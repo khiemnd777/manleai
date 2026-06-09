@@ -11,14 +11,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/internal/encryption"
 	"github.com/manleai/ai-receptionist/modules/pos"
 )
 
 var (
-	ErrNotConnected     = errors.New("square is not connected")
-	ErrBookingMilestone = errors.New("square booking operations are implemented in milestone 3")
+	ErrNotConnected        = errors.New("square is not connected")
+	ErrLocationNotSelected = errors.New("square location is not selected")
 )
 
 type SquareAdapter struct {
@@ -156,6 +157,10 @@ func (a *SquareAdapter) ListServices(ctx context.Context, salonID string) ([]pos
 		return nil, err
 	}
 
+	return mapCatalogServices(response), nil
+}
+
+func mapCatalogServices(response squareCatalogResponse) []pos.Service {
 	var services []pos.Service
 	for _, object := range response.Objects {
 		if object.Type != "ITEM" {
@@ -164,15 +169,16 @@ func (a *SquareAdapter) ListServices(ctx context.Context, salonID string) ([]pos
 		item := object.ItemData
 		if len(item.Variations) == 0 {
 			services = append(services, pos.Service{
-				POSProvider:     pos.ProviderSquare,
-				POSServiceID:    object.ID,
-				Name:            item.Name,
-				Description:     item.Description,
-				AIDescription:   item.Description,
-				DurationMinutes: 0,
-				PriceDisplay:    "starting at",
-				AIBookable:      true,
-				Active:          !object.IsDeleted,
+				POSProvider:       pos.ProviderSquare,
+				POSServiceID:      object.ID,
+				POSServiceVersion: object.Version,
+				Name:              item.Name,
+				Description:       item.Description,
+				AIDescription:     item.Description,
+				DurationMinutes:   0,
+				PriceDisplay:      "starting at",
+				AIBookable:        true,
+				Active:            !object.IsDeleted,
 			})
 			continue
 		}
@@ -183,20 +189,21 @@ func (a *SquareAdapter) ListServices(ctx context.Context, salonID string) ([]pos
 				name = item.Name + " - " + variation.ItemVariationData.Name
 			}
 			services = append(services, pos.Service{
-				POSProvider:     pos.ProviderSquare,
-				POSServiceID:    variation.ID,
-				Name:            name,
-				Description:     item.Description,
-				AIDescription:   item.Description,
-				DurationMinutes: int(variation.ItemVariationData.ServiceDuration / 60000),
-				PriceFrom:       price,
-				PriceDisplay:    fmt.Sprintf("starting at $%.2f", price),
-				AIBookable:      true,
-				Active:          !object.IsDeleted && !variation.IsDeleted,
+				POSProvider:       pos.ProviderSquare,
+				POSServiceID:      variation.ID,
+				POSServiceVersion: variation.Version,
+				Name:              name,
+				Description:       item.Description,
+				AIDescription:     item.Description,
+				DurationMinutes:   int(variation.ItemVariationData.ServiceDuration / 60000),
+				PriceFrom:         price,
+				PriceDisplay:      fmt.Sprintf("starting at $%.2f", price),
+				AIBookable:        true,
+				Active:            !object.IsDeleted && !variation.IsDeleted,
 			})
 		}
 	}
-	return services, nil
+	return services
 }
 
 func (a *SquareAdapter) ListStaff(ctx context.Context, salonID string) ([]pos.StaffMember, error) {
@@ -232,27 +239,153 @@ func (a *SquareAdapter) ListStaff(ctx context.Context, salonID string) ([]pos.St
 }
 
 func (a *SquareAdapter) SearchCustomerByPhone(ctx context.Context, salonID string, phone string) (*pos.Customer, error) {
-	return nil, ErrBookingMilestone
+	token, err := a.accessToken(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	request, err := buildSquareCustomerSearchRequest(phone)
+	if err != nil {
+		return nil, err
+	}
+	var response squareCustomerSearchResponse
+	if err := a.doJSON(ctx, http.MethodPost, a.apiBaseURL()+"/v2/customers/search", token, request, &response); err != nil {
+		_ = a.repo.LogError(ctx, pos.POSError{
+			SalonID:      salonID,
+			Provider:     pos.ProviderSquare,
+			Operation:    "search_customer",
+			ErrorCode:    normalizeSquareError(err),
+			ErrorMessage: err.Error(),
+		})
+		return nil, err
+	}
+	if len(response.Customers) == 0 {
+		return nil, nil
+	}
+	customer := mapSquareCustomer(response.Customers[0])
+	return &customer, nil
 }
 
 func (a *SquareAdapter) CreateCustomer(ctx context.Context, salonID string, input pos.CreateCustomerInput) (*pos.Customer, error) {
-	return nil, ErrBookingMilestone
+	token, err := a.accessToken(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	request, err := buildSquareCreateCustomerRequest(input)
+	if err != nil {
+		return nil, err
+	}
+	var response squareCustomerResponse
+	if err := a.doJSON(ctx, http.MethodPost, a.apiBaseURL()+"/v2/customers", token, request, &response); err != nil {
+		_ = a.repo.LogError(ctx, pos.POSError{
+			SalonID:      salonID,
+			Provider:     pos.ProviderSquare,
+			Operation:    "create_customer",
+			ErrorCode:    normalizeSquareError(err),
+			ErrorMessage: err.Error(),
+		})
+		return nil, err
+	}
+	customer := mapSquareCustomer(response.Customer)
+	if customer.POSCustomerID == "" {
+		return nil, fmt.Errorf("square customer id was not returned")
+	}
+	return &customer, nil
 }
 
 func (a *SquareAdapter) CheckAvailability(ctx context.Context, salonID string, input pos.AvailabilityInput) ([]pos.TimeSlot, error) {
-	return nil, ErrBookingMilestone
+	token, locationID, err := a.accessTokenAndLocation(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	request, err := buildSquareAvailabilityRequest(locationID, input)
+	if err != nil {
+		return nil, err
+	}
+	var response squareAvailabilityResponse
+	if err := a.doJSON(ctx, http.MethodPost, a.apiBaseURL()+"/v2/bookings/availability/search", token, request, &response); err != nil {
+		_ = a.repo.LogError(ctx, pos.POSError{
+			SalonID:      salonID,
+			Provider:     pos.ProviderSquare,
+			Operation:    "check_availability",
+			ErrorCode:    normalizeSquareError(err),
+			ErrorMessage: err.Error(),
+		})
+		return nil, err
+	}
+	return mapSquareAvailabilities(response, input.DurationMinutes), nil
 }
 
 func (a *SquareAdapter) CreateAppointment(ctx context.Context, salonID string, input pos.CreateAppointmentInput) (*pos.Appointment, error) {
-	return nil, ErrBookingMilestone
+	token, locationID, err := a.accessTokenAndLocation(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	request, err := buildSquareCreateBookingRequest(locationID, input)
+	if err != nil {
+		return nil, err
+	}
+	var response squareBookingResponse
+	if err := a.doJSON(ctx, http.MethodPost, a.apiBaseURL()+"/v2/bookings", token, request, &response); err != nil {
+		_ = a.repo.LogError(ctx, pos.POSError{
+			SalonID:      salonID,
+			Provider:     pos.ProviderSquare,
+			Operation:    "create_booking",
+			ErrorCode:    normalizeSquareError(err),
+			ErrorMessage: err.Error(),
+		})
+		return nil, err
+	}
+	appointment, err := mapSquareBooking(response.Booking, input.DurationMinutes)
+	if err != nil {
+		return nil, err
+	}
+	return appointment, nil
 }
 
-func (a *SquareAdapter) RescheduleAppointment(ctx context.Context, salonID string, appointmentID string, input pos.RescheduleInput) error {
-	return ErrBookingMilestone
+func (a *SquareAdapter) RescheduleAppointment(ctx context.Context, salonID string, appointmentID string, input pos.RescheduleInput) (*pos.Appointment, error) {
+	token, locationID, err := a.accessTokenAndLocation(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	request, err := buildSquareUpdateBookingRequest(locationID, input)
+	if err != nil {
+		return nil, err
+	}
+	var response squareBookingResponse
+	if err := a.doJSON(ctx, http.MethodPut, a.apiBaseURL()+"/v2/bookings/"+url.PathEscape(appointmentID), token, request, &response); err != nil {
+		_ = a.repo.LogError(ctx, pos.POSError{
+			SalonID:      salonID,
+			Provider:     pos.ProviderSquare,
+			Operation:    "reschedule_booking",
+			ErrorCode:    normalizeSquareError(err),
+			ErrorMessage: err.Error(),
+		})
+		return nil, err
+	}
+	return mapSquareBooking(response.Booking, input.DurationMinutes)
 }
 
-func (a *SquareAdapter) CancelAppointment(ctx context.Context, salonID string, appointmentID string, reason string) error {
-	return ErrBookingMilestone
+func (a *SquareAdapter) CancelAppointment(ctx context.Context, salonID string, appointmentID string, input pos.CancelInput) (*pos.Appointment, error) {
+	token, err := a.accessToken(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	request, err := buildSquareCancelBookingRequest(input)
+	if err != nil {
+		return nil, err
+	}
+	var response squareBookingResponse
+	if err := a.doJSON(ctx, http.MethodPost, a.apiBaseURL()+"/v2/bookings/"+url.PathEscape(appointmentID)+"/cancel", token, request, &response); err != nil {
+		_ = a.repo.LogError(ctx, pos.POSError{
+			SalonID:      salonID,
+			Provider:     pos.ProviderSquare,
+			Operation:    "cancel_booking",
+			ErrorCode:    normalizeSquareError(err),
+			ErrorMessage: err.Error(),
+		})
+		return nil, err
+	}
+	return mapSquareBooking(response.Booking, 0)
 }
 
 func (a *SquareAdapter) Sync(ctx context.Context, salonID string) error {
@@ -281,6 +414,24 @@ func (a *SquareAdapter) accessToken(ctx context.Context, salonID string) (string
 	return a.cipher.Decrypt(connection.AccessTokenEncrypted)
 }
 
+func (a *SquareAdapter) accessTokenAndLocation(ctx context.Context, salonID string) (string, string, error) {
+	connection, err := a.repo.GetConnection(ctx, salonID, pos.ProviderSquare)
+	if err != nil {
+		return "", "", ErrNotConnected
+	}
+	if connection.AccessTokenEncrypted == "" {
+		return "", "", ErrNotConnected
+	}
+	if strings.TrimSpace(connection.LocationID) == "" {
+		return "", "", ErrLocationNotSelected
+	}
+	token, err := a.cipher.Decrypt(connection.AccessTokenEncrypted)
+	if err != nil {
+		return "", "", err
+	}
+	return token, connection.LocationID, nil
+}
+
 func (a *SquareAdapter) doJSON(ctx context.Context, method string, endpoint string, bearerToken string, input any, output any) error {
 	var body *bytes.Reader
 	if input == nil {
@@ -298,6 +449,9 @@ func (a *SquareAdapter) doJSON(ctx context.Context, method string, endpoint stri
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
+	if a.cfg.APIVersion != "" {
+		req.Header.Set("Square-Version", a.cfg.APIVersion)
+	}
 	if input != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -326,6 +480,9 @@ func (a *SquareAdapter) doJSON(ctx context.Context, method string, endpoint stri
 }
 
 func (a *SquareAdapter) apiBaseURL() string {
+	if strings.TrimSpace(a.cfg.APIBaseURL) != "" {
+		return strings.TrimRight(a.cfg.APIBaseURL, "/")
+	}
 	if a.cfg.Environment == "production" {
 		return "https://connect.squareup.com"
 	}
@@ -353,6 +510,9 @@ func normalizeSquareError(err error) string {
 	if err == nil {
 		return pos.ErrorUnknown
 	}
+	if errors.Is(err, ErrLocationNotSelected) {
+		return pos.ErrorLocationNotSelected
+	}
 	msg := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(msg, "unauthorized"), strings.Contains(msg, "expired"):
@@ -363,9 +523,258 @@ func normalizeSquareError(err error) string {
 		return pos.ErrorRateLimited
 	case strings.Contains(msg, "timeout"), strings.Contains(msg, "deadline"):
 		return pos.ErrorTimeout
+	case strings.Contains(msg, "location"):
+		return pos.ErrorLocationNotSelected
+	case strings.Contains(msg, "conflict"), strings.Contains(msg, "overlap"):
+		return pos.ErrorBookingConflict
+	case strings.Contains(msg, "availability"):
+		return pos.ErrorAvailabilityFailed
 	default:
 		return pos.ErrorUnknown
 	}
+}
+
+func buildSquareCustomerSearchRequest(phone string) (squareCustomerSearchRequest, error) {
+	phone = strings.TrimSpace(phone)
+	if phone == "" {
+		return squareCustomerSearchRequest{}, fmt.Errorf("phone is required")
+	}
+	return squareCustomerSearchRequest{
+		Query: squareCustomerQuery{
+			Filter: squareCustomerFilter{
+				PhoneNumber: &squareCustomerTextFilter{Exact: phone},
+			},
+		},
+		Limit: 1,
+	}, nil
+}
+
+func buildSquareCreateCustomerRequest(input pos.CreateCustomerInput) (squareCreateCustomerRequest, error) {
+	name := strings.TrimSpace(input.Name)
+	phone := strings.TrimSpace(input.Phone)
+	email := strings.TrimSpace(input.Email)
+	if name == "" && phone == "" && email == "" {
+		return squareCreateCustomerRequest{}, fmt.Errorf("customer name, phone, or email is required")
+	}
+	givenName, familyName := splitCustomerName(name)
+	return squareCreateCustomerRequest{
+		IdempotencyKey: uuid.NewString(),
+		GivenName:      givenName,
+		FamilyName:     familyName,
+		EmailAddress:   email,
+		PhoneNumber:    phone,
+	}, nil
+}
+
+func buildSquareAvailabilityRequest(locationID string, input pos.AvailabilityInput) (squareAvailabilityRequest, error) {
+	if strings.TrimSpace(locationID) == "" {
+		return squareAvailabilityRequest{}, ErrLocationNotSelected
+	}
+	if strings.TrimSpace(input.ServiceID) == "" {
+		return squareAvailabilityRequest{}, fmt.Errorf("service id is required")
+	}
+	startAt, endAt, err := availabilityRange(input.PreferredDate)
+	if err != nil {
+		return squareAvailabilityRequest{}, err
+	}
+	segment := squareSegmentFilter{
+		ServiceVariationID: strings.TrimSpace(input.ServiceID),
+	}
+	if strings.TrimSpace(input.StaffID) != "" {
+		segment.TeamMemberIDFilter = &squareTeamMemberIDFilter{Any: []string{strings.TrimSpace(input.StaffID)}}
+	}
+	return squareAvailabilityRequest{
+		Query: squareAvailabilityQuery{
+			Filter: squareAvailabilityFilter{
+				StartAtRange: squareStartAtRange{
+					StartAt: startAt.Format(time.RFC3339),
+					EndAt:   endAt.Format(time.RFC3339),
+				},
+				LocationID:     strings.TrimSpace(locationID),
+				SegmentFilters: []squareSegmentFilter{segment},
+			},
+		},
+	}, nil
+}
+
+func buildSquareCreateBookingRequest(locationID string, input pos.CreateAppointmentInput) (squareCreateBookingRequest, error) {
+	if strings.TrimSpace(locationID) == "" {
+		return squareCreateBookingRequest{}, ErrLocationNotSelected
+	}
+	if strings.TrimSpace(input.CustomerID) == "" || strings.TrimSpace(input.ServiceID) == "" || strings.TrimSpace(input.StaffID) == "" || input.StartTime.IsZero() {
+		return squareCreateBookingRequest{}, fmt.Errorf("customer, service, staff, and start time are required")
+	}
+	if input.ServiceVersion <= 0 {
+		return squareCreateBookingRequest{}, fmt.Errorf("square service variation version is required")
+	}
+	if input.DurationMinutes <= 0 {
+		return squareCreateBookingRequest{}, fmt.Errorf("duration minutes is required")
+	}
+	return squareCreateBookingRequest{
+		IdempotencyKey: uuid.NewString(),
+		Booking: squareBooking{
+			CustomerID:   strings.TrimSpace(input.CustomerID),
+			StartAt:      input.StartTime.UTC().Format(time.RFC3339),
+			LocationID:   strings.TrimSpace(locationID),
+			CustomerNote: strings.TrimSpace(input.Notes),
+			AppointmentSegments: []squareAppointmentSegment{
+				{
+					DurationMinutes:         input.DurationMinutes,
+					TeamMemberID:            strings.TrimSpace(input.StaffID),
+					ServiceVariationID:      strings.TrimSpace(input.ServiceID),
+					ServiceVariationVersion: input.ServiceVersion,
+				},
+			},
+		},
+	}, nil
+}
+
+func buildSquareUpdateBookingRequest(locationID string, input pos.RescheduleInput) (squareUpdateBookingRequest, error) {
+	if strings.TrimSpace(locationID) == "" {
+		return squareUpdateBookingRequest{}, ErrLocationNotSelected
+	}
+	if input.BookingVersion <= 0 {
+		return squareUpdateBookingRequest{}, fmt.Errorf("square booking version is required")
+	}
+	if strings.TrimSpace(input.ServiceID) == "" || strings.TrimSpace(input.StaffID) == "" || input.StartTime.IsZero() {
+		return squareUpdateBookingRequest{}, fmt.Errorf("service, staff, and start time are required")
+	}
+	if input.ServiceVersion <= 0 {
+		return squareUpdateBookingRequest{}, fmt.Errorf("square service variation version is required")
+	}
+	if input.DurationMinutes <= 0 {
+		return squareUpdateBookingRequest{}, fmt.Errorf("duration minutes is required")
+	}
+	return squareUpdateBookingRequest{
+		IdempotencyKey: uuid.NewString(),
+		Booking: squareBooking{
+			Version:      input.BookingVersion,
+			StartAt:      input.StartTime.UTC().Format(time.RFC3339),
+			LocationID:   strings.TrimSpace(locationID),
+			CustomerNote: strings.TrimSpace(input.Notes),
+			AppointmentSegments: []squareAppointmentSegment{
+				{
+					DurationMinutes:         input.DurationMinutes,
+					TeamMemberID:            strings.TrimSpace(input.StaffID),
+					ServiceVariationID:      strings.TrimSpace(input.ServiceID),
+					ServiceVariationVersion: input.ServiceVersion,
+				},
+			},
+		},
+	}, nil
+}
+
+func buildSquareCancelBookingRequest(input pos.CancelInput) (squareCancelBookingRequest, error) {
+	if input.BookingVersion <= 0 {
+		return squareCancelBookingRequest{}, fmt.Errorf("square booking version is required")
+	}
+	return squareCancelBookingRequest{
+		IdempotencyKey: uuid.NewString(),
+		BookingVersion: input.BookingVersion,
+	}, nil
+}
+
+func mapSquareCustomer(customer squareCustomer) pos.Customer {
+	name := strings.TrimSpace(strings.TrimSpace(customer.GivenName + " " + customer.FamilyName))
+	if name == "" {
+		name = strings.TrimSpace(customer.CompanyName)
+	}
+	return pos.Customer{
+		POSCustomerID: customer.ID,
+		Name:          name,
+		Phone:         customer.PhoneNumber,
+		Email:         customer.EmailAddress,
+	}
+}
+
+func mapSquareAvailabilities(response squareAvailabilityResponse, fallbackDuration int) []pos.TimeSlot {
+	slots := make([]pos.TimeSlot, 0, len(response.Availabilities))
+	for _, item := range response.Availabilities {
+		startAt, err := time.Parse(time.RFC3339, item.StartAt)
+		if err != nil {
+			continue
+		}
+		duration := fallbackDuration
+		staffID := ""
+		if len(item.AppointmentSegments) > 0 {
+			segment := item.AppointmentSegments[0]
+			staffID = segment.TeamMemberID
+			if segment.DurationMinutes > 0 {
+				duration = segment.DurationMinutes
+			}
+		}
+		if duration <= 0 {
+			continue
+		}
+		slots = append(slots, pos.TimeSlot{
+			StartTime: startAt,
+			EndTime:   startAt.Add(time.Duration(duration) * time.Minute),
+			StaffID:   staffID,
+		})
+	}
+	return slots
+}
+
+func mapSquareBooking(booking squareBooking, fallbackDuration int) (*pos.Appointment, error) {
+	if strings.TrimSpace(booking.ID) == "" {
+		return nil, fmt.Errorf("square booking id was not returned")
+	}
+	var startAt time.Time
+	if strings.TrimSpace(booking.StartAt) != "" {
+		parsed, err := time.Parse(time.RFC3339, booking.StartAt)
+		if err != nil {
+			return nil, err
+		}
+		startAt = parsed
+	} else if fallbackDuration > 0 {
+		return nil, fmt.Errorf("square booking start time was not returned")
+	}
+	duration := fallbackDuration
+	if len(booking.AppointmentSegments) > 0 && booking.AppointmentSegments[0].DurationMinutes > 0 {
+		duration = booking.AppointmentSegments[0].DurationMinutes
+	}
+	if fallbackDuration > 0 && duration <= 0 {
+		return nil, fmt.Errorf("square booking duration was not returned")
+	}
+	var endTime time.Time
+	if !startAt.IsZero() && duration > 0 {
+		endTime = startAt.Add(time.Duration(duration) * time.Minute)
+	}
+	return &pos.Appointment{
+		POSAppointmentID:      booking.ID,
+		POSAppointmentVersion: booking.Version,
+		StartTime:             startAt,
+		EndTime:               endTime,
+		Status:                strings.ToLower(booking.Status),
+	}, nil
+}
+
+func availabilityRange(preferredDate string) (time.Time, time.Time, error) {
+	value := strings.TrimSpace(preferredDate)
+	if value == "" {
+		return time.Time{}, time.Time{}, fmt.Errorf("preferred date is required")
+	}
+	if day, err := time.Parse("2006-01-02", value); err == nil {
+		start := day.UTC()
+		return start, start.Add(24 * time.Hour), nil
+	}
+	start, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	start = start.UTC()
+	return start, start.Add(24 * time.Hour), nil
+}
+
+func splitCustomerName(name string) (string, string) {
+	parts := strings.Fields(name)
+	if len(parts) == 0 {
+		return "", ""
+	}
+	if len(parts) == 1 {
+		return parts[0], ""
+	}
+	return parts[0], strings.Join(parts[1:], " ")
 }
 
 type squareTokenResponse struct {
@@ -417,6 +826,7 @@ type squareCatalogResponse struct {
 type squareCatalogObject struct {
 	ID        string `json:"id"`
 	Type      string `json:"type"`
+	Version   int64  `json:"version"`
 	IsDeleted bool   `json:"is_deleted"`
 	ItemData  struct {
 		Name        string                `json:"name"`
@@ -442,4 +852,123 @@ type squareTeamMembersResponse struct {
 		PhoneNumber  string `json:"phone_number"`
 		Status       string `json:"status"`
 	} `json:"team_members"`
+}
+
+type squareCustomerSearchRequest struct {
+	Query squareCustomerQuery `json:"query"`
+	Limit int                 `json:"limit,omitempty"`
+}
+
+type squareCustomerQuery struct {
+	Filter squareCustomerFilter `json:"filter"`
+}
+
+type squareCustomerFilter struct {
+	PhoneNumber *squareCustomerTextFilter `json:"phone_number,omitempty"`
+}
+
+type squareCustomerTextFilter struct {
+	Exact string `json:"exact,omitempty"`
+	Fuzzy string `json:"fuzzy,omitempty"`
+}
+
+type squareCustomerSearchResponse struct {
+	Customers []squareCustomer `json:"customers"`
+}
+
+type squareCustomerResponse struct {
+	Customer squareCustomer `json:"customer"`
+}
+
+type squareCustomer struct {
+	ID           string `json:"id"`
+	GivenName    string `json:"given_name"`
+	FamilyName   string `json:"family_name"`
+	CompanyName  string `json:"company_name"`
+	EmailAddress string `json:"email_address"`
+	PhoneNumber  string `json:"phone_number"`
+}
+
+type squareCreateCustomerRequest struct {
+	IdempotencyKey string `json:"idempotency_key"`
+	GivenName      string `json:"given_name,omitempty"`
+	FamilyName     string `json:"family_name,omitempty"`
+	EmailAddress   string `json:"email_address,omitempty"`
+	PhoneNumber    string `json:"phone_number,omitempty"`
+}
+
+type squareAvailabilityRequest struct {
+	Query squareAvailabilityQuery `json:"query"`
+}
+
+type squareAvailabilityQuery struct {
+	Filter squareAvailabilityFilter `json:"filter"`
+}
+
+type squareAvailabilityFilter struct {
+	StartAtRange   squareStartAtRange    `json:"start_at_range"`
+	LocationID     string                `json:"location_id"`
+	SegmentFilters []squareSegmentFilter `json:"segment_filters"`
+}
+
+type squareStartAtRange struct {
+	StartAt string `json:"start_at"`
+	EndAt   string `json:"end_at"`
+}
+
+type squareSegmentFilter struct {
+	ServiceVariationID string                    `json:"service_variation_id"`
+	TeamMemberIDFilter *squareTeamMemberIDFilter `json:"team_member_id_filter,omitempty"`
+}
+
+type squareTeamMemberIDFilter struct {
+	Any []string `json:"any,omitempty"`
+}
+
+type squareAvailabilityResponse struct {
+	Availabilities []squareAvailability `json:"availabilities"`
+}
+
+type squareAvailability struct {
+	StartAt             string                     `json:"start_at"`
+	LocationID          string                     `json:"location_id"`
+	AppointmentSegments []squareAppointmentSegment `json:"appointment_segments"`
+}
+
+type squareBookingResponse struct {
+	Booking squareBooking `json:"booking"`
+}
+
+type squareCreateBookingRequest struct {
+	IdempotencyKey string        `json:"idempotency_key"`
+	Booking        squareBooking `json:"booking"`
+}
+
+type squareUpdateBookingRequest struct {
+	IdempotencyKey string        `json:"idempotency_key"`
+	Booking        squareBooking `json:"booking"`
+}
+
+type squareCancelBookingRequest struct {
+	IdempotencyKey string `json:"idempotency_key"`
+	BookingVersion int    `json:"booking_version"`
+}
+
+type squareBooking struct {
+	ID                  string                     `json:"id,omitempty"`
+	Version             int                        `json:"version,omitempty"`
+	Status              string                     `json:"status,omitempty"`
+	CustomerID          string                     `json:"customer_id,omitempty"`
+	CustomerNote        string                     `json:"customer_note,omitempty"`
+	SellerNote          string                     `json:"seller_note,omitempty"`
+	StartAt             string                     `json:"start_at,omitempty"`
+	LocationID          string                     `json:"location_id,omitempty"`
+	AppointmentSegments []squareAppointmentSegment `json:"appointment_segments,omitempty"`
+}
+
+type squareAppointmentSegment struct {
+	DurationMinutes         int    `json:"duration_minutes"`
+	TeamMemberID            string `json:"team_member_id"`
+	ServiceVariationID      string `json:"service_variation_id"`
+	ServiceVariationVersion int64  `json:"service_variation_version"`
 }

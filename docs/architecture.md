@@ -2,7 +2,7 @@
 
 ## Current Milestone
 
-This codebase implements Milestone 1 and Milestone 2 of the AI Receptionist system.
+This codebase implements Milestone 1, Milestone 2, and backend booking slices for Milestone 3 of the AI Receptionist system.
 
 The backend is organized as:
 
@@ -17,6 +17,7 @@ modules/auth         login, refresh, roles
 modules/salon        salon profile, settings, business hours
 modules/pos          provider-neutral POS contracts and persistence
 modules/pos_square   Square adapter and Square integration routes
+modules/booking      booking attempts, appointments, and fallback pending safety
 ```
 
 The frontend is organized as:
@@ -41,7 +42,9 @@ Correct dependency direction:
 HTTP handler -> service -> repository/provider interface -> concrete adapter
 ```
 
-The booking service planned for Milestone 3 must depend on `modules/pos.POSProvider`. It must not import `modules/pos_square`.
+The booking service depends on `modules/pos.POSProvider`. It must not import `modules/pos_square`.
+
+Square create-booking, reschedule, cancel, and dashboard test-booking gate operations are implemented inside `modules/pos_square` and routed through the provider-neutral booking service where appointment state changes are required. Until a provider returns a POS booking ID and booking version, booking requests must be stored as fallback pending attempts and must not create confirmed appointments. Reschedule, cancel, and test-booking cleanup requests must leave the internal appointment unchanged unless the provider succeeds.
 
 The AI conversation engine planned for Milestone 4 must call booking tools only. It must not know Square OAuth, Square API payloads, Square location IDs, or token storage.
 

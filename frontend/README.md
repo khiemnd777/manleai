@@ -14,7 +14,7 @@ npm run build
 ## Environment
 
 ```bash
-NEXT_PUBLIC_API_BASE_URL=http://localhost:18080
+NEXT_PUBLIC_API_BASE_URL=http://localhost:18089
 ```
 
 ## Implemented Screens

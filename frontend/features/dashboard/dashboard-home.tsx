@@ -115,8 +115,8 @@ export function DashboardHome() {
                 <div>
                   <CardTitle>Pilot readiness</CardTitle>
                   <CardDescription>
-                    Milestone 1/2 covers auth, salon profile, and Square connection foundation.
-                    Booking tests and AI enablement are gated until Milestone 3.
+                    AI booking can be enabled after Square readiness checks and a cancelled test
+                    booking pass from the Integrations page.
                   </CardDescription>
                 </div>
               </div>

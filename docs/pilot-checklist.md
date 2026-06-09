@@ -21,16 +21,19 @@
 
 ## Before Milestone 3 Review
 
-- [ ] Add signed/persisted OAuth state nonce.
+- [x] Add signed/persisted OAuth state nonce.
 - [ ] Confirm Square Appointments API payload details against a real sandbox account.
-- [ ] Add integration tests with mocked Square HTTP responses.
-- [ ] Add service/staff list endpoints for dashboard tables.
+- [x] Add integration tests with mocked Square HTTP responses.
+- [x] Add service/staff list endpoints for dashboard tables.
 
 ## Milestone 3 Next Steps
 
-- Add booking_attempts and appointment tables.
-- Implement customer search/create in SquareAdapter.
-- Implement availability checks in SquareAdapter.
-- Implement create/reschedule/cancel appointment in SquareAdapter.
-- Add booking service that depends only on `pos.POSProvider`.
-- Add booking test UI and AI booking enablement gate.
+- [x] Add booking_attempts and appointment tables.
+- [x] Add booking service that depends only on `pos.POSProvider`.
+- [x] Implement customer search/create in SquareAdapter.
+- [x] Implement availability checks in SquareAdapter.
+- [x] Implement create appointment in SquareAdapter.
+- [x] Implement reschedule/cancel appointment in SquareAdapter.
+- [x] Add booking test UI and AI booking enablement gate.
+- [x] Add owner appointments dashboard with confirmed POS bookings and fallback pending requests.
+- [x] Add service/staff AI booking controls for synced Square records.

@@ -15,8 +15,8 @@ func RegisterRoutes(api fiber.Router, handler *Handler, jwtSecret string) {
 	protected.Get("/locations", handler.Locations)
 	protected.Post("/select-location", handler.SelectLocation)
 	protected.Post("/sync", handler.Sync)
-	protected.Post("/test-booking", handler.NotYet)
-	protected.Post("/cancel-test-booking", handler.NotYet)
-	protected.Post("/enable-ai-booking", handler.NotYet)
-	protected.Post("/disable-ai-booking", handler.NotYet)
+	protected.Post("/test-booking", handler.TestBooking)
+	protected.Post("/cancel-test-booking", handler.CancelTestBooking)
+	protected.Post("/enable-ai-booking", handler.EnableAIBooking)
+	protected.Post("/disable-ai-booking", handler.DisableAIBooking)
 }

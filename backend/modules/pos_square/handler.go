@@ -7,6 +7,7 @@ import (
 	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/internal/middleware"
 	"github.com/manleai/ai-receptionist/internal/respond"
+	"github.com/manleai/ai-receptionist/modules/booking"
 	"github.com/manleai/ai-receptionist/modules/pos"
 )
 
@@ -129,6 +130,89 @@ func (h *Handler) Sync(c *fiber.Ctx) error {
 	return respond.JSON(c, fiber.StatusOK, fiber.Map{"ok": true})
 }
 
-func (h *Handler) NotYet(c *fiber.Ctx) error {
-	return respond.Error(c, fiber.StatusNotImplemented, "MILESTONE_3_REQUIRED", "This Square booking operation is reserved for Milestone 3.")
+func (h *Handler) TestBooking(c *fiber.Ctx) error {
+	var req TestBookingRequest
+	if err := c.BodyParser(&req); err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
+	}
+	if req.SalonID == "" {
+		req.SalonID = middleware.SalonID(c)
+	}
+	res, err := h.service.CreateTestBooking(c.UserContext(), req.SalonID, middleware.UserID(c), req)
+	if handled := h.handleGateError(c, err, "SQUARE_TEST_BOOKING_FAILED"); handled != nil {
+		return handled
+	}
+	status := fiber.StatusCreated
+	if res.BookingAttempt != nil && res.BookingAttempt.Status == booking.StatusFallbackPending {
+		status = fiber.StatusAccepted
+	}
+	return respond.JSON(c, status, res)
+}
+
+func (h *Handler) CancelTestBooking(c *fiber.Ctx) error {
+	var req CancelTestBookingRequest
+	if err := c.BodyParser(&req); err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
+	}
+	if req.SalonID == "" {
+		req.SalonID = middleware.SalonID(c)
+	}
+	res, err := h.service.CancelTestBooking(c.UserContext(), req.SalonID, middleware.UserID(c), req)
+	if handled := h.handleGateError(c, err, "SQUARE_CANCEL_TEST_BOOKING_FAILED"); handled != nil {
+		return handled
+	}
+	status := fiber.StatusOK
+	if res.BookingAttempt != nil && res.BookingAttempt.Status == booking.StatusFallbackPending {
+		status = fiber.StatusAccepted
+	}
+	return respond.JSON(c, status, res)
+}
+
+func (h *Handler) EnableAIBooking(c *fiber.Ctx) error {
+	var req GateRequest
+	_ = c.BodyParser(&req)
+	if req.SalonID == "" {
+		req.SalonID = middleware.SalonID(c)
+	}
+	res, err := h.service.EnableAIBooking(c.UserContext(), req.SalonID, middleware.UserID(c))
+	if handled := h.handleGateError(c, err, "ENABLE_AI_BOOKING_FAILED"); handled != nil {
+		return handled
+	}
+	return respond.JSON(c, fiber.StatusOK, res)
+}
+
+func (h *Handler) DisableAIBooking(c *fiber.Ctx) error {
+	var req GateRequest
+	_ = c.BodyParser(&req)
+	if req.SalonID == "" {
+		req.SalonID = middleware.SalonID(c)
+	}
+	res, err := h.service.DisableAIBooking(c.UserContext(), req.SalonID, middleware.UserID(c))
+	if handled := h.handleGateError(c, err, "DISABLE_AI_BOOKING_FAILED"); handled != nil {
+		return handled
+	}
+	return respond.JSON(c, fiber.StatusOK, res)
+}
+
+func (h *Handler) handleGateError(c *fiber.Ctx, err error, internalCode string) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, pos.ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if errors.Is(err, ErrValidation) || errors.Is(err, booking.ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Request is missing required booking readiness data.")
+	}
+	if errors.Is(err, ErrReadinessGate) {
+		message := "Square readiness checks have not passed."
+		if internalCode == "ENABLE_AI_BOOKING_FAILED" {
+			message = "AI booking cannot be enabled until Square readiness checks pass."
+		}
+		return respond.Error(c, fiber.StatusConflict, "AI_BOOKING_NOT_READY", message)
+	}
+	if errors.Is(err, booking.ErrProviderUnavailable) || errors.Is(err, ErrBookingServiceUnavailable) {
+		return respond.Error(c, fiber.StatusConflict, "POS_PROVIDER_UNAVAILABLE", "The active POS provider is unavailable.")
+	}
+	return respond.Error(c, fiber.StatusBadGateway, internalCode, err.Error())
 }

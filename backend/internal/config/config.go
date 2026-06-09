@@ -27,26 +27,30 @@ type SquareConfig struct {
 	ClientID     string
 	ClientSecret string
 	RedirectURL  string
+	APIVersion   string
+	APIBaseURL   string
 }
 
 func Load() Config {
 	return Config{
 		AppEnv:          env("APP_ENV", "local"),
-		ServerPort:      env("SERVER_PORT", "18080"),
+		ServerPort:      env("SERVER_PORT", "8080"),
 		DatabaseURL:     env("DATABASE_URL", "postgres://ai_receptionist:ai_receptionist@localhost:55432/ai_receptionist?sslmode=disable"),
 		RedisURL:        env("REDIS_URL", "redis://localhost:56379/0"),
 		JWTSecret:       env("JWT_SECRET", "local-development-secret-change-me"),
 		AccessTokenTTL:  time.Duration(envInt("ACCESS_TOKEN_TTL_MINUTES", 30)) * time.Minute,
 		RefreshTokenTTL: time.Duration(envInt("REFRESH_TOKEN_TTL_HOURS", 720)) * time.Hour,
 		EncryptionKey:   env("TOKEN_ENCRYPTION_KEY_BASE64", "local-development-token-encryption-key"),
-		CORSOrigins:     splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:3000")),
-		FrontendURL:     env("FRONTEND_URL", "http://localhost:3000"),
+		CORSOrigins:     splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:3088")),
+		FrontendURL:     env("FRONTEND_URL", "http://localhost:3088"),
 		AutoMigrate:     envBool("AUTO_MIGRATE", true),
 		Square: SquareConfig{
 			Environment:  env("SQUARE_ENVIRONMENT", "sandbox"),
 			ClientID:     env("SQUARE_CLIENT_ID", ""),
 			ClientSecret: env("SQUARE_CLIENT_SECRET", ""),
-			RedirectURL:  env("SQUARE_REDIRECT_URL", "http://localhost:18080/api/integrations/square/callback"),
+			RedirectURL:  env("SQUARE_REDIRECT_URL", "http://localhost:18089/api/integrations/square/callback"),
+			APIVersion:   env("SQUARE_API_VERSION", "2026-05-20"),
+			APIBaseURL:   env("SQUARE_API_BASE_URL", ""),
 		},
 	}
 }

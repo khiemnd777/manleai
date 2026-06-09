@@ -40,6 +40,15 @@ Salon:
 - `PUT /api/salons/:id/settings`
 - `GET /api/salons/:id/business-hours`
 - `PUT /api/salons/:id/business-hours`
+- `GET /api/salons/:id/services`
+- `PATCH /api/salons/:id/services/:service_id/ai-bookable`
+- `GET /api/salons/:id/staff`
+- `PATCH /api/salons/:id/staff/:staff_id/ai-bookable`
+- `GET /api/salons/:id/appointments`
+- `POST /api/salons/:id/appointments/:appointment_id/reschedule`
+- `POST /api/salons/:id/appointments/:appointment_id/cancel`
+- `GET /api/salons/:id/booking-attempts`
+- `POST /api/salons/:id/booking-attempts`
 
 Square integration:
 
@@ -49,13 +58,13 @@ Square integration:
 - `GET /api/integrations/square/locations`
 - `POST /api/integrations/square/select-location`
 - `POST /api/integrations/square/sync`
-- `POST /api/integrations/square/test-booking` returns `501` until Milestone 3
-- `POST /api/integrations/square/cancel-test-booking` returns `501` until Milestone 3
-- `POST /api/integrations/square/enable-ai-booking` returns `501` until Milestone 3
-- `POST /api/integrations/square/disable-ai-booking` returns `501` until Milestone 3
+- `POST /api/integrations/square/test-booking`
+- `POST /api/integrations/square/cancel-test-booking`
+- `POST /api/integrations/square/enable-ai-booking`
+- `POST /api/integrations/square/disable-ai-booking`
 
 ## Architecture
 
 Handlers parse HTTP requests only. Services own business rules and tenant checks. Repositories own SQL. The API runs startup migrations before registering repositories. The `modules/pos` package defines the POSProvider boundary; `modules/pos_square` is the only concrete provider.
 
-Booking code must call `POSProvider` only. Square payloads and API URLs must remain inside `modules/pos_square`.
+Booking code calls `POSProvider` only. Square payloads and API URLs must remain inside `modules/pos_square`. POS failures are persisted as fallback pending booking attempts and must not create confirmed appointments.

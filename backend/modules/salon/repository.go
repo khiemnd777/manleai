@@ -30,7 +30,7 @@ func (r *Repository) ListForOwner(ctx context.Context, ownerUserID string) ([]Sa
 	}
 	defer rows.Close()
 
-	var salons []Salon
+	salons := make([]Salon, 0)
 	for rows.Next() {
 		item, err := scanSalon(rows)
 		if err != nil {
@@ -164,7 +164,7 @@ func (r *Repository) GetBusinessHours(ctx context.Context, salonID string, owner
 	}
 	defer rows.Close()
 
-	var hours []BusinessHour
+	hours := make([]BusinessHour, 0)
 	for rows.Next() {
 		var hour BusinessHour
 		if err := rows.Scan(&hour.ID, &hour.SalonID, &hour.DayOfWeek, &hour.OpenTime, &hour.CloseTime, &hour.IsClosed, &hour.CreatedAt, &hour.UpdatedAt); err != nil {

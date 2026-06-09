@@ -18,8 +18,8 @@ type POSProvider interface {
     CreateCustomer(ctx context.Context, salonID string, input CreateCustomerInput) (*Customer, error)
     CheckAvailability(ctx context.Context, salonID string, input AvailabilityInput) ([]TimeSlot, error)
     CreateAppointment(ctx context.Context, salonID string, input CreateAppointmentInput) (*Appointment, error)
-    RescheduleAppointment(ctx context.Context, salonID string, appointmentID string, input RescheduleInput) error
-    CancelAppointment(ctx context.Context, salonID string, appointmentID string, reason string) error
+    RescheduleAppointment(ctx context.Context, salonID string, appointmentID string, input RescheduleInput) (*Appointment, error)
+    CancelAppointment(ctx context.Context, salonID string, appointmentID string, input CancelInput) (*Appointment, error)
     Sync(ctx context.Context, salonID string) error
 }
 ```
@@ -33,11 +33,17 @@ type POSProvider interface {
 - Encrypted token storage
 - Location listing
 - Catalog service normalization
+- Catalog service version persistence for future Square booking payloads
 - Team member normalization
 - Sync into internal `services` and `staff`
+- Customer search/create
+- Availability search
+- Create booking
+- Reschedule booking
+- Cancel booking
 - POS sync logs and POS error logs
 
-Booking operations intentionally return a Milestone 3 error today. They must be implemented inside `SquareAdapter`, not in handlers or booking services.
+The provider-neutral booking service records provider failures as fallback pending attempts. Real Square payloads must remain inside `SquareAdapter`, not in handlers or booking services.
 
 ## Adding Future Providers
 
@@ -51,4 +57,3 @@ The provider must:
 - Normalize provider errors into the internal POS error codes.
 - Store secrets only through encrypted `pos_connections` fields.
 - Add only provider-specific docs and tests; do not change booking service logic unless the provider-neutral contract needs to evolve.
-

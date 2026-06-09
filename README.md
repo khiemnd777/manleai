@@ -2,17 +2,21 @@
 
 POS-first production-like pilot foundation for an AI phone receptionist serving US nail salons, starting with Vietnamese-owned salons that use Square Appointments.
 
-This repository currently implements Milestone 1 and Milestone 2 only:
+This repository currently implements Milestone 1, Milestone 2, and backend booking slices for Milestone 3:
 
 - Go/Fiber API scaffold with PostgreSQL, Redis, startup SQL migrations, and Docker Compose.
 - Auth, JWT access tokens, persisted refresh tokens, owner-scoped salon APIs.
 - POS adapter boundary with provider-neutral DTOs.
 - Square OAuth/connect/status/location/sync foundation.
 - Encrypted POS token storage.
+- Persisted Square OAuth state nonce and pinned Square API version.
+- Provider-neutral booking attempt and appointment persistence with fallback pending safety.
+- Square customer search/create, availability search, create-booking, reschedule, cancel, and test-booking gate paths.
+- Backend service/staff list endpoints for synced POS data.
 - Next.js admin shell with login, dashboard, onboarding profile creation, and Square integration status.
 - Repo-local Codex guidance through `AGENTS.md`, `.agents/skills`, and `.codex/agents`.
 
-Milestone 3 booking operations are intentionally not implemented yet. The API exposes the future routes with `501` responses so the frontend can keep the workflow visible without faking production behavior.
+Square Appointments create, reschedule, cancel, and dashboard test-booking operations are implemented through `POSProvider`. AI booking can only be enabled after Square is connected, services/staff are synced, and the latest Square test booking was created and cancelled successfully. Until Square returns a successful POS booking ID and booking version, failed provider calls create fallback pending requests instead of confirmed appointments or internal appointment state changes.
 
 ## Local Start
 
@@ -38,7 +42,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000/login`.
+Open `http://localhost:3088/login`.
 
 Local seed login:
 
@@ -55,7 +59,8 @@ Set these values before testing OAuth:
 SQUARE_ENVIRONMENT=sandbox
 SQUARE_CLIENT_ID=...
 SQUARE_CLIENT_SECRET=...
-SQUARE_REDIRECT_URL=http://localhost:18080/api/integrations/square/callback
+SQUARE_REDIRECT_URL=http://localhost:18089/api/integrations/square/callback
+SQUARE_API_VERSION=2026-05-20
 ```
 
 The Square callback stores encrypted access and refresh tokens in `pos_connections`. Tokens are never returned to the frontend.
@@ -70,12 +75,17 @@ Fully implemented now:
 - Square OAuth skeleton and connect flow
 - Square location listing
 - Square service/staff sync foundation
+- Signed and persisted Square OAuth state nonce
+- Provider-neutral service/staff read endpoints
+- Booking attempt, appointment, appointment service, and fallback notification tables
+- Booking service that depends on `POSProvider`
+- Square customer search/create, availability search, create-booking, reschedule, cancel, and test-booking gate paths
+- Dashboard booking readiness UI for Square test booking and AI booking enablement
 - POS sync and error logs
 - Admin shell, login, dashboard, onboarding profile creation, integrations page
 
-Still stubbed until later milestones:
+Still stubbed until later Milestone 3 slices:
 
-- Square booking, reschedule, cancel, test booking, and cancel test booking
 - AI conversation engine
 - Telephony, SMS, reminders, call logs, and knowledge base
 - Stripe billing

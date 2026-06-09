@@ -14,6 +14,7 @@ import (
 	"github.com/manleai/ai-receptionist/internal/encryption"
 	"github.com/manleai/ai-receptionist/internal/logger"
 	"github.com/manleai/ai-receptionist/modules/auth"
+	"github.com/manleai/ai-receptionist/modules/booking"
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/pos_square"
 	"github.com/manleai/ai-receptionist/modules/salon"
@@ -70,7 +71,14 @@ func main() {
 
 	posRepo := pos.NewRepository(db)
 	squareAdapter := pos_square.NewSquareAdapter(cfg.Square, posRepo, cipher)
-	squareService := pos_square.NewService(posRepo, squareAdapter)
+	posService := pos.NewService(posRepo)
+	pos.RegisterRoutes(api, pos.NewHandler(posService), cfg.JWTSecret)
+
+	bookingRepo := booking.NewRepository(db)
+	bookingService := booking.NewService(bookingRepo, []pos.POSProvider{squareAdapter})
+	booking.RegisterRoutes(api, booking.NewHandler(bookingService), cfg.JWTSecret)
+
+	squareService := pos_square.NewService(posRepo, squareAdapter, cfg.JWTSecret, bookingService)
 	pos_square.RegisterRoutes(api, pos_square.NewHandler(squareService, cfg), cfg.JWTSecret)
 
 	logg.Info("api listening", "port", cfg.ServerPort, "env", cfg.AppEnv)

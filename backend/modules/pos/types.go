@@ -44,8 +44,8 @@ type POSProvider interface {
 	CheckAvailability(ctx context.Context, salonID string, input AvailabilityInput) ([]TimeSlot, error)
 
 	CreateAppointment(ctx context.Context, salonID string, input CreateAppointmentInput) (*Appointment, error)
-	RescheduleAppointment(ctx context.Context, salonID string, appointmentID string, input RescheduleInput) error
-	CancelAppointment(ctx context.Context, salonID string, appointmentID string, reason string) error
+	RescheduleAppointment(ctx context.Context, salonID string, appointmentID string, input RescheduleInput) (*Appointment, error)
+	CancelAppointment(ctx context.Context, salonID string, appointmentID string, input CancelInput) (*Appointment, error)
 
 	Sync(ctx context.Context, salonID string) error
 }
@@ -82,18 +82,19 @@ type Location struct {
 }
 
 type Service struct {
-	ID              string  `json:"id,omitempty"`
-	SalonID         string  `json:"salon_id,omitempty"`
-	POSProvider     string  `json:"pos_provider"`
-	POSServiceID    string  `json:"pos_service_id"`
-	Name            string  `json:"name"`
-	Description     string  `json:"description,omitempty"`
-	AIDescription   string  `json:"ai_description,omitempty"`
-	DurationMinutes int     `json:"duration_minutes"`
-	PriceFrom       float64 `json:"price_from,omitempty"`
-	PriceDisplay    string  `json:"price_display,omitempty"`
-	AIBookable      bool    `json:"ai_bookable"`
-	Active          bool    `json:"active"`
+	ID                string  `json:"id,omitempty"`
+	SalonID           string  `json:"salon_id,omitempty"`
+	POSProvider       string  `json:"pos_provider"`
+	POSServiceID      string  `json:"pos_service_id"`
+	POSServiceVersion int64   `json:"pos_service_version,omitempty"`
+	Name              string  `json:"name"`
+	Description       string  `json:"description,omitempty"`
+	AIDescription     string  `json:"ai_description,omitempty"`
+	DurationMinutes   int     `json:"duration_minutes"`
+	PriceFrom         float64 `json:"price_from,omitempty"`
+	PriceDisplay      string  `json:"price_display,omitempty"`
+	AIBookable        bool    `json:"ai_bookable"`
+	Active            bool    `json:"active"`
 }
 
 type StaffMember struct {
@@ -124,11 +125,12 @@ type TimeSlot struct {
 }
 
 type Appointment struct {
-	ID               string    `json:"id,omitempty"`
-	POSAppointmentID string    `json:"pos_appointment_id"`
-	StartTime        time.Time `json:"start_time"`
-	EndTime          time.Time `json:"end_time"`
-	Status           string    `json:"status"`
+	ID                    string    `json:"id,omitempty"`
+	POSAppointmentID      string    `json:"pos_appointment_id"`
+	POSAppointmentVersion int       `json:"pos_appointment_version,omitempty"`
+	StartTime             time.Time `json:"start_time"`
+	EndTime               time.Time `json:"end_time"`
+	Status                string    `json:"status"`
 }
 
 type CreateCustomerInput struct {
@@ -145,16 +147,28 @@ type AvailabilityInput struct {
 }
 
 type CreateAppointmentInput struct {
-	CustomerID string
-	ServiceID  string
-	StaffID    string
-	StartTime  time.Time
-	Notes      string
+	CustomerID      string
+	ServiceID       string
+	ServiceVersion  int64
+	StaffID         string
+	StartTime       time.Time
+	DurationMinutes int
+	Notes           string
 }
 
 type RescheduleInput struct {
-	StartTime time.Time
-	StaffID   string
+	BookingVersion  int
+	ServiceID       string
+	ServiceVersion  int64
+	StaffID         string
+	StartTime       time.Time
+	DurationMinutes int
+	Notes           string
+}
+
+type CancelInput struct {
+	BookingVersion int
+	Reason         string
 }
 
 type POSError struct {
@@ -175,4 +189,12 @@ type SyncLog struct {
 	Message     string     `json:"message,omitempty"`
 	StartedAt   time.Time  `json:"started_at"`
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
+}
+
+type OAuthState struct {
+	SalonID   string
+	Provider  string
+	StateHash string
+	NonceHash string
+	ExpiresAt time.Time
 }

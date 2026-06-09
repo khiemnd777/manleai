@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { clearSession } from "@/lib/api/client";
+import { logoutSession } from "@/lib/api/client";
 import { cn } from "@/lib/utils/cn";
 import { Button } from "@/components/ui/button";
 
@@ -36,8 +36,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
 
   function logout() {
-    clearSession();
-    router.push("/login");
+    void logoutSession().finally(() => router.push("/login"));
   }
 
   return (
@@ -103,4 +102,3 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
-

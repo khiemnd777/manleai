@@ -1,20 +1,17 @@
 # Square Integration
 
-## Supported in Milestone 2
+## Supported Through Current Backend Foundation
 
 - OAuth authorization URL
+- Signed and persisted OAuth state nonce
 - OAuth callback token exchange
 - Encrypted token storage
+- Pinned Square API version through `Square-Version`
 - Connection status
 - Location listing
 - Location selection
 - Services sync
 - Staff sync
-- Sync logs
-- POS error logs
-
-## Not Implemented Until Milestone 3
-
 - Customer search/create
 - Availability checks
 - Create appointment
@@ -22,9 +19,15 @@
 - Cancel appointment
 - Create test booking
 - Cancel test booking
-- Enable AI booking gate
+- AI booking readiness gate
+- Sync logs
+- POS error logs
 
-These operations return explicit Milestone 3 errors today. The system must not fake booking success.
+## Not Implemented Until Later Milestone 3 Slices
+
+- Real sandbox payload verification against a Square Appointments account
+
+The provider-neutral booking service records provider failures as fallback pending requests and must not fake booking success. Reschedule, cancel, test booking, and test booking cancellation leave internal state unchanged unless Square succeeds. AI booking can only be enabled after the latest Square test booking was created and cancelled successfully.
 
 ## Environment
 
@@ -32,7 +35,8 @@ These operations return explicit Milestone 3 errors today. The system must not f
 SQUARE_ENVIRONMENT=sandbox
 SQUARE_CLIENT_ID=
 SQUARE_CLIENT_SECRET=
-SQUARE_REDIRECT_URL=http://localhost:18080/api/integrations/square/callback
+SQUARE_REDIRECT_URL=http://localhost:18089/api/integrations/square/callback
+SQUARE_API_VERSION=2026-05-20
 ```
 
 ## Token Security

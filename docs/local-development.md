@@ -37,7 +37,7 @@ npm install
 npm run dev
 ```
 
-Visit `http://localhost:3000/login`.
+Visit `http://localhost:3088/login`.
 
 ## Notes
 
