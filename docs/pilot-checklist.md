@@ -37,3 +37,14 @@
 - [x] Add booking test UI and AI booking enablement gate.
 - [x] Add owner appointments dashboard with confirmed POS bookings and fallback pending requests.
 - [x] Add service/staff AI booking controls for synced Square records.
+
+## Milestone 4 Conversation Simulator
+
+- [x] Add call session, transcript, and handoff persistence.
+- [x] Add deterministic conversation engine module that does not import Square packages.
+- [x] Route simulator booking attempts through the provider-neutral booking service.
+- [x] Keep AI-disabled and human-request paths as owner handoffs, not confirmed appointments.
+- [x] Add dashboard Calls page with simulator transcript, detected details, outcomes, and recent sessions.
+- [x] Add backend tests for confirmed, fallback pending, AI-disabled, and handoff paths.
+- [ ] Add live telephony webhooks after simulator behavior is reviewed.
+- [ ] Add STT, LLM, and TTS provider adapters behind runtime abstractions.

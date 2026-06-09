@@ -158,3 +158,52 @@ export type SquareReadiness = {
   latest_test_booking?: TestBookingRecord;
   checks: ReadinessCheck[];
 };
+
+export type TranscriptMessage = {
+  id: string;
+  session_id: string;
+  salon_id: string;
+  speaker: "ai" | "customer" | "tool";
+  body: string;
+  sequence: number;
+  created_at: string;
+};
+
+export type HandoffRequest = {
+  id: string;
+  salon_id: string;
+  call_session_id: string;
+  status: string;
+  reason: string;
+  customer_name?: string;
+  customer_phone?: string;
+  summary: string;
+  created_at: string;
+  resolved_at?: string;
+};
+
+export type ConversationSession = {
+  id: string;
+  salon_id: string;
+  channel: string;
+  status: string;
+  intent: string;
+  outcome: string;
+  customer_name?: string;
+  customer_phone?: string;
+  customer_email?: string;
+  service_id?: string;
+  service_name?: string;
+  staff_id?: string;
+  staff_name?: string;
+  requested_start_time?: string;
+  booking_attempt_id?: string;
+  appointment_id?: string;
+  summary?: string;
+  started_at: string;
+  ended_at?: string;
+  created_at: string;
+  updated_at: string;
+  transcript?: TranscriptMessage[];
+  handoff?: HandoffRequest;
+};

@@ -3,8 +3,9 @@ package booking
 import "time"
 
 const (
-	SourceOwnerDashboard    = "owner_dashboard"
-	SourceSquareTestBooking = "square_test_booking"
+	SourceOwnerDashboard          = "owner_dashboard"
+	SourceSquareTestBooking       = "square_test_booking"
+	SourceAIConversationSimulator = "ai_conversation_simulator"
 
 	StatusConfirmed       = "confirmed"
 	StatusFallbackPending = "fallback_pending"

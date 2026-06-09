@@ -144,6 +144,36 @@ Returns booking attempts, including `fallback_pending` records that need owner r
 
 Returns `201` with status `confirmed` only when the active `POSProvider` returns a POS booking ID and booking version. Returns `202` with status `fallback_pending` when the POS provider fails, times out, or does not return required booking metadata.
 
+## Conversation Simulator
+
+`GET /api/salons/:id/conversation-sessions`
+
+Returns recent deterministic simulator sessions for the authenticated owner.
+
+`POST /api/salons/:id/conversation-sessions`
+
+```json
+{
+  "channel": "simulator"
+}
+```
+
+Creates a simulator session and writes the initial AI transcript message.
+
+`GET /api/salons/:id/conversation-sessions/:session_id`
+
+Returns one simulator session with transcript messages and the latest handoff request when present.
+
+`POST /api/salons/:id/conversation-sessions/:session_id/messages`
+
+```json
+{
+  "message": "My name is Linh Tran, phone 312-555-0101, classic manicure with Mai on 2026-06-10 at 3pm."
+}
+```
+
+Processes one simulated customer message through the deterministic conversation engine. The simulator asks one question at a time, can create owner handoffs for human requests or disabled AI booking, and calls the provider-neutral booking service only after required booking details are collected. A simulator booking is marked `booking_confirmed` only when the booking service returns a confirmed booking attempt with a POS booking ID and appointment. POS failures create `booking_fallback_pending` wording and do not create confirmed appointment language.
+
 ## Square
 
 `GET /api/integrations/square/connect-url?salon_id=<id>`

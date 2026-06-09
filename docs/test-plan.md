@@ -48,6 +48,19 @@
 - Verify the dashboard Services and Staff pages let owners allow/block AI booking for active synced records without editing Square data.
 - Verify inactive synced services/staff cannot be enabled for AI booking and remain unavailable in the dashboard.
 
+## Milestone 4 Conversation Simulator
+
+- Verify startup migrations create `call_sessions`, `call_transcript_messages`, and `handoff_requests`.
+- Verify simulator sessions are owner-scoped by `salon_id`.
+- Verify the conversation module does not import `modules/pos_square`.
+- Verify simulator booking attempts call `booking.Service` with source `ai_conversation_simulator`.
+- Verify simulator confirmed wording appears only after the booking service returns a confirmed attempt, POS booking ID, and appointment.
+- Verify POS fallback from the booking service produces pending request wording and no confirmed appointment language.
+- Verify disabled AI booking creates an owner handoff and does not call the booking service.
+- Verify human requests, complaints, refunds, payment disputes, and group-booking language create owner handoffs.
+- Verify the Calls dashboard handles loading, empty, error, success, disabled/gated, and mobile states.
+- Verify simulator transcripts show customer, AI, and booking tool messages in sequence.
+
 ## Regression Guardrails
 
 - Booking services must import `modules/pos`, not `modules/pos_square`.

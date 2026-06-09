@@ -2,7 +2,7 @@
 
 POS-first production-like pilot foundation for an AI phone receptionist serving US nail salons, starting with Vietnamese-owned salons that use Square Appointments.
 
-This repository currently implements Milestone 1, Milestone 2, and backend booking slices for Milestone 3:
+This repository currently implements Milestone 1, Milestone 2, Milestone 3 booking safety, and the Milestone 4 deterministic conversation simulator:
 
 - Go/Fiber API scaffold with PostgreSQL, Redis, startup SQL migrations, and Docker Compose.
 - Auth, JWT access tokens, persisted refresh tokens, owner-scoped salon APIs.
@@ -12,11 +12,14 @@ This repository currently implements Milestone 1, Milestone 2, and backend booki
 - Persisted Square OAuth state nonce and pinned Square API version.
 - Provider-neutral booking attempt and appointment persistence with fallback pending safety.
 - Square customer search/create, availability search, create-booking, reschedule, cancel, and test-booking gate paths.
+- Deterministic AI conversation simulator with persisted call sessions, transcript messages, summaries, owner handoffs, and booking attempt linkage.
 - Backend service/staff list endpoints for synced POS data.
-- Next.js admin shell with login, dashboard, onboarding profile creation, and Square integration status.
+- Next.js admin shell with login, dashboard, onboarding profile creation, Square integration status, appointments, service/staff controls, and Calls simulator.
 - Repo-local Codex guidance through `AGENTS.md`, `.agents/skills`, and `.codex/agents`.
 
 Square Appointments create, reschedule, cancel, and dashboard test-booking operations are implemented through `POSProvider`. AI booking can only be enabled after Square is connected, services/staff are synced, and the latest Square test booking was created and cancelled successfully. Until Square returns a successful POS booking ID and booking version, failed provider calls create fallback pending requests instead of confirmed appointments or internal appointment state changes.
+
+The Milestone 4 simulator is deterministic and provider-neutral. It records simulator sessions and transcripts, calls the booking service only after required booking details are collected, and never confirms an appointment unless the booking service returns a POS-confirmed attempt and appointment.
 
 ## Local Start
 
@@ -80,14 +83,17 @@ Fully implemented now:
 - Booking attempt, appointment, appointment service, and fallback notification tables
 - Booking service that depends on `POSProvider`
 - Square customer search/create, availability search, create-booking, reschedule, cancel, and test-booking gate paths
+- Conversation simulator session, transcript, summary, handoff, and booking-attempt linkage tables
+- Deterministic conversation engine that asks one question at a time and routes booking through `booking.Service`
 - Dashboard booking readiness UI for Square test booking and AI booking enablement
+- Dashboard Calls simulator with transcripts, detected details, outcomes, and recent sessions
 - POS sync and error logs
-- Admin shell, login, dashboard, onboarding profile creation, integrations page
+- Admin shell, login, dashboard, onboarding profile creation, integrations page, appointments page, services/staff controls
 
-Still stubbed until later Milestone 3 slices:
+Still stubbed until later milestones:
 
-- AI conversation engine
-- Telephony, SMS, reminders, call logs, and knowledge base
+- Live telephony webhooks
+- SMS, reminders, STT, LLM, TTS, and knowledge base
 - Stripe billing
 
 ## Agent Setup
