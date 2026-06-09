@@ -1,0 +1,4 @@
+display_name: Booking Safety TDD
+short_description: Implement booking operations with test-first POS confirmation safety.
+default_prompt: Use this skill for Milestone 3 booking behavior so confirmed appointments require POS provider success.
+

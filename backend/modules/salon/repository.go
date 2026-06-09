@@ -1,0 +1,268 @@
+package salon
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+)
+
+var ErrNotFound = errors.New("salon not found")
+
+type Repository struct {
+	db *sql.DB
+}
+
+func NewRepository(db *sql.DB) *Repository {
+	return &Repository{db: db}
+}
+
+func (r *Repository) ListForOwner(ctx context.Context, ownerUserID string) ([]Salon, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id::text, name, phone, COALESCE(address, ''), COALESCE(city, ''), COALESCE(state, ''), COALESCE(zip_code, ''),
+		       timezone, owner_user_id::text, primary_language, secondary_language, COALESCE(handoff_phone, ''),
+		       ai_enabled, created_at, updated_at
+		FROM salons
+		WHERE owner_user_id = $1
+		ORDER BY created_at DESC
+	`, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var salons []Salon
+	for rows.Next() {
+		item, err := scanSalon(rows)
+		if err != nil {
+			return nil, err
+		}
+		salons = append(salons, *item)
+	}
+	return salons, rows.Err()
+}
+
+func (r *Repository) GetForOwner(ctx context.Context, id string, ownerUserID string) (*Salon, error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT id::text, name, phone, COALESCE(address, ''), COALESCE(city, ''), COALESCE(state, ''), COALESCE(zip_code, ''),
+		       timezone, owner_user_id::text, primary_language, secondary_language, COALESCE(handoff_phone, ''),
+		       ai_enabled, created_at, updated_at
+		FROM salons
+		WHERE id = $1 AND owner_user_id = $2
+	`, id, ownerUserID)
+	return scanSalon(row)
+}
+
+func (r *Repository) Create(ctx context.Context, ownerUserID string, req CreateSalonRequest) (*Salon, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var salonID string
+	row := tx.QueryRowContext(ctx, `
+		INSERT INTO salons (name, phone, address, city, state, zip_code, timezone, owner_user_id, primary_language, secondary_language, handoff_phone)
+		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''), $7, $8, $9, $10, NULLIF($11, ''))
+		RETURNING id::text
+	`, req.Name, req.Phone, req.Address, req.City, req.State, req.ZipCode, req.Timezone, ownerUserID, req.PrimaryLanguage, req.SecondaryLanguage, req.HandoffPhone)
+	if err := row.Scan(&salonID); err != nil {
+		return nil, err
+	}
+
+	if _, err := tx.ExecContext(ctx, `INSERT INTO salon_settings (salon_id) VALUES ($1)`, salonID); err != nil {
+		return nil, err
+	}
+	for day := 0; day <= 6; day++ {
+		isClosed := day == 0
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO salon_business_hours (salon_id, day_of_week, open_time, close_time, is_closed)
+			VALUES ($1, $2, '09:30', '19:00', $3)
+		`, salonID, day, isClosed); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return r.GetForOwner(ctx, salonID, ownerUserID)
+}
+
+func (r *Repository) Update(ctx context.Context, id string, ownerUserID string, req UpdateSalonRequest) (*Salon, error) {
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE salons
+		SET name = $1,
+		    phone = $2,
+		    address = NULLIF($3, ''),
+		    city = NULLIF($4, ''),
+		    state = NULLIF($5, ''),
+		    zip_code = NULLIF($6, ''),
+		    timezone = $7,
+		    primary_language = $8,
+		    secondary_language = $9,
+		    handoff_phone = NULLIF($10, ''),
+		    ai_enabled = $11,
+		    updated_at = now()
+		WHERE id = $12 AND owner_user_id = $13
+	`, req.Name, req.Phone, req.Address, req.City, req.State, req.ZipCode, req.Timezone, req.PrimaryLanguage, req.SecondaryLanguage, req.HandoffPhone, req.AIEnabled, id, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return nil, ErrNotFound
+	}
+	return r.GetForOwner(ctx, id, ownerUserID)
+}
+
+func (r *Repository) GetSettings(ctx context.Context, salonID string, ownerUserID string) (*Settings, error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT ss.id::text, ss.salon_id::text, ss.ai_greeting, ss.ai_voice, ss.booking_mode, ss.recording_enabled,
+		       ss.recording_consent_message, ss.sms_confirmation_enabled, ss.sms_reminder_enabled,
+		       ss.reminder_hours_before, ss.handoff_enabled, ss.created_at, ss.updated_at
+		FROM salon_settings ss
+		JOIN salons s ON s.id = ss.salon_id
+		WHERE ss.salon_id = $1 AND s.owner_user_id = $2
+	`, salonID, ownerUserID)
+	return scanSettings(row)
+}
+
+func (r *Repository) UpdateSettings(ctx context.Context, salonID string, ownerUserID string, req UpdateSettingsRequest) (*Settings, error) {
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE salon_settings
+		SET ai_greeting = $1,
+		    ai_voice = $2,
+		    booking_mode = $3,
+		    recording_enabled = $4,
+		    recording_consent_message = $5,
+		    sms_confirmation_enabled = $6,
+		    sms_reminder_enabled = $7,
+		    reminder_hours_before = $8,
+		    handoff_enabled = $9,
+		    updated_at = now()
+		WHERE salon_id = $10
+		  AND EXISTS (SELECT 1 FROM salons WHERE salons.id = salon_settings.salon_id AND salons.owner_user_id = $11)
+	`, req.AIGreeting, req.AIVoice, req.BookingMode, req.RecordingEnabled, req.RecordingConsentMessage, req.SMSConfirmationEnabled, req.SMSReminderEnabled, req.ReminderHoursBefore, req.HandoffEnabled, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return nil, ErrNotFound
+	}
+	return r.GetSettings(ctx, salonID, ownerUserID)
+}
+
+func (r *Repository) GetBusinessHours(ctx context.Context, salonID string, ownerUserID string) ([]BusinessHour, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT bh.id::text, bh.salon_id::text, bh.day_of_week, COALESCE(bh.open_time::text, ''),
+		       COALESCE(bh.close_time::text, ''), bh.is_closed, bh.created_at, bh.updated_at
+		FROM salon_business_hours bh
+		JOIN salons s ON s.id = bh.salon_id
+		WHERE bh.salon_id = $1 AND s.owner_user_id = $2
+		ORDER BY bh.day_of_week
+	`, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var hours []BusinessHour
+	for rows.Next() {
+		var hour BusinessHour
+		if err := rows.Scan(&hour.ID, &hour.SalonID, &hour.DayOfWeek, &hour.OpenTime, &hour.CloseTime, &hour.IsClosed, &hour.CreatedAt, &hour.UpdatedAt); err != nil {
+			return nil, err
+		}
+		hours = append(hours, hour)
+	}
+	return hours, rows.Err()
+}
+
+func (r *Repository) UpdateBusinessHours(ctx context.Context, salonID string, ownerUserID string, req UpdateBusinessHoursRequest) ([]BusinessHour, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM salons WHERE id = $1 AND owner_user_id = $2)`, salonID, ownerUserID).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrNotFound
+	}
+
+	for _, hour := range req.Hours {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO salon_business_hours (salon_id, day_of_week, open_time, close_time, is_closed)
+			VALUES ($1, $2, NULLIF($3, '')::time, NULLIF($4, '')::time, $5)
+			ON CONFLICT (salon_id, day_of_week)
+			DO UPDATE SET open_time = EXCLUDED.open_time,
+			              close_time = EXCLUDED.close_time,
+			              is_closed = EXCLUDED.is_closed,
+			              updated_at = now()
+		`, salonID, hour.DayOfWeek, hour.OpenTime, hour.CloseTime, hour.IsClosed); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return r.GetBusinessHours(ctx, salonID, ownerUserID)
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanSalon(row rowScanner) (*Salon, error) {
+	var item Salon
+	err := row.Scan(
+		&item.ID,
+		&item.Name,
+		&item.Phone,
+		&item.Address,
+		&item.City,
+		&item.State,
+		&item.ZipCode,
+		&item.Timezone,
+		&item.OwnerUserID,
+		&item.PrimaryLanguage,
+		&item.SecondaryLanguage,
+		&item.HandoffPhone,
+		&item.AIEnabled,
+		&item.CreatedAt,
+		&item.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func scanSettings(row rowScanner) (*Settings, error) {
+	var settings Settings
+	err := row.Scan(
+		&settings.ID,
+		&settings.SalonID,
+		&settings.AIGreeting,
+		&settings.AIVoice,
+		&settings.BookingMode,
+		&settings.RecordingEnabled,
+		&settings.RecordingConsentMessage,
+		&settings.SMSConfirmationEnabled,
+		&settings.SMSReminderEnabled,
+		&settings.ReminderHoursBefore,
+		&settings.HandoffEnabled,
+		&settings.CreatedAt,
+		&settings.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &settings, nil
+}

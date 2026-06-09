@@ -1,0 +1,4 @@
+display_name: Pilot Release Review
+short_description: Review pilot readiness with POS-first, security, tenant, and scope-honesty priorities.
+default_prompt: Use this skill to review changes for real pilot readiness and critical product invariants.
+

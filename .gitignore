@@ -1,0 +1,21 @@
+# Backend
+backend/.gocache/
+backend/tmp/
+
+# Frontend
+frontend/.next/
+frontend/node_modules/
+frontend/tsconfig.tsbuildinfo
+
+# Environment files
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env.local
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+

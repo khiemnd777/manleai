@@ -1,0 +1,6 @@
+services:
+  api:
+    extends:
+      file: ../docker-compose.yml
+      service: api
+
