@@ -186,6 +186,10 @@ export type ConversationSession = {
   id: string;
   salon_id: string;
   channel: string;
+  provider?: string;
+  provider_call_id?: string;
+  inbound_phone?: string;
+  outbound_phone?: string;
   status: string;
   intent: string;
   outcome: string;
@@ -206,4 +210,15 @@ export type ConversationSession = {
   updated_at: string;
   transcript?: TranscriptMessage[];
   handoff?: HandoffRequest;
+};
+
+export type VoiceStatus = {
+  provider: string;
+  configured: boolean;
+  signature_verification: boolean;
+  inbound_webhook_url: string;
+  turn_webhook_url: string;
+  salon_phone?: string;
+  ready: boolean;
+  blocked_reason?: string;
 };

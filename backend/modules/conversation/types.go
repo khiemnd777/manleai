@@ -10,6 +10,7 @@ import (
 
 const (
 	ChannelSimulator = "simulator"
+	ChannelPhone     = "phone"
 
 	StatusActive    = "active"
 	StatusCompleted = "completed"
@@ -63,6 +64,13 @@ type StartSessionRequest struct {
 	CustomerEmail string `json:"customer_email"`
 }
 
+type StartPhoneCallRequest struct {
+	Provider       string
+	ProviderCallID string
+	FromPhone      string
+	ToPhone        string
+}
+
 type MessageRequest struct {
 	Message string `json:"message"`
 }
@@ -93,6 +101,10 @@ type Session struct {
 	ID                 string              `json:"id"`
 	SalonID            string              `json:"salon_id"`
 	Channel            string              `json:"channel"`
+	Provider           string              `json:"provider,omitempty"`
+	ProviderCallID     string              `json:"provider_call_id,omitempty"`
+	InboundPhone       string              `json:"inbound_phone,omitempty"`
+	OutboundPhone      string              `json:"outbound_phone,omitempty"`
 	Status             string              `json:"status"`
 	Intent             string              `json:"intent"`
 	Outcome            string              `json:"outcome"`
@@ -139,13 +151,17 @@ type HandoffRequest struct {
 }
 
 type NewSessionRecord struct {
-	SalonID       string
-	OwnerUserID   string
-	Channel       string
-	CustomerName  string
-	CustomerPhone string
-	CustomerEmail string
-	InitialReply  string
+	SalonID        string
+	OwnerUserID    string
+	Channel        string
+	Provider       string
+	ProviderCallID string
+	InboundPhone   string
+	OutboundPhone  string
+	CustomerName   string
+	CustomerPhone  string
+	CustomerEmail  string
+	InitialReply   string
 }
 
 type TurnRecord struct {

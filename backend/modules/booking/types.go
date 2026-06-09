@@ -6,6 +6,7 @@ const (
 	SourceOwnerDashboard          = "owner_dashboard"
 	SourceSquareTestBooking       = "square_test_booking"
 	SourceAIConversationSimulator = "ai_conversation_simulator"
+	SourceAIVoiceCall             = "ai_voice_call"
 
 	StatusConfirmed       = "confirmed"
 	StatusFallbackPending = "fallback_pending"

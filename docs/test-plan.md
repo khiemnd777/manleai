@@ -61,9 +61,24 @@
 - Verify the Calls dashboard handles loading, empty, error, success, disabled/gated, and mobile states.
 - Verify simulator transcripts show customer, AI, and booking tool messages in sequence.
 
+## Milestone 5 Live Voice Webhooks
+
+- Verify startup migrations add `phone` channel support, provider call metadata, and `voice_webhook_events`.
+- Verify `GET /api/salons/:id/voice/status` is owner-scoped and never exposes Twilio auth token values.
+- Verify Twilio incoming and turn webhooks reject missing or invalid `X-Twilio-Signature` values.
+- Verify Twilio incoming webhook matches `To` against the salon phone and creates a `phone` conversation session with provider call metadata.
+- Verify Twilio turn webhook appends speech turns to the existing `phone` transcript and returns TwiML.
+- Verify no-speech turns reprompt without creating a fake booking.
+- Verify phone booking attempts call `booking.Service` with source `ai_voice_call`.
+- Verify phone confirmed wording appears only after the booking service returns a confirmed attempt, POS booking ID, and appointment.
+- Verify POS fallback from a phone call produces pending request wording and no confirmed appointment language.
+- Verify phone human-request and AI-disabled paths create owner handoffs and do not call booking.
+- Verify the Calls dashboard shows live phone readiness, channel badges, phone/simulator metrics, and transcript details on desktop and mobile.
+
 ## Regression Guardrails
 
 - Booking services must import `modules/pos`, not `modules/pos_square`.
 - AI/conversation modules must not import Square packages.
+- Voice modules must keep Twilio-specific request validation and TwiML response logic outside the conversation engine.
 - No API response may expose encrypted or raw POS tokens.
 - Appointment confirmation, reschedule, and cancellation must remain impossible unless the active POS provider returns a successful booking response.

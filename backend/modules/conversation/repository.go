@@ -50,11 +50,15 @@ func (r *Repository) CreateSession(ctx context.Context, record NewSessionRecord)
 	var sessionID string
 	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO call_sessions (
-			salon_id, channel, status, intent, outcome, customer_name, customer_phone, customer_email
+			salon_id, channel, provider, provider_call_id, inbound_phone, outbound_phone,
+			status, intent, outcome, customer_name, customer_phone, customer_email
 		)
-		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''))
+		VALUES (
+			$1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''),
+			$7, $8, $9, NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, '')
+		)
 		RETURNING id::text
-	`, record.SalonID, record.Channel, StatusActive, IntentUnknown, OutcomeCollecting, record.CustomerName, record.CustomerPhone, record.CustomerEmail).Scan(&sessionID); err != nil {
+	`, record.SalonID, record.Channel, record.Provider, record.ProviderCallID, record.InboundPhone, record.OutboundPhone, StatusActive, IntentUnknown, OutcomeCollecting, record.CustomerName, record.CustomerPhone, record.CustomerEmail).Scan(&sessionID); err != nil {
 		return nil, err
 	}
 
@@ -338,7 +342,10 @@ func (r *Repository) latestHandoff(ctx context.Context, sessionID string) (*Hand
 
 func sessionSelect() string {
 	return `
-		SELECT cs.id::text, cs.salon_id::text, cs.channel, cs.status, cs.intent, cs.outcome,
+		SELECT cs.id::text, cs.salon_id::text, cs.channel,
+		       COALESCE(cs.provider, ''), COALESCE(cs.provider_call_id, ''),
+		       COALESCE(cs.inbound_phone, ''), COALESCE(cs.outbound_phone, ''),
+		       cs.status, cs.intent, cs.outcome,
 		       COALESCE(cs.customer_name, ''), COALESCE(cs.customer_phone, ''), COALESCE(cs.customer_email, ''),
 		       COALESCE(cs.service_id::text, ''), COALESCE(svc.name, ''),
 		       COALESCE(cs.staff_id::text, ''), COALESCE(st.name, ''),
@@ -364,6 +371,10 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 		&item.ID,
 		&item.SalonID,
 		&item.Channel,
+		&item.Provider,
+		&item.ProviderCallID,
+		&item.InboundPhone,
+		&item.OutboundPhone,
 		&item.Status,
 		&item.Intent,
 		&item.Outcome,

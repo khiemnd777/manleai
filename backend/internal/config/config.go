@@ -20,6 +20,7 @@ type Config struct {
 	FrontendURL     string
 	AutoMigrate     bool
 	Square          SquareConfig
+	Voice           VoiceConfig
 }
 
 type SquareConfig struct {
@@ -29,6 +30,18 @@ type SquareConfig struct {
 	RedirectURL  string
 	APIVersion   string
 	APIBaseURL   string
+}
+
+type VoiceConfig struct {
+	Provider      string
+	PublicBaseURL string
+	Twilio        TwilioVoiceConfig
+}
+
+type TwilioVoiceConfig struct {
+	AuthToken    string
+	IncomingPath string
+	TurnPath     string
 }
 
 func Load() Config {
@@ -51,6 +64,15 @@ func Load() Config {
 			RedirectURL:  env("SQUARE_REDIRECT_URL", "http://localhost:18089/api/integrations/square/callback"),
 			APIVersion:   env("SQUARE_API_VERSION", "2026-05-20"),
 			APIBaseURL:   env("SQUARE_API_BASE_URL", ""),
+		},
+		Voice: VoiceConfig{
+			Provider:      env("VOICE_PROVIDER", "twilio"),
+			PublicBaseURL: strings.TrimRight(env("VOICE_PUBLIC_BASE_URL", ""), "/"),
+			Twilio: TwilioVoiceConfig{
+				AuthToken:    env("VOICE_TWILIO_AUTH_TOKEN", ""),
+				IncomingPath: env("VOICE_TWILIO_INCOMING_PATH", "/api/voice/twilio/incoming"),
+				TurnPath:     env("VOICE_TWILIO_TURN_PATH", "/api/voice/twilio/turn"),
+			},
 		},
 	}
 }

@@ -19,6 +19,8 @@ import (
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/pos_square"
 	"github.com/manleai/ai-receptionist/modules/salon"
+	"github.com/manleai/ai-receptionist/modules/voice"
+	"github.com/manleai/ai-receptionist/modules/voice_twilio"
 )
 
 func main() {
@@ -82,6 +84,12 @@ func main() {
 	conversationRepo := conversation.NewRepository(db)
 	conversationService := conversation.NewService(conversationRepo, bookingService)
 	conversation.RegisterRoutes(api, conversation.NewHandler(conversationService), cfg.JWTSecret)
+
+	voiceRepo := voice.NewRepository(db)
+	voiceService := voice.NewService(voiceRepo, conversationService, cfg.Voice)
+	voice.RegisterRoutes(api, voice.NewHandler(voiceService), cfg.JWTSecret)
+	twilioVoiceAdapter := voice_twilio.NewAdapter(cfg.Voice.Twilio, cfg.Voice.PublicBaseURL)
+	voice_twilio.RegisterRoutes(api, voice_twilio.NewHandler(twilioVoiceAdapter, voiceService))
 
 	squareService := pos_square.NewService(posRepo, squareAdapter, cfg.JWTSecret, bookingService)
 	pos_square.RegisterRoutes(api, pos_square.NewHandler(squareService, cfg), cfg.JWTSecret)

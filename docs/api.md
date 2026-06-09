@@ -2,7 +2,7 @@
 
 Base URL: `http://localhost:18089`
 
-All endpoints except login, refresh, logout, health, and the Square OAuth callback require:
+All endpoints except login, refresh, logout, health, the Square OAuth callback, and Twilio voice webhooks require:
 
 ```txt
 Authorization: Bearer <access_token>
@@ -144,11 +144,11 @@ Returns booking attempts, including `fallback_pending` records that need owner r
 
 Returns `201` with status `confirmed` only when the active `POSProvider` returns a POS booking ID and booking version. Returns `202` with status `fallback_pending` when the POS provider fails, times out, or does not return required booking metadata.
 
-## Conversation Simulator
+## Conversation Sessions
 
 `GET /api/salons/:id/conversation-sessions`
 
-Returns recent deterministic simulator sessions for the authenticated owner.
+Returns recent conversation sessions for the authenticated owner, including `simulator` and `phone` channels.
 
 `POST /api/salons/:id/conversation-sessions`
 
@@ -162,7 +162,7 @@ Creates a simulator session and writes the initial AI transcript message.
 
 `GET /api/salons/:id/conversation-sessions/:session_id`
 
-Returns one simulator session with transcript messages and the latest handoff request when present.
+Returns one conversation session with transcript messages and the latest handoff request when present.
 
 `POST /api/salons/:id/conversation-sessions/:session_id/messages`
 
@@ -173,6 +173,53 @@ Returns one simulator session with transcript messages and the latest handoff re
 ```
 
 Processes one simulated customer message through the deterministic conversation engine. The simulator asks one question at a time, can create owner handoffs for human requests or disabled AI booking, and calls the provider-neutral booking service only after required booking details are collected. A simulator booking is marked `booking_confirmed` only when the booking service returns a confirmed booking attempt with a POS booking ID and appointment. POS failures create `booking_fallback_pending` wording and do not create confirmed appointment language.
+
+Phone channel sessions are created by Twilio webhooks and use the same conversation engine. Phone bookings use source `ai_voice_call`; simulator bookings use source `ai_conversation_simulator`.
+
+## Voice
+
+`GET /api/salons/:id/voice/status`
+
+Returns owner-scoped live voice readiness without exposing Twilio secrets.
+
+```json
+{
+  "provider": "twilio",
+  "configured": true,
+  "signature_verification": true,
+  "inbound_webhook_url": "https://api.example.com/api/voice/twilio/incoming",
+  "turn_webhook_url": "https://api.example.com/api/voice/twilio/turn",
+  "salon_phone": "+13125550101",
+  "ready": true
+}
+```
+
+`POST /api/voice/twilio/incoming`
+
+Public Twilio Programmable Voice webhook for a new inbound call. Requires a valid `X-Twilio-Signature` generated with `VOICE_TWILIO_AUTH_TOKEN`. The webhook matches Twilio `To` to the salon phone, creates or reuses a `phone` conversation session, records a `voice_webhook_events` audit row, and returns TwiML with a speech `<Gather>`.
+
+Expected Twilio form fields include:
+
+```txt
+CallSid
+From
+To
+```
+
+`POST /api/voice/twilio/turn`
+
+Public Twilio Programmable Voice webhook for gathered speech turns. Requires a valid `X-Twilio-Signature`. The webhook finds the `phone` session by `CallSid`, appends the customer speech to the transcript, and returns TwiML. The response continues gathering only while the session remains active. Completed, fallback, and handoff outcomes return final TwiML and hang up.
+
+Expected Twilio form fields include:
+
+```txt
+CallSid
+From
+To
+SpeechResult
+```
+
+The phone path never confirms an appointment unless the booking service returns a POS-confirmed booking attempt with a POS booking ID and appointment.
 
 ## Square
 

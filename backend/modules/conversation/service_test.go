@@ -73,6 +73,39 @@ func TestMessageUsesFallbackPendingTextWhenBookingToolFallsBack(t *testing.T) {
 	}
 }
 
+func TestMessageUsesVoiceCallBookingSourceForPhoneSessions(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.Channel = ChannelPhone
+	store.session.Provider = "twilio"
+	store.session.ProviderCallID = "CA123"
+	bookingTool := &fakeBookingTool{
+		attempt: &booking.BookingAttempt{
+			ID:           "attempt_voice",
+			Status:       booking.StatusConfirmed,
+			POSBookingID: "booking_voice",
+			Appointment:  &booking.Appointment{ID: "appointment_voice", Status: booking.StatusConfirmed},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "My name is Linh Tran, phone 312-555-0101, classic manicure with Mai on 2026-06-10 at 3pm.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.Outcome != OutcomeBookingConfirmed {
+		t.Fatalf("outcome = %s, want booking_confirmed", session.Outcome)
+	}
+	if bookingTool.request.Source != booking.SourceAIVoiceCall {
+		t.Fatalf("source = %s, want %s", bookingTool.request.Source, booking.SourceAIVoiceCall)
+	}
+	if !strings.Contains(bookingTool.request.Notes, "phone receptionist") {
+		t.Fatalf("notes = %q, want phone receptionist note", bookingTool.request.Notes)
+	}
+}
+
 func TestMessageCreatesHandoffWithoutBookingWhenAIDisabled(t *testing.T) {
 	store := newFakeConversationStore()
 	store.cfg.AIEnabled = false

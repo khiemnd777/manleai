@@ -64,6 +64,33 @@ func (s *Service) Start(ctx context.Context, salonID string, ownerUserID string,
 	})
 }
 
+func (s *Service) StartPhoneCall(ctx context.Context, salonID string, ownerUserID string, req StartPhoneCallRequest) (*Session, error) {
+	salonID = strings.TrimSpace(salonID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	req.Provider = strings.TrimSpace(req.Provider)
+	req.ProviderCallID = strings.TrimSpace(req.ProviderCallID)
+	req.FromPhone = validation.NormalizePhone(req.FromPhone)
+	req.ToPhone = validation.NormalizePhone(req.ToPhone)
+	if salonID == "" || ownerUserID == "" || req.Provider == "" || req.ProviderCallID == "" {
+		return nil, ErrValidation
+	}
+	cfg, err := s.store.GetRuntimeConfig(ctx, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.CreateSession(ctx, NewSessionRecord{
+		SalonID:        salonID,
+		OwnerUserID:    ownerUserID,
+		Channel:        ChannelPhone,
+		Provider:       req.Provider,
+		ProviderCallID: req.ProviderCallID,
+		InboundPhone:   req.FromPhone,
+		OutboundPhone:  req.ToPhone,
+		CustomerPhone:  req.FromPhone,
+		InitialReply:   initialReply(cfg),
+	})
+}
+
 func (s *Service) Message(ctx context.Context, salonID string, ownerUserID string, sessionID string, req MessageRequest) (*Session, error) {
 	salonID = strings.TrimSpace(salonID)
 	ownerUserID = strings.TrimSpace(ownerUserID)
@@ -150,14 +177,14 @@ func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnR
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, "I could not reach the booking path, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
 	}
 	attempt, err := s.bookingTool.Create(ctx, turn.SalonID, ownerUserID, booking.CreateBookingRequest{
-		Source:        booking.SourceAIConversationSimulator,
+		Source:        bookingSourceForSession(session),
 		CustomerName:  session.CustomerName,
 		CustomerPhone: session.CustomerPhone,
 		CustomerEmail: session.CustomerEmail,
 		ServiceID:     session.ServiceID,
 		StaffID:       session.StaffID,
 		StartTime:     *session.RequestedStartTime,
-		Notes:         "AI conversation simulator request.",
+		Notes:         bookingNotesForSession(session),
 	})
 	if err != nil {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, "I could not confirm that in Square Appointments, so the owner needs to review it. This is not a confirmed appointment.", services, staff, cfg)
@@ -216,10 +243,27 @@ func normalizeStartRequest(req StartSessionRequest) StartSessionRequest {
 	if req.Channel == "" {
 		req.Channel = ChannelSimulator
 	}
+	if req.Channel != ChannelSimulator {
+		req.Channel = ChannelSimulator
+	}
 	req.CustomerName = strings.TrimSpace(req.CustomerName)
 	req.CustomerPhone = validation.NormalizePhone(req.CustomerPhone)
 	req.CustomerEmail = strings.TrimSpace(req.CustomerEmail)
 	return req
+}
+
+func bookingSourceForSession(session Session) string {
+	if session.Channel == ChannelPhone {
+		return booking.SourceAIVoiceCall
+	}
+	return booking.SourceAIConversationSimulator
+}
+
+func bookingNotesForSession(session Session) string {
+	if session.Channel == ChannelPhone {
+		return "AI phone receptionist request."
+	}
+	return "AI conversation simulator request."
 }
 
 func initialReply(cfg *RuntimeConfig) string {

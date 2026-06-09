@@ -14,7 +14,8 @@ import type {
   Salon,
   SquareReadiness,
   SyncLog,
-  TranscriptMessage
+  TranscriptMessage,
+  VoiceStatus
 } from "@/types/api";
 
 type SalonListResponse = {
@@ -34,6 +35,7 @@ type SessionsResponse = {
 export function CallsDashboard() {
   const [salon, setSalon] = useState<Salon | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
   const [sessions, setSessions] = useState<ConversationSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<ConversationSession | null>(null);
   const [message, setMessage] = useState("");
@@ -51,16 +53,19 @@ export function CallsDashboard() {
       setSalon(firstSalon);
       if (!firstSalon) {
         setStatus(null);
+        setVoiceStatus(null);
         setSessions([]);
         setSelectedSession(null);
         return;
       }
 
-      const [statusResponse, sessionsResponse] = await Promise.all([
+      const [statusResponse, voiceResponse, sessionsResponse] = await Promise.all([
         apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
+        apiRequest<VoiceStatus>(`/api/salons/${firstSalon.id}/voice/status`),
         apiRequest<SessionsResponse>(`/api/salons/${firstSalon.id}/conversation-sessions?limit=25`)
       ]);
       setStatus(statusResponse);
+      setVoiceStatus(voiceResponse);
       setSessions(sessionsResponse.sessions);
 
       const currentID = selectedSession?.id;
@@ -75,7 +80,7 @@ export function CallsDashboard() {
         setSelectedSession(null);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load call simulator.");
+      setError(err instanceof Error ? err.message : "Could not load call sessions.");
     } finally {
       setLoading(false);
     }
@@ -114,7 +119,7 @@ export function CallsDashboard() {
     setSending(true);
     try {
       let session = selectedSession;
-      if (!session || session.status !== "active") {
+      if (!session || session.status !== "active" || session.channel !== "simulator") {
         session = await apiRequest<ConversationSession>(`/api/salons/${salon.id}/conversation-sessions`, {
           method: "POST",
           body: JSON.stringify({ channel: "simulator" })
@@ -146,7 +151,7 @@ export function CallsDashboard() {
       );
       setSelectedSession(detail);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Could not load simulator transcript.");
+      setActionError(err instanceof Error ? err.message : "Could not load transcript.");
     }
   }
 
@@ -156,6 +161,8 @@ export function CallsDashboard() {
   }
 
   const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
+  const phoneCount = useMemo(() => sessions.filter((item) => item.channel === "phone").length, [sessions]);
+  const simulatorCount = useMemo(() => sessions.filter((item) => item.channel === "simulator").length, [sessions]);
   const handoffCount = useMemo(
     () => sessions.filter((item) => item.status === "handoff" || item.outcome === "handoff_requested").length,
     [sessions]
@@ -173,7 +180,8 @@ export function CallsDashboard() {
     return (
       <div className="space-y-6">
         <Skeleton className="h-9 w-72" />
-        <div className="grid gap-4 md:grid-cols-4">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+          <Skeleton className="h-28" />
           <Skeleton className="h-28" />
           <Skeleton className="h-28" />
           <Skeleton className="h-28" />
@@ -192,7 +200,7 @@ export function CallsDashboard() {
       <Card>
         <CardTitle>Create a salon first</CardTitle>
         <CardDescription>
-          Simulator sessions are scoped by salon, so the owner profile must exist first.
+          Call sessions are scoped by salon, so the owner profile must exist first.
         </CardDescription>
       </Card>
     );
@@ -204,10 +212,11 @@ export function CallsDashboard() {
         <div>
           <h1 className="text-2xl font-bold text-ink">Calls</h1>
           <p className="mt-1 text-sm text-muted">
-            Simulated AI receptionist sessions, transcripts, booking outcomes, and owner handoffs.
+            Live phone and simulator transcripts, booking outcomes, and owner handoffs.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
+          <Badge value={voiceStatus?.ready ? "ready" : "not_configured"} />
           <Badge value={aiEnabled ? "active" : "disabled"} />
           <Button type="button" variant="secondary" onClick={() => void load()}>
             <RefreshCcw className="h-4 w-4" />
@@ -217,12 +226,13 @@ export function CallsDashboard() {
       </div>
 
       {error ? <Alert title="Calls unavailable" message={error} /> : null}
-      {actionError ? <Alert title="Simulator action failed" message={actionError} /> : null}
+      {actionError ? <Alert title="Call action failed" message={actionError} /> : null}
 
-      <ReadinessPanel aiEnabled={aiEnabled} />
+      <ReadinessPanel aiEnabled={aiEnabled} voiceStatus={voiceStatus} />
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <Metric label="Simulator sessions" value={String(sessions.length)} />
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+        <Metric label="Live phone calls" value={String(phoneCount)} />
+        <Metric label="Simulator sessions" value={String(simulatorCount)} />
         <Metric label="Owner handoffs" value={String(handoffCount)} />
         <Metric label="Confirmed bookings" value={String(confirmedCount)} />
         <Metric label="Pending requests" value={String(fallbackCount)} />
@@ -232,9 +242,9 @@ export function CallsDashboard() {
         <Card>
           <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
             <div>
-              <CardTitle>Conversation simulator</CardTitle>
+              <CardTitle>Conversation transcript</CardTitle>
               <CardDescription>
-                Booking confirmation still requires a successful Square Appointments booking ID.
+                Simulator input stays separate from live phone transcripts.
               </CardDescription>
             </div>
             <Button type="button" variant="secondary" onClick={() => void startSession()} disabled={sending}>
@@ -264,7 +274,7 @@ export function CallsDashboard() {
               className="h-10 min-w-0 flex-1 rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand"
               value={message}
               onChange={(event) => setMessage(event.target.value)}
-              placeholder="Customer message"
+              placeholder="Simulator customer message"
               disabled={sending}
             />
             <Button type="submit" disabled={sending || !message.trim()}>
@@ -285,6 +295,7 @@ export function CallsDashboard() {
 
           {selectedSession ? (
             <dl className="mt-5 space-y-4">
+              <Info label="Channel" value={<Badge value={selectedSession.channel} />} />
               <Info label="Intent" value={<Badge value={selectedSession.intent} />} />
               <Info label="Outcome" value={<Badge value={selectedSession.outcome} />} />
               <Info label="Customer" value={selectedSession.customer_name || "Not collected"} />
@@ -296,10 +307,11 @@ export function CallsDashboard() {
                 value={selectedSession.requested_start_time ? formatDateTime(selectedSession.requested_start_time) : "Not collected"}
               />
               <Info label="Booking attempt" value={selectedSession.booking_attempt_id || "None"} />
+              <Info label="Provider call" value={selectedSession.provider_call_id || "None"} />
             </dl>
           ) : (
             <div className="mt-5 rounded-md border border-line p-4 text-sm text-muted">
-              No simulator session selected.
+              No session selected.
             </div>
           )}
         </Card>
@@ -308,9 +320,9 @@ export function CallsDashboard() {
       <Card>
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
           <div>
-            <CardTitle>Recent simulator sessions</CardTitle>
+            <CardTitle>Recent call sessions</CardTitle>
             <CardDescription>
-              Review deterministic simulator outcomes before live telephony is connected.
+              Review live phone and simulator outcomes before owner follow-up.
             </CardDescription>
           </div>
           <Badge value={sessions.length > 0 ? "active" : "disabled"} />
@@ -319,18 +331,19 @@ export function CallsDashboard() {
         {sessions.length === 0 ? (
           <div className="mt-5 rounded-md border border-line p-6 text-center">
             <PhoneCall className="mx-auto h-5 w-5 text-muted" />
-            <div className="mt-3 text-sm font-semibold text-ink">No simulator sessions yet</div>
+            <div className="mt-3 text-sm font-semibold text-ink">No call sessions yet</div>
             <div className="mt-1 text-sm leading-6 text-muted">
-              Transcript rows will appear here after the first simulated customer message.
+              Transcript rows will appear after a simulator message or live phone webhook.
             </div>
           </div>
         ) : (
           <>
             <div className="mt-5 hidden overflow-x-auto rounded-md border border-line lg:block">
-              <table className="w-full min-w-[860px] text-left text-sm">
+              <table className="w-full min-w-[960px] text-left text-sm">
                 <thead className="bg-slate-50 text-xs uppercase text-muted">
                   <tr>
                     <th className="px-4 py-3">Updated</th>
+                    <th className="px-4 py-3">Channel</th>
                     <th className="px-4 py-3">Customer</th>
                     <th className="px-4 py-3">Intent</th>
                     <th className="px-4 py-3">Outcome</th>
@@ -342,6 +355,9 @@ export function CallsDashboard() {
                   {sessions.map((item) => (
                     <tr key={item.id}>
                       <td className="px-4 py-3 text-muted">{formatDateTime(item.updated_at)}</td>
+                      <td className="px-4 py-3">
+                        <Badge value={item.channel} />
+                      </td>
                       <td className="px-4 py-3">
                         <div className="font-medium text-ink">{item.customer_name || "Unknown customer"}</div>
                         <div className="mt-1 text-xs text-muted">{item.customer_phone || "No phone"}</div>
@@ -375,36 +391,57 @@ export function CallsDashboard() {
   );
 }
 
-function ReadinessPanel({ aiEnabled }: { aiEnabled: boolean }) {
-  if (aiEnabled) {
-    return (
-      <Card className="border-emerald-200 bg-emerald-50 shadow-none">
-        <CardTitle>AI booking simulator is active</CardTitle>
-        <CardDescription className="text-emerald-800">
-          Confirmed simulator bookings still require Square Appointments success through the booking service.
-        </CardDescription>
-      </Card>
-    );
-  }
-
+function ReadinessPanel({ aiEnabled, voiceStatus }: { aiEnabled: boolean; voiceStatus: VoiceStatus | null }) {
   return (
-    <Card className="border-amber-200 bg-amber-50 shadow-none">
-      <div className="flex gap-3">
-        <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" />
-        <div>
-          <CardTitle>AI booking is gated</CardTitle>
-          <CardDescription className="text-amber-900">
-            Booking requests in simulator sessions will be routed to owner review until Square readiness checks pass.
-          </CardDescription>
-          <a
-            className="mt-3 inline-flex h-10 items-center justify-center rounded-md border border-line bg-white px-4 text-sm font-semibold text-ink hover:bg-slate-50"
-            href="/dashboard/integrations"
-          >
-            Open Square integration
-          </a>
+    <div className="grid gap-4 lg:grid-cols-2">
+      <Card className={voiceStatus?.ready ? "border-emerald-200 bg-emerald-50 shadow-none" : "border-amber-200 bg-amber-50 shadow-none"}>
+        <div className="flex gap-3">
+          {!voiceStatus?.ready ? <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" /> : null}
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <CardTitle>Live phone webhook</CardTitle>
+              <Badge value={voiceStatus?.ready ? "ready" : "not_configured"} />
+            </div>
+            <CardDescription className={voiceStatus?.ready ? "text-emerald-800" : "text-amber-900"}>
+              {voiceStatus?.ready
+                ? "Twilio webhooks can create phone call sessions and transcripts."
+                : voiceStatus?.blocked_reason || "Voice provider readiness could not be verified."}
+            </CardDescription>
+            <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
+              <Info label="Provider" value={voiceStatus?.provider || "twilio"} />
+              <Info label="Signature" value={<Badge value={voiceStatus?.signature_verification ? "active" : "disabled"} />} />
+              <Info label="Salon phone" value={voiceStatus?.salon_phone || "Not configured"} />
+              <Info label="Inbound webhook" value={<span className="break-all font-mono text-xs">{voiceStatus?.inbound_webhook_url || "Not configured"}</span>} />
+            </dl>
+          </div>
         </div>
-      </div>
-    </Card>
+      </Card>
+
+      <Card className={aiEnabled ? "border-emerald-200 bg-emerald-50 shadow-none" : "border-amber-200 bg-amber-50 shadow-none"}>
+        <div className="flex gap-3">
+          {!aiEnabled ? <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" /> : null}
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <CardTitle>AI booking readiness</CardTitle>
+              <Badge value={aiEnabled ? "active" : "disabled"} />
+            </div>
+            <CardDescription className={aiEnabled ? "text-emerald-800" : "text-amber-900"}>
+              {aiEnabled
+                ? "Confirmed bookings still require Square Appointments success through the booking service."
+                : "Booking requests will be routed to owner review until Square readiness checks pass."}
+            </CardDescription>
+            {!aiEnabled ? (
+              <a
+                className="mt-3 inline-flex h-10 items-center justify-center rounded-md border border-line bg-white px-4 text-sm font-semibold text-ink hover:bg-slate-50"
+                href="/dashboard/integrations"
+              >
+                Open Square integration
+              </a>
+            ) : null}
+          </div>
+        </div>
+      </Card>
+    </div>
   );
 }
 
@@ -465,7 +502,10 @@ function SessionCard({ item, onOpen }: { item: ConversationSession; onOpen: () =
           <div className="text-sm font-semibold text-ink">{item.customer_name || "Unknown customer"}</div>
           <div className="mt-1 text-xs text-muted">{formatDateTime(item.updated_at)}</div>
         </div>
-        <Badge value={item.outcome} />
+        <div className="flex flex-wrap justify-end gap-2">
+          <Badge value={item.channel} />
+          <Badge value={item.outcome} />
+        </div>
       </div>
       <div className="mt-4 grid gap-3 text-sm">
         <div className="flex items-center justify-between gap-3">

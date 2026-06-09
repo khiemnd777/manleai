@@ -2,7 +2,7 @@
 
 POS-first production-like pilot foundation for an AI phone receptionist serving US nail salons, starting with Vietnamese-owned salons that use Square Appointments.
 
-This repository currently implements Milestone 1, Milestone 2, Milestone 3 booking safety, and the Milestone 4 deterministic conversation simulator:
+This repository currently implements Milestone 1, Milestone 2, Milestone 3 booking safety, the Milestone 4 deterministic conversation simulator, and the Milestone 5 live telephony webhook foundation:
 
 - Go/Fiber API scaffold with PostgreSQL, Redis, startup SQL migrations, and Docker Compose.
 - Auth, JWT access tokens, persisted refresh tokens, owner-scoped salon APIs.
@@ -13,13 +13,14 @@ This repository currently implements Milestone 1, Milestone 2, Milestone 3 booki
 - Provider-neutral booking attempt and appointment persistence with fallback pending safety.
 - Square customer search/create, availability search, create-booking, reschedule, cancel, and test-booking gate paths.
 - Deterministic AI conversation simulator with persisted call sessions, transcript messages, summaries, owner handoffs, and booking attempt linkage.
+- Twilio live voice webhook foundation with signed webhook verification, TwiML responses, phone call session routing, voice webhook audit events, and provider-neutral voice runtime interfaces.
 - Backend service/staff list endpoints for synced POS data.
-- Next.js admin shell with login, dashboard, onboarding profile creation, Square integration status, appointments, service/staff controls, and Calls simulator.
+- Next.js admin shell with login, dashboard, onboarding profile creation, Square integration status, appointments, service/staff controls, and Calls dashboard for simulator and phone sessions.
 - Repo-local Codex guidance through `AGENTS.md`, `.agents/skills`, and `.codex/agents`.
 
 Square Appointments create, reschedule, cancel, and dashboard test-booking operations are implemented through `POSProvider`. AI booking can only be enabled after Square is connected, services/staff are synced, and the latest Square test booking was created and cancelled successfully. Until Square returns a successful POS booking ID and booking version, failed provider calls create fallback pending requests instead of confirmed appointments or internal appointment state changes.
 
-The Milestone 4 simulator is deterministic and provider-neutral. It records simulator sessions and transcripts, calls the booking service only after required booking details are collected, and never confirms an appointment unless the booking service returns a POS-confirmed attempt and appointment.
+The Milestone 4 simulator and Milestone 5 phone webhook path are provider-neutral at the conversation layer. They record sessions and transcripts, call the booking service only after required booking details are collected, and never confirm an appointment unless the booking service returns a POS-confirmed attempt and appointment.
 
 ## Local Start
 
@@ -68,6 +69,20 @@ SQUARE_API_VERSION=2026-05-20
 
 The Square callback stores encrypted access and refresh tokens in `pos_connections`. Tokens are never returned to the frontend.
 
+## Voice Setup
+
+Set these values before pointing Twilio Programmable Voice webhooks at the API:
+
+```bash
+VOICE_PROVIDER=twilio
+VOICE_PUBLIC_BASE_URL=https://api.example.com
+VOICE_TWILIO_AUTH_TOKEN=...
+VOICE_TWILIO_INCOMING_PATH=/api/voice/twilio/incoming
+VOICE_TWILIO_TURN_PATH=/api/voice/twilio/turn
+```
+
+The Twilio incoming and turn webhooks reject unsigned or incorrectly signed requests. Live phone sessions route by matching Twilio `To` against the configured salon phone number.
+
 ## Scope Boundary
 
 Fully implemented now:
@@ -85,15 +100,17 @@ Fully implemented now:
 - Square customer search/create, availability search, create-booking, reschedule, cancel, and test-booking gate paths
 - Conversation simulator session, transcript, summary, handoff, and booking-attempt linkage tables
 - Deterministic conversation engine that asks one question at a time and routes booking through `booking.Service`
+- Live phone call session metadata and voice webhook event audit table
+- Twilio signed incoming/turn webhooks that create phone call sessions and continue transcripts through the same conversation engine
+- Provider-neutral voice interfaces for telephony, STT, LLM, and TTS runtime adapters
 - Dashboard booking readiness UI for Square test booking and AI booking enablement
-- Dashboard Calls simulator with transcripts, detected details, outcomes, and recent sessions
+- Dashboard Calls page with voice readiness, simulator and phone transcripts, detected details, outcomes, and recent sessions
 - POS sync and error logs
 - Admin shell, login, dashboard, onboarding profile creation, integrations page, appointments page, services/staff controls
 
 Still stubbed until later milestones:
 
-- Live telephony webhooks
-- SMS, reminders, STT, LLM, TTS, and knowledge base
+- SMS, reminders, external OpenAI STT/LLM/TTS adapters, and knowledge base
 - Stripe billing
 
 ## Agent Setup

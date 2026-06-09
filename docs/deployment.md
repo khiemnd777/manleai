@@ -20,6 +20,9 @@ AUTO_MIGRATE
 SQUARE_CLIENT_ID
 SQUARE_CLIENT_SECRET
 SQUARE_REDIRECT_URL
+VOICE_PROVIDER
+VOICE_PUBLIC_BASE_URL
+VOICE_TWILIO_AUTH_TOKEN
 CORS_ALLOWED_ORIGINS
 FRONTEND_URL
 ```
@@ -32,4 +35,6 @@ Use a 32-byte base64 value for `TOKEN_ENCRYPTION_KEY_BASE64`.
 - Do not log Square access or refresh tokens.
 - Keep `AUTO_MIGRATE=true` unless another release process applies the same SQL migrations.
 - Configure the Square redirect URL to the deployed API callback.
+- Configure `VOICE_PUBLIC_BASE_URL` to the deployed API origin used in Twilio webhook settings.
+- Keep `VOICE_TWILIO_AUTH_TOKEN` secret; it is used only for Twilio webhook signature verification.
 - Restrict CORS to the deployed frontend URL.

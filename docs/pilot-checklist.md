@@ -46,5 +46,14 @@
 - [x] Keep AI-disabled and human-request paths as owner handoffs, not confirmed appointments.
 - [x] Add dashboard Calls page with simulator transcript, detected details, outcomes, and recent sessions.
 - [x] Add backend tests for confirmed, fallback pending, AI-disabled, and handoff paths.
-- [ ] Add live telephony webhooks after simulator behavior is reviewed.
-- [ ] Add STT, LLM, and TTS provider adapters behind runtime abstractions.
+
+## Milestone 5 Live Voice Webhooks
+
+- [x] Add `phone` call session channel and provider call metadata.
+- [x] Add voice webhook event audit persistence.
+- [x] Add provider-neutral voice runtime interfaces for telephony, STT, LLM, and TTS adapters.
+- [x] Add Twilio incoming and speech-turn webhooks with `X-Twilio-Signature` verification.
+- [x] Route Twilio phone sessions through the same conversation engine and booking service.
+- [x] Keep phone booking confirmations impossible unless POS booking succeeds.
+- [x] Add Calls dashboard live phone readiness, channel badges, and phone/simulator metrics.
+- [ ] Connect external OpenAI STT/LLM/TTS adapters after the deterministic phone webhook path is reviewed.
