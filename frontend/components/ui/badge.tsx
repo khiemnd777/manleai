@@ -28,7 +28,20 @@ const statusClass: Record<string, string> = {
   not_connected: "bg-slate-100 text-slate-700 ring-slate-200",
   not_configured: "bg-slate-100 text-slate-700 ring-slate-200",
   disabled: "bg-slate-100 text-slate-700 ring-slate-200",
-  expired_token: "bg-red-50 text-red-700 ring-red-200"
+  expired_token: "bg-red-50 text-red-700 ring-red-200",
+  pending: "bg-amber-50 text-amber-700 ring-amber-200",
+  applied: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+  dismissed: "bg-slate-100 text-slate-700 ring-slate-200",
+  draft: "bg-slate-100 text-slate-700 ring-slate-200",
+  archived: "bg-slate-100 text-slate-700 ring-slate-200",
+  faq: "bg-blue-50 text-blue-700 ring-blue-200",
+  policy: "bg-purple-50 text-purple-700 ring-purple-200",
+  services: "bg-teal-50 text-teal-700 ring-teal-200",
+  hours: "bg-amber-50 text-amber-700 ring-amber-200",
+  operations: "bg-slate-100 text-slate-700 ring-slate-200",
+  knowledge_answer: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+  no_match: "bg-amber-50 text-amber-700 ring-amber-200",
+  no_booking_action: "bg-slate-100 text-slate-700 ring-slate-200"
 };
 
 export function Badge({ value, className }: { value: string; className?: string }) {

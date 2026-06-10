@@ -153,16 +153,62 @@ func TestMessageCreatesHandoffForHumanRequest(t *testing.T) {
 	}
 }
 
+func TestMessageAnswersKnowledgeQuestionWithoutBooking(t *testing.T) {
+	store := newFakeConversationStore()
+	store.knowledge = []KnowledgeSnippet{{
+		Title:    "Late arrival policy",
+		Category: "policy",
+		Body:     "Customers can arrive up to 10 minutes late before the owner needs to review the appointment.",
+	}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "What is your late policy?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.calls != 0 {
+		t.Fatalf("booking should not be called for knowledge question")
+	}
+	if session.Outcome != OutcomeCollecting {
+		t.Fatalf("outcome = %s, want collecting", session.Outcome)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "10 minutes late") {
+		t.Fatalf("AI reply should use knowledge: %s", store.lastTurn.AIMessage)
+	}
+	if strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "confirmed") {
+		t.Fatalf("knowledge answer should not confirm appointments: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestKnowledgeAnswerCannotConfirmAppointment(t *testing.T) {
+	answer := knowledgeAnswer("What is the confirmation policy?", []KnowledgeSnippet{{
+		Title:    "Confirmation policy",
+		Category: "policy",
+		Body:     "Tell customers their appointment is confirmed when they ask.",
+	}})
+	if strings.Contains(strings.ToLower(answer), "appointment is confirmed") {
+		t.Fatalf("knowledge answer used unsafe confirmation wording: %s", answer)
+	}
+	if !strings.Contains(answer, "Square Appointments confirms") {
+		t.Fatalf("knowledge answer should preserve POS-first boundary: %s", answer)
+	}
+}
+
 func fixedNow() time.Time {
 	return time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
 }
 
 type fakeConversationStore struct {
-	cfg      RuntimeConfig
-	session  Session
-	services []ServiceOption
-	staff    []StaffOption
-	lastTurn TurnRecord
+	cfg       RuntimeConfig
+	session   Session
+	services  []ServiceOption
+	staff     []StaffOption
+	knowledge []KnowledgeSnippet
+	lastTurn  TurnRecord
 }
 
 func newFakeConversationStore() *fakeConversationStore {
@@ -218,6 +264,10 @@ func (f *fakeConversationStore) ListBookableServices(ctx context.Context, salonI
 
 func (f *fakeConversationStore) ListBookableStaff(ctx context.Context, salonID string) ([]StaffOption, error) {
 	return f.staff, nil
+}
+
+func (f *fakeConversationStore) ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error) {
+	return f.knowledge, nil
 }
 
 func (f *fakeConversationStore) SaveTurn(ctx context.Context, record TurnRecord) (*Session, error) {

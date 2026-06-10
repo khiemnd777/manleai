@@ -89,6 +89,7 @@ func (a *Adapter) GenerateReply(ctx context.Context, req voice.ModelRequest) (vo
 			"Rewrite only the safe_reply into a concise spoken response.",
 			"Ask at most one question.",
 			"Do not invent prices or policies.",
+			"Use knowledge_context only when it is relevant to the customer's question.",
 			"Do not say an appointment is confirmed unless booking_confirmed is true.",
 			"For human requests, complaints, refunds, payment disputes, low confidence, or complex group bookings, route to the owner.",
 			"Return strict JSON with message, confidence, handoff, and reason.",
@@ -225,6 +226,7 @@ func modelInput(req voice.ModelRequest) string {
 		"fallback_or_handoff":   req.FallbackOrHandoff,
 		"missing_booking_field": req.MissingBookingField,
 		"summary":               req.Summary,
+		"knowledge_context":     req.KnowledgeContext,
 	})
 	return string(raw)
 }

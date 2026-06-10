@@ -123,6 +123,10 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	if err != nil {
 		return nil, err
 	}
+	knowledge, err := s.store.ListActiveKnowledge(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
 
 	next := *session
 	applyExtraction(&next, message, services, staff, timezoneLocation(cfg.Timezone), s.now)
@@ -153,8 +157,12 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	}
 
 	if intent != IntentBooking {
-		turn.AIMessage = "I can help with appointments. What service would you like to book?"
-		s.applyReplyGenerator(ctx, &turn, next, cfg, "")
+		if answer := knowledgeAnswer(message, knowledge); answer != "" {
+			turn.AIMessage = answer
+		} else {
+			turn.AIMessage = "I can help with appointments. What service would you like to book?"
+		}
+		s.applyReplyGenerator(ctx, &turn, next, cfg, "", knowledge)
 		return s.store.SaveTurn(ctx, turn)
 	}
 
@@ -164,11 +172,11 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 
 	if missing := missingBookingField(next); missing != "" {
 		turn.AIMessage = promptForMissingField(missing)
-		s.applyReplyGenerator(ctx, &turn, next, cfg, missing)
+		s.applyReplyGenerator(ctx, &turn, next, cfg, missing, knowledge)
 		return s.store.SaveTurn(ctx, turn)
 	}
 
-	return s.tryBooking(ctx, ownerUserID, turn, next, services, staff, cfg)
+	return s.tryBooking(ctx, ownerUserID, turn, next, services, staff, cfg, knowledge)
 }
 
 func (s *Service) List(ctx context.Context, salonID string, ownerUserID string, limit int) ([]Session, error) {
@@ -179,7 +187,7 @@ func (s *Service) Get(ctx context.Context, salonID string, ownerUserID string, s
 	return s.store.GetSessionForOwner(ctx, strings.TrimSpace(salonID), strings.TrimSpace(ownerUserID), strings.TrimSpace(sessionID))
 }
 
-func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnRecord, session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (*Session, error) {
+func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnRecord, session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
 	if s.bookingTool == nil {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, "I could not reach the booking path, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
 	}
@@ -223,11 +231,11 @@ func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnR
 	turn.Update.AppointmentID = appointmentID
 	turn.Update.EndSession = true
 	turn.Update.Summary = summaryFor(session, services, staff, cfg)
-	s.applyReplyGenerator(ctx, &turn, session, cfg, "")
+	s.applyReplyGenerator(ctx, &turn, session, cfg, "", knowledge)
 	return s.store.SaveTurn(ctx, turn)
 }
 
-func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, session Session, cfg *RuntimeConfig, missing string) {
+func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, session Session, cfg *RuntimeConfig, missing string, knowledge []KnowledgeSnippet) {
 	if s.replyGenerator == nil || turn == nil || strings.TrimSpace(turn.AIMessage) == "" {
 		return
 	}
@@ -244,6 +252,7 @@ func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, ses
 		FallbackOrHandoff:   turn.Update.Outcome == OutcomeBookingFallbackPending || turn.Update.Outcome == OutcomeAIDisabled || turn.Update.Outcome == OutcomeHandoffRequested,
 		MissingBookingField: missing,
 		Summary:             turn.Update.Summary,
+		KnowledgeContext:    formatKnowledgeContext(knowledge),
 	})
 	if err != nil {
 		return
@@ -540,6 +549,98 @@ func significantWords(value string) []string {
 		}
 	}
 	return words
+}
+
+func knowledgeAnswer(message string, knowledge []KnowledgeSnippet) string {
+	match := bestKnowledgeMatch(message, knowledge)
+	if match == nil || strings.TrimSpace(match.Body) == "" {
+		return ""
+	}
+	if hasUnsafeKnowledgeConfirmation(match.Body) {
+		return "I can share salon policies, but I cannot confirm appointments unless Square Appointments confirms the booking. Would you like help with an appointment?"
+	}
+	return truncateWords(match.Body, 34) + " Would you like help with an appointment?"
+}
+
+func formatKnowledgeContext(knowledge []KnowledgeSnippet) string {
+	if len(knowledge) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(knowledge))
+	for _, item := range knowledge {
+		title := strings.TrimSpace(item.Title)
+		body := truncateWords(item.Body, 40)
+		if title == "" || body == "" {
+			continue
+		}
+		category := strings.TrimSpace(item.Category)
+		if category == "" {
+			category = "knowledge"
+		}
+		lines = append(lines, fmt.Sprintf("%s: %s - %s", category, title, body))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func bestKnowledgeMatch(message string, knowledge []KnowledgeSnippet) *KnowledgeSnippet {
+	lower := strings.ToLower(message)
+	bestScore := 0
+	var best *KnowledgeSnippet
+	for i := range knowledge {
+		item := knowledge[i]
+		score := 0
+		for _, token := range append(significantWords(item.Title), significantWords(item.Category)...) {
+			if strings.Contains(lower, token) {
+				score += 2
+			}
+		}
+		for _, token := range significantWords(item.Body) {
+			if strings.Contains(lower, token) {
+				score++
+			}
+		}
+		if score > bestScore {
+			bestScore = score
+			best = &item
+		}
+	}
+	if bestScore == 0 {
+		return nil
+	}
+	return best
+}
+
+func truncateWords(value string, maxWords int) string {
+	words := strings.Fields(strings.TrimSpace(value))
+	if len(words) <= maxWords {
+		return strings.TrimSpace(value)
+	}
+	return strings.Join(words[:maxWords], " ") + "..."
+}
+
+func hasUnsafeKnowledgeConfirmation(value string) bool {
+	lower := strings.ToLower(value)
+	unsafeAlways := []string{
+		"you are booked",
+		"you're booked",
+		"appointment is set",
+		"all set for",
+		"see you at",
+	}
+	for _, phrase := range unsafeAlways {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	if !strings.Contains(lower, "confirmed") {
+		return false
+	}
+	for _, phrase := range []string{"not confirmed", "not a confirmed", "cannot confirm", "could not confirm", "not yet confirmed"} {
+		if strings.Contains(lower, phrase) {
+			return false
+		}
+	}
+	return true
 }
 
 func parseRequestedTime(message string, loc *time.Location, now func() time.Time) (time.Time, bool) {

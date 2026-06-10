@@ -58,6 +58,7 @@ type Store interface {
 	ListSessions(ctx context.Context, salonID string, ownerUserID string, limit int) ([]Session, error)
 	ListBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error)
 	ListBookableStaff(ctx context.Context, salonID string) ([]StaffOption, error)
+	ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error)
 	SaveTurn(ctx context.Context, record TurnRecord) (*Session, error)
 }
 
@@ -92,6 +93,7 @@ type ReplyGenerationRequest struct {
 	FallbackOrHandoff   bool
 	MissingBookingField string
 	Summary             string
+	KnowledgeContext    string
 }
 
 type ReplyGenerationResult struct {
@@ -121,6 +123,12 @@ type ServiceOption struct {
 type StaffOption struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+}
+
+type KnowledgeSnippet struct {
+	Title    string
+	Category string
+	Body     string
 }
 
 type Session struct {

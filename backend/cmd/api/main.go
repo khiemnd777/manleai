@@ -19,6 +19,7 @@ import (
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/pos_square"
 	"github.com/manleai/ai-receptionist/modules/salon"
+	"github.com/manleai/ai-receptionist/modules/training"
 	"github.com/manleai/ai-receptionist/modules/voice"
 	"github.com/manleai/ai-receptionist/modules/voice_openai"
 	"github.com/manleai/ai-receptionist/modules/voice_twilio"
@@ -85,6 +86,10 @@ func main() {
 	conversationRepo := conversation.NewRepository(db)
 	conversationService := conversation.NewService(conversationRepo, bookingService)
 	conversation.RegisterRoutes(api, conversation.NewHandler(conversationService), cfg.JWTSecret)
+
+	trainingRepo := training.NewRepository(db)
+	trainingService := training.NewService(trainingRepo)
+	training.RegisterRoutes(api, training.NewHandler(trainingService), cfg.JWTSecret)
 
 	voiceRepo := voice.NewRepository(db)
 	var aiProviders voice.AIProviders

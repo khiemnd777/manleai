@@ -66,3 +66,28 @@
 - [x] Add fallback and owner-handoff behavior when STT, LLM, TTS, or POS calls fail.
 - [x] Add Calls dashboard readiness for external STT, LLM, and TTS provider configuration.
 - [x] Keep knowledge base CRUD, owner corrections, and training workflows out of M6; those remain Milestone 7 scope.
+
+## Milestone 7A Knowledge And Owner Corrections
+
+- [x] Add salon-scoped knowledge item persistence for FAQ, policy, services, hours, handoff, and operations notes.
+- [x] Add owner correction persistence with pending, applied, and dismissed statuses.
+- [x] Add owner-scoped knowledge and correction API routes.
+- [x] Feed active knowledge into conversation reply generation as advisory context only.
+- [x] Keep appointment confirmation impossible unless the booking service returns POS-confirmed booking state.
+- [x] Replace the AI Training placeholder with an operational dashboard for knowledge CRUD and corrections.
+
+## Milestone 7B Transcript Review Corrections
+
+- [x] Add correction capture actions to call transcript messages.
+- [x] Persist transcript-linked corrections with call session and transcript message IDs.
+- [x] Require transcript-linked corrections to include a call session source.
+- [x] Add review-before-apply flow so owners can edit corrections into reusable knowledge.
+- [x] Show correction source context in AI Training.
+
+## Milestone 7C Training Evaluation Preview
+
+- [x] Add read-only training evaluation endpoint for active knowledge previews.
+- [x] Keep training evaluation from creating call sessions, transcripts, bookings, or POS calls.
+- [x] Return matched knowledge, preview reply, outcome, booking action, and POS confirmation boundary.
+- [x] Add AI Training dashboard panel for testing sample customer questions.
+- [x] Keep unsafe confirmation wording guarded by Square Appointments confirmation requirements.

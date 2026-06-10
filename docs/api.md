@@ -176,6 +176,80 @@ Processes one simulated customer message through the deterministic conversation 
 
 Phone channel sessions are created by Twilio webhooks and use the same conversation engine. Phone bookings use source `ai_voice_call`; simulator bookings use source `ai_conversation_simulator`.
 
+## AI Training
+
+`GET /api/salons/:id/knowledge-items`
+
+Returns owner-scoped salon knowledge items.
+
+`POST /api/salons/:id/knowledge-items`
+
+```json
+{
+  "title": "Late arrival policy",
+  "category": "policy",
+  "body": "Customers can arrive up to 10 minutes late before the owner needs to review the appointment.",
+  "status": "active"
+}
+```
+
+`PUT /api/salons/:id/knowledge-items/:item_id`
+
+Updates title, category, body, and status.
+
+`DELETE /api/salons/:id/knowledge-items/:item_id`
+
+Deletes an owner-scoped knowledge item.
+
+`GET /api/salons/:id/owner-corrections`
+
+Returns recent owner corrections.
+
+`POST /api/salons/:id/owner-corrections`
+
+```json
+{
+  "call_session_id": "...",
+  "transcript_message_id": "...",
+  "correction": "Mention the group deposit policy before collecting booking details."
+}
+```
+
+When `transcript_message_id` is provided, `call_session_id` is required so the backend can validate the correction source against the owner-scoped call session.
+
+`POST /api/salons/:id/owner-corrections/:correction_id/apply`
+
+Creates a knowledge item from the correction and marks the correction as `applied`.
+
+`POST /api/salons/:id/owner-corrections/:correction_id/dismiss`
+
+Marks the correction as `dismissed`.
+
+`POST /api/salons/:id/training/evaluate`
+
+```json
+{
+  "message": "Do you take walk-ins?"
+}
+```
+
+Returns a read-only preview that uses active salon knowledge without creating a call session, writing transcript rows, calling voice providers, or calling the booking service.
+
+```json
+{
+  "message": "Do you take walk-ins?",
+  "reply": "Walk-ins are accepted when staff is available. Would you like help with an appointment?",
+  "matched_knowledge": {
+    "title": "Walk-in policy",
+    "category": "policy",
+    "body": "Walk-ins are accepted when staff is available."
+  },
+  "outcome": "knowledge_answer",
+  "booking_action": "none",
+  "pos_confirmation_required": true
+}
+```
+
 ## Voice
 
 `GET /api/salons/:id/voice/status`

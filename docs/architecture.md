@@ -2,7 +2,7 @@
 
 ## Current Milestone
 
-This codebase implements Milestone 1, Milestone 2, Milestone 3 booking safety, the Milestone 4 deterministic conversation simulator, the Milestone 5 live telephony webhook foundation, and the Milestone 6 external AI voice provider layer for the AI Receptionist system.
+This codebase implements Milestone 1, Milestone 2, Milestone 3 booking safety, the Milestone 4 deterministic conversation simulator, the Milestone 5 live telephony webhook foundation, the Milestone 6 external AI voice provider layer, and the first Milestone 7A salon knowledge/training slice for the AI Receptionist system.
 
 The backend is organized as:
 
@@ -19,6 +19,7 @@ modules/pos          provider-neutral POS contracts and persistence
 modules/pos_square   Square adapter and Square integration routes
 modules/booking      booking attempts, appointments, and fallback pending safety
 modules/conversation deterministic simulator sessions, transcripts, summaries, and handoffs
+modules/training     salon-authored knowledge base and owner corrections
 modules/voice        provider-neutral live voice runtime, status, routing, and webhook event audit
 modules/voice_openai OpenAI STT, guarded LLM reply, and TTS adapters
 modules/voice_twilio Twilio signature verification, form parsing, and TwiML responses
@@ -31,7 +32,7 @@ app/                 Next.js routes
 components/ui        reusable UI primitives
 components/layout    dashboard shell
 features/auth        login flow
-features/dashboard   dashboard home, appointments, services/staff controls, calls dashboard
+features/dashboard   dashboard home, appointments, services/staff controls, calls dashboard, AI training
 features/integrations Square integration page
 features/onboarding salon profile creation
 lib/api              typed API client
@@ -54,9 +55,11 @@ The Milestone 4 conversation simulator and Milestone 5 live phone webhook path c
 
 The live voice layer is split into `modules/voice`, `modules/voice_twilio`, and provider-specific AI adapter modules such as `modules/voice_openai`. `modules/voice` owns provider-neutral DTOs, runtime interfaces for telephony/STT/LLM/TTS providers, salon phone routing, dashboard readiness, short-lived TTS audio output persistence, and webhook event audit writes. `modules/voice_twilio` owns Twilio-specific request signature validation, webhook form mapping, recording fetches, and TwiML responses. `modules/voice_openai` owns OpenAI API URLs, payloads, response parsing, and model configuration. Twilio speech gathering, recording mode, TwiML speech output, and audio playback are treated as provider adapter behavior, not conversation-engine logic.
 
+The Milestone 7 training layer stores owner-authored salon knowledge and corrections as salon-scoped data. Conversation runtime may read active knowledge as advisory context for FAQ and policy answers, and training evaluation previews can test active knowledge without creating call sessions or bookings. Knowledge never replaces the booking service or POS confirmation checks.
+
 ## Next Milestone
 
-Milestone 7 is knowledge base, owner corrections, and AI training workflows. It should add salon-authored operating knowledge without changing the POS-first confirmation boundary.
+The next Milestone 7 slices should deepen owner approval loops without changing the POS-first confirmation boundary.
 
 ## Data Ownership
 

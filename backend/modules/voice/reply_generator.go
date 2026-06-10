@@ -35,6 +35,7 @@ func (g *GuardedReplyGenerator) GenerateReply(ctx context.Context, req conversat
 		FallbackOrHandoff:   req.FallbackOrHandoff,
 		MissingBookingField: req.MissingBookingField,
 		Summary:             req.Summary,
+		KnowledgeContext:    req.KnowledgeContext,
 	})
 	if err != nil {
 		return conversation.ReplyGenerationResult{}, err

@@ -243,3 +243,27 @@ export type VoiceAIStatus = {
   llm: VoiceCapabilityStatus;
   tts: VoiceCapabilityStatus;
 };
+
+export type KnowledgeItem = {
+  id: string;
+  salon_id: string;
+  title: string;
+  category: string;
+  body: string;
+  status: string;
+  source: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type OwnerCorrection = {
+  id: string;
+  salon_id: string;
+  call_session_id?: string;
+  transcript_message_id?: string;
+  correction: string;
+  status: string;
+  applied_knowledge_item_id?: string;
+  created_at: string;
+  updated_at: string;
+};

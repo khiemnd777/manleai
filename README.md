@@ -2,7 +2,7 @@
 
 POS-first production-like pilot foundation for an AI phone receptionist serving US nail salons, starting with Vietnamese-owned salons that use Square Appointments.
 
-This repository currently implements Milestone 1, Milestone 2, Milestone 3 booking safety, the Milestone 4 deterministic conversation simulator, the Milestone 5 live telephony webhook foundation, and the Milestone 6 external AI voice provider layer:
+This repository currently implements Milestone 1, Milestone 2, Milestone 3 booking safety, the Milestone 4 deterministic conversation simulator, the Milestone 5 live telephony webhook foundation, the Milestone 6 external AI voice provider layer, and the first Milestone 7A salon knowledge/training slice:
 
 - Go/Fiber API scaffold with PostgreSQL, Redis, startup SQL migrations, and Docker Compose.
 - Auth, JWT access tokens, persisted refresh tokens, owner-scoped salon APIs.
@@ -15,6 +15,9 @@ This repository currently implements Milestone 1, Milestone 2, Milestone 3 booki
 - Deterministic AI conversation simulator with persisted call sessions, transcript messages, summaries, owner handoffs, and booking attempt linkage.
 - Twilio live voice webhook foundation with signed webhook verification, TwiML responses, phone call session routing, voice webhook audit events, and provider-neutral voice runtime interfaces.
 - OpenAI-backed external STT, LLM reply, and TTS adapters behind the voice runtime interfaces, with guarded replies, recording-mode turns, expiring TTS audio playback, and safe fallback to text/Twilio behavior when providers fail.
+- Salon-authored knowledge base and owner corrections for FAQ, policy, hours, handoff, and operating notes.
+- Transcript review correction capture from Calls into AI Training.
+- Read-only AI Training evaluation previews for sample customer questions.
 - Backend service/staff list endpoints for synced POS data.
 - Next.js admin shell with login, dashboard, onboarding profile creation, Square integration status, appointments, service/staff controls, and Calls dashboard for simulator and phone sessions.
 - Repo-local Codex guidance through `AGENTS.md`, `.agents/skills`, and `.codex/agents`.
@@ -115,12 +118,15 @@ Fully implemented now:
 - OpenAI external voice adapters for STT, guarded LLM replies, and TTS playback
 - Dashboard booking readiness UI for Square test booking and AI booking enablement
 - Dashboard Calls page with live webhook readiness, external AI provider readiness, simulator and phone transcripts, detected details, outcomes, and recent sessions
+- Dashboard AI Training page with knowledge CRUD and owner correction workflows
+- Dashboard Calls page correction capture for reviewed transcript messages
+- Dashboard AI Training answer preview for active knowledge evaluation
 - POS sync and error logs
 - Admin shell, login, dashboard, onboarding profile creation, integrations page, appointments page, services/staff controls
 
 Still stubbed until later milestones:
 
-- Milestone 7: knowledge base, owner corrections, and AI training workflows
+- Later Milestone 7 slices: richer approval workflows
 - SMS and reminders
 - Stripe billing
 

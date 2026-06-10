@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, MessageSquareText, PhoneCall, Plus, RefreshCcw, Send } from "lucide-react";
+import { AlertTriangle, MessageSquarePlus, MessageSquareText, PhoneCall, Plus, RefreshCcw, Send, X } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest } from "@/lib/api/client";
 import type {
   ConversationSession,
+  OwnerCorrection,
   POSConnection,
   Salon,
   SquareReadiness,
@@ -32,6 +33,11 @@ type SessionsResponse = {
   sessions: ConversationSession[];
 };
 
+type CorrectionTarget = {
+  sessionID: string;
+  item: TranscriptMessage;
+};
+
 export function CallsDashboard() {
   const [salon, setSalon] = useState<Salon | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
@@ -39,10 +45,14 @@ export function CallsDashboard() {
   const [sessions, setSessions] = useState<ConversationSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<ConversationSession | null>(null);
   const [message, setMessage] = useState("");
+  const [correctionTarget, setCorrectionTarget] = useState<CorrectionTarget | null>(null);
+  const [correctionText, setCorrectionText] = useState("");
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [savingCorrection, setSavingCorrection] = useState(false);
   const [error, setError] = useState("");
   const [actionError, setActionError] = useState("");
+  const [success, setSuccess] = useState("");
 
   async function load() {
     setError("");
@@ -78,6 +88,7 @@ export function CallsDashboard() {
         setSelectedSession(detail);
       } else {
         setSelectedSession(null);
+        clearCorrectionDraft();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load call sessions.");
@@ -94,6 +105,7 @@ export function CallsDashboard() {
   async function startSession() {
     if (!salon) return null;
     setActionError("");
+    setSuccess("");
     setSending(true);
     try {
       const session = await apiRequest<ConversationSession>(`/api/salons/${salon.id}/conversation-sessions`, {
@@ -116,6 +128,7 @@ export function CallsDashboard() {
     if (!salon || !message.trim()) return;
 
     setActionError("");
+    setSuccess("");
     setSending(true);
     try {
       let session = selectedSession;
@@ -133,6 +146,7 @@ export function CallsDashboard() {
         }
       );
       setSelectedSession(updated);
+      clearCorrectionDraft();
       setMessage("");
       await reloadSessions(salon.id);
     } catch (err) {
@@ -145,11 +159,13 @@ export function CallsDashboard() {
   async function selectSession(sessionID: string) {
     if (!salon) return;
     setActionError("");
+    setSuccess("");
     try {
       const detail = await apiRequest<ConversationSession>(
         `/api/salons/${salon.id}/conversation-sessions/${sessionID}`
       );
       setSelectedSession(detail);
+      clearCorrectionDraft();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Could not load transcript.");
     }
@@ -158,6 +174,44 @@ export function CallsDashboard() {
   async function reloadSessions(salonID: string) {
     const response = await apiRequest<SessionsResponse>(`/api/salons/${salonID}/conversation-sessions?limit=25`);
     setSessions(response.sessions);
+  }
+
+  async function saveCorrection(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!salon || !selectedSession || !correctionTarget || !correctionText.trim()) return;
+
+    setActionError("");
+    setSuccess("");
+    setSavingCorrection(true);
+    try {
+      await apiRequest<OwnerCorrection>(`/api/salons/${salon.id}/owner-corrections`, {
+        method: "POST",
+        body: JSON.stringify({
+          call_session_id: correctionTarget.sessionID,
+          transcript_message_id: correctionTarget.item.id,
+          correction: correctionText
+        })
+      });
+      setSuccess("Correction captured for AI Training.");
+      clearCorrectionDraft();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Could not save owner correction.");
+    } finally {
+      setSavingCorrection(false);
+    }
+  }
+
+  function startCorrection(item: TranscriptMessage) {
+    if (!selectedSession) return;
+    setCorrectionTarget({ sessionID: selectedSession.id, item });
+    setCorrectionText("");
+    setActionError("");
+    setSuccess("");
+  }
+
+  function clearCorrectionDraft() {
+    setCorrectionTarget(null);
+    setCorrectionText("");
   }
 
   const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
@@ -227,6 +281,7 @@ export function CallsDashboard() {
 
       {error ? <Alert title="Calls unavailable" message={error} /> : null}
       {actionError ? <Alert title="Call action failed" message={actionError} /> : null}
+      {success ? <Alert type="success" title="Call review updated" message={success} /> : null}
 
       <ReadinessPanel aiEnabled={aiEnabled} voiceStatus={voiceStatus} />
 
@@ -257,13 +312,49 @@ export function CallsDashboard() {
             {selectedSession?.transcript?.length ? (
               <div className="space-y-3">
                 {selectedSession.transcript.map((item) => (
-                  <TranscriptBubble key={item.id} item={item} />
+                  <TranscriptBubble key={item.id} item={item} onAddCorrection={() => startCorrection(item)} />
                 ))}
               </div>
             ) : (
               <EmptyTranscript />
             )}
           </div>
+
+          {correctionTarget ? (
+            <form className="mt-4 rounded-md border border-line bg-white p-4" onSubmit={saveCorrection}>
+              <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+                <div>
+                  <div className="text-sm font-semibold text-ink">Add correction</div>
+                  <div className="mt-1 text-xs leading-5 text-muted">
+                    {correctionTarget.item.speaker} message from {selectedSession?.channel || "session"}
+                  </div>
+                </div>
+                <Button type="button" variant="ghost" onClick={clearCorrectionDraft} disabled={savingCorrection}>
+                  <X className="h-4 w-4" />
+                  Cancel
+                </Button>
+              </div>
+              <div className="mt-3 rounded-md border border-line bg-slate-50 p-3 text-sm leading-6 text-muted">
+                {correctionTarget.item.body}
+              </div>
+              <label className="mt-4 block">
+                <span className="text-sm font-medium text-ink">Correction</span>
+                <textarea
+                  className="mt-2 min-h-24 w-full rounded-md border border-line bg-white px-3 py-2 text-sm leading-6 text-ink outline-none focus:border-brand"
+                  value={correctionText}
+                  onChange={(event) => setCorrectionText(event.target.value)}
+                  placeholder="Describe what the AI should say or remember next time"
+                  disabled={savingCorrection}
+                />
+              </label>
+              <div className="mt-3 flex flex-wrap gap-3">
+                <Button type="submit" disabled={savingCorrection || !correctionText.trim()}>
+                  <MessageSquarePlus className="h-4 w-4" />
+                  Save correction
+                </Button>
+              </div>
+            </form>
+          ) : null}
 
           <form className="mt-4 flex flex-col gap-3 sm:flex-row" onSubmit={sendMessage}>
             <label className="sr-only" htmlFor="customer-message">
@@ -498,7 +589,7 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function TranscriptBubble({ item }: { item: TranscriptMessage }) {
+function TranscriptBubble({ item, onAddCorrection }: { item: TranscriptMessage; onAddCorrection: () => void }) {
   const isCustomer = item.speaker === "customer";
   const isTool = item.speaker === "tool";
   return (
@@ -510,8 +601,22 @@ function TranscriptBubble({ item }: { item: TranscriptMessage }) {
           isTool ? "border-amber-200 bg-amber-50 text-amber-900" : ""
         ].join(" ")}
       >
-        <div className="mb-1 text-[11px] font-semibold uppercase opacity-75">{item.speaker}</div>
-        {item.body}
+        <div className="mb-1 flex flex-wrap items-center justify-between gap-2 text-[11px] font-semibold uppercase opacity-75">
+          <span>{item.speaker}</span>
+          <button
+            type="button"
+            className={[
+              "rounded-md border px-2 py-1 text-[11px] font-semibold normal-case opacity-100 transition",
+              isCustomer
+                ? "border-white/35 bg-white/10 text-white hover:bg-white/20"
+                : "border-line bg-white text-ink hover:bg-slate-50"
+            ].join(" ")}
+            onClick={onAddCorrection}
+          >
+            Add correction
+          </button>
+        </div>
+        <div>{item.body}</div>
       </div>
     </div>
   );

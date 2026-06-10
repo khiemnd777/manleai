@@ -71,6 +71,7 @@ type ModelRequest struct {
 	FallbackOrHandoff   bool
 	MissingBookingField string
 	Summary             string
+	KnowledgeContext    string
 }
 
 type ModelReply struct {

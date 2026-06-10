@@ -88,6 +88,32 @@
 - Verify prompt and model tests cover human requests, complaints, refunds, payment disputes, complex group bookings, missing fields, low confidence, AI-disabled state, and POS fallback.
 - Verify the Calls dashboard handles loading, empty, error, success, and gated states for external AI voice provider readiness.
 
+## Milestone 7A Knowledge And Owner Corrections
+
+- Verify startup migrations create `knowledge_items` and `owner_corrections`.
+- Verify knowledge and correction routes are owner-scoped by `salon_id`.
+- Verify active knowledge can answer FAQ and policy questions without calling the booking service.
+- Verify owner corrections can be captured, applied to active knowledge, and dismissed.
+- Verify knowledge context does not allow confirmed appointment wording unless the booking service returns POS-confirmed booking state.
+- Verify the AI Training dashboard handles loading, empty, error, success, disabled/gated, and mobile states.
+
+## Milestone 7B Transcript Review Corrections
+
+- Verify the Calls dashboard can capture a correction from an AI, customer, or tool transcript message.
+- Verify transcript-linked correction requests include both `call_session_id` and `transcript_message_id`.
+- Verify correction creation rejects a transcript message source without a call session source.
+- Verify the AI Training dashboard displays whether a correction came from a call transcript or manual entry.
+- Verify `Review apply` pre-fills the knowledge form and only marks the correction applied after the owner saves.
+
+## Milestone 7C Training Evaluation Preview
+
+- Verify `POST /api/salons/:id/training/evaluate` is owner-scoped and requires a message.
+- Verify evaluation returns a preview answer for matching active knowledge.
+- Verify evaluation returns a no-match fallback when no active knowledge matches.
+- Verify unsafe confirmation knowledge returns POS-first safe wording.
+- Verify evaluation never creates a call session, transcript, booking attempt, appointment, or POS call.
+- Verify the AI Training dashboard handles evaluating, no-match, matched, error, and mobile states.
+
 ## Regression Guardrails
 
 - Booking services must import `modules/pos`, not `modules/pos_square`.

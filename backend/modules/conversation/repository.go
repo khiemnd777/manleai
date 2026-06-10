@@ -163,6 +163,31 @@ func (r *Repository) ListBookableStaff(ctx context.Context, salonID string) ([]S
 	return items, rows.Err()
 }
 
+func (r *Repository) ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT title, category, body
+		FROM knowledge_items
+		WHERE salon_id = $1
+		  AND status = 'active'
+		ORDER BY updated_at DESC
+		LIMIT 8
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]KnowledgeSnippet, 0)
+	for rows.Next() {
+		var item KnowledgeSnippet
+		if err := rows.Scan(&item.Title, &item.Category, &item.Body); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
