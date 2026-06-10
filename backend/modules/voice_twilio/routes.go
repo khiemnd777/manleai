@@ -6,4 +6,5 @@ func RegisterRoutes(api fiber.Router, handler *Handler) {
 	group := api.Group("/voice/twilio")
 	group.Post("/incoming", handler.Incoming)
 	group.Post("/turn", handler.Turn)
+	group.Post("/recording", handler.Recording)
 }

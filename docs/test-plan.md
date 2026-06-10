@@ -75,10 +75,24 @@
 - Verify phone human-request and AI-disabled paths create owner handoffs and do not call booking.
 - Verify the Calls dashboard shows live phone readiness, channel badges, phone/simulator metrics, and transcript details on desktop and mobile.
 
+## Milestone 6 External AI Voice Providers
+
+- Verify external STT, LLM, and TTS adapters are configured behind `modules/voice` interfaces, not inside the conversation engine.
+- Verify voice provider readiness reports STT, LLM, and TTS configuration without exposing API keys or secrets.
+- Verify STT failures create safe reprompt, fallback, or owner-handoff behavior instead of fabricating customer intent.
+- Verify LLM replies follow conversation rules: ask one question at a time, keep responses short, do not invent prices, and use owner handoff for low confidence or sensitive requests.
+- Verify TTS failures do not mark a call or booking as successful and produce a safe fallback path.
+- Verify AI-generated booking turns still call `booking.Service` only after required booking details are collected.
+- Verify AI-generated confirmed wording appears only after POS-confirmed booking success with POS booking ID and appointment.
+- Verify POS failure after an AI-generated phone turn produces pending request wording and no confirmed appointment language.
+- Verify prompt and model tests cover human requests, complaints, refunds, payment disputes, complex group bookings, missing fields, low confidence, AI-disabled state, and POS fallback.
+- Verify the Calls dashboard handles loading, empty, error, success, and gated states for external AI voice provider readiness.
+
 ## Regression Guardrails
 
 - Booking services must import `modules/pos`, not `modules/pos_square`.
 - AI/conversation modules must not import Square packages.
 - Voice modules must keep Twilio-specific request validation and TwiML response logic outside the conversation engine.
+- External AI voice provider adapters must not read POS tokens or import `modules/pos_square`.
 - No API response may expose encrypted or raw POS tokens.
 - Appointment confirmation, reschedule, and cancellation must remain impossible unless the active POS provider returns a successful booking response.

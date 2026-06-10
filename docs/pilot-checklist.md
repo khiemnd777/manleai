@@ -56,4 +56,13 @@
 - [x] Route Twilio phone sessions through the same conversation engine and booking service.
 - [x] Keep phone booking confirmations impossible unless POS booking succeeds.
 - [x] Add Calls dashboard live phone readiness, channel badges, and phone/simulator metrics.
-- [ ] Connect external OpenAI STT/LLM/TTS adapters after the deterministic phone webhook path is reviewed.
+
+## Milestone 6 External AI Voice Providers
+
+- [x] Add provider adapters for external STT, LLM, and TTS behind `modules/voice` interfaces.
+- [x] Keep Twilio-specific webhook validation and TwiML response logic outside the conversation engine.
+- [x] Add AI reply guardrails for one-question-at-a-time turns, low confidence, human requests, complaints, refunds, payment disputes, and complex group bookings.
+- [x] Keep confirmed wording impossible unless `booking.Service` returns a POS-confirmed booking attempt, POS booking ID, and appointment.
+- [x] Add fallback and owner-handoff behavior when STT, LLM, TTS, or POS calls fail.
+- [x] Add Calls dashboard readiness for external STT, LLM, and TTS provider configuration.
+- [x] Keep knowledge base CRUD, owner corrections, and training workflows out of M6; those remain Milestone 7 scope.

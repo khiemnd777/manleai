@@ -34,11 +34,26 @@ func TestVerifyWebhookRejectsInvalidSignature(t *testing.T) {
 func TestGatherResponseEscapesSpeechText(t *testing.T) {
 	adapter := NewAdapter(config.TwilioVoiceConfig{AuthToken: "secret", TurnPath: "/api/voice/twilio/turn"}, "https://voice.example.com")
 
-	body := adapter.GatherResponse("Tom & Linh <confirm>", adapter.TurnURL(""))
+	body := adapter.GatherResponse("Tom & Linh <confirm>", adapter.TurnURL(""), "")
 	if !strings.Contains(body, "Tom &amp; Linh &lt;confirm&gt;") {
 		t.Fatalf("GatherResponse did not XML-escape message: %s", body)
 	}
 	if !strings.Contains(body, `action="https://voice.example.com/api/voice/twilio/turn"`) {
 		t.Fatalf("GatherResponse action URL is wrong: %s", body)
+	}
+}
+
+func TestRecordResponseUsesPlayWhenAudioURLPresent(t *testing.T) {
+	adapter := NewAdapter(config.TwilioVoiceConfig{AuthToken: "secret", RecordingPath: "/api/voice/twilio/recording"}, "https://voice.example.com")
+
+	body := adapter.RecordResponse("Fallback text", adapter.RecordingURL(""), "https://voice.example.com/api/voice/audio/audio_1")
+	if !strings.Contains(body, "<Play>https://voice.example.com/api/voice/audio/audio_1</Play>") {
+		t.Fatalf("RecordResponse should play synthesized audio: %s", body)
+	}
+	if !strings.Contains(body, `action="https://voice.example.com/api/voice/twilio/recording"`) {
+		t.Fatalf("RecordResponse action URL is wrong: %s", body)
+	}
+	if strings.Contains(body, "<Say>Fallback text</Say>") {
+		t.Fatalf("RecordResponse should not include Say prompt when audio is present: %s", body)
 	}
 }

@@ -2,7 +2,7 @@
 
 ## Current Milestone
 
-This codebase implements Milestone 1, Milestone 2, Milestone 3 booking safety, the Milestone 4 deterministic conversation simulator, and the Milestone 5 live telephony webhook foundation for the AI Receptionist system.
+This codebase implements Milestone 1, Milestone 2, Milestone 3 booking safety, the Milestone 4 deterministic conversation simulator, the Milestone 5 live telephony webhook foundation, and the Milestone 6 external AI voice provider layer for the AI Receptionist system.
 
 The backend is organized as:
 
@@ -20,6 +20,7 @@ modules/pos_square   Square adapter and Square integration routes
 modules/booking      booking attempts, appointments, and fallback pending safety
 modules/conversation deterministic simulator sessions, transcripts, summaries, and handoffs
 modules/voice        provider-neutral live voice runtime, status, routing, and webhook event audit
+modules/voice_openai OpenAI STT, guarded LLM reply, and TTS adapters
 modules/voice_twilio Twilio signature verification, form parsing, and TwiML responses
 ```
 
@@ -51,7 +52,11 @@ Square create-booking, reschedule, cancel, and dashboard test-booking gate opera
 
 The Milestone 4 conversation simulator and Milestone 5 live phone webhook path call the booking service through a provider-neutral booking tool. They do not import Square packages, read POS tokens, build Square payloads, or use Square location IDs directly. Booking confirmations remain impossible unless the booking service returns a POS-confirmed booking attempt and appointment. If AI booking is disabled, a customer requests a human, or the booking path cannot confirm through POS, the runtime creates a handoff or fallback pending flow and avoids confirmed wording.
 
-The live voice layer is split into `modules/voice` and `modules/voice_twilio`. `modules/voice` owns provider-neutral DTOs, runtime interfaces for telephony/STT/LLM/TTS providers, salon phone routing, dashboard readiness, and webhook event audit writes. `modules/voice_twilio` owns Twilio-specific request signature validation, webhook form mapping, and TwiML responses. Twilio speech gathering and TwiML speech output are treated as provider adapter behavior, not conversation-engine logic.
+The live voice layer is split into `modules/voice`, `modules/voice_twilio`, and provider-specific AI adapter modules such as `modules/voice_openai`. `modules/voice` owns provider-neutral DTOs, runtime interfaces for telephony/STT/LLM/TTS providers, salon phone routing, dashboard readiness, short-lived TTS audio output persistence, and webhook event audit writes. `modules/voice_twilio` owns Twilio-specific request signature validation, webhook form mapping, recording fetches, and TwiML responses. `modules/voice_openai` owns OpenAI API URLs, payloads, response parsing, and model configuration. Twilio speech gathering, recording mode, TwiML speech output, and audio playback are treated as provider adapter behavior, not conversation-engine logic.
+
+## Next Milestone
+
+Milestone 7 is knowledge base, owner corrections, and AI training workflows. It should add salon-authored operating knowledge without changing the POS-first confirmation boundary.
 
 ## Data Ownership
 

@@ -2,7 +2,7 @@
 
 POS-first production-like pilot foundation for an AI phone receptionist serving US nail salons, starting with Vietnamese-owned salons that use Square Appointments.
 
-This repository currently implements Milestone 1, Milestone 2, Milestone 3 booking safety, the Milestone 4 deterministic conversation simulator, and the Milestone 5 live telephony webhook foundation:
+This repository currently implements Milestone 1, Milestone 2, Milestone 3 booking safety, the Milestone 4 deterministic conversation simulator, the Milestone 5 live telephony webhook foundation, and the Milestone 6 external AI voice provider layer:
 
 - Go/Fiber API scaffold with PostgreSQL, Redis, startup SQL migrations, and Docker Compose.
 - Auth, JWT access tokens, persisted refresh tokens, owner-scoped salon APIs.
@@ -14,6 +14,7 @@ This repository currently implements Milestone 1, Milestone 2, Milestone 3 booki
 - Square customer search/create, availability search, create-booking, reschedule, cancel, and test-booking gate paths.
 - Deterministic AI conversation simulator with persisted call sessions, transcript messages, summaries, owner handoffs, and booking attempt linkage.
 - Twilio live voice webhook foundation with signed webhook verification, TwiML responses, phone call session routing, voice webhook audit events, and provider-neutral voice runtime interfaces.
+- OpenAI-backed external STT, LLM reply, and TTS adapters behind the voice runtime interfaces, with guarded replies, recording-mode turns, expiring TTS audio playback, and safe fallback to text/Twilio behavior when providers fail.
 - Backend service/staff list endpoints for synced POS data.
 - Next.js admin shell with login, dashboard, onboarding profile creation, Square integration status, appointments, service/staff controls, and Calls dashboard for simulator and phone sessions.
 - Repo-local Codex guidance through `AGENTS.md`, `.agents/skills`, and `.codex/agents`.
@@ -79,9 +80,17 @@ VOICE_PUBLIC_BASE_URL=https://api.example.com
 VOICE_TWILIO_AUTH_TOKEN=...
 VOICE_TWILIO_INCOMING_PATH=/api/voice/twilio/incoming
 VOICE_TWILIO_TURN_PATH=/api/voice/twilio/turn
+VOICE_TWILIO_RECORDING_PATH=/api/voice/twilio/recording
+VOICE_AI_PROVIDER=openai
+VOICE_OPENAI_API_KEY=...
+VOICE_OPENAI_BASE_URL=https://api.openai.com/v1
+VOICE_OPENAI_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
+VOICE_OPENAI_REPLY_MODEL=gpt-4.1-mini
+VOICE_OPENAI_SPEECH_MODEL=gpt-4o-mini-tts
+VOICE_OPENAI_SPEECH_VOICE=alloy
 ```
 
-The Twilio incoming and turn webhooks reject unsigned or incorrectly signed requests. Live phone sessions route by matching Twilio `To` against the configured salon phone number.
+The Twilio incoming, turn, and recording webhooks reject unsigned or incorrectly signed requests. Live phone sessions route by matching Twilio `To` against the configured salon phone number. When external STT is configured, Twilio uses recording-mode turns and the OpenAI transcription adapter; otherwise it keeps the existing speech gather path. TTS audio is stored as short-lived runtime output and served through public unguessable audio URLs for Twilio `<Play>`.
 
 ## Scope Boundary
 
@@ -103,14 +112,16 @@ Fully implemented now:
 - Live phone call session metadata and voice webhook event audit table
 - Twilio signed incoming/turn webhooks that create phone call sessions and continue transcripts through the same conversation engine
 - Provider-neutral voice interfaces for telephony, STT, LLM, and TTS runtime adapters
+- OpenAI external voice adapters for STT, guarded LLM replies, and TTS playback
 - Dashboard booking readiness UI for Square test booking and AI booking enablement
-- Dashboard Calls page with voice readiness, simulator and phone transcripts, detected details, outcomes, and recent sessions
+- Dashboard Calls page with live webhook readiness, external AI provider readiness, simulator and phone transcripts, detected details, outcomes, and recent sessions
 - POS sync and error logs
 - Admin shell, login, dashboard, onboarding profile creation, integrations page, appointments page, services/staff controls
 
 Still stubbed until later milestones:
 
-- SMS, reminders, external OpenAI STT/LLM/TTS adapters, and knowledge base
+- Milestone 7: knowledge base, owner corrections, and AI training workflows
+- SMS and reminders
 - Stripe billing
 
 ## Agent Setup

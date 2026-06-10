@@ -23,6 +23,16 @@ SQUARE_REDIRECT_URL
 VOICE_PROVIDER
 VOICE_PUBLIC_BASE_URL
 VOICE_TWILIO_AUTH_TOKEN
+VOICE_TWILIO_INCOMING_PATH
+VOICE_TWILIO_TURN_PATH
+VOICE_TWILIO_RECORDING_PATH
+VOICE_AI_PROVIDER
+VOICE_OPENAI_API_KEY
+VOICE_OPENAI_BASE_URL
+VOICE_OPENAI_TRANSCRIPTION_MODEL
+VOICE_OPENAI_REPLY_MODEL
+VOICE_OPENAI_SPEECH_MODEL
+VOICE_OPENAI_SPEECH_VOICE
 CORS_ALLOWED_ORIGINS
 FRONTEND_URL
 ```
@@ -37,4 +47,6 @@ Use a 32-byte base64 value for `TOKEN_ENCRYPTION_KEY_BASE64`.
 - Configure the Square redirect URL to the deployed API callback.
 - Configure `VOICE_PUBLIC_BASE_URL` to the deployed API origin used in Twilio webhook settings.
 - Keep `VOICE_TWILIO_AUTH_TOKEN` secret; it is used only for Twilio webhook signature verification.
+- Set `VOICE_AI_PROVIDER=openai` and `VOICE_OPENAI_API_KEY` only when external AI voice turns should be enabled.
+- Keep OpenAI model and voice settings configurable so model changes do not require code changes.
 - Restrict CORS to the deployed frontend URL.

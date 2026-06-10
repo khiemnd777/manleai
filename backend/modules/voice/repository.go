@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 type Repository struct {
@@ -88,4 +89,47 @@ func (r *Repository) RecordWebhookEvent(ctx context.Context, event WebhookEvent)
 		)
 	`, event.SalonID, event.CallSessionID, event.Provider, event.ProviderCallID, event.EventType, string(raw))
 	return err
+}
+
+func (r *Repository) SaveAudioOutput(ctx context.Context, record AudioOutputRecord) (*AudioOutput, error) {
+	contentType := record.ContentType
+	if contentType == "" {
+		contentType = "audio/mpeg"
+	}
+	expiresAt := time.Now().UTC().Add(15 * time.Minute)
+	var output AudioOutput
+	err := r.db.QueryRowContext(ctx, `
+		INSERT INTO voice_audio_outputs (
+			salon_id, call_session_id, provider, provider_call_id, content_type, audio_data, expires_at
+		)
+		VALUES (
+			NULLIF($1, '')::uuid, NULLIF($2, '')::uuid, $3, NULLIF($4, ''), $5, $6, $7
+		)
+		RETURNING id::text, content_type, audio_data
+	`, record.SalonID, record.CallSessionID, record.Provider, record.ProviderCallID, contentType, record.Audio, expiresAt).Scan(
+		&output.ID,
+		&output.ContentType,
+		&output.Audio,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &output, nil
+}
+
+func (r *Repository) GetAudioOutput(ctx context.Context, id string) (*AudioOutput, error) {
+	var output AudioOutput
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id::text, content_type, audio_data
+		FROM voice_audio_outputs
+		WHERE id = $1
+		  AND expires_at > now()
+	`, id).Scan(&output.ID, &output.ContentType, &output.Audio)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &output, nil
 }

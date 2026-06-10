@@ -36,12 +36,28 @@ type VoiceConfig struct {
 	Provider      string
 	PublicBaseURL string
 	Twilio        TwilioVoiceConfig
+	AI            VoiceAIConfig
 }
 
 type TwilioVoiceConfig struct {
-	AuthToken    string
-	IncomingPath string
-	TurnPath     string
+	AuthToken     string
+	IncomingPath  string
+	TurnPath      string
+	RecordingPath string
+}
+
+type VoiceAIConfig struct {
+	Provider string
+	OpenAI   OpenAIVoiceConfig
+}
+
+type OpenAIVoiceConfig struct {
+	APIKey             string
+	BaseURL            string
+	TranscriptionModel string
+	ReplyModel         string
+	SpeechModel        string
+	SpeechVoice        string
 }
 
 func Load() Config {
@@ -69,9 +85,21 @@ func Load() Config {
 			Provider:      env("VOICE_PROVIDER", "twilio"),
 			PublicBaseURL: strings.TrimRight(env("VOICE_PUBLIC_BASE_URL", ""), "/"),
 			Twilio: TwilioVoiceConfig{
-				AuthToken:    env("VOICE_TWILIO_AUTH_TOKEN", ""),
-				IncomingPath: env("VOICE_TWILIO_INCOMING_PATH", "/api/voice/twilio/incoming"),
-				TurnPath:     env("VOICE_TWILIO_TURN_PATH", "/api/voice/twilio/turn"),
+				AuthToken:     env("VOICE_TWILIO_AUTH_TOKEN", ""),
+				IncomingPath:  env("VOICE_TWILIO_INCOMING_PATH", "/api/voice/twilio/incoming"),
+				TurnPath:      env("VOICE_TWILIO_TURN_PATH", "/api/voice/twilio/turn"),
+				RecordingPath: env("VOICE_TWILIO_RECORDING_PATH", "/api/voice/twilio/recording"),
+			},
+			AI: VoiceAIConfig{
+				Provider: env("VOICE_AI_PROVIDER", ""),
+				OpenAI: OpenAIVoiceConfig{
+					APIKey:             env("VOICE_OPENAI_API_KEY", ""),
+					BaseURL:            strings.TrimRight(env("VOICE_OPENAI_BASE_URL", "https://api.openai.com/v1"), "/"),
+					TranscriptionModel: env("VOICE_OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe"),
+					ReplyModel:         env("VOICE_OPENAI_REPLY_MODEL", "gpt-4.1-mini"),
+					SpeechModel:        env("VOICE_OPENAI_SPEECH_MODEL", "gpt-4o-mini-tts"),
+					SpeechVoice:        env("VOICE_OPENAI_SPEECH_VOICE", "alloy"),
+				},
 			},
 		},
 	}

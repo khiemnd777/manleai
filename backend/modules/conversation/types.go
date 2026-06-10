@@ -47,6 +47,10 @@ type BookingTool interface {
 	Create(ctx context.Context, salonID string, ownerUserID string, req booking.CreateBookingRequest) (*booking.BookingAttempt, error)
 }
 
+type ReplyGenerator interface {
+	GenerateReply(ctx context.Context, req ReplyGenerationRequest) (ReplyGenerationResult, error)
+}
+
 type Store interface {
 	GetRuntimeConfig(ctx context.Context, salonID string, ownerUserID string) (*RuntimeConfig, error)
 	CreateSession(ctx context.Context, record NewSessionRecord) (*Session, error)
@@ -73,6 +77,28 @@ type StartPhoneCallRequest struct {
 
 type MessageRequest struct {
 	Message string `json:"message"`
+}
+
+type ReplyGenerationRequest struct {
+	SalonID             string
+	SessionID           string
+	Channel             string
+	Intent              string
+	Outcome             string
+	CustomerMessage     string
+	SafeReply           string
+	SalonName           string
+	BookingConfirmed    bool
+	FallbackOrHandoff   bool
+	MissingBookingField string
+	Summary             string
+}
+
+type ReplyGenerationResult struct {
+	Message    string
+	Confidence float64
+	Handoff    bool
+	Reason     string
 }
 
 type RuntimeConfig struct {

@@ -29,9 +29,10 @@ var (
 )
 
 type Service struct {
-	store       Store
-	bookingTool BookingTool
-	now         func() time.Time
+	store          Store
+	bookingTool    BookingTool
+	replyGenerator ReplyGenerator
+	now            func() time.Time
 }
 
 func NewService(store Store, bookingTool BookingTool) *Service {
@@ -40,6 +41,10 @@ func NewService(store Store, bookingTool BookingTool) *Service {
 		bookingTool: bookingTool,
 		now:         func() time.Time { return time.Now().UTC() },
 	}
+}
+
+func (s *Service) SetReplyGenerator(generator ReplyGenerator) {
+	s.replyGenerator = generator
 }
 
 func (s *Service) Start(ctx context.Context, salonID string, ownerUserID string, req StartSessionRequest) (*Session, error) {
@@ -149,6 +154,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 
 	if intent != IntentBooking {
 		turn.AIMessage = "I can help with appointments. What service would you like to book?"
+		s.applyReplyGenerator(ctx, &turn, next, cfg, "")
 		return s.store.SaveTurn(ctx, turn)
 	}
 
@@ -158,6 +164,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 
 	if missing := missingBookingField(next); missing != "" {
 		turn.AIMessage = promptForMissingField(missing)
+		s.applyReplyGenerator(ctx, &turn, next, cfg, missing)
 		return s.store.SaveTurn(ctx, turn)
 	}
 
@@ -216,7 +223,34 @@ func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnR
 	turn.Update.AppointmentID = appointmentID
 	turn.Update.EndSession = true
 	turn.Update.Summary = summaryFor(session, services, staff, cfg)
+	s.applyReplyGenerator(ctx, &turn, session, cfg, "")
 	return s.store.SaveTurn(ctx, turn)
+}
+
+func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, session Session, cfg *RuntimeConfig, missing string) {
+	if s.replyGenerator == nil || turn == nil || strings.TrimSpace(turn.AIMessage) == "" {
+		return
+	}
+	result, err := s.replyGenerator.GenerateReply(ctx, ReplyGenerationRequest{
+		SalonID:             turn.SalonID,
+		SessionID:           session.ID,
+		Channel:             session.Channel,
+		Intent:              turn.Update.Intent,
+		Outcome:             turn.Update.Outcome,
+		CustomerMessage:     turn.CustomerMessage,
+		SafeReply:           turn.AIMessage,
+		SalonName:           salonName(cfg),
+		BookingConfirmed:    turn.Update.Outcome == OutcomeBookingConfirmed && turn.Update.BookingAttemptID != "" && turn.Update.AppointmentID != "",
+		FallbackOrHandoff:   turn.Update.Outcome == OutcomeBookingFallbackPending || turn.Update.Outcome == OutcomeAIDisabled || turn.Update.Outcome == OutcomeHandoffRequested,
+		MissingBookingField: missing,
+		Summary:             turn.Update.Summary,
+	})
+	if err != nil {
+		return
+	}
+	if message := strings.TrimSpace(result.Message); message != "" {
+		turn.AIMessage = message
+	}
 }
 
 func (s *Service) saveHandoffTurn(ctx context.Context, turn TurnRecord, session Session, reason string, reply string, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (*Session, error) {
@@ -271,6 +305,13 @@ func initialReply(cfg *RuntimeConfig) string {
 		return strings.TrimSpace(cfg.AIGreeting)
 	}
 	return defaultGreeting
+}
+
+func salonName(cfg *RuntimeConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.SalonName)
 }
 
 func resolveIntent(current string, message string, session Session) string {

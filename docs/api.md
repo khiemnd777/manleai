@@ -180,7 +180,7 @@ Phone channel sessions are created by Twilio webhooks and use the same conversat
 
 `GET /api/salons/:id/voice/status`
 
-Returns owner-scoped live voice readiness without exposing Twilio secrets.
+Returns owner-scoped live voice and external AI provider readiness without exposing Twilio or OpenAI secrets.
 
 ```json
 {
@@ -189,8 +189,34 @@ Returns owner-scoped live voice readiness without exposing Twilio secrets.
   "signature_verification": true,
   "inbound_webhook_url": "https://api.example.com/api/voice/twilio/incoming",
   "turn_webhook_url": "https://api.example.com/api/voice/twilio/turn",
+  "recording_webhook_url": "https://api.example.com/api/voice/twilio/recording",
   "salon_phone": "+13125550101",
-  "ready": true
+  "ready": true,
+  "input_mode": "recording",
+  "ai": {
+    "provider": "openai",
+    "configured": true,
+    "ready": true,
+    "stt": {
+      "provider": "openai",
+      "configured": true,
+      "ready": true,
+      "model": "gpt-4o-mini-transcribe"
+    },
+    "llm": {
+      "provider": "openai",
+      "configured": true,
+      "ready": true,
+      "model": "gpt-4.1-mini"
+    },
+    "tts": {
+      "provider": "openai",
+      "configured": true,
+      "ready": true,
+      "model": "gpt-4o-mini-tts",
+      "voice": "alloy"
+    }
+  }
 }
 ```
 
@@ -218,6 +244,24 @@ From
 To
 SpeechResult
 ```
+
+`POST /api/voice/twilio/recording`
+
+Public Twilio Programmable Voice webhook for recording-mode turns when external STT is configured. Requires a valid `X-Twilio-Signature`. The webhook downloads the Twilio recording, sends audio through the configured STT provider behind `modules/voice`, then routes the resulting text through the same conversation engine and booking service. STT failures produce safe reprompt/fallback behavior and do not fabricate customer intent.
+
+Expected Twilio form fields include:
+
+```txt
+CallSid
+AccountSid
+From
+To
+RecordingUrl
+```
+
+`GET /api/voice/audio/:id`
+
+Public short-lived audio output endpoint for Twilio `<Play>` responses. IDs are unguessable runtime UUIDs, expire quickly, and never expose POS tokens or provider secrets.
 
 The phone path never confirms an appointment unless the booking service returns a POS-confirmed booking attempt with a POS booking ID and appointment.
 

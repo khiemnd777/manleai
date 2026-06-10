@@ -29,3 +29,18 @@ func (h *Handler) Status(c *fiber.Ctx) error {
 	}
 	return respond.JSON(c, fiber.StatusOK, status)
 }
+
+func (h *Handler) Audio(c *fiber.Ctx) error {
+	output, err := h.service.Audio(c.UserContext(), c.Params("id"))
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "VOICE_AUDIO_NOT_FOUND", "Voice audio was not found.")
+	}
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VOICE_AUDIO_INVALID", "Voice audio request is invalid.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "VOICE_AUDIO_FAILED", "Could not load voice audio.")
+	}
+	c.Set(fiber.HeaderContentType, output.ContentType)
+	return c.Status(fiber.StatusOK).Send(output.Audio)
+}

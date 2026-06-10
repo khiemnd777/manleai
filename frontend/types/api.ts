@@ -218,7 +218,28 @@ export type VoiceStatus = {
   signature_verification: boolean;
   inbound_webhook_url: string;
   turn_webhook_url: string;
+  recording_webhook_url: string;
   salon_phone?: string;
   ready: boolean;
   blocked_reason?: string;
+  input_mode: "gather" | "recording" | string;
+  ai: VoiceAIStatus;
+};
+
+export type VoiceCapabilityStatus = {
+  provider: string;
+  configured: boolean;
+  ready: boolean;
+  model?: string;
+  voice?: string;
+  blocked_reason?: string;
+};
+
+export type VoiceAIStatus = {
+  provider: string;
+  configured: boolean;
+  ready: boolean;
+  stt: VoiceCapabilityStatus;
+  llm: VoiceCapabilityStatus;
+  tts: VoiceCapabilityStatus;
 };

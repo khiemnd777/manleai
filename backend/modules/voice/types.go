@@ -9,10 +9,17 @@ import (
 
 const (
 	ProviderTwilio = "twilio"
+	ProviderOpenAI = "openai"
 
 	EventIncomingCall = "incoming_call"
 	EventSpeechTurn   = "speech_turn"
 	EventNoSpeech     = "no_speech"
+	EventSTTFailed    = "stt_failed"
+	EventLLMFailed    = "llm_failed"
+	EventTTSFailed    = "tts_failed"
+
+	InputModeGather    = "gather"
+	InputModeRecording = "recording"
 )
 
 var (
@@ -33,25 +40,44 @@ type TelephonyProvider interface {
 }
 
 type SpeechToTextProvider interface {
+	Name() string
+	Configured() bool
 	Transcribe(ctx context.Context, audio []byte, contentType string) (string, error)
 }
 
 type LanguageModelProvider interface {
+	Name() string
+	Configured() bool
 	GenerateReply(ctx context.Context, req ModelRequest) (ModelReply, error)
 }
 
 type TextToSpeechProvider interface {
+	Name() string
+	Configured() bool
+	ContentType() string
 	Synthesize(ctx context.Context, text string, voice string) ([]byte, error)
 }
 
 type ModelRequest struct {
-	SalonID   string
-	SessionID string
-	Message   string
+	SalonID             string
+	SessionID           string
+	Channel             string
+	Intent              string
+	Outcome             string
+	CustomerMessage     string
+	SafeReply           string
+	SalonName           string
+	BookingConfirmed    bool
+	FallbackOrHandoff   bool
+	MissingBookingField string
+	Summary             string
 }
 
 type ModelReply struct {
-	Message string
+	Message    string
+	Confidence float64
+	Handoff    bool
+	Reason     string
 }
 
 type InboundSalon struct {
@@ -76,18 +102,22 @@ type IncomingCallRequest struct {
 }
 
 type SpeechTurnRequest struct {
-	Provider       string
-	ProviderCallID string
-	FromPhone      string
-	ToPhone        string
-	SpeechText     string
-	Payload        map[string]string
+	Provider         string
+	ProviderCallID   string
+	FromPhone        string
+	ToPhone          string
+	SpeechText       string
+	Audio            []byte
+	AudioContentType string
+	Payload          map[string]string
 }
 
 type CallReply struct {
-	Message  string
-	Continue bool
-	Session  *conversation.Session
+	Message   string
+	Continue  bool
+	Session   *conversation.Session
+	AudioURL  string
+	InputMode string
 }
 
 type WebhookEvent struct {
@@ -104,13 +134,55 @@ type SalonVoiceStatus struct {
 	Phone   string
 }
 
+type ProviderCapabilityStatus struct {
+	Provider      string `json:"provider"`
+	Configured    bool   `json:"configured"`
+	Ready         bool   `json:"ready"`
+	Model         string `json:"model,omitempty"`
+	Voice         string `json:"voice,omitempty"`
+	BlockedReason string `json:"blocked_reason,omitempty"`
+}
+
+type VoiceAIStatus struct {
+	Provider   string                   `json:"provider"`
+	Configured bool                     `json:"configured"`
+	Ready      bool                     `json:"ready"`
+	STT        ProviderCapabilityStatus `json:"stt"`
+	LLM        ProviderCapabilityStatus `json:"llm"`
+	TTS        ProviderCapabilityStatus `json:"tts"`
+}
+
 type Status struct {
-	Provider              string `json:"provider"`
-	Configured            bool   `json:"configured"`
-	SignatureVerification bool   `json:"signature_verification"`
-	InboundWebhookURL     string `json:"inbound_webhook_url"`
-	TurnWebhookURL        string `json:"turn_webhook_url"`
-	SalonPhone            string `json:"salon_phone,omitempty"`
-	Ready                 bool   `json:"ready"`
-	BlockedReason         string `json:"blocked_reason,omitempty"`
+	Provider              string        `json:"provider"`
+	Configured            bool          `json:"configured"`
+	SignatureVerification bool          `json:"signature_verification"`
+	InboundWebhookURL     string        `json:"inbound_webhook_url"`
+	TurnWebhookURL        string        `json:"turn_webhook_url"`
+	RecordingWebhookURL   string        `json:"recording_webhook_url"`
+	SalonPhone            string        `json:"salon_phone,omitempty"`
+	Ready                 bool          `json:"ready"`
+	BlockedReason         string        `json:"blocked_reason,omitempty"`
+	AI                    VoiceAIStatus `json:"ai"`
+	InputMode             string        `json:"input_mode"`
+}
+
+type AIProviders struct {
+	STT SpeechToTextProvider
+	LLM LanguageModelProvider
+	TTS TextToSpeechProvider
+}
+
+type AudioOutputRecord struct {
+	SalonID        string
+	CallSessionID  string
+	Provider       string
+	ProviderCallID string
+	ContentType    string
+	Audio          []byte
+}
+
+type AudioOutput struct {
+	ID          string
+	ContentType string
+	Audio       []byte
 }

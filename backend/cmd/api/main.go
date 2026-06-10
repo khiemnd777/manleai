@@ -20,6 +20,7 @@ import (
 	"github.com/manleai/ai-receptionist/modules/pos_square"
 	"github.com/manleai/ai-receptionist/modules/salon"
 	"github.com/manleai/ai-receptionist/modules/voice"
+	"github.com/manleai/ai-receptionist/modules/voice_openai"
 	"github.com/manleai/ai-receptionist/modules/voice_twilio"
 )
 
@@ -86,7 +87,17 @@ func main() {
 	conversation.RegisterRoutes(api, conversation.NewHandler(conversationService), cfg.JWTSecret)
 
 	voiceRepo := voice.NewRepository(db)
-	voiceService := voice.NewService(voiceRepo, conversationService, cfg.Voice)
+	var aiProviders voice.AIProviders
+	if strings.TrimSpace(cfg.Voice.AI.Provider) == voice.ProviderOpenAI {
+		openAIVoiceAdapter := voice_openai.NewAdapter(cfg.Voice.AI.OpenAI)
+		aiProviders = voice.AIProviders{
+			STT: openAIVoiceAdapter,
+			LLM: openAIVoiceAdapter,
+			TTS: openAIVoiceAdapter,
+		}
+	}
+	conversationService.SetReplyGenerator(voice.NewGuardedReplyGenerator(aiProviders.LLM))
+	voiceService := voice.NewService(voiceRepo, conversationService, cfg.Voice, aiProviders)
 	voice.RegisterRoutes(api, voice.NewHandler(voiceService), cfg.JWTSecret)
 	twilioVoiceAdapter := voice_twilio.NewAdapter(cfg.Voice.Twilio, cfg.Voice.PublicBaseURL)
 	voice_twilio.RegisterRoutes(api, voice_twilio.NewHandler(twilioVoiceAdapter, voiceService))

@@ -392,8 +392,9 @@ export function CallsDashboard() {
 }
 
 function ReadinessPanel({ aiEnabled, voiceStatus }: { aiEnabled: boolean; voiceStatus: VoiceStatus | null }) {
+  const aiReady = Boolean(voiceStatus?.ai?.ready);
   return (
-    <div className="grid gap-4 lg:grid-cols-2">
+    <div className="grid gap-4 lg:grid-cols-3">
       <Card className={voiceStatus?.ready ? "border-emerald-200 bg-emerald-50 shadow-none" : "border-amber-200 bg-amber-50 shadow-none"}>
         <div className="flex gap-3">
           {!voiceStatus?.ready ? <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" /> : null}
@@ -410,9 +411,33 @@ function ReadinessPanel({ aiEnabled, voiceStatus }: { aiEnabled: boolean; voiceS
             <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
               <Info label="Provider" value={voiceStatus?.provider || "twilio"} />
               <Info label="Signature" value={<Badge value={voiceStatus?.signature_verification ? "active" : "disabled"} />} />
+              <Info label="Input mode" value={<Badge value={voiceStatus?.input_mode || "gather"} />} />
               <Info label="Salon phone" value={voiceStatus?.salon_phone || "Not configured"} />
               <Info label="Inbound webhook" value={<span className="break-all font-mono text-xs">{voiceStatus?.inbound_webhook_url || "Not configured"}</span>} />
+              <Info label="Recording webhook" value={<span className="break-all font-mono text-xs">{voiceStatus?.recording_webhook_url || "Not configured"}</span>} />
             </dl>
+          </div>
+        </div>
+      </Card>
+
+      <Card className={aiReady ? "border-emerald-200 bg-emerald-50 shadow-none" : "border-amber-200 bg-amber-50 shadow-none"}>
+        <div className="flex gap-3">
+          {!aiReady ? <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" /> : null}
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <CardTitle>External AI providers</CardTitle>
+              <Badge value={aiReady ? "ready" : "not_configured"} />
+            </div>
+            <CardDescription className={aiReady ? "text-emerald-800" : "text-amber-900"}>
+              {aiReady
+                ? "External STT, LLM, and TTS are configured behind the voice runtime."
+                : "Configure OpenAI voice settings before external AI voice turns are ready."}
+            </CardDescription>
+            <div className="mt-4 space-y-3 text-sm">
+              <CapabilityRow label="STT" capability={voiceStatus?.ai?.stt} />
+              <CapabilityRow label="LLM" capability={voiceStatus?.ai?.llm} />
+              <CapabilityRow label="TTS" capability={voiceStatus?.ai?.tts} />
+            </div>
           </div>
         </div>
       </Card>
@@ -441,6 +466,25 @@ function ReadinessPanel({ aiEnabled, voiceStatus }: { aiEnabled: boolean; voiceS
           </div>
         </div>
       </Card>
+    </div>
+  );
+}
+
+function CapabilityRow({ label, capability }: { label: string; capability?: VoiceStatus["ai"]["stt"] }) {
+  return (
+    <div className="rounded-md border border-line bg-white/70 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted">{label}</span>
+        <Badge value={capability?.ready ? "ready" : "not_configured"} />
+      </div>
+      <div className="mt-2 text-sm font-medium text-ink">{capability?.provider || "openai"}</div>
+      <div className="mt-1 text-xs leading-5 text-muted">
+        {capability?.model || "Model not configured"}
+        {capability?.voice ? ` / ${capability.voice}` : ""}
+      </div>
+      {!capability?.ready && capability?.blocked_reason ? (
+        <div className="mt-2 text-xs leading-5 text-amber-900">{capability.blocked_reason}</div>
+      ) : null}
     </div>
   );
 }
