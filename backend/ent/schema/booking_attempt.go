@@ -20,6 +20,7 @@ func (BookingAttempt) Fields() []ent.Field {
 		field.String("status").NotEmpty(),
 		field.String("pos_provider").Default("square"),
 		field.String("pos_booking_id").Optional(),
+		field.String("pos_idempotency_key").Optional(),
 		field.String("customer_name").NotEmpty(),
 		field.String("customer_phone").NotEmpty(),
 		field.String("customer_email").Optional(),

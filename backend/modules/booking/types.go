@@ -8,6 +8,7 @@ const (
 	SourceAIConversationSimulator = "ai_conversation_simulator"
 	SourceAIVoiceCall             = "ai_voice_call"
 
+	StatusPOSPending      = "pos_pending"
 	StatusConfirmed       = "confirmed"
 	StatusFallbackPending = "fallback_pending"
 	StatusRescheduled     = "rescheduled"
@@ -48,6 +49,7 @@ type BookingAttempt struct {
 	Status             string       `json:"status"`
 	POSProvider        string       `json:"pos_provider"`
 	POSBookingID       string       `json:"pos_booking_id,omitempty"`
+	POSIdempotencyKey  string       `json:"-"`
 	CustomerName       string       `json:"customer_name"`
 	CustomerPhone      string       `json:"customer_phone"`
 	CustomerEmail      string       `json:"customer_email,omitempty"`
@@ -120,7 +122,23 @@ type AppointmentActionRef struct {
 	UpdatedAt             time.Time
 }
 
+type PendingBookingRecord struct {
+	SalonID           string
+	Source            string
+	Provider          string
+	POSIdempotencyKey string
+	CustomerName      string
+	CustomerPhone     string
+	CustomerEmail     string
+	Service           ServiceRef
+	Staff             StaffRef
+	StartTime         time.Time
+	EndTime           time.Time
+	Notes             string
+}
+
 type ConfirmedBookingRecord struct {
+	AttemptID         string
 	SalonID           string
 	Source            string
 	Provider          string
@@ -137,6 +155,7 @@ type ConfirmedBookingRecord struct {
 }
 
 type FallbackBookingRecord struct {
+	AttemptID     string
 	SalonID       string
 	Source        string
 	Provider      string
@@ -153,7 +172,19 @@ type FallbackBookingRecord struct {
 	ErrorMessage  string
 }
 
+type PendingAppointmentActionRecord struct {
+	SalonID            string
+	Appointment        AppointmentActionRef
+	Provider           string
+	Source             string
+	RequestedStartTime time.Time
+	RequestedEndTime   time.Time
+	Notes              string
+	POSIdempotencyKey  string
+}
+
 type RescheduledAppointmentRecord struct {
+	AttemptID         string
 	Appointment       AppointmentActionRef
 	Staff             StaffRef
 	Source            string
@@ -164,6 +195,7 @@ type RescheduledAppointmentRecord struct {
 }
 
 type CancelledAppointmentRecord struct {
+	AttemptID         string
 	Appointment       AppointmentActionRef
 	Source            string
 	Reason            string
@@ -171,6 +203,7 @@ type CancelledAppointmentRecord struct {
 }
 
 type AppointmentActionFallbackRecord struct {
+	AttemptID          string
 	SalonID            string
 	Appointment        AppointmentActionRef
 	Provider           string

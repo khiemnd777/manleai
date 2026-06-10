@@ -44,6 +44,8 @@ Salon:
 - `PATCH /api/salons/:id/services/:service_id/ai-bookable`
 - `GET /api/salons/:id/staff`
 - `PATCH /api/salons/:id/staff/:staff_id/ai-bookable`
+- `GET /api/salons/:id/customers`
+- `GET /api/salons/:id/customers/search`
 - `GET /api/salons/:id/appointments`
 - `POST /api/salons/:id/appointments/:appointment_id/reschedule`
 - `POST /api/salons/:id/appointments/:appointment_id/cancel`
@@ -67,4 +69,4 @@ Square integration:
 
 Handlers parse HTTP requests only. Services own business rules and tenant checks. Repositories own SQL. The API runs startup migrations before registering repositories. The `modules/pos` package defines the POSProvider boundary; `modules/pos_square` is the only concrete provider.
 
-Booking code calls `POSProvider` only. Square payloads and API URLs must remain inside `modules/pos_square`. POS failures are persisted as fallback pending booking attempts and must not create confirmed appointments.
+Booking code calls `POSProvider` only. Square payloads and API URLs must remain inside `modules/pos_square`. Booking workflows create backend `pos_pending` attempts before POS writes, then finalize the same attempts as confirmed/rescheduled/cancelled only on POS success or `fallback_pending` on POS failure. POS failures must not create confirmed appointments.

@@ -29,12 +29,14 @@
 - Verify synced services keep POS service version metadata for future booking payloads.
 - Verify `GET /api/salons/:id/services` and `GET /api/salons/:id/staff` return only owner-scoped synced records.
 - Verify booking service tests only use `pos.POSProvider`, not `pos_square`.
+- Verify booking service creates a backend `pos_pending` attempt and backend-owned POS idempotency key before outbound POS booking writes.
 - Verify POS success stores a confirmed appointment and POS booking ID.
 - Verify POS failure stores `fallback_pending`, logs `pos_errors`, creates an owner notification, and does not create a confirmed appointment.
 - Verify Square customer search/create payloads use Customers API fields and preserve customer IDs.
 - Verify Square availability payloads include location, service variation, optional team member filter, and parse available slots.
 - Verify Square create-booking payloads include location, start time, team member, service variation ID, service variation version, duration, and idempotency key.
 - Verify confirmed appointments persist the POS booking version returned by Square.
+- Verify Square booking, reschedule, and cancel payloads use the backend-provided idempotency key rather than generating one inside the adapter.
 - Verify Square reschedule payloads include booking version, location, start time, team member, service variation ID, service variation version, duration, and idempotency key.
 - Verify Square cancel payloads include booking version and idempotency key.
 - Verify reschedule/cancel service success updates internal appointment state only after the POS provider succeeds.

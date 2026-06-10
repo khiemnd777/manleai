@@ -16,6 +16,7 @@ import (
 	"github.com/manleai/ai-receptionist/modules/auth"
 	"github.com/manleai/ai-receptionist/modules/booking"
 	"github.com/manleai/ai-receptionist/modules/conversation"
+	"github.com/manleai/ai-receptionist/modules/customer"
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/pos_square"
 	"github.com/manleai/ai-receptionist/modules/salon"
@@ -82,6 +83,10 @@ func main() {
 	bookingRepo := booking.NewRepository(db)
 	bookingService := booking.NewService(bookingRepo, []pos.POSProvider{squareAdapter})
 	booking.RegisterRoutes(api, booking.NewHandler(bookingService), cfg.JWTSecret)
+
+	customerRepo := customer.NewRepository(db)
+	customerService := customer.NewService(customerRepo, []pos.POSProvider{squareAdapter})
+	customer.RegisterRoutes(api, customer.NewHandler(customerService), cfg.JWTSecret)
 
 	conversationRepo := conversation.NewRepository(db)
 	conversationService := conversation.NewService(conversationRepo, bookingService)

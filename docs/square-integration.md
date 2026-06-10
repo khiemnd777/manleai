@@ -27,7 +27,7 @@
 
 - Real sandbox payload verification against a Square Appointments account
 
-The provider-neutral booking service records provider failures as fallback pending requests and must not fake booking success. Reschedule, cancel, test booking, test booking cancellation, and simulator booking requests leave internal confirmed appointment state unchanged unless Square succeeds. AI booking can only be enabled after the latest Square test booking was created and cancelled successfully.
+The provider-neutral booking service records backend `pos_pending` attempts before calling Square, passes backend-owned idempotency keys into the adapter, and must not fake booking success. Reschedule, cancel, test booking, test booking cancellation, and simulator booking requests leave internal confirmed appointment state unchanged unless Square succeeds. AI booking can only be enabled after the latest Square test booking was created and cancelled successfully.
 
 ## Environment
 

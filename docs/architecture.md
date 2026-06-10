@@ -18,6 +18,7 @@ modules/salon        salon profile, settings, business hours
 modules/pos          provider-neutral POS contracts and persistence
 modules/pos_square   Square adapter and Square integration routes
 modules/booking      booking attempts, appointments, and fallback pending safety
+modules/customer     provider-neutral customer activity read model and POS lookup facade
 modules/conversation deterministic simulator sessions, transcripts, summaries, and handoffs
 modules/training     salon-authored knowledge base and owner corrections
 modules/voice        provider-neutral live voice runtime, status, routing, and webhook event audit
@@ -32,7 +33,7 @@ app/                 Next.js routes
 components/ui        reusable UI primitives
 components/layout    dashboard shell
 features/auth        login flow
-features/dashboard   dashboard home, appointments, services/staff controls, calls dashboard, AI training
+features/dashboard   dashboard home, appointments, customers, services/staff controls, calls dashboard, AI training
 features/integrations Square integration page
 features/onboarding salon profile creation
 lib/api              typed API client
@@ -49,7 +50,7 @@ HTTP handler -> service -> repository/provider interface -> concrete adapter
 
 The booking service depends on `modules/pos.POSProvider`. It must not import `modules/pos_square`.
 
-Square create-booking, reschedule, cancel, and dashboard test-booking gate operations are implemented inside `modules/pos_square` and routed through the provider-neutral booking service where appointment state changes are required. Until a provider returns a POS booking ID and booking version, booking requests must be stored as fallback pending attempts and must not create confirmed appointments. Reschedule, cancel, and test-booking cleanup requests must leave the internal appointment unchanged unless the provider succeeds.
+Booking workflow state belongs to the backend. Create-booking, reschedule, cancel, and dashboard test-booking requests first create a `booking_attempts` row with `pos_pending` and a backend-owned POS idempotency key. The POS adapter is then called as an outbound writer. If the provider returns a POS booking ID and booking version, the same attempt is finalized as confirmed/rescheduled/cancelled and the appointment state is written in the backend database. If the provider fails, times out, or omits required booking metadata, the same attempt is finalized as `fallback_pending`, a POS error and owner notification are recorded, and no confirmed appointment is created. Reschedule, cancel, and test-booking cleanup requests must leave the internal appointment unchanged unless the provider succeeds.
 
 The Milestone 4 conversation simulator and Milestone 5 live phone webhook path call the booking service through a provider-neutral booking tool. They do not import Square packages, read POS tokens, build Square payloads, or use Square location IDs directly. Booking confirmations remain impossible unless the booking service returns a POS-confirmed booking attempt and appointment. If AI booking is disabled, a customer requests a human, or the booking path cannot confirm through POS, the runtime creates a handoff or fallback pending flow and avoids confirmed wording.
 

@@ -98,6 +98,57 @@ Returns synced provider-neutral staff for dashboard tables.
 
 Updates only the internal AI booking eligibility flag for a synced staff member. Square staff records are not edited. Inactive Square staff cannot be enabled for AI booking.
 
+`GET /api/salons/:id/customers`
+
+Returns an owner-scoped operational customer list aggregated from internal appointments, booking attempts, call sessions, and handoff requests. This is not a full Square customer directory sync.
+
+```json
+{
+  "customers": [
+    {
+      "key": "phone:+13125550101",
+      "name": "Linh Tran",
+      "phone": "+13125550101",
+      "email": "linh@example.com",
+      "last_activity_at": "2026-06-10T15:00:00Z",
+      "last_activity_source": "appointment",
+      "last_outcome": "confirmed",
+      "confirmed_appointments": 1,
+      "pending_requests": 0,
+      "call_count": 2,
+      "handoff_count": 0,
+      "appointment_ids": ["..."],
+      "booking_attempt_ids": ["..."],
+      "call_session_ids": ["..."]
+    }
+  ],
+  "summary": {
+    "total_known_customers": 1,
+    "confirmed_appointments": 1,
+    "pending_requests": 0,
+    "customers_with_calls": 1,
+    "last_customer_activity_at": "2026-06-10T15:00:00Z"
+  }
+}
+```
+
+`GET /api/salons/:id/customers/search?phone=<phone>&provider=square`
+
+Searches the active provider by phone through `POSProvider.SearchCustomerByPhone` and returns only the normalized provider-neutral customer DTO. It does not create customers, sync the Square directory, or expose Square payloads/tokens.
+
+```json
+{
+  "found": true,
+  "provider": "square",
+  "customer": {
+    "pos_customer_id": "CUSTOMER_ID",
+    "name": "Linh Tran",
+    "phone": "+13125550101",
+    "email": "linh@example.com"
+  }
+}
+```
+
 `GET /api/salons/:id/appointments`
 
 Returns appointments recorded after POS success, including confirmed, rescheduled, and cancelled statuses.
@@ -126,7 +177,7 @@ Returns `200` with the cancelled appointment only when the active `POSProvider` 
 
 `GET /api/salons/:id/booking-attempts`
 
-Returns booking attempts, including `fallback_pending` records that need owner review.
+Returns booking attempts, including transient `pos_pending` records and `fallback_pending` records that need owner review.
 
 `POST /api/salons/:id/booking-attempts`
 
@@ -142,7 +193,7 @@ Returns booking attempts, including `fallback_pending` records that need owner r
 }
 ```
 
-Returns `201` with status `confirmed` only when the active `POSProvider` returns a POS booking ID and booking version. Returns `202` with status `fallback_pending` when the POS provider fails, times out, or does not return required booking metadata.
+Creates a backend booking attempt before calling the active `POSProvider`. Returns `201` with status `confirmed` only when the POS provider returns a POS booking ID and booking version. Returns `202` with status `fallback_pending` when the POS provider fails, times out, or does not return required booking metadata.
 
 ## Conversation Sessions
 

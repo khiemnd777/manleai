@@ -77,6 +77,35 @@ func (r *Repository) GetBookableStaff(ctx context.Context, salonID string, staff
 	return &item, nil
 }
 
+func (r *Repository) CreatePendingBookingAttempt(ctx context.Context, record PendingBookingRecord) (*BookingAttempt, error) {
+	attempt := BookingAttempt{
+		SalonID:            record.SalonID,
+		Source:             record.Source,
+		Status:             StatusPOSPending,
+		POSProvider:        record.Provider,
+		POSIdempotencyKey:  record.POSIdempotencyKey,
+		CustomerName:       record.CustomerName,
+		CustomerPhone:      record.CustomerPhone,
+		CustomerEmail:      record.CustomerEmail,
+		ServiceID:          record.Service.ID,
+		StaffID:            record.Staff.ID,
+		RequestedStartTime: record.StartTime,
+		RequestedEndTime:   record.EndTime,
+		Notes:              record.Notes,
+	}
+	if err := r.db.QueryRowContext(ctx, `
+		INSERT INTO booking_attempts (
+			salon_id, source, status, pos_provider, pos_idempotency_key, customer_name, customer_phone,
+			customer_email, service_id, staff_id, requested_start_time, requested_end_time, notes
+		)
+		VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, $7, NULLIF($8, ''), $9, $10, $11, $12, NULLIF($13, ''))
+		RETURNING id::text, created_at, updated_at
+	`, attempt.SalonID, attempt.Source, attempt.Status, attempt.POSProvider, attempt.POSIdempotencyKey, attempt.CustomerName, attempt.CustomerPhone, attempt.CustomerEmail, attempt.ServiceID, attempt.StaffID, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes).Scan(&attempt.ID, &attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &attempt, nil
+}
+
 func (r *Repository) SaveConfirmedBooking(ctx context.Context, record ConfirmedBookingRecord) (*BookingAttempt, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -85,6 +114,7 @@ func (r *Repository) SaveConfirmedBooking(ctx context.Context, record ConfirmedB
 	defer tx.Rollback()
 
 	attempt := BookingAttempt{
+		ID:                 record.AttemptID,
 		SalonID:            record.SalonID,
 		Source:             record.Source,
 		Status:             StatusConfirmed,
@@ -100,13 +130,23 @@ func (r *Repository) SaveConfirmedBooking(ctx context.Context, record ConfirmedB
 		Notes:              record.Notes,
 	}
 	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO booking_attempts (
-			salon_id, source, status, pos_provider, pos_booking_id, customer_name, customer_phone,
-			customer_email, service_id, staff_id, requested_start_time, requested_end_time, notes
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), $9, $10, $11, $12, NULLIF($13, ''))
-		RETURNING id::text, created_at, updated_at
-	`, attempt.SalonID, attempt.Source, attempt.Status, attempt.POSProvider, attempt.POSBookingID, attempt.CustomerName, attempt.CustomerPhone, attempt.CustomerEmail, attempt.ServiceID, attempt.StaffID, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes).Scan(&attempt.ID, &attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+		UPDATE booking_attempts
+		SET status = $1,
+		    pos_booking_id = $2,
+		    requested_start_time = $3,
+		    requested_end_time = $4,
+		    notes = NULLIF($5, ''),
+		    error_code = NULL,
+		    error_message = NULL,
+		    updated_at = now()
+		WHERE id = $6
+		  AND salon_id = $7
+		  AND status = $8
+		RETURNING created_at, updated_at
+	`, attempt.Status, attempt.POSBookingID, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes, attempt.ID, attempt.SalonID, StatusPOSPending).Scan(&attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, pos.ErrNotFound
+		}
 		return nil, err
 	}
 
@@ -159,6 +199,7 @@ func (r *Repository) SaveFallbackBooking(ctx context.Context, record FallbackBoo
 	defer tx.Rollback()
 
 	attempt := BookingAttempt{
+		ID:                 record.AttemptID,
 		SalonID:            record.SalonID,
 		Source:             record.Source,
 		Status:             StatusFallbackPending,
@@ -175,13 +216,22 @@ func (r *Repository) SaveFallbackBooking(ctx context.Context, record FallbackBoo
 		ErrorMessage:       record.ErrorMessage,
 	}
 	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO booking_attempts (
-			salon_id, source, status, pos_provider, customer_name, customer_phone, customer_email,
-			service_id, staff_id, requested_start_time, requested_end_time, notes, error_code, error_message
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, $9, $10, $11, NULLIF($12, ''), $13, $14)
-		RETURNING id::text, created_at, updated_at
-	`, attempt.SalonID, attempt.Source, attempt.Status, attempt.POSProvider, attempt.CustomerName, attempt.CustomerPhone, attempt.CustomerEmail, attempt.ServiceID, attempt.StaffID, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes, attempt.ErrorCode, attempt.ErrorMessage).Scan(&attempt.ID, &attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+		UPDATE booking_attempts
+		SET status = $1,
+		    requested_start_time = $2,
+		    requested_end_time = $3,
+		    notes = NULLIF($4, ''),
+		    error_code = $5,
+		    error_message = $6,
+		    updated_at = now()
+		WHERE id = $7
+		  AND salon_id = $8
+		  AND status = $9
+		RETURNING created_at, updated_at
+	`, attempt.Status, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes, attempt.ErrorCode, attempt.ErrorMessage, attempt.ID, attempt.SalonID, StatusPOSPending).Scan(&attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, pos.ErrNotFound
+		}
 		return nil, err
 	}
 
@@ -268,6 +318,40 @@ func (r *Repository) GetAppointmentForOwner(ctx context.Context, salonID string,
 	return &item, nil
 }
 
+func (r *Repository) CreatePendingAppointmentAction(ctx context.Context, record PendingAppointmentActionRecord) (*BookingAttempt, error) {
+	source := record.Source
+	if source == "" {
+		source = SourceOwnerDashboard
+	}
+	attempt := BookingAttempt{
+		SalonID:            record.SalonID,
+		Source:             source,
+		Status:             StatusPOSPending,
+		POSProvider:        record.Provider,
+		POSBookingID:       record.Appointment.POSAppointmentID,
+		POSIdempotencyKey:  record.POSIdempotencyKey,
+		CustomerName:       record.Appointment.CustomerName,
+		CustomerPhone:      record.Appointment.CustomerPhone,
+		CustomerEmail:      record.Appointment.CustomerEmail,
+		ServiceID:          record.Appointment.Service.ID,
+		StaffID:            record.Appointment.Staff.ID,
+		RequestedStartTime: record.RequestedStartTime,
+		RequestedEndTime:   record.RequestedEndTime,
+		Notes:              record.Notes,
+	}
+	if err := r.db.QueryRowContext(ctx, `
+		INSERT INTO booking_attempts (
+			salon_id, source, status, pos_provider, pos_booking_id, pos_idempotency_key, customer_name, customer_phone,
+			customer_email, service_id, staff_id, requested_start_time, requested_end_time, notes
+		)
+		VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), $7, $8, NULLIF($9, ''), $10, $11, $12, $13, NULLIF($14, ''))
+		RETURNING id::text, created_at, updated_at
+	`, attempt.SalonID, attempt.Source, attempt.Status, attempt.POSProvider, attempt.POSBookingID, attempt.POSIdempotencyKey, attempt.CustomerName, attempt.CustomerPhone, attempt.CustomerEmail, attempt.ServiceID, attempt.StaffID, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes).Scan(&attempt.ID, &attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &attempt, nil
+}
+
 func (r *Repository) SaveRescheduledAppointment(ctx context.Context, record RescheduledAppointmentRecord) (*Appointment, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -280,6 +364,7 @@ func (r *Repository) SaveRescheduledAppointment(ctx context.Context, record Resc
 		source = SourceOwnerDashboard
 	}
 	attempt := BookingAttempt{
+		ID:                 record.AttemptID,
 		SalonID:            record.Appointment.SalonID,
 		Source:             source,
 		Status:             StatusRescheduled,
@@ -295,13 +380,24 @@ func (r *Repository) SaveRescheduledAppointment(ctx context.Context, record Resc
 		Notes:              record.Notes,
 	}
 	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO booking_attempts (
-			salon_id, source, status, pos_provider, pos_booking_id, customer_name, customer_phone,
-			customer_email, service_id, staff_id, requested_start_time, requested_end_time, notes
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), $9, $10, $11, $12, NULLIF($13, ''))
-		RETURNING id::text, created_at, updated_at
-	`, attempt.SalonID, attempt.Source, attempt.Status, attempt.POSProvider, attempt.POSBookingID, attempt.CustomerName, attempt.CustomerPhone, attempt.CustomerEmail, attempt.ServiceID, attempt.StaffID, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes).Scan(&attempt.ID, &attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+		UPDATE booking_attempts
+		SET status = $1,
+		    pos_booking_id = NULLIF($2, ''),
+		    staff_id = $3,
+		    requested_start_time = $4,
+		    requested_end_time = $5,
+		    notes = NULLIF($6, ''),
+		    error_code = NULL,
+		    error_message = NULL,
+		    updated_at = now()
+		WHERE id = $7
+		  AND salon_id = $8
+		  AND status = $9
+		RETURNING created_at, updated_at
+	`, attempt.Status, attempt.POSBookingID, attempt.StaffID, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes, attempt.ID, attempt.SalonID, StatusPOSPending).Scan(&attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, pos.ErrNotFound
+		}
 		return nil, err
 	}
 
@@ -342,6 +438,7 @@ func (r *Repository) SaveCancelledAppointment(ctx context.Context, record Cancel
 		source = SourceOwnerDashboard
 	}
 	attempt := BookingAttempt{
+		ID:                 record.AttemptID,
 		SalonID:            record.Appointment.SalonID,
 		Source:             source,
 		Status:             StatusCancelled,
@@ -357,13 +454,21 @@ func (r *Repository) SaveCancelledAppointment(ctx context.Context, record Cancel
 		Notes:              record.Reason,
 	}
 	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO booking_attempts (
-			salon_id, source, status, pos_provider, pos_booking_id, customer_name, customer_phone,
-			customer_email, service_id, staff_id, requested_start_time, requested_end_time, notes
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), $9, $10, $11, $12, NULLIF($13, ''))
-		RETURNING id::text, created_at, updated_at
-	`, attempt.SalonID, attempt.Source, attempt.Status, attempt.POSProvider, attempt.POSBookingID, attempt.CustomerName, attempt.CustomerPhone, attempt.CustomerEmail, attempt.ServiceID, attempt.StaffID, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes).Scan(&attempt.ID, &attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+		UPDATE booking_attempts
+		SET status = $1,
+		    pos_booking_id = NULLIF($2, ''),
+		    notes = NULLIF($3, ''),
+		    error_code = NULL,
+		    error_message = NULL,
+		    updated_at = now()
+		WHERE id = $4
+		  AND salon_id = $5
+		  AND status = $6
+		RETURNING created_at, updated_at
+	`, attempt.Status, attempt.POSBookingID, attempt.Notes, attempt.ID, attempt.SalonID, StatusPOSPending).Scan(&attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, pos.ErrNotFound
+		}
 		return nil, err
 	}
 
@@ -400,6 +505,7 @@ func (r *Repository) SaveAppointmentActionFallback(ctx context.Context, record A
 		source = SourceOwnerDashboard
 	}
 	attempt := BookingAttempt{
+		ID:                 record.AttemptID,
 		SalonID:            record.SalonID,
 		Source:             source,
 		Status:             StatusFallbackPending,
@@ -417,14 +523,23 @@ func (r *Repository) SaveAppointmentActionFallback(ctx context.Context, record A
 		ErrorMessage:       record.ErrorMessage,
 	}
 	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO booking_attempts (
-			salon_id, source, status, pos_provider, pos_booking_id, customer_name, customer_phone,
-			customer_email, service_id, staff_id, requested_start_time, requested_end_time,
-			notes, error_code, error_message
-		)
-		VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, $7, NULLIF($8, ''), $9, $10, $11, $12, NULLIF($13, ''), $14, $15)
-		RETURNING id::text, created_at, updated_at
-	`, attempt.SalonID, attempt.Source, attempt.Status, attempt.POSProvider, attempt.POSBookingID, attempt.CustomerName, attempt.CustomerPhone, attempt.CustomerEmail, attempt.ServiceID, attempt.StaffID, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes, attempt.ErrorCode, attempt.ErrorMessage).Scan(&attempt.ID, &attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+		UPDATE booking_attempts
+		SET status = $1,
+		    pos_booking_id = NULLIF($2, ''),
+		    requested_start_time = $3,
+		    requested_end_time = $4,
+		    notes = NULLIF($5, ''),
+		    error_code = $6,
+		    error_message = $7,
+		    updated_at = now()
+		WHERE id = $8
+		  AND salon_id = $9
+		  AND status = $10
+		RETURNING created_at, updated_at
+	`, attempt.Status, attempt.POSBookingID, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes, attempt.ErrorCode, attempt.ErrorMessage, attempt.ID, attempt.SalonID, StatusPOSPending).Scan(&attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, pos.ErrNotFound
+		}
 		return nil, err
 	}
 

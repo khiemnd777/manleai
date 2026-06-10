@@ -37,6 +37,7 @@
 - [x] Add booking test UI and AI booking enablement gate.
 - [x] Add owner appointments dashboard with confirmed POS bookings and fallback pending requests.
 - [x] Add service/staff AI booking controls for synced Square records.
+- [x] Add Customers dashboard with internal customer activity and gated Square phone lookup.
 
 ## Milestone 4 Conversation Simulator
 

@@ -601,6 +601,9 @@ func buildSquareCreateBookingRequest(locationID string, input pos.CreateAppointm
 	if strings.TrimSpace(locationID) == "" {
 		return squareCreateBookingRequest{}, ErrLocationNotSelected
 	}
+	if strings.TrimSpace(input.IdempotencyKey) == "" {
+		return squareCreateBookingRequest{}, fmt.Errorf("idempotency key is required")
+	}
 	if strings.TrimSpace(input.CustomerID) == "" || strings.TrimSpace(input.ServiceID) == "" || strings.TrimSpace(input.StaffID) == "" || input.StartTime.IsZero() {
 		return squareCreateBookingRequest{}, fmt.Errorf("customer, service, staff, and start time are required")
 	}
@@ -611,7 +614,7 @@ func buildSquareCreateBookingRequest(locationID string, input pos.CreateAppointm
 		return squareCreateBookingRequest{}, fmt.Errorf("duration minutes is required")
 	}
 	return squareCreateBookingRequest{
-		IdempotencyKey: uuid.NewString(),
+		IdempotencyKey: strings.TrimSpace(input.IdempotencyKey),
 		Booking: squareBooking{
 			CustomerID:   strings.TrimSpace(input.CustomerID),
 			StartAt:      input.StartTime.UTC().Format(time.RFC3339),
@@ -633,6 +636,9 @@ func buildSquareUpdateBookingRequest(locationID string, input pos.RescheduleInpu
 	if strings.TrimSpace(locationID) == "" {
 		return squareUpdateBookingRequest{}, ErrLocationNotSelected
 	}
+	if strings.TrimSpace(input.IdempotencyKey) == "" {
+		return squareUpdateBookingRequest{}, fmt.Errorf("idempotency key is required")
+	}
 	if input.BookingVersion <= 0 {
 		return squareUpdateBookingRequest{}, fmt.Errorf("square booking version is required")
 	}
@@ -646,7 +652,7 @@ func buildSquareUpdateBookingRequest(locationID string, input pos.RescheduleInpu
 		return squareUpdateBookingRequest{}, fmt.Errorf("duration minutes is required")
 	}
 	return squareUpdateBookingRequest{
-		IdempotencyKey: uuid.NewString(),
+		IdempotencyKey: strings.TrimSpace(input.IdempotencyKey),
 		Booking: squareBooking{
 			Version:      input.BookingVersion,
 			StartAt:      input.StartTime.UTC().Format(time.RFC3339),
@@ -665,11 +671,14 @@ func buildSquareUpdateBookingRequest(locationID string, input pos.RescheduleInpu
 }
 
 func buildSquareCancelBookingRequest(input pos.CancelInput) (squareCancelBookingRequest, error) {
+	if strings.TrimSpace(input.IdempotencyKey) == "" {
+		return squareCancelBookingRequest{}, fmt.Errorf("idempotency key is required")
+	}
 	if input.BookingVersion <= 0 {
 		return squareCancelBookingRequest{}, fmt.Errorf("square booking version is required")
 	}
 	return squareCancelBookingRequest{
-		IdempotencyKey: uuid.NewString(),
+		IdempotencyKey: strings.TrimSpace(input.IdempotencyKey),
 		BookingVersion: input.BookingVersion,
 	}, nil
 }

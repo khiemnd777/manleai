@@ -153,6 +153,7 @@ func TestBuildSquareAvailabilityRequest(t *testing.T) {
 func TestBuildSquareCreateBookingRequestIncludesRequiredSegmentFields(t *testing.T) {
 	start := time.Date(2026, 6, 10, 15, 0, 0, 0, time.UTC)
 	request, err := buildSquareCreateBookingRequest("loc_1", pos.CreateAppointmentInput{
+		IdempotencyKey:  "attempt-key-1",
 		CustomerID:      "cust_1",
 		ServiceID:       "svc_1",
 		ServiceVersion:  123,
@@ -164,8 +165,8 @@ func TestBuildSquareCreateBookingRequestIncludesRequiredSegmentFields(t *testing
 	if err != nil {
 		t.Fatalf("build booking request failed: %v", err)
 	}
-	if request.IdempotencyKey == "" {
-		t.Fatalf("expected idempotency key")
+	if request.IdempotencyKey != "attempt-key-1" {
+		t.Fatalf("idempotency key = %s, want attempt-key-1", request.IdempotencyKey)
 	}
 	if request.Booking.LocationID != "loc_1" || request.Booking.CustomerID != "cust_1" || request.Booking.StartAt != "2026-06-10T15:00:00Z" {
 		t.Fatalf("unexpected booking fields: %#v", request.Booking)
@@ -189,6 +190,7 @@ func TestBuildSquareCreateBookingRequestIncludesRequiredSegmentFields(t *testing
 
 func TestBuildSquareCreateBookingRequestRequiresServiceVersion(t *testing.T) {
 	_, err := buildSquareCreateBookingRequest("loc_1", pos.CreateAppointmentInput{
+		IdempotencyKey:  "attempt-key-1",
 		CustomerID:      "cust_1",
 		ServiceID:       "svc_1",
 		StaffID:         "staff_1",
@@ -203,6 +205,7 @@ func TestBuildSquareCreateBookingRequestRequiresServiceVersion(t *testing.T) {
 func TestBuildSquareUpdateBookingRequestIncludesVersionAndSegment(t *testing.T) {
 	start := time.Date(2026, 6, 11, 16, 0, 0, 0, time.UTC)
 	request, err := buildSquareUpdateBookingRequest("loc_1", pos.RescheduleInput{
+		IdempotencyKey:  "attempt-key-2",
 		BookingVersion:  7,
 		ServiceID:       "svc_1",
 		ServiceVersion:  123,
@@ -214,8 +217,8 @@ func TestBuildSquareUpdateBookingRequestIncludesVersionAndSegment(t *testing.T) 
 	if err != nil {
 		t.Fatalf("build update booking request failed: %v", err)
 	}
-	if request.IdempotencyKey == "" {
-		t.Fatalf("expected idempotency key")
+	if request.IdempotencyKey != "attempt-key-2" {
+		t.Fatalf("idempotency key = %s, want attempt-key-2", request.IdempotencyKey)
 	}
 	if request.Booking.Version != 7 || request.Booking.LocationID != "loc_1" || request.Booking.StartAt != "2026-06-11T16:00:00Z" {
 		t.Fatalf("unexpected booking fields: %#v", request.Booking)
@@ -231,14 +234,15 @@ func TestBuildSquareUpdateBookingRequestIncludesVersionAndSegment(t *testing.T) 
 
 func TestBuildSquareCancelBookingRequestIncludesVersion(t *testing.T) {
 	request, err := buildSquareCancelBookingRequest(pos.CancelInput{
+		IdempotencyKey: "attempt-key-3",
 		BookingVersion: 7,
 		Reason:         "Customer requested cancellation",
 	})
 	if err != nil {
 		t.Fatalf("build cancel booking request failed: %v", err)
 	}
-	if request.IdempotencyKey == "" {
-		t.Fatalf("expected idempotency key")
+	if request.IdempotencyKey != "attempt-key-3" {
+		t.Fatalf("idempotency key = %s, want attempt-key-3", request.IdempotencyKey)
 	}
 	if request.BookingVersion != 7 {
 		t.Fatalf("booking version = %d, want 7", request.BookingVersion)
@@ -246,7 +250,7 @@ func TestBuildSquareCancelBookingRequestIncludesVersion(t *testing.T) {
 }
 
 func TestBuildSquareCancelBookingRequestRequiresVersion(t *testing.T) {
-	_, err := buildSquareCancelBookingRequest(pos.CancelInput{})
+	_, err := buildSquareCancelBookingRequest(pos.CancelInput{IdempotencyKey: "attempt-key-3"})
 	if err == nil {
 		t.Fatalf("expected missing booking version error")
 	}

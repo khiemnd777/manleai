@@ -61,6 +61,41 @@ export type POSStaffMember = {
   active: boolean;
 };
 
+export type POSCustomer = {
+  id?: string;
+  pos_customer_id: string;
+  name: string;
+  phone: string;
+  email?: string;
+};
+
+export type CustomerRecord = {
+  key: string;
+  name?: string;
+  phone?: string;
+  email?: string;
+  last_activity_at: string;
+  last_activity_source: string;
+  last_outcome: string;
+  confirmed_appointments: number;
+  pending_requests: number;
+  call_count: number;
+  handoff_count: number;
+  appointment_ids?: string[];
+  booking_attempt_ids?: string[];
+  call_session_ids?: string[];
+  latest_appointment_at?: string;
+  latest_request_at?: string;
+};
+
+export type CustomerSummary = {
+  total_known_customers: number;
+  confirmed_appointments: number;
+  pending_requests: number;
+  customers_with_calls: number;
+  last_customer_activity_at?: string;
+};
+
 export type AppointmentRecord = {
   id: string;
   salon_id: string;

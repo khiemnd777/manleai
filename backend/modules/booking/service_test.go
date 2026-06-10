@@ -21,6 +21,7 @@ func TestCreateStoresConfirmedBookingOnlyAfterPOSSuccess(t *testing.T) {
 			Status:                StatusConfirmed,
 		},
 	}
+	provider.store = store
 	service := NewService(store, []pos.POSProvider{provider})
 
 	attempt, err := service.Create(context.Background(), "salon_1", "owner_1", validCreateRequest())
@@ -38,6 +39,15 @@ func TestCreateStoresConfirmedBookingOnlyAfterPOSSuccess(t *testing.T) {
 	}
 	if store.confirmed == nil {
 		t.Fatalf("confirmed booking was not persisted")
+	}
+	if store.pending == nil {
+		t.Fatalf("pending booking attempt was not created before POS call")
+	}
+	if !provider.searchSawPending {
+		t.Fatalf("provider search did not see pending booking attempt")
+	}
+	if provider.lastCreateInput.IdempotencyKey != store.pending.POSIdempotencyKey {
+		t.Fatalf("idempotency key = %s, want %s", provider.lastCreateInput.IdempotencyKey, store.pending.POSIdempotencyKey)
 	}
 	if store.fallback != nil {
 		t.Fatalf("fallback should not be persisted on POS success")
@@ -71,8 +81,14 @@ func TestCreateStoresFallbackPendingWhenPOSBookingFails(t *testing.T) {
 	if store.confirmed != nil {
 		t.Fatalf("confirmed booking should not be persisted on POS failure")
 	}
+	if store.pending == nil {
+		t.Fatalf("pending booking attempt was not created before POS failure")
+	}
 	if store.fallback == nil {
 		t.Fatalf("fallback was not persisted")
+	}
+	if store.fallback.AttemptID != "attempt_1" {
+		t.Fatalf("fallback attempt id = %s, want attempt_1", store.fallback.AttemptID)
 	}
 	if store.fallback.ErrorCode != pos.ErrorBookingConflict {
 		t.Fatalf("error code = %s, want %s", store.fallback.ErrorCode, pos.ErrorBookingConflict)
@@ -116,6 +132,12 @@ func TestReschedulePersistsOnlyAfterPOSSuccess(t *testing.T) {
 	if provider.lastRescheduleInput.BookingVersion != 7 {
 		t.Fatalf("booking version = %d, want 7", provider.lastRescheduleInput.BookingVersion)
 	}
+	if store.pendingAction == nil {
+		t.Fatalf("pending reschedule attempt was not created before POS call")
+	}
+	if provider.lastRescheduleInput.IdempotencyKey != store.pendingAction.POSIdempotencyKey {
+		t.Fatalf("idempotency key = %s, want %s", provider.lastRescheduleInput.IdempotencyKey, store.pendingAction.POSIdempotencyKey)
+	}
 }
 
 func TestRescheduleStoresFallbackWhenPOSFails(t *testing.T) {
@@ -140,6 +162,9 @@ func TestRescheduleStoresFallbackWhenPOSFails(t *testing.T) {
 	}
 	if store.actionFallback == nil {
 		t.Fatalf("action fallback was not persisted")
+	}
+	if store.actionFallback.AttemptID != "attempt_action_1" {
+		t.Fatalf("fallback attempt id = %s, want attempt_action_1", store.actionFallback.AttemptID)
 	}
 	if store.actionFallback.ErrorCode != pos.ErrorBookingConflict {
 		t.Fatalf("error code = %s, want %s", store.actionFallback.ErrorCode, pos.ErrorBookingConflict)
@@ -181,6 +206,12 @@ func TestCancelPersistsOnlyAfterPOSSuccess(t *testing.T) {
 	if provider.lastCancelInput.BookingVersion != 7 {
 		t.Fatalf("booking version = %d, want 7", provider.lastCancelInput.BookingVersion)
 	}
+	if store.pendingAction == nil {
+		t.Fatalf("pending cancel attempt was not created before POS call")
+	}
+	if provider.lastCancelInput.IdempotencyKey != store.pendingAction.POSIdempotencyKey {
+		t.Fatalf("idempotency key = %s, want %s", provider.lastCancelInput.IdempotencyKey, store.pendingAction.POSIdempotencyKey)
+	}
 }
 
 func TestCancelStoresFallbackWhenPOSFails(t *testing.T) {
@@ -205,6 +236,9 @@ func TestCancelStoresFallbackWhenPOSFails(t *testing.T) {
 	}
 	if store.actionFallback == nil {
 		t.Fatalf("action fallback was not persisted")
+	}
+	if store.actionFallback.AttemptID != "attempt_action_1" {
+		t.Fatalf("fallback attempt id = %s, want attempt_action_1", store.actionFallback.AttemptID)
 	}
 	if store.actionFallback.ErrorCode != pos.ErrorPermissionDenied {
 		t.Fatalf("error code = %s, want %s", store.actionFallback.ErrorCode, pos.ErrorPermissionDenied)
@@ -231,8 +265,10 @@ type fakeStore struct {
 	service        ServiceRef
 	staff          StaffRef
 	appointment    AppointmentActionRef
+	pending        *PendingBookingRecord
 	confirmed      *ConfirmedBookingRecord
 	fallback       *FallbackBookingRecord
+	pendingAction  *PendingAppointmentActionRecord
 	rescheduled    *RescheduledAppointmentRecord
 	cancelled      *CancelledAppointmentRecord
 	actionFallback *AppointmentActionFallbackRecord
@@ -296,11 +332,30 @@ func (f *fakeStore) GetBookableStaff(ctx context.Context, salonID string, staffI
 	return &f.staff, nil
 }
 
-func (f *fakeStore) SaveConfirmedBooking(ctx context.Context, record ConfirmedBookingRecord) (*BookingAttempt, error) {
-	f.confirmed = &record
+func (f *fakeStore) CreatePendingBookingAttempt(ctx context.Context, record PendingBookingRecord) (*BookingAttempt, error) {
+	f.pending = &record
 	return &BookingAttempt{
 		ID:                 "attempt_1",
 		SalonID:            record.SalonID,
+		Source:             record.Source,
+		Status:             StatusPOSPending,
+		POSProvider:        record.Provider,
+		POSIdempotencyKey:  record.POSIdempotencyKey,
+		CustomerName:       record.CustomerName,
+		CustomerPhone:      record.CustomerPhone,
+		ServiceID:          record.Service.ID,
+		StaffID:            record.Staff.ID,
+		RequestedStartTime: record.StartTime,
+		RequestedEndTime:   record.EndTime,
+	}, nil
+}
+
+func (f *fakeStore) SaveConfirmedBooking(ctx context.Context, record ConfirmedBookingRecord) (*BookingAttempt, error) {
+	f.confirmed = &record
+	return &BookingAttempt{
+		ID:                 record.AttemptID,
+		SalonID:            record.SalonID,
+		Source:             record.Source,
 		Status:             StatusConfirmed,
 		POSProvider:        record.Provider,
 		POSBookingID:       record.POSBookingID,
@@ -322,8 +377,9 @@ func (f *fakeStore) SaveConfirmedBooking(ctx context.Context, record ConfirmedBo
 func (f *fakeStore) SaveFallbackBooking(ctx context.Context, record FallbackBookingRecord) (*BookingAttempt, error) {
 	f.fallback = &record
 	return &BookingAttempt{
-		ID:                 "attempt_1",
+		ID:                 record.AttemptID,
 		SalonID:            record.SalonID,
+		Source:             record.Source,
 		Status:             StatusFallbackPending,
 		POSProvider:        record.Provider,
 		CustomerName:       record.CustomerName,
@@ -342,6 +398,25 @@ func (f *fakeStore) GetAppointmentForOwner(ctx context.Context, salonID string, 
 		return nil, pos.ErrNotFound
 	}
 	return &f.appointment, nil
+}
+
+func (f *fakeStore) CreatePendingAppointmentAction(ctx context.Context, record PendingAppointmentActionRecord) (*BookingAttempt, error) {
+	f.pendingAction = &record
+	return &BookingAttempt{
+		ID:                 "attempt_action_1",
+		SalonID:            record.SalonID,
+		Source:             record.Source,
+		Status:             StatusPOSPending,
+		POSProvider:        record.Provider,
+		POSBookingID:       record.Appointment.POSAppointmentID,
+		POSIdempotencyKey:  record.POSIdempotencyKey,
+		CustomerName:       record.Appointment.CustomerName,
+		CustomerPhone:      record.Appointment.CustomerPhone,
+		ServiceID:          record.Appointment.Service.ID,
+		StaffID:            record.Appointment.Staff.ID,
+		RequestedStartTime: record.RequestedStartTime,
+		RequestedEndTime:   record.RequestedEndTime,
+	}, nil
 }
 
 func (f *fakeStore) SaveRescheduledAppointment(ctx context.Context, record RescheduledAppointmentRecord) (*Appointment, error) {
@@ -364,7 +439,7 @@ func (f *fakeStore) SaveCancelledAppointment(ctx context.Context, record Cancell
 func (f *fakeStore) SaveAppointmentActionFallback(ctx context.Context, record AppointmentActionFallbackRecord) (*BookingAttempt, error) {
 	f.actionFallback = &record
 	return &BookingAttempt{
-		ID:                 "attempt_action_1",
+		ID:                 record.AttemptID,
 		SalonID:            record.SalonID,
 		Status:             StatusFallbackPending,
 		POSProvider:        record.Provider,
@@ -402,8 +477,11 @@ type fakeProvider struct {
 	createBookingErr       error
 	rescheduleErr          error
 	cancelErr              error
+	store                  *fakeStore
+	lastCreateInput        pos.CreateAppointmentInput
 	lastRescheduleInput    pos.RescheduleInput
 	lastCancelInput        pos.CancelInput
+	searchSawPending       bool
 	createAppointmentCalls int
 	rescheduleCalls        int
 	cancelCalls            int
@@ -434,6 +512,9 @@ func (f *fakeProvider) ListStaff(ctx context.Context, salonID string) ([]pos.Sta
 }
 
 func (f *fakeProvider) SearchCustomerByPhone(ctx context.Context, salonID string, phone string) (*pos.Customer, error) {
+	if f.store != nil && f.store.pending != nil {
+		f.searchSawPending = true
+	}
 	if f.searchCustomerErr != nil {
 		return nil, f.searchCustomerErr
 	}
@@ -453,6 +534,7 @@ func (f *fakeProvider) CheckAvailability(ctx context.Context, salonID string, in
 
 func (f *fakeProvider) CreateAppointment(ctx context.Context, salonID string, input pos.CreateAppointmentInput) (*pos.Appointment, error) {
 	f.createAppointmentCalls++
+	f.lastCreateInput = input
 	if f.createBookingErr != nil {
 		return nil, f.createBookingErr
 	}

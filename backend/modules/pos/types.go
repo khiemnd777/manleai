@@ -147,6 +147,7 @@ type AvailabilityInput struct {
 }
 
 type CreateAppointmentInput struct {
+	IdempotencyKey  string
 	CustomerID      string
 	ServiceID       string
 	ServiceVersion  int64
@@ -157,6 +158,7 @@ type CreateAppointmentInput struct {
 }
 
 type RescheduleInput struct {
+	IdempotencyKey  string
 	BookingVersion  int
 	ServiceID       string
 	ServiceVersion  int64
@@ -167,6 +169,7 @@ type RescheduleInput struct {
 }
 
 type CancelInput struct {
+	IdempotencyKey string
 	BookingVersion int
 	Reason         string
 }

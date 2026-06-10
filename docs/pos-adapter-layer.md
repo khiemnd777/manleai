@@ -1,6 +1,6 @@
 # POS Adapter Layer
 
-The project is POS-first. Internal booking behavior must never depend directly on Square, Vagaro, GlossGenius, Fresha, Booksy, Mindbody, Boulevard, Zenoti, or any other provider payload.
+The project is POS-first, but backend booking workflow state is the base. Internal booking behavior must never depend directly on Square, Vagaro, GlossGenius, Fresha, Booksy, Mindbody, Boulevard, Zenoti, or any other provider payload. POS adapters are outbound writers/readers behind the provider-neutral contract.
 
 ## Interface
 
@@ -43,7 +43,7 @@ type POSProvider interface {
 - Cancel booking
 - POS sync logs and POS error logs
 
-The provider-neutral booking service records provider failures as fallback pending attempts. Real Square payloads must remain inside `SquareAdapter`, not in handlers or booking services.
+The provider-neutral booking service creates backend `booking_attempts` before outbound POS writes, passes backend-owned idempotency keys into the adapter, and finalizes the same attempts as confirmed/rescheduled/cancelled or fallback pending. Real Square payloads must remain inside `SquareAdapter`, not in handlers or booking services.
 
 ## Adding Future Providers
 
