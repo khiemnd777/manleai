@@ -42,6 +42,31 @@ type CancelRequest struct {
 	Source string `json:"-"`
 }
 
+type AvailabilityRequest struct {
+	ServiceID     string `json:"service_id"`
+	StaffID       string `json:"staff_id"`
+	PreferredDate string `json:"preferred_date"`
+	Limit         int    `json:"limit"`
+}
+
+type AvailabilityResult struct {
+	ServiceID       string             `json:"service_id"`
+	ServiceName     string             `json:"service_name"`
+	StaffID         string             `json:"staff_id,omitempty"`
+	StaffName       string             `json:"staff_name,omitempty"`
+	PreferredDate   string             `json:"preferred_date"`
+	DurationMinutes int                `json:"duration_minutes"`
+	Timezone        string             `json:"timezone"`
+	Slots           []AvailabilitySlot `json:"slots"`
+}
+
+type AvailabilitySlot struct {
+	StartTime time.Time `json:"start_time"`
+	EndTime   time.Time `json:"end_time"`
+	StaffID   string    `json:"staff_id,omitempty"`
+	StaffName string    `json:"staff_name,omitempty"`
+}
+
 type BookingAttempt struct {
 	ID                 string       `json:"id"`
 	SalonID            string       `json:"salon_id"`
@@ -100,6 +125,18 @@ type StaffRef struct {
 	POSProvider string
 	POSStaffID  string
 	Name        string
+}
+
+type Schedule struct {
+	Timezone      string
+	BusinessHours []BusinessHour
+}
+
+type BusinessHour struct {
+	DayOfWeek int
+	OpenTime  string
+	CloseTime string
+	IsClosed  bool
 }
 
 type AppointmentActionRef struct {

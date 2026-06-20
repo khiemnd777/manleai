@@ -11,13 +11,13 @@ import (
 )
 
 type Service struct {
-	repo         *Repository
+	repo         Store
 	conversation ConversationEngine
 	cfg          config.VoiceConfig
 	providers    AIProviders
 }
 
-func NewService(repo *Repository, conversation ConversationEngine, cfg config.VoiceConfig, providers AIProviders) *Service {
+func NewService(repo Store, conversation ConversationEngine, cfg config.VoiceConfig, providers AIProviders) *Service {
 	return &Service{
 		repo:         repo,
 		conversation: conversation,
@@ -36,6 +36,10 @@ func (s *Service) Status(ctx context.Context, salonID string, ownerUserID string
 	if err != nil {
 		return nil, err
 	}
+	bookingReadiness, err := s.repo.GetPhoneBookingReadiness(ctx, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
 
 	status := &Status{
 		Provider:              defaultProvider(s.cfg.Provider),
@@ -46,6 +50,7 @@ func (s *Service) Status(ctx context.Context, salonID string, ownerUserID string
 		RecordingWebhookURL:   s.webhookURL(s.cfg.Twilio.RecordingPath),
 		SalonPhone:            salon.Phone,
 		AI:                    s.aiStatus(),
+		Booking:               *bookingReadiness,
 		InputMode:             s.inputMode(),
 	}
 	switch {
@@ -56,6 +61,7 @@ func (s *Service) Status(ctx context.Context, salonID string, ownerUserID string
 	default:
 		status.Ready = true
 	}
+	status.PhoneBookingReady = status.Ready && bookingReadiness.Ready
 	return status, nil
 }
 

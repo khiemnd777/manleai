@@ -33,6 +33,95 @@ func (r *Repository) GetSalonVoiceStatus(ctx context.Context, salonID string, ow
 	return &status, nil
 }
 
+func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID string, ownerUserID string) (*PhoneBookingReadiness, error) {
+	readiness := PhoneBookingReadiness{}
+	err := r.db.QueryRowContext(ctx, `
+		SELECT
+			s.ai_enabled,
+			EXISTS (
+				SELECT 1
+				FROM pos_connections pc
+				WHERE pc.salon_id = s.id
+				  AND pc.provider = 'square'
+				  AND pc.status NOT IN ('not_connected', 'error', 'expired_token', 'disabled')
+				  AND COALESCE(pc.location_id, '') <> ''
+			) AS square_connected,
+			EXISTS (
+				SELECT 1
+				FROM pos_connections pc
+				WHERE pc.salon_id = s.id
+				  AND pc.provider = 'square'
+				  AND pc.status NOT IN ('not_connected', 'error', 'expired_token', 'disabled')
+				  AND COALESCE(pc.location_id, '') <> ''
+				  AND pc.last_sync_at IS NOT NULL
+			) AS square_synced,
+			(
+				SELECT COUNT(*)
+				FROM services svc
+				WHERE svc.salon_id = s.id
+				  AND svc.pos_provider = 'square'
+				  AND svc.active = true
+				  AND svc.ai_bookable = true
+				  AND COALESCE(svc.pos_service_id, '') <> ''
+				  AND COALESCE(svc.pos_service_version, 0) > 0
+				  AND svc.duration_minutes > 0
+			) AS service_count,
+			(
+				SELECT COUNT(*)
+				FROM staff st
+				WHERE st.salon_id = s.id
+				  AND st.pos_provider = 'square'
+				  AND st.active = true
+				  AND st.ai_bookable = true
+				  AND COALESCE(st.pos_staff_id, '') <> ''
+			) AS staff_count,
+			(
+				SELECT COUNT(*)
+				FROM salon_business_hours bh
+				WHERE bh.salon_id = s.id
+				  AND bh.is_closed = false
+				  AND bh.open_time IS NOT NULL
+				  AND bh.close_time IS NOT NULL
+				  AND bh.close_time > bh.open_time
+			) AS business_hours_count
+		FROM salons s
+		WHERE s.id = $1
+		  AND s.owner_user_id = $2
+	`, salonID, ownerUserID).Scan(
+		&readiness.AIEnabled,
+		&readiness.SquareConnected,
+		&readiness.SquareSynced,
+		&readiness.ServiceCount,
+		&readiness.StaffCount,
+		&readiness.BusinessHoursCount,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	readiness.Checks = []ReadinessCheck{
+		{Key: "enable_ai_booking", Label: "Enable AI booking", Complete: readiness.AIEnabled, Message: incompleteReadinessMessage(readiness.AIEnabled, "AI booking is disabled for this salon.")},
+		{Key: "connect_square", Label: "Connect Square Appointments", Complete: readiness.SquareConnected, Message: incompleteReadinessMessage(readiness.SquareConnected, "Square Appointments is not connected with a selected location.")},
+		{Key: "sync_square", Label: "Sync Square calendar", Complete: readiness.SquareSynced, Message: incompleteReadinessMessage(readiness.SquareSynced, "Square Appointments services and staff have not been synced.")},
+		{Key: "bookable_services", Label: "AI-bookable services", Complete: readiness.ServiceCount > 0, Message: incompleteReadinessMessage(readiness.ServiceCount > 0, "No active AI-bookable service is synced from Square.")},
+		{Key: "bookable_staff", Label: "AI-bookable staff", Complete: readiness.StaffCount > 0, Message: incompleteReadinessMessage(readiness.StaffCount > 0, "No active AI-bookable staff member is synced from Square.")},
+		{Key: "business_hours", Label: "Business hours", Complete: readiness.BusinessHoursCount > 0, Message: incompleteReadinessMessage(readiness.BusinessHoursCount > 0, "Salon business hours are not configured.")},
+	}
+	readiness.Ready = true
+	for _, check := range readiness.Checks {
+		if !check.Complete {
+			readiness.Ready = false
+			if readiness.BlockedReason == "" {
+				readiness.BlockedReason = check.Message
+			}
+		}
+	}
+	return &readiness, nil
+}
+
 func (r *Repository) FindSalonByPhone(ctx context.Context, phone string) (*InboundSalon, error) {
 	var salon InboundSalon
 	err := r.db.QueryRowContext(ctx, `
@@ -50,6 +139,13 @@ func (r *Repository) FindSalonByPhone(ctx context.Context, phone string) (*Inbou
 		return nil, err
 	}
 	return &salon, nil
+}
+
+func incompleteReadinessMessage(complete bool, message string) string {
+	if complete {
+		return ""
+	}
+	return message
 }
 
 func (r *Repository) FindCallRoute(ctx context.Context, provider string, providerCallID string) (*CallRoute, error) {

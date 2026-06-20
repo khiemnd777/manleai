@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest } from "@/lib/api/client";
 import type {
   ConversationSession,
+  OfferedSlot,
   OwnerCorrection,
   POSConnection,
   Salon,
@@ -405,6 +406,8 @@ export function CallsDashboard() {
               No session selected.
             </div>
           )}
+
+          <BookingNegotiationPanel session={selectedSession} />
         </Card>
       </div>
 
@@ -589,6 +592,72 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function BookingNegotiationPanel({ session }: { session: ConversationSession | null }) {
+  const slots = session?.offered_slots ?? [];
+  const status = bookingNegotiationStatus(session);
+
+  return (
+    <div className="mt-5 rounded-md border border-line bg-slate-50 p-4">
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div>
+          <div className="text-sm font-semibold text-ink">Booking negotiation</div>
+          <div className="mt-1 text-xs leading-5 text-muted">
+            Slot offers, selected time, and Square Appointments confirmation state.
+          </div>
+        </div>
+        <Badge value={status} />
+      </div>
+
+      {!session ? (
+        <div className="mt-4 rounded-md border border-line bg-white p-3 text-sm leading-6 text-muted">
+          No session selected.
+        </div>
+      ) : (
+        <div className="mt-4 space-y-4">
+          {slots.length > 0 ? (
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-muted">Offered Square slots</div>
+              <div className="mt-2 space-y-2">
+                {slots.map((slot) => (
+                  <OfferedSlotRow key={`${slot.start_time}-${slot.staff_id}`} slot={slot} />
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-md border border-line bg-white p-3 text-sm leading-6 text-muted">
+              No active slot offers for this session. Selected or completed sessions clear offered slots.
+            </div>
+          )}
+
+          <dl className="space-y-4">
+            <Info
+              label="Selected slot"
+              value={session.requested_start_time ? selectedSlotLabel(session) : "Not selected"}
+            />
+            <Info label="Square confirmation" value={squareConfirmationLabel(session)} />
+          </dl>
+
+          <div className="rounded-md border border-line bg-white p-3 text-xs leading-5 text-muted">
+            Confirmed only after Square Appointments returns a booking ID through the booking service.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OfferedSlotRow({ slot }: { slot: OfferedSlot }) {
+  return (
+    <div className="rounded-md border border-line bg-white p-3">
+      <div className="text-sm font-semibold text-ink">{formatDateTime(slot.start_time)}</div>
+      <div className="mt-1 text-xs leading-5 text-muted">
+        {formatTimeRange(slot.start_time, slot.end_time)}
+        {slot.staff_name ? ` with ${slot.staff_name}` : ""}
+      </div>
+    </div>
+  );
+}
+
 function TranscriptBubble({ item, onAddCorrection }: { item: TranscriptMessage; onAddCorrection: () => void }) {
   const isCustomer = item.speaker === "customer";
   const isTool = item.speaker === "tool";
@@ -680,4 +749,48 @@ function formatDateTime(value: string) {
     hour: "numeric",
     minute: "2-digit"
   }).format(new Date(value));
+}
+
+function formatTimeRange(start: string, end: string) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit"
+  });
+  return `${formatter.format(new Date(start))} - ${formatter.format(new Date(end))}`;
+}
+
+function selectedSlotLabel(session: ConversationSession) {
+  if (!session.requested_start_time) return "Not selected";
+  return session.staff_name
+    ? `${formatDateTime(session.requested_start_time)} with ${session.staff_name}`
+    : formatDateTime(session.requested_start_time);
+}
+
+function squareConfirmationLabel(session: ConversationSession) {
+  if (session.outcome === "booking_confirmed" && session.booking_attempt_id && session.appointment_id) {
+    return `Confirmed by Square Appointments (${session.booking_attempt_id})`;
+  }
+  if (session.outcome === "booking_fallback_pending") {
+    return session.booking_attempt_id
+      ? `Pending owner review (${session.booking_attempt_id})`
+      : "Pending owner review";
+  }
+  return "Not confirmed";
+}
+
+function bookingNegotiationStatus(session: ConversationSession | null) {
+  if (!session) return "not_started";
+  if (session.outcome === "booking_confirmed" && session.booking_attempt_id && session.appointment_id) {
+    return "confirmed";
+  }
+  if (session.outcome === "booking_fallback_pending") {
+    return "pending_request";
+  }
+  if ((session.offered_slots ?? []).length > 0) {
+    return "slots_offered";
+  }
+  if (session.requested_start_time) {
+    return "slot_selected";
+  }
+  return "not_started";
 }

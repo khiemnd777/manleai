@@ -20,6 +20,8 @@ var (
 	emailPattern        = regexp.MustCompile(`(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}`)
 	dateTimePattern     = regexp.MustCompile(`(?i)(\d{4}-\d{2}-\d{2})(?:[ t]+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)`)
 	relativeTimePattern = regexp.MustCompile(`(?i)\b(today|tomorrow)\b\s*(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?`)
+	dateOnlyPattern     = regexp.MustCompile(`(?i)\b(\d{4}-\d{2}-\d{2})\b`)
+	relativeDayPattern  = regexp.MustCompile(`(?i)\b(today|tomorrow)\b`)
 	namePatterns        = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\bmy name is\s+([^,.;]+)`),
 		regexp.MustCompile(`(?i)\bthis is\s+([^,.;]+)`),
@@ -129,7 +131,15 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	}
 
 	next := *session
+	selectedOfferedSlot := false
 	applyExtraction(&next, message, services, staff, timezoneLocation(cfg.Timezone), s.now)
+	if selected := selectOfferedSlot(message, session.OfferedSlots); selected != nil {
+		next.RequestedStartTime = &selected.StartTime
+		next.StaffID = selected.StaffID
+		next.StaffName = selected.StaffName
+		next.OfferedSlots = nil
+		selectedOfferedSlot = true
+	}
 	intent := resolveIntent(session.Intent, message, next)
 	next.Intent = intent
 
@@ -148,6 +158,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 			ServiceID:          next.ServiceID,
 			StaffID:            next.StaffID,
 			RequestedStartTime: next.RequestedStartTime,
+			OfferedSlots:       next.OfferedSlots,
 			Summary:            summaryFor(next, services, staff, cfg),
 		},
 	}
@@ -170,7 +181,28 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonAIBookingDisabled, "AI booking is not enabled yet. I can take the request for the owner, but this is not a confirmed appointment.", services, staff, cfg)
 	}
 
+	if next.ServiceID != "" && next.RequestedStartTime != nil && !selectedOfferedSlot {
+		available, err := s.applyAvailabilityForRequestedTime(ctx, ownerUserID, &turn, &next, services, staff, cfg)
+		if err != nil {
+			return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check Square Appointments availability, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
+		}
+		if !available {
+			s.applyReplyGenerator(ctx, &turn, next, cfg, "requested_start_time", knowledge)
+			return s.store.SaveTurn(ctx, turn)
+		}
+	}
+
 	if missing := missingBookingField(next); missing != "" {
+		if missing == "requested_start_time" {
+			preferredDate := preferredDateFromMessage(message, nil, timezoneLocation(cfg.Timezone), s.now)
+			if preferredDate != "" && next.ServiceID != "" {
+				if err := s.offerAvailableSlots(ctx, ownerUserID, &turn, &next, services, staff, preferredDate, false, cfg); err != nil {
+					return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check Square Appointments availability, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
+				}
+				s.applyReplyGenerator(ctx, &turn, next, cfg, missing, knowledge)
+				return s.store.SaveTurn(ctx, turn)
+			}
+		}
 		turn.AIMessage = promptForMissingField(missing)
 		s.applyReplyGenerator(ctx, &turn, next, cfg, missing, knowledge)
 		return s.store.SaveTurn(ctx, turn)
@@ -185,6 +217,143 @@ func (s *Service) List(ctx context.Context, salonID string, ownerUserID string, 
 
 func (s *Service) Get(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error) {
 	return s.store.GetSessionForOwner(ctx, strings.TrimSpace(salonID), strings.TrimSpace(ownerUserID), strings.TrimSpace(sessionID))
+}
+
+func (s *Service) applyAvailabilityForRequestedTime(ctx context.Context, ownerUserID string, turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (bool, error) {
+	if session == nil || session.RequestedStartTime == nil {
+		return false, nil
+	}
+	preferredDate := preferredDateFromMessage("", session.RequestedStartTime, timezoneLocation(cfg.Timezone), s.now)
+	if preferredDate == "" {
+		return false, nil
+	}
+	result, err := s.availableSlots(ctx, turn.SalonID, ownerUserID, *session, preferredDate)
+	if err != nil {
+		return false, err
+	}
+	for _, slot := range result.Slots {
+		if !slot.StartTime.Equal(*session.RequestedStartTime) {
+			continue
+		}
+		if session.StaffID != "" && slot.StaffID != session.StaffID {
+			continue
+		}
+		session.StaffID = slot.StaffID
+		session.StaffName = slot.StaffName
+		session.OfferedSlots = nil
+		syncTurnUpdate(turn, *session, services, staff, cfg)
+		return true, nil
+	}
+	applyAvailabilityOffer(turn, session, services, staff, cfg, result, true)
+	return false, nil
+}
+
+func (s *Service) offerAvailableSlots(ctx context.Context, ownerUserID string, turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, preferredDate string, unavailableRequestedTime bool, cfg *RuntimeConfig) error {
+	result, err := s.availableSlots(ctx, turn.SalonID, ownerUserID, *session, preferredDate)
+	if err != nil {
+		return err
+	}
+	applyAvailabilityOffer(turn, session, services, staff, cfg, result, unavailableRequestedTime)
+	return nil
+}
+
+func (s *Service) availableSlots(ctx context.Context, salonID string, ownerUserID string, session Session, preferredDate string) (*booking.AvailabilityResult, error) {
+	if s.bookingTool == nil {
+		return nil, fmt.Errorf("booking tool is unavailable")
+	}
+	return s.bookingTool.AvailableSlots(ctx, salonID, ownerUserID, booking.AvailabilityRequest{
+		ServiceID:     session.ServiceID,
+		StaffID:       session.StaffID,
+		PreferredDate: preferredDate,
+		Limit:         3,
+	})
+}
+
+func applyAvailabilityOffer(turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, result *booking.AvailabilityResult, unavailableRequestedTime bool) {
+	offered := offeredSlotsFromAvailability(result)
+	session.RequestedStartTime = nil
+	session.OfferedSlots = offered
+	turn.ToolMessage = availabilityToolMessage(len(offered))
+	if len(offered) == 0 {
+		turn.AIMessage = "I do not see open times for that day in Square Appointments. What other day works?"
+	} else {
+		turn.AIMessage = formatSlotOffer(offered, timezoneLocation(cfg.Timezone), unavailableRequestedTime)
+	}
+	syncTurnUpdate(turn, *session, services, staff, cfg)
+}
+
+func offeredSlotsFromAvailability(result *booking.AvailabilityResult) []OfferedSlot {
+	if result == nil || len(result.Slots) == 0 {
+		return nil
+	}
+	limit := len(result.Slots)
+	if limit > 3 {
+		limit = 3
+	}
+	out := make([]OfferedSlot, 0, limit)
+	for _, slot := range result.Slots {
+		if len(out) >= limit {
+			break
+		}
+		if slot.StartTime.IsZero() || slot.EndTime.IsZero() || strings.TrimSpace(slot.StaffID) == "" {
+			continue
+		}
+		out = append(out, OfferedSlot{
+			StartTime: slot.StartTime,
+			EndTime:   slot.EndTime,
+			StaffID:   slot.StaffID,
+			StaffName: slot.StaffName,
+		})
+	}
+	return out
+}
+
+func availabilityToolMessage(slotCount int) string {
+	if slotCount == 0 {
+		return "Availability check returned no bookable slots."
+	}
+	return fmt.Sprintf("Availability check returned %d bookable slot(s).", slotCount)
+}
+
+func formatSlotOffer(slots []OfferedSlot, loc *time.Location, unavailableRequestedTime bool) string {
+	prefix := "I found these openings: "
+	if unavailableRequestedTime {
+		prefix = "That time is not available. I found these openings: "
+	}
+	parts := make([]string, 0, len(slots))
+	for i, slot := range slots {
+		label := ordinalLabel(i + 1)
+		when := slot.StartTime.In(loc).Format("Mon Jan 2 at 3:04 PM")
+		if strings.TrimSpace(slot.StaffName) != "" {
+			when += " with " + strings.TrimSpace(slot.StaffName)
+		}
+		parts = append(parts, label+" "+when)
+	}
+	return prefix + strings.Join(parts, "; ") + ". Which works?"
+}
+
+func ordinalLabel(index int) string {
+	switch index {
+	case 1:
+		return "first:"
+	case 2:
+		return "second:"
+	case 3:
+		return "third:"
+	default:
+		return fmt.Sprintf("%d:", index)
+	}
+}
+
+func syncTurnUpdate(turn *TurnRecord, session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) {
+	turn.Update.CustomerName = session.CustomerName
+	turn.Update.CustomerPhone = session.CustomerPhone
+	turn.Update.CustomerEmail = session.CustomerEmail
+	turn.Update.ServiceID = session.ServiceID
+	turn.Update.StaffID = session.StaffID
+	turn.Update.RequestedStartTime = session.RequestedStartTime
+	turn.Update.OfferedSlots = session.OfferedSlots
+	turn.Update.Summary = summaryFor(session, services, staff, cfg)
 }
 
 func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnRecord, session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
@@ -229,6 +398,7 @@ func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnR
 	turn.Update.Outcome = outcome
 	turn.Update.BookingAttemptID = bookingAttemptID
 	turn.Update.AppointmentID = appointmentID
+	turn.Update.OfferedSlots = nil
 	turn.Update.EndSession = true
 	turn.Update.Summary = summaryFor(session, services, staff, cfg)
 	s.applyReplyGenerator(ctx, &turn, session, cfg, "", knowledge)
@@ -398,16 +568,16 @@ func hasBookingSignal(message string) bool {
 
 func missingBookingField(session Session) string {
 	switch {
+	case strings.TrimSpace(session.ServiceID) == "":
+		return "service"
+	case session.RequestedStartTime == nil:
+		return "requested_start_time"
 	case strings.TrimSpace(session.CustomerName) == "":
 		return "customer_name"
 	case strings.TrimSpace(session.CustomerPhone) == "":
 		return "customer_phone"
-	case strings.TrimSpace(session.ServiceID) == "":
-		return "service"
 	case strings.TrimSpace(session.StaffID) == "":
 		return "staff"
-	case session.RequestedStartTime == nil:
-		return "requested_start_time"
 	default:
 		return ""
 	}
@@ -424,7 +594,7 @@ func promptForMissingField(field string) string {
 	case "staff":
 		return "Which technician would you like, or should I use anyone available?"
 	case "requested_start_time":
-		return "What date and time would you like?"
+		return "What day would you like? I will check available times."
 	default:
 		return "What else should I know?"
 	}
@@ -518,11 +688,7 @@ func matchService(message string, services []ServiceOption) *ServiceOption {
 func matchStaff(message string, staff []StaffOption) *StaffOption {
 	lower := strings.ToLower(message)
 	if strings.Contains(lower, "anyone") || strings.Contains(lower, "any technician") || strings.Contains(lower, "any tech") {
-		if len(staff) == 0 {
-			return nil
-		}
-		item := staff[0]
-		return &item
+		return nil
 	}
 	for _, member := range staff {
 		name := strings.ToLower(member.Name)
@@ -668,6 +834,68 @@ func parseRequestedTime(message string, loc *time.Location, now func() time.Time
 		}
 	}
 	return time.Time{}, false
+}
+
+func preferredDateFromMessage(message string, requestedStartTime *time.Time, loc *time.Location, now func() time.Time) string {
+	if loc == nil {
+		loc = time.UTC
+	}
+	if requestedStartTime != nil && !requestedStartTime.IsZero() {
+		return requestedStartTime.In(loc).Format("2006-01-02")
+	}
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
+	}
+	if match := dateOnlyPattern.FindStringSubmatch(message); len(match) > 1 {
+		return match[1]
+	}
+	if match := relativeDayPattern.FindStringSubmatch(message); len(match) > 1 {
+		base := now().In(loc)
+		if strings.EqualFold(match[1], "tomorrow") {
+			base = base.AddDate(0, 0, 1)
+		}
+		return base.Format("2006-01-02")
+	}
+	return ""
+}
+
+func selectOfferedSlot(message string, slots []OfferedSlot) *OfferedSlot {
+	index, ok := selectedSlotIndex(message)
+	if !ok || index < 0 || index >= len(slots) {
+		return nil
+	}
+	slot := slots[index]
+	return &slot
+}
+
+func selectedSlotIndex(message string) (int, bool) {
+	lower := strings.ToLower(message)
+	checks := []struct {
+		index   int
+		signals []string
+	}{
+		{0, []string{"first", "1st", "number 1", "option 1", "the 1"}},
+		{1, []string{"second", "2nd", "number 2", "option 2", "the 2"}},
+		{2, []string{"third", "3rd", "number 3", "option 3", "the 3"}},
+	}
+	for _, check := range checks {
+		for _, signal := range check.signals {
+			if strings.Contains(lower, signal) {
+				return check.index, true
+			}
+		}
+	}
+	trimmed := strings.TrimSpace(lower)
+	switch trimmed {
+	case "1", "1.", "1)":
+		return 0, true
+	case "2", "2.", "2)":
+		return 1, true
+	case "3", "3.", "3)":
+		return 2, true
+	default:
+		return 0, false
+	}
 }
 
 func parseDateAndClock(date string, hourRaw string, minuteRaw string, meridiem string, loc *time.Location) (time.Time, error) {

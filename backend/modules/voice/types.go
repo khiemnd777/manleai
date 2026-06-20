@@ -35,6 +35,16 @@ type ConversationEngine interface {
 	Get(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*conversation.Session, error)
 }
 
+type Store interface {
+	GetSalonVoiceStatus(ctx context.Context, salonID string, ownerUserID string) (*SalonVoiceStatus, error)
+	GetPhoneBookingReadiness(ctx context.Context, salonID string, ownerUserID string) (*PhoneBookingReadiness, error)
+	FindSalonByPhone(ctx context.Context, phone string) (*InboundSalon, error)
+	FindCallRoute(ctx context.Context, provider string, providerCallID string) (*CallRoute, error)
+	RecordWebhookEvent(ctx context.Context, event WebhookEvent) error
+	SaveAudioOutput(ctx context.Context, record AudioOutputRecord) (*AudioOutput, error)
+	GetAudioOutput(ctx context.Context, id string) (*AudioOutput, error)
+}
+
 type TelephonyProvider interface {
 	VerifyWebhook(url string, params map[string]string, signature string) bool
 }
@@ -135,6 +145,25 @@ type SalonVoiceStatus struct {
 	Phone   string
 }
 
+type ReadinessCheck struct {
+	Key      string `json:"key"`
+	Label    string `json:"label"`
+	Complete bool   `json:"complete"`
+	Message  string `json:"message,omitempty"`
+}
+
+type PhoneBookingReadiness struct {
+	Ready              bool             `json:"ready"`
+	AIEnabled          bool             `json:"ai_enabled"`
+	SquareConnected    bool             `json:"square_connected"`
+	SquareSynced       bool             `json:"square_synced"`
+	ServiceCount       int              `json:"service_count"`
+	StaffCount         int              `json:"staff_count"`
+	BusinessHoursCount int              `json:"business_hours_count"`
+	Checks             []ReadinessCheck `json:"checks"`
+	BlockedReason      string           `json:"blocked_reason,omitempty"`
+}
+
 type ProviderCapabilityStatus struct {
 	Provider      string `json:"provider"`
 	Configured    bool   `json:"configured"`
@@ -154,17 +183,19 @@ type VoiceAIStatus struct {
 }
 
 type Status struct {
-	Provider              string        `json:"provider"`
-	Configured            bool          `json:"configured"`
-	SignatureVerification bool          `json:"signature_verification"`
-	InboundWebhookURL     string        `json:"inbound_webhook_url"`
-	TurnWebhookURL        string        `json:"turn_webhook_url"`
-	RecordingWebhookURL   string        `json:"recording_webhook_url"`
-	SalonPhone            string        `json:"salon_phone,omitempty"`
-	Ready                 bool          `json:"ready"`
-	BlockedReason         string        `json:"blocked_reason,omitempty"`
-	AI                    VoiceAIStatus `json:"ai"`
-	InputMode             string        `json:"input_mode"`
+	Provider              string                `json:"provider"`
+	Configured            bool                  `json:"configured"`
+	SignatureVerification bool                  `json:"signature_verification"`
+	InboundWebhookURL     string                `json:"inbound_webhook_url"`
+	TurnWebhookURL        string                `json:"turn_webhook_url"`
+	RecordingWebhookURL   string                `json:"recording_webhook_url"`
+	SalonPhone            string                `json:"salon_phone,omitempty"`
+	Ready                 bool                  `json:"ready"`
+	PhoneBookingReady     bool                  `json:"phone_booking_ready"`
+	BlockedReason         string                `json:"blocked_reason,omitempty"`
+	AI                    VoiceAIStatus         `json:"ai"`
+	Booking               PhoneBookingReadiness `json:"booking"`
+	InputMode             string                `json:"input_mode"`
 }
 
 type AIProviders struct {

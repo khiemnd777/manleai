@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 )
 
@@ -254,6 +255,15 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session,
 		}
 	}
 
+	offeredSlots := record.Update.OfferedSlots
+	if offeredSlots == nil {
+		offeredSlots = []OfferedSlot{}
+	}
+	offeredSlotsJSON, err := json.Marshal(offeredSlots)
+	if err != nil {
+		return nil, err
+	}
+
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE call_sessions
 		SET status = $1,
@@ -265,14 +275,15 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session,
 		    service_id = NULLIF($7, '')::uuid,
 		    staff_id = NULLIF($8, '')::uuid,
 		    requested_start_time = $9,
-		    booking_attempt_id = NULLIF($10, '')::uuid,
-		    appointment_id = NULLIF($11, '')::uuid,
-		    summary = NULLIF($12, ''),
-		    ended_at = CASE WHEN $13 THEN now() ELSE ended_at END,
+		    offered_slots = $10::jsonb,
+		    booking_attempt_id = NULLIF($11, '')::uuid,
+		    appointment_id = NULLIF($12, '')::uuid,
+		    summary = NULLIF($13, ''),
+		    ended_at = CASE WHEN $14 THEN now() ELSE ended_at END,
 		    updated_at = now()
-		WHERE id = $14
-		  AND salon_id = $15
-	`, record.Update.Status, record.Update.Intent, record.Update.Outcome, record.Update.CustomerName, record.Update.CustomerPhone, record.Update.CustomerEmail, record.Update.ServiceID, record.Update.StaffID, record.Update.RequestedStartTime, record.Update.BookingAttemptID, record.Update.AppointmentID, record.Update.Summary, record.Update.EndSession, record.Session.ID, record.SalonID); err != nil {
+		WHERE id = $15
+		  AND salon_id = $16
+	`, record.Update.Status, record.Update.Intent, record.Update.Outcome, record.Update.CustomerName, record.Update.CustomerPhone, record.Update.CustomerEmail, record.Update.ServiceID, record.Update.StaffID, record.Update.RequestedStartTime, string(offeredSlotsJSON), record.Update.BookingAttemptID, record.Update.AppointmentID, record.Update.Summary, record.Update.EndSession, record.Session.ID, record.SalonID); err != nil {
 		return nil, err
 	}
 
@@ -374,7 +385,8 @@ func sessionSelect() string {
 		       COALESCE(cs.customer_name, ''), COALESCE(cs.customer_phone, ''), COALESCE(cs.customer_email, ''),
 		       COALESCE(cs.service_id::text, ''), COALESCE(svc.name, ''),
 		       COALESCE(cs.staff_id::text, ''), COALESCE(st.name, ''),
-		       cs.requested_start_time, COALESCE(cs.booking_attempt_id::text, ''),
+		       cs.requested_start_time, COALESCE(cs.offered_slots, '[]'::jsonb),
+		       COALESCE(cs.booking_attempt_id::text, ''),
 		       COALESCE(cs.appointment_id::text, ''), COALESCE(cs.summary, ''),
 		       cs.started_at, cs.ended_at, cs.created_at, cs.updated_at
 		FROM call_sessions cs
@@ -392,6 +404,7 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 	var item Session
 	var requestedStartAt sql.NullTime
 	var endedAt sql.NullTime
+	var offeredSlots []byte
 	if err := scanner.Scan(
 		&item.ID,
 		&item.SalonID,
@@ -411,6 +424,7 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 		&item.StaffID,
 		&item.StaffName,
 		&requestedStartAt,
+		&offeredSlots,
 		&item.BookingAttemptID,
 		&item.AppointmentID,
 		&item.Summary,
@@ -423,6 +437,11 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 	}
 	if requestedStartAt.Valid {
 		item.RequestedStartTime = &requestedStartAt.Time
+	}
+	if len(offeredSlots) > 0 {
+		if err := json.Unmarshal(offeredSlots, &item.OfferedSlots); err != nil {
+			return nil, err
+		}
 	}
 	if endedAt.Valid {
 		item.EndedAt = &endedAt.Time

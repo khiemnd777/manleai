@@ -77,6 +77,69 @@ func (r *Repository) GetBookableStaff(ctx context.Context, salonID string, staff
 	return &item, nil
 }
 
+func (r *Repository) ListBookableStaffRefs(ctx context.Context, salonID string) ([]StaffRef, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id::text, pos_provider, pos_staff_id, name
+		FROM staff
+		WHERE salon_id = $1
+		  AND active = true
+		  AND ai_bookable = true
+		ORDER BY name ASC
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]StaffRef, 0)
+	for rows.Next() {
+		var item StaffRef
+		if err := rows.Scan(&item.ID, &item.POSProvider, &item.POSStaffID, &item.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *Repository) GetSchedule(ctx context.Context, salonID string) (*Schedule, error) {
+	var schedule Schedule
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT timezone
+		FROM salons
+		WHERE id = $1
+	`, salonID).Scan(&schedule.Timezone); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, pos.ErrNotFound
+		}
+		return nil, err
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT day_of_week, COALESCE(open_time::text, ''), COALESCE(close_time::text, ''), is_closed
+		FROM salon_business_hours
+		WHERE salon_id = $1
+		ORDER BY day_of_week ASC
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	schedule.BusinessHours = make([]BusinessHour, 0)
+	for rows.Next() {
+		var hour BusinessHour
+		if err := rows.Scan(&hour.DayOfWeek, &hour.OpenTime, &hour.CloseTime, &hour.IsClosed); err != nil {
+			return nil, err
+		}
+		schedule.BusinessHours = append(schedule.BusinessHours, hour)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return &schedule, nil
+}
+
 func (r *Repository) CreatePendingBookingAttempt(ctx context.Context, record PendingBookingRecord) (*BookingAttempt, error) {
 	attempt := BookingAttempt{
 		SalonID:            record.SalonID,

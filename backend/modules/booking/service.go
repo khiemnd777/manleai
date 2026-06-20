@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,6 +22,8 @@ type Store interface {
 	EnsureSalonOwner(ctx context.Context, salonID string, ownerUserID string) error
 	GetBookableService(ctx context.Context, salonID string, serviceID string) (*ServiceRef, error)
 	GetBookableStaff(ctx context.Context, salonID string, staffID string) (*StaffRef, error)
+	ListBookableStaffRefs(ctx context.Context, salonID string) ([]StaffRef, error)
+	GetSchedule(ctx context.Context, salonID string) (*Schedule, error)
 	GetAppointmentForOwner(ctx context.Context, salonID string, ownerUserID string, appointmentID string) (*AppointmentActionRef, error)
 	CreatePendingBookingAttempt(ctx context.Context, record PendingBookingRecord) (*BookingAttempt, error)
 	SaveConfirmedBooking(ctx context.Context, record ConfirmedBookingRecord) (*BookingAttempt, error)
@@ -130,7 +133,7 @@ func (s *Service) Create(ctx context.Context, salonID string, ownerUserID string
 	if appointment == nil || strings.TrimSpace(appointment.POSAppointmentID) == "" {
 		return s.saveFallback(ctx, *pending, *service, *staff, req, endTime, "create_booking", fmt.Errorf("pos booking id was not returned"))
 	}
-	if appointment.POSAppointmentVersion <= 0 {
+	if appointment.POSAppointmentVersion < 0 {
 		return s.saveFallback(ctx, *pending, *service, *staff, req, endTime, "create_booking", fmt.Errorf("pos booking version was not returned"))
 	}
 	if !appointment.EndTime.IsZero() {
@@ -168,7 +171,7 @@ func (s *Service) Reschedule(ctx context.Context, salonID string, ownerUserID st
 	if err != nil {
 		return nil, nil, err
 	}
-	if appointment.Status == StatusCancelled || strings.TrimSpace(appointment.POSAppointmentID) == "" || appointment.POSAppointmentVersion <= 0 {
+	if appointment.Status == StatusCancelled || strings.TrimSpace(appointment.POSAppointmentID) == "" || appointment.POSAppointmentVersion < 0 {
 		return nil, nil, ErrValidation
 	}
 	if appointment.Service.POSProvider != appointment.POSProvider || strings.TrimSpace(appointment.Service.POSServiceID) == "" || appointment.Service.POSServiceVersion <= 0 {
@@ -236,7 +239,7 @@ func (s *Service) Reschedule(ctx context.Context, salonID string, ownerUserID st
 		fallback, saveErr := s.saveActionFallback(ctx, pending.ID, salonID, *appointment, appointment.POSProvider, "reschedule_booking", req.Source, NotificationTypeRescheduleFallback, req.StartTime, endTime, notes, fmt.Errorf("pos booking id was not returned"))
 		return nil, fallback, saveErr
 	}
-	if posAppointment.POSAppointmentVersion <= 0 {
+	if posAppointment.POSAppointmentVersion < 0 {
 		fallback, saveErr := s.saveActionFallback(ctx, pending.ID, salonID, *appointment, appointment.POSProvider, "reschedule_booking", req.Source, NotificationTypeRescheduleFallback, req.StartTime, endTime, notes, fmt.Errorf("pos booking version was not returned"))
 		return nil, fallback, saveErr
 	}
@@ -261,13 +264,114 @@ func (s *Service) Reschedule(ctx context.Context, salonID string, ownerUserID st
 	return saved, nil, err
 }
 
+func (s *Service) AvailableSlots(ctx context.Context, salonID string, ownerUserID string, req AvailabilityRequest) (*AvailabilityResult, error) {
+	req = normalizeAvailabilityRequest(req)
+	if err := validateAvailabilityRequest(req); err != nil {
+		return nil, err
+	}
+	if err := s.store.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	service, err := s.store.GetBookableService(ctx, salonID, req.ServiceID)
+	if err != nil {
+		return nil, err
+	}
+	if service.DurationMinutes <= 0 || strings.TrimSpace(service.POSServiceID) == "" {
+		return nil, ErrValidation
+	}
+	provider := s.providers[service.POSProvider]
+	if provider == nil {
+		return nil, ErrProviderUnavailable
+	}
+
+	var selectedStaff *StaffRef
+	if req.StaffID != "" {
+		staff, err := s.store.GetBookableStaff(ctx, salonID, req.StaffID)
+		if err != nil {
+			return nil, err
+		}
+		if staff.POSProvider != service.POSProvider || strings.TrimSpace(staff.POSStaffID) == "" {
+			return nil, ErrValidation
+		}
+		selectedStaff = staff
+	}
+
+	schedule, err := s.store.GetSchedule(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	result := availabilityResult(req, *service, selectedStaff, schedule, nil)
+	if schedule == nil || len(schedule.BusinessHours) == 0 {
+		return result, nil
+	}
+	loc, err := time.LoadLocation(strings.TrimSpace(schedule.Timezone))
+	if err != nil {
+		return nil, ErrValidation
+	}
+
+	staffByPOSID, err := s.bookableStaffByPOSID(ctx, salonID, service.POSProvider, selectedStaff)
+	if err != nil {
+		return nil, err
+	}
+	if len(staffByPOSID) == 0 {
+		return result, nil
+	}
+
+	posStaffID := ""
+	if selectedStaff != nil {
+		posStaffID = selectedStaff.POSStaffID
+	}
+	slots, err := provider.CheckAvailability(ctx, salonID, pos.AvailabilityInput{
+		ServiceID:       service.POSServiceID,
+		StaffID:         posStaffID,
+		PreferredDate:   req.PreferredDate,
+		DurationMinutes: service.DurationMinutes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(slots, func(i, j int) bool {
+		return slots[i].StartTime.Before(slots[j].StartTime)
+	})
+
+	filtered := make([]AvailabilitySlot, 0, availabilityLimit(req.Limit))
+	for _, slot := range slots {
+		if len(filtered) >= availabilityLimit(req.Limit) {
+			break
+		}
+		startTime := slot.StartTime.UTC()
+		endTime := slot.EndTime.UTC()
+		if endTime.IsZero() && !startTime.IsZero() {
+			endTime = startTime.Add(time.Duration(service.DurationMinutes) * time.Minute)
+		}
+		if startTime.IsZero() || !endTime.After(startTime) {
+			continue
+		}
+		staffRef, ok := availabilityStaffRef(slot, selectedStaff, staffByPOSID)
+		if !ok {
+			continue
+		}
+		if !withinBusinessHours(startTime, endTime, schedule.BusinessHours, loc) {
+			continue
+		}
+		filtered = append(filtered, AvailabilitySlot{
+			StartTime: startTime,
+			EndTime:   endTime,
+			StaffID:   staffRef.ID,
+			StaffName: staffRef.Name,
+		})
+	}
+	result.Slots = filtered
+	return result, nil
+}
+
 func (s *Service) Cancel(ctx context.Context, salonID string, ownerUserID string, appointmentID string, req CancelRequest) (*Appointment, *BookingAttempt, error) {
 	req = normalizeCancelRequest(req)
 	appointment, err := s.store.GetAppointmentForOwner(ctx, salonID, ownerUserID, strings.TrimSpace(appointmentID))
 	if err != nil {
 		return nil, nil, err
 	}
-	if appointment.Status == StatusCancelled || strings.TrimSpace(appointment.POSAppointmentID) == "" || appointment.POSAppointmentVersion <= 0 {
+	if appointment.Status == StatusCancelled || strings.TrimSpace(appointment.POSAppointmentID) == "" || appointment.POSAppointmentVersion < 0 {
 		return nil, nil, ErrValidation
 	}
 
@@ -303,7 +407,7 @@ func (s *Service) Cancel(ctx context.Context, salonID string, ownerUserID string
 		fallback, saveErr := s.saveActionFallback(ctx, pending.ID, salonID, *appointment, appointment.POSProvider, "cancel_booking", req.Source, NotificationTypeCancellationFallback, appointment.StartTime, appointment.EndTime, req.Reason, fmt.Errorf("pos booking id was not returned"))
 		return nil, fallback, saveErr
 	}
-	if posAppointment.POSAppointmentVersion <= 0 {
+	if posAppointment.POSAppointmentVersion < 0 {
 		fallback, saveErr := s.saveActionFallback(ctx, pending.ID, salonID, *appointment, appointment.POSProvider, "cancel_booking", req.Source, NotificationTypeCancellationFallback, appointment.StartTime, appointment.EndTime, req.Reason, fmt.Errorf("pos booking version was not returned"))
 		return nil, fallback, saveErr
 	}
@@ -407,11 +511,51 @@ func normalizeCancelRequest(req CancelRequest) CancelRequest {
 	return req
 }
 
+func normalizeAvailabilityRequest(req AvailabilityRequest) AvailabilityRequest {
+	req.ServiceID = strings.TrimSpace(req.ServiceID)
+	req.StaffID = strings.TrimSpace(req.StaffID)
+	req.PreferredDate = strings.TrimSpace(req.PreferredDate)
+	return req
+}
+
 func validateRequest(req CreateBookingRequest) error {
 	if req.CustomerName == "" || req.CustomerPhone == "" || req.ServiceID == "" || req.StaffID == "" || req.StartTime.IsZero() {
 		return ErrValidation
 	}
 	return nil
+}
+
+func validateAvailabilityRequest(req AvailabilityRequest) error {
+	if req.ServiceID == "" || req.PreferredDate == "" {
+		return ErrValidation
+	}
+	if !validAvailabilityDate(req.PreferredDate) {
+		return ErrValidation
+	}
+	if req.Limit < 0 {
+		return ErrValidation
+	}
+	return nil
+}
+
+func validAvailabilityDate(value string) bool {
+	if _, err := time.Parse("2006-01-02", value); err == nil {
+		return true
+	}
+	if _, err := time.Parse(time.RFC3339, value); err == nil {
+		return true
+	}
+	return false
+}
+
+func availabilityLimit(limit int) int {
+	if limit <= 0 {
+		return 5
+	}
+	if limit > 20 {
+		return 20
+	}
+	return limit
 }
 
 func appointmentDurationMinutes(appointment AppointmentActionRef) int {
@@ -445,6 +589,102 @@ func appointmentFromActionRef(ref AppointmentActionRef) *Appointment {
 		CreatedAt:             ref.CreatedAt,
 		UpdatedAt:             ref.UpdatedAt,
 	}
+}
+
+func (s *Service) bookableStaffByPOSID(ctx context.Context, salonID string, provider string, selectedStaff *StaffRef) (map[string]StaffRef, error) {
+	refs := make(map[string]StaffRef)
+	if selectedStaff != nil {
+		refs[selectedStaff.POSStaffID] = *selectedStaff
+		return refs, nil
+	}
+	staff, err := s.store.ListBookableStaffRefs(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range staff {
+		if item.POSProvider != provider || strings.TrimSpace(item.POSStaffID) == "" {
+			continue
+		}
+		refs[item.POSStaffID] = item
+	}
+	return refs, nil
+}
+
+func availabilityStaffRef(slot pos.TimeSlot, selectedStaff *StaffRef, staffByPOSID map[string]StaffRef) (StaffRef, bool) {
+	posStaffID := strings.TrimSpace(slot.StaffID)
+	if selectedStaff != nil {
+		if posStaffID != "" && posStaffID != selectedStaff.POSStaffID {
+			return StaffRef{}, false
+		}
+		return *selectedStaff, true
+	}
+	if posStaffID == "" {
+		return StaffRef{}, false
+	}
+	staff, ok := staffByPOSID[posStaffID]
+	return staff, ok
+}
+
+func availabilityResult(req AvailabilityRequest, service ServiceRef, staff *StaffRef, schedule *Schedule, slots []AvailabilitySlot) *AvailabilityResult {
+	timezone := ""
+	if schedule != nil {
+		timezone = strings.TrimSpace(schedule.Timezone)
+	}
+	result := &AvailabilityResult{
+		ServiceID:       service.ID,
+		ServiceName:     service.Name,
+		PreferredDate:   req.PreferredDate,
+		DurationMinutes: service.DurationMinutes,
+		Timezone:        timezone,
+		Slots:           slots,
+	}
+	if result.Slots == nil {
+		result.Slots = []AvailabilitySlot{}
+	}
+	if staff != nil {
+		result.StaffID = staff.ID
+		result.StaffName = staff.Name
+	}
+	return result
+}
+
+func withinBusinessHours(startTime time.Time, endTime time.Time, hours []BusinessHour, loc *time.Location) bool {
+	if loc == nil {
+		loc = time.UTC
+	}
+	startLocal := startTime.In(loc)
+	endLocal := endTime.In(loc)
+	if startLocal.Year() != endLocal.Year() || startLocal.YearDay() != endLocal.YearDay() {
+		return false
+	}
+	for _, hour := range hours {
+		if hour.DayOfWeek != int(startLocal.Weekday()) || hour.IsClosed {
+			continue
+		}
+		openAt, ok := localClockDuration(hour.OpenTime)
+		if !ok {
+			continue
+		}
+		closeAt, ok := localClockDuration(hour.CloseTime)
+		if !ok || closeAt <= openAt {
+			continue
+		}
+		startAt := time.Duration(startLocal.Hour())*time.Hour + time.Duration(startLocal.Minute())*time.Minute + time.Duration(startLocal.Second())*time.Second
+		endAt := time.Duration(endLocal.Hour())*time.Hour + time.Duration(endLocal.Minute())*time.Minute + time.Duration(endLocal.Second())*time.Second
+		return startAt >= openAt && endAt <= closeAt
+	}
+	return false
+}
+
+func localClockDuration(value string) (time.Duration, bool) {
+	parsed, err := time.Parse("15:04:05", strings.TrimSpace(value))
+	if err != nil {
+		parsed, err = time.Parse("15:04", strings.TrimSpace(value))
+	}
+	if err != nil {
+		return 0, false
+	}
+	return time.Duration(parsed.Hour())*time.Hour + time.Duration(parsed.Minute())*time.Minute + time.Duration(parsed.Second())*time.Second, true
 }
 
 func posErrorCode(err error) string {

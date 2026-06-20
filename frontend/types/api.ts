@@ -138,6 +138,24 @@ export type BookingAttempt = {
   appointment?: AppointmentRecord;
 };
 
+export type AvailabilitySlot = {
+  start_time: string;
+  end_time: string;
+  staff_id?: string;
+  staff_name?: string;
+};
+
+export type AvailabilityResult = {
+  service_id: string;
+  service_name: string;
+  staff_id?: string;
+  staff_name?: string;
+  preferred_date: string;
+  duration_minutes: number;
+  timezone: string;
+  slots: AvailabilitySlot[];
+};
+
 export type POSLocation = {
   id: string;
   name: string;
@@ -217,6 +235,13 @@ export type HandoffRequest = {
   resolved_at?: string;
 };
 
+export type OfferedSlot = {
+  start_time: string;
+  end_time: string;
+  staff_id: string;
+  staff_name: string;
+};
+
 export type ConversationSession = {
   id: string;
   salon_id: string;
@@ -236,6 +261,7 @@ export type ConversationSession = {
   staff_id?: string;
   staff_name?: string;
   requested_start_time?: string;
+  offered_slots?: OfferedSlot[];
   booking_attempt_id?: string;
   appointment_id?: string;
   summary?: string;
@@ -256,9 +282,23 @@ export type VoiceStatus = {
   recording_webhook_url: string;
   salon_phone?: string;
   ready: boolean;
+  phone_booking_ready: boolean;
   blocked_reason?: string;
   input_mode: "gather" | "recording" | string;
   ai: VoiceAIStatus;
+  booking: VoiceBookingReadiness;
+};
+
+export type VoiceBookingReadiness = {
+  ready: boolean;
+  ai_enabled: boolean;
+  square_connected: boolean;
+  square_synced: boolean;
+  service_count: number;
+  staff_count: number;
+  business_hours_count: number;
+  checks: ReadinessCheck[];
+  blocked_reason?: string;
 };
 
 export type VoiceCapabilityStatus = {

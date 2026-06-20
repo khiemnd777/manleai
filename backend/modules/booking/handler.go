@@ -43,6 +43,27 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 	return respond.JSON(c, status, attempt)
 }
 
+func (h *Handler) Availability(c *fiber.Ctx) error {
+	var req AvailabilityRequest
+	if err := c.BodyParser(&req); err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
+	}
+	result, err := h.service.AvailableSlots(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Availability request is missing required service, date, staff, or salon schedule data.")
+	}
+	if errors.Is(err, pos.ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "AVAILABILITY_RESOURCE_NOT_FOUND", "Salon, service, or staff was not found.")
+	}
+	if errors.Is(err, ErrProviderUnavailable) {
+		return respond.Error(c, fiber.StatusConflict, "POS_PROVIDER_UNAVAILABLE", "The active POS provider is unavailable.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusBadGateway, "AVAILABILITY_CHECK_FAILED", "Could not load available booking slots from the active POS provider.")
+	}
+	return respond.JSON(c, fiber.StatusOK, result)
+}
+
 func (h *Handler) Appointments(c *fiber.Ctx) error {
 	items, err := h.service.Appointments(c.UserContext(), c.Params("id"), middleware.UserID(c), parseLimit(c.Query("limit")))
 	if errors.Is(err, pos.ErrNotFound) {

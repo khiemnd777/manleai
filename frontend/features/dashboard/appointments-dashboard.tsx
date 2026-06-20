@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { AlertTriangle, CalendarClock, ClipboardList, RefreshCcw } from "lucide-react";
+import { AlertTriangle, CalendarClock, CalendarSearch, ClipboardList, RefreshCcw } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,8 @@ import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest } from "@/lib/api/client";
 import type {
+  AvailabilityResult,
+  AvailabilitySlot,
   AppointmentRecord,
   BookingAttempt,
   POSConnection,
@@ -53,6 +55,13 @@ export function AppointmentsDashboard() {
   const [attempts, setAttempts] = useState<BookingAttempt[]>([]);
   const [services, setServices] = useState<POSService[]>([]);
   const [staff, setStaff] = useState<POSStaffMember[]>([]);
+  const [selectedDate, setSelectedDate] = useState(() => formatDateInput(new Date()));
+  const [availabilityServiceID, setAvailabilityServiceID] = useState("");
+  const [availabilityStaffID, setAvailabilityStaffID] = useState("");
+  const [availabilityResult, setAvailabilityResult] = useState<AvailabilityResult | null>(null);
+  const [checkingAvailability, setCheckingAvailability] = useState(false);
+  const [availabilityError, setAvailabilityError] = useState("");
+  const [availabilityChecked, setAvailabilityChecked] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -85,6 +94,7 @@ export function AppointmentsDashboard() {
       setAttempts(attemptResponse.booking_attempts);
       setServices(serviceResponse.services);
       setStaff(staffResponse.staff);
+      setAvailabilityServiceID((current) => current || firstBookableServiceID(serviceResponse.services));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load appointment data.");
     } finally {
@@ -96,11 +106,39 @@ export function AppointmentsDashboard() {
     void load();
   }, []);
 
-  const serviceNames = useMemo(() => new Map(services.map((item) => [item.id, item.name])), [services]);
-  const staffNames = useMemo(() => new Map(staff.map((item) => [item.id, item.name])), [staff]);
+  const serviceNames = useMemo(
+    () => new Map(services.flatMap((item) => (item.id ? [[item.id, item.name] as const] : []))),
+    [services]
+  );
+  const staffNames = useMemo(
+    () => new Map(staff.flatMap((item) => (item.id ? [[item.id, item.name] as const] : []))),
+    [staff]
+  );
+  const bookableServices = useMemo(
+    () => services.filter((item) => item.id && item.active && item.ai_bookable),
+    [services]
+  );
+  const bookableStaff = useMemo(
+    () => staff.filter((item) => item.id && item.active && item.ai_bookable),
+    [staff]
+  );
   const pendingRequests = useMemo(
     () => attempts.filter((item) => item.status === "fallback_pending"),
     [attempts]
+  );
+  const dayAppointments = useMemo(
+    () =>
+      appointments
+        .filter((item) => sameDateInput(item.start_time, selectedDate, salon?.timezone))
+        .sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime()),
+    [appointments, selectedDate, salon?.timezone]
+  );
+  const dayPendingRequests = useMemo(
+    () =>
+      pendingRequests
+        .filter((item) => sameDateInput(item.requested_start_time, selectedDate, salon?.timezone))
+        .sort((a, b) => new Date(a.requested_start_time).getTime() - new Date(b.requested_start_time).getTime()),
+    [pendingRequests, selectedDate, salon?.timezone]
   );
   const upcomingCount = useMemo(() => {
     const now = Date.now();
@@ -109,6 +147,40 @@ export function AppointmentsDashboard() {
   }, [appointments]);
   const confirmedCount = appointments.filter((item) => item.status === "confirmed").length;
   const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
+  const readyForAvailability = bookingPathReady(status) && bookableServices.length > 0;
+
+  async function checkAvailability() {
+    if (!salon || !availabilityServiceID || !selectedDate || !readyForAvailability) return;
+    setAvailabilityError("");
+    setAvailabilityChecked(true);
+    setCheckingAvailability(true);
+    try {
+      const result = await apiRequest<AvailabilityResult>(`/api/salons/${salon.id}/availability`, {
+        method: "POST",
+        body: JSON.stringify({
+          service_id: availabilityServiceID,
+          staff_id: availabilityStaffID,
+          preferred_date: selectedDate,
+          limit: 5
+        })
+      });
+      setAvailabilityResult(result);
+    } catch (err) {
+      setAvailabilityResult(null);
+      setAvailabilityError(err instanceof Error ? err.message : "Could not check Square Appointments availability.");
+    } finally {
+      setCheckingAvailability(false);
+    }
+  }
+
+  function setDateFromShortcut(offsetDays: number) {
+    const next = new Date();
+    next.setDate(next.getDate() + offsetDays);
+    setSelectedDate(formatDateInput(next));
+    setAvailabilityResult(null);
+    setAvailabilityError("");
+    setAvailabilityChecked(false);
+  }
 
   if (loading) {
     return (
@@ -121,6 +193,10 @@ export function AppointmentsDashboard() {
           <Skeleton className="h-28" />
         </div>
         <Skeleton className="h-96" />
+        <div className="grid gap-4 xl:grid-cols-[1.25fr_0.75fr]">
+          <Skeleton className="h-96" />
+          <Skeleton className="h-96" />
+        </div>
         <Skeleton className="h-80" />
       </div>
     );
@@ -141,9 +217,9 @@ export function AppointmentsDashboard() {
     <div className="space-y-6">
       <div className="flex flex-col justify-between gap-3 md:flex-row md:items-end">
         <div>
-          <h1 className="text-2xl font-bold text-ink">Appointments</h1>
+          <h1 className="text-2xl font-bold text-ink">Booking Calendar</h1>
           <p className="mt-1 text-sm text-muted">
-            Confirmed Square Appointments bookings and pending requests that need owner review.
+            Confirmed Square Appointments bookings, pending requests, and available slots used by the AI receptionist.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -164,6 +240,123 @@ export function AppointmentsDashboard() {
         <Metric label="Upcoming" value={String(upcomingCount)} />
         <Metric label="Pending requests" value={String(pendingRequests.length)} />
         <Metric label="Last Square sync" value={formatOptionalDate(status?.connection.last_sync_at)} />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[1.25fr_0.75fr]">
+        <Card>
+          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+            <div>
+              <CardTitle>Calendar view</CardTitle>
+              <CardDescription>
+                Confirmed bookings and pending requests for the selected day.
+              </CardDescription>
+            </div>
+            <Badge value={dayAppointments.length + dayPendingRequests.length > 0 ? "active" : "disabled"} />
+          </div>
+
+          <DateControls
+            selectedDate={selectedDate}
+            onShortcut={setDateFromShortcut}
+            onChange={(value) => {
+              setSelectedDate(value);
+              setAvailabilityResult(null);
+              setAvailabilityError("");
+              setAvailabilityChecked(false);
+            }}
+          />
+
+          <DaySchedule
+            selectedDate={selectedDate}
+            appointments={dayAppointments}
+            pendingRequests={dayPendingRequests}
+            serviceNames={serviceNames}
+            staffNames={staffNames}
+            timezone={salon.timezone}
+          />
+        </Card>
+
+        <Card>
+          <div className="flex items-start gap-3">
+            <CalendarSearch className="mt-1 h-5 w-5 text-brand" />
+            <div>
+              <CardTitle>Find available slots</CardTitle>
+              <CardDescription>
+                Check Square Appointments availability before the AI offers times to a caller.
+              </CardDescription>
+            </div>
+          </div>
+
+          <div className="mt-5 grid gap-4">
+            {!readyForAvailability ? (
+              <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
+                Connect Square Appointments, select a location, and sync AI-bookable services and staff before checking availability.
+              </div>
+            ) : null}
+
+            <label className="block">
+              <span className="text-sm font-medium text-ink">Service</span>
+              <select
+                className="mt-2 h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-50 disabled:text-slate-400"
+                value={availabilityServiceID}
+                onChange={(event) => {
+                  setAvailabilityServiceID(event.target.value);
+                  setAvailabilityResult(null);
+                  setAvailabilityError("");
+                  setAvailabilityChecked(false);
+                }}
+                disabled={!readyForAvailability || checkingAvailability}
+              >
+                {bookableServices.length === 0 ? <option value="">No AI-bookable services</option> : null}
+                {bookableServices.map((item) => (
+                  <option key={item.id} value={item.id ?? ""}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="block">
+              <span className="text-sm font-medium text-ink">Staff</span>
+              <select
+                className="mt-2 h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-50 disabled:text-slate-400"
+                value={availabilityStaffID}
+                onChange={(event) => {
+                  setAvailabilityStaffID(event.target.value);
+                  setAvailabilityResult(null);
+                  setAvailabilityError("");
+                  setAvailabilityChecked(false);
+                }}
+                disabled={!readyForAvailability || checkingAvailability}
+              >
+                <option value="">Anyone available</option>
+                {bookableStaff.map((item) => (
+                  <option key={item.id} value={item.id ?? ""}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <Button
+              type="button"
+              onClick={() => void checkAvailability()}
+              disabled={!readyForAvailability || checkingAvailability || !availabilityServiceID || !selectedDate}
+            >
+              <CalendarSearch className="h-4 w-4" />
+              {checkingAvailability ? "Checking..." : "Check availability"}
+            </Button>
+
+            {availabilityError ? <Alert title="Availability check failed" message={availabilityError} /> : null}
+
+            <AvailabilitySlotsPanel
+              checked={availabilityChecked}
+              loading={checkingAvailability}
+              result={availabilityResult}
+              slots={availabilityResult?.slots ?? []}
+              timezone={availabilityResult?.timezone ?? salon.timezone}
+            />
+          </div>
+        </Card>
       </div>
 
       <Card>
@@ -364,6 +557,177 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function DateControls({
+  selectedDate,
+  onShortcut,
+  onChange
+}: {
+  selectedDate: string;
+  onShortcut: (offsetDays: number) => void;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-end">
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" variant="secondary" onClick={() => onShortcut(0)}>
+          Today
+        </Button>
+        <Button type="button" variant="secondary" onClick={() => onShortcut(1)}>
+          Tomorrow
+        </Button>
+      </div>
+      <label className="block sm:ml-auto">
+        <span className="text-sm font-medium text-ink">Date</span>
+        <input
+          className="mt-2 h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand sm:w-44"
+          type="date"
+          value={selectedDate}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      </label>
+    </div>
+  );
+}
+
+function DaySchedule({
+  selectedDate,
+  appointments,
+  pendingRequests,
+  serviceNames,
+  staffNames,
+  timezone
+}: {
+  selectedDate: string;
+  appointments: AppointmentRecord[];
+  pendingRequests: BookingAttempt[];
+  serviceNames: Map<string, string>;
+  staffNames: Map<string, string>;
+  timezone?: string;
+}) {
+  const items = [
+    ...appointments.map((item) => ({
+      id: `appointment-${item.id}`,
+      start: item.start_time,
+      end: item.end_time,
+      title: item.customer_name,
+      subtitle: `${lookupName(serviceNames, item.service_id)} with ${lookupName(staffNames, item.staff_id)}`,
+      status: item.status,
+      detail: item.pos_appointment_id ? "Square booking ID returned" : "POS booking ID missing"
+    })),
+    ...pendingRequests.map((item) => ({
+      id: `pending-${item.id}`,
+      start: item.requested_start_time,
+      end: item.requested_end_time,
+      title: item.customer_name,
+      subtitle: `${lookupName(serviceNames, item.service_id)} with ${lookupName(staffNames, item.staff_id)}`,
+      status: item.status,
+      detail: item.error_code || "Pending owner review"
+    }))
+  ].sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+
+  if (items.length === 0) {
+    return (
+      <EmptyState
+        icon={<CalendarClock className="h-5 w-5 text-muted" />}
+        title="No calendar items for this day"
+        message="Confirmed bookings and pending requests for the selected date will appear here."
+      />
+    );
+  }
+
+  return (
+    <div className="mt-5 space-y-3">
+      <div className="text-sm font-semibold text-ink">{formatInputDateLabel(selectedDate)}</div>
+      {items.map((item) => (
+        <div
+          key={item.id}
+          className="grid gap-3 rounded-md border border-line p-4 sm:grid-cols-[8.5rem_1fr_auto] sm:items-start"
+        >
+          <div>
+            <div className="text-sm font-semibold text-ink">{formatTimeRange(item.start, item.end, timezone)}</div>
+            <div className="mt-1 text-xs text-muted">{formatDate(item.start, timezone)}</div>
+          </div>
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-ink">{item.title || "Unknown customer"}</div>
+            <div className="mt-1 text-sm leading-6 text-muted">{item.subtitle}</div>
+            <div className="mt-1 text-xs leading-5 text-muted">{item.detail}</div>
+          </div>
+          <Badge value={item.status} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AvailabilitySlotsPanel({
+  checked,
+  loading,
+  result,
+  slots,
+  timezone
+}: {
+  checked: boolean;
+  loading: boolean;
+  result: AvailabilityResult | null;
+  slots: AvailabilitySlot[];
+  timezone?: string;
+}) {
+  if (loading) {
+    return (
+      <div className="space-y-3">
+        <Skeleton className="h-16" />
+        <Skeleton className="h-16" />
+        <Skeleton className="h-16" />
+      </div>
+    );
+  }
+
+  if (!checked) {
+    return (
+      <div className="rounded-md border border-line bg-slate-50 p-4 text-sm leading-6 text-muted">
+        Select a service and date, then check Square Appointments availability.
+      </div>
+    );
+  }
+
+  if (!result || slots.length === 0) {
+    return (
+      <EmptyState
+        icon={<CalendarSearch className="h-5 w-5 text-muted" />}
+        title="No available slots returned"
+        message="Try another day, service, or technician before the AI offers times to a caller."
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <div className="text-sm font-semibold text-ink">Available Square slots</div>
+        <div className="mt-1 text-xs leading-5 text-muted">
+          AI can offer these slots, but booking still requires Square Appointments confirmation
+          {result.timezone ? ` (${result.timezone})` : ""}.
+        </div>
+      </div>
+      {slots.map((slot) => (
+        <div key={`${slot.start_time}-${slot.staff_id}`} className="rounded-md border border-line p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-ink">
+                {formatTimeRange(slot.start_time, slot.end_time, timezone)}
+              </div>
+              <div className="mt-1 text-sm leading-6 text-muted">
+                {slot.staff_name ? `with ${slot.staff_name}` : "Anyone available"}
+              </div>
+            </div>
+            <Badge value="available" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function EmptyState({ icon, title, message }: { icon: ReactNode; title: string; message: string }) {
   return (
     <div className="mt-5 rounded-md border border-line p-6 text-center">
@@ -450,7 +814,7 @@ function InfoGrid({ items }: { items: [string, string][] }) {
   );
 }
 
-function lookupName(items: Map<string | undefined, string>, id?: string) {
+function lookupName(items: Map<string, string>, id?: string) {
   if (!id) return "-";
   return items.get(id) || "Unknown";
 }
@@ -460,16 +824,56 @@ function formatOptionalDate(value?: string) {
   return formatDate(value);
 }
 
-function formatDate(value: string) {
+function formatDate(value: string, timezone?: string) {
   return new Date(value).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: timezone
+  });
+}
+
+function formatTimeRange(start: string, end: string, timezone?: string) {
+  const options = { hour: "numeric", minute: "2-digit", timeZone: timezone } as const;
+  const startLabel = new Date(start).toLocaleTimeString(undefined, options);
+  const endLabel = new Date(end).toLocaleTimeString(undefined, options);
+  return `${startLabel} - ${endLabel}`;
+}
+
+function formatDateInput(date: Date, timezone?: string) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    day: "2-digit",
+    month: "2-digit",
+    timeZone: timezone,
+    year: "numeric"
+  }).formatToParts(date);
+  const values = new Map(parts.map((part) => [part.type, part.value]));
+  return `${values.get("year")}-${values.get("month")}-${values.get("day")}`;
+}
+
+function sameDateInput(value: string, selectedDate: string, timezone?: string) {
+  return formatDateInput(new Date(value), timezone) === selectedDate;
+}
+
+function formatInputDateLabel(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+  if (!year || !month || !day) return "Selected date";
+  return new Date(year, month - 1, day).toLocaleDateString(undefined, {
+    weekday: "short",
     month: "short",
     day: "numeric",
     year: "numeric"
   });
 }
 
-function formatTimeRange(start: string, end: string) {
-  const startLabel = new Date(start).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-  const endLabel = new Date(end).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-  return `${startLabel} - ${endLabel}`;
+function firstBookableServiceID(services: POSService[]) {
+  return services.find((item) => item.id && item.active && item.ai_bookable)?.id ?? "";
+}
+
+function bookingPathReady(status: StatusResponse | null) {
+  const connection = status?.connection;
+  const readiness = status?.readiness;
+  const connected = Boolean(connection?.id) && connection?.status !== "not_connected";
+  const locationSelected = Boolean(connection?.location_id);
+  return connected && locationSelected && (readiness?.service_count ?? 0) > 0 && (readiness?.staff_count ?? 0) > 0;
 }

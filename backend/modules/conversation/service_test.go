@@ -106,6 +106,155 @@ func TestMessageUsesVoiceCallBookingSourceForPhoneSessions(t *testing.T) {
 	}
 }
 
+func TestMessageOffersAvailableSlotsBeforeBooking(t *testing.T) {
+	store := newFakeConversationStore()
+	bookingTool := &fakeBookingTool{
+		availabilityResult: &booking.AvailabilityResult{
+			ServiceID:       "service_1",
+			ServiceName:     "Classic Manicure",
+			PreferredDate:   "2026-06-10",
+			DurationMinutes: 45,
+			Timezone:        "America/Chicago",
+			Slots: []booking.AvailabilitySlot{
+				{
+					StartTime: time.Date(2026, 6, 10, 15, 0, 0, 0, time.UTC),
+					EndTime:   time.Date(2026, 6, 10, 15, 45, 0, 0, time.UTC),
+					StaffID:   "staff_1",
+					StaffName: "Mai Nguyen",
+				},
+				{
+					StartTime: time.Date(2026, 6, 10, 16, 0, 0, 0, time.UTC),
+					EndTime:   time.Date(2026, 6, 10, 16, 45, 0, 0, time.UTC),
+					StaffID:   "staff_1",
+					StaffName: "Mai Nguyen",
+				},
+			},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I need a classic manicure tomorrow.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 1 {
+		t.Fatalf("availability calls = %d, want 1", bookingTool.availabilityCalls)
+	}
+	if bookingTool.calls != 0 {
+		t.Fatalf("booking should not be called before customer selects a slot")
+	}
+	if bookingTool.availabilityRequest.ServiceID != "service_1" || bookingTool.availabilityRequest.PreferredDate != "2026-06-10" {
+		t.Fatalf("availability request = %#v, want service/date", bookingTool.availabilityRequest)
+	}
+	if len(session.OfferedSlots) != 2 {
+		t.Fatalf("offered slots = %#v, want two", session.OfferedSlots)
+	}
+	if session.RequestedStartTime != nil {
+		t.Fatalf("requested start should not be set before slot selection: %s", session.RequestedStartTime)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "10:00 AM") || !strings.Contains(store.lastTurn.AIMessage, "Which works") {
+		t.Fatalf("AI reply should offer slots: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageSelectsOfferedSlotThenCollectsCustomerName(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.OfferedSlots = []OfferedSlot{
+		{
+			StartTime: time.Date(2026, 6, 10, 15, 0, 0, 0, time.UTC),
+			EndTime:   time.Date(2026, 6, 10, 15, 45, 0, 0, time.UTC),
+			StaffID:   "staff_1",
+			StaffName: "Mai Nguyen",
+		},
+		{
+			StartTime: time.Date(2026, 6, 10, 16, 0, 0, 0, time.UTC),
+			EndTime:   time.Date(2026, 6, 10, 16, 45, 0, 0, time.UTC),
+			StaffID:   "staff_1",
+			StaffName: "Mai Nguyen",
+		},
+	}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "The second one works.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.calls != 0 {
+		t.Fatalf("booking should not be called until customer details are collected")
+	}
+	if session.RequestedStartTime == nil || !session.RequestedStartTime.Equal(time.Date(2026, 6, 10, 16, 0, 0, 0, time.UTC)) {
+		t.Fatalf("requested start = %v, want second offered slot", session.RequestedStartTime)
+	}
+	if session.StaffID != "staff_1" || session.StaffName != "Mai Nguyen" {
+		t.Fatalf("staff = %s/%s, want offered slot staff", session.StaffID, session.StaffName)
+	}
+	if len(session.OfferedSlots) != 0 {
+		t.Fatalf("offered slots should be cleared after selection: %#v", session.OfferedSlots)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "What name") {
+		t.Fatalf("AI reply should collect name after slot selection: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageBooksSelectedAvailableSlotAfterCustomerDetails(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.Intent = IntentBooking
+	store.session.CustomerName = "Linh Tran"
+	store.session.CustomerPhone = "+13125550101"
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.OfferedSlots = []OfferedSlot{
+		{
+			StartTime: time.Date(2026, 6, 10, 15, 0, 0, 0, time.UTC),
+			EndTime:   time.Date(2026, 6, 10, 15, 45, 0, 0, time.UTC),
+			StaffID:   "staff_1",
+			StaffName: "Mai Nguyen",
+		},
+		{
+			StartTime: time.Date(2026, 6, 10, 16, 0, 0, 0, time.UTC),
+			EndTime:   time.Date(2026, 6, 10, 16, 45, 0, 0, time.UTC),
+			StaffID:   "staff_1",
+			StaffName: "Mai Nguyen",
+		},
+	}
+	bookingTool := &fakeBookingTool{
+		attempt: &booking.BookingAttempt{
+			ID:           "attempt_selected",
+			Status:       booking.StatusConfirmed,
+			POSBookingID: "booking_selected",
+			Appointment:  &booking.Appointment{ID: "appointment_selected", Status: booking.StatusConfirmed},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "The second one works.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.calls != 1 {
+		t.Fatalf("booking calls = %d, want 1", bookingTool.calls)
+	}
+	if !bookingTool.request.StartTime.Equal(time.Date(2026, 6, 10, 16, 0, 0, 0, time.UTC)) || bookingTool.request.StaffID != "staff_1" {
+		t.Fatalf("booking request = %#v, want selected slot", bookingTool.request)
+	}
+	if session.Outcome != OutcomeBookingConfirmed || session.AppointmentID != "appointment_selected" {
+		t.Fatalf("session outcome/link = %s/%s, want confirmed appointment", session.Outcome, session.AppointmentID)
+	}
+}
+
 func TestMessageCreatesHandoffWithoutBookingWhenAIDisabled(t *testing.T) {
 	store := newFakeConversationStore()
 	store.cfg.AIEnabled = false
@@ -202,6 +351,14 @@ func fixedNow() time.Time {
 	return time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
 }
 
+func testStartTime() time.Time {
+	return time.Date(2026, 6, 10, 15, 0, 0, 0, time.UTC)
+}
+
+func defaultAvailabilityStartTime() time.Time {
+	return time.Date(2026, 6, 10, 20, 0, 0, 0, time.UTC)
+}
+
 type fakeConversationStore struct {
 	cfg       RuntimeConfig
 	session   Session
@@ -281,7 +438,18 @@ func (f *fakeConversationStore) SaveTurn(ctx context.Context, record TurnRecord)
 	session.CustomerEmail = record.Update.CustomerEmail
 	session.ServiceID = record.Update.ServiceID
 	session.StaffID = record.Update.StaffID
+	for _, item := range f.services {
+		if item.ID == session.ServiceID {
+			session.ServiceName = item.Name
+		}
+	}
+	for _, item := range f.staff {
+		if item.ID == session.StaffID {
+			session.StaffName = item.Name
+		}
+	}
 	session.RequestedStartTime = record.Update.RequestedStartTime
+	session.OfferedSlots = record.Update.OfferedSlots
 	session.BookingAttemptID = record.Update.BookingAttemptID
 	session.AppointmentID = record.Update.AppointmentID
 	session.Summary = record.Update.Summary
@@ -298,10 +466,42 @@ func (f *fakeConversationStore) SaveTurn(ctx context.Context, record TurnRecord)
 }
 
 type fakeBookingTool struct {
-	calls   int
-	request booking.CreateBookingRequest
-	attempt *booking.BookingAttempt
-	err     error
+	calls               int
+	availabilityCalls   int
+	request             booking.CreateBookingRequest
+	availabilityRequest booking.AvailabilityRequest
+	attempt             *booking.BookingAttempt
+	availabilityResult  *booking.AvailabilityResult
+	err                 error
+	availabilityErr     error
+}
+
+func (f *fakeBookingTool) AvailableSlots(ctx context.Context, salonID string, ownerUserID string, req booking.AvailabilityRequest) (*booking.AvailabilityResult, error) {
+	f.availabilityCalls++
+	f.availabilityRequest = req
+	if f.availabilityErr != nil {
+		return nil, f.availabilityErr
+	}
+	if f.availabilityResult != nil {
+		return f.availabilityResult, nil
+	}
+	return &booking.AvailabilityResult{
+		ServiceID:       req.ServiceID,
+		ServiceName:     "Classic Manicure",
+		StaffID:         req.StaffID,
+		StaffName:       "Mai Nguyen",
+		PreferredDate:   req.PreferredDate,
+		DurationMinutes: 45,
+		Timezone:        "America/Chicago",
+		Slots: []booking.AvailabilitySlot{
+			{
+				StartTime: defaultAvailabilityStartTime(),
+				EndTime:   defaultAvailabilityStartTime().Add(45 * time.Minute),
+				StaffID:   "staff_1",
+				StaffName: "Mai Nguyen",
+			},
+		},
+	}, nil
 }
 
 func (f *fakeBookingTool) Create(ctx context.Context, salonID string, ownerUserID string, req booking.CreateBookingRequest) (*booking.BookingAttempt, error) {

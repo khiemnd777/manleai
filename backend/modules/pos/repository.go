@@ -216,7 +216,7 @@ func (r *Repository) UpsertServices(ctx context.Context, salonID string, service
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO services (salon_id, pos_provider, pos_service_id, pos_service_version, name, description, ai_description, duration_minutes, price_from, price_display, ai_bookable, active)
-			VALUES ($1, $2, $3, NULLIF($4, 0), $5, NULLIF($6, ''), NULLIF($7, ''), $8, NULLIF($9, 0), NULLIF($10, ''), $11, $12)
+			VALUES ($1, $2, $3, NULLIF($4::bigint, 0), $5, NULLIF($6, ''), NULLIF($7, ''), $8, NULLIF($9, 0), NULLIF($10, ''), $11, $12)
 			ON CONFLICT (salon_id, pos_provider, pos_service_id)
 			DO UPDATE SET name = EXCLUDED.name,
 			              pos_service_version = EXCLUDED.pos_service_version,

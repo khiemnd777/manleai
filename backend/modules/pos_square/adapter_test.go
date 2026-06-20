@@ -51,7 +51,7 @@ func TestMapCatalogServicesKeepsVariationVersion(t *testing.T) {
 						{
 							ID:      "VAR_1",
 							Type:    "ITEM_VARIATION",
-							Version: 222,
+							Version: 1781282541083,
 							ItemVariationData: struct {
 								Name            string `json:"name"`
 								ServiceDuration int64  `json:"service_duration"`
@@ -80,7 +80,7 @@ func TestMapCatalogServicesKeepsVariationVersion(t *testing.T) {
 	if services[0].POSServiceID != "VAR_1" {
 		t.Fatalf("unexpected service id: %s", services[0].POSServiceID)
 	}
-	if services[0].POSServiceVersion != 222 {
+	if services[0].POSServiceVersion != 1781282541083 {
 		t.Fatalf("unexpected service version: %d", services[0].POSServiceVersion)
 	}
 	if services[0].DurationMinutes != 30 {
@@ -249,8 +249,21 @@ func TestBuildSquareCancelBookingRequestIncludesVersion(t *testing.T) {
 	}
 }
 
+func TestBuildSquareCancelBookingRequestAllowsZeroVersion(t *testing.T) {
+	request, err := buildSquareCancelBookingRequest(pos.CancelInput{
+		IdempotencyKey: "attempt-key-3",
+		BookingVersion: 0,
+	})
+	if err != nil {
+		t.Fatalf("build cancel request failed: %v", err)
+	}
+	if request.BookingVersion != 0 {
+		t.Fatalf("booking version = %d, want 0", request.BookingVersion)
+	}
+}
+
 func TestBuildSquareCancelBookingRequestRequiresVersion(t *testing.T) {
-	_, err := buildSquareCancelBookingRequest(pos.CancelInput{IdempotencyKey: "attempt-key-3"})
+	_, err := buildSquareCancelBookingRequest(pos.CancelInput{IdempotencyKey: "attempt-key-3", BookingVersion: -1})
 	if err == nil {
 		t.Fatalf("expected missing booking version error")
 	}
@@ -302,6 +315,34 @@ func TestMapSquareBooking(t *testing.T) {
 	}
 }
 
+func TestMapSquareBookingAllowsZeroVersion(t *testing.T) {
+	var booking squareBooking
+	if err := json.Unmarshal([]byte(`{"id":"booking_1","version":0,"status":"ACCEPTED","start_at":"2026-06-10T15:00:00Z","appointment_segments":[{"duration_minutes":45}]}`), &booking); err != nil {
+		t.Fatalf("unmarshal booking failed: %v", err)
+	}
+	appointment, err := mapSquareBooking(booking, 30)
+	if err != nil {
+		t.Fatalf("map booking failed: %v", err)
+	}
+	if appointment.POSAppointmentVersion != 0 {
+		t.Fatalf("booking version = %d, want 0", appointment.POSAppointmentVersion)
+	}
+}
+
+func TestMapSquareBookingMarksMissingVersion(t *testing.T) {
+	var booking squareBooking
+	if err := json.Unmarshal([]byte(`{"id":"booking_1","status":"ACCEPTED","start_at":"2026-06-10T15:00:00Z","appointment_segments":[{"duration_minutes":45}]}`), &booking); err != nil {
+		t.Fatalf("unmarshal booking failed: %v", err)
+	}
+	appointment, err := mapSquareBooking(booking, 30)
+	if err != nil {
+		t.Fatalf("map booking failed: %v", err)
+	}
+	if appointment.POSAppointmentVersion != -1 {
+		t.Fatalf("booking version = %d, want -1", appointment.POSAppointmentVersion)
+	}
+}
+
 func TestMapSquareCancelledBookingAllowsMissingScheduleFields(t *testing.T) {
 	appointment, err := mapSquareBooking(squareBooking{
 		ID:      "booking_1",
@@ -319,6 +360,37 @@ func TestMapSquareCancelledBookingAllowsMissingScheduleFields(t *testing.T) {
 	}
 }
 
+func TestRetrieveBookingGetsVersion(t *testing.T) {
+	transport := &sequenceTransport{
+		responses: []string{`{"booking":{"id":"booking_1","version":12,"status":"ACCEPTED","start_at":"2026-06-17T17:00:00Z","appointment_segments":[{"duration_minutes":30}]}}`},
+	}
+	adapter := &SquareAdapter{
+		cfg: config.SquareConfig{
+			APIBaseURL: "https://square.test",
+			APIVersion: "2026-05-20",
+		},
+		httpClient: &http.Client{Transport: transport},
+	}
+
+	booking, err := adapter.retrieveBooking(context.Background(), "token_1", "booking_1")
+	if err != nil {
+		t.Fatalf("retrieve booking failed: %v", err)
+	}
+	if booking.ID != "booking_1" || booking.Version != 12 {
+		t.Fatalf("unexpected booking: %#v", booking)
+	}
+	if len(transport.requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(transport.requests))
+	}
+	req := transport.requests[0]
+	if req.Method != http.MethodGet || req.URL.String() != "https://square.test/v2/bookings/booking_1" {
+		t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+	}
+	if req.Header.Get("Authorization") != "Bearer token_1" {
+		t.Fatalf("missing authorization header")
+	}
+}
+
 type capturingTransport struct {
 	squareVersion string
 }
@@ -328,6 +400,26 @@ func (t *capturingTransport) RoundTrip(req *http.Request) (*http.Response, error
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Body:       io.NopCloser(bytes.NewBufferString(`{"ok":true}`)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+type sequenceTransport struct {
+	responses []string
+	requests  []*http.Request
+}
+
+func (t *sequenceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.requests = append(t.requests, req)
+	index := len(t.requests) - 1
+	body := `{}`
+	if index < len(t.responses) {
+		body = t.responses[index]
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewBufferString(body)),
 		Header:     make(http.Header),
 		Request:    req,
 	}, nil

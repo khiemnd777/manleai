@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -335,6 +336,19 @@ func (a *SquareAdapter) CreateAppointment(ctx context.Context, salonID string, i
 		})
 		return nil, err
 	}
+	if response.Booking.Version < 0 && strings.TrimSpace(response.Booking.ID) != "" {
+		response.Booking, err = a.retrieveBooking(ctx, token, response.Booking.ID)
+		if err != nil {
+			_ = a.repo.LogError(ctx, pos.POSError{
+				SalonID:      salonID,
+				Provider:     pos.ProviderSquare,
+				Operation:    "retrieve_created_booking",
+				ErrorCode:    normalizeSquareError(err),
+				ErrorMessage: err.Error(),
+			})
+			return nil, err
+		}
+	}
 	appointment, err := mapSquareBooking(response.Booking, input.DurationMinutes)
 	if err != nil {
 		return nil, err
@@ -401,6 +415,14 @@ func (a *SquareAdapter) Sync(ctx context.Context, salonID string) error {
 		return err
 	}
 	return a.repo.UpsertStaff(ctx, salonID, staff)
+}
+
+func (a *SquareAdapter) retrieveBooking(ctx context.Context, token string, bookingID string) (squareBooking, error) {
+	var response squareBookingResponse
+	if err := a.doJSON(ctx, http.MethodGet, a.apiBaseURL()+"/v2/bookings/"+url.PathEscape(bookingID), token, nil, &response); err != nil {
+		return squareBooking{}, err
+	}
+	return response.Booking, nil
 }
 
 func (a *SquareAdapter) accessToken(ctx context.Context, salonID string) (string, error) {
@@ -639,7 +661,7 @@ func buildSquareUpdateBookingRequest(locationID string, input pos.RescheduleInpu
 	if strings.TrimSpace(input.IdempotencyKey) == "" {
 		return squareUpdateBookingRequest{}, fmt.Errorf("idempotency key is required")
 	}
-	if input.BookingVersion <= 0 {
+	if input.BookingVersion < 0 {
 		return squareUpdateBookingRequest{}, fmt.Errorf("square booking version is required")
 	}
 	if strings.TrimSpace(input.ServiceID) == "" || strings.TrimSpace(input.StaffID) == "" || input.StartTime.IsZero() {
@@ -674,7 +696,7 @@ func buildSquareCancelBookingRequest(input pos.CancelInput) (squareCancelBooking
 	if strings.TrimSpace(input.IdempotencyKey) == "" {
 		return squareCancelBookingRequest{}, fmt.Errorf("idempotency key is required")
 	}
-	if input.BookingVersion <= 0 {
+	if input.BookingVersion < 0 {
 		return squareCancelBookingRequest{}, fmt.Errorf("square booking version is required")
 	}
 	return squareCancelBookingRequest{
@@ -973,6 +995,54 @@ type squareBooking struct {
 	StartAt             string                     `json:"start_at,omitempty"`
 	LocationID          string                     `json:"location_id,omitempty"`
 	AppointmentSegments []squareAppointmentSegment `json:"appointment_segments,omitempty"`
+}
+
+func (b *squareBooking) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID                  string                     `json:"id"`
+		Version             json.RawMessage            `json:"version"`
+		Status              string                     `json:"status"`
+		CustomerID          string                     `json:"customer_id"`
+		CustomerNote        string                     `json:"customer_note"`
+		SellerNote          string                     `json:"seller_note"`
+		StartAt             string                     `json:"start_at"`
+		LocationID          string                     `json:"location_id"`
+		AppointmentSegments []squareAppointmentSegment `json:"appointment_segments"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	b.ID = raw.ID
+	b.Version = -1
+	b.Status = raw.Status
+	b.CustomerID = raw.CustomerID
+	b.CustomerNote = raw.CustomerNote
+	b.SellerNote = raw.SellerNote
+	b.StartAt = raw.StartAt
+	b.LocationID = raw.LocationID
+	b.AppointmentSegments = raw.AppointmentSegments
+	if len(raw.Version) == 0 || string(raw.Version) == "null" {
+		return nil
+	}
+	var version int
+	if err := json.Unmarshal(raw.Version, &version); err == nil {
+		b.Version = version
+		return nil
+	}
+	var versionString string
+	if err := json.Unmarshal(raw.Version, &versionString); err != nil {
+		return err
+	}
+	versionString = strings.TrimSpace(versionString)
+	if versionString == "" {
+		return nil
+	}
+	parsed, err := strconv.Atoi(versionString)
+	if err != nil {
+		return err
+	}
+	b.Version = parsed
+	return nil
 }
 
 type squareAppointmentSegment struct {

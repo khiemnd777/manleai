@@ -44,6 +44,7 @@ var (
 )
 
 type BookingTool interface {
+	AvailableSlots(ctx context.Context, salonID string, ownerUserID string, req booking.AvailabilityRequest) (*booking.AvailabilityResult, error)
 	Create(ctx context.Context, salonID string, ownerUserID string, req booking.CreateBookingRequest) (*booking.BookingAttempt, error)
 }
 
@@ -150,6 +151,7 @@ type Session struct {
 	StaffID            string              `json:"staff_id,omitempty"`
 	StaffName          string              `json:"staff_name,omitempty"`
 	RequestedStartTime *time.Time          `json:"requested_start_time,omitempty"`
+	OfferedSlots       []OfferedSlot       `json:"offered_slots,omitempty"`
 	BookingAttemptID   string              `json:"booking_attempt_id,omitempty"`
 	AppointmentID      string              `json:"appointment_id,omitempty"`
 	Summary            string              `json:"summary,omitempty"`
@@ -159,6 +161,13 @@ type Session struct {
 	UpdatedAt          time.Time           `json:"updated_at"`
 	Transcript         []TranscriptMessage `json:"transcript,omitempty"`
 	Handoff            *HandoffRequest     `json:"handoff,omitempty"`
+}
+
+type OfferedSlot struct {
+	StartTime time.Time `json:"start_time"`
+	EndTime   time.Time `json:"end_time"`
+	StaffID   string    `json:"staff_id"`
+	StaffName string    `json:"staff_name"`
 }
 
 type TranscriptMessage struct {
@@ -219,6 +228,7 @@ type SessionUpdate struct {
 	ServiceID          string
 	StaffID            string
 	RequestedStartTime *time.Time
+	OfferedSlots       []OfferedSlot
 	BookingAttemptID   string
 	AppointmentID      string
 	Summary            string

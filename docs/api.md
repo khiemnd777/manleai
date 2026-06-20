@@ -98,6 +98,41 @@ Returns synced provider-neutral staff for dashboard tables.
 
 Updates only the internal AI booking eligibility flag for a synced staff member. Square staff records are not edited. Inactive Square staff cannot be enabled for AI booking.
 
+`POST /api/salons/:id/availability`
+
+Returns provider-neutral available booking slots from the active POS provider for an AI-bookable service and optional AI-bookable staff member. Results are filtered to the salon's configured business hours in the salon timezone. This endpoint does not create a booking attempt or confirm an appointment.
+
+```json
+{
+  "service_id": "...",
+  "staff_id": "...",
+  "preferred_date": "2026-06-10",
+  "limit": 5
+}
+```
+
+Returns:
+
+```json
+{
+  "service_id": "...",
+  "service_name": "Classic Manicure",
+  "staff_id": "...",
+  "staff_name": "Mai Nguyen",
+  "preferred_date": "2026-06-10",
+  "duration_minutes": 45,
+  "timezone": "America/Chicago",
+  "slots": [
+    {
+      "start_time": "2026-06-10T15:00:00Z",
+      "end_time": "2026-06-10T15:45:00Z",
+      "staff_id": "...",
+      "staff_name": "Mai Nguyen"
+    }
+  ]
+}
+```
+
 `GET /api/salons/:id/customers`
 
 Returns an owner-scoped operational customer list aggregated from internal appointments, booking attempts, call sessions, and handoff requests. This is not a full Square customer directory sync.
@@ -223,7 +258,7 @@ Returns one conversation session with transcript messages and the latest handoff
 }
 ```
 
-Processes one simulated customer message through the deterministic conversation engine. The simulator asks one question at a time, can create owner handoffs for human requests or disabled AI booking, and calls the provider-neutral booking service only after required booking details are collected. A simulator booking is marked `booking_confirmed` only when the booking service returns a confirmed booking attempt with a POS booking ID and appointment. POS failures create `booking_fallback_pending` wording and do not create confirmed appointment language.
+Processes one simulated customer message through the deterministic conversation engine. The simulator asks one question at a time, can create owner handoffs for human requests or disabled AI booking, checks provider-neutral availability before selecting a booking time, offers available slots from Square Appointments, and calls the provider-neutral booking service only after the customer selects a slot and required customer details are collected. A simulator booking is marked `booking_confirmed` only when the booking service returns a confirmed booking attempt with a POS booking ID and appointment. POS failures create `booking_fallback_pending` wording and do not create confirmed appointment language.
 
 Phone channel sessions are created by Twilio webhooks and use the same conversation engine. Phone bookings use source `ai_voice_call`; simulator bookings use source `ai_conversation_simulator`.
 
@@ -305,7 +340,7 @@ Returns a read-only preview that uses active salon knowledge without creating a 
 
 `GET /api/salons/:id/voice/status`
 
-Returns owner-scoped live voice and external AI provider readiness without exposing Twilio or OpenAI secrets.
+Returns owner-scoped live voice, phone booking, and external AI provider readiness without exposing Twilio, OpenAI, or POS token secrets. `ready` means Twilio can route live phone webhooks; `phone_booking_ready` means the phone path also has the booking prerequisites needed to offer available Square Appointments slots and attempt POS-first confirmation.
 
 ```json
 {
@@ -317,7 +352,25 @@ Returns owner-scoped live voice and external AI provider readiness without expos
   "recording_webhook_url": "https://api.example.com/api/voice/twilio/recording",
   "salon_phone": "+13125550101",
   "ready": true,
+  "phone_booking_ready": true,
   "input_mode": "recording",
+  "booking": {
+    "ready": true,
+    "ai_enabled": true,
+    "square_connected": true,
+    "square_synced": true,
+    "service_count": 4,
+    "staff_count": 3,
+    "business_hours_count": 6,
+    "checks": [
+      {"key": "enable_ai_booking", "label": "Enable AI booking", "complete": true},
+      {"key": "connect_square", "label": "Connect Square Appointments", "complete": true},
+      {"key": "sync_square", "label": "Sync Square calendar", "complete": true},
+      {"key": "bookable_services", "label": "AI-bookable services", "complete": true},
+      {"key": "bookable_staff", "label": "AI-bookable staff", "complete": true},
+      {"key": "business_hours", "label": "Business hours", "complete": true}
+    ]
+  },
   "ai": {
     "provider": "openai",
     "configured": true,

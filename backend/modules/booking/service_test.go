@@ -57,6 +57,64 @@ func TestCreateStoresConfirmedBookingOnlyAfterPOSSuccess(t *testing.T) {
 	}
 }
 
+func TestCreateAcceptsPOSBookingVersionZero(t *testing.T) {
+	store := newFakeStore()
+	provider := &fakeProvider{
+		customer: &pos.Customer{POSCustomerID: "cust_1", Name: "Linh Tran", Phone: "+13125550101"},
+		appointment: &pos.Appointment{
+			POSAppointmentID:      "booking_1",
+			POSAppointmentVersion: 0,
+			StartTime:             testStartTime(),
+			EndTime:               testStartTime().Add(45 * time.Minute),
+			Status:                StatusConfirmed,
+		},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	attempt, err := service.Create(context.Background(), "salon_1", "owner_1", validCreateRequest())
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if attempt.Status != StatusConfirmed {
+		t.Fatalf("status = %s, want confirmed", attempt.Status)
+	}
+	if store.confirmed == nil || store.confirmed.POSBookingVersion != 0 {
+		t.Fatalf("confirmed version = %#v, want 0", store.confirmed)
+	}
+	if store.fallback != nil {
+		t.Fatalf("fallback should not be persisted on POS success")
+	}
+}
+
+func TestCreateStoresFallbackWhenPOSBookingVersionMissing(t *testing.T) {
+	store := newFakeStore()
+	provider := &fakeProvider{
+		customer: &pos.Customer{POSCustomerID: "cust_1", Name: "Linh Tran", Phone: "+13125550101"},
+		appointment: &pos.Appointment{
+			POSAppointmentID:      "booking_1",
+			POSAppointmentVersion: -1,
+			StartTime:             testStartTime(),
+			EndTime:               testStartTime().Add(45 * time.Minute),
+			Status:                StatusConfirmed,
+		},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	attempt, err := service.Create(context.Background(), "salon_1", "owner_1", validCreateRequest())
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if attempt.Status != StatusFallbackPending {
+		t.Fatalf("status = %s, want fallback_pending", attempt.Status)
+	}
+	if store.confirmed != nil {
+		t.Fatalf("confirmed booking should not be persisted without POS version")
+	}
+	if store.fallback == nil || store.fallback.ErrorMessage != "pos booking version was not returned" {
+		t.Fatalf("fallback = %#v, want missing version", store.fallback)
+	}
+}
+
 func TestCreateStoresFallbackPendingWhenPOSBookingFails(t *testing.T) {
 	store := newFakeStore()
 	provider := &fakeProvider{
@@ -245,6 +303,130 @@ func TestCancelStoresFallbackWhenPOSFails(t *testing.T) {
 	}
 }
 
+func TestAvailableSlotsFiltersBusinessHoursAndMapsStaff(t *testing.T) {
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	store := newFakeStore()
+	provider := &fakeProvider{
+		availabilitySlots: []pos.TimeSlot{
+			{
+				StartTime: time.Date(2026, 6, 15, 8, 45, 0, 0, loc).UTC(),
+				EndTime:   time.Date(2026, 6, 15, 9, 30, 0, 0, loc).UTC(),
+				StaffID:   "square_staff_1",
+			},
+			{
+				StartTime: time.Date(2026, 6, 15, 10, 0, 0, 0, loc).UTC(),
+				EndTime:   time.Date(2026, 6, 15, 10, 45, 0, 0, loc).UTC(),
+				StaffID:   "square_staff_1",
+			},
+			{
+				StartTime: time.Date(2026, 6, 15, 18, 30, 0, 0, loc).UTC(),
+				EndTime:   time.Date(2026, 6, 15, 19, 15, 0, 0, loc).UTC(),
+				StaffID:   "square_staff_1",
+			},
+		},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	result, err := service.AvailableSlots(context.Background(), "salon_1", "owner_1", AvailabilityRequest{
+		ServiceID:     "service_1",
+		StaffID:       "staff_1",
+		PreferredDate: "2026-06-15",
+		Limit:         5,
+	})
+	if err != nil {
+		t.Fatalf("AvailableSlots returned error: %v", err)
+	}
+	if provider.availabilityCalls != 1 {
+		t.Fatalf("availability calls = %d, want 1", provider.availabilityCalls)
+	}
+	if provider.lastAvailabilityInput.ServiceID != "square_service_1" || provider.lastAvailabilityInput.StaffID != "square_staff_1" {
+		t.Fatalf("provider input = %#v, want POS service/staff IDs", provider.lastAvailabilityInput)
+	}
+	if len(result.Slots) != 1 {
+		t.Fatalf("slots = %#v, want one business-hours slot", result.Slots)
+	}
+	slot := result.Slots[0]
+	if slot.StaffID != "staff_1" || slot.StaffName != "Mai Nguyen" {
+		t.Fatalf("slot staff = %s/%s, want internal staff mapping", slot.StaffID, slot.StaffName)
+	}
+	if !slot.StartTime.Equal(time.Date(2026, 6, 15, 10, 0, 0, 0, loc).UTC()) {
+		t.Fatalf("slot start = %s, want 10am local", slot.StartTime)
+	}
+}
+
+func TestAvailableSlotsWithoutStaffSkipsUnknownOrBlockedStaff(t *testing.T) {
+	store := newFakeStore()
+	store.staffRefs = append(store.staffRefs, StaffRef{
+		ID:          "staff_2",
+		POSProvider: pos.ProviderSquare,
+		POSStaffID:  "square_staff_2",
+		Name:        "An Nguyen",
+	})
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	provider := &fakeProvider{
+		availabilitySlots: []pos.TimeSlot{
+			{
+				StartTime: time.Date(2026, 6, 15, 10, 0, 0, 0, loc).UTC(),
+				EndTime:   time.Date(2026, 6, 15, 10, 45, 0, 0, loc).UTC(),
+				StaffID:   "square_staff_2",
+			},
+			{
+				StartTime: time.Date(2026, 6, 15, 11, 0, 0, 0, loc).UTC(),
+				EndTime:   time.Date(2026, 6, 15, 11, 45, 0, 0, loc).UTC(),
+				StaffID:   "square_staff_blocked",
+			},
+		},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	result, err := service.AvailableSlots(context.Background(), "salon_1", "owner_1", AvailabilityRequest{
+		ServiceID:     "service_1",
+		PreferredDate: "2026-06-15",
+	})
+	if err != nil {
+		t.Fatalf("AvailableSlots returned error: %v", err)
+	}
+	if provider.lastAvailabilityInput.StaffID != "" {
+		t.Fatalf("provider staff filter = %q, want no staff filter", provider.lastAvailabilityInput.StaffID)
+	}
+	if len(result.Slots) != 1 || result.Slots[0].StaffID != "staff_2" {
+		t.Fatalf("slots = %#v, want only AI-bookable mapped staff", result.Slots)
+	}
+}
+
+func TestAvailableSlotsReturnsEmptyWhenBusinessHoursMissing(t *testing.T) {
+	store := newFakeStore()
+	store.schedule.BusinessHours = nil
+	provider := &fakeProvider{
+		availabilitySlots: []pos.TimeSlot{
+			{
+				StartTime: testStartTime(),
+				EndTime:   testStartTime().Add(45 * time.Minute),
+				StaffID:   "square_staff_1",
+			},
+		},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	result, err := service.AvailableSlots(context.Background(), "salon_1", "owner_1", AvailabilityRequest{
+		ServiceID:     "service_1",
+		StaffID:       "staff_1",
+		PreferredDate: "2026-06-10",
+	})
+	if err != nil {
+		t.Fatalf("AvailableSlots returned error: %v", err)
+	}
+	if len(result.Slots) != 0 {
+		t.Fatalf("slots = %#v, want none without configured business hours", result.Slots)
+	}
+}
+
 func validCreateRequest() CreateBookingRequest {
 	return CreateBookingRequest{
 		CustomerName:  "Linh Tran",
@@ -264,6 +446,8 @@ func testStartTime() time.Time {
 type fakeStore struct {
 	service        ServiceRef
 	staff          StaffRef
+	staffRefs      []StaffRef
+	schedule       Schedule
 	appointment    AppointmentActionRef
 	pending        *PendingBookingRecord
 	confirmed      *ConfirmedBookingRecord
@@ -291,7 +475,20 @@ func newFakeStore() *fakeStore {
 			POSStaffID:  "square_staff_1",
 			Name:        "Mai Nguyen",
 		},
+		schedule: Schedule{
+			Timezone: "America/Chicago",
+			BusinessHours: []BusinessHour{
+				{DayOfWeek: 0, IsClosed: true},
+				{DayOfWeek: 1, OpenTime: "09:30:00", CloseTime: "19:00:00"},
+				{DayOfWeek: 2, OpenTime: "09:30:00", CloseTime: "19:00:00"},
+				{DayOfWeek: 3, OpenTime: "09:30:00", CloseTime: "19:00:00"},
+				{DayOfWeek: 4, OpenTime: "09:30:00", CloseTime: "19:00:00"},
+				{DayOfWeek: 5, OpenTime: "09:30:00", CloseTime: "19:00:00"},
+				{DayOfWeek: 6, OpenTime: "09:30:00", CloseTime: "19:00:00"},
+			},
+		},
 	}
+	store.staffRefs = []StaffRef{store.staff}
 	store.appointment = AppointmentActionRef{
 		ID:                    "appointment_1",
 		SalonID:               "salon_1",
@@ -330,6 +527,14 @@ func (f *fakeStore) GetBookableStaff(ctx context.Context, salonID string, staffI
 		return nil, pos.ErrNotFound
 	}
 	return &f.staff, nil
+}
+
+func (f *fakeStore) ListBookableStaffRefs(ctx context.Context, salonID string) ([]StaffRef, error) {
+	return f.staffRefs, nil
+}
+
+func (f *fakeStore) GetSchedule(ctx context.Context, salonID string) (*Schedule, error) {
+	return &f.schedule, nil
 }
 
 func (f *fakeStore) CreatePendingBookingAttempt(ctx context.Context, record PendingBookingRecord) (*BookingAttempt, error) {
@@ -477,11 +682,15 @@ type fakeProvider struct {
 	createBookingErr       error
 	rescheduleErr          error
 	cancelErr              error
+	availabilityErr        error
 	store                  *fakeStore
+	availabilitySlots      []pos.TimeSlot
+	lastAvailabilityInput  pos.AvailabilityInput
 	lastCreateInput        pos.CreateAppointmentInput
 	lastRescheduleInput    pos.RescheduleInput
 	lastCancelInput        pos.CancelInput
 	searchSawPending       bool
+	availabilityCalls      int
 	createAppointmentCalls int
 	rescheduleCalls        int
 	cancelCalls            int
@@ -529,7 +738,12 @@ func (f *fakeProvider) CreateCustomer(ctx context.Context, salonID string, input
 }
 
 func (f *fakeProvider) CheckAvailability(ctx context.Context, salonID string, input pos.AvailabilityInput) ([]pos.TimeSlot, error) {
-	return nil, nil
+	f.availabilityCalls++
+	f.lastAvailabilityInput = input
+	if f.availabilityErr != nil {
+		return nil, f.availabilityErr
+	}
+	return f.availabilitySlots, nil
 }
 
 func (f *fakeProvider) CreateAppointment(ctx context.Context, salonID string, input pos.CreateAppointmentInput) (*pos.Appointment, error) {

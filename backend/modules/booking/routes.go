@@ -7,6 +7,7 @@ import (
 
 func RegisterRoutes(api fiber.Router, handler *Handler, jwtSecret string) {
 	group := api.Group("/salons", middleware.RequireAuth(jwtSecret))
+	group.Post("/:id/availability", handler.Availability)
 	group.Get("/:id/appointments", handler.Appointments)
 	group.Post("/:id/appointments/:appointment_id/reschedule", handler.Reschedule)
 	group.Post("/:id/appointments/:appointment_id/cancel", handler.Cancel)
