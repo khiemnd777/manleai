@@ -19,6 +19,10 @@ OpenAI's subagent docs say project-scoped custom agents live under `.codex/agent
 - `voice-ai-runtime`: implement AI/voice provider abstractions and conversation rules.
 - `pilot-release-review`: review release readiness and scope honesty.
 
+## Configuration Memos
+
+- `docs/agents/phone-booking-demo-config-memo.md`: step-by-step agent runbook for guiding live phone booking demo configuration across backend public URL, Square, Twilio, OpenAI, readiness, simulator, and live call testing.
+
 ## Suggested Subagent Use
 
 Ask Codex to spawn:
@@ -30,4 +34,3 @@ Ask Codex to spawn:
 - `pilot_release_planner` when converting a milestone into work slices.
 
 Subagents inherit the parent sandbox and approvals. Keep most review agents read-only and let the parent agent apply final edits.
-

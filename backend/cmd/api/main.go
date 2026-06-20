@@ -53,7 +53,7 @@ func main() {
 		AppName:      "AI Receptionist API",
 		ErrorHandler: fiber.DefaultErrorHandler,
 	})
-	app.Use(recover.New())
+	app.Use(recover.New(recover.Config{EnableStackTrace: cfg.AppEnv != "production"}))
 	app.Use(requestid.New())
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: strings.Join(cfg.CORSOrigins, ","),

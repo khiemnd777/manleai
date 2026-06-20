@@ -7,6 +7,7 @@ COPY . .
 RUN go build -o /bin/api ./cmd/api
 
 FROM alpine:3.20
+RUN apk add --no-cache tzdata
 RUN adduser -D -H appuser
 WORKDIR /app
 COPY --from=build /bin/api /bin/api

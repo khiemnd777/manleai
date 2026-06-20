@@ -18,6 +18,8 @@ import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest } from "@/lib/api/client";
 import type {
+  AvailabilityResult,
+  AvailabilitySlot,
   POSConnection,
   POSLocation,
   POSService,
@@ -80,9 +82,9 @@ type TestBookingForm = {
 const defaultForm: TestBookingForm = {
   service_id: "",
   staff_id: "",
-  start_time: nextTestStartTime(),
+  start_time: "",
   customer_name: "ManleAI Test Customer",
-  customer_phone: "+15555550199",
+  customer_phone: "+13125550199",
   customer_email: "",
   notes: "AI booking readiness test. Cancel after verifying Square booking creation."
 };
@@ -95,6 +97,11 @@ export function SquareIntegration() {
   const [locations, setLocations] = useState<POSLocation[]>([]);
   const [selectedLocationID, setSelectedLocationID] = useState("");
   const [form, setForm] = useState<TestBookingForm>(defaultForm);
+  const [bookingDate, setBookingDate] = useState("");
+  const [availabilityResult, setAvailabilityResult] = useState<AvailabilityResult | null>(null);
+  const [availabilityError, setAvailabilityError] = useState("");
+  const [availabilityChecked, setAvailabilityChecked] = useState(false);
+  const [checkingAvailability, setCheckingAvailability] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -104,6 +111,13 @@ export function SquareIntegration() {
   const connection = status?.connection;
   const readiness = status?.readiness;
   const latestTest = readiness?.latest_test_booking;
+  const selectedLocation =
+    locations.find((location) => location.id === (connection?.location_id || selectedLocationID)) ??
+    locations.find((location) => location.id === selectedLocationID);
+  const squareTimezone = selectedLocation?.timezone || salon?.timezone || "";
+  const displayTimezone = squareTimezone || availabilityResult?.timezone || salon?.timezone || undefined;
+  const timezoneMismatch =
+    Boolean(selectedLocation?.timezone) && Boolean(salon?.timezone) && selectedLocation?.timezone !== salon?.timezone;
 
   async function load() {
     setError("");
@@ -145,8 +159,10 @@ export function SquareIntegration() {
       setForm((current) => ({
         ...current,
         service_id: current.service_id || firstBookableService(serviceResponse.services)?.id || "",
-        staff_id: current.staff_id || firstBookableStaff(staffResponse.staff)?.id || ""
+        staff_id: current.staff_id || firstBookableStaff(staffResponse.staff)?.id || "",
+        start_time: ""
       }));
+      clearAvailability();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load integrations.");
     } finally {
@@ -157,6 +173,12 @@ export function SquareIntegration() {
   useEffect(() => {
     void load();
   }, []);
+
+  useEffect(() => {
+    if (!bookingDate && displayTimezone) {
+      setBookingDate(nextBookingDate(displayTimezone));
+    }
+  }, [bookingDate, displayTimezone]);
 
   const bookableServices = useMemo(
     () =>
@@ -230,6 +252,31 @@ export function SquareIntegration() {
     }
   }
 
+  async function checkAvailability() {
+    if (!salon || !form.service_id || !form.staff_id || !bookingDate) return;
+    setAvailabilityError("");
+    setAvailabilityChecked(true);
+    setCheckingAvailability(true);
+    setForm((current) => ({ ...current, start_time: "" }));
+    try {
+      const result = await apiRequest<AvailabilityResult>(`/api/salons/${salon.id}/availability`, {
+        method: "POST",
+        body: JSON.stringify({
+          service_id: form.service_id,
+          staff_id: form.staff_id,
+          preferred_date: bookingDate,
+          limit: 20
+        })
+      });
+      setAvailabilityResult(result);
+    } catch (err) {
+      setAvailabilityResult(null);
+      setAvailabilityError(err instanceof Error ? err.message : "Could not check Square Appointments availability.");
+    } finally {
+      setCheckingAvailability(false);
+    }
+  }
+
   async function createTestBooking() {
     if (!salon) return;
     setBusy("test");
@@ -241,7 +288,7 @@ export function SquareIntegration() {
         body: JSON.stringify({
           salon_id: salon.id,
           ...form,
-          start_time: new Date(form.start_time).toISOString()
+          start_time: form.start_time
         })
       });
       applyReadiness(response.readiness);
@@ -331,6 +378,28 @@ export function SquareIntegration() {
     setStatus((current) => (current ? { ...current, readiness: next } : current));
   }
 
+  function clearAvailability() {
+    setAvailabilityResult(null);
+    setAvailabilityError("");
+    setAvailabilityChecked(false);
+  }
+
+  function updateService(value: string) {
+    setForm((current) => ({ ...current, service_id: value, start_time: "" }));
+    clearAvailability();
+  }
+
+  function updateStaff(value: string) {
+    setForm((current) => ({ ...current, staff_id: value, start_time: "" }));
+    clearAvailability();
+  }
+
+  function updateBookingDate(value: string) {
+    setBookingDate(value);
+    setForm((current) => ({ ...current, start_time: "" }));
+    clearAvailability();
+  }
+
   if (loading) {
     return (
       <div className="space-y-6">
@@ -368,6 +437,8 @@ export function SquareIntegration() {
   const canCancelTest = Boolean(readiness?.can_cancel_test_booking && latestTest?.appointment_id) && busy === "";
   const canEnable = Boolean(readiness?.can_enable_ai_booking) && busy === "";
   const aiEnabled = Boolean(readiness?.ai_enabled ?? salon.ai_enabled);
+  const canCheckAvailability =
+    Boolean(form.service_id) && Boolean(form.staff_id) && Boolean(bookingDate) && busy === "" && !checkingAvailability;
 
   return (
     <div className="space-y-6">
@@ -515,7 +586,7 @@ export function SquareIntegration() {
               <select
                 className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink"
                 value={form.service_id}
-                onChange={(event) => setForm((current) => ({ ...current, service_id: event.target.value }))}
+                onChange={(event) => updateService(event.target.value)}
                 disabled={bookableServices.length === 0 || busy !== ""}
               >
                 {bookableServices.length === 0 ? <option value="">No bookable services</option> : null}
@@ -530,7 +601,7 @@ export function SquareIntegration() {
               <select
                 className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink"
                 value={form.staff_id}
-                onChange={(event) => setForm((current) => ({ ...current, staff_id: event.target.value }))}
+                onChange={(event) => updateStaff(event.target.value)}
                 disabled={bookableStaff.length === 0 || busy !== ""}
               >
                 {bookableStaff.length === 0 ? <option value="">No bookable staff</option> : null}
@@ -541,15 +612,45 @@ export function SquareIntegration() {
                 ))}
               </select>
             </Field>
-            <Field label="Start time">
+            <Field label="Booking date">
               <input
                 className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
-                type="datetime-local"
-                value={form.start_time}
-                onChange={(event) => setForm((current) => ({ ...current, start_time: event.target.value }))}
-                disabled={busy !== ""}
+                type="date"
+                value={bookingDate}
+                onChange={(event) => updateBookingDate(event.target.value)}
+                disabled={busy !== "" || checkingAvailability}
               />
             </Field>
+            <div className="md:col-span-2">
+              <div className="rounded-md border border-line p-3">
+                <div className="grid gap-3 md:grid-cols-2">
+                  <Info label="Square timezone" value={squareTimezone || "Not loaded"} />
+                  <Info label="Salon timezone" value={salon.timezone || "Not configured"} />
+                </div>
+                {timezoneMismatch ? (
+                  <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+                    Square location timezone and salon profile timezone differ. Slots below are shown in Square location time.
+                  </div>
+                ) : null}
+                <div className="mt-3">
+                  <Button type="button" variant="secondary" onClick={() => void checkAvailability()} disabled={!canCheckAvailability}>
+                    <RefreshCcw className="h-4 w-4" />
+                    {checkingAvailability ? "Checking..." : "Check Square Availability"}
+                  </Button>
+                </div>
+              </div>
+            </div>
+            <div className="md:col-span-2">
+              <AvailabilityPicker
+                checked={availabilityChecked}
+                error={availabilityError}
+                loading={checkingAvailability}
+                selectedStartTime={form.start_time}
+                slots={availabilityResult?.slots ?? []}
+                timezone={displayTimezone}
+                onSelect={(slot) => setForm((current) => ({ ...current, start_time: slot.start_time }))}
+              />
+            </div>
             <Field label="Customer phone">
               <input
                 className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
@@ -697,6 +798,90 @@ function Info({ label, value }: { label: string; value: string }) {
   );
 }
 
+function AvailabilityPicker({
+  checked,
+  error,
+  loading,
+  onSelect,
+  selectedStartTime,
+  slots,
+  timezone
+}: {
+  checked: boolean;
+  error: string;
+  loading: boolean;
+  onSelect: (slot: AvailabilitySlot) => void;
+  selectedStartTime: string;
+  slots: AvailabilitySlot[];
+  timezone?: string;
+}) {
+  if (error) {
+    return <Alert title="Availability check failed" message={error} />;
+  }
+  if (loading) {
+    return (
+      <div className="rounded-md border border-line p-4 text-sm text-muted">
+        Checking Square Appointments availability...
+      </div>
+    );
+  }
+  if (!checked) {
+    return (
+      <div className="rounded-md border border-line p-4 text-sm text-muted">
+        Check Square availability to select a real bookable slot.
+      </div>
+    );
+  }
+  if (slots.length === 0) {
+    return (
+      <div className="rounded-md border border-line p-4 text-sm text-muted">
+        No Square slots returned for this service, staff, and date.
+      </div>
+    );
+  }
+
+  const selected = slots.find((slot) => slot.start_time === selectedStartTime);
+  return (
+    <div className="rounded-md border border-line p-4">
+      <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start">
+        <div>
+          <div className="text-sm font-semibold text-ink">Available slots</div>
+          <div className="mt-1 text-xs text-muted">
+            Times are shown in {timezone || "the selected location timezone"}.
+          </div>
+        </div>
+        {selected ? <Badge value="selected" /> : null}
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+        {slots.map((slot) => {
+          const active = slot.start_time === selectedStartTime;
+          return (
+            <button
+              key={`${slot.start_time}-${slot.staff_id ?? ""}`}
+              type="button"
+              onClick={() => onSelect(slot)}
+              className={`min-h-10 rounded-md border px-3 py-2 text-left text-sm font-medium transition ${
+                active
+                  ? "border-brand bg-emerald-50 text-brand"
+                  : "border-line bg-white text-ink hover:border-brand hover:bg-emerald-50"
+              }`}
+            >
+              {formatTime(slot.start_time, timezone)}
+            </button>
+          );
+        })}
+      </div>
+      {selected ? (
+        <div className="mt-4 rounded-md bg-slate-50 p-3 text-sm text-ink">
+          Selected: {formatDate(selected.start_time, timezone)} {formatTimeRange(selected.start_time, selected.end_time, timezone)}
+        </div>
+      ) : (
+        <div className="mt-4 text-sm text-muted">Select one Square slot before creating the test booking.</div>
+      )}
+    </div>
+  );
+}
+
 function firstBookableService(items: POSService[]) {
   return items.find(
     (service) =>
@@ -712,11 +897,40 @@ function firstBookableStaff(items: POSStaffMember[]) {
   return items.find((member) => member.id && member.active && member.ai_bookable);
 }
 
-function nextTestStartTime() {
+function nextBookingDate(timezone?: string) {
   const date = new Date();
   date.setDate(date.getDate() + 1);
-  date.setHours(10, 0, 0, 0);
-  const offset = date.getTimezoneOffset();
-  const local = new Date(date.getTime() - offset * 60 * 1000);
-  return local.toISOString().slice(0, 16);
+  return formatDateInput(date, timezone);
+}
+
+function formatDate(value: string, timezone?: string) {
+  return new Date(value).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: timezone
+  });
+}
+
+function formatTime(value: string, timezone?: string) {
+  return new Date(value).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: timezone
+  });
+}
+
+function formatTimeRange(start: string, end: string, timezone?: string) {
+  return `${formatTime(start, timezone)} - ${formatTime(end, timezone)}`;
+}
+
+function formatDateInput(date: Date, timezone?: string) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    day: "2-digit",
+    month: "2-digit",
+    timeZone: timezone,
+    year: "numeric"
+  }).formatToParts(date);
+  const values = new Map(parts.map((part) => [part.type, part.value]));
+  return `${values.get("year")}-${values.get("month")}-${values.get("day")}`;
 }

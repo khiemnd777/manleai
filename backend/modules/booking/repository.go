@@ -242,7 +242,7 @@ func (r *Repository) SaveConfirmedBooking(ctx context.Context, record ConfirmedB
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO appointment_services (appointment_id, service_id, pos_service_id, pos_service_version, name, duration_minutes, price_from)
-		VALUES ($1, $2, $3, NULLIF($4, 0), $5, $6, NULLIF($7, 0))
+		VALUES ($1, $2, $3, NULLIF($4::bigint, 0), $5, $6, NULLIF($7, 0))
 	`, appointment.ID, record.Service.ID, record.Service.POSServiceID, record.Service.POSServiceVersion, record.Service.Name, record.Service.DurationMinutes, record.Service.PriceFrom); err != nil {
 		return nil, err
 	}

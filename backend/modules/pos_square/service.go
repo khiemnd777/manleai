@@ -269,12 +269,16 @@ func (s *Service) CreateTestBooking(ctx context.Context, salonID string, ownerUs
 	if err != nil {
 		return nil, err
 	}
+	if attempt == nil {
+		return nil, fmt.Errorf("booking service did not return a booking attempt")
+	}
 	readiness, err = s.Readiness(ctx, req.SalonID, ownerUserID)
 	if err != nil {
 		return nil, err
 	}
 	return &TestBookingResponse{
 		BookingAttempt:    attempt,
+		Appointment:       attempt.Appointment,
 		LatestTestBooking: readiness.LatestTestBooking,
 		Readiness:         readiness,
 	}, nil
@@ -440,7 +444,7 @@ func defaultString(value string, fallback string) string {
 func normalizeTestBookingRequest(salonID string, req TestBookingRequest) TestBookingRequest {
 	req.SalonID = defaultString(strings.TrimSpace(req.SalonID), strings.TrimSpace(salonID))
 	req.CustomerName = defaultString(strings.TrimSpace(req.CustomerName), "ManleAI Test Customer")
-	req.CustomerPhone = defaultString(strings.TrimSpace(req.CustomerPhone), "+15555550199")
+	req.CustomerPhone = defaultString(strings.TrimSpace(req.CustomerPhone), "+13125550199")
 	req.CustomerEmail = strings.TrimSpace(req.CustomerEmail)
 	req.ServiceID = strings.TrimSpace(req.ServiceID)
 	req.StaffID = strings.TrimSpace(req.StaffID)

@@ -99,9 +99,10 @@ func (s *Service) Create(ctx context.Context, salonID string, ownerUserID string
 		return nil, err
 	}
 
+	persistCtx := postPOSPersistenceContext(ctx)
 	customer, err := provider.SearchCustomerByPhone(ctx, salonID, req.CustomerPhone)
 	if err != nil {
-		return s.saveFallback(ctx, *pending, *service, *staff, req, endTime, "search_customer", err)
+		return s.saveFallback(persistCtx, *pending, *service, *staff, req, endTime, "search_customer", err)
 	}
 	if customer == nil {
 		customer, err = provider.CreateCustomer(ctx, salonID, pos.CreateCustomerInput{
@@ -110,11 +111,11 @@ func (s *Service) Create(ctx context.Context, salonID string, ownerUserID string
 			Email: req.CustomerEmail,
 		})
 		if err != nil {
-			return s.saveFallback(ctx, *pending, *service, *staff, req, endTime, "create_customer", err)
+			return s.saveFallback(persistCtx, *pending, *service, *staff, req, endTime, "create_customer", err)
 		}
 	}
 	if customer == nil || strings.TrimSpace(customer.POSCustomerID) == "" {
-		return s.saveFallback(ctx, *pending, *service, *staff, req, endTime, "create_customer", fmt.Errorf("pos customer id was not returned"))
+		return s.saveFallback(persistCtx, *pending, *service, *staff, req, endTime, "create_customer", fmt.Errorf("pos customer id was not returned"))
 	}
 
 	appointment, err := provider.CreateAppointment(ctx, salonID, pos.CreateAppointmentInput{
@@ -128,13 +129,13 @@ func (s *Service) Create(ctx context.Context, salonID string, ownerUserID string
 		Notes:           req.Notes,
 	})
 	if err != nil {
-		return s.saveFallback(ctx, *pending, *service, *staff, req, endTime, "create_booking", err)
+		return s.saveFallback(persistCtx, *pending, *service, *staff, req, endTime, "create_booking", err)
 	}
 	if appointment == nil || strings.TrimSpace(appointment.POSAppointmentID) == "" {
-		return s.saveFallback(ctx, *pending, *service, *staff, req, endTime, "create_booking", fmt.Errorf("pos booking id was not returned"))
+		return s.saveFallback(persistCtx, *pending, *service, *staff, req, endTime, "create_booking", fmt.Errorf("pos booking id was not returned"))
 	}
 	if appointment.POSAppointmentVersion < 0 {
-		return s.saveFallback(ctx, *pending, *service, *staff, req, endTime, "create_booking", fmt.Errorf("pos booking version was not returned"))
+		return s.saveFallback(persistCtx, *pending, *service, *staff, req, endTime, "create_booking", fmt.Errorf("pos booking version was not returned"))
 	}
 	if !appointment.EndTime.IsZero() {
 		endTime = appointment.EndTime
@@ -144,7 +145,7 @@ func (s *Service) Create(ctx context.Context, salonID string, ownerUserID string
 		startTime = appointment.StartTime
 	}
 
-	return s.store.SaveConfirmedBooking(ctx, ConfirmedBookingRecord{
+	return s.store.SaveConfirmedBooking(persistCtx, ConfirmedBookingRecord{
 		AttemptID:         pending.ID,
 		SalonID:           salonID,
 		Source:            req.Source,
@@ -221,6 +222,7 @@ func (s *Service) Reschedule(ctx context.Context, salonID string, ownerUserID st
 		return nil, nil, err
 	}
 
+	persistCtx := postPOSPersistenceContext(ctx)
 	posAppointment, err := provider.RescheduleAppointment(ctx, salonID, appointment.POSAppointmentID, pos.RescheduleInput{
 		IdempotencyKey:  pending.POSIdempotencyKey,
 		BookingVersion:  appointment.POSAppointmentVersion,
@@ -232,15 +234,15 @@ func (s *Service) Reschedule(ctx context.Context, salonID string, ownerUserID st
 		Notes:           notes,
 	})
 	if err != nil {
-		fallback, saveErr := s.saveActionFallback(ctx, pending.ID, salonID, *appointment, appointment.POSProvider, "reschedule_booking", req.Source, NotificationTypeRescheduleFallback, req.StartTime, endTime, notes, err)
+		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "reschedule_booking", req.Source, NotificationTypeRescheduleFallback, req.StartTime, endTime, notes, err)
 		return nil, fallback, saveErr
 	}
 	if posAppointment == nil || strings.TrimSpace(posAppointment.POSAppointmentID) == "" {
-		fallback, saveErr := s.saveActionFallback(ctx, pending.ID, salonID, *appointment, appointment.POSProvider, "reschedule_booking", req.Source, NotificationTypeRescheduleFallback, req.StartTime, endTime, notes, fmt.Errorf("pos booking id was not returned"))
+		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "reschedule_booking", req.Source, NotificationTypeRescheduleFallback, req.StartTime, endTime, notes, fmt.Errorf("pos booking id was not returned"))
 		return nil, fallback, saveErr
 	}
 	if posAppointment.POSAppointmentVersion < 0 {
-		fallback, saveErr := s.saveActionFallback(ctx, pending.ID, salonID, *appointment, appointment.POSProvider, "reschedule_booking", req.Source, NotificationTypeRescheduleFallback, req.StartTime, endTime, notes, fmt.Errorf("pos booking version was not returned"))
+		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "reschedule_booking", req.Source, NotificationTypeRescheduleFallback, req.StartTime, endTime, notes, fmt.Errorf("pos booking version was not returned"))
 		return nil, fallback, saveErr
 	}
 	startTime := req.StartTime
@@ -251,7 +253,7 @@ func (s *Service) Reschedule(ctx context.Context, salonID string, ownerUserID st
 		endTime = posAppointment.EndTime
 	}
 
-	saved, err := s.store.SaveRescheduledAppointment(ctx, RescheduledAppointmentRecord{
+	saved, err := s.store.SaveRescheduledAppointment(persistCtx, RescheduledAppointmentRecord{
 		AttemptID:         pending.ID,
 		Appointment:       *appointment,
 		Staff:             staff,
@@ -394,25 +396,26 @@ func (s *Service) Cancel(ctx context.Context, salonID string, ownerUserID string
 		return nil, nil, err
 	}
 
+	persistCtx := postPOSPersistenceContext(ctx)
 	posAppointment, err := provider.CancelAppointment(ctx, salonID, appointment.POSAppointmentID, pos.CancelInput{
 		IdempotencyKey: pending.POSIdempotencyKey,
 		BookingVersion: appointment.POSAppointmentVersion,
 		Reason:         req.Reason,
 	})
 	if err != nil {
-		fallback, saveErr := s.saveActionFallback(ctx, pending.ID, salonID, *appointment, appointment.POSProvider, "cancel_booking", req.Source, NotificationTypeCancellationFallback, appointment.StartTime, appointment.EndTime, req.Reason, err)
+		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "cancel_booking", req.Source, NotificationTypeCancellationFallback, appointment.StartTime, appointment.EndTime, req.Reason, err)
 		return nil, fallback, saveErr
 	}
 	if posAppointment == nil || strings.TrimSpace(posAppointment.POSAppointmentID) == "" {
-		fallback, saveErr := s.saveActionFallback(ctx, pending.ID, salonID, *appointment, appointment.POSProvider, "cancel_booking", req.Source, NotificationTypeCancellationFallback, appointment.StartTime, appointment.EndTime, req.Reason, fmt.Errorf("pos booking id was not returned"))
+		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "cancel_booking", req.Source, NotificationTypeCancellationFallback, appointment.StartTime, appointment.EndTime, req.Reason, fmt.Errorf("pos booking id was not returned"))
 		return nil, fallback, saveErr
 	}
 	if posAppointment.POSAppointmentVersion < 0 {
-		fallback, saveErr := s.saveActionFallback(ctx, pending.ID, salonID, *appointment, appointment.POSProvider, "cancel_booking", req.Source, NotificationTypeCancellationFallback, appointment.StartTime, appointment.EndTime, req.Reason, fmt.Errorf("pos booking version was not returned"))
+		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "cancel_booking", req.Source, NotificationTypeCancellationFallback, appointment.StartTime, appointment.EndTime, req.Reason, fmt.Errorf("pos booking version was not returned"))
 		return nil, fallback, saveErr
 	}
 
-	saved, err := s.store.SaveCancelledAppointment(ctx, CancelledAppointmentRecord{
+	saved, err := s.store.SaveCancelledAppointment(persistCtx, CancelledAppointmentRecord{
 		AttemptID:         pending.ID,
 		Appointment:       *appointment,
 		Source:            req.Source,
@@ -476,6 +479,13 @@ func (s *Service) saveActionFallback(ctx context.Context, attemptID string, salo
 
 func newPOSIdempotencyKey() string {
 	return uuid.NewString()
+}
+
+func postPOSPersistenceContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return context.WithoutCancel(ctx)
 }
 
 func normalizeRequest(req CreateBookingRequest) CreateBookingRequest {

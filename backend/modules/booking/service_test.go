@@ -86,6 +86,37 @@ func TestCreateAcceptsPOSBookingVersionZero(t *testing.T) {
 	}
 }
 
+func TestCreateFinalizesConfirmedBookingAfterRequestContextCancelledPostPOSSuccess(t *testing.T) {
+	store := newFakeStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	provider := &fakeProvider{
+		customer: &pos.Customer{POSCustomerID: "cust_1", Name: "Linh Tran", Phone: "+13125550101"},
+		appointment: &pos.Appointment{
+			POSAppointmentID:      "booking_1",
+			POSAppointmentVersion: 0,
+			StartTime:             testStartTime(),
+			EndTime:               testStartTime().Add(45 * time.Minute),
+			Status:                StatusConfirmed,
+		},
+		afterCreateAppointment: cancel,
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	attempt, err := service.Create(ctx, "salon_1", "owner_1", validCreateRequest())
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if ctx.Err() == nil {
+		t.Fatalf("test did not cancel request context")
+	}
+	if attempt.Status != StatusConfirmed {
+		t.Fatalf("status = %s, want confirmed", attempt.Status)
+	}
+	if store.confirmed == nil || store.confirmed.POSBookingID != "booking_1" {
+		t.Fatalf("confirmed booking = %#v, want POS booking persisted", store.confirmed)
+	}
+}
+
 func TestCreateStoresFallbackWhenPOSBookingVersionMissing(t *testing.T) {
 	store := newFakeStore()
 	provider := &fakeProvider{
@@ -556,6 +587,9 @@ func (f *fakeStore) CreatePendingBookingAttempt(ctx context.Context, record Pend
 }
 
 func (f *fakeStore) SaveConfirmedBooking(ctx context.Context, record ConfirmedBookingRecord) (*BookingAttempt, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f.confirmed = &record
 	return &BookingAttempt{
 		ID:                 record.AttemptID,
@@ -694,6 +728,7 @@ type fakeProvider struct {
 	createAppointmentCalls int
 	rescheduleCalls        int
 	cancelCalls            int
+	afterCreateAppointment func()
 }
 
 func (f *fakeProvider) Name() string {
@@ -751,6 +786,9 @@ func (f *fakeProvider) CreateAppointment(ctx context.Context, salonID string, in
 	f.lastCreateInput = input
 	if f.createBookingErr != nil {
 		return nil, f.createBookingErr
+	}
+	if f.afterCreateAppointment != nil {
+		f.afterCreateAppointment()
 	}
 	return f.appointment, nil
 }

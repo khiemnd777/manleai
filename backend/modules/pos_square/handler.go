@@ -139,8 +139,11 @@ func (h *Handler) TestBooking(c *fiber.Ctx) error {
 		req.SalonID = middleware.SalonID(c)
 	}
 	res, err := h.service.CreateTestBooking(c.UserContext(), req.SalonID, middleware.UserID(c), req)
-	if handled := h.handleGateError(c, err, "SQUARE_TEST_BOOKING_FAILED"); handled != nil {
-		return handled
+	if handled, handleErr := h.handleGateError(c, err, "SQUARE_TEST_BOOKING_FAILED"); handled {
+		return handleErr
+	}
+	if res == nil {
+		return respond.Error(c, fiber.StatusBadGateway, "SQUARE_TEST_BOOKING_FAILED", "Square test booking did not return a response.")
 	}
 	status := fiber.StatusCreated
 	if res.BookingAttempt != nil && res.BookingAttempt.Status == booking.StatusFallbackPending {
@@ -158,8 +161,11 @@ func (h *Handler) CancelTestBooking(c *fiber.Ctx) error {
 		req.SalonID = middleware.SalonID(c)
 	}
 	res, err := h.service.CancelTestBooking(c.UserContext(), req.SalonID, middleware.UserID(c), req)
-	if handled := h.handleGateError(c, err, "SQUARE_CANCEL_TEST_BOOKING_FAILED"); handled != nil {
-		return handled
+	if handled, handleErr := h.handleGateError(c, err, "SQUARE_CANCEL_TEST_BOOKING_FAILED"); handled {
+		return handleErr
+	}
+	if res == nil {
+		return respond.Error(c, fiber.StatusBadGateway, "SQUARE_CANCEL_TEST_BOOKING_FAILED", "Square test booking cancellation did not return a response.")
 	}
 	status := fiber.StatusOK
 	if res.BookingAttempt != nil && res.BookingAttempt.Status == booking.StatusFallbackPending {
@@ -175,8 +181,8 @@ func (h *Handler) EnableAIBooking(c *fiber.Ctx) error {
 		req.SalonID = middleware.SalonID(c)
 	}
 	res, err := h.service.EnableAIBooking(c.UserContext(), req.SalonID, middleware.UserID(c))
-	if handled := h.handleGateError(c, err, "ENABLE_AI_BOOKING_FAILED"); handled != nil {
-		return handled
+	if handled, handleErr := h.handleGateError(c, err, "ENABLE_AI_BOOKING_FAILED"); handled {
+		return handleErr
 	}
 	return respond.JSON(c, fiber.StatusOK, res)
 }
@@ -188,31 +194,31 @@ func (h *Handler) DisableAIBooking(c *fiber.Ctx) error {
 		req.SalonID = middleware.SalonID(c)
 	}
 	res, err := h.service.DisableAIBooking(c.UserContext(), req.SalonID, middleware.UserID(c))
-	if handled := h.handleGateError(c, err, "DISABLE_AI_BOOKING_FAILED"); handled != nil {
-		return handled
+	if handled, handleErr := h.handleGateError(c, err, "DISABLE_AI_BOOKING_FAILED"); handled {
+		return handleErr
 	}
 	return respond.JSON(c, fiber.StatusOK, res)
 }
 
-func (h *Handler) handleGateError(c *fiber.Ctx, err error, internalCode string) error {
+func (h *Handler) handleGateError(c *fiber.Ctx, err error, internalCode string) (bool, error) {
 	if err == nil {
-		return nil
+		return false, nil
 	}
 	if errors.Is(err, pos.ErrNotFound) {
-		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+		return true, respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
 	}
 	if errors.Is(err, ErrValidation) || errors.Is(err, booking.ErrValidation) {
-		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Request is missing required booking readiness data.")
+		return true, respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Request is missing required booking readiness data.")
 	}
 	if errors.Is(err, ErrReadinessGate) {
 		message := "Square readiness checks have not passed."
 		if internalCode == "ENABLE_AI_BOOKING_FAILED" {
 			message = "AI booking cannot be enabled until Square readiness checks pass."
 		}
-		return respond.Error(c, fiber.StatusConflict, "AI_BOOKING_NOT_READY", message)
+		return true, respond.Error(c, fiber.StatusConflict, "AI_BOOKING_NOT_READY", message)
 	}
 	if errors.Is(err, booking.ErrProviderUnavailable) || errors.Is(err, ErrBookingServiceUnavailable) {
-		return respond.Error(c, fiber.StatusConflict, "POS_PROVIDER_UNAVAILABLE", "The active POS provider is unavailable.")
+		return true, respond.Error(c, fiber.StatusConflict, "POS_PROVIDER_UNAVAILABLE", "The active POS provider is unavailable.")
 	}
-	return respond.Error(c, fiber.StatusBadGateway, internalCode, err.Error())
+	return true, respond.Error(c, fiber.StatusBadGateway, internalCode, err.Error())
 }

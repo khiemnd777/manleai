@@ -254,7 +254,7 @@ Returns one conversation session with transcript messages and the latest handoff
 
 ```json
 {
-  "message": "My name is Linh Tran, phone 312-555-0101, classic manicure with Mai on 2026-06-10 at 3pm."
+  "message": "My name is Linh Tran, phone 312-555-0199, classic manicure with Mai on 2026-06-10 at 3pm."
 }
 ```
 
@@ -484,7 +484,7 @@ Lists Square locations through the Square adapter.
 {
   "salon_id": "...",
   "customer_name": "ManleAI Test Customer",
-  "customer_phone": "+15555550199",
+  "customer_phone": "+13125550199",
   "customer_email": "",
   "service_id": "...",
   "staff_id": "...",
