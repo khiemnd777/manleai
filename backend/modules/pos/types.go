@@ -122,6 +122,13 @@ type TimeSlot struct {
 	EndTime   time.Time `json:"end_time"`
 	StaffID   string    `json:"staff_id,omitempty"`
 	StaffName string    `json:"staff_name,omitempty"`
+	Segments  []TimeSlotSegment
+}
+
+type TimeSlotSegment struct {
+	ServiceID       string
+	StaffID         string
+	DurationMinutes int
 }
 
 type Appointment struct {
@@ -144,6 +151,13 @@ type AvailabilityInput struct {
 	StaffID         string
 	PreferredDate   string
 	DurationMinutes int
+	Segments        []AvailabilitySegmentInput
+}
+
+type AvailabilitySegmentInput struct {
+	ServiceID       string
+	StaffID         string
+	DurationMinutes int
 }
 
 type CreateAppointmentInput struct {
@@ -155,6 +169,14 @@ type CreateAppointmentInput struct {
 	StartTime       time.Time
 	DurationMinutes int
 	Notes           string
+	Segments        []AppointmentSegmentInput
+}
+
+type AppointmentSegmentInput struct {
+	ServiceID       string
+	ServiceVersion  int64
+	StaffID         string
+	DurationMinutes int
 }
 
 type RescheduleInput struct {
@@ -166,6 +188,7 @@ type RescheduleInput struct {
 	StartTime       time.Time
 	DurationMinutes int
 	Notes           string
+	Segments        []AppointmentSegmentInput
 }
 
 type CancelInput struct {

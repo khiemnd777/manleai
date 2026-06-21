@@ -26,6 +26,7 @@ func (Appointment) Fields() []ent.Field {
 		field.String("customer_email").Optional(),
 		field.UUID("service_id", uuid.UUID{}).Optional().Nillable(),
 		field.UUID("staff_id", uuid.UUID{}).Optional().Nillable(),
+		field.String("staff_selection_mode").Default("specific"),
 		field.Time("start_time"),
 		field.Time("end_time"),
 		field.String("notes").Optional(),

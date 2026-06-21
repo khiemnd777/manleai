@@ -134,10 +134,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	selectedOfferedSlot := false
 	applyExtraction(&next, message, services, staff, timezoneLocation(cfg.Timezone), s.now)
 	if selected := selectOfferedSlot(message, session.OfferedSlots); selected != nil {
-		next.RequestedStartTime = &selected.StartTime
-		next.StaffID = selected.StaffID
-		next.StaffName = selected.StaffName
-		next.OfferedSlots = nil
+		applySelectedOfferedSlot(&next, *selected)
 		selectedOfferedSlot = true
 	}
 	intent := resolveIntent(session.Intent, message, next)
@@ -157,8 +154,10 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 			CustomerEmail:      next.CustomerEmail,
 			ServiceID:          next.ServiceID,
 			StaffID:            next.StaffID,
+			StaffSelectionMode: staffSelectionModeForSession(next),
 			RequestedStartTime: next.RequestedStartTime,
 			OfferedSlots:       next.OfferedSlots,
+			BookingSegments:    next.BookingSegments,
 			Summary:            summaryFor(next, services, staff, cfg),
 		},
 	}
@@ -238,9 +237,7 @@ func (s *Service) applyAvailabilityForRequestedTime(ctx context.Context, ownerUs
 		if session.StaffID != "" && slot.StaffID != session.StaffID {
 			continue
 		}
-		session.StaffID = slot.StaffID
-		session.StaffName = slot.StaffName
-		session.OfferedSlots = nil
+		applySelectedOfferedSlot(session, offeredSlotFromAvailability(result, slot))
 		syncTurnUpdate(turn, *session, services, staff, cfg)
 		return true, nil
 	}
@@ -261,11 +258,14 @@ func (s *Service) availableSlots(ctx context.Context, salonID string, ownerUserI
 	if s.bookingTool == nil {
 		return nil, fmt.Errorf("booking tool is unavailable")
 	}
+	staffSelectionMode := staffSelectionModeForAvailability(session)
 	return s.bookingTool.AvailableSlots(ctx, salonID, ownerUserID, booking.AvailabilityRequest{
-		ServiceID:     session.ServiceID,
-		StaffID:       session.StaffID,
-		PreferredDate: preferredDate,
-		Limit:         3,
+		ServiceID:          session.ServiceID,
+		StaffID:            staffIDForAvailability(session),
+		StaffSelectionMode: staffSelectionMode,
+		Segments:           availabilitySegmentsForSession(session, staffSelectionMode),
+		PreferredDate:      preferredDate,
+		Limit:              3,
 	})
 }
 
@@ -298,11 +298,66 @@ func offeredSlotsFromAvailability(result *booking.AvailabilityResult) []OfferedS
 		if slot.StartTime.IsZero() || slot.EndTime.IsZero() || strings.TrimSpace(slot.StaffID) == "" {
 			continue
 		}
-		out = append(out, OfferedSlot{
-			StartTime: slot.StartTime,
-			EndTime:   slot.EndTime,
-			StaffID:   slot.StaffID,
-			StaffName: slot.StaffName,
+		out = append(out, offeredSlotFromAvailability(result, slot))
+	}
+	return out
+}
+
+func offeredSlotFromAvailability(result *booking.AvailabilityResult, slot booking.AvailabilitySlot) OfferedSlot {
+	offered := OfferedSlot{
+		StartTime:          slot.StartTime,
+		EndTime:            slot.EndTime,
+		StaffID:            slot.StaffID,
+		StaffName:          slot.StaffName,
+		StaffSelectionMode: firstNonEmpty(slot.StaffSelectionMode, result.StaffSelectionMode),
+		Segments:           offeredSlotSegments(result, slot),
+	}
+	if offered.StaffSelectionMode == "" {
+		offered.StaffSelectionMode = booking.StaffSelectionSpecific
+	}
+	if offered.StaffID == "" && len(offered.Segments) > 0 {
+		offered.StaffID = offered.Segments[0].StaffID
+		offered.StaffName = offered.Segments[0].StaffName
+	}
+	return offered
+}
+
+func offeredSlotSegments(result *booking.AvailabilityResult, slot booking.AvailabilitySlot) []OfferedSlotSegment {
+	source := slot.Segments
+	if len(source) == 0 {
+		source = result.Segments
+	}
+	if len(source) == 0 {
+		serviceID := firstNonEmpty(result.ServiceID)
+		if serviceID == "" {
+			return nil
+		}
+		source = []booking.AvailabilitySegment{{
+			ServiceID:          serviceID,
+			ServiceName:        result.ServiceName,
+			StaffID:            firstNonEmpty(slot.StaffID, result.StaffID),
+			StaffName:          firstNonEmpty(slot.StaffName, result.StaffName),
+			StaffSelectionMode: firstNonEmpty(slot.StaffSelectionMode, result.StaffSelectionMode),
+			DurationMinutes:    result.DurationMinutes,
+		}}
+	}
+	out := make([]OfferedSlotSegment, 0, len(source))
+	for _, segment := range source {
+		serviceID := strings.TrimSpace(segment.ServiceID)
+		if serviceID == "" {
+			continue
+		}
+		mode := firstNonEmpty(segment.StaffSelectionMode, slot.StaffSelectionMode, result.StaffSelectionMode)
+		if mode == "" {
+			mode = booking.StaffSelectionSpecific
+		}
+		out = append(out, OfferedSlotSegment{
+			ServiceID:          serviceID,
+			ServiceName:        segment.ServiceName,
+			StaffID:            firstNonEmpty(segment.StaffID, slot.StaffID, result.StaffID),
+			StaffName:          firstNonEmpty(segment.StaffName, slot.StaffName, result.StaffName),
+			StaffSelectionMode: mode,
+			DurationMinutes:    segment.DurationMinutes,
 		})
 	}
 	return out
@@ -324,7 +379,7 @@ func formatSlotOffer(slots []OfferedSlot, loc *time.Location, unavailableRequest
 	for i, slot := range slots {
 		label := ordinalLabel(i + 1)
 		when := slot.StartTime.In(loc).Format("Mon Jan 2 at 3:04 PM")
-		if strings.TrimSpace(slot.StaffName) != "" {
+		if strings.TrimSpace(slot.StaffName) != "" && !slotUsesAnyone(slot) {
 			when += " with " + strings.TrimSpace(slot.StaffName)
 		}
 		parts = append(parts, label+" "+when)
@@ -351,8 +406,10 @@ func syncTurnUpdate(turn *TurnRecord, session Session, services []ServiceOption,
 	turn.Update.CustomerEmail = session.CustomerEmail
 	turn.Update.ServiceID = session.ServiceID
 	turn.Update.StaffID = session.StaffID
+	turn.Update.StaffSelectionMode = staffSelectionModeForSession(session)
 	turn.Update.RequestedStartTime = session.RequestedStartTime
 	turn.Update.OfferedSlots = session.OfferedSlots
+	turn.Update.BookingSegments = session.BookingSegments
 	turn.Update.Summary = summaryFor(session, services, staff, cfg)
 }
 
@@ -361,14 +418,16 @@ func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnR
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, "I could not reach the booking path, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
 	}
 	attempt, err := s.bookingTool.Create(ctx, turn.SalonID, ownerUserID, booking.CreateBookingRequest{
-		Source:        bookingSourceForSession(session),
-		CustomerName:  session.CustomerName,
-		CustomerPhone: session.CustomerPhone,
-		CustomerEmail: session.CustomerEmail,
-		ServiceID:     session.ServiceID,
-		StaffID:       session.StaffID,
-		StartTime:     *session.RequestedStartTime,
-		Notes:         bookingNotesForSession(session),
+		Source:             bookingSourceForSession(session),
+		CustomerName:       session.CustomerName,
+		CustomerPhone:      session.CustomerPhone,
+		CustomerEmail:      session.CustomerEmail,
+		ServiceID:          session.ServiceID,
+		StaffID:            session.StaffID,
+		StaffSelectionMode: staffSelectionModeForSession(session),
+		Segments:           bookingSegmentsForCreate(session),
+		StartTime:          *session.RequestedStartTime,
+		Notes:              bookingNotesForSession(session),
 	})
 	if err != nil {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, "I could not confirm that in Square Appointments, so the owner needs to review it. This is not a confirmed appointment.", services, staff, cfg)
@@ -504,6 +563,9 @@ func resolveIntent(current string, message string, session Session) string {
 }
 
 func applyExtraction(session *Session, message string, services []ServiceOption, staff []StaffOption, loc *time.Location, now func() time.Time) {
+	if session == nil {
+		return
+	}
 	if session.CustomerEmail == "" {
 		if email := extractEmail(message); email != "" {
 			session.CustomerEmail = email
@@ -514,16 +576,25 @@ func applyExtraction(session *Session, message string, services []ServiceOption,
 			session.CustomerPhone = phone
 		}
 	}
-	if session.ServiceID == "" {
-		if service := matchService(message, services); service != nil {
-			session.ServiceID = service.ID
-			session.ServiceName = service.Name
-		}
+	requestedAnyone := customerRequestedAnyone(message)
+	matchedStaff := matchStaff(message, staff)
+	if requestedAnyone {
+		session.StaffSelectionMode = booking.StaffSelectionAnyone
+		session.StaffID = ""
+		session.StaffName = ""
+		clearBookingSegmentsStaffSelection(session)
+	} else if matchedStaff != nil {
+		session.StaffSelectionMode = booking.StaffSelectionSpecific
+		session.StaffID = matchedStaff.ID
+		session.StaffName = matchedStaff.Name
+		applySpecificStaffToBookingSegments(session, *matchedStaff)
 	}
-	if session.StaffID == "" {
-		if member := matchStaff(message, staff); member != nil {
-			session.StaffID = member.ID
-			session.StaffName = member.Name
+	if matches := matchServices(message, services); len(matches) > 0 && (session.ServiceID == "" || len(session.BookingSegments) == 0) {
+		session.ServiceID = matches[0].ID
+		session.ServiceName = matches[0].Name
+		session.BookingSegments = bookingSegmentsFromServices(matches, *session)
+		if len(session.BookingSegments) > 0 {
+			session.StaffSelectionMode = session.BookingSegments[0].StaffSelectionMode
 		}
 	}
 	if session.RequestedStartTime == nil {
@@ -576,7 +647,7 @@ func missingBookingField(session Session) string {
 		return "customer_name"
 	case strings.TrimSpace(session.CustomerPhone) == "":
 		return "customer_phone"
-	case strings.TrimSpace(session.StaffID) == "":
+	case !hasStaffAssignment(session):
 		return "staff"
 	default:
 		return ""
@@ -662,27 +733,64 @@ func cleanName(raw string) string {
 }
 
 func matchService(message string, services []ServiceOption) *ServiceOption {
+	matches := matchServices(message, services)
+	if len(matches) > 0 {
+		item := matches[0]
+		return &item
+	}
+	return nil
+}
+
+func matchServices(message string, services []ServiceOption) []ServiceOption {
 	lower := strings.ToLower(message)
 	ordered := append([]ServiceOption(nil), services...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		return len(ordered[i].Name) > len(ordered[j].Name)
 	})
+	type match struct {
+		service ServiceOption
+		index   int
+	}
+	matches := make([]match, 0, len(ordered))
+	seen := map[string]bool{}
 	for _, service := range ordered {
 		name := strings.ToLower(service.Name)
-		if name != "" && strings.Contains(lower, name) {
-			item := service
-			return &item
+		if name == "" {
+			continue
+		}
+		if index := strings.Index(lower, name); index >= 0 {
+			matches = append(matches, match{service: service, index: index})
+			seen[service.ID] = true
 		}
 	}
-	for _, service := range ordered {
-		for _, token := range significantWords(service.Name) {
-			if strings.Contains(lower, token) {
-				item := service
-				return &item
+	if len(matches) == 0 {
+		for _, service := range ordered {
+			if seen[service.ID] {
+				continue
+			}
+			for _, token := range significantWords(service.Name) {
+				if index := strings.Index(lower, token); index >= 0 {
+					matches = append(matches, match{service: service, index: index})
+					seen[service.ID] = true
+					break
+				}
 			}
 		}
 	}
-	return nil
+	if len(matches) == 0 {
+		return nil
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].index == matches[j].index {
+			return len(matches[i].service.Name) > len(matches[j].service.Name)
+		}
+		return matches[i].index < matches[j].index
+	})
+	out := make([]ServiceOption, 0, len(matches))
+	for _, item := range matches {
+		out = append(out, item.service)
+	}
+	return out
 }
 
 func matchStaff(message string, staff []StaffOption) *StaffOption {
@@ -898,6 +1006,285 @@ func selectedSlotIndex(message string) (int, bool) {
 	}
 }
 
+func customerRequestedAnyone(message string) bool {
+	lower := strings.ToLower(message)
+	signals := []string{"anyone", "any technician", "any tech", "whoever is available", "any available"}
+	for _, signal := range signals {
+		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func applySelectedOfferedSlot(session *Session, slot OfferedSlot) {
+	if session == nil {
+		return
+	}
+	start := slot.StartTime
+	session.RequestedStartTime = &start
+	session.StaffID = slot.StaffID
+	session.StaffName = slot.StaffName
+	session.StaffSelectionMode = offeredSlotStaffSelectionMode(slot)
+	session.BookingSegments = bookingSegmentsFromOfferedSlot(slot)
+	if session.StaffID == "" && len(slot.Segments) > 0 {
+		session.StaffID = slot.Segments[0].StaffID
+		session.StaffName = slot.Segments[0].StaffName
+	}
+	session.OfferedSlots = nil
+}
+
+func bookingSegmentsFromServices(services []ServiceOption, session Session) []booking.BookingSegmentRequest {
+	if len(services) == 0 {
+		return nil
+	}
+	mode := staffSelectionModeForServiceRequest(session)
+	staffID := strings.TrimSpace(session.StaffID)
+	if mode == booking.StaffSelectionAnyone {
+		staffID = ""
+	}
+	out := make([]booking.BookingSegmentRequest, 0, len(services))
+	for _, service := range services {
+		serviceID := strings.TrimSpace(service.ID)
+		if serviceID == "" {
+			continue
+		}
+		out = append(out, booking.BookingSegmentRequest{
+			ServiceID:          serviceID,
+			StaffID:            staffID,
+			StaffSelectionMode: mode,
+		})
+	}
+	return out
+}
+
+func applySpecificStaffToBookingSegments(session *Session, member StaffOption) {
+	if session == nil || len(session.BookingSegments) == 0 {
+		return
+	}
+	for i := range session.BookingSegments {
+		session.BookingSegments[i].StaffID = member.ID
+		session.BookingSegments[i].StaffSelectionMode = booking.StaffSelectionSpecific
+	}
+}
+
+func clearBookingSegmentsStaffSelection(session *Session) {
+	if session == nil || len(session.BookingSegments) == 0 {
+		return
+	}
+	for i := range session.BookingSegments {
+		session.BookingSegments[i].StaffID = ""
+		session.BookingSegments[i].StaffSelectionMode = booking.StaffSelectionAnyone
+	}
+}
+
+func availabilitySegmentsForSession(session Session, staffSelectionMode string) []booking.BookingSegmentRequest {
+	if len(session.BookingSegments) > 0 {
+		out := make([]booking.BookingSegmentRequest, 0, len(session.BookingSegments))
+		for _, segment := range session.BookingSegments {
+			serviceID := strings.TrimSpace(segment.ServiceID)
+			if serviceID == "" {
+				continue
+			}
+			mode := normalizeConversationStaffSelectionMode(firstNonEmpty(segment.StaffSelectionMode, staffSelectionMode))
+			if mode == "" {
+				mode = staffSelectionMode
+			}
+			staffID := strings.TrimSpace(segment.StaffID)
+			if mode == booking.StaffSelectionAnyone {
+				staffID = ""
+			} else if staffID == "" {
+				staffID = strings.TrimSpace(session.StaffID)
+			}
+			out = append(out, booking.BookingSegmentRequest{
+				ServiceID:          serviceID,
+				StaffID:            staffID,
+				StaffSelectionMode: mode,
+			})
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	serviceID := strings.TrimSpace(session.ServiceID)
+	if serviceID == "" {
+		return nil
+	}
+	return []booking.BookingSegmentRequest{{
+		ServiceID:          serviceID,
+		StaffID:            staffIDForAvailability(session),
+		StaffSelectionMode: staffSelectionMode,
+	}}
+}
+
+func bookingSegmentsForCreate(session Session) []booking.BookingSegmentRequest {
+	if len(session.BookingSegments) > 0 {
+		out := make([]booking.BookingSegmentRequest, 0, len(session.BookingSegments))
+		for _, segment := range session.BookingSegments {
+			serviceID := strings.TrimSpace(segment.ServiceID)
+			if serviceID == "" {
+				continue
+			}
+			mode := normalizeConversationStaffSelectionMode(firstNonEmpty(segment.StaffSelectionMode, session.StaffSelectionMode))
+			if mode == "" {
+				mode = staffSelectionModeForSession(session)
+			}
+			staffID := strings.TrimSpace(segment.StaffID)
+			if staffID == "" {
+				staffID = strings.TrimSpace(session.StaffID)
+			}
+			out = append(out, booking.BookingSegmentRequest{
+				ServiceID:          serviceID,
+				StaffID:            staffID,
+				StaffSelectionMode: mode,
+			})
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	serviceID := strings.TrimSpace(session.ServiceID)
+	if serviceID == "" {
+		return nil
+	}
+	return []booking.BookingSegmentRequest{{
+		ServiceID:          serviceID,
+		StaffID:            strings.TrimSpace(session.StaffID),
+		StaffSelectionMode: staffSelectionModeForSession(session),
+	}}
+}
+
+func bookingSegmentsFromOfferedSlot(slot OfferedSlot) []booking.BookingSegmentRequest {
+	if len(slot.Segments) == 0 {
+		return nil
+	}
+	out := make([]booking.BookingSegmentRequest, 0, len(slot.Segments))
+	for _, segment := range slot.Segments {
+		serviceID := strings.TrimSpace(segment.ServiceID)
+		if serviceID == "" {
+			continue
+		}
+		mode := normalizeConversationStaffSelectionMode(firstNonEmpty(segment.StaffSelectionMode, slot.StaffSelectionMode))
+		if mode == "" {
+			mode = booking.StaffSelectionSpecific
+		}
+		out = append(out, booking.BookingSegmentRequest{
+			ServiceID:          serviceID,
+			StaffID:            firstNonEmpty(segment.StaffID, slot.StaffID),
+			StaffSelectionMode: mode,
+		})
+	}
+	return out
+}
+
+func staffSelectionModeForServiceRequest(session Session) string {
+	mode := normalizeConversationStaffSelectionMode(session.StaffSelectionMode)
+	if mode == booking.StaffSelectionAnyone || strings.TrimSpace(session.StaffID) == "" {
+		return booking.StaffSelectionAnyone
+	}
+	return booking.StaffSelectionSpecific
+}
+
+func staffSelectionModeForAvailability(session Session) string {
+	mode := normalizeConversationStaffSelectionMode(session.StaffSelectionMode)
+	if mode == booking.StaffSelectionAnyone {
+		return booking.StaffSelectionAnyone
+	}
+	if strings.TrimSpace(session.StaffID) == "" && !bookingSegmentsHaveStaff(session.BookingSegments) {
+		return booking.StaffSelectionAnyone
+	}
+	return booking.StaffSelectionSpecific
+}
+
+func staffIDForAvailability(session Session) string {
+	if staffSelectionModeForAvailability(session) == booking.StaffSelectionAnyone {
+		return ""
+	}
+	return strings.TrimSpace(session.StaffID)
+}
+
+func staffSelectionModeForSession(session Session) string {
+	if mode := normalizeConversationStaffSelectionMode(session.StaffSelectionMode); mode != "" {
+		return mode
+	}
+	if len(session.BookingSegments) > 0 {
+		if mode := normalizeConversationStaffSelectionMode(session.BookingSegments[0].StaffSelectionMode); mode != "" {
+			return mode
+		}
+	}
+	if strings.TrimSpace(session.StaffID) == "" {
+		return booking.StaffSelectionAnyone
+	}
+	return booking.StaffSelectionSpecific
+}
+
+func offeredSlotStaffSelectionMode(slot OfferedSlot) string {
+	if mode := normalizeConversationStaffSelectionMode(slot.StaffSelectionMode); mode != "" {
+		return mode
+	}
+	for _, segment := range slot.Segments {
+		if mode := normalizeConversationStaffSelectionMode(segment.StaffSelectionMode); mode != "" {
+			return mode
+		}
+	}
+	return booking.StaffSelectionSpecific
+}
+
+func slotUsesAnyone(slot OfferedSlot) bool {
+	if normalizeConversationStaffSelectionMode(slot.StaffSelectionMode) == booking.StaffSelectionAnyone {
+		return true
+	}
+	for _, segment := range slot.Segments {
+		if normalizeConversationStaffSelectionMode(segment.StaffSelectionMode) == booking.StaffSelectionAnyone {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionUsesAnyone(session Session) bool {
+	return staffSelectionModeForSession(session) == booking.StaffSelectionAnyone
+}
+
+func hasStaffAssignment(session Session) bool {
+	if strings.TrimSpace(session.StaffID) != "" {
+		return true
+	}
+	return bookingSegmentsHaveStaff(session.BookingSegments)
+}
+
+func bookingSegmentsHaveStaff(segments []booking.BookingSegmentRequest) bool {
+	if len(segments) == 0 {
+		return false
+	}
+	for _, segment := range segments {
+		if strings.TrimSpace(segment.StaffID) == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeConversationStaffSelectionMode(mode string) string {
+	switch strings.TrimSpace(mode) {
+	case booking.StaffSelectionSpecific:
+		return booking.StaffSelectionSpecific
+	case booking.StaffSelectionAnyone:
+		return booking.StaffSelectionAnyone
+	default:
+		return ""
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 func parseDateAndClock(date string, hourRaw string, minuteRaw string, meridiem string, loc *time.Location) (time.Time, error) {
 	if hourRaw == "" {
 		return time.Time{}, fmt.Errorf("hour is required")
@@ -952,10 +1339,10 @@ func summaryFor(session Session, services []ServiceOption, staff []StaffOption, 
 	if session.CustomerPhone != "" {
 		parts = append(parts, session.CustomerPhone)
 	}
-	if name := serviceName(session.ServiceID, services, session.ServiceName); name != "" {
+	if name := serviceSummary(session, services); name != "" {
 		parts = append(parts, name)
 	}
-	if name := staffName(session.StaffID, staff, session.StaffName); name != "" {
+	if name := staffName(session.StaffID, staff, session.StaffName); name != "" && !sessionUsesAnyone(session) {
 		parts = append(parts, "with "+name)
 	}
 	if session.RequestedStartTime != nil {
@@ -968,8 +1355,11 @@ func summaryFor(session Session, services []ServiceOption, staff []StaffOption, 
 }
 
 func confirmedMessage(session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) string {
-	service := serviceName(session.ServiceID, services, session.ServiceName)
-	member := staffName(session.StaffID, staff, session.StaffName)
+	service := serviceSummary(session, services)
+	member := ""
+	if !sessionUsesAnyone(session) {
+		member = staffName(session.StaffID, staff, session.StaffName)
+	}
 	when := ""
 	if session.RequestedStartTime != nil {
 		loc := timezoneLocation("")
@@ -983,6 +1373,25 @@ func confirmedMessage(session Session, services []ServiceOption, staff []StaffOp
 		return "Your appointment is confirmed in Square Appointments."
 	}
 	return "Your appointment is confirmed in Square Appointments for " + details + "."
+}
+
+func serviceSummary(session Session, services []ServiceOption) string {
+	names := make([]string, 0, len(session.BookingSegments))
+	seen := map[string]bool{}
+	for _, segment := range session.BookingSegments {
+		serviceID := strings.TrimSpace(segment.ServiceID)
+		if serviceID == "" || seen[serviceID] {
+			continue
+		}
+		if name := serviceName(serviceID, services, ""); name != "" {
+			names = append(names, name)
+			seen[serviceID] = true
+		}
+	}
+	if len(names) > 0 {
+		return strings.Join(names, ", ")
+	}
+	return serviceName(session.ServiceID, services, session.ServiceName)
 }
 
 func nonEmpty(values []string) []string {

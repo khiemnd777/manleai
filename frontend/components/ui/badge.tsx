@@ -12,6 +12,8 @@ const statusClass: Record<string, string> = {
   confirmed: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   available: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   allowed: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+  anyone: "bg-blue-50 text-blue-700 ring-blue-200",
+  specific: "bg-slate-100 text-slate-700 ring-slate-200",
   blocked: "bg-amber-50 text-amber-700 ring-amber-200",
   cancelled: "bg-slate-100 text-slate-700 ring-slate-200",
   rescheduled: "bg-blue-50 text-blue-700 ring-blue-200",

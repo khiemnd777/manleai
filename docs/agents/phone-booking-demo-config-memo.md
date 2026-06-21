@@ -153,9 +153,14 @@ APPOINTMENTS_BUSINESS_SETTINGS_READ
 CUSTOMERS_READ
 CUSTOMERS_WRITE
 ITEMS_READ
+ITEMS_WRITE
 MERCHANT_PROFILE_READ
 EMPLOYEES_READ
+EMPLOYEES_WRITE
 ```
+
+Sandbox OAuth uses the Square sandbox dashboard session and does not include
+`session=false`; production OAuth includes `session=false`.
 
 Dashboard flow:
 

@@ -43,7 +43,7 @@ type POSProvider interface {
 - Cancel booking
 - POS sync logs and POS error logs
 
-The provider-neutral booking service creates backend `booking_attempts` before outbound POS writes, passes backend-owned idempotency keys into the adapter, and finalizes the same attempts as confirmed/rescheduled/cancelled or fallback pending. Real Square payloads must remain inside `SquareAdapter`, not in handlers or booking services.
+The provider-neutral booking service creates backend `booking_attempts` before outbound POS writes, passes backend-owned idempotency keys into the adapter, and finalizes the same attempts as confirmed/rescheduled/cancelled or fallback pending. Booking attempts and confirmed appointments also snapshot one or more service/staff segments using provider-neutral fields. `CreateAppointmentInput`, `RescheduleInput`, and `AvailabilityInput` expose segment arrays so providers can map multi-service booking payloads without leaking provider-specific shapes into booking services. The legacy single-service fields remain populated for compatibility during the migration to customer-facing multi-service booking. `staff_selection_mode=anyone` is stored as the customer's technician preference while the provider adapter receives whatever staff assignment the provider contract requires. Real Square payloads must remain inside `SquareAdapter`, not in handlers or booking services.
 
 ## Adding Future Providers
 

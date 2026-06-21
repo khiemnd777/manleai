@@ -72,6 +72,9 @@ func TestSignedTwilioWebhookDrivesPhoneBookingFlowThroughConversation(t *testing
 	if !strings.Contains(firstTurnBody, "<Gather") || !strings.Contains(firstTurnBody, "I found these openings") || !strings.Contains(firstTurnBody, "10:00 AM") {
 		t.Fatalf("first turn should offer available slots: %s", firstTurnBody)
 	}
+	if strings.Contains(firstTurnBody, "Mai Nguyen") {
+		t.Fatalf("anyone availability offer should not present the assigned technician as customer-chosen: %s", firstTurnBody)
+	}
 	if strings.Contains(strings.ToLower(firstTurnBody), "confirmed") {
 		t.Fatalf("availability offer must not confirm booking: %s", firstTurnBody)
 	}
@@ -104,6 +107,12 @@ func TestSignedTwilioWebhookDrivesPhoneBookingFlowThroughConversation(t *testing
 	}
 	if bookingTool.request.Source != booking.SourceAIVoiceCall {
 		t.Fatalf("booking source = %s, want %s", bookingTool.request.Source, booking.SourceAIVoiceCall)
+	}
+	if bookingTool.request.StaffSelectionMode != booking.StaffSelectionAnyone {
+		t.Fatalf("booking staff selection mode = %s, want anyone", bookingTool.request.StaffSelectionMode)
+	}
+	if got := bookingTool.request.Segments; len(got) != 1 || got[0].ServiceID != "service_1" || got[0].StaffID != "staff_1" || got[0].StaffSelectionMode != booking.StaffSelectionAnyone {
+		t.Fatalf("booking segments = %#v, want selected staff assignment with anyone mode", got)
 	}
 	if bookingTool.request.StaffID != "staff_1" || !bookingTool.request.StartTime.Equal(phoneFlowFirstSlotStart()) {
 		t.Fatalf("booking request = %#v, want selected offered slot", bookingTool.request)
@@ -208,6 +217,7 @@ func (f *phoneFlowConversationStore) SaveTurn(ctx context.Context, record conver
 	session.CustomerEmail = record.Update.CustomerEmail
 	session.ServiceID = record.Update.ServiceID
 	session.StaffID = record.Update.StaffID
+	session.StaffSelectionMode = record.Update.StaffSelectionMode
 	for _, service := range f.services {
 		if service.ID == session.ServiceID {
 			session.ServiceName = service.Name
@@ -220,6 +230,7 @@ func (f *phoneFlowConversationStore) SaveTurn(ctx context.Context, record conver
 	}
 	session.RequestedStartTime = record.Update.RequestedStartTime
 	session.OfferedSlots = record.Update.OfferedSlots
+	session.BookingSegments = append([]booking.BookingSegmentRequest(nil), record.Update.BookingSegments...)
 	session.BookingAttemptID = record.Update.BookingAttemptID
 	session.AppointmentID = record.Update.AppointmentID
 	session.Summary = record.Update.Summary
@@ -268,6 +279,7 @@ func (f *phoneFlowConversationStore) copySession() *conversation.Session {
 	session := f.session
 	session.Transcript = append([]conversation.TranscriptMessage(nil), f.session.Transcript...)
 	session.OfferedSlots = append([]conversation.OfferedSlot(nil), f.session.OfferedSlots...)
+	session.BookingSegments = append([]booking.BookingSegmentRequest(nil), f.session.BookingSegments...)
 	return &session
 }
 
@@ -283,23 +295,56 @@ func (f *phoneFlowBookingTool) AvailableSlots(ctx context.Context, salonID strin
 	f.availabilityCalls++
 	f.availabilityRequest = req
 	return &booking.AvailabilityResult{
-		ServiceID:       "service_1",
-		ServiceName:     "Classic Manicure",
+		ServiceID:          "service_1",
+		ServiceName:        "Classic Manicure",
+		StaffSelectionMode: req.StaffSelectionMode,
+		Segments: []booking.AvailabilitySegment{
+			{
+				ServiceID:          "service_1",
+				ServiceName:        "Classic Manicure",
+				StaffID:            "staff_1",
+				StaffName:          "Mai Nguyen",
+				StaffSelectionMode: req.StaffSelectionMode,
+				DurationMinutes:    45,
+			},
+		},
 		PreferredDate:   req.PreferredDate,
 		DurationMinutes: 45,
 		Timezone:        "America/Chicago",
 		Slots: []booking.AvailabilitySlot{
 			{
-				StartTime: phoneFlowFirstSlotStart(),
-				EndTime:   phoneFlowFirstSlotStart().Add(45 * time.Minute),
-				StaffID:   "staff_1",
-				StaffName: "Mai Nguyen",
+				StartTime:          phoneFlowFirstSlotStart(),
+				EndTime:            phoneFlowFirstSlotStart().Add(45 * time.Minute),
+				StaffID:            "staff_1",
+				StaffName:          "Mai Nguyen",
+				StaffSelectionMode: req.StaffSelectionMode,
+				Segments: []booking.AvailabilitySegment{
+					{
+						ServiceID:          "service_1",
+						ServiceName:        "Classic Manicure",
+						StaffID:            "staff_1",
+						StaffName:          "Mai Nguyen",
+						StaffSelectionMode: req.StaffSelectionMode,
+						DurationMinutes:    45,
+					},
+				},
 			},
 			{
-				StartTime: phoneFlowFirstSlotStart().Add(time.Hour),
-				EndTime:   phoneFlowFirstSlotStart().Add(time.Hour + 45*time.Minute),
-				StaffID:   "staff_1",
-				StaffName: "Mai Nguyen",
+				StartTime:          phoneFlowFirstSlotStart().Add(time.Hour),
+				EndTime:            phoneFlowFirstSlotStart().Add(time.Hour + 45*time.Minute),
+				StaffID:            "staff_1",
+				StaffName:          "Mai Nguyen",
+				StaffSelectionMode: req.StaffSelectionMode,
+				Segments: []booking.AvailabilitySegment{
+					{
+						ServiceID:          "service_1",
+						ServiceName:        "Classic Manicure",
+						StaffID:            "staff_1",
+						StaffName:          "Mai Nguyen",
+						StaffSelectionMode: req.StaffSelectionMode,
+						DurationMinutes:    45,
+					},
+				},
 			},
 		},
 	}, nil

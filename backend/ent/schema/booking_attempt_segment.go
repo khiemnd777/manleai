@@ -8,14 +8,14 @@ import (
 	"github.com/google/uuid"
 )
 
-type AppointmentService struct {
+type BookingAttemptSegment struct {
 	ent.Schema
 }
 
-func (AppointmentService) Fields() []ent.Field {
+func (BookingAttemptSegment) Fields() []ent.Field {
 	return []ent.Field{
 		field.UUID("id", uuid.UUID{}).Default(uuid.New),
-		field.UUID("appointment_id", uuid.UUID{}),
+		field.UUID("booking_attempt_id", uuid.UUID{}),
 		field.UUID("service_id", uuid.UUID{}).Optional().Nillable(),
 		field.UUID("staff_id", uuid.UUID{}).Optional().Nillable(),
 		field.String("staff_selection_mode").Default("specific"),

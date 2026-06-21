@@ -17,17 +17,28 @@ const (
 	NotificationTypeBookingFallback      = "booking_fallback_pending"
 	NotificationTypeRescheduleFallback   = "reschedule_fallback_pending"
 	NotificationTypeCancellationFallback = "cancel_fallback_pending"
+
+	StaffSelectionSpecific = "specific"
+	StaffSelectionAnyone   = "anyone"
 )
 
 type CreateBookingRequest struct {
-	Source        string    `json:"source"`
-	CustomerName  string    `json:"customer_name"`
-	CustomerPhone string    `json:"customer_phone"`
-	CustomerEmail string    `json:"customer_email"`
-	ServiceID     string    `json:"service_id"`
-	StaffID       string    `json:"staff_id"`
-	StartTime     time.Time `json:"start_time"`
-	Notes         string    `json:"notes"`
+	Source             string                  `json:"source"`
+	CustomerName       string                  `json:"customer_name"`
+	CustomerPhone      string                  `json:"customer_phone"`
+	CustomerEmail      string                  `json:"customer_email"`
+	ServiceID          string                  `json:"service_id"`
+	StaffID            string                  `json:"staff_id"`
+	StaffSelectionMode string                  `json:"staff_selection_mode"`
+	Segments           []BookingSegmentRequest `json:"segments"`
+	StartTime          time.Time               `json:"start_time"`
+	Notes              string                  `json:"notes"`
+}
+
+type BookingSegmentRequest struct {
+	ServiceID          string `json:"service_id"`
+	StaffID            string `json:"staff_id"`
+	StaffSelectionMode string `json:"staff_selection_mode"`
 }
 
 type RescheduleRequest struct {
@@ -43,71 +54,90 @@ type CancelRequest struct {
 }
 
 type AvailabilityRequest struct {
-	ServiceID     string `json:"service_id"`
-	StaffID       string `json:"staff_id"`
-	PreferredDate string `json:"preferred_date"`
-	Limit         int    `json:"limit"`
+	ServiceID          string                  `json:"service_id"`
+	StaffID            string                  `json:"staff_id"`
+	StaffSelectionMode string                  `json:"staff_selection_mode"`
+	Segments           []BookingSegmentRequest `json:"segments"`
+	PreferredDate      string                  `json:"preferred_date"`
+	Limit              int                     `json:"limit"`
 }
 
 type AvailabilityResult struct {
-	ServiceID       string             `json:"service_id"`
-	ServiceName     string             `json:"service_name"`
-	StaffID         string             `json:"staff_id,omitempty"`
-	StaffName       string             `json:"staff_name,omitempty"`
-	PreferredDate   string             `json:"preferred_date"`
-	DurationMinutes int                `json:"duration_minutes"`
-	Timezone        string             `json:"timezone"`
-	Slots           []AvailabilitySlot `json:"slots"`
+	ServiceID          string                `json:"service_id"`
+	ServiceName        string                `json:"service_name"`
+	StaffID            string                `json:"staff_id,omitempty"`
+	StaffName          string                `json:"staff_name,omitempty"`
+	StaffSelectionMode string                `json:"staff_selection_mode"`
+	Segments           []AvailabilitySegment `json:"segments,omitempty"`
+	PreferredDate      string                `json:"preferred_date"`
+	DurationMinutes    int                   `json:"duration_minutes"`
+	Timezone           string                `json:"timezone"`
+	Slots              []AvailabilitySlot    `json:"slots"`
 }
 
 type AvailabilitySlot struct {
-	StartTime time.Time `json:"start_time"`
-	EndTime   time.Time `json:"end_time"`
-	StaffID   string    `json:"staff_id,omitempty"`
-	StaffName string    `json:"staff_name,omitempty"`
+	StartTime          time.Time             `json:"start_time"`
+	EndTime            time.Time             `json:"end_time"`
+	StaffID            string                `json:"staff_id,omitempty"`
+	StaffName          string                `json:"staff_name,omitempty"`
+	StaffSelectionMode string                `json:"staff_selection_mode"`
+	Segments           []AvailabilitySegment `json:"segments,omitempty"`
+}
+
+type AvailabilitySegment struct {
+	ServiceID          string `json:"service_id"`
+	ServiceName        string `json:"service_name"`
+	StaffID            string `json:"staff_id,omitempty"`
+	StaffName          string `json:"staff_name,omitempty"`
+	StaffSelectionMode string `json:"staff_selection_mode"`
+	DurationMinutes    int    `json:"duration_minutes"`
 }
 
 type BookingAttempt struct {
-	ID                 string       `json:"id"`
-	SalonID            string       `json:"salon_id"`
-	Source             string       `json:"source"`
-	Status             string       `json:"status"`
-	POSProvider        string       `json:"pos_provider"`
-	POSBookingID       string       `json:"pos_booking_id,omitempty"`
-	POSIdempotencyKey  string       `json:"-"`
-	CustomerName       string       `json:"customer_name"`
-	CustomerPhone      string       `json:"customer_phone"`
-	CustomerEmail      string       `json:"customer_email,omitempty"`
-	ServiceID          string       `json:"service_id,omitempty"`
-	StaffID            string       `json:"staff_id,omitempty"`
-	RequestedStartTime time.Time    `json:"requested_start_time"`
-	RequestedEndTime   time.Time    `json:"requested_end_time"`
-	Notes              string       `json:"notes,omitempty"`
-	ErrorCode          string       `json:"error_code,omitempty"`
-	ErrorMessage       string       `json:"error_message,omitempty"`
-	CreatedAt          time.Time    `json:"created_at"`
-	UpdatedAt          time.Time    `json:"updated_at"`
-	Appointment        *Appointment `json:"appointment,omitempty"`
+	ID                 string                   `json:"id"`
+	SalonID            string                   `json:"salon_id"`
+	Source             string                   `json:"source"`
+	Status             string                   `json:"status"`
+	POSProvider        string                   `json:"pos_provider"`
+	POSBookingID       string                   `json:"pos_booking_id,omitempty"`
+	POSIdempotencyKey  string                   `json:"-"`
+	CustomerName       string                   `json:"customer_name"`
+	CustomerPhone      string                   `json:"customer_phone"`
+	CustomerEmail      string                   `json:"customer_email,omitempty"`
+	ServiceID          string                   `json:"service_id,omitempty"`
+	StaffID            string                   `json:"staff_id,omitempty"`
+	StaffSelectionMode string                   `json:"staff_selection_mode"`
+	Segments           []BookingSegmentSnapshot `json:"segments,omitempty"`
+	RequestedStartTime time.Time                `json:"requested_start_time"`
+	RequestedEndTime   time.Time                `json:"requested_end_time"`
+	Notes              string                   `json:"notes,omitempty"`
+	ErrorCode          string                   `json:"error_code,omitempty"`
+	ErrorMessage       string                   `json:"error_message,omitempty"`
+	CreatedAt          time.Time                `json:"created_at"`
+	UpdatedAt          time.Time                `json:"updated_at"`
+	Appointment        *Appointment             `json:"appointment,omitempty"`
 }
 
 type Appointment struct {
-	ID                    string    `json:"id"`
-	SalonID               string    `json:"salon_id"`
-	BookingAttemptID      string    `json:"booking_attempt_id"`
-	POSProvider           string    `json:"pos_provider"`
-	POSAppointmentID      string    `json:"pos_appointment_id"`
-	POSAppointmentVersion int       `json:"pos_appointment_version,omitempty"`
-	Status                string    `json:"status"`
-	CustomerName          string    `json:"customer_name"`
-	CustomerPhone         string    `json:"customer_phone"`
-	CustomerEmail         string    `json:"customer_email,omitempty"`
-	ServiceID             string    `json:"service_id,omitempty"`
-	StaffID               string    `json:"staff_id,omitempty"`
-	StartTime             time.Time `json:"start_time"`
-	EndTime               time.Time `json:"end_time"`
-	Notes                 string    `json:"notes,omitempty"`
-	CreatedAt             time.Time `json:"created_at"`
-	UpdatedAt             time.Time `json:"updated_at"`
+	ID                    string                   `json:"id"`
+	SalonID               string                   `json:"salon_id"`
+	BookingAttemptID      string                   `json:"booking_attempt_id"`
+	POSProvider           string                   `json:"pos_provider"`
+	POSAppointmentID      string                   `json:"pos_appointment_id"`
+	POSAppointmentVersion int                      `json:"pos_appointment_version,omitempty"`
+	Status                string                   `json:"status"`
+	CustomerName          string                   `json:"customer_name"`
+	CustomerPhone         string                   `json:"customer_phone"`
+	CustomerEmail         string                   `json:"customer_email,omitempty"`
+	ServiceID             string                   `json:"service_id,omitempty"`
+	StaffID               string                   `json:"staff_id,omitempty"`
+	StaffSelectionMode    string                   `json:"staff_selection_mode"`
+	Segments              []BookingSegmentSnapshot `json:"segments,omitempty"`
+	StartTime             time.Time                `json:"start_time"`
+	EndTime               time.Time                `json:"end_time"`
+	Notes                 string                   `json:"notes,omitempty"`
+	CreatedAt             time.Time                `json:"created_at"`
+	UpdatedAt             time.Time                `json:"updated_at"`
 }
 
 type ServiceRef struct {
@@ -152,6 +182,8 @@ type AppointmentActionRef struct {
 	CustomerEmail         string
 	Service               ServiceRef
 	Staff                 StaffRef
+	StaffSelectionMode    string
+	Segments              []BookingSegmentRecord
 	StartTime             time.Time
 	EndTime               time.Time
 	Notes                 string
@@ -160,53 +192,59 @@ type AppointmentActionRef struct {
 }
 
 type PendingBookingRecord struct {
-	SalonID           string
-	Source            string
-	Provider          string
-	POSIdempotencyKey string
-	CustomerName      string
-	CustomerPhone     string
-	CustomerEmail     string
-	Service           ServiceRef
-	Staff             StaffRef
-	StartTime         time.Time
-	EndTime           time.Time
-	Notes             string
+	SalonID            string
+	Source             string
+	Provider           string
+	POSIdempotencyKey  string
+	CustomerName       string
+	CustomerPhone      string
+	CustomerEmail      string
+	Service            ServiceRef
+	Staff              StaffRef
+	StaffSelectionMode string
+	Segments           []BookingSegmentRecord
+	StartTime          time.Time
+	EndTime            time.Time
+	Notes              string
 }
 
 type ConfirmedBookingRecord struct {
-	AttemptID         string
-	SalonID           string
-	Source            string
-	Provider          string
-	CustomerName      string
-	CustomerPhone     string
-	CustomerEmail     string
-	Service           ServiceRef
-	Staff             StaffRef
-	StartTime         time.Time
-	EndTime           time.Time
-	Notes             string
-	POSBookingID      string
-	POSBookingVersion int
+	AttemptID          string
+	SalonID            string
+	Source             string
+	Provider           string
+	CustomerName       string
+	CustomerPhone      string
+	CustomerEmail      string
+	Service            ServiceRef
+	Staff              StaffRef
+	StaffSelectionMode string
+	Segments           []BookingSegmentRecord
+	StartTime          time.Time
+	EndTime            time.Time
+	Notes              string
+	POSBookingID       string
+	POSBookingVersion  int
 }
 
 type FallbackBookingRecord struct {
-	AttemptID     string
-	SalonID       string
-	Source        string
-	Provider      string
-	Operation     string
-	CustomerName  string
-	CustomerPhone string
-	CustomerEmail string
-	Service       ServiceRef
-	Staff         StaffRef
-	StartTime     time.Time
-	EndTime       time.Time
-	Notes         string
-	ErrorCode     string
-	ErrorMessage  string
+	AttemptID          string
+	SalonID            string
+	Source             string
+	Provider           string
+	Operation          string
+	CustomerName       string
+	CustomerPhone      string
+	CustomerEmail      string
+	Service            ServiceRef
+	Staff              StaffRef
+	StaffSelectionMode string
+	Segments           []BookingSegmentRecord
+	StartTime          time.Time
+	EndTime            time.Time
+	Notes              string
+	ErrorCode          string
+	ErrorMessage       string
 }
 
 type PendingAppointmentActionRecord struct {
@@ -214,6 +252,7 @@ type PendingAppointmentActionRecord struct {
 	Appointment        AppointmentActionRef
 	Provider           string
 	Source             string
+	Segments           []BookingSegmentRecord
 	RequestedStartTime time.Time
 	RequestedEndTime   time.Time
 	Notes              string
@@ -225,6 +264,7 @@ type RescheduledAppointmentRecord struct {
 	Appointment       AppointmentActionRef
 	Staff             StaffRef
 	Source            string
+	Segments          []BookingSegmentRecord
 	StartTime         time.Time
 	EndTime           time.Time
 	Notes             string
@@ -247,11 +287,29 @@ type AppointmentActionFallbackRecord struct {
 	Operation          string
 	Source             string
 	NotificationType   string
+	Segments           []BookingSegmentRecord
 	RequestedStartTime time.Time
 	RequestedEndTime   time.Time
 	Notes              string
 	ErrorCode          string
 	ErrorMessage       string
+}
+
+type BookingSegmentRecord struct {
+	Service            ServiceRef
+	Staff              StaffRef
+	StaffSelectionMode string
+	SortOrder          int
+}
+
+type BookingSegmentSnapshot struct {
+	ServiceID          string `json:"service_id,omitempty"`
+	ServiceName        string `json:"service_name"`
+	StaffID            string `json:"staff_id,omitempty"`
+	StaffName          string `json:"staff_name,omitempty"`
+	StaffSelectionMode string `json:"staff_selection_mode"`
+	DurationMinutes    int    `json:"duration_minutes,omitempty"`
+	SortOrder          int    `json:"sort_order"`
 }
 
 type TestBookingRecord struct {

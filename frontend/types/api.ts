@@ -96,6 +96,24 @@ export type CustomerSummary = {
   last_customer_activity_at?: string;
 };
 
+export type StaffSelectionMode = "specific" | "anyone" | string;
+
+export type BookingSegmentSnapshot = {
+  service_id?: string;
+  service_name: string;
+  staff_id?: string;
+  staff_name?: string;
+  staff_selection_mode: StaffSelectionMode;
+  duration_minutes?: number;
+  sort_order: number;
+};
+
+export type BookingSegmentRequest = {
+  service_id: string;
+  staff_id?: string;
+  staff_selection_mode: StaffSelectionMode;
+};
+
 export type AppointmentRecord = {
   id: string;
   salon_id: string;
@@ -109,6 +127,8 @@ export type AppointmentRecord = {
   customer_email?: string;
   service_id?: string;
   staff_id?: string;
+  staff_selection_mode: StaffSelectionMode;
+  segments?: BookingSegmentSnapshot[];
   start_time: string;
   end_time: string;
   notes?: string;
@@ -128,6 +148,8 @@ export type BookingAttempt = {
   customer_email?: string;
   service_id?: string;
   staff_id?: string;
+  staff_selection_mode: StaffSelectionMode;
+  segments?: BookingSegmentSnapshot[];
   requested_start_time: string;
   requested_end_time: string;
   notes?: string;
@@ -143,6 +165,17 @@ export type AvailabilitySlot = {
   end_time: string;
   staff_id?: string;
   staff_name?: string;
+  staff_selection_mode: StaffSelectionMode;
+  segments?: AvailabilitySegment[];
+};
+
+export type AvailabilitySegment = {
+  service_id: string;
+  service_name: string;
+  staff_id?: string;
+  staff_name?: string;
+  staff_selection_mode: StaffSelectionMode;
+  duration_minutes: number;
 };
 
 export type AvailabilityResult = {
@@ -150,6 +183,8 @@ export type AvailabilityResult = {
   service_name: string;
   staff_id?: string;
   staff_name?: string;
+  staff_selection_mode: StaffSelectionMode;
+  segments?: AvailabilitySegment[];
   preferred_date: string;
   duration_minutes: number;
   timezone: string;
@@ -240,6 +275,17 @@ export type OfferedSlot = {
   end_time: string;
   staff_id: string;
   staff_name: string;
+  staff_selection_mode?: StaffSelectionMode;
+  segments?: OfferedSlotSegment[];
+};
+
+export type OfferedSlotSegment = {
+  service_id: string;
+  service_name?: string;
+  staff_id?: string;
+  staff_name?: string;
+  staff_selection_mode: StaffSelectionMode;
+  duration_minutes?: number;
 };
 
 export type ConversationSession = {
@@ -260,8 +306,10 @@ export type ConversationSession = {
   service_name?: string;
   staff_id?: string;
   staff_name?: string;
+  staff_selection_mode?: StaffSelectionMode;
   requested_start_time?: string;
   offered_slots?: OfferedSlot[];
+  booking_segments?: BookingSegmentRequest[];
   booking_attempt_id?: string;
   appointment_id?: string;
   summary?: string;

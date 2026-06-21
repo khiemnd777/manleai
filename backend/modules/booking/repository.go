@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/manleai/ai-receptionist/modules/pos"
 )
 
@@ -141,6 +142,12 @@ func (r *Repository) GetSchedule(ctx context.Context, salonID string) (*Schedule
 }
 
 func (r *Repository) CreatePendingBookingAttempt(ctx context.Context, record PendingBookingRecord) (*BookingAttempt, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
 	attempt := BookingAttempt{
 		SalonID:            record.SalonID,
 		Source:             record.Source,
@@ -152,18 +159,28 @@ func (r *Repository) CreatePendingBookingAttempt(ctx context.Context, record Pen
 		CustomerEmail:      record.CustomerEmail,
 		ServiceID:          record.Service.ID,
 		StaffID:            record.Staff.ID,
+		StaffSelectionMode: record.StaffSelectionMode,
 		RequestedStartTime: record.StartTime,
 		RequestedEndTime:   record.EndTime,
 		Notes:              record.Notes,
 	}
-	if err := r.db.QueryRowContext(ctx, `
+	if attempt.StaffSelectionMode == "" {
+		attempt.StaffSelectionMode = StaffSelectionSpecific
+	}
+	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO booking_attempts (
 			salon_id, source, status, pos_provider, pos_idempotency_key, customer_name, customer_phone,
-			customer_email, service_id, staff_id, requested_start_time, requested_end_time, notes
+			customer_email, service_id, staff_id, staff_selection_mode, requested_start_time, requested_end_time, notes
 		)
-		VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, $7, NULLIF($8, ''), $9, $10, $11, $12, NULLIF($13, ''))
+		VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, $7, NULLIF($8, ''), $9, $10, $11, $12, $13, NULLIF($14, ''))
 		RETURNING id::text, created_at, updated_at
-	`, attempt.SalonID, attempt.Source, attempt.Status, attempt.POSProvider, attempt.POSIdempotencyKey, attempt.CustomerName, attempt.CustomerPhone, attempt.CustomerEmail, attempt.ServiceID, attempt.StaffID, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes).Scan(&attempt.ID, &attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+	`, attempt.SalonID, attempt.Source, attempt.Status, attempt.POSProvider, attempt.POSIdempotencyKey, attempt.CustomerName, attempt.CustomerPhone, attempt.CustomerEmail, attempt.ServiceID, attempt.StaffID, attempt.StaffSelectionMode, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes).Scan(&attempt.ID, &attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if err := insertBookingAttemptSegments(ctx, tx, attempt.ID, record.Segments); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return &attempt, nil
@@ -188,25 +205,30 @@ func (r *Repository) SaveConfirmedBooking(ctx context.Context, record ConfirmedB
 		CustomerEmail:      record.CustomerEmail,
 		ServiceID:          record.Service.ID,
 		StaffID:            record.Staff.ID,
+		StaffSelectionMode: record.StaffSelectionMode,
 		RequestedStartTime: record.StartTime,
 		RequestedEndTime:   record.EndTime,
 		Notes:              record.Notes,
+	}
+	if attempt.StaffSelectionMode == "" {
+		attempt.StaffSelectionMode = StaffSelectionSpecific
 	}
 	if err := tx.QueryRowContext(ctx, `
 		UPDATE booking_attempts
 		SET status = $1,
 		    pos_booking_id = $2,
-		    requested_start_time = $3,
-		    requested_end_time = $4,
-		    notes = NULLIF($5, ''),
+		    staff_selection_mode = $3,
+		    requested_start_time = $4,
+		    requested_end_time = $5,
+		    notes = NULLIF($6, ''),
 		    error_code = NULL,
 		    error_message = NULL,
 		    updated_at = now()
-		WHERE id = $6
-		  AND salon_id = $7
-		  AND status = $8
+		WHERE id = $7
+		  AND salon_id = $8
+		  AND status = $9
 		RETURNING created_at, updated_at
-	`, attempt.Status, attempt.POSBookingID, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes, attempt.ID, attempt.SalonID, StatusPOSPending).Scan(&attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+	`, attempt.Status, attempt.POSBookingID, attempt.StaffSelectionMode, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes, attempt.ID, attempt.SalonID, StatusPOSPending).Scan(&attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, pos.ErrNotFound
 		}
@@ -225,6 +247,7 @@ func (r *Repository) SaveConfirmedBooking(ctx context.Context, record ConfirmedB
 		CustomerEmail:         record.CustomerEmail,
 		ServiceID:             record.Service.ID,
 		StaffID:               record.Staff.ID,
+		StaffSelectionMode:    attempt.StaffSelectionMode,
 		StartTime:             record.StartTime,
 		EndTime:               record.EndTime,
 		Notes:                 record.Notes,
@@ -232,18 +255,19 @@ func (r *Repository) SaveConfirmedBooking(ctx context.Context, record ConfirmedB
 	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO appointments (
 			salon_id, booking_attempt_id, pos_provider, pos_appointment_id, pos_appointment_version, status, customer_name,
-			customer_phone, customer_email, service_id, staff_id, start_time, end_time, notes
+			customer_phone, customer_email, service_id, staff_id, staff_selection_mode, start_time, end_time, notes
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10, $11, $12, $13, NULLIF($14, ''))
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10, $11, $12, $13, $14, NULLIF($15, ''))
 		RETURNING id::text, created_at, updated_at
-	`, appointment.SalonID, appointment.BookingAttemptID, appointment.POSProvider, appointment.POSAppointmentID, appointment.POSAppointmentVersion, appointment.Status, appointment.CustomerName, appointment.CustomerPhone, appointment.CustomerEmail, appointment.ServiceID, appointment.StaffID, appointment.StartTime, appointment.EndTime, appointment.Notes).Scan(&appointment.ID, &appointment.CreatedAt, &appointment.UpdatedAt); err != nil {
+	`, appointment.SalonID, appointment.BookingAttemptID, appointment.POSProvider, appointment.POSAppointmentID, appointment.POSAppointmentVersion, appointment.Status, appointment.CustomerName, appointment.CustomerPhone, appointment.CustomerEmail, appointment.ServiceID, appointment.StaffID, appointment.StaffSelectionMode, appointment.StartTime, appointment.EndTime, appointment.Notes).Scan(&appointment.ID, &appointment.CreatedAt, &appointment.UpdatedAt); err != nil {
 		return nil, err
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO appointment_services (appointment_id, service_id, pos_service_id, pos_service_version, name, duration_minutes, price_from)
-		VALUES ($1, $2, $3, NULLIF($4::bigint, 0), $5, $6, NULLIF($7, 0))
-	`, appointment.ID, record.Service.ID, record.Service.POSServiceID, record.Service.POSServiceVersion, record.Service.Name, record.Service.DurationMinutes, record.Service.PriceFrom); err != nil {
+	segments := record.Segments
+	if len(segments) == 0 {
+		segments = []BookingSegmentRecord{{Service: record.Service, Staff: record.Staff, StaffSelectionMode: appointment.StaffSelectionMode, SortOrder: 1}}
+	}
+	if err := insertAppointmentServices(ctx, tx, appointment.ID, segments); err != nil {
 		return nil, err
 	}
 
@@ -272,26 +296,31 @@ func (r *Repository) SaveFallbackBooking(ctx context.Context, record FallbackBoo
 		CustomerEmail:      record.CustomerEmail,
 		ServiceID:          record.Service.ID,
 		StaffID:            record.Staff.ID,
+		StaffSelectionMode: record.StaffSelectionMode,
 		RequestedStartTime: record.StartTime,
 		RequestedEndTime:   record.EndTime,
 		Notes:              record.Notes,
 		ErrorCode:          record.ErrorCode,
 		ErrorMessage:       record.ErrorMessage,
 	}
+	if attempt.StaffSelectionMode == "" {
+		attempt.StaffSelectionMode = StaffSelectionSpecific
+	}
 	if err := tx.QueryRowContext(ctx, `
 		UPDATE booking_attempts
 		SET status = $1,
-		    requested_start_time = $2,
-		    requested_end_time = $3,
-		    notes = NULLIF($4, ''),
-		    error_code = $5,
-		    error_message = $6,
+		    staff_selection_mode = $2,
+		    requested_start_time = $3,
+		    requested_end_time = $4,
+		    notes = NULLIF($5, ''),
+		    error_code = $6,
+		    error_message = $7,
 		    updated_at = now()
-		WHERE id = $7
-		  AND salon_id = $8
-		  AND status = $9
+		WHERE id = $8
+		  AND salon_id = $9
+		  AND status = $10
 		RETURNING created_at, updated_at
-	`, attempt.Status, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes, attempt.ErrorCode, attempt.ErrorMessage, attempt.ID, attempt.SalonID, StatusPOSPending).Scan(&attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+	`, attempt.Status, attempt.StaffSelectionMode, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes, attempt.ErrorCode, attempt.ErrorMessage, attempt.ID, attempt.SalonID, StatusPOSPending).Scan(&attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, pos.ErrNotFound
 		}
@@ -324,23 +353,20 @@ func (r *Repository) GetAppointmentForOwner(ctx context.Context, salonID string,
 		       a.pos_appointment_id, COALESCE(a.pos_appointment_version, 0), a.status,
 		       a.customer_name, a.customer_phone, COALESCE(a.customer_email, ''),
 		       COALESCE(a.start_time, now()), COALESCE(a.end_time, now()), COALESCE(a.notes, ''),
-		       a.created_at, a.updated_at,
+		       a.created_at, a.updated_at, COALESCE(a.staff_selection_mode, 'specific'),
 		       COALESCE(s.id::text, ''), COALESCE(s.pos_provider, a.pos_provider),
-		       COALESCE(aps.pos_service_id, s.pos_service_id, ''), COALESCE(aps.pos_service_version, s.pos_service_version, 0),
-		       COALESCE(aps.name, s.name, ''), COALESCE(aps.duration_minutes, s.duration_minutes, 0),
-		       COALESCE(aps.price_from, s.price_from, 0),
+		       COALESCE(s.pos_service_id, ''), COALESCE(s.pos_service_version, 0),
+		       COALESCE(s.name, ''), COALESCE(s.duration_minutes, 0),
+		       COALESCE(s.price_from, 0),
 		       COALESCE(st.id::text, ''), COALESCE(st.pos_provider, a.pos_provider), COALESCE(st.pos_staff_id, ''),
 		       COALESCE(st.name, '')
 		FROM appointments a
 		JOIN salons salon ON salon.id = a.salon_id
-		LEFT JOIN appointment_services aps ON aps.appointment_id = a.id
 		LEFT JOIN services s ON s.id = a.service_id
 		LEFT JOIN staff st ON st.id = a.staff_id
 		WHERE a.id = $1
 		  AND a.salon_id = $2
 		  AND salon.owner_user_id = $3
-		ORDER BY aps.created_at ASC NULLS LAST
-		LIMIT 1
 	`, appointmentID, salonID, ownerUserID)
 
 	var item AppointmentActionRef
@@ -360,6 +386,7 @@ func (r *Repository) GetAppointmentForOwner(ctx context.Context, salonID string,
 		&item.Notes,
 		&item.CreatedAt,
 		&item.UpdatedAt,
+		&item.StaffSelectionMode,
 		&item.Service.ID,
 		&item.Service.POSProvider,
 		&item.Service.POSServiceID,
@@ -378,14 +405,88 @@ func (r *Repository) GetAppointmentForOwner(ctx context.Context, salonID string,
 	if err != nil {
 		return nil, err
 	}
+	segments, err := r.loadAppointmentActionSegments(ctx, item.ID, item.POSProvider)
+	if err != nil {
+		return nil, err
+	}
+	if len(segments) > 0 {
+		item.Segments = segments
+		item.Service = segments[0].Service
+		item.Staff = segments[0].Staff
+	}
 	return &item, nil
 }
 
+func (r *Repository) loadAppointmentActionSegments(ctx context.Context, appointmentID string, provider string) ([]BookingSegmentRecord, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT COALESCE(aps.service_id::text, ''),
+		       COALESCE(s.pos_provider, $2),
+		       COALESCE(aps.pos_service_id, s.pos_service_id, ''),
+		       COALESCE(aps.pos_service_version, s.pos_service_version, 0),
+		       aps.name,
+		       COALESCE(aps.duration_minutes, 0),
+		       COALESCE(aps.price_from, s.price_from, 0),
+		       COALESCE(aps.staff_id::text, ''),
+		       COALESCE(st.pos_provider, $2),
+		       COALESCE(st.pos_staff_id, ''),
+		       COALESCE(st.name, ''),
+		       COALESCE(aps.staff_selection_mode, 'specific'),
+		       COALESCE(aps.sort_order, 1)
+		FROM appointment_services aps
+		LEFT JOIN services s ON s.id = aps.service_id
+		LEFT JOIN staff st ON st.id = aps.staff_id
+		WHERE aps.appointment_id = $1
+		ORDER BY aps.sort_order ASC, aps.created_at ASC
+	`, appointmentID, provider)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	segments := make([]BookingSegmentRecord, 0)
+	for rows.Next() {
+		var segment BookingSegmentRecord
+		if err := rows.Scan(
+			&segment.Service.ID,
+			&segment.Service.POSProvider,
+			&segment.Service.POSServiceID,
+			&segment.Service.POSServiceVersion,
+			&segment.Service.Name,
+			&segment.Service.DurationMinutes,
+			&segment.Service.PriceFrom,
+			&segment.Staff.ID,
+			&segment.Staff.POSProvider,
+			&segment.Staff.POSStaffID,
+			&segment.Staff.Name,
+			&segment.StaffSelectionMode,
+			&segment.SortOrder,
+		); err != nil {
+			return nil, err
+		}
+		segments = append(segments, segment)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return segments, nil
+}
+
 func (r *Repository) CreatePendingAppointmentAction(ctx context.Context, record PendingAppointmentActionRecord) (*BookingAttempt, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
 	source := record.Source
 	if source == "" {
 		source = SourceOwnerDashboard
 	}
+	segments := record.Segments
+	if len(segments) == 0 {
+		segments = appointmentActionSegments(record.Appointment)
+	}
+	primary := segments[0]
 	attempt := BookingAttempt{
 		SalonID:            record.SalonID,
 		Source:             source,
@@ -396,22 +497,33 @@ func (r *Repository) CreatePendingAppointmentAction(ctx context.Context, record 
 		CustomerName:       record.Appointment.CustomerName,
 		CustomerPhone:      record.Appointment.CustomerPhone,
 		CustomerEmail:      record.Appointment.CustomerEmail,
-		ServiceID:          record.Appointment.Service.ID,
-		StaffID:            record.Appointment.Staff.ID,
+		ServiceID:          primary.Service.ID,
+		StaffID:            primary.Staff.ID,
+		StaffSelectionMode: primary.StaffSelectionMode,
 		RequestedStartTime: record.RequestedStartTime,
 		RequestedEndTime:   record.RequestedEndTime,
 		Notes:              record.Notes,
 	}
-	if err := r.db.QueryRowContext(ctx, `
+	if attempt.StaffSelectionMode == "" {
+		attempt.StaffSelectionMode = StaffSelectionSpecific
+	}
+	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO booking_attempts (
 			salon_id, source, status, pos_provider, pos_booking_id, pos_idempotency_key, customer_name, customer_phone,
-			customer_email, service_id, staff_id, requested_start_time, requested_end_time, notes
+			customer_email, service_id, staff_id, staff_selection_mode, requested_start_time, requested_end_time, notes
 		)
-		VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), $7, $8, NULLIF($9, ''), $10, $11, $12, $13, NULLIF($14, ''))
+		VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), $7, $8, NULLIF($9, ''), $10, $11, $12, $13, $14, NULLIF($15, ''))
 		RETURNING id::text, created_at, updated_at
-	`, attempt.SalonID, attempt.Source, attempt.Status, attempt.POSProvider, attempt.POSBookingID, attempt.POSIdempotencyKey, attempt.CustomerName, attempt.CustomerPhone, attempt.CustomerEmail, attempt.ServiceID, attempt.StaffID, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes).Scan(&attempt.ID, &attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+	`, attempt.SalonID, attempt.Source, attempt.Status, attempt.POSProvider, attempt.POSBookingID, attempt.POSIdempotencyKey, attempt.CustomerName, attempt.CustomerPhone, attempt.CustomerEmail, attempt.ServiceID, attempt.StaffID, attempt.StaffSelectionMode, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes).Scan(&attempt.ID, &attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
 		return nil, err
 	}
+	if err := insertBookingAttemptSegments(ctx, tx, attempt.ID, segments); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	attempt.Segments = bookingSegmentSnapshots(segments)
 	return &attempt, nil
 }
 
@@ -426,6 +538,14 @@ func (r *Repository) SaveRescheduledAppointment(ctx context.Context, record Resc
 	if source == "" {
 		source = SourceOwnerDashboard
 	}
+	segments := record.Segments
+	if len(segments) == 0 {
+		segments = appointmentActionSegments(record.Appointment)
+		if record.Staff.ID != "" {
+			segments = applyStaffToBookingSegments(segments, record.Staff)
+		}
+	}
+	primary := segments[0]
 	attempt := BookingAttempt{
 		ID:                 record.AttemptID,
 		SalonID:            record.Appointment.SalonID,
@@ -436,28 +556,33 @@ func (r *Repository) SaveRescheduledAppointment(ctx context.Context, record Resc
 		CustomerName:       record.Appointment.CustomerName,
 		CustomerPhone:      record.Appointment.CustomerPhone,
 		CustomerEmail:      record.Appointment.CustomerEmail,
-		ServiceID:          record.Appointment.Service.ID,
-		StaffID:            record.Staff.ID,
+		ServiceID:          primary.Service.ID,
+		StaffID:            primary.Staff.ID,
+		StaffSelectionMode: primary.StaffSelectionMode,
 		RequestedStartTime: record.StartTime,
 		RequestedEndTime:   record.EndTime,
 		Notes:              record.Notes,
+	}
+	if attempt.StaffSelectionMode == "" {
+		attempt.StaffSelectionMode = StaffSelectionSpecific
 	}
 	if err := tx.QueryRowContext(ctx, `
 		UPDATE booking_attempts
 		SET status = $1,
 		    pos_booking_id = NULLIF($2, ''),
 		    staff_id = $3,
-		    requested_start_time = $4,
-		    requested_end_time = $5,
-		    notes = NULLIF($6, ''),
+		    staff_selection_mode = $4,
+		    requested_start_time = $5,
+		    requested_end_time = $6,
+		    notes = NULLIF($7, ''),
 		    error_code = NULL,
 		    error_message = NULL,
 		    updated_at = now()
-		WHERE id = $7
-		  AND salon_id = $8
-		  AND status = $9
+		WHERE id = $8
+		  AND salon_id = $9
+		  AND status = $10
 		RETURNING created_at, updated_at
-	`, attempt.Status, attempt.POSBookingID, attempt.StaffID, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes, attempt.ID, attempt.SalonID, StatusPOSPending).Scan(&attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+	`, attempt.Status, attempt.POSBookingID, attempt.StaffID, attempt.StaffSelectionMode, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes, attempt.ID, attempt.SalonID, StatusPOSPending).Scan(&attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, pos.ErrNotFound
 		}
@@ -468,24 +593,32 @@ func (r *Repository) SaveRescheduledAppointment(ctx context.Context, record Resc
 		UPDATE appointments
 		SET status = $1,
 		    staff_id = $2,
-		    start_time = $3,
-		    end_time = $4,
-		    notes = NULLIF($5, ''),
-		    pos_appointment_version = $6,
+		    staff_selection_mode = $3,
+		    start_time = $4,
+		    end_time = $5,
+		    notes = NULLIF($6, ''),
+		    pos_appointment_version = $7,
 		    updated_at = now()
-		WHERE id = $7
-		  AND salon_id = $8
+		WHERE id = $8
+		  AND salon_id = $9
 		RETURNING id::text, salon_id::text, booking_attempt_id::text, pos_provider, pos_appointment_id,
 		          COALESCE(pos_appointment_version, 0), status, customer_name, customer_phone,
-		          COALESCE(customer_email, ''), COALESCE(service_id::text, ''), COALESCE(staff_id::text, ''),
+		          COALESCE(customer_email, ''), COALESCE(service_id::text, ''), COALESCE(staff_id::text, ''), COALESCE(staff_selection_mode, 'specific'),
 		          start_time, end_time, COALESCE(notes, ''), created_at, updated_at
-	`, StatusRescheduled, record.Staff.ID, record.StartTime, record.EndTime, record.Notes, record.POSBookingVersion, record.Appointment.ID, record.Appointment.SalonID))
+	`, StatusRescheduled, primary.Staff.ID, attempt.StaffSelectionMode, record.StartTime, record.EndTime, record.Notes, record.POSBookingVersion, record.Appointment.ID, record.Appointment.SalonID))
 	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM appointment_services WHERE appointment_id = $1`, record.Appointment.ID); err != nil {
+		return nil, err
+	}
+	if err := insertAppointmentServices(ctx, tx, record.Appointment.ID, segments); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	appointment.Segments = bookingSegmentSnapshots(segments)
 	return appointment, nil
 }
 
@@ -500,6 +633,8 @@ func (r *Repository) SaveCancelledAppointment(ctx context.Context, record Cancel
 	if source == "" {
 		source = SourceOwnerDashboard
 	}
+	segments := appointmentActionSegments(record.Appointment)
+	primary := segments[0]
 	attempt := BookingAttempt{
 		ID:                 record.AttemptID,
 		SalonID:            record.Appointment.SalonID,
@@ -510,25 +645,30 @@ func (r *Repository) SaveCancelledAppointment(ctx context.Context, record Cancel
 		CustomerName:       record.Appointment.CustomerName,
 		CustomerPhone:      record.Appointment.CustomerPhone,
 		CustomerEmail:      record.Appointment.CustomerEmail,
-		ServiceID:          record.Appointment.Service.ID,
-		StaffID:            record.Appointment.Staff.ID,
+		ServiceID:          primary.Service.ID,
+		StaffID:            primary.Staff.ID,
+		StaffSelectionMode: primary.StaffSelectionMode,
 		RequestedStartTime: record.Appointment.StartTime,
 		RequestedEndTime:   record.Appointment.EndTime,
 		Notes:              record.Reason,
+	}
+	if attempt.StaffSelectionMode == "" {
+		attempt.StaffSelectionMode = StaffSelectionSpecific
 	}
 	if err := tx.QueryRowContext(ctx, `
 		UPDATE booking_attempts
 		SET status = $1,
 		    pos_booking_id = NULLIF($2, ''),
-		    notes = NULLIF($3, ''),
+		    staff_selection_mode = $3,
+		    notes = NULLIF($4, ''),
 		    error_code = NULL,
 		    error_message = NULL,
 		    updated_at = now()
-		WHERE id = $4
-		  AND salon_id = $5
-		  AND status = $6
+		WHERE id = $5
+		  AND salon_id = $6
+		  AND status = $7
 		RETURNING created_at, updated_at
-	`, attempt.Status, attempt.POSBookingID, attempt.Notes, attempt.ID, attempt.SalonID, StatusPOSPending).Scan(&attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+	`, attempt.Status, attempt.POSBookingID, attempt.StaffSelectionMode, attempt.Notes, attempt.ID, attempt.SalonID, StatusPOSPending).Scan(&attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, pos.ErrNotFound
 		}
@@ -544,7 +684,7 @@ func (r *Repository) SaveCancelledAppointment(ctx context.Context, record Cancel
 		  AND salon_id = $4
 		RETURNING id::text, salon_id::text, booking_attempt_id::text, pos_provider, pos_appointment_id,
 		          COALESCE(pos_appointment_version, 0), status, customer_name, customer_phone,
-		          COALESCE(customer_email, ''), COALESCE(service_id::text, ''), COALESCE(staff_id::text, ''),
+		          COALESCE(customer_email, ''), COALESCE(service_id::text, ''), COALESCE(staff_id::text, ''), COALESCE(staff_selection_mode, 'specific'),
 		          start_time, end_time, COALESCE(notes, ''), created_at, updated_at
 	`, StatusCancelled, record.POSBookingVersion, record.Appointment.ID, record.Appointment.SalonID))
 	if err != nil {
@@ -553,6 +693,7 @@ func (r *Repository) SaveCancelledAppointment(ctx context.Context, record Cancel
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	appointment.Segments = bookingSegmentSnapshots(segments)
 	return appointment, nil
 }
 
@@ -567,6 +708,11 @@ func (r *Repository) SaveAppointmentActionFallback(ctx context.Context, record A
 	if source == "" {
 		source = SourceOwnerDashboard
 	}
+	segments := record.Segments
+	if len(segments) == 0 {
+		segments = appointmentActionSegments(record.Appointment)
+	}
+	primary := segments[0]
 	attempt := BookingAttempt{
 		ID:                 record.AttemptID,
 		SalonID:            record.SalonID,
@@ -577,29 +723,34 @@ func (r *Repository) SaveAppointmentActionFallback(ctx context.Context, record A
 		CustomerName:       record.Appointment.CustomerName,
 		CustomerPhone:      record.Appointment.CustomerPhone,
 		CustomerEmail:      record.Appointment.CustomerEmail,
-		ServiceID:          record.Appointment.Service.ID,
-		StaffID:            record.Appointment.Staff.ID,
+		ServiceID:          primary.Service.ID,
+		StaffID:            primary.Staff.ID,
+		StaffSelectionMode: primary.StaffSelectionMode,
 		RequestedStartTime: record.RequestedStartTime,
 		RequestedEndTime:   record.RequestedEndTime,
 		Notes:              record.Notes,
 		ErrorCode:          record.ErrorCode,
 		ErrorMessage:       record.ErrorMessage,
 	}
+	if attempt.StaffSelectionMode == "" {
+		attempt.StaffSelectionMode = StaffSelectionSpecific
+	}
 	if err := tx.QueryRowContext(ctx, `
 		UPDATE booking_attempts
 		SET status = $1,
 		    pos_booking_id = NULLIF($2, ''),
-		    requested_start_time = $3,
-		    requested_end_time = $4,
-		    notes = NULLIF($5, ''),
-		    error_code = $6,
-		    error_message = $7,
+		    staff_selection_mode = $3,
+		    requested_start_time = $4,
+		    requested_end_time = $5,
+		    notes = NULLIF($6, ''),
+		    error_code = $7,
+		    error_message = $8,
 		    updated_at = now()
-		WHERE id = $8
-		  AND salon_id = $9
-		  AND status = $10
+		WHERE id = $9
+		  AND salon_id = $10
+		  AND status = $11
 		RETURNING created_at, updated_at
-	`, attempt.Status, attempt.POSBookingID, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes, attempt.ErrorCode, attempt.ErrorMessage, attempt.ID, attempt.SalonID, StatusPOSPending).Scan(&attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+	`, attempt.Status, attempt.POSBookingID, attempt.StaffSelectionMode, attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes, attempt.ErrorCode, attempt.ErrorMessage, attempt.ID, attempt.SalonID, StatusPOSPending).Scan(&attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, pos.ErrNotFound
 		}
@@ -627,6 +778,7 @@ func (r *Repository) SaveAppointmentActionFallback(ctx context.Context, record A
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	attempt.Segments = bookingSegmentSnapshots(segments)
 	return &attempt, nil
 }
 
@@ -703,7 +855,7 @@ func (r *Repository) ListAppointments(ctx context.Context, salonID string, owner
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id::text, salon_id::text, booking_attempt_id::text, pos_provider, pos_appointment_id,
 		       COALESCE(pos_appointment_version, 0), status, customer_name, customer_phone, COALESCE(customer_email, ''), COALESCE(service_id::text, ''),
-		       COALESCE(staff_id::text, ''), start_time, end_time, COALESCE(notes, ''), created_at, updated_at
+		       COALESCE(staff_id::text, ''), COALESCE(staff_selection_mode, 'specific'), start_time, end_time, COALESCE(notes, ''), created_at, updated_at
 		FROM appointments
 		WHERE salon_id = $1
 		ORDER BY start_time DESC
@@ -730,6 +882,7 @@ func (r *Repository) ListAppointments(ctx context.Context, salonID string, owner
 			&item.CustomerEmail,
 			&item.ServiceID,
 			&item.StaffID,
+			&item.StaffSelectionMode,
 			&item.StartTime,
 			&item.EndTime,
 			&item.Notes,
@@ -740,7 +893,13 @@ func (r *Repository) ListAppointments(ctx context.Context, salonID string, owner
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := r.attachAppointmentSegments(ctx, items); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 func (r *Repository) ListBookingAttempts(ctx context.Context, salonID string, ownerUserID string, limit int) ([]BookingAttempt, error) {
@@ -750,7 +909,7 @@ func (r *Repository) ListBookingAttempts(ctx context.Context, salonID string, ow
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id::text, salon_id::text, source, status, pos_provider, COALESCE(pos_booking_id, ''),
 		       customer_name, customer_phone, COALESCE(customer_email, ''), COALESCE(service_id::text, ''),
-		       COALESCE(staff_id::text, ''), requested_start_time, requested_end_time, COALESCE(notes, ''),
+		       COALESCE(staff_id::text, ''), COALESCE(staff_selection_mode, 'specific'), requested_start_time, requested_end_time, COALESCE(notes, ''),
 		       COALESCE(error_code, ''), COALESCE(error_message, ''), created_at, updated_at
 		FROM booking_attempts
 		WHERE salon_id = $1
@@ -777,6 +936,7 @@ func (r *Repository) ListBookingAttempts(ctx context.Context, salonID string, ow
 			&item.CustomerEmail,
 			&item.ServiceID,
 			&item.StaffID,
+			&item.StaffSelectionMode,
 			&item.RequestedStartTime,
 			&item.RequestedEndTime,
 			&item.Notes,
@@ -789,7 +949,109 @@ func (r *Repository) ListBookingAttempts(ctx context.Context, salonID string, ow
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := r.attachBookingAttemptSegments(ctx, items); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (r *Repository) attachAppointmentSegments(ctx context.Context, items []Appointment) error {
+	if len(items) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(items))
+	indexByID := make(map[string]int, len(items))
+	for index, item := range items {
+		ids = append(ids, item.ID)
+		indexByID[item.ID] = index
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT aps.appointment_id::text,
+		       COALESCE(aps.service_id::text, ''), aps.name,
+		       COALESCE(aps.staff_id::text, ''), COALESCE(st.name, ''),
+		       COALESCE(aps.staff_selection_mode, 'specific'),
+		       COALESCE(aps.duration_minutes, 0), aps.sort_order
+		FROM appointment_services aps
+		LEFT JOIN staff st ON st.id = aps.staff_id
+		WHERE aps.appointment_id = ANY($1::uuid[])
+		ORDER BY aps.appointment_id, aps.sort_order ASC
+	`, pq.Array(ids))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var appointmentID string
+		var segment BookingSegmentSnapshot
+		if err := rows.Scan(
+			&appointmentID,
+			&segment.ServiceID,
+			&segment.ServiceName,
+			&segment.StaffID,
+			&segment.StaffName,
+			&segment.StaffSelectionMode,
+			&segment.DurationMinutes,
+			&segment.SortOrder,
+		); err != nil {
+			return err
+		}
+		if index, ok := indexByID[appointmentID]; ok {
+			items[index].Segments = append(items[index].Segments, segment)
+		}
+	}
+	return rows.Err()
+}
+
+func (r *Repository) attachBookingAttemptSegments(ctx context.Context, items []BookingAttempt) error {
+	if len(items) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(items))
+	indexByID := make(map[string]int, len(items))
+	for index, item := range items {
+		ids = append(ids, item.ID)
+		indexByID[item.ID] = index
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT bas.booking_attempt_id::text,
+		       COALESCE(bas.service_id::text, ''), bas.name,
+		       COALESCE(bas.staff_id::text, ''), COALESCE(st.name, ''),
+		       COALESCE(bas.staff_selection_mode, 'specific'),
+		       COALESCE(bas.duration_minutes, 0), bas.sort_order
+		FROM booking_attempt_segments bas
+		LEFT JOIN staff st ON st.id = bas.staff_id
+		WHERE bas.booking_attempt_id = ANY($1::uuid[])
+		ORDER BY bas.booking_attempt_id, bas.sort_order ASC
+	`, pq.Array(ids))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var attemptID string
+		var segment BookingSegmentSnapshot
+		if err := rows.Scan(
+			&attemptID,
+			&segment.ServiceID,
+			&segment.ServiceName,
+			&segment.StaffID,
+			&segment.StaffName,
+			&segment.StaffSelectionMode,
+			&segment.DurationMinutes,
+			&segment.SortOrder,
+		); err != nil {
+			return err
+		}
+		if index, ok := indexByID[attemptID]; ok {
+			items[index].Segments = append(items[index].Segments, segment)
+		}
+	}
+	return rows.Err()
 }
 
 type appointmentScanner interface {
@@ -811,6 +1073,7 @@ func scanAppointment(row appointmentScanner) (*Appointment, error) {
 		&item.CustomerEmail,
 		&item.ServiceID,
 		&item.StaffID,
+		&item.StaffSelectionMode,
 		&item.StartTime,
 		&item.EndTime,
 		&item.Notes,
@@ -824,6 +1087,52 @@ func scanAppointment(row appointmentScanner) (*Appointment, error) {
 		return nil, err
 	}
 	return &item, nil
+}
+
+func insertBookingAttemptSegments(ctx context.Context, tx *sql.Tx, attemptID string, segments []BookingSegmentRecord) error {
+	for index, segment := range segments {
+		sortOrder := segment.SortOrder
+		if sortOrder <= 0 {
+			sortOrder = index + 1
+		}
+		mode := segment.StaffSelectionMode
+		if mode == "" {
+			mode = StaffSelectionSpecific
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO booking_attempt_segments (
+				booking_attempt_id, service_id, staff_id, staff_selection_mode, pos_service_id,
+				pos_service_version, name, duration_minutes, price_from, sort_order
+			)
+			VALUES ($1, NULLIF($2, '')::uuid, NULLIF($3, '')::uuid, $4, $5, NULLIF($6::bigint, 0), $7, $8, NULLIF($9, 0), $10)
+		`, attemptID, segment.Service.ID, segment.Staff.ID, mode, segment.Service.POSServiceID, segment.Service.POSServiceVersion, segment.Service.Name, segment.Service.DurationMinutes, segment.Service.PriceFrom, sortOrder); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func insertAppointmentServices(ctx context.Context, tx *sql.Tx, appointmentID string, segments []BookingSegmentRecord) error {
+	for index, segment := range segments {
+		sortOrder := segment.SortOrder
+		if sortOrder <= 0 {
+			sortOrder = index + 1
+		}
+		mode := segment.StaffSelectionMode
+		if mode == "" {
+			mode = StaffSelectionSpecific
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO appointment_services (
+				appointment_id, service_id, staff_id, staff_selection_mode, pos_service_id,
+				pos_service_version, name, duration_minutes, price_from, sort_order
+			)
+			VALUES ($1, NULLIF($2, '')::uuid, NULLIF($3, '')::uuid, $4, $5, NULLIF($6::bigint, 0), $7, $8, NULLIF($9, 0), $10)
+		`, appointmentID, segment.Service.ID, segment.Staff.ID, mode, segment.Service.POSServiceID, segment.Service.POSServiceVersion, segment.Service.Name, segment.Service.DurationMinutes, segment.Service.PriceFrom, sortOrder); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func fallbackNotificationMessage(record FallbackBookingRecord) string {

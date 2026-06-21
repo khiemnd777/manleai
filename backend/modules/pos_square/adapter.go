@@ -52,7 +52,9 @@ func (a *SquareAdapter) OAuthURL(state string) (string, error) {
 	values := url.Values{}
 	values.Set("client_id", a.cfg.ClientID)
 	values.Set("scope", strings.Join(squareScopes(), " "))
-	values.Set("session", "false")
+	if strings.EqualFold(strings.TrimSpace(a.cfg.Environment), "production") {
+		values.Set("session", "false")
+	}
 	values.Set("state", state)
 	values.Set("redirect_uri", a.cfg.RedirectURL)
 	return a.oauthBaseURL() + "/oauth2/authorize?" + values.Encode(), nil
@@ -313,7 +315,7 @@ func (a *SquareAdapter) CheckAvailability(ctx context.Context, salonID string, i
 		})
 		return nil, err
 	}
-	return mapSquareAvailabilities(response, input.DurationMinutes), nil
+	return mapSquareAvailabilities(response, availabilityFallbackDuration(input)), nil
 }
 
 func (a *SquareAdapter) CreateAppointment(ctx context.Context, salonID string, input pos.CreateAppointmentInput) (*pos.Appointment, error) {
@@ -349,7 +351,7 @@ func (a *SquareAdapter) CreateAppointment(ctx context.Context, salonID string, i
 			return nil, err
 		}
 	}
-	appointment, err := mapSquareBooking(response.Booking, input.DurationMinutes)
+	appointment, err := mapSquareBooking(response.Booking, appointmentFallbackDuration(input.Segments, input.DurationMinutes))
 	if err != nil {
 		return nil, err
 	}
@@ -376,7 +378,7 @@ func (a *SquareAdapter) RescheduleAppointment(ctx context.Context, salonID strin
 		})
 		return nil, err
 	}
-	return mapSquareBooking(response.Booking, input.DurationMinutes)
+	return mapSquareBooking(response.Booking, appointmentFallbackDuration(input.Segments, input.DurationMinutes))
 }
 
 func (a *SquareAdapter) CancelAppointment(ctx context.Context, salonID string, appointmentID string, input pos.CancelInput) (*pos.Appointment, error) {
@@ -523,8 +525,10 @@ func squareScopes() []string {
 		"CUSTOMERS_READ",
 		"CUSTOMERS_WRITE",
 		"ITEMS_READ",
+		"ITEMS_WRITE",
 		"MERCHANT_PROFILE_READ",
 		"EMPLOYEES_READ",
+		"EMPLOYEES_WRITE",
 	}
 }
 
@@ -592,18 +596,23 @@ func buildSquareAvailabilityRequest(locationID string, input pos.AvailabilityInp
 	if strings.TrimSpace(locationID) == "" {
 		return squareAvailabilityRequest{}, ErrLocationNotSelected
 	}
-	if strings.TrimSpace(input.ServiceID) == "" {
-		return squareAvailabilityRequest{}, fmt.Errorf("service id is required")
-	}
 	startAt, endAt, err := availabilityRange(input.PreferredDate)
 	if err != nil {
 		return squareAvailabilityRequest{}, err
 	}
-	segment := squareSegmentFilter{
-		ServiceVariationID: strings.TrimSpace(input.ServiceID),
+	segments, err := availabilitySegments(input)
+	if err != nil {
+		return squareAvailabilityRequest{}, err
 	}
-	if strings.TrimSpace(input.StaffID) != "" {
-		segment.TeamMemberIDFilter = &squareTeamMemberIDFilter{Any: []string{strings.TrimSpace(input.StaffID)}}
+	filters := make([]squareSegmentFilter, 0, len(segments))
+	for _, segment := range segments {
+		filter := squareSegmentFilter{
+			ServiceVariationID: strings.TrimSpace(segment.ServiceID),
+		}
+		if strings.TrimSpace(segment.StaffID) != "" {
+			filter.TeamMemberIDFilter = &squareTeamMemberIDFilter{Any: []string{strings.TrimSpace(segment.StaffID)}}
+		}
+		filters = append(filters, filter)
 	}
 	return squareAvailabilityRequest{
 		Query: squareAvailabilityQuery{
@@ -613,7 +622,7 @@ func buildSquareAvailabilityRequest(locationID string, input pos.AvailabilityInp
 					EndAt:   endAt.Format(time.RFC3339),
 				},
 				LocationID:     strings.TrimSpace(locationID),
-				SegmentFilters: []squareSegmentFilter{segment},
+				SegmentFilters: filters,
 			},
 		},
 	}, nil
@@ -626,30 +635,21 @@ func buildSquareCreateBookingRequest(locationID string, input pos.CreateAppointm
 	if strings.TrimSpace(input.IdempotencyKey) == "" {
 		return squareCreateBookingRequest{}, fmt.Errorf("idempotency key is required")
 	}
-	if strings.TrimSpace(input.CustomerID) == "" || strings.TrimSpace(input.ServiceID) == "" || strings.TrimSpace(input.StaffID) == "" || input.StartTime.IsZero() {
-		return squareCreateBookingRequest{}, fmt.Errorf("customer, service, staff, and start time are required")
+	if strings.TrimSpace(input.CustomerID) == "" || input.StartTime.IsZero() {
+		return squareCreateBookingRequest{}, fmt.Errorf("customer and start time are required")
 	}
-	if input.ServiceVersion <= 0 {
-		return squareCreateBookingRequest{}, fmt.Errorf("square service variation version is required")
-	}
-	if input.DurationMinutes <= 0 {
-		return squareCreateBookingRequest{}, fmt.Errorf("duration minutes is required")
+	segments, err := appointmentSegments(input.Segments, input.ServiceID, input.ServiceVersion, input.StaffID, input.DurationMinutes)
+	if err != nil {
+		return squareCreateBookingRequest{}, err
 	}
 	return squareCreateBookingRequest{
 		IdempotencyKey: strings.TrimSpace(input.IdempotencyKey),
 		Booking: squareBooking{
-			CustomerID:   strings.TrimSpace(input.CustomerID),
-			StartAt:      input.StartTime.UTC().Format(time.RFC3339),
-			LocationID:   strings.TrimSpace(locationID),
-			CustomerNote: strings.TrimSpace(input.Notes),
-			AppointmentSegments: []squareAppointmentSegment{
-				{
-					DurationMinutes:         input.DurationMinutes,
-					TeamMemberID:            strings.TrimSpace(input.StaffID),
-					ServiceVariationID:      strings.TrimSpace(input.ServiceID),
-					ServiceVariationVersion: input.ServiceVersion,
-				},
-			},
+			CustomerID:          strings.TrimSpace(input.CustomerID),
+			StartAt:             input.StartTime.UTC().Format(time.RFC3339),
+			LocationID:          strings.TrimSpace(locationID),
+			CustomerNote:        strings.TrimSpace(input.Notes),
+			AppointmentSegments: segments,
 		},
 	}, nil
 }
@@ -664,32 +664,110 @@ func buildSquareUpdateBookingRequest(locationID string, input pos.RescheduleInpu
 	if input.BookingVersion < 0 {
 		return squareUpdateBookingRequest{}, fmt.Errorf("square booking version is required")
 	}
-	if strings.TrimSpace(input.ServiceID) == "" || strings.TrimSpace(input.StaffID) == "" || input.StartTime.IsZero() {
-		return squareUpdateBookingRequest{}, fmt.Errorf("service, staff, and start time are required")
+	if input.StartTime.IsZero() {
+		return squareUpdateBookingRequest{}, fmt.Errorf("start time is required")
 	}
-	if input.ServiceVersion <= 0 {
-		return squareUpdateBookingRequest{}, fmt.Errorf("square service variation version is required")
-	}
-	if input.DurationMinutes <= 0 {
-		return squareUpdateBookingRequest{}, fmt.Errorf("duration minutes is required")
+	segments, err := appointmentSegments(input.Segments, input.ServiceID, input.ServiceVersion, input.StaffID, input.DurationMinutes)
+	if err != nil {
+		return squareUpdateBookingRequest{}, err
 	}
 	return squareUpdateBookingRequest{
 		IdempotencyKey: strings.TrimSpace(input.IdempotencyKey),
 		Booking: squareBooking{
-			Version:      input.BookingVersion,
-			StartAt:      input.StartTime.UTC().Format(time.RFC3339),
-			LocationID:   strings.TrimSpace(locationID),
-			CustomerNote: strings.TrimSpace(input.Notes),
-			AppointmentSegments: []squareAppointmentSegment{
-				{
-					DurationMinutes:         input.DurationMinutes,
-					TeamMemberID:            strings.TrimSpace(input.StaffID),
-					ServiceVariationID:      strings.TrimSpace(input.ServiceID),
-					ServiceVariationVersion: input.ServiceVersion,
-				},
-			},
+			Version:             input.BookingVersion,
+			StartAt:             input.StartTime.UTC().Format(time.RFC3339),
+			LocationID:          strings.TrimSpace(locationID),
+			CustomerNote:        strings.TrimSpace(input.Notes),
+			AppointmentSegments: segments,
 		},
 	}, nil
+}
+
+func availabilitySegments(input pos.AvailabilityInput) ([]pos.AvailabilitySegmentInput, error) {
+	segments := input.Segments
+	if len(segments) == 0 {
+		segments = []pos.AvailabilitySegmentInput{
+			{
+				ServiceID:       input.ServiceID,
+				StaffID:         input.StaffID,
+				DurationMinutes: input.DurationMinutes,
+			},
+		}
+	}
+	normalized := make([]pos.AvailabilitySegmentInput, 0, len(segments))
+	for _, segment := range segments {
+		segment.ServiceID = strings.TrimSpace(segment.ServiceID)
+		segment.StaffID = strings.TrimSpace(segment.StaffID)
+		if segment.ServiceID == "" {
+			return nil, fmt.Errorf("service id is required")
+		}
+		normalized = append(normalized, segment)
+	}
+	return normalized, nil
+}
+
+func availabilityFallbackDuration(input pos.AvailabilityInput) int {
+	if len(input.Segments) == 0 {
+		return input.DurationMinutes
+	}
+	total := 0
+	for _, segment := range input.Segments {
+		if segment.DurationMinutes > 0 {
+			total += segment.DurationMinutes
+		}
+	}
+	if total > 0 {
+		return total
+	}
+	return input.DurationMinutes
+}
+
+func appointmentSegments(input []pos.AppointmentSegmentInput, serviceID string, serviceVersion int64, staffID string, durationMinutes int) ([]squareAppointmentSegment, error) {
+	segments := input
+	if len(segments) == 0 {
+		segments = []pos.AppointmentSegmentInput{
+			{
+				ServiceID:       serviceID,
+				ServiceVersion:  serviceVersion,
+				StaffID:         staffID,
+				DurationMinutes: durationMinutes,
+			},
+		}
+	}
+	mapped := make([]squareAppointmentSegment, 0, len(segments))
+	for _, segment := range segments {
+		serviceID := strings.TrimSpace(segment.ServiceID)
+		staffID := strings.TrimSpace(segment.StaffID)
+		if serviceID == "" || staffID == "" {
+			return nil, fmt.Errorf("service and staff are required")
+		}
+		if segment.ServiceVersion <= 0 {
+			return nil, fmt.Errorf("square service variation version is required")
+		}
+		if segment.DurationMinutes <= 0 {
+			return nil, fmt.Errorf("duration minutes is required")
+		}
+		mapped = append(mapped, squareAppointmentSegment{
+			DurationMinutes:         segment.DurationMinutes,
+			TeamMemberID:            staffID,
+			ServiceVariationID:      serviceID,
+			ServiceVariationVersion: segment.ServiceVersion,
+		})
+	}
+	return mapped, nil
+}
+
+func appointmentFallbackDuration(segments []pos.AppointmentSegmentInput, fallbackDuration int) int {
+	total := 0
+	for _, segment := range segments {
+		if segment.DurationMinutes > 0 {
+			total += segment.DurationMinutes
+		}
+	}
+	if total > 0 {
+		return total
+	}
+	return fallbackDuration
 }
 
 func buildSquareCancelBookingRequest(input pos.CancelInput) (squareCancelBookingRequest, error) {
@@ -728,10 +806,9 @@ func mapSquareAvailabilities(response squareAvailabilityResponse, fallbackDurati
 		duration := fallbackDuration
 		staffID := ""
 		if len(item.AppointmentSegments) > 0 {
-			segment := item.AppointmentSegments[0]
-			staffID = segment.TeamMemberID
-			if segment.DurationMinutes > 0 {
-				duration = segment.DurationMinutes
+			staffID = item.AppointmentSegments[0].TeamMemberID
+			if segmentDuration := squareSegmentDuration(item.AppointmentSegments); segmentDuration > 0 {
+				duration = segmentDuration
 			}
 		}
 		if duration <= 0 {
@@ -741,9 +818,22 @@ func mapSquareAvailabilities(response squareAvailabilityResponse, fallbackDurati
 			StartTime: startAt,
 			EndTime:   startAt.Add(time.Duration(duration) * time.Minute),
 			StaffID:   staffID,
+			Segments:  mapSquareTimeSlotSegments(item.AppointmentSegments),
 		})
 	}
 	return slots
+}
+
+func mapSquareTimeSlotSegments(segments []squareAppointmentSegment) []pos.TimeSlotSegment {
+	items := make([]pos.TimeSlotSegment, 0, len(segments))
+	for _, segment := range segments {
+		items = append(items, pos.TimeSlotSegment{
+			ServiceID:       segment.ServiceVariationID,
+			StaffID:         segment.TeamMemberID,
+			DurationMinutes: segment.DurationMinutes,
+		})
+	}
+	return items
 }
 
 func mapSquareBooking(booking squareBooking, fallbackDuration int) (*pos.Appointment, error) {
@@ -761,8 +851,8 @@ func mapSquareBooking(booking squareBooking, fallbackDuration int) (*pos.Appoint
 		return nil, fmt.Errorf("square booking start time was not returned")
 	}
 	duration := fallbackDuration
-	if len(booking.AppointmentSegments) > 0 && booking.AppointmentSegments[0].DurationMinutes > 0 {
-		duration = booking.AppointmentSegments[0].DurationMinutes
+	if segmentDuration := squareSegmentDuration(booking.AppointmentSegments); segmentDuration > 0 {
+		duration = segmentDuration
 	}
 	if fallbackDuration > 0 && duration <= 0 {
 		return nil, fmt.Errorf("square booking duration was not returned")
@@ -778,6 +868,16 @@ func mapSquareBooking(booking squareBooking, fallbackDuration int) (*pos.Appoint
 		EndTime:               endTime,
 		Status:                strings.ToLower(booking.Status),
 	}, nil
+}
+
+func squareSegmentDuration(segments []squareAppointmentSegment) int {
+	total := 0
+	for _, segment := range segments {
+		if segment.DurationMinutes > 0 {
+			total += segment.DurationMinutes
+		}
+	}
+	return total
 }
 
 func availabilityRange(preferredDate string) (time.Time, time.Time, error) {

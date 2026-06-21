@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"testing"
 	"time"
 
@@ -30,6 +31,66 @@ func TestDoJSONSendsSquareVersionHeader(t *testing.T) {
 	}
 	if !out["ok"] {
 		t.Fatalf("unexpected response: %#v", out)
+	}
+}
+
+func TestSquareScopesIncludeDemoSetupWritePermissions(t *testing.T) {
+	scopes := map[string]bool{}
+	for _, scope := range squareScopes() {
+		scopes[scope] = true
+	}
+	for _, required := range []string{"ITEMS_WRITE", "EMPLOYEES_WRITE"} {
+		if !scopes[required] {
+			t.Fatalf("squareScopes missing %s", required)
+		}
+	}
+}
+
+func TestOAuthURLDoesNotSendSessionFalseInSandbox(t *testing.T) {
+	adapter := &SquareAdapter{
+		cfg: config.SquareConfig{
+			Environment: "sandbox",
+			ClientID:    "sandbox-client-id",
+			RedirectURL: "https://demo.test/api/integrations/square/callback",
+		},
+	}
+	oauthURL, err := adapter.OAuthURL("state_1")
+	if err != nil {
+		t.Fatalf("OAuthURL failed: %v", err)
+	}
+	parsed, err := url.Parse(oauthURL)
+	if err != nil {
+		t.Fatalf("parse OAuth URL failed: %v", err)
+	}
+	if parsed.Host != "connect.squareupsandbox.com" {
+		t.Fatalf("OAuth host = %q, want sandbox host", parsed.Host)
+	}
+	if got := parsed.Query().Get("session"); got != "" {
+		t.Fatalf("sandbox session parameter = %q, want omitted", got)
+	}
+}
+
+func TestOAuthURLSendsSessionFalseInProduction(t *testing.T) {
+	adapter := &SquareAdapter{
+		cfg: config.SquareConfig{
+			Environment: "production",
+			ClientID:    "production-client-id",
+			RedirectURL: "https://demo.test/api/integrations/square/callback",
+		},
+	}
+	oauthURL, err := adapter.OAuthURL("state_1")
+	if err != nil {
+		t.Fatalf("OAuthURL failed: %v", err)
+	}
+	parsed, err := url.Parse(oauthURL)
+	if err != nil {
+		t.Fatalf("parse OAuth URL failed: %v", err)
+	}
+	if parsed.Host != "connect.squareup.com" {
+		t.Fatalf("OAuth host = %q, want production host", parsed.Host)
+	}
+	if got := parsed.Query().Get("session"); got != "false" {
+		t.Fatalf("production session parameter = %q, want false", got)
 	}
 }
 
@@ -150,6 +211,29 @@ func TestBuildSquareAvailabilityRequest(t *testing.T) {
 	}
 }
 
+func TestBuildSquareAvailabilityRequestUsesSegmentInputs(t *testing.T) {
+	request, err := buildSquareAvailabilityRequest("loc_1", pos.AvailabilityInput{
+		PreferredDate: "2026-06-10",
+		Segments: []pos.AvailabilitySegmentInput{
+			{ServiceID: "svc_1", StaffID: "staff_1", DurationMinutes: 30},
+			{ServiceID: "svc_2", StaffID: "staff_2", DurationMinutes: 45},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build availability request failed: %v", err)
+	}
+	filters := request.Query.Filter.SegmentFilters
+	if len(filters) != 2 {
+		t.Fatalf("segment filters = %#v, want two", filters)
+	}
+	if filters[0].ServiceVariationID != "svc_1" || filters[0].TeamMemberIDFilter == nil || filters[0].TeamMemberIDFilter.Any[0] != "staff_1" {
+		t.Fatalf("first segment filter = %#v, want svc_1/staff_1", filters[0])
+	}
+	if filters[1].ServiceVariationID != "svc_2" || filters[1].TeamMemberIDFilter == nil || filters[1].TeamMemberIDFilter.Any[0] != "staff_2" {
+		t.Fatalf("second segment filter = %#v, want svc_2/staff_2", filters[1])
+	}
+}
+
 func TestBuildSquareCreateBookingRequestIncludesRequiredSegmentFields(t *testing.T) {
 	start := time.Date(2026, 6, 10, 15, 0, 0, 0, time.UTC)
 	request, err := buildSquareCreateBookingRequest("loc_1", pos.CreateAppointmentInput{
@@ -185,6 +269,33 @@ func TestBuildSquareCreateBookingRequestIncludesRequiredSegmentFields(t *testing
 	}
 	if !bytes.Contains(payload, []byte("service_variation_version")) {
 		t.Fatalf("payload did not include service_variation_version: %s", string(payload))
+	}
+}
+
+func TestBuildSquareCreateBookingRequestUsesMultipleSegments(t *testing.T) {
+	start := time.Date(2026, 6, 10, 15, 0, 0, 0, time.UTC)
+	request, err := buildSquareCreateBookingRequest("loc_1", pos.CreateAppointmentInput{
+		IdempotencyKey: "attempt-key-1",
+		CustomerID:     "cust_1",
+		StartTime:      start,
+		Notes:          "Two services",
+		Segments: []pos.AppointmentSegmentInput{
+			{ServiceID: "svc_1", ServiceVersion: 123, StaffID: "staff_1", DurationMinutes: 30},
+			{ServiceID: "svc_2", ServiceVersion: 456, StaffID: "staff_2", DurationMinutes: 45},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build booking request failed: %v", err)
+	}
+	segments := request.Booking.AppointmentSegments
+	if len(segments) != 2 {
+		t.Fatalf("segments = %#v, want two", segments)
+	}
+	if segments[0].ServiceVariationID != "svc_1" || segments[0].ServiceVariationVersion != 123 || segments[0].TeamMemberID != "staff_1" || segments[0].DurationMinutes != 30 {
+		t.Fatalf("first segment = %#v, want svc_1/staff_1", segments[0])
+	}
+	if segments[1].ServiceVariationID != "svc_2" || segments[1].ServiceVariationVersion != 456 || segments[1].TeamMemberID != "staff_2" || segments[1].DurationMinutes != 45 {
+		t.Fatalf("second segment = %#v, want svc_2/staff_2", segments[1])
 	}
 }
 
@@ -229,6 +340,33 @@ func TestBuildSquareUpdateBookingRequestIncludesVersionAndSegment(t *testing.T) 
 	segment := request.Booking.AppointmentSegments[0]
 	if segment.TeamMemberID != "staff_1" || segment.ServiceVariationID != "svc_1" || segment.ServiceVariationVersion != 123 || segment.DurationMinutes != 45 {
 		t.Fatalf("unexpected segment: %#v", segment)
+	}
+}
+
+func TestBuildSquareUpdateBookingRequestUsesMultipleSegments(t *testing.T) {
+	start := time.Date(2026, 6, 11, 16, 0, 0, 0, time.UTC)
+	request, err := buildSquareUpdateBookingRequest("loc_1", pos.RescheduleInput{
+		IdempotencyKey: "attempt-key-2",
+		BookingVersion: 7,
+		StartTime:      start,
+		Notes:          "Rescheduled two services",
+		Segments: []pos.AppointmentSegmentInput{
+			{ServiceID: "svc_1", ServiceVersion: 123, StaffID: "staff_1", DurationMinutes: 30},
+			{ServiceID: "svc_2", ServiceVersion: 456, StaffID: "staff_2", DurationMinutes: 45},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build update booking request failed: %v", err)
+	}
+	if request.Booking.Version != 7 {
+		t.Fatalf("booking version = %d, want 7", request.Booking.Version)
+	}
+	segments := request.Booking.AppointmentSegments
+	if len(segments) != 2 {
+		t.Fatalf("segments = %#v, want two", segments)
+	}
+	if segments[0].ServiceVariationID != "svc_1" || segments[1].ServiceVariationID != "svc_2" {
+		t.Fatalf("segments = %#v, want ordered service variations", segments)
 	}
 }
 
@@ -291,6 +429,32 @@ func TestMapSquareAvailabilities(t *testing.T) {
 	}
 }
 
+func TestMapSquareAvailabilitiesSumsSegmentDurations(t *testing.T) {
+	slots := mapSquareAvailabilities(squareAvailabilityResponse{
+		Availabilities: []squareAvailability{
+			{
+				StartAt: "2026-06-10T15:00:00Z",
+				AppointmentSegments: []squareAppointmentSegment{
+					{DurationMinutes: 30, TeamMemberID: "staff_1"},
+					{DurationMinutes: 45, TeamMemberID: "staff_2"},
+				},
+			},
+		},
+	}, 0)
+	if len(slots) != 1 {
+		t.Fatalf("expected one slot, got %d", len(slots))
+	}
+	if slots[0].EndTime.Sub(slots[0].StartTime) != 75*time.Minute {
+		t.Fatalf("unexpected duration: %s", slots[0].EndTime.Sub(slots[0].StartTime))
+	}
+	if slots[0].StaffID != "staff_1" {
+		t.Fatalf("slot staff id = %s, want first segment staff", slots[0].StaffID)
+	}
+	if len(slots[0].Segments) != 2 || slots[0].Segments[1].ServiceID != "" || slots[0].Segments[1].StaffID != "staff_2" {
+		t.Fatalf("slot segments = %#v, want mapped Square segments", slots[0].Segments)
+	}
+}
+
 func TestMapSquareBooking(t *testing.T) {
 	appointment, err := mapSquareBooking(squareBooking{
 		ID:      "booking_1",
@@ -311,6 +475,25 @@ func TestMapSquareBooking(t *testing.T) {
 		t.Fatalf("booking version = %d, want 4", appointment.POSAppointmentVersion)
 	}
 	if appointment.EndTime.Sub(appointment.StartTime) != 45*time.Minute {
+		t.Fatalf("unexpected duration: %s", appointment.EndTime.Sub(appointment.StartTime))
+	}
+}
+
+func TestMapSquareBookingSumsSegmentDurations(t *testing.T) {
+	appointment, err := mapSquareBooking(squareBooking{
+		ID:      "booking_1",
+		Version: 4,
+		Status:  "ACCEPTED",
+		StartAt: "2026-06-10T15:00:00Z",
+		AppointmentSegments: []squareAppointmentSegment{
+			{DurationMinutes: 30},
+			{DurationMinutes: 45},
+		},
+	}, 0)
+	if err != nil {
+		t.Fatalf("map booking failed: %v", err)
+	}
+	if appointment.EndTime.Sub(appointment.StartTime) != 75*time.Minute {
 		t.Fatalf("unexpected duration: %s", appointment.EndTime.Sub(appointment.StartTime))
 	}
 }

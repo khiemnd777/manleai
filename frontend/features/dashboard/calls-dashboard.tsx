@@ -7,12 +7,22 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  assignedTechniciansLabel,
+  conversationBookingRecord,
+  orderedSegments,
+  serviceNamesLabel,
+  technicianPreferenceLabel,
+  technicianPreferenceValue
+} from "@/features/dashboard/booking-display";
 import { apiRequest } from "@/lib/api/client";
 import type {
   ConversationSession,
   OfferedSlot,
   OwnerCorrection,
   POSConnection,
+  POSService,
+  POSStaffMember,
   Salon,
   SquareReadiness,
   SyncLog,
@@ -34,6 +44,14 @@ type SessionsResponse = {
   sessions: ConversationSession[];
 };
 
+type ServicesResponse = {
+  services: POSService[];
+};
+
+type StaffResponse = {
+  staff: POSStaffMember[];
+};
+
 type CorrectionTarget = {
   sessionID: string;
   item: TranscriptMessage;
@@ -45,6 +63,8 @@ export function CallsDashboard() {
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
   const [sessions, setSessions] = useState<ConversationSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<ConversationSession | null>(null);
+  const [services, setServices] = useState<POSService[]>([]);
+  const [staff, setStaff] = useState<POSStaffMember[]>([]);
   const [message, setMessage] = useState("");
   const [correctionTarget, setCorrectionTarget] = useState<CorrectionTarget | null>(null);
   const [correctionText, setCorrectionText] = useState("");
@@ -67,17 +87,23 @@ export function CallsDashboard() {
         setVoiceStatus(null);
         setSessions([]);
         setSelectedSession(null);
+        setServices([]);
+        setStaff([]);
         return;
       }
 
-      const [statusResponse, voiceResponse, sessionsResponse] = await Promise.all([
+      const [statusResponse, voiceResponse, sessionsResponse, serviceResponse, staffResponse] = await Promise.all([
         apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
         apiRequest<VoiceStatus>(`/api/salons/${firstSalon.id}/voice/status`),
-        apiRequest<SessionsResponse>(`/api/salons/${firstSalon.id}/conversation-sessions?limit=25`)
+        apiRequest<SessionsResponse>(`/api/salons/${firstSalon.id}/conversation-sessions?limit=25`),
+        apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
+        apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`)
       ]);
       setStatus(statusResponse);
       setVoiceStatus(voiceResponse);
       setSessions(sessionsResponse.sessions);
+      setServices(serviceResponse.services);
+      setStaff(staffResponse.staff);
 
       const currentID = selectedSession?.id;
       const nextSummary =
@@ -230,6 +256,15 @@ export function CallsDashboard() {
     () => sessions.filter((item) => item.outcome === "booking_fallback_pending" || item.outcome === "ai_disabled").length,
     [sessions]
   );
+  const serviceNames = useMemo(
+    () => new Map(services.flatMap((item) => (item.id ? [[item.id, item.name] as const] : []))),
+    [services]
+  );
+  const staffNames = useMemo(
+    () => new Map(staff.flatMap((item) => (item.id ? [[item.id, item.name] as const] : []))),
+    [staff]
+  );
+  const selectedBookingRecord = selectedSession ? conversationBookingRecord(selectedSession) : null;
 
   if (loading) {
     return (
@@ -392,8 +427,18 @@ export function CallsDashboard() {
               <Info label="Outcome" value={<Badge value={selectedSession.outcome} />} />
               <Info label="Customer" value={selectedSession.customer_name || "Not collected"} />
               <Info label="Phone" value={selectedSession.customer_phone || "Not collected"} />
-              <Info label="Service" value={selectedSession.service_name || "Not collected"} />
-              <Info label="Staff" value={selectedSession.staff_name || "Not collected"} />
+              <Info
+                label="Service(s)"
+                value={selectedBookingRecord ? serviceNamesLabel(selectedBookingRecord, serviceNames) : "Not collected"}
+              />
+              <Info
+                label="Technician preference"
+                value={selectedBookingRecord ? <Badge value={technicianPreferenceValue(selectedBookingRecord)} /> : "Not collected"}
+              />
+              <Info
+                label="Assigned technicians"
+                value={selectedBookingRecord ? assignedTechniciansLabel(selectedBookingRecord, staffNames) : "Not assigned"}
+              />
               <Info
                 label="Requested time"
                 value={selectedSession.requested_start_time ? formatDateTime(selectedSession.requested_start_time) : "Not collected"}
@@ -407,7 +452,7 @@ export function CallsDashboard() {
             </div>
           )}
 
-          <BookingNegotiationPanel session={selectedSession} />
+          <BookingNegotiationPanel session={selectedSession} serviceNames={serviceNames} staffNames={staffNames} />
         </Card>
       </div>
 
@@ -592,7 +637,15 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function BookingNegotiationPanel({ session }: { session: ConversationSession | null }) {
+function BookingNegotiationPanel({
+  session,
+  serviceNames,
+  staffNames
+}: {
+  session: ConversationSession | null;
+  serviceNames: Map<string, string>;
+  staffNames: Map<string, string>;
+}) {
   const slots = session?.offered_slots ?? [];
   const status = bookingNegotiationStatus(session);
 
@@ -619,7 +672,12 @@ function BookingNegotiationPanel({ session }: { session: ConversationSession | n
               <div className="text-xs font-semibold uppercase tracking-wide text-muted">Offered Square slots</div>
               <div className="mt-2 space-y-2">
                 {slots.map((slot) => (
-                  <OfferedSlotRow key={`${slot.start_time}-${slot.staff_id}`} slot={slot} />
+                  <OfferedSlotRow
+                    key={`${slot.start_time}-${slot.staff_id}`}
+                    slot={slot}
+                    serviceNames={serviceNames}
+                    staffNames={staffNames}
+                  />
                 ))}
               </div>
             </div>
@@ -632,10 +690,21 @@ function BookingNegotiationPanel({ session }: { session: ConversationSession | n
           <dl className="space-y-4">
             <Info
               label="Selected slot"
-              value={session.requested_start_time ? selectedSlotLabel(session) : "Not selected"}
+              value={session.requested_start_time ? selectedSlotLabel(session, serviceNames, staffNames) : "Not selected"}
             />
             <Info label="Square confirmation" value={squareConfirmationLabel(session)} />
           </dl>
+
+          {session.requested_start_time ? (
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-muted">Selected segment assignment</div>
+              <SegmentAssignmentList
+                record={conversationBookingRecord(session)}
+                serviceNames={serviceNames}
+                staffNames={staffNames}
+              />
+            </div>
+          ) : null}
 
           <div className="rounded-md border border-line bg-white p-3 text-xs leading-5 text-muted">
             Confirmed only after Square Appointments returns a booking ID through the booking service.
@@ -646,14 +715,56 @@ function BookingNegotiationPanel({ session }: { session: ConversationSession | n
   );
 }
 
-function OfferedSlotRow({ slot }: { slot: OfferedSlot }) {
+function OfferedSlotRow({
+  slot,
+  serviceNames,
+  staffNames
+}: {
+  slot: OfferedSlot;
+  serviceNames: Map<string, string>;
+  staffNames: Map<string, string>;
+}) {
   return (
     <div className="rounded-md border border-line bg-white p-3">
       <div className="text-sm font-semibold text-ink">{formatDateTime(slot.start_time)}</div>
       <div className="mt-1 text-xs leading-5 text-muted">
         {formatTimeRange(slot.start_time, slot.end_time)}
-        {slot.staff_name ? ` with ${slot.staff_name}` : ""}
       </div>
+      <div className="mt-1 text-xs leading-5 text-muted">
+        Customer-facing: {technicianPreferenceValue(slot) === "anyone" ? "Anyone available" : assignedTechniciansLabel(slot, staffNames)}
+      </div>
+      <div className="mt-1 text-xs leading-5 text-muted">
+        Assigned: {assignedTechniciansLabel(slot, staffNames)}
+      </div>
+      <SegmentAssignmentList record={slot} serviceNames={serviceNames} staffNames={staffNames} />
+    </div>
+  );
+}
+
+function SegmentAssignmentList({
+  record,
+  serviceNames,
+  staffNames
+}: {
+  record: OfferedSlot | ReturnType<typeof conversationBookingRecord>;
+  serviceNames: Map<string, string>;
+  staffNames: Map<string, string>;
+}) {
+  const segments = orderedSegments(record);
+  if (segments.length === 0) {
+    return null;
+  }
+  return (
+    <div className="mt-3 space-y-2 border-t border-line pt-3">
+      {segments.map((segment, index) => (
+        <div key={`${segment.service_id ?? "service"}-${segment.staff_id ?? "staff"}-${index}`} className="text-xs leading-5 text-muted">
+          <span className="font-semibold text-ink">
+            {index + 1}. {segment.service_name || (segment.service_id ? serviceNames.get(segment.service_id) : "") || "Unknown service"}
+          </span>
+          {" -> "}
+          <span>{segment.staff_name || (segment.staff_id ? staffNames.get(segment.staff_id) : "") || "Unassigned technician"}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -759,11 +870,10 @@ function formatTimeRange(start: string, end: string) {
   return `${formatter.format(new Date(start))} - ${formatter.format(new Date(end))}`;
 }
 
-function selectedSlotLabel(session: ConversationSession) {
+function selectedSlotLabel(session: ConversationSession, serviceNames: Map<string, string>, staffNames: Map<string, string>) {
   if (!session.requested_start_time) return "Not selected";
-  return session.staff_name
-    ? `${formatDateTime(session.requested_start_time)} with ${session.staff_name}`
-    : formatDateTime(session.requested_start_time);
+  const record = conversationBookingRecord(session);
+  return `${formatDateTime(session.requested_start_time)} · ${serviceNamesLabel(record, serviceNames)} · Preference: ${technicianPreferenceLabel(record)} · Assigned: ${assignedTechniciansLabel(record, staffNames)}`;
 }
 
 function squareConfirmationLabel(session: ConversationSession) {

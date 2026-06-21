@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
+
+	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
 type Repository struct {
@@ -263,6 +266,18 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session,
 	if err != nil {
 		return nil, err
 	}
+	bookingSegments := record.Update.BookingSegments
+	if bookingSegments == nil {
+		bookingSegments = []booking.BookingSegmentRequest{}
+	}
+	bookingSegmentsJSON, err := json.Marshal(bookingSegments)
+	if err != nil {
+		return nil, err
+	}
+	staffSelectionMode := strings.TrimSpace(record.Update.StaffSelectionMode)
+	if staffSelectionMode == "" {
+		staffSelectionMode = booking.StaffSelectionSpecific
+	}
 
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE call_sessions
@@ -274,16 +289,18 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session,
 		    customer_email = NULLIF($6, ''),
 		    service_id = NULLIF($7, '')::uuid,
 		    staff_id = NULLIF($8, '')::uuid,
-		    requested_start_time = $9,
-		    offered_slots = $10::jsonb,
-		    booking_attempt_id = NULLIF($11, '')::uuid,
-		    appointment_id = NULLIF($12, '')::uuid,
-		    summary = NULLIF($13, ''),
-		    ended_at = CASE WHEN $14 THEN now() ELSE ended_at END,
+		    staff_selection_mode = $9,
+		    requested_start_time = $10,
+		    offered_slots = $11::jsonb,
+		    booking_segments = $12::jsonb,
+		    booking_attempt_id = NULLIF($13, '')::uuid,
+		    appointment_id = NULLIF($14, '')::uuid,
+		    summary = NULLIF($15, ''),
+		    ended_at = CASE WHEN $16 THEN now() ELSE ended_at END,
 		    updated_at = now()
-		WHERE id = $15
-		  AND salon_id = $16
-	`, record.Update.Status, record.Update.Intent, record.Update.Outcome, record.Update.CustomerName, record.Update.CustomerPhone, record.Update.CustomerEmail, record.Update.ServiceID, record.Update.StaffID, record.Update.RequestedStartTime, string(offeredSlotsJSON), record.Update.BookingAttemptID, record.Update.AppointmentID, record.Update.Summary, record.Update.EndSession, record.Session.ID, record.SalonID); err != nil {
+		WHERE id = $17
+		  AND salon_id = $18
+	`, record.Update.Status, record.Update.Intent, record.Update.Outcome, record.Update.CustomerName, record.Update.CustomerPhone, record.Update.CustomerEmail, record.Update.ServiceID, record.Update.StaffID, staffSelectionMode, record.Update.RequestedStartTime, string(offeredSlotsJSON), string(bookingSegmentsJSON), record.Update.BookingAttemptID, record.Update.AppointmentID, record.Update.Summary, record.Update.EndSession, record.Session.ID, record.SalonID); err != nil {
 		return nil, err
 	}
 
@@ -385,7 +402,9 @@ func sessionSelect() string {
 		       COALESCE(cs.customer_name, ''), COALESCE(cs.customer_phone, ''), COALESCE(cs.customer_email, ''),
 		       COALESCE(cs.service_id::text, ''), COALESCE(svc.name, ''),
 		       COALESCE(cs.staff_id::text, ''), COALESCE(st.name, ''),
+		       COALESCE(cs.staff_selection_mode, 'specific'),
 		       cs.requested_start_time, COALESCE(cs.offered_slots, '[]'::jsonb),
+		       COALESCE(cs.booking_segments, '[]'::jsonb),
 		       COALESCE(cs.booking_attempt_id::text, ''),
 		       COALESCE(cs.appointment_id::text, ''), COALESCE(cs.summary, ''),
 		       cs.started_at, cs.ended_at, cs.created_at, cs.updated_at
@@ -405,6 +424,7 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 	var requestedStartAt sql.NullTime
 	var endedAt sql.NullTime
 	var offeredSlots []byte
+	var bookingSegments []byte
 	if err := scanner.Scan(
 		&item.ID,
 		&item.SalonID,
@@ -423,8 +443,10 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 		&item.ServiceName,
 		&item.StaffID,
 		&item.StaffName,
+		&item.StaffSelectionMode,
 		&requestedStartAt,
 		&offeredSlots,
+		&bookingSegments,
 		&item.BookingAttemptID,
 		&item.AppointmentID,
 		&item.Summary,
@@ -442,6 +464,14 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 		if err := json.Unmarshal(offeredSlots, &item.OfferedSlots); err != nil {
 			return nil, err
 		}
+	}
+	if len(bookingSegments) > 0 {
+		if err := json.Unmarshal(bookingSegments, &item.BookingSegments); err != nil {
+			return nil, err
+		}
+	}
+	if item.StaffSelectionMode == "" {
+		item.StaffSelectionMode = booking.StaffSelectionSpecific
 	}
 	if endedAt.Valid {
 		item.EndedAt = &endedAt.Time

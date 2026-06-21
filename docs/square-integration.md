@@ -29,6 +29,8 @@
 
 The provider-neutral booking service records backend `pos_pending` attempts before calling Square, passes backend-owned idempotency keys into the adapter, and must not fake booking success. Reschedule, cancel, test booking, test booking cancellation, and simulator booking requests leave internal confirmed appointment state unchanged unless Square succeeds. AI booking can only be enabled after the latest Square test booking was created and cancelled successfully.
 
+Booking attempts and confirmed appointments snapshot service/staff segments in backend tables before or after the Square call as appropriate. Provider-neutral POS DTOs now carry segment arrays, and `SquareAdapter` maps those arrays into Square booking `appointment_segments` and availability `segment_filters`. `staff_selection_mode=anyone` is retained as internal/customer preference metadata; Square-specific appointment payload requirements remain isolated inside `SquareAdapter`.
+
 ## Environment
 
 ```txt

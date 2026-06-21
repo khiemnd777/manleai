@@ -100,12 +100,20 @@ Updates only the internal AI booking eligibility flag for a synced staff member.
 
 `POST /api/salons/:id/availability`
 
-Returns provider-neutral available booking slots from the active POS provider for an AI-bookable service and optional AI-bookable staff member. Results are filtered to the salon's configured business hours in the salon timezone. This endpoint does not create a booking attempt or confirm an appointment.
+Returns provider-neutral available booking slots from the active POS provider for one or more AI-bookable services and optional AI-bookable staff members. Use `segments` for multi-service booking; the legacy `service_id` and `staff_id` fields remain supported for single-service booking. `staff_selection_mode` is either `specific` or `anyone`; `anyone` means the customer did not request a named technician. Results are filtered to the salon's configured business hours in the salon timezone. This endpoint does not create a booking attempt or confirm an appointment.
 
 ```json
 {
   "service_id": "...",
   "staff_id": "...",
+  "staff_selection_mode": "specific",
+  "segments": [
+    {
+      "service_id": "...",
+      "staff_id": "...",
+      "staff_selection_mode": "specific"
+    }
+  ],
   "preferred_date": "2026-06-10",
   "limit": 5
 }
@@ -119,6 +127,17 @@ Returns:
   "service_name": "Classic Manicure",
   "staff_id": "...",
   "staff_name": "Mai Nguyen",
+  "staff_selection_mode": "specific",
+  "segments": [
+    {
+      "service_id": "...",
+      "service_name": "Classic Manicure",
+      "staff_id": "...",
+      "staff_name": "Mai Nguyen",
+      "staff_selection_mode": "specific",
+      "duration_minutes": 45
+    }
+  ],
   "preferred_date": "2026-06-10",
   "duration_minutes": 45,
   "timezone": "America/Chicago",
@@ -127,7 +146,18 @@ Returns:
       "start_time": "2026-06-10T15:00:00Z",
       "end_time": "2026-06-10T15:45:00Z",
       "staff_id": "...",
-      "staff_name": "Mai Nguyen"
+      "staff_name": "Mai Nguyen",
+      "staff_selection_mode": "specific",
+      "segments": [
+        {
+          "service_id": "...",
+          "service_name": "Classic Manicure",
+          "staff_id": "...",
+          "staff_name": "Mai Nguyen",
+          "staff_selection_mode": "specific",
+          "duration_minutes": 45
+        }
+      ]
     }
   ]
 }
@@ -186,7 +216,7 @@ Searches the active provider by phone through `POSProvider.SearchCustomerByPhone
 
 `GET /api/salons/:id/appointments`
 
-Returns appointments recorded after POS success, including confirmed, rescheduled, and cancelled statuses.
+Returns appointments recorded after POS success, including confirmed, rescheduled, and cancelled statuses. Each item includes `staff_selection_mode` and, when available, ordered `segments[]` from `appointment_services` with service names, assigned technician names, durations, and segment-level staff selection mode. `staff_selection_mode=anyone` means the customer did not request a named technician even though the POS-confirmed appointment stores the staff assignment used to book.
 
 `POST /api/salons/:id/appointments/:appointment_id/reschedule`
 
@@ -212,7 +242,7 @@ Returns `200` with the cancelled appointment only when the active `POSProvider` 
 
 `GET /api/salons/:id/booking-attempts`
 
-Returns booking attempts, including transient `pos_pending` records and `fallback_pending` records that need owner review.
+Returns booking attempts, including transient `pos_pending` records and `fallback_pending` records that need owner review. Each item includes `staff_selection_mode` and, when available, ordered `segments[]` from `booking_attempt_segments` so owner dashboards can distinguish the customer preference (`anyone` or `specific`) from the staff assignment attempted through the POS provider.
 
 `POST /api/salons/:id/booking-attempts`
 
@@ -223,12 +253,20 @@ Returns booking attempts, including transient `pos_pending` records and `fallbac
   "customer_email": "linh@example.com",
   "service_id": "...",
   "staff_id": "...",
+  "staff_selection_mode": "specific",
+  "segments": [
+    {
+      "service_id": "...",
+      "staff_id": "...",
+      "staff_selection_mode": "specific"
+    }
+  ],
   "start_time": "2026-06-10T15:00:00Z",
   "notes": "First visit"
 }
 ```
 
-Creates a backend booking attempt before calling the active `POSProvider`. Returns `201` with status `confirmed` only when the POS provider returns a POS booking ID and booking version. Returns `202` with status `fallback_pending` when the POS provider fails, times out, or does not return required booking metadata.
+Creates a backend booking attempt before calling the active `POSProvider`. For multi-service booking, each segment is resolved to provider-neutral service/staff records and persisted in `booking_attempt_segments`; confirmed appointments snapshot the same ordered segments in `appointment_services`. `staff_selection_mode=anyone` records that the customer did not request a named technician; the backend still stores the POS-compatible staff assignment used for the booking attempt. Returns `201` with status `confirmed` only when the POS provider returns a POS booking ID and booking version. Returns `202` with status `fallback_pending` when the POS provider fails, times out, or does not return required booking metadata.
 
 ## Conversation Sessions
 
@@ -258,7 +296,7 @@ Returns one conversation session with transcript messages and the latest handoff
 }
 ```
 
-Processes one simulated customer message through the deterministic conversation engine. The simulator asks one question at a time, can create owner handoffs for human requests or disabled AI booking, checks provider-neutral availability before selecting a booking time, offers available slots from Square Appointments, and calls the provider-neutral booking service only after the customer selects a slot and required customer details are collected. A simulator booking is marked `booking_confirmed` only when the booking service returns a confirmed booking attempt with a POS booking ID and appointment. POS failures create `booking_fallback_pending` wording and do not create confirmed appointment language.
+Processes one simulated customer message through the deterministic conversation engine. The simulator asks one question at a time, can create owner handoffs for human requests or disabled AI booking, checks provider-neutral availability before selecting a booking time, offers available slots from Square Appointments, and calls the provider-neutral booking service only after the customer selects a slot and required customer details are collected. Offered slots may include ordered `segments` with provider-neutral service/staff assignments. Once a customer selects a slot, the session stores selected `booking_segments` and `staff_selection_mode` so simulator and phone flows can create one multi-service POS-first booking request. When `staff_selection_mode=anyone`, the customer did not choose a named technician, so the conversation avoids presenting the POS staff assignment as a customer-selected technician. A simulator booking is marked `booking_confirmed` only when the booking service returns a confirmed booking attempt with a POS booking ID and appointment. POS failures create `booking_fallback_pending` wording and do not create confirmed appointment language.
 
 Phone channel sessions are created by Twilio webhooks and use the same conversation engine. Phone bookings use source `ai_voice_call`; simulator bookings use source `ai_conversation_simulator`.
 

@@ -8,6 +8,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  assignedTechniciansLabel,
+  bookingSummaryLabel,
+  orderedSegments,
+  serviceNamesLabel,
+  technicianPreferenceLabel,
+  technicianPreferenceValue
+} from "@/features/dashboard/booking-display";
 import { apiRequest } from "@/lib/api/client";
 import type {
   AvailabilityResult,
@@ -155,11 +163,20 @@ export function AppointmentsDashboard() {
     setAvailabilityChecked(true);
     setCheckingAvailability(true);
     try {
+      const staffSelectionMode = availabilityStaffID ? "specific" : "anyone";
       const result = await apiRequest<AvailabilityResult>(`/api/salons/${salon.id}/availability`, {
         method: "POST",
         body: JSON.stringify({
           service_id: availabilityServiceID,
           staff_id: availabilityStaffID,
+          staff_selection_mode: staffSelectionMode,
+          segments: [
+            {
+              service_id: availabilityServiceID,
+              staff_id: availabilityStaffID,
+              staff_selection_mode: staffSelectionMode
+            }
+          ],
           preferred_date: selectedDate,
           limit: 5
         })
@@ -379,13 +396,14 @@ export function AppointmentsDashboard() {
         ) : (
           <>
             <div className="mt-5 hidden overflow-x-auto rounded-md border border-line lg:block">
-              <table className="w-full min-w-[860px] text-left text-sm">
+              <table className="w-full min-w-[1080px] text-left text-sm">
                 <thead className="bg-slate-50 text-xs uppercase text-muted">
                   <tr>
                     <th className="px-4 py-3">When</th>
                     <th className="px-4 py-3">Customer</th>
-                    <th className="px-4 py-3">Service</th>
-                    <th className="px-4 py-3">Staff</th>
+                    <th className="px-4 py-3">Services</th>
+                    <th className="px-4 py-3">Technician preference</th>
+                    <th className="px-4 py-3">Assigned technicians</th>
                     <th className="px-4 py-3">Status</th>
                     <th className="px-4 py-3">POS booking</th>
                   </tr>
@@ -401,8 +419,12 @@ export function AppointmentsDashboard() {
                         <div className="font-medium text-ink">{item.customer_name}</div>
                         <div className="mt-1 text-xs text-muted">{item.customer_phone}</div>
                       </td>
-                      <td className="px-4 py-3 text-muted">{lookupName(serviceNames, item.service_id)}</td>
-                      <td className="px-4 py-3 text-muted">{lookupName(staffNames, item.staff_id)}</td>
+                      <td className="px-4 py-3 text-muted">{serviceNamesLabel(item, serviceNames)}</td>
+                      <td className="px-4 py-3">
+                        <Badge value={technicianPreferenceValue(item)} />
+                        <div className="mt-1 text-xs text-muted">{technicianPreferenceLabel(item)}</div>
+                      </td>
+                      <td className="px-4 py-3 text-muted">{assignedTechniciansLabel(item, staffNames)}</td>
                       <td className="px-4 py-3">
                         <Badge value={item.status} />
                       </td>
@@ -417,8 +439,9 @@ export function AppointmentsDashboard() {
                 <AppointmentCard
                   key={item.id}
                   item={item}
-                  serviceName={lookupName(serviceNames, item.service_id)}
-                  staffName={lookupName(staffNames, item.staff_id)}
+                  serviceName={serviceNamesLabel(item, serviceNames)}
+                  staffName={assignedTechniciansLabel(item, staffNames)}
+                  technicianPreference={technicianPreferenceLabel(item)}
                 />
               ))}
             </div>
@@ -446,13 +469,14 @@ export function AppointmentsDashboard() {
         ) : (
           <>
             <div className="mt-5 hidden overflow-x-auto rounded-md border border-line lg:block">
-              <table className="w-full min-w-[900px] text-left text-sm">
+              <table className="w-full min-w-[1080px] text-left text-sm">
                 <thead className="bg-slate-50 text-xs uppercase text-muted">
                   <tr>
                     <th className="px-4 py-3">Requested time</th>
                     <th className="px-4 py-3">Customer</th>
-                    <th className="px-4 py-3">Service</th>
-                    <th className="px-4 py-3">Staff</th>
+                    <th className="px-4 py-3">Services</th>
+                    <th className="px-4 py-3">Technician preference</th>
+                    <th className="px-4 py-3">Assigned technicians</th>
                     <th className="px-4 py-3">Failure reason</th>
                     <th className="px-4 py-3">Status</th>
                   </tr>
@@ -470,8 +494,12 @@ export function AppointmentsDashboard() {
                         <div className="font-medium text-ink">{item.customer_name}</div>
                         <div className="mt-1 text-xs text-muted">{item.customer_phone}</div>
                       </td>
-                      <td className="px-4 py-3 text-muted">{lookupName(serviceNames, item.service_id)}</td>
-                      <td className="px-4 py-3 text-muted">{lookupName(staffNames, item.staff_id)}</td>
+                      <td className="px-4 py-3 text-muted">{serviceNamesLabel(item, serviceNames)}</td>
+                      <td className="px-4 py-3">
+                        <Badge value={technicianPreferenceValue(item)} />
+                        <div className="mt-1 text-xs text-muted">{technicianPreferenceLabel(item)}</div>
+                      </td>
+                      <td className="px-4 py-3 text-muted">{assignedTechniciansLabel(item, staffNames)}</td>
                       <td className="px-4 py-3">
                         <div className="font-medium text-ink">{item.error_code || "POS error"}</div>
                         <div className="mt-1 max-w-xs text-xs leading-5 text-muted">
@@ -491,8 +519,9 @@ export function AppointmentsDashboard() {
                 <FallbackCard
                   key={item.id}
                   item={item}
-                  serviceName={lookupName(serviceNames, item.service_id)}
-                  staffName={lookupName(staffNames, item.staff_id)}
+                  serviceName={serviceNamesLabel(item, serviceNames)}
+                  staffName={assignedTechniciansLabel(item, staffNames)}
+                  technicianPreference={technicianPreferenceLabel(item)}
                 />
               ))}
             </div>
@@ -610,7 +639,7 @@ function DaySchedule({
       start: item.start_time,
       end: item.end_time,
       title: item.customer_name,
-      subtitle: `${lookupName(serviceNames, item.service_id)} with ${lookupName(staffNames, item.staff_id)}`,
+      subtitle: bookingSummaryLabel(item, serviceNames, staffNames),
       status: item.status,
       detail: item.pos_appointment_id ? "Square booking ID returned" : "POS booking ID missing"
     })),
@@ -619,7 +648,7 @@ function DaySchedule({
       start: item.requested_start_time,
       end: item.requested_end_time,
       title: item.customer_name,
-      subtitle: `${lookupName(serviceNames, item.service_id)} with ${lookupName(staffNames, item.staff_id)}`,
+      subtitle: bookingSummaryLabel(item, serviceNames, staffNames),
       status: item.status,
       detail: item.error_code || "Pending owner review"
     }))
@@ -717,11 +746,33 @@ function AvailabilitySlotsPanel({
                 {formatTimeRange(slot.start_time, slot.end_time, timezone)}
               </div>
               <div className="mt-1 text-sm leading-6 text-muted">
-                {slot.staff_name ? `with ${slot.staff_name}` : "Anyone available"}
+                Customer-facing: {technicianPreferenceValue(slot) === "anyone" ? "Anyone available" : assignedTechniciansLabel(slot)}
+              </div>
+              <div className="mt-1 text-sm leading-6 text-muted">
+                Assigned: {assignedTechniciansLabel(slot)}
               </div>
             </div>
             <Badge value="available" />
           </div>
+          <SegmentAssignmentList record={slot} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SegmentAssignmentList({ record }: { record: AvailabilitySlot | AppointmentRecord | BookingAttempt }) {
+  const segments = orderedSegments(record);
+  if (segments.length === 0) {
+    return null;
+  }
+  return (
+    <div className="mt-3 space-y-2 border-t border-line pt-3">
+      {segments.map((segment, index) => (
+        <div key={`${segment.service_id ?? "service"}-${segment.staff_id ?? "staff"}-${index}`} className="text-xs leading-5 text-muted">
+          <span className="font-semibold text-ink">{index + 1}. {segment.service_name || "Unknown service"}</span>
+          {" -> "}
+          <span>{segment.staff_name || "Unassigned technician"}</span>
         </div>
       ))}
     </div>
@@ -741,11 +792,13 @@ function EmptyState({ icon, title, message }: { icon: ReactNode; title: string; 
 function AppointmentCard({
   item,
   serviceName,
-  staffName
+  staffName,
+  technicianPreference
 }: {
   item: AppointmentRecord;
   serviceName: string;
   staffName: string;
+  technicianPreference: string;
 }) {
   return (
     <div className="rounded-md border border-line p-4">
@@ -759,11 +812,13 @@ function AppointmentCard({
       <InfoGrid
         items={[
           ["When", `${formatDate(item.start_time)} ${formatTimeRange(item.start_time, item.end_time)}`],
-          ["Service", serviceName],
-          ["Staff", staffName],
+          ["Services", serviceName],
+          ["Technician preference", technicianPreference],
+          ["Assigned technicians", staffName],
           ["POS booking", item.pos_appointment_id || "Not returned"]
         ]}
       />
+      <SegmentAssignmentList record={item} />
     </div>
   );
 }
@@ -771,11 +826,13 @@ function AppointmentCard({
 function FallbackCard({
   item,
   serviceName,
-  staffName
+  staffName,
+  technicianPreference
 }: {
   item: BookingAttempt;
   serviceName: string;
   staffName: string;
+  technicianPreference: string;
 }) {
   return (
     <div className="rounded-md border border-line p-4">
@@ -789,11 +846,13 @@ function FallbackCard({
       <InfoGrid
         items={[
           ["Requested", `${formatDate(item.requested_start_time)} ${formatTimeRange(item.requested_start_time, item.requested_end_time)}`],
-          ["Service", serviceName],
-          ["Staff", staffName],
+          ["Services", serviceName],
+          ["Technician preference", technicianPreference],
+          ["Assigned technicians", staffName],
           ["Failure", item.error_code || "POS error"]
         ]}
       />
+      <SegmentAssignmentList record={item} />
       <div className="mt-3 text-sm leading-6 text-muted">
         {item.error_message || "Review POS logs for details."}
       </div>
@@ -812,11 +871,6 @@ function InfoGrid({ items }: { items: [string, string][] }) {
       ))}
     </div>
   );
-}
-
-function lookupName(items: Map<string, string>, id?: string) {
-  if (!id) return "-";
-  return items.get(id) || "Unknown";
 }
 
 function formatOptionalDate(value?: string) {

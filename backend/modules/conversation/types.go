@@ -133,41 +133,54 @@ type KnowledgeSnippet struct {
 }
 
 type Session struct {
-	ID                 string              `json:"id"`
-	SalonID            string              `json:"salon_id"`
-	Channel            string              `json:"channel"`
-	Provider           string              `json:"provider,omitempty"`
-	ProviderCallID     string              `json:"provider_call_id,omitempty"`
-	InboundPhone       string              `json:"inbound_phone,omitempty"`
-	OutboundPhone      string              `json:"outbound_phone,omitempty"`
-	Status             string              `json:"status"`
-	Intent             string              `json:"intent"`
-	Outcome            string              `json:"outcome"`
-	CustomerName       string              `json:"customer_name,omitempty"`
-	CustomerPhone      string              `json:"customer_phone,omitempty"`
-	CustomerEmail      string              `json:"customer_email,omitempty"`
-	ServiceID          string              `json:"service_id,omitempty"`
-	ServiceName        string              `json:"service_name,omitempty"`
-	StaffID            string              `json:"staff_id,omitempty"`
-	StaffName          string              `json:"staff_name,omitempty"`
-	RequestedStartTime *time.Time          `json:"requested_start_time,omitempty"`
-	OfferedSlots       []OfferedSlot       `json:"offered_slots,omitempty"`
-	BookingAttemptID   string              `json:"booking_attempt_id,omitempty"`
-	AppointmentID      string              `json:"appointment_id,omitempty"`
-	Summary            string              `json:"summary,omitempty"`
-	StartedAt          time.Time           `json:"started_at"`
-	EndedAt            *time.Time          `json:"ended_at,omitempty"`
-	CreatedAt          time.Time           `json:"created_at"`
-	UpdatedAt          time.Time           `json:"updated_at"`
-	Transcript         []TranscriptMessage `json:"transcript,omitempty"`
-	Handoff            *HandoffRequest     `json:"handoff,omitempty"`
+	ID                 string                          `json:"id"`
+	SalonID            string                          `json:"salon_id"`
+	Channel            string                          `json:"channel"`
+	Provider           string                          `json:"provider,omitempty"`
+	ProviderCallID     string                          `json:"provider_call_id,omitempty"`
+	InboundPhone       string                          `json:"inbound_phone,omitempty"`
+	OutboundPhone      string                          `json:"outbound_phone,omitempty"`
+	Status             string                          `json:"status"`
+	Intent             string                          `json:"intent"`
+	Outcome            string                          `json:"outcome"`
+	CustomerName       string                          `json:"customer_name,omitempty"`
+	CustomerPhone      string                          `json:"customer_phone,omitempty"`
+	CustomerEmail      string                          `json:"customer_email,omitempty"`
+	ServiceID          string                          `json:"service_id,omitempty"`
+	ServiceName        string                          `json:"service_name,omitempty"`
+	StaffID            string                          `json:"staff_id,omitempty"`
+	StaffName          string                          `json:"staff_name,omitempty"`
+	StaffSelectionMode string                          `json:"staff_selection_mode,omitempty"`
+	RequestedStartTime *time.Time                      `json:"requested_start_time,omitempty"`
+	OfferedSlots       []OfferedSlot                   `json:"offered_slots,omitempty"`
+	BookingSegments    []booking.BookingSegmentRequest `json:"booking_segments,omitempty"`
+	BookingAttemptID   string                          `json:"booking_attempt_id,omitempty"`
+	AppointmentID      string                          `json:"appointment_id,omitempty"`
+	Summary            string                          `json:"summary,omitempty"`
+	StartedAt          time.Time                       `json:"started_at"`
+	EndedAt            *time.Time                      `json:"ended_at,omitempty"`
+	CreatedAt          time.Time                       `json:"created_at"`
+	UpdatedAt          time.Time                       `json:"updated_at"`
+	Transcript         []TranscriptMessage             `json:"transcript,omitempty"`
+	Handoff            *HandoffRequest                 `json:"handoff,omitempty"`
 }
 
 type OfferedSlot struct {
-	StartTime time.Time `json:"start_time"`
-	EndTime   time.Time `json:"end_time"`
-	StaffID   string    `json:"staff_id"`
-	StaffName string    `json:"staff_name"`
+	StartTime          time.Time            `json:"start_time"`
+	EndTime            time.Time            `json:"end_time"`
+	StaffID            string               `json:"staff_id"`
+	StaffName          string               `json:"staff_name"`
+	StaffSelectionMode string               `json:"staff_selection_mode,omitempty"`
+	Segments           []OfferedSlotSegment `json:"segments,omitempty"`
+}
+
+type OfferedSlotSegment struct {
+	ServiceID          string `json:"service_id"`
+	ServiceName        string `json:"service_name,omitempty"`
+	StaffID            string `json:"staff_id,omitempty"`
+	StaffName          string `json:"staff_name,omitempty"`
+	StaffSelectionMode string `json:"staff_selection_mode"`
+	DurationMinutes    int    `json:"duration_minutes,omitempty"`
 }
 
 type TranscriptMessage struct {
@@ -227,8 +240,10 @@ type SessionUpdate struct {
 	CustomerEmail      string
 	ServiceID          string
 	StaffID            string
+	StaffSelectionMode string
 	RequestedStartTime *time.Time
 	OfferedSlots       []OfferedSlot
+	BookingSegments    []booking.BookingSegmentRequest
 	BookingAttemptID   string
 	AppointmentID      string
 	Summary            string

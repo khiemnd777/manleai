@@ -57,6 +57,124 @@ func TestCreateStoresConfirmedBookingOnlyAfterPOSSuccess(t *testing.T) {
 	}
 }
 
+func TestCreatePersistsStaffSelectionModeAndSingleSegment(t *testing.T) {
+	store := newFakeStore()
+	provider := &fakeProvider{
+		customer: &pos.Customer{POSCustomerID: "cust_1", Name: "Linh Tran", Phone: "+13125550101"},
+		appointment: &pos.Appointment{
+			POSAppointmentID:      "booking_1",
+			POSAppointmentVersion: 7,
+			StartTime:             testStartTime(),
+			EndTime:               testStartTime().Add(45 * time.Minute),
+			Status:                StatusConfirmed,
+		},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+	req := validCreateRequest()
+	req.StaffSelectionMode = StaffSelectionAnyone
+
+	attempt, err := service.Create(context.Background(), "salon_1", "owner_1", req)
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if attempt.Status != StatusConfirmed {
+		t.Fatalf("status = %s, want confirmed", attempt.Status)
+	}
+	if provider.lastCreateInput.StaffID != "square_staff_1" {
+		t.Fatalf("provider staff id = %s, want resolved Square staff", provider.lastCreateInput.StaffID)
+	}
+	if len(provider.lastCreateInput.Segments) != 1 {
+		t.Fatalf("provider create segments = %#v, want one segment", provider.lastCreateInput.Segments)
+	}
+	createSegment := provider.lastCreateInput.Segments[0]
+	if createSegment.ServiceID != "square_service_1" || createSegment.ServiceVersion != 123 || createSegment.StaffID != "square_staff_1" || createSegment.DurationMinutes != 45 {
+		t.Fatalf("provider create segment = %#v, want POS-backed segment", createSegment)
+	}
+	if store.pending == nil || store.pending.StaffSelectionMode != StaffSelectionAnyone {
+		t.Fatalf("pending mode = %#v, want anyone", store.pending)
+	}
+	if len(store.pending.Segments) != 1 {
+		t.Fatalf("pending segments = %#v, want one segment", store.pending.Segments)
+	}
+	pendingSegment := store.pending.Segments[0]
+	if pendingSegment.StaffSelectionMode != StaffSelectionAnyone || pendingSegment.Service.ID != "service_1" || pendingSegment.Staff.ID != "staff_1" || pendingSegment.SortOrder != 1 {
+		t.Fatalf("pending segment = %#v, want anyone segment snapshot", pendingSegment)
+	}
+	if store.confirmed == nil || store.confirmed.StaffSelectionMode != StaffSelectionAnyone {
+		t.Fatalf("confirmed mode = %#v, want anyone", store.confirmed)
+	}
+	if len(store.confirmed.Segments) != 1 {
+		t.Fatalf("confirmed segments = %#v, want one segment", store.confirmed.Segments)
+	}
+	confirmedSegment := store.confirmed.Segments[0]
+	if confirmedSegment.StaffSelectionMode != StaffSelectionAnyone || confirmedSegment.Service.POSServiceID != "square_service_1" || confirmedSegment.Staff.POSStaffID != "square_staff_1" {
+		t.Fatalf("confirmed segment = %#v, want POS-backed segment snapshot", confirmedSegment)
+	}
+}
+
+func TestCreateSupportsMultipleSegments(t *testing.T) {
+	store := newFakeStore()
+	store.services = append(store.services, ServiceRef{
+		ID:                "service_2",
+		POSProvider:       pos.ProviderSquare,
+		POSServiceID:      "square_service_2",
+		POSServiceVersion: 456,
+		Name:              "Gel Removal",
+		DurationMinutes:   30,
+		PriceFrom:         15,
+	})
+	store.staffRefs = append(store.staffRefs, StaffRef{
+		ID:          "staff_2",
+		POSProvider: pos.ProviderSquare,
+		POSStaffID:  "square_staff_2",
+		Name:        "An Nguyen",
+	})
+	provider := &fakeProvider{
+		customer: &pos.Customer{POSCustomerID: "cust_1", Name: "Linh Tran", Phone: "+13125550101"},
+		appointment: &pos.Appointment{
+			POSAppointmentID:      "booking_1",
+			POSAppointmentVersion: 7,
+			StartTime:             testStartTime(),
+			EndTime:               testStartTime().Add(75 * time.Minute),
+			Status:                StatusConfirmed,
+		},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+	req := validCreateRequest()
+	req.ServiceID = ""
+	req.StaffID = ""
+	req.Segments = []BookingSegmentRequest{
+		{ServiceID: "service_1", StaffID: "staff_1"},
+		{ServiceID: "service_2", StaffID: "staff_2"},
+	}
+
+	attempt, err := service.Create(context.Background(), "salon_1", "owner_1", req)
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if attempt.Status != StatusConfirmed {
+		t.Fatalf("status = %s, want confirmed", attempt.Status)
+	}
+	if len(provider.lastCreateInput.Segments) != 2 {
+		t.Fatalf("provider segments = %#v, want two", provider.lastCreateInput.Segments)
+	}
+	if provider.lastCreateInput.Segments[0].ServiceID != "square_service_1" || provider.lastCreateInput.Segments[1].ServiceID != "square_service_2" {
+		t.Fatalf("provider segments = %#v, want ordered POS services", provider.lastCreateInput.Segments)
+	}
+	if store.pending == nil || len(store.pending.Segments) != 2 {
+		t.Fatalf("pending segments = %#v, want two", store.pending)
+	}
+	if store.pending.EndTime.Sub(store.pending.StartTime) != 75*time.Minute {
+		t.Fatalf("pending duration = %s, want 75m", store.pending.EndTime.Sub(store.pending.StartTime))
+	}
+	if store.confirmed == nil || len(store.confirmed.Segments) != 2 {
+		t.Fatalf("confirmed segments = %#v, want two", store.confirmed)
+	}
+	if store.confirmed.Segments[1].Service.ID != "service_2" || store.confirmed.Segments[1].Staff.ID != "staff_2" || store.confirmed.Segments[1].SortOrder != 2 {
+		t.Fatalf("second confirmed segment = %#v, want service_2/staff_2", store.confirmed.Segments[1])
+	}
+}
+
 func TestCreateAcceptsPOSBookingVersionZero(t *testing.T) {
 	store := newFakeStore()
 	provider := &fakeProvider{
@@ -221,11 +339,68 @@ func TestReschedulePersistsOnlyAfterPOSSuccess(t *testing.T) {
 	if provider.lastRescheduleInput.BookingVersion != 7 {
 		t.Fatalf("booking version = %d, want 7", provider.lastRescheduleInput.BookingVersion)
 	}
+	if len(provider.lastRescheduleInput.Segments) != 1 {
+		t.Fatalf("provider reschedule segments = %#v, want one segment", provider.lastRescheduleInput.Segments)
+	}
+	rescheduleSegment := provider.lastRescheduleInput.Segments[0]
+	if rescheduleSegment.ServiceID != "square_service_1" || rescheduleSegment.ServiceVersion != 123 || rescheduleSegment.StaffID != "square_staff_1" || rescheduleSegment.DurationMinutes != 45 {
+		t.Fatalf("provider reschedule segment = %#v, want POS-backed segment", rescheduleSegment)
+	}
 	if store.pendingAction == nil {
 		t.Fatalf("pending reschedule attempt was not created before POS call")
 	}
 	if provider.lastRescheduleInput.IdempotencyKey != store.pendingAction.POSIdempotencyKey {
 		t.Fatalf("idempotency key = %s, want %s", provider.lastRescheduleInput.IdempotencyKey, store.pendingAction.POSIdempotencyKey)
+	}
+}
+
+func TestRescheduleSupportsMultipleSegments(t *testing.T) {
+	store := newFakeStore()
+	store.addSecondAppointmentSegment()
+	nextStart := testStartTime().Add(24 * time.Hour)
+	provider := &fakeProvider{
+		rescheduledAppointment: &pos.Appointment{
+			POSAppointmentID:      "booking_1",
+			POSAppointmentVersion: 8,
+			StartTime:             nextStart,
+			EndTime:               nextStart.Add(75 * time.Minute),
+			Status:                StatusRescheduled,
+		},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	appointment, fallback, err := service.Reschedule(context.Background(), "salon_1", "owner_1", "appointment_1", RescheduleRequest{
+		StartTime: nextStart,
+	})
+	if err != nil {
+		t.Fatalf("Reschedule returned error: %v", err)
+	}
+	if fallback != nil {
+		t.Fatalf("fallback should not be persisted on POS success")
+	}
+	if appointment == nil || len(appointment.Segments) != 2 {
+		t.Fatalf("appointment segments = %#v, want two", appointment)
+	}
+	if provider.lastRescheduleInput.DurationMinutes != 75 {
+		t.Fatalf("duration = %d, want 75", provider.lastRescheduleInput.DurationMinutes)
+	}
+	if len(provider.lastRescheduleInput.Segments) != 2 {
+		t.Fatalf("provider reschedule segments = %#v, want two", provider.lastRescheduleInput.Segments)
+	}
+	if provider.lastRescheduleInput.Segments[0].ServiceID != "square_service_1" || provider.lastRescheduleInput.Segments[1].ServiceID != "square_service_2" {
+		t.Fatalf("provider reschedule segments = %#v, want ordered POS services", provider.lastRescheduleInput.Segments)
+	}
+	if provider.lastRescheduleInput.Segments[1].StaffID != "square_staff_2" || provider.lastRescheduleInput.Segments[1].DurationMinutes != 30 {
+		t.Fatalf("second provider segment = %#v, want staff_2 30m", provider.lastRescheduleInput.Segments[1])
+	}
+	if store.pendingAction == nil || len(store.pendingAction.Segments) != 2 {
+		t.Fatalf("pending action segments = %#v, want two", store.pendingAction)
+	}
+	if store.rescheduled == nil || len(store.rescheduled.Segments) != 2 {
+		t.Fatalf("rescheduled segments = %#v, want two", store.rescheduled)
+	}
+	if store.appointment.EndTime.Sub(store.appointment.StartTime) != 75*time.Minute {
+		t.Fatalf("appointment duration = %s, want 75m", store.appointment.EndTime.Sub(store.appointment.StartTime))
 	}
 }
 
@@ -257,6 +432,41 @@ func TestRescheduleStoresFallbackWhenPOSFails(t *testing.T) {
 	}
 	if store.actionFallback.ErrorCode != pos.ErrorBookingConflict {
 		t.Fatalf("error code = %s, want %s", store.actionFallback.ErrorCode, pos.ErrorBookingConflict)
+	}
+}
+
+func TestRescheduleMultiSegmentFallbackLeavesAppointmentUnchanged(t *testing.T) {
+	store := newFakeStore()
+	store.addSecondAppointmentSegment()
+	originalStart := store.appointment.StartTime
+	originalEnd := store.appointment.EndTime
+	originalSegments := append([]BookingSegmentRecord(nil), store.appointment.Segments...)
+	provider := &fakeProvider{rescheduleErr: errors.New("square booking conflict")}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	appointment, fallback, err := service.Reschedule(context.Background(), "salon_1", "owner_1", "appointment_1", RescheduleRequest{
+		StartTime: testStartTime().Add(24 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("Reschedule returned error: %v", err)
+	}
+	if appointment != nil {
+		t.Fatalf("appointment should not be updated on POS failure")
+	}
+	if fallback == nil || fallback.Status != StatusFallbackPending {
+		t.Fatalf("fallback = %#v, want fallback_pending", fallback)
+	}
+	if store.appointment.Status != StatusConfirmed || !store.appointment.StartTime.Equal(originalStart) || !store.appointment.EndTime.Equal(originalEnd) {
+		t.Fatalf("appointment changed after POS failure: %#v", store.appointment)
+	}
+	if len(store.appointment.Segments) != len(originalSegments) || store.appointment.Segments[1].Staff.ID != originalSegments[1].Staff.ID {
+		t.Fatalf("appointment segments changed after POS failure: %#v", store.appointment.Segments)
+	}
+	if store.pendingAction == nil || len(store.pendingAction.Segments) != 2 {
+		t.Fatalf("pending action segments = %#v, want two", store.pendingAction)
+	}
+	if store.actionFallback == nil || len(store.actionFallback.Segments) != 2 {
+		t.Fatalf("action fallback segments = %#v, want two", store.actionFallback)
 	}
 }
 
@@ -331,6 +541,35 @@ func TestCancelStoresFallbackWhenPOSFails(t *testing.T) {
 	}
 	if store.actionFallback.ErrorCode != pos.ErrorPermissionDenied {
 		t.Fatalf("error code = %s, want %s", store.actionFallback.ErrorCode, pos.ErrorPermissionDenied)
+	}
+}
+
+func TestCancelFallbackSnapshotsMultipleSegments(t *testing.T) {
+	store := newFakeStore()
+	store.addSecondAppointmentSegment()
+	provider := &fakeProvider{cancelErr: errors.New("square permission denied")}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	appointment, fallback, err := service.Cancel(context.Background(), "salon_1", "owner_1", "appointment_1", CancelRequest{
+		Reason: "Customer requested cancellation",
+	})
+	if err != nil {
+		t.Fatalf("Cancel returned error: %v", err)
+	}
+	if appointment != nil {
+		t.Fatalf("appointment should not be updated on POS failure")
+	}
+	if fallback == nil || len(fallback.Segments) != 2 {
+		t.Fatalf("fallback segments = %#v, want two", fallback)
+	}
+	if store.pendingAction == nil || len(store.pendingAction.Segments) != 2 {
+		t.Fatalf("pending cancel segments = %#v, want two", store.pendingAction)
+	}
+	if store.actionFallback == nil || len(store.actionFallback.Segments) != 2 {
+		t.Fatalf("action fallback segments = %#v, want two", store.actionFallback)
+	}
+	if store.cancelled != nil {
+		t.Fatalf("cancel should not be persisted on POS failure")
 	}
 }
 
@@ -426,8 +665,84 @@ func TestAvailableSlotsWithoutStaffSkipsUnknownOrBlockedStaff(t *testing.T) {
 	if provider.lastAvailabilityInput.StaffID != "" {
 		t.Fatalf("provider staff filter = %q, want no staff filter", provider.lastAvailabilityInput.StaffID)
 	}
+	if result.StaffSelectionMode != StaffSelectionAnyone {
+		t.Fatalf("staff selection mode = %s, want anyone", result.StaffSelectionMode)
+	}
 	if len(result.Slots) != 1 || result.Slots[0].StaffID != "staff_2" {
 		t.Fatalf("slots = %#v, want only AI-bookable mapped staff", result.Slots)
+	}
+	if result.Slots[0].StaffSelectionMode != StaffSelectionAnyone {
+		t.Fatalf("slot staff selection mode = %s, want anyone", result.Slots[0].StaffSelectionMode)
+	}
+}
+
+func TestAvailableSlotsSupportsMultipleSegments(t *testing.T) {
+	store := newFakeStore()
+	store.services = append(store.services, ServiceRef{
+		ID:                "service_2",
+		POSProvider:       pos.ProviderSquare,
+		POSServiceID:      "square_service_2",
+		POSServiceVersion: 456,
+		Name:              "Gel Removal",
+		DurationMinutes:   30,
+		PriceFrom:         15,
+	})
+	store.staffRefs = append(store.staffRefs, StaffRef{
+		ID:          "staff_2",
+		POSProvider: pos.ProviderSquare,
+		POSStaffID:  "square_staff_2",
+		Name:        "An Nguyen",
+	})
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	provider := &fakeProvider{
+		availabilitySlots: []pos.TimeSlot{
+			{
+				StartTime: time.Date(2026, 6, 15, 10, 0, 0, 0, loc).UTC(),
+				EndTime:   time.Date(2026, 6, 15, 11, 15, 0, 0, loc).UTC(),
+				StaffID:   "square_staff_1",
+				Segments: []pos.TimeSlotSegment{
+					{ServiceID: "square_service_1", StaffID: "square_staff_1", DurationMinutes: 45},
+					{ServiceID: "square_service_2", StaffID: "square_staff_2", DurationMinutes: 30},
+				},
+			},
+		},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	result, err := service.AvailableSlots(context.Background(), "salon_1", "owner_1", AvailabilityRequest{
+		PreferredDate: "2026-06-15",
+		Segments: []BookingSegmentRequest{
+			{ServiceID: "service_1"},
+			{ServiceID: "service_2"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("AvailableSlots returned error: %v", err)
+	}
+	if len(provider.lastAvailabilityInput.Segments) != 2 {
+		t.Fatalf("provider segments = %#v, want two", provider.lastAvailabilityInput.Segments)
+	}
+	if provider.lastAvailabilityInput.Segments[0].ServiceID != "square_service_1" || provider.lastAvailabilityInput.Segments[1].ServiceID != "square_service_2" {
+		t.Fatalf("provider segments = %#v, want ordered POS services", provider.lastAvailabilityInput.Segments)
+	}
+	if len(result.Slots) != 1 {
+		t.Fatalf("slots = %#v, want one", result.Slots)
+	}
+	slot := result.Slots[0]
+	if len(slot.Segments) != 2 {
+		t.Fatalf("slot segments = %#v, want two", slot.Segments)
+	}
+	if slot.Segments[0].ServiceID != "service_1" || slot.Segments[0].StaffID != "staff_1" {
+		t.Fatalf("first slot segment = %#v, want service_1/staff_1", slot.Segments[0])
+	}
+	if slot.Segments[1].ServiceID != "service_2" || slot.Segments[1].StaffID != "staff_2" {
+		t.Fatalf("second slot segment = %#v, want service_2/staff_2", slot.Segments[1])
+	}
+	if slot.EndTime.Sub(slot.StartTime) != 75*time.Minute {
+		t.Fatalf("slot duration = %s, want 75m", slot.EndTime.Sub(slot.StartTime))
 	}
 }
 
@@ -476,6 +791,7 @@ func testStartTime() time.Time {
 
 type fakeStore struct {
 	service        ServiceRef
+	services       []ServiceRef
 	staff          StaffRef
 	staffRefs      []StaffRef
 	schedule       Schedule
@@ -519,6 +835,7 @@ func newFakeStore() *fakeStore {
 			},
 		},
 	}
+	store.services = []ServiceRef{store.service}
 	store.staffRefs = []StaffRef{store.staff}
 	store.appointment = AppointmentActionRef{
 		ID:                    "appointment_1",
@@ -532,11 +849,38 @@ func newFakeStore() *fakeStore {
 		CustomerEmail:         "linh@example.com",
 		Service:               store.service,
 		Staff:                 store.staff,
+		StaffSelectionMode:    StaffSelectionSpecific,
 		StartTime:             testStartTime(),
 		EndTime:               testStartTime().Add(45 * time.Minute),
 		Notes:                 "First visit",
 	}
+	store.appointment.Segments = singleBookingSegment(store.service, store.staff, StaffSelectionSpecific)
 	return store
+}
+
+func (f *fakeStore) addSecondAppointmentSegment() {
+	secondService := ServiceRef{
+		ID:                "service_2",
+		POSProvider:       pos.ProviderSquare,
+		POSServiceID:      "square_service_2",
+		POSServiceVersion: 456,
+		Name:              "Gel Removal",
+		DurationMinutes:   30,
+		PriceFrom:         15,
+	}
+	secondStaff := StaffRef{
+		ID:          "staff_2",
+		POSProvider: pos.ProviderSquare,
+		POSStaffID:  "square_staff_2",
+		Name:        "An Nguyen",
+	}
+	f.services = append(f.services, secondService)
+	f.staffRefs = append(f.staffRefs, secondStaff)
+	f.appointment.EndTime = f.appointment.StartTime.Add(75 * time.Minute)
+	f.appointment.Segments = []BookingSegmentRecord{
+		{Service: f.service, Staff: f.staff, StaffSelectionMode: StaffSelectionSpecific, SortOrder: 1},
+		{Service: secondService, Staff: secondStaff, StaffSelectionMode: StaffSelectionSpecific, SortOrder: 2},
+	}
 }
 
 func (f *fakeStore) EnsureSalonOwner(ctx context.Context, salonID string, ownerUserID string) error {
@@ -547,17 +891,23 @@ func (f *fakeStore) EnsureSalonOwner(ctx context.Context, salonID string, ownerU
 }
 
 func (f *fakeStore) GetBookableService(ctx context.Context, salonID string, serviceID string) (*ServiceRef, error) {
-	if serviceID != f.service.ID {
-		return nil, pos.ErrNotFound
+	for _, service := range f.services {
+		if serviceID == service.ID {
+			item := service
+			return &item, nil
+		}
 	}
-	return &f.service, nil
+	return nil, pos.ErrNotFound
 }
 
 func (f *fakeStore) GetBookableStaff(ctx context.Context, salonID string, staffID string) (*StaffRef, error) {
-	if staffID != f.staff.ID {
-		return nil, pos.ErrNotFound
+	for _, staff := range f.staffRefs {
+		if staffID == staff.ID {
+			item := staff
+			return &item, nil
+		}
 	}
-	return &f.staff, nil
+	return nil, pos.ErrNotFound
 }
 
 func (f *fakeStore) ListBookableStaffRefs(ctx context.Context, salonID string) ([]StaffRef, error) {
@@ -581,6 +931,7 @@ func (f *fakeStore) CreatePendingBookingAttempt(ctx context.Context, record Pend
 		CustomerPhone:      record.CustomerPhone,
 		ServiceID:          record.Service.ID,
 		StaffID:            record.Staff.ID,
+		StaffSelectionMode: record.StaffSelectionMode,
 		RequestedStartTime: record.StartTime,
 		RequestedEndTime:   record.EndTime,
 	}, nil
@@ -602,6 +953,7 @@ func (f *fakeStore) SaveConfirmedBooking(ctx context.Context, record ConfirmedBo
 		CustomerPhone:      record.CustomerPhone,
 		ServiceID:          record.Service.ID,
 		StaffID:            record.Staff.ID,
+		StaffSelectionMode: record.StaffSelectionMode,
 		RequestedStartTime: record.StartTime,
 		RequestedEndTime:   record.EndTime,
 		Appointment: &Appointment{
@@ -609,6 +961,7 @@ func (f *fakeStore) SaveConfirmedBooking(ctx context.Context, record ConfirmedBo
 			POSAppointmentID:      record.POSBookingID,
 			POSAppointmentVersion: record.POSBookingVersion,
 			Status:                StatusConfirmed,
+			StaffSelectionMode:    record.StaffSelectionMode,
 		},
 	}, nil
 }
@@ -625,6 +978,7 @@ func (f *fakeStore) SaveFallbackBooking(ctx context.Context, record FallbackBook
 		CustomerPhone:      record.CustomerPhone,
 		ServiceID:          record.Service.ID,
 		StaffID:            record.Staff.ID,
+		StaffSelectionMode: record.StaffSelectionMode,
 		RequestedStartTime: record.StartTime,
 		RequestedEndTime:   record.EndTime,
 		ErrorCode:          record.ErrorCode,
@@ -640,6 +994,12 @@ func (f *fakeStore) GetAppointmentForOwner(ctx context.Context, salonID string, 
 }
 
 func (f *fakeStore) CreatePendingAppointmentAction(ctx context.Context, record PendingAppointmentActionRecord) (*BookingAttempt, error) {
+	segments := record.Segments
+	if len(segments) == 0 {
+		segments = appointmentActionSegments(record.Appointment)
+	}
+	primary := segments[0]
+	record.Segments = segments
 	f.pendingAction = &record
 	return &BookingAttempt{
 		ID:                 "attempt_action_1",
@@ -651,19 +1011,33 @@ func (f *fakeStore) CreatePendingAppointmentAction(ctx context.Context, record P
 		POSIdempotencyKey:  record.POSIdempotencyKey,
 		CustomerName:       record.Appointment.CustomerName,
 		CustomerPhone:      record.Appointment.CustomerPhone,
-		ServiceID:          record.Appointment.Service.ID,
-		StaffID:            record.Appointment.Staff.ID,
+		ServiceID:          primary.Service.ID,
+		StaffID:            primary.Staff.ID,
+		StaffSelectionMode: primary.StaffSelectionMode,
+		Segments:           bookingSegmentSnapshots(segments),
 		RequestedStartTime: record.RequestedStartTime,
 		RequestedEndTime:   record.RequestedEndTime,
 	}, nil
 }
 
 func (f *fakeStore) SaveRescheduledAppointment(ctx context.Context, record RescheduledAppointmentRecord) (*Appointment, error) {
+	segments := record.Segments
+	if len(segments) == 0 {
+		segments = appointmentActionSegments(record.Appointment)
+		if record.Staff.ID != "" {
+			segments = applyStaffToBookingSegments(segments, record.Staff)
+		}
+	}
+	primary := segments[0]
+	record.Segments = segments
 	f.rescheduled = &record
 	f.appointment.Status = StatusRescheduled
 	f.appointment.StartTime = record.StartTime
 	f.appointment.EndTime = record.EndTime
-	f.appointment.Staff = record.Staff
+	f.appointment.Service = primary.Service
+	f.appointment.Staff = primary.Staff
+	f.appointment.StaffSelectionMode = primary.StaffSelectionMode
+	f.appointment.Segments = segments
 	f.appointment.POSAppointmentVersion = record.POSBookingVersion
 	return appointmentFromActionRef(f.appointment), nil
 }
@@ -676,6 +1050,12 @@ func (f *fakeStore) SaveCancelledAppointment(ctx context.Context, record Cancell
 }
 
 func (f *fakeStore) SaveAppointmentActionFallback(ctx context.Context, record AppointmentActionFallbackRecord) (*BookingAttempt, error) {
+	segments := record.Segments
+	if len(segments) == 0 {
+		segments = appointmentActionSegments(record.Appointment)
+	}
+	primary := segments[0]
+	record.Segments = segments
 	f.actionFallback = &record
 	return &BookingAttempt{
 		ID:                 record.AttemptID,
@@ -685,8 +1065,10 @@ func (f *fakeStore) SaveAppointmentActionFallback(ctx context.Context, record Ap
 		POSBookingID:       record.Appointment.POSAppointmentID,
 		CustomerName:       record.Appointment.CustomerName,
 		CustomerPhone:      record.Appointment.CustomerPhone,
-		ServiceID:          record.Appointment.Service.ID,
-		StaffID:            record.Appointment.Staff.ID,
+		ServiceID:          primary.Service.ID,
+		StaffID:            primary.Staff.ID,
+		StaffSelectionMode: primary.StaffSelectionMode,
+		Segments:           bookingSegmentSnapshots(segments),
 		RequestedStartTime: record.RequestedStartTime,
 		RequestedEndTime:   record.RequestedEndTime,
 		ErrorCode:          record.ErrorCode,
