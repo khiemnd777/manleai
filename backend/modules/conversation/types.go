@@ -59,6 +59,7 @@ type Store interface {
 	ListSessions(ctx context.Context, salonID string, ownerUserID string, limit int) ([]Session, error)
 	ListBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error)
 	ListBookableStaff(ctx context.Context, salonID string) ([]StaffOption, error)
+	ListActiveStaff(ctx context.Context, salonID string) ([]StaffOption, error)
 	ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error)
 	SaveTurn(ctx context.Context, record TurnRecord) (*Session, error)
 }
@@ -122,8 +123,9 @@ type ServiceOption struct {
 }
 
 type StaffOption struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	AIBookable bool   `json:"ai_bookable"`
 }
 
 type KnowledgeSnippet struct {

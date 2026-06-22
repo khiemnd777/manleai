@@ -153,15 +153,16 @@ type ReadinessCheck struct {
 }
 
 type PhoneBookingReadiness struct {
-	Ready              bool             `json:"ready"`
-	AIEnabled          bool             `json:"ai_enabled"`
-	SquareConnected    bool             `json:"square_connected"`
-	SquareSynced       bool             `json:"square_synced"`
-	ServiceCount       int              `json:"service_count"`
-	StaffCount         int              `json:"staff_count"`
-	BusinessHoursCount int              `json:"business_hours_count"`
-	Checks             []ReadinessCheck `json:"checks"`
-	BlockedReason      string           `json:"blocked_reason,omitempty"`
+	Ready                bool             `json:"ready"`
+	AIEnabled            bool             `json:"ai_enabled"`
+	SquareConnected      bool             `json:"square_connected"`
+	SquareSynced         bool             `json:"square_synced"`
+	TestBookingCancelled bool             `json:"test_booking_cancelled"`
+	ServiceCount         int              `json:"service_count"`
+	StaffCount           int              `json:"staff_count"`
+	BusinessHoursCount   int              `json:"business_hours_count"`
+	Checks               []ReadinessCheck `json:"checks"`
+	BlockedReason        string           `json:"blocked_reason,omitempty"`
 }
 
 type ProviderCapabilityStatus struct {

@@ -342,6 +342,7 @@ export type VoiceBookingReadiness = {
   ai_enabled: boolean;
   square_connected: boolean;
   square_synced: boolean;
+  test_booking_cancelled: boolean;
   service_count: number;
   staff_count: number;
   business_hours_count: number;

@@ -125,6 +125,10 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	if err != nil {
 		return nil, err
 	}
+	activeStaff, err := s.store.ListActiveStaff(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
 	knowledge, err := s.store.ListActiveKnowledge(ctx, salonID)
 	if err != nil {
 		return nil, err
@@ -178,6 +182,13 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 
 	if !cfg.AIEnabled {
 		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonAIBookingDisabled, "AI booking is not enabled yet. I can take the request for the owner, but this is not a confirmed appointment.", services, staff, cfg)
+	}
+
+	if requestedStaff := matchNonBookableStaff(message, activeStaff); requestedStaff != nil {
+		next.StaffName = requestedStaff.Name
+		next.StaffSelectionMode = booking.StaffSelectionSpecific
+		turn.Update.StaffSelectionMode = staffSelectionModeForSession(next)
+		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, nonBookableStaffReply(*requestedStaff), services, staff, cfg)
 	}
 
 	if next.ServiceID != "" && next.RequestedStartTime != nil && !selectedOfferedSlot {
@@ -552,6 +563,10 @@ func salonName(cfg *RuntimeConfig) string {
 	return strings.TrimSpace(cfg.SalonName)
 }
 
+func bookingSafetyEnabled(aiEnabled bool, testBookingCancelled bool) bool {
+	return aiEnabled && testBookingCancelled
+}
+
 func resolveIntent(current string, message string, session Session) string {
 	if shouldHandoff(message) {
 		return IntentHandoff
@@ -811,6 +826,22 @@ func matchStaff(message string, staff []StaffOption) *StaffOption {
 		}
 	}
 	return nil
+}
+
+func matchNonBookableStaff(message string, staff []StaffOption) *StaffOption {
+	match := matchStaff(message, staff)
+	if match == nil || match.AIBookable {
+		return nil
+	}
+	return match
+}
+
+func nonBookableStaffReply(member StaffOption) string {
+	name := strings.TrimSpace(member.Name)
+	if name == "" {
+		name = "That technician"
+	}
+	return name + " is not enabled for AI booking. I will pass this request to the owner for review. This is not a confirmed appointment."
 }
 
 func significantWords(value string) []string {

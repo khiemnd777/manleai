@@ -397,16 +397,18 @@ Returns owner-scoped live voice, phone booking, and external AI provider readine
     "ai_enabled": true,
     "square_connected": true,
     "square_synced": true,
+    "test_booking_cancelled": true,
     "service_count": 4,
     "staff_count": 3,
     "business_hours_count": 6,
     "checks": [
-      {"key": "enable_ai_booking", "label": "Enable AI booking", "complete": true},
       {"key": "connect_square", "label": "Connect Square Appointments", "complete": true},
       {"key": "sync_square", "label": "Sync Square calendar", "complete": true},
       {"key": "bookable_services", "label": "AI-bookable services", "complete": true},
       {"key": "bookable_staff", "label": "AI-bookable staff", "complete": true},
-      {"key": "business_hours", "label": "Business hours", "complete": true}
+      {"key": "business_hours", "label": "Business hours", "complete": true},
+      {"key": "cancel_test_booking", "label": "Cancel Square test booking", "complete": true},
+      {"key": "enable_ai_booking", "label": "Enable AI booking", "complete": true}
     ]
   },
   "ai": {

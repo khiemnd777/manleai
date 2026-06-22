@@ -75,25 +75,43 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 				  AND st.ai_bookable = true
 				  AND COALESCE(st.pos_staff_id, '') <> ''
 			) AS staff_count,
-			(
-				SELECT COUNT(*)
-				FROM salon_business_hours bh
-				WHERE bh.salon_id = s.id
-				  AND bh.is_closed = false
-				  AND bh.open_time IS NOT NULL
-				  AND bh.close_time IS NOT NULL
-				  AND bh.close_time > bh.open_time
-			) AS business_hours_count
-		FROM salons s
-		WHERE s.id = $1
-		  AND s.owner_user_id = $2
-	`, salonID, ownerUserID).Scan(
+				(
+					SELECT COUNT(*)
+					FROM salon_business_hours bh
+					WHERE bh.salon_id = s.id
+					  AND bh.is_closed = false
+					  AND bh.open_time IS NOT NULL
+					  AND bh.close_time IS NOT NULL
+					  AND bh.close_time > bh.open_time
+				) AS business_hours_count,
+				EXISTS (
+					SELECT 1
+					FROM (
+						SELECT ba.status, ba.pos_provider, COALESCE(ba.pos_booking_id, '') AS pos_booking_id
+						FROM booking_attempts ba
+						WHERE ba.salon_id = s.id
+						  AND ba.source = 'square_test_booking'
+						ORDER BY ba.created_at DESC
+						LIMIT 1
+					) latest
+					JOIN appointments appt ON appt.salon_id = s.id
+					                       AND appt.pos_provider = latest.pos_provider
+					                       AND appt.pos_appointment_id = latest.pos_booking_id
+					WHERE latest.status = 'cancelled'
+					  AND latest.pos_booking_id <> ''
+					  AND appt.status = 'cancelled'
+				) AS test_booking_cancelled
+			FROM salons s
+			WHERE s.id = $1
+			  AND s.owner_user_id = $2
+		`, salonID, ownerUserID).Scan(
 		&readiness.AIEnabled,
 		&readiness.SquareConnected,
 		&readiness.SquareSynced,
 		&readiness.ServiceCount,
 		&readiness.StaffCount,
 		&readiness.BusinessHoursCount,
+		&readiness.TestBookingCancelled,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -103,12 +121,13 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 	}
 
 	readiness.Checks = []ReadinessCheck{
-		{Key: "enable_ai_booking", Label: "Enable AI booking", Complete: readiness.AIEnabled, Message: incompleteReadinessMessage(readiness.AIEnabled, "AI booking is disabled for this salon.")},
 		{Key: "connect_square", Label: "Connect Square Appointments", Complete: readiness.SquareConnected, Message: incompleteReadinessMessage(readiness.SquareConnected, "Square Appointments is not connected with a selected location.")},
 		{Key: "sync_square", Label: "Sync Square calendar", Complete: readiness.SquareSynced, Message: incompleteReadinessMessage(readiness.SquareSynced, "Square Appointments services and staff have not been synced.")},
 		{Key: "bookable_services", Label: "AI-bookable services", Complete: readiness.ServiceCount > 0, Message: incompleteReadinessMessage(readiness.ServiceCount > 0, "No active AI-bookable service is synced from Square.")},
 		{Key: "bookable_staff", Label: "AI-bookable staff", Complete: readiness.StaffCount > 0, Message: incompleteReadinessMessage(readiness.StaffCount > 0, "No active AI-bookable staff member is synced from Square.")},
 		{Key: "business_hours", Label: "Business hours", Complete: readiness.BusinessHoursCount > 0, Message: incompleteReadinessMessage(readiness.BusinessHoursCount > 0, "Salon business hours are not configured.")},
+		{Key: "cancel_test_booking", Label: "Cancel Square test booking", Complete: readiness.TestBookingCancelled, Message: incompleteReadinessMessage(readiness.TestBookingCancelled, "The latest Square test booking has not been created and cancelled.")},
+		{Key: "enable_ai_booking", Label: "Enable AI booking", Complete: readiness.AIEnabled, Message: incompleteReadinessMessage(readiness.AIEnabled, "AI booking is disabled for this salon.")},
 	}
 	readiness.Ready = true
 	for _, check := range readiness.Checks {

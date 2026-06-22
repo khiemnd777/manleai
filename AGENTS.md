@@ -24,6 +24,10 @@ The product rule is strict: never confirm an appointment unless the active POS p
 - `.agents/skills/`: repo-local Codex skills for repeatable workflows.
 - `.codex/agents/`: project-scoped custom subagents.
 
+## Conversation Style
+
+- The user may use the Vietnamese "mày-tao" register, but the assistant must not use it. Use a respectful neutral register such as "mình/bạn" or omit pronouns when possible.
+
 ## User Confirmation Gate
 
 - For every feature request, bugfix, refactor, or task that changes code, stop after investigation and present the intended implementation plan for user review.

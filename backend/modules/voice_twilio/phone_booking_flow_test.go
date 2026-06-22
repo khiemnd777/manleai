@@ -123,11 +123,12 @@ func TestSignedTwilioWebhookDrivesPhoneBookingFlowThroughConversation(t *testing
 }
 
 type phoneFlowConversationStore struct {
-	cfg       conversation.RuntimeConfig
-	session   conversation.Session
-	services  []conversation.ServiceOption
-	staff     []conversation.StaffOption
-	knowledge []conversation.KnowledgeSnippet
+	cfg         conversation.RuntimeConfig
+	session     conversation.Session
+	services    []conversation.ServiceOption
+	staff       []conversation.StaffOption
+	activeStaff []conversation.StaffOption
+	knowledge   []conversation.KnowledgeSnippet
 }
 
 func newPhoneFlowConversationStore() *phoneFlowConversationStore {
@@ -146,8 +147,9 @@ func newPhoneFlowConversationStore() *phoneFlowConversationStore {
 			PriceFrom:       35,
 		}},
 		staff: []conversation.StaffOption{{
-			ID:   "staff_1",
-			Name: "Mai Nguyen",
+			ID:         "staff_1",
+			Name:       "Mai Nguyen",
+			AIBookable: true,
 		}},
 	}
 }
@@ -201,6 +203,17 @@ func (f *phoneFlowConversationStore) ListBookableServices(ctx context.Context, s
 
 func (f *phoneFlowConversationStore) ListBookableStaff(ctx context.Context, salonID string) ([]conversation.StaffOption, error) {
 	return f.staff, nil
+}
+
+func (f *phoneFlowConversationStore) ListActiveStaff(ctx context.Context, salonID string) ([]conversation.StaffOption, error) {
+	if f.activeStaff != nil {
+		return f.activeStaff, nil
+	}
+	staff := append([]conversation.StaffOption(nil), f.staff...)
+	for i := range staff {
+		staff[i].AIBookable = true
+	}
+	return staff, nil
 }
 
 func (f *phoneFlowConversationStore) ListActiveKnowledge(ctx context.Context, salonID string) ([]conversation.KnowledgeSnippet, error) {

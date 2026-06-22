@@ -413,6 +413,53 @@ func TestMessageCreatesHandoffForHumanRequest(t *testing.T) {
 	}
 }
 
+func TestMessageCreatesHandoffForKnownNonBookableStaff(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{{
+		ID:              "service_gel",
+		Name:            "Gel Manicure",
+		DurationMinutes: 45,
+		PriceFrom:       38,
+	}}
+	store.staff = []StaffOption{{
+		ID:         "staff_mai",
+		Name:       "Mai Nguyen",
+		AIBookable: true,
+	}}
+	store.activeStaff = []StaffOption{
+		{ID: "staff_mai", Name: "Mai Nguyen", AIBookable: true},
+		{ID: "staff_jenny", Name: "Jenny Le", AIBookable: false},
+	}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I want Gel Manicure with Jenny tomorrow.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 {
+		t.Fatalf("availability calls = %d, want 0 for non-bookable staff", bookingTool.availabilityCalls)
+	}
+	if bookingTool.calls != 0 {
+		t.Fatalf("booking calls = %d, want 0 for non-bookable staff", bookingTool.calls)
+	}
+	if session.Status != StatusHandoff || session.Outcome != OutcomeHandoffRequested {
+		t.Fatalf("session status/outcome = %s/%s, want handoff/handoff_requested", session.Status, session.Outcome)
+	}
+	if store.lastTurn.Handoff == nil || store.lastTurn.Handoff.Reason != HandoffReasonBookingUnavailable {
+		t.Fatalf("handoff = %#v, want booking_unavailable", store.lastTurn.Handoff)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Jenny Le") || !strings.Contains(store.lastTurn.AIMessage, "not enabled for AI booking") {
+		t.Fatalf("reply should name non-bookable staff and explain owner review: %s", store.lastTurn.AIMessage)
+	}
+	if strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "confirmed") && !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "not a confirmed") {
+		t.Fatalf("reply must not imply confirmation: %s", store.lastTurn.AIMessage)
+	}
+}
+
 func TestMessageAnswersKnowledgeQuestionWithoutBooking(t *testing.T) {
 	store := newFakeConversationStore()
 	store.knowledge = []KnowledgeSnippet{{
@@ -458,6 +505,18 @@ func TestKnowledgeAnswerCannotConfirmAppointment(t *testing.T) {
 	}
 }
 
+func TestBookingSafetyEnabledRequiresCancelledTestBooking(t *testing.T) {
+	if bookingSafetyEnabled(true, false) {
+		t.Fatalf("AI booking should remain disabled without a cancelled Square test booking")
+	}
+	if !bookingSafetyEnabled(true, true) {
+		t.Fatalf("AI booking should be enabled after Square test booking cancellation")
+	}
+	if bookingSafetyEnabled(false, true) {
+		t.Fatalf("AI booking should remain disabled when the salon flag is false")
+	}
+}
+
 func fixedNow() time.Time {
 	return time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
 }
@@ -471,12 +530,13 @@ func defaultAvailabilityStartTime() time.Time {
 }
 
 type fakeConversationStore struct {
-	cfg       RuntimeConfig
-	session   Session
-	services  []ServiceOption
-	staff     []StaffOption
-	knowledge []KnowledgeSnippet
-	lastTurn  TurnRecord
+	cfg         RuntimeConfig
+	session     Session
+	services    []ServiceOption
+	staff       []StaffOption
+	activeStaff []StaffOption
+	knowledge   []KnowledgeSnippet
+	lastTurn    TurnRecord
 }
 
 func newFakeConversationStore() *fakeConversationStore {
@@ -503,8 +563,9 @@ func newFakeConversationStore() *fakeConversationStore {
 			PriceFrom:       35,
 		}},
 		staff: []StaffOption{{
-			ID:   "staff_1",
-			Name: "Mai Nguyen",
+			ID:         "staff_1",
+			Name:       "Mai Nguyen",
+			AIBookable: true,
 		}},
 	}
 }
@@ -532,6 +593,17 @@ func (f *fakeConversationStore) ListBookableServices(ctx context.Context, salonI
 
 func (f *fakeConversationStore) ListBookableStaff(ctx context.Context, salonID string) ([]StaffOption, error) {
 	return f.staff, nil
+}
+
+func (f *fakeConversationStore) ListActiveStaff(ctx context.Context, salonID string) ([]StaffOption, error) {
+	if f.activeStaff != nil {
+		return f.activeStaff, nil
+	}
+	staff := append([]StaffOption(nil), f.staff...)
+	for i := range staff {
+		staff[i].AIBookable = true
+	}
+	return staff, nil
 }
 
 func (f *fakeConversationStore) ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error) {

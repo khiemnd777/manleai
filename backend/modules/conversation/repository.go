@@ -20,20 +20,40 @@ func NewRepository(db *sql.DB) *Repository {
 
 func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, ownerUserID string) (*RuntimeConfig, error) {
 	var cfg RuntimeConfig
+	var rawAIEnabled bool
+	var testBookingCancelled bool
 	err := r.db.QueryRowContext(ctx, `
 		SELECT s.name, s.timezone, COALESCE(s.handoff_phone, ''), s.ai_enabled,
-		       COALESCE(ss.handoff_enabled, true), COALESCE(ss.ai_greeting, '')
+		       COALESCE(ss.handoff_enabled, true), COALESCE(ss.ai_greeting, ''),
+		       EXISTS (
+		           SELECT 1
+		           FROM (
+		               SELECT ba.status, ba.pos_provider, COALESCE(ba.pos_booking_id, '') AS pos_booking_id
+		               FROM booking_attempts ba
+		               WHERE ba.salon_id = s.id
+		                 AND ba.source = $3
+		               ORDER BY ba.created_at DESC
+		               LIMIT 1
+		           ) latest
+		           JOIN appointments appt ON appt.salon_id = s.id
+		                                  AND appt.pos_provider = latest.pos_provider
+		                                  AND appt.pos_appointment_id = latest.pos_booking_id
+		           WHERE latest.status = 'cancelled'
+		             AND latest.pos_booking_id <> ''
+		             AND appt.status = 'cancelled'
+		       )
 		FROM salons s
 		LEFT JOIN salon_settings ss ON ss.salon_id = s.id
 		WHERE s.id = $1
 		  AND s.owner_user_id = $2
-	`, salonID, ownerUserID).Scan(
+	`, salonID, ownerUserID, booking.SourceSquareTestBooking).Scan(
 		&cfg.SalonName,
 		&cfg.Timezone,
 		&cfg.HandoffPhone,
-		&cfg.AIEnabled,
+		&rawAIEnabled,
 		&cfg.HandoffEnabled,
 		&cfg.AIGreeting,
+		&testBookingCancelled,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -41,6 +61,7 @@ func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, owner
 	if err != nil {
 		return nil, err
 	}
+	cfg.AIEnabled = bookingSafetyEnabled(rawAIEnabled, testBookingCancelled)
 	return &cfg, nil
 }
 
@@ -144,7 +165,7 @@ func (r *Repository) ListBookableServices(ctx context.Context, salonID string) (
 
 func (r *Repository) ListBookableStaff(ctx context.Context, salonID string) ([]StaffOption, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id::text, name
+		SELECT id::text, name, ai_bookable
 		FROM staff
 		WHERE salon_id = $1
 		  AND active = true
@@ -159,7 +180,31 @@ func (r *Repository) ListBookableStaff(ctx context.Context, salonID string) ([]S
 	items := make([]StaffOption, 0)
 	for rows.Next() {
 		var item StaffOption
-		if err := rows.Scan(&item.ID, &item.Name); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.AIBookable); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *Repository) ListActiveStaff(ctx context.Context, salonID string) ([]StaffOption, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id::text, name, ai_bookable
+		FROM staff
+		WHERE salon_id = $1
+		  AND active = true
+		ORDER BY ai_bookable DESC, name ASC
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]StaffOption, 0)
+	for rows.Next() {
+		var item StaffOption
+		if err := rows.Scan(&item.ID, &item.Name, &item.AIBookable); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
