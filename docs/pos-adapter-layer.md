@@ -1,6 +1,38 @@
 # POS Adapter Layer
 
-The project is POS-first, but backend booking workflow state is the base. Internal booking behavior must never depend directly on Square, Vagaro, GlossGenius, Fresha, Booksy, Mindbody, Boulevard, Zenoti, or any other provider payload. POS adapters are outbound writers/readers behind the provider-neutral contract.
+The project is POS-first, but ManleAI owns canonical salon operational data.
+POS providers are external projections and booking execution layers. Internal
+booking behavior must never depend directly on Square, Vagaro, GlossGenius,
+Fresha, Booksy, Mindbody, Boulevard, Zenoti, or any other provider payload. POS
+adapters are outbound writers/readers behind the provider-neutral contract.
+
+## Ownership Model
+
+ManleAI-owned canonical records include services, staff, customers, AI controls,
+owner workflow state, fallback pending requests, logs, and training data. The
+active POS provider owns real-time availability and booking execution.
+
+Provider IDs are mappings, not primary product identity. The target model stores
+those mappings in `pos_entity_links` with:
+
+```txt
+entity_type: service | staff | customer
+entity_id: ManleAI canonical record ID
+provider: square | another implemented provider
+provider_entity_id: provider-side ID
+sync_status: local_only | syncing | synced | sync_failed | unmapped | archived
+```
+
+During the migration, existing `services.pos_service_id` and
+`staff.pos_staff_id` fields are legacy provider links for Square-imported data.
+New provider-facing work should converge on separate link records rather than
+treating provider IDs as the service, staff, or customer identity.
+
+Booking eligibility depends on both canonical state and the active-provider
+link. A local-only, unmapped, archived, or sync-failed record may be visible to
+owners, but it must not be used for POS availability or POS booking. `AI
+bookable` can only be enabled for an active canonical record with a valid link
+for the active POS provider.
 
 ## Interface
 
@@ -35,7 +67,9 @@ type POSProvider interface {
 - Catalog service normalization
 - Catalog service version persistence for future Square booking payloads
 - Team member normalization
-- Sync into internal `services` and `staff`
+- Import/projection into internal `services` and `staff`
+- Legacy Square provider link persistence on service/staff rows until
+  `pos_entity_links` is introduced
 - Customer search/create
 - Availability search
 - Create booking
@@ -47,7 +81,9 @@ The provider-neutral booking service creates backend `booking_attempts` before o
 
 ## Adding Future Providers
 
-Add a new package such as `modules/pos_vagaro`.
+Add a new package such as `modules/pos_vagaro` only when that provider is a real
+implementation. Future provider names in docs are architecture targets, not
+shipped support.
 
 The provider must:
 

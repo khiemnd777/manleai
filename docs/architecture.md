@@ -42,6 +42,19 @@ types                API response types
 
 ## Core Boundary
 
+ManleAI is the system of record for salon operational data: canonical services,
+staff, customers, AI controls, owner workflow state, fallback pending requests,
+logs, and training data. POS providers are external projections and booking
+execution layers. The active POS provider owns real availability and provider
+booking execution.
+
+Provider IDs are mappings, not primary product identity. Square Appointments is
+the first real POS integration; future POS names are architecture targets until
+implemented. Current `services` and `staff` rows still carry Square-shaped
+provider fields such as `pos_provider`, `pos_service_id`, and `pos_staff_id`.
+The canonical ownership migration should move those mappings into provider link
+records while preserving the POS-first booking boundary.
+
 Correct dependency direction:
 
 ```txt
@@ -64,6 +77,17 @@ The next Milestone 7 slices should deepen owner approval loops without changing 
 
 ## Data Ownership
 
-SQL files under `backend/migrations` are the current database source of truth. The API startup migrator applies them once and records checksums in `app_schema_migrations`. Ent schema files mirror the table structure so generated clients can be introduced without changing the domain boundaries.
+SQL files under `backend/migrations` are the current database source of truth.
+The API startup migrator applies them once and records checksums in
+`app_schema_migrations`. Ent schema files mirror the table structure so
+generated clients can be introduced without changing the domain boundaries.
 
-Tenant isolation is enforced by owner-scoped queries in repositories and by salon ownership checks before POS actions.
+Domain ownership is separate from provider execution. ManleAI owns canonical
+salon records and owner workflow state; the active POS owns provider-side
+availability, booking IDs, booking versions, and the success or failure of
+booking execution. A confirmed, rescheduled, or cancelled appointment must never
+be recorded unless the active `POSProvider` returns the required successful
+provider booking metadata.
+
+Tenant isolation is enforced by owner-scoped queries in repositories and by
+salon ownership checks before POS actions.

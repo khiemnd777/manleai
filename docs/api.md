@@ -8,6 +8,42 @@ All endpoints except login, refresh, logout, health, the Square OAuth callback, 
 Authorization: Bearer <access_token>
 ```
 
+## Canonical Entity Semantics
+
+Services, staff, and customers are moving to ManleAI-owned canonical records.
+The active POS provider remains the authority for real availability and booking
+execution. API clients should treat ManleAI `id` values as product identity and
+provider IDs as mappings used behind the provider-neutral booking contract.
+
+During the migration, some endpoints still expose Square-imported service and
+staff records because Square Appointments is the first real POS integration.
+Future API responses may include provider link and sync fields such as:
+
+```json
+{
+  "sync_status": "synced",
+  "pos_provider": "square",
+  "pos_linked": true,
+  "last_synced_at": "2026-06-10T15:00:00Z",
+  "sync_error": ""
+}
+```
+
+Sync status meanings:
+
+- `local_only`: ManleAI record exists without an active-provider mapping.
+- `syncing`: a provider sync or projection operation is in progress.
+- `synced`: canonical record has a valid active-provider mapping.
+- `sync_failed`: the latest provider sync failed and booking must be gated.
+- `unmapped`: record needs an owner or sync workflow to link it to the provider.
+- `archived`: record is retained for history but unavailable for new booking.
+
+Local-only, unmapped, sync-failed, or archived services/staff may be visible in
+management views after the canonical migration, but they must not be used for
+availability checks or booking attempts. Confirmed, rescheduled, or cancelled
+appointment responses still require active POS provider success and required
+provider booking metadata.
+
 ## Auth
 
 `POST /api/auth/login`
@@ -72,7 +108,11 @@ Returns salons owned by the authenticated user.
 
 `GET /api/salons/:id/services`
 
-Returns synced provider-neutral services for dashboard tables.
+Current behavior: returns Square-imported provider-neutral services for
+dashboard tables. Future canonical behavior: returns ManleAI-owned services with
+provider link/sync metadata when available. A service without a valid
+active-provider link is manageable by the owner but not eligible for
+availability or booking.
 
 `PATCH /api/salons/:id/services/:service_id/ai-bookable`
 
@@ -82,11 +122,18 @@ Returns synced provider-neutral services for dashboard tables.
 }
 ```
 
-Updates only the internal AI booking eligibility flag for a synced service. Square service records are not edited. Inactive Square services cannot be enabled for AI booking.
+Updates only the internal AI booking eligibility flag for a service. Square
+service records are not edited. A service cannot be enabled for AI booking when
+it is inactive, archived, local-only, unmapped, sync-failed, or missing a valid
+link for the active POS provider.
 
 `GET /api/salons/:id/staff`
 
-Returns synced provider-neutral staff for dashboard tables.
+Current behavior: returns Square-imported provider-neutral staff for dashboard
+tables. Future canonical behavior: returns ManleAI-owned staff records with
+provider link/sync metadata when available. Staff without a valid
+active-provider link are manageable by the owner but not eligible for
+availability or booking.
 
 `PATCH /api/salons/:id/staff/:staff_id/ai-bookable`
 
@@ -96,11 +143,23 @@ Returns synced provider-neutral staff for dashboard tables.
 }
 ```
 
-Updates only the internal AI booking eligibility flag for a synced staff member. Square staff records are not edited. Inactive Square staff cannot be enabled for AI booking.
+Updates only the internal AI booking eligibility flag for a staff member. Square
+staff records are not edited. A staff member cannot be enabled for AI booking
+when inactive, archived, local-only, unmapped, sync-failed, or missing a valid
+link for the active POS provider.
 
 `POST /api/salons/:id/availability`
 
-Returns provider-neutral available booking slots from the active POS provider for one or more AI-bookable services and optional AI-bookable staff members. Use `segments` for multi-service booking; the legacy `service_id` and `staff_id` fields remain supported for single-service booking. `staff_selection_mode` is either `specific` or `anyone`; `anyone` means the customer did not request a named technician. Results are filtered to the salon's configured business hours in the salon timezone. This endpoint does not create a booking attempt or confirm an appointment.
+Returns provider-neutral available booking slots from the active POS provider
+for one or more AI-bookable services and optional AI-bookable staff members. Use
+`segments` for multi-service booking; the legacy `service_id` and `staff_id`
+fields remain supported for single-service booking. As canonical service/staff
+ownership lands, these IDs are ManleAI canonical IDs that must resolve through a
+valid active-provider link before the POS adapter is called.
+`staff_selection_mode` is either `specific` or `anyone`; `anyone` means the
+customer did not request a named technician. Results are filtered to the salon's
+configured business hours in the salon timezone. This endpoint does not create a
+booking attempt or confirm an appointment.
 
 ```json
 {
@@ -165,7 +224,11 @@ Returns:
 
 `GET /api/salons/:id/customers`
 
-Returns an owner-scoped operational customer list aggregated from internal appointments, booking attempts, call sessions, and handoff requests. This is not a full Square customer directory sync.
+Current behavior: returns an owner-scoped operational customer list aggregated
+from internal appointments, booking attempts, call sessions, and handoff
+requests. This is not a full Square customer directory sync. Future canonical
+behavior: customers become ManleAI-owned records with optional POS customer
+links used only when the active provider requires them for booking.
 
 ```json
 {
@@ -266,7 +329,19 @@ Returns booking attempts, including transient `pos_pending` records and `fallbac
 }
 ```
 
-Creates a backend booking attempt before calling the active `POSProvider`. For multi-service booking, each segment is resolved to provider-neutral service/staff records and persisted in `booking_attempt_segments`; confirmed appointments snapshot the same ordered segments in `appointment_services`. `staff_selection_mode=anyone` records that the customer did not request a named technician; the backend still stores the POS-compatible staff assignment used for the booking attempt. Returns `201` with status `confirmed` only when the POS provider returns a POS booking ID and booking version. Returns `202` with status `fallback_pending` when the POS provider fails, times out, or does not return required booking metadata.
+Creates a backend booking attempt before calling the active `POSProvider`. For
+multi-service booking, each segment is resolved to provider-neutral
+service/staff records and persisted in `booking_attempt_segments`; confirmed
+appointments snapshot the same ordered segments in `appointment_services`. As
+canonical service/staff ownership lands, booking resolution must translate
+ManleAI canonical IDs through valid active-provider links before calling the POS
+adapter. Local-only, unmapped, sync-failed, or archived records must not be
+booked. `staff_selection_mode=anyone` records that the customer did not request
+a named technician; the backend still stores the POS-compatible staff assignment
+used for the booking attempt. Returns `201` with status `confirmed` only when
+the POS provider returns a POS booking ID and booking version. Returns `202`
+with status `fallback_pending` when the POS provider fails, times out, or does
+not return required booking metadata.
 
 ## Conversation Sessions
 
