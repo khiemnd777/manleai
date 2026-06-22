@@ -10,14 +10,14 @@ Authorization: Bearer <access_token>
 
 ## Canonical Entity Semantics
 
-Services, staff, and customers are moving to ManleAI-owned canonical records.
+Services, staff, and customers are ManleAI-owned canonical records.
 The active POS provider remains the authority for real availability and booking
 execution. API clients should treat ManleAI `id` values as product identity and
 provider IDs as mappings used behind the provider-neutral booking contract.
 
-During the migration, some endpoints still expose Square-imported service and
-staff records because Square Appointments is the first real POS integration.
-Future API responses may include provider link and sync fields such as:
+Some endpoints still expose legacy Square provider fields alongside canonical
+IDs because Square Appointments is the first real POS integration. API
+responses include provider link and sync fields such as:
 
 ```json
 {
@@ -108,11 +108,99 @@ Returns salons owned by the authenticated user.
 
 `GET /api/salons/:id/services`
 
-Current behavior: returns Square-imported provider-neutral services for
-dashboard tables. Future canonical behavior: returns ManleAI-owned services with
-provider link/sync metadata when available. A service without a valid
-active-provider link is manageable by the owner but not eligible for
-availability or booking.
+Returns ManleAI-owned services for dashboard tables, including Square-imported
+services and local-only services. A service without a valid active-provider link
+is manageable by the owner but not eligible for availability or booking.
+
+```json
+{
+  "services": [
+    {
+      "id": "...",
+      "salon_id": "...",
+      "pos_provider": "square",
+      "pos_service_id": "SQUARE_SERVICE_VARIATION_ID",
+      "pos_service_version": 123,
+      "name": "Classic Manicure",
+      "description": "Trim, shape, cuticle care, and polish.",
+      "ai_description": "Classic manicure",
+      "duration_minutes": 45,
+      "price_from": 35,
+      "price_display": "$35.00",
+      "ai_bookable": true,
+      "active": true,
+      "sync_status": "synced",
+      "last_synced_at": "2026-06-10T15:00:00Z",
+      "sync_error": "",
+      "source": "imported",
+      "pos_linked": true
+    }
+  ]
+}
+```
+
+`POST /api/salons/:id/services`
+
+Creates a local ManleAI service. Local-only services are visible in the Services
+dashboard but cannot be used for availability or booking until an active POS
+provider link exists. The API always creates local services with
+`ai_bookable=false`, `sync_status=local_only`, and `pos_linked=false`.
+If the active provider later declares service write support, the mutation can
+queue a `pos_sync_jobs` outbox job and move through `syncing`, `synced`, or
+`sync_failed`. Square Appointments service writes are not enabled in the current
+slice.
+
+```json
+{
+  "name": "Gel Removal",
+  "description": "Removal service for existing gel polish.",
+  "ai_description": "Gel polish removal",
+  "duration_minutes": 20,
+  "price_from": 10,
+  "active": true
+}
+```
+
+Returns `201`:
+
+```json
+{
+  "service": {
+    "id": "...",
+    "name": "Gel Removal",
+    "duration_minutes": 20,
+    "price_from": 10,
+    "ai_bookable": false,
+    "active": true,
+    "sync_status": "local_only",
+    "source": "local",
+    "pos_linked": false
+  }
+}
+```
+
+`PUT /api/salons/:id/services/:service_id`
+
+Updates a non-archived service's canonical ManleAI fields. This does not edit
+Square Appointments records or push changes to a POS provider. If `active=false`
+is saved, `ai_bookable` is also disabled.
+
+```json
+{
+  "name": "Classic Manicure",
+  "description": "Trim, shape, cuticle care, and polish.",
+  "ai_description": "Classic manicure",
+  "duration_minutes": 45,
+  "price_from": 35,
+  "active": true
+}
+```
+
+`POST /api/salons/:id/services/:service_id/archive`
+
+Soft-archives a service by setting `active=false`, `ai_bookable=false`,
+`sync_status=archived`, and `archived_at`. Archived services remain visible for
+history but cannot be used for availability or booking.
 
 `PATCH /api/salons/:id/services/:service_id/ai-bookable`
 
@@ -129,11 +217,92 @@ link for the active POS provider.
 
 `GET /api/salons/:id/staff`
 
-Current behavior: returns Square-imported provider-neutral staff for dashboard
-tables. Future canonical behavior: returns ManleAI-owned staff records with
-provider link/sync metadata when available. Staff without a valid
-active-provider link are manageable by the owner but not eligible for
+Returns ManleAI-owned staff records for dashboard tables, including
+Square-imported staff and local-only staff. A staff member without a valid
+active-provider link is manageable by the owner but not eligible for
 availability or booking.
+
+```json
+{
+  "staff": [
+    {
+      "id": "...",
+      "salon_id": "...",
+      "pos_provider": "square",
+      "pos_staff_id": "SQUARE_TEAM_MEMBER_ID",
+      "name": "Mai Nguyen",
+      "phone": "+13125550101",
+      "email": "mai@example.com",
+      "ai_bookable": true,
+      "active": true,
+      "sync_status": "synced",
+      "last_synced_at": "2026-06-10T15:00:00Z",
+      "sync_error": "",
+      "source": "imported",
+      "pos_linked": true
+    }
+  ]
+}
+```
+
+`POST /api/salons/:id/staff`
+
+Creates a local ManleAI staff member. Local-only staff are visible in the Staff
+dashboard but cannot be used for availability or booking until an active POS
+provider link exists. The API always creates local staff with
+`ai_bookable=false`, `sync_status=local_only`, and `pos_linked=false`.
+If the active provider later declares staff write support, the mutation can
+queue a `pos_sync_jobs` outbox job and move through `syncing`, `synced`, or
+`sync_failed`. Square Appointments staff writes are not enabled in the current
+slice.
+
+```json
+{
+  "name": "Linh Tran",
+  "phone": "+13125550102",
+  "email": "linh@example.com",
+  "active": true
+}
+```
+
+Returns `201`:
+
+```json
+{
+  "staff_member": {
+    "id": "...",
+    "name": "Linh Tran",
+    "phone": "+13125550102",
+    "email": "linh@example.com",
+    "ai_bookable": false,
+    "active": true,
+    "sync_status": "local_only",
+    "source": "local",
+    "pos_linked": false
+  }
+}
+```
+
+`PUT /api/salons/:id/staff/:staff_id`
+
+Updates a non-archived staff member's canonical ManleAI fields. This does not
+edit Square Appointments records or push changes to a POS provider. If
+`active=false` is saved, `ai_bookable` is also disabled.
+
+```json
+{
+  "name": "Mai Nguyen",
+  "phone": "+13125550101",
+  "email": "mai@example.com",
+  "active": true
+}
+```
+
+`POST /api/salons/:id/staff/:staff_id/archive`
+
+Soft-archives a staff member by setting `active=false`, `ai_bookable=false`,
+`sync_status=archived`, and `archived_at`. Archived staff remain visible for
+history but cannot be used for availability or booking.
 
 `PATCH /api/salons/:id/staff/:staff_id/ai-bookable`
 
@@ -153,9 +322,9 @@ link for the active POS provider.
 Returns provider-neutral available booking slots from the active POS provider
 for one or more AI-bookable services and optional AI-bookable staff members. Use
 `segments` for multi-service booking; the legacy `service_id` and `staff_id`
-fields remain supported for single-service booking. As canonical service/staff
-ownership lands, these IDs are ManleAI canonical IDs that must resolve through a
-valid active-provider link before the POS adapter is called.
+fields remain supported for single-service booking. These IDs are ManleAI
+canonical IDs that must resolve through a valid active-provider link before the
+POS adapter is called.
 `staff_selection_mode` is either `specific` or `anyone`; `anyone` means the
 customer did not request a named technician. Results are filtered to the salon's
 configured business hours in the salon timezone. This endpoint does not create a
@@ -224,20 +393,30 @@ Returns:
 
 `GET /api/salons/:id/customers`
 
-Current behavior: returns an owner-scoped operational customer list aggregated
-from internal appointments, booking attempts, call sessions, and handoff
-requests. This is not a full Square customer directory sync. Future canonical
-behavior: customers become ManleAI-owned records with optional POS customer
-links used only when the active provider requires them for booking.
+Returns ManleAI-owned customer records plus owner-scoped activity from internal
+appointments, booking attempts, call sessions, and handoff requests. This is not
+a full Square customer directory sync. A row with no `id` is activity-only and
+can be converted into a local customer record by the owner. POS customer links
+are optional mappings used when the active provider requires a customer ID for
+booking.
 
 ```json
 {
   "customers": [
     {
+      "id": "...",
+      "salon_id": "...",
       "key": "phone:+13125550101",
       "name": "Linh Tran",
       "phone": "+13125550101",
       "email": "linh@example.com",
+      "notes": "Prefers quiet appointments.",
+      "active": true,
+      "sync_status": "synced",
+      "last_synced_at": "2026-06-10T15:00:00Z",
+      "sync_error": "",
+      "source": "local",
+      "pos_linked": true,
       "last_activity_at": "2026-06-10T15:00:00Z",
       "last_activity_source": "appointment",
       "last_outcome": "confirmed",
@@ -259,6 +438,35 @@ links used only when the active provider requires them for booking.
   }
 }
 ```
+
+`POST /api/salons/:id/customers`
+
+Creates a local ManleAI customer. The request must include `name` and at least
+one contact field. Active, non-archived customers are deduped by normalized
+phone and normalized email per salon.
+
+```json
+{
+  "name": "Linh Tran",
+  "phone": "+13125550101",
+  "email": "linh@example.com",
+  "notes": "Prefers quiet appointments.",
+  "active": true
+}
+```
+
+Returns `201` with `{ "customer": { ... } }`. Duplicate active phone or email
+returns `409`.
+
+`PUT /api/salons/:id/customers/:customer_id`
+
+Updates a non-archived local customer record. This does not edit Square
+Appointments records or expose provider payloads.
+
+`POST /api/salons/:id/customers/:customer_id/archive`
+
+Soft-archives a customer by setting `active=false`, `sync_status=archived`, and
+`archived_at`. Existing activity remains visible in customer history.
 
 `GET /api/salons/:id/customers/search?phone=<phone>&provider=square`
 
@@ -332,9 +540,9 @@ Returns booking attempts, including transient `pos_pending` records and `fallbac
 Creates a backend booking attempt before calling the active `POSProvider`. For
 multi-service booking, each segment is resolved to provider-neutral
 service/staff records and persisted in `booking_attempt_segments`; confirmed
-appointments snapshot the same ordered segments in `appointment_services`. As
-canonical service/staff ownership lands, booking resolution must translate
-ManleAI canonical IDs through valid active-provider links before calling the POS
+appointments snapshot the same ordered segments in `appointment_services`.
+Booking resolution translates ManleAI canonical IDs through valid
+active-provider links before calling the POS
 adapter. Local-only, unmapped, sync-failed, or archived records must not be
 booked. `staff_selection_mode=anyone` records that the customer did not request
 a named technician; the backend still stores the POS-compatible staff assignment
@@ -453,7 +661,7 @@ Returns a read-only preview that uses active salon knowledge without creating a 
 
 `GET /api/salons/:id/voice/status`
 
-Returns owner-scoped live voice, phone booking, and external AI provider readiness without exposing Twilio, OpenAI, or POS token secrets. `ready` means Twilio can route live phone webhooks; `phone_booking_ready` means the phone path also has the booking prerequisites needed to offer available Square Appointments slots and attempt POS-first confirmation.
+Returns owner-scoped live voice, phone booking, and external AI provider readiness without exposing Twilio, OpenAI, or POS token secrets. `ready` means Twilio can route live phone webhooks; `phone_booking_ready` means the phone path also has the booking prerequisites needed to offer available slots from the active POS provider and attempt POS-first confirmation.
 
 ```json
 {
@@ -470,6 +678,9 @@ Returns owner-scoped live voice, phone booking, and external AI provider readine
   "booking": {
     "ready": true,
     "ai_enabled": true,
+    "active_provider": "square",
+    "provider_connected": true,
+    "provider_synced": true,
     "square_connected": true,
     "square_synced": true,
     "test_booking_cancelled": true,
@@ -557,6 +768,168 @@ RecordingUrl
 Public short-lived audio output endpoint for Twilio `<Play>` responses. IDs are unguessable runtime UUIDs, expire quickly, and never expose POS tokens or provider secrets.
 
 The phone path never confirms an appointment unless the booking service returns a POS-confirmed booking attempt with a POS booking ID and appointment.
+
+## POS Provider Switch Readiness
+
+`GET /api/salons/:id/pos/provider-switch-readiness`
+
+Returns the active POS provider, installed adapters, unavailable adapter gate,
+provider mapping counts, and readiness checks. This endpoint is read-only in
+the current pilot. It does not activate a new provider or create fake provider
+support.
+
+```json
+{
+  "salon_id": "...",
+  "active_provider": "square",
+  "active_provider_label": "Square Appointments",
+  "installed_providers": [
+    {
+      "provider": "square",
+      "label": "Square Appointments",
+      "installed": true,
+      "active": true,
+      "status": "active",
+      "capabilities": {
+        "service_upsert": false,
+        "service_archive": false,
+        "staff_upsert": false,
+        "staff_archive": false,
+        "customer_upsert": false
+      }
+    }
+  ],
+  "unavailable_providers": [
+    {
+      "provider": "",
+      "label": "No alternate POS adapter installed",
+      "installed": false,
+      "active": false,
+      "status": "disabled",
+      "blocked_reason": "Square Appointments is the only native POS integration in this pilot release."
+    }
+  ],
+  "mapping": {
+    "service_count": 4,
+    "staff_count": 3,
+    "customer_count": 12,
+    "bookable_service_count": 4,
+    "bookable_staff_count": 3,
+    "linked_service_count": 4,
+    "linked_staff_count": 3,
+    "linked_customer_count": 6,
+    "unmapped_service_count": 0,
+    "unmapped_staff_count": 0,
+    "sync_failed_count": 0
+  },
+  "checks": [
+    {"key": "active_provider", "label": "Active provider selected", "complete": true},
+    {"key": "alternate_adapter", "label": "Alternate provider adapter installed", "complete": false}
+  ],
+  "dry_run_booking_ready": true,
+  "can_start_switch": false,
+  "can_activate_provider": false,
+  "blocked_reason": "No alternate POS adapter is installed in this pilot deployment."
+}
+```
+
+`POST /api/salons/:id/pos/provider-switch-runs`
+
+Creates a provider switch run record for a requested target provider. If the
+target adapter is not installed, the run is persisted with `status=blocked` and
+no import/match work is started. If a real target adapter is installed in a
+future slice, the backend can populate service/staff/customer match candidates,
+but activation still remains disabled in this phase.
+
+```json
+{
+  "to_provider": "future_provider"
+}
+```
+
+Response:
+
+```json
+{
+  "run": {
+    "id": "...",
+    "salon_id": "...",
+    "from_provider": "square",
+    "to_provider": "future_provider",
+    "status": "blocked",
+    "blocked_reason": "The requested POS provider adapter is not installed in this deployment.",
+    "dry_run_ready": false,
+    "can_activate": false,
+    "match_summary": {
+      "total": 0,
+      "suggested": 0,
+      "unmatched": 0,
+      "conflicts": 0,
+      "confirmed": 0,
+      "skipped": 0
+    },
+    "matches": []
+  }
+}
+```
+
+`GET /api/salons/:id/pos/provider-switch-runs/latest`
+
+Returns the latest switch run for the salon, or `{"run": null}` when no run has
+been created.
+
+`GET /api/salons/:id/pos/provider-switch-runs/:run_id`
+
+Returns one owner-scoped switch run with its match summary and match rows.
+Match rows are provider-neutral and may include `service`, `staff`, or
+`customer` entities. There is intentionally no activation endpoint in the
+current pilot.
+
+`PATCH /api/salons/:id/pos/provider-switch-runs/:run_id/matches/:match_id`
+
+Updates one match review decision for an owner-scoped switch run. Allowed
+`match_status` values are `confirmed`, `unmatched`, and `skipped`. Confirming a
+match records the owner's review decision only; it does not create provider
+links, run a dry-run booking, or activate a provider.
+
+```json
+{
+  "match_status": "confirmed"
+}
+```
+
+Response:
+
+```json
+{
+  "run": {
+    "id": "...",
+    "status": "ready",
+    "can_activate": false,
+    "match_summary": {
+      "total": 1,
+      "suggested": 0,
+      "unmatched": 0,
+      "conflicts": 0,
+      "confirmed": 1,
+      "skipped": 0
+    },
+    "matches": [
+      {
+        "id": "...",
+        "entity_type": "service",
+        "canonical_entity_id": "...",
+        "canonical_name": "Classic Manicure",
+        "provider_entity_id": "...",
+        "provider_name": "Classic Manicure",
+        "match_status": "confirmed",
+        "match_confidence": 100,
+        "match_reason": "Owner confirmed this provider match."
+      }
+    ]
+  }
+}
+```
 
 ## Square
 

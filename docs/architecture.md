@@ -8,7 +8,7 @@ The backend is organized as:
 
 ```txt
 cmd/api              Fiber HTTP server
-cmd/worker           worker entrypoint for later async jobs
+cmd/worker           POS sync job worker entrypoint
 internal/config      environment config
 internal/database    PostgreSQL connection bootstrap and startup migrations
 internal/encryption  AES-GCM token encryption
@@ -18,7 +18,7 @@ modules/salon        salon profile, settings, business hours
 modules/pos          provider-neutral POS contracts and persistence
 modules/pos_square   Square adapter and Square integration routes
 modules/booking      booking attempts, appointments, and fallback pending safety
-modules/customer     provider-neutral customer activity read model and POS lookup facade
+modules/customer     canonical customer CRUD, activity read model, and POS lookup facade
 modules/conversation deterministic simulator sessions, transcripts, summaries, and handoffs
 modules/training     salon-authored knowledge base and owner corrections
 modules/voice        provider-neutral live voice runtime, status, routing, and webhook event audit
@@ -50,10 +50,26 @@ booking execution.
 
 Provider IDs are mappings, not primary product identity. Square Appointments is
 the first real POS integration; future POS names are architecture targets until
-implemented. Current `services` and `staff` rows still carry Square-shaped
-provider fields such as `pos_provider`, `pos_service_id`, and `pos_staff_id`.
-The canonical ownership migration should move those mappings into provider link
-records while preserving the POS-first booking boundary.
+implemented. `salons.active_pos_provider` records the provider that booking,
+availability, service/staff management, and phone readiness should evaluate.
+Current `services` and `staff` rows still carry legacy provider fields such as
+`pos_provider`, `pos_service_id`, and `pos_staff_id`. Provider links in
+`pos_entity_links` are the durable mapping model; old provider links are kept
+for history and compatibility while preserving the POS-first booking boundary.
+
+Local service/staff/customer writes may be projected to a POS provider only
+through capability-gated `pos_sync_jobs`. Unsupported provider writes remain
+local and must not be marked as synced. The worker processes supported jobs,
+updates `pos_entity_links`, records `pos_sync_logs`, and logs provider failures
+to `pos_errors`.
+
+Provider switching is intentionally gated. The Integrations dashboard exposes
+provider switch readiness for the active provider and can read persisted switch
+runs with service/staff/customer match summaries and owner match review
+decisions. The pilot cannot activate an alternate POS provider until a real
+adapter exists,
+records are imported and matched, conflicts are resolved, a dry-run booking
+readiness check passes, and required mappings are ready.
 
 Correct dependency direction:
 
@@ -63,7 +79,7 @@ HTTP handler -> service -> repository/provider interface -> concrete adapter
 
 The booking service depends on `modules/pos.POSProvider`. It must not import `modules/pos_square`.
 
-Booking workflow state belongs to the backend. Create-booking, reschedule, cancel, and dashboard test-booking requests first create a `booking_attempts` row with `pos_pending` and a backend-owned POS idempotency key. The POS adapter is then called as an outbound writer. If the provider returns a POS booking ID and booking version, the same attempt is finalized as confirmed/rescheduled/cancelled and the appointment state is written in the backend database. If the provider fails, times out, or omits required booking metadata, the same attempt is finalized as `fallback_pending`, a POS error and owner notification are recorded, and no confirmed appointment is created. Reschedule, cancel, and test-booking cleanup requests must leave the internal appointment unchanged unless the provider succeeds.
+Booking workflow state belongs to the backend. Create-booking, reschedule, cancel, and dashboard test-booking requests first create a `booking_attempts` row with `pos_pending` and a backend-owned POS idempotency key. The POS adapter is then called as an outbound writer. For customer identity, booking resolves or creates the ManleAI canonical customer, reuses an active `pos_entity_links` customer mapping when present, or asks the active `POSProvider` to search/create a provider customer and then stores the mapping. If customer lookup/linking or appointment creation fails, the same attempt is finalized as `fallback_pending`, a POS error and owner notification are recorded, and no confirmed appointment is created. If the provider returns a POS booking ID and booking version, the same attempt is finalized as confirmed/rescheduled/cancelled and the appointment state is written in the backend database. Reschedule, cancel, and test-booking cleanup requests must leave the internal appointment unchanged unless the provider succeeds.
 
 The Milestone 4 conversation simulator and Milestone 5 live phone webhook path call the booking service through a provider-neutral booking tool. They do not import Square packages, read POS tokens, build Square payloads, or use Square location IDs directly. The runtime checks provider-neutral availability, offers available slots to the caller, stores offered slot segment assignments on the call session, and only calls booking creation after the caller selects a slot and required customer details are present. Selected segments and `staff_selection_mode=anyone` survive later turns so simulator and phone bookings can create the same provider-neutral multi-service request while avoiding customer-facing named-technician wording unless the customer chose a specific technician. Booking confirmations remain impossible unless the booking service returns a POS-confirmed booking attempt and appointment. If AI booking is disabled, a customer requests a human, or the booking path cannot confirm through POS, the runtime creates a handoff or fallback pending flow and avoids confirmed wording.
 

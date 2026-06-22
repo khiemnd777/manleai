@@ -27,6 +27,56 @@ func (h *Handler) Services(c *fiber.Ctx) error {
 	return respond.JSON(c, fiber.StatusOK, fiber.Map{"services": items})
 }
 
+func (h *Handler) CreateService(c *fiber.Ctx) error {
+	req, err := parseServiceWriteRequest(c)
+	if err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body must include a valid service.")
+	}
+	item, err := h.service.CreateService(c.UserContext(), c.Params("id"), middleware.UserID(c), *req)
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Service name, duration, and price must be valid.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CREATE_FAILED", "Could not create service.")
+	}
+	return respond.JSON(c, fiber.StatusCreated, fiber.Map{"service": item})
+}
+
+func (h *Handler) UpdateService(c *fiber.Ctx) error {
+	req, err := parseServiceWriteRequest(c)
+	if err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body must include a valid service.")
+	}
+	item, err := h.service.UpdateService(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("service_id"), *req)
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Service name, duration, price, and archive state must be valid.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SERVICE_NOT_FOUND", "Service was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_UPDATE_FAILED", "Could not update service.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service": item})
+}
+
+func (h *Handler) ArchiveService(c *fiber.Ctx) error {
+	item, err := h.service.ArchiveService(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("service_id"))
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Service cannot be archived.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SERVICE_NOT_FOUND", "Service was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_ARCHIVE_FAILED", "Could not archive service.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service": item})
+}
+
 func (h *Handler) UpdateServiceAIBookable(c *fiber.Ctx) error {
 	req, err := parseAIBookableRequest(c)
 	if err != nil {
@@ -56,6 +106,128 @@ func (h *Handler) Staff(c *fiber.Ctx) error {
 	return respond.JSON(c, fiber.StatusOK, fiber.Map{"staff": items})
 }
 
+func (h *Handler) ProviderSwitchReadiness(c *fiber.Ctx) error {
+	readiness, err := h.service.ProviderSwitchReadiness(c.UserContext(), c.Params("id"), middleware.UserID(c))
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "PROVIDER_SWITCH_READINESS_FAILED", "Could not load provider switch readiness.")
+	}
+	return respond.JSON(c, fiber.StatusOK, readiness)
+}
+
+func (h *Handler) CreateProviderSwitchRun(c *fiber.Ctx) error {
+	req, err := parseProviderSwitchRunRequest(c)
+	if err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body must include a target POS provider.")
+	}
+	run, err := h.service.CreateProviderSwitchRun(c.UserContext(), c.Params("id"), middleware.UserID(c), *req)
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Target POS provider must be valid and different from the active provider.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "PROVIDER_SWITCH_RUN_CREATE_FAILED", "Could not create provider switch run.")
+	}
+	return respond.JSON(c, fiber.StatusCreated, fiber.Map{"run": run})
+}
+
+func (h *Handler) LatestProviderSwitchRun(c *fiber.Ctx) error {
+	run, err := h.service.LatestProviderSwitchRun(c.UserContext(), c.Params("id"), middleware.UserID(c))
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "PROVIDER_SWITCH_RUN_FAILED", "Could not load provider switch run.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"run": run})
+}
+
+func (h *Handler) GetProviderSwitchRun(c *fiber.Ctx) error {
+	run, err := h.service.GetProviderSwitchRun(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("run_id"))
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Provider switch run id is required.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "PROVIDER_SWITCH_RUN_NOT_FOUND", "Provider switch run was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "PROVIDER_SWITCH_RUN_FAILED", "Could not load provider switch run.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"run": run})
+}
+
+func (h *Handler) UpdateProviderSwitchMatch(c *fiber.Ctx) error {
+	req, err := parseProviderSwitchMatchUpdateRequest(c)
+	if err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body must include a valid match status.")
+	}
+	run, err := h.service.UpdateProviderSwitchMatch(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("run_id"), c.Params("match_id"), *req)
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Provider switch match cannot be updated to that state.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "PROVIDER_SWITCH_MATCH_NOT_FOUND", "Provider switch match was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "PROVIDER_SWITCH_MATCH_UPDATE_FAILED", "Could not update provider switch match.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"run": run})
+}
+
+func (h *Handler) CreateStaff(c *fiber.Ctx) error {
+	req, err := parseStaffWriteRequest(c)
+	if err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body must include a valid staff member.")
+	}
+	item, err := h.service.CreateStaff(c.UserContext(), c.Params("id"), middleware.UserID(c), *req)
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Staff name and contact fields must be valid.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "STAFF_CREATE_FAILED", "Could not create staff member.")
+	}
+	return respond.JSON(c, fiber.StatusCreated, fiber.Map{"staff_member": item})
+}
+
+func (h *Handler) UpdateStaff(c *fiber.Ctx) error {
+	req, err := parseStaffWriteRequest(c)
+	if err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body must include a valid staff member.")
+	}
+	item, err := h.service.UpdateStaff(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("staff_id"), *req)
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Staff name, contact fields, active state, and archive state must be valid.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "STAFF_NOT_FOUND", "Staff member was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "STAFF_UPDATE_FAILED", "Could not update staff member.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"staff_member": item})
+}
+
+func (h *Handler) ArchiveStaff(c *fiber.Ctx) error {
+	item, err := h.service.ArchiveStaff(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("staff_id"))
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Staff member cannot be archived.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "STAFF_NOT_FOUND", "Staff member was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "STAFF_ARCHIVE_FAILED", "Could not archive staff member.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"staff_member": item})
+}
+
 func (h *Handler) UpdateStaffAIBookable(c *fiber.Ctx) error {
 	req, err := parseAIBookableRequest(c)
 	if err != nil {
@@ -76,6 +248,44 @@ func (h *Handler) UpdateStaffAIBookable(c *fiber.Ctx) error {
 
 type updateAIBookableRequest struct {
 	AIBookable *bool `json:"ai_bookable"`
+}
+
+func parseServiceWriteRequest(c *fiber.Ctx) (*ServiceWriteRequest, error) {
+	var req ServiceWriteRequest
+	if err := c.BodyParser(&req); err != nil {
+		return nil, err
+	}
+	return &req, nil
+}
+
+func parseStaffWriteRequest(c *fiber.Ctx) (*StaffWriteRequest, error) {
+	var req StaffWriteRequest
+	if err := c.BodyParser(&req); err != nil {
+		return nil, err
+	}
+	return &req, nil
+}
+
+func parseProviderSwitchRunRequest(c *fiber.Ctx) (*ProviderSwitchRunRequest, error) {
+	var req ProviderSwitchRunRequest
+	if err := c.BodyParser(&req); err != nil {
+		return nil, err
+	}
+	if req.ToProvider == "" {
+		return nil, ErrValidation
+	}
+	return &req, nil
+}
+
+func parseProviderSwitchMatchUpdateRequest(c *fiber.Ctx) (*ProviderSwitchMatchUpdateRequest, error) {
+	var req ProviderSwitchMatchUpdateRequest
+	if err := c.BodyParser(&req); err != nil {
+		return nil, err
+	}
+	if req.MatchStatus == "" {
+		return nil, ErrValidation
+	}
+	return &req, nil
 }
 
 func parseAIBookableRequest(c *fiber.Ctx) (*updateAIBookableRequest, error) {

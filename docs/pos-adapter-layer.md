@@ -11,6 +11,8 @@ adapters are outbound writers/readers behind the provider-neutral contract.
 ManleAI-owned canonical records include services, staff, customers, AI controls,
 owner workflow state, fallback pending requests, logs, and training data. The
 active POS provider owns real-time availability and booking execution.
+`salons.active_pos_provider` is the backend source of truth for which provider
+is evaluated by management lists, booking readiness, and future switch flows.
 
 Provider IDs are mappings, not primary product identity. The target model stores
 those mappings in `pos_entity_links` with:
@@ -25,14 +27,27 @@ sync_status: local_only | syncing | synced | sync_failed | unmapped | archived
 
 During the migration, existing `services.pos_service_id` and
 `staff.pos_staff_id` fields are legacy provider links for Square-imported data.
-New provider-facing work should converge on separate link records rather than
-treating provider IDs as the service, staff, or customer identity.
+Customer links are stored in `pos_entity_links`. New provider-facing work
+should converge on separate link records rather than treating provider IDs as
+the service, staff, or customer identity.
 
 Booking eligibility depends on both canonical state and the active-provider
 link. A local-only, unmapped, archived, or sync-failed record may be visible to
 owners, but it must not be used for POS availability or POS booking. `AI
 bookable` can only be enabled for an active canonical record with a valid link
 for the active POS provider.
+
+Provider switch activation must be a gated workflow, not a status toggle. A new
+provider cannot become active until its adapter exists, provider data has been
+imported, canonical services/staff/customers have been matched or resolved,
+booking readiness has passed, and previous provider links remain available for
+appointment history.
+
+The current backend can persist provider switch runs and service/staff/customer
+match candidates for a real future adapter. Missing target adapters create
+blocked runs. Owners can record match review decisions for imported candidates,
+but activation remains unavailable until a real import, full conflict
+resolution, and dry-run path exists.
 
 ## Interface
 
@@ -56,6 +71,47 @@ type POSProvider interface {
 }
 ```
 
+Providers may also expose optional sync/write capabilities:
+
+```go
+type CapabilityProvider interface {
+    Capabilities() ProviderCapabilities
+}
+
+type POSWriteProvider interface {
+    UpsertService(ctx context.Context, salonID string, service Service) (*ProviderSyncResult, error)
+    ArchiveService(ctx context.Context, salonID string, service Service) (*ProviderSyncResult, error)
+    UpsertStaff(ctx context.Context, salonID string, staff StaffMember) (*ProviderSyncResult, error)
+    ArchiveStaff(ctx context.Context, salonID string, staff StaffMember) (*ProviderSyncResult, error)
+    UpsertCustomer(ctx context.Context, salonID string, customer Customer) (*ProviderSyncResult, error)
+}
+```
+
+Capability flags are authoritative. If a provider does not declare support for
+a write operation, the API and worker must keep that operation gated and must
+not fake a synced state.
+
+## POS Sync Jobs
+
+`pos_sync_jobs` is the provider-neutral outbox for projecting ManleAI-owned
+canonical records to the active POS provider when that provider supports the
+operation.
+
+Current job operations are:
+
+- `upsert_service`
+- `archive_service`
+- `upsert_staff`
+- `archive_staff`
+- `upsert_customer`
+
+Jobs move through `queued`, `running`, `succeeded`, and `failed`. The worker
+claims queued or retryable failed jobs, checks provider capabilities, calls
+`POSWriteProvider` only for supported operations, updates `pos_entity_links`,
+and writes `pos_sync_logs`. Provider failures are logged to `pos_errors` and
+reflected on canonical sync fields when the operation owns a durable canonical
+projection.
+
 ## First Provider
 
 `backend/modules/pos_square` implements the first adapter:
@@ -77,7 +133,29 @@ type POSProvider interface {
 - Cancel booking
 - POS sync logs and POS error logs
 
-The provider-neutral booking service creates backend `booking_attempts` before outbound POS writes, passes backend-owned idempotency keys into the adapter, and finalizes the same attempts as confirmed/rescheduled/cancelled or fallback pending. Booking attempts and confirmed appointments also snapshot one or more service/staff segments using provider-neutral fields. `CreateAppointmentInput`, `RescheduleInput`, and `AvailabilityInput` expose segment arrays so providers can map multi-service booking payloads without leaking provider-specific shapes into booking services. The legacy single-service fields remain populated for compatibility during the migration to customer-facing multi-service booking. `staff_selection_mode=anyone` is stored as the customer's technician preference while the provider adapter receives whatever staff assignment the provider contract requires. Real Square payloads must remain inside `SquareAdapter`, not in handlers or booking services.
+Square currently declares no service/staff/customer outbox write capabilities.
+It can import services/staff and perform booking/customer operations already
+listed here, but service/staff/customer writes from ManleAI remain
+capability-gated until real Square payloads are verified against a Square
+Appointments sandbox account.
+
+The provider-neutral booking service creates backend `booking_attempts` before
+outbound POS writes, passes backend-owned idempotency keys into the adapter, and
+finalizes the same attempts as confirmed/rescheduled/cancelled or fallback
+pending. Before appointment creation, booking resolves the canonical customer
+and reuses an active customer link, or asks the provider to search/create a
+customer and then stores the `pos_entity_links` mapping. Failure while
+searching, creating, or linking the provider customer produces fallback pending
+state instead of confirmed wording. Booking attempts and confirmed appointments
+also snapshot one or more service/staff segments using provider-neutral fields.
+`CreateAppointmentInput`, `RescheduleInput`, and `AvailabilityInput` expose
+segment arrays so providers can map multi-service booking payloads without
+leaking provider-specific shapes into booking services. The legacy
+single-service fields remain populated for compatibility during the migration to
+customer-facing multi-service booking. `staff_selection_mode=anyone` is stored
+as the customer's technician preference while the provider adapter receives
+whatever staff assignment the provider contract requires. Real Square payloads
+must remain inside `SquareAdapter`, not in handlers or booking services.
 
 ## Adding Future Providers
 

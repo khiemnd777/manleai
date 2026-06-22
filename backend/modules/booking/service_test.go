@@ -302,6 +302,224 @@ func TestCreateStoresFallbackPendingWhenPOSBookingFails(t *testing.T) {
 	}
 }
 
+func TestCreateUsesLinkedCanonicalCustomerWithoutPOSLookup(t *testing.T) {
+	store := newFakeStore()
+	store.customer.POSProvider = pos.ProviderSquare
+	store.customer.POSCustomerID = "square_customer_linked"
+	provider := &fakeProvider{
+		appointment: &pos.Appointment{
+			POSAppointmentID:      "booking_1",
+			POSAppointmentVersion: 7,
+			StartTime:             testStartTime(),
+			EndTime:               testStartTime().Add(45 * time.Minute),
+			Status:                StatusConfirmed,
+		},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	attempt, err := service.Create(context.Background(), "salon_1", "owner_1", validCreateRequest())
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if attempt.Status != StatusConfirmed {
+		t.Fatalf("status = %s, want confirmed", attempt.Status)
+	}
+	if provider.searchCustomerCalls != 0 || provider.createCustomerCalls != 0 {
+		t.Fatalf("customer POS calls search=%d create=%d, want none", provider.searchCustomerCalls, provider.createCustomerCalls)
+	}
+	if provider.lastCreateInput.CustomerID != "square_customer_linked" {
+		t.Fatalf("provider customer id = %s, want linked customer", provider.lastCreateInput.CustomerID)
+	}
+}
+
+func TestCreateLinksSearchedPOSCustomerBeforeBooking(t *testing.T) {
+	store := newFakeStore()
+	provider := &fakeProvider{
+		customer: &pos.Customer{POSCustomerID: "square_customer_found", Name: "Linh Tran", Phone: "3125550101", Email: "linh@example.com"},
+		appointment: &pos.Appointment{
+			POSAppointmentID:      "booking_1",
+			POSAppointmentVersion: 7,
+			StartTime:             testStartTime(),
+			EndTime:               testStartTime().Add(45 * time.Minute),
+			Status:                StatusConfirmed,
+		},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	attempt, err := service.Create(context.Background(), "salon_1", "owner_1", validCreateRequest())
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if attempt.Status != StatusConfirmed {
+		t.Fatalf("status = %s, want confirmed", attempt.Status)
+	}
+	if provider.searchCustomerCalls != 1 || provider.createCustomerCalls != 0 {
+		t.Fatalf("customer POS calls search=%d create=%d, want search only", provider.searchCustomerCalls, provider.createCustomerCalls)
+	}
+	if store.linkedCustomer == nil || store.linkedCustomer.POSCustomerID != "square_customer_found" {
+		t.Fatalf("linked customer = %#v, want searched POS customer", store.linkedCustomer)
+	}
+	if provider.lastCreateInput.CustomerID != "square_customer_found" {
+		t.Fatalf("provider customer id = %s, want searched customer", provider.lastCreateInput.CustomerID)
+	}
+}
+
+func TestCreateStoresFallbackWhenCustomerLinkFails(t *testing.T) {
+	store := newFakeStore()
+	store.linkCustomerErr = errors.New("link customer failed")
+	provider := &fakeProvider{
+		customer: &pos.Customer{POSCustomerID: "square_customer_found", Name: "Linh Tran", Phone: "3125550101"},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	attempt, err := service.Create(context.Background(), "salon_1", "owner_1", validCreateRequest())
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if attempt.Status != StatusFallbackPending {
+		t.Fatalf("status = %s, want fallback_pending", attempt.Status)
+	}
+	if store.pending == nil {
+		t.Fatalf("pending booking attempt was not created before customer link failure")
+	}
+	if store.confirmed != nil {
+		t.Fatalf("confirmed booking should not be persisted when customer link fails")
+	}
+	if provider.createAppointmentCalls != 0 {
+		t.Fatalf("create appointment calls = %d, want 0", provider.createAppointmentCalls)
+	}
+	if store.fallback == nil || store.fallback.Operation != "link_customer" || store.fallback.ErrorCode != pos.ErrorBookingFailed {
+		t.Fatalf("fallback = %#v, want link_customer booking failure", store.fallback)
+	}
+}
+
+func TestCreateRejectsUnlinkedCanonicalRecordsBeforePOS(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*fakeStore)
+	}{
+		{
+			name: "service without provider link",
+			mutate: func(store *fakeStore) {
+				store.services[0].POSServiceID = ""
+				store.services[0].POSServiceVersion = 0
+			},
+		},
+		{
+			name: "service without provider version",
+			mutate: func(store *fakeStore) {
+				store.services[0].POSServiceVersion = 0
+			},
+		},
+		{
+			name: "staff without provider link",
+			mutate: func(store *fakeStore) {
+				store.staffRefs[0].POSStaffID = ""
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeStore()
+			tt.mutate(store)
+			provider := &fakeProvider{
+				customer: &pos.Customer{POSCustomerID: "cust_1", Name: "Linh Tran", Phone: "+13125550101"},
+				appointment: &pos.Appointment{
+					POSAppointmentID:      "booking_1",
+					POSAppointmentVersion: 7,
+					StartTime:             testStartTime(),
+					EndTime:               testStartTime().Add(45 * time.Minute),
+					Status:                StatusConfirmed,
+				},
+			}
+			service := NewService(store, []pos.POSProvider{provider})
+
+			attempt, err := service.Create(context.Background(), "salon_1", "owner_1", validCreateRequest())
+			if !errors.Is(err, ErrValidation) {
+				t.Fatalf("Create error = %v, want ErrValidation", err)
+			}
+			if attempt != nil {
+				t.Fatalf("attempt = %#v, want nil", attempt)
+			}
+			if store.pending != nil || store.confirmed != nil || store.fallback != nil {
+				t.Fatalf("persistence happened for unlinked record: pending=%#v confirmed=%#v fallback=%#v", store.pending, store.confirmed, store.fallback)
+			}
+			if provider.createAppointmentCalls != 0 {
+				t.Fatalf("provider create calls = %d, want 0", provider.createAppointmentCalls)
+			}
+		})
+	}
+}
+
+func TestAvailableSlotsRejectsUnlinkedCanonicalRecordsBeforePOS(t *testing.T) {
+	tests := []struct {
+		name   string
+		req    AvailabilityRequest
+		mutate func(*fakeStore)
+	}{
+		{
+			name: "service without provider link",
+			req: AvailabilityRequest{
+				ServiceID:     "service_1",
+				PreferredDate: "2026-06-15",
+			},
+			mutate: func(store *fakeStore) {
+				store.services[0].POSServiceID = ""
+			},
+		},
+		{
+			name: "service without provider version",
+			req: AvailabilityRequest{
+				ServiceID:     "service_1",
+				PreferredDate: "2026-06-15",
+			},
+			mutate: func(store *fakeStore) {
+				store.services[0].POSServiceVersion = 0
+			},
+		},
+		{
+			name: "staff without provider link",
+			req: AvailabilityRequest{
+				ServiceID:     "service_1",
+				StaffID:       "staff_1",
+				PreferredDate: "2026-06-15",
+			},
+			mutate: func(store *fakeStore) {
+				store.staffRefs[0].POSStaffID = ""
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeStore()
+			tt.mutate(store)
+			provider := &fakeProvider{
+				availabilitySlots: []pos.TimeSlot{
+					{
+						StartTime: testStartTime(),
+						EndTime:   testStartTime().Add(45 * time.Minute),
+						StaffID:   "square_staff_1",
+					},
+				},
+			}
+			service := NewService(store, []pos.POSProvider{provider})
+
+			result, err := service.AvailableSlots(context.Background(), "salon_1", "owner_1", tt.req)
+			if !errors.Is(err, ErrValidation) {
+				t.Fatalf("AvailableSlots error = %v, want ErrValidation", err)
+			}
+			if result != nil {
+				t.Fatalf("result = %#v, want nil", result)
+			}
+			if provider.availabilityCalls != 0 {
+				t.Fatalf("provider availability calls = %d, want 0", provider.availabilityCalls)
+			}
+		})
+	}
+}
+
 func TestReschedulePersistsOnlyAfterPOSSuccess(t *testing.T) {
 	store := newFakeStore()
 	provider := &fakeProvider{
@@ -790,19 +1008,22 @@ func testStartTime() time.Time {
 }
 
 type fakeStore struct {
-	service        ServiceRef
-	services       []ServiceRef
-	staff          StaffRef
-	staffRefs      []StaffRef
-	schedule       Schedule
-	appointment    AppointmentActionRef
-	pending        *PendingBookingRecord
-	confirmed      *ConfirmedBookingRecord
-	fallback       *FallbackBookingRecord
-	pendingAction  *PendingAppointmentActionRecord
-	rescheduled    *RescheduledAppointmentRecord
-	cancelled      *CancelledAppointmentRecord
-	actionFallback *AppointmentActionFallbackRecord
+	service         ServiceRef
+	services        []ServiceRef
+	staff           StaffRef
+	staffRefs       []StaffRef
+	customer        CustomerRef
+	schedule        Schedule
+	appointment     AppointmentActionRef
+	pending         *PendingBookingRecord
+	confirmed       *ConfirmedBookingRecord
+	fallback        *FallbackBookingRecord
+	pendingAction   *PendingAppointmentActionRecord
+	rescheduled     *RescheduledAppointmentRecord
+	cancelled       *CancelledAppointmentRecord
+	actionFallback  *AppointmentActionFallbackRecord
+	linkedCustomer  *CustomerRef
+	linkCustomerErr error
 }
 
 func newFakeStore() *fakeStore {
@@ -821,6 +1042,12 @@ func newFakeStore() *fakeStore {
 			POSProvider: pos.ProviderSquare,
 			POSStaffID:  "square_staff_1",
 			Name:        "Mai Nguyen",
+		},
+		customer: CustomerRef{
+			ID:    "customer_1",
+			Name:  "Linh Tran",
+			Phone: "3125550101",
+			Email: "linh@example.com",
 		},
 		schedule: Schedule{
 			Timezone: "America/Chicago",
@@ -912,6 +1139,44 @@ func (f *fakeStore) GetBookableStaff(ctx context.Context, salonID string, staffI
 
 func (f *fakeStore) ListBookableStaffRefs(ctx context.Context, salonID string) ([]StaffRef, error) {
 	return f.staffRefs, nil
+}
+
+func (f *fakeStore) ResolveBookingCustomer(ctx context.Context, salonID string, provider string, name string, phone string, email string) (*CustomerRef, error) {
+	if salonID != "salon_1" || provider != pos.ProviderSquare {
+		return nil, pos.ErrNotFound
+	}
+	item := f.customer
+	if item.Name == "" {
+		item.Name = name
+	}
+	if item.Phone == "" {
+		item.Phone = phone
+	}
+	if item.Email == "" {
+		item.Email = email
+	}
+	return &item, nil
+}
+
+func (f *fakeStore) LinkBookingCustomer(ctx context.Context, salonID string, provider string, customerID string, customer pos.Customer) (*CustomerRef, error) {
+	if f.linkCustomerErr != nil {
+		return nil, f.linkCustomerErr
+	}
+	if salonID != "salon_1" || provider != pos.ProviderSquare || customerID != f.customer.ID {
+		return nil, pos.ErrNotFound
+	}
+	item := f.customer
+	item.POSProvider = provider
+	item.POSCustomerID = customer.POSCustomerID
+	if item.Phone == "" {
+		item.Phone = customer.Phone
+	}
+	if item.Email == "" {
+		item.Email = customer.Email
+	}
+	f.customer = item
+	f.linkedCustomer = &item
+	return &item, nil
 }
 
 func (f *fakeStore) GetSchedule(ctx context.Context, salonID string) (*Schedule, error) {
@@ -1106,6 +1371,8 @@ type fakeProvider struct {
 	lastRescheduleInput    pos.RescheduleInput
 	lastCancelInput        pos.CancelInput
 	searchSawPending       bool
+	searchCustomerCalls    int
+	createCustomerCalls    int
 	availabilityCalls      int
 	createAppointmentCalls int
 	rescheduleCalls        int
@@ -1138,6 +1405,7 @@ func (f *fakeProvider) ListStaff(ctx context.Context, salonID string) ([]pos.Sta
 }
 
 func (f *fakeProvider) SearchCustomerByPhone(ctx context.Context, salonID string, phone string) (*pos.Customer, error) {
+	f.searchCustomerCalls++
 	if f.store != nil && f.store.pending != nil {
 		f.searchSawPending = true
 	}
@@ -1148,6 +1416,7 @@ func (f *fakeProvider) SearchCustomerByPhone(ctx context.Context, salonID string
 }
 
 func (f *fakeProvider) CreateCustomer(ctx context.Context, salonID string, input pos.CreateCustomerInput) (*pos.Customer, error) {
+	f.createCustomerCalls++
 	if f.createCustomerErr != nil {
 		return nil, f.createCustomerErr
 	}

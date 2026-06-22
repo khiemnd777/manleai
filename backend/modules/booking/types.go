@@ -157,6 +157,15 @@ type StaffRef struct {
 	Name        string
 }
 
+type CustomerRef struct {
+	ID            string
+	Name          string
+	Phone         string
+	Email         string
+	POSProvider   string
+	POSCustomerID string
+}
+
 type Schedule struct {
 	Timezone      string
 	BusinessHours []BusinessHour

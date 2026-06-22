@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/manleai/ai-receptionist/migrations"
@@ -19,6 +20,7 @@ const migrationLockID int64 = 30919910842811
 
 type migrationFile struct {
 	Version  string
+	Order    int
 	Name     string
 	Path     string
 	SQL      string
@@ -93,7 +95,6 @@ func loadMigrationFiles() ([]migrationFile, error) {
 	if err != nil {
 		return nil, fmt.Errorf("find migrations: %w", err)
 	}
-	sort.Strings(paths)
 
 	files := make([]migrationFile, 0, len(paths))
 	for _, filePath := range paths {
@@ -107,7 +108,17 @@ func loadMigrationFiles() ([]migrationFile, error) {
 		}
 		files = append(files, migration)
 	}
+	sortMigrationFiles(files)
 	return files, nil
+}
+
+func sortMigrationFiles(files []migrationFile) {
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].Order == files[j].Order {
+			return files[i].Path < files[j].Path
+		}
+		return files[i].Order < files[j].Order
+	})
 }
 
 func parseMigrationFile(filePath string, sqlText string) (migrationFile, error) {
@@ -117,10 +128,16 @@ func parseMigrationFile(filePath string, sqlText string) (migrationFile, error) 
 	if len(parts) != 2 || !strings.HasPrefix(parts[0], "V") || strings.TrimPrefix(parts[0], "V") == "" {
 		return migrationFile{}, fmt.Errorf("invalid migration filename %s", filePath)
 	}
+	version := strings.TrimPrefix(parts[0], "V")
+	order, err := strconv.Atoi(version)
+	if err != nil {
+		return migrationFile{}, fmt.Errorf("invalid migration version %s in %s", version, filePath)
+	}
 
 	sum := sha256.Sum256([]byte(sqlText))
 	return migrationFile{
-		Version:  strings.TrimPrefix(parts[0], "V"),
+		Version:  version,
+		Order:    order,
 		Name:     strings.ReplaceAll(parts[1], "_", " "),
 		Path:     filePath,
 		SQL:      sqlText,

@@ -53,8 +53,9 @@ Current code has:
   `modules/pos.POSProvider`.
 - Square-specific auth, payloads, endpoint URLs, and mapping isolated in
   `backend/modules/pos_square`.
-- Customers dashboard as an internal activity aggregate plus Square phone
-  lookup, not a full customer directory.
+- Customers dashboard as a local CRM-lite directory backed by canonical
+  `customers`, activity aggregation, optional POS customer links, and Square
+  phone lookup as a secondary tool.
 
 ## Global Implementation Rules
 
@@ -285,21 +286,21 @@ Goal: make booking consume canonical IDs resolved through active-provider links.
 
 Tasks:
 
-- [ ] Add repository methods to resolve canonical service/staff to active POS
+- [x] Add repository methods to resolve canonical service/staff to active POS
       provider links.
-- [ ] Update availability resolution to reject unmapped/local-only/sync-failed
+- [x] Update availability resolution to reject unmapped/local-only/sync-failed
       records.
-- [ ] Update booking create/reschedule resolution to use provider links.
-- [ ] Preserve segment and `staff_selection_mode` behavior.
-- [ ] Preserve fallback pending behavior on POS failure.
-- [ ] Add service-level tests for bookable vs unbookable mapping states.
+- [x] Update booking create/reschedule resolution to use provider links.
+- [x] Preserve segment and `staff_selection_mode` behavior.
+- [x] Preserve fallback pending behavior on POS failure.
+- [x] Add service-level tests for bookable vs unbookable mapping states.
 
 Definition of done:
 
-- [ ] Booking API accepts canonical IDs.
-- [ ] POS adapter receives provider IDs.
-- [ ] Local-only records cannot book.
-- [ ] Confirmed appointment invariant remains intact.
+- [x] Booking API accepts canonical IDs.
+- [x] POS adapter receives provider IDs.
+- [x] Local-only records cannot book.
+- [x] Confirmed appointment invariant remains intact.
 
 Suggested thread prompt:
 
@@ -316,19 +317,19 @@ Goal: turn Customers into a real local CRM-lite model with provider links.
 
 Tasks:
 
-- [ ] Add `customers` canonical table.
-- [ ] Add customer provider links using `pos_entity_links`.
-- [ ] Add local create/update/archive customer API.
-- [ ] Add dedupe by phone/email.
-- [ ] During booking, search/link/create POS customer if needed and supported.
-- [ ] Update Customers UI from activity-only to customer records plus activity.
+- [x] Add `customers` canonical table.
+- [x] Add customer provider links using `pos_entity_links`.
+- [x] Add local create/update/archive customer API.
+- [x] Add dedupe by phone/email.
+- [x] During booking, search/link/create POS customer if needed and supported.
+- [x] Update Customers UI from activity-only to customer records plus activity.
 
 Definition of done:
 
-- [ ] Owner can create/edit/archive customers locally.
-- [ ] Customer activity still shows calls, bookings, pending requests.
-- [ ] Booking links or creates POS customer without leaking POS payloads.
-- [ ] No duplicate customer creation for same phone/email.
+- [x] Owner can create/edit/archive customers locally.
+- [x] Customer activity still shows calls, bookings, pending requests.
+- [x] Booking links or creates POS customer without leaking POS payloads.
+- [x] No duplicate customer creation for same phone/email.
 
 Suggested thread prompt:
 
@@ -343,13 +344,55 @@ booking when needed. Provide Mockup as Text before UI edits.
 
 Goal: make switching POS providers a guided, low-risk workflow.
 
+Phase 6A foundation completed:
+
+- [x] Add `salons.active_pos_provider` as the active provider source of truth.
+- [x] Add provider switch readiness API and dashboard gate.
+- [x] Make service/staff management and phone booking readiness evaluate the
+      active provider instead of hard-coded Square checks.
+- [x] Keep switch activation disabled until an alternate real adapter exists.
+
+Phase 6B switch run and match skeleton completed:
+
+- [x] Add provider switch run and match persistence tables.
+- [x] Add owner-scoped switch run create/latest/read APIs.
+- [x] Persist blocked switch runs when the requested target adapter is not
+      installed.
+- [x] Add service/staff auto-match skeleton by normalized name, duration,
+      phone, and email for future real adapter imports.
+- [x] Surface latest switch run state and match counts in the Integrations
+      dashboard while keeping start/activate controls gated.
+
+Phase 6C match review skeleton completed:
+
+- [x] Add owner-scoped match review API for confirm, unmatched, and skipped
+      decisions.
+- [x] Recompute switch run review status as `needs_review` or `ready` while
+      keeping `can_activate=false`.
+- [x] Add Integrations dashboard match review rows with gated actions.
+- [x] Keep blocked runs and deployments without an alternate real adapter
+      non-editable.
+
+Phase 6D customer match skeleton completed:
+
+- [x] Add customer switch match candidates from canonical customers and
+      customer `pos_entity_links`.
+- [x] Auto-match customer candidates by normalized phone, email, and name.
+- [x] Mark duplicate provider customer candidates that map to the same
+      canonical customer as conflicts.
+- [x] Keep provider activation disabled after customer matches are reviewed.
+
+Full Phase 6 remains open because the pilot currently has only the Square
+Appointments adapter. Do not add fake provider implementations to satisfy the
+workflow.
+
 Tasks:
 
 - [ ] Add provider switch/import wizard.
 - [ ] Import services/staff/customers from new provider.
-- [ ] Auto-match to canonical records by stable heuristics:
+- [x] Auto-match to canonical records by stable heuristics:
       name, duration, phone, email, normalized text.
-- [ ] Add manual conflict resolution UI.
+- [x] Add manual conflict resolution UI.
 - [ ] Add dry-run booking readiness check.
 - [ ] Activate new provider only after required mappings are ready.
 - [ ] Preserve old provider links for history.
@@ -444,4 +487,3 @@ Stop and ask for explicit direction if:
 - a UI change would imply local-only records are bookable
 - booking confirmation wording could appear without POS success
 - provider switching would activate a provider with incomplete mappings
-

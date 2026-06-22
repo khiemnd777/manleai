@@ -20,7 +20,7 @@ func (r *Repository) ListForOwner(ctx context.Context, ownerUserID string) ([]Sa
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id::text, name, phone, COALESCE(address, ''), COALESCE(city, ''), COALESCE(state, ''), COALESCE(zip_code, ''),
 		       timezone, owner_user_id::text, primary_language, secondary_language, COALESCE(handoff_phone, ''),
-		       ai_enabled, created_at, updated_at
+		       ai_enabled, active_pos_provider, created_at, updated_at
 		FROM salons
 		WHERE owner_user_id = $1
 		ORDER BY created_at DESC
@@ -45,7 +45,7 @@ func (r *Repository) GetForOwner(ctx context.Context, id string, ownerUserID str
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id::text, name, phone, COALESCE(address, ''), COALESCE(city, ''), COALESCE(state, ''), COALESCE(zip_code, ''),
 		       timezone, owner_user_id::text, primary_language, secondary_language, COALESCE(handoff_phone, ''),
-		       ai_enabled, created_at, updated_at
+		       ai_enabled, active_pos_provider, created_at, updated_at
 		FROM salons
 		WHERE id = $1 AND owner_user_id = $2
 	`, id, ownerUserID)
@@ -229,6 +229,7 @@ func scanSalon(row rowScanner) (*Salon, error) {
 		&item.SecondaryLanguage,
 		&item.HandoffPhone,
 		&item.AIEnabled,
+		&item.ActivePOSProvider,
 		&item.CreatedAt,
 		&item.UpdatedAt,
 	)

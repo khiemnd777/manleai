@@ -1,4 +1,4 @@
-import { StaffDashboard } from "@/features/dashboard/service-staff-controls";
+import { StaffDashboard } from "@/features/dashboard/staff-dashboard";
 
 export default function StaffPage() {
   return <StaffDashboard />;

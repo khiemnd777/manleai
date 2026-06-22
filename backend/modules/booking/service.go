@@ -23,6 +23,8 @@ type Store interface {
 	GetBookableService(ctx context.Context, salonID string, serviceID string) (*ServiceRef, error)
 	GetBookableStaff(ctx context.Context, salonID string, staffID string) (*StaffRef, error)
 	ListBookableStaffRefs(ctx context.Context, salonID string) ([]StaffRef, error)
+	ResolveBookingCustomer(ctx context.Context, salonID string, provider string, name string, phone string, email string) (*CustomerRef, error)
+	LinkBookingCustomer(ctx context.Context, salonID string, provider string, customerID string, customer pos.Customer) (*CustomerRef, error)
 	GetSchedule(ctx context.Context, salonID string) (*Schedule, error)
 	GetAppointmentForOwner(ctx context.Context, salonID string, ownerUserID string, appointmentID string) (*AppointmentActionRef, error)
 	CreatePendingBookingAttempt(ctx context.Context, record PendingBookingRecord) (*BookingAttempt, error)
@@ -84,6 +86,10 @@ func (s *Service) Create(ctx context.Context, salonID string, ownerUserID string
 	if provider == nil {
 		return nil, ErrProviderUnavailable
 	}
+	customerRef, err := s.store.ResolveBookingCustomer(ctx, salonID, provider.Name(), req.CustomerName, req.CustomerPhone, req.CustomerEmail)
+	if err != nil {
+		return nil, err
+	}
 
 	durationMinutes := bookingSegmentsDuration(resolvedSegments)
 	endTime := req.StartTime.Add(time.Duration(durationMinutes) * time.Minute)
@@ -109,27 +115,14 @@ func (s *Service) Create(ctx context.Context, salonID string, ownerUserID string
 	}
 
 	persistCtx := postPOSPersistenceContext(ctx)
-	customer, err := provider.SearchCustomerByPhone(ctx, salonID, req.CustomerPhone)
+	posCustomer, operation, err := s.resolvePOSCustomer(ctx, salonID, provider, *customerRef, req)
 	if err != nil {
-		return s.saveFallback(persistCtx, *pending, segments, req, endTime, "search_customer", err)
-	}
-	if customer == nil {
-		customer, err = provider.CreateCustomer(ctx, salonID, pos.CreateCustomerInput{
-			Name:  req.CustomerName,
-			Phone: req.CustomerPhone,
-			Email: req.CustomerEmail,
-		})
-		if err != nil {
-			return s.saveFallback(persistCtx, *pending, segments, req, endTime, "create_customer", err)
-		}
-	}
-	if customer == nil || strings.TrimSpace(customer.POSCustomerID) == "" {
-		return s.saveFallback(persistCtx, *pending, segments, req, endTime, "create_customer", fmt.Errorf("pos customer id was not returned"))
+		return s.saveFallback(persistCtx, *pending, segments, req, endTime, operation, err)
 	}
 
 	appointment, err := provider.CreateAppointment(ctx, salonID, pos.CreateAppointmentInput{
 		IdempotencyKey:  pending.POSIdempotencyKey,
-		CustomerID:      customer.POSCustomerID,
+		CustomerID:      posCustomer.POSCustomerID,
 		ServiceID:       primary.Service.POSServiceID,
 		ServiceVersion:  primary.Service.POSServiceVersion,
 		StaffID:         primary.Staff.POSStaffID,
@@ -659,6 +652,20 @@ func validStaffSelectionMode(mode string) bool {
 	return mode == StaffSelectionSpecific || mode == StaffSelectionAnyone
 }
 
+func bookableServiceHasProviderLink(service *ServiceRef) bool {
+	return service != nil &&
+		strings.TrimSpace(service.POSProvider) != "" &&
+		strings.TrimSpace(service.POSServiceID) != "" &&
+		service.POSServiceVersion > 0 &&
+		service.DurationMinutes > 0
+}
+
+func bookableStaffHasProviderLink(staff *StaffRef) bool {
+	return staff != nil &&
+		strings.TrimSpace(staff.POSProvider) != "" &&
+		strings.TrimSpace(staff.POSStaffID) != ""
+}
+
 func (s *Service) resolveBookingSegments(ctx context.Context, salonID string, req CreateBookingRequest) ([]resolvedBookingSegment, error) {
 	segments := requestSegments(req.Segments, req.ServiceID, req.StaffID, req.StaffSelectionMode)
 	resolved := make([]resolvedBookingSegment, 0, len(segments))
@@ -668,14 +675,14 @@ func (s *Service) resolveBookingSegments(ctx context.Context, salonID string, re
 		if err != nil {
 			return nil, err
 		}
-		if service.DurationMinutes <= 0 {
+		if !bookableServiceHasProviderLink(service) {
 			return nil, ErrValidation
 		}
 		staff, err := s.store.GetBookableStaff(ctx, salonID, segment.StaffID)
 		if err != nil {
 			return nil, err
 		}
-		if staff.POSProvider != service.POSProvider {
+		if !bookableStaffHasProviderLink(staff) || staff.POSProvider != service.POSProvider {
 			return nil, ErrValidation
 		}
 		if provider == "" {
@@ -706,7 +713,7 @@ func (s *Service) resolveAvailabilitySegments(ctx context.Context, salonID strin
 		if err != nil {
 			return nil, err
 		}
-		if service.DurationMinutes <= 0 || strings.TrimSpace(service.POSServiceID) == "" {
+		if !bookableServiceHasProviderLink(service) {
 			return nil, ErrValidation
 		}
 		if provider == "" {
@@ -721,7 +728,7 @@ func (s *Service) resolveAvailabilitySegments(ctx context.Context, salonID strin
 			if err != nil {
 				return nil, err
 			}
-			if staff.POSProvider != service.POSProvider || strings.TrimSpace(staff.POSStaffID) == "" {
+			if !bookableStaffHasProviderLink(staff) || staff.POSProvider != service.POSProvider {
 				return nil, ErrValidation
 			}
 		}
@@ -736,6 +743,49 @@ func (s *Service) resolveAvailabilitySegments(ctx context.Context, salonID strin
 		return nil, ErrValidation
 	}
 	return resolved, nil
+}
+
+func (s *Service) resolvePOSCustomer(ctx context.Context, salonID string, provider pos.POSProvider, customer CustomerRef, req CreateBookingRequest) (*pos.Customer, string, error) {
+	if strings.TrimSpace(customer.POSCustomerID) != "" {
+		return &pos.Customer{
+			ID:            customer.ID,
+			POSCustomerID: customer.POSCustomerID,
+			Name:          customer.Name,
+			Phone:         customer.Phone,
+			Email:         customer.Email,
+		}, "", nil
+	}
+	posCustomer, err := provider.SearchCustomerByPhone(ctx, salonID, req.CustomerPhone)
+	if err != nil {
+		return nil, "search_customer", err
+	}
+	if posCustomer == nil {
+		posCustomer, err = provider.CreateCustomer(ctx, salonID, pos.CreateCustomerInput{
+			Name:  req.CustomerName,
+			Phone: req.CustomerPhone,
+			Email: req.CustomerEmail,
+		})
+		if err != nil {
+			return nil, "create_customer", err
+		}
+	}
+	if posCustomer == nil || strings.TrimSpace(posCustomer.POSCustomerID) == "" {
+		return nil, "create_customer", fmt.Errorf("pos customer id was not returned")
+	}
+	linked, err := s.store.LinkBookingCustomer(ctx, salonID, provider.Name(), customer.ID, *posCustomer)
+	if err != nil {
+		return nil, "link_customer", err
+	}
+	if strings.TrimSpace(linked.POSCustomerID) == "" {
+		return nil, "link_customer", fmt.Errorf("pos customer id was not persisted")
+	}
+	return &pos.Customer{
+		ID:            linked.ID,
+		POSCustomerID: linked.POSCustomerID,
+		Name:          linked.Name,
+		Phone:         linked.Phone,
+		Email:         linked.Email,
+	}, "", nil
 }
 
 func bookingSegmentsDuration(segments []resolvedBookingSegment) int {
@@ -1041,7 +1091,9 @@ func posAppointmentSegment(service ServiceRef, staff StaffRef) pos.AppointmentSe
 func (s *Service) bookableStaffByPOSID(ctx context.Context, salonID string, provider string, selectedStaff *StaffRef) (map[string]StaffRef, error) {
 	refs := make(map[string]StaffRef)
 	if selectedStaff != nil {
-		refs[selectedStaff.POSStaffID] = *selectedStaff
+		if bookableStaffHasProviderLink(selectedStaff) && selectedStaff.POSProvider == provider {
+			refs[selectedStaff.POSStaffID] = *selectedStaff
+		}
 		return refs, nil
 	}
 	staff, err := s.store.ListBookableStaffRefs(ctx, salonID)
@@ -1049,7 +1101,7 @@ func (s *Service) bookableStaffByPOSID(ctx context.Context, salonID string, prov
 		return nil, err
 	}
 	for _, item := range staff {
-		if item.POSProvider != provider || strings.TrimSpace(item.POSStaffID) == "" {
+		if item.POSProvider != provider || !bookableStaffHasProviderLink(&item) {
 			continue
 		}
 		refs[item.POSStaffID] = item

@@ -19,6 +19,7 @@ export type Salon = {
   secondary_language: string;
   handoff_phone?: string;
   ai_enabled: boolean;
+  active_pos_provider: string;
 };
 
 export type POSConnection = {
@@ -47,6 +48,12 @@ export type POSService = {
   price_display?: string;
   ai_bookable: boolean;
   active: boolean;
+  sync_status: string;
+  archived_at?: string;
+  last_synced_at?: string;
+  sync_error?: string;
+  source: string;
+  pos_linked: boolean;
 };
 
 export type POSStaffMember = {
@@ -59,6 +66,12 @@ export type POSStaffMember = {
   email?: string;
   ai_bookable: boolean;
   active: boolean;
+  sync_status: string;
+  archived_at?: string;
+  last_synced_at?: string;
+  sync_error?: string;
+  source: string;
+  pos_linked: boolean;
 };
 
 export type POSCustomer = {
@@ -70,10 +83,20 @@ export type POSCustomer = {
 };
 
 export type CustomerRecord = {
+  id?: string;
+  salon_id?: string;
   key: string;
   name?: string;
   phone?: string;
   email?: string;
+  notes?: string;
+  active: boolean;
+  sync_status: string;
+  archived_at?: string;
+  last_synced_at?: string;
+  sync_error?: string;
+  source: string;
+  pos_linked: boolean;
   last_activity_at: string;
   last_activity_source: string;
   last_outcome: string;
@@ -247,6 +270,98 @@ export type SquareReadiness = {
   checks: ReadinessCheck[];
 };
 
+export type ProviderCapabilities = {
+  service_upsert: boolean;
+  service_archive: boolean;
+  staff_upsert: boolean;
+  staff_archive: boolean;
+  customer_upsert: boolean;
+};
+
+export type ProviderOption = {
+  provider: string;
+  label: string;
+  installed: boolean;
+  active: boolean;
+  status: string;
+  blocked_reason?: string;
+  capabilities: ProviderCapabilities;
+};
+
+export type ProviderMappingSummary = {
+  service_count: number;
+  staff_count: number;
+  customer_count: number;
+  bookable_service_count: number;
+  bookable_staff_count: number;
+  linked_service_count: number;
+  linked_staff_count: number;
+  linked_customer_count: number;
+  unmapped_service_count: number;
+  unmapped_staff_count: number;
+  sync_failed_count: number;
+};
+
+export type ProviderSwitchReadiness = {
+  salon_id: string;
+  active_provider: string;
+  active_provider_label: string;
+  installed_providers: ProviderOption[];
+  unavailable_providers: ProviderOption[];
+  mapping: ProviderMappingSummary;
+  checks: ReadinessCheck[];
+  dry_run_booking_ready: boolean;
+  can_start_switch: boolean;
+  can_activate_provider: boolean;
+  blocked_reason?: string;
+};
+
+export type ProviderSwitchMatchSummary = {
+  total: number;
+  suggested: number;
+  unmatched: number;
+  conflicts: number;
+  confirmed: number;
+  skipped: number;
+};
+
+export type ProviderSwitchMatch = {
+  id: string;
+  run_id: string;
+  salon_id: string;
+  entity_type: string;
+  canonical_entity_id?: string;
+  canonical_name?: string;
+  provider_entity_id: string;
+  provider_name: string;
+  provider_phone?: string;
+  provider_email?: string;
+  provider_duration_minutes?: number;
+  match_status: string;
+  match_confidence: number;
+  match_reason?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ProviderSwitchRun = {
+  id: string;
+  salon_id: string;
+  from_provider: string;
+  to_provider: string;
+  status: string;
+  blocked_reason?: string;
+  dry_run_ready: boolean;
+  can_activate: boolean;
+  activated_at?: string;
+  cancelled_at?: string;
+  created_by_user_id?: string;
+  created_at: string;
+  updated_at: string;
+  match_summary: ProviderSwitchMatchSummary;
+  matches?: ProviderSwitchMatch[];
+};
+
 export type TranscriptMessage = {
   id: string;
   session_id: string;
@@ -340,6 +455,9 @@ export type VoiceStatus = {
 export type VoiceBookingReadiness = {
   ready: boolean;
   ai_enabled: boolean;
+  active_provider: string;
+  provider_connected: boolean;
+  provider_synced: boolean;
   square_connected: boolean;
   square_synced: boolean;
   test_booking_cancelled: boolean;

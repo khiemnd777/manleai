@@ -45,6 +45,64 @@ func (s *Service) List(ctx context.Context, salonID string, ownerUserID string, 
 	}, nil
 }
 
+func (s *Service) Create(ctx context.Context, salonID string, ownerUserID string, req WriteRequest) (*MutationResponse, error) {
+	salonID = strings.TrimSpace(salonID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	input, err := normalizeWriteRequest(req, true)
+	if err != nil {
+		return nil, err
+	}
+	if salonID == "" || ownerUserID == "" {
+		return nil, ErrValidation
+	}
+	if err := s.store.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	item, err := s.store.CreateCustomer(ctx, salonID, ownerUserID, input)
+	if err != nil {
+		return nil, err
+	}
+	return &MutationResponse{Customer: *item}, nil
+}
+
+func (s *Service) Update(ctx context.Context, salonID string, ownerUserID string, customerID string, req WriteRequest) (*MutationResponse, error) {
+	salonID = strings.TrimSpace(salonID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	customerID = strings.TrimSpace(customerID)
+	input, err := normalizeWriteRequest(req, false)
+	if err != nil {
+		return nil, err
+	}
+	if salonID == "" || ownerUserID == "" || customerID == "" {
+		return nil, ErrValidation
+	}
+	if err := s.store.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	item, err := s.store.UpdateCustomer(ctx, salonID, ownerUserID, customerID, input)
+	if err != nil {
+		return nil, err
+	}
+	return &MutationResponse{Customer: *item}, nil
+}
+
+func (s *Service) Archive(ctx context.Context, salonID string, ownerUserID string, customerID string) (*MutationResponse, error) {
+	salonID = strings.TrimSpace(salonID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	customerID = strings.TrimSpace(customerID)
+	if salonID == "" || ownerUserID == "" || customerID == "" {
+		return nil, ErrValidation
+	}
+	if err := s.store.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	item, err := s.store.ArchiveCustomer(ctx, salonID, ownerUserID, customerID)
+	if err != nil {
+		return nil, err
+	}
+	return &MutationResponse{Customer: *item}, nil
+}
+
 func (s *Service) SearchPOS(ctx context.Context, salonID string, ownerUserID string, providerName string, phone string) (*SearchResponse, error) {
 	salonID = strings.TrimSpace(salonID)
 	ownerUserID = strings.TrimSpace(ownerUserID)
@@ -99,4 +157,29 @@ func summarize(items []Record) Summary {
 		}
 	}
 	return summary
+}
+
+func normalizeWriteRequest(req WriteRequest, create bool) (Mutation, error) {
+	name := strings.TrimSpace(req.Name)
+	phone := validation.NormalizePhone(req.Phone)
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	notes := strings.TrimSpace(req.Notes)
+	if name == "" || (phone == "" && email == "") {
+		return Mutation{}, ErrValidation
+	}
+	active := true
+	if req.Active != nil {
+		active = *req.Active
+	} else if !create {
+		active = true
+	}
+	return Mutation{
+		Name:            name,
+		Phone:           phone,
+		NormalizedPhone: phone,
+		Email:           email,
+		NormalizedEmail: email,
+		Notes:           notes,
+		Active:          active,
+	}, nil
 }

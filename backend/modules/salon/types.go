@@ -16,6 +16,7 @@ type Salon struct {
 	SecondaryLanguage string    `json:"secondary_language"`
 	HandoffPhone      string    `json:"handoff_phone,omitempty"`
 	AIEnabled         bool      `json:"ai_enabled"`
+	ActivePOSProvider string    `json:"active_pos_provider"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }

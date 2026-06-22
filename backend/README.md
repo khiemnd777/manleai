@@ -10,6 +10,7 @@ Go/Fiber API for the AI Receptionist pilot foundation.
 - Startup SQL migrations from `backend/migrations`
 - Ent schema definitions
 - Redis connection target reserved for later async work
+- POS sync worker backed by `pos_sync_jobs`
 - JWT access tokens and persisted refresh tokens
 
 ## Commands
@@ -64,6 +65,11 @@ Square integration:
 - `POST /api/integrations/square/cancel-test-booking`
 - `POST /api/integrations/square/enable-ai-booking`
 - `POST /api/integrations/square/disable-ai-booking`
+
+Worker:
+
+- `make run-worker` processes capability-gated POS sync jobs from
+  `pos_sync_jobs`. Unsupported provider writes are not faked as successful.
 
 ## Architecture
 

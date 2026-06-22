@@ -410,7 +410,13 @@ func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.S
 func countBookableServices(services []pos.Service) int {
 	count := 0
 	for _, service := range services {
-		if service.Active && service.AIBookable && strings.TrimSpace(service.POSServiceID) != "" && service.POSServiceVersion > 0 && service.DurationMinutes > 0 {
+		if service.Active &&
+			service.AIBookable &&
+			service.SyncStatus == pos.SyncStatusSynced &&
+			service.POSLinked &&
+			strings.TrimSpace(service.POSServiceID) != "" &&
+			service.POSServiceVersion > 0 &&
+			service.DurationMinutes > 0 {
 			count++
 		}
 	}
@@ -420,7 +426,12 @@ func countBookableServices(services []pos.Service) int {
 func countBookableStaff(staff []pos.StaffMember) int {
 	count := 0
 	for _, member := range staff {
-		if member.Active && member.AIBookable && strings.TrimSpace(member.POSStaffID) != "" {
+		if member.Active &&
+			member.AIBookable &&
+			member.ArchivedAt == nil &&
+			member.SyncStatus == pos.SyncStatusSynced &&
+			member.POSLinked &&
+			strings.TrimSpace(member.POSStaffID) != "" {
 			count++
 		}
 	}

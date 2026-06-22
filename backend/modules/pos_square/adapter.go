@@ -45,6 +45,10 @@ func (a *SquareAdapter) Name() string {
 	return pos.ProviderSquare
 }
 
+func (a *SquareAdapter) Capabilities() pos.ProviderCapabilities {
+	return pos.ProviderCapabilities{}
+}
+
 func (a *SquareAdapter) OAuthURL(state string) (string, error) {
 	if a.cfg.ClientID == "" || a.cfg.RedirectURL == "" {
 		return "", errors.New("square oauth is not configured")

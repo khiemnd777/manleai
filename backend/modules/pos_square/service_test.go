@@ -75,10 +75,12 @@ func TestBuildReadinessAllowsEnableOnlyAfterCancelledTestBooking(t *testing.T) {
 			DurationMinutes:   45,
 			AIBookable:        true,
 			Active:            true,
+			SyncStatus:        pos.SyncStatusSynced,
+			POSLinked:         true,
 		},
 	}
 	staff := []pos.StaffMember{
-		{POSStaffID: "staff_1", AIBookable: true, Active: true},
+		{POSStaffID: "staff_1", AIBookable: true, Active: true, SyncStatus: pos.SyncStatusSynced, POSLinked: true},
 	}
 
 	confirmed := buildReadiness(false, connection, services, staff, &booking.TestBookingRecord{

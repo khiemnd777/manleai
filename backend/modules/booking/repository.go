@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/lib/pq"
+	"github.com/manleai/ai-receptionist/internal/validation"
 	"github.com/manleai/ai-receptionist/modules/pos"
 )
 
@@ -34,13 +36,24 @@ func (r *Repository) EnsureSalonOwner(ctx context.Context, salonID string, owner
 func (r *Repository) GetBookableService(ctx context.Context, salonID string, serviceID string) (*ServiceRef, error) {
 	var item ServiceRef
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id::text, pos_provider, pos_service_id, COALESCE(pos_service_version, 0),
-		       name, duration_minutes, COALESCE(price_from, 0)
-		FROM services
-		WHERE id = $1
-		  AND salon_id = $2
-		  AND active = true
-		  AND ai_bookable = true
+		SELECT svc.id::text, link.provider, link.provider_entity_id,
+		       COALESCE(link.provider_version, svc.pos_service_version, 0),
+		       svc.name, svc.duration_minutes, COALESCE(svc.price_from, 0)
+		FROM services svc
+		JOIN pos_entity_links link
+		  ON link.salon_id = svc.salon_id
+		 AND link.entity_type = 'service'
+		 AND link.entity_id = svc.id
+		 AND link.provider = svc.pos_provider
+		 AND link.sync_status = 'synced'
+		 AND link.provider_entity_id IS NOT NULL
+		 AND link.provider_entity_id <> ''
+		WHERE svc.id = $1
+		  AND svc.salon_id = $2
+		  AND svc.active = true
+		  AND svc.ai_bookable = true
+		  AND svc.archived_at IS NULL
+		  AND svc.sync_status = 'synced'
 	`, serviceID, salonID).Scan(
 		&item.ID,
 		&item.POSProvider,
@@ -62,12 +75,22 @@ func (r *Repository) GetBookableService(ctx context.Context, salonID string, ser
 func (r *Repository) GetBookableStaff(ctx context.Context, salonID string, staffID string) (*StaffRef, error) {
 	var item StaffRef
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id::text, pos_provider, pos_staff_id, name
-		FROM staff
-		WHERE id = $1
-		  AND salon_id = $2
-		  AND active = true
-		  AND ai_bookable = true
+		SELECT st.id::text, link.provider, link.provider_entity_id, st.name
+		FROM staff st
+		JOIN pos_entity_links link
+		  ON link.salon_id = st.salon_id
+		 AND link.entity_type = 'staff'
+		 AND link.entity_id = st.id
+		 AND link.provider = st.pos_provider
+		 AND link.sync_status = 'synced'
+		 AND link.provider_entity_id IS NOT NULL
+		 AND link.provider_entity_id <> ''
+		WHERE st.id = $1
+		  AND st.salon_id = $2
+		  AND st.active = true
+		  AND st.ai_bookable = true
+		  AND st.archived_at IS NULL
+		  AND st.sync_status = 'synced'
 	`, staffID, salonID).Scan(&item.ID, &item.POSProvider, &item.POSStaffID, &item.Name)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, pos.ErrNotFound
@@ -80,12 +103,22 @@ func (r *Repository) GetBookableStaff(ctx context.Context, salonID string, staff
 
 func (r *Repository) ListBookableStaffRefs(ctx context.Context, salonID string) ([]StaffRef, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id::text, pos_provider, pos_staff_id, name
-		FROM staff
-		WHERE salon_id = $1
-		  AND active = true
-		  AND ai_bookable = true
-		ORDER BY name ASC
+		SELECT st.id::text, link.provider, link.provider_entity_id, st.name
+		FROM staff st
+		JOIN pos_entity_links link
+		  ON link.salon_id = st.salon_id
+		 AND link.entity_type = 'staff'
+		 AND link.entity_id = st.id
+		 AND link.provider = st.pos_provider
+		 AND link.sync_status = 'synced'
+		 AND link.provider_entity_id IS NOT NULL
+		 AND link.provider_entity_id <> ''
+		WHERE st.salon_id = $1
+		  AND st.active = true
+		  AND st.ai_bookable = true
+		  AND st.archived_at IS NULL
+		  AND st.sync_status = 'synced'
+		ORDER BY st.name ASC
 	`, salonID)
 	if err != nil {
 		return nil, err
@@ -101,6 +134,178 @@ func (r *Repository) ListBookableStaffRefs(ctx context.Context, salonID string) 
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (r *Repository) ResolveBookingCustomer(ctx context.Context, salonID string, provider string, name string, phone string, email string) (*CustomerRef, error) {
+	name = strings.TrimSpace(name)
+	phone = validation.NormalizePhone(phone)
+	email = strings.ToLower(strings.TrimSpace(email))
+	if name == "" || phone == "" {
+		return nil, ErrValidation
+	}
+	if customer, err := r.findBookingCustomer(ctx, salonID, provider, phone, email); err != nil {
+		return nil, err
+	} else if customer != nil {
+		return customer, nil
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var customerID string
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO customers (
+			salon_id, name, phone, normalized_phone, email, normalized_email, active, sync_status, source
+		)
+		VALUES ($1, $2, $3, $3, NULLIF($4, ''), NULLIF($4, ''), true, 'local_only', 'local')
+		RETURNING id::text
+	`, salonID, name, phone, email).Scan(&customerID)
+	if err != nil {
+		if isUniqueViolation(err) {
+			if customer, findErr := r.findBookingCustomer(ctx, salonID, provider, phone, email); findErr != nil {
+				return nil, findErr
+			} else if customer != nil {
+				return customer, nil
+			}
+		}
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO pos_entity_links (
+			salon_id, entity_type, entity_id, provider, provider_entity_id, sync_status, last_synced_at, last_error
+		)
+		VALUES ($1, 'customer', $2, $3, NULL, 'local_only', NULL, NULL)
+		ON CONFLICT (salon_id, entity_type, entity_id, provider)
+		DO UPDATE SET sync_status = 'local_only',
+		              provider_entity_id = NULL,
+		              provider_version = NULL,
+		              last_synced_at = NULL,
+		              last_error = NULL,
+		              updated_at = now()
+	`, salonID, customerID, provider); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return r.findBookingCustomerByID(ctx, salonID, provider, customerID)
+}
+
+func (r *Repository) LinkBookingCustomer(ctx context.Context, salonID string, provider string, customerID string, customer pos.Customer) (*CustomerRef, error) {
+	providerCustomerID := strings.TrimSpace(customer.POSCustomerID)
+	if providerCustomerID == "" {
+		return nil, ErrValidation
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE customers
+		SET phone = COALESCE(NULLIF(phone, ''), NULLIF($3, '')),
+		    normalized_phone = COALESCE(NULLIF(normalized_phone, ''), NULLIF($4, '')),
+		    email = COALESCE(NULLIF(email, ''), NULLIF($5, '')),
+		    normalized_email = COALESCE(NULLIF(normalized_email, ''), NULLIF($6, '')),
+		    sync_status = 'synced',
+		    last_synced_at = now(),
+		    sync_error = NULL,
+		    updated_at = now()
+		WHERE salon_id = $1
+		  AND id = $2
+		  AND archived_at IS NULL
+	`, salonID, customerID, validation.NormalizePhone(customer.Phone), validation.NormalizePhone(customer.Phone), strings.ToLower(strings.TrimSpace(customer.Email)), strings.ToLower(strings.TrimSpace(customer.Email))); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO pos_entity_links (
+			salon_id, entity_type, entity_id, provider, provider_entity_id, sync_status, last_synced_at, last_error
+		)
+		VALUES ($1, 'customer', $2, $3, $4, 'synced', now(), NULL)
+		ON CONFLICT (salon_id, entity_type, entity_id, provider)
+		DO UPDATE SET provider_entity_id = EXCLUDED.provider_entity_id,
+		              sync_status = 'synced',
+		              last_synced_at = now(),
+		              last_error = NULL,
+		              updated_at = now()
+	`, salonID, customerID, provider, providerCustomerID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return r.findBookingCustomerByID(ctx, salonID, provider, customerID)
+}
+
+func (r *Repository) findBookingCustomer(ctx context.Context, salonID string, provider string, phone string, email string) (*CustomerRef, error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT c.id::text, c.name, COALESCE(c.phone, ''), COALESCE(c.email, ''),
+		       COALESCE(link.provider, $4), COALESCE(link.provider_entity_id, '')
+		FROM customers c
+		LEFT JOIN pos_entity_links link
+		  ON link.salon_id = c.salon_id
+		 AND link.entity_type = 'customer'
+		 AND link.entity_id = c.id
+		 AND link.provider = $4
+		 AND link.sync_status = 'synced'
+		 AND link.provider_entity_id IS NOT NULL
+		 AND link.provider_entity_id <> ''
+		WHERE c.salon_id = $1
+		  AND c.archived_at IS NULL
+		  AND (
+		    c.normalized_phone = $2
+		    OR (NULLIF($3, '') IS NOT NULL AND c.normalized_email = $3)
+		  )
+		ORDER BY CASE WHEN c.normalized_phone = $2 THEN 0 ELSE 1 END, c.updated_at DESC
+		LIMIT 1
+	`, salonID, phone, email, provider)
+	customer, err := scanCustomerRef(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return customer, err
+}
+
+func (r *Repository) findBookingCustomerByID(ctx context.Context, salonID string, provider string, customerID string) (*CustomerRef, error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT c.id::text, c.name, COALESCE(c.phone, ''), COALESCE(c.email, ''),
+		       COALESCE(link.provider, $3), COALESCE(link.provider_entity_id, '')
+		FROM customers c
+		LEFT JOIN pos_entity_links link
+		  ON link.salon_id = c.salon_id
+		 AND link.entity_type = 'customer'
+		 AND link.entity_id = c.id
+		 AND link.provider = $3
+		 AND link.sync_status = 'synced'
+		 AND link.provider_entity_id IS NOT NULL
+		 AND link.provider_entity_id <> ''
+		WHERE c.salon_id = $1
+		  AND c.id = $2
+	`, salonID, customerID, provider)
+	customer, err := scanCustomerRef(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, pos.ErrNotFound
+	}
+	return customer, err
+}
+
+func scanCustomerRef(row interface {
+	Scan(dest ...any) error
+}) (*CustomerRef, error) {
+	var item CustomerRef
+	if err := row.Scan(&item.ID, &item.Name, &item.Phone, &item.Email, &item.POSProvider, &item.POSCustomerID); err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func isUniqueViolation(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == "23505"
 }
 
 func (r *Repository) GetSchedule(ctx context.Context, salonID string) (*Schedule, error) {
@@ -352,21 +557,37 @@ func (r *Repository) GetAppointmentForOwner(ctx context.Context, salonID string,
 		SELECT a.id::text, a.salon_id::text, a.booking_attempt_id::text, a.pos_provider,
 		       a.pos_appointment_id, COALESCE(a.pos_appointment_version, 0), a.status,
 		       a.customer_name, a.customer_phone, COALESCE(a.customer_email, ''),
-		       COALESCE(a.start_time, now()), COALESCE(a.end_time, now()), COALESCE(a.notes, ''),
-		       a.created_at, a.updated_at, COALESCE(a.staff_selection_mode, 'specific'),
-		       COALESCE(s.id::text, ''), COALESCE(s.pos_provider, a.pos_provider),
-		       COALESCE(s.pos_service_id, ''), COALESCE(s.pos_service_version, 0),
-		       COALESCE(s.name, ''), COALESCE(s.duration_minutes, 0),
-		       COALESCE(s.price_from, 0),
-		       COALESCE(st.id::text, ''), COALESCE(st.pos_provider, a.pos_provider), COALESCE(st.pos_staff_id, ''),
-		       COALESCE(st.name, '')
-		FROM appointments a
-		JOIN salons salon ON salon.id = a.salon_id
-		LEFT JOIN services s ON s.id = a.service_id
-		LEFT JOIN staff st ON st.id = a.staff_id
-		WHERE a.id = $1
-		  AND a.salon_id = $2
-		  AND salon.owner_user_id = $3
+	       COALESCE(a.start_time, now()), COALESCE(a.end_time, now()), COALESCE(a.notes, ''),
+	       a.created_at, a.updated_at, COALESCE(a.staff_selection_mode, 'specific'),
+	       COALESCE(s.id::text, ''), COALESCE(service_link.provider, s.pos_provider, a.pos_provider),
+	       COALESCE(service_link.provider_entity_id, ''), COALESCE(service_link.provider_version, s.pos_service_version, 0),
+	       COALESCE(s.name, ''), COALESCE(s.duration_minutes, 0),
+	       COALESCE(s.price_from, 0),
+	       COALESCE(st.id::text, ''), COALESCE(staff_link.provider, st.pos_provider, a.pos_provider), COALESCE(staff_link.provider_entity_id, ''),
+	       COALESCE(st.name, '')
+	FROM appointments a
+	JOIN salons salon ON salon.id = a.salon_id
+	LEFT JOIN services s ON s.id = a.service_id
+	LEFT JOIN staff st ON st.id = a.staff_id
+	LEFT JOIN pos_entity_links service_link
+	  ON service_link.salon_id = a.salon_id
+	 AND service_link.entity_type = 'service'
+	 AND service_link.entity_id = s.id
+	 AND service_link.provider = a.pos_provider
+	 AND service_link.sync_status = 'synced'
+	 AND service_link.provider_entity_id IS NOT NULL
+	 AND service_link.provider_entity_id <> ''
+	LEFT JOIN pos_entity_links staff_link
+	  ON staff_link.salon_id = a.salon_id
+	 AND staff_link.entity_type = 'staff'
+	 AND staff_link.entity_id = st.id
+	 AND staff_link.provider = a.pos_provider
+	 AND staff_link.sync_status = 'synced'
+	 AND staff_link.provider_entity_id IS NOT NULL
+	 AND staff_link.provider_entity_id <> ''
+	WHERE a.id = $1
+	  AND a.salon_id = $2
+	  AND salon.owner_user_id = $3
 	`, appointmentID, salonID, ownerUserID)
 
 	var item AppointmentActionRef
@@ -420,21 +641,38 @@ func (r *Repository) GetAppointmentForOwner(ctx context.Context, salonID string,
 func (r *Repository) loadAppointmentActionSegments(ctx context.Context, appointmentID string, provider string) ([]BookingSegmentRecord, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT COALESCE(aps.service_id::text, ''),
-		       COALESCE(s.pos_provider, $2),
-		       COALESCE(aps.pos_service_id, s.pos_service_id, ''),
-		       COALESCE(aps.pos_service_version, s.pos_service_version, 0),
+		       COALESCE(service_link.provider, s.pos_provider, $2),
+		       COALESCE(aps.pos_service_id, service_link.provider_entity_id, ''),
+		       COALESCE(aps.pos_service_version, service_link.provider_version, 0),
 		       aps.name,
 		       COALESCE(aps.duration_minutes, 0),
 		       COALESCE(aps.price_from, s.price_from, 0),
 		       COALESCE(aps.staff_id::text, ''),
-		       COALESCE(st.pos_provider, $2),
-		       COALESCE(st.pos_staff_id, ''),
+		       COALESCE(staff_link.provider, st.pos_provider, $2),
+		       COALESCE(staff_link.provider_entity_id, ''),
 		       COALESCE(st.name, ''),
 		       COALESCE(aps.staff_selection_mode, 'specific'),
 		       COALESCE(aps.sort_order, 1)
 		FROM appointment_services aps
 		LEFT JOIN services s ON s.id = aps.service_id
 		LEFT JOIN staff st ON st.id = aps.staff_id
+		LEFT JOIN appointments a ON a.id = aps.appointment_id
+		LEFT JOIN pos_entity_links service_link
+		  ON service_link.salon_id = a.salon_id
+		 AND service_link.entity_type = 'service'
+		 AND service_link.entity_id = s.id
+		 AND service_link.provider = $2
+		 AND service_link.sync_status = 'synced'
+		 AND service_link.provider_entity_id IS NOT NULL
+		 AND service_link.provider_entity_id <> ''
+		LEFT JOIN pos_entity_links staff_link
+		  ON staff_link.salon_id = a.salon_id
+		 AND staff_link.entity_type = 'staff'
+		 AND staff_link.entity_id = st.id
+		 AND staff_link.provider = $2
+		 AND staff_link.sync_status = 'synced'
+		 AND staff_link.provider_entity_id IS NOT NULL
+		 AND staff_link.provider_entity_id <> ''
 		WHERE aps.appointment_id = $1
 		ORDER BY aps.sort_order ASC, aps.created_at ASC
 	`, appointmentID, provider)

@@ -169,11 +169,11 @@ export function AppointmentsDashboard() {
     [staff]
   );
   const bookableServices = useMemo(
-    () => services.filter((item) => item.id && item.active && item.ai_bookable),
+    () => services.filter(serviceIsBookable),
     [services]
   );
   const bookableStaff = useMemo(
-    () => staff.filter((item) => item.id && item.active && item.ai_bookable),
+    () => staff.filter(staffIsBookable),
     [staff]
   );
   const pendingRequests = useMemo(
@@ -1732,7 +1732,31 @@ function formatInputDateLabel(value: string) {
 }
 
 function firstBookableServiceID(services: POSService[]) {
-  return services.find((item) => item.id && item.active && item.ai_bookable)?.id ?? "";
+  return services.find(serviceIsBookable)?.id ?? "";
+}
+
+function serviceIsBookable(service: POSService) {
+  return (
+    Boolean(service.id) &&
+    service.active &&
+    service.ai_bookable &&
+    service.sync_status === "synced" &&
+    service.pos_linked &&
+    Boolean(service.pos_service_id) &&
+    Boolean(service.pos_service_version) &&
+    service.duration_minutes > 0
+  );
+}
+
+function staffIsBookable(member: POSStaffMember) {
+  return (
+    Boolean(member.id) &&
+    member.active &&
+    member.ai_bookable &&
+    member.sync_status === "synced" &&
+    member.pos_linked &&
+    Boolean(member.pos_staff_id)
+  );
 }
 
 function bookingPathReady(status: StatusResponse | null) {

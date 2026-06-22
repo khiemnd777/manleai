@@ -1,0 +1,2 @@
+ALTER TABLE staff
+    ALTER COLUMN pos_staff_id DROP NOT NULL;

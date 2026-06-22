@@ -155,6 +155,9 @@ type ReadinessCheck struct {
 type PhoneBookingReadiness struct {
 	Ready                bool             `json:"ready"`
 	AIEnabled            bool             `json:"ai_enabled"`
+	ActiveProvider       string           `json:"active_provider"`
+	ProviderConnected    bool             `json:"provider_connected"`
+	ProviderSynced       bool             `json:"provider_synced"`
 	SquareConnected      bool             `json:"square_connected"`
 	SquareSynced         bool             `json:"square_synced"`
 	TestBookingCancelled bool             `json:"test_booking_cancelled"`

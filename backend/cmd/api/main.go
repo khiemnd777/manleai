@@ -77,7 +77,7 @@ func main() {
 
 	posRepo := pos.NewRepository(db)
 	squareAdapter := pos_square.NewSquareAdapter(cfg.Square, posRepo, cipher)
-	posService := pos.NewService(posRepo)
+	posService := pos.NewService(posRepo, squareAdapter)
 	pos.RegisterRoutes(api, pos.NewHandler(posService), cfg.JWTSecret)
 
 	bookingRepo := booking.NewRepository(db)

@@ -27,6 +27,7 @@ func (Salon) Fields() []ent.Field {
 		field.String("secondary_language").Default("vi"),
 		field.String("handoff_phone").Optional(),
 		field.Bool("ai_enabled").Default(false),
+		field.String("active_pos_provider").Default("square").NotEmpty(),
 		field.Time("created_at").Default(time.Now),
 		field.Time("updated_at").Default(time.Now).UpdateDefault(time.Now),
 	}
