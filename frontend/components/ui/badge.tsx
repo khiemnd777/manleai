@@ -11,6 +11,7 @@ const statusClass: Record<string, string> = {
   error: "bg-red-50 text-red-700 ring-red-200",
   confirmed: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   available: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+  selected: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   allowed: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   anyone: "bg-blue-50 text-blue-700 ring-blue-200",
   specific: "bg-slate-100 text-slate-700 ring-slate-200",

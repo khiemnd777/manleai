@@ -2,7 +2,15 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { AlertTriangle, CalendarClock, CalendarSearch, ClipboardList, RefreshCcw } from "lucide-react";
+import {
+  AlertTriangle,
+  CalendarClock,
+  CalendarPlus,
+  CalendarSearch,
+  ClipboardList,
+  RefreshCcw,
+  X
+} from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,10 +30,12 @@ import type {
   AvailabilitySlot,
   AppointmentRecord,
   BookingAttempt,
+  BookingSegmentRequest,
   POSConnection,
   POSService,
   POSStaffMember,
   Salon,
+  StaffSelectionMode,
   SquareReadiness,
   SyncLog
 } from "@/types/api";
@@ -56,6 +66,26 @@ type StaffResponse = {
   staff: POSStaffMember[];
 };
 
+type AppointmentActionMode = "create" | "reschedule" | "cancel";
+
+type AppointmentActionForm = {
+  customerName: string;
+  customerPhone: string;
+  customerEmail: string;
+  serviceID: string;
+  staffID: string;
+  preferredDate: string;
+  selectedSlotKey: string;
+  notes: string;
+  cancelReason: string;
+};
+
+type ActionNotice = {
+  tone: "success" | "warning";
+  title: string;
+  message: string;
+};
+
 export function AppointmentsDashboard() {
   const [salon, setSalon] = useState<Salon | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
@@ -72,10 +102,24 @@ export function AppointmentsDashboard() {
   const [availabilityChecked, setAvailabilityChecked] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [actionMode, setActionMode] = useState<AppointmentActionMode | null>(null);
+  const [selectedAppointment, setSelectedAppointment] = useState<AppointmentRecord | null>(null);
+  const [actionForm, setActionForm] = useState<AppointmentActionForm>(() =>
+    emptyActionForm(formatDateInput(new Date()))
+  );
+  const [actionAvailabilityResult, setActionAvailabilityResult] = useState<AvailabilityResult | null>(null);
+  const [actionAvailabilityChecked, setActionAvailabilityChecked] = useState(false);
+  const [checkingActionAvailability, setCheckingActionAvailability] = useState(false);
+  const [actionAvailabilityError, setActionAvailabilityError] = useState("");
+  const [savingAction, setSavingAction] = useState(false);
+  const [actionError, setActionError] = useState("");
+  const [actionNotice, setActionNotice] = useState<ActionNotice | null>(null);
 
-  async function load() {
+  async function load({ silent = false }: { silent?: boolean } = {}) {
     setError("");
-    setLoading(true);
+    if (!silent) {
+      setLoading(true);
+    }
     try {
       const salonResponse = await apiRequest<SalonListResponse>("/api/salons");
       const firstSalon = salonResponse.salons[0] ?? null;
@@ -106,7 +150,9 @@ export function AppointmentsDashboard() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load appointment data.");
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   }
 
@@ -156,6 +202,11 @@ export function AppointmentsDashboard() {
   const confirmedCount = appointments.filter((item) => item.status === "confirmed").length;
   const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
   const readyForAvailability = bookingPathReady(status) && bookableServices.length > 0;
+  const readyForManualBooking = readyForAvailability && bookableStaff.length > 0;
+  const selectedActionSlot = useMemo(
+    () => (actionAvailabilityResult?.slots ?? []).find((slot) => slotKey(slot) === actionForm.selectedSlotKey) ?? null,
+    [actionAvailabilityResult, actionForm.selectedSlotKey]
+  );
 
   async function checkAvailability() {
     if (!salon || !availabilityServiceID || !selectedDate || !readyForAvailability) return;
@@ -197,6 +248,232 @@ export function AppointmentsDashboard() {
     setAvailabilityResult(null);
     setAvailabilityError("");
     setAvailabilityChecked(false);
+  }
+
+  function updateActionForm(patch: Partial<AppointmentActionForm>) {
+    setActionForm((current) => ({ ...current, ...patch }));
+  }
+
+  function resetActionAvailability() {
+    setActionAvailabilityResult(null);
+    setActionAvailabilityChecked(false);
+    setCheckingActionAvailability(false);
+    setActionAvailabilityError("");
+    updateActionForm({ selectedSlotKey: "" });
+  }
+
+  function openCreateBooking() {
+    setActionMode("create");
+    setSelectedAppointment(null);
+    setActionForm({
+      ...emptyActionForm(selectedDate),
+      serviceID: firstBookableServiceID(services)
+    });
+    setActionError("");
+    setActionNotice(null);
+    resetActionAvailability();
+  }
+
+  function openReschedule(appointment: AppointmentRecord) {
+    setActionMode("reschedule");
+    setSelectedAppointment(appointment);
+    setActionForm({
+      ...emptyActionForm(formatDateInput(new Date(appointment.start_time), salon?.timezone)),
+      customerName: appointment.customer_name,
+      customerPhone: appointment.customer_phone,
+      customerEmail: appointment.customer_email ?? "",
+      serviceID: appointmentPrimaryServiceID(appointment),
+      staffID: "",
+      notes: appointment.notes ?? ""
+    });
+    setActionError("");
+    setActionNotice(null);
+    resetActionAvailability();
+  }
+
+  function openCancel(appointment: AppointmentRecord) {
+    setActionMode("cancel");
+    setSelectedAppointment(appointment);
+    setActionForm({
+      ...emptyActionForm(formatDateInput(new Date(appointment.start_time), salon?.timezone)),
+      customerName: appointment.customer_name,
+      customerPhone: appointment.customer_phone,
+      customerEmail: appointment.customer_email ?? "",
+      serviceID: appointmentPrimaryServiceID(appointment),
+      staffID: "",
+      notes: appointment.notes ?? "",
+      cancelReason: ""
+    });
+    setActionError("");
+    setActionNotice(null);
+    setActionAvailabilityResult(null);
+    setActionAvailabilityChecked(false);
+    setActionAvailabilityError("");
+  }
+
+  function closeActionPanel() {
+    setActionMode(null);
+    setSelectedAppointment(null);
+    setActionError("");
+    resetActionAvailability();
+  }
+
+  async function checkActionAvailability() {
+    if (!salon || !actionMode || actionMode === "cancel" || !actionForm.preferredDate || !readyForManualBooking) {
+      return;
+    }
+    setActionAvailabilityError("");
+    setActionAvailabilityChecked(true);
+    setCheckingActionAvailability(true);
+    updateActionForm({ selectedSlotKey: "" });
+    try {
+      const segments = actionAvailabilitySegments(actionMode, actionForm, selectedAppointment);
+      if (segments.length === 0 || segments.some((segment) => !segment.service_id)) {
+        throw new Error("This appointment is missing service details needed to check availability.");
+      }
+      const staffSelectionMode = actionMode === "create" && !actionForm.staffID ? "anyone" : "specific";
+      const result = await apiRequest<AvailabilityResult>(`/api/salons/${salon.id}/availability`, {
+        method: "POST",
+        body: JSON.stringify({
+          service_id: segments[0].service_id,
+          staff_id: actionMode === "create" ? actionForm.staffID : "",
+          staff_selection_mode: staffSelectionMode,
+          segments,
+          preferred_date: actionForm.preferredDate,
+          limit: 5
+        })
+      });
+      setActionAvailabilityResult(result);
+    } catch (err) {
+      setActionAvailabilityResult(null);
+      setActionAvailabilityError(
+        err instanceof Error ? err.message : "Could not check Square Appointments availability."
+      );
+    } finally {
+      setCheckingActionAvailability(false);
+    }
+  }
+
+  async function submitCreateBooking() {
+    if (!salon || !selectedActionSlot) return;
+    setSavingAction(true);
+    setActionError("");
+    setActionNotice(null);
+    try {
+      const staffSelectionMode = actionForm.staffID ? "specific" : "anyone";
+      const segments = slotBookingSegments(selectedActionSlot, actionForm.serviceID, staffSelectionMode);
+      if (segments.length === 0 || segments.some((segment) => !segment.staff_id)) {
+        throw new Error("Select a returned Square slot before creating the booking.");
+      }
+      const attempt = await apiRequest<BookingAttempt>(`/api/salons/${salon.id}/booking-attempts`, {
+        method: "POST",
+        body: JSON.stringify({
+          source: "owner_dashboard",
+          customer_name: actionForm.customerName,
+          customer_phone: actionForm.customerPhone,
+          customer_email: actionForm.customerEmail,
+          service_id: segments[0].service_id,
+          staff_id: segments[0].staff_id,
+          staff_selection_mode: staffSelectionMode,
+          segments,
+          start_time: selectedActionSlot.start_time,
+          notes: actionForm.notes
+        })
+      });
+      if (attempt.status === "fallback_pending") {
+        setActionNotice({
+          tone: "warning",
+          title: "Booking needs owner review",
+          message: "Square Appointments did not confirm this booking. A pending request was created instead."
+        });
+      } else {
+        setActionNotice({
+          tone: "success",
+          title: "Booking confirmed",
+          message: "Square Appointments returned a booking ID, so the appointment is confirmed."
+        });
+      }
+      closeActionPanel();
+      await load({ silent: true });
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Could not create booking.");
+    } finally {
+      setSavingAction(false);
+    }
+  }
+
+  async function submitReschedule() {
+    if (!salon || !selectedAppointment || !selectedActionSlot) return;
+    setSavingAction(true);
+    setActionError("");
+    setActionNotice(null);
+    try {
+      const response = await apiRequest<AppointmentRecord | BookingAttempt>(
+        `/api/salons/${salon.id}/appointments/${selectedAppointment.id}/reschedule`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            start_time: selectedActionSlot.start_time,
+            staff_id: actionForm.staffID,
+            notes: actionForm.notes
+          })
+        }
+      );
+      if (isBookingAttempt(response)) {
+        setActionNotice({
+          tone: "warning",
+          title: "Reschedule needs owner review",
+          message: "Square Appointments did not reschedule this booking. The original appointment was left unchanged."
+        });
+      } else {
+        setActionNotice({
+          tone: "success",
+          title: "Appointment rescheduled",
+          message: "Square Appointments confirmed the new time before the dashboard updated this appointment."
+        });
+      }
+      closeActionPanel();
+      await load({ silent: true });
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Could not reschedule appointment.");
+    } finally {
+      setSavingAction(false);
+    }
+  }
+
+  async function submitCancel() {
+    if (!salon || !selectedAppointment) return;
+    setSavingAction(true);
+    setActionError("");
+    setActionNotice(null);
+    try {
+      const response = await apiRequest<AppointmentRecord | BookingAttempt>(
+        `/api/salons/${salon.id}/appointments/${selectedAppointment.id}/cancel`,
+        {
+          method: "POST",
+          body: JSON.stringify({ reason: actionForm.cancelReason })
+        }
+      );
+      if (isBookingAttempt(response)) {
+        setActionNotice({
+          tone: "warning",
+          title: "Cancellation needs owner review",
+          message: "Square Appointments did not cancel this booking. The original appointment was left unchanged."
+        });
+      } else {
+        setActionNotice({
+          tone: "success",
+          title: "Appointment cancelled",
+          message: "Square Appointments confirmed the cancellation before the dashboard updated this appointment."
+        });
+      }
+      closeActionPanel();
+      await load({ silent: true });
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Could not cancel appointment.");
+    } finally {
+      setSavingAction(false);
+    }
   }
 
   if (loading) {
@@ -241,6 +518,14 @@ export function AppointmentsDashboard() {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <Badge value={aiEnabled ? "active" : "disabled"} />
+          <Button
+            type="button"
+            onClick={openCreateBooking}
+            disabled={!readyForManualBooking || savingAction}
+          >
+            <CalendarPlus className="h-4 w-4" />
+            New booking
+          </Button>
           <Button type="button" variant="secondary" onClick={() => void load()}>
             <RefreshCcw className="h-4 w-4" />
             Refresh
@@ -249,8 +534,36 @@ export function AppointmentsDashboard() {
       </div>
 
       {error ? <Alert title="Appointments unavailable" message={error} /> : null}
+      {actionNotice ? <ActionNoticePanel notice={actionNotice} /> : null}
 
       <ReadinessPanel status={status} />
+
+      {actionMode ? (
+        <BookingActionPanel
+          mode={actionMode}
+          form={actionForm}
+          selectedAppointment={selectedAppointment}
+          bookableServices={bookableServices}
+          bookableStaff={bookableStaff}
+          readyForManualBooking={readyForManualBooking}
+          timezone={salon.timezone}
+          availabilityChecked={actionAvailabilityChecked}
+          availabilityLoading={checkingActionAvailability}
+          availabilityResult={actionAvailabilityResult}
+          availabilityError={actionAvailabilityError}
+          selectedSlotKey={actionForm.selectedSlotKey}
+          selectedSlot={selectedActionSlot}
+          saving={savingAction}
+          actionError={actionError}
+          onChange={updateActionForm}
+          onClose={closeActionPanel}
+          onCheckAvailability={() => void checkActionAvailability()}
+          onSelectSlot={(slot) => updateActionForm({ selectedSlotKey: slotKey(slot) })}
+          onCreate={() => void submitCreateBooking()}
+          onReschedule={() => void submitReschedule()}
+          onCancelAppointment={() => void submitCancel()}
+        />
+      ) : null}
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <Metric label="Confirmed appointments" value={String(confirmedCount)} />
@@ -392,11 +705,21 @@ export function AppointmentsDashboard() {
             icon={<CalendarClock className="h-5 w-5 text-muted" />}
             title="No appointments yet"
             message="Confirmed bookings will appear here after Square returns a booking ID."
-          />
+          >
+            <Button
+              type="button"
+              className="mt-4"
+              onClick={openCreateBooking}
+              disabled={!readyForManualBooking || savingAction}
+            >
+              <CalendarPlus className="h-4 w-4" />
+              New booking
+            </Button>
+          </EmptyState>
         ) : (
           <>
             <div className="mt-5 hidden overflow-x-auto rounded-md border border-line lg:block">
-              <table className="w-full min-w-[1080px] text-left text-sm">
+              <table className="w-full min-w-[1220px] text-left text-sm">
                 <thead className="bg-slate-50 text-xs uppercase text-muted">
                   <tr>
                     <th className="px-4 py-3">When</th>
@@ -406,6 +729,7 @@ export function AppointmentsDashboard() {
                     <th className="px-4 py-3">Assigned technicians</th>
                     <th className="px-4 py-3">Status</th>
                     <th className="px-4 py-3">POS booking</th>
+                    <th className="px-4 py-3">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-line bg-white">
@@ -429,6 +753,14 @@ export function AppointmentsDashboard() {
                         <Badge value={item.status} />
                       </td>
                       <td className="px-4 py-3 text-muted">{item.pos_appointment_id || "Not returned"}</td>
+                      <td className="px-4 py-3">
+                        <AppointmentActions
+                          appointment={item}
+                          disabled={savingAction || !canChangeAppointment(item)}
+                          onReschedule={openReschedule}
+                          onCancel={openCancel}
+                        />
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -442,6 +774,9 @@ export function AppointmentsDashboard() {
                   serviceName={serviceNamesLabel(item, serviceNames)}
                   staffName={assignedTechniciansLabel(item, staffNames)}
                   technicianPreference={technicianPreferenceLabel(item)}
+                  disabled={savingAction || !canChangeAppointment(item)}
+                  onReschedule={openReschedule}
+                  onCancel={openCancel}
                 />
               ))}
             </div>
@@ -583,6 +918,457 @@ function Metric({ label, value }: { label: string; value: string }) {
       <div className="text-xs font-semibold uppercase tracking-wide text-muted">{label}</div>
       <div className="mt-2 text-2xl font-bold text-ink">{value}</div>
     </Card>
+  );
+}
+
+function ActionNoticePanel({ notice }: { notice: ActionNotice }) {
+  if (notice.tone === "success") {
+    return <Alert type="success" title={notice.title} message={notice.message} />;
+  }
+  return (
+    <div className="flex gap-3 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+      <AlertTriangle className="mt-0.5 h-4 w-4 flex-none" />
+      <div>
+        <div className="font-semibold">{notice.title}</div>
+        <div className="mt-1 leading-6">{notice.message}</div>
+      </div>
+    </div>
+  );
+}
+
+function BookingActionPanel({
+  mode,
+  form,
+  selectedAppointment,
+  bookableServices,
+  bookableStaff,
+  readyForManualBooking,
+  timezone,
+  availabilityChecked,
+  availabilityLoading,
+  availabilityResult,
+  availabilityError,
+  selectedSlotKey,
+  selectedSlot,
+  saving,
+  actionError,
+  onChange,
+  onClose,
+  onCheckAvailability,
+  onSelectSlot,
+  onCreate,
+  onReschedule,
+  onCancelAppointment
+}: {
+  mode: AppointmentActionMode;
+  form: AppointmentActionForm;
+  selectedAppointment: AppointmentRecord | null;
+  bookableServices: POSService[];
+  bookableStaff: POSStaffMember[];
+  readyForManualBooking: boolean;
+  timezone?: string;
+  availabilityChecked: boolean;
+  availabilityLoading: boolean;
+  availabilityResult: AvailabilityResult | null;
+  availabilityError: string;
+  selectedSlotKey: string;
+  selectedSlot: AvailabilitySlot | null;
+  saving: boolean;
+  actionError: string;
+  onChange: (patch: Partial<AppointmentActionForm>) => void;
+  onClose: () => void;
+  onCheckAvailability: () => void;
+  onSelectSlot: (slot: AvailabilitySlot) => void;
+  onCreate: () => void;
+  onReschedule: () => void;
+  onCancelAppointment: () => void;
+}) {
+  const title =
+    mode === "create" ? "New booking" : mode === "reschedule" ? "Reschedule appointment" : "Cancel appointment";
+  const canCheckAvailability =
+    readyForManualBooking &&
+    !availabilityLoading &&
+    !saving &&
+    Boolean(form.preferredDate) &&
+    (mode === "create" ? Boolean(form.serviceID) : Boolean(selectedAppointment));
+  const canSubmitCreate =
+    mode === "create" &&
+    readyForManualBooking &&
+    Boolean(selectedSlot) &&
+    Boolean(form.customerName.trim()) &&
+    Boolean(form.customerPhone.trim()) &&
+    !saving;
+  const canSubmitReschedule =
+    mode === "reschedule" && readyForManualBooking && Boolean(selectedAppointment) && Boolean(selectedSlot) && !saving;
+
+  return (
+    <Card>
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div>
+          <CardTitle>{title}</CardTitle>
+          <CardDescription>
+            {mode === "cancel"
+              ? "Cancellation is applied only after Square Appointments confirms it."
+              : "Check Square Appointments availability, choose a returned slot, then submit the POS action."}
+          </CardDescription>
+        </div>
+        <Button type="button" variant="ghost" onClick={onClose} disabled={saving} aria-label="Close booking action">
+          <X className="h-4 w-4" />
+          Close
+        </Button>
+      </div>
+
+      {!readyForManualBooking && mode !== "cancel" ? (
+        <div className="mt-5 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
+          Connect Square Appointments, select a location, and keep at least one AI-bookable service and staff member before creating or rescheduling bookings.
+        </div>
+      ) : null}
+
+      {actionError ? (
+        <div className="mt-5">
+          <Alert title={`${title} failed`} message={actionError} />
+        </div>
+      ) : null}
+
+      {mode === "cancel" ? (
+        <CancelAppointmentForm
+          appointment={selectedAppointment}
+          reason={form.cancelReason}
+          saving={saving}
+          onReasonChange={(value) => onChange({ cancelReason: value })}
+          onSubmit={onCancelAppointment}
+        />
+      ) : (
+        <div className="mt-5 grid gap-5">
+          {mode === "create" ? (
+            <CustomerFields form={form} disabled={saving} onChange={onChange} />
+          ) : (
+            <AppointmentActionSummary appointment={selectedAppointment} timezone={timezone} />
+          )}
+
+          <div className="grid gap-4 lg:grid-cols-3">
+            {mode === "create" ? (
+              <label className="block">
+                <span className="text-sm font-medium text-ink">Service</span>
+                <select
+                  className={selectClassName}
+                  value={form.serviceID}
+                  onChange={(event) =>
+                    onChange({ serviceID: event.target.value, selectedSlotKey: "" })
+                  }
+                  disabled={!readyForManualBooking || saving || availabilityLoading}
+                >
+                  {bookableServices.length === 0 ? <option value="">No AI-bookable services</option> : null}
+                  {bookableServices.map((item) => (
+                    <option key={item.id} value={item.id ?? ""}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <ReadOnlyField label="Services" value={selectedAppointment ? serviceNamesLabel(selectedAppointment) : "-"} />
+            )}
+
+            <label className="block">
+              <span className="text-sm font-medium text-ink">Staff</span>
+              <select
+                className={selectClassName}
+                value={form.staffID}
+                onChange={(event) => onChange({ staffID: event.target.value, selectedSlotKey: "" })}
+                disabled={!readyForManualBooking || saving || availabilityLoading}
+              >
+                <option value="">{mode === "create" ? "Anyone available" : "Keep assigned technicians"}</option>
+                {bookableStaff.map((item) => (
+                  <option key={item.id} value={item.id ?? ""}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="block">
+              <span className="text-sm font-medium text-ink">Date</span>
+              <input
+                className={inputClassName}
+                type="date"
+                value={form.preferredDate}
+                onChange={(event) => onChange({ preferredDate: event.target.value, selectedSlotKey: "" })}
+                disabled={!readyForManualBooking || saving || availabilityLoading}
+              />
+            </label>
+          </div>
+
+          <label className="block">
+            <span className="text-sm font-medium text-ink">Notes</span>
+            <textarea
+              className={textareaClassName}
+              value={form.notes}
+              onChange={(event) => onChange({ notes: event.target.value })}
+              placeholder={mode === "create" ? "First visit, preferred color, or owner notes" : "Reason for the new time"}
+              disabled={saving}
+            />
+          </label>
+
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <Button type="button" variant="secondary" onClick={onCheckAvailability} disabled={!canCheckAvailability}>
+              <CalendarSearch className="h-4 w-4" />
+              {availabilityLoading ? "Checking..." : "Check availability"}
+            </Button>
+            <div className="text-sm leading-6 text-muted">
+              {selectedSlot
+                ? `Selected ${formatTimeRange(selectedSlot.start_time, selectedSlot.end_time, timezone)}`
+                : "Select a returned Square slot before submitting."}
+            </div>
+          </div>
+
+          {availabilityError ? <Alert title="Availability check failed" message={availabilityError} /> : null}
+
+          <ActionAvailabilitySlots
+            checked={availabilityChecked}
+            loading={availabilityLoading}
+            result={availabilityResult}
+            selectedSlotKey={selectedSlotKey}
+            timezone={timezone}
+            onSelect={onSelectSlot}
+          />
+
+          <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+            <Button type="button" variant="secondary" onClick={onClose} disabled={saving}>
+              Keep current view
+            </Button>
+            {mode === "create" ? (
+              <Button type="button" onClick={onCreate} disabled={!canSubmitCreate}>
+                <CalendarPlus className="h-4 w-4" />
+                {saving ? "Creating..." : "Create booking"}
+              </Button>
+            ) : (
+              <Button type="button" onClick={onReschedule} disabled={!canSubmitReschedule}>
+                {saving ? "Rescheduling..." : "Reschedule appointment"}
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function CustomerFields({
+  form,
+  disabled,
+  onChange
+}: {
+  form: AppointmentActionForm;
+  disabled: boolean;
+  onChange: (patch: Partial<AppointmentActionForm>) => void;
+}) {
+  return (
+    <div className="grid gap-4 lg:grid-cols-3">
+      <label className="block">
+        <span className="text-sm font-medium text-ink">Customer name</span>
+        <input
+          className={inputClassName}
+          value={form.customerName}
+          onChange={(event) => onChange({ customerName: event.target.value })}
+          placeholder="Customer name"
+          disabled={disabled}
+        />
+      </label>
+      <label className="block">
+        <span className="text-sm font-medium text-ink">Customer phone</span>
+        <input
+          className={inputClassName}
+          value={form.customerPhone}
+          onChange={(event) => onChange({ customerPhone: event.target.value })}
+          placeholder="+13125550101"
+          disabled={disabled}
+        />
+      </label>
+      <label className="block">
+        <span className="text-sm font-medium text-ink">Customer email</span>
+        <input
+          className={inputClassName}
+          value={form.customerEmail}
+          onChange={(event) => onChange({ customerEmail: event.target.value })}
+          placeholder="Optional"
+          disabled={disabled}
+        />
+      </label>
+    </div>
+  );
+}
+
+function AppointmentActionSummary({
+  appointment,
+  timezone
+}: {
+  appointment: AppointmentRecord | null;
+  timezone?: string;
+}) {
+  if (!appointment) return null;
+  return (
+    <div className="rounded-md border border-line bg-slate-50 p-4">
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div>
+          <div className="text-sm font-semibold text-ink">{appointment.customer_name}</div>
+          <div className="mt-1 text-sm leading-6 text-muted">
+            {formatDate(appointment.start_time, timezone)} {formatTimeRange(appointment.start_time, appointment.end_time, timezone)}
+          </div>
+        </div>
+        <Badge value={appointment.status} />
+      </div>
+      <InfoGrid
+        items={[
+          ["Services", serviceNamesLabel(appointment)],
+          ["Assigned technicians", assignedTechniciansLabel(appointment)],
+          ["POS booking", appointment.pos_appointment_id || "Not returned"],
+          ["Technician preference", technicianPreferenceLabel(appointment)]
+        ]}
+      />
+    </div>
+  );
+}
+
+function CancelAppointmentForm({
+  appointment,
+  reason,
+  saving,
+  onReasonChange,
+  onSubmit
+}: {
+  appointment: AppointmentRecord | null;
+  reason: string;
+  saving: boolean;
+  onReasonChange: (value: string) => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <div className="mt-5 grid gap-5">
+      <AppointmentActionSummary appointment={appointment} />
+      <label className="block">
+        <span className="text-sm font-medium text-ink">Cancellation reason</span>
+        <textarea
+          className={textareaClassName}
+          value={reason}
+          onChange={(event) => onReasonChange(event.target.value)}
+          placeholder="Customer requested cancellation"
+          disabled={saving}
+        />
+      </label>
+      <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
+        This does not delete appointment history. The dashboard marks it cancelled only after Square Appointments confirms the cancellation.
+      </div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+        <Button type="button" variant="danger" onClick={onSubmit} disabled={!appointment || saving}>
+          {saving ? "Cancelling..." : "Cancel appointment"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function ReadOnlyField({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-sm font-medium text-ink">{label}</div>
+      <div className="mt-2 min-h-10 rounded-md border border-line bg-slate-50 px-3 py-2 text-sm leading-6 text-muted">
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function ActionAvailabilitySlots({
+  checked,
+  loading,
+  result,
+  selectedSlotKey,
+  timezone,
+  onSelect
+}: {
+  checked: boolean;
+  loading: boolean;
+  result: AvailabilityResult | null;
+  selectedSlotKey: string;
+  timezone?: string;
+  onSelect: (slot: AvailabilitySlot) => void;
+}) {
+  if (loading) {
+    return (
+      <div className="space-y-3">
+        <Skeleton className="h-16" />
+        <Skeleton className="h-16" />
+      </div>
+    );
+  }
+  if (!checked) {
+    return (
+      <div className="rounded-md border border-line bg-slate-50 p-4 text-sm leading-6 text-muted">
+        Check availability to get Square Appointments slots for this action.
+      </div>
+    );
+  }
+  if (!result || result.slots.length === 0) {
+    return (
+      <EmptyState
+        icon={<CalendarSearch className="h-5 w-5 text-muted" />}
+        title="No available slots returned"
+        message="Try another day, service, or technician before submitting this POS action."
+      />
+    );
+  }
+  return (
+    <div className="space-y-3">
+      {result.slots.map((slot) => {
+        const key = slotKey(slot);
+        const selected = key === selectedSlotKey;
+        return (
+          <div key={key} className="rounded-md border border-line p-4">
+            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+              <div>
+                <div className="text-sm font-semibold text-ink">
+                  {formatTimeRange(slot.start_time, slot.end_time, timezone)}
+                </div>
+                <div className="mt-1 text-sm leading-6 text-muted">
+                  Assigned: {assignedTechniciansLabel(slot)}
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge value={selected ? "selected" : "available"} />
+                <Button type="button" variant={selected ? "primary" : "secondary"} onClick={() => onSelect(slot)}>
+                  {selected ? "Selected" : "Use this slot"}
+                </Button>
+              </div>
+            </div>
+            <SegmentAssignmentList record={slot} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function AppointmentActions({
+  appointment,
+  disabled,
+  onReschedule,
+  onCancel
+}: {
+  appointment: AppointmentRecord;
+  disabled: boolean;
+  onReschedule: (appointment: AppointmentRecord) => void;
+  onCancel: (appointment: AppointmentRecord) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2 sm:flex-row">
+      <Button type="button" variant="secondary" onClick={() => onReschedule(appointment)} disabled={disabled}>
+        Reschedule
+      </Button>
+      <Button type="button" variant="danger" onClick={() => onCancel(appointment)} disabled={disabled}>
+        Cancel
+      </Button>
+    </div>
   );
 }
 
@@ -779,12 +1565,23 @@ function SegmentAssignmentList({ record }: { record: AvailabilitySlot | Appointm
   );
 }
 
-function EmptyState({ icon, title, message }: { icon: ReactNode; title: string; message: string }) {
+function EmptyState({
+  icon,
+  title,
+  message,
+  children
+}: {
+  icon: ReactNode;
+  title: string;
+  message: string;
+  children?: ReactNode;
+}) {
   return (
     <div className="mt-5 rounded-md border border-line p-6 text-center">
       <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-md bg-slate-100">{icon}</div>
       <div className="mt-3 text-sm font-semibold text-ink">{title}</div>
       <div className="mt-1 text-sm leading-6 text-muted">{message}</div>
+      {children}
     </div>
   );
 }
@@ -793,12 +1590,18 @@ function AppointmentCard({
   item,
   serviceName,
   staffName,
-  technicianPreference
+  technicianPreference,
+  disabled,
+  onReschedule,
+  onCancel
 }: {
   item: AppointmentRecord;
   serviceName: string;
   staffName: string;
   technicianPreference: string;
+  disabled: boolean;
+  onReschedule: (appointment: AppointmentRecord) => void;
+  onCancel: (appointment: AppointmentRecord) => void;
 }) {
   return (
     <div className="rounded-md border border-line p-4">
@@ -819,6 +1622,14 @@ function AppointmentCard({
         ]}
       />
       <SegmentAssignmentList record={item} />
+      <div className="mt-4">
+        <AppointmentActions
+          appointment={item}
+          disabled={disabled}
+          onReschedule={onReschedule}
+          onCancel={onCancel}
+        />
+      </div>
     </div>
   );
 }
@@ -931,3 +1742,113 @@ function bookingPathReady(status: StatusResponse | null) {
   const locationSelected = Boolean(connection?.location_id);
   return connected && locationSelected && (readiness?.service_count ?? 0) > 0 && (readiness?.staff_count ?? 0) > 0;
 }
+
+function emptyActionForm(preferredDate: string): AppointmentActionForm {
+  return {
+    customerName: "",
+    customerPhone: "",
+    customerEmail: "",
+    serviceID: "",
+    staffID: "",
+    preferredDate,
+    selectedSlotKey: "",
+    notes: "",
+    cancelReason: ""
+  };
+}
+
+function actionAvailabilitySegments(
+  mode: AppointmentActionMode,
+  form: AppointmentActionForm,
+  appointment: AppointmentRecord | null
+): BookingSegmentRequest[] {
+  if (mode === "create") {
+    return [
+      {
+        service_id: form.serviceID,
+        staff_id: form.staffID,
+        staff_selection_mode: form.staffID ? "specific" : "anyone"
+      }
+    ];
+  }
+  if (mode !== "reschedule" || !appointment) {
+    return [];
+  }
+  return appointmentRequestSegments(appointment, form.staffID);
+}
+
+function appointmentRequestSegments(appointment: AppointmentRecord, staffID: string): BookingSegmentRequest[] {
+  const segments = orderedSegments(appointment);
+  if (segments.length > 0) {
+    return segments.map((segment) => {
+      const nextStaffID = staffID || segment.staff_id || appointment.staff_id || "";
+      return {
+        service_id: segment.service_id ?? appointment.service_id ?? "",
+        staff_id: nextStaffID,
+        staff_selection_mode: staffID ? "specific" : staffMode(segment.staff_selection_mode, nextStaffID)
+      };
+    });
+  }
+  const nextStaffID = staffID || appointment.staff_id || "";
+  return [
+    {
+      service_id: appointment.service_id ?? "",
+      staff_id: nextStaffID,
+      staff_selection_mode: staffID ? "specific" : staffMode(appointment.staff_selection_mode, nextStaffID)
+    }
+  ];
+}
+
+function slotBookingSegments(
+  slot: AvailabilitySlot,
+  fallbackServiceID: string,
+  staffSelectionMode: StaffSelectionMode
+): BookingSegmentRequest[] {
+  const segments = slot.segments ?? [];
+  if (segments.length > 0) {
+    return segments.map((segment) => ({
+      service_id: segment.service_id,
+      staff_id: segment.staff_id ?? "",
+      staff_selection_mode: staffSelectionMode
+    }));
+  }
+  return [
+    {
+      service_id: fallbackServiceID,
+      staff_id: slot.staff_id ?? "",
+      staff_selection_mode: staffSelectionMode
+    }
+  ];
+}
+
+function staffMode(value: StaffSelectionMode | undefined, staffID: string): StaffSelectionMode {
+  if (value === "anyone" || value === "specific") {
+    return value;
+  }
+  return staffID ? "specific" : "anyone";
+}
+
+function appointmentPrimaryServiceID(appointment: AppointmentRecord) {
+  return orderedSegments(appointment).find((segment) => segment.service_id)?.service_id ?? appointment.service_id ?? "";
+}
+
+function canChangeAppointment(appointment: AppointmentRecord) {
+  return appointment.status !== "cancelled" && Boolean(appointment.pos_appointment_id);
+}
+
+function isBookingAttempt(response: AppointmentRecord | BookingAttempt): response is BookingAttempt {
+  return "requested_start_time" in response;
+}
+
+function slotKey(slot: AvailabilitySlot) {
+  return `${slot.start_time}-${slot.end_time}-${slot.staff_id || assignedTechniciansLabel(slot)}`;
+}
+
+const inputClassName =
+  "mt-2 h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-teal-100 disabled:bg-slate-100 disabled:text-slate-500";
+
+const selectClassName =
+  "mt-2 h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-teal-100 disabled:bg-slate-100 disabled:text-slate-500";
+
+const textareaClassName =
+  "mt-2 min-h-24 w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-teal-100 disabled:bg-slate-100 disabled:text-slate-500";
