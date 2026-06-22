@@ -176,6 +176,78 @@ Dashboard flow:
 
 Do not proceed to live phone booking until the Square readiness checks pass.
 
+## Current Demo State - Square Sandbox Nail Salon
+
+Use these notes when rebuilding or repairing the current Square sandbox demo.
+
+Salon:
+
+- Local salon: `Lotus Nails Studio`
+- Square location: `L3QRV6AZKFKVQ`
+- The active Square connection must include:
+  `APPOINTMENTS_READ`, `APPOINTMENTS_WRITE`,
+  `APPOINTMENTS_BUSINESS_SETTINGS_READ`, `CUSTOMERS_READ`,
+  `CUSTOMERS_WRITE`, `ITEMS_READ`, `ITEMS_WRITE`,
+  `MERCHANT_PROFILE_READ`, `EMPLOYEES_READ`, `EMPLOYEES_WRITE`
+
+Sandbox token recovery:
+
+- Sandbox browser OAuth can fail with a blank Square page or `HTTP 403`.
+- If browser OAuth fails, use Square Developer Console -> Sandbox -> OAuth -> Test account authorizations.
+- Copy the sandbox access token locally only. Do not paste the token into chat or docs.
+- Import the token only after encrypting it with `TOKEN_ENCRYPTION_KEY_BASE64`, then write the encrypted value to `pos_connections.access_token_encrypted`.
+
+Demo service menu:
+
+- `Classic Manicure` - 30 minutes - `$25`
+- `Gel Manicure` - 45 minutes - `$38`
+- `Classic Pedicure` - 45 minutes - `$40`
+- `Spa Pedicure` - 60 minutes - `$55`
+- `Dip Powder Manicure` - 60 minutes - `$50`
+- `Acrylic Full Set` - 75 minutes - `$65`
+- `Gel Removal` - 20 minutes - `$15`
+
+Square service bookability requirements:
+
+- `item_data.product_type` must be `APPOINTMENTS_SERVICE`.
+- Each service variation must include `service_duration`.
+- Each service variation must set `available_for_booking=true`.
+- Each service variation must set `transition_time=0`.
+- Each service variation must set `team_member_ids` to Square Appointments-bookable team members.
+- If these fields are missing, Square availability returns:
+  `INVALID_VALUE: Service variation is not bookable`.
+
+Demo staff:
+
+- `Mai Nguyen`
+- `Tina Tran`
+- `Kelly Pham`
+- `Jenny Le`
+
+Current staff limitation:
+
+- Square Bookings API currently reports only `Mai Nguyen` as Appointments-bookable.
+- Local `staff.ai_bookable` should be `true` only for `Mai Nguyen` until Square Dashboard creates or enables booking profiles for the other demo staff.
+- `Tina Tran`, `Kelly Pham`, and `Jenny Le` may remain active staff records, but they should not be offered for Square availability yet.
+- If a non-bookable staff member is sent to Square availability, Square returns:
+  `INVALID_VALUE: Invalid team member <id>`.
+
+Expected validation:
+
+- `2026-06-21`: no availability slots.
+- `2026-06-22`: availability slots return; the first known slot was `2026-06-22T17:00:00Z`.
+- The dashboard availability staff dropdown should show only `Mai Nguyen` until the other staff have Square Appointments booking profiles.
+
+Recovery checklist:
+
+1. Verify scopes in `pos_connections.scopes`.
+2. Verify Square catalog has 7 active nail services.
+3. Verify each Square service variation has `available_for_booking=true`, `transition_time=0`, and `team_member_ids`.
+4. Verify local `services.pos_service_version` is synced after Square catalog updates.
+5. Verify only Square Appointments-bookable staff have local `staff.ai_bookable=true`.
+6. Test Square `/v2/bookings/availability/search`.
+7. Test local `/api/salons/:id/availability`.
+
 ## Step 5 - Twilio Configuration
 
 Backend env:
