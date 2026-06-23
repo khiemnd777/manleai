@@ -513,7 +513,7 @@ export function AppointmentsDashboard() {
         <div>
           <h1 className="text-2xl font-bold text-ink">Booking Calendar</h1>
           <p className="mt-1 text-sm text-muted">
-            Confirmed Square Appointments bookings, pending requests, and available slots used by the AI receptionist.
+            POS-confirmed bookings, pending requests, and Square Appointments availability used by the AI receptionist.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -537,6 +537,7 @@ export function AppointmentsDashboard() {
       {actionNotice ? <ActionNoticePanel notice={actionNotice} /> : null}
 
       <ReadinessPanel status={status} />
+      <BookingBoundaryPanel />
 
       {actionMode ? (
         <BookingActionPanel
@@ -566,7 +567,7 @@ export function AppointmentsDashboard() {
       ) : null}
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <Metric label="Confirmed appointments" value={String(confirmedCount)} />
+        <Metric label="POS-confirmed appointments" value={String(confirmedCount)} />
         <Metric label="Upcoming" value={String(upcomingCount)} />
         <Metric label="Pending requests" value={String(pendingRequests.length)} />
         <Metric label="Last Square sync" value={formatOptionalDate(status?.connection.last_sync_at)} />
@@ -578,7 +579,7 @@ export function AppointmentsDashboard() {
             <div>
               <CardTitle>Calendar view</CardTitle>
               <CardDescription>
-                Confirmed bookings and pending requests for the selected day.
+                POS-confirmed bookings and pending requests for the selected day.
               </CardDescription>
             </div>
             <Badge value={dayAppointments.length + dayPendingRequests.length > 0 ? "active" : "disabled"} />
@@ -692,7 +693,7 @@ export function AppointmentsDashboard() {
       <Card>
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
           <div>
-            <CardTitle>Appointments confirmed by POS</CardTitle>
+            <CardTitle>POS-confirmed appointments</CardTitle>
             <CardDescription>
               These rows are confirmed only because Square Appointments returned a booking ID.
             </CardDescription>
@@ -704,7 +705,7 @@ export function AppointmentsDashboard() {
           <EmptyState
             icon={<CalendarClock className="h-5 w-5 text-muted" />}
             title="No appointments yet"
-            message="Confirmed bookings will appear here after Square returns a booking ID."
+            message="POS-confirmed bookings will appear here after Square Appointments returns a booking ID."
           >
             <Button
               type="button"
@@ -789,7 +790,7 @@ export function AppointmentsDashboard() {
           <div>
             <CardTitle>Fallback requests</CardTitle>
             <CardDescription>
-              These requests are not confirmed appointments. Review them when the POS path fails.
+              These requests are not POS-confirmed appointments. Review them when the POS path fails.
             </CardDescription>
           </div>
           <Badge value={pendingRequests.length > 0 ? "fallback_pending" : "disabled"} />
@@ -882,7 +883,7 @@ function ReadinessPanel({ status }: { status: StatusResponse | null }) {
           <div>
             <CardTitle>Square booking path is configured</CardTitle>
             <CardDescription className="text-emerald-800">
-              Confirmed appointments require a successful Square Appointments booking ID.
+              POS-confirmed appointments require a successful Square Appointments booking ID.
             </CardDescription>
           </div>
           <Badge value={readiness?.ai_enabled ? "active" : "disabled"} />
@@ -909,6 +910,45 @@ function ReadinessPanel({ status }: { status: StatusResponse | null }) {
         </div>
       </div>
     </Card>
+  );
+}
+
+function BookingBoundaryPanel() {
+  return (
+    <Card>
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div>
+          <CardTitle>Booking boundary</CardTitle>
+          <CardDescription>
+            The dashboard separates POS-confirmed appointments from requests that still need owner review.
+          </CardDescription>
+        </div>
+        <Badge value="pos_pending" />
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
+        <BoundaryItem
+          label="POS-confirmed appointment"
+          value="The active POS provider returned a booking ID before the appointment was recorded as confirmed."
+        />
+        <BoundaryItem
+          label="Pending request"
+          value="The POS path did not confirm. Owner review is required and no appointment is marked confirmed."
+        />
+        <BoundaryItem
+          label="Not bookable"
+          value="Local-only, unmapped, archived, or sync-failed services and staff stay out of availability and booking."
+        />
+      </div>
+    </Card>
+  );
+}
+
+function BoundaryItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-line p-3">
+      <div className="text-sm font-semibold text-ink">{label}</div>
+      <div className="mt-1 text-xs leading-5 text-muted">{value}</div>
+    </div>
   );
 }
 
@@ -1427,7 +1467,7 @@ function DaySchedule({
       title: item.customer_name,
       subtitle: bookingSummaryLabel(item, serviceNames, staffNames),
       status: item.status,
-      detail: item.pos_appointment_id ? "Square booking ID returned" : "POS booking ID missing"
+      detail: item.pos_appointment_id ? "POS-confirmed: Square booking ID returned" : "POS booking ID missing"
     })),
     ...pendingRequests.map((item) => ({
       id: `pending-${item.id}`,
@@ -1445,7 +1485,7 @@ function DaySchedule({
       <EmptyState
         icon={<CalendarClock className="h-5 w-5 text-muted" />}
         title="No calendar items for this day"
-        message="Confirmed bookings and pending requests for the selected date will appear here."
+        message="POS-confirmed bookings and pending requests for the selected date will appear here."
       />
     );
   }

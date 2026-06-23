@@ -119,7 +119,7 @@ export function ServicesDashboard() {
             body
           });
       setServices((current) => upsertService(current, response.service));
-      setSuccess(editingService ? "Service saved." : "Service created. Local-only services are not bookable until linked to Square Appointments.");
+      setSuccess(editingService ? "Service saved." : "Service created. Local-only services are not booking-ready until linked to Square Appointments.");
       setEditingService(response.service);
       setForm(serviceToForm(response.service));
       await load({ silent: true });
@@ -169,7 +169,7 @@ export function ServicesDashboard() {
         setEditingService(response.service);
         setForm(serviceToForm(response.service));
       }
-      setSuccess(nextValue ? "AI booking allowed for this synced service." : "AI booking blocked for this service.");
+      setSuccess(nextValue ? "Service marked booking-ready for the AI receptionist." : "Service removed from AI booking.");
       await load({ silent: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not update AI booking eligibility.");
@@ -208,7 +208,7 @@ export function ServicesDashboard() {
         <div>
           <h1 className="text-2xl font-bold text-ink">Services</h1>
           <p className="mt-1 text-sm text-muted">
-            Manage ManleAI service records. Square Appointments remains the booking execution layer.
+            Manage ManleAI-owned service records. Square Appointments executes availability and booking.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -228,12 +228,13 @@ export function ServicesDashboard() {
       {success ? <Alert type="success" title="Services updated" message={success} /> : null}
 
       <ServicesGate status={status} />
+      <BookingEligibilityPanel />
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <Metric label="Total services" value={String(metrics.total)} />
         <Metric label="Synced" value={String(metrics.synced)} />
         <Metric label="Local only" value={String(metrics.localOnly)} />
-        <Metric label="AI bookable" value={String(metrics.aiBookable)} />
+        <Metric label="Booking-ready" value={String(metrics.aiBookable)} />
       </div>
 
       {formOpen ? (
@@ -256,7 +257,7 @@ export function ServicesDashboard() {
           <div>
             <CardTitle>Service catalog</CardTitle>
             <CardDescription>
-              Local-only services are visible here but cannot be booked until linked to Square Appointments.
+              Only active, synced, POS-linked, AI-bookable services are used for availability and booking.
             </CardDescription>
           </div>
           <Badge value={services.length > 0 ? "active" : "disabled"} />
@@ -291,7 +292,7 @@ function ServicesGate({ status }: { status: StatusResponse | null }) {
           <div>
             <CardTitle>Square sync is ready</CardTitle>
             <CardDescription className="text-emerald-800">
-              Last synced {new Date(lastSync).toLocaleString()}. Synced services can be enabled for AI booking.
+              Last synced {new Date(lastSync).toLocaleString()}. Synced services can become booking-ready after AI booking is allowed.
             </CardDescription>
           </div>
           <Badge value="active" />
@@ -321,6 +322,45 @@ function ServicesGate({ status }: { status: StatusResponse | null }) {
   );
 }
 
+function BookingEligibilityPanel() {
+  return (
+    <Card>
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div>
+          <CardTitle>Booking eligibility</CardTitle>
+          <CardDescription>
+            Service records can exist locally, but booking stays gated until the active POS link is ready.
+          </CardDescription>
+        </div>
+        <Badge value="booking" />
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
+        <EligibilityItem
+          label="Booking-ready service"
+          value="Active, synced, POS linked, and allowed for AI booking."
+        />
+        <EligibilityItem
+          label="Not bookable"
+          value="Local-only, unmapped, sync-failed, archived, or inactive services stay out of availability and booking."
+        />
+        <EligibilityItem
+          label="Booking execution"
+          value="Square Appointments returns availability and booking IDs before appointments can be confirmed."
+        />
+      </div>
+    </Card>
+  );
+}
+
+function EligibilityItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-line p-3">
+      <div className="text-sm font-semibold text-ink">{label}</div>
+      <div className="mt-1 text-xs leading-5 text-muted">{value}</div>
+    </div>
+  );
+}
+
 function ServiceForm({
   form,
   service,
@@ -343,7 +383,7 @@ function ServiceForm({
         <div>
           <CardTitle>{service ? "Edit service" : "New service"}</CardTitle>
           <CardDescription>
-            {service ? serviceGateReason(service) : "New services start as local only and cannot be booked until linked to Square Appointments."}
+            {service ? serviceGateReason(service) : "New services start as ManleAI local records and are not booking-ready until linked to Square Appointments."}
           </CardDescription>
         </div>
         {service ? <Badge value={service.sync_status || "local_only"} /> : <Badge value="local_only" />}
@@ -442,7 +482,7 @@ function ServicesTable({
               <th className="px-4 py-3">Price</th>
               <th className="px-4 py-3">Source</th>
               <th className="px-4 py-3">Sync status</th>
-              <th className="px-4 py-3">AI booking</th>
+              <th className="px-4 py-3">Booking readiness</th>
               <th className="px-4 py-3">Actions</th>
             </tr>
           </thead>
@@ -596,7 +636,9 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
         <Settings2 className="h-5 w-5 text-muted" />
       </div>
       <div className="mt-3 text-sm font-semibold text-ink">No services yet</div>
-      <div className="mt-1 text-sm leading-6 text-muted">Create a local service or sync Square Appointments services.</div>
+      <div className="mt-1 text-sm leading-6 text-muted">
+        Create a local service or sync Square Appointments services. Local records are not bookable until linked.
+      </div>
       <div className="mt-4 flex flex-wrap justify-center gap-3">
         <Button type="button" onClick={onCreate}>
           <Plus className="h-4 w-4" />
@@ -705,14 +747,14 @@ function canEnableAI(service: POSService) {
 }
 
 function serviceGateReason(service: POSService) {
-  if (service.archived_at || service.sync_status === "archived") return "Archived services are retained for history and cannot be booked.";
-  if (!service.active) return "Inactive services cannot be offered by the AI receptionist.";
-  if (!service.pos_linked || service.sync_status === "local_only") return "Local-only services need a Square Appointments link before AI booking.";
-  if (service.sync_status === "sync_failed") return service.sync_error || "Latest POS sync failed.";
-  if (service.sync_status === "unmapped") return "Service needs a provider mapping before AI booking.";
+  if (service.archived_at || service.sync_status === "archived") return "Archived services stay visible for history and are not bookable.";
+  if (!service.active) return "Inactive services are not bookable by the AI receptionist.";
+  if (!service.pos_linked || service.sync_status === "local_only") return "Local-only services need a Square Appointments link before they are booking-ready.";
+  if (service.sync_status === "sync_failed") return service.sync_error || "Latest POS sync failed; service is not bookable.";
+  if (service.sync_status === "unmapped") return "Service needs an active-provider mapping before it is bookable.";
   if (!service.pos_service_version) return "Square booking metadata is incomplete.";
-  if (service.ai_bookable) return "Synced and available for AI booking.";
-  return "Synced service can be enabled for AI booking.";
+  if (service.ai_bookable) return "Booking-ready: synced, POS linked, and allowed for AI booking.";
+  return "Synced service can be allowed for AI booking.";
 }
 
 function formatPrice(value?: number) {

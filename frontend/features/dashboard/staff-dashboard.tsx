@@ -117,7 +117,7 @@ export function StaffDashboard() {
             body
           });
       setStaff((current) => upsertStaff(current, response.staff_member));
-      setSuccess(editingStaff ? "Staff member saved." : "Staff member created. Local-only staff are not bookable until linked to Square Appointments.");
+      setSuccess(editingStaff ? "Staff member saved." : "Staff member created. Local-only staff are not booking-ready until linked to Square Appointments.");
       setEditingStaff(response.staff_member);
       setForm(staffToForm(response.staff_member));
       await load({ silent: true });
@@ -167,7 +167,7 @@ export function StaffDashboard() {
         setEditingStaff(response.staff_member);
         setForm(staffToForm(response.staff_member));
       }
-      setSuccess(nextValue ? "AI booking allowed for this synced staff member." : "AI booking blocked for this staff member.");
+      setSuccess(nextValue ? "Staff member marked booking-ready for the AI receptionist." : "Staff member removed from AI booking.");
       await load({ silent: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not update AI booking eligibility.");
@@ -206,7 +206,7 @@ export function StaffDashboard() {
         <div>
           <h1 className="text-2xl font-bold text-ink">Staff</h1>
           <p className="mt-1 text-sm text-muted">
-            Manage ManleAI staff records. Square Appointments remains the booking execution layer.
+            Manage ManleAI-owned staff records. Square Appointments executes availability and booking.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -226,12 +226,13 @@ export function StaffDashboard() {
       {success ? <Alert type="success" title="Staff updated" message={success} /> : null}
 
       <StaffGate status={status} />
+      <BookingEligibilityPanel />
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <Metric label="Total staff" value={String(metrics.total)} />
         <Metric label="Synced" value={String(metrics.synced)} />
         <Metric label="Local only" value={String(metrics.localOnly)} />
-        <Metric label="AI bookable" value={String(metrics.aiBookable)} />
+        <Metric label="Booking-ready" value={String(metrics.aiBookable)} />
       </div>
 
       {formOpen ? (
@@ -254,7 +255,7 @@ export function StaffDashboard() {
           <div>
             <CardTitle>Staff directory</CardTitle>
             <CardDescription>
-              Local-only staff are visible here but cannot be booked until linked to Square Appointments.
+              Only active, synced, POS-linked, AI-bookable staff are used for availability and booking.
             </CardDescription>
           </div>
           <Badge value={staff.length > 0 ? "active" : "disabled"} />
@@ -289,7 +290,7 @@ function StaffGate({ status }: { status: StatusResponse | null }) {
           <div>
             <CardTitle>Square sync is ready</CardTitle>
             <CardDescription className="text-emerald-800">
-              Last synced {new Date(lastSync).toLocaleString()}. Synced staff can be enabled for AI booking.
+              Last synced {new Date(lastSync).toLocaleString()}. Synced staff can become booking-ready after AI booking is allowed.
             </CardDescription>
           </div>
           <Badge value="active" />
@@ -319,6 +320,45 @@ function StaffGate({ status }: { status: StatusResponse | null }) {
   );
 }
 
+function BookingEligibilityPanel() {
+  return (
+    <Card>
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div>
+          <CardTitle>Booking eligibility</CardTitle>
+          <CardDescription>
+            Staff records can exist locally, but booking stays gated until the active POS link is ready.
+          </CardDescription>
+        </div>
+        <Badge value="booking" />
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
+        <EligibilityItem
+          label="Booking-ready staff"
+          value="Active, synced, POS linked, and allowed for AI booking."
+        />
+        <EligibilityItem
+          label="Not bookable"
+          value="Local-only, unmapped, sync-failed, archived, or inactive staff stay out of availability and booking."
+        />
+        <EligibilityItem
+          label="Booking execution"
+          value="Square Appointments returns availability and booking IDs before appointments can be confirmed."
+        />
+      </div>
+    </Card>
+  );
+}
+
+function EligibilityItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-line p-3">
+      <div className="text-sm font-semibold text-ink">{label}</div>
+      <div className="mt-1 text-xs leading-5 text-muted">{value}</div>
+    </div>
+  );
+}
+
 function StaffForm({
   form,
   member,
@@ -341,7 +381,7 @@ function StaffForm({
         <div>
           <CardTitle>{member ? "Edit staff member" : "New staff member"}</CardTitle>
           <CardDescription>
-            {member ? staffGateReason(member) : "New staff start as local only and cannot be booked until linked to Square Appointments."}
+            {member ? staffGateReason(member) : "New staff start as ManleAI local records and are not booking-ready until linked to Square Appointments."}
           </CardDescription>
         </div>
         {member ? <Badge value={member.sync_status || "local_only"} /> : <Badge value="local_only" />}
@@ -419,7 +459,7 @@ function StaffTable({
               <th className="px-4 py-3">Contact</th>
               <th className="px-4 py-3">Source</th>
               <th className="px-4 py-3">Sync status</th>
-              <th className="px-4 py-3">AI booking</th>
+              <th className="px-4 py-3">Booking readiness</th>
               <th className="px-4 py-3">Actions</th>
             </tr>
           </thead>
@@ -572,7 +612,9 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
         <Users className="h-5 w-5 text-muted" />
       </div>
       <div className="mt-3 text-sm font-semibold text-ink">No staff yet</div>
-      <div className="mt-1 text-sm leading-6 text-muted">Create a local staff member or sync Square Appointments staff.</div>
+      <div className="mt-1 text-sm leading-6 text-muted">
+        Create a local staff member or sync Square Appointments staff. Local records are not bookable until linked.
+      </div>
       <div className="mt-4 flex flex-wrap justify-center gap-3">
         <Button type="button" onClick={onCreate}>
           <Plus className="h-4 w-4" />
@@ -672,11 +714,11 @@ function canEnableAI(member: POSStaffMember) {
 }
 
 function staffGateReason(member: POSStaffMember) {
-  if (member.archived_at || member.sync_status === "archived") return "Archived staff are retained for history and cannot be booked.";
-  if (!member.active) return "Inactive staff cannot be assigned by the AI receptionist.";
-  if (!member.pos_linked || member.sync_status === "local_only") return "Local-only staff need a Square Appointments link before AI booking.";
-  if (member.sync_status === "sync_failed") return member.sync_error || "Latest POS sync failed.";
-  if (member.sync_status === "unmapped") return "Staff member needs a provider mapping before AI booking.";
-  if (member.ai_bookable) return "Synced and available for AI booking.";
-  return "Synced staff member can be enabled for AI booking.";
+  if (member.archived_at || member.sync_status === "archived") return "Archived staff stay visible for history and are not bookable.";
+  if (!member.active) return "Inactive staff are not bookable by the AI receptionist.";
+  if (!member.pos_linked || member.sync_status === "local_only") return "Local-only staff need a Square Appointments link before they are booking-ready.";
+  if (member.sync_status === "sync_failed") return member.sync_error || "Latest POS sync failed; staff member is not bookable.";
+  if (member.sync_status === "unmapped") return "Staff member needs an active-provider mapping before they are bookable.";
+  if (member.ai_bookable) return "Booking-ready: synced, POS linked, and allowed for AI booking.";
+  return "Synced staff member can be allowed for AI booking.";
 }

@@ -325,6 +325,48 @@ func TestProviderSwitchReadinessBlocksWithoutAlternateAdapter(t *testing.T) {
 	}
 }
 
+func TestProviderSwitchReadinessBlocksWithoutBookableMappings(t *testing.T) {
+	now := testTime()
+	store := &fakePOSStore{
+		activeProvider: ProviderSquare,
+		connection: &Connection{
+			ID:         "conn_1",
+			SalonID:    "salon_1",
+			Provider:   ProviderSquare,
+			Status:     StatusActive,
+			LocationID: "loc_1",
+			LastSyncAt: &now,
+			Scopes:     []string{},
+		},
+		summary: ProviderMappingSummary{
+			ServiceCount:         2,
+			StaffCount:           2,
+			LinkedServiceCount:   2,
+			LinkedStaffCount:     2,
+			BookableServiceCount: 0,
+			BookableStaffCount:   1,
+		},
+	}
+	service := NewService(store, fakeCapabilityProvider{name: ProviderSquare}, fakeCapabilityProvider{name: "future_pos"})
+
+	readiness, err := service.ProviderSwitchReadiness(context.Background(), "salon_1", "owner_1")
+	if err != nil {
+		t.Fatalf("ProviderSwitchReadiness returned error: %v", err)
+	}
+	if readiness.DryRunBookingReady {
+		t.Fatalf("dry-run booking should be blocked without bookable service mappings: %#v", readiness)
+	}
+	if readiness.CanActivateProvider {
+		t.Fatalf("provider activation must remain disabled: %#v", readiness)
+	}
+	if servicesCheck := findReadinessCheck(readiness.Checks, "services_mapped"); servicesCheck.Complete || servicesCheck.Message == "" {
+		t.Fatalf("services mapped check = %#v, want incomplete service mapping gate", servicesCheck)
+	}
+	if readiness.BlockedReason != findReadinessCheck(readiness.Checks, "services_mapped").Message {
+		t.Fatalf("blocked reason = %q, want services_mapped message", readiness.BlockedReason)
+	}
+}
+
 func TestCreateProviderSwitchRunBlocksMissingAdapter(t *testing.T) {
 	store := &fakePOSStore{activeProvider: ProviderSquare}
 	service := NewService(store, fakeCapabilityProvider{name: ProviderSquare})
@@ -714,6 +756,67 @@ func TestProviderSwitchDryRunReadinessRequiresResolvedMatches(t *testing.T) {
 	}
 	if readiness.BlockedReason != resolvedCheck.Message {
 		t.Fatalf("blocked reason = %q, want unresolved match message %q", readiness.BlockedReason, resolvedCheck.Message)
+	}
+}
+
+func TestProviderSwitchDryRunReadinessBlocksWhenActiveProviderChanged(t *testing.T) {
+	now := testTime()
+	store := &fakePOSStore{
+		activeProvider: "future_pos",
+		connection: &Connection{
+			ID:         "conn_1",
+			SalonID:    "salon_1",
+			Provider:   ProviderSquare,
+			Status:     StatusActive,
+			LocationID: "loc_1",
+			LastSyncAt: &now,
+		},
+		summary: ProviderMappingSummary{
+			BookableServiceCount: 1,
+			BookableStaffCount:   1,
+		},
+		switchRun: &ProviderSwitchRun{
+			ID:           "run_1",
+			SalonID:      "salon_1",
+			FromProvider: ProviderSquare,
+			ToProvider:   "future_pos",
+			Status:       SwitchRunStatusReady,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		switchMatches: []ProviderSwitchMatch{{
+			ID:                "match_1",
+			RunID:             "run_1",
+			SalonID:           "salon_1",
+			EntityType:        EntityTypeService,
+			CanonicalEntityID: "service_1",
+			ProviderEntityID:  "future_service_1",
+			ProviderName:      "Classic Manicure",
+			MatchStatus:       SwitchMatchStatusConfirmed,
+			MatchConfidence:   100,
+			CreatedAt:         now,
+			UpdatedAt:         now,
+		}},
+	}
+	service := NewService(
+		store,
+		fakeCapabilityProvider{name: ProviderSquare},
+		fakeCapabilityProvider{name: "future_pos"},
+	)
+
+	readiness, err := service.ProviderSwitchDryRunReadiness(context.Background(), "salon_1", "owner_1", "run_1")
+	if err != nil {
+		t.Fatalf("ProviderSwitchDryRunReadiness returned error: %v", err)
+	}
+	currentCheck := findReadinessCheck(readiness.Checks, "current_provider_booking_ready")
+	if currentCheck.Complete || currentCheck.Message != "This switch run no longer starts from the active POS provider." {
+		t.Fatalf("current provider check = %#v, want active provider mismatch gate", currentCheck)
+	}
+	if readiness.CanRunDryRun || readiness.DryRunReady || readiness.CanActivate {
+		t.Fatalf("dry-run readiness = %#v, want blocked after active provider changed", readiness)
+	}
+	if readiness.BlockedReason != currentCheck.Message {
+		t.Fatalf("blocked reason = %q, want current-provider mismatch message", readiness.BlockedReason)
 	}
 }
 

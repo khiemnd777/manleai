@@ -444,20 +444,79 @@ readiness, and activate new provider only after required mappings are ready.
 
 Goal: make owner UX coherent after canonical ownership migration.
 
+Phase 7A Appointments/Customers POS-boundary polish completed:
+
+- [x] Clarify Appointments dashboard copy so confirmed bookings are described
+      as POS-confirmed bookings backed by a Square Appointments booking ID.
+- [x] Add an Appointments booking boundary panel explaining POS-confirmed
+      appointments, pending requests, and not-bookable local/unmapped/failed
+      records.
+- [x] Clarify Customers dashboard activity labels so appointment activity is
+      described as POS-confirmed while pending requests remain separate.
+- [x] Keep wording scope-honest: Square Appointments remains the only current
+      real POS integration.
+
+Phase 7B Services/Staff POS-boundary polish completed:
+
+- [x] Clarify Services and Staff dashboard copy so records are described as
+      ManleAI-owned while Square Appointments executes availability and
+      booking.
+- [x] Add Services and Staff booking eligibility panels explaining
+      booking-ready, not-bookable, and Square Appointments execution states.
+- [x] Keep local-only, unmapped, sync-failed, archived, and inactive services
+      and staff visibly gated from availability and booking.
+- [x] Keep wording scope-honest without adding fake provider support.
+
+Phase 7C Dashboard Home readiness overview completed:
+
+- [x] Replace Dashboard Home placeholder metrics with real owner-scoped counts
+      from conversation sessions, appointments, booking attempts, services, and
+      staff.
+- [x] Add Dashboard Home readiness cards for Square Appointments, phone booking,
+      and canonical booking-ready data.
+- [x] Add Dashboard Home POS booking boundary copy for POS-confirmed
+      appointments and fallback pending requests.
+- [x] Update the app shell pilot tagline from Square-first to POS-first while
+      keeping Square Appointments as the current real integration.
+
+Phase 7D readiness regression tests completed:
+
+- [x] Add POS service regression coverage for provider switch readiness when
+      current-provider service/staff mappings are not booking-ready.
+- [x] Add POS dry-run readiness regression coverage for switch runs whose
+      `from_provider` no longer matches the active POS provider.
+- [x] Keep coverage test-only without adding production fake providers or
+      executable alternate-provider support.
+
+Phase 7E Integrations readiness/state polish completed:
+
+- [x] Add an Integrations readiness overview that surfaces Square connection,
+      booking-ready data, test booking, and provider-switch gates from existing
+      API data.
+- [x] Improve Square test booking gated state so owners can see the next
+      blocker before creating, cancelling, or enabling AI booking.
+- [x] Improve sync-log empty state so owners understand sync history starts
+      only after Square is connected and services/staff sync runs.
+- [x] Keep provider switch copy scope-honest: Square Appointments is the only
+      native POS adapter in this pilot, so import, dry-run, and activation stay
+      disabled.
+
 Tasks:
 
-- [ ] Review Services, Staff, Customers, and Appointments copy.
-- [ ] Ensure all pages show sync status, booking readiness, and blockers.
-- [ ] Ensure loading, empty, error, success, and disabled/gated states exist.
-- [ ] Remove stale Square-only wording where canonical model now applies.
-- [ ] Keep wording scope-honest: Square Appointments is current integration.
-- [ ] Add regression tests or smoke tests for critical flows.
+- [x] Review Appointments and Customers copy for POS-boundary language.
+- [x] Review Services and Staff copy for canonical ownership and POS-boundary
+      language.
+- [x] Ensure all pages show sync status, booking readiness, and blockers.
+- [x] Ensure loading, empty, error, success, and disabled/gated states exist.
+- [x] Remove stale Square-only wording where canonical model now applies.
+- [x] Keep wording scope-honest: Square Appointments is current integration.
+- [x] Add regression tests or smoke tests for critical flows.
 
 Definition of done:
 
-- [ ] Owner can understand what is local, synced, failed, or not bookable.
-- [ ] No UI implies broad POS support beyond implemented providers.
-- [ ] No UI implies confirmed appointment without POS success.
+- [x] Owner can understand what is local, synced, failed, or not bookable.
+- [x] No UI implies broad POS support beyond implemented providers.
+- [x] No UI implies confirmed appointment without POS success.
 
 Suggested thread prompt:
 

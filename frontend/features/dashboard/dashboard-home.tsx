@@ -9,29 +9,111 @@ import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest } from "@/lib/api/client";
-import type { Salon } from "@/types/api";
+import type {
+  AppointmentRecord,
+  BookingAttempt,
+  ConversationSession,
+  POSConnection,
+  POSService,
+  POSStaffMember,
+  Salon,
+  SquareReadiness,
+  SyncLog,
+  VoiceStatus
+} from "@/types/api";
 
 type SalonListResponse = {
   salons: Salon[];
 };
 
+type StatusResponse = {
+  connection: POSConnection;
+  sync_logs: SyncLog[];
+  readiness: SquareReadiness;
+};
+
+type SessionsResponse = {
+  sessions: ConversationSession[];
+};
+
+type AppointmentsResponse = {
+  appointments: AppointmentRecord[];
+};
+
+type AttemptsResponse = {
+  booking_attempts: BookingAttempt[];
+};
+
+type ServicesResponse = {
+  services: POSService[];
+};
+
+type StaffResponse = {
+  staff: POSStaffMember[];
+};
+
 export function DashboardHome() {
   const [salons, setSalons] = useState<Salon[]>([]);
+  const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
+  const [sessions, setSessions] = useState<ConversationSession[]>([]);
+  const [appointments, setAppointments] = useState<AppointmentRecord[]>([]);
+  const [attempts, setAttempts] = useState<BookingAttempt[]>([]);
+  const [services, setServices] = useState<POSService[]>([]);
+  const [staff, setStaff] = useState<POSStaffMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
     let mounted = true;
-    apiRequest<SalonListResponse>("/api/salons")
-      .then((data) => {
-        if (mounted) setSalons(data.salons);
-      })
-      .catch((err) => {
+
+    async function loadDashboard() {
+      setError("");
+      setLoading(true);
+      try {
+        const salonResponse = await apiRequest<SalonListResponse>("/api/salons");
+        const firstSalon = salonResponse.salons[0] ?? null;
+        if (!mounted) return;
+        setSalons(salonResponse.salons);
+
+        if (!firstSalon) {
+          setStatus(null);
+          setVoiceStatus(null);
+          setSessions([]);
+          setAppointments([]);
+          setAttempts([]);
+          setServices([]);
+          setStaff([]);
+          return;
+        }
+
+        const [statusResponse, voiceResponse, sessionsResponse, appointmentResponse, attemptResponse, serviceResponse, staffResponse] =
+          await Promise.all([
+            apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
+            apiRequest<VoiceStatus>(`/api/salons/${firstSalon.id}/voice/status`),
+            apiRequest<SessionsResponse>(`/api/salons/${firstSalon.id}/conversation-sessions?limit=25`),
+            apiRequest<AppointmentsResponse>(`/api/salons/${firstSalon.id}/appointments`),
+            apiRequest<AttemptsResponse>(`/api/salons/${firstSalon.id}/booking-attempts?limit=50`),
+            apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
+            apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`)
+          ]);
+
+        if (!mounted) return;
+        setStatus(statusResponse);
+        setVoiceStatus(voiceResponse);
+        setSessions(sessionsResponse.sessions);
+        setAppointments(appointmentResponse.appointments);
+        setAttempts(attemptResponse.booking_attempts);
+        setServices(serviceResponse.services);
+        setStaff(staffResponse.staff);
+      } catch (err) {
         if (mounted) setError(err instanceof Error ? err.message : "Could not load dashboard.");
-      })
-      .finally(() => {
+      } finally {
         if (mounted) setLoading(false);
-      });
+      }
+    }
+
+    void loadDashboard();
     return () => {
       mounted = false;
     };
@@ -56,6 +138,18 @@ export function DashboardHome() {
   }
 
   const primarySalon = salons[0];
+  const phoneCount = sessions.filter((item) => item.channel === "phone").length;
+  const confirmedAppointments = appointments.filter((item) => item.status === "confirmed").length;
+  const pendingRequests = attempts.filter((item) => item.status === "fallback_pending").length;
+  const bookingReadyServices = services.filter(serviceIsBookingReady).length;
+  const bookingReadyStaff = staff.filter(staffIsBookingReady).length;
+  const squareConnected = Boolean(status?.connection.id) && status?.connection.status !== "not_connected";
+  const squareBadge = squareConnected ? status?.connection.status || "connected" : "not_connected";
+  const squareDescription = squareConnected
+    ? `Square Appointments connected. Last sync: ${formatOptionalDate(status?.connection.last_sync_at)}.`
+    : status?.connection.error_message || "Connect Square Appointments and select a location before booking readiness can pass.";
+  const phoneBookingReady = Boolean(voiceStatus?.phone_booking_ready);
+  const canonicalReady = bookingReadyServices > 0 && bookingReadyStaff > 0;
 
   return (
     <div className="space-y-6">
@@ -63,7 +157,7 @@ export function DashboardHome() {
         <div>
           <h1 className="text-2xl font-bold text-ink">Dashboard</h1>
           <p className="mt-1 text-sm text-muted">
-            Configure the salon, connect Square, and monitor pilot readiness.
+            Monitor POS-first receptionist readiness, pending requests, and Square Appointments booking status.
           </p>
         </div>
         {primarySalon ? <Badge value={primarySalon.ai_enabled ? "active" : "disabled"} /> : null}
@@ -84,14 +178,60 @@ export function DashboardHome() {
       ) : (
         <>
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <MetricCard icon={PhoneCall} label="Calls Today" value="0" subtext="Voice starts later" />
-            <MetricCard icon={CalendarDays} label="Bookings Created" value="0" subtext="Milestone 3" />
-            <MetricCard icon={Link2} label="POS Status" value="Square" subtext="Open Integrations" />
+            <MetricCard
+              icon={PhoneCall}
+              label="Live phone calls"
+              value={String(phoneCount)}
+              subtext={voiceStatus?.ready ? "Phone webhook sessions" : "Phone not configured"}
+            />
+            <MetricCard
+              icon={CalendarDays}
+              label="POS-confirmed appointments"
+              value={String(confirmedAppointments)}
+              subtext="Square booking ID returned"
+            />
+            <MetricCard
+              icon={Link2}
+              label="Pending requests"
+              value={String(pendingRequests)}
+              subtext="Owner review after POS failure"
+            />
             <MetricCard
               icon={CheckCircle2}
-              label="AI Status"
-              value={primarySalon.ai_enabled ? "Enabled" : "Disabled"}
-              subtext="Requires Square checks"
+              label="Booking-ready records"
+              value={`${bookingReadyServices}/${bookingReadyStaff}`}
+              subtext="Services / staff"
+            />
+          </div>
+
+          <div className="grid gap-4 xl:grid-cols-3">
+            <ReadinessCard
+              icon={Link2}
+              title="Square Appointments"
+              badge={squareBadge}
+              description={squareDescription}
+              href="/dashboard/integrations"
+              action="Open Integrations"
+            />
+            <ReadinessCard
+              icon={PhoneCall}
+              title="Phone booking"
+              badge={phoneBookingReady ? "ready" : "not_configured"}
+              description={
+                phoneBookingReady
+                  ? "Phone calls can offer active POS availability and attempt POS-first booking."
+                  : voiceStatus?.booking?.blocked_reason || voiceStatus?.blocked_reason || "Configure voice and booking readiness before phone booking."
+              }
+              href="/dashboard/calls"
+              action="Open Calls"
+            />
+            <ReadinessCard
+              icon={CheckCircle2}
+              title="Canonical data"
+              badge={canonicalReady ? "ready" : "blocked"}
+              description={`Booking uses ${bookingReadyServices} booking-ready services and ${bookingReadyStaff} booking-ready staff. Local-only or failed records stay out of availability.`}
+              href="/dashboard/services"
+              action="Review Services"
             />
           </div>
 
@@ -113,10 +253,10 @@ export function DashboardHome() {
               <div className="flex items-start gap-3">
                 <Settings className="mt-1 h-5 w-5 text-brand" />
                 <div>
-                  <CardTitle>Pilot readiness</CardTitle>
+                  <CardTitle>POS booking boundary</CardTitle>
                   <CardDescription>
-                    AI booking can be enabled after Square readiness checks and a cancelled test
-                    booking pass from the Integrations page.
+                    Appointments are POS-confirmed only after Square Appointments returns a booking ID.
+                    POS failures create pending requests for owner review.
                   </CardDescription>
                 </div>
               </div>
@@ -125,6 +265,43 @@ export function DashboardHome() {
         </>
       )}
     </div>
+  );
+}
+
+function ReadinessCard({
+  icon: Icon,
+  title,
+  badge,
+  description,
+  href,
+  action
+}: {
+  icon: React.ElementType;
+  title: string;
+  badge: string;
+  description: string;
+  href: string;
+  action: string;
+}) {
+  return (
+    <Card>
+      <div className="flex items-start gap-3">
+        <Icon className="mt-1 h-5 w-5 text-brand" />
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <CardTitle>{title}</CardTitle>
+            <Badge value={badge} />
+          </div>
+          <CardDescription>{description}</CardDescription>
+          <Link
+            className="mt-4 inline-flex h-10 items-center justify-center rounded-md border border-line bg-white px-4 text-sm font-semibold text-ink hover:bg-slate-50"
+            href={href}
+          >
+            {action}
+          </Link>
+        </div>
+      </div>
+    </Card>
   );
 }
 
@@ -149,6 +326,34 @@ function MetricCard({
       <div className="mt-1 text-xs text-muted">{subtext}</div>
     </Card>
   );
+}
+
+function serviceIsBookingReady(service: POSService) {
+  return (
+    service.active &&
+    !service.archived_at &&
+    service.sync_status === "synced" &&
+    service.pos_linked &&
+    service.ai_bookable &&
+    Boolean(service.pos_service_id) &&
+    Boolean(service.pos_service_version)
+  );
+}
+
+function staffIsBookingReady(member: POSStaffMember) {
+  return (
+    member.active &&
+    !member.archived_at &&
+    member.sync_status === "synced" &&
+    member.pos_linked &&
+    member.ai_bookable &&
+    Boolean(member.pos_staff_id)
+  );
+}
+
+function formatOptionalDate(value?: string) {
+  if (!value) return "Not synced";
+  return new Date(value).toLocaleString();
 }
 
 function Info({ label, value }: { label: string; value: string }) {

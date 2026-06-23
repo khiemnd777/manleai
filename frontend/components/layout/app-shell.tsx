@@ -49,7 +49,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
             <div>
               <div className="text-sm font-bold text-ink">Salon Receptionist</div>
-              <div className="text-xs text-muted">Square-first pilot</div>
+              <div className="text-xs text-muted">POS-first pilot</div>
             </div>
           </Link>
 

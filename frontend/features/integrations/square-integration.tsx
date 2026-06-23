@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   Ban,
   CalendarCheck,
   CheckCircle2,
@@ -514,6 +515,19 @@ export function SquareIntegration() {
       {error ? <Alert title="Square action failed" message={error} /> : null}
       {success ? <Alert type="success" title="Square updated" message={success} /> : null}
 
+      <ReadinessOverviewPanel
+        busy={busy}
+        connection={connection}
+        latestTest={latestTest}
+        readiness={readiness}
+        services={services}
+        staff={staff}
+        switchReadiness={switchReadiness}
+        syncLogCount={status?.sync_logs?.length ?? 0}
+        onConnect={() => void connectSquare()}
+        onSync={() => void syncSquare()}
+      />
+
       <Card>
         <div className="flex flex-col justify-between gap-5 lg:flex-row lg:items-start">
           <div className="flex items-center gap-3">
@@ -643,6 +657,13 @@ export function SquareIntegration() {
             Create one Square test booking, then cancel it before enabling AI booking.
           </CardDescription>
 
+          <TestBookingGate
+            bookableServiceCount={bookableServices.length}
+            bookableStaffCount={bookableStaff.length}
+            latest={latestTest}
+            readiness={readiness}
+          />
+
           <div className="mt-5 grid gap-4 md:grid-cols-2">
             <Field label="Service">
               <select
@@ -767,19 +788,19 @@ export function SquareIntegration() {
       <Card>
         <CardTitle>Recent sync logs</CardTitle>
         <CardDescription>Provider sync activity and failures are stored for troubleshooting.</CardDescription>
-        <div className="mt-5 overflow-x-auto rounded-md border border-line">
-          <table className="w-full min-w-[680px] text-left text-sm">
-            <thead className="bg-slate-50 text-xs uppercase text-muted">
-              <tr>
-                <th className="px-4 py-3">Type</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">Started</th>
-                <th className="px-4 py-3">Message</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-line bg-white">
-              {status?.sync_logs?.length ? (
-                status.sync_logs.map((log) => (
+        {status?.sync_logs?.length ? (
+          <div className="mt-5 overflow-x-auto rounded-md border border-line">
+            <table className="w-full min-w-[680px] text-left text-sm">
+              <thead className="bg-slate-50 text-xs uppercase text-muted">
+                <tr>
+                  <th className="px-4 py-3">Type</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Started</th>
+                  <th className="px-4 py-3">Message</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-line bg-white">
+                {status.sync_logs.map((log) => (
                   <tr key={log.id}>
                     <td className="px-4 py-3 font-medium text-ink">{log.sync_type}</td>
                     <td className="px-4 py-3">
@@ -788,18 +809,229 @@ export function SquareIntegration() {
                     <td className="px-4 py-3 text-muted">{new Date(log.started_at).toLocaleString()}</td>
                     <td className="px-4 py-3 text-muted">{log.message || "-"}</td>
                   </tr>
-                ))
-              ) : (
-                <tr>
-                  <td className="px-4 py-8 text-center text-muted" colSpan={4}>
-                    No sync logs yet.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="mt-5 rounded-md border border-line p-6 text-center">
+            <RefreshCcw className="mx-auto h-5 w-5 text-muted" />
+            <div className="mt-3 text-sm font-semibold text-ink">No sync logs yet</div>
+            <div className="mt-1 text-sm leading-6 text-muted">
+              {connection?.id
+                ? "Run Sync Services and Staff to import Square Appointments records and record the sync result."
+                : "Connect Square Appointments before sync activity can be recorded."}
+            </div>
+          </div>
+        )}
       </Card>
+    </div>
+  );
+}
+
+function ReadinessOverviewPanel({
+  busy,
+  connection,
+  latestTest,
+  onConnect,
+  onSync,
+  readiness,
+  services,
+  staff,
+  switchReadiness,
+  syncLogCount
+}: {
+  busy: string;
+  connection?: POSConnection;
+  latestTest?: TestBookingRecord;
+  onConnect: () => void;
+  onSync: () => void;
+  readiness?: SquareReadiness;
+  services: POSService[];
+  staff: POSStaffMember[];
+  switchReadiness: ProviderSwitchReadiness | null;
+  syncLogCount: number;
+}) {
+  const squareStatus = connection?.error_message ? "error" : connection?.id ? "connected" : "not_connected";
+  const squareMessage = squareOverviewMessage(connection, syncLogCount);
+  const bookableServiceCount = readiness?.service_count ?? services.filter(serviceIsBookable).length;
+  const bookableStaffCount = readiness?.staff_count ?? staff.filter(staffIsBookable).length;
+  const syncFailedCount =
+    switchReadiness?.mapping.sync_failed_count ??
+    services.filter((service) => service.sync_status === "sync_failed").length +
+      staff.filter((member) => member.sync_status === "sync_failed").length;
+  const unmappedCount =
+    switchReadiness
+      ? switchReadiness.mapping.unmapped_service_count + switchReadiness.mapping.unmapped_staff_count
+      : services.filter((service) => service.sync_status === "unmapped" || service.sync_status === "local_only").length +
+        staff.filter((member) => member.sync_status === "unmapped" || member.sync_status === "local_only").length;
+  const bookingDataReady = bookableServiceCount > 0 && bookableStaffCount > 0;
+  const bookingDataMessage = bookingDataOverviewMessage(readiness, bookableServiceCount, bookableStaffCount, syncFailedCount);
+  const testGate = testBookingGateState(readiness, latestTest);
+  const switchStatus = switchReadiness?.can_start_switch ? "pending" : "disabled";
+  const switchMessage =
+    switchReadiness?.blocked_reason ||
+    firstIncompleteCheckMessage(switchReadiness?.checks) ||
+    "Square Appointments is the only native POS adapter in this pilot release.";
+
+  return (
+    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <OverviewCard
+        action={
+          connection?.id ? (
+            <Button type="button" variant="secondary" onClick={onSync} disabled={busy !== ""}>
+              <RefreshCcw className="h-4 w-4" />
+              {busy === "sync" ? "Syncing..." : "Sync Services and Staff"}
+            </Button>
+          ) : (
+            <Button type="button" onClick={onConnect} disabled={busy !== ""}>
+              <ExternalLink className="h-4 w-4" />
+              {busy === "connect" ? "Opening..." : "Connect Square"}
+            </Button>
+          )
+        }
+        description={squareMessage}
+        details={[
+          { label: "Connection", value: connection?.id ? connection.status || "connected" : "Not connected" },
+          { label: "Location", value: connection?.location_id ? "Selected" : "Not selected" },
+          { label: "Latest sync", value: formatOptionalDateTime(connection?.last_sync_at) },
+          { label: "Sync logs", value: String(syncLogCount) }
+        ]}
+        icon={<ExternalLink className="h-5 w-5 text-brand" />}
+        status={squareStatus}
+        title="Square Appointments"
+      />
+
+      <OverviewCard
+        action={
+          <a
+            className="inline-flex h-10 items-center justify-center rounded-md border border-line bg-white px-4 text-sm font-semibold text-ink hover:bg-slate-50"
+            href="/dashboard/services"
+          >
+            Review services
+          </a>
+        }
+        description={bookingDataMessage}
+        details={[
+          { label: "Bookable services", value: String(bookableServiceCount) },
+          { label: "Bookable staff", value: String(bookableStaffCount) },
+          { label: "Unmapped records", value: String(unmappedCount) },
+          { label: "Sync failures", value: String(syncFailedCount) }
+        ]}
+        icon={<CheckCircle2 className="h-5 w-5 text-brand" />}
+        status={bookingDataReady ? "ready" : "blocked"}
+        title="Booking-ready data"
+      />
+
+      <OverviewCard
+        description={testGate.message}
+        details={[
+          { label: "Latest test", value: latestTest?.appointment_status || latestTest?.status || "Not created" },
+          { label: "POS booking", value: latestTest?.pos_booking_id ? "Returned" : "Not returned" },
+          { label: "AI booking", value: readiness?.ai_enabled ? "Enabled" : "Disabled" }
+        ]}
+        icon={<CalendarCheck className="h-5 w-5 text-brand" />}
+        status={testGate.status}
+        title="Test booking gate"
+      />
+
+      <OverviewCard
+        action={
+          <Button type="button" disabled>
+            <Workflow className="h-4 w-4" />
+            Start switch run
+          </Button>
+        }
+        description={switchMessage}
+        details={[
+          { label: "Active provider", value: switchReadiness?.active_provider_label || "Square Appointments" },
+          { label: "Installed adapters", value: String(switchReadiness?.installed_providers.length ?? 1) },
+          { label: "Alternate adapters", value: String(switchReadiness?.installed_providers.filter((provider) => !provider.active).length ?? 0) }
+        ]}
+        icon={<Workflow className="h-5 w-5 text-brand" />}
+        status={switchStatus}
+        title="Provider switch"
+      />
+    </div>
+  );
+}
+
+function OverviewCard({
+  action,
+  description,
+  details,
+  icon,
+  status,
+  title
+}: {
+  action?: React.ReactNode;
+  description: string;
+  details: { label: string; value: string }[];
+  icon: React.ReactNode;
+  status: string;
+  title: string;
+}) {
+  return (
+    <Card className={overviewCardClass(status)}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 gap-3">
+          <div className="mt-0.5 flex-none">{icon}</div>
+          <div className="min-w-0">
+            <CardTitle>{title}</CardTitle>
+            <CardDescription className={overviewDescriptionClass(status)}>{description}</CardDescription>
+          </div>
+        </div>
+        <Badge value={status} />
+      </div>
+      <dl className="mt-4 grid gap-3 text-sm">
+        {details.map((item) => (
+          <div key={item.label}>
+            <dt className="text-xs font-semibold uppercase tracking-wide text-muted">{item.label}</dt>
+            <dd className="mt-1 break-words font-medium text-ink">{item.value}</dd>
+          </div>
+        ))}
+      </dl>
+      {action ? <div className="mt-4">{action}</div> : null}
+    </Card>
+  );
+}
+
+function TestBookingGate({
+  bookableServiceCount,
+  bookableStaffCount,
+  latest,
+  readiness
+}: {
+  bookableServiceCount: number;
+  bookableStaffCount: number;
+  latest?: TestBookingRecord;
+  readiness?: SquareReadiness;
+}) {
+  const gate = testBookingGateState(readiness, latest);
+  const ready = gate.status === "ready";
+  return (
+    <div className={ready ? "mt-5 rounded-md border border-emerald-200 bg-emerald-50 p-4" : "mt-5 rounded-md border border-amber-200 bg-amber-50 p-4"}>
+      <div className="flex gap-3">
+        {ready ? (
+          <CheckCircle2 className="mt-0.5 h-5 w-5 flex-none text-emerald-700" />
+        ) : (
+          <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" />
+        )}
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="text-sm font-semibold text-ink">Test booking gate</div>
+            <Badge value={gate.status} />
+          </div>
+          <div className={ready ? "mt-1 text-sm leading-6 text-emerald-800" : "mt-1 text-sm leading-6 text-amber-900"}>
+            {gate.message}
+          </div>
+          <div className="mt-3 grid gap-3 text-sm sm:grid-cols-3">
+            <Info label="Bookable services" value={String(bookableServiceCount)} />
+            <Info label="Bookable staff" value={String(bookableStaffCount)} />
+            <Info label="Latest POS booking" value={latest?.pos_booking_id ? "Returned" : "Not returned"} />
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1450,6 +1682,123 @@ function providerSwitchWorkflowSteps(
       message: "Activation stays disabled until a real adapter, mappings, and dry-run are complete."
     }
   ];
+}
+
+function squareOverviewMessage(connection: POSConnection | undefined, syncLogCount: number) {
+  if (connection?.error_message) {
+    return connection.error_message;
+  }
+  if (!connection?.id) {
+    return "Connect Square Appointments before syncing records or running booking readiness tests.";
+  }
+  if (!connection.location_id) {
+    return "Select a Square location before booking readiness can pass.";
+  }
+  if (!connection.last_sync_at && syncLogCount === 0) {
+    return "Run Sync Services and Staff to import current Square Appointments records.";
+  }
+  return `Latest sync ${formatOptionalDateTime(connection.last_sync_at)}. Confirmed bookings still require Square success.`;
+}
+
+function bookingDataOverviewMessage(
+  readiness: SquareReadiness | undefined,
+  bookableServiceCount: number,
+  bookableStaffCount: number,
+  syncFailedCount: number
+) {
+  if (bookableServiceCount === 0) {
+    return (
+      firstIncompleteCheckMessage(readiness?.checks, ["bookable_services", "sync_square"]) ||
+      "No active, synced, POS-linked, AI-bookable service is ready for availability or booking."
+    );
+  }
+  if (bookableStaffCount === 0) {
+    return (
+      firstIncompleteCheckMessage(readiness?.checks, ["bookable_staff", "sync_square"]) ||
+      "No active, synced, POS-linked, AI-bookable staff member is ready for availability or booking."
+    );
+  }
+  if (syncFailedCount > 0) {
+    return `${syncFailedCount} sync failure${syncFailedCount === 1 ? "" : "s"} need review. Booking only uses records that remain synced and POS-linked.`;
+  }
+  return "Only active, synced, POS-linked, AI-bookable services and staff are used for availability and booking.";
+}
+
+function testBookingGateState(readiness: SquareReadiness | undefined, latest?: TestBookingRecord) {
+  if (readiness?.ai_enabled) {
+    return {
+      status: "ready",
+      message: "AI booking is enabled. New confirmations still require a successful Square Appointments booking ID."
+    };
+  }
+  if (readiness?.can_enable_ai_booking) {
+    return {
+      status: "ready",
+      message: "The latest Square test booking was created and cancelled. AI booking can be enabled when the owner is ready."
+    };
+  }
+  if (readiness?.can_cancel_test_booking) {
+    return {
+      status: "pending",
+      message: "Cancel the latest Square test booking before enabling AI booking."
+    };
+  }
+  if (latest?.error_message) {
+    return {
+      status: "blocked",
+      message: latest.error_message
+    };
+  }
+  if (readiness?.can_test_booking) {
+    return {
+      status: "pending",
+      message: "Check Square availability, select a real slot, and create one test booking."
+    };
+  }
+  return {
+    status: "blocked",
+    message:
+      firstIncompleteCheckMessage(readiness?.checks) ||
+      "Connect Square Appointments, select a location, and keep at least one booking-ready service and staff member before testing booking."
+  };
+}
+
+function firstIncompleteCheckMessage(
+  checks: { key: string; complete: boolean; message?: string }[] | undefined,
+  keys?: string[]
+) {
+  const check = checks?.find((item) => !item.complete && (!keys || keys.includes(item.key)));
+  return check?.message || "";
+}
+
+function overviewCardClass(status: string) {
+  if (status === "ready" || status === "connected" || status === "active") {
+    return "border-emerald-200 bg-emerald-50 shadow-none";
+  }
+  if (status === "error" || status === "blocked" || status === "failed") {
+    return "border-red-200 bg-red-50 shadow-none";
+  }
+  if (status === "pending") {
+    return "border-amber-200 bg-amber-50 shadow-none";
+  }
+  return "shadow-none";
+}
+
+function overviewDescriptionClass(status: string) {
+  if (status === "ready" || status === "connected" || status === "active") {
+    return "text-emerald-800";
+  }
+  if (status === "error" || status === "blocked" || status === "failed") {
+    return "text-red-800";
+  }
+  if (status === "pending") {
+    return "text-amber-900";
+  }
+  return "text-muted";
+}
+
+function formatOptionalDateTime(value?: string) {
+  return value ? new Date(value).toLocaleString() : "Not synced";
 }
 
 function LatestTest({ latest }: { latest?: TestBookingRecord }) {

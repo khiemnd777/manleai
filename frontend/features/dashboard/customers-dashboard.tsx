@@ -227,7 +227,7 @@ export function CustomersDashboard() {
         <div>
           <h1 className="text-2xl font-bold text-ink">Customers</h1>
           <p className="mt-1 text-sm text-muted">
-            Manage ManleAI customer records and review booking, call, and pending-request activity.
+            Manage ManleAI customer records and review calls, pending requests, and POS-confirmed appointment activity.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -390,7 +390,7 @@ export function CustomersDashboard() {
           <EmptyState
             icon={<Users className="h-5 w-5 text-muted" />}
             title="No customers yet"
-            message="Create a customer record or wait for calls, confirmed appointments, or pending requests to appear."
+            message="Create a customer record or wait for calls, POS-confirmed appointments, or pending requests to appear."
           />
         ) : (
           <>
@@ -428,7 +428,7 @@ export function CustomersDashboard() {
                         </div>
                       </td>
                       <td className="px-4 py-3 text-muted">
-                        {item.confirmed_appointments} confirmed / {item.pending_requests} pending / {item.call_count} calls
+                        {item.confirmed_appointments} POS-confirmed / {item.pending_requests} pending / {item.call_count} calls
                       </td>
                       <td className="px-4 py-3">
                         <div className="font-medium text-ink">{formatDateTime(item.last_activity_at)}</div>
@@ -582,7 +582,7 @@ function CustomerCard({
       <InfoGrid
         items={[
           ["Last activity", `${formatDateTime(item.last_activity_at)} - ${formatActivitySource(item.last_activity_source)}`],
-          ["Confirmed", String(item.confirmed_appointments)],
+          ["POS-confirmed", String(item.confirmed_appointments)],
           ["Pending", String(item.pending_requests)],
           ["Calls", String(item.call_count)]
         ]}
@@ -743,7 +743,7 @@ function customerName(item: CustomerRecord) {
 
 function formatActivitySource(value: string) {
   if (value === "booking_attempt") return "Pending request";
-  if (value === "appointment") return "Appointment";
+  if (value === "appointment") return "POS-confirmed appointment";
   if (value === "call") return "Call";
   if (value === "handoff") return "Owner handoff";
   return "Customer record";
