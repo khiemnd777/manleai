@@ -193,6 +193,19 @@ type ProviderSwitchRun struct {
 	Matches         []ProviderSwitchMatch      `json:"matches,omitempty"`
 }
 
+type ProviderSwitchDryRunReadiness struct {
+	RunID         string                   `json:"run_id"`
+	SalonID       string                   `json:"salon_id"`
+	FromProvider  string                   `json:"from_provider"`
+	ToProvider    string                   `json:"to_provider"`
+	Status        string                   `json:"status"`
+	Checks        []ProviderReadinessCheck `json:"checks"`
+	CanRunDryRun  bool                     `json:"can_run_dry_run"`
+	DryRunReady   bool                     `json:"dry_run_ready"`
+	CanActivate   bool                     `json:"can_activate"`
+	BlockedReason string                   `json:"blocked_reason,omitempty"`
+}
+
 type ProviderSwitchMatchSummary struct {
 	Total     int `json:"total"`
 	Suggested int `json:"suggested"`

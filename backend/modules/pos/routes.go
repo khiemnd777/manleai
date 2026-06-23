@@ -21,5 +21,6 @@ func RegisterRoutes(api fiber.Router, handler *Handler, jwtSecret string) {
 	group.Get("/:id/pos/provider-switch-runs/latest", handler.LatestProviderSwitchRun)
 	group.Post("/:id/pos/provider-switch-runs", handler.CreateProviderSwitchRun)
 	group.Get("/:id/pos/provider-switch-runs/:run_id", handler.GetProviderSwitchRun)
+	group.Get("/:id/pos/provider-switch-runs/:run_id/dry-run-readiness", handler.ProviderSwitchDryRunReadiness)
 	group.Patch("/:id/pos/provider-switch-runs/:run_id/matches/:match_id", handler.UpdateProviderSwitchMatch)
 }

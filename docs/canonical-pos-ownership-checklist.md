@@ -382,18 +382,45 @@ Phase 6D customer match skeleton completed:
       canonical customer as conflicts.
 - [x] Keep provider activation disabled after customer matches are reviewed.
 
+Phase 6E dry-run readiness checklist gate completed:
+
+- [x] Add owner-scoped dry-run readiness API for provider switch runs.
+- [x] Return checklist gates for target adapter, run state, imported records,
+      match resolution, current-provider booking readiness, and dry-run
+      execution availability.
+- [x] Surface the dry-run checklist in the Integrations dashboard with a
+      disabled dry-run action.
+- [x] Keep `dry_run_ready=false`, `can_run_dry_run=false`, and
+      `can_activate=false` until a real alternate adapter and executable
+      dry-run path exist.
+
+Phase 6F import wizard gated shell completed:
+
+- [x] Add Integrations dashboard import wizard shell for the provider switch
+      workflow.
+- [x] Gate target provider selection and start action when no alternate native
+      POS adapter is installed.
+- [x] Drive wizard step states from provider switch readiness, latest run
+      summary, and dry-run checklist data.
+- [x] Do not call import/start APIs, create fake provider options, or fabricate
+      imported provider records.
+
 Full Phase 6 remains open because the pilot currently has only the Square
 Appointments adapter. Do not add fake provider implementations to satisfy the
 workflow.
 
 Tasks:
 
-- [ ] Add provider switch/import wizard.
+- [x] Add provider switch/import wizard gated shell.
+- [ ] Enable executable provider switch/import wizard once an alternate real
+      adapter exists.
 - [ ] Import services/staff/customers from new provider.
 - [x] Auto-match to canonical records by stable heuristics:
       name, duration, phone, email, normalized text.
 - [x] Add manual conflict resolution UI.
-- [ ] Add dry-run booking readiness check.
+- [x] Add dry-run booking readiness checklist gate.
+- [ ] Execute alternate-provider dry-run booking readiness against a real target
+      adapter and persist `dry_run_ready=true` only after success.
 - [ ] Activate new provider only after required mappings are ready.
 - [ ] Preserve old provider links for history.
 

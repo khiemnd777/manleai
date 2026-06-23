@@ -29,14 +29,18 @@
 - Provider switch run persistence and service/staff/customer match skeleton for
   future real adapters
 - Provider switch match review skeleton for future real adapter imports
+- Provider switch dry-run readiness checklist, still gated because no alternate
+  native POS adapter exists
+- Provider switch/import wizard shell, still gated because no alternate native
+  POS adapter exists
 
 ## Not Implemented In The Current Square Slice
 
 - Real sandbox payload verification against a Square Appointments account
 - Outbox-driven Square service/staff writes from ManleAI canonical records
 - Outbox-driven Square customer writes outside the booking flow
-- Full provider switch import, dry-run, and activation workflow for a second
-  real POS adapter
+- Executable provider switch import, executable dry-run, and activation workflow
+  for a second real POS adapter
 
 Square Appointments service/staff/customer outbox writes remain disabled by
 provider capability flags until the exact catalog/team/customer payloads are

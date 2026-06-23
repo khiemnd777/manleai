@@ -839,7 +839,9 @@ Creates a provider switch run record for a requested target provider. If the
 target adapter is not installed, the run is persisted with `status=blocked` and
 no import/match work is started. If a real target adapter is installed in a
 future slice, the backend can populate service/staff/customer match candidates,
-but activation still remains disabled in this phase.
+but activation still remains disabled in this phase. The current dashboard
+import wizard shell does not call this endpoint while no alternate native POS
+adapter is installed.
 
 ```json
 {
@@ -884,6 +886,36 @@ Returns one owner-scoped switch run with its match summary and match rows.
 Match rows are provider-neutral and may include `service`, `staff`, or
 `customer` entities. There is intentionally no activation endpoint in the
 current pilot.
+
+`GET /api/salons/:id/pos/provider-switch-runs/:run_id/dry-run-readiness`
+
+Returns the dry-run checklist for one owner-scoped provider switch run. This
+endpoint is read-only. It does not call a target POS provider, create
+appointments, create provider links, mark `dry_run_ready=true`, or activate a
+provider. In the current pilot it remains blocked because no alternate native
+POS adapter and no alternate-provider dry-run executor exist.
+
+```json
+{
+  "run_id": "...",
+  "salon_id": "...",
+  "from_provider": "square",
+  "to_provider": "future_provider",
+  "status": "ready",
+  "checks": [
+    {"key": "target_adapter", "label": "Target provider adapter installed", "complete": false, "message": "The target POS provider adapter is not installed in this deployment."},
+    {"key": "switch_run_reviewable", "label": "Switch run is reviewable", "complete": true},
+    {"key": "imported_records", "label": "Imported provider records exist", "complete": false, "message": "Import records from a real alternate POS provider before dry-run checks can pass."},
+    {"key": "matches_resolved", "label": "Match conflicts resolved", "complete": false, "message": "Resolve suggested, unmatched, or conflicting provider matches before dry-run."},
+    {"key": "current_provider_booking_ready", "label": "Current provider booking readiness passed", "complete": true},
+    {"key": "dry_run_execution_available", "label": "Alternate-provider dry-run execution available", "complete": false, "message": "Alternate-provider dry-run execution is not implemented in this pilot slice."}
+  ],
+  "can_run_dry_run": false,
+  "dry_run_ready": false,
+  "can_activate": false,
+  "blocked_reason": "The target POS provider adapter is not installed in this deployment."
+}
+```
 
 `PATCH /api/salons/:id/pos/provider-switch-runs/:run_id/matches/:match_id`
 

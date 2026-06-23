@@ -328,6 +328,73 @@ func (s *ServiceLayer) GetProviderSwitchRun(ctx context.Context, salonID string,
 	return s.withSwitchMatches(ctx, ownerUserID, run)
 }
 
+func (s *ServiceLayer) ProviderSwitchDryRunReadiness(ctx context.Context, salonID string, ownerUserID string, runID string) (*ProviderSwitchDryRunReadiness, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil, ErrValidation
+	}
+	run, err := s.repo.GetProviderSwitchRun(ctx, salonID, ownerUserID, runID)
+	if err != nil {
+		return nil, err
+	}
+	matches, err := s.repo.ListProviderSwitchMatches(ctx, salonID, ownerUserID, runID)
+	if err != nil {
+		return nil, err
+	}
+	matchSummary := summarizeSwitchMatches(matches)
+
+	activeProvider, err := s.activeProvider(ctx, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	connection, err := s.repo.GetConnection(ctx, salonID, run.FromProvider)
+	if errors.Is(err, ErrNotFound) {
+		connection = &Connection{SalonID: salonID, Provider: run.FromProvider, Status: StatusNotConnected, Scopes: []string{}}
+	} else if err != nil {
+		return nil, err
+	}
+	mapping, err := s.repo.ProviderMappingSummary(ctx, salonID, ownerUserID, run.FromProvider)
+	if err != nil {
+		return nil, err
+	}
+
+	targetAdapterInstalled := s.providers[run.ToProvider] != nil
+	runReviewable := switchRunDryRunReviewable(run.Status)
+	importedRecordsExist := matchSummary.Total > 0
+	matchesResolved := importedRecordsExist && matchSummary.Suggested == 0 && matchSummary.Unmatched == 0 && matchSummary.Conflicts == 0
+	currentConnected := connectionReady(connection)
+	currentSynced := currentConnected && connection.LastSyncAt != nil
+	currentBookingReady := activeProvider == run.FromProvider && currentSynced && mapping.BookableServiceCount > 0 && mapping.BookableStaffCount > 0
+	dryRunExecutionAvailable := false
+
+	checks := []ProviderReadinessCheck{
+		{Key: "target_adapter", Label: "Target provider adapter installed", Complete: targetAdapterInstalled, Message: incompleteProviderMessage(targetAdapterInstalled, "The target POS provider adapter is not installed in this deployment.")},
+		{Key: "switch_run_reviewable", Label: "Switch run is reviewable", Complete: runReviewable, Message: incompleteProviderMessage(runReviewable, "This switch run is blocked, activated, cancelled, or failed.")},
+		{Key: "imported_records", Label: "Imported provider records exist", Complete: importedRecordsExist, Message: incompleteProviderMessage(importedRecordsExist, "Import records from a real alternate POS provider before dry-run checks can pass.")},
+		{Key: "matches_resolved", Label: "Match conflicts resolved", Complete: matchesResolved, Message: incompleteProviderMessage(matchesResolved, "Resolve suggested, unmatched, or conflicting provider matches before dry-run.")},
+		{Key: "current_provider_booking_ready", Label: "Current provider booking readiness passed", Complete: currentBookingReady, Message: dryRunCurrentProviderMessage(activeProvider, run.FromProvider, currentConnected, currentSynced, mapping)},
+		{Key: "dry_run_execution_available", Label: "Alternate-provider dry-run execution available", Complete: dryRunExecutionAvailable, Message: "Alternate-provider dry-run execution is not implemented in this pilot slice."},
+	}
+	canRunDryRun := providerChecksComplete(checks)
+	result := &ProviderSwitchDryRunReadiness{
+		RunID:        run.ID,
+		SalonID:      run.SalonID,
+		FromProvider: run.FromProvider,
+		ToProvider:   run.ToProvider,
+		Status:       run.Status,
+		Checks:       checks,
+		CanRunDryRun: canRunDryRun,
+		DryRunReady:  run.DryRunReady && canRunDryRun,
+		CanActivate:  false,
+	}
+	for _, check := range checks {
+		if !check.Complete && result.BlockedReason == "" {
+			result.BlockedReason = check.Message
+		}
+	}
+	return result, nil
+}
+
 func (s *ServiceLayer) UpdateProviderSwitchMatch(ctx context.Context, salonID string, ownerUserID string, runID string, matchID string, req ProviderSwitchMatchUpdateRequest) (*ProviderSwitchRun, error) {
 	runID = strings.TrimSpace(runID)
 	matchID = strings.TrimSpace(matchID)
@@ -663,6 +730,46 @@ func reviewSwitchRunStatus(current string, summary ProviderSwitchMatchSummary) s
 		return SwitchRunStatusNeedsReview
 	}
 	return SwitchRunStatusReady
+}
+
+func switchRunDryRunReviewable(status string) bool {
+	switch status {
+	case SwitchRunStatusBlocked, SwitchRunStatusActivated, SwitchRunStatusCancelled, SwitchRunStatusFailed:
+		return false
+	default:
+		return strings.TrimSpace(status) != ""
+	}
+}
+
+func providerChecksComplete(checks []ProviderReadinessCheck) bool {
+	if len(checks) == 0 {
+		return false
+	}
+	for _, check := range checks {
+		if !check.Complete {
+			return false
+		}
+	}
+	return true
+}
+
+func dryRunCurrentProviderMessage(activeProvider string, fromProvider string, connected bool, synced bool, mapping *ProviderMappingSummary) string {
+	if activeProvider != fromProvider {
+		return "This switch run no longer starts from the active POS provider."
+	}
+	if !connected {
+		return "Connect the current active provider and select a booking location before dry-run."
+	}
+	if !synced {
+		return "Sync services and staff from the current active provider before dry-run."
+	}
+	if mapping == nil || mapping.BookableServiceCount == 0 {
+		return "At least one active AI-bookable service must have a synced current-provider link."
+	}
+	if mapping.BookableStaffCount == 0 {
+		return "At least one active AI-bookable staff member must have a synced current-provider link."
+	}
+	return ""
 }
 
 func normalizeSwitchText(value string) string {

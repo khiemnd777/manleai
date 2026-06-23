@@ -46,8 +46,10 @@ appointment history.
 The current backend can persist provider switch runs and service/staff/customer
 match candidates for a real future adapter. Missing target adapters create
 blocked runs. Owners can record match review decisions for imported candidates,
-but activation remains unavailable until a real import, full conflict
-resolution, and dry-run path exists.
+and the backend can return a dry-run readiness checklist for a switch run, but
+the dashboard import wizard shell remains gated when no alternate native POS
+adapter is installed. Activation remains unavailable until a real import, full
+conflict resolution, and executable alternate-provider dry-run path exists.
 
 ## Interface
 

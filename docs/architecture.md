@@ -64,12 +64,14 @@ updates `pos_entity_links`, records `pos_sync_logs`, and logs provider failures
 to `pos_errors`.
 
 Provider switching is intentionally gated. The Integrations dashboard exposes
-provider switch readiness for the active provider and can read persisted switch
-runs with service/staff/customer match summaries and owner match review
-decisions. The pilot cannot activate an alternate POS provider until a real
-adapter exists,
-records are imported and matched, conflicts are resolved, a dry-run booking
-readiness check passes, and required mappings are ready.
+provider switch readiness for the active provider, a gated import wizard shell,
+and persisted switch runs with service/staff/customer match summaries and owner
+match review decisions. It also exposes a dry-run readiness checklist for
+switch runs, but the import wizard and dry-run checklist remain blocked until a
+real alternate adapter and executable import/dry-run path exist. The pilot
+cannot activate an alternate POS provider until a real adapter exists, records
+are imported and matched, conflicts are resolved, a dry-run booking readiness
+check passes, and required mappings are ready.
 
 Correct dependency direction:
 

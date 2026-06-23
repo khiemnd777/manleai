@@ -608,6 +608,182 @@ func TestUpdateProviderSwitchMatchRejectsBlockedRun(t *testing.T) {
 	}
 }
 
+func TestProviderSwitchDryRunReadinessBlocksMissingAdapter(t *testing.T) {
+	now := testTime()
+	store := &fakePOSStore{
+		activeProvider: ProviderSquare,
+		connection: &Connection{
+			ID:         "conn_1",
+			SalonID:    "salon_1",
+			Provider:   ProviderSquare,
+			Status:     StatusActive,
+			LocationID: "loc_1",
+			LastSyncAt: &now,
+		},
+		summary: ProviderMappingSummary{
+			BookableServiceCount: 1,
+			BookableStaffCount:   1,
+		},
+		switchRun: &ProviderSwitchRun{
+			ID:            "run_1",
+			SalonID:       "salon_1",
+			FromProvider:  ProviderSquare,
+			ToProvider:    "future_pos",
+			Status:        SwitchRunStatusBlocked,
+			BlockedReason: switchAdapterMissingReason,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		},
+	}
+	service := NewService(store, fakeCapabilityProvider{name: ProviderSquare})
+
+	readiness, err := service.ProviderSwitchDryRunReadiness(context.Background(), "salon_1", "owner_1", "run_1")
+	if err != nil {
+		t.Fatalf("ProviderSwitchDryRunReadiness returned error: %v", err)
+	}
+	if readiness.CanRunDryRun || readiness.DryRunReady || readiness.CanActivate {
+		t.Fatalf("dry-run readiness = %#v, want fully gated", readiness)
+	}
+	targetCheck := findReadinessCheck(readiness.Checks, "target_adapter")
+	if targetCheck.Complete || targetCheck.Message == "" {
+		t.Fatalf("target adapter check = %#v, want incomplete missing adapter", targetCheck)
+	}
+	if readiness.BlockedReason != targetCheck.Message {
+		t.Fatalf("blocked reason = %q, want first missing adapter message %q", readiness.BlockedReason, targetCheck.Message)
+	}
+}
+
+func TestProviderSwitchDryRunReadinessRequiresResolvedMatches(t *testing.T) {
+	now := testTime()
+	store := &fakePOSStore{
+		activeProvider: ProviderSquare,
+		connection: &Connection{
+			ID:         "conn_1",
+			SalonID:    "salon_1",
+			Provider:   ProviderSquare,
+			Status:     StatusActive,
+			LocationID: "loc_1",
+			LastSyncAt: &now,
+		},
+		summary: ProviderMappingSummary{
+			BookableServiceCount: 1,
+			BookableStaffCount:   1,
+		},
+		switchRun: &ProviderSwitchRun{
+			ID:           "run_1",
+			SalonID:      "salon_1",
+			FromProvider: ProviderSquare,
+			ToProvider:   "future_pos",
+			Status:       SwitchRunStatusNeedsReview,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		switchMatches: []ProviderSwitchMatch{{
+			ID:                "match_1",
+			RunID:             "run_1",
+			SalonID:           "salon_1",
+			EntityType:        EntityTypeService,
+			CanonicalEntityID: "service_1",
+			ProviderEntityID:  "future_service_1",
+			ProviderName:      "Classic Manicure",
+			MatchStatus:       SwitchMatchStatusSuggested,
+			MatchConfidence:   95,
+			CreatedAt:         now,
+			UpdatedAt:         now,
+		}},
+	}
+	service := NewService(
+		store,
+		fakeCapabilityProvider{name: ProviderSquare},
+		fakeCapabilityProvider{name: "future_pos"},
+	)
+
+	readiness, err := service.ProviderSwitchDryRunReadiness(context.Background(), "salon_1", "owner_1", "run_1")
+	if err != nil {
+		t.Fatalf("ProviderSwitchDryRunReadiness returned error: %v", err)
+	}
+	if readiness.CanRunDryRun || readiness.DryRunReady || readiness.CanActivate {
+		t.Fatalf("dry-run readiness = %#v, want gated before matches resolve", readiness)
+	}
+	if importedCheck := findReadinessCheck(readiness.Checks, "imported_records"); !importedCheck.Complete {
+		t.Fatalf("imported records check = %#v, want complete", importedCheck)
+	}
+	resolvedCheck := findReadinessCheck(readiness.Checks, "matches_resolved")
+	if resolvedCheck.Complete || resolvedCheck.Message == "" {
+		t.Fatalf("matches resolved check = %#v, want incomplete", resolvedCheck)
+	}
+	if readiness.BlockedReason != resolvedCheck.Message {
+		t.Fatalf("blocked reason = %q, want unresolved match message %q", readiness.BlockedReason, resolvedCheck.Message)
+	}
+}
+
+func TestProviderSwitchDryRunReadinessGatesExecutionForReadyRun(t *testing.T) {
+	now := testTime()
+	store := &fakePOSStore{
+		activeProvider: ProviderSquare,
+		connection: &Connection{
+			ID:         "conn_1",
+			SalonID:    "salon_1",
+			Provider:   ProviderSquare,
+			Status:     StatusActive,
+			LocationID: "loc_1",
+			LastSyncAt: &now,
+		},
+		summary: ProviderMappingSummary{
+			BookableServiceCount: 1,
+			BookableStaffCount:   1,
+		},
+		switchRun: &ProviderSwitchRun{
+			ID:           "run_1",
+			SalonID:      "salon_1",
+			FromProvider: ProviderSquare,
+			ToProvider:   "future_pos",
+			Status:       SwitchRunStatusReady,
+			DryRunReady:  true,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		switchMatches: []ProviderSwitchMatch{{
+			ID:                "match_1",
+			RunID:             "run_1",
+			SalonID:           "salon_1",
+			EntityType:        EntityTypeService,
+			CanonicalEntityID: "service_1",
+			ProviderEntityID:  "future_service_1",
+			ProviderName:      "Classic Manicure",
+			MatchStatus:       SwitchMatchStatusConfirmed,
+			MatchConfidence:   100,
+			CreatedAt:         now,
+			UpdatedAt:         now,
+		}},
+	}
+	service := NewService(
+		store,
+		fakeCapabilityProvider{name: ProviderSquare},
+		fakeCapabilityProvider{name: "future_pos"},
+	)
+
+	readiness, err := service.ProviderSwitchDryRunReadiness(context.Background(), "salon_1", "owner_1", "run_1")
+	if err != nil {
+		t.Fatalf("ProviderSwitchDryRunReadiness returned error: %v", err)
+	}
+	for _, key := range []string{"target_adapter", "switch_run_reviewable", "imported_records", "matches_resolved", "current_provider_booking_ready"} {
+		if check := findReadinessCheck(readiness.Checks, key); !check.Complete {
+			t.Fatalf("%s check = %#v, want complete", key, check)
+		}
+	}
+	executionCheck := findReadinessCheck(readiness.Checks, "dry_run_execution_available")
+	if executionCheck.Complete || executionCheck.Message == "" {
+		t.Fatalf("execution check = %#v, want gated dry-run execution", executionCheck)
+	}
+	if readiness.CanRunDryRun || readiness.DryRunReady || readiness.CanActivate {
+		t.Fatalf("dry-run readiness = %#v, want execution gated and activation false", readiness)
+	}
+	if readiness.BlockedReason != executionCheck.Message {
+		t.Fatalf("blocked reason = %q, want execution message %q", readiness.BlockedReason, executionCheck.Message)
+	}
+}
+
 type fakePOSStore struct {
 	activeProvider       string
 	listServicesProvider string
@@ -896,6 +1072,15 @@ func findSwitchMatch(matches []ProviderSwitchMatch, entityType string) ProviderS
 		}
 	}
 	return ProviderSwitchMatch{}
+}
+
+func findReadinessCheck(checks []ProviderReadinessCheck, key string) ProviderReadinessCheck {
+	for _, check := range checks {
+		if check.Key == key {
+			return check
+		}
+	}
+	return ProviderReadinessCheck{}
 }
 
 func boolPtr(value bool) *bool {

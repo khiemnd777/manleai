@@ -9,6 +9,7 @@ import {
   Power,
   PowerOff,
   RefreshCcw,
+  Workflow,
   XCircle
 } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
@@ -23,6 +24,7 @@ import type {
   POSConnection,
   POSLocation,
   ProviderSwitchMatch,
+  ProviderSwitchDryRunReadiness,
   ProviderSwitchRun,
   ProviderSwitchReadiness,
   POSService,
@@ -105,6 +107,7 @@ export function SquareIntegration() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [switchReadiness, setSwitchReadiness] = useState<ProviderSwitchReadiness | null>(null);
   const [switchRun, setSwitchRun] = useState<ProviderSwitchRun | null>(null);
+  const [switchDryRunReadiness, setSwitchDryRunReadiness] = useState<ProviderSwitchDryRunReadiness | null>(null);
   const [services, setServices] = useState<POSService[]>([]);
   const [staff, setStaff] = useState<POSStaffMember[]>([]);
   const [locations, setLocations] = useState<POSLocation[]>([]);
@@ -143,6 +146,7 @@ export function SquareIntegration() {
         setStatus(null);
         setSwitchReadiness(null);
         setSwitchRun(null);
+        setSwitchDryRunReadiness(null);
         setServices([]);
         setStaff([]);
         setLocations([]);
@@ -159,6 +163,14 @@ export function SquareIntegration() {
       setStatus(squareStatus);
       setSwitchReadiness(providerSwitchResponse);
       setSwitchRun(providerSwitchRunResponse.run ?? null);
+      if (providerSwitchRunResponse.run) {
+        const dryRunResponse = await apiRequest<ProviderSwitchDryRunReadiness>(
+          `/api/salons/${firstSalon.id}/pos/provider-switch-runs/${providerSwitchRunResponse.run.id}/dry-run-readiness`
+        );
+        setSwitchDryRunReadiness(dryRunResponse);
+      } else {
+        setSwitchDryRunReadiness(null);
+      }
       setServices(serviceResponse.services);
       setStaff(staffResponse.staff);
       setSelectedLocationID(squareStatus.connection.location_id || "");
@@ -399,6 +411,14 @@ export function SquareIntegration() {
         }
       );
       setSwitchRun(response.run ?? null);
+      if (response.run) {
+        const dryRunResponse = await apiRequest<ProviderSwitchDryRunReadiness>(
+          `/api/salons/${salon.id}/pos/provider-switch-runs/${response.run.id}/dry-run-readiness`
+        );
+        setSwitchDryRunReadiness(dryRunResponse);
+      } else {
+        setSwitchDryRunReadiness(null);
+      }
       setSuccess("Provider switch match updated.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not update provider switch match.");
@@ -565,6 +585,7 @@ export function SquareIntegration() {
       </Card>
 
       <ProviderSwitchReadinessPanel
+        dryRunReadiness={switchDryRunReadiness}
         readiness={switchReadiness}
         switchRun={switchRun}
         busy={busy}
@@ -785,12 +806,14 @@ export function SquareIntegration() {
 
 function ProviderSwitchReadinessPanel({
   busy,
+  dryRunReadiness,
   onRefresh,
   onUpdateMatch,
   readiness,
   switchRun
 }: {
   busy: string;
+  dryRunReadiness: ProviderSwitchDryRunReadiness | null;
   onRefresh: () => void;
   onUpdateMatch: (matchID: string, matchStatus: string) => void;
   readiness: ProviderSwitchReadiness | null;
@@ -806,7 +829,7 @@ function ProviderSwitchReadinessPanel({
   }
 
   const allProviders = [...readiness.installed_providers, ...readiness.unavailable_providers];
-  const workflowSteps = providerSwitchWorkflowSteps(readiness, switchRun);
+  const workflowSteps = providerSwitchWorkflowSteps(readiness, switchRun, dryRunReadiness);
   const matchSummary = switchRun?.match_summary;
   const workflowBlockedReason =
     switchRun?.blocked_reason ||
@@ -914,6 +937,17 @@ function ProviderSwitchReadinessPanel({
         ) : null}
       </div>
 
+      <ProviderSwitchImportWizard
+        dryRunReadiness={dryRunReadiness}
+        readiness={readiness}
+        switchRun={switchRun}
+      />
+
+      <ProviderSwitchDryRunChecklist
+        dryRunReadiness={dryRunReadiness}
+        switchRun={switchRun}
+      />
+
       <ProviderSwitchMatchReview
         busy={busy}
         readiness={readiness}
@@ -937,6 +971,182 @@ function ProviderSwitchReadinessPanel({
         </Button>
       </div>
     </Card>
+  );
+}
+
+function ProviderSwitchImportWizard({
+  dryRunReadiness,
+  readiness,
+  switchRun
+}: {
+  dryRunReadiness: ProviderSwitchDryRunReadiness | null;
+  readiness: ProviderSwitchReadiness;
+  switchRun: ProviderSwitchRun | null;
+}) {
+  const targetProviders = readiness.installed_providers.filter((provider) => !provider.active);
+  const selectedTarget = targetProviders[0]?.provider ?? "";
+  const importSteps = providerSwitchImportSteps(readiness, switchRun, dryRunReadiness);
+  const status = readiness.can_start_switch ? "pending" : "disabled";
+
+  return (
+    <div className="mt-5 rounded-md border border-line p-4">
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div>
+          <div className="text-sm font-semibold text-ink">Import wizard</div>
+          <div className="mt-1 text-xs leading-5 text-muted">
+            Provider import stays gated until an alternate native POS adapter is installed.
+          </div>
+        </div>
+        <Badge value={status} />
+      </div>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-[0.85fr_1.15fr]">
+        <div className="rounded-md border border-line p-3">
+          <label className="block">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted">Target provider</span>
+            <select
+              className="mt-2 h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink disabled:bg-slate-50 disabled:text-slate-500"
+              defaultValue={selectedTarget}
+              disabled={!readiness.can_start_switch || targetProviders.length === 0}
+            >
+              {targetProviders.length === 0 ? <option value="">No alternate POS adapter installed</option> : null}
+              {targetProviders.map((provider) => (
+                <option key={provider.provider} value={provider.provider}>
+                  {provider.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="mt-3 text-xs leading-5 text-muted">
+            Square Appointments is the only native POS adapter in this pilot release.
+          </div>
+        </div>
+
+        <div className="rounded-md border border-line p-3">
+          <div className="text-sm font-semibold text-ink">Wizard steps</div>
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            {importSteps.map((step) => (
+              <div key={step.key} className="rounded-md border border-line p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-ink">{step.label}</div>
+                    <div className="mt-1 text-xs leading-5 text-muted">{step.message}</div>
+                  </div>
+                  <Badge value={step.complete ? "active" : step.status} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+        Provider switching is gated until a real alternate POS adapter is installed. Existing Square links and appointment history remain preserved.
+      </div>
+
+      <div className="mt-4">
+        <Button type="button" disabled>
+          <Workflow className="h-4 w-4" />
+          Start import wizard
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function ProviderSwitchDryRunChecklist({
+  dryRunReadiness,
+  switchRun
+}: {
+  dryRunReadiness: ProviderSwitchDryRunReadiness | null;
+  switchRun: ProviderSwitchRun | null;
+}) {
+  if (!switchRun) {
+    return (
+      <div className="mt-5 rounded-md border border-line p-4">
+        <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+          <div>
+            <div className="text-sm font-semibold text-ink">Dry-run checklist</div>
+            <div className="mt-1 text-xs leading-5 text-muted">
+              Create a switch run before dry-run checks are available.
+            </div>
+          </div>
+          <Badge value="disabled" />
+        </div>
+      </div>
+    );
+  }
+
+  if (!dryRunReadiness) {
+    return (
+      <div className="mt-5 rounded-md border border-line p-4">
+        <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+          <div>
+            <div className="text-sm font-semibold text-ink">Dry-run checklist</div>
+            <div className="mt-1 text-xs leading-5 text-muted">
+              Dry-run checks load after the latest switch run is available.
+            </div>
+          </div>
+          <Badge value="disabled" />
+        </div>
+      </div>
+    );
+  }
+
+  const status = dryRunReadiness.dry_run_ready
+    ? "ready"
+    : dryRunReadiness.can_run_dry_run
+      ? "pending"
+      : "blocked";
+
+  return (
+    <div className="mt-5 rounded-md border border-line p-4">
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div>
+          <div className="text-sm font-semibold text-ink">Dry-run checklist</div>
+          <div className="mt-1 text-xs leading-5 text-muted">
+            Dry-run booking stays gated until a real alternate provider adapter, imported records, resolved mappings, and execution support exist.
+          </div>
+        </div>
+        <Badge value={status} />
+      </div>
+
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
+        <Info label="Run status" value={dryRunReadiness.status} />
+        <Info label="Target provider" value={dryRunReadiness.to_provider} />
+        <Info label="Dry-run ready" value={dryRunReadiness.dry_run_ready ? "Yes" : "No"} />
+      </div>
+
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        {dryRunReadiness.checks.map((check) => (
+          <div key={check.key} className="rounded-md border border-line p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex min-w-0 gap-3">
+                <CheckCircle2 className={check.complete ? "mt-0.5 h-5 w-5 flex-none text-brand" : "mt-0.5 h-5 w-5 flex-none text-slate-300"} />
+                <div>
+                  <div className="text-sm font-medium text-ink">{check.label}</div>
+                  {!check.complete && check.message ? <div className="mt-1 text-xs leading-5 text-muted">{check.message}</div> : null}
+                </div>
+              </div>
+              <Badge value={check.complete ? "active" : "blocked"} />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {dryRunReadiness.blocked_reason ? (
+        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+          {dryRunReadiness.blocked_reason}
+        </div>
+      ) : null}
+
+      <div className="mt-4">
+        <Button type="button" disabled>
+          <CalendarCheck className="h-4 w-4" />
+          Run dry-run
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -1114,10 +1324,77 @@ function providerSwitchProviderLabel(match: ProviderSwitchMatch) {
   return details.length ? `${match.provider_name} (${details.join(", ")})` : match.provider_name;
 }
 
-function providerSwitchWorkflowSteps(readiness: ProviderSwitchReadiness, switchRun: ProviderSwitchRun | null) {
+function providerSwitchImportSteps(
+  readiness: ProviderSwitchReadiness,
+  switchRun: ProviderSwitchRun | null,
+  dryRunReadiness: ProviderSwitchDryRunReadiness | null
+) {
+  const summary = switchRun?.match_summary;
+  const hasMatches = Boolean(summary && summary.total > 0);
+  const hasUnresolved = Boolean(summary && (summary.suggested > 0 || summary.conflicts > 0 || summary.unmatched > 0));
+  return [
+    {
+      key: "connect_target_provider",
+      label: "Connect target provider",
+      complete: readiness.can_start_switch,
+      status: "blocked",
+      message: readiness.can_start_switch
+        ? "Alternate adapter is installed; connection flow belongs to a future provider-specific slice."
+        : "No alternate native POS adapter is installed."
+    },
+    {
+      key: "import_provider_records",
+      label: "Import provider records",
+      complete: hasMatches,
+      status: switchRun ? "pending" : "blocked",
+      message: hasMatches ? `${summary?.total ?? 0} provider records are available for review.` : "Import waits for a real target provider connection."
+    },
+    {
+      key: "auto_match_records",
+      label: "Auto-match canonical records",
+      complete: hasMatches,
+      status: switchRun ? "pending" : "blocked",
+      message: hasMatches
+        ? `${summary?.suggested ?? 0} suggested, ${summary?.conflicts ?? 0} conflicts, ${summary?.unmatched ?? 0} unmatched.`
+        : "Matching starts after provider records are imported."
+    },
+    {
+      key: "resolve_matches",
+      label: "Resolve matches",
+      complete: hasMatches && !hasUnresolved,
+      status: hasMatches ? "pending" : "blocked",
+      message: hasMatches && !hasUnresolved ? "Match review is resolved for this run." : "Owner review is required before dry-run."
+    },
+    {
+      key: "dry_run_readiness",
+      label: "Dry-run booking readiness",
+      complete: Boolean(dryRunReadiness?.dry_run_ready),
+      status: dryRunReadiness?.can_run_dry_run ? "pending" : "blocked",
+      message: dryRunReadiness?.blocked_reason || "Dry-run remains gated until import and mapping prerequisites pass."
+    },
+    {
+      key: "activate_provider",
+      label: "Activate provider",
+      complete: false,
+      status: "blocked",
+      message: "Activation stays disabled until a real adapter, mappings, and dry-run are complete."
+    }
+  ];
+}
+
+function providerSwitchWorkflowSteps(
+  readiness: ProviderSwitchReadiness,
+  switchRun: ProviderSwitchRun | null,
+  dryRunReadiness: ProviderSwitchDryRunReadiness | null
+) {
   const summary = switchRun?.match_summary;
   const hasMatches = Boolean(summary && summary.total > 0);
   const hasUnresolved = Boolean(summary && (summary.conflicts > 0 || summary.unmatched > 0));
+  const dryRunBlockedReason =
+    dryRunReadiness?.blocked_reason ||
+    (readiness.dry_run_booking_ready
+      ? "Alternate-provider dry-run is still gated."
+      : "Current provider must be synced with bookable service and staff links first.");
   return [
     {
       key: "active_provider_source",
@@ -1161,11 +1438,9 @@ function providerSwitchWorkflowSteps(readiness: ProviderSwitchReadiness, switchR
     {
       key: "dry_run",
       label: "Dry-run booking",
-      complete: Boolean(switchRun?.dry_run_ready),
-      status: readiness.dry_run_booking_ready ? "pending" : "blocked",
-      message: readiness.dry_run_booking_ready
-        ? "Current provider is ready; alternate-provider dry-run is still gated."
-        : "Current provider must be synced with bookable service and staff links first."
+      complete: Boolean(dryRunReadiness?.dry_run_ready ?? switchRun?.dry_run_ready),
+      status: dryRunReadiness?.can_run_dry_run ? "pending" : "blocked",
+      message: dryRunBlockedReason
     },
     {
       key: "activate_provider",

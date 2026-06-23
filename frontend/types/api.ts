@@ -362,6 +362,19 @@ export type ProviderSwitchRun = {
   matches?: ProviderSwitchMatch[];
 };
 
+export type ProviderSwitchDryRunReadiness = {
+  run_id: string;
+  salon_id: string;
+  from_provider: string;
+  to_provider: string;
+  status: string;
+  checks: ReadinessCheck[];
+  can_run_dry_run: boolean;
+  dry_run_ready: boolean;
+  can_activate: boolean;
+  blocked_reason?: string;
+};
+
 export type TranscriptMessage = {
   id: string;
   session_id: string;

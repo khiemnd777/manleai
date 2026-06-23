@@ -160,6 +160,20 @@ func (h *Handler) GetProviderSwitchRun(c *fiber.Ctx) error {
 	return respond.JSON(c, fiber.StatusOK, fiber.Map{"run": run})
 }
 
+func (h *Handler) ProviderSwitchDryRunReadiness(c *fiber.Ctx) error {
+	readiness, err := h.service.ProviderSwitchDryRunReadiness(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("run_id"))
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Provider switch run id is required.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "PROVIDER_SWITCH_RUN_NOT_FOUND", "Provider switch run was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "PROVIDER_SWITCH_DRY_RUN_READINESS_FAILED", "Could not load provider switch dry-run readiness.")
+	}
+	return respond.JSON(c, fiber.StatusOK, readiness)
+}
+
 func (h *Handler) UpdateProviderSwitchMatch(c *fiber.Ctx) error {
 	req, err := parseProviderSwitchMatchUpdateRequest(c)
 	if err != nil {
