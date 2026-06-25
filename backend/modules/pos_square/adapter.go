@@ -24,10 +24,15 @@ var (
 )
 
 type SquareAdapter struct {
-	cfg        config.SquareConfig
-	repo       *pos.Repository
-	cipher     *encryption.TokenCipher
-	httpClient *http.Client
+	cfg            config.SquareConfig
+	configResolver SquareConfigResolver
+	repo           *pos.Repository
+	cipher         *encryption.TokenCipher
+	httpClient     *http.Client
+}
+
+type SquareConfigResolver interface {
+	ResolveSquareConfig(ctx context.Context, salonID string) (config.SquareConfig, error)
 }
 
 func NewSquareAdapter(cfg config.SquareConfig, repo *pos.Repository, cipher *encryption.TokenCipher) *SquareAdapter {
@@ -41,6 +46,10 @@ func NewSquareAdapter(cfg config.SquareConfig, repo *pos.Repository, cipher *enc
 	}
 }
 
+func (a *SquareAdapter) SetConfigResolver(resolver SquareConfigResolver) {
+	a.configResolver = resolver
+}
+
 func (a *SquareAdapter) Name() string {
 	return pos.ProviderSquare
 }
@@ -49,35 +58,43 @@ func (a *SquareAdapter) Capabilities() pos.ProviderCapabilities {
 	return pos.ProviderCapabilities{}
 }
 
-func (a *SquareAdapter) OAuthURL(state string) (string, error) {
-	if a.cfg.ClientID == "" || a.cfg.RedirectURL == "" {
+func (a *SquareAdapter) OAuthURL(ctx context.Context, salonID string, state string) (string, error) {
+	cfg, err := a.configFor(ctx, salonID)
+	if err != nil {
+		return "", err
+	}
+	if cfg.ClientID == "" || cfg.RedirectURL == "" {
 		return "", errors.New("square oauth is not configured")
 	}
 	values := url.Values{}
-	values.Set("client_id", a.cfg.ClientID)
+	values.Set("client_id", cfg.ClientID)
 	values.Set("scope", strings.Join(squareScopes(), " "))
-	if strings.EqualFold(strings.TrimSpace(a.cfg.Environment), "production") {
+	if strings.EqualFold(strings.TrimSpace(cfg.Environment), "production") {
 		values.Set("session", "false")
 	}
 	values.Set("state", state)
-	values.Set("redirect_uri", a.cfg.RedirectURL)
-	return a.oauthBaseURL() + "/oauth2/authorize?" + values.Encode(), nil
+	values.Set("redirect_uri", cfg.RedirectURL)
+	return a.oauthBaseURL(cfg) + "/oauth2/authorize?" + values.Encode(), nil
 }
 
 func (a *SquareAdapter) Connect(ctx context.Context, input pos.ConnectInput) (*pos.Connection, error) {
-	if a.cfg.ClientID == "" || a.cfg.ClientSecret == "" {
+	cfg, err := a.configFor(ctx, input.SalonID)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.ClientID == "" || cfg.ClientSecret == "" {
 		return nil, errors.New("square oauth credentials are not configured")
 	}
 
 	payload := map[string]string{
-		"client_id":     a.cfg.ClientID,
-		"client_secret": a.cfg.ClientSecret,
+		"client_id":     cfg.ClientID,
+		"client_secret": cfg.ClientSecret,
 		"code":          input.Code,
 		"grant_type":    "authorization_code",
-		"redirect_uri":  input.RedirectURL,
+		"redirect_uri":  defaultString(input.RedirectURL, cfg.RedirectURL),
 	}
 	var tokenResponse squareTokenResponse
-	if err := a.doJSON(ctx, http.MethodPost, a.apiBaseURL()+"/oauth2/token", "", payload, &tokenResponse); err != nil {
+	if err := a.doJSON(ctx, cfg, http.MethodPost, a.apiBaseURL(cfg)+"/oauth2/token", "", payload, &tokenResponse); err != nil {
 		_ = a.repo.LogError(ctx, pos.POSError{
 			SalonID:      input.SalonID,
 			Provider:     pos.ProviderSquare,
@@ -123,8 +140,12 @@ func (a *SquareAdapter) ListLocations(ctx context.Context, salonID string) ([]po
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := a.configFor(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
 	var response squareLocationsResponse
-	if err := a.doJSON(ctx, http.MethodGet, a.apiBaseURL()+"/v2/locations", token, nil, &response); err != nil {
+	if err := a.doJSON(ctx, cfg, http.MethodGet, a.apiBaseURL(cfg)+"/v2/locations", token, nil, &response); err != nil {
 		_ = a.repo.LogError(ctx, pos.POSError{
 			SalonID:      salonID,
 			Provider:     pos.ProviderSquare,
@@ -152,8 +173,12 @@ func (a *SquareAdapter) ListServices(ctx context.Context, salonID string) ([]pos
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := a.configFor(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
 	var response squareCatalogResponse
-	if err := a.doJSON(ctx, http.MethodGet, a.apiBaseURL()+"/v2/catalog/list?types=ITEM,ITEM_VARIATION", token, nil, &response); err != nil {
+	if err := a.doJSON(ctx, cfg, http.MethodGet, a.apiBaseURL(cfg)+"/v2/catalog/list?types=ITEM,ITEM_VARIATION", token, nil, &response); err != nil {
 		_ = a.repo.LogError(ctx, pos.POSError{
 			SalonID:      salonID,
 			Provider:     pos.ProviderSquare,
@@ -218,8 +243,12 @@ func (a *SquareAdapter) ListStaff(ctx context.Context, salonID string) ([]pos.St
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := a.configFor(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
 	var response squareTeamMembersResponse
-	if err := a.doJSON(ctx, http.MethodPost, a.apiBaseURL()+"/v2/team-members/search", token, map[string]any{}, &response); err != nil {
+	if err := a.doJSON(ctx, cfg, http.MethodPost, a.apiBaseURL(cfg)+"/v2/team-members/search", token, map[string]any{}, &response); err != nil {
 		_ = a.repo.LogError(ctx, pos.POSError{
 			SalonID:      salonID,
 			Provider:     pos.ProviderSquare,
@@ -250,12 +279,16 @@ func (a *SquareAdapter) SearchCustomerByPhone(ctx context.Context, salonID strin
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := a.configFor(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
 	request, err := buildSquareCustomerSearchRequest(phone)
 	if err != nil {
 		return nil, err
 	}
 	var response squareCustomerSearchResponse
-	if err := a.doJSON(ctx, http.MethodPost, a.apiBaseURL()+"/v2/customers/search", token, request, &response); err != nil {
+	if err := a.doJSON(ctx, cfg, http.MethodPost, a.apiBaseURL(cfg)+"/v2/customers/search", token, request, &response); err != nil {
 		_ = a.repo.LogError(ctx, pos.POSError{
 			SalonID:      salonID,
 			Provider:     pos.ProviderSquare,
@@ -277,12 +310,16 @@ func (a *SquareAdapter) CreateCustomer(ctx context.Context, salonID string, inpu
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := a.configFor(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
 	request, err := buildSquareCreateCustomerRequest(input)
 	if err != nil {
 		return nil, err
 	}
 	var response squareCustomerResponse
-	if err := a.doJSON(ctx, http.MethodPost, a.apiBaseURL()+"/v2/customers", token, request, &response); err != nil {
+	if err := a.doJSON(ctx, cfg, http.MethodPost, a.apiBaseURL(cfg)+"/v2/customers", token, request, &response); err != nil {
 		_ = a.repo.LogError(ctx, pos.POSError{
 			SalonID:      salonID,
 			Provider:     pos.ProviderSquare,
@@ -304,12 +341,16 @@ func (a *SquareAdapter) CheckAvailability(ctx context.Context, salonID string, i
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := a.configFor(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
 	request, err := buildSquareAvailabilityRequest(locationID, input)
 	if err != nil {
 		return nil, err
 	}
 	var response squareAvailabilityResponse
-	if err := a.doJSON(ctx, http.MethodPost, a.apiBaseURL()+"/v2/bookings/availability/search", token, request, &response); err != nil {
+	if err := a.doJSON(ctx, cfg, http.MethodPost, a.apiBaseURL(cfg)+"/v2/bookings/availability/search", token, request, &response); err != nil {
 		_ = a.repo.LogError(ctx, pos.POSError{
 			SalonID:      salonID,
 			Provider:     pos.ProviderSquare,
@@ -327,12 +368,16 @@ func (a *SquareAdapter) CreateAppointment(ctx context.Context, salonID string, i
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := a.configFor(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
 	request, err := buildSquareCreateBookingRequest(locationID, input)
 	if err != nil {
 		return nil, err
 	}
 	var response squareBookingResponse
-	if err := a.doJSON(ctx, http.MethodPost, a.apiBaseURL()+"/v2/bookings", token, request, &response); err != nil {
+	if err := a.doJSON(ctx, cfg, http.MethodPost, a.apiBaseURL(cfg)+"/v2/bookings", token, request, &response); err != nil {
 		_ = a.repo.LogError(ctx, pos.POSError{
 			SalonID:      salonID,
 			Provider:     pos.ProviderSquare,
@@ -343,7 +388,7 @@ func (a *SquareAdapter) CreateAppointment(ctx context.Context, salonID string, i
 		return nil, err
 	}
 	if response.Booking.Version < 0 && strings.TrimSpace(response.Booking.ID) != "" {
-		response.Booking, err = a.retrieveBooking(ctx, token, response.Booking.ID)
+		response.Booking, err = a.retrieveBooking(ctx, cfg, token, response.Booking.ID)
 		if err != nil {
 			_ = a.repo.LogError(ctx, pos.POSError{
 				SalonID:      salonID,
@@ -367,12 +412,16 @@ func (a *SquareAdapter) RescheduleAppointment(ctx context.Context, salonID strin
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := a.configFor(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
 	request, err := buildSquareUpdateBookingRequest(locationID, input)
 	if err != nil {
 		return nil, err
 	}
 	var response squareBookingResponse
-	if err := a.doJSON(ctx, http.MethodPut, a.apiBaseURL()+"/v2/bookings/"+url.PathEscape(appointmentID), token, request, &response); err != nil {
+	if err := a.doJSON(ctx, cfg, http.MethodPut, a.apiBaseURL(cfg)+"/v2/bookings/"+url.PathEscape(appointmentID), token, request, &response); err != nil {
 		_ = a.repo.LogError(ctx, pos.POSError{
 			SalonID:      salonID,
 			Provider:     pos.ProviderSquare,
@@ -390,12 +439,16 @@ func (a *SquareAdapter) CancelAppointment(ctx context.Context, salonID string, a
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := a.configFor(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
 	request, err := buildSquareCancelBookingRequest(input)
 	if err != nil {
 		return nil, err
 	}
 	var response squareBookingResponse
-	if err := a.doJSON(ctx, http.MethodPost, a.apiBaseURL()+"/v2/bookings/"+url.PathEscape(appointmentID)+"/cancel", token, request, &response); err != nil {
+	if err := a.doJSON(ctx, cfg, http.MethodPost, a.apiBaseURL(cfg)+"/v2/bookings/"+url.PathEscape(appointmentID)+"/cancel", token, request, &response); err != nil {
 		_ = a.repo.LogError(ctx, pos.POSError{
 			SalonID:      salonID,
 			Provider:     pos.ProviderSquare,
@@ -423,9 +476,9 @@ func (a *SquareAdapter) Sync(ctx context.Context, salonID string) error {
 	return a.repo.UpsertStaff(ctx, salonID, staff)
 }
 
-func (a *SquareAdapter) retrieveBooking(ctx context.Context, token string, bookingID string) (squareBooking, error) {
+func (a *SquareAdapter) retrieveBooking(ctx context.Context, cfg config.SquareConfig, token string, bookingID string) (squareBooking, error) {
 	var response squareBookingResponse
-	if err := a.doJSON(ctx, http.MethodGet, a.apiBaseURL()+"/v2/bookings/"+url.PathEscape(bookingID), token, nil, &response); err != nil {
+	if err := a.doJSON(ctx, cfg, http.MethodGet, a.apiBaseURL(cfg)+"/v2/bookings/"+url.PathEscape(bookingID), token, nil, &response); err != nil {
 		return squareBooking{}, err
 	}
 	return response.Booking, nil
@@ -460,7 +513,7 @@ func (a *SquareAdapter) accessTokenAndLocation(ctx context.Context, salonID stri
 	return token, connection.LocationID, nil
 }
 
-func (a *SquareAdapter) doJSON(ctx context.Context, method string, endpoint string, bearerToken string, input any, output any) error {
+func (a *SquareAdapter) doJSON(ctx context.Context, cfg config.SquareConfig, method string, endpoint string, bearerToken string, input any, output any) error {
 	var body *bytes.Reader
 	if input == nil {
 		body = bytes.NewReader(nil)
@@ -477,8 +530,8 @@ func (a *SquareAdapter) doJSON(ctx context.Context, method string, endpoint stri
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
-	if a.cfg.APIVersion != "" {
-		req.Header.Set("Square-Version", a.cfg.APIVersion)
+	if cfg.APIVersion != "" {
+		req.Header.Set("Square-Version", cfg.APIVersion)
 	}
 	if input != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -507,18 +560,29 @@ func (a *SquareAdapter) doJSON(ctx context.Context, method string, endpoint stri
 	return json.NewDecoder(res.Body).Decode(output)
 }
 
-func (a *SquareAdapter) apiBaseURL() string {
-	if strings.TrimSpace(a.cfg.APIBaseURL) != "" {
-		return strings.TrimRight(a.cfg.APIBaseURL, "/")
+func (a *SquareAdapter) configFor(ctx context.Context, salonID string) (config.SquareConfig, error) {
+	if a.configResolver == nil || strings.TrimSpace(salonID) == "" {
+		return a.cfg, nil
 	}
-	if a.cfg.Environment == "production" {
+	cfg, err := a.configResolver.ResolveSquareConfig(ctx, salonID)
+	if err != nil {
+		return config.SquareConfig{}, err
+	}
+	return cfg, nil
+}
+
+func (a *SquareAdapter) apiBaseURL(cfg config.SquareConfig) string {
+	if strings.TrimSpace(cfg.APIBaseURL) != "" {
+		return strings.TrimRight(cfg.APIBaseURL, "/")
+	}
+	if cfg.Environment == "production" {
 		return "https://connect.squareup.com"
 	}
 	return "https://connect.squareupsandbox.com"
 }
 
-func (a *SquareAdapter) oauthBaseURL() string {
-	return a.apiBaseURL()
+func (a *SquareAdapter) oauthBaseURL(cfg config.SquareConfig) string {
+	return a.apiBaseURL(cfg)
 }
 
 func squareScopes() []string {

@@ -34,6 +34,11 @@ The product rule is strict: never confirm an appointment unless the active POS p
 - Do not edit production code, migrations, tests, frontend files, or runtime configuration until the user explicitly confirms and allows implementation.
 - Read-only exploration, repo inspection, and answering questions are allowed before confirmation.
 - Documentation-only or agent-rule changes may be applied directly only when the user explicitly asks to change those files.
+- Treat phrases such as "need", "cần", "should", "want", "add", "create", "fix", "build", or "implement" as a request to analyze and propose a plan, not as approval to write files.
+- Do not create, scaffold, patch, format, generate, move, delete, or otherwise write any code, tests, docs, skills, agents, migrations, runtime configuration, or generated artifacts before explicit approval for that exact scope.
+- Do not request escalated permissions for any write operation before the user has approved the scope and the specific need for escalation.
+- Explicit approval must be clear and action-oriented, such as "approved", "cho phép ghi file", "triển khai theo plan này", or "sửa các file này"; otherwise continue in read-only planning mode.
+- One explicit approval is sufficient when it directly answers an agent-proposed scope or plan. Do not ask for a second confirmation for the same scope; execute the approved scope.
 - If the user says "implement", "fix", "build", or similar, still present the plan first and wait for explicit approval before changing code.
 - For any request that changes the UI or user-facing layout, provide a **Mockup as Text** before implementation and wait for explicit approval.
 

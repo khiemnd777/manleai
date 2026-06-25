@@ -1,0 +1,4 @@
+interface:
+  display_name: "Business Logic Overlap Analysis"
+  short_description: "Find collisions in salon business rules"
+  default_prompt: "Use $business-logic-overlap-analysis to map overlapping rules, ownership, risks, and tests before changing this workflow."

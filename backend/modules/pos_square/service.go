@@ -106,7 +106,7 @@ func (s *Service) ConnectURL(ctx context.Context, salonID string, ownerUserID st
 	if err != nil {
 		return nil, err
 	}
-	url, err := s.adapter.OAuthURL(state)
+	url, err := s.adapter.OAuthURL(ctx, salonID, state)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +122,7 @@ func (s *Service) ConnectURL(ctx context.Context, salonID string, ownerUserID st
 	return &ConnectURLResponse{URL: url, State: state}, nil
 }
 
-func (s *Service) HandleCallback(ctx context.Context, code string, state string, redirectURL string) (*pos.Connection, error) {
+func (s *Service) HandleCallback(ctx context.Context, code string, state string, _ string) (*pos.Connection, error) {
 	salonID, nonceHash, err := decodeState(state, s.stateSecret, time.Now().UTC())
 	if err != nil {
 		return nil, err
@@ -131,10 +131,9 @@ func (s *Service) HandleCallback(ctx context.Context, code string, state string,
 		return nil, fmt.Errorf("invalid or expired square state")
 	}
 	return s.adapter.Connect(ctx, pos.ConnectInput{
-		SalonID:     salonID,
-		Code:        code,
-		RedirectURL: redirectURL,
-		State:       state,
+		SalonID: salonID,
+		Code:    code,
+		State:   state,
 	})
 }
 

@@ -60,7 +60,7 @@ func (f *fakeLanguageModelProvider) Name() string {
 	return ProviderOpenAI
 }
 
-func (f *fakeLanguageModelProvider) Configured() bool {
+func (f *fakeLanguageModelProvider) Configured(ctx context.Context, salonID string) bool {
 	return true
 }
 

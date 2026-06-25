@@ -31,6 +31,14 @@ func NewAdapter(cfg config.TwilioVoiceConfig, publicBaseURL string) *Adapter {
 	}
 }
 
+func (a *Adapter) WithConfig(cfg config.TwilioVoiceConfig, publicBaseURL string) *Adapter {
+	return &Adapter{
+		cfg:           cfg,
+		publicBaseURL: strings.TrimRight(publicBaseURL, "/"),
+		httpClient:    a.httpClient,
+	}
+}
+
 func (a *Adapter) Configured() bool {
 	return strings.TrimSpace(a.cfg.AuthToken) != ""
 }

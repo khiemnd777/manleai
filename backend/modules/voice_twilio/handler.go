@@ -20,10 +20,14 @@ func NewHandler(adapter *Adapter, service *voice.Service) *Handler {
 
 func (h *Handler) Incoming(c *fiber.Ctx) error {
 	params := formParams(c)
-	if !h.adapter.Configured() {
+	adapter, err := h.requestAdapter(c, params)
+	if err != nil {
 		return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_PROVIDER_NOT_CONFIGURED", "Voice provider is not configured.")
 	}
-	if !h.verify(c, params) {
+	if !adapter.Configured() {
+		return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_PROVIDER_NOT_CONFIGURED", "Voice provider is not configured.")
+	}
+	if !h.verify(c, adapter, params) {
 		return respond.Error(c, fiber.StatusForbidden, "TWILIO_SIGNATURE_INVALID", "Twilio webhook signature is invalid.")
 	}
 
@@ -38,7 +42,7 @@ func (h *Handler) Incoming(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_PROVIDER_NOT_CONFIGURED", "Voice provider is not configured.")
 	}
 	if errors.Is(err, voice.ErrRouteNotFound) {
-		return h.twiml(c, h.adapter.FinalResponse("We could not route this call to a salon. Please call the salon directly.", ""))
+		return h.twiml(c, adapter.FinalResponse("We could not route this call to a salon. Please call the salon directly.", ""))
 	}
 	if errors.Is(err, voice.ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "TWILIO_WEBHOOK_INVALID", "Twilio webhook request is invalid.")
@@ -46,7 +50,7 @@ func (h *Handler) Incoming(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "TWILIO_INCOMING_FAILED", "Could not process incoming call.")
 	}
-	return h.twiml(c, h.responseForReply(c, reply))
+	return h.twiml(c, h.responseForReply(c, adapter, reply))
 }
 
 func (h *Handler) Turn(c *fiber.Ctx) error {
@@ -59,14 +63,18 @@ func (h *Handler) Recording(c *fiber.Ctx) error {
 
 func (h *Handler) handleTurn(c *fiber.Ctx) error {
 	params := formParams(c)
-	if !h.adapter.Configured() {
+	adapter, err := h.requestAdapter(c, params)
+	if err != nil {
 		return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_PROVIDER_NOT_CONFIGURED", "Voice provider is not configured.")
 	}
-	if !h.verify(c, params) {
+	if !adapter.Configured() {
+		return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_PROVIDER_NOT_CONFIGURED", "Voice provider is not configured.")
+	}
+	if !h.verify(c, adapter, params) {
 		return respond.Error(c, fiber.StatusForbidden, "TWILIO_SIGNATURE_INVALID", "Twilio webhook signature is invalid.")
 	}
 
-	audio, audioContentType, fetchErr := h.recordingAudio(c, params)
+	audio, audioContentType, fetchErr := h.recordingAudio(c, adapter, params)
 	if fetchErr != nil {
 		audio = nil
 		audioContentType = ""
@@ -86,7 +94,7 @@ func (h *Handler) handleTurn(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_PROVIDER_NOT_CONFIGURED", "Voice provider is not configured.")
 	}
 	if errors.Is(err, voice.ErrRouteNotFound) {
-		return h.twiml(c, h.adapter.FinalResponse("We could not continue this call. Please call the salon directly.", ""))
+		return h.twiml(c, adapter.FinalResponse("We could not continue this call. Please call the salon directly.", ""))
 	}
 	if errors.Is(err, voice.ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "TWILIO_WEBHOOK_INVALID", "Twilio webhook request is invalid.")
@@ -94,32 +102,40 @@ func (h *Handler) handleTurn(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "TWILIO_TURN_FAILED", "Could not process voice turn.")
 	}
-	return h.twiml(c, h.responseForReply(c, reply))
+	return h.twiml(c, h.responseForReply(c, adapter, reply))
 }
 
-func (h *Handler) responseForReply(c *fiber.Ctx, reply *voice.CallReply) string {
+func (h *Handler) responseForReply(c *fiber.Ctx, adapter *Adapter, reply *voice.CallReply) string {
 	if reply == nil {
-		return h.adapter.FinalResponse("The owner can help with anything else.", "")
+		return adapter.FinalResponse("The owner can help with anything else.", "")
 	}
 	if !reply.Continue {
-		return h.adapter.FinalResponse(reply.Message, reply.AudioURL)
+		return adapter.FinalResponse(reply.Message, reply.AudioURL)
 	}
 	baseURL := requestBaseURL(c)
 	if reply.InputMode == voice.InputModeRecording {
-		return h.adapter.RecordResponse(reply.Message, h.adapter.RecordingURL(baseURL), reply.AudioURL)
+		return adapter.RecordResponse(reply.Message, adapter.RecordingURL(baseURL), reply.AudioURL)
 	}
-	return h.adapter.GatherResponse(reply.Message, h.adapter.TurnURL(baseURL), reply.AudioURL)
+	return adapter.GatherResponse(reply.Message, adapter.TurnURL(baseURL), reply.AudioURL)
 }
 
-func (h *Handler) recordingAudio(c *fiber.Ctx, params map[string]string) ([]byte, string, error) {
+func (h *Handler) recordingAudio(c *fiber.Ctx, adapter *Adapter, params map[string]string) ([]byte, string, error) {
 	if strings.TrimSpace(params["SpeechResult"]) != "" || strings.TrimSpace(params["RecordingUrl"]) == "" {
 		return nil, "", nil
 	}
-	return h.adapter.FetchRecording(c.UserContext(), params["RecordingUrl"], params["AccountSid"])
+	return adapter.FetchRecording(c.UserContext(), params["RecordingUrl"], params["AccountSid"])
 }
 
-func (h *Handler) verify(c *fiber.Ctx, params map[string]string) bool {
-	return h.adapter.VerifyWebhook(h.adapter.RequestURL(c.OriginalURL(), requestBaseURL(c)), params, c.Get("X-Twilio-Signature"))
+func (h *Handler) verify(c *fiber.Ctx, adapter *Adapter, params map[string]string) bool {
+	return adapter.VerifyWebhook(adapter.RequestURL(c.OriginalURL(), requestBaseURL(c)), params, c.Get("X-Twilio-Signature"))
+}
+
+func (h *Handler) requestAdapter(c *fiber.Ctx, params map[string]string) (*Adapter, error) {
+	cfg, publicBaseURL, err := h.service.TwilioWebhookConfig(c.UserContext(), params["CallSid"], params["To"])
+	if err != nil {
+		return nil, err
+	}
+	return h.adapter.WithConfig(cfg, publicBaseURL), nil
 }
 
 func (h *Handler) twiml(c *fiber.Ctx, body string) error {

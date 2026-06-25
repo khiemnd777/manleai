@@ -23,7 +23,7 @@ func TestDoJSONSendsSquareVersionHeader(t *testing.T) {
 		httpClient: &http.Client{Transport: transport},
 	}
 	var out map[string]bool
-	if err := adapter.doJSON(context.Background(), http.MethodGet, "https://square.test/v2/locations", "", nil, &out); err != nil {
+	if err := adapter.doJSON(context.Background(), adapter.cfg, http.MethodGet, "https://square.test/v2/locations", "", nil, &out); err != nil {
 		t.Fatalf("doJSON failed: %v", err)
 	}
 	if got := transport.squareVersion; got != "2026-05-20" {
@@ -54,7 +54,7 @@ func TestOAuthURLDoesNotSendSessionFalseInSandbox(t *testing.T) {
 			RedirectURL: "https://demo.test/api/integrations/square/callback",
 		},
 	}
-	oauthURL, err := adapter.OAuthURL("state_1")
+	oauthURL, err := adapter.OAuthURL(context.Background(), "salon_1", "state_1")
 	if err != nil {
 		t.Fatalf("OAuthURL failed: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestOAuthURLSendsSessionFalseInProduction(t *testing.T) {
 			RedirectURL: "https://demo.test/api/integrations/square/callback",
 		},
 	}
-	oauthURL, err := adapter.OAuthURL("state_1")
+	oauthURL, err := adapter.OAuthURL(context.Background(), "salon_1", "state_1")
 	if err != nil {
 		t.Fatalf("OAuthURL failed: %v", err)
 	}
@@ -555,7 +555,7 @@ func TestRetrieveBookingGetsVersion(t *testing.T) {
 		httpClient: &http.Client{Transport: transport},
 	}
 
-	booking, err := adapter.retrieveBooking(context.Background(), "token_1", "booking_1")
+	booking, err := adapter.retrieveBooking(context.Background(), adapter.cfg, "token_1", "booking_1")
 	if err != nil {
 		t.Fatalf("retrieve booking failed: %v", err)
 	}

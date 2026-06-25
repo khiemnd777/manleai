@@ -20,6 +20,83 @@ export type Salon = {
   handoff_phone?: string;
   ai_enabled: boolean;
   active_pos_provider: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type SalonSettings = {
+  id: string;
+  salon_id: string;
+  ai_greeting: string;
+  ai_voice: string;
+  booking_mode: string;
+  recording_enabled: boolean;
+  recording_consent_message: string;
+  sms_confirmation_enabled: boolean;
+  sms_reminder_enabled: boolean;
+  reminder_hours_before: number;
+  handoff_enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type BusinessHour = {
+  id?: string;
+  salon_id?: string;
+  day_of_week: number;
+  open_time?: string;
+  close_time?: string;
+  is_closed: boolean;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type SquareIntegrationConfig = {
+  provider: "square" | string;
+  configured: boolean;
+  environment: string;
+  client_id: string;
+  redirect_url: string;
+  api_version: string;
+  api_base_url?: string;
+  client_secret_configured: boolean;
+  client_secret_source: string;
+  updated_at?: string;
+};
+
+export type TwilioIntegrationConfig = {
+  provider: "twilio" | string;
+  configured: boolean;
+  public_base_url: string;
+  incoming_path: string;
+  turn_path: string;
+  recording_path: string;
+  inbound_webhook_url: string;
+  turn_webhook_url: string;
+  recording_webhook_url: string;
+  auth_token_configured: boolean;
+  auth_token_source: string;
+  updated_at?: string;
+};
+
+export type OpenAIIntegrationConfig = {
+  provider: "openai" | string;
+  enabled: boolean;
+  configured: boolean;
+  base_url: string;
+  transcription_model: string;
+  reply_model: string;
+  speech_model: string;
+  speech_voice: string;
+  api_key_configured: boolean;
+  api_key_source: string;
+  updated_at?: string;
+};
+
+export type IntegrationConfigs = {
+  square: SquareIntegrationConfig;
+  twilio: TwilioIntegrationConfig;
+  openai: OpenAIIntegrationConfig;
 };
 
 export type POSConnection = {

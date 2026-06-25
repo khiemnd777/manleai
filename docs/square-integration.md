@@ -62,15 +62,19 @@ successfully.
 
 Booking attempts and confirmed appointments snapshot service/staff segments in backend tables before or after the Square call as appropriate. Provider-neutral POS DTOs now carry segment arrays, and `SquareAdapter` maps those arrays into Square booking `appointment_segments` and availability `segment_filters`. `staff_selection_mode=anyone` is retained as internal/customer preference metadata; Square-specific appointment payload requirements remain isolated inside `SquareAdapter`.
 
-## Environment
+## Configuration
 
-```txt
-SQUARE_ENVIRONMENT=sandbox
-SQUARE_CLIENT_ID=
-SQUARE_CLIENT_SECRET=
-SQUARE_REDIRECT_URL=http://localhost:18089/api/integrations/square/callback
-SQUARE_API_VERSION=2026-05-20
-```
+Square Appointments app credentials are configured in the Integrations
+dashboard per salon. The backend stores the Square client secret encrypted and
+never returns it to the frontend. These legacy environment variables remain
+optional local-development fallback values when a salon does not yet have
+dashboard-saved Square configuration:
+
+- `SQUARE_ENVIRONMENT`
+- `SQUARE_CLIENT_ID`
+- `SQUARE_CLIENT_SECRET`
+- `SQUARE_REDIRECT_URL`
+- `SQUARE_API_VERSION`
 
 ## Token Security
 

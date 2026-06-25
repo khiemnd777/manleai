@@ -19,7 +19,7 @@ func NewGuardedReplyGenerator(provider LanguageModelProvider) *GuardedReplyGener
 }
 
 func (g *GuardedReplyGenerator) GenerateReply(ctx context.Context, req conversation.ReplyGenerationRequest) (conversation.ReplyGenerationResult, error) {
-	if g == nil || g.provider == nil || !g.provider.Configured() || req.Channel != conversation.ChannelPhone {
+	if g == nil || g.provider == nil || !g.provider.Configured(ctx, req.SalonID) || req.Channel != conversation.ChannelPhone {
 		return conversation.ReplyGenerationResult{}, ErrProviderDisabled
 	}
 	reply, err := g.provider.GenerateReply(ctx, ModelRequest{

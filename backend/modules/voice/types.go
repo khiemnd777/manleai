@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/modules/conversation"
 )
 
@@ -51,21 +52,26 @@ type TelephonyProvider interface {
 
 type SpeechToTextProvider interface {
 	Name() string
-	Configured() bool
-	Transcribe(ctx context.Context, audio []byte, contentType string) (string, error)
+	Configured(ctx context.Context, salonID string) bool
+	Transcribe(ctx context.Context, salonID string, audio []byte, contentType string) (string, error)
 }
 
 type LanguageModelProvider interface {
 	Name() string
-	Configured() bool
+	Configured(ctx context.Context, salonID string) bool
 	GenerateReply(ctx context.Context, req ModelRequest) (ModelReply, error)
 }
 
 type TextToSpeechProvider interface {
 	Name() string
-	Configured() bool
+	Configured(ctx context.Context, salonID string) bool
 	ContentType() string
-	Synthesize(ctx context.Context, text string, voice string) ([]byte, error)
+	Synthesize(ctx context.Context, salonID string, text string, voice string) ([]byte, error)
+}
+
+type ConfigResolver interface {
+	ResolveTwilioConfig(ctx context.Context, salonID string) (config.TwilioVoiceConfig, string, error)
+	ResolveOpenAIConfig(ctx context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error)
 }
 
 type ModelRequest struct {

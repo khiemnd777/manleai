@@ -13,6 +13,7 @@ import (
 	"github.com/manleai/ai-receptionist/internal/database"
 	"github.com/manleai/ai-receptionist/internal/encryption"
 	"github.com/manleai/ai-receptionist/internal/logger"
+	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/pos_square"
 )
@@ -48,7 +49,10 @@ func main() {
 	}
 
 	posRepo := pos.NewRepository(db)
+	integrationConfigRepo := integrationconfig.NewRepository(db)
+	integrationConfigService := integrationconfig.NewService(integrationConfigRepo, cipher, cfg)
 	squareAdapter := pos_square.NewSquareAdapter(cfg.Square, posRepo, cipher)
+	squareAdapter.SetConfigResolver(integrationConfigService)
 	processor := pos.NewSyncProcessor(posRepo, []pos.POSProvider{squareAdapter})
 
 	logg.Info("worker started", "scope", "pos_sync_jobs", "interval", posSyncPollInterval.String(), "batch_limit", posSyncBatchLimit)

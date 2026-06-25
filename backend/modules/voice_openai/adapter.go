@@ -17,8 +17,13 @@ import (
 )
 
 type Adapter struct {
-	cfg        config.OpenAIVoiceConfig
-	httpClient *http.Client
+	cfg            config.OpenAIVoiceConfig
+	configResolver OpenAIConfigResolver
+	httpClient     *http.Client
+}
+
+type OpenAIConfigResolver interface {
+	ResolveOpenAIConfig(ctx context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error)
 }
 
 func NewAdapter(cfg config.OpenAIVoiceConfig) *Adapter {
@@ -28,20 +33,29 @@ func NewAdapter(cfg config.OpenAIVoiceConfig) *Adapter {
 	}
 }
 
+func (a *Adapter) SetConfigResolver(resolver OpenAIConfigResolver) {
+	a.configResolver = resolver
+}
+
 func (a *Adapter) Name() string {
 	return voice.ProviderOpenAI
 }
 
-func (a *Adapter) Configured() bool {
-	return strings.TrimSpace(a.cfg.APIKey) != ""
+func (a *Adapter) Configured(ctx context.Context, salonID string) bool {
+	cfg, enabled, err := a.configFor(ctx, salonID)
+	return err == nil && enabled && strings.TrimSpace(cfg.APIKey) != ""
 }
 
 func (a *Adapter) ContentType() string {
 	return "audio/mpeg"
 }
 
-func (a *Adapter) Transcribe(ctx context.Context, audio []byte, contentType string) (string, error) {
-	if !a.Configured() || strings.TrimSpace(a.cfg.TranscriptionModel) == "" {
+func (a *Adapter) Transcribe(ctx context.Context, salonID string, audio []byte, contentType string) (string, error) {
+	cfg, enabled, err := a.configFor(ctx, salonID)
+	if err != nil {
+		return "", err
+	}
+	if !enabled || strings.TrimSpace(cfg.APIKey) == "" || strings.TrimSpace(cfg.TranscriptionModel) == "" {
 		return "", voice.ErrProviderDisabled
 	}
 	if len(audio) == 0 {
@@ -50,7 +64,7 @@ func (a *Adapter) Transcribe(ctx context.Context, audio []byte, contentType stri
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	if err := writer.WriteField("model", strings.TrimSpace(a.cfg.TranscriptionModel)); err != nil {
+	if err := writer.WriteField("model", strings.TrimSpace(cfg.TranscriptionModel)); err != nil {
 		return "", err
 	}
 	part, err := writer.CreateFormFile("file", filenameForContentType(contentType))
@@ -64,12 +78,12 @@ func (a *Adapter) Transcribe(ctx context.Context, audio []byte, contentType stri
 		return "", err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url("/audio/transcriptions"), &body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url(cfg, "/audio/transcriptions"), &body)
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
-	a.authorize(req)
+	a.authorize(req, cfg)
 
 	var res transcriptionResponse
 	if err := a.do(req, &res); err != nil {
@@ -79,11 +93,15 @@ func (a *Adapter) Transcribe(ctx context.Context, audio []byte, contentType stri
 }
 
 func (a *Adapter) GenerateReply(ctx context.Context, req voice.ModelRequest) (voice.ModelReply, error) {
-	if !a.Configured() || strings.TrimSpace(a.cfg.ReplyModel) == "" {
+	cfg, enabled, err := a.configFor(ctx, req.SalonID)
+	if err != nil {
+		return voice.ModelReply{}, err
+	}
+	if !enabled || strings.TrimSpace(cfg.APIKey) == "" || strings.TrimSpace(cfg.ReplyModel) == "" {
 		return voice.ModelReply{}, voice.ErrProviderDisabled
 	}
 	payload := responseRequest{
-		Model: strings.TrimSpace(a.cfg.ReplyModel),
+		Model: strings.TrimSpace(cfg.ReplyModel),
 		Instructions: strings.Join([]string{
 			"You are the AI phone receptionist for a US nail salon.",
 			"Rewrite only the safe_reply into a concise spoken response.",
@@ -118,12 +136,12 @@ func (a *Adapter) GenerateReply(ctx context.Context, req voice.ModelRequest) (vo
 	if err != nil {
 		return voice.ModelReply{}, err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url("/responses"), bytes.NewReader(raw))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url(cfg, "/responses"), bytes.NewReader(raw))
 	if err != nil {
 		return voice.ModelReply{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	a.authorize(httpReq)
+	a.authorize(httpReq, cfg)
 
 	var res responseResponse
 	if err := a.do(httpReq, &res); err != nil {
@@ -145,8 +163,12 @@ func (a *Adapter) GenerateReply(ctx context.Context, req voice.ModelRequest) (vo
 	return parsed, nil
 }
 
-func (a *Adapter) Synthesize(ctx context.Context, text string, requestedVoice string) ([]byte, error) {
-	if !a.Configured() || strings.TrimSpace(a.cfg.SpeechModel) == "" {
+func (a *Adapter) Synthesize(ctx context.Context, salonID string, text string, requestedVoice string) ([]byte, error) {
+	cfg, enabled, err := a.configFor(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	if !enabled || strings.TrimSpace(cfg.APIKey) == "" || strings.TrimSpace(cfg.SpeechModel) == "" {
 		return nil, voice.ErrProviderDisabled
 	}
 	text = strings.TrimSpace(text)
@@ -155,13 +177,13 @@ func (a *Adapter) Synthesize(ctx context.Context, text string, requestedVoice st
 	}
 	voiceName := strings.TrimSpace(requestedVoice)
 	if voiceName == "" {
-		voiceName = strings.TrimSpace(a.cfg.SpeechVoice)
+		voiceName = strings.TrimSpace(cfg.SpeechVoice)
 	}
 	if voiceName == "" {
 		return nil, voice.ErrValidation
 	}
 	payload := map[string]any{
-		"model":  strings.TrimSpace(a.cfg.SpeechModel),
+		"model":  strings.TrimSpace(cfg.SpeechModel),
 		"voice":  voiceName,
 		"input":  text,
 		"format": "mp3",
@@ -170,12 +192,12 @@ func (a *Adapter) Synthesize(ctx context.Context, text string, requestedVoice st
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url("/audio/speech"), bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url(cfg, "/audio/speech"), bytes.NewReader(raw))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	a.authorize(req)
+	a.authorize(req, cfg)
 
 	res, err := a.httpClient.Do(req)
 	if err != nil {
@@ -200,16 +222,23 @@ func (a *Adapter) do(req *http.Request, output any) error {
 	return json.NewDecoder(res.Body).Decode(output)
 }
 
-func (a *Adapter) authorize(req *http.Request) {
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(a.cfg.APIKey))
+func (a *Adapter) authorize(req *http.Request, cfg config.OpenAIVoiceConfig) {
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(cfg.APIKey))
 }
 
-func (a *Adapter) url(path string) string {
-	base := strings.TrimRight(strings.TrimSpace(a.cfg.BaseURL), "/")
+func (a *Adapter) url(cfg config.OpenAIVoiceConfig, path string) string {
+	base := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
 	if base == "" {
 		base = "https://api.openai.com/v1"
 	}
 	return base + path
+}
+
+func (a *Adapter) configFor(ctx context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error) {
+	if a.configResolver == nil || strings.TrimSpace(salonID) == "" {
+		return a.cfg, true, nil
+	}
+	return a.configResolver.ResolveOpenAIConfig(ctx, salonID)
 }
 
 func modelInput(req voice.ModelRequest) string {

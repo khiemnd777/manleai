@@ -460,7 +460,7 @@ function StaffTable({
               <th className="px-4 py-3">Source</th>
               <th className="px-4 py-3">Sync status</th>
               <th className="px-4 py-3">Booking readiness</th>
-              <th className="px-4 py-3">Actions</th>
+              <th className="w-56 px-4 py-3">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-line bg-white">
@@ -483,7 +483,7 @@ function StaffTable({
                 <td className="px-4 py-3">
                   <AIStatus member={member} />
                 </td>
-                <td className="px-4 py-3">
+                <td className="w-56 px-4 py-3 align-top">
                   <StaffActions member={member} busy={busy} onEdit={onEdit} onArchive={onArchive} onUpdateAI={onUpdateAI} />
                 </td>
               </tr>
@@ -566,23 +566,32 @@ function StaffActions({
   const canEnable = canEnableAI(member);
   const nextAI = !member.ai_bookable;
   return (
-    <div className="flex flex-wrap gap-2">
-      <Button type="button" variant="secondary" onClick={() => onEdit(member)} disabled={busy !== ""}>
-        <Pencil className="h-4 w-4" />
-        Edit
-      </Button>
+    <div className="grid w-full gap-2">
       <Button
         type="button"
         variant={member.ai_bookable ? "secondary" : "primary"}
+        className="w-full whitespace-nowrap px-3"
         onClick={() => onUpdateAI(member, nextAI)}
         disabled={busy !== "" || !member.id || (!member.ai_bookable && !canEnable)}
       >
         {aiBusy ? "Saving..." : member.ai_bookable ? "Block AI booking" : canEnable ? "Allow AI booking" : "AI booking gated"}
       </Button>
-      <Button type="button" variant="danger" onClick={() => onArchive(member)} disabled={busy !== "" || archived || !member.id}>
-        <Archive className="h-4 w-4" />
-        {archiveBusy ? "Archiving..." : "Archive"}
-      </Button>
+      <div className="grid grid-cols-2 gap-2">
+        <Button type="button" variant="secondary" className="h-9 px-3 text-xs" onClick={() => onEdit(member)} disabled={busy !== ""}>
+          <Pencil className="h-4 w-4" />
+          Edit
+        </Button>
+        <Button
+          type="button"
+          variant="danger"
+          className="h-9 px-3 text-xs"
+          onClick={() => onArchive(member)}
+          disabled={busy !== "" || archived || !member.id}
+        >
+          {archiveBusy ? null : <Archive className="h-4 w-4" />}
+          {archiveBusy ? "Archiving" : "Archive"}
+        </Button>
+      </div>
     </div>
   );
 }

@@ -41,7 +41,7 @@ Visit `http://localhost:3088/login`.
 
 ## External Voice AI
 
-The local app can run without external AI providers. To exercise Milestone 6 voice provider readiness and recording-mode turns, set these values in `.env` or `backend/.env`:
+The local app can run without external AI providers. To exercise Milestone 6 voice provider readiness and recording-mode turns, configure OpenAI in the Integrations dashboard. The legacy env values below remain optional fallback values:
 
 ```bash
 VOICE_AI_PROVIDER=openai
@@ -56,7 +56,7 @@ When external STT is configured, Twilio can use `/api/voice/twilio/recording`; o
 
 ## Simulate Twilio Phone Booking Webhooks
 
-Use the local Twilio simulator to exercise the real phone webhook path without hand-writing signed requests. The API must be running, `VOICE_TWILIO_AUTH_TOKEN` must match the backend config, and `-to` must be the salon phone number stored for routing inbound calls.
+Use the local Twilio simulator to exercise the real phone webhook path without hand-writing signed requests. The API must be running, `-auth-token` must match the salon's configured Twilio auth token, and `-to` must be the salon phone number stored for routing inbound calls.
 
 ```bash
 cd backend

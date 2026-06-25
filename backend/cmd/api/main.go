@@ -17,6 +17,7 @@ import (
 	"github.com/manleai/ai-receptionist/modules/booking"
 	"github.com/manleai/ai-receptionist/modules/conversation"
 	"github.com/manleai/ai-receptionist/modules/customer"
+	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/pos_square"
 	"github.com/manleai/ai-receptionist/modules/salon"
@@ -75,8 +76,13 @@ func main() {
 	salonService := salon.NewService(salonRepo)
 	salon.RegisterRoutes(api, salon.NewHandler(salonService), cfg.JWTSecret)
 
+	integrationConfigRepo := integrationconfig.NewRepository(db)
+	integrationConfigService := integrationconfig.NewService(integrationConfigRepo, cipher, cfg)
+	integrationconfig.RegisterRoutes(api, integrationconfig.NewHandler(integrationConfigService), cfg.JWTSecret)
+
 	posRepo := pos.NewRepository(db)
 	squareAdapter := pos_square.NewSquareAdapter(cfg.Square, posRepo, cipher)
+	squareAdapter.SetConfigResolver(integrationConfigService)
 	posService := pos.NewService(posRepo, squareAdapter)
 	pos.RegisterRoutes(api, pos.NewHandler(posService), cfg.JWTSecret)
 
@@ -97,17 +103,16 @@ func main() {
 	training.RegisterRoutes(api, training.NewHandler(trainingService), cfg.JWTSecret)
 
 	voiceRepo := voice.NewRepository(db)
-	var aiProviders voice.AIProviders
-	if strings.TrimSpace(cfg.Voice.AI.Provider) == voice.ProviderOpenAI {
-		openAIVoiceAdapter := voice_openai.NewAdapter(cfg.Voice.AI.OpenAI)
-		aiProviders = voice.AIProviders{
-			STT: openAIVoiceAdapter,
-			LLM: openAIVoiceAdapter,
-			TTS: openAIVoiceAdapter,
-		}
+	openAIVoiceAdapter := voice_openai.NewAdapter(cfg.Voice.AI.OpenAI)
+	openAIVoiceAdapter.SetConfigResolver(integrationConfigService)
+	aiProviders := voice.AIProviders{
+		STT: openAIVoiceAdapter,
+		LLM: openAIVoiceAdapter,
+		TTS: openAIVoiceAdapter,
 	}
 	conversationService.SetReplyGenerator(voice.NewGuardedReplyGenerator(aiProviders.LLM))
 	voiceService := voice.NewService(voiceRepo, conversationService, cfg.Voice, aiProviders)
+	voiceService.SetConfigResolver(integrationConfigService)
 	voice.RegisterRoutes(api, voice.NewHandler(voiceService), cfg.JWTSecret)
 	twilioVoiceAdapter := voice_twilio.NewAdapter(cfg.Voice.Twilio, cfg.Voice.PublicBaseURL)
 	voice_twilio.RegisterRoutes(api, voice_twilio.NewHandler(twilioVoiceAdapter, voiceService))

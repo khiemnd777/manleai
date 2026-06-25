@@ -106,6 +106,96 @@ Returns salons owned by the authenticated user.
 
 `PUT /api/salons/:id/business-hours`
 
+## Integration Configuration
+
+Provider credentials and runtime settings are salon-scoped and owner-scoped.
+Secret values are write-only: responses only expose whether a secret is
+configured and whether it came from dashboard storage or environment fallback.
+
+`GET /api/salons/:id/integration-configs`
+
+```json
+{
+  "square": {
+    "provider": "square",
+    "configured": true,
+    "environment": "sandbox",
+    "client_id": "square-app-id",
+    "redirect_url": "https://api.example.com/api/integrations/square/callback",
+    "api_version": "2026-05-20",
+    "client_secret_configured": true,
+    "client_secret_source": "database"
+  },
+  "twilio": {
+    "provider": "twilio",
+    "configured": true,
+    "public_base_url": "https://api.example.com",
+    "incoming_path": "/api/voice/twilio/incoming",
+    "turn_path": "/api/voice/twilio/turn",
+    "recording_path": "/api/voice/twilio/recording",
+    "inbound_webhook_url": "https://api.example.com/api/voice/twilio/incoming",
+    "turn_webhook_url": "https://api.example.com/api/voice/twilio/turn",
+    "recording_webhook_url": "https://api.example.com/api/voice/twilio/recording",
+    "auth_token_configured": true,
+    "auth_token_source": "database"
+  },
+  "openai": {
+    "provider": "openai",
+    "enabled": true,
+    "configured": true,
+    "base_url": "https://api.openai.com/v1",
+    "transcription_model": "gpt-4o-mini-transcribe",
+    "reply_model": "gpt-4.1-mini",
+    "speech_model": "gpt-4o-mini-tts",
+    "speech_voice": "alloy",
+    "api_key_configured": true,
+    "api_key_source": "database"
+  }
+}
+```
+
+`PUT /api/salons/:id/integration-configs/square`
+
+```json
+{
+  "environment": "sandbox",
+  "client_id": "square-app-id",
+  "client_secret": "new-secret-or-empty-to-keep-existing",
+  "clear_client_secret": false,
+  "redirect_url": "https://api.example.com/api/integrations/square/callback",
+  "api_version": "2026-05-20",
+  "api_base_url": ""
+}
+```
+
+`PUT /api/salons/:id/integration-configs/twilio`
+
+```json
+{
+  "public_base_url": "https://api.example.com",
+  "auth_token": "new-token-or-empty-to-keep-existing",
+  "clear_auth_token": false,
+  "incoming_path": "/api/voice/twilio/incoming",
+  "turn_path": "/api/voice/twilio/turn",
+  "recording_path": "/api/voice/twilio/recording"
+}
+```
+
+`PUT /api/salons/:id/integration-configs/openai`
+
+```json
+{
+  "enabled": true,
+  "api_key": "new-key-or-empty-to-keep-existing",
+  "clear_api_key": false,
+  "base_url": "https://api.openai.com/v1",
+  "transcription_model": "gpt-4o-mini-transcribe",
+  "reply_model": "gpt-4.1-mini",
+  "speech_model": "gpt-4o-mini-tts",
+  "speech_voice": "alloy"
+}
+```
+
 `GET /api/salons/:id/services`
 
 Returns ManleAI-owned services for dashboard tables, including Square-imported
@@ -726,7 +816,7 @@ Returns owner-scoped live voice, phone booking, and external AI provider readine
 
 `POST /api/voice/twilio/incoming`
 
-Public Twilio Programmable Voice webhook for a new inbound call. Requires a valid `X-Twilio-Signature` generated with `VOICE_TWILIO_AUTH_TOKEN`. The webhook matches Twilio `To` to the salon phone, creates or reuses a `phone` conversation session, records a `voice_webhook_events` audit row, and returns TwiML with a speech `<Gather>`.
+Public Twilio Programmable Voice webhook for a new inbound call. Requires a valid `X-Twilio-Signature` generated with the salon's configured Twilio auth token. The webhook matches Twilio `To` to the salon phone, creates or reuses a `phone` conversation session, records a `voice_webhook_events` audit row, and returns TwiML with a speech `<Gather>`.
 
 Expected Twilio form fields include:
 

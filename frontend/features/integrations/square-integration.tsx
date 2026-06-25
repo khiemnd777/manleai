@@ -1,15 +1,20 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import type { Dispatch, ReactNode, SetStateAction } from "react";
 import {
   AlertTriangle,
   Ban,
+  Bot,
   CalendarCheck,
   CheckCircle2,
   ExternalLink,
+  KeyRound,
+  PhoneCall,
   Power,
   PowerOff,
   RefreshCcw,
+  Save,
   Workflow,
   XCircle
 } from "lucide-react";
@@ -22,6 +27,8 @@ import { apiRequest } from "@/lib/api/client";
 import type {
   AvailabilityResult,
   AvailabilitySlot,
+  IntegrationConfigs,
+  OpenAIIntegrationConfig,
   POSConnection,
   POSLocation,
   ProviderSwitchMatch,
@@ -31,8 +38,10 @@ import type {
   POSService,
   POSStaffMember,
   Salon,
+  SquareIntegrationConfig,
   SquareReadiness,
   SyncLog,
+  TwilioIntegrationConfig,
   TestBookingRecord
 } from "@/types/api";
 
@@ -93,6 +102,38 @@ type TestBookingForm = {
   notes: string;
 };
 
+type ConfigTab = "square" | "twilio" | "openai";
+
+type SquareConfigForm = {
+  environment: string;
+  client_id: string;
+  client_secret: string;
+  clear_client_secret: boolean;
+  redirect_url: string;
+  api_version: string;
+  api_base_url: string;
+};
+
+type TwilioConfigForm = {
+  public_base_url: string;
+  auth_token: string;
+  clear_auth_token: boolean;
+  incoming_path: string;
+  turn_path: string;
+  recording_path: string;
+};
+
+type OpenAIConfigForm = {
+  enabled: boolean;
+  api_key: string;
+  clear_api_key: boolean;
+  base_url: string;
+  transcription_model: string;
+  reply_model: string;
+  speech_model: string;
+  speech_voice: string;
+};
+
 const defaultForm: TestBookingForm = {
   service_id: "",
   staff_id: "",
@@ -103,9 +144,40 @@ const defaultForm: TestBookingForm = {
   notes: "AI booking readiness test. Cancel after verifying Square booking creation."
 };
 
+const defaultSquareConfigForm: SquareConfigForm = {
+  environment: "sandbox",
+  client_id: "",
+  client_secret: "",
+  clear_client_secret: false,
+  redirect_url: "http://localhost:18089/api/integrations/square/callback",
+  api_version: "2026-05-20",
+  api_base_url: ""
+};
+
+const defaultTwilioConfigForm: TwilioConfigForm = {
+  public_base_url: "",
+  auth_token: "",
+  clear_auth_token: false,
+  incoming_path: "/api/voice/twilio/incoming",
+  turn_path: "/api/voice/twilio/turn",
+  recording_path: "/api/voice/twilio/recording"
+};
+
+const defaultOpenAIConfigForm: OpenAIConfigForm = {
+  enabled: false,
+  api_key: "",
+  clear_api_key: false,
+  base_url: "https://api.openai.com/v1",
+  transcription_model: "gpt-4o-mini-transcribe",
+  reply_model: "gpt-4.1-mini",
+  speech_model: "gpt-4o-mini-tts",
+  speech_voice: "alloy"
+};
+
 export function SquareIntegration() {
   const [salons, setSalons] = useState<Salon[]>([]);
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [integrationConfigs, setIntegrationConfigs] = useState<IntegrationConfigs | null>(null);
   const [switchReadiness, setSwitchReadiness] = useState<ProviderSwitchReadiness | null>(null);
   const [switchRun, setSwitchRun] = useState<ProviderSwitchRun | null>(null);
   const [switchDryRunReadiness, setSwitchDryRunReadiness] = useState<ProviderSwitchDryRunReadiness | null>(null);
@@ -114,6 +186,10 @@ export function SquareIntegration() {
   const [locations, setLocations] = useState<POSLocation[]>([]);
   const [selectedLocationID, setSelectedLocationID] = useState("");
   const [form, setForm] = useState<TestBookingForm>(defaultForm);
+  const [activeConfigTab, setActiveConfigTab] = useState<ConfigTab>("square");
+  const [squareConfigForm, setSquareConfigForm] = useState<SquareConfigForm>(defaultSquareConfigForm);
+  const [twilioConfigForm, setTwilioConfigForm] = useState<TwilioConfigForm>(defaultTwilioConfigForm);
+  const [openAIConfigForm, setOpenAIConfigForm] = useState<OpenAIConfigForm>(defaultOpenAIConfigForm);
   const [bookingDate, setBookingDate] = useState("");
   const [availabilityResult, setAvailabilityResult] = useState<AvailabilityResult | null>(null);
   const [availabilityError, setAvailabilityError] = useState("");
@@ -145,23 +221,32 @@ export function SquareIntegration() {
       const firstSalon = salonResponse.salons[0];
       if (!firstSalon) {
         setStatus(null);
+        setIntegrationConfigs(null);
         setSwitchReadiness(null);
         setSwitchRun(null);
         setSwitchDryRunReadiness(null);
         setServices([]);
         setStaff([]);
         setLocations([]);
+        setSquareConfigForm(defaultSquareConfigForm);
+        setTwilioConfigForm(defaultTwilioConfigForm);
+        setOpenAIConfigForm(defaultOpenAIConfigForm);
         return;
       }
 
-      const [squareStatus, providerSwitchResponse, providerSwitchRunResponse, serviceResponse, staffResponse] = await Promise.all([
+      const [squareStatus, configResponse, providerSwitchResponse, providerSwitchRunResponse, serviceResponse, staffResponse] = await Promise.all([
         apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
+        apiRequest<IntegrationConfigs>(`/api/salons/${firstSalon.id}/integration-configs`),
         apiRequest<ProviderSwitchReadiness>(`/api/salons/${firstSalon.id}/pos/provider-switch-readiness`),
         apiRequest<ProviderSwitchRunResponse>(`/api/salons/${firstSalon.id}/pos/provider-switch-runs/latest`),
         apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
         apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`)
       ]);
       setStatus(squareStatus);
+      setIntegrationConfigs(configResponse);
+      setSquareConfigForm(squareConfigToForm(configResponse.square));
+      setTwilioConfigForm(twilioConfigToForm(configResponse.twilio));
+      setOpenAIConfigForm(openAIConfigToForm(configResponse.openai));
       setSwitchReadiness(providerSwitchResponse);
       setSwitchRun(providerSwitchRunResponse.run ?? null);
       if (providerSwitchRunResponse.run) {
@@ -223,6 +308,11 @@ export function SquareIntegration() {
 
   async function connectSquare() {
     if (!salon) return;
+    if (!integrationConfigs?.square.configured) {
+      setError("Save Square Appointments credentials before starting OAuth.");
+      setActiveConfigTab("square");
+      return;
+    }
     setBusy("connect");
     setError("");
     setSuccess("");
@@ -398,6 +488,66 @@ export function SquareIntegration() {
     }
   }
 
+  async function saveSquareConfig() {
+    if (!salon) return;
+    setBusy("save-square-config");
+    setError("");
+    setSuccess("");
+    try {
+      const updated = await apiRequest<SquareIntegrationConfig>(`/api/salons/${salon.id}/integration-configs/square`, {
+        method: "PUT",
+        body: JSON.stringify(squareConfigForm)
+      });
+      setIntegrationConfigs((current) => ({ ...(current ?? emptyIntegrationConfigs()), square: updated }));
+      setSquareConfigForm(squareConfigToForm(updated));
+      setSuccess("Square Appointments configuration saved.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save Square configuration.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function saveTwilioConfig() {
+    if (!salon) return;
+    setBusy("save-twilio-config");
+    setError("");
+    setSuccess("");
+    try {
+      const updated = await apiRequest<TwilioIntegrationConfig>(`/api/salons/${salon.id}/integration-configs/twilio`, {
+        method: "PUT",
+        body: JSON.stringify(twilioConfigForm)
+      });
+      setIntegrationConfigs((current) => ({ ...(current ?? emptyIntegrationConfigs()), twilio: updated }));
+      setTwilioConfigForm(twilioConfigToForm(updated));
+      setSuccess("Twilio voice configuration saved.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save Twilio configuration.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function saveOpenAIConfig() {
+    if (!salon) return;
+    setBusy("save-openai-config");
+    setError("");
+    setSuccess("");
+    try {
+      const updated = await apiRequest<OpenAIIntegrationConfig>(`/api/salons/${salon.id}/integration-configs/openai`, {
+        method: "PUT",
+        body: JSON.stringify(openAIConfigForm)
+      });
+      setIntegrationConfigs((current) => ({ ...(current ?? emptyIntegrationConfigs()), openai: updated }));
+      setOpenAIConfigForm(openAIConfigToForm(updated));
+      setSuccess("OpenAI voice AI configuration saved.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save OpenAI configuration.");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function updateSwitchMatch(matchID: string, matchStatus: string) {
     if (!salon || !switchRun) return;
     setBusy(`switch-match:${matchID}:${matchStatus}`);
@@ -491,6 +641,7 @@ export function SquareIntegration() {
   const canCancelTest = Boolean(readiness?.can_cancel_test_booking && latestTest?.appointment_id) && busy === "";
   const canEnable = Boolean(readiness?.can_enable_ai_booking) && busy === "";
   const aiEnabled = Boolean(readiness?.ai_enabled ?? salon.ai_enabled);
+  const squareConfigConfigured = Boolean(integrationConfigs?.square.configured);
   const canCheckAvailability =
     Boolean(form.service_id) && Boolean(form.staff_id) && Boolean(bookingDate) && busy === "" && !checkingAvailability;
 
@@ -522,10 +673,27 @@ export function SquareIntegration() {
         readiness={readiness}
         services={services}
         staff={staff}
+        squareConfigConfigured={squareConfigConfigured}
         switchReadiness={switchReadiness}
         syncLogCount={status?.sync_logs?.length ?? 0}
         onConnect={() => void connectSquare()}
         onSync={() => void syncSquare()}
+      />
+
+      <ProviderConfigurationPanel
+        activeTab={activeConfigTab}
+        busy={busy}
+        configs={integrationConfigs}
+        openAIForm={openAIConfigForm}
+        setActiveTab={setActiveConfigTab}
+        setOpenAIForm={setOpenAIConfigForm}
+        setSquareForm={setSquareConfigForm}
+        setTwilioForm={setTwilioConfigForm}
+        squareForm={squareConfigForm}
+        twilioForm={twilioConfigForm}
+        onSaveOpenAI={() => void saveOpenAIConfig()}
+        onSaveSquare={() => void saveSquareConfig()}
+        onSaveTwilio={() => void saveTwilioConfig()}
       />
 
       <Card>
@@ -559,7 +727,7 @@ export function SquareIntegration() {
         ) : null}
 
         <div className="mt-6 grid gap-3 lg:grid-cols-[1fr_1fr_auto]">
-          <Button type="button" onClick={() => void connectSquare()} disabled={busy !== ""}>
+          <Button type="button" onClick={() => void connectSquare()} disabled={busy !== "" || !squareConfigConfigured}>
             <ExternalLink className="h-4 w-4" />
             {busy === "connect" ? "Opening..." : "Connect Square"}
           </Button>
@@ -829,6 +997,487 @@ export function SquareIntegration() {
   );
 }
 
+function ProviderConfigurationPanel({
+  activeTab,
+  busy,
+  configs,
+  openAIForm,
+  setActiveTab,
+  setOpenAIForm,
+  setSquareForm,
+  setTwilioForm,
+  squareForm,
+  twilioForm,
+  onSaveOpenAI,
+  onSaveSquare,
+  onSaveTwilio
+}: {
+  activeTab: ConfigTab;
+  busy: string;
+  configs: IntegrationConfigs | null;
+  openAIForm: OpenAIConfigForm;
+  setActiveTab: Dispatch<SetStateAction<ConfigTab>>;
+  setOpenAIForm: Dispatch<SetStateAction<OpenAIConfigForm>>;
+  setSquareForm: Dispatch<SetStateAction<SquareConfigForm>>;
+  setTwilioForm: Dispatch<SetStateAction<TwilioConfigForm>>;
+  squareForm: SquareConfigForm;
+  twilioForm: TwilioConfigForm;
+  onSaveOpenAI: () => void;
+  onSaveSquare: () => void;
+  onSaveTwilio: () => void;
+}) {
+  const square = configs?.square;
+  const twilio = configs?.twilio;
+  const openAI = configs?.openai;
+
+  return (
+    <Card>
+      <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-start">
+        <div>
+          <CardTitle>Provider configuration</CardTitle>
+          <CardDescription>
+            Store provider credentials securely in this dashboard. Secret values are write-only.
+          </CardDescription>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <ConfigTabButton active={activeTab === "square"} icon={<KeyRound className="h-4 w-4" />} label="Square" onClick={() => setActiveTab("square")} />
+          <ConfigTabButton active={activeTab === "twilio"} icon={<PhoneCall className="h-4 w-4" />} label="Twilio" onClick={() => setActiveTab("twilio")} />
+          <ConfigTabButton active={activeTab === "openai"} icon={<Bot className="h-4 w-4" />} label="OpenAI" onClick={() => setActiveTab("openai")} />
+        </div>
+      </div>
+
+      <div className="mt-5 grid gap-3 md:grid-cols-3">
+        <ConfigStatusBlock
+          label="Square Appointments"
+          status={square?.configured ? "configured" : "needs_config"}
+          detail={square?.configured ? "OAuth can be started." : "Client ID, secret, and redirect URL are required."}
+        />
+        <ConfigStatusBlock
+          label="Twilio Voice"
+          status={twilio?.configured ? "configured" : "needs_config"}
+          detail={twilio?.configured ? "Webhook signatures can be verified." : "Auth token is required."}
+        />
+        <ConfigStatusBlock
+          label="OpenAI Voice AI"
+          status={openAI?.configured ? "configured" : openAI?.enabled ? "needs_config" : "disabled"}
+          detail={openAI?.configured ? "STT, reply, and speech providers are ready." : openAI?.enabled ? "API key and models are required." : "External AI voice is off."}
+        />
+      </div>
+
+      {activeTab === "square" ? (
+        <div className="mt-6 space-y-5">
+          <div className="grid gap-4 md:grid-cols-2">
+            <Field label="Environment">
+              <select
+                className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink"
+                value={squareForm.environment}
+                onChange={(event) => setSquareForm((current) => ({ ...current, environment: event.target.value }))}
+                disabled={busy !== ""}
+              >
+                <option value="sandbox">Sandbox</option>
+                <option value="production">Production</option>
+              </select>
+            </Field>
+            <Field label="Square client ID">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                value={squareForm.client_id}
+                onChange={(event) => setSquareForm((current) => ({ ...current, client_id: event.target.value }))}
+                disabled={busy !== ""}
+              />
+            </Field>
+            <Field label="Square client secret">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                type="password"
+                value={squareForm.client_secret}
+                placeholder={square?.client_secret_configured ? "Stored - leave blank to keep" : "Paste client secret"}
+                onChange={(event) => setSquareForm((current) => ({ ...current, client_secret: event.target.value, clear_client_secret: false }))}
+                disabled={busy !== "" || squareForm.clear_client_secret}
+              />
+            </Field>
+            <SecretControl
+              checked={squareForm.clear_client_secret}
+              configured={Boolean(square?.client_secret_configured)}
+              source={square?.client_secret_source}
+              label="Clear stored Square client secret"
+              onChange={(checked) => setSquareForm((current) => ({ ...current, clear_client_secret: checked, client_secret: checked ? "" : current.client_secret }))}
+            />
+            <Field label="Redirect URL">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                value={squareForm.redirect_url}
+                onChange={(event) => setSquareForm((current) => ({ ...current, redirect_url: event.target.value }))}
+                disabled={busy !== ""}
+              />
+            </Field>
+            <Field label="Square API version">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                value={squareForm.api_version}
+                onChange={(event) => setSquareForm((current) => ({ ...current, api_version: event.target.value }))}
+                disabled={busy !== ""}
+              />
+            </Field>
+            <div className="md:col-span-2">
+              <Field label="Square API base URL">
+                <input
+                  className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                  value={squareForm.api_base_url}
+                  placeholder="Optional override"
+                  onChange={(event) => setSquareForm((current) => ({ ...current, api_base_url: event.target.value }))}
+                  disabled={busy !== ""}
+                />
+              </Field>
+            </div>
+          </div>
+          <ConfigActions
+            busy={busy === "save-square-config"}
+            configured={Boolean(square?.configured)}
+            label="Save Square settings"
+            onSave={onSaveSquare}
+          />
+        </div>
+      ) : null}
+
+      {activeTab === "twilio" ? (
+        <div className="mt-6 space-y-5">
+          <div className="grid gap-4 md:grid-cols-2">
+            <Field label="Public API base URL">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                value={twilioForm.public_base_url}
+                placeholder="https://api.example.com"
+                onChange={(event) => setTwilioForm((current) => ({ ...current, public_base_url: event.target.value }))}
+                disabled={busy !== ""}
+              />
+            </Field>
+            <Field label="Twilio auth token">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                type="password"
+                value={twilioForm.auth_token}
+                placeholder={twilio?.auth_token_configured ? "Stored - leave blank to keep" : "Paste auth token"}
+                onChange={(event) => setTwilioForm((current) => ({ ...current, auth_token: event.target.value, clear_auth_token: false }))}
+                disabled={busy !== "" || twilioForm.clear_auth_token}
+              />
+            </Field>
+            <SecretControl
+              checked={twilioForm.clear_auth_token}
+              configured={Boolean(twilio?.auth_token_configured)}
+              source={twilio?.auth_token_source}
+              label="Clear stored Twilio auth token"
+              onChange={(checked) => setTwilioForm((current) => ({ ...current, clear_auth_token: checked, auth_token: checked ? "" : current.auth_token }))}
+            />
+            <Field label="Incoming path">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                value={twilioForm.incoming_path}
+                onChange={(event) => setTwilioForm((current) => ({ ...current, incoming_path: event.target.value }))}
+                disabled={busy !== ""}
+              />
+            </Field>
+            <Field label="Turn path">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                value={twilioForm.turn_path}
+                onChange={(event) => setTwilioForm((current) => ({ ...current, turn_path: event.target.value }))}
+                disabled={busy !== ""}
+              />
+            </Field>
+            <Field label="Recording path">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                value={twilioForm.recording_path}
+                onChange={(event) => setTwilioForm((current) => ({ ...current, recording_path: event.target.value }))}
+                disabled={busy !== ""}
+              />
+            </Field>
+          </div>
+          <div className="grid gap-3 md:grid-cols-3">
+            <ReadOnlyValue label="Incoming webhook" value={twilio?.inbound_webhook_url || twilioForm.incoming_path} />
+            <ReadOnlyValue label="Turn webhook" value={twilio?.turn_webhook_url || twilioForm.turn_path} />
+            <ReadOnlyValue label="Recording webhook" value={twilio?.recording_webhook_url || twilioForm.recording_path} />
+          </div>
+          <ConfigActions
+            busy={busy === "save-twilio-config"}
+            configured={Boolean(twilio?.configured)}
+            label="Save Twilio settings"
+            onSave={onSaveTwilio}
+          />
+        </div>
+      ) : null}
+
+      {activeTab === "openai" ? (
+        <div className="mt-6 space-y-5">
+          <label className="flex items-center gap-3 rounded-md border border-line p-3 text-sm font-medium text-ink">
+            <input
+              type="checkbox"
+              checked={openAIForm.enabled}
+              onChange={(event) => setOpenAIForm((current) => ({ ...current, enabled: event.target.checked }))}
+              disabled={busy !== ""}
+            />
+            Enable OpenAI voice AI
+          </label>
+          <div className="grid gap-4 md:grid-cols-2">
+            <Field label="OpenAI API key">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                type="password"
+                value={openAIForm.api_key}
+                placeholder={openAI?.api_key_configured ? "Stored - leave blank to keep" : "Paste API key"}
+                onChange={(event) => setOpenAIForm((current) => ({ ...current, api_key: event.target.value, clear_api_key: false }))}
+                disabled={busy !== "" || openAIForm.clear_api_key || !openAIForm.enabled}
+              />
+            </Field>
+            <SecretControl
+              checked={openAIForm.clear_api_key}
+              configured={Boolean(openAI?.api_key_configured)}
+              source={openAI?.api_key_source}
+              label="Clear stored OpenAI API key"
+              onChange={(checked) => setOpenAIForm((current) => ({ ...current, clear_api_key: checked, api_key: checked ? "" : current.api_key }))}
+            />
+            <Field label="Base URL">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                value={openAIForm.base_url}
+                onChange={(event) => setOpenAIForm((current) => ({ ...current, base_url: event.target.value }))}
+                disabled={busy !== "" || !openAIForm.enabled}
+              />
+            </Field>
+            <Field label="Transcription model">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                value={openAIForm.transcription_model}
+                onChange={(event) => setOpenAIForm((current) => ({ ...current, transcription_model: event.target.value }))}
+                disabled={busy !== "" || !openAIForm.enabled}
+              />
+            </Field>
+            <Field label="Reply model">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                value={openAIForm.reply_model}
+                onChange={(event) => setOpenAIForm((current) => ({ ...current, reply_model: event.target.value }))}
+                disabled={busy !== "" || !openAIForm.enabled}
+              />
+            </Field>
+            <Field label="Speech model">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                value={openAIForm.speech_model}
+                onChange={(event) => setOpenAIForm((current) => ({ ...current, speech_model: event.target.value }))}
+                disabled={busy !== "" || !openAIForm.enabled}
+              />
+            </Field>
+            <Field label="Speech voice">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                value={openAIForm.speech_voice}
+                onChange={(event) => setOpenAIForm((current) => ({ ...current, speech_voice: event.target.value }))}
+                disabled={busy !== "" || !openAIForm.enabled}
+              />
+            </Field>
+          </div>
+          <ConfigActions
+            busy={busy === "save-openai-config"}
+            configured={Boolean(openAI?.configured)}
+            label="Save OpenAI settings"
+            onSave={onSaveOpenAI}
+          />
+        </div>
+      ) : null}
+    </Card>
+  );
+}
+
+function ConfigTabButton({
+  active,
+  icon,
+  label,
+  onClick
+}: {
+  active: boolean;
+  icon: ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`inline-flex h-10 items-center gap-2 rounded-md border px-3 text-sm font-semibold transition ${
+        active ? "border-brand bg-teal-50 text-brand" : "border-line bg-white text-ink hover:bg-slate-50"
+      }`}
+      onClick={onClick}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+function ConfigStatusBlock({ label, status, detail }: { label: string; status: string; detail: string }) {
+  return (
+    <div className="rounded-md border border-line p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-sm font-semibold text-ink">{label}</div>
+        <Badge value={status} />
+      </div>
+      <div className="mt-2 text-xs leading-5 text-muted">{detail}</div>
+    </div>
+  );
+}
+
+function SecretControl({
+  checked,
+  configured,
+  label,
+  onChange,
+  source
+}: {
+  checked: boolean;
+  configured: boolean;
+  label: string;
+  onChange: (checked: boolean) => void;
+  source?: string;
+}) {
+  return (
+    <div className="rounded-md border border-line p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium text-ink">Secret status</div>
+          <div className="mt-1 text-xs leading-5 text-muted">
+            {configured ? `Configured from ${secretSourceLabel(source)}.` : "No secret is configured."}
+          </div>
+        </div>
+        <Badge value={configured ? "configured" : "missing"} />
+      </div>
+      <label className="mt-3 flex items-center gap-2 text-xs font-medium text-slate-700">
+        <input type="checkbox" checked={checked} disabled={!configured || source !== "database"} onChange={(event) => onChange(event.target.checked)} />
+        {label}
+      </label>
+    </div>
+  );
+}
+
+function ReadOnlyValue({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 rounded-md border border-line p-3">
+      <div className="text-xs font-semibold uppercase text-muted">{label}</div>
+      <div className="mt-2 break-all text-sm font-medium text-ink">{value || "-"}</div>
+    </div>
+  );
+}
+
+function ConfigActions({
+  busy,
+  configured,
+  label,
+  onSave
+}: {
+  busy: boolean;
+  configured: boolean;
+  label: string;
+  onSave: () => void;
+}) {
+  return (
+    <div className="flex flex-col justify-between gap-3 border-t border-line pt-4 md:flex-row md:items-center">
+      <div className="text-sm text-muted">
+        {configured ? "Configuration is ready. Blank secret fields keep the stored value." : "Save the required fields before dependent workflows can run."}
+      </div>
+      <Button type="button" onClick={onSave} disabled={busy}>
+        <Save className="h-4 w-4" />
+        {busy ? "Saving..." : label}
+      </Button>
+    </div>
+  );
+}
+
+function squareConfigToForm(config?: SquareIntegrationConfig): SquareConfigForm {
+  if (!config) return defaultSquareConfigForm;
+  return {
+    environment: config.environment || "sandbox",
+    client_id: config.client_id || "",
+    client_secret: "",
+    clear_client_secret: false,
+    redirect_url: config.redirect_url || defaultSquareConfigForm.redirect_url,
+    api_version: config.api_version || defaultSquareConfigForm.api_version,
+    api_base_url: config.api_base_url || ""
+  };
+}
+
+function twilioConfigToForm(config?: TwilioIntegrationConfig): TwilioConfigForm {
+  if (!config) return defaultTwilioConfigForm;
+  return {
+    public_base_url: config.public_base_url || "",
+    auth_token: "",
+    clear_auth_token: false,
+    incoming_path: config.incoming_path || defaultTwilioConfigForm.incoming_path,
+    turn_path: config.turn_path || defaultTwilioConfigForm.turn_path,
+    recording_path: config.recording_path || defaultTwilioConfigForm.recording_path
+  };
+}
+
+function openAIConfigToForm(config?: OpenAIIntegrationConfig): OpenAIConfigForm {
+  if (!config) return defaultOpenAIConfigForm;
+  return {
+    enabled: config.enabled,
+    api_key: "",
+    clear_api_key: false,
+    base_url: config.base_url || defaultOpenAIConfigForm.base_url,
+    transcription_model: config.transcription_model || defaultOpenAIConfigForm.transcription_model,
+    reply_model: config.reply_model || defaultOpenAIConfigForm.reply_model,
+    speech_model: config.speech_model || defaultOpenAIConfigForm.speech_model,
+    speech_voice: config.speech_voice || defaultOpenAIConfigForm.speech_voice
+  };
+}
+
+function emptyIntegrationConfigs(): IntegrationConfigs {
+  return {
+    square: {
+      provider: "square",
+      configured: false,
+      environment: defaultSquareConfigForm.environment,
+      client_id: defaultSquareConfigForm.client_id,
+      redirect_url: defaultSquareConfigForm.redirect_url,
+      api_version: defaultSquareConfigForm.api_version,
+      api_base_url: defaultSquareConfigForm.api_base_url,
+      client_secret_configured: false,
+      client_secret_source: "none"
+    },
+    twilio: {
+      provider: "twilio",
+      configured: false,
+      public_base_url: defaultTwilioConfigForm.public_base_url,
+      incoming_path: defaultTwilioConfigForm.incoming_path,
+      turn_path: defaultTwilioConfigForm.turn_path,
+      recording_path: defaultTwilioConfigForm.recording_path,
+      inbound_webhook_url: defaultTwilioConfigForm.incoming_path,
+      turn_webhook_url: defaultTwilioConfigForm.turn_path,
+      recording_webhook_url: defaultTwilioConfigForm.recording_path,
+      auth_token_configured: false,
+      auth_token_source: "none"
+    },
+    openai: {
+      provider: "openai",
+      enabled: false,
+      configured: false,
+      base_url: defaultOpenAIConfigForm.base_url,
+      transcription_model: defaultOpenAIConfigForm.transcription_model,
+      reply_model: defaultOpenAIConfigForm.reply_model,
+      speech_model: defaultOpenAIConfigForm.speech_model,
+      speech_voice: defaultOpenAIConfigForm.speech_voice,
+      api_key_configured: false,
+      api_key_source: "none"
+    }
+  };
+}
+
+function secretSourceLabel(source?: string) {
+  if (source === "database") return "dashboard storage";
+  if (source === "environment") return "environment fallback";
+  return "no source";
+}
+
 function ReadinessOverviewPanel({
   busy,
   connection,
@@ -838,6 +1487,7 @@ function ReadinessOverviewPanel({
   readiness,
   services,
   staff,
+  squareConfigConfigured,
   switchReadiness,
   syncLogCount
 }: {
@@ -849,11 +1499,14 @@ function ReadinessOverviewPanel({
   readiness?: SquareReadiness;
   services: POSService[];
   staff: POSStaffMember[];
+  squareConfigConfigured: boolean;
   switchReadiness: ProviderSwitchReadiness | null;
   syncLogCount: number;
 }) {
   const squareStatus = connection?.error_message ? "error" : connection?.id ? "connected" : "not_connected";
-  const squareMessage = squareOverviewMessage(connection, syncLogCount);
+  const squareMessage = squareConfigConfigured
+    ? squareOverviewMessage(connection, syncLogCount)
+    : "Save Square Appointments app credentials before starting OAuth.";
   const bookableServiceCount = readiness?.service_count ?? services.filter(serviceIsBookable).length;
   const bookableStaffCount = readiness?.staff_count ?? staff.filter(staffIsBookable).length;
   const syncFailedCount =
@@ -884,9 +1537,9 @@ function ReadinessOverviewPanel({
               {busy === "sync" ? "Syncing..." : "Sync Services and Staff"}
             </Button>
           ) : (
-            <Button type="button" onClick={onConnect} disabled={busy !== ""}>
+            <Button type="button" onClick={onConnect} disabled={busy !== "" || !squareConfigConfigured}>
               <ExternalLink className="h-4 w-4" />
-              {busy === "connect" ? "Opening..." : "Connect Square"}
+              {busy === "connect" ? "Opening..." : squareConfigConfigured ? "Connect Square" : "Config required"}
             </Button>
           )
         }
@@ -964,10 +1617,10 @@ function OverviewCard({
   status,
   title
 }: {
-  action?: React.ReactNode;
+  action?: ReactNode;
   description: string;
   details: { label: string; value: string }[];
-  icon: React.ReactNode;
+  icon: ReactNode;
   status: string;
   title: string;
 }) {
@@ -1839,7 +2492,7 @@ function LatestTest({ latest }: { latest?: TestBookingRecord }) {
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <label className="block">
       <span className="text-xs font-semibold uppercase tracking-wide text-muted">{label}</span>

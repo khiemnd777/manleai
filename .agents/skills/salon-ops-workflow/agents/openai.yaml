@@ -1,0 +1,4 @@
+interface:
+  display_name: "Salon Ops Workflow"
+  short_description: "Analyze salon operations and call flows"
+  default_prompt: "Use $salon-ops-workflow to analyze the owner, caller, staff, POS, fallback, and dashboard workflow for this request."

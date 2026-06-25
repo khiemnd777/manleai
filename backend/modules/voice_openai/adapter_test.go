@@ -31,7 +31,7 @@ func TestGenerateReplyParsesStructuredResponse(t *testing.T) {
 		return jsonResponse(body), nil
 	})}
 
-	reply, err := adapter.GenerateReply(context.Background(), voice.ModelRequest{SafeReply: "What phone number should we use?"})
+	reply, err := adapter.GenerateReply(context.Background(), voice.ModelRequest{SalonID: "salon_1", SafeReply: "What phone number should we use?"})
 	if err != nil {
 		t.Fatalf("GenerateReply returned error: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestTranscribeSendsMultipartAudio(t *testing.T) {
 		return jsonResponse(body), nil
 	})}
 
-	text, err := adapter.Transcribe(context.Background(), []byte("audio"), "audio/wav")
+	text, err := adapter.Transcribe(context.Background(), "salon_1", []byte("audio"), "audio/wav")
 	if err != nil {
 		t.Fatalf("Transcribe returned error: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestSynthesizeReturnsAudioBytes(t *testing.T) {
 		}, nil
 	})}
 
-	audio, err := adapter.Synthesize(context.Background(), "How can I help?", "")
+	audio, err := adapter.Synthesize(context.Background(), "salon_1", "How can I help?", "")
 	if err != nil {
 		t.Fatalf("Synthesize returned error: %v", err)
 	}
