@@ -18,6 +18,16 @@ type LoginRequest struct {
 	Password string `json:"password"`
 }
 
+type BootstrapOwnerRequest struct {
+	Email    string `json:"email"`
+	FullName string `json:"full_name"`
+	Password string `json:"password"`
+}
+
+type BootstrapStatusResponse struct {
+	Available bool `json:"available"`
+}
+
 type RefreshRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }

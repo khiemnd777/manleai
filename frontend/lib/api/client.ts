@@ -115,7 +115,12 @@ async function parseResponse<T>(response: Response): Promise<T> {
 }
 
 function shouldAttachAccessToken(path: string) {
-  return !path.startsWith("/api/auth/login") && !path.startsWith("/api/auth/refresh-token");
+  return (
+    !path.startsWith("/api/auth/login") &&
+    !path.startsWith("/api/auth/refresh-token") &&
+    !path.startsWith("/api/auth/bootstrap/") &&
+    !path.startsWith("/api/auth/bootstrap-owner")
+  );
 }
 
 function shouldAttemptRefresh(path: string) {

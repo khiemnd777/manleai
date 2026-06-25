@@ -37,6 +37,32 @@ func (h *Handler) Login(c *fiber.Ctx) error {
 	return respond.JSON(c, fiber.StatusOK, res)
 }
 
+func (h *Handler) BootstrapStatus(c *fiber.Ctx) error {
+	res, err := h.service.BootstrapStatus(c.UserContext())
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "BOOTSTRAP_STATUS_FAILED", "Could not load account setup status.")
+	}
+	return respond.JSON(c, fiber.StatusOK, res)
+}
+
+func (h *Handler) BootstrapOwner(c *fiber.Ctx) error {
+	var req BootstrapOwnerRequest
+	if err := c.BodyParser(&req); err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
+	}
+	res, err := h.service.BootstrapOwner(c.UserContext(), req)
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "A valid email, owner name, and password with at least 8 characters are required.")
+	}
+	if errors.Is(err, ErrBootstrapClosed) {
+		return respond.Error(c, fiber.StatusConflict, "BOOTSTRAP_CLOSED", "Owner account setup is already complete.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "BOOTSTRAP_OWNER_FAILED", "Could not create owner account.")
+	}
+	return respond.JSON(c, fiber.StatusCreated, res)
+}
+
 func (h *Handler) Refresh(c *fiber.Ctx) error {
 	var req RefreshRequest
 	if err := c.BodyParser(&req); err != nil {

@@ -2,8 +2,9 @@
 
 Base URL: `http://localhost:18089`
 
-All endpoints except login, refresh, logout, health, public catalog endpoints,
-the Square OAuth callback, and Twilio voice webhooks require:
+All endpoints except login, bootstrap owner setup, refresh, logout, health,
+public catalog endpoints, the Square OAuth callback, and Twilio voice webhooks
+require:
 
 ```txt
 Authorization: Bearer <access_token>
@@ -51,12 +52,41 @@ provider booking metadata.
 
 ```json
 {
-  "email": "owner@lotusnails.example",
-  "password": "password123"
+  "email": "owner@example.com",
+  "password": "your-password"
 }
 ```
 
 Returns access token, refresh token, user, roles, and primary salon ID.
+
+`GET /api/auth/bootstrap/status`
+
+Unauthenticated endpoint used by a fresh deployment to determine whether first
+owner setup is still open.
+
+```json
+{
+  "available": true
+}
+```
+
+`POST /api/auth/bootstrap-owner`
+
+Unauthenticated one-time endpoint for creating the first dashboard owner. It is
+available only while the `users` table is empty. The backend assigns the
+`salon_owner` role; clients do not send a role.
+
+```json
+{
+  "email": "owner@example.com",
+  "full_name": "Owner Name",
+  "password": "minimum-8-characters"
+}
+```
+
+Returns access token, refresh token, user, roles, and an empty primary salon ID
+until onboarding creates the first salon. After any user exists, this endpoint
+returns `409 BOOTSTRAP_CLOSED`.
 
 `POST /api/auth/refresh-token`
 

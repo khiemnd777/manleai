@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -17,14 +18,28 @@ import (
 var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	ErrDisabledUser       = errors.New("user is disabled")
+	ErrValidation         = errors.New("validation failed")
+	ErrBootstrapClosed    = errors.New("bootstrap owner setup is closed")
 )
 
+type Store interface {
+	FindUserByEmail(ctx context.Context, email string) (*User, error)
+	FindUserByID(ctx context.Context, id string) (*User, error)
+	RolesForUser(ctx context.Context, userID string) ([]string, error)
+	PrimarySalonIDForUser(ctx context.Context, userID string) (string, error)
+	StoreRefreshToken(ctx context.Context, userID string, token string, expiresAt time.Time) error
+	FindRefreshTokenUser(ctx context.Context, token string) (string, error)
+	RevokeRefreshToken(ctx context.Context, token string) error
+	BootstrapAvailable(ctx context.Context) (bool, error)
+	CreateFirstOwner(ctx context.Context, params CreateFirstOwnerParams) (*User, error)
+}
+
 type Service struct {
-	repo *Repository
+	repo Store
 	cfg  config.Config
 }
 
-func NewService(repo *Repository, cfg config.Config) *Service {
+func NewService(repo Store, cfg config.Config) *Service {
 	return &Service{repo: repo, cfg: cfg}
 }
 
@@ -38,6 +53,47 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*LoginResponse, 
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
 		return nil, ErrInvalidCredentials
+	}
+	return s.issueTokens(ctx, *user)
+}
+
+func (s *Service) BootstrapStatus(ctx context.Context) (*BootstrapStatusResponse, error) {
+	available, err := s.repo.BootstrapAvailable(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &BootstrapStatusResponse{Available: available}, nil
+}
+
+func (s *Service) BootstrapOwner(ctx context.Context, req BootstrapOwnerRequest) (*LoginResponse, error) {
+	email, ok := normalizeEmail(req.Email)
+	if !ok {
+		return nil, ErrValidation
+	}
+	fullName := strings.TrimSpace(req.FullName)
+	if fullName == "" || len(req.Password) < 8 || strings.TrimSpace(req.Password) == "" {
+		return nil, ErrValidation
+	}
+
+	available, err := s.repo.BootstrapAvailable(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !available {
+		return nil, ErrBootstrapClosed
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, err
+	}
+	user, err := s.repo.CreateFirstOwner(ctx, CreateFirstOwnerParams{
+		Email:        email,
+		PasswordHash: string(passwordHash),
+		FullName:     fullName,
+	})
+	if err != nil {
+		return nil, err
 	}
 	return s.issueTokens(ctx, *user)
 }
@@ -131,4 +187,16 @@ func randomToken() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
+func normalizeEmail(value string) (string, bool) {
+	email := strings.ToLower(strings.TrimSpace(value))
+	if email == "" {
+		return "", false
+	}
+	address, err := mail.ParseAddress(email)
+	if err != nil || address.Address != email {
+		return "", false
+	}
+	return email, true
 }

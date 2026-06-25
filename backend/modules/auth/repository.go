@@ -9,7 +9,16 @@ import (
 	"time"
 )
 
-var ErrNotFound = errors.New("auth record not found")
+var (
+	ErrNotFound             = errors.New("auth record not found")
+	ErrBootstrapRoleMissing = errors.New("salon owner role not found")
+)
+
+type CreateFirstOwnerParams struct {
+	Email        string
+	PasswordHash string
+	FullName     string
+}
 
 type Repository struct {
 	db *sql.DB
@@ -17,6 +26,62 @@ type Repository struct {
 
 func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
+}
+
+func (r *Repository) BootstrapAvailable(ctx context.Context) (bool, error) {
+	var count int
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+		return false, err
+	}
+	return count == 0, nil
+}
+
+func (r *Repository) CreateFirstOwner(ctx context.Context, params CreateFirstOwnerParams) (*User, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `LOCK TABLE users IN EXCLUSIVE MODE`); err != nil {
+		return nil, err
+	}
+
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+		return nil, err
+	}
+	if count > 0 {
+		return nil, ErrBootstrapClosed
+	}
+
+	row := tx.QueryRowContext(ctx, `
+		INSERT INTO users (email, password_hash, full_name, status)
+		VALUES ($1, $2, $3, 'active')
+		RETURNING id::text, email, password_hash, full_name, COALESCE(phone, ''), status, created_at, updated_at
+	`, params.Email, params.PasswordHash, params.FullName)
+	user, err := scanUser(row)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO user_roles (user_id, role_id)
+		SELECT $1, id
+		FROM roles
+		WHERE name = 'salon_owner'
+	`, user.ID)
+	if err != nil {
+		return nil, err
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return nil, ErrBootstrapRoleMissing
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return user, nil
 }
 
 func (r *Repository) FindUserByEmail(ctx context.Context, email string) (*User, error) {

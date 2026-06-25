@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { LockKeyhole, Mail } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -12,12 +13,35 @@ type LoginResponse = {
   refresh_token: string;
 };
 
+type BootstrapStatus = {
+  available: boolean;
+};
+
 export function LoginForm() {
   const router = useRouter();
-  const [email, setEmail] = useState("owner@lotusnails.example");
-  const [password, setPassword] = useState("password123");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [bootstrapAvailable, setBootstrapAvailable] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function loadBootstrapStatus() {
+      try {
+        const status = await apiRequest<BootstrapStatus>("/api/auth/bootstrap/status");
+        if (mounted) setBootstrapAvailable(status.available);
+      } catch {
+        if (mounted) setBootstrapAvailable(false);
+      }
+    }
+
+    void loadBootstrapStatus();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -50,6 +74,7 @@ export function LoginForm() {
             onChange={(event) => setEmail(event.target.value)}
             type="email"
             autoComplete="email"
+            required
           />
         </div>
       </label>
@@ -63,13 +88,21 @@ export function LoginForm() {
             onChange={(event) => setPassword(event.target.value)}
             type="password"
             autoComplete="current-password"
+            required
           />
         </div>
       </label>
       <Button type="submit" className="w-full" disabled={loading}>
         {loading ? "Signing in..." : "Sign in"}
       </Button>
+      {bootstrapAvailable ? (
+        <p className="text-sm leading-6 text-muted">
+          First owner account is not set up yet.{" "}
+          <Link className="font-semibold text-brand hover:text-teal-800" href="/create-account">
+            Create account
+          </Link>
+        </p>
+      ) : null}
     </form>
   );
 }
-
