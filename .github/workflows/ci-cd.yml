@@ -7,12 +7,8 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Release tag label, for example v2026.06.25.1
-        required: false
-        type: string
+    tags:
+      - "v*"
 
 concurrency:
   group: manleai-${{ github.ref }}
@@ -22,8 +18,8 @@ env:
   DEPLOY_PATH: /opt/manleai
   EDGE_CADDY_CONTAINER: edge-gateway-caddy
   EDGE_PATH: /opt/edge-gateway
-  RELEASE_ID: ${{ github.event.inputs.tag || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-  RELEASE_NAME: manleai-release-${{ github.event.inputs.tag || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}.tgz
+  RELEASE_ID: ${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+  RELEASE_NAME: manleai-release-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}.tgz
 
 jobs:
   backend:
@@ -87,7 +83,7 @@ jobs:
     needs:
       - backend
       - web
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
