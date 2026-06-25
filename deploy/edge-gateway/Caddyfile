@@ -1,0 +1,15 @@
+{
+	email {$CADDY_EMAIL}
+}
+
+(common_headers) {
+	encode gzip zstd
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Frame-Options SAMEORIGIN
+	}
+}
+
+import conf.d/*.caddy

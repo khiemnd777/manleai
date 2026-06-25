@@ -1,0 +1,24 @@
+name: edge-gateway
+
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    container_name: edge-gateway-caddy
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      CADDY_EMAIL: ${CADDY_EMAIL:-admin@knasoftware.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./conf.d:/etc/caddy/conf.d:ro
+      - /var/www:/var/www:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+    external: true
+    name: perfect-pitch_caddy_data
+  caddy_config:
+    external: true
+    name: perfect-pitch_caddy_config

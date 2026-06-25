@@ -20,6 +20,8 @@ concurrency:
 
 env:
   DEPLOY_PATH: /opt/manleai
+  EDGE_CADDY_CONTAINER: edge-gateway-caddy
+  EDGE_PATH: /opt/edge-gateway
   RELEASE_ID: ${{ github.event.inputs.tag || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
   RELEASE_NAME: manleai-release-${{ github.event.inputs.tag || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}.tgz
 
@@ -136,32 +138,16 @@ jobs:
       - name: Preflight VPS
         env:
           DEPLOY_PATH: ${{ env.DEPLOY_PATH }}
+          EDGE_CADDY_CONTAINER: ${{ env.EDGE_CADDY_CONTAINER }}
+          EDGE_PATH: ${{ env.EDGE_PATH }}
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
           SERVER_IP: ${{ secrets.SERVER_IP }}
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
           set -euo pipefail
           export SSHPASS="$SSH_PASSWORD"
-          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' EDGE_CADDY_CONTAINER='$EDGE_CADDY_CONTAINER' EDGE_PATH='$EDGE_PATH' bash -s" <<'REMOTE'
           set -euo pipefail
-
-          if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nginx; then
-            echo "::error::nginx is active on this VPS. Stop or migrate nginx before deploying Caddy on ports 80/443."
-            ss -ltnp '( sport = :80 or sport = :443 )' || true
-            exit 1
-          fi
-
-          if command -v pgrep >/dev/null 2>&1 && pgrep -x nginx >/dev/null 2>&1; then
-            echo "::error::An nginx process is running on this VPS. Stop or migrate nginx before deploying Caddy on ports 80/443."
-            ss -ltnp '( sport = :80 or sport = :443 )' || true
-            exit 1
-          fi
-
-          if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet caddy; then
-            echo "::error::A host-level caddy service is active. Disable it or migrate it before running the Docker Caddy container."
-            ss -ltnp '( sport = :80 or sport = :443 )' || true
-            exit 1
-          fi
 
           if ! command -v docker >/dev/null 2>&1; then
             echo "::error::Docker is not installed on the VPS."
@@ -169,6 +155,28 @@ jobs:
           fi
 
           docker compose version >/dev/null
+
+          if [ ! -f "$EDGE_PATH/docker-compose.yml" ]; then
+            echo "::error::Edge gateway compose file is missing at $EDGE_PATH/docker-compose.yml."
+            exit 1
+          fi
+
+          if [ ! -d "$EDGE_PATH/conf.d" ]; then
+            echo "::error::Edge gateway conf.d directory is missing at $EDGE_PATH/conf.d."
+            exit 1
+          fi
+
+          if docker ps --format '{{.Names}}' | grep -qx 'perfect-pitch-caddy-1'; then
+            echo "::error::Legacy perfect-pitch Caddy container is still running and may own ports 80/443."
+            exit 1
+          fi
+
+          if ! docker ps --format '{{.Names}}' | grep -qx "$EDGE_CADDY_CONTAINER"; then
+            echo "::error::Edge gateway Caddy container $EDGE_CADDY_CONTAINER is not running."
+            exit 1
+          fi
+
+          docker exec "$EDGE_CADDY_CONTAINER" caddy validate --config /etc/caddy/Caddyfile >/dev/null
           mkdir -p "$DEPLOY_PATH/releases"
           REMOTE
 
@@ -201,6 +209,8 @@ jobs:
       - name: Deploy release
         env:
           DEPLOY_PATH: ${{ env.DEPLOY_PATH }}
+          EDGE_CADDY_CONTAINER: ${{ env.EDGE_CADDY_CONTAINER }}
+          EDGE_PATH: ${{ env.EDGE_PATH }}
           RELEASE_ID: ${{ env.RELEASE_ID }}
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
           SERVER_IP: ${{ secrets.SERVER_IP }}
@@ -208,7 +218,7 @@ jobs:
         run: |
           set -euo pipefail
           export SSHPASS="$SSH_PASSWORD"
-          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' RELEASE_ID='$RELEASE_ID' RELEASE_NAME='$RELEASE_NAME' bash -s" <<'REMOTE'
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' EDGE_CADDY_CONTAINER='$EDGE_CADDY_CONTAINER' EDGE_PATH='$EDGE_PATH' RELEASE_ID='$RELEASE_ID' RELEASE_NAME='$RELEASE_NAME' bash -s" <<'REMOTE'
           set -euo pipefail
 
           release_dir="$DEPLOY_PATH/releases/$RELEASE_ID"
@@ -221,15 +231,63 @@ jobs:
           docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai up -d --build --remove-orphans
           docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai ps
 
+          set -a
+          . "$DEPLOY_PATH/project.env"
+          set +a
+
+          ADMIN_DOMAIN="${ADMIN_DOMAIN:-ai.knasoftware.com}"
+          LANDING_DOMAIN="${LANDING_DOMAIN:-salon.knasoftware.com}"
+          API_PORT="${API_PORT:-18089}"
+          FRONTEND_PORT="${FRONTEND_PORT:-13088}"
+          LANDING_PORT="${LANDING_PORT:-13090}"
+
           for attempt in $(seq 1 30); do
-            if docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai exec -T api wget -qO- http://127.0.0.1:8080/healthz; then
-              rm -f "$archive"
-              exit 0
+            if command -v curl >/dev/null 2>&1; then
+              healthcheck_cmd=(curl -fsS "http://127.0.0.1:${API_PORT}/healthz")
+            else
+              healthcheck_cmd=(wget -qO- "http://127.0.0.1:${API_PORT}/healthz")
+            fi
+
+            if "${healthcheck_cmd[@]}"; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              echo "::error::API healthcheck failed after deploy."
+              docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai logs --tail=120 api
+              exit 1
             fi
             sleep 2
           done
 
-          echo "::error::API healthcheck failed after deploy."
-          docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai logs --tail=120 api
-          exit 1
+          tmp_caddy="$(mktemp)"
+          sed \
+            -e "s#{{ADMIN_DOMAIN}}#${ADMIN_DOMAIN}#g" \
+            -e "s#{{LANDING_DOMAIN}}#${LANDING_DOMAIN}#g" \
+            -e "s#{{API_PORT}}#${API_PORT}#g" \
+            -e "s#{{FRONTEND_PORT}}#${FRONTEND_PORT}#g" \
+            -e "s#{{LANDING_PORT}}#${LANDING_PORT}#g" \
+            "$release_dir/deploy/manleai.caddy.template" > "$tmp_caddy"
+
+          edge_conf="$EDGE_PATH/conf.d/manleai.caddy"
+          backup="$EDGE_PATH/conf.d/manleai.caddy.before-$RELEASE_ID"
+          if [ -f "$edge_conf" ]; then
+            cp "$edge_conf" "$backup"
+          fi
+
+          cp "$tmp_caddy" "$edge_conf"
+          rm -f "$tmp_caddy"
+
+          if ! docker exec "$EDGE_CADDY_CONTAINER" caddy validate --config /etc/caddy/Caddyfile; then
+            if [ -f "$backup" ]; then
+              cp "$backup" "$edge_conf"
+            else
+              rm -f "$edge_conf"
+            fi
+            docker exec "$EDGE_CADDY_CONTAINER" caddy validate --config /etc/caddy/Caddyfile >/dev/null || true
+            echo "::error::Rendered ManleAI Caddy route failed validation; restored previous edge config."
+            exit 1
+          fi
+
+          docker exec "$EDGE_CADDY_CONTAINER" caddy reload --config /etc/caddy/Caddyfile
+          rm -f "$archive"
           REMOTE

@@ -1,31 +1,6 @@
 name: ${COMPOSE_PROJECT_NAME:-manleai}
 
 services:
-  caddy:
-    image: caddy:2.8-alpine
-    restart: unless-stopped
-    depends_on:
-      api:
-        condition: service_healthy
-      frontend:
-        condition: service_started
-      landing:
-        condition: service_started
-    environment:
-      ADMIN_DOMAIN: ${ADMIN_DOMAIN:-ai.knasoftware.com}
-      LANDING_DOMAIN: ${LANDING_DOMAIN:-salon.knasoftware.com}
-      CADDY_EMAIL: ${CADDY_EMAIL:-admin@knasoftware.com}
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    networks:
-      - app
-
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -99,6 +74,8 @@ services:
       VOICE_OPENAI_SPEECH_VOICE: ${VOICE_OPENAI_SPEECH_VOICE:-alloy}
     expose:
       - "8080"
+    ports:
+      - "${API_BIND_HOST:-127.0.0.1}:${API_PORT:-18089}:8080"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1"]
       start_period: 10s
@@ -126,6 +103,8 @@ services:
       NEXT_PUBLIC_LANDING_BASE_URL: ${NEXT_PUBLIC_LANDING_BASE_URL:-https://salon.knasoftware.com}
     expose:
       - "3000"
+    ports:
+      - "${FRONTEND_BIND_HOST:-127.0.0.1}:${FRONTEND_PORT:-13088}:3000"
     networks:
       - app
 
@@ -144,12 +123,12 @@ services:
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://ai.knasoftware.com}
     expose:
       - "3000"
+    ports:
+      - "${LANDING_BIND_HOST:-127.0.0.1}:${LANDING_PORT:-13090}:3000"
     networks:
       - app
 
 volumes:
-  caddy_config:
-  caddy_data:
   postgres_data:
   redis_data:
 

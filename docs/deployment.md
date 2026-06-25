@@ -1,7 +1,8 @@
 # Deployment
 
 This release deploys the Go API, PostgreSQL, Redis, the owner admin dashboard,
-the public salon landing app, and a Caddy reverse proxy.
+and the public salon landing app. Public HTTP and HTTPS are owned by the shared
+VPS edge gateway, not by the ManleAI Docker Compose project.
 
 ## Production Domains
 
@@ -12,6 +13,25 @@ the public salon landing app, and a Caddy reverse proxy.
 - Voice public base URL: `https://ai.knasoftware.com`
 
 Both DNS `A` records must point to the VPS before Caddy can issue certificates.
+
+## Edge Gateway
+
+The VPS has one shared Caddy gateway under `/opt/edge-gateway`. It owns ports
+`80` and `443` and routes public domains to localhost ports exposed by app
+stacks. ManleAI does not run its own Caddy container.
+
+ManleAI exposes:
+
+```txt
+127.0.0.1:18089 -> api:8080
+127.0.0.1:13088 -> frontend:3000
+127.0.0.1:13090 -> landing:3000
+```
+
+The CI/CD deploy job renders `deploy/manleai.caddy.template` into
+`/opt/edge-gateway/conf.d/manleai.caddy`, validates the full Caddy config inside
+the `edge-gateway-caddy` container, and reloads Caddy only after validation
+passes. If validation fails, the previous ManleAI route file is restored.
 
 ## GitHub Actions
 
@@ -26,10 +46,13 @@ cd landing && npm ci && npm run typecheck && npm run build
 
 Pushes to `main`, and manual `workflow_dispatch` runs on `main`, also deploy to
 the VPS by uploading a release archive, decoding `PROJECT_ENV_B64` into
-`/opt/manleai/project.env`, and running:
+`/opt/manleai/project.env`, running the ManleAI compose stack, then validating
+and reloading the shared edge gateway:
 
 ```bash
 docker compose --env-file /opt/manleai/project.env -f docker-compose.prod.yml -p manleai up -d --build --remove-orphans
+docker exec edge-gateway-caddy caddy validate --config /etc/caddy/Caddyfile
+docker exec edge-gateway-caddy caddy reload --config /etc/caddy/Caddyfile
 ```
 
 Required GitHub Secrets:
@@ -84,14 +107,13 @@ base64 -i project.env | tr -d '\n'
 - Docker Engine with Docker Compose v2.
 - Ports `80` and `443` open to the internet.
 - DNS for `ai.knasoftware.com` and `salon.knasoftware.com` pointing to the VPS.
-- No host-level nginx or Caddy service bound to `80` or `443`.
+- Shared edge gateway running as container `edge-gateway-caddy`.
+- Edge gateway compose file at `/opt/edge-gateway/docker-compose.yml`.
 
-The deploy workflow checks for active nginx and host-level Caddy before
-starting the Docker Caddy container. If nginx is serving existing Certbot sites,
-the workflow fails before deployment so those sites can be migrated or nginx can
-be stopped intentionally. Existing Certbot files under `/etc/letsencrypt` are
-not modified by this deployment. Caddy manages HTTPS certificates for the two
-ManleAI domains in its Docker volume.
+Existing Certbot files under `/etc/letsencrypt` are not modified by this
+deployment. Caddy manages HTTPS certificates in its Docker data volume.
+Do not restart app-owned Caddy containers such as `perfect-pitch-caddy-1`; the
+shared edge gateway is now the only container that should bind `80` and `443`.
 
 ## Dashboard-Managed Provider Configuration
 

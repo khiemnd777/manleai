@@ -1,0 +1,22 @@
+# Managed by ManleAI CI/CD.
+
+{{ADMIN_DOMAIN}} {
+	import common_headers
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:{{API_PORT}}
+	}
+
+	handle /healthz {
+		reverse_proxy 127.0.0.1:{{API_PORT}}
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:{{FRONTEND_PORT}}
+	}
+}
+
+{{LANDING_DOMAIN}} {
+	import common_headers
+	reverse_proxy 127.0.0.1:{{LANDING_PORT}}
+}
