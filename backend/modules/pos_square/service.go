@@ -55,6 +55,7 @@ type ReadinessStatus struct {
 	CanEnableAIBooking   bool                       `json:"can_enable_ai_booking"`
 	ServiceCount         int                        `json:"service_count"`
 	StaffCount           int                        `json:"staff_count"`
+	BusinessHourCount    int                        `json:"business_hour_period_count"`
 	LatestTestBooking    *booking.TestBookingRecord `json:"latest_test_booking,omitempty"`
 	Checks               []ReadinessCheck           `json:"checks"`
 }
@@ -180,18 +181,19 @@ func (s *Service) SelectLocation(ctx context.Context, salonID string, ownerUserI
 	return s.repo.UpdateLocation(ctx, salonID, pos.ProviderSquare, locationID)
 }
 
-func (s *Service) Sync(ctx context.Context, salonID string, ownerUserID string) error {
+func (s *Service) Sync(ctx context.Context, salonID string, ownerUserID string) (*pos.SyncSummary, error) {
 	if err := s.repo.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
-		return err
+		return nil, err
 	}
-	logID, err := s.repo.CreateSyncLog(ctx, salonID, pos.ProviderSquare, "services_and_staff")
+	logID, err := s.repo.CreateSyncLog(ctx, salonID, pos.ProviderSquare, "full_import")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := s.repo.MarkSyncing(ctx, salonID, pos.ProviderSquare); err != nil {
-		return err
+		return nil, err
 	}
-	if err := s.adapter.Sync(ctx, salonID); err != nil {
+	summary, err := s.adapter.SyncWithSummary(ctx, salonID)
+	if err != nil {
 		_ = s.repo.LogError(ctx, pos.POSError{
 			SalonID:      salonID,
 			Provider:     pos.ProviderSquare,
@@ -201,12 +203,12 @@ func (s *Service) Sync(ctx context.Context, salonID string, ownerUserID string) 
 		})
 		_ = s.repo.CompleteSyncLog(ctx, logID, "failed", err.Error())
 		_ = s.repo.MarkSyncComplete(ctx, salonID, pos.ProviderSquare, pos.StatusError, err.Error())
-		return err
+		return nil, err
 	}
-	if err := s.repo.CompleteSyncLog(ctx, logID, "succeeded", "Services and staff synced from Square."); err != nil {
-		return err
+	if err := s.repo.CompleteSyncLog(ctx, logID, "succeeded", syncSummaryMessage(summary)); err != nil {
+		return nil, err
 	}
-	return s.repo.MarkSyncComplete(ctx, salonID, pos.ProviderSquare, pos.StatusActive, "")
+	return summary, s.repo.MarkSyncComplete(ctx, salonID, pos.ProviderSquare, pos.StatusActive, "")
 }
 
 func (s *Service) Readiness(ctx context.Context, salonID string, ownerUserID string) (*ReadinessStatus, error) {
@@ -233,11 +235,15 @@ func (s *Service) Readiness(ctx context.Context, salonID string, ownerUserID str
 	if err != nil {
 		return nil, err
 	}
+	periods, err := s.repo.ListBusinessHourPeriods(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
 	latest, err := s.latestTestBooking(ctx, salonID, ownerUserID)
 	if err != nil {
 		return nil, err
 	}
-	return buildReadiness(aiEnabled, connection, services, staff, latest), nil
+	return buildReadiness(aiEnabled, connection, services, staff, periods, latest), nil
 }
 
 func (s *Service) CreateTestBooking(ctx context.Context, salonID string, ownerUserID string, req TestBookingRequest) (*TestBookingResponse, error) {
@@ -361,7 +367,7 @@ func (s *Service) latestTestBooking(ctx context.Context, salonID string, ownerUs
 	return latest, err
 }
 
-func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.Service, staff []pos.StaffMember, latest *booking.TestBookingRecord) *ReadinessStatus {
+func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.Service, staff []pos.StaffMember, periods []pos.BusinessHourPeriod, latest *booking.TestBookingRecord) *ReadinessStatus {
 	connected := connection != nil &&
 		connection.ID != "" &&
 		connection.Status != pos.StatusNotConnected &&
@@ -372,9 +378,11 @@ func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.S
 	synced := connected && connection.LastSyncAt != nil
 	serviceCount := countBookableServices(services)
 	staffCount := countBookableStaff(staff)
+	businessHourCount := countImportedBusinessHourPeriods(periods, pos.ProviderSquare)
 	servicesReady := synced && serviceCount > 0
 	staffReady := synced && staffCount > 0
-	canTest := connected && locationSelected && synced && servicesReady && staffReady
+	businessHoursReady := synced && businessHourCount > 0
+	canTest := connected && locationSelected && synced && servicesReady && staffReady && businessHoursReady
 	canCancel := latest != nil &&
 		latest.AppointmentID != "" &&
 		latest.POSBookingID != "" &&
@@ -389,6 +397,7 @@ func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.S
 		{Key: "select_location", Label: "Select location", Complete: locationSelected, Message: incompleteMessage(locationSelected, "Choose the Square location for this salon.")},
 		{Key: "sync_services", Label: "Sync services", Complete: servicesReady, Message: incompleteMessage(servicesReady, "Sync at least one active AI-bookable service.")},
 		{Key: "sync_staff", Label: "Sync staff", Complete: staffReady, Message: incompleteMessage(staffReady, "Sync at least one active AI-bookable staff member.")},
+		{Key: "sync_business_hours", Label: "Sync business hours", Complete: businessHoursReady, Message: incompleteMessage(businessHoursReady, "Sync at least one Square business hour period.")},
 		{Key: "create_test_booking", Label: "Create test booking", Complete: latest != nil && latest.POSBookingID != "" && latest.Status != booking.StatusFallbackPending, Message: incompleteMessage(latest != nil && latest.POSBookingID != "" && latest.Status != booking.StatusFallbackPending, "Create a real Square test booking.")},
 		{Key: "cancel_test_booking", Label: "Cancel test booking", Complete: testCancelled, Message: incompleteMessage(testCancelled, "Cancel the latest Square test booking before enabling AI booking.")},
 		{Key: "enable_ai_booking", Label: "Enable AI booking", Complete: aiEnabled, Message: incompleteMessage(aiEnabled, "AI booking is disabled until all safety checks pass.")},
@@ -401,9 +410,23 @@ func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.S
 		CanEnableAIBooking:   canEnable,
 		ServiceCount:         serviceCount,
 		StaffCount:           staffCount,
+		BusinessHourCount:    businessHourCount,
 		LatestTestBooking:    latest,
 		Checks:               checks,
 	}
+}
+
+func syncSummaryMessage(summary *pos.SyncSummary) string {
+	if summary == nil {
+		return "Square sync completed."
+	}
+	return fmt.Sprintf(
+		"Synced %d services, %d staff, %d business hour periods, and %d customers from Square.",
+		summary.ServicesSynced,
+		summary.StaffSynced,
+		summary.BusinessHourPeriodsSynced,
+		summary.CustomersSynced,
+	)
 }
 
 func countBookableServices(services []pos.Service) int {
@@ -431,6 +454,16 @@ func countBookableStaff(staff []pos.StaffMember) int {
 			member.SyncStatus == pos.SyncStatusSynced &&
 			member.POSLinked &&
 			strings.TrimSpace(member.POSStaffID) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func countImportedBusinessHourPeriods(periods []pos.BusinessHourPeriod, provider string) int {
+	count := 0
+	for _, period := range periods {
+		if period.Source == pos.BusinessHourSourceImported && period.Provider == provider {
 			count++
 		}
 	}

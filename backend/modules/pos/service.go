@@ -238,7 +238,7 @@ func (s *ServiceLayer) ProviderSwitchReadiness(ctx context.Context, salonID stri
 		{Key: "active_provider", Label: "Active provider selected", Complete: activeProvider != "", Message: incompleteProviderMessage(activeProvider != "", "No active POS provider is selected.")},
 		{Key: "provider_adapter", Label: "Active provider adapter installed", Complete: s.providers[activeProvider] != nil, Message: incompleteProviderMessage(s.providers[activeProvider] != nil, "The active POS provider adapter is not configured in this deployment.")},
 		{Key: "provider_connected", Label: "Active provider connected", Complete: connected, Message: incompleteProviderMessage(connected, "Connect the active provider and select a booking location.")},
-		{Key: "provider_synced", Label: "Active provider synced", Complete: synced, Message: incompleteProviderMessage(synced, "Sync services and staff from the active provider.")},
+		{Key: "provider_synced", Label: "Active provider synced", Complete: synced, Message: incompleteProviderMessage(synced, "Sync records from the active provider.")},
 		{Key: "services_mapped", Label: "Bookable services mapped", Complete: summary.BookableServiceCount > 0, Message: incompleteProviderMessage(summary.BookableServiceCount > 0, "At least one active AI-bookable service must have a synced provider link.")},
 		{Key: "staff_mapped", Label: "Bookable staff mapped", Complete: summary.BookableStaffCount > 0, Message: incompleteProviderMessage(summary.BookableStaffCount > 0, "At least one active AI-bookable staff member must have a synced provider link.")},
 		{Key: "alternate_adapter", Label: "Alternate provider adapter installed", Complete: alternateInstalled, Message: incompleteProviderMessage(alternateInstalled, "No alternate POS adapter is installed in this pilot deployment.")},
@@ -761,7 +761,7 @@ func dryRunCurrentProviderMessage(activeProvider string, fromProvider string, co
 		return "Connect the current active provider and select a booking location before dry-run."
 	}
 	if !synced {
-		return "Sync services and staff from the current active provider before dry-run."
+		return "Sync records from the current active provider before dry-run."
 	}
 	if mapping == nil || mapping.BookableServiceCount == 0 {
 		return "At least one active AI-bookable service must have a synced current-provider link."

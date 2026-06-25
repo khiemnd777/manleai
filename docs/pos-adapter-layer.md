@@ -93,6 +93,12 @@ Capability flags are authoritative. If a provider does not declare support for
 a write operation, the API and worker must keep that operation gated and must
 not fake a synced state.
 
+Provider `Sync(ctx, salonID)` is the pull/import path. For Square Appointments
+it imports services, staff, selected-location business hour periods, and
+customers. Business hours use provider-native period semantics instead of a
+single open/close pair per day, and booking availability filters require a slot
+to fit inside one imported period.
+
 ## POS Sync Jobs
 
 `pos_sync_jobs` is the provider-neutral outbox for projecting ManleAI-owned

@@ -167,8 +167,9 @@ type CustomerRef struct {
 }
 
 type Schedule struct {
-	Timezone      string
-	BusinessHours []BusinessHour
+	Timezone            string
+	BusinessHours       []BusinessHour
+	BusinessHourPeriods []BusinessHourPeriod
 }
 
 type BusinessHour struct {
@@ -176,6 +177,12 @@ type BusinessHour struct {
 	OpenTime  string
 	CloseTime string
 	IsClosed  bool
+}
+
+type BusinessHourPeriod struct {
+	DayOfWeek      int
+	StartLocalTime string
+	EndLocalTime   string
 }
 
 type AppointmentActionRef struct {

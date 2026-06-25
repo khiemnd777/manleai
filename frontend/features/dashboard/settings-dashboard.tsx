@@ -3,14 +3,14 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { AlertTriangle, Clock, RefreshCcw, Save, ShieldCheck } from "lucide-react";
+import { AlertTriangle, RefreshCcw, Save, ShieldCheck } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest } from "@/lib/api/client";
-import type { BusinessHour, POSConnection, Salon, SalonSettings, SquareReadiness, SyncLog } from "@/types/api";
+import type { BusinessHourPeriod, POSConnection, Salon, SalonSettings, SquareReadiness, SyncLog } from "@/types/api";
 
 type SalonListResponse = {
   salons: Salon[];
@@ -23,7 +23,7 @@ type StatusResponse = {
 };
 
 type BusinessHoursResponse = {
-  hours: BusinessHour[];
+  periods: BusinessHourPeriod[];
 };
 
 type SalonFormState = {
@@ -51,23 +51,15 @@ type SettingsFormState = {
   handoffEnabled: boolean;
 };
 
-type HourFormState = {
-  dayOfWeek: number;
-  openTime: string;
-  closeTime: string;
-  isClosed: boolean;
-};
-
 const dayLabels = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 export function SettingsDashboard() {
   const [salon, setSalon] = useState<Salon | null>(null);
   const [settings, setSettings] = useState<SalonSettings | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
-  const [hours, setHours] = useState<BusinessHour[]>([]);
+  const [periods, setPeriods] = useState<BusinessHourPeriod[]>([]);
   const [salonForm, setSalonForm] = useState<SalonFormState>(emptySalonForm());
   const [settingsForm, setSettingsForm] = useState<SettingsFormState>(emptySettingsForm());
-  const [hoursForm, setHoursForm] = useState<HourFormState[]>(emptyHoursForm());
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -85,10 +77,9 @@ export function SettingsDashboard() {
       if (!firstSalon) {
         setSettings(null);
         setStatus(null);
-        setHours([]);
+        setPeriods([]);
         setSalonForm(emptySalonForm());
         setSettingsForm(emptySettingsForm());
-        setHoursForm(emptyHoursForm());
         return;
       }
 
@@ -100,10 +91,9 @@ export function SettingsDashboard() {
 
       setStatus(statusResponse);
       setSettings(settingsResponse);
-      setHours(businessHoursResponse.hours);
+      setPeriods(businessHoursResponse.periods ?? []);
       setSalonForm(salonToForm(firstSalon));
       setSettingsForm(settingsToForm(settingsResponse));
-      setHoursForm(hoursToForm(businessHoursResponse.hours));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load settings.");
     } finally {
@@ -119,8 +109,10 @@ export function SettingsDashboard() {
 
   const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
   const activeProvider = salon?.active_pos_provider || "square";
-  const hasOpenHours = useMemo(() => hoursForm.some((item) => !item.isClosed), [hoursForm]);
-  const latestUpdate = latestUpdatedAt(salon?.updated_at, settings?.updated_at, ...hours.map((item) => item.updated_at || ""));
+  const squarePeriods = useMemo(() => periods.filter(isImportedSquarePeriod), [periods]);
+  const hasBusinessHourPeriods = squarePeriods.length > 0;
+  const latestBusinessHourSync = latestUpdatedAt(...squarePeriods.map((item) => item.last_synced_at || item.updated_at || ""));
+  const latestUpdate = latestUpdatedAt(salon?.updated_at, settings?.updated_at, latestBusinessHourSync);
   const bookingModeBlocked = settingsForm.bookingMode === "confirmed_booking" && !aiEnabled;
 
   async function saveSalonProfile() {
@@ -208,38 +200,20 @@ export function SettingsDashboard() {
     }
   }
 
-  async function saveBusinessHours() {
+  async function syncSquareRecords() {
     if (!salon) return;
-    const invalid = hoursForm.find((item) => !item.isClosed && (!item.openTime || !item.closeTime || item.openTime >= item.closeTime));
-    if (invalid) {
-      setError(`Business hours are invalid for ${dayLabels[invalid.dayOfWeek]}. Open time must be before close time.`);
-      return;
-    }
-    if (!hasOpenHours) {
-      setError("Set at least one open day before saving business hours.");
-      return;
-    }
-
-    setBusy("save-hours");
+    setBusy("sync-square");
     setError("");
     setSuccess("");
     try {
-      const updated = await apiRequest<BusinessHoursResponse>(`/api/salons/${salon.id}/business-hours`, {
-        method: "PUT",
-        body: JSON.stringify({
-          hours: hoursForm.map((item) => ({
-            day_of_week: item.dayOfWeek,
-            open_time: item.isClosed ? "" : item.openTime,
-            close_time: item.isClosed ? "" : item.closeTime,
-            is_closed: item.isClosed
-          }))
-        })
+      await apiRequest<{ ok: boolean }>("/api/integrations/square/sync", {
+        method: "POST",
+        body: JSON.stringify({ salon_id: salon.id })
       });
-      setHours(updated.hours);
-      setHoursForm(hoursToForm(updated.hours));
-      setSuccess("Business hours saved.");
+      setSuccess("Square sync completed.");
+      await load({ silent: true });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save business hours.");
+      setError(err instanceof Error ? err.message : "Could not sync Square records.");
     } finally {
       setBusy("");
     }
@@ -295,7 +269,7 @@ export function SettingsDashboard() {
         <div>
           <h1 className="text-2xl font-bold text-ink">Settings</h1>
           <p className="mt-1 text-sm text-muted">
-            Configure salon profile, AI receptionist behavior, handoff, SMS, and business hours.
+            Configure salon profile, AI receptionist behavior, handoff, SMS, and synced Square hours.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -314,7 +288,7 @@ export function SettingsDashboard() {
 
       <div className="grid gap-4 md:grid-cols-3">
         <StatusMetric label="Active provider" value={activeProvider === "square" ? "Square Appointments" : activeProvider} badge="booking" />
-        <StatusMetric label="Business hours" value={hasOpenHours ? "Configured" : "Missing"} badge={hasOpenHours ? "ready" : "blocked"} />
+        <StatusMetric label="Business hours" value={hasBusinessHourPeriods ? "Synced" : "Missing"} badge={hasBusinessHourPeriods ? "ready" : "blocked"} />
         <StatusMetric label="Last saved" value={latestUpdate ? formatDateTime(latestUpdate) : "Not available"} badge={latestUpdate ? "synced" : "not_configured"} />
       </div>
 
@@ -329,12 +303,12 @@ export function SettingsDashboard() {
         onSave={() => void saveSettings()}
       />
 
-      <BusinessHoursForm
-        form={hoursForm}
-        busy={busy === "save-hours"}
-        hasOpenHours={hasOpenHours}
-        onChange={setHoursForm}
-        onSave={() => void saveBusinessHours()}
+      <BusinessHoursCard
+        periods={periods}
+        hasSyncedSquarePeriods={hasBusinessHourPeriods}
+        busy={busy === "sync-square"}
+        lastSyncedAt={latestBusinessHourSync}
+        onSync={() => void syncSquareRecords()}
       />
     </div>
   );
@@ -565,36 +539,39 @@ function AISettingsForm({
   );
 }
 
-function BusinessHoursForm({
-  form,
+function BusinessHoursCard({
+  periods,
+  hasSyncedSquarePeriods,
   busy,
-  hasOpenHours,
-  onChange,
-  onSave
+  lastSyncedAt,
+  onSync
 }: {
-  form: HourFormState[];
+  periods: BusinessHourPeriod[];
+  hasSyncedSquarePeriods: boolean;
   busy: boolean;
-  hasOpenHours: boolean;
-  onChange: (next: HourFormState[]) => void;
-  onSave: () => void;
+  lastSyncedAt: string;
+  onSync: () => void;
 }) {
-  function updateHour(dayOfWeek: number, next: Partial<HourFormState>) {
-    onChange(form.map((item) => (item.dayOfWeek === dayOfWeek ? { ...item, ...next } : item)));
-  }
+  const periodsByDay = groupPeriodsByDay(periods);
 
   return (
     <Card>
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
         <div>
           <CardTitle>Business hours</CardTitle>
-          <CardDescription>Availability checks reject requested times outside these salon hours.</CardDescription>
+          <CardDescription>
+            Synced from Square Appointments. Availability checks reject requested times outside these periods.
+          </CardDescription>
+          <div className="mt-2 text-xs leading-5 text-muted">
+            Edit operating hours in Square, then sync here. Last sync: {lastSyncedAt ? formatDateTime(lastSyncedAt) : "not synced"}.
+          </div>
         </div>
-        <Badge value={hasOpenHours ? "ready" : "blocked"} className="self-start" />
+        <Badge value={hasSyncedSquarePeriods ? "ready" : "blocked"} className="self-start" />
       </div>
 
-      {!hasOpenHours ? (
+      {!hasSyncedSquarePeriods ? (
         <div className="mt-5 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-          Set at least one open day before phone booking readiness can pass.
+          No Square business hour periods are synced yet. Run Sync after selecting the correct Square location.
         </div>
       ) : null}
 
@@ -603,86 +580,100 @@ function BusinessHoursForm({
           <thead className="bg-slate-50 text-xs uppercase text-muted">
             <tr>
               <th className="px-4 py-3">Day</th>
-              <th className="px-4 py-3">Closed</th>
-              <th className="px-4 py-3">Open</th>
-              <th className="px-4 py-3">Close</th>
+              <th className="px-4 py-3">Open periods</th>
+              <th className="px-4 py-3">Source</th>
+              <th className="px-4 py-3">Last sync</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-line bg-white">
-            {form.map((item) => (
-              <tr key={item.dayOfWeek}>
-                <td className="px-4 py-3 font-medium text-ink">{dayLabels[item.dayOfWeek]}</td>
-                <td className="px-4 py-3">
-                  <input
-                    type="checkbox"
-                    checked={item.isClosed}
-                    onChange={(event) => updateHour(item.dayOfWeek, { isClosed: event.target.checked })}
-                    disabled={busy}
-                  />
-                </td>
-                <td className="px-4 py-3">
-                  <TimeInput
-                    value={item.isClosed ? "" : item.openTime}
-                    disabled={busy || item.isClosed}
-                    onChange={(value) => updateHour(item.dayOfWeek, { openTime: value })}
-                  />
-                </td>
-                <td className="px-4 py-3">
-                  <TimeInput
-                    value={item.isClosed ? "" : item.closeTime}
-                    disabled={busy || item.isClosed}
-                    onChange={(value) => updateHour(item.dayOfWeek, { closeTime: value })}
-                  />
-                </td>
-              </tr>
-            ))}
+            {dayLabels.map((day, dayOfWeek) => {
+              const dayPeriods = periodsByDay.get(dayOfWeek) ?? [];
+              return (
+                <tr key={day}>
+                  <td className="px-4 py-3 font-medium text-ink">{day}</td>
+                  <td className="px-4 py-3 text-ink">
+                    {dayPeriods.length ? formatPeriodList(dayPeriods) : <span className="text-muted">Closed or not synced</span>}
+                  </td>
+                  <td className="px-4 py-3 text-muted">{formatPeriodSource(dayPeriods)}</td>
+                  <td className="px-4 py-3 text-muted">{formatDayLastSynced(dayPeriods)}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
 
       <div className="mt-5 space-y-3 md:hidden">
-        {form.map((item) => (
-          <div key={item.dayOfWeek} className="rounded-md border border-line p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-sm font-semibold text-ink">{dayLabels[item.dayOfWeek]}</div>
-              <label className="flex items-center gap-2 text-sm font-medium text-ink">
-                <input
-                  type="checkbox"
-                  checked={item.isClosed}
-                  onChange={(event) => updateHour(item.dayOfWeek, { isClosed: event.target.checked })}
-                  disabled={busy}
-                />
-                Closed
-              </label>
+        {dayLabels.map((day, dayOfWeek) => {
+          const dayPeriods = periodsByDay.get(dayOfWeek) ?? [];
+          return (
+            <div key={day} className="rounded-md border border-line p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm font-semibold text-ink">{day}</div>
+                <Badge value={dayPeriods.length ? "open" : "closed"} />
+              </div>
+              <div className="mt-3 text-sm text-ink">
+                {dayPeriods.length ? formatPeriodList(dayPeriods) : "Closed or not synced"}
+              </div>
+              <div className="mt-2 text-xs leading-5 text-muted">
+                {formatPeriodSource(dayPeriods)} - {formatDayLastSynced(dayPeriods)}
+              </div>
             </div>
-            <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              <Field label="Open">
-                <TimeInput
-                  value={item.isClosed ? "" : item.openTime}
-                  disabled={busy || item.isClosed}
-                  onChange={(value) => updateHour(item.dayOfWeek, { openTime: value })}
-                />
-              </Field>
-              <Field label="Close">
-                <TimeInput
-                  value={item.isClosed ? "" : item.closeTime}
-                  disabled={busy || item.isClosed}
-                  onChange={(value) => updateHour(item.dayOfWeek, { closeTime: value })}
-                />
-              </Field>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
-      <div className="mt-5 flex justify-end">
-        <Button type="button" onClick={onSave} disabled={busy}>
-          <Clock className="h-4 w-4" />
-          {busy ? "Saving..." : "Save business hours"}
+      <div className="mt-5 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+        <Link
+          href="/dashboard/integrations"
+          className="inline-flex h-10 items-center justify-center rounded-md border border-line px-4 text-sm font-semibold text-ink hover:bg-slate-50"
+        >
+          Open Square setup
+        </Link>
+        <Button type="button" onClick={onSync} disabled={busy}>
+          <RefreshCcw className="h-4 w-4" />
+          {busy ? "Syncing..." : "Sync"}
         </Button>
       </div>
     </Card>
   );
+}
+
+function groupPeriodsByDay(periods: BusinessHourPeriod[]) {
+  const grouped = new Map<number, BusinessHourPeriod[]>();
+  for (const period of periods) {
+    const next = grouped.get(period.day_of_week) ?? [];
+    next.push(period);
+    grouped.set(
+      period.day_of_week,
+      next.sort((a, b) => a.start_local_time.localeCompare(b.start_local_time))
+    );
+  }
+  return grouped;
+}
+
+function formatPeriodList(periods: BusinessHourPeriod[]) {
+  return periods.map((period) => `${toDisplayTime(period.start_local_time)}-${toDisplayTime(period.end_local_time)}`).join(", ");
+}
+
+function formatPeriodSource(periods: BusinessHourPeriod[]) {
+  if (periods.length === 0) return "Not synced";
+  if (periods.some((period) => period.provider === "square")) return "Square";
+  return "Migrated local hours";
+}
+
+function isImportedSquarePeriod(period: BusinessHourPeriod) {
+  return period.source === "imported" && period.provider === "square";
+}
+
+function formatDayLastSynced(periods: BusinessHourPeriod[]) {
+  const value = latestUpdatedAt(...periods.map((period) => period.last_synced_at || period.updated_at || ""));
+  return value ? formatDateTime(value) : "Not synced";
+}
+
+function toDisplayTime(value?: string) {
+  if (!value) return "";
+  return value.slice(0, 5);
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -706,26 +697,6 @@ function TextInput({
   return (
     <input
       className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-50 disabled:text-slate-400"
-      value={value}
-      onChange={(event) => onChange(event.target.value)}
-      disabled={disabled}
-    />
-  );
-}
-
-function TimeInput({
-  value,
-  disabled,
-  onChange
-}: {
-  value: string;
-  disabled: boolean;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <input
-      className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-50 disabled:text-slate-400"
-      type="time"
       value={value}
       onChange={(event) => onChange(event.target.value)}
       disabled={disabled}
@@ -808,33 +779,6 @@ function settingsToForm(settings: SalonSettings): SettingsFormState {
     reminderHoursBefore: String(settings.reminder_hours_before || 24),
     handoffEnabled: settings.handoff_enabled
   };
-}
-
-function emptyHoursForm(): HourFormState[] {
-  return dayLabels.map((_, dayOfWeek) => ({
-    dayOfWeek,
-    openTime: "",
-    closeTime: "",
-    isClosed: true
-  }));
-}
-
-function hoursToForm(hours: BusinessHour[]): HourFormState[] {
-  const byDay = new Map(hours.map((item) => [item.day_of_week, item]));
-  return dayLabels.map((_, dayOfWeek) => {
-    const hour = byDay.get(dayOfWeek);
-    return {
-      dayOfWeek,
-      openTime: toTimeInput(hour?.open_time),
-      closeTime: toTimeInput(hour?.close_time),
-      isClosed: hour ? hour.is_closed : true
-    };
-  });
-}
-
-function toTimeInput(value?: string) {
-  if (!value) return "";
-  return value.slice(0, 5);
 }
 
 function latestUpdatedAt(...values: Array<string | undefined>) {

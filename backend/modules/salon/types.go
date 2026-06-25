@@ -87,6 +87,21 @@ type BusinessHour struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+type BusinessHourPeriod struct {
+	ID                  string     `json:"id,omitempty"`
+	SalonID             string     `json:"salon_id,omitempty"`
+	DayOfWeek           int        `json:"day_of_week"`
+	StartLocalTime      string     `json:"start_local_time"`
+	EndLocalTime        string     `json:"end_local_time"`
+	Source              string     `json:"source"`
+	Provider            string     `json:"provider,omitempty"`
+	ProviderLocationID  string     `json:"provider_location_id,omitempty"`
+	ProviderPeriodIndex int        `json:"provider_period_index"`
+	LastSyncedAt        *time.Time `json:"last_synced_at,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+}
+
 type UpdateBusinessHoursRequest struct {
 	Hours []BusinessHourInput `json:"hours"`
 }

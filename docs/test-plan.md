@@ -7,7 +7,8 @@
 - Verify login succeeds and returns access and refresh tokens.
 - Verify `GET /api/auth/me` returns the owner and primary salon ID.
 - Verify owner can create, read, and update salons.
-- Verify owner can read and update salon settings and business hours.
+- Verify owner can read salon settings and Square-synced business hour periods.
+- Verify local business hour updates return `BUSINESS_HOURS_POS_MANAGED`.
 - Verify frontend login stores tokens and opens the dashboard.
 - Verify empty dashboard state links to salon onboarding.
 
@@ -19,7 +20,7 @@
 - Verify `GET /api/integrations/square/status` returns connection state and sync logs.
 - Verify `GET /api/integrations/square/locations` calls Square through `SquareAdapter`.
 - Verify `POST /api/integrations/square/select-location` stores `location_id`.
-- Verify `POST /api/integrations/square/sync` writes normalized `services` and `staff` rows.
+- Verify `POST /api/integrations/square/sync` writes normalized `services`, `staff`, business hour periods, and customers.
 - Verify Square errors create `pos_errors` rows and failed sync logs.
 
 ## Milestone 3 Backend Foundation

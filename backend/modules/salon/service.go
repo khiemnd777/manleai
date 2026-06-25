@@ -58,8 +58,8 @@ func (s *Service) UpdateSettings(ctx context.Context, salonID string, ownerUserI
 	return s.repo.UpdateSettings(ctx, salonID, ownerUserID, req)
 }
 
-func (s *Service) GetBusinessHours(ctx context.Context, salonID string, ownerUserID string) ([]BusinessHour, error) {
-	return s.repo.GetBusinessHours(ctx, salonID, ownerUserID)
+func (s *Service) GetBusinessHours(ctx context.Context, salonID string, ownerUserID string) ([]BusinessHourPeriod, error) {
+	return s.repo.GetBusinessHourPeriods(ctx, salonID, ownerUserID)
 }
 
 func (s *Service) UpdateBusinessHours(ctx context.Context, salonID string, ownerUserID string, req UpdateBusinessHoursRequest) ([]BusinessHour, error) {

@@ -51,6 +51,21 @@ export type BusinessHour = {
   updated_at?: string;
 };
 
+export type BusinessHourPeriod = {
+  id?: string;
+  salon_id?: string;
+  day_of_week: number;
+  start_local_time: string;
+  end_local_time: string;
+  source: string;
+  provider?: string;
+  provider_location_id?: string;
+  provider_period_index: number;
+  last_synced_at?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
 export type SquareIntegrationConfig = {
   provider: "square" | string;
   configured: boolean;
@@ -343,6 +358,7 @@ export type SquareReadiness = {
   can_enable_ai_booking: boolean;
   service_count: number;
   staff_count: number;
+  business_hour_period_count: number;
   latest_test_booking?: TestBookingRecord;
   checks: ReadinessCheck[];
 };

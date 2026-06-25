@@ -620,7 +620,7 @@ export function AppointmentsDashboard() {
           <div className="mt-5 grid gap-4">
             {!readyForAvailability ? (
               <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
-                Connect Square Appointments, select a location, and sync AI-bookable services and staff before checking availability.
+                Connect Square Appointments, select a location, and sync AI-bookable services, staff, and business hours before checking availability.
               </div>
             ) : null}
 
@@ -899,7 +899,7 @@ function ReadinessPanel({ status }: { status: StatusResponse | null }) {
         <div>
           <CardTitle>Booking workflow is gated</CardTitle>
           <CardDescription className="text-amber-900">
-            Connect Square Appointments, select a location, and sync services and staff before AI booking can operate.
+            Connect Square Appointments, select a location, and sync services, staff, and business hours before AI booking can operate.
           </CardDescription>
           <a
             className="mt-3 inline-flex h-10 items-center justify-center rounded-md border border-line bg-white px-4 text-sm font-semibold text-ink hover:bg-slate-50"

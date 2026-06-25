@@ -105,23 +105,9 @@ func (h *Handler) GetBusinessHours(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "BUSINESS_HOURS_FAILED", "Could not load business hours.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"hours": hours})
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"periods": hours})
 }
 
 func (h *Handler) UpdateBusinessHours(c *fiber.Ctx) error {
-	var req UpdateBusinessHoursRequest
-	if err := c.BodyParser(&req); err != nil {
-		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
-	}
-	hours, err := h.service.UpdateBusinessHours(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
-	if errors.Is(err, ErrValidation) {
-		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Business hours contain invalid values.")
-	}
-	if errors.Is(err, ErrNotFound) {
-		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
-	}
-	if err != nil {
-		return respond.Error(c, fiber.StatusInternalServerError, "BUSINESS_HOURS_UPDATE_FAILED", "Could not update business hours.")
-	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"hours": hours})
+	return respond.Error(c, fiber.StatusConflict, "BUSINESS_HOURS_POS_MANAGED", "Business hours are managed in Square and imported through Square sync.")
 }

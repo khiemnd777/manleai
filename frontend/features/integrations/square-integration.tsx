@@ -357,7 +357,7 @@ export function SquareIntegration() {
         method: "POST",
         body: JSON.stringify({ salon_id: salon.id })
       });
-      setSuccess("Services and staff sync completed.");
+      setSuccess("Square sync completed.");
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Square sync failed.");
@@ -705,19 +705,20 @@ export function SquareIntegration() {
             <div>
               <CardTitle>Square Appointments</CardTitle>
               <CardDescription>
-                Connect OAuth, choose a location, then sync services and staff into this system.
+                Connect OAuth, choose a location, then sync Square records into this system.
               </CardDescription>
             </div>
           </div>
           <Badge value={connection?.status ?? "not_connected"} />
         </div>
 
-        <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+        <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-6">
           <Info label="Provider" value="Square" />
           <Info label="Merchant ID" value={connection?.merchant_id || "Not connected"} />
           <Info label="Location ID" value={connection?.location_id || "Not selected"} />
           <Info label="Bookable services" value={String(readiness?.service_count ?? 0)} />
           <Info label="Bookable staff" value={String(readiness?.staff_count ?? 0)} />
+          <Info label="Business periods" value={String(readiness?.business_hour_period_count ?? 0)} />
         </div>
 
         {connection?.error_message ? (
@@ -761,7 +762,7 @@ export function SquareIntegration() {
             disabled={!connection?.id || busy !== ""}
           >
             <RefreshCcw className="h-4 w-4" />
-            {busy === "sync" ? "Syncing..." : "Sync Services and Staff"}
+            {busy === "sync" ? "Syncing..." : "Sync"}
           </Button>
         </div>
       </Card>
@@ -987,7 +988,7 @@ export function SquareIntegration() {
             <div className="mt-3 text-sm font-semibold text-ink">No sync logs yet</div>
             <div className="mt-1 text-sm leading-6 text-muted">
               {connection?.id
-                ? "Run Sync Services and Staff to import Square Appointments records and record the sync result."
+                ? "Run Sync to import Square Appointments records and record the sync result."
                 : "Connect Square Appointments before sync activity can be recorded."}
             </div>
           </div>
@@ -1534,7 +1535,7 @@ function ReadinessOverviewPanel({
           connection?.id ? (
             <Button type="button" variant="secondary" onClick={onSync} disabled={busy !== ""}>
               <RefreshCcw className="h-4 w-4" />
-              {busy === "sync" ? "Syncing..." : "Sync Services and Staff"}
+              {busy === "sync" ? "Syncing..." : "Sync"}
             </Button>
           ) : (
             <Button type="button" onClick={onConnect} disabled={busy !== "" || !squareConfigConfigured}>
@@ -2348,7 +2349,7 @@ function squareOverviewMessage(connection: POSConnection | undefined, syncLogCou
     return "Select a Square location before booking readiness can pass.";
   }
   if (!connection.last_sync_at && syncLogCount === 0) {
-    return "Run Sync Services and Staff to import current Square Appointments records.";
+    return "Run Sync to import current Square Appointments records.";
   }
   return `Latest sync ${formatOptionalDateTime(connection.last_sync_at)}. Confirmed bookings still require Square success.`;
 }

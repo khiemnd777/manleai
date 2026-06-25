@@ -85,7 +85,7 @@ owner@lotusnails.example / password123
 Seeded local phones:
 
 ```txt
-Salon inbound phone: +13125550101
+Salon inbound phone: +16292536211
 Owner handoff phone: +13125550102
 ```
 
@@ -167,7 +167,7 @@ Dashboard flow:
 1. Open `/dashboard/integrations`.
 2. Connect Square.
 3. Select location.
-4. Sync services and staff.
+4. Sync services, staff, business hour periods, and customers.
 5. Confirm at least one active AI-bookable service.
 6. Confirm at least one active AI-bookable staff member.
 7. Create a real Square test booking.
@@ -335,7 +335,7 @@ Use the simulator before placing a live call:
 cd backend
 go run ./cmd/twilio-sim \
   -auth-token "$VOICE_TWILIO_AUTH_TOKEN" \
-  -to "+13125550101" \
+  -to "+16292536211" \
   -turn "I need a classic manicure tomorrow." \
   -turn "The first one works. My name is Linh Tran and my phone is 312-555-0199."
 ```

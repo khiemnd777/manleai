@@ -78,12 +78,13 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 			) AS staff_count,
 				(
 					SELECT COUNT(*)
-					FROM salon_business_hours bh
-					WHERE bh.salon_id = s.id
-					  AND bh.is_closed = false
-					  AND bh.open_time IS NOT NULL
-					  AND bh.close_time IS NOT NULL
-					  AND bh.close_time > bh.open_time
+					FROM salon_business_hour_periods bhp
+					WHERE bhp.salon_id = s.id
+					  AND bhp.source = 'imported'
+					  AND bhp.provider = s.active_pos_provider
+					  AND bhp.start_local_time IS NOT NULL
+					  AND bhp.end_local_time IS NOT NULL
+					  AND bhp.end_local_time > bhp.start_local_time
 				) AS business_hours_count,
 				EXISTS (
 					SELECT 1
@@ -130,7 +131,7 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 
 	readiness.Checks = []ReadinessCheck{
 		{Key: "connect_active_provider", Label: "Connect active POS provider", Complete: readiness.ProviderConnected, Message: incompleteReadinessMessage(readiness.ProviderConnected, providerLabel+" is not connected with a selected location.")},
-		{Key: "sync_active_provider", Label: "Sync active POS provider", Complete: readiness.ProviderSynced, Message: incompleteReadinessMessage(readiness.ProviderSynced, providerLabel+" services and staff have not been synced.")},
+		{Key: "sync_active_provider", Label: "Sync active POS provider", Complete: readiness.ProviderSynced, Message: incompleteReadinessMessage(readiness.ProviderSynced, providerLabel+" records have not been synced.")},
 		{Key: "bookable_services", Label: "AI-bookable services", Complete: readiness.ServiceCount > 0, Message: incompleteReadinessMessage(readiness.ServiceCount > 0, "No active AI-bookable service is synced from the active POS provider.")},
 		{Key: "bookable_staff", Label: "AI-bookable staff", Complete: readiness.StaffCount > 0, Message: incompleteReadinessMessage(readiness.StaffCount > 0, "No active AI-bookable staff member is synced from the active POS provider.")},
 		{Key: "business_hours", Label: "Business hours", Complete: readiness.BusinessHoursCount > 0, Message: incompleteReadinessMessage(readiness.BusinessHoursCount > 0, "Salon business hours are not configured.")},

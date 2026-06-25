@@ -274,6 +274,71 @@ func (a *SquareAdapter) ListStaff(ctx context.Context, salonID string) ([]pos.St
 	return staff, nil
 }
 
+func (a *SquareAdapter) ListBusinessHourPeriods(ctx context.Context, salonID string) ([]pos.BusinessHourPeriod, error) {
+	token, locationID, err := a.accessTokenAndLocation(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := a.configFor(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	var response squareLocationResponse
+	if err := a.doJSON(ctx, cfg, http.MethodGet, a.apiBaseURL(cfg)+"/v2/locations/"+url.PathEscape(locationID), token, nil, &response); err != nil {
+		_ = a.repo.LogError(ctx, pos.POSError{
+			SalonID:      salonID,
+			Provider:     pos.ProviderSquare,
+			Operation:    "retrieve_location",
+			ErrorCode:    normalizeSquareError(err),
+			ErrorMessage: err.Error(),
+		})
+		return nil, err
+	}
+	return mapSquareBusinessHourPeriods(response.Location.BusinessHours.Periods), nil
+}
+
+func (a *SquareAdapter) ListCustomers(ctx context.Context, salonID string) ([]pos.Customer, error) {
+	token, err := a.accessToken(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := a.configFor(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+
+	customers := make([]pos.Customer, 0)
+	cursor := ""
+	for {
+		request := squareCustomerSearchRequest{
+			Limit:  100,
+			Cursor: cursor,
+		}
+		var response squareCustomerSearchResponse
+		if err := a.doJSON(ctx, cfg, http.MethodPost, a.apiBaseURL(cfg)+"/v2/customers/search", token, request, &response); err != nil {
+			_ = a.repo.LogError(ctx, pos.POSError{
+				SalonID:      salonID,
+				Provider:     pos.ProviderSquare,
+				Operation:    "list_customers",
+				ErrorCode:    normalizeSquareError(err),
+				ErrorMessage: err.Error(),
+			})
+			return nil, err
+		}
+		for _, item := range response.Customers {
+			customer := mapSquareCustomer(item)
+			if strings.TrimSpace(customer.POSCustomerID) != "" {
+				customers = append(customers, customer)
+			}
+		}
+		cursor = strings.TrimSpace(response.Cursor)
+		if cursor == "" {
+			break
+		}
+	}
+	return customers, nil
+}
+
 func (a *SquareAdapter) SearchCustomerByPhone(ctx context.Context, salonID string, phone string) (*pos.Customer, error) {
 	token, err := a.accessToken(ctx, salonID)
 	if err != nil {
@@ -462,18 +527,52 @@ func (a *SquareAdapter) CancelAppointment(ctx context.Context, salonID string, a
 }
 
 func (a *SquareAdapter) Sync(ctx context.Context, salonID string) error {
+	_, err := a.SyncWithSummary(ctx, salonID)
+	return err
+}
+
+func (a *SquareAdapter) SyncWithSummary(ctx context.Context, salonID string) (*pos.SyncSummary, error) {
 	services, err := a.ListServices(ctx, salonID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := a.repo.UpsertServices(ctx, salonID, services); err != nil {
-		return err
+		return nil, err
 	}
 	staff, err := a.ListStaff(ctx, salonID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return a.repo.UpsertStaff(ctx, salonID, staff)
+	if err := a.repo.UpsertStaff(ctx, salonID, staff); err != nil {
+		return nil, err
+	}
+	_, locationID, err := a.accessTokenAndLocation(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	periods, err := a.ListBusinessHourPeriods(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	periodsSynced, err := a.repo.UpsertBusinessHourPeriods(ctx, salonID, pos.ProviderSquare, locationID, periods)
+	if err != nil {
+		return nil, err
+	}
+	customers, err := a.ListCustomers(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	customersSynced, customersSkipped, err := a.repo.UpsertCustomers(ctx, salonID, pos.ProviderSquare, customers)
+	if err != nil {
+		return nil, err
+	}
+	return &pos.SyncSummary{
+		ServicesSynced:            len(services),
+		StaffSynced:               len(staff),
+		BusinessHourPeriodsSynced: periodsSynced,
+		CustomersSynced:           customersSynced,
+		CustomersSkipped:          customersSkipped,
+	}, nil
 }
 
 func (a *SquareAdapter) retrieveBooking(ctx context.Context, cfg config.SquareConfig, token string, bookingID string) (squareBooking, error) {
@@ -634,7 +733,7 @@ func buildSquareCustomerSearchRequest(phone string) (squareCustomerSearchRequest
 		return squareCustomerSearchRequest{}, fmt.Errorf("phone is required")
 	}
 	return squareCustomerSearchRequest{
-		Query: squareCustomerQuery{
+		Query: &squareCustomerQuery{
 			Filter: squareCustomerFilter{
 				PhoneNumber: &squareCustomerTextFilter{Exact: phone},
 			},
@@ -864,6 +963,54 @@ func mapSquareCustomer(customer squareCustomer) pos.Customer {
 	}
 }
 
+func mapSquareBusinessHourPeriods(periods []squareBusinessHourPeriod) []pos.BusinessHourPeriod {
+	items := make([]pos.BusinessHourPeriod, 0, len(periods))
+	dayIndexes := make(map[int]int)
+	for _, period := range periods {
+		dayOfWeek, ok := squareDayOfWeek(period.DayOfWeek)
+		if !ok {
+			continue
+		}
+		startLocalTime := strings.TrimSpace(period.StartLocalTime)
+		endLocalTime := strings.TrimSpace(period.EndLocalTime)
+		if startLocalTime == "" || endLocalTime == "" {
+			continue
+		}
+		periodIndex := dayIndexes[dayOfWeek]
+		dayIndexes[dayOfWeek] = periodIndex + 1
+		items = append(items, pos.BusinessHourPeriod{
+			DayOfWeek:           dayOfWeek,
+			StartLocalTime:      startLocalTime,
+			EndLocalTime:        endLocalTime,
+			Source:              pos.BusinessHourSourceImported,
+			Provider:            pos.ProviderSquare,
+			ProviderPeriodIndex: periodIndex,
+		})
+	}
+	return items
+}
+
+func squareDayOfWeek(value string) (int, bool) {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "SUN", "SUNDAY":
+		return 0, true
+	case "MON", "MONDAY":
+		return 1, true
+	case "TUE", "TUESDAY":
+		return 2, true
+	case "WED", "WEDNESDAY":
+		return 3, true
+	case "THU", "THURSDAY":
+		return 4, true
+	case "FRI", "FRIDAY":
+		return 5, true
+	case "SAT", "SATURDAY":
+		return 6, true
+	default:
+		return 0, false
+	}
+}
+
 func mapSquareAvailabilities(response squareAvailabilityResponse, fallbackDuration int) []pos.TimeSlot {
 	slots := make([]pos.TimeSlot, 0, len(response.Availabilities))
 	for _, item := range response.Availabilities {
@@ -991,13 +1138,30 @@ type squareErrorResponse struct {
 }
 
 type squareLocationsResponse struct {
-	Locations []struct {
-		ID       string        `json:"id"`
-		Name     string        `json:"name"`
-		Status   string        `json:"status"`
-		Timezone string        `json:"timezone"`
-		Address  squareAddress `json:"address"`
-	} `json:"locations"`
+	Locations []squareLocation `json:"locations"`
+}
+
+type squareLocationResponse struct {
+	Location squareLocation `json:"location"`
+}
+
+type squareLocation struct {
+	ID            string              `json:"id"`
+	Name          string              `json:"name"`
+	Status        string              `json:"status"`
+	Timezone      string              `json:"timezone"`
+	Address       squareAddress       `json:"address"`
+	BusinessHours squareBusinessHours `json:"business_hours"`
+}
+
+type squareBusinessHours struct {
+	Periods []squareBusinessHourPeriod `json:"periods"`
+}
+
+type squareBusinessHourPeriod struct {
+	DayOfWeek      string `json:"day_of_week"`
+	StartLocalTime string `json:"start_local_time"`
+	EndLocalTime   string `json:"end_local_time"`
 }
 
 type squareAddress struct {
@@ -1054,8 +1218,9 @@ type squareTeamMembersResponse struct {
 }
 
 type squareCustomerSearchRequest struct {
-	Query squareCustomerQuery `json:"query"`
-	Limit int                 `json:"limit,omitempty"`
+	Query  *squareCustomerQuery `json:"query,omitempty"`
+	Limit  int                  `json:"limit,omitempty"`
+	Cursor string               `json:"cursor,omitempty"`
 }
 
 type squareCustomerQuery struct {
@@ -1073,6 +1238,7 @@ type squareCustomerTextFilter struct {
 
 type squareCustomerSearchResponse struct {
 	Customers []squareCustomer `json:"customers"`
+	Cursor    string           `json:"cursor"`
 }
 
 type squareCustomerResponse struct {

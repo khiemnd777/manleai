@@ -845,6 +845,50 @@ func TestAvailableSlotsFiltersBusinessHoursAndMapsStaff(t *testing.T) {
 	}
 }
 
+func TestAvailableSlotsRequiresSlotInsideOneBusinessHourPeriod(t *testing.T) {
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	store := newFakeStore()
+	store.schedule.BusinessHours = nil
+	store.schedule.BusinessHourPeriods = []BusinessHourPeriod{
+		{DayOfWeek: 1, StartLocalTime: "09:30:00", EndLocalTime: "12:00:00"},
+		{DayOfWeek: 1, StartLocalTime: "13:00:00", EndLocalTime: "19:00:00"},
+	}
+	provider := &fakeProvider{
+		availabilitySlots: []pos.TimeSlot{
+			{
+				StartTime: time.Date(2026, 6, 15, 11, 30, 0, 0, loc).UTC(),
+				EndTime:   time.Date(2026, 6, 15, 12, 15, 0, 0, loc).UTC(),
+				StaffID:   "square_staff_1",
+			},
+			{
+				StartTime: time.Date(2026, 6, 15, 13, 15, 0, 0, loc).UTC(),
+				EndTime:   time.Date(2026, 6, 15, 14, 0, 0, 0, loc).UTC(),
+				StaffID:   "square_staff_1",
+			},
+		},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	result, err := service.AvailableSlots(context.Background(), "salon_1", "owner_1", AvailabilityRequest{
+		ServiceID:     "service_1",
+		StaffID:       "staff_1",
+		PreferredDate: "2026-06-15",
+		Limit:         5,
+	})
+	if err != nil {
+		t.Fatalf("AvailableSlots returned error: %v", err)
+	}
+	if len(result.Slots) != 1 {
+		t.Fatalf("slots = %#v, want only the slot fully inside one period", result.Slots)
+	}
+	if !result.Slots[0].StartTime.Equal(time.Date(2026, 6, 15, 13, 15, 0, 0, loc).UTC()) {
+		t.Fatalf("slot start = %s, want 13:15 local", result.Slots[0].StartTime)
+	}
+}
+
 func TestAvailableSlotsWithoutStaffSkipsUnknownOrBlockedStaff(t *testing.T) {
 	store := newFakeStore()
 	store.staffRefs = append(store.staffRefs, StaffRef{

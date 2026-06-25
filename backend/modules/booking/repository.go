@@ -322,23 +322,26 @@ func (r *Repository) GetSchedule(ctx context.Context, salonID string) (*Schedule
 	}
 
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT day_of_week, COALESCE(open_time::text, ''), COALESCE(close_time::text, ''), is_closed
-		FROM salon_business_hours
-		WHERE salon_id = $1
-		ORDER BY day_of_week ASC
+		SELECT bhp.day_of_week, bhp.start_local_time::text, bhp.end_local_time::text
+		FROM salon_business_hour_periods bhp
+		JOIN salons s ON s.id = bhp.salon_id
+		WHERE bhp.salon_id = $1
+		  AND bhp.source = 'imported'
+		  AND bhp.provider = s.active_pos_provider
+		ORDER BY bhp.day_of_week ASC, bhp.start_local_time ASC, bhp.provider_period_index ASC
 	`, salonID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	schedule.BusinessHours = make([]BusinessHour, 0)
+	schedule.BusinessHourPeriods = make([]BusinessHourPeriod, 0)
 	for rows.Next() {
-		var hour BusinessHour
-		if err := rows.Scan(&hour.DayOfWeek, &hour.OpenTime, &hour.CloseTime, &hour.IsClosed); err != nil {
+		var period BusinessHourPeriod
+		if err := rows.Scan(&period.DayOfWeek, &period.StartLocalTime, &period.EndLocalTime); err != nil {
 			return nil, err
 		}
-		schedule.BusinessHours = append(schedule.BusinessHours, hour)
+		schedule.BusinessHourPeriods = append(schedule.BusinessHourPeriods, period)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

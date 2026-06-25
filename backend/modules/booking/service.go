@@ -307,7 +307,8 @@ func (s *Service) AvailableSlots(ctx context.Context, salonID string, ownerUserI
 		return nil, err
 	}
 	result := availabilityResult(req, resolvedSegments, schedule, nil)
-	if schedule == nil || len(schedule.BusinessHours) == 0 {
+	businessHourPeriods := scheduleBusinessHourPeriods(schedule)
+	if len(businessHourPeriods) == 0 {
 		return result, nil
 	}
 	loc, err := time.LoadLocation(strings.TrimSpace(schedule.Timezone))
@@ -354,7 +355,7 @@ func (s *Service) AvailableSlots(ctx context.Context, salonID string, ownerUserI
 		if !ok {
 			continue
 		}
-		if !withinBusinessHours(startTime, endTime, schedule.BusinessHours, loc) {
+		if !withinBusinessHourPeriods(startTime, endTime, businessHourPeriods, loc) {
 			continue
 		}
 		filtered = append(filtered, AvailabilitySlot{
@@ -1150,7 +1151,28 @@ func availabilityResult(req AvailabilityRequest, segments []resolvedAvailability
 	return result
 }
 
-func withinBusinessHours(startTime time.Time, endTime time.Time, hours []BusinessHour, loc *time.Location) bool {
+func scheduleBusinessHourPeriods(schedule *Schedule) []BusinessHourPeriod {
+	if schedule == nil {
+		return nil
+	}
+	if len(schedule.BusinessHourPeriods) > 0 {
+		return schedule.BusinessHourPeriods
+	}
+	periods := make([]BusinessHourPeriod, 0, len(schedule.BusinessHours))
+	for _, hour := range schedule.BusinessHours {
+		if hour.IsClosed {
+			continue
+		}
+		periods = append(periods, BusinessHourPeriod{
+			DayOfWeek:      hour.DayOfWeek,
+			StartLocalTime: hour.OpenTime,
+			EndLocalTime:   hour.CloseTime,
+		})
+	}
+	return periods
+}
+
+func withinBusinessHourPeriods(startTime time.Time, endTime time.Time, periods []BusinessHourPeriod, loc *time.Location) bool {
 	if loc == nil {
 		loc = time.UTC
 	}
@@ -1159,23 +1181,29 @@ func withinBusinessHours(startTime time.Time, endTime time.Time, hours []Busines
 	if startLocal.Year() != endLocal.Year() || startLocal.YearDay() != endLocal.YearDay() {
 		return false
 	}
-	for _, hour := range hours {
-		if hour.DayOfWeek != int(startLocal.Weekday()) || hour.IsClosed {
+	for _, period := range periods {
+		if period.DayOfWeek != int(startLocal.Weekday()) {
 			continue
 		}
-		openAt, ok := localClockDuration(hour.OpenTime)
+		openAt, ok := localClockDuration(period.StartLocalTime)
 		if !ok {
 			continue
 		}
-		closeAt, ok := localClockDuration(hour.CloseTime)
+		closeAt, ok := localClockDuration(period.EndLocalTime)
 		if !ok || closeAt <= openAt {
 			continue
 		}
 		startAt := time.Duration(startLocal.Hour())*time.Hour + time.Duration(startLocal.Minute())*time.Minute + time.Duration(startLocal.Second())*time.Second
 		endAt := time.Duration(endLocal.Hour())*time.Hour + time.Duration(endLocal.Minute())*time.Minute + time.Duration(endLocal.Second())*time.Second
-		return startAt >= openAt && endAt <= closeAt
+		if startAt >= openAt && endAt <= closeAt {
+			return true
+		}
 	}
 	return false
+}
+
+func withinBusinessHours(startTime time.Time, endTime time.Time, hours []BusinessHour, loc *time.Location) bool {
+	return withinBusinessHourPeriods(startTime, endTime, scheduleBusinessHourPeriods(&Schedule{BusinessHours: hours}), loc)
 }
 
 func localClockDuration(value string) (time.Duration, bool) {

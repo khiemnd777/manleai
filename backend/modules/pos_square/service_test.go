@@ -82,8 +82,11 @@ func TestBuildReadinessAllowsEnableOnlyAfterCancelledTestBooking(t *testing.T) {
 	staff := []pos.StaffMember{
 		{POSStaffID: "staff_1", AIBookable: true, Active: true, SyncStatus: pos.SyncStatusSynced, POSLinked: true},
 	}
+	periods := []pos.BusinessHourPeriod{
+		{DayOfWeek: 1, StartLocalTime: "09:00:00", EndLocalTime: "17:00:00", Source: pos.BusinessHourSourceImported, Provider: pos.ProviderSquare},
+	}
 
-	confirmed := buildReadiness(false, connection, services, staff, &booking.TestBookingRecord{
+	confirmed := buildReadiness(false, connection, services, staff, periods, &booking.TestBookingRecord{
 		AppointmentID:     "appointment_1",
 		Status:            booking.StatusConfirmed,
 		AppointmentStatus: booking.StatusConfirmed,
@@ -99,7 +102,7 @@ func TestBuildReadinessAllowsEnableOnlyAfterCancelledTestBooking(t *testing.T) {
 		t.Fatalf("enable should remain blocked before cancellation")
 	}
 
-	cancelled := buildReadiness(false, connection, services, staff, &booking.TestBookingRecord{
+	cancelled := buildReadiness(false, connection, services, staff, periods, &booking.TestBookingRecord{
 		AppointmentID:     "appointment_1",
 		Status:            booking.StatusCancelled,
 		AppointmentStatus: booking.StatusCancelled,
@@ -120,7 +123,7 @@ func TestBuildReadinessBlocksTestBookingWithoutBookableRecords(t *testing.T) {
 		Status:     pos.StatusActive,
 		LocationID: "loc_1",
 		LastSyncAt: &now,
-	}, []pos.Service{}, []pos.StaffMember{}, nil)
+	}, []pos.Service{}, []pos.StaffMember{}, nil, nil)
 	if readiness.CanTestBooking {
 		t.Fatalf("test booking should be blocked without bookable services and staff")
 	}

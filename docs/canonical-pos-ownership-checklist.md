@@ -167,7 +167,7 @@ Tasks:
 
 Definition of done:
 
-- [ ] Existing Square-synced services and staff still load as before.
+- [ ] Existing Square-synced services, staff, business hour periods, and customers still load as before.
 - [ ] Existing `pos_service_id` and `pos_staff_id` values are represented in
       `pos_entity_links`.
 - [ ] Backend tests pass.

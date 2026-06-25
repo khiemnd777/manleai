@@ -14,7 +14,7 @@ internal/database    PostgreSQL connection bootstrap and startup migrations
 internal/encryption  AES-GCM token encryption
 internal/middleware  JWT middleware
 modules/auth         login, refresh, roles
-modules/salon        salon profile, settings, business hours
+modules/salon        salon profile, settings, synced business hour periods
 modules/pos          provider-neutral POS contracts and persistence
 modules/pos_square   Square adapter and Square integration routes
 modules/booking      booking attempts, appointments, and fallback pending safety
@@ -48,6 +48,12 @@ staff, customers, AI controls, owner workflow state, fallback pending requests,
 logs, and training data. POS providers are external projections and booking
 execution layers. The active POS provider owns real availability and provider
 booking execution.
+
+For the Square pilot, operating hours are owned in Square Appointments. ManleAI
+imports the selected Square location's business hour periods into
+`salon_business_hour_periods` and uses them as a local safety filter before
+offering availability slots. The local dashboard displays those periods and can
+trigger sync, but it does not edit the source hours.
 
 Provider IDs are mappings, not primary product identity. Square Appointments is
 the first real POS integration; future POS names are architecture targets until

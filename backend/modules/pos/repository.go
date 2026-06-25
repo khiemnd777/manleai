@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+	"github.com/manleai/ai-receptionist/internal/validation"
 )
 
 var ErrNotFound = errors.New("pos record not found")
@@ -493,6 +494,229 @@ func (r *Repository) UpsertStaff(ctx context.Context, salonID string, staff []St
 		}
 	}
 	return tx.Commit()
+}
+
+func (r *Repository) UpsertBusinessHourPeriods(ctx context.Context, salonID string, provider string, locationID string, periods []BusinessHourPeriod) (int, error) {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		provider = ProviderSquare
+	}
+	locationID = strings.TrimSpace(locationID)
+	if locationID == "" {
+		return 0, ErrValidation
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM salon_business_hour_periods
+		WHERE salon_id = $1
+		  AND source = 'imported'
+		  AND provider = $2
+		  AND provider_location_id = $3
+	`, salonID, provider, locationID); err != nil {
+		return 0, err
+	}
+
+	count := 0
+	for _, period := range periods {
+		startTime, startOK := normalizeLocalClock(period.StartLocalTime)
+		endTime, endOK := normalizeLocalClock(period.EndLocalTime)
+		if !startOK || !endOK || period.DayOfWeek < 0 || period.DayOfWeek > 6 {
+			continue
+		}
+		startDuration, _ := localClockDuration(startTime)
+		endDuration, _ := localClockDuration(endTime)
+		if endDuration <= startDuration {
+			continue
+		}
+		periodIndex := period.ProviderPeriodIndex
+		if periodIndex < 0 {
+			periodIndex = count
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO salon_business_hour_periods (
+				salon_id, day_of_week, start_local_time, end_local_time, source,
+				provider, provider_location_id, provider_period_index, last_synced_at
+			)
+			VALUES ($1, $2, $3::time, $4::time, 'imported', $5, $6, $7, now())
+			ON CONFLICT (salon_id, provider, provider_location_id, day_of_week, provider_period_index)
+			DO UPDATE SET start_local_time = EXCLUDED.start_local_time,
+			              end_local_time = EXCLUDED.end_local_time,
+			              source = 'imported',
+			              last_synced_at = now(),
+			              updated_at = now()
+		`, salonID, period.DayOfWeek, startTime, endTime, provider, locationID, periodIndex); err != nil {
+			return 0, err
+		}
+		count++
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (r *Repository) ListBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id::text, salon_id::text, day_of_week, start_local_time::text, end_local_time::text,
+		       source, provider, provider_location_id, provider_period_index, last_synced_at, created_at, updated_at
+		FROM salon_business_hour_periods
+		WHERE salon_id = $1
+		ORDER BY day_of_week ASC, start_local_time ASC, provider_period_index ASC
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]BusinessHourPeriod, 0)
+	for rows.Next() {
+		var item BusinessHourPeriod
+		var lastSyncedAt sql.NullTime
+		if err := rows.Scan(
+			&item.ID,
+			&item.SalonID,
+			&item.DayOfWeek,
+			&item.StartLocalTime,
+			&item.EndLocalTime,
+			&item.Source,
+			&item.Provider,
+			&item.ProviderLocationID,
+			&item.ProviderPeriodIndex,
+			&lastSyncedAt,
+			&item.CreatedAt,
+			&item.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if lastSyncedAt.Valid {
+			item.LastSyncedAt = &lastSyncedAt.Time
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *Repository) UpsertCustomers(ctx context.Context, salonID string, provider string, customers []Customer) (int, int, error) {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		provider = ProviderSquare
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+
+	synced := 0
+	skipped := 0
+	for _, customer := range customers {
+		providerCustomerID := strings.TrimSpace(customer.POSCustomerID)
+		if providerCustomerID == "" {
+			skipped++
+			continue
+		}
+		name := importedCustomerName(customer)
+		phone := validation.NormalizePhone(customer.Phone)
+		email := strings.ToLower(strings.TrimSpace(customer.Email))
+
+		customerID, err := findCustomerIDForImport(ctx, tx, salonID, provider, providerCustomerID, phone, email)
+		if err != nil {
+			return 0, 0, err
+		}
+		if customerID == "" {
+			if err := tx.QueryRowContext(ctx, `
+				INSERT INTO customers (
+					salon_id, name, phone, normalized_phone, email, normalized_email, active,
+					sync_status, last_synced_at, sync_error, source
+				)
+				VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''), true, 'synced', now(), NULL, 'imported')
+				RETURNING id::text
+			`, salonID, name, phone, phone, email, email).Scan(&customerID); err != nil {
+				return 0, 0, err
+			}
+		} else {
+			safePhone := phone
+			if safePhone != "" {
+				conflicts, err := customerNormalizedValueConflicts(ctx, tx, salonID, customerID, "normalized_phone", safePhone)
+				if err != nil {
+					return 0, 0, err
+				}
+				if conflicts {
+					safePhone = ""
+				}
+			}
+			safeEmail := email
+			if safeEmail != "" {
+				conflicts, err := customerNormalizedValueConflicts(ctx, tx, salonID, customerID, "normalized_email", safeEmail)
+				if err != nil {
+					return 0, 0, err
+				}
+				if conflicts {
+					safeEmail = ""
+				}
+			}
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE customers
+				SET name = CASE
+				        WHEN source = 'imported' OR btrim(name) = '' THEN $3
+				        ELSE name
+				    END,
+				    phone = CASE
+				        WHEN NULLIF($4, '') IS NOT NULL AND (source = 'imported' OR COALESCE(phone, '') = '') THEN $4
+				        ELSE phone
+				    END,
+				    normalized_phone = CASE
+				        WHEN NULLIF($5, '') IS NOT NULL AND (source = 'imported' OR COALESCE(normalized_phone, '') = '') THEN $5
+				        ELSE normalized_phone
+				    END,
+				    email = CASE
+				        WHEN NULLIF($6, '') IS NOT NULL AND (source = 'imported' OR COALESCE(email, '') = '') THEN $6
+				        ELSE email
+				    END,
+				    normalized_email = CASE
+				        WHEN NULLIF($7, '') IS NOT NULL AND (source = 'imported' OR COALESCE(normalized_email, '') = '') THEN $7
+				        ELSE normalized_email
+				    END,
+				    active = true,
+				    sync_status = 'synced',
+				    last_synced_at = now(),
+				    sync_error = NULL,
+				    updated_at = now()
+				WHERE salon_id = $1
+				  AND id = $2
+				  AND archived_at IS NULL
+			`, salonID, customerID, name, safePhone, safePhone, safeEmail, safeEmail); err != nil {
+				return 0, 0, err
+			}
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO pos_entity_links (
+				salon_id, entity_type, entity_id, provider, provider_entity_id, sync_status, last_synced_at, last_error
+			)
+			VALUES ($1, 'customer', $2, $3, $4, 'synced', now(), NULL)
+			ON CONFLICT (salon_id, entity_type, entity_id, provider)
+			DO UPDATE SET provider_entity_id = EXCLUDED.provider_entity_id,
+			              sync_status = 'synced',
+			              last_synced_at = now(),
+			              last_error = NULL,
+			              updated_at = now()
+		`, salonID, customerID, provider, providerCustomerID); err != nil {
+			return 0, 0, err
+		}
+		synced++
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return synced, skipped, nil
 }
 
 func (r *Repository) ListServices(ctx context.Context, salonID string, provider string) ([]Service, error) {
@@ -1731,6 +1955,143 @@ func scanProviderSwitchCandidateRows(rows *sql.Rows) ([]ProviderSwitchEntityCand
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func findCustomerIDForImport(ctx context.Context, tx *sql.Tx, salonID string, provider string, providerCustomerID string, phone string, email string) (string, error) {
+	var customerID string
+	err := tx.QueryRowContext(ctx, `
+		SELECT c.id::text
+		FROM pos_entity_links link
+		JOIN customers c ON c.salon_id = link.salon_id AND c.id = link.entity_id
+		WHERE link.salon_id = $1
+		  AND link.entity_type = 'customer'
+		  AND link.provider = $2
+		  AND link.provider_entity_id = $3
+		LIMIT 1
+	`, salonID, provider, providerCustomerID).Scan(&customerID)
+	if err == nil {
+		return customerID, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+
+	if strings.TrimSpace(phone) != "" {
+		err = tx.QueryRowContext(ctx, `
+			SELECT id::text
+			FROM customers
+			WHERE salon_id = $1
+			  AND archived_at IS NULL
+			  AND normalized_phone = $2
+			ORDER BY updated_at DESC
+			LIMIT 1
+		`, salonID, phone).Scan(&customerID)
+		if err == nil {
+			return customerID, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+	}
+
+	if strings.TrimSpace(email) != "" {
+		err = tx.QueryRowContext(ctx, `
+			SELECT id::text
+			FROM customers
+			WHERE salon_id = $1
+			  AND archived_at IS NULL
+			  AND normalized_email = $2
+			ORDER BY updated_at DESC
+			LIMIT 1
+		`, salonID, email).Scan(&customerID)
+		if err == nil {
+			return customerID, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+	}
+
+	return "", nil
+}
+
+func customerNormalizedValueConflicts(ctx context.Context, tx *sql.Tx, salonID string, customerID string, fieldName string, value string) (bool, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false, nil
+	}
+
+	query := ""
+	switch fieldName {
+	case "normalized_phone":
+		query = `
+			SELECT EXISTS (
+				SELECT 1
+				FROM customers
+				WHERE salon_id = $1
+				  AND archived_at IS NULL
+				  AND id <> $2::uuid
+				  AND normalized_phone = $3
+			)
+		`
+	case "normalized_email":
+		query = `
+			SELECT EXISTS (
+				SELECT 1
+				FROM customers
+				WHERE salon_id = $1
+				  AND archived_at IS NULL
+				  AND id <> $2::uuid
+				  AND normalized_email = $3
+			)
+		`
+	default:
+		return false, ErrValidation
+	}
+
+	var conflicts bool
+	err := tx.QueryRowContext(ctx, query, salonID, customerID, value).Scan(&conflicts)
+	return conflicts, err
+}
+
+func importedCustomerName(customer Customer) string {
+	name := strings.TrimSpace(customer.Name)
+	if name != "" {
+		return name
+	}
+	if phone := validation.NormalizePhone(customer.Phone); phone != "" {
+		return phone
+	}
+	if email := strings.ToLower(strings.TrimSpace(customer.Email)); email != "" {
+		return email
+	}
+	return "Square customer"
+}
+
+func normalizeLocalClock(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+	for _, layout := range []string{"15:04:05", "15:04"} {
+		parsed, err := time.Parse(layout, value)
+		if err == nil {
+			return parsed.Format("15:04:05"), true
+		}
+	}
+	return "", false
+}
+
+func localClockDuration(value string) (time.Duration, bool) {
+	normalized, ok := normalizeLocalClock(value)
+	if !ok {
+		return 0, false
+	}
+	parsed, err := time.Parse("15:04:05", normalized)
+	if err != nil {
+		return 0, false
+	}
+	return time.Duration(parsed.Hour())*time.Hour + time.Duration(parsed.Minute())*time.Minute + time.Duration(parsed.Second())*time.Second, true
 }
 
 func NowPtr() *time.Time {

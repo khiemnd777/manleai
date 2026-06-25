@@ -175,6 +175,49 @@ func (r *Repository) GetBusinessHours(ctx context.Context, salonID string, owner
 	return hours, rows.Err()
 }
 
+func (r *Repository) GetBusinessHourPeriods(ctx context.Context, salonID string, ownerUserID string) ([]BusinessHourPeriod, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT bhp.id::text, bhp.salon_id::text, bhp.day_of_week, bhp.start_local_time::text,
+		       bhp.end_local_time::text, bhp.source, bhp.provider, bhp.provider_location_id,
+		       bhp.provider_period_index, bhp.last_synced_at, bhp.created_at, bhp.updated_at
+		FROM salon_business_hour_periods bhp
+		JOIN salons s ON s.id = bhp.salon_id
+		WHERE bhp.salon_id = $1 AND s.owner_user_id = $2
+		ORDER BY bhp.day_of_week ASC, bhp.start_local_time ASC, bhp.provider_period_index ASC
+	`, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	periods := make([]BusinessHourPeriod, 0)
+	for rows.Next() {
+		var period BusinessHourPeriod
+		var lastSyncedAt sql.NullTime
+		if err := rows.Scan(
+			&period.ID,
+			&period.SalonID,
+			&period.DayOfWeek,
+			&period.StartLocalTime,
+			&period.EndLocalTime,
+			&period.Source,
+			&period.Provider,
+			&period.ProviderLocationID,
+			&period.ProviderPeriodIndex,
+			&lastSyncedAt,
+			&period.CreatedAt,
+			&period.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if lastSyncedAt.Valid {
+			period.LastSyncedAt = &lastSyncedAt.Time
+		}
+		periods = append(periods, period)
+	}
+	return periods, rows.Err()
+}
+
 func (r *Repository) UpdateBusinessHours(ctx context.Context, salonID string, ownerUserID string, req UpdateBusinessHoursRequest) ([]BusinessHour, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {

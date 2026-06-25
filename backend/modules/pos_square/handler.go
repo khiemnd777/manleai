@@ -118,7 +118,8 @@ func (h *Handler) Sync(c *fiber.Ctx) error {
 	if req.SalonID == "" {
 		req.SalonID = middleware.SalonID(c)
 	}
-	if err := h.service.Sync(c.UserContext(), req.SalonID, middleware.UserID(c)); err != nil {
+	summary, err := h.service.Sync(c.UserContext(), req.SalonID, middleware.UserID(c))
+	if err != nil {
 		if errors.Is(err, pos.ErrNotFound) {
 			return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
 		}
@@ -127,7 +128,7 @@ func (h *Handler) Sync(c *fiber.Ctx) error {
 		}
 		return respond.Error(c, fiber.StatusBadGateway, "SQUARE_SYNC_FAILED", err.Error())
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"ok": true})
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"ok": true, "summary": summary})
 }
 
 func (h *Handler) TestBooking(c *fiber.Ctx) error {

@@ -86,7 +86,7 @@ Returns salons owned by the authenticated user.
 ```json
 {
   "name": "Lotus Nails Studio",
-  "phone": "+13125550101",
+  "phone": "+16292536211",
   "address": "1200 W Sample Ave",
   "city": "Chicago",
   "state": "IL",
@@ -104,7 +104,41 @@ Returns salons owned by the authenticated user.
 
 `GET /api/salons/:id/business-hours`
 
+Returns Square-style business hour periods currently imported for the salon.
+Owner-facing editing happens in Square Appointments; the local dashboard reads
+these periods and can trigger Square sync.
+
+```json
+{
+  "periods": [
+    {
+      "day_of_week": 1,
+      "start_local_time": "09:30:00",
+      "end_local_time": "13:00:00",
+      "source": "imported",
+      "provider": "square",
+      "provider_location_id": "L123",
+      "provider_period_index": 0,
+      "last_synced_at": "2026-06-25T14:30:00Z"
+    },
+    {
+      "day_of_week": 1,
+      "start_local_time": "14:00:00",
+      "end_local_time": "19:00:00",
+      "source": "imported",
+      "provider": "square",
+      "provider_location_id": "L123",
+      "provider_period_index": 1,
+      "last_synced_at": "2026-06-25T14:30:00Z"
+    }
+  ]
+}
+```
+
 `PUT /api/salons/:id/business-hours`
+
+Returns `409 BUSINESS_HOURS_POS_MANAGED`. Business hours are managed in Square
+and imported through `POST /api/integrations/square/sync`.
 
 ## Integration Configuration
 
@@ -416,8 +450,9 @@ fields remain supported for single-service booking. These IDs are ManleAI
 canonical IDs that must resolve through a valid active-provider link before the
 POS adapter is called.
 `staff_selection_mode` is either `specific` or `anyone`; `anyone` means the
-customer did not request a named technician. Results are filtered to the salon's
-configured business hours in the salon timezone. This endpoint does not create a
+customer did not request a named technician. Results are filtered to synced
+business hour periods in the salon timezone. A slot must fit inside one imported
+period; split-day periods are not collapsed. This endpoint does not create a
 booking attempt or confirm an appointment.
 
 ```json
@@ -761,7 +796,7 @@ Returns owner-scoped live voice, phone booking, and external AI provider readine
   "inbound_webhook_url": "https://api.example.com/api/voice/twilio/incoming",
   "turn_webhook_url": "https://api.example.com/api/voice/twilio/turn",
   "recording_webhook_url": "https://api.example.com/api/voice/twilio/recording",
-  "salon_phone": "+13125550101",
+  "salon_phone": "+16292536211",
   "ready": true,
   "phone_booking_ready": true,
   "input_mode": "recording",
@@ -1065,7 +1100,8 @@ Exchanges the Square OAuth code and stores encrypted tokens.
 
 `GET /api/integrations/square/status?salon_id=<id>`
 
-Returns the Square connection, recent sync logs, and AI booking readiness checks.
+Returns the Square connection, recent sync logs, and AI booking readiness checks,
+including `business_hour_period_count` for the selected Square location import.
 
 `GET /api/integrations/square/locations?salon_id=<id>`
 
@@ -1082,9 +1118,26 @@ Lists Square locations through the Square adapter.
 
 `POST /api/integrations/square/sync`
 
+Imports Square services, staff, selected-location business hour periods, and
+customers into local canonical tables. The button label is `Sync` in the owner
+dashboard because the action is no longer limited to services and staff.
+
 ```json
 {
   "salon_id": "..."
+}
+```
+
+```json
+{
+  "ok": true,
+  "summary": {
+    "services_synced": 12,
+    "staff_synced": 4,
+    "business_hour_periods_synced": 8,
+    "customers_synced": 250,
+    "customers_skipped": 0
+  }
 }
 ```
 

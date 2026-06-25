@@ -12,6 +12,8 @@
 - Location selection
 - Services sync
 - Staff sync
+- Business hour period sync from the selected Square location
+- Customer sync from Square Customers search pagination
 - Customer search/create
 - Availability checks
 - Create appointment
@@ -47,6 +49,14 @@ provider capability flags until the exact catalog/team/customer payloads are
 verified against a real sandbox account. Local ManleAI service/staff/customer
 CRUD can exist, but the Square adapter must not pretend those records were
 projected to Square outside supported booking-time customer operations.
+
+The owner-facing `Sync` action imports Square services, staff, business hour
+periods, and customers. Business hours are edited in Square Appointments and
+stored locally as `salon_business_hour_periods` using Square-style
+`day_of_week`, `start_local_time`, and `end_local_time` periods. The local
+Settings page is read-only for business hours and does not collapse split-day
+periods. Availability filtering only offers slots that fit inside one synced
+period.
 
 The provider-neutral booking service records backend `pos_pending` attempts
 before calling Square, passes backend-owned idempotency keys into the adapter,

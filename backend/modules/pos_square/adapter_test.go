@@ -46,6 +46,28 @@ func TestSquareScopesIncludeDemoSetupWritePermissions(t *testing.T) {
 	}
 }
 
+func TestMapSquareBusinessHourPeriodsPreservesSplitDayPeriods(t *testing.T) {
+	periods := mapSquareBusinessHourPeriods([]squareBusinessHourPeriod{
+		{DayOfWeek: "MON", StartLocalTime: "09:30", EndLocalTime: "12:00"},
+		{DayOfWeek: "MON", StartLocalTime: "13:00", EndLocalTime: "19:00"},
+		{DayOfWeek: "SUNDAY", StartLocalTime: "10:00", EndLocalTime: "15:00"},
+		{DayOfWeek: "BAD", StartLocalTime: "09:00", EndLocalTime: "10:00"},
+	})
+
+	if len(periods) != 3 {
+		t.Fatalf("periods = %#v, want three mapped periods", periods)
+	}
+	if periods[0].DayOfWeek != 1 || periods[0].ProviderPeriodIndex != 0 {
+		t.Fatalf("first monday period = %#v, want day 1 index 0", periods[0])
+	}
+	if periods[1].DayOfWeek != 1 || periods[1].ProviderPeriodIndex != 1 {
+		t.Fatalf("second monday period = %#v, want day 1 index 1", periods[1])
+	}
+	if periods[2].DayOfWeek != 0 || periods[2].ProviderPeriodIndex != 0 {
+		t.Fatalf("sunday period = %#v, want day 0 index 0", periods[2])
+	}
+}
+
 func TestOAuthURLDoesNotSendSessionFalseInSandbox(t *testing.T) {
 	adapter := &SquareAdapter{
 		cfg: config.SquareConfig{

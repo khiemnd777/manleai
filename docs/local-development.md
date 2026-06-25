@@ -62,12 +62,12 @@ Use the local Twilio simulator to exercise the real phone webhook path without h
 cd backend
 go run ./cmd/twilio-sim \
   -auth-token "$VOICE_TWILIO_AUTH_TOKEN" \
-  -to "+13125550101" \
+  -to "+16292536211" \
   -turn "I need a classic manicure tomorrow." \
   -turn "The first one works. My name is Linh Tran and my phone is 312-555-0199."
 ```
 
-The simulator posts to `/api/voice/twilio/incoming`, then posts each customer utterance to `/api/voice/twilio/turn` with a valid `X-Twilio-Signature`. This exercises the same flow as a live call: AI greeting, availability lookup inside valid booking hours, slot negotiation, and POS-first confirmation. A booking is confirmed only if Square Appointments returns a successful booking ID; otherwise the call path must fall back to a pending owner request. For the seeded salon, `+13125550101` is the inbound salon phone; `+13125550102` is only the owner handoff phone.
+The simulator posts to `/api/voice/twilio/incoming`, then posts each customer utterance to `/api/voice/twilio/turn` with a valid `X-Twilio-Signature`. This exercises the same flow as a live call: AI greeting, availability lookup inside valid booking hours, slot negotiation, and POS-first confirmation. A booking is confirmed only if Square Appointments returns a successful booking ID; otherwise the call path must fall back to a pending owner request. For the seeded salon, `+16292536211` is the inbound salon phone; `+13125550102` is only the owner handoff phone.
 
 ## Notes
 

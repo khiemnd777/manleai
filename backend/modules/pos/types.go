@@ -46,6 +46,10 @@ const (
 	EntitySourceLocal    = "local"
 	EntitySourceImported = "imported"
 
+	BusinessHourSourceImported      = "imported"
+	BusinessHourSourceLocalMigrated = "local_migrated"
+	BusinessHourSourceLocalOverride = "local_override"
+
 	SyncOperationUpsertService  = "upsert_service"
 	SyncOperationArchiveService = "archive_service"
 	SyncOperationUpsertStaff    = "upsert_staff"
@@ -307,6 +311,29 @@ type Location struct {
 	Timezone string `json:"timezone,omitempty"`
 	Address  string `json:"address,omitempty"`
 	Status   string `json:"status,omitempty"`
+}
+
+type BusinessHourPeriod struct {
+	ID                  string     `json:"id,omitempty"`
+	SalonID             string     `json:"salon_id,omitempty"`
+	DayOfWeek           int        `json:"day_of_week"`
+	StartLocalTime      string     `json:"start_local_time"`
+	EndLocalTime        string     `json:"end_local_time"`
+	Source              string     `json:"source"`
+	Provider            string     `json:"provider,omitempty"`
+	ProviderLocationID  string     `json:"provider_location_id,omitempty"`
+	ProviderPeriodIndex int        `json:"provider_period_index"`
+	LastSyncedAt        *time.Time `json:"last_synced_at,omitempty"`
+	CreatedAt           time.Time  `json:"created_at,omitempty"`
+	UpdatedAt           time.Time  `json:"updated_at,omitempty"`
+}
+
+type SyncSummary struct {
+	ServicesSynced            int `json:"services_synced"`
+	StaffSynced               int `json:"staff_synced"`
+	BusinessHourPeriodsSynced int `json:"business_hour_periods_synced"`
+	CustomersSynced           int `json:"customers_synced"`
+	CustomersSkipped          int `json:"customers_skipped"`
 }
 
 type Service struct {
