@@ -1,0 +1,24 @@
+{
+	email {$CADDY_EMAIL}
+}
+
+{$ADMIN_DOMAIN} {
+	encode zstd gzip
+
+	handle /api/* {
+		reverse_proxy api:8080
+	}
+
+	handle /healthz {
+		reverse_proxy api:8080
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}
+
+{$LANDING_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy landing:3000
+}

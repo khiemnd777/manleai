@@ -15,6 +15,9 @@ landing/tsconfig.tsbuildinfo
 .env
 .env.*
 !.env.example
+project.env
+deploy/project.env
+sync_github_secret.env
 backend/.env
 frontend/.env.local
 landing/.env.local

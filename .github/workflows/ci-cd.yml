@@ -1,0 +1,235 @@
+name: CI/CD
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag label, for example v2026.06.25.1
+        required: false
+        type: string
+
+concurrency:
+  group: manleai-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEPLOY_PATH: /opt/manleai
+  RELEASE_ID: ${{ github.event.inputs.tag || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+  RELEASE_NAME: manleai-release-${{ github.event.inputs.tag || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}.tgz
+
+jobs:
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Test
+        run: go test ./...
+
+  web:
+    name: Web / ${{ matrix.app }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - frontend
+          - landing
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.app }}
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: ${{ matrix.app }}
+        run: npm run typecheck
+
+      - name: Build
+        working-directory: ${{ matrix.app }}
+        run: npm run build
+        env:
+          LANDING_API_BASE_URL: http://localhost:18089
+          NEXT_PUBLIC_API_BASE_URL: http://localhost:18089
+          NEXT_PUBLIC_LANDING_BASE_URL: http://localhost:3090
+
+  deploy:
+    name: Deploy VPS
+    runs-on: ubuntu-latest
+    needs:
+      - backend
+      - web
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate deployment secrets
+        env:
+          PROJECT_ENV_B64: ${{ secrets.PROJECT_ENV_B64 }}
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for key in PROJECT_ENV_B64 REMOTE_USER SERVER_IP SSH_PASSWORD; do
+            if [ -z "${!key:-}" ]; then
+              echo "::error::Missing GitHub secret: ${key}"
+              exit 1
+            fi
+          done
+          printf '%s' "$PROJECT_ENV_B64" | base64 -d >/dev/null
+
+      - name: Install SSH tooling
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y sshpass
+
+      - name: Create release archive
+        run: |
+          set -euo pipefail
+          tar \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='.env' \
+            --exclude='.env.*' \
+            --exclude='project.env' \
+            --exclude='deploy/project.env' \
+            --exclude='backend/.gocache' \
+            --exclude='backend/tmp' \
+            --exclude='frontend/.next' \
+            --exclude='frontend/node_modules' \
+            --exclude='frontend/tsconfig.tsbuildinfo' \
+            --exclude='landing/.next' \
+            --exclude='landing/node_modules' \
+            --exclude='landing/tsconfig.tsbuildinfo' \
+            -czf "$RUNNER_TEMP/$RELEASE_NAME" .
+          echo "RELEASE_ARCHIVE=$RUNNER_TEMP/$RELEASE_NAME" >> "$GITHUB_ENV"
+
+      - name: Preflight VPS
+        env:
+          DEPLOY_PATH: ${{ env.DEPLOY_PATH }}
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          set -euo pipefail
+          export SSHPASS="$SSH_PASSWORD"
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nginx; then
+            echo "::error::nginx is active on this VPS. Stop or migrate nginx before deploying Caddy on ports 80/443."
+            ss -ltnp '( sport = :80 or sport = :443 )' || true
+            exit 1
+          fi
+
+          if command -v pgrep >/dev/null 2>&1 && pgrep -x nginx >/dev/null 2>&1; then
+            echo "::error::An nginx process is running on this VPS. Stop or migrate nginx before deploying Caddy on ports 80/443."
+            ss -ltnp '( sport = :80 or sport = :443 )' || true
+            exit 1
+          fi
+
+          if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet caddy; then
+            echo "::error::A host-level caddy service is active. Disable it or migrate it before running the Docker Caddy container."
+            ss -ltnp '( sport = :80 or sport = :443 )' || true
+            exit 1
+          fi
+
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "::error::Docker is not installed on the VPS."
+            exit 1
+          fi
+
+          docker compose version >/dev/null
+          mkdir -p "$DEPLOY_PATH/releases"
+          REMOTE
+
+      - name: Upload release and env
+        env:
+          DEPLOY_PATH: ${{ env.DEPLOY_PATH }}
+          PROJECT_ENV_B64: ${{ secrets.PROJECT_ENV_B64 }}
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          set -euo pipefail
+          export SSHPASS="$SSH_PASSWORD"
+          env_file="$RUNNER_TEMP/project.env"
+          trap 'rm -f "$env_file"' EXIT
+          printf '%s' "$PROJECT_ENV_B64" | base64 -d > "$env_file"
+          chmod 600 "$env_file"
+
+          sshpass -e scp -o StrictHostKeyChecking=accept-new "$RELEASE_ARCHIVE" "$REMOTE_USER@$SERVER_IP:/tmp/$RELEASE_NAME"
+          sshpass -e scp -o StrictHostKeyChecking=accept-new "$env_file" "$REMOTE_USER@$SERVER_IP:/tmp/manleai-project.env"
+
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          set -euo pipefail
+          mkdir -p "$DEPLOY_PATH"
+          mv /tmp/manleai-project.env "$DEPLOY_PATH/project.env.tmp"
+          chmod 600 "$DEPLOY_PATH/project.env.tmp"
+          mv "$DEPLOY_PATH/project.env.tmp" "$DEPLOY_PATH/project.env"
+          REMOTE
+
+      - name: Deploy release
+        env:
+          DEPLOY_PATH: ${{ env.DEPLOY_PATH }}
+          RELEASE_ID: ${{ env.RELEASE_ID }}
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          set -euo pipefail
+          export SSHPASS="$SSH_PASSWORD"
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' RELEASE_ID='$RELEASE_ID' RELEASE_NAME='$RELEASE_NAME' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          release_dir="$DEPLOY_PATH/releases/$RELEASE_ID"
+          archive="/tmp/$RELEASE_NAME"
+          mkdir -p "$release_dir"
+          tar -xzf "$archive" -C "$release_dir"
+          ln -sfn "$release_dir" "$DEPLOY_PATH/current"
+
+          cd "$DEPLOY_PATH/current"
+          docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai up -d --build --remove-orphans
+          docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai ps
+
+          for attempt in $(seq 1 30); do
+            if docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai exec -T api wget -qO- http://127.0.0.1:8080/healthz; then
+              rm -f "$archive"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "::error::API healthcheck failed after deploy."
+          docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai logs --tail=120 api
+          exit 1
+          REMOTE
