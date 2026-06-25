@@ -4,9 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 )
 
-var ErrNotFound = errors.New("salon not found")
+var (
+	ErrNotFound        = errors.New("salon not found")
+	ErrSlugUnavailable = errors.New("public slug unavailable")
+)
 
 type Repository struct {
 	db *sql.DB
@@ -20,7 +24,7 @@ func (r *Repository) ListForOwner(ctx context.Context, ownerUserID string) ([]Sa
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id::text, name, phone, COALESCE(address, ''), COALESCE(city, ''), COALESCE(state, ''), COALESCE(zip_code, ''),
 		       timezone, owner_user_id::text, primary_language, secondary_language, COALESCE(handoff_phone, ''),
-		       ai_enabled, active_pos_provider, created_at, updated_at
+		       ai_enabled, active_pos_provider, COALESCE(public_slug, ''), public_catalog_enabled, created_at, updated_at
 		FROM salons
 		WHERE owner_user_id = $1
 		ORDER BY created_at DESC
@@ -45,7 +49,7 @@ func (r *Repository) GetForOwner(ctx context.Context, id string, ownerUserID str
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id::text, name, phone, COALESCE(address, ''), COALESCE(city, ''), COALESCE(state, ''), COALESCE(zip_code, ''),
 		       timezone, owner_user_id::text, primary_language, secondary_language, COALESCE(handoff_phone, ''),
-		       ai_enabled, active_pos_provider, created_at, updated_at
+		       ai_enabled, active_pos_provider, COALESCE(public_slug, ''), public_catalog_enabled, created_at, updated_at
 		FROM salons
 		WHERE id = $1 AND owner_user_id = $2
 	`, id, ownerUserID)
@@ -150,6 +154,47 @@ func (r *Repository) UpdateSettings(ctx context.Context, salonID string, ownerUs
 	return r.GetSettings(ctx, salonID, ownerUserID)
 }
 
+func (r *Repository) GetPublicCatalogSettings(ctx context.Context, salonID string, ownerUserID string) (*PublicCatalogSettings, error) {
+	row := r.db.QueryRowContext(ctx, publicCatalogSettingsQuery(), salonID, ownerUserID)
+	return scanPublicCatalogSettings(row)
+}
+
+func (r *Repository) UpdatePublicCatalogSettings(ctx context.Context, salonID string, ownerUserID string, req UpdatePublicCatalogRequest) (*PublicCatalogSettings, error) {
+	slug := strings.TrimSpace(req.PublicSlug)
+	if slug != "" {
+		var taken bool
+		if err := r.db.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM salons
+				WHERE lower(public_slug) = lower($1)
+				  AND id <> $2
+			)
+		`, slug, salonID).Scan(&taken); err != nil {
+			return nil, err
+		}
+		if taken {
+			return nil, ErrSlugUnavailable
+		}
+	}
+
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE salons
+		SET public_slug = NULLIF($1, ''),
+		    public_catalog_enabled = $2,
+		    updated_at = now()
+		WHERE id = $3
+		  AND owner_user_id = $4
+	`, slug, req.PublicCatalogEnabled, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return nil, ErrNotFound
+	}
+	return r.GetPublicCatalogSettings(ctx, salonID, ownerUserID)
+}
+
 func (r *Repository) GetBusinessHours(ctx context.Context, salonID string, ownerUserID string) ([]BusinessHour, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT bh.id::text, bh.salon_id::text, bh.day_of_week, COALESCE(bh.open_time::text, ''),
@@ -182,7 +227,10 @@ func (r *Repository) GetBusinessHourPeriods(ctx context.Context, salonID string,
 		       bhp.provider_period_index, bhp.last_synced_at, bhp.created_at, bhp.updated_at
 		FROM salon_business_hour_periods bhp
 		JOIN salons s ON s.id = bhp.salon_id
-		WHERE bhp.salon_id = $1 AND s.owner_user_id = $2
+		WHERE bhp.salon_id = $1
+		  AND s.owner_user_id = $2
+		  AND bhp.source = 'imported'
+		  AND bhp.provider = s.active_pos_provider
 		ORDER BY bhp.day_of_week ASC, bhp.start_local_time ASC, bhp.provider_period_index ASC
 	`, salonID, ownerUserID)
 	if err != nil {
@@ -273,6 +321,8 @@ func scanSalon(row rowScanner) (*Salon, error) {
 		&item.HandoffPhone,
 		&item.AIEnabled,
 		&item.ActivePOSProvider,
+		&item.PublicSlug,
+		&item.PublicCatalogEnabled,
 		&item.CreatedAt,
 		&item.UpdatedAt,
 	)
@@ -309,4 +359,98 @@ func scanSettings(row rowScanner) (*Settings, error) {
 		return nil, err
 	}
 	return &settings, nil
+}
+
+func publicCatalogSettingsQuery() string {
+	return `
+		WITH owned_salon AS (
+			SELECT id, owner_user_id, active_pos_provider, public_slug, public_catalog_enabled, updated_at
+			FROM salons
+			WHERE id = $1 AND owner_user_id = $2
+		),
+		service_rows AS (
+			SELECT svc.id,
+			       EXISTS (
+			           SELECT 1
+			           FROM pos_entity_links link
+			           WHERE link.salon_id = svc.salon_id
+			             AND link.entity_type = 'service'
+			             AND link.entity_id = svc.id
+			             AND link.provider = (SELECT active_pos_provider FROM owned_salon)
+			             AND link.sync_status = 'synced'
+			             AND link.provider_entity_id IS NOT NULL
+			             AND link.provider_entity_id <> ''
+			       ) AS linked
+			FROM services svc
+			WHERE svc.salon_id = (SELECT id FROM owned_salon)
+			  AND svc.pos_provider = (SELECT active_pos_provider FROM owned_salon)
+			  AND svc.active = true
+			  AND svc.ai_bookable = true
+			  AND svc.archived_at IS NULL
+			  AND svc.sync_status = 'synced'
+			  AND svc.duration_minutes > 0
+			  AND COALESCE(svc.pos_service_version, 0) > 0
+		),
+		staff_rows AS (
+			SELECT st.id,
+			       EXISTS (
+			           SELECT 1
+			           FROM pos_entity_links link
+			           WHERE link.salon_id = st.salon_id
+			             AND link.entity_type = 'staff'
+			             AND link.entity_id = st.id
+			             AND link.provider = (SELECT active_pos_provider FROM owned_salon)
+			             AND link.sync_status = 'synced'
+			             AND link.provider_entity_id IS NOT NULL
+			             AND link.provider_entity_id <> ''
+			       ) AS linked
+			FROM staff st
+			WHERE st.salon_id = (SELECT id FROM owned_salon)
+			  AND st.pos_provider = (SELECT active_pos_provider FROM owned_salon)
+			  AND st.active = true
+			  AND st.ai_bookable = true
+			  AND st.archived_at IS NULL
+			  AND st.sync_status = 'synced'
+		)
+		SELECT id::text, COALESCE(public_slug, ''), public_catalog_enabled,
+		       (SELECT count(*)::int FROM service_rows WHERE linked = true),
+		       (SELECT count(*)::int FROM staff_rows WHERE linked = true),
+		       updated_at
+		FROM owned_salon
+	`
+}
+
+func scanPublicCatalogSettings(row rowScanner) (*PublicCatalogSettings, error) {
+	var settings PublicCatalogSettings
+	err := row.Scan(
+		&settings.SalonID,
+		&settings.PublicSlug,
+		&settings.PublicCatalogEnabled,
+		&settings.BookableServiceCount,
+		&settings.BookableStaffCount,
+		&settings.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	settings.PublicPath = publicPath(settings.PublicSlug)
+	settings.CanPublish = settings.PublicSlug != "" && settings.BookableServiceCount > 0 && settings.BookableStaffCount > 0
+	if settings.PublicSlug == "" {
+		settings.BlockedReason = "Add a public page slug before publishing."
+	} else if settings.BookableServiceCount == 0 {
+		settings.BlockedReason = "At least one active AI-bookable service must be synced and linked to the active POS provider."
+	} else if settings.BookableStaffCount == 0 {
+		settings.BlockedReason = "At least one active AI-bookable staff member must be synced and linked to the active POS provider."
+	}
+	return &settings, nil
+}
+
+func publicPath(slug string) string {
+	if strings.TrimSpace(slug) == "" {
+		return ""
+	}
+	return "/s/" + strings.TrimSpace(slug)
 }

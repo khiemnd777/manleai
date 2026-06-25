@@ -2,7 +2,8 @@
 
 Base URL: `http://localhost:18089`
 
-All endpoints except login, refresh, logout, health, the Square OAuth callback, and Twilio voice webhooks require:
+All endpoints except login, refresh, logout, health, public catalog endpoints,
+the Square OAuth callback, and Twilio voice webhooks require:
 
 ```txt
 Authorization: Bearer <access_token>
@@ -75,6 +76,68 @@ Returns access token, refresh token, user, roles, and primary salon ID.
 
 `GET /api/auth/me`
 
+## Public Catalog
+
+`GET /api/public/salon`
+
+Public unauthenticated endpoint for the landing root. Returns the first
+published salon catalog by `salons.created_at ASC, salons.id ASC`, so
+`http://localhost:3090` can redirect to its canonical `/s/:slug` page.
+
+`GET /api/public/salons/:slug`
+
+Public unauthenticated endpoint for the customer-facing `landing/` app. Returns
+only salons whose owner has enabled the public catalog. The response is
+public-safe: no POS IDs, provider tokens, owner IDs, staff phone/email, sync
+errors, or raw provider payloads are returned.
+
+Only active, synced, POS-linked, AI-bookable services and staff for the active
+POS provider are included. This endpoint does not check availability, create a
+booking attempt, or confirm appointments.
+
+```json
+{
+  "salon": {
+    "slug": "lotus-nails-studio",
+    "name": "Lotus Nails Studio",
+    "phone": "+16292536211",
+    "address": "1200 W Sample Ave",
+    "city": "Chicago",
+    "state": "IL",
+    "zip_code": "60601",
+    "timezone": "America/Chicago",
+    "primary_language": "en",
+    "secondary_language": "vi",
+    "active_pos_provider": "square"
+  },
+  "services": [
+    {
+      "name": "Classic Manicure",
+      "description": "Trim, shape, cuticle care, and polish.",
+      "ai_description": "Classic manicure",
+      "duration_minutes": 45,
+      "price_from": 35,
+      "price_display": "$35.00"
+    }
+  ],
+  "staff": [
+    {
+      "name": "Mai Nguyen"
+    }
+  ],
+  "hours": [
+    {
+      "day_of_week": 1,
+      "start_local_time": "09:30:00",
+      "end_local_time": "19:00:00",
+      "source": "imported",
+      "provider": "square"
+    }
+  ],
+  "booking_note": "Appointments are confirmed only after Square Appointments completes the booking."
+}
+```
+
 ## Salons
 
 `GET /api/salons`
@@ -101,6 +164,36 @@ Returns salons owned by the authenticated user.
 `GET /api/salons/:id/settings`
 
 `PUT /api/salons/:id/settings`
+
+`GET /api/salons/:id/public-catalog`
+
+Returns owner-scoped public page settings and publish readiness.
+
+```json
+{
+  "salon_id": "...",
+  "public_slug": "lotus-nails-studio",
+  "public_catalog_enabled": true,
+  "public_path": "/s/lotus-nails-studio",
+  "bookable_service_count": 3,
+  "bookable_staff_count": 2,
+  "can_publish": true,
+  "updated_at": "2026-06-25T14:30:00Z"
+}
+```
+
+`PUT /api/salons/:id/public-catalog`
+
+```json
+{
+  "public_slug": "lotus-nails-studio",
+  "public_catalog_enabled": true
+}
+```
+
+Enabling publish requires a valid unique slug plus at least one active,
+synced, POS-linked, AI-bookable service and staff member for the active POS
+provider. Disabling remains allowed so owners can take a page offline.
 
 `GET /api/salons/:id/business-hours`
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"unicode"
 )
 
 var ErrValidation = errors.New("validation failed")
@@ -58,6 +59,27 @@ func (s *Service) UpdateSettings(ctx context.Context, salonID string, ownerUserI
 	return s.repo.UpdateSettings(ctx, salonID, ownerUserID, req)
 }
 
+func (s *Service) GetPublicCatalogSettings(ctx context.Context, salonID string, ownerUserID string) (*PublicCatalogSettings, error) {
+	return s.repo.GetPublicCatalogSettings(ctx, salonID, ownerUserID)
+}
+
+func (s *Service) UpdatePublicCatalogSettings(ctx context.Context, salonID string, ownerUserID string, req UpdatePublicCatalogRequest) (*PublicCatalogSettings, error) {
+	req.PublicSlug = normalizePublicSlug(req.PublicSlug)
+	if req.PublicCatalogEnabled {
+		if req.PublicSlug == "" {
+			return nil, ErrValidation
+		}
+		current, err := s.repo.GetPublicCatalogSettings(ctx, salonID, ownerUserID)
+		if err != nil {
+			return nil, err
+		}
+		if current.BookableServiceCount == 0 || current.BookableStaffCount == 0 {
+			return nil, ErrValidation
+		}
+	}
+	return s.repo.UpdatePublicCatalogSettings(ctx, salonID, ownerUserID, req)
+}
+
 func (s *Service) GetBusinessHours(ctx context.Context, salonID string, ownerUserID string) ([]BusinessHourPeriod, error) {
 	return s.repo.GetBusinessHourPeriods(ctx, salonID, ownerUserID)
 }
@@ -110,4 +132,33 @@ func defaultString(value string, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func normalizePublicSlug(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	var builder strings.Builder
+	previousHyphen := false
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+			previousHyphen = false
+		case unicode.IsDigit(r):
+			builder.WriteRune(r)
+			previousHyphen = false
+		case r == '-' || r == '_' || unicode.IsSpace(r):
+			if builder.Len() > 0 && !previousHyphen {
+				builder.WriteByte('-')
+				previousHyphen = true
+			}
+		}
+	}
+	normalized := strings.Trim(builder.String(), "-")
+	if len(normalized) < 3 || len(normalized) > 64 {
+		return ""
+	}
+	return normalized
 }

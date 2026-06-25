@@ -28,6 +28,8 @@ func (Salon) Fields() []ent.Field {
 		field.String("handoff_phone").Optional(),
 		field.Bool("ai_enabled").Default(false),
 		field.String("active_pos_provider").Default("square").NotEmpty(),
+		field.String("public_slug").Optional(),
+		field.Bool("public_catalog_enabled").Default(false),
 		field.Time("created_at").Default(time.Now),
 		field.Time("updated_at").Default(time.Now).UpdateDefault(time.Now),
 	}

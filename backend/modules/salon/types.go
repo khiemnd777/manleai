@@ -3,22 +3,24 @@ package salon
 import "time"
 
 type Salon struct {
-	ID                string    `json:"id"`
-	Name              string    `json:"name"`
-	Phone             string    `json:"phone"`
-	Address           string    `json:"address,omitempty"`
-	City              string    `json:"city,omitempty"`
-	State             string    `json:"state,omitempty"`
-	ZipCode           string    `json:"zip_code,omitempty"`
-	Timezone          string    `json:"timezone"`
-	OwnerUserID       string    `json:"owner_user_id"`
-	PrimaryLanguage   string    `json:"primary_language"`
-	SecondaryLanguage string    `json:"secondary_language"`
-	HandoffPhone      string    `json:"handoff_phone,omitempty"`
-	AIEnabled         bool      `json:"ai_enabled"`
-	ActivePOSProvider string    `json:"active_pos_provider"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                   string    `json:"id"`
+	Name                 string    `json:"name"`
+	Phone                string    `json:"phone"`
+	Address              string    `json:"address,omitempty"`
+	City                 string    `json:"city,omitempty"`
+	State                string    `json:"state,omitempty"`
+	ZipCode              string    `json:"zip_code,omitempty"`
+	Timezone             string    `json:"timezone"`
+	OwnerUserID          string    `json:"owner_user_id"`
+	PrimaryLanguage      string    `json:"primary_language"`
+	SecondaryLanguage    string    `json:"secondary_language"`
+	HandoffPhone         string    `json:"handoff_phone,omitempty"`
+	AIEnabled            bool      `json:"ai_enabled"`
+	ActivePOSProvider    string    `json:"active_pos_provider"`
+	PublicSlug           string    `json:"public_slug,omitempty"`
+	PublicCatalogEnabled bool      `json:"public_catalog_enabled"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 type CreateSalonRequest struct {
@@ -74,6 +76,23 @@ type UpdateSettingsRequest struct {
 	SMSReminderEnabled      bool   `json:"sms_reminder_enabled"`
 	ReminderHoursBefore     int    `json:"reminder_hours_before"`
 	HandoffEnabled          bool   `json:"handoff_enabled"`
+}
+
+type PublicCatalogSettings struct {
+	SalonID              string    `json:"salon_id"`
+	PublicSlug           string    `json:"public_slug,omitempty"`
+	PublicCatalogEnabled bool      `json:"public_catalog_enabled"`
+	PublicPath           string    `json:"public_path,omitempty"`
+	BookableServiceCount int       `json:"bookable_service_count"`
+	BookableStaffCount   int       `json:"bookable_staff_count"`
+	CanPublish           bool      `json:"can_publish"`
+	BlockedReason        string    `json:"blocked_reason,omitempty"`
+	UpdatedAt            time.Time `json:"updated_at"`
+}
+
+type UpdatePublicCatalogRequest struct {
+	PublicSlug           string `json:"public_slug"`
+	PublicCatalogEnabled bool   `json:"public_catalog_enabled"`
 }
 
 type BusinessHour struct {

@@ -13,6 +13,8 @@ func RegisterRoutes(api fiber.Router, handler *Handler, jwtSecret string) {
 	group.Put("/:id", handler.Update)
 	group.Get("/:id/settings", handler.GetSettings)
 	group.Put("/:id/settings", handler.UpdateSettings)
+	group.Get("/:id/public-catalog", handler.GetPublicCatalogSettings)
+	group.Put("/:id/public-catalog", handler.UpdatePublicCatalogSettings)
 	group.Get("/:id/business-hours", handler.GetBusinessHours)
 	group.Put("/:id/business-hours", handler.UpdateBusinessHours)
 }

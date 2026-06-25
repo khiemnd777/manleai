@@ -39,6 +39,20 @@ npm run dev
 
 Visit `http://localhost:3088/login`.
 
+## Run Landing
+
+The public customer-facing app is separate from the admin dashboard.
+
+```bash
+cd landing
+npm install
+npm run dev
+```
+
+Visit a published salon page at `http://localhost:3090/s/<public-slug>`.
+The landing app reads `LANDING_API_BASE_URL` or `NEXT_PUBLIC_API_BASE_URL` and
+does not require an owner login for public catalog reads.
+
 ## External Voice AI
 
 The local app can run without external AI providers. To exercise Milestone 6 voice provider readiness and recording-mode turns, configure OpenAI in the Integrations dashboard. The legacy env values below remain optional fallback values:

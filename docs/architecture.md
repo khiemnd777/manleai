@@ -17,6 +17,7 @@ modules/auth         login, refresh, roles
 modules/salon        salon profile, settings, synced business hour periods
 modules/pos          provider-neutral POS contracts and persistence
 modules/pos_square   Square adapter and Square integration routes
+modules/public_catalog public-safe salon catalog read API
 modules/booking      booking attempts, appointments, and fallback pending safety
 modules/customer     canonical customer CRUD, activity read model, and POS lookup facade
 modules/integration_config encrypted salon-scoped provider app credentials and runtime settings
@@ -40,6 +41,11 @@ features/onboarding salon profile creation
 lib/api              typed API client
 types                API response types
 ```
+
+The public customer-facing web surface lives in `landing/`, separate from the
+owner admin dashboard in `frontend/`. The landing app reads only public-safe
+catalog data through unauthenticated `/api/public/*` endpoints and does not
+create booking attempts or confirmed appointments.
 
 ## Core Boundary
 
@@ -104,6 +110,12 @@ developer setup; dashboard-saved provider configuration takes precedence for a
 salon.
 
 The Milestone 7 training layer stores owner-authored salon knowledge and corrections as salon-scoped data. Conversation runtime may read active knowledge as advisory context for FAQ and policy answers, and training evaluation previews can test active knowledge without creating call sessions or bookings. Knowledge never replaces the booking service or POS confirmation checks.
+
+Public salon catalog pages are owner-published by slug. They expose only
+bookable active-provider services/staff and salon contact details needed for a
+customer to call for an appointment. They never expose staff contact details,
+POS IDs, provider tokens, sync errors, or owner identifiers, and they must not
+present a web booking as confirmed.
 
 ## Next Milestone
 

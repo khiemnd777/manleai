@@ -20,6 +20,7 @@ This repository currently implements Milestone 1, Milestone 2, Milestone 3 booki
 - Read-only AI Training evaluation previews for sample customer questions.
 - Backend service/staff list endpoints for synced POS data.
 - Next.js admin shell with login, dashboard, onboarding profile creation, Square integration status, appointments, service/staff controls, and Calls dashboard for simulator and phone sessions.
+- Public salon catalog app in `landing/` for customer-facing services, staff, hours, and call-to-book pages.
 - Repo-local Codex guidance through `AGENTS.md`, `.agents/skills`, and `.codex/agents`.
 
 Square Appointments create, reschedule, cancel, and dashboard test-booking operations are implemented through `POSProvider`. AI booking can only be enabled after Square is connected, services/staff are synced, and the latest Square test booking was created and cancelled successfully. Until Square returns a successful POS booking ID and booking version, failed provider calls create fallback pending requests instead of confirmed appointments or internal appointment state changes.
@@ -51,6 +52,15 @@ npm run dev
 ```
 
 Open `http://localhost:3088/login`.
+
+The public landing app runs separately at `http://localhost:3090` when using
+Docker Compose. For non-Docker landing development:
+
+```bash
+cd landing
+npm install
+npm run dev
+```
 
 Local seed login:
 
@@ -121,6 +131,7 @@ Fully implemented now:
 - Dashboard AI Training page with knowledge CRUD and owner correction workflows
 - Dashboard Calls page correction capture for reviewed transcript messages
 - Dashboard AI Training answer preview for active knowledge evaluation
+- Owner-published public catalog pages in `landing/` backed by safe unauthenticated `/api/public/salon` and `/api/public/salons/:slug` reads
 - POS sync and error logs
 - Admin shell, login, dashboard, onboarding profile creation, integrations page, appointments page, services/staff controls
 

@@ -3,14 +3,15 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { AlertTriangle, RefreshCcw, Save, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ExternalLink, Globe2, RefreshCcw, Save, ShieldCheck } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest } from "@/lib/api/client";
-import type { BusinessHourPeriod, POSConnection, Salon, SalonSettings, SquareReadiness, SyncLog } from "@/types/api";
+import { landingBaseUrl } from "@/lib/config/env";
+import type { BusinessHourPeriod, POSConnection, PublicCatalogSettings, Salon, SalonSettings, SquareReadiness, SyncLog } from "@/types/api";
 
 type SalonListResponse = {
   salons: Salon[];
@@ -51,6 +52,11 @@ type SettingsFormState = {
   handoffEnabled: boolean;
 };
 
+type PublicCatalogFormState = {
+  publicSlug: string;
+  enabled: boolean;
+};
+
 const dayLabels = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 export function SettingsDashboard() {
@@ -60,6 +66,8 @@ export function SettingsDashboard() {
   const [periods, setPeriods] = useState<BusinessHourPeriod[]>([]);
   const [salonForm, setSalonForm] = useState<SalonFormState>(emptySalonForm());
   const [settingsForm, setSettingsForm] = useState<SettingsFormState>(emptySettingsForm());
+  const [publicCatalog, setPublicCatalog] = useState<PublicCatalogSettings | null>(null);
+  const [publicCatalogForm, setPublicCatalogForm] = useState<PublicCatalogFormState>(emptyPublicCatalogForm());
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -80,20 +88,25 @@ export function SettingsDashboard() {
         setPeriods([]);
         setSalonForm(emptySalonForm());
         setSettingsForm(emptySettingsForm());
+        setPublicCatalog(null);
+        setPublicCatalogForm(emptyPublicCatalogForm());
         return;
       }
 
-      const [statusResponse, settingsResponse, businessHoursResponse] = await Promise.all([
+      const [statusResponse, settingsResponse, businessHoursResponse, publicCatalogResponse] = await Promise.all([
         apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
         apiRequest<SalonSettings>(`/api/salons/${firstSalon.id}/settings`),
-        apiRequest<BusinessHoursResponse>(`/api/salons/${firstSalon.id}/business-hours`)
+        apiRequest<BusinessHoursResponse>(`/api/salons/${firstSalon.id}/business-hours`),
+        apiRequest<PublicCatalogSettings>(`/api/salons/${firstSalon.id}/public-catalog`)
       ]);
 
       setStatus(statusResponse);
       setSettings(settingsResponse);
       setPeriods(businessHoursResponse.periods ?? []);
+      setPublicCatalog(publicCatalogResponse);
       setSalonForm(salonToForm(firstSalon));
       setSettingsForm(settingsToForm(settingsResponse));
+      setPublicCatalogForm(publicCatalogToForm(publicCatalogResponse));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load settings.");
     } finally {
@@ -109,10 +122,11 @@ export function SettingsDashboard() {
 
   const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
   const activeProvider = salon?.active_pos_provider || "square";
-  const squarePeriods = useMemo(() => periods.filter(isImportedSquarePeriod), [periods]);
-  const hasBusinessHourPeriods = squarePeriods.length > 0;
-  const latestBusinessHourSync = latestUpdatedAt(...squarePeriods.map((item) => item.last_synced_at || item.updated_at || ""));
-  const latestUpdate = latestUpdatedAt(salon?.updated_at, settings?.updated_at, latestBusinessHourSync);
+  const activeProviderLabel = activeProvider === "square" ? "Square" : activeProvider;
+  const importedProviderPeriods = useMemo(() => periods.filter((period) => isImportedProviderPeriod(period, activeProvider)), [activeProvider, periods]);
+  const hasBusinessHourPeriods = importedProviderPeriods.length > 0;
+  const latestBusinessHourSync = latestUpdatedAt(...importedProviderPeriods.map((item) => item.last_synced_at || item.updated_at || ""));
+  const latestUpdate = latestUpdatedAt(salon?.updated_at, settings?.updated_at, latestBusinessHourSync, publicCatalog?.updated_at);
   const bookingModeBlocked = settingsForm.bookingMode === "confirmed_booking" && !aiEnabled;
 
   async function saveSalonProfile() {
@@ -219,6 +233,39 @@ export function SettingsDashboard() {
     }
   }
 
+  async function savePublicCatalog() {
+    if (!salon) return;
+    setBusy("save-public-catalog");
+    setError("");
+    setSuccess("");
+    try {
+      const updated = await apiRequest<PublicCatalogSettings>(`/api/salons/${salon.id}/public-catalog`, {
+        method: "PUT",
+        body: JSON.stringify({
+          public_slug: publicCatalogForm.publicSlug,
+          public_catalog_enabled: publicCatalogForm.enabled
+        })
+      });
+      setPublicCatalog(updated);
+      setPublicCatalogForm(publicCatalogToForm(updated));
+      setSalon((current) =>
+        current
+          ? {
+              ...current,
+              public_slug: updated.public_slug,
+              public_catalog_enabled: updated.public_catalog_enabled,
+              updated_at: updated.updated_at
+            }
+          : current
+      );
+      setSuccess(updated.public_catalog_enabled ? "Public salon page published." : "Public salon page settings saved.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save public page settings.");
+    } finally {
+      setBusy("");
+    }
+  }
+
   if (loading) {
     return (
       <div className="space-y-6">
@@ -292,6 +339,14 @@ export function SettingsDashboard() {
         <StatusMetric label="Last saved" value={latestUpdate ? formatDateTime(latestUpdate) : "Not available"} badge={latestUpdate ? "synced" : "not_configured"} />
       </div>
 
+      <PublicCatalogCard
+        settings={publicCatalog}
+        form={publicCatalogForm}
+        busy={busy === "save-public-catalog"}
+        onChange={setPublicCatalogForm}
+        onSave={() => void savePublicCatalog()}
+      />
+
       <SalonProfileForm form={salonForm} busy={busy === "save-salon"} onChange={setSalonForm} onSave={() => void saveSalonProfile()} />
 
       <AISettingsForm
@@ -304,7 +359,8 @@ export function SettingsDashboard() {
       />
 
       <BusinessHoursCard
-        periods={periods}
+        periods={importedProviderPeriods}
+        sourceLabel={activeProviderLabel}
         hasSyncedSquarePeriods={hasBusinessHourPeriods}
         busy={busy === "sync-square"}
         lastSyncedAt={latestBusinessHourSync}
@@ -372,6 +428,115 @@ function StatusMetric({ label, value, badge }: { label: string; value: string; b
         <Badge value={badge} />
       </div>
     </Card>
+  );
+}
+
+function PublicCatalogCard({
+  settings,
+  form,
+  busy,
+  onChange,
+  onSave
+}: {
+  settings: PublicCatalogSettings | null;
+  form: PublicCatalogFormState;
+  busy: boolean;
+  onChange: (next: PublicCatalogFormState) => void;
+  onSave: () => void;
+}) {
+  const serviceCount = settings?.bookable_service_count ?? 0;
+  const staffCount = settings?.bookable_staff_count ?? 0;
+  const publicPath = settings?.public_path || (form.publicSlug ? `/s/${form.publicSlug}` : "");
+  const publicUrl = publicPath ? `${landingBaseUrl}${publicPath}` : "";
+  const canPublishWithForm = form.publicSlug.trim().length >= 3 && serviceCount > 0 && staffCount > 0;
+  const blockedReason =
+    settings?.blocked_reason ||
+    (!form.publicSlug.trim()
+      ? "Add a public page slug before publishing."
+      : serviceCount === 0
+        ? "At least one synced AI-bookable service is required."
+        : staffCount === 0
+          ? "At least one synced AI-bookable staff member is required."
+          : "");
+
+  return (
+    <Card>
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div className="flex gap-3">
+          <div className="flex h-10 w-10 flex-none items-center justify-center rounded-md bg-teal-50 text-brand">
+            <Globe2 className="h-5 w-5" />
+          </div>
+          <div>
+            <CardTitle>Public booking page</CardTitle>
+            <CardDescription>
+              Publish a customer-facing page for services, staff, hours, and phone booking requests.
+            </CardDescription>
+          </div>
+        </div>
+        <Badge value={settings?.public_catalog_enabled ? "published" : "disabled"} className="self-start" />
+      </div>
+
+      <div className="mt-5 grid gap-4 md:grid-cols-[1.3fr_0.7fr]">
+        <Field label="Public slug">
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <TextInput
+              value={form.publicSlug}
+              disabled={busy}
+              onChange={(value) => onChange({ ...form, publicSlug: value })}
+            />
+            {publicUrl ? (
+              <a
+                href={publicUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex h-10 flex-none items-center justify-center gap-2 rounded-md border border-line px-4 text-sm font-semibold text-ink hover:bg-slate-50"
+              >
+                <ExternalLink className="h-4 w-4" />
+                Open
+              </a>
+            ) : null}
+          </div>
+          <div className="mt-2 break-all text-xs leading-5 text-muted">
+            {publicUrl || `${landingBaseUrl}/s/your-salon-slug`}
+          </div>
+        </Field>
+        <div className="rounded-md border border-line p-3">
+          <div className="text-xs font-semibold uppercase text-muted">Public-ready catalog</div>
+          <div className="mt-3 grid grid-cols-2 gap-3">
+            <MiniMetric label="Services" value={String(serviceCount)} />
+            <MiniMetric label="Staff" value={String(staffCount)} />
+          </div>
+        </div>
+      </div>
+
+      {form.enabled && !canPublishWithForm ? (
+        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+          {blockedReason}
+        </div>
+      ) : null}
+
+      <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <CheckboxRow
+          label="Publish public page"
+          checked={form.enabled}
+          disabled={busy}
+          onChange={(checked) => onChange({ ...form, enabled: checked })}
+        />
+        <Button type="button" onClick={onSave} disabled={busy || (form.enabled && !canPublishWithForm)}>
+          <Save className="h-4 w-4" />
+          {busy ? "Saving..." : "Save public page"}
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+function MiniMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-lg font-bold text-ink">{value}</div>
+      <div className="text-xs text-muted">{label}</div>
+    </div>
   );
 }
 
@@ -541,12 +706,14 @@ function AISettingsForm({
 
 function BusinessHoursCard({
   periods,
+  sourceLabel,
   hasSyncedSquarePeriods,
   busy,
   lastSyncedAt,
   onSync
 }: {
   periods: BusinessHourPeriod[];
+  sourceLabel: string;
   hasSyncedSquarePeriods: boolean;
   busy: boolean;
   lastSyncedAt: string;
@@ -594,7 +761,7 @@ function BusinessHoursCard({
                   <td className="px-4 py-3 text-ink">
                     {dayPeriods.length ? formatPeriodList(dayPeriods) : <span className="text-muted">Closed or not synced</span>}
                   </td>
-                  <td className="px-4 py-3 text-muted">{formatPeriodSource(dayPeriods)}</td>
+                  <td className="px-4 py-3 text-muted">{formatPeriodSource(dayPeriods, sourceLabel)}</td>
                   <td className="px-4 py-3 text-muted">{formatDayLastSynced(dayPeriods)}</td>
                 </tr>
               );
@@ -616,7 +783,7 @@ function BusinessHoursCard({
                 {dayPeriods.length ? formatPeriodList(dayPeriods) : "Closed or not synced"}
               </div>
               <div className="mt-2 text-xs leading-5 text-muted">
-                {formatPeriodSource(dayPeriods)} - {formatDayLastSynced(dayPeriods)}
+                {formatPeriodSource(dayPeriods, sourceLabel)} - {formatDayLastSynced(dayPeriods)}
               </div>
             </div>
           );
@@ -656,14 +823,13 @@ function formatPeriodList(periods: BusinessHourPeriod[]) {
   return periods.map((period) => `${toDisplayTime(period.start_local_time)}-${toDisplayTime(period.end_local_time)}`).join(", ");
 }
 
-function formatPeriodSource(periods: BusinessHourPeriod[]) {
+function formatPeriodSource(periods: BusinessHourPeriod[], sourceLabel: string) {
   if (periods.length === 0) return "Not synced";
-  if (periods.some((period) => period.provider === "square")) return "Square";
-  return "Migrated local hours";
+  return sourceLabel;
 }
 
-function isImportedSquarePeriod(period: BusinessHourPeriod) {
-  return period.source === "imported" && period.provider === "square";
+function isImportedProviderPeriod(period: BusinessHourPeriod, provider: string) {
+  return period.source === "imported" && period.provider === provider;
 }
 
 function formatDayLastSynced(periods: BusinessHourPeriod[]) {
@@ -767,6 +933,13 @@ function emptySettingsForm(): SettingsFormState {
   };
 }
 
+function emptyPublicCatalogForm(): PublicCatalogFormState {
+  return {
+    publicSlug: "",
+    enabled: false
+  };
+}
+
 function settingsToForm(settings: SalonSettings): SettingsFormState {
   return {
     aiGreeting: settings.ai_greeting || "",
@@ -778,6 +951,13 @@ function settingsToForm(settings: SalonSettings): SettingsFormState {
     smsReminderEnabled: settings.sms_reminder_enabled,
     reminderHoursBefore: String(settings.reminder_hours_before || 24),
     handoffEnabled: settings.handoff_enabled
+  };
+}
+
+function publicCatalogToForm(settings: PublicCatalogSettings): PublicCatalogFormState {
+  return {
+    publicSlug: settings.public_slug || "",
+    enabled: settings.public_catalog_enabled
   };
 }
 

@@ -97,6 +97,38 @@ func (h *Handler) UpdateSettings(c *fiber.Ctx) error {
 	return respond.JSON(c, fiber.StatusOK, settings)
 }
 
+func (h *Handler) GetPublicCatalogSettings(c *fiber.Ctx) error {
+	settings, err := h.service.GetPublicCatalogSettings(c.UserContext(), c.Params("id"), middleware.UserID(c))
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "PUBLIC_CATALOG_FAILED", "Could not load public catalog settings.")
+	}
+	return respond.JSON(c, fiber.StatusOK, settings)
+}
+
+func (h *Handler) UpdatePublicCatalogSettings(c *fiber.Ctx) error {
+	var req UpdatePublicCatalogRequest
+	if err := c.BodyParser(&req); err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
+	}
+	settings, err := h.service.UpdatePublicCatalogSettings(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Public catalog requires a slug, one synced AI-bookable service, and one synced AI-bookable staff member.")
+	}
+	if errors.Is(err, ErrSlugUnavailable) {
+		return respond.Error(c, fiber.StatusConflict, "PUBLIC_SLUG_UNAVAILABLE", "Public page slug is already in use.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "PUBLIC_CATALOG_UPDATE_FAILED", "Could not update public catalog settings.")
+	}
+	return respond.JSON(c, fiber.StatusOK, settings)
+}
+
 func (h *Handler) GetBusinessHours(c *fiber.Ctx) error {
 	hours, err := h.service.GetBusinessHours(c.UserContext(), c.Params("id"), middleware.UserID(c))
 	if errors.Is(err, ErrNotFound) {

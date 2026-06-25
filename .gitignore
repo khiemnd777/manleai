@@ -6,6 +6,10 @@ backend/tmp/
 frontend/.next/
 frontend/node_modules/
 frontend/tsconfig.tsbuildinfo
+landing/.next/
+landing/node_modules/
+landing/node_modules
+landing/tsconfig.tsbuildinfo
 
 # Environment files
 .env
@@ -13,9 +17,9 @@ frontend/tsconfig.tsbuildinfo
 !.env.example
 backend/.env
 frontend/.env.local
+landing/.env.local
 
 # OS/editor
 .DS_Store
 .idea/
 .vscode/
-

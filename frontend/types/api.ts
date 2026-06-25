@@ -20,8 +20,22 @@ export type Salon = {
   handoff_phone?: string;
   ai_enabled: boolean;
   active_pos_provider: string;
+  public_slug?: string;
+  public_catalog_enabled: boolean;
   created_at?: string;
   updated_at?: string;
+};
+
+export type PublicCatalogSettings = {
+  salon_id: string;
+  public_slug?: string;
+  public_catalog_enabled: boolean;
+  public_path?: string;
+  bookable_service_count: number;
+  bookable_staff_count: number;
+  can_publish: boolean;
+  blocked_reason?: string;
+  updated_at: string;
 };
 
 export type SalonSettings = {

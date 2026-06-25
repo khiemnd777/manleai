@@ -20,6 +20,7 @@ import (
 	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/pos_square"
+	publiccatalog "github.com/manleai/ai-receptionist/modules/public_catalog"
 	"github.com/manleai/ai-receptionist/modules/salon"
 	"github.com/manleai/ai-receptionist/modules/training"
 	"github.com/manleai/ai-receptionist/modules/voice"
@@ -75,6 +76,10 @@ func main() {
 	salonRepo := salon.NewRepository(db)
 	salonService := salon.NewService(salonRepo)
 	salon.RegisterRoutes(api, salon.NewHandler(salonService), cfg.JWTSecret)
+
+	publicCatalogRepo := publiccatalog.NewRepository(db)
+	publicCatalogService := publiccatalog.NewService(publicCatalogRepo)
+	publiccatalog.RegisterRoutes(api, publiccatalog.NewHandler(publicCatalogService))
 
 	integrationConfigRepo := integrationconfig.NewRepository(db)
 	integrationConfigService := integrationconfig.NewService(integrationConfigRepo, cipher, cfg)
