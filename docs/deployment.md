@@ -35,27 +35,19 @@ passes. If validation fails, the previous ManleAI route file is restored.
 
 ## GitHub Actions
 
-The workflow in `.github/workflows/ci-cd.yml` runs CI on pull requests and
-pushes to `main`. Pull requests and main-branch pushes run:
-
-```bash
-cd backend && go test ./...
-cd frontend && npm ci && npm run typecheck && npm run build
-cd landing && npm ci && npm run typecheck && npm run build
-```
-
-Deployments run only when a release tag matching `v*` is pushed. The normal
-release command is:
+The workflow in `.github/workflows/ci-cd.yml` runs only when a release tag
+matching `v*` is pushed. Commit pushes to `main` do not trigger this workflow.
+The normal release command is:
 
 ```bash
 make release TAG=v2026.06.25.1
 ```
 
 That command requires a clean `main` worktree, creates an annotated git tag, and
-pushes the tag to `origin`. The tag push triggers the deploy job, which uploads
-a release archive, decodes `PROJECT_ENV_B64` into `/opt/manleai/project.env`,
-runs the ManleAI compose stack, then validates and reloads the shared edge
-gateway:
+pushes the tag to `origin`. The tag push runs backend tests, typechecks and
+builds both web apps, uploads a release archive, decodes `PROJECT_ENV_B64` into
+`/opt/manleai/project.env`, runs the ManleAI compose stack, then validates and
+reloads the shared edge gateway:
 
 ```bash
 docker compose --env-file /opt/manleai/project.env -f docker-compose.prod.yml -p manleai up -d --build --remove-orphans
