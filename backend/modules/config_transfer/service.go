@@ -831,10 +831,10 @@ func importResponse(plan *importPlan, dryRun bool, runID string) *ImportResponse
 		SchemaVersion:         plan.SchemaVersion,
 		CanApply:              plan.CanApply,
 		Summary:               summaryValues(plan.Summary),
-		Warnings:              plan.Warnings,
-		Conflicts:             plan.Conflicts,
+		Warnings:              issueValues(plan.Warnings),
+		Conflicts:             issueValues(plan.Conflicts),
 		ExcludedData:          copyStrings(excludedData),
-		RequiresSecretReentry: append([]string{}, plan.RequiresSecretReentry...),
+		RequiresSecretReentry: copyStrings(plan.RequiresSecretReentry),
 	}
 }
 
@@ -864,6 +864,13 @@ func summaryValues(items map[string]*ImportSectionSummary) []ImportSectionSummar
 		}
 	}
 	return out
+}
+
+func issueValues(items []ImportIssue) []ImportIssue {
+	if items == nil {
+		return []ImportIssue{}
+	}
+	return append([]ImportIssue{}, items...)
 }
 
 func fieldChange(plan *importPlan, section string, field string, current string, incoming string) {

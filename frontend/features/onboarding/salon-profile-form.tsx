@@ -7,7 +7,7 @@ import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
-import { ImportIssueList, ImportSummaryTable } from "@/features/configuration-transfer/import-preview";
+import { ImportIssueList, ImportSummaryTable, listOrNone } from "@/features/configuration-transfer/import-preview";
 import { apiRequest } from "@/lib/api/client";
 import {
   applyOnboardingConfigurationImport,
@@ -314,7 +314,7 @@ function ImportConfigurationPanel({
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="text-xs leading-5 text-muted">
                   Schema {preview.schema_version}. Secrets must be re-entered for:{" "}
-                  {preview.requires_secret_reentry.length ? preview.requires_secret_reentry.join(", ") : "none"}.
+                  {listOrNone(preview.requires_secret_reentry)}.
                 </div>
                 <div className="flex gap-2">
                   <Button type="button" variant="secondary" onClick={onClear} disabled={disabled}>

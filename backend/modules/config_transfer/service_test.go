@@ -307,6 +307,31 @@ func TestApplyOnboardingImportIsIdempotentForSameRequest(t *testing.T) {
 	}
 }
 
+func TestImportResponseEncodesEmptyListsAsArrays(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
+	bundle := testImportBundle(updatedAt)
+	plan := newImportPlan(bundle, "fingerprint-empty-lists", "req-empty-lists", "", onboardingImportTargetState())
+	plan.Warnings = nil
+	plan.Conflicts = nil
+	plan.RequiresSecretReentry = nil
+
+	raw, err := json.Marshal(importResponse(plan, false, "run_empty_lists"))
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	rawJSON := string(raw)
+	for _, forbidden := range []string{`"warnings":null`, `"conflicts":null`, `"requires_secret_reentry":null`, `"excluded_data":null`} {
+		if strings.Contains(rawJSON, forbidden) {
+			t.Fatalf("response encoded nil list as null: %s", rawJSON)
+		}
+	}
+	for _, required := range []string{`"warnings":[]`, `"conflicts":[]`, `"requires_secret_reentry":[]`} {
+		if !strings.Contains(rawJSON, required) {
+			t.Fatalf("response did not encode empty list as array %s in %s", required, rawJSON)
+		}
+	}
+}
+
 func newTestService(updatedAt time.Time) *Service {
 	knowledge := &fakeKnowledgeReader{
 		items: []training.KnowledgeItem{

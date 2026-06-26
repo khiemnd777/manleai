@@ -1,6 +1,10 @@
 import type { ConfigurationImportResponse } from "@/types/api";
 
-export function ImportSummaryTable({ summary }: { summary: ConfigurationImportResponse["summary"] }) {
+type ImportSummary = ConfigurationImportResponse["summary"] | null | undefined;
+type ImportIssues = ConfigurationImportResponse["warnings"] | null | undefined;
+
+export function ImportSummaryTable({ summary }: { summary: ImportSummary }) {
+  const items = Array.isArray(summary) ? summary : [];
   return (
     <>
       <div className="hidden overflow-x-auto rounded-md border border-line md:block">
@@ -16,7 +20,7 @@ export function ImportSummaryTable({ summary }: { summary: ConfigurationImportRe
             </tr>
           </thead>
           <tbody className="divide-y divide-line">
-            {summary.map((item) => (
+            {items.map((item) => (
               <tr key={item.section}>
                 <td className="px-3 py-2 font-medium text-ink">{sectionLabel(item.section)}</td>
                 <td className="px-3 py-2 text-muted">{item.created}</td>
@@ -30,7 +34,7 @@ export function ImportSummaryTable({ summary }: { summary: ConfigurationImportRe
         </table>
       </div>
       <div className="space-y-3 md:hidden">
-        {summary.map((item) => (
+        {items.map((item) => (
           <div key={item.section} className="rounded-md border border-line p-3">
             <div className="text-sm font-semibold text-ink">{sectionLabel(item.section)}</div>
             <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-muted">
@@ -53,16 +57,17 @@ export function ImportIssueList({
   tone
 }: {
   title: string;
-  issues: ConfigurationImportResponse["warnings"];
+  issues: ImportIssues;
   tone: "warning" | "danger";
 }) {
-  if (issues.length === 0) return null;
+  const items = Array.isArray(issues) ? issues : [];
+  if (items.length === 0) return null;
   const className = tone === "danger" ? "border-red-200 bg-red-50 text-red-900" : "border-amber-200 bg-amber-50 text-amber-900";
   return (
     <div className={`rounded-md border p-4 text-sm ${className}`}>
       <div className="font-semibold">{title}</div>
       <ul className="mt-2 space-y-2">
-        {issues.map((issue, index) => (
+        {items.map((issue, index) => (
           <li key={`${issue.code}-${issue.field ?? issue.source_key ?? index}`}>
             {sectionLabel(issue.section)}: {issue.message}
           </li>
@@ -87,4 +92,9 @@ export function sectionLabel(section: string) {
     default:
       return section;
   }
+}
+
+export function listOrNone(values: string[] | null | undefined) {
+  const items = Array.isArray(values) ? values : [];
+  return items.length ? items.join(", ") : "none";
 }
