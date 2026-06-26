@@ -67,6 +67,45 @@ func TestStatusKeepsWebhookReadyWhenPhoneBookingIsBlocked(t *testing.T) {
 	}
 }
 
+func TestStatusReportsRealtimeInputModeWhenRealtimeConfigured(t *testing.T) {
+	store := newFakeVoiceStore()
+	service := NewService(store, newFakeConversationEngine(), config.VoiceConfig{
+		Provider:      ProviderTwilio,
+		PublicBaseURL: "https://voice.example.com",
+		Twilio: config.TwilioVoiceConfig{
+			AuthToken:      "secret",
+			IncomingPath:   "/api/voice/twilio/incoming",
+			RecordingPath:  "/api/voice/twilio/recording",
+			StreamPath:     "/api/voice/twilio/stream",
+			VoiceTransport: InputModeRealtimeStream,
+		},
+		AI: config.VoiceAIConfig{
+			Provider: ProviderOpenAI,
+			OpenAI: config.OpenAIVoiceConfig{
+				APIKey:          "openai-key",
+				BaseURL:         "https://api.openai.com/v1",
+				RealtimeEnabled: true,
+				RealtimeModel:   "gpt-4o-realtime-preview",
+				RealtimeVoice:   "alloy",
+			},
+		},
+	}, AIProviders{Realtime: fakeRealtimeProvider{configured: true}})
+
+	status, err := service.Status(context.Background(), "salon_1", "owner_1")
+	if err != nil {
+		t.Fatalf("Status returned error: %v", err)
+	}
+	if status.InputMode != InputModeRealtimeStream {
+		t.Fatalf("input mode = %q, want realtime_stream", status.InputMode)
+	}
+	if status.StreamWebhookURL != "wss://voice.example.com/api/voice/twilio/stream" {
+		t.Fatalf("stream webhook URL = %q", status.StreamWebhookURL)
+	}
+	if !status.AI.Realtime.Ready {
+		t.Fatalf("realtime capability should be ready: %#v", status.AI.Realtime)
+	}
+}
+
 func TestIncomingCallStartsPhoneSessionAndReturnsGreeting(t *testing.T) {
 	store := newFakeVoiceStore()
 	engine := newFakeConversationEngine()
@@ -296,6 +335,22 @@ type fakeConversationEngine struct {
 	lastMessage    string
 	startSession   *conversation.Session
 	messageSession *conversation.Session
+}
+
+type fakeRealtimeProvider struct {
+	configured bool
+}
+
+func (f fakeRealtimeProvider) Name() string {
+	return ProviderOpenAI
+}
+
+func (f fakeRealtimeProvider) Configured(ctx context.Context, salonID string) bool {
+	return f.configured
+}
+
+func (f fakeRealtimeProvider) ConnectRealtime(ctx context.Context, salonID string, opts RealtimeSessionOptions) (RealtimeSession, error) {
+	return nil, ErrProviderDisabled
 }
 
 func newFakeConversationEngine() *fakeConversationEngine {

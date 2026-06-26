@@ -133,6 +133,8 @@ VOICE_TWILIO_AUTH_TOKEN
 VOICE_TWILIO_INCOMING_PATH
 VOICE_TWILIO_TURN_PATH
 VOICE_TWILIO_RECORDING_PATH
+VOICE_TWILIO_STREAM_PATH
+VOICE_TWILIO_VOICE_TRANSPORT
 VOICE_AI_PROVIDER
 VOICE_OPENAI_API_KEY
 VOICE_OPENAI_BASE_URL
@@ -140,6 +142,10 @@ VOICE_OPENAI_TRANSCRIPTION_MODEL
 VOICE_OPENAI_REPLY_MODEL
 VOICE_OPENAI_SPEECH_MODEL
 VOICE_OPENAI_SPEECH_VOICE
+VOICE_OPENAI_REALTIME_ENABLED
+VOICE_OPENAI_REALTIME_MODEL
+VOICE_OPENAI_REALTIME_VOICE
+VOICE_OPENAI_REALTIME_INSTRUCTIONS
 ```
 
 Do not troubleshoot active Square, Twilio, or OpenAI provider behavior by
@@ -156,6 +162,7 @@ the legacy fallback path for a fresh deployment with no saved dashboard config.
 - Keep `AUTO_MIGRATE=true` unless another release process applies the same SQL migrations.
 - Configure the Square redirect URL in the Integrations dashboard to the deployed API callback.
 - Configure the dashboard Twilio public base URL to the deployed API origin used in Twilio webhook settings; `VOICE_PUBLIC_BASE_URL` is only the fallback source when no dashboard Twilio config exists.
+- Configure realtime phone mode from the Integrations dashboard: Twilio `voice_transport=realtime_stream`, Twilio stream path, and OpenAI realtime model/voice. The env names above are fallback-only values.
 - Keep Twilio and OpenAI secrets out of logs and docs; dashboard responses expose only configured/source metadata.
 - Enable OpenAI voice AI in the Integrations dashboard only when external AI voice turns should be enabled.
 - Keep OpenAI model and voice settings configurable through the dashboard so model changes do not require code changes.

@@ -121,6 +121,8 @@ type TwilioConfigForm = {
   incoming_path: string;
   turn_path: string;
   recording_path: string;
+  stream_path: string;
+  voice_transport: string;
 };
 
 type OpenAIConfigForm = {
@@ -132,6 +134,10 @@ type OpenAIConfigForm = {
   reply_model: string;
   speech_model: string;
   speech_voice: string;
+  realtime_enabled: boolean;
+  realtime_model: string;
+  realtime_voice: string;
+  realtime_instructions: string;
 };
 
 const defaultForm: TestBookingForm = {
@@ -160,7 +166,9 @@ const defaultTwilioConfigForm: TwilioConfigForm = {
   clear_auth_token: false,
   incoming_path: "/api/voice/twilio/incoming",
   turn_path: "/api/voice/twilio/turn",
-  recording_path: "/api/voice/twilio/recording"
+  recording_path: "/api/voice/twilio/recording",
+  stream_path: "/api/voice/twilio/stream",
+  voice_transport: "recording"
 };
 
 const defaultOpenAIConfigForm: OpenAIConfigForm = {
@@ -171,7 +179,11 @@ const defaultOpenAIConfigForm: OpenAIConfigForm = {
   transcription_model: "gpt-4o-mini-transcribe",
   reply_model: "gpt-4.1-mini",
   speech_model: "gpt-4o-mini-tts",
-  speech_voice: "alloy"
+  speech_voice: "alloy",
+  realtime_enabled: false,
+  realtime_model: "gpt-4o-realtime-preview",
+  realtime_voice: "alloy",
+  realtime_instructions: ""
 };
 
 export function SquareIntegration() {
@@ -1056,12 +1068,12 @@ function ProviderConfigurationPanel({
         <ConfigStatusBlock
           label="Twilio Voice"
           status={twilio?.configured ? "configured" : "needs_config"}
-          detail={twilio?.configured ? "Webhook signatures can be verified." : "Auth token is required."}
+          detail={twilio?.configured ? `Webhook signatures can be verified. Transport: ${twilio.voice_transport || "recording"}.` : "Auth token is required."}
         />
         <ConfigStatusBlock
           label="OpenAI Voice AI"
           status={openAI?.configured ? "configured" : openAI?.enabled ? "needs_config" : "disabled"}
-          detail={openAI?.configured ? "STT, reply, and speech providers are ready." : openAI?.enabled ? "API key and models are required." : "External AI voice is off."}
+          detail={openAI?.configured ? `STT, reply, speech, and${openAI.realtime_enabled ? "" : " optional"} realtime settings are ready.` : openAI?.enabled ? "API key and models are required." : "External AI voice is off."}
         />
       </div>
 
@@ -1170,6 +1182,17 @@ function ProviderConfigurationPanel({
               label="Clear stored Twilio auth token"
               onChange={(checked) => setTwilioForm((current) => ({ ...current, clear_auth_token: checked, auth_token: checked ? "" : current.auth_token }))}
             />
+            <Field label="Voice transport">
+              <select
+                className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink"
+                value={twilioForm.voice_transport}
+                onChange={(event) => setTwilioForm((current) => ({ ...current, voice_transport: event.target.value }))}
+                disabled={busy !== ""}
+              >
+                <option value="recording">Recording fallback</option>
+                <option value="realtime_stream">Realtime stream</option>
+              </select>
+            </Field>
             <Field label="Incoming path">
               <input
                 className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
@@ -1194,11 +1217,20 @@ function ProviderConfigurationPanel({
                 disabled={busy !== ""}
               />
             </Field>
+            <Field label="Stream path">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                value={twilioForm.stream_path}
+                onChange={(event) => setTwilioForm((current) => ({ ...current, stream_path: event.target.value }))}
+                disabled={busy !== ""}
+              />
+            </Field>
           </div>
-          <div className="grid gap-3 md:grid-cols-3">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
             <ReadOnlyValue label="Incoming webhook" value={twilio?.inbound_webhook_url || twilioForm.incoming_path} />
             <ReadOnlyValue label="Turn webhook" value={twilio?.turn_webhook_url || twilioForm.turn_path} />
             <ReadOnlyValue label="Recording webhook" value={twilio?.recording_webhook_url || twilioForm.recording_path} />
+            <ReadOnlyValue label="Realtime stream" value={twilio?.stream_webhook_url || twilioForm.stream_path} />
           </div>
           <ConfigActions
             busy={busy === "save-twilio-config"}
@@ -1278,6 +1310,54 @@ function ProviderConfigurationPanel({
                 disabled={busy !== "" || !openAIForm.enabled}
               />
             </Field>
+          </div>
+          <div className="rounded-md border border-line p-4">
+            <div className="flex flex-col justify-between gap-3 md:flex-row md:items-start">
+              <div>
+                <div className="text-sm font-semibold text-ink">Realtime voice</div>
+                <div className="mt-1 text-xs leading-5 text-muted">
+                  Used only when Twilio Voice transport is set to Realtime stream. Booking and confirmations still run through the backend.
+                </div>
+              </div>
+              <label className="flex items-center gap-2 text-sm font-medium text-ink">
+                <input
+                  type="checkbox"
+                  checked={openAIForm.realtime_enabled}
+                  onChange={(event) => setOpenAIForm((current) => ({ ...current, realtime_enabled: event.target.checked }))}
+                  disabled={busy !== "" || !openAIForm.enabled}
+                />
+                Enable realtime
+              </label>
+            </div>
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <Field label="Realtime model">
+                <input
+                  className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                  value={openAIForm.realtime_model}
+                  onChange={(event) => setOpenAIForm((current) => ({ ...current, realtime_model: event.target.value }))}
+                  disabled={busy !== "" || !openAIForm.enabled || !openAIForm.realtime_enabled}
+                />
+              </Field>
+              <Field label="Realtime voice">
+                <input
+                  className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                  value={openAIForm.realtime_voice}
+                  onChange={(event) => setOpenAIForm((current) => ({ ...current, realtime_voice: event.target.value }))}
+                  disabled={busy !== "" || !openAIForm.enabled || !openAIForm.realtime_enabled}
+                />
+              </Field>
+              <div className="md:col-span-2">
+                <Field label="Realtime instructions">
+                  <textarea
+                    className="min-h-24 w-full rounded-md border border-line px-3 py-2 text-sm text-ink"
+                    value={openAIForm.realtime_instructions}
+                    onChange={(event) => setOpenAIForm((current) => ({ ...current, realtime_instructions: event.target.value }))}
+                    disabled={busy !== "" || !openAIForm.enabled || !openAIForm.realtime_enabled}
+                    placeholder="Optional operating notes for the audio bridge. Do not put secrets here."
+                  />
+                </Field>
+              </div>
+            </div>
           </div>
           <ConfigActions
             busy={busy === "save-openai-config"}
@@ -1414,7 +1494,9 @@ function twilioConfigToForm(config?: TwilioIntegrationConfig): TwilioConfigForm 
     clear_auth_token: false,
     incoming_path: config.incoming_path || defaultTwilioConfigForm.incoming_path,
     turn_path: config.turn_path || defaultTwilioConfigForm.turn_path,
-    recording_path: config.recording_path || defaultTwilioConfigForm.recording_path
+    recording_path: config.recording_path || defaultTwilioConfigForm.recording_path,
+    stream_path: config.stream_path || defaultTwilioConfigForm.stream_path,
+    voice_transport: config.voice_transport || defaultTwilioConfigForm.voice_transport
   };
 }
 
@@ -1428,7 +1510,11 @@ function openAIConfigToForm(config?: OpenAIIntegrationConfig): OpenAIConfigForm 
     transcription_model: config.transcription_model || defaultOpenAIConfigForm.transcription_model,
     reply_model: config.reply_model || defaultOpenAIConfigForm.reply_model,
     speech_model: config.speech_model || defaultOpenAIConfigForm.speech_model,
-    speech_voice: config.speech_voice || defaultOpenAIConfigForm.speech_voice
+    speech_voice: config.speech_voice || defaultOpenAIConfigForm.speech_voice,
+    realtime_enabled: config.realtime_enabled,
+    realtime_model: config.realtime_model || defaultOpenAIConfigForm.realtime_model,
+    realtime_voice: config.realtime_voice || defaultOpenAIConfigForm.realtime_voice,
+    realtime_instructions: config.realtime_instructions || ""
   };
 }
 
@@ -1452,9 +1538,12 @@ function emptyIntegrationConfigs(): IntegrationConfigs {
       incoming_path: defaultTwilioConfigForm.incoming_path,
       turn_path: defaultTwilioConfigForm.turn_path,
       recording_path: defaultTwilioConfigForm.recording_path,
+      stream_path: defaultTwilioConfigForm.stream_path,
+      voice_transport: defaultTwilioConfigForm.voice_transport,
       inbound_webhook_url: defaultTwilioConfigForm.incoming_path,
       turn_webhook_url: defaultTwilioConfigForm.turn_path,
       recording_webhook_url: defaultTwilioConfigForm.recording_path,
+      stream_webhook_url: defaultTwilioConfigForm.stream_path,
       auth_token_configured: false,
       auth_token_source: "none"
     },
@@ -1467,6 +1556,10 @@ function emptyIntegrationConfigs(): IntegrationConfigs {
       reply_model: defaultOpenAIConfigForm.reply_model,
       speech_model: defaultOpenAIConfigForm.speech_model,
       speech_voice: defaultOpenAIConfigForm.speech_voice,
+      realtime_enabled: defaultOpenAIConfigForm.realtime_enabled,
+      realtime_model: defaultOpenAIConfigForm.realtime_model,
+      realtime_voice: defaultOpenAIConfigForm.realtime_voice,
+      realtime_instructions: defaultOpenAIConfigForm.realtime_instructions,
       api_key_configured: false,
       api_key_source: "none"
     }

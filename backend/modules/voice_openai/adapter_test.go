@@ -99,6 +99,23 @@ func TestSynthesizeReturnsAudioBytes(t *testing.T) {
 	}
 }
 
+func TestParseRealtimeEvents(t *testing.T) {
+	audio := parseRealtimeEvent([]byte(`{"type":"response.output_audio.delta","delta":"abc123"}`))
+	if audio.Type != voice.RealtimeEventAudioDelta || audio.AudioBase64 != "abc123" {
+		t.Fatalf("audio event = %#v", audio)
+	}
+
+	transcript := parseRealtimeEvent([]byte(`{"type":"conversation.item.input_audio_transcription.completed","item_id":"item_1","transcript":"gel removal"}`))
+	if transcript.Type != voice.RealtimeEventTranscriptDone || transcript.ItemID != "item_1" || transcript.Transcript != "gel removal" {
+		t.Fatalf("transcript event = %#v", transcript)
+	}
+
+	done := parseRealtimeEvent([]byte(`{"type":"response.done"}`))
+	if done.Type != voice.RealtimeEventResponseDone {
+		t.Fatalf("done event = %#v", done)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {

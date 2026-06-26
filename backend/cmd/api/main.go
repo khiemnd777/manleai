@@ -117,9 +117,10 @@ func main() {
 	openAIVoiceAdapter := voice_openai.NewAdapter(cfg.Voice.AI.OpenAI)
 	openAIVoiceAdapter.SetConfigResolver(integrationConfigService)
 	aiProviders := voice.AIProviders{
-		STT: openAIVoiceAdapter,
-		LLM: openAIVoiceAdapter,
-		TTS: openAIVoiceAdapter,
+		STT:      openAIVoiceAdapter,
+		LLM:      openAIVoiceAdapter,
+		TTS:      openAIVoiceAdapter,
+		Realtime: openAIVoiceAdapter,
 	}
 	conversationService.SetReplyGenerator(voice.NewGuardedReplyGenerator(aiProviders.LLM))
 	voiceService := voice.NewService(voiceRepo, conversationService, cfg.Voice, aiProviders)

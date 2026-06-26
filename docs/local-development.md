@@ -64,9 +64,12 @@ VOICE_OPENAI_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
 VOICE_OPENAI_REPLY_MODEL=gpt-4.1-mini
 VOICE_OPENAI_SPEECH_MODEL=gpt-4o-mini-tts
 VOICE_OPENAI_SPEECH_VOICE=alloy
+VOICE_OPENAI_REALTIME_ENABLED=false
+VOICE_OPENAI_REALTIME_MODEL=gpt-4o-realtime-preview
+VOICE_OPENAI_REALTIME_VOICE=alloy
 ```
 
-When external STT is configured, Twilio can use `/api/voice/twilio/recording`; otherwise the existing `/api/voice/twilio/turn` speech gather path remains available.
+When external STT is configured, Twilio can use `/api/voice/twilio/recording`; otherwise the existing `/api/voice/twilio/turn` speech gather path remains available. For lower latency, configure Twilio `voice_transport=realtime_stream` and OpenAI realtime settings in the Integrations dashboard; local env values are fallback-only unless no dashboard config exists.
 
 ## Simulate Twilio Phone Booking Webhooks
 

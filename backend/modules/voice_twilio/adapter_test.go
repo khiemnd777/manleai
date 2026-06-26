@@ -57,3 +57,30 @@ func TestRecordResponseUsesPlayWhenAudioURLPresent(t *testing.T) {
 		t.Fatalf("RecordResponse should not include Say prompt when audio is present: %s", body)
 	}
 }
+
+func TestStreamResponseUsesSignedParametersAndWebSocketURL(t *testing.T) {
+	adapter := NewAdapter(config.TwilioVoiceConfig{
+		AuthToken:  "secret",
+		StreamPath: "/api/voice/twilio/stream",
+	}, "https://voice.example.com")
+	token := adapter.StreamToken("CA123", "session_phone")
+
+	body := adapter.StreamResponse("Thank you for calling.", adapter.StreamURL(""), "", map[string]string{
+		"call_sid":     "CA123",
+		"session_id":   "session_phone",
+		"stream_token": token,
+	})
+
+	if !strings.Contains(body, `<Connect><Stream url="wss://voice.example.com/api/voice/twilio/stream">`) {
+		t.Fatalf("StreamResponse should connect to wss stream URL: %s", body)
+	}
+	if !strings.Contains(body, `name="session_id" value="session_phone"`) || !strings.Contains(body, `name="stream_token"`) {
+		t.Fatalf("StreamResponse should include signed custom parameters: %s", body)
+	}
+	if !adapter.VerifyStreamToken("CA123", "session_phone", token) {
+		t.Fatalf("VerifyStreamToken rejected valid token")
+	}
+	if adapter.VerifyStreamToken("CA123", "other_session", token) {
+		t.Fatalf("VerifyStreamToken accepted token for another session")
+	}
+}

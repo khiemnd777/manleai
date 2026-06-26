@@ -12,15 +12,24 @@ const (
 	ProviderTwilio = "twilio"
 	ProviderOpenAI = "openai"
 
-	EventIncomingCall = "incoming_call"
-	EventSpeechTurn   = "speech_turn"
-	EventNoSpeech     = "no_speech"
-	EventSTTFailed    = "stt_failed"
-	EventLLMFailed    = "llm_failed"
-	EventTTSFailed    = "tts_failed"
+	EventIncomingCall      = "incoming_call"
+	EventSpeechTurn        = "speech_turn"
+	EventNoSpeech          = "no_speech"
+	EventSTTFailed         = "stt_failed"
+	EventLLMFailed         = "llm_failed"
+	EventTTSFailed         = "tts_failed"
+	EventRealtimeConnected = "realtime_connected"
+	EventRealtimeFailed    = "realtime_failed"
 
-	InputModeGather    = "gather"
-	InputModeRecording = "recording"
+	InputModeGather         = "gather"
+	InputModeRecording      = "recording"
+	InputModeRealtimeStream = "realtime_stream"
+
+	RealtimeEventAudioDelta     = "audio_delta"
+	RealtimeEventTranscriptDone = "transcript_done"
+	RealtimeEventSpeechStarted  = "speech_started"
+	RealtimeEventResponseDone   = "response_done"
+	RealtimeEventError          = "error"
 )
 
 var (
@@ -67,6 +76,34 @@ type TextToSpeechProvider interface {
 	Configured(ctx context.Context, salonID string) bool
 	ContentType() string
 	Synthesize(ctx context.Context, salonID string, text string, voice string) ([]byte, error)
+}
+
+type RealtimeSpeechProvider interface {
+	Name() string
+	Configured(ctx context.Context, salonID string) bool
+	ConnectRealtime(ctx context.Context, salonID string, opts RealtimeSessionOptions) (RealtimeSession, error)
+}
+
+type RealtimeSession interface {
+	AppendInputAudio(ctx context.Context, base64Audio string) error
+	Speak(ctx context.Context, text string) error
+	Events() <-chan RealtimeEvent
+	Close() error
+}
+
+type RealtimeSessionOptions struct {
+	SessionID    string
+	CallID       string
+	Voice        string
+	Instructions string
+}
+
+type RealtimeEvent struct {
+	Type        string
+	ItemID      string
+	Transcript  string
+	AudioBase64 string
+	Error       string
 }
 
 type ConfigResolver interface {
@@ -190,6 +227,7 @@ type VoiceAIStatus struct {
 	STT        ProviderCapabilityStatus `json:"stt"`
 	LLM        ProviderCapabilityStatus `json:"llm"`
 	TTS        ProviderCapabilityStatus `json:"tts"`
+	Realtime   ProviderCapabilityStatus `json:"realtime"`
 }
 
 type Status struct {
@@ -199,6 +237,7 @@ type Status struct {
 	InboundWebhookURL     string                `json:"inbound_webhook_url"`
 	TurnWebhookURL        string                `json:"turn_webhook_url"`
 	RecordingWebhookURL   string                `json:"recording_webhook_url"`
+	StreamWebhookURL      string                `json:"stream_webhook_url"`
 	SalonPhone            string                `json:"salon_phone,omitempty"`
 	Ready                 bool                  `json:"ready"`
 	PhoneBookingReady     bool                  `json:"phone_booking_ready"`
@@ -209,9 +248,10 @@ type Status struct {
 }
 
 type AIProviders struct {
-	STT SpeechToTextProvider
-	LLM LanguageModelProvider
-	TTS TextToSpeechProvider
+	STT      SpeechToTextProvider
+	LLM      LanguageModelProvider
+	TTS      TextToSpeechProvider
+	Realtime RealtimeSpeechProvider
 }
 
 type AudioOutputRecord struct {

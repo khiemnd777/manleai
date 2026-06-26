@@ -343,9 +343,12 @@ keys, client secrets, encrypted secrets, or POS connection token state.
       "incoming_path": "/api/voice/twilio/incoming",
       "turn_path": "/api/voice/twilio/turn",
       "recording_path": "/api/voice/twilio/recording",
+      "stream_path": "/api/voice/twilio/stream",
+      "voice_transport": "realtime_stream",
       "inbound_webhook_url": "https://api.example.com/api/voice/twilio/incoming",
       "turn_webhook_url": "https://api.example.com/api/voice/twilio/turn",
       "recording_webhook_url": "https://api.example.com/api/voice/twilio/recording",
+      "stream_webhook_url": "wss://api.example.com/api/voice/twilio/stream",
       "auth_token_configured": true,
       "auth_token_source": "database"
     },
@@ -358,6 +361,10 @@ keys, client secrets, encrypted secrets, or POS connection token state.
       "reply_model": "gpt-4.1-mini",
       "speech_model": "gpt-4o-mini-tts",
       "speech_voice": "alloy",
+      "realtime_enabled": true,
+      "realtime_model": "gpt-4o-realtime-preview",
+      "realtime_voice": "alloy",
+      "realtime_instructions": "",
       "api_key_configured": true,
       "api_key_source": "database"
     }
@@ -529,9 +536,12 @@ configured and whether it came from dashboard storage or environment fallback.
     "incoming_path": "/api/voice/twilio/incoming",
     "turn_path": "/api/voice/twilio/turn",
     "recording_path": "/api/voice/twilio/recording",
+    "stream_path": "/api/voice/twilio/stream",
+    "voice_transport": "realtime_stream",
     "inbound_webhook_url": "https://api.example.com/api/voice/twilio/incoming",
     "turn_webhook_url": "https://api.example.com/api/voice/twilio/turn",
     "recording_webhook_url": "https://api.example.com/api/voice/twilio/recording",
+    "stream_webhook_url": "wss://api.example.com/api/voice/twilio/stream",
     "auth_token_configured": true,
     "auth_token_source": "database"
   },
@@ -544,6 +554,10 @@ configured and whether it came from dashboard storage or environment fallback.
     "reply_model": "gpt-4.1-mini",
     "speech_model": "gpt-4o-mini-tts",
     "speech_voice": "alloy",
+    "realtime_enabled": true,
+    "realtime_model": "gpt-4o-realtime-preview",
+    "realtime_voice": "alloy",
+    "realtime_instructions": "",
     "api_key_configured": true,
     "api_key_source": "database"
   }
@@ -573,7 +587,9 @@ configured and whether it came from dashboard storage or environment fallback.
   "clear_auth_token": false,
   "incoming_path": "/api/voice/twilio/incoming",
   "turn_path": "/api/voice/twilio/turn",
-  "recording_path": "/api/voice/twilio/recording"
+  "recording_path": "/api/voice/twilio/recording",
+  "stream_path": "/api/voice/twilio/stream",
+  "voice_transport": "realtime_stream"
 }
 ```
 
@@ -588,7 +604,11 @@ configured and whether it came from dashboard storage or environment fallback.
   "transcription_model": "gpt-4o-mini-transcribe",
   "reply_model": "gpt-4.1-mini",
   "speech_model": "gpt-4o-mini-tts",
-  "speech_voice": "alloy"
+  "speech_voice": "alloy",
+  "realtime_enabled": true,
+  "realtime_model": "gpt-4o-realtime-preview",
+  "realtime_voice": "alloy",
+  "realtime_instructions": ""
 }
 ```
 
@@ -1158,6 +1178,7 @@ Returns owner-scoped live voice, phone booking, and external AI provider readine
   "inbound_webhook_url": "https://api.example.com/api/voice/twilio/incoming",
   "turn_webhook_url": "https://api.example.com/api/voice/twilio/turn",
   "recording_webhook_url": "https://api.example.com/api/voice/twilio/recording",
+  "stream_webhook_url": "wss://api.example.com/api/voice/twilio/stream",
   "salon_phone": "+16292536211",
   "ready": true,
   "phone_booking_ready": true,
@@ -1205,6 +1226,13 @@ Returns owner-scoped live voice, phone booking, and external AI provider readine
       "ready": true,
       "model": "gpt-4o-mini-tts",
       "voice": "alloy"
+    },
+    "realtime": {
+      "provider": "openai",
+      "configured": true,
+      "ready": true,
+      "model": "gpt-4o-realtime-preview",
+      "voice": "alloy"
     }
   }
 }
@@ -1212,7 +1240,7 @@ Returns owner-scoped live voice, phone booking, and external AI provider readine
 
 `POST /api/voice/twilio/incoming`
 
-Public Twilio Programmable Voice webhook for a new inbound call. Requires a valid `X-Twilio-Signature` generated with the salon's configured Twilio auth token. The webhook matches Twilio `To` to the salon phone, creates or reuses a `phone` conversation session, records a `voice_webhook_events` audit row, and returns TwiML with a speech `<Gather>`.
+Public Twilio Programmable Voice webhook for a new inbound call. Requires a valid `X-Twilio-Signature` generated with the salon's configured Twilio auth token. The webhook matches Twilio `To` to the salon phone, creates or reuses a `phone` conversation session, records a `voice_webhook_events` audit row, and returns TwiML for the configured input mode: speech `<Gather>`, recording mode, or `<Connect><Stream>` when realtime streaming is enabled and ready.
 
 Expected Twilio form fields include:
 
@@ -1248,6 +1276,10 @@ From
 To
 RecordingUrl
 ```
+
+`GET /api/voice/twilio/stream`
+
+Public Twilio Media Streams WebSocket endpoint for realtime audio mode. The endpoint is not configured directly in Twilio Console; the incoming webhook returns `<Connect><Stream>` with signed custom parameters for the existing call session. The stream forwards Twilio g711 audio frames to the configured OpenAI Realtime adapter, routes completed transcripts through the same backend conversation engine and booking service, then streams backend-approved audio responses back to Twilio. If realtime configuration is missing, voice status falls back to the recording or gather path.
 
 `GET /api/voice/audio/:id`
 

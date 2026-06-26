@@ -110,6 +110,8 @@ func (s *Service) UpdateTwilio(ctx context.Context, salonID string, ownerUserID 
 		"incoming_path":   defaultString(strings.TrimSpace(req.IncomingPath), "/api/voice/twilio/incoming"),
 		"turn_path":       defaultString(strings.TrimSpace(req.TurnPath), "/api/voice/twilio/turn"),
 		"recording_path":  defaultString(strings.TrimSpace(req.RecordingPath), "/api/voice/twilio/recording"),
+		"stream_path":     defaultString(strings.TrimSpace(req.StreamPath), "/api/voice/twilio/stream"),
+		"voice_transport": normalizeVoiceTransport(req.VoiceTransport),
 	}
 	if settings["public_base_url"] != "" {
 		parsed, err := url.ParseRequestURI(settings["public_base_url"])
@@ -148,11 +150,15 @@ func (s *Service) UpdateOpenAI(ctx context.Context, salonID string, ownerUserID 
 		return nil, err
 	}
 	settings := map[string]string{
-		"base_url":            strings.TrimRight(strings.TrimSpace(req.BaseURL), "/"),
-		"transcription_model": strings.TrimSpace(req.TranscriptionModel),
-		"reply_model":         strings.TrimSpace(req.ReplyModel),
-		"speech_model":        strings.TrimSpace(req.SpeechModel),
-		"speech_voice":        strings.TrimSpace(req.SpeechVoice),
+		"base_url":              strings.TrimRight(strings.TrimSpace(req.BaseURL), "/"),
+		"transcription_model":   strings.TrimSpace(req.TranscriptionModel),
+		"reply_model":           strings.TrimSpace(req.ReplyModel),
+		"speech_model":          strings.TrimSpace(req.SpeechModel),
+		"speech_voice":          strings.TrimSpace(req.SpeechVoice),
+		"realtime_enabled":      boolString(req.RealtimeEnabled),
+		"realtime_model":        strings.TrimSpace(req.RealtimeModel),
+		"realtime_voice":        strings.TrimSpace(req.RealtimeVoice),
+		"realtime_instructions": strings.TrimSpace(req.RealtimeInstructions),
 	}
 	if settings["base_url"] != "" {
 		parsed, err := url.ParseRequestURI(settings["base_url"])
@@ -161,6 +167,9 @@ func (s *Service) UpdateOpenAI(ctx context.Context, salonID string, ownerUserID 
 		}
 	}
 	if req.Enabled && (settings["base_url"] == "" || settings["transcription_model"] == "" || settings["reply_model"] == "" || settings["speech_model"] == "" || settings["speech_voice"] == "") {
+		return nil, ErrValidation
+	}
+	if req.Enabled && req.RealtimeEnabled && (settings["realtime_model"] == "" || settings["realtime_voice"] == "") {
 		return nil, ErrValidation
 	}
 	existing, secrets, err := s.existingConfigAndSecrets(ctx, salonID, ProviderOpenAI)
@@ -210,12 +219,16 @@ func (s *Service) ResolveTwilioConfig(ctx context.Context, salonID string) (conf
 	cfg.IncomingPath = defaultString(strings.TrimSpace(cfg.IncomingPath), "/api/voice/twilio/incoming")
 	cfg.TurnPath = defaultString(strings.TrimSpace(cfg.TurnPath), "/api/voice/twilio/turn")
 	cfg.RecordingPath = defaultString(strings.TrimSpace(cfg.RecordingPath), "/api/voice/twilio/recording")
+	cfg.StreamPath = defaultString(strings.TrimSpace(cfg.StreamPath), "/api/voice/twilio/stream")
+	cfg.VoiceTransport = normalizeVoiceTransport(defaultString(cfg.VoiceTransport, "recording"))
 	item, secrets := s.resolveStored(ctx, salonID, ProviderTwilio)
 	if item != nil {
 		publicBaseURL = strings.TrimRight(strings.TrimSpace(item.Settings["public_base_url"]), "/")
 		cfg.IncomingPath = defaultString(strings.TrimSpace(item.Settings["incoming_path"]), cfg.IncomingPath)
 		cfg.TurnPath = defaultString(strings.TrimSpace(item.Settings["turn_path"]), cfg.TurnPath)
 		cfg.RecordingPath = defaultString(strings.TrimSpace(item.Settings["recording_path"]), cfg.RecordingPath)
+		cfg.StreamPath = defaultString(strings.TrimSpace(item.Settings["stream_path"]), cfg.StreamPath)
+		cfg.VoiceTransport = normalizeVoiceTransport(defaultString(item.Settings["voice_transport"], cfg.VoiceTransport))
 	}
 	if secret := strings.TrimSpace(secrets["auth_token"]); secret != "" {
 		cfg.AuthToken = secret
@@ -230,6 +243,9 @@ func (s *Service) ResolveOpenAIConfig(ctx context.Context, salonID string) (conf
 	cfg.ReplyModel = defaultString(strings.TrimSpace(cfg.ReplyModel), "gpt-4.1-mini")
 	cfg.SpeechModel = defaultString(strings.TrimSpace(cfg.SpeechModel), "gpt-4o-mini-tts")
 	cfg.SpeechVoice = defaultString(strings.TrimSpace(cfg.SpeechVoice), "alloy")
+	cfg.RealtimeModel = defaultString(strings.TrimSpace(cfg.RealtimeModel), "gpt-4o-realtime-preview")
+	cfg.RealtimeVoice = defaultString(strings.TrimSpace(cfg.RealtimeVoice), cfg.SpeechVoice)
+	cfg.RealtimeInstructions = strings.TrimSpace(cfg.RealtimeInstructions)
 	enabled := strings.TrimSpace(s.cfg.Voice.AI.Provider) == ProviderOpenAI
 	item, secrets := s.resolveStored(ctx, salonID, ProviderOpenAI)
 	if item != nil {
@@ -239,6 +255,10 @@ func (s *Service) ResolveOpenAIConfig(ctx context.Context, salonID string) (conf
 		cfg.ReplyModel = defaultString(strings.TrimSpace(item.Settings["reply_model"]), cfg.ReplyModel)
 		cfg.SpeechModel = defaultString(strings.TrimSpace(item.Settings["speech_model"]), cfg.SpeechModel)
 		cfg.SpeechVoice = defaultString(strings.TrimSpace(item.Settings["speech_voice"]), cfg.SpeechVoice)
+		cfg.RealtimeEnabled = boolSetting(item.Settings["realtime_enabled"])
+		cfg.RealtimeModel = defaultString(strings.TrimSpace(item.Settings["realtime_model"]), cfg.RealtimeModel)
+		cfg.RealtimeVoice = defaultString(strings.TrimSpace(item.Settings["realtime_voice"]), cfg.SpeechVoice)
+		cfg.RealtimeInstructions = strings.TrimSpace(item.Settings["realtime_instructions"])
 	}
 	if secret := strings.TrimSpace(secrets["api_key"]); secret != "" {
 		cfg.APIKey = secret
@@ -322,10 +342,14 @@ func (s *Service) twilioResponse(item *StoredConfig) TwilioSettingsResponse {
 		cfg.IncomingPath = defaultString(strings.TrimSpace(item.Settings["incoming_path"]), cfg.IncomingPath)
 		cfg.TurnPath = defaultString(strings.TrimSpace(item.Settings["turn_path"]), cfg.TurnPath)
 		cfg.RecordingPath = defaultString(strings.TrimSpace(item.Settings["recording_path"]), cfg.RecordingPath)
+		cfg.StreamPath = defaultString(strings.TrimSpace(item.Settings["stream_path"]), cfg.StreamPath)
+		cfg.VoiceTransport = normalizeVoiceTransport(defaultString(item.Settings["voice_transport"], cfg.VoiceTransport))
 	}
 	cfg.IncomingPath = defaultString(strings.TrimSpace(cfg.IncomingPath), "/api/voice/twilio/incoming")
 	cfg.TurnPath = defaultString(strings.TrimSpace(cfg.TurnPath), "/api/voice/twilio/turn")
 	cfg.RecordingPath = defaultString(strings.TrimSpace(cfg.RecordingPath), "/api/voice/twilio/recording")
+	cfg.StreamPath = defaultString(strings.TrimSpace(cfg.StreamPath), "/api/voice/twilio/stream")
+	cfg.VoiceTransport = normalizeVoiceTransport(defaultString(cfg.VoiceTransport, "recording"))
 	secretSource := SecretSourceNone
 	if item != nil {
 		if secrets, err := s.decryptSecrets(item.SecretsEncrypted); err == nil && strings.TrimSpace(secrets["auth_token"]) != "" {
@@ -343,9 +367,12 @@ func (s *Service) twilioResponse(item *StoredConfig) TwilioSettingsResponse {
 		IncomingPath:        cfg.IncomingPath,
 		TurnPath:            cfg.TurnPath,
 		RecordingPath:       cfg.RecordingPath,
+		StreamPath:          cfg.StreamPath,
+		VoiceTransport:      cfg.VoiceTransport,
 		InboundWebhookURL:   urlForPath(publicBaseURL, cfg.IncomingPath),
 		TurnWebhookURL:      urlForPath(publicBaseURL, cfg.TurnPath),
 		RecordingWebhookURL: urlForPath(publicBaseURL, cfg.RecordingPath),
+		StreamWebhookURL:    wsURLForPath(publicBaseURL, cfg.StreamPath),
 		AuthTokenConfigured: secretSource != SecretSourceNone,
 		AuthTokenSource:     secretSource,
 		UpdatedAt:           updatedAt,
@@ -364,12 +391,19 @@ func (s *Service) openAIResponse(item *StoredConfig) OpenAISettingsResponse {
 		cfg.ReplyModel = defaultString(strings.TrimSpace(item.Settings["reply_model"]), cfg.ReplyModel)
 		cfg.SpeechModel = defaultString(strings.TrimSpace(item.Settings["speech_model"]), cfg.SpeechModel)
 		cfg.SpeechVoice = defaultString(strings.TrimSpace(item.Settings["speech_voice"]), cfg.SpeechVoice)
+		cfg.RealtimeEnabled = boolSetting(item.Settings["realtime_enabled"])
+		cfg.RealtimeModel = defaultString(strings.TrimSpace(item.Settings["realtime_model"]), cfg.RealtimeModel)
+		cfg.RealtimeVoice = defaultString(strings.TrimSpace(item.Settings["realtime_voice"]), cfg.SpeechVoice)
+		cfg.RealtimeInstructions = strings.TrimSpace(item.Settings["realtime_instructions"])
 	}
 	cfg.BaseURL = defaultString(strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"), "https://api.openai.com/v1")
 	cfg.TranscriptionModel = defaultString(strings.TrimSpace(cfg.TranscriptionModel), "gpt-4o-mini-transcribe")
 	cfg.ReplyModel = defaultString(strings.TrimSpace(cfg.ReplyModel), "gpt-4.1-mini")
 	cfg.SpeechModel = defaultString(strings.TrimSpace(cfg.SpeechModel), "gpt-4o-mini-tts")
 	cfg.SpeechVoice = defaultString(strings.TrimSpace(cfg.SpeechVoice), "alloy")
+	cfg.RealtimeModel = defaultString(strings.TrimSpace(cfg.RealtimeModel), "gpt-4o-realtime-preview")
+	cfg.RealtimeVoice = defaultString(strings.TrimSpace(cfg.RealtimeVoice), cfg.SpeechVoice)
+	cfg.RealtimeInstructions = strings.TrimSpace(cfg.RealtimeInstructions)
 	secretSource := SecretSourceNone
 	if item != nil {
 		if secrets, err := s.decryptSecrets(item.SecretsEncrypted); err == nil && strings.TrimSpace(secrets["api_key"]) != "" {
@@ -381,17 +415,21 @@ func (s *Service) openAIResponse(item *StoredConfig) OpenAISettingsResponse {
 	}
 	updatedAt := updatedAt(item)
 	return OpenAISettingsResponse{
-		Provider:           ProviderOpenAI,
-		Enabled:            enabled,
-		Configured:         enabled && secretSource != SecretSourceNone && cfg.TranscriptionModel != "" && cfg.ReplyModel != "" && cfg.SpeechModel != "" && cfg.SpeechVoice != "",
-		BaseURL:            cfg.BaseURL,
-		TranscriptionModel: cfg.TranscriptionModel,
-		ReplyModel:         cfg.ReplyModel,
-		SpeechModel:        cfg.SpeechModel,
-		SpeechVoice:        cfg.SpeechVoice,
-		APIKeyConfigured:   secretSource != SecretSourceNone,
-		APIKeySource:       secretSource,
-		UpdatedAt:          updatedAt,
+		Provider:             ProviderOpenAI,
+		Enabled:              enabled,
+		Configured:           enabled && secretSource != SecretSourceNone && cfg.TranscriptionModel != "" && cfg.ReplyModel != "" && cfg.SpeechModel != "" && cfg.SpeechVoice != "",
+		BaseURL:              cfg.BaseURL,
+		TranscriptionModel:   cfg.TranscriptionModel,
+		ReplyModel:           cfg.ReplyModel,
+		SpeechModel:          cfg.SpeechModel,
+		SpeechVoice:          cfg.SpeechVoice,
+		RealtimeEnabled:      cfg.RealtimeEnabled,
+		RealtimeModel:        cfg.RealtimeModel,
+		RealtimeVoice:        cfg.RealtimeVoice,
+		RealtimeInstructions: cfg.RealtimeInstructions,
+		APIKeyConfigured:     secretSource != SecretSourceNone,
+		APIKeySource:         secretSource,
+		UpdatedAt:            updatedAt,
 	}
 }
 
@@ -481,6 +519,31 @@ func normalizeEnvironment(value string) string {
 	return "sandbox"
 }
 
+func normalizeVoiceTransport(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "realtime_stream":
+		return "realtime_stream"
+	default:
+		return "recording"
+	}
+}
+
+func boolString(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
+func boolSetting(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func urlForPath(publicBaseURL string, path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -494,4 +557,23 @@ func urlForPath(publicBaseURL string, path string) string {
 		return path
 	}
 	return publicBaseURL + "/" + strings.TrimLeft(path, "/")
+}
+
+func wsURLForPath(publicBaseURL string, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if strings.HasPrefix(path, "ws://") || strings.HasPrefix(path, "wss://") {
+		return path
+	}
+	webhookURL := urlForPath(publicBaseURL, path)
+	switch {
+	case strings.HasPrefix(webhookURL, "https://"):
+		return "wss://" + strings.TrimPrefix(webhookURL, "https://")
+	case strings.HasPrefix(webhookURL, "http://"):
+		return "ws://" + strings.TrimPrefix(webhookURL, "http://")
+	default:
+		return webhookURL
+	}
 }

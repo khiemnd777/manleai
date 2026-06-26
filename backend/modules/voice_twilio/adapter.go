@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"io"
@@ -76,6 +78,10 @@ func (a *Adapter) RecordingURL(fallbackBaseURL string) string {
 	return a.urlForPath(a.cfg.RecordingPath, fallbackBaseURL)
 }
 
+func (a *Adapter) StreamURL(fallbackBaseURL string) string {
+	return a.streamURLForPath(a.cfg.StreamPath, fallbackBaseURL)
+}
+
 func (a *Adapter) IncomingURL(fallbackBaseURL string) string {
 	return a.urlForPath(a.cfg.IncomingPath, fallbackBaseURL)
 }
@@ -105,12 +111,55 @@ func (a *Adapter) RecordResponse(message string, actionURL string, audioURL stri
 	return b.String()
 }
 
+func (a *Adapter) StreamResponse(message string, streamURL string, audioURL string, params map[string]string) string {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><Response>`)
+	writePrompt(&b, message, audioURL)
+	b.WriteString(`<Connect><Stream url="`)
+	writeEscaped(&b, streamURL)
+	b.WriteString(`">`)
+	for key, value := range params {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		b.WriteString(`<Parameter name="`)
+		writeEscaped(&b, key)
+		b.WriteString(`" value="`)
+		writeEscaped(&b, value)
+		b.WriteString(`"/>`)
+	}
+	b.WriteString(`</Stream></Connect><Hangup/></Response>`)
+	return b.String()
+}
+
 func (a *Adapter) FinalResponse(message string, audioURL string) string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><Response>`)
 	writePrompt(&b, message, audioURL)
 	b.WriteString(`<Hangup/></Response>`)
 	return b.String()
+}
+
+func (a *Adapter) StreamToken(providerCallID string, sessionID string) string {
+	if !a.Configured() {
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte(strings.TrimSpace(a.cfg.AuthToken)))
+	_, _ = mac.Write([]byte(strings.TrimSpace(providerCallID)))
+	_, _ = mac.Write([]byte(":"))
+	_, _ = mac.Write([]byte(strings.TrimSpace(sessionID)))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func (a *Adapter) VerifyStreamToken(providerCallID string, sessionID string, token string) bool {
+	expected := a.StreamToken(providerCallID, sessionID)
+	token = strings.TrimSpace(token)
+	if expected == "" || token == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(expected), []byte(token)) == 1
 }
 
 func (a *Adapter) FetchRecording(ctx context.Context, recordingURL string, accountSID string) ([]byte, string, error) {
@@ -163,6 +212,25 @@ func (a *Adapter) urlForPath(path string, fallbackBaseURL string) string {
 		return path
 	}
 	return baseURL + "/" + strings.TrimLeft(path, "/")
+}
+
+func (a *Adapter) streamURLForPath(path string, fallbackBaseURL string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if strings.HasPrefix(path, "ws://") || strings.HasPrefix(path, "wss://") {
+		return path
+	}
+	url := a.urlForPath(path, fallbackBaseURL)
+	switch {
+	case strings.HasPrefix(url, "https://"):
+		return "wss://" + strings.TrimPrefix(url, "https://")
+	case strings.HasPrefix(url, "http://"):
+		return "ws://" + strings.TrimPrefix(url, "http://")
+	default:
+		return url
+	}
 }
 
 func writePrompt(b *strings.Builder, message string, audioURL string) {

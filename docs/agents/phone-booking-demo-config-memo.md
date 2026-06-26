@@ -277,11 +277,14 @@ In the ManleAI Integrations dashboard, Twilio tab:
 - `Incoming path`: `/api/voice/twilio/incoming`
 - `Turn path`: `/api/voice/twilio/turn`
 - `Recording path`: `/api/voice/twilio/recording`
+- `Stream path`: `/api/voice/twilio/stream`
+- `Voice transport`: `recording` for the legacy recording loop, or `realtime_stream` for Twilio Media Streams + OpenAI Realtime.
 
 Legacy env fallback names, used only when no dashboard Twilio config exists:
 `VOICE_PROVIDER`, `VOICE_PUBLIC_BASE_URL`, `VOICE_TWILIO_AUTH_TOKEN`,
 `VOICE_TWILIO_INCOMING_PATH`, `VOICE_TWILIO_TURN_PATH`, and
-`VOICE_TWILIO_RECORDING_PATH`.
+`VOICE_TWILIO_RECORDING_PATH`, `VOICE_TWILIO_STREAM_PATH`, and
+`VOICE_TWILIO_VOICE_TRANSPORT`.
 
 In Twilio phone number voice settings:
 
@@ -289,6 +292,11 @@ In Twilio phone number voice settings:
 When a call comes in:
 POST https://<public-api-url>/api/voice/twilio/incoming
 ```
+
+Do not paste the realtime stream URL into the Twilio phone number settings. The
+backend returns `<Connect><Stream>` from the incoming webhook with signed
+call-session parameters when `Voice transport` is `realtime_stream` and OpenAI
+Realtime is ready.
 
 Twilio webhook signature verification uses the dashboard-saved Twilio auth
 token first, then `VOICE_TWILIO_AUTH_TOKEN` only as fallback. If the token is
@@ -307,17 +315,25 @@ The local app can run Twilio speech `<Gather>` without OpenAI STT/TTS. For a ful
 - `Reply model`: `gpt-4.1-mini`
 - `Speech model`: `gpt-4o-mini-tts`
 - `Speech voice`: `alloy`
+- Optional realtime mode:
+  - Enable realtime
+  - `Realtime model`: `gpt-4o-realtime-preview`
+  - `Realtime voice`: `alloy`
+  - `Realtime instructions`: optional non-secret operating notes for the audio bridge
 
 Legacy env fallback names, used only when no dashboard OpenAI config exists:
 `VOICE_AI_PROVIDER`, `VOICE_OPENAI_API_KEY`, `VOICE_OPENAI_BASE_URL`,
 `VOICE_OPENAI_TRANSCRIPTION_MODEL`, `VOICE_OPENAI_REPLY_MODEL`,
-`VOICE_OPENAI_SPEECH_MODEL`, and `VOICE_OPENAI_SPEECH_VOICE`.
+`VOICE_OPENAI_SPEECH_MODEL`, `VOICE_OPENAI_SPEECH_VOICE`,
+`VOICE_OPENAI_REALTIME_ENABLED`, `VOICE_OPENAI_REALTIME_MODEL`,
+`VOICE_OPENAI_REALTIME_VOICE`, and `VOICE_OPENAI_REALTIME_INSTRUCTIONS`.
 
 Readiness meaning:
 
 - STT ready enables recording mode.
 - LLM ready allows safe reply rewriting, but it must not override POS-first confirmation safety.
 - TTS ready allows Twilio `<Play>` audio responses.
+- Realtime ready enables Twilio Media Streams input mode when the Twilio tab also selects `realtime_stream`. Completed transcripts still go through the backend conversation engine and booking service; OpenAI Realtime must not confirm bookings on its own.
 
 If OpenAI is not configured, do not block the whole phone webhook demo. Use Twilio Gather / deterministic safe replies for initial testing.
 

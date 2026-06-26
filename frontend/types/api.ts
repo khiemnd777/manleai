@@ -100,9 +100,12 @@ export type TwilioIntegrationConfig = {
   incoming_path: string;
   turn_path: string;
   recording_path: string;
+  stream_path: string;
+  voice_transport: string;
   inbound_webhook_url: string;
   turn_webhook_url: string;
   recording_webhook_url: string;
+  stream_webhook_url: string;
   auth_token_configured: boolean;
   auth_token_source: string;
   updated_at?: string;
@@ -117,6 +120,10 @@ export type OpenAIIntegrationConfig = {
   reply_model: string;
   speech_model: string;
   speech_voice: string;
+  realtime_enabled: boolean;
+  realtime_model: string;
+  realtime_voice: string;
+  realtime_instructions: string;
   api_key_configured: boolean;
   api_key_source: string;
   updated_at?: string;
@@ -679,11 +686,12 @@ export type VoiceStatus = {
   inbound_webhook_url: string;
   turn_webhook_url: string;
   recording_webhook_url: string;
+  stream_webhook_url: string;
   salon_phone?: string;
   ready: boolean;
   phone_booking_ready: boolean;
   blocked_reason?: string;
-  input_mode: "gather" | "recording" | string;
+  input_mode: "gather" | "recording" | "realtime_stream" | string;
   ai: VoiceAIStatus;
   booking: VoiceBookingReadiness;
 };
@@ -720,6 +728,7 @@ export type VoiceAIStatus = {
   stt: VoiceCapabilityStatus;
   llm: VoiceCapabilityStatus;
   tts: VoiceCapabilityStatus;
+  realtime: VoiceCapabilityStatus;
 };
 
 export type KnowledgeItem = {

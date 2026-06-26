@@ -49,26 +49,33 @@ type TwilioSettingsResponse struct {
 	IncomingPath        string     `json:"incoming_path"`
 	TurnPath            string     `json:"turn_path"`
 	RecordingPath       string     `json:"recording_path"`
+	StreamPath          string     `json:"stream_path"`
+	VoiceTransport      string     `json:"voice_transport"`
 	InboundWebhookURL   string     `json:"inbound_webhook_url"`
 	TurnWebhookURL      string     `json:"turn_webhook_url"`
 	RecordingWebhookURL string     `json:"recording_webhook_url"`
+	StreamWebhookURL    string     `json:"stream_webhook_url"`
 	AuthTokenConfigured bool       `json:"auth_token_configured"`
 	AuthTokenSource     string     `json:"auth_token_source"`
 	UpdatedAt           *time.Time `json:"updated_at,omitempty"`
 }
 
 type OpenAISettingsResponse struct {
-	Provider           string     `json:"provider"`
-	Enabled            bool       `json:"enabled"`
-	Configured         bool       `json:"configured"`
-	BaseURL            string     `json:"base_url"`
-	TranscriptionModel string     `json:"transcription_model"`
-	ReplyModel         string     `json:"reply_model"`
-	SpeechModel        string     `json:"speech_model"`
-	SpeechVoice        string     `json:"speech_voice"`
-	APIKeyConfigured   bool       `json:"api_key_configured"`
-	APIKeySource       string     `json:"api_key_source"`
-	UpdatedAt          *time.Time `json:"updated_at,omitempty"`
+	Provider             string     `json:"provider"`
+	Enabled              bool       `json:"enabled"`
+	Configured           bool       `json:"configured"`
+	BaseURL              string     `json:"base_url"`
+	TranscriptionModel   string     `json:"transcription_model"`
+	ReplyModel           string     `json:"reply_model"`
+	SpeechModel          string     `json:"speech_model"`
+	SpeechVoice          string     `json:"speech_voice"`
+	RealtimeEnabled      bool       `json:"realtime_enabled"`
+	RealtimeModel        string     `json:"realtime_model"`
+	RealtimeVoice        string     `json:"realtime_voice"`
+	RealtimeInstructions string     `json:"realtime_instructions"`
+	APIKeyConfigured     bool       `json:"api_key_configured"`
+	APIKeySource         string     `json:"api_key_source"`
+	UpdatedAt            *time.Time `json:"updated_at,omitempty"`
 }
 
 type UpdateSquareSettingsRequest struct {
@@ -88,15 +95,21 @@ type UpdateTwilioSettingsRequest struct {
 	IncomingPath   string `json:"incoming_path"`
 	TurnPath       string `json:"turn_path"`
 	RecordingPath  string `json:"recording_path"`
+	StreamPath     string `json:"stream_path"`
+	VoiceTransport string `json:"voice_transport"`
 }
 
 type UpdateOpenAISettingsRequest struct {
-	Enabled            bool   `json:"enabled"`
-	APIKey             string `json:"api_key"`
-	ClearAPIKey        bool   `json:"clear_api_key"`
-	BaseURL            string `json:"base_url"`
-	TranscriptionModel string `json:"transcription_model"`
-	ReplyModel         string `json:"reply_model"`
-	SpeechModel        string `json:"speech_model"`
-	SpeechVoice        string `json:"speech_voice"`
+	Enabled              bool   `json:"enabled"`
+	APIKey               string `json:"api_key"`
+	ClearAPIKey          bool   `json:"clear_api_key"`
+	BaseURL              string `json:"base_url"`
+	TranscriptionModel   string `json:"transcription_model"`
+	ReplyModel           string `json:"reply_model"`
+	SpeechModel          string `json:"speech_model"`
+	SpeechVoice          string `json:"speech_voice"`
+	RealtimeEnabled      bool   `json:"realtime_enabled"`
+	RealtimeModel        string `json:"realtime_model"`
+	RealtimeVoice        string `json:"realtime_voice"`
+	RealtimeInstructions string `json:"realtime_instructions"`
 }

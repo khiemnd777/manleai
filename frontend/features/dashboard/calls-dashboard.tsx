@@ -554,6 +554,7 @@ function ReadinessPanel({ aiEnabled, voiceStatus }: { aiEnabled: boolean; voiceS
               <Info label="Salon phone" value={voiceStatus?.salon_phone || "Not configured"} />
               <Info label="Inbound webhook" value={<span className="break-all font-mono text-xs">{voiceStatus?.inbound_webhook_url || "Not configured"}</span>} />
               <Info label="Recording webhook" value={<span className="break-all font-mono text-xs">{voiceStatus?.recording_webhook_url || "Not configured"}</span>} />
+              <Info label="Realtime stream" value={<span className="break-all font-mono text-xs">{voiceStatus?.stream_webhook_url || "Not configured"}</span>} />
             </dl>
           </div>
         </div>
@@ -569,13 +570,14 @@ function ReadinessPanel({ aiEnabled, voiceStatus }: { aiEnabled: boolean; voiceS
             </div>
             <CardDescription className={aiReady ? "text-emerald-800" : "text-amber-900"}>
               {aiReady
-                ? "External STT, LLM, and TTS are configured behind the voice runtime."
+                ? "External STT, LLM, TTS, and realtime audio settings are configured behind the voice runtime."
                 : "Configure OpenAI voice settings before external AI voice turns are ready."}
             </CardDescription>
             <div className="mt-4 space-y-3 text-sm">
               <CapabilityRow label="STT" capability={voiceStatus?.ai?.stt} />
               <CapabilityRow label="LLM" capability={voiceStatus?.ai?.llm} />
               <CapabilityRow label="TTS" capability={voiceStatus?.ai?.tts} />
+              <CapabilityRow label="Realtime" capability={voiceStatus?.ai?.realtime} />
             </div>
           </div>
         </div>

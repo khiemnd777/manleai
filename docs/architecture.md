@@ -24,8 +24,8 @@ modules/integration_config encrypted salon-scoped provider app credentials and r
 modules/conversation deterministic simulator sessions, transcripts, summaries, and handoffs
 modules/training     salon-authored knowledge base and owner corrections
 modules/voice        provider-neutral live voice runtime, status, routing, and webhook event audit
-modules/voice_openai OpenAI STT, guarded LLM reply, and TTS adapters
-modules/voice_twilio Twilio signature verification, form parsing, and TwiML responses
+modules/voice_openai OpenAI STT, guarded LLM reply, TTS, and Realtime adapters
+modules/voice_twilio Twilio signature verification, form parsing, TwiML responses, and Media Streams bridge
 ```
 
 The frontend is organized as:
@@ -98,7 +98,7 @@ Booking workflow state belongs to the backend. Create-booking, reschedule, cance
 
 The Milestone 4 conversation simulator and Milestone 5 live phone webhook path call the booking service through a provider-neutral booking tool. They do not import Square packages, read POS tokens, build Square payloads, or use Square location IDs directly. The runtime checks provider-neutral availability, offers available slots to the caller, stores offered slot segment assignments on the call session, and only calls booking creation after the caller selects a slot and required customer details are present. Selected segments and `staff_selection_mode=anyone` survive later turns so simulator and phone bookings can create the same provider-neutral multi-service request while avoiding customer-facing named-technician wording unless the customer chose a specific technician. Booking confirmations remain impossible unless the booking service returns a POS-confirmed booking attempt and appointment. If AI booking is disabled, a customer requests a human, or the booking path cannot confirm through POS, the runtime creates a handoff or fallback pending flow and avoids confirmed wording.
 
-The live voice layer is split into `modules/voice`, `modules/voice_twilio`, and provider-specific AI adapter modules such as `modules/voice_openai`. `modules/voice` owns provider-neutral DTOs, runtime interfaces for telephony/STT/LLM/TTS providers, salon phone routing, dashboard readiness, short-lived TTS audio output persistence, and webhook event audit writes. `modules/voice_twilio` owns Twilio-specific request signature validation, webhook form mapping, recording fetches, and TwiML responses. `modules/voice_openai` owns OpenAI API URLs, payloads, response parsing, and model configuration. Twilio speech gathering, recording mode, TwiML speech output, and audio playback are treated as provider adapter behavior, not conversation-engine logic.
+The live voice layer is split into `modules/voice`, `modules/voice_twilio`, and provider-specific AI adapter modules such as `modules/voice_openai`. `modules/voice` owns provider-neutral DTOs, runtime interfaces for telephony/STT/LLM/TTS/realtime providers, salon phone routing, dashboard readiness, short-lived TTS audio output persistence, and webhook event audit writes. `modules/voice_twilio` owns Twilio-specific request signature validation, webhook form mapping, recording fetches, TwiML responses, and Twilio Media Streams WebSocket framing. `modules/voice_openai` owns OpenAI API URLs, payloads, response parsing, model configuration, and Realtime WebSocket sessions. Twilio speech gathering, recording mode, realtime stream transport, TwiML speech output, and audio playback are treated as provider adapter behavior, not conversation-engine logic. Completed realtime transcripts still enter the same conversation engine and booking service; OpenAI Realtime does not call Square or confirm bookings on its own.
 
 Provider app credentials and runtime settings for Square Appointments, Twilio,
 and OpenAI are salon-scoped operational configuration stored through
