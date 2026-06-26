@@ -128,6 +128,121 @@ export type IntegrationConfigs = {
   openai: OpenAIIntegrationConfig;
 };
 
+export type ConfigurationBundle = {
+  schema_version: string;
+  exported_at: string;
+  secrets_exported: boolean;
+  operational_data_exported: boolean;
+  excluded_data: string[];
+  requires_secret_reentry: string[];
+  salon_profile: ConfigurationSalonProfile;
+  ai_receptionist: ConfigurationAIReceptionist;
+  public_booking_page: ConfigurationPublicBookingPage;
+  integrations: IntegrationConfigs;
+  pos_connection: ConfigurationPOSConnection;
+  knowledge_base: ConfigurationKnowledgeBase;
+};
+
+export type ConfigurationExport = ConfigurationBundle;
+
+export type ConfigurationSalonProfile = {
+  name: string;
+  phone: string;
+  address?: string;
+  city?: string;
+  state?: string;
+  zip_code?: string;
+  timezone: string;
+  primary_language: string;
+  secondary_language: string;
+  handoff_phone?: string;
+  ai_enabled: boolean;
+  active_pos_provider: string;
+  updated_at: string;
+};
+
+export type ConfigurationAIReceptionist = {
+  ai_greeting: string;
+  ai_voice: string;
+  booking_mode: string;
+  recording_enabled: boolean;
+  recording_consent_message: string;
+  sms_confirmation_enabled: boolean;
+  sms_reminder_enabled: boolean;
+  reminder_hours_before: number;
+  handoff_enabled: boolean;
+  updated_at: string;
+};
+
+export type ConfigurationPublicBookingPage = {
+  public_slug?: string;
+  public_catalog_enabled: boolean;
+  public_path?: string;
+  updated_at: string;
+};
+
+export type ConfigurationPOSConnection = {
+  provider: string;
+  status: string;
+  merchant_id?: string;
+  location_id?: string;
+  scopes: string[];
+  last_sync_at?: string;
+  updated_at?: string;
+};
+
+export type ConfigurationKnowledgeBase = {
+  items: ConfigurationKnowledgeItem[];
+  count: number;
+};
+
+export type ConfigurationKnowledgeItem = {
+  source_key: string;
+  title: string;
+  category: string;
+  body: string;
+  status: string;
+  source: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ConfigurationImportRequest = {
+  request_id?: string;
+  configuration: ConfigurationBundle;
+};
+
+export type ConfigurationImportResponse = {
+  import_run_id?: string;
+  request_id: string;
+  dry_run: boolean;
+  status: string;
+  schema_version: string;
+  can_apply: boolean;
+  summary: ConfigurationImportSectionSummary[];
+  warnings: ConfigurationImportIssue[];
+  conflicts: ConfigurationImportIssue[];
+  excluded_data: string[];
+  requires_secret_reentry: string[];
+};
+
+export type ConfigurationImportSectionSummary = {
+  section: string;
+  created: number;
+  updated: number;
+  unchanged: number;
+  skipped: number;
+  conflicts: number;
+};
+
+export type ConfigurationImportIssue = {
+  section: string;
+  code: string;
+  message: string;
+  field?: string;
+  source_key?: string;
+};
+
 export type POSConnection = {
   id?: string;
   salon_id: string;

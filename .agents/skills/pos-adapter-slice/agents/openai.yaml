@@ -1,4 +1,3 @@
 display_name: POS Adapter Slice
-short_description: Preserve the POSProvider boundary while implementing Square and future POS adapter work.
-default_prompt: Use this skill to implement POS integration work without leaking provider-specific logic into booking or AI modules.
-
+short_description: Preserve the POSProvider boundary while implementing product-grade Square and future POS adapter work.
+default_prompt: Use this skill to implement POS integration work without leaking provider-specific logic into booking or AI modules, while handling retry, webhook, sync, idempotency, and duplicate-prevention behavior.

@@ -7,6 +7,20 @@ description: Design or implement AI receptionist, conversation engine, telephony
 
 Use this skill for Milestone 4 and Milestone 5 work.
 
+## Codebase Truth Rule
+
+- Be strictly honest about the current codebase and runtime configuration. Do not flatter, reassure, or infer readiness from docs, milestones, intended architecture, or previous claims.
+- Before saying voice, STT, LLM, TTS, telephony, bilingual behavior, or booking-by-phone works or only needs testing, verify the actual runtime wiring, provider config gates, webhook path, prompts, persistence, and tests/status output when available.
+- Separate confirmed current behavior from product intent, planned behavior, unverified assumptions, and missing implementation.
+- If evidence conflicts, stop and name the conflict directly with file references instead of smoothing over it.
+
+## Product-Grade Rule
+
+- Treat voice and AI runtime work as production-grade pilot behavior, not MVP, demo, prototype, or happy-path scaffolding.
+- Before proposing or implementing, check repeated webhook/event behavior, idempotency, duplicate transcript/message/session prevention, retry/rerun semantics, provider timeout handling, tenant/security/privacy boundaries, and safe fallback/handoff states.
+- Conversation, telephony, SMS, STT, LLM, TTS, summary, handoff, and booking-tool flows must define stable event/session keys when messages can be replayed or retried.
+- Do not mark runtime work complete until repeated provider callbacks cannot create duplicate rubbish state or misleading caller/owner responses.
+
 ## Boundaries
 
 - Conversation Engine owns state, intent, entity extraction, and tool routing.
@@ -31,4 +45,3 @@ Use this skill for Milestone 4 and Milestone 5 work.
 3. Implement a deterministic simulator before live telephony.
 4. Add tests for state transitions and fallback text.
 5. Wire Twilio/OpenAI/provider specifics behind adapters only.
-

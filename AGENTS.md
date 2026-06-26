@@ -42,6 +42,16 @@ The product rule is strict: never confirm an appointment unless the active POS p
 - If the user says "implement", "fix", "build", or similar, still present the plan first and wait for explicit approval before changing code.
 - For any request that changes the UI or user-facing layout, provide a **Mockup as Text** before implementation and wait for explicit approval.
 
+## Product-Grade Standard
+
+- Build and review every approved slice as production-grade pilot software, not MVP, demo, prototype, or happy-path scaffolding.
+- Before proposing or implementing, check repeated-use behavior, idempotency, duplicate prevention, retry/rerun semantics, conflict handling, rollback or cleanup needs, disabled/error/empty states, tenant boundaries, and security/privacy exposure.
+- For export/import, sync, webhook, booking, provider, AI training, or any workflow that can run more than once, define stable keys, upsert or dedupe behavior, and prove repeated execution will not create duplicate or rubbish records.
+- If external systems will consume exported data, include contract stability, schema versioning, stable identifiers, and import semantics even when the importer is outside the current implementation slice.
+- Narrow vertical slices are allowed only when the slice is internally complete and scope-honest. Do not call a slice done if predictable product-grade failure modes are unhandled, hidden, or left ambiguous.
+- Do not ship fake, placeholder, or demo behavior as production behavior. Local seed/demo data is allowed only when isolated from production paths.
+- Acceptance criteria and test plans must cover critical edge cases and regression risks, not just the happy path.
+
 ## Mockup As Text
 
 For UI-changing requests, the Mockup as Text must include:
@@ -103,4 +113,5 @@ docker compose up -d postgres redis flyway
 - Respect the User Confirmation Gate before editing code.
 - Do not implement fake production paths. Local seed/demo data is allowed only when isolated from production behavior.
 - If a requested change crosses API contracts, update DTOs, mappers, docs, and UI states together.
+- Every implementation plan must include the product-grade edge cases relevant to the slice, especially repeated execution/idempotency, duplicate prevention, conflict handling, and safe failure states.
 - For high-risk booking, auth, token, tenant, or POS behavior, add tests before or alongside the change.

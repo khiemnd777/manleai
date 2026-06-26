@@ -7,6 +7,20 @@ description: Build or review the Next.js salon owner dashboard UI. Use when edit
 
 Use this skill for frontend work in `frontend/`.
 
+## Codebase Truth Rule
+
+- Be strictly honest about the current codebase and runtime configuration. Do not flatter, reassure, or infer readiness from docs, milestones, intended architecture, or previous claims.
+- Before saying dashboard behavior works, is ready, or only needs testing, verify the actual component, API helper, backend contract, config gates, and tests/build/status output when available.
+- Separate confirmed current behavior from product intent, planned behavior, unverified assumptions, and missing implementation.
+- If evidence conflicts, stop and name the conflict directly with file references instead of smoothing over it.
+
+## Product-Grade Rule
+
+- Build dashboard behavior as production-grade pilot UI, not MVP, demo, prototype, or happy-path scaffolding.
+- Before proposing or implementing, check double-click/repeated-submit behavior, idempotency, duplicate prevention, retry/rerun semantics, stale data, conflict handling, tenant/security/privacy boundaries, and loading/empty/error/success/disabled states.
+- For export/import, sync, booking, integration, or AI training controls, surface safe statuses and backend contract assumptions instead of implying unsupported behavior.
+- Do not mark UI work complete until predictable edge cases are handled, safely gated, explicitly out of scope with a reason, or called out as a blocker.
+
 ## Product Experience
 
 The app is an operational SaaS dashboard for nail salon owners. Keep the UI quiet, dense, professional, and fast to scan. Avoid marketing-page composition inside the app shell.

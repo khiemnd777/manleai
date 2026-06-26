@@ -44,6 +44,7 @@ type KnowledgeSnippet struct {
 type KnowledgeItem struct {
 	ID        string    `json:"id"`
 	SalonID   string    `json:"salon_id"`
+	ImportKey string    `json:"-"`
 	Title     string    `json:"title"`
 	Category  string    `json:"category"`
 	Body      string    `json:"body"`

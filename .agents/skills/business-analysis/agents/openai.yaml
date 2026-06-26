@@ -1,4 +1,4 @@
 interface:
   display_name: "Business Analysis"
-  short_description: "Turn salon requests into requirements"
-  default_prompt: "Use $business-analysis to turn this request into workflow, requirements, acceptance criteria, scope boundaries, and open questions."
+  short_description: "Turn salon requests into product-grade requirements"
+  default_prompt: "Use $business-analysis to turn this request into workflow, requirements, acceptance criteria, product-grade edge cases, idempotency, duplicate prevention, scope boundaries, and open questions."

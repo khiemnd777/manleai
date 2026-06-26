@@ -263,6 +263,196 @@ these periods and can trigger Square sync.
 Returns `409 BUSINESS_HOURS_POS_MANAGED`. Business hours are managed in Square
 and imported through `POST /api/integrations/square/sync`.
 
+## Configuration Transfer
+
+`GET /api/salons/:id/configuration-export`
+
+Returns a sanitized, owner-scoped JSON snapshot for moving setup information to
+another system or importing into another salon. This transfer bundle includes
+configuration only:
+
+- Salon profile
+- AI receptionist settings
+- Public booking page settings
+- Integration runtime settings without secrets
+- AI Training knowledge base
+
+Secret-bearing integrations return only configuration values and secret status
+metadata such as `client_secret_configured`, `auth_token_configured`,
+`api_key_configured`, and `*_source`. It does not export services, staff,
+customers, appointments, booking attempts, fallback requests, call sessions,
+transcripts, recordings, summaries, owner corrections, POS OAuth tokens, API
+keys, client secrets, encrypted secrets, or POS connection token state.
+
+```json
+{
+  "schema_version": "manleai.salon_configuration.v2",
+  "exported_at": "2026-06-26T15:00:00Z",
+  "secrets_exported": false,
+  "operational_data_exported": false,
+  "excluded_data": ["services", "staff", "customers", "appointments", "call_sessions", "pos_oauth_tokens", "api_keys", "client_secrets"],
+  "requires_secret_reentry": ["square", "twilio", "openai"],
+  "salon_profile": {
+    "name": "Lotus Nails Studio",
+    "phone": "+16292536211",
+    "address": "1200 W Sample Ave",
+    "city": "Chicago",
+    "state": "IL",
+    "zip_code": "60601",
+    "timezone": "America/Chicago",
+    "primary_language": "en",
+    "secondary_language": "vi",
+    "handoff_phone": "+13125550102",
+    "ai_enabled": true,
+    "active_pos_provider": "square",
+    "updated_at": "2026-06-25T14:30:00Z"
+  },
+  "ai_receptionist": {
+    "ai_greeting": "Thanks for calling Lotus Nails Studio.",
+    "ai_voice": "professional_female",
+    "booking_mode": "confirmed_booking",
+    "recording_enabled": true,
+    "recording_consent_message": "This call may be recorded.",
+    "sms_confirmation_enabled": true,
+    "sms_reminder_enabled": true,
+    "reminder_hours_before": 24,
+    "handoff_enabled": true,
+    "updated_at": "2026-06-25T14:30:00Z"
+  },
+  "public_booking_page": {
+    "public_slug": "lotus-nails-studio",
+    "public_catalog_enabled": true,
+    "public_path": "/s/lotus-nails-studio",
+    "updated_at": "2026-06-25T14:30:00Z"
+  },
+  "integrations": {
+    "square": {
+      "provider": "square",
+      "configured": true,
+      "environment": "sandbox",
+      "client_id": "square-app-id",
+      "redirect_url": "https://api.example.com/api/integrations/square/callback",
+      "api_version": "2026-05-20",
+      "client_secret_configured": true,
+      "client_secret_source": "database"
+    },
+    "twilio": {
+      "provider": "twilio",
+      "configured": true,
+      "public_base_url": "https://api.example.com",
+      "incoming_path": "/api/voice/twilio/incoming",
+      "turn_path": "/api/voice/twilio/turn",
+      "recording_path": "/api/voice/twilio/recording",
+      "inbound_webhook_url": "https://api.example.com/api/voice/twilio/incoming",
+      "turn_webhook_url": "https://api.example.com/api/voice/twilio/turn",
+      "recording_webhook_url": "https://api.example.com/api/voice/twilio/recording",
+      "auth_token_configured": true,
+      "auth_token_source": "database"
+    },
+    "openai": {
+      "provider": "openai",
+      "enabled": true,
+      "configured": true,
+      "base_url": "https://api.openai.com/v1",
+      "transcription_model": "gpt-4o-mini-transcribe",
+      "reply_model": "gpt-4.1-mini",
+      "speech_model": "gpt-4o-mini-tts",
+      "speech_voice": "alloy",
+      "api_key_configured": true,
+      "api_key_source": "database"
+    }
+  },
+  "pos_connection": {
+    "provider": "square",
+    "status": "active",
+    "merchant_id": "merchant-id",
+    "location_id": "location-id",
+    "scopes": ["APPOINTMENTS_READ", "APPOINTMENTS_WRITE"],
+    "last_sync_at": "2026-06-25T14:30:00Z",
+    "updated_at": "2026-06-25T14:30:00Z"
+  },
+  "knowledge_base": {
+    "count": 1,
+    "items": [
+      {
+        "source_key": "knowledge:3d9df47b6f8f4b97a7fcaf3e8d0f14be",
+        "title": "Deposit policy",
+        "category": "policy",
+        "body": "Deposits are required for groups of four or more.",
+        "status": "active",
+        "source": "owner",
+        "created_at": "2026-06-25T14:30:00Z",
+        "updated_at": "2026-06-25T14:30:00Z"
+      }
+    ]
+  }
+}
+```
+
+`POST /api/salons/:id/configuration-import/preview`
+
+Validates a transfer bundle and returns a dry-run summary. Preview does not
+write to the database.
+
+Request shape, with the full exported bundle in `configuration`:
+
+```json
+{
+  "configuration": {
+    "schema_version": "manleai.salon_configuration.v2",
+    "...": "full exported configuration bundle"
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "request_id": "import-preview-id",
+  "dry_run": true,
+  "status": "previewed",
+  "schema_version": "manleai.salon_configuration.v2",
+  "can_apply": true,
+  "summary": [
+    {"section": "salon_profile", "created": 0, "updated": 6, "unchanged": 5, "skipped": 0, "conflicts": 0},
+    {"section": "knowledge_base", "created": 4, "updated": 2, "unchanged": 8, "skipped": 0, "conflicts": 0}
+  ],
+  "warnings": [
+    {"section": "integrations", "code": "secret_reentry_required", "message": "square secret values are not included in the export. Re-enter secrets or reconnect this provider after import.", "field": "square"}
+  ],
+  "conflicts": [],
+  "excluded_data": ["services", "staff", "customers", "appointments", "call_sessions", "pos_oauth_tokens", "api_keys", "client_secrets"],
+  "requires_secret_reentry": ["square", "twilio", "openai"]
+}
+```
+
+`POST /api/salons/:id/configuration-import`
+
+Applies a previously previewed transfer bundle. The request should include a
+client-generated `request_id`. The backend stores an import run with
+`payload_fingerprint`; reusing the same `request_id` with the same payload is
+idempotent, while reusing it with a different payload returns a conflict.
+
+```json
+{
+  "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
+  "configuration": {
+    "schema_version": "manleai.salon_configuration.v2",
+    "...": "full exported configuration bundle"
+  }
+}
+```
+
+Import idempotency:
+
+- Salon profile, AI receptionist, public booking page, and integration settings update the existing salon-scoped rows.
+- Integration secrets are preserved if already present and are never imported from the transfer file.
+- Knowledge base entries upsert by `source_key`, backed by a unique `(salon_id, import_key)` index.
+- Re-importing the same file reports `unchanged` or `updated`; it does not create duplicate knowledge rows.
+- If the bundle requests `ai_enabled=true` or `booking_mode=confirmed_booking`, those fields are skipped unless the target salon has passed Square booking readiness.
+- If the bundle requests public page publishing, the publish state is skipped unless the target salon has synced AI-bookable services and staff.
+
 ## Integration Configuration
 
 Provider credentials and runtime settings are salon-scoped and owner-scoped.

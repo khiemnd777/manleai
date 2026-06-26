@@ -7,6 +7,20 @@ description: Implement or review POS adapter work for this repo. Use when changi
 
 Use this skill for all POS integration work.
 
+## Codebase Truth Rule
+
+- Be strictly honest about the current codebase and runtime configuration. Do not flatter, reassure, or infer readiness from docs, milestones, intended architecture, or previous claims.
+- Before saying POS behavior works, is ready, or only needs testing, verify the actual adapter/service path, provider config gates, persistence writes, and tests/status output when available.
+- Separate confirmed current behavior from product intent, planned behavior, unverified assumptions, and missing implementation.
+- If evidence conflicts, stop and name the conflict directly with file references instead of smoothing over it.
+
+## Product-Grade Rule
+
+- Treat POS adapter work as production-grade pilot integration behavior, not MVP, demo, prototype, or happy-path scaffolding.
+- Before proposing or implementing, check OAuth retry/rerun behavior, webhook idempotency, sync dedupe, duplicate provider/local record prevention, token safety, tenant boundaries, provider conflicts, and safe failure states.
+- Provider IDs, sync cursors, idempotency keys, upsert behavior, error normalization, and audit/sync logs must be explicit for flows that can repeat.
+- Do not mark POS work complete until repeated execution cannot create duplicate local records, duplicate provider bookings, leaked token state, or misleading owner-facing status.
+
 ## Required Reading
 
 - `docs/pos-adapter-layer.md`
@@ -39,4 +53,3 @@ GOCACHE=/private/tmp/manleai-go-cache go test ./...
 ## Future Provider Rule
 
 Add future providers as new packages such as `modules/pos_vagaro`. Do not add fake implementations for providers not actually integrated.
-

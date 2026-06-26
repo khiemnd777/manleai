@@ -7,6 +7,20 @@ description: Analyze overlapping feature rules, duplicated ownership, conflictin
 
 Use this skill before implementing or reviewing work that may collide with existing business rules.
 
+## Codebase Truth Rule
+
+- Be strictly honest about the current codebase and runtime configuration. Do not flatter, reassure, or infer readiness from docs, milestones, intended architecture, or previous claims.
+- Before saying rules do not overlap, behavior works, or a path is ready, verify the actual owning code paths, config gates, persistence, API/UI behavior, and tests/status output when available.
+- Separate confirmed current behavior from product intent, planned behavior, unverified assumptions, and missing implementation.
+- If evidence conflicts, stop and name the conflict directly with file references instead of smoothing over it.
+
+## Product-Grade Rule
+
+- Review every overlap as production-grade pilot behavior, not MVP, demo, prototype, or happy-path scaffolding.
+- Before clearing a plan, check repeated-use behavior, idempotency, duplicate prevention, retry/rerun semantics, race conditions, conflict handling, tenant/security/privacy boundaries, and safe empty/error/disabled states.
+- For export/import, sync, webhook, booking, provider, or AI training flows, verify stable keys, upsert or dedupe semantics, schema/version impact, and repeated execution behavior.
+- Do not accept a design where predictable duplicate/rubbish data, misleading state, or unsupported behavior is merely undocumented.
+
 ## Start Here
 
 1. Read `CONTEXT.md` for domain language and invariants.
@@ -27,6 +41,7 @@ Ask these questions before proposing implementation:
 - Does a voice/conversation path bypass booking service rules?
 - Does an API response, DTO, or UI label use a different state name than persistence or docs?
 - Does the requested behavior create a race between availability, booking attempt, appointment write, notification, audit log, or POS error logging?
+- Can the workflow be run, retried, imported, synced, submitted, or replayed more than once, and if so what stable key prevents duplicate or rubbish records?
 - Does the change cross tenant, auth, token, or salon ownership boundaries?
 
 ## Collision Types
@@ -41,6 +56,7 @@ Classify findings with one or more of these labels:
 - `api_contract`: backend DTO, frontend type, docs, or mapper disagree.
 - `tenant_security`: salon ownership, token secrecy, or cross-salon data isolation is unclear.
 - `milestone_scope`: UI or copy implies unsupported production behavior.
+- `idempotency_gap`: repeated execution, retry, import, sync, webhook, or double-submit can create duplicates or rubbish state.
 - `test_gap`: high-risk overlap lacks regression coverage.
 
 ## Output Shape

@@ -663,8 +663,8 @@ export function SquareIntegration() {
         </div>
       </div>
 
-      {error ? <Alert title="Square action failed" message={error} /> : null}
-      {success ? <Alert type="success" title="Square updated" message={success} /> : null}
+      {error ? <Alert title="Integration action failed" message={error} /> : null}
+      {success ? <Alert type="success" title="Integration updated" message={success} /> : null}
 
       <ReadinessOverviewPanel
         busy={busy}

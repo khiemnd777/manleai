@@ -3,15 +3,32 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { AlertTriangle, ExternalLink, Globe2, RefreshCcw, Save, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Download, ExternalLink, FileJson, Globe2, RefreshCcw, Save, ShieldCheck, Upload } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest } from "@/lib/api/client";
+import {
+  applyConfigurationImport,
+  downloadConfigurationExport,
+  newConfigurationImportRequestID,
+  previewConfigurationImport,
+  readConfigurationBundle
+} from "@/lib/api/configuration-transfer";
 import { landingBaseUrl } from "@/lib/config/env";
-import type { BusinessHourPeriod, POSConnection, PublicCatalogSettings, Salon, SalonSettings, SquareReadiness, SyncLog } from "@/types/api";
+import type {
+  BusinessHourPeriod,
+  ConfigurationBundle,
+  ConfigurationImportResponse,
+  POSConnection,
+  PublicCatalogSettings,
+  Salon,
+  SalonSettings,
+  SquareReadiness,
+  SyncLog
+} from "@/types/api";
 
 type SalonListResponse = {
   salons: Salon[];
@@ -72,6 +89,10 @@ export function SettingsDashboard() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [importBundle, setImportBundle] = useState<ConfigurationBundle | null>(null);
+  const [importPreview, setImportPreview] = useState<ConfigurationImportResponse | null>(null);
+  const [importFileName, setImportFileName] = useState("");
+  const [importRequestID, setImportRequestID] = useState("");
 
   async function load({ silent = false }: { silent?: boolean } = {}) {
     setError("");
@@ -90,6 +111,7 @@ export function SettingsDashboard() {
         setSettingsForm(emptySettingsForm());
         setPublicCatalog(null);
         setPublicCatalogForm(emptyPublicCatalogForm());
+        clearImportState();
         return;
       }
 
@@ -266,6 +288,68 @@ export function SettingsDashboard() {
     }
   }
 
+  async function exportConfiguration() {
+    if (!salon) return;
+    setBusy("export-config");
+    setError("");
+    setSuccess("");
+    try {
+      await downloadConfigurationExport(salon);
+      setSuccess("Configuration export downloaded.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not export configuration.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function previewImportFile(file: File | null) {
+    if (!salon || !file) return;
+    setBusy("preview-config-import");
+    setError("");
+    setSuccess("");
+    try {
+      const bundle = await readConfigurationBundle(file);
+      const preview = await previewConfigurationImport(salon, bundle);
+      setImportBundle(bundle);
+      setImportPreview(preview);
+      setImportFileName(file.name);
+      setImportRequestID(newConfigurationImportRequestID());
+      setSuccess(preview.can_apply ? "Configuration import preview is ready." : "Configuration import preview has conflicts.");
+    } catch (err) {
+      clearImportState();
+      setError(err instanceof Error ? err.message : "Could not preview configuration import.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function applyImportPreview() {
+    if (!salon || !importBundle || !importPreview?.can_apply) return;
+    const requestID = importRequestID || newConfigurationImportRequestID();
+    setBusy("apply-config-import");
+    setError("");
+    setSuccess("");
+    try {
+      const applied = await applyConfigurationImport(salon, importBundle, requestID);
+      setImportPreview(applied);
+      setImportRequestID(applied.request_id);
+      setSuccess("Configuration import applied.");
+      await load({ silent: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not apply configuration import.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function clearImportState() {
+    setImportBundle(null);
+    setImportPreview(null);
+    setImportFileName("");
+    setImportRequestID("");
+  }
+
   if (loading) {
     return (
       <div className="space-y-6">
@@ -338,6 +422,16 @@ export function SettingsDashboard() {
         <StatusMetric label="Business hours" value={hasBusinessHourPeriods ? "Synced" : "Missing"} badge={hasBusinessHourPeriods ? "ready" : "blocked"} />
         <StatusMetric label="Last saved" value={latestUpdate ? formatDateTime(latestUpdate) : "Not available"} badge={latestUpdate ? "synced" : "not_configured"} />
       </div>
+
+      <ConfigurationTransferCard
+        busy={busy}
+        fileName={importFileName}
+        preview={importPreview}
+        onApply={() => void applyImportPreview()}
+        onClear={clearImportState}
+        onExport={() => void exportConfiguration()}
+        onPreviewFile={(file) => void previewImportFile(file)}
+      />
 
       <PublicCatalogCard
         settings={publicCatalog}
@@ -429,6 +523,216 @@ function StatusMetric({ label, value, badge }: { label: string; value: string; b
       </div>
     </Card>
   );
+}
+
+function ConfigurationTransferCard({
+  busy,
+  fileName,
+  preview,
+  onApply,
+  onClear,
+  onExport,
+  onPreviewFile
+}: {
+  busy: string;
+  fileName: string;
+  preview: ConfigurationImportResponse | null;
+  onApply: () => void;
+  onClear: () => void;
+  onExport: () => void;
+  onPreviewFile: (file: File | null) => void;
+}) {
+  const exportBusy = busy === "export-config";
+  const previewBusy = busy === "preview-config-import";
+  const applyBusy = busy === "apply-config-import";
+  const disabled = busy !== "";
+
+  return (
+    <Card>
+      <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
+        <div className="flex gap-3">
+          <div className="flex h-10 w-10 flex-none items-center justify-center rounded-md bg-teal-50 text-brand">
+            <FileJson className="h-5 w-5" />
+          </div>
+          <div>
+            <CardTitle>Configuration transfer</CardTitle>
+            <CardDescription>
+              Export or import salon profile, AI receptionist, public booking page, integrations, and AI Training knowledge base in one JSON bundle.
+            </CardDescription>
+          </div>
+        </div>
+        <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center">
+          <Badge value={preview?.can_apply === false ? "conflict" : "ready"} />
+          <Button type="button" onClick={onExport} disabled={disabled}>
+            <Download className="h-4 w-4" />
+            {exportBusy ? "Exporting..." : "Export JSON"}
+          </Button>
+        </div>
+      </div>
+
+      <div className="mt-5 grid gap-4 lg:grid-cols-[0.8fr_1.2fr]">
+        <div className="rounded-md border border-line p-4">
+          <div className="text-sm font-semibold text-ink">Included</div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {["Salon profile", "AI receptionist", "Public booking page", "Integrations", "Knowledge base"].map((item) => (
+              <Badge key={item} value={item.toLowerCase().replaceAll(" ", "_")} />
+            ))}
+          </div>
+          <div className="mt-5 text-sm font-semibold text-ink">Excluded</div>
+          <div className="mt-2 text-sm leading-6 text-muted">
+            Services, staff, customers, appointments, fallback requests, call data, POS tokens, API keys, and client secrets.
+          </div>
+        </div>
+
+        <div className="rounded-md border border-line p-4">
+          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+            <div>
+              <div className="text-sm font-semibold text-ink">Import configuration</div>
+              <div className="mt-1 text-sm leading-6 text-muted">
+                Preview validates schema, conflicts, skipped fields, and repeated-import behavior before any write.
+              </div>
+            </div>
+            <label
+              className={`inline-flex h-10 cursor-pointer items-center justify-center gap-2 rounded-md border border-line bg-white px-4 text-sm font-semibold text-ink hover:bg-slate-50 ${
+                disabled ? "pointer-events-none opacity-50" : ""
+              }`}
+            >
+              <Upload className="h-4 w-4" />
+              {previewBusy ? "Previewing..." : "Choose JSON"}
+              <input
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                disabled={disabled}
+                onChange={(event) => {
+                  const file = event.target.files?.[0] ?? null;
+                  event.target.value = "";
+                  onPreviewFile(file);
+                }}
+              />
+            </label>
+          </div>
+
+          {fileName ? <div className="mt-3 break-all text-xs text-muted">Selected file: {fileName}</div> : null}
+
+          {preview ? (
+            <div className="mt-5 space-y-4">
+              <ImportSummaryTable summary={preview.summary} />
+              <ImportIssueList title="Conflicts" issues={preview.conflicts} tone="danger" />
+              <ImportIssueList title="Warnings" issues={preview.warnings} tone="warning" />
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="text-xs leading-5 text-muted">
+                  Schema {preview.schema_version}. Secrets must be re-entered for: {preview.requires_secret_reentry.length ? preview.requires_secret_reentry.join(", ") : "none"}.
+                </div>
+                <div className="flex gap-2">
+                  <Button type="button" variant="secondary" onClick={onClear} disabled={disabled}>
+                    Clear
+                  </Button>
+                  <Button type="button" onClick={onApply} disabled={disabled || !preview.can_apply}>
+                    <Upload className="h-4 w-4" />
+                    {applyBusy ? "Applying..." : "Apply import"}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-5 rounded-md border border-dashed border-line p-5 text-sm leading-6 text-muted">
+              Choose a ManleAI configuration JSON file to preview changes. Preview does not write to the salon.
+            </div>
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function ImportSummaryTable({ summary }: { summary: ConfigurationImportResponse["summary"] }) {
+  return (
+    <>
+      <div className="hidden overflow-x-auto rounded-md border border-line md:block">
+        <table className="w-full min-w-[620px] text-left text-sm">
+          <thead className="bg-slate-50 text-xs uppercase text-muted">
+            <tr>
+              <th className="px-3 py-2">Section</th>
+              <th className="px-3 py-2">Create</th>
+              <th className="px-3 py-2">Update</th>
+              <th className="px-3 py-2">Unchanged</th>
+              <th className="px-3 py-2">Skipped</th>
+              <th className="px-3 py-2">Conflicts</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line">
+            {summary.map((item) => (
+              <tr key={item.section}>
+                <td className="px-3 py-2 font-medium text-ink">{sectionLabel(item.section)}</td>
+                <td className="px-3 py-2 text-muted">{item.created}</td>
+                <td className="px-3 py-2 text-muted">{item.updated}</td>
+                <td className="px-3 py-2 text-muted">{item.unchanged}</td>
+                <td className="px-3 py-2 text-muted">{item.skipped}</td>
+                <td className="px-3 py-2 text-muted">{item.conflicts}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="space-y-3 md:hidden">
+        {summary.map((item) => (
+          <div key={item.section} className="rounded-md border border-line p-3">
+            <div className="text-sm font-semibold text-ink">{sectionLabel(item.section)}</div>
+            <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-muted">
+              <span>Create: {item.created}</span>
+              <span>Update: {item.updated}</span>
+              <span>Unchanged: {item.unchanged}</span>
+              <span>Skipped: {item.skipped}</span>
+              <span>Conflicts: {item.conflicts}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function ImportIssueList({
+  title,
+  issues,
+  tone
+}: {
+  title: string;
+  issues: ConfigurationImportResponse["warnings"];
+  tone: "warning" | "danger";
+}) {
+  if (issues.length === 0) return null;
+  const className = tone === "danger" ? "border-red-200 bg-red-50 text-red-900" : "border-amber-200 bg-amber-50 text-amber-900";
+  return (
+    <div className={`rounded-md border p-4 text-sm ${className}`}>
+      <div className="font-semibold">{title}</div>
+      <ul className="mt-2 space-y-2">
+        {issues.map((issue, index) => (
+          <li key={`${issue.code}-${issue.field ?? issue.source_key ?? index}`}>
+            {sectionLabel(issue.section)}: {issue.message}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function sectionLabel(section: string) {
+  switch (section) {
+    case "salon_profile":
+      return "Salon profile";
+    case "ai_receptionist":
+      return "AI receptionist";
+    case "public_booking_page":
+      return "Public booking page";
+    case "integrations":
+      return "Integrations";
+    case "knowledge_base":
+      return "Knowledge base";
+    default:
+      return section;
+  }
 }
 
 function PublicCatalogCard({

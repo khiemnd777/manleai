@@ -7,6 +7,20 @@ description: Analyze real nail salon operating workflows for this AI Receptionis
 
 Use this skill when a request depends on how a nail salon owner, caller, or staff member would actually work during a busy salon day.
 
+## Codebase Truth Rule
+
+- Be strictly honest about the current codebase and runtime configuration. Do not flatter, reassure, or infer readiness from docs, milestones, intended architecture, or previous claims.
+- Before saying an operational workflow works, is ready, or only needs testing, verify the actual code/API/config gates, persistence, dashboard states, and tests/status output when available.
+- Separate confirmed current behavior from product intent, planned behavior, unverified assumptions, and missing implementation.
+- If evidence conflicts, stop and name the conflict directly with file references instead of smoothing over it.
+
+## Product-Grade Rule
+
+- Analyze salon workflows as production-grade pilot behavior, not MVP, demo, prototype, or happy-path scaffolding.
+- Before proposing or approving a workflow, check repeated-use behavior, idempotency, duplicate prevention, retry/rerun semantics, owner conflict handling, tenant/security/privacy boundaries, and loading/empty/error/disabled states.
+- For export/import, sync, booking, fallback pending, owner-review, or AI training flows, define stable keys, upsert or dedupe semantics, and how repeated execution avoids duplicate or rubbish records.
+- Do not call a workflow ready if predictable salon-day exceptions would mislead the owner, caller, staff, AI runtime, or POS provider.
+
 ## Start Here
 
 1. Read `CONTEXT.md` for shared terms.
@@ -38,6 +52,7 @@ For each proposed workflow, identify:
 - Success state: what the owner and caller can safely believe happened.
 - Exception states: disabled, blocked, unavailable, fallback pending, handoff, POS error, sync failure, retry needed.
 - Owner action: review, approve, call back, sync, connect Square, enable AI, update services/staff, edit settings, or dismiss.
+- Repeat behavior: whether the workflow can be retried, resubmitted, imported, synced, or replayed, and what prevents duplicate/rubbish records.
 - Auditability: booking attempt, POS error, sync log, notification, transcript, correction, or dashboard timestamp.
 
 ## Output Shape

@@ -7,6 +7,20 @@ description: Turn ambiguous product, operations, or customer requests for this A
 
 Use this skill before implementation when the request is broad, ambiguous, workflow-heavy, or product-facing.
 
+## Codebase Truth Rule
+
+- Be strictly honest about the current codebase and runtime configuration. Do not flatter, reassure, or infer readiness from docs, milestones, intended architecture, or previous claims.
+- Before saying a workflow exists, works, is ready, or only needs testing, verify the actual owning code path, config gates, persistence, API/UI behavior, and tests/status output when available.
+- Separate confirmed current behavior from product intent, planned behavior, unverified assumptions, and missing implementation.
+- If evidence conflicts, stop and name the conflict directly with file references instead of smoothing over it.
+
+## Product-Grade Rule
+
+- Analyze every request as production-grade pilot behavior, not MVP, demo, prototype, or happy-path scaffolding.
+- Before recommending a plan, identify repeated-use behavior, idempotency, duplicate prevention, retry/rerun semantics, conflict handling, tenant/security/privacy boundaries, and empty/error/disabled states.
+- For export/import, sync, webhook, booking, provider, or AI training flows, define stable keys, upsert or dedupe semantics, schema/version impact, and how repeated execution avoids duplicate or rubbish records.
+- Acceptance criteria must include edge cases and regression risks, not only the happy path.
+
 ## Start Here
 
 1. Read `CONTEXT.md` for product language and invariants.
@@ -25,6 +39,7 @@ Convert the request into a concrete business slice:
 - Map the main workflow and exception workflows.
 - Name the source of truth for each decision and state.
 - Identify data, API, UI, notification, audit, and reporting needs.
+- Identify repeated-run/idempotency behavior, duplicate prevention, conflicts, and safe failure states whenever the workflow can be retried, imported, synced, submitted, or replayed.
 - Preserve milestone honesty: Square Appointments is the first real POS integration; future POS providers are adapter targets until implemented.
 - Keep confirmed appointments impossible unless the active POS provider returns successful booking metadata.
 
@@ -42,7 +57,8 @@ Return concise sections:
 6. **Acceptance Criteria:** observable outcomes in Given/When/Then or bullet form.
 7. **Open Questions:** only questions that materially affect scope or correctness.
 8. **Out Of Scope:** what should not be built in this slice.
-9. **Implementation Guardrails:** where logic should live and what invariants must not be violated.
+9. **Product-Grade Edge Cases:** idempotency, duplicate prevention, conflict handling, retry/rerun behavior, and safe failure states.
+10. **Implementation Guardrails:** where logic should live and what invariants must not be violated.
 
 For implementation requests, stop after the analysis and proposed plan. Wait for explicit user approval before editing files.
 

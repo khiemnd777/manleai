@@ -314,7 +314,7 @@ func (r *Repository) ensureTranscriptOwner(ctx context.Context, salonID string, 
 
 func knowledgeSelect() string {
 	return `
-		SELECT ki.id::text, ki.salon_id::text, ki.title, ki.category, ki.body,
+		SELECT ki.id::text, ki.salon_id::text, COALESCE(ki.import_key, ''), ki.title, ki.category, ki.body,
 		       ki.status, ki.source, ki.created_at, ki.updated_at
 		FROM knowledge_items ki
 		JOIN salons s ON s.id = ki.salon_id
@@ -337,7 +337,7 @@ type rowScanner interface {
 
 func scanKnowledgeItem(row rowScanner) (*KnowledgeItem, error) {
 	var item KnowledgeItem
-	if err := row.Scan(&item.ID, &item.SalonID, &item.Title, &item.Category, &item.Body, &item.Status, &item.Source, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	if err := row.Scan(&item.ID, &item.SalonID, &item.ImportKey, &item.Title, &item.Category, &item.Body, &item.Status, &item.Source, &item.CreatedAt, &item.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &item, nil

@@ -1,4 +1,3 @@
 display_name: AI Receptionist Repo
-short_description: Navigate and implement coherent slices in this POS-first salon receptionist monorepo.
-default_prompt: Use this repo skill to orient around the current architecture, milestone scope, and product invariants before making changes.
-
+short_description: Navigate and implement coherent product-grade slices in this POS-first salon receptionist monorepo.
+default_prompt: Use this repo skill to orient around the current architecture, milestone scope, product invariants, idempotency, duplicate prevention, and safe failure states before making changes.

@@ -15,6 +15,7 @@ import (
 	"github.com/manleai/ai-receptionist/internal/logger"
 	"github.com/manleai/ai-receptionist/modules/auth"
 	"github.com/manleai/ai-receptionist/modules/booking"
+	configtransfer "github.com/manleai/ai-receptionist/modules/config_transfer"
 	"github.com/manleai/ai-receptionist/modules/conversation"
 	"github.com/manleai/ai-receptionist/modules/customer"
 	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
@@ -86,6 +87,7 @@ func main() {
 	integrationconfig.RegisterRoutes(api, integrationconfig.NewHandler(integrationConfigService), cfg.JWTSecret)
 
 	posRepo := pos.NewRepository(db)
+
 	squareAdapter := pos_square.NewSquareAdapter(cfg.Square, posRepo, cipher)
 	squareAdapter.SetConfigResolver(integrationConfigService)
 	posService := pos.NewService(posRepo, squareAdapter)
@@ -106,6 +108,10 @@ func main() {
 	trainingRepo := training.NewRepository(db)
 	trainingService := training.NewService(trainingRepo)
 	training.RegisterRoutes(api, training.NewHandler(trainingService), cfg.JWTSecret)
+
+	configTransferRepo := configtransfer.NewRepository(db)
+	configTransferService := configtransfer.NewService(salonService, integrationConfigService, posRepo, trainingService, configTransferRepo)
+	configtransfer.RegisterRoutes(api, configtransfer.NewHandler(configTransferService), cfg.JWTSecret)
 
 	voiceRepo := voice.NewRepository(db)
 	openAIVoiceAdapter := voice_openai.NewAdapter(cfg.Voice.AI.OpenAI)
