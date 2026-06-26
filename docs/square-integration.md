@@ -87,6 +87,35 @@ dashboard-saved Square configuration:
 - `SQUARE_REDIRECT_URL`
 - `SQUARE_API_VERSION`
 
+When a salon has dashboard-saved Square configuration, inspect and update the
+Integrations dashboard settings first; `.env`, `project.env`, and deployment
+secrets are not the active Square source of truth.
+
+## Sandbox OAuth Troubleshooting
+
+If Square sandbox OAuth opens a blank page or returns the error
+`To start the OAuth flow for a sandbox account, first launch the seller test
+account from the Developer Console.`, open the sandbox seller dashboard first:
+
+```txt
+https://app.squareupsandbox.com/dashboard/
+```
+
+Do not use the production Square dashboard for sandbox OAuth setup:
+
+```txt
+https://app.squareup.com/dashboard/
+```
+
+After the sandbox dashboard loads, return to the ManleAI Integrations dashboard
+and retry `Connect Square`. For dashboard-managed sandbox credentials, keep the
+Square environment set to `Sandbox` and use the sandbox application ID and
+secret. The optional Square API base URL may be blank or set to:
+
+```txt
+https://connect.squareupsandbox.com
+```
+
 ## Token Security
 
 Square tokens are encrypted with AES-GCM before being persisted in `pos_connections`. The API never returns access or refresh tokens to the frontend.

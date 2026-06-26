@@ -10,7 +10,7 @@ Customer calls -> AI answers through Twilio -> customer asks for a booking -> AI
 
 - Guide one configuration step at a time. Do not dump every step unless the user asks for the full checklist.
 - After each step, ask the user to confirm what is done before moving on.
-- Never ask the user to paste secrets into chat. Tell them which env variable or provider console field needs the secret.
+- Never ask the user to paste secrets into chat. Tell them which Integrations dashboard field or provider console field needs the secret. Mention env variables only when explicitly using the legacy local fallback path before dashboard config exists.
 - Never say the demo is ready until `GET /api/salons/:id/voice/status` returns both `ready: true` and `phone_booking_ready: true`.
 - Keep Square as the first real POS provider. Do not claim generic POS support for this demo.
 - Keep the POS-first invariant explicit: no confirmed appointment unless Square returns a POS booking ID.
@@ -18,7 +18,8 @@ Customer calls -> AI answers through Twilio -> customer asks for a booking -> AI
 
 ## Source Of Truth
 
-- Backend env names: `backend/.env.example`
+- Backend env names: `backend/.env.example` for infrastructure and legacy provider fallback only.
+- Dashboard provider config: `/dashboard/integrations` and `GET /api/salons/:id/integration-configs`.
 - Local commands: `docs/local-development.md`
 - Deployment secrets: `docs/deployment.md`
 - Square behavior: `docs/square-integration.md`
@@ -95,20 +96,28 @@ Use the salon inbound phone as Twilio `To` / simulator `-to`.
 
 For live Twilio or Square OAuth callback, the backend must have a public HTTPS origin.
 
-For ngrok/local demo, tell the user to expose the backend API port and then set:
+For ngrok/local demo, tell the user to expose the backend API port and then set
+the public origin in the Integrations dashboard:
 
-```bash
-VOICE_PUBLIC_BASE_URL=https://<public-api-url>
-SQUARE_REDIRECT_URL=https://<public-api-url>/api/integrations/square/callback
+- Square tab: `Redirect URL`
+- Twilio tab: `Public API base URL`
+
+Use these values:
+
+```txt
+Twilio public API base URL: https://<public-api-url>
+Square redirect URL: https://<public-api-url>/api/integrations/square/callback
 ```
 
 If deployed, use the deployed API origin for both values.
 
-Do not use the frontend URL for these two variables.
+Do not use the frontend URL for these two dashboard fields. The env values
+`VOICE_PUBLIC_BASE_URL` and `SQUARE_REDIRECT_URL` are fallback-only values when
+no dashboard provider config exists.
 
 ## Step 3 - Core Backend Env
 
-Minimum backend env values:
+Minimum backend env values are infrastructure/runtime bootstrap only:
 
 ```bash
 APP_ENV=local
@@ -122,6 +131,9 @@ AUTO_MIGRATE=true
 ```
 
 For deployed/staging, replace `CORS_ALLOWED_ORIGINS` and `FRONTEND_URL` with the deployed frontend origin.
+Do not put Square, Twilio, or OpenAI provider secrets here unless intentionally
+using the legacy fallback path before the Integrations dashboard has saved
+provider config.
 
 ## Step 4 - Square Configuration
 
@@ -134,15 +146,18 @@ In Square Developer:
 https://<public-api-url>/api/integrations/square/callback
 ```
 
-Backend env:
+In the ManleAI Integrations dashboard, Square tab:
 
-```bash
-SQUARE_ENVIRONMENT=sandbox
-SQUARE_CLIENT_ID=<square-client-id>
-SQUARE_CLIENT_SECRET=<square-client-secret>
-SQUARE_REDIRECT_URL=https://<public-api-url>/api/integrations/square/callback
-SQUARE_API_VERSION=2026-05-20
-```
+- `Environment`: `Sandbox`
+- `Square client ID`: sandbox application ID
+- `Square client secret`: sandbox application secret
+- `Redirect URL`: `https://<public-api-url>/api/integrations/square/callback`
+- `Square API version`: `2026-05-20`
+- `Square API base URL`: blank, or `https://connect.squareupsandbox.com`
+
+Legacy env fallback names, used only when no dashboard Square config exists:
+`SQUARE_ENVIRONMENT`, `SQUARE_CLIENT_ID`, `SQUARE_CLIENT_SECRET`,
+`SQUARE_REDIRECT_URL`, and `SQUARE_API_VERSION`.
 
 The adapter requests these Square scopes:
 
@@ -160,7 +175,12 @@ EMPLOYEES_WRITE
 ```
 
 Sandbox OAuth uses the Square sandbox dashboard session and does not include
-`session=false`; production OAuth includes `session=false`.
+`session=false`; production OAuth includes `session=false`. If sandbox OAuth
+opens a blank page, first open the sandbox seller dashboard:
+
+```txt
+https://app.squareupsandbox.com/dashboard/
+```
 
 Dashboard flow:
 
@@ -250,16 +270,18 @@ Recovery checklist:
 
 ## Step 5 - Twilio Configuration
 
-Backend env:
+In the ManleAI Integrations dashboard, Twilio tab:
 
-```bash
-VOICE_PROVIDER=twilio
-VOICE_PUBLIC_BASE_URL=https://<public-api-url>
-VOICE_TWILIO_AUTH_TOKEN=<twilio-auth-token>
-VOICE_TWILIO_INCOMING_PATH=/api/voice/twilio/incoming
-VOICE_TWILIO_TURN_PATH=/api/voice/twilio/turn
-VOICE_TWILIO_RECORDING_PATH=/api/voice/twilio/recording
-```
+- `Public API base URL`: `https://<public-api-url>`
+- `Twilio auth token`: Twilio Auth Token
+- `Incoming path`: `/api/voice/twilio/incoming`
+- `Turn path`: `/api/voice/twilio/turn`
+- `Recording path`: `/api/voice/twilio/recording`
+
+Legacy env fallback names, used only when no dashboard Twilio config exists:
+`VOICE_PROVIDER`, `VOICE_PUBLIC_BASE_URL`, `VOICE_TWILIO_AUTH_TOKEN`,
+`VOICE_TWILIO_INCOMING_PATH`, `VOICE_TWILIO_TURN_PATH`, and
+`VOICE_TWILIO_RECORDING_PATH`.
 
 In Twilio phone number voice settings:
 
@@ -268,23 +290,28 @@ When a call comes in:
 POST https://<public-api-url>/api/voice/twilio/incoming
 ```
 
-Twilio webhook signature verification uses `VOICE_TWILIO_AUTH_TOKEN`. If the token is wrong, Twilio webhooks return `TWILIO_SIGNATURE_INVALID`.
+Twilio webhook signature verification uses the dashboard-saved Twilio auth
+token first, then `VOICE_TWILIO_AUTH_TOKEN` only as fallback. If the token is
+wrong, Twilio webhooks return `TWILIO_SIGNATURE_INVALID`.
 
 The salon phone in the dashboard/database must match the Twilio number receiving the call. The backend routes inbound calls by matching Twilio `To` to `salons.phone`.
 
 ## Step 6 - OpenAI Voice AI Configuration
 
-The local app can run Twilio speech `<Gather>` without OpenAI STT/TTS. For a full voice demo with recording-mode turns, transcription, safer AI reply rewriting, and generated audio playback, configure OpenAI:
+The local app can run Twilio speech `<Gather>` without OpenAI STT/TTS. For a full voice demo with recording-mode turns, transcription, safer AI reply rewriting, and generated audio playback, configure OpenAI in the ManleAI Integrations dashboard, OpenAI tab:
 
-```bash
-VOICE_AI_PROVIDER=openai
-VOICE_OPENAI_API_KEY=<openai-api-key>
-VOICE_OPENAI_BASE_URL=https://api.openai.com/v1
-VOICE_OPENAI_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
-VOICE_OPENAI_REPLY_MODEL=gpt-4.1-mini
-VOICE_OPENAI_SPEECH_MODEL=gpt-4o-mini-tts
-VOICE_OPENAI_SPEECH_VOICE=alloy
-```
+- Enable OpenAI voice AI
+- `OpenAI API key`: OpenAI API key
+- `Base URL`: `https://api.openai.com/v1`
+- `Transcription model`: `gpt-4o-mini-transcribe`
+- `Reply model`: `gpt-4.1-mini`
+- `Speech model`: `gpt-4o-mini-tts`
+- `Speech voice`: `alloy`
+
+Legacy env fallback names, used only when no dashboard OpenAI config exists:
+`VOICE_AI_PROVIDER`, `VOICE_OPENAI_API_KEY`, `VOICE_OPENAI_BASE_URL`,
+`VOICE_OPENAI_TRANSCRIPTION_MODEL`, `VOICE_OPENAI_REPLY_MODEL`,
+`VOICE_OPENAI_SPEECH_MODEL`, and `VOICE_OPENAI_SPEECH_VOICE`.
 
 Readiness meaning:
 
@@ -348,10 +375,10 @@ Expected flow:
 
 If the simulator fails signature verification, compare:
 
-- `VOICE_PUBLIC_BASE_URL`
+- dashboard Twilio `Public API base URL`, or fallback `VOICE_PUBLIC_BASE_URL`
 - simulator `-base-url`
 - simulator `-signature-base-url`
-- `VOICE_TWILIO_AUTH_TOKEN`
+- dashboard Twilio auth token, or fallback `VOICE_TWILIO_AUTH_TOKEN`
 
 ## Step 9 - Live Call Test
 
@@ -371,12 +398,13 @@ When simulator passes:
 
 - Wrong Twilio auth token.
 - Public URL mismatch between Twilio request URL and backend verification URL.
-- Webhook path differs from env path.
+- Webhook path differs from the dashboard Twilio path, or from the fallback env path when no dashboard config exists.
 
 `VOICE_PROVIDER_NOT_CONFIGURED`
 
-- `VOICE_PROVIDER` is not `twilio`.
-- `VOICE_TWILIO_AUTH_TOKEN` is empty.
+- Dashboard Twilio config is missing, disabled, or incomplete.
+- Fallback `VOICE_PROVIDER` is not `twilio` when no dashboard config exists.
+- Dashboard Twilio auth token is empty, or fallback `VOICE_TWILIO_AUTH_TOKEN` is empty when no dashboard config exists.
 
 `We could not route this call to a salon`
 

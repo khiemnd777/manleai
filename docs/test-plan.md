@@ -14,7 +14,7 @@
 
 ## Milestone 2
 
-- Verify `GET /api/integrations/square/connect-url` returns a Square OAuth URL when Square env vars are set.
+- Verify `GET /api/integrations/square/connect-url` returns a Square OAuth URL when Square is configured through the Integrations dashboard, and still supports env fallback only for local bootstrap.
 - Verify Square callback stores encrypted tokens in `pos_connections`.
 - Verify token values are not returned by status endpoints.
 - Verify `GET /api/integrations/square/status` returns connection state and sync logs.

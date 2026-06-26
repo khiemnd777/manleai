@@ -28,6 +28,14 @@ The product rule is strict: never confirm an appointment unless the active POS p
 
 - The user may use the Vietnamese "mày-tao" register, but the assistant must not use it. Use a respectful neutral register such as "mình/bạn" or omit pronouns when possible.
 
+## Evidence And Source Discipline
+
+- Do not give vendor-console navigation, setup instructions, or operational diagnoses as bare assertions. Ground them in visible user-provided UI/log text, repository files, command output, or official vendor documentation.
+- When interpreting logs or screenshots, quote the exact field names, values, timestamps, error codes, and request IDs that support the conclusion. Separate confirmed facts from inference.
+- When recommending where to click in a third-party console, cite the source of that path: current screenshot/appshot, official documentation URL, or clearly label it as an unverified UI-memory guess and ask the user to confirm the screen.
+- Prefer official vendor docs for external-service behavior. Include links when internet sources are used, and avoid half-sourced instructions such as "go to X -> Y" without origin or evidence.
+- If the evidence is insufficient, say exactly what is missing and what needs to be inspected next instead of filling the gap with a confident-sounding answer.
+
 ## User Confirmation Gate
 
 - For every feature request, bugfix, refactor, or task that changes code, stop after investigation and present the intended implementation plan for user review.

@@ -142,13 +142,20 @@ VOICE_OPENAI_SPEECH_MODEL
 VOICE_OPENAI_SPEECH_VOICE
 ```
 
+Do not troubleshoot active Square, Twilio, or OpenAI provider behavior by
+editing `project.env` before checking the Integrations dashboard. When a salon
+has dashboard-saved provider configuration, that encrypted salon-scoped config
+takes precedence over `project.env`, `.env`, and GitHub deployment secrets.
+Keep provider secrets out of production env files unless intentionally using
+the legacy fallback path for a fresh deployment with no saved dashboard config.
+
 ## Production Rules
 
 - Do not run `backend/seed/local.sql` in production.
 - Do not log Square access or refresh tokens.
 - Keep `AUTO_MIGRATE=true` unless another release process applies the same SQL migrations.
 - Configure the Square redirect URL in the Integrations dashboard to the deployed API callback.
-- Configure `VOICE_PUBLIC_BASE_URL` or the dashboard Twilio public base URL to the deployed API origin used in Twilio webhook settings.
+- Configure the dashboard Twilio public base URL to the deployed API origin used in Twilio webhook settings; `VOICE_PUBLIC_BASE_URL` is only the fallback source when no dashboard Twilio config exists.
 - Keep Twilio and OpenAI secrets out of logs and docs; dashboard responses expose only configured/source metadata.
 - Enable OpenAI voice AI in the Integrations dashboard only when external AI voice turns should be enabled.
 - Keep OpenAI model and voice settings configurable through the dashboard so model changes do not require code changes.

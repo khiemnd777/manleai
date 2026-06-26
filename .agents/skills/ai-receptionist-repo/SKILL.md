@@ -39,6 +39,7 @@ Use this skill before broad or ambiguous repo work.
 - Backend changes follow handler -> service -> repository/provider.
 - Booking and AI code call `modules/pos.POSProvider` only.
 - Square-specific code stays in `backend/modules/pos_square`.
+- Square Appointments, Twilio, and OpenAI runtime settings are dashboard-managed provider configuration stored in `salon_integration_configs`; `.env`, `project.env`, and deployment secrets are bootstrap or fallback values only. Check the Integrations dashboard/API before telling the user to edit env files for provider credentials, redirect URLs, webhook URLs, model names, or provider base URLs.
 - Frontend pages must be operational dashboards with loading, empty, error, and success states.
 - Docs must be updated when architecture, API, env, setup, or milestone scope changes.
 
