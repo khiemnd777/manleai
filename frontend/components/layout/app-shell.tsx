@@ -6,14 +6,17 @@ import {
   Home,
   Link2,
   LogOut,
+  Menu,
   PhoneCall,
   Settings,
   Sparkles,
   Users,
-  WalletCards
+  WalletCards,
+  X
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 import { logoutSession } from "@/lib/api/client";
 import { cn } from "@/lib/utils/cn";
 import { Button } from "@/components/ui/button";
@@ -31,13 +34,73 @@ const navItems = [
   { label: "Billing", href: "/dashboard/billing", icon: WalletCards }
 ];
 
+function NavigationLinks({
+  pathname,
+  onNavigate
+}: {
+  pathname: string;
+  onNavigate?: () => void;
+}) {
+  return (
+    <>
+      {navItems.map((item) => {
+        const Icon = item.icon;
+        const active = pathname === item.href;
+        return (
+          <Link
+            key={item.href}
+            href={item.href}
+            onClick={onNavigate}
+            className={cn(
+              "flex h-10 items-center gap-3 rounded-md px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100",
+              active && "bg-teal-50 text-brand"
+            )}
+          >
+            <Icon className="h-4 w-4" />
+            {item.label}
+          </Link>
+        );
+      })}
+    </>
+  );
+}
+
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   function logout() {
     void logoutSession().finally(() => router.push("/login"));
   }
+
+  useEffect(() => {
+    setMobileMenuOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!mobileMenuOpen) {
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+
+    document.getElementById("mobile-navigation-close")?.focus();
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setMobileMenuOpen(false);
+      }
+    }
+
+    document.body.style.overflow = "hidden";
+    document.addEventListener("keydown", closeOnEscape);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [mobileMenuOpen]);
 
   return (
     <div className="min-h-screen bg-shell">
@@ -54,23 +117,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </Link>
 
           <nav className="mt-8 space-y-1">
-            {navItems.map((item) => {
-              const Icon = item.icon;
-              const active = pathname === item.href;
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={cn(
-                    "flex h-10 items-center gap-3 rounded-md px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100",
-                    active && "bg-teal-50 text-brand"
-                  )}
-                >
-                  <Icon className="h-4 w-4" />
-                  {item.label}
-                </Link>
-              );
-            })}
+            <NavigationLinks pathname={pathname} />
           </nav>
 
           <div className="mt-auto border-t border-line pt-4">
@@ -82,15 +129,104 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
       </aside>
 
+      {mobileMenuOpen && (
+        <div
+          className="fixed inset-0 z-40 lg:hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Dashboard navigation"
+        >
+          <button
+            type="button"
+            className="absolute inset-0 bg-ink/45"
+            aria-label="Close navigation menu"
+            onClick={() => setMobileMenuOpen(false)}
+          />
+          <div
+            id="mobile-dashboard-navigation"
+            className="relative z-10 flex h-full w-80 max-w-[85vw] flex-col border-r border-line bg-white px-4 py-5 shadow-soft"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <Link
+                href="/dashboard"
+                className="flex min-w-0 items-center gap-3 px-2"
+                onClick={() => setMobileMenuOpen(false)}
+              >
+                <div className="flex h-10 w-10 flex-none items-center justify-center rounded-md bg-brand text-sm font-bold text-white">
+                  AI
+                </div>
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-bold text-ink">Salon Receptionist</div>
+                  <div className="truncate text-xs text-muted">POS-first pilot</div>
+                </div>
+              </Link>
+              <Button
+                id="mobile-navigation-close"
+                type="button"
+                variant="ghost"
+                className="h-10 w-10 flex-none px-0"
+                aria-label="Close navigation menu"
+                onClick={() => setMobileMenuOpen(false)}
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+
+            <Link
+              href="/dashboard/integrations"
+              className="mt-6"
+              onClick={() => setMobileMenuOpen(false)}
+            >
+              <Button type="button" variant="secondary" className="w-full">
+                <Link2 className="h-4 w-4" />
+                Square setup
+              </Button>
+            </Link>
+
+            <nav className="mt-6 space-y-1">
+              <NavigationLinks pathname={pathname} onNavigate={() => setMobileMenuOpen(false)} />
+            </nav>
+
+            <div className="mt-auto border-t border-line pt-4">
+              <Button
+                type="button"
+                variant="ghost"
+                className="w-full justify-start"
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  logout();
+                }}
+              >
+                <LogOut className="h-4 w-4" />
+                Sign out
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="lg:pl-72">
         <header className="sticky top-0 z-10 border-b border-line bg-white/95 px-5 py-4 backdrop-blur">
-          <div className="mx-auto flex max-w-7xl items-center justify-between">
-            <div>
-              <div className="text-sm font-semibold text-ink">AI Phone Receptionist</div>
-              <div className="text-xs text-muted">Nail salon owner dashboard</div>
+          <div className="mx-auto flex max-w-7xl flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-center gap-3">
+              <Button
+                type="button"
+                variant="ghost"
+                className="h-10 w-10 flex-none px-0 lg:hidden"
+                aria-label="Open navigation menu"
+                aria-controls="mobile-dashboard-navigation"
+                aria-expanded={mobileMenuOpen}
+                onClick={() => setMobileMenuOpen(true)}
+              >
+                <Menu className="h-4 w-4" />
+              </Button>
+              <div className="min-w-0">
+                <div className="truncate text-sm font-semibold text-ink">AI Phone Receptionist</div>
+                <div className="truncate text-xs text-muted">Nail salon owner dashboard</div>
+              </div>
             </div>
-            <Link href="/dashboard/integrations">
-              <Button type="button" variant="secondary">
+            <Link href="/dashboard/integrations" className="w-full sm:w-auto">
+              <Button type="button" variant="secondary" className="w-full sm:w-auto">
                 <Link2 className="h-4 w-4" />
                 Square setup
               </Button>
