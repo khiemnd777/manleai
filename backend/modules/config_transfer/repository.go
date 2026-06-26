@@ -66,7 +66,7 @@ func (r *Repository) PublicSlugTaken(ctx context.Context, salonID string, slug s
 			SELECT 1
 			FROM salons
 			WHERE lower(public_slug) = lower($1)
-			  AND id <> $2
+			  AND ($2 = '' OR id::text <> $2)
 		)
 	`, slug, salonID).Scan(&taken)
 	return taken, err

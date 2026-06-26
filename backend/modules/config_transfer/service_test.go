@@ -165,6 +165,82 @@ func TestPreviewOnboardingImportBlocksExistingSalon(t *testing.T) {
 	}
 }
 
+func TestPreviewOnboardingImportAllowsAvailablePublicSlugWithoutSalonID(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
+	store := &fakeImportStore{publicCanPublish: true, canEnableAI: true}
+	service := newTestService(updatedAt)
+	service.imports = store
+
+	result, err := service.PreviewOnboardingImport(context.Background(), "owner_1", ImportRequest{
+		RequestID:     "req-onboarding-slug",
+		Configuration: testImportBundle(updatedAt),
+	})
+	if err != nil {
+		t.Fatalf("PreviewOnboardingImport returned error: %v", err)
+	}
+	if !result.CanApply {
+		t.Fatalf("preview should be applyable for an available public slug: %#v", result)
+	}
+	if store.lastSlugSalonID != "" {
+		t.Fatalf("onboarding slug check salon id = %q, want empty id for a new salon", store.lastSlugSalonID)
+	}
+	if len(result.Conflicts) != 0 || sectionSummary(result.Summary, SectionPublic).Conflicts != 0 {
+		t.Fatalf("public slug should not create conflicts: result=%#v", result)
+	}
+}
+
+func TestPreviewOnboardingImportBlocksTakenPublicSlug(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
+	store := &fakeImportStore{publicCanPublish: true, canEnableAI: true, slugTaken: true}
+	service := newTestService(updatedAt)
+	service.imports = store
+
+	result, err := service.PreviewOnboardingImport(context.Background(), "owner_1", ImportRequest{
+		RequestID:     "req-onboarding-slug-taken",
+		Configuration: testImportBundle(updatedAt),
+	})
+	if err != nil {
+		t.Fatalf("PreviewOnboardingImport returned error: %v", err)
+	}
+	if result.CanApply {
+		t.Fatalf("preview should not be applyable for a taken public slug: %#v", result)
+	}
+	if len(result.Conflicts) != 1 || result.Conflicts[0].Code != "public_slug_unavailable" {
+		t.Fatalf("conflicts = %#v, want public_slug_unavailable", result.Conflicts)
+	}
+	if sectionSummary(result.Summary, SectionPublic).Conflicts != 1 {
+		t.Fatalf("public summary = %#v, want one conflict", result.Summary)
+	}
+}
+
+func TestPreviewImportCountsPublicSlugCheckFailure(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
+	store := &fakeImportStore{
+		publicCanPublish: true,
+		canEnableAI:      true,
+		slugErr:          errors.New("slug check failed"),
+	}
+	service := newTestService(updatedAt)
+	service.imports = store
+
+	result, err := service.PreviewImport(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "req-slug-check-failed",
+		Configuration: testImportBundle(updatedAt),
+	})
+	if err != nil {
+		t.Fatalf("PreviewImport returned error: %v", err)
+	}
+	if result.CanApply {
+		t.Fatalf("preview should not be applyable when slug check fails: %#v", result)
+	}
+	if len(result.Conflicts) != 1 || result.Conflicts[0].Code != "public_slug_check_failed" {
+		t.Fatalf("conflicts = %#v, want public_slug_check_failed", result.Conflicts)
+	}
+	if sectionSummary(result.Summary, SectionPublic).Conflicts != 1 {
+		t.Fatalf("public summary = %#v, want one conflict", result.Summary)
+	}
+}
+
 func TestApplyOnboardingImportCreatesSalonAndSkipsUnsafeLiveStates(t *testing.T) {
 	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
 	store := &fakeImportStore{publicCanPublish: false, canEnableAI: false}
@@ -483,6 +559,8 @@ type fakeImportStore struct {
 	publicCanPublish   bool
 	canEnableAI        bool
 	slugTaken          bool
+	slugErr            error
+	lastSlugSalonID    string
 	ownerHasSalon      bool
 	knowledge          *fakeKnowledgeReader
 	appliedRuns        map[string]string
@@ -517,7 +595,8 @@ func (f *fakeImportStore) TargetImportState(ctx context.Context, salonID string,
 }
 
 func (f *fakeImportStore) PublicSlugTaken(ctx context.Context, salonID string, slug string) (bool, error) {
-	return f.slugTaken, nil
+	f.lastSlugSalonID = salonID
+	return f.slugTaken, f.slugErr
 }
 
 func (f *fakeImportStore) OwnerHasSalon(ctx context.Context, ownerUserID string) (bool, error) {

@@ -439,6 +439,7 @@ func planPublicBookingPage(ctx context.Context, store ImportStore, salonID strin
 	if incoming.PublicSlug != "" {
 		taken, err := store.PublicSlugTaken(ctx, salonID, incoming.PublicSlug)
 		if err != nil {
+			summary(plan, SectionPublic).Conflicts++
 			plan.Conflicts = append(plan.Conflicts, ImportIssue{
 				Section: SectionPublic,
 				Code:    "public_slug_check_failed",
