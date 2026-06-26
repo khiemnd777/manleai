@@ -453,6 +453,55 @@ Import idempotency:
 - If the bundle requests `ai_enabled=true` or `booking_mode=confirmed_booking`, those fields are skipped unless the target salon has passed Square booking readiness.
 - If the bundle requests public page publishing, the publish state is skipped unless the target salon has synced AI-bookable services and staff.
 
+`POST /api/onboarding/configuration-import/preview`
+
+Validates a transfer bundle before the owner has created a salon. This endpoint
+is auth-only and does not require `salon_id`. It returns the same dry-run shape
+as salon-scoped import preview, but `can_apply=false` with an
+`owner_salon_exists` conflict when the owner already has a salon.
+
+`POST /api/onboarding/configuration-import`
+
+Creates the owner's first salon from a transfer bundle and applies supported
+configuration in one transaction. The request should include a client-generated
+`request_id`; reusing the same `request_id` and same payload is idempotent and
+returns the same `salon_id` and `import_run_id`.
+
+```json
+{
+  "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
+  "configuration": {
+    "schema_version": "manleai.salon_configuration.v2",
+    "...": "full exported configuration bundle"
+  }
+}
+```
+
+Response includes the created salon id:
+
+```json
+{
+  "import_run_id": "...",
+  "salon_id": "...",
+  "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
+  "dry_run": false,
+  "status": "applied",
+  "schema_version": "manleai.salon_configuration.v2",
+  "can_apply": true,
+  "summary": [],
+  "warnings": [],
+  "conflicts": [],
+  "excluded_data": ["services", "staff", "customers", "appointments", "call_sessions", "pos_oauth_tokens", "api_keys", "client_secrets"],
+  "requires_secret_reentry": ["square", "twilio", "openai"]
+}
+```
+
+Onboarding import never imports services, staff, customers, appointments, POS
+tokens, API keys, client secrets, or encrypted secrets. If the bundle requests
+`ai_enabled=true`, `booking_mode=confirmed_booking`, or public catalog
+publishing, those live states are skipped until Square Appointments is
+connected, synced, and booking-ready.
+
 ## Integration Configuration
 
 Provider credentials and runtime settings are salon-scoped and owner-scoped.
@@ -1131,7 +1180,6 @@ Returns owner-scoped live voice, phone booking, and external AI provider readine
       {"key": "bookable_services", "label": "AI-bookable services", "complete": true},
       {"key": "bookable_staff", "label": "AI-bookable staff", "complete": true},
       {"key": "business_hours", "label": "Business hours", "complete": true},
-      {"key": "cancel_test_booking", "label": "Cancel Square test booking", "complete": true},
       {"key": "enable_ai_booking", "label": "Enable AI booking", "complete": true}
     ]
   },
@@ -1491,7 +1539,7 @@ Cancels the latest Square test booking through the provider-neutral booking serv
 }
 ```
 
-Sets `salons.ai_enabled=true` only after Square is connected, a location is selected, services/staff are synced, at least one service and staff member are AI-bookable, and the latest test booking was created and cancelled successfully.
+Sets `salons.ai_enabled=true` only after Square is connected, a location is selected, services/staff/business hours are synced, and at least one service and staff member are AI-bookable. Square test booking create/cancel remains an optional POS write smoke test and is not an AI enablement gate.
 
 `POST /api/integrations/square/disable-ai-booking`
 

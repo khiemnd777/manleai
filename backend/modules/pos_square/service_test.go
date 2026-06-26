@@ -60,7 +60,7 @@ func TestSquareStateRejectsExpiredState(t *testing.T) {
 	}
 }
 
-func TestBuildReadinessAllowsEnableOnlyAfterCancelledTestBooking(t *testing.T) {
+func TestBuildReadinessAllowsEnableWhenSquareIsBookingReady(t *testing.T) {
 	now := time.Date(2026, 6, 10, 15, 0, 0, 0, time.UTC)
 	connection := &pos.Connection{
 		ID:         "connection_1",
@@ -98,8 +98,8 @@ func TestBuildReadinessAllowsEnableOnlyAfterCancelledTestBooking(t *testing.T) {
 	if !confirmed.CanCancelTestBooking {
 		t.Fatalf("expected cancel test booking to be allowed")
 	}
-	if confirmed.CanEnableAIBooking {
-		t.Fatalf("enable should remain blocked before cancellation")
+	if !confirmed.CanEnableAIBooking {
+		t.Fatalf("enable should be allowed when Square is connected, synced, and booking-ready")
 	}
 
 	cancelled := buildReadiness(false, connection, services, staff, periods, &booking.TestBookingRecord{
@@ -112,7 +112,12 @@ func TestBuildReadinessAllowsEnableOnlyAfterCancelledTestBooking(t *testing.T) {
 		t.Fatalf("cancel should not be allowed after test booking is cancelled")
 	}
 	if !cancelled.CanEnableAIBooking {
-		t.Fatalf("enable should be allowed after cancelled test booking")
+		t.Fatalf("enable should remain allowed after cancelled test booking")
+	}
+
+	withoutTest := buildReadiness(false, connection, services, staff, periods, nil)
+	if !withoutTest.CanEnableAIBooking {
+		t.Fatalf("enable should not require an optional Square test booking")
 	}
 }
 

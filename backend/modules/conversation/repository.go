@@ -20,40 +20,20 @@ func NewRepository(db *sql.DB) *Repository {
 
 func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, ownerUserID string) (*RuntimeConfig, error) {
 	var cfg RuntimeConfig
-	var rawAIEnabled bool
-	var testBookingCancelled bool
 	err := r.db.QueryRowContext(ctx, `
 		SELECT s.name, s.timezone, COALESCE(s.handoff_phone, ''), s.ai_enabled,
-		       COALESCE(ss.handoff_enabled, true), COALESCE(ss.ai_greeting, ''),
-		       EXISTS (
-		           SELECT 1
-		           FROM (
-		               SELECT ba.status, ba.pos_provider, COALESCE(ba.pos_booking_id, '') AS pos_booking_id
-		               FROM booking_attempts ba
-		               WHERE ba.salon_id = s.id
-		                 AND ba.source = $3
-		               ORDER BY ba.created_at DESC
-		               LIMIT 1
-		           ) latest
-		           JOIN appointments appt ON appt.salon_id = s.id
-		                                  AND appt.pos_provider = latest.pos_provider
-		                                  AND appt.pos_appointment_id = latest.pos_booking_id
-		           WHERE latest.status = 'cancelled'
-		             AND latest.pos_booking_id <> ''
-		             AND appt.status = 'cancelled'
-		       )
+		       COALESCE(ss.handoff_enabled, true), COALESCE(ss.ai_greeting, '')
 		FROM salons s
 		LEFT JOIN salon_settings ss ON ss.salon_id = s.id
 		WHERE s.id = $1
 		  AND s.owner_user_id = $2
-	`, salonID, ownerUserID, booking.SourceSquareTestBooking).Scan(
+	`, salonID, ownerUserID).Scan(
 		&cfg.SalonName,
 		&cfg.Timezone,
 		&cfg.HandoffPhone,
-		&rawAIEnabled,
+		&cfg.AIEnabled,
 		&cfg.HandoffEnabled,
 		&cfg.AIGreeting,
-		&testBookingCancelled,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -61,7 +41,7 @@ func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, owner
 	if err != nil {
 		return nil, err
 	}
-	cfg.AIEnabled = bookingSafetyEnabled(rawAIEnabled, testBookingCancelled)
+	cfg.AIEnabled = bookingSafetyEnabled(cfg.AIEnabled)
 	return &cfg, nil
 }
 

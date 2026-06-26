@@ -34,6 +34,20 @@ export async function applyConfigurationImport(salon: Salon, configuration: Conf
   });
 }
 
+export async function previewOnboardingConfigurationImport(configuration: ConfigurationBundle) {
+  return apiRequest<ConfigurationImportResponse>("/api/onboarding/configuration-import/preview", {
+    method: "POST",
+    body: JSON.stringify({ configuration })
+  });
+}
+
+export async function applyOnboardingConfigurationImport(configuration: ConfigurationBundle, requestId: string) {
+  return apiRequest<ConfigurationImportResponse>("/api/onboarding/configuration-import", {
+    method: "POST",
+    body: JSON.stringify({ request_id: requestId, configuration })
+  });
+}
+
 export function newConfigurationImportRequestID() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();

@@ -563,8 +563,8 @@ func salonName(cfg *RuntimeConfig) string {
 	return strings.TrimSpace(cfg.SalonName)
 }
 
-func bookingSafetyEnabled(aiEnabled bool, testBookingCancelled bool) bool {
-	return aiEnabled && testBookingCancelled
+func bookingSafetyEnabled(aiEnabled bool) bool {
+	return aiEnabled
 }
 
 func resolveIntent(current string, message string, session Session) string {

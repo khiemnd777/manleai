@@ -135,7 +135,6 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 		{Key: "bookable_services", Label: "AI-bookable services", Complete: readiness.ServiceCount > 0, Message: incompleteReadinessMessage(readiness.ServiceCount > 0, "No active AI-bookable service is synced from the active POS provider.")},
 		{Key: "bookable_staff", Label: "AI-bookable staff", Complete: readiness.StaffCount > 0, Message: incompleteReadinessMessage(readiness.StaffCount > 0, "No active AI-bookable staff member is synced from the active POS provider.")},
 		{Key: "business_hours", Label: "Business hours", Complete: readiness.BusinessHoursCount > 0, Message: incompleteReadinessMessage(readiness.BusinessHoursCount > 0, "Salon business hours are not configured.")},
-		{Key: "cancel_test_booking", Label: "Cancel POS test booking", Complete: readiness.TestBookingCancelled, Message: incompleteReadinessMessage(readiness.TestBookingCancelled, "The latest active-provider test booking has not been created and cancelled.")},
 		{Key: "enable_ai_booking", Label: "Enable AI booking", Complete: readiness.AIEnabled, Message: incompleteReadinessMessage(readiness.AIEnabled, "AI booking is disabled for this salon.")},
 	}
 	readiness.Ready = true

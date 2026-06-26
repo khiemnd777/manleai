@@ -387,10 +387,7 @@ func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.S
 		latest.AppointmentID != "" &&
 		latest.POSBookingID != "" &&
 		latest.AppointmentStatus != booking.StatusCancelled
-	testCancelled := latest != nil &&
-		latest.Status == booking.StatusCancelled &&
-		latest.AppointmentStatus == booking.StatusCancelled
-	canEnable := canTest && testCancelled
+	canEnable := canTest
 
 	checks := []ReadinessCheck{
 		{Key: "connect_square", Label: "Connect Square", Complete: connected, Message: incompleteMessage(connected, "Square Appointments is not connected.")},
@@ -398,8 +395,6 @@ func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.S
 		{Key: "sync_services", Label: "Sync services", Complete: servicesReady, Message: incompleteMessage(servicesReady, "Sync at least one active AI-bookable service.")},
 		{Key: "sync_staff", Label: "Sync staff", Complete: staffReady, Message: incompleteMessage(staffReady, "Sync at least one active AI-bookable staff member.")},
 		{Key: "sync_business_hours", Label: "Sync business hours", Complete: businessHoursReady, Message: incompleteMessage(businessHoursReady, "Sync at least one Square business hour period.")},
-		{Key: "create_test_booking", Label: "Create test booking", Complete: latest != nil && latest.POSBookingID != "" && latest.Status != booking.StatusFallbackPending, Message: incompleteMessage(latest != nil && latest.POSBookingID != "" && latest.Status != booking.StatusFallbackPending, "Create a real Square test booking.")},
-		{Key: "cancel_test_booking", Label: "Cancel test booking", Complete: testCancelled, Message: incompleteMessage(testCancelled, "Cancel the latest Square test booking before enabling AI booking.")},
 		{Key: "enable_ai_booking", Label: "Enable AI booking", Complete: aiEnabled, Message: incompleteMessage(aiEnabled, "AI booking is disabled until all safety checks pass.")},
 	}
 

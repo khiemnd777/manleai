@@ -144,6 +144,93 @@ func TestApplyImportIsIdempotentForKnowledgeSourceKeys(t *testing.T) {
 	}
 }
 
+func TestPreviewOnboardingImportBlocksExistingSalon(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
+	store := &fakeImportStore{ownerHasSalon: true}
+	service := newTestService(updatedAt)
+	service.imports = store
+
+	result, err := service.PreviewOnboardingImport(context.Background(), "owner_1", ImportRequest{
+		RequestID:     "req-onboarding-existing",
+		Configuration: testImportBundle(updatedAt),
+	})
+	if err != nil {
+		t.Fatalf("PreviewOnboardingImport returned error: %v", err)
+	}
+	if result.CanApply {
+		t.Fatalf("preview should not be applyable when the owner already has a salon: %#v", result)
+	}
+	if len(result.Conflicts) != 1 || result.Conflicts[0].Code != "owner_salon_exists" {
+		t.Fatalf("conflicts = %#v, want owner_salon_exists", result.Conflicts)
+	}
+}
+
+func TestApplyOnboardingImportCreatesSalonAndSkipsUnsafeLiveStates(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
+	store := &fakeImportStore{publicCanPublish: false, canEnableAI: false}
+	service := newTestService(updatedAt)
+	service.imports = store
+	bundle := testImportBundle(updatedAt)
+	bundle.SalonProfile.AIEnabled = true
+	bundle.AIReceptionist.BookingMode = "confirmed_booking"
+	bundle.PublicBookingPage.PublicCatalogEnabled = true
+
+	result, err := service.ApplyOnboardingImport(context.Background(), "owner_1", ImportRequest{
+		RequestID:     "req-onboarding-create",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("ApplyOnboardingImport returned error: %v", err)
+	}
+	if result.SalonID == "" || result.ImportRunID == "" {
+		t.Fatalf("result should include created salon and import run ids: %#v", result)
+	}
+	if store.onboardingCreates != 1 {
+		t.Fatalf("onboarding create count = %d, want 1", store.onboardingCreates)
+	}
+	if store.lastOnboardingPlan == nil {
+		t.Fatalf("store did not receive onboarding plan")
+	}
+	if store.lastOnboardingPlan.AIEnabled {
+		t.Fatalf("AI booking should be skipped for a newly imported salon without Square readiness")
+	}
+	if store.lastOnboardingPlan.BookingMode == "confirmed_booking" {
+		t.Fatalf("confirmed booking mode should be skipped for a newly imported salon without Square readiness")
+	}
+	if store.lastOnboardingPlan.PublicCatalogEnabled {
+		t.Fatalf("public catalog should be skipped for a newly imported salon without service/staff readiness")
+	}
+	if len(result.Warnings) < 3 {
+		t.Fatalf("warnings = %#v, want skipped live-state warnings", result.Warnings)
+	}
+}
+
+func TestApplyOnboardingImportIsIdempotentForSameRequest(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
+	store := &fakeImportStore{publicCanPublish: false, canEnableAI: false}
+	service := newTestService(updatedAt)
+	service.imports = store
+	req := ImportRequest{
+		RequestID:     "req-onboarding-idempotent",
+		Configuration: testImportBundle(updatedAt),
+	}
+
+	first, err := service.ApplyOnboardingImport(context.Background(), "owner_1", req)
+	if err != nil {
+		t.Fatalf("first ApplyOnboardingImport returned error: %v", err)
+	}
+	second, err := service.ApplyOnboardingImport(context.Background(), "owner_1", req)
+	if err != nil {
+		t.Fatalf("second ApplyOnboardingImport returned error: %v", err)
+	}
+	if first.ImportRunID != second.ImportRunID || first.SalonID != second.SalonID {
+		t.Fatalf("same request should return same ids: first=%#v second=%#v", first, second)
+	}
+	if store.onboardingCreates != 1 {
+		t.Fatalf("onboarding create count = %d, want idempotent create count 1", store.onboardingCreates)
+	}
+}
+
 func newTestService(updatedAt time.Time) *Service {
 	knowledge := &fakeKnowledgeReader{
 		items: []training.KnowledgeItem{
@@ -393,11 +480,21 @@ func (f *fakeKnowledgeReader) ListKnowledge(ctx context.Context, salonID string,
 }
 
 type fakeImportStore struct {
-	publicCanPublish bool
-	canEnableAI      bool
-	slugTaken        bool
-	knowledge        *fakeKnowledgeReader
-	appliedRuns      map[string]string
+	publicCanPublish   bool
+	canEnableAI        bool
+	slugTaken          bool
+	ownerHasSalon      bool
+	knowledge          *fakeKnowledgeReader
+	appliedRuns        map[string]string
+	onboardingRuns     map[string]fakeOnboardingRun
+	onboardingCreates  int
+	lastOnboardingPlan *importPlan
+}
+
+type fakeOnboardingRun struct {
+	runID       string
+	salonID     string
+	fingerprint string
 }
 
 func (f *fakeImportStore) TargetImportState(ctx context.Context, salonID string, ownerUserID string, current *ConfigurationBundle) (*importTargetState, error) {
@@ -421,6 +518,21 @@ func (f *fakeImportStore) TargetImportState(ctx context.Context, salonID string,
 
 func (f *fakeImportStore) PublicSlugTaken(ctx context.Context, salonID string, slug string) (bool, error) {
 	return f.slugTaken, nil
+}
+
+func (f *fakeImportStore) OwnerHasSalon(ctx context.Context, ownerUserID string) (bool, error) {
+	return f.ownerHasSalon, nil
+}
+
+func (f *fakeImportStore) ExistingOnboardingImport(ctx context.Context, ownerUserID string, requestID string, fingerprint string) (string, string, bool, bool, error) {
+	if f.onboardingRuns == nil {
+		return "", "", false, false, nil
+	}
+	run, ok := f.onboardingRuns[requestID]
+	if !ok {
+		return "", "", false, false, nil
+	}
+	return run.salonID, run.runID, true, run.fingerprint == fingerprint, nil
 }
 
 func (f *fakeImportStore) ApplyImport(ctx context.Context, salonID string, ownerUserID string, plan *importPlan) (string, bool, error) {
@@ -464,4 +576,25 @@ func (f *fakeImportStore) ApplyImport(ctx context.Context, salonID string, owner
 		}
 	}
 	return f.appliedRuns[plan.RequestID], false, nil
+}
+
+func (f *fakeImportStore) ApplyOnboardingImport(ctx context.Context, ownerUserID string, plan *importPlan) (string, string, bool, error) {
+	if f.onboardingRuns == nil {
+		f.onboardingRuns = map[string]fakeOnboardingRun{}
+	}
+	if run, ok := f.onboardingRuns[plan.RequestID]; ok {
+		if run.fingerprint != plan.PayloadFingerprint {
+			return run.salonID, run.runID, true, ErrImportConflict
+		}
+		return run.salonID, run.runID, true, nil
+	}
+	f.onboardingCreates++
+	f.lastOnboardingPlan = plan
+	run := fakeOnboardingRun{
+		runID:       "run_" + plan.RequestID,
+		salonID:     "salon_" + plan.RequestID,
+		fingerprint: plan.PayloadFingerprint,
+	}
+	f.onboardingRuns[plan.RequestID] = run
+	return run.salonID, run.runID, false, nil
 }

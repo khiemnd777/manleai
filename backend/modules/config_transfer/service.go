@@ -20,9 +20,10 @@ import (
 )
 
 var (
-	ErrValidation        = errors.New("configuration transfer validation failed")
-	ErrUnsupportedSchema = errors.New("configuration transfer schema is unsupported")
-	ErrImportConflict    = errors.New("configuration import has conflicts")
+	ErrValidation            = errors.New("configuration transfer validation failed")
+	ErrUnsupportedSchema     = errors.New("configuration transfer schema is unsupported")
+	ErrImportConflict        = errors.New("configuration import has conflicts")
+	ErrOnboardingSalonExists = errors.New("onboarding import requires an owner without a salon")
 )
 
 type SalonReader interface {
@@ -47,6 +48,9 @@ type ImportStore interface {
 	TargetImportState(ctx context.Context, salonID string, ownerUserID string, current *ConfigurationBundle) (*importTargetState, error)
 	PublicSlugTaken(ctx context.Context, salonID string, slug string) (bool, error)
 	ApplyImport(ctx context.Context, salonID string, ownerUserID string, plan *importPlan) (string, bool, error)
+	OwnerHasSalon(ctx context.Context, ownerUserID string) (bool, error)
+	ExistingOnboardingImport(ctx context.Context, ownerUserID string, requestID string, fingerprint string) (string, string, bool, bool, error)
+	ApplyOnboardingImport(ctx context.Context, ownerUserID string, plan *importPlan) (string, string, bool, error)
 }
 
 type Service struct {
@@ -161,13 +165,89 @@ func (s *Service) ApplyImport(ctx context.Context, salonID string, ownerUserID s
 	return importResponse(plan, false, runID), nil
 }
 
+func (s *Service) PreviewOnboardingImport(ctx context.Context, ownerUserID string, req ImportRequest) (*ImportResponse, error) {
+	bundle, fingerprint, requestID, err := normalizedImportRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := s.buildOnboardingImportPlan(ctx, ownerUserID, bundle, fingerprint, requestID, false)
+	if err != nil {
+		return nil, err
+	}
+	return importResponse(plan, true, ""), nil
+}
+
+func (s *Service) ApplyOnboardingImport(ctx context.Context, ownerUserID string, req ImportRequest) (*ImportResponse, error) {
+	if s.imports == nil {
+		return nil, ErrValidation
+	}
+	bundle, fingerprint, requestID, err := normalizedImportRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	existingSalonID, existingRunID, exists, samePayload, err := s.imports.ExistingOnboardingImport(ctx, strings.TrimSpace(ownerUserID), requestID, fingerprint)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		plan, err := s.buildOnboardingImportPlan(ctx, ownerUserID, bundle, fingerprint, requestID, true)
+		if err != nil {
+			return nil, err
+		}
+		plan.SalonID = existingSalonID
+		if !samePayload {
+			plan.Conflicts = append(plan.Conflicts, ImportIssue{
+				Section: SectionSalon,
+				Code:    "request_id_conflict",
+				Message: "This request id was already used for a different configuration payload.",
+				Field:   "request_id",
+			})
+			plan.CanApply = false
+			return importResponse(plan, false, existingRunID), ErrImportConflict
+		}
+		return importResponse(plan, false, existingRunID), nil
+	}
+	plan, err := s.buildOnboardingImportPlan(ctx, ownerUserID, bundle, fingerprint, requestID, false)
+	if err != nil {
+		return nil, err
+	}
+	if !plan.CanApply {
+		return importResponse(plan, false, ""), ErrImportConflict
+	}
+	salonID, runID, _, err := s.imports.ApplyOnboardingImport(ctx, strings.TrimSpace(ownerUserID), plan)
+	if err != nil {
+		if errors.Is(err, ErrOnboardingSalonExists) {
+			plan.Conflicts = append(plan.Conflicts, ImportIssue{
+				Section: SectionSalon,
+				Code:    "owner_salon_exists",
+				Message: "This owner already has a salon. Use Settings configuration transfer to import into the existing salon.",
+			})
+			plan.CanApply = false
+			return importResponse(plan, false, runID), ErrImportConflict
+		}
+		if errors.Is(err, ErrImportConflict) {
+			plan.Conflicts = append(plan.Conflicts, ImportIssue{
+				Section: SectionSalon,
+				Code:    "request_id_conflict",
+				Message: "This request id was already used for a different configuration payload.",
+				Field:   "request_id",
+			})
+			plan.CanApply = false
+			return importResponse(plan, false, runID), ErrImportConflict
+		}
+		return nil, err
+	}
+	plan.SalonID = salonID
+	return importResponse(plan, false, runID), nil
+}
+
 func (s *Service) buildImportPlan(ctx context.Context, salonID string, ownerUserID string, req ImportRequest) (*importPlan, error) {
 	salonID = strings.TrimSpace(salonID)
 	ownerUserID = strings.TrimSpace(ownerUserID)
 	if salonID == "" || ownerUserID == "" || s.imports == nil {
 		return nil, ErrValidation
 	}
-	bundle, err := normalizeImportBundle(req.Configuration)
+	bundle, fingerprint, requestID, err := normalizedImportRequest(req)
 	if err != nil {
 		return nil, err
 	}
@@ -179,18 +259,56 @@ func (s *Service) buildImportPlan(ctx context.Context, salonID string, ownerUser
 	if err != nil {
 		return nil, err
 	}
-	fingerprint, err := fingerprintBundle(bundle)
-	if err != nil {
-		return nil, err
+	plan := newImportPlan(bundle, fingerprint, requestID, salonID, target)
+	planSalonProfile(ctx, s.imports, plan)
+	planAIReceptionist(plan)
+	planPublicBookingPage(ctx, s.imports, salonID, plan)
+	planIntegrations(plan)
+	planKnowledge(plan)
+	if len(plan.Conflicts) > 0 {
+		plan.CanApply = false
 	}
-	requestID := strings.TrimSpace(req.RequestID)
-	if requestID == "" {
-		requestID = randomRequestID()
+	return plan, nil
+}
+
+func (s *Service) buildOnboardingImportPlan(ctx context.Context, ownerUserID string, bundle ConfigurationBundle, fingerprint string, requestID string, skipExistingSalonCheck bool) (*importPlan, error) {
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	if ownerUserID == "" || s.imports == nil {
+		return nil, ErrValidation
 	}
+	target := onboardingImportTargetState()
+	plan := newImportPlan(bundle, fingerprint, requestID, "", target)
+	if !skipExistingSalonCheck {
+		hasSalon, err := s.imports.OwnerHasSalon(ctx, ownerUserID)
+		if err != nil {
+			return nil, err
+		}
+		if hasSalon {
+			summary(plan, SectionSalon).Conflicts++
+			plan.Conflicts = append(plan.Conflicts, ImportIssue{
+				Section: SectionSalon,
+				Code:    "owner_salon_exists",
+				Message: "This owner already has a salon. Use Settings configuration transfer to import into the existing salon.",
+			})
+		}
+	}
+	planSalonProfile(ctx, s.imports, plan)
+	planAIReceptionist(plan)
+	planPublicBookingPage(ctx, s.imports, "", plan)
+	planIntegrations(plan)
+	planKnowledge(plan)
+	if len(plan.Conflicts) > 0 {
+		plan.CanApply = false
+	}
+	return plan, nil
+}
+
+func newImportPlan(bundle ConfigurationBundle, fingerprint string, requestID string, salonID string, target *importTargetState) *importPlan {
 	plan := &importPlan{
 		Bundle:                bundle,
 		PayloadFingerprint:    fingerprint,
 		SchemaVersion:         bundle.SchemaVersion,
+		SalonID:               salonID,
 		RequestID:             requestID,
 		Summary:               newSummaryMap(),
 		RequiresSecretReentry: secretReentryProviders(bundle.Integrations),
@@ -215,15 +333,32 @@ func (s *Service) buildImportPlan(ctx context.Context, salonID string, ownerUser
 			Field:   provider,
 		})
 	}
-	planSalonProfile(ctx, s.imports, plan)
-	planAIReceptionist(plan)
-	planPublicBookingPage(ctx, s.imports, salonID, plan)
-	planIntegrations(plan)
-	planKnowledge(plan)
-	if len(plan.Conflicts) > 0 {
-		plan.CanApply = false
+	return plan
+}
+
+func onboardingImportTargetState() *importTargetState {
+	return &importTargetState{
+		SalonProfile: SalonProfileExport{
+			Timezone:          "America/Chicago",
+			PrimaryLanguage:   "en",
+			SecondaryLanguage: "vi",
+			ActivePOSProvider: pos.ProviderSquare,
+		},
+		AIReceptionist: AIReceptionistExport{
+			AIVoice:                 "professional_female",
+			BookingMode:             "pending_approval",
+			RecordingEnabled:        true,
+			RecordingConsentMessage: "Thank you for calling. This call may be recorded to help us manage appointments and improve service.",
+			SMSConfirmationEnabled:  true,
+			SMSReminderEnabled:      true,
+			ReminderHoursBefore:     24,
+			HandoffEnabled:          true,
+		},
+		PublicCanPublish:       false,
+		CanEnableAIBooking:     false,
+		KnowledgeByImportKey:   map[string]KnowledgeItemExport{},
+		KnowledgeByContentHash: map[string]KnowledgeItemExport{},
 	}
-	return plan, nil
 }
 
 func planSalonProfile(ctx context.Context, store ImportStore, plan *importPlan) {
@@ -443,6 +578,22 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 	}
 	bundle.KnowledgeBase.Count = len(bundle.KnowledgeBase.Items)
 	return bundle, nil
+}
+
+func normalizedImportRequest(req ImportRequest) (ConfigurationBundle, string, string, error) {
+	bundle, err := normalizeImportBundle(req.Configuration)
+	if err != nil {
+		return bundle, "", "", err
+	}
+	fingerprint, err := fingerprintBundle(bundle)
+	if err != nil {
+		return bundle, "", "", err
+	}
+	requestID := strings.TrimSpace(req.RequestID)
+	if requestID == "" {
+		requestID = randomRequestID()
+	}
+	return bundle, fingerprint, requestID, nil
 }
 
 func normalizeSalonProfile(profile SalonProfileExport) SalonProfileExport {
@@ -672,6 +823,7 @@ func importResponse(plan *importPlan, dryRun bool, runID string) *ImportResponse
 	}
 	return &ImportResponse{
 		ImportRunID:           runID,
+		SalonID:               plan.SalonID,
 		RequestID:             plan.RequestID,
 		DryRun:                dryRun,
 		Status:                status,

@@ -21,7 +21,7 @@
 - Cancel appointment
 - Create test booking
 - Cancel test booking
-- AI booking readiness gate
+- AI booking readiness checks
 - Sync logs
 - POS error logs
 - Provider capability reporting for POS sync jobs
@@ -66,9 +66,10 @@ exists, or calls Square customer search/create and stores the resulting link.
 Customer search/create/link failures keep the attempt in fallback pending state
 instead of producing a confirmed appointment. Reschedule, cancel, test booking,
 test booking cancellation, and simulator booking requests leave internal
-confirmed appointment state unchanged unless Square succeeds. AI booking can
-only be enabled after the latest Square test booking was created and cancelled
-successfully.
+confirmed appointment state unchanged unless Square succeeds. AI booking can be
+enabled after Square connection, location, sync, bookable service/staff, and
+business hour readiness pass; Square test booking create/cancel is an optional
+POS write smoke test, not an AI enablement gate.
 
 Booking attempts and confirmed appointments snapshot service/staff segments in backend tables before or after the Square call as appropriate. Provider-neutral POS DTOs now carry segment arrays, and `SquareAdapter` maps those arrays into Square booking `appointment_segments` and availability `segment_filters`. `staff_selection_mode=anyone` is retained as internal/customer preference metadata; Square-specific appointment payload requirements remain isolated inside `SquareAdapter`.
 

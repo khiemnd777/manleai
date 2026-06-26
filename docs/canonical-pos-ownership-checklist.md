@@ -491,10 +491,10 @@ Phase 7D readiness regression tests completed:
 Phase 7E Integrations readiness/state polish completed:
 
 - [x] Add an Integrations readiness overview that surfaces Square connection,
-      booking-ready data, test booking, and provider-switch gates from existing
+      booking-ready data, optional test booking, and provider-switch gates from existing
       API data.
-- [x] Improve Square test booking gated state so owners can see the next
-      blocker before creating, cancelling, or enabling AI booking.
+- [x] Improve Square test booking smoke-test state so owners can see the next
+      blocker before creating or cancelling an optional POS write test.
 - [x] Improve sync-log empty state so owners understand sync history starts
       only after Square is connected and services/staff sync runs.
 - [x] Keep provider switch copy scope-honest: Square Appointments is the only

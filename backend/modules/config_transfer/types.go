@@ -121,6 +121,7 @@ type ImportRequest struct {
 
 type ImportResponse struct {
 	ImportRunID           string                 `json:"import_run_id,omitempty"`
+	SalonID               string                 `json:"salon_id,omitempty"`
 	RequestID             string                 `json:"request_id"`
 	DryRun                bool                   `json:"dry_run"`
 	Status                string                 `json:"status"`
@@ -154,6 +155,7 @@ type importPlan struct {
 	Bundle                ConfigurationBundle
 	PayloadFingerprint    string
 	SchemaVersion         string
+	SalonID               string
 	RequestID             string
 	Summary               map[string]*ImportSectionSummary
 	Warnings              []ImportIssue

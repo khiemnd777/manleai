@@ -170,9 +170,9 @@ Dashboard flow:
 4. Sync services, staff, business hour periods, and customers.
 5. Confirm at least one active AI-bookable service.
 6. Confirm at least one active AI-bookable staff member.
-7. Create a real Square test booking.
-8. Cancel that test booking.
-9. Enable AI booking.
+7. Enable AI booking.
+8. Optional smoke test: create a real Square test booking.
+9. Optional cleanup: cancel that test booking.
 
 Do not proceed to live phone booking until the Square readiness checks pass.
 

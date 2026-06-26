@@ -241,7 +241,6 @@ func newFakeVoiceStore() *fakeVoiceStore {
 				{Key: "bookable_services", Label: "AI-bookable services", Complete: true},
 				{Key: "bookable_staff", Label: "AI-bookable staff", Complete: true},
 				{Key: "business_hours", Label: "Business hours", Complete: true},
-				{Key: "cancel_test_booking", Label: "Cancel Square test booking", Complete: true},
 				{Key: "enable_ai_booking", Label: "Enable AI booking", Complete: true},
 			},
 		},

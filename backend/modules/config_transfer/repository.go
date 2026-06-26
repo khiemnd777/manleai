@@ -72,6 +72,48 @@ func (r *Repository) PublicSlugTaken(ctx context.Context, salonID string, slug s
 	return taken, err
 }
 
+func (r *Repository) OwnerHasSalon(ctx context.Context, ownerUserID string) (bool, error) {
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	if ownerUserID == "" {
+		return false, ErrValidation
+	}
+	var exists bool
+	err := r.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM salons
+			WHERE owner_user_id = $1
+		)
+	`, ownerUserID).Scan(&exists)
+	return exists, err
+}
+
+func (r *Repository) ExistingOnboardingImport(ctx context.Context, ownerUserID string, requestID string, fingerprint string) (string, string, bool, bool, error) {
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	requestID = strings.TrimSpace(requestID)
+	if ownerUserID == "" || requestID == "" {
+		return "", "", false, false, ErrValidation
+	}
+	var salonID string
+	var runID string
+	var existingFingerprint string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT run.salon_id::text, run.id::text, run.payload_fingerprint
+		FROM configuration_import_runs run
+		WHERE run.owner_user_id = $1
+		  AND run.request_id = $2
+		ORDER BY run.created_at DESC
+		LIMIT 1
+	`, ownerUserID, requestID).Scan(&salonID, &runID, &existingFingerprint)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, false, nil
+	}
+	if err != nil {
+		return "", "", false, false, err
+	}
+	return salonID, runID, true, existingFingerprint == fingerprint, nil
+}
+
 func (r *Repository) ApplyImport(ctx context.Context, salonID string, ownerUserID string, plan *importPlan) (string, bool, error) {
 	if plan == nil || !plan.CanApply {
 		return "", false, ErrImportConflict
@@ -124,6 +166,84 @@ func (r *Repository) ApplyImport(ctx context.Context, salonID string, ownerUserI
 	return runID, false, nil
 }
 
+func (r *Repository) ApplyOnboardingImport(ctx context.Context, ownerUserID string, plan *importPlan) (string, string, bool, error) {
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	if plan == nil || !plan.CanApply {
+		return "", "", false, ErrImportConflict
+	}
+	if ownerUserID == "" || plan.RequestID == "" || plan.PayloadFingerprint == "" {
+		return "", "", false, ErrValidation
+	}
+	existingSalonID, existingRunID, exists, samePayload, err := r.ExistingOnboardingImport(ctx, ownerUserID, plan.RequestID, plan.PayloadFingerprint)
+	if err != nil {
+		return "", "", false, err
+	}
+	if exists {
+		if !samePayload {
+			return existingSalonID, existingRunID, true, ErrImportConflict
+		}
+		return existingSalonID, existingRunID, true, nil
+	}
+	hasSalon, err := r.OwnerHasSalon(ctx, ownerUserID)
+	if err != nil {
+		return "", "", false, err
+	}
+	if hasSalon {
+		return "", "", false, ErrOnboardingSalonExists
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", "", false, err
+	}
+	defer tx.Rollback()
+
+	var salonID string
+	profile := plan.Bundle.SalonProfile
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO salons (
+			name, phone, address, city, state, zip_code, timezone, owner_user_id,
+			primary_language, secondary_language, handoff_phone, ai_enabled,
+			active_pos_provider, public_slug, public_catalog_enabled
+		)
+		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''), $7, $8,
+		        $9, $10, NULLIF($11, ''), $12, $13, NULLIF($14, ''), $15)
+		RETURNING id::text
+	`, profile.Name, profile.Phone, profile.Address, profile.City, profile.State, profile.ZipCode, profile.Timezone, ownerUserID, profile.PrimaryLanguage, profile.SecondaryLanguage, profile.HandoffPhone, plan.AIEnabled, profile.ActivePOSProvider, plan.Bundle.PublicBookingPage.PublicSlug, plan.PublicCatalogEnabled).Scan(&salonID)
+	if err != nil {
+		return "", "", false, err
+	}
+
+	settings := plan.Bundle.AIReceptionist
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO salon_settings (
+			salon_id, ai_greeting, ai_voice, booking_mode, recording_enabled,
+			recording_consent_message, sms_confirmation_enabled, sms_reminder_enabled,
+			reminder_hours_before, handoff_enabled
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	`, salonID, settings.AIGreeting, settings.AIVoice, plan.BookingMode, settings.RecordingEnabled, settings.RecordingConsentMessage, settings.SMSConfirmationEnabled, settings.SMSReminderEnabled, settings.ReminderHoursBefore, settings.HandoffEnabled); err != nil {
+		return "", "", false, err
+	}
+	if err := insertDefaultBusinessHours(ctx, tx, salonID); err != nil {
+		return "", "", false, err
+	}
+	if err := r.upsertIntegrationConfigs(ctx, tx, salonID, plan.Bundle.Integrations); err != nil {
+		return "", "", false, err
+	}
+	if err := r.upsertKnowledge(ctx, tx, salonID, plan.Knowledge); err != nil {
+		return "", "", false, err
+	}
+	runID, err := r.createImportRun(ctx, tx, salonID, ownerUserID, plan)
+	if err != nil {
+		return "", "", false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", "", false, err
+	}
+	return salonID, runID, false, nil
+}
+
 func (r *Repository) existingImportRun(ctx context.Context, salonID string, ownerUserID string, requestID string, fingerprint string) (string, bool, error) {
 	var id string
 	var existingFingerprint string
@@ -142,6 +262,19 @@ func (r *Repository) existingImportRun(ctx context.Context, salonID string, owne
 		return "", false, err
 	}
 	return id, existingFingerprint == fingerprint, nil
+}
+
+func insertDefaultBusinessHours(ctx context.Context, tx *sql.Tx, salonID string) error {
+	for day := 0; day <= 6; day++ {
+		isClosed := day == 0
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO salon_business_hours (salon_id, day_of_week, open_time, close_time, is_closed)
+			VALUES ($1, $2, '09:30', '19:00', $3)
+		`, salonID, day, isClosed); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *Repository) ensureSalonOwner(ctx context.Context, salonID string, ownerUserID string) error {
@@ -188,9 +321,8 @@ func (r *Repository) canEnableAIBooking(ctx context.Context, salonID string) (bo
 	var serviceCount int
 	var staffCount int
 	var periodCount int
-	var testCancelled bool
-	err := r.db.QueryRowContext(ctx, aiBookingReadinessQuery(), salonID).Scan(&connected, &serviceCount, &staffCount, &periodCount, &testCancelled)
-	return connected && serviceCount > 0 && staffCount > 0 && periodCount > 0 && testCancelled, err
+	err := r.db.QueryRowContext(ctx, aiBookingReadinessQuery(), salonID).Scan(&connected, &serviceCount, &staffCount, &periodCount)
+	return connected && serviceCount > 0 && staffCount > 0 && periodCount > 0, err
 }
 
 func (r *Repository) updateSalonProfile(ctx context.Context, tx *sql.Tx, salonID string, ownerUserID string, profile SalonProfileExport, aiEnabled bool) error {
@@ -494,31 +626,10 @@ func aiBookingReadinessQuery() string {
 			WHERE salon_id = (SELECT id FROM owned_salon)
 			  AND source = 'imported'
 			  AND provider = (SELECT active_pos_provider FROM owned_salon)
-		),
-		latest_attempt AS (
-			SELECT ba.pos_booking_id, ba.status
-			FROM booking_attempts ba
-			WHERE ba.salon_id = (SELECT id FROM owned_salon)
-			  AND ba.source = 'square_test_booking'
-			ORDER BY ba.created_at DESC
-			LIMIT 1
-		),
-		test_cancelled AS (
-			SELECT EXISTS (
-				SELECT 1
-				FROM latest_attempt latest
-				JOIN appointments appointment ON appointment.salon_id = (SELECT id FROM owned_salon)
-				  AND appointment.pos_provider = (SELECT active_pos_provider FROM owned_salon)
-				  AND appointment.pos_appointment_id = latest.pos_booking_id
-				WHERE latest.status = 'cancelled'
-				  AND appointment.status = 'cancelled'
-				  AND COALESCE(latest.pos_booking_id, '') <> ''
-			) AS ready
 		)
 		SELECT (SELECT ready FROM connection_ready),
 		       (SELECT count(*)::int FROM service_rows WHERE linked = true),
 		       (SELECT count(*)::int FROM staff_rows WHERE linked = true),
-		       (SELECT count FROM business_periods),
-		       (SELECT ready FROM test_cancelled)
+		       (SELECT count FROM business_periods)
 	`
 }

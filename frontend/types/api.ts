@@ -214,6 +214,7 @@ export type ConfigurationImportRequest = {
 
 export type ConfigurationImportResponse = {
   import_run_id?: string;
+  salon_id?: string;
   request_id: string;
   dry_run: boolean;
   status: string;

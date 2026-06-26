@@ -51,12 +51,33 @@ func (h *Handler) ApplyImport(c *fiber.Ctx) error {
 	return h.importResponse(c, result, err)
 }
 
+func (h *Handler) PreviewOnboardingImport(c *fiber.Ctx) error {
+	req, err := parseImportRequest(c)
+	if err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_CONFIGURATION_IMPORT", "Request body must include a valid configuration bundle.")
+	}
+	result, err := h.service.PreviewOnboardingImport(c.UserContext(), middleware.UserID(c), *req)
+	return h.importResponse(c, result, err)
+}
+
+func (h *Handler) ApplyOnboardingImport(c *fiber.Ctx) error {
+	req, err := parseImportRequest(c)
+	if err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_CONFIGURATION_IMPORT", "Request body must include a valid configuration bundle.")
+	}
+	result, err := h.service.ApplyOnboardingImport(c.UserContext(), middleware.UserID(c), *req)
+	return h.importResponse(c, result, err)
+}
+
 func (h *Handler) importResponse(c *fiber.Ctx, result *ImportResponse, err error) error {
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "CONFIGURATION_IMPORT_INVALID", "Configuration import request is invalid.")
 	}
 	if errors.Is(err, ErrUnsupportedSchema) {
 		return respond.Error(c, fiber.StatusBadRequest, "CONFIGURATION_IMPORT_SCHEMA_UNSUPPORTED", "Configuration import schema is not supported.")
+	}
+	if errors.Is(err, ErrOnboardingSalonExists) {
+		return respond.Error(c, fiber.StatusConflict, "ONBOARDING_SALON_EXISTS", "This owner already has a salon. Use Settings configuration transfer instead.")
 	}
 	if errors.Is(err, ErrImportConflict) {
 		return respond.JSON(c, fiber.StatusConflict, result)

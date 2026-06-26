@@ -45,7 +45,7 @@
 - Verify Square readiness blocks test booking until Square is connected, a location is selected, services/staff are synced, and at least one service/staff record is AI-bookable.
 - Verify Square test booking creates a real booking through `booking.Service` with source `square_test_booking`.
 - Verify cancel test booking cancels the latest Square test appointment through `booking.Service`.
-- Verify AI booking enablement is blocked until the latest test booking is cancelled successfully.
+- Verify AI booking enablement is not blocked by optional Square test booking create/cancel state once Square connection, location, sync, bookable service/staff, and business hours readiness pass.
 - Verify the dashboard Integrations page handles loading, empty, error, success, disabled/gated, and mobile states for Square readiness.
 - Verify the dashboard Appointments page distinguishes POS-confirmed appointments from `fallback_pending` requests that need owner review.
 - Verify the dashboard Services and Staff pages let owners allow/block AI booking for active synced records without editing Square data.

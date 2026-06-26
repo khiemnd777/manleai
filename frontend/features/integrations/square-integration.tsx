@@ -409,7 +409,7 @@ export function SquareIntegration() {
       if (response.booking_attempt?.status === "fallback_pending") {
         setError(response.booking_attempt.error_message || "Test booking is pending owner review.");
       } else {
-        setSuccess("Square test booking created. Cancel it before enabling AI booking.");
+        setSuccess("Square test booking created. Cancel it when you finish the optional POS smoke test.");
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not create Square test booking.");
@@ -782,7 +782,7 @@ export function SquareIntegration() {
             <div>
               <CardTitle>AI booking readiness</CardTitle>
               <CardDescription>
-                AI booking stays disabled until Square creates and cancels a real test booking.
+                AI booking can be enabled after Square is connected, synced, and has booking-ready services, staff, and hours.
               </CardDescription>
             </div>
             <Badge value={aiEnabled ? "active" : "disabled"} />
@@ -823,7 +823,7 @@ export function SquareIntegration() {
         <Card>
           <CardTitle>Test booking</CardTitle>
           <CardDescription>
-            Create one Square test booking, then cancel it before enabling AI booking.
+            Optional Square write smoke test. Create and cancel a real Square booking when you want to verify POS writes.
           </CardDescription>
 
           <TestBookingGate
@@ -1673,7 +1673,7 @@ function TestBookingGate({
         )}
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <div className="text-sm font-semibold text-ink">Test booking gate</div>
+            <div className="text-sm font-semibold text-ink">Optional Square smoke test</div>
             <Badge value={gate.status} />
           </div>
           <div className={ready ? "mt-1 text-sm leading-6 text-emerald-800" : "mt-1 text-sm leading-6 text-amber-900"}>
@@ -2388,13 +2388,13 @@ function testBookingGateState(readiness: SquareReadiness | undefined, latest?: T
   if (readiness?.can_enable_ai_booking) {
     return {
       status: "ready",
-      message: "The latest Square test booking was created and cancelled. AI booking can be enabled when the owner is ready."
+      message: "Square is connected, synced, and booking-ready. The test booking buttons are optional POS smoke tests."
     };
   }
   if (readiness?.can_cancel_test_booking) {
     return {
       status: "pending",
-      message: "Cancel the latest Square test booking before enabling AI booking."
+      message: "Cancel the latest optional Square test booking to clean up the POS smoke test."
     };
   }
   if (latest?.error_message) {
@@ -2406,14 +2406,14 @@ function testBookingGateState(readiness: SquareReadiness | undefined, latest?: T
   if (readiness?.can_test_booking) {
     return {
       status: "pending",
-      message: "Check Square availability, select a real slot, and create one test booking."
+      message: "Optional: check Square availability, select a real slot, and create one smoke-test booking."
     };
   }
   return {
     status: "blocked",
     message:
       firstIncompleteCheckMessage(readiness?.checks) ||
-      "Connect Square Appointments, select a location, and keep at least one booking-ready service and staff member before testing booking."
+      "Connect Square Appointments, select a location, and keep at least one booking-ready service and staff member before running a smoke test."
   };
 }
 

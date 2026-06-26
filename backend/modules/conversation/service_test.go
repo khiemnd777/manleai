@@ -505,14 +505,11 @@ func TestKnowledgeAnswerCannotConfirmAppointment(t *testing.T) {
 	}
 }
 
-func TestBookingSafetyEnabledRequiresCancelledTestBooking(t *testing.T) {
-	if bookingSafetyEnabled(true, false) {
-		t.Fatalf("AI booking should remain disabled without a cancelled Square test booking")
+func TestBookingSafetyEnabledFollowsSalonFlag(t *testing.T) {
+	if !bookingSafetyEnabled(true) {
+		t.Fatalf("AI booking should be enabled when the salon flag is true")
 	}
-	if !bookingSafetyEnabled(true, true) {
-		t.Fatalf("AI booking should be enabled after Square test booking cancellation")
-	}
-	if bookingSafetyEnabled(false, true) {
+	if bookingSafetyEnabled(false) {
 		t.Fatalf("AI booking should remain disabled when the salon flag is false")
 	}
 }
