@@ -114,6 +114,62 @@ func TestParseRealtimeEvents(t *testing.T) {
 	if done.Type != voice.RealtimeEventResponseDone {
 		t.Fatalf("done event = %#v", done)
 	}
+
+	sessionUpdated := parseRealtimeEvent([]byte(`{"type":"session.updated"}`))
+	if sessionUpdated.Type != voice.RealtimeEventSessionUpdated {
+		t.Fatalf("session updated event = %#v", sessionUpdated)
+	}
+
+	apiErr := parseRealtimeEvent([]byte(`{"type":"error","error":{"type":"invalid_request_error","code":"invalid_value","param":"session.audio.input.format","message":"Unsupported audio format."}}`))
+	if apiErr.Type != voice.RealtimeEventError || !strings.Contains(apiErr.Error, "invalid_request_error") || !strings.Contains(apiErr.Error, "Unsupported audio format.") {
+		t.Fatalf("api error event = %#v", apiErr)
+	}
+}
+
+func TestRealtimeSessionConfigUsesLegacyShapeForPreviewModel(t *testing.T) {
+	cfg := config.OpenAIVoiceConfig{
+		RealtimeModel:      "gpt-4o-realtime-preview",
+		TranscriptionModel: "gpt-4o-mini-transcribe",
+		RealtimeVoice:      "alloy",
+	}
+	session := realtimeSessionConfig(cfg, voice.RealtimeSessionOptions{})
+
+	if _, ok := session["input_audio_format"]; !ok {
+		t.Fatalf("preview realtime session should use legacy input_audio_format shape: %#v", session)
+	}
+	if _, ok := session["audio"]; ok {
+		t.Fatalf("preview realtime session should not use nested GA audio shape: %#v", session)
+	}
+	if realtimeHeaders(cfg).Get("OpenAI-Beta") != "realtime=v1" {
+		t.Fatalf("preview realtime headers should include beta header")
+	}
+}
+
+func TestRealtimeSessionConfigUsesGAShapeForRealtimeModel(t *testing.T) {
+	cfg := config.OpenAIVoiceConfig{
+		RealtimeModel:      "gpt-realtime-2",
+		TranscriptionModel: "gpt-4o-mini-transcribe",
+		RealtimeVoice:      "alloy",
+	}
+	session := realtimeSessionConfig(cfg, voice.RealtimeSessionOptions{})
+
+	audio, ok := session["audio"].(map[string]any)
+	if !ok {
+		t.Fatalf("GA realtime session should use nested audio shape: %#v", session)
+	}
+	input, ok := audio["input"].(map[string]any)
+	if !ok {
+		t.Fatalf("GA realtime session should include audio.input: %#v", session)
+	}
+	if _, ok := input["format"].(map[string]any); !ok {
+		t.Fatalf("GA realtime session should include structured input format: %#v", session)
+	}
+	if _, ok := session["input_audio_format"]; ok {
+		t.Fatalf("GA realtime session should not use legacy input_audio_format shape: %#v", session)
+	}
+	if realtimeHeaders(cfg).Get("OpenAI-Beta") != "" {
+		t.Fatalf("GA realtime headers should not include beta header")
+	}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

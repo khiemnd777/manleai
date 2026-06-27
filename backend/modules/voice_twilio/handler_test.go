@@ -93,12 +93,79 @@ func TestTurnWebhookReturnsFinalTwiMLAfterPOSConfirmedBooking(t *testing.T) {
 	}
 }
 
+func TestStreamStatusWebhookRecordsRealtimeFailure(t *testing.T) {
+	adapter, service, store, _ := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Thank you for calling.", conversation.StatusActive, conversation.OutcomeCollecting))
+	app := testTwilioApp(adapter, service)
+	form := url.Values{
+		"CallSid":     {"CA123"},
+		"StreamSid":   {"MZ123"},
+		"StreamEvent": {"stream-error"},
+		"StreamError": {"Connection reset without closing handshake"},
+	}
+
+	res := signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/stream/status", form)
+	body := readBody(t, res)
+
+	if res.StatusCode != fiber.StatusNoContent {
+		t.Fatalf("status = %d, body = %s", res.StatusCode, body)
+	}
+	if len(store.events) == 0 {
+		t.Fatalf("expected stream status event to be recorded")
+	}
+	event := store.events[len(store.events)-1]
+	if event.EventType != voice.EventRealtimeFailed {
+		t.Fatalf("event type = %q, want %q", event.EventType, voice.EventRealtimeFailed)
+	}
+	if event.Payload["StreamError"] != "Connection reset without closing handshake" || event.Payload["stage"] != "twilio_stream_status" {
+		t.Fatalf("payload = %#v", event.Payload)
+	}
+}
+
+func TestStreamFallbackSaysConnectionProblemForActiveSession(t *testing.T) {
+	adapter, service, _, _ := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Thank you for calling.", conversation.StatusActive, conversation.OutcomeCollecting))
+	app := testTwilioApp(adapter, service)
+	form := url.Values{"CallSid": {"CA123"}}
+
+	res := signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/stream/fallback", form)
+	body := readBody(t, res)
+
+	if res.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.StatusCode, body)
+	}
+	if !strings.Contains(body, "live phone connection had a problem") || !strings.Contains(body, "<Hangup/>") {
+		t.Fatalf("active stream fallback should explain the connection problem and hang up: %s", body)
+	}
+}
+
+func TestStreamFallbackOnlyHangsUpForCompletedSession(t *testing.T) {
+	completed := phoneSessionWithAIReply("You are confirmed in Square Appointments.", conversation.StatusCompleted, conversation.OutcomeBookingConfirmed)
+	adapter, service, _, _ := testTwilioRuntimeWithStore(completed)
+	app := testTwilioApp(adapter, service)
+	form := url.Values{"CallSid": {"CA123"}}
+
+	res := signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/stream/fallback", form)
+	body := readBody(t, res)
+
+	if res.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.StatusCode, body)
+	}
+	if body != adapter.HangupResponse() {
+		t.Fatalf("completed stream fallback should only hang up, got: %s", body)
+	}
+}
+
 func testTwilioRuntime(messageSession *conversation.Session) (*Adapter, *voice.Service, *fakeTwilioConversationEngine) {
+	adapter, service, _, engine := testTwilioRuntimeWithStore(messageSession)
+	return adapter, service, engine
+}
+
+func testTwilioRuntimeWithStore(messageSession *conversation.Session) (*Adapter, *voice.Service, *fakeTwilioVoiceStore, *fakeTwilioConversationEngine) {
 	adapter := NewAdapter(config.TwilioVoiceConfig{
 		AuthToken:     "secret",
 		IncomingPath:  "/api/voice/twilio/incoming",
 		TurnPath:      "/api/voice/twilio/turn",
 		RecordingPath: "/api/voice/twilio/recording",
+		StreamPath:    "/api/voice/twilio/stream",
 	}, "")
 	store := &fakeTwilioVoiceStore{
 		salon: &voice.InboundSalon{
@@ -120,9 +187,10 @@ func testTwilioRuntime(messageSession *conversation.Session) (*Adapter, *voice.S
 			IncomingPath:  "/api/voice/twilio/incoming",
 			TurnPath:      "/api/voice/twilio/turn",
 			RecordingPath: "/api/voice/twilio/recording",
+			StreamPath:    "/api/voice/twilio/stream",
 		},
 	}, voice.AIProviders{})
-	return adapter, service, engine
+	return adapter, service, store, engine
 }
 
 func testTwilioApp(adapter *Adapter, service *voice.Service) *fiber.App {
@@ -130,6 +198,8 @@ func testTwilioApp(adapter *Adapter, service *voice.Service) *fiber.App {
 	handler := NewHandler(adapter, service)
 	app.Post("/api/voice/twilio/incoming", handler.Incoming)
 	app.Post("/api/voice/twilio/turn", handler.Turn)
+	app.Post("/api/voice/twilio/stream/status", handler.StreamStatus)
+	app.Post("/api/voice/twilio/stream/fallback", handler.StreamFallback)
 	return app
 }
 

@@ -20,6 +20,7 @@ const (
 	EventTTSFailed         = "tts_failed"
 	EventRealtimeConnected = "realtime_connected"
 	EventRealtimeFailed    = "realtime_failed"
+	EventRealtimeStopped   = "realtime_stopped"
 
 	InputModeGather         = "gather"
 	InputModeRecording      = "recording"
@@ -29,6 +30,7 @@ const (
 	RealtimeEventTranscriptDone = "transcript_done"
 	RealtimeEventSpeechStarted  = "speech_started"
 	RealtimeEventResponseDone   = "response_done"
+	RealtimeEventSessionUpdated = "session_updated"
 	RealtimeEventError          = "error"
 )
 

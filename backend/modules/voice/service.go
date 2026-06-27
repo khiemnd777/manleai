@@ -336,6 +336,56 @@ func (s *Service) ConnectRealtime(ctx context.Context, salonID string, sessionID
 	})
 }
 
+func (s *Service) RecordRealtimeEvent(ctx context.Context, provider string, providerCallID string, sessionID string, eventType string, payload map[string]string) error {
+	provider = defaultProvider(provider)
+	providerCallID = strings.TrimSpace(providerCallID)
+	sessionID = strings.TrimSpace(sessionID)
+	eventType = strings.TrimSpace(eventType)
+	if providerCallID == "" || eventType == "" {
+		return ErrValidation
+	}
+	event := WebhookEvent{
+		Provider:       provider,
+		ProviderCallID: providerCallID,
+		EventType:      eventType,
+		Payload:        payload,
+	}
+	route, err := s.repo.FindCallRoute(ctx, provider, providerCallID)
+	if err == nil {
+		if sessionID != "" && route.SessionID != sessionID {
+			return ErrRouteNotFound
+		}
+		event.SalonID = route.SalonID
+		event.CallSessionID = route.SessionID
+	} else if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	return s.repo.RecordWebhookEvent(ctx, event)
+}
+
+func (s *Service) RealtimeFallbackMessage(ctx context.Context, provider string, providerCallID string) (string, error) {
+	provider = defaultProvider(provider)
+	providerCallID = strings.TrimSpace(providerCallID)
+	if providerCallID == "" {
+		return "", ErrValidation
+	}
+	route, err := s.repo.FindCallRoute(ctx, provider, providerCallID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return "The live phone connection had a problem. Please call again or wait for the owner.", nil
+		}
+		return "", err
+	}
+	session, err := s.conversation.Get(ctx, route.SalonID, route.OwnerUserID, route.SessionID)
+	if err != nil {
+		return "", err
+	}
+	if session == nil || session.Status != conversation.StatusActive {
+		return "", nil
+	}
+	return "The live phone connection had a problem. Please call again or wait for the owner.", nil
+}
+
 func (s *Service) realtimeVoice(ctx context.Context, salonID string) string {
 	cfg, _, err := s.openAIConfig(ctx, salonID)
 	if err != nil {

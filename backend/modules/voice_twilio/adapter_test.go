@@ -65,14 +65,20 @@ func TestStreamResponseUsesSignedParametersAndWebSocketURL(t *testing.T) {
 	}, "https://voice.example.com")
 	token := adapter.StreamToken("CA123", "session_phone")
 
-	body := adapter.StreamResponse("Thank you for calling.", adapter.StreamURL(""), "", map[string]string{
+	body := adapter.StreamResponse("Thank you for calling.", adapter.StreamURL(""), adapter.StreamStatusURL(""), adapter.StreamFallbackURL(""), "", map[string]string{
 		"call_sid":     "CA123",
 		"session_id":   "session_phone",
 		"stream_token": token,
 	})
 
-	if !strings.Contains(body, `<Connect><Stream url="wss://voice.example.com/api/voice/twilio/stream">`) {
+	if !strings.Contains(body, `<Connect><Stream url="wss://voice.example.com/api/voice/twilio/stream"`) {
 		t.Fatalf("StreamResponse should connect to wss stream URL: %s", body)
+	}
+	if !strings.Contains(body, `statusCallback="https://voice.example.com/api/voice/twilio/stream/status" statusCallbackMethod="POST"`) {
+		t.Fatalf("StreamResponse should include stream status callback: %s", body)
+	}
+	if !strings.Contains(body, `<Redirect method="POST">https://voice.example.com/api/voice/twilio/stream/fallback</Redirect>`) {
+		t.Fatalf("StreamResponse should redirect to fallback TwiML after stream ends: %s", body)
 	}
 	if !strings.Contains(body, `name="session_id" value="session_phone"`) || !strings.Contains(body, `name="stream_token"`) {
 		t.Fatalf("StreamResponse should include signed custom parameters: %s", body)

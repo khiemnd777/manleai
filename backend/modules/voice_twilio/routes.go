@@ -10,6 +10,8 @@ func RegisterRoutes(api fiber.Router, handler *Handler) {
 	group.Post("/incoming", handler.Incoming)
 	group.Post("/turn", handler.Turn)
 	group.Post("/recording", handler.Recording)
+	group.Post("/stream/status", handler.StreamStatus)
+	group.Post("/stream/fallback", handler.StreamFallback)
 	group.Get("/stream", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
 			return c.Next()

@@ -16,6 +16,7 @@ import (
 )
 
 const realtimeAudioFormat = "g711_ulaw"
+const realtimeReadyTimeout = 5 * time.Second
 
 func (a *Adapter) ConnectRealtime(ctx context.Context, salonID string, opts voice.RealtimeSessionOptions) (voice.RealtimeSession, error) {
 	cfg, enabled, err := a.configFor(ctx, salonID)
@@ -25,9 +26,7 @@ func (a *Adapter) ConnectRealtime(ctx context.Context, salonID string, opts voic
 	if !enabled || !cfg.RealtimeEnabled || strings.TrimSpace(cfg.APIKey) == "" || strings.TrimSpace(cfg.RealtimeModel) == "" {
 		return nil, voice.ErrProviderDisabled
 	}
-	header := http.Header{}
-	header.Set("Authorization", "Bearer "+strings.TrimSpace(cfg.APIKey))
-	header.Set("OpenAI-Beta", "realtime=v1")
+	header := realtimeHeaders(cfg)
 	conn, _, err := (&websocket.Dialer{HandshakeTimeout: 15 * time.Second}).DialContext(ctx, realtimeURL(cfg), header)
 	if err != nil {
 		return nil, err
@@ -36,12 +35,17 @@ func (a *Adapter) ConnectRealtime(ctx context.Context, salonID string, opts voic
 		conn:   conn,
 		events: make(chan voice.RealtimeEvent, 128),
 		done:   make(chan struct{}),
+		ready:  make(chan error, 1),
 	}
+	go session.readLoop()
 	if err := session.update(ctx, cfg, opts); err != nil {
 		_ = session.Close()
 		return nil, err
 	}
-	go session.readLoop()
+	if err := session.waitReady(ctx); err != nil {
+		_ = session.Close()
+		return nil, err
+	}
 	return session, nil
 }
 
@@ -49,8 +53,10 @@ type realtimeSession struct {
 	conn      *websocket.Conn
 	writeMu   sync.Mutex
 	closeOnce sync.Once
+	readyOnce sync.Once
 	events    chan voice.RealtimeEvent
 	done      chan struct{}
+	ready     chan error
 }
 
 func (s *realtimeSession) AppendInputAudio(ctx context.Context, base64Audio string) error {
@@ -97,6 +103,13 @@ func (s *realtimeSession) Close() error {
 }
 
 func (s *realtimeSession) update(ctx context.Context, cfg config.OpenAIVoiceConfig, opts voice.RealtimeSessionOptions) error {
+	return s.write(ctx, map[string]any{
+		"type":    "session.update",
+		"session": realtimeSessionConfig(cfg, opts),
+	})
+}
+
+func realtimeSessionConfig(cfg config.OpenAIVoiceConfig, opts voice.RealtimeSessionOptions) map[string]any {
 	voiceName := strings.TrimSpace(opts.Voice)
 	if voiceName == "" {
 		voiceName = strings.TrimSpace(cfg.RealtimeVoice)
@@ -104,25 +117,59 @@ func (s *realtimeSession) update(ctx context.Context, cfg config.OpenAIVoiceConf
 	if voiceName == "" {
 		voiceName = strings.TrimSpace(cfg.SpeechVoice)
 	}
-	session := map[string]any{
-		"modalities":                []string{"text", "audio"},
-		"instructions":              realtimeInstructions(opts.Instructions),
-		"voice":                     voiceName,
-		"input_audio_format":        realtimeAudioFormat,
-		"output_audio_format":       realtimeAudioFormat,
-		"input_audio_transcription": map[string]any{"model": strings.TrimSpace(cfg.TranscriptionModel)},
-		"turn_detection": map[string]any{
-			"type":                "server_vad",
-			"threshold":           0.5,
-			"prefix_padding_ms":   300,
-			"silence_duration_ms": 450,
-			"create_response":     false,
+	if realtimeUsesLegacyProtocol(cfg.RealtimeModel) {
+		return map[string]any{
+			"modalities":                []string{"text", "audio"},
+			"instructions":              realtimeInstructions(opts.Instructions),
+			"voice":                     voiceName,
+			"input_audio_format":        realtimeAudioFormat,
+			"output_audio_format":       realtimeAudioFormat,
+			"input_audio_transcription": map[string]any{"model": strings.TrimSpace(cfg.TranscriptionModel)},
+			"turn_detection":            realtimeTurnDetection(),
+		}
+	}
+	return map[string]any{
+		"type":         "realtime",
+		"modalities":   []string{"text", "audio"},
+		"instructions": realtimeInstructions(opts.Instructions),
+		"audio": map[string]any{
+			"input": map[string]any{
+				"format":         map[string]any{"type": realtimeAudioFormat},
+				"transcription":  map[string]any{"model": strings.TrimSpace(cfg.TranscriptionModel)},
+				"turn_detection": realtimeTurnDetection(),
+			},
+			"output": map[string]any{
+				"format": map[string]any{"type": realtimeAudioFormat},
+				"voice":  voiceName,
+			},
 		},
 	}
-	return s.write(ctx, map[string]any{
-		"type":    "session.update",
-		"session": session,
-	})
+}
+
+func realtimeTurnDetection() map[string]any {
+	return map[string]any{
+		"type":                "server_vad",
+		"threshold":           0.5,
+		"prefix_padding_ms":   300,
+		"silence_duration_ms": 450,
+		"create_response":     false,
+	}
+}
+
+func (s *realtimeSession) waitReady(ctx context.Context) error {
+	timeout := time.NewTimer(realtimeReadyTimeout)
+	defer timeout.Stop()
+	select {
+	case err, ok := <-s.ready:
+		if !ok {
+			return errors.New("realtime session closed before update")
+		}
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timeout.C:
+		return errors.New("realtime session update timed out")
+	}
 }
 
 func (s *realtimeSession) write(ctx context.Context, payload any) error {
@@ -148,6 +195,7 @@ func (s *realtimeSession) readLoop() {
 		_, raw, err := s.conn.ReadMessage()
 		if err != nil {
 			if !errors.Is(err, websocket.ErrCloseSent) {
+				s.markReady(err)
 				s.emit(voice.RealtimeEvent{Type: voice.RealtimeEventError, Error: err.Error()})
 			}
 			return
@@ -156,8 +204,26 @@ func (s *realtimeSession) readLoop() {
 		if event.Type == "" {
 			continue
 		}
+		if event.Type == voice.RealtimeEventSessionUpdated {
+			s.markReady(nil)
+			continue
+		}
+		if event.Type == voice.RealtimeEventError {
+			if strings.TrimSpace(event.Error) == "" {
+				s.markReady(errors.New("openai realtime error"))
+			} else {
+				s.markReady(errors.New(event.Error))
+			}
+		}
 		s.emit(event)
 	}
+}
+
+func (s *realtimeSession) markReady(err error) {
+	s.readyOnce.Do(func() {
+		s.ready <- err
+		close(s.ready)
+	})
 }
 
 func (s *realtimeSession) emit(event voice.RealtimeEvent) {
@@ -175,6 +241,9 @@ func parseRealtimeEvent(raw []byte) voice.RealtimeEvent {
 		Delta      string `json:"delta"`
 		Transcript string `json:"transcript"`
 		Error      struct {
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+			Param   string `json:"param"`
 			Message string `json:"message"`
 		} `json:"error"`
 	}
@@ -190,11 +259,38 @@ func parseRealtimeEvent(raw []byte) voice.RealtimeEvent {
 		return voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStarted}
 	case "response.done":
 		return voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
+	case "session.updated":
+		return voice.RealtimeEvent{Type: voice.RealtimeEventSessionUpdated}
 	case "error":
-		return voice.RealtimeEvent{Type: voice.RealtimeEventError, Error: strings.TrimSpace(event.Error.Message)}
+		return voice.RealtimeEvent{Type: voice.RealtimeEventError, Error: realtimeErrorMessage(event.Error.Type, event.Error.Code, event.Error.Param, event.Error.Message)}
 	default:
 		return voice.RealtimeEvent{}
 	}
+}
+
+func realtimeErrorMessage(errorType string, code string, param string, message string) string {
+	parts := []string{}
+	for _, part := range []string{errorType, code, param, message} {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			parts = append(parts, part)
+		}
+	}
+	return strings.Join(parts, ": ")
+}
+
+func realtimeHeaders(cfg config.OpenAIVoiceConfig) http.Header {
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+strings.TrimSpace(cfg.APIKey))
+	if realtimeUsesLegacyProtocol(cfg.RealtimeModel) {
+		header.Set("OpenAI-Beta", "realtime=v1")
+	}
+	return header
+}
+
+func realtimeUsesLegacyProtocol(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return model == "" || strings.Contains(model, "realtime-preview")
 }
 
 func realtimeURL(cfg config.OpenAIVoiceConfig) string {

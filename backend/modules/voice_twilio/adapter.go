@@ -82,6 +82,14 @@ func (a *Adapter) StreamURL(fallbackBaseURL string) string {
 	return a.streamURLForPath(a.cfg.StreamPath, fallbackBaseURL)
 }
 
+func (a *Adapter) StreamStatusURL(fallbackBaseURL string) string {
+	return a.streamRelatedURL(fallbackBaseURL, "status")
+}
+
+func (a *Adapter) StreamFallbackURL(fallbackBaseURL string) string {
+	return a.streamRelatedURL(fallbackBaseURL, "fallback")
+}
+
 func (a *Adapter) IncomingURL(fallbackBaseURL string) string {
 	return a.urlForPath(a.cfg.IncomingPath, fallbackBaseURL)
 }
@@ -111,13 +119,19 @@ func (a *Adapter) RecordResponse(message string, actionURL string, audioURL stri
 	return b.String()
 }
 
-func (a *Adapter) StreamResponse(message string, streamURL string, audioURL string, params map[string]string) string {
+func (a *Adapter) StreamResponse(message string, streamURL string, statusURL string, fallbackURL string, audioURL string, params map[string]string) string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><Response>`)
 	writePrompt(&b, message, audioURL)
 	b.WriteString(`<Connect><Stream url="`)
 	writeEscaped(&b, streamURL)
-	b.WriteString(`">`)
+	b.WriteString(`"`)
+	if strings.TrimSpace(statusURL) != "" {
+		b.WriteString(` statusCallback="`)
+		writeEscaped(&b, statusURL)
+		b.WriteString(`" statusCallbackMethod="POST"`)
+	}
+	b.WriteString(`>`)
 	for key, value := range params {
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
@@ -130,8 +144,20 @@ func (a *Adapter) StreamResponse(message string, streamURL string, audioURL stri
 		writeEscaped(&b, value)
 		b.WriteString(`"/>`)
 	}
-	b.WriteString(`</Stream></Connect><Hangup/></Response>`)
+	b.WriteString(`</Stream></Connect>`)
+	if strings.TrimSpace(fallbackURL) != "" {
+		b.WriteString(`<Redirect method="POST">`)
+		writeEscaped(&b, fallbackURL)
+		b.WriteString(`</Redirect>`)
+	} else {
+		b.WriteString(`<Hangup/>`)
+	}
+	b.WriteString(`</Response>`)
 	return b.String()
+}
+
+func (a *Adapter) HangupResponse() string {
+	return `<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`
 }
 
 func (a *Adapter) FinalResponse(message string, audioURL string) string {
@@ -231,6 +257,24 @@ func (a *Adapter) streamURLForPath(path string, fallbackBaseURL string) string {
 	default:
 		return url
 	}
+}
+
+func (a *Adapter) streamRelatedURL(fallbackBaseURL string, suffix string) string {
+	path := strings.TrimSpace(a.cfg.StreamPath)
+	if path == "" {
+		return ""
+	}
+	suffix = strings.Trim(strings.TrimSpace(suffix), "/")
+	if suffix != "" {
+		path = strings.TrimRight(path, "/") + "/" + suffix
+	}
+	switch {
+	case strings.HasPrefix(path, "wss://"):
+		path = "https://" + strings.TrimPrefix(path, "wss://")
+	case strings.HasPrefix(path, "ws://"):
+		path = "http://" + strings.TrimPrefix(path, "ws://")
+	}
+	return a.urlForPath(path, fallbackBaseURL)
 }
 
 func writePrompt(b *strings.Builder, message string, audioURL string) {
