@@ -132,8 +132,10 @@ func TestStreamFallbackSaysConnectionProblemForActiveSession(t *testing.T) {
 	if res.StatusCode != fiber.StatusOK {
 		t.Fatalf("status = %d, body = %s", res.StatusCode, body)
 	}
-	if !strings.Contains(body, "live phone connection had a problem") || !strings.Contains(body, "<Hangup/>") {
-		t.Fatalf("active stream fallback should explain the connection problem and hang up: %s", body)
+	if !strings.Contains(body, "live phone connection had a problem") ||
+		!strings.Contains(body, "<Record") ||
+		!strings.Contains(body, "voice_fallback_mode=recording") {
+		t.Fatalf("active stream fallback should explain the connection problem and continue in recording mode: %s", body)
 	}
 }
 

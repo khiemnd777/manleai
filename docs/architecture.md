@@ -111,6 +111,8 @@ salon.
 
 The Milestone 7 training layer stores owner-authored salon knowledge and corrections as salon-scoped data. Conversation runtime may read active knowledge as advisory context for FAQ and policy answers, and training evaluation previews can test active knowledge without creating call sessions or bookings. Knowledge never replaces the booking service or POS confirmation checks.
 
+Call sessions are operational records, not an unbounded owner-facing inbox. The Calls dashboard defaults to active sessions and supports archived and redacted lifecycle filters. Active lifecycle sessions carry a 90-day retention timestamp; the worker redacts expired sessions by clearing customer PII, transcript bodies, handoff summaries, webhook payloads, and temporary voice audio while preserving booking, handoff, provider call, outcome, and timestamp audit links. Manual redaction is irreversible from the dashboard and is blocked while a session is active.
+
 Public salon catalog pages are owner-published by slug. They expose only
 bookable active-provider services/staff and salon contact details needed for a
 customer to call for an appointment. They never expose staff contact details,

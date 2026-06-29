@@ -317,7 +317,7 @@ The local app can run Twilio speech `<Gather>` without OpenAI STT/TTS. For a ful
 - `Speech voice`: `alloy`
 - Optional realtime mode:
   - Enable realtime
-  - `Realtime model`: `gpt-4o-realtime-preview`
+  - `Realtime model`: `gpt-realtime-2`
   - `Realtime voice`: `alloy`
   - `Realtime instructions`: optional non-secret operating notes for the audio bridge
 

@@ -13,14 +13,17 @@ import (
 	"github.com/manleai/ai-receptionist/internal/database"
 	"github.com/manleai/ai-receptionist/internal/encryption"
 	"github.com/manleai/ai-receptionist/internal/logger"
+	"github.com/manleai/ai-receptionist/modules/conversation"
 	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/pos_square"
 )
 
 const (
-	posSyncPollInterval = 30 * time.Second
-	posSyncBatchLimit   = 10
+	posSyncPollInterval                 = 30 * time.Second
+	posSyncBatchLimit                   = 10
+	conversationRetentionPollInterval   = time.Hour
+	conversationRetentionRedactionLimit = 50
 )
 
 func main() {
@@ -54,8 +57,10 @@ func main() {
 	squareAdapter := pos_square.NewSquareAdapter(cfg.Square, posRepo, cipher)
 	squareAdapter.SetConfigResolver(integrationConfigService)
 	processor := pos.NewSyncProcessor(posRepo, []pos.POSProvider{squareAdapter})
+	conversationRetention := conversation.NewRetentionProcessor(conversation.NewRepository(db))
+	nextRetentionRun := time.Now().UTC()
 
-	logg.Info("worker started", "scope", "pos_sync_jobs", "interval", posSyncPollInterval.String(), "batch_limit", posSyncBatchLimit)
+	logg.Info("worker started", "scope", "pos_sync_jobs,conversation_retention", "interval", posSyncPollInterval.String(), "batch_limit", posSyncBatchLimit)
 	ticker := time.NewTicker(posSyncPollInterval)
 	defer ticker.Stop()
 
@@ -65,6 +70,16 @@ func main() {
 			logg.Error("process POS sync jobs", slog.String("error", err.Error()))
 		} else if processed > 0 {
 			logg.Info("processed POS sync jobs", "count", processed)
+		}
+		now := time.Now().UTC()
+		if !now.Before(nextRetentionRun) {
+			redacted, err := conversationRetention.ProcessOnce(ctx, conversationRetentionRedactionLimit)
+			if err != nil {
+				logg.Error("process conversation retention", slog.String("error", err.Error()))
+			} else if redacted > 0 {
+				logg.Info("redacted expired conversation sessions", "count", redacted)
+			}
+			nextRetentionRun = now.Add(conversationRetentionPollInterval)
 		}
 
 		select {

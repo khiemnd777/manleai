@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, MessageSquarePlus, MessageSquareText, PhoneCall, Plus, RefreshCcw, Send, X } from "lucide-react";
+import { Archive, AlertTriangle, Eraser, MessageSquarePlus, MessageSquareText, PhoneCall, Plus, RefreshCcw, Send, X } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,7 @@ import type {
   POSConnection,
   POSService,
   POSStaffMember,
+  RealtimeEventLog,
   Salon,
   SquareReadiness,
   SyncLog,
@@ -44,6 +45,14 @@ type SessionsResponse = {
   sessions: ConversationSession[];
 };
 
+type RealtimeEventsResponse = {
+  events: RealtimeEventLog[];
+};
+
+type LifecycleFilter = "active" | "archived" | "redacted";
+
+const lifecycleFilters: LifecycleFilter[] = ["active", "archived", "redacted"];
+
 type ServicesResponse = {
   services: POSService[];
 };
@@ -63,21 +72,31 @@ export function CallsDashboard() {
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
   const [sessions, setSessions] = useState<ConversationSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<ConversationSession | null>(null);
+  const [realtimeEvents, setRealtimeEvents] = useState<RealtimeEventLog[]>([]);
   const [services, setServices] = useState<POSService[]>([]);
   const [staff, setStaff] = useState<POSStaffMember[]>([]);
   const [message, setMessage] = useState("");
   const [correctionTarget, setCorrectionTarget] = useState<CorrectionTarget | null>(null);
   const [correctionText, setCorrectionText] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [lifecycleFilter, setLifecycleFilter] = useState<LifecycleFilter>("active");
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [sessionListLoading, setSessionListLoading] = useState(false);
+  const [realtimeEventsLoading, setRealtimeEventsLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [savingCorrection, setSavingCorrection] = useState(false);
+  const [sessionActionID, setSessionActionID] = useState("");
   const [error, setError] = useState("");
   const [actionError, setActionError] = useState("");
+  const [realtimeEventsError, setRealtimeEventsError] = useState("");
   const [success, setSuccess] = useState("");
 
-  async function load() {
+  async function load(filter: LifecycleFilter = lifecycleFilter, fullPage = initialLoading) {
     setError("");
-    setLoading(true);
+    if (fullPage) {
+      setInitialLoading(true);
+    } else {
+      setSessionListLoading(true);
+    }
     try {
       const salonResponse = await apiRequest<SalonListResponse>("/api/salons");
       const firstSalon = salonResponse.salons[0] ?? null;
@@ -87,6 +106,7 @@ export function CallsDashboard() {
         setVoiceStatus(null);
         setSessions([]);
         setSelectedSession(null);
+        setRealtimeEvents([]);
         setServices([]);
         setStaff([]);
         return;
@@ -95,7 +115,9 @@ export function CallsDashboard() {
       const [statusResponse, voiceResponse, sessionsResponse, serviceResponse, staffResponse] = await Promise.all([
         apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
         apiRequest<VoiceStatus>(`/api/salons/${firstSalon.id}/voice/status`),
-        apiRequest<SessionsResponse>(`/api/salons/${firstSalon.id}/conversation-sessions?limit=25`),
+        apiRequest<SessionsResponse>(
+          `/api/salons/${firstSalon.id}/conversation-sessions?limit=25&lifecycle_status=${filter}`
+        ),
         apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
         apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`)
       ]);
@@ -113,21 +135,63 @@ export function CallsDashboard() {
           `/api/salons/${firstSalon.id}/conversation-sessions/${nextSummary.id}`
         );
         setSelectedSession(detail);
+        await loadRealtimeEventsForSession(firstSalon.id, detail);
       } else {
         setSelectedSession(null);
+        setRealtimeEvents([]);
         clearCorrectionDraft();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load call sessions.");
     } finally {
-      setLoading(false);
+      if (fullPage) {
+        setInitialLoading(false);
+      } else {
+        setSessionListLoading(false);
+      }
     }
   }
 
   useEffect(() => {
-    void load();
+    void load(lifecycleFilter, initialLoading);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [lifecycleFilter]);
+
+  useEffect(() => {
+    if (!salon || !selectedSession || selectedSession.channel !== "phone") {
+      setRealtimeEvents([]);
+      setRealtimeEventsError("");
+      setRealtimeEventsLoading(false);
+      return;
+    }
+    void loadRealtimeEvents(salon.id, selectedSession.id);
+  }, [salon?.id, selectedSession?.id, selectedSession?.updated_at, selectedSession?.channel]);
+
+  async function loadRealtimeEvents(salonID: string, sessionID: string) {
+    setRealtimeEventsLoading(true);
+    setRealtimeEventsError("");
+    try {
+      const response = await apiRequest<RealtimeEventsResponse>(
+        `/api/salons/${salonID}/conversation-sessions/${sessionID}/realtime-events?limit=50`
+      );
+      setRealtimeEvents(response.events);
+    } catch (err) {
+      setRealtimeEvents([]);
+      setRealtimeEventsError(err instanceof Error ? err.message : "Could not load realtime events.");
+    } finally {
+      setRealtimeEventsLoading(false);
+    }
+  }
+
+  async function loadRealtimeEventsForSession(salonID: string, session: ConversationSession) {
+    if (session.channel !== "phone") {
+      setRealtimeEvents([]);
+      setRealtimeEventsError("");
+      setRealtimeEventsLoading(false);
+      return;
+    }
+    await loadRealtimeEvents(salonID, session.id);
+  }
 
   async function startSession() {
     if (!salon) return null;
@@ -140,7 +204,11 @@ export function CallsDashboard() {
         body: JSON.stringify({ channel: "simulator" })
       });
       setSelectedSession(session);
-      await reloadSessions(salon.id);
+      if (lifecycleFilter !== "active") {
+        setLifecycleFilter("active");
+      } else {
+        await reloadSessions(salon.id, "active");
+      }
       return session;
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Could not start simulator session.");
@@ -175,7 +243,7 @@ export function CallsDashboard() {
       setSelectedSession(updated);
       clearCorrectionDraft();
       setMessage("");
-      await reloadSessions(salon.id);
+      await reloadSessions(salon.id, lifecycleFilter);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Could not process simulator message.");
     } finally {
@@ -192,15 +260,64 @@ export function CallsDashboard() {
         `/api/salons/${salon.id}/conversation-sessions/${sessionID}`
       );
       setSelectedSession(detail);
+      await loadRealtimeEventsForSession(salon.id, detail);
       clearCorrectionDraft();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Could not load transcript.");
     }
   }
 
-  async function reloadSessions(salonID: string) {
-    const response = await apiRequest<SessionsResponse>(`/api/salons/${salonID}/conversation-sessions?limit=25`);
+  async function reloadSessions(salonID: string, filter: LifecycleFilter) {
+    const response = await apiRequest<SessionsResponse>(
+      `/api/salons/${salonID}/conversation-sessions?limit=25&lifecycle_status=${filter}`
+    );
     setSessions(response.sessions);
+  }
+
+  async function archiveSession(item: ConversationSession) {
+    if (!salon || item.lifecycle_status === "redacted") return;
+    setActionError("");
+    setSuccess("");
+    setSessionActionID(`${item.id}:archive`);
+    try {
+      const updated = await apiRequest<ConversationSession>(
+        `/api/salons/${salon.id}/conversation-sessions/${item.id}/archive`,
+        { method: "POST" }
+      );
+      if (selectedSession?.id === item.id) {
+        setSelectedSession(updated);
+      }
+      setSuccess("Call session archived.");
+      await reloadSessions(salon.id, lifecycleFilter);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Could not archive call session.");
+    } finally {
+      setSessionActionID("");
+    }
+  }
+
+  async function redactSession(item: ConversationSession) {
+    if (!salon || item.status === "active" || item.lifecycle_status === "redacted") return;
+    if (!window.confirm("Redact this transcript and customer details? This cannot be undone from the dashboard.")) return;
+    setActionError("");
+    setSuccess("");
+    setSessionActionID(`${item.id}:redact`);
+    try {
+      const updated = await apiRequest<ConversationSession>(
+        `/api/salons/${salon.id}/conversation-sessions/${item.id}/redact`,
+        { method: "POST" }
+      );
+      if (selectedSession?.id === item.id) {
+        setSelectedSession(updated);
+        clearCorrectionDraft();
+      }
+      setSuccess("Transcript and customer details redacted.");
+      await reloadSessions(salon.id, lifecycleFilter);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Could not redact call session.");
+    } finally {
+      setSessionActionID("");
+    }
   }
 
   async function saveCorrection(event: FormEvent<HTMLFormElement>) {
@@ -229,7 +346,7 @@ export function CallsDashboard() {
   }
 
   function startCorrection(item: TranscriptMessage) {
-    if (!selectedSession) return;
+    if (!selectedSession || selectedSession.lifecycle_status === "redacted") return;
     setCorrectionTarget({ sessionID: selectedSession.id, item });
     setCorrectionText("");
     setActionError("");
@@ -265,8 +382,9 @@ export function CallsDashboard() {
     [staff]
   );
   const selectedBookingRecord = selectedSession ? conversationBookingRecord(selectedSession) : null;
+  const lastRealtimeEvent = realtimeEvents.length > 0 ? realtimeEvents[realtimeEvents.length - 1] : null;
 
-  if (loading) {
+  if (initialLoading) {
     return (
       <div className="space-y-6">
         <Skeleton className="h-9 w-72" />
@@ -308,7 +426,7 @@ export function CallsDashboard() {
         <div className="flex flex-wrap items-center gap-3">
           <Badge value={voiceStatus?.ready ? "ready" : "not_configured"} />
           <Badge value={aiEnabled ? "active" : "disabled"} />
-          <Button type="button" variant="secondary" onClick={() => void load()}>
+          <Button type="button" variant="secondary" onClick={() => void load(lifecycleFilter)}>
             <RefreshCcw className="h-4 w-4" />
             Refresh
           </Button>
@@ -348,7 +466,12 @@ export function CallsDashboard() {
             {selectedSession?.transcript?.length ? (
               <div className="space-y-3">
                 {selectedSession.transcript.map((item) => (
-                  <TranscriptBubble key={item.id} item={item} onAddCorrection={() => startCorrection(item)} />
+                  <TranscriptBubble
+                    key={item.id}
+                    item={item}
+                    canAddCorrection={selectedSession.lifecycle_status !== "redacted"}
+                    onAddCorrection={() => startCorrection(item)}
+                  />
                 ))}
               </div>
             ) : (
@@ -423,6 +546,7 @@ export function CallsDashboard() {
           {selectedSession ? (
             <dl className="mt-5 space-y-4">
               <Info label="Channel" value={<Badge value={selectedSession.channel} />} />
+              <Info label="Lifecycle" value={<Badge value={selectedSession.lifecycle_status} />} />
               <Info label="Intent" value={<Badge value={selectedSession.intent} />} />
               <Info label="Outcome" value={<Badge value={selectedSession.outcome} />} />
               <Info label="Customer" value={selectedSession.customer_name || "Not collected"} />
@@ -444,7 +568,14 @@ export function CallsDashboard() {
                 value={selectedSession.requested_start_time ? formatDateTime(selectedSession.requested_start_time) : "Not collected"}
               />
               <Info label="Booking attempt" value={selectedSession.booking_attempt_id || "None"} />
+              <Info label="Retention" value={retentionLabel(selectedSession)} />
               <Info label="Provider call" value={selectedSession.provider_call_id || "None"} />
+              {selectedSession.channel === "phone" ? (
+                <>
+                  <Info label="Last realtime status" value={lastRealtimeEvent ? <Badge value={lastRealtimeEvent.event_type} /> : "No event"} />
+                  <Info label="Last realtime stage" value={lastRealtimeEvent?.stage || lastRealtimeEvent?.stream_event || "Not recorded"} />
+                </>
+              ) : null}
             </dl>
           ) : (
             <div className="mt-5 rounded-md border border-line p-4 text-sm text-muted">
@@ -456,29 +587,54 @@ export function CallsDashboard() {
         </Card>
       </div>
 
+      <RealtimeEventsPanel
+        session={selectedSession}
+        events={realtimeEvents}
+        loading={realtimeEventsLoading}
+        error={realtimeEventsError}
+      />
+
       <Card>
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
           <div>
-            <CardTitle>Recent call sessions</CardTitle>
+            <CardTitle>Call session log</CardTitle>
             <CardDescription>
-              Review live phone and simulator outcomes before owner follow-up.
+              Active transcripts retain for 90 days, then the worker redacts customer details and transcript text.
             </CardDescription>
           </div>
-          <Badge value={sessions.length > 0 ? "active" : "disabled"} />
+          <Badge value={sessions.length > 0 ? lifecycleFilter : "disabled"} />
         </div>
+        <div className="mt-5 flex flex-wrap gap-2">
+          {lifecycleFilters.map((filter) => (
+            <Button
+              key={filter}
+              type="button"
+              variant={filter === lifecycleFilter ? "primary" : "secondary"}
+              onClick={() => setLifecycleFilter(filter)}
+              disabled={sessionListLoading || sessionActionID !== ""}
+            >
+              {filterLabel(filter)}
+            </Button>
+          ))}
+        </div>
+        {sessionListLoading ? (
+          <div className="mt-4 rounded-md border border-line bg-slate-50 px-3 py-2 text-sm text-muted">
+            Loading {filterLabel(lifecycleFilter).toLowerCase()} sessions...
+          </div>
+        ) : null}
 
         {sessions.length === 0 ? (
           <div className="mt-5 rounded-md border border-line p-6 text-center">
             <PhoneCall className="mx-auto h-5 w-5 text-muted" />
-            <div className="mt-3 text-sm font-semibold text-ink">No call sessions yet</div>
+            <div className="mt-3 text-sm font-semibold text-ink">{emptySessionsTitle(lifecycleFilter)}</div>
             <div className="mt-1 text-sm leading-6 text-muted">
-              Transcript rows will appear after a simulator message or live phone webhook.
+              {emptySessionsDescription(lifecycleFilter)}
             </div>
           </div>
         ) : (
           <>
             <div className="mt-5 hidden overflow-x-auto rounded-md border border-line lg:block">
-              <table className="w-full min-w-[960px] text-left text-sm">
+              <table className="w-full min-w-[1180px] text-left text-sm">
                 <thead className="bg-slate-50 text-xs uppercase text-muted">
                   <tr>
                     <th className="px-4 py-3">Updated</th>
@@ -487,7 +643,8 @@ export function CallsDashboard() {
                     <th className="px-4 py-3">Intent</th>
                     <th className="px-4 py-3">Outcome</th>
                     <th className="px-4 py-3">Booking</th>
-                    <th className="px-4 py-3">Action</th>
+                    <th className="px-4 py-3">Retention</th>
+                    <th className="px-4 py-3">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-line bg-white">
@@ -508,10 +665,31 @@ export function CallsDashboard() {
                         <Badge value={item.outcome} />
                       </td>
                       <td className="px-4 py-3 text-muted">{item.booking_attempt_id || "None"}</td>
+                      <td className="px-4 py-3 text-muted">{retentionLabel(item)}</td>
                       <td className="px-4 py-3">
-                        <Button type="button" variant="secondary" onClick={() => void selectSession(item.id)}>
-                          Open
-                        </Button>
+                        <div className="flex flex-wrap gap-2">
+                          <Button type="button" variant="secondary" onClick={() => void selectSession(item.id)}>
+                            Open
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            onClick={() => void archiveSession(item)}
+                            disabled={sessionActionID !== "" || item.lifecycle_status !== "active"}
+                          >
+                            <Archive className="h-4 w-4" />
+                            Archive
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="danger"
+                            onClick={() => void redactSession(item)}
+                            disabled={sessionActionID !== "" || item.status === "active" || item.lifecycle_status === "redacted"}
+                          >
+                            <Eraser className="h-4 w-4" />
+                            Redact
+                          </Button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -520,7 +698,14 @@ export function CallsDashboard() {
             </div>
             <div className="mt-5 space-y-3 lg:hidden">
               {sessions.map((item) => (
-                <SessionCard key={item.id} item={item} onOpen={() => void selectSession(item.id)} />
+                <SessionCard
+                  key={item.id}
+                  item={item}
+                  busy={sessionActionID !== ""}
+                  onOpen={() => void selectSession(item.id)}
+                  onArchive={() => void archiveSession(item)}
+                  onRedact={() => void redactSession(item)}
+                />
               ))}
             </div>
           </>
@@ -717,6 +902,99 @@ function BookingNegotiationPanel({
   );
 }
 
+function RealtimeEventsPanel({
+  session,
+  events,
+  loading,
+  error
+}: {
+  session: ConversationSession | null;
+  events: RealtimeEventLog[];
+  loading: boolean;
+  error: string;
+}) {
+  if (!session || session.channel !== "phone") {
+    return null;
+  }
+
+  const last = events.length > 0 ? events[events.length - 1] : null;
+
+  return (
+    <Card>
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div>
+          <CardTitle>Realtime event timeline</CardTitle>
+          <CardDescription>Twilio stream lifecycle and backend realtime failures for the selected call.</CardDescription>
+        </div>
+        <Badge value={last?.event_type || (loading ? "loading" : "no_events")} />
+      </div>
+
+      {error ? <Alert title="Realtime events unavailable" message={error} /> : null}
+
+      {loading ? (
+        <div className="mt-5 rounded-md border border-line bg-slate-50 px-3 py-2 text-sm text-muted">
+          Loading realtime events...
+        </div>
+      ) : null}
+
+      {!loading && events.length === 0 ? (
+        <div className="mt-5 rounded-md border border-line p-6 text-center">
+          <MessageSquareText className="mx-auto h-5 w-5 text-muted" />
+          <div className="mt-3 text-sm font-semibold text-ink">No realtime events recorded for this session.</div>
+          <div className="mt-1 text-sm leading-6 text-muted">Events appear after Twilio starts or stops a realtime stream.</div>
+        </div>
+      ) : null}
+
+      {events.length > 0 ? (
+        <>
+          <div className="mt-5 hidden overflow-x-auto rounded-md border border-line md:block">
+            <table className="w-full min-w-[900px] text-left text-sm">
+              <thead className="bg-slate-50 text-xs uppercase text-muted">
+                <tr>
+                  <th className="px-4 py-3">Time</th>
+                  <th className="px-4 py-3">Event</th>
+                  <th className="px-4 py-3">Stage</th>
+                  <th className="px-4 py-3">Stream SID</th>
+                  <th className="px-4 py-3">Detail</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-line bg-white">
+                {events.map((event) => (
+                  <tr key={event.id}>
+                    <td className="px-4 py-3 text-muted">{formatDateTime(event.created_at)}</td>
+                    <td className="px-4 py-3">
+                      <Badge value={event.event_type} />
+                    </td>
+                    <td className="px-4 py-3 text-muted">{event.stage || "Not recorded"}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-muted">{event.stream_sid || "-"}</td>
+                    <td className="max-w-[360px] break-words px-4 py-3 text-muted">{realtimeEventDetail(event)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="mt-5 space-y-3 md:hidden">
+            {events.map((event) => (
+              <div key={event.id} className="rounded-md border border-line p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-sm font-semibold text-ink">{formatDateTime(event.created_at)}</div>
+                  <Badge value={event.event_type} />
+                </div>
+                <dl className="mt-3 grid gap-3 text-sm">
+                  <Info label="Stage" value={event.stage || "Not recorded"} />
+                  <Info label="Stream SID" value={<span className="break-all font-mono text-xs">{event.stream_sid || "-"}</span>} />
+                  <Info label="Detail" value={realtimeEventDetail(event)} />
+                </dl>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : null}
+    </Card>
+  );
+}
+
 function OfferedSlotRow({
   slot,
   serviceNames,
@@ -771,7 +1049,15 @@ function SegmentAssignmentList({
   );
 }
 
-function TranscriptBubble({ item, onAddCorrection }: { item: TranscriptMessage; onAddCorrection: () => void }) {
+function TranscriptBubble({
+  item,
+  canAddCorrection,
+  onAddCorrection
+}: {
+  item: TranscriptMessage;
+  canAddCorrection: boolean;
+  onAddCorrection: () => void;
+}) {
   const isCustomer = item.speaker === "customer";
   const isTool = item.speaker === "tool";
   return (
@@ -785,18 +1071,20 @@ function TranscriptBubble({ item, onAddCorrection }: { item: TranscriptMessage; 
       >
         <div className="mb-1 flex flex-wrap items-center justify-between gap-2 text-[11px] font-semibold uppercase opacity-75">
           <span>{item.speaker}</span>
-          <button
-            type="button"
-            className={[
-              "rounded-md border px-2 py-1 text-[11px] font-semibold normal-case opacity-100 transition",
-              isCustomer
-                ? "border-white/35 bg-white/10 text-white hover:bg-white/20"
-                : "border-line bg-white text-ink hover:bg-slate-50"
-            ].join(" ")}
-            onClick={onAddCorrection}
-          >
-            Add correction
-          </button>
+          {canAddCorrection ? (
+            <button
+              type="button"
+              className={[
+                "rounded-md border px-2 py-1 text-[11px] font-semibold normal-case opacity-100 transition",
+                isCustomer
+                  ? "border-white/35 bg-white/10 text-white hover:bg-white/20"
+                  : "border-line bg-white text-ink hover:bg-slate-50"
+              ].join(" ")}
+              onClick={onAddCorrection}
+            >
+              Add correction
+            </button>
+          ) : null}
         </div>
         <div>{item.body}</div>
       </div>
@@ -825,7 +1113,19 @@ function Info({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-function SessionCard({ item, onOpen }: { item: ConversationSession; onOpen: () => void }) {
+function SessionCard({
+  item,
+  busy,
+  onOpen,
+  onArchive,
+  onRedact
+}: {
+  item: ConversationSession;
+  busy: boolean;
+  onOpen: () => void;
+  onArchive: () => void;
+  onRedact: () => void;
+}) {
   return (
     <div className="rounded-md border border-line p-4">
       <div className="flex items-start justify-between gap-3">
@@ -847,12 +1147,62 @@ function SessionCard({ item, onOpen }: { item: ConversationSession; onOpen: () =
           <span className="text-muted">Booking</span>
           <span className="font-medium text-ink">{item.booking_attempt_id || "None"}</span>
         </div>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-muted">Retention</span>
+          <span className="text-right font-medium text-ink">{retentionLabel(item)}</span>
+        </div>
       </div>
-      <Button type="button" variant="secondary" className="mt-4 w-full" onClick={onOpen}>
-        Open
-      </Button>
+      <div className="mt-4 grid gap-2 sm:grid-cols-3">
+        <Button type="button" variant="secondary" onClick={onOpen}>
+          Open
+        </Button>
+        <Button type="button" variant="secondary" onClick={onArchive} disabled={busy || item.lifecycle_status !== "active"}>
+          <Archive className="h-4 w-4" />
+          Archive
+        </Button>
+        <Button type="button" variant="danger" onClick={onRedact} disabled={busy || item.status === "active" || item.lifecycle_status === "redacted"}>
+          <Eraser className="h-4 w-4" />
+          Redact
+        </Button>
+      </div>
     </div>
   );
+}
+
+function filterLabel(filter: LifecycleFilter) {
+  if (filter === "active") return "Active";
+  if (filter === "archived") return "Archived";
+  return "Redacted";
+}
+
+function emptySessionsTitle(filter: LifecycleFilter) {
+  if (filter === "archived") return "No archived sessions";
+  if (filter === "redacted") return "No redacted sessions";
+  return "No active call sessions";
+}
+
+function emptySessionsDescription(filter: LifecycleFilter) {
+  if (filter === "archived") return "Archived sessions appear here after an owner hides them from the active review list.";
+  if (filter === "redacted") return "Redacted sessions appear here after transcript and customer details are removed.";
+  return "Archived or redacted sessions may still be available from the filters.";
+}
+
+function retentionLabel(session: ConversationSession) {
+  if (session.lifecycle_status === "redacted") {
+    return session.redacted_at ? `Transcript redacted ${formatDateTime(session.redacted_at)}` : "Transcript redacted";
+  }
+  if (session.lifecycle_status === "archived") {
+    return session.archived_at ? `Archived ${formatDateTime(session.archived_at)}` : "Archived";
+  }
+  return session.retention_expires_at ? `Retains until ${formatRetentionDate(session.retention_expires_at)}` : "Retention not set";
+}
+
+function realtimeEventDetail(event: RealtimeEventLog) {
+  if (event.redacted) return "Payload redacted by retention policy.";
+  if (event.error) return event.error;
+  if (event.stream_error) return event.stream_error;
+  if (event.stream_event) return event.stream_event;
+  return "No additional detail recorded.";
 }
 
 function formatDateTime(value: string) {
@@ -861,6 +1211,14 @@ function formatDateTime(value: string) {
     day: "numeric",
     hour: "numeric",
     minute: "2-digit"
+  }).format(new Date(value));
+}
+
+function formatRetentionDate(value: string) {
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric"
   }).format(new Date(value));
 }
 

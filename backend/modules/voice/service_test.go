@@ -85,7 +85,7 @@ func TestStatusReportsRealtimeInputModeWhenRealtimeConfigured(t *testing.T) {
 				APIKey:          "openai-key",
 				BaseURL:         "https://api.openai.com/v1",
 				RealtimeEnabled: true,
-				RealtimeModel:   "gpt-4o-realtime-preview",
+				RealtimeModel:   "gpt-realtime-2",
 				RealtimeVoice:   "alloy",
 			},
 		},
@@ -182,6 +182,35 @@ func TestSpeechTurnRoutesLiveCallThroughAvailabilityOffer(t *testing.T) {
 	}
 	if len(store.events) != 1 || store.events[0].EventType != EventSpeechTurn || store.events[0].CallSessionID != "session_phone" {
 		t.Fatalf("events = %#v, want speech turn event for call session", store.events)
+	}
+}
+
+func TestSpeechTurnRealtimeFallbackOverrideKeepsRecordingMode(t *testing.T) {
+	store := newFakeVoiceStore()
+	store.route = &CallRoute{SalonID: "salon_1", OwnerUserID: "owner_1", SessionID: "session_phone"}
+	engine := newFakeConversationEngine()
+	engine.messageSession = phoneSessionWithAIReply("What service would you like to book?", conversation.StatusActive, conversation.OutcomeCollecting)
+	cfg := testVoiceConfig()
+	cfg.Twilio.VoiceTransport = InputModeRealtimeStream
+	cfg.AI.Provider = ProviderOpenAI
+	cfg.AI.OpenAI.APIKey = "openai-key"
+	cfg.AI.OpenAI.RealtimeEnabled = true
+	cfg.AI.OpenAI.RealtimeModel = "gpt-realtime-2"
+	cfg.AI.OpenAI.RealtimeVoice = "alloy"
+	service := NewService(store, engine, cfg, AIProviders{Realtime: fakeRealtimeProvider{configured: true}})
+
+	reply, err := service.HandleSpeechTurn(context.Background(), SpeechTurnRequest{
+		Provider:          ProviderTwilio,
+		ProviderCallID:    "CA123",
+		SpeechText:        "I need a manicure.",
+		InputModeOverride: InputModeRecording,
+		Payload:           map[string]string{"SpeechResult": "I need a manicure.", "voice_fallback_mode": InputModeRecording},
+	})
+	if err != nil {
+		t.Fatalf("HandleSpeechTurn returned error: %v", err)
+	}
+	if reply.InputMode != InputModeRecording {
+		t.Fatalf("reply input mode = %q, want recording fallback", reply.InputMode)
 	}
 }
 

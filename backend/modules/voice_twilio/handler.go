@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,8 @@ import (
 	"github.com/manleai/ai-receptionist/internal/respond"
 	"github.com/manleai/ai-receptionist/modules/voice"
 )
+
+const fallbackInputModeQuery = "voice_fallback_mode"
 
 type Handler struct {
 	adapter *Adapter
@@ -112,7 +115,11 @@ func (h *Handler) StreamFallback(c *fiber.Ctx) error {
 	if strings.TrimSpace(message) == "" {
 		return h.twiml(c, adapter.HangupResponse())
 	}
-	return h.twiml(c, adapter.FinalResponse(message, ""))
+	recordingURL := appendQueryParam(adapter.RecordingURL(requestBaseURL(c)), fallbackInputModeQuery, voice.InputModeRecording)
+	if strings.TrimSpace(recordingURL) != "" {
+		return h.twiml(c, adapter.RecordResponse(message+" Please tell me again how I can help.", recordingURL, ""))
+	}
+	return h.twiml(c, adapter.GatherResponse(message+" Please tell me again how I can help.", adapter.TurnURL(requestBaseURL(c)), ""))
 }
 
 func (h *Handler) handleTurn(c *fiber.Ctx) error {
@@ -134,15 +141,22 @@ func (h *Handler) handleTurn(c *fiber.Ctx) error {
 		audioContentType = ""
 	}
 
+	runtimeParams := copyStringMap(params)
+	inputModeOverride := strings.TrimSpace(c.Query(fallbackInputModeQuery))
+	if inputModeOverride != "" {
+		runtimeParams[fallbackInputModeQuery] = inputModeOverride
+	}
+
 	reply, err := h.service.HandleSpeechTurn(c.UserContext(), voice.SpeechTurnRequest{
-		Provider:         voice.ProviderTwilio,
-		ProviderCallID:   params["CallSid"],
-		FromPhone:        params["From"],
-		ToPhone:          params["To"],
-		SpeechText:       params["SpeechResult"],
-		Audio:            audio,
-		AudioContentType: audioContentType,
-		Payload:          params,
+		Provider:          voice.ProviderTwilio,
+		ProviderCallID:    params["CallSid"],
+		FromPhone:         params["From"],
+		ToPhone:           params["To"],
+		SpeechText:        params["SpeechResult"],
+		Audio:             audio,
+		AudioContentType:  audioContentType,
+		InputModeOverride: inputModeOverride,
+		Payload:           runtimeParams,
 	})
 	if errors.Is(err, voice.ErrProviderDisabled) {
 		return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_PROVIDER_NOT_CONFIGURED", "Voice provider is not configured.")
@@ -453,6 +467,23 @@ func requestBaseURL(c *fiber.Ctx) string {
 		return ""
 	}
 	return protocol + "://" + host
+}
+
+func appendQueryParam(rawURL string, key string, value string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+	if rawURL == "" || key == "" || value == "" {
+		return rawURL
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	query := parsed.Query()
+	query.Set(key, value)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 type twilioStreamMessage struct {

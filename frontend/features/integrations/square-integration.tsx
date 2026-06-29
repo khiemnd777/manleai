@@ -181,7 +181,7 @@ const defaultOpenAIConfigForm: OpenAIConfigForm = {
   speech_model: "gpt-4o-mini-tts",
   speech_voice: "alloy",
   realtime_enabled: false,
-  realtime_model: "gpt-4o-realtime-preview",
+  realtime_model: "gpt-realtime-2",
   realtime_voice: "alloy",
   realtime_instructions: ""
 };

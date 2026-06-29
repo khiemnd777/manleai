@@ -156,7 +156,7 @@ func (s *Service) UpdateOpenAI(ctx context.Context, salonID string, ownerUserID 
 		"speech_model":          strings.TrimSpace(req.SpeechModel),
 		"speech_voice":          strings.TrimSpace(req.SpeechVoice),
 		"realtime_enabled":      boolString(req.RealtimeEnabled),
-		"realtime_model":        strings.TrimSpace(req.RealtimeModel),
+		"realtime_model":        config.NormalizeOpenAIRealtimeModel(req.RealtimeModel),
 		"realtime_voice":        strings.TrimSpace(req.RealtimeVoice),
 		"realtime_instructions": strings.TrimSpace(req.RealtimeInstructions),
 	}
@@ -243,7 +243,7 @@ func (s *Service) ResolveOpenAIConfig(ctx context.Context, salonID string) (conf
 	cfg.ReplyModel = defaultString(strings.TrimSpace(cfg.ReplyModel), "gpt-4.1-mini")
 	cfg.SpeechModel = defaultString(strings.TrimSpace(cfg.SpeechModel), "gpt-4o-mini-tts")
 	cfg.SpeechVoice = defaultString(strings.TrimSpace(cfg.SpeechVoice), "alloy")
-	cfg.RealtimeModel = defaultString(strings.TrimSpace(cfg.RealtimeModel), "gpt-4o-realtime-preview")
+	cfg.RealtimeModel = config.NormalizeOpenAIRealtimeModel(cfg.RealtimeModel)
 	cfg.RealtimeVoice = defaultString(strings.TrimSpace(cfg.RealtimeVoice), cfg.SpeechVoice)
 	cfg.RealtimeInstructions = strings.TrimSpace(cfg.RealtimeInstructions)
 	enabled := strings.TrimSpace(s.cfg.Voice.AI.Provider) == ProviderOpenAI
@@ -256,7 +256,7 @@ func (s *Service) ResolveOpenAIConfig(ctx context.Context, salonID string) (conf
 		cfg.SpeechModel = defaultString(strings.TrimSpace(item.Settings["speech_model"]), cfg.SpeechModel)
 		cfg.SpeechVoice = defaultString(strings.TrimSpace(item.Settings["speech_voice"]), cfg.SpeechVoice)
 		cfg.RealtimeEnabled = boolSetting(item.Settings["realtime_enabled"])
-		cfg.RealtimeModel = defaultString(strings.TrimSpace(item.Settings["realtime_model"]), cfg.RealtimeModel)
+		cfg.RealtimeModel = config.NormalizeOpenAIRealtimeModel(defaultString(item.Settings["realtime_model"], cfg.RealtimeModel))
 		cfg.RealtimeVoice = defaultString(strings.TrimSpace(item.Settings["realtime_voice"]), cfg.SpeechVoice)
 		cfg.RealtimeInstructions = strings.TrimSpace(item.Settings["realtime_instructions"])
 	}
@@ -392,7 +392,7 @@ func (s *Service) openAIResponse(item *StoredConfig) OpenAISettingsResponse {
 		cfg.SpeechModel = defaultString(strings.TrimSpace(item.Settings["speech_model"]), cfg.SpeechModel)
 		cfg.SpeechVoice = defaultString(strings.TrimSpace(item.Settings["speech_voice"]), cfg.SpeechVoice)
 		cfg.RealtimeEnabled = boolSetting(item.Settings["realtime_enabled"])
-		cfg.RealtimeModel = defaultString(strings.TrimSpace(item.Settings["realtime_model"]), cfg.RealtimeModel)
+		cfg.RealtimeModel = config.NormalizeOpenAIRealtimeModel(defaultString(item.Settings["realtime_model"], cfg.RealtimeModel))
 		cfg.RealtimeVoice = defaultString(strings.TrimSpace(item.Settings["realtime_voice"]), cfg.SpeechVoice)
 		cfg.RealtimeInstructions = strings.TrimSpace(item.Settings["realtime_instructions"])
 	}
@@ -401,7 +401,7 @@ func (s *Service) openAIResponse(item *StoredConfig) OpenAISettingsResponse {
 	cfg.ReplyModel = defaultString(strings.TrimSpace(cfg.ReplyModel), "gpt-4.1-mini")
 	cfg.SpeechModel = defaultString(strings.TrimSpace(cfg.SpeechModel), "gpt-4o-mini-tts")
 	cfg.SpeechVoice = defaultString(strings.TrimSpace(cfg.SpeechVoice), "alloy")
-	cfg.RealtimeModel = defaultString(strings.TrimSpace(cfg.RealtimeModel), "gpt-4o-realtime-preview")
+	cfg.RealtimeModel = config.NormalizeOpenAIRealtimeModel(cfg.RealtimeModel)
 	cfg.RealtimeVoice = defaultString(strings.TrimSpace(cfg.RealtimeVoice), cfg.SpeechVoice)
 	cfg.RealtimeInstructions = strings.TrimSpace(cfg.RealtimeInstructions)
 	secretSource := SecretSourceNone

@@ -671,12 +671,30 @@ export type ConversationSession = {
   booking_attempt_id?: string;
   appointment_id?: string;
   summary?: string;
+  lifecycle_status: "active" | "archived" | "redacted";
+  archived_at?: string;
+  redacted_at?: string;
+  retention_expires_at: string;
   started_at: string;
   ended_at?: string;
   created_at: string;
   updated_at: string;
   transcript?: TranscriptMessage[];
   handoff?: HandoffRequest;
+};
+
+export type RealtimeEventLog = {
+  id: string;
+  provider: string;
+  provider_call_id?: string;
+  event_type: string;
+  stage?: string;
+  stream_sid?: string;
+  stream_event?: string;
+  stream_error?: string;
+  error?: string;
+  redacted?: boolean;
+  created_at: string;
 };
 
 export type VoiceStatus = {

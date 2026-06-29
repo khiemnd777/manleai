@@ -57,6 +57,7 @@ const statusClass: Record<string, string> = {
   dismissed: "bg-slate-100 text-slate-700 ring-slate-200",
   draft: "bg-slate-100 text-slate-700 ring-slate-200",
   archived: "bg-slate-100 text-slate-700 ring-slate-200",
+  redacted: "bg-red-50 text-red-700 ring-red-200",
   faq: "bg-blue-50 text-blue-700 ring-blue-200",
   policy: "bg-purple-50 text-purple-700 ring-purple-200",
   services: "bg-teal-50 text-teal-700 ring-teal-200",

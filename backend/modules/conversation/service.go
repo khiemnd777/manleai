@@ -13,7 +13,13 @@ import (
 	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
-const defaultGreeting = "Thank you for calling. How can I help you today?"
+const (
+	defaultGreeting       = "Thank you for calling. How can I help you today?"
+	defaultRetentionLimit = 50
+	maxRetentionLimit     = 500
+	defaultWebhookLimit   = 50
+	maxWebhookLimit       = 100
+)
 
 var (
 	phonePattern        = regexp.MustCompile(`(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})`)
@@ -221,12 +227,46 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	return s.tryBooking(ctx, ownerUserID, turn, next, services, staff, cfg, knowledge)
 }
 
-func (s *Service) List(ctx context.Context, salonID string, ownerUserID string, limit int) ([]Session, error) {
-	return s.store.ListSessions(ctx, strings.TrimSpace(salonID), strings.TrimSpace(ownerUserID), clampLimit(limit))
+func (s *Service) List(ctx context.Context, salonID string, ownerUserID string, limit int, lifecycleStatus string) ([]Session, error) {
+	lifecycleStatus = normalizeLifecycleStatus(lifecycleStatus)
+	if lifecycleStatus == "" {
+		return nil, ErrValidation
+	}
+	return s.store.ListSessions(ctx, strings.TrimSpace(salonID), strings.TrimSpace(ownerUserID), lifecycleStatus, clampLimit(limit))
 }
 
 func (s *Service) Get(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error) {
 	return s.store.GetSessionForOwner(ctx, strings.TrimSpace(salonID), strings.TrimSpace(ownerUserID), strings.TrimSpace(sessionID))
+}
+
+func (s *Service) ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int) ([]WebhookEventLog, error) {
+	salonID = strings.TrimSpace(salonID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	sessionID = strings.TrimSpace(sessionID)
+	if salonID == "" || ownerUserID == "" || sessionID == "" {
+		return nil, ErrValidation
+	}
+	return s.store.ListWebhookEvents(ctx, salonID, ownerUserID, sessionID, clampWebhookLimit(limit))
+}
+
+func (s *Service) Archive(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error) {
+	salonID = strings.TrimSpace(salonID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	sessionID = strings.TrimSpace(sessionID)
+	if salonID == "" || ownerUserID == "" || sessionID == "" {
+		return nil, ErrValidation
+	}
+	return s.store.ArchiveSession(ctx, salonID, ownerUserID, sessionID)
+}
+
+func (s *Service) Redact(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error) {
+	salonID = strings.TrimSpace(salonID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	sessionID = strings.TrimSpace(sessionID)
+	if salonID == "" || ownerUserID == "" || sessionID == "" {
+		return nil, ErrValidation
+	}
+	return s.store.RedactSession(ctx, salonID, ownerUserID, sessionID)
 }
 
 func (s *Service) applyAvailabilityForRequestedTime(ctx context.Context, ownerUserID string, turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (bool, error) {
@@ -1462,4 +1502,37 @@ func clampLimit(limit int) int {
 		return 100
 	}
 	return limit
+}
+
+func clampRetentionLimit(limit int) int {
+	if limit <= 0 {
+		return defaultRetentionLimit
+	}
+	if limit > maxRetentionLimit {
+		return maxRetentionLimit
+	}
+	return limit
+}
+
+func clampWebhookLimit(limit int) int {
+	if limit <= 0 {
+		return defaultWebhookLimit
+	}
+	if limit > maxWebhookLimit {
+		return maxWebhookLimit
+	}
+	return limit
+}
+
+func normalizeLifecycleStatus(status string) string {
+	switch strings.TrimSpace(status) {
+	case "", LifecycleActive:
+		return LifecycleActive
+	case LifecycleArchived:
+		return LifecycleArchived
+	case LifecycleRedacted:
+		return LifecycleRedacted
+	default:
+		return ""
+	}
 }

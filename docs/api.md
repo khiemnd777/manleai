@@ -362,7 +362,7 @@ keys, client secrets, encrypted secrets, or POS connection token state.
       "speech_model": "gpt-4o-mini-tts",
       "speech_voice": "alloy",
       "realtime_enabled": true,
-      "realtime_model": "gpt-4o-realtime-preview",
+      "realtime_model": "gpt-realtime-2",
       "realtime_voice": "alloy",
       "realtime_instructions": "",
       "api_key_configured": true,
@@ -555,7 +555,7 @@ configured and whether it came from dashboard storage or environment fallback.
     "speech_model": "gpt-4o-mini-tts",
     "speech_voice": "alloy",
     "realtime_enabled": true,
-    "realtime_model": "gpt-4o-realtime-preview",
+    "realtime_model": "gpt-realtime-2",
     "realtime_voice": "alloy",
     "realtime_instructions": "",
     "api_key_configured": true,
@@ -606,7 +606,7 @@ configured and whether it came from dashboard storage or environment fallback.
   "speech_model": "gpt-4o-mini-tts",
   "speech_voice": "alloy",
   "realtime_enabled": true,
-  "realtime_model": "gpt-4o-realtime-preview",
+  "realtime_model": "gpt-realtime-2",
   "realtime_voice": "alloy",
   "realtime_instructions": ""
 }
@@ -1062,7 +1062,7 @@ not return required booking metadata.
 
 `GET /api/salons/:id/conversation-sessions`
 
-Returns recent conversation sessions for the authenticated owner, including `simulator` and `phone` channels.
+Returns recent conversation sessions for the authenticated owner, including `simulator` and `phone` channels. The optional `lifecycle_status` query parameter accepts `active`, `archived`, or `redacted`; the default is `active`. Active lifecycle sessions receive a 90-day `retention_expires_at` timestamp. The worker redacts expired sessions by clearing customer PII, transcript bodies, handoff summaries, webhook payloads, and temporary voice audio while preserving booking, handoff, outcome, provider call, and timestamp audit links.
 
 `POST /api/salons/:id/conversation-sessions`
 
@@ -1077,6 +1077,14 @@ Creates a simulator session and writes the initial AI transcript message.
 `GET /api/salons/:id/conversation-sessions/:session_id`
 
 Returns one conversation session with transcript messages and the latest handoff request when present.
+
+`POST /api/salons/:id/conversation-sessions/:session_id/archive`
+
+Archives an owner-scoped conversation session so it no longer appears in the default active call log. Archiving is idempotent and keeps transcript text available until retention redaction.
+
+`POST /api/salons/:id/conversation-sessions/:session_id/redact`
+
+Irreversibly redacts a completed or otherwise non-active owner-scoped conversation session. Active sessions return `409 CONVERSATION_LIFECYCLE_CONFLICT`. Redaction clears customer PII and transcript text but keeps POS booking evidence and owner handoff links for audit.
 
 `POST /api/salons/:id/conversation-sessions/:session_id/messages`
 
@@ -1231,7 +1239,7 @@ Returns owner-scoped live voice, phone booking, and external AI provider readine
       "provider": "openai",
       "configured": true,
       "ready": true,
-      "model": "gpt-4o-realtime-preview",
+      "model": "gpt-realtime-2",
       "voice": "alloy"
     }
   }
@@ -1261,6 +1269,33 @@ CallSid
 From
 To
 SpeechResult
+```
+
+`GET /api/salons/:id/conversation-sessions/:session_id/realtime-events`
+
+Owner-authenticated debug endpoint for the selected phone call session. It
+returns realtime stream audit events recorded in `voice_webhook_events`, scoped
+by salon ownership and session ID. The response intentionally exposes only
+debug-safe fields extracted from provider payloads; raw Twilio/OpenAI payloads
+are not returned.
+
+Example response:
+
+```json
+{
+  "events": [
+    {
+      "id": "b87c6...",
+      "provider": "twilio",
+      "provider_call_id": "CA2a47b5e8e5777820f84d6447132b1574",
+      "event_type": "realtime_failed",
+      "stage": "openai_event",
+      "stream_sid": "MZ...",
+      "error": "invalid_request_error: invalid_value: session.audio.input.format: Unsupported audio format.",
+      "created_at": "2026-06-29T00:13:10Z"
+    }
+  ]
+}
 ```
 
 `POST /api/voice/twilio/recording`

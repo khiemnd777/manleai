@@ -192,9 +192,30 @@ func (f *phoneFlowConversationStore) GetSessionForOwner(ctx context.Context, sal
 	return f.copySession(), nil
 }
 
-func (f *phoneFlowConversationStore) ListSessions(ctx context.Context, salonID string, ownerUserID string, limit int) ([]conversation.Session, error) {
+func (f *phoneFlowConversationStore) ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int) ([]conversation.Session, error) {
 	session := f.session
 	return []conversation.Session{session}, nil
+}
+
+func (f *phoneFlowConversationStore) ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int) ([]conversation.WebhookEventLog, error) {
+	return []conversation.WebhookEventLog{}, nil
+}
+
+func (f *phoneFlowConversationStore) ArchiveSession(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*conversation.Session, error) {
+	session := f.session
+	session.LifecycleStatus = conversation.LifecycleArchived
+	f.session = session
+	return f.copySession(), nil
+}
+
+func (f *phoneFlowConversationStore) RedactSession(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*conversation.Session, error) {
+	session := f.session
+	session.LifecycleStatus = conversation.LifecycleRedacted
+	session.CustomerName = ""
+	session.CustomerPhone = ""
+	session.CustomerEmail = ""
+	f.session = session
+	return f.copySession(), nil
 }
 
 func (f *phoneFlowConversationStore) ListBookableServices(ctx context.Context, salonID string) ([]conversation.ServiceOption, error) {

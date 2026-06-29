@@ -66,6 +66,19 @@ type OpenAIVoiceConfig struct {
 	RealtimeInstructions string
 }
 
+const (
+	DefaultOpenAIRealtimeModel       = "gpt-realtime-2"
+	LegacyOpenAIRealtimePreviewModel = "gpt-4o-realtime-preview"
+)
+
+func NormalizeOpenAIRealtimeModel(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" || model == LegacyOpenAIRealtimePreviewModel {
+		return DefaultOpenAIRealtimeModel
+	}
+	return model
+}
+
 func Load() Config {
 	return Config{
 		AppEnv:          env("APP_ENV", "local"),
@@ -108,7 +121,7 @@ func Load() Config {
 					SpeechModel:          env("VOICE_OPENAI_SPEECH_MODEL", "gpt-4o-mini-tts"),
 					SpeechVoice:          env("VOICE_OPENAI_SPEECH_VOICE", "alloy"),
 					RealtimeEnabled:      envBool("VOICE_OPENAI_REALTIME_ENABLED", false),
-					RealtimeModel:        env("VOICE_OPENAI_REALTIME_MODEL", "gpt-4o-realtime-preview"),
+					RealtimeModel:        NormalizeOpenAIRealtimeModel(env("VOICE_OPENAI_REALTIME_MODEL", DefaultOpenAIRealtimeModel)),
 					RealtimeVoice:        env("VOICE_OPENAI_REALTIME_VOICE", "alloy"),
 					RealtimeInstructions: env("VOICE_OPENAI_REALTIME_INSTRUCTIONS", ""),
 				},

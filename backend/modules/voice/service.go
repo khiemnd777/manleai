@@ -179,11 +179,11 @@ func (s *Service) HandleSpeechTurn(ctx context.Context, req SpeechTurnRequest) (
 				Payload:        req.Payload,
 			})
 			session, _ := s.conversation.Get(ctx, route.SalonID, route.OwnerUserID, route.SessionID)
-			return s.buildReply(ctx, CallReply{
+			return s.buildReplyWithInputMode(ctx, CallReply{
 				Message:  "I could not hear that clearly. Please say it again, or the owner can help directly.",
 				Continue: true,
 				Session:  session,
-			}, session, req.Provider, req.ProviderCallID), nil
+			}, session, req.Provider, req.ProviderCallID, req.InputModeOverride), nil
 		}
 		req.SpeechText = strings.TrimSpace(text)
 	}
@@ -198,21 +198,21 @@ func (s *Service) HandleSpeechTurn(ctx context.Context, req SpeechTurnRequest) (
 			Payload:        req.Payload,
 		})
 		session, _ := s.conversation.Get(ctx, route.SalonID, route.OwnerUserID, route.SessionID)
-		return s.buildReply(ctx, CallReply{
+		return s.buildReplyWithInputMode(ctx, CallReply{
 			Message:  "I did not hear that. How can I help you today?",
 			Continue: true,
 			Session:  session,
-		}, session, req.Provider, req.ProviderCallID), nil
+		}, session, req.Provider, req.ProviderCallID, req.InputModeOverride), nil
 	}
 
 	session, err := s.conversation.Message(ctx, route.SalonID, route.OwnerUserID, route.SessionID, conversation.MessageRequest{Message: req.SpeechText})
 	if errors.Is(err, conversation.ErrSessionClosed) {
 		session, _ = s.conversation.Get(ctx, route.SalonID, route.OwnerUserID, route.SessionID)
-		return s.buildReply(ctx, CallReply{
+		return s.buildReplyWithInputMode(ctx, CallReply{
 			Message:  "This request is already complete. The owner can help with anything else.",
 			Continue: false,
 			Session:  session,
-		}, session, req.Provider, req.ProviderCallID), nil
+		}, session, req.Provider, req.ProviderCallID, req.InputModeOverride), nil
 	}
 	if err != nil {
 		return nil, err
@@ -225,11 +225,11 @@ func (s *Service) HandleSpeechTurn(ctx context.Context, req SpeechTurnRequest) (
 		EventType:      EventSpeechTurn,
 		Payload:        req.Payload,
 	})
-	return s.buildReply(ctx, CallReply{
+	return s.buildReplyWithInputMode(ctx, CallReply{
 		Message:  lastAIMessage(session),
 		Continue: session.Status == conversation.StatusActive,
 		Session:  session,
-	}, session, req.Provider, req.ProviderCallID), nil
+	}, session, req.Provider, req.ProviderCallID, req.InputModeOverride), nil
 }
 
 func (s *Service) configured(cfg config.VoiceConfig) bool {
@@ -244,11 +244,18 @@ func (s *Service) transcribe(ctx context.Context, salonID string, req SpeechTurn
 }
 
 func (s *Service) buildReply(ctx context.Context, reply CallReply, session *conversation.Session, provider string, providerCallID string) *CallReply {
+	return s.buildReplyWithInputMode(ctx, reply, session, provider, providerCallID, "")
+}
+
+func (s *Service) buildReplyWithInputMode(ctx context.Context, reply CallReply, session *conversation.Session, provider string, providerCallID string, inputModeOverride string) *CallReply {
 	salonID := ""
 	if session != nil {
 		salonID = session.SalonID
 	}
 	reply.InputMode = s.inputMode(ctx, salonID)
+	if strings.TrimSpace(inputModeOverride) != "" {
+		reply.InputMode = normalizeVoiceTransport(inputModeOverride)
+	}
 	if reply.InputMode == InputModeRealtimeStream {
 		return &reply
 	}
@@ -542,7 +549,7 @@ func (s *Service) voiceConfig(ctx context.Context, salonID string) (config.Voice
 	cfg.AI.OpenAI.ReplyModel = defaultString(strings.TrimSpace(cfg.AI.OpenAI.ReplyModel), "gpt-4.1-mini")
 	cfg.AI.OpenAI.SpeechModel = defaultString(strings.TrimSpace(cfg.AI.OpenAI.SpeechModel), "gpt-4o-mini-tts")
 	cfg.AI.OpenAI.SpeechVoice = defaultString(strings.TrimSpace(cfg.AI.OpenAI.SpeechVoice), "alloy")
-	cfg.AI.OpenAI.RealtimeModel = defaultString(strings.TrimSpace(cfg.AI.OpenAI.RealtimeModel), "gpt-4o-realtime-preview")
+	cfg.AI.OpenAI.RealtimeModel = config.NormalizeOpenAIRealtimeModel(cfg.AI.OpenAI.RealtimeModel)
 	cfg.AI.OpenAI.RealtimeVoice = defaultString(strings.TrimSpace(cfg.AI.OpenAI.RealtimeVoice), cfg.AI.OpenAI.SpeechVoice)
 	cfg.AI.OpenAI.RealtimeInstructions = strings.TrimSpace(cfg.AI.OpenAI.RealtimeInstructions)
 	if s.configResolver == nil || strings.TrimSpace(salonID) == "" {

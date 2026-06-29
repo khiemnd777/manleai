@@ -2,12 +2,93 @@ package conversation
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/manleai/ai-receptionist/modules/booking"
 )
+
+func TestListDefaultsToActiveLifecycle(t *testing.T) {
+	store := newFakeConversationStore()
+	service := NewService(store, &fakeBookingTool{})
+
+	items, err := service.List(context.Background(), " salon_1 ", " owner_1 ", 0, "")
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1", len(items))
+	}
+	if store.listLifecycleStatus != LifecycleActive {
+		t.Fatalf("lifecycle filter = %q, want active", store.listLifecycleStatus)
+	}
+	if store.listLimit != 25 {
+		t.Fatalf("limit = %d, want 25", store.listLimit)
+	}
+}
+
+func TestListRejectsInvalidLifecycle(t *testing.T) {
+	store := newFakeConversationStore()
+	service := NewService(store, &fakeBookingTool{})
+
+	_, err := service.List(context.Background(), "salon_1", "owner_1", 25, "deleted")
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("error = %v, want ErrValidation", err)
+	}
+}
+
+func TestListWebhookEventsDelegatesToStore(t *testing.T) {
+	store := newFakeConversationStore()
+	service := NewService(store, &fakeBookingTool{})
+
+	events, err := service.ListWebhookEvents(context.Background(), " salon_1 ", " owner_1 ", " session_1 ", 500)
+	if err != nil {
+		t.Fatalf("ListWebhookEvents returned error: %v", err)
+	}
+	if len(events) != 1 || events[0].EventType != "realtime_failed" {
+		t.Fatalf("events = %#v", events)
+	}
+	if store.webhookSessionID != "session_1" {
+		t.Fatalf("webhook session = %q, want session_1", store.webhookSessionID)
+	}
+	if store.webhookLimit != maxWebhookLimit {
+		t.Fatalf("webhook limit = %d, want %d", store.webhookLimit, maxWebhookLimit)
+	}
+}
+
+func TestArchiveSessionDelegatesToStore(t *testing.T) {
+	store := newFakeConversationStore()
+	service := NewService(store, &fakeBookingTool{})
+
+	session, err := service.Archive(context.Background(), " salon_1 ", " owner_1 ", " session_1 ")
+	if err != nil {
+		t.Fatalf("Archive returned error: %v", err)
+	}
+	if session.LifecycleStatus != LifecycleArchived {
+		t.Fatalf("lifecycle = %s, want archived", session.LifecycleStatus)
+	}
+	if store.archivedSessionID != "session_1" {
+		t.Fatalf("archived session = %q, want session_1", store.archivedSessionID)
+	}
+}
+
+func TestRedactSessionDelegatesToStore(t *testing.T) {
+	store := newFakeConversationStore()
+	service := NewService(store, &fakeBookingTool{})
+
+	session, err := service.Redact(context.Background(), " salon_1 ", " owner_1 ", " session_1 ")
+	if err != nil {
+		t.Fatalf("Redact returned error: %v", err)
+	}
+	if session.LifecycleStatus != LifecycleRedacted {
+		t.Fatalf("lifecycle = %s, want redacted", session.LifecycleStatus)
+	}
+	if store.redactedSessionID != "session_1" {
+		t.Fatalf("redacted session = %q, want session_1", store.redactedSessionID)
+	}
+}
 
 func TestMessageConfirmsOnlyAfterBookingToolSuccess(t *testing.T) {
 	store := newFakeConversationStore()
@@ -527,13 +608,19 @@ func defaultAvailabilityStartTime() time.Time {
 }
 
 type fakeConversationStore struct {
-	cfg         RuntimeConfig
-	session     Session
-	services    []ServiceOption
-	staff       []StaffOption
-	activeStaff []StaffOption
-	knowledge   []KnowledgeSnippet
-	lastTurn    TurnRecord
+	cfg                 RuntimeConfig
+	session             Session
+	services            []ServiceOption
+	staff               []StaffOption
+	activeStaff         []StaffOption
+	knowledge           []KnowledgeSnippet
+	lastTurn            TurnRecord
+	listLifecycleStatus string
+	listLimit           int
+	webhookSessionID    string
+	webhookLimit        int
+	archivedSessionID   string
+	redactedSessionID   string
 }
 
 func newFakeConversationStore() *fakeConversationStore {
@@ -546,12 +633,14 @@ func newFakeConversationStore() *fakeConversationStore {
 			AIGreeting:     defaultGreeting,
 		},
 		session: Session{
-			ID:      "session_1",
-			SalonID: "salon_1",
-			Channel: ChannelSimulator,
-			Status:  StatusActive,
-			Intent:  IntentUnknown,
-			Outcome: OutcomeCollecting,
+			ID:                 "session_1",
+			SalonID:            "salon_1",
+			Channel:            ChannelSimulator,
+			Status:             StatusActive,
+			Intent:             IntentUnknown,
+			Outcome:            OutcomeCollecting,
+			LifecycleStatus:    LifecycleActive,
+			RetentionExpiresAt: time.Now().UTC().Add(90 * 24 * time.Hour),
 		},
 		services: []ServiceOption{{
 			ID:              "service_1",
@@ -580,8 +669,39 @@ func (f *fakeConversationStore) GetSessionForOwner(ctx context.Context, salonID 
 	return &session, nil
 }
 
-func (f *fakeConversationStore) ListSessions(ctx context.Context, salonID string, ownerUserID string, limit int) ([]Session, error) {
+func (f *fakeConversationStore) ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int) ([]Session, error) {
+	f.listLifecycleStatus = lifecycleStatus
+	f.listLimit = limit
 	return []Session{f.session}, nil
+}
+
+func (f *fakeConversationStore) ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int) ([]WebhookEventLog, error) {
+	f.webhookSessionID = sessionID
+	f.webhookLimit = limit
+	return []WebhookEventLog{{
+		ID:        "event_1",
+		EventType: "realtime_failed",
+		Stage:     "openai_event",
+	}}, nil
+}
+
+func (f *fakeConversationStore) ArchiveSession(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error) {
+	f.archivedSessionID = sessionID
+	session := f.session
+	session.LifecycleStatus = LifecycleArchived
+	f.session = session
+	return &session, nil
+}
+
+func (f *fakeConversationStore) RedactSession(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error) {
+	f.redactedSessionID = sessionID
+	session := f.session
+	session.LifecycleStatus = LifecycleRedacted
+	session.CustomerName = ""
+	session.CustomerPhone = ""
+	session.CustomerEmail = ""
+	f.session = session
+	return &session, nil
 }
 
 func (f *fakeConversationStore) ListBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error) {

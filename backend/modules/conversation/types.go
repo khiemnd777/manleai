@@ -28,6 +28,10 @@ const (
 	OutcomeAIDisabled             = "ai_disabled"
 	OutcomeFailed                 = "failed"
 
+	LifecycleActive   = "active"
+	LifecycleArchived = "archived"
+	LifecycleRedacted = "redacted"
+
 	SpeakerAI       = "ai"
 	SpeakerCustomer = "customer"
 	SpeakerTool     = "tool"
@@ -41,6 +45,7 @@ var (
 	ErrValidation    = errors.New("conversation validation failed")
 	ErrNotFound      = errors.New("conversation record not found")
 	ErrSessionClosed = errors.New("conversation session is closed")
+	ErrLifecycle     = errors.New("conversation lifecycle action is not allowed")
 )
 
 type BookingTool interface {
@@ -56,7 +61,10 @@ type Store interface {
 	GetRuntimeConfig(ctx context.Context, salonID string, ownerUserID string) (*RuntimeConfig, error)
 	CreateSession(ctx context.Context, record NewSessionRecord) (*Session, error)
 	GetSessionForOwner(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error)
-	ListSessions(ctx context.Context, salonID string, ownerUserID string, limit int) ([]Session, error)
+	ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int) ([]Session, error)
+	ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int) ([]WebhookEventLog, error)
+	ArchiveSession(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error)
+	RedactSession(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error)
 	ListBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error)
 	ListBookableStaff(ctx context.Context, salonID string) ([]StaffOption, error)
 	ListActiveStaff(ctx context.Context, salonID string) ([]StaffOption, error)
@@ -159,6 +167,10 @@ type Session struct {
 	BookingAttemptID   string                          `json:"booking_attempt_id,omitempty"`
 	AppointmentID      string                          `json:"appointment_id,omitempty"`
 	Summary            string                          `json:"summary,omitempty"`
+	LifecycleStatus    string                          `json:"lifecycle_status"`
+	ArchivedAt         *time.Time                      `json:"archived_at,omitempty"`
+	RedactedAt         *time.Time                      `json:"redacted_at,omitempty"`
+	RetentionExpiresAt time.Time                       `json:"retention_expires_at"`
 	StartedAt          time.Time                       `json:"started_at"`
 	EndedAt            *time.Time                      `json:"ended_at,omitempty"`
 	CreatedAt          time.Time                       `json:"created_at"`
@@ -206,6 +218,20 @@ type HandoffRequest struct {
 	Summary       string     `json:"summary"`
 	CreatedAt     time.Time  `json:"created_at"`
 	ResolvedAt    *time.Time `json:"resolved_at,omitempty"`
+}
+
+type WebhookEventLog struct {
+	ID             string    `json:"id"`
+	Provider       string    `json:"provider"`
+	ProviderCallID string    `json:"provider_call_id,omitempty"`
+	EventType      string    `json:"event_type"`
+	Stage          string    `json:"stage,omitempty"`
+	StreamSID      string    `json:"stream_sid,omitempty"`
+	StreamEvent    string    `json:"stream_event,omitempty"`
+	StreamError    string    `json:"stream_error,omitempty"`
+	Error          string    `json:"error,omitempty"`
+	Redacted       bool      `json:"redacted,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type NewSessionRecord struct {

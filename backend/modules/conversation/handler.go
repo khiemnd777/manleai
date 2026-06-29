@@ -59,7 +59,10 @@ func (h *Handler) Message(c *fiber.Ctx) error {
 }
 
 func (h *Handler) List(c *fiber.Ctx) error {
-	items, err := h.service.List(c.UserContext(), c.Params("id"), middleware.UserID(c), parseLimit(c.Query("limit")))
+	items, err := h.service.List(c.UserContext(), c.Params("id"), middleware.UserID(c), parseLimit(c.Query("limit")), c.Query("lifecycle_status"))
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Conversation lifecycle filter is invalid.")
+	}
 	if errors.Is(err, ErrNotFound) {
 		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
 	}
@@ -76,6 +79,54 @@ func (h *Handler) Get(c *fiber.Ctx) error {
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "CONVERSATION_FAILED", "Could not load conversation session.")
+	}
+	return respond.JSON(c, fiber.StatusOK, session)
+}
+
+func (h *Handler) RealtimeEvents(c *fiber.Ctx) error {
+	events, err := h.service.ListWebhookEvents(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("session_id"), parseLimit(c.Query("limit")))
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Conversation session request is invalid.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "CONVERSATION_NOT_FOUND", "Conversation session was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "CONVERSATION_REALTIME_EVENTS_FAILED", "Could not load realtime events.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"events": events})
+}
+
+func (h *Handler) Archive(c *fiber.Ctx) error {
+	session, err := h.service.Archive(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("session_id"))
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Conversation session request is invalid.")
+	}
+	if errors.Is(err, ErrLifecycle) {
+		return respond.Error(c, fiber.StatusConflict, "CONVERSATION_LIFECYCLE_CONFLICT", "Conversation session cannot be archived.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "CONVERSATION_NOT_FOUND", "Conversation session was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "CONVERSATION_ARCHIVE_FAILED", "Could not archive conversation session.")
+	}
+	return respond.JSON(c, fiber.StatusOK, session)
+}
+
+func (h *Handler) Redact(c *fiber.Ctx) error {
+	session, err := h.service.Redact(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("session_id"))
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Conversation session request is invalid.")
+	}
+	if errors.Is(err, ErrLifecycle) {
+		return respond.Error(c, fiber.StatusConflict, "CONVERSATION_LIFECYCLE_CONFLICT", "Active or already incompatible conversation sessions cannot be redacted.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "CONVERSATION_NOT_FOUND", "Conversation session was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "CONVERSATION_REDACT_FAILED", "Could not redact conversation session.")
 	}
 	return respond.JSON(c, fiber.StatusOK, session)
 }

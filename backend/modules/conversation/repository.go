@@ -10,6 +10,11 @@ import (
 	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
+const (
+	redactedTranscriptBody = "[redacted]"
+	redactedSummaryBody    = "Redacted by call session retention policy."
+)
+
 type Repository struct {
 	db *sql.DB
 }
@@ -95,13 +100,14 @@ func (r *Repository) GetSessionForOwner(ctx context.Context, salonID string, own
 	return session, nil
 }
 
-func (r *Repository) ListSessions(ctx context.Context, salonID string, ownerUserID string, limit int) ([]Session, error) {
+func (r *Repository) ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int) ([]Session, error) {
 	rows, err := r.db.QueryContext(ctx, sessionSelect()+`
 		WHERE cs.salon_id = $1
 		  AND salon.owner_user_id = $2
+		  AND cs.lifecycle_status = $3
 		ORDER BY cs.updated_at DESC
-		LIMIT $3
-	`, salonID, ownerUserID, limit)
+		LIMIT $4
+	`, salonID, ownerUserID, lifecycleStatus, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -116,6 +122,173 @@ func (r *Repository) ListSessions(ctx context.Context, salonID string, ownerUser
 		items = append(items, *item)
 	}
 	return items, rows.Err()
+}
+
+func (r *Repository) ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int) ([]WebhookEventLog, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT v.id::text, v.provider, COALESCE(v.provider_call_id, ''), v.event_type, v.payload, v.created_at
+		FROM call_sessions cs
+		JOIN salons salon ON salon.id = cs.salon_id
+		JOIN voice_webhook_events v ON (
+			v.call_session_id = cs.id
+			OR (
+				v.call_session_id IS NULL
+				AND v.provider = cs.provider
+				AND v.provider_call_id = cs.provider_call_id
+			)
+		)
+		WHERE cs.id = $1
+		  AND cs.salon_id = $2
+		  AND salon.owner_user_id = $3
+		  AND v.event_type IN ('realtime_connected', 'realtime_failed', 'realtime_stopped')
+		ORDER BY v.created_at ASC
+		LIMIT $4
+	`, sessionID, salonID, ownerUserID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]WebhookEventLog, 0)
+	found := false
+	for rows.Next() {
+		item, err := scanWebhookEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		found = true
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if found {
+		return items, nil
+	}
+
+	// Distinguish "no events yet" from "the session is not owned by this user".
+	if _, err := r.GetSessionForOwner(ctx, salonID, ownerUserID, sessionID); err != nil {
+		return nil, err
+	}
+	return []WebhookEventLog{}, nil
+}
+
+func (r *Repository) ArchiveSession(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error) {
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE call_sessions cs
+		SET lifecycle_status = $1,
+		    archived_at = COALESCE(cs.archived_at, now()),
+		    updated_at = now()
+		FROM salons salon
+		WHERE cs.id = $2
+		  AND cs.salon_id = $3
+		  AND salon.id = cs.salon_id
+		  AND salon.owner_user_id = $4
+		  AND cs.lifecycle_status <> $5
+	`, LifecycleArchived, sessionID, salonID, ownerUserID, LifecycleRedacted)
+	if err != nil {
+		return nil, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if affected == 0 {
+		session, getErr := r.GetSessionForOwner(ctx, salonID, ownerUserID, sessionID)
+		if getErr != nil {
+			return nil, getErr
+		}
+		if session.LifecycleStatus == LifecycleRedacted {
+			return nil, ErrLifecycle
+		}
+		return session, nil
+	}
+	return r.GetSessionForOwner(ctx, salonID, ownerUserID, sessionID)
+}
+
+func (r *Repository) RedactSession(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	session, err := scanSession(tx.QueryRowContext(ctx, sessionSelect()+`
+		WHERE cs.id = $1
+		  AND cs.salon_id = $2
+		  AND salon.owner_user_id = $3
+		FOR UPDATE OF cs
+	`, sessionID, salonID, ownerUserID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if session.LifecycleStatus == LifecycleRedacted {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return r.GetSessionForOwner(ctx, salonID, ownerUserID, sessionID)
+	}
+	if session.Status == StatusActive {
+		return nil, ErrLifecycle
+	}
+	if err := redactSessionInTx(ctx, tx, sessionID, salonID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return r.GetSessionForOwner(ctx, salonID, ownerUserID, sessionID)
+}
+
+func (r *Repository) RedactExpiredSessions(ctx context.Context, limit int) (int, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id::text, salon_id::text
+		FROM call_sessions
+		WHERE lifecycle_status <> $1
+		  AND retention_expires_at <= now()
+		ORDER BY retention_expires_at ASC
+		LIMIT $2
+		FOR UPDATE SKIP LOCKED
+	`, LifecycleRedacted, clampRetentionLimit(limit))
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	type expiredSession struct {
+		id      string
+		salonID string
+	}
+	items := make([]expiredSession, 0)
+	for rows.Next() {
+		var item expiredSession
+		if err := rows.Scan(&item.id, &item.salonID); err != nil {
+			return 0, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	for _, item := range items {
+		if err := redactSessionInTx(ctx, tx, item.id, item.salonID); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(items), nil
 }
 
 func (r *Repository) ListBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error) {
@@ -232,8 +405,9 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session,
 		WHERE cs.id = $1
 		  AND cs.salon_id = $2
 		  AND s.owner_user_id = $3
+		  AND cs.lifecycle_status <> $4
 		FOR UPDATE
-	`, record.Session.ID, record.SalonID, record.OwnerUserID).Scan(&lockedID); err != nil {
+	`, record.Session.ID, record.SalonID, record.OwnerUserID, LifecycleRedacted).Scan(&lockedID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -418,6 +592,130 @@ func (r *Repository) latestHandoff(ctx context.Context, sessionID string) (*Hand
 	return &item, nil
 }
 
+type sqlExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func redactSessionInTx(ctx context.Context, execer sqlExecer, sessionID string, salonID string) error {
+	if _, err := execer.ExecContext(ctx, `
+		UPDATE call_sessions
+		SET lifecycle_status = $1,
+		    redacted_at = COALESCE(redacted_at, now()),
+		    customer_name = NULL,
+		    customer_phone = NULL,
+		    customer_email = NULL,
+		    inbound_phone = NULL,
+		    outbound_phone = NULL,
+		    summary = CASE WHEN summary IS NULL THEN NULL ELSE $2 END,
+		    offered_slots = '[]'::jsonb,
+		    updated_at = now()
+		WHERE id = $3
+		  AND salon_id = $4
+	`, LifecycleRedacted, redactedSummaryBody, sessionID, salonID); err != nil {
+		return err
+	}
+	if _, err := execer.ExecContext(ctx, `
+		UPDATE call_transcript_messages
+		SET body = $1,
+		    metadata = jsonb_build_object('redacted', true)
+		WHERE session_id = $2
+		  AND salon_id = $3
+	`, redactedTranscriptBody, sessionID, salonID); err != nil {
+		return err
+	}
+	if _, err := execer.ExecContext(ctx, `
+		UPDATE handoff_requests
+		SET customer_name = NULL,
+		    customer_phone = NULL,
+		    summary = $1
+		WHERE call_session_id = $2
+		  AND salon_id = $3
+	`, redactedSummaryBody, sessionID, salonID); err != nil {
+		return err
+	}
+	if _, err := execer.ExecContext(ctx, `
+		UPDATE voice_webhook_events
+		SET payload = jsonb_build_object('redacted', true)
+		WHERE call_session_id = $1
+	`, sessionID); err != nil {
+		return err
+	}
+	if _, err := execer.ExecContext(ctx, `
+		DELETE FROM voice_audio_outputs
+		WHERE call_session_id = $1
+	`, sessionID); err != nil {
+		return err
+	}
+	return nil
+}
+
+type webhookEventScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanWebhookEvent(scanner webhookEventScanner) (WebhookEventLog, error) {
+	var item WebhookEventLog
+	var payload []byte
+	if err := scanner.Scan(
+		&item.ID,
+		&item.Provider,
+		&item.ProviderCallID,
+		&item.EventType,
+		&payload,
+		&item.CreatedAt,
+	); err != nil {
+		return item, err
+	}
+	applyWebhookPayload(&item, payload)
+	return item, nil
+}
+
+func applyWebhookPayload(item *WebhookEventLog, raw []byte) {
+	if item == nil || len(raw) == 0 {
+		return
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return
+	}
+	if boolPayload(payload, "redacted") {
+		item.Redacted = true
+		return
+	}
+	item.Stage = stringPayload(payload, "stage", "Stage")
+	item.StreamSID = stringPayload(payload, "stream_sid", "StreamSid")
+	item.StreamEvent = stringPayload(payload, "StreamEvent", "stream_event")
+	item.StreamError = stringPayload(payload, "StreamError", "stream_error")
+	item.Error = stringPayload(payload, "error", "Error")
+}
+
+func stringPayload(payload map[string]any, keys ...string) string {
+	for _, key := range keys {
+		value, ok := payload[key]
+		if !ok {
+			continue
+		}
+		if text, ok := value.(string); ok {
+			return strings.TrimSpace(text)
+		}
+	}
+	return ""
+}
+
+func boolPayload(payload map[string]any, key string) bool {
+	value, ok := payload[key]
+	if !ok {
+		return false
+	}
+	if flag, ok := value.(bool); ok {
+		return flag
+	}
+	if text, ok := value.(string); ok {
+		return strings.EqualFold(strings.TrimSpace(text), "true")
+	}
+	return false
+}
+
 func sessionSelect() string {
 	return `
 		SELECT cs.id::text, cs.salon_id::text, cs.channel,
@@ -432,6 +730,7 @@ func sessionSelect() string {
 		       COALESCE(cs.booking_segments, '[]'::jsonb),
 		       COALESCE(cs.booking_attempt_id::text, ''),
 		       COALESCE(cs.appointment_id::text, ''), COALESCE(cs.summary, ''),
+		       cs.lifecycle_status, cs.archived_at, cs.redacted_at, cs.retention_expires_at,
 		       cs.started_at, cs.ended_at, cs.created_at, cs.updated_at
 		FROM call_sessions cs
 		JOIN salons salon ON salon.id = cs.salon_id
@@ -448,6 +747,8 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 	var item Session
 	var requestedStartAt sql.NullTime
 	var endedAt sql.NullTime
+	var archivedAt sql.NullTime
+	var redactedAt sql.NullTime
 	var offeredSlots []byte
 	var bookingSegments []byte
 	if err := scanner.Scan(
@@ -475,6 +776,10 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 		&item.BookingAttemptID,
 		&item.AppointmentID,
 		&item.Summary,
+		&item.LifecycleStatus,
+		&archivedAt,
+		&redactedAt,
+		&item.RetentionExpiresAt,
 		&item.StartedAt,
 		&endedAt,
 		&item.CreatedAt,
@@ -497,6 +802,15 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 	}
 	if item.StaffSelectionMode == "" {
 		item.StaffSelectionMode = booking.StaffSelectionSpecific
+	}
+	if item.LifecycleStatus == "" {
+		item.LifecycleStatus = LifecycleActive
+	}
+	if archivedAt.Valid {
+		item.ArchivedAt = &archivedAt.Time
+	}
+	if redactedAt.Valid {
+		item.RedactedAt = &redactedAt.Time
 	}
 	if endedAt.Valid {
 		item.EndedAt = &endedAt.Time

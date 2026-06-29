@@ -158,14 +158,15 @@ type IncomingCallRequest struct {
 }
 
 type SpeechTurnRequest struct {
-	Provider         string
-	ProviderCallID   string
-	FromPhone        string
-	ToPhone          string
-	SpeechText       string
-	Audio            []byte
-	AudioContentType string
-	Payload          map[string]string
+	Provider          string
+	ProviderCallID    string
+	FromPhone         string
+	ToPhone           string
+	SpeechText        string
+	Audio             []byte
+	AudioContentType  string
+	InputModeOverride string
+	Payload           map[string]string
 }
 
 type CallReply struct {

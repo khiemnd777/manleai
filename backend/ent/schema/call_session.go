@@ -36,6 +36,12 @@ func (CallSession) Fields() []ent.Field {
 		field.UUID("booking_attempt_id", uuid.UUID{}).Optional().Nillable(),
 		field.UUID("appointment_id", uuid.UUID{}).Optional().Nillable(),
 		field.String("summary").Optional(),
+		field.String("lifecycle_status").Default("active"),
+		field.Time("archived_at").Optional().Nillable(),
+		field.Time("redacted_at").Optional().Nillable(),
+		field.Time("retention_expires_at").Default(func() time.Time {
+			return time.Now().UTC().Add(90 * 24 * time.Hour)
+		}),
 		field.Time("started_at").Default(time.Now),
 		field.Time("ended_at").Optional().Nillable(),
 		field.Time("created_at").Default(time.Now),
