@@ -1,11 +1,14 @@
 ---
 name: salon-dashboard-ui
-description: Build or review the Next.js salon owner dashboard UI. Use when editing frontend dashboard pages, onboarding, integrations, settings, service/staff tables, booking test UI, AI simulator, or landing page.
+description: Build or review the Next.js salon owner dashboard UI. Use when editing frontend dashboard pages, onboarding, integrations, settings, service/staff tables, booking test UI, AI simulator, configuration transfer, public catalog settings, billing gates, or landing page handoffs.
 ---
 
 # Salon Dashboard UI
 
-Use this skill for frontend work in `frontend/`.
+Use this skill for owner-dashboard work in `frontend/`. For the separate
+customer-facing `landing/` app, still preserve the POS-first confirmation
+boundary and public-safe catalog rules from `docs/architecture.md` and
+`docs/api.md`.
 
 ## Codebase Truth Rule
 
@@ -18,7 +21,7 @@ Use this skill for frontend work in `frontend/`.
 
 - Build dashboard behavior as production-grade pilot UI, not MVP, demo, prototype, or happy-path scaffolding.
 - Before proposing or implementing, check double-click/repeated-submit behavior, idempotency, duplicate prevention, retry/rerun semantics, stale data, conflict handling, tenant/security/privacy boundaries, and loading/empty/error/success/disabled states.
-- For export/import, sync, booking, integration, or AI training controls, surface safe statuses and backend contract assumptions instead of implying unsupported behavior.
+- For export/import, sync, booking, integration, provider switching, public catalog, billing, or AI training controls, surface safe statuses and backend contract assumptions instead of implying unsupported behavior.
 - Do not mark UI work complete until predictable edge cases are handled, safely gated, explicitly out of scope with a reason, or called out as a blocker.
 
 ## Product Experience
@@ -55,6 +58,8 @@ Every production page needs:
 - Do not hard-code operational data as the main behavior.
 - Do not claim AI booking is enabled until backend gate checks exist and pass.
 - Use exact POS-first wording: "Square Appointments" for current integration, "adapter architecture" for future providers.
+- Public catalog UI must never expose staff contact details, POS IDs, sync errors,
+  owner identifiers, provider tokens, or web booking confirmation claims.
 
 ## Validation
 

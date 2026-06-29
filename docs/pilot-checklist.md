@@ -92,3 +92,37 @@
 - [x] Return matched knowledge, preview reply, outcome, booking action, and POS confirmation boundary.
 - [x] Add AI Training dashboard panel for testing sample customer questions.
 - [x] Keep unsafe confirmation wording guarded by Square Appointments confirmation requirements.
+
+## Canonical POS Ownership And Provider Switch Gates
+
+- [x] Add durable `pos_entity_links` and sync status fields for canonical services, staff, and customers.
+- [x] Add local create/update/archive flows for services, staff, and customers while keeping local-only or unmapped records out of booking.
+- [x] Add capability-gated `pos_sync_jobs` with worker processing, sync logs, POS errors, and duplicate open-job prevention.
+- [x] Add `salons.active_pos_provider` as the active booking/readiness source of truth.
+- [x] Add provider switch readiness, switch run persistence, service/staff/customer match review, dry-run readiness, and gated import wizard shell.
+- [x] Keep provider switch import, dry-run, and activation disabled while Square Appointments is the only native POS adapter.
+- [ ] Enable executable alternate-provider import, dry-run, and activation only after a real alternate adapter exists.
+
+## Public Catalog And Landing App
+
+- [x] Add owner-managed public catalog settings and publish readiness.
+- [x] Add unauthenticated public-safe catalog APIs for first published salon and slug lookup.
+- [x] Add separate `landing/` Next.js app for public salon pages.
+- [x] Keep public pages call-to-book only; no web booking attempt is presented as confirmed.
+- [x] Avoid exposing staff contact details, POS IDs, sync errors, owner identifiers, or provider tokens.
+
+## Configuration Transfer
+
+- [x] Add sanitized owner-scoped configuration export with stable schema version.
+- [x] Exclude services, staff, customers, appointments, call sessions, transcripts, POS OAuth tokens, API keys, client secrets, encrypted secrets, and operational records.
+- [x] Add import preview and apply flows for existing salons and onboarding.
+- [x] Use request IDs for repeated import applies so retries do not create duplicate import runs.
+- [x] Gate live `ai_enabled`, confirmed booking mode, and public catalog publishing until Square Appointments readiness passes on the target salon.
+
+## Call Lifecycle Retention And Realtime Streams
+
+- [x] Add call session lifecycle filters for active, archived, and redacted sessions.
+- [x] Add idempotent archive and irreversible redaction actions with active-session conflict gates.
+- [x] Add worker-driven 90-day retention redaction for expired active sessions.
+- [x] Clear customer PII, transcript bodies, handoff summaries, webhook payloads, and temporary voice audio while preserving booking/handoff/provider-call audit links.
+- [x] Add Twilio Media Streams and OpenAI Realtime adapter path with completed transcripts routed back through the same conversation engine and booking service.

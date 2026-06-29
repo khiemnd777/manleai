@@ -2,13 +2,13 @@
 
 ## Current Milestone
 
-This codebase implements Milestone 1, Milestone 2, Milestone 3 booking safety, the Milestone 4 deterministic conversation simulator, the Milestone 5 live telephony webhook foundation, the Milestone 6 external AI voice provider layer, and the first Milestone 7A salon knowledge/training slice for the AI Receptionist system.
+This codebase implements Milestone 1, Milestone 2, Milestone 3 booking safety, the Milestone 4 deterministic conversation simulator, the Milestone 5 live telephony webhook foundation, the Milestone 6 external AI voice provider layer, the Milestone 7A-7C salon knowledge/training slices, canonical POS ownership/provider-switch gates, configuration transfer, public catalog publishing, and call lifecycle retention for the AI Receptionist system.
 
 The backend is organized as:
 
 ```txt
 cmd/api              Fiber HTTP server
-cmd/worker           POS sync job worker entrypoint
+cmd/worker           POS sync job and call retention worker entrypoint
 internal/config      environment config
 internal/database    PostgreSQL connection bootstrap and startup migrations
 internal/encryption  AES-GCM token encryption
@@ -21,6 +21,7 @@ modules/public_catalog public-safe salon catalog read API
 modules/booking      booking attempts, appointments, and fallback pending safety
 modules/customer     canonical customer CRUD, activity read model, and POS lookup facade
 modules/integration_config encrypted salon-scoped provider app credentials and runtime settings
+modules/config_transfer safe salon configuration export/import previews and applies
 modules/conversation deterministic simulator sessions, transcripts, summaries, and handoffs
 modules/training     salon-authored knowledge base and owner corrections
 modules/voice        provider-neutral live voice runtime, status, routing, and webhook event audit
@@ -35,7 +36,8 @@ app/                 Next.js routes
 components/ui        reusable UI primitives
 components/layout    dashboard shell
 features/auth        login flow
-features/dashboard   dashboard home, appointments, customers, services/staff controls, calls dashboard, AI training
+features/configuration-transfer export/import preview helpers and onboarding import UI
+features/dashboard   dashboard home, appointments, calls, customers, services/staff controls, settings, billing gate, AI training
 features/integrations Square integration page
 features/onboarding salon profile creation
 lib/api              typed API client
@@ -109,7 +111,7 @@ fallback configuration for infrastructure, JWT, CORS, encryption, and legacy
 developer setup; dashboard-saved provider configuration takes precedence for a
 salon.
 
-The Milestone 7 training layer stores owner-authored salon knowledge and corrections as salon-scoped data. Conversation runtime may read active knowledge as advisory context for FAQ and policy answers, and training evaluation previews can test active knowledge without creating call sessions or bookings. Knowledge never replaces the booking service or POS confirmation checks.
+The Milestone 7 training layer stores owner-authored salon knowledge and corrections as salon-scoped data. Conversation runtime may read active knowledge as advisory context for FAQ and policy answers, transcript-linked corrections can be reviewed into reusable knowledge, and training evaluation previews can test active knowledge without creating call sessions or bookings. Knowledge never replaces the booking service or POS confirmation checks.
 
 Call sessions are operational records, not an unbounded owner-facing inbox. The Calls dashboard defaults to active sessions and supports archived and redacted lifecycle filters. Active lifecycle sessions carry a 90-day retention timestamp; the worker redacts expired sessions by clearing customer PII, transcript bodies, handoff summaries, webhook payloads, and temporary voice audio while preserving booking, handoff, provider call, outcome, and timestamp audit links. Manual redaction is irreversible from the dashboard and is blocked while a session is active.
 
@@ -119,9 +121,14 @@ customer to call for an appointment. They never expose staff contact details,
 POS IDs, provider tokens, sync errors, or owner identifiers, and they must not
 present a web booking as confirmed.
 
+Configuration transfer exports sanitized setup data only. Import previews and
+applies use stable request IDs, skip secrets and operational records, and must
+not recreate services, staff, customers, appointments, POS tokens, call
+sessions, transcripts, or provider-side state.
+
 ## Next Milestone
 
-The next Milestone 7 slices should deepen owner approval loops without changing the POS-first confirmation boundary.
+The next slices should deepen owner approval loops and production readiness without changing the POS-first confirmation boundary.
 
 ## Data Ownership
 

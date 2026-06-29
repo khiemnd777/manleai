@@ -5,7 +5,8 @@ description: Design or implement AI receptionist, conversation engine, telephony
 
 # Voice AI Runtime
 
-Use this skill for Milestone 4 and Milestone 5 work.
+Use this skill for conversation, telephony, external AI provider, realtime stream,
+transcript, handoff, call lifecycle, and voice booking work across Milestone 4+.
 
 ## Codebase Truth Rule
 
@@ -27,7 +28,10 @@ Use this skill for Milestone 4 and Milestone 5 work.
 - Booking tools call Booking Service.
 - Booking Service calls `POSProvider`.
 - AI runtime must not call Square or read POS tokens.
-- Telephony, SMS, STT, LLM, and TTS must be provider abstractions.
+- Telephony, SMS, STT, LLM, TTS, and realtime audio must be provider abstractions.
+- Call archive, redaction, retention, and temporary audio outputs must preserve
+  audit links while clearing customer PII and transcript/audio content when
+  lifecycle rules require it.
 
 ## Conversation Rules
 
@@ -45,3 +49,5 @@ Use this skill for Milestone 4 and Milestone 5 work.
 3. Implement a deterministic simulator before live telephony.
 4. Add tests for state transitions and fallback text.
 5. Wire Twilio/OpenAI/provider specifics behind adapters only.
+6. For realtime, retention, or audio-output changes, verify replay/idempotency,
+   signature checks, lifecycle gates, expiration, and redaction behavior.

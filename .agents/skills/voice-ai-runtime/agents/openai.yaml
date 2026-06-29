@@ -1,3 +1,4 @@
-display_name: Voice AI Runtime
-short_description: Build product-grade AI receptionist and voice provider abstractions without leaking POS details.
-default_prompt: Use this skill when implementing conversation, telephony, SMS, transcript, handoff, or AI runtime behavior with replay safety, idempotency, duplicate prevention, and safe fallback states.
+interface:
+  display_name: "Voice AI Runtime"
+  short_description: "Build AI receptionist and voice provider abstractions"
+  default_prompt: "Use $voice-ai-runtime when implementing conversation, telephony, SMS, transcript, handoff, realtime, retention, or AI runtime behavior with replay safety, idempotency, duplicate prevention, and safe fallback states."

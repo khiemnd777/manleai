@@ -1,3 +1,4 @@
-display_name: Booking Safety TDD
-short_description: Implement booking operations with test-first POS confirmation and idempotency safety.
-default_prompt: Use this skill for Milestone 3 booking behavior so confirmed appointments require POS provider success and repeated execution cannot create duplicate or misleading records.
+interface:
+  display_name: "Booking Safety TDD"
+  short_description: "Implement booking operations with test-first POS confirmation and idempotency safety"
+  default_prompt: "Use $booking-safety-tdd for booking behavior so confirmed appointments require POS provider success and repeated execution cannot create duplicate or misleading records."

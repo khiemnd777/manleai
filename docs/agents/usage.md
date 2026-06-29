@@ -29,7 +29,19 @@ Use $booking-safety-tdd to implement test booking creation and cancellation.
 ```
 
 ```txt
-Use $pilot-release-review to review this branch for Milestone 2 readiness.
+Use $pilot-release-review to review this branch for pilot readiness.
+```
+
+```txt
+Use $business-analysis to turn this workflow idea into requirements, acceptance criteria, and edge cases.
+```
+
+```txt
+Use $business-logic-overlap-analysis to check whether this change collides with booking, POS sync, voice, or dashboard gates.
+```
+
+```txt
+Use $salon-ops-workflow to analyze the owner/caller workflow before changing dashboard or AI behavior.
 ```
 
 ## Subagents
@@ -47,7 +59,7 @@ Review this dashboard change with frontend_product_reviewer and security_privacy
 ```
 
 ```txt
-Have pilot_release_planner split Milestone 3 into vertical slices with acceptance criteria and tests.
+Have pilot_release_planner split the next approval-loop slice into vertical backend, frontend, docs, and test work.
 ```
 
 ## Maintenance

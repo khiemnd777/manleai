@@ -18,7 +18,7 @@ The product rule is strict: never confirm an appointment unless the active POS p
 
 ## Repository Layout
 
-- `backend/`: Go/Fiber API, PostgreSQL persistence, Flyway migrations, Ent schemas, domain modules.
+- `backend/`: Go/Fiber API, PostgreSQL persistence, startup SQL migrations, Ent schemas, domain modules.
 - `frontend/`: Next.js TypeScript admin UI.
 - `docs/`: architecture, integration, deployment, testing, and agent guidance.
 - `.agents/skills/`: repo-local Codex skills for repeatable workflows.
@@ -79,7 +79,7 @@ For UI-changing requests, the Mockup as Text must include:
 - Keep Square-specific auth, payloads, API URLs, error mapping, and token handling inside `backend/modules/pos_square`.
 - Store POS tokens encrypted only. Never expose raw or encrypted POS tokens to the frontend.
 - Enforce tenant ownership by `salon_id` before returning or mutating salon-scoped data.
-- Add Flyway migrations for schema changes and keep Ent schemas aligned.
+- Add SQL migrations under `backend/migrations` for schema changes and keep Ent schemas aligned.
 - Use transactions for booking, appointment, POS attempt, notification, and audit-log writes.
 
 ## Frontend Rules
@@ -112,8 +112,10 @@ npm run build
 Local services:
 
 ```bash
-docker compose up -d postgres redis flyway
+docker compose up -d postgres redis
 ```
+
+The API and worker run the embedded startup migrator when `AUTO_MIGRATE=true`.
 
 ## Change Discipline
 

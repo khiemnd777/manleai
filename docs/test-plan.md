@@ -117,6 +117,44 @@
 - Verify evaluation never creates a call session, transcript, booking attempt, appointment, or POS call.
 - Verify the AI Training dashboard handles evaluating, no-match, matched, error, and mobile states.
 
+## Canonical POS Ownership And Provider Switch Gates
+
+- Verify `pos_entity_links` backfills existing Square service/staff mappings and keeps provider IDs as mappings, not primary identity.
+- Verify services, staff, and customers can be created, updated, and archived locally with owner-scoped APIs.
+- Verify local-only, unmapped, archived, inactive, or sync-failed services/staff cannot be used for availability, booking, or AI bookable enablement.
+- Verify repeated service/staff writes create at most one open `pos_sync_jobs` row per salon/provider/entity/operation.
+- Verify unsupported provider writes stay gated, record visible sync status, and do not mark local records as synced.
+- Verify provider switch readiness reports Square Appointments as the only installed provider and keeps alternate import, dry-run, and activation disabled.
+- Verify provider switch run creation for an unavailable target persists a blocked run without creating provider links or activating a provider.
+- Verify match review changes are owner-scoped, recompute review state, and never activate a provider.
+- Verify dry-run readiness remains false until a real target adapter and executable dry-run path exist.
+
+## Public Catalog And Landing App
+
+- Verify public catalog settings are owner-scoped and slug uniqueness is enforced.
+- Verify `GET /api/public/salon` and `GET /api/public/salons/:slug` return only published, public-safe data.
+- Verify public responses exclude staff contact details, POS IDs, provider tokens, sync errors, and owner identifiers.
+- Verify the landing app renders loading, not-found, unpublished, and published states without creating booking attempts.
+- Verify public copy stays call-to-book and never claims a web appointment is confirmed.
+
+## Configuration Transfer
+
+- Verify configuration export returns schema version, exported timestamp, excluded data, and secret re-entry requirements.
+- Verify export never includes services, staff, customers, appointments, booking attempts, call sessions, transcripts, POS OAuth tokens, API keys, client secrets, encrypted secrets, or operational records.
+- Verify import preview is dry-run only and reports creates, updates, skips, conflicts, and gated live states without writing records.
+- Verify import apply uses `request_id` idempotency so repeated applies do not create duplicate import runs or duplicate knowledge items.
+- Verify onboarding import can create a salon from a valid bundle but still skips secrets and readiness-gated live states.
+- Verify import refuses schema versions or malformed bundles that would break contract stability.
+
+## Call Lifecycle Retention And Realtime Streams
+
+- Verify conversation list defaults to active sessions and supports `lifecycle_status=active|archived|redacted`.
+- Verify archive is idempotent and keeps transcript text available until retention redaction.
+- Verify redaction rejects active sessions, is irreversible, clears customer PII/transcripts/handoff summaries/webhook payloads/audio, and preserves booking/handoff/provider-call audit links.
+- Verify the worker redacts expired sessions according to `retention_expires_at` without touching non-expired active sessions.
+- Verify realtime stream status/fallback events are recorded without leaking raw provider payloads or secrets.
+- Verify completed realtime transcripts enter the same conversation engine and booking service and cannot confirm without POS success.
+
 ## Regression Guardrails
 
 - Booking services must import `modules/pos`, not `modules/pos_square`.

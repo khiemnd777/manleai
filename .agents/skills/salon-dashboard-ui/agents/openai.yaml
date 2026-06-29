@@ -1,3 +1,4 @@
-display_name: Salon Dashboard UI
-short_description: Build polished, operational product-grade Next.js dashboard flows for salon owners.
-default_prompt: Use this skill to implement or review frontend dashboard pages with complete UI states, repeated-action safety, idempotency assumptions, and honest product gating.
+interface:
+  display_name: "Salon Dashboard UI"
+  short_description: "Build operational product-grade dashboard flows for salon owners"
+  default_prompt: "Use $salon-dashboard-ui to implement or review frontend dashboard pages with complete UI states, repeated-action safety, idempotency assumptions, and honest product gating."

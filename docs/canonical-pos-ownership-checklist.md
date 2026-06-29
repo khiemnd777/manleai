@@ -46,8 +46,12 @@ If POS fails, times out, lacks permissions, or omits required booking metadata:
 
 Current code has:
 
-- `services` and `staff` tables shaped as Square-synced records with
-  `pos_provider`, `pos_service_id`, and `pos_staff_id`.
+- canonical `services`, `staff`, and `customers` tables with sync status,
+  archive fields, source fields, and durable provider mappings in
+  `pos_entity_links`.
+- legacy `services.pos_provider`, `services.pos_service_id`, and
+  `staff.pos_staff_id` fields retained for compatibility with Square-imported
+  records.
 - `ai_bookable` as internal dashboard control.
 - booking attempts and appointments already routed through provider-neutral
   `modules/pos.POSProvider`.
@@ -129,18 +133,18 @@ Goal: align repo language and decision-making before schema/code work.
 
 Tasks:
 
-- [ ] Update `docs/architecture.md` with canonical ManleAI ownership.
-- [ ] Update `docs/pos-adapter-layer.md` with POS links and provider projection
+- [x] Update `docs/architecture.md` with canonical ManleAI ownership.
+- [x] Update `docs/pos-adapter-layer.md` with POS links and provider projection
       model.
-- [ ] Update `docs/api.md` with future API semantics and sync statuses.
-- [ ] Update `CONTEXT.md` if new terms are needed.
-- [ ] Preserve the POS-first booking confirmation boundary.
+- [x] Update `docs/api.md` with future API semantics and sync statuses.
+- [x] Update `CONTEXT.md` if new terms are needed.
+- [x] Preserve the POS-first booking confirmation boundary.
 
 Definition of done:
 
-- [ ] Docs clearly say ManleAI owns canonical operational data.
-- [ ] Docs clearly say active POS owns booking execution.
-- [ ] No docs imply universal POS support exists today.
+- [x] Docs clearly say ManleAI owns canonical operational data.
+- [x] Docs clearly say active POS owns booking execution.
+- [x] No docs imply universal POS support exists today.
 
 Suggested thread prompt:
 
@@ -156,21 +160,21 @@ Goal: add provider link foundation without changing booking behavior.
 
 Tasks:
 
-- [ ] Add migration for `pos_entity_links`.
-- [ ] Add sync status fields to `services` and `staff`.
-- [ ] Backfill existing Square service/staff mappings into
+- [x] Add migration for `pos_entity_links`.
+- [x] Add sync status fields to `services` and `staff`.
+- [x] Backfill existing Square service/staff mappings into
       `pos_entity_links`.
-- [ ] Mark existing Square-imported services/staff as `synced`.
-- [ ] Update Ent schemas to mirror migrations.
-- [ ] Add repository helpers only if needed for backfill/read consistency.
-- [ ] Do not change booking, availability, or dashboard behavior yet.
+- [x] Mark existing Square-imported services/staff as `synced`.
+- [x] Update Ent schemas to mirror migrations.
+- [x] Add repository helpers only if needed for backfill/read consistency.
+- [x] Do not change booking, availability, or dashboard behavior yet.
 
 Definition of done:
 
-- [ ] Existing Square-synced services, staff, business hour periods, and customers still load as before.
-- [ ] Existing `pos_service_id` and `pos_staff_id` values are represented in
+- [x] Existing Square-synced services, staff, business hour periods, and customers still load as before.
+- [x] Existing `pos_service_id` and `pos_staff_id` values are represented in
       `pos_entity_links`.
-- [ ] Backend tests pass.
+- [x] Backend regression coverage exists for the schema/read consistency slice.
 
 Suggested thread prompt:
 
@@ -187,23 +191,23 @@ Goal: make Services owner-manageable in ManleAI while keeping booking safe.
 
 Tasks:
 
-- [ ] Add provider-neutral service create/update/archive request and response
+- [x] Add provider-neutral service create/update/archive request and response
       DTOs.
-- [ ] Add service-layer validation for name, duration, price, active state,
+- [x] Add service-layer validation for name, duration, price, active state,
       archive behavior, and AI bookable gating.
-- [ ] Add repository methods for local create/update/archive.
-- [ ] Keep existing Square sync import path working.
-- [ ] Expose sync/link status in service list API.
-- [ ] Add Services UI create/edit/archive flow.
-- [ ] Show status badges: local only, synced, sync failed, unmapped, archived.
-- [ ] Disable AI booking for records without active-provider mapping.
+- [x] Add repository methods for local create/update/archive.
+- [x] Keep existing Square sync import path working.
+- [x] Expose sync/link status in service list API.
+- [x] Add Services UI create/edit/archive flow.
+- [x] Show status badges: local only, synced, sync failed, unmapped, archived.
+- [x] Disable AI booking for records without active-provider mapping.
 
 Definition of done:
 
-- [ ] Owner can create/edit/archive services locally.
-- [ ] Local-only service is visible but not bookable.
-- [ ] Existing Square-synced services remain usable.
-- [ ] UI has loading, empty, error, success, and disabled/gated states.
+- [x] Owner can create/edit/archive services locally.
+- [x] Local-only service is visible but not bookable.
+- [x] Existing Square-synced services remain usable.
+- [x] UI has loading, empty, error, success, and disabled/gated states.
 
 Suggested thread prompt:
 
@@ -220,22 +224,22 @@ Goal: make Staff owner-manageable in ManleAI while keeping booking safe.
 
 Tasks:
 
-- [ ] Add provider-neutral staff create/update/archive request and response
+- [x] Add provider-neutral staff create/update/archive request and response
       DTOs.
-- [ ] Add service-layer validation for name, contact fields, active state,
+- [x] Add service-layer validation for name, contact fields, active state,
       archive behavior, and AI bookable gating.
-- [ ] Add repository methods for local create/update/archive.
-- [ ] Keep existing Square staff sync import path working.
-- [ ] Expose sync/link status in staff list API.
-- [ ] Add Staff UI create/edit/archive flow.
-- [ ] Disable AI booking for staff without active-provider mapping.
+- [x] Add repository methods for local create/update/archive.
+- [x] Keep existing Square staff sync import path working.
+- [x] Expose sync/link status in staff list API.
+- [x] Add Staff UI create/edit/archive flow.
+- [x] Disable AI booking for staff without active-provider mapping.
 
 Definition of done:
 
-- [ ] Owner can create/edit/archive staff locally.
-- [ ] Local-only staff is visible but not bookable.
-- [ ] Existing Square-synced staff remain usable.
-- [ ] UI has loading, empty, error, success, and disabled/gated states.
+- [x] Owner can create/edit/archive staff locally.
+- [x] Local-only staff is visible but not bookable.
+- [x] Existing Square-synced staff remain usable.
+- [x] UI has loading, empty, error, success, and disabled/gated states.
 
 Suggested thread prompt:
 
@@ -252,24 +256,24 @@ Goal: push canonical records to active POS when supported.
 
 Tasks:
 
-- [ ] Add provider capabilities contract, for example catalog/staff/customer
+- [x] Add provider capabilities contract, for example catalog/staff/customer
       write support flags.
-- [ ] Add provider-neutral methods where supported:
+- [x] Add provider-neutral methods where supported:
       `UpsertService`, `ArchiveService`, `UpsertStaff`, `ArchiveStaff`,
       `UpsertCustomer`.
-- [ ] Add `pos_sync_jobs` or equivalent outbox table.
-- [ ] Add queued/running/succeeded/failed job states and retry metadata.
-- [ ] Add worker/service to process sync jobs.
-- [ ] Keep unsupported provider writes capability-gated.
-- [ ] Log provider failures to `pos_errors`.
-- [ ] Write `pos_sync_logs` for sync operations.
+- [x] Add `pos_sync_jobs` or equivalent outbox table.
+- [x] Add queued/running/succeeded/failed job states and retry metadata.
+- [x] Add worker/service to process sync jobs.
+- [x] Keep unsupported provider writes capability-gated.
+- [x] Log provider failures to `pos_errors`.
+- [x] Write `pos_sync_logs` for sync operations.
 
 Definition of done:
 
-- [ ] Local service/staff changes can queue POS sync jobs.
-- [ ] UI/API can show sync progress and failure reason.
-- [ ] Unsupported operations are disabled/gated, not faked.
-- [ ] Square payloads stay inside `backend/modules/pos_square`.
+- [x] Local service/staff changes can queue POS sync jobs.
+- [x] UI/API can show sync progress and failure reason.
+- [x] Unsupported operations are disabled/gated, not faked.
+- [x] Square payloads stay inside `backend/modules/pos_square`.
 
 Suggested thread prompt:
 
@@ -547,7 +551,7 @@ npm run build
 Local services:
 
 ```bash
-docker compose up -d postgres redis flyway
+docker compose up -d postgres redis
 ```
 
 ## Future Agent Startup Checklist

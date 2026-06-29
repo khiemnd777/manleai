@@ -6,6 +6,11 @@ This file is the design, UI, and UX contract for ManleAI agents. Use it before p
 
 The product is an operational SaaS dashboard for nail salon owners, not a marketing site. The UI should help an owner configure the salon, connect Square Appointments, monitor phone receptionist readiness, and understand failures quickly.
 
+The public customer-facing catalog in `landing/` is a separate surface. It can
+use a simpler customer-facing layout, but it must stay public-safe: call-to-book
+only, no confirmed web booking claims, no staff contact details, no POS IDs, no
+sync errors, no owner identifiers, and no provider tokens.
+
 ## Product Experience
 
 - Keep the interface quiet, dense, professional, and fast to scan.

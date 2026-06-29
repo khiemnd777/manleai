@@ -17,6 +17,9 @@ OpenAI's subagent docs say project-scoped custom agents live under `.codex/agent
 - `booking-safety-tdd`: implement booking behavior with test-first confirmation safety.
 - `salon-dashboard-ui`: build polished frontend dashboard flows.
 - `voice-ai-runtime`: implement AI/voice provider abstractions and conversation rules.
+- `business-analysis`: turn ambiguous requests into product requirements and acceptance criteria.
+- `business-logic-overlap-analysis`: find overlapping rules and regression risks before changes.
+- `salon-ops-workflow`: analyze real salon owner/caller/staff workflows before product changes.
 - `pilot-release-review`: review release readiness and scope honesty.
 
 ## Configuration Memos
