@@ -183,10 +183,10 @@ func (a *Adapter) Synthesize(ctx context.Context, salonID string, text string, r
 		return nil, voice.ErrValidation
 	}
 	payload := map[string]any{
-		"model":  strings.TrimSpace(cfg.SpeechModel),
-		"voice":  voiceName,
-		"input":  text,
-		"format": "mp3",
+		"model":           strings.TrimSpace(cfg.SpeechModel),
+		"voice":           voiceName,
+		"input":           text,
+		"response_format": "mp3",
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {

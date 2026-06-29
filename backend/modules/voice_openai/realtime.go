@@ -15,7 +15,8 @@ import (
 	"github.com/manleai/ai-receptionist/modules/voice"
 )
 
-const realtimeAudioFormat = "g711_ulaw"
+const realtimeLegacyAudioFormat = "g711_ulaw"
+const realtimeG711ULawFormat = "audio/pcmu"
 const realtimeReadyTimeout = 5 * time.Second
 
 func (a *Adapter) ConnectRealtime(ctx context.Context, salonID string, opts voice.RealtimeSessionOptions) (voice.RealtimeSession, error) {
@@ -32,10 +33,11 @@ func (a *Adapter) ConnectRealtime(ctx context.Context, salonID string, opts voic
 		return nil, err
 	}
 	session := &realtimeSession{
-		conn:   conn,
-		events: make(chan voice.RealtimeEvent, 128),
-		done:   make(chan struct{}),
-		ready:  make(chan error, 1),
+		conn:           conn,
+		legacyProtocol: realtimeUsesLegacyProtocol(cfg.RealtimeModel),
+		events:         make(chan voice.RealtimeEvent, 128),
+		done:           make(chan struct{}),
+		ready:          make(chan error, 1),
 	}
 	go session.readLoop()
 	if err := session.update(ctx, cfg, opts); err != nil {
@@ -50,13 +52,14 @@ func (a *Adapter) ConnectRealtime(ctx context.Context, salonID string, opts voic
 }
 
 type realtimeSession struct {
-	conn      *websocket.Conn
-	writeMu   sync.Mutex
-	closeOnce sync.Once
-	readyOnce sync.Once
-	events    chan voice.RealtimeEvent
-	done      chan struct{}
-	ready     chan error
+	conn           *websocket.Conn
+	legacyProtocol bool
+	writeMu        sync.Mutex
+	closeOnce      sync.Once
+	readyOnce      sync.Once
+	events         chan voice.RealtimeEvent
+	done           chan struct{}
+	ready          chan error
 }
 
 func (s *realtimeSession) AppendInputAudio(ctx context.Context, base64Audio string) error {
@@ -75,18 +78,7 @@ func (s *realtimeSession) Speak(ctx context.Context, text string) error {
 	if text == "" {
 		return nil
 	}
-	return s.write(ctx, map[string]any{
-		"type": "response.create",
-		"response": map[string]any{
-			"modalities": []string{"audio"},
-			"instructions": strings.Join([]string{
-				"Read this backend-approved phone response exactly as written.",
-				"Do not add, omit, paraphrase, translate, or change any words.",
-				"Response:",
-				text,
-			}, "\n"),
-		},
-	})
+	return s.write(ctx, realtimeResponseCreatePayload(s.legacyProtocol, text))
 }
 
 func (s *realtimeSession) Events() <-chan voice.RealtimeEvent {
@@ -122,27 +114,47 @@ func realtimeSessionConfig(cfg config.OpenAIVoiceConfig, opts voice.RealtimeSess
 			"modalities":                []string{"text", "audio"},
 			"instructions":              realtimeInstructions(opts.Instructions),
 			"voice":                     voiceName,
-			"input_audio_format":        realtimeAudioFormat,
-			"output_audio_format":       realtimeAudioFormat,
+			"input_audio_format":        realtimeLegacyAudioFormat,
+			"output_audio_format":       realtimeLegacyAudioFormat,
 			"input_audio_transcription": map[string]any{"model": strings.TrimSpace(cfg.TranscriptionModel)},
 			"turn_detection":            realtimeTurnDetection(),
 		}
 	}
 	return map[string]any{
-		"type":         "realtime",
-		"modalities":   []string{"text", "audio"},
-		"instructions": realtimeInstructions(opts.Instructions),
+		"type":              "realtime",
+		"output_modalities": []string{"audio"},
+		"instructions":      realtimeInstructions(opts.Instructions),
 		"audio": map[string]any{
 			"input": map[string]any{
-				"format":         map[string]any{"type": realtimeAudioFormat},
+				"format":         map[string]any{"type": realtimeG711ULawFormat},
 				"transcription":  map[string]any{"model": strings.TrimSpace(cfg.TranscriptionModel)},
 				"turn_detection": realtimeTurnDetection(),
 			},
 			"output": map[string]any{
-				"format": map[string]any{"type": realtimeAudioFormat},
+				"format": map[string]any{"type": realtimeG711ULawFormat},
 				"voice":  voiceName,
 			},
 		},
+	}
+}
+
+func realtimeResponseCreatePayload(legacyProtocol bool, text string) map[string]any {
+	response := map[string]any{
+		"instructions": strings.Join([]string{
+			"Read this backend-approved phone response exactly as written.",
+			"Do not add, omit, paraphrase, translate, or change any words.",
+			"Response:",
+			strings.TrimSpace(text),
+		}, "\n"),
+	}
+	if legacyProtocol {
+		response["modalities"] = []string{"audio"}
+	} else {
+		response["output_modalities"] = []string{"audio"}
+	}
+	return map[string]any{
+		"type":     "response.create",
+		"response": response,
 	}
 }
 

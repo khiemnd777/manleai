@@ -83,6 +83,25 @@ func TestSynthesizeReturnsAudioBytes(t *testing.T) {
 		if r.URL.Path != "/v1/audio/speech" {
 			t.Fatalf("path = %s, want /v1/audio/speech", r.URL.Path)
 		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode speech payload: %v", err)
+		}
+		if got := payload["model"]; got != "speech-test" {
+			t.Fatalf("model = %#v, want speech-test", got)
+		}
+		if got := payload["voice"]; got != "alloy" {
+			t.Fatalf("voice = %#v, want alloy", got)
+		}
+		if got := payload["input"]; got != "How can I help?" {
+			t.Fatalf("input = %#v, want request text", got)
+		}
+		if got := payload["response_format"]; got != "mp3" {
+			t.Fatalf("response_format = %#v, want mp3", got)
+		}
+		if _, ok := payload["format"]; ok {
+			t.Fatalf("speech payload should not include deprecated format key: %#v", payload)
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"audio/mpeg"}},
@@ -153,6 +172,12 @@ func TestRealtimeSessionConfigUsesGAShapeForRealtimeModel(t *testing.T) {
 	}
 	session := realtimeSessionConfig(cfg, voice.RealtimeSessionOptions{})
 
+	if _, ok := session["modalities"]; ok {
+		t.Fatalf("GA realtime session should not include legacy modalities: %#v", session)
+	}
+	if outputModalities, ok := session["output_modalities"].([]string); !ok || len(outputModalities) != 1 || outputModalities[0] != "audio" {
+		t.Fatalf("GA realtime session should include audio output_modalities: %#v", session)
+	}
 	audio, ok := session["audio"].(map[string]any)
 	if !ok {
 		t.Fatalf("GA realtime session should use nested audio shape: %#v", session)
@@ -161,14 +186,55 @@ func TestRealtimeSessionConfigUsesGAShapeForRealtimeModel(t *testing.T) {
 	if !ok {
 		t.Fatalf("GA realtime session should include audio.input: %#v", session)
 	}
-	if _, ok := input["format"].(map[string]any); !ok {
+	inputFormat, ok := input["format"].(map[string]any)
+	if !ok {
 		t.Fatalf("GA realtime session should include structured input format: %#v", session)
+	}
+	if inputFormat["type"] != "audio/pcmu" {
+		t.Fatalf("GA realtime session input format = %#v, want audio/pcmu", inputFormat["type"])
+	}
+	output, ok := audio["output"].(map[string]any)
+	if !ok {
+		t.Fatalf("GA realtime session should include audio.output: %#v", session)
+	}
+	outputFormat, ok := output["format"].(map[string]any)
+	if !ok {
+		t.Fatalf("GA realtime session should include structured output format: %#v", session)
+	}
+	if outputFormat["type"] != "audio/pcmu" {
+		t.Fatalf("GA realtime session output format = %#v, want audio/pcmu", outputFormat["type"])
 	}
 	if _, ok := session["input_audio_format"]; ok {
 		t.Fatalf("GA realtime session should not use legacy input_audio_format shape: %#v", session)
 	}
 	if realtimeHeaders(cfg).Get("OpenAI-Beta") != "" {
 		t.Fatalf("GA realtime headers should not include beta header")
+	}
+}
+
+func TestRealtimeResponseCreatePayloadUsesProtocolShape(t *testing.T) {
+	ga := realtimeResponseCreatePayload(false, "Hello.")
+	gaResponse, ok := ga["response"].(map[string]any)
+	if !ok {
+		t.Fatalf("GA response.create payload missing response: %#v", ga)
+	}
+	if _, ok := gaResponse["modalities"]; ok {
+		t.Fatalf("GA response.create should not include legacy modalities: %#v", gaResponse)
+	}
+	if outputModalities, ok := gaResponse["output_modalities"].([]string); !ok || len(outputModalities) != 1 || outputModalities[0] != "audio" {
+		t.Fatalf("GA response.create should include audio output_modalities: %#v", gaResponse)
+	}
+
+	legacy := realtimeResponseCreatePayload(true, "Hello.")
+	legacyResponse, ok := legacy["response"].(map[string]any)
+	if !ok {
+		t.Fatalf("legacy response.create payload missing response: %#v", legacy)
+	}
+	if modalities, ok := legacyResponse["modalities"].([]string); !ok || len(modalities) != 1 || modalities[0] != "audio" {
+		t.Fatalf("legacy response.create should include audio modalities: %#v", legacyResponse)
+	}
+	if _, ok := legacyResponse["output_modalities"]; ok {
+		t.Fatalf("legacy response.create should not include GA output_modalities: %#v", legacyResponse)
 	}
 }
 
