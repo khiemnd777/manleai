@@ -3,12 +3,15 @@ package voice
 import (
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 
 	"github.com/manleai/ai-receptionist/modules/conversation"
 )
 
 var errUnsafeReply = errors.New("voice reply failed guardrails")
+
+var replyClockReferencePattern = regexp.MustCompile(`(?i)\b(?:\d{1,2}(?::\d{2})?\s*(?:a\.?\s*m\.?|p\.?\s*m\.?)|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?:a\.?\s*m\.?|p\.?\s*m\.?))(?:$|[^a-z0-9])`)
 
 type GuardedReplyGenerator struct {
 	provider LanguageModelProvider
@@ -106,7 +109,8 @@ func asksForBookingField(message string, field string) bool {
 			strings.Contains(lower, "when do you want")
 	case "requested_start_time", "requested_time":
 		return strings.Contains(lower, "what time") ||
-			strings.Contains(lower, "which time")
+			strings.Contains(lower, "which time") ||
+			asksToConfirmClock(lower)
 	case "customer_name":
 		return strings.Contains(lower, "what name") ||
 			strings.Contains(lower, "name should")
@@ -120,6 +124,16 @@ func asksForBookingField(message string, field string) bool {
 	default:
 		return false
 	}
+}
+
+func asksToConfirmClock(message string) bool {
+	if !replyClockReferencePattern.MatchString(message) {
+		return false
+	}
+	return (strings.Contains(message, "does") && strings.Contains(message, "work")) ||
+		strings.Contains(message, "would you like") ||
+		strings.Contains(message, "do you want") ||
+		strings.Contains(message, "should i book")
 }
 
 func hasUnsafeConfirmation(message string) bool {

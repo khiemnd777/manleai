@@ -235,7 +235,6 @@ func (h *Handler) Stream(c *websocket.Conn) {
 	var sessionID string
 	var fromPhone string
 	var toPhone string
-	var closeAfterResponse atomic.Bool
 	var connected atomic.Bool
 	seenTranscripts := map[string]struct{}{}
 
@@ -294,7 +293,7 @@ func (h *Handler) Stream(c *websocket.Conn) {
 				"stage":      "openai_connected",
 				"stream_sid": streamSID,
 			})
-			go h.forwardRealtimeEvents(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, seenTranscripts, &closeAfterResponse)
+			go h.forwardRealtimeEvents(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, seenTranscripts)
 		case "media":
 			if realtime == nil || msg.Media == nil || strings.TrimSpace(msg.Media.Payload) == "" {
 				continue
@@ -331,8 +330,41 @@ func (h *Handler) forwardRealtimeEvents(
 	fromPhone string,
 	toPhone string,
 	seenTranscripts map[string]struct{},
-	closeAfterResponse *atomic.Bool,
 ) {
+	responseActive := false
+	activeCloseAfter := false
+	suppressAudioUntilDone := false
+	pendingReply := realtimeQueuedReply{}
+
+	speakReply := func(message string, closeAfter bool) bool {
+		message = strings.TrimSpace(message)
+		if message == "" {
+			return true
+		}
+		if responseActive {
+			pendingReply = realtimeQueuedReply{message: message, closeAfter: closeAfter}
+			return true
+		}
+		if err := realtime.Speak(ctx, message); err != nil {
+			_ = h.recordRealtimeFailure(ctx, providerCallID, sessionID, streamSID, "openai_response_create", err)
+			closeStream("openai_response_create_failed")
+			return false
+		}
+		responseActive = true
+		activeCloseAfter = closeAfter
+		suppressAudioUntilDone = false
+		return true
+	}
+
+	flushPendingReply := func() bool {
+		if strings.TrimSpace(pendingReply.message) == "" {
+			return true
+		}
+		reply := pendingReply
+		pendingReply = realtimeQueuedReply{}
+		return speakReply(reply.message, reply.closeAfter)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -347,6 +379,9 @@ func (h *Handler) forwardRealtimeEvents(
 			}
 			switch event.Type {
 			case voice.RealtimeEventAudioDelta:
+				if suppressAudioUntilDone {
+					continue
+				}
 				if strings.TrimSpace(event.AudioBase64) != "" && streamSID != "" {
 					_ = writeJSON(twilioOutboundMedia{
 						Event:     "media",
@@ -357,6 +392,9 @@ func (h *Handler) forwardRealtimeEvents(
 			case voice.RealtimeEventSpeechStarted:
 				if streamSID != "" {
 					_ = writeJSON(twilioClearMessage{Event: "clear", StreamSid: streamSID})
+				}
+				if responseActive {
+					suppressAudioUntilDone = true
 				}
 			case voice.RealtimeEventTranscriptDone:
 				transcript := strings.TrimSpace(event.Transcript)
@@ -384,18 +422,27 @@ func (h *Handler) forwardRealtimeEvents(
 				})
 				turnCancel()
 				if err != nil {
-					_ = realtime.Speak(ctx, "I could not process that clearly. Please say it again, or the owner can help directly.")
+					if !speakReply("I could not process that clearly. Please say it again, or the owner can help directly.", false) {
+						return
+					}
 					continue
 				}
 				if reply == nil || strings.TrimSpace(reply.Message) == "" {
 					continue
 				}
-				if !reply.Continue {
-					closeAfterResponse.Store(true)
+				if !speakReply(reply.Message, !reply.Continue) {
+					return
 				}
-				_ = realtime.Speak(ctx, reply.Message)
 			case voice.RealtimeEventResponseDone:
-				if closeAfterResponse.Load() {
+				completedCloseAfter := activeCloseAfter
+				hadPendingReply := strings.TrimSpace(pendingReply.message) != ""
+				responseActive = false
+				activeCloseAfter = false
+				suppressAudioUntilDone = false
+				if !flushPendingReply() {
+					return
+				}
+				if !hadPendingReply && completedCloseAfter {
 					cancel()
 					closeStream("response_complete")
 					return
@@ -405,11 +452,24 @@ func (h *Handler) forwardRealtimeEvents(
 				if strings.TrimSpace(event.Error) == "" {
 					continue
 				}
+				if isActiveRealtimeResponseConflict(event.Error) {
+					responseActive = true
+					continue
+				}
 				closeStream("openai_event_error")
 				return
 			}
 		}
 	}
+}
+
+type realtimeQueuedReply struct {
+	message    string
+	closeAfter bool
+}
+
+func isActiveRealtimeResponseConflict(message string) bool {
+	return strings.Contains(strings.ToLower(message), "conversation_already_has_active_response")
 }
 
 func (h *Handler) recordRealtimeFailure(ctx context.Context, providerCallID string, sessionID string, streamSID string, stage string, err error) error {

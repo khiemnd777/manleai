@@ -55,6 +55,22 @@ func TestGuardedReplyGeneratorRejectsAskingKnownDateAgain(t *testing.T) {
 	}
 }
 
+func TestGuardedReplyGeneratorRejectsConfirmingKnownTimeAgain(t *testing.T) {
+	generator := NewGuardedReplyGenerator(&fakeLanguageModelProvider{
+		reply: ModelReply{Message: "Does 1:00 PM work for you?", Confidence: 0.9},
+	})
+
+	_, err := generator.GenerateReply(context.Background(), conversation.ReplyGenerationRequest{
+		Channel:            conversation.ChannelPhone,
+		SafeReply:          "What name should I put on the appointment?",
+		KnownBookingFields: []string{"service", "requested_date", "requested_time", "requested_start_time"},
+		NextRequiredField:  "customer_name",
+	})
+	if err == nil {
+		t.Fatalf("GenerateReply accepted a reply that confirms a known time again")
+	}
+}
+
 func TestGuardedReplyGeneratorSkipsSimulatorChannel(t *testing.T) {
 	generator := NewGuardedReplyGenerator(&fakeLanguageModelProvider{
 		reply: ModelReply{Message: "What phone number should we use?", Confidence: 0.9},

@@ -63,7 +63,10 @@
 - Verify human requests, complaints, refunds, payment disputes, and group-booking language create owner handoffs.
 - Verify the Calls dashboard handles loading, empty, error, success, disabled/gated, and mobile states.
 - Verify simulator transcripts show customer, AI, and booking tool messages in sequence.
+- Verify initial voice and simulator greetings identify the salon, include recording disclosure when configured/defaulted, and collect intent with an open-ended prompt before asking for a booking service.
+- Verify greeting-only or connection-check turns such as "Hello" and "Can you hear me?" acknowledge the caller without replaying the full welcome, forcing booking intent, or calling booking tools when no booking details have been collected.
 - Verify booking conversations preserve already-collected service/date/time/customer/staff slots and do not ask for a known day again after date-only turns such as "Thursday this week" or "Thứ Tư này tuần này".
+- Verify offered-slot turns can select a unique offered time from spoken responses such as "one p.m." or a "Yes" response to a single-slot confirmation prompt, and do not rerun availability for unclear time fragments while the same offered slots remain valid.
 - Verify unclear repair turns such as "Sorry?", "Hello?", or partial STT fragments repeat or rephrase the current prompt without clearing the known booking date or calling booking tools.
 - Verify voice provider retries with a stable event key do not append duplicate transcript turns or create duplicate booking attempts.
 
@@ -156,6 +159,7 @@
 - Verify redaction rejects active sessions, is irreversible, clears customer PII/transcripts/handoff summaries/webhook payloads/audio, and preserves booking/handoff/provider-call audit links.
 - Verify the worker redacts expired sessions according to `retention_expires_at` without touching non-expired active sessions.
 - Verify realtime stream status/fallback events are recorded without leaking raw provider payloads or secrets.
+- Verify realtime stream replies serialize OpenAI `response.create` calls, queue the latest backend-approved reply until `response.done`, suppress interrupted audio after caller barge-in, and treat `conversation_already_has_active_response` as a recoverable event instead of closing the stream.
 - Verify completed realtime transcripts enter the same conversation engine and booking service and cannot confirm without POS success.
 
 ## Regression Guardrails

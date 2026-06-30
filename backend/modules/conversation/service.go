@@ -14,22 +14,33 @@ import (
 )
 
 const (
-	defaultGreeting       = "Thank you for calling. How can I help you today?"
-	defaultRetentionLimit = 50
-	maxRetentionLimit     = 500
-	defaultWebhookLimit   = 50
-	maxWebhookLimit       = 100
+	defaultGreeting           = "Thank you for calling. This call may be recorded to help us manage appointments and improve service. How can I help today?"
+	recordingDisclosure       = "This call may be recorded to help us manage appointments and improve service."
+	openEndedHelpPrompt       = "How can I help today?"
+	connectionCheckOpenPrompt = "Hi, I can hear you. How can I help today?"
+	defaultRetentionLimit     = 50
+	maxRetentionLimit         = 500
+	defaultWebhookLimit       = 50
+	maxWebhookLimit           = 100
 )
 
 var (
-	phonePattern            = regexp.MustCompile(`(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})`)
-	emailPattern            = regexp.MustCompile(`(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}`)
-	dateTimePattern         = regexp.MustCompile(`(?i)(\d{4}-\d{2}-\d{2})(?:[ t]+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)`)
-	relativeTimePattern     = regexp.MustCompile(`(?i)\b(today|tomorrow)\b\s*(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?`)
-	dateOnlyPattern         = regexp.MustCompile(`(?i)\b(\d{4}-\d{2}-\d{2})\b`)
-	relativeDayPattern      = regexp.MustCompile(`(?i)\b(today|tomorrow)\b`)
-	timeWithMeridiemPattern = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b`)
-	namePatterns            = []*regexp.Regexp{
+	phonePattern                   = regexp.MustCompile(`(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})`)
+	emailPattern                   = regexp.MustCompile(`(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}`)
+	dateTimePattern                = regexp.MustCompile(`(?i)(\d{4}-\d{2}-\d{2})(?:[ t]+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)`)
+	relativeTimePattern            = regexp.MustCompile(`(?i)\b(today|tomorrow)\b\s*(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?`)
+	dateOnlyPattern                = regexp.MustCompile(`(?i)\b(\d{4}-\d{2}-\d{2})\b`)
+	relativeDayPattern             = regexp.MustCompile(`(?i)\b(today|tomorrow)\b`)
+	timeWithMeridiemPattern        = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b`)
+	offeredSlotNumericTimePattern  = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|bpm|tm)(?:$|[^a-z0-9])`)
+	offeredSlotWordTimePattern     = regexp.MustCompile(`(?i)\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?:\s+([0-5][0-9]|oh\s+[0-9]|fifteen|thirty|forty[- ]five))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|bpm|tm)(?:$|[^a-z0-9])`)
+	slotConfirmationPromptPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\bdoes\s+(.{0,80}?)\s+work\b`),
+		regexp.MustCompile(`(?i)\bwould you like\s+(.{0,80}?)(?:\?|$)`),
+		regexp.MustCompile(`(?i)\bdo you want\s+(.{0,80}?)(?:\?|$)`),
+		regexp.MustCompile(`(?i)\bshould i book\s+(.{0,80}?)(?:\?|$)`),
+	}
+	namePatterns = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\bmy name is\s+([^,.;]+)`),
 		regexp.MustCompile(`(?i)\bthis is\s+([^,.;]+)`),
 		regexp.MustCompile(`(?i)\bi am\s+([^,.;]+)`),
@@ -162,8 +173,12 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 
 	next := *session
 	selectedOfferedSlot := false
-	applyExtraction(&next, message, services, staff, timezoneLocation(cfg.Timezone), s.now)
-	if selected := selectOfferedSlot(message, session.OfferedSlots); selected != nil {
+	loc := timezoneLocation(cfg.Timezone)
+	applyExtraction(&next, message, services, staff, loc, s.now)
+	if selected := selectOfferedSlot(message, session.OfferedSlots, loc); selected != nil {
+		applySelectedOfferedSlot(&next, *selected)
+		selectedOfferedSlot = true
+	} else if selected := selectConfirmedOfferedSlot(message, *session, loc); selected != nil {
 		applySelectedOfferedSlot(&next, *selected)
 		selectedOfferedSlot = true
 	}
@@ -212,7 +227,13 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 
 	if missing := missingBookingField(next); missing != "" {
 		if missing == "requested_time" || missing == "requested_start_time" {
-			preferredDate := preferredDateForAvailability(next, message, timezoneLocation(cfg.Timezone), s.now)
+			if len(next.OfferedSlots) > 0 {
+				turn.AIMessage = formatSlotOffer(next.OfferedSlots, loc, false)
+				s.applyReplyGenerator(ctx, &turn, next, cfg, missing, missing, knowledge)
+				finalizeTurnMetadata(&turn, *session, next, missing, missing, "availability_offer_repeated")
+				return s.store.SaveTurn(ctx, turn)
+			}
+			preferredDate := preferredDateForAvailability(next, message, loc, s.now)
 			if preferredDate != "" && next.ServiceID != "" {
 				if err := s.offerAvailableSlots(ctx, ownerUserID, &turn, &next, services, staff, preferredDate, false, cfg); err != nil {
 					return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check Square Appointments availability, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
@@ -725,10 +746,10 @@ func repairReplyForMessage(message string, session Session, cfg *RuntimeConfig) 
 	}
 	last := lastAITranscriptMessage(session)
 	if isConnectionCheck(message) {
-		if last != "" {
-			return "I can hear you. " + last
+		if hasBookingProgress(session) {
+			return "I can hear you. " + promptForCurrentBookingState(session, cfg)
 		}
-		return "I can hear you. How can I help with your appointment?"
+		return connectionCheckOpenPrompt
 	}
 	if last != "" {
 		return last
@@ -748,9 +769,9 @@ func isRepairOrUnclearUtterance(message string) bool {
 	if len([]rune(cleaned)) <= 2 {
 		return true
 	}
-	exact := []string{"sorry", "sorry?", "what", "what?", "huh", "pardon", "hello", "hello?"}
+	exact := []string{"sorry", "what", "huh", "pardon", "hello", "hi", "hey"}
 	for _, trigger := range exact {
-		if lower == trigger {
+		if cleaned == trigger {
 			return true
 		}
 	}
@@ -765,7 +786,21 @@ func isRepairOrUnclearUtterance(message string) bool {
 
 func isConnectionCheck(message string) bool {
 	lower := strings.ToLower(strings.TrimSpace(message))
-	return strings.Contains(lower, "hello") || strings.Contains(lower, "can you hear") || strings.Contains(lower, "i can hear")
+	cleaned := strings.Trim(lower, " .,!?:;-")
+	return cleaned == "hello" || cleaned == "hi" || cleaned == "hey" ||
+		strings.Contains(lower, "can you hear") ||
+		strings.Contains(lower, "i can hear")
+}
+
+func hasBookingProgress(session Session) bool {
+	return session.Intent == IntentBooking ||
+		strings.TrimSpace(session.ServiceID) != "" ||
+		strings.TrimSpace(session.RequestedDate) != "" ||
+		session.RequestedStartTime != nil ||
+		len(session.OfferedSlots) > 0 ||
+		strings.TrimSpace(session.CustomerName) != "" ||
+		strings.TrimSpace(session.CustomerPhone) != "" ||
+		hasStaffAssignment(session)
 }
 
 func lastAITranscriptMessage(session Session) string {
@@ -833,10 +868,87 @@ func bookingNotesForSession(session Session) string {
 }
 
 func initialReply(cfg *RuntimeConfig) string {
+	greeting := defaultGreeting
 	if cfg != nil && strings.TrimSpace(cfg.AIGreeting) != "" {
-		return strings.TrimSpace(cfg.AIGreeting)
+		greeting = strings.TrimSpace(cfg.AIGreeting)
 	}
-	return defaultGreeting
+	return normalizeInitialGreeting(greeting, salonName(cfg))
+}
+
+func normalizeInitialGreeting(greeting string, salon string) string {
+	greeting = strings.TrimSpace(greeting)
+	if greeting == "" {
+		greeting = defaultGreeting
+	}
+	greeting = ensureSalonInGreeting(greeting, salon)
+	greeting = ensureRecordingDisclosure(greeting)
+	greeting = ensureOpenEndedHelpPrompt(greeting)
+	return greeting
+}
+
+func ensureSalonInGreeting(greeting string, salon string) string {
+	salon = strings.TrimSpace(salon)
+	if salon == "" || containsFold(greeting, salon) {
+		return greeting
+	}
+	if strings.HasPrefix(strings.ToLower(greeting), "thank you for calling.") {
+		rest := strings.TrimSpace(greeting[len("Thank you for calling."):])
+		if rest == "" {
+			return "Thank you for calling " + salon + "."
+		}
+		return "Thank you for calling " + salon + ". " + rest
+	}
+	return "Thank you for calling " + salon + ". " + greeting
+}
+
+func ensureRecordingDisclosure(greeting string) string {
+	if containsFold(greeting, "recorded") {
+		return greeting
+	}
+	return insertAfterFirstSentence(greeting, recordingDisclosure)
+}
+
+func ensureOpenEndedHelpPrompt(greeting string) string {
+	lower := strings.ToLower(greeting)
+	if strings.Contains(lower, "how can i help") || strings.Contains(lower, "how may i help") {
+		return greeting
+	}
+	return appendSentence(greeting, openEndedHelpPrompt)
+}
+
+func insertAfterFirstSentence(text string, sentence string) string {
+	text = strings.TrimSpace(text)
+	sentence = strings.TrimSpace(sentence)
+	if text == "" {
+		return sentence
+	}
+	if sentence == "" {
+		return text
+	}
+	index := strings.Index(text, ".")
+	if index < 0 || index == len(text)-1 {
+		return appendSentence(text, sentence)
+	}
+	return strings.TrimSpace(text[:index+1]) + " " + sentence + " " + strings.TrimSpace(text[index+1:])
+}
+
+func appendSentence(text string, sentence string) string {
+	text = strings.TrimSpace(text)
+	sentence = strings.TrimSpace(sentence)
+	if text == "" {
+		return sentence
+	}
+	if sentence == "" {
+		return text
+	}
+	if strings.HasSuffix(text, ".") || strings.HasSuffix(text, "?") || strings.HasSuffix(text, "!") {
+		return text + " " + sentence
+	}
+	return text + ". " + sentence
+}
+
+func containsFold(value string, needle string) bool {
+	return strings.Contains(strings.ToLower(value), strings.ToLower(strings.TrimSpace(needle)))
 }
 
 func salonName(cfg *RuntimeConfig) string {
@@ -1404,13 +1516,16 @@ func dateForWeekday(base time.Time, target time.Weekday, nextWeek bool) time.Tim
 	return start.AddDate(0, 0, days)
 }
 
-func selectOfferedSlot(message string, slots []OfferedSlot) *OfferedSlot {
-	index, ok := selectedSlotIndex(message)
-	if !ok || index < 0 || index >= len(slots) {
-		return nil
+func selectOfferedSlot(message string, slots []OfferedSlot, loc *time.Location) *OfferedSlot {
+	if selected := offeredSlotForClockCandidates(clockCandidatesFromText(message), slots, loc); selected != nil {
+		return selected
 	}
-	slot := slots[index]
-	return &slot
+	index, ok := selectedSlotIndex(message)
+	if ok && index >= 0 && index < len(slots) {
+		slot := slots[index]
+		return &slot
+	}
+	return nil
 }
 
 func selectedSlotIndex(message string) (int, bool) {
@@ -1441,6 +1556,234 @@ func selectedSlotIndex(message string) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func selectConfirmedOfferedSlot(message string, session Session, loc *time.Location) *OfferedSlot {
+	if len(session.OfferedSlots) == 0 || !isAffirmativeSlotReply(message) {
+		return nil
+	}
+	last := lastAITranscriptMessage(session)
+	if last == "" {
+		return nil
+	}
+	candidates := confirmationClockCandidates(last)
+	if len(candidates) == 0 && looksLikeSlotConfirmationPrompt(last) {
+		allCandidates := clockCandidatesFromText(last)
+		if len(allCandidates) == 1 {
+			candidates = allCandidates
+		}
+	}
+	return offeredSlotForClockCandidates(candidates, session.OfferedSlots, loc)
+}
+
+func confirmationClockCandidates(message string) []int {
+	out := []int{}
+	seen := map[int]bool{}
+	for _, pattern := range slotConfirmationPromptPatterns {
+		for _, match := range pattern.FindAllStringSubmatch(message, -1) {
+			if len(match) < 2 {
+				continue
+			}
+			for _, candidate := range clockCandidatesFromText(match[1]) {
+				if seen[candidate] {
+					continue
+				}
+				seen[candidate] = true
+				out = append(out, candidate)
+			}
+		}
+	}
+	return out
+}
+
+func looksLikeSlotConfirmationPrompt(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	return (strings.Contains(lower, "does") && strings.Contains(lower, "work")) ||
+		strings.Contains(lower, "would you like") ||
+		strings.Contains(lower, "do you want") ||
+		strings.Contains(lower, "should i book")
+}
+
+func isAffirmativeSlotReply(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	lower = strings.Trim(lower, " .,!?:;-")
+	if lower == "" {
+		return false
+	}
+	exact := []string{"yes", "yeah", "yep", "ok", "okay", "sure", "correct", "right"}
+	for _, item := range exact {
+		if lower == item {
+			return true
+		}
+	}
+	return strings.HasPrefix(lower, "yes ") ||
+		strings.Contains(lower, "that works") ||
+		strings.Contains(lower, "works for me") ||
+		strings.Contains(lower, "sounds good") ||
+		strings.Contains(lower, "i want to") ||
+		strings.Contains(lower, "i would like that") ||
+		strings.Contains(lower, "book it")
+}
+
+func clockCandidatesFromText(message string) []int {
+	out := []int{}
+	seen := map[int]bool{}
+	add := func(minutes int, ok bool) {
+		if !ok || seen[minutes] {
+			return
+		}
+		seen[minutes] = true
+		out = append(out, minutes)
+	}
+	for _, match := range offeredSlotNumericTimePattern.FindAllStringSubmatch(message, -1) {
+		if len(match) < 4 {
+			continue
+		}
+		hour, err := strconv.Atoi(match[1])
+		if err != nil {
+			continue
+		}
+		minute := 0
+		if strings.TrimSpace(match[2]) != "" {
+			parsed, err := strconv.Atoi(match[2])
+			if err != nil {
+				continue
+			}
+			minute = parsed
+		}
+		add(clockMinutes(hour, minute, match[3]))
+	}
+	for _, match := range offeredSlotWordTimePattern.FindAllStringSubmatch(message, -1) {
+		if len(match) < 4 {
+			continue
+		}
+		hour, ok := spokenHour(match[1])
+		if !ok {
+			continue
+		}
+		minute, ok := spokenMinute(match[2])
+		if !ok {
+			continue
+		}
+		add(clockMinutes(hour, minute, match[3]))
+	}
+	return out
+}
+
+func offeredSlotForClockCandidates(candidates []int, slots []OfferedSlot, loc *time.Location) *OfferedSlot {
+	if len(candidates) == 0 || len(slots) == 0 {
+		return nil
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+	candidateSet := map[int]bool{}
+	for _, candidate := range candidates {
+		candidateSet[candidate] = true
+	}
+	matches := []OfferedSlot{}
+	for _, slot := range slots {
+		local := slot.StartTime.In(loc)
+		minutes := local.Hour()*60 + local.Minute()
+		if candidateSet[minutes] {
+			matches = append(matches, slot)
+		}
+	}
+	if len(matches) != 1 {
+		return nil
+	}
+	slot := matches[0]
+	return &slot
+}
+
+func clockMinutes(hour int, minute int, meridiem string) (int, bool) {
+	if hour < 1 || hour > 12 || minute < 0 || minute > 59 {
+		return 0, false
+	}
+	switch normalizeMeridiem(meridiem) {
+	case "am":
+		if hour == 12 {
+			hour = 0
+		}
+	case "pm":
+		if hour != 12 {
+			hour += 12
+		}
+	default:
+		return 0, false
+	}
+	return hour*60 + minute, true
+}
+
+func normalizeMeridiem(value string) string {
+	cleaned := strings.ToLower(strings.TrimSpace(value))
+	cleaned = strings.ReplaceAll(cleaned, ".", "")
+	cleaned = strings.ReplaceAll(cleaned, " ", "")
+	switch cleaned {
+	case "am":
+		return "am"
+	case "pm", "bpm", "tm":
+		return "pm"
+	default:
+		return ""
+	}
+}
+
+func spokenHour(value string) (int, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "one":
+		return 1, true
+	case "two":
+		return 2, true
+	case "three":
+		return 3, true
+	case "four":
+		return 4, true
+	case "five":
+		return 5, true
+	case "six":
+		return 6, true
+	case "seven":
+		return 7, true
+	case "eight":
+		return 8, true
+	case "nine":
+		return 9, true
+	case "ten":
+		return 10, true
+	case "eleven":
+		return 11, true
+	case "twelve":
+		return 12, true
+	default:
+		return 0, false
+	}
+}
+
+func spokenMinute(value string) (int, bool) {
+	cleaned := strings.ToLower(strings.TrimSpace(value))
+	cleaned = strings.ReplaceAll(cleaned, "-", " ")
+	switch cleaned {
+	case "":
+		return 0, true
+	case "fifteen":
+		return 15, true
+	case "thirty":
+		return 30, true
+	case "forty five":
+		return 45, true
+	}
+	if strings.HasPrefix(cleaned, "oh ") {
+		cleaned = strings.TrimSpace(strings.TrimPrefix(cleaned, "oh "))
+	}
+	minute, err := strconv.Atoi(cleaned)
+	if err != nil || minute < 0 || minute > 59 {
+		return 0, false
+	}
+	return minute, true
 }
 
 func customerRequestedAnyone(message string) bool {
