@@ -67,6 +67,8 @@
 - Verify greeting-only or connection-check turns such as "Hello" and "Can you hear me?" acknowledge the caller without replaying the full welcome, forcing booking intent, or calling booking tools when no booking details have been collected.
 - Verify booking conversations preserve already-collected service/date/time/customer/staff slots and do not ask for a known day again after date-only turns such as "Thursday this week" or "Thứ Tư này tuần này".
 - Verify offered-slot turns can select a unique offered time from spoken responses such as "one p.m." or a "Yes" response to a single-slot confirmation prompt, and do not rerun availability for unclear time fragments while the same offered slots remain valid.
+- Verify exact service/date/time requests such as "gel manicure for 1 p.m. this Thursday" parse dotted meridiem, auto-select a matching POS availability slot, name the assigned technician, and ask the next missing customer detail instead of asking the caller to confirm the same time again.
+- Verify customer-name collection accepts plausible bare names after service/date/time are known, rejects affirmative replies, connection checks, service phrases, and time/date phrases as names, and creates an owner handoff with non-confirmed wording when repeated non-answers or caller goodbye prevent collecting the name.
 - Verify unclear repair turns such as "Sorry?", "Hello?", or partial STT fragments repeat or rephrase the current prompt without clearing the known booking date or calling booking tools.
 - Verify voice provider retries with a stable event key do not append duplicate transcript turns or create duplicate booking attempts.
 

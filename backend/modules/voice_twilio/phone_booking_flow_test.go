@@ -72,8 +72,8 @@ func TestSignedTwilioWebhookDrivesPhoneBookingFlowThroughConversation(t *testing
 	if !strings.Contains(firstTurnBody, "<Gather") || !strings.Contains(firstTurnBody, "I found these openings") || !strings.Contains(firstTurnBody, "10:00 AM") {
 		t.Fatalf("first turn should offer available slots: %s", firstTurnBody)
 	}
-	if strings.Contains(firstTurnBody, "Mai Nguyen") {
-		t.Fatalf("anyone availability offer should not present the assigned technician as customer-chosen: %s", firstTurnBody)
+	if !strings.Contains(firstTurnBody, "Mai Nguyen") {
+		t.Fatalf("availability offer should name the assigned technician: %s", firstTurnBody)
 	}
 	if strings.Contains(strings.ToLower(firstTurnBody), "confirmed") {
 		t.Fatalf("availability offer must not confirm booking: %s", firstTurnBody)
@@ -99,7 +99,7 @@ func TestSignedTwilioWebhookDrivesPhoneBookingFlowThroughConversation(t *testing
 	if strings.Contains(secondTurnBody, "<Gather") {
 		t.Fatalf("confirmed booking should end gather loop: %s", secondTurnBody)
 	}
-	if !strings.Contains(secondTurnBody, "confirmed in Square Appointments") || !strings.Contains(secondTurnBody, "<Hangup/>") {
+	if !strings.Contains(secondTurnBody, "confirmed in Square Appointments") || !strings.Contains(secondTurnBody, "Mai Nguyen") || !strings.Contains(secondTurnBody, "<Hangup/>") {
 		t.Fatalf("second turn should return final confirmed TwiML: %s", secondTurnBody)
 	}
 	if bookingTool.calls != 1 {

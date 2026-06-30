@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/manleai/ai-receptionist/internal/validation"
 	"github.com/manleai/ai-receptionist/modules/booking"
@@ -22,16 +23,17 @@ const (
 	maxRetentionLimit         = 500
 	defaultWebhookLimit       = 50
 	maxWebhookLimit           = 100
+	maxCustomerNamePrompts    = 3
 )
 
 var (
 	phonePattern                   = regexp.MustCompile(`(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})`)
 	emailPattern                   = regexp.MustCompile(`(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}`)
-	dateTimePattern                = regexp.MustCompile(`(?i)(\d{4}-\d{2}-\d{2})(?:[ t]+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)`)
-	relativeTimePattern            = regexp.MustCompile(`(?i)\b(today|tomorrow)\b\s*(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?`)
+	dateTimePattern                = regexp.MustCompile(`(?i)(\d{4}-\d{2}-\d{2})(?:[ t]+(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)?)`)
+	relativeTimePattern            = regexp.MustCompile(`(?i)\b(today|tomorrow)\b\s*(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)?`)
 	dateOnlyPattern                = regexp.MustCompile(`(?i)\b(\d{4}-\d{2}-\d{2})\b`)
 	relativeDayPattern             = regexp.MustCompile(`(?i)\b(today|tomorrow)\b`)
-	timeWithMeridiemPattern        = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b`)
+	timeWithMeridiemPattern        = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)(?:$|[^a-z0-9])`)
 	offeredSlotNumericTimePattern  = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|bpm|tm)(?:$|[^a-z0-9])`)
 	offeredSlotWordTimePattern     = regexp.MustCompile(`(?i)\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?:\s+([0-5][0-9]|oh\s+[0-9]|fifteen|thirty|forty[- ]five))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|bpm|tm)(?:$|[^a-z0-9])`)
 	slotConfirmationPromptPatterns = []*regexp.Regexp{
@@ -160,6 +162,17 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		return nil, err
 	}
 
+	if reply, handoff := customerNameSlotRepairReply(message, *session, services); reply != "" {
+		turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
+		if handoff {
+			return s.saveHandoffTurn(ctx, turn, *session, HandoffReasonCustomerDetailsUnavailable, reply, services, staff, cfg)
+		}
+		turn.AIMessage = reply
+		s.applyReplyGenerator(ctx, &turn, *session, cfg, "customer_name", "customer_name", knowledge)
+		finalizeTurnMetadata(&turn, *session, *session, "customer_name", "customer_name", "customer_name_repair")
+		return s.store.SaveTurn(ctx, turn)
+	}
+
 	if repairReply := repairReplyForMessage(message, *session, cfg); repairReply != "" {
 		turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
 		turn.AIMessage = repairReply
@@ -173,6 +186,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 
 	next := *session
 	selectedOfferedSlot := false
+	exactRequestedTimeSelected := false
 	loc := timezoneLocation(cfg.Timezone)
 	applyExtraction(&next, message, services, staff, loc, s.now)
 	if selected := selectOfferedSlot(message, session.OfferedSlots, loc); selected != nil {
@@ -213,7 +227,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, nonBookableStaffReply(*requestedStaff), services, staff, cfg)
 	}
 
-	if next.ServiceID != "" && next.RequestedStartTime != nil && !selectedOfferedSlot {
+	if shouldCheckAvailabilityForRequestedTime(*session, next, selectedOfferedSlot) {
 		available, err := s.applyAvailabilityForRequestedTime(ctx, ownerUserID, &turn, &next, services, staff, cfg)
 		if err != nil {
 			return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check Square Appointments availability, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
@@ -223,6 +237,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 			finalizeTurnMetadata(&turn, *session, next, "requested_time", "requested_time", "availability_alternative")
 			return s.store.SaveTurn(ctx, turn)
 		}
+		exactRequestedTimeSelected = true
 	}
 
 	if missing := missingBookingField(next); missing != "" {
@@ -244,6 +259,9 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 			}
 		}
 		turn.AIMessage = promptForMissingField(missing)
+		if exactRequestedTimeSelected {
+			turn.AIMessage = selectedRequestedTimeReply(next, services, staff, cfg, missing)
+		}
 		s.applyReplyGenerator(ctx, &turn, next, cfg, missing, missing, knowledge)
 		finalizeTurnMetadata(&turn, *session, next, missing, missing, "missing_field")
 		return s.store.SaveTurn(ctx, turn)
@@ -306,19 +324,74 @@ func (s *Service) applyAvailabilityForRequestedTime(ctx context.Context, ownerUs
 	if err != nil {
 		return false, err
 	}
-	for _, slot := range result.Slots {
-		if !slot.StartTime.Equal(*session.RequestedStartTime) {
-			continue
-		}
-		if session.StaffID != "" && slot.StaffID != session.StaffID {
-			continue
-		}
-		applySelectedOfferedSlot(session, offeredSlotFromAvailability(result, slot))
+	slots := []booking.AvailabilitySlot{}
+	if result != nil {
+		slots = result.Slots
+	}
+	matches := exactAvailabilityMatches(slots, *session)
+	if len(matches) > 0 {
+		sort.SliceStable(matches, func(i, j int) bool {
+			return availabilitySlotSortKey(matches[i]) < availabilitySlotSortKey(matches[j])
+		})
+		turn.ToolMessage = availabilityToolMessage(len(slots))
+		applySelectedOfferedSlot(session, offeredSlotFromAvailability(result, matches[0]))
 		syncTurnUpdate(turn, *session, services, staff, cfg)
 		return true, nil
 	}
 	applyAvailabilityOffer(turn, session, services, staff, cfg, result, true)
 	return false, nil
+}
+
+func shouldCheckAvailabilityForRequestedTime(before Session, after Session, selectedOfferedSlot bool) bool {
+	if selectedOfferedSlot || strings.TrimSpace(after.ServiceID) == "" || after.RequestedStartTime == nil {
+		return false
+	}
+	if strings.TrimSpace(before.ServiceID) == "" || !sameOptionalTime(before.RequestedStartTime, after.RequestedStartTime) {
+		return true
+	}
+	if strings.TrimSpace(before.RequestedDate) != strings.TrimSpace(after.RequestedDate) {
+		return true
+	}
+	if staffSelectionModeForAvailability(before) != staffSelectionModeForAvailability(after) {
+		return true
+	}
+	if strings.TrimSpace(before.StaffID) != strings.TrimSpace(after.StaffID) {
+		return true
+	}
+	return !hasStaffAssignment(before)
+}
+
+func sameOptionalTime(left *time.Time, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Equal(*right)
+}
+
+func exactAvailabilityMatches(slots []booking.AvailabilitySlot, session Session) []booking.AvailabilitySlot {
+	if session.RequestedStartTime == nil {
+		return nil
+	}
+	matches := []booking.AvailabilitySlot{}
+	for _, slot := range slots {
+		if !slot.StartTime.Equal(*session.RequestedStartTime) {
+			continue
+		}
+		if staffID := strings.TrimSpace(session.StaffID); staffID != "" && strings.TrimSpace(slot.StaffID) != staffID {
+			continue
+		}
+		matches = append(matches, slot)
+	}
+	return matches
+}
+
+func availabilitySlotSortKey(slot booking.AvailabilitySlot) string {
+	name := strings.ToLower(strings.TrimSpace(slot.StaffName))
+	staffID := strings.TrimSpace(slot.StaffID)
+	if name == "" {
+		name = staffID
+	}
+	return name + "\x00" + staffID
 }
 
 func (s *Service) offerAvailableSlots(ctx context.Context, ownerUserID string, turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, preferredDate string, unavailableRequestedTime bool, cfg *RuntimeConfig) error {
@@ -455,12 +528,29 @@ func formatSlotOffer(slots []OfferedSlot, loc *time.Location, unavailableRequest
 	for i, slot := range slots {
 		label := ordinalLabel(i + 1)
 		when := slot.StartTime.In(loc).Format("Mon Jan 2 at 3:04 PM")
-		if strings.TrimSpace(slot.StaffName) != "" && !slotUsesAnyone(slot) {
-			when += " with " + strings.TrimSpace(slot.StaffName)
+		if assigned := slotAssignedStaffLabel(slot); assigned != "" {
+			when += " with " + assigned + " assigned"
 		}
 		parts = append(parts, label+" "+when)
 	}
 	return prefix + strings.Join(parts, "; ") + ". Which works?"
+}
+
+func selectedRequestedTimeReply(session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, missing string) string {
+	prompt := promptForMissingField(missing)
+	if session.RequestedStartTime == nil {
+		return prompt
+	}
+	loc := timezoneLocation(timezoneFromConfig(cfg))
+	when := session.RequestedStartTime.In(loc).Format("3:04 PM Monday")
+	sentence := when + " is available"
+	if service := strings.TrimSpace(serviceSummary(session, services)); service != "" {
+		sentence += " for your " + service
+	}
+	if assigned := sessionAssignedStaffLabel(session, staff); assigned != "" {
+		sentence += " with " + assigned + " assigned"
+	}
+	return sentence + ". " + prompt
 }
 
 func ordinalLabel(index int) string {
@@ -775,7 +865,7 @@ func isRepairOrUnclearUtterance(message string) bool {
 			return true
 		}
 	}
-	contains := []string{"repeat that", "say that again", "can you repeat", "i didn't hear", "i did not hear", "can you hear me", "i can hear you"}
+	contains := []string{"repeat that", "say that again", "can you repeat", "i didn't hear", "i did not hear", "can't understand", "cannot understand", "can you hear me", "i can hear you"}
 	for _, trigger := range contains {
 		if strings.Contains(lower, trigger) {
 			return true
@@ -1022,8 +1112,8 @@ func applyExtraction(session *Session, message string, services []ServiceOption,
 	if session.CustomerName == "" {
 		if name := extractName(message); name != "" {
 			session.CustomerName = name
-		} else if canTreatAsName(message, *session) {
-			session.CustomerName = strings.TrimSpace(message)
+		} else if name := bareCustomerNameForSession(message, *session); name != "" {
+			session.CustomerName = name
 		}
 	}
 }
@@ -1119,26 +1209,189 @@ func extractName(message string) string {
 	return ""
 }
 
-func canTreatAsName(message string, session Session) bool {
-	if session.Intent != IntentBooking || session.CustomerName != "" {
-		return false
+func customerNameSlotRepairReply(message string, session Session, services []ServiceOption) (string, bool) {
+	if missingBookingField(session) != "customer_name" {
+		return "", false
 	}
-	if session.CustomerPhone != "" || session.ServiceID != "" || session.StaffID != "" || session.RequestedDate != "" || session.RequestedStartTime != nil {
-		return false
+	if extractName(message) != "" || bareCustomerNameForSession(message, session) != "" {
+		return "", false
 	}
-	trimmed := strings.TrimSpace(message)
-	if len(trimmed) < 3 || len(trimmed) > 80 {
-		return false
+	if isGoodbyeUtterance(message) {
+		return "No problem. I'll send this request to the owner to review. This is not a confirmed appointment. Goodbye.", true
 	}
-	if phonePattern.MatchString(trimmed) || emailPattern.MatchString(trimmed) || hasBookingSignal(trimmed) {
-		return false
+	if customerNamePromptCount(session) >= maxCustomerNamePrompts {
+		return "I'm having trouble catching the name. I'll send this request to the owner to review. This is not a confirmed appointment.", true
 	}
-	for _, r := range trimmed {
-		if !(r == ' ' || r == '\'' || r == '-' || r == '.' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z')) {
-			return false
+	if !isCustomerNameNonAnswer(message, services) {
+		return "", false
+	}
+	if isConnectionCheck(message) {
+		return "I can hear you. What name should I put on the appointment?", false
+	}
+	if looksLikeServiceInsteadOfName(message, services) {
+		if serviceName := strings.TrimSpace(session.ServiceName); serviceName != "" {
+			return "I have " + serviceName + ". What name should I put on the appointment?", false
+		}
+		return "I have the service. What name should I put on the appointment?", false
+	}
+	if isNameRepairRequest(message) {
+		return "I'm asking for the customer name. What name should I put on the appointment?", false
+	}
+	return "Please say the customer name for the appointment, for example: \"My name is Linh.\"", false
+}
+
+func customerNamePromptCount(session Session) int {
+	count := 0
+	for _, msg := range session.Transcript {
+		if msg.Speaker != SpeakerAI {
+			continue
+		}
+		lower := strings.ToLower(msg.Body)
+		if strings.Contains(lower, "name") && (strings.Contains(lower, "appointment") || strings.Contains(lower, "customer")) {
+			count++
 		}
 	}
-	return true
+	return count
+}
+
+func isCustomerNameNonAnswer(message string, services []ServiceOption) bool {
+	return isAffirmativeOnly(message) ||
+		isConnectionCheck(message) ||
+		isNameRepairRequest(message) ||
+		looksLikeServiceInsteadOfName(message, services) ||
+		phonePattern.MatchString(message) ||
+		emailPattern.MatchString(message) ||
+		looksLikeDateOrTimeInsteadOfName(message)
+}
+
+func isAffirmativeOnly(message string) bool {
+	normalized := normalizeLooseText(message)
+	if normalized == "" {
+		return false
+	}
+	switch normalized {
+	case "yes", "yeah", "yep", "ok", "okay", "sure", "correct", "right", "yes you can", "yes i can", "yes please", "yes i want to":
+		return true
+	}
+	return strings.HasPrefix(normalized, "yes ") ||
+		strings.HasPrefix(normalized, "ok ") ||
+		strings.HasPrefix(normalized, "okay ") ||
+		strings.Contains(normalized, "i want to book")
+}
+
+func isGoodbyeUtterance(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	normalized := normalizeLooseText(message)
+	return normalized == "bye" ||
+		normalized == "bye bye" ||
+		normalized == "goodbye" ||
+		strings.Contains(lower, "bye-bye") ||
+		strings.Contains(normalized, "i have to go") ||
+		strings.Contains(normalized, "hang up")
+}
+
+func isNameRepairRequest(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	normalized := normalizeLooseText(message)
+	return strings.Contains(lower, "pardon") ||
+		strings.Contains(lower, "can't understand") ||
+		strings.Contains(lower, "cannot understand") ||
+		strings.Contains(normalized, "can t understand") ||
+		strings.Contains(normalized, "could not understand") ||
+		strings.Contains(normalized, "what did you say") ||
+		strings.Contains(normalized, "what you say") ||
+		strings.Contains(normalized, "say that again") ||
+		strings.Contains(normalized, "repeat")
+}
+
+func looksLikeServiceInsteadOfName(message string, services []ServiceOption) bool {
+	lower := strings.ToLower(message)
+	if strings.Contains(lower, "service") || strings.Contains(lower, "name of") {
+		return true
+	}
+	return len(matchServices(message, services)) > 0
+}
+
+func looksLikeDateOrTimeInsteadOfName(message string) bool {
+	lower := strings.ToLower(message)
+	checks := []string{
+		"today", "tomorrow", "this week", "next week", "monday", "tuesday", "wednesday",
+		"thursday", "friday", "saturday", "sunday", " am", " pm", "a.m", "p.m", "o'clock",
+		"one pm", "one p m", "two pm", "three pm", "four pm", "five pm",
+	}
+	for _, check := range checks {
+		if strings.Contains(lower, check) {
+			return true
+		}
+	}
+	return dateOnlyPattern.MatchString(message) || timeWithMeridiemPattern.MatchString(message)
+}
+
+func normalizeLooseText(message string) string {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	replacer := strings.NewReplacer(
+		".", " ",
+		",", " ",
+		"!", " ",
+		"?", " ",
+		":", " ",
+		";", " ",
+		"-", " ",
+		"_", " ",
+		"'", " ",
+		"\"", " ",
+	)
+	return strings.Join(strings.Fields(replacer.Replace(lower)), " ")
+}
+
+func bareCustomerNameForSession(message string, session Session) string {
+	if session.Intent != IntentBooking || strings.TrimSpace(session.CustomerName) != "" {
+		return ""
+	}
+	if missingBookingField(session) != "customer_name" {
+		if session.ServiceID != "" || session.StaffID != "" || session.RequestedDate != "" || session.RequestedStartTime != nil || session.CustomerPhone != "" {
+			return ""
+		}
+	}
+	return cleanBareCustomerName(message)
+}
+
+func cleanBareCustomerName(raw string) string {
+	name := cleanName(raw)
+	name = strings.Trim(name, " \"'")
+	name = strings.Trim(name, ".")
+	if len([]rune(name)) < 2 || len([]rune(name)) > 80 {
+		return ""
+	}
+	if phonePattern.MatchString(name) || emailPattern.MatchString(name) || hasBookingSignal(name) {
+		return ""
+	}
+	if isAffirmativeOnly(name) || isConnectionCheck(name) || isGoodbyeUtterance(name) || isNameRepairRequest(name) || looksLikeDateOrTimeInsteadOfName(name) {
+		return ""
+	}
+	if len(strings.Fields(name)) > 4 {
+		return ""
+	}
+	for _, r := range name {
+		if r == ' ' || r == '\'' || r == '-' || r == '.' {
+			continue
+		}
+		if isLatinLetter(r) {
+			continue
+		}
+		return ""
+	}
+	return strings.TrimSpace(strings.Trim(name, "."))
+}
+
+func isLatinLetter(r rune) bool {
+	if r >= 'A' && r <= 'Z' {
+		return true
+	}
+	if r >= 'a' && r <= 'z' {
+		return true
+	}
+	return unicode.IsLetter(r) && unicode.Is(unicode.Latin, r)
 }
 
 func cleanName(raw string) string {
@@ -2081,7 +2334,8 @@ func parseDateAndClock(date string, hourRaw string, minuteRaw string, meridiem s
 			return time.Time{}, err
 		}
 	}
-	meridiem = strings.ToLower(meridiem)
+	meridiem = strings.ToLower(strings.TrimSpace(meridiem))
+	meridiem = strings.NewReplacer(".", "", " ", "").Replace(meridiem)
 	if meridiem == "pm" && hour < 12 {
 		hour += 12
 	}
@@ -2123,8 +2377,12 @@ func summaryFor(session Session, services []ServiceOption, staff []StaffOption, 
 	if name := serviceSummary(session, services); name != "" {
 		parts = append(parts, name)
 	}
-	if name := staffName(session.StaffID, staff, session.StaffName); name != "" && !sessionUsesAnyone(session) {
-		parts = append(parts, "with "+name)
+	if name := sessionAssignedStaffLabel(session, staff); name != "" {
+		if sessionUsesAnyone(session) {
+			parts = append(parts, "assigned "+name)
+		} else {
+			parts = append(parts, "with "+name)
+		}
 	}
 	if session.RequestedStartTime != nil {
 		parts = append(parts, "requested "+session.RequestedStartTime.Format(time.RFC3339))
@@ -2139,10 +2397,7 @@ func summaryFor(session Session, services []ServiceOption, staff []StaffOption, 
 
 func confirmedMessage(session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) string {
 	service := serviceSummary(session, services)
-	member := ""
-	if !sessionUsesAnyone(session) {
-		member = staffName(session.StaffID, staff, session.StaffName)
-	}
+	member := sessionAssignedStaffLabel(session, staff)
 	when := ""
 	if session.RequestedStartTime != nil {
 		loc := timezoneLocation("")
@@ -2156,6 +2411,52 @@ func confirmedMessage(session Session, services []ServiceOption, staff []StaffOp
 		return "Your appointment is confirmed in Square Appointments."
 	}
 	return "Your appointment is confirmed in Square Appointments for " + details + "."
+}
+
+func slotAssignedStaffLabel(slot OfferedSlot) string {
+	names := []string{}
+	seen := map[string]bool{}
+	addStaffName(&names, seen, slot.StaffName)
+	for _, segment := range slot.Segments {
+		addStaffName(&names, seen, segment.StaffName)
+	}
+	return joinHumanList(names)
+}
+
+func sessionAssignedStaffLabel(session Session, staff []StaffOption) string {
+	names := []string{}
+	seen := map[string]bool{}
+	addStaffName(&names, seen, staffName(session.StaffID, staff, session.StaffName))
+	for _, segment := range session.BookingSegments {
+		addStaffName(&names, seen, staffName(segment.StaffID, staff, ""))
+	}
+	return joinHumanList(names)
+}
+
+func addStaffName(names *[]string, seen map[string]bool, name string) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	key := strings.ToLower(name)
+	if seen[key] {
+		return
+	}
+	seen[key] = true
+	*names = append(*names, name)
+}
+
+func joinHumanList(values []string) string {
+	switch len(values) {
+	case 0:
+		return ""
+	case 1:
+		return values[0]
+	case 2:
+		return values[0] + " and " + values[1]
+	default:
+		return strings.Join(values[:len(values)-1], ", ") + ", and " + values[len(values)-1]
+	}
 }
 
 func serviceSummary(session Session, services []ServiceOption) string {

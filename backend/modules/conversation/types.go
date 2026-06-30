@@ -36,9 +36,10 @@ const (
 	SpeakerCustomer = "customer"
 	SpeakerTool     = "tool"
 
-	HandoffReasonHumanRequested     = "human_requested"
-	HandoffReasonAIBookingDisabled  = "ai_booking_disabled"
-	HandoffReasonBookingUnavailable = "booking_unavailable"
+	HandoffReasonHumanRequested             = "human_requested"
+	HandoffReasonAIBookingDisabled          = "ai_booking_disabled"
+	HandoffReasonBookingUnavailable         = "booking_unavailable"
+	HandoffReasonCustomerDetailsUnavailable = "customer_details_unavailable"
 )
 
 var (
