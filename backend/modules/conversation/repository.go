@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
+	"github.com/lib/pq"
 	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
@@ -392,6 +394,71 @@ func (r *Repository) ListActiveStaff(ctx context.Context, salonID string) ([]Sta
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (r *Repository) ListStaffAssignmentStats(ctx context.Context, salonID string, staffIDs []string, from time.Time, to time.Time) (map[string]StaffAssignmentStat, error) {
+	ids := make([]string, 0, len(staffIDs))
+	seen := map[string]bool{}
+	for _, staffID := range staffIDs {
+		staffID = strings.TrimSpace(staffID)
+		if staffID == "" || seen[staffID] {
+			continue
+		}
+		seen[staffID] = true
+		ids = append(ids, staffID)
+	}
+	out := make(map[string]StaffAssignmentStat, len(ids))
+	for _, staffID := range ids {
+		out[staffID] = StaffAssignmentStat{StaffID: staffID}
+	}
+	if len(ids) == 0 {
+		return out, nil
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+		WITH requested_staff AS (
+			SELECT unnest($2::uuid[]) AS staff_id
+		),
+		assignment_events AS (
+			SELECT a.id AS appointment_id, a.staff_id, a.created_at
+			FROM appointments a
+			WHERE a.salon_id = $1
+			  AND a.staff_id = ANY($2::uuid[])
+			  AND a.status IN ('confirmed', 'rescheduled')
+			  AND a.start_time >= $3
+			  AND a.start_time < $4
+			UNION
+			SELECT a.id AS appointment_id, aps.staff_id, a.created_at
+			FROM appointments a
+			JOIN appointment_services aps ON aps.appointment_id = a.id
+			WHERE a.salon_id = $1
+			  AND aps.staff_id = ANY($2::uuid[])
+			  AND a.status IN ('confirmed', 'rescheduled')
+			  AND a.start_time >= $3
+			  AND a.start_time < $4
+		)
+		SELECT rs.staff_id::text, COALESCE(COUNT(DISTINCT ae.appointment_id), 0)::int, MAX(ae.created_at)
+		FROM requested_staff rs
+		LEFT JOIN assignment_events ae ON ae.staff_id = rs.staff_id
+		GROUP BY rs.staff_id
+	`, salonID, pq.Array(ids), from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var stat StaffAssignmentStat
+		var lastAssignedAt sql.NullTime
+		if err := rows.Scan(&stat.StaffID, &stat.AssignedCount, &lastAssignedAt); err != nil {
+			return nil, err
+		}
+		if lastAssignedAt.Valid {
+			stat.LastAssignedAt = &lastAssignedAt.Time
+		}
+		out[stat.StaffID] = stat
+	}
+	return out, rows.Err()
 }
 
 func (r *Repository) ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error) {

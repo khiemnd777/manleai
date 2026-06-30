@@ -246,6 +246,14 @@ func (f *phoneFlowConversationStore) ListActiveStaff(ctx context.Context, salonI
 	return staff, nil
 }
 
+func (f *phoneFlowConversationStore) ListStaffAssignmentStats(ctx context.Context, salonID string, staffIDs []string, from time.Time, to time.Time) (map[string]conversation.StaffAssignmentStat, error) {
+	out := make(map[string]conversation.StaffAssignmentStat, len(staffIDs))
+	for _, staffID := range staffIDs {
+		out[staffID] = conversation.StaffAssignmentStat{StaffID: staffID}
+	}
+	return out, nil
+}
+
 func (f *phoneFlowConversationStore) ListActiveKnowledge(ctx context.Context, salonID string) ([]conversation.KnowledgeSnippet, error) {
 	return f.knowledge, nil
 }

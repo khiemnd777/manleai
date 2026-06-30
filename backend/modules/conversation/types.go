@@ -40,6 +40,7 @@ const (
 	HandoffReasonAIBookingDisabled          = "ai_booking_disabled"
 	HandoffReasonBookingUnavailable         = "booking_unavailable"
 	HandoffReasonCustomerDetailsUnavailable = "customer_details_unavailable"
+	HandoffReasonGroupBooking               = "group_booking"
 )
 
 var (
@@ -70,6 +71,7 @@ type Store interface {
 	ListBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error)
 	ListBookableStaff(ctx context.Context, salonID string) ([]StaffOption, error)
 	ListActiveStaff(ctx context.Context, salonID string) ([]StaffOption, error)
+	ListStaffAssignmentStats(ctx context.Context, salonID string, staffIDs []string, from time.Time, to time.Time) (map[string]StaffAssignmentStat, error)
 	ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error)
 	SaveTurn(ctx context.Context, record TurnRecord) (*Session, error)
 }
@@ -139,6 +141,12 @@ type StaffOption struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
 	AIBookable bool   `json:"ai_bookable"`
+}
+
+type StaffAssignmentStat struct {
+	StaffID        string     `json:"staff_id"`
+	AssignedCount  int        `json:"assigned_count"`
+	LastAssignedAt *time.Time `json:"last_assigned_at,omitempty"`
 }
 
 type KnowledgeSnippet struct {

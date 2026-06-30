@@ -24,6 +24,8 @@ const (
 	defaultWebhookLimit       = 50
 	maxWebhookLimit           = 100
 	maxCustomerNamePrompts    = 3
+	availabilityOfferLimit    = 3
+	exactAvailabilityLimit    = 24
 )
 
 var (
@@ -55,6 +57,20 @@ type Service struct {
 	bookingTool    BookingTool
 	replyGenerator ReplyGenerator
 	now            func() time.Time
+}
+
+type availabilitySelection struct {
+	Slot       booking.AvailabilitySlot
+	Policy     string
+	Candidates []assignmentCandidate
+}
+
+type assignmentCandidate struct {
+	StaffID        string
+	StaffName      string
+	AssignedCount  int
+	LastAssignedAt *time.Time
+	Slot           booking.AvailabilitySlot
 }
 
 func NewService(store Store, bookingTool BookingTool) *Service {
@@ -201,6 +217,10 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 
 	turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
 
+	if shouldGroupBookingHandoff(message) {
+		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonGroupBooking, groupBookingHandoffReply(), services, staff, cfg)
+	}
+
 	if shouldHandoff(message) {
 		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonHumanRequested, "I'll pass this to the owner so they can help directly. This is not a confirmed appointment.", services, staff, cfg)
 	}
@@ -320,7 +340,7 @@ func (s *Service) applyAvailabilityForRequestedTime(ctx context.Context, ownerUs
 	if preferredDate == "" {
 		return false, nil
 	}
-	result, err := s.availableSlots(ctx, turn.SalonID, ownerUserID, *session, preferredDate)
+	result, err := s.availableSlotsWithLimit(ctx, turn.SalonID, ownerUserID, *session, preferredDate, exactAvailabilityLimit)
 	if err != nil {
 		return false, err
 	}
@@ -330,13 +350,20 @@ func (s *Service) applyAvailabilityForRequestedTime(ctx context.Context, ownerUs
 	}
 	matches := exactAvailabilityMatches(slots, *session)
 	if len(matches) > 0 {
-		sort.SliceStable(matches, func(i, j int) bool {
-			return availabilitySlotSortKey(matches[i]) < availabilitySlotSortKey(matches[j])
-		})
+		selection, err := s.selectAvailabilitySlot(ctx, turn.SalonID, *session, matches, cfg)
+		if err != nil {
+			return false, err
+		}
 		turn.ToolMessage = availabilityToolMessage(len(slots))
-		applySelectedOfferedSlot(session, offeredSlotFromAvailability(result, matches[0]))
+		applyAssignmentSelectionMetadata(turn, selection)
+		applySelectedOfferedSlot(session, offeredSlotFromAvailability(result, selection.Slot))
 		syncTurnUpdate(turn, *session, services, staff, cfg)
 		return true, nil
+	}
+	if handled, err := s.applySpecificStaffUnavailableOffer(ctx, ownerUserID, turn, session, services, staff, cfg, preferredDate, result); err != nil {
+		return false, err
+	} else if handled {
+		return false, nil
 	}
 	applyAvailabilityOffer(turn, session, services, staff, cfg, result, true)
 	return false, nil
@@ -377,7 +404,7 @@ func exactAvailabilityMatches(slots []booking.AvailabilitySlot, session Session)
 		if !slot.StartTime.Equal(*session.RequestedStartTime) {
 			continue
 		}
-		if staffID := strings.TrimSpace(session.StaffID); staffID != "" && strings.TrimSpace(slot.StaffID) != staffID {
+		if staffID := strings.TrimSpace(session.StaffID); staffID != "" && availabilitySlotStaffID(slot) != staffID {
 			continue
 		}
 		matches = append(matches, slot)
@@ -385,13 +412,177 @@ func exactAvailabilityMatches(slots []booking.AvailabilitySlot, session Session)
 	return matches
 }
 
-func availabilitySlotSortKey(slot booking.AvailabilitySlot) string {
-	name := strings.ToLower(strings.TrimSpace(slot.StaffName))
-	staffID := strings.TrimSpace(slot.StaffID)
-	if name == "" {
-		name = staffID
+func (s *Service) selectAvailabilitySlot(ctx context.Context, salonID string, session Session, matches []booking.AvailabilitySlot, cfg *RuntimeConfig) (availabilitySelection, error) {
+	if len(matches) == 0 {
+		return availabilitySelection{}, ErrNotFound
 	}
-	return name + "\x00" + staffID
+	if staffSelectionModeForAvailability(session) == booking.StaffSelectionSpecific && strings.TrimSpace(session.StaffID) != "" {
+		sort.SliceStable(matches, stableAvailabilitySlotLess(matches))
+		slot := matches[0]
+		return availabilitySelection{
+			Slot:   slot,
+			Policy: "customer_requested_staff",
+			Candidates: []assignmentCandidate{{
+				StaffID:   availabilitySlotStaffID(slot),
+				StaffName: availabilitySlotStaffName(slot),
+				Slot:      slot,
+			}},
+		}, nil
+	}
+	return s.selectFairAvailabilitySlot(ctx, salonID, session, matches, cfg)
+}
+
+func (s *Service) selectFairAvailabilitySlot(ctx context.Context, salonID string, session Session, matches []booking.AvailabilitySlot, cfg *RuntimeConfig) (availabilitySelection, error) {
+	unique := uniqueAvailabilitySlotsByStaff(matches)
+	if len(unique) == 0 {
+		unique = append([]booking.AvailabilitySlot(nil), matches...)
+	}
+	staffIDs := make([]string, 0, len(unique))
+	for _, slot := range unique {
+		if staffID := availabilitySlotStaffID(slot); staffID != "" {
+			staffIDs = append(staffIDs, staffID)
+		}
+	}
+	from, to := assignmentStatsWindow(session.RequestedStartTime, timezoneLocation(timezoneFromConfig(cfg)))
+	stats, err := s.store.ListStaffAssignmentStats(ctx, salonID, staffIDs, from, to)
+	if err != nil {
+		return availabilitySelection{}, err
+	}
+	candidates := make([]assignmentCandidate, 0, len(unique))
+	for _, slot := range unique {
+		staffID := availabilitySlotStaffID(slot)
+		stat := stats[staffID]
+		candidates = append(candidates, assignmentCandidate{
+			StaffID:        staffID,
+			StaffName:      availabilitySlotStaffName(slot),
+			AssignedCount:  stat.AssignedCount,
+			LastAssignedAt: stat.LastAssignedAt,
+			Slot:           slot,
+		})
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return assignmentCandidateLess(candidates[i], candidates[j])
+	})
+	return availabilitySelection{
+		Slot:       candidates[0].Slot,
+		Policy:     "fair_rotation",
+		Candidates: candidates,
+	}, nil
+}
+
+func stableAvailabilitySlotLess(slots []booking.AvailabilitySlot) func(i int, j int) bool {
+	return func(i int, j int) bool {
+		leftID := availabilitySlotStaffID(slots[i])
+		rightID := availabilitySlotStaffID(slots[j])
+		if leftID != rightID {
+			return leftID < rightID
+		}
+		leftName := strings.ToLower(availabilitySlotStaffName(slots[i]))
+		rightName := strings.ToLower(availabilitySlotStaffName(slots[j]))
+		if leftName != rightName {
+			return leftName < rightName
+		}
+		return slots[i].StartTime.Before(slots[j].StartTime)
+	}
+}
+
+func uniqueAvailabilitySlotsByStaff(slots []booking.AvailabilitySlot) []booking.AvailabilitySlot {
+	out := make([]booking.AvailabilitySlot, 0, len(slots))
+	seen := map[string]bool{}
+	for _, slot := range slots {
+		staffID := availabilitySlotStaffID(slot)
+		if staffID == "" {
+			continue
+		}
+		if seen[staffID] {
+			continue
+		}
+		seen[staffID] = true
+		out = append(out, slot)
+	}
+	return out
+}
+
+func availabilitySlotStaffID(slot booking.AvailabilitySlot) string {
+	if staffID := strings.TrimSpace(slot.StaffID); staffID != "" {
+		return staffID
+	}
+	for _, segment := range slot.Segments {
+		if staffID := strings.TrimSpace(segment.StaffID); staffID != "" {
+			return staffID
+		}
+	}
+	return ""
+}
+
+func availabilitySlotStaffName(slot booking.AvailabilitySlot) string {
+	if name := strings.TrimSpace(slot.StaffName); name != "" {
+		return name
+	}
+	for _, segment := range slot.Segments {
+		if name := strings.TrimSpace(segment.StaffName); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func assignmentStatsWindow(requestedStartTime *time.Time, loc *time.Location) (time.Time, time.Time) {
+	if loc == nil {
+		loc = time.UTC
+	}
+	if requestedStartTime == nil || requestedStartTime.IsZero() {
+		now := time.Now().In(loc)
+		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+		return start.UTC(), start.AddDate(0, 0, 1).UTC()
+	}
+	local := requestedStartTime.In(loc)
+	start := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
+	return start.UTC(), start.AddDate(0, 0, 1).UTC()
+}
+
+func assignmentCandidateLess(left assignmentCandidate, right assignmentCandidate) bool {
+	if left.AssignedCount != right.AssignedCount {
+		return left.AssignedCount < right.AssignedCount
+	}
+	if left.LastAssignedAt == nil && right.LastAssignedAt != nil {
+		return true
+	}
+	if left.LastAssignedAt != nil && right.LastAssignedAt == nil {
+		return false
+	}
+	if left.LastAssignedAt != nil && right.LastAssignedAt != nil && !left.LastAssignedAt.Equal(*right.LastAssignedAt) {
+		return left.LastAssignedAt.Before(*right.LastAssignedAt)
+	}
+	if left.StaffID != right.StaffID {
+		return left.StaffID < right.StaffID
+	}
+	return strings.ToLower(left.StaffName) < strings.ToLower(right.StaffName)
+}
+
+func applyAssignmentSelectionMetadata(turn *TurnRecord, selection availabilitySelection) {
+	if turn == nil {
+		return
+	}
+	candidates := make([]map[string]any, 0, len(selection.Candidates))
+	for _, item := range selection.Candidates {
+		entry := map[string]any{
+			"staff_id":       item.StaffID,
+			"staff_name":     item.StaffName,
+			"assigned_count": item.AssignedCount,
+		}
+		if item.LastAssignedAt != nil {
+			entry["last_assigned_at"] = item.LastAssignedAt.Format(time.RFC3339)
+		}
+		candidates = append(candidates, entry)
+	}
+	turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{
+		"assignment_policy":      selection.Policy,
+		"selected_staff_id":      availabilitySlotStaffID(selection.Slot),
+		"selected_staff_name":    availabilitySlotStaffName(selection.Slot),
+		"assignment_candidates":  candidates,
+		"assignment_candidate_n": len(candidates),
+	})
 }
 
 func (s *Service) offerAvailableSlots(ctx context.Context, ownerUserID string, turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, preferredDate string, unavailableRequestedTime bool, cfg *RuntimeConfig) error {
@@ -404,18 +595,99 @@ func (s *Service) offerAvailableSlots(ctx context.Context, ownerUserID string, t
 }
 
 func (s *Service) availableSlots(ctx context.Context, salonID string, ownerUserID string, session Session, preferredDate string) (*booking.AvailabilityResult, error) {
+	return s.availableSlotsWithLimit(ctx, salonID, ownerUserID, session, preferredDate, availabilityOfferLimit)
+}
+
+func (s *Service) availableSlotsWithLimit(ctx context.Context, salonID string, ownerUserID string, session Session, preferredDate string, limit int) (*booking.AvailabilityResult, error) {
 	if s.bookingTool == nil {
 		return nil, fmt.Errorf("booking tool is unavailable")
 	}
 	staffSelectionMode := staffSelectionModeForAvailability(session)
+	if limit <= 0 {
+		limit = availabilityOfferLimit
+	}
 	return s.bookingTool.AvailableSlots(ctx, salonID, ownerUserID, booking.AvailabilityRequest{
 		ServiceID:          session.ServiceID,
 		StaffID:            staffIDForAvailability(session),
 		StaffSelectionMode: staffSelectionMode,
 		Segments:           availabilitySegmentsForSession(session, staffSelectionMode),
 		PreferredDate:      preferredDate,
-		Limit:              3,
+		Limit:              limit,
 	})
+}
+
+func (s *Service) applySpecificStaffUnavailableOffer(ctx context.Context, ownerUserID string, turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, preferredDate string, requestedStaffResult *booking.AvailabilityResult) (bool, error) {
+	if session == nil || session.RequestedStartTime == nil || staffSelectionModeForAvailability(*session) != booking.StaffSelectionSpecific || strings.TrimSpace(session.StaffID) == "" {
+		return false, nil
+	}
+	requestedStart := *session.RequestedStartTime
+	anyoneSession := *session
+	anyoneSession.StaffID = ""
+	anyoneSession.StaffName = ""
+	anyoneSession.StaffSelectionMode = booking.StaffSelectionAnyone
+	clearBookingSegmentsStaffSelection(&anyoneSession)
+	anyoneResult, err := s.availableSlotsWithLimit(ctx, turn.SalonID, ownerUserID, anyoneSession, preferredDate, exactAvailabilityLimit)
+	if err != nil {
+		return false, err
+	}
+
+	otherStaffMatches := exactAvailabilityMatches(availabilitySlots(anyoneResult), anyoneSession)
+	filteredOtherStaffMatches := make([]booking.AvailabilitySlot, 0, len(otherStaffMatches))
+	for _, slot := range otherStaffMatches {
+		if availabilitySlotStaffID(slot) == strings.TrimSpace(session.StaffID) {
+			continue
+		}
+		filteredOtherStaffMatches = append(filteredOtherStaffMatches, slot)
+	}
+
+	offered := []OfferedSlot{}
+	if len(filteredOtherStaffMatches) > 0 {
+		selection, err := s.selectFairAvailabilitySlot(ctx, turn.SalonID, anyoneSession, filteredOtherStaffMatches, cfg)
+		if err != nil {
+			return false, err
+		}
+		applyAssignmentSelectionMetadata(turn, selection)
+		offered = append(offered, offeredSlotFromAvailability(anyoneResult, selection.Slot))
+	}
+	for _, slot := range offeredSlotsFromAvailability(requestedStaffResult) {
+		if len(offered) >= availabilityOfferLimit {
+			break
+		}
+		if offeredSlotAlreadyIncluded(offered, slot) {
+			continue
+		}
+		offered = append(offered, slot)
+	}
+
+	session.RequestedStartTime = nil
+	session.OfferedSlots = offered
+	turn.ToolMessage = availabilityToolMessage(len(offered))
+	turn.AIMessage = formatSpecificStaffUnavailableOffer(*session, staff, requestedStart, offered, timezoneLocation(timezoneFromConfig(cfg)))
+	turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{
+		"availability_policy":          "specific_staff_unavailable",
+		"requested_staff_id":           strings.TrimSpace(session.StaffID),
+		"requested_staff_name":         staffName(session.StaffID, staff, session.StaffName),
+		"same_time_alternative_count":  len(filteredOtherStaffMatches),
+		"requested_staff_option_count": len(offeredSlotsFromAvailability(requestedStaffResult)),
+	})
+	syncTurnUpdate(turn, *session, services, staff, cfg)
+	return true, nil
+}
+
+func availabilitySlots(result *booking.AvailabilityResult) []booking.AvailabilitySlot {
+	if result == nil {
+		return nil
+	}
+	return result.Slots
+}
+
+func offeredSlotAlreadyIncluded(slots []OfferedSlot, candidate OfferedSlot) bool {
+	for _, slot := range slots {
+		if slot.StartTime.Equal(candidate.StartTime) && strings.TrimSpace(slot.StaffID) == strings.TrimSpace(candidate.StaffID) {
+			return true
+		}
+	}
+	return false
 }
 
 func applyAvailabilityOffer(turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, result *booking.AvailabilityResult, unavailableRequestedTime bool) {
@@ -524,6 +796,26 @@ func formatSlotOffer(slots []OfferedSlot, loc *time.Location, unavailableRequest
 	if unavailableRequestedTime {
 		prefix = "That time is not available. I found these openings: "
 	}
+	return prefix + formatSlotOptions(slots, loc) + ". Which works?"
+}
+
+func formatSpecificStaffUnavailableOffer(session Session, staff []StaffOption, requestedStart time.Time, slots []OfferedSlot, loc *time.Location) string {
+	if loc == nil {
+		loc = time.UTC
+	}
+	requestedStaff := staffName(session.StaffID, staff, session.StaffName)
+	if requestedStaff == "" {
+		requestedStaff = "That technician"
+	}
+	when := requestedStart.In(loc).Format("3:04 PM Monday")
+	prefix := requestedStaff + " is not available at " + when + ". "
+	if len(slots) == 0 {
+		return prefix + "What other time works with " + requestedStaff + ", or should I use anyone available?"
+	}
+	return prefix + "I found these options: " + formatSlotOptions(slots, loc) + ". Which works?"
+}
+
+func formatSlotOptions(slots []OfferedSlot, loc *time.Location) string {
 	parts := make([]string, 0, len(slots))
 	for i, slot := range slots {
 		label := ordinalLabel(i + 1)
@@ -533,7 +825,7 @@ func formatSlotOffer(slots []OfferedSlot, loc *time.Location, unavailableRequest
 		}
 		parts = append(parts, label+" "+when)
 	}
-	return prefix + strings.Join(parts, "; ") + ". Which works?"
+	return strings.Join(parts, "; ")
 }
 
 func selectedRequestedTimeReply(session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, missing string) string {
@@ -1123,7 +1415,7 @@ func shouldHandoff(message string) bool {
 	triggers := []string{
 		"human", "owner", "manager", "person", "representative", "complaint",
 		"refund", "payment dispute", "dispute", "chargeback", "wedding", "party",
-		"group booking", "large group", "talk to someone", "speak to someone",
+		"talk to someone", "speak to someone",
 	}
 	for _, trigger := range triggers {
 		if strings.Contains(lower, trigger) {
@@ -1131,6 +1423,66 @@ func shouldHandoff(message string) bool {
 		}
 	}
 	return false
+}
+
+func shouldGroupBookingHandoff(message string) bool {
+	lower := strings.ToLower(message)
+	normalized := normalizeLooseText(message)
+	triggers := []string{
+		"group booking",
+		"large group",
+		"me and my friend",
+		"my friend and i",
+		"me and two friends",
+		"me and three friends",
+		"my friends and i",
+		"for me and",
+		"for my friends",
+		"party of",
+		"appointments",
+	}
+	for _, trigger := range triggers {
+		if strings.Contains(lower, trigger) || strings.Contains(normalized, trigger) {
+			if strings.Contains(trigger, "appointments") && !containsMultiAppointmentQuantity(normalized) {
+				continue
+			}
+			return true
+		}
+	}
+	return containsMultiPersonQuantity(normalized)
+}
+
+func containsMultiAppointmentQuantity(normalized string) bool {
+	return strings.Contains(normalized, "two appointments") ||
+		strings.Contains(normalized, "three appointments") ||
+		strings.Contains(normalized, "four appointments") ||
+		strings.Contains(normalized, "2 appointments") ||
+		strings.Contains(normalized, "3 appointments") ||
+		strings.Contains(normalized, "4 appointments")
+}
+
+func containsMultiPersonQuantity(normalized string) bool {
+	patterns := []string{
+		"for 2 people",
+		"for 3 people",
+		"for 4 people",
+		"for two people",
+		"for three people",
+		"for four people",
+		"two people",
+		"three people",
+		"four people",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(normalized, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func groupBookingHandoffReply() string {
+	return "For multiple people, the owner needs to coordinate the services, timing, and technicians. I'll send this request to the owner to review. This is not a confirmed appointment."
 }
 
 func hasBookingSignal(message string) bool {
@@ -1773,12 +2125,91 @@ func selectOfferedSlot(message string, slots []OfferedSlot, loc *time.Location) 
 	if selected := offeredSlotForClockCandidates(clockCandidatesFromText(message), slots, loc); selected != nil {
 		return selected
 	}
+	if selected := offeredSlotForStaffName(message, slots); selected != nil {
+		return selected
+	}
+	if selected := offeredSlotForAlternativeStaffIntent(message, slots); selected != nil {
+		return selected
+	}
 	index, ok := selectedSlotIndex(message)
 	if ok && index >= 0 && index < len(slots) {
 		slot := slots[index]
 		return &slot
 	}
 	return nil
+}
+
+func offeredSlotForStaffName(message string, slots []OfferedSlot) *OfferedSlot {
+	if len(slots) == 0 {
+		return nil
+	}
+	lower := strings.ToLower(message)
+	matches := []OfferedSlot{}
+	for _, slot := range slots {
+		names := offeredSlotStaffNames(slot)
+		for _, name := range names {
+			if staffNameMentioned(lower, name) {
+				matches = append(matches, slot)
+				break
+			}
+		}
+	}
+	if len(matches) != 1 {
+		return nil
+	}
+	slot := matches[0]
+	return &slot
+}
+
+func offeredSlotForAlternativeStaffIntent(message string, slots []OfferedSlot) *OfferedSlot {
+	if len(slots) == 0 {
+		return nil
+	}
+	normalized := normalizeLooseText(message)
+	if normalized == "" {
+		return nil
+	}
+	alternative := customerRequestedAnyone(message) ||
+		strings.Contains(normalized, "another technician") ||
+		strings.Contains(normalized, "another tech") ||
+		strings.Contains(normalized, "someone else") ||
+		strings.Contains(normalized, "same time")
+	if !alternative {
+		return nil
+	}
+	matches := []OfferedSlot{}
+	for _, slot := range slots {
+		if slotUsesAnyone(slot) {
+			matches = append(matches, slot)
+		}
+	}
+	if len(matches) != 1 {
+		return nil
+	}
+	slot := matches[0]
+	return &slot
+}
+
+func offeredSlotStaffNames(slot OfferedSlot) []string {
+	names := []string{}
+	seen := map[string]bool{}
+	addStaffName(&names, seen, slot.StaffName)
+	for _, segment := range slot.Segments {
+		addStaffName(&names, seen, segment.StaffName)
+	}
+	return names
+}
+
+func staffNameMentioned(lowerMessage string, name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return false
+	}
+	if strings.Contains(lowerMessage, name) {
+		return true
+	}
+	parts := strings.Fields(name)
+	return len(parts) > 0 && len(parts[0]) > 2 && strings.Contains(lowerMessage, parts[0])
 }
 
 func selectedSlotIndex(message string) (int, bool) {

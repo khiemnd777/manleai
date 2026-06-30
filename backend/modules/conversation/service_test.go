@@ -435,13 +435,17 @@ func TestMessageAutoSelectsExactRequestedTimeAndNamesAssignedTechnician(t *testi
 	}
 }
 
-func TestMessageAutoSelectsDeterministicTechnicianWhenMultipleExactSlotsAreAvailable(t *testing.T) {
+func TestMessageAutoSelectsFairRotationTechnicianWhenMultipleExactSlotsAreAvailable(t *testing.T) {
 	store := newFakeConversationStore()
-	store.staff = append(store.staff, StaffOption{
-		ID:         "staff_2",
-		Name:       "Lena Pham",
-		AIBookable: true,
-	})
+	store.staff = []StaffOption{
+		{ID: "staff_a", Name: "Amy Nguyen", AIBookable: true},
+		{ID: "staff_z", Name: "Zoe Tran", AIBookable: true},
+	}
+	lastAssigned := time.Date(2026, 6, 11, 15, 30, 0, 0, time.UTC)
+	store.assignmentStats = map[string]StaffAssignmentStat{
+		"staff_a": {StaffID: "staff_a", AssignedCount: 2, LastAssignedAt: &lastAssigned},
+		"staff_z": {StaffID: "staff_z", AssignedCount: 0},
+	}
 	start := time.Date(2026, 6, 11, 18, 0, 0, 0, time.UTC)
 	bookingTool := &fakeBookingTool{
 		availabilityResult: &booking.AvailabilityResult{
@@ -455,15 +459,15 @@ func TestMessageAutoSelectsDeterministicTechnicianWhenMultipleExactSlotsAreAvail
 				{
 					StartTime:          start,
 					EndTime:            start.Add(45 * time.Minute),
-					StaffID:            "staff_1",
-					StaffName:          "Mai Nguyen",
+					StaffID:            "staff_a",
+					StaffName:          "Amy Nguyen",
 					StaffSelectionMode: booking.StaffSelectionAnyone,
 				},
 				{
 					StartTime:          start,
 					EndTime:            start.Add(45 * time.Minute),
-					StaffID:            "staff_2",
-					StaffName:          "Lena Pham",
+					StaffID:            "staff_z",
+					StaffName:          "Zoe Tran",
 					StaffSelectionMode: booking.StaffSelectionAnyone,
 				},
 			},
@@ -478,11 +482,168 @@ func TestMessageAutoSelectsDeterministicTechnicianWhenMultipleExactSlotsAreAvail
 	if err != nil {
 		t.Fatalf("Message returned error: %v", err)
 	}
-	if session.StaffID != "staff_2" || session.StaffName != "Lena Pham" {
-		t.Fatalf("assigned staff = %s/%s, want deterministic Lena Pham selection", session.StaffID, session.StaffName)
+	if session.StaffID != "staff_z" || session.StaffName != "Zoe Tran" {
+		t.Fatalf("assigned staff = %s/%s, want fair-rotation Zoe Tran selection", session.StaffID, session.StaffName)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "Lena Pham") || strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "which works") {
+	if !strings.Contains(store.lastTurn.AIMessage, "Zoe Tran") || strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "which works") {
 		t.Fatalf("reply should name the assigned technician without asking the caller to reselect time: %s", store.lastTurn.AIMessage)
+	}
+	if store.lastTurn.ToolMetadata["assignment_policy"] != "fair_rotation" {
+		t.Fatalf("assignment policy metadata = %#v, want fair_rotation", store.lastTurn.ToolMetadata)
+	}
+	if len(store.assignmentStaffIDs) != 2 {
+		t.Fatalf("assignment staff ids = %#v, want two candidates", store.assignmentStaffIDs)
+	}
+	if store.assignmentFrom.IsZero() || store.assignmentTo.Sub(store.assignmentFrom) != 24*time.Hour {
+		t.Fatalf("assignment window = %s to %s, want local day window", store.assignmentFrom, store.assignmentTo)
+	}
+}
+
+func TestMessageOffersAlternativesWhenRequestedTechnicianUnavailableAtExactTime(t *testing.T) {
+	store := newFakeConversationStore()
+	store.staff = append(store.staff, StaffOption{
+		ID:         "staff_2",
+		Name:       "Lena Pham",
+		AIBookable: true,
+	})
+	requestedStart := time.Date(2026, 6, 11, 18, 0, 0, 0, time.UTC)
+	maiLater := requestedStart.Add(time.Hour)
+	bookingTool := &fakeBookingTool{
+		availabilityResults: []*booking.AvailabilityResult{
+			{
+				ServiceID:          "service_1",
+				ServiceName:        "Classic Manicure",
+				StaffID:            "staff_1",
+				StaffName:          "Mai Nguyen",
+				StaffSelectionMode: booking.StaffSelectionSpecific,
+				PreferredDate:      "2026-06-11",
+				DurationMinutes:    45,
+				Timezone:           "America/Chicago",
+				Slots: []booking.AvailabilitySlot{{
+					StartTime:          maiLater,
+					EndTime:            maiLater.Add(45 * time.Minute),
+					StaffID:            "staff_1",
+					StaffName:          "Mai Nguyen",
+					StaffSelectionMode: booking.StaffSelectionSpecific,
+				}},
+			},
+			{
+				ServiceID:          "service_1",
+				ServiceName:        "Classic Manicure",
+				StaffSelectionMode: booking.StaffSelectionAnyone,
+				PreferredDate:      "2026-06-11",
+				DurationMinutes:    45,
+				Timezone:           "America/Chicago",
+				Slots: []booking.AvailabilitySlot{
+					{
+						StartTime:          requestedStart,
+						EndTime:            requestedStart.Add(45 * time.Minute),
+						StaffID:            "staff_2",
+						StaffName:          "Lena Pham",
+						StaffSelectionMode: booking.StaffSelectionAnyone,
+					},
+					{
+						StartTime:          maiLater,
+						EndTime:            maiLater.Add(45 * time.Minute),
+						StaffID:            "staff_1",
+						StaffName:          "Mai Nguyen",
+						StaffSelectionMode: booking.StaffSelectionSpecific,
+					},
+				},
+			},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I want a classic manicure with Mai at 1 p.m. this Thursday.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 2 {
+		t.Fatalf("availability calls = %d, want requested-staff and anyone checks", bookingTool.availabilityCalls)
+	}
+	if bookingTool.calls != 0 {
+		t.Fatalf("booking calls = %d, want 0 before caller chooses an alternative", bookingTool.calls)
+	}
+	if session.RequestedStartTime != nil {
+		t.Fatalf("requested start should be cleared until caller chooses an alternative: %s", session.RequestedStartTime)
+	}
+	if session.StaffID != "staff_1" || session.StaffName != "Mai Nguyen" {
+		t.Fatalf("requested staff should remain Mai until caller agrees to switch: %s/%s", session.StaffID, session.StaffName)
+	}
+	if len(session.OfferedSlots) != 2 {
+		t.Fatalf("offered slots = %#v, want same-time other tech and later requested tech", session.OfferedSlots)
+	}
+	reply := store.lastTurn.AIMessage
+	for _, wantText := range []string{"Mai Nguyen is not available", "1:00 PM", "Lena Pham", "2:00 PM", "Which works"} {
+		if !strings.Contains(reply, wantText) {
+			t.Fatalf("AI reply missing %q: %s", wantText, reply)
+		}
+	}
+	if strings.Contains(strings.ToLower(reply), "confirmed") {
+		t.Fatalf("unavailable reply must not sound confirmed: %s", reply)
+	}
+	if store.lastTurn.ToolMetadata["availability_policy"] != "specific_staff_unavailable" {
+		t.Fatalf("availability policy metadata = %#v, want specific_staff_unavailable", store.lastTurn.ToolMetadata)
+	}
+}
+
+func TestMessageSelectsOfferedSlotByTechnicianNameWithoutAvailabilityRetry(t *testing.T) {
+	store := newFakeConversationStore()
+	store.staff = append(store.staff, StaffOption{
+		ID:         "staff_2",
+		Name:       "Lena Pham",
+		AIBookable: true,
+	})
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.StaffID = "staff_1"
+	store.session.StaffName = "Mai Nguyen"
+	store.session.StaffSelectionMode = booking.StaffSelectionSpecific
+	store.session.OfferedSlots = []OfferedSlot{
+		{
+			StartTime:          time.Date(2026, 6, 11, 18, 0, 0, 0, time.UTC),
+			EndTime:            time.Date(2026, 6, 11, 18, 45, 0, 0, time.UTC),
+			StaffID:            "staff_2",
+			StaffName:          "Lena Pham",
+			StaffSelectionMode: booking.StaffSelectionAnyone,
+		},
+		{
+			StartTime:          time.Date(2026, 6, 11, 19, 0, 0, 0, time.UTC),
+			EndTime:            time.Date(2026, 6, 11, 19, 45, 0, 0, time.UTC),
+			StaffID:            "staff_1",
+			StaffName:          "Mai Nguyen",
+			StaffSelectionMode: booking.StaffSelectionSpecific,
+		},
+	}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Lena is fine.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 {
+		t.Fatalf("availability calls = %d, want 0 when selecting an offered technician", bookingTool.availabilityCalls)
+	}
+	if session.RequestedStartTime == nil || !session.RequestedStartTime.Equal(time.Date(2026, 6, 11, 18, 0, 0, 0, time.UTC)) {
+		t.Fatalf("requested start = %v, want Lena offered slot", session.RequestedStartTime)
+	}
+	if session.StaffID != "staff_2" || session.StaffName != "Lena Pham" {
+		t.Fatalf("assigned staff = %s/%s, want Lena Pham", session.StaffID, session.StaffName)
+	}
+	if len(session.OfferedSlots) != 0 {
+		t.Fatalf("offered slots should be cleared after selecting Lena: %#v", session.OfferedSlots)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "What name") {
+		t.Fatalf("AI reply should collect name after selecting technician alternative: %s", store.lastTurn.AIMessage)
 	}
 }
 
@@ -1100,6 +1261,43 @@ func TestMessageBooksAnyoneMultiServiceSlotWithSegmentAssignments(t *testing.T) 
 	}
 }
 
+func TestMessageCreatesHandoffForMultiPersonBookingRequests(t *testing.T) {
+	tests := []string{
+		"I want to book gel manicures for me and two friends this Thursday.",
+		"I need pedicures for 3 people tomorrow.",
+		"My friend and I want manicures at 1 p.m. Thursday.",
+		"We need two appointments for gel manicure.",
+	}
+	for _, message := range tests {
+		t.Run(message, func(t *testing.T) {
+			store := newFakeConversationStore()
+			bookingTool := &fakeBookingTool{}
+			service := NewService(store, bookingTool)
+			service.now = fixedNow
+
+			session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+				Message: message,
+			})
+			if err != nil {
+				t.Fatalf("Message returned error: %v", err)
+			}
+			if session.Status != StatusHandoff || session.Outcome != OutcomeHandoffRequested {
+				t.Fatalf("session status/outcome = %s/%s, want handoff/handoff_requested", session.Status, session.Outcome)
+			}
+			if store.lastTurn.Handoff == nil || store.lastTurn.Handoff.Reason != HandoffReasonGroupBooking {
+				t.Fatalf("handoff = %#v, want group_booking", store.lastTurn.Handoff)
+			}
+			if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+				t.Fatalf("group booking should not call booking tools, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+			}
+			reply := strings.ToLower(store.lastTurn.AIMessage)
+			if !strings.Contains(reply, "owner") || !strings.Contains(reply, "not a confirmed appointment") {
+				t.Fatalf("group handoff reply must route owner review without confirmation: %s", store.lastTurn.AIMessage)
+			}
+		})
+	}
+}
+
 func TestMessageCreatesHandoffWithoutBookingWhenAIDisabled(t *testing.T) {
 	store := newFakeConversationStore()
 	store.cfg.AIEnabled = false
@@ -1337,6 +1535,10 @@ type fakeConversationStore struct {
 	staff               []StaffOption
 	activeStaff         []StaffOption
 	knowledge           []KnowledgeSnippet
+	assignmentStats     map[string]StaffAssignmentStat
+	assignmentFrom      time.Time
+	assignmentTo        time.Time
+	assignmentStaffIDs  []string
 	lastTurn            TurnRecord
 	processedEventKeys  map[string]bool
 	listLifecycleStatus string
@@ -1456,6 +1658,21 @@ func (f *fakeConversationStore) ListActiveStaff(ctx context.Context, salonID str
 	return staff, nil
 }
 
+func (f *fakeConversationStore) ListStaffAssignmentStats(ctx context.Context, salonID string, staffIDs []string, from time.Time, to time.Time) (map[string]StaffAssignmentStat, error) {
+	f.assignmentFrom = from
+	f.assignmentTo = to
+	f.assignmentStaffIDs = append([]string(nil), staffIDs...)
+	out := make(map[string]StaffAssignmentStat, len(staffIDs))
+	for _, staffID := range staffIDs {
+		if stat, ok := f.assignmentStats[staffID]; ok {
+			out[staffID] = stat
+			continue
+		}
+		out[staffID] = StaffAssignmentStat{StaffID: staffID}
+	}
+	return out, nil
+}
+
 func (f *fakeConversationStore) ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error) {
 	return f.knowledge, nil
 }
@@ -1511,6 +1728,7 @@ type fakeBookingTool struct {
 	availabilityRequest booking.AvailabilityRequest
 	attempt             *booking.BookingAttempt
 	availabilityResult  *booking.AvailabilityResult
+	availabilityResults []*booking.AvailabilityResult
 	err                 error
 	availabilityErr     error
 }
@@ -1520,6 +1738,13 @@ func (f *fakeBookingTool) AvailableSlots(ctx context.Context, salonID string, ow
 	f.availabilityRequest = req
 	if f.availabilityErr != nil {
 		return nil, f.availabilityErr
+	}
+	if len(f.availabilityResults) > 0 {
+		index := f.availabilityCalls - 1
+		if index >= len(f.availabilityResults) {
+			index = len(f.availabilityResults) - 1
+		}
+		return f.availabilityResults[index], nil
 	}
 	if f.availabilityResult != nil {
 		return f.availabilityResult, nil
