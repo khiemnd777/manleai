@@ -100,6 +100,35 @@ func (r *Repository) GetSessionForOwner(ctx context.Context, salonID string, own
 	return session, nil
 }
 
+func (r *Repository) GetSessionByTurnEventKey(ctx context.Context, salonID string, ownerUserID string, sessionID string, eventKey string) (*Session, bool, error) {
+	eventKey = strings.TrimSpace(eventKey)
+	if eventKey == "" {
+		return nil, false, nil
+	}
+	session, err := r.getSession(ctx, `
+		WHERE cs.id = $1
+		  AND cs.salon_id = $2
+		  AND salon.owner_user_id = $3
+		  AND EXISTS (
+		    SELECT 1
+		    FROM call_transcript_messages ctm
+		    WHERE ctm.session_id = cs.id
+		      AND ctm.speaker = $4
+		      AND ctm.metadata->>'event_key' = $5
+		  )
+	`, sessionID, salonID, ownerUserID, SpeakerCustomer, eventKey)
+	if errors.Is(err, ErrNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if err := r.loadSessionDetails(ctx, session); err != nil {
+		return nil, false, err
+	}
+	return session, true, nil
+}
+
 func (r *Repository) ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int) ([]Session, error) {
 	rows, err := r.db.QueryContext(ctx, sessionSelect()+`
 		WHERE cs.salon_id = $1
@@ -407,11 +436,30 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session,
 		  AND s.owner_user_id = $3
 		  AND cs.lifecycle_status <> $4
 		FOR UPDATE
-	`, record.Session.ID, record.SalonID, record.OwnerUserID, LifecycleRedacted).Scan(&lockedID); err != nil {
+		`, record.Session.ID, record.SalonID, record.OwnerUserID, LifecycleRedacted).Scan(&lockedID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
+	}
+	eventKey := strings.TrimSpace(record.EventKey)
+	if eventKey != "" {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM call_transcript_messages
+				WHERE session_id = $1
+				  AND speaker = $2
+				  AND metadata->>'event_key' = $3
+			)
+		`, record.Session.ID, SpeakerCustomer, eventKey).Scan(&exists); err != nil {
+			return nil, err
+		}
+		if exists {
+			_ = tx.Rollback()
+			return r.GetSessionForOwner(ctx, record.SalonID, record.OwnerUserID, record.Session.ID)
+		}
 	}
 
 	var sequence int
@@ -422,27 +470,39 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session,
 	`, record.Session.ID).Scan(&sequence); err != nil {
 		return nil, err
 	}
+	customerMetadata, err := metadataJSON(record.CustomerMetadata)
+	if err != nil {
+		return nil, err
+	}
+	toolMetadata, err := metadataJSON(record.ToolMetadata)
+	if err != nil {
+		return nil, err
+	}
+	aiMetadata, err := metadataJSON(record.AIMetadata)
+	if err != nil {
+		return nil, err
+	}
 	sequence++
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO call_transcript_messages (session_id, salon_id, speaker, body, metadata, sequence)
-		VALUES ($1, $2, $3, $4, '{}'::jsonb, $5)
-	`, record.Session.ID, record.SalonID, SpeakerCustomer, record.CustomerMessage, sequence); err != nil {
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+	`, record.Session.ID, record.SalonID, SpeakerCustomer, record.CustomerMessage, customerMetadata, sequence); err != nil {
 		return nil, err
 	}
 	if record.ToolMessage != "" {
 		sequence++
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO call_transcript_messages (session_id, salon_id, speaker, body, metadata, sequence)
-			VALUES ($1, $2, $3, $4, '{}'::jsonb, $5)
-		`, record.Session.ID, record.SalonID, SpeakerTool, record.ToolMessage, sequence); err != nil {
+			VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+		`, record.Session.ID, record.SalonID, SpeakerTool, record.ToolMessage, toolMetadata, sequence); err != nil {
 			return nil, err
 		}
 	}
 	sequence++
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO call_transcript_messages (session_id, salon_id, speaker, body, metadata, sequence)
-		VALUES ($1, $2, $3, $4, '{}'::jsonb, $5)
-	`, record.Session.ID, record.SalonID, SpeakerAI, record.AIMessage, sequence); err != nil {
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+	`, record.Session.ID, record.SalonID, SpeakerAI, record.AIMessage, aiMetadata, sequence); err != nil {
 		return nil, err
 	}
 
@@ -487,19 +547,20 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session,
 		    customer_phone = NULLIF($5, ''),
 		    customer_email = NULLIF($6, ''),
 		    service_id = NULLIF($7, '')::uuid,
-		    staff_id = NULLIF($8, '')::uuid,
-		    staff_selection_mode = $9,
-		    requested_start_time = $10,
-		    offered_slots = $11::jsonb,
-		    booking_segments = $12::jsonb,
-		    booking_attempt_id = NULLIF($13, '')::uuid,
-		    appointment_id = NULLIF($14, '')::uuid,
-		    summary = NULLIF($15, ''),
-		    ended_at = CASE WHEN $16 THEN now() ELSE ended_at END,
-		    updated_at = now()
-		WHERE id = $17
-		  AND salon_id = $18
-	`, record.Update.Status, record.Update.Intent, record.Update.Outcome, record.Update.CustomerName, record.Update.CustomerPhone, record.Update.CustomerEmail, record.Update.ServiceID, record.Update.StaffID, staffSelectionMode, record.Update.RequestedStartTime, string(offeredSlotsJSON), string(bookingSegmentsJSON), record.Update.BookingAttemptID, record.Update.AppointmentID, record.Update.Summary, record.Update.EndSession, record.Session.ID, record.SalonID); err != nil {
+			    staff_id = NULLIF($8, '')::uuid,
+			    staff_selection_mode = $9,
+			    requested_date = NULLIF($10, '')::date,
+			    requested_start_time = $11,
+			    offered_slots = $12::jsonb,
+			    booking_segments = $13::jsonb,
+			    booking_attempt_id = NULLIF($14, '')::uuid,
+			    appointment_id = NULLIF($15, '')::uuid,
+			    summary = NULLIF($16, ''),
+			    ended_at = CASE WHEN $17 THEN now() ELSE ended_at END,
+			    updated_at = now()
+			WHERE id = $18
+			  AND salon_id = $19
+		`, record.Update.Status, record.Update.Intent, record.Update.Outcome, record.Update.CustomerName, record.Update.CustomerPhone, record.Update.CustomerEmail, record.Update.ServiceID, record.Update.StaffID, staffSelectionMode, record.Update.RequestedDate, record.Update.RequestedStartTime, string(offeredSlotsJSON), string(bookingSegmentsJSON), record.Update.BookingAttemptID, record.Update.AppointmentID, record.Update.Summary, record.Update.EndSession, record.Session.ID, record.SalonID); err != nil {
 		return nil, err
 	}
 
@@ -537,7 +598,7 @@ func (r *Repository) loadSessionDetails(ctx context.Context, session *Session) e
 
 func (r *Repository) listTranscript(ctx context.Context, sessionID string) ([]TranscriptMessage, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id::text, session_id::text, salon_id::text, speaker, body, sequence, created_at
+		SELECT id::text, session_id::text, salon_id::text, speaker, body, COALESCE(metadata, '{}'::jsonb), sequence, created_at
 		FROM call_transcript_messages
 		WHERE session_id = $1
 		ORDER BY sequence ASC
@@ -550,8 +611,14 @@ func (r *Repository) listTranscript(ctx context.Context, sessionID string) ([]Tr
 	items := make([]TranscriptMessage, 0)
 	for rows.Next() {
 		var item TranscriptMessage
-		if err := rows.Scan(&item.ID, &item.SessionID, &item.SalonID, &item.Speaker, &item.Body, &item.Sequence, &item.CreatedAt); err != nil {
+		var metadata []byte
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.SalonID, &item.Speaker, &item.Body, &metadata, &item.Sequence, &item.CreatedAt); err != nil {
 			return nil, err
+		}
+		if len(metadata) > 0 {
+			if err := json.Unmarshal(metadata, &item.Metadata); err != nil {
+				return nil, err
+			}
 		}
 		items = append(items, item)
 	}
@@ -590,6 +657,17 @@ func (r *Repository) latestHandoff(ctx context.Context, sessionID string) (*Hand
 		item.ResolvedAt = &resolvedAt.Time
 	}
 	return &item, nil
+}
+
+func metadataJSON(metadata map[string]any) (string, error) {
+	if len(metadata) == 0 {
+		return "{}", nil
+	}
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
 }
 
 type sqlExecer interface {
@@ -726,6 +804,7 @@ func sessionSelect() string {
 		       COALESCE(cs.service_id::text, ''), COALESCE(svc.name, ''),
 		       COALESCE(cs.staff_id::text, ''), COALESCE(st.name, ''),
 		       COALESCE(cs.staff_selection_mode, 'specific'),
+		       COALESCE(cs.requested_date::text, ''),
 		       cs.requested_start_time, COALESCE(cs.offered_slots, '[]'::jsonb),
 		       COALESCE(cs.booking_segments, '[]'::jsonb),
 		       COALESCE(cs.booking_attempt_id::text, ''),
@@ -770,6 +849,7 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 		&item.StaffID,
 		&item.StaffName,
 		&item.StaffSelectionMode,
+		&item.RequestedDate,
 		&requestedStartAt,
 		&offeredSlots,
 		&bookingSegments,

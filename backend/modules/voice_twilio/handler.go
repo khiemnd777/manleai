@@ -146,6 +146,9 @@ func (h *Handler) handleTurn(c *fiber.Ctx) error {
 	if inputModeOverride != "" {
 		runtimeParams[fallbackInputModeQuery] = inputModeOverride
 	}
+	if token := strings.TrimSpace(c.Get("I-Twilio-Idempotency-Token")); token != "" {
+		runtimeParams["TwilioIdempotencyToken"] = token
+	}
 
 	reply, err := h.service.HandleSpeechTurn(c.UserContext(), voice.SpeechTurnRequest{
 		Provider:          voice.ProviderTwilio,

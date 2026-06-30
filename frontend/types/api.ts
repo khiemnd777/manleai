@@ -611,6 +611,7 @@ export type TranscriptMessage = {
   salon_id: string;
   speaker: "ai" | "customer" | "tool";
   body: string;
+  metadata?: Record<string, unknown>;
   sequence: number;
   created_at: string;
 };
@@ -665,6 +666,7 @@ export type ConversationSession = {
   staff_id?: string;
   staff_name?: string;
   staff_selection_mode?: StaffSelectionMode;
+  requested_date?: string;
   requested_start_time?: string;
   offered_slots?: OfferedSlot[];
   booking_segments?: BookingSegmentRequest[];

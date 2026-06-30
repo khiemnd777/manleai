@@ -39,6 +39,22 @@ func TestGuardedReplyGeneratorAcceptsOneQuestionPhoneReply(t *testing.T) {
 	}
 }
 
+func TestGuardedReplyGeneratorRejectsAskingKnownDateAgain(t *testing.T) {
+	generator := NewGuardedReplyGenerator(&fakeLanguageModelProvider{
+		reply: ModelReply{Message: "What day would you like to book your appointment?", Confidence: 0.9},
+	})
+
+	_, err := generator.GenerateReply(context.Background(), conversation.ReplyGenerationRequest{
+		Channel:            conversation.ChannelPhone,
+		SafeReply:          "I have Thursday. What time works best?",
+		KnownBookingFields: []string{"service", "requested_date"},
+		NextRequiredField:  "requested_time",
+	})
+	if err == nil {
+		t.Fatalf("GenerateReply accepted a reply that asks for a known date")
+	}
+}
+
 func TestGuardedReplyGeneratorSkipsSimulatorChannel(t *testing.T) {
 	generator := NewGuardedReplyGenerator(&fakeLanguageModelProvider{
 		reply: ModelReply{Message: "What phone number should we use?", Confidence: 0.9},

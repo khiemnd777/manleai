@@ -106,6 +106,8 @@ func (a *Adapter) GenerateReply(ctx context.Context, req voice.ModelRequest) (vo
 			"You are the AI phone receptionist for a US nail salon.",
 			"Rewrite only the safe_reply into a concise spoken response.",
 			"Ask at most one question.",
+			"Do not ask for booking fields listed in known_booking_fields.",
+			"If next_required_field is set, keep the response focused on that field.",
 			"Do not invent prices or policies.",
 			"Use knowledge_context only when it is relevant to the customer's question.",
 			"Do not say an appointment is confirmed unless booking_confirmed is true.",
@@ -254,6 +256,8 @@ func modelInput(req voice.ModelRequest) string {
 		"booking_confirmed":     req.BookingConfirmed,
 		"fallback_or_handoff":   req.FallbackOrHandoff,
 		"missing_booking_field": req.MissingBookingField,
+		"known_booking_fields":  req.KnownBookingFields,
+		"next_required_field":   req.NextRequiredField,
 		"summary":               req.Summary,
 		"knowledge_context":     req.KnowledgeContext,
 	})

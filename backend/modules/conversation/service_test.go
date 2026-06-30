@@ -241,6 +241,131 @@ func TestMessageOffersAvailableSlotsBeforeBooking(t *testing.T) {
 	}
 }
 
+func TestMessageParsesWeekdayDateAndDoesNotAskForDayAgain(t *testing.T) {
+	store := newFakeConversationStore()
+	bookingTool := &fakeBookingTool{
+		availabilityResult: &booking.AvailabilityResult{
+			ServiceID:       "service_1",
+			ServiceName:     "Classic Manicure",
+			PreferredDate:   "2026-06-11",
+			DurationMinutes: 45,
+			Timezone:        "America/Chicago",
+			Slots: []booking.AvailabilitySlot{{
+				StartTime: time.Date(2026, 6, 11, 15, 0, 0, 0, time.UTC),
+				EndTime:   time.Date(2026, 6, 11, 15, 45, 0, 0, time.UTC),
+				StaffID:   "staff_1",
+				StaffName: "Mai Nguyen",
+			}},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I want a classic manicure on Thursday this week.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 1 {
+		t.Fatalf("availability calls = %d, want 1", bookingTool.availabilityCalls)
+	}
+	if bookingTool.availabilityRequest.PreferredDate != "2026-06-11" {
+		t.Fatalf("preferred date = %s, want 2026-06-11", bookingTool.availabilityRequest.PreferredDate)
+	}
+	if session.RequestedDate != "2026-06-11" {
+		t.Fatalf("requested date = %q, want 2026-06-11", session.RequestedDate)
+	}
+	if strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "what day") {
+		t.Fatalf("AI should not ask for day again after parsing Thursday: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageParsesVietnameseWeekdayDate(t *testing.T) {
+	store := newFakeConversationStore()
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I want a classic manicure. Thứ Tư này tuần này.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityRequest.PreferredDate != "2026-06-10" {
+		t.Fatalf("preferred date = %s, want 2026-06-10", bookingTool.availabilityRequest.PreferredDate)
+	}
+	if session.RequestedDate != "2026-06-10" {
+		t.Fatalf("requested date = %q, want 2026-06-10", session.RequestedDate)
+	}
+	if strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "what day") {
+		t.Fatalf("AI should not ask for day again after Vietnamese weekday: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageKeepsKnownDateOnUnclearRepairTurn(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.RequestedDate = "2026-06-11"
+	store.session.Transcript = []TranscriptMessage{{
+		Speaker: SpeakerAI,
+		Body:    "I have Thursday. What time works best?",
+	}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "A...",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("repair turn should not call booking tools, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if session.RequestedDate != "2026-06-11" {
+		t.Fatalf("requested date = %q, want preserved Thursday", session.RequestedDate)
+	}
+	if strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "what day") {
+		t.Fatalf("repair turn should not ask for date again: %s", store.lastTurn.AIMessage)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Thursday") {
+		t.Fatalf("repair reply should preserve last prompt context: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageDedupesProcessedEventKeyBeforeBooking(t *testing.T) {
+	store := newFakeConversationStore()
+	bookingTool := &fakeBookingTool{
+		attempt: &booking.BookingAttempt{
+			ID:           "attempt_1",
+			Status:       booking.StatusConfirmed,
+			POSBookingID: "booking_1",
+			Appointment:  &booking.Appointment{ID: "appointment_1", Status: booking.StatusConfirmed},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+	req := MessageRequest{
+		Message:  "My name is Linh Tran, phone 312-555-0101, classic manicure with Mai on 2026-06-10 at 3pm.",
+		EventKey: "twilio:CA123:realtime:item_1",
+	}
+
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", req); err != nil {
+		t.Fatalf("first Message returned error: %v", err)
+	}
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", req); err != nil {
+		t.Fatalf("duplicate Message returned error: %v", err)
+	}
+	if bookingTool.calls != 1 {
+		t.Fatalf("booking calls = %d, want one after duplicate event key", bookingTool.calls)
+	}
+}
+
 func TestMessageSelectsOfferedSlotThenCollectsCustomerName(t *testing.T) {
 	store := newFakeConversationStore()
 	store.session.Intent = IntentBooking
@@ -615,6 +740,7 @@ type fakeConversationStore struct {
 	activeStaff         []StaffOption
 	knowledge           []KnowledgeSnippet
 	lastTurn            TurnRecord
+	processedEventKeys  map[string]bool
 	listLifecycleStatus string
 	listLimit           int
 	webhookSessionID    string
@@ -653,6 +779,7 @@ func newFakeConversationStore() *fakeConversationStore {
 			Name:       "Mai Nguyen",
 			AIBookable: true,
 		}},
+		processedEventKeys: map[string]bool{},
 	}
 }
 
@@ -667,6 +794,14 @@ func (f *fakeConversationStore) CreateSession(ctx context.Context, record NewSes
 func (f *fakeConversationStore) GetSessionForOwner(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error) {
 	session := f.session
 	return &session, nil
+}
+
+func (f *fakeConversationStore) GetSessionByTurnEventKey(ctx context.Context, salonID string, ownerUserID string, sessionID string, eventKey string) (*Session, bool, error) {
+	if f.processedEventKeys[eventKey] {
+		session := f.session
+		return &session, true, nil
+	}
+	return nil, false, nil
 }
 
 func (f *fakeConversationStore) ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int) ([]Session, error) {
@@ -729,6 +864,9 @@ func (f *fakeConversationStore) ListActiveKnowledge(ctx context.Context, salonID
 
 func (f *fakeConversationStore) SaveTurn(ctx context.Context, record TurnRecord) (*Session, error) {
 	f.lastTurn = record
+	if record.EventKey != "" {
+		f.processedEventKeys[record.EventKey] = true
+	}
 	session := record.Session
 	session.Status = record.Update.Status
 	session.Intent = record.Update.Intent
@@ -750,6 +888,7 @@ func (f *fakeConversationStore) SaveTurn(ctx context.Context, record TurnRecord)
 		}
 	}
 	session.RequestedStartTime = record.Update.RequestedStartTime
+	session.RequestedDate = record.Update.RequestedDate
 	session.OfferedSlots = record.Update.OfferedSlots
 	session.BookingSegments = append([]booking.BookingSegmentRequest(nil), record.Update.BookingSegments...)
 	session.BookingAttemptID = record.Update.BookingAttemptID

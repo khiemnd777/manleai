@@ -22,13 +22,14 @@ const (
 )
 
 var (
-	phonePattern        = regexp.MustCompile(`(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})`)
-	emailPattern        = regexp.MustCompile(`(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}`)
-	dateTimePattern     = regexp.MustCompile(`(?i)(\d{4}-\d{2}-\d{2})(?:[ t]+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)`)
-	relativeTimePattern = regexp.MustCompile(`(?i)\b(today|tomorrow)\b\s*(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?`)
-	dateOnlyPattern     = regexp.MustCompile(`(?i)\b(\d{4}-\d{2}-\d{2})\b`)
-	relativeDayPattern  = regexp.MustCompile(`(?i)\b(today|tomorrow)\b`)
-	namePatterns        = []*regexp.Regexp{
+	phonePattern            = regexp.MustCompile(`(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})`)
+	emailPattern            = regexp.MustCompile(`(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}`)
+	dateTimePattern         = regexp.MustCompile(`(?i)(\d{4}-\d{2}-\d{2})(?:[ t]+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)`)
+	relativeTimePattern     = regexp.MustCompile(`(?i)\b(today|tomorrow)\b\s*(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?`)
+	dateOnlyPattern         = regexp.MustCompile(`(?i)\b(\d{4}-\d{2}-\d{2})\b`)
+	relativeDayPattern      = regexp.MustCompile(`(?i)\b(today|tomorrow)\b`)
+	timeWithMeridiemPattern = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b`)
+	namePatterns            = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\bmy name is\s+([^,.;]+)`),
 		regexp.MustCompile(`(?i)\bthis is\s+([^,.;]+)`),
 		regexp.MustCompile(`(?i)\bi am\s+([^,.;]+)`),
@@ -109,12 +110,20 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	ownerUserID = strings.TrimSpace(ownerUserID)
 	sessionID = strings.TrimSpace(sessionID)
 	message := strings.TrimSpace(req.Message)
+	eventKey := normalizeEventKey(req.EventKey)
 	if salonID == "" || ownerUserID == "" || sessionID == "" || message == "" {
 		return nil, ErrValidation
 	}
 	session, err := s.store.GetSessionForOwner(ctx, salonID, ownerUserID, sessionID)
 	if err != nil {
 		return nil, err
+	}
+	if eventKey != "" {
+		if processed, ok, err := s.store.GetSessionByTurnEventKey(ctx, salonID, ownerUserID, sessionID, eventKey); err != nil {
+			return nil, err
+		} else if ok {
+			return processed, nil
+		}
 	}
 	if session.Status != StatusActive {
 		return nil, ErrSessionClosed
@@ -140,6 +149,17 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		return nil, err
 	}
 
+	if repairReply := repairReplyForMessage(message, *session, cfg); repairReply != "" {
+		turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
+		turn.AIMessage = repairReply
+		missing := ""
+		if session.Intent == IntentBooking || session.ServiceID != "" || session.RequestedDate != "" || session.RequestedStartTime != nil {
+			missing = missingBookingField(*session)
+		}
+		finalizeTurnMetadata(&turn, *session, *session, missing, missing, "deterministic_repair")
+		return s.store.SaveTurn(ctx, turn)
+	}
+
 	next := *session
 	selectedOfferedSlot := false
 	applyExtraction(&next, message, services, staff, timezoneLocation(cfg.Timezone), s.now)
@@ -150,27 +170,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	intent := resolveIntent(session.Intent, message, next)
 	next.Intent = intent
 
-	turn := TurnRecord{
-		SalonID:         salonID,
-		OwnerUserID:     ownerUserID,
-		Session:         *session,
-		CustomerMessage: message,
-		Update: SessionUpdate{
-			Status:             StatusActive,
-			Intent:             intent,
-			Outcome:            OutcomeCollecting,
-			CustomerName:       next.CustomerName,
-			CustomerPhone:      next.CustomerPhone,
-			CustomerEmail:      next.CustomerEmail,
-			ServiceID:          next.ServiceID,
-			StaffID:            next.StaffID,
-			StaffSelectionMode: staffSelectionModeForSession(next),
-			RequestedStartTime: next.RequestedStartTime,
-			OfferedSlots:       next.OfferedSlots,
-			BookingSegments:    next.BookingSegments,
-			Summary:            summaryFor(next, services, staff, cfg),
-		},
-	}
+	turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
 
 	if shouldHandoff(message) {
 		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonHumanRequested, "I'll pass this to the owner so they can help directly. This is not a confirmed appointment.", services, staff, cfg)
@@ -182,7 +182,8 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		} else {
 			turn.AIMessage = "I can help with appointments. What service would you like to book?"
 		}
-		s.applyReplyGenerator(ctx, &turn, next, cfg, "", knowledge)
+		s.applyReplyGenerator(ctx, &turn, next, cfg, "", "", knowledge)
+		finalizeTurnMetadata(&turn, *session, next, "", "", "knowledge_or_booking_redirect")
 		return s.store.SaveTurn(ctx, turn)
 	}
 
@@ -203,24 +204,27 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 			return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check Square Appointments availability, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
 		}
 		if !available {
-			s.applyReplyGenerator(ctx, &turn, next, cfg, "requested_start_time", knowledge)
+			s.applyReplyGenerator(ctx, &turn, next, cfg, "requested_time", "requested_time", knowledge)
+			finalizeTurnMetadata(&turn, *session, next, "requested_time", "requested_time", "availability_alternative")
 			return s.store.SaveTurn(ctx, turn)
 		}
 	}
 
 	if missing := missingBookingField(next); missing != "" {
-		if missing == "requested_start_time" {
-			preferredDate := preferredDateFromMessage(message, nil, timezoneLocation(cfg.Timezone), s.now)
+		if missing == "requested_time" || missing == "requested_start_time" {
+			preferredDate := preferredDateForAvailability(next, message, timezoneLocation(cfg.Timezone), s.now)
 			if preferredDate != "" && next.ServiceID != "" {
 				if err := s.offerAvailableSlots(ctx, ownerUserID, &turn, &next, services, staff, preferredDate, false, cfg); err != nil {
 					return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check Square Appointments availability, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
 				}
-				s.applyReplyGenerator(ctx, &turn, next, cfg, missing, knowledge)
+				s.applyReplyGenerator(ctx, &turn, next, cfg, missing, missing, knowledge)
+				finalizeTurnMetadata(&turn, *session, next, missing, missing, "availability_offer")
 				return s.store.SaveTurn(ctx, turn)
 			}
 		}
 		turn.AIMessage = promptForMissingField(missing)
-		s.applyReplyGenerator(ctx, &turn, next, cfg, missing, knowledge)
+		s.applyReplyGenerator(ctx, &turn, next, cfg, missing, missing, knowledge)
+		finalizeTurnMetadata(&turn, *session, next, missing, missing, "missing_field")
 		return s.store.SaveTurn(ctx, turn)
 	}
 
@@ -458,10 +462,120 @@ func syncTurnUpdate(turn *TurnRecord, session Session, services []ServiceOption,
 	turn.Update.ServiceID = session.ServiceID
 	turn.Update.StaffID = session.StaffID
 	turn.Update.StaffSelectionMode = staffSelectionModeForSession(session)
+	turn.Update.RequestedDate = session.RequestedDate
 	turn.Update.RequestedStartTime = session.RequestedStartTime
 	turn.Update.OfferedSlots = session.OfferedSlots
 	turn.Update.BookingSegments = session.BookingSegments
 	turn.Update.Summary = summaryFor(session, services, staff, cfg)
+}
+
+func newTurnRecord(salonID string, ownerUserID string, before Session, after Session, message string, eventKey string, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) TurnRecord {
+	return TurnRecord{
+		SalonID:         salonID,
+		OwnerUserID:     ownerUserID,
+		Session:         before,
+		CustomerMessage: message,
+		EventKey:        eventKey,
+		Update: SessionUpdate{
+			Status:             StatusActive,
+			Intent:             after.Intent,
+			Outcome:            OutcomeCollecting,
+			CustomerName:       after.CustomerName,
+			CustomerPhone:      after.CustomerPhone,
+			CustomerEmail:      after.CustomerEmail,
+			ServiceID:          after.ServiceID,
+			StaffID:            after.StaffID,
+			StaffSelectionMode: staffSelectionModeForSession(after),
+			RequestedDate:      after.RequestedDate,
+			RequestedStartTime: after.RequestedStartTime,
+			OfferedSlots:       after.OfferedSlots,
+			BookingSegments:    after.BookingSegments,
+			Summary:            summaryFor(after, services, staff, cfg),
+		},
+	}
+}
+
+func finalizeTurnMetadata(turn *TurnRecord, before Session, after Session, missing string, nextRequired string, replySource string) {
+	if turn == nil {
+		return
+	}
+	customer := map[string]any{
+		"slots_before": bookingSlotSnapshot(before),
+		"slots_after":  bookingSlotSnapshot(after),
+	}
+	if turn.EventKey != "" {
+		customer["event_key"] = turn.EventKey
+	}
+	if missing != "" {
+		customer["missing_booking_field"] = missing
+	}
+	if nextRequired != "" {
+		customer["next_required_field"] = nextRequired
+	}
+	turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, customer)
+	ai := map[string]any{
+		"turn_path":            replySource,
+		"known_booking_fields": knownBookingFields(after),
+	}
+	if nextRequired != "" {
+		ai["next_required_field"] = nextRequired
+	}
+	if missing != "" {
+		ai["missing_booking_field"] = missing
+	}
+	turn.AIMetadata = mergeMetadata(turn.AIMetadata, ai)
+}
+
+func mergeMetadata(base map[string]any, updates map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range base {
+		out[key] = value
+	}
+	for key, value := range updates {
+		out[key] = value
+	}
+	return out
+}
+
+func bookingSlotSnapshot(session Session) map[string]any {
+	out := map[string]any{
+		"intent":                 session.Intent,
+		"service_id":             strings.TrimSpace(session.ServiceID),
+		"staff_id":               strings.TrimSpace(session.StaffID),
+		"staff_selection_mode":   staffSelectionModeForSession(session),
+		"requested_date":         strings.TrimSpace(session.RequestedDate),
+		"offered_slot_count":     len(session.OfferedSlots),
+		"booking_segment_count":  len(session.BookingSegments),
+		"customer_name_present":  strings.TrimSpace(session.CustomerName) != "",
+		"customer_phone_present": strings.TrimSpace(session.CustomerPhone) != "",
+	}
+	if session.RequestedStartTime != nil {
+		out["requested_start_time"] = session.RequestedStartTime.Format(time.RFC3339)
+	}
+	return out
+}
+
+func knownBookingFields(session Session) []string {
+	fields := []string{}
+	if strings.TrimSpace(session.ServiceID) != "" {
+		fields = append(fields, "service")
+	}
+	if strings.TrimSpace(session.RequestedDate) != "" || session.RequestedStartTime != nil {
+		fields = append(fields, "requested_date")
+	}
+	if session.RequestedStartTime != nil {
+		fields = append(fields, "requested_start_time", "requested_time")
+	}
+	if strings.TrimSpace(session.CustomerName) != "" {
+		fields = append(fields, "customer_name")
+	}
+	if strings.TrimSpace(session.CustomerPhone) != "" {
+		fields = append(fields, "customer_phone")
+	}
+	if hasStaffAssignment(session) {
+		fields = append(fields, "staff")
+	}
+	return fields
 }
 
 func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnRecord, session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
@@ -511,14 +625,16 @@ func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnR
 	turn.Update.OfferedSlots = nil
 	turn.Update.EndSession = true
 	turn.Update.Summary = summaryFor(session, services, staff, cfg)
-	s.applyReplyGenerator(ctx, &turn, session, cfg, "", knowledge)
+	s.applyReplyGenerator(ctx, &turn, session, cfg, "", "", knowledge)
+	finalizeTurnMetadata(&turn, turn.Session, session, "", "", "booking_result")
 	return s.store.SaveTurn(ctx, turn)
 }
 
-func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, session Session, cfg *RuntimeConfig, missing string, knowledge []KnowledgeSnippet) {
+func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, session Session, cfg *RuntimeConfig, missing string, nextRequired string, knowledge []KnowledgeSnippet) {
 	if s.replyGenerator == nil || turn == nil || strings.TrimSpace(turn.AIMessage) == "" {
 		return
 	}
+	safeReply := strings.TrimSpace(turn.AIMessage)
 	result, err := s.replyGenerator.GenerateReply(ctx, ReplyGenerationRequest{
 		SalonID:             turn.SalonID,
 		SessionID:           session.ID,
@@ -531,15 +647,34 @@ func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, ses
 		BookingConfirmed:    turn.Update.Outcome == OutcomeBookingConfirmed && turn.Update.BookingAttemptID != "" && turn.Update.AppointmentID != "",
 		FallbackOrHandoff:   turn.Update.Outcome == OutcomeBookingFallbackPending || turn.Update.Outcome == OutcomeAIDisabled || turn.Update.Outcome == OutcomeHandoffRequested,
 		MissingBookingField: missing,
+		KnownBookingFields:  knownBookingFields(session),
+		NextRequiredField:   nextRequired,
 		Summary:             turn.Update.Summary,
 		KnowledgeContext:    formatKnowledgeContext(knowledge),
 	})
 	if err != nil {
+		turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{
+			"safe_reply":          safeReply,
+			"llm_guardrail":       "fallback_to_safe_reply",
+			"llm_error":           err.Error(),
+			"reply_source":        "safe_reply",
+			"next_required_field": nextRequired,
+		})
 		return
 	}
 	if message := strings.TrimSpace(result.Message); message != "" {
 		turn.AIMessage = message
 	}
+	turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{
+		"safe_reply":          safeReply,
+		"llm_reply":           strings.TrimSpace(result.Message),
+		"llm_confidence":      result.Confidence,
+		"llm_handoff":         result.Handoff,
+		"llm_reason":          result.Reason,
+		"llm_guardrail":       "accepted",
+		"reply_source":        "llm_rewrite",
+		"next_required_field": nextRequired,
+	})
 }
 
 func (s *Service) saveHandoffTurn(ctx context.Context, turn TurnRecord, session Session, reason string, reply string, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (*Session, error) {
@@ -558,6 +693,7 @@ func (s *Service) saveHandoffTurn(ctx context.Context, turn TurnRecord, session 
 		CustomerPhone: session.CustomerPhone,
 		Summary:       summary,
 	}
+	finalizeTurnMetadata(&turn, turn.Session, session, "", "", "handoff")
 	return s.store.SaveTurn(ctx, turn)
 }
 
@@ -573,6 +709,113 @@ func normalizeStartRequest(req StartSessionRequest) StartSessionRequest {
 	req.CustomerPhone = validation.NormalizePhone(req.CustomerPhone)
 	req.CustomerEmail = strings.TrimSpace(req.CustomerEmail)
 	return req
+}
+
+func normalizeEventKey(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 180 {
+		value = value[:180]
+	}
+	return value
+}
+
+func repairReplyForMessage(message string, session Session, cfg *RuntimeConfig) string {
+	if !isRepairOrUnclearUtterance(message) {
+		return ""
+	}
+	last := lastAITranscriptMessage(session)
+	if isConnectionCheck(message) {
+		if last != "" {
+			return "I can hear you. " + last
+		}
+		return "I can hear you. How can I help with your appointment?"
+	}
+	if last != "" {
+		return last
+	}
+	if session.Intent == IntentBooking || session.ServiceID != "" || session.RequestedDate != "" || session.RequestedStartTime != nil {
+		return promptForCurrentBookingState(session, cfg)
+	}
+	return ""
+}
+
+func isRepairOrUnclearUtterance(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	cleaned := strings.Trim(lower, " .,!?:;-")
+	if len([]rune(cleaned)) <= 2 {
+		return true
+	}
+	exact := []string{"sorry", "sorry?", "what", "what?", "huh", "pardon", "hello", "hello?"}
+	for _, trigger := range exact {
+		if lower == trigger {
+			return true
+		}
+	}
+	contains := []string{"repeat that", "say that again", "can you repeat", "i didn't hear", "i did not hear", "can you hear me", "i can hear you"}
+	for _, trigger := range contains {
+		if strings.Contains(lower, trigger) {
+			return true
+		}
+	}
+	return false
+}
+
+func isConnectionCheck(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(lower, "hello") || strings.Contains(lower, "can you hear") || strings.Contains(lower, "i can hear")
+}
+
+func lastAITranscriptMessage(session Session) string {
+	for i := len(session.Transcript) - 1; i >= 0; i-- {
+		msg := session.Transcript[i]
+		if msg.Speaker == SpeakerAI {
+			return strings.TrimSpace(msg.Body)
+		}
+	}
+	return ""
+}
+
+func promptForCurrentBookingState(session Session, cfg *RuntimeConfig) string {
+	switch missingBookingField(session) {
+	case "service":
+		return promptForMissingField("service")
+	case "requested_date":
+		return promptForMissingField("requested_date")
+	case "requested_time":
+		if session.RequestedDate != "" {
+			return "I have " + requestedDateLabel(session.RequestedDate, timezoneLocation(timezoneFromConfig(cfg))) + ". What time works best?"
+		}
+		return promptForMissingField("requested_time")
+	case "customer_name":
+		return promptForMissingField("customer_name")
+	case "customer_phone":
+		return promptForMissingField("customer_phone")
+	case "staff":
+		return promptForMissingField("staff")
+	default:
+		return "I have the appointment details. Let me check that for you."
+	}
+}
+
+func timezoneFromConfig(cfg *RuntimeConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	return cfg.Timezone
+}
+
+func requestedDateLabel(requestedDate string, loc *time.Location) string {
+	if loc == nil {
+		loc = time.UTC
+	}
+	parsed, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(requestedDate), loc)
+	if err != nil {
+		return strings.TrimSpace(requestedDate)
+	}
+	return parsed.Format("Monday")
 }
 
 func bookingSourceForSession(session Session) string {
@@ -611,7 +854,7 @@ func resolveIntent(current string, message string, session Session) string {
 	if shouldHandoff(message) {
 		return IntentHandoff
 	}
-	if current == IntentBooking || hasBookingSignal(message) || session.ServiceID != "" || session.RequestedStartTime != nil {
+	if current == IntentBooking || hasBookingSignal(message) || session.ServiceID != "" || session.RequestedDate != "" || session.RequestedStartTime != nil {
 		return IntentBooking
 	}
 	return IntentUnknown
@@ -620,6 +863,18 @@ func resolveIntent(current string, message string, session Session) string {
 func applyExtraction(session *Session, message string, services []ServiceOption, staff []StaffOption, loc *time.Location, now func() time.Time) {
 	if session == nil {
 		return
+	}
+	if requestedAt, ok := parseRequestedTime(message, loc, now); ok {
+		applyRequestedStartTime(session, requestedAt, loc)
+	} else {
+		if requestedDate := preferredDateFromMessage(message, nil, loc, now); requestedDate != "" {
+			applyRequestedDate(session, requestedDate)
+		}
+		if session.RequestedStartTime == nil && strings.TrimSpace(session.RequestedDate) != "" {
+			if requestedAt, ok := parseTimeOnlyForDate(message, session.RequestedDate, loc); ok {
+				applyRequestedStartTime(session, requestedAt, loc)
+			}
+		}
 	}
 	if session.CustomerEmail == "" {
 		if email := extractEmail(message); email != "" {
@@ -650,11 +905,6 @@ func applyExtraction(session *Session, message string, services []ServiceOption,
 		session.BookingSegments = bookingSegmentsFromServices(matches, *session)
 		if len(session.BookingSegments) > 0 {
 			session.StaffSelectionMode = session.BookingSegments[0].StaffSelectionMode
-		}
-	}
-	if session.RequestedStartTime == nil {
-		if requestedAt, ok := parseRequestedTime(message, loc, now); ok {
-			session.RequestedStartTime = &requestedAt
 		}
 	}
 	if session.CustomerName == "" {
@@ -696,8 +946,10 @@ func missingBookingField(session Session) string {
 	switch {
 	case strings.TrimSpace(session.ServiceID) == "":
 		return "service"
+	case session.RequestedStartTime == nil && strings.TrimSpace(session.RequestedDate) == "":
+		return "requested_date"
 	case session.RequestedStartTime == nil:
-		return "requested_start_time"
+		return "requested_time"
 	case strings.TrimSpace(session.CustomerName) == "":
 		return "customer_name"
 	case strings.TrimSpace(session.CustomerPhone) == "":
@@ -719,8 +971,12 @@ func promptForMissingField(field string) string {
 		return "Which service would you like?"
 	case "staff":
 		return "Which technician would you like, or should I use anyone available?"
-	case "requested_start_time":
+	case "requested_date":
 		return "What day would you like? I will check available times."
+	case "requested_time":
+		return "What time works for that day?"
+	case "requested_start_time":
+		return "What day and time would you like?"
 	default:
 		return "What else should I know?"
 	}
@@ -755,7 +1011,7 @@ func canTreatAsName(message string, session Session) bool {
 	if session.Intent != IntentBooking || session.CustomerName != "" {
 		return false
 	}
-	if session.CustomerPhone != "" || session.ServiceID != "" || session.StaffID != "" || session.RequestedStartTime != nil {
+	if session.CustomerPhone != "" || session.ServiceID != "" || session.StaffID != "" || session.RequestedDate != "" || session.RequestedStartTime != nil {
 		return false
 	}
 	trimmed := strings.TrimSpace(message)
@@ -1015,6 +1271,23 @@ func parseRequestedTime(message string, loc *time.Location, now func() time.Time
 	return time.Time{}, false
 }
 
+func parseTimeOnlyForDate(message string, requestedDate string, loc *time.Location) (time.Time, bool) {
+	requestedDate = strings.TrimSpace(requestedDate)
+	if requestedDate == "" {
+		return time.Time{}, false
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+	if match := timeWithMeridiemPattern.FindStringSubmatch(message); len(match) > 0 {
+		parsed, err := parseDateAndClock(requestedDate, match[1], match[2], match[3], loc)
+		if err == nil {
+			return parsed.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
 func preferredDateFromMessage(message string, requestedStartTime *time.Time, loc *time.Location, now func() time.Time) string {
 	if loc == nil {
 		loc = time.UTC
@@ -1035,7 +1308,100 @@ func preferredDateFromMessage(message string, requestedStartTime *time.Time, loc
 		}
 		return base.Format("2006-01-02")
 	}
+	if weekday, nextWeek, ok := weekdayFromMessage(message); ok {
+		return dateForWeekday(now().In(loc), weekday, nextWeek).Format("2006-01-02")
+	}
 	return ""
+}
+
+func preferredDateForAvailability(session Session, message string, loc *time.Location, now func() time.Time) string {
+	if session.RequestedStartTime != nil {
+		return preferredDateFromMessage("", session.RequestedStartTime, loc, now)
+	}
+	if date := strings.TrimSpace(session.RequestedDate); date != "" {
+		return date
+	}
+	return preferredDateFromMessage(message, nil, loc, now)
+}
+
+func applyRequestedStartTime(session *Session, requestedAt time.Time, loc *time.Location) {
+	if session == nil || requestedAt.IsZero() {
+		return
+	}
+	start := requestedAt.UTC()
+	session.RequestedStartTime = &start
+	if loc == nil {
+		loc = time.UTC
+	}
+	session.RequestedDate = start.In(loc).Format("2006-01-02")
+	session.OfferedSlots = nil
+}
+
+func applyRequestedDate(session *Session, requestedDate string) {
+	if session == nil {
+		return
+	}
+	requestedDate = strings.TrimSpace(requestedDate)
+	if requestedDate == "" {
+		return
+	}
+	if session.RequestedDate != requestedDate {
+		session.RequestedDate = requestedDate
+		session.RequestedStartTime = nil
+		session.OfferedSlots = nil
+		return
+	}
+	if session.RequestedDate == "" {
+		session.RequestedDate = requestedDate
+	}
+}
+
+func weekdayFromMessage(message string) (time.Weekday, bool, bool) {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return time.Sunday, false, false
+	}
+	nextWeek := strings.Contains(lower, "next ") || strings.Contains(lower, "tuần sau") || strings.Contains(lower, "tuan sau")
+	checks := []struct {
+		weekday time.Weekday
+		signals []string
+	}{
+		{time.Monday, []string{"monday", "mon", "thứ hai", "thu hai"}},
+		{time.Tuesday, []string{"tuesday", "tues", "tue", "thứ ba", "thu ba"}},
+		{time.Wednesday, []string{"wednesday", "wed", "thứ tư", "thu tu"}},
+		{time.Thursday, []string{"thursday", "thurs", "thur", "thứ năm", "thu nam"}},
+		{time.Friday, []string{"friday", "fri", "thứ sáu", "thu sau"}},
+		{time.Saturday, []string{"saturday", "sat", "thứ bảy", "thu bay"}},
+		{time.Sunday, []string{"sunday", "sun", "chủ nhật", "chu nhat"}},
+	}
+	for _, check := range checks {
+		for _, signal := range check.signals {
+			if containsDateSignal(lower, signal) {
+				return check.weekday, nextWeek, true
+			}
+		}
+	}
+	return time.Sunday, false, false
+}
+
+func containsDateSignal(lower string, signal string) bool {
+	if strings.Contains(signal, " ") || strings.ContainsAny(signal, "ứủảăâêôơư") {
+		return strings.Contains(lower, signal)
+	}
+	return regexp.MustCompile(`\b` + regexp.QuoteMeta(signal) + `\b`).MatchString(lower)
+}
+
+func dateForWeekday(base time.Time, target time.Weekday, nextWeek bool) time.Time {
+	start := time.Date(base.Year(), base.Month(), base.Day(), 0, 0, 0, 0, base.Location())
+	days := (int(target) - int(start.Weekday()) + 7) % 7
+	if nextWeek {
+		if days == 0 {
+			days = 7
+		} else {
+			days += 7
+		}
+	}
+	return start.AddDate(0, 0, days)
 }
 
 func selectOfferedSlot(message string, slots []OfferedSlot) *OfferedSlot {
@@ -1094,6 +1460,7 @@ func applySelectedOfferedSlot(session *Session, slot OfferedSlot) {
 	}
 	start := slot.StartTime
 	session.RequestedStartTime = &start
+	session.RequestedDate = start.Format("2006-01-02")
 	session.StaffID = slot.StaffID
 	session.StaffName = slot.StaffName
 	session.StaffSelectionMode = offeredSlotStaffSelectionMode(slot)
@@ -1418,6 +1785,8 @@ func summaryFor(session Session, services []ServiceOption, staff []StaffOption, 
 	}
 	if session.RequestedStartTime != nil {
 		parts = append(parts, "requested "+session.RequestedStartTime.Format(time.RFC3339))
+	} else if session.RequestedDate != "" {
+		parts = append(parts, "requested date "+session.RequestedDate)
 	}
 	if len(parts) == 0 {
 		return "Conversation needs owner review."

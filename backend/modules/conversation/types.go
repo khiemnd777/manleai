@@ -61,6 +61,7 @@ type Store interface {
 	GetRuntimeConfig(ctx context.Context, salonID string, ownerUserID string) (*RuntimeConfig, error)
 	CreateSession(ctx context.Context, record NewSessionRecord) (*Session, error)
 	GetSessionForOwner(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error)
+	GetSessionByTurnEventKey(ctx context.Context, salonID string, ownerUserID string, sessionID string, eventKey string) (*Session, bool, error)
 	ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int) ([]Session, error)
 	ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int) ([]WebhookEventLog, error)
 	ArchiveSession(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error)
@@ -87,7 +88,8 @@ type StartPhoneCallRequest struct {
 }
 
 type MessageRequest struct {
-	Message string `json:"message"`
+	Message  string `json:"message"`
+	EventKey string `json:"event_key,omitempty"`
 }
 
 type ReplyGenerationRequest struct {
@@ -102,6 +104,8 @@ type ReplyGenerationRequest struct {
 	BookingConfirmed    bool
 	FallbackOrHandoff   bool
 	MissingBookingField string
+	KnownBookingFields  []string
+	NextRequiredField   string
 	Summary             string
 	KnowledgeContext    string
 }
@@ -161,6 +165,7 @@ type Session struct {
 	StaffID            string                          `json:"staff_id,omitempty"`
 	StaffName          string                          `json:"staff_name,omitempty"`
 	StaffSelectionMode string                          `json:"staff_selection_mode,omitempty"`
+	RequestedDate      string                          `json:"requested_date,omitempty"`
 	RequestedStartTime *time.Time                      `json:"requested_start_time,omitempty"`
 	OfferedSlots       []OfferedSlot                   `json:"offered_slots,omitempty"`
 	BookingSegments    []booking.BookingSegmentRequest `json:"booking_segments,omitempty"`
@@ -198,13 +203,14 @@ type OfferedSlotSegment struct {
 }
 
 type TranscriptMessage struct {
-	ID        string    `json:"id"`
-	SessionID string    `json:"session_id"`
-	SalonID   string    `json:"salon_id"`
-	Speaker   string    `json:"speaker"`
-	Body      string    `json:"body"`
-	Sequence  int       `json:"sequence"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string         `json:"id"`
+	SessionID string         `json:"session_id"`
+	SalonID   string         `json:"salon_id"`
+	Speaker   string         `json:"speaker"`
+	Body      string         `json:"body"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+	Sequence  int            `json:"sequence"`
+	CreatedAt time.Time      `json:"created_at"`
 }
 
 type HandoffRequest struct {
@@ -249,14 +255,18 @@ type NewSessionRecord struct {
 }
 
 type TurnRecord struct {
-	SalonID         string
-	OwnerUserID     string
-	Session         Session
-	CustomerMessage string
-	ToolMessage     string
-	AIMessage       string
-	Update          SessionUpdate
-	Handoff         *HandoffRecord
+	SalonID          string
+	OwnerUserID      string
+	Session          Session
+	CustomerMessage  string
+	ToolMessage      string
+	AIMessage        string
+	EventKey         string
+	CustomerMetadata map[string]any
+	ToolMetadata     map[string]any
+	AIMetadata       map[string]any
+	Update           SessionUpdate
+	Handoff          *HandoffRecord
 }
 
 type SessionUpdate struct {
@@ -269,6 +279,7 @@ type SessionUpdate struct {
 	ServiceID          string
 	StaffID            string
 	StaffSelectionMode string
+	RequestedDate      string
 	RequestedStartTime *time.Time
 	OfferedSlots       []OfferedSlot
 	BookingSegments    []booking.BookingSegmentRequest

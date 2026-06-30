@@ -205,7 +205,10 @@ func (s *Service) HandleSpeechTurn(ctx context.Context, req SpeechTurnRequest) (
 		}, session, req.Provider, req.ProviderCallID, req.InputModeOverride), nil
 	}
 
-	session, err := s.conversation.Message(ctx, route.SalonID, route.OwnerUserID, route.SessionID, conversation.MessageRequest{Message: req.SpeechText})
+	session, err := s.conversation.Message(ctx, route.SalonID, route.OwnerUserID, route.SessionID, conversation.MessageRequest{
+		Message:  req.SpeechText,
+		EventKey: speechTurnEventKey(req),
+	})
 	if errors.Is(err, conversation.ErrSessionClosed) {
 		session, _ = s.conversation.Get(ctx, route.SalonID, route.OwnerUserID, route.SessionID)
 		return s.buildReplyWithInputMode(ctx, CallReply{
@@ -241,6 +244,23 @@ func (s *Service) transcribe(ctx context.Context, salonID string, req SpeechTurn
 		return "", ErrProviderDisabled
 	}
 	return s.providers.STT.Transcribe(ctx, salonID, req.Audio, req.AudioContentType)
+}
+
+func speechTurnEventKey(req SpeechTurnRequest) string {
+	callID := strings.TrimSpace(req.ProviderCallID)
+	if callID == "" {
+		callID = strings.TrimSpace(req.Payload["CallSid"])
+	}
+	if callID == "" {
+		return ""
+	}
+	for _, key := range []string{"RealtimeTranscriptID", "RecordingSid", "EventSid", "TwilioIdempotencyToken"} {
+		value := strings.TrimSpace(req.Payload[key])
+		if value != "" {
+			return strings.Join([]string{defaultProvider(req.Provider), callID, strings.ToLower(key), value}, ":")
+		}
+	}
+	return ""
 }
 
 func (s *Service) buildReply(ctx context.Context, reply CallReply, session *conversation.Session, provider string, providerCallID string) *CallReply {

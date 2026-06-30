@@ -63,6 +63,9 @@
 - Verify human requests, complaints, refunds, payment disputes, and group-booking language create owner handoffs.
 - Verify the Calls dashboard handles loading, empty, error, success, disabled/gated, and mobile states.
 - Verify simulator transcripts show customer, AI, and booking tool messages in sequence.
+- Verify booking conversations preserve already-collected service/date/time/customer/staff slots and do not ask for a known day again after date-only turns such as "Thursday this week" or "Thứ Tư này tuần này".
+- Verify unclear repair turns such as "Sorry?", "Hello?", or partial STT fragments repeat or rephrase the current prompt without clearing the known booking date or calling booking tools.
+- Verify voice provider retries with a stable event key do not append duplicate transcript turns or create duplicate booking attempts.
 
 ## Milestone 5 Live Voice Webhooks
 

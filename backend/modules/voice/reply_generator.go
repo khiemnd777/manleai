@@ -34,6 +34,8 @@ func (g *GuardedReplyGenerator) GenerateReply(ctx context.Context, req conversat
 		BookingConfirmed:    req.BookingConfirmed,
 		FallbackOrHandoff:   req.FallbackOrHandoff,
 		MissingBookingField: req.MissingBookingField,
+		KnownBookingFields:  append([]string(nil), req.KnownBookingFields...),
+		NextRequiredField:   req.NextRequiredField,
 		Summary:             req.Summary,
 		KnowledgeContext:    req.KnowledgeContext,
 	})
@@ -68,7 +70,56 @@ func replyAllowed(req conversation.ReplyGenerationRequest, reply ModelReply) boo
 	if !req.BookingConfirmed && hasUnsafeConfirmation(message) {
 		return false
 	}
+	if asksForKnownBookingField(req, message) {
+		return false
+	}
 	return true
+}
+
+func asksForKnownBookingField(req conversation.ReplyGenerationRequest, message string) bool {
+	for _, field := range req.KnownBookingFields {
+		if asksForBookingField(message, field) {
+			return true
+		}
+	}
+	switch req.NextRequiredField {
+	case "requested_time":
+		return asksForBookingField(message, "requested_date")
+	default:
+		return false
+	}
+}
+
+func asksForBookingField(message string, field string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	switch field {
+	case "service":
+		return strings.Contains(lower, "what service") ||
+			strings.Contains(lower, "which service") ||
+			strings.Contains(lower, "what nail service")
+	case "requested_date":
+		return strings.Contains(lower, "what day") ||
+			strings.Contains(lower, "which day") ||
+			strings.Contains(lower, "what date") ||
+			strings.Contains(lower, "which date") ||
+			strings.Contains(lower, "when would you like") ||
+			strings.Contains(lower, "when do you want")
+	case "requested_start_time", "requested_time":
+		return strings.Contains(lower, "what time") ||
+			strings.Contains(lower, "which time")
+	case "customer_name":
+		return strings.Contains(lower, "what name") ||
+			strings.Contains(lower, "name should")
+	case "customer_phone":
+		return strings.Contains(lower, "what phone") ||
+			strings.Contains(lower, "phone number")
+	case "staff":
+		return strings.Contains(lower, "which technician") ||
+			strings.Contains(lower, "what technician") ||
+			strings.Contains(lower, "which nail tech")
+	default:
+		return false
+	}
 }
 
 func hasUnsafeConfirmation(message string) bool {

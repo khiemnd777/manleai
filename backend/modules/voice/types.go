@@ -125,6 +125,8 @@ type ModelRequest struct {
 	BookingConfirmed    bool
 	FallbackOrHandoff   bool
 	MissingBookingField string
+	KnownBookingFields  []string
+	NextRequiredField   string
 	Summary             string
 	KnowledgeContext    string
 }

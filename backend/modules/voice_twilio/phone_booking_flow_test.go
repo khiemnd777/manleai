@@ -129,6 +129,7 @@ type phoneFlowConversationStore struct {
 	staff       []conversation.StaffOption
 	activeStaff []conversation.StaffOption
 	knowledge   []conversation.KnowledgeSnippet
+	eventKeys   map[string]bool
 }
 
 func newPhoneFlowConversationStore() *phoneFlowConversationStore {
@@ -151,6 +152,7 @@ func newPhoneFlowConversationStore() *phoneFlowConversationStore {
 			Name:       "Mai Nguyen",
 			AIBookable: true,
 		}},
+		eventKeys: map[string]bool{},
 	}
 }
 
@@ -190,6 +192,13 @@ func (f *phoneFlowConversationStore) CreateSession(ctx context.Context, record c
 
 func (f *phoneFlowConversationStore) GetSessionForOwner(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*conversation.Session, error) {
 	return f.copySession(), nil
+}
+
+func (f *phoneFlowConversationStore) GetSessionByTurnEventKey(ctx context.Context, salonID string, ownerUserID string, sessionID string, eventKey string) (*conversation.Session, bool, error) {
+	if f.eventKeys[eventKey] {
+		return f.copySession(), true, nil
+	}
+	return nil, false, nil
 }
 
 func (f *phoneFlowConversationStore) ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int) ([]conversation.Session, error) {
@@ -242,6 +251,9 @@ func (f *phoneFlowConversationStore) ListActiveKnowledge(ctx context.Context, sa
 }
 
 func (f *phoneFlowConversationStore) SaveTurn(ctx context.Context, record conversation.TurnRecord) (*conversation.Session, error) {
+	if record.EventKey != "" {
+		f.eventKeys[record.EventKey] = true
+	}
 	session := record.Session
 	session.Status = record.Update.Status
 	session.Intent = record.Update.Intent
@@ -263,6 +275,7 @@ func (f *phoneFlowConversationStore) SaveTurn(ctx context.Context, record conver
 		}
 	}
 	session.RequestedStartTime = record.Update.RequestedStartTime
+	session.RequestedDate = record.Update.RequestedDate
 	session.OfferedSlots = record.Update.OfferedSlots
 	session.BookingSegments = append([]booking.BookingSegmentRequest(nil), record.Update.BookingSegments...)
 	session.BookingAttemptID = record.Update.BookingAttemptID
