@@ -72,6 +72,7 @@ type Store interface {
 	ListBookableStaff(ctx context.Context, salonID string) ([]StaffOption, error)
 	ListActiveStaff(ctx context.Context, salonID string) ([]StaffOption, error)
 	ListStaffAssignmentStats(ctx context.Context, salonID string, staffIDs []string, from time.Time, to time.Time) (map[string]StaffAssignmentStat, error)
+	ListActiveServiceAliases(ctx context.Context, salonID string) ([]ServiceAlias, error)
 	ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error)
 	SaveTurn(ctx context.Context, record TurnRecord) (*Session, error)
 }
@@ -135,6 +136,16 @@ type ServiceOption struct {
 	DurationMinutes int     `json:"duration_minutes"`
 	PriceFrom       float64 `json:"price_from,omitempty"`
 	PriceDisplay    string  `json:"price_display,omitempty"`
+}
+
+type ServiceAlias struct {
+	ID              string  `json:"id"`
+	ServiceID       string  `json:"service_id"`
+	ServiceName     string  `json:"service_name"`
+	Alias           string  `json:"alias"`
+	NormalizedAlias string  `json:"normalized_alias"`
+	Source          string  `json:"source"`
+	Confidence      float64 `json:"confidence"`
 }
 
 type StaffOption struct {

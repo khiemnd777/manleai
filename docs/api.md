@@ -1095,7 +1095,7 @@ Irreversibly redacts a completed or otherwise non-active owner-scoped conversati
 }
 ```
 
-Processes one simulated customer message through the deterministic conversation engine. `event_key` is optional for simulator callers and is used by voice adapters to dedupe provider retries. The simulator asks one question at a time, preserves already-collected booking slots, handles greeting-only or connection-check turns without replaying the full welcome or forcing booking intent, handles date-only turns such as weekdays before a time is known, can create owner handoffs for human requests or disabled AI booking, checks provider-neutral availability before selecting a booking time, offers available slots from Square Appointments, and calls the provider-neutral booking service only after the customer selects a slot and required customer details are collected. Offered slots may include ordered `segments` with provider-neutral service/staff assignments. The engine can select a unique offered slot from ordinal replies, spoken times such as "one p.m.", or a "Yes" reply to a prompt that confirmed one specific offered time; unclear time fragments repeat the existing offered slots instead of rerunning availability. Once a customer selects a slot, the session stores selected `booking_segments` and `staff_selection_mode` so simulator and phone flows can create one multi-service POS-first booking request. When `staff_selection_mode=anyone`, the customer did not choose a named technician, so the conversation avoids presenting the POS staff assignment as a customer-selected technician. A simulator booking is marked `booking_confirmed` only when the booking service returns a confirmed booking attempt with a POS booking ID and appointment. POS failures create `booking_fallback_pending` wording and do not create confirmed appointment language.
+Processes one simulated customer message through the deterministic conversation engine. `event_key` is optional for simulator callers and is used by voice adapters to dedupe provider retries. The simulator asks one question at a time, preserves already-collected booking slots, handles greeting-only or connection-check turns without replaying the full welcome or forcing booking intent, handles date-only turns such as weekdays before a time is known, can create owner handoffs for human requests or disabled AI booking, checks provider-neutral availability before selecting a booking time, offers available slots from Square Appointments, and calls the provider-neutral booking service only after the customer selects a slot and required customer details are collected. Service utterances are interpreted against the active salon catalog and active `service_aliases`; exact catalog service names win over aliases, alias matches can select one service, and generic or fuzzy family matches ask for catalog-backed clarification instead of selecting a service. Transcript metadata may include `service_understanding_status`, `service_understanding_reason`, `service_understanding_confidence`, candidate service IDs/names, selected service, alias source, and alias ID for debugging. Offered slots may include ordered `segments` with provider-neutral service/staff assignments. The engine can select a unique offered slot from ordinal replies, spoken times such as "one p.m.", or a "Yes" reply to a prompt that confirmed one specific offered time; unclear time fragments repeat the existing offered slots instead of rerunning availability. Once a customer selects a slot, the session stores selected `booking_segments` and `staff_selection_mode` so simulator and phone flows can create one multi-service POS-first booking request. When `staff_selection_mode=anyone`, the customer did not choose a named technician, so the conversation avoids presenting the POS staff assignment as a customer-selected technician. A simulator booking is marked `booking_confirmed` only when the booking service returns a confirmed booking attempt with a POS booking ID and appointment. POS failures create `booking_fallback_pending` wording and do not create confirmed appointment language.
 
 Phone channel sessions are created by Twilio webhooks and use the same conversation engine. Phone bookings use source `ai_voice_call`; simulator bookings use source `ai_conversation_simulator`.
 
@@ -1124,6 +1124,24 @@ Updates title, category, body, and status.
 
 Deletes an owner-scoped knowledge item.
 
+`GET /api/salons/:id/service-aliases`
+
+Returns owner-scoped service aliases used by the conversation service-understanding layer. Runtime use is limited to active aliases whose target service is active and AI-bookable.
+
+`POST /api/salons/:id/service-aliases`
+
+Creates or updates a service alias. The backend normalizes `alias` into `normalized_alias` and upserts by `(salon_id, normalized_alias)`, so retrying the same request updates one alias instead of creating duplicate learned behavior.
+
+```json
+{
+  "service_id": "...",
+  "alias": "shell manicure",
+  "source": "owner",
+  "status": "active",
+  "confidence": 0.94
+}
+```
+
 `GET /api/salons/:id/owner-corrections`
 
 Returns recent owner corrections.
@@ -1143,6 +1161,18 @@ When `transcript_message_id` is provided, `call_session_id` is required so the b
 `POST /api/salons/:id/owner-corrections/:correction_id/apply`
 
 Creates a knowledge item from the correction and marks the correction as `applied`.
+
+`POST /api/salons/:id/owner-corrections/:correction_id/apply-service-alias`
+
+Applies a correction into a structured service alias and marks the correction as `applied`. This is for service-understanding fixes such as mapping a repeated caller/STT phrase to a real service. It does not alter POS services and does not confirm appointments.
+
+```json
+{
+  "service_id": "...",
+  "alias": "shell manicure",
+  "confidence": 0.96
+}
+```
 
 `POST /api/salons/:id/owner-corrections/:correction_id/dismiss`
 

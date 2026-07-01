@@ -32,6 +32,39 @@ func TestKnowledgeValidationRejectsUnknownValues(t *testing.T) {
 	}
 }
 
+func TestNormalizeServiceAliasInputDefaultsAndBoundsConfidence(t *testing.T) {
+	req := normalizeServiceAliasInput(ServiceAliasInput{
+		ServiceID:  " service_1 ",
+		Alias:      " Shell Manicure ",
+		Confidence: 1.7,
+	}, AliasSourceCorrection, AliasStatusActive)
+
+	if req.ServiceID != "service_1" || req.Alias != "Shell Manicure" {
+		t.Fatalf("normalized request = %#v", req)
+	}
+	if req.Source != AliasSourceCorrection || req.Status != AliasStatusActive {
+		t.Fatalf("source/status = %s/%s", req.Source, req.Status)
+	}
+	if req.Confidence != 1 {
+		t.Fatalf("confidence = %f, want capped 1", req.Confidence)
+	}
+}
+
+func TestNormalizeAliasTextCanonicalizesAliasKey(t *testing.T) {
+	if got := normalizeAliasText(" Shell-Manicure / Gel "); got != "shell manicure gel" {
+		t.Fatalf("normalized alias = %q", got)
+	}
+}
+
+func TestServiceAliasValidationRejectsUnknownValues(t *testing.T) {
+	if validAliasSource("prompt") {
+		t.Fatalf("unknown alias source should be invalid")
+	}
+	if validAliasStatus("pending") {
+		t.Fatalf("unknown alias status should be invalid")
+	}
+}
+
 func TestCreateCorrectionRequiresSessionForTranscriptSource(t *testing.T) {
 	service := NewService(&Repository{})
 	_, err := service.CreateCorrection(context.Background(), "salon_1", "owner_1", OwnerCorrectionInput{

@@ -21,6 +21,7 @@ func (OwnerCorrection) Fields() []ent.Field {
 		field.String("correction"),
 		field.String("status").Default("pending"),
 		field.UUID("applied_knowledge_item_id", uuid.UUID{}).Optional().Nillable(),
+		field.UUID("applied_service_alias_id", uuid.UUID{}).Optional().Nillable(),
 		field.Time("created_at").Default(time.Now),
 		field.Time("updated_at").Default(time.Now).UpdateDefault(time.Now),
 	}

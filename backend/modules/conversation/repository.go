@@ -461,6 +461,36 @@ func (r *Repository) ListStaffAssignmentStats(ctx context.Context, salonID strin
 	return out, rows.Err()
 }
 
+func (r *Repository) ListActiveServiceAliases(ctx context.Context, salonID string) ([]ServiceAlias, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT sa.id::text, sa.service_id::text, svc.name, sa.alias, sa.normalized_alias,
+		       sa.source, sa.confidence
+		FROM service_aliases sa
+		JOIN services svc ON svc.id = sa.service_id
+		WHERE sa.salon_id = $1
+		  AND sa.status = 'active'
+		  AND svc.salon_id = sa.salon_id
+		  AND svc.active = true
+		  AND svc.ai_bookable = true
+		ORDER BY sa.updated_at DESC
+		LIMIT 200
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]ServiceAlias, 0)
+	for rows.Next() {
+		var item ServiceAlias
+		if err := rows.Scan(&item.ID, &item.ServiceID, &item.ServiceName, &item.Alias, &item.NormalizedAlias, &item.Source, &item.Confidence); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (r *Repository) ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT title, category, body

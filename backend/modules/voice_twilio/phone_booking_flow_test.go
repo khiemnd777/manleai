@@ -132,6 +132,7 @@ type phoneFlowConversationStore struct {
 	cfg         conversation.RuntimeConfig
 	session     conversation.Session
 	services    []conversation.ServiceOption
+	aliases     []conversation.ServiceAlias
 	staff       []conversation.StaffOption
 	activeStaff []conversation.StaffOption
 	knowledge   []conversation.KnowledgeSnippet
@@ -235,6 +236,10 @@ func (f *phoneFlowConversationStore) RedactSession(ctx context.Context, salonID 
 
 func (f *phoneFlowConversationStore) ListBookableServices(ctx context.Context, salonID string) ([]conversation.ServiceOption, error) {
 	return f.services, nil
+}
+
+func (f *phoneFlowConversationStore) ListActiveServiceAliases(ctx context.Context, salonID string) ([]conversation.ServiceAlias, error) {
+	return f.aliases, nil
 }
 
 func (f *phoneFlowConversationStore) ListBookableStaff(ctx context.Context, salonID string) ([]conversation.StaffOption, error) {

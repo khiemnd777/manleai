@@ -172,6 +172,10 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	if err != nil {
 		return nil, err
 	}
+	serviceAliases, err := s.store.ListActiveServiceAliases(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
 	staff, err := s.store.ListBookableStaff(ctx, salonID)
 	if err != nil {
 		return nil, err
@@ -189,7 +193,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		return updated, err
 	}
 
-	if reply, handoff := customerNameSlotRepairReply(message, *session, services); reply != "" {
+	if reply, handoff := customerNameSlotRepairReply(message, *session, services, serviceAliases); reply != "" {
 		turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
 		if handoff {
 			return s.saveHandoffTurn(ctx, turn, *session, HandoffReasonCustomerDetailsUnavailable, reply, services, staff, cfg)
@@ -216,7 +220,11 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	exactRequestedTimeSelected := false
 	loc := timezoneLocation(cfg.Timezone)
 	pendingNameCandidate := voiceCustomerNamePendingConfirmationCandidate(message, *session)
-	applyExtraction(&next, message, services, staff, loc, s.now)
+	serviceUnderstanding := interpretServiceForSession(message, *session, services, serviceAliases)
+	applyExtraction(&next, message, services, serviceAliases, staff, loc, s.now)
+	if shouldApplyServiceUnderstandingSelection(*session, message, serviceUnderstanding) {
+		applyServiceSelection(&next, serviceUnderstanding.Candidates)
+	}
 	if pendingNameCandidate != "" {
 		next.CustomerName = ""
 	}
@@ -231,6 +239,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	next.Intent = intent
 
 	turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
+	applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
 
 	if shouldGroupBookingHandoff(message) {
 		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonGroupBooking, groupBookingHandoffReply(), services, staff, cfg)
@@ -302,6 +311,14 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 			}
 		}
 		turn.AIMessage = promptForMissingField(missing)
+		if missing == "service" {
+			if prompt := serviceClarificationPrompt(next, serviceUnderstanding, cfg); prompt != "" {
+				turn.AIMessage = prompt
+				setPendingServiceCandidateMetadata(&turn, serviceUnderstanding)
+				finalizeTurnMetadata(&turn, *session, next, missing, missing, "service_understanding_clarification")
+				return s.store.SaveTurn(ctx, turn)
+			}
+		}
 		if exactRequestedTimeSelected {
 			turn.AIMessage = selectedRequestedTimeReply(next, services, staff, cfg, missing)
 		}
@@ -955,6 +972,38 @@ func finalizeTurnMetadata(turn *TurnRecord, before Session, after Session, missi
 	turn.AIMetadata = mergeMetadata(turn.AIMetadata, ai)
 }
 
+func applyServiceUnderstandingMetadata(turn *TurnRecord, result serviceUnderstandingResult) {
+	if turn == nil || (result.Status == serviceUnderstandingStatusUnknown && strings.TrimSpace(result.NormalizedInput) == "") {
+		return
+	}
+	candidateIDs := make([]string, 0, len(result.Candidates))
+	candidateNames := make([]string, 0, len(result.Candidates))
+	for _, candidate := range result.Candidates {
+		candidateIDs = append(candidateIDs, strings.TrimSpace(candidate.ID))
+		candidateNames = append(candidateNames, strings.TrimSpace(candidate.Name))
+	}
+	selectedID := ""
+	selectedName := ""
+	if result.Selected != nil {
+		selectedID = strings.TrimSpace(result.Selected.ID)
+		selectedName = strings.TrimSpace(result.Selected.Name)
+	}
+	turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, map[string]any{
+		"service_understanding_status":        string(result.Status),
+		"service_understanding_reason":        result.Reason,
+		"service_understanding_confidence":    result.Confidence,
+		"service_understanding_token":         result.MatchedToken,
+		"service_understanding_source":        result.MatchedSource,
+		"service_understanding_alias_id":      result.MatchedAliasID,
+		"service_understanding_alias":         result.MatchedAlias,
+		"service_understanding_normalized":    result.NormalizedInput,
+		"service_understanding_candidate_ids": candidateIDs,
+		"service_understanding_candidates":    candidateNames,
+		"service_understanding_selected_id":   selectedID,
+		"service_understanding_selected":      selectedName,
+	})
+}
+
 func mergeMetadata(base map[string]any, updates map[string]any) map[string]any {
 	out := map[string]any{}
 	for key, value := range base {
@@ -1397,7 +1446,7 @@ func resolveIntent(current string, message string, session Session) string {
 	return IntentUnknown
 }
 
-func applyExtraction(session *Session, message string, services []ServiceOption, staff []StaffOption, loc *time.Location, now func() time.Time) {
+func applyExtraction(session *Session, message string, services []ServiceOption, aliases []ServiceAlias, staff []StaffOption, loc *time.Location, now func() time.Time) {
 	if session == nil {
 		return
 	}
@@ -1447,10 +1496,28 @@ func applyExtraction(session *Session, message string, services []ServiceOption,
 			session.CustomerName = name
 		} else if name := extractName(message); name != "" {
 			session.CustomerName = name
-		} else if name := bareCustomerNameForSession(message, *session); name != "" {
-			session.CustomerName = name
+		} else if !looksLikeServiceInsteadOfName(message, services, aliases) {
+			if name := bareCustomerNameForSession(message, *session); name != "" {
+				session.CustomerName = name
+			}
 		}
 	}
+}
+
+func shouldApplyServiceUnderstandingSelection(session Session, message string, result serviceUnderstandingResult) bool {
+	if result.Status != serviceUnderstandingStatusSelected || len(result.Candidates) == 0 {
+		return false
+	}
+	if strings.TrimSpace(session.ServiceID) == "" || len(session.BookingSegments) == 0 {
+		return true
+	}
+	if sameServiceSelection(session, result.Candidates) {
+		return false
+	}
+	if hasServiceCorrectionSignal(message) {
+		return true
+	}
+	return missingBookingField(session) == "customer_name"
 }
 
 func shouldApplyServiceSelection(session Session, message string, matches []ServiceOption) bool {
@@ -1701,6 +1768,61 @@ func promptForMissingField(field string) string {
 	default:
 		return "What else should I know?"
 	}
+}
+
+func serviceClarificationPrompt(session Session, result serviceUnderstandingResult, cfg *RuntimeConfig) string {
+	if result.Status != serviceUnderstandingStatusAmbiguous || len(result.Candidates) == 0 {
+		return ""
+	}
+	options := serviceCandidateNames(result.Candidates, 5)
+	if len(options) == 0 {
+		return ""
+	}
+	serviceLabel := "service"
+	if token := strings.TrimSpace(result.MatchedToken); token != "" {
+		serviceLabel = token + " service"
+	}
+	prefix := ""
+	if context := appointmentContextPhrase(session, cfg); context != "" {
+		prefix = "I have " + context + " noted. "
+	}
+	return prefix + "Which " + serviceLabel + " would you like: " + joinHumanList(options) + "?"
+}
+
+func appointmentContextPhrase(session Session, cfg *RuntimeConfig) string {
+	loc := timezoneLocation(timezoneFromConfig(cfg))
+	if session.RequestedStartTime != nil {
+		return session.RequestedStartTime.In(loc).Format("Monday at 3:04 PM")
+	}
+	if strings.TrimSpace(session.RequestedDate) == "" {
+		return ""
+	}
+	parsed, err := time.Parse("2006-01-02", session.RequestedDate)
+	if err != nil {
+		return strings.TrimSpace(session.RequestedDate)
+	}
+	return parsed.Format("Monday")
+}
+
+func serviceCandidateNames(candidates []ServiceOption, limit int) []string {
+	if limit <= 0 || limit > len(candidates) {
+		limit = len(candidates)
+	}
+	names := make([]string, 0, limit)
+	seen := map[string]bool{}
+	for _, service := range candidates[:limit] {
+		name := strings.TrimSpace(service.Name)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		names = append(names, name)
+	}
+	return names
 }
 
 func extractPhone(message string) string {
@@ -1957,6 +2079,28 @@ func clearPendingCustomerNameMetadata(turn *TurnRecord, reason string) {
 	})
 }
 
+func setPendingServiceCandidateMetadata(turn *TurnRecord, result serviceUnderstandingResult) {
+	if turn == nil || len(result.Candidates) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(result.Candidates))
+	names := make([]string, 0, len(result.Candidates))
+	for _, candidate := range result.Candidates {
+		if id := strings.TrimSpace(candidate.ID); id != "" {
+			ids = append(ids, id)
+		}
+		if name := strings.TrimSpace(candidate.Name); name != "" {
+			names = append(names, name)
+		}
+	}
+	turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{
+		"pending_service_candidate_ids": ids,
+		"pending_service_candidates":    names,
+		"pending_service_token":         strings.TrimSpace(result.MatchedToken),
+		"pending_service_reason":        strings.TrimSpace(result.Reason),
+	})
+}
+
 func metadataString(metadata map[string]any, key string) string {
 	if metadata == nil {
 		return ""
@@ -1971,6 +2115,40 @@ func metadataString(metadata map[string]any, key string) string {
 	return ""
 }
 
+func metadataStringSlice(metadata map[string]any, key string) []string {
+	if metadata == nil {
+		return nil
+	}
+	value, ok := metadata[key]
+	if !ok {
+		return nil
+	}
+	switch typed := value.(type) {
+	case []string:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if item = strings.TrimSpace(item); item != "" {
+				out = append(out, item)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text, ok := item.(string)
+			if !ok {
+				continue
+			}
+			if text = strings.TrimSpace(text); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 func metadataBool(metadata map[string]any, key string) bool {
 	if metadata == nil {
 		return false
@@ -1983,7 +2161,7 @@ func metadataBool(metadata map[string]any, key string) bool {
 	return ok && flag
 }
 
-func customerNameSlotRepairReply(message string, session Session, services []ServiceOption) (string, bool) {
+func customerNameSlotRepairReply(message string, session Session, services []ServiceOption, aliases []ServiceAlias) (string, bool) {
 	if missingBookingField(session) != "customer_name" {
 		return "", false
 	}
@@ -1996,23 +2174,23 @@ func customerNameSlotRepairReply(message string, session Session, services []Ser
 		}
 		return "I may have heard that wrong. Please spell the name for the appointment.", false
 	}
-	if extractName(message) != "" || bareCustomerNameForSession(message, session) != "" {
+	if looksLikeServiceInsteadOfName(message, services, aliases) {
+		return "", false
+	}
+	if extractName(message) != "" {
+		return "", false
+	}
+	if bareCustomerNameForSession(message, session) != "" {
 		return "", false
 	}
 	if customerNamePromptCount(session) >= maxCustomerNamePrompts {
 		return "I'm having trouble catching the name. I'll send this request to the owner to review. This is not a confirmed appointment.", true
 	}
-	if !isCustomerNameNonAnswer(message, services) {
+	if !isCustomerNameNonAnswer(message, services, aliases) {
 		return "", false
 	}
 	if isConnectionCheck(message) {
 		return "I can hear you. What name should I put on the appointment?", false
-	}
-	if looksLikeServiceInsteadOfName(message, services) {
-		if serviceName := strings.TrimSpace(session.ServiceName); serviceName != "" {
-			return "I have " + serviceName + ". What name should I put on the appointment?", false
-		}
-		return "I have the service. What name should I put on the appointment?", false
 	}
 	if isNameRepairRequest(message) {
 		return "I'm asking for the customer name. What name should I put on the appointment?", false
@@ -2034,11 +2212,15 @@ func customerNamePromptCount(session Session) int {
 	return count
 }
 
-func isCustomerNameNonAnswer(message string, services []ServiceOption) bool {
+func isCustomerNameNonAnswer(message string, services []ServiceOption, aliases ...[]ServiceAlias) bool {
+	serviceAliases := []ServiceAlias(nil)
+	if len(aliases) > 0 {
+		serviceAliases = aliases[0]
+	}
 	return isAffirmativeOnly(message) ||
 		isConnectionCheck(message) ||
 		isNameRepairRequest(message) ||
-		looksLikeServiceInsteadOfName(message, services) ||
+		looksLikeServiceInsteadOfName(message, services, serviceAliases) ||
 		phonePattern.MatchString(message) ||
 		emailPattern.MatchString(message) ||
 		looksLikeDateOrTimeInsteadOfName(message)
@@ -2148,10 +2330,14 @@ func isNameRepairRequest(message string) bool {
 		strings.Contains(normalized, "repeat")
 }
 
-func looksLikeServiceInsteadOfName(message string, services []ServiceOption) bool {
+func looksLikeServiceInsteadOfName(message string, services []ServiceOption, aliases ...[]ServiceAlias) bool {
 	lower := strings.ToLower(message)
 	if strings.Contains(lower, "service") || strings.Contains(lower, "name of") {
 		return true
+	}
+	if len(aliases) > 0 {
+		result := interpretService(message, services, aliases[0])
+		return result.Status == serviceUnderstandingStatusSelected || result.Status == serviceUnderstandingStatusAmbiguous
 	}
 	return len(matchServices(message, services)) > 0
 }
@@ -2262,54 +2448,11 @@ func matchService(message string, services []ServiceOption) *ServiceOption {
 }
 
 func matchServices(message string, services []ServiceOption) []ServiceOption {
-	lower := strings.ToLower(message)
-	ordered := append([]ServiceOption(nil), services...)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		return len(ordered[i].Name) > len(ordered[j].Name)
-	})
-	matches := make([]serviceMatch, 0, len(ordered))
-	seen := map[string]bool{}
-	for _, service := range ordered {
-		name := strings.ToLower(service.Name)
-		if name == "" {
-			continue
-		}
-		if index := strings.Index(lower, name); index >= 0 {
-			matches = append(matches, serviceMatch{service: service, index: index, end: index + len(name)})
-			seen[service.ID] = true
-		}
-	}
-	if len(matches) > 0 {
-		matches = removeContainedServiceMatches(matches)
-	} else {
-		for _, service := range ordered {
-			if seen[service.ID] {
-				continue
-			}
-			for _, token := range significantWords(service.Name) {
-				if index := strings.Index(lower, token); index >= 0 {
-					matches = append(matches, serviceMatch{service: service, index: index, end: index + len(token), token: token})
-					seen[service.ID] = true
-					break
-				}
-			}
-		}
-		matches = removeAmbiguousTokenMatches(matches)
-	}
-	if len(matches) == 0 {
+	result := interpretService(message, services)
+	if result.Status != serviceUnderstandingStatusSelected {
 		return nil
 	}
-	sort.SliceStable(matches, func(i, j int) bool {
-		if matches[i].index == matches[j].index {
-			return len(matches[i].service.Name) > len(matches[j].service.Name)
-		}
-		return matches[i].index < matches[j].index
-	})
-	out := make([]ServiceOption, 0, len(matches))
-	for _, item := range matches {
-		out = append(out, item.service)
-	}
-	return out
+	return append([]ServiceOption(nil), result.Candidates...)
 }
 
 func removeContainedServiceMatches(matches []serviceMatch) []serviceMatch {

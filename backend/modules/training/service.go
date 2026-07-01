@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 type Service struct {
@@ -46,6 +47,18 @@ func (s *Service) ListCorrections(ctx context.Context, salonID string, ownerUser
 	return s.repo.ListCorrections(ctx, strings.TrimSpace(salonID), strings.TrimSpace(ownerUserID))
 }
 
+func (s *Service) ListServiceAliases(ctx context.Context, salonID string, ownerUserID string) ([]ServiceAlias, error) {
+	return s.repo.ListServiceAliases(ctx, strings.TrimSpace(salonID), strings.TrimSpace(ownerUserID))
+}
+
+func (s *Service) UpsertServiceAlias(ctx context.Context, salonID string, ownerUserID string, req ServiceAliasInput) (*ServiceAlias, error) {
+	req = normalizeServiceAliasInput(req, AliasSourceOwner, AliasStatusActive)
+	if req.ServiceID == "" || req.Alias == "" || normalizeAliasText(req.Alias) == "" || !validAliasSource(req.Source) || !validAliasStatus(req.Status) {
+		return nil, ErrValidation
+	}
+	return s.repo.UpsertServiceAlias(ctx, strings.TrimSpace(salonID), strings.TrimSpace(ownerUserID), "", req)
+}
+
 func (s *Service) CreateCorrection(ctx context.Context, salonID string, ownerUserID string, req OwnerCorrectionInput) (*OwnerCorrection, error) {
 	req.CallSessionID = strings.TrimSpace(req.CallSessionID)
 	req.TranscriptMessageID = strings.TrimSpace(req.TranscriptMessageID)
@@ -66,6 +79,15 @@ func (s *Service) ApplyCorrection(ctx context.Context, salonID string, ownerUser
 		return nil, ErrValidation
 	}
 	return s.repo.ApplyCorrection(ctx, strings.TrimSpace(salonID), strings.TrimSpace(ownerUserID), correctionID, req)
+}
+
+func (s *Service) ApplyServiceAliasCorrection(ctx context.Context, salonID string, ownerUserID string, correctionID string, req ServiceAliasInput) (*ServiceAlias, error) {
+	correctionID = strings.TrimSpace(correctionID)
+	req = normalizeServiceAliasInput(req, AliasSourceCorrection, AliasStatusActive)
+	if correctionID == "" || req.ServiceID == "" || req.Alias == "" || normalizeAliasText(req.Alias) == "" || !validAliasSource(req.Source) || !validAliasStatus(req.Status) {
+		return nil, ErrValidation
+	}
+	return s.repo.ApplyServiceAliasCorrection(ctx, strings.TrimSpace(salonID), strings.TrimSpace(ownerUserID), correctionID, req)
 }
 
 func (s *Service) DismissCorrection(ctx context.Context, salonID string, ownerUserID string, correctionID string) (*OwnerCorrection, error) {
@@ -132,6 +154,50 @@ func normalizeKnowledgeInput(req KnowledgeItemInput) KnowledgeItemInput {
 	return req
 }
 
+func normalizeServiceAliasInput(req ServiceAliasInput, defaultSource string, defaultStatus string) ServiceAliasInput {
+	req.ServiceID = strings.TrimSpace(req.ServiceID)
+	req.Alias = strings.TrimSpace(req.Alias)
+	req.Source = strings.ToLower(strings.TrimSpace(req.Source))
+	req.Status = strings.ToLower(strings.TrimSpace(req.Status))
+	if req.Source == "" {
+		req.Source = defaultSource
+	}
+	if req.Status == "" {
+		req.Status = defaultStatus
+	}
+	if req.Confidence <= 0 {
+		req.Confidence = 0.94
+	}
+	if req.Confidence > 1 {
+		req.Confidence = 1
+	}
+	return req
+}
+
+func normalizeAliasText(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	previousSpace := true
+	for _, r := range value {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(r)
+			previousSpace = false
+		case unicode.IsSpace(r) || r == '-' || r == '_' || r == '/' || r == '&':
+			if !previousSpace {
+				b.WriteByte(' ')
+				previousSpace = true
+			}
+		default:
+			if !previousSpace {
+				b.WriteByte(' ')
+				previousSpace = true
+			}
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
 func validCategory(category string) bool {
 	switch category {
 	case CategoryFAQ, CategoryPolicy, CategoryServices, CategoryHours, CategoryHandoff, CategoryOperations:
@@ -144,6 +210,24 @@ func validCategory(category string) bool {
 func validKnowledgeStatus(status string) bool {
 	switch status {
 	case StatusDraft, StatusActive, StatusArchived:
+		return true
+	default:
+		return false
+	}
+}
+
+func validAliasSource(source string) bool {
+	switch source {
+	case AliasSourceOwner, AliasSourceCorrection, AliasSourceImport:
+		return true
+	default:
+		return false
+	}
+}
+
+func validAliasStatus(status string) bool {
+	switch status {
+	case AliasStatusActive, AliasStatusArchived:
 		return true
 	default:
 		return false

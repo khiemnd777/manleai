@@ -70,6 +70,26 @@ func (h *Handler) ListCorrections(c *fiber.Ctx) error {
 	return respond.JSON(c, fiber.StatusOK, fiber.Map{"owner_corrections": items})
 }
 
+func (h *Handler) ListServiceAliases(c *fiber.Ctx) error {
+	items, err := h.service.ListServiceAliases(c.UserContext(), c.Params("id"), middleware.UserID(c))
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_ALIASES_FAILED", "Could not load service aliases.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service_aliases": items})
+}
+
+func (h *Handler) UpsertServiceAlias(c *fiber.Ctx) error {
+	var req ServiceAliasInput
+	if err := c.BodyParser(&req); err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
+	}
+	item, err := h.service.UpsertServiceAlias(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
+	return h.respondServiceAlias(c, item, err, fiber.StatusCreated)
+}
+
 func (h *Handler) CreateCorrection(c *fiber.Ctx) error {
 	var req OwnerCorrectionInput
 	if err := c.BodyParser(&req); err != nil {
@@ -115,6 +135,15 @@ func (h *Handler) ApplyCorrection(c *fiber.Ctx) error {
 	return h.respondKnowledge(c, item, err, fiber.StatusCreated)
 }
 
+func (h *Handler) ApplyServiceAliasCorrection(c *fiber.Ctx) error {
+	var req ServiceAliasInput
+	if err := c.BodyParser(&req); err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
+	}
+	item, err := h.service.ApplyServiceAliasCorrection(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("correction_id"), req)
+	return h.respondServiceAlias(c, item, err, fiber.StatusCreated)
+}
+
 func (h *Handler) DismissCorrection(c *fiber.Ctx) error {
 	item, err := h.service.DismissCorrection(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("correction_id"))
 	if errors.Is(err, ErrValidation) {
@@ -138,6 +167,19 @@ func (h *Handler) respondKnowledge(c *fiber.Ctx, item *KnowledgeItem, err error,
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "KNOWLEDGE_SAVE_FAILED", "Could not save knowledge item.")
+	}
+	return respond.JSON(c, status, item)
+}
+
+func (h *Handler) respondServiceAlias(c *fiber.Ctx, item *ServiceAlias, err error, status int) error {
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Service alias request contains invalid values.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SERVICE_ALIAS_SOURCE_NOT_FOUND", "Salon, correction, or service was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_ALIAS_SAVE_FAILED", "Could not save service alias.")
 	}
 	return respond.JSON(c, status, item)
 }

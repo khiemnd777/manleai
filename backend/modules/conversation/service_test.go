@@ -110,6 +110,40 @@ func TestInitialReplyIncludesSalonDisclosureAndOpenEndedPrompt(t *testing.T) {
 	}
 }
 
+func TestMessageUsesActiveServiceAliasFromStore(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = testManicureCatalog()
+	store.serviceAliases = []ServiceAlias{{
+		ID:              "alias_1",
+		ServiceID:       "service_gel",
+		Alias:           "shell manicure",
+		NormalizedAlias: "shell manicure",
+		Source:          "correction",
+		Confidence:      0.97,
+	}}
+	service := NewService(store, &fakeBookingTool{})
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I want to book a shell manicure.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+
+	if session.ServiceID != "service_gel" {
+		t.Fatalf("service id = %q, want service_gel", session.ServiceID)
+	}
+	if got := store.lastTurn.CustomerMetadata["service_understanding_reason"]; got != serviceUnderstandingAlias {
+		t.Fatalf("understanding reason = %#v, want service alias", got)
+	}
+	if got := store.lastTurn.CustomerMetadata["service_understanding_source"]; got != "correction" {
+		t.Fatalf("understanding source = %#v, want correction", got)
+	}
+	if got := store.lastTurn.CustomerMetadata["service_understanding_alias_id"]; got != "alias_1" {
+		t.Fatalf("understanding alias id = %#v, want alias_1", got)
+	}
+}
+
 func TestMessageHelloAfterInitialGreetingDoesNotAskForBookingService(t *testing.T) {
 	store := newFakeConversationStore()
 	store.cfg.SalonName = "Lotus Nails Studio"
@@ -244,8 +278,168 @@ func TestMessageDoesNotBookAmbiguousGenericManicureMatch(t *testing.T) {
 	if session.ServiceID != "" || len(session.BookingSegments) != 0 {
 		t.Fatalf("service selection = %q segments %#v, want no service for ambiguous generic manicure match", session.ServiceID, session.BookingSegments)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "Which service") {
+	if !strings.Contains(store.lastTurn.AIMessage, "Which manicure service") ||
+		!strings.Contains(store.lastTurn.AIMessage, "1:00 PM") ||
+		!strings.Contains(store.lastTurn.AIMessage, "Classic Manicure") ||
+		!strings.Contains(store.lastTurn.AIMessage, "Gel Manicure") ||
+		!strings.Contains(store.lastTurn.AIMessage, "Dip Powder Manicure") {
 		t.Fatalf("ambiguous service should ask for clarification: %s", store.lastTurn.AIMessage)
+	}
+	if store.lastTurn.CustomerMetadata["service_understanding_reason"] != serviceUnderstandingAmbiguousFamily {
+		t.Fatalf("service understanding metadata = %#v", store.lastTurn.CustomerMetadata)
+	}
+}
+
+func TestMessageClarifiesNoisyServiceFamilyWithCatalogOptions(t *testing.T) {
+	tests := []struct {
+		name       string
+		message    string
+		wantReason string
+	}{
+		{name: "stt_menikur", message: "Menikur.", wantReason: serviceUnderstandingFuzzyFamily},
+		{name: "stt_manecu", message: "Manecu.", wantReason: serviceUnderstandingFuzzyFamily},
+		{name: "mixed_language_manicure", message: "腳 manicure.", wantReason: serviceUnderstandingAmbiguousFamily},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeConversationStore()
+			store.services = testManicureCatalog()
+			store.session.Intent = IntentBooking
+			store.session.RequestedDate = "2026-07-02"
+			bookingTool := &fakeBookingTool{}
+			service := NewService(store, bookingTool)
+			service.now = fixedNow
+
+			session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+				Message: tt.message,
+			})
+			if err != nil {
+				t.Fatalf("Message returned error: %v", err)
+			}
+			if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+				t.Fatalf("booking tool calls = availability %d/create %d, want none for fuzzy family", bookingTool.availabilityCalls, bookingTool.calls)
+			}
+			if session.ServiceID != "" || len(session.BookingSegments) != 0 {
+				t.Fatalf("service selection = %q segments %#v, want no service for fuzzy family", session.ServiceID, session.BookingSegments)
+			}
+			if !strings.Contains(store.lastTurn.AIMessage, "Which manicure service") ||
+				!strings.Contains(store.lastTurn.AIMessage, "Classic Manicure") ||
+				!strings.Contains(store.lastTurn.AIMessage, "Gel Manicure") ||
+				!strings.Contains(store.lastTurn.AIMessage, "Dip Powder Manicure") {
+				t.Fatalf("AI should clarify with catalog options: %s", store.lastTurn.AIMessage)
+			}
+			if strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "which service would you like?") {
+				t.Fatalf("AI should not fall back to generic service prompt: %s", store.lastTurn.AIMessage)
+			}
+			if strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "foot manicure") {
+				t.Fatalf("AI should not invent a foot manicure service: %s", store.lastTurn.AIMessage)
+			}
+			if store.lastTurn.CustomerMetadata["service_understanding_reason"] != tt.wantReason {
+				t.Fatalf("service understanding metadata = %#v", store.lastTurn.CustomerMetadata)
+			}
+		})
+	}
+}
+
+func TestMessageResolvesServiceFromPendingClarificationCandidates(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_classic", Name: "Classic Manicure"},
+		{ID: "service_gel", Name: "Gel Manicure"},
+		{ID: "service_dip", Name: "Dip Powder Manicure"},
+		{ID: "service_removal", Name: "Gel Removal"},
+	}
+	store.session.Intent = IntentBooking
+	store.session.Transcript = []TranscriptMessage{{
+		Speaker: SpeakerAI,
+		Body:    "Which manicure service would you like: Classic Manicure, Gel Manicure, or Dip Powder Manicure?",
+		Metadata: map[string]any{
+			"pending_service_candidate_ids": []string{"service_classic", "service_gel", "service_dip"},
+		},
+	}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Gel.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.ServiceID != "service_gel" || session.ServiceName != "Gel Manicure" {
+		t.Fatalf("service = %s/%s, want Gel Manicure from pending candidates", session.ServiceID, session.ServiceName)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("service clarification should not book/check availability without date, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	if store.lastTurn.CustomerMetadata["service_understanding_selected_id"] != "service_gel" {
+		t.Fatalf("service understanding metadata = %#v", store.lastTurn.CustomerMetadata)
+	}
+	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "day") {
+		t.Fatalf("AI should move to date collection after service selection: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageKeepsAmbiguousServiceWithoutPendingClarification(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_gel", Name: "Gel Manicure"},
+		{ID: "service_removal", Name: "Gel Removal"},
+	}
+	store.session.Intent = IntentBooking
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Gel.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.ServiceID != "" || len(session.BookingSegments) != 0 {
+		t.Fatalf("service = %s segments %#v, want ambiguous without pending context", session.ServiceID, session.BookingSegments)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("ambiguous service should not call tools, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Gel Manicure") || !strings.Contains(store.lastTurn.AIMessage, "Gel Removal") {
+		t.Fatalf("AI should clarify with full catalog candidates: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessagePreservesDeterministicServiceClarificationAgainstLLMRewrite(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = testManicureCatalog()
+	store.session.Intent = IntentBooking
+	store.session.RequestedDate = "2026-07-02"
+	replyGenerator := &fakeReplyGenerator{message: "Which service would you like?"}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetReplyGenerator(replyGenerator)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Manicure.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.ServiceID != "" {
+		t.Fatalf("service = %s, want ambiguous service unselected", session.ServiceID)
+	}
+	if replyGenerator.calls != 0 {
+		t.Fatalf("reply generator calls = %d, want deterministic clarification without LLM rewrite", replyGenerator.calls)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Which manicure service") ||
+		!strings.Contains(store.lastTurn.AIMessage, "Classic Manicure") ||
+		!strings.Contains(store.lastTurn.AIMessage, "Gel Manicure") ||
+		!strings.Contains(store.lastTurn.AIMessage, "Dip Powder Manicure") {
+		t.Fatalf("deterministic service clarification was not preserved: %s", store.lastTurn.AIMessage)
+	}
+	if store.lastTurn.AIMetadata["turn_path"] != "service_understanding_clarification" {
+		t.Fatalf("AI metadata = %#v", store.lastTurn.AIMetadata)
 	}
 }
 
@@ -1271,14 +1465,16 @@ func TestMessageEscalatesAfterRepeatedCustomerNameNonAnswers(t *testing.T) {
 
 func TestMessageDoesNotTreatServicePhraseAsCustomerName(t *testing.T) {
 	store := newFakeConversationStore()
-	seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
+	start := seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
 	store.services = append(store.services, ServiceOption{
 		ID:              "service_shell",
 		Name:            "Shell Manicure",
 		DurationMinutes: 45,
 		PriceFrom:       40,
 	})
-	bookingTool := &fakeBookingTool{}
+	bookingTool := &fakeBookingTool{
+		availabilityResult: availabilityResultForStart("service_shell", "Shell Manicure", start),
+	}
 	service := NewService(store, bookingTool)
 	service.now = fixedNow
 
@@ -1291,14 +1487,57 @@ func TestMessageDoesNotTreatServicePhraseAsCustomerName(t *testing.T) {
 	if session.CustomerName != "" {
 		t.Fatalf("customer name = %q, want empty for service phrase", session.CustomerName)
 	}
-	if session.ServiceID != "service_gel" {
-		t.Fatalf("service id = %s, want existing service_gel preserved", session.ServiceID)
+	if session.ServiceID != "service_shell" {
+		t.Fatalf("service id = %s, want service correction to service_shell", session.ServiceID)
 	}
-	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
-		t.Fatalf("service phrase in name slot should not call booking tools, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 1 {
+		t.Fatalf("service phrase in name slot should recheck availability without booking, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "Gel Manicure") || !strings.Contains(store.lastTurn.AIMessage, "What name") {
-		t.Fatalf("AI should keep service and return to name collection: %s", store.lastTurn.AIMessage)
+	if !strings.Contains(store.lastTurn.AIMessage, "Shell Manicure") || !strings.Contains(store.lastTurn.AIMessage, "What name") {
+		t.Fatalf("AI should confirm corrected service and return to name collection: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageDoesNotTreatServiceAliasAsCustomerName(t *testing.T) {
+	store := newFakeConversationStore()
+	start := seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
+	store.services = append(store.services, ServiceOption{
+		ID:              "service_shell",
+		Name:            "Shellac Gel Manicure",
+		DurationMinutes: 45,
+		PriceFrom:       40,
+	})
+	store.serviceAliases = []ServiceAlias{{
+		ID:              "alias_shell",
+		ServiceID:       "service_shell",
+		Alias:           "shell",
+		NormalizedAlias: "shell",
+		Source:          "correction",
+		Confidence:      0.96,
+	}}
+	bookingTool := &fakeBookingTool{
+		availabilityResult: availabilityResultForStart("service_shell", "Shellac Gel Manicure", start),
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Shell.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.CustomerName != "" {
+		t.Fatalf("customer name = %q, want empty for service alias phrase", session.CustomerName)
+	}
+	if session.ServiceID != "service_shell" {
+		t.Fatalf("service id = %s, want service correction to service_shell", session.ServiceID)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 1 {
+		t.Fatalf("service alias in name slot should recheck availability without booking, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Shellac Gel Manicure") || !strings.Contains(store.lastTurn.AIMessage, "What name") {
+		t.Fatalf("AI should confirm corrected alias service and return to name collection: %s", store.lastTurn.AIMessage)
 	}
 }
 
@@ -1466,7 +1705,11 @@ func TestMessageClearsServiceForAmbiguousServiceCorrection(t *testing.T) {
 	if session.ServiceID != "" || len(session.BookingSegments) != 0 || len(session.OfferedSlots) != 0 {
 		t.Fatalf("session service/segments/slots = %q/%#v/%#v, want cleared service state", session.ServiceID, session.BookingSegments, session.OfferedSlots)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "Which service") {
+	if !strings.Contains(store.lastTurn.AIMessage, "Which manicure service") ||
+		!strings.Contains(store.lastTurn.AIMessage, "Thursday") ||
+		!strings.Contains(store.lastTurn.AIMessage, "Classic Manicure") ||
+		!strings.Contains(store.lastTurn.AIMessage, "Gel Manicure") ||
+		!strings.Contains(store.lastTurn.AIMessage, "Dip Powder Manicure") {
 		t.Fatalf("ambiguous service correction should ask for service clarification: %s", store.lastTurn.AIMessage)
 	}
 }
@@ -2018,6 +2261,7 @@ type fakeConversationStore struct {
 	cfg                 RuntimeConfig
 	session             Session
 	services            []ServiceOption
+	serviceAliases      []ServiceAlias
 	staff               []StaffOption
 	activeStaff         []StaffOption
 	knowledge           []KnowledgeSnippet
@@ -2137,6 +2381,10 @@ func (f *fakeConversationStore) RedactSession(ctx context.Context, salonID strin
 
 func (f *fakeConversationStore) ListBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error) {
 	return f.services, nil
+}
+
+func (f *fakeConversationStore) ListActiveServiceAliases(ctx context.Context, salonID string) ([]ServiceAlias, error) {
+	return f.serviceAliases, nil
 }
 
 func (f *fakeConversationStore) ListBookableStaff(ctx context.Context, salonID string) ([]StaffOption, error) {

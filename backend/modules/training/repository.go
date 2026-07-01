@@ -137,6 +137,58 @@ func (r *Repository) ListCorrections(ctx context.Context, salonID string, ownerU
 	return items, rows.Err()
 }
 
+func (r *Repository) ListServiceAliases(ctx context.Context, salonID string, ownerUserID string) ([]ServiceAlias, error) {
+	rows, err := r.db.QueryContext(ctx, serviceAliasSelect()+`
+		WHERE sa.salon_id = $1
+		  AND s.owner_user_id = $2
+		ORDER BY sa.updated_at DESC
+		LIMIT 200
+	`, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]ServiceAlias, 0)
+	for rows.Next() {
+		item, err := scanServiceAlias(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *item)
+	}
+	return items, rows.Err()
+}
+
+func (r *Repository) UpsertServiceAlias(ctx context.Context, salonID string, ownerUserID string, correctionID string, req ServiceAliasInput) (*ServiceAlias, error) {
+	if err := r.ensureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	if err := r.ensureServiceOwner(ctx, salonID, req.ServiceID); err != nil {
+		return nil, err
+	}
+	normalizedAlias := normalizeAliasText(req.Alias)
+
+	var id string
+	err := r.db.QueryRowContext(ctx, `
+		INSERT INTO service_aliases (salon_id, service_id, alias, normalized_alias, source, status, confidence, correction_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, '')::uuid)
+		ON CONFLICT (salon_id, normalized_alias)
+		DO UPDATE SET service_id = EXCLUDED.service_id,
+		              alias = EXCLUDED.alias,
+		              source = EXCLUDED.source,
+		              status = EXCLUDED.status,
+		              confidence = EXCLUDED.confidence,
+		              correction_id = COALESCE(EXCLUDED.correction_id, service_aliases.correction_id),
+		              updated_at = now()
+		RETURNING id::text
+	`, salonID, req.ServiceID, req.Alias, normalizedAlias, req.Source, req.Status, req.Confidence, correctionID).Scan(&id)
+	if err != nil {
+		return nil, err
+	}
+	return r.getServiceAlias(ctx, salonID, ownerUserID, id)
+}
+
 func (r *Repository) CreateCorrection(ctx context.Context, salonID string, ownerUserID string, req OwnerCorrectionInput) (*OwnerCorrection, error) {
 	if err := r.ensureSalonOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
@@ -213,6 +265,80 @@ func (r *Repository) ApplyCorrection(ctx context.Context, salonID string, ownerU
 	return r.getKnowledge(ctx, salonID, ownerUserID, itemID)
 }
 
+func (r *Repository) ApplyServiceAliasCorrection(ctx context.Context, salonID string, ownerUserID string, correctionID string, req ServiceAliasInput) (*ServiceAlias, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var lockedID string
+	err = tx.QueryRowContext(ctx, `
+		SELECT oc.id::text
+		FROM owner_corrections oc
+		JOIN salons s ON s.id = oc.salon_id
+		WHERE oc.id = $1
+		  AND oc.salon_id = $2
+		  AND s.owner_user_id = $3
+		FOR UPDATE
+	`, correctionID, salonID, ownerUserID).Scan(&lockedID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var serviceExists bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM services
+			WHERE id = $1
+			  AND salon_id = $2
+		)
+	`, req.ServiceID, salonID).Scan(&serviceExists); err != nil {
+		return nil, err
+	}
+	if !serviceExists {
+		return nil, ErrNotFound
+	}
+
+	normalizedAlias := normalizeAliasText(req.Alias)
+	var aliasID string
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO service_aliases (salon_id, service_id, alias, normalized_alias, source, status, confidence, correction_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (salon_id, normalized_alias)
+		DO UPDATE SET service_id = EXCLUDED.service_id,
+		              alias = EXCLUDED.alias,
+		              source = EXCLUDED.source,
+		              status = EXCLUDED.status,
+		              confidence = EXCLUDED.confidence,
+		              correction_id = EXCLUDED.correction_id,
+		              updated_at = now()
+		RETURNING id::text
+	`, salonID, req.ServiceID, req.Alias, normalizedAlias, req.Source, req.Status, req.Confidence, correctionID).Scan(&aliasID)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE owner_corrections
+		SET status = 'applied',
+		    applied_service_alias_id = $1,
+		    updated_at = now()
+		WHERE id = $2
+		  AND salon_id = $3
+	`, aliasID, correctionID, salonID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return r.getServiceAlias(ctx, salonID, ownerUserID, aliasID)
+}
+
 func (r *Repository) UpdateCorrectionStatus(ctx context.Context, salonID string, ownerUserID string, correctionID string, status string) (*OwnerCorrection, error) {
 	result, err := r.db.ExecContext(ctx, `
 		UPDATE owner_corrections
@@ -255,11 +381,36 @@ func (r *Repository) getCorrection(ctx context.Context, salonID string, ownerUse
 	return item, err
 }
 
+func (r *Repository) getServiceAlias(ctx context.Context, salonID string, ownerUserID string, aliasID string) (*ServiceAlias, error) {
+	item, err := scanServiceAlias(r.db.QueryRowContext(ctx, serviceAliasSelect()+`
+		WHERE sa.id = $1
+		  AND sa.salon_id = $2
+		  AND s.owner_user_id = $3
+	`, aliasID, salonID, ownerUserID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return item, err
+}
+
 func (r *Repository) ensureSalonOwner(ctx context.Context, salonID string, ownerUserID string) error {
 	var exists bool
 	if err := r.db.QueryRowContext(ctx, `
 		SELECT EXISTS (SELECT 1 FROM salons WHERE id = $1 AND owner_user_id = $2)
 	`, salonID, ownerUserID).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *Repository) ensureServiceOwner(ctx context.Context, salonID string, serviceID string) error {
+	var exists bool
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM services WHERE id = $1 AND salon_id = $2)
+	`, serviceID, salonID).Scan(&exists); err != nil {
 		return err
 	}
 	if !exists {
@@ -325,9 +476,21 @@ func correctionSelect() string {
 	return `
 		SELECT oc.id::text, oc.salon_id::text, COALESCE(oc.call_session_id::text, ''),
 		       COALESCE(oc.transcript_message_id::text, ''), oc.correction, oc.status,
-		       COALESCE(oc.applied_knowledge_item_id::text, ''), oc.created_at, oc.updated_at
+		       COALESCE(oc.applied_knowledge_item_id::text, ''),
+		       COALESCE(oc.applied_service_alias_id::text, ''), oc.created_at, oc.updated_at
 		FROM owner_corrections oc
 		JOIN salons s ON s.id = oc.salon_id
+	`
+}
+
+func serviceAliasSelect() string {
+	return `
+		SELECT sa.id::text, sa.salon_id::text, sa.service_id::text, svc.name,
+		       sa.alias, sa.normalized_alias, sa.source, sa.status, sa.confidence,
+		       COALESCE(sa.correction_id::text, ''), sa.created_at, sa.updated_at
+		FROM service_aliases sa
+		JOIN salons s ON s.id = sa.salon_id
+		JOIN services svc ON svc.id = sa.service_id AND svc.salon_id = sa.salon_id
 	`
 }
 
@@ -345,7 +508,15 @@ func scanKnowledgeItem(row rowScanner) (*KnowledgeItem, error) {
 
 func scanOwnerCorrection(row rowScanner) (*OwnerCorrection, error) {
 	var item OwnerCorrection
-	if err := row.Scan(&item.ID, &item.SalonID, &item.CallSessionID, &item.TranscriptMessageID, &item.Correction, &item.Status, &item.AppliedKnowledgeItemID, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	if err := row.Scan(&item.ID, &item.SalonID, &item.CallSessionID, &item.TranscriptMessageID, &item.Correction, &item.Status, &item.AppliedKnowledgeItemID, &item.AppliedServiceAliasID, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func scanServiceAlias(row rowScanner) (*ServiceAlias, error) {
+	var item ServiceAlias
+	if err := row.Scan(&item.ID, &item.SalonID, &item.ServiceID, &item.ServiceName, &item.Alias, &item.NormalizedAlias, &item.Source, &item.Status, &item.Confidence, &item.CorrectionID, &item.CreatedAt, &item.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &item, nil

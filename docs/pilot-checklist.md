@@ -93,6 +93,15 @@
 - [x] Add AI Training dashboard panel for testing sample customer questions.
 - [x] Keep unsafe confirmation wording guarded by Square Appointments confirmation requirements.
 
+## Production Service Understanding
+
+- [x] Interpret service utterances against the active salon catalog instead of hardcoded salon-specific keyword patches.
+- [x] Treat generic and fuzzy service-family matches as clarification candidates, not selected services.
+- [x] Persist salon-scoped service aliases from owner corrections with stable `(salon_id, normalized_alias)` upsert semantics.
+- [x] Feed active service aliases into simulator and phone conversation runtime.
+- [x] Re-check availability when a caller corrects the service after a time or slot was already collected.
+- [x] Record service-understanding status, reason, confidence, candidates, selected service, alias source, and alias ID in transcript metadata.
+
 ## Canonical POS Ownership And Provider Switch Gates
 
 - [x] Add durable `pos_entity_links` and sync status fields for canonical services, staff, and customers.
