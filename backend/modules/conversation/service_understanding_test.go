@@ -51,6 +51,40 @@ func TestServiceInterpreterUsesCatalogFuzzyFamilyWithoutHardcodedAliases(t *test
 	}
 }
 
+func TestServiceInterpreterSelectsDistinctNoisyCatalogService(t *testing.T) {
+	tests := []string{
+		"Clatic manicure.",
+		"Klasos manicure.",
+		"Classis Manikia.",
+		"Klasik manikyur.",
+	}
+	for _, message := range tests {
+		t.Run(message, func(t *testing.T) {
+			result := interpretService(message, testManicureCatalog())
+			if result.Status != serviceUnderstandingStatusSelected {
+				t.Fatalf("status = %s, want selected; result=%#v", result.Status, result)
+			}
+			if result.Reason != serviceUnderstandingFuzzyService {
+				t.Fatalf("reason = %s, want fuzzy service", result.Reason)
+			}
+			if result.Selected == nil || result.Selected.ID != "service_classic" {
+				t.Fatalf("selected = %#v, want classic manicure", result.Selected)
+			}
+		})
+	}
+}
+
+func TestServiceInterpreterDoesNotSelectNoisyGenericFamilyAsSpecificService(t *testing.T) {
+	result := interpretService("Child manicure.", testManicureCatalog())
+
+	if result.Status != serviceUnderstandingStatusAmbiguous {
+		t.Fatalf("status = %s, want ambiguous", result.Status)
+	}
+	if result.Selected != nil {
+		t.Fatalf("selected = %#v, want no guessed service", result.Selected)
+	}
+}
+
 func TestServiceInterpreterUsesEachSalonCatalog(t *testing.T) {
 	catalog := []ServiceOption{
 		{ID: "builder_gel", Name: "Builder Gel"},

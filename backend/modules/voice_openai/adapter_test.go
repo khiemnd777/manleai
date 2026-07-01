@@ -67,11 +67,18 @@ func TestTranscribeSendsMultipartAudio(t *testing.T) {
 		if got := r.FormValue("model"); got != "transcribe-test" {
 			t.Fatalf("model = %q", got)
 		}
+		if got := r.FormValue("prompt"); got != "Active service names: Classic Manicure." {
+			t.Fatalf("prompt = %q", got)
+		}
 		body, _ := json.Marshal(map[string]any{"text": "classic manicure"})
 		return jsonResponse(body), nil
 	})}
 
-	text, err := adapter.Transcribe(context.Background(), "salon_1", []byte("audio"), "audio/wav")
+	text, err := adapter.Transcribe(context.Background(), "salon_1", voice.SpeechToTextRequest{
+		Audio:       []byte("audio"),
+		ContentType: "audio/wav",
+		Prompt:      "Active service names: Classic Manicure.",
+	})
 	if err != nil {
 		t.Fatalf("Transcribe returned error: %v", err)
 	}
@@ -217,6 +224,32 @@ func TestRealtimeSessionConfigUsesGAShapeForRealtimeModel(t *testing.T) {
 	}
 	if realtimeHeaders(cfg).Get("OpenAI-Beta") != "" {
 		t.Fatalf("GA realtime headers should not include beta header")
+	}
+}
+
+func TestRealtimeSessionConfigIncludesTranscriptionPrompt(t *testing.T) {
+	cfg := config.OpenAIVoiceConfig{
+		RealtimeModel:      "gpt-realtime-2",
+		TranscriptionModel: "gpt-4o-mini-transcribe",
+		RealtimeVoice:      "alloy",
+	}
+	session := realtimeSessionConfig(cfg, voice.RealtimeSessionOptions{
+		TranscriptionPrompt: "Active service names: Classic Manicure.",
+	})
+	audio, ok := session["audio"].(map[string]any)
+	if !ok {
+		t.Fatalf("GA realtime session should include audio: %#v", session)
+	}
+	input, ok := audio["input"].(map[string]any)
+	if !ok {
+		t.Fatalf("GA realtime session should include audio.input: %#v", session)
+	}
+	transcription, ok := input["transcription"].(map[string]any)
+	if !ok {
+		t.Fatalf("GA realtime session should include transcription config: %#v", input)
+	}
+	if transcription["prompt"] != "Active service names: Classic Manicure." {
+		t.Fatalf("transcription prompt = %#v", transcription["prompt"])
 	}
 }
 

@@ -45,6 +45,7 @@ type ConversationEngine interface {
 	StartPhoneCall(ctx context.Context, salonID string, ownerUserID string, req conversation.StartPhoneCallRequest) (*conversation.Session, error)
 	Message(ctx context.Context, salonID string, ownerUserID string, sessionID string, req conversation.MessageRequest) (*conversation.Session, error)
 	Get(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*conversation.Session, error)
+	TranscriptionContext(ctx context.Context, salonID string, ownerUserID string, sessionID string) (conversation.TranscriptionContext, error)
 }
 
 type Store interface {
@@ -64,7 +65,7 @@ type TelephonyProvider interface {
 type SpeechToTextProvider interface {
 	Name() string
 	Configured(ctx context.Context, salonID string) bool
-	Transcribe(ctx context.Context, salonID string, audio []byte, contentType string) (string, error)
+	Transcribe(ctx context.Context, salonID string, req SpeechToTextRequest) (string, error)
 }
 
 type LanguageModelProvider interface {
@@ -94,10 +95,11 @@ type RealtimeSession interface {
 }
 
 type RealtimeSessionOptions struct {
-	SessionID    string
-	CallID       string
-	Voice        string
-	Instructions string
+	SessionID           string
+	CallID              string
+	Voice               string
+	Instructions        string
+	TranscriptionPrompt string
 }
 
 type RealtimeEvent struct {
@@ -169,6 +171,12 @@ type SpeechTurnRequest struct {
 	AudioContentType  string
 	InputModeOverride string
 	Payload           map[string]string
+}
+
+type SpeechToTextRequest struct {
+	Audio       []byte
+	ContentType string
+	Prompt      string
 }
 
 type CallReply struct {

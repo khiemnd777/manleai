@@ -46,6 +46,9 @@ var (
 	}
 	namePatterns = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\bmy name is\s+([^,.;]+)`),
+		regexp.MustCompile(`(?i)\bmy name\s+([^,.;]+)`),
+		regexp.MustCompile(`(?i)\bname is\s+([^,.;]+)`),
+		regexp.MustCompile(`(?i)\bthe name is\s+([^,.;]+)`),
 		regexp.MustCompile(`(?i)\bthis is\s+([^,.;]+)`),
 		regexp.MustCompile(`(?i)\bi am\s+([^,.;]+)`),
 		regexp.MustCompile(`(?i)\bi'm\s+([^,.;]+)`),
@@ -312,9 +315,10 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		}
 		turn.AIMessage = promptForMissingField(missing)
 		if missing == "service" {
-			if prompt := serviceClarificationPrompt(next, serviceUnderstanding, cfg); prompt != "" {
+			serviceClarification := serviceUnderstandingForClarification(next, services, serviceUnderstanding)
+			if prompt := serviceClarificationPrompt(next, serviceClarification, cfg); prompt != "" {
 				turn.AIMessage = prompt
-				setPendingServiceCandidateMetadata(&turn, serviceUnderstanding)
+				setPendingServiceCandidateMetadata(&turn, serviceClarification)
 				finalizeTurnMetadata(&turn, *session, next, missing, missing, "service_understanding_clarification")
 				return s.store.SaveTurn(ctx, turn)
 			}
@@ -340,6 +344,34 @@ func (s *Service) List(ctx context.Context, salonID string, ownerUserID string, 
 
 func (s *Service) Get(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error) {
 	return s.store.GetSessionForOwner(ctx, strings.TrimSpace(salonID), strings.TrimSpace(ownerUserID), strings.TrimSpace(sessionID))
+}
+
+func (s *Service) TranscriptionContext(ctx context.Context, salonID string, ownerUserID string, sessionID string) (TranscriptionContext, error) {
+	salonID = strings.TrimSpace(salonID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	sessionID = strings.TrimSpace(sessionID)
+	if salonID == "" || ownerUserID == "" || sessionID == "" {
+		return TranscriptionContext{}, ErrValidation
+	}
+	session, err := s.store.GetSessionForOwner(ctx, salonID, ownerUserID, sessionID)
+	if err != nil {
+		return TranscriptionContext{}, err
+	}
+	cfg, err := s.store.GetRuntimeConfig(ctx, salonID, ownerUserID)
+	if err != nil {
+		return TranscriptionContext{}, err
+	}
+	services, err := s.store.ListBookableServices(ctx, salonID)
+	if err != nil {
+		return TranscriptionContext{}, err
+	}
+	aliases, err := s.store.ListActiveServiceAliases(ctx, salonID)
+	if err != nil {
+		return TranscriptionContext{}, err
+	}
+	return TranscriptionContext{
+		Prompt: transcriptionContextPrompt(*session, cfg, services, aliases),
+	}, nil
 }
 
 func (s *Service) ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int) ([]WebhookEventLog, error) {
@@ -1789,6 +1821,40 @@ func serviceClarificationPrompt(session Session, result serviceUnderstandingResu
 	return prefix + "Which " + serviceLabel + " would you like: " + joinHumanList(options) + "?"
 }
 
+func serviceUnderstandingForClarification(session Session, services []ServiceOption, result serviceUnderstandingResult) serviceUnderstandingResult {
+	if result.Status == serviceUnderstandingStatusAmbiguous && len(result.Candidates) > 0 {
+		return result
+	}
+	pending := pendingServiceCandidateServices(session, services)
+	if len(pending) == 0 {
+		return result
+	}
+	result.Status = serviceUnderstandingStatusAmbiguous
+	if result.Reason == "" || result.Reason == serviceUnderstandingUnknown {
+		result.Reason = serviceUnderstandingAmbiguousFamily
+	}
+	result.Confidence = maxFloat(result.Confidence, 0.72)
+	result.Candidates = pending
+	result.MatchedToken = firstNonEmpty(result.MatchedToken, pendingServiceToken(session))
+	return result
+}
+
+func pendingServiceToken(session Session) string {
+	for i := len(session.Transcript) - 1; i >= 0; i-- {
+		msg := session.Transcript[i]
+		if msg.Speaker != SpeakerAI {
+			continue
+		}
+		if metadataBool(msg.Metadata, "pending_service_candidates_cleared") {
+			return ""
+		}
+		if token := metadataString(msg.Metadata, "pending_service_token"); token != "" {
+			return token
+		}
+	}
+	return ""
+}
+
 func appointmentContextPhrase(session Session, cfg *RuntimeConfig) string {
 	loc := timezoneLocation(timezoneFromConfig(cfg))
 	if session.RequestedStartTime != nil {
@@ -1823,6 +1889,80 @@ func serviceCandidateNames(candidates []ServiceOption, limit int) []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+func transcriptionContextPrompt(session Session, cfg *RuntimeConfig, services []ServiceOption, aliases []ServiceAlias) string {
+	parts := []string{
+		"Nail salon appointment call. The caller may speak Vietnamese-accented English or switch between Vietnamese and English.",
+		"When audio sounds close to an active service name or alias, transcribe the likely service name clearly.",
+	}
+	if salon := salonName(cfg); salon != "" {
+		parts = append(parts, "Salon: "+salon+".")
+	}
+	if pending := serviceCandidateNames(pendingServiceCandidateServices(session, services), 8); len(pending) > 0 {
+		parts = append(parts, "Current service options being clarified: "+strings.Join(pending, "; ")+".")
+	}
+	if names := transcriptionServiceNames(services, 40); len(names) > 0 {
+		parts = append(parts, "Active service names: "+strings.Join(names, "; ")+".")
+	}
+	if aliasLines := transcriptionAliasLines(aliases, 40); len(aliasLines) > 0 {
+		parts = append(parts, "Active service aliases: "+strings.Join(aliasLines, "; ")+".")
+	}
+	return truncateRunes(strings.Join(parts, "\n"), 1500)
+}
+
+func transcriptionServiceNames(services []ServiceOption, limit int) []string {
+	names := make([]string, 0, len(services))
+	seen := map[string]bool{}
+	for _, service := range services {
+		if len(names) >= limit {
+			break
+		}
+		name := strings.TrimSpace(service.Name)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		names = append(names, name)
+	}
+	return names
+}
+
+func transcriptionAliasLines(aliases []ServiceAlias, limit int) []string {
+	lines := make([]string, 0, len(aliases))
+	seen := map[string]bool{}
+	for _, alias := range aliases {
+		if len(lines) >= limit {
+			break
+		}
+		phrase := strings.TrimSpace(firstNonEmpty(alias.Alias, alias.NormalizedAlias))
+		serviceName := strings.TrimSpace(alias.ServiceName)
+		if phrase == "" || serviceName == "" {
+			continue
+		}
+		key := strings.ToLower(phrase + "=>" + serviceName)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		lines = append(lines, phrase+" -> "+serviceName)
+	}
+	return lines
+}
+
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return strings.TrimSpace(string(runes[:limit]))
 }
 
 func extractPhone(message string) string {
@@ -1958,6 +2098,7 @@ func stripNameCorrectionPrefix(message string) string {
 			"it is ",
 			"this is ",
 			"my name is ",
+			"my name ",
 			"the name is ",
 			"name is ",
 		} {
@@ -3419,6 +3560,13 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func maxFloat(left float64, right float64) float64 {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 func parseDateAndClock(date string, hourRaw string, minuteRaw string, meridiem string, loc *time.Location) (time.Time, error) {

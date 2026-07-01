@@ -185,6 +185,41 @@ func TestSpeechTurnRoutesLiveCallThroughAvailabilityOffer(t *testing.T) {
 	}
 }
 
+func TestSpeechTurnPassesTranscriptionContextToSTT(t *testing.T) {
+	store := newFakeVoiceStore()
+	store.route = &CallRoute{SalonID: "salon_1", OwnerUserID: "owner_1", SessionID: "session_phone"}
+	engine := newFakeConversationEngine()
+	engine.transcriptionContext = conversation.TranscriptionContext{
+		Prompt: "Active service names: Classic Manicure; Gel Manicure.",
+	}
+	engine.messageSession = phoneSessionWithAIReply("What day would you like?", conversation.StatusActive, conversation.OutcomeCollecting)
+	stt := &fakeSpeechToTextProvider{text: "Klasos manicure"}
+	service := NewService(store, engine, testVoiceConfig(), AIProviders{STT: stt})
+
+	reply, err := service.HandleSpeechTurn(context.Background(), SpeechTurnRequest{
+		Provider:         ProviderTwilio,
+		ProviderCallID:   "CA123",
+		Audio:            []byte("audio"),
+		AudioContentType: "audio/wav",
+		Payload:          map[string]string{"RecordingSid": "RE123"},
+	})
+	if err != nil {
+		t.Fatalf("HandleSpeechTurn returned error: %v", err)
+	}
+	if stt.request.Prompt != "Active service names: Classic Manicure; Gel Manicure." {
+		t.Fatalf("STT prompt = %q", stt.request.Prompt)
+	}
+	if stt.request.ContentType != "audio/wav" || string(stt.request.Audio) != "audio" {
+		t.Fatalf("STT request = %#v", stt.request)
+	}
+	if engine.lastMessage != "Klasos manicure" {
+		t.Fatalf("conversation message = %q, want transcribed text", engine.lastMessage)
+	}
+	if reply == nil || !reply.Continue {
+		t.Fatalf("reply should continue after STT turn: %#v", reply)
+	}
+}
+
 func TestSpeechTurnRealtimeFallbackOverrideKeepsRecordingMode(t *testing.T) {
 	store := newFakeVoiceStore()
 	store.route = &CallRoute{SalonID: "salon_1", OwnerUserID: "owner_1", SessionID: "session_phone"}
@@ -358,12 +393,13 @@ func (f *fakeVoiceStore) GetAudioOutput(ctx context.Context, id string) (*AudioO
 }
 
 type fakeConversationEngine struct {
-	startCalls     int
-	messageCalls   int
-	startRequest   conversation.StartPhoneCallRequest
-	lastMessage    string
-	startSession   *conversation.Session
-	messageSession *conversation.Session
+	startCalls           int
+	messageCalls         int
+	startRequest         conversation.StartPhoneCallRequest
+	lastMessage          string
+	startSession         *conversation.Session
+	messageSession       *conversation.Session
+	transcriptionContext conversation.TranscriptionContext
 }
 
 type fakeRealtimeProvider struct {
@@ -380,6 +416,28 @@ func (f fakeRealtimeProvider) Configured(ctx context.Context, salonID string) bo
 
 func (f fakeRealtimeProvider) ConnectRealtime(ctx context.Context, salonID string, opts RealtimeSessionOptions) (RealtimeSession, error) {
 	return nil, ErrProviderDisabled
+}
+
+type fakeSpeechToTextProvider struct {
+	text       string
+	configured bool
+	request    SpeechToTextRequest
+}
+
+func (f *fakeSpeechToTextProvider) Name() string {
+	return ProviderOpenAI
+}
+
+func (f *fakeSpeechToTextProvider) Configured(ctx context.Context, salonID string) bool {
+	if f.configured {
+		return true
+	}
+	return f.text != ""
+}
+
+func (f *fakeSpeechToTextProvider) Transcribe(ctx context.Context, salonID string, req SpeechToTextRequest) (string, error) {
+	f.request = req
+	return f.text, nil
 }
 
 func newFakeConversationEngine() *fakeConversationEngine {
@@ -408,4 +466,8 @@ func (f *fakeConversationEngine) Get(ctx context.Context, salonID string, ownerU
 		return f.messageSession, nil
 	}
 	return f.startSession, nil
+}
+
+func (f *fakeConversationEngine) TranscriptionContext(ctx context.Context, salonID string, ownerUserID string, sessionID string) (conversation.TranscriptionContext, error) {
+	return f.transcriptionContext, nil
 }

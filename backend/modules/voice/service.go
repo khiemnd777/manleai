@@ -168,7 +168,7 @@ func (s *Service) HandleSpeechTurn(ctx context.Context, req SpeechTurnRequest) (
 	}
 
 	if req.SpeechText == "" && len(req.Audio) > 0 {
-		text, transcribeErr := s.transcribe(ctx, route.SalonID, req)
+		text, transcribeErr := s.transcribe(ctx, route.SalonID, route.OwnerUserID, route.SessionID, req)
 		if transcribeErr != nil {
 			_ = s.repo.RecordWebhookEvent(ctx, WebhookEvent{
 				SalonID:        route.SalonID,
@@ -239,11 +239,15 @@ func (s *Service) configured(cfg config.VoiceConfig) bool {
 	return defaultProvider(cfg.Provider) == ProviderTwilio && strings.TrimSpace(cfg.Twilio.AuthToken) != ""
 }
 
-func (s *Service) transcribe(ctx context.Context, salonID string, req SpeechTurnRequest) (string, error) {
+func (s *Service) transcribe(ctx context.Context, salonID string, ownerUserID string, sessionID string, req SpeechTurnRequest) (string, error) {
 	if s.providers.STT == nil || !s.providers.STT.Configured(ctx, salonID) {
 		return "", ErrProviderDisabled
 	}
-	return s.providers.STT.Transcribe(ctx, salonID, req.Audio, req.AudioContentType)
+	return s.providers.STT.Transcribe(ctx, salonID, SpeechToTextRequest{
+		Audio:       req.Audio,
+		ContentType: req.AudioContentType,
+		Prompt:      s.transcriptionContextPrompt(ctx, salonID, ownerUserID, sessionID),
+	})
 }
 
 func speechTurnEventKey(req SpeechTurnRequest) string {
@@ -355,11 +359,16 @@ func (s *Service) ConnectRealtime(ctx context.Context, salonID string, sessionID
 	if !s.realtimeReady(ctx, salonID, cfg) {
 		return nil, ErrProviderDisabled
 	}
+	ownerUserID := ""
+	if route, err := s.repo.FindCallRoute(ctx, ProviderTwilio, providerCallID); err == nil && route.SessionID == strings.TrimSpace(sessionID) {
+		ownerUserID = route.OwnerUserID
+	}
 	return s.providers.Realtime.ConnectRealtime(ctx, salonID, RealtimeSessionOptions{
-		SessionID:    strings.TrimSpace(sessionID),
-		CallID:       strings.TrimSpace(providerCallID),
-		Voice:        s.realtimeVoice(ctx, salonID),
-		Instructions: s.realtimeInstructions(ctx, salonID),
+		SessionID:           strings.TrimSpace(sessionID),
+		CallID:              strings.TrimSpace(providerCallID),
+		Voice:               s.realtimeVoice(ctx, salonID),
+		Instructions:        s.realtimeInstructions(ctx, salonID),
+		TranscriptionPrompt: s.transcriptionContextPrompt(ctx, salonID, ownerUserID, sessionID),
 	})
 }
 
@@ -427,6 +436,17 @@ func (s *Service) realtimeInstructions(ctx context.Context, salonID string) stri
 		return strings.TrimSpace(s.cfg.AI.OpenAI.RealtimeInstructions)
 	}
 	return strings.TrimSpace(cfg.RealtimeInstructions)
+}
+
+func (s *Service) transcriptionContextPrompt(ctx context.Context, salonID string, ownerUserID string, sessionID string) string {
+	if strings.TrimSpace(salonID) == "" || strings.TrimSpace(ownerUserID) == "" || strings.TrimSpace(sessionID) == "" {
+		return ""
+	}
+	context, err := s.conversation.TranscriptionContext(ctx, salonID, ownerUserID, sessionID)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(context.Prompt)
 }
 
 func (s *Service) aiStatus(ctx context.Context, salonID string, cfg config.VoiceConfig) VoiceAIStatus {

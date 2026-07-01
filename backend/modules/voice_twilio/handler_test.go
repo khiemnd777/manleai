@@ -668,6 +668,10 @@ func (f *fakeTwilioConversationEngine) Get(ctx context.Context, salonID string, 
 	return f.startSession, nil
 }
 
+func (f *fakeTwilioConversationEngine) TranscriptionContext(ctx context.Context, salonID string, ownerUserID string, sessionID string) (conversation.TranscriptionContext, error) {
+	return conversation.TranscriptionContext{}, nil
+}
+
 type fakeRealtimeSession struct {
 	events  chan voice.RealtimeEvent
 	speaks  chan string

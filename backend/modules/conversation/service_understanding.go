@@ -10,9 +10,19 @@ const (
 	serviceUnderstandingUnknown         = "unknown_service"
 	serviceUnderstandingExact           = "exact_service"
 	serviceUnderstandingAlias           = "service_alias"
+	serviceUnderstandingFuzzyService    = "fuzzy_service"
 	serviceUnderstandingCatalogToken    = "catalog_token"
 	serviceUnderstandingAmbiguousFamily = "ambiguous_family"
 	serviceUnderstandingFuzzyFamily     = "fuzzy_family"
+)
+
+const (
+	fuzzyServiceStrictThreshold  = 0.74
+	fuzzyServicePendingThreshold = 0.61
+	fuzzyServiceStrictMinToken   = 0.55
+	fuzzyServicePendingMinToken  = 0.50
+	fuzzyServiceStrictMargin     = 0.12
+	fuzzyServicePendingMargin    = 0.16
 )
 
 type serviceUnderstandingStatus string
@@ -47,7 +57,7 @@ func interpretService(message string, services []ServiceOption, aliasSets ...[]S
 
 func interpretServiceForSession(message string, session Session, services []ServiceOption, aliases []ServiceAlias) serviceUnderstandingResult {
 	if pending := pendingServiceCandidateServices(session, services); len(pending) > 0 {
-		result := interpretService(message, pending)
+		result := newServiceCatalogIndex(pending, nil).InterpretPending(message)
 		if result.Status != serviceUnderstandingStatusUnknown {
 			return result
 		}
@@ -74,12 +84,20 @@ func pendingServiceCandidateServices(session Session, services []ServiceOption) 
 }
 
 func pendingServiceCandidateIDs(session Session) []string {
+	if strings.TrimSpace(session.ServiceID) != "" {
+		return nil
+	}
 	for i := len(session.Transcript) - 1; i >= 0; i-- {
 		msg := session.Transcript[i]
 		if msg.Speaker != SpeakerAI {
 			continue
 		}
-		return metadataStringSlice(msg.Metadata, "pending_service_candidate_ids")
+		if metadataBool(msg.Metadata, "pending_service_candidates_cleared") {
+			return nil
+		}
+		if ids := metadataStringSlice(msg.Metadata, "pending_service_candidate_ids"); len(ids) > 0 {
+			return ids
+		}
 	}
 	return nil
 }
@@ -165,6 +183,14 @@ func newServiceCatalogIndex(services []ServiceOption, aliases []ServiceAlias) se
 }
 
 func (idx serviceCatalogIndex) Interpret(message string) serviceUnderstandingResult {
+	return idx.interpret(message, false)
+}
+
+func (idx serviceCatalogIndex) InterpretPending(message string) serviceUnderstandingResult {
+	return idx.interpret(message, true)
+}
+
+func (idx serviceCatalogIndex) interpret(message string, pendingCandidates bool) serviceUnderstandingResult {
 	normalized := normalizeServiceText(message)
 	result := serviceUnderstandingResult{
 		Status:          serviceUnderstandingStatusUnknown,
@@ -233,6 +259,16 @@ func (idx serviceCatalogIndex) Interpret(message string) serviceUnderstandingRes
 		result.Candidates = orderedServices(candidates)
 		return result
 	}
+	if fuzzyMatch, ok := idx.fuzzyServiceMatch(normalized, pendingCandidates); ok {
+		result.Status = serviceUnderstandingStatusSelected
+		result.Reason = serviceUnderstandingFuzzyService
+		result.Confidence = fuzzyMatch.score
+		result.Candidates = []ServiceOption{fuzzyMatch.service}
+		result.MatchedToken = fuzzyMatch.token
+		item := fuzzyMatch.service
+		result.Selected = &item
+		return result
+	}
 	directMatches := idx.directTokenMatches(normalized)
 	if len(directMatches) == 1 {
 		result.Status = serviceUnderstandingStatusSelected
@@ -260,6 +296,13 @@ func (idx serviceCatalogIndex) Interpret(message string) serviceUnderstandingRes
 		result.MatchedToken = fuzzyToken
 	}
 	return result
+}
+
+type fuzzyServiceMatch struct {
+	service       ServiceOption
+	score         float64
+	minTokenScore float64
+	token         string
 }
 
 type serviceAliasMatch struct {
@@ -348,6 +391,181 @@ func (idx serviceCatalogIndex) fuzzyFamilyMatch(normalized string) (string, []Se
 		}
 	}
 	return "", nil
+}
+
+func (idx serviceCatalogIndex) fuzzyServiceMatch(normalized string, pendingCandidates bool) (fuzzyServiceMatch, bool) {
+	inputTokens := serviceNameTokens(normalized)
+	if len(inputTokens) == 0 || len(idx.services) == 0 {
+		return fuzzyServiceMatch{}, false
+	}
+	matches := make([]fuzzyServiceMatch, 0, len(idx.services))
+	for _, service := range idx.services {
+		score, minTokenScore := fuzzyServiceScore(inputTokens, service.Name)
+		if score <= 0 {
+			continue
+		}
+		matches = append(matches, fuzzyServiceMatch{
+			service:       service,
+			score:         score,
+			minTokenScore: minTokenScore,
+			token:         normalizeServiceText(service.Name),
+		})
+	}
+	if len(matches) == 0 {
+		return fuzzyServiceMatch{}, false
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].score == matches[j].score {
+			return matches[i].service.Name < matches[j].service.Name
+		}
+		return matches[i].score > matches[j].score
+	})
+	threshold := fuzzyServiceStrictThreshold
+	minToken := fuzzyServiceStrictMinToken
+	margin := fuzzyServiceStrictMargin
+	if pendingCandidates {
+		threshold = fuzzyServicePendingThreshold
+		minToken = fuzzyServicePendingMinToken
+		margin = fuzzyServicePendingMargin
+	}
+	top := matches[0]
+	if top.score < threshold || top.minTokenScore < minToken {
+		return fuzzyServiceMatch{}, false
+	}
+	if len(matches) > 1 && top.score-matches[1].score < margin {
+		return fuzzyServiceMatch{}, false
+	}
+	return top, true
+}
+
+func fuzzyServiceScore(inputTokens []string, serviceName string) (float64, float64) {
+	serviceTokens := serviceNameTokens(serviceName)
+	if len(serviceTokens) == 0 || len(inputTokens) == 0 {
+		return 0, 0
+	}
+	total := 0.0
+	minTokenScore := 1.0
+	for _, serviceToken := range serviceTokens {
+		best := 0.0
+		for _, inputToken := range inputTokens {
+			if score := fuzzyServiceTokenScore(inputToken, serviceToken); score > best {
+				best = score
+			}
+		}
+		total += best
+		if best < minTokenScore {
+			minTokenScore = best
+		}
+	}
+	return total / float64(len(serviceTokens)), minTokenScore
+}
+
+func fuzzyServiceTokenScore(input string, catalogToken string) float64 {
+	input = normalizeServiceText(input)
+	catalogToken = normalizeServiceText(catalogToken)
+	if input == "" || catalogToken == "" {
+		return 0
+	}
+	if input == catalogToken {
+		return 1
+	}
+	scores := []float64{
+		levenshteinSimilarity(input, catalogToken),
+		levenshteinSimilarity(phoneticServiceToken(input), phoneticServiceToken(catalogToken)),
+		levenshteinSimilarity(consonantSkeleton(input), consonantSkeleton(catalogToken)),
+		bigramDice(phoneticServiceToken(input), phoneticServiceToken(catalogToken)),
+	}
+	best := 0.0
+	for _, score := range scores {
+		if score > best {
+			best = score
+		}
+	}
+	return best
+}
+
+func levenshteinSimilarity(left string, right string) float64 {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == "" || right == "" {
+		return 0
+	}
+	distance := levenshteinDistance(left, right)
+	maxLen := maxInt(len([]rune(left)), len([]rune(right)))
+	if maxLen == 0 {
+		return 0
+	}
+	return 1 - float64(distance)/float64(maxLen)
+}
+
+func phoneticServiceToken(value string) string {
+	value = normalizeServiceText(value)
+	value = strings.NewReplacer(
+		"ph", "f",
+		"ck", "k",
+		"qu", "kw",
+		"c", "k",
+		"q", "k",
+		"y", "i",
+		"x", "ks",
+		"z", "s",
+	).Replace(value)
+	value = strings.TrimSuffix(value, "e")
+	return collapseRepeatedRunes(value)
+}
+
+func consonantSkeleton(value string) string {
+	value = phoneticServiceToken(value)
+	var b strings.Builder
+	for _, r := range value {
+		switch r {
+		case 'a', 'e', 'i', 'o', 'u':
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func collapseRepeatedRunes(value string) string {
+	var b strings.Builder
+	var previous rune
+	for _, r := range value {
+		if r == previous {
+			continue
+		}
+		b.WriteRune(r)
+		previous = r
+	}
+	return b.String()
+}
+
+func bigramDice(left string, right string) float64 {
+	leftRunes := []rune(left)
+	rightRunes := []rune(right)
+	if len(leftRunes) < 2 || len(rightRunes) < 2 {
+		return 0
+	}
+	leftCounts := map[string]int{}
+	for i := 0; i < len(leftRunes)-1; i++ {
+		leftCounts[string(leftRunes[i:i+2])]++
+	}
+	intersection := 0
+	rightCount := 0
+	for i := 0; i < len(rightRunes)-1; i++ {
+		rightCount++
+		key := string(rightRunes[i : i+2])
+		if leftCounts[key] > 0 {
+			intersection++
+			leftCounts[key]--
+		}
+	}
+	leftCount := len(leftRunes) - 1
+	if leftCount+rightCount == 0 {
+		return 0
+	}
+	return 2 * float64(intersection) / float64(leftCount+rightCount)
 }
 
 func firstMatchedFamilyToken(normalized string, families map[string][]ServiceOption) string {

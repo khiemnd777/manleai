@@ -121,6 +121,10 @@ type ReplyGenerationResult struct {
 	Reason     string
 }
 
+type TranscriptionContext struct {
+	Prompt string
+}
+
 type RuntimeConfig struct {
 	SalonName      string
 	Timezone       string

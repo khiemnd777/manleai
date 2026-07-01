@@ -50,7 +50,7 @@ func (a *Adapter) ContentType() string {
 	return "audio/mpeg"
 }
 
-func (a *Adapter) Transcribe(ctx context.Context, salonID string, audio []byte, contentType string) (string, error) {
+func (a *Adapter) Transcribe(ctx context.Context, salonID string, req voice.SpeechToTextRequest) (string, error) {
 	cfg, enabled, err := a.configFor(ctx, salonID)
 	if err != nil {
 		return "", err
@@ -58,7 +58,7 @@ func (a *Adapter) Transcribe(ctx context.Context, salonID string, audio []byte, 
 	if !enabled || strings.TrimSpace(cfg.APIKey) == "" || strings.TrimSpace(cfg.TranscriptionModel) == "" {
 		return "", voice.ErrProviderDisabled
 	}
-	if len(audio) == 0 {
+	if len(req.Audio) == 0 {
 		return "", voice.ErrValidation
 	}
 
@@ -67,26 +67,31 @@ func (a *Adapter) Transcribe(ctx context.Context, salonID string, audio []byte, 
 	if err := writer.WriteField("model", strings.TrimSpace(cfg.TranscriptionModel)); err != nil {
 		return "", err
 	}
-	part, err := writer.CreateFormFile("file", filenameForContentType(contentType))
+	if prompt := strings.TrimSpace(req.Prompt); prompt != "" {
+		if err := writer.WriteField("prompt", prompt); err != nil {
+			return "", err
+		}
+	}
+	part, err := writer.CreateFormFile("file", filenameForContentType(req.ContentType))
 	if err != nil {
 		return "", err
 	}
-	if _, err := part.Write(audio); err != nil {
+	if _, err := part.Write(req.Audio); err != nil {
 		return "", err
 	}
 	if err := writer.Close(); err != nil {
 		return "", err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url(cfg, "/audio/transcriptions"), &body)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url(cfg, "/audio/transcriptions"), &body)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	a.authorize(req, cfg)
+	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
+	a.authorize(httpReq, cfg)
 
 	var res transcriptionResponse
-	if err := a.do(req, &res); err != nil {
+	if err := a.do(httpReq, &res); err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(res.Text), nil

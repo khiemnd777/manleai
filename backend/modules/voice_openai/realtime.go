@@ -116,7 +116,7 @@ func realtimeSessionConfig(cfg config.OpenAIVoiceConfig, opts voice.RealtimeSess
 			"voice":                     voiceName,
 			"input_audio_format":        realtimeLegacyAudioFormat,
 			"output_audio_format":       realtimeLegacyAudioFormat,
-			"input_audio_transcription": map[string]any{"model": strings.TrimSpace(cfg.TranscriptionModel)},
+			"input_audio_transcription": realtimeTranscriptionConfig(cfg, opts),
 			"turn_detection":            realtimeTurnDetection(cfg),
 		}
 	}
@@ -127,7 +127,7 @@ func realtimeSessionConfig(cfg config.OpenAIVoiceConfig, opts voice.RealtimeSess
 		"audio": map[string]any{
 			"input": map[string]any{
 				"format":         map[string]any{"type": realtimeG711ULawFormat},
-				"transcription":  map[string]any{"model": strings.TrimSpace(cfg.TranscriptionModel)},
+				"transcription":  realtimeTranscriptionConfig(cfg, opts),
 				"turn_detection": realtimeTurnDetection(cfg),
 			},
 			"output": map[string]any{
@@ -136,6 +136,14 @@ func realtimeSessionConfig(cfg config.OpenAIVoiceConfig, opts voice.RealtimeSess
 			},
 		},
 	}
+}
+
+func realtimeTranscriptionConfig(cfg config.OpenAIVoiceConfig, opts voice.RealtimeSessionOptions) map[string]any {
+	out := map[string]any{"model": strings.TrimSpace(cfg.TranscriptionModel)}
+	if prompt := strings.TrimSpace(opts.TranscriptionPrompt); prompt != "" {
+		out["prompt"] = prompt
+	}
+	return out
 }
 
 func realtimeResponseCreatePayload(legacyProtocol bool, text string) map[string]any {

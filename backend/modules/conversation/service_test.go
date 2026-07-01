@@ -144,6 +144,47 @@ func TestMessageUsesActiveServiceAliasFromStore(t *testing.T) {
 	}
 }
 
+func TestTranscriptionContextIncludesCatalogAliasesAndPendingCandidatesWithoutCustomerPII(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_classic", Name: "Classic Manicure"},
+		{ID: "service_gel", Name: "Gel Manicure"},
+	}
+	store.serviceAliases = []ServiceAlias{{
+		ID:          "alias_shell",
+		ServiceID:   "service_gel",
+		ServiceName: "Gel Manicure",
+		Alias:       "shell manicure",
+	}}
+	store.session.CustomerName = "Linh Tran"
+	store.session.CustomerPhone = "3125550101"
+	store.session.Transcript = []TranscriptMessage{{
+		Speaker: SpeakerAI,
+		Body:    "Which manicure service would you like: Classic Manicure or Gel Manicure?",
+		Metadata: map[string]any{
+			"pending_service_candidate_ids": []string{"service_classic", "service_gel"},
+		},
+	}}
+	service := NewService(store, &fakeBookingTool{})
+
+	context, err := service.TranscriptionContext(context.Background(), "salon_1", "owner_1", "session_1")
+	if err != nil {
+		t.Fatalf("TranscriptionContext returned error: %v", err)
+	}
+	if !strings.Contains(context.Prompt, "Active service names: Classic Manicure; Gel Manicure.") {
+		t.Fatalf("prompt missing service names: %s", context.Prompt)
+	}
+	if !strings.Contains(context.Prompt, "shell manicure -> Gel Manicure") {
+		t.Fatalf("prompt missing service alias: %s", context.Prompt)
+	}
+	if !strings.Contains(context.Prompt, "Current service options being clarified: Classic Manicure; Gel Manicure.") {
+		t.Fatalf("prompt missing pending candidates: %s", context.Prompt)
+	}
+	if strings.Contains(context.Prompt, "Linh Tran") || strings.Contains(context.Prompt, "3125550101") {
+		t.Fatalf("prompt should not include customer PII: %s", context.Prompt)
+	}
+}
+
 func TestMessageHelloAfterInitialGreetingDoesNotAskForBookingService(t *testing.T) {
 	store := newFakeConversationStore()
 	store.cfg.SalonName = "Lotus Nails Studio"
@@ -378,6 +419,124 @@ func TestMessageResolvesServiceFromPendingClarificationCandidates(t *testing.T) 
 	}
 	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "day") {
 		t.Fatalf("AI should move to date collection after service selection: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageHandlesNoisyVinglishServiceAfterDateTurnAndShortNameConfirmation(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_classic", Name: "Classic Manicure", DurationMinutes: 45},
+		{ID: "service_gel", Name: "Gel Manicure", DurationMinutes: 45},
+		{ID: "service_dip", Name: "Dip Powder Manicure", DurationMinutes: 75},
+	}
+	store.session.Channel = ChannelPhone
+	store.session.Intent = IntentBooking
+	store.session.CustomerPhone = "3125550101"
+	store.session.Transcript = []TranscriptMessage{{
+		Speaker: SpeakerAI,
+		Body:    "Which manicure service would you like: Classic Manicure, Gel Manicure, or Dip Powder Manicure?",
+		Metadata: map[string]any{
+			"pending_service_candidate_ids": []string{"service_classic", "service_gel", "service_dip"},
+			"pending_service_token":         "manicure",
+		},
+	}}
+	slotStart := time.Date(2026, 6, 9, 18, 0, 0, 0, time.UTC)
+	bookingTool := &fakeBookingTool{
+		availabilityResult: availabilityResultForStart("service_classic", "Classic Manicure", slotStart),
+		attempt: &booking.BookingAttempt{
+			ID:           "attempt_1",
+			Status:       booking.StatusConfirmed,
+			POSBookingID: "booking_1",
+			Appointment:  &booking.Appointment{ID: "appointment_1", Status: booking.StatusConfirmed},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Today.",
+	})
+	if err != nil {
+		t.Fatalf("date Message returned error: %v", err)
+	}
+	if session.RequestedDate != "2026-06-09" {
+		t.Fatalf("requested date = %q, want today", session.RequestedDate)
+	}
+	if session.ServiceID != "" {
+		t.Fatalf("service = %q, want no guessed service from date turn", session.ServiceID)
+	}
+	if got := metadataStringSlice(store.lastTurn.AIMetadata, "pending_service_candidate_ids"); !sameStrings(got, []string{"service_classic", "service_gel", "service_dip"}) {
+		t.Fatalf("pending service ids after date turn = %#v", got)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Which manicure service") {
+		t.Fatalf("AI should keep service clarification after date turn: %s", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Klasos Makikio.",
+	})
+	if err != nil {
+		t.Fatalf("service Message returned error: %v", err)
+	}
+	if session.ServiceID != "service_classic" {
+		t.Fatalf("service = %s, want Classic Manicure from noisy pending candidate reply", session.ServiceID)
+	}
+	if bookingTool.availabilityCalls != 1 || bookingTool.calls != 0 {
+		t.Fatalf("tool calls after service = availability %d booking %d, want availability only", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if store.lastTurn.CustomerMetadata["service_understanding_reason"] != serviceUnderstandingFuzzyService {
+		t.Fatalf("service understanding metadata = %#v", store.lastTurn.CustomerMetadata)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "1:00 PM") {
+		t.Fatalf("AI should offer the available slot after service selection: %s", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "1PM.",
+	})
+	if err != nil {
+		t.Fatalf("slot Message returned error: %v", err)
+	}
+	if session.RequestedStartTime == nil || !session.RequestedStartTime.Equal(slotStart) {
+		t.Fatalf("requested start = %v, want %s", session.RequestedStartTime, slotStart)
+	}
+	if bookingTool.calls != 0 {
+		t.Fatalf("booking calls = %d, want none before name is confirmed", bookingTool.calls)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "What name") {
+		t.Fatalf("AI should ask for customer name after slot selection: %s", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "My name Tim.",
+	})
+	if err != nil {
+		t.Fatalf("name Message returned error: %v", err)
+	}
+	if session.CustomerName != "" {
+		t.Fatalf("customer name = %q, want pending confirmation only", session.CustomerName)
+	}
+	if store.lastTurn.AIMetadata["pending_customer_name"] != "Tim" {
+		t.Fatalf("pending customer name metadata = %#v, want Tim", store.lastTurn.AIMetadata)
+	}
+	if bookingTool.calls != 0 {
+		t.Fatalf("booking calls = %d, want none before short voice name confirmation", bookingTool.calls)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Yes.",
+	})
+	if err != nil {
+		t.Fatalf("name confirmation Message returned error: %v", err)
+	}
+	if bookingTool.calls != 1 {
+		t.Fatalf("booking calls = %d, want one after name confirmation", bookingTool.calls)
+	}
+	if bookingTool.request.CustomerName != "Tim" {
+		t.Fatalf("booking customer name = %q, want Tim", bookingTool.request.CustomerName)
+	}
+	if session.CustomerName != "Tim" || session.Outcome != OutcomeBookingConfirmed {
+		t.Fatalf("session name/outcome = %q/%s, want Tim/confirmed", session.CustomerName, session.Outcome)
 	}
 }
 
