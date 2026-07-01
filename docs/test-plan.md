@@ -58,6 +58,7 @@
 - Verify the conversation module does not import `modules/pos_square`.
 - Verify simulator booking attempts call `booking.Service` with source `ai_conversation_simulator`.
 - Verify simulator confirmed wording appears only after the booking service returns a confirmed attempt, POS booking ID, and appointment.
+- Verify simulator and phone customer-facing booking replies do not mention Square, POS, provider names, or internal provider details; those stay in tool/audit logs only.
 - Verify POS fallback from the booking service produces pending request wording and no confirmed appointment language.
 - Verify disabled AI booking creates an owner handoff and does not call the booking service.
 - Verify human requests, complaints, refunds, payment disputes, and group-booking language create owner handoffs.

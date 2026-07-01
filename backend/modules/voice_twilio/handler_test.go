@@ -67,7 +67,7 @@ func TestTurnWebhookReturnsGatherWithAvailabilityOffer(t *testing.T) {
 }
 
 func TestTurnWebhookReturnsFinalTwiMLAfterPOSConfirmedBooking(t *testing.T) {
-	confirmed := phoneSessionWithAIReply("You are confirmed in Square Appointments for Wed Jun 10 at 10:00 AM.", conversation.StatusCompleted, conversation.OutcomeBookingConfirmed)
+	confirmed := phoneSessionWithAIReply("You're confirmed with Lotus Nails for your Classic Manicure on Wednesday, June 10 at 10:00 AM with Mai Nguyen. The appointment is under Linh Tran.", conversation.StatusCompleted, conversation.OutcomeBookingConfirmed)
 	confirmed.BookingAttemptID = "attempt_voice"
 	confirmed.AppointmentID = "appointment_voice"
 	adapter, service, _ := testTwilioRuntime(confirmed)
@@ -88,8 +88,11 @@ func TestTurnWebhookReturnsFinalTwiMLAfterPOSConfirmedBooking(t *testing.T) {
 	if strings.Contains(body, "<Gather") {
 		t.Fatalf("confirmed booking should end the Twilio gather loop: %s", body)
 	}
-	if !strings.Contains(body, "confirmed in Square Appointments") || !strings.Contains(body, "<Hangup/>") {
+	if !strings.Contains(body, "confirmed with Lotus Nails") || !strings.Contains(body, "<Hangup/>") {
 		t.Fatalf("confirmed booking should return final TwiML: %s", body)
+	}
+	if strings.Contains(strings.ToLower(body), "square") || strings.Contains(strings.ToLower(body), "provider") || strings.Contains(strings.ToLower(body), "pos") {
+		t.Fatalf("confirmed booking TwiML should not expose provider internals: %s", body)
 	}
 }
 
@@ -140,7 +143,7 @@ func TestStreamFallbackSaysConnectionProblemForActiveSession(t *testing.T) {
 }
 
 func TestStreamFallbackOnlyHangsUpForCompletedSession(t *testing.T) {
-	completed := phoneSessionWithAIReply("You are confirmed in Square Appointments.", conversation.StatusCompleted, conversation.OutcomeBookingConfirmed)
+	completed := phoneSessionWithAIReply("You're confirmed with Lotus Nails.", conversation.StatusCompleted, conversation.OutcomeBookingConfirmed)
 	adapter, service, _, _ := testTwilioRuntimeWithStore(completed)
 	app := testTwilioApp(adapter, service)
 	form := url.Values{"CallSid": {"CA123"}}

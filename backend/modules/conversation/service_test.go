@@ -197,9 +197,13 @@ func TestMessageConfirmsOnlyAfterBookingToolSuccess(t *testing.T) {
 	if session.BookingAttemptID != "attempt_1" || session.AppointmentID != "appointment_1" {
 		t.Fatalf("booking linkage = %s/%s", session.BookingAttemptID, session.AppointmentID)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "confirmed in Square Appointments") {
-		t.Fatalf("AI reply should confirm only after booking success: %s", store.lastTurn.AIMessage)
+	reply := store.lastTurn.AIMessage
+	for _, wantText := range []string{"You're confirmed with Lotus Nails", "Classic Manicure", "Wednesday, June 10 at 3:00 PM", "Mai Nguyen", "under Linh Tran"} {
+		if !strings.Contains(reply, wantText) {
+			t.Fatalf("confirmed reply missing %q: %s", wantText, reply)
+		}
 	}
+	assertCustomerReplyHidesProvider(t, reply)
 }
 
 func TestMessageUsesFallbackPendingTextWhenBookingToolFallsBack(t *testing.T) {
@@ -227,6 +231,40 @@ func TestMessageUsesFallbackPendingTextWhenBookingToolFallsBack(t *testing.T) {
 	}
 	if !strings.Contains(store.lastTurn.AIMessage, "not a confirmed appointment") {
 		t.Fatalf("fallback reply must avoid confirmation: %s", store.lastTurn.AIMessage)
+	}
+	assertCustomerReplyHidesProvider(t, store.lastTurn.AIMessage)
+}
+
+func TestMessageUsesProviderHiddenTextWhenBookingToolErrors(t *testing.T) {
+	store := newFakeConversationStore()
+	bookingTool := &fakeBookingTool{
+		err: errors.New("booking provider unavailable"),
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "My name is Linh Tran, phone 312-555-0101, classic manicure with Mai on 2026-06-10 at 3pm.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.Status != StatusHandoff || session.Outcome != OutcomeHandoffRequested {
+		t.Fatalf("session status/outcome = %s/%s, want handoff/handoff_requested", session.Status, session.Outcome)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "not a confirmed appointment") {
+		t.Fatalf("booking error reply must avoid confirmation: %s", store.lastTurn.AIMessage)
+	}
+	assertCustomerReplyHidesProvider(t, store.lastTurn.AIMessage)
+}
+
+func assertCustomerReplyHidesProvider(t *testing.T, reply string) {
+	t.Helper()
+	lower := strings.ToLower(reply)
+	for _, blocked := range []string{"square", "pos", "provider"} {
+		if strings.Contains(lower, blocked) {
+			t.Fatalf("customer reply should not expose provider term %q: %s", blocked, reply)
+		}
 	}
 }
 
@@ -1148,6 +1186,7 @@ func TestMessageBooksSelectedAvailableSlotAfterCustomerDetails(t *testing.T) {
 	if session.Outcome != OutcomeBookingConfirmed || session.AppointmentID != "appointment_selected" {
 		t.Fatalf("session outcome/link = %s/%s, want confirmed appointment", session.Outcome, session.AppointmentID)
 	}
+	assertCustomerReplyHidesProvider(t, store.lastTurn.AIMessage)
 }
 
 func TestMessageBooksAnyoneMultiServiceSlotWithSegmentAssignments(t *testing.T) {
@@ -1259,6 +1298,7 @@ func TestMessageBooksAnyoneMultiServiceSlotWithSegmentAssignments(t *testing.T) 
 	if !strings.Contains(store.lastTurn.AIMessage, "Mai Nguyen") || !strings.Contains(store.lastTurn.AIMessage, "Lena Pham") {
 		t.Fatalf("anyone confirmation should name assigned technicians: %s", store.lastTurn.AIMessage)
 	}
+	assertCustomerReplyHidesProvider(t, store.lastTurn.AIMessage)
 }
 
 func TestMessageCreatesHandoffForMultiPersonBookingRequests(t *testing.T) {
@@ -1432,9 +1472,10 @@ func TestKnowledgeAnswerCannotConfirmAppointment(t *testing.T) {
 	if strings.Contains(strings.ToLower(answer), "appointment is confirmed") {
 		t.Fatalf("knowledge answer used unsafe confirmation wording: %s", answer)
 	}
-	if !strings.Contains(answer, "Square Appointments confirms") {
+	if !strings.Contains(answer, "booking is completed successfully") {
 		t.Fatalf("knowledge answer should preserve POS-first boundary: %s", answer)
 	}
+	assertCustomerReplyHidesProvider(t, answer)
 }
 
 func TestBookingSafetyEnabledFollowsSalonFlag(t *testing.T) {

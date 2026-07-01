@@ -250,7 +250,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	if shouldCheckAvailabilityForRequestedTime(*session, next, selectedOfferedSlot) {
 		available, err := s.applyAvailabilityForRequestedTime(ctx, ownerUserID, &turn, &next, services, staff, cfg)
 		if err != nil {
-			return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check Square Appointments availability, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
+			return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check appointment availability, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
 		}
 		if !available {
 			s.applyReplyGenerator(ctx, &turn, next, cfg, "requested_time", "requested_time", knowledge)
@@ -271,7 +271,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 			preferredDate := preferredDateForAvailability(next, message, loc, s.now)
 			if preferredDate != "" && next.ServiceID != "" {
 				if err := s.offerAvailableSlots(ctx, ownerUserID, &turn, &next, services, staff, preferredDate, false, cfg); err != nil {
-					return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check Square Appointments availability, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
+					return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check appointment availability, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
 				}
 				s.applyReplyGenerator(ctx, &turn, next, cfg, missing, missing, knowledge)
 				finalizeTurnMetadata(&turn, *session, next, missing, missing, "availability_offer")
@@ -696,7 +696,7 @@ func applyAvailabilityOffer(turn *TurnRecord, session *Session, services []Servi
 	session.OfferedSlots = offered
 	turn.ToolMessage = availabilityToolMessage(len(offered))
 	if len(offered) == 0 {
-		turn.AIMessage = "I do not see open times for that day in Square Appointments. What other day works?"
+		turn.AIMessage = "I do not see open times for that day. What other day works?"
 	} else {
 		turn.AIMessage = formatSlotOffer(offered, timezoneLocation(cfg.Timezone), unavailableRequestedTime)
 	}
@@ -983,7 +983,7 @@ func knownBookingFields(session Session) []string {
 
 func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnRecord, session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
 	if s.bookingTool == nil {
-		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, "I could not reach the booking path, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
+		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, bookingErrorReply(), services, staff, cfg)
 	}
 	attempt, err := s.bookingTool.Create(ctx, turn.SalonID, ownerUserID, booking.CreateBookingRequest{
 		Source:             bookingSourceForSession(session),
@@ -998,13 +998,13 @@ func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnR
 		Notes:              bookingNotesForSession(session),
 	})
 	if err != nil {
-		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, "I could not confirm that in Square Appointments, so the owner needs to review it. This is not a confirmed appointment.", services, staff, cfg)
+		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, bookingErrorReply(), services, staff, cfg)
 	}
 
 	toolMessage := "Booking service returned fallback pending."
 	outcome := OutcomeBookingFallbackPending
 	status := StatusCompleted
-	aiMessage := "I could not confirm that in Square Appointments, so I created a pending request for the owner. This is not a confirmed appointment."
+	aiMessage := bookingFallbackReply()
 	bookingAttemptID := ""
 	appointmentID := ""
 	if attempt != nil {
@@ -1031,6 +1031,14 @@ func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnR
 	s.applyReplyGenerator(ctx, &turn, session, cfg, "", "", knowledge)
 	finalizeTurnMetadata(&turn, turn.Session, session, "", "", "booking_result")
 	return s.store.SaveTurn(ctx, turn)
+}
+
+func bookingFallbackReply() string {
+	return "I couldn't confirm the appointment, so I sent the request to the owner to review. This is not a confirmed appointment."
+}
+
+func bookingErrorReply() string {
+	return "I couldn't complete the booking right now, so the owner needs to review it. This is not a confirmed appointment."
 }
 
 func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, session Session, cfg *RuntimeConfig, missing string, nextRequired string, knowledge []KnowledgeSnippet) {
@@ -1748,7 +1756,7 @@ func isLatinLetter(r rune) bool {
 
 func cleanName(raw string) string {
 	name := strings.TrimSpace(raw)
-	for _, marker := range []string{" phone ", " for ", " at ", " on ", " wants ", " would "} {
+	for _, marker := range []string{" and my ", " phone ", " for ", " at ", " on ", " wants ", " would "} {
 		if idx := strings.Index(strings.ToLower(name), marker); idx >= 0 {
 			name = strings.TrimSpace(name[:idx])
 		}
@@ -1875,7 +1883,7 @@ func knowledgeAnswer(message string, knowledge []KnowledgeSnippet) string {
 		return ""
 	}
 	if hasUnsafeKnowledgeConfirmation(match.Body) {
-		return "I can share salon policies, but I cannot confirm appointments unless Square Appointments confirms the booking. Would you like help with an appointment?"
+		return "I can share salon policies, but I cannot confirm appointments unless the booking is completed successfully. Would you like help with an appointment?"
 	}
 	return truncateWords(match.Body, 34) + " Would you like help with an appointment?"
 }
@@ -2829,19 +2837,38 @@ func summaryFor(session Session, services []ServiceOption, staff []StaffOption, 
 func confirmedMessage(session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) string {
 	service := serviceSummary(session, services)
 	member := sessionAssignedStaffLabel(session, staff)
+	salon := salonName(cfg)
 	when := ""
 	if session.RequestedStartTime != nil {
 		loc := timezoneLocation("")
 		if cfg != nil {
 			loc = timezoneLocation(cfg.Timezone)
 		}
-		when = session.RequestedStartTime.In(loc).Format("Jan 2 at 3:04 PM")
+		when = session.RequestedStartTime.In(loc).Format("Monday, January 2 at 3:04 PM")
 	}
-	details := strings.TrimSpace(strings.Join(nonEmpty([]string{service, "with " + member, when}), " "))
-	if details == "" {
-		return "Your appointment is confirmed in Square Appointments."
+	parts := []string{}
+	if service != "" {
+		parts = append(parts, "for your "+service)
 	}
-	return "Your appointment is confirmed in Square Appointments for " + details + "."
+	if when != "" {
+		parts = append(parts, "on "+when)
+	}
+	if member != "" {
+		parts = append(parts, "with "+member)
+	}
+	prefix := "You're confirmed"
+	if salon != "" {
+		prefix += " with " + salon
+	}
+	message := strings.TrimSpace(prefix + " " + strings.Join(parts, " "))
+	if message == prefix {
+		message = prefix
+	}
+	message += "."
+	if name := strings.TrimSpace(session.CustomerName); name != "" {
+		message += " The appointment is under " + name + "."
+	}
+	return message
 }
 
 func slotAssignedStaffLabel(slot OfferedSlot) string {

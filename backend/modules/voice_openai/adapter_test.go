@@ -25,6 +25,14 @@ func TestGenerateReplyParsesStructuredResponse(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
 			t.Fatalf("authorization = %q", got)
 		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		instructions, _ := req["instructions"].(string)
+		if !strings.Contains(instructions, "Do not mention POS providers") {
+			t.Fatalf("instructions should hide POS provider names: %s", instructions)
+		}
 		body, _ := json.Marshal(map[string]any{
 			"output_text": `{"message":"What phone number should we use?","confidence":0.9,"handoff":false,"reason":""}`,
 		})

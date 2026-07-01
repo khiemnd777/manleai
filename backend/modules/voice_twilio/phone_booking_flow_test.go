@@ -99,11 +99,17 @@ func TestSignedTwilioWebhookDrivesPhoneBookingFlowThroughConversation(t *testing
 	if strings.Contains(secondTurnBody, "<Gather") {
 		t.Fatalf("confirmed booking should end gather loop: %s", secondTurnBody)
 	}
-	if !strings.Contains(secondTurnBody, "confirmed in Square Appointments") || !strings.Contains(secondTurnBody, "Mai Nguyen") || !strings.Contains(secondTurnBody, "<Hangup/>") {
+	if !strings.Contains(secondTurnBody, "confirmed with Lotus Nails") || !strings.Contains(secondTurnBody, "Mai Nguyen") || !strings.Contains(secondTurnBody, "under Linh Tran") || !strings.Contains(secondTurnBody, "<Hangup/>") {
 		t.Fatalf("second turn should return final confirmed TwiML: %s", secondTurnBody)
+	}
+	if strings.Contains(strings.ToLower(secondTurnBody), "square") || strings.Contains(strings.ToLower(secondTurnBody), "provider") || strings.Contains(strings.ToLower(secondTurnBody), "pos") {
+		t.Fatalf("confirmed TwiML should not expose provider internals: %s", secondTurnBody)
 	}
 	if bookingTool.calls != 1 {
 		t.Fatalf("booking calls = %d, want 1 after slot selection", bookingTool.calls)
+	}
+	if bookingTool.request.CustomerName != "Linh Tran" {
+		t.Fatalf("booking customer name = %q, want Linh Tran", bookingTool.request.CustomerName)
 	}
 	if bookingTool.request.Source != booking.SourceAIVoiceCall {
 		t.Fatalf("booking source = %s, want %s", bookingTool.request.Source, booking.SourceAIVoiceCall)
