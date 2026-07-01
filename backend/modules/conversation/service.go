@@ -185,6 +185,10 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		return nil, err
 	}
 
+	if handled, updated, err := s.handlePendingCustomerNameConfirmation(ctx, salonID, ownerUserID, *session, message, eventKey, services, staff, cfg, knowledge); handled {
+		return updated, err
+	}
+
 	if reply, handoff := customerNameSlotRepairReply(message, *session, services); reply != "" {
 		turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
 		if handoff {
@@ -211,7 +215,11 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	selectedOfferedSlot := false
 	exactRequestedTimeSelected := false
 	loc := timezoneLocation(cfg.Timezone)
+	pendingNameCandidate := voiceCustomerNamePendingConfirmationCandidate(message, *session)
 	applyExtraction(&next, message, services, staff, loc, s.now)
+	if pendingNameCandidate != "" {
+		next.CustomerName = ""
+	}
 	if selected := selectOfferedSlot(message, session.OfferedSlots, loc); selected != nil {
 		applySelectedOfferedSlot(&next, *selected)
 		selectedOfferedSlot = true
@@ -230,6 +238,14 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 
 	if shouldHandoff(message) {
 		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonHumanRequested, "I'll pass this to the owner so they can help directly. This is not a confirmed appointment.", services, staff, cfg)
+	}
+
+	if pendingNameCandidate != "" && intent == IntentBooking {
+		turn.AIMessage = customerNameConfirmationPrompt(pendingNameCandidate)
+		setPendingCustomerNameMetadata(&turn, pendingNameCandidate, "voice_short_bare_name")
+		s.applyReplyGenerator(ctx, &turn, next, cfg, "customer_name", "customer_name", knowledge)
+		finalizeTurnMetadata(&turn, *session, next, "customer_name", "customer_name", "customer_name_confirmation")
+		return s.store.SaveTurn(ctx, turn)
 	}
 
 	if intent != IntentBooking {
@@ -1427,7 +1443,9 @@ func applyExtraction(session *Session, message string, services []ServiceOption,
 		clearServiceSelection(session)
 	}
 	if session.CustomerName == "" {
-		if name := extractName(message); name != "" {
+		if name := spelledCustomerName(message); name != "" && missingBookingField(*session) == "customer_name" {
+			session.CustomerName = name
+		} else if name := extractName(message); name != "" {
 			session.CustomerName = name
 		} else if name := bareCustomerNameForSession(message, *session); name != "" {
 			session.CustomerName = name
@@ -1708,6 +1726,273 @@ func extractName(message string) string {
 		}
 	}
 	return ""
+}
+
+func (s *Service) handlePendingCustomerNameConfirmation(ctx context.Context, salonID string, ownerUserID string, session Session, message string, eventKey string, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (bool, *Session, error) {
+	if missingBookingField(session) != "customer_name" {
+		return false, nil, nil
+	}
+	pendingName := pendingCustomerName(session)
+	if pendingName == "" {
+		return false, nil, nil
+	}
+	if isAffirmativeOnly(message) {
+		next := session
+		next.CustomerName = pendingName
+		if next.CustomerPhone == "" {
+			next.CustomerPhone = extractPhone(message)
+		}
+		if next.CustomerEmail == "" {
+			next.CustomerEmail = extractEmail(message)
+		}
+		turn := newTurnRecord(salonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
+		clearPendingCustomerNameMetadata(&turn, "confirmed")
+		updated, err := s.continueAfterCustomerName(ctx, ownerUserID, turn, next, services, staff, cfg, knowledge)
+		return true, updated, err
+	}
+	if candidate := correctedCustomerNameCandidate(message, session); candidate != "" {
+		next := session
+		turn := newTurnRecord(salonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
+		turn.AIMessage = customerNameConfirmationPrompt(candidate)
+		setPendingCustomerNameMetadata(&turn, candidate, "customer_corrected_name")
+		s.applyReplyGenerator(ctx, &turn, next, cfg, "customer_name", "customer_name", knowledge)
+		finalizeTurnMetadata(&turn, session, next, "customer_name", "customer_name", "customer_name_confirmation")
+		updated, err := s.store.SaveTurn(ctx, turn)
+		return true, updated, err
+	}
+	if isNegativeNameConfirmation(message) {
+		next := session
+		turn := newTurnRecord(salonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
+		turn.AIMessage = "Please say or spell the customer name for the appointment."
+		clearPendingCustomerNameMetadata(&turn, "rejected")
+		s.applyReplyGenerator(ctx, &turn, next, cfg, "customer_name", "customer_name", knowledge)
+		finalizeTurnMetadata(&turn, session, next, "customer_name", "customer_name", "customer_name_repair")
+		updated, err := s.store.SaveTurn(ctx, turn)
+		return true, updated, err
+	}
+	return false, nil, nil
+}
+
+func (s *Service) continueAfterCustomerName(ctx context.Context, ownerUserID string, turn TurnRecord, next Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
+	if missing := missingBookingField(next); missing != "" {
+		turn.AIMessage = promptForMissingField(missing)
+		s.applyReplyGenerator(ctx, &turn, next, cfg, missing, missing, knowledge)
+		finalizeTurnMetadata(&turn, turn.Session, next, missing, missing, "customer_name_confirmed")
+		return s.store.SaveTurn(ctx, turn)
+	}
+	return s.tryBooking(ctx, ownerUserID, turn, next, services, staff, cfg, knowledge)
+}
+
+func voiceCustomerNamePendingConfirmationCandidate(message string, session Session) string {
+	if session.Channel != ChannelPhone || missingBookingField(session) != "customer_name" {
+		return ""
+	}
+	if spelled := spelledCustomerName(message); spelled != "" {
+		return ""
+	}
+	if hasExplicitNamePhrase(message) {
+		return ""
+	}
+	candidate := customerNameCandidate(message, session)
+	if !isShortSingleWordName(candidate) {
+		return ""
+	}
+	return candidate
+}
+
+func customerNameCandidate(message string, session Session) string {
+	if name := spelledCustomerName(message); name != "" {
+		return name
+	}
+	if name := extractName(message); name != "" {
+		return name
+	}
+	return bareCustomerNameForSession(message, session)
+}
+
+func correctedCustomerNameCandidate(message string, session Session) string {
+	if name := spelledCustomerName(message); name != "" {
+		return name
+	}
+	cleaned := stripNameCorrectionPrefix(message)
+	if cleaned == "" || cleaned == strings.TrimSpace(message) {
+		return customerNameCandidate(message, session)
+	}
+	if name := extractName(cleaned); name != "" {
+		return name
+	}
+	return cleanBareCustomerName(cleaned)
+}
+
+func stripNameCorrectionPrefix(message string) string {
+	value := strings.TrimSpace(message)
+	for {
+		lower := strings.ToLower(strings.TrimSpace(value))
+		next := value
+		for _, prefix := range []string{
+			"no,",
+			"no ",
+			"nope,",
+			"nope ",
+			"not ",
+			"it's ",
+			"it is ",
+			"this is ",
+			"my name is ",
+			"the name is ",
+			"name is ",
+		} {
+			if strings.HasPrefix(lower, prefix) {
+				next = strings.TrimSpace(value[len(prefix):])
+				break
+			}
+		}
+		if next == value {
+			return strings.TrimSpace(strings.Trim(value, " ,.;"))
+		}
+		value = next
+	}
+}
+
+func spelledCustomerName(message string) string {
+	cleaned := normalizeSpelledNameText(message)
+	if cleaned == "" {
+		return ""
+	}
+	tokens := strings.FieldsFunc(cleaned, func(r rune) bool {
+		return r == ' ' || r == '-' || r == '.' || r == ','
+	})
+	letters := make([]rune, 0, len(tokens))
+	for _, token := range tokens {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		runes := []rune(token)
+		if len(runes) != 1 || !isLatinLetter(runes[0]) {
+			return ""
+		}
+		letters = append(letters, unicode.ToLower(runes[0]))
+	}
+	if len(letters) < 2 || len(letters) > 24 {
+		return ""
+	}
+	letters[0] = unicode.ToUpper(letters[0])
+	return string(letters)
+}
+
+func normalizeSpelledNameText(message string) string {
+	value := strings.ToLower(strings.TrimSpace(message))
+	replacer := strings.NewReplacer(
+		"spelled", "",
+		"spell", "",
+		"it's", "",
+		"it is", "",
+		"my name is", "",
+		"name is", "",
+		"nope", "",
+		"no", "",
+	)
+	value = replacer.Replace(value)
+	return strings.TrimSpace(strings.Trim(value, " ,.;:!?"))
+}
+
+func hasExplicitNamePhrase(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(lower, "my name is") ||
+		strings.Contains(lower, "this is") ||
+		strings.Contains(lower, "i am ") ||
+		strings.Contains(lower, "i'm ") ||
+		strings.Contains(lower, "name is")
+}
+
+func isShortSingleWordName(name string) bool {
+	name = strings.TrimSpace(strings.Trim(name, "."))
+	if name == "" || len(strings.Fields(name)) != 1 {
+		return false
+	}
+	runeCount := len([]rune(name))
+	return runeCount >= 2 && runeCount <= 6
+}
+
+func customerNameConfirmationPrompt(name string) string {
+	return "I heard " + strings.TrimSpace(name) + ". Is that the correct name for the appointment?"
+}
+
+func isNegativeNameConfirmation(message string) bool {
+	normalized := normalizeLooseText(message)
+	return normalized == "no" ||
+		normalized == "nope" ||
+		normalized == "not correct" ||
+		normalized == "wrong" ||
+		normalized == "incorrect" ||
+		strings.HasPrefix(normalized, "no ") ||
+		strings.HasPrefix(normalized, "nope ")
+}
+
+func pendingCustomerName(session Session) string {
+	if strings.TrimSpace(session.CustomerName) != "" {
+		return ""
+	}
+	for i := len(session.Transcript) - 1; i >= 0; i-- {
+		msg := session.Transcript[i]
+		if msg.Speaker != SpeakerAI {
+			continue
+		}
+		if metadataBool(msg.Metadata, "pending_customer_name_cleared") {
+			return ""
+		}
+		if name := metadataString(msg.Metadata, "pending_customer_name"); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func setPendingCustomerNameMetadata(turn *TurnRecord, name string, reason string) {
+	if turn == nil {
+		return
+	}
+	turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{
+		"pending_customer_name":        strings.TrimSpace(name),
+		"pending_customer_name_reason": strings.TrimSpace(reason),
+	})
+}
+
+func clearPendingCustomerNameMetadata(turn *TurnRecord, reason string) {
+	if turn == nil {
+		return
+	}
+	turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{
+		"pending_customer_name_cleared": true,
+		"pending_customer_name_reason":  strings.TrimSpace(reason),
+	})
+}
+
+func metadataString(metadata map[string]any, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	value, ok := metadata[key]
+	if !ok {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	return ""
+}
+
+func metadataBool(metadata map[string]any, key string) bool {
+	if metadata == nil {
+		return false
+	}
+	value, ok := metadata[key]
+	if !ok {
+		return false
+	}
+	flag, ok := value.(bool)
+	return ok && flag
 }
 
 func customerNameSlotRepairReply(message string, session Session, services []ServiceOption) (string, bool) {
