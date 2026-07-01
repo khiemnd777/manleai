@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,7 +17,10 @@ import (
 	"github.com/manleai/ai-receptionist/modules/voice"
 )
 
-const fallbackInputModeQuery = "voice_fallback_mode"
+const (
+	fallbackInputModeQuery       = "voice_fallback_mode"
+	realtimeTerminalDrainTimeout = 12 * time.Second
+)
 
 type Handler struct {
 	adapter *Adapter
@@ -237,6 +241,7 @@ func (h *Handler) Stream(c *websocket.Conn) {
 	var toPhone string
 	var connected atomic.Bool
 	seenTranscripts := map[string]struct{}{}
+	twilioMarks := make(chan string, 8)
 
 	defer func() {
 		if realtime != nil {
@@ -293,7 +298,7 @@ func (h *Handler) Stream(c *websocket.Conn) {
 				"stage":      "openai_connected",
 				"stream_sid": streamSID,
 			})
-			go h.forwardRealtimeEvents(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, seenTranscripts)
+			go h.forwardRealtimeEvents(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, seenTranscripts, twilioMarks)
 		case "media":
 			if realtime == nil || msg.Media == nil || strings.TrimSpace(msg.Media.Payload) == "" {
 				continue
@@ -314,6 +319,18 @@ func (h *Handler) Stream(c *websocket.Conn) {
 				})
 			}
 			return
+		case "mark":
+			if msg.Mark == nil {
+				continue
+			}
+			name := strings.TrimSpace(msg.Mark.Name)
+			if name == "" {
+				continue
+			}
+			select {
+			case twilioMarks <- name:
+			default:
+			}
 		}
 	}
 }
@@ -330,11 +347,35 @@ func (h *Handler) forwardRealtimeEvents(
 	fromPhone string,
 	toPhone string,
 	seenTranscripts map[string]struct{},
+	twilioMarks <-chan string,
+) {
+	h.forwardRealtimeEventsWithTerminalDrainTimeout(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, seenTranscripts, twilioMarks, realtimeTerminalDrainTimeout)
+}
+
+func (h *Handler) forwardRealtimeEventsWithTerminalDrainTimeout(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	closeStream func(string),
+	realtime voice.RealtimeSession,
+	writeJSON func(any) error,
+	streamSID string,
+	providerCallID string,
+	sessionID string,
+	fromPhone string,
+	toPhone string,
+	seenTranscripts map[string]struct{},
+	twilioMarks <-chan string,
+	terminalDrainTimeout time.Duration,
 ) {
 	responseActive := false
 	activeCloseAfter := false
+	activeAudioSent := false
+	activeInterrupted := false
 	suppressAudioUntilDone := false
 	pendingReply := realtimeQueuedReply{}
+	pendingCloseMark := ""
+	closeDrainTimer := (<-chan time.Time)(nil)
+	markSequence := 0
 
 	speakReply := func(message string, closeAfter bool) bool {
 		message = strings.TrimSpace(message)
@@ -352,6 +393,8 @@ func (h *Handler) forwardRealtimeEvents(
 		}
 		responseActive = true
 		activeCloseAfter = closeAfter
+		activeAudioSent = false
+		activeInterrupted = false
 		suppressAudioUntilDone = false
 		return true
 	}
@@ -365,9 +408,49 @@ func (h *Handler) forwardRealtimeEvents(
 		return speakReply(reply.message, reply.closeAfter)
 	}
 
+	clearPendingCloseMark := func() {
+		pendingCloseMark = ""
+		closeDrainTimer = nil
+	}
+
+	beginTerminalCloseDrain := func(audioSent bool) bool {
+		if streamSID == "" || !audioSent {
+			cancel()
+			closeStream("response_complete")
+			return false
+		}
+		markSequence++
+		pendingCloseMark = "final-response-" + strconv.Itoa(markSequence)
+		if err := writeJSON(twilioOutboundMark{
+			Event:     "mark",
+			StreamSid: streamSID,
+			Mark:      twilioMarkPayload{Name: pendingCloseMark},
+		}); err != nil {
+			_ = h.recordRealtimeFailure(ctx, providerCallID, sessionID, streamSID, "twilio_mark_write", err)
+			cancel()
+			closeStream("twilio_mark_write_failed")
+			return false
+		}
+		closeDrainTimer = time.After(terminalDrainTimeout)
+		return true
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case markName := <-twilioMarks:
+			if pendingCloseMark == "" || markName != pendingCloseMark {
+				continue
+			}
+			clearPendingCloseMark()
+			cancel()
+			closeStream("response_complete")
+			return
+		case <-closeDrainTimer:
+			clearPendingCloseMark()
+			cancel()
+			closeStream("response_playback_timeout")
 			return
 		case event, ok := <-realtime.Events():
 			if !ok {
@@ -388,13 +471,16 @@ func (h *Handler) forwardRealtimeEvents(
 						StreamSid: streamSID,
 						Media:     twilioOutboundMediaPayload{Payload: event.AudioBase64},
 					})
+					activeAudioSent = true
 				}
 			case voice.RealtimeEventSpeechStarted:
+				clearPendingCloseMark()
 				if streamSID != "" {
 					_ = writeJSON(twilioClearMessage{Event: "clear", StreamSid: streamSID})
 				}
 				if responseActive {
 					suppressAudioUntilDone = true
+					activeInterrupted = true
 				}
 			case voice.RealtimeEventTranscriptDone:
 				transcript := strings.TrimSpace(event.Transcript)
@@ -435,17 +521,21 @@ func (h *Handler) forwardRealtimeEvents(
 				}
 			case voice.RealtimeEventResponseDone:
 				completedCloseAfter := activeCloseAfter
+				completedAudioSent := activeAudioSent
+				completedInterrupted := activeInterrupted
 				hadPendingReply := strings.TrimSpace(pendingReply.message) != ""
 				responseActive = false
 				activeCloseAfter = false
+				activeAudioSent = false
+				activeInterrupted = false
 				suppressAudioUntilDone = false
 				if !flushPendingReply() {
 					return
 				}
-				if !hadPendingReply && completedCloseAfter {
-					cancel()
-					closeStream("response_complete")
-					return
+				if !hadPendingReply && completedCloseAfter && !completedInterrupted {
+					if !beginTerminalCloseDrain(completedAudioSent) {
+						return
+					}
 				}
 			case voice.RealtimeEventError:
 				_ = h.recordRealtimeFailure(ctx, providerCallID, sessionID, streamSID, "openai_event", errors.New(event.Error))
@@ -554,6 +644,7 @@ type twilioStreamMessage struct {
 	StreamSid string             `json:"streamSid"`
 	Start     *twilioStreamStart `json:"start,omitempty"`
 	Media     *twilioStreamMedia `json:"media,omitempty"`
+	Mark      *twilioStreamMark  `json:"mark,omitempty"`
 }
 
 type twilioStreamStart struct {
@@ -566,6 +657,10 @@ type twilioStreamStart struct {
 type twilioStreamMedia struct {
 	Track   string `json:"track"`
 	Payload string `json:"payload"`
+}
+
+type twilioStreamMark struct {
+	Name string `json:"name"`
 }
 
 type twilioOutboundMedia struct {
@@ -581,6 +676,16 @@ type twilioOutboundMediaPayload struct {
 type twilioClearMessage struct {
 	Event     string `json:"event"`
 	StreamSid string `json:"streamSid"`
+}
+
+type twilioOutboundMark struct {
+	Event     string            `json:"event"`
+	StreamSid string            `json:"streamSid"`
+	Mark      twilioMarkPayload `json:"mark"`
+}
+
+type twilioMarkPayload struct {
+	Name string `json:"name"`
 }
 
 func firstNonEmpty(values ...string) string {

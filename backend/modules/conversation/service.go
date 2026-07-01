@@ -1790,9 +1790,6 @@ func voiceCustomerNamePendingConfirmationCandidate(message string, session Sessi
 	if spelled := spelledCustomerName(message); spelled != "" {
 		return ""
 	}
-	if hasExplicitNamePhrase(message) {
-		return ""
-	}
 	candidate := customerNameCandidate(message, session)
 	if !isShortSingleWordName(candidate) {
 		return ""
@@ -1897,15 +1894,6 @@ func normalizeSpelledNameText(message string) string {
 	return strings.TrimSpace(strings.Trim(value, " ,.;:!?"))
 }
 
-func hasExplicitNamePhrase(message string) bool {
-	lower := strings.ToLower(strings.TrimSpace(message))
-	return strings.Contains(lower, "my name is") ||
-		strings.Contains(lower, "this is") ||
-		strings.Contains(lower, "i am ") ||
-		strings.Contains(lower, "i'm ") ||
-		strings.Contains(lower, "name is")
-}
-
 func isShortSingleWordName(name string) bool {
 	name = strings.TrimSpace(strings.Trim(name, "."))
 	if name == "" || len(strings.Fields(name)) != 1 {
@@ -1999,11 +1987,17 @@ func customerNameSlotRepairReply(message string, session Session, services []Ser
 	if missingBookingField(session) != "customer_name" {
 		return "", false
 	}
-	if extractName(message) != "" || bareCustomerNameForSession(message, session) != "" {
-		return "", false
-	}
 	if isGoodbyeUtterance(message) {
 		return "No problem. I'll send this request to the owner to review. This is not a confirmed appointment. Goodbye.", true
+	}
+	if voiceCustomerNameNeedsRepair(message, session) {
+		if customerNamePromptCount(session) >= maxCustomerNamePrompts {
+			return "I'm having trouble catching the name. I'll send this request to the owner to review. This is not a confirmed appointment.", true
+		}
+		return "I may have heard that wrong. Please spell the name for the appointment.", false
+	}
+	if extractName(message) != "" || bareCustomerNameForSession(message, session) != "" {
+		return "", false
 	}
 	if customerNamePromptCount(session) >= maxCustomerNamePrompts {
 		return "I'm having trouble catching the name. I'll send this request to the owner to review. This is not a confirmed appointment.", true
@@ -2048,6 +2042,70 @@ func isCustomerNameNonAnswer(message string, services []ServiceOption) bool {
 		phonePattern.MatchString(message) ||
 		emailPattern.MatchString(message) ||
 		looksLikeDateOrTimeInsteadOfName(message)
+}
+
+func voiceCustomerNameNeedsRepair(message string, session Session) bool {
+	if session.Channel != ChannelPhone || missingBookingField(session) != "customer_name" {
+		return false
+	}
+	if spelledCustomerName(message) != "" {
+		return false
+	}
+	candidate := customerNameCandidate(message, session)
+	if candidate == "" {
+		return false
+	}
+	return isLowQualityVoiceCustomerName(candidate)
+}
+
+func isLowQualityVoiceCustomerName(name string) bool {
+	words := customerNameWords(name)
+	if len(words) == 0 {
+		return false
+	}
+	for _, word := range words {
+		if isPhraseLikeNameToken(word) {
+			return true
+		}
+	}
+	if len(words) >= 4 && !looksLikeNameCaseSequence(words) {
+		return true
+	}
+	return false
+}
+
+func customerNameWords(name string) []string {
+	fields := strings.Fields(strings.TrimSpace(name))
+	words := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.Trim(field, " ,.;:!?\"'")
+		if field != "" {
+			words = append(words, field)
+		}
+	}
+	return words
+}
+
+func isPhraseLikeNameToken(word string) bool {
+	switch strings.ToLower(strings.TrimSpace(word)) {
+	case "for", "fur", "für", "to", "of", "the", "is", "are", "am", "was", "were", "you", "your", "me", "appointment", "service", "book", "booking":
+		return true
+	default:
+		return false
+	}
+}
+
+func looksLikeNameCaseSequence(words []string) bool {
+	if len(words) == 0 {
+		return false
+	}
+	for _, word := range words {
+		runes := []rune(strings.TrimSpace(word))
+		if len(runes) == 0 || !unicode.IsUpper(runes[0]) {
+			return false
+		}
+	}
+	return true
 }
 
 func isAffirmativeOnly(message string) bool {

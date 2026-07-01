@@ -1118,6 +1118,92 @@ func TestMessageAcceptsSpelledVoiceName(t *testing.T) {
 	}
 }
 
+func TestMessageAcceptsNormalFullVoiceName(t *testing.T) {
+	tests := []struct {
+		message string
+		want    string
+	}{
+		{message: "Linh Tran.", want: "Linh Tran"},
+		{message: "Nguyen Thi Minh Khai.", want: "Nguyen Thi Minh Khai"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			store := newFakeConversationStore()
+			seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
+			store.session.Channel = ChannelPhone
+			bookingTool := &fakeBookingTool{}
+			service := NewService(store, bookingTool)
+			service.now = fixedNow
+
+			session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+				Message: tt.message,
+			})
+			if err != nil {
+				t.Fatalf("Message returned error: %v", err)
+			}
+			if session.CustomerName != tt.want {
+				t.Fatalf("customer name = %q, want %s", session.CustomerName, tt.want)
+			}
+			if _, ok := store.lastTurn.AIMetadata["pending_customer_name"]; ok {
+				t.Fatalf("normal full name should not remain pending: %#v", store.lastTurn.AIMetadata)
+			}
+			if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "phone") {
+				t.Fatalf("AI should move to phone after full name: %s", store.lastTurn.AIMessage)
+			}
+		})
+	}
+}
+
+func TestMessageConfirmsExplicitShortVoiceName(t *testing.T) {
+	store := newFakeConversationStore()
+	seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
+	store.session.Channel = ChannelPhone
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "My name is Sim.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.CustomerName != "" {
+		t.Fatalf("customer name = %q, want pending only until confirmation", session.CustomerName)
+	}
+	if store.lastTurn.AIMetadata["pending_customer_name"] != "Sim" {
+		t.Fatalf("pending metadata = %#v, want Sim", store.lastTurn.AIMetadata)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "I heard Sim") || !strings.Contains(store.lastTurn.AIMessage, "correct name") {
+		t.Fatalf("AI should confirm explicit short voice name: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageRepromptsForLowQualityVoiceName(t *testing.T) {
+	store := newFakeConversationStore()
+	seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
+	store.session.Channel = ChannelPhone
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Es wus für mi.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.CustomerName != "" {
+		t.Fatalf("customer name = %q, want empty for low-quality voice name", session.CustomerName)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("low-quality name should not call booking tools, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "spell") {
+		t.Fatalf("AI should ask caller to spell low-quality name: %s", store.lastTurn.AIMessage)
+	}
+}
+
 func TestMessageRepromptsWithoutTreatingYesAsCustomerName(t *testing.T) {
 	store := newFakeConversationStore()
 	seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
@@ -1146,6 +1232,7 @@ func TestMessageEscalatesAfterRepeatedCustomerNameNonAnswers(t *testing.T) {
 	tests := []string{
 		"Yes, you can.",
 		"ออสเทรลเมนิคิว",
+		"Es wus für mi.",
 	}
 	for _, message := range tests {
 		t.Run(message, func(t *testing.T) {
@@ -1155,6 +1242,7 @@ func TestMessageEscalatesAfterRepeatedCustomerNameNonAnswers(t *testing.T) {
 				"Can I have the name for the appointment, please?",
 				"Could you please provide the name for the appointment?",
 			})
+			store.session.Channel = ChannelPhone
 			bookingTool := &fakeBookingTool{}
 			service := NewService(store, bookingTool)
 			service.now = fixedNow

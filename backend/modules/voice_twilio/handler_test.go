@@ -167,7 +167,7 @@ func TestForwardRealtimeEventsQueuesReplyUntilResponseDone(t *testing.T) {
 	defer cancel()
 	closed := make(chan string, 1)
 
-	go handler.forwardRealtimeEvents(ctx, cancel, closeStreamRecorder(closed), realtime, func(any) error { return nil }, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{})
+	go handler.forwardRealtimeEvents(ctx, cancel, closeStreamRecorder(closed), realtime, func(any) error { return nil }, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{}, nil)
 
 	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_1", Transcript: "one p.m."}
 	if got := waitForSpeak(t, realtime); got != "What name should I put on the appointment?" {
@@ -195,7 +195,7 @@ func TestForwardRealtimeEventsSuppressesInterruptedAudioUntilResponseDone(t *tes
 	go handler.forwardRealtimeEvents(ctx, cancel, closeStreamRecorder(closed), realtime, func(value any) error {
 		writes <- value
 		return nil
-	}, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{})
+	}, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{}, nil)
 
 	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_1", Transcript: "one p.m."}
 	_ = waitForSpeak(t, realtime)
@@ -226,7 +226,7 @@ func TestForwardRealtimeEventsKeepsStreamOpenForActiveResponseConflict(t *testin
 	defer cancel()
 	closed := make(chan string, 1)
 
-	go handler.forwardRealtimeEvents(ctx, cancel, closeStreamRecorder(closed), realtime, func(any) error { return nil }, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{})
+	go handler.forwardRealtimeEvents(ctx, cancel, closeStreamRecorder(closed), realtime, func(any) error { return nil }, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{}, nil)
 
 	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_1", Transcript: "one p.m."}
 	_ = waitForSpeak(t, realtime)
@@ -242,7 +242,7 @@ func TestForwardRealtimeEventsKeepsStreamOpenForActiveResponseConflict(t *testin
 	}
 }
 
-func TestForwardRealtimeEventsClosesOnlyAfterTerminalReplyResponseDone(t *testing.T) {
+func TestForwardRealtimeEventsClosesTerminalReplyOnlyAfterTwilioMark(t *testing.T) {
 	completed := phoneSessionWithAIReply("You're confirmed with Lotus Nails for your Classic Manicure on Wednesday, June 10 at 10:00 AM with Mai Nguyen. The appointment is under Linh Tran. Thank you, goodbye.", conversation.StatusCompleted, conversation.OutcomeBookingConfirmed)
 	completed.BookingAttemptID = "attempt_voice"
 	completed.AppointmentID = "appointment_voice"
@@ -252,8 +252,13 @@ func TestForwardRealtimeEventsClosesOnlyAfterTerminalReplyResponseDone(t *testin
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	closed := make(chan string, 1)
+	writes := make(chan any, 4)
+	marks := make(chan string, 4)
 
-	go handler.forwardRealtimeEvents(ctx, cancel, closeStreamRecorder(closed), realtime, func(any) error { return nil }, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{})
+	go handler.forwardRealtimeEvents(ctx, cancel, closeStreamRecorder(closed), realtime, func(value any) error {
+		writes <- value
+		return nil
+	}, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{}, marks)
 
 	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_1", Transcript: "Sim"}
 	if got := waitForSpeak(t, realtime); !strings.Contains(got, "Thank you, goodbye.") {
@@ -261,10 +266,126 @@ func TestForwardRealtimeEventsClosesOnlyAfterTerminalReplyResponseDone(t *testin
 	}
 	assertNoClose(t, closed)
 
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventAudioDelta, AudioBase64: "confirmed-audio"}
+	if got := waitForWrite(t, writes); got != (twilioOutboundMedia{
+		Event:     "media",
+		StreamSid: "MZ123",
+		Media:     twilioOutboundMediaPayload{Payload: "confirmed-audio"},
+	}) {
+		t.Fatalf("write = %#v, want confirmation audio", got)
+	}
+
 	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
+	markWrite, ok := waitForWrite(t, writes).(twilioOutboundMark)
+	if !ok {
+		t.Fatalf("terminal response should write a Twilio mark")
+	}
+	if markWrite.Event != "mark" || markWrite.StreamSid != "MZ123" || markWrite.Mark.Name != "final-response-1" {
+		t.Fatalf("mark write = %#v", markWrite)
+	}
+	assertNoClose(t, closed)
+
+	marks <- "stale-final-response"
+	assertNoClose(t, closed)
+	marks <- markWrite.Mark.Name
 	if got := waitForClose(t, closed); got != "response_complete" {
 		t.Fatalf("close reason = %q, want response_complete", got)
 	}
+}
+
+func TestForwardRealtimeEventsClosesTerminalReplyImmediatelyWhenNoAudioWasSent(t *testing.T) {
+	completed := phoneSessionWithAIReply("You're confirmed with Lotus Nails. Thank you, goodbye.", conversation.StatusCompleted, conversation.OutcomeBookingConfirmed)
+	completed.BookingAttemptID = "attempt_voice"
+	completed.AppointmentID = "appointment_voice"
+	adapter, service, _, _ := testTwilioRuntimeWithStore(completed)
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	closed := make(chan string, 1)
+	writes := make(chan any, 1)
+
+	go handler.forwardRealtimeEvents(ctx, cancel, closeStreamRecorder(closed), realtime, func(value any) error {
+		writes <- value
+		return nil
+	}, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{}, nil)
+
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_1", Transcript: "Sim"}
+	_ = waitForSpeak(t, realtime)
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
+
+	if got := waitForClose(t, closed); got != "response_complete" {
+		t.Fatalf("close reason = %q, want response_complete", got)
+	}
+	assertNoWrite(t, writes)
+}
+
+func TestForwardRealtimeEventsClosesTerminalReplyOnPlaybackTimeout(t *testing.T) {
+	completed := phoneSessionWithAIReply("You're confirmed with Lotus Nails for your Classic Manicure. Thank you, goodbye.", conversation.StatusCompleted, conversation.OutcomeBookingConfirmed)
+	completed.BookingAttemptID = "attempt_voice"
+	completed.AppointmentID = "appointment_voice"
+	adapter, service, _, _ := testTwilioRuntimeWithStore(completed)
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	closed := make(chan string, 1)
+	writes := make(chan any, 4)
+	marks := make(chan string, 4)
+
+	go handler.forwardRealtimeEventsWithTerminalDrainTimeout(ctx, cancel, closeStreamRecorder(closed), realtime, func(value any) error {
+		writes <- value
+		return nil
+	}, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{}, marks, 10*time.Millisecond)
+
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_1", Transcript: "Sim"}
+	_ = waitForSpeak(t, realtime)
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventAudioDelta, AudioBase64: "confirmed-audio"}
+	_ = waitForWrite(t, writes)
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
+	if _, ok := waitForWrite(t, writes).(twilioOutboundMark); !ok {
+		t.Fatalf("terminal response should write a Twilio mark")
+	}
+
+	if got := waitForClose(t, closed); got != "response_playback_timeout" {
+		t.Fatalf("close reason = %q, want response_playback_timeout", got)
+	}
+}
+
+func TestForwardRealtimeEventsInvalidatesTerminalMarkOnCallerInterruption(t *testing.T) {
+	completed := phoneSessionWithAIReply("You're confirmed with Lotus Nails for your Classic Manicure. Thank you, goodbye.", conversation.StatusCompleted, conversation.OutcomeBookingConfirmed)
+	completed.BookingAttemptID = "attempt_voice"
+	completed.AppointmentID = "appointment_voice"
+	adapter, service, _, _ := testTwilioRuntimeWithStore(completed)
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	closed := make(chan string, 1)
+	writes := make(chan any, 4)
+	marks := make(chan string, 4)
+
+	go handler.forwardRealtimeEvents(ctx, cancel, closeStreamRecorder(closed), realtime, func(value any) error {
+		writes <- value
+		return nil
+	}, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{}, marks)
+
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_1", Transcript: "Sim"}
+	_ = waitForSpeak(t, realtime)
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventAudioDelta, AudioBase64: "confirmed-audio"}
+	_ = waitForWrite(t, writes)
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
+	markWrite, ok := waitForWrite(t, writes).(twilioOutboundMark)
+	if !ok {
+		t.Fatalf("terminal response should write a Twilio mark")
+	}
+
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStarted}
+	if got := waitForWrite(t, writes); got != (twilioClearMessage{Event: "clear", StreamSid: "MZ123"}) {
+		t.Fatalf("write = %#v, want clear", got)
+	}
+	marks <- markWrite.Mark.Name
+	assertNoClose(t, closed)
 }
 
 func testTwilioRuntime(messageSession *conversation.Session) (*Adapter, *voice.Service, *fakeTwilioConversationEngine) {
