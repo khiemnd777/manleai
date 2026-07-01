@@ -73,6 +73,13 @@ type assignmentCandidate struct {
 	Slot           booking.AvailabilitySlot
 }
 
+type serviceMatch struct {
+	service ServiceOption
+	index   int
+	end     int
+	token   string
+}
+
 func NewService(store Store, bookingTool BookingTool) *Service {
 	return &Service{
 		store:       store,
@@ -372,6 +379,9 @@ func (s *Service) applyAvailabilityForRequestedTime(ctx context.Context, ownerUs
 func shouldCheckAvailabilityForRequestedTime(before Session, after Session, selectedOfferedSlot bool) bool {
 	if selectedOfferedSlot || strings.TrimSpace(after.ServiceID) == "" || after.RequestedStartTime == nil {
 		return false
+	}
+	if strings.TrimSpace(before.ServiceID) != strings.TrimSpace(after.ServiceID) {
+		return true
 	}
 	if strings.TrimSpace(before.ServiceID) == "" || !sameOptionalTime(before.RequestedStartTime, after.RequestedStartTime) {
 		return true
@@ -1046,6 +1056,15 @@ func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, ses
 		return
 	}
 	safeReply := strings.TrimSpace(turn.AIMessage)
+	if turn.Update.EndSession {
+		turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{
+			"safe_reply":          safeReply,
+			"llm_guardrail":       "skipped_terminal_reply",
+			"reply_source":        "safe_reply",
+			"next_required_field": nextRequired,
+		})
+		return
+	}
 	result, err := s.replyGenerator.GenerateReply(ctx, ReplyGenerationRequest{
 		SalonID:             turn.SalonID,
 		SessionID:           session.ID,
@@ -1401,13 +1420,11 @@ func applyExtraction(session *Session, message string, services []ServiceOption,
 		session.StaffName = matchedStaff.Name
 		applySpecificStaffToBookingSegments(session, *matchedStaff)
 	}
-	if matches := matchServices(message, services); len(matches) > 0 && (session.ServiceID == "" || len(session.BookingSegments) == 0) {
-		session.ServiceID = matches[0].ID
-		session.ServiceName = matches[0].Name
-		session.BookingSegments = bookingSegmentsFromServices(matches, *session)
-		if len(session.BookingSegments) > 0 {
-			session.StaffSelectionMode = session.BookingSegments[0].StaffSelectionMode
-		}
+	matches := matchServices(message, services)
+	if shouldApplyServiceSelection(*session, message, matches) {
+		applyServiceSelection(session, matches)
+	} else if shouldClearAmbiguousServiceCorrection(*session, message, services, matches) {
+		clearServiceSelection(session)
 	}
 	if session.CustomerName == "" {
 		if name := extractName(message); name != "" {
@@ -1416,6 +1433,130 @@ func applyExtraction(session *Session, message string, services []ServiceOption,
 			session.CustomerName = name
 		}
 	}
+}
+
+func shouldApplyServiceSelection(session Session, message string, matches []ServiceOption) bool {
+	if len(matches) == 0 {
+		return false
+	}
+	if strings.TrimSpace(session.ServiceID) == "" || len(session.BookingSegments) == 0 {
+		return true
+	}
+	if !hasServiceCorrectionSignal(message) {
+		return false
+	}
+	return !sameServiceSelection(session, matches)
+}
+
+func shouldClearAmbiguousServiceCorrection(session Session, message string, services []ServiceOption, matches []ServiceOption) bool {
+	if len(matches) > 0 || strings.TrimSpace(session.ServiceID) == "" || !hasServiceCorrectionSignal(message) {
+		return false
+	}
+	return containsServiceVocabulary(message, services)
+}
+
+func applyServiceSelection(session *Session, matches []ServiceOption) {
+	if session == nil || len(matches) == 0 {
+		return
+	}
+	session.ServiceID = matches[0].ID
+	session.ServiceName = matches[0].Name
+	session.BookingSegments = bookingSegmentsFromServices(matches, *session)
+	session.OfferedSlots = nil
+	if len(session.BookingSegments) > 0 {
+		session.StaffSelectionMode = session.BookingSegments[0].StaffSelectionMode
+	}
+}
+
+func clearServiceSelection(session *Session) {
+	if session == nil {
+		return
+	}
+	session.ServiceID = ""
+	session.ServiceName = ""
+	session.BookingSegments = nil
+	session.OfferedSlots = nil
+}
+
+func sameServiceSelection(session Session, matches []ServiceOption) bool {
+	current := selectedServiceIDs(session)
+	if len(current) != len(matches) {
+		return false
+	}
+	for i, match := range matches {
+		if strings.TrimSpace(match.ID) != current[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func selectedServiceIDs(session Session) []string {
+	if len(session.BookingSegments) > 0 {
+		out := make([]string, 0, len(session.BookingSegments))
+		for _, segment := range session.BookingSegments {
+			serviceID := strings.TrimSpace(segment.ServiceID)
+			if serviceID != "" {
+				out = append(out, serviceID)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	if serviceID := strings.TrimSpace(session.ServiceID); serviceID != "" {
+		return []string{serviceID}
+	}
+	return nil
+}
+
+func hasServiceCorrectionSignal(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	signals := []string{
+		"actually",
+		"i mean",
+		"i meant",
+		"instead",
+		"change it to",
+		"change to",
+		"switch to",
+		"make it",
+	}
+	for _, signal := range signals {
+		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
+	cleaned := strings.TrimLeft(lower, " ,.;:!?")
+	return strings.HasPrefix(cleaned, "no ") || strings.HasPrefix(cleaned, "no,") || strings.Contains(lower, " not ")
+}
+
+func containsServiceVocabulary(message string, services []ServiceOption) bool {
+	lower := strings.ToLower(message)
+	if lower == "" {
+		return false
+	}
+	for _, service := range services {
+		name := strings.ToLower(strings.TrimSpace(service.Name))
+		if name != "" && strings.Contains(lower, name) {
+			return true
+		}
+		for _, token := range significantWords(service.Name) {
+			if strings.Contains(lower, token) {
+				return true
+			}
+		}
+	}
+	generic := []string{"manicure", "pedicure", "nail", "nails", "acrylic", "gel", "dip", "powder", "polish", "shellac", "french", "chrome"}
+	for _, token := range generic {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func shouldHandoff(message string) bool {
@@ -1783,11 +1924,7 @@ func matchServices(message string, services []ServiceOption) []ServiceOption {
 	sort.SliceStable(ordered, func(i, j int) bool {
 		return len(ordered[i].Name) > len(ordered[j].Name)
 	})
-	type match struct {
-		service ServiceOption
-		index   int
-	}
-	matches := make([]match, 0, len(ordered))
+	matches := make([]serviceMatch, 0, len(ordered))
 	seen := map[string]bool{}
 	for _, service := range ordered {
 		name := strings.ToLower(service.Name)
@@ -1795,23 +1932,26 @@ func matchServices(message string, services []ServiceOption) []ServiceOption {
 			continue
 		}
 		if index := strings.Index(lower, name); index >= 0 {
-			matches = append(matches, match{service: service, index: index})
+			matches = append(matches, serviceMatch{service: service, index: index, end: index + len(name)})
 			seen[service.ID] = true
 		}
 	}
-	if len(matches) == 0 {
+	if len(matches) > 0 {
+		matches = removeContainedServiceMatches(matches)
+	} else {
 		for _, service := range ordered {
 			if seen[service.ID] {
 				continue
 			}
 			for _, token := range significantWords(service.Name) {
 				if index := strings.Index(lower, token); index >= 0 {
-					matches = append(matches, match{service: service, index: index})
+					matches = append(matches, serviceMatch{service: service, index: index, end: index + len(token), token: token})
 					seen[service.ID] = true
 					break
 				}
 			}
 		}
+		matches = removeAmbiguousTokenMatches(matches)
 	}
 	if len(matches) == 0 {
 		return nil
@@ -1825,6 +1965,43 @@ func matchServices(message string, services []ServiceOption) []ServiceOption {
 	out := make([]ServiceOption, 0, len(matches))
 	for _, item := range matches {
 		out = append(out, item.service)
+	}
+	return out
+}
+
+func removeContainedServiceMatches(matches []serviceMatch) []serviceMatch {
+	out := make([]serviceMatch, 0, len(matches))
+	for i, item := range matches {
+		contained := false
+		for j, other := range matches {
+			if i == j {
+				continue
+			}
+			if item.index >= other.index && item.end <= other.end && len(item.service.Name) < len(other.service.Name) {
+				contained = true
+				break
+			}
+		}
+		if !contained {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func removeAmbiguousTokenMatches(matches []serviceMatch) []serviceMatch {
+	if len(matches) <= 1 {
+		return matches
+	}
+	counts := map[string]int{}
+	for _, item := range matches {
+		counts[item.token]++
+	}
+	out := make([]serviceMatch, 0, len(matches))
+	for _, item := range matches {
+		if counts[item.token] == 1 {
+			out = append(out, item)
+		}
 	}
 	return out
 }
@@ -2868,6 +3045,7 @@ func confirmedMessage(session Session, services []ServiceOption, staff []StaffOp
 	if name := strings.TrimSpace(session.CustomerName); name != "" {
 		message += " The appointment is under " + name + "."
 	}
+	message += " Thank you, goodbye."
 	return message
 }
 

@@ -737,8 +737,8 @@ export function AppointmentsDashboard() {
                   {appointments.map((item) => (
                     <tr key={item.id}>
                       <td className="px-4 py-3">
-                        <div className="font-medium text-ink">{formatDate(item.start_time)}</div>
-                        <div className="mt-1 text-xs text-muted">{formatTimeRange(item.start_time, item.end_time)}</div>
+                        <div className="font-medium text-ink">{formatDate(item.start_time, salon.timezone)}</div>
+                        <div className="mt-1 text-xs text-muted">{formatTimeRange(item.start_time, item.end_time, salon.timezone)}</div>
                       </td>
                       <td className="px-4 py-3">
                         <div className="font-medium text-ink">{item.customer_name}</div>
@@ -775,6 +775,7 @@ export function AppointmentsDashboard() {
                   serviceName={serviceNamesLabel(item, serviceNames)}
                   staffName={assignedTechniciansLabel(item, staffNames)}
                   technicianPreference={technicianPreferenceLabel(item)}
+                  timezone={salon.timezone}
                   disabled={savingAction || !canChangeAppointment(item)}
                   onReschedule={openReschedule}
                   onCancel={openCancel}
@@ -821,9 +822,9 @@ export function AppointmentsDashboard() {
                   {pendingRequests.map((item) => (
                     <tr key={item.id}>
                       <td className="px-4 py-3">
-                        <div className="font-medium text-ink">{formatDate(item.requested_start_time)}</div>
+                        <div className="font-medium text-ink">{formatDate(item.requested_start_time, salon.timezone)}</div>
                         <div className="mt-1 text-xs text-muted">
-                          {formatTimeRange(item.requested_start_time, item.requested_end_time)}
+                          {formatTimeRange(item.requested_start_time, item.requested_end_time, salon.timezone)}
                         </div>
                       </td>
                       <td className="px-4 py-3">
@@ -858,6 +859,7 @@ export function AppointmentsDashboard() {
                   serviceName={serviceNamesLabel(item, serviceNames)}
                   staffName={assignedTechniciansLabel(item, staffNames)}
                   technicianPreference={technicianPreferenceLabel(item)}
+                  timezone={salon.timezone}
                 />
               ))}
             </div>
@@ -1631,6 +1633,7 @@ function AppointmentCard({
   serviceName,
   staffName,
   technicianPreference,
+  timezone,
   disabled,
   onReschedule,
   onCancel
@@ -1639,6 +1642,7 @@ function AppointmentCard({
   serviceName: string;
   staffName: string;
   technicianPreference: string;
+  timezone?: string;
   disabled: boolean;
   onReschedule: (appointment: AppointmentRecord) => void;
   onCancel: (appointment: AppointmentRecord) => void;
@@ -1654,7 +1658,7 @@ function AppointmentCard({
       </div>
       <InfoGrid
         items={[
-          ["When", `${formatDate(item.start_time)} ${formatTimeRange(item.start_time, item.end_time)}`],
+          ["When", `${formatDate(item.start_time, timezone)} ${formatTimeRange(item.start_time, item.end_time, timezone)}`],
           ["Services", serviceName],
           ["Technician preference", technicianPreference],
           ["Assigned technicians", staffName],
@@ -1678,12 +1682,14 @@ function FallbackCard({
   item,
   serviceName,
   staffName,
-  technicianPreference
+  technicianPreference,
+  timezone
 }: {
   item: BookingAttempt;
   serviceName: string;
   staffName: string;
   technicianPreference: string;
+  timezone?: string;
 }) {
   return (
     <div className="rounded-md border border-line p-4">
@@ -1696,7 +1702,7 @@ function FallbackCard({
       </div>
       <InfoGrid
         items={[
-          ["Requested", `${formatDate(item.requested_start_time)} ${formatTimeRange(item.requested_start_time, item.requested_end_time)}`],
+          ["Requested", `${formatDate(item.requested_start_time, timezone)} ${formatTimeRange(item.requested_start_time, item.requested_end_time, timezone)}`],
           ["Services", serviceName],
           ["Technician preference", technicianPreference],
           ["Assigned technicians", staffName],

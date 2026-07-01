@@ -206,6 +206,87 @@ func TestMessageConfirmsOnlyAfterBookingToolSuccess(t *testing.T) {
 	assertCustomerReplyHidesProvider(t, reply)
 }
 
+func TestMessageDoesNotBookAmbiguousGenericManicureMatch(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{
+			ID:              "service_dip",
+			Name:            "Dip Powder Manicure",
+			DurationMinutes: 75,
+			PriceFrom:       55,
+		},
+		{
+			ID:              "service_classic",
+			Name:            "Classic Manicure",
+			DurationMinutes: 45,
+			PriceFrom:       35,
+		},
+		{
+			ID:              "service_gel",
+			Name:            "Gel Manicure",
+			DurationMinutes: 45,
+			PriceFrom:       38,
+		},
+	}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I want to book a child manicure for Thursday at 1 p.m. My name is Sim, phone 312-555-0101.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("booking tool calls = availability %d/create %d, want none for ambiguous service", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if session.ServiceID != "" || len(session.BookingSegments) != 0 {
+		t.Fatalf("service selection = %q segments %#v, want no service for ambiguous generic manicure match", session.ServiceID, session.BookingSegments)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Which service") {
+		t.Fatalf("ambiguous service should ask for clarification: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageKeepsTerminalBookingReplyDeterministic(t *testing.T) {
+	store := newFakeConversationStore()
+	bookingTool := &fakeBookingTool{
+		attempt: &booking.BookingAttempt{
+			ID:           "attempt_1",
+			Status:       booking.StatusConfirmed,
+			POSBookingID: "booking_1",
+			Appointment:  &booking.Appointment{ID: "appointment_1", Status: booking.StatusConfirmed},
+		},
+	}
+	replyGenerator := &fakeReplyGenerator{
+		message: "Your appointment is confirmed. Is there anything else I can assist you with today?",
+	}
+	service := NewService(store, bookingTool)
+	service.SetReplyGenerator(replyGenerator)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "My name is Linh Tran, phone 312-555-0101, classic manicure with Mai on 2026-06-10 at 3pm.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.Status != StatusCompleted || session.Outcome != OutcomeBookingConfirmed {
+		t.Fatalf("session status/outcome = %s/%s, want completed/booking_confirmed", session.Status, session.Outcome)
+	}
+	if replyGenerator.calls != 0 {
+		t.Fatalf("reply generator calls = %d, want 0 for terminal booking reply", replyGenerator.calls)
+	}
+	reply := store.lastTurn.AIMessage
+	if strings.Contains(reply, "?") || strings.Contains(strings.ToLower(reply), "anything else") {
+		t.Fatalf("terminal booking reply should not ask a follow-up question: %s", reply)
+	}
+	if !strings.Contains(reply, "Thank you, goodbye.") {
+		t.Fatalf("terminal booking reply should close the call politely: %s", reply)
+	}
+}
+
 func TestMessageUsesFallbackPendingTextWhenBookingToolFallsBack(t *testing.T) {
 	store := newFakeConversationStore()
 	bookingTool := &fakeBookingTool{
@@ -1026,6 +1107,175 @@ func TestMessageDoesNotTreatServicePhraseAsCustomerName(t *testing.T) {
 	}
 }
 
+func TestMessageChangesServiceAndRefreshesOfferedSlotsBeforeBooking(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = append(store.services, ServiceOption{
+		ID:              "service_gel",
+		Name:            "Gel Manicure",
+		DurationMinutes: 45,
+		PriceFrom:       38,
+	})
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.RequestedDate = "2026-07-02"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{
+		ServiceID:          "service_1",
+		StaffSelectionMode: booking.StaffSelectionAnyone,
+	}}
+	store.session.OfferedSlots = offeredPMSlots()
+	newSlotStart := time.Date(2026, 7, 2, 20, 0, 0, 0, time.UTC)
+	bookingTool := &fakeBookingTool{
+		availabilityResult: availabilityResultForStart("service_gel", "Gel Manicure", newSlotStart),
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Actually Gel Manicure.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 1 {
+		t.Fatalf("availability calls = %d, want 1 for corrected service", bookingTool.availabilityCalls)
+	}
+	if bookingTool.calls != 0 {
+		t.Fatalf("booking calls = %d, want 0 before customer picks refreshed slot", bookingTool.calls)
+	}
+	if bookingTool.availabilityRequest.ServiceID != "service_gel" {
+		t.Fatalf("availability service = %s, want service_gel", bookingTool.availabilityRequest.ServiceID)
+	}
+	if got := bookingTool.availabilityRequest.Segments; len(got) != 1 || got[0].ServiceID != "service_gel" {
+		t.Fatalf("availability segments = %#v, want corrected service_gel segment", got)
+	}
+	if session.ServiceID != "service_gel" {
+		t.Fatalf("session service = %s, want service_gel", session.ServiceID)
+	}
+	if got := session.BookingSegments; len(got) != 1 || got[0].ServiceID != "service_gel" {
+		t.Fatalf("session booking segments = %#v, want corrected service_gel segment", got)
+	}
+	if len(session.OfferedSlots) != 1 || !session.OfferedSlots[0].StartTime.Equal(newSlotStart) {
+		t.Fatalf("offered slots = %#v, want refreshed slot for corrected service", session.OfferedSlots)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "3:00 PM") {
+		t.Fatalf("AI reply should offer refreshed slot: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageBooksCorrectedServiceForExistingExactTime(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = append(store.services, ServiceOption{
+		ID:              "service_gel",
+		Name:            "Gel Manicure",
+		DurationMinutes: 45,
+		PriceFrom:       38,
+	})
+	start := time.Date(2026, 7, 2, 18, 0, 0, 0, time.UTC)
+	store.session.Intent = IntentBooking
+	store.session.CustomerName = "Sim"
+	store.session.CustomerPhone = "+13125550101"
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.RequestedDate = "2026-07-02"
+	store.session.RequestedStartTime = &start
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{
+		ServiceID:          "service_1",
+		StaffSelectionMode: booking.StaffSelectionAnyone,
+	}}
+	bookingTool := &fakeBookingTool{
+		availabilityResult: availabilityResultForStart("service_gel", "Gel Manicure", start),
+		attempt: &booking.BookingAttempt{
+			ID:           "attempt_corrected",
+			Status:       booking.StatusConfirmed,
+			POSBookingID: "booking_corrected",
+			Appointment:  &booking.Appointment{ID: "appointment_corrected", Status: booking.StatusConfirmed},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Actually Gel Manicure.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 1 {
+		t.Fatalf("availability calls = %d, want 1 for corrected exact time", bookingTool.availabilityCalls)
+	}
+	if bookingTool.calls != 1 {
+		t.Fatalf("booking calls = %d, want 1 after corrected exact time is available", bookingTool.calls)
+	}
+	if bookingTool.request.ServiceID != "service_gel" {
+		t.Fatalf("booking service = %s, want service_gel", bookingTool.request.ServiceID)
+	}
+	if got := bookingTool.request.Segments; len(got) != 1 || got[0].ServiceID != "service_gel" {
+		t.Fatalf("booking segments = %#v, want corrected service_gel segment", got)
+	}
+	if session.Outcome != OutcomeBookingConfirmed || session.AppointmentID != "appointment_corrected" {
+		t.Fatalf("session outcome/link = %s/%s, want confirmed corrected appointment", session.Outcome, session.AppointmentID)
+	}
+	if strings.Contains(store.lastTurn.AIMessage, "Classic Manicure") || !strings.Contains(store.lastTurn.AIMessage, "Gel Manicure") {
+		t.Fatalf("confirmed reply should use corrected service only: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageClearsServiceForAmbiguousServiceCorrection(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{
+			ID:              "service_dip",
+			Name:            "Dip Powder Manicure",
+			DurationMinutes: 75,
+			PriceFrom:       55,
+		},
+		{
+			ID:              "service_1",
+			Name:            "Classic Manicure",
+			DurationMinutes: 45,
+			PriceFrom:       35,
+		},
+		{
+			ID:              "service_gel",
+			Name:            "Gel Manicure",
+			DurationMinutes: 45,
+			PriceFrom:       38,
+		},
+	}
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.RequestedDate = "2026-07-02"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{
+		ServiceID:          "service_1",
+		StaffSelectionMode: booking.StaffSelectionAnyone,
+	}}
+	store.session.OfferedSlots = offeredPMSlots()
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Actually child manicure.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("ambiguous correction should not call tools, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if session.ServiceID != "" || len(session.BookingSegments) != 0 || len(session.OfferedSlots) != 0 {
+		t.Fatalf("session service/segments/slots = %q/%#v/%#v, want cleared service state", session.ServiceID, session.BookingSegments, session.OfferedSlots)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Which service") {
+		t.Fatalf("ambiguous service correction should ask for service clarification: %s", store.lastTurn.AIMessage)
+	}
+}
+
 func TestMessageHandoffsWhenCallerEndsWhileCustomerNameMissing(t *testing.T) {
 	store := newFakeConversationStore()
 	seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
@@ -1588,6 +1838,16 @@ type fakeConversationStore struct {
 	webhookLimit        int
 	archivedSessionID   string
 	redactedSessionID   string
+}
+
+type fakeReplyGenerator struct {
+	calls   int
+	message string
+}
+
+func (f *fakeReplyGenerator) GenerateReply(ctx context.Context, req ReplyGenerationRequest) (ReplyGenerationResult, error) {
+	f.calls++
+	return ReplyGenerationResult{Message: f.message, Confidence: 0.9}, nil
 }
 
 func newFakeConversationStore() *fakeConversationStore {
