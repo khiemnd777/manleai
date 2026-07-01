@@ -72,6 +72,7 @@ type OpenAISettingsResponse struct {
 	RealtimeEnabled      bool       `json:"realtime_enabled"`
 	RealtimeModel        string     `json:"realtime_model"`
 	RealtimeVoice        string     `json:"realtime_voice"`
+	RealtimeNoiseProfile string     `json:"realtime_noise_profile"`
 	RealtimeInstructions string     `json:"realtime_instructions"`
 	APIKeyConfigured     bool       `json:"api_key_configured"`
 	APIKeySource         string     `json:"api_key_source"`
@@ -111,5 +112,6 @@ type UpdateOpenAISettingsRequest struct {
 	RealtimeEnabled      bool   `json:"realtime_enabled"`
 	RealtimeModel        string `json:"realtime_model"`
 	RealtimeVoice        string `json:"realtime_voice"`
+	RealtimeNoiseProfile string `json:"realtime_noise_profile"`
 	RealtimeInstructions string `json:"realtime_instructions"`
 }

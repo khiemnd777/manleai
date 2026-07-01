@@ -19,6 +19,12 @@ The voice agent that answers inbound calls, collects booking details, answers FA
 **Conversation Engine**
 The state machine and tool-calling layer behind the AI Receptionist. It must not know Square payloads, OAuth tokens, or provider-specific booking details.
 
+**Service Understanding**
+The backend-owned interpretation layer that maps customer service utterances to active salon services. It uses the salon catalog and active service aliases, asks clarification for generic or fuzzy family matches, and records diagnostic transcript metadata.
+
+**Service Alias**
+A salon-scoped learned phrase for a real service, stored in `service_aliases` with a normalized alias key. Owner corrections can create or update service aliases; aliases are operational data, not prompt text.
+
 **Booking Service**
 The internal domain service that creates, reschedules, cancels, and records appointments through the active `POSProvider`.
 
@@ -57,6 +63,7 @@ A normalized, salon-scoped record of provider failures. Use codes such as `POS_T
 - Confirmed booking means the active POS provider returned success.
 - Internal calendar records are mirrors or logs, not the source of booking truth for the pilot.
 - ManleAI owns canonical salon operational data; the active POS owns booking execution.
+- Service recognition must be catalog-backed and salon-scoped. Do not hardcode per-salon service keywords into prompts or generic matchers.
 - Square is the first real integration; future POS names are architecture targets, not implemented features.
 - Vietnamese language support is product scope, but English remains the primary pilot language unless a feature explicitly says otherwise.
 

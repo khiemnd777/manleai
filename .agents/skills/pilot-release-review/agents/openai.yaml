@@ -1,4 +1,4 @@
 interface:
   display_name: "Pilot Release Review"
   short_description: "Review product-grade pilot readiness"
-  default_prompt: "Use $pilot-release-review to review changes for real pilot readiness, idempotency, duplicate prevention, safe failure states, and critical product invariants."
+  default_prompt: "Use $pilot-release-review to review changes for real pilot readiness, idempotency, duplicate prevention, service-understanding drift, safe failure states, and critical product invariants."

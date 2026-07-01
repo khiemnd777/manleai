@@ -117,7 +117,7 @@ func realtimeSessionConfig(cfg config.OpenAIVoiceConfig, opts voice.RealtimeSess
 			"input_audio_format":        realtimeLegacyAudioFormat,
 			"output_audio_format":       realtimeLegacyAudioFormat,
 			"input_audio_transcription": map[string]any{"model": strings.TrimSpace(cfg.TranscriptionModel)},
-			"turn_detection":            realtimeTurnDetection(),
+			"turn_detection":            realtimeTurnDetection(cfg),
 		}
 	}
 	return map[string]any{
@@ -128,7 +128,7 @@ func realtimeSessionConfig(cfg config.OpenAIVoiceConfig, opts voice.RealtimeSess
 			"input": map[string]any{
 				"format":         map[string]any{"type": realtimeG711ULawFormat},
 				"transcription":  map[string]any{"model": strings.TrimSpace(cfg.TranscriptionModel)},
-				"turn_detection": realtimeTurnDetection(),
+				"turn_detection": realtimeTurnDetection(cfg),
 			},
 			"output": map[string]any{
 				"format": map[string]any{"type": realtimeG711ULawFormat},
@@ -158,13 +158,32 @@ func realtimeResponseCreatePayload(legacyProtocol bool, text string) map[string]
 	}
 }
 
-func realtimeTurnDetection() map[string]any {
+type realtimeNoisePolicy struct {
+	threshold         float64
+	prefixPaddingMS   int
+	silenceDurationMS int
+}
+
+func realtimeTurnDetection(cfg config.OpenAIVoiceConfig) map[string]any {
+	policy := realtimeNoisePolicyForProfile(cfg.RealtimeNoiseProfile)
 	return map[string]any{
 		"type":                "server_vad",
-		"threshold":           0.5,
-		"prefix_padding_ms":   300,
-		"silence_duration_ms": 450,
+		"threshold":           policy.threshold,
+		"prefix_padding_ms":   policy.prefixPaddingMS,
+		"silence_duration_ms": policy.silenceDurationMS,
 		"create_response":     false,
+		"interrupt_response":  false,
+	}
+}
+
+func realtimeNoisePolicyForProfile(profile string) realtimeNoisePolicy {
+	switch config.NormalizeOpenAIRealtimeNoiseProfile(profile) {
+	case "quiet_room":
+		return realtimeNoisePolicy{threshold: 0.5, prefixPaddingMS: 300, silenceDurationMS: 450}
+	case "balanced":
+		return realtimeNoisePolicy{threshold: 0.65, prefixPaddingMS: 300, silenceDurationMS: 650}
+	default:
+		return realtimeNoisePolicy{threshold: 0.78, prefixPaddingMS: 300, silenceDurationMS: 850}
 	}
 }
 

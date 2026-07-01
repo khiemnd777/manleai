@@ -1,6 +1,6 @@
 ---
 name: business-analysis
-description: Turn ambiguous product, operations, or customer requests for this AI Receptionist repo into clear business requirements, workflow maps, acceptance criteria, open questions, scope boundaries, and implementation guardrails. Use when Codex is asked to analyze requirements, write PRD-style notes, define user stories, clarify owner/caller/staff workflows, or prepare a plan before backend, frontend, POS, voice, booking, or dashboard changes.
+description: Turn ambiguous product, operations, or customer requests for this AI Receptionist repo into clear business requirements, workflow maps, acceptance criteria, open questions, scope boundaries, and implementation guardrails. Use when Codex is asked to analyze requirements, write PRD-style notes, define user stories, clarify owner/caller/staff workflows, service-understanding behavior, or prepare a plan before backend, frontend, POS, voice, booking, or dashboard changes.
 ---
 
 # Business Analysis
@@ -42,6 +42,7 @@ Convert the request into a concrete business slice:
 - Identify repeated-run/idempotency behavior, duplicate prevention, conflicts, and safe failure states whenever the workflow can be retried, imported, synced, submitted, or replayed.
 - Preserve milestone honesty: Square Appointments is the first real POS integration; future POS providers are adapter targets until implemented.
 - Keep confirmed appointments impossible unless the active POS provider returns successful booking metadata.
+- For conversation or AI training requests, separate free-text knowledge from structured service-understanding data. Service aliases are salon-scoped operational data with stable normalized keys; they should not be replaced by prompt wording or hardcoded per-salon keyword lists.
 
 If rules overlap or conflict, invoke `business-logic-overlap-analysis` thinking before finalizing the plan.
 

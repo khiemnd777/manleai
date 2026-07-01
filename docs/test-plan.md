@@ -69,9 +69,12 @@
 - Verify booking conversations preserve already-collected service/date/time/customer/staff slots and do not ask for a known day again after date-only turns such as "Thursday this week" or "Thứ Tư này tuần này".
 - Verify offered-slot turns can select a unique offered time from spoken responses such as "one p.m." or a "Yes" response to a single-slot confirmation prompt, and do not rerun availability for unclear time fragments while the same offered slots remain valid.
 - Verify exact service/date/time requests such as "gel manicure for 1 p.m. this Thursday" parse dotted meridiem, auto-select a matching POS availability slot, name the assigned technician, and ask the next missing customer detail instead of asking the caller to confirm the same time again.
+- Verify service understanding uses the active salon catalog and active `service_aliases`, exact catalog service names beat aliases, aliases can select one service, and generic or fuzzy service-family matches ask for catalog-backed clarification instead of selecting a service.
+- Verify noisy service utterances such as "Menikur", "Manecu", and mixed-language service family phrases do not book a guessed service; they must either select an exact/alias match or ask clarification with real catalog candidates.
 - Verify exact service/date/time requests with multiple available technicians use fair rotation from confirmed/rescheduled salon assignments for that local day, not list order or alphabetic staff names, and record assignment policy metadata for audit.
 - Verify customer-requested technicians are honored when available, and when unavailable at the requested time the AI does not auto-switch; it names the unavailable technician, offers same-time another-technician or another-time requested-technician options, and waits for the caller to choose.
-- Verify customer-name collection accepts plausible bare names after service/date/time are known, rejects affirmative replies, connection checks, service phrases, and time/date phrases as names, and creates an owner handoff with non-confirmed wording when repeated non-answers or caller goodbye prevent collecting the name.
+- Verify customer-name collection accepts plausible bare names after service/date/time are known, rejects affirmative replies, connection checks, service phrases, active service aliases, and time/date phrases as names, and creates an owner handoff with non-confirmed wording when repeated non-answers or caller goodbye prevent collecting the name.
+- Verify when a caller corrects the service after a time or offered slot was already collected, the engine changes the service, clears stale offered slots, re-checks availability, and does not book until customer details are complete.
 - Verify multi-person requests such as "me and two friends", "for 3 people", or "two appointments" create an owner handoff with non-confirmed wording and do not call availability or booking tools.
 - Verify unclear repair turns such as "Sorry?", "Hello?", or partial STT fragments repeat or rephrase the current prompt without clearing the known booking date or calling booking tools.
 - Verify voice provider retries with a stable event key do not append duplicate transcript turns or create duplicate booking attempts.
@@ -105,10 +108,11 @@
 
 ## Milestone 7A Knowledge And Owner Corrections
 
-- Verify startup migrations create `knowledge_items` and `owner_corrections`.
+- Verify startup migrations create `knowledge_items`, `owner_corrections`, and `service_aliases`.
 - Verify knowledge and correction routes are owner-scoped by `salon_id`.
 - Verify active knowledge can answer FAQ and policy questions without calling the booking service.
 - Verify owner corrections can be captured, applied to active knowledge, and dismissed.
+- Verify owner corrections can be applied to a structured service alias when the correction is about service recognition, and repeated applies update one `(salon_id, normalized_alias)` row rather than creating duplicates.
 - Verify knowledge context does not allow confirmed appointment wording unless the booking service returns POS-confirmed booking state.
 - Verify the AI Training dashboard handles loading, empty, error, success, disabled/gated, and mobile states.
 
@@ -119,6 +123,7 @@
 - Verify correction creation rejects a transcript message source without a call session source.
 - Verify the AI Training dashboard displays whether a correction came from a call transcript or manual entry.
 - Verify `Review apply` pre-fills the knowledge form and only marks the correction applied after the owner saves.
+- Verify service-recognition corrections can be reviewed into service aliases without editing POS services and without implying the alias is active until the backend confirms the apply request.
 
 ## Milestone 7C Training Evaluation Preview
 
@@ -172,6 +177,7 @@
 
 - Booking services must import `modules/pos`, not `modules/pos_square`.
 - AI/conversation modules must not import Square packages.
+- Service understanding must remain backend-owned and catalog/alias-backed; do not add production behavior through prompt-only service keyword patches.
 - Voice modules must keep Twilio-specific request validation and TwiML response logic outside the conversation engine.
 - External AI voice provider adapters must not read POS tokens or import `modules/pos_square`.
 - No API response may expose encrypted or raw POS tokens.

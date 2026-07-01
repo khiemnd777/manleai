@@ -67,6 +67,7 @@ VOICE_OPENAI_SPEECH_VOICE=alloy
 VOICE_OPENAI_REALTIME_ENABLED=false
 VOICE_OPENAI_REALTIME_MODEL=gpt-realtime-2
 VOICE_OPENAI_REALTIME_VOICE=alloy
+VOICE_OPENAI_REALTIME_NOISE_PROFILE=noisy_salon
 ```
 
 When external STT is configured, Twilio can use `/api/voice/twilio/recording`; otherwise the existing `/api/voice/twilio/turn` speech gather path remains available. For lower latency, configure Twilio `voice_transport=realtime_stream` and OpenAI realtime settings in the Integrations dashboard; local env values are fallback-only unless no dashboard config exists.

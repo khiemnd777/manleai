@@ -319,6 +319,7 @@ The local app can run Twilio speech `<Gather>` without OpenAI STT/TTS. For a ful
   - Enable realtime
   - `Realtime model`: `gpt-realtime-2`
   - `Realtime voice`: `alloy`
+  - `Noise profile`: `Noisy salon (recommended)` unless the call test is in a quiet room
   - `Realtime instructions`: optional non-secret operating notes for the audio bridge
 
 Legacy env fallback names, used only when no dashboard OpenAI config exists:

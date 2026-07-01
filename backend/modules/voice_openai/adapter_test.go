@@ -220,6 +220,45 @@ func TestRealtimeSessionConfigUsesGAShapeForRealtimeModel(t *testing.T) {
 	}
 }
 
+func TestRealtimeSessionConfigDefaultsToNoisySalonVAD(t *testing.T) {
+	cfg := config.OpenAIVoiceConfig{
+		RealtimeModel:      "gpt-realtime-2",
+		TranscriptionModel: "gpt-4o-mini-transcribe",
+		RealtimeVoice:      "alloy",
+	}
+	turnDetection := gaTurnDetection(t, realtimeSessionConfig(cfg, voice.RealtimeSessionOptions{}))
+
+	if turnDetection["type"] != "server_vad" {
+		t.Fatalf("turn detection type = %#v, want server_vad", turnDetection["type"])
+	}
+	if turnDetection["threshold"] != 0.78 {
+		t.Fatalf("threshold = %#v, want noisy salon threshold", turnDetection["threshold"])
+	}
+	if turnDetection["silence_duration_ms"] != 850 {
+		t.Fatalf("silence duration = %#v, want noisy salon duration", turnDetection["silence_duration_ms"])
+	}
+	if turnDetection["create_response"] != false || turnDetection["interrupt_response"] != false {
+		t.Fatalf("realtime bridge should disable provider autonomous response/interrupt: %#v", turnDetection)
+	}
+}
+
+func TestRealtimeSessionConfigUsesQuietRoomVADProfile(t *testing.T) {
+	cfg := config.OpenAIVoiceConfig{
+		RealtimeModel:        "gpt-realtime-2",
+		TranscriptionModel:   "gpt-4o-mini-transcribe",
+		RealtimeVoice:        "alloy",
+		RealtimeNoiseProfile: "quiet_room",
+	}
+	turnDetection := gaTurnDetection(t, realtimeSessionConfig(cfg, voice.RealtimeSessionOptions{}))
+
+	if turnDetection["threshold"] != 0.5 {
+		t.Fatalf("threshold = %#v, want quiet room threshold", turnDetection["threshold"])
+	}
+	if turnDetection["silence_duration_ms"] != 450 {
+		t.Fatalf("silence duration = %#v, want quiet room duration", turnDetection["silence_duration_ms"])
+	}
+}
+
 func TestRealtimeResponseCreatePayloadUsesProtocolShape(t *testing.T) {
 	ga := realtimeResponseCreatePayload(false, "Hello.")
 	gaResponse, ok := ga["response"].(map[string]any)
@@ -244,6 +283,23 @@ func TestRealtimeResponseCreatePayloadUsesProtocolShape(t *testing.T) {
 	if _, ok := legacyResponse["output_modalities"]; ok {
 		t.Fatalf("legacy response.create should not include GA output_modalities: %#v", legacyResponse)
 	}
+}
+
+func gaTurnDetection(t *testing.T, session map[string]any) map[string]any {
+	t.Helper()
+	audio, ok := session["audio"].(map[string]any)
+	if !ok {
+		t.Fatalf("session missing audio: %#v", session)
+	}
+	input, ok := audio["input"].(map[string]any)
+	if !ok {
+		t.Fatalf("session missing audio.input: %#v", session)
+	}
+	turnDetection, ok := input["turn_detection"].(map[string]any)
+	if !ok {
+		t.Fatalf("session missing turn_detection: %#v", session)
+	}
+	return turnDetection
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

@@ -123,6 +123,7 @@ export type OpenAIIntegrationConfig = {
   realtime_enabled: boolean;
   realtime_model: string;
   realtime_voice: string;
+  realtime_noise_profile: string;
   realtime_instructions: string;
   api_key_configured: boolean;
   api_key_source: string;

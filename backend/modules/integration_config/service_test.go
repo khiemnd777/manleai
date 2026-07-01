@@ -51,3 +51,47 @@ func TestSquareResponseMasksEncryptedClientSecret(t *testing.T) {
 		t.Fatalf("response leaked secret: %#v", response)
 	}
 }
+
+func TestOpenAIResponseDefaultsRealtimeNoiseProfile(t *testing.T) {
+	cipher, err := encryption.NewTokenCipher("test-secret")
+	if err != nil {
+		t.Fatalf("NewTokenCipher: %v", err)
+	}
+	service := NewService(nil, cipher, config.Config{
+		Voice: config.VoiceConfig{
+			AI: config.VoiceAIConfig{
+				Provider: ProviderOpenAI,
+				OpenAI: config.OpenAIVoiceConfig{
+					BaseURL:            "https://api.openai.com/v1",
+					TranscriptionModel: "gpt-4o-mini-transcribe",
+					ReplyModel:         "gpt-4.1-mini",
+					SpeechModel:        "gpt-4o-mini-tts",
+					SpeechVoice:        "alloy",
+					RealtimeModel:      "gpt-realtime-2",
+					RealtimeVoice:      "alloy",
+				},
+			},
+		},
+	})
+
+	response := service.openAIResponse(&StoredConfig{
+		SalonID:  "salon_1",
+		Provider: ProviderOpenAI,
+		Enabled:  true,
+		Settings: map[string]string{
+			"base_url":            "https://api.openai.com/v1",
+			"transcription_model": "gpt-4o-mini-transcribe",
+			"reply_model":         "gpt-4.1-mini",
+			"speech_model":        "gpt-4o-mini-tts",
+			"speech_voice":        "alloy",
+			"realtime_enabled":    "true",
+			"realtime_model":      "gpt-realtime-2",
+			"realtime_voice":      "alloy",
+		},
+		UpdatedAt: time.Now().UTC(),
+	})
+
+	if response.RealtimeNoiseProfile != config.DefaultOpenAIRealtimeNoiseProfile {
+		t.Fatalf("noise profile = %q, want %q", response.RealtimeNoiseProfile, config.DefaultOpenAIRealtimeNoiseProfile)
+	}
+}

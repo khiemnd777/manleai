@@ -22,8 +22,8 @@ modules/booking      booking attempts, appointments, and fallback pending safety
 modules/customer     canonical customer CRUD, activity read model, and POS lookup facade
 modules/integration_config encrypted salon-scoped provider app credentials and runtime settings
 modules/config_transfer safe salon configuration export/import previews and applies
-modules/conversation deterministic simulator sessions, transcripts, summaries, and handoffs
-modules/training     salon-authored knowledge base and owner corrections
+modules/conversation deterministic simulator sessions, service understanding, transcripts, summaries, and handoffs
+modules/training     salon-authored knowledge base, owner corrections, and service aliases
 modules/voice        provider-neutral live voice runtime, status, routing, and webhook event audit
 modules/voice_openai OpenAI STT, guarded LLM reply, TTS, and Realtime adapters
 modules/voice_twilio Twilio signature verification, form parsing, TwiML responses, and Media Streams bridge
@@ -111,7 +111,7 @@ fallback configuration for infrastructure, JWT, CORS, encryption, and legacy
 developer setup; dashboard-saved provider configuration takes precedence for a
 salon.
 
-The Milestone 7 training layer stores owner-authored salon knowledge and corrections as salon-scoped data. Conversation runtime may read active knowledge as advisory context for FAQ and policy answers, transcript-linked corrections can be reviewed into reusable knowledge, and training evaluation previews can test active knowledge without creating call sessions or bookings. Knowledge never replaces the booking service or POS confirmation checks.
+The Milestone 7 training layer stores owner-authored salon knowledge, corrections, and service aliases as salon-scoped data. Conversation runtime may read active knowledge as advisory context for FAQ and policy answers, transcript-linked corrections can be reviewed into reusable knowledge or structured service aliases, and training evaluation previews can test active knowledge without creating call sessions or bookings. Knowledge never replaces the booking service or POS confirmation checks.
 
 Service understanding is a backend domain layer, not prompt-only behavior. The conversation runtime interprets customer service utterances against the active salon service catalog and salon-scoped `service_aliases`. Exact catalog service names win over aliases, aliases win over generic family matching, and fuzzy family matches only produce clarification candidates instead of selecting a service. Owner corrections can be applied into service aliases with a stable `(salon_id, normalized_alias)` key, so repeated applies update the same alias rather than creating duplicate learned behavior. Service-understanding decisions are written to transcript metadata with status, reason, confidence, candidates, selected service, alias source, and alias ID so call reviews can explain why a service was selected or why the AI asked for clarification.
 

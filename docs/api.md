@@ -364,6 +364,7 @@ keys, client secrets, encrypted secrets, or POS connection token state.
       "realtime_enabled": true,
       "realtime_model": "gpt-realtime-2",
       "realtime_voice": "alloy",
+      "realtime_noise_profile": "noisy_salon",
       "realtime_instructions": "",
       "api_key_configured": true,
       "api_key_source": "database"
@@ -557,6 +558,7 @@ configured and whether it came from dashboard storage or environment fallback.
     "realtime_enabled": true,
     "realtime_model": "gpt-realtime-2",
     "realtime_voice": "alloy",
+    "realtime_noise_profile": "noisy_salon",
     "realtime_instructions": "",
     "api_key_configured": true,
     "api_key_source": "database"
@@ -608,6 +610,7 @@ configured and whether it came from dashboard storage or environment fallback.
   "realtime_enabled": true,
   "realtime_model": "gpt-realtime-2",
   "realtime_voice": "alloy",
+  "realtime_noise_profile": "noisy_salon",
   "realtime_instructions": ""
 }
 ```
@@ -1345,7 +1348,7 @@ RecordingUrl
 
 `GET /api/voice/twilio/stream`
 
-Public Twilio Media Streams WebSocket endpoint for realtime audio mode. The endpoint is not configured directly in Twilio Console; the incoming webhook returns `<Connect><Stream>` with signed custom parameters for the existing call session. The stream forwards Twilio g711 audio frames to the configured OpenAI Realtime adapter, routes completed transcripts through the same backend conversation engine and booking service, then streams backend-approved audio responses back to Twilio. Realtime replies are serialized so a new OpenAI `response.create` is not sent until the active response finishes; caller barge-in clears Twilio playback and suppresses stale audio while preserving the latest queued backend reply. If realtime configuration is missing, voice status falls back to the recording or gather path.
+Public Twilio Media Streams WebSocket endpoint for realtime audio mode. The endpoint is not configured directly in Twilio Console; the incoming webhook returns `<Connect><Stream>` with signed custom parameters for the existing call session. The stream forwards Twilio g711 audio frames to the configured OpenAI Realtime adapter, routes completed transcripts through the same backend conversation engine and booking service, then streams backend-approved audio responses back to Twilio. Realtime replies are serialized so a new OpenAI `response.create` is not sent until the active response finishes; caller barge-in clears Twilio playback and suppresses stale audio after AI audio has started and passed the noise guard while preserving the latest queued backend reply. If realtime configuration is missing, voice status falls back to the recording or gather path.
 
 `GET /api/voice/audio/:id`
 

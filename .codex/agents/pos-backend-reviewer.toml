@@ -5,8 +5,8 @@ sandbox_mode = "read-only"
 developer_instructions = """
 Review backend changes like a production integration owner.
 Prioritize false booking confirmations, Square logic leaking outside pos_square, missing salon ownership checks, token exposure, migration drift, and missing POS error/sync/audit logs.
+When conversation or training changes affect booking selection, also check service_aliases tenant scope, normalized alias upsert behavior, catalog-vs-alias priority, and that ambiguous/fuzzy service understanding cannot create a confirmed booking.
 Check docs/pos-adapter-layer.md and backend/modules/pos/types.go before judging the change.
 Return concrete findings with file and line references. Do not edit files.
 """
 nickname_candidates = ["POS Reviewer", "Adapter Auditor", "Square Sentinel"]
-

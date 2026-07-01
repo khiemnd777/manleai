@@ -1,6 +1,6 @@
 ---
 name: salon-ops-workflow
-description: Analyze real nail salon operating workflows for this AI Receptionist repo, including caller journeys, owner handoff, staff/service availability, business hours, booking requests, fallback pending review, Square Appointments setup, bilingual support, and dashboard actions. Use when Codex needs to reason about salon operations before designing, implementing, or reviewing product behavior.
+description: Analyze real nail salon operating workflows for this AI Receptionist repo, including caller journeys, owner handoff, staff/service availability, service-alias corrections, business hours, booking requests, fallback pending review, Square Appointments setup, bilingual support, and dashboard actions. Use when Codex needs to reason about salon operations before designing, implementing, or reviewing product behavior.
 ---
 
 # Salon Ops Workflow
@@ -35,6 +35,7 @@ Analyze the request across these salon realities:
 
 - Owners are often serving customers while answering exceptions.
 - Callers may ask for prices, hours, walk-ins, reschedules, cancellations, group bookings, or human help before giving full details.
+- Callers may pronounce service names unclearly or use local salon wording. The operational fix is catalog-backed clarification or owner-reviewed `service_aliases`, not per-call guessing or hardcoded keyword patches.
 - Staff availability, service duration, business hours, and active POS mappings determine whether booking can even be attempted.
 - Square Appointments owns real availability and booking execution in the pilot.
 - POS failure, disconnected Square, missing staff/service mappings, or disabled AI booking must become pending request or handoff behavior, not confirmed appointments.
@@ -51,7 +52,7 @@ For each proposed workflow, identify:
 - Decision gates: AI enabled, Square connected, booking-ready records, availability result, customer details, POS success, owner approval.
 - Success state: what the owner and caller can safely believe happened.
 - Exception states: disabled, blocked, unavailable, fallback pending, handoff, POS error, sync failure, retry needed.
-- Owner action: review, approve, call back, sync, connect Square, enable AI, update services/staff, edit settings, or dismiss.
+- Owner action: review, approve, call back, sync, connect Square, enable AI, update services/staff, apply a correction to knowledge or a service alias, edit settings, or dismiss.
 - Repeat behavior: whether the workflow can be retried, resubmitted, imported, synced, or replayed, and what prevents duplicate/rubbish records.
 - Auditability: booking attempt, POS error, sync log, notification, transcript, correction, or dashboard timestamp.
 

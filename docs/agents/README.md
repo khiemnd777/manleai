@@ -16,10 +16,10 @@ OpenAI's subagent docs say project-scoped custom agents live under `.codex/agent
 - `pos-adapter-slice`: implement POS provider work without leaking provider details.
 - `booking-safety-tdd`: implement booking behavior with test-first confirmation safety.
 - `salon-dashboard-ui`: build polished frontend dashboard flows.
-- `voice-ai-runtime`: implement AI/voice provider abstractions and conversation rules.
+- `voice-ai-runtime`: implement AI/voice provider abstractions, conversation rules, service understanding, and realtime safety.
 - `business-analysis`: turn ambiguous requests into product requirements and acceptance criteria.
 - `business-logic-overlap-analysis`: find overlapping rules and regression risks before changes.
-- `salon-ops-workflow`: analyze real salon owner/caller/staff workflows before product changes.
+- `salon-ops-workflow`: analyze real salon owner/caller/staff workflows, including correction-to-knowledge and correction-to-service-alias decisions.
 - `pilot-release-review`: review release readiness and scope honesty.
 
 ## Configuration Memos
@@ -35,5 +35,7 @@ Ask Codex to spawn:
 - `frontend_product_reviewer` for dashboard UX and frontend contracts.
 - `security_privacy_reviewer` for secrets, tenant isolation, phone/SMS/call data, and auth.
 - `pilot_release_planner` when converting a milestone into work slices.
+
+For service-understanding or AI Training correction work, ask `repo_mapper` to map `modules/conversation`, `modules/training`, `service_aliases`, transcript metadata, and golden tests before implementation.
 
 Subagents inherit the parent sandbox and approvals. Keep most review agents read-only and let the parent agent apply final edits.

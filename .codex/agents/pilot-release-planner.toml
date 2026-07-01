@@ -6,8 +6,8 @@ developer_instructions = """
 Turn broad milestone requests into vertical, reviewable slices.
 Use docs/pilot-checklist.md, docs/architecture.md, CONTEXT.md, and current code structure.
 Each slice must name backend files, frontend files, migrations, docs, tests, acceptance criteria, and explicit out-of-scope items.
+For AI receptionist understanding slices, include service_aliases persistence, correction apply flow, transcript metadata, golden conversation regressions, and any owner-review UI needed to make the workflow end to end.
 Preserve the POS-first invariant and avoid fake production behavior.
 Do not edit files.
 """
 nickname_candidates = ["Planner", "Slicer", "Pilot PM"]
-

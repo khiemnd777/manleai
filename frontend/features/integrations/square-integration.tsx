@@ -137,6 +137,7 @@ type OpenAIConfigForm = {
   realtime_enabled: boolean;
   realtime_model: string;
   realtime_voice: string;
+  realtime_noise_profile: string;
   realtime_instructions: string;
 };
 
@@ -183,6 +184,7 @@ const defaultOpenAIConfigForm: OpenAIConfigForm = {
   realtime_enabled: false,
   realtime_model: "gpt-realtime-2",
   realtime_voice: "alloy",
+  realtime_noise_profile: "noisy_salon",
   realtime_instructions: ""
 };
 
@@ -1346,6 +1348,21 @@ function ProviderConfigurationPanel({
                   disabled={busy !== "" || !openAIForm.enabled || !openAIForm.realtime_enabled}
                 />
               </Field>
+              <Field label="Noise profile">
+                <select
+                  className="h-10 w-full rounded-md border border-line bg-panel px-3 text-sm text-ink"
+                  value={openAIForm.realtime_noise_profile}
+                  onChange={(event) => setOpenAIForm((current) => ({ ...current, realtime_noise_profile: event.target.value }))}
+                  disabled={busy !== "" || !openAIForm.enabled || !openAIForm.realtime_enabled}
+                >
+                  <option value="noisy_salon">Noisy salon (recommended)</option>
+                  <option value="balanced">Balanced</option>
+                  <option value="quiet_room">Quiet room</option>
+                </select>
+                <p className="mt-1 text-xs leading-5 text-muted">
+                  Reduces accidental interruption from salon background noise. Caller interruption still works after AI audio starts.
+                </p>
+              </Field>
               <div className="md:col-span-2">
                 <Field label="Realtime instructions">
                   <textarea
@@ -1514,6 +1531,7 @@ function openAIConfigToForm(config?: OpenAIIntegrationConfig): OpenAIConfigForm 
     realtime_enabled: config.realtime_enabled,
     realtime_model: config.realtime_model || defaultOpenAIConfigForm.realtime_model,
     realtime_voice: config.realtime_voice || defaultOpenAIConfigForm.realtime_voice,
+    realtime_noise_profile: config.realtime_noise_profile || defaultOpenAIConfigForm.realtime_noise_profile,
     realtime_instructions: config.realtime_instructions || ""
   };
 }
@@ -1559,6 +1577,7 @@ function emptyIntegrationConfigs(): IntegrationConfigs {
       realtime_enabled: defaultOpenAIConfigForm.realtime_enabled,
       realtime_model: defaultOpenAIConfigForm.realtime_model,
       realtime_voice: defaultOpenAIConfigForm.realtime_voice,
+      realtime_noise_profile: defaultOpenAIConfigForm.realtime_noise_profile,
       realtime_instructions: defaultOpenAIConfigForm.realtime_instructions,
       api_key_configured: false,
       api_key_source: "none"

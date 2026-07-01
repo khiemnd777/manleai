@@ -162,7 +162,7 @@ the legacy fallback path for a fresh deployment with no saved dashboard config.
 - Keep `AUTO_MIGRATE=true` unless another release process applies the same SQL migrations.
 - Configure the Square redirect URL in the Integrations dashboard to the deployed API callback.
 - Configure the dashboard Twilio public base URL to the deployed API origin used in Twilio webhook settings; `VOICE_PUBLIC_BASE_URL` is only the fallback source when no dashboard Twilio config exists.
-- Configure realtime phone mode from the Integrations dashboard: Twilio `voice_transport=realtime_stream`, Twilio stream path, and OpenAI realtime model/voice. The env names above are fallback-only values.
+- Configure realtime phone mode from the Integrations dashboard: Twilio `voice_transport=realtime_stream`, Twilio stream path, OpenAI realtime model/voice, and the realtime noise profile. The env names above are fallback-only values.
 - Keep Twilio and OpenAI secrets out of logs and docs; dashboard responses expose only configured/source metadata.
 - Enable OpenAI voice AI in the Integrations dashboard only when external AI voice turns should be enabled.
 - Keep OpenAI model and voice settings configurable through the dashboard so model changes do not require code changes.

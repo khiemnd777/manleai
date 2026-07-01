@@ -150,15 +150,16 @@ func (s *Service) UpdateOpenAI(ctx context.Context, salonID string, ownerUserID 
 		return nil, err
 	}
 	settings := map[string]string{
-		"base_url":              strings.TrimRight(strings.TrimSpace(req.BaseURL), "/"),
-		"transcription_model":   strings.TrimSpace(req.TranscriptionModel),
-		"reply_model":           strings.TrimSpace(req.ReplyModel),
-		"speech_model":          strings.TrimSpace(req.SpeechModel),
-		"speech_voice":          strings.TrimSpace(req.SpeechVoice),
-		"realtime_enabled":      boolString(req.RealtimeEnabled),
-		"realtime_model":        config.NormalizeOpenAIRealtimeModel(req.RealtimeModel),
-		"realtime_voice":        strings.TrimSpace(req.RealtimeVoice),
-		"realtime_instructions": strings.TrimSpace(req.RealtimeInstructions),
+		"base_url":               strings.TrimRight(strings.TrimSpace(req.BaseURL), "/"),
+		"transcription_model":    strings.TrimSpace(req.TranscriptionModel),
+		"reply_model":            strings.TrimSpace(req.ReplyModel),
+		"speech_model":           strings.TrimSpace(req.SpeechModel),
+		"speech_voice":           strings.TrimSpace(req.SpeechVoice),
+		"realtime_enabled":       boolString(req.RealtimeEnabled),
+		"realtime_model":         config.NormalizeOpenAIRealtimeModel(req.RealtimeModel),
+		"realtime_voice":         strings.TrimSpace(req.RealtimeVoice),
+		"realtime_noise_profile": config.NormalizeOpenAIRealtimeNoiseProfile(req.RealtimeNoiseProfile),
+		"realtime_instructions":  strings.TrimSpace(req.RealtimeInstructions),
 	}
 	if settings["base_url"] != "" {
 		parsed, err := url.ParseRequestURI(settings["base_url"])
@@ -245,6 +246,7 @@ func (s *Service) ResolveOpenAIConfig(ctx context.Context, salonID string) (conf
 	cfg.SpeechVoice = defaultString(strings.TrimSpace(cfg.SpeechVoice), "alloy")
 	cfg.RealtimeModel = config.NormalizeOpenAIRealtimeModel(cfg.RealtimeModel)
 	cfg.RealtimeVoice = defaultString(strings.TrimSpace(cfg.RealtimeVoice), cfg.SpeechVoice)
+	cfg.RealtimeNoiseProfile = config.NormalizeOpenAIRealtimeNoiseProfile(cfg.RealtimeNoiseProfile)
 	cfg.RealtimeInstructions = strings.TrimSpace(cfg.RealtimeInstructions)
 	enabled := strings.TrimSpace(s.cfg.Voice.AI.Provider) == ProviderOpenAI
 	item, secrets := s.resolveStored(ctx, salonID, ProviderOpenAI)
@@ -258,6 +260,7 @@ func (s *Service) ResolveOpenAIConfig(ctx context.Context, salonID string) (conf
 		cfg.RealtimeEnabled = boolSetting(item.Settings["realtime_enabled"])
 		cfg.RealtimeModel = config.NormalizeOpenAIRealtimeModel(defaultString(item.Settings["realtime_model"], cfg.RealtimeModel))
 		cfg.RealtimeVoice = defaultString(strings.TrimSpace(item.Settings["realtime_voice"]), cfg.SpeechVoice)
+		cfg.RealtimeNoiseProfile = config.NormalizeOpenAIRealtimeNoiseProfile(defaultString(item.Settings["realtime_noise_profile"], cfg.RealtimeNoiseProfile))
 		cfg.RealtimeInstructions = strings.TrimSpace(item.Settings["realtime_instructions"])
 	}
 	if secret := strings.TrimSpace(secrets["api_key"]); secret != "" {
@@ -394,6 +397,7 @@ func (s *Service) openAIResponse(item *StoredConfig) OpenAISettingsResponse {
 		cfg.RealtimeEnabled = boolSetting(item.Settings["realtime_enabled"])
 		cfg.RealtimeModel = config.NormalizeOpenAIRealtimeModel(defaultString(item.Settings["realtime_model"], cfg.RealtimeModel))
 		cfg.RealtimeVoice = defaultString(strings.TrimSpace(item.Settings["realtime_voice"]), cfg.SpeechVoice)
+		cfg.RealtimeNoiseProfile = config.NormalizeOpenAIRealtimeNoiseProfile(defaultString(item.Settings["realtime_noise_profile"], cfg.RealtimeNoiseProfile))
 		cfg.RealtimeInstructions = strings.TrimSpace(item.Settings["realtime_instructions"])
 	}
 	cfg.BaseURL = defaultString(strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"), "https://api.openai.com/v1")
@@ -403,6 +407,7 @@ func (s *Service) openAIResponse(item *StoredConfig) OpenAISettingsResponse {
 	cfg.SpeechVoice = defaultString(strings.TrimSpace(cfg.SpeechVoice), "alloy")
 	cfg.RealtimeModel = config.NormalizeOpenAIRealtimeModel(cfg.RealtimeModel)
 	cfg.RealtimeVoice = defaultString(strings.TrimSpace(cfg.RealtimeVoice), cfg.SpeechVoice)
+	cfg.RealtimeNoiseProfile = config.NormalizeOpenAIRealtimeNoiseProfile(cfg.RealtimeNoiseProfile)
 	cfg.RealtimeInstructions = strings.TrimSpace(cfg.RealtimeInstructions)
 	secretSource := SecretSourceNone
 	if item != nil {
@@ -426,6 +431,7 @@ func (s *Service) openAIResponse(item *StoredConfig) OpenAISettingsResponse {
 		RealtimeEnabled:      cfg.RealtimeEnabled,
 		RealtimeModel:        cfg.RealtimeModel,
 		RealtimeVoice:        cfg.RealtimeVoice,
+		RealtimeNoiseProfile: cfg.RealtimeNoiseProfile,
 		RealtimeInstructions: cfg.RealtimeInstructions,
 		APIKeyConfigured:     secretSource != SecretSourceNone,
 		APIKeySource:         secretSource,

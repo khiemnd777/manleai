@@ -20,6 +20,7 @@ import (
 const (
 	fallbackInputModeQuery       = "voice_fallback_mode"
 	realtimeTerminalDrainTimeout = 12 * time.Second
+	realtimeBargeInGuard         = 850 * time.Millisecond
 )
 
 type Handler struct {
@@ -349,7 +350,7 @@ func (h *Handler) forwardRealtimeEvents(
 	seenTranscripts map[string]struct{},
 	twilioMarks <-chan string,
 ) {
-	h.forwardRealtimeEventsWithTerminalDrainTimeout(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, seenTranscripts, twilioMarks, realtimeTerminalDrainTimeout)
+	h.forwardRealtimeEventsWithRealtimePolicy(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, seenTranscripts, twilioMarks, realtimeTerminalDrainTimeout, realtimeBargeInGuard, time.Now)
 }
 
 func (h *Handler) forwardRealtimeEventsWithTerminalDrainTimeout(
@@ -367,15 +368,39 @@ func (h *Handler) forwardRealtimeEventsWithTerminalDrainTimeout(
 	twilioMarks <-chan string,
 	terminalDrainTimeout time.Duration,
 ) {
+	h.forwardRealtimeEventsWithRealtimePolicy(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, seenTranscripts, twilioMarks, terminalDrainTimeout, realtimeBargeInGuard, time.Now)
+}
+
+func (h *Handler) forwardRealtimeEventsWithRealtimePolicy(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	closeStream func(string),
+	realtime voice.RealtimeSession,
+	writeJSON func(any) error,
+	streamSID string,
+	providerCallID string,
+	sessionID string,
+	fromPhone string,
+	toPhone string,
+	seenTranscripts map[string]struct{},
+	twilioMarks <-chan string,
+	terminalDrainTimeout time.Duration,
+	bargeInGuard time.Duration,
+	now func() time.Time,
+) {
 	responseActive := false
 	activeCloseAfter := false
 	activeAudioSent := false
 	activeInterrupted := false
+	playbackAudioStartedAt := time.Time{}
 	suppressAudioUntilDone := false
 	pendingReply := realtimeQueuedReply{}
 	pendingCloseMark := ""
 	closeDrainTimer := (<-chan time.Time)(nil)
 	markSequence := 0
+	if now == nil {
+		now = time.Now
+	}
 
 	speakReply := func(message string, closeAfter bool) bool {
 		message = strings.TrimSpace(message)
@@ -395,6 +420,7 @@ func (h *Handler) forwardRealtimeEventsWithTerminalDrainTimeout(
 		activeCloseAfter = closeAfter
 		activeAudioSent = false
 		activeInterrupted = false
+		playbackAudioStartedAt = time.Time{}
 		suppressAudioUntilDone = false
 		return true
 	}
@@ -435,6 +461,16 @@ func (h *Handler) forwardRealtimeEventsWithTerminalDrainTimeout(
 		return true
 	}
 
+	shouldInterruptPlayback := func() bool {
+		if playbackAudioStartedAt.IsZero() {
+			return false
+		}
+		if bargeInGuard <= 0 {
+			return true
+		}
+		return !now().Before(playbackAudioStartedAt.Add(bargeInGuard))
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -472,8 +508,14 @@ func (h *Handler) forwardRealtimeEventsWithTerminalDrainTimeout(
 						Media:     twilioOutboundMediaPayload{Payload: event.AudioBase64},
 					})
 					activeAudioSent = true
+					if playbackAudioStartedAt.IsZero() {
+						playbackAudioStartedAt = now()
+					}
 				}
 			case voice.RealtimeEventSpeechStarted:
+				if !shouldInterruptPlayback() {
+					continue
+				}
 				clearPendingCloseMark()
 				if streamSID != "" {
 					_ = writeJSON(twilioClearMessage{Event: "clear", StreamSid: streamSID})

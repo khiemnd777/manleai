@@ -571,6 +571,7 @@ func (s *Service) voiceConfig(ctx context.Context, salonID string) (config.Voice
 	cfg.AI.OpenAI.SpeechVoice = defaultString(strings.TrimSpace(cfg.AI.OpenAI.SpeechVoice), "alloy")
 	cfg.AI.OpenAI.RealtimeModel = config.NormalizeOpenAIRealtimeModel(cfg.AI.OpenAI.RealtimeModel)
 	cfg.AI.OpenAI.RealtimeVoice = defaultString(strings.TrimSpace(cfg.AI.OpenAI.RealtimeVoice), cfg.AI.OpenAI.SpeechVoice)
+	cfg.AI.OpenAI.RealtimeNoiseProfile = config.NormalizeOpenAIRealtimeNoiseProfile(cfg.AI.OpenAI.RealtimeNoiseProfile)
 	cfg.AI.OpenAI.RealtimeInstructions = strings.TrimSpace(cfg.AI.OpenAI.RealtimeInstructions)
 	if s.configResolver == nil || strings.TrimSpace(salonID) == "" {
 		return cfg, nil

@@ -44,6 +44,10 @@ Use $business-logic-overlap-analysis to check whether this change collides with 
 Use $salon-ops-workflow to analyze the owner/caller workflow before changing dashboard or AI behavior.
 ```
 
+```txt
+Use $voice-ai-runtime to update service understanding, salon-scoped service aliases, name-slot repair, and conversation golden regressions.
+```
+
 ## Subagents
 
 Project-scoped custom agents live in `.codex/agents`. Ask Codex to spawn them explicitly.
@@ -62,9 +66,14 @@ Review this dashboard change with frontend_product_reviewer and security_privacy
 Have pilot_release_planner split the next approval-loop slice into vertical backend, frontend, docs, and test work.
 ```
 
+```txt
+Have repo_mapper map service_aliases and owner corrections, then have frontend_product_reviewer check the AI Training apply-correction UI contract.
+```
+
 ## Maintenance
 
 - Keep skills concise. Move long reference material into `docs/` or skill `references/`.
 - Update `CONTEXT.md` when domain terms become stable.
+- Update this inventory when new repo-local skill triggers, project agents, or domain source-of-truth tables such as `service_aliases` are added.
 - Add ADRs when a decision should stop future agents from re-opening the same debate.
 - Prefer read-only subagents for review and exploration; let the parent agent make final edits.

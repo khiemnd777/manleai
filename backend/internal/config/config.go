@@ -63,12 +63,14 @@ type OpenAIVoiceConfig struct {
 	RealtimeEnabled      bool
 	RealtimeModel        string
 	RealtimeVoice        string
+	RealtimeNoiseProfile string
 	RealtimeInstructions string
 }
 
 const (
-	DefaultOpenAIRealtimeModel       = "gpt-realtime-2"
-	LegacyOpenAIRealtimePreviewModel = "gpt-4o-realtime-preview"
+	DefaultOpenAIRealtimeModel        = "gpt-realtime-2"
+	LegacyOpenAIRealtimePreviewModel  = "gpt-4o-realtime-preview"
+	DefaultOpenAIRealtimeNoiseProfile = "noisy_salon"
 )
 
 func NormalizeOpenAIRealtimeModel(model string) string {
@@ -77,6 +79,15 @@ func NormalizeOpenAIRealtimeModel(model string) string {
 		return DefaultOpenAIRealtimeModel
 	}
 	return model
+}
+
+func NormalizeOpenAIRealtimeNoiseProfile(profile string) string {
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "quiet_room", "balanced", "noisy_salon":
+		return strings.ToLower(strings.TrimSpace(profile))
+	default:
+		return DefaultOpenAIRealtimeNoiseProfile
+	}
 }
 
 func Load() Config {
@@ -123,6 +134,7 @@ func Load() Config {
 					RealtimeEnabled:      envBool("VOICE_OPENAI_REALTIME_ENABLED", false),
 					RealtimeModel:        NormalizeOpenAIRealtimeModel(env("VOICE_OPENAI_REALTIME_MODEL", DefaultOpenAIRealtimeModel)),
 					RealtimeVoice:        env("VOICE_OPENAI_REALTIME_VOICE", "alloy"),
+					RealtimeNoiseProfile: NormalizeOpenAIRealtimeNoiseProfile(env("VOICE_OPENAI_REALTIME_NOISE_PROFILE", DefaultOpenAIRealtimeNoiseProfile)),
 					RealtimeInstructions: env("VOICE_OPENAI_REALTIME_INSTRUCTIONS", ""),
 				},
 			},

@@ -1,6 +1,6 @@
 ---
 name: voice-ai-runtime
-description: Design or implement AI receptionist, conversation engine, telephony, SMS, STT, LLM, TTS, transcript, summary, handoff, and voice provider abstractions for this repo.
+description: Design or implement AI receptionist, conversation engine, service understanding, service aliases, telephony, SMS, STT, LLM, TTS, transcript, summary, handoff, and voice provider abstractions for this repo.
 ---
 
 # Voice AI Runtime
@@ -25,6 +25,7 @@ transcript, handoff, call lifecycle, and voice booking work across Milestone 4+.
 ## Boundaries
 
 - Conversation Engine owns state, intent, entity extraction, and tool routing.
+- Service understanding belongs in deterministic backend code. Interpret service utterances against active catalog services and active salon-scoped `service_aliases`; exact catalog names beat aliases, aliases beat generic family matching, and fuzzy/generic family matches should ask catalog-backed clarification instead of selecting a service.
 - Booking tools call Booking Service.
 - Booking Service calls `POSProvider`.
 - AI runtime must not call Square or read POS tokens.
@@ -37,6 +38,8 @@ transcript, handoff, call lifecycle, and voice booking work across Milestone 4+.
 
 - Ask one question at a time.
 - Keep responses short.
+- Preserve known slots. Do not ask for a known day/time/service again unless the caller corrects it or availability invalidates it.
+- Treat service phrases in the customer-name slot as service corrections, not customer names; re-check availability before continuing.
 - Do not invent prices.
 - Use "starting at" when price varies by design, length, add-on, or technician.
 - Transfer to the owner for human requests, complaints, refunds, payment disputes, complex group bookings, and low confidence.
@@ -48,6 +51,9 @@ transcript, handoff, call lifecycle, and voice booking work across Milestone 4+.
 2. Add persistence for call sessions, transcript, summary, handoff, and booking attempt linkage.
 3. Implement a deterministic simulator before live telephony.
 4. Add tests for state transitions and fallback text.
-5. Wire Twilio/OpenAI/provider specifics behind adapters only.
-6. For realtime, retention, or audio-output changes, verify replay/idempotency,
+5. Add golden conversation regressions for service understanding, alias matches,
+   slot preservation, name-quality, terminal booking replies, and no provider
+   leakage in customer-facing text.
+6. Wire Twilio/OpenAI/provider specifics behind adapters only.
+7. For realtime, retention, or audio-output changes, verify replay/idempotency,
    signature checks, lifecycle gates, expiration, and redaction behavior.
