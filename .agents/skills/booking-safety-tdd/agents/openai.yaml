@@ -1,4 +1,6 @@
 interface:
   display_name: "Booking Safety TDD"
-  short_description: "Implement booking operations with test-first POS confirmation and idempotency safety"
-  default_prompt: "Use $booking-safety-tdd for booking behavior so confirmed appointments require POS provider success and repeated execution cannot create duplicate or misleading records."
+  short_description: "Plan booking safety with POS confirmation"
+  default_prompt: "Use $booking-safety-tdd to investigate booking behavior, plan the approval-gated test slice, and preserve POS-confirmed appointments plus duplicate-prevention safety."
+policy:
+  allow_implicit_invocation: false

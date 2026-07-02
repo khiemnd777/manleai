@@ -1,6 +1,6 @@
 ---
 name: salon-dashboard-ui
-description: Build or review the Next.js salon owner dashboard UI. Use when editing frontend dashboard pages, onboarding, integrations, settings, service/staff tables, booking test UI, AI simulator, configuration transfer, public catalog settings, billing gates, or landing page handoffs.
+description: Investigate, review, plan, and only after explicit approval implement the Next.js salon owner dashboard UI. Use when frontend dashboard pages, onboarding, integrations, settings, service/staff tables, booking test UI, AI simulator, configuration transfer, public catalog settings, billing gates, or landing page handoffs may change. Do not edit frontend files until the latest user message explicitly approves the exact UI scope.
 ---
 
 # Salon Dashboard UI
@@ -32,6 +32,8 @@ Read `DESIGN.md` before proposing, implementing, or reviewing dashboard UI. Trea
 
 ## Required Approval Before UI Edits
 
+This skill does not authorize edits by itself.
+
 Before editing any UI or user-facing layout:
 
 1. Inspect the current component/page and relevant API contract.
@@ -40,6 +42,9 @@ Before editing any UI or user-facing layout:
 4. Wait for explicit approval before changing frontend code.
 
 The Mockup as Text must include layout blocks, visible copy, controls, states, responsive behavior, and backend/API assumptions.
+
+- Treat screenshots, appshots, complaints, "why" prompts, status checks, and partial instructions as read-only investigation requests, not UI implementation approval.
+- Earlier approval expires when the UI scope changes, after the assistant gives a final answer, or when the latest user message is a question or complaint instead of an approval.
 
 ## Required UI States
 

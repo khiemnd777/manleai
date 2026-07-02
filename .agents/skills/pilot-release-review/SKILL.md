@@ -42,6 +42,7 @@ Use this skill for code review, milestone review, or readiness checks.
 - Separate confirmed issues from open questions.
 - Do not list style nits unless they hide a real operational risk.
 - If no issues are found, state residual risk and any tests not run.
+- This skill is review-only and does not authorize edits. If the user asks for fixes, stop after findings and a proposed change plan, then wait for latest explicit approval for the exact scope before editing files.
 
 ## Validation Commands
 

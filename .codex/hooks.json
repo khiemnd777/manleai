@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "apply_patch|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/write_approval_gate.py\"",
+            "timeout": 5,
+            "statusMessage": "Checking write approval"
+          }
+        ]
+      }
+    ]
+  }
+}

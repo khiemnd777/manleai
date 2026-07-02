@@ -1,4 +1,6 @@
 interface:
   display_name: "POS Adapter Slice"
   short_description: "Preserve the POSProvider boundary for Square and future adapters"
-  default_prompt: "Use $pos-adapter-slice to implement POS integration work without leaking provider-specific logic into booking or AI modules, while handling retry, webhook, sync, idempotency, and duplicate-prevention behavior."
+  default_prompt: "Use $pos-adapter-slice to investigate POS integration ownership, plan the approval-gated change, and preserve provider boundaries, retry, webhook, sync, idempotency, and duplicate-prevention behavior."
+policy:
+  allow_implicit_invocation: false

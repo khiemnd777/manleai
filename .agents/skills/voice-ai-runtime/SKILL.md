@@ -1,6 +1,6 @@
 ---
 name: voice-ai-runtime
-description: Design or implement AI receptionist, conversation engine, service understanding, service aliases, telephony, SMS, STT, LLM, TTS, transcript, summary, handoff, and voice provider abstractions for this repo.
+description: Investigate, design, plan, and only after explicit approval implement AI receptionist, conversation engine, service understanding, service aliases, telephony, SMS, STT, LLM, TTS, transcript, summary, handoff, and voice provider abstractions for this repo. Do not write files until the latest user message explicitly approves the exact change scope.
 ---
 
 # Voice AI Runtime
@@ -47,7 +47,16 @@ transcript, handoff, call lifecycle, and voice booking work across Milestone 4+.
 - Never say a booking is confirmed unless POS booking succeeded.
 - Tone presets may make a safe reply more natural, human, young, concise, or warm, but must not change required questions, known-slot preservation, handoff decisions, availability checks, or POS confirmation boundaries. Realtime must speak backend-approved replies and must not use independent realtime instructions to bypass those rules.
 
+## Write Approval Hard Stop
+
+- This skill does not authorize edits by itself. Follow the root `AGENTS.md` confirmation gate before any code, test, migration, doc, config, skill, agent, runtime, or generated artifact change.
+- Treat questions, complaints, screenshots, appshots, status checks, "why" prompts, and partial instructions as read-only investigation requests, not implementation approval.
+- Before editing, trace the real voice/runtime owner and root cause, state ambiguity or open questions, present the implementation and regression plan, then wait for latest explicit approval for the exact scope.
+- Earlier approval expires when the scope changes, after the assistant gives a final answer, or when the latest user message is a question or complaint instead of an approval.
+
 ## Implementation Flow
+
+After explicit approval for the exact voice/runtime scope:
 
 1. Define provider interface and domain DTOs first.
 2. Add persistence for call sessions, transcript, summary, handoff, and booking attempt linkage.

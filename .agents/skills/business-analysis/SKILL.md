@@ -46,6 +46,12 @@ Convert the request into a concrete business slice:
 
 If rules overlap or conflict, invoke `business-logic-overlap-analysis` thinking before finalizing the plan.
 
+## Write Approval Hard Stop
+
+- This skill is analysis-first and does not authorize edits by itself.
+- Treat questions, complaints, screenshots, appshots, status checks, "why" prompts, and partial instructions as read-only investigation requests, not implementation approval.
+- For any file-changing task, stop after requirements, acceptance criteria, open questions, and plan. Wait for latest explicit approval for the exact scope before editing files.
+
 ## Output Shape
 
 Return concise sections:

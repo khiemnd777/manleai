@@ -77,6 +77,12 @@ For analysis-only tasks, return:
 
 For implementation requests, stop after the analysis and plan. Wait for explicit user approval before editing files.
 
+## Write Approval Hard Stop
+
+- This skill is analysis-first and does not authorize edits by itself.
+- Treat questions, complaints, screenshots, appshots, status checks, "why" prompts, and partial instructions as read-only investigation requests, not implementation approval.
+- For any file-changing task, stop after overlap findings, decisions needed, guardrails, and test plan. Wait for latest explicit approval for the exact scope before editing files.
+
 ## Repo Invariants
 
 - Confirmed booking requires active POS provider success and a provider booking ID.

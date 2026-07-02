@@ -9,23 +9,25 @@ This repo's root `AGENTS.md` includes a User Confirmation Gate:
 - Feature requests, bugfixes, refactors, and code-changing tasks require an implementation plan and explicit user approval before code edits.
 - UI-changing tasks require a Mockup as Text and explicit user approval before frontend edits.
 - Read-only exploration and answering questions are allowed before approval.
+- Questions, complaints, screenshots, appshots, status checks, and partial instructions are not approval to write files.
+- Project `.codex/hooks.json` adds a `PreToolUse` write approval gate for `apply_patch`, `Edit`, and `Write`; review/trust the hook in Codex when prompted after changes.
 
 ## Skills
 
-Repo-local skills live in `.agents/skills`. Invoke explicitly with `$skill-name` or let Codex choose them from their descriptions.
+Repo-local skills live in `.agents/skills`. Analysis and review skills may be selected implicitly. Skills that can lead to edits disable implicit invocation in `agents/openai.yaml`; invoke them explicitly and still require plan-first approval before writes.
 
 Recommended prompts:
 
 ```txt
-Use $ai-receptionist-repo to implement the next backend/frontend slice.
+Use $ai-receptionist-repo to investigate the next backend/frontend slice, identify owning files, and propose a plan before edits.
 ```
 
 ```txt
-Use $pos-adapter-slice to add Square token refresh without leaking Square logic into booking.
+Use $pos-adapter-slice to investigate Square token refresh ownership and propose an approval-ready plan without leaking Square logic into booking.
 ```
 
 ```txt
-Use $booking-safety-tdd to implement test booking creation and cancellation.
+Use $booking-safety-tdd to plan the test-first booking creation and cancellation slice, including POS confirmation and duplicate-prevention checks.
 ```
 
 ```txt
@@ -45,7 +47,7 @@ Use $salon-ops-workflow to analyze the owner/caller workflow before changing das
 ```
 
 ```txt
-Use $voice-ai-runtime to update AI tone, service understanding, salon-scoped service aliases, name-slot repair, and conversation golden regressions.
+Use $voice-ai-runtime to investigate AI tone, service understanding, salon-scoped service aliases, name-slot repair, and conversation golden regressions, then propose an approval-ready plan.
 ```
 
 ## Subagents

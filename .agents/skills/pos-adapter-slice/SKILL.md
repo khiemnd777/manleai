@@ -1,6 +1,6 @@
 ---
 name: pos-adapter-slice
-description: Implement or review POS adapter work for this repo. Use when changing POSProvider, SquareAdapter, POS connections, sync logs, POS errors, OAuth, provider DTOs, service/staff sync, or future POS integration seams.
+description: Investigate, review, plan, and only after explicit approval implement POS adapter work for this repo. Use when POSProvider, SquareAdapter, POS connections, sync logs, POS errors, OAuth, provider DTOs, service/staff sync, or future POS integration seams may change. Do not write files until the latest user message explicitly approves the exact change scope.
 ---
 
 # POS Adapter Slice
@@ -36,7 +36,16 @@ Use this skill for all POS integration work.
 - POS failures are logged to `pos_errors` with normalized codes.
 - Sync operations write `pos_sync_logs`.
 
+## Write Approval Hard Stop
+
+- This skill does not authorize edits by itself. Follow the root `AGENTS.md` confirmation gate before any code, test, migration, doc, config, skill, agent, runtime, or generated artifact change.
+- Treat questions, complaints, screenshots, appshots, status checks, "why" prompts, and partial instructions as read-only investigation requests, not implementation approval.
+- Before editing, trace the real POS owner and root cause, state ambiguity or open questions, present the implementation and test plan, then wait for latest explicit approval for the exact scope.
+- Earlier approval expires when the scope changes, after the assistant gives a final answer, or when the latest user message is a question or complaint instead of an approval.
+
 ## Implementation Flow
+
+After explicit approval for the exact POS scope:
 
 1. Confirm the provider-neutral DTO or method shape first.
 2. Update migrations and Ent schemas when persistence changes.

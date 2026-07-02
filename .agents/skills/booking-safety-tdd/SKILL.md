@@ -1,6 +1,6 @@
 ---
 name: booking-safety-tdd
-description: Build booking, reschedule, cancel, availability, appointment, booking_attempt, and fallback behavior with test-first safety. Use when implementing Milestone 3 booking operations or changing confirmation logic.
+description: Investigate, plan, and only after explicit approval implement booking, reschedule, cancel, availability, appointment, booking_attempt, and fallback behavior with test-first safety. Use when Milestone 3 booking operations or confirmation logic may change. Do not write tests or code until the latest user message explicitly approves the exact change scope.
 ---
 
 # Booking Safety TDD
@@ -25,10 +25,17 @@ Use this skill whenever appointment confirmation behavior changes.
 
 An appointment is confirmed only after the active `POSProvider` returns a successful POS booking ID. If POS fails, create a fallback pending request and log the failure. Do not mark the appointment confirmed.
 
+## Write Approval Hard Stop
+
+- This skill does not authorize edits by itself. Follow the root `AGENTS.md` confirmation gate before any code, test, migration, doc, config, skill, agent, runtime, or generated artifact change.
+- Treat questions, complaints, screenshots, appshots, status checks, "why" prompts, and partial instructions as read-only investigation requests, not implementation approval.
+- Before editing, trace the real booking owner and root cause, state ambiguity or open questions, present the test and implementation plan, then wait for latest explicit approval for the exact scope.
+- Earlier approval expires when the scope changes, after the assistant gives a final answer, or when the latest user message is a question or complaint instead of an approval.
+
 ## Test-First Flow
 
-1. Write one failing behavior test for the next booking rule.
-2. Implement the smallest production code to pass it.
+1. After explicit approval, write one failing behavior test for the next booking rule.
+2. Implement the smallest production code to pass it only after the approved failing test exists or the user explicitly approves a no-test exception.
 3. Repeat one vertical slice at a time.
 4. Refactor only while green.
 

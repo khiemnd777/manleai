@@ -71,6 +71,12 @@ Return:
 
 For implementation requests, stop after workflow analysis and proposed plan. Wait for explicit user approval before editing files.
 
+## Write Approval Hard Stop
+
+- This skill is analysis-first and does not authorize edits by itself.
+- Treat questions, complaints, screenshots, appshots, status checks, "why" prompts, and partial instructions as read-only investigation requests, not implementation approval.
+- For any file-changing task, stop after workflow analysis, operational gates, exception handling, dashboard needs, and plan. Wait for latest explicit approval for the exact scope before editing files.
+
 ## Non-Negotiables
 
 - Never describe an appointment as confirmed unless POS booking succeeded.

@@ -1,6 +1,6 @@
 ---
 name: ai-receptionist-repo
-description: Orient and implement changes in this AI Receptionist monorepo. Use when work touches repo architecture, module placement, milestone scope, product terminology, or cross-backend/frontend/docs changes for the nail salon AI receptionist.
+description: Orient, investigate, and plan changes in this AI Receptionist monorepo. Use when work touches repo architecture, module placement, milestone scope, product terminology, agent rules, skills, or cross-backend/frontend/docs changes for the nail salon AI receptionist. Do not edit files from this skill until the latest user message explicitly approves the exact change scope.
 ---
 
 # AI Receptionist Repo
@@ -30,9 +30,13 @@ Use this skill before broad or ambiguous repo work.
 
 ## User Confirmation Gate
 
+- This skill does not authorize edits by itself.
 - For feature, bugfix, refactor, or code-changing tasks, inspect first, then present the implementation plan and wait for explicit user approval before editing code.
 - For UI changes, include a Mockup as Text before implementation and wait for explicit approval.
 - Documentation-only or agent-rule changes may be applied directly when the user explicitly asks for those files to change.
+- Treat questions, complaints, screenshots, appshots, status checks, "why" prompts, and partial instructions as read-only investigation requests, not implementation approval.
+- Earlier approval expires when the scope changes, after the assistant gives a final answer, or when the latest user message is a question or complaint instead of an approval.
+- Before any write, confirm the latest user message contains action-oriented approval for the exact files or scope, such as "approved", "cho phep ghi file", "trien khai theo plan nay", "sua cac file nay", or "lam di".
 
 ## Architecture Rules
 

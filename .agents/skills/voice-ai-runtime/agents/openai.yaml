@@ -1,4 +1,6 @@
 interface:
   display_name: "Voice AI Runtime"
-  short_description: "Build AI receptionist, service understanding, and voice abstractions"
-  default_prompt: "Use $voice-ai-runtime when implementing conversation, AI tone, service understanding, service aliases, telephony, SMS, transcript, handoff, realtime, retention, or AI runtime behavior with replay safety, idempotency, duplicate prevention, and safe fallback states."
+  short_description: "Plan AI runtime and voice safety"
+  default_prompt: "Use $voice-ai-runtime to investigate AI runtime, tone, service understanding, telephony, realtime, retention, and voice behavior, then plan approval-gated changes with replay safety and safe fallback states."
+policy:
+  allow_implicit_invocation: false

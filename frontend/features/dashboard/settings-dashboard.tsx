@@ -60,9 +60,7 @@ type SalonFormState = {
 
 type SettingsFormState = {
   aiGreeting: string;
-  aiVoice: string;
   aiTone: string;
-  bookingMode: string;
   recordingEnabled: boolean;
   recordingConsentMessage: string;
   smsConfirmationEnabled: boolean;
@@ -174,7 +172,6 @@ export function SettingsDashboard() {
   const hasBusinessHourPeriods = importedProviderPeriods.length > 0;
   const latestBusinessHourSync = latestUpdatedAt(...importedProviderPeriods.map((item) => item.last_synced_at || item.updated_at || ""));
   const latestUpdate = latestUpdatedAt(salon?.updated_at, settings?.updated_at, latestBusinessHourSync, publicCatalog?.updated_at);
-  const bookingModeBlocked = settingsForm.bookingMode === "confirmed_booking" && !aiEnabled;
 
   async function saveSalonProfile() {
     if (!salon) return;
@@ -228,10 +225,6 @@ export function SettingsDashboard() {
       setError("Reminder hours before must be greater than zero.");
       return;
     }
-    if (bookingModeBlocked) {
-      setError("POS-confirmed booking mode is gated until Square setup enables AI booking.");
-      return;
-    }
 
     setBusy("save-settings");
     setError("");
@@ -241,9 +234,9 @@ export function SettingsDashboard() {
         method: "PUT",
         body: JSON.stringify({
           ai_greeting: settingsForm.aiGreeting,
-          ai_voice: settingsForm.aiVoice,
+          ai_voice: settings?.ai_voice || "professional_female",
           ai_tone: settingsForm.aiTone,
-          booking_mode: settingsForm.bookingMode,
+          booking_mode: settings?.booking_mode || "pending_approval",
           recording_enabled: settingsForm.recordingEnabled,
           recording_consent_message: settingsForm.recordingConsentMessage,
           sms_confirmation_enabled: settingsForm.smsConfirmationEnabled,
@@ -473,7 +466,6 @@ export function SettingsDashboard() {
         form={settingsForm}
         aiEnabled={aiEnabled}
         busy={busy === "save-settings"}
-        bookingModeBlocked={bookingModeBlocked}
         onChange={setSettingsForm}
         onSave={() => void saveSettings()}
       />
@@ -845,14 +837,12 @@ function AISettingsForm({
   form,
   aiEnabled,
   busy,
-  bookingModeBlocked,
   onChange,
   onSave
 }: {
   form: SettingsFormState;
   aiEnabled: boolean;
   busy: boolean;
-  bookingModeBlocked: boolean;
   onChange: (next: SettingsFormState) => void;
   onSave: () => void;
 }) {
@@ -861,16 +851,10 @@ function AISettingsForm({
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
         <div>
           <CardTitle>AI receptionist</CardTitle>
-          <CardDescription>Call greeting, speaking style, recording consent, handoff, SMS, and owner approval behavior.</CardDescription>
+          <CardDescription>Call greeting, speaking style, recording consent, handoff, and SMS behavior.</CardDescription>
         </div>
         <Badge value={aiEnabled ? "active" : "ai_disabled"} className="self-start" />
       </div>
-
-      {bookingModeBlocked ? (
-        <div className="mt-5 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-          POS-confirmed booking mode is gated until Square setup enables AI booking.
-        </div>
-      ) : null}
 
       <div className="mt-5 grid gap-4 md:grid-cols-2">
         <Field label="AI greeting">
@@ -889,9 +873,6 @@ function AISettingsForm({
             disabled={busy}
           />
         </Field>
-        <Field label="Voice">
-          <TextInput value={form.aiVoice} disabled={busy} onChange={(value) => onChange({ ...form, aiVoice: value })} />
-        </Field>
         <Field label="Speaking style">
           <select
             className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-50 disabled:text-slate-400"
@@ -908,20 +889,6 @@ function AISettingsForm({
           <div className="mt-3 rounded-md border border-line bg-slate-50 px-3 py-2 text-xs leading-5 text-muted">
             <span className="font-semibold text-ink">Style preview:</span> {tonePreview(form.aiTone)}
           </div>
-        </Field>
-        <Field label="Booking mode">
-          <select
-            className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-50 disabled:text-slate-400"
-            value={form.bookingMode}
-            onChange={(event) => onChange({ ...form, bookingMode: event.target.value })}
-            disabled={busy}
-          >
-            <option value="pending_approval">Pending owner approval</option>
-            <option value="disabled">Disabled</option>
-            <option value="confirmed_booking" disabled={!aiEnabled}>
-              POS-confirmed booking{aiEnabled ? "" : " (requires Square readiness)"}
-            </option>
-          </select>
         </Field>
         <Field label="Reminder hours before">
           <input
@@ -953,7 +920,7 @@ function AISettingsForm({
       </div>
 
       <div className="mt-5 flex justify-end">
-        <Button type="button" onClick={onSave} disabled={busy || bookingModeBlocked}>
+        <Button type="button" onClick={onSave} disabled={busy}>
           <Save className="h-4 w-4" />
           {busy ? "Saving..." : "Save AI settings"}
         </Button>
@@ -1180,9 +1147,7 @@ function salonToForm(salon: Salon): SalonFormState {
 function emptySettingsForm(): SettingsFormState {
   return {
     aiGreeting: "",
-    aiVoice: "professional_female",
     aiTone: "professional_warm",
-    bookingMode: "pending_approval",
     recordingEnabled: true,
     recordingConsentMessage: "",
     smsConfirmationEnabled: true,
@@ -1202,9 +1167,7 @@ function emptyPublicCatalogForm(): PublicCatalogFormState {
 function settingsToForm(settings: SalonSettings): SettingsFormState {
   return {
     aiGreeting: settings.ai_greeting || "",
-    aiVoice: settings.ai_voice || "professional_female",
     aiTone: settings.ai_tone || "professional_warm",
-    bookingMode: settings.booking_mode || "pending_approval",
     recordingEnabled: settings.recording_enabled,
     recordingConsentMessage: settings.recording_consent_message || "",
     smsConfirmationEnabled: settings.sms_confirmation_enabled,
