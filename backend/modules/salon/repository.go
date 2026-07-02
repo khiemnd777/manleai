@@ -119,7 +119,7 @@ func (r *Repository) Update(ctx context.Context, id string, ownerUserID string, 
 
 func (r *Repository) GetSettings(ctx context.Context, salonID string, ownerUserID string) (*Settings, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT ss.id::text, ss.salon_id::text, ss.ai_greeting, ss.ai_voice, ss.booking_mode, ss.recording_enabled,
+		SELECT ss.id::text, ss.salon_id::text, ss.ai_greeting, ss.ai_voice, COALESCE(ss.ai_tone, 'professional_warm'), ss.booking_mode, ss.recording_enabled,
 		       ss.recording_consent_message, ss.sms_confirmation_enabled, ss.sms_reminder_enabled,
 		       ss.reminder_hours_before, ss.handoff_enabled, ss.created_at, ss.updated_at
 		FROM salon_settings ss
@@ -134,17 +134,18 @@ func (r *Repository) UpdateSettings(ctx context.Context, salonID string, ownerUs
 		UPDATE salon_settings
 		SET ai_greeting = $1,
 		    ai_voice = $2,
-		    booking_mode = $3,
-		    recording_enabled = $4,
-		    recording_consent_message = $5,
-		    sms_confirmation_enabled = $6,
-		    sms_reminder_enabled = $7,
-		    reminder_hours_before = $8,
-		    handoff_enabled = $9,
+		    ai_tone = $3,
+		    booking_mode = $4,
+		    recording_enabled = $5,
+		    recording_consent_message = $6,
+		    sms_confirmation_enabled = $7,
+		    sms_reminder_enabled = $8,
+		    reminder_hours_before = $9,
+		    handoff_enabled = $10,
 		    updated_at = now()
-		WHERE salon_id = $10
-		  AND EXISTS (SELECT 1 FROM salons WHERE salons.id = salon_settings.salon_id AND salons.owner_user_id = $11)
-	`, req.AIGreeting, req.AIVoice, req.BookingMode, req.RecordingEnabled, req.RecordingConsentMessage, req.SMSConfirmationEnabled, req.SMSReminderEnabled, req.ReminderHoursBefore, req.HandoffEnabled, salonID, ownerUserID)
+		WHERE salon_id = $11
+		  AND EXISTS (SELECT 1 FROM salons WHERE salons.id = salon_settings.salon_id AND salons.owner_user_id = $12)
+	`, req.AIGreeting, req.AIVoice, req.AITone, req.BookingMode, req.RecordingEnabled, req.RecordingConsentMessage, req.SMSConfirmationEnabled, req.SMSReminderEnabled, req.ReminderHoursBefore, req.HandoffEnabled, salonID, ownerUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -342,6 +343,7 @@ func scanSettings(row rowScanner) (*Settings, error) {
 		&settings.SalonID,
 		&settings.AIGreeting,
 		&settings.AIVoice,
+		&settings.AITone,
 		&settings.BookingMode,
 		&settings.RecordingEnabled,
 		&settings.RecordingConsentMessage,

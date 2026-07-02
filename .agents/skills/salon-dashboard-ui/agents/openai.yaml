@@ -1,4 +1,4 @@
 interface:
   display_name: "Salon Dashboard UI"
   short_description: "Build operational product-grade dashboard flows for salon owners"
-  default_prompt: "Use $salon-dashboard-ui to implement or review frontend dashboard pages with complete UI states, repeated-action safety, idempotency assumptions, and honest product gating."
+  default_prompt: "Use $salon-dashboard-ui to implement or review frontend dashboard pages, including AI receptionist settings and tone controls, with complete UI states, repeated-action safety, idempotency assumptions, and honest product gating."

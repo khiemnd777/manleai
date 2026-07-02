@@ -195,6 +195,26 @@ Returns salons owned by the authenticated user.
 
 `PUT /api/salons/:id/settings`
 
+Returns and updates owner-scoped AI receptionist settings. `ai_tone` accepts
+`professional_warm`, `natural_human`, `friendly_young`, or `concise_calm`.
+The tone controls spoken reply style only; booking guardrails and POS-first
+confirmation rules still override style.
+
+```json
+{
+  "ai_greeting": "Thanks for calling Lotus Nails Studio.",
+  "ai_voice": "professional_female",
+  "ai_tone": "natural_human",
+  "booking_mode": "pending_approval",
+  "recording_enabled": true,
+  "recording_consent_message": "This call may be recorded.",
+  "sms_confirmation_enabled": true,
+  "sms_reminder_enabled": true,
+  "reminder_hours_before": 24,
+  "handoff_enabled": true
+}
+```
+
 `GET /api/salons/:id/public-catalog`
 
 Returns owner-scoped public page settings and publish readiness.
@@ -286,7 +306,7 @@ keys, client secrets, encrypted secrets, or POS connection token state.
 
 ```json
 {
-  "schema_version": "manleai.salon_configuration.v2",
+  "schema_version": "manleai.salon_configuration.v3",
   "exported_at": "2026-06-26T15:00:00Z",
   "secrets_exported": false,
   "operational_data_exported": false,
@@ -310,6 +330,7 @@ keys, client secrets, encrypted secrets, or POS connection token state.
   "ai_receptionist": {
     "ai_greeting": "Thanks for calling Lotus Nails Studio.",
     "ai_voice": "professional_female",
+    "ai_tone": "natural_human",
     "booking_mode": "confirmed_booking",
     "recording_enabled": true,
     "recording_consent_message": "This call may be recorded.",
@@ -407,7 +428,7 @@ Request shape, with the full exported bundle in `configuration`:
 ```json
 {
   "configuration": {
-    "schema_version": "manleai.salon_configuration.v2",
+    "schema_version": "manleai.salon_configuration.v3",
     "...": "full exported configuration bundle"
   }
 }
@@ -420,7 +441,7 @@ Response:
   "request_id": "import-preview-id",
   "dry_run": true,
   "status": "previewed",
-  "schema_version": "manleai.salon_configuration.v2",
+  "schema_version": "manleai.salon_configuration.v3",
   "can_apply": true,
   "summary": [
     {"section": "salon_profile", "created": 0, "updated": 6, "unchanged": 5, "skipped": 0, "conflicts": 0},
@@ -446,7 +467,7 @@ idempotent, while reusing it with a different payload returns a conflict.
 {
   "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
   "configuration": {
-    "schema_version": "manleai.salon_configuration.v2",
+    "schema_version": "manleai.salon_configuration.v3",
     "...": "full exported configuration bundle"
   }
 }
@@ -479,7 +500,7 @@ returns the same `salon_id` and `import_run_id`.
 {
   "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
   "configuration": {
-    "schema_version": "manleai.salon_configuration.v2",
+    "schema_version": "manleai.salon_configuration.v3",
     "...": "full exported configuration bundle"
   }
 }
@@ -494,7 +515,7 @@ Response includes the created salon id:
   "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
   "dry_run": false,
   "status": "applied",
-  "schema_version": "manleai.salon_configuration.v2",
+  "schema_version": "manleai.salon_configuration.v3",
   "can_apply": true,
   "summary": [],
   "warnings": [],

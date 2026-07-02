@@ -16,6 +16,9 @@ ManleAI-owned salon data such as services, staff, customers, AI controls, owner 
 **AI Receptionist**
 The voice agent that answers inbound calls, collects booking details, answers FAQs, and routes work to booking and handoff tools.
 
+**AI Receptionist Tone**
+A salon-scoped speaking-style preset stored on `salon_settings.ai_tone`. It can make backend-approved replies sound warmer, more natural, younger, or more concise, but it is not a booking rule, provider credential, or free-form prompt override.
+
 **Conversation Engine**
 The state machine and tool-calling layer behind the AI Receptionist. It must not know Square payloads, OAuth tokens, or provider-specific booking details.
 
@@ -64,6 +67,7 @@ A normalized, salon-scoped record of provider failures. Use codes such as `POS_T
 - Internal calendar records are mirrors or logs, not the source of booking truth for the pilot.
 - ManleAI owns canonical salon operational data; the active POS owns booking execution.
 - Service recognition must be catalog-backed and salon-scoped. Do not hardcode per-salon service keywords into prompts or generic matchers.
+- AI tone changes reply style only. It must not change required booking slots, handoff decisions, availability checks, service selection, or confirmed-booking wording.
 - Square is the first real integration; future POS names are architecture targets, not implemented features.
 - Vietnamese language support is product scope, but English remains the primary pilot language unless a feature explicitly says otherwise.
 

@@ -51,6 +51,9 @@ func TestGetBuildsSanitizedConfigurationExportWithKnowledgeBase(t *testing.T) {
 	if result.KnowledgeBase.Count != 1 || result.KnowledgeBase.Items[0].SourceKey == "" {
 		t.Fatalf("knowledge base was not exported with stable source key: %#v", result.KnowledgeBase)
 	}
+	if result.AIReceptionist.AITone != "natural_human" {
+		t.Fatalf("AI tone = %q, want natural_human", result.AIReceptionist.AITone)
+	}
 	if len(result.RequiresSecretReentry) != 3 {
 		t.Fatalf("secret re-entry providers = %#v, want three providers", result.RequiresSecretReentry)
 	}
@@ -141,6 +144,21 @@ func TestApplyImportIsIdempotentForKnowledgeSourceKeys(t *testing.T) {
 	}
 	if len(knowledge.items) != 1 {
 		t.Fatalf("knowledge count after repeated import = %d, want no duplicate", len(knowledge.items))
+	}
+}
+
+func TestNormalizeImportBundleDefaultsLegacyAITone(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
+	bundle := testImportBundle(updatedAt)
+	bundle.SchemaVersion = LegacySchemaV2
+	bundle.AIReceptionist.AITone = ""
+
+	normalized, err := normalizeImportBundle(bundle)
+	if err != nil {
+		t.Fatalf("normalizeImportBundle returned error: %v", err)
+	}
+	if normalized.AIReceptionist.AITone != "professional_warm" {
+		t.Fatalf("legacy AI tone = %q, want professional_warm", normalized.AIReceptionist.AITone)
 	}
 }
 
@@ -374,6 +392,7 @@ func newTestService(updatedAt time.Time) *Service {
 				SalonID:                 "salon_1",
 				AIGreeting:              "Thanks for calling Lotus Nails.",
 				AIVoice:                 "professional_female",
+				AITone:                  "natural_human",
 				BookingMode:             "pending_approval",
 				RecordingEnabled:        true,
 				RecordingConsentMessage: "This call may be recorded.",
@@ -420,6 +439,7 @@ func testImportBundle(updatedAt time.Time) ConfigurationBundle {
 		AIReceptionist: AIReceptionistExport{
 			AIGreeting:              "Thanks for calling Lotus Nails.",
 			AIVoice:                 "professional_female",
+			AITone:                  "natural_human",
 			BookingMode:             "pending_approval",
 			RecordingEnabled:        true,
 			RecordingConsentMessage: "This call may be recorded.",

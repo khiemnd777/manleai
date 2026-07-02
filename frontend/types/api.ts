@@ -43,6 +43,7 @@ export type SalonSettings = {
   salon_id: string;
   ai_greeting: string;
   ai_voice: string;
+  ai_tone: string;
   booking_mode: string;
   recording_enabled: boolean;
   recording_consent_message: string;
@@ -172,6 +173,7 @@ export type ConfigurationSalonProfile = {
 export type ConfigurationAIReceptionist = {
   ai_greeting: string;
   ai_voice: string;
+  ai_tone: string;
   booking_mode: string;
   recording_enabled: boolean;
   recording_consent_message: string;

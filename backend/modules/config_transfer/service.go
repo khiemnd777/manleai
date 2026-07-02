@@ -412,6 +412,7 @@ func planAIReceptionist(plan *importPlan) {
 	incoming := plan.Bundle.AIReceptionist
 	fieldChange(plan, SectionAI, "ai_greeting", target.AIGreeting, incoming.AIGreeting)
 	fieldChange(plan, SectionAI, "ai_voice", target.AIVoice, incoming.AIVoice)
+	fieldChange(plan, SectionAI, "ai_tone", target.AITone, incoming.AITone)
 	fieldChange(plan, SectionAI, "recording_enabled", boolString(target.RecordingEnabled), boolString(incoming.RecordingEnabled))
 	fieldChange(plan, SectionAI, "recording_consent_message", target.RecordingConsentMessage, incoming.RecordingConsentMessage)
 	fieldChange(plan, SectionAI, "sms_confirmation_enabled", boolString(target.SMSConfirmationEnabled), boolString(incoming.SMSConfirmationEnabled))
@@ -542,7 +543,7 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 	if bundle.SchemaVersion == "" {
 		return bundle, ErrValidation
 	}
-	if bundle.SchemaVersion != SchemaVersion && bundle.SchemaVersion != LegacySchemaV1 {
+	if bundle.SchemaVersion != SchemaVersion && bundle.SchemaVersion != LegacySchemaV2 && bundle.SchemaVersion != LegacySchemaV1 {
 		return bundle, ErrUnsupportedSchema
 	}
 	if bundle.SecretsExported || bundle.OperationalDataExported {
@@ -615,6 +616,7 @@ func normalizeSalonProfile(profile SalonProfileExport) SalonProfileExport {
 func normalizeAIReceptionist(settings AIReceptionistExport) AIReceptionistExport {
 	settings.AIGreeting = strings.TrimSpace(settings.AIGreeting)
 	settings.AIVoice = defaultString(strings.TrimSpace(settings.AIVoice), "professional_female")
+	settings.AITone = normalizeAITone(settings.AITone)
 	settings.BookingMode = defaultString(strings.TrimSpace(settings.BookingMode), "pending_approval")
 	settings.RecordingConsentMessage = strings.TrimSpace(settings.RecordingConsentMessage)
 	return settings
@@ -712,6 +714,7 @@ func aiReceptionistExport(settings *salon.Settings) AIReceptionistExport {
 	return AIReceptionistExport{
 		AIGreeting:              settings.AIGreeting,
 		AIVoice:                 settings.AIVoice,
+		AITone:                  normalizeAITone(settings.AITone),
 		BookingMode:             settings.BookingMode,
 		RecordingEnabled:        settings.RecordingEnabled,
 		RecordingConsentMessage: settings.RecordingConsentMessage,
@@ -720,6 +723,15 @@ func aiReceptionistExport(settings *salon.Settings) AIReceptionistExport {
 		ReminderHoursBefore:     settings.ReminderHoursBefore,
 		HandoffEnabled:          settings.HandoffEnabled,
 		UpdatedAt:               settings.UpdatedAt,
+	}
+}
+
+func normalizeAITone(value string) string {
+	switch strings.TrimSpace(value) {
+	case "natural_human", "friendly_young", "concise_calm":
+		return strings.TrimSpace(value)
+	default:
+		return "professional_warm"
 	}
 }
 

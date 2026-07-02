@@ -41,6 +41,7 @@ Use this skill before broad or ambiguous repo work.
 - Square-specific code stays in `backend/modules/pos_square`.
 - Conversation service understanding is backend domain logic, not prompt-only behavior. Use catalog-derived matching plus salon-scoped `service_aliases`; do not patch salon-specific service keywords into prompts or generic matchers.
 - Owner corrections can become either knowledge items or structured service aliases. Preserve idempotent `(salon_id, normalized_alias)` upsert semantics and transcript metadata explaining alias source, confidence, candidates, and selected service.
+- AI receptionist tone is salon-scoped runtime configuration on `salon_settings.ai_tone`. Keep presets controlled, flow tone through `conversation.RuntimeConfig` -> `voice.ModelRequest` -> provider adapters, and do not let style settings change slot collection, handoff routing, service understanding, or POS-first confirmation wording.
 - Square Appointments, Twilio, and OpenAI runtime settings are dashboard-managed provider configuration stored in `salon_integration_configs`; `.env`, `project.env`, and deployment secrets are bootstrap or fallback values only. Check the Integrations dashboard/API before telling the user to edit env files for provider credentials, redirect URLs, webhook URLs, model names, or provider base URLs.
 - Frontend pages must be operational dashboards with loading, empty, error, and success states.
 - Docs must be updated when architecture, API, env, setup, or milestone scope changes.

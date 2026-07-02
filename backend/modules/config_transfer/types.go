@@ -7,7 +7,8 @@ import (
 )
 
 const (
-	SchemaVersion       = "manleai.salon_configuration.v2"
+	SchemaVersion       = "manleai.salon_configuration.v3"
+	LegacySchemaV2      = "manleai.salon_configuration.v2"
 	LegacySchemaV1      = "manleai.salon_configuration.v1"
 	StatusPreviewed     = "previewed"
 	StatusApplied       = "applied"
@@ -71,6 +72,7 @@ type SalonProfileExport struct {
 type AIReceptionistExport struct {
 	AIGreeting              string    `json:"ai_greeting"`
 	AIVoice                 string    `json:"ai_voice"`
+	AITone                  string    `json:"ai_tone"`
 	BookingMode             string    `json:"booking_mode"`
 	RecordingEnabled        bool      `json:"recording_enabled"`
 	RecordingConsentMessage string    `json:"recording_consent_message"`

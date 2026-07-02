@@ -17,3 +17,19 @@ func TestNormalizePublicSlug(t *testing.T) {
 		}
 	}
 }
+
+func TestValidAITone(t *testing.T) {
+	for _, value := range []string{
+		AIToneProfessionalWarm,
+		AIToneNaturalHuman,
+		AIToneFriendlyYoung,
+		AIToneConciseCalm,
+	} {
+		if !validAITone(value) {
+			t.Fatalf("validAITone(%q) = false, want true", value)
+		}
+	}
+	if validAITone("unrestricted_prompt") {
+		t.Fatalf("validAITone accepted unsupported tone")
+	}
+}

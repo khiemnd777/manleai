@@ -41,6 +41,7 @@ Ask these questions before proposing implementation:
 - Does a voice/conversation path bypass booking service rules?
 - Does service understanding happen in one backend-owned place, or do prompts, name-slot repair, dashboard copy, and training corrections each infer services differently?
 - Do owner corrections update the right data type: reusable knowledge for FAQ/policy, or structured `service_aliases` for service recognition?
+- Does AI tone stay a style-only salon setting flowing through `salon_settings.ai_tone`, `conversation.RuntimeConfig`, `voice.ModelRequest`, and provider adapters without changing booking, handoff, slot, or service-understanding decisions?
 - Does an API response, DTO, or UI label use a different state name than persistence or docs?
 - Does the requested behavior create a race between availability, booking attempt, appointment write, notification, audit log, or POS error logging?
 - Can the workflow be run, retried, imported, synced, submitted, or replayed more than once, and if so what stable key prevents duplicate or rubbish records?
@@ -57,6 +58,7 @@ Classify findings with one or more of these labels:
 - `workflow_gap`: happy path exists but fallback, disabled, retry, owner review, or handoff path is missing.
 - `api_contract`: backend DTO, frontend type, docs, or mapper disagree.
 - `understanding_drift`: service recognition, aliases, fuzzy candidates, or transcript metadata differ across runtime, dashboard, docs, and tests.
+- `tone_guardrail`: AI tone is treated as provider setup or prompt-only behavior, or style changes can override conversation and booking safety rules.
 - `tenant_security`: salon ownership, token secrecy, or cross-salon data isolation is unclear.
 - `milestone_scope`: UI or copy implies unsupported production behavior.
 - `idempotency_gap`: repeated execution, retry, import, sync, webhook, or double-submit can create duplicates or rubbish state.

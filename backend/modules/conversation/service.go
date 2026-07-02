@@ -1171,6 +1171,7 @@ func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, ses
 		CustomerMessage:     turn.CustomerMessage,
 		SafeReply:           turn.AIMessage,
 		SalonName:           salonName(cfg),
+		AITone:              aiTone(cfg),
 		BookingConfirmed:    turn.Update.Outcome == OutcomeBookingConfirmed && turn.Update.BookingAttemptID != "" && turn.Update.AppointmentID != "",
 		FallbackOrHandoff:   turn.Update.Outcome == OutcomeBookingFallbackPending || turn.Update.Outcome == OutcomeAIDisabled || turn.Update.Outcome == OutcomeHandoffRequested,
 		MissingBookingField: missing,
@@ -1379,6 +1380,18 @@ func initialReply(cfg *RuntimeConfig) string {
 		greeting = strings.TrimSpace(cfg.AIGreeting)
 	}
 	return normalizeInitialGreeting(greeting, salonName(cfg))
+}
+
+func aiTone(cfg *RuntimeConfig) string {
+	if cfg == nil {
+		return "professional_warm"
+	}
+	switch strings.TrimSpace(cfg.AITone) {
+	case "natural_human", "friendly_young", "concise_calm":
+		return strings.TrimSpace(cfg.AITone)
+	default:
+		return "professional_warm"
+	}
 }
 
 func normalizeInitialGreeting(greeting string, salon string) string {

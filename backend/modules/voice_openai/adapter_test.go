@@ -33,13 +33,24 @@ func TestGenerateReplyParsesStructuredResponse(t *testing.T) {
 		if !strings.Contains(instructions, "Do not mention POS providers") {
 			t.Fatalf("instructions should hide POS provider names: %s", instructions)
 		}
+		if !strings.Contains(instructions, "natural, human spoken tone") {
+			t.Fatalf("instructions should include selected tone guidance: %s", instructions)
+		}
+		input, _ := req["input"].(string)
+		var inputPayload map[string]any
+		if err := json.Unmarshal([]byte(input), &inputPayload); err != nil {
+			t.Fatalf("decode model input: %v", err)
+		}
+		if inputPayload["ai_tone"] != "natural_human" {
+			t.Fatalf("ai_tone = %#v, want natural_human", inputPayload["ai_tone"])
+		}
 		body, _ := json.Marshal(map[string]any{
 			"output_text": `{"message":"What phone number should we use?","confidence":0.9,"handoff":false,"reason":""}`,
 		})
 		return jsonResponse(body), nil
 	})}
 
-	reply, err := adapter.GenerateReply(context.Background(), voice.ModelRequest{SalonID: "salon_1", SafeReply: "What phone number should we use?"})
+	reply, err := adapter.GenerateReply(context.Background(), voice.ModelRequest{SalonID: "salon_1", SafeReply: "What phone number should we use?", AITone: "natural_human"})
 	if err != nil {
 		t.Fatalf("GenerateReply returned error: %v", err)
 	}

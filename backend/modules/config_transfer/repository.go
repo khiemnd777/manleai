@@ -217,12 +217,12 @@ func (r *Repository) ApplyOnboardingImport(ctx context.Context, ownerUserID stri
 	settings := plan.Bundle.AIReceptionist
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO salon_settings (
-			salon_id, ai_greeting, ai_voice, booking_mode, recording_enabled,
+			salon_id, ai_greeting, ai_voice, ai_tone, booking_mode, recording_enabled,
 			recording_consent_message, sms_confirmation_enabled, sms_reminder_enabled,
 			reminder_hours_before, handoff_enabled
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	`, salonID, settings.AIGreeting, settings.AIVoice, plan.BookingMode, settings.RecordingEnabled, settings.RecordingConsentMessage, settings.SMSConfirmationEnabled, settings.SMSReminderEnabled, settings.ReminderHoursBefore, settings.HandoffEnabled); err != nil {
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`, salonID, settings.AIGreeting, settings.AIVoice, settings.AITone, plan.BookingMode, settings.RecordingEnabled, settings.RecordingConsentMessage, settings.SMSConfirmationEnabled, settings.SMSReminderEnabled, settings.ReminderHoursBefore, settings.HandoffEnabled); err != nil {
 		return "", "", false, err
 	}
 	if err := insertDefaultBusinessHours(ctx, tx, salonID); err != nil {
@@ -358,17 +358,18 @@ func (r *Repository) updateAIReceptionist(ctx context.Context, tx *sql.Tx, salon
 		UPDATE salon_settings
 		SET ai_greeting = $1,
 		    ai_voice = $2,
-		    booking_mode = $3,
-		    recording_enabled = $4,
-		    recording_consent_message = $5,
-		    sms_confirmation_enabled = $6,
-		    sms_reminder_enabled = $7,
-		    reminder_hours_before = $8,
-		    handoff_enabled = $9,
+		    ai_tone = $3,
+		    booking_mode = $4,
+		    recording_enabled = $5,
+		    recording_consent_message = $6,
+		    sms_confirmation_enabled = $7,
+		    sms_reminder_enabled = $8,
+		    reminder_hours_before = $9,
+		    handoff_enabled = $10,
 		    updated_at = now()
-		WHERE salon_id = $10
-		  AND EXISTS (SELECT 1 FROM salons WHERE salons.id = salon_settings.salon_id AND salons.owner_user_id = $11)
-	`, settings.AIGreeting, settings.AIVoice, bookingMode, settings.RecordingEnabled, settings.RecordingConsentMessage, settings.SMSConfirmationEnabled, settings.SMSReminderEnabled, settings.ReminderHoursBefore, settings.HandoffEnabled, salonID, ownerUserID)
+		WHERE salon_id = $11
+		  AND EXISTS (SELECT 1 FROM salons WHERE salons.id = salon_settings.salon_id AND salons.owner_user_id = $12)
+	`, settings.AIGreeting, settings.AIVoice, settings.AITone, bookingMode, settings.RecordingEnabled, settings.RecordingConsentMessage, settings.SMSConfirmationEnabled, settings.SMSReminderEnabled, settings.ReminderHoursBefore, settings.HandoffEnabled, salonID, ownerUserID)
 	if err != nil {
 		return err
 	}

@@ -115,6 +115,7 @@ func (a *Adapter) GenerateReply(ctx context.Context, req voice.ModelRequest) (vo
 			"If next_required_field is set, keep the response focused on that field.",
 			"Do not invent prices or policies.",
 			"Use knowledge_context only when it is relevant to the customer's question.",
+			toneInstruction(req.AITone),
 			"Do not say an appointment is confirmed unless booking_confirmed is true.",
 			"Do not mention POS providers, Square, Square Appointments, POS, or provider names in customer-facing replies.",
 			"For human requests, complaints, refunds, payment disputes, low confidence, or complex group bookings, route to the owner.",
@@ -259,6 +260,7 @@ func modelInput(req voice.ModelRequest) string {
 		"customer_message":      req.CustomerMessage,
 		"safe_reply":            req.SafeReply,
 		"salon_name":            req.SalonName,
+		"ai_tone":               normalizedAITone(req.AITone),
 		"booking_confirmed":     req.BookingConfirmed,
 		"fallback_or_handoff":   req.FallbackOrHandoff,
 		"missing_booking_field": req.MissingBookingField,
@@ -268,6 +270,28 @@ func modelInput(req voice.ModelRequest) string {
 		"knowledge_context":     req.KnowledgeContext,
 	})
 	return string(raw)
+}
+
+func toneInstruction(tone string) string {
+	switch normalizedAITone(tone) {
+	case "natural_human":
+		return "Use a natural, human spoken tone with light contractions and no scripted or robotic phrasing."
+	case "friendly_young":
+		return "Use a friendly, upbeat, younger-sounding tone while staying respectful, concise, and professional."
+	case "concise_calm":
+		return "Use a calm, concise tone with fewer filler words and direct next-step wording."
+	default:
+		return "Use a warm professional salon receptionist tone."
+	}
+}
+
+func normalizedAITone(tone string) string {
+	switch strings.TrimSpace(tone) {
+	case "natural_human", "friendly_young", "concise_calm":
+		return strings.TrimSpace(tone)
+	default:
+		return "professional_warm"
+	}
 }
 
 func filenameForContentType(contentType string) string {

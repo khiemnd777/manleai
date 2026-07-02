@@ -34,6 +34,7 @@ func (g *GuardedReplyGenerator) GenerateReply(ctx context.Context, req conversat
 		CustomerMessage:     req.CustomerMessage,
 		SafeReply:           req.SafeReply,
 		SalonName:           req.SalonName,
+		AITone:              req.AITone,
 		BookingConfirmed:    req.BookingConfirmed,
 		FallbackOrHandoff:   req.FallbackOrHandoff,
 		MissingBookingField: req.MissingBookingField,

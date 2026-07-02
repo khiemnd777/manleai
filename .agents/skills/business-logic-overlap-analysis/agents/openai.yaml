@@ -1,4 +1,4 @@
 interface:
   display_name: "Business Logic Overlap Analysis"
   short_description: "Find product-grade collisions in salon business rules"
-  default_prompt: "Use $business-logic-overlap-analysis to map overlapping rules, service-understanding ownership, idempotency gaps, duplicate risks, safe failure states, and tests before changing this workflow."
+  default_prompt: "Use $business-logic-overlap-analysis to map overlapping rules, service-understanding ownership, AI tone boundaries, idempotency gaps, duplicate risks, safe failure states, and tests before changing this workflow."

@@ -58,6 +58,7 @@ Every production page needs:
 - Do not hard-code operational data as the main behavior.
 - Do not claim AI booking is enabled until backend gate checks exist and pass.
 - Use exact POS-first wording: "Square Appointments" for current integration, "adapter architecture" for future providers.
+- AI tone belongs in Settings > AI receptionist as the controlled `ai_tone` speaking-style setting with backend-sourced value, save states, and preview copy. Do not place tone under Integrations > OpenAI or present it as model, voice, or provider setup.
 - Public catalog UI must never expose staff contact details, POS IDs, sync errors,
   owner identifiers, provider tokens, or web booking confirmation claims.
 

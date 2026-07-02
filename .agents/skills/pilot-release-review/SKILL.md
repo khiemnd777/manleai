@@ -31,8 +31,9 @@ Use this skill for code review, milestone review, or readiness checks.
 6. Missing POS error, sync log, booking attempt, audit, or notification records.
 7. Frontend UI that implies unavailable production behavior.
 8. Service-understanding drift: hardcoded salon keywords, aliases not scoped by salon, fuzzy matches selecting services, or missing transcript metadata for why a service was selected.
-9. Missing tests around critical booking/auth/POS/conversation-understanding paths.
-10. Documentation drift around env vars, API routes, or milestone scope.
+9. AI tone drift: style settings bypass backend-approved replies, alter booking/handoff/slot behavior, or are documented as provider config instead of salon settings.
+10. Missing tests around critical booking/auth/POS/conversation-understanding paths.
+11. Documentation drift around env vars, API routes, or milestone scope.
 
 ## Review Method
 

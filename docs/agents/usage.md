@@ -45,7 +45,7 @@ Use $salon-ops-workflow to analyze the owner/caller workflow before changing das
 ```
 
 ```txt
-Use $voice-ai-runtime to update service understanding, salon-scoped service aliases, name-slot repair, and conversation golden regressions.
+Use $voice-ai-runtime to update AI tone, service understanding, salon-scoped service aliases, name-slot repair, and conversation golden regressions.
 ```
 
 ## Subagents
@@ -70,10 +70,14 @@ Have pilot_release_planner split the next approval-loop slice into vertical back
 Have repo_mapper map service_aliases and owner corrections, then have frontend_product_reviewer check the AI Training apply-correction UI contract.
 ```
 
+```txt
+Have repo_mapper map ai_tone from Settings/API/config transfer through conversation and voice adapters, then have frontend_product_reviewer review the speaking-style UI contract.
+```
+
 ## Maintenance
 
 - Keep skills concise. Move long reference material into `docs/` or skill `references/`.
 - Update `CONTEXT.md` when domain terms become stable.
-- Update this inventory when new repo-local skill triggers, project agents, or domain source-of-truth tables such as `service_aliases` are added.
+- Update this inventory when new repo-local skill triggers, project agents, or domain source-of-truth tables/settings such as `service_aliases` or `salon_settings.ai_tone` are added.
 - Add ADRs when a decision should stop future agents from re-opening the same debate.
 - Prefer read-only subagents for review and exploration; let the parent agent make final edits.

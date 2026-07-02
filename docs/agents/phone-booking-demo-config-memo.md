@@ -25,6 +25,7 @@ Customer calls -> AI answers through Twilio -> customer asks for a booking -> AI
 - Square behavior: `docs/square-integration.md`
 - Voice/Twilio API: `docs/api.md`
 - POS boundary: `docs/pos-adapter-layer.md`
+- AI receptionist tone: `/dashboard/settings` and `GET/PUT /api/salons/:id/settings`
 
 ## Step 0 - Establish Current State
 
@@ -335,6 +336,14 @@ Readiness meaning:
 - LLM ready allows safe reply rewriting, but it must not override POS-first confirmation safety.
 - TTS ready allows Twilio `<Play>` audio responses.
 - Realtime ready enables Twilio Media Streams input mode when the Twilio tab also selects `realtime_stream`. Completed transcripts still go through the backend conversation engine and booking service; OpenAI Realtime must not confirm bookings on its own.
+
+AI receptionist speaking style is configured in Settings, not in the OpenAI tab.
+Use `/dashboard/settings` -> `AI receptionist` -> `Speaking style` to set
+`ai_tone`. Tone is passed into LLM reply requests when available, but it is
+style-only: it must not change required booking slots, handoff decisions,
+availability checks, or POS-first confirmation wording. Realtime should speak
+backend-approved replies and should not rely on independent realtime
+instructions for tone changes.
 
 If OpenAI is not configured, do not block the whole phone webhook demo. Use Twilio Gather / deterministic safe replies for initial testing.
 

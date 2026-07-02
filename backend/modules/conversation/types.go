@@ -105,6 +105,7 @@ type ReplyGenerationRequest struct {
 	CustomerMessage     string
 	SafeReply           string
 	SalonName           string
+	AITone              string
 	BookingConfirmed    bool
 	FallbackOrHandoff   bool
 	MissingBookingField string
@@ -132,6 +133,7 @@ type RuntimeConfig struct {
 	HandoffPhone   string
 	HandoffEnabled bool
 	AIGreeting     string
+	AITone         string
 }
 
 type ServiceOption struct {

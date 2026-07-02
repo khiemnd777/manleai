@@ -9,6 +9,14 @@ import (
 
 var ErrValidation = errors.New("validation failed")
 
+const (
+	DefaultAITone          = "professional_warm"
+	AIToneProfessionalWarm = "professional_warm"
+	AIToneNaturalHuman     = "natural_human"
+	AIToneFriendlyYoung    = "friendly_young"
+	AIToneConciseCalm      = "concise_calm"
+)
+
 type Service struct {
 	repo *Repository
 }
@@ -48,9 +56,13 @@ func (s *Service) GetSettings(ctx context.Context, salonID string, ownerUserID s
 func (s *Service) UpdateSettings(ctx context.Context, salonID string, ownerUserID string, req UpdateSettingsRequest) (*Settings, error) {
 	req.AIGreeting = strings.TrimSpace(req.AIGreeting)
 	req.AIVoice = defaultString(strings.TrimSpace(req.AIVoice), "professional_female")
+	req.AITone = defaultString(strings.TrimSpace(req.AITone), DefaultAITone)
 	req.BookingMode = defaultString(strings.TrimSpace(req.BookingMode), "pending_approval")
 	req.RecordingConsentMessage = strings.TrimSpace(req.RecordingConsentMessage)
 	if req.AIGreeting == "" || req.RecordingConsentMessage == "" || req.ReminderHoursBefore <= 0 {
+		return nil, ErrValidation
+	}
+	if !validAITone(req.AITone) {
 		return nil, ErrValidation
 	}
 	if req.BookingMode != "confirmed_booking" && req.BookingMode != "pending_approval" && req.BookingMode != "disabled" {
@@ -132,6 +144,15 @@ func defaultString(value string, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func validAITone(value string) bool {
+	switch strings.TrimSpace(value) {
+	case AIToneProfessionalWarm, AIToneNaturalHuman, AIToneFriendlyYoung, AIToneConciseCalm:
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizePublicSlug(value string) string {

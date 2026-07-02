@@ -30,6 +30,7 @@ transcript, handoff, call lifecycle, and voice booking work across Milestone 4+.
 - Booking Service calls `POSProvider`.
 - AI runtime must not call Square or read POS tokens.
 - Telephony, SMS, STT, LLM, TTS, and realtime audio must be provider abstractions.
+- AI receptionist tone is style-only salon runtime config. Read it from backend settings, pass it through provider-neutral request DTOs, and keep deterministic conversation guardrails authoritative before any LLM rewrite or audio synthesis.
 - Call archive, redaction, retention, and temporary audio outputs must preserve
   audit links while clearing customer PII and transcript/audio content when
   lifecycle rules require it.
@@ -44,6 +45,7 @@ transcript, handoff, call lifecycle, and voice booking work across Milestone 4+.
 - Use "starting at" when price varies by design, length, add-on, or technician.
 - Transfer to the owner for human requests, complaints, refunds, payment disputes, complex group bookings, and low confidence.
 - Never say a booking is confirmed unless POS booking succeeded.
+- Tone presets may make a safe reply more natural, human, young, concise, or warm, but must not change required questions, known-slot preservation, handoff decisions, availability checks, or POS confirmation boundaries. Realtime must speak backend-approved replies and must not use independent realtime instructions to bypass those rules.
 
 ## Implementation Flow
 
@@ -55,5 +57,6 @@ transcript, handoff, call lifecycle, and voice booking work across Milestone 4+.
    slot preservation, name-quality, terminal booking replies, and no provider
    leakage in customer-facing text.
 6. Wire Twilio/OpenAI/provider specifics behind adapters only.
-7. For realtime, retention, or audio-output changes, verify replay/idempotency,
+7. For AI tone changes, verify `salon_settings.ai_tone` flows into phone/LLM requests, legacy imports default safely, and tone-only changes do not alter booking, handoff, or service-understanding outcomes.
+8. For realtime, retention, or audio-output changes, verify replay/idempotency,
    signature checks, lifecycle gates, expiration, and redaction behavior.

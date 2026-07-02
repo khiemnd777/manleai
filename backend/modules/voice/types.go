@@ -124,6 +124,7 @@ type ModelRequest struct {
 	CustomerMessage     string
 	SafeReply           string
 	SalonName           string
+	AITone              string
 	BookingConfirmed    bool
 	FallbackOrHandoff   bool
 	MissingBookingField string

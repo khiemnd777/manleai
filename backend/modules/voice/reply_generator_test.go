@@ -23,19 +23,24 @@ func TestGuardedReplyGeneratorRejectsUnsafeConfirmation(t *testing.T) {
 }
 
 func TestGuardedReplyGeneratorAcceptsOneQuestionPhoneReply(t *testing.T) {
-	generator := NewGuardedReplyGenerator(&fakeLanguageModelProvider{
+	provider := &fakeLanguageModelProvider{
 		reply: ModelReply{Message: "What phone number should we use?", Confidence: 0.9},
-	})
+	}
+	generator := NewGuardedReplyGenerator(provider)
 
 	reply, err := generator.GenerateReply(context.Background(), conversation.ReplyGenerationRequest{
 		Channel:   conversation.ChannelPhone,
 		SafeReply: "What phone number should we use?",
+		AITone:    "natural_human",
 	})
 	if err != nil {
 		t.Fatalf("GenerateReply returned error: %v", err)
 	}
 	if reply.Message != "What phone number should we use?" {
 		t.Fatalf("message = %q", reply.Message)
+	}
+	if provider.req.AITone != "natural_human" {
+		t.Fatalf("model request tone = %q, want natural_human", provider.req.AITone)
 	}
 }
 
@@ -86,6 +91,7 @@ func TestGuardedReplyGeneratorSkipsSimulatorChannel(t *testing.T) {
 
 type fakeLanguageModelProvider struct {
 	reply ModelReply
+	req   ModelRequest
 }
 
 func (f *fakeLanguageModelProvider) Name() string {
@@ -97,5 +103,6 @@ func (f *fakeLanguageModelProvider) Configured(ctx context.Context, salonID stri
 }
 
 func (f *fakeLanguageModelProvider) GenerateReply(ctx context.Context, req ModelRequest) (ModelReply, error) {
+	f.req = req
 	return f.reply, nil
 }

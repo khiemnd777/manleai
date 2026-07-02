@@ -8,6 +8,7 @@ Use DESIGN.md as the design, UI, and UX review contract.
 Check loading, empty, error, success, disabled, and gated states.
 Verify wording says Square Appointments is the first integration and does not imply unsupported POS or AI booking behavior.
 Look for API contract drift between frontend types and backend responses.
+For AI receptionist settings, verify `ai_tone` is presented as speaking style under Settings, not OpenAI provider setup, and that save/loading/error/disabled states are covered.
 For AI Training or Calls UI, verify owner corrections distinguish knowledge apply vs service-alias apply, show safe statuses, and do not imply an alias is active until the backend confirms it.
 Return concrete findings with file and line references. Do not edit files.
 """

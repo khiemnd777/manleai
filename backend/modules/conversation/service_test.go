@@ -735,6 +735,41 @@ func TestMessageUsesVoiceCallBookingSourceForPhoneSessions(t *testing.T) {
 	}
 }
 
+func TestApplyReplyGeneratorIncludesAITone(t *testing.T) {
+	store := newFakeConversationStore()
+	service := NewService(store, &fakeBookingTool{})
+	replyGenerator := &fakeReplyGenerator{message: "What time works best?"}
+	service.SetReplyGenerator(replyGenerator)
+	session := store.session
+	session.Channel = ChannelPhone
+	cfg := store.cfg
+	cfg.AITone = "friendly_young"
+	turn := TurnRecord{
+		SalonID:         "salon_1",
+		OwnerUserID:     "owner_1",
+		Session:         session,
+		CustomerMessage: "Tomorrow",
+		AIMessage:       "What time works for that day?",
+		Update: SessionUpdate{
+			Status:  StatusActive,
+			Intent:  IntentBooking,
+			Outcome: OutcomeCollecting,
+		},
+	}
+
+	service.applyReplyGenerator(context.Background(), &turn, session, &cfg, "requested_time", "requested_time", nil)
+
+	if replyGenerator.calls != 1 {
+		t.Fatalf("reply generator calls = %d, want 1", replyGenerator.calls)
+	}
+	if replyGenerator.lastRequest.AITone != "friendly_young" {
+		t.Fatalf("AI tone = %q, want friendly_young", replyGenerator.lastRequest.AITone)
+	}
+	if turn.AIMessage != "What time works best?" {
+		t.Fatalf("AI message = %q", turn.AIMessage)
+	}
+}
+
 func TestMessageOffersAvailableSlotsBeforeBooking(t *testing.T) {
 	store := newFakeConversationStore()
 	bookingTool := &fakeBookingTool{
@@ -2439,12 +2474,14 @@ type fakeConversationStore struct {
 }
 
 type fakeReplyGenerator struct {
-	calls   int
-	message string
+	calls       int
+	message     string
+	lastRequest ReplyGenerationRequest
 }
 
 func (f *fakeReplyGenerator) GenerateReply(ctx context.Context, req ReplyGenerationRequest) (ReplyGenerationResult, error) {
 	f.calls++
+	f.lastRequest = req
 	return ReplyGenerationResult{Message: f.message, Confidence: 0.9}, nil
 }
 

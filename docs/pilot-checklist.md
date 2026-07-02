@@ -63,6 +63,7 @@
 - [x] Add provider adapters for external STT, LLM, and TTS behind `modules/voice` interfaces.
 - [x] Keep Twilio-specific webhook validation and TwiML response logic outside the conversation engine.
 - [x] Add AI reply guardrails for one-question-at-a-time turns, low confidence, human requests, complaints, refunds, payment disputes, and complex group bookings.
+- [x] Add salon-scoped AI receptionist tone presets that flow from Settings through phone/LLM reply generation without changing booking guardrails.
 - [x] Keep confirmed wording impossible unless `booking.Service` returns a POS-confirmed booking attempt, POS booking ID, and appointment.
 - [x] Add fallback and owner-handoff behavior when STT, LLM, TTS, or POS calls fail.
 - [x] Add Calls dashboard readiness for external STT, LLM, and TTS provider configuration.

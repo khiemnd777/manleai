@@ -61,6 +61,7 @@ type SalonFormState = {
 type SettingsFormState = {
   aiGreeting: string;
   aiVoice: string;
+  aiTone: string;
   bookingMode: string;
   recordingEnabled: boolean;
   recordingConsentMessage: string;
@@ -76,6 +77,29 @@ type PublicCatalogFormState = {
 };
 
 const dayLabels = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+const aiToneOptions = [
+  {
+    value: "professional_warm",
+    label: "Professional warm",
+    preview: "Thanks for calling Lotus Nails Studio. How can I help today?"
+  },
+  {
+    value: "natural_human",
+    label: "Natural human",
+    preview: "Thanks for calling Lotus Nails Studio. How can I help you today?"
+  },
+  {
+    value: "friendly_young",
+    label: "Friendly young",
+    preview: "Hi, thanks for calling Lotus Nails Studio. How can I help today?"
+  },
+  {
+    value: "concise_calm",
+    label: "Concise calm",
+    preview: "Thanks for calling Lotus Nails Studio. How can I help?"
+  }
+];
 
 export function SettingsDashboard() {
   const [salon, setSalon] = useState<Salon | null>(null);
@@ -218,6 +242,7 @@ export function SettingsDashboard() {
         body: JSON.stringify({
           ai_greeting: settingsForm.aiGreeting,
           ai_voice: settingsForm.aiVoice,
+          ai_tone: settingsForm.aiTone,
           booking_mode: settingsForm.bookingMode,
           recording_enabled: settingsForm.recordingEnabled,
           recording_consent_message: settingsForm.recordingConsentMessage,
@@ -836,7 +861,7 @@ function AISettingsForm({
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
         <div>
           <CardTitle>AI receptionist</CardTitle>
-          <CardDescription>Call greeting, recording consent, handoff, SMS, and owner approval behavior.</CardDescription>
+          <CardDescription>Call greeting, speaking style, recording consent, handoff, SMS, and owner approval behavior.</CardDescription>
         </div>
         <Badge value={aiEnabled ? "active" : "ai_disabled"} className="self-start" />
       </div>
@@ -866,6 +891,23 @@ function AISettingsForm({
         </Field>
         <Field label="Voice">
           <TextInput value={form.aiVoice} disabled={busy} onChange={(value) => onChange({ ...form, aiVoice: value })} />
+        </Field>
+        <Field label="Speaking style">
+          <select
+            className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-50 disabled:text-slate-400"
+            value={form.aiTone}
+            onChange={(event) => onChange({ ...form, aiTone: event.target.value })}
+            disabled={busy}
+          >
+            {aiToneOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <div className="mt-3 rounded-md border border-line bg-slate-50 px-3 py-2 text-xs leading-5 text-muted">
+            <span className="font-semibold text-ink">Style preview:</span> {tonePreview(form.aiTone)}
+          </div>
         </Field>
         <Field label="Booking mode">
           <select
@@ -1139,6 +1181,7 @@ function emptySettingsForm(): SettingsFormState {
   return {
     aiGreeting: "",
     aiVoice: "professional_female",
+    aiTone: "professional_warm",
     bookingMode: "pending_approval",
     recordingEnabled: true,
     recordingConsentMessage: "",
@@ -1160,6 +1203,7 @@ function settingsToForm(settings: SalonSettings): SettingsFormState {
   return {
     aiGreeting: settings.ai_greeting || "",
     aiVoice: settings.ai_voice || "professional_female",
+    aiTone: settings.ai_tone || "professional_warm",
     bookingMode: settings.booking_mode || "pending_approval",
     recordingEnabled: settings.recording_enabled,
     recordingConsentMessage: settings.recording_consent_message || "",
@@ -1168,6 +1212,10 @@ function settingsToForm(settings: SalonSettings): SettingsFormState {
     reminderHoursBefore: String(settings.reminder_hours_before || 24),
     handoffEnabled: settings.handoff_enabled
   };
+}
+
+function tonePreview(value: string) {
+  return aiToneOptions.find((option) => option.value === value)?.preview ?? aiToneOptions[0].preview;
 }
 
 function publicCatalogToForm(settings: PublicCatalogSettings): PublicCatalogFormState {

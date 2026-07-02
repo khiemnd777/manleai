@@ -104,6 +104,7 @@
 - Verify AI-generated confirmed wording appears only after POS-confirmed booking success with POS booking ID and appointment.
 - Verify POS failure after an AI-generated phone turn produces pending request wording and no confirmed appointment language.
 - Verify prompt and model tests cover human requests, complaints, refunds, payment disputes, complex group bookings, missing fields, low confidence, AI-disabled state, and POS fallback.
+- Verify AI tone presets change only spoken reply style and do not weaken one-question, known-slot preservation, handoff, or POS-first confirmation guardrails.
 - Verify the Calls dashboard handles loading, empty, error, success, and gated states for external AI voice provider readiness.
 
 ## Milestone 7A Knowledge And Owner Corrections

@@ -55,6 +55,7 @@ type Settings struct {
 	SalonID                 string    `json:"salon_id"`
 	AIGreeting              string    `json:"ai_greeting"`
 	AIVoice                 string    `json:"ai_voice"`
+	AITone                  string    `json:"ai_tone"`
 	BookingMode             string    `json:"booking_mode"`
 	RecordingEnabled        bool      `json:"recording_enabled"`
 	RecordingConsentMessage string    `json:"recording_consent_message"`
@@ -69,6 +70,7 @@ type Settings struct {
 type UpdateSettingsRequest struct {
 	AIGreeting              string `json:"ai_greeting"`
 	AIVoice                 string `json:"ai_voice"`
+	AITone                  string `json:"ai_tone"`
 	BookingMode             string `json:"booking_mode"`
 	RecordingEnabled        bool   `json:"recording_enabled"`
 	RecordingConsentMessage string `json:"recording_consent_message"`
