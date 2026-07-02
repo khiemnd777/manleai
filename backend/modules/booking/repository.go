@@ -1089,7 +1089,7 @@ func (r *Repository) LatestTestBooking(ctx context.Context, salonID string, owne
 	return &item, nil
 }
 
-func (r *Repository) ListAppointments(ctx context.Context, salonID string, ownerUserID string, limit int) ([]Appointment, error) {
+func (r *Repository) ListAppointments(ctx context.Context, salonID string, ownerUserID string, limit int, offset int) ([]Appointment, error) {
 	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
 	}
@@ -1099,9 +1099,10 @@ func (r *Repository) ListAppointments(ctx context.Context, salonID string, owner
 		       COALESCE(staff_id::text, ''), COALESCE(staff_selection_mode, 'specific'), start_time, end_time, COALESCE(notes, ''), created_at, updated_at
 		FROM appointments
 		WHERE salon_id = $1
-		ORDER BY start_time DESC
+		ORDER BY start_time DESC, id DESC
 		LIMIT $2
-	`, salonID, limit)
+		OFFSET $3
+	`, salonID, limit, offset)
 	if err != nil {
 		return nil, err
 	}

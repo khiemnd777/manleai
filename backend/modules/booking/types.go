@@ -140,6 +140,13 @@ type Appointment struct {
 	UpdatedAt             time.Time                `json:"updated_at"`
 }
 
+type ListAppointmentsResponse struct {
+	Appointments []Appointment `json:"appointments"`
+	Limit        int           `json:"limit"`
+	Offset       int           `json:"offset"`
+	HasMore      bool          `json:"has_more"`
+}
+
 type ServiceRef struct {
 	ID                string
 	POSProvider       string

@@ -24,7 +24,8 @@ var (
 
 type Store interface {
 	EnsureSalonOwner(ctx context.Context, salonID string, ownerUserID string) error
-	ListCustomers(ctx context.Context, salonID string, ownerUserID string, limit int) ([]Record, error)
+	ListCustomers(ctx context.Context, salonID string, ownerUserID string, limit int, offset int) ([]Record, error)
+	CustomerSummary(ctx context.Context, salonID string, ownerUserID string) (Summary, error)
 	CreateCustomer(ctx context.Context, salonID string, ownerUserID string, input Mutation) (*Record, error)
 	UpdateCustomer(ctx context.Context, salonID string, ownerUserID string, customerID string, input Mutation) (*Record, error)
 	ArchiveCustomer(ctx context.Context, salonID string, ownerUserID string, customerID string) (*Record, error)
@@ -61,6 +62,8 @@ type Record struct {
 
 type Summary struct {
 	TotalKnownCustomers    int        `json:"total_known_customers"`
+	ActiveCustomers        int        `json:"active_customers"`
+	POSLinkedCustomers     int        `json:"pos_linked_customers"`
 	ConfirmedAppointments  int        `json:"confirmed_appointments"`
 	PendingRequests        int        `json:"pending_requests"`
 	CustomersWithCalls     int        `json:"customers_with_calls"`
@@ -70,6 +73,9 @@ type Summary struct {
 type ListResponse struct {
 	Customers []Record `json:"customers"`
 	Summary   Summary  `json:"summary"`
+	Limit     int      `json:"limit"`
+	Offset    int      `json:"offset"`
+	HasMore   bool     `json:"has_more"`
 }
 
 type WriteRequest struct {

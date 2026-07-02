@@ -9,6 +9,67 @@ import (
 	"github.com/manleai/ai-receptionist/modules/pos"
 )
 
+func TestAppointmentsReturnsPaginationMetadata(t *testing.T) {
+	store := newFakeStore()
+	store.appointments = make([]Appointment, 201)
+	for i := range store.appointments {
+		store.appointments[i] = Appointment{ID: "appointment_1"}
+	}
+	service := NewService(store, nil)
+
+	res, err := service.Appointments(context.Background(), "salon_1", "owner_1", 500, 30)
+	if err != nil {
+		t.Fatalf("Appointments returned error: %v", err)
+	}
+	if len(res.Appointments) != 200 {
+		t.Fatalf("appointments = %d, want 200", len(res.Appointments))
+	}
+	if res.Limit != 200 {
+		t.Fatalf("response limit = %d, want 200", res.Limit)
+	}
+	if res.Offset != 30 {
+		t.Fatalf("response offset = %d, want 30", res.Offset)
+	}
+	if !res.HasMore {
+		t.Fatal("has_more = false, want true")
+	}
+	if store.listAppointmentLimit != 201 {
+		t.Fatalf("store limit = %d, want 201", store.listAppointmentLimit)
+	}
+	if store.listAppointmentOffset != 30 {
+		t.Fatalf("store offset = %d, want 30", store.listAppointmentOffset)
+	}
+}
+
+func TestAppointmentsDefaultsPagination(t *testing.T) {
+	store := newFakeStore()
+	store.appointments = []Appointment{{ID: "appointment_1"}}
+	service := NewService(store, nil)
+
+	res, err := service.Appointments(context.Background(), "salon_1", "owner_1", 0, -10)
+	if err != nil {
+		t.Fatalf("Appointments returned error: %v", err)
+	}
+	if len(res.Appointments) != 1 {
+		t.Fatalf("appointments = %d, want 1", len(res.Appointments))
+	}
+	if res.Limit != 50 {
+		t.Fatalf("response limit = %d, want 50", res.Limit)
+	}
+	if res.Offset != 0 {
+		t.Fatalf("response offset = %d, want 0", res.Offset)
+	}
+	if res.HasMore {
+		t.Fatal("has_more = true, want false")
+	}
+	if store.listAppointmentLimit != 51 {
+		t.Fatalf("store limit = %d, want 51", store.listAppointmentLimit)
+	}
+	if store.listAppointmentOffset != 0 {
+		t.Fatalf("store offset = %d, want 0", store.listAppointmentOffset)
+	}
+}
+
 func TestCreateStoresConfirmedBookingOnlyAfterPOSSuccess(t *testing.T) {
 	store := newFakeStore()
 	provider := &fakeProvider{
@@ -1052,22 +1113,25 @@ func testStartTime() time.Time {
 }
 
 type fakeStore struct {
-	service         ServiceRef
-	services        []ServiceRef
-	staff           StaffRef
-	staffRefs       []StaffRef
-	customer        CustomerRef
-	schedule        Schedule
-	appointment     AppointmentActionRef
-	pending         *PendingBookingRecord
-	confirmed       *ConfirmedBookingRecord
-	fallback        *FallbackBookingRecord
-	pendingAction   *PendingAppointmentActionRecord
-	rescheduled     *RescheduledAppointmentRecord
-	cancelled       *CancelledAppointmentRecord
-	actionFallback  *AppointmentActionFallbackRecord
-	linkedCustomer  *CustomerRef
-	linkCustomerErr error
+	service               ServiceRef
+	services              []ServiceRef
+	staff                 StaffRef
+	staffRefs             []StaffRef
+	customer              CustomerRef
+	schedule              Schedule
+	appointment           AppointmentActionRef
+	pending               *PendingBookingRecord
+	confirmed             *ConfirmedBookingRecord
+	fallback              *FallbackBookingRecord
+	pendingAction         *PendingAppointmentActionRecord
+	rescheduled           *RescheduledAppointmentRecord
+	cancelled             *CancelledAppointmentRecord
+	actionFallback        *AppointmentActionFallbackRecord
+	appointments          []Appointment
+	listAppointmentLimit  int
+	listAppointmentOffset int
+	linkedCustomer        *CustomerRef
+	linkCustomerErr       error
 }
 
 func newFakeStore() *fakeStore {
@@ -1389,8 +1453,10 @@ func (f *fakeStore) LatestTestBooking(ctx context.Context, salonID string, owner
 	return nil, pos.ErrNotFound
 }
 
-func (f *fakeStore) ListAppointments(ctx context.Context, salonID string, ownerUserID string, limit int) ([]Appointment, error) {
-	return nil, nil
+func (f *fakeStore) ListAppointments(ctx context.Context, salonID string, ownerUserID string, limit int, offset int) ([]Appointment, error) {
+	f.listAppointmentLimit = limit
+	f.listAppointmentOffset = offset
+	return f.appointments, nil
 }
 
 func (f *fakeStore) ListBookingAttempts(ctx context.Context, salonID string, ownerUserID string, limit int) ([]BookingAttempt, error) {

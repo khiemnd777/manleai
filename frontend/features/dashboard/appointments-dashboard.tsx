@@ -7,6 +7,8 @@ import {
   CalendarClock,
   CalendarPlus,
   CalendarSearch,
+  ChevronLeft,
+  ChevronRight,
   ClipboardList,
   RefreshCcw,
   X
@@ -52,6 +54,9 @@ type StatusResponse = {
 
 type AppointmentsResponse = {
   appointments: AppointmentRecord[];
+  limit?: number;
+  offset?: number;
+  has_more?: boolean;
 };
 
 type AttemptsResponse = {
@@ -86,10 +91,19 @@ type ActionNotice = {
   message: string;
 };
 
+const defaultAppointmentPageSize = 10;
+const appointmentPageSizeOptions = [10, 25, 50] as const;
+const appointmentOverviewLimit = 200;
+
 export function AppointmentsDashboard() {
   const [salon, setSalon] = useState<Salon | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [appointments, setAppointments] = useState<AppointmentRecord[]>([]);
+  const [appointmentRows, setAppointmentRows] = useState<AppointmentRecord[]>([]);
+  const [appointmentLimit, setAppointmentLimit] = useState(defaultAppointmentPageSize);
+  const [appointmentOffset, setAppointmentOffset] = useState(0);
+  const [appointmentHasMore, setAppointmentHasMore] = useState(false);
+  const [appointmentOverviewHasMore, setAppointmentOverviewHasMore] = useState(false);
   const [attempts, setAttempts] = useState<BookingAttempt[]>([]);
   const [services, setServices] = useState<POSService[]>([]);
   const [staff, setStaff] = useState<POSStaffMember[]>([]);
@@ -101,6 +115,7 @@ export function AppointmentsDashboard() {
   const [availabilityError, setAvailabilityError] = useState("");
   const [availabilityChecked, setAvailabilityChecked] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [appointmentListLoading, setAppointmentListLoading] = useState(false);
   const [error, setError] = useState("");
   const [actionMode, setActionMode] = useState<AppointmentActionMode | null>(null);
   const [selectedAppointment, setSelectedAppointment] = useState<AppointmentRecord | null>(null);
@@ -115,10 +130,54 @@ export function AppointmentsDashboard() {
   const [actionError, setActionError] = useState("");
   const [actionNotice, setActionNotice] = useState<ActionNotice | null>(null);
 
-  async function load({ silent = false }: { silent?: boolean } = {}) {
+  function appointmentListPath(salonID: string, limit: number, offset: number) {
+    const params = new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset)
+    });
+    return `/api/salons/${salonID}/appointments?${params.toString()}`;
+  }
+
+  async function fetchAppointmentPage(salonID: string, limit: number, offset: number) {
+    return apiRequest<AppointmentsResponse>(appointmentListPath(salonID, limit, offset));
+  }
+
+  async function fetchAppointmentPageWithFallback(salonID: string, limit: number, offset: number) {
+    let response = await fetchAppointmentPage(salonID, limit, offset);
+    if (response.appointments.length === 0 && offset > 0) {
+      const previousOffset = Math.max(0, offset - limit);
+      response = await fetchAppointmentPage(salonID, limit, previousOffset);
+    }
+    return response;
+  }
+
+  function applyAppointmentPage(response: AppointmentsResponse, requestedLimit: number, requestedOffset: number) {
+    setAppointmentRows(response.appointments);
+    setAppointmentLimit(response.limit ?? requestedLimit);
+    setAppointmentOffset(response.offset ?? requestedOffset);
+    setAppointmentHasMore(Boolean(response.has_more));
+  }
+
+  async function reloadAppointmentRows(salonID: string, offset = appointmentOffset, limit = appointmentLimit) {
+    setAppointmentListLoading(true);
+    try {
+      const response = await fetchAppointmentPageWithFallback(salonID, limit, offset);
+      applyAppointmentPage(response, limit, offset);
+    } finally {
+      setAppointmentListLoading(false);
+    }
+  }
+
+  async function load({
+    silent = false,
+    offset = appointmentOffset,
+    limit = appointmentLimit
+  }: { silent?: boolean; offset?: number; limit?: number } = {}) {
     setError("");
     if (!silent) {
       setLoading(true);
+    } else {
+      setAppointmentListLoading(true);
     }
     try {
       const salonResponse = await apiRequest<SalonListResponse>("/api/salons");
@@ -127,6 +186,9 @@ export function AppointmentsDashboard() {
       if (!firstSalon) {
         setStatus(null);
         setAppointments([]);
+        setAppointmentRows([]);
+        setAppointmentHasMore(false);
+        setAppointmentOverviewHasMore(false);
         setAttempts([]);
         setServices([]);
         setStaff([]);
@@ -136,13 +198,16 @@ export function AppointmentsDashboard() {
       const [statusResponse, appointmentResponse, attemptResponse, serviceResponse, staffResponse] =
         await Promise.all([
           apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
-          apiRequest<AppointmentsResponse>(`/api/salons/${firstSalon.id}/appointments?limit=50`),
+          fetchAppointmentPageWithFallback(firstSalon.id, limit, offset),
           apiRequest<AttemptsResponse>(`/api/salons/${firstSalon.id}/booking-attempts?limit=50`),
           apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
           apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`)
         ]);
+      const overviewResponse = await fetchAppointmentPage(firstSalon.id, appointmentOverviewLimit, 0);
       setStatus(statusResponse);
-      setAppointments(appointmentResponse.appointments);
+      applyAppointmentPage(appointmentResponse, limit, offset);
+      setAppointments(overviewResponse.appointments);
+      setAppointmentOverviewHasMore(Boolean(overviewResponse.has_more));
       setAttempts(attemptResponse.booking_attempts);
       setServices(serviceResponse.services);
       setStaff(staffResponse.staff);
@@ -152,6 +217,8 @@ export function AppointmentsDashboard() {
     } finally {
       if (!silent) {
         setLoading(false);
+      } else {
+        setAppointmentListLoading(false);
       }
     }
   }
@@ -196,10 +263,16 @@ export function AppointmentsDashboard() {
   );
   const upcomingCount = useMemo(() => {
     const now = Date.now();
-    return appointments.filter((item) => item.status !== "cancelled" && new Date(item.start_time).getTime() >= now)
-      .length;
-  }, [appointments]);
-  const confirmedCount = appointments.filter((item) => item.status === "confirmed").length;
+    return appointmentCountLabel(
+      appointments.filter((item) => item.status !== "cancelled" && new Date(item.start_time).getTime() >= now)
+        .length,
+      appointmentOverviewHasMore
+    );
+  }, [appointments, appointmentOverviewHasMore]);
+  const confirmedCount = appointmentCountLabel(
+    appointments.filter((item) => item.status === "confirmed").length,
+    appointmentOverviewHasMore
+  );
   const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
   const readyForAvailability = bookingPathReady(status) && bookableServices.length > 0;
   const readyForManualBooking = readyForAvailability && bookableStaff.length > 0;
@@ -260,6 +333,31 @@ export function AppointmentsDashboard() {
     setCheckingActionAvailability(false);
     setActionAvailabilityError("");
     updateActionForm({ selectedSlotKey: "" });
+  }
+
+  function updateAppointmentPageSize(limit: number) {
+    setAppointmentLimit(limit);
+    setAppointmentOffset(0);
+    if (salon) {
+      void reloadAppointmentRows(salon.id, 0, limit);
+    }
+  }
+
+  function goToPreviousAppointmentPage() {
+    const previousOffset = Math.max(0, appointmentOffset - appointmentLimit);
+    setAppointmentOffset(previousOffset);
+    if (salon) {
+      void reloadAppointmentRows(salon.id, previousOffset, appointmentLimit);
+    }
+  }
+
+  function goToNextAppointmentPage() {
+    if (!appointmentHasMore) return;
+    const nextOffset = appointmentOffset + appointmentLimit;
+    setAppointmentOffset(nextOffset);
+    if (salon) {
+      void reloadAppointmentRows(salon.id, nextOffset, appointmentLimit);
+    }
   }
 
   function openCreateBooking() {
@@ -526,7 +624,7 @@ export function AppointmentsDashboard() {
             <CalendarPlus className="h-4 w-4" />
             New booking
           </Button>
-          <Button type="button" variant="secondary" onClick={() => void load()}>
+          <Button type="button" variant="secondary" onClick={() => void load({ silent: true })}>
             <RefreshCcw className="h-4 w-4" />
             Refresh
           </Button>
@@ -567,8 +665,8 @@ export function AppointmentsDashboard() {
       ) : null}
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <Metric label="POS-confirmed appointments" value={String(confirmedCount)} />
-        <Metric label="Upcoming" value={String(upcomingCount)} />
+        <Metric label="POS-confirmed appointments" value={confirmedCount} />
+        <Metric label="Upcoming" value={upcomingCount} />
         <Metric label="Pending requests" value={String(pendingRequests.length)} />
         <Metric label="Last Square sync" value={formatOptionalDate(status?.connection.last_sync_at)} />
       </div>
@@ -701,6 +799,12 @@ export function AppointmentsDashboard() {
           <Badge value={appointments.length > 0 ? "active" : "disabled"} />
         </div>
 
+        {appointmentListLoading ? (
+          <div className="mt-4 rounded-md border border-line bg-slate-50 px-3 py-2 text-sm text-muted">
+            Loading POS-confirmed appointments...
+          </div>
+        ) : null}
+
         {appointments.length === 0 ? (
           <EmptyState
             icon={<CalendarClock className="h-5 w-5 text-muted" />}
@@ -719,7 +823,18 @@ export function AppointmentsDashboard() {
           </EmptyState>
         ) : (
           <>
-            <div className="mt-5 hidden overflow-x-auto rounded-md border border-line lg:block">
+            <AppointmentPaginationControls
+              className="mt-5"
+              count={appointmentRows.length}
+              limit={appointmentLimit}
+              offset={appointmentOffset}
+              hasMore={appointmentHasMore}
+              busy={appointmentListLoading || savingAction}
+              onPrevious={goToPreviousAppointmentPage}
+              onNext={goToNextAppointmentPage}
+              onLimitChange={updateAppointmentPageSize}
+            />
+            <div className="mt-3 hidden overflow-x-auto rounded-md border border-line lg:block">
               <table className="w-full min-w-[1220px] text-left text-sm">
                 <thead className="bg-slate-50 text-xs uppercase text-muted">
                   <tr>
@@ -734,7 +849,7 @@ export function AppointmentsDashboard() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-line bg-white">
-                  {appointments.map((item) => (
+                  {appointmentRows.map((item) => (
                     <tr key={item.id}>
                       <td className="px-4 py-3">
                         <div className="font-medium text-ink">{formatDate(item.start_time, salon.timezone)}</div>
@@ -768,7 +883,7 @@ export function AppointmentsDashboard() {
               </table>
             </div>
             <div className="mt-5 space-y-3 lg:hidden">
-              {appointments.map((item) => (
+              {appointmentRows.map((item) => (
                 <AppointmentCard
                   key={item.id}
                   item={item}
@@ -782,6 +897,17 @@ export function AppointmentsDashboard() {
                 />
               ))}
             </div>
+            <AppointmentPaginationControls
+              className="mt-4"
+              count={appointmentRows.length}
+              limit={appointmentLimit}
+              offset={appointmentOffset}
+              hasMore={appointmentHasMore}
+              busy={appointmentListLoading || savingAction}
+              onPrevious={goToPreviousAppointmentPage}
+              onNext={goToNextAppointmentPage}
+              onLimitChange={updateAppointmentPageSize}
+            />
           </>
         )}
       </Card>
@@ -1412,6 +1538,80 @@ function AppointmentActions({
       </Button>
     </div>
   );
+}
+
+function AppointmentPaginationControls({
+  className = "",
+  count,
+  limit,
+  offset,
+  hasMore,
+  busy,
+  onPrevious,
+  onNext,
+  onLimitChange
+}: {
+  className?: string;
+  count: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+  busy: boolean;
+  onPrevious: () => void;
+  onNext: () => void;
+  onLimitChange: (limit: number) => void;
+}) {
+  const page = Math.floor(offset / limit) + 1;
+
+  return (
+    <div
+      className={`flex flex-col gap-3 rounded-md border border-line bg-slate-50 px-3 py-3 sm:flex-row sm:items-center sm:justify-between ${className}`}
+    >
+      <div className="text-sm leading-6 text-muted">{appointmentRangeLabel(count, offset, hasMore)}</div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        <label className="flex items-center gap-2 text-sm text-muted">
+          Rows per page
+          <select
+            className="h-9 rounded-md border border-line bg-white px-2 text-sm font-medium text-ink outline-none focus:border-brand disabled:text-slate-400"
+            value={limit}
+            onChange={(event) => onLimitChange(Number(event.target.value))}
+            disabled={busy}
+          >
+            {appointmentPageSizeOptions.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="flex items-center gap-2">
+          <Button type="button" variant="secondary" className="h-9 px-3" onClick={onPrevious} disabled={busy || offset === 0}>
+            <ChevronLeft className="h-4 w-4" />
+            Previous
+          </Button>
+          <span className="min-w-16 text-center text-sm font-semibold text-ink">Page {page}</span>
+          <Button type="button" variant="secondary" className="h-9 px-3" onClick={onNext} disabled={busy || !hasMore}>
+            Next
+            <ChevronRight className="h-4 w-4" />
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function appointmentRangeLabel(count: number, offset: number, hasMore: boolean) {
+  if (count === 0) {
+    return "No POS-confirmed appointments";
+  }
+  const start = offset + 1;
+  const end = offset + count;
+  const total = hasMore ? `at least ${end + 1}` : String(end);
+  return `Showing ${start}-${end} of ${total} POS-confirmed appointments`;
+}
+
+function appointmentCountLabel(count: number, hasMore: boolean) {
+  return hasMore ? `${count}+` : String(count);
 }
 
 function DateControls({

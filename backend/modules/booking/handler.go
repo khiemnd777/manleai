@@ -65,14 +65,14 @@ func (h *Handler) Availability(c *fiber.Ctx) error {
 }
 
 func (h *Handler) Appointments(c *fiber.Ctx) error {
-	items, err := h.service.Appointments(c.UserContext(), c.Params("id"), middleware.UserID(c), parseLimit(c.Query("limit")))
+	res, err := h.service.Appointments(c.UserContext(), c.Params("id"), middleware.UserID(c), parseLimit(c.Query("limit")), parseOffset(c.Query("offset")))
 	if errors.Is(err, pos.ErrNotFound) {
 		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "APPOINTMENTS_FAILED", "Could not load appointments.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"appointments": items})
+	return respond.JSON(c, fiber.StatusOK, res)
 }
 
 func (h *Handler) Reschedule(c *fiber.Ctx) error {
@@ -139,4 +139,9 @@ func (h *Handler) Attempts(c *fiber.Ctx) error {
 func parseLimit(raw string) int {
 	limit, _ := strconv.Atoi(raw)
 	return limit
+}
+
+func parseOffset(raw string) int {
+	offset, _ := strconv.Atoi(raw)
+	return offset
 }

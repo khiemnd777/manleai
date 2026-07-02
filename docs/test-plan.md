@@ -48,6 +48,8 @@
 - Verify AI booking enablement is not blocked by optional Square test booking create/cancel state once Square connection, location, sync, bookable service/staff, and business hours readiness pass.
 - Verify the dashboard Integrations page handles loading, empty, error, success, disabled/gated, and mobile states for Square readiness.
 - Verify the dashboard Appointments page distinguishes POS-confirmed appointments from `fallback_pending` requests that need owner review.
+- Verify POS-confirmed appointment pagination returns stable `limit`, `offset`, and `has_more` metadata without changing calendar-day or metric data to the current page slice.
+- Verify customer record pagination returns stable `limit`, `offset`, and `has_more` metadata without changing customer summary metrics to the current page slice.
 - Verify the dashboard Services and Staff pages let owners allow/block AI booking for active synced records without editing Square data.
 - Verify inactive synced services/staff cannot be enabled for AI booking and remain unavailable in the dashboard.
 
@@ -167,6 +169,7 @@
 ## Call Lifecycle Retention And Realtime Streams
 
 - Verify conversation list defaults to active sessions and supports `lifecycle_status=active|archived|redacted`.
+- Verify conversation list pagination returns stable `limit`, `offset`, and `has_more` metadata for each lifecycle filter without duplicating rows across page navigation.
 - Verify archive is idempotent and keeps transcript text available until retention redaction.
 - Verify redaction rejects active sessions, is irreversible, clears customer PII/transcripts/handoff summaries/webhook payloads/audio, and preserves booking/handoff/provider-call audit links.
 - Verify the worker redacts expired sessions according to `retention_expires_at` without touching non-expired active sessions.

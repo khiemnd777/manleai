@@ -929,7 +929,12 @@ appointments, booking attempts, call sessions, and handoff requests. This is not
 a full Square customer directory sync. A row with no `id` is activity-only and
 can be converted into a local customer record by the owner. POS customer links
 are optional mappings used when the active provider requires a customer ID for
-booking.
+booking. The optional `limit` query parameter defaults to 50 and is capped at
+100. The optional `offset` query parameter defaults to 0. Responses include
+`customers`, `summary`, `limit`, `offset`, and `has_more`; `has_more` is
+computed by requesting one extra row and does not require an exact total count.
+`summary` describes the full owner-scoped customer/activity set, not only the
+current page.
 
 ```json
 {
@@ -962,11 +967,16 @@ booking.
   ],
   "summary": {
     "total_known_customers": 1,
+    "active_customers": 1,
+    "pos_linked_customers": 1,
     "confirmed_appointments": 1,
     "pending_requests": 0,
     "customers_with_calls": 1,
     "last_customer_activity_at": "2026-06-10T15:00:00Z"
-  }
+  },
+  "limit": 10,
+  "offset": 0,
+  "has_more": false
 }
 ```
 
@@ -1018,7 +1028,7 @@ Searches the active provider by phone through `POSProvider.SearchCustomerByPhone
 
 `GET /api/salons/:id/appointments`
 
-Returns appointments recorded after POS success, including confirmed, rescheduled, and cancelled statuses. Each item includes `staff_selection_mode` and, when available, ordered `segments[]` from `appointment_services` with service names, assigned technician names, durations, and segment-level staff selection mode. `staff_selection_mode=anyone` means the customer did not request a named technician even though the POS-confirmed appointment stores the staff assignment used to book.
+Returns appointments recorded after POS success, including confirmed, rescheduled, and cancelled statuses. The optional `limit` query parameter defaults to 50 and is capped at 200. The optional `offset` query parameter defaults to 0. Responses include `appointments`, `limit`, `offset`, and `has_more`; `has_more` is computed by requesting one extra row and does not require an exact total count. Each item includes `staff_selection_mode` and, when available, ordered `segments[]` from `appointment_services` with service names, assigned technician names, durations, and segment-level staff selection mode. `staff_selection_mode=anyone` means the customer did not request a named technician even though the POS-confirmed appointment stores the staff assignment used to book.
 
 `POST /api/salons/:id/appointments/:appointment_id/reschedule`
 
@@ -1086,7 +1096,7 @@ not return required booking metadata.
 
 `GET /api/salons/:id/conversation-sessions`
 
-Returns recent conversation sessions for the authenticated owner, including `simulator` and `phone` channels. The optional `lifecycle_status` query parameter accepts `active`, `archived`, or `redacted`; the default is `active`. Active lifecycle sessions receive a 90-day `retention_expires_at` timestamp. The worker redacts expired sessions by clearing customer PII, transcript bodies, handoff summaries, webhook payloads, and temporary voice audio while preserving booking, handoff, outcome, provider call, and timestamp audit links.
+Returns recent conversation sessions for the authenticated owner, including `simulator` and `phone` channels. The optional `lifecycle_status` query parameter accepts `active`, `archived`, or `redacted`; the default is `active`. The optional `limit` query parameter defaults to 25 and is capped at 100. The optional `offset` query parameter defaults to 0. Responses include `sessions`, `limit`, `offset`, and `has_more`; `has_more` is computed by requesting one extra row and does not require an exact total count. Active lifecycle sessions receive a 90-day `retention_expires_at` timestamp. The worker redacts expired sessions by clearing customer PII, transcript bodies, handoff summaries, webhook payloads, and temporary voice audio while preserving booking, handoff, outcome, provider call, and timestamp audit links.
 
 `POST /api/salons/:id/conversation-sessions`
 

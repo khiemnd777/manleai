@@ -29,8 +29,8 @@ func (r *Repository) EnsureSalonOwner(ctx context.Context, salonID string, owner
 	return nil
 }
 
-func (r *Repository) ListCustomers(ctx context.Context, salonID string, ownerUserID string, limit int) ([]Record, error) {
-	rows, err := r.db.QueryContext(ctx, customerListQuery, salonID, ownerUserID, limit)
+func (r *Repository) ListCustomers(ctx context.Context, salonID string, ownerUserID string, limit int, offset int) ([]Record, error) {
+	rows, err := r.db.QueryContext(ctx, customerListQuery, salonID, ownerUserID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -45,6 +45,28 @@ func (r *Repository) ListCustomers(ctx context.Context, salonID string, ownerUse
 		items = append(items, *item)
 	}
 	return items, rows.Err()
+}
+
+func (r *Repository) CustomerSummary(ctx context.Context, salonID string, ownerUserID string) (Summary, error) {
+	var summary Summary
+	var lastActivityAt sql.NullTime
+	err := r.db.QueryRowContext(ctx, customerSummaryQuery, salonID, ownerUserID).Scan(
+		&summary.TotalKnownCustomers,
+		&summary.ActiveCustomers,
+		&summary.POSLinkedCustomers,
+		&summary.ConfirmedAppointments,
+		&summary.PendingRequests,
+		&summary.CustomersWithCalls,
+		&lastActivityAt,
+	)
+	if err != nil {
+		return Summary{}, err
+	}
+	if lastActivityAt.Valid {
+		value := lastActivityAt.Time
+		summary.LastCustomerActivityAt = &value
+	}
+	return summary, nil
 }
 
 func (r *Repository) CreateCustomer(ctx context.Context, salonID string, ownerUserID string, input Mutation) (*Record, error) {
@@ -303,7 +325,7 @@ WHERE c.salon_id = $1
   AND c.id = $3
 `
 
-const customerListQuery = `
+const customerRowsQuery = `
 WITH canonical AS (
 	SELECT c.*,
 	       EXISTS (
@@ -531,11 +553,26 @@ rows AS (
 	       g.latest_request_at
 	FROM activity_grouped g
 )
+`
+
+const customerListQuery = customerRowsQuery + `
 SELECT id, salon_id, key, name, phone, email, notes, active, sync_status, archived_at, last_synced_at,
        sync_error, source, pos_linked, last_activity_at, last_activity_source, last_outcome,
        confirmed_appointments, pending_requests, call_count, handoff_count,
        appointment_ids, booking_attempt_ids, call_session_ids, latest_appointment_at, latest_request_at
 FROM rows
-ORDER BY (archived_at IS NOT NULL) ASC, active DESC, last_activity_at DESC
+ORDER BY (archived_at IS NOT NULL) ASC, active DESC, last_activity_at DESC, key ASC
 LIMIT $3
+OFFSET $4
+`
+
+const customerSummaryQuery = customerRowsQuery + `
+SELECT count(*)::int,
+       (count(*) FILTER (WHERE id <> '' AND active = true AND archived_at IS NULL))::int,
+       (count(*) FILTER (WHERE pos_linked = true))::int,
+       COALESCE(sum(confirmed_appointments), 0)::int,
+       COALESCE(sum(pending_requests), 0)::int,
+       (count(*) FILTER (WHERE call_count > 0))::int,
+       max(last_activity_at)
+FROM rows
 `

@@ -14,18 +14,65 @@ func TestListDefaultsToActiveLifecycle(t *testing.T) {
 	store := newFakeConversationStore()
 	service := NewService(store, &fakeBookingTool{})
 
-	items, err := service.List(context.Background(), " salon_1 ", " owner_1 ", 0, "")
+	res, err := service.List(context.Background(), " salon_1 ", " owner_1 ", 0, -10, "")
 	if err != nil {
 		t.Fatalf("List returned error: %v", err)
 	}
-	if len(items) != 1 {
-		t.Fatalf("items = %d, want 1", len(items))
+	if len(res.Sessions) != 1 {
+		t.Fatalf("items = %d, want 1", len(res.Sessions))
+	}
+	if res.Limit != defaultSessionListLimit {
+		t.Fatalf("response limit = %d, want %d", res.Limit, defaultSessionListLimit)
+	}
+	if res.Offset != 0 {
+		t.Fatalf("response offset = %d, want 0", res.Offset)
+	}
+	if res.HasMore {
+		t.Fatal("has_more = true, want false")
 	}
 	if store.listLifecycleStatus != LifecycleActive {
 		t.Fatalf("lifecycle filter = %q, want active", store.listLifecycleStatus)
 	}
-	if store.listLimit != 25 {
-		t.Fatalf("limit = %d, want 25", store.listLimit)
+	if store.listLimit != defaultSessionListLimit+1 {
+		t.Fatalf("limit = %d, want %d", store.listLimit, defaultSessionListLimit+1)
+	}
+	if store.listOffset != 0 {
+		t.Fatalf("offset = %d, want 0", store.listOffset)
+	}
+}
+
+func TestListReturnsPaginationMetadata(t *testing.T) {
+	store := newFakeConversationStore()
+	store.listSessions = make([]Session, maxSessionListLimit+1)
+	for i := range store.listSessions {
+		store.listSessions[i] = store.session
+	}
+	service := NewService(store, &fakeBookingTool{})
+
+	res, err := service.List(context.Background(), "salon_1", "owner_1", 500, 30, LifecycleArchived)
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	if len(res.Sessions) != maxSessionListLimit {
+		t.Fatalf("items = %d, want %d", len(res.Sessions), maxSessionListLimit)
+	}
+	if res.Limit != maxSessionListLimit {
+		t.Fatalf("response limit = %d, want %d", res.Limit, maxSessionListLimit)
+	}
+	if res.Offset != 30 {
+		t.Fatalf("response offset = %d, want 30", res.Offset)
+	}
+	if !res.HasMore {
+		t.Fatal("has_more = false, want true")
+	}
+	if store.listLifecycleStatus != LifecycleArchived {
+		t.Fatalf("lifecycle filter = %q, want archived", store.listLifecycleStatus)
+	}
+	if store.listLimit != maxSessionListLimit+1 {
+		t.Fatalf("limit = %d, want %d", store.listLimit, maxSessionListLimit+1)
+	}
+	if store.listOffset != 30 {
+		t.Fatalf("offset = %d, want 30", store.listOffset)
 	}
 }
 
@@ -33,7 +80,7 @@ func TestListRejectsInvalidLifecycle(t *testing.T) {
 	store := newFakeConversationStore()
 	service := NewService(store, &fakeBookingTool{})
 
-	_, err := service.List(context.Background(), "salon_1", "owner_1", 25, "deleted")
+	_, err := service.List(context.Background(), "salon_1", "owner_1", 25, 0, "deleted")
 	if !errors.Is(err, ErrValidation) {
 		t.Fatalf("error = %v, want ErrValidation", err)
 	}
@@ -2467,6 +2514,8 @@ type fakeConversationStore struct {
 	processedEventKeys  map[string]bool
 	listLifecycleStatus string
 	listLimit           int
+	listOffset          int
+	listSessions        []Session
 	webhookSessionID    string
 	webhookLimit        int
 	archivedSessionID   string
@@ -2540,9 +2589,13 @@ func (f *fakeConversationStore) GetSessionByTurnEventKey(ctx context.Context, sa
 	return nil, false, nil
 }
 
-func (f *fakeConversationStore) ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int) ([]Session, error) {
+func (f *fakeConversationStore) ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int, offset int) ([]Session, error) {
 	f.listLifecycleStatus = lifecycleStatus
 	f.listLimit = limit
+	f.listOffset = offset
+	if f.listSessions != nil {
+		return f.listSessions, nil
+	}
 	return []Session{f.session}, nil
 }
 

@@ -64,7 +64,7 @@ type Store interface {
 	CreateSession(ctx context.Context, record NewSessionRecord) (*Session, error)
 	GetSessionForOwner(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error)
 	GetSessionByTurnEventKey(ctx context.Context, salonID string, ownerUserID string, sessionID string, eventKey string) (*Session, bool, error)
-	ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int) ([]Session, error)
+	ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int, offset int) ([]Session, error)
 	ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int) ([]WebhookEventLog, error)
 	ArchiveSession(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error)
 	RedactSession(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error)
@@ -82,6 +82,13 @@ type StartSessionRequest struct {
 	CustomerName  string `json:"customer_name"`
 	CustomerPhone string `json:"customer_phone"`
 	CustomerEmail string `json:"customer_email"`
+}
+
+type ListSessionsResponse struct {
+	Sessions []Session `json:"sessions"`
+	Limit    int       `json:"limit"`
+	Offset   int       `json:"offset"`
+	HasMore  bool      `json:"has_more"`
 }
 
 type StartPhoneCallRequest struct {

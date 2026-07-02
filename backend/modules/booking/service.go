@@ -35,7 +35,7 @@ type Store interface {
 	SaveCancelledAppointment(ctx context.Context, record CancelledAppointmentRecord) (*Appointment, error)
 	SaveAppointmentActionFallback(ctx context.Context, record AppointmentActionFallbackRecord) (*BookingAttempt, error)
 	LatestTestBooking(ctx context.Context, salonID string, ownerUserID string) (*TestBookingRecord, error)
-	ListAppointments(ctx context.Context, salonID string, ownerUserID string, limit int) ([]Appointment, error)
+	ListAppointments(ctx context.Context, salonID string, ownerUserID string, limit int, offset int) ([]Appointment, error)
 	ListBookingAttempts(ctx context.Context, salonID string, ownerUserID string, limit int) ([]BookingAttempt, error)
 }
 
@@ -431,8 +431,23 @@ func (s *Service) Cancel(ctx context.Context, salonID string, ownerUserID string
 	return saved, nil, err
 }
 
-func (s *Service) Appointments(ctx context.Context, salonID string, ownerUserID string, limit int) ([]Appointment, error) {
-	return s.store.ListAppointments(ctx, salonID, ownerUserID, clampLimit(limit))
+func (s *Service) Appointments(ctx context.Context, salonID string, ownerUserID string, limit int, offset int) (*ListAppointmentsResponse, error) {
+	pageLimit := clampLimit(limit)
+	pageOffset := clampOffset(offset)
+	items, err := s.store.ListAppointments(ctx, salonID, ownerUserID, pageLimit+1, pageOffset)
+	if err != nil {
+		return nil, err
+	}
+	hasMore := len(items) > pageLimit
+	if hasMore {
+		items = items[:pageLimit]
+	}
+	return &ListAppointmentsResponse{
+		Appointments: items,
+		Limit:        pageLimit,
+		Offset:       pageOffset,
+		HasMore:      hasMore,
+	}, nil
 }
 
 func (s *Service) Attempts(ctx context.Context, salonID string, ownerUserID string, limit int) ([]BookingAttempt, error) {
@@ -1248,4 +1263,11 @@ func clampLimit(limit int) int {
 		return 200
 	}
 	return limit
+}
+
+func clampOffset(offset int) int {
+	if offset < 0 {
+		return 0
+	}
+	return offset
 }

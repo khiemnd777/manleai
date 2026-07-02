@@ -21,6 +21,8 @@ const (
 	connectionCheckOpenPrompt = "Hi, I can hear you. How can I help today?"
 	defaultRetentionLimit     = 50
 	maxRetentionLimit         = 500
+	defaultSessionListLimit   = 25
+	maxSessionListLimit       = 100
 	defaultWebhookLimit       = 50
 	maxWebhookLimit           = 100
 	maxCustomerNamePrompts    = 3
@@ -334,12 +336,27 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	return s.tryBooking(ctx, ownerUserID, turn, next, services, staff, cfg, knowledge)
 }
 
-func (s *Service) List(ctx context.Context, salonID string, ownerUserID string, limit int, lifecycleStatus string) ([]Session, error) {
+func (s *Service) List(ctx context.Context, salonID string, ownerUserID string, limit int, offset int, lifecycleStatus string) (*ListSessionsResponse, error) {
 	lifecycleStatus = normalizeLifecycleStatus(lifecycleStatus)
 	if lifecycleStatus == "" {
 		return nil, ErrValidation
 	}
-	return s.store.ListSessions(ctx, strings.TrimSpace(salonID), strings.TrimSpace(ownerUserID), lifecycleStatus, clampLimit(limit))
+	pageLimit := clampLimit(limit)
+	pageOffset := clampOffset(offset)
+	items, err := s.store.ListSessions(ctx, strings.TrimSpace(salonID), strings.TrimSpace(ownerUserID), lifecycleStatus, pageLimit+1, pageOffset)
+	if err != nil {
+		return nil, err
+	}
+	hasMore := len(items) > pageLimit
+	if hasMore {
+		items = items[:pageLimit]
+	}
+	return &ListSessionsResponse{
+		Sessions: items,
+		Limit:    pageLimit,
+		Offset:   pageOffset,
+		HasMore:  hasMore,
+	}, nil
 }
 
 func (s *Service) Get(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error) {
@@ -3792,12 +3809,19 @@ func staffName(id string, staff []StaffOption, fallback string) string {
 
 func clampLimit(limit int) int {
 	if limit <= 0 {
-		return 25
+		return defaultSessionListLimit
 	}
-	if limit > 100 {
-		return 100
+	if limit > maxSessionListLimit {
+		return maxSessionListLimit
 	}
 	return limit
+}
+
+func clampOffset(offset int) int {
+	if offset < 0 {
+		return 0
+	}
+	return offset
 }
 
 func clampRetentionLimit(limit int) int {

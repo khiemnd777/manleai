@@ -59,7 +59,7 @@ func (h *Handler) Message(c *fiber.Ctx) error {
 }
 
 func (h *Handler) List(c *fiber.Ctx) error {
-	items, err := h.service.List(c.UserContext(), c.Params("id"), middleware.UserID(c), parseLimit(c.Query("limit")), c.Query("lifecycle_status"))
+	res, err := h.service.List(c.UserContext(), c.Params("id"), middleware.UserID(c), parseLimit(c.Query("limit")), parseOffset(c.Query("offset")), c.Query("lifecycle_status"))
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Conversation lifecycle filter is invalid.")
 	}
@@ -69,7 +69,7 @@ func (h *Handler) List(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "CONVERSATIONS_FAILED", "Could not load conversation sessions.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"sessions": items})
+	return respond.JSON(c, fiber.StatusOK, res)
 }
 
 func (h *Handler) Get(c *fiber.Ctx) error {
@@ -134,4 +134,9 @@ func (h *Handler) Redact(c *fiber.Ctx) error {
 func parseLimit(raw string) int {
 	limit, _ := strconv.Atoi(raw)
 	return limit
+}
+
+func parseOffset(raw string) int {
+	offset, _ := strconv.Atoi(raw)
+	return offset
 }

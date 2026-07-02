@@ -37,17 +37,23 @@ func TestListReturnsCustomersAndSummary(t *testing.T) {
 	}
 	service := NewService(store, nil)
 
-	res, err := service.List(context.Background(), " salon_1 ", " owner_1 ", 500)
+	res, err := service.List(context.Background(), " salon_1 ", " owner_1 ", 500, -10)
 	if err != nil {
 		t.Fatalf("List returned error: %v", err)
 	}
-	if store.limit != maxCustomerLimit {
-		t.Fatalf("limit = %d, want %d", store.limit, maxCustomerLimit)
+	if store.limit != maxCustomerLimit+1 {
+		t.Fatalf("limit = %d, want %d", store.limit, maxCustomerLimit+1)
+	}
+	if store.offset != 0 {
+		t.Fatalf("offset = %d, want 0", store.offset)
 	}
 	if len(res.Customers) != 2 {
 		t.Fatalf("customers length = %d, want 2", len(res.Customers))
 	}
-	if res.Summary.TotalKnownCustomers != 2 || res.Summary.ConfirmedAppointments != 2 || res.Summary.PendingRequests != 1 || res.Summary.CustomersWithCalls != 1 {
+	if res.Limit != maxCustomerLimit || res.Offset != 0 || res.HasMore {
+		t.Fatalf("unexpected pagination metadata: limit=%d offset=%d has_more=%v", res.Limit, res.Offset, res.HasMore)
+	}
+	if res.Summary.TotalKnownCustomers != 2 || res.Summary.ActiveCustomers != 0 || res.Summary.POSLinkedCustomers != 0 || res.Summary.ConfirmedAppointments != 2 || res.Summary.PendingRequests != 1 || res.Summary.CustomersWithCalls != 1 {
 		t.Fatalf("unexpected summary: %#v", res.Summary)
 	}
 	if res.Summary.LastCustomerActivityAt == nil || !res.Summary.LastCustomerActivityAt.Equal(now) {
@@ -55,10 +61,55 @@ func TestListReturnsCustomersAndSummary(t *testing.T) {
 	}
 }
 
+func TestListReturnsHasMoreWithoutSlicingSummary(t *testing.T) {
+	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	store := &fakeStore{
+		customers: []Record{
+			{
+				ID:                    "customer_1",
+				Key:                   "customer:customer_1",
+				Name:                  "Linh Tran",
+				Active:                true,
+				POSLinked:             true,
+				LastActivityAt:        now,
+				ConfirmedAppointments: 2,
+				CallCount:             1,
+			},
+			{
+				ID:                    "customer_2",
+				Key:                   "customer:customer_2",
+				Name:                  "Mai Nguyen",
+				Active:                true,
+				LastActivityAt:        now.Add(-time.Hour),
+				ConfirmedAppointments: 1,
+				PendingRequests:       1,
+			},
+		},
+	}
+	service := NewService(store, nil)
+
+	res, err := service.List(context.Background(), "salon_1", "owner_1", 1, 10)
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	if store.limit != 2 || store.offset != 10 {
+		t.Fatalf("store pagination = limit %d offset %d, want limit 2 offset 10", store.limit, store.offset)
+	}
+	if len(res.Customers) != 1 {
+		t.Fatalf("customers length = %d, want 1", len(res.Customers))
+	}
+	if res.Limit != 1 || res.Offset != 10 || !res.HasMore {
+		t.Fatalf("unexpected pagination metadata: limit=%d offset=%d has_more=%v", res.Limit, res.Offset, res.HasMore)
+	}
+	if res.Summary.TotalKnownCustomers != 2 || res.Summary.ActiveCustomers != 2 || res.Summary.POSLinkedCustomers != 1 || res.Summary.ConfirmedAppointments != 3 || res.Summary.PendingRequests != 1 {
+		t.Fatalf("summary should cover full list, got %#v", res.Summary)
+	}
+}
+
 func TestListRejectsMissingScope(t *testing.T) {
 	service := NewService(&fakeStore{}, nil)
 
-	_, err := service.List(context.Background(), "", "owner_1", 0)
+	_, err := service.List(context.Background(), "", "owner_1", 0, 0)
 	if !errors.Is(err, ErrValidation) {
 		t.Fatalf("error = %v, want ErrValidation", err)
 	}
@@ -68,7 +119,7 @@ func TestListChecksOwnerBeforeAggregate(t *testing.T) {
 	store := &fakeStore{err: ErrNotFound}
 	service := NewService(store, nil)
 
-	_, err := service.List(context.Background(), "salon_1", "owner_1", 0)
+	_, err := service.List(context.Background(), "salon_1", "owner_1", 0, 0)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("error = %v, want ErrNotFound", err)
 	}
@@ -201,6 +252,7 @@ func TestUpdateAndArchiveCustomer(t *testing.T) {
 type fakeStore struct {
 	customers    []Record
 	limit        int
+	offset       int
 	ensureCalled bool
 	listCalled   bool
 	created      *Mutation
@@ -215,10 +267,18 @@ func (f *fakeStore) EnsureSalonOwner(ctx context.Context, salonID string, ownerU
 	return f.err
 }
 
-func (f *fakeStore) ListCustomers(ctx context.Context, salonID string, ownerUserID string, limit int) ([]Record, error) {
+func (f *fakeStore) ListCustomers(ctx context.Context, salonID string, ownerUserID string, limit int, offset int) ([]Record, error) {
 	f.listCalled = true
 	f.limit = limit
+	f.offset = offset
 	return f.customers, f.err
+}
+
+func (f *fakeStore) CustomerSummary(ctx context.Context, salonID string, ownerUserID string) (Summary, error) {
+	if f.err != nil {
+		return Summary{}, f.err
+	}
+	return summarize(f.customers), nil
 }
 
 func (f *fakeStore) CreateCustomer(ctx context.Context, salonID string, ownerUserID string, input Mutation) (*Record, error) {

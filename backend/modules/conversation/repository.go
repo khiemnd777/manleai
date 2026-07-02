@@ -132,14 +132,15 @@ func (r *Repository) GetSessionByTurnEventKey(ctx context.Context, salonID strin
 	return session, true, nil
 }
 
-func (r *Repository) ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int) ([]Session, error) {
+func (r *Repository) ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int, offset int) ([]Session, error) {
 	rows, err := r.db.QueryContext(ctx, sessionSelect()+`
 		WHERE cs.salon_id = $1
 		  AND salon.owner_user_id = $2
 		  AND cs.lifecycle_status = $3
-		ORDER BY cs.updated_at DESC
+		ORDER BY cs.updated_at DESC, cs.id DESC
 		LIMIT $4
-	`, salonID, ownerUserID, lifecycleStatus, limit)
+		OFFSET $5
+	`, salonID, ownerUserID, lifecycleStatus, limit, offset)
 	if err != nil {
 		return nil, err
 	}

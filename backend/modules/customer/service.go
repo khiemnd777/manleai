@@ -26,7 +26,7 @@ func NewService(store Store, providers []pos.POSProvider) *Service {
 	return &Service{store: store, providers: byName}
 }
 
-func (s *Service) List(ctx context.Context, salonID string, ownerUserID string, limit int) (*ListResponse, error) {
+func (s *Service) List(ctx context.Context, salonID string, ownerUserID string, limit int, offset int) (*ListResponse, error) {
 	salonID = strings.TrimSpace(salonID)
 	ownerUserID = strings.TrimSpace(ownerUserID)
 	if salonID == "" || ownerUserID == "" {
@@ -35,13 +35,26 @@ func (s *Service) List(ctx context.Context, salonID string, ownerUserID string, 
 	if err := s.store.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
 	}
-	items, err := s.store.ListCustomers(ctx, salonID, ownerUserID, clampLimit(limit))
+	pageLimit := clampLimit(limit)
+	pageOffset := clampOffset(offset)
+	items, err := s.store.ListCustomers(ctx, salonID, ownerUserID, pageLimit+1, pageOffset)
+	if err != nil {
+		return nil, err
+	}
+	hasMore := len(items) > pageLimit
+	if hasMore {
+		items = items[:pageLimit]
+	}
+	summary, err := s.store.CustomerSummary(ctx, salonID, ownerUserID)
 	if err != nil {
 		return nil, err
 	}
 	return &ListResponse{
 		Customers: items,
-		Summary:   summarize(items),
+		Summary:   summary,
+		Limit:     pageLimit,
+		Offset:    pageOffset,
+		HasMore:   hasMore,
 	}, nil
 }
 
@@ -142,10 +155,23 @@ func clampLimit(limit int) int {
 	return limit
 }
 
+func clampOffset(offset int) int {
+	if offset < 0 {
+		return 0
+	}
+	return offset
+}
+
 func summarize(items []Record) Summary {
 	summary := Summary{TotalKnownCustomers: len(items)}
 	for i := range items {
 		item := items[i]
+		if item.ID != "" && item.Active && item.ArchivedAt == nil {
+			summary.ActiveCustomers++
+		}
+		if item.POSLinked {
+			summary.POSLinkedCustomers++
+		}
 		summary.ConfirmedAppointments += item.ConfirmedAppointments
 		summary.PendingRequests += item.PendingRequests
 		if item.CallCount > 0 {

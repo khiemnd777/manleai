@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { AlertTriangle, Archive, Pencil, Plus, RefreshCcw, Search, Users } from "lucide-react";
+import { AlertTriangle, Archive, ChevronLeft, ChevronRight, Pencil, Plus, RefreshCcw, Search, Users } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -32,6 +32,9 @@ type StatusResponse = {
 type CustomersResponse = {
   customers: CustomerRecord[];
   summary: CustomerSummary;
+  limit?: number;
+  offset?: number;
+  has_more?: boolean;
 };
 
 type CustomerMutationResponse = {
@@ -52,12 +55,19 @@ type CustomerFormState = {
   active: boolean;
 };
 
+const defaultCustomerPageSize = 10;
+const customerPageSizeOptions = [10, 25, 50] as const;
+
 export function CustomersDashboard() {
   const [salon, setSalon] = useState<Salon | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [customers, setCustomers] = useState<CustomerRecord[]>([]);
   const [summary, setSummary] = useState<CustomerSummary | null>(null);
+  const [customerLimit, setCustomerLimit] = useState(defaultCustomerPageSize);
+  const [customerOffset, setCustomerOffset] = useState(0);
+  const [customerHasMore, setCustomerHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [customerListLoading, setCustomerListLoading] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -69,10 +79,55 @@ export function CustomersDashboard() {
   const [searchError, setSearchError] = useState("");
   const [searchResult, setSearchResult] = useState<SearchResponse | null>(null);
 
-  async function load({ silent = false }: { silent?: boolean } = {}) {
+  function customerListPath(salonID: string, limit: number, offset: number) {
+    const params = new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset)
+    });
+    return `/api/salons/${salonID}/customers?${params.toString()}`;
+  }
+
+  async function fetchCustomerPage(salonID: string, limit: number, offset: number) {
+    return apiRequest<CustomersResponse>(customerListPath(salonID, limit, offset));
+  }
+
+  async function fetchCustomerPageWithFallback(salonID: string, limit: number, offset: number) {
+    let response = await fetchCustomerPage(salonID, limit, offset);
+    if (response.customers.length === 0 && offset > 0) {
+      const previousOffset = Math.max(0, offset - limit);
+      response = await fetchCustomerPage(salonID, limit, previousOffset);
+    }
+    return response;
+  }
+
+  function applyCustomerPage(response: CustomersResponse, requestedLimit: number, requestedOffset: number) {
+    setCustomers(response.customers);
+    setSummary(response.summary);
+    setCustomerLimit(response.limit ?? requestedLimit);
+    setCustomerOffset(response.offset ?? requestedOffset);
+    setCustomerHasMore(Boolean(response.has_more));
+  }
+
+  async function reloadCustomerRows(salonID: string, offset = customerOffset, limit = customerLimit) {
+    setCustomerListLoading(true);
+    try {
+      const response = await fetchCustomerPageWithFallback(salonID, limit, offset);
+      applyCustomerPage(response, limit, offset);
+    } finally {
+      setCustomerListLoading(false);
+    }
+  }
+
+  async function load({
+    silent = false,
+    offset = customerOffset,
+    limit = customerLimit
+  }: { silent?: boolean; offset?: number; limit?: number } = {}) {
     setError("");
     if (!silent) {
       setLoading(true);
+    } else {
+      setCustomerListLoading(true);
     }
     try {
       const salonResponse = await apiRequest<SalonListResponse>("/api/salons");
@@ -82,21 +137,23 @@ export function CustomersDashboard() {
         setStatus(null);
         setCustomers([]);
         setSummary(null);
+        setCustomerHasMore(false);
         return;
       }
 
       const [statusResponse, customerResponse] = await Promise.all([
         apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
-        apiRequest<CustomersResponse>(`/api/salons/${firstSalon.id}/customers?limit=100`)
+        fetchCustomerPageWithFallback(firstSalon.id, limit, offset)
       ]);
       setStatus(statusResponse);
-      setCustomers(customerResponse.customers);
-      setSummary(customerResponse.summary);
+      applyCustomerPage(customerResponse, limit, offset);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load customer data.");
     } finally {
       if (!silent) {
         setLoading(false);
+      } else {
+        setCustomerListLoading(false);
       }
     }
   }
@@ -108,6 +165,32 @@ export function CustomersDashboard() {
   const squareConnected = isSquareConnected(status?.connection);
   const metricSummary = useMemo(() => summarizeCustomers(customers, summary), [customers, summary]);
   const metrics = useMemo(() => customerMetrics(customers, metricSummary), [customers, metricSummary]);
+  const customerListBusy = customerListLoading || busy !== "" || searching;
+
+  function updateCustomerPageSize(limit: number) {
+    setCustomerLimit(limit);
+    setCustomerOffset(0);
+    if (salon) {
+      void reloadCustomerRows(salon.id, 0, limit);
+    }
+  }
+
+  function goToPreviousCustomerPage() {
+    const previousOffset = Math.max(0, customerOffset - customerLimit);
+    setCustomerOffset(previousOffset);
+    if (salon) {
+      void reloadCustomerRows(salon.id, previousOffset, customerLimit);
+    }
+  }
+
+  function goToNextCustomerPage() {
+    if (!customerHasMore) return;
+    const nextOffset = customerOffset + customerLimit;
+    setCustomerOffset(nextOffset);
+    if (salon) {
+      void reloadCustomerRows(salon.id, nextOffset, customerLimit);
+    }
+  }
 
   function openCreateForm(seed?: Partial<CustomerFormState>) {
     setEditingCustomer(null);
@@ -383,7 +466,7 @@ export function CustomersDashboard() {
             <CardTitle>Customer records</CardTitle>
             <CardDescription>Canonical records are shown with calls, booking attempts, handoffs, and POS-confirmed appointments.</CardDescription>
           </div>
-          <Badge value={customers.length > 0 ? "active" : "disabled"} />
+          <Badge value={metricSummary.total_known_customers > 0 ? "active" : "disabled"} />
         </div>
 
         {customers.length === 0 ? (
@@ -394,7 +477,18 @@ export function CustomersDashboard() {
           />
         ) : (
           <>
-            <div className="mt-5 hidden overflow-x-auto rounded-md border border-line lg:block">
+            <CustomerPaginationControls
+              className="mt-5"
+              count={customers.length}
+              limit={customerLimit}
+              offset={customerOffset}
+              hasMore={customerHasMore}
+              busy={customerListBusy}
+              onPrevious={goToPreviousCustomerPage}
+              onNext={goToNextCustomerPage}
+              onLimitChange={updateCustomerPageSize}
+            />
+            <div className="mt-3 hidden overflow-x-auto rounded-md border border-line lg:block">
               <table className="w-full min-w-[1040px] text-left text-sm">
                 <thead className="bg-slate-50 text-xs uppercase text-muted">
                   <tr>
@@ -460,11 +554,92 @@ export function CustomersDashboard() {
                 />
               ))}
             </div>
+            <CustomerPaginationControls
+              className="mt-4"
+              count={customers.length}
+              limit={customerLimit}
+              offset={customerOffset}
+              hasMore={customerHasMore}
+              busy={customerListBusy}
+              onPrevious={goToPreviousCustomerPage}
+              onNext={goToNextCustomerPage}
+              onLimitChange={updateCustomerPageSize}
+            />
           </>
         )}
       </Card>
     </div>
   );
+}
+
+function CustomerPaginationControls({
+  className = "",
+  count,
+  limit,
+  offset,
+  hasMore,
+  busy,
+  onPrevious,
+  onNext,
+  onLimitChange
+}: {
+  className?: string;
+  count: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+  busy: boolean;
+  onPrevious: () => void;
+  onNext: () => void;
+  onLimitChange: (limit: number) => void;
+}) {
+  const page = Math.floor(offset / limit) + 1;
+
+  return (
+    <div
+      className={`flex flex-col gap-3 rounded-md border border-line bg-slate-50 px-3 py-3 sm:flex-row sm:items-center sm:justify-between ${className}`}
+    >
+      <div className="text-sm leading-6 text-muted">{customerRangeLabel(count, offset, hasMore)}</div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        <label className="flex items-center gap-2 text-sm text-muted">
+          Rows per page
+          <select
+            className="h-9 rounded-md border border-line bg-white px-2 text-sm font-medium text-ink outline-none focus:border-brand disabled:text-slate-400"
+            value={limit}
+            onChange={(event) => onLimitChange(Number(event.target.value))}
+            disabled={busy}
+          >
+            {customerPageSizeOptions.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="flex items-center gap-2">
+          <Button type="button" variant="secondary" className="h-9 px-3" onClick={onPrevious} disabled={busy || offset === 0}>
+            <ChevronLeft className="h-4 w-4" />
+            Previous
+          </Button>
+          <span className="min-w-16 text-center text-sm font-semibold text-ink">Page {page}</span>
+          <Button type="button" variant="secondary" className="h-9 px-3" onClick={onNext} disabled={busy || !hasMore}>
+            Next
+            <ChevronRight className="h-4 w-4" />
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function customerRangeLabel(count: number, offset: number, hasMore: boolean) {
+  if (count === 0) {
+    return "No customer records";
+  }
+  const start = offset + 1;
+  const end = offset + count;
+  const total = hasMore ? `at least ${end + 1}` : String(end);
+  return `Showing ${start}-${end} of ${total} customer records`;
 }
 
 function CustomerLookupGate({ status }: { status: StatusResponse | null }) {
@@ -702,6 +877,8 @@ function summarizeCustomers(customers: CustomerRecord[], summary: CustomerSummar
   return customers.reduce<CustomerSummary>(
     (acc, item) => {
       acc.total_known_customers += 1;
+      if (item.id && item.active && !item.archived_at) acc.active_customers = (acc.active_customers ?? 0) + 1;
+      if (item.pos_linked) acc.pos_linked_customers = (acc.pos_linked_customers ?? 0) + 1;
       acc.confirmed_appointments += item.confirmed_appointments;
       acc.pending_requests += item.pending_requests;
       if (item.call_count > 0) acc.customers_with_calls += 1;
@@ -712,6 +889,8 @@ function summarizeCustomers(customers: CustomerRecord[], summary: CustomerSummar
     },
     {
       total_known_customers: 0,
+      active_customers: 0,
+      pos_linked_customers: 0,
       confirmed_appointments: 0,
       pending_requests: 0,
       customers_with_calls: 0
@@ -721,8 +900,9 @@ function summarizeCustomers(customers: CustomerRecord[], summary: CustomerSummar
 
 function customerMetrics(customers: CustomerRecord[], _summary: CustomerSummary) {
   return {
-    activeCustomers: customers.filter((item) => item.id && item.active && !item.archived_at).length,
-    posLinked: customers.filter((item) => item.pos_linked).length
+    activeCustomers:
+      _summary.active_customers ?? customers.filter((item) => item.id && item.active && !item.archived_at).length,
+    posLinked: _summary.pos_linked_customers ?? customers.filter((item) => item.pos_linked).length
   };
 }
 

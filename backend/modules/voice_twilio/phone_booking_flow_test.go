@@ -208,7 +208,7 @@ func (f *phoneFlowConversationStore) GetSessionByTurnEventKey(ctx context.Contex
 	return nil, false, nil
 }
 
-func (f *phoneFlowConversationStore) ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int) ([]conversation.Session, error) {
+func (f *phoneFlowConversationStore) ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int, offset int) ([]conversation.Session, error) {
 	session := f.session
 	return []conversation.Session{session}, nil
 }

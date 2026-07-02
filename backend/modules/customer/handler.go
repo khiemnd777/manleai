@@ -18,7 +18,7 @@ func NewHandler(service *Service) *Handler {
 }
 
 func (h *Handler) List(c *fiber.Ctx) error {
-	res, err := h.service.List(c.UserContext(), c.Params("id"), middleware.UserID(c), parseLimit(c.Query("limit")))
+	res, err := h.service.List(c.UserContext(), c.Params("id"), middleware.UserID(c), parseLimit(c.Query("limit")), parseOffset(c.Query("offset")))
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Customer request is invalid.")
 	}
@@ -90,4 +90,9 @@ func (h *Handler) respondMutation(c *fiber.Ctx, status int, res *MutationRespons
 func parseLimit(raw string) int {
 	limit, _ := strconv.Atoi(raw)
 	return limit
+}
+
+func parseOffset(raw string) int {
+	offset, _ := strconv.Atoi(raw)
+	return offset
 }

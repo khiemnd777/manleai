@@ -345,6 +345,8 @@ export type CustomerRecord = {
 
 export type CustomerSummary = {
   total_known_customers: number;
+  active_customers?: number;
+  pos_linked_customers?: number;
   confirmed_appointments: number;
   pending_requests: number;
   customers_with_calls: number;

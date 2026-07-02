@@ -1,7 +1,20 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { Archive, AlertTriangle, Eraser, MessageSquarePlus, MessageSquareText, PhoneCall, Plus, RefreshCcw, Send, X } from "lucide-react";
+import {
+  Archive,
+  AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  Eraser,
+  MessageSquarePlus,
+  MessageSquareText,
+  PhoneCall,
+  Plus,
+  RefreshCcw,
+  Send,
+  X
+} from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -43,6 +56,9 @@ type StatusResponse = {
 
 type SessionsResponse = {
   sessions: ConversationSession[];
+  limit?: number;
+  offset?: number;
+  has_more?: boolean;
 };
 
 type RealtimeEventsResponse = {
@@ -52,6 +68,9 @@ type RealtimeEventsResponse = {
 type LifecycleFilter = "active" | "archived" | "redacted";
 
 const lifecycleFilters: LifecycleFilter[] = ["active", "archived", "redacted"];
+const defaultSessionPageSize = 10;
+const sessionPageSizeOptions = [10, 25, 50] as const;
+const readinessMetricLimit = 100;
 
 type ServicesResponse = {
   services: POSService[];
@@ -71,6 +90,7 @@ export function CallsDashboard() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
   const [sessions, setSessions] = useState<ConversationSession[]>([]);
+  const [readinessSessions, setReadinessSessions] = useState<ConversationSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<ConversationSession | null>(null);
   const [realtimeEvents, setRealtimeEvents] = useState<RealtimeEventLog[]>([]);
   const [services, setServices] = useState<POSService[]>([]);
@@ -79,6 +99,10 @@ export function CallsDashboard() {
   const [correctionTarget, setCorrectionTarget] = useState<CorrectionTarget | null>(null);
   const [correctionText, setCorrectionText] = useState("");
   const [lifecycleFilter, setLifecycleFilter] = useState<LifecycleFilter>("active");
+  const [sessionLimit, setSessionLimit] = useState(defaultSessionPageSize);
+  const [sessionOffset, setSessionOffset] = useState(0);
+  const [sessionHasMore, setSessionHasMore] = useState(false);
+  const [readinessSessionsHasMore, setReadinessSessionsHasMore] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [sessionListLoading, setSessionListLoading] = useState(false);
   const [realtimeEventsLoading, setRealtimeEventsLoading] = useState(false);
@@ -90,7 +114,47 @@ export function CallsDashboard() {
   const [realtimeEventsError, setRealtimeEventsError] = useState("");
   const [success, setSuccess] = useState("");
 
-  async function load(filter: LifecycleFilter = lifecycleFilter, fullPage = initialLoading) {
+  function sessionListPath(salonID: string, filter: LifecycleFilter, limit: number, offset: number) {
+    const params = new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+      lifecycle_status: filter
+    });
+    return `/api/salons/${salonID}/conversation-sessions?${params.toString()}`;
+  }
+
+  async function fetchSessionPage(salonID: string, filter: LifecycleFilter, limit: number, offset: number) {
+    return apiRequest<SessionsResponse>(sessionListPath(salonID, filter, limit, offset));
+  }
+
+  async function fetchSessionPageWithFallback(salonID: string, filter: LifecycleFilter, limit: number, offset: number) {
+    let response = await fetchSessionPage(salonID, filter, limit, offset);
+    if (response.sessions.length === 0 && offset > 0) {
+      const previousOffset = Math.max(0, offset - limit);
+      response = await fetchSessionPage(salonID, filter, limit, previousOffset);
+    }
+    return response;
+  }
+
+  function applySessionPage(response: SessionsResponse, requestedLimit: number, requestedOffset: number) {
+    setSessions(response.sessions);
+    setSessionLimit(response.limit ?? requestedLimit);
+    setSessionOffset(response.offset ?? requestedOffset);
+    setSessionHasMore(Boolean(response.has_more));
+  }
+
+  async function reloadReadinessSessions(salonID: string) {
+    const response = await fetchSessionPage(salonID, "active", readinessMetricLimit, 0);
+    setReadinessSessions(response.sessions);
+    setReadinessSessionsHasMore(Boolean(response.has_more));
+  }
+
+  async function load(
+    filter: LifecycleFilter = lifecycleFilter,
+    fullPage = initialLoading,
+    offset = sessionOffset,
+    limit = sessionLimit
+  ) {
     setError("");
     if (fullPage) {
       setInitialLoading(true);
@@ -105,6 +169,9 @@ export function CallsDashboard() {
         setStatus(null);
         setVoiceStatus(null);
         setSessions([]);
+        setReadinessSessions([]);
+        setSessionHasMore(false);
+        setReadinessSessionsHasMore(false);
         setSelectedSession(null);
         setRealtimeEvents([]);
         setServices([]);
@@ -112,18 +179,19 @@ export function CallsDashboard() {
         return;
       }
 
-      const [statusResponse, voiceResponse, sessionsResponse, serviceResponse, staffResponse] = await Promise.all([
+      const [statusResponse, voiceResponse, sessionsResponse, readinessResponse, serviceResponse, staffResponse] = await Promise.all([
         apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
         apiRequest<VoiceStatus>(`/api/salons/${firstSalon.id}/voice/status`),
-        apiRequest<SessionsResponse>(
-          `/api/salons/${firstSalon.id}/conversation-sessions?limit=25&lifecycle_status=${filter}`
-        ),
+        fetchSessionPageWithFallback(firstSalon.id, filter, limit, offset),
+        fetchSessionPage(firstSalon.id, "active", readinessMetricLimit, 0),
         apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
         apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`)
       ]);
       setStatus(statusResponse);
       setVoiceStatus(voiceResponse);
-      setSessions(sessionsResponse.sessions);
+      applySessionPage(sessionsResponse, limit, offset);
+      setReadinessSessions(readinessResponse.sessions);
+      setReadinessSessionsHasMore(Boolean(readinessResponse.has_more));
       setServices(serviceResponse.services);
       setStaff(staffResponse.staff);
 
@@ -153,9 +221,9 @@ export function CallsDashboard() {
   }
 
   useEffect(() => {
-    void load(lifecycleFilter, initialLoading);
+    void load(lifecycleFilter, initialLoading, sessionOffset, sessionLimit);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lifecycleFilter]);
+  }, [lifecycleFilter, sessionOffset, sessionLimit]);
 
   useEffect(() => {
     if (!salon || !selectedSession || selectedSession.channel !== "phone") {
@@ -204,10 +272,11 @@ export function CallsDashboard() {
         body: JSON.stringify({ channel: "simulator" })
       });
       setSelectedSession(session);
-      if (lifecycleFilter !== "active") {
+      if (lifecycleFilter !== "active" || sessionOffset !== 0) {
+        setSessionOffset(0);
         setLifecycleFilter("active");
       } else {
-        await reloadSessions(salon.id, "active");
+        await reloadSessions(salon.id, "active", 0, sessionLimit);
       }
       return session;
     } catch (err) {
@@ -243,7 +312,7 @@ export function CallsDashboard() {
       setSelectedSession(updated);
       clearCorrectionDraft();
       setMessage("");
-      await reloadSessions(salon.id, lifecycleFilter);
+      await reloadSessions(salon.id, lifecycleFilter, sessionOffset, sessionLimit);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Could not process simulator message.");
     } finally {
@@ -267,11 +336,11 @@ export function CallsDashboard() {
     }
   }
 
-  async function reloadSessions(salonID: string, filter: LifecycleFilter) {
-    const response = await apiRequest<SessionsResponse>(
-      `/api/salons/${salonID}/conversation-sessions?limit=25&lifecycle_status=${filter}`
-    );
-    setSessions(response.sessions);
+  async function reloadSessions(salonID: string, filter: LifecycleFilter, offset = sessionOffset, limit = sessionLimit) {
+    const response = await fetchSessionPageWithFallback(salonID, filter, limit, offset);
+    applySessionPage(response, limit, offset);
+    await reloadReadinessSessions(salonID);
+    return response;
   }
 
   async function archiveSession(item: ConversationSession) {
@@ -288,7 +357,7 @@ export function CallsDashboard() {
         setSelectedSession(updated);
       }
       setSuccess("Call session archived.");
-      await reloadSessions(salon.id, lifecycleFilter);
+      await reloadSessions(salon.id, lifecycleFilter, sessionOffset, sessionLimit);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Could not archive call session.");
     } finally {
@@ -312,7 +381,7 @@ export function CallsDashboard() {
         clearCorrectionDraft();
       }
       setSuccess("Transcript and customer details redacted.");
-      await reloadSessions(salon.id, lifecycleFilter);
+      await reloadSessions(salon.id, lifecycleFilter, sessionOffset, sessionLimit);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Could not redact call session.");
     } finally {
@@ -358,20 +427,53 @@ export function CallsDashboard() {
     setCorrectionText("");
   }
 
+  function updateLifecycleFilter(filter: LifecycleFilter) {
+    setSessionOffset(0);
+    setLifecycleFilter(filter);
+  }
+
+  function updateSessionPageSize(limit: number) {
+    setSessionLimit(limit);
+    setSessionOffset(0);
+  }
+
+  function goToPreviousSessionPage() {
+    setSessionOffset((current) => Math.max(0, current - sessionLimit));
+  }
+
+  function goToNextSessionPage() {
+    if (!sessionHasMore) return;
+    setSessionOffset((current) => current + sessionLimit);
+  }
+
   const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
-  const phoneCount = useMemo(() => sessions.filter((item) => item.channel === "phone").length, [sessions]);
-  const simulatorCount = useMemo(() => sessions.filter((item) => item.channel === "simulator").length, [sessions]);
+  const phoneCount = useMemo(
+    () => countLabel(readinessSessions.filter((item) => item.channel === "phone").length, readinessSessionsHasMore),
+    [readinessSessions, readinessSessionsHasMore]
+  );
+  const simulatorCount = useMemo(
+    () => countLabel(readinessSessions.filter((item) => item.channel === "simulator").length, readinessSessionsHasMore),
+    [readinessSessions, readinessSessionsHasMore]
+  );
   const handoffCount = useMemo(
-    () => sessions.filter((item) => item.status === "handoff" || item.outcome === "handoff_requested").length,
-    [sessions]
+    () =>
+      countLabel(
+        readinessSessions.filter((item) => item.status === "handoff" || item.outcome === "handoff_requested").length,
+        readinessSessionsHasMore
+      ),
+    [readinessSessions, readinessSessionsHasMore]
   );
   const confirmedCount = useMemo(
-    () => sessions.filter((item) => item.outcome === "booking_confirmed").length,
-    [sessions]
+    () => countLabel(readinessSessions.filter((item) => item.outcome === "booking_confirmed").length, readinessSessionsHasMore),
+    [readinessSessions, readinessSessionsHasMore]
   );
   const fallbackCount = useMemo(
-    () => sessions.filter((item) => item.outcome === "booking_fallback_pending" || item.outcome === "ai_disabled").length,
-    [sessions]
+    () =>
+      countLabel(
+        readinessSessions.filter((item) => item.outcome === "booking_fallback_pending" || item.outcome === "ai_disabled").length,
+        readinessSessionsHasMore
+      ),
+    [readinessSessions, readinessSessionsHasMore]
   );
   const serviceNames = useMemo(
     () => new Map(services.flatMap((item) => (item.id ? [[item.id, item.name] as const] : []))),
@@ -426,7 +528,7 @@ export function CallsDashboard() {
         <div className="flex flex-wrap items-center gap-3">
           <Badge value={voiceStatus?.ready ? "ready" : "not_configured"} />
           <Badge value={aiEnabled ? "active" : "disabled"} />
-          <Button type="button" variant="secondary" onClick={() => void load(lifecycleFilter)}>
+          <Button type="button" variant="secondary" onClick={() => void load(lifecycleFilter, false, sessionOffset, sessionLimit)}>
             <RefreshCcw className="h-4 w-4" />
             Refresh
           </Button>
@@ -440,11 +542,11 @@ export function CallsDashboard() {
       <ReadinessPanel aiEnabled={aiEnabled} voiceStatus={voiceStatus} />
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-        <Metric label="Live phone calls" value={String(phoneCount)} />
-        <Metric label="Simulator sessions" value={String(simulatorCount)} />
-        <Metric label="Owner handoffs" value={String(handoffCount)} />
-        <Metric label="Confirmed bookings" value={String(confirmedCount)} />
-        <Metric label="Pending requests" value={String(fallbackCount)} />
+        <Metric label="Live phone calls" value={phoneCount} />
+        <Metric label="Simulator sessions" value={simulatorCount} />
+        <Metric label="Owner handoffs" value={handoffCount} />
+        <Metric label="Confirmed bookings" value={confirmedCount} />
+        <Metric label="Pending requests" value={fallbackCount} />
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[1.35fr_0.65fr]">
@@ -610,7 +712,7 @@ export function CallsDashboard() {
               key={filter}
               type="button"
               variant={filter === lifecycleFilter ? "primary" : "secondary"}
-              onClick={() => setLifecycleFilter(filter)}
+              onClick={() => updateLifecycleFilter(filter)}
               disabled={sessionListLoading || sessionActionID !== ""}
             >
               {filterLabel(filter)}
@@ -633,7 +735,19 @@ export function CallsDashboard() {
           </div>
         ) : (
           <>
-            <div className="mt-5 hidden overflow-x-auto rounded-md border border-line lg:block">
+            <SessionPaginationControls
+              className="mt-5"
+              count={sessions.length}
+              filter={lifecycleFilter}
+              limit={sessionLimit}
+              offset={sessionOffset}
+              hasMore={sessionHasMore}
+              busy={sessionListLoading || sessionActionID !== ""}
+              onPrevious={goToPreviousSessionPage}
+              onNext={goToNextSessionPage}
+              onLimitChange={updateSessionPageSize}
+            />
+            <div className="mt-3 hidden overflow-x-auto rounded-md border border-line lg:block">
               <table className="w-full min-w-[1180px] text-left text-sm">
                 <thead className="bg-slate-50 text-xs uppercase text-muted">
                   <tr>
@@ -708,6 +822,18 @@ export function CallsDashboard() {
                 />
               ))}
             </div>
+            <SessionPaginationControls
+              className="mt-4"
+              count={sessions.length}
+              filter={lifecycleFilter}
+              limit={sessionLimit}
+              offset={sessionOffset}
+              hasMore={sessionHasMore}
+              busy={sessionListLoading || sessionActionID !== ""}
+              onPrevious={goToPreviousSessionPage}
+              onNext={goToNextSessionPage}
+              onLimitChange={updateSessionPageSize}
+            />
           </>
         )}
       </Card>
@@ -1167,6 +1293,83 @@ function SessionCard({
       </div>
     </div>
   );
+}
+
+function SessionPaginationControls({
+  className = "",
+  count,
+  filter,
+  limit,
+  offset,
+  hasMore,
+  busy,
+  onPrevious,
+  onNext,
+  onLimitChange
+}: {
+  className?: string;
+  count: number;
+  filter: LifecycleFilter;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+  busy: boolean;
+  onPrevious: () => void;
+  onNext: () => void;
+  onLimitChange: (limit: number) => void;
+}) {
+  const page = Math.floor(offset / limit) + 1;
+
+  return (
+    <div
+      className={`flex flex-col gap-3 rounded-md border border-line bg-slate-50 px-3 py-3 sm:flex-row sm:items-center sm:justify-between ${className}`}
+    >
+      <div className="text-sm leading-6 text-muted">{sessionRangeLabel(count, offset, hasMore, filter)}</div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        <label className="flex items-center gap-2 text-sm text-muted">
+          Rows per page
+          <select
+            className="h-9 rounded-md border border-line bg-white px-2 text-sm font-medium text-ink outline-none focus:border-brand disabled:text-slate-400"
+            value={limit}
+            onChange={(event) => onLimitChange(Number(event.target.value))}
+            disabled={busy}
+          >
+            {sessionPageSizeOptions.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="flex items-center gap-2">
+          <Button type="button" variant="secondary" className="h-9 px-3" onClick={onPrevious} disabled={busy || offset === 0}>
+            <ChevronLeft className="h-4 w-4" />
+            Previous
+          </Button>
+          <span className="min-w-16 text-center text-sm font-semibold text-ink">Page {page}</span>
+          <Button type="button" variant="secondary" className="h-9 px-3" onClick={onNext} disabled={busy || !hasMore}>
+            Next
+            <ChevronRight className="h-4 w-4" />
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function sessionRangeLabel(count: number, offset: number, hasMore: boolean, filter: LifecycleFilter) {
+  const label = filterLabel(filter).toLowerCase();
+  if (count === 0) {
+    return `No ${label} sessions`;
+  }
+  const start = offset + 1;
+  const end = offset + count;
+  const total = hasMore ? `at least ${end + 1}` : String(end);
+  return `Showing ${start}-${end} of ${total} ${label} sessions`;
+}
+
+function countLabel(count: number, hasMore: boolean) {
+  return hasMore ? `${count}+` : String(count);
 }
 
 function filterLabel(filter: LifecycleFilter) {
