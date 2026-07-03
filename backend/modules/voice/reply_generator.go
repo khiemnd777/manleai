@@ -74,10 +74,38 @@ func replyAllowed(req conversation.ReplyGenerationRequest, reply ModelReply) boo
 	if !req.BookingConfirmed && hasUnsafeConfirmation(message) {
 		return false
 	}
+	if hasCasualOpener(message) {
+		return false
+	}
 	if asksForKnownBookingField(req, message) {
 		return false
 	}
 	return true
+}
+
+func hasCasualOpener(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	rejectedPrefixes := []string{
+		"hey",
+		"hi",
+		"hi there",
+		"hello there",
+		"awesome choice",
+		"great choice",
+	}
+	for _, prefix := range rejectedPrefixes {
+		if lower == prefix ||
+			strings.HasPrefix(lower, prefix+" ") ||
+			strings.HasPrefix(lower, prefix+",") ||
+			strings.HasPrefix(lower, prefix+"!") ||
+			strings.HasPrefix(lower, prefix+".") {
+			return true
+		}
+	}
+	return false
 }
 
 func asksForKnownBookingField(req conversation.ReplyGenerationRequest, message string) bool {

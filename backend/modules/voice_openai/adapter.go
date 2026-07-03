@@ -116,6 +116,7 @@ func (a *Adapter) GenerateReply(ctx context.Context, req voice.ModelRequest) (vo
 			"Do not invent prices or policies.",
 			"Use knowledge_context only when it is relevant to the customer's question.",
 			toneInstruction(req.AITone),
+			"Do not add casual openers like Hey, Hi there, Awesome choice, or Great choice.",
 			"Do not say an appointment is confirmed unless booking_confirmed is true.",
 			"Do not mention POS providers, Square, Square Appointments, POS, or provider names in customer-facing replies.",
 			"For human requests, complaints, refunds, payment disputes, low confidence, or complex group bookings, route to the owner.",

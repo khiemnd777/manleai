@@ -76,6 +76,21 @@ func TestGuardedReplyGeneratorRejectsConfirmingKnownTimeAgain(t *testing.T) {
 	}
 }
 
+func TestGuardedReplyGeneratorRejectsCasualOpeners(t *testing.T) {
+	generator := NewGuardedReplyGenerator(&fakeLanguageModelProvider{
+		reply: ModelReply{Message: "Hey! Great choice. What name should I put on the appointment?", Confidence: 0.9},
+	})
+
+	_, err := generator.GenerateReply(context.Background(), conversation.ReplyGenerationRequest{
+		Channel:           conversation.ChannelPhone,
+		SafeReply:         "What name should I put on the appointment?",
+		NextRequiredField: "customer_name",
+	})
+	if err == nil {
+		t.Fatalf("GenerateReply accepted casual opener")
+	}
+}
+
 func TestGuardedReplyGeneratorSkipsSimulatorChannel(t *testing.T) {
 	generator := NewGuardedReplyGenerator(&fakeLanguageModelProvider{
 		reply: ModelReply{Message: "What phone number should we use?", Confidence: 0.9},
