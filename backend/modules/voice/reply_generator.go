@@ -26,22 +26,23 @@ func (g *GuardedReplyGenerator) GenerateReply(ctx context.Context, req conversat
 		return conversation.ReplyGenerationResult{}, ErrProviderDisabled
 	}
 	reply, err := g.provider.GenerateReply(ctx, ModelRequest{
-		SalonID:             req.SalonID,
-		SessionID:           req.SessionID,
-		Channel:             req.Channel,
-		Intent:              req.Intent,
-		Outcome:             req.Outcome,
-		CustomerMessage:     req.CustomerMessage,
-		SafeReply:           req.SafeReply,
-		SalonName:           req.SalonName,
-		AITone:              req.AITone,
-		BookingConfirmed:    req.BookingConfirmed,
-		FallbackOrHandoff:   req.FallbackOrHandoff,
-		MissingBookingField: req.MissingBookingField,
-		KnownBookingFields:  append([]string(nil), req.KnownBookingFields...),
-		NextRequiredField:   req.NextRequiredField,
-		Summary:             req.Summary,
-		KnowledgeContext:    req.KnowledgeContext,
+		SalonID:              req.SalonID,
+		SessionID:            req.SessionID,
+		Channel:              req.Channel,
+		Intent:               req.Intent,
+		Outcome:              req.Outcome,
+		CustomerMessage:      req.CustomerMessage,
+		SafeReply:            req.SafeReply,
+		SalonName:            req.SalonName,
+		AITone:               req.AITone,
+		BookingConfirmed:     req.BookingConfirmed,
+		FallbackOrHandoff:    req.FallbackOrHandoff,
+		MissingBookingField:  req.MissingBookingField,
+		KnownBookingFields:   append([]string(nil), req.KnownBookingFields...),
+		NextRequiredField:    req.NextRequiredField,
+		SelectedServiceNames: append([]string(nil), req.SelectedServiceNames...),
+		Summary:              req.Summary,
+		KnowledgeContext:     req.KnowledgeContext,
 	})
 	if err != nil {
 		return conversation.ReplyGenerationResult{}, err
@@ -80,7 +81,47 @@ func replyAllowed(req conversation.ReplyGenerationRequest, reply ModelReply) boo
 	if asksForKnownBookingField(req, message) {
 		return false
 	}
+	if !preservesSelectedServiceNames(req, message) {
+		return false
+	}
 	return true
+}
+
+func preservesSelectedServiceNames(req conversation.ReplyGenerationRequest, message string) bool {
+	if len(req.SelectedServiceNames) == 0 {
+		return true
+	}
+	safe := normalizeServiceGuardText(req.SafeReply)
+	reply := normalizeServiceGuardText(message)
+	if safe == "" || reply == "" {
+		return true
+	}
+	for _, name := range req.SelectedServiceNames {
+		normalizedName := normalizeServiceGuardText(name)
+		if normalizedName == "" || !strings.Contains(safe, normalizedName) {
+			continue
+		}
+		if !strings.Contains(reply, normalizedName) {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeServiceGuardText(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	replacer := strings.NewReplacer(
+		".", " ",
+		",", " ",
+		"!", " ",
+		"?", " ",
+		":", " ",
+		";", " ",
+		"-", " ",
+		"_", " ",
+		"&", " ",
+	)
+	return strings.Join(strings.Fields(replacer.Replace(value)), " ")
 }
 
 func hasCasualOpener(message string) bool {

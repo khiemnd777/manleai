@@ -116,22 +116,23 @@ type ConfigResolver interface {
 }
 
 type ModelRequest struct {
-	SalonID             string
-	SessionID           string
-	Channel             string
-	Intent              string
-	Outcome             string
-	CustomerMessage     string
-	SafeReply           string
-	SalonName           string
-	AITone              string
-	BookingConfirmed    bool
-	FallbackOrHandoff   bool
-	MissingBookingField string
-	KnownBookingFields  []string
-	NextRequiredField   string
-	Summary             string
-	KnowledgeContext    string
+	SalonID              string
+	SessionID            string
+	Channel              string
+	Intent               string
+	Outcome              string
+	CustomerMessage      string
+	SafeReply            string
+	SalonName            string
+	AITone               string
+	BookingConfirmed     bool
+	FallbackOrHandoff    bool
+	MissingBookingField  string
+	KnownBookingFields   []string
+	NextRequiredField    string
+	SelectedServiceNames []string
+	Summary              string
+	KnowledgeContext     string
 }
 
 type ModelReply struct {

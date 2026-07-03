@@ -44,13 +44,22 @@ func TestGenerateReplyParsesStructuredResponse(t *testing.T) {
 		if inputPayload["ai_tone"] != "natural_human" {
 			t.Fatalf("ai_tone = %#v, want natural_human", inputPayload["ai_tone"])
 		}
+		selected, ok := inputPayload["selected_service_names"].([]any)
+		if !ok || len(selected) != 2 || selected[0] != "Classic Manicure" || selected[1] != "Gel Removal" {
+			t.Fatalf("selected_service_names = %#v, want Classic Manicure and Gel Removal", inputPayload["selected_service_names"])
+		}
 		body, _ := json.Marshal(map[string]any{
 			"output_text": `{"message":"What phone number should we use?","confidence":0.9,"handoff":false,"reason":""}`,
 		})
 		return jsonResponse(body), nil
 	})}
 
-	reply, err := adapter.GenerateReply(context.Background(), voice.ModelRequest{SalonID: "salon_1", SafeReply: "What phone number should we use?", AITone: "natural_human"})
+	reply, err := adapter.GenerateReply(context.Background(), voice.ModelRequest{
+		SalonID:              "salon_1",
+		SafeReply:            "What phone number should we use?",
+		AITone:               "natural_human",
+		SelectedServiceNames: []string{"Classic Manicure", "Gel Removal"},
+	})
 	if err != nil {
 		t.Fatalf("GenerateReply returned error: %v", err)
 	}

@@ -264,6 +264,38 @@ func TestMessageHelloAfterInitialGreetingDoesNotAskForBookingService(t *testing.
 	}
 }
 
+func TestMessageAnswersServiceMenuWithBookableServices(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = append(store.services,
+		ServiceOption{ID: "service_acrylic", Name: "Acrylic Full Set", DurationMinutes: 75},
+		ServiceOption{ID: "service_pedicure", Name: "Classic Pedicure", DurationMinutes: 45},
+		ServiceOption{ID: "service_dip", Name: "Dip Powder Manicure", DurationMinutes: 60},
+		ServiceOption{ID: "service_gel", Name: "Gel Manicure", DurationMinutes: 45},
+		ServiceOption{ID: "service_removal", Name: "Gel Removal", DurationMinutes: 30},
+	)
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "What services do you have?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.Intent != IntentUnknown {
+		t.Fatalf("service menu intent = %s, want unknown", session.Intent)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("service menu should not call booking tools, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	for _, want := range []string{"Classic Manicure", "Gel Removal", "Which one would you like to book"} {
+		if !strings.Contains(store.lastTurn.AIMessage, want) {
+			t.Fatalf("service menu reply missing %q: %s", want, store.lastTurn.AIMessage)
+		}
+	}
+}
+
 func TestMessageBookingRequestAfterGreetingStillCollectsService(t *testing.T) {
 	store := newFakeConversationStore()
 	store.session.Transcript = []TranscriptMessage{{
@@ -864,7 +896,7 @@ func TestApplyReplyGeneratorIncludesAITone(t *testing.T) {
 		},
 	}
 
-	service.applyReplyGenerator(context.Background(), &turn, session, &cfg, "requested_time", "requested_time", nil)
+	service.applyReplyGenerator(context.Background(), &turn, session, store.services, &cfg, "requested_time", "requested_time", nil)
 
 	if replyGenerator.calls != 1 {
 		t.Fatalf("reply generator calls = %d, want 1", replyGenerator.calls)
@@ -2472,6 +2504,223 @@ func TestMessageBooksAnyoneMultiServiceSlotWithSegmentAssignments(t *testing.T) 
 		t.Fatalf("anyone confirmation should avoid naming assigned technicians: %s", store.lastTurn.AIMessage)
 	}
 	assertCustomerReplyHidesProvider(t, store.lastTurn.AIMessage)
+}
+
+func TestMessageAddsServiceToExistingAppointmentBeforeAvailability(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = append(store.services, ServiceOption{
+		ID:              "service_removal",
+		Name:            "Gel Removal",
+		DurationMinutes: 30,
+		PriceFrom:       15,
+	})
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{
+		ServiceID:          "service_1",
+		StaffSelectionMode: booking.StaffSelectionAnyone,
+	}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I also book Gel Removal.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("add-on before date should not call tools, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if session.ServiceID != "service_1" {
+		t.Fatalf("primary service = %s, want Classic Manicure primary", session.ServiceID)
+	}
+	if got := session.BookingSegments; len(got) != 2 || got[0].ServiceID != "service_1" || got[1].ServiceID != "service_removal" {
+		t.Fatalf("booking segments = %#v, want Classic Manicure plus Gel Removal", got)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Classic Manicure and Gel Removal") || !strings.Contains(store.lastTurn.AIMessage, "What day") {
+		t.Fatalf("AI should acknowledge combo and ask for date: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageClarifiesBareServiceAfterExistingServiceWithoutScheduleContext(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = append(store.services, ServiceOption{
+		ID:              "service_removal",
+		Name:            "Gel Removal",
+		DurationMinutes: 30,
+		PriceFrom:       15,
+	})
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{
+		ServiceID:          "service_1",
+		StaffSelectionMode: booking.StaffSelectionAnyone,
+	}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Gel Removal.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("bare service clarification should not call tools, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if session.ServiceID != "service_1" || len(session.BookingSegments) != 1 || session.BookingSegments[0].ServiceID != "service_1" {
+		t.Fatalf("session service state = %s %#v, want unchanged Classic Manicure", session.ServiceID, session.BookingSegments)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "add Gel Removal to Classic Manicure") || !strings.Contains(store.lastTurn.AIMessage, "switch to Gel Removal only") {
+		t.Fatalf("AI should clarify add vs switch: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageBooksAddedServiceOnlyAfterComboAvailabilityAndNameConfirmation(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = append(store.services, ServiceOption{
+		ID:              "service_removal",
+		Name:            "Gel Removal",
+		DurationMinutes: 30,
+		PriceFrom:       15,
+	})
+	store.staff = append(store.staff, StaffOption{
+		ID:         "staff_2",
+		Name:       "Lena Pham",
+		AIBookable: true,
+	})
+	store.session.Channel = ChannelPhone
+	store.session.Intent = IntentBooking
+	store.session.CustomerPhone = "+13125550101"
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{
+		ServiceID:          "service_1",
+		StaffSelectionMode: booking.StaffSelectionAnyone,
+	}}
+	slotStart := time.Date(2026, 6, 15, 18, 0, 0, 0, time.UTC)
+	bookingTool := &fakeBookingTool{
+		availabilityResult: &booking.AvailabilityResult{
+			ServiceID:          "service_1",
+			ServiceName:        "Classic Manicure",
+			StaffSelectionMode: booking.StaffSelectionAnyone,
+			PreferredDate:      "2026-06-15",
+			DurationMinutes:    75,
+			Timezone:           "America/Chicago",
+			Slots: []booking.AvailabilitySlot{{
+				StartTime:          slotStart,
+				EndTime:            slotStart.Add(75 * time.Minute),
+				StaffID:            "staff_1",
+				StaffName:          "Mai Nguyen",
+				StaffSelectionMode: booking.StaffSelectionAnyone,
+				Segments: []booking.AvailabilitySegment{
+					{
+						ServiceID:          "service_1",
+						ServiceName:        "Classic Manicure",
+						StaffID:            "staff_1",
+						StaffName:          "Mai Nguyen",
+						StaffSelectionMode: booking.StaffSelectionAnyone,
+						DurationMinutes:    45,
+					},
+					{
+						ServiceID:          "service_removal",
+						ServiceName:        "Gel Removal",
+						StaffID:            "staff_2",
+						StaffName:          "Lena Pham",
+						StaffSelectionMode: booking.StaffSelectionAnyone,
+						DurationMinutes:    30,
+					},
+				},
+			}},
+		},
+		attempt: &booking.BookingAttempt{
+			ID:           "attempt_combo_added",
+			Status:       booking.StatusConfirmed,
+			POSBookingID: "booking_combo_added",
+			Appointment:  &booking.Appointment{ID: "appointment_combo_added", Status: booking.StatusConfirmed},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I also book Gel Removal.",
+	})
+	if err != nil {
+		t.Fatalf("add-on Message returned error: %v", err)
+	}
+	if len(session.BookingSegments) != 2 {
+		t.Fatalf("booking segments after add-on = %#v, want two", session.BookingSegments)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Next Monday.",
+	})
+	if err != nil {
+		t.Fatalf("date Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 1 {
+		t.Fatalf("availability calls = %d, want 1", bookingTool.availabilityCalls)
+	}
+	if got := bookingTool.availabilityRequest.Segments; len(got) != 2 || got[0].ServiceID != "service_1" || got[1].ServiceID != "service_removal" {
+		t.Fatalf("availability segments = %#v, want combo", got)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Classic Manicure and Gel Removal") || !strings.Contains(store.lastTurn.AIMessage, "Monday, June 15 at 1:00 PM") {
+		t.Fatalf("AI should offer combo slot with absolute date: %s", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "1 PM.",
+	})
+	if err != nil {
+		t.Fatalf("time Message returned error: %v", err)
+	}
+	if bookingTool.calls != 0 {
+		t.Fatalf("booking calls = %d, want none before name", bookingTool.calls)
+	}
+	if session.RequestedStartTime == nil || !session.RequestedStartTime.Equal(slotStart) {
+		t.Fatalf("requested start = %v, want %s", session.RequestedStartTime, slotStart)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Tapping.",
+	})
+	if err != nil {
+		t.Fatalf("name Message returned error: %v", err)
+	}
+	if bookingTool.calls != 0 {
+		t.Fatalf("booking calls = %d, want none before risky name confirmation", bookingTool.calls)
+	}
+	if session.CustomerName != "" || store.lastTurn.AIMetadata["pending_customer_name"] != "Tapping" {
+		t.Fatalf("name state = %q metadata %#v, want pending Tapping", session.CustomerName, store.lastTurn.AIMetadata)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Yes.",
+	})
+	if err != nil {
+		t.Fatalf("name confirmation Message returned error: %v", err)
+	}
+	if bookingTool.calls != 1 {
+		t.Fatalf("booking calls = %d, want 1 after name confirmation", bookingTool.calls)
+	}
+	if got := bookingTool.request.Segments; len(got) != 2 || got[0].ServiceID != "service_1" || got[1].ServiceID != "service_removal" {
+		t.Fatalf("booking segments = %#v, want combo", got)
+	}
+	if session.Outcome != OutcomeBookingConfirmed || session.AppointmentID != "appointment_combo_added" {
+		t.Fatalf("session outcome/link = %s/%s, want confirmed combo appointment", session.Outcome, session.AppointmentID)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Classic Manicure and Gel Removal") {
+		t.Fatalf("confirmation should name both services: %s", store.lastTurn.AIMessage)
+	}
 }
 
 func TestMessageCreatesHandoffForMultiPersonBookingRequests(t *testing.T) {

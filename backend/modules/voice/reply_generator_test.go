@@ -91,6 +91,22 @@ func TestGuardedReplyGeneratorRejectsCasualOpeners(t *testing.T) {
 	}
 }
 
+func TestGuardedReplyGeneratorRejectsDroppedSelectedService(t *testing.T) {
+	generator := NewGuardedReplyGenerator(&fakeLanguageModelProvider{
+		reply: ModelReply{Message: "For your Classic Manicure, I found Monday, June 15 at 1:00 PM. Which works?", Confidence: 0.9},
+	})
+
+	_, err := generator.GenerateReply(context.Background(), conversation.ReplyGenerationRequest{
+		Channel:              conversation.ChannelPhone,
+		SafeReply:            "For your Classic Manicure and Gel Removal, I found these openings: first: Monday, June 15 at 1:00 PM. Which works?",
+		SelectedServiceNames: []string{"Classic Manicure", "Gel Removal"},
+		NextRequiredField:    "requested_time",
+	})
+	if err == nil {
+		t.Fatalf("GenerateReply accepted rewrite that dropped selected service")
+	}
+}
+
 func TestGuardedReplyGeneratorSkipsSimulatorChannel(t *testing.T) {
 	generator := NewGuardedReplyGenerator(&fakeLanguageModelProvider{
 		reply: ModelReply{Message: "What phone number should we use?", Confidence: 0.9},
