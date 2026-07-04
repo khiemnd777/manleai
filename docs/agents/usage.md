@@ -43,11 +43,11 @@ Use $business-logic-overlap-analysis to check whether this change collides with 
 ```
 
 ```txt
-Use $salon-ops-workflow to analyze the owner/caller workflow before changing dashboard or AI behavior.
+Use $salon-ops-workflow to analyze the owner/caller workflow before changing dashboard, service category, party request, or AI behavior.
 ```
 
 ```txt
-Use $voice-ai-runtime to investigate AI tone, service understanding, salon-scoped service aliases, name-slot repair, and conversation golden regressions, then propose an approval-ready plan.
+Use $voice-ai-runtime to investigate AI tone, service understanding, salon-scoped service aliases, service categories, category aliases, party booking handoff, name-slot repair, and conversation golden regressions, then propose an approval-ready plan.
 ```
 
 ## Subagents
@@ -69,7 +69,7 @@ Have production_release_planner split the next approval-loop slice into vertical
 ```
 
 ```txt
-Have repo_mapper map service_aliases and owner corrections, then have frontend_product_reviewer check the AI Training apply-correction UI contract.
+Have repo_mapper map service_aliases, service_categories, service_category_aliases, owner corrections, and party_booking_requests, then have frontend_product_reviewer check the Services, Calls, and AI Training UI contracts.
 ```
 
 ```txt
@@ -80,6 +80,6 @@ Have repo_mapper map ai_tone from Settings/API/config transfer through conversat
 
 - Keep skills concise. Move long reference material into `docs/` or skill `references/`.
 - Update `CONTEXT.md` when domain terms become stable.
-- Update this inventory when new repo-local skill triggers, project agents, or domain source-of-truth tables/settings such as `service_aliases` or `salon_settings.ai_tone` are added.
+- Update this inventory when new repo-local skill triggers, project agents, or domain source-of-truth tables/settings such as `service_aliases`, `service_categories`, `service_category_aliases`, `party_booking_requests`, or `salon_settings.ai_tone` are added.
 - Add ADRs when a decision should stop future agents from re-opening the same debate.
 - Prefer read-only subagents for review and exploration; let the parent agent make final edits.

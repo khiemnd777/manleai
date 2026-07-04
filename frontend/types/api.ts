@@ -874,6 +874,21 @@ export type KnowledgeItem = {
   updated_at: string;
 };
 
+export type ServiceAlias = {
+  id: string;
+  salon_id: string;
+  service_id: string;
+  service_name: string;
+  alias: string;
+  normalized_alias: string;
+  source: string;
+  status: string;
+  confidence: number;
+  correction_id?: string;
+  created_at: string;
+  updated_at: string;
+};
+
 export type OwnerCorrection = {
   id: string;
   salon_id: string;
@@ -882,6 +897,7 @@ export type OwnerCorrection = {
   correction: string;
   status: string;
   applied_knowledge_item_id?: string;
+  applied_service_alias_id?: string;
   created_at: string;
   updated_at: string;
 };

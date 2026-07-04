@@ -42,6 +42,20 @@ OpenAI's subagent docs say project-scoped custom agents live under `.codex/agent
 - Runtime path: `conversation.RuntimeConfig` -> `voice.ModelRequest` -> provider-specific reply adapters.
 - Guardrail: tone changes spoken style only. Slot collection, handoff routing, service understanding, availability, and POS-first confirmation remain backend-owned.
 
+## Service Understanding Inventory
+
+- Owner UI: `/dashboard/services` manages service categories, category aliases, suggestion refresh, service category assignment, and accept/clear suggestion actions.
+- API and persistence: `service_categories`, `service_category_aliases`, and service category assignment fields on `services` are owned by `backend/modules/pos`.
+- Runtime path: `conversation.Repository.ListBookableServices` loads category fields, `ListActiveServiceCategoryAliases` loads active category aliases, `loadAnswerContext` passes them into service understanding, and simulator/phone turns share `conversation.Message`.
+- Guardrail: categories are clarification groups, not directly bookable services. Exact catalog services win; category/category-alias matches ask for a real service in that group.
+
+## Party Booking Request Inventory
+
+- Owner UI: `/dashboard/calls` exposes `Party booking requests` with `pending`, `contacted`, `resolved`, and `dismissed` workflow states.
+- API and persistence: `party_booking_requests` are owned by `backend/modules/conversation` and keyed by salon, call session, and turn event key.
+- Runtime path: group or party booking detection creates owner handoff plus a structured party request; this path does not call availability or booking tools.
+- Guardrail: party requests are not confirmed appointments. Owner workflow status changes do not create POS appointments.
+
 ## Suggested Subagent Use
 
 Ask Codex to spawn:
@@ -52,7 +66,9 @@ Ask Codex to spawn:
 - `security_privacy_reviewer` for secrets, tenant isolation, phone/SMS/call data, and auth.
 - `production_release_planner` when converting a milestone into work slices.
 
-For service-understanding or AI Training correction work, ask `repo_mapper` to map `modules/conversation`, `modules/training`, `service_aliases`, transcript metadata, and golden tests before planning implementation.
+For service-understanding or AI Training correction work, ask `repo_mapper` to map `modules/conversation`, `modules/training`, `service_aliases`, `service_categories`, `service_category_aliases`, transcript metadata, answer-context caching, and golden tests before planning implementation.
+
+For party booking work, ask `repo_mapper` to map group detection, owner handoff, `party_booking_requests`, Calls dashboard workflow, redaction, and booking-tool avoidance before planning implementation.
 
 For AI tone work, ask `repo_mapper` to map the settings/API/config-transfer/runtime path, `frontend_product_reviewer` to review the Settings UI contract, and `pos_backend_reviewer` to verify no booking guardrail changed.
 

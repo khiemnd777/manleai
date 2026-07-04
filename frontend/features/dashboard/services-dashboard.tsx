@@ -15,6 +15,7 @@ import type {
   POSServiceCategory,
   POSServiceCategoryAlias,
   Salon,
+  ServiceAlias,
   ServiceCategorySuggestionRefresh,
   SquareReadiness,
   SyncLog
@@ -36,6 +37,10 @@ type ServicesResponse = {
 
 type ServiceCategoriesResponse = {
   service_categories: POSServiceCategory[];
+};
+
+type ServiceAliasesResponse = {
+  service_aliases: ServiceAlias[];
 };
 
 type ServiceResponse = {
@@ -79,6 +84,7 @@ export function ServicesDashboard() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [services, setServices] = useState<POSService[]>([]);
   const [categories, setCategories] = useState<POSServiceCategory[]>([]);
+  const [serviceAliases, setServiceAliases] = useState<ServiceAlias[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -91,6 +97,8 @@ export function ServicesDashboard() {
   const [categoryForm, setCategoryForm] = useState<ServiceCategoryFormState>(emptyCategoryForm());
   const [aliasDraftCategoryID, setAliasDraftCategoryID] = useState("");
   const [aliasDraft, setAliasDraft] = useState("");
+  const [serviceAliasDraftServiceID, setServiceAliasDraftServiceID] = useState("");
+  const [serviceAliasDraft, setServiceAliasDraft] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [reviewFilter, setReviewFilter] = useState<CategoryReviewFilter>("all");
 
@@ -107,16 +115,19 @@ export function ServicesDashboard() {
         setStatus(null);
         setServices([]);
         setCategories([]);
+        setServiceAliases([]);
         return;
       }
-      const [statusResponse, serviceResponse, categoryResponse] = await Promise.all([
+      const [statusResponse, serviceResponse, categoryResponse, aliasResponse] = await Promise.all([
         apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
         apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
-        apiRequest<ServiceCategoriesResponse>(`/api/salons/${firstSalon.id}/service-categories`)
+        apiRequest<ServiceCategoriesResponse>(`/api/salons/${firstSalon.id}/service-categories`),
+        apiRequest<ServiceAliasesResponse>(`/api/salons/${firstSalon.id}/service-aliases`)
       ]);
       setStatus(statusResponse);
       setServices(serviceResponse.services);
       setCategories(sortCategories(categoryResponse.service_categories));
+      setServiceAliases(aliasResponse.service_aliases);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load services.");
     } finally {
@@ -136,6 +147,7 @@ export function ServicesDashboard() {
     () => filterServices(services, categoryFilter, reviewFilter),
     [services, categoryFilter, reviewFilter]
   );
+  const serviceAliasesByServiceID = useMemo(() => groupServiceAliasesByServiceID(serviceAliases), [serviceAliases]);
   const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
 
   function openCreateForm() {
@@ -297,6 +309,55 @@ export function ServicesDashboard() {
       await load({ silent: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not archive category alias.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function addServiceAlias(service: POSService) {
+    if (!salon || !service.id || !serviceAliasDraft.trim()) return;
+    setBusy(`service-alias-${service.id}`);
+    setError("");
+    setSuccess("");
+    try {
+      await apiRequest<ServiceAlias>(`/api/salons/${salon.id}/service-aliases`, {
+        method: "POST",
+        body: JSON.stringify({
+          service_id: service.id,
+          alias: serviceAliasDraft
+        })
+      });
+      setServiceAliasDraft("");
+      setServiceAliasDraftServiceID("");
+      setSuccess("Service alias saved.");
+      await load({ silent: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save service alias.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function archiveServiceAlias(alias: ServiceAlias) {
+    if (!salon || alias.status === "archived") return;
+    setBusy(`service-alias-archive-${alias.id}`);
+    setError("");
+    setSuccess("");
+    try {
+      await apiRequest<ServiceAlias>(`/api/salons/${salon.id}/service-aliases`, {
+        method: "POST",
+        body: JSON.stringify({
+          service_id: alias.service_id,
+          alias: alias.alias,
+          source: alias.source,
+          status: "archived",
+          confidence: alias.confidence
+        })
+      });
+      setSuccess("Service alias archived.");
+      await load({ silent: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not archive service alias.");
     } finally {
       setBusy("");
     }
@@ -521,11 +582,18 @@ export function ServicesDashboard() {
           <ServicesTable
             services={filteredServices}
             categories={activeCategories}
+            serviceAliasesByServiceID={serviceAliasesByServiceID}
             busy={busy}
+            serviceAliasDraftServiceID={serviceAliasDraftServiceID}
+            serviceAliasDraft={serviceAliasDraft}
             onEdit={openEditForm}
             onArchive={(service) => void archiveService(service)}
             onUpdateAI={(service, nextValue) => void updateAIBookable(service, nextValue)}
             onAssignCategory={(service, categoryID) => void assignServiceCategory(service, categoryID)}
+            onServiceAliasDraftServiceChange={setServiceAliasDraftServiceID}
+            onServiceAliasDraftChange={setServiceAliasDraft}
+            onAddServiceAlias={(service) => void addServiceAlias(service)}
+            onArchiveServiceAlias={(alias) => void archiveServiceAlias(alias)}
           />
         )}
       </Card>
@@ -951,24 +1019,38 @@ function ServiceForm({
 function ServicesTable({
   services,
   categories,
+  serviceAliasesByServiceID,
   busy,
+  serviceAliasDraftServiceID,
+  serviceAliasDraft,
   onEdit,
   onArchive,
   onUpdateAI,
-  onAssignCategory
+  onAssignCategory,
+  onServiceAliasDraftServiceChange,
+  onServiceAliasDraftChange,
+  onAddServiceAlias,
+  onArchiveServiceAlias
 }: {
   services: POSService[];
   categories: POSServiceCategory[];
+  serviceAliasesByServiceID: Map<string, ServiceAlias[]>;
   busy: string;
+  serviceAliasDraftServiceID: string;
+  serviceAliasDraft: string;
   onEdit: (service: POSService) => void;
   onArchive: (service: POSService) => void;
   onUpdateAI: (service: POSService, nextValue: boolean) => void;
   onAssignCategory: (service: POSService, categoryID: string) => void;
+  onServiceAliasDraftServiceChange: (serviceID: string) => void;
+  onServiceAliasDraftChange: (value: string) => void;
+  onAddServiceAlias: (service: POSService) => void;
+  onArchiveServiceAlias: (alias: ServiceAlias) => void;
 }) {
   return (
     <>
       <div className="mt-5 hidden overflow-x-auto rounded-md border border-line lg:block">
-        <table className="w-full min-w-[1220px] text-left text-sm">
+        <table className="w-full min-w-[1360px] text-left text-sm">
           <thead className="bg-slate-50 text-xs uppercase text-muted">
             <tr>
               <th className="px-4 py-3">Service</th>
@@ -976,6 +1058,7 @@ function ServicesTable({
               <th className="px-4 py-3">Price</th>
               <th className="px-4 py-3">Source</th>
               <th className="px-4 py-3">Category</th>
+              <th className="px-4 py-3">Aliases</th>
               <th className="px-4 py-3">Sync status</th>
               <th className="px-4 py-3">Booking readiness</th>
               <th className="px-4 py-3">Actions</th>
@@ -995,6 +1078,19 @@ function ServicesTable({
                 </td>
                 <td className="px-4 py-3">
                   <CategoryCell service={service} categories={categories} busy={busy} onAssignCategory={onAssignCategory} />
+                </td>
+                <td className="px-4 py-3">
+                  <ServiceAliasesCell
+                    service={service}
+                    aliases={service.id ? serviceAliasesByServiceID.get(service.id) ?? [] : []}
+                    busy={busy}
+                    draftServiceID={serviceAliasDraftServiceID}
+                    draft={serviceAliasDraft}
+                    onDraftServiceChange={onServiceAliasDraftServiceChange}
+                    onDraftChange={onServiceAliasDraftChange}
+                    onAddAlias={onAddServiceAlias}
+                    onArchiveAlias={onArchiveServiceAlias}
+                  />
                 </td>
                 <td className="px-4 py-3">
                   <div className="space-y-1">
@@ -1019,11 +1115,18 @@ function ServicesTable({
             key={service.id || service.pos_service_id || service.name}
             service={service}
             categories={categories}
+            aliases={service.id ? serviceAliasesByServiceID.get(service.id) ?? [] : []}
             busy={busy}
+            serviceAliasDraftServiceID={serviceAliasDraftServiceID}
+            serviceAliasDraft={serviceAliasDraft}
             onEdit={onEdit}
             onArchive={onArchive}
             onUpdateAI={onUpdateAI}
             onAssignCategory={onAssignCategory}
+            onServiceAliasDraftServiceChange={onServiceAliasDraftServiceChange}
+            onServiceAliasDraftChange={onServiceAliasDraftChange}
+            onAddServiceAlias={onAddServiceAlias}
+            onArchiveServiceAlias={onArchiveServiceAlias}
           />
         ))}
       </div>
@@ -1034,19 +1137,33 @@ function ServicesTable({
 function ServiceCard({
   service,
   categories,
+  aliases,
   busy,
+  serviceAliasDraftServiceID,
+  serviceAliasDraft,
   onEdit,
   onArchive,
   onUpdateAI,
-  onAssignCategory
+  onAssignCategory,
+  onServiceAliasDraftServiceChange,
+  onServiceAliasDraftChange,
+  onAddServiceAlias,
+  onArchiveServiceAlias
 }: {
   service: POSService;
   categories: POSServiceCategory[];
+  aliases: ServiceAlias[];
   busy: string;
+  serviceAliasDraftServiceID: string;
+  serviceAliasDraft: string;
   onEdit: (service: POSService) => void;
   onArchive: (service: POSService) => void;
   onUpdateAI: (service: POSService, nextValue: boolean) => void;
   onAssignCategory: (service: POSService, categoryID: string) => void;
+  onServiceAliasDraftServiceChange: (serviceID: string) => void;
+  onServiceAliasDraftChange: (value: string) => void;
+  onAddServiceAlias: (service: POSService) => void;
+  onArchiveServiceAlias: (alias: ServiceAlias) => void;
 }) {
   return (
     <div className="rounded-md border border-line p-4">
@@ -1068,6 +1185,19 @@ function ServiceCard({
       />
       <div className="mt-4">
         <CategoryCell service={service} categories={categories} busy={busy} onAssignCategory={onAssignCategory} />
+      </div>
+      <div className="mt-4">
+        <ServiceAliasesCell
+          service={service}
+          aliases={aliases}
+          busy={busy}
+          draftServiceID={serviceAliasDraftServiceID}
+          draft={serviceAliasDraft}
+          onDraftServiceChange={onServiceAliasDraftServiceChange}
+          onDraftChange={onServiceAliasDraftChange}
+          onAddAlias={onAddServiceAlias}
+          onArchiveAlias={onArchiveServiceAlias}
+        />
       </div>
       <div className="mt-4">
         <AIStatus service={service} />
@@ -1178,6 +1308,106 @@ function CategoryCell({
       )}
       {service.category_confidence && source === "suggested" ? (
         <div className="text-xs text-muted">Confidence {Math.round(service.category_confidence * 100)}%</div>
+      ) : null}
+    </div>
+  );
+}
+
+function ServiceAliasesCell({
+  service,
+  aliases,
+  busy,
+  draftServiceID,
+  draft,
+  onDraftServiceChange,
+  onDraftChange,
+  onAddAlias,
+  onArchiveAlias
+}: {
+  service: POSService;
+  aliases: ServiceAlias[];
+  busy: string;
+  draftServiceID: string;
+  draft: string;
+  onDraftServiceChange: (serviceID: string) => void;
+  onDraftChange: (value: string) => void;
+  onAddAlias: (service: POSService) => void;
+  onArchiveAlias: (alias: ServiceAlias) => void;
+}) {
+  const serviceID = service.id ?? "";
+  const activeAliases = aliases.filter((alias) => alias.status !== "archived");
+  const aliasBusy = busy === `service-alias-${serviceID}`;
+  const draftOpen = serviceID !== "" && draftServiceID === serviceID;
+  const archived = Boolean(service.archived_at);
+  const usedByAI = service.ai_bookable && canEnableAI(service);
+
+  return (
+    <div className="min-w-56">
+      {activeAliases.length > 0 ? (
+        <div className="flex flex-wrap gap-2">
+          {activeAliases.map((alias) => (
+            <span key={alias.id} className="inline-flex items-center gap-1 rounded-full border border-line bg-slate-50 px-2.5 py-1 text-xs font-medium text-ink">
+              {alias.alias}
+              <button
+                type="button"
+                className="text-muted hover:text-red-700"
+                onClick={() => onArchiveAlias(alias)}
+                disabled={busy !== ""}
+                aria-label={`Archive ${alias.alias}`}
+              >
+                <XCircle className="h-3.5 w-3.5" />
+              </button>
+            </span>
+          ))}
+        </div>
+      ) : (
+        <div className="text-xs leading-5 text-muted">No active aliases.</div>
+      )}
+
+      {activeAliases.length > 0 && !usedByAI ? (
+        <div className="mt-2 text-xs leading-5 text-muted">Not used by AI: {serviceAliasGateReason(service)}</div>
+      ) : null}
+
+      {draftOpen ? (
+        <div className="mt-3 flex flex-col gap-2">
+          <input
+            className="h-10 min-w-0 rounded-md border border-line px-3 text-sm text-ink outline-none focus:border-brand"
+            value={draft}
+            onChange={(event) => onDraftChange(event.target.value)}
+            placeholder="Example: shell manicure"
+            disabled={busy !== ""}
+          />
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" onClick={() => onAddAlias(service)} disabled={busy !== "" || !draft.trim()}>
+              {aliasBusy ? "Saving..." : "Save alias"}
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => {
+                onDraftServiceChange("");
+                onDraftChange("");
+              }}
+              disabled={busy !== ""}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : !archived ? (
+        <Button
+          type="button"
+          variant="ghost"
+          className="mt-3"
+          onClick={() => {
+            onDraftServiceChange(serviceID);
+            onDraftChange("");
+          }}
+          disabled={busy !== "" || !serviceID}
+        >
+          <Plus className="h-4 w-4" />
+          Add alias
+        </Button>
       ) : null}
     </div>
   );
@@ -1402,6 +1632,19 @@ function filterServices(services: POSService[], categoryFilter: string, reviewFi
   });
 }
 
+function groupServiceAliasesByServiceID(aliases: ServiceAlias[]) {
+  const byServiceID = new Map<string, ServiceAlias[]>();
+  aliases.forEach((alias) => {
+    const items = byServiceID.get(alias.service_id) ?? [];
+    items.push(alias);
+    byServiceID.set(alias.service_id, items);
+  });
+  byServiceID.forEach((items, serviceID) => {
+    byServiceID.set(serviceID, items.sort(compareServiceAliases));
+  });
+  return byServiceID;
+}
+
 function refreshSummary(refresh: ServiceCategorySuggestionRefresh) {
   return [
     `Category suggestions refreshed: ${refresh.suggested_services} service suggestion${refresh.suggested_services === 1 ? "" : "s"}.`,
@@ -1420,6 +1663,11 @@ function compareServices(a: POSService, b: POSService) {
   return a.name.localeCompare(b.name);
 }
 
+function compareServiceAliases(a: ServiceAlias, b: ServiceAlias) {
+  if (a.status !== b.status) return a.status === "active" ? -1 : 1;
+  return a.alias.localeCompare(b.alias);
+}
+
 function canEnableAI(service: POSService) {
   return (
     service.active &&
@@ -1430,6 +1678,11 @@ function canEnableAI(service: POSService) {
     Boolean(service.pos_service_version) &&
     service.duration_minutes > 0
   );
+}
+
+function serviceAliasGateReason(service: POSService) {
+  if (!service.ai_bookable) return "AI booking is not allowed for this service.";
+  return serviceGateReason(service);
 }
 
 function serviceGateReason(service: POSService) {

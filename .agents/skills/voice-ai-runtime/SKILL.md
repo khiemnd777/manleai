@@ -1,6 +1,6 @@
 ---
 name: voice-ai-runtime
-description: Investigate, design, plan, and only after explicit approval implement AI receptionist, conversation engine, service understanding, service aliases, telephony, SMS, STT, LLM, TTS, transcript, summary, handoff, and voice provider abstractions for this repo. Do not write files until the latest user message explicitly approves the exact change scope.
+description: Investigate, design, plan, and only after explicit approval implement AI receptionist, conversation engine, service understanding, service aliases, service categories, service category aliases, party booking handoff, telephony, SMS, STT, LLM, TTS, transcript, summary, handoff, and voice provider abstractions for this repo. Do not write files until the latest user message explicitly approves the exact change scope.
 ---
 
 # Voice AI Runtime
@@ -25,7 +25,7 @@ transcript, handoff, call lifecycle, and voice booking work across Milestone 4+.
 ## Boundaries
 
 - Conversation Engine owns state, intent, entity extraction, and tool routing.
-- Service understanding belongs in deterministic backend code. Interpret service utterances against active catalog services and active salon-scoped `service_aliases`; exact catalog names beat aliases, aliases beat generic family matching, and fuzzy/generic family matches should ask catalog-backed clarification instead of selecting a service.
+- Service understanding belongs in deterministic backend code. Interpret service utterances against active-provider catalog services, active salon-scoped `service_aliases`, active `service_categories`, and active `service_category_aliases`; exact catalog names beat aliases, service aliases can select one real service, category/category-alias matches ask catalog-backed clarification for a real service in that group, and fuzzy/generic family matches should ask clarification instead of selecting a service.
 - Booking tools call Booking Service.
 - Booking Service calls `POSProvider`.
 - AI runtime must not call Square or read POS tokens.
@@ -43,7 +43,7 @@ transcript, handoff, call lifecycle, and voice booking work across Milestone 4+.
 - Treat service phrases in the customer-name slot as service corrections, not customer names; re-check availability before continuing.
 - Do not invent prices.
 - Use "starting at" when price varies by design, length, add-on, or technician.
-- Transfer to the owner for human requests, complaints, refunds, payment disputes, complex group bookings, and low confidence.
+- Transfer to the owner for human requests, complaints, refunds, payment disputes, complex group bookings, and low confidence. Group or party bookings create structured `party_booking_requests` and must not call booking or availability tools in the current production release.
 - Never say a booking is confirmed unless POS booking succeeded.
 - Tone presets may make a safe reply more natural, human, young, concise, or warm, but must not change required questions, known-slot preservation, handoff decisions, availability checks, or POS confirmation boundaries. Realtime must speak backend-approved replies and must not use independent realtime instructions to bypass those rules.
 
@@ -62,8 +62,9 @@ After explicit approval for the exact voice/runtime scope:
 2. Add persistence for call sessions, transcript, summary, handoff, and booking attempt linkage.
 3. Implement a deterministic simulator before live telephony.
 4. Add tests for state transitions and fallback text.
-5. Add golden conversation regressions for service understanding, alias matches,
-   slot preservation, name-quality, terminal booking replies, and no provider
+5. Add golden conversation regressions for service understanding, service aliases,
+   category/category-alias clarification, party booking handoff, slot
+   preservation, name-quality, terminal booking replies, and no provider
    leakage in customer-facing text.
 6. Wire Twilio/OpenAI/provider specifics behind adapters only.
 7. For AI tone changes, verify `salon_settings.ai_tone` flows into phone/LLM requests, legacy imports default safely, and tone-only changes do not alter booking, handoff, or service-understanding outcomes.

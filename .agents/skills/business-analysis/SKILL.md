@@ -21,6 +21,20 @@ Use this skill before implementation when the request is broad, ambiguous, workf
 - For export/import, sync, webhook, booking, provider, or AI training flows, define stable keys, upsert or dedupe semantics, schema/version impact, and how repeated execution avoids duplicate or rubbish records.
 - Acceptance criteria must include edge cases and regression risks, not only the happy path.
 
+## Product Proposal Gate
+
+Before proposing a product, workflow, UI, or architecture plan:
+
+1. Define the actor workflow: actor, trigger, operational object, user goal, and source of truth.
+2. Identify the existing owner surface: current page, module, adjacent controls, and neighboring workflow that already manages the same operational object.
+3. Identify the primary parent object and data grain before choosing placement. If the requested field/action is a child attribute, child action, learned phrase, mapping, exception, setting, or status of one parent object, place it in that parent object's existing row, card, detail panel, or edit flow by default.
+4. Do not create a standalone panel, page, or management table for child data unless the real workflow is cross-object bulk review, audit, import/export, reporting, deduplication, or conflict resolution.
+5. Remove redundant target selectors when parent context already supplies the target. Do not make the owner choose the current service, staff member, customer, category, or appointment again unless the workflow intentionally moves the child record.
+6. Identify backend/API support separately from user workflow. Backend module names, route grouping, docs section names, and implementation accidents are evidence about implementation, not proof of product placement.
+7. Compare plausible placements or ownership boundaries when the answer is not obvious. Reject the wrong placement explicitly and state the confusion or source-of-truth problem it would create.
+8. Run the failure check before presenting the plan: would this confuse structured operational data with free-text knowledge, provider setup, review/audit state, or unsupported production behavior? If yes, revise the plan first.
+9. Use examples only as examples. Prefer general decision rules over latest-case-specific fixes.
+
 ## Start Here
 
 1. Read `CONTEXT.md` for product language and invariants.

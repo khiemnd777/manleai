@@ -34,10 +34,32 @@ The product rule is strict: never confirm an appointment unless the active POS p
 ## Evidence And Source Discipline
 
 - Do not give vendor-console navigation, setup instructions, or operational diagnoses as bare assertions. Ground them in visible user-provided UI/log text, repository files, command output, or official vendor documentation.
+- When answering current product behavior, inspect the codebase first if the behavior depends on routes, UI, data models, runtime flow, or repository logic.
+- Do not use shorthand labels that mix UI, API, database, and runtime behavior. Split them into separate columns or separate statements.
+- Do not say "A or B", "maybe", "could be", or "X / Y" when codebase evidence can prove the exact current state.
+- For every claim about existing behavior, identify whether it is confirmed by code, confirmed by screenshot/log, inferred, or proposed.
+- If the current code has backend support but no UI, say exactly: "backend exists; UI does not exist."
+- If UI exists in a different page than expected, name the exact page and cite the frontend file.
+- Use options only for future implementation choices. Label them as "proposal", not as current behavior.
+- If correcting a previous answer, state the exact wrong phrase, the corrected statement, and the file evidence.
 - When interpreting logs or screenshots, quote the exact field names, values, timestamps, error codes, and request IDs that support the conclusion. Separate confirmed facts from inference.
 - When recommending where to click in a third-party console, cite the source of that path: current screenshot/appshot, official documentation URL, or clearly label it as an unverified UI-memory guess and ask the user to confirm the screen.
 - Prefer official vendor docs for external-service behavior. Include links when internet sources are used, and avoid half-sourced instructions such as "go to X -> Y" without origin or evidence.
 - If the evidence is insufficient, say exactly what is missing and what needs to be inspected next instead of filling the gap with a confident-sounding answer.
+
+## Product Proposal Quality Gate
+
+- Before proposing any product, UI, workflow, or architecture change, complete the proposal gate mentally and expose the relevant parts in the answer when the decision is non-trivial.
+- Do not choose UI placement, module ownership, or workflow ownership from backend module names, API route grouping, docs section names, existing implementation accidents, or previous assistant claims alone.
+- Identify the actor workflow first: actor, trigger, operational object, user goal, source of truth, and existing neighboring controls.
+- Identify the primary parent object and the grain of the new field/action before choosing UI placement. If the requested data is a child attribute, child action, learned phrase, mapping, exception, setting, or status of one parent object, place it inside that parent object's existing row, card, detail panel, or edit flow by default.
+- Do not create a standalone panel, page, or management table for child data unless the primary workflow is explicitly cross-object bulk review, audit, import/export, reporting, deduplication, or conflict resolution.
+- When a child-control placement is chosen, remove redundant target selectors that are already implied by the parent object. Do not make the owner re-select the service, staff member, customer, category, or appointment currently being edited unless the workflow is intentionally moving the child record to another parent.
+- Compare candidate placements or ownership boundaries when more than one location is plausible. Explicitly reject the wrong placement and state why it would confuse ownership, workflow, or source of truth.
+- Place features near the workflow and operational object they affect. Structured operational data belongs near the operational management surface; free-text policy/FAQ/notes belong near knowledge/training; provider setup belongs near integrations; review/audit workflows must not be treated as the primary management surface unless that is the actual owner workflow.
+- Before presenting a plan, run this failure check: would this confuse structured operational data with free-text knowledge, setup/configuration, provider integration, review/audit state, or unsupported production behavior? If yes, revise the proposal before presenting it.
+- If backend/API grouping conflicts with the owner workflow, explicitly name the conflict and prefer the owner workflow unless the backend contract makes that impossible. If the backend contract is blocking, propose the backend contract change separately.
+- Use examples only as examples. Do not write rules that solve only the latest mistaken case; write the general decision rule that would have prevented it.
 
 ## User Confirmation Gate
 

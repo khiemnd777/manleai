@@ -1,6 +1,6 @@
 ---
 name: salon-ops-workflow
-description: Analyze real nail salon operating workflows for this AI Receptionist repo, including caller journeys, owner handoff, staff/service availability, service-alias corrections, business hours, booking requests, fallback pending review, Square Appointments setup, bilingual support, and dashboard actions. Use when Codex needs to reason about salon operations before designing, implementing, or reviewing product behavior.
+description: Analyze real nail salon operating workflows for this AI Receptionist repo, including caller journeys, owner handoff, staff/service availability, service categories, service-alias/category-alias corrections, structured party booking requests, business hours, booking requests, fallback pending review, Square Appointments setup, bilingual support, and dashboard actions. Use when Codex needs to reason about salon operations before designing, implementing, or reviewing product behavior.
 ---
 
 # Salon Ops Workflow
@@ -35,7 +35,8 @@ Analyze the request across these salon realities:
 
 - Owners are often serving customers while answering exceptions.
 - Callers may ask for prices, hours, walk-ins, reschedules, cancellations, group bookings, or human help before giving full details.
-- Callers may pronounce service names unclearly or use local salon wording. The operational fix is catalog-backed clarification or owner-reviewed `service_aliases`, not per-call guessing or hardcoded keyword patches.
+- Callers may pronounce service names unclearly or use local salon wording. The operational fix is catalog-backed clarification through real services, `service_categories`, owner-reviewed `service_aliases`, or `service_category_aliases`, not per-call guessing or hardcoded keyword patches.
+- Group or party bookings are owner-review requests in the current production release. The AI may collect representative details, party size, requested date/time, and guest services, but should create a structured party request instead of trying to auto-confirm a group appointment.
 - Staff availability, service duration, business hours, and active POS mappings determine whether booking can even be attempted.
 - Square Appointments owns real availability and booking execution in the current production release.
 - POS failure, disconnected Square, missing staff/service mappings, or disabled AI booking must become pending request or handoff behavior, not confirmed appointments.
@@ -48,13 +49,13 @@ For each proposed workflow, identify:
 
 - Entry point: phone call, simulator, dashboard, onboarding, Square setup, training, settings, or support action.
 - Trigger: what user or system event starts the workflow.
-- Required data: salon, services, staff, customer, business hours, POS connection, provider mapping, voice readiness, owner settings.
+- Required data: salon, services, service categories, category aliases, staff, customer, business hours, POS connection, provider mapping, voice readiness, owner settings.
 - Decision gates: AI enabled, Square connected, booking-ready records, availability result, customer details, POS success, owner approval.
 - Success state: what the owner and caller can safely believe happened.
 - Exception states: disabled, blocked, unavailable, fallback pending, handoff, POS error, sync failure, retry needed.
-- Owner action: review, approve, call back, sync, connect Square, enable AI, update services/staff, apply a correction to knowledge or a service alias, edit settings, or dismiss.
+- Owner action: review, approve, call back, sync, connect Square, enable AI, update services/staff/categories, apply a correction to knowledge or a service alias, add category aliases, contact/resolve party requests, edit settings, or dismiss.
 - Repeat behavior: whether the workflow can be retried, resubmitted, imported, synced, or replayed, and what prevents duplicate/rubbish records.
-- Auditability: booking attempt, POS error, sync log, notification, transcript, correction, or dashboard timestamp.
+- Auditability: booking attempt, POS error, sync log, notification, transcript, correction, party request, or dashboard timestamp.
 
 ## Output Shape
 

@@ -9,7 +9,9 @@ Check loading, empty, error, success, disabled, and gated states.
 Verify wording says Square Appointments is the first integration and does not imply unsupported POS or AI booking behavior.
 Look for API contract drift between frontend types and backend responses.
 For AI receptionist settings, verify `ai_tone` is presented as speaking style under Settings, not OpenAI provider setup, and that save/loading/error/disabled states are covered.
+For Services UI, verify service category taxonomy, category aliases, suggestion refresh, accept/clear suggestion actions, filters, and empty/error/success states are operational and do not imply categories are directly bookable services.
 For AI Training or Calls UI, verify owner corrections distinguish knowledge apply vs service-alias apply, show safe statuses, and do not imply an alias is active until the backend confirms it.
+For Calls UI, verify party booking requests are shown as owner-review handoffs, expose contact/resolve/dismiss workflow states, and never imply a confirmed appointment.
 Return concrete findings with file and line references. Do not edit files.
 """
 nickname_candidates = ["UI Reviewer", "Product Lens", "Dashboard QA"]

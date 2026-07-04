@@ -30,6 +30,20 @@ The app is an operational SaaS dashboard for nail salon owners. Keep the UI quie
 
 Read `DESIGN.md` before proposing, implementing, or reviewing dashboard UI. Treat it as the design, UI, and UX contract for tokens, layout, components, page states, copy, responsive behavior, and review criteria.
 
+## UI Placement Gate
+
+Before proposing where a dashboard feature belongs:
+
+1. Name the owner workflow, trigger, operational object, and source of truth.
+2. Inspect existing dashboard pages and name the adjacent controls that already manage related objects.
+3. Identify the primary parent object and data grain. If the feature is a child field, child action, learned phrase, mapping, exception, status, or setting of one parent object, place it in that parent object's row, card, detail panel, or edit flow by default.
+4. Do not create a standalone panel, page, or management table for child data unless the primary owner workflow is cross-object bulk review, audit, import/export, reporting, deduplication, or conflict resolution.
+5. Remove redundant target selectors when the parent object already supplies the target context. Do not ask the owner to choose the current service, staff member, customer, category, or appointment again unless the workflow intentionally moves the child record.
+6. Separate backend/API support from UI placement. Do not place a UI control on a page only because its backend route, module, or docs section is grouped there.
+7. Compare plausible pages and component placements when placement is not obvious. State the chosen placement and at least one rejected placement with the reason it would confuse workflow or ownership.
+8. Place structured operational data near the operational management surface it affects; place free-text policy/FAQ/notes near knowledge/training; place provider setup near integrations; keep review/audit workflows distinct from primary management surfaces.
+9. Before presenting the Mockup as Text, ask whether the placement could make the owner confuse structured operational data with free-text knowledge, setup/configuration, review state, or unsupported production behavior. If yes, revise the placement first.
+
 ## Required Approval Before UI Edits
 
 This skill does not authorize edits by itself.

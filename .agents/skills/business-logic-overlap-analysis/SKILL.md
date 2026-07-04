@@ -21,6 +21,17 @@ Use this skill before implementing or reviewing work that may collide with exist
 - For export/import, sync, webhook, booking, provider, or AI training flows, verify stable keys, upsert or dedupe semantics, schema/version impact, and repeated execution behavior.
 - Do not accept a design where predictable duplicate/rubbish data, misleading state, or unsupported behavior is merely undocumented.
 
+## Proposal Ownership Gate
+
+Before clearing or proposing a plan, verify ownership separately across four axes:
+
+1. User workflow ownership: which actor performs the job, when, and on which operational object.
+2. Data/source-of-truth ownership: which persisted data, provider, or domain rule owns the behavior.
+3. UI surface ownership: which existing page and adjacent controls manage related decisions today.
+4. Backend/API ownership: which route, module, or service supports the operation.
+
+Do not allow backend/API ownership to override user workflow ownership without naming the conflict and explaining why the backend contract requires it. Treat mismatches between workflow, source of truth, UI placement, and backend grouping as potential overlap findings, not as harmless implementation details.
+
 ## Start Here
 
 1. Read `CONTEXT.md` for domain language and invariants.
@@ -43,6 +54,8 @@ Ask these questions before proposing implementation:
 - Do owner corrections update the right data type: reusable knowledge for FAQ/policy, or structured `service_aliases` for service recognition?
 - Does AI tone stay a style-only salon setting flowing through `salon_settings.ai_tone`, `conversation.RuntimeConfig`, `voice.ModelRequest`, and provider adapters without changing booking, handoff, slot, or service-understanding decisions?
 - Does an API response, DTO, or UI label use a different state name than persistence or docs?
+- Is the proposed UI placement based on the owner workflow and operational object, or only on backend module/API/docs grouping?
+- Would the proposed placement confuse structured operational data with free-text knowledge, setup/configuration, provider integration, review/audit state, or unsupported production behavior?
 - Does the requested behavior create a race between availability, booking attempt, appointment write, notification, audit log, or POS error logging?
 - Can the workflow be run, retried, imported, synced, submitted, or replayed more than once, and if so what stable key prevents duplicate or rubbish records?
 - Does the change cross tenant, auth, token, or salon ownership boundaries?
@@ -54,6 +67,7 @@ Classify findings with one or more of these labels:
 - `rule_ownership`: unclear or duplicated owner for a business rule.
 - `state_conflict`: incompatible status names, transitions, or terminal states.
 - `source_of_truth`: frontend, local DB, provider projection, or POS provider treated as authority in the wrong place.
+- `placement_ownership`: UI surface, product workflow, source of truth, or backend/API grouping imply different owners for the same feature.
 - `booking_boundary`: possible confirmed/rescheduled/cancelled appointment without provider success.
 - `workflow_gap`: happy path exists but fallback, disabled, retry, owner review, or handoff path is missing.
 - `api_contract`: backend DTO, frontend type, docs, or mapper disagree.

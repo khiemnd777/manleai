@@ -30,10 +30,11 @@ Use this skill for code review, milestone review, or readiness checks.
 5. Duplicate/rubbish records from missing idempotency, retry, import, sync, webhook, or repeated-submit handling.
 6. Missing POS error, sync log, booking attempt, audit, or notification records.
 7. Frontend UI that implies unavailable production behavior.
-8. Service-understanding drift: hardcoded salon keywords, aliases not scoped by salon, fuzzy matches selecting services, or missing transcript metadata for why a service was selected.
-9. AI tone drift: style settings bypass backend-approved replies, alter booking/handoff/slot behavior, or are documented as provider config instead of salon settings.
-10. Missing tests around critical booking/auth/POS/conversation-understanding paths.
-11. Documentation drift around env vars, API routes, or milestone scope.
+8. Service-understanding drift: hardcoded salon keywords, aliases or category aliases not scoped by salon, service alias/category alias conflicts, category/fuzzy matches selecting services instead of clarifying, or missing transcript metadata for why a service or category was selected.
+9. Party/group booking drift: group requests calling availability or booking tools, missing idempotent `party_booking_requests`, or UI/caller wording that implies a confirmed appointment.
+10. AI tone drift: style settings bypass backend-approved replies, alter booking/handoff/slot behavior, or are documented as provider config instead of salon settings.
+11. Missing tests around critical booking/auth/POS/conversation-understanding paths.
+12. Documentation drift around env vars, API routes, or milestone scope.
 
 ## Review Method
 
