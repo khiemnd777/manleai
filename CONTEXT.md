@@ -23,10 +23,19 @@ A salon-scoped speaking-style preset stored on `salon_settings.ai_tone`. It can 
 The state machine and tool-calling layer behind the AI Receptionist. It must not know Square payloads, OAuth tokens, or provider-specific booking details.
 
 **Service Understanding**
-The backend-owned interpretation layer that maps customer service utterances to active salon services. It uses the salon catalog and active service aliases, asks clarification for generic or fuzzy family matches, and records diagnostic transcript metadata.
+The backend-owned interpretation layer that maps customer service utterances to active salon services. It uses the salon catalog, service categories, active service aliases, and active service category aliases; asks clarification for category, generic, or fuzzy family matches; and records diagnostic transcript metadata.
 
 **Service Alias**
 A salon-scoped learned phrase for a real service, stored in `service_aliases` with a normalized alias key. Owner corrections can create or update service aliases; aliases are operational data, not prompt text.
+
+**Service Category**
+A salon-scoped menu group such as Manicure, Pedicure, Acrylic, Dip Powder, or Removal, stored in `service_categories`. Categories help the AI answer and clarify grouped service requests; they do not replace real services and are not directly bookable.
+
+**Service Category Alias**
+A salon-scoped phrase for a service category, stored in `service_category_aliases` with a normalized alias key. Category aliases route broad caller wording such as "mani" or "take off" to a category-level clarification, not to a single service.
+
+**Party Booking Request**
+A structured owner-review request for group or multi-person bookings. The AI can collect representative details, party size, requested date or time window, and requested guest services, but it must not confirm a party booking unless a future POS-confirmed workflow explicitly supports it.
 
 **Booking Service**
 The internal domain service that creates, reschedules, cancels, and records appointments through the active `POSProvider`.
@@ -67,6 +76,8 @@ A normalized, salon-scoped record of provider failures. Use codes such as `POS_T
 - Internal calendar records are mirrors or logs, not the source of booking truth in production.
 - ManleAI owns canonical salon operational data; the active POS owns booking execution.
 - Service recognition must be catalog-backed and salon-scoped. Do not hardcode per-salon service keywords into prompts or generic matchers.
+- Service categories are menu/understanding configuration, not confirmed-booking entities. Category matches should clarify to real services before availability or booking.
+- Group or party booking requests require owner review in the current production release and must not be described as confirmed appointments.
 - AI tone changes reply style only. It must not change required booking slots, handoff decisions, availability checks, service selection, or confirmed-booking wording.
 - Square is the first real integration; future POS names are architecture targets, not implemented features.
 - Vietnamese language support is product scope, but English remains the primary commercial release language unless a feature explicitly says otherwise.

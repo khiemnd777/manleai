@@ -38,7 +38,7 @@ OpenAI's subagent docs say project-scoped custom agents live under `.codex/agent
 
 - Owner UI: `/dashboard/settings` exposes `Speaking style` and saves `ai_tone`.
 - API and persistence: `GET/PUT /api/salons/:id/settings` reads and writes `salon_settings.ai_tone`.
-- Config transfer: `manleai.salon_configuration.v3` includes `ai_receptionist.ai_tone`; legacy imports default to `professional_warm`.
+- Config transfer: `manleai.salon_configuration.v4` includes `ai_receptionist.ai_tone` and the service category taxonomy; legacy v1-v3 imports default missing tone to `professional_warm`.
 - Runtime path: `conversation.RuntimeConfig` -> `voice.ModelRequest` -> provider-specific reply adapters.
 - Guardrail: tone changes spoken style only. Slot collection, handoff routing, service understanding, availability, and POS-first confirmation remain backend-owned.
 

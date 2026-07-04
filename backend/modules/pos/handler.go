@@ -27,6 +27,142 @@ func (h *Handler) Services(c *fiber.Ctx) error {
 	return respond.JSON(c, fiber.StatusOK, fiber.Map{"services": items})
 }
 
+func (h *Handler) ServiceCategories(c *fiber.Ctx) error {
+	items, err := h.service.ServiceCategories(c.UserContext(), c.Params("id"), middleware.UserID(c))
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORIES_FAILED", "Could not load service categories.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service_categories": items})
+}
+
+func (h *Handler) CreateServiceCategory(c *fiber.Ctx) error {
+	req, err := parseServiceCategoryWriteRequest(c)
+	if err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body must include a valid service category.")
+	}
+	item, err := h.service.CreateServiceCategory(c.UserContext(), c.Params("id"), middleware.UserID(c), *req)
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Service category name must be valid.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORY_CREATE_FAILED", "Could not create service category.")
+	}
+	return respond.JSON(c, fiber.StatusCreated, fiber.Map{"service_category": item})
+}
+
+func (h *Handler) UpdateServiceCategory(c *fiber.Ctx) error {
+	req, err := parseServiceCategoryWriteRequest(c)
+	if err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body must include a valid service category.")
+	}
+	item, err := h.service.UpdateServiceCategory(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("category_id"), *req)
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Service category name must be valid.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SERVICE_CATEGORY_NOT_FOUND", "Service category was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORY_UPDATE_FAILED", "Could not update service category.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service_category": item})
+}
+
+func (h *Handler) ArchiveServiceCategory(c *fiber.Ctx) error {
+	item, err := h.service.ArchiveServiceCategory(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("category_id"))
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Service category cannot be archived.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SERVICE_CATEGORY_NOT_FOUND", "Service category was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORY_ARCHIVE_FAILED", "Could not archive service category.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service_category": item})
+}
+
+func (h *Handler) RestoreServiceCategory(c *fiber.Ctx) error {
+	item, err := h.service.RestoreServiceCategory(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("category_id"))
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Service category cannot be restored.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SERVICE_CATEGORY_NOT_FOUND", "Service category was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORY_RESTORE_FAILED", "Could not restore service category.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service_category": item})
+}
+
+func (h *Handler) UpsertServiceCategoryAlias(c *fiber.Ctx) error {
+	req, err := parseServiceCategoryAliasWriteRequest(c)
+	if err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body must include a valid category alias.")
+	}
+	item, err := h.service.UpsertServiceCategoryAlias(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("category_id"), *req)
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Alias conflicts with an active service alias or is invalid.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SERVICE_CATEGORY_NOT_FOUND", "Service category was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORY_ALIAS_SAVE_FAILED", "Could not save service category alias.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service_category_alias": item})
+}
+
+func (h *Handler) ArchiveServiceCategoryAlias(c *fiber.Ctx) error {
+	item, err := h.service.ArchiveServiceCategoryAlias(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("alias_id"))
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Service category alias cannot be archived.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SERVICE_CATEGORY_ALIAS_NOT_FOUND", "Service category alias was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORY_ALIAS_ARCHIVE_FAILED", "Could not archive service category alias.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service_category_alias": item})
+}
+
+func (h *Handler) AssignServiceCategory(c *fiber.Ctx) error {
+	req, err := parseServiceCategoryAssignRequest(c)
+	if err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body must include service_category_id.")
+	}
+	item, err := h.service.AssignServiceCategory(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("service_id"), *req)
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Service category assignment is invalid.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SERVICE_OR_CATEGORY_NOT_FOUND", "Service or category was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORY_ASSIGN_FAILED", "Could not assign service category.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service": item})
+}
+
+func (h *Handler) RefreshServiceCategorySuggestions(c *fiber.Ctx) error {
+	result, err := h.service.RefreshServiceCategorySuggestions(c.UserContext(), c.Params("id"), middleware.UserID(c))
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORY_SUGGESTION_REFRESH_FAILED", "Could not refresh service category suggestions.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"refresh": result})
+}
+
 func (h *Handler) CreateService(c *fiber.Ctx) error {
 	req, err := parseServiceWriteRequest(c)
 	if err != nil {
@@ -266,6 +402,30 @@ type updateAIBookableRequest struct {
 
 func parseServiceWriteRequest(c *fiber.Ctx) (*ServiceWriteRequest, error) {
 	var req ServiceWriteRequest
+	if err := c.BodyParser(&req); err != nil {
+		return nil, err
+	}
+	return &req, nil
+}
+
+func parseServiceCategoryWriteRequest(c *fiber.Ctx) (*ServiceCategoryWriteRequest, error) {
+	var req ServiceCategoryWriteRequest
+	if err := c.BodyParser(&req); err != nil {
+		return nil, err
+	}
+	return &req, nil
+}
+
+func parseServiceCategoryAliasWriteRequest(c *fiber.Ctx) (*ServiceCategoryAliasWriteRequest, error) {
+	var req ServiceCategoryAliasWriteRequest
+	if err := c.BodyParser(&req); err != nil {
+		return nil, err
+	}
+	return &req, nil
+}
+
+func parseServiceCategoryAssignRequest(c *fiber.Ctx) (*ServiceCategoryAssignRequest, error) {
+	var req ServiceCategoryAssignRequest
 	if err := c.BodyParser(&req); err != nil {
 		return nil, err
 	}

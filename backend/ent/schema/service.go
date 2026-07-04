@@ -32,6 +32,11 @@ func (Service) Fields() []ent.Field {
 		field.Time("last_synced_at").Optional().Nillable(),
 		field.String("sync_error").Optional(),
 		field.String("source").Default("local"),
+		field.UUID("service_category_id", uuid.UUID{}).Optional().Nillable(),
+		field.String("service_category_source").Default("unassigned"),
+		field.Float("service_category_confidence").Optional(),
+		field.UUID("service_category_reviewed_by", uuid.UUID{}).Optional().Nillable(),
+		field.Time("service_category_reviewed_at").Optional().Nillable(),
 		field.Time("created_at").Default(time.Now),
 		field.Time("updated_at").Default(time.Now).UpdateDefault(time.Now),
 	}

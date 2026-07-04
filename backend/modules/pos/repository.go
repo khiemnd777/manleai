@@ -17,6 +17,13 @@ type Repository struct {
 	db *sql.DB
 }
 
+type serviceCategorySuggestionRule struct {
+	CategoryID   string
+	CategoryName string
+	Phrase       string
+	Confidence   float64
+}
+
 func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
 }
@@ -734,10 +741,15 @@ func (r *Repository) ListServices(ctx context.Context, salonID string, provider 
 		             AND link.provider = svc.pos_provider
 		             AND link.provider_entity_id IS NOT NULL
 		             AND link.sync_status = 'synced'
-		       ) AS pos_linked
+		       ) AS pos_linked,
+		       COALESCE(cat.id::text, ''), COALESCE(cat.name, ''), COALESCE(cat.slug, ''),
+		       svc.service_category_source, COALESCE(svc.service_category_confidence, 0), svc.service_category_reviewed_at
 		FROM services svc
+		LEFT JOIN service_categories cat ON cat.id = svc.service_category_id
+		                                AND cat.salon_id = svc.salon_id
+		                                AND cat.status = 'active'
 		WHERE svc.salon_id = $1 AND svc.pos_provider = $2
-		ORDER BY (svc.archived_at IS NOT NULL) ASC, svc.active DESC, svc.name ASC
+		ORDER BY (svc.archived_at IS NOT NULL) ASC, svc.active DESC, COALESCE(cat.sort_order, 9999), COALESCE(cat.name, ''), svc.name ASC
 	`, salonID, provider)
 	if err != nil {
 		return nil, err
@@ -755,9 +767,369 @@ func (r *Repository) ListServices(ctx context.Context, salonID string, provider 
 	return items, rows.Err()
 }
 
+func (r *Repository) ListServiceCategories(ctx context.Context, salonID string, ownerUserID string) ([]ServiceCategory, error) {
+	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT cat.id::text, cat.salon_id::text, cat.name, cat.slug, COALESCE(cat.description, ''),
+		       cat.status, cat.sort_order, cat.source, COUNT(svc.id)::int,
+		       cat.reviewed_at, cat.archived_at, cat.created_at, cat.updated_at
+		FROM service_categories cat
+		LEFT JOIN services svc ON svc.service_category_id = cat.id
+		                      AND svc.salon_id = cat.salon_id
+		                      AND svc.archived_at IS NULL
+		WHERE cat.salon_id = $1
+		GROUP BY cat.id
+		ORDER BY (cat.status = 'archived') ASC, cat.sort_order ASC, cat.name ASC
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]ServiceCategory, 0)
+	for rows.Next() {
+		item, err := scanServiceCategory(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	aliases, err := r.listServiceCategoryAliases(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	byCategory := map[string][]ServiceCategoryAlias{}
+	for _, alias := range aliases {
+		byCategory[alias.CategoryID] = append(byCategory[alias.CategoryID], alias)
+	}
+	for i := range items {
+		items[i].Aliases = byCategory[items[i].ID]
+	}
+	return items, nil
+}
+
+func (r *Repository) CreateServiceCategory(ctx context.Context, salonID string, ownerUserID string, input ServiceCategoryMutation) (*ServiceCategory, error) {
+	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	row := r.db.QueryRowContext(ctx, `
+		INSERT INTO service_categories (
+			salon_id, name, slug, description, sort_order, source, reviewed_by, reviewed_at
+		)
+		VALUES ($1, $2, $3, NULLIF($4, ''), $5, 'manual', $6, now())
+		RETURNING id::text, salon_id::text, name, slug, COALESCE(description, ''), status, sort_order,
+		          source, 0::int, reviewed_at, archived_at, created_at, updated_at
+	`, salonID, input.Name, input.Slug, input.Description, input.SortOrder, ownerUserID)
+	return scanServiceCategory(row)
+}
+
+func (r *Repository) UpdateServiceCategory(ctx context.Context, salonID string, ownerUserID string, categoryID string, input ServiceCategoryMutation) (*ServiceCategory, error) {
+	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	row := r.db.QueryRowContext(ctx, `
+		UPDATE service_categories
+		SET name = $1,
+		    slug = $2,
+		    description = NULLIF($3, ''),
+		    sort_order = $4,
+		    reviewed_by = $5,
+		    reviewed_at = now(),
+		    updated_at = now()
+		WHERE id = $6
+		  AND salon_id = $7
+		RETURNING id::text, salon_id::text, name, slug, COALESCE(description, ''), status, sort_order,
+		          source,
+		          (SELECT COUNT(*)::int FROM services WHERE service_category_id = service_categories.id AND archived_at IS NULL),
+		          reviewed_at, archived_at, created_at, updated_at
+	`, input.Name, input.Slug, input.Description, input.SortOrder, ownerUserID, categoryID, salonID)
+	return scanServiceCategory(row)
+}
+
+func (r *Repository) ArchiveServiceCategory(ctx context.Context, salonID string, ownerUserID string, categoryID string) (*ServiceCategory, error) {
+	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	row := tx.QueryRowContext(ctx, `
+		UPDATE service_categories
+		SET status = 'archived',
+		    archived_at = COALESCE(archived_at, now()),
+		    updated_at = now()
+		WHERE id = $1
+		  AND salon_id = $2
+		RETURNING id::text, salon_id::text, name, slug, COALESCE(description, ''), status, sort_order,
+		          source, 0::int, reviewed_at, archived_at, created_at, updated_at
+	`, categoryID, salonID)
+	item, err := scanServiceCategory(row)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE services
+		SET service_category_id = NULL,
+		    service_category_source = 'unassigned',
+		    service_category_confidence = NULL,
+		    service_category_reviewed_by = NULL,
+		    service_category_reviewed_at = NULL,
+		    updated_at = now()
+		WHERE salon_id = $1
+		  AND service_category_id = $2
+	`, salonID, categoryID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE service_category_aliases
+		SET status = 'archived',
+		    updated_at = now()
+		WHERE salon_id = $1
+		  AND category_id = $2
+	`, salonID, categoryID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return item, nil
+}
+
+func (r *Repository) RestoreServiceCategory(ctx context.Context, salonID string, ownerUserID string, categoryID string) (*ServiceCategory, error) {
+	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	row := r.db.QueryRowContext(ctx, `
+		UPDATE service_categories
+		SET status = 'active',
+		    archived_at = NULL,
+		    reviewed_by = $1,
+		    reviewed_at = now(),
+		    updated_at = now()
+		WHERE id = $2
+		  AND salon_id = $3
+		RETURNING id::text, salon_id::text, name, slug, COALESCE(description, ''), status, sort_order,
+		          source,
+		          (SELECT COUNT(*)::int FROM services WHERE service_category_id = service_categories.id AND archived_at IS NULL),
+		          reviewed_at, archived_at, created_at, updated_at
+	`, ownerUserID, categoryID, salonID)
+	return scanServiceCategory(row)
+}
+
+func (r *Repository) UpsertServiceCategoryAlias(ctx context.Context, salonID string, ownerUserID string, input ServiceCategoryAliasMutation) (*ServiceCategoryAlias, error) {
+	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	if err := r.ensureActiveCategory(ctx, salonID, ownerUserID, input.CategoryID); err != nil {
+		return nil, err
+	}
+	var conflictingServiceAlias bool
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM service_aliases
+			WHERE salon_id = $1
+			  AND normalized_alias = $2
+			  AND status = 'active'
+		)
+	`, salonID, input.NormalizedAlias).Scan(&conflictingServiceAlias); err != nil {
+		return nil, err
+	}
+	if conflictingServiceAlias {
+		return nil, ErrValidation
+	}
+	row := r.db.QueryRowContext(ctx, `
+		INSERT INTO service_category_aliases (
+			salon_id, category_id, alias, normalized_alias, source, status, confidence
+		)
+		VALUES ($1, $2, $3, $4, 'owner', 'active', $5)
+		ON CONFLICT (salon_id, normalized_alias)
+		DO UPDATE SET category_id = EXCLUDED.category_id,
+		              alias = EXCLUDED.alias,
+		              source = 'owner',
+		              status = 'active',
+		              confidence = EXCLUDED.confidence,
+		              updated_at = now()
+		RETURNING id::text, salon_id::text, category_id::text,
+		          (SELECT name FROM service_categories WHERE id = service_category_aliases.category_id),
+		          alias, normalized_alias, source, status, confidence, created_at, updated_at
+	`, salonID, input.CategoryID, input.Alias, input.NormalizedAlias, input.Confidence)
+	return scanServiceCategoryAlias(row)
+}
+
+func (r *Repository) ArchiveServiceCategoryAlias(ctx context.Context, salonID string, ownerUserID string, aliasID string) (*ServiceCategoryAlias, error) {
+	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	row := r.db.QueryRowContext(ctx, `
+		UPDATE service_category_aliases
+		SET status = 'archived',
+		    updated_at = now()
+		WHERE id = $1
+		  AND salon_id = $2
+		RETURNING id::text, salon_id::text, category_id::text,
+		          (SELECT name FROM service_categories WHERE id = service_category_aliases.category_id),
+		          alias, normalized_alias, source, status, confidence, created_at, updated_at
+	`, aliasID, salonID)
+	return scanServiceCategoryAlias(row)
+}
+
+func (r *Repository) AssignServiceCategory(ctx context.Context, salonID string, ownerUserID string, serviceID string, categoryID string) (*Service, error) {
+	if _, err := r.getServiceForOwner(ctx, salonID, ownerUserID, serviceID); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(categoryID) != "" {
+		if err := r.ensureActiveCategory(ctx, salonID, ownerUserID, categoryID); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := r.db.ExecContext(ctx, `
+		UPDATE services
+		SET service_category_id = NULLIF($1, '')::uuid,
+		    service_category_source = CASE WHEN NULLIF($1, '') IS NULL THEN 'unassigned' ELSE 'manual' END,
+		    service_category_confidence = CASE WHEN NULLIF($1, '') IS NULL THEN NULL ELSE 1.000 END,
+		    service_category_reviewed_by = CASE WHEN NULLIF($1, '') IS NULL THEN NULL ELSE $2::uuid END,
+		    service_category_reviewed_at = CASE WHEN NULLIF($1, '') IS NULL THEN NULL ELSE now() END,
+		    updated_at = now()
+		WHERE id = $3
+		  AND salon_id = $4
+	`, categoryID, ownerUserID, serviceID, salonID); err != nil {
+		return nil, err
+	}
+	return r.getServiceForOwner(ctx, salonID, ownerUserID, serviceID)
+}
+
+func (r *Repository) RefreshServiceCategorySuggestions(ctx context.Context, salonID string, ownerUserID string, seeds []ServiceCategorySeed) (*ServiceCategorySuggestionRefresh, error) {
+	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	result := &ServiceCategorySuggestionRefresh{}
+	for _, seed := range seeds {
+		slug := strings.TrimSpace(seed.Slug)
+		if slug == "" {
+			slug = normalizeCategorySlug(seed.Name)
+		}
+		if strings.TrimSpace(seed.Name) == "" || slug == "" {
+			continue
+		}
+		categoryID, status, created, restored, err := upsertSystemServiceCategory(ctx, tx, salonID, seed, slug)
+		if err != nil {
+			return nil, err
+		}
+		if created {
+			result.CreatedCategories++
+		}
+		if restored {
+			result.RestoredSystemCategories++
+		}
+		if status == ServiceCategoryStatusActive {
+			for _, alias := range seed.Aliases {
+				createdAlias, updatedAlias, skippedConflict, err := upsertSystemServiceCategoryAlias(ctx, tx, salonID, categoryID, alias)
+				if err != nil {
+					return nil, err
+				}
+				if createdAlias {
+					result.CreatedAliases++
+				}
+				if updatedAlias {
+					result.UpdatedSystemAliases++
+				}
+				if skippedConflict {
+					result.SkippedAliasConflicts++
+				}
+			}
+		}
+	}
+
+	rules, err := serviceCategorySuggestionRules(ctx, tx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id::text, name, COALESCE(service_category_id::text, ''), service_category_source
+		FROM services
+		WHERE salon_id = $1
+		  AND archived_at IS NULL
+		ORDER BY name ASC
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+
+	for rows.Next() {
+		var serviceID, serviceName, currentCategoryID, source string
+		if err := rows.Scan(&serviceID, &serviceName, &currentCategoryID, &source); err != nil {
+			return nil, err
+		}
+		if source != ServiceCategoryAssignmentUnassigned && source != ServiceCategoryAssignmentSuggested {
+			result.SkippedReviewedServices++
+			continue
+		}
+		rule, matched, ambiguous := bestServiceCategorySuggestion(serviceName, rules)
+		if ambiguous {
+			result.SkippedAmbiguousServices++
+			continue
+		}
+		if !matched {
+			result.UnmatchedUnreviewedServices++
+			continue
+		}
+		if currentCategoryID == rule.CategoryID && source == ServiceCategoryAssignmentSuggested {
+			continue
+		}
+		execResult, err := tx.ExecContext(ctx, `
+			UPDATE services
+			SET service_category_id = $1::uuid,
+			    service_category_source = 'suggested',
+			    service_category_confidence = $2,
+			    service_category_reviewed_by = NULL,
+			    service_category_reviewed_at = NULL,
+			    updated_at = now()
+			WHERE id = $3
+			  AND salon_id = $4
+			  AND (service_category_source IN ('unassigned', 'suggested') OR service_category_id IS NULL)
+		`, rule.CategoryID, rule.Confidence, serviceID, salonID)
+		if err != nil {
+			return nil, err
+		}
+		if affected, err := execResult.RowsAffected(); err == nil && affected > 0 {
+			result.SuggestedServices++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 func (r *Repository) CreateService(ctx context.Context, salonID string, ownerUserID string, provider string, input ServiceMutation) (*Service, error) {
 	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(input.ServiceCategoryID) != "" {
+		if err := r.ensureActiveCategory(ctx, salonID, ownerUserID, input.ServiceCategoryID); err != nil {
+			return nil, err
+		}
 	}
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
@@ -773,11 +1145,20 @@ func (r *Repository) CreateService(ctx context.Context, salonID string, ownerUse
 	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO services (
 			salon_id, pos_provider, pos_service_id, name, description, ai_description, duration_minutes,
-			price_from, price_display, ai_bookable, active, sync_status, archived_at, last_synced_at, sync_error, source
+			price_from, price_display, ai_bookable, active, sync_status, archived_at, last_synced_at, sync_error, source,
+			service_category_id, service_category_source, service_category_confidence, service_category_reviewed_by, service_category_reviewed_at
 		)
-		VALUES ($1, $2, NULL, $3, NULLIF($4, ''), NULLIF($5, ''), $6, $7, NULL, false, $8, 'local_only', NULL, NULL, NULL, 'local')
+		VALUES (
+			$1, $2, NULL, $3, NULLIF($4, ''), NULLIF($5, ''), $6, $7, NULL, false, $8,
+			'local_only', NULL, NULL, NULL, 'local',
+			NULLIF($9, '')::uuid,
+			CASE WHEN NULLIF($9, '') IS NULL THEN 'unassigned' ELSE 'manual' END,
+			CASE WHEN NULLIF($9, '') IS NULL THEN NULL ELSE 1.000 END,
+			CASE WHEN NULLIF($9, '') IS NULL THEN NULL ELSE $10::uuid END,
+			CASE WHEN NULLIF($9, '') IS NULL THEN NULL ELSE now() END
+		)
 		RETURNING id::text
-	`, salonID, provider, input.Name, input.Description, input.AIDescription, input.DurationMinutes, servicePriceValue(input.PriceFrom), input.Active).Scan(&serviceID); err != nil {
+	`, salonID, provider, input.Name, input.Description, input.AIDescription, input.DurationMinutes, servicePriceValue(input.PriceFrom), input.Active, input.ServiceCategoryID, ownerUserID).Scan(&serviceID); err != nil {
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -809,6 +1190,11 @@ func (r *Repository) UpdateService(ctx context.Context, salonID string, ownerUse
 	if current.ArchivedAt != nil {
 		return nil, ErrValidation
 	}
+	if strings.TrimSpace(input.ServiceCategoryID) != "" {
+		if err := r.ensureActiveCategory(ctx, salonID, ownerUserID, input.ServiceCategoryID); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := r.db.ExecContext(ctx, `
 		UPDATE services
 		SET name = $1,
@@ -819,10 +1205,15 @@ func (r *Repository) UpdateService(ctx context.Context, salonID string, ownerUse
 		    price_display = NULL,
 		    active = $6,
 		    ai_bookable = CASE WHEN $6 THEN ai_bookable ELSE false END,
+		    service_category_id = NULLIF($9, '')::uuid,
+		    service_category_source = CASE WHEN NULLIF($9, '') IS NULL THEN 'unassigned' ELSE 'manual' END,
+		    service_category_confidence = CASE WHEN NULLIF($9, '') IS NULL THEN NULL ELSE 1.000 END,
+		    service_category_reviewed_by = CASE WHEN NULLIF($9, '') IS NULL THEN NULL ELSE $10::uuid END,
+		    service_category_reviewed_at = CASE WHEN NULLIF($9, '') IS NULL THEN NULL ELSE now() END,
 		    updated_at = now()
 		WHERE id = $7
 		  AND salon_id = $8
-	`, input.Name, input.Description, input.AIDescription, input.DurationMinutes, servicePriceValue(input.PriceFrom), input.Active, serviceID, salonID); err != nil {
+	`, input.Name, input.Description, input.AIDescription, input.DurationMinutes, servicePriceValue(input.PriceFrom), input.Active, serviceID, salonID, input.ServiceCategoryID, ownerUserID); err != nil {
 		return nil, err
 	}
 	return r.getServiceForOwner(ctx, salonID, ownerUserID, serviceID)
@@ -1032,8 +1423,13 @@ func (r *Repository) GetServiceForSync(ctx context.Context, salonID string, serv
 		             AND link.provider = svc.pos_provider
 		             AND link.provider_entity_id IS NOT NULL
 		             AND link.sync_status = 'synced'
-		       ) AS pos_linked
+		       ) AS pos_linked,
+		       COALESCE(cat.id::text, ''), COALESCE(cat.name, ''), COALESCE(cat.slug, ''),
+		       svc.service_category_source, COALESCE(svc.service_category_confidence, 0), svc.service_category_reviewed_at
 		FROM services svc
+		LEFT JOIN service_categories cat ON cat.id = svc.service_category_id
+		                                AND cat.salon_id = svc.salon_id
+		                                AND cat.status = 'active'
 		WHERE svc.id = $1
 		  AND svc.salon_id = $2
 	`, serviceID, salonID)
@@ -1518,8 +1914,13 @@ func (r *Repository) getServiceForOwner(ctx context.Context, salonID string, own
 		             AND link.provider = svc.pos_provider
 		             AND link.provider_entity_id IS NOT NULL
 		             AND link.sync_status = 'synced'
-		       ) AS pos_linked
+		       ) AS pos_linked,
+		       COALESCE(cat.id::text, ''), COALESCE(cat.name, ''), COALESCE(cat.slug, ''),
+		       svc.service_category_source, COALESCE(svc.service_category_confidence, 0), svc.service_category_reviewed_at
 		FROM services svc
+		LEFT JOIN service_categories cat ON cat.id = svc.service_category_id
+		                                AND cat.salon_id = svc.salon_id
+		                                AND cat.status = 'active'
 		JOIN salons salon ON salon.id = svc.salon_id
 		WHERE svc.id = $1
 		  AND svc.salon_id = $2
@@ -1735,6 +2136,7 @@ func scanService(row rowScanner) (*Service, error) {
 	var item Service
 	var archivedAt sql.NullTime
 	var lastSyncedAt sql.NullTime
+	var categoryReviewedAt sql.NullTime
 	err := row.Scan(
 		&item.ID,
 		&item.SalonID,
@@ -1755,6 +2157,12 @@ func scanService(row rowScanner) (*Service, error) {
 		&item.SyncError,
 		&item.Source,
 		&item.POSLinked,
+		&item.ServiceCategoryID,
+		&item.CategoryName,
+		&item.CategorySlug,
+		&item.CategorySource,
+		&item.CategoryConfidence,
+		&categoryReviewedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -1768,7 +2176,315 @@ func scanService(row rowScanner) (*Service, error) {
 	if lastSyncedAt.Valid {
 		item.LastSyncedAt = &lastSyncedAt.Time
 	}
+	if categoryReviewedAt.Valid {
+		item.CategoryReviewedAt = &categoryReviewedAt.Time
+	}
 	return &item, nil
+}
+
+func scanServiceCategory(row rowScanner) (*ServiceCategory, error) {
+	var item ServiceCategory
+	var reviewedAt sql.NullTime
+	var archivedAt sql.NullTime
+	err := row.Scan(
+		&item.ID,
+		&item.SalonID,
+		&item.Name,
+		&item.Slug,
+		&item.Description,
+		&item.Status,
+		&item.SortOrder,
+		&item.Source,
+		&item.ServiceCount,
+		&reviewedAt,
+		&archivedAt,
+		&item.CreatedAt,
+		&item.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if reviewedAt.Valid {
+		item.ReviewedAt = &reviewedAt.Time
+	}
+	if archivedAt.Valid {
+		item.ArchivedAt = &archivedAt.Time
+	}
+	return &item, nil
+}
+
+func scanServiceCategoryAlias(row rowScanner) (*ServiceCategoryAlias, error) {
+	var item ServiceCategoryAlias
+	err := row.Scan(
+		&item.ID,
+		&item.SalonID,
+		&item.CategoryID,
+		&item.CategoryName,
+		&item.Alias,
+		&item.NormalizedAlias,
+		&item.Source,
+		&item.Status,
+		&item.Confidence,
+		&item.CreatedAt,
+		&item.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func upsertSystemServiceCategory(ctx context.Context, tx *sql.Tx, salonID string, seed ServiceCategorySeed, slug string) (string, string, bool, bool, error) {
+	var existingID, existingStatus, existingSource string
+	err := tx.QueryRowContext(ctx, `
+		SELECT id::text, status, source
+		FROM service_categories
+		WHERE salon_id = $1
+		  AND slug = $2
+	`, salonID, slug).Scan(&existingID, &existingStatus, &existingSource)
+	if errors.Is(err, sql.ErrNoRows) {
+		var categoryID, status string
+		err = tx.QueryRowContext(ctx, `
+			INSERT INTO service_categories (
+				salon_id, name, slug, description, sort_order, source, status
+			)
+			VALUES ($1, $2, $3, NULLIF($4, ''), $5, 'system', 'active')
+			RETURNING id::text, status
+		`, salonID, strings.TrimSpace(seed.Name), slug, strings.TrimSpace(seed.Description), seed.SortOrder).Scan(&categoryID, &status)
+		return categoryID, status, true, false, err
+	}
+	if err != nil {
+		return "", "", false, false, err
+	}
+	if existingSource != ServiceCategorySourceSystem {
+		return existingID, existingStatus, false, false, nil
+	}
+	restored := existingStatus == ServiceCategoryStatusArchived
+	var status string
+	err = tx.QueryRowContext(ctx, `
+		UPDATE service_categories
+		SET name = $1,
+		    description = NULLIF($2, ''),
+		    sort_order = $3,
+		    status = 'active',
+		    archived_at = NULL,
+		    updated_at = now()
+		WHERE id = $4
+		  AND salon_id = $5
+		RETURNING status
+	`, strings.TrimSpace(seed.Name), strings.TrimSpace(seed.Description), seed.SortOrder, existingID, salonID).Scan(&status)
+	return existingID, status, false, restored, err
+}
+
+func upsertSystemServiceCategoryAlias(ctx context.Context, tx *sql.Tx, salonID string, categoryID string, alias string) (bool, bool, bool, error) {
+	alias = strings.TrimSpace(alias)
+	normalized := normalizeAliasKey(alias)
+	if alias == "" || normalized == "" {
+		return false, false, false, nil
+	}
+	var serviceAliasConflict bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM service_aliases
+			WHERE salon_id = $1
+			  AND normalized_alias = $2
+			  AND status = 'active'
+		)
+	`, salonID, normalized).Scan(&serviceAliasConflict); err != nil {
+		return false, false, false, err
+	}
+	if serviceAliasConflict {
+		return false, false, true, nil
+	}
+
+	var existingID, existingCategoryID, existingAlias, existingSource, existingStatus string
+	var existingConfidence float64
+	err := tx.QueryRowContext(ctx, `
+		SELECT id::text, category_id::text, alias, source, status, confidence
+		FROM service_category_aliases
+		WHERE salon_id = $1
+		  AND normalized_alias = $2
+	`, salonID, normalized).Scan(&existingID, &existingCategoryID, &existingAlias, &existingSource, &existingStatus, &existingConfidence)
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO service_category_aliases (
+				salon_id, category_id, alias, normalized_alias, source, status, confidence
+			)
+			VALUES ($1, $2, $3, $4, 'system', 'active', 0.860)
+		`, salonID, categoryID, alias, normalized); err != nil {
+			return false, false, false, err
+		}
+		return true, false, false, nil
+	}
+	if err != nil {
+		return false, false, false, err
+	}
+	if existingSource != ServiceCategoryAliasSourceSystem {
+		return false, false, false, nil
+	}
+	needsUpdate := existingCategoryID != categoryID ||
+		existingAlias != alias ||
+		existingStatus != ServiceCategoryStatusActive ||
+		existingConfidence != 0.86
+	if !needsUpdate {
+		return false, false, false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE service_category_aliases
+		SET category_id = $1,
+		    alias = $2,
+		    status = 'active',
+		    confidence = 0.860,
+		    updated_at = now()
+		WHERE id = $3
+		  AND salon_id = $4
+	`, categoryID, alias, existingID, salonID); err != nil {
+		return false, false, false, err
+	}
+	return false, true, false, nil
+}
+
+func serviceCategorySuggestionRules(ctx context.Context, tx *sql.Tx, salonID string) ([]serviceCategorySuggestionRule, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT cat.id::text, cat.name, cat.slug, COALESCE(alias.normalized_alias, ''), COALESCE(alias.confidence, 0)
+		FROM service_categories cat
+		LEFT JOIN service_category_aliases alias ON alias.category_id = cat.id
+		                                      AND alias.salon_id = cat.salon_id
+		                                      AND alias.status = 'active'
+		WHERE cat.salon_id = $1
+		  AND cat.status = 'active'
+		ORDER BY cat.sort_order ASC, cat.name ASC, alias.normalized_alias ASC
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	rules := make([]serviceCategorySuggestionRule, 0)
+	seenCategoryPhrase := map[string]bool{}
+	for rows.Next() {
+		var categoryID, categoryName, slug, alias string
+		var aliasConfidence float64
+		if err := rows.Scan(&categoryID, &categoryName, &slug, &alias, &aliasConfidence); err != nil {
+			return nil, err
+		}
+		for _, phrase := range []string{categoryName, slug} {
+			normalized := normalizeAliasKey(phrase)
+			key := categoryID + ":" + normalized
+			if normalized == "" || seenCategoryPhrase[key] {
+				continue
+			}
+			seenCategoryPhrase[key] = true
+			rules = append(rules, serviceCategorySuggestionRule{
+				CategoryID:   categoryID,
+				CategoryName: categoryName,
+				Phrase:       normalized,
+				Confidence:   0.72,
+			})
+		}
+		if alias != "" {
+			rules = append(rules, serviceCategorySuggestionRule{
+				CategoryID:   categoryID,
+				CategoryName: categoryName,
+				Phrase:       alias,
+				Confidence:   aliasConfidence,
+			})
+		}
+	}
+	return rules, rows.Err()
+}
+
+func bestServiceCategorySuggestion(serviceName string, rules []serviceCategorySuggestionRule) (serviceCategorySuggestionRule, bool, bool) {
+	normalizedName := normalizeAliasKey(serviceName)
+	if normalizedName == "" {
+		return serviceCategorySuggestionRule{}, false, false
+	}
+	var best serviceCategorySuggestionRule
+	bestScore := -1
+	ambiguous := false
+	for _, rule := range rules {
+		if rule.Phrase == "" || !containsNormalizedPhrase(normalizedName, rule.Phrase) {
+			continue
+		}
+		score := len(strings.Fields(rule.Phrase))*1000 + len(rule.Phrase)
+		switch {
+		case bestScore < 0 || score > bestScore:
+			best = rule
+			bestScore = score
+			ambiguous = false
+		case score == bestScore && rule.CategoryID != best.CategoryID:
+			ambiguous = true
+		case score == bestScore && rule.CategoryID == best.CategoryID && rule.Confidence > best.Confidence:
+			best = rule
+		}
+	}
+	if bestScore < 0 {
+		return serviceCategorySuggestionRule{}, false, false
+	}
+	return best, true, ambiguous
+}
+
+func containsNormalizedPhrase(text string, phrase string) bool {
+	if text == phrase {
+		return true
+	}
+	return strings.Contains(" "+text+" ", " "+phrase+" ")
+}
+
+func (r *Repository) listServiceCategoryAliases(ctx context.Context, salonID string) ([]ServiceCategoryAlias, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT alias.id::text, alias.salon_id::text, alias.category_id::text, cat.name,
+		       alias.alias, alias.normalized_alias, alias.source, alias.status, alias.confidence,
+		       alias.created_at, alias.updated_at
+		FROM service_category_aliases alias
+		JOIN service_categories cat ON cat.id = alias.category_id
+		                           AND cat.salon_id = alias.salon_id
+		WHERE alias.salon_id = $1
+		ORDER BY (alias.status = 'archived') ASC, alias.updated_at DESC, alias.alias ASC
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]ServiceCategoryAlias, 0)
+	for rows.Next() {
+		item, err := scanServiceCategoryAlias(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *item)
+	}
+	return items, rows.Err()
+}
+
+func (r *Repository) ensureActiveCategory(ctx context.Context, salonID string, ownerUserID string, categoryID string) error {
+	var exists bool
+	err := r.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM service_categories cat
+			JOIN salons salon ON salon.id = cat.salon_id
+			WHERE cat.id = $1
+			  AND cat.salon_id = $2
+			  AND salon.owner_user_id = $3
+			  AND cat.status = 'active'
+		)
+	`, categoryID, salonID, ownerUserID).Scan(&exists)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func scanStaffMember(row rowScanner) (*StaffMember, error) {

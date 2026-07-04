@@ -40,6 +40,10 @@ type POSConnectionReader interface {
 	GetConnection(ctx context.Context, salonID string, provider string) (*pos.Connection, error)
 }
 
+type ServiceCategoryReader interface {
+	ListServiceCategories(ctx context.Context, salonID string, ownerUserID string) ([]pos.ServiceCategory, error)
+}
+
 type KnowledgeListReader interface {
 	ListKnowledge(ctx context.Context, salonID string, ownerUserID string) ([]training.KnowledgeItem, error)
 }
@@ -57,16 +61,24 @@ type Service struct {
 	salons       SalonReader
 	integrations IntegrationConfigReader
 	pos          POSConnectionReader
+	categories   ServiceCategoryReader
 	knowledge    KnowledgeListReader
 	imports      ImportStore
 	now          func() time.Time
 }
 
-func NewService(salons SalonReader, integrations IntegrationConfigReader, posConnections POSConnectionReader, knowledge KnowledgeListReader, imports ImportStore) *Service {
+func NewService(salons SalonReader, integrations IntegrationConfigReader, posConnections POSConnectionReader, knowledge KnowledgeListReader, imports ImportStore, categoryReaders ...ServiceCategoryReader) *Service {
+	var categories ServiceCategoryReader
+	if len(categoryReaders) > 0 {
+		categories = categoryReaders[0]
+	} else if reader, ok := posConnections.(ServiceCategoryReader); ok {
+		categories = reader
+	}
 	return &Service{
 		salons:       salons,
 		integrations: integrations,
 		pos:          posConnections,
+		categories:   categories,
 		knowledge:    knowledge,
 		imports:      imports,
 		now:          time.Now,
@@ -100,6 +112,10 @@ func (s *Service) Get(ctx context.Context, salonID string, ownerUserID string) (
 	if err != nil {
 		return nil, err
 	}
+	categories, err := s.serviceCategories(ctx, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
 
 	activeProvider := strings.TrimSpace(item.ActivePOSProvider)
 	if activeProvider == "" {
@@ -125,6 +141,7 @@ func (s *Service) Get(ctx context.Context, salonID string, ownerUserID string) (
 		PublicBookingPage:       publicBookingPageExport(publicPage),
 		Integrations:            *integrations,
 		POSConnection:           posConnectionExport(activeProvider, connection),
+		ServiceCategories:       serviceCategoriesExport(categories),
 		KnowledgeBase:           knowledgeBaseExport(knowledge),
 	}, nil
 }
@@ -264,6 +281,7 @@ func (s *Service) buildImportPlan(ctx context.Context, salonID string, ownerUser
 	planAIReceptionist(plan)
 	planPublicBookingPage(ctx, s.imports, salonID, plan)
 	planIntegrations(plan)
+	planServiceCategories(plan)
 	planKnowledge(plan)
 	if len(plan.Conflicts) > 0 {
 		plan.CanApply = false
@@ -296,6 +314,7 @@ func (s *Service) buildOnboardingImportPlan(ctx context.Context, ownerUserID str
 	planAIReceptionist(plan)
 	planPublicBookingPage(ctx, s.imports, "", plan)
 	planIntegrations(plan)
+	planServiceCategories(plan)
 	planKnowledge(plan)
 	if len(plan.Conflicts) > 0 {
 		plan.CanApply = false
@@ -323,6 +342,13 @@ func newImportPlan(bundle ConfigurationBundle, fingerprint string, requestID str
 			Section: SectionKnowledge,
 			Code:    "legacy_schema_missing_knowledge_base",
 			Message: "This v1 export did not include AI Training knowledge base entries.",
+		})
+	}
+	if bundle.SchemaVersion == LegacySchemaV1 || bundle.SchemaVersion == LegacySchemaV2 || bundle.SchemaVersion == LegacySchemaV3 {
+		plan.Warnings = append(plan.Warnings, ImportIssue{
+			Section: SectionCategories,
+			Code:    "legacy_schema_missing_service_categories",
+			Message: "This export did not include service category taxonomy or category aliases.",
 		})
 	}
 	for _, provider := range plan.RequiresSecretReentry {
@@ -356,6 +382,9 @@ func onboardingImportTargetState() *importTargetState {
 		},
 		PublicCanPublish:       false,
 		CanEnableAIBooking:     false,
+		ServiceCategoryBySlug:  map[string]ServiceCategoryExport{},
+		CategoryAliasByKey:     map[string]ServiceCategoryAliasExport{},
+		ActiveServiceAliasKeys: map[string]bool{},
 		KnowledgeByImportKey:   map[string]KnowledgeItemExport{},
 		KnowledgeByContentHash: map[string]KnowledgeItemExport{},
 	}
@@ -496,6 +525,84 @@ func planIntegrations(plan *importPlan) {
 	fieldChange(plan, SectionIntegrations, "openai.speech_voice", target.OpenAI.SpeechVoice, incoming.OpenAI.SpeechVoice)
 }
 
+func planServiceCategories(plan *importPlan) {
+	seenSlugs := map[string]bool{}
+	seenAliases := map[string]bool{}
+	for _, item := range plan.Bundle.ServiceCategories.Items {
+		if seenSlugs[item.Slug] {
+			summary(plan, SectionCategories).Conflicts++
+			plan.Conflicts = append(plan.Conflicts, ImportIssue{
+				Section:   SectionCategories,
+				Code:      "duplicate_service_category_slug",
+				Message:   "The import file contains more than one service category with the same slug.",
+				Field:     "slug",
+				SourceKey: item.SourceKey,
+			})
+			continue
+		}
+		seenSlugs[item.Slug] = true
+
+		operation := "created"
+		if existing, ok := plan.Target.ServiceCategoryBySlug[item.Slug]; ok {
+			if serviceCategoryEqual(existing, item) {
+				operation = "unchanged"
+				summary(plan, SectionCategories).Unchanged++
+			} else {
+				operation = "updated"
+				summary(plan, SectionCategories).Updated++
+			}
+		} else {
+			summary(plan, SectionCategories).Created++
+		}
+		planned := plannedServiceCategory{Item: item, Operation: operation}
+
+		for _, alias := range item.Aliases {
+			if seenAliases[alias.NormalizedAlias] {
+				summary(plan, SectionCategories).Conflicts++
+				plan.Conflicts = append(plan.Conflicts, ImportIssue{
+					Section:   SectionCategories,
+					Code:      "duplicate_service_category_alias",
+					Message:   "The import file contains more than one service category alias with the same normalized alias.",
+					Field:     "normalized_alias",
+					SourceKey: alias.SourceKey,
+				})
+				continue
+			}
+			seenAliases[alias.NormalizedAlias] = true
+			if plan.Target.ActiveServiceAliasKeys[alias.NormalizedAlias] {
+				summary(plan, SectionCategories).Conflicts++
+				plan.Conflicts = append(plan.Conflicts, ImportIssue{
+					Section:   SectionCategories,
+					Code:      "category_alias_conflicts_with_service_alias",
+					Message:   "A category alias conflicts with an active service alias on the target salon.",
+					Field:     "normalized_alias",
+					SourceKey: alias.SourceKey,
+				})
+				continue
+			}
+
+			aliasOperation := "created"
+			if existing, ok := plan.Target.CategoryAliasByKey[alias.NormalizedAlias]; ok {
+				if serviceCategoryAliasEqual(existing, alias) {
+					aliasOperation = "unchanged"
+					summary(plan, SectionCategories).Unchanged++
+				} else {
+					aliasOperation = "updated"
+					summary(plan, SectionCategories).Updated++
+				}
+			} else {
+				summary(plan, SectionCategories).Created++
+			}
+			planned.Aliases = append(planned.Aliases, plannedServiceCategoryAlias{
+				CategorySlug: item.Slug,
+				Item:         alias,
+				Operation:    aliasOperation,
+			})
+		}
+		plan.ServiceCategories = append(plan.ServiceCategories, planned)
+	}
+}
+
 func planKnowledge(plan *importPlan) {
 	seen := map[string]bool{}
 	for _, item := range plan.Bundle.KnowledgeBase.Items {
@@ -543,7 +650,7 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 	if bundle.SchemaVersion == "" {
 		return bundle, ErrValidation
 	}
-	if bundle.SchemaVersion != SchemaVersion && bundle.SchemaVersion != LegacySchemaV2 && bundle.SchemaVersion != LegacySchemaV1 {
+	if bundle.SchemaVersion != SchemaVersion && bundle.SchemaVersion != LegacySchemaV3 && bundle.SchemaVersion != LegacySchemaV2 && bundle.SchemaVersion != LegacySchemaV1 {
 		return bundle, ErrUnsupportedSchema
 	}
 	if bundle.SecretsExported || bundle.OperationalDataExported {
@@ -571,6 +678,21 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 	if err := validateIntegrationURLs(bundle.Integrations); err != nil {
 		return bundle, err
 	}
+	for i := range bundle.ServiceCategories.Items {
+		item := normalizeServiceCategoryItem(bundle.ServiceCategories.Items[i])
+		if item.Name == "" || item.Slug == "" || !validServiceCategoryStatus(item.Status) || !validServiceCategorySource(item.Source) {
+			return bundle, ErrValidation
+		}
+		for j := range item.Aliases {
+			alias := normalizeServiceCategoryAliasItem(item.Aliases[j])
+			if alias.Alias == "" || alias.NormalizedAlias == "" || !validServiceCategoryStatus(alias.Status) || !validServiceCategoryAliasSource(alias.Source) || alias.Confidence <= 0 || alias.Confidence > 1 {
+				return bundle, ErrValidation
+			}
+			item.Aliases[j] = alias
+		}
+		bundle.ServiceCategories.Items[i] = item
+	}
+	bundle.ServiceCategories.Count = len(bundle.ServiceCategories.Items)
 	for i := range bundle.KnowledgeBase.Items {
 		item := normalizeKnowledgeItem(bundle.KnowledgeBase.Items[i])
 		if item.Title == "" || item.Body == "" || !validKnowledgeCategory(item.Category) || !validKnowledgeStatus(item.Status) {
@@ -662,6 +784,31 @@ func normalizeKnowledgeItem(item KnowledgeItemExport) KnowledgeItemExport {
 	return item
 }
 
+func normalizeServiceCategoryItem(item ServiceCategoryExport) ServiceCategoryExport {
+	item.Name = strings.TrimSpace(item.Name)
+	item.Slug = normalizeConfigSlug(defaultString(strings.TrimSpace(item.Slug), item.Name))
+	item.SourceKey = defaultString(strings.TrimSpace(item.SourceKey), serviceCategorySourceKey(item.Slug))
+	item.Description = strings.TrimSpace(item.Description)
+	item.Status = defaultString(strings.ToLower(strings.TrimSpace(item.Status)), pos.ServiceCategoryStatusActive)
+	item.Source = defaultString(strings.ToLower(strings.TrimSpace(item.Source)), pos.ServiceCategorySourceImported)
+	for i := range item.Aliases {
+		item.Aliases[i] = normalizeServiceCategoryAliasItem(item.Aliases[i])
+	}
+	return item
+}
+
+func normalizeServiceCategoryAliasItem(item ServiceCategoryAliasExport) ServiceCategoryAliasExport {
+	item.Alias = strings.TrimSpace(item.Alias)
+	item.NormalizedAlias = normalizeConfigAlias(defaultString(strings.TrimSpace(item.NormalizedAlias), item.Alias))
+	item.SourceKey = defaultString(strings.TrimSpace(item.SourceKey), serviceCategoryAliasSourceKey(item.NormalizedAlias))
+	item.Source = defaultString(strings.ToLower(strings.TrimSpace(item.Source)), pos.ServiceCategoryAliasSourceImported)
+	item.Status = defaultString(strings.ToLower(strings.TrimSpace(item.Status)), pos.ServiceCategoryStatusActive)
+	if item.Confidence == 0 {
+		item.Confidence = 0.94
+	}
+	return item
+}
+
 func validateIntegrationURLs(configs integrationconfig.IntegrationConfigsResponse) error {
 	if configs.Square.RedirectURL == "" || configs.Square.APIVersion == "" {
 		return ErrValidation
@@ -690,6 +837,13 @@ func (s *Service) posConnection(ctx context.Context, salonID string, provider st
 		return nil, nil
 	}
 	return connection, err
+}
+
+func (s *Service) serviceCategories(ctx context.Context, salonID string, ownerUserID string) ([]pos.ServiceCategory, error) {
+	if s.categories == nil {
+		return []pos.ServiceCategory{}, nil
+	}
+	return s.categories.ListServiceCategories(ctx, salonID, ownerUserID)
 }
 
 func salonProfileExport(item *salon.Salon) SalonProfileExport {
@@ -764,6 +918,38 @@ func posConnectionExport(provider string, connection *pos.Connection) POSConnect
 	}
 }
 
+func serviceCategoriesExport(items []pos.ServiceCategory) ServiceCategoryBundleExport {
+	out := make([]ServiceCategoryExport, 0, len(items))
+	for _, item := range items {
+		category := ServiceCategoryExport{
+			SourceKey:   serviceCategorySourceKey(item.Slug),
+			Name:        item.Name,
+			Slug:        item.Slug,
+			Description: item.Description,
+			Status:      item.Status,
+			Source:      item.Source,
+			SortOrder:   item.SortOrder,
+			Aliases:     make([]ServiceCategoryAliasExport, 0, len(item.Aliases)),
+			CreatedAt:   item.CreatedAt,
+			UpdatedAt:   item.UpdatedAt,
+		}
+		for _, alias := range item.Aliases {
+			category.Aliases = append(category.Aliases, ServiceCategoryAliasExport{
+				SourceKey:       serviceCategoryAliasSourceKey(alias.NormalizedAlias),
+				Alias:           alias.Alias,
+				NormalizedAlias: alias.NormalizedAlias,
+				Source:          alias.Source,
+				Status:          alias.Status,
+				Confidence:      alias.Confidence,
+				CreatedAt:       alias.CreatedAt,
+				UpdatedAt:       alias.UpdatedAt,
+			})
+		}
+		out = append(out, category)
+	}
+	return ServiceCategoryBundleExport{Items: out, Count: len(out)}
+}
+
 func knowledgeBaseExport(items []training.KnowledgeItem) KnowledgeBaseExport {
 	out := make([]KnowledgeItemExport, 0, len(items))
 	for _, item := range items {
@@ -789,6 +975,14 @@ func knowledgeSourceKey(item training.KnowledgeItem) string {
 	return "knowledge:" + hex.EncodeToString(hash[:])[:32]
 }
 
+func serviceCategorySourceKey(slug string) string {
+	return "service_category:" + normalizeConfigSlug(slug)
+}
+
+func serviceCategoryAliasSourceKey(normalizedAlias string) string {
+	return "service_category_alias:" + normalizeConfigAlias(normalizedAlias)
+}
+
 func knowledgeContentHash(item KnowledgeItemExport) string {
 	normalized := strings.Join([]string{
 		strings.ToLower(strings.TrimSpace(item.Title)),
@@ -810,6 +1004,23 @@ func knowledgeEqual(a KnowledgeItemExport, b KnowledgeItemExport) bool {
 		strings.TrimSpace(a.Body) == strings.TrimSpace(b.Body) &&
 		strings.TrimSpace(a.Status) == strings.TrimSpace(b.Status) &&
 		strings.TrimSpace(a.Source) == strings.TrimSpace(b.Source)
+}
+
+func serviceCategoryEqual(a ServiceCategoryExport, b ServiceCategoryExport) bool {
+	return strings.TrimSpace(a.Name) == strings.TrimSpace(b.Name) &&
+		strings.TrimSpace(a.Slug) == strings.TrimSpace(b.Slug) &&
+		strings.TrimSpace(a.Description) == strings.TrimSpace(b.Description) &&
+		strings.TrimSpace(a.Status) == strings.TrimSpace(b.Status) &&
+		strings.TrimSpace(a.Source) == strings.TrimSpace(b.Source) &&
+		a.SortOrder == b.SortOrder
+}
+
+func serviceCategoryAliasEqual(a ServiceCategoryAliasExport, b ServiceCategoryAliasExport) bool {
+	return strings.TrimSpace(a.Alias) == strings.TrimSpace(b.Alias) &&
+		strings.TrimSpace(a.NormalizedAlias) == strings.TrimSpace(b.NormalizedAlias) &&
+		strings.TrimSpace(a.Status) == strings.TrimSpace(b.Status) &&
+		strings.TrimSpace(a.Source) == strings.TrimSpace(b.Source) &&
+		a.Confidence == b.Confidence
 }
 
 func secretReentryProviders(configs integrationconfig.IntegrationConfigsResponse) []string {
@@ -852,7 +1063,7 @@ func importResponse(plan *importPlan, dryRun bool, runID string) *ImportResponse
 
 func newSummaryMap() map[string]*ImportSectionSummary {
 	out := map[string]*ImportSectionSummary{}
-	for _, section := range []string{SectionSalon, SectionAI, SectionPublic, SectionIntegrations, SectionKnowledge} {
+	for _, section := range []string{SectionSalon, SectionAI, SectionPublic, SectionIntegrations, SectionCategories, SectionKnowledge} {
 		out[section] = &ImportSectionSummary{Section: section}
 	}
 	return out
@@ -868,7 +1079,7 @@ func summary(plan *importPlan, section string) *ImportSectionSummary {
 }
 
 func summaryValues(items map[string]*ImportSectionSummary) []ImportSectionSummary {
-	order := []string{SectionSalon, SectionAI, SectionPublic, SectionIntegrations, SectionKnowledge}
+	order := []string{SectionSalon, SectionAI, SectionPublic, SectionIntegrations, SectionCategories, SectionKnowledge}
 	out := make([]ImportSectionSummary, 0, len(order))
 	for _, section := range order {
 		if item := items[section]; item != nil {
@@ -936,6 +1147,33 @@ func validKnowledgeCategory(category string) bool {
 	}
 }
 
+func validServiceCategoryStatus(status string) bool {
+	switch status {
+	case pos.ServiceCategoryStatusActive, pos.ServiceCategoryStatusArchived:
+		return true
+	default:
+		return false
+	}
+}
+
+func validServiceCategorySource(source string) bool {
+	switch source {
+	case pos.ServiceCategorySourceManual, pos.ServiceCategorySourceSystem, pos.ServiceCategorySourceImported:
+		return true
+	default:
+		return false
+	}
+}
+
+func validServiceCategoryAliasSource(source string) bool {
+	switch source {
+	case pos.ServiceCategoryAliasSourceOwner, pos.ServiceCategoryAliasSourceSystem, pos.ServiceCategoryAliasSourceImported:
+		return true
+	default:
+		return false
+	}
+}
+
 func validKnowledgeStatus(status string) bool {
 	switch status {
 	case training.StatusDraft, training.StatusActive, training.StatusArchived:
@@ -980,6 +1218,33 @@ func normalizePublicSlug(value string) string {
 		return ""
 	}
 	return normalized
+}
+
+func normalizeConfigSlug(value string) string {
+	return strings.Trim(normalizeConfigText(value, "-"), "-")
+}
+
+func normalizeConfigAlias(value string) string {
+	return strings.TrimSpace(normalizeConfigText(value, " "))
+}
+
+func normalizeConfigText(value string, separator string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var builder strings.Builder
+	previousSeparator := true
+	for _, r := range value {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			builder.WriteRune(r)
+			previousSeparator = false
+		default:
+			if !previousSeparator {
+				builder.WriteString(separator)
+				previousSeparator = true
+			}
+		}
+	}
+	return strings.Trim(builder.String(), separator)
 }
 
 func publicPath(slug string) string {

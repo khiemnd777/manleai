@@ -97,6 +97,40 @@ func (h *Handler) RealtimeEvents(c *fiber.Ctx) error {
 	return respond.JSON(c, fiber.StatusOK, fiber.Map{"events": events})
 }
 
+func (h *Handler) ListPartyBookingRequests(c *fiber.Ctx) error {
+	items, err := h.service.ListPartyBookingRequests(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Query("status"), parseLimit(c.Query("limit")))
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Party request filter is invalid.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "PARTY_REQUESTS_FAILED", "Could not load party booking requests.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"party_booking_requests": items})
+}
+
+func (h *Handler) UpdatePartyBookingRequestStatus(c *fiber.Ctx) error {
+	var req struct {
+		Status string `json:"status"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
+	}
+	item, err := h.service.UpdatePartyBookingRequestStatus(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("request_id"), req.Status)
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Party request status is invalid.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "PARTY_REQUEST_NOT_FOUND", "Party booking request was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "PARTY_REQUEST_UPDATE_FAILED", "Could not update party booking request.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"party_booking_request": item})
+}
+
 func (h *Handler) Archive(c *fiber.Ctx) error {
 	session, err := h.service.Archive(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("session_id"))
 	if errors.Is(err, ErrValidation) {

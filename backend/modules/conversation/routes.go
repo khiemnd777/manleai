@@ -14,4 +14,6 @@ func RegisterRoutes(api fiber.Router, handler *Handler, jwtSecret string) {
 	group.Post("/:id/conversation-sessions/:session_id/archive", handler.Archive)
 	group.Post("/:id/conversation-sessions/:session_id/redact", handler.Redact)
 	group.Post("/:id/conversation-sessions/:session_id/messages", handler.Message)
+	group.Get("/:id/party-booking-requests", handler.ListPartyBookingRequests)
+	group.Patch("/:id/party-booking-requests/:request_id/status", handler.UpdatePartyBookingRequestStatus)
 }

@@ -150,6 +150,77 @@ func TestCreateServiceRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestCreateServiceCategoryNormalizesInput(t *testing.T) {
+	store := &fakePOSStore{}
+	service := NewService(store)
+
+	category, err := service.CreateServiceCategory(context.Background(), "salon_1", "owner_1", ServiceCategoryWriteRequest{
+		Name:        " Dip Powder ",
+		Description: "  Powder services ",
+		SortOrder:   40,
+	})
+	if err != nil {
+		t.Fatalf("CreateServiceCategory returned error: %v", err)
+	}
+	if category == nil || category.Slug != "dip-powder" {
+		t.Fatalf("category = %#v, want normalized dip-powder category", category)
+	}
+	if store.categoryCreate.salonID != "salon_1" || store.categoryCreate.ownerUserID != "owner_1" {
+		t.Fatalf("category create scope = %#v", store.categoryCreate)
+	}
+	if store.categoryCreate.input.Name != "Dip Powder" || store.categoryCreate.input.Description != "Powder services" {
+		t.Fatalf("category create input = %#v, want trimmed fields", store.categoryCreate.input)
+	}
+}
+
+func TestAssignServiceCategoryDelegatesManualOwnerScopedAssignment(t *testing.T) {
+	store := &fakePOSStore{}
+	service := NewService(store)
+
+	item, err := service.AssignServiceCategory(context.Background(), "salon_1", "owner_1", " service_1 ", ServiceCategoryAssignRequest{
+		ServiceCategoryID: " category_1 ",
+	})
+	if err != nil {
+		t.Fatalf("AssignServiceCategory returned error: %v", err)
+	}
+	if item == nil || item.CategorySource != ServiceCategoryAssignmentManual || item.ServiceCategoryID != "category_1" {
+		t.Fatalf("assigned service = %#v, want manual category assignment", item)
+	}
+	if store.categoryAssign.salonID != "salon_1" || store.categoryAssign.ownerUserID != "owner_1" || store.categoryAssign.serviceID != "service_1" || store.categoryAssign.categoryID != "category_1" {
+		t.Fatalf("category assign scope = %#v", store.categoryAssign)
+	}
+}
+
+func TestRefreshServiceCategorySuggestionsUsesCommercialTaxonomySeeds(t *testing.T) {
+	store := &fakePOSStore{}
+	service := NewService(store)
+
+	result, err := service.RefreshServiceCategorySuggestions(context.Background(), "salon_1", "owner_1")
+	if err != nil {
+		t.Fatalf("RefreshServiceCategorySuggestions returned error: %v", err)
+	}
+	if result.CreatedCategories == 0 {
+		t.Fatalf("refresh result = %#v, want default taxonomy seeds", result)
+	}
+	if store.categoryRefresh.salonID != "salon_1" || store.categoryRefresh.ownerUserID != "owner_1" {
+		t.Fatalf("category refresh scope = %#v", store.categoryRefresh)
+	}
+	if len(store.categoryRefresh.seeds) < 5 {
+		t.Fatalf("seeds = %#v, want commercial nail salon taxonomy", store.categoryRefresh.seeds)
+	}
+	want := map[string]bool{"manicure": false, "pedicure": false, "acrylic": false, "dip-powder": false, "removal": false}
+	for _, seed := range store.categoryRefresh.seeds {
+		if _, ok := want[seed.Slug]; ok {
+			want[seed.Slug] = true
+		}
+	}
+	for slug, found := range want {
+		if !found {
+			t.Fatalf("seed slug %q missing from %#v", slug, store.categoryRefresh.seeds)
+		}
+	}
+}
+
 func TestUpdateServiceDelegatesNormalizedInput(t *testing.T) {
 	store := &fakePOSStore{}
 	service := NewService(store)
@@ -893,7 +964,51 @@ type fakePOSStore struct {
 	listStaffProvider    string
 	connection           *Connection
 	summary              ProviderMappingSummary
-	serviceCreate        struct {
+	categories           []ServiceCategory
+	categoryAliases      []ServiceCategoryAlias
+	categoryCreate       struct {
+		salonID     string
+		ownerUserID string
+		input       ServiceCategoryMutation
+	}
+	categoryUpdate struct {
+		salonID     string
+		ownerUserID string
+		categoryID  string
+		input       ServiceCategoryMutation
+	}
+	categoryArchive struct {
+		salonID     string
+		ownerUserID string
+		categoryID  string
+	}
+	categoryRestore struct {
+		salonID     string
+		ownerUserID string
+		categoryID  string
+	}
+	categoryAliasUpsert struct {
+		salonID     string
+		ownerUserID string
+		input       ServiceCategoryAliasMutation
+	}
+	categoryAliasArchive struct {
+		salonID     string
+		ownerUserID string
+		aliasID     string
+	}
+	categoryAssign struct {
+		salonID     string
+		ownerUserID string
+		serviceID   string
+		categoryID  string
+	}
+	categoryRefresh struct {
+		salonID     string
+		ownerUserID string
+		seeds       []ServiceCategorySeed
+	}
+	serviceCreate struct {
 		salonID     string
 		ownerUserID string
 		provider    string
@@ -978,6 +1093,100 @@ func (f *fakePOSStore) GetConnection(ctx context.Context, salonID string, provid
 func (f *fakePOSStore) ListServices(ctx context.Context, salonID string, provider string) ([]Service, error) {
 	f.listServicesProvider = provider
 	return nil, nil
+}
+
+func (f *fakePOSStore) ListServiceCategories(ctx context.Context, salonID string, ownerUserID string) ([]ServiceCategory, error) {
+	return f.categories, nil
+}
+
+func (f *fakePOSStore) CreateServiceCategory(ctx context.Context, salonID string, ownerUserID string, input ServiceCategoryMutation) (*ServiceCategory, error) {
+	f.categoryCreate.salonID = salonID
+	f.categoryCreate.ownerUserID = ownerUserID
+	f.categoryCreate.input = input
+	category := ServiceCategory{
+		ID:          "category_new",
+		SalonID:     salonID,
+		Name:        input.Name,
+		Slug:        input.Slug,
+		Description: input.Description,
+		SortOrder:   input.SortOrder,
+		Status:      ServiceCategoryStatusActive,
+		Source:      ServiceCategorySourceManual,
+	}
+	f.categories = append(f.categories, category)
+	return &category, nil
+}
+
+func (f *fakePOSStore) UpdateServiceCategory(ctx context.Context, salonID string, ownerUserID string, categoryID string, input ServiceCategoryMutation) (*ServiceCategory, error) {
+	f.categoryUpdate.salonID = salonID
+	f.categoryUpdate.ownerUserID = ownerUserID
+	f.categoryUpdate.categoryID = categoryID
+	f.categoryUpdate.input = input
+	category := ServiceCategory{
+		ID:          categoryID,
+		SalonID:     salonID,
+		Name:        input.Name,
+		Slug:        input.Slug,
+		Description: input.Description,
+		SortOrder:   input.SortOrder,
+		Status:      ServiceCategoryStatusActive,
+		Source:      ServiceCategorySourceManual,
+	}
+	return &category, nil
+}
+
+func (f *fakePOSStore) ArchiveServiceCategory(ctx context.Context, salonID string, ownerUserID string, categoryID string) (*ServiceCategory, error) {
+	f.categoryArchive.salonID = salonID
+	f.categoryArchive.ownerUserID = ownerUserID
+	f.categoryArchive.categoryID = categoryID
+	return &ServiceCategory{ID: categoryID, SalonID: salonID, Status: ServiceCategoryStatusArchived}, nil
+}
+
+func (f *fakePOSStore) RestoreServiceCategory(ctx context.Context, salonID string, ownerUserID string, categoryID string) (*ServiceCategory, error) {
+	f.categoryRestore.salonID = salonID
+	f.categoryRestore.ownerUserID = ownerUserID
+	f.categoryRestore.categoryID = categoryID
+	return &ServiceCategory{ID: categoryID, SalonID: salonID, Status: ServiceCategoryStatusActive}, nil
+}
+
+func (f *fakePOSStore) UpsertServiceCategoryAlias(ctx context.Context, salonID string, ownerUserID string, input ServiceCategoryAliasMutation) (*ServiceCategoryAlias, error) {
+	f.categoryAliasUpsert.salonID = salonID
+	f.categoryAliasUpsert.ownerUserID = ownerUserID
+	f.categoryAliasUpsert.input = input
+	alias := ServiceCategoryAlias{
+		ID:              "category_alias_new",
+		SalonID:         salonID,
+		CategoryID:      input.CategoryID,
+		Alias:           input.Alias,
+		NormalizedAlias: input.NormalizedAlias,
+		Source:          ServiceCategoryAliasSourceOwner,
+		Status:          ServiceCategoryStatusActive,
+		Confidence:      input.Confidence,
+	}
+	f.categoryAliases = append(f.categoryAliases, alias)
+	return &alias, nil
+}
+
+func (f *fakePOSStore) ArchiveServiceCategoryAlias(ctx context.Context, salonID string, ownerUserID string, aliasID string) (*ServiceCategoryAlias, error) {
+	f.categoryAliasArchive.salonID = salonID
+	f.categoryAliasArchive.ownerUserID = ownerUserID
+	f.categoryAliasArchive.aliasID = aliasID
+	return &ServiceCategoryAlias{ID: aliasID, SalonID: salonID, Status: ServiceCategoryStatusArchived}, nil
+}
+
+func (f *fakePOSStore) AssignServiceCategory(ctx context.Context, salonID string, ownerUserID string, serviceID string, categoryID string) (*Service, error) {
+	f.categoryAssign.salonID = salonID
+	f.categoryAssign.ownerUserID = ownerUserID
+	f.categoryAssign.serviceID = serviceID
+	f.categoryAssign.categoryID = categoryID
+	return &Service{ID: serviceID, SalonID: salonID, ServiceCategoryID: categoryID, CategorySource: ServiceCategoryAssignmentManual, CategoryConfidence: 1}, nil
+}
+
+func (f *fakePOSStore) RefreshServiceCategorySuggestions(ctx context.Context, salonID string, ownerUserID string, seeds []ServiceCategorySeed) (*ServiceCategorySuggestionRefresh, error) {
+	f.categoryRefresh.salonID = salonID
+	f.categoryRefresh.ownerUserID = ownerUserID
+	f.categoryRefresh.seeds = append([]ServiceCategorySeed(nil), seeds...)
+	return &ServiceCategorySuggestionRefresh{CreatedCategories: len(seeds)}, nil
 }
 
 func (f *fakePOSStore) ListStaff(ctx context.Context, salonID string, provider string) ([]StaffMember, error) {

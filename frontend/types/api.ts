@@ -149,6 +149,7 @@ export type ConfigurationBundle = {
   public_booking_page: ConfigurationPublicBookingPage;
   integrations: IntegrationConfigs;
   pos_connection: ConfigurationPOSConnection;
+  service_categories: ConfigurationServiceCategoryBundle;
   knowledge_base: ConfigurationKnowledgeBase;
 };
 
@@ -204,6 +205,35 @@ export type ConfigurationPOSConnection = {
 export type ConfigurationKnowledgeBase = {
   items: ConfigurationKnowledgeItem[];
   count: number;
+};
+
+export type ConfigurationServiceCategoryBundle = {
+  items: ConfigurationServiceCategory[];
+  count: number;
+};
+
+export type ConfigurationServiceCategory = {
+  source_key: string;
+  name: string;
+  slug: string;
+  description?: string;
+  status: string;
+  source: string;
+  sort_order: number;
+  aliases: ConfigurationServiceCategoryAlias[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type ConfigurationServiceCategoryAlias = {
+  source_key: string;
+  alias: string;
+  normalized_alias: string;
+  source: string;
+  status: string;
+  confidence: number;
+  created_at: string;
+  updated_at: string;
 };
 
 export type ConfigurationKnowledgeItem = {
@@ -286,6 +316,55 @@ export type POSService = {
   sync_error?: string;
   source: string;
   pos_linked: boolean;
+  service_category_id?: string;
+  category_name?: string;
+  category_slug?: string;
+  category_source: string;
+  category_confidence?: number;
+  category_reviewed_at?: string;
+};
+
+export type POSServiceCategory = {
+  id: string;
+  salon_id: string;
+  name: string;
+  slug: string;
+  description?: string;
+  status: string;
+  sort_order: number;
+  source: string;
+  service_count: number;
+  aliases?: POSServiceCategoryAlias[];
+  reviewed_at?: string;
+  archived_at?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type POSServiceCategoryAlias = {
+  id: string;
+  salon_id: string;
+  category_id: string;
+  category_name?: string;
+  alias: string;
+  normalized_alias: string;
+  source: string;
+  status: string;
+  confidence: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ServiceCategorySuggestionRefresh = {
+  created_categories: number;
+  restored_system_categories: number;
+  created_aliases: number;
+  updated_system_aliases: number;
+  skipped_alias_conflicts: number;
+  suggested_services: number;
+  skipped_reviewed_services: number;
+  skipped_ambiguous_services: number;
+  unmatched_unreviewed_services: number;
 };
 
 export type POSStaffMember = {
@@ -634,6 +713,32 @@ export type HandoffRequest = {
   resolved_at?: string;
 };
 
+export type PartyGuestService = {
+  service_id?: string;
+  service_name?: string;
+  notes?: string;
+};
+
+export type PartyBookingRequest = {
+  id: string;
+  salon_id: string;
+  call_session_id: string;
+  event_key?: string;
+  status: string;
+  party_size?: number;
+  representative_name?: string;
+  representative_phone?: string;
+  requested_date?: string;
+  requested_time_window?: string;
+  guest_service_requests?: PartyGuestService[];
+  flexibility_notes?: string;
+  summary: string;
+  created_at: string;
+  updated_at: string;
+  resolved_at?: string;
+  resolved_by?: string;
+};
+
 export type OfferedSlot = {
   start_time: string;
   end_time: string;
@@ -688,6 +793,7 @@ export type ConversationSession = {
   updated_at: string;
   transcript?: TranscriptMessage[];
   handoff?: HandoffRequest;
+  party_request?: PartyBookingRequest;
 };
 
 export type RealtimeEventLog = {

@@ -209,6 +209,10 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	if err != nil {
 		return nil, err
 	}
+	categoryAliases, err := s.store.ListActiveServiceCategoryAliases(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
 	staff, err := s.store.ListBookableStaff(ctx, salonID)
 	if err != nil {
 		return nil, err
@@ -251,7 +255,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		return s.store.SaveTurn(ctx, turn)
 	}
 
-	if reply, handoff := customerNameSlotRepairReply(message, *session, services, serviceAliases, cfg); reply != "" {
+	if reply, handoff := customerNameSlotRepairReply(message, *session, services, serviceAliases, categoryAliases, cfg); reply != "" {
 		turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
 		if handoff {
 			return s.saveHandoffTurn(ctx, turn, *session, HandoffReasonCustomerDetailsUnavailable, reply, services, staff, cfg)
@@ -278,7 +282,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	exactRequestedTimeSelected := false
 	loc := timezoneLocation(cfg.Timezone)
 	pendingNameCandidate := voiceCustomerNamePendingConfirmationCandidate(message, *session)
-	serviceUnderstanding := interpretServiceForSession(message, *session, services, serviceAliases)
+	serviceUnderstanding := interpretServiceForSession(message, *session, services, serviceAliases, categoryAliases)
 	if isServiceInquiry(message, serviceUnderstanding) {
 		turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
 		applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
@@ -287,7 +291,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		finalizeTurnMetadata(&turn, *session, *session, "", "", "service_inquiry")
 		return s.store.SaveTurn(ctx, turn)
 	}
-	applyExtraction(&next, message, services, serviceAliases, staff, loc, s.now)
+	applyExtraction(&next, message, services, serviceAliases, categoryAliases, staff, loc, s.now)
 	serviceEdit := serviceEditDecisionForMessage(*session, message, serviceUnderstanding, services)
 	serviceChanged := applyServiceEditDecision(&next, serviceEdit)
 	if pendingNameCandidate != "" {
@@ -481,6 +485,30 @@ func (s *Service) ListWebhookEvents(ctx context.Context, salonID string, ownerUs
 		return nil, ErrValidation
 	}
 	return s.store.ListWebhookEvents(ctx, salonID, ownerUserID, sessionID, clampWebhookLimit(limit))
+}
+
+func (s *Service) ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int) ([]PartyBookingRequest, error) {
+	salonID = strings.TrimSpace(salonID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	status = strings.TrimSpace(status)
+	if salonID == "" || ownerUserID == "" {
+		return nil, ErrValidation
+	}
+	if status != "" && status != "all" && !allowedPartyRequestStatus(status) {
+		return nil, ErrValidation
+	}
+	return s.store.ListPartyBookingRequests(ctx, salonID, ownerUserID, status, clampLimit(limit))
+}
+
+func (s *Service) UpdatePartyBookingRequestStatus(ctx context.Context, salonID string, ownerUserID string, requestID string, status string) (*PartyBookingRequest, error) {
+	salonID = strings.TrimSpace(salonID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	requestID = strings.TrimSpace(requestID)
+	status = strings.TrimSpace(status)
+	if salonID == "" || ownerUserID == "" || requestID == "" || !allowedPartyRequestStatus(status) {
+		return nil, ErrValidation
+	}
+	return s.store.UpdatePartyBookingRequestStatus(ctx, salonID, ownerUserID, requestID, status)
 }
 
 func (s *Service) Archive(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error) {
@@ -1211,6 +1239,8 @@ func applyServiceUnderstandingMetadata(turn *TurnRecord, result serviceUnderstan
 		"service_understanding_source":        result.MatchedSource,
 		"service_understanding_alias_id":      result.MatchedAliasID,
 		"service_understanding_alias":         result.MatchedAlias,
+		"service_understanding_category_id":   result.MatchedCategoryID,
+		"service_understanding_category":      result.MatchedCategoryName,
 		"service_understanding_normalized":    result.NormalizedInput,
 		"service_understanding_candidate_ids": candidateIDs,
 		"service_understanding_candidates":    candidateNames,
@@ -1426,8 +1456,106 @@ func (s *Service) saveHandoffTurn(ctx context.Context, turn TurnRecord, session 
 		CustomerPhone: session.CustomerPhone,
 		Summary:       summary,
 	}
+	if reason == HandoffReasonGroupBooking {
+		turn.PartyRequest = partyRequestRecordFromSession(turn, session, services, cfg, summary)
+	}
 	finalizeTurnMetadata(&turn, turn.Session, session, "", "", "handoff")
 	return s.store.SaveTurn(ctx, turn)
+}
+
+func partyRequestRecordFromSession(turn TurnRecord, session Session, services []ServiceOption, cfg *RuntimeConfig, summary string) *PartyRequestRecord {
+	loc := timezoneLocation(timezoneFromConfig(cfg))
+	requestedTimeWindow := ""
+	if session.RequestedStartTime != nil {
+		requestedTimeWindow = session.RequestedStartTime.In(loc).Format("3:04 PM")
+	}
+	return &PartyRequestRecord{
+		EventKey:             normalizeEventKey(turn.EventKey),
+		PartySize:            partySizeFromMessage(turn.CustomerMessage),
+		RepresentativeName:   session.CustomerName,
+		RepresentativePhone:  session.CustomerPhone,
+		RequestedDate:        session.RequestedDate,
+		RequestedTimeWindow:  requestedTimeWindow,
+		GuestServiceRequests: partyGuestServicesFromSession(session, services),
+		Summary:              summary,
+	}
+}
+
+func partyGuestServicesFromSession(session Session, services []ServiceOption) []PartyGuestService {
+	byID := map[string]ServiceOption{}
+	for _, service := range services {
+		byID[strings.TrimSpace(service.ID)] = service
+	}
+	items := make([]PartyGuestService, 0)
+	seen := map[string]bool{}
+	for _, segment := range session.BookingSegments {
+		serviceID := strings.TrimSpace(segment.ServiceID)
+		if serviceID == "" || seen[serviceID] {
+			continue
+		}
+		seen[serviceID] = true
+		item := PartyGuestService{ServiceID: serviceID}
+		if service, ok := byID[serviceID]; ok {
+			item.ServiceName = service.Name
+		}
+		items = append(items, item)
+	}
+	if len(items) == 0 && strings.TrimSpace(session.ServiceID) != "" {
+		serviceID := strings.TrimSpace(session.ServiceID)
+		item := PartyGuestService{ServiceID: serviceID}
+		if service, ok := byID[serviceID]; ok {
+			item.ServiceName = service.Name
+		} else if strings.TrimSpace(session.ServiceName) != "" {
+			item.ServiceName = session.ServiceName
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+func partySizeFromMessage(message string) int {
+	normalized := normalizeLooseText(message)
+	if normalized == "" {
+		return 0
+	}
+	if strings.Contains(normalized, "my friend and i") || strings.Contains(normalized, "me and my friend") {
+		return 2
+	}
+	wordNumbers := map[string]int{
+		"two":   2,
+		"three": 3,
+		"four":  4,
+		"five":  5,
+		"six":   6,
+	}
+	if strings.Contains(normalized, "me and two friends") {
+		return 3
+	}
+	if strings.Contains(normalized, "me and three friends") {
+		return 4
+	}
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`party of ([2-9])`),
+		regexp.MustCompile(`for ([2-9]) people`),
+		regexp.MustCompile(`([2-9]) people`),
+		regexp.MustCompile(`([2-9]) appointments`),
+	}
+	for _, pattern := range patterns {
+		if matches := pattern.FindStringSubmatch(normalized); len(matches) == 2 {
+			if value, err := strconv.Atoi(matches[1]); err == nil {
+				return value
+			}
+		}
+	}
+	for word, value := range wordNumbers {
+		if strings.Contains(normalized, "party of "+word) ||
+			strings.Contains(normalized, "for "+word+" people") ||
+			strings.Contains(normalized, word+" people") ||
+			strings.Contains(normalized, word+" appointments") {
+			return value
+		}
+	}
+	return 0
 }
 
 func normalizeStartRequest(req StartSessionRequest) StartSessionRequest {
@@ -1756,7 +1884,7 @@ func resolveIntent(current string, message string, session Session) string {
 	return IntentUnknown
 }
 
-func applyExtraction(session *Session, message string, services []ServiceOption, aliases []ServiceAlias, staff []StaffOption, loc *time.Location, now func() time.Time) {
+func applyExtraction(session *Session, message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, staff []StaffOption, loc *time.Location, now func() time.Time) {
 	if session == nil {
 		return
 	}
@@ -1800,7 +1928,7 @@ func applyExtraction(session *Session, message string, services []ServiceOption,
 			session.CustomerName = name
 		} else if name := extractName(message); name != "" {
 			session.CustomerName = name
-		} else if !looksLikeServiceInsteadOfName(message, services, aliases) {
+		} else if !looksLikeServiceInsteadOfName(message, services, aliases, categoryAliases) {
 			if name := bareCustomerNameForSession(message, *session); name != "" {
 				session.CustomerName = name
 			}
@@ -3156,7 +3284,7 @@ func metadataInt(metadata map[string]any, key string) (int, bool) {
 	return 0, false
 }
 
-func customerNameSlotRepairReply(message string, session Session, services []ServiceOption, aliases []ServiceAlias, cfg *RuntimeConfig) (string, bool) {
+func customerNameSlotRepairReply(message string, session Session, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, cfg *RuntimeConfig) (string, bool) {
 	if missingBookingField(session) != "customer_name" {
 		return "", false
 	}
@@ -3169,13 +3297,13 @@ func customerNameSlotRepairReply(message string, session Session, services []Ser
 		}
 		return "I may have heard that wrong. Please spell the name for the appointment.", false
 	}
-	if service := repeatedSelectedServiceInsteadOfName(message, session, services, aliases); service != "" {
+	if service := repeatedSelectedServiceInsteadOfName(message, session, services, aliases, categoryAliases); service != "" {
 		if customerNamePromptCount(session) >= maxCustomerNamePrompts {
 			return "I'm having trouble catching the name. I'll send this request to the owner to review. This is not a confirmed appointment.", true
 		}
 		return "I have " + service + " already. What name should I put on the appointment?", false
 	}
-	if looksLikeServiceInsteadOfName(message, services, aliases) {
+	if looksLikeServiceInsteadOfName(message, services, aliases, categoryAliases) {
 		return "", false
 	}
 	if extractName(message) != "" {
@@ -3190,7 +3318,7 @@ func customerNameSlotRepairReply(message string, session Session, services []Ser
 	if customerNamePromptCount(session) >= maxCustomerNamePrompts {
 		return "I'm having trouble catching the name. I'll send this request to the owner to review. This is not a confirmed appointment.", true
 	}
-	if !isCustomerNameNonAnswer(message, services, aliases) {
+	if !isCustomerNameNonAnswer(message, services, aliases, categoryAliases) {
 		return "", false
 	}
 	if isConnectionCheck(message) {
@@ -3202,8 +3330,8 @@ func customerNameSlotRepairReply(message string, session Session, services []Ser
 	return "Please say the customer name for the appointment, for example: \"My name is Linh.\"", false
 }
 
-func repeatedSelectedServiceInsteadOfName(message string, session Session, services []ServiceOption, aliases []ServiceAlias) string {
-	result := interpretService(message, services, aliases)
+func repeatedSelectedServiceInsteadOfName(message string, session Session, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) string {
+	result := interpretServiceWithCategoryAliases(message, services, aliases, categoryAliases)
 	if result.Status != serviceUnderstandingStatusSelected || len(result.Candidates) == 0 {
 		return ""
 	}
@@ -3241,15 +3369,11 @@ func customerNamePromptCount(session Session) int {
 	return count
 }
 
-func isCustomerNameNonAnswer(message string, services []ServiceOption, aliases ...[]ServiceAlias) bool {
-	serviceAliases := []ServiceAlias(nil)
-	if len(aliases) > 0 {
-		serviceAliases = aliases[0]
-	}
+func isCustomerNameNonAnswer(message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) bool {
 	return isAffirmativeOnly(message) ||
 		isConnectionCheck(message) ||
 		isNameRepairRequest(message) ||
-		looksLikeServiceInsteadOfName(message, services, serviceAliases) ||
+		looksLikeServiceInsteadOfName(message, services, aliases, categoryAliases) ||
 		phonePattern.MatchString(message) ||
 		emailPattern.MatchString(message) ||
 		looksLikeDateOrTimeInsteadOfName(message)
@@ -3359,16 +3483,17 @@ func isNameRepairRequest(message string) bool {
 		strings.Contains(normalized, "repeat")
 }
 
-func looksLikeServiceInsteadOfName(message string, services []ServiceOption, aliases ...[]ServiceAlias) bool {
+func looksLikeServiceInsteadOfName(message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases ...[]ServiceCategoryAlias) bool {
 	lower := strings.ToLower(message)
 	if strings.Contains(lower, "service") || strings.Contains(lower, "name of") {
 		return true
 	}
-	if len(aliases) > 0 {
-		result := interpretService(message, services, aliases[0])
+	if len(categoryAliases) > 0 {
+		result := interpretServiceWithCategoryAliases(message, services, aliases, categoryAliases[0])
 		return result.Status == serviceUnderstandingStatusSelected || result.Status == serviceUnderstandingStatusAmbiguous
 	}
-	return len(matchServices(message, services)) > 0
+	result := interpretService(message, services, aliases)
+	return result.Status == serviceUnderstandingStatusSelected || result.Status == serviceUnderstandingStatusAmbiguous
 }
 
 func looksLikeDateOrTimeInsteadOfName(message string) bool {
@@ -4882,5 +5007,14 @@ func normalizeLifecycleStatus(status string) string {
 		return LifecycleRedacted
 	default:
 		return ""
+	}
+}
+
+func allowedPartyRequestStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case PartyRequestStatusPending, PartyRequestStatusContacted, PartyRequestStatusResolved, PartyRequestStatusDismissed:
+		return true
+	default:
+		return false
 	}
 }

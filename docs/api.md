@@ -295,6 +295,7 @@ configuration only:
 - AI receptionist settings
 - Public booking page settings
 - Integration runtime settings without secrets
+- Service category taxonomy and service category aliases
 - AI Training knowledge base
 
 Secret-bearing integrations return only configuration values and secret status
@@ -306,7 +307,7 @@ keys, client secrets, encrypted secrets, or POS connection token state.
 
 ```json
 {
-  "schema_version": "manleai.salon_configuration.v3",
+  "schema_version": "manleai.salon_configuration.v4",
   "exported_at": "2026-06-26T15:00:00Z",
   "secrets_exported": false,
   "operational_data_exported": false,
@@ -400,6 +401,34 @@ keys, client secrets, encrypted secrets, or POS connection token state.
     "last_sync_at": "2026-06-25T14:30:00Z",
     "updated_at": "2026-06-25T14:30:00Z"
   },
+  "service_categories": {
+    "count": 1,
+    "items": [
+      {
+        "source_key": "service_category:manicure",
+        "name": "Manicure",
+        "slug": "manicure",
+        "description": "Hand nail services.",
+        "status": "active",
+        "source": "manual",
+        "sort_order": 10,
+        "aliases": [
+          {
+            "source_key": "service_category_alias:mani",
+            "alias": "mani",
+            "normalized_alias": "mani",
+            "source": "owner",
+            "status": "active",
+            "confidence": 0.94,
+            "created_at": "2026-06-25T14:30:00Z",
+            "updated_at": "2026-06-25T14:30:00Z"
+          }
+        ],
+        "created_at": "2026-06-25T14:30:00Z",
+        "updated_at": "2026-06-25T14:30:00Z"
+      }
+    ]
+  },
   "knowledge_base": {
     "count": 1,
     "items": [
@@ -428,7 +457,7 @@ Request shape, with the full exported bundle in `configuration`:
 ```json
 {
   "configuration": {
-    "schema_version": "manleai.salon_configuration.v3",
+    "schema_version": "manleai.salon_configuration.v4",
     "...": "full exported configuration bundle"
   }
 }
@@ -441,10 +470,11 @@ Response:
   "request_id": "import-preview-id",
   "dry_run": true,
   "status": "previewed",
-  "schema_version": "manleai.salon_configuration.v3",
+  "schema_version": "manleai.salon_configuration.v4",
   "can_apply": true,
   "summary": [
     {"section": "salon_profile", "created": 0, "updated": 6, "unchanged": 5, "skipped": 0, "conflicts": 0},
+    {"section": "service_categories", "created": 2, "updated": 1, "unchanged": 4, "skipped": 0, "conflicts": 0},
     {"section": "knowledge_base", "created": 4, "updated": 2, "unchanged": 8, "skipped": 0, "conflicts": 0}
   ],
   "warnings": [
@@ -467,7 +497,7 @@ idempotent, while reusing it with a different payload returns a conflict.
 {
   "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
   "configuration": {
-    "schema_version": "manleai.salon_configuration.v3",
+    "schema_version": "manleai.salon_configuration.v4",
     "...": "full exported configuration bundle"
   }
 }
@@ -477,6 +507,7 @@ Import idempotency:
 
 - Salon profile, AI receptionist, public booking page, and integration settings update the existing salon-scoped rows.
 - Integration secrets are preserved if already present and are never imported from the transfer file.
+- Service categories upsert by stable slug; category aliases upsert by normalized alias and conflict with active service aliases.
 - Knowledge base entries upsert by `source_key`, backed by a unique `(salon_id, import_key)` index.
 - Re-importing the same file reports `unchanged` or `updated`; it does not create duplicate knowledge rows.
 - If the bundle requests `ai_enabled=true` or `booking_mode=confirmed_booking`, those fields are skipped unless the target salon has passed Square booking readiness.
@@ -500,7 +531,7 @@ returns the same `salon_id` and `import_run_id`.
 {
   "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
   "configuration": {
-    "schema_version": "manleai.salon_configuration.v3",
+    "schema_version": "manleai.salon_configuration.v4",
     "...": "full exported configuration bundle"
   }
 }
@@ -515,7 +546,7 @@ Response includes the created salon id:
   "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
   "dry_run": false,
   "status": "applied",
-  "schema_version": "manleai.salon_configuration.v3",
+  "schema_version": "manleai.salon_configuration.v4",
   "can_apply": true,
   "summary": [],
   "warnings": [],
@@ -526,10 +557,12 @@ Response includes the created salon id:
 ```
 
 Onboarding import never imports services, staff, customers, appointments, POS
-tokens, API keys, client secrets, or encrypted secrets. If the bundle requests
-`ai_enabled=true`, `booking_mode=confirmed_booking`, or public catalog
-publishing, those live states are skipped until Square Appointments is
-connected, synced, and booking-ready.
+tokens, API keys, client secrets, or encrypted secrets. It can import service
+category taxonomy and aliases because those are understanding configuration,
+not service records or provider state. If the bundle requests `ai_enabled=true`,
+`booking_mode=confirmed_booking`, or public catalog publishing, those live
+states are skipped until Square Appointments is connected, synced, and
+booking-ready.
 
 ## Integration Configuration
 
@@ -663,7 +696,13 @@ is manageable by the owner but not eligible for availability or booking.
       "last_synced_at": "2026-06-10T15:00:00Z",
       "sync_error": "",
       "source": "imported",
-      "pos_linked": true
+      "pos_linked": true,
+      "service_category_id": "category-manicure-id",
+      "category_name": "Manicure",
+      "category_slug": "manicure",
+      "category_source": "manual",
+      "category_confidence": 1,
+      "category_reviewed_at": "2026-06-25T14:30:00Z"
     }
   ]
 }
@@ -687,7 +726,8 @@ slice.
   "ai_description": "Gel polish removal",
   "duration_minutes": 20,
   "price_from": 10,
-  "active": true
+  "active": true,
+  "service_category_id": "category-removal-id"
 }
 ```
 
@@ -704,7 +744,9 @@ Returns `201`:
     "active": true,
     "sync_status": "local_only",
     "source": "local",
-    "pos_linked": false
+    "pos_linked": false,
+    "service_category_id": "category-removal-id",
+    "category_source": "manual"
   }
 }
 ```
@@ -722,7 +764,8 @@ is saved, `ai_bookable` is also disabled.
   "ai_description": "Classic manicure",
   "duration_minutes": 45,
   "price_from": 35,
-  "active": true
+  "active": true,
+  "service_category_id": "category-manicure-id"
 }
 ```
 
@@ -744,6 +787,119 @@ Updates only the internal AI booking eligibility flag for a service. Square
 service records are not edited. A service cannot be enabled for AI booking when
 it is inactive, archived, local-only, unmapped, sync-failed, or missing a valid
 link for the active POS provider.
+
+`PATCH /api/salons/:id/services/:service_id/category`
+
+Assigns or clears a service category. Passing a category ID marks the assignment
+as owner-reviewed `manual` with confidence `1`; passing an empty
+`service_category_id` clears the assignment and returns it to `unassigned`.
+
+```json
+{
+  "service_category_id": "category-manicure-id"
+}
+```
+
+`GET /api/salons/:id/service-categories`
+
+Returns owner-scoped service categories with service counts and aliases. These
+groups help the AI clarify service requests but are not directly bookable.
+
+```json
+{
+  "service_categories": [
+    {
+      "id": "category-manicure-id",
+      "salon_id": "...",
+      "name": "Manicure",
+      "slug": "manicure",
+      "description": "Hand nail services.",
+      "status": "active",
+      "sort_order": 10,
+      "source": "manual",
+      "service_count": 4,
+      "aliases": [
+        {
+          "id": "category-alias-id",
+          "category_id": "category-manicure-id",
+          "category_name": "Manicure",
+          "alias": "mani",
+          "normalized_alias": "mani",
+          "source": "owner",
+          "status": "active",
+          "confidence": 0.94
+        }
+      ]
+    }
+  ]
+}
+```
+
+`POST /api/salons/:id/service-categories`
+
+Creates an owner-managed category. Slugs are derived from names and are unique
+per salon.
+
+```json
+{
+  "name": "Waxing",
+  "description": "Waxing services.",
+  "sort_order": 80
+}
+```
+
+`PUT /api/salons/:id/service-categories/:category_id`
+
+Updates category name, description, and sort order.
+
+`POST /api/salons/:id/service-categories/:category_id/archive`
+
+Archives a category, clears matching service assignments back to `unassigned`,
+and archives its category aliases.
+
+`POST /api/salons/:id/service-categories/:category_id/restore`
+
+Restores an archived category.
+
+`POST /api/salons/:id/service-categories/:category_id/aliases`
+
+Creates or updates a category alias by `(salon_id, normalized_alias)`. The
+backend rejects aliases that conflict with active service aliases.
+
+```json
+{
+  "alias": "mani",
+  "confidence": 0.94
+}
+```
+
+`POST /api/salons/:id/service-category-aliases/:alias_id/archive`
+
+Archives one category alias.
+
+`POST /api/salons/:id/service-categories/suggestions/refresh`
+
+Idempotently seeds common nail-salon categories such as Manicure, Pedicure,
+Acrylic, Dip Powder, and Removal; creates system category aliases when they do
+not conflict with service aliases; and suggests categories only for services
+whose category source is `unassigned` or `suggested`. It does not override
+manual or imported assignments.
+
+```json
+{
+  "refresh": {
+    "created_categories": 0,
+    "restored_system_categories": 0,
+    "created_aliases": 0,
+    "updated_system_aliases": 0,
+    "skipped_alias_conflicts": 0,
+    "suggested_services": 3,
+    "skipped_reviewed_services": 5,
+    "skipped_ambiguous_services": 0,
+    "unmatched_unreviewed_services": 1
+  }
+}
+```
 
 `GET /api/salons/:id/staff`
 
@@ -1129,9 +1285,52 @@ Irreversibly redacts a completed or otherwise non-active owner-scoped conversati
 }
 ```
 
-Processes one simulated customer message through the deterministic conversation engine. `event_key` is optional for simulator callers and is used by voice adapters to dedupe provider retries. The simulator asks one question at a time, preserves already-collected booking slots, handles greeting-only or connection-check turns without replaying the full welcome or forcing booking intent, handles date-only turns such as weekdays before a time is known, can create owner handoffs for human requests or disabled AI booking, checks provider-neutral availability before selecting a booking time, offers available slots from Square Appointments, and calls the provider-neutral booking service only after the customer selects a slot and required customer details are collected. Service utterances are interpreted against the active salon catalog and active `service_aliases`; exact catalog service names win over aliases, alias matches can select one service, and generic or fuzzy family matches ask for catalog-backed clarification instead of selecting a service. Transcript metadata may include `service_understanding_status`, `service_understanding_reason`, `service_understanding_confidence`, candidate service IDs/names, selected service, alias source, and alias ID for debugging. Offered slots may include ordered `segments` with provider-neutral service/staff assignments. The engine can select a unique offered slot from ordinal replies, spoken times such as "one p.m.", or a "Yes" reply to a prompt that confirmed one specific offered time; unclear time fragments repeat the existing offered slots instead of rerunning availability. Once a customer selects a slot, the session stores selected `booking_segments` and `staff_selection_mode` so simulator and phone flows can create one multi-service POS-first booking request. When `staff_selection_mode=anyone`, the customer did not choose a named technician, so the conversation avoids presenting the POS staff assignment as a customer-selected technician. A simulator booking is marked `booking_confirmed` only when the booking service returns a confirmed booking attempt with a POS booking ID and appointment. POS failures create `booking_fallback_pending` wording and do not create confirmed appointment language.
+Processes one simulated customer message through the deterministic conversation engine. `event_key` is optional for simulator callers and is used by voice adapters to dedupe provider retries. The simulator asks one question at a time, preserves already-collected booking slots, handles greeting-only or connection-check turns without replaying the full welcome or forcing booking intent, handles date-only turns such as weekdays before a time is known, can create owner handoffs for human requests or disabled AI booking, checks provider-neutral availability before selecting a booking time, offers available slots from Square Appointments, and calls the provider-neutral booking service only after the customer selects a slot and required customer details are collected. Service utterances are interpreted against the active salon catalog, active `service_aliases`, active `service_categories`, and active `service_category_aliases`; exact catalog service names win over aliases, alias matches can select one service, category/category-alias matches ask the caller to choose a real service in that group, and generic or fuzzy family matches ask for catalog-backed clarification instead of selecting a service. Transcript metadata may include `service_understanding_status`, `service_understanding_reason`, `service_understanding_confidence`, candidate service IDs/names, selected service, alias source, alias ID, category ID, and category name for debugging. Group or party booking requests create owner handoff and structured party request records; they do not call availability or booking tools and are not confirmed appointments. Offered slots may include ordered `segments` with provider-neutral service/staff assignments. The engine can select a unique offered slot from ordinal replies, spoken times such as "one p.m.", or a "Yes" reply to a prompt that confirmed one specific offered time; unclear time fragments repeat the existing offered slots instead of rerunning availability. Once a customer selects a slot, the session stores selected `booking_segments` and `staff_selection_mode` so simulator and phone flows can create one multi-service POS-first booking request. When `staff_selection_mode=anyone`, the customer did not choose a named technician, so the conversation avoids presenting the POS staff assignment as a customer-selected technician. A simulator booking is marked `booking_confirmed` only when the booking service returns a confirmed booking attempt with a POS booking ID and appointment. POS failures create `booking_fallback_pending` wording and do not create confirmed appointment language.
 
 Phone channel sessions are created by Twilio webhooks and use the same conversation engine. Phone bookings use source `ai_voice_call`; simulator bookings use source `ai_conversation_simulator`.
+
+`GET /api/salons/:id/party-booking-requests?status=pending`
+
+Returns owner-scoped party booking requests created from group booking handoffs.
+The optional `status` filter accepts `pending`, `contacted`, `resolved`, or
+`dismissed`; the optional `limit` defaults to 25 and is capped at 100.
+
+```json
+{
+  "party_booking_requests": [
+    {
+      "id": "party-request-id",
+      "salon_id": "...",
+      "call_session_id": "session-id",
+      "event_key": "provider-turn-key",
+      "status": "pending",
+      "party_size": 3,
+      "representative_name": "Linh Tran",
+      "representative_phone": "+13125550101",
+      "requested_date": "2026-07-06",
+      "requested_time_window": "afternoon",
+      "guest_service_requests": [
+        {"service_id": "service-gel-id", "service_name": "Gel Manicure"}
+      ],
+      "flexibility_notes": "Caller can move later if needed.",
+      "summary": "Group booking request for three manicures.",
+      "created_at": "2026-07-04T15:00:00Z",
+      "updated_at": "2026-07-04T15:00:00Z"
+    }
+  ]
+}
+```
+
+`PATCH /api/salons/:id/party-booking-requests/:request_id/status`
+
+Updates owner workflow status for a party request. This does not create,
+confirm, reschedule, or cancel a POS appointment.
+
+```json
+{
+  "status": "contacted"
+}
+```
 
 ## AI Training
 
@@ -1164,7 +1363,12 @@ Returns owner-scoped service aliases used by the conversation service-understand
 
 `POST /api/salons/:id/service-aliases`
 
-Creates or updates a service alias. The backend normalizes `alias` into `normalized_alias` and upserts by `(salon_id, normalized_alias)`, so retrying the same request updates one alias instead of creating duplicate learned behavior.
+Creates or updates a service alias. The backend normalizes `alias` into
+`normalized_alias` and upserts by `(salon_id, normalized_alias)`, so retrying
+the same request updates one alias instead of creating duplicate learned
+behavior. The backend rejects an active service alias if the normalized phrase
+already belongs to an active service category alias, because one caller phrase
+cannot safely mean both a concrete service and a category.
 
 ```json
 {

@@ -10,6 +10,8 @@ const (
 	serviceUnderstandingUnknown         = "unknown_service"
 	serviceUnderstandingExact           = "exact_service"
 	serviceUnderstandingAlias           = "service_alias"
+	serviceUnderstandingCategory        = "category"
+	serviceUnderstandingCategoryAlias   = "category_alias"
 	serviceUnderstandingFuzzyService    = "fuzzy_service"
 	serviceUnderstandingCatalogToken    = "catalog_token"
 	serviceUnderstandingAmbiguousFamily = "ambiguous_family"
@@ -34,16 +36,18 @@ const (
 )
 
 type serviceUnderstandingResult struct {
-	Status          serviceUnderstandingStatus
-	Reason          string
-	Confidence      float64
-	Selected        *ServiceOption
-	Candidates      []ServiceOption
-	MatchedToken    string
-	MatchedSource   string
-	MatchedAliasID  string
-	MatchedAlias    string
-	NormalizedInput string
+	Status              serviceUnderstandingStatus
+	Reason              string
+	Confidence          float64
+	Selected            *ServiceOption
+	Candidates          []ServiceOption
+	MatchedToken        string
+	MatchedSource       string
+	MatchedAliasID      string
+	MatchedAlias        string
+	MatchedCategoryID   string
+	MatchedCategoryName string
+	NormalizedInput     string
 }
 
 func interpretService(message string, services []ServiceOption, aliasSets ...[]ServiceAlias) serviceUnderstandingResult {
@@ -51,18 +55,23 @@ func interpretService(message string, services []ServiceOption, aliasSets ...[]S
 	if len(aliasSets) > 0 {
 		aliases = aliasSets[0]
 	}
-	index := newServiceCatalogIndex(services, aliases)
+	index := newServiceCatalogIndex(services, aliases, nil)
 	return index.Interpret(message)
 }
 
-func interpretServiceForSession(message string, session Session, services []ServiceOption, aliases []ServiceAlias) serviceUnderstandingResult {
+func interpretServiceWithCategoryAliases(message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) serviceUnderstandingResult {
+	index := newServiceCatalogIndex(services, aliases, categoryAliases)
+	return index.Interpret(message)
+}
+
+func interpretServiceForSession(message string, session Session, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) serviceUnderstandingResult {
 	if pending := pendingServiceCandidateServices(session, services); len(pending) > 0 {
-		result := newServiceCatalogIndex(pending, nil).InterpretPending(message)
+		result := newServiceCatalogIndex(pending, nil, categoryAliases).InterpretPending(message)
 		if result.Status != serviceUnderstandingStatusUnknown {
 			return result
 		}
 	}
-	return interpretService(message, services, aliases)
+	return interpretServiceWithCategoryAliases(message, services, aliases, categoryAliases)
 }
 
 func pendingServiceCandidateServices(session Session, services []ServiceOption) []ServiceOption {
@@ -103,12 +112,15 @@ func pendingServiceCandidateIDs(session Session) []string {
 }
 
 type serviceCatalogIndex struct {
-	services      []ServiceOption
-	exactNames    map[string]ServiceOption
-	exactPhrases  []serviceExactPhrase
-	aliasPhrases  []serviceAliasPhrase
-	tokenServices map[string][]ServiceOption
-	familyTokens  map[string][]ServiceOption
+	services             []ServiceOption
+	exactNames           map[string]ServiceOption
+	exactPhrases         []serviceExactPhrase
+	aliasPhrases         []serviceAliasPhrase
+	categoryPhrases      []serviceCategoryPhrase
+	categoryAliasPhrases []serviceCategoryAliasPhrase
+	tokenServices        map[string][]ServiceOption
+	familyTokens         map[string][]ServiceOption
+	categoryServices     map[string][]ServiceOption
 }
 
 type serviceExactPhrase struct {
@@ -122,12 +134,26 @@ type serviceAliasPhrase struct {
 	Service ServiceOption
 }
 
-func newServiceCatalogIndex(services []ServiceOption, aliases []ServiceAlias) serviceCatalogIndex {
+type serviceCategoryPhrase struct {
+	Phrase       string
+	CategoryID   string
+	CategoryName string
+	Services     []ServiceOption
+}
+
+type serviceCategoryAliasPhrase struct {
+	Phrase   string
+	Alias    ServiceCategoryAlias
+	Services []ServiceOption
+}
+
+func newServiceCatalogIndex(services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) serviceCatalogIndex {
 	index := serviceCatalogIndex{
-		services:      append([]ServiceOption(nil), services...),
-		exactNames:    map[string]ServiceOption{},
-		tokenServices: map[string][]ServiceOption{},
-		familyTokens:  map[string][]ServiceOption{},
+		services:         append([]ServiceOption(nil), services...),
+		exactNames:       map[string]ServiceOption{},
+		tokenServices:    map[string][]ServiceOption{},
+		familyTokens:     map[string][]ServiceOption{},
+		categoryServices: map[string][]ServiceOption{},
 	}
 	sort.SliceStable(index.services, func(i, j int) bool {
 		return len(index.services[i].Name) > len(index.services[j].Name)
@@ -141,6 +167,9 @@ func newServiceCatalogIndex(services []ServiceOption, aliases []ServiceAlias) se
 		index.exactPhrases = append(index.exactPhrases, serviceExactPhrase{Phrase: name, Service: service})
 		for _, token := range serviceNameTokens(service.Name) {
 			index.tokenServices[token] = appendUniqueService(index.tokenServices[token], service)
+		}
+		if categoryID := strings.TrimSpace(service.CategoryID); categoryID != "" {
+			index.categoryServices[categoryID] = appendUniqueService(index.categoryServices[categoryID], service)
 		}
 	}
 	servicesByID := map[string]ServiceOption{}
@@ -165,6 +194,46 @@ func newServiceCatalogIndex(services []ServiceOption, aliases []ServiceAlias) se
 			Service: service,
 		})
 	}
+	for categoryID, items := range index.categoryServices {
+		items = orderedServices(items)
+		categoryName := ""
+		for _, item := range items {
+			if strings.TrimSpace(item.CategoryName) != "" {
+				categoryName = strings.TrimSpace(item.CategoryName)
+				break
+			}
+		}
+		if categoryName == "" {
+			continue
+		}
+		phrase := normalizeServiceText(categoryName)
+		if phrase != "" {
+			index.categoryPhrases = append(index.categoryPhrases, serviceCategoryPhrase{
+				Phrase:       phrase,
+				CategoryID:   categoryID,
+				CategoryName: categoryName,
+				Services:     items,
+			})
+		}
+	}
+	for _, alias := range categoryAliases {
+		services := index.categoryServices[strings.TrimSpace(alias.CategoryID)]
+		if len(services) == 0 {
+			continue
+		}
+		phrase := normalizeServiceText(alias.NormalizedAlias)
+		if phrase == "" {
+			phrase = normalizeServiceText(alias.Alias)
+		}
+		if phrase == "" {
+			continue
+		}
+		index.categoryAliasPhrases = append(index.categoryAliasPhrases, serviceCategoryAliasPhrase{
+			Phrase:   phrase,
+			Alias:    alias,
+			Services: orderedServices(services),
+		})
+	}
 	for token, items := range index.tokenServices {
 		if len(items) > 1 {
 			index.familyTokens[token] = orderedServices(items)
@@ -178,6 +247,18 @@ func newServiceCatalogIndex(services []ServiceOption, aliases []ServiceAlias) se
 			return index.aliasPhrases[i].Service.Name < index.aliasPhrases[j].Service.Name
 		}
 		return len(index.aliasPhrases[i].Phrase) > len(index.aliasPhrases[j].Phrase)
+	})
+	sort.SliceStable(index.categoryPhrases, func(i, j int) bool {
+		if len(index.categoryPhrases[i].Phrase) == len(index.categoryPhrases[j].Phrase) {
+			return index.categoryPhrases[i].CategoryName < index.categoryPhrases[j].CategoryName
+		}
+		return len(index.categoryPhrases[i].Phrase) > len(index.categoryPhrases[j].Phrase)
+	})
+	sort.SliceStable(index.categoryAliasPhrases, func(i, j int) bool {
+		if len(index.categoryAliasPhrases[i].Phrase) == len(index.categoryAliasPhrases[j].Phrase) {
+			return index.categoryAliasPhrases[i].Alias.CategoryName < index.categoryAliasPhrases[j].Alias.CategoryName
+		}
+		return len(index.categoryAliasPhrases[i].Phrase) > len(index.categoryAliasPhrases[j].Phrase)
 	})
 	return index
 }
@@ -259,6 +340,29 @@ func (idx serviceCatalogIndex) interpret(message string, pendingCandidates bool)
 		result.Candidates = orderedServices(candidates)
 		return result
 	}
+	if categoryMatch, ok := idx.categoryMatch(normalized); ok {
+		result.Status = serviceUnderstandingStatusAmbiguous
+		result.Reason = serviceUnderstandingCategory
+		result.Confidence = 0.9
+		result.Candidates = categoryMatch.Services
+		result.MatchedToken = categoryMatch.Phrase
+		result.MatchedCategoryID = categoryMatch.CategoryID
+		result.MatchedCategoryName = categoryMatch.CategoryName
+		return result
+	}
+	if categoryAliasMatch, ok := idx.categoryAliasMatch(normalized); ok {
+		result.Status = serviceUnderstandingStatusAmbiguous
+		result.Reason = serviceUnderstandingCategoryAlias
+		result.Confidence = categoryAliasConfidence(categoryAliasMatch.Alias)
+		result.Candidates = categoryAliasMatch.Services
+		result.MatchedToken = categoryAliasMatch.Phrase
+		result.MatchedSource = strings.TrimSpace(categoryAliasMatch.Alias.Source)
+		result.MatchedAliasID = strings.TrimSpace(categoryAliasMatch.Alias.ID)
+		result.MatchedAlias = strings.TrimSpace(categoryAliasMatch.Alias.Alias)
+		result.MatchedCategoryID = strings.TrimSpace(categoryAliasMatch.Alias.CategoryID)
+		result.MatchedCategoryName = strings.TrimSpace(categoryAliasMatch.Alias.CategoryName)
+		return result
+	}
 	if fuzzyMatch, ok := idx.fuzzyServiceMatch(normalized, pendingCandidates); ok {
 		result.Status = serviceUnderstandingStatusSelected
 		result.Reason = serviceUnderstandingFuzzyService
@@ -296,6 +400,24 @@ func (idx serviceCatalogIndex) interpret(message string, pendingCandidates bool)
 		result.MatchedToken = fuzzyToken
 	}
 	return result
+}
+
+func (idx serviceCatalogIndex) categoryMatch(normalized string) (serviceCategoryPhrase, bool) {
+	for _, category := range idx.categoryPhrases {
+		if indexNormalizedPhrase(normalized, category.Phrase) >= 0 {
+			return category, true
+		}
+	}
+	return serviceCategoryPhrase{}, false
+}
+
+func (idx serviceCatalogIndex) categoryAliasMatch(normalized string) (serviceCategoryAliasPhrase, bool) {
+	for _, alias := range idx.categoryAliasPhrases {
+		if indexNormalizedPhrase(normalized, alias.Phrase) >= 0 {
+			return alias, true
+		}
+	}
+	return serviceCategoryAliasPhrase{}, false
 }
 
 type fuzzyServiceMatch struct {
@@ -363,6 +485,13 @@ func aliasConfidence(alias ServiceAlias) float64 {
 		return alias.Confidence
 	}
 	return 0.94
+}
+
+func categoryAliasConfidence(alias ServiceCategoryAlias) float64 {
+	if alias.Confidence > 0 {
+		return alias.Confidence
+	}
+	return 0.9
 }
 
 func (idx serviceCatalogIndex) directTokenMatches(normalized string) []ServiceOption {

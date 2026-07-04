@@ -41,6 +41,11 @@ const (
 	HandoffReasonBookingUnavailable         = "booking_unavailable"
 	HandoffReasonCustomerDetailsUnavailable = "customer_details_unavailable"
 	HandoffReasonGroupBooking               = "group_booking"
+
+	PartyRequestStatusPending   = "pending"
+	PartyRequestStatusContacted = "contacted"
+	PartyRequestStatusResolved  = "resolved"
+	PartyRequestStatusDismissed = "dismissed"
 )
 
 var (
@@ -73,7 +78,10 @@ type Store interface {
 	ListActiveStaff(ctx context.Context, salonID string) ([]StaffOption, error)
 	ListStaffAssignmentStats(ctx context.Context, salonID string, staffIDs []string, from time.Time, to time.Time) (map[string]StaffAssignmentStat, error)
 	ListActiveServiceAliases(ctx context.Context, salonID string) ([]ServiceAlias, error)
+	ListActiveServiceCategoryAliases(ctx context.Context, salonID string) ([]ServiceCategoryAlias, error)
 	ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error)
+	ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int) ([]PartyBookingRequest, error)
+	UpdatePartyBookingRequestStatus(ctx context.Context, salonID string, ownerUserID string, requestID string, status string) (*PartyBookingRequest, error)
 	SaveTurn(ctx context.Context, record TurnRecord) (*Session, error)
 }
 
@@ -150,12 +158,25 @@ type ServiceOption struct {
 	DurationMinutes int     `json:"duration_minutes"`
 	PriceFrom       float64 `json:"price_from,omitempty"`
 	PriceDisplay    string  `json:"price_display,omitempty"`
+	CategoryID      string  `json:"category_id,omitempty"`
+	CategoryName    string  `json:"category_name,omitempty"`
+	CategorySlug    string  `json:"category_slug,omitempty"`
 }
 
 type ServiceAlias struct {
 	ID              string  `json:"id"`
 	ServiceID       string  `json:"service_id"`
 	ServiceName     string  `json:"service_name"`
+	Alias           string  `json:"alias"`
+	NormalizedAlias string  `json:"normalized_alias"`
+	Source          string  `json:"source"`
+	Confidence      float64 `json:"confidence"`
+}
+
+type ServiceCategoryAlias struct {
+	ID              string  `json:"id"`
+	CategoryID      string  `json:"category_id"`
+	CategoryName    string  `json:"category_name"`
 	Alias           string  `json:"alias"`
 	NormalizedAlias string  `json:"normalized_alias"`
 	Source          string  `json:"source"`
@@ -216,6 +237,7 @@ type Session struct {
 	UpdatedAt          time.Time                       `json:"updated_at"`
 	Transcript         []TranscriptMessage             `json:"transcript,omitempty"`
 	Handoff            *HandoffRequest                 `json:"handoff,omitempty"`
+	PartyRequest       *PartyBookingRequest            `json:"party_request,omitempty"`
 }
 
 type OfferedSlot struct {
@@ -260,6 +282,32 @@ type HandoffRequest struct {
 	ResolvedAt    *time.Time `json:"resolved_at,omitempty"`
 }
 
+type PartyBookingRequest struct {
+	ID                   string              `json:"id"`
+	SalonID              string              `json:"salon_id"`
+	CallSessionID        string              `json:"call_session_id"`
+	EventKey             string              `json:"event_key,omitempty"`
+	Status               string              `json:"status"`
+	PartySize            int                 `json:"party_size,omitempty"`
+	RepresentativeName   string              `json:"representative_name,omitempty"`
+	RepresentativePhone  string              `json:"representative_phone,omitempty"`
+	RequestedDate        string              `json:"requested_date,omitempty"`
+	RequestedTimeWindow  string              `json:"requested_time_window,omitempty"`
+	GuestServiceRequests []PartyGuestService `json:"guest_service_requests,omitempty"`
+	FlexibilityNotes     string              `json:"flexibility_notes,omitempty"`
+	Summary              string              `json:"summary"`
+	CreatedAt            time.Time           `json:"created_at"`
+	UpdatedAt            time.Time           `json:"updated_at"`
+	ResolvedAt           *time.Time          `json:"resolved_at,omitempty"`
+	ResolvedBy           string              `json:"resolved_by,omitempty"`
+}
+
+type PartyGuestService struct {
+	ServiceID   string `json:"service_id,omitempty"`
+	ServiceName string `json:"service_name,omitempty"`
+	Notes       string `json:"notes,omitempty"`
+}
+
 type WebhookEventLog struct {
 	ID             string    `json:"id"`
 	Provider       string    `json:"provider"`
@@ -301,6 +349,7 @@ type TurnRecord struct {
 	AIMetadata       map[string]any
 	Update           SessionUpdate
 	Handoff          *HandoffRecord
+	PartyRequest     *PartyRequestRecord
 }
 
 type SessionUpdate struct {
@@ -328,4 +377,16 @@ type HandoffRecord struct {
 	CustomerName  string
 	CustomerPhone string
 	Summary       string
+}
+
+type PartyRequestRecord struct {
+	EventKey             string
+	PartySize            int
+	RepresentativeName   string
+	RepresentativePhone  string
+	RequestedDate        string
+	RequestedTimeWindow  string
+	GuestServiceRequests []PartyGuestService
+	FlexibilityNotes     string
+	Summary              string
 }

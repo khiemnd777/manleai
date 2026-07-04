@@ -36,6 +36,31 @@ func TestGetBuildsSanitizedConfigurationExportWithKnowledgeBase(t *testing.T) {
 			UpdatedAt:             updatedAt,
 		},
 	}
+	service.categories = &fakeServiceCategoryReader{items: []pos.ServiceCategory{{
+		ID:          "cat_1",
+		SalonID:     "salon_1",
+		Name:        "Manicure",
+		Slug:        "manicure",
+		Description: "Hand nail services.",
+		Status:      pos.ServiceCategoryStatusActive,
+		Source:      pos.ServiceCategorySourceManual,
+		SortOrder:   10,
+		Aliases: []pos.ServiceCategoryAlias{{
+			ID:              "cat_alias_1",
+			SalonID:         "salon_1",
+			CategoryID:      "cat_1",
+			CategoryName:    "Manicure",
+			Alias:           "mani",
+			NormalizedAlias: "mani",
+			Source:          pos.ServiceCategoryAliasSourceOwner,
+			Status:          pos.ServiceCategoryStatusActive,
+			Confidence:      0.94,
+			CreatedAt:       updatedAt,
+			UpdatedAt:       updatedAt,
+		}},
+		CreatedAt: updatedAt,
+		UpdatedAt: updatedAt,
+	}}}
 	service.now = func() time.Time { return exportedAt }
 
 	result, err := service.Get(context.Background(), "salon_1", "owner_1")
@@ -50,6 +75,12 @@ func TestGetBuildsSanitizedConfigurationExportWithKnowledgeBase(t *testing.T) {
 	}
 	if result.KnowledgeBase.Count != 1 || result.KnowledgeBase.Items[0].SourceKey == "" {
 		t.Fatalf("knowledge base was not exported with stable source key: %#v", result.KnowledgeBase)
+	}
+	if result.ServiceCategories.Count != 1 || result.ServiceCategories.Items[0].SourceKey != "service_category:manicure" {
+		t.Fatalf("service categories were not exported with stable source key: %#v", result.ServiceCategories)
+	}
+	if got := result.ServiceCategories.Items[0].Aliases[0].SourceKey; got != "service_category_alias:mani" {
+		t.Fatalf("category alias source key = %q, want stable alias key", got)
 	}
 	if result.AIReceptionist.AITone != "natural_human" {
 		t.Fatalf("AI tone = %q, want natural_human", result.AIReceptionist.AITone)
@@ -256,6 +287,58 @@ func TestPreviewImportCountsPublicSlugCheckFailure(t *testing.T) {
 	}
 	if sectionSummary(result.Summary, SectionPublic).Conflicts != 1 {
 		t.Fatalf("public summary = %#v, want one conflict", result.Summary)
+	}
+}
+
+func TestPreviewImportBlocksCategoryAliasServiceAliasConflict(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
+	store := &fakeImportStore{
+		publicCanPublish:       true,
+		canEnableAI:            true,
+		activeServiceAliasKeys: map[string]bool{"classic": true},
+	}
+	service := newTestService(updatedAt)
+	service.imports = store
+
+	bundle := testImportBundle(updatedAt)
+	bundle.ServiceCategories = ServiceCategoryBundleExport{
+		Items: []ServiceCategoryExport{{
+			SourceKey: "service_category:manicure",
+			Name:      "Manicure",
+			Slug:      "manicure",
+			Status:    pos.ServiceCategoryStatusActive,
+			Source:    pos.ServiceCategorySourceManual,
+			SortOrder: 10,
+			Aliases: []ServiceCategoryAliasExport{{
+				SourceKey:       "service_category_alias:classic",
+				Alias:           "classic",
+				NormalizedAlias: "classic",
+				Source:          pos.ServiceCategoryAliasSourceOwner,
+				Status:          pos.ServiceCategoryStatusActive,
+				Confidence:      0.94,
+			}},
+		}},
+		Count: 1,
+	}
+
+	result, err := service.PreviewImport(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "req-category-conflict",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("PreviewImport returned error: %v", err)
+	}
+	if result.CanApply {
+		t.Fatalf("CanApply = true, want conflict for service alias overlap: %#v", result)
+	}
+	found := false
+	for _, issue := range result.Conflicts {
+		if issue.Code == "category_alias_conflicts_with_service_alias" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("conflicts = %#v, want category/service alias conflict", result.Conflicts)
 	}
 }
 
@@ -588,6 +671,18 @@ func (f *fakePOSConnectionReader) GetConnection(ctx context.Context, salonID str
 	return f.connection, nil
 }
 
+type fakeServiceCategoryReader struct {
+	items []pos.ServiceCategory
+	err   error
+}
+
+func (f *fakeServiceCategoryReader) ListServiceCategories(ctx context.Context, salonID string, ownerUserID string) ([]pos.ServiceCategory, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.items, nil
+}
+
 type fakeKnowledgeReader struct {
 	items []training.KnowledgeItem
 	err   error
@@ -601,17 +696,18 @@ func (f *fakeKnowledgeReader) ListKnowledge(ctx context.Context, salonID string,
 }
 
 type fakeImportStore struct {
-	publicCanPublish   bool
-	canEnableAI        bool
-	slugTaken          bool
-	slugErr            error
-	lastSlugSalonID    string
-	ownerHasSalon      bool
-	knowledge          *fakeKnowledgeReader
-	appliedRuns        map[string]string
-	onboardingRuns     map[string]fakeOnboardingRun
-	onboardingCreates  int
-	lastOnboardingPlan *importPlan
+	publicCanPublish       bool
+	canEnableAI            bool
+	slugTaken              bool
+	slugErr                error
+	lastSlugSalonID        string
+	ownerHasSalon          bool
+	knowledge              *fakeKnowledgeReader
+	activeServiceAliasKeys map[string]bool
+	appliedRuns            map[string]string
+	onboardingRuns         map[string]fakeOnboardingRun
+	onboardingCreates      int
+	lastOnboardingPlan     *importPlan
 }
 
 type fakeOnboardingRun struct {
@@ -623,9 +719,17 @@ type fakeOnboardingRun struct {
 func (f *fakeImportStore) TargetImportState(ctx context.Context, salonID string, ownerUserID string, current *ConfigurationBundle) (*importTargetState, error) {
 	byImportKey := map[string]KnowledgeItemExport{}
 	byContentHash := map[string]KnowledgeItemExport{}
+	categoryBySlug := map[string]ServiceCategoryExport{}
+	categoryAliasByKey := map[string]ServiceCategoryAliasExport{}
 	for _, item := range current.KnowledgeBase.Items {
 		byImportKey[item.SourceKey] = item
 		byContentHash[knowledgeContentHash(item)] = item
+	}
+	for _, item := range current.ServiceCategories.Items {
+		categoryBySlug[item.Slug] = item
+		for _, alias := range item.Aliases {
+			categoryAliasByKey[alias.NormalizedAlias] = alias
+		}
 	}
 	return &importTargetState{
 		SalonProfile:           current.SalonProfile,
@@ -634,6 +738,9 @@ func (f *fakeImportStore) TargetImportState(ctx context.Context, salonID string,
 		PublicCanPublish:       f.publicCanPublish,
 		CanEnableAIBooking:     f.canEnableAI,
 		Integrations:           current.Integrations,
+		ServiceCategoryBySlug:  categoryBySlug,
+		CategoryAliasByKey:     categoryAliasByKey,
+		ActiveServiceAliasKeys: f.activeServiceAliasKeys,
 		KnowledgeByImportKey:   byImportKey,
 		KnowledgeByContentHash: byContentHash,
 	}, nil

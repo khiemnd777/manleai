@@ -36,12 +36,30 @@ func (r *Repository) TargetImportState(ctx context.Context, salonID string, owne
 	}
 	byImportKey := map[string]KnowledgeItemExport{}
 	byContentHash := map[string]KnowledgeItemExport{}
+	categoryBySlug := map[string]ServiceCategoryExport{}
+	categoryAliasByKey := map[string]ServiceCategoryAliasExport{}
 	for _, item := range current.KnowledgeBase.Items {
 		key := strings.TrimSpace(item.SourceKey)
 		if key != "" {
 			byImportKey[key] = item
 		}
 		byContentHash[knowledgeContentHash(item)] = item
+	}
+	for _, item := range current.ServiceCategories.Items {
+		slug := strings.TrimSpace(item.Slug)
+		if slug != "" {
+			categoryBySlug[slug] = item
+		}
+		for _, alias := range item.Aliases {
+			key := strings.TrimSpace(alias.NormalizedAlias)
+			if key != "" {
+				categoryAliasByKey[key] = alias
+			}
+		}
+	}
+	activeServiceAliasKeys, err := r.activeServiceAliasKeys(ctx, salonID)
+	if err != nil {
+		return nil, err
 	}
 	return &importTargetState{
 		SalonProfile:           current.SalonProfile,
@@ -50,6 +68,9 @@ func (r *Repository) TargetImportState(ctx context.Context, salonID string, owne
 		PublicCanPublish:       publicCanPublish,
 		CanEnableAIBooking:     canEnableAI,
 		Integrations:           current.Integrations,
+		ServiceCategoryBySlug:  categoryBySlug,
+		CategoryAliasByKey:     categoryAliasByKey,
+		ActiveServiceAliasKeys: activeServiceAliasKeys,
 		KnowledgeByImportKey:   byImportKey,
 		KnowledgeByContentHash: byContentHash,
 	}, nil
@@ -86,6 +107,29 @@ func (r *Repository) OwnerHasSalon(ctx context.Context, ownerUserID string) (boo
 		)
 	`, ownerUserID).Scan(&exists)
 	return exists, err
+}
+
+func (r *Repository) activeServiceAliasKeys(ctx context.Context, salonID string) (map[string]bool, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT normalized_alias
+		FROM service_aliases
+		WHERE salon_id = $1
+		  AND status = 'active'
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[string]bool{}
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		out[key] = true
+	}
+	return out, rows.Err()
 }
 
 func (r *Repository) ExistingOnboardingImport(ctx context.Context, ownerUserID string, requestID string, fingerprint string) (string, string, bool, bool, error) {
@@ -151,6 +195,9 @@ func (r *Repository) ApplyImport(ctx context.Context, salonID string, ownerUserI
 		return "", false, err
 	}
 	if err := r.upsertIntegrationConfigs(ctx, tx, salonID, plan.Bundle.Integrations); err != nil {
+		return "", false, err
+	}
+	if err := r.upsertServiceCategories(ctx, tx, salonID, plan.ServiceCategories); err != nil {
 		return "", false, err
 	}
 	if err := r.upsertKnowledge(ctx, tx, salonID, plan.Knowledge); err != nil {
@@ -229,6 +276,9 @@ func (r *Repository) ApplyOnboardingImport(ctx context.Context, ownerUserID stri
 		return "", "", false, err
 	}
 	if err := r.upsertIntegrationConfigs(ctx, tx, salonID, plan.Bundle.Integrations); err != nil {
+		return "", "", false, err
+	}
+	if err := r.upsertServiceCategories(ctx, tx, salonID, plan.ServiceCategories); err != nil {
 		return "", "", false, err
 	}
 	if err := r.upsertKnowledge(ctx, tx, salonID, plan.Knowledge); err != nil {
@@ -453,6 +503,103 @@ func upsertConfigSettings(ctx context.Context, tx *sql.Tx, salonID string, provi
 		              updated_at = now()
 	`, salonID, provider, enabled, string(settingsJSON))
 	return err
+}
+
+func (r *Repository) upsertServiceCategories(ctx context.Context, tx *sql.Tx, salonID string, items []plannedServiceCategory) error {
+	categoryIDs := map[string]string{}
+	for _, planned := range items {
+		item := planned.Item
+		if item.Slug == "" {
+			continue
+		}
+		var categoryID string
+		if planned.Operation == "unchanged" {
+			err := tx.QueryRowContext(ctx, `
+				SELECT id::text
+				FROM service_categories
+				WHERE salon_id = $1
+				  AND slug = $2
+			`, salonID, item.Slug).Scan(&categoryID)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
+		if categoryID == "" {
+			err := tx.QueryRowContext(ctx, `
+				INSERT INTO service_categories (
+					salon_id, name, slug, description, status, source, sort_order, archived_at
+				)
+				VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7,
+				        CASE WHEN $5 = 'archived' THEN now() ELSE NULL END)
+				ON CONFLICT (salon_id, slug)
+				DO UPDATE SET name = EXCLUDED.name,
+				              description = EXCLUDED.description,
+				              status = EXCLUDED.status,
+				              source = EXCLUDED.source,
+				              sort_order = EXCLUDED.sort_order,
+				              archived_at = CASE WHEN EXCLUDED.status = 'archived' THEN COALESCE(service_categories.archived_at, now()) ELSE NULL END,
+				              updated_at = now()
+				RETURNING id::text
+			`, salonID, item.Name, item.Slug, item.Description, item.Status, item.Source, item.SortOrder).Scan(&categoryID)
+			if err != nil {
+				return err
+			}
+		}
+		categoryIDs[item.Slug] = categoryID
+	}
+
+	for _, planned := range items {
+		categoryID := categoryIDs[planned.Item.Slug]
+		if categoryID == "" {
+			continue
+		}
+		for _, aliasPlan := range planned.Aliases {
+			if aliasPlan.Operation == "unchanged" {
+				continue
+			}
+			alias := aliasPlan.Item
+			if alias.NormalizedAlias == "" {
+				continue
+			}
+			conflict, err := activeServiceAliasExistsTx(ctx, tx, salonID, alias.NormalizedAlias)
+			if err != nil {
+				return err
+			}
+			if conflict {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO service_category_aliases (
+					salon_id, category_id, alias, normalized_alias, source, status, confidence
+				)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)
+				ON CONFLICT (salon_id, normalized_alias)
+				DO UPDATE SET category_id = EXCLUDED.category_id,
+				              alias = EXCLUDED.alias,
+				              source = EXCLUDED.source,
+				              status = EXCLUDED.status,
+				              confidence = EXCLUDED.confidence,
+				              updated_at = now()
+			`, salonID, categoryID, alias.Alias, alias.NormalizedAlias, alias.Source, alias.Status, alias.Confidence); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func activeServiceAliasExistsTx(ctx context.Context, tx *sql.Tx, salonID string, normalizedAlias string) (bool, error) {
+	var exists bool
+	err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM service_aliases
+			WHERE salon_id = $1
+			  AND normalized_alias = $2
+			  AND status = 'active'
+		)
+	`, salonID, normalizedAlias).Scan(&exists)
+	return exists, err
 }
 
 func (r *Repository) upsertKnowledge(ctx context.Context, tx *sql.Tx, salonID string, items []plannedKnowledgeItem) error {

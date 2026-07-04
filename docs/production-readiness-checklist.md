@@ -97,11 +97,23 @@
 ## Production Service Understanding
 
 - [x] Interpret service utterances against the active salon catalog instead of hardcoded salon-specific keyword patches.
+- [x] Add owner-reviewable service categories and category aliases for menu-level service understanding.
+- [x] Keep category and category-alias matches as clarification candidates, not directly bookable services.
+- [x] Add idempotent system taxonomy refresh for common nail salon groups without overriding owner-reviewed service assignments.
 - [x] Treat generic and fuzzy service-family matches as clarification candidates, not selected services.
 - [x] Persist salon-scoped service aliases from owner corrections with stable `(salon_id, normalized_alias)` upsert semantics.
+- [x] Prevent one normalized phrase from being both an active service alias and an active category alias.
 - [x] Feed active service aliases into simulator and phone conversation runtime.
+- [x] Feed active service categories and category aliases into simulator and phone conversation runtime.
 - [x] Re-check availability when a caller corrects the service after a time or slot was already collected.
-- [x] Record service-understanding status, reason, confidence, candidates, selected service, alias source, and alias ID in transcript metadata.
+- [x] Record service-understanding status, reason, confidence, candidates, selected service, alias source, alias ID, category ID, and category name in transcript metadata.
+
+## Party Booking Owner Review
+
+- [x] Detect group and party booking requests as owner handoffs, not confirmed bookings.
+- [x] Persist structured `party_booking_requests` with stable salon/session/event keys to avoid duplicate requests on retry.
+- [x] Add owner status transitions for pending, contacted, resolved, and dismissed party requests.
+- [x] Redact party request representative PII and guest-service notes during call lifecycle redaction.
 
 ## Canonical POS Ownership And Provider Switch Gates
 
@@ -125,6 +137,8 @@
 
 - [x] Add sanitized owner-scoped configuration export with stable schema version.
 - [x] Exclude services, staff, customers, appointments, call sessions, transcripts, POS OAuth tokens, API keys, client secrets, encrypted secrets, and operational records.
+- [x] Include service category taxonomy and service category aliases in schema v4 while continuing to exclude service records and provider state.
+- [x] Use stable category slugs and normalized alias keys so repeated imports update existing taxonomy instead of duplicating it.
 - [x] Add import preview and apply flows for existing salons and onboarding.
 - [x] Use request IDs for repeated import applies so retries do not create duplicate import runs.
 - [x] Gate live `ai_enabled`, confirmed booking mode, and public catalog publishing until Square Appointments readiness passes on the target salon.

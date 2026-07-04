@@ -326,12 +326,16 @@ func (r *Repository) RedactExpiredSessions(ctx context.Context, limit int) (int,
 
 func (r *Repository) ListBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id::text, name, duration_minutes, COALESCE(price_from, 0), COALESCE(price_display, '')
-		FROM services
-		WHERE salon_id = $1
-		  AND active = true
-		  AND ai_bookable = true
-		ORDER BY name ASC
+		SELECT svc.id::text, svc.name, svc.duration_minutes, COALESCE(svc.price_from, 0), COALESCE(svc.price_display, ''),
+		       COALESCE(cat.id::text, ''), COALESCE(cat.name, ''), COALESCE(cat.slug, '')
+		FROM services svc
+		LEFT JOIN service_categories cat ON cat.id = svc.service_category_id
+		                                AND cat.salon_id = svc.salon_id
+		                                AND cat.status = 'active'
+		WHERE svc.salon_id = $1
+		  AND svc.active = true
+		  AND svc.ai_bookable = true
+		ORDER BY COALESCE(cat.sort_order, 9999), COALESCE(cat.name, ''), svc.name ASC
 	`, salonID)
 	if err != nil {
 		return nil, err
@@ -341,7 +345,7 @@ func (r *Repository) ListBookableServices(ctx context.Context, salonID string) (
 	items := make([]ServiceOption, 0)
 	for rows.Next() {
 		var item ServiceOption
-		if err := rows.Scan(&item.ID, &item.Name, &item.DurationMinutes, &item.PriceFrom, &item.PriceDisplay); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.DurationMinutes, &item.PriceFrom, &item.PriceDisplay, &item.CategoryID, &item.CategoryName, &item.CategorySlug); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -493,6 +497,35 @@ func (r *Repository) ListActiveServiceAliases(ctx context.Context, salonID strin
 	return items, rows.Err()
 }
 
+func (r *Repository) ListActiveServiceCategoryAliases(ctx context.Context, salonID string) ([]ServiceCategoryAlias, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT alias.id::text, alias.category_id::text, cat.name, alias.alias,
+		       alias.normalized_alias, alias.source, alias.confidence
+		FROM service_category_aliases alias
+		JOIN service_categories cat ON cat.id = alias.category_id
+		                           AND cat.salon_id = alias.salon_id
+		                           AND cat.status = 'active'
+		WHERE alias.salon_id = $1
+		  AND alias.status = 'active'
+		ORDER BY alias.updated_at DESC
+		LIMIT 200
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]ServiceCategoryAlias, 0)
+	for rows.Next() {
+		var item ServiceCategoryAlias
+		if err := rows.Scan(&item.ID, &item.CategoryID, &item.CategoryName, &item.Alias, &item.NormalizedAlias, &item.Source, &item.Confidence); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (r *Repository) ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT title, category, body
@@ -616,6 +649,43 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session,
 		}
 	}
 
+	if record.PartyRequest != nil {
+		guestRequests := record.PartyRequest.GuestServiceRequests
+		if guestRequests == nil {
+			guestRequests = []PartyGuestService{}
+		}
+		guestRequestsJSON, err := json.Marshal(guestRequests)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO party_booking_requests (
+				salon_id, call_session_id, event_key, status, party_size, representative_name,
+				representative_phone, requested_date, requested_time_window, guest_service_requests,
+				flexibility_notes, summary
+			)
+			VALUES (
+				$1, $2, $3, 'pending', NULLIF($4, 0), NULLIF($5, ''), NULLIF($6, ''),
+				NULLIF($7, '')::date, NULLIF($8, ''), $9::jsonb, NULLIF($10, ''), $11
+			)
+			ON CONFLICT (salon_id, call_session_id, event_key)
+			DO UPDATE SET party_size = COALESCE(EXCLUDED.party_size, party_booking_requests.party_size),
+			              representative_name = COALESCE(EXCLUDED.representative_name, party_booking_requests.representative_name),
+			              representative_phone = COALESCE(EXCLUDED.representative_phone, party_booking_requests.representative_phone),
+			              requested_date = COALESCE(EXCLUDED.requested_date, party_booking_requests.requested_date),
+			              requested_time_window = COALESCE(EXCLUDED.requested_time_window, party_booking_requests.requested_time_window),
+			              guest_service_requests = CASE
+			                  WHEN jsonb_array_length(EXCLUDED.guest_service_requests) > 0 THEN EXCLUDED.guest_service_requests
+			                  ELSE party_booking_requests.guest_service_requests
+			              END,
+			              flexibility_notes = COALESCE(EXCLUDED.flexibility_notes, party_booking_requests.flexibility_notes),
+			              summary = EXCLUDED.summary,
+			              updated_at = now()
+		`, record.SalonID, record.Session.ID, record.PartyRequest.EventKey, record.PartyRequest.PartySize, record.PartyRequest.RepresentativeName, record.PartyRequest.RepresentativePhone, record.PartyRequest.RequestedDate, record.PartyRequest.RequestedTimeWindow, string(guestRequestsJSON), record.PartyRequest.FlexibilityNotes, record.PartyRequest.Summary); err != nil {
+			return nil, err
+		}
+	}
+
 	offeredSlots := record.Update.OfferedSlots
 	if offeredSlots == nil {
 		offeredSlots = []OfferedSlot{}
@@ -692,6 +762,11 @@ func (r *Repository) loadSessionDetails(ctx context.Context, session *Session) e
 		return err
 	}
 	session.Handoff = handoff
+	partyRequest, err := r.latestPartyRequest(ctx, session.ID)
+	if err != nil {
+		return err
+	}
+	session.PartyRequest = partyRequest
 	return nil
 }
 
@@ -758,6 +833,87 @@ func (r *Repository) latestHandoff(ctx context.Context, sessionID string) (*Hand
 	return &item, nil
 }
 
+func (r *Repository) latestPartyRequest(ctx context.Context, sessionID string) (*PartyBookingRequest, error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT id::text, salon_id::text, call_session_id::text, event_key, status,
+		       COALESCE(party_size, 0), COALESCE(representative_name, ''), COALESCE(representative_phone, ''),
+		       COALESCE(requested_date::text, ''), COALESCE(requested_time_window, ''),
+		       guest_service_requests, COALESCE(flexibility_notes, ''), summary,
+		       created_at, updated_at, resolved_at, COALESCE(resolved_by::text, '')
+		FROM party_booking_requests
+		WHERE call_session_id = $1
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, sessionID)
+	item, err := scanPartyBookingRequest(row)
+	if errors.Is(err, ErrNotFound) {
+		return nil, nil
+	}
+	return item, err
+}
+
+func (r *Repository) ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int) ([]PartyBookingRequest, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	status = strings.TrimSpace(status)
+	statusFilter := ""
+	args := []any{salonID, ownerUserID, limit}
+	if status != "" && status != "all" {
+		statusFilter = "AND req.status = $4"
+		args = append(args, status)
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT req.id::text, req.salon_id::text, req.call_session_id::text, req.event_key, req.status,
+		       COALESCE(req.party_size, 0), COALESCE(req.representative_name, ''), COALESCE(req.representative_phone, ''),
+		       COALESCE(req.requested_date::text, ''), COALESCE(req.requested_time_window, ''),
+		       req.guest_service_requests, COALESCE(req.flexibility_notes, ''), req.summary,
+		       req.created_at, req.updated_at, req.resolved_at, COALESCE(req.resolved_by::text, '')
+		FROM party_booking_requests req
+		JOIN salons salon ON salon.id = req.salon_id
+		WHERE req.salon_id = $1
+		  AND salon.owner_user_id = $2
+		`+statusFilter+`
+		ORDER BY req.created_at DESC
+		LIMIT $3
+	`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]PartyBookingRequest, 0)
+	for rows.Next() {
+		item, err := scanPartyBookingRequest(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *item)
+	}
+	return items, rows.Err()
+}
+
+func (r *Repository) UpdatePartyBookingRequestStatus(ctx context.Context, salonID string, ownerUserID string, requestID string, status string) (*PartyBookingRequest, error) {
+	row := r.db.QueryRowContext(ctx, `
+		UPDATE party_booking_requests req
+		SET status = $1,
+		    resolved_at = CASE WHEN $1 IN ('resolved', 'dismissed') THEN COALESCE(req.resolved_at, now()) ELSE req.resolved_at END,
+		    resolved_by = CASE WHEN $1 IN ('resolved', 'dismissed') THEN $2::uuid ELSE req.resolved_by END,
+		    updated_at = now()
+		FROM salons salon
+		WHERE req.id = $3
+		  AND req.salon_id = $4
+		  AND salon.id = req.salon_id
+		  AND salon.owner_user_id = $2
+		RETURNING req.id::text, req.salon_id::text, req.call_session_id::text, req.event_key, req.status,
+		          COALESCE(req.party_size, 0), COALESCE(req.representative_name, ''), COALESCE(req.representative_phone, ''),
+		          COALESCE(req.requested_date::text, ''), COALESCE(req.requested_time_window, ''),
+		          req.guest_service_requests, COALESCE(req.flexibility_notes, ''), req.summary,
+		          req.created_at, req.updated_at, req.resolved_at, COALESCE(req.resolved_by::text, '')
+	`, status, ownerUserID, requestID, salonID)
+	return scanPartyBookingRequest(row)
+}
+
 func metadataJSON(metadata map[string]any) (string, error) {
 	if len(metadata) == 0 {
 		return "{}", nil
@@ -811,6 +967,19 @@ func redactSessionInTx(ctx context.Context, execer sqlExecer, sessionID string, 
 		return err
 	}
 	if _, err := execer.ExecContext(ctx, `
+		UPDATE party_booking_requests
+		SET representative_name = NULL,
+		    representative_phone = NULL,
+		    guest_service_requests = '[]'::jsonb,
+		    flexibility_notes = NULL,
+		    summary = $1,
+		    updated_at = now()
+		WHERE call_session_id = $2
+		  AND salon_id = $3
+	`, redactedSummaryBody, sessionID, salonID); err != nil {
+		return err
+	}
+	if _, err := execer.ExecContext(ctx, `
 		UPDATE voice_webhook_events
 		SET payload = jsonb_build_object('redacted', true)
 		WHERE call_session_id = $1
@@ -845,6 +1014,45 @@ func scanWebhookEvent(scanner webhookEventScanner) (WebhookEventLog, error) {
 	}
 	applyWebhookPayload(&item, payload)
 	return item, nil
+}
+
+func scanPartyBookingRequest(scanner interface{ Scan(dest ...any) error }) (*PartyBookingRequest, error) {
+	var item PartyBookingRequest
+	var guestRequests []byte
+	var resolvedAt sql.NullTime
+	if err := scanner.Scan(
+		&item.ID,
+		&item.SalonID,
+		&item.CallSessionID,
+		&item.EventKey,
+		&item.Status,
+		&item.PartySize,
+		&item.RepresentativeName,
+		&item.RepresentativePhone,
+		&item.RequestedDate,
+		&item.RequestedTimeWindow,
+		&guestRequests,
+		&item.FlexibilityNotes,
+		&item.Summary,
+		&item.CreatedAt,
+		&item.UpdatedAt,
+		&resolvedAt,
+		&item.ResolvedBy,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if len(guestRequests) > 0 {
+		if err := json.Unmarshal(guestRequests, &item.GuestServiceRequests); err != nil {
+			return nil, err
+		}
+	}
+	if resolvedAt.Valid {
+		item.ResolvedAt = &resolvedAt.Time
+	}
+	return &item, nil
 }
 
 func applyWebhookPayload(item *WebhookEventLog, raw []byte) {

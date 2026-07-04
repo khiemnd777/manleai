@@ -115,9 +115,11 @@ The Milestone 7 training layer stores owner-authored salon knowledge, correction
 
 AI receptionist tone is salon-scoped runtime configuration on `salon_settings`. Tone presets guide spoken reply style, but backend conversation guardrails still own slot collection, handoff routing, and POS-first confirmation wording.
 
-Service understanding is a backend domain layer, not prompt-only behavior. The conversation runtime interprets customer service utterances against the active salon service catalog and salon-scoped `service_aliases`. Exact catalog service names win over aliases, aliases win over generic family matching, and fuzzy family matches only produce clarification candidates instead of selecting a service. Owner corrections can be applied into service aliases with a stable `(salon_id, normalized_alias)` key, so repeated applies update the same alias rather than creating duplicate learned behavior. Service-understanding decisions are written to transcript metadata with status, reason, confidence, candidates, selected service, alias source, and alias ID so call reviews can explain why a service was selected or why the AI asked for clarification.
+Service understanding is a backend domain layer, not prompt-only behavior. The conversation runtime interprets customer service utterances against the active salon service catalog, salon-scoped `service_aliases`, active `service_categories`, and active `service_category_aliases`. Exact catalog service names win over aliases; aliases can select one real service; category names and category aliases create catalog-backed clarification candidates; and fuzzy family matches only produce clarification candidates instead of selecting a service. Owner corrections can be applied into service aliases with a stable `(salon_id, normalized_alias)` key, while category aliases use their own stable `(salon_id, normalized_alias)` key and conflict with active service aliases so one phrase cannot mean both a single service and a category. Service-understanding decisions are written to transcript metadata with status, reason, confidence, candidates, selected service, alias source, alias ID, category ID, and category name so call reviews can explain why a service was selected or why the AI asked for clarification.
 
-Call sessions are operational records, not an unbounded owner-facing inbox. The Calls dashboard defaults to active sessions and supports archived and redacted lifecycle filters. Active lifecycle sessions carry a 90-day retention timestamp; the worker redacts expired sessions by clearing customer PII, transcript bodies, handoff summaries, webhook payloads, and temporary voice audio while preserving booking, handoff, provider call, outcome, and timestamp audit links. Manual redaction is irreversible from the dashboard and is blocked while a session is active.
+Group and party bookings are structured owner-review requests in the current production release, not automatic confirmed bookings. When the conversation detects a multi-person request, it creates a handoff and an idempotent `party_booking_requests` row keyed by salon, call session, and turn event key. The record stores representative details, party size, requested date or time window, requested guest services, flexibility notes, and a concise summary for the owner dashboard. This path does not call availability or booking tools and must not use confirmed appointment wording.
+
+Call sessions are operational records, not an unbounded owner-facing inbox. The Calls dashboard defaults to active sessions and supports archived and redacted lifecycle filters. Active lifecycle sessions carry a 90-day retention timestamp; the worker redacts expired sessions by clearing customer PII, transcript bodies, handoff summaries, party request representative details, webhook payloads, and temporary voice audio while preserving booking, handoff, provider call, outcome, and timestamp audit links. Manual redaction is irreversible from the dashboard and is blocked while a session is active.
 
 Public salon catalog pages are owner-published by slug. They expose only
 bookable active-provider services/staff and salon contact details needed for a
@@ -125,10 +127,14 @@ customer to call for an appointment. They never expose staff contact details,
 POS IDs, provider tokens, sync errors, or owner identifiers, and they must not
 present a web booking as confirmed.
 
-Configuration transfer exports sanitized setup data only. Import previews and
-applies use stable request IDs, skip secrets and operational records, and must
-not recreate services, staff, customers, appointments, POS tokens, call
-sessions, transcripts, or provider-side state.
+Configuration transfer exports sanitized setup data only, including salon
+profile, AI settings, public catalog settings, integration runtime settings,
+service category taxonomy, service category aliases, and owner-authored
+knowledge. Import previews and applies use stable request IDs, skip secrets
+and operational records, and must not recreate services, staff, customers,
+appointments, POS tokens, call sessions, transcripts, or provider-side state.
+Service category imports use stable slug and normalized-alias keys and reject
+category aliases that conflict with active service aliases.
 
 ## Next Milestone
 

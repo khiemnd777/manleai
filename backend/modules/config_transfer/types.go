@@ -7,7 +7,8 @@ import (
 )
 
 const (
-	SchemaVersion       = "manleai.salon_configuration.v3"
+	SchemaVersion       = "manleai.salon_configuration.v4"
+	LegacySchemaV3      = "manleai.salon_configuration.v3"
 	LegacySchemaV2      = "manleai.salon_configuration.v2"
 	LegacySchemaV1      = "manleai.salon_configuration.v1"
 	StatusPreviewed     = "previewed"
@@ -18,6 +19,7 @@ const (
 	SectionPublic       = "public_booking_page"
 	SectionIntegrations = "integrations"
 	SectionKnowledge    = "knowledge_base"
+	SectionCategories   = "service_categories"
 )
 
 var excludedData = []string{
@@ -50,6 +52,7 @@ type ConfigurationBundle struct {
 	PublicBookingPage       PublicBookingPageExport                      `json:"public_booking_page"`
 	Integrations            integrationconfig.IntegrationConfigsResponse `json:"integrations"`
 	POSConnection           POSConnectionExport                          `json:"pos_connection"`
+	ServiceCategories       ServiceCategoryBundleExport                  `json:"service_categories"`
 	KnowledgeBase           KnowledgeBaseExport                          `json:"knowledge_base"`
 }
 
@@ -103,6 +106,35 @@ type POSConnectionExport struct {
 type KnowledgeBaseExport struct {
 	Items []KnowledgeItemExport `json:"items"`
 	Count int                   `json:"count"`
+}
+
+type ServiceCategoryBundleExport struct {
+	Items []ServiceCategoryExport `json:"items"`
+	Count int                     `json:"count"`
+}
+
+type ServiceCategoryExport struct {
+	SourceKey   string                       `json:"source_key"`
+	Name        string                       `json:"name"`
+	Slug        string                       `json:"slug"`
+	Description string                       `json:"description,omitempty"`
+	Status      string                       `json:"status"`
+	Source      string                       `json:"source"`
+	SortOrder   int                          `json:"sort_order"`
+	Aliases     []ServiceCategoryAliasExport `json:"aliases"`
+	CreatedAt   time.Time                    `json:"created_at"`
+	UpdatedAt   time.Time                    `json:"updated_at"`
+}
+
+type ServiceCategoryAliasExport struct {
+	SourceKey       string    `json:"source_key"`
+	Alias           string    `json:"alias"`
+	NormalizedAlias string    `json:"normalized_alias"`
+	Source          string    `json:"source"`
+	Status          string    `json:"status"`
+	Confidence      float64   `json:"confidence"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type KnowledgeItemExport struct {
@@ -169,11 +201,24 @@ type importPlan struct {
 	PublicCatalogEnabled  bool
 	AIEnabled             bool
 	BookingMode           string
+	ServiceCategories     []plannedServiceCategory
 }
 
 type plannedKnowledgeItem struct {
 	Item      KnowledgeItemExport
 	Operation string
+}
+
+type plannedServiceCategory struct {
+	Item      ServiceCategoryExport
+	Operation string
+	Aliases   []plannedServiceCategoryAlias
+}
+
+type plannedServiceCategoryAlias struct {
+	CategorySlug string
+	Item         ServiceCategoryAliasExport
+	Operation    string
 }
 
 type importTargetState struct {
@@ -183,6 +228,9 @@ type importTargetState struct {
 	PublicCanPublish       bool
 	CanEnableAIBooking     bool
 	Integrations           integrationconfig.IntegrationConfigsResponse
+	ServiceCategoryBySlug  map[string]ServiceCategoryExport
+	CategoryAliasByKey     map[string]ServiceCategoryAliasExport
+	ActiveServiceAliasKeys map[string]bool
 	KnowledgeByImportKey   map[string]KnowledgeItemExport
 	KnowledgeByContentHash map[string]KnowledgeItemExport
 }

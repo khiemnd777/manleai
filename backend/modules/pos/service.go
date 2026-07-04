@@ -18,6 +18,15 @@ type Store interface {
 	GetActiveProvider(ctx context.Context, salonID string, ownerUserID string) (string, error)
 	GetConnection(ctx context.Context, salonID string, provider string) (*Connection, error)
 	ListServices(ctx context.Context, salonID string, provider string) ([]Service, error)
+	ListServiceCategories(ctx context.Context, salonID string, ownerUserID string) ([]ServiceCategory, error)
+	CreateServiceCategory(ctx context.Context, salonID string, ownerUserID string, input ServiceCategoryMutation) (*ServiceCategory, error)
+	UpdateServiceCategory(ctx context.Context, salonID string, ownerUserID string, categoryID string, input ServiceCategoryMutation) (*ServiceCategory, error)
+	ArchiveServiceCategory(ctx context.Context, salonID string, ownerUserID string, categoryID string) (*ServiceCategory, error)
+	RestoreServiceCategory(ctx context.Context, salonID string, ownerUserID string, categoryID string) (*ServiceCategory, error)
+	UpsertServiceCategoryAlias(ctx context.Context, salonID string, ownerUserID string, input ServiceCategoryAliasMutation) (*ServiceCategoryAlias, error)
+	ArchiveServiceCategoryAlias(ctx context.Context, salonID string, ownerUserID string, aliasID string) (*ServiceCategoryAlias, error)
+	AssignServiceCategory(ctx context.Context, salonID string, ownerUserID string, serviceID string, categoryID string) (*Service, error)
+	RefreshServiceCategorySuggestions(ctx context.Context, salonID string, ownerUserID string, seeds []ServiceCategorySeed) (*ServiceCategorySuggestionRefresh, error)
 	ListStaff(ctx context.Context, salonID string, provider string) ([]StaffMember, error)
 	CreateService(ctx context.Context, salonID string, ownerUserID string, provider string, input ServiceMutation) (*Service, error)
 	UpdateService(ctx context.Context, salonID string, ownerUserID string, serviceID string, input ServiceMutation) (*Service, error)
@@ -46,6 +55,44 @@ type ServiceLayer struct {
 	providers map[string]NamedProvider
 }
 
+var defaultServiceCategorySeeds = []ServiceCategorySeed{
+	{
+		Name:        "Manicure",
+		Slug:        "manicure",
+		Description: "Hand nail services such as classic, gel, and polish manicure appointments.",
+		SortOrder:   10,
+		Aliases:     []string{"manicure", "mani", "classic manicure", "gel manicure"},
+	},
+	{
+		Name:        "Pedicure",
+		Slug:        "pedicure",
+		Description: "Foot nail services such as classic, gel, spa, and polish pedicure appointments.",
+		SortOrder:   20,
+		Aliases:     []string{"pedicure", "pedi", "classic pedicure", "spa pedicure", "gel pedicure"},
+	},
+	{
+		Name:        "Acrylic",
+		Slug:        "acrylic",
+		Description: "Acrylic full sets, fills, overlays, and related extension services.",
+		SortOrder:   30,
+		Aliases:     []string{"acrylic", "acrylic full set", "full set", "fill", "fill in", "overlay"},
+	},
+	{
+		Name:        "Dip Powder",
+		Slug:        "dip-powder",
+		Description: "Dip powder and SNS-style nail services.",
+		SortOrder:   40,
+		Aliases:     []string{"dip powder", "dip", "sns", "powder manicure"},
+	},
+	{
+		Name:        "Removal",
+		Slug:        "removal",
+		Description: "Gel, acrylic, dip, polish, and enhancement removal services.",
+		SortOrder:   50,
+		Aliases:     []string{"removal", "remove", "take off", "soak off", "gel removal", "polish removal"},
+	},
+}
+
 func NewService(repo Store, providers ...NamedProvider) *ServiceLayer {
 	byName := make(map[string]NamedProvider, len(providers))
 	for _, provider := range providers {
@@ -63,6 +110,78 @@ func (s *ServiceLayer) Services(ctx context.Context, salonID string, ownerUserID
 		return nil, err
 	}
 	return s.repo.ListServices(ctx, salonID, provider)
+}
+
+func (s *ServiceLayer) ServiceCategories(ctx context.Context, salonID string, ownerUserID string) ([]ServiceCategory, error) {
+	return s.repo.ListServiceCategories(ctx, salonID, ownerUserID)
+}
+
+func (s *ServiceLayer) CreateServiceCategory(ctx context.Context, salonID string, ownerUserID string, req ServiceCategoryWriteRequest) (*ServiceCategory, error) {
+	input, err := normalizeServiceCategoryWriteRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	return s.repo.CreateServiceCategory(ctx, salonID, ownerUserID, input)
+}
+
+func (s *ServiceLayer) UpdateServiceCategory(ctx context.Context, salonID string, ownerUserID string, categoryID string, req ServiceCategoryWriteRequest) (*ServiceCategory, error) {
+	categoryID = strings.TrimSpace(categoryID)
+	if categoryID == "" {
+		return nil, ErrValidation
+	}
+	input, err := normalizeServiceCategoryWriteRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	return s.repo.UpdateServiceCategory(ctx, salonID, ownerUserID, categoryID, input)
+}
+
+func (s *ServiceLayer) ArchiveServiceCategory(ctx context.Context, salonID string, ownerUserID string, categoryID string) (*ServiceCategory, error) {
+	categoryID = strings.TrimSpace(categoryID)
+	if categoryID == "" {
+		return nil, ErrValidation
+	}
+	return s.repo.ArchiveServiceCategory(ctx, salonID, ownerUserID, categoryID)
+}
+
+func (s *ServiceLayer) RestoreServiceCategory(ctx context.Context, salonID string, ownerUserID string, categoryID string) (*ServiceCategory, error) {
+	categoryID = strings.TrimSpace(categoryID)
+	if categoryID == "" {
+		return nil, ErrValidation
+	}
+	return s.repo.RestoreServiceCategory(ctx, salonID, ownerUserID, categoryID)
+}
+
+func (s *ServiceLayer) UpsertServiceCategoryAlias(ctx context.Context, salonID string, ownerUserID string, categoryID string, req ServiceCategoryAliasWriteRequest) (*ServiceCategoryAlias, error) {
+	categoryID = strings.TrimSpace(categoryID)
+	if categoryID == "" {
+		return nil, ErrValidation
+	}
+	input, err := normalizeServiceCategoryAliasWriteRequest(categoryID, req)
+	if err != nil {
+		return nil, err
+	}
+	return s.repo.UpsertServiceCategoryAlias(ctx, salonID, ownerUserID, input)
+}
+
+func (s *ServiceLayer) ArchiveServiceCategoryAlias(ctx context.Context, salonID string, ownerUserID string, aliasID string) (*ServiceCategoryAlias, error) {
+	aliasID = strings.TrimSpace(aliasID)
+	if aliasID == "" {
+		return nil, ErrValidation
+	}
+	return s.repo.ArchiveServiceCategoryAlias(ctx, salonID, ownerUserID, aliasID)
+}
+
+func (s *ServiceLayer) AssignServiceCategory(ctx context.Context, salonID string, ownerUserID string, serviceID string, req ServiceCategoryAssignRequest) (*Service, error) {
+	serviceID = strings.TrimSpace(serviceID)
+	if serviceID == "" {
+		return nil, ErrValidation
+	}
+	return s.repo.AssignServiceCategory(ctx, salonID, ownerUserID, serviceID, strings.TrimSpace(req.ServiceCategoryID))
+}
+
+func (s *ServiceLayer) RefreshServiceCategorySuggestions(ctx context.Context, salonID string, ownerUserID string) (*ServiceCategorySuggestionRefresh, error) {
+	return s.repo.RefreshServiceCategorySuggestions(ctx, salonID, ownerUserID, defaultServiceCategorySeeds)
 }
 
 func (s *ServiceLayer) Staff(ctx context.Context, salonID string, ownerUserID string) ([]StaffMember, error) {
@@ -799,13 +918,79 @@ func normalizeServiceWriteRequest(req ServiceWriteRequest, defaultActive bool) (
 		active = *req.Active
 	}
 	return ServiceMutation{
-		Name:            name,
-		Description:     strings.TrimSpace(req.Description),
-		AIDescription:   strings.TrimSpace(req.AIDescription),
-		DurationMinutes: req.DurationMinutes,
-		PriceFrom:       req.PriceFrom,
-		Active:          active,
+		Name:              name,
+		Description:       strings.TrimSpace(req.Description),
+		AIDescription:     strings.TrimSpace(req.AIDescription),
+		DurationMinutes:   req.DurationMinutes,
+		PriceFrom:         req.PriceFrom,
+		Active:            active,
+		ServiceCategoryID: strings.TrimSpace(req.ServiceCategoryID),
 	}, nil
+}
+
+func normalizeServiceCategoryWriteRequest(req ServiceCategoryWriteRequest) (ServiceCategoryMutation, error) {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return ServiceCategoryMutation{}, ErrValidation
+	}
+	slug := normalizeCategorySlug(name)
+	if slug == "" {
+		return ServiceCategoryMutation{}, ErrValidation
+	}
+	return ServiceCategoryMutation{
+		Name:        name,
+		Slug:        slug,
+		Description: strings.TrimSpace(req.Description),
+		SortOrder:   req.SortOrder,
+	}, nil
+}
+
+func normalizeServiceCategoryAliasWriteRequest(categoryID string, req ServiceCategoryAliasWriteRequest) (ServiceCategoryAliasMutation, error) {
+	alias := strings.TrimSpace(req.Alias)
+	normalized := normalizeAliasKey(alias)
+	if alias == "" || normalized == "" {
+		return ServiceCategoryAliasMutation{}, ErrValidation
+	}
+	confidence := 0.94
+	if req.Confidence != nil {
+		confidence = *req.Confidence
+	}
+	if confidence <= 0 || confidence > 1 {
+		return ServiceCategoryAliasMutation{}, ErrValidation
+	}
+	return ServiceCategoryAliasMutation{
+		CategoryID:      categoryID,
+		Alias:           alias,
+		NormalizedAlias: normalized,
+		Confidence:      confidence,
+	}, nil
+}
+
+func normalizeCategorySlug(value string) string {
+	return strings.Trim(normalizeTextKey(value, "-"), "-")
+}
+
+func normalizeAliasKey(value string) string {
+	return strings.TrimSpace(normalizeTextKey(value, " "))
+}
+
+func normalizeTextKey(value string, separator string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	previousSeparator := true
+	for _, r := range value {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(r)
+			previousSeparator = false
+		default:
+			if !previousSeparator {
+				b.WriteString(separator)
+				previousSeparator = true
+			}
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func normalizeStaffWriteRequest(req StaffWriteRequest, defaultActive bool) (StaffMutation, error) {

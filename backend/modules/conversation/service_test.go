@@ -191,6 +191,52 @@ func TestMessageUsesActiveServiceAliasFromStore(t *testing.T) {
 	}
 }
 
+func TestMessageUsesServiceCategoryAliasAsClarificationNotSelection(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_classic", Name: "Classic Manicure", CategoryID: "cat_mani", CategoryName: "Manicure", CategorySlug: "manicure", DurationMinutes: 30},
+		{ID: "service_gel", Name: "Gel Manicure", CategoryID: "cat_mani", CategoryName: "Manicure", CategorySlug: "manicure", DurationMinutes: 45},
+		{ID: "service_pedi", Name: "Classic Pedicure", CategoryID: "cat_pedi", CategoryName: "Pedicure", CategorySlug: "pedicure", DurationMinutes: 45},
+	}
+	store.categoryAliases = []ServiceCategoryAlias{{
+		ID:              "cat_alias_mani",
+		CategoryID:      "cat_mani",
+		CategoryName:    "Manicure",
+		Alias:           "mani",
+		NormalizedAlias: "mani",
+		Source:          "system",
+		Confidence:      0.86,
+	}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I want mani next Monday.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.ServiceID != "" {
+		t.Fatalf("service id = %q, want category clarification without selecting one service", session.ServiceID)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("category alias should not call booking tools, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if got := store.lastTurn.CustomerMetadata["service_understanding_reason"]; got != serviceUnderstandingCategoryAlias {
+		t.Fatalf("understanding reason = %#v, want category alias", got)
+	}
+	if got := store.lastTurn.CustomerMetadata["service_understanding_category_id"]; got != "cat_mani" {
+		t.Fatalf("category id metadata = %#v, want cat_mani", got)
+	}
+	if got := metadataStringSlice(store.lastTurn.AIMetadata, "pending_service_candidate_ids"); !sameStrings(got, []string{"service_classic", "service_gel"}) {
+		t.Fatalf("pending service candidates = %#v, want manicure services only", got)
+	}
+	reply := strings.ToLower(store.lastTurn.AIMessage)
+	if !strings.Contains(reply, "classic manicure") || !strings.Contains(reply, "gel manicure") {
+		t.Fatalf("reply should ask which manicure service: %s", store.lastTurn.AIMessage)
+	}
+}
+
 func TestTranscriptionContextIncludesCatalogAliasesAndPendingCandidatesWithoutCustomerPII(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = []ServiceOption{
@@ -3027,6 +3073,21 @@ func TestMessageCreatesHandoffForMultiPersonBookingRequests(t *testing.T) {
 			if store.lastTurn.Handoff == nil || store.lastTurn.Handoff.Reason != HandoffReasonGroupBooking {
 				t.Fatalf("handoff = %#v, want group_booking", store.lastTurn.Handoff)
 			}
+			if store.lastTurn.PartyRequest == nil {
+				t.Fatal("party request record was not created for group booking handoff")
+			}
+			if len(store.partyRequests) != 1 {
+				t.Fatalf("party requests = %#v, want one pending request", store.partyRequests)
+			}
+			if store.partyRequests[0].Status != PartyRequestStatusPending {
+				t.Fatalf("party request status = %s, want pending", store.partyRequests[0].Status)
+			}
+			if store.partyRequests[0].PartySize < 2 {
+				t.Fatalf("party size = %d, want grouped request size", store.partyRequests[0].PartySize)
+			}
+			if session.PartyRequest == nil || session.PartyRequest.ID != "party_request_1" {
+				t.Fatalf("session party request = %#v, want linked pending request", session.PartyRequest)
+			}
 			if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
 				t.Fatalf("group booking should not call booking tools, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
 			}
@@ -3270,13 +3331,19 @@ func defaultAvailabilityStartTime() time.Time {
 }
 
 type fakeConversationStore struct {
-	cfg                 RuntimeConfig
-	session             Session
-	services            []ServiceOption
-	serviceAliases      []ServiceAlias
-	staff               []StaffOption
-	activeStaff         []StaffOption
-	knowledge           []KnowledgeSnippet
+	cfg               RuntimeConfig
+	session           Session
+	services          []ServiceOption
+	serviceAliases    []ServiceAlias
+	categoryAliases   []ServiceCategoryAlias
+	staff             []StaffOption
+	activeStaff       []StaffOption
+	knowledge         []KnowledgeSnippet
+	partyRequests     []PartyBookingRequest
+	partyStatusUpdate struct {
+		requestID string
+		status    string
+	}
 	assignmentStats     map[string]StaffAssignmentStat
 	assignmentFrom      time.Time
 	assignmentTo        time.Time
@@ -3407,6 +3474,10 @@ func (f *fakeConversationStore) ListActiveServiceAliases(ctx context.Context, sa
 	return f.serviceAliases, nil
 }
 
+func (f *fakeConversationStore) ListActiveServiceCategoryAliases(ctx context.Context, salonID string) ([]ServiceCategoryAlias, error) {
+	return f.categoryAliases, nil
+}
+
 func (f *fakeConversationStore) ListBookableStaff(ctx context.Context, salonID string) ([]StaffOption, error) {
 	return f.staff, nil
 }
@@ -3439,6 +3510,23 @@ func (f *fakeConversationStore) ListStaffAssignmentStats(ctx context.Context, sa
 
 func (f *fakeConversationStore) ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error) {
 	return f.knowledge, nil
+}
+
+func (f *fakeConversationStore) ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int) ([]PartyBookingRequest, error) {
+	return f.partyRequests, nil
+}
+
+func (f *fakeConversationStore) UpdatePartyBookingRequestStatus(ctx context.Context, salonID string, ownerUserID string, requestID string, status string) (*PartyBookingRequest, error) {
+	f.partyStatusUpdate.requestID = requestID
+	f.partyStatusUpdate.status = status
+	for i := range f.partyRequests {
+		if f.partyRequests[i].ID != requestID {
+			continue
+		}
+		f.partyRequests[i].Status = status
+		return &f.partyRequests[i], nil
+	}
+	return nil, ErrNotFound
 }
 
 func (f *fakeConversationStore) SaveTurn(ctx context.Context, record TurnRecord) (*Session, error) {
@@ -3480,6 +3568,27 @@ func (f *fakeConversationStore) SaveTurn(ctx context.Context, record TurnRecord)
 			CustomerPhone: record.Handoff.CustomerPhone,
 			Summary:       record.Handoff.Summary,
 		}
+	}
+	if record.PartyRequest != nil {
+		request := PartyBookingRequest{
+			ID:                   "party_request_1",
+			SalonID:              record.SalonID,
+			CallSessionID:        record.Session.ID,
+			EventKey:             record.PartyRequest.EventKey,
+			Status:               PartyRequestStatusPending,
+			PartySize:            record.PartyRequest.PartySize,
+			RepresentativeName:   record.PartyRequest.RepresentativeName,
+			RepresentativePhone:  record.PartyRequest.RepresentativePhone,
+			RequestedDate:        record.PartyRequest.RequestedDate,
+			RequestedTimeWindow:  record.PartyRequest.RequestedTimeWindow,
+			GuestServiceRequests: append([]PartyGuestService(nil), record.PartyRequest.GuestServiceRequests...),
+			FlexibilityNotes:     record.PartyRequest.FlexibilityNotes,
+			Summary:              record.PartyRequest.Summary,
+			CreatedAt:            time.Now().UTC(),
+			UpdatedAt:            time.Now().UTC(),
+		}
+		f.partyRequests = append(f.partyRequests, request)
+		session.PartyRequest = &request
 	}
 	nextSequence := len(session.Transcript) + 1
 	session.Transcript = append(session.Transcript, TranscriptMessage{

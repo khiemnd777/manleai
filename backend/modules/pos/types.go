@@ -46,6 +46,21 @@ const (
 	EntitySourceLocal    = "local"
 	EntitySourceImported = "imported"
 
+	ServiceCategoryStatusActive   = "active"
+	ServiceCategoryStatusArchived = "archived"
+
+	ServiceCategorySourceManual   = "manual"
+	ServiceCategorySourceSystem   = "system"
+	ServiceCategorySourceImported = "imported"
+
+	ServiceCategoryAliasSourceOwner    = "owner"
+	ServiceCategoryAliasSourceSystem   = "system"
+	ServiceCategoryAliasSourceImported = "imported"
+
+	ServiceCategoryAssignmentUnassigned = "unassigned"
+	ServiceCategoryAssignmentSuggested  = "suggested"
+	ServiceCategoryAssignmentManual     = "manual"
+
 	BusinessHourSourceImported      = "imported"
 	BusinessHourSourceLocalMigrated = "local_migrated"
 	BusinessHourSourceLocalOverride = "local_override"
@@ -337,43 +352,131 @@ type SyncSummary struct {
 }
 
 type Service struct {
-	ID                string     `json:"id,omitempty"`
-	SalonID           string     `json:"salon_id,omitempty"`
-	POSProvider       string     `json:"pos_provider"`
-	POSServiceID      string     `json:"pos_service_id"`
-	POSServiceVersion int64      `json:"pos_service_version,omitempty"`
-	Name              string     `json:"name"`
-	Description       string     `json:"description,omitempty"`
-	AIDescription     string     `json:"ai_description,omitempty"`
-	DurationMinutes   int        `json:"duration_minutes"`
-	PriceFrom         float64    `json:"price_from,omitempty"`
-	PriceDisplay      string     `json:"price_display,omitempty"`
-	AIBookable        bool       `json:"ai_bookable"`
-	Active            bool       `json:"active"`
-	SyncStatus        string     `json:"sync_status"`
-	ArchivedAt        *time.Time `json:"archived_at,omitempty"`
-	LastSyncedAt      *time.Time `json:"last_synced_at,omitempty"`
-	SyncError         string     `json:"sync_error,omitempty"`
-	Source            string     `json:"source"`
-	POSLinked         bool       `json:"pos_linked"`
+	ID                 string     `json:"id,omitempty"`
+	SalonID            string     `json:"salon_id,omitempty"`
+	POSProvider        string     `json:"pos_provider"`
+	POSServiceID       string     `json:"pos_service_id"`
+	POSServiceVersion  int64      `json:"pos_service_version,omitempty"`
+	Name               string     `json:"name"`
+	Description        string     `json:"description,omitempty"`
+	AIDescription      string     `json:"ai_description,omitempty"`
+	DurationMinutes    int        `json:"duration_minutes"`
+	PriceFrom          float64    `json:"price_from,omitempty"`
+	PriceDisplay       string     `json:"price_display,omitempty"`
+	AIBookable         bool       `json:"ai_bookable"`
+	Active             bool       `json:"active"`
+	SyncStatus         string     `json:"sync_status"`
+	ArchivedAt         *time.Time `json:"archived_at,omitempty"`
+	LastSyncedAt       *time.Time `json:"last_synced_at,omitempty"`
+	SyncError          string     `json:"sync_error,omitempty"`
+	Source             string     `json:"source"`
+	POSLinked          bool       `json:"pos_linked"`
+	ServiceCategoryID  string     `json:"service_category_id,omitempty"`
+	CategoryName       string     `json:"category_name,omitempty"`
+	CategorySlug       string     `json:"category_slug,omitempty"`
+	CategorySource     string     `json:"category_source"`
+	CategoryConfidence float64    `json:"category_confidence,omitempty"`
+	CategoryReviewedAt *time.Time `json:"category_reviewed_at,omitempty"`
 }
 
 type ServiceWriteRequest struct {
-	Name            string   `json:"name"`
-	Description     string   `json:"description"`
-	AIDescription   string   `json:"ai_description"`
-	DurationMinutes int      `json:"duration_minutes"`
-	PriceFrom       *float64 `json:"price_from"`
-	Active          *bool    `json:"active"`
+	Name              string   `json:"name"`
+	Description       string   `json:"description"`
+	AIDescription     string   `json:"ai_description"`
+	DurationMinutes   int      `json:"duration_minutes"`
+	PriceFrom         *float64 `json:"price_from"`
+	Active            *bool    `json:"active"`
+	ServiceCategoryID string   `json:"service_category_id"`
 }
 
 type ServiceMutation struct {
-	Name            string
-	Description     string
-	AIDescription   string
-	DurationMinutes int
-	PriceFrom       *float64
-	Active          bool
+	Name              string
+	Description       string
+	AIDescription     string
+	DurationMinutes   int
+	PriceFrom         *float64
+	Active            bool
+	ServiceCategoryID string
+}
+
+type ServiceCategory struct {
+	ID           string                 `json:"id"`
+	SalonID      string                 `json:"salon_id"`
+	Name         string                 `json:"name"`
+	Slug         string                 `json:"slug"`
+	Description  string                 `json:"description,omitempty"`
+	Status       string                 `json:"status"`
+	SortOrder    int                    `json:"sort_order"`
+	Source       string                 `json:"source"`
+	ServiceCount int                    `json:"service_count"`
+	Aliases      []ServiceCategoryAlias `json:"aliases,omitempty"`
+	ReviewedAt   *time.Time             `json:"reviewed_at,omitempty"`
+	ArchivedAt   *time.Time             `json:"archived_at,omitempty"`
+	CreatedAt    time.Time              `json:"created_at"`
+	UpdatedAt    time.Time              `json:"updated_at"`
+}
+
+type ServiceCategoryAlias struct {
+	ID              string    `json:"id"`
+	SalonID         string    `json:"salon_id"`
+	CategoryID      string    `json:"category_id"`
+	CategoryName    string    `json:"category_name,omitempty"`
+	Alias           string    `json:"alias"`
+	NormalizedAlias string    `json:"normalized_alias"`
+	Source          string    `json:"source"`
+	Status          string    `json:"status"`
+	Confidence      float64   `json:"confidence"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+type ServiceCategoryWriteRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	SortOrder   int    `json:"sort_order"`
+}
+
+type ServiceCategoryMutation struct {
+	Name        string
+	Slug        string
+	Description string
+	SortOrder   int
+}
+
+type ServiceCategoryAliasWriteRequest struct {
+	Alias      string   `json:"alias"`
+	Confidence *float64 `json:"confidence"`
+}
+
+type ServiceCategoryAliasMutation struct {
+	CategoryID      string
+	Alias           string
+	NormalizedAlias string
+	Confidence      float64
+}
+
+type ServiceCategorySeed struct {
+	Name        string
+	Slug        string
+	Description string
+	SortOrder   int
+	Aliases     []string
+}
+
+type ServiceCategorySuggestionRefresh struct {
+	CreatedCategories           int `json:"created_categories"`
+	RestoredSystemCategories    int `json:"restored_system_categories"`
+	CreatedAliases              int `json:"created_aliases"`
+	UpdatedSystemAliases        int `json:"updated_system_aliases"`
+	SkippedAliasConflicts       int `json:"skipped_alias_conflicts"`
+	SuggestedServices           int `json:"suggested_services"`
+	SkippedReviewedServices     int `json:"skipped_reviewed_services"`
+	SkippedAmbiguousServices    int `json:"skipped_ambiguous_services"`
+	UnmatchedUnreviewedServices int `json:"unmatched_unreviewed_services"`
+}
+
+type ServiceCategoryAssignRequest struct {
+	ServiceCategoryID string `json:"service_category_id"`
 }
 
 type StaffMember struct {

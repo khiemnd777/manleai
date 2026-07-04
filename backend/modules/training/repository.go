@@ -168,6 +168,13 @@ func (r *Repository) UpsertServiceAlias(ctx context.Context, salonID string, own
 		return nil, err
 	}
 	normalizedAlias := normalizeAliasText(req.Alias)
+	if req.Status == AliasStatusActive {
+		if conflict, err := r.hasActiveCategoryAliasConflict(ctx, salonID, normalizedAlias); err != nil {
+			return nil, err
+		} else if conflict {
+			return nil, ErrValidation
+		}
+	}
 
 	var id string
 	err := r.db.QueryRowContext(ctx, `
@@ -305,6 +312,23 @@ func (r *Repository) ApplyServiceAliasCorrection(ctx context.Context, salonID st
 	}
 
 	normalizedAlias := normalizeAliasText(req.Alias)
+	if req.Status == AliasStatusActive {
+		var categoryAliasConflict bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM service_category_aliases
+				WHERE salon_id = $1
+				  AND normalized_alias = $2
+				  AND status = 'active'
+			)
+		`, salonID, normalizedAlias).Scan(&categoryAliasConflict); err != nil {
+			return nil, err
+		}
+		if categoryAliasConflict {
+			return nil, ErrValidation
+		}
+	}
 	var aliasID string
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO service_aliases (salon_id, service_id, alias, normalized_alias, source, status, confidence, correction_id)
@@ -337,6 +361,20 @@ func (r *Repository) ApplyServiceAliasCorrection(ctx context.Context, salonID st
 		return nil, err
 	}
 	return r.getServiceAlias(ctx, salonID, ownerUserID, aliasID)
+}
+
+func (r *Repository) hasActiveCategoryAliasConflict(ctx context.Context, salonID string, normalizedAlias string) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM service_category_aliases
+			WHERE salon_id = $1
+			  AND normalized_alias = $2
+			  AND status = 'active'
+		)
+	`, salonID, normalizedAlias).Scan(&exists)
+	return exists, err
 }
 
 func (r *Repository) UpdateCorrectionStatus(ctx context.Context, salonID string, ownerUserID string, correctionID string, status string) (*OwnerCorrection, error) {

@@ -133,6 +133,7 @@ type phoneFlowConversationStore struct {
 	session     conversation.Session
 	services    []conversation.ServiceOption
 	aliases     []conversation.ServiceAlias
+	catAliases  []conversation.ServiceCategoryAlias
 	staff       []conversation.StaffOption
 	activeStaff []conversation.StaffOption
 	knowledge   []conversation.KnowledgeSnippet
@@ -242,6 +243,10 @@ func (f *phoneFlowConversationStore) ListActiveServiceAliases(ctx context.Contex
 	return f.aliases, nil
 }
 
+func (f *phoneFlowConversationStore) ListActiveServiceCategoryAliases(ctx context.Context, salonID string) ([]conversation.ServiceCategoryAlias, error) {
+	return f.catAliases, nil
+}
+
 func (f *phoneFlowConversationStore) ListBookableStaff(ctx context.Context, salonID string) ([]conversation.StaffOption, error) {
 	return f.staff, nil
 }
@@ -267,6 +272,14 @@ func (f *phoneFlowConversationStore) ListStaffAssignmentStats(ctx context.Contex
 
 func (f *phoneFlowConversationStore) ListActiveKnowledge(ctx context.Context, salonID string) ([]conversation.KnowledgeSnippet, error) {
 	return f.knowledge, nil
+}
+
+func (f *phoneFlowConversationStore) ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int) ([]conversation.PartyBookingRequest, error) {
+	return []conversation.PartyBookingRequest{}, nil
+}
+
+func (f *phoneFlowConversationStore) UpdatePartyBookingRequestStatus(ctx context.Context, salonID string, ownerUserID string, requestID string, status string) (*conversation.PartyBookingRequest, error) {
+	return nil, conversation.ErrNotFound
 }
 
 func (f *phoneFlowConversationStore) SaveTurn(ctx context.Context, record conversation.TurnRecord) (*conversation.Session, error) {

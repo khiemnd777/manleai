@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   Archive,
   AlertTriangle,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Eraser,
@@ -13,6 +14,7 @@ import {
   Plus,
   RefreshCcw,
   Send,
+  Users,
   X
 } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
@@ -33,6 +35,7 @@ import type {
   ConversationSession,
   OfferedSlot,
   OwnerCorrection,
+  PartyBookingRequest,
   POSConnection,
   POSService,
   POSStaffMember,
@@ -65,9 +68,19 @@ type RealtimeEventsResponse = {
   events: RealtimeEventLog[];
 };
 
+type PartyRequestsResponse = {
+  party_booking_requests: PartyBookingRequest[];
+};
+
+type PartyRequestResponse = {
+  party_booking_request: PartyBookingRequest;
+};
+
 type LifecycleFilter = "active" | "archived" | "redacted";
+type PartyStatusFilter = "pending" | "contacted" | "resolved" | "dismissed";
 
 const lifecycleFilters: LifecycleFilter[] = ["active", "archived", "redacted"];
+const partyStatusFilters: PartyStatusFilter[] = ["pending", "contacted", "resolved", "dismissed"];
 const defaultSessionPageSize = 10;
 const sessionPageSizeOptions = [10, 25, 50] as const;
 const readinessMetricLimit = 100;
@@ -93,12 +106,14 @@ export function CallsDashboard() {
   const [readinessSessions, setReadinessSessions] = useState<ConversationSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<ConversationSession | null>(null);
   const [realtimeEvents, setRealtimeEvents] = useState<RealtimeEventLog[]>([]);
+  const [partyRequests, setPartyRequests] = useState<PartyBookingRequest[]>([]);
   const [services, setServices] = useState<POSService[]>([]);
   const [staff, setStaff] = useState<POSStaffMember[]>([]);
   const [message, setMessage] = useState("");
   const [correctionTarget, setCorrectionTarget] = useState<CorrectionTarget | null>(null);
   const [correctionText, setCorrectionText] = useState("");
   const [lifecycleFilter, setLifecycleFilter] = useState<LifecycleFilter>("active");
+  const [partyStatusFilter, setPartyStatusFilter] = useState<PartyStatusFilter>("pending");
   const [sessionLimit, setSessionLimit] = useState(defaultSessionPageSize);
   const [sessionOffset, setSessionOffset] = useState(0);
   const [sessionHasMore, setSessionHasMore] = useState(false);
@@ -106,9 +121,11 @@ export function CallsDashboard() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [sessionListLoading, setSessionListLoading] = useState(false);
   const [realtimeEventsLoading, setRealtimeEventsLoading] = useState(false);
+  const [partyRequestsLoading, setPartyRequestsLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [savingCorrection, setSavingCorrection] = useState(false);
   const [sessionActionID, setSessionActionID] = useState("");
+  const [partyActionID, setPartyActionID] = useState("");
   const [error, setError] = useState("");
   const [actionError, setActionError] = useState("");
   const [realtimeEventsError, setRealtimeEventsError] = useState("");
@@ -134,6 +151,18 @@ export function CallsDashboard() {
       response = await fetchSessionPage(salonID, filter, limit, previousOffset);
     }
     return response;
+  }
+
+  function partyRequestsPath(salonID: string, status: PartyStatusFilter) {
+    const params = new URLSearchParams({
+      status,
+      limit: "25"
+    });
+    return `/api/salons/${salonID}/party-booking-requests?${params.toString()}`;
+  }
+
+  async function fetchPartyRequests(salonID: string, status: PartyStatusFilter) {
+    return apiRequest<PartyRequestsResponse>(partyRequestsPath(salonID, status));
   }
 
   function applySessionPage(response: SessionsResponse, requestedLimit: number, requestedOffset: number) {
@@ -174,16 +203,18 @@ export function CallsDashboard() {
         setReadinessSessionsHasMore(false);
         setSelectedSession(null);
         setRealtimeEvents([]);
+        setPartyRequests([]);
         setServices([]);
         setStaff([]);
         return;
       }
 
-      const [statusResponse, voiceResponse, sessionsResponse, readinessResponse, serviceResponse, staffResponse] = await Promise.all([
+      const [statusResponse, voiceResponse, sessionsResponse, readinessResponse, partyResponse, serviceResponse, staffResponse] = await Promise.all([
         apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
         apiRequest<VoiceStatus>(`/api/salons/${firstSalon.id}/voice/status`),
         fetchSessionPageWithFallback(firstSalon.id, filter, limit, offset),
         fetchSessionPage(firstSalon.id, "active", readinessMetricLimit, 0),
+        fetchPartyRequests(firstSalon.id, partyStatusFilter),
         apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
         apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`)
       ]);
@@ -192,6 +223,7 @@ export function CallsDashboard() {
       applySessionPage(sessionsResponse, limit, offset);
       setReadinessSessions(readinessResponse.sessions);
       setReadinessSessionsHasMore(Boolean(readinessResponse.has_more));
+      setPartyRequests(partyResponse.party_booking_requests);
       setServices(serviceResponse.services);
       setStaff(staffResponse.staff);
 
@@ -224,6 +256,12 @@ export function CallsDashboard() {
     void load(lifecycleFilter, initialLoading, sessionOffset, sessionLimit);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lifecycleFilter, sessionOffset, sessionLimit]);
+
+  useEffect(() => {
+    if (!salon) return;
+    void reloadPartyRequests(salon.id, partyStatusFilter);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [salon?.id, partyStatusFilter]);
 
   useEffect(() => {
     if (!salon || !selectedSession || selectedSession.channel !== "phone") {
@@ -259,6 +297,20 @@ export function CallsDashboard() {
       return;
     }
     await loadRealtimeEvents(salonID, session.id);
+  }
+
+  async function reloadPartyRequests(salonID: string, status: PartyStatusFilter) {
+    setPartyRequestsLoading(true);
+    setActionError("");
+    try {
+      const response = await fetchPartyRequests(salonID, status);
+      setPartyRequests(response.party_booking_requests);
+    } catch (err) {
+      setPartyRequests([]);
+      setActionError(err instanceof Error ? err.message : "Could not load party booking requests.");
+    } finally {
+      setPartyRequestsLoading(false);
+    }
   }
 
   async function startSession() {
@@ -389,6 +441,36 @@ export function CallsDashboard() {
     }
   }
 
+  async function updatePartyRequestStatus(item: PartyBookingRequest, status: PartyStatusFilter) {
+    if (!salon) return;
+    setActionError("");
+    setSuccess("");
+    setPartyActionID(`${item.id}:${status}`);
+    try {
+      const response = await apiRequest<PartyRequestResponse>(
+        `/api/salons/${salon.id}/party-booking-requests/${item.id}/status`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ status })
+        }
+      );
+      setPartyRequests((current) => {
+        const next = current.map((request) => (request.id === response.party_booking_request.id ? response.party_booking_request : request));
+        return status === partyStatusFilter ? next : next.filter((request) => request.id !== item.id);
+      });
+      setSuccess(partyStatusSuccess(status));
+      if (selectedSession?.id === response.party_booking_request.call_session_id) {
+        setSelectedSession((current) =>
+          current ? { ...current, party_request: response.party_booking_request } : current
+        );
+      }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Could not update party booking request.");
+    } finally {
+      setPartyActionID("");
+    }
+  }
+
   async function saveCorrection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!salon || !selectedSession || !correctionTarget || !correctionText.trim()) return;
@@ -430,6 +512,10 @@ export function CallsDashboard() {
   function updateLifecycleFilter(filter: LifecycleFilter) {
     setSessionOffset(0);
     setLifecycleFilter(filter);
+  }
+
+  function updatePartyStatusFilter(filter: PartyStatusFilter) {
+    setPartyStatusFilter(filter);
   }
 
   function updateSessionPageSize(limit: number) {
@@ -475,6 +561,7 @@ export function CallsDashboard() {
       ),
     [readinessSessions, readinessSessionsHasMore]
   );
+  const partyRequestCount = partyRequestsLoading ? "..." : String(partyRequests.length);
   const serviceNames = useMemo(
     () => new Map(services.flatMap((item) => (item.id ? [[item.id, item.name] as const] : []))),
     [services]
@@ -490,7 +577,8 @@ export function CallsDashboard() {
     return (
       <div className="space-y-6">
         <Skeleton className="h-9 w-72" />
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
+          <Skeleton className="h-28" />
           <Skeleton className="h-28" />
           <Skeleton className="h-28" />
           <Skeleton className="h-28" />
@@ -541,13 +629,24 @@ export function CallsDashboard() {
 
       <ReadinessPanel aiEnabled={aiEnabled} voiceStatus={voiceStatus} />
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
         <Metric label="Live phone calls" value={phoneCount} />
         <Metric label="Simulator sessions" value={simulatorCount} />
         <Metric label="Owner handoffs" value={handoffCount} />
         <Metric label="Confirmed bookings" value={confirmedCount} />
-        <Metric label="Pending requests" value={fallbackCount} />
+        <Metric label="Fallback requests" value={fallbackCount} />
+        <Metric label={`${partyStatusFilter} parties`} value={partyRequestCount} />
       </div>
+
+      <PartyRequestsPanel
+        requests={partyRequests}
+        statusFilter={partyStatusFilter}
+        loading={partyRequestsLoading}
+        busy={partyActionID}
+        onStatusFilterChange={updatePartyStatusFilter}
+        onUpdateStatus={(item, status) => void updatePartyRequestStatus(item, status)}
+        onOpenSession={(sessionID) => void selectSession(sessionID)}
+      />
 
       <div className="grid gap-4 xl:grid-cols-[1.35fr_0.65fr]">
         <Card>
@@ -670,6 +769,12 @@ export function CallsDashboard() {
                 value={selectedSession.requested_start_time ? formatDateTime(selectedSession.requested_start_time) : "Not collected"}
               />
               <Info label="Booking attempt" value={selectedSession.booking_attempt_id || "None"} />
+              {selectedSession.party_request ? (
+                <>
+                  <Info label="Party request" value={<Badge value={selectedSession.party_request.status} />} />
+                  <Info label="Party summary" value={selectedSession.party_request.summary || "No summary recorded"} />
+                </>
+              ) : null}
               <Info label="Retention" value={retentionLabel(selectedSession)} />
               <Info label="Provider call" value={selectedSession.provider_call_id || "None"} />
               {selectedSession.channel === "phone" ? (
@@ -947,6 +1052,206 @@ function Metric({ label, value }: { label: string; value: string }) {
       <div className="text-xs font-semibold uppercase tracking-wide text-muted">{label}</div>
       <div className="mt-2 text-2xl font-bold text-ink">{value}</div>
     </Card>
+  );
+}
+
+function PartyRequestsPanel({
+  requests,
+  statusFilter,
+  loading,
+  busy,
+  onStatusFilterChange,
+  onUpdateStatus,
+  onOpenSession
+}: {
+  requests: PartyBookingRequest[];
+  statusFilter: PartyStatusFilter;
+  loading: boolean;
+  busy: string;
+  onStatusFilterChange: (status: PartyStatusFilter) => void;
+  onUpdateStatus: (request: PartyBookingRequest, status: PartyStatusFilter) => void;
+  onOpenSession: (sessionID: string) => void;
+}) {
+  return (
+    <Card>
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div className="flex items-start gap-3">
+          <Users className="mt-1 h-5 w-5 text-brand" />
+          <div>
+            <CardTitle>Party booking requests</CardTitle>
+            <CardDescription>
+              Group requests are owner-review handoffs. They are not confirmed appointments until staff handles them in the POS.
+            </CardDescription>
+          </div>
+        </div>
+        <Badge value={statusFilter} />
+      </div>
+
+      <div className="mt-5 flex flex-wrap gap-2">
+        {partyStatusFilters.map((status) => (
+          <Button
+            key={status}
+            type="button"
+            variant={status === statusFilter ? "primary" : "secondary"}
+            onClick={() => onStatusFilterChange(status)}
+            disabled={loading || busy !== ""}
+          >
+            {partyStatusLabel(status)}
+          </Button>
+        ))}
+      </div>
+
+      {loading ? (
+        <div className="mt-4 rounded-md border border-line bg-slate-50 px-3 py-2 text-sm text-muted">
+          Loading party booking requests...
+        </div>
+      ) : null}
+
+      {!loading && requests.length === 0 ? (
+        <div className="mt-5 rounded-md border border-line p-6 text-center">
+          <Users className="mx-auto h-5 w-5 text-muted" />
+          <div className="mt-3 text-sm font-semibold text-ink">No {partyStatusLabel(statusFilter).toLowerCase()} party requests</div>
+          <div className="mt-1 text-sm leading-6 text-muted">
+            Party requests appear here when a caller asks to book for a group or multiple guests.
+          </div>
+        </div>
+      ) : null}
+
+      {requests.length > 0 ? (
+        <>
+          <div className="mt-5 hidden overflow-x-auto rounded-md border border-line lg:block">
+            <table className="w-full min-w-[1080px] text-left text-sm">
+              <thead className="bg-slate-50 text-xs uppercase text-muted">
+                <tr>
+                  <th className="px-4 py-3">Created</th>
+                  <th className="px-4 py-3">Representative</th>
+                  <th className="px-4 py-3">Party</th>
+                  <th className="px-4 py-3">Requested time</th>
+                  <th className="px-4 py-3">Services</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-line bg-white">
+                {requests.map((request) => (
+                  <tr key={request.id}>
+                    <td className="px-4 py-3 text-muted">{formatDateTime(request.created_at)}</td>
+                    <td className="px-4 py-3">
+                      <div className="font-medium text-ink">{request.representative_name || "Not collected"}</div>
+                      <div className="mt-1 text-xs text-muted">{request.representative_phone || "No phone"}</div>
+                    </td>
+                    <td className="px-4 py-3 text-muted">{request.party_size ? `${request.party_size} guests` : "Size not collected"}</td>
+                    <td className="px-4 py-3 text-muted">{partyTimeLabel(request)}</td>
+                    <td className="px-4 py-3 text-muted">{partyServicesLabel(request)}</td>
+                    <td className="px-4 py-3">
+                      <Badge value={request.status} />
+                    </td>
+                    <td className="px-4 py-3">
+                      <PartyRequestActions
+                        request={request}
+                        busy={busy}
+                        onUpdateStatus={onUpdateStatus}
+                        onOpenSession={onOpenSession}
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="mt-5 space-y-3 lg:hidden">
+            {requests.map((request) => (
+              <PartyRequestCard
+                key={request.id}
+                request={request}
+                busy={busy}
+                onUpdateStatus={onUpdateStatus}
+                onOpenSession={onOpenSession}
+              />
+            ))}
+          </div>
+        </>
+      ) : null}
+    </Card>
+  );
+}
+
+function PartyRequestCard({
+  request,
+  busy,
+  onUpdateStatus,
+  onOpenSession
+}: {
+  request: PartyBookingRequest;
+  busy: string;
+  onUpdateStatus: (request: PartyBookingRequest, status: PartyStatusFilter) => void;
+  onOpenSession: (sessionID: string) => void;
+}) {
+  return (
+    <div className="rounded-md border border-line p-4">
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div>
+          <div className="text-sm font-semibold text-ink">{request.representative_name || "Party request"}</div>
+          <div className="mt-1 text-xs text-muted">{formatDateTime(request.created_at)}</div>
+        </div>
+        <Badge value={request.status} />
+      </div>
+      <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
+        <Info label="Phone" value={request.representative_phone || "No phone"} />
+        <Info label="Party size" value={request.party_size ? `${request.party_size} guests` : "Not collected"} />
+        <Info label="Requested time" value={partyTimeLabel(request)} />
+        <Info label="Services" value={partyServicesLabel(request)} />
+      </dl>
+      <div className="mt-3 rounded-md border border-line bg-slate-50 p-3 text-sm leading-6 text-muted">
+        {request.summary || "No summary recorded."}
+      </div>
+      <PartyRequestActions request={request} busy={busy} onUpdateStatus={onUpdateStatus} onOpenSession={onOpenSession} />
+    </div>
+  );
+}
+
+function PartyRequestActions({
+  request,
+  busy,
+  onUpdateStatus,
+  onOpenSession
+}: {
+  request: PartyBookingRequest;
+  busy: string;
+  onUpdateStatus: (request: PartyBookingRequest, status: PartyStatusFilter) => void;
+  onOpenSession: (sessionID: string) => void;
+}) {
+  const disabled = busy !== "";
+  return (
+    <div className="mt-3 flex flex-wrap gap-2 lg:mt-0">
+      <Button type="button" variant="secondary" onClick={() => onOpenSession(request.call_session_id)} disabled={disabled}>
+        Open transcript
+      </Button>
+      {request.status === "pending" ? (
+        <Button type="button" variant="secondary" onClick={() => onUpdateStatus(request, "contacted")} disabled={disabled}>
+          <PhoneCall className="h-4 w-4" />
+          {busy === `${request.id}:contacted` ? "Saving..." : "Mark contacted"}
+        </Button>
+      ) : null}
+      {request.status === "pending" || request.status === "contacted" ? (
+        <>
+          <Button type="button" onClick={() => onUpdateStatus(request, "resolved")} disabled={disabled}>
+            <CheckCircle2 className="h-4 w-4" />
+            {busy === `${request.id}:resolved` ? "Saving..." : "Resolve"}
+          </Button>
+          <Button type="button" variant="danger" onClick={() => onUpdateStatus(request, "dismissed")} disabled={disabled}>
+            <X className="h-4 w-4" />
+            {busy === `${request.id}:dismissed` ? "Saving..." : "Dismiss"}
+          </Button>
+        </>
+      ) : null}
+      {request.status === "dismissed" ? (
+        <Button type="button" variant="secondary" onClick={() => onUpdateStatus(request, "pending")} disabled={disabled}>
+          Reopen
+        </Button>
+      ) : null}
+    </div>
   );
 }
 
@@ -1388,6 +1693,35 @@ function emptySessionsDescription(filter: LifecycleFilter) {
   if (filter === "archived") return "Archived sessions appear here after an owner hides them from the active review list.";
   if (filter === "redacted") return "Redacted sessions appear here after transcript and customer details are removed.";
   return "Archived or redacted sessions may still be available from the filters.";
+}
+
+function partyStatusLabel(status: PartyStatusFilter) {
+  if (status === "contacted") return "Contacted";
+  if (status === "resolved") return "Resolved";
+  if (status === "dismissed") return "Dismissed";
+  return "Pending";
+}
+
+function partyStatusSuccess(status: PartyStatusFilter) {
+  if (status === "contacted") return "Party request marked contacted.";
+  if (status === "resolved") return "Party request resolved. This did not create a confirmed appointment.";
+  if (status === "dismissed") return "Party request dismissed.";
+  return "Party request reopened.";
+}
+
+function partyTimeLabel(request: PartyBookingRequest) {
+  const date = request.requested_date || "Date not collected";
+  return request.requested_time_window ? `${date}, ${request.requested_time_window}` : date;
+}
+
+function partyServicesLabel(request: PartyBookingRequest) {
+  const services = request.guest_service_requests ?? [];
+  if (services.length === 0) {
+    return "Services not collected";
+  }
+  return services
+    .map((service) => [service.service_name || "Unknown service", service.notes].filter(Boolean).join(" - "))
+    .join(", ");
 }
 
 function retentionLabel(session: ConversationSession) {
