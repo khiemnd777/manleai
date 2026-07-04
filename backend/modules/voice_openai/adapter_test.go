@@ -273,6 +273,58 @@ func TestRealtimeSessionConfigIncludesTranscriptionPrompt(t *testing.T) {
 	}
 }
 
+func TestRealtimeSessionConfigCapsGATranscriptionPrompt(t *testing.T) {
+	cfg := config.OpenAIVoiceConfig{
+		RealtimeModel:      "gpt-realtime-2",
+		TranscriptionModel: "gpt-4o-mini-transcribe",
+		RealtimeVoice:      "alloy",
+	}
+	session := realtimeSessionConfig(cfg, voice.RealtimeSessionOptions{
+		TranscriptionPrompt: strings.Repeat("a", realtimeTranscriptionPromptMaxLength+50),
+	})
+	audio, ok := session["audio"].(map[string]any)
+	if !ok {
+		t.Fatalf("GA realtime session should include audio: %#v", session)
+	}
+	input, ok := audio["input"].(map[string]any)
+	if !ok {
+		t.Fatalf("GA realtime session should include audio.input: %#v", session)
+	}
+	transcription, ok := input["transcription"].(map[string]any)
+	if !ok {
+		t.Fatalf("GA realtime session should include transcription config: %#v", input)
+	}
+	prompt, ok := transcription["prompt"].(string)
+	if !ok {
+		t.Fatalf("transcription prompt should be a string: %#v", transcription["prompt"])
+	}
+	if got := len([]rune(prompt)); got != realtimeTranscriptionPromptMaxLength {
+		t.Fatalf("transcription prompt length = %d, want %d", got, realtimeTranscriptionPromptMaxLength)
+	}
+}
+
+func TestRealtimeSessionConfigCapsLegacyTranscriptionPrompt(t *testing.T) {
+	cfg := config.OpenAIVoiceConfig{
+		RealtimeModel:      "gpt-4o-realtime-preview",
+		TranscriptionModel: "gpt-4o-mini-transcribe",
+		RealtimeVoice:      "alloy",
+	}
+	session := realtimeSessionConfig(cfg, voice.RealtimeSessionOptions{
+		TranscriptionPrompt: strings.Repeat("a", realtimeTranscriptionPromptMaxLength+50),
+	})
+	transcription, ok := session["input_audio_transcription"].(map[string]any)
+	if !ok {
+		t.Fatalf("legacy realtime session should include transcription config: %#v", session)
+	}
+	prompt, ok := transcription["prompt"].(string)
+	if !ok {
+		t.Fatalf("transcription prompt should be a string: %#v", transcription["prompt"])
+	}
+	if got := len([]rune(prompt)); got != realtimeTranscriptionPromptMaxLength {
+		t.Fatalf("transcription prompt length = %d, want %d", got, realtimeTranscriptionPromptMaxLength)
+	}
+}
+
 func TestRealtimeSessionConfigDefaultsToNoisySalonVAD(t *testing.T) {
 	cfg := config.OpenAIVoiceConfig{
 		RealtimeModel:      "gpt-realtime-2",

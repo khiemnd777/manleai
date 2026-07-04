@@ -18,6 +18,7 @@ import (
 const realtimeLegacyAudioFormat = "g711_ulaw"
 const realtimeG711ULawFormat = "audio/pcmu"
 const realtimeReadyTimeout = 5 * time.Second
+const realtimeTranscriptionPromptMaxLength = 1024
 
 func (a *Adapter) ConnectRealtime(ctx context.Context, salonID string, opts voice.RealtimeSessionOptions) (voice.RealtimeSession, error) {
 	cfg, enabled, err := a.configFor(ctx, salonID)
@@ -141,9 +142,17 @@ func realtimeSessionConfig(cfg config.OpenAIVoiceConfig, opts voice.RealtimeSess
 func realtimeTranscriptionConfig(cfg config.OpenAIVoiceConfig, opts voice.RealtimeSessionOptions) map[string]any {
 	out := map[string]any{"model": strings.TrimSpace(cfg.TranscriptionModel)}
 	if prompt := strings.TrimSpace(opts.TranscriptionPrompt); prompt != "" {
-		out["prompt"] = prompt
+		out["prompt"] = truncateRealtimeTranscriptionPrompt(prompt)
 	}
 	return out
+}
+
+func truncateRealtimeTranscriptionPrompt(value string) string {
+	runes := []rune(value)
+	if len(runes) <= realtimeTranscriptionPromptMaxLength {
+		return value
+	}
+	return strings.TrimSpace(string(runes[:realtimeTranscriptionPromptMaxLength]))
 }
 
 func realtimeResponseCreatePayload(legacyProtocol bool, text string) map[string]any {
