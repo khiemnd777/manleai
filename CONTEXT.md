@@ -38,7 +38,7 @@ The provider-neutral interface in `backend/modules/pos`. Booking and AI code use
 A concrete provider implementation such as `SquareAdapter`. It owns provider-specific auth, API calls, payload mapping, retries, and error normalization.
 
 **SquareAdapter**
-The first real POS Adapter. It is the only production POS implementation in the pilot.
+The first real POS Adapter. It is the only production POS implementation in the current commercial release.
 
 **POS Entity Link**
 A mapping between a ManleAI canonical record and a provider-side record, such as a service, staff member, or customer. Provider IDs are mappings, not primary product identity.
@@ -64,17 +64,17 @@ A normalized, salon-scoped record of provider failures. Use codes such as `POS_T
 ## Product Invariants
 
 - Confirmed booking means the active POS provider returned success.
-- Internal calendar records are mirrors or logs, not the source of booking truth for the pilot.
+- Internal calendar records are mirrors or logs, not the source of booking truth in production.
 - ManleAI owns canonical salon operational data; the active POS owns booking execution.
 - Service recognition must be catalog-backed and salon-scoped. Do not hardcode per-salon service keywords into prompts or generic matchers.
 - AI tone changes reply style only. It must not change required booking slots, handoff decisions, availability checks, service selection, or confirmed-booking wording.
 - Square is the first real integration; future POS names are architecture targets, not implemented features.
-- Vietnamese language support is product scope, but English remains the primary pilot language unless a feature explicitly says otherwise.
+- Vietnamese language support is product scope, but English remains the primary commercial release language unless a feature explicitly says otherwise.
 
 ## Avoid These Terms
 
-- "Universal POS support" for the pilot.
+- "Universal POS support" for the current commercial release.
 - "Square is the source of truth" for all salon operational data.
 - "Confirmed" when only an internal record exists.
 - "Mock POS" as a production path.
-- "Placeholder" for required pilot behavior.
+- "Placeholder" for required production behavior.

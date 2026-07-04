@@ -1,22 +1,22 @@
 ---
-name: pilot-release-review
-description: Review this repo for production-like pilot readiness, scope honesty, POS-first architecture, missing tests, security gaps, and milestone boundary regressions.
+name: production-release-review
+description: Review this repo for commercial production readiness, scope honesty, POS-first architecture, missing tests, security gaps, and release boundary regressions.
 ---
 
-# Pilot Release Review
+# Production Release Review
 
 Use this skill for code review, milestone review, or readiness checks.
 
 ## Codebase Truth Rule
 
 - Be strictly honest about the current codebase and runtime configuration. Do not flatter, reassure, or infer readiness from docs, milestones, intended architecture, or previous claims.
-- Before saying the pilot is ready, a feature works, or a gap is only a test issue, verify the actual owning code path, config gates, persistence, API/UI behavior, and tests/status output when available.
+- Before saying the production release is ready, a feature works, or a gap is only a test issue, verify the actual owning code path, config gates, persistence, API/UI behavior, and tests/status output when available.
 - Separate confirmed current behavior from product intent, planned behavior, unverified assumptions, and missing implementation.
 - If evidence conflicts, stop and name the conflict directly with file references instead of smoothing over it.
 
 ## Product-Grade Rule
 
-- Review pilot readiness against production-grade behavior, not MVP, demo, prototype, or happy-path scaffolding.
+- Review release readiness against commercial-grade production behavior, not MVP, demo, prototype, or happy-path scaffolding.
 - Treat missing repeated-run/idempotency behavior, duplicate prevention, retry/rerun semantics, conflict handling, tenant/security/privacy boundaries, or safe failure states as real readiness risks.
 - For export/import, sync, webhook, booking, provider, or AI training flows, require stable keys, upsert or dedupe semantics, schema/version impact, and regression coverage for repeated execution.
 - Do not downgrade predictable duplicate/rubbish data, misleading owner/caller state, or unsupported production behavior to a cosmetic issue.

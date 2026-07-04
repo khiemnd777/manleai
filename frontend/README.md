@@ -1,6 +1,6 @@
 # Frontend
 
-Next.js admin frontend for the AI Receptionist pilot foundation.
+Next.js admin frontend for the AI Receptionist commercial production foundation.
 
 ## Commands
 

@@ -1,6 +1,0 @@
-interface:
-  display_name: "Pilot Release Review"
-  short_description: "Review product-grade pilot readiness"
-  default_prompt: "Use $pilot-release-review to review changes for real pilot readiness, idempotency, duplicate prevention, service-understanding drift, AI tone guardrails, safe failure states, and critical product invariants."
-policy:
-  allow_implicit_invocation: true

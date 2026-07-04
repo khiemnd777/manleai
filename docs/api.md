@@ -1393,7 +1393,7 @@ The phone path never confirms an appointment unless the booking service returns 
 
 Returns the active POS provider, installed adapters, unavailable adapter gate,
 provider mapping counts, and readiness checks. This endpoint is read-only in
-the current pilot. It does not activate a new provider or create fake provider
+the current production release. It does not activate a new provider or create fake provider
 support.
 
 ```json
@@ -1424,7 +1424,7 @@ support.
       "installed": false,
       "active": false,
       "status": "disabled",
-      "blocked_reason": "Square Appointments is the only native POS integration in this pilot release."
+      "blocked_reason": "Square Appointments is the only native POS integration in the current production release."
     }
   ],
   "mapping": {
@@ -1447,7 +1447,7 @@ support.
   "dry_run_booking_ready": true,
   "can_start_switch": false,
   "can_activate_provider": false,
-  "blocked_reason": "No alternate POS adapter is installed in this pilot deployment."
+  "blocked_reason": "No alternate production POS adapter is installed in this deployment."
 }
 ```
 
@@ -1503,14 +1503,14 @@ been created.
 Returns one owner-scoped switch run with its match summary and match rows.
 Match rows are provider-neutral and may include `service`, `staff`, or
 `customer` entities. There is intentionally no activation endpoint in the
-current pilot.
+current production release.
 
 `GET /api/salons/:id/pos/provider-switch-runs/:run_id/dry-run-readiness`
 
 Returns the dry-run checklist for one owner-scoped provider switch run. This
 endpoint is read-only. It does not call a target POS provider, create
 appointments, create provider links, mark `dry_run_ready=true`, or activate a
-provider. In the current pilot it remains blocked because no alternate native
+provider. In the current production release it remains blocked because no alternate native
 POS adapter and no alternate-provider dry-run executor exist.
 
 ```json
@@ -1526,7 +1526,7 @@ POS adapter and no alternate-provider dry-run executor exist.
     {"key": "imported_records", "label": "Imported provider records exist", "complete": false, "message": "Import records from a real alternate POS provider before dry-run checks can pass."},
     {"key": "matches_resolved", "label": "Match conflicts resolved", "complete": false, "message": "Resolve suggested, unmatched, or conflicting provider matches before dry-run."},
     {"key": "current_provider_booking_ready", "label": "Current provider booking readiness passed", "complete": true},
-    {"key": "dry_run_execution_available", "label": "Alternate-provider dry-run execution available", "complete": false, "message": "Alternate-provider dry-run execution is not implemented in this pilot slice."}
+    {"key": "dry_run_execution_available", "label": "Alternate-provider dry-run execution available", "complete": false, "message": "Alternate-provider dry-run execution is not available in the current production release."}
   ],
   "can_run_dry_run": false,
   "dry_run_ready": false,

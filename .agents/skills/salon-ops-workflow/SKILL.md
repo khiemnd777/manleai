@@ -16,7 +16,7 @@ Use this skill when a request depends on how a nail salon owner, caller, or staf
 
 ## Product-Grade Rule
 
-- Analyze salon workflows as production-grade pilot behavior, not MVP, demo, prototype, or happy-path scaffolding.
+- Analyze salon workflows as commercial-grade production behavior, not MVP, demo, prototype, or happy-path scaffolding.
 - Before proposing or approving a workflow, check repeated-use behavior, idempotency, duplicate prevention, retry/rerun semantics, owner conflict handling, tenant/security/privacy boundaries, and loading/empty/error/disabled states.
 - For export/import, sync, booking, fallback pending, owner-review, or AI training flows, define stable keys, upsert or dedupe semantics, and how repeated execution avoids duplicate or rubbish records.
 - Do not call a workflow ready if predictable salon-day exceptions would mislead the owner, caller, staff, AI runtime, or POS provider.
@@ -25,7 +25,7 @@ Use this skill when a request depends on how a nail salon owner, caller, or staf
 
 1. Read `CONTEXT.md` for shared terms.
 2. Read `docs/architecture.md` for current system boundaries.
-3. Read `docs/pilot-checklist.md` for milestone scope.
+3. Read `docs/production-readiness-checklist.md` for production readiness scope.
 4. For dashboard workflows, read `DESIGN.md`.
 5. Inspect relevant code or API docs only after mapping the operational workflow.
 
@@ -37,7 +37,7 @@ Analyze the request across these salon realities:
 - Callers may ask for prices, hours, walk-ins, reschedules, cancellations, group bookings, or human help before giving full details.
 - Callers may pronounce service names unclearly or use local salon wording. The operational fix is catalog-backed clarification or owner-reviewed `service_aliases`, not per-call guessing or hardcoded keyword patches.
 - Staff availability, service duration, business hours, and active POS mappings determine whether booking can even be attempted.
-- Square Appointments owns real availability and booking execution in the pilot.
+- Square Appointments owns real availability and booking execution in the current production release.
 - POS failure, disconnected Square, missing staff/service mappings, or disabled AI booking must become pending request or handoff behavior, not confirmed appointments.
 - Dashboard actions must help the owner decide the next step quickly.
 - Vietnamese support is in scope as product language, but do not assume full bilingual runtime behavior unless the feature explicitly supports it.

@@ -241,7 +241,7 @@ func (s *ServiceLayer) ProviderSwitchReadiness(ctx context.Context, salonID stri
 		{Key: "provider_synced", Label: "Active provider synced", Complete: synced, Message: incompleteProviderMessage(synced, "Sync records from the active provider.")},
 		{Key: "services_mapped", Label: "Bookable services mapped", Complete: summary.BookableServiceCount > 0, Message: incompleteProviderMessage(summary.BookableServiceCount > 0, "At least one active AI-bookable service must have a synced provider link.")},
 		{Key: "staff_mapped", Label: "Bookable staff mapped", Complete: summary.BookableStaffCount > 0, Message: incompleteProviderMessage(summary.BookableStaffCount > 0, "At least one active AI-bookable staff member must have a synced provider link.")},
-		{Key: "alternate_adapter", Label: "Alternate provider adapter installed", Complete: alternateInstalled, Message: incompleteProviderMessage(alternateInstalled, "No alternate POS adapter is installed in this pilot deployment.")},
+		{Key: "alternate_adapter", Label: "Alternate provider adapter installed", Complete: alternateInstalled, Message: incompleteProviderMessage(alternateInstalled, "No alternate production POS adapter is installed in this deployment.")},
 	}
 	result := &ProviderSwitchReadiness{
 		SalonID:              salonID,
@@ -261,7 +261,7 @@ func (s *ServiceLayer) ProviderSwitchReadiness(ctx context.Context, salonID stri
 		}
 	}
 	if !alternateInstalled && result.BlockedReason == "" {
-		result.BlockedReason = "No alternate POS adapter is installed in this pilot deployment."
+		result.BlockedReason = "No alternate production POS adapter is installed in this deployment."
 	}
 	return result, nil
 }
@@ -373,7 +373,7 @@ func (s *ServiceLayer) ProviderSwitchDryRunReadiness(ctx context.Context, salonI
 		{Key: "imported_records", Label: "Imported provider records exist", Complete: importedRecordsExist, Message: incompleteProviderMessage(importedRecordsExist, "Import records from a real alternate POS provider before dry-run checks can pass.")},
 		{Key: "matches_resolved", Label: "Match conflicts resolved", Complete: matchesResolved, Message: incompleteProviderMessage(matchesResolved, "Resolve suggested, unmatched, or conflicting provider matches before dry-run.")},
 		{Key: "current_provider_booking_ready", Label: "Current provider booking readiness passed", Complete: currentBookingReady, Message: dryRunCurrentProviderMessage(activeProvider, run.FromProvider, currentConnected, currentSynced, mapping)},
-		{Key: "dry_run_execution_available", Label: "Alternate-provider dry-run execution available", Complete: dryRunExecutionAvailable, Message: "Alternate-provider dry-run execution is not implemented in this pilot slice."},
+		{Key: "dry_run_execution_available", Label: "Alternate-provider dry-run execution available", Complete: dryRunExecutionAvailable, Message: "Alternate-provider dry-run execution is not available in the current production release."},
 	}
 	canRunDryRun := providerChecksComplete(checks)
 	result := &ProviderSwitchDryRunReadiness{
@@ -949,7 +949,7 @@ func unavailableProviderOptions(alternateInstalled bool) []ProviderOption {
 		Installed:     false,
 		Active:        false,
 		Status:        StatusDisabled,
-		BlockedReason: "Square Appointments is the only native POS integration in this pilot release.",
+		BlockedReason: "Square Appointments is the only native POS integration in the current production release.",
 	}}
 }
 

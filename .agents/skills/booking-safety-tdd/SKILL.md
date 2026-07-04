@@ -16,7 +16,7 @@ Use this skill whenever appointment confirmation behavior changes.
 
 ## Product-Grade Rule
 
-- Treat booking, reschedule, cancel, availability, and fallback work as production-grade pilot behavior, not MVP, demo, prototype, or happy-path scaffolding.
+- Treat booking, reschedule, cancel, availability, and fallback work as commercial-grade production behavior, not MVP, demo, prototype, or happy-path scaffolding.
 - Before proposing or implementing, check repeated-submit behavior, idempotency keys, duplicate appointment/request prevention, retry/rerun semantics, race conditions, conflict handling, tenant/security/privacy boundaries, and safe failure states.
 - POS success, POS failure, timeout, retry, fallback pending, owner approval, notification, audit log, and duplicate request paths must be explicit in tests or safely gated.
 - Do not mark booking work complete until repeated execution cannot create duplicate confirmed appointments, duplicate fallback rubbish, or misleading caller/owner state.

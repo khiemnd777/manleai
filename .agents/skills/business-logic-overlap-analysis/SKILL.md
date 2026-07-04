@@ -16,7 +16,7 @@ Use this skill before implementing or reviewing work that may collide with exist
 
 ## Product-Grade Rule
 
-- Review every overlap as production-grade pilot behavior, not MVP, demo, prototype, or happy-path scaffolding.
+- Review every overlap as commercial-grade production behavior, not MVP, demo, prototype, or happy-path scaffolding.
 - Before clearing a plan, check repeated-use behavior, idempotency, duplicate prevention, retry/rerun semantics, race conditions, conflict handling, tenant/security/privacy boundaries, and safe empty/error/disabled states.
 - For export/import, sync, webhook, booking, provider, or AI training flows, verify stable keys, upsert or dedupe semantics, schema/version impact, and repeated execution behavior.
 - Do not accept a design where predictable duplicate/rubbish data, misleading state, or unsupported behavior is merely undocumented.
@@ -25,7 +25,7 @@ Use this skill before implementing or reviewing work that may collide with exist
 
 1. Read `CONTEXT.md` for domain language and invariants.
 2. Read `docs/architecture.md` for module ownership and dependency direction.
-3. Read the smallest relevant source-of-truth docs for the workflow, such as `docs/api.md`, `docs/pos-adapter-layer.md`, `docs/square-integration.md`, `docs/pilot-checklist.md`, or `DESIGN.md`.
+3. Read the smallest relevant source-of-truth docs for the workflow, such as `docs/api.md`, `docs/pos-adapter-layer.md`, `docs/square-integration.md`, `docs/production-readiness-checklist.md`, or `DESIGN.md`.
 4. Inspect the current owning code paths before judging overlap. Prefer `rg` to find handlers, services, repositories, DTOs, frontend types, and dashboard state.
 
 ## Overlap Questions

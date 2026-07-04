@@ -31,7 +31,7 @@ Use $booking-safety-tdd to plan the test-first booking creation and cancellation
 ```
 
 ```txt
-Use $pilot-release-review to review this branch for pilot readiness.
+Use $production-release-review to review this branch for production readiness.
 ```
 
 ```txt
@@ -65,7 +65,7 @@ Review this dashboard change with frontend_product_reviewer and security_privacy
 ```
 
 ```txt
-Have pilot_release_planner split the next approval-loop slice into vertical backend, frontend, docs, and test work.
+Have production_release_planner split the next approval-loop slice into vertical backend, frontend, docs, and test work.
 ```
 
 ```txt

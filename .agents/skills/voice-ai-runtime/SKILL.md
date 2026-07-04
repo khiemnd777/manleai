@@ -17,7 +17,7 @@ transcript, handoff, call lifecycle, and voice booking work across Milestone 4+.
 
 ## Product-Grade Rule
 
-- Treat voice and AI runtime work as production-grade pilot behavior, not MVP, demo, prototype, or happy-path scaffolding.
+- Treat voice and AI runtime work as commercial-grade production behavior, not MVP, demo, prototype, or happy-path scaffolding.
 - Before proposing or implementing, check repeated webhook/event behavior, idempotency, duplicate transcript/message/session prevention, retry/rerun semantics, provider timeout handling, tenant/security/privacy boundaries, and safe fallback/handoff states.
 - Conversation, telephony, SMS, STT, LLM, TTS, summary, handoff, and booking-tool flows must define stable event/session keys when messages can be replayed or retried.
 - Do not mark runtime work complete until repeated provider callbacks cannot create duplicate rubbish state or misleading caller/owner responses.

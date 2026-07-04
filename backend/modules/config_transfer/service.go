@@ -394,7 +394,7 @@ func planSalonProfile(ctx context.Context, store ImportStore, plan *importPlan) 
 		plan.Warnings = append(plan.Warnings, ImportIssue{
 			Section: SectionSalon,
 			Code:    "active_provider_skipped",
-			Message: "Only Square Appointments can be active in this pilot. Active POS provider was not changed.",
+			Message: "Only Square Appointments can be active in the current production release. Active POS provider was not changed.",
 			Field:   "active_pos_provider",
 		})
 	} else {

@@ -19,7 +19,7 @@ boundary and public-safe catalog rules from `docs/architecture.md` and
 
 ## Product-Grade Rule
 
-- Build dashboard behavior as production-grade pilot UI, not MVP, demo, prototype, or happy-path scaffolding.
+- Build dashboard behavior as commercial-grade production UI, not MVP, demo, prototype, or happy-path scaffolding.
 - Before proposing or implementing, check double-click/repeated-submit behavior, idempotency, duplicate prevention, retry/rerun semantics, stale data, conflict handling, tenant/security/privacy boundaries, and loading/empty/error/success/disabled states.
 - For export/import, sync, booking, integration, provider switching, public catalog, billing, or AI training controls, surface safe statuses and backend contract assumptions instead of implying unsupported behavior.
 - Do not mark UI work complete until predictable edge cases are handled, safely gated, explicitly out of scope with a reason, or called out as a blocker.

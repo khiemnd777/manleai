@@ -86,14 +86,14 @@ export function BillingDashboard() {
         <div>
           <h1 className="text-2xl font-bold text-ink">Billing</h1>
           <p className="mt-1 text-sm text-muted">
-            Pilot billing is separated from Square Appointments booking behavior.
+            Commercial billing is separated from Square Appointments booking behavior.
           </p>
         </div>
         <Badge value="not_configured" className="self-start" />
       </div>
 
       <div className="grid gap-4 md:grid-cols-3">
-        <BillingMetric label="Plan status" value="Pilot gated" badge="pending" />
+        <BillingMetric label="Plan status" value="Commercial billing pending" badge="pending" />
         <BillingMetric label="Subscription system" value="Not connected" badge="not_configured" />
         <BillingMetric label="POS booking impact" value="None" badge="allowed" />
       </div>
@@ -103,9 +103,9 @@ export function BillingDashboard() {
           <div className="flex gap-3">
             <WalletCards className="mt-0.5 h-5 w-5 flex-none text-brand" />
             <div>
-              <CardTitle>Pilot billing status</CardTitle>
+              <CardTitle>Billing status</CardTitle>
               <CardDescription>
-                {salon.name} is in the foundation pilot scope. This release does not include Stripe, payment methods, invoices, or subscription state.
+                {salon.name} is running production booking workflows. This release does not include Stripe, payment methods, invoices, or subscription state.
               </CardDescription>
             </div>
           </div>
@@ -126,7 +126,7 @@ export function BillingDashboard() {
       <Card>
         <CardTitle>Scope boundary</CardTitle>
         <CardDescription>
-          Square Appointments remains the POS provider for availability and booking. App subscription billing will be added as a separate Stripe or billing-provider slice after pilot readiness.
+          Square Appointments remains the POS provider for availability and booking. App subscription billing will be added as a separate commercial billing release.
         </CardDescription>
         <div className="mt-5">
           <Link

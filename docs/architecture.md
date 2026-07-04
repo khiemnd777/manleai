@@ -57,7 +57,7 @@ logs, and training data. POS providers are external projections and booking
 execution layers. The active POS provider owns real availability and provider
 booking execution.
 
-For the Square pilot, operating hours are owned in Square Appointments. ManleAI
+For the current Square Appointments production release, operating hours are owned in Square Appointments. ManleAI
 imports the selected Square location's business hour periods into
 `salon_business_hour_periods` and uses them as a local safety filter before
 offering availability slots. The local dashboard displays those periods and can
@@ -83,7 +83,7 @@ provider switch readiness for the active provider, a gated import wizard shell,
 and persisted switch runs with service/staff/customer match summaries and owner
 match review decisions. It also exposes a dry-run readiness checklist for
 switch runs, but the import wizard and dry-run checklist remain blocked until a
-real alternate adapter and executable import/dry-run path exist. The pilot
+real alternate adapter and executable import/dry-run path exist. The production release
 cannot activate an alternate POS provider until a real adapter exists, records
 are imported and matched, conflicts are resolved, a dry-run booking readiness
 check passes, and required mappings are ready.

@@ -16,7 +16,7 @@ Use this skill for all POS integration work.
 
 ## Product-Grade Rule
 
-- Treat POS adapter work as production-grade pilot integration behavior, not MVP, demo, prototype, or happy-path scaffolding.
+- Treat POS adapter work as commercial-grade production integration behavior, not MVP, demo, prototype, or happy-path scaffolding.
 - Before proposing or implementing, check OAuth retry/rerun behavior, webhook idempotency, sync dedupe, duplicate provider/local record prevention, token safety, tenant boundaries, provider conflicts, and safe failure states.
 - Provider IDs, sync cursors, idempotency keys, upsert behavior, error normalization, and audit/sync logs must be explicit for flows that can repeat.
 - Do not mark POS work complete until repeated execution cannot create duplicate local records, duplicate provider bookings, leaked token state, or misleading owner-facing status.

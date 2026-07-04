@@ -16,7 +16,7 @@ Use this skill before implementation when the request is broad, ambiguous, workf
 
 ## Product-Grade Rule
 
-- Analyze every request as production-grade pilot behavior, not MVP, demo, prototype, or happy-path scaffolding.
+- Analyze every request as commercial-grade production behavior, not MVP, demo, prototype, or happy-path scaffolding.
 - Before recommending a plan, identify repeated-use behavior, idempotency, duplicate prevention, retry/rerun semantics, conflict handling, tenant/security/privacy boundaries, and empty/error/disabled states.
 - For export/import, sync, webhook, booking, provider, or AI training flows, define stable keys, upsert or dedupe semantics, schema/version impact, and how repeated execution avoids duplicate or rubbish records.
 - Acceptance criteria must include edge cases and regression risks, not only the happy path.
@@ -24,7 +24,7 @@ Use this skill before implementation when the request is broad, ambiguous, workf
 ## Start Here
 
 1. Read `CONTEXT.md` for product language and invariants.
-2. Read `docs/architecture.md` and `docs/pilot-checklist.md` for current milestone boundaries.
+2. Read `docs/architecture.md` and `docs/production-readiness-checklist.md` for current release boundaries.
 3. For UI-facing work, read `DESIGN.md`.
 4. For API or integration work, read the smallest relevant source-of-truth docs such as `docs/api.md`, `docs/pos-adapter-layer.md`, or `docs/square-integration.md`.
 5. Inspect code only as needed to verify current behavior and ownership.
@@ -74,5 +74,5 @@ For implementation requests, stop after the analysis and proposed plan. Wait for
 - Do not invent production behavior to make a workflow look complete.
 - Do not hide missing backend support behind optimistic UI copy.
 - Prefer narrow vertical slices that can be verified end to end.
-- Tie every requirement to an actor, state, owner action, backend rule, or measurable pilot outcome.
+- Tie every requirement to an actor, state, owner action, backend rule, or measurable production outcome.
 - Call out when docs, DTOs, frontend types, tests, and UI states must move together.

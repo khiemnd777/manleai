@@ -1,6 +1,6 @@
 # Backend
 
-Go/Fiber API for the AI Receptionist pilot foundation.
+Go/Fiber API for the AI Receptionist commercial production foundation.
 
 ## Stack
 

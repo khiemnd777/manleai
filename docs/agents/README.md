@@ -21,7 +21,7 @@ OpenAI's subagent docs say project-scoped custom agents live under `.codex/agent
 - `business-analysis`: turn ambiguous requests into product requirements and acceptance criteria.
 - `business-logic-overlap-analysis`: find overlapping rules and regression risks before changes.
 - `salon-ops-workflow`: analyze real salon owner/caller/staff workflows, including correction-to-knowledge and correction-to-service-alias decisions.
-- `pilot-release-review`: review release readiness and scope honesty.
+- `production-release-review`: review release readiness and scope honesty.
 
 ## Write Approval Gate
 
@@ -50,7 +50,7 @@ Ask Codex to spawn:
 - `pos_backend_reviewer` for POS, auth, tenant, token, and migration changes.
 - `frontend_product_reviewer` for dashboard UX and frontend contracts.
 - `security_privacy_reviewer` for secrets, tenant isolation, phone/SMS/call data, and auth.
-- `pilot_release_planner` when converting a milestone into work slices.
+- `production_release_planner` when converting a milestone into work slices.
 
 For service-understanding or AI Training correction work, ask `repo_mapper` to map `modules/conversation`, `modules/training`, `service_aliases`, transcript metadata, and golden tests before planning implementation.
 

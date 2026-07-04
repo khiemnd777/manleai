@@ -409,7 +409,7 @@ Phase 6F import wizard gated shell completed:
 - [x] Do not call import/start APIs, create fake provider options, or fabricate
       imported provider records.
 
-Full Phase 6 remains open because the pilot currently has only the Square
+Full Phase 6 remains open because the current production release has only the Square
 Appointments adapter. Do not add fake provider implementations to satisfy the
 workflow.
 
@@ -480,7 +480,7 @@ Phase 7C Dashboard Home readiness overview completed:
       and canonical booking-ready data.
 - [x] Add Dashboard Home POS booking boundary copy for POS-confirmed
       appointments and fallback pending requests.
-- [x] Update the app shell pilot tagline from Square-first to POS-first while
+- [x] Update the app shell production tagline from Square-first to POS-first while
       keeping Square Appointments as the current real integration.
 
 Phase 7D readiness regression tests completed:
@@ -502,7 +502,7 @@ Phase 7E Integrations readiness/state polish completed:
 - [x] Improve sync-log empty state so owners understand sync history starts
       only after Square is connected and services/staff sync runs.
 - [x] Keep provider switch copy scope-honest: Square Appointments is the only
-      native POS adapter in this pilot, so import, dry-run, and activation stay
+      native POS adapter in the current production release, so import, dry-run, and activation stay
       disabled.
 
 Tasks:

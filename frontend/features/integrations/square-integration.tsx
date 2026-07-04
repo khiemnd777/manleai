@@ -665,7 +665,7 @@ export function SquareIntegration() {
         <div>
           <h1 className="text-2xl font-bold text-ink">Integrations</h1>
           <p className="mt-1 text-sm text-muted">
-            Square Appointments is the only native POS integration in this pilot release.
+            Square Appointments is the active supported POS integration in this production release.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -1638,7 +1638,7 @@ function ReadinessOverviewPanel({
   const switchMessage =
     switchReadiness?.blocked_reason ||
     firstIncompleteCheckMessage(switchReadiness?.checks) ||
-    "Square Appointments is the only native POS adapter in this pilot release.";
+    "Square Appointments is the only native POS adapter in the current production release.";
 
   return (
     <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -1832,7 +1832,7 @@ function ProviderSwitchReadinessPanel({
   const workflowBlockedReason =
     switchRun?.blocked_reason ||
     readiness.blocked_reason ||
-    "No alternate POS adapter is installed in this pilot deployment.";
+    "No alternate production POS adapter is installed in this deployment.";
   return (
     <Card>
       <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-start">
@@ -2016,7 +2016,7 @@ function ProviderSwitchImportWizard({
             </select>
           </label>
           <div className="mt-3 text-xs leading-5 text-muted">
-            Square Appointments is the only native POS adapter in this pilot release.
+            Square Appointments is the only native POS adapter in the current production release.
           </div>
         </div>
 
@@ -2408,7 +2408,7 @@ function providerSwitchWorkflowSteps(
       status: "blocked",
       message: readiness.can_start_switch
         ? "Alternate adapter is installed."
-        : "Square Appointments is the only native POS adapter in this pilot."
+        : "Square Appointments is the only native POS adapter in the current production release."
     },
     {
       key: "import_records",

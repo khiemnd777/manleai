@@ -12,7 +12,7 @@ The product rule is strict: never confirm an appointment unless the active POS p
 - POS adapter contract: `docs/pos-adapter-layer.md`
 - Square integration: `docs/square-integration.md`
 - API surface: `docs/api.md`
-- Pilot scope: `docs/pilot-checklist.md`
+- Production readiness scope: `docs/production-readiness-checklist.md`
 - Design/UI/UX contract: `DESIGN.md`
 - Domain language: `CONTEXT.md`
 
@@ -57,7 +57,7 @@ The product rule is strict: never confirm an appointment unless the active POS p
 
 ## Product-Grade Standard
 
-- Build and review every approved slice as production-grade pilot software, not MVP, demo, prototype, or happy-path scaffolding.
+- Build and review every approved slice as commercial-grade production software, not MVP, demo, prototype, or happy-path scaffolding.
 - Before proposing or implementing, check repeated-use behavior, idempotency, duplicate prevention, retry/rerun semantics, conflict handling, rollback or cleanup needs, disabled/error/empty states, tenant boundaries, and security/privacy exposure.
 - For export/import, sync, webhook, booking, provider, AI training, or any workflow that can run more than once, define stable keys, upsert or dedupe behavior, and prove repeated execution will not create duplicate or rubbish records.
 - If external systems will consume exported data, include contract stability, schema versioning, stable identifiers, and import semantics even when the importer is outside the current implementation slice.

@@ -16,7 +16,7 @@ Use this skill before broad or ambiguous repo work.
 
 ## Product-Grade Rule
 
-- Treat every approved slice as production-grade pilot software, not MVP, demo, prototype, or happy-path scaffolding.
+- Treat every approved slice as commercial-grade production software, not MVP, demo, prototype, or happy-path scaffolding.
 - Before proposing or implementing, check repeated-use behavior, idempotency, duplicate prevention, retry/rerun semantics, conflict handling, tenant/security/privacy boundaries, and empty/error/disabled states.
 - For export/import, sync, webhook, booking, provider, or AI training flows, define stable keys, upsert or dedupe semantics, schema/version impact, and how repeated execution avoids duplicate or rubbish records.
 - Do not mark work complete until predictable edge cases are handled, safely gated, explicitly out of scope with a reason, or called out as a blocker.
@@ -24,7 +24,7 @@ Use this skill before broad or ambiguous repo work.
 ## Start Here
 
 1. Read `CONTEXT.md` for shared product language.
-2. Read `docs/architecture.md` and `docs/pilot-checklist.md` for current milestone boundaries.
+2. Read `docs/architecture.md` and `docs/production-readiness-checklist.md` for current release boundaries.
 3. Identify whether the change belongs to `backend`, `frontend`, `docs`, `.agents`, `.codex`, or multiple layers.
 4. Keep product claims honest: Square is the first real POS integration; future POS names are architecture targets.
 
