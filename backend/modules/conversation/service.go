@@ -36,6 +36,9 @@ var (
 	dateTimePattern                = regexp.MustCompile(`(?i)(\d{4}-\d{2}-\d{2})(?:[ t]+(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)?)`)
 	relativeTimePattern            = regexp.MustCompile(`(?i)\b(today|tomorrow)\b\s*(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)?`)
 	dateOnlyPattern                = regexp.MustCompile(`(?i)\b(\d{4}-\d{2}-\d{2})\b`)
+	monthDateTimePattern           = regexp.MustCompile(`(?i)\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,)?\s+(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)\b`)
+	timeMonthDatePattern           = regexp.MustCompile(`(?i)\b(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)\s+(?:on\s+)?(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec)\s+(\d{1,2})(?:st|nd|rd|th)?\b`)
+	monthDateOnlyPattern           = regexp.MustCompile(`(?i)\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec)\s+(\d{1,2})(?:st|nd|rd|th)?\b`)
 	relativeDayPattern             = regexp.MustCompile(`(?i)\b(today|tomorrow)\b`)
 	timeWithMeridiemPattern        = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)(?:$|[^a-z0-9])`)
 	offeredSlotNumericTimePattern  = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|bpm|tm)(?:$|[^a-z0-9])`)
@@ -462,7 +465,8 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 	}
 
 	if strings.TrimSpace(next.TargetAppointmentID) == "" {
-		if selected := selectRescheduleCandidate(message, next.RescheduleCandidates, loc); selected != nil {
+		clearNewRescheduleSlot(&next)
+		if selected := selectRescheduleCandidate(message, next.RescheduleCandidates, loc, s.now); selected != nil {
 			applyRescheduleCandidate(&next, *selected)
 			syncTurnUpdate(&turn, next, services, staff, cfg)
 		} else {
@@ -497,6 +501,9 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 	}
 
 	if next.RequestedStartTime == nil {
+		if applyRelativeRescheduleDate(&next, message, loc) {
+			syncTurnUpdate(&turn, next, services, staff, cfg)
+		}
 		if strings.TrimSpace(next.RequestedDate) != "" {
 			if err := s.offerAvailableSlots(ctx, ownerUserID, &turn, &next, services, staff, next.RequestedDate, false, cfg); err != nil {
 				return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check new appointment times, so I will send this reschedule request to the owner. The appointment is not rescheduled yet.", services, staff, cfg)
@@ -507,6 +514,9 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 			s.applyReplyGenerator(ctx, &turn, next, services, cfg, "requested_time", "requested_time", knowledge)
 			finalizeTurnMetadata(&turn, before, next, "requested_time", "requested_time", "reschedule_availability_offer")
 			return s.store.SaveTurn(ctx, turn)
+		}
+		if shouldHandoffRepeatedRescheduleNewTime(before, message) {
+			return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I'm having trouble catching the new date and time, so I will send this reschedule request to the owner. The appointment is not rescheduled yet.", services, staff, cfg)
 		}
 		turn.AIMessage = "What new day and time would you like?"
 		s.applyReplyGenerator(ctx, &turn, next, services, cfg, "requested_start_time", "requested_start_time", knowledge)
@@ -1611,6 +1621,19 @@ func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, ses
 		return
 	}
 	if message := strings.TrimSpace(result.Message); message != "" {
+		if rejectRescheduleReplyRewrite(turn, nextRequired, message) {
+			turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{
+				"safe_reply":          safeReply,
+				"llm_reply":           message,
+				"llm_confidence":      result.Confidence,
+				"llm_handoff":         result.Handoff,
+				"llm_reason":          result.Reason,
+				"llm_guardrail":       "rejected_reschedule_stage_flip",
+				"reply_source":        "safe_reply",
+				"next_required_field": nextRequired,
+			})
+			return
+		}
 		turn.AIMessage = message
 	}
 	turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{
@@ -1623,6 +1646,34 @@ func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, ses
 		"reply_source":        "llm_rewrite",
 		"next_required_field": nextRequired,
 	})
+}
+
+func rejectRescheduleReplyRewrite(turn *TurnRecord, nextRequired string, message string) bool {
+	if turn == nil || nextRequired != "target_appointment" || turn.Update.BookingAction != BookingActionReschedule {
+		return false
+	}
+	if strings.TrimSpace(turn.Update.TargetAppointmentID) != "" {
+		return false
+	}
+	normalized := normalizeLooseText(message)
+	if normalized == "" {
+		return false
+	}
+	stageFlipSignals := []string{
+		"new time",
+		"new day",
+		"new date",
+		"what time",
+		"what day",
+		"schedule your",
+		"reschedule your",
+	}
+	for _, signal := range stageFlipSignals {
+		if strings.Contains(normalized, signal) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) saveHandoffTurn(ctx context.Context, turn TurnRecord, session Session, reason string, reply string, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (*Session, error) {
@@ -2797,37 +2848,155 @@ func addServiceName(names *[]string, seen map[string]bool, name string) {
 	*names = append(*names, name)
 }
 
-func selectRescheduleCandidate(message string, candidates []RescheduleCandidate, loc *time.Location) *RescheduleCandidate {
+func selectRescheduleCandidate(message string, candidates []RescheduleCandidate, loc *time.Location, now func() time.Time) *RescheduleCandidate {
 	if len(candidates) == 0 {
 		return nil
 	}
 	if len(candidates) == 1 && isAffirmativeOnly(message) {
 		return &candidates[0]
 	}
+	if selected := selectRescheduleCandidateByDateTime(message, candidates, loc, now); selected != nil {
+		return selected
+	}
+	if selected := selectRescheduleCandidateByService(message, candidates); selected != nil {
+		return selected
+	}
+	if selected := selectRescheduleCandidateByOrdinal(message, candidates); selected != nil {
+		return selected
+	}
+	return nil
+}
+
+func selectRescheduleCandidateByDateTime(message string, candidates []RescheduleCandidate, loc *time.Location, now func() time.Time) *RescheduleCandidate {
+	if loc == nil {
+		loc = time.UTC
+	}
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
+	}
+	if requestedAt, ok := parseRequestedTime(message, loc, now); ok {
+		for i := range candidates {
+			if candidates[i].StartTime.Equal(requestedAt) {
+				return &candidates[i]
+			}
+		}
+		return nil
+	}
+	if selected := selectRescheduleCandidateByClock(message, candidates, loc); selected != nil {
+		return selected
+	}
+	if requestedDate := preferredDateFromMessage(message, nil, loc, now); requestedDate != "" {
+		matches := make([]int, 0, len(candidates))
+		for i := range candidates {
+			if candidates[i].StartTime.In(loc).Format("2006-01-02") == requestedDate {
+				matches = append(matches, i)
+			}
+		}
+		if len(matches) == 1 {
+			return &candidates[matches[0]]
+		}
+	}
+	return nil
+}
+
+func selectRescheduleCandidateByClock(message string, candidates []RescheduleCandidate, loc *time.Location) *RescheduleCandidate {
+	if loc == nil {
+		loc = time.UTC
+	}
+	match := timeWithMeridiemPattern.FindStringSubmatch(message)
+	if len(match) == 0 {
+		return nil
+	}
+	parsed, err := parseDateAndClock("2000-01-01", match[1], match[2], match[3], loc)
+	if err != nil {
+		return nil
+	}
+	hour, minute := parsed.In(loc).Hour(), parsed.In(loc).Minute()
+	matches := make([]int, 0, len(candidates))
+	for i := range candidates {
+		start := candidates[i].StartTime.In(loc)
+		if start.Hour() == hour && start.Minute() == minute {
+			matches = append(matches, i)
+		}
+	}
+	if len(matches) == 1 {
+		return &candidates[matches[0]]
+	}
+	return nil
+}
+
+func selectRescheduleCandidateByService(message string, candidates []RescheduleCandidate) *RescheduleCandidate {
+	messageFamilies := rescheduleServiceFamilies(message)
+	if len(messageFamilies) == 0 {
+		return nil
+	}
+	matches := make([]int, 0, len(candidates))
+	for i := range candidates {
+		candidateFamilies := rescheduleServiceFamilies(candidates[i].ServiceLabel)
+		for family := range messageFamilies {
+			if candidateFamilies[family] {
+				matches = append(matches, i)
+				break
+			}
+		}
+	}
+	if len(matches) == 1 {
+		return &candidates[matches[0]]
+	}
+	return nil
+}
+
+func rescheduleServiceFamilies(value string) map[string]bool {
+	normalized := normalizeServiceText(value)
+	families := map[string]bool{}
+	for _, token := range strings.Fields(normalized) {
+		switch token {
+		case "mani", "manis", "manicure", "manicures":
+			families["manicure"] = true
+		case "pedi", "pedis", "pedicure", "pedicures":
+			families["pedicure"] = true
+		default:
+			if len([]rune(token)) >= 4 {
+				families[token] = true
+			}
+		}
+	}
+	return families
+}
+
+func selectRescheduleCandidateByOrdinal(message string, candidates []RescheduleCandidate) *RescheduleCandidate {
 	normalized := normalizeLooseText(message)
+	if normalized == "" {
+		return nil
+	}
 	selections := []struct {
 		Index int
 		Terms []string
 	}{
-		{0, []string{"first", "one", "1", "1st"}},
-		{1, []string{"second", "two", "2", "2nd"}},
-		{2, []string{"third", "three", "3", "3rd"}},
+		{0, []string{"first", "first one", "the first", "the first one", "number one", "number 1", "option one", "option 1", "appointment one", "appointment 1", "1st"}},
+		{1, []string{"second", "second one", "the second", "the second one", "number two", "number 2", "option two", "option 2", "appointment two", "appointment 2", "2nd"}},
+		{2, []string{"third", "third one", "the third", "the third one", "number three", "number 3", "option three", "option 3", "appointment three", "appointment 3", "3rd"}},
 	}
 	for _, selection := range selections {
 		if selection.Index >= len(candidates) {
 			continue
 		}
 		for _, term := range selection.Terms {
-			if containsLoosePhrase(normalized, term) {
+			if normalized == term || containsLoosePhrase(normalized, term) {
 				return &candidates[selection.Index]
 			}
 		}
 	}
-	if requestedAt, ok := parseRequestedTime(message, loc, func() time.Time { return time.Now().UTC() }); ok {
-		for i := range candidates {
-			if candidates[i].StartTime.Equal(requestedAt) {
-				return &candidates[i]
-			}
+	switch normalized {
+	case "one", "1":
+		return &candidates[0]
+	case "two", "2":
+		if len(candidates) > 1 {
+			return &candidates[1]
+		}
+	case "three", "3":
+		if len(candidates) > 2 {
+			return &candidates[2]
 		}
 	}
 	return nil
@@ -2838,12 +3007,14 @@ func applyRescheduleCandidate(session *Session, candidate RescheduleCandidate) {
 		return
 	}
 	session.TargetAppointmentID = strings.TrimSpace(candidate.AppointmentID)
-	session.RescheduleCandidates = nil
 	session.ServiceID = strings.TrimSpace(candidate.ServiceID)
 	session.ServiceName = strings.TrimSpace(candidate.ServiceLabel)
 	session.StaffID = strings.TrimSpace(candidate.StaffID)
 	session.StaffName = strings.TrimSpace(candidate.StaffLabel)
 	session.StaffSelectionMode = normalizeRescheduleStaffSelectionMode(candidate.StaffSelectionMode, candidate.StaffID)
+	session.RequestedDate = ""
+	session.RequestedStartTime = nil
+	session.OfferedSlots = nil
 	session.BookingSegments = append([]booking.BookingSegmentRequest(nil), candidate.Segments...)
 	if len(session.BookingSegments) == 0 && session.ServiceID != "" {
 		session.BookingSegments = []booking.BookingSegmentRequest{{
@@ -2862,6 +3033,120 @@ func rescheduleTargetAutoSafe(session Session) bool {
 		return false
 	}
 	return len(session.BookingSegments) == 1
+}
+
+func applyRelativeRescheduleDate(session *Session, message string, loc *time.Location) bool {
+	if session == nil || !hasNextDayRescheduleSignal(message) {
+		return false
+	}
+	candidate := selectedRescheduleCandidate(*session)
+	if candidate == nil || candidate.StartTime.IsZero() {
+		return false
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+	requestedDate := candidate.StartTime.In(loc).AddDate(0, 0, 1).Format("2006-01-02")
+	applyRequestedDate(session, requestedDate)
+	return true
+}
+
+func selectedRescheduleCandidate(session Session) *RescheduleCandidate {
+	targetID := strings.TrimSpace(session.TargetAppointmentID)
+	if targetID == "" {
+		return nil
+	}
+	for i := range session.RescheduleCandidates {
+		if strings.TrimSpace(session.RescheduleCandidates[i].AppointmentID) == targetID {
+			return &session.RescheduleCandidates[i]
+		}
+	}
+	return nil
+}
+
+func hasNextDayRescheduleSignal(message string) bool {
+	normalized := normalizeLooseText(message)
+	if normalized == "" {
+		return false
+	}
+	signals := []string{
+		"next day",
+		"the next day",
+		"following day",
+		"the following day",
+		"day after",
+		"the day after",
+	}
+	for _, signal := range signals {
+		if strings.Contains(normalized, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldHandoffRepeatedRescheduleNewTime(session Session, message string) bool {
+	return recentRescheduleNewTimePromptCount(session) >= 2 && looksLikeUnparsedDateOrTime(message)
+}
+
+func recentRescheduleNewTimePromptCount(session Session) int {
+	count := 0
+	seenAI := 0
+	for i := len(session.Transcript) - 1; i >= 0 && seenAI < 4; i-- {
+		msg := session.Transcript[i]
+		if msg.Speaker != SpeakerAI {
+			continue
+		}
+		seenAI++
+		if transcriptMessageAsksForRescheduleNewTime(msg) {
+			count++
+		}
+	}
+	return count
+}
+
+func transcriptMessageAsksForRescheduleNewTime(msg TranscriptMessage) bool {
+	if field := metadataString(msg.Metadata, "next_required_field"); field == "requested_start_time" || field == "requested_time" {
+		return true
+	}
+	normalized := normalizeLooseText(msg.Body)
+	return strings.Contains(normalized, "new day and time") ||
+		strings.Contains(normalized, "new date and time") ||
+		strings.Contains(normalized, "what time would you like") ||
+		strings.Contains(normalized, "what time work")
+}
+
+func looksLikeUnparsedDateOrTime(message string) bool {
+	if strings.TrimSpace(message) == "" {
+		return false
+	}
+	normalized := normalizeLooseText(message)
+	if hasNextDayRescheduleSignal(message) ||
+		dateOnlyPattern.MatchString(message) ||
+		monthDateOnlyPattern.MatchString(message) ||
+		timeWithMeridiemPattern.MatchString(message) {
+		return true
+	}
+	if _, _, ok := weekdayFromMessage(message); ok {
+		return true
+	}
+	timeWords := []string{"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"}
+	minuteWords := []string{"fifteen", "thirty", "forty five", "fortyfive", "o clock"}
+	hasHourWord := false
+	for _, word := range timeWords {
+		if containsLoosePhrase(normalized, word) {
+			hasHourWord = true
+			break
+		}
+	}
+	if hasHourWord {
+		for _, word := range minuteWords {
+			if strings.Contains(normalized, word) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func rescheduleSingleCandidatePrompt(candidate RescheduleCandidate, loc *time.Location) string {
@@ -4219,6 +4504,22 @@ func parseRequestedTime(message string, loc *time.Location, now func() time.Time
 			return parsed.UTC(), true
 		}
 	}
+	if match := monthDateTimePattern.FindStringSubmatch(message); len(match) > 0 {
+		if date, ok := dateFromMonthDay(match[1], match[2], loc, now); ok {
+			parsed, err := parseDateAndClock(date, match[3], match[4], match[5], loc)
+			if err == nil {
+				return parsed.UTC(), true
+			}
+		}
+	}
+	if match := timeMonthDatePattern.FindStringSubmatch(message); len(match) > 0 {
+		if date, ok := dateFromMonthDay(match[4], match[5], loc, now); ok {
+			parsed, err := parseDateAndClock(date, match[1], match[2], match[3], loc)
+			if err == nil {
+				return parsed.UTC(), true
+			}
+		}
+	}
 	if match := relativeTimePattern.FindStringSubmatch(message); len(match) > 0 {
 		base := now().In(loc)
 		if strings.EqualFold(match[1], "tomorrow") {
@@ -4263,6 +4564,11 @@ func preferredDateFromMessage(message string, requestedStartTime *time.Time, loc
 	if match := dateOnlyPattern.FindStringSubmatch(message); len(match) > 1 {
 		return match[1]
 	}
+	if match := monthDateOnlyPattern.FindStringSubmatch(message); len(match) > 0 {
+		if date, ok := dateFromMonthDay(match[1], match[2], loc, now); ok {
+			return date
+		}
+	}
 	if match := relativeDayPattern.FindStringSubmatch(message); len(match) > 1 {
 		base := now().In(loc)
 		if strings.EqualFold(match[1], "tomorrow") {
@@ -4274,6 +4580,64 @@ func preferredDateFromMessage(message string, requestedStartTime *time.Time, loc
 		return dateForWeekday(now().In(loc), weekday, nextWeek).Format("2006-01-02")
 	}
 	return ""
+}
+
+func dateFromMonthDay(monthRaw string, dayRaw string, loc *time.Location, now func() time.Time) (string, bool) {
+	month, ok := monthFromText(monthRaw)
+	if !ok {
+		return "", false
+	}
+	day, err := strconv.Atoi(strings.TrimSpace(dayRaw))
+	if err != nil || day < 1 || day > 31 {
+		return "", false
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
+	}
+	base := now().In(loc)
+	candidate := time.Date(base.Year(), month, day, 0, 0, 0, 0, loc)
+	if candidate.Month() != month || candidate.Day() != day {
+		return "", false
+	}
+	today := time.Date(base.Year(), base.Month(), base.Day(), 0, 0, 0, 0, loc)
+	if candidate.Before(today) {
+		candidate = time.Date(base.Year()+1, month, day, 0, 0, 0, 0, loc)
+	}
+	return candidate.Format("2006-01-02"), true
+}
+
+func monthFromText(value string) (time.Month, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "january", "jan":
+		return time.January, true
+	case "february", "feb":
+		return time.February, true
+	case "march", "mar":
+		return time.March, true
+	case "april", "apr":
+		return time.April, true
+	case "may":
+		return time.May, true
+	case "june", "jun":
+		return time.June, true
+	case "july", "jul":
+		return time.July, true
+	case "august", "aug":
+		return time.August, true
+	case "september", "sep", "sept":
+		return time.September, true
+	case "october", "oct":
+		return time.October, true
+	case "november", "nov":
+		return time.November, true
+	case "december", "dec":
+		return time.December, true
+	default:
+		return 0, false
+	}
 }
 
 func preferredDateForAvailability(session Session, message string, loc *time.Location, now func() time.Time) string {

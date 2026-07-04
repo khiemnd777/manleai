@@ -616,6 +616,209 @@ func TestMessageStartsAutoRescheduleWithTargetConfirmation(t *testing.T) {
 	}
 }
 
+func TestMessageRescheduleSelectsTargetBySpokenDateTimeBeforeNewSlot(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_manicure", Name: "Classic Manicure", DurationMinutes: 45},
+		{ID: "service_pedicure", Name: "Classic Pedicure", DurationMinutes: 45},
+	}
+	store.session.BookingAction = BookingActionReschedule
+	store.session.Intent = IntentBooking
+	store.session.CustomerPhone = "+13125550101"
+	candidates := []booking.AppointmentActionRef{
+		testRescheduleAppointmentAt("appointment_manicure", "service_manicure", "Classic Manicure", time.Date(2026, 7, 6, 18, 0, 0, 0, time.UTC)),
+		testRescheduleAppointmentAt("appointment_pedicure", "service_pedicure", "Classic Pedicure", time.Date(2026, 7, 6, 18, 30, 0, 0, time.UTC)),
+	}
+	store.session.RescheduleCandidates = rescheduleCandidatesFromAppointments(candidates)
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "July 6, 1:30 PM.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.TargetAppointmentID != "appointment_pedicure" {
+		t.Fatalf("target appointment = %s, want appointment_pedicure", session.TargetAppointmentID)
+	}
+	if session.ServiceID != "service_pedicure" || session.ServiceName != "Classic Pedicure" {
+		t.Fatalf("selected service = %s/%s, want pedicure", session.ServiceID, session.ServiceName)
+	}
+	if session.RequestedStartTime != nil || session.RequestedDate != "" {
+		t.Fatalf("old appointment time should not be stored as new slot: date=%s start=%v", session.RequestedDate, session.RequestedStartTime)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.rescheduleCalls != 0 {
+		t.Fatalf("calls = availability %d reschedule %d, want none before new time", bookingTool.availabilityCalls, bookingTool.rescheduleCalls)
+	}
+	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "new day and time") {
+		t.Fatalf("AI message = %q, want new time prompt", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageRescheduleSelectsTargetByServiceFamily(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_manicure", Name: "Classic Manicure", DurationMinutes: 45},
+		{ID: "service_pedicure", Name: "Classic Pedicure", DurationMinutes: 45},
+	}
+	store.session.BookingAction = BookingActionReschedule
+	store.session.Intent = IntentBooking
+	store.session.CustomerPhone = "+13125550101"
+	candidates := []booking.AppointmentActionRef{
+		testRescheduleAppointmentAt("appointment_manicure", "service_manicure", "Classic Manicure", time.Date(2026, 7, 6, 18, 0, 0, 0, time.UTC)),
+		testRescheduleAppointmentAt("appointment_pedicure", "service_pedicure", "Classic Pedicure", time.Date(2026, 7, 6, 18, 30, 0, 0, time.UTC)),
+	}
+	store.session.RescheduleCandidates = rescheduleCandidatesFromAppointments(candidates)
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "regular pedi",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.TargetAppointmentID != "appointment_pedicure" {
+		t.Fatalf("target appointment = %s, want appointment_pedicure", session.TargetAppointmentID)
+	}
+	if session.ServiceID != "service_pedicure" {
+		t.Fatalf("service = %s, want service_pedicure", session.ServiceID)
+	}
+	if session.RequestedStartTime != nil {
+		t.Fatalf("service target selection should not set a new time: %v", session.RequestedStartTime)
+	}
+}
+
+func TestMessageAutoReschedulesAfterNaturalMonthDateTime(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{{ID: "service_pedicure", Name: "Classic Pedicure", DurationMinutes: 45}}
+	store.session.BookingAction = BookingActionReschedule
+	store.session.Intent = IntentBooking
+	store.session.CustomerPhone = "+13125550101"
+	candidates := rescheduleCandidatesFromAppointments([]booking.AppointmentActionRef{
+		testRescheduleAppointmentAt("appointment_pedicure", "service_pedicure", "Classic Pedicure", time.Date(2026, 7, 6, 18, 30, 0, 0, time.UTC)),
+	})
+	store.session.RescheduleCandidates = candidates
+	applyRescheduleCandidate(&store.session, candidates[0])
+	newStart := time.Date(2026, 7, 7, 18, 30, 0, 0, time.UTC)
+	bookingTool := &fakeBookingTool{
+		availabilityResult: availabilityResultForStart("service_pedicure", "Classic Pedicure", newStart),
+		rescheduledAppointment: &booking.Appointment{
+			ID:               "appointment_pedicure",
+			Status:           booking.StatusRescheduled,
+			POSAppointmentID: "booking_pedicure",
+			StartTime:        newStart,
+			EndTime:          newStart.Add(45 * time.Minute),
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "1:30 PM on July 7.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.rescheduleCalls != 1 {
+		t.Fatalf("reschedule calls = %d, want 1", bookingTool.rescheduleCalls)
+	}
+	if !bookingTool.rescheduleRequest.StartTime.Equal(newStart) {
+		t.Fatalf("reschedule start = %s, want %s", bookingTool.rescheduleRequest.StartTime, newStart)
+	}
+	if session.Outcome != OutcomeBookingRescheduled {
+		t.Fatalf("outcome = %s, want booking_rescheduled", session.Outcome)
+	}
+}
+
+func TestMessageRescheduleCombinesMonthDateThenTime(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{{ID: "service_pedicure", Name: "Classic Pedicure", DurationMinutes: 45}}
+	store.session.BookingAction = BookingActionReschedule
+	store.session.Intent = IntentBooking
+	store.session.CustomerPhone = "+13125550101"
+	candidates := rescheduleCandidatesFromAppointments([]booking.AppointmentActionRef{
+		testRescheduleAppointmentAt("appointment_pedicure", "service_pedicure", "Classic Pedicure", time.Date(2026, 7, 6, 18, 30, 0, 0, time.UTC)),
+	})
+	store.session.RescheduleCandidates = candidates
+	applyRescheduleCandidate(&store.session, candidates[0])
+	newStart := time.Date(2026, 7, 7, 18, 30, 0, 0, time.UTC)
+	bookingTool := &fakeBookingTool{
+		availabilityResult: availabilityResultForStart("service_pedicure", "Classic Pedicure", newStart),
+		rescheduledAppointment: &booking.Appointment{
+			ID:               "appointment_pedicure",
+			Status:           booking.StatusRescheduled,
+			POSAppointmentID: "booking_pedicure",
+			StartTime:        newStart,
+			EndTime:          newStart.Add(45 * time.Minute),
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "July 7.",
+	})
+	if err != nil {
+		t.Fatalf("date Message returned error: %v", err)
+	}
+	if session.RequestedDate != "2026-07-07" || session.RequestedStartTime != nil {
+		t.Fatalf("date turn state = %s/%v, want date only", session.RequestedDate, session.RequestedStartTime)
+	}
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "1:30 PM.",
+	})
+	if err != nil {
+		t.Fatalf("time Message returned error: %v", err)
+	}
+	if bookingTool.rescheduleCalls != 1 {
+		t.Fatalf("reschedule calls = %d, want 1", bookingTool.rescheduleCalls)
+	}
+	if session.Outcome != OutcomeBookingRescheduled {
+		t.Fatalf("outcome = %s, want booking_rescheduled", session.Outcome)
+	}
+}
+
+func TestMessageRescheduleHandoffAfterRepeatedUnparsedNewTime(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{{ID: "service_pedicure", Name: "Classic Pedicure", DurationMinutes: 45}}
+	store.session.BookingAction = BookingActionReschedule
+	store.session.Intent = IntentBooking
+	store.session.CustomerPhone = "+13125550101"
+	candidates := rescheduleCandidatesFromAppointments([]booking.AppointmentActionRef{
+		testRescheduleAppointmentAt("appointment_pedicure", "service_pedicure", "Classic Pedicure", time.Date(2026, 7, 6, 18, 30, 0, 0, time.UTC)),
+	})
+	store.session.RescheduleCandidates = candidates
+	applyRescheduleCandidate(&store.session, candidates[0])
+	store.session.Transcript = []TranscriptMessage{
+		{Speaker: SpeakerAI, Body: "What new day and time would you like?", Metadata: map[string]any{"next_required_field": "requested_start_time"}},
+		{Speaker: SpeakerCustomer, Body: "one thirty two line seven"},
+		{Speaker: SpeakerAI, Body: "What new day and time would you like?", Metadata: map[string]any{"next_required_field": "requested_start_time"}},
+	}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "one thirty two line seven",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.Status != StatusHandoff || session.Outcome != OutcomeHandoffRequested {
+		t.Fatalf("session = %s/%s, want handoff", session.Status, session.Outcome)
+	}
+	if bookingTool.rescheduleCalls != 0 {
+		t.Fatalf("reschedule calls = %d, want 0", bookingTool.rescheduleCalls)
+	}
+	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "not rescheduled yet") {
+		t.Fatalf("AI message = %q, want not rescheduled yet", store.lastTurn.AIMessage)
+	}
+}
+
 func TestMessageAutoReschedulesAfterTargetAndAvailableNewTime(t *testing.T) {
 	store := newFakeConversationStore()
 	store.session.BookingAction = BookingActionReschedule
@@ -1183,6 +1386,40 @@ func TestApplyReplyGeneratorIncludesAITone(t *testing.T) {
 	}
 	if turn.AIMessage != "What time works best?" {
 		t.Fatalf("AI message = %q", turn.AIMessage)
+	}
+}
+
+func TestApplyReplyGeneratorRejectsRescheduleTargetStageFlip(t *testing.T) {
+	store := newFakeConversationStore()
+	service := NewService(store, &fakeBookingTool{})
+	replyGenerator := &fakeReplyGenerator{message: "You mentioned July 6 at 1:30 PM. Is that the new time you'd like for your Classic Manicure appointment?"}
+	service.SetReplyGenerator(replyGenerator)
+	session := store.session
+	session.BookingAction = BookingActionReschedule
+	turn := TurnRecord{
+		SalonID:         "salon_1",
+		OwnerUserID:     "owner_1",
+		Session:         session,
+		CustomerMessage: "July 6, 1:30 PM.",
+		AIMessage:       "I found more than one upcoming appointment. Which one should I reschedule? First for Classic Manicure on Monday, July 6 at 1:00 PM. Second for Classic Pedicure on Monday, July 6 at 1:30 PM.",
+		Update: SessionUpdate{
+			Status:        StatusActive,
+			Intent:        IntentBooking,
+			Outcome:       OutcomeCollecting,
+			BookingAction: BookingActionReschedule,
+		},
+	}
+
+	service.applyReplyGenerator(context.Background(), &turn, session, store.services, &store.cfg, "target_appointment", "target_appointment", nil)
+
+	if replyGenerator.calls != 1 {
+		t.Fatalf("reply generator calls = %d, want 1", replyGenerator.calls)
+	}
+	if strings.Contains(strings.ToLower(turn.AIMessage), "new time") {
+		t.Fatalf("AI message accepted unsafe target-stage rewrite: %q", turn.AIMessage)
+	}
+	if turn.AIMetadata["llm_guardrail"] != "rejected_reschedule_stage_flip" {
+		t.Fatalf("AI metadata = %#v, want rejected guardrail", turn.AIMetadata)
 	}
 }
 
@@ -3522,9 +3759,13 @@ func testStartTime() time.Time {
 
 func testRescheduleAppointment() booking.AppointmentActionRef {
 	start := time.Date(2026, 6, 10, 20, 0, 0, 0, time.UTC)
+	return testRescheduleAppointmentAt("appointment_1", "service_1", "Classic Manicure", start)
+}
+
+func testRescheduleAppointmentAt(id string, serviceID string, serviceName string, start time.Time) booking.AppointmentActionRef {
 	service := booking.ServiceRef{
-		ID:              "service_1",
-		Name:            "Classic Manicure",
+		ID:              serviceID,
+		Name:            serviceName,
 		DurationMinutes: 45,
 	}
 	staff := booking.StaffRef{
@@ -3532,7 +3773,7 @@ func testRescheduleAppointment() booking.AppointmentActionRef {
 		Name: "Mai Nguyen",
 	}
 	return booking.AppointmentActionRef{
-		ID:                 "appointment_1",
+		ID:                 id,
 		Status:             booking.StatusConfirmed,
 		CustomerName:       "Linh Tran",
 		CustomerPhone:      "+13125550101",
