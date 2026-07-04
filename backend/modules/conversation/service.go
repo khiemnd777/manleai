@@ -279,6 +279,14 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	loc := timezoneLocation(cfg.Timezone)
 	pendingNameCandidate := voiceCustomerNamePendingConfirmationCandidate(message, *session)
 	serviceUnderstanding := interpretServiceForSession(message, *session, services, serviceAliases)
+	if isServiceInquiry(message, serviceUnderstanding) {
+		turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
+		applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
+		applyServiceInquiryMetadata(&turn, serviceUnderstanding)
+		turn.AIMessage = serviceInquiryReply(*session, serviceUnderstanding, services)
+		finalizeTurnMetadata(&turn, *session, *session, "", "", "service_inquiry")
+		return s.store.SaveTurn(ctx, turn)
+	}
 	applyExtraction(&next, message, services, serviceAliases, staff, loc, s.now)
 	serviceEdit := serviceEditDecisionForMessage(*session, message, serviceUnderstanding, services)
 	serviceChanged := applyServiceEditDecision(&next, serviceEdit)
@@ -377,6 +385,9 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 			if preferredDate != "" && next.ServiceID != "" {
 				if err := s.offerAvailableSlots(ctx, ownerUserID, &turn, &next, services, staff, preferredDate, false, cfg); err != nil {
 					return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check appointment availability, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
+				}
+				if prefix := serviceSwitchAcknowledgement(*session, next, serviceEdit, serviceChanged, services); prefix != "" {
+					turn.AIMessage = prefix + " " + turn.AIMessage
 				}
 				s.applyReplyGenerator(ctx, &turn, next, services, cfg, missing, missing, knowledge)
 				finalizeTurnMetadata(&turn, *session, next, missing, missing, "availability_offer")
@@ -1901,6 +1912,36 @@ func applyServiceEditMetadata(turn *TurnRecord, decision serviceEditDecision) {
 	}
 }
 
+func applyServiceInquiryMetadata(turn *TurnRecord, result serviceUnderstandingResult) {
+	if turn == nil {
+		return
+	}
+	turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, map[string]any{
+		"service_inquiry":        true,
+		"service_inquiry_status": string(result.Status),
+	})
+}
+
+func serviceSwitchAcknowledgement(previous Session, current Session, decision serviceEditDecision, serviceChanged bool, services []ServiceOption) string {
+	if !serviceChanged || decision.Action != serviceEditReplace {
+		return ""
+	}
+	if strings.TrimSpace(previous.ServiceID) == "" || strings.TrimSpace(current.ServiceID) == "" {
+		return ""
+	}
+	if strings.TrimSpace(previous.ServiceID) == strings.TrimSpace(current.ServiceID) {
+		return ""
+	}
+	if len(previous.OfferedSlots) == 0 && strings.TrimSpace(previous.RequestedDate) == "" && previous.RequestedStartTime == nil {
+		return ""
+	}
+	service := strings.TrimSpace(serviceSummary(current, services))
+	if service == "" {
+		return "Switching services."
+	}
+	return "Switching to " + service + "."
+}
+
 func shouldApplyBareServiceSwitch(session Session, message string, result serviceUnderstandingResult) bool {
 	if strings.TrimSpace(session.ServiceID) == "" || !hasBookingProgress(session) {
 		return false
@@ -2344,12 +2385,12 @@ func promptForMissingFieldWithServiceContext(field string, session Session, serv
 	}
 	switch field {
 	case "requested_date":
-		return "I have " + service + ". What day would you like? I will check available times."
+		return "Got it, " + service + ". What day would you like? I will check available times."
 	case "requested_time", "requested_start_time":
 		if date := strings.TrimSpace(session.RequestedDate); date != "" {
 			return "I have " + service + " on " + requestedDateLabel(date, timezoneLocation(timezoneFromConfig(cfg))) + ". What time works?"
 		}
-		return "I have " + service + ". What day and time would you like?"
+		return "Got it, " + service + ". What day and time would you like?"
 	default:
 		return ""
 	}
@@ -2389,6 +2430,99 @@ func serviceMenuReply(services []ServiceOption) string {
 		prefix = "Popular services include "
 	}
 	return prefix + joinHumanList(names) + ". Which one would you like to book?"
+}
+
+func isServiceInquiry(message string, result serviceUnderstandingResult) bool {
+	normalized := normalizeLooseText(message)
+	if normalized == "" {
+		return false
+	}
+	if hasExplicitBookingRequestSignal(normalized) ||
+		hasServiceAddSignal(message) ||
+		hasServiceCorrectionSignal(message) ||
+		hasExplicitServiceReplacementPhrase(message) ||
+		looksLikeDateOrTimeInsteadOfName(message) ||
+		hasSchedulingAvailabilitySignal(normalized) {
+		return false
+	}
+	if strings.HasPrefix(normalized, "do you have ") ||
+		strings.HasPrefix(normalized, "do you guys have ") ||
+		strings.HasPrefix(normalized, "do yall have ") ||
+		strings.HasPrefix(normalized, "you have ") ||
+		strings.HasPrefix(normalized, "do you offer ") ||
+		strings.HasPrefix(normalized, "do you do ") ||
+		strings.HasPrefix(normalized, "do you provide ") ||
+		strings.HasPrefix(normalized, "is there ") {
+		return true
+	}
+	return result.Status != serviceUnderstandingStatusUnknown &&
+		strings.HasPrefix(normalized, "is ") &&
+		strings.HasSuffix(normalized, " available")
+}
+
+func hasExplicitBookingRequestSignal(normalized string) bool {
+	signals := []string{
+		"book",
+		"booking",
+		"appointment",
+		"schedule",
+		"reschedule",
+		"cancel",
+	}
+	for _, signal := range signals {
+		if containsLoosePhrase(normalized, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSchedulingAvailabilitySignal(normalized string) bool {
+	signals := []string{
+		"availability",
+		"available time",
+		"available times",
+		"open time",
+		"open times",
+		"opening",
+		"openings",
+		"slot",
+		"slots",
+		"spot",
+		"spots",
+		"time",
+		"times",
+	}
+	for _, signal := range signals {
+		if containsLoosePhrase(normalized, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func serviceInquiryReply(session Session, result serviceUnderstandingResult, services []ServiceOption) string {
+	switch result.Status {
+	case serviceUnderstandingStatusSelected:
+		names := serviceCandidateNames(result.Candidates, 3)
+		if len(names) == 0 {
+			break
+		}
+		service := joinHumanList(names)
+		if current := strings.TrimSpace(serviceSummary(session, services)); current != "" {
+			return "Yes, we offer " + service + ". I still have " + current + " noted. Which service would you like to book?"
+		}
+		return "Yes, we offer " + service + ". Which service would you like to book?"
+	case serviceUnderstandingStatusAmbiguous:
+		names := serviceCandidateNames(result.Candidates, 5)
+		if len(names) > 0 {
+			return "We offer " + joinHumanList(names) + ". Which one would you like to book?"
+		}
+	}
+	if names := serviceCandidateNames(services, 8); len(names) > 0 {
+		return "I do not see that in the bookable service list. Services include " + joinHumanList(names) + ". Which service would you like to book?"
+	}
+	return "I do not see that in the bookable service list. Which service would you like?"
 }
 
 func serviceClarificationPrompt(session Session, result serviceUnderstandingResult, cfg *RuntimeConfig) string {
@@ -3035,6 +3169,12 @@ func customerNameSlotRepairReply(message string, session Session, services []Ser
 		}
 		return "I may have heard that wrong. Please spell the name for the appointment.", false
 	}
+	if service := repeatedSelectedServiceInsteadOfName(message, session, services, aliases); service != "" {
+		if customerNamePromptCount(session) >= maxCustomerNamePrompts {
+			return "I'm having trouble catching the name. I'll send this request to the owner to review. This is not a confirmed appointment.", true
+		}
+		return "I have " + service + " already. What name should I put on the appointment?", false
+	}
 	if looksLikeServiceInsteadOfName(message, services, aliases) {
 		return "", false
 	}
@@ -3060,6 +3200,17 @@ func customerNameSlotRepairReply(message string, session Session, services []Ser
 		return "I'm asking for the customer name. What name should I put on the appointment?", false
 	}
 	return "Please say the customer name for the appointment, for example: \"My name is Linh.\"", false
+}
+
+func repeatedSelectedServiceInsteadOfName(message string, session Session, services []ServiceOption, aliases []ServiceAlias) string {
+	result := interpretService(message, services, aliases)
+	if result.Status != serviceUnderstandingStatusSelected || len(result.Candidates) == 0 {
+		return ""
+	}
+	if !sameServiceSelection(session, result.Candidates) {
+		return ""
+	}
+	return strings.TrimSpace(serviceSummary(session, services))
 }
 
 func timeInsteadOfNameReply(message string, session Session, cfg *RuntimeConfig) string {
