@@ -80,6 +80,7 @@ type Store interface {
 	ListActiveServiceAliases(ctx context.Context, salonID string) ([]ServiceAlias, error)
 	ListActiveServiceCategoryAliases(ctx context.Context, salonID string) ([]ServiceCategoryAlias, error)
 	ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error)
+	ListBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error)
 	ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int) ([]PartyBookingRequest, error)
 	UpdatePartyBookingRequestStatus(ctx context.Context, salonID string, ownerUserID string, requestID string, status string) (*PartyBookingRequest, error)
 	SaveTurn(ctx context.Context, record TurnRecord) (*Session, error)
@@ -196,9 +197,19 @@ type StaffAssignmentStat struct {
 }
 
 type KnowledgeSnippet struct {
+	ID       string
 	Title    string
 	Category string
 	Body     string
+}
+
+type BusinessHourPeriod struct {
+	ID             string
+	DayOfWeek      int
+	StartLocalTime string
+	EndLocalTime   string
+	Source         string
+	Provider       string
 }
 
 type Session struct {

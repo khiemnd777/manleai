@@ -24,6 +24,13 @@ type serviceCategorySuggestionRule struct {
 	Confidence   float64
 }
 
+type serviceCategorySuggestionCandidate struct {
+	ServiceID         string
+	ServiceName       string
+	CurrentCategoryID string
+	Source            string
+}
+
 func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
 }
@@ -1070,16 +1077,29 @@ func (r *Repository) RefreshServiceCategorySuggestions(ctx context.Context, salo
 		return nil, err
 	}
 
+	candidates := make([]serviceCategorySuggestionCandidate, 0)
 	for rows.Next() {
-		var serviceID, serviceName, currentCategoryID, source string
-		if err := rows.Scan(&serviceID, &serviceName, &currentCategoryID, &source); err != nil {
+		var candidate serviceCategorySuggestionCandidate
+		if err := rows.Scan(&candidate.ServiceID, &candidate.ServiceName, &candidate.CurrentCategoryID, &candidate.Source); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		if source != ServiceCategoryAssignmentUnassigned && source != ServiceCategoryAssignmentSuggested {
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	for _, candidate := range candidates {
+		if candidate.Source != ServiceCategoryAssignmentUnassigned && candidate.Source != ServiceCategoryAssignmentSuggested {
 			result.SkippedReviewedServices++
 			continue
 		}
-		rule, matched, ambiguous := bestServiceCategorySuggestion(serviceName, rules)
+		rule, matched, ambiguous := bestServiceCategorySuggestion(candidate.ServiceName, rules)
 		if ambiguous {
 			result.SkippedAmbiguousServices++
 			continue
@@ -1088,7 +1108,7 @@ func (r *Repository) RefreshServiceCategorySuggestions(ctx context.Context, salo
 			result.UnmatchedUnreviewedServices++
 			continue
 		}
-		if currentCategoryID == rule.CategoryID && source == ServiceCategoryAssignmentSuggested {
+		if candidate.CurrentCategoryID == rule.CategoryID && candidate.Source == ServiceCategoryAssignmentSuggested {
 			continue
 		}
 		execResult, err := tx.ExecContext(ctx, `
@@ -1102,19 +1122,13 @@ func (r *Repository) RefreshServiceCategorySuggestions(ctx context.Context, salo
 			WHERE id = $3
 			  AND salon_id = $4
 			  AND (service_category_source IN ('unassigned', 'suggested') OR service_category_id IS NULL)
-		`, rule.CategoryID, rule.Confidence, serviceID, salonID)
+		`, rule.CategoryID, rule.Confidence, candidate.ServiceID, salonID)
 		if err != nil {
 			return nil, err
 		}
 		if affected, err := execResult.RowsAffected(); err == nil && affected > 0 {
 			result.SuggestedServices++
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err

@@ -108,6 +108,16 @@
 - [x] Re-check availability when a caller corrects the service after a time or slot was already collected.
 - [x] Record service-understanding status, reason, confidence, candidates, selected service, alias source, alias ID, category ID, and category name in transcript metadata.
 
+## Production Answer Routing
+
+- [x] Load service, alias, category, staff, knowledge, and business-hour answer context once per salon turn window instead of scattering source reads.
+- [x] Answer service/menu questions from active-provider, POS-linked, synced, AI-bookable services only.
+- [x] Answer open/close questions from imported business hour periods before owner-authored knowledge.
+- [x] Answer staff questions from active-provider staff records without exposing inactive or non-bookable staff as confirmed booking options.
+- [x] Route incomplete availability questions into booking-detail prompts instead of guessing availability or creating bookings.
+- [x] Use owner-authored knowledge only after structured service, hours, staff, and availability sources do not answer the request.
+- [x] Record answer source, reason, confidence, source record IDs, router intent, and answer-context cache state in transcript metadata.
+
 ## Party Booking Owner Review
 
 - [x] Detect group and party booking requests as owner handoffs, not confirmed bookings.

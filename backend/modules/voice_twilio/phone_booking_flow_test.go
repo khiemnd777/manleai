@@ -274,6 +274,10 @@ func (f *phoneFlowConversationStore) ListActiveKnowledge(ctx context.Context, sa
 	return f.knowledge, nil
 }
 
+func (f *phoneFlowConversationStore) ListBusinessHourPeriods(ctx context.Context, salonID string) ([]conversation.BusinessHourPeriod, error) {
+	return []conversation.BusinessHourPeriod{}, nil
+}
+
 func (f *phoneFlowConversationStore) ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int) ([]conversation.PartyBookingRequest, error) {
 	return []conversation.PartyBookingRequest{}, nil
 }

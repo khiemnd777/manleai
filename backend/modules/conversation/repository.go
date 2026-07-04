@@ -329,12 +329,26 @@ func (r *Repository) ListBookableServices(ctx context.Context, salonID string) (
 		SELECT svc.id::text, svc.name, svc.duration_minutes, COALESCE(svc.price_from, 0), COALESCE(svc.price_display, ''),
 		       COALESCE(cat.id::text, ''), COALESCE(cat.name, ''), COALESCE(cat.slug, '')
 		FROM services svc
+		JOIN salons salon ON salon.id = svc.salon_id
+		JOIN pos_entity_links link
+		  ON link.salon_id = svc.salon_id
+		 AND link.entity_type = 'service'
+		 AND link.entity_id = svc.id
+		 AND link.provider = salon.active_pos_provider
+		 AND link.sync_status = 'synced'
+		 AND link.provider_entity_id IS NOT NULL
+		 AND link.provider_entity_id <> ''
 		LEFT JOIN service_categories cat ON cat.id = svc.service_category_id
 		                                AND cat.salon_id = svc.salon_id
 		                                AND cat.status = 'active'
 		WHERE svc.salon_id = $1
+		  AND svc.pos_provider = salon.active_pos_provider
 		  AND svc.active = true
 		  AND svc.ai_bookable = true
+		  AND svc.archived_at IS NULL
+		  AND svc.sync_status = 'synced'
+		  AND svc.duration_minutes > 0
+		  AND COALESCE(link.provider_version, svc.pos_service_version, 0) > 0
 		ORDER BY COALESCE(cat.sort_order, 9999), COALESCE(cat.name, ''), svc.name ASC
 	`, salonID)
 	if err != nil {
@@ -355,12 +369,24 @@ func (r *Repository) ListBookableServices(ctx context.Context, salonID string) (
 
 func (r *Repository) ListBookableStaff(ctx context.Context, salonID string) ([]StaffOption, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id::text, name, ai_bookable
-		FROM staff
-		WHERE salon_id = $1
-		  AND active = true
-		  AND ai_bookable = true
-		ORDER BY name ASC
+		SELECT st.id::text, st.name, st.ai_bookable
+		FROM staff st
+		JOIN salons salon ON salon.id = st.salon_id
+		JOIN pos_entity_links link
+		  ON link.salon_id = st.salon_id
+		 AND link.entity_type = 'staff'
+		 AND link.entity_id = st.id
+		 AND link.provider = salon.active_pos_provider
+		 AND link.sync_status = 'synced'
+		 AND link.provider_entity_id IS NOT NULL
+		 AND link.provider_entity_id <> ''
+		WHERE st.salon_id = $1
+		  AND st.pos_provider = salon.active_pos_provider
+		  AND st.active = true
+		  AND st.ai_bookable = true
+		  AND st.archived_at IS NULL
+		  AND st.sync_status = 'synced'
+		ORDER BY st.name ASC
 	`, salonID)
 	if err != nil {
 		return nil, err
@@ -380,11 +406,23 @@ func (r *Repository) ListBookableStaff(ctx context.Context, salonID string) ([]S
 
 func (r *Repository) ListActiveStaff(ctx context.Context, salonID string) ([]StaffOption, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id::text, name, ai_bookable
-		FROM staff
-		WHERE salon_id = $1
-		  AND active = true
-		ORDER BY ai_bookable DESC, name ASC
+		SELECT st.id::text, st.name, st.ai_bookable
+		FROM staff st
+		JOIN salons salon ON salon.id = st.salon_id
+		JOIN pos_entity_links link
+		  ON link.salon_id = st.salon_id
+		 AND link.entity_type = 'staff'
+		 AND link.entity_id = st.id
+		 AND link.provider = salon.active_pos_provider
+		 AND link.sync_status = 'synced'
+		 AND link.provider_entity_id IS NOT NULL
+		 AND link.provider_entity_id <> ''
+		WHERE st.salon_id = $1
+		  AND st.pos_provider = salon.active_pos_provider
+		  AND st.active = true
+		  AND st.archived_at IS NULL
+		  AND st.sync_status = 'synced'
+		ORDER BY st.ai_bookable DESC, st.name ASC
 	`, salonID)
 	if err != nil {
 		return nil, err
@@ -473,11 +511,25 @@ func (r *Repository) ListActiveServiceAliases(ctx context.Context, salonID strin
 		       sa.source, sa.confidence
 		FROM service_aliases sa
 		JOIN services svc ON svc.id = sa.service_id
+		JOIN salons salon ON salon.id = svc.salon_id
+		JOIN pos_entity_links link
+		  ON link.salon_id = svc.salon_id
+		 AND link.entity_type = 'service'
+		 AND link.entity_id = svc.id
+		 AND link.provider = salon.active_pos_provider
+		 AND link.sync_status = 'synced'
+		 AND link.provider_entity_id IS NOT NULL
+		 AND link.provider_entity_id <> ''
 		WHERE sa.salon_id = $1
 		  AND sa.status = 'active'
 		  AND svc.salon_id = sa.salon_id
+		  AND svc.pos_provider = salon.active_pos_provider
 		  AND svc.active = true
 		  AND svc.ai_bookable = true
+		  AND svc.archived_at IS NULL
+		  AND svc.sync_status = 'synced'
+		  AND svc.duration_minutes > 0
+		  AND COALESCE(link.provider_version, svc.pos_service_version, 0) > 0
 		ORDER BY sa.updated_at DESC
 		LIMIT 200
 	`, salonID)
@@ -528,7 +580,7 @@ func (r *Repository) ListActiveServiceCategoryAliases(ctx context.Context, salon
 
 func (r *Repository) ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT title, category, body
+		SELECT id::text, title, category, body
 		FROM knowledge_items
 		WHERE salon_id = $1
 		  AND status = 'active'
@@ -543,7 +595,34 @@ func (r *Repository) ListActiveKnowledge(ctx context.Context, salonID string) ([
 	items := make([]KnowledgeSnippet, 0)
 	for rows.Next() {
 		var item KnowledgeSnippet
-		if err := rows.Scan(&item.Title, &item.Category, &item.Body); err != nil {
+		if err := rows.Scan(&item.ID, &item.Title, &item.Category, &item.Body); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *Repository) ListBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT bhp.id::text, bhp.day_of_week, bhp.start_local_time::text,
+		       bhp.end_local_time::text, bhp.source, bhp.provider
+		FROM salon_business_hour_periods bhp
+		JOIN salons salon ON salon.id = bhp.salon_id
+		WHERE bhp.salon_id = $1
+		  AND bhp.source = 'imported'
+		  AND bhp.provider = salon.active_pos_provider
+		ORDER BY bhp.day_of_week ASC, bhp.start_local_time ASC, bhp.provider_period_index ASC
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]BusinessHourPeriod, 0)
+	for rows.Next() {
+		var item BusinessHourPeriod
+		if err := rows.Scan(&item.ID, &item.DayOfWeek, &item.StartLocalTime, &item.EndLocalTime, &item.Source, &item.Provider); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

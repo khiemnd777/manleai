@@ -340,6 +340,9 @@ func TestMessageAnswersServiceMenuWithBookableServices(t *testing.T) {
 			t.Fatalf("service menu reply missing %q: %s", want, store.lastTurn.AIMessage)
 		}
 	}
+	if store.lastTurn.AIMetadata["answer_source"] != answerSourceServiceCatalog {
+		t.Fatalf("answer source = %#v, want service catalog", store.lastTurn.AIMetadata["answer_source"])
+	}
 }
 
 func TestMessageAnswersExactServiceInquiryWithoutSelectingBookingService(t *testing.T) {
@@ -3196,6 +3199,7 @@ func TestMessageCreatesHandoffForKnownNonBookableStaff(t *testing.T) {
 func TestMessageAnswersKnowledgeQuestionWithoutBooking(t *testing.T) {
 	store := newFakeConversationStore()
 	store.knowledge = []KnowledgeSnippet{{
+		ID:       "knowledge_late",
 		Title:    "Late arrival policy",
 		Category: "policy",
 		Body:     "Customers can arrive up to 10 minutes late before the owner needs to review the appointment.",
@@ -3221,6 +3225,153 @@ func TestMessageAnswersKnowledgeQuestionWithoutBooking(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "confirmed") {
 		t.Fatalf("knowledge answer should not confirm appointments: %s", store.lastTurn.AIMessage)
+	}
+	if store.lastTurn.AIMetadata["answer_source"] != answerSourceKnowledge {
+		t.Fatalf("answer source = %#v, want knowledge", store.lastTurn.AIMetadata["answer_source"])
+	}
+	if got := metadataStringSlice(store.lastTurn.AIMetadata, "source_record_ids"); !sameStrings(got, []string{"knowledge_late"}) {
+		t.Fatalf("source ids = %#v, want knowledge_late", got)
+	}
+}
+
+func TestMessageAnswersBusinessHoursFromStructuredPeriodsBeforeKnowledge(t *testing.T) {
+	store := newFakeConversationStore()
+	store.businessHours = []BusinessHourPeriod{
+		{ID: "hours_mon_am", DayOfWeek: 1, StartLocalTime: "09:30:00", EndLocalTime: "12:00:00", Source: "imported", Provider: "square"},
+		{ID: "hours_mon_pm", DayOfWeek: 1, StartLocalTime: "13:00:00", EndLocalTime: "19:00:00", Source: "imported", Provider: "square"},
+	}
+	store.knowledge = []KnowledgeSnippet{{
+		ID:       "knowledge_hours",
+		Title:    "Hours",
+		Category: "hours",
+		Body:     "The salon is open 24/7.",
+	}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	_, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "What time do you close on Monday?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("business hours should not call booking tools, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Hours for Monday") || !strings.Contains(store.lastTurn.AIMessage, "7:00 PM") {
+		t.Fatalf("AI reply should use structured hours: %s", store.lastTurn.AIMessage)
+	}
+	if strings.Contains(store.lastTurn.AIMessage, "24/7") {
+		t.Fatalf("structured hours should override knowledge conflict: %s", store.lastTurn.AIMessage)
+	}
+	if store.lastTurn.AIMetadata["answer_source"] != answerSourceBusinessHours {
+		t.Fatalf("answer source = %#v, want structured business hours", store.lastTurn.AIMetadata["answer_source"])
+	}
+	if got := metadataStringSlice(store.lastTurn.AIMetadata, "source_record_ids"); !sameStrings(got, []string{"hours_mon_am", "hours_mon_pm"}) {
+		t.Fatalf("source ids = %#v, want Monday hour period ids", got)
+	}
+}
+
+func TestMessageAnswersStaffQuestionFromStructuredStaff(t *testing.T) {
+	store := newFakeConversationStore()
+	store.staff = []StaffOption{
+		{ID: "staff_mai", Name: "Mai Nguyen", AIBookable: true},
+		{ID: "staff_lena", Name: "Lena Pham", AIBookable: true},
+	}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	_, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Which technicians do you have?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("staff question should not call booking tools, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Mai Nguyen") || !strings.Contains(store.lastTurn.AIMessage, "Lena Pham") {
+		t.Fatalf("AI reply should list structured staff: %s", store.lastTurn.AIMessage)
+	}
+	if store.lastTurn.AIMetadata["answer_source"] != answerSourceStaff {
+		t.Fatalf("answer source = %#v, want structured staff", store.lastTurn.AIMetadata["answer_source"])
+	}
+	if got := metadataStringSlice(store.lastTurn.AIMetadata, "source_record_ids"); !sameStrings(got, []string{"staff_mai", "staff_lena"}) {
+		t.Fatalf("source ids = %#v, want staff ids", got)
+	}
+}
+
+func TestMessageAnswersKnownNonBookableStaffQuestionWithoutBooking(t *testing.T) {
+	store := newFakeConversationStore()
+	store.staff = []StaffOption{{ID: "staff_mai", Name: "Mai Nguyen", AIBookable: true}}
+	store.activeStaff = []StaffOption{
+		{ID: "staff_mai", Name: "Mai Nguyen", AIBookable: true},
+		{ID: "staff_jenny", Name: "Jenny Le", AIBookable: false},
+	}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	_, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Do you have Jenny?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("non-bookable staff question should not call booking tools, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Jenny Le") || !strings.Contains(store.lastTurn.AIMessage, "not enabled for AI booking") {
+		t.Fatalf("AI reply should route non-bookable staff to owner review: %s", store.lastTurn.AIMessage)
+	}
+	if store.lastTurn.AIMetadata["answer_source"] != answerSourceStaff {
+		t.Fatalf("answer source = %#v, want structured staff", store.lastTurn.AIMetadata["answer_source"])
+	}
+}
+
+func TestMessageRoutesAvailabilityQuestionToBookingSourceWithoutGuessing(t *testing.T) {
+	store := newFakeConversationStore()
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	_, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "What times are available tomorrow?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("availability question without service should not call booking tools, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Which service should I check") {
+		t.Fatalf("AI reply should collect service before availability: %s", store.lastTurn.AIMessage)
+	}
+	if store.lastTurn.AIMetadata["answer_source"] != answerSourceAvailability {
+		t.Fatalf("answer source = %#v, want booking availability", store.lastTurn.AIMetadata["answer_source"])
+	}
+}
+
+func TestMessageReusesAnswerContextCacheAcrossTurns(t *testing.T) {
+	store := newFakeConversationStore()
+	store.businessHours = []BusinessHourPeriod{{ID: "hours_mon", DayOfWeek: 1, StartLocalTime: "09:00:00", EndLocalTime: "17:00:00", Source: "imported", Provider: "square"}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "What services do you have?"}); err != nil {
+		t.Fatalf("first Message returned error: %v", err)
+	}
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "What are your hours Monday?"}); err != nil {
+		t.Fatalf("second Message returned error: %v", err)
+	}
+	if store.serviceListCalls != 1 || store.knowledgeListCalls != 1 || store.hoursListCalls != 1 {
+		t.Fatalf("context load counts services/knowledge/hours = %d/%d/%d, want 1/1/1", store.serviceListCalls, store.knowledgeListCalls, store.hoursListCalls)
+	}
+	if store.lastTurn.AIMetadata["answer_context_cache_hit"] != true {
+		t.Fatalf("answer context cache hit metadata = %#v, want true", store.lastTurn.AIMetadata)
 	}
 }
 
@@ -3339,6 +3490,7 @@ type fakeConversationStore struct {
 	staff             []StaffOption
 	activeStaff       []StaffOption
 	knowledge         []KnowledgeSnippet
+	businessHours     []BusinessHourPeriod
 	partyRequests     []PartyBookingRequest
 	partyStatusUpdate struct {
 		requestID string
@@ -3348,6 +3500,9 @@ type fakeConversationStore struct {
 	assignmentFrom      time.Time
 	assignmentTo        time.Time
 	assignmentStaffIDs  []string
+	serviceListCalls    int
+	knowledgeListCalls  int
+	hoursListCalls      int
 	lastTurn            TurnRecord
 	processedEventKeys  map[string]bool
 	listLifecycleStatus string
@@ -3467,6 +3622,7 @@ func (f *fakeConversationStore) RedactSession(ctx context.Context, salonID strin
 }
 
 func (f *fakeConversationStore) ListBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error) {
+	f.serviceListCalls++
 	return f.services, nil
 }
 
@@ -3509,7 +3665,13 @@ func (f *fakeConversationStore) ListStaffAssignmentStats(ctx context.Context, sa
 }
 
 func (f *fakeConversationStore) ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error) {
+	f.knowledgeListCalls++
 	return f.knowledge, nil
+}
+
+func (f *fakeConversationStore) ListBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error) {
+	f.hoursListCalls++
+	return f.businessHours, nil
 }
 
 func (f *fakeConversationStore) ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int) ([]PartyBookingRequest, error) {

@@ -58,10 +58,11 @@ var (
 )
 
 type Service struct {
-	store          Store
-	bookingTool    BookingTool
-	replyGenerator ReplyGenerator
-	now            func() time.Time
+	store              Store
+	bookingTool        BookingTool
+	replyGenerator     ReplyGenerator
+	answerContextCache *answerContextCache
+	now                func() time.Time
 }
 
 type availabilitySelection struct {
@@ -115,9 +116,10 @@ type serviceEditDecision struct {
 
 func NewService(store Store, bookingTool BookingTool) *Service {
 	return &Service{
-		store:       store,
-		bookingTool: bookingTool,
-		now:         func() time.Time { return time.Now().UTC() },
+		store:              store,
+		bookingTool:        bookingTool,
+		answerContextCache: newAnswerContextCache(defaultAnswerContextTTL),
+		now:                func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -201,30 +203,16 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	if err != nil {
 		return nil, err
 	}
-	services, err := s.store.ListBookableServices(ctx, salonID)
+	answerCtx, err := s.loadAnswerContext(ctx, salonID)
 	if err != nil {
 		return nil, err
 	}
-	serviceAliases, err := s.store.ListActiveServiceAliases(ctx, salonID)
-	if err != nil {
-		return nil, err
-	}
-	categoryAliases, err := s.store.ListActiveServiceCategoryAliases(ctx, salonID)
-	if err != nil {
-		return nil, err
-	}
-	staff, err := s.store.ListBookableStaff(ctx, salonID)
-	if err != nil {
-		return nil, err
-	}
-	activeStaff, err := s.store.ListActiveStaff(ctx, salonID)
-	if err != nil {
-		return nil, err
-	}
-	knowledge, err := s.store.ListActiveKnowledge(ctx, salonID)
-	if err != nil {
-		return nil, err
-	}
+	services := answerCtx.Services
+	serviceAliases := answerCtx.ServiceAliases
+	categoryAliases := answerCtx.CategoryAliases
+	staff := answerCtx.Staff
+	activeStaff := answerCtx.ActiveStaff
+	knowledge := answerCtx.Knowledge
 
 	if handled, updated, err := s.handlePendingCustomerNameConfirmation(ctx, salonID, ownerUserID, *session, message, eventKey, services, staff, cfg, knowledge); handled {
 		return updated, err
@@ -283,13 +271,26 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	loc := timezoneLocation(cfg.Timezone)
 	pendingNameCandidate := voiceCustomerNamePendingConfirmationCandidate(message, *session)
 	serviceUnderstanding := interpretServiceForSession(message, *session, services, serviceAliases, categoryAliases)
-	if isServiceInquiry(message, serviceUnderstanding) {
+	if isServiceInquiry(message, serviceUnderstanding) && !asksStaffQuestion(message, staff, activeStaff) {
 		turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
 		applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
 		applyServiceInquiryMetadata(&turn, serviceUnderstanding)
-		turn.AIMessage = serviceInquiryReply(*session, serviceUnderstanding, services)
+		route := routeServiceInquiryAnswer(*session, serviceUnderstanding, answerCtx)
+		turn.AIMessage = route.Reply
+		applyAnswerRouteMetadata(&turn, route, answerCtx)
 		finalizeTurnMetadata(&turn, *session, *session, "", "", "service_inquiry")
 		return s.store.SaveTurn(ctx, turn)
+	}
+	if !hasBookingProgress(*session) && !hasBookingSignal(message) {
+		route := routeNonBookingAnswer(message, *session, answerCtx, cfg, s.now)
+		if route.Handled && route.Source != answerSourceBookingRedirect {
+			turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
+			turn.AIMessage = route.Reply
+			applyAnswerRouteMetadata(&turn, route, answerCtx)
+			s.applyReplyGenerator(ctx, &turn, *session, services, cfg, "", "", knowledge)
+			finalizeTurnMetadata(&turn, *session, *session, "", "", "answer_router")
+			return s.store.SaveTurn(ctx, turn)
+		}
 	}
 	applyExtraction(&next, message, services, serviceAliases, categoryAliases, staff, loc, s.now)
 	serviceEdit := serviceEditDecisionForMessage(*session, message, serviceUnderstanding, services)
@@ -334,13 +335,9 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	}
 
 	if intent != IntentBooking {
-		if asksServiceMenu(message) {
-			turn.AIMessage = serviceMenuReply(services)
-		} else if answer := knowledgeAnswer(message, knowledge); answer != "" {
-			turn.AIMessage = answer
-		} else {
-			turn.AIMessage = "I can help with appointments. What service would you like to book?"
-		}
+		route := routeNonBookingAnswer(message, next, answerCtx, cfg, s.now)
+		turn.AIMessage = route.Reply
+		applyAnswerRouteMetadata(&turn, route, answerCtx)
 		s.applyReplyGenerator(ctx, &turn, next, services, cfg, "", "", knowledge)
 		finalizeTurnMetadata(&turn, *session, next, "", "", "knowledge_or_booking_redirect")
 		return s.store.SaveTurn(ctx, turn)
@@ -464,16 +461,12 @@ func (s *Service) TranscriptionContext(ctx context.Context, salonID string, owne
 	if err != nil {
 		return TranscriptionContext{}, err
 	}
-	services, err := s.store.ListBookableServices(ctx, salonID)
-	if err != nil {
-		return TranscriptionContext{}, err
-	}
-	aliases, err := s.store.ListActiveServiceAliases(ctx, salonID)
+	answerCtx, err := s.loadAnswerContext(ctx, salonID)
 	if err != nil {
 		return TranscriptionContext{}, err
 	}
 	return TranscriptionContext{
-		Prompt: transcriptionContextPrompt(*session, cfg, services, aliases),
+		Prompt: transcriptionContextPrompt(*session, cfg, answerCtx.Services, answerCtx.ServiceAliases),
 	}, nil
 }
 
@@ -3696,13 +3689,7 @@ func significantWords(value string) []string {
 
 func knowledgeAnswer(message string, knowledge []KnowledgeSnippet) string {
 	match := bestKnowledgeMatch(message, knowledge)
-	if match == nil || strings.TrimSpace(match.Body) == "" {
-		return ""
-	}
-	if hasUnsafeKnowledgeConfirmation(match.Body) {
-		return "I can share salon policies, but I cannot confirm appointments unless the booking is completed successfully. Would you like help with an appointment?"
-	}
-	return truncateWords(match.Body, 34) + " Would you like help with an appointment?"
+	return knowledgeAnswerFromMatch(match)
 }
 
 func formatKnowledgeContext(knowledge []KnowledgeSnippet) string {
@@ -3730,24 +3717,23 @@ func bestKnowledgeMatch(message string, knowledge []KnowledgeSnippet) *Knowledge
 	bestScore := 0
 	var best *KnowledgeSnippet
 	for i := range knowledge {
-		item := knowledge[i]
 		score := 0
-		for _, token := range append(significantWords(item.Title), significantWords(item.Category)...) {
+		for _, token := range append(significantWords(knowledge[i].Title), significantWords(knowledge[i].Category)...) {
 			if strings.Contains(lower, token) {
 				score += 2
 			}
 		}
-		for _, token := range significantWords(item.Body) {
+		for _, token := range significantWords(knowledge[i].Body) {
 			if strings.Contains(lower, token) {
 				score++
 			}
 		}
 		if score > bestScore {
 			bestScore = score
-			best = &item
+			best = &knowledge[i]
 		}
 	}
-	if bestScore == 0 {
+	if bestScore < 2 {
 		return nil
 	}
 	return best
