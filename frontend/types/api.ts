@@ -768,6 +768,9 @@ export type ConversationSession = {
   status: string;
   intent: string;
   outcome: string;
+  booking_action?: "book" | "reschedule";
+  target_appointment_id?: string;
+  reschedule_candidates?: RescheduleCandidate[];
   customer_name?: string;
   customer_phone?: string;
   customer_email?: string;
@@ -794,6 +797,18 @@ export type ConversationSession = {
   transcript?: TranscriptMessage[];
   handoff?: HandoffRequest;
   party_request?: PartyBookingRequest;
+};
+
+export type RescheduleCandidate = {
+  appointment_id: string;
+  service_label: string;
+  staff_label: string;
+  service_id?: string;
+  staff_id?: string;
+  staff_selection_mode?: StaffSelectionMode;
+  segments?: BookingSegmentRequest[];
+  start_time: string;
+  end_time: string;
 };
 
 export type RealtimeEventLog = {

@@ -48,6 +48,12 @@ type RescheduleRequest struct {
 	Source    string    `json:"-"`
 }
 
+type RescheduleLookupRequest struct {
+	CustomerName  string `json:"customer_name"`
+	CustomerPhone string `json:"customer_phone"`
+	Limit         int    `json:"limit"`
+}
+
 type CancelRequest struct {
 	Reason string `json:"reason"`
 	Source string `json:"-"`

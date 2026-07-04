@@ -641,6 +641,58 @@ func (r *Repository) GetAppointmentForOwner(ctx context.Context, salonID string,
 	return &item, nil
 }
 
+func (r *Repository) ListRescheduleCandidates(ctx context.Context, salonID string, ownerUserID string, req RescheduleLookupRequest) ([]AppointmentActionRef, error) {
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 5
+	}
+	if limit > 5 {
+		limit = 5
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT a.id::text
+		FROM appointments a
+		JOIN salons salon ON salon.id = a.salon_id
+		WHERE a.salon_id = $1
+		  AND salon.owner_user_id = $2
+		  AND right(regexp_replace(a.customer_phone, '[^0-9]', '', 'g'), 10) = right(regexp_replace($3, '[^0-9]', '', 'g'), 10)
+		  AND a.status IN ($4, $5)
+		  AND a.start_time >= now()
+		  AND a.pos_appointment_id <> ''
+		  AND a.pos_appointment_version >= 0
+		ORDER BY
+		  CASE WHEN NULLIF($6, '') IS NOT NULL AND lower(a.customer_name) = lower($6) THEN 0 ELSE 1 END,
+		  a.start_time ASC,
+		  a.id ASC
+		LIMIT $7
+	`, salonID, ownerUserID, req.CustomerPhone, StatusConfirmed, StatusRescheduled, req.CustomerName, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0, limit)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	items := make([]AppointmentActionRef, 0, len(ids))
+	for _, id := range ids {
+		item, err := r.GetAppointmentForOwner(ctx, salonID, ownerUserID, id)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *item)
+	}
+	return items, nil
+}
+
 func (r *Repository) loadAppointmentActionSegments(ctx context.Context, appointmentID string, provider string) ([]BookingSegmentRecord, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT COALESCE(aps.service_id::text, ''),

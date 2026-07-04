@@ -749,6 +749,7 @@ export function CallsDashboard() {
               <Info label="Channel" value={<Badge value={selectedSession.channel} />} />
               <Info label="Lifecycle" value={<Badge value={selectedSession.lifecycle_status} />} />
               <Info label="Intent" value={<Badge value={selectedSession.intent} />} />
+              <Info label="Action" value={<Badge value={bookingActionValue(selectedSession)} />} />
               <Info label="Outcome" value={<Badge value={selectedSession.outcome} />} />
               <Info label="Customer" value={selectedSession.customer_name || "Not collected"} />
               <Info label="Phone" value={selectedSession.customer_phone || "Not collected"} />
@@ -769,6 +770,7 @@ export function CallsDashboard() {
                 value={selectedSession.requested_start_time ? formatDateTime(selectedSession.requested_start_time) : "Not collected"}
               />
               <Info label="Booking attempt" value={selectedSession.booking_attempt_id || "None"} />
+              <Info label="Target appointment" value={selectedSession.target_appointment_id || "None"} />
               {selectedSession.party_request ? (
                 <>
                   <Info label="Party request" value={<Badge value={selectedSession.party_request.status} />} />
@@ -853,13 +855,14 @@ export function CallsDashboard() {
               onLimitChange={updateSessionPageSize}
             />
             <div className="mt-3 hidden overflow-x-auto rounded-md border border-line lg:block">
-              <table className="w-full min-w-[1180px] text-left text-sm">
+              <table className="w-full min-w-[1260px] text-left text-sm">
                 <thead className="bg-slate-50 text-xs uppercase text-muted">
                   <tr>
                     <th className="px-4 py-3">Updated</th>
                     <th className="px-4 py-3">Channel</th>
                     <th className="px-4 py-3">Customer</th>
                     <th className="px-4 py-3">Intent</th>
+                    <th className="px-4 py-3">Action</th>
                     <th className="px-4 py-3">Outcome</th>
                     <th className="px-4 py-3">Booking</th>
                     <th className="px-4 py-3">Retention</th>
@@ -879,6 +882,9 @@ export function CallsDashboard() {
                       </td>
                       <td className="px-4 py-3">
                         <Badge value={item.intent} />
+                      </td>
+                      <td className="px-4 py-3">
+                        <Badge value={bookingActionValue(item)} />
                       </td>
                       <td className="px-4 py-3">
                         <Badge value={item.outcome} />
@@ -1575,6 +1581,10 @@ function SessionCard({
           <Badge value={item.intent} />
         </div>
         <div className="flex items-center justify-between gap-3">
+          <span className="text-muted">Action</span>
+          <Badge value={bookingActionValue(item)} />
+        </div>
+        <div className="flex items-center justify-between gap-3">
           <span className="text-muted">Booking</span>
           <span className="font-medium text-ink">{item.booking_attempt_id || "None"}</span>
         </div>
@@ -1773,11 +1783,23 @@ function selectedSlotLabel(session: ConversationSession, serviceNames: Map<strin
   return `${formatDateTime(session.requested_start_time)} · ${serviceNamesLabel(record, serviceNames)} · Preference: ${technicianPreferenceLabel(record)} · Assigned: ${assignedTechniciansLabel(record, staffNames)}`;
 }
 
+function bookingActionValue(session: ConversationSession) {
+  return session.booking_action === "reschedule" ? "reschedule" : "book";
+}
+
 function squareConfirmationLabel(session: ConversationSession) {
+  if (session.outcome === "booking_rescheduled" && session.appointment_id) {
+    return `Rescheduled by Square Appointments (${session.appointment_id})`;
+  }
   if (session.outcome === "booking_confirmed" && session.booking_attempt_id && session.appointment_id) {
     return `Confirmed by Square Appointments (${session.booking_attempt_id})`;
   }
   if (session.outcome === "booking_fallback_pending") {
+    if (bookingActionValue(session) === "reschedule") {
+      return session.booking_attempt_id
+        ? `Reschedule pending owner review (${session.booking_attempt_id})`
+        : "Reschedule pending owner review";
+    }
     return session.booking_attempt_id
       ? `Pending owner review (${session.booking_attempt_id})`
       : "Pending owner review";
@@ -1787,6 +1809,9 @@ function squareConfirmationLabel(session: ConversationSession) {
 
 function bookingNegotiationStatus(session: ConversationSession | null) {
   if (!session) return "not_started";
+  if (session.outcome === "booking_rescheduled" && session.appointment_id) {
+    return "rescheduled";
+  }
   if (session.outcome === "booking_confirmed" && session.booking_attempt_id && session.appointment_id) {
     return "confirmed";
   }

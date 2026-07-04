@@ -70,6 +70,39 @@ func TestAppointmentsDefaultsPagination(t *testing.T) {
 	}
 }
 
+func TestRescheduleCandidatesRequiresCallerPhone(t *testing.T) {
+	store := newFakeStore()
+	service := NewService(store, nil)
+
+	_, err := service.RescheduleCandidates(context.Background(), "salon_1", "owner_1", RescheduleLookupRequest{})
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("error = %v, want validation", err)
+	}
+}
+
+func TestRescheduleCandidatesNormalizesPhoneAndClampsLimit(t *testing.T) {
+	store := newFakeStore()
+	service := NewService(store, nil)
+
+	candidates, err := service.RescheduleCandidates(context.Background(), "salon_1", "owner_1", RescheduleLookupRequest{
+		CustomerName:  " Linh Tran ",
+		CustomerPhone: "(312) 555-0101",
+		Limit:         50,
+	})
+	if err != nil {
+		t.Fatalf("RescheduleCandidates returned error: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ID != "appointment_1" {
+		t.Fatalf("candidates = %#v, want appointment_1", candidates)
+	}
+	if store.rescheduleLookup.CustomerPhone != "3125550101" {
+		t.Fatalf("lookup phone = %q, want normalized", store.rescheduleLookup.CustomerPhone)
+	}
+	if store.rescheduleLookup.Limit != 5 {
+		t.Fatalf("lookup limit = %d, want 5", store.rescheduleLookup.Limit)
+	}
+}
+
 func TestCreateStoresConfirmedBookingOnlyAfterPOSSuccess(t *testing.T) {
 	store := newFakeStore()
 	provider := &fakeProvider{
@@ -1130,6 +1163,7 @@ type fakeStore struct {
 	appointments          []Appointment
 	listAppointmentLimit  int
 	listAppointmentOffset int
+	rescheduleLookup      RescheduleLookupRequest
 	linkedCustomer        *CustomerRef
 	linkCustomerErr       error
 }
@@ -1364,6 +1398,30 @@ func (f *fakeStore) GetAppointmentForOwner(ctx context.Context, salonID string, 
 		return nil, pos.ErrNotFound
 	}
 	return &f.appointment, nil
+}
+
+func (f *fakeStore) ListRescheduleCandidates(ctx context.Context, salonID string, ownerUserID string, req RescheduleLookupRequest) ([]AppointmentActionRef, error) {
+	f.rescheduleLookup = req
+	if salonID != "salon_1" || ownerUserID != "owner_1" {
+		return nil, pos.ErrNotFound
+	}
+	if last10Digits(req.CustomerPhone) != last10Digits(f.appointment.CustomerPhone) {
+		return nil, nil
+	}
+	return []AppointmentActionRef{f.appointment}, nil
+}
+
+func last10Digits(value string) string {
+	digits := ""
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			digits += string(r)
+		}
+	}
+	if len(digits) <= 10 {
+		return digits
+	}
+	return digits[len(digits)-10:]
 }
 
 func (f *fakeStore) CreatePendingAppointmentAction(ctx context.Context, record PendingAppointmentActionRecord) (*BookingAttempt, error) {

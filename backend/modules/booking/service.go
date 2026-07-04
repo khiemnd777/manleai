@@ -27,6 +27,7 @@ type Store interface {
 	LinkBookingCustomer(ctx context.Context, salonID string, provider string, customerID string, customer pos.Customer) (*CustomerRef, error)
 	GetSchedule(ctx context.Context, salonID string) (*Schedule, error)
 	GetAppointmentForOwner(ctx context.Context, salonID string, ownerUserID string, appointmentID string) (*AppointmentActionRef, error)
+	ListRescheduleCandidates(ctx context.Context, salonID string, ownerUserID string, req RescheduleLookupRequest) ([]AppointmentActionRef, error)
 	CreatePendingBookingAttempt(ctx context.Context, record PendingBookingRecord) (*BookingAttempt, error)
 	SaveConfirmedBooking(ctx context.Context, record ConfirmedBookingRecord) (*BookingAttempt, error)
 	SaveFallbackBooking(ctx context.Context, record FallbackBookingRecord) (*BookingAttempt, error)
@@ -281,6 +282,17 @@ func (s *Service) Reschedule(ctx context.Context, salonID string, ownerUserID st
 		POSBookingVersion: posAppointment.POSAppointmentVersion,
 	})
 	return saved, nil, err
+}
+
+func (s *Service) RescheduleCandidates(ctx context.Context, salonID string, ownerUserID string, req RescheduleLookupRequest) ([]AppointmentActionRef, error) {
+	req = normalizeRescheduleLookupRequest(req)
+	if req.CustomerPhone == "" {
+		return nil, ErrValidation
+	}
+	if err := s.store.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	return s.store.ListRescheduleCandidates(ctx, salonID, ownerUserID, req)
 }
 
 func (s *Service) AvailableSlots(ctx context.Context, salonID string, ownerUserID string, req AvailabilityRequest) (*AvailabilityResult, error) {
@@ -540,6 +552,18 @@ func normalizeRescheduleRequest(req RescheduleRequest) RescheduleRequest {
 	}
 	req.StaffID = strings.TrimSpace(req.StaffID)
 	req.Notes = strings.TrimSpace(req.Notes)
+	return req
+}
+
+func normalizeRescheduleLookupRequest(req RescheduleLookupRequest) RescheduleLookupRequest {
+	req.CustomerName = strings.TrimSpace(req.CustomerName)
+	req.CustomerPhone = validation.NormalizePhone(req.CustomerPhone)
+	if req.Limit <= 0 {
+		req.Limit = 5
+	}
+	if req.Limit > 5 {
+		req.Limit = 5
+	}
 	return req
 }
 

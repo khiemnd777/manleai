@@ -439,6 +439,14 @@ func (f *phoneFlowBookingTool) Create(ctx context.Context, salonID string, owner
 	return f.attempt, nil
 }
 
+func (f *phoneFlowBookingTool) RescheduleCandidates(ctx context.Context, salonID string, ownerUserID string, req booking.RescheduleLookupRequest) ([]booking.AppointmentActionRef, error) {
+	return nil, nil
+}
+
+func (f *phoneFlowBookingTool) Reschedule(ctx context.Context, salonID string, ownerUserID string, appointmentID string, req booking.RescheduleRequest) (*booking.Appointment, *booking.BookingAttempt, error) {
+	return nil, nil, nil
+}
+
 func phoneFlowFirstSlotStart() time.Time {
 	return time.Date(2026, 6, 10, 15, 0, 0, 0, time.UTC)
 }

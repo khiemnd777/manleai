@@ -781,9 +781,21 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session,
 	if err != nil {
 		return nil, err
 	}
+	rescheduleCandidates := record.Update.RescheduleCandidates
+	if rescheduleCandidates == nil {
+		rescheduleCandidates = []RescheduleCandidate{}
+	}
+	rescheduleCandidatesJSON, err := json.Marshal(rescheduleCandidates)
+	if err != nil {
+		return nil, err
+	}
 	staffSelectionMode := strings.TrimSpace(record.Update.StaffSelectionMode)
 	if staffSelectionMode == "" {
 		staffSelectionMode = booking.StaffSelectionSpecific
+	}
+	bookingAction := strings.TrimSpace(record.Update.BookingAction)
+	if bookingAction == "" {
+		bookingAction = BookingActionBook
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -791,24 +803,27 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session,
 		SET status = $1,
 		    intent = $2,
 		    outcome = $3,
-		    customer_name = NULLIF($4, ''),
-		    customer_phone = NULLIF($5, ''),
-		    customer_email = NULLIF($6, ''),
-		    service_id = NULLIF($7, '')::uuid,
-			    staff_id = NULLIF($8, '')::uuid,
-			    staff_selection_mode = $9,
-			    requested_date = NULLIF($10, '')::date,
-			    requested_start_time = $11,
-			    offered_slots = $12::jsonb,
-			    booking_segments = $13::jsonb,
-			    booking_attempt_id = NULLIF($14, '')::uuid,
-			    appointment_id = NULLIF($15, '')::uuid,
-			    summary = NULLIF($16, ''),
-			    ended_at = CASE WHEN $17 THEN now() ELSE ended_at END,
+		    booking_action = $4,
+		    target_appointment_id = NULLIF($5, '')::uuid,
+		    reschedule_candidates = $6::jsonb,
+		    customer_name = NULLIF($7, ''),
+		    customer_phone = NULLIF($8, ''),
+		    customer_email = NULLIF($9, ''),
+		    service_id = NULLIF($10, '')::uuid,
+			    staff_id = NULLIF($11, '')::uuid,
+			    staff_selection_mode = $12,
+			    requested_date = NULLIF($13, '')::date,
+			    requested_start_time = $14,
+			    offered_slots = $15::jsonb,
+			    booking_segments = $16::jsonb,
+			    booking_attempt_id = NULLIF($17, '')::uuid,
+			    appointment_id = NULLIF($18, '')::uuid,
+			    summary = NULLIF($19, ''),
+			    ended_at = CASE WHEN $20 THEN now() ELSE ended_at END,
 			    updated_at = now()
-			WHERE id = $18
-			  AND salon_id = $19
-		`, record.Update.Status, record.Update.Intent, record.Update.Outcome, record.Update.CustomerName, record.Update.CustomerPhone, record.Update.CustomerEmail, record.Update.ServiceID, record.Update.StaffID, staffSelectionMode, record.Update.RequestedDate, record.Update.RequestedStartTime, string(offeredSlotsJSON), string(bookingSegmentsJSON), record.Update.BookingAttemptID, record.Update.AppointmentID, record.Update.Summary, record.Update.EndSession, record.Session.ID, record.SalonID); err != nil {
+			WHERE id = $21
+			  AND salon_id = $22
+		`, record.Update.Status, record.Update.Intent, record.Update.Outcome, bookingAction, record.Update.TargetAppointmentID, string(rescheduleCandidatesJSON), record.Update.CustomerName, record.Update.CustomerPhone, record.Update.CustomerEmail, record.Update.ServiceID, record.Update.StaffID, staffSelectionMode, record.Update.RequestedDate, record.Update.RequestedStartTime, string(offeredSlotsJSON), string(bookingSegmentsJSON), record.Update.BookingAttemptID, record.Update.AppointmentID, record.Update.Summary, record.Update.EndSession, record.Session.ID, record.SalonID); err != nil {
 		return nil, err
 	}
 
@@ -1186,6 +1201,8 @@ func sessionSelect() string {
 		       COALESCE(cs.provider, ''), COALESCE(cs.provider_call_id, ''),
 		       COALESCE(cs.inbound_phone, ''), COALESCE(cs.outbound_phone, ''),
 		       cs.status, cs.intent, cs.outcome,
+		       COALESCE(cs.booking_action, 'book'), COALESCE(cs.target_appointment_id::text, ''),
+		       COALESCE(cs.reschedule_candidates, '[]'::jsonb),
 		       COALESCE(cs.customer_name, ''), COALESCE(cs.customer_phone, ''), COALESCE(cs.customer_email, ''),
 		       COALESCE(cs.service_id::text, ''), COALESCE(svc.name, ''),
 		       COALESCE(cs.staff_id::text, ''), COALESCE(st.name, ''),
@@ -1216,6 +1233,7 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 	var redactedAt sql.NullTime
 	var offeredSlots []byte
 	var bookingSegments []byte
+	var rescheduleCandidates []byte
 	if err := scanner.Scan(
 		&item.ID,
 		&item.SalonID,
@@ -1227,6 +1245,9 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 		&item.Status,
 		&item.Intent,
 		&item.Outcome,
+		&item.BookingAction,
+		&item.TargetAppointmentID,
+		&rescheduleCandidates,
 		&item.CustomerName,
 		&item.CustomerPhone,
 		&item.CustomerEmail,
@@ -1255,6 +1276,14 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 	}
 	if requestedStartAt.Valid {
 		item.RequestedStartTime = &requestedStartAt.Time
+	}
+	if item.BookingAction == "" {
+		item.BookingAction = BookingActionBook
+	}
+	if len(rescheduleCandidates) > 0 {
+		if err := json.Unmarshal(rescheduleCandidates, &item.RescheduleCandidates); err != nil {
+			return nil, err
+		}
 	}
 	if len(offeredSlots) > 0 {
 		if err := json.Unmarshal(offeredSlots, &item.OfferedSlots); err != nil {

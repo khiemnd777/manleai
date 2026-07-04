@@ -584,6 +584,119 @@ func TestMessageConfirmsOnlyAfterBookingToolSuccess(t *testing.T) {
 	assertCustomerReplyHidesProvider(t, reply)
 }
 
+func TestMessageStartsAutoRescheduleWithTargetConfirmation(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.CustomerPhone = "+13125550101"
+	bookingTool := &fakeBookingTool{
+		candidates: []booking.AppointmentActionRef{testRescheduleAppointment()},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I need to reschedule my appointment.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.candidateCalls != 1 {
+		t.Fatalf("candidate calls = %d, want 1", bookingTool.candidateCalls)
+	}
+	if bookingTool.calls != 0 || bookingTool.rescheduleCalls != 0 {
+		t.Fatalf("booking calls = create %d reschedule %d, want none before target confirmation", bookingTool.calls, bookingTool.rescheduleCalls)
+	}
+	if session.BookingAction != BookingActionReschedule || len(session.RescheduleCandidates) != 1 {
+		t.Fatalf("reschedule state = %s/%#v, want one candidate", session.BookingAction, session.RescheduleCandidates)
+	}
+	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "is this the appointment") {
+		t.Fatalf("AI message = %q, want target confirmation", store.lastTurn.AIMessage)
+	}
+	if session.RequestedStartTime != nil {
+		t.Fatalf("first reschedule turn should not reuse extracted new time: %s", session.RequestedStartTime)
+	}
+}
+
+func TestMessageAutoReschedulesAfterTargetAndAvailableNewTime(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.BookingAction = BookingActionReschedule
+	store.session.Intent = IntentBooking
+	store.session.CustomerPhone = "+13125550101"
+	applyRescheduleCandidate(&store.session, rescheduleCandidatesFromAppointments([]booking.AppointmentActionRef{testRescheduleAppointment()})[0])
+	newStart := time.Date(2026, 6, 11, 21, 0, 0, 0, time.UTC)
+	bookingTool := &fakeBookingTool{
+		availabilityResult: availabilityResultForStart("service_1", "Classic Manicure", newStart),
+		rescheduledAppointment: &booking.Appointment{
+			ID:               "appointment_1",
+			Status:           booking.StatusRescheduled,
+			POSAppointmentID: "booking_1",
+			StartTime:        newStart,
+			EndTime:          newStart.Add(45 * time.Minute),
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "2026-06-11 at 4pm works.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.calls != 0 {
+		t.Fatalf("create calls = %d, want 0 for reschedule", bookingTool.calls)
+	}
+	if bookingTool.rescheduleCalls != 1 {
+		t.Fatalf("reschedule calls = %d, want 1", bookingTool.rescheduleCalls)
+	}
+	if bookingTool.rescheduleAppointmentID != "appointment_1" {
+		t.Fatalf("reschedule appointment id = %s, want appointment_1", bookingTool.rescheduleAppointmentID)
+	}
+	if bookingTool.rescheduleRequest.Source != booking.SourceAIConversationSimulator {
+		t.Fatalf("reschedule source = %s, want simulator", bookingTool.rescheduleRequest.Source)
+	}
+	if session.Outcome != OutcomeBookingRescheduled || session.AppointmentID != "appointment_1" {
+		t.Fatalf("session outcome/link = %s/%s, want rescheduled appointment", session.Outcome, session.AppointmentID)
+	}
+}
+
+func TestMessageAutoRescheduleFallbackLeavesNoConfirmedAppointmentLink(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.BookingAction = BookingActionReschedule
+	store.session.Intent = IntentBooking
+	store.session.CustomerPhone = "+13125550101"
+	applyRescheduleCandidate(&store.session, rescheduleCandidatesFromAppointments([]booking.AppointmentActionRef{testRescheduleAppointment()})[0])
+	newStart := time.Date(2026, 6, 11, 21, 0, 0, 0, time.UTC)
+	bookingTool := &fakeBookingTool{
+		availabilityResult: availabilityResultForStart("service_1", "Classic Manicure", newStart),
+		rescheduleFallback: &booking.BookingAttempt{
+			ID:                 "attempt_reschedule_fallback",
+			Status:             booking.StatusFallbackPending,
+			RequestedStartTime: newStart,
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "2026-06-11 at 4pm works.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.calls != 0 || bookingTool.rescheduleCalls != 1 {
+		t.Fatalf("calls = create %d reschedule %d, want only reschedule", bookingTool.calls, bookingTool.rescheduleCalls)
+	}
+	if session.Outcome != OutcomeBookingFallbackPending || session.BookingAttemptID != "attempt_reschedule_fallback" {
+		t.Fatalf("session fallback = %s/%s, want fallback attempt", session.Outcome, session.BookingAttemptID)
+	}
+	if session.AppointmentID != "" {
+		t.Fatalf("fallback should not link a confirmed appointment: %s", session.AppointmentID)
+	}
+	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "original appointment has not been changed") {
+		t.Fatalf("AI message = %q, want original appointment unchanged", store.lastTurn.AIMessage)
+	}
+}
+
 func TestMessageDoesNotBookAmbiguousGenericManicureMatch(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = []ServiceOption{
@@ -3407,6 +3520,36 @@ func testStartTime() time.Time {
 	return time.Date(2026, 6, 10, 15, 0, 0, 0, time.UTC)
 }
 
+func testRescheduleAppointment() booking.AppointmentActionRef {
+	start := time.Date(2026, 6, 10, 20, 0, 0, 0, time.UTC)
+	service := booking.ServiceRef{
+		ID:              "service_1",
+		Name:            "Classic Manicure",
+		DurationMinutes: 45,
+	}
+	staff := booking.StaffRef{
+		ID:   "staff_1",
+		Name: "Mai Nguyen",
+	}
+	return booking.AppointmentActionRef{
+		ID:                 "appointment_1",
+		Status:             booking.StatusConfirmed,
+		CustomerName:       "Linh Tran",
+		CustomerPhone:      "+13125550101",
+		Service:            service,
+		Staff:              staff,
+		StaffSelectionMode: booking.StaffSelectionSpecific,
+		Segments: []booking.BookingSegmentRecord{{
+			Service:            service,
+			Staff:              staff,
+			StaffSelectionMode: booking.StaffSelectionSpecific,
+			SortOrder:          1,
+		}},
+		StartTime: start,
+		EndTime:   start.Add(45 * time.Minute),
+	}
+}
+
 func offeredPMSlots() []OfferedSlot {
 	return []OfferedSlot{
 		{
@@ -3543,6 +3686,7 @@ func newFakeConversationStore() *fakeConversationStore {
 			Status:             StatusActive,
 			Intent:             IntentUnknown,
 			Outcome:            OutcomeCollecting,
+			BookingAction:      BookingActionBook,
 			LifecycleStatus:    LifecycleActive,
 			RetentionExpiresAt: time.Now().UTC().Add(90 * 24 * time.Hour),
 		},
@@ -3700,6 +3844,12 @@ func (f *fakeConversationStore) SaveTurn(ctx context.Context, record TurnRecord)
 	session.Status = record.Update.Status
 	session.Intent = record.Update.Intent
 	session.Outcome = record.Update.Outcome
+	session.BookingAction = record.Update.BookingAction
+	if session.BookingAction == "" {
+		session.BookingAction = BookingActionBook
+	}
+	session.TargetAppointmentID = record.Update.TargetAppointmentID
+	session.RescheduleCandidates = append([]RescheduleCandidate(nil), record.Update.RescheduleCandidates...)
 	session.CustomerName = record.Update.CustomerName
 	session.CustomerPhone = record.Update.CustomerPhone
 	session.CustomerEmail = record.Update.CustomerEmail
@@ -3780,15 +3930,25 @@ func (f *fakeConversationStore) SaveTurn(ctx context.Context, record TurnRecord)
 }
 
 type fakeBookingTool struct {
-	calls               int
-	availabilityCalls   int
-	request             booking.CreateBookingRequest
-	availabilityRequest booking.AvailabilityRequest
-	attempt             *booking.BookingAttempt
-	availabilityResult  *booking.AvailabilityResult
-	availabilityResults []*booking.AvailabilityResult
-	err                 error
-	availabilityErr     error
+	calls                   int
+	rescheduleCalls         int
+	candidateCalls          int
+	availabilityCalls       int
+	request                 booking.CreateBookingRequest
+	rescheduleRequest       booking.RescheduleRequest
+	availabilityRequest     booking.AvailabilityRequest
+	rescheduleAppointmentID string
+	candidateRequest        booking.RescheduleLookupRequest
+	attempt                 *booking.BookingAttempt
+	rescheduledAppointment  *booking.Appointment
+	rescheduleFallback      *booking.BookingAttempt
+	candidates              []booking.AppointmentActionRef
+	availabilityResult      *booking.AvailabilityResult
+	availabilityResults     []*booking.AvailabilityResult
+	err                     error
+	rescheduleErr           error
+	candidateErr            error
+	availabilityErr         error
 }
 
 func (f *fakeBookingTool) AvailableSlots(ctx context.Context, salonID string, ownerUserID string, req booking.AvailabilityRequest) (*booking.AvailabilityResult, error) {
@@ -3830,4 +3990,26 @@ func (f *fakeBookingTool) Create(ctx context.Context, salonID string, ownerUserI
 	f.calls++
 	f.request = req
 	return f.attempt, f.err
+}
+
+func (f *fakeBookingTool) RescheduleCandidates(ctx context.Context, salonID string, ownerUserID string, req booking.RescheduleLookupRequest) ([]booking.AppointmentActionRef, error) {
+	f.candidateCalls++
+	f.candidateRequest = req
+	if f.candidateErr != nil {
+		return nil, f.candidateErr
+	}
+	return append([]booking.AppointmentActionRef(nil), f.candidates...), nil
+}
+
+func (f *fakeBookingTool) Reschedule(ctx context.Context, salonID string, ownerUserID string, appointmentID string, req booking.RescheduleRequest) (*booking.Appointment, *booking.BookingAttempt, error) {
+	f.rescheduleCalls++
+	f.rescheduleAppointmentID = appointmentID
+	f.rescheduleRequest = req
+	if f.rescheduleErr != nil {
+		return nil, nil, f.rescheduleErr
+	}
+	if f.rescheduledAppointment != nil {
+		return f.rescheduledAppointment, nil, nil
+	}
+	return nil, f.rescheduleFallback, nil
 }
