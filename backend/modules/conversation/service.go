@@ -31,19 +31,21 @@ const (
 )
 
 var (
-	phonePattern                   = regexp.MustCompile(`(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})`)
-	emailPattern                   = regexp.MustCompile(`(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}`)
-	dateTimePattern                = regexp.MustCompile(`(?i)(\d{4}-\d{2}-\d{2})(?:[ t]+(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)?)`)
-	relativeTimePattern            = regexp.MustCompile(`(?i)\b(today|tomorrow)\b\s*(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)?`)
-	dateOnlyPattern                = regexp.MustCompile(`(?i)\b(\d{4}-\d{2}-\d{2})\b`)
-	monthDateTimePattern           = regexp.MustCompile(`(?i)\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,)?\s+(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)\b`)
-	timeMonthDatePattern           = regexp.MustCompile(`(?i)\b(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)\s+(?:on\s+)?(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec)\s+(\d{1,2})(?:st|nd|rd|th)?\b`)
-	monthDateOnlyPattern           = regexp.MustCompile(`(?i)\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec)\s+(\d{1,2})(?:st|nd|rd|th)?\b`)
-	relativeDayPattern             = regexp.MustCompile(`(?i)\b(today|tomorrow)\b`)
-	timeWithMeridiemPattern        = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)(?:$|[^a-z0-9])`)
-	offeredSlotNumericTimePattern  = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|bpm|tm)(?:$|[^a-z0-9])`)
-	offeredSlotWordTimePattern     = regexp.MustCompile(`(?i)\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?:\s+([0-5][0-9]|oh\s+[0-9]|fifteen|thirty|forty[- ]five))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|bpm|tm)(?:$|[^a-z0-9])`)
-	slotConfirmationPromptPatterns = []*regexp.Regexp{
+	phonePattern                    = regexp.MustCompile(`(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})`)
+	emailPattern                    = regexp.MustCompile(`(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}`)
+	dateTimePattern                 = regexp.MustCompile(`(?i)(\d{4}-\d{2}-\d{2})(?:[ t]+(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)?)`)
+	relativeTimePattern             = regexp.MustCompile(`(?i)\b(today|tomorrow)\b\s*(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)?`)
+	dateOnlyPattern                 = regexp.MustCompile(`(?i)\b(\d{4}-\d{2}-\d{2})\b`)
+	monthDateTimePattern            = regexp.MustCompile(`(?i)\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,)?\s+(?:at\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)\b`)
+	timeMonthDatePattern            = regexp.MustCompile(`(?i)\b(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)\s+(?:on\s+)?(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec)\s+(\d{1,2})(?:st|nd|rd|th)?\b`)
+	monthDateOnlyPattern            = regexp.MustCompile(`(?i)\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec)\s+(\d{1,2})(?:st|nd|rd|th)?\b`)
+	relativeDayPattern              = regexp.MustCompile(`(?i)\b(today|tomorrow)\b`)
+	timeWithMeridiemPattern         = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)(?:$|[^a-z0-9])`)
+	offeredSlotNumericTimePattern   = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|bpm|tm)(?:$|[^a-z0-9])`)
+	offeredSlotWordTimePattern      = regexp.MustCompile(`(?i)\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?:\s+([0-5][0-9]|oh\s+[0-9]|fifteen|thirty|forty[- ]five))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|bpm|tm)(?:$|[^a-z0-9])`)
+	offeredSlotNumericOClockPattern = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+|for\s+)?(\d{1,2})\s*(?:o\s*['’]?\s*clock|oclock)\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm|bpm|tm)(?:$|[^a-z0-9])`)
+	offeredSlotWordOClockPattern    = regexp.MustCompile(`(?i)\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?:o\s*['’]?\s*clock|oclock)\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm|bpm|tm)(?:$|[^a-z0-9])`)
+	slotConfirmationPromptPatterns  = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\bdoes\s+(.{0,80}?)\s+work\b`),
 		regexp.MustCompile(`(?i)\bwould you like\s+(.{0,80}?)(?:\?|$)`),
 		regexp.MustCompile(`(?i)\bdo you want\s+(.{0,80}?)(?:\?|$)`),
@@ -488,7 +490,11 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 			case 1:
 				turn.AIMessage = rescheduleSingleCandidatePrompt(next.RescheduleCandidates[0], loc)
 			default:
-				turn.AIMessage = rescheduleMultipleCandidatesPrompt(next.RescheduleCandidates, loc)
+				if isRescheduleTargetFiller(message) && len(before.RescheduleCandidates) > 0 {
+					turn.AIMessage = rescheduleConciseTargetPrompt(next.RescheduleCandidates, loc)
+				} else {
+					turn.AIMessage = rescheduleMultipleCandidatesPrompt(next.RescheduleCandidates, loc)
+				}
 			}
 			s.applyReplyGenerator(ctx, &turn, next, services, cfg, "target_appointment", "target_appointment", knowledge)
 			finalizeTurnMetadata(&turn, before, next, "target_appointment", "target_appointment", "reschedule_target_lookup")
@@ -503,6 +509,12 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 	if next.RequestedStartTime == nil {
 		if applyRelativeRescheduleDate(&next, message, loc) {
 			syncTurnUpdate(&turn, next, services, staff, cfg)
+		}
+		if len(next.OfferedSlots) > 0 {
+			turn.AIMessage = offeredSlotSelectionRetryReply(message, next, services, loc)
+			s.applyReplyGenerator(ctx, &turn, next, services, cfg, "requested_time", "requested_time", knowledge)
+			finalizeTurnMetadata(&turn, before, next, "requested_time", "requested_time", "reschedule_offered_slot_repeated")
+			return s.store.SaveTurn(ctx, turn)
 		}
 		if strings.TrimSpace(next.RequestedDate) != "" {
 			if err := s.offerAvailableSlots(ctx, ownerUserID, &turn, &next, services, staff, next.RequestedDate, false, cfg); err != nil {
@@ -1192,6 +1204,28 @@ func formatSlotOfferForSession(slots []OfferedSlot, loc *time.Location, unavaila
 		return "That time is not available. For your " + service + ", I found these openings: " + options + ". Which works?"
 	}
 	return "For your " + service + ", I found these openings: " + options + ". Which works?"
+}
+
+func offeredSlotSelectionRetryReply(message string, session Session, services []ServiceOption, loc *time.Location) string {
+	reply := formatSlotOfferForSession(session.OfferedSlots, loc, false, session, services)
+	if looksLikeUnclearOClockTime(message) {
+		return "I heard a time but not clearly. " + reply
+	}
+	return reply
+}
+
+func looksLikeUnclearOClockTime(message string) bool {
+	if len(clockCandidatesFromText(message)) > 0 {
+		return false
+	}
+	normalized := normalizeLooseText(message)
+	if normalized == "" {
+		return false
+	}
+	return strings.Contains(normalized, "o clock") ||
+		strings.Contains(normalized, "oclock") ||
+		strings.Contains(normalized, "clock am") ||
+		strings.Contains(normalized, "clock pm")
 }
 
 func formatSpecificStaffUnavailableOffer(session Session, staff []StaffOption, requestedStart time.Time, slots []OfferedSlot, loc *time.Location) string {
@@ -3085,6 +3119,16 @@ func hasNextDayRescheduleSignal(message string) bool {
 	return false
 }
 
+func isRescheduleTargetFiller(message string) bool {
+	normalized := normalizeLooseText(message)
+	switch normalized {
+	case "reschedule", "to reschedule", "i want to reschedule", "i need to reschedule", "change appointment", "change my appointment":
+		return true
+	default:
+		return false
+	}
+}
+
 func shouldHandoffRepeatedRescheduleNewTime(session Session, message string) bool {
 	return recentRescheduleNewTimePromptCount(session) >= 2 && looksLikeUnparsedDateOrTime(message)
 }
@@ -3159,6 +3203,31 @@ func rescheduleMultipleCandidatesPrompt(candidates []RescheduleCandidate, loc *t
 		parts = append(parts, ordinalLabel(i+1)+" "+rescheduleCandidatePhrase(candidate, loc))
 	}
 	return strings.Join(parts, " ")
+}
+
+func rescheduleConciseTargetPrompt(candidates []RescheduleCandidate, loc *time.Location) string {
+	parts := make([]string, 0, len(candidates))
+	for i, candidate := range candidates {
+		if i >= 3 {
+			break
+		}
+		parts = append(parts, rescheduleConciseCandidatePhrase(i+1, candidate, loc))
+	}
+	if len(parts) == 0 {
+		return "Which appointment should I reschedule?"
+	}
+	return "Which one should I reschedule, " + joinHumanList(parts) + "?"
+}
+
+func rescheduleConciseCandidatePhrase(index int, candidate RescheduleCandidate, loc *time.Location) string {
+	label := "the " + strings.TrimSuffix(ordinalLabel(index), ":")
+	if loc == nil {
+		loc = time.UTC
+	}
+	if candidate.StartTime.IsZero() {
+		return label
+	}
+	return label + " at " + candidate.StartTime.In(loc).Format("3:04 PM")
 }
 
 func rescheduleCandidatePhrase(candidate RescheduleCandidate, loc *time.Location) string {
@@ -4548,7 +4617,23 @@ func parseTimeOnlyForDate(message string, requestedDate string, loc *time.Locati
 			return parsed.UTC(), true
 		}
 	}
+	if parsed, ok := parseOClockCandidateForDate(message, requestedDate, loc); ok {
+		return parsed.UTC(), true
+	}
 	return time.Time{}, false
+}
+
+func parseOClockCandidateForDate(message string, requestedDate string, loc *time.Location) (time.Time, bool) {
+	candidates := oClockCandidatesFromText(message)
+	if len(candidates) != 1 {
+		return time.Time{}, false
+	}
+	minutes := candidates[0]
+	parsedDate, err := time.ParseInLocation("2006-01-02", requestedDate, loc)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Date(parsedDate.Year(), parsedDate.Month(), parsedDate.Day(), minutes/60, minutes%60, 0, 0, loc), true
 }
 
 func preferredDateFromMessage(message string, requestedStartTime *time.Time, loc *time.Location, now func() time.Time) string {
@@ -5105,6 +5190,42 @@ func clockCandidatesFromText(message string) []int {
 			continue
 		}
 		add(clockMinutes(hour, minute, match[3]))
+	}
+	for _, minutes := range oClockCandidatesFromText(message) {
+		add(minutes, true)
+	}
+	return out
+}
+
+func oClockCandidatesFromText(message string) []int {
+	out := []int{}
+	seen := map[int]bool{}
+	add := func(minutes int, ok bool) {
+		if !ok || seen[minutes] {
+			return
+		}
+		seen[minutes] = true
+		out = append(out, minutes)
+	}
+	for _, match := range offeredSlotNumericOClockPattern.FindAllStringSubmatch(message, -1) {
+		if len(match) < 3 {
+			continue
+		}
+		hour, err := strconv.Atoi(match[1])
+		if err != nil {
+			continue
+		}
+		add(clockMinutes(hour, 0, match[2]))
+	}
+	for _, match := range offeredSlotWordOClockPattern.FindAllStringSubmatch(message, -1) {
+		if len(match) < 3 {
+			continue
+		}
+		hour, ok := spokenHour(match[1])
+		if !ok {
+			continue
+		}
+		add(clockMinutes(hour, 0, match[2]))
 	}
 	return out
 }
