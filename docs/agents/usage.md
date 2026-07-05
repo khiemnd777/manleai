@@ -47,7 +47,7 @@ Use $salon-ops-workflow to analyze the owner/caller workflow before changing das
 ```
 
 ```txt
-Use $voice-ai-runtime to investigate AI tone, service understanding, salon-scoped service aliases, service categories, category aliases, party booking handoff, name-slot repair, and conversation golden regressions, then propose an approval-ready plan.
+Use $voice-ai-runtime to investigate AI tone, service understanding, salon-scoped service aliases, service categories, category aliases, supported party booking, owner-review party exceptions, name-slot repair, and conversation golden regressions, then propose an approval-ready plan.
 ```
 
 ## Subagents

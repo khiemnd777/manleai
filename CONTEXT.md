@@ -35,7 +35,7 @@ A salon-scoped menu group such as Manicure, Pedicure, Acrylic, Dip Powder, or Re
 A salon-scoped phrase for a service category, stored in `service_category_aliases` with a normalized alias key. Category aliases route broad caller wording such as "mani" or "take off" to a category-level clarification, not to a single service.
 
 **Party Booking Request**
-A structured owner-review request for group or multi-person bookings. The AI can collect representative details, party size, requested date or time window, and requested guest services, but it must not confirm a party booking unless a future POS-confirmed workflow explicitly supports it.
+A structured owner-review exception record for group or multi-person bookings that cannot be safely completed through the POS-first booking flow. Supported party bookings may be checked and booked by the AI as multiple catalog-backed booking segments, but the AI must not confirm a party booking unless the active POS provider returns a successful booking ID.
 
 **Booking Service**
 The internal domain service that creates, reschedules, cancels, and records appointments through the active `POSProvider`.

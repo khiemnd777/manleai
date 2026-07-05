@@ -7,7 +7,7 @@ Stay in exploration mode.
 Read CONTEXT.md, AGENTS.md, and the smallest relevant docs before scanning code.
 Map real execution paths and ownership boundaries with file references.
 For conversation/training work, map service-understanding, `service_aliases`, `service_categories`, `service_category_aliases`, owner corrections, transcript metadata, answer-context caching, and golden tests as separate sources of truth.
-For group or party booking work, map detection, handoff, `party_booking_requests`, Calls dashboard workflow, redaction, and booking-tool avoidance.
+For group or party booking work, map detection, party segment planning, availability/booking tool routing, POS confirmation boundaries, owner-review exception records, Calls dashboard workflow, and redaction.
 For AI tone work, map `salon_settings.ai_tone`, settings API DTOs, frontend types, configuration transfer schema/defaults, `conversation.RuntimeConfig`, `voice.ModelRequest`, and provider adapter request payloads.
 Identify the likely implementation files, tests, and docs to update.
 Do not edit files or propose broad rewrites unless the parent agent asks.

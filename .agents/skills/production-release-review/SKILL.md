@@ -31,7 +31,7 @@ Use this skill for code review, milestone review, or readiness checks.
 6. Missing POS error, sync log, booking attempt, audit, or notification records.
 7. Frontend UI that implies unavailable production behavior.
 8. Service-understanding drift: hardcoded salon keywords, aliases or category aliases not scoped by salon, service alias/category alias conflicts, category/fuzzy matches selecting services instead of clarifying, or missing transcript metadata for why a service or category was selected.
-9. Party/group booking drift: group requests calling availability or booking tools, missing idempotent `party_booking_requests`, or UI/caller wording that implies a confirmed appointment.
+9. Party/group booking drift: supported party requests that bypass catalog-backed segment planning, booking-tool calls outside the booking service, missing fallback/exception handling, missing owner-review `party_booking_requests` where still required, or UI/caller wording that implies a confirmed appointment before POS success.
 10. AI tone drift: style settings bypass backend-approved replies, alter booking/handoff/slot behavior, or are documented as provider config instead of salon settings.
 11. Missing tests around critical booking/auth/POS/conversation-understanding paths.
 12. Documentation drift around env vars, API routes, or milestone scope.

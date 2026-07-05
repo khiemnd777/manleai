@@ -118,10 +118,12 @@
 - [x] Use owner-authored knowledge only after structured service, hours, staff, and availability sources do not answer the request.
 - [x] Record answer source, reason, confidence, source record IDs, router intent, and answer-context cache state in transcript metadata.
 
-## Party Booking Owner Review
+## Party Booking
 
-- [x] Detect group and party booking requests as owner handoffs, not confirmed bookings.
-- [x] Persist structured `party_booking_requests` with stable salon/session/event keys to avoid duplicate requests on retry.
+- [x] Detect supported group and party booking requests and convert clear party size/service counts into catalog-backed booking segments.
+- [x] Call provider-neutral availability and booking for supported party bookings, with confirmation allowed only after POS success.
+- [x] Preserve fallback-pending wording when POS booking fails and avoid confirmed appointment wording.
+- [x] Persist structured `party_booking_requests` with stable salon/session/event keys for owner-review exception records.
 - [x] Add owner status transitions for pending, contacted, resolved, and dismissed party requests.
 - [x] Redact party request representative PII and guest-service notes during call lifecycle redaction.
 

@@ -52,9 +52,9 @@ OpenAI's subagent docs say project-scoped custom agents live under `.codex/agent
 ## Party Booking Request Inventory
 
 - Owner UI: `/dashboard/calls` exposes `Party booking requests` with `pending`, `contacted`, `resolved`, and `dismissed` workflow states.
-- API and persistence: `party_booking_requests` are owned by `backend/modules/conversation` and keyed by salon, call session, and turn event key.
-- Runtime path: group or party booking detection creates owner handoff plus a structured party request; this path does not call availability or booking tools.
-- Guardrail: party requests are not confirmed appointments. Owner workflow status changes do not create POS appointments.
+- API and persistence: `party_booking_requests` are owned by `backend/modules/conversation` and keyed by salon, call session, and turn event key for owner-review exception records.
+- Runtime path: supported group or party booking detection converts clear party size and guest-service counts into catalog-backed booking segments, then uses provider-neutral availability and booking tools.
+- Guardrail: party bookings are confirmed only after POS success. `party_booking_requests` and owner workflow status changes are not confirmed appointments and do not create POS appointments.
 
 ## Suggested Subagent Use
 
@@ -68,7 +68,7 @@ Ask Codex to spawn:
 
 For service-understanding or AI Training correction work, ask `repo_mapper` to map `modules/conversation`, `modules/training`, `service_aliases`, `service_categories`, `service_category_aliases`, transcript metadata, answer-context caching, and golden tests before planning implementation.
 
-For party booking work, ask `repo_mapper` to map group detection, owner handoff, `party_booking_requests`, Calls dashboard workflow, redaction, and booking-tool avoidance before planning implementation.
+For party booking work, ask `repo_mapper` to map group detection, party segment planning, availability/booking tool routing, POS confirmation boundaries, owner-review exception records, Calls dashboard workflow, and redaction before planning implementation.
 
 For AI tone work, ask `repo_mapper` to map the settings/API/config-transfer/runtime path, `frontend_product_reviewer` to review the Settings UI contract, and `pos_backend_reviewer` to verify no booking guardrail changed.
 

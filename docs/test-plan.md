@@ -63,7 +63,7 @@
 - Verify simulator and phone customer-facing booking replies do not mention Square, POS, provider names, or internal provider details; those stay in tool/audit logs only.
 - Verify POS fallback from the booking service produces pending request wording and no confirmed appointment language.
 - Verify disabled AI booking creates an owner handoff and does not call the booking service.
-- Verify human requests, complaints, refunds, payment disputes, and group-booking language create owner handoffs.
+- Verify human requests, complaints, refunds, payment disputes, and unsupported or low-confidence group-booking language create owner handoffs.
 - Verify the Calls dashboard handles loading, empty, error, success, disabled/gated, and mobile states.
 - Verify simulator transcripts show customer, AI, and booking tool messages in sequence.
 - Verify initial voice and simulator greetings identify the salon, include recording disclosure when configured/defaulted, and collect intent with an open-ended prompt before asking for a booking service.
@@ -77,7 +77,7 @@
 - Verify customer-requested technicians are honored when available, and when unavailable at the requested time the AI does not auto-switch; it names the unavailable technician, offers same-time another-technician or another-time requested-technician options, and waits for the caller to choose.
 - Verify customer-name collection accepts plausible bare names after service/date/time are known, rejects affirmative replies, connection checks, service phrases, active service aliases, and time/date phrases as names, and creates an owner handoff with non-confirmed wording when repeated non-answers or caller goodbye prevent collecting the name.
 - Verify when a caller corrects the service after a time or offered slot was already collected, the engine changes the service, clears stale offered slots, re-checks availability, and does not book until customer details are complete.
-- Verify multi-person requests such as "me and two friends", "for 3 people", or "two appointments" create an owner handoff with non-confirmed wording and do not call availability or booking tools.
+- Verify supported multi-person requests such as "for four people, two manicures and two pedicures" resolve to catalog-backed party booking segments, call availability and booking only through the provider-neutral booking service, and use confirmed wording only after POS success; ambiguous service families must ask clarification before availability.
 - Verify unclear repair turns such as "Sorry?", "Hello?", or partial STT fragments repeat or rephrase the current prompt without clearing the known booking date or calling booking tools.
 - Verify voice provider retries with a stable event key do not append duplicate transcript turns or create duplicate booking attempts.
 

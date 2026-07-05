@@ -303,6 +303,13 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	}
 	serviceEdit := serviceEditDecisionForMessage(*session, message, serviceUnderstanding, services)
 	serviceChanged := applyServiceEditDecision(&next, serviceEdit)
+	partyPlanApplied := false
+	if shouldGroupBookingHandoff(message) {
+		if plan, ok := partyBookingPlanFromMessage(message, services, next); ok {
+			partyPlanApplied = applyPartyBookingPlan(&next, plan)
+			serviceChanged = serviceChanged || partyPlanApplied
+		}
+	}
 	if pendingNameCandidate != "" {
 		next.CustomerName = ""
 	}
@@ -322,8 +329,8 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
 	applyServiceEditMetadata(&turn, serviceEdit)
 
-	if shouldGroupBookingHandoff(message) {
-		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonGroupBooking, groupBookingHandoffReply(), services, staff, cfg)
+	if partyPlanApplied {
+		applyPartyBookingMetadata(&turn, next)
 	}
 
 	if shouldComplaintHandoff(message) {
@@ -355,7 +362,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonAIBookingDisabled, "AI booking is not enabled yet. I can take the request for the owner, but this is not a confirmed appointment.", services, staff, cfg)
 	}
 
-	if serviceEdit.Action == serviceEditClarifyAddSwitch {
+	if serviceEdit.Action == serviceEditClarifyAddSwitch && !partyPlanApplied {
 		turn.AIMessage = serviceEditClarificationPrompt(*session, serviceEdit.Candidates, services)
 		setPendingServiceEditMetadata(&turn, serviceEdit.Candidates)
 		finalizeTurnMetadata(&turn, *session, next, "service", "service", "service_edit_clarification")
@@ -521,7 +528,7 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 				return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check new appointment times, so I will send this reschedule request to the owner. The appointment is not rescheduled yet.", services, staff, cfg)
 			}
 			if len(next.OfferedSlots) > 0 {
-				turn.AIMessage = "For the reschedule, " + turn.AIMessage
+				turn.AIMessage = formatRescheduleSlotOfferForSession(next.OfferedSlots, loc, false, next, services)
 			}
 			s.applyReplyGenerator(ctx, &turn, next, services, cfg, "requested_time", "requested_time", knowledge)
 			finalizeTurnMetadata(&turn, before, next, "requested_time", "requested_time", "reschedule_availability_offer")
@@ -1206,6 +1213,45 @@ func formatSlotOfferForSession(slots []OfferedSlot, loc *time.Location, unavaila
 	return "For your " + service + ", I found these openings: " + options + ". Which works?"
 }
 
+func formatRescheduleSlotOfferForSession(slots []OfferedSlot, loc *time.Location, unavailableRequestedTime bool, session Session, services []ServiceOption) string {
+	service := strings.TrimSpace(serviceSummary(session, services))
+	prefix := "I found openings"
+	if service != "" {
+		prefix += " for your " + service
+	}
+	if unavailableRequestedTime {
+		prefix = "That time is not available. " + prefix
+	}
+	if day, times, staffPhrase, ok := compactSameDaySlotOptions(slots, loc); ok {
+		return prefix + " on " + day + " at " + joinHumanList(times) + staffPhrase + ". Which time works?"
+	}
+	return prefix + ": " + formatSlotOptions(slots, loc) + ". Which time works?"
+}
+
+func compactSameDaySlotOptions(slots []OfferedSlot, loc *time.Location) (string, []string, string, bool) {
+	if len(slots) == 0 {
+		return "", nil, "", false
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+	firstLocal := slots[0].StartTime.In(loc)
+	day := firstLocal.Format("Monday, January 2")
+	staffPhrase := slotStaffPhrase(slots[0])
+	times := make([]string, 0, len(slots))
+	for _, slot := range slots {
+		local := slot.StartTime.In(loc)
+		if local.Format("2006-01-02") != firstLocal.Format("2006-01-02") {
+			return "", nil, "", false
+		}
+		if slotStaffPhrase(slot) != staffPhrase {
+			return "", nil, "", false
+		}
+		times = append(times, local.Format("3:04 PM"))
+	}
+	return day, times, staffPhrase, true
+}
+
 func offeredSlotSelectionRetryReply(message string, session Session, services []ServiceOption, loc *time.Location) string {
 	reply := formatSlotOfferForSession(session.OfferedSlots, loc, false, session, services)
 	if looksLikeUnclearOClockTime(message) {
@@ -1247,16 +1293,22 @@ func formatSpecificStaffUnavailableOffer(session Session, staff []StaffOption, r
 func formatSlotOptions(slots []OfferedSlot, loc *time.Location) string {
 	parts := make([]string, 0, len(slots))
 	for i, slot := range slots {
-		label := ordinalLabel(i + 1)
+		label := ordinalSpeechLabel(i + 1)
 		when := slot.StartTime.In(loc).Format("Monday, January 2 at 3:04 PM")
-		if slotUsesAnyone(slot) {
-			when += availableTechnicianPhrase(slot)
-		} else if assigned := slotAssignedStaffLabel(slot); assigned != "" {
-			when += " with " + assigned
-		}
+		when += slotStaffPhrase(slot)
 		parts = append(parts, label+" "+when)
 	}
 	return strings.Join(parts, "; ")
+}
+
+func slotStaffPhrase(slot OfferedSlot) string {
+	if slotUsesAnyone(slot) {
+		return availableTechnicianPhrase(slot)
+	}
+	if assigned := slotAssignedStaffLabel(slot); assigned != "" {
+		return " with " + assigned
+	}
+	return ""
 }
 
 func selectedRequestedTimeReply(session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, missing string) string {
@@ -1288,6 +1340,19 @@ func ordinalLabel(index int) string {
 		return "third:"
 	default:
 		return fmt.Sprintf("%d:", index)
+	}
+}
+
+func ordinalSpeechLabel(index int) string {
+	switch index {
+	case 1:
+		return "First,"
+	case 2:
+		return "Second,"
+	case 3:
+		return "Third,"
+	default:
+		return fmt.Sprintf("%d.", index)
 	}
 }
 
@@ -1601,14 +1666,17 @@ func bookingServiceSelectionConsistent(session Session) bool {
 	if primaryServiceID == "" {
 		return false
 	}
+	hasPrimary := false
 	for _, segment := range session.BookingSegments {
 		segmentServiceID := strings.TrimSpace(segment.ServiceID)
 		if segmentServiceID == "" {
 			continue
 		}
-		return segmentServiceID == primaryServiceID
+		if segmentServiceID == primaryServiceID {
+			hasPrimary = true
+		}
 	}
-	return false
+	return hasPrimary
 }
 
 func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, session Session, services []ServiceOption, cfg *RuntimeConfig, missing string, nextRequired string, knowledge []KnowledgeSnippet) {
@@ -1826,6 +1894,354 @@ func partySizeFromMessage(message string) int {
 		}
 	}
 	return 0
+}
+
+type partyBookingPlan struct {
+	PartySize int
+	Segments  []booking.BookingSegmentRequest
+}
+
+type partyServiceCountMatch struct {
+	Start     int
+	End       int
+	Count     int
+	Service   ServiceOption
+	PhraseLen int
+}
+
+type partyServicePhrase struct {
+	Service ServiceOption
+	Phrase  string
+	Family  bool
+}
+
+func partyBookingPlanFromMessage(message string, services []ServiceOption, session Session) (partyBookingPlan, bool) {
+	partySize := partySizeFromMessage(message)
+	counted := partyServiceCountSegmentsFromMessage(message, services, session)
+	if len(counted) > 0 {
+		if partySize > 0 && len(counted) != partySize {
+			return partyBookingPlan{}, false
+		}
+		if partySize == 0 {
+			partySize = len(counted)
+		}
+		return partyBookingPlan{PartySize: partySize, Segments: counted}, true
+	}
+	if partySize < 2 {
+		return partyBookingPlan{}, false
+	}
+	service, ok := singlePartyServiceFromMessage(message, services)
+	if !ok {
+		if strings.TrimSpace(session.ServiceID) == "" {
+			return partyBookingPlan{}, false
+		}
+		service = ServiceOption{ID: session.ServiceID, Name: session.ServiceName}
+	}
+	segments := partySegmentsForService(service, partySize, session)
+	if len(segments) != partySize {
+		return partyBookingPlan{}, false
+	}
+	return partyBookingPlan{PartySize: partySize, Segments: segments}, true
+}
+
+func partyServiceCountSegmentsFromMessage(message string, services []ServiceOption, session Session) []booking.BookingSegmentRequest {
+	normalized := normalizeServiceText(message)
+	if normalized == "" {
+		return nil
+	}
+	phrases := partyServicePhrases(services)
+	matches := make([]partyServiceCountMatch, 0)
+	for _, phrase := range phrases {
+		pattern := regexp.MustCompile(`\b(` + partyCountTokenPattern() + `)\s+` + regexp.QuoteMeta(phrase.Phrase) + `\b`)
+		for _, indexes := range pattern.FindAllStringSubmatchIndex(normalized, -1) {
+			if len(indexes) < 4 {
+				continue
+			}
+			countToken := normalized[indexes[2]:indexes[3]]
+			count, ok := partyCountTokenValue(countToken)
+			if !ok || count < 1 {
+				continue
+			}
+			matches = append(matches, partyServiceCountMatch{
+				Start:     indexes[0],
+				End:       indexes[1],
+				Count:     count,
+				Service:   phrase.Service,
+				PhraseLen: len(phrase.Phrase),
+			})
+		}
+	}
+	if len(matches) == 0 {
+		return nil
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].Start == matches[j].Start {
+			return matches[i].PhraseLen > matches[j].PhraseLen
+		}
+		return matches[i].Start < matches[j].Start
+	})
+	accepted := make([]partyServiceCountMatch, 0, len(matches))
+	for _, match := range matches {
+		if partyCountMatchOverlaps(accepted, match) {
+			continue
+		}
+		accepted = append(accepted, match)
+	}
+	mode := staffSelectionModeForServiceRequest(session)
+	staffID := strings.TrimSpace(session.StaffID)
+	if mode == booking.StaffSelectionAnyone {
+		staffID = ""
+	}
+	segments := make([]booking.BookingSegmentRequest, 0)
+	for _, match := range accepted {
+		for i := 0; i < match.Count; i++ {
+			segments = append(segments, booking.BookingSegmentRequest{
+				ServiceID:          strings.TrimSpace(match.Service.ID),
+				StaffID:            staffID,
+				StaffSelectionMode: mode,
+			})
+		}
+	}
+	return segments
+}
+
+func partyCountMatchOverlaps(accepted []partyServiceCountMatch, candidate partyServiceCountMatch) bool {
+	for _, item := range accepted {
+		if candidate.Start < item.End && item.Start < candidate.End {
+			return true
+		}
+	}
+	return false
+}
+
+func partySegmentsForService(service ServiceOption, count int, session Session) []booking.BookingSegmentRequest {
+	serviceID := strings.TrimSpace(service.ID)
+	if serviceID == "" || count <= 0 {
+		return nil
+	}
+	mode := staffSelectionModeForServiceRequest(session)
+	staffID := strings.TrimSpace(session.StaffID)
+	if mode == booking.StaffSelectionAnyone {
+		staffID = ""
+	}
+	segments := make([]booking.BookingSegmentRequest, 0, count)
+	for i := 0; i < count; i++ {
+		segments = append(segments, booking.BookingSegmentRequest{
+			ServiceID:          serviceID,
+			StaffID:            staffID,
+			StaffSelectionMode: mode,
+		})
+	}
+	return segments
+}
+
+func singlePartyServiceFromMessage(message string, services []ServiceOption) (ServiceOption, bool) {
+	normalized := normalizeServiceText(message)
+	if normalized == "" {
+		return ServiceOption{}, false
+	}
+	phrases := partyServicePhrases(services)
+	matched := map[string]ServiceOption{}
+	exactMatched := map[string]ServiceOption{}
+	for _, phrase := range phrases {
+		if !containsNormalizedPhrase(normalized, phrase.Phrase) {
+			continue
+		}
+		serviceID := strings.TrimSpace(phrase.Service.ID)
+		if serviceID == "" {
+			continue
+		}
+		matched[serviceID] = phrase.Service
+		if !phrase.Family {
+			exactMatched[serviceID] = phrase.Service
+		}
+	}
+	if len(exactMatched) == 1 {
+		for _, service := range exactMatched {
+			return service, true
+		}
+	}
+	if len(matched) == 1 {
+		for _, service := range matched {
+			return service, true
+		}
+	}
+	return ServiceOption{}, false
+}
+
+func partyServicePhrases(services []ServiceOption) []partyServicePhrase {
+	familyCounts := map[string]int{}
+	for _, service := range services {
+		for _, token := range serviceNameTokens(service.Name) {
+			familyCounts[singularServiceToken(token)]++
+		}
+	}
+	seen := map[string]bool{}
+	phrases := make([]partyServicePhrase, 0)
+	addPhrase := func(service ServiceOption, phrase string, family bool) {
+		phrase = normalizeServiceText(phrase)
+		if phrase == "" {
+			return
+		}
+		key := strings.TrimSpace(service.ID) + "\x00" + phrase
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		phrases = append(phrases, partyServicePhrase{Service: service, Phrase: phrase, Family: family})
+	}
+	for _, service := range services {
+		name := normalizeServiceText(service.Name)
+		if name == "" || strings.TrimSpace(service.ID) == "" {
+			continue
+		}
+		addPhrase(service, name, false)
+		addPhrase(service, pluralServicePhrase(name), false)
+		for _, token := range serviceNameTokens(service.Name) {
+			singular := singularServiceToken(token)
+			if familyCounts[singular] != 1 {
+				continue
+			}
+			addPhrase(service, singular, true)
+			addPhrase(service, pluralServicePhrase(singular), true)
+		}
+	}
+	sort.SliceStable(phrases, func(i, j int) bool {
+		if len(phrases[i].Phrase) == len(phrases[j].Phrase) {
+			if phrases[i].Family == phrases[j].Family {
+				return phrases[i].Phrase < phrases[j].Phrase
+			}
+			return !phrases[i].Family
+		}
+		return len(phrases[i].Phrase) > len(phrases[j].Phrase)
+	})
+	return phrases
+}
+
+func pluralServicePhrase(phrase string) string {
+	phrase = normalizeServiceText(phrase)
+	if phrase == "" {
+		return ""
+	}
+	parts := strings.Fields(phrase)
+	if len(parts) == 0 {
+		return ""
+	}
+	last := parts[len(parts)-1]
+	switch {
+	case strings.HasSuffix(last, "s"):
+		return phrase
+	case strings.HasSuffix(last, "y"):
+		parts[len(parts)-1] = strings.TrimSuffix(last, "y") + "ies"
+	default:
+		parts[len(parts)-1] = last + "s"
+	}
+	return strings.Join(parts, " ")
+}
+
+func singularServiceToken(token string) string {
+	token = normalizeServiceText(token)
+	switch {
+	case strings.HasSuffix(token, "ies") && len(token) > 3:
+		return strings.TrimSuffix(token, "ies") + "y"
+	case strings.HasSuffix(token, "s") && len(token) > 3:
+		return strings.TrimSuffix(token, "s")
+	default:
+		return token
+	}
+}
+
+func partyCountTokenPattern() string {
+	return `[2-9]|two|three|four|five|six|seven|eight|nine`
+}
+
+func partyCountTokenValue(token string) (int, bool) {
+	token = strings.TrimSpace(strings.ToLower(token))
+	switch token {
+	case "two":
+		return 2, true
+	case "three":
+		return 3, true
+	case "four":
+		return 4, true
+	case "five":
+		return 5, true
+	case "six":
+		return 6, true
+	case "seven":
+		return 7, true
+	case "eight":
+		return 8, true
+	case "nine":
+		return 9, true
+	}
+	value, err := strconv.Atoi(token)
+	if err != nil || value < 2 || value > 9 {
+		return 0, false
+	}
+	return value, true
+}
+
+func applyPartyBookingPlan(session *Session, plan partyBookingPlan) bool {
+	if session == nil || len(plan.Segments) == 0 {
+		return false
+	}
+	before := selectedServiceIDs(*session)
+	segments := make([]booking.BookingSegmentRequest, 0, len(plan.Segments))
+	for _, segment := range plan.Segments {
+		serviceID := strings.TrimSpace(segment.ServiceID)
+		if serviceID == "" {
+			continue
+		}
+		mode := normalizeConversationStaffSelectionMode(segment.StaffSelectionMode)
+		if mode == "" {
+			mode = staffSelectionModeForServiceRequest(*session)
+		}
+		staffID := strings.TrimSpace(segment.StaffID)
+		if mode == booking.StaffSelectionAnyone {
+			staffID = ""
+		}
+		segments = append(segments, booking.BookingSegmentRequest{
+			ServiceID:          serviceID,
+			StaffID:            staffID,
+			StaffSelectionMode: mode,
+		})
+	}
+	if len(segments) == 0 {
+		return false
+	}
+	session.ServiceID = segments[0].ServiceID
+	session.BookingSegments = segments
+	session.StaffSelectionMode = segments[0].StaffSelectionMode
+	if session.StaffSelectionMode == booking.StaffSelectionAnyone {
+		session.StaffID = ""
+		session.StaffName = ""
+	}
+	session.OfferedSlots = nil
+	return !sameStringSlices(before, selectedServiceIDs(*session))
+}
+
+func applyPartyBookingMetadata(turn *TurnRecord, session Session) {
+	if turn == nil {
+		return
+	}
+	turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, map[string]any{
+		"party_booking":        true,
+		"party_segment_count":  len(session.BookingSegments),
+		"party_service_counts": partyServiceCountsForMetadata(session.BookingSegments),
+	})
+}
+
+func partyServiceCountsForMetadata(segments []booking.BookingSegmentRequest) map[string]int {
+	counts := map[string]int{}
+	for _, segment := range segments {
+		serviceID := strings.TrimSpace(segment.ServiceID)
+		if serviceID == "" {
+			continue
+		}
+		counts[serviceID]++
+	}
+	return counts
 }
 
 func normalizeStartRequest(req StartSessionRequest) StartSessionRequest {
@@ -2840,13 +3256,13 @@ func rescheduleCandidateSegments(item booking.AppointmentActionRef) []booking.Bo
 
 func normalizeRescheduleStaffSelectionMode(mode string, staffID string) string {
 	mode = strings.TrimSpace(mode)
+	if strings.TrimSpace(staffID) != "" {
+		return booking.StaffSelectionSpecific
+	}
 	if mode == booking.StaffSelectionAnyone || mode == booking.StaffSelectionSpecific {
 		return mode
 	}
-	if strings.TrimSpace(staffID) == "" {
-		return booking.StaffSelectionAnyone
-	}
-	return booking.StaffSelectionSpecific
+	return booking.StaffSelectionAnyone
 }
 
 func rescheduleServiceLabel(item booking.AppointmentActionRef) string {
@@ -3200,9 +3616,18 @@ func rescheduleSingleCandidatePrompt(candidate RescheduleCandidate, loc *time.Lo
 func rescheduleMultipleCandidatesPrompt(candidates []RescheduleCandidate, loc *time.Location) string {
 	parts := []string{"I found more than one upcoming appointment. Which one should I reschedule?"}
 	for i, candidate := range candidates {
-		parts = append(parts, ordinalLabel(i+1)+" "+rescheduleCandidatePhrase(candidate, loc))
+		parts = append(parts, rescheduleCandidateOptionPhrase(i+1, candidate, loc))
 	}
 	return strings.Join(parts, " ")
+}
+
+func rescheduleCandidateOptionPhrase(index int, candidate RescheduleCandidate, loc *time.Location) string {
+	phrase := strings.TrimSpace(rescheduleCandidatePhrase(candidate, loc))
+	phrase = strings.TrimPrefix(phrase, "for ")
+	if phrase == "" {
+		return strings.TrimSuffix(ordinalSpeechLabel(index), ",") + "."
+	}
+	return ordinalSpeechLabel(index) + " " + phrase + "."
 }
 
 func rescheduleConciseTargetPrompt(candidates []RescheduleCandidate, loc *time.Location) string {

@@ -7,7 +7,7 @@ Turn broad milestone requests into vertical, reviewable slices.
 Use docs/production-readiness-checklist.md, docs/architecture.md, CONTEXT.md, and current code structure.
 Each slice must name backend files, frontend files, migrations, docs, tests, acceptance criteria, and explicit out-of-scope items.
 For AI receptionist understanding slices, include `service_aliases`, `service_categories`, `service_category_aliases`, correction apply flow, transcript metadata, category suggestion refresh, golden conversation regressions, and any owner-review UI needed to make the workflow end to end.
-For group or party booking slices, include structured `party_booking_requests`, idempotent salon/session/event keys, owner handoff, Calls dashboard workflow, redaction, and no-confirmation wording.
+For group or party booking slices, include party segment planning, provider-neutral availability and booking, POS-only confirmation wording, fallback-pending behavior, structured owner-review exception records, idempotent salon/session/event keys, Calls dashboard workflow, and redaction.
 For AI tone slices, include `salon_settings.ai_tone`, settings API/frontend types, configuration transfer schema/defaults, `conversation.RuntimeConfig`, `voice.ModelRequest`, provider adapter prompts, and style-only guardrail tests.
 Preserve the POS-first invariant and avoid fake production behavior.
 Do not edit files.

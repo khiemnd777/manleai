@@ -36,7 +36,7 @@ Analyze the request across these salon realities:
 - Owners are often serving customers while answering exceptions.
 - Callers may ask for prices, hours, walk-ins, reschedules, cancellations, group bookings, or human help before giving full details.
 - Callers may pronounce service names unclearly or use local salon wording. The operational fix is catalog-backed clarification through real services, `service_categories`, owner-reviewed `service_aliases`, or `service_category_aliases`, not per-call guessing or hardcoded keyword patches.
-- Group or party bookings are owner-review requests in the current production release. The AI may collect representative details, party size, requested date/time, and guest services, but should create a structured party request instead of trying to auto-confirm a group appointment.
+- Supported group or party bookings may be completed by the AI when party size and guest service counts resolve to real catalog services and provider-neutral availability returns bookable slots. Ambiguous or unsupported party requests must ask clarification or fall back safely; confirmed wording is allowed only after POS booking success.
 - Staff availability, service duration, business hours, and active POS mappings determine whether booking can even be attempted.
 - Square Appointments owns real availability and booking execution in the current production release.
 - POS failure, disconnected Square, missing staff/service mappings, or disabled AI booking must become pending request or handoff behavior, not confirmed appointments.
