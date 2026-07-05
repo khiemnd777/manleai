@@ -301,15 +301,54 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	if shouldRouteReschedule(*session, message) {
 		return s.handleRescheduleMessage(ctx, ownerUserID, *session, next, message, eventKey, services, staff, cfg, knowledge)
 	}
-	serviceEdit := serviceEditDecisionForMessage(*session, message, serviceUnderstanding, services)
-	serviceChanged := applyServiceEditDecision(&next, serviceEdit)
 	partyPlanApplied := false
-	if shouldGroupBookingHandoff(message) {
-		if plan, ok := partyBookingPlanFromMessage(message, services, next); ok {
-			partyPlanApplied = applyPartyBookingPlan(&next, plan)
-			serviceChanged = serviceChanged || partyPlanApplied
+	partyPlanTouched := false
+	if activePartyPlan(next.PartyPlan) && !partyPlanComplete(next.PartyPlan) {
+		partyPlanTouched = true
+		plan := clonePartyPlan(next.PartyPlan)
+		resolvePartyPlanFromMessage(plan, message, services)
+		autoResolveSingleCandidatePartyGroups(plan)
+		next.PartyPlan = plan
+		next.Intent = IntentBooking
+		if partyPlanComplete(plan) {
+			partyPlanApplied = applyPartyBookingPlan(&next, partyBookingPlan{
+				PartySize: plan.PartySize,
+				Segments:  partyPlanSegments(plan, next),
+			})
+		} else {
+			turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
+			applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
+			applyPartyPlanMetadata(&turn, plan)
+			turn.AIMessage = partyPlanClarificationPrompt(next, plan, services, cfg)
+			finalizeTurnMetadata(&turn, *session, next, "service", "service", "party_plan_clarification")
+			return s.store.SaveTurn(ctx, turn)
+		}
+	} else if shouldGroupBookingHandoff(message) {
+		if plan, ok := partyPlanFromMessage(message, services, serviceAliases, categoryAliases, next); ok {
+			partyPlanTouched = true
+			next.PartyPlan = plan
+			next.Intent = IntentBooking
+			if partyPlanComplete(plan) {
+				partyPlanApplied = applyPartyBookingPlan(&next, partyBookingPlan{
+					PartySize: plan.PartySize,
+					Segments:  partyPlanSegments(plan, next),
+				})
+			} else {
+				turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
+				applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
+				applyPartyPlanMetadata(&turn, plan)
+				turn.AIMessage = partyPlanClarificationPrompt(next, plan, services, cfg)
+				finalizeTurnMetadata(&turn, *session, next, "service", "service", "party_plan_clarification")
+				return s.store.SaveTurn(ctx, turn)
+			}
 		}
 	}
+	serviceEdit := serviceEditDecisionForMessage(*session, message, serviceUnderstanding, services)
+	serviceChanged := false
+	if !partyPlanTouched {
+		serviceChanged = applyServiceEditDecision(&next, serviceEdit)
+	}
+	serviceChanged = serviceChanged || partyPlanApplied
 	if pendingNameCandidate != "" {
 		next.CustomerName = ""
 	}
@@ -1370,6 +1409,7 @@ func syncTurnUpdate(turn *TurnRecord, session Session, services []ServiceOption,
 	turn.Update.RequestedStartTime = session.RequestedStartTime
 	turn.Update.OfferedSlots = session.OfferedSlots
 	turn.Update.BookingSegments = session.BookingSegments
+	turn.Update.PartyPlan = clonePartyPlan(session.PartyPlan)
 	turn.Update.Summary = summaryFor(session, services, staff, cfg)
 }
 
@@ -1397,6 +1437,7 @@ func newTurnRecord(salonID string, ownerUserID string, before Session, after Ses
 			RequestedStartTime:   after.RequestedStartTime,
 			OfferedSlots:         after.OfferedSlots,
 			BookingSegments:      after.BookingSegments,
+			PartyPlan:            clonePartyPlan(after.PartyPlan),
 			Summary:              summaryFor(after, services, staff, cfg),
 		},
 	}
@@ -1944,6 +1985,569 @@ func partyBookingPlanFromMessage(message string, services []ServiceOption, sessi
 	return partyBookingPlan{PartySize: partySize, Segments: segments}, true
 }
 
+type partyPlanPhrase struct {
+	Phrase     string
+	Label      string
+	Candidates []ServiceOption
+}
+
+type partyPlanCountMatch struct {
+	Start     int
+	End       int
+	Count     int
+	Phrase    partyPlanPhrase
+	PhraseLen int
+}
+
+type partyPlanServiceSelection struct {
+	Start     int
+	End       int
+	Service   ServiceOption
+	PhraseLen int
+}
+
+func partyPlanFromMessage(message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, session Session) (*PartyPlan, bool) {
+	partySize := partySizeFromMessage(message)
+	groups := partyPlanGroupsFromMessage(message, services, aliases, categoryAliases)
+	if len(groups) > 0 {
+		total := 0
+		for _, group := range groups {
+			total += group.Count
+		}
+		if total < 2 {
+			return nil, false
+		}
+		if partySize > 0 && total != partySize {
+			return nil, false
+		}
+		if partySize == 0 {
+			partySize = total
+		}
+		plan := &PartyPlan{PartySize: partySize, Groups: groups}
+		autoResolveSingleCandidatePartyGroups(plan)
+		return plan, true
+	}
+	if plan, ok := partyBookingPlanFromMessage(message, services, session); ok {
+		return completedPartyPlanFromSegments(plan, services), true
+	}
+	return nil, false
+}
+
+func partyPlanGroupsFromMessage(message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) []PartyPlanGroup {
+	normalized := normalizeServiceText(message)
+	if normalized == "" {
+		return nil
+	}
+	phrases := partyPlanPhrases(services, aliases, categoryAliases)
+	matches := make([]partyPlanCountMatch, 0)
+	for _, phrase := range phrases {
+		if strings.TrimSpace(phrase.Phrase) == "" || len(phrase.Candidates) == 0 {
+			continue
+		}
+		pattern := regexp.MustCompile(`\b(` + partyCountTokenPattern() + `)\s+` + regexp.QuoteMeta(phrase.Phrase) + `\b`)
+		for _, indexes := range pattern.FindAllStringSubmatchIndex(normalized, -1) {
+			if len(indexes) < 4 {
+				continue
+			}
+			countToken := normalized[indexes[2]:indexes[3]]
+			count, ok := partyCountTokenValue(countToken)
+			if !ok || count < 1 {
+				continue
+			}
+			matches = append(matches, partyPlanCountMatch{
+				Start:     indexes[0],
+				End:       indexes[1],
+				Count:     count,
+				Phrase:    phrase,
+				PhraseLen: len(phrase.Phrase),
+			})
+		}
+	}
+	if len(matches) == 0 {
+		return nil
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].Start == matches[j].Start {
+			return matches[i].PhraseLen > matches[j].PhraseLen
+		}
+		return matches[i].Start < matches[j].Start
+	})
+	accepted := make([]partyPlanCountMatch, 0, len(matches))
+	for _, match := range matches {
+		if partyPlanCountMatchOverlaps(accepted, match) {
+			continue
+		}
+		accepted = append(accepted, match)
+	}
+	groups := make([]PartyPlanGroup, 0, len(accepted))
+	for _, match := range accepted {
+		group := PartyPlanGroup{
+			Label:               partyPlanGroupLabel(match.Phrase),
+			Count:               match.Count,
+			CandidateServiceIDs: serviceIDsFromOptions(match.Phrase.Candidates),
+		}
+		if len(group.CandidateServiceIDs) == 1 {
+			group.ResolvedServiceIDs = repeatedString(group.CandidateServiceIDs[0], group.Count)
+		}
+		if group.Count > 0 && len(group.CandidateServiceIDs) > 0 {
+			groups = append(groups, group)
+		}
+	}
+	return groups
+}
+
+func partyPlanPhrases(services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) []partyPlanPhrase {
+	servicesByID := map[string]ServiceOption{}
+	categoryServices := map[string][]ServiceOption{}
+	tokenServices := map[string][]ServiceOption{}
+	for _, service := range services {
+		serviceID := strings.TrimSpace(service.ID)
+		if serviceID == "" {
+			continue
+		}
+		servicesByID[serviceID] = service
+		if categoryID := strings.TrimSpace(service.CategoryID); categoryID != "" {
+			categoryServices[categoryID] = appendUniqueService(categoryServices[categoryID], service)
+		}
+		for _, token := range serviceNameTokens(service.Name) {
+			tokenServices[singularServiceToken(token)] = appendUniqueService(tokenServices[singularServiceToken(token)], service)
+		}
+	}
+	seen := map[string]bool{}
+	phrases := make([]partyPlanPhrase, 0)
+	addPhrase := func(label string, phrase string, candidates []ServiceOption) {
+		phrase = normalizeServiceText(phrase)
+		candidates = orderedServices(candidates)
+		if phrase == "" || len(candidates) == 0 {
+			return
+		}
+		key := phrase + "\x00" + strings.Join(serviceIDsFromOptions(candidates), ",")
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		phrases = append(phrases, partyPlanPhrase{
+			Phrase:     phrase,
+			Label:      strings.TrimSpace(label),
+			Candidates: candidates,
+		})
+	}
+	for _, service := range services {
+		name := strings.TrimSpace(service.Name)
+		if strings.TrimSpace(service.ID) == "" || name == "" {
+			continue
+		}
+		addPhrase(name, name, []ServiceOption{service})
+		addPhrase(name, pluralServicePhrase(name), []ServiceOption{service})
+	}
+	for _, alias := range aliases {
+		service, ok := servicesByID[strings.TrimSpace(alias.ServiceID)]
+		if !ok {
+			continue
+		}
+		phrase := strings.TrimSpace(alias.NormalizedAlias)
+		if phrase == "" {
+			phrase = alias.Alias
+		}
+		addPhrase(service.Name, phrase, []ServiceOption{service})
+		addPhrase(service.Name, pluralServicePhrase(phrase), []ServiceOption{service})
+	}
+	categoryLabels := map[string]string{}
+	for categoryID, items := range categoryServices {
+		label := ""
+		for _, item := range items {
+			if item.CategoryName != "" {
+				label = item.CategoryName
+				break
+			}
+		}
+		if label == "" {
+			continue
+		}
+		categoryLabels[categoryID] = label
+		addPhrase(label, label, items)
+		addPhrase(label, pluralServicePhrase(label), items)
+	}
+	for _, alias := range categoryAliases {
+		items := categoryServices[strings.TrimSpace(alias.CategoryID)]
+		if len(items) == 0 {
+			continue
+		}
+		label := strings.TrimSpace(alias.CategoryName)
+		if label == "" {
+			label = categoryLabels[strings.TrimSpace(alias.CategoryID)]
+		}
+		if label == "" {
+			label = alias.Alias
+		}
+		phrase := strings.TrimSpace(alias.NormalizedAlias)
+		if phrase == "" {
+			phrase = alias.Alias
+		}
+		addPhrase(label, phrase, items)
+		addPhrase(label, pluralServicePhrase(phrase), items)
+	}
+	for token, items := range tokenServices {
+		if token == "" {
+			continue
+		}
+		addPhrase(token, token, items)
+		addPhrase(token, pluralServicePhrase(token), items)
+	}
+	sort.SliceStable(phrases, func(i, j int) bool {
+		if len(phrases[i].Phrase) == len(phrases[j].Phrase) {
+			return phrases[i].Phrase < phrases[j].Phrase
+		}
+		return len(phrases[i].Phrase) > len(phrases[j].Phrase)
+	})
+	return phrases
+}
+
+func partyPlanGroupLabel(phrase partyPlanPhrase) string {
+	label := normalizeServiceText(phrase.Label)
+	if label == "" {
+		label = normalizeServiceText(phrase.Phrase)
+	}
+	parts := strings.Fields(label)
+	if len(parts) == 0 {
+		return "service"
+	}
+	return singularServiceToken(parts[len(parts)-1])
+}
+
+func partyPlanCountMatchOverlaps(accepted []partyPlanCountMatch, candidate partyPlanCountMatch) bool {
+	for _, item := range accepted {
+		if candidate.Start < item.End && item.Start < candidate.End {
+			return true
+		}
+	}
+	return false
+}
+
+func completedPartyPlanFromSegments(plan partyBookingPlan, services []ServiceOption) *PartyPlan {
+	if len(plan.Segments) == 0 {
+		return nil
+	}
+	groups := make([]PartyPlanGroup, 0, len(plan.Segments))
+	for _, segment := range plan.Segments {
+		serviceID := strings.TrimSpace(segment.ServiceID)
+		if serviceID == "" {
+			continue
+		}
+		label := serviceName(serviceID, services, "service")
+		if len(groups) > 0 {
+			last := &groups[len(groups)-1]
+			if len(last.ResolvedServiceIDs) > 0 && last.ResolvedServiceIDs[0] == serviceID {
+				last.Count++
+				last.ResolvedServiceIDs = append(last.ResolvedServiceIDs, serviceID)
+				continue
+			}
+		}
+		groups = append(groups, PartyPlanGroup{
+			Label:               label,
+			Count:               1,
+			CandidateServiceIDs: []string{serviceID},
+			ResolvedServiceIDs:  []string{serviceID},
+		})
+	}
+	if len(groups) == 0 {
+		return nil
+	}
+	partySize := plan.PartySize
+	if partySize == 0 {
+		for _, group := range groups {
+			partySize += group.Count
+		}
+	}
+	return &PartyPlan{PartySize: partySize, Groups: groups}
+}
+
+func activePartyPlan(plan *PartyPlan) bool {
+	return plan != nil && (plan.PartySize > 0 || len(plan.Groups) > 0)
+}
+
+func clonePartyPlan(plan *PartyPlan) *PartyPlan {
+	if plan == nil {
+		return nil
+	}
+	out := &PartyPlan{
+		PartySize: plan.PartySize,
+		Groups:    make([]PartyPlanGroup, 0, len(plan.Groups)),
+	}
+	for _, group := range plan.Groups {
+		out.Groups = append(out.Groups, PartyPlanGroup{
+			Label:               group.Label,
+			Count:               group.Count,
+			CandidateServiceIDs: append([]string(nil), group.CandidateServiceIDs...),
+			ResolvedServiceIDs:  append([]string(nil), group.ResolvedServiceIDs...),
+		})
+	}
+	return out
+}
+
+func partyPlanComplete(plan *PartyPlan) bool {
+	if plan == nil || plan.PartySize < 2 || len(plan.Groups) == 0 {
+		return false
+	}
+	total := 0
+	for _, group := range plan.Groups {
+		if group.Count <= 0 {
+			return false
+		}
+		total += group.Count
+		resolved := nonEmptyStrings(group.ResolvedServiceIDs)
+		if len(resolved) != group.Count {
+			return false
+		}
+	}
+	return total == plan.PartySize
+}
+
+func autoResolveSingleCandidatePartyGroups(plan *PartyPlan) {
+	if plan == nil {
+		return
+	}
+	for i := range plan.Groups {
+		group := &plan.Groups[i]
+		candidates := nonEmptyStrings(group.CandidateServiceIDs)
+		if len(candidates) != 1 || group.Count <= 0 {
+			continue
+		}
+		resolved := nonEmptyStrings(group.ResolvedServiceIDs)
+		for len(resolved) < group.Count {
+			resolved = append(resolved, candidates[0])
+		}
+		if len(resolved) > group.Count {
+			resolved = resolved[:group.Count]
+		}
+		group.ResolvedServiceIDs = resolved
+	}
+}
+
+func resolvePartyPlanFromMessage(plan *PartyPlan, message string, services []ServiceOption) bool {
+	if plan == nil {
+		return false
+	}
+	groupIndex := firstUnresolvedPartyPlanGroup(plan)
+	if groupIndex < 0 {
+		return false
+	}
+	group := &plan.Groups[groupIndex]
+	remaining := group.Count - len(nonEmptyStrings(group.ResolvedServiceIDs))
+	if remaining <= 0 {
+		return false
+	}
+	candidates := servicesByIDs(services, group.CandidateServiceIDs)
+	if len(candidates) == 1 && isAffirmativeOnly(message) {
+		group.ResolvedServiceIDs = append(group.ResolvedServiceIDs, repeatedString(candidates[0].ID, remaining)...)
+		return true
+	}
+	selected := partyPlanSelectedServices(message, candidates)
+	if len(selected) == 0 {
+		return false
+	}
+	ids := serviceIDsFromOptions(selected)
+	switch {
+	case len(ids) == remaining:
+		group.ResolvedServiceIDs = append(group.ResolvedServiceIDs, ids...)
+	case len(ids) == 1 && remaining > 1:
+		group.ResolvedServiceIDs = append(group.ResolvedServiceIDs, repeatedString(ids[0], remaining)...)
+	case len(ids) < remaining:
+		group.ResolvedServiceIDs = append(group.ResolvedServiceIDs, ids...)
+	default:
+		return false
+	}
+	return true
+}
+
+func firstUnresolvedPartyPlanGroup(plan *PartyPlan) int {
+	if plan == nil {
+		return -1
+	}
+	for i, group := range plan.Groups {
+		if group.Count > len(nonEmptyStrings(group.ResolvedServiceIDs)) {
+			return i
+		}
+	}
+	return -1
+}
+
+func partyPlanSelectedServices(message string, candidates []ServiceOption) []ServiceOption {
+	normalized := normalizeServiceText(message)
+	if normalized == "" || len(candidates) == 0 {
+		return nil
+	}
+	if len(candidates) == 1 && isAffirmativeOnly(message) {
+		return append([]ServiceOption(nil), candidates[0])
+	}
+	phrases := partyServicePhrases(candidates)
+	matches := make([]partyPlanServiceSelection, 0)
+	for _, phrase := range phrases {
+		index := indexNormalizedPhrase(normalized, phrase.Phrase)
+		if index < 0 {
+			continue
+		}
+		matches = append(matches, partyPlanServiceSelection{
+			Start:     index,
+			End:       index + len(phrase.Phrase),
+			Service:   phrase.Service,
+			PhraseLen: len(phrase.Phrase),
+		})
+	}
+	if len(matches) == 0 {
+		result := interpretServiceWithCategoryAliases(message, candidates, nil, nil)
+		if result.Status == serviceUnderstandingStatusSelected || result.Status == serviceUnderstandingStatusAmbiguous {
+			return append([]ServiceOption(nil), result.Candidates...)
+		}
+		return nil
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].Start == matches[j].Start {
+			return matches[i].PhraseLen > matches[j].PhraseLen
+		}
+		return matches[i].Start < matches[j].Start
+	})
+	accepted := make([]partyPlanServiceSelection, 0, len(matches))
+	seen := map[string]bool{}
+	for _, match := range matches {
+		if seen[strings.TrimSpace(match.Service.ID)] {
+			continue
+		}
+		overlap := false
+		for _, existing := range accepted {
+			if match.Start < existing.End && existing.Start < match.End {
+				overlap = true
+				break
+			}
+		}
+		if overlap {
+			continue
+		}
+		accepted = append(accepted, match)
+		seen[strings.TrimSpace(match.Service.ID)] = true
+	}
+	out := make([]ServiceOption, 0, len(accepted))
+	for _, match := range accepted {
+		out = append(out, match.Service)
+	}
+	return out
+}
+
+func partyPlanSegments(plan *PartyPlan, session Session) []booking.BookingSegmentRequest {
+	if plan == nil {
+		return nil
+	}
+	mode := staffSelectionModeForServiceRequest(session)
+	staffID := strings.TrimSpace(session.StaffID)
+	if mode == booking.StaffSelectionAnyone {
+		staffID = ""
+	}
+	segments := make([]booking.BookingSegmentRequest, 0, plan.PartySize)
+	for _, group := range plan.Groups {
+		for _, serviceID := range nonEmptyStrings(group.ResolvedServiceIDs) {
+			segments = append(segments, booking.BookingSegmentRequest{
+				ServiceID:          serviceID,
+				StaffID:            staffID,
+				StaffSelectionMode: mode,
+			})
+		}
+	}
+	return segments
+}
+
+func partyPlanClarificationPrompt(session Session, plan *PartyPlan, services []ServiceOption, cfg *RuntimeConfig) string {
+	groupIndex := firstUnresolvedPartyPlanGroup(plan)
+	if groupIndex < 0 {
+		return "Which service would you like for the group appointment?"
+	}
+	group := plan.Groups[groupIndex]
+	candidates := servicesByIDs(services, group.CandidateServiceIDs)
+	options := serviceCandidateNames(candidates, 6)
+	if len(options) == 0 {
+		return "Which service would you like for the group appointment?"
+	}
+	label := strings.TrimSpace(group.Label)
+	if label == "" {
+		label = "service"
+	}
+	remaining := group.Count - len(nonEmptyStrings(group.ResolvedServiceIDs))
+	if remaining < 1 {
+		remaining = group.Count
+	}
+	prefix := ""
+	if context := appointmentContextPhrase(session, cfg); context != "" {
+		prefix = "I have " + context + " noted. "
+	}
+	countLabel := partyPlanCountLabel(remaining, label)
+	return prefix + "Which " + label + " service would you like for " + countLabel + ": " + joinHumanList(options) + "?"
+}
+
+func partyPlanCountLabel(count int, label string) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		label = "service"
+	}
+	switch count {
+	case 1:
+		return "the " + label
+	case 2:
+		return "the two " + pluralServicePhrase(label)
+	case 3:
+		return "the three " + pluralServicePhrase(label)
+	case 4:
+		return "the four " + pluralServicePhrase(label)
+	default:
+		return fmt.Sprintf("the %d %s", count, pluralServicePhrase(label))
+	}
+}
+
+func applyPartyPlanMetadata(turn *TurnRecord, plan *PartyPlan) {
+	if turn == nil || plan == nil {
+		return
+	}
+	turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, map[string]any{
+		"party_plan_active":     true,
+		"party_plan_complete":   partyPlanComplete(plan),
+		"party_plan_party_size": plan.PartySize,
+	})
+}
+
+func serviceIDsFromOptions(services []ServiceOption) []string {
+	out := make([]string, 0, len(services))
+	seen := map[string]bool{}
+	for _, service := range services {
+		id := strings.TrimSpace(service.ID)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+func repeatedString(value string, count int) []string {
+	if strings.TrimSpace(value) == "" || count <= 0 {
+		return nil
+	}
+	out := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		out = append(out, value)
+	}
+	return out
+}
+
+func nonEmptyStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
 func partyServiceCountSegmentsFromMessage(message string, services []ServiceOption, session Session) []booking.BookingSegmentRequest {
 	normalized := normalizeServiceText(message)
 	if normalized == "" {
@@ -2324,6 +2928,7 @@ func hasBookingProgress(session Session) bool {
 		strings.TrimSpace(session.RequestedDate) != "" ||
 		session.RequestedStartTime != nil ||
 		len(session.OfferedSlots) > 0 ||
+		activePartyPlan(session.PartyPlan) ||
 		strings.TrimSpace(session.CustomerName) != "" ||
 		strings.TrimSpace(session.CustomerPhone) != "" ||
 		hasStaffAssignment(session)
@@ -2848,6 +3453,7 @@ func applyServiceSelection(session *Session, matches []ServiceOption) bool {
 	session.ServiceID = matches[0].ID
 	session.ServiceName = matches[0].Name
 	session.BookingSegments = bookingSegmentsFromServices(matches, *session)
+	session.PartyPlan = nil
 	session.OfferedSlots = nil
 	if len(session.BookingSegments) > 0 {
 		session.StaffSelectionMode = session.BookingSegments[0].StaffSelectionMode
@@ -2894,6 +3500,7 @@ func addServiceSelection(session *Session, matches []ServiceOption) bool {
 		return false
 	}
 	session.BookingSegments = segments
+	session.PartyPlan = nil
 	if strings.TrimSpace(session.ServiceID) == "" {
 		session.ServiceID = strings.TrimSpace(segments[0].ServiceID)
 	}
@@ -2914,6 +3521,7 @@ func clearServiceSelection(session *Session) {
 	session.ServiceID = ""
 	session.ServiceName = ""
 	session.BookingSegments = nil
+	session.PartyPlan = nil
 	session.OfferedSlots = nil
 }
 

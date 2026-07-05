@@ -3731,6 +3731,111 @@ func TestMessageBooksSupportedMultiPersonBookingRequest(t *testing.T) {
 	}
 }
 
+func TestMessageCompletesMultiTurnPartyPlanFromCategoryClarification(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_classic_mani", Name: "Classic Manicure", CategoryID: "cat_mani", CategoryName: "Manicure", CategorySlug: "manicure", DurationMinutes: 45},
+		{ID: "service_dip_mani", Name: "Dip Powder Manicure", CategoryID: "cat_mani", CategoryName: "Manicure", CategorySlug: "manicure", DurationMinutes: 60},
+		{ID: "service_gel_mani", Name: "Gel Manicure", CategoryID: "cat_mani", CategoryName: "Manicure", CategorySlug: "manicure", DurationMinutes: 45},
+		{ID: "service_classic_pedi", Name: "Classic Pedicure", CategoryID: "cat_pedi", CategoryName: "Pedicure", CategorySlug: "pedicure", DurationMinutes: 45},
+	}
+	store.categoryAliases = []ServiceCategoryAlias{
+		{ID: "cat_alias_mani", CategoryID: "cat_mani", CategoryName: "Manicure", Alias: "manicures", NormalizedAlias: "manicures", Source: "system", Confidence: 0.9},
+		{ID: "cat_alias_pedi", CategoryID: "cat_pedi", CategoryName: "Pedicure", Alias: "pedicures", NormalizedAlias: "pedicures", Source: "system", Confidence: 0.9},
+	}
+	store.staff = []StaffOption{
+		{ID: "staff_1", Name: "Mai Nguyen", AIBookable: true},
+		{ID: "staff_2", Name: "Lena Pham", AIBookable: true},
+		{ID: "staff_3", Name: "Anne Tran", AIBookable: true},
+		{ID: "staff_4", Name: "Kim Le", AIBookable: true},
+	}
+	slotStart := time.Date(2026, 6, 11, 18, 0, 0, 0, time.UTC)
+	bookingTool := &fakeBookingTool{
+		attempt: &booking.BookingAttempt{
+			ID:           "attempt_party_clarified",
+			Status:       booking.StatusConfirmed,
+			POSBookingID: "booking_party_clarified",
+			Appointment:  &booking.Appointment{ID: "appointment_party_clarified", Status: booking.StatusConfirmed},
+		},
+		availabilityResult: &booking.AvailabilityResult{
+			ServiceID:          "service_classic_mani",
+			ServiceName:        "Classic Manicure",
+			StaffSelectionMode: booking.StaffSelectionAnyone,
+			PreferredDate:      "2026-06-11",
+			DurationMinutes:    210,
+			Timezone:           "America/Chicago",
+			Slots: []booking.AvailabilitySlot{{
+				StartTime:          slotStart,
+				EndTime:            slotStart.Add(210 * time.Minute),
+				StaffID:            "staff_1",
+				StaffName:          "Mai Nguyen",
+				StaffSelectionMode: booking.StaffSelectionAnyone,
+				Segments: []booking.AvailabilitySegment{
+					{ServiceID: "service_classic_mani", ServiceName: "Classic Manicure", StaffID: "staff_1", StaffName: "Mai Nguyen", StaffSelectionMode: booking.StaffSelectionAnyone, DurationMinutes: 45},
+					{ServiceID: "service_dip_mani", ServiceName: "Dip Powder Manicure", StaffID: "staff_2", StaffName: "Lena Pham", StaffSelectionMode: booking.StaffSelectionAnyone, DurationMinutes: 60},
+					{ServiceID: "service_classic_pedi", ServiceName: "Classic Pedicure", StaffID: "staff_3", StaffName: "Anne Tran", StaffSelectionMode: booking.StaffSelectionAnyone, DurationMinutes: 45},
+					{ServiceID: "service_classic_pedi", ServiceName: "Classic Pedicure", StaffID: "staff_4", StaffName: "Kim Le", StaffSelectionMode: booking.StaffSelectionAnyone, DurationMinutes: 45},
+				},
+			}},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I need to book for four people this Thursday. Two manicures and two pedicures.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("booking tool calls = availability %d booking %d, want none before party plan clarification", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if session.PartyPlan == nil || session.PartyPlan.PartySize != 4 || len(session.PartyPlan.Groups) != 2 {
+		t.Fatalf("party plan = %#v, want persisted four-person plan with manicure/pedicure groups", session.PartyPlan)
+	}
+	reply := strings.ToLower(store.lastTurn.AIMessage)
+	if !strings.Contains(reply, "which manicure") || !strings.Contains(reply, "classic manicure") || !strings.Contains(reply, "dip powder manicure") || !strings.Contains(reply, "gel manicure") {
+		t.Fatalf("reply should ask for manicure clarification: %s", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Classic and dip powder",
+	})
+	if err != nil {
+		t.Fatalf("clarification Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 1 {
+		t.Fatalf("availability calls = %d, want 1 after party plan is complete; reply=%q session=%#v", bookingTool.availabilityCalls, store.lastTurn.AIMessage, session)
+	}
+	if got := bookingTool.availabilityRequest.Segments; len(got) != 4 {
+		t.Fatalf("availability segments = %#v, want four clarified party segments", got)
+	} else {
+		want := []string{"service_classic_mani", "service_dip_mani", "service_classic_pedi", "service_classic_pedi"}
+		for i, serviceID := range want {
+			if got[i].ServiceID != serviceID || got[i].StaffSelectionMode != booking.StaffSelectionAnyone {
+				t.Fatalf("segment %d = %#v, want %s/anyone", i, got[i], serviceID)
+			}
+		}
+	}
+	if strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "which dip powder") {
+		t.Fatalf("reply should not loop on single-option dip powder clarification: %s", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "The first one works. My name is Kevin, phone 312-555-0101.",
+	})
+	if err != nil {
+		t.Fatalf("selection Message returned error: %v", err)
+	}
+	if bookingTool.calls != 1 {
+		t.Fatalf("booking calls = %d, want 1; reply=%q session=%#v", bookingTool.calls, store.lastTurn.AIMessage, session)
+	}
+	if session.Outcome != OutcomeBookingConfirmed || session.AppointmentID != "appointment_party_clarified" {
+		t.Fatalf("session outcome/link = %s/%s, want confirmed party appointment", session.Outcome, session.AppointmentID)
+	}
+}
+
 func TestMessageDoesNotConfirmMultiPersonBookingWhenPOSFallbackPending(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = []ServiceOption{{ID: "service_manicure", Name: "Classic Manicure", DurationMinutes: 45}}
@@ -4517,6 +4622,7 @@ func (f *fakeConversationStore) SaveTurn(ctx context.Context, record TurnRecord)
 	session.RequestedDate = record.Update.RequestedDate
 	session.OfferedSlots = record.Update.OfferedSlots
 	session.BookingSegments = append([]booking.BookingSegmentRequest(nil), record.Update.BookingSegments...)
+	session.PartyPlan = clonePartyPlan(record.Update.PartyPlan)
 	session.BookingAttemptID = record.Update.BookingAttemptID
 	session.AppointmentID = record.Update.AppointmentID
 	session.Summary = record.Update.Summary

@@ -781,6 +781,14 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session,
 	if err != nil {
 		return nil, err
 	}
+	partyPlanJSON := "{}"
+	if record.Update.PartyPlan != nil {
+		partyPlanBytes, err := json.Marshal(record.Update.PartyPlan)
+		if err != nil {
+			return nil, err
+		}
+		partyPlanJSON = string(partyPlanBytes)
+	}
 	rescheduleCandidates := record.Update.RescheduleCandidates
 	if rescheduleCandidates == nil {
 		rescheduleCandidates = []RescheduleCandidate{}
@@ -816,14 +824,15 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session,
 			    requested_start_time = $14,
 			    offered_slots = $15::jsonb,
 			    booking_segments = $16::jsonb,
-			    booking_attempt_id = NULLIF($17, '')::uuid,
-			    appointment_id = NULLIF($18, '')::uuid,
-			    summary = NULLIF($19, ''),
-			    ended_at = CASE WHEN $20 THEN now() ELSE ended_at END,
+			    party_plan = $17::jsonb,
+			    booking_attempt_id = NULLIF($18, '')::uuid,
+			    appointment_id = NULLIF($19, '')::uuid,
+			    summary = NULLIF($20, ''),
+			    ended_at = CASE WHEN $21 THEN now() ELSE ended_at END,
 			    updated_at = now()
-			WHERE id = $21
-			  AND salon_id = $22
-		`, record.Update.Status, record.Update.Intent, record.Update.Outcome, bookingAction, record.Update.TargetAppointmentID, string(rescheduleCandidatesJSON), record.Update.CustomerName, record.Update.CustomerPhone, record.Update.CustomerEmail, record.Update.ServiceID, record.Update.StaffID, staffSelectionMode, record.Update.RequestedDate, record.Update.RequestedStartTime, string(offeredSlotsJSON), string(bookingSegmentsJSON), record.Update.BookingAttemptID, record.Update.AppointmentID, record.Update.Summary, record.Update.EndSession, record.Session.ID, record.SalonID); err != nil {
+			WHERE id = $22
+			  AND salon_id = $23
+		`, record.Update.Status, record.Update.Intent, record.Update.Outcome, bookingAction, record.Update.TargetAppointmentID, string(rescheduleCandidatesJSON), record.Update.CustomerName, record.Update.CustomerPhone, record.Update.CustomerEmail, record.Update.ServiceID, record.Update.StaffID, staffSelectionMode, record.Update.RequestedDate, record.Update.RequestedStartTime, string(offeredSlotsJSON), string(bookingSegmentsJSON), partyPlanJSON, record.Update.BookingAttemptID, record.Update.AppointmentID, record.Update.Summary, record.Update.EndSession, record.Session.ID, record.SalonID); err != nil {
 		return nil, err
 	}
 
@@ -1210,6 +1219,7 @@ func sessionSelect() string {
 		       COALESCE(cs.requested_date::text, ''),
 		       cs.requested_start_time, COALESCE(cs.offered_slots, '[]'::jsonb),
 		       COALESCE(cs.booking_segments, '[]'::jsonb),
+		       COALESCE(cs.party_plan, '{}'::jsonb),
 		       COALESCE(cs.booking_attempt_id::text, ''),
 		       COALESCE(cs.appointment_id::text, ''), COALESCE(cs.summary, ''),
 		       cs.lifecycle_status, cs.archived_at, cs.redacted_at, cs.retention_expires_at,
@@ -1233,6 +1243,7 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 	var redactedAt sql.NullTime
 	var offeredSlots []byte
 	var bookingSegments []byte
+	var partyPlan []byte
 	var rescheduleCandidates []byte
 	if err := scanner.Scan(
 		&item.ID,
@@ -1260,6 +1271,7 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 		&requestedStartAt,
 		&offeredSlots,
 		&bookingSegments,
+		&partyPlan,
 		&item.BookingAttemptID,
 		&item.AppointmentID,
 		&item.Summary,
@@ -1292,6 +1304,11 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 	}
 	if len(bookingSegments) > 0 {
 		if err := json.Unmarshal(bookingSegments, &item.BookingSegments); err != nil {
+			return nil, err
+		}
+	}
+	if len(partyPlan) > 0 && strings.TrimSpace(string(partyPlan)) != "{}" {
+		if err := json.Unmarshal(partyPlan, &item.PartyPlan); err != nil {
 			return nil, err
 		}
 	}

@@ -244,6 +244,7 @@ type Session struct {
 	RequestedStartTime   *time.Time                      `json:"requested_start_time,omitempty"`
 	OfferedSlots         []OfferedSlot                   `json:"offered_slots,omitempty"`
 	BookingSegments      []booking.BookingSegmentRequest `json:"booking_segments,omitempty"`
+	PartyPlan            *PartyPlan                      `json:"party_plan,omitempty"`
 	BookingAttemptID     string                          `json:"booking_attempt_id,omitempty"`
 	AppointmentID        string                          `json:"appointment_id,omitempty"`
 	Summary              string                          `json:"summary,omitempty"`
@@ -340,6 +341,18 @@ type PartyGuestService struct {
 	Notes       string `json:"notes,omitempty"`
 }
 
+type PartyPlan struct {
+	PartySize int              `json:"party_size,omitempty"`
+	Groups    []PartyPlanGroup `json:"groups,omitempty"`
+}
+
+type PartyPlanGroup struct {
+	Label               string   `json:"label,omitempty"`
+	Count               int      `json:"count,omitempty"`
+	CandidateServiceIDs []string `json:"candidate_service_ids,omitempty"`
+	ResolvedServiceIDs  []string `json:"resolved_service_ids,omitempty"`
+}
+
 type WebhookEventLog struct {
 	ID             string    `json:"id"`
 	Provider       string    `json:"provider"`
@@ -401,6 +414,7 @@ type SessionUpdate struct {
 	RequestedStartTime   *time.Time
 	OfferedSlots         []OfferedSlot
 	BookingSegments      []booking.BookingSegmentRequest
+	PartyPlan            *PartyPlan
 	BookingAttemptID     string
 	AppointmentID        string
 	Summary              string
