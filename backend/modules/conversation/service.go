@@ -276,6 +276,27 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	loc := timezoneLocation(cfg.Timezone)
 	pendingNameCandidate := voiceCustomerNamePendingConfirmationCandidate(message, *session)
 	serviceUnderstanding := interpretServiceForSession(message, *session, services, serviceAliases, categoryAliases)
+	if activePartyPlan(session.PartyPlan) && !partyPlanComplete(session.PartyPlan) {
+		if reply, ok := partyPlanServiceMenuReply(message, *session, services, cfg); ok {
+			turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
+			applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
+			applyPartyPlanMetadata(&turn, session.PartyPlan)
+			turn.AIMessage = reply
+			finalizeTurnMetadata(&turn, *session, *session, "service", "service", "party_plan_service_menu")
+			return s.store.SaveTurn(ctx, turn)
+		}
+	}
+	if asksServiceMenu(message) && serviceUnderstanding.Status == serviceUnderstandingStatusUnknown {
+		route := routeNonBookingAnswer(message, *session, answerCtx, cfg, s.now)
+		if route.Handled && route.Source != answerSourceBookingRedirect {
+			turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
+			turn.AIMessage = route.Reply
+			applyAnswerRouteMetadata(&turn, route, answerCtx)
+			s.applyReplyGenerator(ctx, &turn, *session, services, cfg, "", "", knowledge)
+			finalizeTurnMetadata(&turn, *session, *session, "", "", "answer_router")
+			return s.store.SaveTurn(ctx, turn)
+		}
+	}
 	if isServiceInquiry(message, serviceUnderstanding) && !asksStaffQuestion(message, staff, activeStaff) {
 		turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
 		applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
@@ -306,7 +327,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	if activePartyPlan(next.PartyPlan) && !partyPlanComplete(next.PartyPlan) {
 		partyPlanTouched = true
 		plan := clonePartyPlan(next.PartyPlan)
-		resolvePartyPlanFromMessage(plan, message, services)
+		resolvePartyPlanFromMessage(plan, message, services, serviceAliases)
 		autoResolveSingleCandidatePartyGroups(plan)
 		next.PartyPlan = plan
 		next.Intent = IntentBooking
@@ -2324,7 +2345,79 @@ func autoResolveSingleCandidatePartyGroups(plan *PartyPlan) {
 	}
 }
 
-func resolvePartyPlanFromMessage(plan *PartyPlan, message string, services []ServiceOption) bool {
+func partyPlanServiceMenuReply(message string, session Session, services []ServiceOption, cfg *RuntimeConfig) (string, bool) {
+	plan := session.PartyPlan
+	groupIndex := firstUnresolvedPartyPlanGroup(plan)
+	if groupIndex < 0 {
+		return "", false
+	}
+	group := plan.Groups[groupIndex]
+	candidates := servicesByIDs(services, group.CandidateServiceIDs)
+	if len(candidates) == 0 || !asksPartyPlanServiceMenu(message, group, candidates) {
+		return "", false
+	}
+	options := serviceCandidateNames(candidates, 6)
+	if len(options) == 0 {
+		return "", false
+	}
+	label := strings.TrimSpace(group.Label)
+	if label == "" {
+		label = "service"
+	}
+	reply := "We offer " + joinHumanList(options) + " for " + pluralServicePhrase(label) + ". "
+	reply += partyPlanClarificationPrompt(session, plan, services, cfg)
+	return reply, true
+}
+
+func asksPartyPlanServiceMenu(message string, group PartyPlanGroup, candidates []ServiceOption) bool {
+	if asksServiceMenu(message) {
+		return true
+	}
+	normalized := normalizeLooseText(message)
+	if normalized == "" {
+		return false
+	}
+	if !strings.Contains(normalized, "what") && !strings.Contains(normalized, "which") && !strings.Contains(normalized, "list") {
+		return false
+	}
+	if !strings.Contains(normalized, "service") && !strings.Contains(normalized, "option") && !strings.Contains(normalized, "have") && !strings.Contains(normalized, "offer") {
+		return false
+	}
+	for _, phrase := range partyPlanGroupMenuPhrases(group, candidates) {
+		if containsLoosePhrase(normalized, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func partyPlanGroupMenuPhrases(group PartyPlanGroup, candidates []ServiceOption) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0)
+	add := func(value string) {
+		value = normalizeServiceText(value)
+		if value == "" || seen[value] {
+			return
+		}
+		seen[value] = true
+		out = append(out, value)
+		if plural := pluralServicePhrase(value); plural != "" && !seen[plural] {
+			seen[plural] = true
+			out = append(out, plural)
+		}
+	}
+	add(group.Label)
+	for _, candidate := range candidates {
+		add(candidate.CategoryName)
+		add(candidate.CategorySlug)
+		for _, token := range serviceNameTokens(candidate.Name) {
+			add(singularServiceToken(token))
+		}
+	}
+	return out
+}
+
+func resolvePartyPlanFromMessage(plan *PartyPlan, message string, services []ServiceOption, aliases []ServiceAlias) bool {
 	if plan == nil {
 		return false
 	}
@@ -2338,11 +2431,19 @@ func resolvePartyPlanFromMessage(plan *PartyPlan, message string, services []Ser
 		return false
 	}
 	candidates := servicesByIDs(services, group.CandidateServiceIDs)
-	if len(candidates) == 1 && isAffirmativeOnly(message) {
-		group.ResolvedServiceIDs = append(group.ResolvedServiceIDs, repeatedString(candidates[0].ID, remaining)...)
-		return true
+	if isAffirmativeOnly(message) {
+		switch {
+		case len(candidates) == 1:
+			group.ResolvedServiceIDs = append(group.ResolvedServiceIDs, repeatedString(candidates[0].ID, remaining)...)
+			return true
+		case remaining > 1 && remaining == len(candidates):
+			group.ResolvedServiceIDs = append(group.ResolvedServiceIDs, serviceIDsFromOptions(candidates)...)
+			return true
+		default:
+			return false
+		}
 	}
-	selected := partyPlanSelectedServices(message, candidates)
+	selected := partyPlanSelectedServices(message, candidates, services, aliases, *group)
 	if len(selected) == 0 {
 		return false
 	}
@@ -2350,7 +2451,7 @@ func resolvePartyPlanFromMessage(plan *PartyPlan, message string, services []Ser
 	switch {
 	case len(ids) == remaining:
 		group.ResolvedServiceIDs = append(group.ResolvedServiceIDs, ids...)
-	case len(ids) == 1 && remaining > 1:
+	case len(ids) == 1 && remaining > 1 && partyPlanCanRepeatSingleSelection(message):
 		group.ResolvedServiceIDs = append(group.ResolvedServiceIDs, repeatedString(ids[0], remaining)...)
 	case len(ids) < remaining:
 		group.ResolvedServiceIDs = append(group.ResolvedServiceIDs, ids...)
@@ -2372,7 +2473,7 @@ func firstUnresolvedPartyPlanGroup(plan *PartyPlan) int {
 	return -1
 }
 
-func partyPlanSelectedServices(message string, candidates []ServiceOption) []ServiceOption {
+func partyPlanSelectedServices(message string, candidates []ServiceOption, services []ServiceOption, aliases []ServiceAlias, group PartyPlanGroup) []ServiceOption {
 	normalized := normalizeServiceText(message)
 	if normalized == "" || len(candidates) == 0 {
 		return nil
@@ -2380,7 +2481,8 @@ func partyPlanSelectedServices(message string, candidates []ServiceOption) []Ser
 	if len(candidates) == 1 && isAffirmativeOnly(message) {
 		return append([]ServiceOption(nil), candidates[0])
 	}
-	phrases := partyServicePhrases(candidates)
+	pool := partyPlanSelectionPool(services, candidates, group)
+	phrases := partyServicePhrasesWithAliases(pool, aliases)
 	matches := make([]partyPlanServiceSelection, 0)
 	for _, phrase := range phrases {
 		index := indexNormalizedPhrase(normalized, phrase.Phrase)
@@ -2395,8 +2497,8 @@ func partyPlanSelectedServices(message string, candidates []ServiceOption) []Ser
 		})
 	}
 	if len(matches) == 0 {
-		result := interpretServiceWithCategoryAliases(message, candidates, nil, nil)
-		if result.Status == serviceUnderstandingStatusSelected || result.Status == serviceUnderstandingStatusAmbiguous {
+		result := interpretServiceWithCategoryAliases(message, pool, aliases, nil)
+		if result.Status == serviceUnderstandingStatusSelected {
 			return append([]ServiceOption(nil), result.Candidates...)
 		}
 		return nil
@@ -2431,6 +2533,115 @@ func partyPlanSelectedServices(message string, candidates []ServiceOption) []Ser
 		out = append(out, match.Service)
 	}
 	return out
+}
+
+func partyPlanSelectionPool(services []ServiceOption, candidates []ServiceOption, group PartyPlanGroup) []ServiceOption {
+	out := make([]ServiceOption, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = appendUniqueService(out, candidate)
+	}
+	for _, service := range services {
+		if partyServiceFitsPartyGroup(service, candidates, group) {
+			out = appendUniqueService(out, service)
+		}
+	}
+	return orderedServices(out)
+}
+
+func partyServiceFitsPartyGroup(service ServiceOption, candidates []ServiceOption, group PartyPlanGroup) bool {
+	serviceID := strings.TrimSpace(service.ID)
+	if serviceID == "" {
+		return false
+	}
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate.ID) == serviceID {
+			return true
+		}
+	}
+	serviceCategoryID := strings.TrimSpace(service.CategoryID)
+	serviceCategoryName := normalizeServiceText(firstNonEmpty(service.CategoryName, service.CategorySlug))
+	groupLabel := normalizeServiceText(group.Label)
+	for _, candidate := range candidates {
+		if serviceCategoryID != "" && serviceCategoryID == strings.TrimSpace(candidate.CategoryID) {
+			return true
+		}
+		candidateCategory := normalizeServiceText(firstNonEmpty(candidate.CategoryName, candidate.CategorySlug))
+		if serviceCategoryName != "" && candidateCategory != "" && serviceCategoryName == candidateCategory {
+			return true
+		}
+	}
+	if groupLabel == "" {
+		return false
+	}
+	if serviceCategoryName != "" && (serviceCategoryName == groupLabel || containsNormalizedPhrase(serviceCategoryName, groupLabel)) {
+		return true
+	}
+	serviceName := normalizeServiceText(service.Name)
+	return serviceName != "" && containsNormalizedPhrase(serviceName, groupLabel)
+}
+
+func partyServicePhrasesWithAliases(services []ServiceOption, aliases []ServiceAlias) []partyServicePhrase {
+	phrases := partyServicePhrases(services)
+	seen := map[string]bool{}
+	servicesByID := map[string]ServiceOption{}
+	for _, service := range services {
+		servicesByID[strings.TrimSpace(service.ID)] = service
+	}
+	for _, phrase := range phrases {
+		seen[strings.TrimSpace(phrase.Service.ID)+"\x00"+strings.TrimSpace(phrase.Phrase)] = true
+	}
+	addAliasPhrase := func(service ServiceOption, phrase string) {
+		phrase = normalizeServiceText(phrase)
+		if phrase == "" {
+			return
+		}
+		key := strings.TrimSpace(service.ID) + "\x00" + phrase
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		phrases = append(phrases, partyServicePhrase{Service: service, Phrase: phrase})
+	}
+	for _, alias := range aliases {
+		service, ok := servicesByID[strings.TrimSpace(alias.ServiceID)]
+		if !ok {
+			continue
+		}
+		phrase := strings.TrimSpace(alias.NormalizedAlias)
+		if phrase == "" {
+			phrase = alias.Alias
+		}
+		addAliasPhrase(service, phrase)
+		addAliasPhrase(service, pluralServicePhrase(phrase))
+	}
+	sortPartyServicePhrases(phrases)
+	return phrases
+}
+
+func sortPartyServicePhrases(phrases []partyServicePhrase) {
+	sort.SliceStable(phrases, func(i, j int) bool {
+		if len(phrases[i].Phrase) == len(phrases[j].Phrase) {
+			if phrases[i].Family == phrases[j].Family {
+				return phrases[i].Phrase < phrases[j].Phrase
+			}
+			return !phrases[i].Family
+		}
+		return len(phrases[i].Phrase) > len(phrases[j].Phrase)
+	})
+}
+
+func partyPlanCanRepeatSingleSelection(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	normalized := normalizeLooseText(message)
+	if strings.Contains(lower, "&") {
+		return false
+	}
+	for _, signal := range []string{"and", "plus", "also", "both", "each", "one each"} {
+		if containsLoosePhrase(normalized, signal) {
+			return false
+		}
+	}
+	return true
 }
 
 func partyPlanSegments(plan *PartyPlan, session Session) []booking.BookingSegmentRequest {
@@ -2479,7 +2690,16 @@ func partyPlanClarificationPrompt(session Session, plan *PartyPlan, services []S
 		prefix = "I have " + context + " noted. "
 	}
 	countLabel := partyPlanCountLabel(remaining, label)
-	return prefix + "Which " + label + " service would you like for " + countLabel + ": " + joinHumanList(options) + "?"
+	switch {
+	case len(options) == 1:
+		return prefix + "Should I book " + serviceCountSpeech(remaining, options[0]) + "?"
+	case remaining > 1 && remaining == len(options):
+		return prefix + "Should I book " + oneEachServiceSpeech(options) + " for " + countLabel + "?"
+	case remaining > 1:
+		return prefix + "Which " + label + " services should I book for " + countLabel + ": " + joinChoiceList(options) + "?"
+	default:
+		return prefix + "Which " + label + " service should I book: " + joinChoiceList(options) + "?"
+	}
 }
 
 func partyPlanCountLabel(count int, label string) string {
@@ -2499,6 +2719,72 @@ func partyPlanCountLabel(count int, label string) string {
 	default:
 		return fmt.Sprintf("the %d %s", count, pluralServicePhrase(label))
 	}
+}
+
+func serviceCountSpeech(count int, service string) string {
+	service = strings.TrimSpace(service)
+	if count <= 1 {
+		return "one " + service
+	}
+	return countWord(count) + " " + pluralDisplayName(service)
+}
+
+func oneEachServiceSpeech(options []string) string {
+	parts := make([]string, 0, len(options))
+	for _, option := range options {
+		option = strings.TrimSpace(option)
+		if option != "" {
+			parts = append(parts, "one "+option)
+		}
+	}
+	return joinHumanList(parts)
+}
+
+func countWord(count int) string {
+	switch count {
+	case 1:
+		return "one"
+	case 2:
+		return "two"
+	case 3:
+		return "three"
+	case 4:
+		return "four"
+	case 5:
+		return "five"
+	case 6:
+		return "six"
+	case 7:
+		return "seven"
+	case 8:
+		return "eight"
+	case 9:
+		return "nine"
+	default:
+		return fmt.Sprintf("%d", count)
+	}
+}
+
+func pluralDisplayName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return name
+	}
+	parts := strings.Fields(name)
+	if len(parts) == 0 {
+		return name
+	}
+	last := parts[len(parts)-1]
+	lower := strings.ToLower(last)
+	switch {
+	case strings.HasSuffix(lower, "s"):
+		return name
+	case strings.HasSuffix(lower, "y"):
+		parts[len(parts)-1] = strings.TrimSuffix(last, last[len(last)-1:]) + "ies"
+	default:
+		parts[len(parts)-1] = last + "s"
+	}
+	return strings.Join(parts, " ")
 }
 
 func applyPartyPlanMetadata(turn *TurnRecord, plan *PartyPlan) {
@@ -2710,15 +2996,7 @@ func partyServicePhrases(services []ServiceOption) []partyServicePhrase {
 			addPhrase(service, pluralServicePhrase(singular), true)
 		}
 	}
-	sort.SliceStable(phrases, func(i, j int) bool {
-		if len(phrases[i].Phrase) == len(phrases[j].Phrase) {
-			if phrases[i].Family == phrases[j].Family {
-				return phrases[i].Phrase < phrases[j].Phrase
-			}
-			return !phrases[i].Family
-		}
-		return len(phrases[i].Phrase) > len(phrases[j].Phrase)
-	})
+	sortPartyServicePhrases(phrases)
 	return phrases
 }
 
@@ -4359,6 +4637,24 @@ func asksServiceMenu(message string) bool {
 			return true
 		}
 	}
+	if strings.HasPrefix(normalized, "what ") {
+		for _, signal := range []string{
+			"service do you have",
+			"services do you have",
+			"service you have",
+			"services you have",
+			"service do you offer",
+			"services do you offer",
+			"option do you have",
+			"options do you have",
+			"option do you offer",
+			"options do you offer",
+		} {
+			if strings.Contains(normalized, signal) {
+				return true
+			}
+		}
+	}
 	return false
 }
 
@@ -4386,6 +4682,9 @@ func isServiceInquiry(message string, result serviceUnderstandingResult) bool {
 		looksLikeDateOrTimeInsteadOfName(message) ||
 		hasSchedulingAvailabilitySignal(normalized) {
 		return false
+	}
+	if asksServiceMenu(message) {
+		return true
 	}
 	if strings.HasPrefix(normalized, "do you have ") ||
 		strings.HasPrefix(normalized, "do you guys have ") ||
@@ -4483,7 +4782,7 @@ func serviceClarificationPrompt(session Session, result serviceUnderstandingResu
 	if context := appointmentContextPhrase(session, cfg); context != "" {
 		prefix = "I have " + context + " noted. "
 	}
-	return prefix + "Which " + serviceLabel + " would you like: " + joinHumanList(options) + "?"
+	return prefix + "Which " + serviceLabel + " would you like: " + joinChoiceList(options) + "?"
 }
 
 func serviceEditClarificationPrompt(session Session, candidates []ServiceOption, services []ServiceOption) string {
@@ -6843,12 +7142,84 @@ func joinHumanList(values []string) string {
 	}
 }
 
+func joinChoiceList(values []string) string {
+	switch len(values) {
+	case 0:
+		return ""
+	case 1:
+		return values[0]
+	case 2:
+		return values[0] + " or " + values[1]
+	default:
+		return strings.Join(values[:len(values)-1], ", ") + ", or " + values[len(values)-1]
+	}
+}
+
 func serviceSummary(session Session, services []ServiceOption) string {
+	if activePartyPlan(session.PartyPlan) || hasRepeatedBookingService(session.BookingSegments) {
+		if summary := selectedServiceCountSummary(session, services); summary != "" {
+			return summary
+		}
+	}
 	names := selectedServiceNames(session, services)
 	if len(names) > 0 {
 		return joinHumanList(names)
 	}
 	return ""
+}
+
+func hasRepeatedBookingService(segments []booking.BookingSegmentRequest) bool {
+	seen := map[string]bool{}
+	for _, segment := range segments {
+		serviceID := strings.TrimSpace(segment.ServiceID)
+		if serviceID == "" {
+			continue
+		}
+		if seen[serviceID] {
+			return true
+		}
+		seen[serviceID] = true
+	}
+	return false
+}
+
+func selectedServiceCountSummary(session Session, services []ServiceOption) string {
+	type serviceCount struct {
+		ServiceID string
+		Name      string
+		Count     int
+	}
+	counts := make([]serviceCount, 0)
+	indexes := map[string]int{}
+	for _, segment := range session.BookingSegments {
+		serviceID := strings.TrimSpace(segment.ServiceID)
+		if serviceID == "" {
+			continue
+		}
+		index, ok := indexes[serviceID]
+		if !ok {
+			name := serviceName(serviceID, services, "")
+			if name == "" {
+				continue
+			}
+			index = len(counts)
+			indexes[serviceID] = index
+			counts = append(counts, serviceCount{ServiceID: serviceID, Name: name})
+		}
+		counts[index].Count++
+	}
+	if len(counts) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(counts))
+	for _, item := range counts {
+		if item.Count <= 1 {
+			parts = append(parts, "1 "+item.Name)
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%d %s", item.Count, pluralDisplayName(item.Name)))
+	}
+	return joinHumanList(parts)
 }
 
 func selectedServiceNames(session Session, services []ServiceOption) []string {

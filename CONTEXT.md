@@ -77,7 +77,7 @@ A normalized, salon-scoped record of provider failures. Use codes such as `POS_T
 - ManleAI owns canonical salon operational data; the active POS owns booking execution.
 - Service recognition must be catalog-backed and salon-scoped. Do not hardcode per-salon service keywords into prompts or generic matchers.
 - Service categories are menu/understanding configuration, not confirmed-booking entities. Category matches should clarify to real services before availability or booking.
-- Group or party booking requests require owner review in the current production release and must not be described as confirmed appointments.
+- Supported group or party booking requests may be booked by the AI when party size and guest service counts resolve to bookable catalog services, availability returns bookable slots, and the active POS provider returns a successful booking ID. Unsupported or unsafe party requests require owner review and must not be described as confirmed appointments.
 - AI tone changes reply style only. It must not change required booking slots, handoff decisions, availability checks, service selection, or confirmed-booking wording.
 - Square is the first real integration; future POS names are architecture targets, not implemented features.
 - Vietnamese language support is product scope, but English remains the primary commercial release language unless a feature explicitly says otherwise.
