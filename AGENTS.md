@@ -6,15 +6,26 @@ This repository builds a POS-first AI phone receptionist for US nail salons, sta
 
 The product rule is strict: never confirm an appointment unless the active POS provider returns a successful booking ID. If Square or another POS fails, create a fallback pending request, notify the owner, log the POS error, and do not mark the appointment as confirmed.
 
-## Source Of Truth
+## Mandatory Doc Routing
 
-- Architecture: `docs/architecture.md`
-- POS adapter contract: `docs/pos-adapter-layer.md`
-- Square integration: `docs/square-integration.md`
-- API surface: `docs/api.md`
+Do not duplicate the source docs here. Before answering, diagnosing, planning,
+or implementing work in any area below, read the listed source docs first and
+treat them as binding:
+
+- Architecture/current module ownership: `docs/architecture.md`
+- POS booking, Square, and confirmation safety: `docs/pos-adapter-layer.md`, `docs/square-integration.md`
+- API surface and authenticated status/debug endpoints: `docs/api.md`
+- Production, deployment, provider runtime config, and dashboard-managed provider settings: `docs/deployment.md`
 - Production readiness scope: `docs/production-readiness-checklist.md`
+- Voice, Twilio, OpenAI, realtime phone behavior, and live phone demo setup: `docs/api.md`, `docs/agents/phone-booking-demo-config-memo.md`
 - Design/UI/UX contract: `DESIGN.md`
-- Domain language: `CONTEXT.md`
+- Domain language and product scope: `CONTEXT.md`
+
+If the relevant doc cannot be read, say that before giving the answer. If a
+change adds, deletes, renames, or materially changes a `.md` file that affects
+agent routing, product behavior, operational setup, source-of-truth ownership,
+or validation workflow, update this routing rule or the relevant agent rule in
+the same approved documentation scope.
 
 ## Repository Layout
 
