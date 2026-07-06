@@ -168,13 +168,36 @@ func TestStreamStatusWebhookRecordsRealtimeFailure(t *testing.T) {
 	if event.EventType != voice.EventRealtimeFailed {
 		t.Fatalf("event type = %q, want %q", event.EventType, voice.EventRealtimeFailed)
 	}
-	if event.Payload["StreamError"] != "Connection reset without closing handshake" || event.Payload["stage"] != "twilio_stream_status" {
+	if event.Payload["StreamError"] != "Connection reset without closing handshake" || event.Payload["stage"] != "twilio_stream_status" || event.Payload["terminal"] != "true" {
 		t.Fatalf("payload = %#v", event.Payload)
 	}
 }
 
-func TestStreamFallbackSaysConnectionProblemForActiveSession(t *testing.T) {
+func TestStreamFallbackHangsUpForActiveSessionWithoutTerminalFailure(t *testing.T) {
 	adapter, service, _, _ := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Thank you for calling.", conversation.StatusActive, conversation.OutcomeCollecting))
+	app := testTwilioApp(adapter, service)
+	form := url.Values{"CallSid": {"CA123"}}
+
+	res := signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/stream/fallback", form)
+	body := readBody(t, res)
+
+	if res.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.StatusCode, body)
+	}
+	if body != adapter.HangupResponse() {
+		t.Fatalf("active stream fallback without terminal failure should hang up, got: %s", body)
+	}
+}
+
+func TestStreamFallbackSaysConnectionProblemForTerminalFailure(t *testing.T) {
+	adapter, service, store, _ := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Thank you for calling.", conversation.StatusActive, conversation.OutcomeCollecting))
+	store.events = append(store.events, voice.WebhookEvent{
+		Provider:       voice.ProviderTwilio,
+		ProviderCallID: "CA123",
+		CallSessionID:  "session_phone",
+		EventType:      voice.EventRealtimeFailed,
+		Payload:        map[string]string{"stage": "openai_connect", "terminal": "true"},
+	})
 	app := testTwilioApp(adapter, service)
 	form := url.Values{"CallSid": {"CA123"}}
 
@@ -187,7 +210,7 @@ func TestStreamFallbackSaysConnectionProblemForActiveSession(t *testing.T) {
 	if !strings.Contains(body, "live phone connection had a problem") ||
 		!strings.Contains(body, "<Record") ||
 		!strings.Contains(body, "voice_fallback_mode=recording") {
-		t.Fatalf("active stream fallback should explain the connection problem and continue in recording mode: %s", body)
+		t.Fatalf("terminal stream fallback should explain the connection problem and continue in recording mode: %s", body)
 	}
 }
 
@@ -376,7 +399,7 @@ func TestForwardRealtimeEventsKeepsStreamOpenForActiveResponseConflict(t *testin
 		t.Fatalf("expected recoverable active-response conflict to be recorded")
 	}
 	event := store.events[len(store.events)-1]
-	if event.EventType != voice.EventRealtimeFailed || event.Payload["stage"] != "openai_event" || !strings.Contains(event.Payload["error"], "conversation_already_has_active_response") {
+	if event.EventType != voice.EventRealtimeFailed || event.Payload["stage"] != "openai_event" || event.Payload["terminal"] != "" || !strings.Contains(event.Payload["error"], "conversation_already_has_active_response") {
 		t.Fatalf("event = %#v", event)
 	}
 }
@@ -385,7 +408,7 @@ func TestForwardRealtimeEventsClosesTerminalReplyOnlyAfterTwilioMark(t *testing.
 	completed := phoneSessionWithAIReply("You're confirmed with Lotus Nails for your Classic Manicure on Wednesday, June 10 at 10:00 AM with Mai Nguyen. The appointment is under Linh Tran. Thank you, goodbye.", conversation.StatusCompleted, conversation.OutcomeBookingConfirmed)
 	completed.BookingAttemptID = "attempt_voice"
 	completed.AppointmentID = "appointment_voice"
-	adapter, service, _, _ := testTwilioRuntimeWithStore(completed)
+	adapter, service, store, _ := testTwilioRuntimeWithStore(completed)
 	handler := NewHandler(adapter, service)
 	realtime := newFakeRealtimeSession()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -429,6 +452,10 @@ func TestForwardRealtimeEventsClosesTerminalReplyOnlyAfterTwilioMark(t *testing.
 	marks <- markWrite.Mark.Name
 	if got := waitForClose(t, closed); got != "response_complete" {
 		t.Fatalf("close reason = %q, want response_complete", got)
+	}
+	event := store.events[len(store.events)-1]
+	if event.EventType != voice.EventRealtimeStopped || event.Payload["stage"] != "backend_stream_close" || event.Payload["reason"] != "response_complete" {
+		t.Fatalf("backend close event = %#v", event)
 	}
 }
 
@@ -705,6 +732,21 @@ func (f *fakeTwilioVoiceStore) FindCallRoute(ctx context.Context, provider strin
 func (f *fakeTwilioVoiceStore) RecordWebhookEvent(ctx context.Context, event voice.WebhookEvent) error {
 	f.events = append(f.events, event)
 	return nil
+}
+
+func (f *fakeTwilioVoiceStore) HasTerminalRealtimeFailure(ctx context.Context, provider string, providerCallID string, sessionID string) (bool, error) {
+	for _, event := range f.events {
+		if event.Provider != provider || event.ProviderCallID != providerCallID || event.EventType != voice.EventRealtimeFailed {
+			continue
+		}
+		if sessionID != "" && event.CallSessionID != "" && event.CallSessionID != sessionID {
+			continue
+		}
+		if event.Payload["terminal"] == "true" || strings.EqualFold(event.Payload["StreamEvent"], "stream-error") || strings.EqualFold(event.Payload["stream_event"], "stream-error") {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (f *fakeTwilioVoiceStore) SaveAudioOutput(ctx context.Context, record voice.AudioOutputRecord) (*voice.AudioOutput, error) {

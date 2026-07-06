@@ -304,6 +304,38 @@ func TestSpeechTurnEndsOnlyAfterConversationReturnsPOSConfirmedBooking(t *testin
 	}
 }
 
+func TestRealtimeFallbackMessageRequiresTerminalRealtimeFailure(t *testing.T) {
+	store := newFakeVoiceStore()
+	store.route = &CallRoute{SalonID: "salon_1", OwnerUserID: "owner_1", SessionID: "session_phone"}
+	engine := newFakeConversationEngine()
+	engine.messageSession = phoneSessionWithAIReply("What time works for you?", conversation.StatusActive, conversation.OutcomeCollecting)
+	service := NewService(store, engine, testVoiceConfig(), AIProviders{})
+
+	message, err := service.RealtimeFallbackMessage(context.Background(), ProviderTwilio, "CA123")
+	if err != nil {
+		t.Fatalf("RealtimeFallbackMessage returned error: %v", err)
+	}
+	if message != "" {
+		t.Fatalf("fallback message without terminal failure = %q, want empty", message)
+	}
+
+	store.events = append(store.events, WebhookEvent{
+		Provider:       ProviderTwilio,
+		ProviderCallID: "CA123",
+		CallSessionID:  "session_phone",
+		EventType:      EventRealtimeFailed,
+		Payload:        map[string]string{"stage": "openai_connect", "terminal": "true"},
+	})
+
+	message, err = service.RealtimeFallbackMessage(context.Background(), ProviderTwilio, "CA123")
+	if err != nil {
+		t.Fatalf("RealtimeFallbackMessage returned error after terminal failure: %v", err)
+	}
+	if !strings.Contains(message, "live phone connection had a problem") {
+		t.Fatalf("fallback message = %q, want connection problem", message)
+	}
+}
+
 func testVoiceConfig() config.VoiceConfig {
 	return config.VoiceConfig{
 		Provider:      ProviderTwilio,
@@ -403,6 +435,21 @@ func (f *fakeVoiceStore) FindCallRoute(ctx context.Context, provider string, pro
 func (f *fakeVoiceStore) RecordWebhookEvent(ctx context.Context, event WebhookEvent) error {
 	f.events = append(f.events, event)
 	return nil
+}
+
+func (f *fakeVoiceStore) HasTerminalRealtimeFailure(ctx context.Context, provider string, providerCallID string, sessionID string) (bool, error) {
+	for _, event := range f.events {
+		if event.Provider != provider || event.ProviderCallID != providerCallID || event.EventType != EventRealtimeFailed {
+			continue
+		}
+		if sessionID != "" && event.CallSessionID != "" && event.CallSessionID != sessionID {
+			continue
+		}
+		if event.Payload["terminal"] == "true" || strings.EqualFold(event.Payload["StreamEvent"], "stream-error") || strings.EqualFold(event.Payload["stream_event"], "stream-error") {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (f *fakeVoiceStore) SaveAudioOutput(ctx context.Context, record AudioOutputRecord) (*AudioOutput, error) {

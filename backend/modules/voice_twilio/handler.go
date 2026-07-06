@@ -92,6 +92,9 @@ func (h *Handler) StreamStatus(c *fiber.Ctx) error {
 	if payload["stage"] == "" {
 		payload["stage"] = "twilio_stream_status"
 	}
+	if eventType == voice.EventRealtimeFailed && strings.EqualFold(strings.TrimSpace(params["StreamEvent"]), "stream-error") {
+		payload["terminal"] = "true"
+	}
 	if err := h.service.RecordRealtimeEvent(c.UserContext(), voice.ProviderTwilio, params["CallSid"], "", eventType, payload); err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "TWILIO_STREAM_STATUS_FAILED", "Could not record stream status.")
 	}
@@ -281,19 +284,19 @@ func (h *Handler) Stream(c *websocket.Conn) {
 
 			adapter, err := h.streamAdapter(ctx, providerCallID)
 			if err != nil || !adapter.VerifyStreamToken(providerCallID, sessionID, token) {
-				_ = h.recordRealtimeFailure(ctx, providerCallID, sessionID, streamSID, "stream_token", err)
+				_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "stream_token", err)
 				closeStream("stream_auth_failed")
 				return
 			}
 			route, err := h.service.StreamRoute(ctx, voice.ProviderTwilio, providerCallID, sessionID)
 			if err != nil {
-				_ = h.recordRealtimeFailure(ctx, providerCallID, sessionID, streamSID, "stream_route", err)
+				_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "stream_route", err)
 				closeStream("stream_route_failed")
 				return
 			}
 			realtime, err = h.service.ConnectRealtime(ctx, route.SalonID, route.SessionID, providerCallID)
 			if err != nil {
-				_ = h.recordRealtimeFailure(ctx, providerCallID, sessionID, streamSID, "openai_connect", err)
+				_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_connect", err)
 				closeStream("openai_connect_failed")
 				return
 			}
@@ -311,7 +314,7 @@ func (h *Handler) Stream(c *websocket.Conn) {
 				continue
 			}
 			if err := realtime.AppendInputAudio(ctx, msg.Media.Payload); err != nil {
-				_ = h.recordRealtimeFailure(ctx, providerCallID, sessionID, streamSID, "openai_audio_append", err)
+				_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_audio_append", err)
 				closeStream("openai_audio_append_failed")
 				return
 			}
@@ -443,6 +446,21 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	if now == nil {
 		now = time.Now
 	}
+	recordBackendClose := func(reason string) {
+		reason = strings.TrimSpace(reason)
+		if reason == "" {
+			return
+		}
+		_ = h.service.RecordRealtimeEvent(ctx, voice.ProviderTwilio, providerCallID, sessionID, voice.EventRealtimeStopped, map[string]string{
+			"stage":      "backend_stream_close",
+			"stream_sid": strings.TrimSpace(streamSID),
+			"reason":     reason,
+		})
+	}
+	closeAfterBackendStop := func(reason string) {
+		recordBackendClose(reason)
+		closeStream(reason)
+	}
 
 	speakReply := func(message string, closeAfter bool) bool {
 		message = strings.TrimSpace(message)
@@ -454,7 +472,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 			return true
 		}
 		if err := realtime.Speak(ctx, message); err != nil {
-			_ = h.recordRealtimeFailure(ctx, providerCallID, sessionID, streamSID, "openai_response_create", err)
+			_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_response_create", err)
 			closeStream("openai_response_create_failed")
 			return false
 		}
@@ -484,7 +502,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	beginTerminalCloseDrain := func(audioSent bool) bool {
 		if streamSID == "" || !audioSent {
 			cancel()
-			closeStream("response_complete")
+			closeAfterBackendStop("response_complete")
 			return false
 		}
 		markSequence++
@@ -494,7 +512,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 			StreamSid: streamSID,
 			Mark:      twilioMarkPayload{Name: pendingCloseMark},
 		}); err != nil {
-			_ = h.recordRealtimeFailure(ctx, providerCallID, sessionID, streamSID, "twilio_mark_write", err)
+			_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "twilio_mark_write", err)
 			cancel()
 			closeStream("twilio_mark_write_failed")
 			return false
@@ -527,17 +545,17 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 			}
 			clearPendingCloseMark()
 			cancel()
-			closeStream("response_complete")
+			closeAfterBackendStop("response_complete")
 			return
 		case <-closeDrainTimer:
 			clearPendingCloseMark()
 			cancel()
-			closeStream("response_playback_timeout")
+			closeAfterBackendStop("response_playback_timeout")
 			return
 		case event, ok := <-realtime.Events():
 			if !ok {
 				if ctx.Err() == nil {
-					_ = h.recordRealtimeFailure(ctx, providerCallID, sessionID, streamSID, "openai_events_closed", nil)
+					_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_events_closed", nil)
 					closeStream("openai_events_closed")
 				}
 				return
@@ -626,14 +644,15 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					}
 				}
 			case voice.RealtimeEventError:
-				_ = h.recordRealtimeFailure(ctx, providerCallID, sessionID, streamSID, "openai_event", errors.New(event.Error))
 				if strings.TrimSpace(event.Error) == "" {
 					continue
 				}
 				if isActiveRealtimeResponseConflict(event.Error) {
+					_ = h.recordRealtimeFailure(ctx, providerCallID, sessionID, streamSID, "openai_event", errors.New(event.Error))
 					responseActive = true
 					continue
 				}
+				_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_event", errors.New(event.Error))
 				closeStream("openai_event_error")
 				return
 			}
@@ -651,9 +670,20 @@ func isActiveRealtimeResponseConflict(message string) bool {
 }
 
 func (h *Handler) recordRealtimeFailure(ctx context.Context, providerCallID string, sessionID string, streamSID string, stage string, err error) error {
+	return h.recordRealtimeFailureWithTerminal(ctx, providerCallID, sessionID, streamSID, stage, err, false)
+}
+
+func (h *Handler) recordRealtimeTerminalFailure(ctx context.Context, providerCallID string, sessionID string, streamSID string, stage string, err error) error {
+	return h.recordRealtimeFailureWithTerminal(ctx, providerCallID, sessionID, streamSID, stage, err, true)
+}
+
+func (h *Handler) recordRealtimeFailureWithTerminal(ctx context.Context, providerCallID string, sessionID string, streamSID string, stage string, err error, terminal bool) error {
 	payload := map[string]string{
 		"stage":      strings.TrimSpace(stage),
 		"stream_sid": strings.TrimSpace(streamSID),
+	}
+	if terminal {
+		payload["terminal"] = "true"
 	}
 	if err != nil {
 		payload["error"] = err.Error()

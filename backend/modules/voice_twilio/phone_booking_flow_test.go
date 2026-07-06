@@ -511,6 +511,21 @@ func (f *phoneFlowVoiceStore) RecordWebhookEvent(ctx context.Context, event voic
 	return nil
 }
 
+func (f *phoneFlowVoiceStore) HasTerminalRealtimeFailure(ctx context.Context, provider string, providerCallID string, sessionID string) (bool, error) {
+	for _, event := range f.events {
+		if event.Provider != provider || event.ProviderCallID != providerCallID || event.EventType != voice.EventRealtimeFailed {
+			continue
+		}
+		if sessionID != "" && event.CallSessionID != "" && event.CallSessionID != sessionID {
+			continue
+		}
+		if event.Payload["terminal"] == "true" || strings.EqualFold(event.Payload["StreamEvent"], "stream-error") || strings.EqualFold(event.Payload["stream_event"], "stream-error") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (f *phoneFlowVoiceStore) SaveAudioOutput(ctx context.Context, record voice.AudioOutputRecord) (*voice.AudioOutput, error) {
 	return &voice.AudioOutput{ID: "audio_1", ContentType: record.ContentType, Audio: record.Audio}, nil
 }

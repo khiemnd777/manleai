@@ -216,6 +216,33 @@ func (r *Repository) RecordWebhookEvent(ctx context.Context, event WebhookEvent)
 	return err
 }
 
+func (r *Repository) HasTerminalRealtimeFailure(ctx context.Context, provider string, providerCallID string, sessionID string) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM voice_webhook_events
+			WHERE provider = $1
+			  AND provider_call_id = $2
+			  AND event_type = 'realtime_failed'
+			  AND (
+			       COALESCE($3, '') = ''
+			       OR call_session_id::text = $3
+			       OR call_session_id IS NULL
+			  )
+			  AND (
+			       payload->>'terminal' = 'true'
+			       OR lower(COALESCE(payload->>'StreamEvent', payload->>'stream_event', '')) = 'stream-error'
+			  )
+			LIMIT 1
+		)
+	`, provider, providerCallID, sessionID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
 func (r *Repository) SaveAudioOutput(ctx context.Context, record AudioOutputRecord) (*AudioOutput, error) {
 	contentType := record.ContentType
 	if contentType == "" {

@@ -411,9 +411,16 @@ func (s *Service) RealtimeFallbackMessage(ctx context.Context, provider string, 
 	route, err := s.repo.FindCallRoute(ctx, provider, providerCallID)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return "The live phone connection had a problem. Please call again or wait for the owner.", nil
+			return "", nil
 		}
 		return "", err
+	}
+	hasFailure, err := s.repo.HasTerminalRealtimeFailure(ctx, provider, providerCallID, route.SessionID)
+	if err != nil {
+		return "", err
+	}
+	if !hasFailure {
+		return "", nil
 	}
 	session, err := s.conversation.Get(ctx, route.SalonID, route.OwnerUserID, route.SessionID)
 	if err != nil {

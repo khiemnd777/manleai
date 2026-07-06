@@ -54,6 +54,7 @@ type Store interface {
 	FindSalonByPhone(ctx context.Context, phone string) (*InboundSalon, error)
 	FindCallRoute(ctx context.Context, provider string, providerCallID string) (*CallRoute, error)
 	RecordWebhookEvent(ctx context.Context, event WebhookEvent) error
+	HasTerminalRealtimeFailure(ctx context.Context, provider string, providerCallID string, sessionID string) (bool, error)
 	SaveAudioOutput(ctx context.Context, record AudioOutputRecord) (*AudioOutput, error)
 	GetAudioOutput(ctx context.Context, id string) (*AudioOutput, error)
 }
