@@ -35,6 +35,7 @@ func (r *Repository) GetSalonVoiceStatus(ctx context.Context, salonID string, ow
 
 func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID string, ownerUserID string) (*PhoneBookingReadiness, error) {
 	readiness := PhoneBookingReadiness{}
+	var bookingWriteBlockedAt sql.NullTime
 	err := r.db.QueryRowContext(ctx, `
 		SELECT
 			s.ai_enabled,
@@ -102,8 +103,30 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 					WHERE latest.status = 'cancelled'
 					  AND latest.pos_booking_id <> ''
 					  AND appt.status = 'cancelled'
-				) AS test_booking_cancelled
+				) AS test_booking_cancelled,
+				COALESCE(booking_write_blocker.error_code, '') AS booking_write_blocked_code,
+				COALESCE(booking_write_blocker.error_message, '') AS booking_write_blocked_reason,
+				booking_write_blocker.created_at AS booking_write_blocked_at
 			FROM salons s
+			LEFT JOIN LATERAL (
+				SELECT pe.error_code, pe.error_message, pe.created_at
+				FROM pos_errors pe
+				WHERE pe.salon_id = s.id
+				  AND pe.provider = s.active_pos_provider
+				  AND pe.operation = 'create_booking'
+				  AND pe.error_code = 'POS_PERMISSION_DENIED'
+				  AND NOT EXISTS (
+				    SELECT 1
+				    FROM booking_attempts ba
+				    WHERE ba.salon_id = s.id
+				      AND ba.source = 'square_test_booking'
+				      AND COALESCE(ba.pos_booking_id, '') <> ''
+				      AND COALESCE(ba.error_code, '') = ''
+				      AND ba.created_at > pe.created_at
+				  )
+				ORDER BY pe.created_at DESC
+				LIMIT 1
+			) booking_write_blocker ON true
 			WHERE s.id = $1
 			  AND s.owner_user_id = $2
 	`, salonID, ownerUserID).Scan(
@@ -115,6 +138,9 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 		&readiness.StaffCount,
 		&readiness.BusinessHoursCount,
 		&readiness.TestBookingCancelled,
+		&readiness.BookingWriteBlockedCode,
+		&readiness.BookingWriteBlockedReason,
+		&bookingWriteBlockedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -124,9 +150,18 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 	}
 	readiness.SquareConnected = readiness.ActiveProvider == "square" && readiness.ProviderConnected
 	readiness.SquareSynced = readiness.ActiveProvider == "square" && readiness.ProviderSynced
+	readiness.BookingWriteBlocked = readiness.BookingWriteBlockedCode != ""
+	if bookingWriteBlockedAt.Valid {
+		readiness.BookingWriteBlockedAt = &bookingWriteBlockedAt.Time
+	}
 	providerLabel := readiness.ActiveProvider
 	if providerLabel == "square" {
 		providerLabel = "Square Appointments"
+	}
+	bookingWritesReady := !readiness.BookingWriteBlocked
+	bookingWriteMessage := readiness.BookingWriteBlockedReason
+	if bookingWriteMessage == "" {
+		bookingWriteMessage = "Square Appointments rejected booking writes."
 	}
 
 	readiness.Checks = []ReadinessCheck{
@@ -135,6 +170,7 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 		{Key: "bookable_services", Label: "AI-bookable services", Complete: readiness.ServiceCount > 0, Message: incompleteReadinessMessage(readiness.ServiceCount > 0, "No active AI-bookable service is synced from the active POS provider.")},
 		{Key: "bookable_staff", Label: "AI-bookable staff", Complete: readiness.StaffCount > 0, Message: incompleteReadinessMessage(readiness.StaffCount > 0, "No active AI-bookable staff member is synced from the active POS provider.")},
 		{Key: "business_hours", Label: "Business hours", Complete: readiness.BusinessHoursCount > 0, Message: incompleteReadinessMessage(readiness.BusinessHoursCount > 0, "Salon business hours are not configured.")},
+		{Key: "booking_writes", Label: "Square booking writes", Complete: bookingWritesReady, Message: incompleteReadinessMessage(bookingWritesReady, bookingWriteMessage)},
 		{Key: "enable_ai_booking", Label: "Enable AI booking", Complete: readiness.AIEnabled, Message: incompleteReadinessMessage(readiness.AIEnabled, "AI booking is disabled for this salon.")},
 	}
 	readiness.Ready = true

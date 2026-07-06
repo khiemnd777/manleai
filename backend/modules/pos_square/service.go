@@ -53,6 +53,10 @@ type ReadinessStatus struct {
 	CanTestBooking                      bool                       `json:"can_test_booking"`
 	CanCancelTestBooking                bool                       `json:"can_cancel_test_booking"`
 	CanEnableAIBooking                  bool                       `json:"can_enable_ai_booking"`
+	BookingWriteBlocked                 bool                       `json:"booking_write_blocked"`
+	BookingWriteBlockedCode             string                     `json:"booking_write_blocked_code,omitempty"`
+	BookingWriteBlockedReason           string                     `json:"booking_write_blocked_reason,omitempty"`
+	BookingWriteBlockedAt               *time.Time                 `json:"booking_write_blocked_at,omitempty"`
 	AppointmentChangeWriteBlocked       bool                       `json:"appointment_change_write_blocked"`
 	AppointmentChangeWriteBlockedCode   string                     `json:"appointment_change_write_blocked_code,omitempty"`
 	AppointmentChangeWriteBlockedReason string                     `json:"appointment_change_write_blocked_reason,omitempty"`
@@ -247,13 +251,19 @@ func (s *Service) Readiness(ctx context.Context, salonID string, ownerUserID str
 	if err != nil {
 		return nil, err
 	}
+	bookingWriteError, err := s.repo.LatestErrorForOperations(ctx, salonID, pos.ProviderSquare, []string{"create_booking"})
+	if errors.Is(err, pos.ErrNotFound) {
+		bookingWriteError = nil
+	} else if err != nil {
+		return nil, err
+	}
 	appointmentChangeError, err := s.repo.LatestErrorForOperations(ctx, salonID, pos.ProviderSquare, []string{"reschedule_booking", "cancel_booking"})
 	if errors.Is(err, pos.ErrNotFound) {
 		appointmentChangeError = nil
 	} else if err != nil {
 		return nil, err
 	}
-	return buildReadiness(aiEnabled, connection, services, staff, periods, latest, appointmentChangeError), nil
+	return buildReadiness(aiEnabled, connection, services, staff, periods, latest, bookingWriteError, appointmentChangeError), nil
 }
 
 func (s *Service) CreateTestBooking(ctx context.Context, salonID string, ownerUserID string, req TestBookingRequest) (*TestBookingResponse, error) {
@@ -377,7 +387,7 @@ func (s *Service) latestTestBooking(ctx context.Context, salonID string, ownerUs
 	return latest, err
 }
 
-func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.Service, staff []pos.StaffMember, periods []pos.BusinessHourPeriod, latest *booking.TestBookingRecord, appointmentChangeError *pos.POSErrorRecord) *ReadinessStatus {
+func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.Service, staff []pos.StaffMember, periods []pos.BusinessHourPeriod, latest *booking.TestBookingRecord, bookingWriteError *pos.POSErrorRecord, appointmentChangeError *pos.POSErrorRecord) *ReadinessStatus {
 	connected := connection != nil &&
 		connection.ID != "" &&
 		connection.Status != pos.StatusNotConnected &&
@@ -397,7 +407,8 @@ func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.S
 		latest.AppointmentID != "" &&
 		latest.POSBookingID != "" &&
 		latest.AppointmentStatus != booking.StatusCancelled
-	canEnable := canTest
+	bookingWriteBlocker := bookingWriteBlockerFromError(bookingWriteError, latest)
+	canEnable := canTest && !bookingWriteBlocker.Blocked
 
 	checks := []ReadinessCheck{
 		{Key: "connect_square", Label: "Connect Square", Complete: connected, Message: incompleteMessage(connected, "Square Appointments is not connected.")},
@@ -405,6 +416,7 @@ func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.S
 		{Key: "sync_services", Label: "Sync services", Complete: servicesReady, Message: incompleteMessage(servicesReady, "Sync at least one active AI-bookable service.")},
 		{Key: "sync_staff", Label: "Sync staff", Complete: staffReady, Message: incompleteMessage(staffReady, "Sync at least one active AI-bookable staff member.")},
 		{Key: "sync_business_hours", Label: "Sync business hours", Complete: businessHoursReady, Message: incompleteMessage(businessHoursReady, "Sync at least one Square business hour period.")},
+		{Key: "booking_writes", Label: "Square booking writes", Complete: !bookingWriteBlocker.Blocked, Message: incompleteMessage(!bookingWriteBlocker.Blocked, bookingWriteBlocker.Message())},
 		{Key: "enable_ai_booking", Label: "Enable AI booking", Complete: aiEnabled, Message: incompleteMessage(aiEnabled, "AI booking is disabled until all safety checks pass.")},
 	}
 	appointmentChangeBlocker := appointmentChangeWriteBlockerFromError(appointmentChangeError)
@@ -414,6 +426,10 @@ func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.S
 		CanTestBooking:                      canTest,
 		CanCancelTestBooking:                canCancel,
 		CanEnableAIBooking:                  canEnable,
+		BookingWriteBlocked:                 bookingWriteBlocker.Blocked,
+		BookingWriteBlockedCode:             bookingWriteBlocker.ErrorCode,
+		BookingWriteBlockedReason:           bookingWriteBlocker.Reason,
+		BookingWriteBlockedAt:               bookingWriteBlocker.LastSeenAt,
 		AppointmentChangeWriteBlocked:       appointmentChangeBlocker.Blocked,
 		AppointmentChangeWriteBlockedCode:   appointmentChangeBlocker.ErrorCode,
 		AppointmentChangeWriteBlockedReason: appointmentChangeBlocker.Reason,
@@ -423,6 +439,40 @@ func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.S
 		BusinessHourCount:                   businessHourCount,
 		LatestTestBooking:                   latest,
 		Checks:                              checks,
+	}
+}
+
+type bookingWriteBlocker struct {
+	Blocked    bool
+	ErrorCode  string
+	Reason     string
+	LastSeenAt *time.Time
+}
+
+func (b bookingWriteBlocker) Message() string {
+	if strings.TrimSpace(b.Reason) != "" {
+		return b.Reason
+	}
+	return "Square Appointments rejected booking writes. Reconnect Square with booking write permissions or run the Square test booking after updating the seller account."
+}
+
+func bookingWriteBlockerFromError(item *pos.POSErrorRecord, latest *booking.TestBookingRecord) bookingWriteBlocker {
+	if item == nil || item.ErrorCode != pos.ErrorPermissionDenied {
+		return bookingWriteBlocker{}
+	}
+	if latest != nil &&
+		strings.TrimSpace(latest.POSBookingID) != "" &&
+		latest.ErrorCode == "" &&
+		latest.CreatedAt.After(item.CreatedAt) {
+		return bookingWriteBlocker{}
+	}
+	message := strings.TrimSpace(item.ErrorMessage)
+	createdAt := item.CreatedAt
+	return bookingWriteBlocker{
+		Blocked:    true,
+		ErrorCode:  item.ErrorCode,
+		Reason:     message,
+		LastSeenAt: &createdAt,
 	}
 }
 

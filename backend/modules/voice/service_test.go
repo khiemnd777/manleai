@@ -67,6 +67,41 @@ func TestStatusKeepsWebhookReadyWhenPhoneBookingIsBlocked(t *testing.T) {
 	}
 }
 
+func TestStatusKeepsWebhookReadyWhenBookingWritesAreBlocked(t *testing.T) {
+	store := newFakeVoiceStore()
+	store.bookingReadiness = &PhoneBookingReadiness{
+		Ready:                     false,
+		AIEnabled:                 true,
+		SquareConnected:           true,
+		SquareSynced:              true,
+		BookingWriteBlocked:       true,
+		BookingWriteBlockedCode:   "POS_PERMISSION_DENIED",
+		BookingWriteBlockedReason: "square INSUFFICIENT_SCOPES: missing APPOINTMENTS_ALL_WRITE.",
+		Checks: []ReadinessCheck{{
+			Key:      "booking_writes",
+			Label:    "Square booking writes",
+			Complete: false,
+			Message:  "square INSUFFICIENT_SCOPES: missing APPOINTMENTS_ALL_WRITE.",
+		}},
+		BlockedReason: "square INSUFFICIENT_SCOPES: missing APPOINTMENTS_ALL_WRITE.",
+	}
+	service := NewService(store, newFakeConversationEngine(), testVoiceConfig(), AIProviders{})
+
+	status, err := service.Status(context.Background(), "salon_1", "owner_1")
+	if err != nil {
+		t.Fatalf("Status returned error: %v", err)
+	}
+	if !status.Ready {
+		t.Fatalf("Twilio webhook should still be ready: %#v", status)
+	}
+	if status.PhoneBookingReady {
+		t.Fatalf("phone booking should not be ready when Square booking writes are blocked: %#v", status.Booking)
+	}
+	if !status.Booking.BookingWriteBlocked {
+		t.Fatalf("booking write blocker was not surfaced: %#v", status.Booking)
+	}
+}
+
 func TestStatusReportsRealtimeInputModeWhenRealtimeConfigured(t *testing.T) {
 	store := newFakeVoiceStore()
 	service := NewService(store, newFakeConversationEngine(), config.VoiceConfig{

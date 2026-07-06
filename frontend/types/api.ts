@@ -577,6 +577,10 @@ export type SquareReadiness = {
   can_test_booking: boolean;
   can_cancel_test_booking: boolean;
   can_enable_ai_booking: boolean;
+  booking_write_blocked?: boolean;
+  booking_write_blocked_code?: string;
+  booking_write_blocked_reason?: string;
+  booking_write_blocked_at?: string;
   appointment_change_write_blocked?: boolean;
   appointment_change_write_blocked_code?: string;
   appointment_change_write_blocked_reason?: string;
@@ -855,6 +859,10 @@ export type VoiceBookingReadiness = {
   square_connected: boolean;
   square_synced: boolean;
   test_booking_cancelled: boolean;
+  booking_write_blocked?: boolean;
+  booking_write_blocked_code?: string;
+  booking_write_blocked_reason?: string;
+  booking_write_blocked_at?: string;
   service_count: number;
   staff_count: number;
   business_hours_count: number;

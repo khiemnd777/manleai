@@ -397,7 +397,7 @@ keys, client secrets, encrypted secrets, or POS connection token state.
     "status": "active",
     "merchant_id": "merchant-id",
     "location_id": "location-id",
-    "scopes": ["APPOINTMENTS_READ", "APPOINTMENTS_WRITE"],
+    "scopes": ["APPOINTMENTS_READ", "APPOINTMENTS_ALL_READ", "APPOINTMENTS_WRITE", "APPOINTMENTS_ALL_WRITE"],
     "last_sync_at": "2026-06-25T14:30:00Z",
     "updated_at": "2026-06-25T14:30:00Z"
   },
@@ -1445,7 +1445,7 @@ Returns a read-only preview that uses active salon knowledge without creating a 
 
 `GET /api/salons/:id/voice/status`
 
-Returns owner-scoped live voice, phone booking, and external AI provider readiness without exposing Twilio, OpenAI, or POS token secrets. `ready` means Twilio can route live phone webhooks; `phone_booking_ready` means the phone path also has the booking prerequisites needed to offer available slots from the active POS provider and attempt POS-first confirmation.
+Returns owner-scoped live voice, phone booking, and external AI provider readiness without exposing Twilio, OpenAI, or POS token secrets. `ready` means Twilio can route live phone webhooks; `phone_booking_ready` means the phone path also has the booking prerequisites needed to offer available slots from the active POS provider and attempt POS-first confirmation. For Square Appointments, a current create-booking permission blocker returns `booking.booking_write_blocked=true` and keeps `phone_booking_ready=false`.
 
 ```json
 {
@@ -1469,6 +1469,7 @@ Returns owner-scoped live voice, phone booking, and external AI provider readine
     "square_connected": true,
     "square_synced": true,
     "test_booking_cancelled": true,
+    "booking_write_blocked": false,
     "service_count": 4,
     "staff_count": 3,
     "business_hours_count": 6,
@@ -1799,6 +1800,10 @@ Exchanges the Square OAuth code and stores encrypted tokens.
 
 Returns the Square connection, recent sync logs, and AI booking readiness checks,
 including `business_hour_period_count` for the selected Square location import.
+Readiness also includes `booking_write_blocked`, `booking_write_blocked_code`,
+`booking_write_blocked_reason`, and `booking_write_blocked_at` when the latest
+Square create-booking permission error still has not been cleared by a later
+successful Square test booking.
 
 `GET /api/integrations/square/locations?salon_id=<id>`
 

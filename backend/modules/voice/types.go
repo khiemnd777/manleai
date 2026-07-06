@@ -3,6 +3,7 @@ package voice
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/modules/conversation"
@@ -216,19 +217,23 @@ type ReadinessCheck struct {
 }
 
 type PhoneBookingReadiness struct {
-	Ready                bool             `json:"ready"`
-	AIEnabled            bool             `json:"ai_enabled"`
-	ActiveProvider       string           `json:"active_provider"`
-	ProviderConnected    bool             `json:"provider_connected"`
-	ProviderSynced       bool             `json:"provider_synced"`
-	SquareConnected      bool             `json:"square_connected"`
-	SquareSynced         bool             `json:"square_synced"`
-	TestBookingCancelled bool             `json:"test_booking_cancelled"`
-	ServiceCount         int              `json:"service_count"`
-	StaffCount           int              `json:"staff_count"`
-	BusinessHoursCount   int              `json:"business_hours_count"`
-	Checks               []ReadinessCheck `json:"checks"`
-	BlockedReason        string           `json:"blocked_reason,omitempty"`
+	Ready                     bool             `json:"ready"`
+	AIEnabled                 bool             `json:"ai_enabled"`
+	ActiveProvider            string           `json:"active_provider"`
+	ProviderConnected         bool             `json:"provider_connected"`
+	ProviderSynced            bool             `json:"provider_synced"`
+	SquareConnected           bool             `json:"square_connected"`
+	SquareSynced              bool             `json:"square_synced"`
+	TestBookingCancelled      bool             `json:"test_booking_cancelled"`
+	BookingWriteBlocked       bool             `json:"booking_write_blocked"`
+	BookingWriteBlockedCode   string           `json:"booking_write_blocked_code,omitempty"`
+	BookingWriteBlockedReason string           `json:"booking_write_blocked_reason,omitempty"`
+	BookingWriteBlockedAt     *time.Time       `json:"booking_write_blocked_at,omitempty"`
+	ServiceCount              int              `json:"service_count"`
+	StaffCount                int              `json:"staff_count"`
+	BusinessHoursCount        int              `json:"business_hours_count"`
+	Checks                    []ReadinessCheck `json:"checks"`
+	BlockedReason             string           `json:"blocked_reason,omitempty"`
 }
 
 type ProviderCapabilityStatus struct {

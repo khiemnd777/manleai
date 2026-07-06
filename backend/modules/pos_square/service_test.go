@@ -91,7 +91,7 @@ func TestBuildReadinessAllowsEnableWhenSquareIsBookingReady(t *testing.T) {
 		Status:            booking.StatusConfirmed,
 		AppointmentStatus: booking.StatusConfirmed,
 		POSBookingID:      "booking_1",
-	}, nil)
+	}, nil, nil)
 	if !confirmed.CanTestBooking {
 		t.Fatalf("expected test booking to be allowed")
 	}
@@ -107,7 +107,7 @@ func TestBuildReadinessAllowsEnableWhenSquareIsBookingReady(t *testing.T) {
 		Status:            booking.StatusCancelled,
 		AppointmentStatus: booking.StatusCancelled,
 		POSBookingID:      "booking_1",
-	}, nil)
+	}, nil, nil)
 	if cancelled.CanCancelTestBooking {
 		t.Fatalf("cancel should not be allowed after test booking is cancelled")
 	}
@@ -115,7 +115,7 @@ func TestBuildReadinessAllowsEnableWhenSquareIsBookingReady(t *testing.T) {
 		t.Fatalf("enable should remain allowed after cancelled test booking")
 	}
 
-	withoutTest := buildReadiness(false, connection, services, staff, periods, nil, nil)
+	withoutTest := buildReadiness(false, connection, services, staff, periods, nil, nil, nil)
 	if !withoutTest.CanEnableAIBooking {
 		t.Fatalf("enable should not require an optional Square test booking")
 	}
@@ -128,7 +128,7 @@ func TestBuildReadinessBlocksTestBookingWithoutBookableRecords(t *testing.T) {
 		Status:     pos.StatusActive,
 		LocationID: "loc_1",
 		LastSyncAt: &now,
-	}, []pos.Service{}, []pos.StaffMember{}, nil, nil, nil)
+	}, []pos.Service{}, []pos.StaffMember{}, nil, nil, nil, nil)
 	if readiness.CanTestBooking {
 		t.Fatalf("test booking should be blocked without bookable services and staff")
 	}
@@ -137,9 +137,62 @@ func TestBuildReadinessBlocksTestBookingWithoutBookableRecords(t *testing.T) {
 	}
 }
 
+func TestBuildReadinessBlocksEnableWhenCreateBookingPermissionDenied(t *testing.T) {
+	now := time.Date(2026, 7, 6, 17, 0, 0, 0, time.UTC)
+	connection, services, staff, periods := squareReadyPrerequisites(now)
+	readiness := buildReadiness(false, connection, services, staff, periods, nil, &pos.POSErrorRecord{
+		ErrorCode:    pos.ErrorPermissionDenied,
+		ErrorMessage: "square INSUFFICIENT_SCOPES: The application is not allowed to update this field once written since it does not have all the required permissions: APPOINTMENTS_ALL_READ, APPOINTMENTS_ALL_WRITE.",
+		CreatedAt:    now,
+	}, nil)
+
+	if !readiness.CanTestBooking {
+		t.Fatalf("test booking should remain available so the owner can verify recovery")
+	}
+	if readiness.CanEnableAIBooking {
+		t.Fatalf("enable should be blocked while Square create-booking writes are rejected")
+	}
+	if !readiness.BookingWriteBlocked {
+		t.Fatalf("booking write blocker was not surfaced")
+	}
+	if readiness.BookingWriteBlockedCode != pos.ErrorPermissionDenied {
+		t.Fatalf("blocker code = %s, want %s", readiness.BookingWriteBlockedCode, pos.ErrorPermissionDenied)
+	}
+	if readiness.BookingWriteBlockedAt == nil || !readiness.BookingWriteBlockedAt.Equal(now) {
+		t.Fatalf("blocker timestamp = %#v, want %s", readiness.BookingWriteBlockedAt, now)
+	}
+	writeCheck := findReadinessCheck(readiness.Checks, "booking_writes")
+	if writeCheck == nil || writeCheck.Complete {
+		t.Fatalf("booking_writes check = %#v, want incomplete", writeCheck)
+	}
+}
+
+func TestBuildReadinessClearsCreateBookingBlockerAfterLaterSuccessfulTest(t *testing.T) {
+	now := time.Date(2026, 7, 6, 17, 0, 0, 0, time.UTC)
+	connection, services, staff, periods := squareReadyPrerequisites(now)
+	readiness := buildReadiness(false, connection, services, staff, periods, &booking.TestBookingRecord{
+		AppointmentID:     "appointment_1",
+		Status:            booking.StatusConfirmed,
+		AppointmentStatus: booking.StatusConfirmed,
+		POSBookingID:      "booking_1",
+		CreatedAt:         now.Add(time.Hour),
+	}, &pos.POSErrorRecord{
+		ErrorCode:    pos.ErrorPermissionDenied,
+		ErrorMessage: "square FORBIDDEN: Merchant subscription does not support write operations.",
+		CreatedAt:    now,
+	}, nil)
+
+	if readiness.BookingWriteBlocked {
+		t.Fatalf("later successful test booking should clear stale create-booking blocker")
+	}
+	if !readiness.CanEnableAIBooking {
+		t.Fatalf("enable should be allowed after a later successful Square test booking")
+	}
+}
+
 func TestBuildReadinessSurfacesSquareAppointmentChangeSubscriptionBlocker(t *testing.T) {
 	now := time.Date(2026, 7, 6, 17, 0, 0, 0, time.UTC)
-	readiness := buildReadiness(false, nil, nil, nil, nil, nil, &pos.POSErrorRecord{
+	readiness := buildReadiness(false, nil, nil, nil, nil, nil, nil, &pos.POSErrorRecord{
 		ErrorCode:    pos.ErrorPermissionDenied,
 		ErrorMessage: "square FORBIDDEN: Merchant subscription does not support write operations.",
 		CreatedAt:    now,
@@ -157,7 +210,7 @@ func TestBuildReadinessSurfacesSquareAppointmentChangeSubscriptionBlocker(t *tes
 }
 
 func TestBuildReadinessDoesNotTreatInsufficientScopesAsSubscriptionBlocker(t *testing.T) {
-	readiness := buildReadiness(false, nil, nil, nil, nil, nil, &pos.POSErrorRecord{
+	readiness := buildReadiness(false, nil, nil, nil, nil, nil, nil, &pos.POSErrorRecord{
 		ErrorCode:    pos.ErrorPermissionDenied,
 		ErrorMessage: "square INSUFFICIENT_SCOPES: The application is not allowed to update this field once written since it does not have all the required permissions: APPOINTMENTS_ALL_READ, APPOINTMENTS_ALL_WRITE.",
 		CreatedAt:    time.Date(2026, 7, 6, 17, 0, 0, 0, time.UTC),
@@ -166,4 +219,40 @@ func TestBuildReadinessDoesNotTreatInsufficientScopesAsSubscriptionBlocker(t *te
 	if readiness.AppointmentChangeWriteBlocked {
 		t.Fatalf("insufficient scopes should not be treated as Square subscription blocker")
 	}
+}
+
+func squareReadyPrerequisites(now time.Time) (*pos.Connection, []pos.Service, []pos.StaffMember, []pos.BusinessHourPeriod) {
+	connection := &pos.Connection{
+		ID:         "connection_1",
+		Status:     pos.StatusActive,
+		LocationID: "loc_1",
+		LastSyncAt: &now,
+	}
+	services := []pos.Service{
+		{
+			POSServiceID:      "svc_1",
+			POSServiceVersion: 123,
+			DurationMinutes:   45,
+			AIBookable:        true,
+			Active:            true,
+			SyncStatus:        pos.SyncStatusSynced,
+			POSLinked:         true,
+		},
+	}
+	staff := []pos.StaffMember{
+		{POSStaffID: "staff_1", AIBookable: true, Active: true, SyncStatus: pos.SyncStatusSynced, POSLinked: true},
+	}
+	periods := []pos.BusinessHourPeriod{
+		{DayOfWeek: 1, StartLocalTime: "09:00:00", EndLocalTime: "17:00:00", Source: pos.BusinessHourSourceImported, Provider: pos.ProviderSquare},
+	}
+	return connection, services, staff, periods
+}
+
+func findReadinessCheck(checks []ReadinessCheck, key string) *ReadinessCheck {
+	for i := range checks {
+		if checks[i].Key == key {
+			return &checks[i]
+		}
+	}
+	return nil
 }

@@ -274,8 +274,10 @@ export function AppointmentsDashboard() {
     appointmentOverviewHasMore
   );
   const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
-  const readyForAvailability = bookingPathReady(status) && bookableServices.length > 0;
-  const readyForManualBooking = readyForAvailability && bookableStaff.length > 0;
+  const bookingDataReady = bookingPathReady(status);
+  const bookingWriteReady = bookingDataReady && !status?.readiness?.booking_write_blocked;
+  const readyForAvailability = bookingDataReady && bookableServices.length > 0;
+  const readyForManualBooking = bookingWriteReady && bookableServices.length > 0 && bookableStaff.length > 0;
   const selectedActionSlot = useMemo(
     () => (actionAvailabilityResult?.slots ?? []).find((slot) => slotKey(slot) === actionForm.selectedSlotKey) ?? null,
     [actionAvailabilityResult, actionForm.selectedSlotKey]
@@ -1003,7 +1005,40 @@ function ReadinessPanel({ status }: { status: StatusResponse | null }) {
   const locationSelected = Boolean(connection?.location_id);
   const readyForBookings =
     connected && locationSelected && (readiness?.service_count ?? 0) > 0 && (readiness?.staff_count ?? 0) > 0;
+  const bookingWriteBlocked = Boolean(readiness?.booking_write_blocked);
   const appointmentChangesBlocked = Boolean(readiness?.appointment_change_write_blocked);
+
+  if (readyForBookings && bookingWriteBlocked) {
+    return (
+      <Card className="border-red-200 bg-red-50 shadow-none">
+        <div className="flex gap-3">
+          <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-accent" />
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <CardTitle>Square booking writes are blocked</CardTitle>
+              <Badge value="fallback_pending" />
+            </div>
+            <CardDescription className="text-red-900">
+              The AI can check Square availability, but new bookings cannot be POS-confirmed until Square accepts booking writes.
+            </CardDescription>
+            <div className="mt-3 rounded-md border border-red-200 bg-white p-3 text-sm leading-6 text-red-900">
+              <div className="font-semibold">{readiness?.booking_write_blocked_code || "Square booking write blocked"}</div>
+              <div className="mt-1">{readiness?.booking_write_blocked_reason || "Square Appointments rejected booking writes."}</div>
+              <div className="mt-1 text-xs text-muted">
+                Last seen: {formatOptionalDate(readiness?.booking_write_blocked_at)}
+              </div>
+            </div>
+            <a
+              className="mt-3 inline-flex h-10 items-center justify-center rounded-md border border-line bg-white px-4 text-sm font-semibold text-ink hover:bg-slate-50"
+              href="/dashboard/integrations"
+            >
+              Open Square integration
+            </a>
+          </div>
+        </div>
+      </Card>
+    );
+  }
 
   if (readyForBookings && appointmentChangesBlocked) {
     return (

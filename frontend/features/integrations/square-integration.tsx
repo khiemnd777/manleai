@@ -801,7 +801,23 @@ export function SquareIntegration() {
             </div>
             <Badge value={aiEnabled ? "active" : "disabled"} />
           </div>
-          {readiness?.appointment_change_write_blocked ? (
+          {readiness?.booking_write_blocked ? (
+            <div className="mt-5 flex gap-3 rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-900">
+              <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-accent" />
+              <div className="min-w-0">
+                <div className="font-semibold">Square booking writes are blocked</div>
+                <div className="mt-1 leading-6">
+                  Square can return availability, but new bookings cannot be POS-confirmed until the seller account and OAuth token allow booking writes.
+                </div>
+                <div className="mt-2 break-words text-xs text-muted">
+                  {readiness.booking_write_blocked_reason || "Square Appointments rejected booking writes."}
+                </div>
+                <div className="mt-1 text-xs text-muted">
+                  Last seen: {formatOptionalDateTime(readiness.booking_write_blocked_at)}
+                </div>
+              </div>
+            </div>
+          ) : readiness?.appointment_change_write_blocked ? (
             <div className="mt-5 flex gap-3 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
               <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" />
               <div className="min-w-0">
@@ -2505,6 +2521,14 @@ function bookingDataOverviewMessage(
 }
 
 function testBookingGateState(readiness: SquareReadiness | undefined, latest?: TestBookingRecord) {
+  if (readiness?.booking_write_blocked) {
+    return {
+      status: "blocked",
+      message:
+        readiness.booking_write_blocked_reason ||
+        "Square rejected the latest booking write. Reconnect Square or run a test booking after updating seller permissions."
+    };
+  }
   if (readiness?.ai_enabled) {
     return {
       status: "ready",
