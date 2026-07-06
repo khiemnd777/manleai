@@ -687,6 +687,7 @@ func (a *SquareAdapter) oauthBaseURL(cfg config.SquareConfig) string {
 func squareScopes() []string {
 	return []string{
 		"APPOINTMENTS_READ",
+		"APPOINTMENTS_ALL_READ",
 		"APPOINTMENTS_WRITE",
 		"APPOINTMENTS_ALL_WRITE",
 		"APPOINTMENTS_BUSINESS_SETTINGS_READ",

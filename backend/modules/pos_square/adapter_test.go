@@ -39,7 +39,7 @@ func TestSquareScopesIncludeDemoSetupWritePermissions(t *testing.T) {
 	for _, scope := range squareScopes() {
 		scopes[scope] = true
 	}
-	for _, required := range []string{"APPOINTMENTS_WRITE", "APPOINTMENTS_ALL_WRITE", "ITEMS_WRITE", "EMPLOYEES_WRITE"} {
+	for _, required := range []string{"APPOINTMENTS_READ", "APPOINTMENTS_ALL_READ", "APPOINTMENTS_WRITE", "APPOINTMENTS_ALL_WRITE", "ITEMS_WRITE", "EMPLOYEES_WRITE"} {
 		if !scopes[required] {
 			t.Fatalf("squareScopes missing %s", required)
 		}
