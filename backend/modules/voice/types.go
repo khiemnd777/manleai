@@ -143,10 +143,12 @@ type ModelReply struct {
 }
 
 type InboundSalon struct {
-	SalonID     string
-	OwnerUserID string
-	SalonName   string
-	Phone       string
+	SalonID                 string
+	OwnerUserID             string
+	SalonName               string
+	Phone                   string
+	RecordingEnabled        bool
+	RecordingConsentMessage string
 }
 
 type CallRoute struct {
@@ -182,11 +184,12 @@ type SpeechToTextRequest struct {
 }
 
 type CallReply struct {
-	Message   string
-	Continue  bool
-	Session   *conversation.Session
-	AudioURL  string
-	InputMode string
+	Message       string
+	OpeningNotice string
+	Continue      bool
+	Session       *conversation.Session
+	AudioURL      string
+	InputMode     string
 }
 
 type WebhookEvent struct {

@@ -140,8 +140,10 @@ func TestRedactSessionDelegatesToStore(t *testing.T) {
 
 func TestInitialReplyIncludesSalonDisclosureAndOpenEndedPrompt(t *testing.T) {
 	reply := initialReply(&RuntimeConfig{
-		SalonName:  "Lotus Nails Studio",
-		AIGreeting: "Thank you for calling. This call may be recorded to help us manage appointments and improve service.",
+		SalonName:               "Lotus Nails Studio",
+		AIGreeting:              "Thank you for calling. This call may be recorded to help us manage appointments and improve service.",
+		RecordingEnabled:        true,
+		RecordingConsentMessage: recordingDisclosure,
 	})
 
 	if !strings.Contains(reply, "Thank you for calling Lotus Nails Studio.") {
@@ -155,6 +157,22 @@ func TestInitialReplyIncludesSalonDisclosureAndOpenEndedPrompt(t *testing.T) {
 	}
 	if strings.Count(reply, "Thank you for calling") != 1 {
 		t.Fatalf("initial reply should not double-greet: %s", reply)
+	}
+}
+
+func TestInitialPhoneReplyLeavesRecordingDisclosureToTwilio(t *testing.T) {
+	reply := initialPhoneReply(&RuntimeConfig{
+		SalonName:               "Pearl Nails Studio",
+		AIGreeting:              "Thank you for calling. This call may be recorded to help us manage appointments and improve service.",
+		RecordingEnabled:        true,
+		RecordingConsentMessage: recordingDisclosure,
+	})
+
+	if reply != "Thank you for calling Pearl Nails Studio. How can I help today?" {
+		t.Fatalf("phone initial reply = %q", reply)
+	}
+	if strings.Contains(reply, "recorded") {
+		t.Fatalf("phone initial reply should not include recording disclosure: %s", reply)
 	}
 }
 
@@ -614,6 +632,166 @@ func TestMessageStartsAutoRescheduleWithTargetConfirmation(t *testing.T) {
 	}
 	if session.RequestedStartTime != nil {
 		t.Fatalf("first reschedule turn should not reuse extracted new time: %s", session.RequestedStartTime)
+	}
+}
+
+func TestMessageStartsAutoCancelWithTargetConfirmation(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.CustomerPhone = "+13125550101"
+	bookingTool := &fakeBookingTool{
+		candidates: []booking.AppointmentActionRef{testRescheduleAppointment()},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I can't make my appointment.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.candidateCalls != 1 {
+		t.Fatalf("candidate calls = %d, want 1", bookingTool.candidateCalls)
+	}
+	if bookingTool.cancelCalls != 0 || bookingTool.rescheduleCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("booking calls = create %d reschedule %d cancel %d, want none before target confirmation", bookingTool.calls, bookingTool.rescheduleCalls, bookingTool.cancelCalls)
+	}
+	if session.BookingAction != BookingActionCancel || session.TargetAppointmentID != "appointment_1" || len(session.RescheduleCandidates) != 1 {
+		t.Fatalf("cancel state = action %s target %s candidates %#v, want selected cancellation target", session.BookingAction, session.TargetAppointmentID, session.RescheduleCandidates)
+	}
+	if session.RequestedStartTime == nil {
+		t.Fatalf("cancel target time should be stored for review")
+	}
+	reply := strings.ToLower(store.lastTurn.AIMessage)
+	if !strings.Contains(reply, "is this the appointment") || !strings.Contains(reply, "cancel") {
+		t.Fatalf("AI message = %q, want cancellation target confirmation", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageCancelConfirmsTargetAndCallsPOS(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.BookingAction = BookingActionCancel
+	store.session.Intent = IntentBooking
+	store.session.CustomerPhone = "+13125550101"
+	candidates := rescheduleCandidatesFromAppointments([]booking.AppointmentActionRef{testRescheduleAppointment()})
+	store.session.RescheduleCandidates = candidates
+	applyCancelCandidate(&store.session, candidates[0], timezoneLocation("America/Chicago"))
+	bookingTool := &fakeBookingTool{
+		cancelledAppointment: &booking.Appointment{
+			ID:               "appointment_1",
+			Status:           booking.StatusCancelled,
+			POSAppointmentID: "square_booking_1",
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Yes, please cancel it.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.cancelCalls != 1 || len(bookingTool.cancelAppointmentIDs) != 1 || bookingTool.cancelAppointmentIDs[0] != "appointment_1" {
+		t.Fatalf("cancel calls/ids = %d/%#v, want POS cancel for selected appointment", bookingTool.cancelCalls, bookingTool.cancelAppointmentIDs)
+	}
+	if bookingTool.cancelRequest.Source != booking.SourceAIConversationSimulator {
+		t.Fatalf("cancel source = %s, want simulator", bookingTool.cancelRequest.Source)
+	}
+	if session.Status != StatusCompleted || session.Outcome != OutcomeBookingCancelled || session.AppointmentID != "appointment_1" {
+		t.Fatalf("session status/outcome/appointment = %s/%s/%s, want completed/booking_cancelled/appointment_1", session.Status, session.Outcome, session.AppointmentID)
+	}
+	reply := store.lastTurn.AIMessage
+	if !strings.Contains(reply, "has been cancelled") || strings.Contains(strings.ToLower(reply), "confirmed") {
+		t.Fatalf("cancel reply should state cancelled without confirmed wording: %s", reply)
+	}
+	assertCustomerReplyHidesProvider(t, reply)
+}
+
+func TestMessageCancelStoresFallbackWhenPOSCancelFails(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.BookingAction = BookingActionCancel
+	store.session.Intent = IntentBooking
+	store.session.CustomerPhone = "+13125550101"
+	candidates := rescheduleCandidatesFromAppointments([]booking.AppointmentActionRef{testRescheduleAppointment()})
+	store.session.RescheduleCandidates = candidates
+	applyCancelCandidate(&store.session, candidates[0], timezoneLocation("America/Chicago"))
+	bookingTool := &fakeBookingTool{
+		cancelFallback: &booking.BookingAttempt{ID: "attempt_cancel_1", Status: booking.StatusFallbackPending},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "That is the one, cancel it.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.cancelCalls != 1 {
+		t.Fatalf("cancel calls = %d, want 1", bookingTool.cancelCalls)
+	}
+	if session.Outcome != OutcomeBookingFallbackPending || session.BookingAttemptID != "attempt_cancel_1" || session.AppointmentID != "" {
+		t.Fatalf("session outcome/attempt/appointment = %s/%s/%s, want fallback attempt without appointment", session.Outcome, session.BookingAttemptID, session.AppointmentID)
+	}
+	reply := store.lastTurn.AIMessage
+	if !strings.Contains(reply, "original appointment has not been changed") || strings.Contains(strings.ToLower(reply), "has been cancelled") {
+		t.Fatalf("fallback reply should avoid cancelled wording: %s", reply)
+	}
+}
+
+func TestMessageCancelNegationDoesNotCallPOS(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.BookingAction = BookingActionCancel
+	store.session.Intent = IntentBooking
+	store.session.CustomerPhone = "+13125550101"
+	candidates := rescheduleCandidatesFromAppointments([]booking.AppointmentActionRef{testRescheduleAppointment()})
+	store.session.RescheduleCandidates = candidates
+	applyCancelCandidate(&store.session, candidates[0], timezoneLocation("America/Chicago"))
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "No, don't cancel it.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.cancelCalls != 0 {
+		t.Fatalf("cancel calls = %d, want none for negation", bookingTool.cancelCalls)
+	}
+	if session.TargetAppointmentID != "" || session.Outcome != OutcomeCollecting {
+		t.Fatalf("cancel target/outcome = %s/%s, want cleared collecting state", session.TargetAppointmentID, session.Outcome)
+	}
+	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "will not cancel") {
+		t.Fatalf("negation reply should acknowledge no cancellation: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageCancelCurrentDraftDoesNotRouteToAppointmentCancellation(t *testing.T) {
+	store := newFakeConversationStore()
+	seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
+	store.services = append(store.services, ServiceOption{
+		ID:              "service_pedicure",
+		Name:            "Classic Pedicure",
+		DurationMinutes: 45,
+	})
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Cancel that, I want a pedicure instead.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.cancelCalls != 0 || bookingTool.candidateCalls != 0 {
+		t.Fatalf("cancel/candidate calls = %d/%d, want none for current draft edit", bookingTool.cancelCalls, bookingTool.candidateCalls)
+	}
+	if session.BookingAction == BookingActionCancel {
+		t.Fatalf("booking action = cancel, want current draft edit to stay out of cancellation flow")
 	}
 }
 
@@ -1661,6 +1839,38 @@ func TestApplyReplyGeneratorRejectsRescheduleTargetStageFlip(t *testing.T) {
 	}
 }
 
+func TestApplyReplyGeneratorRejectsUnavailableRequestedTimeOmission(t *testing.T) {
+	store := newFakeConversationStore()
+	service := NewService(store, &fakeBookingTool{})
+	replyGenerator := &fakeReplyGenerator{message: "I have openings at noon or 12:30. Which works?"}
+	service.SetReplyGenerator(replyGenerator)
+	session := store.session
+	turn := TurnRecord{
+		SalonID:         "salon_1",
+		OwnerUserID:     "owner_1",
+		Session:         session,
+		CustomerMessage: "Thursday at 9:00",
+		AIMessage:       "That time is not available. For your Classic Manicure, I have openings on Thursday, June 11 at 12:00 PM or 12:30 PM. Which works best?",
+		Update: SessionUpdate{
+			Status:  StatusActive,
+			Intent:  IntentBooking,
+			Outcome: OutcomeCollecting,
+		},
+	}
+
+	service.applyReplyGenerator(context.Background(), &turn, session, store.services, &store.cfg, "requested_time", "requested_time", nil)
+
+	if replyGenerator.calls != 1 {
+		t.Fatalf("reply generator calls = %d, want 1", replyGenerator.calls)
+	}
+	if !strings.Contains(turn.AIMessage, "That time is not available") {
+		t.Fatalf("AI message accepted unavailable-time omission: %q", turn.AIMessage)
+	}
+	if turn.AIMetadata["llm_guardrail"] != "rejected_unavailable_time_omission" {
+		t.Fatalf("AI metadata = %#v, want unavailable-time omission guardrail", turn.AIMetadata)
+	}
+}
+
 func TestMessageOffersAvailableSlotsBeforeBooking(t *testing.T) {
 	store := newFakeConversationStore()
 	bookingTool := &fakeBookingTool{
@@ -1755,6 +1965,79 @@ func TestMessageParsesWeekdayDateAndDoesNotAskForDayAgain(t *testing.T) {
 	}
 }
 
+func TestMessageReportsUnavailableRequestedWeekdayBareTimeBeforeOfferingAlternatives(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{{
+		ID:              "service_dip",
+		Name:            "Dip Powder Manicure",
+		DurationMinutes: 60,
+		PriceFrom:       55,
+	}}
+	bookingTool := &fakeBookingTool{
+		availabilityResult: &booking.AvailabilityResult{
+			ServiceID:          "service_dip",
+			ServiceName:        "Dip Powder Manicure",
+			StaffSelectionMode: booking.StaffSelectionAnyone,
+			PreferredDate:      "2026-06-11",
+			DurationMinutes:    60,
+			Timezone:           "America/Chicago",
+			Slots: []booking.AvailabilitySlot{
+				{
+					StartTime:          time.Date(2026, 6, 11, 17, 0, 0, 0, time.UTC),
+					EndTime:            time.Date(2026, 6, 11, 18, 0, 0, 0, time.UTC),
+					StaffID:            "staff_1",
+					StaffName:          "Mai Nguyen",
+					StaffSelectionMode: booking.StaffSelectionAnyone,
+				},
+				{
+					StartTime:          time.Date(2026, 6, 11, 17, 30, 0, 0, time.UTC),
+					EndTime:            time.Date(2026, 6, 11, 18, 30, 0, 0, time.UTC),
+					StaffID:            "staff_1",
+					StaffName:          "Mai Nguyen",
+					StaffSelectionMode: booking.StaffSelectionAnyone,
+				},
+				{
+					StartTime:          time.Date(2026, 6, 11, 18, 0, 0, 0, time.UTC),
+					EndTime:            time.Date(2026, 6, 11, 19, 0, 0, 0, time.UTC),
+					StaffID:            "staff_1",
+					StaffName:          "Mai Nguyen",
+					StaffSelectionMode: booking.StaffSelectionAnyone,
+				},
+			},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I want dip powder Thursday this week at 9:00.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 1 {
+		t.Fatalf("availability calls = %d, want 1", bookingTool.availabilityCalls)
+	}
+	if bookingTool.availabilityRequest.PreferredDate != "2026-06-11" || bookingTool.availabilityRequest.Limit != exactAvailabilityLimit {
+		t.Fatalf("availability request = %#v, want exact requested-time lookup for Thursday", bookingTool.availabilityRequest)
+	}
+	if session.RequestedStartTime != nil {
+		t.Fatalf("requested start should clear until caller chooses an available alternative: %s", session.RequestedStartTime)
+	}
+	if len(session.OfferedSlots) != 3 {
+		t.Fatalf("offered slots = %#v, want three alternatives", session.OfferedSlots)
+	}
+	reply := store.lastTurn.AIMessage
+	for _, want := range []string{"That time is not available", "Dip Powder Manicure", "Thursday, June 11", "12:00 PM", "12:30 PM", "1:00 PM"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply missing %q: %s", want, reply)
+		}
+	}
+	if strings.Contains(strings.ToLower(reply), "all technicians") || strings.Contains(strings.ToLower(reply), "confirmed") {
+		t.Fatalf("reply should avoid unproven busy reason and confirmation wording: %s", reply)
+	}
+}
+
 func TestPreferredDateNextMondayUsesUpcomingWeekday(t *testing.T) {
 	loc := timezoneLocation("America/Chicago")
 	now := func() time.Time {
@@ -1839,13 +2122,13 @@ func TestMessageAutoSelectsExactRequestedTimeWithoutNamingAssignedAnyoneTechnici
 		t.Fatalf("booking calls = %d, want 0 until customer details are collected", bookingTool.calls)
 	}
 	reply := store.lastTurn.AIMessage
-	for _, wantText := range []string{"1:00 PM", "Thursday", "Gel Manicure", "available technician", "What name"} {
+	for _, wantText := range []string{"1:00 PM", "Thursday", "Gel Manicure", "What name"} {
 		if !strings.Contains(reply, wantText) {
 			t.Fatalf("AI reply missing %q: %s", wantText, reply)
 		}
 	}
-	if strings.Contains(reply, "Mai Nguyen") {
-		t.Fatalf("AI reply should not name assigned technician when caller asked for anyone: %s", reply)
+	if strings.Contains(reply, "Mai Nguyen") || strings.Contains(reply, "available technician") {
+		t.Fatalf("AI reply should not name assigned technician or use generic technician wording when caller asked for anyone: %s", reply)
 	}
 	lower := strings.ToLower(reply)
 	if strings.Contains(lower, "does 1:00 pm work") || strings.Contains(lower, "which works") || strings.Contains(reply, "12:00 PM") {
@@ -1903,8 +2186,8 @@ func TestMessageAutoSelectsFairRotationTechnicianWhenMultipleExactSlotsAreAvaila
 	if session.StaffID != "staff_z" || session.StaffName != "Zoe Tran" {
 		t.Fatalf("assigned staff = %s/%s, want fair-rotation Zoe Tran selection", session.StaffID, session.StaffName)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "available technician") || strings.Contains(store.lastTurn.AIMessage, "Zoe Tran") || strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "which works") {
-		t.Fatalf("reply should avoid naming fair-rotation technician without asking the caller to reselect time: %s", store.lastTurn.AIMessage)
+	if strings.Contains(store.lastTurn.AIMessage, "available technician") || strings.Contains(store.lastTurn.AIMessage, "Zoe Tran") || strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "which works") {
+		t.Fatalf("reply should avoid generic technician wording or naming fair-rotation technician without asking the caller to reselect time: %s", store.lastTurn.AIMessage)
 	}
 	if store.lastTurn.ToolMetadata["assignment_policy"] != "fair_rotation" {
 		t.Fatalf("assignment policy metadata = %#v, want fair_rotation", store.lastTurn.ToolMetadata)
@@ -1996,13 +2279,13 @@ func TestMessageOffersAlternativesWhenRequestedTechnicianUnavailableAtExactTime(
 		t.Fatalf("offered slots = %#v, want same-time other tech and later requested tech", session.OfferedSlots)
 	}
 	reply := store.lastTurn.AIMessage
-	for _, wantText := range []string{"Mai Nguyen is not available", "1:00 PM", "available technician", "2:00 PM", "Which works"} {
+	for _, wantText := range []string{"Mai Nguyen is not available", "1:00 PM", "2:00 PM", "Which works"} {
 		if !strings.Contains(reply, wantText) {
 			t.Fatalf("AI reply missing %q: %s", wantText, reply)
 		}
 	}
-	if strings.Contains(reply, "Lena Pham") {
-		t.Fatalf("AI reply should not name alternate technician unless caller selects them: %s", reply)
+	if strings.Contains(reply, "Lena Pham") || strings.Contains(reply, "available technician") {
+		t.Fatalf("AI reply should not name alternate technician or use generic technician wording unless caller selects them: %s", reply)
 	}
 	if strings.Contains(strings.ToLower(reply), "confirmed") {
 		t.Fatalf("unavailable reply must not sound confirmed: %s", reply)
@@ -2065,6 +2348,235 @@ func TestMessageSelectsOfferedSlotByTechnicianNameWithoutAvailabilityRetry(t *te
 	}
 	if !strings.Contains(store.lastTurn.AIMessage, "What name") {
 		t.Fatalf("AI reply should collect name after selecting technician alternative: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageSwitchesTechnicianDuringCustomerNameCollection(t *testing.T) {
+	store := newFakeConversationStore()
+	start := seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
+	store.staff = append(store.staff, StaffOption{
+		ID:         "staff_jenny",
+		Name:       "Jenny Le",
+		AIBookable: true,
+	})
+	bookingTool := &fakeBookingTool{
+		availabilityResult: &booking.AvailabilityResult{
+			ServiceID:          "service_gel",
+			ServiceName:        "Gel Manicure",
+			StaffID:            "staff_jenny",
+			StaffName:          "Jenny Le",
+			StaffSelectionMode: booking.StaffSelectionSpecific,
+			PreferredDate:      start.Format("2006-01-02"),
+			DurationMinutes:    45,
+			Timezone:           "America/Chicago",
+			Slots: []booking.AvailabilitySlot{{
+				StartTime:          start,
+				EndTime:            start.Add(45 * time.Minute),
+				StaffID:            "staff_jenny",
+				StaffName:          "Jenny Le",
+				StaffSelectionMode: booking.StaffSelectionSpecific,
+			}},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Actually, can you switch to Jenny?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 1 || bookingTool.calls != 0 {
+		t.Fatalf("staff switch should re-check availability only, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if bookingTool.availabilityRequest.StaffID != "staff_jenny" || bookingTool.availabilityRequest.StaffSelectionMode != booking.StaffSelectionSpecific {
+		t.Fatalf("availability staff = %s/%s, want specific Jenny", bookingTool.availabilityRequest.StaffID, bookingTool.availabilityRequest.StaffSelectionMode)
+	}
+	if session.StaffID != "staff_jenny" || session.StaffName != "Jenny Le" || session.StaffSelectionMode != booking.StaffSelectionSpecific {
+		t.Fatalf("session staff = %s/%s/%s, want Jenny specific", session.StaffID, session.StaffName, session.StaffSelectionMode)
+	}
+	if session.CustomerName != "" {
+		t.Fatalf("staff switch should not be treated as customer name: %q", session.CustomerName)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "What name") {
+		t.Fatalf("AI should continue collecting customer name after available staff switch: %s", store.lastTurn.AIMessage)
+	}
+	if store.lastTurn.CustomerMetadata["staff_change_source"] != "bookable_staff" {
+		t.Fatalf("staff change metadata = %#v", store.lastTurn.CustomerMetadata)
+	}
+}
+
+func TestMessageSwitchesToAnyoneDuringCustomerNameCollection(t *testing.T) {
+	store := newFakeConversationStore()
+	start := seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
+	store.staff = append(store.staff, StaffOption{
+		ID:         "staff_jenny",
+		Name:       "Jenny Le",
+		AIBookable: true,
+	})
+	bookingTool := &fakeBookingTool{
+		availabilityResult: &booking.AvailabilityResult{
+			ServiceID:          "service_gel",
+			ServiceName:        "Gel Manicure",
+			StaffSelectionMode: booking.StaffSelectionAnyone,
+			PreferredDate:      start.Format("2006-01-02"),
+			DurationMinutes:    45,
+			Timezone:           "America/Chicago",
+			Slots: []booking.AvailabilitySlot{{
+				StartTime:          start,
+				EndTime:            start.Add(45 * time.Minute),
+				StaffID:            "staff_jenny",
+				StaffName:          "Jenny Le",
+				StaffSelectionMode: booking.StaffSelectionAnyone,
+			}},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Keep that time but anyone available is fine.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 1 || bookingTool.calls != 0 {
+		t.Fatalf("anyone switch should re-check availability only, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if bookingTool.availabilityRequest.StaffID != "" || bookingTool.availabilityRequest.StaffSelectionMode != booking.StaffSelectionAnyone {
+		t.Fatalf("availability staff = %s/%s, want anyone", bookingTool.availabilityRequest.StaffID, bookingTool.availabilityRequest.StaffSelectionMode)
+	}
+	if session.StaffSelectionMode != booking.StaffSelectionAnyone {
+		t.Fatalf("session staff selection mode = %s, want anyone", session.StaffSelectionMode)
+	}
+	if len(session.BookingSegments) != 1 || session.BookingSegments[0].StaffSelectionMode != booking.StaffSelectionAnyone {
+		t.Fatalf("booking segments = %#v, want anyone selection", session.BookingSegments)
+	}
+	if session.CustomerName != "" {
+		t.Fatalf("anyone switch should not be treated as customer name: %q", session.CustomerName)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "What name") {
+		t.Fatalf("AI should continue collecting customer name after anyone switch: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageHandsOffNonBookableTechnicianChangeDuringCustomerNameCollection(t *testing.T) {
+	store := newFakeConversationStore()
+	seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
+	store.activeStaff = []StaffOption{
+		{ID: "staff_1", Name: "Mai Nguyen", AIBookable: true},
+		{ID: "staff_jenny", Name: "Jenny Le", AIBookable: false},
+	}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Can you switch to Jenny instead?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("non-bookable staff change should not call booking tools, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if session.Status != StatusHandoff || session.Outcome != OutcomeHandoffRequested {
+		t.Fatalf("session status/outcome = %s/%s, want handoff/handoff_requested", session.Status, session.Outcome)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Jenny Le") || !strings.Contains(store.lastTurn.AIMessage, "not enabled for AI booking") {
+		t.Fatalf("AI should explain non-bookable technician owner review: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageClarifiesUnknownTechnicianChangeDuringCustomerNameCollection(t *testing.T) {
+	store := newFakeConversationStore()
+	seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Could you change it to Hannah instead?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("unknown staff change should not call booking tools, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if session.Status != StatusActive || session.CustomerName != "" {
+		t.Fatalf("session status/name = %s/%q, want active with no customer name", session.Status, session.CustomerName)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Hannah") || !strings.Contains(store.lastTurn.AIMessage, "anyone available") {
+		t.Fatalf("AI should clarify unknown technician instead of falling back: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageRechecksAvailabilityWhenOfferedTimeHasDifferentRequestedTechnician(t *testing.T) {
+	store := newFakeConversationStore()
+	store.staff = append(store.staff, StaffOption{
+		ID:         "staff_lena",
+		Name:       "Lena Pham",
+		AIBookable: true,
+	})
+	requestedStart := time.Date(2026, 7, 2, 17, 0, 0, 0, time.UTC)
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.RequestedDate = "2026-07-02"
+	store.session.OfferedSlots = []OfferedSlot{{
+		StartTime:          requestedStart,
+		EndTime:            requestedStart.Add(45 * time.Minute),
+		StaffID:            "staff_lena",
+		StaffName:          "Lena Pham",
+		StaffSelectionMode: booking.StaffSelectionSpecific,
+	}}
+	bookingTool := &fakeBookingTool{
+		availabilityResult: &booking.AvailabilityResult{
+			ServiceID:          "service_1",
+			ServiceName:        "Classic Manicure",
+			StaffID:            "staff_1",
+			StaffName:          "Mai Nguyen",
+			StaffSelectionMode: booking.StaffSelectionSpecific,
+			PreferredDate:      "2026-07-02",
+			DurationMinutes:    45,
+			Timezone:           "America/Chicago",
+			Slots: []booking.AvailabilitySlot{{
+				StartTime:          requestedStart,
+				EndTime:            requestedStart.Add(45 * time.Minute),
+				StaffID:            "staff_1",
+				StaffName:          "Mai Nguyen",
+				StaffSelectionMode: booking.StaffSelectionSpecific,
+			}},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "12:00 PM with Mai.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 1 || bookingTool.calls != 0 {
+		t.Fatalf("staff-qualified time should re-check availability only, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if bookingTool.availabilityRequest.StaffID != "staff_1" || bookingTool.availabilityRequest.StaffSelectionMode != booking.StaffSelectionSpecific {
+		t.Fatalf("availability staff = %s/%s, want specific Mai", bookingTool.availabilityRequest.StaffID, bookingTool.availabilityRequest.StaffSelectionMode)
+	}
+	if session.StaffID != "staff_1" || session.StaffName != "Mai Nguyen" {
+		t.Fatalf("session staff = %s/%s, want Mai not stale offered Lena", session.StaffID, session.StaffName)
+	}
+	if session.RequestedStartTime == nil || !session.RequestedStartTime.Equal(requestedStart) {
+		t.Fatalf("requested start = %v, want %s", session.RequestedStartTime, requestedStart)
+	}
+	if len(session.OfferedSlots) != 0 {
+		t.Fatalf("offered slots should clear after exact requested staff availability: %#v", session.OfferedSlots)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "What name") {
+		t.Fatalf("AI should continue collecting customer name after staff-qualified exact slot: %s", store.lastTurn.AIMessage)
 	}
 }
 
@@ -3223,10 +3735,11 @@ func TestMessageBooksAnyoneMultiServiceSlotWithSegmentAssignments(t *testing.T) 
 	if len(session.OfferedSlots) != 1 || len(session.OfferedSlots[0].Segments) != 2 {
 		t.Fatalf("offered slots = %#v, want one slot with two assigned segments", session.OfferedSlots)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "technicians assigned") ||
+	if strings.Contains(store.lastTurn.AIMessage, "technicians assigned") ||
+		strings.Contains(store.lastTurn.AIMessage, "available technician") ||
 		strings.Contains(store.lastTurn.AIMessage, "Mai Nguyen") ||
 		strings.Contains(store.lastTurn.AIMessage, "Lena Pham") {
-		t.Fatalf("anyone slot offer should avoid naming assigned technicians: %s", store.lastTurn.AIMessage)
+		t.Fatalf("anyone slot offer should avoid generic technician wording and assigned technician names: %s", store.lastTurn.AIMessage)
 	}
 
 	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -3254,10 +3767,11 @@ func TestMessageBooksAnyoneMultiServiceSlotWithSegmentAssignments(t *testing.T) 
 	if session.Outcome != OutcomeBookingConfirmed || session.AppointmentID != "appointment_anyone_segments" {
 		t.Fatalf("session outcome/link = %s/%s, want confirmed appointment", session.Outcome, session.AppointmentID)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "technicians assigned") ||
+	if strings.Contains(store.lastTurn.AIMessage, "technicians assigned") ||
+		strings.Contains(store.lastTurn.AIMessage, "available technician") ||
 		strings.Contains(store.lastTurn.AIMessage, "Mai Nguyen") ||
 		strings.Contains(store.lastTurn.AIMessage, "Lena Pham") {
-		t.Fatalf("anyone confirmation should avoid naming assigned technicians: %s", store.lastTurn.AIMessage)
+		t.Fatalf("anyone confirmation should avoid generic technician wording and assigned technician names: %s", store.lastTurn.AIMessage)
 	}
 	assertCustomerReplyHidesProvider(t, store.lastTurn.AIMessage)
 }
@@ -4238,7 +4752,7 @@ func TestFormatSlotOfferForPartySameDayGroupsDateTimesAndStaffPhrase(t *testing.
 
 	reply := formatSlotOfferForSession(slots, loc, false, session, services)
 
-	want := "For 1 Classic Manicure, 1 Gel Manicure, and 2 Spa Pedicures, I have openings on Thursday, July 9 at 12:00 PM, 12:30 PM, or 1:00 PM with technicians assigned. Which works best?"
+	want := "For 1 Classic Manicure, 1 Gel Manicure, and 2 Spa Pedicures, I have openings on Thursday, July 9 at 12:00 PM, 12:30 PM, or 1:00 PM. Which works best?"
 	if reply != want {
 		t.Fatalf("reply = %q, want %q", reply, want)
 	}
@@ -4391,8 +4905,11 @@ func TestMessageOffersSplitPartyOptionsWhenExactCommonTimeUnavailable(t *testing
 		t.Fatalf("party plan split options = %#v, want staggered options after exact time misses", session.PartyPlan)
 	}
 	reply := strings.ToLower(store.lastTurn.AIMessage)
-	if !strings.Contains(reply, "stagger") || strings.Contains(reply, "not a confirmed") {
-		t.Fatalf("reply should offer split times after exact common time miss: %s", store.lastTurn.AIMessage)
+	if !strings.Contains(reply, "that time is not available") || !strings.Contains(reply, "stagger") || strings.Contains(reply, "not a confirmed") {
+		t.Fatalf("reply should explain the exact time miss before offering split times: %s", store.lastTurn.AIMessage)
+	}
+	if store.lastTurn.ToolMetadata["requested_time_unavailable"] != true {
+		t.Fatalf("tool metadata = %#v, want requested_time_unavailable", store.lastTurn.ToolMetadata)
 	}
 }
 
@@ -5337,11 +5854,13 @@ func (f *fakeReplyGenerator) GenerateReply(ctx context.Context, req ReplyGenerat
 func newFakeConversationStore() *fakeConversationStore {
 	return &fakeConversationStore{
 		cfg: RuntimeConfig{
-			SalonName:      "Lotus Nails",
-			Timezone:       "America/Chicago",
-			AIEnabled:      true,
-			HandoffEnabled: true,
-			AIGreeting:     defaultGreeting,
+			SalonName:               "Lotus Nails",
+			Timezone:                "America/Chicago",
+			AIEnabled:               true,
+			HandoffEnabled:          true,
+			AIGreeting:              defaultGreeting,
+			RecordingEnabled:        true,
+			RecordingConsentMessage: recordingDisclosure,
 		},
 		session: Session{
 			ID:                 "session_1",
@@ -5612,6 +6131,7 @@ type fakeBookingTool struct {
 	attempt                 *booking.BookingAttempt
 	attempts                []*booking.BookingAttempt
 	rescheduledAppointment  *booking.Appointment
+	cancelledAppointment    *booking.Appointment
 	rescheduleFallback      *booking.BookingAttempt
 	candidates              []booking.AppointmentActionRef
 	availabilityResult      *booking.AvailabilityResult
@@ -5694,7 +6214,13 @@ func (f *fakeBookingTool) Cancel(ctx context.Context, salonID string, ownerUserI
 	if f.cancelErr != nil {
 		return nil, nil, f.cancelErr
 	}
-	return &booking.Appointment{ID: appointmentID, Status: booking.StatusCancelled}, f.cancelFallback, nil
+	if f.cancelFallback != nil {
+		return nil, f.cancelFallback, nil
+	}
+	if f.cancelledAppointment != nil {
+		return f.cancelledAppointment, f.cancelFallback, nil
+	}
+	return &booking.Appointment{ID: appointmentID, Status: booking.StatusCancelled, POSAppointmentID: "pos_" + appointmentID}, f.cancelFallback, nil
 }
 
 func (f *fakeBookingTool) RescheduleCandidates(ctx context.Context, salonID string, ownerUserID string, req booking.RescheduleLookupRequest) ([]booking.AppointmentActionRef, error) {

@@ -8,6 +8,15 @@ Prioritize cross-salon access, raw token exposure, weak auth/session behavior, u
 Inspect migrations, repositories, handlers, middleware, environment docs, and frontend API surfaces as needed.
 For AI tone or voice settings, verify salon ownership checks and that style configuration does not expose secrets, provider credentials, phone numbers, transcripts, or call audio.
 For party booking requests, verify salon ownership checks, representative name/phone redaction, transcript linkage, and that owner workflow statuses do not expose cross-salon call data.
-Return findings with severity, exact file references, exploit or failure mode, and the minimal fix direction. Do not edit files.
+Return findings with severity, exact file references, exploit or failure mode, and the minimal fix direction.
+Use this structure:
+1. Conclusion: whether a security/privacy issue is present, likely, or not found in the inspected scope.
+2. Work Type: review, defect, new feature, refactor, or task.
+3. Evidence: exact files and line references, request/response fields, schema fields, logs, or config docs.
+4. Root Cause: missing tenant check, unsafe secret handling, logging exposure, weak auth, retention gap, or data leakage path.
+5. Proposed Fix: numbered minimal changes and the boundary they protect.
+6. Scope: will change / will not change, including data migration or config impact.
+7. Checks: auth/RBAC tests, tenant-isolation tests, redaction tests, secret-exposure checks, and regression commands.
+Do not edit files.
 """
 nickname_candidates = ["Security Reviewer", "Privacy Guard", "Tenant Auditor"]

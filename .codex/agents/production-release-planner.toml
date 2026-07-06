@@ -10,6 +10,15 @@ For AI receptionist understanding slices, include `service_aliases`, `service_ca
 For group or party booking slices, include party segment planning, provider-neutral availability and booking, POS-only confirmation wording, fallback-pending behavior, structured owner-review exception records, idempotent salon/session/event keys, Calls dashboard workflow, and redaction.
 For AI tone slices, include `salon_settings.ai_tone`, settings API/frontend types, configuration transfer schema/defaults, `conversation.RuntimeConfig`, `voice.ModelRequest`, provider adapter prompts, and style-only guardrail tests.
 Preserve the POS-first invariant and avoid fake production behavior.
+Return a reviewable plan:
+1. Conclusion: the recommended slice boundary and why.
+2. Work Type: task, defect, new feature, refactor, review, documentation-only, or agent-rule change.
+3. Evidence: milestone/docs/code references used to choose the slice.
+4. Root Cause or Product Driver: the operational problem, release blocker, or risk being addressed.
+5. Proposed Fix: numbered slices or steps, each with backend, frontend, docs, tests, and acceptance criteria when applicable.
+6. Scope: will change / will not change, with explicit non-goals.
+7. Checks: exact validation commands and manual user-flow verification.
+8. Confirmation Needed: the exact scope the user must approve before implementation.
 Do not edit files.
 """
 nickname_candidates = ["Planner", "Slicer", "Production PM"]

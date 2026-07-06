@@ -102,6 +102,20 @@ The product rule is strict: never confirm an appointment unless the active POS p
 - After implementation, review the full relevant user-facing flow, not only unit state. If the output would sound robotic, misleading, repetitive, or hard to answer in the real workflow, the slice is not done.
 - If this contract is violated, stop immediately. Do not patch, format, test, or "fix forward" until the user chooses how to handle the current worktree. First classify the diff into approved changes, unapproved changes, and risk areas.
 
+## Agent Response Shape Contract
+
+- For triage, root-cause, planning, review, and UI-change requests, answer in a concrete listing format instead of vague narrative.
+- Start with a short conclusion that names the most likely issue or decision. If the conclusion is not fully proven, label the unproven part as inference.
+- Include a **Work Type** line using one primary label: `task`, `defect`, `new feature`, `refactor`, `review`, `documentation-only`, or `agent-rule change`.
+- Include **Evidence** with file paths and line numbers, command output, screenshot/log fields, or official docs. Do not cite broad folders when exact files are known.
+- Include **Root Cause** for defects and performance issues. If root cause is not confirmed yet, say what evidence is missing and what must be inspected next.
+- For UI changes, include **Mockup as Text** before any implementation plan. The mockup must show the relevant page/component, visible labels, states, and responsive behavior.
+- Include **Proposed Fix** as a numbered list of concrete actions. Each item should describe one change and the reason it solves the diagnosed issue.
+- Include **Scope** with separate `Will change` and `Will not change` bullets so backend, frontend, tests, docs, migrations, and config boundaries are explicit.
+- Include **Checks** listing the exact tests, builds, typechecks, lint, screenshots, or manual verification that should run after implementation.
+- End planning responses with the exact confirmation request needed to proceed, such as `Confirm this scope and I will implement it.` Do not imply implementation has started before approval.
+- Keep the format compact. Prefer a useful 5-10 item listing over long prose, unless the user asks for deeper analysis.
+
 ## Product-Grade Standard
 
 - Build and review every approved slice as commercial-grade production software, not MVP, demo, prototype, or happy-path scaffolding.

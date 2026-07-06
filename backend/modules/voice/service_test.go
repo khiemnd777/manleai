@@ -126,6 +126,9 @@ func TestIncomingCallStartsPhoneSessionAndReturnsGreeting(t *testing.T) {
 	if reply.Message != "Thank you for calling. How can I help you today?" {
 		t.Fatalf("message = %q", reply.Message)
 	}
+	if reply.OpeningNotice != defaultRecordingConsentMessage {
+		t.Fatalf("opening notice = %q", reply.OpeningNotice)
+	}
 	if engine.startCalls != 1 {
 		t.Fatalf("start phone calls = %d, want 1", engine.startCalls)
 	}
@@ -137,6 +140,26 @@ func TestIncomingCallStartsPhoneSessionAndReturnsGreeting(t *testing.T) {
 	}
 	if len(store.events) != 1 || store.events[0].EventType != EventIncomingCall || store.events[0].CallSessionID != "session_phone" {
 		t.Fatalf("events = %#v, want routed incoming call event", store.events)
+	}
+}
+
+func TestIncomingCallOmitsOpeningNoticeWhenRecordingDisabled(t *testing.T) {
+	store := newFakeVoiceStore()
+	store.salon.RecordingEnabled = false
+	engine := newFakeConversationEngine()
+	service := NewService(store, engine, testVoiceConfig(), AIProviders{})
+
+	reply, err := service.HandleIncomingCall(context.Background(), IncomingCallRequest{
+		ProviderCallID: "CA123",
+		FromPhone:      "(312) 555-0101",
+		ToPhone:        "+1 312-555-0102",
+		Payload:        map[string]string{"CallSid": "CA123"},
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingCall returned error: %v", err)
+	}
+	if reply.OpeningNotice != "" {
+		t.Fatalf("opening notice = %q, want empty", reply.OpeningNotice)
 	}
 }
 
@@ -324,10 +347,12 @@ type fakeVoiceStore struct {
 func newFakeVoiceStore() *fakeVoiceStore {
 	return &fakeVoiceStore{
 		salon: &InboundSalon{
-			SalonID:     "salon_1",
-			OwnerUserID: "owner_1",
-			SalonName:   "Lotus Nails",
-			Phone:       "+13125550102",
+			SalonID:                 "salon_1",
+			OwnerUserID:             "owner_1",
+			SalonName:               "Lotus Nails",
+			Phone:                   "+13125550102",
+			RecordingEnabled:        true,
+			RecordingConsentMessage: defaultRecordingConsentMessage,
 		},
 		bookingReadiness: &PhoneBookingReadiness{
 			Ready:                true,

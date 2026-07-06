@@ -28,8 +28,9 @@ func NewRepository(db *sql.DB) *Repository {
 func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, ownerUserID string) (*RuntimeConfig, error) {
 	var cfg RuntimeConfig
 	err := r.db.QueryRowContext(ctx, `
-		SELECT s.name, s.timezone, COALESCE(s.handoff_phone, ''), s.ai_enabled,
-		       COALESCE(ss.handoff_enabled, true), COALESCE(ss.ai_greeting, ''), COALESCE(ss.ai_tone, 'professional_warm')
+			SELECT s.name, s.timezone, COALESCE(s.handoff_phone, ''), s.ai_enabled,
+			       COALESCE(ss.handoff_enabled, true), COALESCE(ss.ai_greeting, ''), COALESCE(ss.ai_tone, 'professional_warm'),
+			       COALESCE(ss.recording_enabled, true), COALESCE(ss.recording_consent_message, '')
 		FROM salons s
 		LEFT JOIN salon_settings ss ON ss.salon_id = s.id
 		WHERE s.id = $1
@@ -42,6 +43,8 @@ func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, owner
 		&cfg.HandoffEnabled,
 		&cfg.AIGreeting,
 		&cfg.AITone,
+		&cfg.RecordingEnabled,
+		&cfg.RecordingConsentMessage,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound

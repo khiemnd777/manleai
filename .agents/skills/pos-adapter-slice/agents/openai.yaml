@@ -1,6 +1,6 @@
 interface:
   display_name: "POS Adapter Slice"
   short_description: "Preserve the POSProvider boundary for Square and future adapters"
-  default_prompt: "Use $pos-adapter-slice to investigate POS integration ownership, plan the approval-gated change, and preserve provider boundaries, retry, webhook, sync, idempotency, and duplicate-prevention behavior."
+  default_prompt: "Use $pos-adapter-slice to investigate POS integration ownership and plan the approval-gated change. Return structured output with conclusion, work type, evidence, confirmed or inferred root cause, numbered backend plan, scope/non-goals, provider-boundary/idempotency checks, and the exact approval gate."
 policy:
   allow_implicit_invocation: false

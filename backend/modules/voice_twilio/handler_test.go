@@ -34,8 +34,57 @@ func TestIncomingWebhookReturnsGatherGreeting(t *testing.T) {
 	if !strings.Contains(body, "<Gather") || !strings.Contains(body, "Thank you for calling") {
 		t.Fatalf("incoming webhook should return gather greeting TwiML: %s", body)
 	}
+	if !strings.Contains(body, "This call may be recorded to help us manage appointments and improve service.") {
+		t.Fatalf("incoming webhook should include recording notice: %s", body)
+	}
 	if !strings.Contains(body, `action="http://voice.example.com/api/voice/twilio/turn"`) {
 		t.Fatalf("gather action should route to turn webhook: %s", body)
+	}
+}
+
+func TestIncomingWebhookReturnsRealtimeNoticeAndDefersGreetingToOpenAI(t *testing.T) {
+	adapter, _, store, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Thank you for calling Lotus Nails. How can I help today?", conversation.StatusActive, conversation.OutcomeCollecting))
+	service := voice.NewService(store, engine, config.VoiceConfig{
+		Provider: voice.ProviderTwilio,
+		Twilio: config.TwilioVoiceConfig{
+			AuthToken:      "secret",
+			IncomingPath:   "/api/voice/twilio/incoming",
+			TurnPath:       "/api/voice/twilio/turn",
+			RecordingPath:  "/api/voice/twilio/recording",
+			StreamPath:     "/api/voice/twilio/stream",
+			VoiceTransport: voice.InputModeRealtimeStream,
+		},
+		AI: config.VoiceAIConfig{
+			Provider: voice.ProviderOpenAI,
+			OpenAI: config.OpenAIVoiceConfig{
+				APIKey:          "openai-key",
+				RealtimeEnabled: true,
+				RealtimeModel:   "gpt-realtime-2",
+				RealtimeVoice:   "alloy",
+			},
+		},
+	}, voice.AIProviders{Realtime: fakeTwilioRealtimeProvider{configured: true}})
+	app := testTwilioApp(adapter, service)
+	form := url.Values{
+		"CallSid": {"CA123"},
+		"From":    {"+13125550101"},
+		"To":      {"+13125550102"},
+	}
+
+	res := signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/incoming", form)
+	body := readBody(t, res)
+
+	if res.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.StatusCode, body)
+	}
+	if !strings.Contains(body, `<Say>This call may be recorded to help us manage appointments and improve service.</Say>`) {
+		t.Fatalf("realtime incoming should have Twilio recording notice only: %s", body)
+	}
+	if strings.Contains(body, `<Say>Thank you for calling`) {
+		t.Fatalf("realtime incoming should not have Twilio say the AI greeting: %s", body)
+	}
+	if !strings.Contains(body, `<Connect><Stream`) || !strings.Contains(body, `name="initial_message" value="Thank you for calling Lotus Nails. How can I help today?"`) {
+		t.Fatalf("realtime incoming should pass initial AI greeting to stream params: %s", body)
 	}
 }
 
@@ -222,6 +271,27 @@ func TestForwardRealtimeEventsSuppressesInterruptedAudioUntilResponseDone(t *tes
 		Media:     twilioOutboundMediaPayload{Payload: "fresh-audio"},
 	}) {
 		t.Fatalf("write = %#v, want fresh outbound media", got)
+	}
+	assertNoClose(t, closed)
+}
+
+func TestForwardRealtimeEventsSpeaksInitialGreetingBeforeCallerTranscript(t *testing.T) {
+	adapter, service, _, _ := testTwilioRuntimeWithStore(phoneSessionWithAIReply("What name should I put on the appointment?", conversation.StatusActive, conversation.OutcomeCollecting))
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	closed := make(chan string, 1)
+
+	go handler.forwardRealtimeEventsWithInitialReply(ctx, cancel, closeStreamRecorder(closed), realtime, func(any) error { return nil }, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", "Thank you for calling Lotus Nails. How can I help today?", map[string]struct{}{}, nil)
+
+	if got := waitForSpeak(t, realtime); got != "Thank you for calling Lotus Nails. How can I help today?" {
+		t.Fatalf("initial speak = %q", got)
+	}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_1", Transcript: "classic manicure"}
+	if got := waitForSpeak(t, realtime); got != "What name should I put on the appointment?" {
+		t.Fatalf("turn speak = %q", got)
 	}
 	assertNoClose(t, closed)
 }
@@ -508,10 +578,12 @@ func testTwilioRuntimeWithStore(messageSession *conversation.Session) (*Adapter,
 	}, "")
 	store := &fakeTwilioVoiceStore{
 		salon: &voice.InboundSalon{
-			SalonID:     "salon_1",
-			OwnerUserID: "owner_1",
-			SalonName:   "Lotus Nails",
-			Phone:       "+13125550102",
+			SalonID:                 "salon_1",
+			OwnerUserID:             "owner_1",
+			SalonName:               "Lotus Nails",
+			Phone:                   "+13125550102",
+			RecordingEnabled:        true,
+			RecordingConsentMessage: "This call may be recorded to help us manage appointments and improve service.",
 		},
 		route: &voice.CallRoute{SalonID: "salon_1", OwnerUserID: "owner_1", SessionID: "session_phone"},
 	}
@@ -670,6 +742,22 @@ func (f *fakeTwilioConversationEngine) Get(ctx context.Context, salonID string, 
 
 func (f *fakeTwilioConversationEngine) TranscriptionContext(ctx context.Context, salonID string, ownerUserID string, sessionID string) (conversation.TranscriptionContext, error) {
 	return conversation.TranscriptionContext{}, nil
+}
+
+type fakeTwilioRealtimeProvider struct {
+	configured bool
+}
+
+func (f fakeTwilioRealtimeProvider) Name() string {
+	return voice.ProviderOpenAI
+}
+
+func (f fakeTwilioRealtimeProvider) Configured(ctx context.Context, salonID string) bool {
+	return f.configured
+}
+
+func (f fakeTwilioRealtimeProvider) ConnectRealtime(ctx context.Context, salonID string, opts voice.RealtimeSessionOptions) (voice.RealtimeSession, error) {
+	return nil, voice.ErrProviderDisabled
 }
 
 type fakeRealtimeSession struct {

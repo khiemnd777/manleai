@@ -374,7 +374,7 @@ func onboardingImportTargetState() *importTargetState {
 			AIVoice:                 "professional_female",
 			BookingMode:             "pending_approval",
 			RecordingEnabled:        true,
-			RecordingConsentMessage: "Thank you for calling. This call may be recorded to help us manage appointments and improve service.",
+			RecordingConsentMessage: "This call may be recorded to help us manage appointments and improve service.",
 			SMSConfirmationEnabled:  true,
 			SMSReminderEnabled:      true,
 			ReminderHoursBefore:     24,

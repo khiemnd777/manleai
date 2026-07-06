@@ -10,6 +10,8 @@ import (
 	"github.com/manleai/ai-receptionist/modules/conversation"
 )
 
+const defaultRecordingConsentMessage = "This call may be recorded to help us manage appointments and improve service."
+
 type Service struct {
 	repo           Store
 	conversation   ConversationEngine
@@ -122,9 +124,10 @@ func (s *Service) HandleIncomingCall(ctx context.Context, req IncomingCallReques
 		Payload:        req.Payload,
 	})
 	return s.buildReply(ctx, CallReply{
-		Message:  lastAIMessage(session),
-		Continue: session.Status == conversation.StatusActive,
-		Session:  session,
+		Message:       lastAIMessage(session),
+		OpeningNotice: recordingNotice(salon),
+		Continue:      session.Status == conversation.StatusActive,
+		Session:       session,
 	}, session, req.Provider, req.ProviderCallID), nil
 }
 
@@ -716,4 +719,15 @@ func lastAIMessage(session *conversation.Session) string {
 		}
 	}
 	return "Thank you for calling. How can I help you today?"
+}
+
+func recordingNotice(salon *InboundSalon) string {
+	if salon == nil || !salon.RecordingEnabled {
+		return ""
+	}
+	notice := strings.TrimSpace(salon.RecordingConsentMessage)
+	if notice == "" {
+		return defaultRecordingConsentMessage
+	}
+	return notice
 }

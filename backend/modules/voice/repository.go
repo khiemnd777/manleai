@@ -152,13 +152,15 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 func (r *Repository) FindSalonByPhone(ctx context.Context, phone string) (*InboundSalon, error) {
 	var salon InboundSalon
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id::text, owner_user_id::text, name, COALESCE(phone, '')
-		FROM salons
-		WHERE regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = regexp_replace($1, '[^0-9]', '', 'g')
-		  AND COALESCE(phone, '') <> ''
-		ORDER BY created_at ASC
+		SELECT s.id::text, s.owner_user_id::text, s.name, COALESCE(s.phone, ''),
+		       COALESCE(ss.recording_enabled, true), COALESCE(ss.recording_consent_message, '')
+		FROM salons s
+		LEFT JOIN salon_settings ss ON ss.salon_id = s.id
+		WHERE regexp_replace(COALESCE(s.phone, ''), '[^0-9]', '', 'g') = regexp_replace($1, '[^0-9]', '', 'g')
+		  AND COALESCE(s.phone, '') <> ''
+		ORDER BY s.created_at ASC
 		LIMIT 1
-	`, phone).Scan(&salon.SalonID, &salon.OwnerUserID, &salon.SalonName, &salon.Phone)
+	`, phone).Scan(&salon.SalonID, &salon.OwnerUserID, &salon.SalonName, &salon.Phone, &salon.RecordingEnabled, &salon.RecordingConsentMessage)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

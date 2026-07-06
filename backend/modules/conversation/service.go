@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	defaultGreeting           = "Thank you for calling. This call may be recorded to help us manage appointments and improve service. How can I help today?"
+	defaultGreeting           = "Thank you for calling. How can I help today?"
 	recordingDisclosure       = "This call may be recorded to help us manage appointments and improve service."
 	openEndedHelpPrompt       = "How can I help today?"
 	connectionCheckOpenPrompt = "Hi, I can hear you. How can I help today?"
@@ -48,6 +48,8 @@ var (
 	monthDateOnlyPattern            = regexp.MustCompile(`(?i)\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec)\s+(\d{1,2})(?:st|nd|rd|th)?\b`)
 	relativeDayPattern              = regexp.MustCompile(`(?i)\b(today|tomorrow)\b`)
 	timeWithMeridiemPattern         = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+|for\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm)(?:$|[^a-z0-9])`)
+	bareClockWithColonPattern       = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+|for\s+)?(\d{1,2}):([0-5]\d)\b`)
+	bareClockWithPrefixPattern      = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+)(\d{1,2})(?:$|[^a-z0-9])`)
 	offeredSlotNumericTimePattern   = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|bpm|tm)(?:$|[^a-z0-9])`)
 	offeredSlotWordTimePattern      = regexp.MustCompile(`(?i)\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?:\s+([0-5][0-9]|oh\s+[0-9]|fifteen|thirty|forty[- ]five))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|bpm|tm)(?:$|[^a-z0-9])`)
 	offeredSlotNumericOClockPattern = regexp.MustCompile(`(?i)\b(?:at\s+|around\s+|about\s+|for\s+)?(\d{1,2})\s*(?:o\s*['’]?\s*clock|oclock)\s*(a\.?\s*m\.?|p\.?\s*m\.?|am|pm|bpm|tm)(?:$|[^a-z0-9])`)
@@ -57,6 +59,13 @@ var (
 		regexp.MustCompile(`(?i)\bwould you like\s+(.{0,80}?)(?:\?|$)`),
 		regexp.MustCompile(`(?i)\bdo you want\s+(.{0,80}?)(?:\?|$)`),
 		regexp.MustCompile(`(?i)\bshould i book\s+(.{0,80}?)(?:\?|$)`),
+	}
+	staffChangeTargetPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\b(?:change|switch|move)\s+(?:it\s+|this\s+|me\s+)?(?:to|with)\s+([^,.;?!]+)`),
+		regexp.MustCompile(`(?i)\bwith\s+([^,.;?!]+?)\s+instead\b`),
+		regexp.MustCompile(`(?i)\binstead\s+(?:with\s+)?([^,.;?!]+)`),
+		regexp.MustCompile(`(?i)\bactually\s+(?:with\s+)?([^,.;?!]+)`),
+		regexp.MustCompile(`(?i)\bwith\s+([^,.;?!]+)`),
 	}
 	namePatterns = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\bmy name is\s+([^,.;]+)`),
@@ -126,6 +135,17 @@ type serviceEditDecision struct {
 	Source     string
 }
 
+type staffChangeRequest struct {
+	Intent           bool
+	RequestedAnyone  bool
+	HasMatchedStaff  bool
+	MatchedStaff     StaffOption
+	HasNonBookable   bool
+	NonBookableStaff StaffOption
+	UnknownStaffName string
+	Source           string
+}
+
 func NewService(store Store, bookingTool BookingTool) *Service {
 	return &Service{
 		store:              store,
@@ -184,7 +204,7 @@ func (s *Service) StartPhoneCall(ctx context.Context, salonID string, ownerUserI
 		InboundPhone:   req.FromPhone,
 		OutboundPhone:  req.ToPhone,
 		CustomerPhone:  req.FromPhone,
-		InitialReply:   initialReply(cfg),
+		InitialReply:   initialPhoneReply(cfg),
 	})
 }
 
@@ -255,15 +275,18 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		return s.store.SaveTurn(ctx, turn)
 	}
 
-	if reply, handoff := customerNameSlotRepairReply(message, *session, services, serviceAliases, categoryAliases, cfg); reply != "" {
-		turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
-		if handoff {
-			return s.saveHandoffTurn(ctx, turn, *session, HandoffReasonCustomerDetailsUnavailable, reply, services, staff, cfg)
+	staffChange := detectStaffChangeRequest(message, *session, services, serviceAliases, categoryAliases, staff, activeStaff)
+	if !staffChange.Intent && bookingActionForSession(*session) != BookingActionCancel {
+		if reply, handoff := customerNameSlotRepairReply(message, *session, services, serviceAliases, categoryAliases, cfg); reply != "" {
+			turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
+			if handoff {
+				return s.saveHandoffTurn(ctx, turn, *session, HandoffReasonCustomerDetailsUnavailable, reply, services, staff, cfg)
+			}
+			turn.AIMessage = reply
+			s.applyReplyGenerator(ctx, &turn, *session, services, cfg, "customer_name", "customer_name", knowledge)
+			finalizeTurnMetadata(&turn, *session, *session, "customer_name", "customer_name", "customer_name_repair")
+			return s.store.SaveTurn(ctx, turn)
 		}
-		turn.AIMessage = reply
-		s.applyReplyGenerator(ctx, &turn, *session, services, cfg, "customer_name", "customer_name", knowledge)
-		finalizeTurnMetadata(&turn, *session, *session, "customer_name", "customer_name", "customer_name_repair")
-		return s.store.SaveTurn(ctx, turn)
 	}
 
 	if repairReply := repairReplyForMessage(message, *session, cfg); repairReply != "" {
@@ -283,6 +306,18 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	loc := timezoneLocation(cfg.Timezone)
 	pendingNameCandidate := voiceCustomerNamePendingConfirmationCandidate(message, *session)
 	serviceUnderstanding := interpretServiceForSession(message, *session, services, serviceAliases, categoryAliases)
+	if shouldClarifyCancelReschedule(*session, message) {
+		next.Intent = IntentBooking
+		turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
+		turn.AIMessage = "Do you want to cancel the existing appointment, or move it to a new time?"
+		turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{"booking_action_clarification": "cancel_or_reschedule"})
+		finalizeTurnMetadata(&turn, *session, next, "booking_action", "booking_action", "appointment_action_clarification")
+		return s.store.SaveTurn(ctx, turn)
+	}
+	if shouldRouteCancel(*session, message) {
+		applyExtraction(&next, message, services, serviceAliases, categoryAliases, staff, loc, s.now)
+		return s.handleCancelMessage(ctx, ownerUserID, *session, next, message, eventKey, services, staff, cfg, knowledge)
+	}
 	if activePartyPlan(session.PartyPlan) && !partyPlanComplete(session.PartyPlan) {
 		if reply, ok := partyPlanServiceMenuReply(message, *session, services, cfg); ok {
 			turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
@@ -385,12 +420,19 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 			applySelectedPartySplitOption(&next, selectedSplit.Option, selectedSplit.DateConsentConfirmed)
 			selectedOfferedSlot = true
 		} else if selected := selectOfferedSlot(message, session.OfferedSlots, loc); selected != nil && offeredSlotMatchesServiceSelection(*selected, next) {
-			applySelectedOfferedSlot(&next, *selected)
-			selectedOfferedSlot = true
+			if offeredSlotAllowedForStaffChange(*selected, staffChange) {
+				applySelectedOfferedSlot(&next, *selected)
+				selectedOfferedSlot = true
+			}
 		} else if selected := selectConfirmedOfferedSlot(message, *session, loc); selected != nil && offeredSlotMatchesServiceSelection(*selected, next) {
-			applySelectedOfferedSlot(&next, *selected)
-			selectedOfferedSlot = true
+			if offeredSlotAllowedForStaffChange(*selected, staffChange) {
+				applySelectedOfferedSlot(&next, *selected)
+				selectedOfferedSlot = true
+			}
 		}
+	}
+	if staffChange.Intent && !selectedOfferedSlot {
+		next.OfferedSlots = nil
 	}
 	intent := resolveIntent(session.Intent, message, next)
 	next.Intent = intent
@@ -398,6 +440,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
 	applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
 	applyServiceEditMetadata(&turn, serviceEdit)
+	applyStaffChangeMetadata(&turn, staffChange)
 
 	if partyPlanApplied {
 		applyPartyBookingMetadata(&turn, next)
@@ -436,6 +479,13 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		turn.AIMessage = serviceEditClarificationPrompt(*session, serviceEdit.Candidates, services)
 		setPendingServiceEditMetadata(&turn, serviceEdit.Candidates)
 		finalizeTurnMetadata(&turn, *session, next, "service", "service", "service_edit_clarification")
+		return s.store.SaveTurn(ctx, turn)
+	}
+
+	if staffChange.Intent && staffChange.UnknownStaffName != "" {
+		turn.AIMessage = unknownStaffChangeReply(staffChange.UnknownStaffName, staff)
+		s.applyReplyGenerator(ctx, &turn, next, services, cfg, "staff", "staff", knowledge)
+		finalizeTurnMetadata(&turn, *session, next, "staff", "staff", "staff_change_unknown")
 		return s.store.SaveTurn(ctx, turn)
 	}
 
@@ -515,6 +565,23 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 
 func shouldRouteReschedule(session Session, message string) bool {
 	return bookingActionForSession(session) == BookingActionReschedule || hasRescheduleSignal(message)
+}
+
+func shouldRouteCancel(session Session, message string) bool {
+	if bookingActionForSession(session) == BookingActionCancel {
+		return true
+	}
+	return hasCancelSignal(message) &&
+		!hasCancelNegation(message) &&
+		!looksLikeCurrentBookingDraftCancel(message, session) &&
+		!hasRescheduleSignal(message)
+}
+
+func shouldClarifyCancelReschedule(session Session, message string) bool {
+	return bookingActionForSession(session) == BookingActionBook &&
+		hasCancelSignal(message) &&
+		hasRescheduleSignal(message) &&
+		!hasCancelNegation(message)
 }
 
 func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID string, before Session, next Session, message string, eventKey string, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
@@ -635,6 +702,110 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 	}
 
 	return s.tryReschedule(ctx, ownerUserID, turn, next, services, staff, cfg)
+}
+
+func (s *Service) handleCancelMessage(ctx context.Context, ownerUserID string, before Session, next Session, message string, eventKey string, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
+	loc := timezoneLocation(timezoneFromConfig(cfg))
+	firstCancelTurn := bookingActionForSession(before) != BookingActionCancel && hasCancelSignal(message)
+	next.BookingAction = BookingActionCancel
+	next.Intent = IntentBooking
+	if firstCancelTurn {
+		clearCancelSelection(&next)
+	}
+	turn := newTurnRecord(before.SalonID, ownerUserID, before, next, message, eventKey, services, staff, cfg)
+	turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{"booking_action": BookingActionCancel})
+
+	if shouldComplaintHandoff(message) {
+		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonHumanRequested, "I'm sorry to hear that. I'll send this cancellation request to the owner so they can help directly. The appointment is not cancelled yet.", services, staff, cfg)
+	}
+	if shouldHandoff(message) {
+		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonHumanRequested, "I'll pass this cancellation request to the owner so they can help directly. The appointment is not cancelled yet.", services, staff, cfg)
+	}
+	if !cfg.AIEnabled {
+		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonAIBookingDisabled, "AI booking is not enabled yet. I can send this cancellation request to the owner, but the appointment is not cancelled yet.", services, staff, cfg)
+	}
+	if s.bookingTool == nil {
+		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, cancelErrorReply(), services, staff, cfg)
+	}
+	if strings.TrimSpace(next.CustomerPhone) == "" {
+		turn.AIMessage = "What phone number is on the appointment you want to cancel?"
+		s.applyReplyGenerator(ctx, &turn, next, services, cfg, "customer_phone", "customer_phone", knowledge)
+		finalizeTurnMetadata(&turn, before, next, "customer_phone", "customer_phone", "cancel_missing_phone")
+		return s.store.SaveTurn(ctx, turn)
+	}
+
+	if strings.TrimSpace(next.TargetAppointmentID) == "" {
+		if selected := selectRescheduleCandidate(message, next.RescheduleCandidates, loc, s.now); selected != nil {
+			applyCancelCandidate(&next, *selected, loc)
+			syncTurnUpdate(&turn, next, services, staff, cfg)
+			turn.AIMessage = cancelSingleCandidatePrompt(*selected, loc)
+			s.applyReplyGenerator(ctx, &turn, next, services, cfg, "target_appointment", "target_appointment", knowledge)
+			finalizeTurnMetadata(&turn, before, next, "target_appointment", "target_appointment", "cancel_target_confirmation")
+			return s.store.SaveTurn(ctx, turn)
+		}
+		if len(next.RescheduleCandidates) == 0 {
+			candidates, err := s.bookingTool.RescheduleCandidates(ctx, before.SalonID, ownerUserID, booking.RescheduleLookupRequest{
+				CustomerName:  next.CustomerName,
+				CustomerPhone: next.CustomerPhone,
+				Limit:         3,
+			})
+			if err != nil {
+				return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not look up the appointment safely, so I will send this cancellation request to the owner. The appointment is not cancelled yet.", services, staff, cfg)
+			}
+			next.RescheduleCandidates = rescheduleCandidatesFromAppointments(candidates)
+			syncTurnUpdate(&turn, next, services, staff, cfg)
+		}
+		if selected := selectRescheduleCandidate(message, next.RescheduleCandidates, loc, s.now); selected != nil {
+			applyCancelCandidate(&next, *selected, loc)
+			syncTurnUpdate(&turn, next, services, staff, cfg)
+			turn.AIMessage = cancelSingleCandidatePrompt(*selected, loc)
+			s.applyReplyGenerator(ctx, &turn, next, services, cfg, "target_appointment", "target_appointment", knowledge)
+			finalizeTurnMetadata(&turn, before, next, "target_appointment", "target_appointment", "cancel_target_confirmation")
+			return s.store.SaveTurn(ctx, turn)
+		}
+		switch len(next.RescheduleCandidates) {
+		case 0:
+			return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not find an upcoming appointment for this phone number, so I will send this cancellation request to the owner. The appointment is not cancelled yet.", services, staff, cfg)
+		case 1:
+			applyCancelCandidate(&next, next.RescheduleCandidates[0], loc)
+			syncTurnUpdate(&turn, next, services, staff, cfg)
+			turn.AIMessage = cancelSingleCandidatePrompt(next.RescheduleCandidates[0], loc)
+		default:
+			if isCancelTargetFiller(message) && len(before.RescheduleCandidates) > 0 {
+				turn.AIMessage = cancelConciseTargetPrompt(next.RescheduleCandidates, loc)
+			} else {
+				turn.AIMessage = cancelMultipleCandidatesPrompt(next.RescheduleCandidates, loc)
+			}
+		}
+		s.applyReplyGenerator(ctx, &turn, next, services, cfg, "target_appointment", "target_appointment", knowledge)
+		finalizeTurnMetadata(&turn, before, next, "target_appointment", "target_appointment", "cancel_target_lookup")
+		return s.store.SaveTurn(ctx, turn)
+	}
+
+	if isNegativeOnly(message) || hasCancelNegation(message) {
+		clearCancelSelection(&next)
+		syncTurnUpdate(&turn, next, services, staff, cfg)
+		if len(next.RescheduleCandidates) > 1 {
+			turn.AIMessage = cancelConciseTargetPrompt(next.RescheduleCandidates, loc)
+		} else {
+			turn.AIMessage = "Okay, I will not cancel that appointment. Which appointment did you want to cancel?"
+		}
+		s.applyReplyGenerator(ctx, &turn, next, services, cfg, "target_appointment", "target_appointment", knowledge)
+		finalizeTurnMetadata(&turn, before, next, "target_appointment", "target_appointment", "cancel_target_rejected")
+		return s.store.SaveTurn(ctx, turn)
+	}
+	if !cancelTargetConfirmed(message) {
+		if selected := selectedRescheduleCandidate(next); selected != nil {
+			turn.AIMessage = cancelSingleCandidatePrompt(*selected, loc)
+		} else {
+			turn.AIMessage = "Please confirm which appointment you want to cancel."
+		}
+		s.applyReplyGenerator(ctx, &turn, next, services, cfg, "target_appointment", "target_appointment", knowledge)
+		finalizeTurnMetadata(&turn, before, next, "target_appointment", "target_appointment", "cancel_target_confirmation")
+		return s.store.SaveTurn(ctx, turn)
+	}
+
+	return s.tryCancel(ctx, ownerUserID, turn, next, services, staff, cfg)
 }
 
 func (s *Service) List(ctx context.Context, salonID string, ownerUserID string, limit int, offset int, lifecycleStatus string) (*ListSessionsResponse, error) {
@@ -781,7 +952,7 @@ func (s *Service) applyAvailabilityForRequestedTime(ctx context.Context, ownerUs
 			return false, err
 		}
 		if len(options) > 0 {
-			applyPartySplitOffer(turn, session, services, staff, cfg, options)
+			applyPartySplitOffer(turn, session, services, staff, cfg, options, true)
 			return false, nil
 		}
 	}
@@ -1020,7 +1191,7 @@ func (s *Service) offerAvailableSlots(ctx context.Context, ownerUserID string, t
 			return err
 		}
 		if len(options) > 0 {
-			applyPartySplitOffer(turn, session, services, staff, cfg, options)
+			applyPartySplitOffer(turn, session, services, staff, cfg, options, unavailableRequestedTime)
 			return nil
 		}
 	}
@@ -1496,7 +1667,7 @@ func partySplitFirstStart(option PartySplitOption) time.Time {
 	return first
 }
 
-func applyPartySplitOffer(turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, options []PartySplitOption) {
+func applyPartySplitOffer(turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, options []PartySplitOption, unavailableRequestedTime bool) {
 	if turn == nil || session == nil {
 		return
 	}
@@ -1513,12 +1684,16 @@ func applyPartySplitOffer(turn *TurnRecord, session *Session, services []Service
 	session.OfferedSlots = nil
 	turn.ToolMessage = fmt.Sprintf("Availability check returned no full-party slots; split availability returned %d option(s).", len(options))
 	turn.AIMessage = partySplitOfferMessage(*session, services, cfg)
+	if unavailableRequestedTime {
+		turn.AIMessage = "That time is not available. " + turn.AIMessage
+	}
 	turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{
 		"availability_policy":         "party_split_offer",
 		"split_option_count":          len(options),
 		"split_requires_date_consent": partySplitOptionsRequireDateConsent(options),
 		"split_date_policy_summary":   partySplitDatePolicySummary(options),
 		"full_party_slot_count":       0,
+		"requested_time_unavailable":  unavailableRequestedTime,
 	})
 	syncTurnUpdate(turn, *session, services, staff, cfg)
 }
@@ -2747,6 +2922,52 @@ func (s *Service) tryReschedule(ctx context.Context, ownerUserID string, turn Tu
 	return s.store.SaveTurn(ctx, turn)
 }
 
+func (s *Service) tryCancel(ctx context.Context, ownerUserID string, turn TurnRecord, session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (*Session, error) {
+	if s.bookingTool == nil || strings.TrimSpace(session.TargetAppointmentID) == "" {
+		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, cancelErrorReply(), services, staff, cfg)
+	}
+	appointment, fallback, err := s.bookingTool.Cancel(ctx, turn.SalonID, ownerUserID, session.TargetAppointmentID, booking.CancelRequest{
+		Source: bookingSourceForSession(session),
+		Reason: "AI receptionist cancellation request.",
+	})
+	if err != nil {
+		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, cancelErrorReply(), services, staff, cfg)
+	}
+
+	toolMessage := "Booking service returned cancellation fallback pending."
+	outcome := OutcomeBookingFallbackPending
+	status := StatusCompleted
+	aiMessage := cancelFallbackReply()
+	bookingAttemptID := ""
+	appointmentID := ""
+	if fallback != nil {
+		bookingAttemptID = fallback.ID
+	}
+	if appointment != nil && appointment.Status == booking.StatusCancelled && strings.TrimSpace(appointment.POSAppointmentID) != "" {
+		toolMessage = "Booking service cancelled appointment through POS."
+		outcome = OutcomeBookingCancelled
+		aiMessage = cancelledMessage(session, cfg)
+		appointmentID = appointment.ID
+	} else if fallback == nil {
+		toolMessage = "Booking service returned no cancellation result."
+	}
+
+	turn.ToolMessage = toolMessage
+	turn.AIMessage = aiMessage
+	turn.Update.Status = status
+	turn.Update.Outcome = outcome
+	turn.Update.BookingAction = BookingActionCancel
+	turn.Update.TargetAppointmentID = session.TargetAppointmentID
+	turn.Update.RescheduleCandidates = nil
+	turn.Update.BookingAttemptID = bookingAttemptID
+	turn.Update.AppointmentID = appointmentID
+	turn.Update.OfferedSlots = nil
+	turn.Update.EndSession = true
+	turn.Update.Summary = summaryFor(session, services, staff, cfg)
+	finalizeTurnMetadata(&turn, turn.Session, session, "", "", "cancel_result")
+	return s.store.SaveTurn(ctx, turn)
+}
+
 func bookingFallbackReply() string {
 	return "I couldn't confirm the appointment, so I sent the request to the owner to review. This is not a confirmed appointment."
 }
@@ -2761,6 +2982,14 @@ func rescheduleFallbackReply() string {
 
 func rescheduleErrorReply() string {
 	return "I couldn't complete the reschedule right now, so the owner needs to review it. The original appointment has not been changed."
+}
+
+func cancelFallbackReply() string {
+	return "I couldn't cancel the appointment, so I sent the request to the owner to review. The original appointment has not been changed."
+}
+
+func cancelErrorReply() string {
+	return "I couldn't complete the cancellation right now, so the owner needs to review it. The original appointment has not been changed."
 }
 
 func rescheduledMessage(session Session, cfg *RuntimeConfig) string {
@@ -2848,6 +3077,19 @@ func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, ses
 		return
 	}
 	if message := strings.TrimSpace(result.Message); message != "" {
+		if rejectUnavailableRequestedTimeRewrite(safeReply, message) {
+			turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{
+				"safe_reply":          safeReply,
+				"llm_reply":           message,
+				"llm_confidence":      result.Confidence,
+				"llm_handoff":         result.Handoff,
+				"llm_reason":          result.Reason,
+				"llm_guardrail":       "rejected_unavailable_time_omission",
+				"reply_source":        "safe_reply",
+				"next_required_field": nextRequired,
+			})
+			return
+		}
 		if rejectRescheduleReplyRewrite(turn, nextRequired, message) {
 			turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{
 				"safe_reply":          safeReply,
@@ -2873,6 +3115,33 @@ func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, ses
 		"reply_source":        "llm_rewrite",
 		"next_required_field": nextRequired,
 	})
+}
+
+func rejectUnavailableRequestedTimeRewrite(safeReply string, message string) bool {
+	safe := normalizeLooseText(safeReply)
+	if !strings.Contains(safe, "time is not available") && !strings.Contains(safe, "not available at") {
+		return false
+	}
+	normalized := normalizeLooseText(message)
+	if normalized == "" {
+		return true
+	}
+	signals := []string{
+		"not available",
+		"unavailable",
+		"no opening at that time",
+		"no openings at that time",
+		"do not have that time",
+		"don t have that time",
+		"that time is taken",
+		"that time is booked",
+	}
+	for _, signal := range signals {
+		if strings.Contains(normalized, signal) {
+			return false
+		}
+	}
+	return true
 }
 
 func rejectRescheduleReplyRewrite(turn *TurnRecord, nextRequired string, message string) bool {
@@ -4483,7 +4752,15 @@ func initialReply(cfg *RuntimeConfig) string {
 	if cfg != nil && strings.TrimSpace(cfg.AIGreeting) != "" {
 		greeting = strings.TrimSpace(cfg.AIGreeting)
 	}
-	return normalizeInitialGreeting(greeting, salonName(cfg))
+	return normalizeInitialGreeting(greeting, salonName(cfg), recordingDisclosureForConfig(cfg))
+}
+
+func initialPhoneReply(cfg *RuntimeConfig) string {
+	greeting := defaultGreeting
+	if cfg != nil && strings.TrimSpace(cfg.AIGreeting) != "" {
+		greeting = strings.TrimSpace(cfg.AIGreeting)
+	}
+	return normalizeInitialGreeting(stripStandardRecordingDisclosure(greeting), salonName(cfg), "")
 }
 
 func aiTone(cfg *RuntimeConfig) string {
@@ -4498,13 +4775,13 @@ func aiTone(cfg *RuntimeConfig) string {
 	}
 }
 
-func normalizeInitialGreeting(greeting string, salon string) string {
+func normalizeInitialGreeting(greeting string, salon string, disclosure string) string {
 	greeting = strings.TrimSpace(greeting)
 	if greeting == "" {
 		greeting = defaultGreeting
 	}
 	greeting = ensureSalonInGreeting(greeting, salon)
-	greeting = ensureRecordingDisclosure(greeting)
+	greeting = ensureRecordingDisclosure(greeting, disclosure)
 	greeting = ensureOpenEndedHelpPrompt(greeting)
 	return greeting
 }
@@ -4524,11 +4801,36 @@ func ensureSalonInGreeting(greeting string, salon string) string {
 	return "Thank you for calling " + salon + ". " + greeting
 }
 
-func ensureRecordingDisclosure(greeting string) string {
+func ensureRecordingDisclosure(greeting string, disclosure string) string {
+	disclosure = strings.TrimSpace(disclosure)
+	if disclosure == "" {
+		return greeting
+	}
 	if containsFold(greeting, "recorded") {
 		return greeting
 	}
-	return insertAfterFirstSentence(greeting, recordingDisclosure)
+	return insertAfterFirstSentence(greeting, disclosure)
+}
+
+func recordingDisclosureForConfig(cfg *RuntimeConfig) string {
+	if cfg != nil && !cfg.RecordingEnabled {
+		return ""
+	}
+	if cfg != nil && strings.TrimSpace(cfg.RecordingConsentMessage) != "" {
+		return strings.TrimSpace(cfg.RecordingConsentMessage)
+	}
+	return recordingDisclosure
+}
+
+func stripStandardRecordingDisclosure(greeting string) string {
+	greeting = strings.TrimSpace(greeting)
+	if greeting == "" {
+		return greeting
+	}
+	greeting = strings.ReplaceAll(greeting, " "+recordingDisclosure, "")
+	greeting = strings.ReplaceAll(greeting, recordingDisclosure+" ", "")
+	greeting = strings.ReplaceAll(greeting, recordingDisclosure, "")
+	return strings.TrimSpace(greeting)
 }
 
 func ensureOpenEndedHelpPrompt(greeting string) string {
@@ -4645,6 +4947,174 @@ func applyExtraction(session *Session, message string, services []ServiceOption,
 			}
 		}
 	}
+}
+
+func detectStaffChangeRequest(message string, session Session, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, staff []StaffOption, activeStaff []StaffOption) staffChangeRequest {
+	if bookingActionForSession(session) != BookingActionBook || !hasBookingProgress(session) {
+		return staffChangeRequest{}
+	}
+	if spelledCustomerName(message) != "" || extractName(message) != "" {
+		return staffChangeRequest{}
+	}
+	normalized := normalizeLooseText(message)
+	if normalized == "" {
+		return staffChangeRequest{}
+	}
+	requestedAnyone := customerRequestedAnyone(message)
+	bookableMatch := matchStaff(message, staff)
+	activeMatch := matchStaff(message, activeStaff)
+	target := staffChangeTargetName(message)
+	hasSignal := hasStaffChangeSignal(normalized, target != "", requestedAnyone, bookableMatch != nil || activeMatch != nil)
+	if requestedAnyone && hasSignal {
+		return staffChangeRequest{Intent: true, RequestedAnyone: true, Source: "anyone_available"}
+	}
+	if bookableMatch != nil && hasSignal {
+		return staffChangeRequest{Intent: true, HasMatchedStaff: true, MatchedStaff: *bookableMatch, Source: "bookable_staff"}
+	}
+	if activeMatch != nil && !activeMatch.AIBookable && hasSignal {
+		return staffChangeRequest{Intent: true, HasNonBookable: true, NonBookableStaff: *activeMatch, Source: "non_bookable_staff"}
+	}
+	if target == "" || !hasSignal || looksLikeServiceInsteadOfName(target, services, aliases, categoryAliases) || looksLikeDateOrTimeInsteadOfName(target) {
+		return staffChangeRequest{}
+	}
+	return staffChangeRequest{Intent: true, UnknownStaffName: target, Source: "unknown_staff"}
+}
+
+func hasStaffChangeSignal(normalized string, hasTarget bool, requestedAnyone bool, hasKnownStaff bool) bool {
+	if normalized == "" {
+		return false
+	}
+	if requestedAnyone {
+		return true
+	}
+	signals := []string{
+		"change to",
+		"change with",
+		"switch to",
+		"switch with",
+		"move to",
+		"move with",
+		"instead",
+		"actually",
+		"prefer",
+		"with",
+	}
+	for _, signal := range signals {
+		if containsLoosePhrase(normalized, signal) {
+			return hasKnownStaff || hasTarget || signal == "with"
+		}
+	}
+	return false
+}
+
+func staffChangeTargetName(message string) string {
+	for _, pattern := range staffChangeTargetPatterns {
+		match := pattern.FindStringSubmatch(message)
+		if len(match) < 2 {
+			continue
+		}
+		if target := cleanStaffChangeTarget(match[1]); target != "" {
+			return target
+		}
+	}
+	return ""
+}
+
+func cleanStaffChangeTarget(raw string) string {
+	value := strings.TrimSpace(strings.Trim(raw, " ,.;?!\"'"))
+	if value == "" || customerRequestedAnyone(value) || looksLikeDateOrTimeInsteadOfName(value) {
+		return ""
+	}
+	for {
+		lower := strings.ToLower(value)
+		next := value
+		for _, suffix := range []string{" instead", " please", " pls", " for me"} {
+			if strings.HasSuffix(lower, suffix) {
+				next = strings.TrimSpace(value[:len(value)-len(suffix)])
+				break
+			}
+		}
+		if next == value {
+			break
+		}
+		value = next
+	}
+	for _, marker := range []string{" at ", " on ", " for "} {
+		if idx := strings.Index(strings.ToLower(value), marker); idx >= 0 {
+			value = strings.TrimSpace(value[:idx])
+		}
+	}
+	return cleanBareCustomerName(value)
+}
+
+func offeredSlotAllowedForStaffChange(slot OfferedSlot, change staffChangeRequest) bool {
+	if !change.Intent {
+		return true
+	}
+	if change.RequestedAnyone {
+		return true
+	}
+	if !change.HasMatchedStaff {
+		return false
+	}
+	return offeredSlotHasStaff(slot, change.MatchedStaff)
+}
+
+func offeredSlotHasStaff(slot OfferedSlot, member StaffOption) bool {
+	staffID := strings.TrimSpace(member.ID)
+	staffName := strings.TrimSpace(member.Name)
+	if staffID != "" && strings.TrimSpace(slot.StaffID) == staffID {
+		return true
+	}
+	if staffName != "" && staffNameMentioned(strings.ToLower(slot.StaffName), staffName) {
+		return true
+	}
+	for _, segment := range slot.Segments {
+		if staffID != "" && strings.TrimSpace(segment.StaffID) == staffID {
+			return true
+		}
+		if staffName != "" && staffNameMentioned(strings.ToLower(segment.StaffName), staffName) {
+			return true
+		}
+	}
+	return false
+}
+
+func applyStaffChangeMetadata(turn *TurnRecord, change staffChangeRequest) {
+	if turn == nil || !change.Intent {
+		return
+	}
+	metadata := map[string]any{
+		"staff_change_intent": true,
+		"staff_change_source": strings.TrimSpace(change.Source),
+	}
+	switch {
+	case change.RequestedAnyone:
+		metadata["staff_change_selection_mode"] = booking.StaffSelectionAnyone
+	case change.HasMatchedStaff:
+		metadata["staff_change_selection_mode"] = booking.StaffSelectionSpecific
+		metadata["requested_staff_id"] = change.MatchedStaff.ID
+		metadata["requested_staff_name"] = change.MatchedStaff.Name
+	case change.HasNonBookable:
+		metadata["staff_change_selection_mode"] = booking.StaffSelectionSpecific
+		metadata["requested_staff_id"] = change.NonBookableStaff.ID
+		metadata["requested_staff_name"] = change.NonBookableStaff.Name
+	case change.UnknownStaffName != "":
+		metadata["staff_change_selection_mode"] = "unknown"
+		metadata["requested_staff_name"] = change.UnknownStaffName
+	}
+	turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, metadata)
+}
+
+func unknownStaffChangeReply(name string, staff []StaffOption) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "that technician"
+	}
+	if len(staff) == 0 {
+		return "I do not see " + name + " in the AI-bookable technician list. Should I use anyone available, or send this to the owner for review?"
+	}
+	return "I do not see " + name + " in the AI-bookable technician list. Would you like anyone available, or another technician?"
 }
 
 func serviceEditDecisionForMessage(session Session, message string, result serviceUnderstandingResult, services []ServiceOption) serviceEditDecision {
@@ -5203,10 +5673,122 @@ func hasRescheduleSignal(message string) bool {
 	return false
 }
 
+func hasCancelSignal(message string) bool {
+	normalized := normalizeLooseText(message)
+	if normalized == "" || hasCancelNegation(message) {
+		return false
+	}
+	directSignals := []string{
+		"cancel",
+		"cancel appointment",
+		"cancel my appointment",
+		"cancel the appointment",
+		"cancel booking",
+		"cancel my booking",
+		"cancel the booking",
+		"cancel reservation",
+		"cancel my reservation",
+		"call off appointment",
+		"call it off",
+		"take me off the schedule",
+		"remove me from the schedule",
+		"delete my appointment",
+		"drop my appointment",
+		"don t need that appointment anymore",
+		"do not need that appointment anymore",
+		"don t need my appointment anymore",
+		"do not need my appointment anymore",
+	}
+	for _, signal := range directSignals {
+		if normalized == signal || containsLoosePhrase(normalized, signal) {
+			return true
+		}
+	}
+	hasAppointmentTerm := false
+	for _, term := range []string{"appointment", "booking", "reservation", "schedule"} {
+		if containsLoosePhrase(normalized, term) {
+			hasAppointmentTerm = true
+			break
+		}
+	}
+	if !hasAppointmentTerm {
+		return false
+	}
+	unableSignals := []string{
+		"can t make",
+		"cannot make",
+		"won t be able to come",
+		"will not be able to come",
+		"can t come",
+		"cannot come",
+		"not coming",
+		"won t make it",
+		"will not make it",
+	}
+	for _, signal := range unableSignals {
+		if containsLoosePhrase(normalized, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCancelNegation(message string) bool {
+	normalized := normalizeLooseText(message)
+	if normalized == "" {
+		return false
+	}
+	negations := []string{
+		"don t cancel",
+		"do not cancel",
+		"dont cancel",
+		"not cancel",
+		"no cancel",
+		"never mind cancel",
+		"don t want to cancel",
+		"do not want to cancel",
+	}
+	for _, negation := range negations {
+		if normalized == negation || containsLoosePhrase(normalized, negation) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeCurrentBookingDraftCancel(message string, session Session) bool {
+	if !hasBookingProgress(session) || bookingActionForSession(session) != BookingActionBook {
+		return false
+	}
+	normalized := normalizeLooseText(message)
+	if normalized == "" {
+		return false
+	}
+	hasDraftSignal := false
+	for _, signal := range []string{"cancel that", "cancel it", "cancel this", "scratch that", "nevermind that", "never mind that", "forget that"} {
+		if normalized == signal || containsLoosePhrase(normalized, signal) {
+			hasDraftSignal = true
+			break
+		}
+	}
+	if !hasDraftSignal {
+		return false
+	}
+	for _, term := range []string{"appointment", "booking", "reservation", "schedule"} {
+		if containsLoosePhrase(normalized, term) {
+			return false
+		}
+	}
+	return true
+}
+
 func bookingActionForSession(session Session) string {
 	action := strings.TrimSpace(session.BookingAction)
 	if action == BookingActionReschedule {
 		return BookingActionReschedule
+	}
+	if action == BookingActionCancel {
+		return BookingActionCancel
 	}
 	return BookingActionBook
 }
@@ -5215,6 +5797,22 @@ func clearNewRescheduleSlot(session *Session) {
 	if session == nil {
 		return
 	}
+	session.ServiceID = ""
+	session.ServiceName = ""
+	session.StaffID = ""
+	session.StaffName = ""
+	session.StaffSelectionMode = ""
+	session.RequestedDate = ""
+	session.RequestedStartTime = nil
+	session.OfferedSlots = nil
+	session.BookingSegments = nil
+}
+
+func clearCancelSelection(session *Session) {
+	if session == nil {
+		return
+	}
+	session.TargetAppointmentID = ""
 	session.ServiceID = ""
 	session.ServiceName = ""
 	session.StaffID = ""
@@ -5503,6 +6101,21 @@ func applyRescheduleCandidate(session *Session, candidate RescheduleCandidate) {
 	}
 }
 
+func applyCancelCandidate(session *Session, candidate RescheduleCandidate, loc *time.Location) {
+	applyRescheduleCandidate(session, candidate)
+	if session == nil {
+		return
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+	start := candidate.StartTime
+	if !start.IsZero() {
+		session.RequestedStartTime = &start
+		session.RequestedDate = start.In(loc).Format("2006-01-02")
+	}
+}
+
 func rescheduleTargetAutoSafe(session Session) bool {
 	if strings.TrimSpace(session.TargetAppointmentID) == "" ||
 		strings.TrimSpace(session.ServiceID) == "" ||
@@ -5540,6 +6153,54 @@ func selectedRescheduleCandidate(session Session) *RescheduleCandidate {
 		}
 	}
 	return nil
+}
+
+func isNegativeOnly(message string) bool {
+	normalized := normalizeLooseText(message)
+	switch normalized {
+	case "no", "nope", "nah", "not that one", "not this one", "wrong one":
+		return true
+	default:
+		return false
+	}
+}
+
+func cancelTargetConfirmed(message string) bool {
+	if isAffirmativeOnly(message) {
+		return true
+	}
+	normalized := normalizeLooseText(message)
+	if normalized == "" || hasCancelNegation(message) {
+		return false
+	}
+	confirmSignals := []string{
+		"yes cancel",
+		"cancel it",
+		"cancel that",
+		"please cancel",
+		"go ahead and cancel",
+		"that one",
+		"that s the one",
+		"that is the one",
+		"correct",
+		"right",
+	}
+	for _, signal := range confirmSignals {
+		if normalized == signal || containsLoosePhrase(normalized, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func isCancelTargetFiller(message string) bool {
+	normalized := normalizeLooseText(message)
+	switch normalized {
+	case "cancel", "to cancel", "i want to cancel", "i need to cancel", "cancel appointment", "cancel my appointment":
+		return true
+	default:
+		return false
+	}
 }
 
 func hasNextDayRescheduleSignal(message string) bool {
@@ -5641,8 +6302,20 @@ func rescheduleSingleCandidatePrompt(candidate RescheduleCandidate, loc *time.Lo
 	return "I found your appointment " + rescheduleCandidatePhrase(candidate, loc) + ". Is this the appointment you want to reschedule?"
 }
 
+func cancelSingleCandidatePrompt(candidate RescheduleCandidate, loc *time.Location) string {
+	return "I found your appointment " + rescheduleCandidatePhrase(candidate, loc) + ". Is this the appointment you want to cancel?"
+}
+
 func rescheduleMultipleCandidatesPrompt(candidates []RescheduleCandidate, loc *time.Location) string {
 	parts := []string{"I found more than one upcoming appointment. Which one should I reschedule?"}
+	for i, candidate := range candidates {
+		parts = append(parts, rescheduleCandidateOptionPhrase(i+1, candidate, loc))
+	}
+	return strings.Join(parts, " ")
+}
+
+func cancelMultipleCandidatesPrompt(candidates []RescheduleCandidate, loc *time.Location) string {
+	parts := []string{"I found more than one upcoming appointment. Which one should I cancel?"}
 	for i, candidate := range candidates {
 		parts = append(parts, rescheduleCandidateOptionPhrase(i+1, candidate, loc))
 	}
@@ -5670,6 +6343,20 @@ func rescheduleConciseTargetPrompt(candidates []RescheduleCandidate, loc *time.L
 		return "Which appointment should I reschedule?"
 	}
 	return "Which one should I reschedule, " + joinHumanList(parts) + "?"
+}
+
+func cancelConciseTargetPrompt(candidates []RescheduleCandidate, loc *time.Location) string {
+	parts := make([]string, 0, len(candidates))
+	for i, candidate := range candidates {
+		if i >= 3 {
+			break
+		}
+		parts = append(parts, rescheduleConciseCandidatePhrase(i+1, candidate, loc))
+	}
+	if len(parts) == 0 {
+		return "Which appointment should I cancel?"
+	}
+	return "Which one should I cancel, " + joinHumanList(parts) + "?"
 }
 
 func rescheduleConciseCandidatePhrase(index int, candidate RescheduleCandidate, loc *time.Location) string {
@@ -6628,6 +7315,7 @@ func isCustomerNameNonAnswer(message string, services []ServiceOption, aliases [
 	return isAffirmativeOnly(message) ||
 		isConnectionCheck(message) ||
 		isNameRepairRequest(message) ||
+		hasCancelSignal(message) ||
 		looksLikeServiceInsteadOfName(message, services, aliases, categoryAliases) ||
 		phonePattern.MatchString(message) ||
 		emailPattern.MatchString(message) ||
@@ -6802,7 +7490,7 @@ func cleanBareCustomerName(raw string) string {
 	if len([]rune(name)) < 2 || len([]rune(name)) > 80 {
 		return ""
 	}
-	if phonePattern.MatchString(name) || emailPattern.MatchString(name) || hasBookingSignal(name) {
+	if phonePattern.MatchString(name) || emailPattern.MatchString(name) || hasBookingSignal(name) || hasCancelSignal(name) {
 		return ""
 	}
 	if isAffirmativeOnly(name) || isConnectionCheck(name) || isGoodbyeUtterance(name) || isNameRepairRequest(name) || looksLikeDateOrTimeInsteadOfName(name) {
@@ -7074,6 +7762,11 @@ func parseRequestedTime(message string, loc *time.Location, now func() time.Time
 			return parsed.UTC(), true
 		}
 	}
+	if date := preferredDateFromMessage(message, nil, loc, now); date != "" {
+		if parsed, ok := parseTimeOnlyForDate(message, date, loc); ok {
+			return parsed.UTC(), true
+		}
+	}
 	return time.Time{}, false
 }
 
@@ -7094,6 +7787,9 @@ func parseTimeOnlyForDate(message string, requestedDate string, loc *time.Locati
 	if parsed, ok := parseOClockCandidateForDate(message, requestedDate, loc); ok {
 		return parsed.UTC(), true
 	}
+	if parsed, ok := parseBareClockCandidateForDate(message, requestedDate, loc); ok {
+		return parsed.UTC(), true
+	}
 	return time.Time{}, false
 }
 
@@ -7103,7 +7799,22 @@ func parseOClockCandidateForDate(message string, requestedDate string, loc *time
 		return time.Time{}, false
 	}
 	minutes := candidates[0]
-	parsedDate, err := time.ParseInLocation("2006-01-02", requestedDate, loc)
+	return parseDateAndClockMinutes(requestedDate, minutes, loc)
+}
+
+func parseBareClockCandidateForDate(message string, requestedDate string, loc *time.Location) (time.Time, bool) {
+	candidates := bareClockCandidatesFromText(message)
+	if len(candidates) != 1 {
+		return time.Time{}, false
+	}
+	return parseDateAndClockMinutes(requestedDate, candidates[0], loc)
+}
+
+func parseDateAndClockMinutes(requestedDate string, minutes int, loc *time.Location) (time.Time, bool) {
+	if minutes < 0 || minutes >= 24*60 {
+		return time.Time{}, false
+	}
+	parsedDate, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(requestedDate), loc)
 	if err != nil {
 		return time.Time{}, false
 	}
@@ -7704,6 +8415,43 @@ func oClockCandidatesFromText(message string) []int {
 	return out
 }
 
+func bareClockCandidatesFromText(message string) []int {
+	out := []int{}
+	seen := map[int]bool{}
+	add := func(minutes int, ok bool) {
+		if !ok || seen[minutes] {
+			return
+		}
+		seen[minutes] = true
+		out = append(out, minutes)
+	}
+	for _, match := range bareClockWithColonPattern.FindAllStringSubmatch(message, -1) {
+		if len(match) < 3 {
+			continue
+		}
+		hour, err := strconv.Atoi(match[1])
+		if err != nil {
+			continue
+		}
+		minute, err := strconv.Atoi(match[2])
+		if err != nil {
+			continue
+		}
+		add(clockMinutesWithoutMeridiem(hour, minute))
+	}
+	for _, match := range bareClockWithPrefixPattern.FindAllStringSubmatch(message, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		hour, err := strconv.Atoi(match[1])
+		if err != nil {
+			continue
+		}
+		add(clockMinutesWithoutMeridiem(hour, 0))
+	}
+	return out
+}
+
 func offeredSlotForClockCandidates(candidates []int, slots []OfferedSlot, loc *time.Location) *OfferedSlot {
 	if len(candidates) == 0 || len(slots) == 0 {
 		return nil
@@ -7744,6 +8492,13 @@ func clockMinutes(hour int, minute int, meridiem string) (int, bool) {
 			hour += 12
 		}
 	default:
+		return 0, false
+	}
+	return hour*60 + minute, true
+}
+
+func clockMinutesWithoutMeridiem(hour int, minute int) (int, bool) {
+	if hour < 0 || hour > 23 || minute < 0 || minute > 59 {
 		return 0, false
 	}
 	return hour*60 + minute, true
@@ -8153,8 +8908,11 @@ func summaryFor(session Session, services []ServiceOption, staff []StaffOption, 
 	if cfg != nil && cfg.SalonName != "" {
 		parts = append(parts, cfg.SalonName)
 	}
-	if bookingActionForSession(session) == BookingActionReschedule {
+	switch bookingActionForSession(session) {
+	case BookingActionReschedule:
 		parts = append(parts, "reschedule request")
+	case BookingActionCancel:
+		parts = append(parts, "cancellation request")
 	}
 	if session.CustomerName != "" {
 		parts = append(parts, "customer "+session.CustomerName)
@@ -8203,7 +8961,9 @@ func confirmedMessage(session Session, services []ServiceOption, staff []StaffOp
 		parts = append(parts, "on "+when)
 	}
 	if sessionUsesAnyone(session) {
-		parts = append(parts, strings.TrimSpace(availableTechnicianPhraseForSegments(session.BookingSegments)))
+		if phrase := strings.TrimSpace(availableTechnicianPhraseForSegments(session.BookingSegments)); phrase != "" {
+			parts = append(parts, phrase)
+		}
 	} else if member != "" {
 		parts = append(parts, "with "+member)
 	}
@@ -8220,6 +8980,26 @@ func confirmedMessage(session Session, services []ServiceOption, staff []StaffOp
 		message += " The appointment is under " + name + "."
 	}
 	message += " Thank you, goodbye."
+	return message
+}
+
+func cancelledMessage(session Session, cfg *RuntimeConfig) string {
+	loc := timezoneLocation("")
+	if cfg != nil {
+		loc = timezoneLocation(cfg.Timezone)
+	}
+	parts := []string{}
+	if service := strings.TrimSpace(session.ServiceName); service != "" {
+		parts = append(parts, "for "+service)
+	}
+	if session.RequestedStartTime != nil {
+		parts = append(parts, "on "+session.RequestedStartTime.In(loc).Format("Monday, January 2 at 3:04 PM"))
+	}
+	message := "Your appointment has been cancelled"
+	if len(parts) > 0 {
+		message += " " + strings.Join(parts, " ")
+	}
+	message += ". Thank you, goodbye."
 	return message
 }
 
@@ -8242,10 +9022,7 @@ func availableTechnicianPhraseForSegments(segments []booking.BookingSegmentReque
 }
 
 func availableTechnicianPhraseForSegmentCount(count int) string {
-	if count > 1 {
-		return " with technicians assigned"
-	}
-	return " with an available technician"
+	return ""
 }
 
 func sessionAssignedStaffLabel(session Session, staff []StaffOption) string {

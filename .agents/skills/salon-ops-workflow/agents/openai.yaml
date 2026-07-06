@@ -1,6 +1,6 @@
 interface:
   display_name: "Salon Ops Workflow"
   short_description: "Analyze product-grade salon operations and call flows"
-  default_prompt: "Use $salon-ops-workflow to analyze the owner, caller, staff, POS, service-alias correction, fallback, dashboard, repeated-run, duplicate-prevention, and safe failure workflow for this request."
+  default_prompt: "Use $salon-ops-workflow to analyze the owner, caller, staff, POS, service-alias correction, fallback, dashboard, repeated-run, duplicate-prevention, and safe failure workflow for this request. Return structured output with conclusion, work type, evidence, operational root cause/driver, numbered workflow plan, scope/non-goals, checks, and approval gate when implementation is implied."
 policy:
   allow_implicit_invocation: true

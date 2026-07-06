@@ -768,7 +768,7 @@ export type ConversationSession = {
   status: string;
   intent: string;
   outcome: string;
-  booking_action?: "book" | "reschedule";
+  booking_action?: "book" | "reschedule" | "cancel";
   target_appointment_id?: string;
   reschedule_candidates?: RescheduleCandidate[];
   customer_name?: string;

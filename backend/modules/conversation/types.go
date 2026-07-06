@@ -24,6 +24,7 @@ const (
 	OutcomeCollecting             = "collecting"
 	OutcomeBookingConfirmed       = "booking_confirmed"
 	OutcomeBookingRescheduled     = "booking_rescheduled"
+	OutcomeBookingCancelled       = "booking_cancelled"
 	OutcomeBookingFallbackPending = "booking_fallback_pending"
 	OutcomeHandoffRequested       = "handoff_requested"
 	OutcomeAIDisabled             = "ai_disabled"
@@ -39,6 +40,7 @@ const (
 
 	BookingActionBook       = "book"
 	BookingActionReschedule = "reschedule"
+	BookingActionCancel     = "cancel"
 
 	HandoffReasonHumanRequested             = "human_requested"
 	HandoffReasonAIBookingDisabled          = "ai_booking_disabled"
@@ -151,13 +153,15 @@ type TranscriptionContext struct {
 }
 
 type RuntimeConfig struct {
-	SalonName      string
-	Timezone       string
-	AIEnabled      bool
-	HandoffPhone   string
-	HandoffEnabled bool
-	AIGreeting     string
-	AITone         string
+	SalonName               string
+	Timezone                string
+	AIEnabled               bool
+	HandoffPhone            string
+	HandoffEnabled          bool
+	AIGreeting              string
+	AITone                  string
+	RecordingEnabled        bool
+	RecordingConsentMessage string
 }
 
 type ServiceOption struct {

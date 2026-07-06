@@ -99,18 +99,28 @@ func (a *Adapter) RequestURL(originalURL string, fallbackBaseURL string) string 
 }
 
 func (a *Adapter) GatherResponse(message string, actionURL string, audioURL string) string {
+	return a.GatherResponseWithOpeningNotice("", message, actionURL, audioURL)
+}
+
+func (a *Adapter) GatherResponseWithOpeningNotice(openingNotice string, message string, actionURL string, audioURL string) string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><Response><Gather input="speech" action="`)
 	writeEscaped(&b, actionURL)
 	b.WriteString(`" method="POST" speechTimeout="auto">`)
+	writeNotice(&b, openingNotice)
 	writePrompt(&b, message, audioURL)
 	b.WriteString(`</Gather><Say>I did not hear anything. Please call the salon again or wait for the owner.</Say><Hangup/></Response>`)
 	return b.String()
 }
 
 func (a *Adapter) RecordResponse(message string, actionURL string, audioURL string) string {
+	return a.RecordResponseWithOpeningNotice("", message, actionURL, audioURL)
+}
+
+func (a *Adapter) RecordResponseWithOpeningNotice(openingNotice string, message string, actionURL string, audioURL string) string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><Response>`)
+	writeNotice(&b, openingNotice)
 	writePrompt(&b, message, audioURL)
 	b.WriteString(`<Record action="`)
 	writeEscaped(&b, actionURL)
@@ -282,6 +292,19 @@ func writePrompt(b *strings.Builder, message string, audioURL string) {
 		b.WriteString(`<Play>`)
 		writeEscaped(b, audioURL)
 		b.WriteString(`</Play>`)
+		return
+	}
+	if strings.TrimSpace(message) == "" {
+		return
+	}
+	b.WriteString(`<Say>`)
+	writeEscaped(b, message)
+	b.WriteString(`</Say>`)
+}
+
+func writeNotice(b *strings.Builder, message string) {
+	message = strings.TrimSpace(message)
+	if message == "" {
 		return
 	}
 	b.WriteString(`<Say>`)

@@ -1,6 +1,6 @@
 interface:
   display_name: "Booking Safety TDD"
   short_description: "Plan booking safety with POS confirmation"
-  default_prompt: "Use $booking-safety-tdd to investigate booking behavior, plan the approval-gated test slice, and preserve POS-confirmed appointments plus duplicate-prevention safety."
+  default_prompt: "Use $booking-safety-tdd to investigate booking behavior and plan the approval-gated test slice. Return structured output with conclusion, work type, evidence, confirmed or inferred root cause, numbered test/implementation listing, scope/non-goals, POS failure/idempotency checks, and the exact approval gate."
 policy:
   allow_implicit_invocation: false

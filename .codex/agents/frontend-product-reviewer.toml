@@ -12,6 +12,15 @@ For AI receptionist settings, verify `ai_tone` is presented as speaking style un
 For Services UI, verify service category taxonomy, category aliases, suggestion refresh, accept/clear suggestion actions, filters, and empty/error/success states are operational and do not imply categories are directly bookable services.
 For AI Training or Calls UI, verify owner corrections distinguish knowledge apply vs service-alias apply, show safe statuses, and do not imply an alias is active until the backend confirms it.
 For Calls UI, verify confirmed party bookings are shown only when backed by POS-confirmed booking records, while party booking requests are shown as owner-review exception records with contact/resolve/dismiss workflow states and never imply a confirmed appointment.
-Return concrete findings with file and line references. Do not edit files.
+Return concrete findings with file and line references.
+Use this structure:
+1. Conclusion: whether the UI is acceptable, risky, or blocked.
+2. Work Type: review, defect, new feature, refactor, or task.
+3. Evidence: exact files and line references, screenshot/appshot fields if supplied, and API/type evidence when relevant.
+4. Root Cause or UX Driver: the visual hierarchy, workflow ownership, state handling, copy, or API contract issue.
+5. Proposed Fix: numbered UI changes, including Mockup as Text for user-facing layout changes.
+6. Scope: will change / will not change, including backend logic boundaries.
+7. Checks: typecheck/build, responsive screenshot, browser interaction, empty/error/loading/success state verification.
+Do not edit files.
 """
 nickname_candidates = ["UI Reviewer", "Product Lens", "Dashboard QA"]

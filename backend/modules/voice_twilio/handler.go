@@ -190,23 +190,24 @@ func (h *Handler) responseForReply(c *fiber.Ctx, adapter *Adapter, reply *voice.
 	}
 	baseURL := requestBaseURL(c)
 	if reply.InputMode == voice.InputModeRecording {
-		return adapter.RecordResponse(reply.Message, adapter.RecordingURL(baseURL), reply.AudioURL)
+		return adapter.RecordResponseWithOpeningNotice(reply.OpeningNotice, reply.Message, adapter.RecordingURL(baseURL), reply.AudioURL)
 	}
 	if reply.InputMode == voice.InputModeRealtimeStream && reply.Session != nil {
 		streamURL := adapter.StreamURL(baseURL)
 		if streamURL != "" {
 			providerCallID := strings.TrimSpace(reply.Session.ProviderCallID)
 			sessionID := strings.TrimSpace(reply.Session.ID)
-			return adapter.StreamResponse(reply.Message, streamURL, adapter.StreamStatusURL(baseURL), adapter.StreamFallbackURL(baseURL), reply.AudioURL, map[string]string{
-				"call_sid":     providerCallID,
-				"session_id":   sessionID,
-				"stream_token": adapter.StreamToken(providerCallID, sessionID),
-				"from_phone":   reply.Session.InboundPhone,
-				"to_phone":     reply.Session.OutboundPhone,
+			return adapter.StreamResponse(reply.OpeningNotice, streamURL, adapter.StreamStatusURL(baseURL), adapter.StreamFallbackURL(baseURL), reply.AudioURL, map[string]string{
+				"call_sid":        providerCallID,
+				"session_id":      sessionID,
+				"stream_token":    adapter.StreamToken(providerCallID, sessionID),
+				"from_phone":      reply.Session.InboundPhone,
+				"to_phone":        reply.Session.OutboundPhone,
+				"initial_message": reply.Message,
 			})
 		}
 	}
-	return adapter.GatherResponse(reply.Message, adapter.TurnURL(baseURL), reply.AudioURL)
+	return adapter.GatherResponseWithOpeningNotice(reply.OpeningNotice, reply.Message, adapter.TurnURL(baseURL), reply.AudioURL)
 }
 
 func (h *Handler) Stream(c *websocket.Conn) {
@@ -240,6 +241,7 @@ func (h *Handler) Stream(c *websocket.Conn) {
 	var sessionID string
 	var fromPhone string
 	var toPhone string
+	var initialMessage string
 	var connected atomic.Bool
 	seenTranscripts := map[string]struct{}{}
 	twilioMarks := make(chan string, 8)
@@ -270,6 +272,7 @@ func (h *Handler) Stream(c *websocket.Conn) {
 			sessionID = strings.TrimSpace(msg.Start.CustomParameters["session_id"])
 			fromPhone = msg.Start.CustomParameters["from_phone"]
 			toPhone = msg.Start.CustomParameters["to_phone"]
+			initialMessage = msg.Start.CustomParameters["initial_message"]
 			token := msg.Start.CustomParameters["stream_token"]
 			if streamSID == "" || providerCallID == "" || sessionID == "" || token == "" {
 				closeStream("invalid_start_parameters")
@@ -299,7 +302,7 @@ func (h *Handler) Stream(c *websocket.Conn) {
 				"stage":      "openai_connected",
 				"stream_sid": streamSID,
 			})
-			go h.forwardRealtimeEvents(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, seenTranscripts, twilioMarks)
+			go h.forwardRealtimeEventsWithInitialReply(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, initialMessage, seenTranscripts, twilioMarks)
 		case "media":
 			if realtime == nil || msg.Media == nil || strings.TrimSpace(msg.Media.Payload) == "" {
 				continue
@@ -350,7 +353,25 @@ func (h *Handler) forwardRealtimeEvents(
 	seenTranscripts map[string]struct{},
 	twilioMarks <-chan string,
 ) {
-	h.forwardRealtimeEventsWithRealtimePolicy(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, seenTranscripts, twilioMarks, realtimeTerminalDrainTimeout, realtimeBargeInGuard, time.Now)
+	h.forwardRealtimeEventsWithInitialReply(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, "", seenTranscripts, twilioMarks)
+}
+
+func (h *Handler) forwardRealtimeEventsWithInitialReply(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	closeStream func(string),
+	realtime voice.RealtimeSession,
+	writeJSON func(any) error,
+	streamSID string,
+	providerCallID string,
+	sessionID string,
+	fromPhone string,
+	toPhone string,
+	initialMessage string,
+	seenTranscripts map[string]struct{},
+	twilioMarks <-chan string,
+) {
+	h.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, initialMessage, seenTranscripts, twilioMarks, realtimeTerminalDrainTimeout, realtimeBargeInGuard, time.Now)
 }
 
 func (h *Handler) forwardRealtimeEventsWithTerminalDrainTimeout(
@@ -368,7 +389,7 @@ func (h *Handler) forwardRealtimeEventsWithTerminalDrainTimeout(
 	twilioMarks <-chan string,
 	terminalDrainTimeout time.Duration,
 ) {
-	h.forwardRealtimeEventsWithRealtimePolicy(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, seenTranscripts, twilioMarks, terminalDrainTimeout, realtimeBargeInGuard, time.Now)
+	h.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, "", seenTranscripts, twilioMarks, terminalDrainTimeout, realtimeBargeInGuard, time.Now)
 }
 
 func (h *Handler) forwardRealtimeEventsWithRealtimePolicy(
@@ -382,6 +403,27 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicy(
 	sessionID string,
 	fromPhone string,
 	toPhone string,
+	seenTranscripts map[string]struct{},
+	twilioMarks <-chan string,
+	terminalDrainTimeout time.Duration,
+	bargeInGuard time.Duration,
+	now func() time.Time,
+) {
+	h.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, "", seenTranscripts, twilioMarks, terminalDrainTimeout, bargeInGuard, now)
+}
+
+func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	closeStream func(string),
+	realtime voice.RealtimeSession,
+	writeJSON func(any) error,
+	streamSID string,
+	providerCallID string,
+	sessionID string,
+	fromPhone string,
+	toPhone string,
+	initialMessage string,
 	seenTranscripts map[string]struct{},
 	twilioMarks <-chan string,
 	terminalDrainTimeout time.Duration,
@@ -469,6 +511,10 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicy(
 			return true
 		}
 		return !now().Before(playbackAudioStartedAt.Add(bargeInGuard))
+	}
+
+	if !speakReply(initialMessage, false) {
+		return
 	}
 
 	for {

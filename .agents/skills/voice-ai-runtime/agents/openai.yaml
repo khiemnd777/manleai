@@ -1,6 +1,6 @@
 interface:
   display_name: "Voice AI Runtime"
   short_description: "Plan AI runtime and voice safety"
-  default_prompt: "Use $voice-ai-runtime to investigate AI runtime, tone, service understanding, telephony, realtime, retention, and voice behavior, then plan approval-gated changes with replay safety and safe fallback states."
+  default_prompt: "Use $voice-ai-runtime to investigate AI runtime, tone, service understanding, telephony, realtime, retention, and voice behavior. Return structured output with conclusion, work type, evidence, confirmed or inferred root cause, numbered runtime/regression plan, scope/non-goals, replay/fallback checks, and the exact approval gate."
 policy:
   allow_implicit_invocation: false

@@ -1784,10 +1784,15 @@ function selectedSlotLabel(session: ConversationSession, serviceNames: Map<strin
 }
 
 function bookingActionValue(session: ConversationSession) {
-  return session.booking_action === "reschedule" ? "reschedule" : "book";
+  if (session.booking_action === "reschedule") return "reschedule";
+  if (session.booking_action === "cancel") return "cancel";
+  return "book";
 }
 
 function squareConfirmationLabel(session: ConversationSession) {
+  if (session.outcome === "booking_cancelled" && session.appointment_id) {
+    return `Cancelled by Square Appointments (${session.appointment_id})`;
+  }
   if (session.outcome === "booking_rescheduled" && session.appointment_id) {
     return `Rescheduled by Square Appointments (${session.appointment_id})`;
   }
@@ -1795,6 +1800,11 @@ function squareConfirmationLabel(session: ConversationSession) {
     return `Confirmed by Square Appointments (${session.booking_attempt_id})`;
   }
   if (session.outcome === "booking_fallback_pending") {
+    if (bookingActionValue(session) === "cancel") {
+      return session.booking_attempt_id
+        ? `Cancellation pending owner review (${session.booking_attempt_id})`
+        : "Cancellation pending owner review";
+    }
     if (bookingActionValue(session) === "reschedule") {
       return session.booking_attempt_id
         ? `Reschedule pending owner review (${session.booking_attempt_id})`
@@ -1809,6 +1819,9 @@ function squareConfirmationLabel(session: ConversationSession) {
 
 function bookingNegotiationStatus(session: ConversationSession | null) {
   if (!session) return "not_started";
+  if (session.outcome === "booking_cancelled" && session.appointment_id) {
+    return "cancelled";
+  }
   if (session.outcome === "booking_rescheduled" && session.appointment_id) {
     return "rescheduled";
   }

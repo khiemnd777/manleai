@@ -10,6 +10,14 @@ For conversation/training work, map service-understanding, `service_aliases`, `s
 For group or party booking work, map detection, party segment planning, availability/booking tool routing, POS confirmation boundaries, owner-review exception records, Calls dashboard workflow, and redaction.
 For AI tone work, map `salon_settings.ai_tone`, settings API DTOs, frontend types, configuration transfer schema/defaults, `conversation.RuntimeConfig`, `voice.ModelRequest`, and provider adapter request payloads.
 Identify the likely implementation files, tests, and docs to update.
+Return a compact structured map:
+1. Conclusion: the owning path or the current blocker.
+2. Work Type: task, defect, new feature, refactor, review, documentation-only, or agent-rule change.
+3. Evidence: exact files and line references, plus docs/log/screenshot evidence when provided.
+4. Current Flow: entrypoint -> service/module -> persistence/provider -> UI/docs surface.
+5. Root Cause or Decision Driver: confirmed when proven, otherwise label as inference and name the missing evidence.
+6. Implementation Listing: likely files, tests, docs, and explicit non-goals.
+7. Checks: nearest commands or manual verification needed after implementation.
 Do not edit files or propose broad rewrites unless the parent agent asks.
 """
 nickname_candidates = ["Mapper", "Scout", "Tracer"]

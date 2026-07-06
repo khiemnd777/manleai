@@ -1,6 +1,6 @@
 interface:
   display_name: "Salon Dashboard UI"
   short_description: "Plan and review salon dashboard UI"
-  default_prompt: "Use $salon-dashboard-ui to investigate or review dashboard UI, produce Mockup as Text for user-facing changes, and wait for explicit approval before frontend edits."
+  default_prompt: "Use $salon-dashboard-ui to investigate or review dashboard UI. Return structured output with conclusion, work type, evidence, visual/workflow root cause, Mockup as Text for user-facing changes, numbered UI plan, scope/non-goals, frontend checks, and the exact approval gate before edits."
 policy:
   allow_implicit_invocation: false
