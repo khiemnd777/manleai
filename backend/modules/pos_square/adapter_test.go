@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,15 +35,50 @@ func TestDoJSONSendsSquareVersionHeader(t *testing.T) {
 	}
 }
 
-func TestSquareScopesIncludeDemoSetupWritePermissions(t *testing.T) {
+func TestSquareScopesIncludeProductionDemoSetupWritePermissions(t *testing.T) {
 	scopes := map[string]bool{}
-	for _, scope := range squareScopes() {
+	for _, scope := range squareScopes(config.SquareConfig{Environment: "production"}) {
 		scopes[scope] = true
 	}
 	for _, required := range []string{"APPOINTMENTS_READ", "APPOINTMENTS_ALL_READ", "APPOINTMENTS_WRITE", "APPOINTMENTS_ALL_WRITE", "ITEMS_WRITE", "EMPLOYEES_WRITE"} {
 		if !scopes[required] {
 			t.Fatalf("squareScopes missing %s", required)
 		}
+	}
+}
+
+func TestSquareScopesUseBuyerBookingWritesInSandbox(t *testing.T) {
+	scopes := map[string]bool{}
+	for _, scope := range squareScopes(config.SquareConfig{Environment: "sandbox"}) {
+		scopes[scope] = true
+	}
+	for _, required := range []string{"APPOINTMENTS_READ", "APPOINTMENTS_ALL_READ", "APPOINTMENTS_WRITE", "ITEMS_WRITE", "EMPLOYEES_WRITE"} {
+		if !scopes[required] {
+			t.Fatalf("squareScopes missing sandbox scope %s", required)
+		}
+	}
+	if scopes["APPOINTMENTS_ALL_WRITE"] {
+		t.Fatalf("sandbox scope list should not request APPOINTMENTS_ALL_WRITE")
+	}
+}
+
+func TestConnectionScopesPreservesSquareTokenResponseScopes(t *testing.T) {
+	scopes := connectionScopes("APPOINTMENTS_WRITE CUSTOMERS_READ", config.SquareConfig{Environment: "sandbox"})
+	if len(scopes) != 2 || scopes[0] != "APPOINTMENTS_WRITE" || scopes[1] != "CUSTOMERS_READ" {
+		t.Fatalf("connection scopes = %v, want Square token response scopes", scopes)
+	}
+}
+
+func TestConnectionScopesFallbackUsesSandboxBuyerBookingWrites(t *testing.T) {
+	scopes := map[string]bool{}
+	for _, scope := range connectionScopes("", config.SquareConfig{Environment: "sandbox"}) {
+		scopes[scope] = true
+	}
+	if !scopes["APPOINTMENTS_WRITE"] {
+		t.Fatalf("fallback sandbox scopes should include APPOINTMENTS_WRITE")
+	}
+	if scopes["APPOINTMENTS_ALL_WRITE"] {
+		t.Fatalf("fallback sandbox scopes should not include APPOINTMENTS_ALL_WRITE")
 	}
 }
 
@@ -90,6 +126,17 @@ func TestOAuthURLDoesNotSendSessionFalseInSandbox(t *testing.T) {
 	if got := parsed.Query().Get("session"); got != "" {
 		t.Fatalf("sandbox session parameter = %q, want omitted", got)
 	}
+	scopeValues := strings.Fields(parsed.Query().Get("scope"))
+	scopes := map[string]bool{}
+	for _, scope := range scopeValues {
+		scopes[scope] = true
+	}
+	if !scopes["APPOINTMENTS_WRITE"] {
+		t.Fatalf("sandbox OAuth scope should include APPOINTMENTS_WRITE: %v", scopeValues)
+	}
+	if scopes["APPOINTMENTS_ALL_WRITE"] {
+		t.Fatalf("sandbox OAuth scope should not include APPOINTMENTS_ALL_WRITE: %v", scopeValues)
+	}
 }
 
 func TestOAuthURLSendsSessionFalseInProduction(t *testing.T) {
@@ -113,6 +160,14 @@ func TestOAuthURLSendsSessionFalseInProduction(t *testing.T) {
 	}
 	if got := parsed.Query().Get("session"); got != "false" {
 		t.Fatalf("production session parameter = %q, want false", got)
+	}
+	scopeValues := strings.Fields(parsed.Query().Get("scope"))
+	scopes := map[string]bool{}
+	for _, scope := range scopeValues {
+		scopes[scope] = true
+	}
+	if !scopes["APPOINTMENTS_ALL_WRITE"] {
+		t.Fatalf("production OAuth scope should include APPOINTMENTS_ALL_WRITE: %v", scopeValues)
 	}
 }
 

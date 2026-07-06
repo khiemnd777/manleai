@@ -68,7 +68,7 @@ func (a *SquareAdapter) OAuthURL(ctx context.Context, salonID string, state stri
 	}
 	values := url.Values{}
 	values.Set("client_id", cfg.ClientID)
-	values.Set("scope", strings.Join(squareScopes(), " "))
+	values.Set("scope", strings.Join(squareScopes(cfg), " "))
 	if strings.EqualFold(strings.TrimSpace(cfg.Environment), "production") {
 		values.Set("session", "false")
 	}
@@ -114,11 +114,6 @@ func (a *SquareAdapter) Connect(ctx context.Context, input pos.ConnectInput) (*p
 		return nil, err
 	}
 
-	scopes := strings.Fields(tokenResponse.Scope)
-	if len(scopes) == 0 {
-		scopes = squareScopes()
-	}
-
 	return a.repo.UpsertConnection(ctx, pos.Connection{
 		SalonID:               input.SalonID,
 		Provider:              pos.ProviderSquare,
@@ -126,7 +121,7 @@ func (a *SquareAdapter) Connect(ctx context.Context, input pos.ConnectInput) (*p
 		AccessTokenEncrypted:  accessTokenEncrypted,
 		RefreshTokenEncrypted: refreshTokenEncrypted,
 		MerchantID:            tokenResponse.MerchantID,
-		Scopes:                scopes,
+		Scopes:                connectionScopes(tokenResponse.Scope, cfg),
 	})
 }
 
@@ -684,12 +679,11 @@ func (a *SquareAdapter) oauthBaseURL(cfg config.SquareConfig) string {
 	return a.apiBaseURL(cfg)
 }
 
-func squareScopes() []string {
-	return []string{
+func squareScopes(cfg config.SquareConfig) []string {
+	scopes := []string{
 		"APPOINTMENTS_READ",
 		"APPOINTMENTS_ALL_READ",
 		"APPOINTMENTS_WRITE",
-		"APPOINTMENTS_ALL_WRITE",
 		"APPOINTMENTS_BUSINESS_SETTINGS_READ",
 		"CUSTOMERS_READ",
 		"CUSTOMERS_WRITE",
@@ -699,6 +693,18 @@ func squareScopes() []string {
 		"EMPLOYEES_READ",
 		"EMPLOYEES_WRITE",
 	}
+	if strings.EqualFold(strings.TrimSpace(cfg.Environment), "production") {
+		scopes = append(scopes[:3], append([]string{"APPOINTMENTS_ALL_WRITE"}, scopes[3:]...)...)
+	}
+	return scopes
+}
+
+func connectionScopes(tokenScope string, cfg config.SquareConfig) []string {
+	scopes := strings.Fields(tokenScope)
+	if len(scopes) > 0 {
+		return scopes
+	}
+	return squareScopes(cfg)
 }
 
 func normalizeSquareError(err error) string {
