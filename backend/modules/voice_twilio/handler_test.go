@@ -255,6 +255,68 @@ func TestForwardRealtimeEventsQueuesReplyUntilResponseDone(t *testing.T) {
 	assertNoClose(t, closed)
 }
 
+func TestForwardRealtimeEventsSpeaksProgressWhileBackendTurnIsPending(t *testing.T) {
+	adapter, service, _, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("What name should I put on the appointment?", conversation.StatusActive, conversation.OutcomeCollecting))
+	engine.messageDelay = 80 * time.Millisecond
+	engine.messageStarted = make(chan struct{}, 1)
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	closed := make(chan string, 1)
+
+	go handler.forwardRealtimeEventsWithRealtimePolicyAndProgress(ctx, cancel, closeStreamRecorder(closed), realtime, func(any) error { return nil }, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{}, nil, realtimeTerminalDrainTimeout, 0, 10*time.Millisecond, time.Now)
+
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_1", Transcript: "one p.m."}
+	select {
+	case <-engine.messageStarted:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for backend turn to start")
+	}
+	if got := waitForSpeak(t, realtime); got != realtimeBackendProgressReply {
+		t.Fatalf("progress speak = %q", got)
+	}
+	if strings.Contains(strings.ToLower(realtimeBackendProgressReply), "confirmed") {
+		t.Fatalf("progress reply must not confirm booking: %q", realtimeBackendProgressReply)
+	}
+	time.Sleep(120 * time.Millisecond)
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
+	if got := waitForSpeak(t, realtime); got != "What name should I put on the appointment?" {
+		t.Fatalf("final queued speak = %q", got)
+	}
+	assertNoClose(t, closed)
+}
+
+func TestForwardRealtimeEventsRecordsTimingStages(t *testing.T) {
+	adapter, service, store, _ := testTwilioRuntimeWithStore(phoneSessionWithAIReply("What name should I put on the appointment?", conversation.StatusActive, conversation.OutcomeCollecting))
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes := make(chan any, 2)
+
+	go handler.forwardRealtimeEventsWithRealtimePolicy(ctx, cancel, closeStreamRecorder(make(chan string, 1)), realtime, func(value any) error {
+		writes <- value
+		return nil
+	}, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{}, nil, realtimeTerminalDrainTimeout, 0, time.Now)
+
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_1", Transcript: "one p.m."}
+	_ = waitForSpeak(t, realtime)
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventAudioDelta, AudioBase64: "first-audio"}
+	_ = waitForWrite(t, writes)
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
+
+	waitForTimingStages(t, store, []string{"transcript_done", "backend_turn_start", "backend_turn_done", "response_create", "first_audio_delta", "response_done"})
+	for _, event := range store.events {
+		if event.EventType != voice.EventRealtimeTiming {
+			continue
+		}
+		if event.Payload["transcript"] != "" || event.Payload["audio"] != "" {
+			t.Fatalf("timing event should not include transcript or audio payload: %#v", event)
+		}
+	}
+}
+
 func TestForwardRealtimeEventsSuppressesInterruptedAudioUntilResponseDone(t *testing.T) {
 	adapter, service, _, _ := testTwilioRuntimeWithStore(phoneSessionWithAIReply("What name should I put on the appointment?", conversation.StatusActive, conversation.OutcomeCollecting))
 	handler := NewHandler(adapter, service)
@@ -761,6 +823,8 @@ type fakeTwilioConversationEngine struct {
 	startSession   *conversation.Session
 	messageSession *conversation.Session
 	lastMessage    string
+	messageDelay   time.Duration
+	messageStarted chan struct{}
 }
 
 func (f *fakeTwilioConversationEngine) StartPhoneCall(ctx context.Context, salonID string, ownerUserID string, req conversation.StartPhoneCallRequest) (*conversation.Session, error) {
@@ -768,6 +832,19 @@ func (f *fakeTwilioConversationEngine) StartPhoneCall(ctx context.Context, salon
 }
 
 func (f *fakeTwilioConversationEngine) Message(ctx context.Context, salonID string, ownerUserID string, sessionID string, req conversation.MessageRequest) (*conversation.Session, error) {
+	if f.messageStarted != nil {
+		select {
+		case f.messageStarted <- struct{}{}:
+		default:
+		}
+	}
+	if f.messageDelay > 0 {
+		select {
+		case <-time.After(f.messageDelay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	f.lastMessage = req.Message
 	if f.messageSession != nil {
 		return f.messageSession, nil
@@ -860,6 +937,34 @@ func assertNoSpeak(t *testing.T, realtime *fakeRealtimeSession) {
 	case got := <-realtime.speaks:
 		t.Fatalf("unexpected realtime speak: %q", got)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func waitForTimingStages(t *testing.T, store *fakeTwilioVoiceStore, required []string) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		stages := map[string]bool{}
+		for _, event := range store.events {
+			if event.EventType == voice.EventRealtimeTiming {
+				stages[event.Payload["stage"]] = true
+			}
+		}
+		missing := ""
+		for _, stage := range required {
+			if !stages[stage] {
+				missing = stage
+				break
+			}
+		}
+		if missing == "" {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("missing realtime timing stage %q in events: %#v", missing, store.events)
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 

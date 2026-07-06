@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/internal/validation"
@@ -18,6 +19,10 @@ type Service struct {
 	cfg            config.VoiceConfig
 	providers      AIProviders
 	configResolver ConfigResolver
+}
+
+type answerContextPrewarmer interface {
+	PrewarmAnswerContext(ctx context.Context, salonID string) error
 }
 
 func NewService(repo Store, conversation ConversationEngine, cfg config.VoiceConfig, providers AIProviders) *Service {
@@ -115,6 +120,7 @@ func (s *Service) HandleIncomingCall(ctx context.Context, req IncomingCallReques
 	if err != nil {
 		return nil, err
 	}
+	go s.prewarmAnswerContext(ctx, salon.SalonID)
 	_ = s.repo.RecordWebhookEvent(ctx, WebhookEvent{
 		SalonID:        salon.SalonID,
 		CallSessionID:  session.ID,
@@ -129,6 +135,16 @@ func (s *Service) HandleIncomingCall(ctx context.Context, req IncomingCallReques
 		Continue:      session.Status == conversation.StatusActive,
 		Session:       session,
 	}, session, req.Provider, req.ProviderCallID), nil
+}
+
+func (s *Service) prewarmAnswerContext(ctx context.Context, salonID string) {
+	prewarmer, ok := s.conversation.(answerContextPrewarmer)
+	if !ok {
+		return
+	}
+	prewarmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_ = prewarmer.PrewarmAnswerContext(prewarmCtx, salonID)
 }
 
 func (s *Service) HandleSpeechTurn(ctx context.Context, req SpeechTurnRequest) (*CallReply, error) {

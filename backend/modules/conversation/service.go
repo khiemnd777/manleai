@@ -159,6 +159,15 @@ func (s *Service) SetReplyGenerator(generator ReplyGenerator) {
 	s.replyGenerator = generator
 }
 
+func (s *Service) PrewarmAnswerContext(ctx context.Context, salonID string) error {
+	salonID = strings.TrimSpace(salonID)
+	if salonID == "" {
+		return ErrValidation
+	}
+	_, err := s.loadAnswerContext(ctx, salonID)
+	return err
+}
+
 func (s *Service) Start(ctx context.Context, salonID string, ownerUserID string, req StartSessionRequest) (*Session, error) {
 	salonID = strings.TrimSpace(salonID)
 	ownerUserID = strings.TrimSpace(ownerUserID)
@@ -3047,6 +3056,15 @@ func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, ses
 		})
 		return
 	}
+	if isRealtimePhoneTurn(turn, session) {
+		turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{
+			"safe_reply":          safeReply,
+			"llm_guardrail":       "skipped_realtime_latency_budget",
+			"reply_source":        "safe_reply",
+			"next_required_field": nextRequired,
+		})
+		return
+	}
 	result, err := s.replyGenerator.GenerateReply(ctx, ReplyGenerationRequest{
 		SalonID:              turn.SalonID,
 		SessionID:            session.ID,
@@ -3115,6 +3133,13 @@ func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, ses
 		"reply_source":        "llm_rewrite",
 		"next_required_field": nextRequired,
 	})
+}
+
+func isRealtimePhoneTurn(turn *TurnRecord, session Session) bool {
+	if turn == nil || session.Channel != ChannelPhone {
+		return false
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(turn.EventKey)), ":realtimetranscriptid:")
 }
 
 func rejectUnavailableRequestedTimeRewrite(safeReply string, message string) bool {

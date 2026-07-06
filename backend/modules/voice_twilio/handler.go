@@ -21,6 +21,9 @@ const (
 	fallbackInputModeQuery       = "voice_fallback_mode"
 	realtimeTerminalDrainTimeout = 12 * time.Second
 	realtimeBargeInGuard         = 850 * time.Millisecond
+	realtimeTurnTimeout          = 25 * time.Second
+	realtimeBackendProgressDelay = 1200 * time.Millisecond
+	realtimeBackendProgressReply = "One moment while I check that."
 )
 
 type Handler struct {
@@ -266,6 +269,7 @@ func (h *Handler) Stream(c *websocket.Conn) {
 		}
 		switch msg.Event {
 		case "start":
+			streamStartAt := time.Now()
 			if msg.Start == nil {
 				closeStream("missing_start")
 				return
@@ -294,6 +298,8 @@ func (h *Handler) Stream(c *websocket.Conn) {
 				closeStream("stream_route_failed")
 				return
 			}
+			_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "stream_start", streamStartAt, nil)
+			openAIConnectAt := time.Now()
 			realtime, err = h.service.ConnectRealtime(ctx, route.SalonID, route.SessionID, providerCallID)
 			if err != nil {
 				_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_connect", err)
@@ -302,8 +308,9 @@ func (h *Handler) Stream(c *websocket.Conn) {
 			}
 			connected.Store(true)
 			_ = h.service.RecordRealtimeEvent(ctx, voice.ProviderTwilio, providerCallID, sessionID, voice.EventRealtimeConnected, map[string]string{
-				"stage":      "openai_connected",
-				"stream_sid": streamSID,
+				"stage":       "openai_connected",
+				"stream_sid":  streamSID,
+				"duration_ms": durationMilliseconds(openAIConnectAt, time.Now()),
 			})
 			go h.forwardRealtimeEventsWithInitialReply(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, initialMessage, seenTranscripts, twilioMarks)
 		case "media":
@@ -374,7 +381,7 @@ func (h *Handler) forwardRealtimeEventsWithInitialReply(
 	seenTranscripts map[string]struct{},
 	twilioMarks <-chan string,
 ) {
-	h.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, initialMessage, seenTranscripts, twilioMarks, realtimeTerminalDrainTimeout, realtimeBargeInGuard, time.Now)
+	h.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, initialMessage, seenTranscripts, twilioMarks, realtimeTerminalDrainTimeout, realtimeBargeInGuard, realtimeBackendProgressDelay, time.Now)
 }
 
 func (h *Handler) forwardRealtimeEventsWithTerminalDrainTimeout(
@@ -392,7 +399,7 @@ func (h *Handler) forwardRealtimeEventsWithTerminalDrainTimeout(
 	twilioMarks <-chan string,
 	terminalDrainTimeout time.Duration,
 ) {
-	h.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, "", seenTranscripts, twilioMarks, terminalDrainTimeout, realtimeBargeInGuard, time.Now)
+	h.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, "", seenTranscripts, twilioMarks, terminalDrainTimeout, realtimeBargeInGuard, realtimeBackendProgressDelay, time.Now)
 }
 
 func (h *Handler) forwardRealtimeEventsWithRealtimePolicy(
@@ -412,7 +419,28 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicy(
 	bargeInGuard time.Duration,
 	now func() time.Time,
 ) {
-	h.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, "", seenTranscripts, twilioMarks, terminalDrainTimeout, bargeInGuard, now)
+	h.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, "", seenTranscripts, twilioMarks, terminalDrainTimeout, bargeInGuard, realtimeBackendProgressDelay, now)
+}
+
+func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndProgress(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	closeStream func(string),
+	realtime voice.RealtimeSession,
+	writeJSON func(any) error,
+	streamSID string,
+	providerCallID string,
+	sessionID string,
+	fromPhone string,
+	toPhone string,
+	seenTranscripts map[string]struct{},
+	twilioMarks <-chan string,
+	terminalDrainTimeout time.Duration,
+	bargeInGuard time.Duration,
+	progressDelay time.Duration,
+	now func() time.Time,
+) {
+	h.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, "", seenTranscripts, twilioMarks, terminalDrainTimeout, bargeInGuard, progressDelay, now)
 }
 
 func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
@@ -431,6 +459,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	twilioMarks <-chan string,
 	terminalDrainTimeout time.Duration,
 	bargeInGuard time.Duration,
+	progressDelay time.Duration,
 	now func() time.Time,
 ) {
 	responseActive := false
@@ -443,8 +472,17 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	pendingCloseMark := ""
 	closeDrainTimer := (<-chan time.Time)(nil)
 	markSequence := 0
+	turnResults := make(chan realtimeTurnResult, 8)
+	turnQueue := []realtimeTurnTask{}
+	turnInFlight := false
+	turnProgressTimer := (<-chan time.Time)(nil)
+	turnProgressSpoken := false
+	activeResponseCreatedAt := time.Time{}
 	if now == nil {
 		now = time.Now
+	}
+	if progressDelay <= 0 {
+		progressDelay = realtimeBackendProgressDelay
 	}
 	recordBackendClose := func(reason string) {
 		reason = strings.TrimSpace(reason)
@@ -461,8 +499,85 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 		recordBackendClose(reason)
 		closeStream(reason)
 	}
+	var speakReply func(string, bool) bool
+	startNextTurn := func() {
+		if turnInFlight || len(turnQueue) == 0 {
+			return
+		}
+		task := turnQueue[0]
+		turnQueue = turnQueue[1:]
+		turnInFlight = true
+		turnProgressSpoken = false
+		turnProgressTimer = time.After(progressDelay)
+		startedAt := time.Now()
+		_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "backend_turn_start", time.Time{}, map[string]string{
+			"item_id":   task.itemID,
+			"queued_ms": durationMilliseconds(task.queuedAt, startedAt),
+		})
+		go func(task realtimeTurnTask, startedAt time.Time) {
+			turnCtx, turnCancel := context.WithTimeout(ctx, realtimeTurnTimeout)
+			reply, err := h.service.HandleSpeechTurn(turnCtx, voice.SpeechTurnRequest{
+				Provider:          voice.ProviderTwilio,
+				ProviderCallID:    providerCallID,
+				FromPhone:         fromPhone,
+				ToPhone:           toPhone,
+				SpeechText:        task.transcript,
+				InputModeOverride: voice.InputModeRealtimeStream,
+				Payload: map[string]string{
+					"CallSid":              providerCallID,
+					"StreamSid":            streamSID,
+					"CallSessionID":        sessionID,
+					"RealtimeTranscriptID": task.itemID,
+				},
+			})
+			turnCancel()
+			result := realtimeTurnResult{
+				task:        task,
+				reply:       reply,
+				err:         err,
+				startedAt:   startedAt,
+				completedAt: time.Now(),
+			}
+			select {
+			case turnResults <- result:
+			case <-ctx.Done():
+			}
+		}(task, startedAt)
+	}
+	handleTurnResult := func(result realtimeTurnResult) bool {
+		turnInFlight = false
+		turnProgressTimer = nil
+		status := "ok"
+		if result.err != nil {
+			status = "error"
+		}
+		_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "backend_turn_done", result.startedAt, map[string]string{
+			"duration_ms":      durationMilliseconds(result.startedAt, result.completedAt),
+			"item_id":          result.task.itemID,
+			"status":           status,
+			"progress_spoken":  strconv.FormatBool(turnProgressSpoken),
+			"queued_remaining": strconv.Itoa(len(turnQueue)),
+		})
+		if result.err != nil {
+			if !speakReply("I could not process that clearly. Please say it again, or the owner can help directly.", false) {
+				return false
+			}
+			startNextTurn()
+			return true
+		}
+		if result.reply != nil && strings.TrimSpace(result.reply.Message) != "" {
+			if !speakReply(result.reply.Message, !result.reply.Continue) {
+				return false
+			}
+			if !result.reply.Continue {
+				turnQueue = nil
+			}
+		}
+		startNextTurn()
+		return true
+	}
 
-	speakReply := func(message string, closeAfter bool) bool {
+	speakReply = func(message string, closeAfter bool) bool {
 		message = strings.TrimSpace(message)
 		if message == "" {
 			return true
@@ -476,6 +591,10 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 			closeStream("openai_response_create_failed")
 			return false
 		}
+		activeResponseCreatedAt = now()
+		_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "response_create", time.Time{}, map[string]string{
+			"close_after": strconv.FormatBool(closeAfter),
+		})
 		responseActive = true
 		activeCloseAfter = closeAfter
 		activeAudioSent = false
@@ -552,6 +671,26 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 			cancel()
 			closeAfterBackendStop("response_playback_timeout")
 			return
+		case <-turnProgressTimer:
+			turnProgressTimer = nil
+			select {
+			case result := <-turnResults:
+				if !handleTurnResult(result) {
+					return
+				}
+				continue
+			default:
+			}
+			if turnInFlight && !turnProgressSpoken && !responseActive && strings.TrimSpace(pendingReply.message) == "" {
+				turnProgressSpoken = true
+				if !speakReply(realtimeBackendProgressReply, false) {
+					return
+				}
+			}
+		case result := <-turnResults:
+			if !handleTurnResult(result) {
+				return
+			}
 		case event, ok := <-realtime.Events():
 			if !ok {
 				if ctx.Err() == nil {
@@ -574,9 +713,11 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					activeAudioSent = true
 					if playbackAudioStartedAt.IsZero() {
 						playbackAudioStartedAt = now()
+						_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "first_audio_delta", activeResponseCreatedAt, nil)
 					}
 				}
 			case voice.RealtimeEventSpeechStarted:
+				_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "speech_started", time.Time{}, nil)
 				if !shouldInterruptPlayback() {
 					continue
 				}
@@ -598,42 +739,29 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					continue
 				}
 				seenTranscripts[key] = struct{}{}
-				turnCtx, turnCancel := context.WithTimeout(ctx, 25*time.Second)
-				reply, err := h.service.HandleSpeechTurn(turnCtx, voice.SpeechTurnRequest{
-					Provider:       voice.ProviderTwilio,
-					ProviderCallID: providerCallID,
-					FromPhone:      fromPhone,
-					ToPhone:        toPhone,
-					SpeechText:     transcript,
-					Payload: map[string]string{
-						"CallSid":              providerCallID,
-						"StreamSid":            streamSID,
-						"CallSessionID":        sessionID,
-						"RealtimeTranscriptID": event.ItemID,
-					},
+				_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "transcript_done", time.Time{}, map[string]string{
+					"item_id": strings.TrimSpace(event.ItemID),
 				})
-				turnCancel()
-				if err != nil {
-					if !speakReply("I could not process that clearly. Please say it again, or the owner can help directly.", false) {
-						return
-					}
-					continue
-				}
-				if reply == nil || strings.TrimSpace(reply.Message) == "" {
-					continue
-				}
-				if !speakReply(reply.Message, !reply.Continue) {
-					return
-				}
+				turnQueue = append(turnQueue, realtimeTurnTask{
+					itemID:     strings.TrimSpace(event.ItemID),
+					transcript: transcript,
+					queuedAt:   time.Now(),
+				})
+				startNextTurn()
 			case voice.RealtimeEventResponseDone:
 				completedCloseAfter := activeCloseAfter
 				completedAudioSent := activeAudioSent
 				completedInterrupted := activeInterrupted
 				hadPendingReply := strings.TrimSpace(pendingReply.message) != ""
+				_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "response_done", activeResponseCreatedAt, map[string]string{
+					"close_after": strconv.FormatBool(completedCloseAfter),
+					"interrupted": strconv.FormatBool(completedInterrupted),
+				})
 				responseActive = false
 				activeCloseAfter = false
 				activeAudioSent = false
 				activeInterrupted = false
+				activeResponseCreatedAt = time.Time{}
 				suppressAudioUntilDone = false
 				if !flushPendingReply() {
 					return
@@ -665,8 +793,51 @@ type realtimeQueuedReply struct {
 	closeAfter bool
 }
 
+type realtimeTurnTask struct {
+	itemID     string
+	transcript string
+	queuedAt   time.Time
+}
+
+type realtimeTurnResult struct {
+	task        realtimeTurnTask
+	reply       *voice.CallReply
+	err         error
+	startedAt   time.Time
+	completedAt time.Time
+}
+
 func isActiveRealtimeResponseConflict(message string) bool {
 	return strings.Contains(strings.ToLower(message), "conversation_already_has_active_response")
+}
+
+func (h *Handler) recordRealtimeTiming(ctx context.Context, providerCallID string, sessionID string, streamSID string, stage string, startedAt time.Time, extra map[string]string) error {
+	payload := map[string]string{
+		"stage":      strings.TrimSpace(stage),
+		"stream_sid": strings.TrimSpace(streamSID),
+	}
+	if !startedAt.IsZero() {
+		payload["duration_ms"] = durationMilliseconds(startedAt, time.Now())
+	}
+	for key, value := range extra {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		payload[key] = value
+	}
+	return h.service.RecordRealtimeEvent(ctx, voice.ProviderTwilio, providerCallID, sessionID, voice.EventRealtimeTiming, payload)
+}
+
+func durationMilliseconds(start time.Time, end time.Time) string {
+	if start.IsZero() || end.IsZero() {
+		return ""
+	}
+	if end.Before(start) {
+		return "0"
+	}
+	return strconv.FormatInt(end.Sub(start).Milliseconds(), 10)
 }
 
 func (h *Handler) recordRealtimeFailure(ctx context.Context, providerCallID string, sessionID string, streamSID string, stage string, err error) error {

@@ -19,6 +19,7 @@ const (
 	EventLLMFailed         = "llm_failed"
 	EventTTSFailed         = "tts_failed"
 	EventRealtimeConnected = "realtime_connected"
+	EventRealtimeTiming    = "realtime_timing"
 	EventRealtimeFailed    = "realtime_failed"
 	EventRealtimeStopped   = "realtime_stopped"
 

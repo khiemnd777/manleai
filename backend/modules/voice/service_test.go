@@ -143,6 +143,32 @@ func TestIncomingCallStartsPhoneSessionAndReturnsGreeting(t *testing.T) {
 	}
 }
 
+func TestIncomingCallPrewarmsAnswerContextInBackground(t *testing.T) {
+	store := newFakeVoiceStore()
+	engine := newFakeConversationEngine()
+	engine.prewarmDone = make(chan struct{}, 1)
+	service := NewService(store, engine, testVoiceConfig(), AIProviders{})
+
+	_, err := service.HandleIncomingCall(context.Background(), IncomingCallRequest{
+		ProviderCallID: "CA123",
+		FromPhone:      "(312) 555-0101",
+		ToPhone:        "+1 312-555-0102",
+		Payload:        map[string]string{"CallSid": "CA123"},
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingCall returned error: %v", err)
+	}
+
+	select {
+	case <-engine.prewarmDone:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for answer context prewarm")
+	}
+	if engine.prewarmCalls != 1 || engine.prewarmSalonID != "salon_1" {
+		t.Fatalf("prewarm calls/salon = %d/%q", engine.prewarmCalls, engine.prewarmSalonID)
+	}
+}
+
 func TestIncomingCallOmitsOpeningNoticeWhenRecordingDisabled(t *testing.T) {
 	store := newFakeVoiceStore()
 	store.salon.RecordingEnabled = false
@@ -467,11 +493,14 @@ func (f *fakeVoiceStore) GetAudioOutput(ctx context.Context, id string) (*AudioO
 type fakeConversationEngine struct {
 	startCalls           int
 	messageCalls         int
+	prewarmCalls         int
 	startRequest         conversation.StartPhoneCallRequest
 	lastMessage          string
+	prewarmSalonID       string
 	startSession         *conversation.Session
 	messageSession       *conversation.Session
 	transcriptionContext conversation.TranscriptionContext
+	prewarmDone          chan struct{}
 }
 
 type fakeRealtimeProvider struct {
@@ -522,6 +551,18 @@ func (f *fakeConversationEngine) StartPhoneCall(ctx context.Context, salonID str
 	f.startCalls++
 	f.startRequest = req
 	return f.startSession, nil
+}
+
+func (f *fakeConversationEngine) PrewarmAnswerContext(ctx context.Context, salonID string) error {
+	f.prewarmCalls++
+	f.prewarmSalonID = salonID
+	if f.prewarmDone != nil {
+		select {
+		case f.prewarmDone <- struct{}{}:
+		default:
+		}
+	}
+	return nil
 }
 
 func (f *fakeConversationEngine) Message(ctx context.Context, salonID string, ownerUserID string, sessionID string, req conversation.MessageRequest) (*conversation.Session, error) {

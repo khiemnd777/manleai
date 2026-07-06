@@ -1805,6 +1805,40 @@ func TestApplyReplyGeneratorIncludesAITone(t *testing.T) {
 	}
 }
 
+func TestApplyReplyGeneratorSkipsLLMForRealtimePhoneTurn(t *testing.T) {
+	store := newFakeConversationStore()
+	service := NewService(store, &fakeBookingTool{})
+	replyGenerator := &fakeReplyGenerator{message: "What time works best?"}
+	service.SetReplyGenerator(replyGenerator)
+	session := store.session
+	session.Channel = ChannelPhone
+	turn := TurnRecord{
+		SalonID:         "salon_1",
+		OwnerUserID:     "owner_1",
+		Session:         session,
+		EventKey:        "twilio:CA123:realtimetranscriptid:item_1",
+		CustomerMessage: "Tomorrow",
+		AIMessage:       "What time works for that day?",
+		Update: SessionUpdate{
+			Status:  StatusActive,
+			Intent:  IntentBooking,
+			Outcome: OutcomeCollecting,
+		},
+	}
+
+	service.applyReplyGenerator(context.Background(), &turn, session, store.services, &store.cfg, "requested_time", "requested_time", nil)
+
+	if replyGenerator.calls != 0 {
+		t.Fatalf("reply generator calls = %d, want 0 for realtime latency fast path", replyGenerator.calls)
+	}
+	if turn.AIMessage != "What time works for that day?" {
+		t.Fatalf("AI message = %q, want deterministic safe reply", turn.AIMessage)
+	}
+	if turn.AIMetadata["llm_guardrail"] != "skipped_realtime_latency_budget" || turn.AIMetadata["reply_source"] != "safe_reply" {
+		t.Fatalf("AI metadata = %#v", turn.AIMetadata)
+	}
+}
+
 func TestApplyReplyGeneratorRejectsRescheduleTargetStageFlip(t *testing.T) {
 	store := newFakeConversationStore()
 	service := NewService(store, &fakeBookingTool{})
