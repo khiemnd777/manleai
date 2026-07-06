@@ -1171,12 +1171,16 @@ func TestMessageDoesNotBookAmbiguousGenericManicureMatch(t *testing.T) {
 	if session.ServiceID != "" || len(session.BookingSegments) != 0 {
 		t.Fatalf("service selection = %q segments %#v, want no service for ambiguous generic manicure match", session.ServiceID, session.BookingSegments)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "Which manicure service") ||
-		!strings.Contains(store.lastTurn.AIMessage, "1:00 PM") ||
+	reply := strings.ToLower(store.lastTurn.AIMessage)
+	if !strings.Contains(reply, "which manicure service") ||
+		strings.Contains(reply, "noted") ||
 		!strings.Contains(store.lastTurn.AIMessage, "Classic Manicure") ||
 		!strings.Contains(store.lastTurn.AIMessage, "Gel Manicure") ||
 		!strings.Contains(store.lastTurn.AIMessage, "Dip Powder Manicure") {
 		t.Fatalf("ambiguous service should ask for clarification: %s", store.lastTurn.AIMessage)
+	}
+	if session.RequestedStartTime == nil {
+		t.Fatalf("requested time should stay in session even when not repeated in wording: %#v", session)
 	}
 	if store.lastTurn.CustomerMetadata["service_understanding_reason"] != serviceUnderstandingAmbiguousFamily {
 		t.Fatalf("service understanding metadata = %#v", store.lastTurn.CustomerMetadata)
@@ -2840,12 +2844,16 @@ func TestMessageClearsServiceForAmbiguousServiceCorrection(t *testing.T) {
 	if session.ServiceID != "" || len(session.BookingSegments) != 0 || len(session.OfferedSlots) != 0 {
 		t.Fatalf("session service/segments/slots = %q/%#v/%#v, want cleared service state", session.ServiceID, session.BookingSegments, session.OfferedSlots)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "Which manicure service") ||
-		!strings.Contains(store.lastTurn.AIMessage, "Thursday") ||
+	reply := strings.ToLower(store.lastTurn.AIMessage)
+	if !strings.Contains(reply, "which manicure service") ||
+		strings.Contains(reply, "noted") ||
 		!strings.Contains(store.lastTurn.AIMessage, "Classic Manicure") ||
 		!strings.Contains(store.lastTurn.AIMessage, "Gel Manicure") ||
 		!strings.Contains(store.lastTurn.AIMessage, "Dip Powder Manicure") {
 		t.Fatalf("ambiguous service correction should ask for service clarification: %s", store.lastTurn.AIMessage)
+	}
+	if strings.TrimSpace(session.RequestedDate) == "" {
+		t.Fatalf("requested date should stay in session even when not repeated in wording: %#v", session)
 	}
 }
 
@@ -3796,7 +3804,13 @@ func TestMessageCompletesMultiTurnPartyPlanFromCategoryClarification(t *testing.
 		t.Fatalf("party plan = %#v, want persisted four-person plan with manicure/pedicure groups", session.PartyPlan)
 	}
 	reply := strings.ToLower(store.lastTurn.AIMessage)
-	if !strings.Contains(reply, "which manicure") || !strings.Contains(reply, "classic manicure") || !strings.Contains(reply, "dip powder manicure") || !strings.Contains(reply, "gel manicure") {
+	if !strings.Contains(reply, "for the two manicures") ||
+		!strings.Contains(reply, "which services would you like") ||
+		!strings.Contains(reply, "classic manicure") ||
+		!strings.Contains(reply, "dip powder manicure") ||
+		!strings.Contains(reply, "gel manicure") ||
+		strings.Contains(reply, "noted") ||
+		strings.Contains(reply, "should i book one") {
 		t.Fatalf("reply should ask for manicure clarification: %s", store.lastTurn.AIMessage)
 	}
 
@@ -3837,7 +3851,7 @@ func TestMessageCompletesMultiTurnPartyPlanFromCategoryClarification(t *testing.
 	}
 }
 
-func TestMessageResolvesPartyPlanAffirmativeForAllListedCandidates(t *testing.T) {
+func TestMessageDoesNotResolvePartyPlanAffirmativeWithoutSingleOptionPrompt(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = []ServiceOption{
 		{ID: "service_classic_mani", Name: "Classic Manicure", CategoryID: "cat_mani", CategoryName: "Manicure", CategorySlug: "manicure", DurationMinutes: 45},
@@ -3888,11 +3902,17 @@ func TestMessageResolvesPartyPlanAffirmativeForAllListedCandidates(t *testing.T)
 		t.Fatalf("Message returned error: %v", err)
 	}
 	firstReply := strings.ToLower(store.lastTurn.AIMessage)
-	if !strings.Contains(firstReply, "should i book") || !strings.Contains(firstReply, "classic manicure") || !strings.Contains(firstReply, "gel manicure") {
-		t.Fatalf("reply should ask a clear one-each confirmation: %s", store.lastTurn.AIMessage)
+	if strings.Contains(firstReply, "should i book") || strings.Contains(firstReply, "noted") {
+		t.Fatalf("reply should ask an open service choice without debug-style state wording: %s", store.lastTurn.AIMessage)
+	}
+	if !strings.Contains(firstReply, "for the two manicures") ||
+		!strings.Contains(firstReply, "which services would you like") ||
+		!strings.Contains(firstReply, "classic manicure") ||
+		!strings.Contains(firstReply, "gel manicure") {
+		t.Fatalf("reply should ask an open manicure clarification: %s", store.lastTurn.AIMessage)
 	}
 	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
-		t.Fatalf("booking tool calls before affirmation = availability %d booking %d, want none", bookingTool.availabilityCalls, bookingTool.calls)
+		t.Fatalf("booking tool calls before service selection = availability %d booking %d, want none", bookingTool.availabilityCalls, bookingTool.calls)
 	}
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -3901,8 +3921,25 @@ func TestMessageResolvesPartyPlanAffirmativeForAllListedCandidates(t *testing.T)
 	if err != nil {
 		t.Fatalf("affirmative Message returned error: %v", err)
 	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("booking tools should not run on a bare affirmative without a single-option prompt, availability=%d booking=%d reply=%q", bookingTool.availabilityCalls, bookingTool.calls, store.lastTurn.AIMessage)
+	}
+	reply := strings.ToLower(store.lastTurn.AIMessage)
+	if strings.Contains(reply, "noted") || strings.Contains(reply, "should i book one") {
+		t.Fatalf("affirmative retry should stay natural and avoid one-each guessing: %s", store.lastTurn.AIMessage)
+	}
+	if session.PartyPlan == nil || partyPlanComplete(session.PartyPlan) {
+		t.Fatalf("party plan = %#v, want incomplete after bare affirmative", session.PartyPlan)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Classic and Gel",
+	})
+	if err != nil {
+		t.Fatalf("explicit selection Message returned error: %v", err)
+	}
 	if bookingTool.availabilityCalls != 1 {
-		t.Fatalf("availability calls = %d, want 1 after affirmative one-each confirmation; reply=%q", bookingTool.availabilityCalls, store.lastTurn.AIMessage)
+		t.Fatalf("availability calls = %d, want 1 after explicit service selection; reply=%q", bookingTool.availabilityCalls, store.lastTurn.AIMessage)
 	}
 	if got := bookingTool.availabilityRequest.Segments; len(got) != 4 {
 		t.Fatalf("availability segments = %#v, want four party segments", got)
@@ -3915,7 +3952,144 @@ func TestMessageResolvesPartyPlanAffirmativeForAllListedCandidates(t *testing.T)
 		}
 	}
 	if session.PartyPlan == nil || !partyPlanComplete(session.PartyPlan) {
-		t.Fatalf("party plan = %#v, want complete after affirmative response", session.PartyPlan)
+		t.Fatalf("party plan = %#v, want complete after explicit service selection", session.PartyPlan)
+	}
+}
+
+func TestMessageKeepsPartyPlanNaturalAcrossMenuRejectionAndGroupQuestions(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_classic_mani", Name: "Classic Manicure", CategoryID: "cat_mani", CategoryName: "Manicure", CategorySlug: "manicure", DurationMinutes: 45},
+		{ID: "service_gel_mani", Name: "Gel Manicure", CategoryID: "cat_mani", CategoryName: "Manicure", CategorySlug: "manicure", DurationMinutes: 45},
+		{ID: "service_classic_pedi", Name: "Classic Pedicure", CategoryID: "cat_pedi", CategoryName: "Pedicure", CategorySlug: "pedicure", DurationMinutes: 45},
+		{ID: "service_spa_pedi", Name: "Spa Pedicure", CategoryID: "cat_pedi", CategoryName: "Pedicure", CategorySlug: "pedicure", DurationMinutes: 60},
+	}
+	store.categoryAliases = []ServiceCategoryAlias{
+		{ID: "cat_alias_mani", CategoryID: "cat_mani", CategoryName: "Manicure", Alias: "manicures", NormalizedAlias: "manicures", Source: "system", Confidence: 0.9},
+		{ID: "cat_alias_pedi", CategoryID: "cat_pedi", CategoryName: "Pedicure", Alias: "pedicures", NormalizedAlias: "pedicures", Source: "system", Confidence: 0.9},
+	}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I need to book for four people this Thursday. Two manicures and two pedicures.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	firstReply := strings.ToLower(store.lastTurn.AIMessage)
+	if strings.Contains(firstReply, "noted") || strings.Contains(firstReply, "should i book one") {
+		t.Fatalf("initial party prompt should not expose stored date or assume one-each: %s", store.lastTurn.AIMessage)
+	}
+	if !strings.Contains(firstReply, "for the two manicures") || !strings.Contains(firstReply, "which services would you like") {
+		t.Fatalf("initial party prompt should ask the active group naturally: %s", store.lastTurn.AIMessage)
+	}
+	if strings.TrimSpace(session.RequestedDate) == "" {
+		t.Fatalf("requested date should stay in session even when not repeated in wording: %#v", session)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "what pedicure services do you have?",
+	})
+	if err != nil {
+		t.Fatalf("pedicure menu Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("pedicure menu question should not run booking tools, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	reply := strings.ToLower(store.lastTurn.AIMessage)
+	if !strings.Contains(reply, "for pedicures") ||
+		!strings.Contains(reply, "classic pedicure") ||
+		!strings.Contains(reply, "spa pedicure") ||
+		!strings.Contains(reply, "for the two manicures") {
+		t.Fatalf("reply should answer the requested group menu, then return to active unresolved group: %s", store.lastTurn.AIMessage)
+	}
+	if strings.Contains(reply, "noted") {
+		t.Fatalf("group menu reply should not use noted wording: %s", store.lastTurn.AIMessage)
+	}
+	if session.PartyPlan == nil || partyPlanComplete(session.PartyPlan) {
+		t.Fatalf("party plan = %#v, want still incomplete after informational menu question", session.PartyPlan)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "No, what manicure services do you have?",
+	})
+	if err != nil {
+		t.Fatalf("negative manicure menu Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("negative menu question should not run booking tools, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	reply = strings.ToLower(store.lastTurn.AIMessage)
+	if !strings.Contains(reply, "no problem") ||
+		!strings.Contains(reply, "for manicures") ||
+		!strings.Contains(reply, "classic manicure") ||
+		!strings.Contains(reply, "gel manicure") ||
+		!strings.Contains(reply, "which two should i book") {
+		t.Fatalf("reply should acknowledge rejection, answer menu, and ask open selection: %s", store.lastTurn.AIMessage)
+	}
+	if strings.Contains(reply, "noted") || strings.Contains(reply, "should i book one") {
+		t.Fatalf("negative menu reply should not repeat rejected one-each wording: %s", store.lastTurn.AIMessage)
+	}
+	if session.PartyPlan == nil || partyPlanComplete(session.PartyPlan) {
+		t.Fatalf("party plan = %#v, want incomplete after negative menu question", session.PartyPlan)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "yes",
+	})
+	if err != nil {
+		t.Fatalf("bare affirmative Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("bare affirmative should not run booking tools after open menu question, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	reply = strings.ToLower(store.lastTurn.AIMessage)
+	if strings.Contains(reply, "noted") || strings.Contains(reply, "should i book one") {
+		t.Fatalf("bare affirmative retry should stay natural and avoid guessing: %s", store.lastTurn.AIMessage)
+	}
+	if session.PartyPlan == nil || partyPlanComplete(session.PartyPlan) {
+		t.Fatalf("party plan = %#v, want incomplete after bare affirmative", session.PartyPlan)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "classic and gel",
+	})
+	if err != nil {
+		t.Fatalf("manicure service selection Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("booking tools should wait for pedicure group, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	reply = strings.ToLower(store.lastTurn.AIMessage)
+	if !strings.Contains(reply, "for the two pedicures") ||
+		!strings.Contains(reply, "classic pedicure") ||
+		!strings.Contains(reply, "spa pedicure") {
+		t.Fatalf("reply should move to unresolved pedicure group: %s", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "both classic",
+	})
+	if err != nil {
+		t.Fatalf("pedicure service selection Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 1 {
+		t.Fatalf("availability calls = %d, want 1 after all party groups resolve; reply=%q", bookingTool.availabilityCalls, store.lastTurn.AIMessage)
+	}
+	if got := bookingTool.availabilityRequest.Segments; len(got) != 4 {
+		t.Fatalf("availability segments = %#v, want four party segments", got)
+	} else {
+		want := []string{"service_classic_mani", "service_gel_mani", "service_classic_pedi", "service_classic_pedi"}
+		for i, serviceID := range want {
+			if got[i].ServiceID != serviceID {
+				t.Fatalf("segment %d = %#v, want service %s", i, got[i], serviceID)
+			}
+		}
+	}
+	if session.PartyPlan == nil || !partyPlanComplete(session.PartyPlan) {
+		t.Fatalf("party plan = %#v, want complete after explicit group selections", session.PartyPlan)
 	}
 }
 

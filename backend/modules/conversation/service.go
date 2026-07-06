@@ -340,7 +340,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 			turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
 			applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
 			applyPartyPlanMetadata(&turn, plan)
-			turn.AIMessage = partyPlanClarificationPrompt(next, plan, services, cfg)
+			turn.AIMessage = partyPlanClarificationReply(message, next, plan, services, cfg)
 			finalizeTurnMetadata(&turn, *session, next, "service", "service", "party_plan_clarification")
 			return s.store.SaveTurn(ctx, turn)
 		}
@@ -358,7 +358,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 				turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
 				applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
 				applyPartyPlanMetadata(&turn, plan)
-				turn.AIMessage = partyPlanClarificationPrompt(next, plan, services, cfg)
+				turn.AIMessage = partyPlanClarificationReply(message, next, plan, services, cfg)
 				finalizeTurnMetadata(&turn, *session, next, "service", "service", "party_plan_clarification")
 				return s.store.SaveTurn(ctx, turn)
 			}
@@ -2347,13 +2347,17 @@ func autoResolveSingleCandidatePartyGroups(plan *PartyPlan) {
 
 func partyPlanServiceMenuReply(message string, session Session, services []ServiceOption, cfg *RuntimeConfig) (string, bool) {
 	plan := session.PartyPlan
-	groupIndex := firstUnresolvedPartyPlanGroup(plan)
-	if groupIndex < 0 {
+	activeGroupIndex := firstUnresolvedPartyPlanGroup(plan)
+	if activeGroupIndex < 0 {
 		return "", false
 	}
-	group := plan.Groups[groupIndex]
+	menuGroupIndex, ok := partyPlanMenuGroupIndex(message, plan, services)
+	if !ok {
+		return "", false
+	}
+	group := plan.Groups[menuGroupIndex]
 	candidates := servicesByIDs(services, group.CandidateServiceIDs)
-	if len(candidates) == 0 || !asksPartyPlanServiceMenu(message, group, candidates) {
+	if len(candidates) == 0 {
 		return "", false
 	}
 	options := serviceCandidateNames(candidates, 6)
@@ -2364,12 +2368,41 @@ func partyPlanServiceMenuReply(message string, session Session, services []Servi
 	if label == "" {
 		label = "service"
 	}
-	reply := "We offer " + joinHumanList(options) + " for " + pluralServicePhrase(label) + ". "
-	reply += partyPlanClarificationPrompt(session, plan, services, cfg)
+	reply := "For " + pluralServicePhrase(label) + ", we offer " + joinHumanList(options) + ". "
+	if menuGroupIndex == activeGroupIndex {
+		reply += partyPlanMenuFollowUpPrompt(group)
+	} else {
+		reply += partyPlanClarificationPrompt(session, plan, services, cfg)
+	}
+	if partyPlanDeclinesServiceSuggestion(message) {
+		reply = "No problem. " + reply
+	}
 	return reply, true
 }
 
-func asksPartyPlanServiceMenu(message string, group PartyPlanGroup, candidates []ServiceOption) bool {
+func partyPlanMenuGroupIndex(message string, plan *PartyPlan, services []ServiceOption) (int, bool) {
+	if plan == nil || !isPartyPlanServiceMenuQuestion(message) {
+		return -1, false
+	}
+	normalized := normalizeLooseText(message)
+	for i, group := range plan.Groups {
+		candidates := servicesByIDs(services, group.CandidateServiceIDs)
+		if len(candidates) == 0 {
+			continue
+		}
+		if partyPlanQuestionMentionsGroup(normalized, group, candidates) {
+			return i, true
+		}
+	}
+	if asksServiceMenu(message) {
+		if groupIndex := firstUnresolvedPartyPlanGroup(plan); groupIndex >= 0 {
+			return groupIndex, true
+		}
+	}
+	return -1, false
+}
+
+func isPartyPlanServiceMenuQuestion(message string) bool {
 	if asksServiceMenu(message) {
 		return true
 	}
@@ -2383,6 +2416,10 @@ func asksPartyPlanServiceMenu(message string, group PartyPlanGroup, candidates [
 	if !strings.Contains(normalized, "service") && !strings.Contains(normalized, "option") && !strings.Contains(normalized, "have") && !strings.Contains(normalized, "offer") {
 		return false
 	}
+	return true
+}
+
+func partyPlanQuestionMentionsGroup(normalized string, group PartyPlanGroup, candidates []ServiceOption) bool {
 	for _, phrase := range partyPlanGroupMenuPhrases(group, candidates) {
 		if containsLoosePhrase(normalized, phrase) {
 			return true
@@ -2435,9 +2472,6 @@ func resolvePartyPlanFromMessage(plan *PartyPlan, message string, services []Ser
 		switch {
 		case len(candidates) == 1:
 			group.ResolvedServiceIDs = append(group.ResolvedServiceIDs, repeatedString(candidates[0].ID, remaining)...)
-			return true
-		case remaining > 1 && remaining == len(candidates):
-			group.ResolvedServiceIDs = append(group.ResolvedServiceIDs, serviceIDsFromOptions(candidates)...)
 			return true
 		default:
 			return false
@@ -2636,7 +2670,7 @@ func partyPlanCanRepeatSingleSelection(message string) bool {
 	if strings.Contains(lower, "&") {
 		return false
 	}
-	for _, signal := range []string{"and", "plus", "also", "both", "each", "one each"} {
+	for _, signal := range []string{"and", "plus", "also", "each", "one each"} {
 		if containsLoosePhrase(normalized, signal) {
 			return false
 		}
@@ -2685,21 +2719,43 @@ func partyPlanClarificationPrompt(session Session, plan *PartyPlan, services []S
 	if remaining < 1 {
 		remaining = group.Count
 	}
-	prefix := ""
-	if context := appointmentContextPhrase(session, cfg); context != "" {
-		prefix = "I have " + context + " noted. "
-	}
 	countLabel := partyPlanCountLabel(remaining, label)
 	switch {
 	case len(options) == 1:
-		return prefix + "Should I book " + serviceCountSpeech(remaining, options[0]) + "?"
-	case remaining > 1 && remaining == len(options):
-		return prefix + "Should I book " + oneEachServiceSpeech(options) + " for " + countLabel + "?"
+		return "Should I book " + serviceCountSpeech(remaining, options[0]) + "?"
 	case remaining > 1:
-		return prefix + "Which " + label + " services should I book for " + countLabel + ": " + joinChoiceList(options) + "?"
+		return "For " + countLabel + ", which services would you like: " + joinChoiceList(options) + "?"
 	default:
-		return prefix + "Which " + label + " service should I book: " + joinChoiceList(options) + "?"
+		return "Which " + label + " service would you like: " + joinChoiceList(options) + "?"
 	}
+}
+
+func partyPlanClarificationReply(message string, session Session, plan *PartyPlan, services []ServiceOption, cfg *RuntimeConfig) string {
+	reply := partyPlanClarificationPrompt(session, plan, services, cfg)
+	if partyPlanDeclinesServiceSuggestion(message) {
+		return "No problem. " + reply
+	}
+	return reply
+}
+
+func partyPlanMenuFollowUpPrompt(group PartyPlanGroup) string {
+	remaining := group.Count - len(nonEmptyStrings(group.ResolvedServiceIDs))
+	if remaining <= 1 {
+		return "Which one should I book?"
+	}
+	return "Which " + countWord(remaining) + " should I book?"
+}
+
+func partyPlanDeclinesServiceSuggestion(message string) bool {
+	normalized := normalizeLooseText(message)
+	return normalized == "no" ||
+		normalized == "nope" ||
+		strings.HasPrefix(normalized, "no ") ||
+		strings.HasPrefix(normalized, "nope ") ||
+		strings.Contains(normalized, "not those") ||
+		strings.Contains(normalized, "not that") ||
+		strings.Contains(normalized, "don t want that") ||
+		strings.Contains(normalized, "do not want that")
 }
 
 func partyPlanCountLabel(count int, label string) string {
@@ -3230,7 +3286,7 @@ func promptForCurrentBookingState(session Session, cfg *RuntimeConfig) string {
 		return promptForMissingField("requested_date")
 	case "requested_time":
 		if session.RequestedDate != "" {
-			return "I have " + requestedDateLabel(session.RequestedDate, timezoneLocation(timezoneFromConfig(cfg))) + ". What time works best?"
+			return "For " + requestedDateLabel(session.RequestedDate, timezoneLocation(timezoneFromConfig(cfg))) + ", what time works best?"
 		}
 		return promptForMissingField("requested_time")
 	case "customer_name":
@@ -4608,7 +4664,7 @@ func promptForMissingFieldWithServiceContext(field string, session Session, serv
 		return "Got it, " + service + ". What day would you like? I will check available times."
 	case "requested_time", "requested_start_time":
 		if date := strings.TrimSpace(session.RequestedDate); date != "" {
-			return "I have " + service + " on " + requestedDateLabel(date, timezoneLocation(timezoneFromConfig(cfg))) + ". What time works?"
+			return "For " + service + " on " + requestedDateLabel(date, timezoneLocation(timezoneFromConfig(cfg))) + ", what time works?"
 		}
 		return "Got it, " + service + ". What day and time would you like?"
 	default:
@@ -4751,7 +4807,7 @@ func serviceInquiryReply(session Session, result serviceUnderstandingResult, ser
 		}
 		service := joinHumanList(names)
 		if current := strings.TrimSpace(serviceSummary(session, services)); current != "" {
-			return "Yes, we offer " + service + ". I still have " + current + " noted. Which service would you like to book?"
+			return "Yes, we offer " + service + ". Do you want to switch to " + service + ", or keep " + current + "?"
 		}
 		return "Yes, we offer " + service + ". Which service would you like to book?"
 	case serviceUnderstandingStatusAmbiguous:
@@ -4778,11 +4834,7 @@ func serviceClarificationPrompt(session Session, result serviceUnderstandingResu
 	if token := strings.TrimSpace(result.MatchedToken); token != "" {
 		serviceLabel = token + " service"
 	}
-	prefix := ""
-	if context := appointmentContextPhrase(session, cfg); context != "" {
-		prefix = "I have " + context + " noted. "
-	}
-	return prefix + "Which " + serviceLabel + " would you like: " + joinChoiceList(options) + "?"
+	return "Which " + serviceLabel + " would you like: " + joinChoiceList(options) + "?"
 }
 
 func serviceEditClarificationPrompt(session Session, candidates []ServiceOption, services []ServiceOption) string {
