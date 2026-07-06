@@ -608,6 +608,16 @@ type POSError struct {
 	Payload      []byte
 }
 
+type POSErrorRecord struct {
+	ID           string    `json:"id"`
+	SalonID      string    `json:"salon_id"`
+	Provider     string    `json:"provider"`
+	Operation    string    `json:"operation"`
+	ErrorCode    string    `json:"error_code"`
+	ErrorMessage string    `json:"error_message"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
 type SyncLog struct {
 	ID          string     `json:"id"`
 	SalonID     string     `json:"salon_id"`

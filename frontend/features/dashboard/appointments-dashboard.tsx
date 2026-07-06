@@ -1003,6 +1003,39 @@ function ReadinessPanel({ status }: { status: StatusResponse | null }) {
   const locationSelected = Boolean(connection?.location_id);
   const readyForBookings =
     connected && locationSelected && (readiness?.service_count ?? 0) > 0 && (readiness?.staff_count ?? 0) > 0;
+  const appointmentChangesBlocked = Boolean(readiness?.appointment_change_write_blocked);
+
+  if (readyForBookings && appointmentChangesBlocked) {
+    return (
+      <Card className="border-amber-200 bg-amber-50 shadow-none">
+        <div className="flex gap-3">
+          <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" />
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <CardTitle>Square appointment changes need owner review</CardTitle>
+              <Badge value="fallback_pending" />
+            </div>
+            <CardDescription className="text-amber-900">
+              New bookings can still be POS-confirmed, but Square rejected automatic reschedule or cancellation for this seller account.
+            </CardDescription>
+            <div className="mt-3 rounded-md border border-amber-200 bg-white p-3 text-sm leading-6 text-amber-900">
+              <div className="font-semibold">{readiness?.appointment_change_write_blocked_code || "Square write blocked"}</div>
+              <div className="mt-1">{readiness?.appointment_change_write_blocked_reason || "Square Appointments rejected appointment-change writes."}</div>
+              <div className="mt-1 text-xs text-muted">
+                Last seen: {formatOptionalDate(readiness?.appointment_change_write_blocked_at)}
+              </div>
+            </div>
+            <a
+              className="mt-3 inline-flex h-10 items-center justify-center rounded-md border border-line bg-white px-4 text-sm font-semibold text-ink hover:bg-slate-50"
+              href="/dashboard/integrations"
+            >
+              Open Square integration
+            </a>
+          </div>
+        </div>
+      </Card>
+    );
+  }
 
   if (readyForBookings) {
     return (

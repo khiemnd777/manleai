@@ -364,6 +364,29 @@ func (r *Repository) LogError(ctx context.Context, item POSError) error {
 	return err
 }
 
+func (r *Repository) LatestErrorForOperations(ctx context.Context, salonID string, provider string, operations []string) (*POSErrorRecord, error) {
+	if strings.TrimSpace(salonID) == "" || strings.TrimSpace(provider) == "" || len(operations) == 0 {
+		return nil, ErrNotFound
+	}
+	item := POSErrorRecord{}
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id::text, salon_id::text, provider, operation, error_code, error_message, created_at
+		FROM pos_errors
+		WHERE salon_id = $1
+		  AND provider = $2
+		  AND operation = ANY($3)
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, salonID, provider, pq.Array(operations)).Scan(&item.ID, &item.SalonID, &item.Provider, &item.Operation, &item.ErrorCode, &item.ErrorMessage, &item.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
 func (r *Repository) CreateOAuthState(ctx context.Context, state OAuthState) error {
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO pos_oauth_states (salon_id, provider, state_hash, nonce_hash, expires_at)

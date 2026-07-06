@@ -91,7 +91,7 @@ func TestBuildReadinessAllowsEnableWhenSquareIsBookingReady(t *testing.T) {
 		Status:            booking.StatusConfirmed,
 		AppointmentStatus: booking.StatusConfirmed,
 		POSBookingID:      "booking_1",
-	})
+	}, nil)
 	if !confirmed.CanTestBooking {
 		t.Fatalf("expected test booking to be allowed")
 	}
@@ -107,7 +107,7 @@ func TestBuildReadinessAllowsEnableWhenSquareIsBookingReady(t *testing.T) {
 		Status:            booking.StatusCancelled,
 		AppointmentStatus: booking.StatusCancelled,
 		POSBookingID:      "booking_1",
-	})
+	}, nil)
 	if cancelled.CanCancelTestBooking {
 		t.Fatalf("cancel should not be allowed after test booking is cancelled")
 	}
@@ -115,7 +115,7 @@ func TestBuildReadinessAllowsEnableWhenSquareIsBookingReady(t *testing.T) {
 		t.Fatalf("enable should remain allowed after cancelled test booking")
 	}
 
-	withoutTest := buildReadiness(false, connection, services, staff, periods, nil)
+	withoutTest := buildReadiness(false, connection, services, staff, periods, nil, nil)
 	if !withoutTest.CanEnableAIBooking {
 		t.Fatalf("enable should not require an optional Square test booking")
 	}
@@ -128,11 +128,42 @@ func TestBuildReadinessBlocksTestBookingWithoutBookableRecords(t *testing.T) {
 		Status:     pos.StatusActive,
 		LocationID: "loc_1",
 		LastSyncAt: &now,
-	}, []pos.Service{}, []pos.StaffMember{}, nil, nil)
+	}, []pos.Service{}, []pos.StaffMember{}, nil, nil, nil)
 	if readiness.CanTestBooking {
 		t.Fatalf("test booking should be blocked without bookable services and staff")
 	}
 	if readiness.ServiceCount != 0 || readiness.StaffCount != 0 {
 		t.Fatalf("unexpected counts: services=%d staff=%d", readiness.ServiceCount, readiness.StaffCount)
+	}
+}
+
+func TestBuildReadinessSurfacesSquareAppointmentChangeSubscriptionBlocker(t *testing.T) {
+	now := time.Date(2026, 7, 6, 17, 0, 0, 0, time.UTC)
+	readiness := buildReadiness(false, nil, nil, nil, nil, nil, &pos.POSErrorRecord{
+		ErrorCode:    pos.ErrorPermissionDenied,
+		ErrorMessage: "square FORBIDDEN: Merchant subscription does not support write operations.",
+		CreatedAt:    now,
+	})
+
+	if !readiness.AppointmentChangeWriteBlocked {
+		t.Fatalf("appointment change blocker was not surfaced")
+	}
+	if readiness.AppointmentChangeWriteBlockedCode != pos.ErrorPermissionDenied {
+		t.Fatalf("blocker code = %s, want %s", readiness.AppointmentChangeWriteBlockedCode, pos.ErrorPermissionDenied)
+	}
+	if readiness.AppointmentChangeWriteBlockedAt == nil || !readiness.AppointmentChangeWriteBlockedAt.Equal(now) {
+		t.Fatalf("blocker timestamp = %#v, want %s", readiness.AppointmentChangeWriteBlockedAt, now)
+	}
+}
+
+func TestBuildReadinessDoesNotTreatInsufficientScopesAsSubscriptionBlocker(t *testing.T) {
+	readiness := buildReadiness(false, nil, nil, nil, nil, nil, &pos.POSErrorRecord{
+		ErrorCode:    pos.ErrorPermissionDenied,
+		ErrorMessage: "square INSUFFICIENT_SCOPES: The application is not allowed to update this field once written since it does not have all the required permissions: APPOINTMENTS_ALL_READ, APPOINTMENTS_ALL_WRITE.",
+		CreatedAt:    time.Date(2026, 7, 6, 17, 0, 0, 0, time.UTC),
+	})
+
+	if readiness.AppointmentChangeWriteBlocked {
+		t.Fatalf("insufficient scopes should not be treated as Square subscription blocker")
 	}
 }

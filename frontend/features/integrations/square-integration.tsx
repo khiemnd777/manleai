@@ -801,6 +801,20 @@ export function SquareIntegration() {
             </div>
             <Badge value={aiEnabled ? "active" : "disabled"} />
           </div>
+          {readiness?.appointment_change_write_blocked ? (
+            <div className="mt-5 flex gap-3 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+              <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" />
+              <div className="min-w-0">
+                <div className="font-semibold">Square appointment changes are blocked</div>
+                <div className="mt-1 leading-6">
+                  New bookings can still be POS-confirmed, but reschedule and cancellation requests will stay pending for owner review until the Square seller account supports Appointments write operations.
+                </div>
+                <div className="mt-2 break-words text-xs text-muted">
+                  {readiness.appointment_change_write_blocked_reason || "Square Appointments rejected appointment-change writes."}
+                </div>
+              </div>
+            </div>
+          ) : null}
           <div className="mt-5 space-y-3">
             {readiness?.checks.map((step) => (
               <div key={step.key} className="rounded-md border border-line p-3">

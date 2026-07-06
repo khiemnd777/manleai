@@ -49,15 +49,19 @@ type StatusResponse struct {
 }
 
 type ReadinessStatus struct {
-	AIEnabled            bool                       `json:"ai_enabled"`
-	CanTestBooking       bool                       `json:"can_test_booking"`
-	CanCancelTestBooking bool                       `json:"can_cancel_test_booking"`
-	CanEnableAIBooking   bool                       `json:"can_enable_ai_booking"`
-	ServiceCount         int                        `json:"service_count"`
-	StaffCount           int                        `json:"staff_count"`
-	BusinessHourCount    int                        `json:"business_hour_period_count"`
-	LatestTestBooking    *booking.TestBookingRecord `json:"latest_test_booking,omitempty"`
-	Checks               []ReadinessCheck           `json:"checks"`
+	AIEnabled                           bool                       `json:"ai_enabled"`
+	CanTestBooking                      bool                       `json:"can_test_booking"`
+	CanCancelTestBooking                bool                       `json:"can_cancel_test_booking"`
+	CanEnableAIBooking                  bool                       `json:"can_enable_ai_booking"`
+	AppointmentChangeWriteBlocked       bool                       `json:"appointment_change_write_blocked"`
+	AppointmentChangeWriteBlockedCode   string                     `json:"appointment_change_write_blocked_code,omitempty"`
+	AppointmentChangeWriteBlockedReason string                     `json:"appointment_change_write_blocked_reason,omitempty"`
+	AppointmentChangeWriteBlockedAt     *time.Time                 `json:"appointment_change_write_blocked_at,omitempty"`
+	ServiceCount                        int                        `json:"service_count"`
+	StaffCount                          int                        `json:"staff_count"`
+	BusinessHourCount                   int                        `json:"business_hour_period_count"`
+	LatestTestBooking                   *booking.TestBookingRecord `json:"latest_test_booking,omitempty"`
+	Checks                              []ReadinessCheck           `json:"checks"`
 }
 
 type ReadinessCheck struct {
@@ -243,7 +247,13 @@ func (s *Service) Readiness(ctx context.Context, salonID string, ownerUserID str
 	if err != nil {
 		return nil, err
 	}
-	return buildReadiness(aiEnabled, connection, services, staff, periods, latest), nil
+	appointmentChangeError, err := s.repo.LatestErrorForOperations(ctx, salonID, pos.ProviderSquare, []string{"reschedule_booking", "cancel_booking"})
+	if errors.Is(err, pos.ErrNotFound) {
+		appointmentChangeError = nil
+	} else if err != nil {
+		return nil, err
+	}
+	return buildReadiness(aiEnabled, connection, services, staff, periods, latest, appointmentChangeError), nil
 }
 
 func (s *Service) CreateTestBooking(ctx context.Context, salonID string, ownerUserID string, req TestBookingRequest) (*TestBookingResponse, error) {
@@ -367,7 +377,7 @@ func (s *Service) latestTestBooking(ctx context.Context, salonID string, ownerUs
 	return latest, err
 }
 
-func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.Service, staff []pos.StaffMember, periods []pos.BusinessHourPeriod, latest *booking.TestBookingRecord) *ReadinessStatus {
+func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.Service, staff []pos.StaffMember, periods []pos.BusinessHourPeriod, latest *booking.TestBookingRecord, appointmentChangeError *pos.POSErrorRecord) *ReadinessStatus {
 	connected := connection != nil &&
 		connection.ID != "" &&
 		connection.Status != pos.StatusNotConnected &&
@@ -397,17 +407,47 @@ func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.S
 		{Key: "sync_business_hours", Label: "Sync business hours", Complete: businessHoursReady, Message: incompleteMessage(businessHoursReady, "Sync at least one Square business hour period.")},
 		{Key: "enable_ai_booking", Label: "Enable AI booking", Complete: aiEnabled, Message: incompleteMessage(aiEnabled, "AI booking is disabled until all safety checks pass.")},
 	}
+	appointmentChangeBlocker := appointmentChangeWriteBlockerFromError(appointmentChangeError)
 
 	return &ReadinessStatus{
-		AIEnabled:            aiEnabled,
-		CanTestBooking:       canTest,
-		CanCancelTestBooking: canCancel,
-		CanEnableAIBooking:   canEnable,
-		ServiceCount:         serviceCount,
-		StaffCount:           staffCount,
-		BusinessHourCount:    businessHourCount,
-		LatestTestBooking:    latest,
-		Checks:               checks,
+		AIEnabled:                           aiEnabled,
+		CanTestBooking:                      canTest,
+		CanCancelTestBooking:                canCancel,
+		CanEnableAIBooking:                  canEnable,
+		AppointmentChangeWriteBlocked:       appointmentChangeBlocker.Blocked,
+		AppointmentChangeWriteBlockedCode:   appointmentChangeBlocker.ErrorCode,
+		AppointmentChangeWriteBlockedReason: appointmentChangeBlocker.Reason,
+		AppointmentChangeWriteBlockedAt:     appointmentChangeBlocker.LastSeenAt,
+		ServiceCount:                        serviceCount,
+		StaffCount:                          staffCount,
+		BusinessHourCount:                   businessHourCount,
+		LatestTestBooking:                   latest,
+		Checks:                              checks,
+	}
+}
+
+type appointmentChangeWriteBlocker struct {
+	Blocked    bool
+	ErrorCode  string
+	Reason     string
+	LastSeenAt *time.Time
+}
+
+func appointmentChangeWriteBlockerFromError(item *pos.POSErrorRecord) appointmentChangeWriteBlocker {
+	if item == nil || item.ErrorCode != pos.ErrorPermissionDenied {
+		return appointmentChangeWriteBlocker{}
+	}
+	message := strings.TrimSpace(item.ErrorMessage)
+	normalized := strings.ToLower(message)
+	if !strings.Contains(normalized, "merchant subscription does not support write operations") {
+		return appointmentChangeWriteBlocker{}
+	}
+	createdAt := item.CreatedAt
+	return appointmentChangeWriteBlocker{
+		Blocked:    true,
+		ErrorCode:  item.ErrorCode,
+		Reason:     message,
+		LastSeenAt: &createdAt,
 	}
 }
 

@@ -577,6 +577,10 @@ export type SquareReadiness = {
   can_test_booking: boolean;
   can_cancel_test_booking: boolean;
   can_enable_ai_booking: boolean;
+  appointment_change_write_blocked?: boolean;
+  appointment_change_write_blocked_code?: string;
+  appointment_change_write_blocked_reason?: string;
+  appointment_change_write_blocked_at?: string;
   service_count: number;
   staff_count: number;
   business_hour_period_count: number;
