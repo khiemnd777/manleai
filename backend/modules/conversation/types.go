@@ -62,6 +62,7 @@ var (
 type BookingTool interface {
 	AvailableSlots(ctx context.Context, salonID string, ownerUserID string, req booking.AvailabilityRequest) (*booking.AvailabilityResult, error)
 	Create(ctx context.Context, salonID string, ownerUserID string, req booking.CreateBookingRequest) (*booking.BookingAttempt, error)
+	Cancel(ctx context.Context, salonID string, ownerUserID string, appointmentID string, req booking.CancelRequest) (*booking.Appointment, *booking.BookingAttempt, error)
 	RescheduleCandidates(ctx context.Context, salonID string, ownerUserID string, req booking.RescheduleLookupRequest) ([]booking.AppointmentActionRef, error)
 	Reschedule(ctx context.Context, salonID string, ownerUserID string, appointmentID string, req booking.RescheduleRequest) (*booking.Appointment, *booking.BookingAttempt, error)
 }
@@ -342,8 +343,12 @@ type PartyGuestService struct {
 }
 
 type PartyPlan struct {
-	PartySize int              `json:"party_size,omitempty"`
-	Groups    []PartyPlanGroup `json:"groups,omitempty"`
+	PartySize              int                `json:"party_size,omitempty"`
+	Groups                 []PartyPlanGroup   `json:"groups,omitempty"`
+	SplitOptions           []PartySplitOption `json:"split_options,omitempty"`
+	SelectedSplitOptionID  string             `json:"selected_split_option_id,omitempty"`
+	SplitBookingAttemptIDs []string           `json:"split_booking_attempt_ids,omitempty"`
+	SplitAppointmentIDs    []string           `json:"split_appointment_ids,omitempty"`
 }
 
 type PartyPlanGroup struct {
@@ -351,6 +356,22 @@ type PartyPlanGroup struct {
 	Count               int      `json:"count,omitempty"`
 	CandidateServiceIDs []string `json:"candidate_service_ids,omitempty"`
 	ResolvedServiceIDs  []string `json:"resolved_service_ids,omitempty"`
+}
+
+type PartySplitOption struct {
+	ID                   string            `json:"id"`
+	Blocks               []PartySplitBlock `json:"blocks,omitempty"`
+	DatePolicy           string            `json:"date_policy,omitempty"`
+	RequiresDateConsent  bool              `json:"requires_date_consent,omitempty"`
+	DateConsentConfirmed bool              `json:"date_consent_confirmed,omitempty"`
+	SpanMinutes          int               `json:"span_minutes,omitempty"`
+	FinishSpreadMinutes  int               `json:"finish_spread_minutes,omitempty"`
+}
+
+type PartySplitBlock struct {
+	StartTime time.Time                       `json:"start_time"`
+	EndTime   time.Time                       `json:"end_time"`
+	Segments  []booking.BookingSegmentRequest `json:"segments,omitempty"`
 }
 
 type WebhookEventLog struct {

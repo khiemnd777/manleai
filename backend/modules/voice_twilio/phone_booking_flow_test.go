@@ -69,7 +69,7 @@ func TestSignedTwilioWebhookDrivesPhoneBookingFlowThroughConversation(t *testing
 	if firstTurnRes.StatusCode != fiber.StatusOK {
 		t.Fatalf("first turn status = %d, body = %s", firstTurnRes.StatusCode, firstTurnBody)
 	}
-	if !strings.Contains(firstTurnBody, "<Gather") || !strings.Contains(firstTurnBody, "I found these openings") || !strings.Contains(firstTurnBody, "10:00 AM") {
+	if !strings.Contains(firstTurnBody, "<Gather") || !strings.Contains(firstTurnBody, "I have openings") || !strings.Contains(firstTurnBody, "10:00 AM or 11:00 AM") {
 		t.Fatalf("first turn should offer available slots: %s", firstTurnBody)
 	}
 	if !strings.Contains(firstTurnBody, "available technician") || strings.Contains(firstTurnBody, "Mai Nguyen") {
@@ -437,6 +437,10 @@ func (f *phoneFlowBookingTool) Create(ctx context.Context, salonID string, owner
 	f.calls++
 	f.request = req
 	return f.attempt, nil
+}
+
+func (f *phoneFlowBookingTool) Cancel(ctx context.Context, salonID string, ownerUserID string, appointmentID string, req booking.CancelRequest) (*booking.Appointment, *booking.BookingAttempt, error) {
+	return &booking.Appointment{ID: appointmentID, Status: booking.StatusCancelled}, nil, nil
 }
 
 func (f *phoneFlowBookingTool) RescheduleCandidates(ctx context.Context, salonID string, ownerUserID string, req booking.RescheduleLookupRequest) ([]booking.AppointmentActionRef, error) {

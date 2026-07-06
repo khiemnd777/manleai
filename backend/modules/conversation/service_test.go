@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -785,7 +786,7 @@ func TestMessageRescheduleNextDayOfferPreservesAssignedTechnician(t *testing.T) 
 		t.Fatalf("AI message should be natural and preserve assigned staff: %s", reply)
 	}
 	for _, wantText := range []string{
-		"I found openings for your Classic Pedicure on Tuesday, July 7 at 12:00 PM, 12:30 PM, and 1:00 PM with Mai Nguyen. Which time works?",
+		"I found openings for your Classic Pedicure on Tuesday, July 7 at 12:00 PM, 12:30 PM, or 1:00 PM with Mai Nguyen. Which time works?",
 	} {
 		if !strings.Contains(reply, wantText) {
 			t.Fatalf("AI message missing %q: %s", wantText, reply)
@@ -3222,7 +3223,7 @@ func TestMessageBooksAnyoneMultiServiceSlotWithSegmentAssignments(t *testing.T) 
 	if len(session.OfferedSlots) != 1 || len(session.OfferedSlots[0].Segments) != 2 {
 		t.Fatalf("offered slots = %#v, want one slot with two assigned segments", session.OfferedSlots)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "available technicians") ||
+	if !strings.Contains(store.lastTurn.AIMessage, "technicians assigned") ||
 		strings.Contains(store.lastTurn.AIMessage, "Mai Nguyen") ||
 		strings.Contains(store.lastTurn.AIMessage, "Lena Pham") {
 		t.Fatalf("anyone slot offer should avoid naming assigned technicians: %s", store.lastTurn.AIMessage)
@@ -3253,7 +3254,7 @@ func TestMessageBooksAnyoneMultiServiceSlotWithSegmentAssignments(t *testing.T) 
 	if session.Outcome != OutcomeBookingConfirmed || session.AppointmentID != "appointment_anyone_segments" {
 		t.Fatalf("session outcome/link = %s/%s, want confirmed appointment", session.Outcome, session.AppointmentID)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "available technicians") ||
+	if !strings.Contains(store.lastTurn.AIMessage, "technicians assigned") ||
 		strings.Contains(store.lastTurn.AIMessage, "Mai Nguyen") ||
 		strings.Contains(store.lastTurn.AIMessage, "Lena Pham") {
 		t.Fatalf("anyone confirmation should avoid naming assigned technicians: %s", store.lastTurn.AIMessage)
@@ -4214,6 +4215,385 @@ func TestMessageAcceptsBookablePartyServiceOutsideCurrentCandidatesWhenSameGroup
 	}
 }
 
+func TestFormatSlotOfferForPartySameDayGroupsDateTimesAndStaffPhrase(t *testing.T) {
+	loc := timezoneLocation("America/Chicago")
+	services := []ServiceOption{
+		{ID: "service_classic_mani", Name: "Classic Manicure"},
+		{ID: "service_gel_mani", Name: "Gel Manicure"},
+		{ID: "service_spa_pedi", Name: "Spa Pedicure"},
+	}
+	session := Session{
+		BookingSegments: []booking.BookingSegmentRequest{
+			{ServiceID: "service_classic_mani", StaffSelectionMode: booking.StaffSelectionAnyone},
+			{ServiceID: "service_gel_mani", StaffSelectionMode: booking.StaffSelectionAnyone},
+			{ServiceID: "service_spa_pedi", StaffSelectionMode: booking.StaffSelectionAnyone},
+			{ServiceID: "service_spa_pedi", StaffSelectionMode: booking.StaffSelectionAnyone},
+		},
+	}
+	slots := []OfferedSlot{
+		partyOfferSlot(time.Date(2026, 7, 9, 12, 0, 0, 0, loc), session.BookingSegments),
+		partyOfferSlot(time.Date(2026, 7, 9, 12, 30, 0, 0, loc), session.BookingSegments),
+		partyOfferSlot(time.Date(2026, 7, 9, 13, 0, 0, 0, loc), session.BookingSegments),
+	}
+
+	reply := formatSlotOfferForSession(slots, loc, false, session, services)
+
+	want := "For 1 Classic Manicure, 1 Gel Manicure, and 2 Spa Pedicures, I have openings on Thursday, July 9 at 12:00 PM, 12:30 PM, or 1:00 PM with technicians assigned. Which works best?"
+	if reply != want {
+		t.Fatalf("reply = %q, want %q", reply, want)
+	}
+	if strings.Contains(reply, "First,") || strings.Count(reply, "Thursday, July 9") != 1 {
+		t.Fatalf("reply should group same-day options without ordinal repetition: %s", reply)
+	}
+}
+
+func TestFormatSlotOfferKeepsDifferentDaysVisible(t *testing.T) {
+	loc := timezoneLocation("America/Chicago")
+	slots := []OfferedSlot{
+		{
+			StartTime:          time.Date(2026, 7, 9, 12, 0, 0, 0, loc),
+			EndTime:            time.Date(2026, 7, 9, 12, 45, 0, 0, loc),
+			StaffID:            "staff_1",
+			StaffName:          "Mai Nguyen",
+			StaffSelectionMode: booking.StaffSelectionSpecific,
+		},
+		{
+			StartTime:          time.Date(2026, 7, 10, 13, 0, 0, 0, loc),
+			EndTime:            time.Date(2026, 7, 10, 13, 45, 0, 0, loc),
+			StaffID:            "staff_1",
+			StaffName:          "Mai Nguyen",
+			StaffSelectionMode: booking.StaffSelectionSpecific,
+		},
+	}
+
+	reply := formatSlotOfferForSession(slots, loc, false, Session{ServiceID: "service_classic"}, []ServiceOption{{ID: "service_classic", Name: "Classic Manicure"}})
+
+	for _, want := range []string{"Thursday, July 9 at 12:00 PM", "Friday, July 10 at 1:00 PM", "with Mai Nguyen"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply missing %q: %s", want, reply)
+		}
+	}
+	if strings.Contains(reply, "First,") || strings.Count(reply, "Mai Nguyen") != 2 {
+		t.Fatalf("multi-day reply should keep each day visible and avoid ordinal scaffolding: %s", reply)
+	}
+}
+
+func TestPartySplitMessagesKeepDifferentServiceDaysVisible(t *testing.T) {
+	loc := timezoneLocation("America/Chicago")
+	services := []ServiceOption{
+		{ID: "service_spa_pedi", Name: "Spa Pedicure"},
+		{ID: "service_classic_mani", Name: "Classic Manicure"},
+	}
+	option := PartySplitOption{
+		ID: "multi_day",
+		Blocks: []PartySplitBlock{
+			{
+				StartTime: time.Date(2026, 7, 9, 12, 0, 0, 0, loc),
+				EndTime:   time.Date(2026, 7, 9, 13, 0, 0, 0, loc),
+				Segments:  []booking.BookingSegmentRequest{{ServiceID: "service_spa_pedi", StaffID: "staff_1", StaffSelectionMode: booking.StaffSelectionSpecific}},
+			},
+			{
+				StartTime: time.Date(2026, 7, 10, 13, 0, 0, 0, loc),
+				EndTime:   time.Date(2026, 7, 10, 13, 45, 0, 0, loc),
+				Segments:  []booking.BookingSegmentRequest{{ServiceID: "service_classic_mani", StaffID: "staff_2", StaffSelectionMode: booking.StaffSelectionSpecific}},
+			},
+		},
+		SpanMinutes: 1545,
+	}
+	session := Session{
+		CustomerName:  "Kevin",
+		RequestedDate: "2026-07-09",
+		PartyPlan:     &PartyPlan{PartySize: 2, SplitOptions: []PartySplitOption{option}},
+	}
+
+	offer := partySplitOfferMessage(session, services, &RuntimeConfig{Timezone: "America/Chicago"})
+	confirmation := confirmedPartySplitMessage(session, option, services, &RuntimeConfig{SalonName: "Lotus Nails Studio", Timezone: "America/Chicago"})
+
+	for _, reply := range []string{offer, confirmation} {
+		for _, want := range []string{"Thursday, July 9 at 12:00 PM", "Friday, July 10 at 1:00 PM"} {
+			if !strings.Contains(reply, want) {
+				t.Fatalf("reply missing %q: %s", want, reply)
+			}
+		}
+		if strings.Contains(reply, "for the group on Thursday, July 9:") {
+			t.Fatalf("multi-day split reply must not apply the first date to every service block: %s", reply)
+		}
+	}
+}
+
+func TestMessageOffersSplitPartyOptionsWhenNoCommonPartySlot(t *testing.T) {
+	store := newSplitPartyConversationStore()
+	bookingTool := &fakeBookingTool{availabilityResults: splitPartyAvailabilityResults()}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	_, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I need to book for four people this Thursday. Two manicures and two pedicures.",
+	})
+	if err != nil {
+		t.Fatalf("initial Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 {
+		t.Fatalf("availability calls before manicure selection = %d, want 0", bookingTool.availabilityCalls)
+	}
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "classic and dip powder",
+	})
+	if err != nil {
+		t.Fatalf("service clarification Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 5 {
+		t.Fatalf("availability calls = %d, want 1 whole-party lookup plus 4 split lookups", bookingTool.availabilityCalls)
+	}
+	if bookingTool.calls != 0 {
+		t.Fatalf("booking calls = %d, want none before customer chooses a split option", bookingTool.calls)
+	}
+	if len(bookingTool.availabilityRequests) != 5 || len(bookingTool.availabilityRequests[0].Segments) != 4 {
+		t.Fatalf("availability requests = %#v, want whole-party lookup first", bookingTool.availabilityRequests)
+	}
+	if session.PartyPlan == nil || len(session.PartyPlan.SplitOptions) == 0 {
+		t.Fatalf("party plan split options = %#v, want at least one staggered option", session.PartyPlan)
+	}
+	reply := strings.ToLower(store.lastTurn.AIMessage)
+	for _, want := range []string{"stagger", "option 1", "2 spa pedicures", "1 classic manicure", "1 dip powder manicure"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("split offer reply missing %q: %s", want, store.lastTurn.AIMessage)
+		}
+	}
+	if strings.Contains(reply, "owner") || strings.Contains(reply, "not a confirmed") || strings.Contains(reply, "i have thursday noted") {
+		t.Fatalf("split offer should not hand off or repeat mechanical date wording: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageOffersSplitPartyOptionsWhenExactCommonTimeUnavailable(t *testing.T) {
+	store := newSplitPartyConversationStore()
+	bookingTool := &fakeBookingTool{availabilityResults: splitPartyAvailabilityResults()}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	_, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I need to book for four people this Thursday at 12 PM. Two manicures and two pedicures.",
+	})
+	if err != nil {
+		t.Fatalf("initial Message returned error: %v", err)
+	}
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "classic and dip powder",
+	})
+	if err != nil {
+		t.Fatalf("service clarification Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 5 {
+		t.Fatalf("availability calls = %d, want exact whole-party lookup plus split lookups", bookingTool.availabilityCalls)
+	}
+	if session.PartyPlan == nil || len(session.PartyPlan.SplitOptions) == 0 {
+		t.Fatalf("party plan split options = %#v, want staggered options after exact time misses", session.PartyPlan)
+	}
+	reply := strings.ToLower(store.lastTurn.AIMessage)
+	if !strings.Contains(reply, "stagger") || strings.Contains(reply, "not a confirmed") {
+		t.Fatalf("reply should offer split times after exact common time miss: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageBooksSelectedSplitPartyOptionThroughPOS(t *testing.T) {
+	store := newSplitPartyConversationStore()
+	bookingTool := &fakeBookingTool{
+		availabilityResults: splitPartyAvailabilityResults(),
+		attempts:            splitConfirmedAttempts(4),
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	_, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I need to book for four people this Thursday. Two manicures and two pedicures.",
+	})
+	if err != nil {
+		t.Fatalf("initial Message returned error: %v", err)
+	}
+	_, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "classic and dip powder",
+	})
+	if err != nil {
+		t.Fatalf("service clarification Message returned error: %v", err)
+	}
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Option 1 works. My name is Kevin, phone 312-555-0101.",
+	})
+	if err != nil {
+		t.Fatalf("split selection Message returned error: %v", err)
+	}
+	if bookingTool.calls != 4 {
+		t.Fatalf("booking calls = %d, want one POS booking per split service", bookingTool.calls)
+	}
+	if session.Outcome != OutcomeBookingConfirmed {
+		t.Fatalf("outcome = %s, want confirmed after every split child POS booking succeeds", session.Outcome)
+	}
+	if session.PartyPlan == nil || len(session.PartyPlan.SplitAppointmentIDs) != 4 || len(session.PartyPlan.SplitBookingAttemptIDs) != 4 {
+		t.Fatalf("party split booking IDs = %#v", session.PartyPlan)
+	}
+	for i, req := range bookingTool.requests {
+		if len(req.Segments) != 1 || strings.TrimSpace(req.StaffID) == "" || req.StaffSelectionMode != booking.StaffSelectionSpecific {
+			t.Fatalf("split booking request %d = %#v, want one concrete staff-assigned service", i, req)
+		}
+	}
+	reply := strings.ToLower(store.lastTurn.AIMessage)
+	for _, want := range []string{"you're confirmed", "2 spa pedicures", "1 classic manicure", "1 dip powder manicure", "appointments are under kevin"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("confirmation missing %q: %s", want, store.lastTurn.AIMessage)
+		}
+	}
+	if strings.Contains(reply, "not a confirmed") || strings.Contains(reply, "owner") {
+		t.Fatalf("confirmed split booking should not use fallback wording: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageRequiresConsentBeforeBookingMultiDaySplitPartyOption(t *testing.T) {
+	store := newSplitPartyConversationStore()
+	bookingTool := &fakeBookingTool{
+		availabilityResults: multiDaySplitPartyAvailabilityResults(),
+		attempts:            splitConfirmedAttempts(4),
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	_, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I need to book for four people this Thursday. Two manicures and two pedicures.",
+	})
+	if err != nil {
+		t.Fatalf("initial Message returned error: %v", err)
+	}
+	_, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "classic and dip powder",
+	})
+	if err != nil {
+		t.Fatalf("service clarification Message returned error: %v", err)
+	}
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "1 PM works. My name is Kevin, phone 312-555-0101.",
+	})
+	if err != nil {
+		t.Fatalf("split clock selection Message returned error: %v", err)
+	}
+	if bookingTool.calls != 0 {
+		t.Fatalf("booking calls = %d, want 0 before multi-day split consent", bookingTool.calls)
+	}
+	if session.PartyPlan == nil || !partyPlanSelectedSplitRequiresDateConsent(session.PartyPlan) {
+		t.Fatalf("party plan = %#v, want selected multi-day split still requiring consent", session.PartyPlan)
+	}
+	reply := strings.ToLower(store.lastTurn.AIMessage)
+	for _, want := range []string{"splits the group across different days", "is that okay", "one day"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("consent prompt missing %q: %s", want, store.lastTurn.AIMessage)
+		}
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Yes, that works.",
+	})
+	if err != nil {
+		t.Fatalf("split consent Message returned error: %v", err)
+	}
+	if bookingTool.calls != 4 {
+		t.Fatalf("booking calls = %d, want one booking per split service after consent", bookingTool.calls)
+	}
+	if session.Outcome != OutcomeBookingConfirmed {
+		t.Fatalf("outcome = %s, want confirmed after every multi-day split child POS booking succeeds", session.Outcome)
+	}
+	if session.PartyPlan == nil || partyPlanSelectedSplitRequiresDateConsent(session.PartyPlan) {
+		t.Fatalf("party plan = %#v, want date consent confirmed", session.PartyPlan)
+	}
+	confirmation := strings.ToLower(store.lastTurn.AIMessage)
+	for _, want := range []string{"you're confirmed", "thursday, june 11", "friday, june 12", "appointments are under kevin"} {
+		if !strings.Contains(confirmation, want) {
+			t.Fatalf("multi-day confirmation missing %q: %s", want, store.lastTurn.AIMessage)
+		}
+	}
+}
+
+func TestPartySplitOptionRankingPrefersRequestedDateAndStableMultiDayIDs(t *testing.T) {
+	loc := timezoneLocation("America/Chicago")
+	requested := "2026-06-11"
+	sameDayStart := time.Date(2026, 6, 11, 17, 0, 0, 0, loc)
+	alternateDayStart := time.Date(2026, 6, 12, 17, 0, 0, 0, loc)
+	candidateSets := [][]partySplitCandidate{
+		{
+			splitCandidate("service_classic_mani", "staff_1", sameDayStart, 45),
+			splitCandidate("service_classic_mani", "staff_1", alternateDayStart, 45),
+		},
+		{
+			splitCandidate("service_dip_mani", "staff_2", sameDayStart, 60),
+			splitCandidate("service_dip_mani", "staff_2", alternateDayStart, 60),
+		},
+	}
+
+	options := rankPartySplitOptions(partySplitOptionsFromCandidates(candidateSets, requested, loc), 2)
+
+	if len(options) != 2 {
+		t.Fatalf("options = %d, want 2", len(options))
+	}
+	if options[0].DatePolicy != partySplitDatePolicyRequestedDate || options[0].RequiresDateConsent {
+		t.Fatalf("first option = %#v, want requested-date option first without date consent", options[0])
+	}
+	if options[1].DatePolicy != partySplitDatePolicyAlternateDate || !options[1].RequiresDateConsent {
+		t.Fatalf("second option = %#v, want alternate-date option requiring consent", options[1])
+	}
+	if options[0].ID == options[1].ID {
+		t.Fatalf("option IDs collided across different dates: %q", options[0].ID)
+	}
+}
+
+func TestMessageDoesNotConfirmSplitPartyWhenChildBookingFails(t *testing.T) {
+	store := newSplitPartyConversationStore()
+	bookingTool := &fakeBookingTool{
+		availabilityResults: splitPartyAvailabilityResults(),
+		attempts: []*booking.BookingAttempt{
+			confirmedAttempt("attempt_split_1", "pos_split_1", "appointment_split_1"),
+			{ID: "attempt_split_2", Status: booking.StatusFallbackPending},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	_, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I need to book for four people this Thursday. Two manicures and two pedicures.",
+	})
+	if err != nil {
+		t.Fatalf("initial Message returned error: %v", err)
+	}
+	_, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "classic and dip powder",
+	})
+	if err != nil {
+		t.Fatalf("service clarification Message returned error: %v", err)
+	}
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "First option. My name is Kevin, phone 312-555-0101.",
+	})
+	if err != nil {
+		t.Fatalf("split selection Message returned error: %v", err)
+	}
+	if bookingTool.calls != 2 {
+		t.Fatalf("booking calls = %d, want stop after first failed child booking", bookingTool.calls)
+	}
+	if bookingTool.cancelCalls != 1 || len(bookingTool.cancelAppointmentIDs) != 1 || bookingTool.cancelAppointmentIDs[0] != "appointment_split_1" {
+		t.Fatalf("cancel calls/ids = %d/%#v, want rollback of first confirmed child booking", bookingTool.cancelCalls, bookingTool.cancelAppointmentIDs)
+	}
+	if session.Outcome == OutcomeBookingConfirmed || session.Status != StatusHandoff {
+		t.Fatalf("session status/outcome = %s/%s, want handoff without group confirmation", session.Status, session.Outcome)
+	}
+	if session.PartyRequest == nil {
+		t.Fatalf("party request = nil, want owner-visible fallback request after split failure")
+	}
+	reply := strings.ToLower(store.lastTurn.AIMessage)
+	if strings.Contains(reply, "you're confirmed") || !strings.Contains(reply, "not a confirmed group appointment") {
+		t.Fatalf("partial split failure reply must not confirm: %s", store.lastTurn.AIMessage)
+	}
+}
+
 func TestMessageDoesNotConfirmMultiPersonBookingWhenPOSFallbackPending(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = []ServiceOption{{ID: "service_manicure", Name: "Classic Manicure", DurationMinutes: 45}}
@@ -4750,6 +5130,160 @@ func availabilityResultForStart(serviceID string, serviceName string, start time
 	}
 }
 
+func partyOfferSlot(start time.Time, segments []booking.BookingSegmentRequest) OfferedSlot {
+	offeredSegments := make([]OfferedSlotSegment, 0, len(segments))
+	for i, segment := range segments {
+		offeredSegments = append(offeredSegments, OfferedSlotSegment{
+			ServiceID:          segment.ServiceID,
+			StaffID:            "staff_" + strconv.Itoa(i+1),
+			StaffSelectionMode: booking.StaffSelectionAnyone,
+		})
+	}
+	return OfferedSlot{
+		StartTime:          start,
+		EndTime:            start.Add(90 * time.Minute),
+		StaffSelectionMode: booking.StaffSelectionAnyone,
+		Segments:           offeredSegments,
+	}
+}
+
+func newSplitPartyConversationStore() *fakeConversationStore {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_classic_mani", Name: "Classic Manicure", CategoryID: "cat_mani", CategoryName: "Manicure", CategorySlug: "manicure", DurationMinutes: 45},
+		{ID: "service_dip_mani", Name: "Dip Powder Manicure", CategoryID: "cat_mani", CategoryName: "Manicure", CategorySlug: "manicure", DurationMinutes: 60},
+		{ID: "service_spa_pedi", Name: "Spa Pedicure", CategoryID: "cat_pedi", CategoryName: "Pedicure", CategorySlug: "pedicure", DurationMinutes: 60},
+	}
+	store.categoryAliases = []ServiceCategoryAlias{
+		{ID: "cat_alias_mani", CategoryID: "cat_mani", CategoryName: "Manicure", Alias: "manicures", NormalizedAlias: "manicures", Source: "system", Confidence: 0.9},
+		{ID: "cat_alias_pedi", CategoryID: "cat_pedi", CategoryName: "Pedicure", Alias: "pedicures", NormalizedAlias: "pedicures", Source: "system", Confidence: 0.9},
+	}
+	store.staff = []StaffOption{
+		{ID: "staff_1", Name: "Mai Nguyen", AIBookable: true},
+		{ID: "staff_2", Name: "Lena Pham", AIBookable: true},
+		{ID: "staff_3", Name: "Anne Tran", AIBookable: true},
+		{ID: "staff_4", Name: "Kim Le", AIBookable: true},
+	}
+	return store
+}
+
+func splitPartyAvailabilityResults() []*booking.AvailabilityResult {
+	spaStart := time.Date(2026, 6, 11, 17, 0, 0, 0, time.UTC)
+	maniStart := time.Date(2026, 6, 11, 17, 30, 0, 0, time.UTC)
+	spaCandidates := splitServiceAvailabilityResult("service_spa_pedi", "Spa Pedicure", 60, []splitAvailabilitySlot{
+		{Start: spaStart, StaffID: "staff_3", StaffName: "Anne Tran"},
+		{Start: spaStart, StaffID: "staff_4", StaffName: "Kim Le"},
+	})
+	return []*booking.AvailabilityResult{
+		{
+			StaffSelectionMode: booking.StaffSelectionAnyone,
+			PreferredDate:      "2026-06-11",
+			Timezone:           "America/Chicago",
+			Slots:              []booking.AvailabilitySlot{},
+		},
+		splitServiceAvailabilityResult("service_classic_mani", "Classic Manicure", 45, []splitAvailabilitySlot{
+			{Start: maniStart, StaffID: "staff_1", StaffName: "Mai Nguyen"},
+		}),
+		splitServiceAvailabilityResult("service_dip_mani", "Dip Powder Manicure", 60, []splitAvailabilitySlot{
+			{Start: maniStart, StaffID: "staff_2", StaffName: "Lena Pham"},
+		}),
+		spaCandidates,
+		spaCandidates,
+	}
+}
+
+func multiDaySplitPartyAvailabilityResults() []*booking.AvailabilityResult {
+	maniStart := time.Date(2026, 6, 11, 17, 0, 0, 0, time.UTC)
+	spaStart := time.Date(2026, 6, 12, 18, 0, 0, 0, time.UTC)
+	spaCandidates := splitServiceAvailabilityResult("service_spa_pedi", "Spa Pedicure", 60, []splitAvailabilitySlot{
+		{Start: spaStart, StaffID: "staff_3", StaffName: "Anne Tran"},
+		{Start: spaStart, StaffID: "staff_4", StaffName: "Kim Le"},
+	})
+	return []*booking.AvailabilityResult{
+		{
+			StaffSelectionMode: booking.StaffSelectionAnyone,
+			PreferredDate:      "2026-06-11",
+			Timezone:           "America/Chicago",
+			Slots:              []booking.AvailabilitySlot{},
+		},
+		splitServiceAvailabilityResult("service_classic_mani", "Classic Manicure", 45, []splitAvailabilitySlot{
+			{Start: maniStart, StaffID: "staff_1", StaffName: "Mai Nguyen"},
+		}),
+		splitServiceAvailabilityResult("service_dip_mani", "Dip Powder Manicure", 60, []splitAvailabilitySlot{
+			{Start: maniStart, StaffID: "staff_2", StaffName: "Lena Pham"},
+		}),
+		spaCandidates,
+		spaCandidates,
+	}
+}
+
+type splitAvailabilitySlot struct {
+	Start     time.Time
+	StaffID   string
+	StaffName string
+}
+
+func splitCandidate(serviceID string, staffID string, start time.Time, durationMinutes int) partySplitCandidate {
+	return partySplitCandidate{
+		Segment: booking.BookingSegmentRequest{
+			ServiceID:          serviceID,
+			StaffID:            staffID,
+			StaffSelectionMode: booking.StaffSelectionSpecific,
+		},
+		StartTime: start,
+		EndTime:   start.Add(time.Duration(durationMinutes) * time.Minute),
+		StaffID:   staffID,
+	}
+}
+
+func splitServiceAvailabilityResult(serviceID string, serviceName string, durationMinutes int, slots []splitAvailabilitySlot) *booking.AvailabilityResult {
+	result := &booking.AvailabilityResult{
+		ServiceID:          serviceID,
+		ServiceName:        serviceName,
+		StaffSelectionMode: booking.StaffSelectionSpecific,
+		PreferredDate:      "2026-06-11",
+		DurationMinutes:    durationMinutes,
+		Timezone:           "America/Chicago",
+		Slots:              make([]booking.AvailabilitySlot, 0, len(slots)),
+	}
+	for _, slot := range slots {
+		result.Slots = append(result.Slots, booking.AvailabilitySlot{
+			StartTime:          slot.Start,
+			EndTime:            slot.Start.Add(time.Duration(durationMinutes) * time.Minute),
+			StaffID:            slot.StaffID,
+			StaffName:          slot.StaffName,
+			StaffSelectionMode: booking.StaffSelectionSpecific,
+			Segments: []booking.AvailabilitySegment{{
+				ServiceID:          serviceID,
+				ServiceName:        serviceName,
+				StaffID:            slot.StaffID,
+				StaffName:          slot.StaffName,
+				StaffSelectionMode: booking.StaffSelectionSpecific,
+				DurationMinutes:    durationMinutes,
+			}},
+		})
+	}
+	return result
+}
+
+func splitConfirmedAttempts(count int) []*booking.BookingAttempt {
+	attempts := make([]*booking.BookingAttempt, 0, count)
+	for i := 1; i <= count; i++ {
+		suffix := strconv.Itoa(i)
+		attempts = append(attempts, confirmedAttempt("attempt_split_"+suffix, "pos_split_"+suffix, "appointment_split_"+suffix))
+	}
+	return attempts
+}
+
+func confirmedAttempt(id string, posBookingID string, appointmentID string) *booking.BookingAttempt {
+	return &booking.BookingAttempt{
+		ID:           id,
+		Status:       booking.StatusConfirmed,
+		POSBookingID: posBookingID,
+		Appointment:  &booking.Appointment{ID: appointmentID, Status: booking.StatusConfirmed},
+	}
+}
+
 func defaultAvailabilityStartTime() time.Time {
 	return time.Date(2026, 6, 10, 20, 0, 0, 0, time.UTC)
 }
@@ -5062,21 +5596,30 @@ func (f *fakeConversationStore) SaveTurn(ctx context.Context, record TurnRecord)
 
 type fakeBookingTool struct {
 	calls                   int
+	cancelCalls             int
 	rescheduleCalls         int
 	candidateCalls          int
 	availabilityCalls       int
 	request                 booking.CreateBookingRequest
+	requests                []booking.CreateBookingRequest
+	cancelAppointmentIDs    []string
+	cancelRequest           booking.CancelRequest
 	rescheduleRequest       booking.RescheduleRequest
 	availabilityRequest     booking.AvailabilityRequest
+	availabilityRequests    []booking.AvailabilityRequest
 	rescheduleAppointmentID string
 	candidateRequest        booking.RescheduleLookupRequest
 	attempt                 *booking.BookingAttempt
+	attempts                []*booking.BookingAttempt
 	rescheduledAppointment  *booking.Appointment
 	rescheduleFallback      *booking.BookingAttempt
 	candidates              []booking.AppointmentActionRef
 	availabilityResult      *booking.AvailabilityResult
 	availabilityResults     []*booking.AvailabilityResult
 	err                     error
+	errs                    []error
+	cancelErr               error
+	cancelFallback          *booking.BookingAttempt
 	rescheduleErr           error
 	candidateErr            error
 	availabilityErr         error
@@ -5085,6 +5628,7 @@ type fakeBookingTool struct {
 func (f *fakeBookingTool) AvailableSlots(ctx context.Context, salonID string, ownerUserID string, req booking.AvailabilityRequest) (*booking.AvailabilityResult, error) {
 	f.availabilityCalls++
 	f.availabilityRequest = req
+	f.availabilityRequests = append(f.availabilityRequests, req)
 	if f.availabilityErr != nil {
 		return nil, f.availabilityErr
 	}
@@ -5120,7 +5664,37 @@ func (f *fakeBookingTool) AvailableSlots(ctx context.Context, salonID string, ow
 func (f *fakeBookingTool) Create(ctx context.Context, salonID string, ownerUserID string, req booking.CreateBookingRequest) (*booking.BookingAttempt, error) {
 	f.calls++
 	f.request = req
-	return f.attempt, f.err
+	f.requests = append(f.requests, req)
+	index := f.calls - 1
+	if len(f.errs) > 0 {
+		if index >= len(f.errs) {
+			index = len(f.errs) - 1
+		}
+		if f.errs[index] != nil {
+			return nil, f.errs[index]
+		}
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	if len(f.attempts) > 0 {
+		index = f.calls - 1
+		if index >= len(f.attempts) {
+			index = len(f.attempts) - 1
+		}
+		return f.attempts[index], nil
+	}
+	return f.attempt, nil
+}
+
+func (f *fakeBookingTool) Cancel(ctx context.Context, salonID string, ownerUserID string, appointmentID string, req booking.CancelRequest) (*booking.Appointment, *booking.BookingAttempt, error) {
+	f.cancelCalls++
+	f.cancelAppointmentIDs = append(f.cancelAppointmentIDs, appointmentID)
+	f.cancelRequest = req
+	if f.cancelErr != nil {
+		return nil, nil, f.cancelErr
+	}
+	return &booking.Appointment{ID: appointmentID, Status: booking.StatusCancelled}, f.cancelFallback, nil
 }
 
 func (f *fakeBookingTool) RescheduleCandidates(ctx context.Context, salonID string, ownerUserID string, req booking.RescheduleLookupRequest) ([]booking.AppointmentActionRef, error) {

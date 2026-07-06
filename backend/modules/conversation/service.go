@@ -28,6 +28,13 @@ const (
 	maxCustomerNamePrompts    = 3
 	availabilityOfferLimit    = 3
 	exactAvailabilityLimit    = 24
+	splitAvailabilityLimit    = 5
+	splitPartyOptionLimit     = 2
+	splitCombinationLimit     = 256
+
+	partySplitDatePolicyRequestedDate = "requested_date"
+	partySplitDatePolicyAlternateDate = "alternate_date"
+	partySplitDatePolicyMultiDay      = "multi_day"
 )
 
 var (
@@ -374,7 +381,10 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		next.CustomerName = ""
 	}
 	if !serviceChanged && serviceEdit.Action != serviceEditClarifyAddSwitch && serviceEdit.Action != serviceEditClearAmbiguous {
-		if selected := selectOfferedSlot(message, session.OfferedSlots, loc); selected != nil && offeredSlotMatchesServiceSelection(*selected, next) {
+		if selectedSplit, ok := selectPartySplitOption(message, next.PartyPlan, loc); ok {
+			applySelectedPartySplitOption(&next, selectedSplit.Option, selectedSplit.DateConsentConfirmed)
+			selectedOfferedSlot = true
+		} else if selected := selectOfferedSlot(message, session.OfferedSlots, loc); selected != nil && offeredSlotMatchesServiceSelection(*selected, next) {
 			applySelectedOfferedSlot(&next, *selected)
 			selectedOfferedSlot = true
 		} else if selected := selectConfirmedOfferedSlot(message, *session, loc); selected != nil && offeredSlotMatchesServiceSelection(*selected, next) {
@@ -469,6 +479,15 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 				finalizeTurnMetadata(&turn, *session, next, missing, missing, "availability_offer")
 				return s.store.SaveTurn(ctx, turn)
 			}
+		}
+		if missing == "party_split_date_consent" {
+			turn.AIMessage = partySplitDateConsentPrompt(next, services, cfg)
+			turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{
+				"availability_policy": "party_split_date_consent_required",
+			})
+			s.applyReplyGenerator(ctx, &turn, next, services, cfg, missing, missing, knowledge)
+			finalizeTurnMetadata(&turn, *session, next, missing, missing, "party_split_date_consent")
+			return s.store.SaveTurn(ctx, turn)
 		}
 		turn.AIMessage = promptForMissingField(missing)
 		if contextual := promptForMissingFieldWithServiceContext(missing, next, services, cfg); contextual != "" {
@@ -756,6 +775,16 @@ func (s *Service) applyAvailabilityForRequestedTime(ctx context.Context, ownerUs
 	} else if handled {
 		return false, nil
 	}
+	if shouldOfferPartySplitAvailability(*session) {
+		options, err := s.planPartySplitOptions(ctx, ownerUserID, turn.SalonID, *session, services, preferredDate, cfg)
+		if err != nil {
+			return false, err
+		}
+		if len(options) > 0 {
+			applyPartySplitOffer(turn, session, services, staff, cfg, options)
+			return false, nil
+		}
+	}
 	applyAvailabilityOffer(turn, session, services, staff, cfg, result, true)
 	return false, nil
 }
@@ -984,6 +1013,17 @@ func (s *Service) offerAvailableSlots(ctx context.Context, ownerUserID string, t
 	if err != nil {
 		return err
 	}
+	offered := offeredSlotsFromAvailabilityForSession(result, *session, timezoneLocation(timezoneFromConfig(cfg)))
+	if len(offered) == 0 && shouldOfferPartySplitAvailability(*session) {
+		options, err := s.planPartySplitOptions(ctx, ownerUserID, turn.SalonID, *session, services, preferredDate, cfg)
+		if err != nil {
+			return err
+		}
+		if len(options) > 0 {
+			applyPartySplitOffer(turn, session, services, staff, cfg, options)
+			return nil
+		}
+	}
 	applyAvailabilityOffer(turn, session, services, staff, cfg, result, unavailableRequestedTime)
 	return nil
 }
@@ -1117,6 +1157,776 @@ func applyAvailabilityOffer(turn *TurnRecord, session *Session, services []Servi
 		turn.AIMessage = formatSlotOfferForSession(offered, timezoneLocation(cfg.Timezone), unavailableRequestedTime, *session, services)
 	}
 	syncTurnUpdate(turn, *session, services, staff, cfg)
+}
+
+type partySplitCandidate struct {
+	Segment   booking.BookingSegmentRequest
+	StartTime time.Time
+	EndTime   time.Time
+	StaffID   string
+	StaffName string
+}
+
+type partySplitSelection struct {
+	Option               PartySplitOption
+	DateConsentConfirmed bool
+}
+
+func shouldOfferPartySplitAvailability(session Session) bool {
+	return activePartyPlan(session.PartyPlan) &&
+		partyPlanComplete(session.PartyPlan) &&
+		!partyPlanHasSelectedSplitOption(session.PartyPlan) &&
+		strings.TrimSpace(session.RequestedDate) != "" &&
+		len(session.BookingSegments) > 1
+}
+
+func (s *Service) planPartySplitOptions(ctx context.Context, ownerUserID string, salonID string, session Session, services []ServiceOption, preferredDate string, cfg *RuntimeConfig) ([]PartySplitOption, error) {
+	segments := bookingSegmentsForCreate(session)
+	if len(segments) < 2 {
+		return nil, nil
+	}
+	candidateSets := make([][]partySplitCandidate, 0, len(segments))
+	for _, segment := range segments {
+		serviceID := strings.TrimSpace(segment.ServiceID)
+		if serviceID == "" {
+			return nil, nil
+		}
+		segmentSession := session
+		segmentSession.ServiceID = serviceID
+		segmentSession.StaffID = strings.TrimSpace(segment.StaffID)
+		segmentSession.StaffSelectionMode = firstNonEmpty(segment.StaffSelectionMode, session.StaffSelectionMode, booking.StaffSelectionAnyone)
+		segmentSession.BookingSegments = []booking.BookingSegmentRequest{{
+			ServiceID:          serviceID,
+			StaffID:            strings.TrimSpace(segment.StaffID),
+			StaffSelectionMode: firstNonEmpty(segment.StaffSelectionMode, session.StaffSelectionMode, booking.StaffSelectionAnyone),
+		}}
+		segmentSession.RequestedStartTime = nil
+		segmentSession.OfferedSlots = nil
+		segmentSession.PartyPlan = nil
+
+		result, err := s.availableSlotsWithLimit(ctx, salonID, ownerUserID, segmentSession, preferredDate, splitAvailabilityLimit)
+		if err != nil {
+			return nil, err
+		}
+		candidates := partySplitCandidatesFromAvailability(segmentSession.BookingSegments[0], result)
+		if len(candidates) == 0 {
+			return nil, nil
+		}
+		candidateSets = append(candidateSets, candidates)
+	}
+	options := rankPartySplitOptions(partySplitOptionsFromCandidates(candidateSets, session.RequestedDate, timezoneLocation(timezoneFromConfig(cfg))), splitPartyOptionLimit)
+	return options, nil
+}
+
+func partySplitCandidatesFromAvailability(segment booking.BookingSegmentRequest, result *booking.AvailabilityResult) []partySplitCandidate {
+	if result == nil || len(result.Slots) == 0 {
+		return nil
+	}
+	out := make([]partySplitCandidate, 0, len(result.Slots))
+	for _, rawSlot := range result.Slots {
+		if len(out) >= splitAvailabilityLimit {
+			break
+		}
+		if rawSlot.StartTime.IsZero() || rawSlot.EndTime.IsZero() {
+			continue
+		}
+		slot := offeredSlotFromAvailability(result, rawSlot)
+		if slot.StartTime.IsZero() || slot.EndTime.IsZero() {
+			continue
+		}
+		serviceID := strings.TrimSpace(segment.ServiceID)
+		if serviceID == "" {
+			continue
+		}
+		staffID := strings.TrimSpace(segment.StaffID)
+		staffName := ""
+		mode := firstNonEmpty(segment.StaffSelectionMode, slot.StaffSelectionMode, booking.StaffSelectionAnyone)
+		for _, item := range slot.Segments {
+			if strings.TrimSpace(item.ServiceID) != serviceID {
+				continue
+			}
+			staffID = firstNonEmpty(staffID, item.StaffID)
+			staffName = firstNonEmpty(staffName, item.StaffName)
+			mode = firstNonEmpty(item.StaffSelectionMode, mode)
+			break
+		}
+		staffID = firstNonEmpty(staffID, slot.StaffID)
+		staffName = firstNonEmpty(staffName, slot.StaffName)
+		if staffID == "" {
+			continue
+		}
+		if mode == "" || mode == booking.StaffSelectionAnyone {
+			mode = booking.StaffSelectionSpecific
+		}
+		out = append(out, partySplitCandidate{
+			Segment: booking.BookingSegmentRequest{
+				ServiceID:          serviceID,
+				StaffID:            staffID,
+				StaffSelectionMode: mode,
+			},
+			StartTime: slot.StartTime,
+			EndTime:   slot.EndTime,
+			StaffID:   staffID,
+			StaffName: staffName,
+		})
+	}
+	return out
+}
+
+func partySplitOptionsFromCandidates(candidateSets [][]partySplitCandidate, requestedDate string, loc *time.Location) []PartySplitOption {
+	if len(candidateSets) == 0 {
+		return nil
+	}
+	options := []PartySplitOption{}
+	current := make([]partySplitCandidate, 0, len(candidateSets))
+	var walk func(int)
+	walk = func(index int) {
+		if len(options) >= splitCombinationLimit {
+			return
+		}
+		if index >= len(candidateSets) {
+			options = append(options, partySplitOptionFromCandidates(current, requestedDate, loc))
+			return
+		}
+		for _, candidate := range candidateSets[index] {
+			if partySplitCandidateConflicts(current, candidate) {
+				continue
+			}
+			current = append(current, candidate)
+			walk(index + 1)
+			current = current[:len(current)-1]
+			if len(options) >= splitCombinationLimit {
+				return
+			}
+		}
+	}
+	walk(0)
+	return dedupePartySplitOptions(options)
+}
+
+func partySplitCandidateConflicts(existing []partySplitCandidate, candidate partySplitCandidate) bool {
+	for _, item := range existing {
+		if strings.TrimSpace(item.StaffID) == "" || strings.TrimSpace(candidate.StaffID) == "" {
+			continue
+		}
+		if strings.TrimSpace(item.StaffID) != strings.TrimSpace(candidate.StaffID) {
+			continue
+		}
+		if candidate.StartTime.Before(item.EndTime) && item.StartTime.Before(candidate.EndTime) {
+			return true
+		}
+	}
+	return false
+}
+
+func partySplitOptionFromCandidates(candidates []partySplitCandidate, requestedDate string, loc *time.Location) PartySplitOption {
+	ordered := append([]partySplitCandidate(nil), candidates...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if !ordered[i].StartTime.Equal(ordered[j].StartTime) {
+			return ordered[i].StartTime.Before(ordered[j].StartTime)
+		}
+		return strings.TrimSpace(ordered[i].Segment.ServiceID) < strings.TrimSpace(ordered[j].Segment.ServiceID)
+	})
+	blocks := []PartySplitBlock{}
+	blockIndexes := map[string]int{}
+	var firstStart time.Time
+	var lastStart time.Time
+	var lastEnd time.Time
+	for _, candidate := range ordered {
+		if firstStart.IsZero() || candidate.StartTime.Before(firstStart) {
+			firstStart = candidate.StartTime
+		}
+		if lastStart.IsZero() || candidate.StartTime.After(lastStart) {
+			lastStart = candidate.StartTime
+		}
+		if lastEnd.IsZero() || candidate.EndTime.After(lastEnd) {
+			lastEnd = candidate.EndTime
+		}
+		key := candidate.StartTime.Format(time.RFC3339)
+		index, ok := blockIndexes[key]
+		if !ok {
+			index = len(blocks)
+			blockIndexes[key] = index
+			blocks = append(blocks, PartySplitBlock{
+				StartTime: candidate.StartTime,
+				EndTime:   candidate.EndTime,
+				Segments:  []booking.BookingSegmentRequest{},
+			})
+		}
+		if candidate.EndTime.After(blocks[index].EndTime) {
+			blocks[index].EndTime = candidate.EndTime
+		}
+		blocks[index].Segments = append(blocks[index].Segments, candidate.Segment)
+	}
+	sort.SliceStable(blocks, func(i, j int) bool {
+		return blocks[i].StartTime.Before(blocks[j].StartTime)
+	})
+	option := PartySplitOption{
+		ID:                  partySplitOptionID(blocks),
+		Blocks:              blocks,
+		SpanMinutes:         int(lastEnd.Sub(firstStart).Minutes()),
+		FinishSpreadMinutes: int(lastEnd.Sub(lastStart).Minutes()),
+	}
+	option = applyPartySplitDatePolicy(option, requestedDate, loc)
+	return option
+}
+
+func applyPartySplitDatePolicy(option PartySplitOption, requestedDate string, loc *time.Location) PartySplitOption {
+	policy := partySplitDatePolicy(option, requestedDate, loc)
+	option.DatePolicy = policy
+	option.RequiresDateConsent = policy != partySplitDatePolicyRequestedDate
+	option.DateConsentConfirmed = !option.RequiresDateConsent
+	return option
+}
+
+func partySplitDatePolicy(option PartySplitOption, requestedDate string, loc *time.Location) string {
+	if loc == nil {
+		loc = time.UTC
+	}
+	requestedDate = strings.TrimSpace(requestedDate)
+	dates := partySplitOptionLocalDates(option, loc)
+	if len(dates) == 0 {
+		return partySplitDatePolicyMultiDay
+	}
+	if len(dates) == 1 {
+		for date := range dates {
+			if requestedDate != "" && date == requestedDate {
+				return partySplitDatePolicyRequestedDate
+			}
+			return partySplitDatePolicyAlternateDate
+		}
+	}
+	return partySplitDatePolicyMultiDay
+}
+
+func partySplitOptionLocalDates(option PartySplitOption, loc *time.Location) map[string]bool {
+	if loc == nil {
+		loc = time.UTC
+	}
+	dates := map[string]bool{}
+	for _, block := range option.Blocks {
+		if block.StartTime.IsZero() {
+			continue
+		}
+		dates[block.StartTime.In(loc).Format("2006-01-02")] = true
+	}
+	return dates
+}
+
+func partySplitOptionID(blocks []PartySplitBlock) string {
+	parts := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		serviceIDs := make([]string, 0, len(block.Segments))
+		for _, segment := range block.Segments {
+			serviceIDs = append(serviceIDs, strings.TrimSpace(segment.ServiceID)+"@"+strings.TrimSpace(segment.StaffID))
+		}
+		sort.Strings(serviceIDs)
+		parts = append(parts, block.StartTime.UTC().Format("20060102T150405Z")+"["+strings.Join(serviceIDs, ",")+"]")
+	}
+	return strings.Join(parts, "|")
+}
+
+func dedupePartySplitOptions(options []PartySplitOption) []PartySplitOption {
+	out := make([]PartySplitOption, 0, len(options))
+	seen := map[string]bool{}
+	for _, option := range options {
+		key := partySplitOptionID(option.Blocks)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		option.ID = key
+		out = append(out, option)
+	}
+	return out
+}
+
+func rankPartySplitOptions(options []PartySplitOption, limit int) []PartySplitOption {
+	if len(options) == 0 {
+		return nil
+	}
+	sort.SliceStable(options, func(i, j int) bool {
+		left := options[i]
+		right := options[j]
+		if partySplitDatePolicyRank(left.DatePolicy) != partySplitDatePolicyRank(right.DatePolicy) {
+			return partySplitDatePolicyRank(left.DatePolicy) < partySplitDatePolicyRank(right.DatePolicy)
+		}
+		if left.SpanMinutes != right.SpanMinutes {
+			return left.SpanMinutes < right.SpanMinutes
+		}
+		if left.FinishSpreadMinutes != right.FinishSpreadMinutes {
+			return left.FinishSpreadMinutes < right.FinishSpreadMinutes
+		}
+		if len(left.Blocks) != len(right.Blocks) {
+			return len(left.Blocks) < len(right.Blocks)
+		}
+		leftStart := partySplitFirstStart(left)
+		rightStart := partySplitFirstStart(right)
+		if !leftStart.Equal(rightStart) {
+			return leftStart.Before(rightStart)
+		}
+		return left.ID < right.ID
+	})
+	if limit <= 0 || limit > len(options) {
+		limit = len(options)
+	}
+	return options[:limit]
+}
+
+func partySplitDatePolicyRank(policy string) int {
+	switch strings.TrimSpace(policy) {
+	case partySplitDatePolicyRequestedDate:
+		return 0
+	case partySplitDatePolicyAlternateDate:
+		return 1
+	case partySplitDatePolicyMultiDay:
+		return 2
+	default:
+		return 3
+	}
+}
+
+func partySplitFirstStart(option PartySplitOption) time.Time {
+	var first time.Time
+	for _, block := range option.Blocks {
+		if first.IsZero() || block.StartTime.Before(first) {
+			first = block.StartTime
+		}
+	}
+	return first
+}
+
+func applyPartySplitOffer(turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, options []PartySplitOption) {
+	if turn == nil || session == nil {
+		return
+	}
+	plan := clonePartyPlan(session.PartyPlan)
+	if plan == nil {
+		plan = &PartyPlan{}
+	}
+	plan.SplitOptions = append([]PartySplitOption(nil), options...)
+	plan.SelectedSplitOptionID = ""
+	plan.SplitBookingAttemptIDs = nil
+	plan.SplitAppointmentIDs = nil
+	session.PartyPlan = plan
+	session.RequestedStartTime = nil
+	session.OfferedSlots = nil
+	turn.ToolMessage = fmt.Sprintf("Availability check returned no full-party slots; split availability returned %d option(s).", len(options))
+	turn.AIMessage = partySplitOfferMessage(*session, services, cfg)
+	turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{
+		"availability_policy":         "party_split_offer",
+		"split_option_count":          len(options),
+		"split_requires_date_consent": partySplitOptionsRequireDateConsent(options),
+		"split_date_policy_summary":   partySplitDatePolicySummary(options),
+		"full_party_slot_count":       0,
+	})
+	syncTurnUpdate(turn, *session, services, staff, cfg)
+}
+
+func partyPlanHasSelectedSplitOption(plan *PartyPlan) bool {
+	_, ok := selectedPartySplitOption(plan)
+	return ok
+}
+
+func selectedPartySplitOption(plan *PartyPlan) (PartySplitOption, bool) {
+	if plan == nil || strings.TrimSpace(plan.SelectedSplitOptionID) == "" {
+		return PartySplitOption{}, false
+	}
+	for _, option := range plan.SplitOptions {
+		if strings.TrimSpace(option.ID) == strings.TrimSpace(plan.SelectedSplitOptionID) {
+			return option, true
+		}
+	}
+	return PartySplitOption{}, false
+}
+
+func partyPlanSelectedSplitRequiresDateConsent(plan *PartyPlan) bool {
+	option, ok := selectedPartySplitOption(plan)
+	return ok && option.RequiresDateConsent && !option.DateConsentConfirmed
+}
+
+func selectPartySplitOption(message string, plan *PartyPlan, loc *time.Location) (partySplitSelection, bool) {
+	if plan == nil || len(plan.SplitOptions) == 0 {
+		return partySplitSelection{}, false
+	}
+	if option, ok := selectedPartySplitOption(plan); ok && option.RequiresDateConsent && !option.DateConsentConfirmed && isAffirmativeSlotReply(message) {
+		return partySplitSelection{Option: option, DateConsentConfirmed: true}, true
+	}
+	if index, ok := selectedSlotIndex(message); ok && index >= 0 && index < len(plan.SplitOptions) {
+		option := plan.SplitOptions[index]
+		return partySplitSelection{Option: option, DateConsentConfirmed: partySplitSelectionConfirmsDateConsent(message, option, loc, true)}, true
+	}
+	if len(plan.SplitOptions) == 1 && isAffirmativeSlotReply(message) {
+		option := plan.SplitOptions[0]
+		return partySplitSelection{Option: option, DateConsentConfirmed: partySplitSelectionConfirmsDateConsent(message, option, loc, true)}, true
+	}
+	matches := partySplitOptionsForClockCandidates(plan.SplitOptions, clockCandidatesFromText(message), loc)
+	if len(matches) == 1 {
+		option := matches[0]
+		return partySplitSelection{Option: option, DateConsentConfirmed: partySplitSelectionConfirmsDateConsent(message, option, loc, false)}, true
+	}
+	return partySplitSelection{}, false
+}
+
+func partySplitSelectionConfirmsDateConsent(message string, option PartySplitOption, loc *time.Location, explicitOptionSelection bool) bool {
+	if !option.RequiresDateConsent {
+		return true
+	}
+	if explicitOptionSelection {
+		return true
+	}
+	return messageMentionsPartySplitDateConsent(message, option, loc)
+}
+
+func messageMentionsPartySplitDateConsent(message string, option PartySplitOption, loc *time.Location) bool {
+	normalized := normalizeLooseText(message)
+	if normalized == "" {
+		return false
+	}
+	dateChangeSignals := []string{
+		"different day",
+		"different days",
+		"another day",
+		"other day",
+		"split day",
+		"split days",
+		"split across days",
+		"across days",
+		"separate day",
+		"separate days",
+		"next day",
+	}
+	for _, signal := range dateChangeSignals {
+		if strings.Contains(normalized, signal) {
+			return true
+		}
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+	dates := partySplitOptionLocalDates(option, loc)
+	for date := range dates {
+		if messageMentionsISODateOrWeekday(message, date, loc) {
+			return true
+		}
+	}
+	return false
+}
+
+func messageMentionsISODateOrWeekday(message string, isoDate string, loc *time.Location) bool {
+	if strings.TrimSpace(isoDate) == "" {
+		return false
+	}
+	if strings.Contains(message, isoDate) {
+		return true
+	}
+	parsed, err := time.Parse("2006-01-02", isoDate)
+	if err != nil {
+		return false
+	}
+	weekday := strings.ToLower(parsed.Weekday().String())
+	return strings.Contains(normalizeLooseText(message), weekday)
+}
+
+func partySplitOptionsForClockCandidates(options []PartySplitOption, candidates []int, loc *time.Location) []PartySplitOption {
+	if len(options) == 0 || len(candidates) == 0 {
+		return nil
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+	out := []PartySplitOption{}
+	seen := map[string]bool{}
+	for _, option := range options {
+		if partySplitOptionHasClockCandidate(option, candidates, loc) && !seen[option.ID] {
+			out = append(out, option)
+			seen[option.ID] = true
+		}
+	}
+	return out
+}
+
+func partySplitOptionHasClockCandidate(option PartySplitOption, candidates []int, loc *time.Location) bool {
+	for _, block := range option.Blocks {
+		minutes := block.StartTime.In(loc).Hour()*60 + block.StartTime.In(loc).Minute()
+		for _, candidate := range candidates {
+			if minutes == candidate {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func applySelectedPartySplitOption(session *Session, option PartySplitOption, dateConsentConfirmed bool) {
+	if session == nil {
+		return
+	}
+	plan := clonePartyPlan(session.PartyPlan)
+	if plan == nil {
+		plan = &PartyPlan{}
+	}
+	option.DateConsentConfirmed = dateConsentConfirmed || !option.RequiresDateConsent
+	plan.SelectedSplitOptionID = option.ID
+	for i := range plan.SplitOptions {
+		if strings.TrimSpace(plan.SplitOptions[i].ID) == strings.TrimSpace(option.ID) {
+			plan.SplitOptions[i].DateConsentConfirmed = option.DateConsentConfirmed
+			plan.SplitOptions[i].RequiresDateConsent = option.RequiresDateConsent
+			plan.SplitOptions[i].DatePolicy = option.DatePolicy
+			break
+		}
+	}
+	session.PartyPlan = plan
+	session.RequestedStartTime = nil
+	session.OfferedSlots = nil
+	session.BookingSegments = partySplitOptionSegments(option)
+	if strings.TrimSpace(session.ServiceID) == "" && len(session.BookingSegments) > 0 {
+		session.ServiceID = strings.TrimSpace(session.BookingSegments[0].ServiceID)
+	}
+	if strings.TrimSpace(session.RequestedDate) == "" {
+		if first := partySplitFirstStart(option); !first.IsZero() {
+			session.RequestedDate = first.Format("2006-01-02")
+		}
+	}
+	if bookingSegmentsHaveStaff(session.BookingSegments) {
+		session.StaffID = ""
+		session.StaffName = ""
+		session.StaffSelectionMode = booking.StaffSelectionSpecific
+	}
+}
+
+func partySplitOptionSegments(option PartySplitOption) []booking.BookingSegmentRequest {
+	segments := []booking.BookingSegmentRequest{}
+	for _, block := range option.Blocks {
+		segments = append(segments, block.Segments...)
+	}
+	return segments
+}
+
+func partySplitOfferMessage(session Session, services []ServiceOption, cfg *RuntimeConfig) string {
+	plan := session.PartyPlan
+	if plan == nil || len(plan.SplitOptions) == 0 {
+		return "I do not see one opening that fits the whole group together. What other time or day works?"
+	}
+	loc := timezoneLocation(timezoneFromConfig(cfg))
+	includeDate := !partySplitOptionsAllRequestedDate(plan.SplitOptions)
+	intro := partySplitOfferIntro(session, plan.SplitOptions, loc)
+	parts := []string{intro}
+	for i, option := range plan.SplitOptions {
+		parts = append(parts, fmt.Sprintf("Option %d: %s.", i+1, partySplitOptionSpeech(option, services, loc, includeDate || partySplitOptionHasMultipleDates(option, loc))))
+	}
+	parts = append(parts, partySplitOfferQuestion(plan.SplitOptions))
+	return strings.Join(parts, " ")
+}
+
+func partySplitOfferIntro(session Session, options []PartySplitOption, loc *time.Location) string {
+	requested := requestedDateLabel(session.RequestedDate, loc)
+	base := "I do not see one opening that fits the whole group together"
+	if requested != "" {
+		base += " on " + requested
+	}
+	if partySplitOptionsAllRequestedDate(options) {
+		return base + ", but I can still make it work by staggering the start times."
+	}
+	if date, ok := partySplitOptionsSharedSingleDate(options, loc); ok {
+		return base + ". I found an option on " + date + " instead, so I need your okay before booking."
+	}
+	return base + ". I found an option that splits the services across days, so I need your okay before booking."
+}
+
+func partySplitOfferQuestion(options []PartySplitOption) string {
+	if partySplitOptionsRequireDateConsent(options) {
+		if len(options) == 1 {
+			return "Does that work for your group, or should I keep looking for one day?"
+		}
+		return "Which option works for your group, or should I keep looking for one day?"
+	}
+	if len(options) == 1 {
+		return "Does that work for your group?"
+	}
+	return "Which option works better?"
+}
+
+func partySplitDateConsentPrompt(session Session, services []ServiceOption, cfg *RuntimeConfig) string {
+	option, ok := selectedPartySplitOption(session.PartyPlan)
+	if !ok {
+		return "Is it okay to split the group across different days?"
+	}
+	loc := timezoneLocation(timezoneFromConfig(cfg))
+	requested := requestedDateLabel(session.RequestedDate, loc)
+	details := partySplitOptionSpeech(option, services, loc, true)
+	if strings.TrimSpace(details) == "" {
+		details = "the available times"
+	}
+	if option.DatePolicy == partySplitDatePolicyAlternateDate {
+		if date, ok := partySplitOptionSingleDate(option, loc); ok {
+			if requested != "" {
+				return "Just to confirm, I found this on " + date + " instead of " + requested + ": " + details + ". Should I book that, or keep looking for " + requested + "?"
+			}
+			return "Just to confirm, I found this on " + date + ": " + details + ". Should I book that?"
+		}
+	}
+	return "Just to confirm, this splits the group across different days: " + details + ". Is that okay, or should I keep looking for one day?"
+}
+
+func partySplitOptionsAllRequestedDate(options []PartySplitOption) bool {
+	if len(options) == 0 {
+		return false
+	}
+	for _, option := range options {
+		if option.DatePolicy != partySplitDatePolicyRequestedDate {
+			return false
+		}
+	}
+	return true
+}
+
+func partySplitOptionsRequireDateConsent(options []PartySplitOption) bool {
+	for _, option := range options {
+		if option.RequiresDateConsent {
+			return true
+		}
+	}
+	return false
+}
+
+func partySplitDatePolicySummary(options []PartySplitOption) string {
+	if len(options) == 0 {
+		return ""
+	}
+	seen := map[string]bool{}
+	ordered := []string{}
+	for _, option := range options {
+		policy := strings.TrimSpace(option.DatePolicy)
+		if policy == "" {
+			policy = "unknown"
+		}
+		if seen[policy] {
+			continue
+		}
+		seen[policy] = true
+		ordered = append(ordered, policy)
+	}
+	return strings.Join(ordered, ",")
+}
+
+func partySplitOptionsSharedSingleDate(options []PartySplitOption, loc *time.Location) (string, bool) {
+	shared := ""
+	for _, option := range options {
+		date, ok := partySplitOptionSingleDate(option, loc)
+		if !ok {
+			return "", false
+		}
+		if shared == "" {
+			shared = date
+			continue
+		}
+		if shared != date {
+			return "", false
+		}
+	}
+	return shared, shared != ""
+}
+
+func partySplitDateLabel(option PartySplitOption, requestedDate string, loc *time.Location) string {
+	if first := partySplitFirstStart(option); !first.IsZero() {
+		return first.In(loc).Format("Monday, January 2")
+	}
+	return requestedDateLabel(requestedDate, loc)
+}
+
+func partySplitOptionsSharedDate(options []PartySplitOption, requestedDate string, loc *time.Location) string {
+	if len(options) == 0 {
+		return requestedDateLabel(requestedDate, loc)
+	}
+	shared := ""
+	for _, option := range options {
+		date, ok := partySplitOptionSingleDate(option, loc)
+		if !ok {
+			return ""
+		}
+		if shared == "" {
+			shared = date
+			continue
+		}
+		if shared != date {
+			return ""
+		}
+	}
+	if shared != "" {
+		return shared
+	}
+	return requestedDateLabel(requestedDate, loc)
+}
+
+func partySplitOptionSingleDate(option PartySplitOption, loc *time.Location) (string, bool) {
+	date := ""
+	for _, block := range option.Blocks {
+		if block.StartTime.IsZero() {
+			continue
+		}
+		current := block.StartTime.In(loc).Format("Monday, January 2")
+		if date == "" {
+			date = current
+			continue
+		}
+		if date != current {
+			return "", false
+		}
+	}
+	return date, date != ""
+}
+
+func partySplitOptionHasMultipleDates(option PartySplitOption, loc *time.Location) bool {
+	_, ok := partySplitOptionSingleDate(option, loc)
+	return !ok
+}
+
+func partySplitOptionSpeech(option PartySplitOption, services []ServiceOption, loc *time.Location, includeDate bool) string {
+	blockParts := make([]string, 0, len(option.Blocks))
+	for _, block := range option.Blocks {
+		blockParts = append(blockParts, partySplitBlockSpeech(block, services, loc, includeDate))
+	}
+	summary := joinHumanList(blockParts)
+	if option.SpanMinutes > 0 {
+		summary += " so the group finishes within about " + roundedMinutePhrase(option.SpanMinutes)
+	}
+	return summary
+}
+
+func partySplitBlockSpeech(block PartySplitBlock, services []ServiceOption, loc *time.Location, includeDate bool) string {
+	whenFormat := "3:04 PM"
+	if includeDate {
+		whenFormat = "Monday, January 2 at 3:04 PM"
+	}
+	when := block.StartTime.In(loc).Format(whenFormat)
+	return serviceCountSummaryForSegments(block.Segments, services) + " at " + when
+}
+
+func serviceCountSummaryForSegments(segments []booking.BookingSegmentRequest, services []ServiceOption) string {
+	session := Session{BookingSegments: segments}
+	if summary := selectedServiceCountSummary(session, services); summary != "" {
+		return summary
+	}
+	return "the services"
+}
+
+func roundedMinutePhrase(minutes int) string {
+	if minutes <= 0 {
+		return "the same time"
+	}
+	if minutes < 60 {
+		return fmt.Sprintf("%d minutes", minutes)
+	}
+	hours := minutes / 60
+	remainder := minutes % 60
+	if remainder == 0 {
+		if hours == 1 {
+			return "1 hour"
+		}
+		return fmt.Sprintf("%d hours", hours)
+	}
+	return fmt.Sprintf("%d hour %d minutes", hours, remainder)
 }
 
 func offeredSlotsFromAvailability(result *booking.AvailabilityResult) []OfferedSlot {
@@ -1254,11 +2064,11 @@ func availabilityToolMessage(slotCount int) string {
 }
 
 func formatSlotOffer(slots []OfferedSlot, loc *time.Location, unavailableRequestedTime bool) string {
-	prefix := "I found these openings: "
+	prefix := "I have openings"
 	if unavailableRequestedTime {
-		prefix = "That time is not available. I found these openings: "
+		prefix = "That time is not available. I have openings"
 	}
-	return prefix + formatSlotOptions(slots, loc) + ". Which works?"
+	return prefix + " " + formatAvailabilitySlotPhrase(slots, loc) + ". Which works best?"
 }
 
 func formatSlotOfferForSession(slots []OfferedSlot, loc *time.Location, unavailableRequestedTime bool, session Session, services []ServiceOption) string {
@@ -1266,11 +2076,11 @@ func formatSlotOfferForSession(slots []OfferedSlot, loc *time.Location, unavaila
 	if service == "" {
 		return formatSlotOffer(slots, loc, unavailableRequestedTime)
 	}
-	options := formatSlotOptions(slots, loc)
+	prefix := serviceOfferPrefix(service) + ", I have openings"
 	if unavailableRequestedTime {
-		return "That time is not available. For your " + service + ", I found these openings: " + options + ". Which works?"
+		prefix = "That time is not available. " + prefix
 	}
-	return "For your " + service + ", I found these openings: " + options + ". Which works?"
+	return prefix + " " + formatAvailabilitySlotPhrase(slots, loc) + ". Which works best?"
 }
 
 func formatRescheduleSlotOfferForSession(slots []OfferedSlot, loc *time.Location, unavailableRequestedTime bool, session Session, services []ServiceOption) string {
@@ -1282,34 +2092,72 @@ func formatRescheduleSlotOfferForSession(slots []OfferedSlot, loc *time.Location
 	if unavailableRequestedTime {
 		prefix = "That time is not available. " + prefix
 	}
-	if day, times, staffPhrase, ok := compactSameDaySlotOptions(slots, loc); ok {
-		return prefix + " on " + day + " at " + joinHumanList(times) + staffPhrase + ". Which time works?"
-	}
-	return prefix + ": " + formatSlotOptions(slots, loc) + ". Which time works?"
+	return prefix + " " + formatAvailabilitySlotPhrase(slots, loc) + ". Which time works?"
 }
 
-func compactSameDaySlotOptions(slots []OfferedSlot, loc *time.Location) (string, []string, string, bool) {
+func serviceOfferPrefix(service string) string {
+	if service == "" {
+		return ""
+	}
+	first := []rune(strings.TrimSpace(service))
+	if len(first) > 0 && first[0] >= '0' && first[0] <= '9' {
+		return "For " + service
+	}
+	return "For your " + service
+}
+
+func formatAvailabilitySlotPhrase(slots []OfferedSlot, loc *time.Location) string {
 	if len(slots) == 0 {
-		return "", nil, "", false
+		return ""
 	}
 	if loc == nil {
 		loc = time.UTC
 	}
-	firstLocal := slots[0].StartTime.In(loc)
-	day := firstLocal.Format("Monday, January 2")
-	staffPhrase := slotStaffPhrase(slots[0])
-	times := make([]string, 0, len(slots))
+	groups := make([][]OfferedSlot, 0)
+	groupIndex := map[string]int{}
 	for _, slot := range slots {
 		local := slot.StartTime.In(loc)
-		if local.Format("2006-01-02") != firstLocal.Format("2006-01-02") {
-			return "", nil, "", false
+		key := local.Format("2006-01-02")
+		index, ok := groupIndex[key]
+		if !ok {
+			index = len(groups)
+			groupIndex[key] = index
+			groups = append(groups, []OfferedSlot{})
 		}
-		if slotStaffPhrase(slot) != staffPhrase {
-			return "", nil, "", false
-		}
-		times = append(times, local.Format("3:04 PM"))
+		groups[index] = append(groups[index], slot)
 	}
-	return day, times, staffPhrase, true
+	parts := make([]string, 0, len(groups))
+	for _, group := range groups {
+		parts = append(parts, formatAvailabilityDayGroup(group, loc))
+	}
+	return joinChoiceList(parts)
+}
+
+func formatAvailabilityDayGroup(slots []OfferedSlot, loc *time.Location) string {
+	if len(slots) == 0 {
+		return ""
+	}
+	day := slots[0].StartTime.In(loc).Format("Monday, January 2")
+	staffPhrase := slotOfferStaffPhrase(slots[0])
+	sameStaffPhrase := true
+	for _, slot := range slots[1:] {
+		if slotOfferStaffPhrase(slot) != staffPhrase {
+			sameStaffPhrase = false
+			break
+		}
+	}
+	if sameStaffPhrase {
+		times := make([]string, 0, len(slots))
+		for _, slot := range slots {
+			times = append(times, slot.StartTime.In(loc).Format("3:04 PM"))
+		}
+		return "on " + day + " at " + joinChoiceList(times) + staffPhrase
+	}
+	parts := make([]string, 0, len(slots))
+	for _, slot := range slots {
+		parts = append(parts, slot.StartTime.In(loc).Format("3:04 PM")+slotOfferStaffPhrase(slot))
+	}
+	return "on " + day + " at " + joinChoiceList(parts)
 }
 
 func offeredSlotSelectionRetryReply(message string, session Session, services []ServiceOption, loc *time.Location) string {
@@ -1347,7 +2195,7 @@ func formatSpecificStaffUnavailableOffer(session Session, staff []StaffOption, r
 	if len(slots) == 0 {
 		return prefix + "What other time works with " + requestedStaff + ", or should I use anyone available?"
 	}
-	return prefix + "I found these options: " + formatSlotOptions(slots, loc) + ". Which works?"
+	return prefix + "I found openings " + formatAvailabilitySlotPhrase(slots, loc) + ". Which works best?"
 }
 
 func formatSlotOptions(slots []OfferedSlot, loc *time.Location) string {
@@ -1362,6 +2210,16 @@ func formatSlotOptions(slots []OfferedSlot, loc *time.Location) string {
 }
 
 func slotStaffPhrase(slot OfferedSlot) string {
+	if slotUsesAnyone(slot) {
+		return availableTechnicianPhrase(slot)
+	}
+	if assigned := slotAssignedStaffLabel(slot); assigned != "" {
+		return " with " + assigned
+	}
+	return ""
+}
+
+func slotOfferStaffPhrase(slot OfferedSlot) string {
 	if slotUsesAnyone(slot) {
 		return availableTechnicianPhrase(slot)
 	}
@@ -1585,6 +2443,9 @@ func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnR
 	if s.bookingTool == nil {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, bookingErrorReply(), services, staff, cfg)
 	}
+	if option, ok := selectedPartySplitOption(session.PartyPlan); ok {
+		return s.tryPartySplitBooking(ctx, ownerUserID, turn, session, option, services, staff, cfg, knowledge)
+	}
 	if !bookingServiceSelectionConsistent(session) {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, bookingErrorReply(), services, staff, cfg)
 	}
@@ -1634,6 +2495,208 @@ func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnR
 	s.applyReplyGenerator(ctx, &turn, session, services, cfg, "", "", knowledge)
 	finalizeTurnMetadata(&turn, turn.Session, session, "", "", "booking_result")
 	return s.store.SaveTurn(ctx, turn)
+}
+
+func (s *Service) tryPartySplitBooking(ctx context.Context, ownerUserID string, turn TurnRecord, session Session, option PartySplitOption, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
+	if len(option.Blocks) == 0 {
+		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonGroupBooking, partySplitBookingFailureReply(0, 0), services, staff, cfg)
+	}
+	totalSegments := len(partySplitOptionSegments(option))
+	if totalSegments == 0 {
+		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonGroupBooking, partySplitBookingFailureReply(0, 0), services, staff, cfg)
+	}
+	if option.RequiresDateConsent && !option.DateConsentConfirmed {
+		turn.AIMessage = partySplitDateConsentPrompt(session, services, cfg)
+		turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{
+			"booking_policy": "party_split_date_consent_required",
+		})
+		s.applyReplyGenerator(ctx, &turn, session, services, cfg, "party_split_date_consent", "party_split_date_consent", knowledge)
+		finalizeTurnMetadata(&turn, turn.Session, session, "party_split_date_consent", "party_split_date_consent", "party_split_date_consent")
+		return s.store.SaveTurn(ctx, turn)
+	}
+	if strings.TrimSpace(session.CustomerName) == "" || strings.TrimSpace(session.CustomerPhone) == "" {
+		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonCustomerDetailsUnavailable, partySplitBookingFailureReply(0, totalSegments), services, staff, cfg)
+	}
+
+	successfulAttempts := []*booking.BookingAttempt{}
+	successfulAppointmentIDs := []string{}
+	for _, block := range option.Blocks {
+		if block.StartTime.IsZero() || len(block.Segments) == 0 {
+			rollback := s.rollbackPartySplitBookings(ctx, ownerUserID, turn.SalonID, session, successfulAppointmentIDs)
+			turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, partySplitBookingFailureMetadata(len(successfulAttempts), totalSegments, rollback))
+			return s.saveHandoffTurn(ctx, turn, session, HandoffReasonGroupBooking, partySplitBookingFailureReply(len(successfulAttempts), totalSegments), services, staff, cfg)
+		}
+		for _, segment := range block.Segments {
+			if strings.TrimSpace(segment.ServiceID) == "" {
+				rollback := s.rollbackPartySplitBookings(ctx, ownerUserID, turn.SalonID, session, successfulAppointmentIDs)
+				turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, partySplitBookingFailureMetadata(len(successfulAttempts), totalSegments, rollback))
+				return s.saveHandoffTurn(ctx, turn, session, HandoffReasonGroupBooking, partySplitBookingFailureReply(len(successfulAttempts), totalSegments), services, staff, cfg)
+			}
+			mode := firstNonEmpty(segment.StaffSelectionMode, booking.StaffSelectionSpecific)
+			req := booking.CreateBookingRequest{
+				Source:             bookingSourceForSession(session),
+				CustomerName:       session.CustomerName,
+				CustomerPhone:      session.CustomerPhone,
+				CustomerEmail:      session.CustomerEmail,
+				ServiceID:          strings.TrimSpace(segment.ServiceID),
+				StaffID:            strings.TrimSpace(segment.StaffID),
+				StaffSelectionMode: mode,
+				Segments: []booking.BookingSegmentRequest{{
+					ServiceID:          strings.TrimSpace(segment.ServiceID),
+					StaffID:            strings.TrimSpace(segment.StaffID),
+					StaffSelectionMode: mode,
+				}},
+				StartTime: block.StartTime,
+				Notes:     bookingNotesForSplitParty(session),
+			}
+			attempt, err := s.bookingTool.Create(ctx, turn.SalonID, ownerUserID, req)
+			if err != nil || !bookingAttemptConfirmed(attempt) {
+				rollback := s.rollbackPartySplitBookings(ctx, ownerUserID, turn.SalonID, session, successfulAppointmentIDs)
+				turn.ToolMessage = "Booking service did not confirm every split party appointment through POS."
+				turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, partySplitBookingFailureMetadata(len(successfulAttempts), totalSegments, rollback))
+				return s.saveHandoffTurn(ctx, turn, session, HandoffReasonGroupBooking, partySplitBookingFailureReply(len(successfulAttempts), totalSegments), services, staff, cfg)
+			}
+			successfulAttempts = append(successfulAttempts, attempt)
+			successfulAppointmentIDs = append(successfulAppointmentIDs, attempt.Appointment.ID)
+		}
+	}
+
+	bookingAttemptIDs := make([]string, 0, len(successfulAttempts))
+	for _, attempt := range successfulAttempts {
+		bookingAttemptIDs = append(bookingAttemptIDs, attempt.ID)
+	}
+	plan := clonePartyPlan(session.PartyPlan)
+	if plan == nil {
+		plan = &PartyPlan{}
+	}
+	plan.SelectedSplitOptionID = option.ID
+	plan.SplitBookingAttemptIDs = append([]string(nil), bookingAttemptIDs...)
+	plan.SplitAppointmentIDs = append([]string(nil), successfulAppointmentIDs...)
+	session.PartyPlan = plan
+	session.BookingSegments = partySplitOptionSegments(option)
+	session.OfferedSlots = nil
+	session.RequestedStartTime = nil
+
+	turn.ToolMessage = "Booking service confirmed every split party appointment through POS."
+	turn.AIMessage = confirmedPartySplitMessage(session, option, services, cfg)
+	turn.Update.Status = StatusCompleted
+	turn.Update.Outcome = OutcomeBookingConfirmed
+	if len(bookingAttemptIDs) > 0 {
+		turn.Update.BookingAttemptID = bookingAttemptIDs[0]
+	}
+	if len(successfulAppointmentIDs) > 0 {
+		turn.Update.AppointmentID = successfulAppointmentIDs[0]
+	}
+	turn.Update.OfferedSlots = nil
+	turn.Update.PartyPlan = clonePartyPlan(plan)
+	turn.Update.BookingSegments = session.BookingSegments
+	turn.Update.EndSession = true
+	turn.Update.Summary = summaryFor(session, services, staff, cfg)
+	turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{
+		"booking_policy":            "party_split_pos_confirmed",
+		"split_booking_count":       len(successfulAttempts),
+		"split_booking_attempt_ids": bookingAttemptIDs,
+		"split_appointment_ids":     successfulAppointmentIDs,
+	})
+	s.applyReplyGenerator(ctx, &turn, session, services, cfg, "", "", knowledge)
+	finalizeTurnMetadata(&turn, turn.Session, session, "", "", "party_split_booking_result")
+	return s.store.SaveTurn(ctx, turn)
+}
+
+type partySplitRollbackResult struct {
+	Attempted int
+	Cancelled int
+	Failed    int
+}
+
+func (s *Service) rollbackPartySplitBookings(ctx context.Context, ownerUserID string, salonID string, session Session, appointmentIDs []string) partySplitRollbackResult {
+	result := partySplitRollbackResult{Attempted: len(appointmentIDs)}
+	if s.bookingTool == nil {
+		result.Failed = len(appointmentIDs)
+		return result
+	}
+	for _, appointmentID := range appointmentIDs {
+		appointmentID = strings.TrimSpace(appointmentID)
+		if appointmentID == "" {
+			result.Failed++
+			continue
+		}
+		_, fallback, err := s.bookingTool.Cancel(ctx, salonID, ownerUserID, appointmentID, booking.CancelRequest{
+			Reason: "Split party booking rollback after partial POS failure.",
+			Source: bookingSourceForSession(session),
+		})
+		if err != nil || fallback != nil {
+			result.Failed++
+			continue
+		}
+		result.Cancelled++
+	}
+	return result
+}
+
+func bookingAttemptConfirmed(attempt *booking.BookingAttempt) bool {
+	return attempt != nil &&
+		attempt.Status == booking.StatusConfirmed &&
+		strings.TrimSpace(attempt.POSBookingID) != "" &&
+		attempt.Appointment != nil &&
+		strings.TrimSpace(attempt.Appointment.ID) != ""
+}
+
+func partySplitBookingFailureMetadata(successful int, total int, rollback partySplitRollbackResult) map[string]any {
+	return map[string]any{
+		"booking_policy":              "party_split_partial_failure",
+		"split_booking_success_count": successful,
+		"split_booking_total_count":   total,
+		"rollback_attempted_count":    rollback.Attempted,
+		"rollback_cancelled_count":    rollback.Cancelled,
+		"rollback_failed_count":       rollback.Failed,
+	}
+}
+
+func partySplitBookingFailureReply(successful int, total int) string {
+	if successful > 0 {
+		return "I could not complete every appointment for the group through the booking system, so I will send this to the owner to review. This is not a confirmed group appointment."
+	}
+	if total > 0 {
+		return "I could not complete the group appointment through the booking system, so I will send this to the owner to review. This is not a confirmed group appointment."
+	}
+	return "I could not complete the group appointment safely, so I will send this to the owner to review. This is not a confirmed group appointment."
+}
+
+func bookingNotesForSplitParty(session Session) string {
+	base := bookingNotesForSession(session)
+	if strings.TrimSpace(base) == "" {
+		return "Split party booking request."
+	}
+	return strings.TrimSpace(base) + " Split party booking request."
+}
+
+func confirmedPartySplitMessage(session Session, option PartySplitOption, services []ServiceOption, cfg *RuntimeConfig) string {
+	salon := salonName(cfg)
+	loc := timezoneLocation(timezoneFromConfig(cfg))
+	parts := []string{}
+	if salon != "" {
+		parts = append(parts, "You're confirmed with "+salon+" for the group")
+	} else {
+		parts = append(parts, "You're confirmed for the group")
+	}
+	date, singleDate := partySplitOptionSingleDate(option, loc)
+	if !singleDate {
+		date = ""
+	}
+	if date != "" {
+		parts[0] += " on " + date
+	}
+	details := make([]string, 0, len(option.Blocks))
+	for _, block := range option.Blocks {
+		details = append(details, partySplitBlockSpeech(block, services, loc, !singleDate))
+	}
+	message := strings.Join(parts, " ") + ": " + joinHumanList(details) + "."
+	if name := strings.TrimSpace(session.CustomerName); name != "" {
+		message += " The appointments are under " + name + "."
+	}
+	message += " Thank you, goodbye."
+	return message
 }
 
 func (s *Service) tryReschedule(ctx context.Context, ownerUserID string, turn TurnRecord, session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (*Session, error) {
@@ -2292,8 +3355,12 @@ func clonePartyPlan(plan *PartyPlan) *PartyPlan {
 		return nil
 	}
 	out := &PartyPlan{
-		PartySize: plan.PartySize,
-		Groups:    make([]PartyPlanGroup, 0, len(plan.Groups)),
+		PartySize:              plan.PartySize,
+		Groups:                 make([]PartyPlanGroup, 0, len(plan.Groups)),
+		SplitOptions:           make([]PartySplitOption, 0, len(plan.SplitOptions)),
+		SelectedSplitOptionID:  plan.SelectedSplitOptionID,
+		SplitBookingAttemptIDs: append([]string(nil), plan.SplitBookingAttemptIDs...),
+		SplitAppointmentIDs:    append([]string(nil), plan.SplitAppointmentIDs...),
 	}
 	for _, group := range plan.Groups {
 		out.Groups = append(out.Groups, PartyPlanGroup{
@@ -2302,6 +3369,25 @@ func clonePartyPlan(plan *PartyPlan) *PartyPlan {
 			CandidateServiceIDs: append([]string(nil), group.CandidateServiceIDs...),
 			ResolvedServiceIDs:  append([]string(nil), group.ResolvedServiceIDs...),
 		})
+	}
+	for _, option := range plan.SplitOptions {
+		cloned := PartySplitOption{
+			ID:                   option.ID,
+			DatePolicy:           option.DatePolicy,
+			RequiresDateConsent:  option.RequiresDateConsent,
+			DateConsentConfirmed: option.DateConsentConfirmed,
+			SpanMinutes:          option.SpanMinutes,
+			FinishSpreadMinutes:  option.FinishSpreadMinutes,
+			Blocks:               make([]PartySplitBlock, 0, len(option.Blocks)),
+		}
+		for _, block := range option.Blocks {
+			cloned.Blocks = append(cloned.Blocks, PartySplitBlock{
+				StartTime: block.StartTime,
+				EndTime:   block.EndTime,
+				Segments:  append([]booking.BookingSegmentRequest(nil), block.Segments...),
+			})
+		}
+		out.SplitOptions = append(out.SplitOptions, cloned)
 	}
 	return out
 }
@@ -4620,8 +5706,10 @@ func missingBookingField(session Session) string {
 		return "service"
 	case session.RequestedStartTime == nil && strings.TrimSpace(session.RequestedDate) == "":
 		return "requested_date"
-	case session.RequestedStartTime == nil:
+	case session.RequestedStartTime == nil && !partyPlanHasSelectedSplitOption(session.PartyPlan):
 		return "requested_time"
+	case partyPlanSelectedSplitRequiresDateConsent(session.PartyPlan):
+		return "party_split_date_consent"
 	case strings.TrimSpace(session.CustomerName) == "":
 		return "customer_name"
 	case strings.TrimSpace(session.CustomerPhone) == "":
@@ -4649,6 +5737,8 @@ func promptForMissingField(field string) string {
 		return "What time works for that day?"
 	case "requested_start_time":
 		return "What day and time would you like?"
+	case "party_split_date_consent":
+		return "Is it okay to split the group across different days?"
 	default:
 		return "What else should I know?"
 	}
@@ -7153,7 +8243,7 @@ func availableTechnicianPhraseForSegments(segments []booking.BookingSegmentReque
 
 func availableTechnicianPhraseForSegmentCount(count int) string {
 	if count > 1 {
-		return " with available technicians assigned"
+		return " with technicians assigned"
 	}
 	return " with an available technician"
 }

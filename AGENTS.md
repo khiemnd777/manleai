@@ -77,6 +77,31 @@ The product rule is strict: never confirm an appointment unless the active POS p
 - If the user says "implement", "fix", "build", or similar, still present the plan first and wait for explicit approval before changing code.
 - For any request that changes the UI or user-facing layout, provide a **Mockup as Text** before implementation and wait for explicit approval.
 
+## Codex Working Contract
+
+- Before any workspace write, decide from the latest user message whether file changes are actually allowed. Workspace writes include code patches, tests, docs, skills, agents, migrations, generated files, formatting commands, and configuration changes.
+- File changes are not allowed when the latest message contains any unresolved question, concern, objection, condition, edge case, scope change, ambiguity, status request, screenshot/log review, complaint, or request for explanation. This remains true even when the message also contains approval language.
+- File changes are allowed only when the latest message is an action-oriented approval for an exact scope that has already been investigated and planned, and no unresolved decision remains in that latest message.
+- Do not use keyword matching as the approval gate. The gate is semantic: ask whether a reasonable user would still expect an answer, clarification, or decision before files are changed. If yes, stay read-only.
+- If the user approves but also raises a new edge case or asks what happens in a scenario, answer that decision gate first. If the answer changes scope, risk, files, tests, or behavior, present the updated plan and wait for a fresh action-oriented approval.
+- Before any approved implementation, state in commentary exactly which scope is being implemented. If that sentence cannot be stated truthfully and specifically, do not write files.
+- For documentation-only or agent-rule changes explicitly requested by the user, the exact write scope is the requested documentation/rule update. Do not expand that scope into code or tests unless separately approved.
+- Before implementation planning, load the repo-local skills that fit the work, such as planning, triage, root-cause investigation, review, frontend workflow, backend workflow, booking safety, POS adapter, voice runtime, or business analysis skills.
+- Classify the work before planning as one of: task, defect, new feature, refactor, review, documentation-only, or agent-rule change. If more than one applies, name the primary classification and the secondary risk area.
+- Decode the smallest relevant codebase surface before proposing implementation: owner module, UI page or component, API route, service, repository, schema, docs, runtime config, logs, screenshot, or vendor evidence as applicable.
+- Separate findings into confirmed current behavior, inference, and proposed change. Cite file paths and line numbers, command output, screenshot/log fields, or official docs for claims about current behavior.
+- Present a reviewable implementation listing before editing: exact scope, non-goals, business rule, expected files, tests or checks to run, covered edge cases, and remaining unknowns.
+- Do not implement until the user has reviewed the listing, has no unresolved questions or scope changes, and gives clear action-oriented approval for that exact scope.
+- Never solve product, conversation, workflow, parsing, UI, or test issues by hardcoding the latest user phrase, transcript wording, screenshot text, salon name, service name, date, time, staff name, customer name, or narrow example.
+- Treat user examples as evidence and regression fixtures, not product logic. Runtime behavior must be data-driven, state-driven, catalog-backed, provider-backed, or contract-driven as appropriate.
+- Do not use keyword-only gates for user approval, caller intent, service selection, escalation, or conversation behavior when semantic state or structured data is required.
+- Before implementing a fix, identify the general rule that prevents the class of failure and the dynamic inputs that must remain variable, such as services, categories, aliases, staff, dates, times, party size, customer details, business hours, POS response, and conversation state.
+- If a proposed fix depends on one exact wording, one exact transcript, one exact service combination, or one exact date/time, stop and redesign it as a general rule before editing files.
+- Every implementation plan must include an execution contract: exact scope, non-goals, business rule, expected files, tests to run, covered edge cases, and any remaining unknowns.
+- Conversation, parser, formatter, booking, and workflow changes must include at least one regression test using different wording or different data from the original reported example to prove the implementation is not hardcoded.
+- After implementation, review the full relevant user-facing flow, not only unit state. If the output would sound robotic, misleading, repetitive, or hard to answer in the real workflow, the slice is not done.
+- If this contract is violated, stop immediately. Do not patch, format, test, or "fix forward" until the user chooses how to handle the current worktree. First classify the diff into approved changes, unapproved changes, and risk areas.
+
 ## Product-Grade Standard
 
 - Build and review every approved slice as commercial-grade production software, not MVP, demo, prototype, or happy-path scaffolding.
@@ -86,6 +111,22 @@ The product rule is strict: never confirm an appointment unless the active POS p
 - Narrow vertical slices are allowed only when the slice is internally complete and scope-honest. Do not call a slice done if predictable product-grade failure modes are unhandled, hidden, or left ambiguous.
 - Do not ship fake, placeholder, or demo behavior as production behavior. Local seed/demo data is allowed only when isolated from production paths.
 - Acceptance criteria and test plans must cover critical edge cases and regression risks, not just the happy path.
+
+## AI Receptionist Conversation Quality Contract
+
+- Treat the AI receptionist as a real phone receptionist for an operating nail salon, not a generic chatbot or a backend state machine with spoken output attached.
+- The assistant owns the salon-operations reasoning burden. The user is not expected to provide nail-salon domain control language. When domain evidence is incomplete, state assumptions, reason from real salon operations, repository evidence, and provided transcripts, then propose how to validate.
+- Do not fix booking conversations by patching only the latest transcript phrase. Derive the general conversation rule that prevents the class of failure across booking, reschedule, cancellation, party booking, availability, fallback, and confirmation flows.
+- Before proposing or implementing any conversation change, map the real call flow: caller goal, known fields, missing fields, service/category ambiguity, staff preference, date/time constraints, POS availability gate, POS booking gate, and owner handoff gate.
+- Every AI reply must be concise, natural, context-aware, operationally useful, and easy for a caller to answer verbally. Do not expose internal state, parser state, stored-field reminders, or mechanical scaffolding such as repeated "noted" wording.
+- Preserve known information silently. Use captured date, service, staff preference, party size, or customer details for logic without repeating them unless it helps the caller choose or confirm.
+- Ask one useful question at a time. If the caller asks for a menu while a required field is missing, answer from catalog-backed services/categories, then return to the unresolved question. Do not treat a bare affirmative after an open menu as a service selection.
+- Use human grouping in availability replies: same day once, same staff/team phrase once, repeated services by count. Use ordinal labels only when options differ enough that ordinals help.
+- For party bookings, ask group-specific clarifications and distinguish service categories from concrete services.
+- If no common time fits, prefer safe provider-backed split/staggered options before saying unavailable or handing off.
+- Never confirm unless POS returns a successful booking ID. For split/multi-child booking, every child appointment must succeed; partial failure must rollback when possible and avoid confirmed wording.
+- Conversation changes must include golden transcript tests, not only state assertions.
+- Before calling a conversation slice complete, read or simulate the full transcript as a caller would hear it. If it sounds robotic, repetitive, misleading, or hard to answer by phone, the slice is not done even when backend tests pass.
 
 ## Mockup As Text
 
