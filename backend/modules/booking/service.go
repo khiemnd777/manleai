@@ -37,7 +37,7 @@ type Store interface {
 	SaveAppointmentActionFallback(ctx context.Context, record AppointmentActionFallbackRecord) (*BookingAttempt, error)
 	LatestTestBooking(ctx context.Context, salonID string, ownerUserID string) (*TestBookingRecord, error)
 	ListAppointments(ctx context.Context, salonID string, ownerUserID string, limit int, offset int) ([]Appointment, error)
-	ListBookingAttempts(ctx context.Context, salonID string, ownerUserID string, limit int) ([]BookingAttempt, error)
+	ListBookingAttempts(ctx context.Context, salonID string, ownerUserID string, status string, limit int, offset int) ([]BookingAttempt, error)
 }
 
 type Service struct {
@@ -462,8 +462,28 @@ func (s *Service) Appointments(ctx context.Context, salonID string, ownerUserID 
 	}, nil
 }
 
-func (s *Service) Attempts(ctx context.Context, salonID string, ownerUserID string, limit int) ([]BookingAttempt, error) {
-	return s.store.ListBookingAttempts(ctx, salonID, ownerUserID, clampLimit(limit))
+func (s *Service) Attempts(ctx context.Context, salonID string, ownerUserID string, status string, limit int, offset int) (*ListBookingAttemptsResponse, error) {
+	pageStatus, err := normalizeAttemptStatusFilter(status)
+	if err != nil {
+		return nil, err
+	}
+	pageLimit := clampLimit(limit)
+	pageOffset := clampOffset(offset)
+	items, err := s.store.ListBookingAttempts(ctx, salonID, ownerUserID, pageStatus, pageLimit+1, pageOffset)
+	if err != nil {
+		return nil, err
+	}
+	hasMore := len(items) > pageLimit
+	if hasMore {
+		items = items[:pageLimit]
+	}
+	return &ListBookingAttemptsResponse{
+		BookingAttempts: items,
+		Limit:           pageLimit,
+		Offset:          pageOffset,
+		HasMore:         hasMore,
+		Status:          pageStatus,
+	}, nil
 }
 
 func (s *Service) LatestTestBooking(ctx context.Context, salonID string, ownerUserID string) (*TestBookingRecord, error) {
@@ -1294,4 +1314,19 @@ func clampOffset(offset int) int {
 		return 0
 	}
 	return offset
+}
+
+func normalizeAttemptStatusFilter(status string) (string, error) {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		return "", nil
+	}
+	switch status {
+	case StatusPOSPending, StatusConfirmed, StatusFallbackPending, StatusRescheduled, StatusCancelled:
+		return status, nil
+	case "started", "failed":
+		return status, nil
+	default:
+		return "", ErrValidation
+	}
 }

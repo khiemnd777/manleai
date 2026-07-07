@@ -878,7 +878,7 @@ func (s *Service) ListWebhookEvents(ctx context.Context, salonID string, ownerUs
 	return s.store.ListWebhookEvents(ctx, salonID, ownerUserID, sessionID, clampWebhookLimit(limit))
 }
 
-func (s *Service) ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int) ([]PartyBookingRequest, error) {
+func (s *Service) ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int, offset int) (*ListPartyBookingRequestsResponse, error) {
 	salonID = strings.TrimSpace(salonID)
 	ownerUserID = strings.TrimSpace(ownerUserID)
 	status = strings.TrimSpace(status)
@@ -888,7 +888,22 @@ func (s *Service) ListPartyBookingRequests(ctx context.Context, salonID string, 
 	if status != "" && status != "all" && !allowedPartyRequestStatus(status) {
 		return nil, ErrValidation
 	}
-	return s.store.ListPartyBookingRequests(ctx, salonID, ownerUserID, status, clampLimit(limit))
+	pageLimit := clampLimit(limit)
+	pageOffset := clampOffset(offset)
+	items, err := s.store.ListPartyBookingRequests(ctx, salonID, ownerUserID, status, pageLimit+1, pageOffset)
+	if err != nil {
+		return nil, err
+	}
+	hasMore := len(items) > pageLimit
+	if hasMore {
+		items = items[:pageLimit]
+	}
+	return &ListPartyBookingRequestsResponse{
+		PartyBookingRequests: items,
+		Limit:                pageLimit,
+		Offset:               pageOffset,
+		HasMore:              hasMore,
+	}, nil
 }
 
 func (s *Service) UpdatePartyBookingRequestStatus(ctx context.Context, salonID string, ownerUserID string, requestID string, status string) (*PartyBookingRequest, error) {

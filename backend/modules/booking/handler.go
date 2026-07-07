@@ -126,14 +126,17 @@ func (h *Handler) Cancel(c *fiber.Ctx) error {
 }
 
 func (h *Handler) Attempts(c *fiber.Ctx) error {
-	items, err := h.service.Attempts(c.UserContext(), c.Params("id"), middleware.UserID(c), parseLimit(c.Query("limit")))
+	res, err := h.service.Attempts(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Query("status"), parseLimit(c.Query("limit")), parseOffset(c.Query("offset")))
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Booking attempt status filter is invalid.")
+	}
 	if errors.Is(err, pos.ErrNotFound) {
 		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "BOOKING_ATTEMPTS_FAILED", "Could not load booking attempts.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"booking_attempts": items})
+	return respond.JSON(c, fiber.StatusOK, res)
 }
 
 func parseLimit(raw string) int {

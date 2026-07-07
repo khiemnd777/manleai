@@ -98,7 +98,7 @@ func (h *Handler) RealtimeEvents(c *fiber.Ctx) error {
 }
 
 func (h *Handler) ListPartyBookingRequests(c *fiber.Ctx) error {
-	items, err := h.service.ListPartyBookingRequests(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Query("status"), parseLimit(c.Query("limit")))
+	res, err := h.service.ListPartyBookingRequests(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Query("status"), parseLimit(c.Query("limit")), parseOffset(c.Query("offset")))
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Party request filter is invalid.")
 	}
@@ -108,7 +108,7 @@ func (h *Handler) ListPartyBookingRequests(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "PARTY_REQUESTS_FAILED", "Could not load party booking requests.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"party_booking_requests": items})
+	return respond.JSON(c, fiber.StatusOK, res)
 }
 
 func (h *Handler) UpdatePartyBookingRequestStatus(c *fiber.Ctx) error {

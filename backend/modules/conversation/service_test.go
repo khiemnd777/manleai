@@ -77,6 +77,47 @@ func TestListReturnsPaginationMetadata(t *testing.T) {
 	}
 }
 
+func TestListPartyBookingRequestsReturnsPaginationMetadata(t *testing.T) {
+	store := newFakeConversationStore()
+	store.partyRequests = make([]PartyBookingRequest, maxSessionListLimit+1)
+	for i := range store.partyRequests {
+		store.partyRequests[i] = PartyBookingRequest{
+			ID:            "party_" + strconv.Itoa(i),
+			SalonID:       "salon_1",
+			CallSessionID: "session_1",
+			Status:        PartyRequestStatusPending,
+			Summary:       "Party request",
+		}
+	}
+	service := NewService(store, &fakeBookingTool{})
+
+	res, err := service.ListPartyBookingRequests(context.Background(), " salon_1 ", " owner_1 ", PartyRequestStatusPending, 500, 30)
+	if err != nil {
+		t.Fatalf("ListPartyBookingRequests returned error: %v", err)
+	}
+	if len(res.PartyBookingRequests) != maxSessionListLimit {
+		t.Fatalf("items = %d, want %d", len(res.PartyBookingRequests), maxSessionListLimit)
+	}
+	if res.Limit != maxSessionListLimit {
+		t.Fatalf("response limit = %d, want %d", res.Limit, maxSessionListLimit)
+	}
+	if res.Offset != 30 {
+		t.Fatalf("response offset = %d, want 30", res.Offset)
+	}
+	if !res.HasMore {
+		t.Fatal("has_more = false, want true")
+	}
+	if store.partyListStatus != PartyRequestStatusPending {
+		t.Fatalf("status filter = %q, want pending", store.partyListStatus)
+	}
+	if store.partyListLimit != maxSessionListLimit+1 {
+		t.Fatalf("limit = %d, want %d", store.partyListLimit, maxSessionListLimit+1)
+	}
+	if store.partyListOffset != 30 {
+		t.Fatalf("offset = %d, want 30", store.partyListOffset)
+	}
+}
+
 func TestListRejectsInvalidLifecycle(t *testing.T) {
 	store := newFakeConversationStore()
 	service := NewService(store, &fakeBookingTool{})
@@ -5850,6 +5891,9 @@ type fakeConversationStore struct {
 	knowledge         []KnowledgeSnippet
 	businessHours     []BusinessHourPeriod
 	partyRequests     []PartyBookingRequest
+	partyListStatus   string
+	partyListLimit    int
+	partyListOffset   int
 	partyStatusUpdate struct {
 		requestID string
 		status    string
@@ -6035,7 +6079,10 @@ func (f *fakeConversationStore) ListBusinessHourPeriods(ctx context.Context, sal
 	return f.businessHours, nil
 }
 
-func (f *fakeConversationStore) ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int) ([]PartyBookingRequest, error) {
+func (f *fakeConversationStore) ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int, offset int) ([]PartyBookingRequest, error) {
+	f.partyListStatus = status
+	f.partyListLimit = limit
+	f.partyListOffset = offset
 	return f.partyRequests, nil
 }
 

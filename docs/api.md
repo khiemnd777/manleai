@@ -1210,7 +1210,9 @@ Returns `200` with the cancelled appointment only when the active `POSProvider` 
 
 `GET /api/salons/:id/booking-attempts`
 
-Returns booking attempts, including transient `pos_pending` records and `fallback_pending` records that need owner review. Each item includes `staff_selection_mode` and, when available, ordered `segments[]` from `booking_attempt_segments` so owner dashboards can distinguish the customer preference (`anyone` or `specific`) from the staff assignment attempted through the POS provider.
+Returns booking attempts, including transient `pos_pending` records and `fallback_pending` records that need owner review. The optional `status` query parameter filters by attempt status such as `fallback_pending`. The optional `limit` query parameter defaults to 50 and is capped at 200. The optional `offset` query parameter defaults to 0. Responses include `booking_attempts`, `limit`, `offset`, `has_more`, and `status` when a filter is applied; `has_more` is computed by requesting one extra row and does not require an exact total count.
+
+Each item includes `staff_selection_mode` and, when available, ordered `segments[]` from `booking_attempt_segments` so owner dashboards can distinguish the customer preference (`anyone` or `specific`) from the staff assignment attempted through the POS provider. Fallback action rows include `booking_action` (`book`, `reschedule`, or `cancel`) derived from backend notification/audit state, plus `target_appointment_id` and `appointment` when a failed reschedule or cancellation has a POS-confirmed appointment target. Dashboard retry actions must still call the booking service and active POS provider; a fallback request must not be marked confirmed, rescheduled, or cancelled from the list response alone.
 
 `POST /api/salons/:id/booking-attempts`
 
@@ -1293,7 +1295,10 @@ Phone channel sessions are created by Twilio webhooks and use the same conversat
 
 Returns owner-scoped party booking requests created from group booking handoffs.
 The optional `status` filter accepts `pending`, `contacted`, `resolved`, or
-`dismissed`; the optional `limit` defaults to 25 and is capped at 100.
+`dismissed`; the optional `limit` defaults to 25 and is capped at 100. The
+optional `offset` defaults to 0. Responses include `party_booking_requests`,
+`limit`, `offset`, and `has_more`; `has_more` is computed by requesting one
+extra row and does not require an exact total count.
 
 ```json
 {
@@ -1317,7 +1322,10 @@ The optional `status` filter accepts `pending`, `contacted`, `resolved`, or
       "created_at": "2026-07-04T15:00:00Z",
       "updated_at": "2026-07-04T15:00:00Z"
     }
-  ]
+  ],
+  "limit": 25,
+  "offset": 0,
+  "has_more": false
 }
 ```
 

@@ -70,6 +70,9 @@ type RealtimeEventsResponse = {
 
 type PartyRequestsResponse = {
   party_booking_requests: PartyBookingRequest[];
+  limit?: number;
+  offset?: number;
+  has_more?: boolean;
 };
 
 type PartyRequestResponse = {
@@ -82,7 +85,9 @@ type PartyStatusFilter = "pending" | "contacted" | "resolved" | "dismissed";
 const lifecycleFilters: LifecycleFilter[] = ["active", "archived", "redacted"];
 const partyStatusFilters: PartyStatusFilter[] = ["pending", "contacted", "resolved", "dismissed"];
 const defaultSessionPageSize = 10;
+const defaultPartyRequestPageSize = 10;
 const sessionPageSizeOptions = [10, 25, 50] as const;
+const partyRequestPageSizeOptions = [10, 25, 50] as const;
 const readinessMetricLimit = 100;
 
 type ServicesResponse = {
@@ -117,6 +122,9 @@ export function CallsDashboard() {
   const [sessionLimit, setSessionLimit] = useState(defaultSessionPageSize);
   const [sessionOffset, setSessionOffset] = useState(0);
   const [sessionHasMore, setSessionHasMore] = useState(false);
+  const [partyLimit, setPartyLimit] = useState(defaultPartyRequestPageSize);
+  const [partyOffset, setPartyOffset] = useState(0);
+  const [partyHasMore, setPartyHasMore] = useState(false);
   const [readinessSessionsHasMore, setReadinessSessionsHasMore] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [sessionListLoading, setSessionListLoading] = useState(false);
@@ -153,16 +161,26 @@ export function CallsDashboard() {
     return response;
   }
 
-  function partyRequestsPath(salonID: string, status: PartyStatusFilter) {
+  function partyRequestsPath(salonID: string, status: PartyStatusFilter, limit: number, offset: number) {
     const params = new URLSearchParams({
       status,
-      limit: "25"
+      limit: String(limit),
+      offset: String(offset)
     });
     return `/api/salons/${salonID}/party-booking-requests?${params.toString()}`;
   }
 
-  async function fetchPartyRequests(salonID: string, status: PartyStatusFilter) {
-    return apiRequest<PartyRequestsResponse>(partyRequestsPath(salonID, status));
+  async function fetchPartyRequests(salonID: string, status: PartyStatusFilter, limit: number, offset: number) {
+    return apiRequest<PartyRequestsResponse>(partyRequestsPath(salonID, status, limit, offset));
+  }
+
+  async function fetchPartyRequestsWithFallback(salonID: string, status: PartyStatusFilter, limit: number, offset: number) {
+    let response = await fetchPartyRequests(salonID, status, limit, offset);
+    if (response.party_booking_requests.length === 0 && offset > 0) {
+      const previousOffset = Math.max(0, offset - limit);
+      response = await fetchPartyRequests(salonID, status, limit, previousOffset);
+    }
+    return response;
   }
 
   function applySessionPage(response: SessionsResponse, requestedLimit: number, requestedOffset: number) {
@@ -170,6 +188,13 @@ export function CallsDashboard() {
     setSessionLimit(response.limit ?? requestedLimit);
     setSessionOffset(response.offset ?? requestedOffset);
     setSessionHasMore(Boolean(response.has_more));
+  }
+
+  function applyPartyRequestPage(response: PartyRequestsResponse, requestedLimit: number, requestedOffset: number) {
+    setPartyRequests(response.party_booking_requests);
+    setPartyLimit(response.limit ?? requestedLimit);
+    setPartyOffset(response.offset ?? requestedOffset);
+    setPartyHasMore(Boolean(response.has_more));
   }
 
   async function reloadReadinessSessions(salonID: string) {
@@ -200,6 +225,7 @@ export function CallsDashboard() {
         setSessions([]);
         setReadinessSessions([]);
         setSessionHasMore(false);
+        setPartyHasMore(false);
         setReadinessSessionsHasMore(false);
         setSelectedSession(null);
         setRealtimeEvents([]);
@@ -214,7 +240,7 @@ export function CallsDashboard() {
         apiRequest<VoiceStatus>(`/api/salons/${firstSalon.id}/voice/status`),
         fetchSessionPageWithFallback(firstSalon.id, filter, limit, offset),
         fetchSessionPage(firstSalon.id, "active", readinessMetricLimit, 0),
-        fetchPartyRequests(firstSalon.id, partyStatusFilter),
+        fetchPartyRequestsWithFallback(firstSalon.id, partyStatusFilter, partyLimit, partyOffset),
         apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
         apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`)
       ]);
@@ -223,7 +249,7 @@ export function CallsDashboard() {
       applySessionPage(sessionsResponse, limit, offset);
       setReadinessSessions(readinessResponse.sessions);
       setReadinessSessionsHasMore(Boolean(readinessResponse.has_more));
-      setPartyRequests(partyResponse.party_booking_requests);
+      applyPartyRequestPage(partyResponse, partyLimit, partyOffset);
       setServices(serviceResponse.services);
       setStaff(staffResponse.staff);
 
@@ -259,9 +285,9 @@ export function CallsDashboard() {
 
   useEffect(() => {
     if (!salon) return;
-    void reloadPartyRequests(salon.id, partyStatusFilter);
+    void reloadPartyRequests(salon.id, partyStatusFilter, partyOffset, partyLimit);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [salon?.id, partyStatusFilter]);
+  }, [salon?.id, partyStatusFilter, partyOffset, partyLimit]);
 
   useEffect(() => {
     if (!salon || !selectedSession || selectedSession.channel !== "phone") {
@@ -299,14 +325,15 @@ export function CallsDashboard() {
     await loadRealtimeEvents(salonID, session.id);
   }
 
-  async function reloadPartyRequests(salonID: string, status: PartyStatusFilter) {
+  async function reloadPartyRequests(salonID: string, status: PartyStatusFilter, offset = partyOffset, limit = partyLimit) {
     setPartyRequestsLoading(true);
     setActionError("");
     try {
-      const response = await fetchPartyRequests(salonID, status);
-      setPartyRequests(response.party_booking_requests);
+      const response = await fetchPartyRequestsWithFallback(salonID, status, limit, offset);
+      applyPartyRequestPage(response, limit, offset);
     } catch (err) {
       setPartyRequests([]);
+      setPartyHasMore(false);
       setActionError(err instanceof Error ? err.message : "Could not load party booking requests.");
     } finally {
       setPartyRequestsLoading(false);
@@ -454,16 +481,13 @@ export function CallsDashboard() {
           body: JSON.stringify({ status })
         }
       );
-      setPartyRequests((current) => {
-        const next = current.map((request) => (request.id === response.party_booking_request.id ? response.party_booking_request : request));
-        return status === partyStatusFilter ? next : next.filter((request) => request.id !== item.id);
-      });
       setSuccess(partyStatusSuccess(status));
       if (selectedSession?.id === response.party_booking_request.call_session_id) {
         setSelectedSession((current) =>
           current ? { ...current, party_request: response.party_booking_request } : current
         );
       }
+      await reloadPartyRequests(salon.id, partyStatusFilter, partyOffset, partyLimit);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Could not update party booking request.");
     } finally {
@@ -515,12 +539,18 @@ export function CallsDashboard() {
   }
 
   function updatePartyStatusFilter(filter: PartyStatusFilter) {
+    setPartyOffset(0);
     setPartyStatusFilter(filter);
   }
 
   function updateSessionPageSize(limit: number) {
     setSessionLimit(limit);
     setSessionOffset(0);
+  }
+
+  function updatePartyPageSize(limit: number) {
+    setPartyLimit(limit);
+    setPartyOffset(0);
   }
 
   function goToPreviousSessionPage() {
@@ -530,6 +560,15 @@ export function CallsDashboard() {
   function goToNextSessionPage() {
     if (!sessionHasMore) return;
     setSessionOffset((current) => current + sessionLimit);
+  }
+
+  function goToPreviousPartyPage() {
+    setPartyOffset((current) => Math.max(0, current - partyLimit));
+  }
+
+  function goToNextPartyPage() {
+    if (!partyHasMore) return;
+    setPartyOffset((current) => current + partyLimit);
   }
 
   const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
@@ -561,7 +600,7 @@ export function CallsDashboard() {
       ),
     [readinessSessions, readinessSessionsHasMore]
   );
-  const partyRequestCount = partyRequestsLoading ? "..." : String(partyRequests.length);
+  const partyRequestCount = partyRequestsLoading ? "..." : countLabel(partyRequests.length, partyHasMore);
   const serviceNames = useMemo(
     () => new Map(services.flatMap((item) => (item.id ? [[item.id, item.name] as const] : []))),
     [services]
@@ -638,18 +677,8 @@ export function CallsDashboard() {
         <Metric label={`${partyStatusFilter} parties`} value={partyRequestCount} />
       </div>
 
-      <PartyRequestsPanel
-        requests={partyRequests}
-        statusFilter={partyStatusFilter}
-        loading={partyRequestsLoading}
-        busy={partyActionID}
-        onStatusFilterChange={updatePartyStatusFilter}
-        onUpdateStatus={(item, status) => void updatePartyRequestStatus(item, status)}
-        onOpenSession={(sessionID) => void selectSession(sessionID)}
-      />
-
-      <div className="grid gap-4 xl:grid-cols-[1.35fr_0.65fr]">
-        <Card>
+      <div className="grid items-stretch gap-4 xl:grid-cols-[1.35fr_0.65fr]">
+        <Card className="flex min-h-[520px] flex-col">
           <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
             <div>
               <CardTitle>Conversation transcript</CardTitle>
@@ -663,7 +692,7 @@ export function CallsDashboard() {
             </Button>
           </div>
 
-          <div className="mt-5 h-[360px] overflow-y-auto rounded-md border border-line bg-slate-50 p-4">
+          <div className="mt-5 min-h-[360px] flex-1 overflow-y-auto rounded-md border border-line bg-slate-50 p-4">
             {selectedSession?.transcript?.length ? (
               <div className="space-y-3">
                 {selectedSession.transcript.map((item) => (
@@ -801,6 +830,22 @@ export function CallsDashboard() {
         events={realtimeEvents}
         loading={realtimeEventsLoading}
         error={realtimeEventsError}
+      />
+
+      <PartyRequestsPanel
+        requests={partyRequests}
+        statusFilter={partyStatusFilter}
+        loading={partyRequestsLoading}
+        limit={partyLimit}
+        offset={partyOffset}
+        hasMore={partyHasMore}
+        busy={partyActionID}
+        onStatusFilterChange={updatePartyStatusFilter}
+        onPrevious={goToPreviousPartyPage}
+        onNext={goToNextPartyPage}
+        onLimitChange={updatePartyPageSize}
+        onUpdateStatus={(item, status) => void updatePartyRequestStatus(item, status)}
+        onOpenSession={(sessionID) => void selectSession(sessionID)}
       />
 
       <Card>
@@ -1065,19 +1110,33 @@ function PartyRequestsPanel({
   requests,
   statusFilter,
   loading,
+  limit,
+  offset,
+  hasMore,
   busy,
   onStatusFilterChange,
+  onPrevious,
+  onNext,
+  onLimitChange,
   onUpdateStatus,
   onOpenSession
 }: {
   requests: PartyBookingRequest[];
   statusFilter: PartyStatusFilter;
   loading: boolean;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
   busy: string;
   onStatusFilterChange: (status: PartyStatusFilter) => void;
+  onPrevious: () => void;
+  onNext: () => void;
+  onLimitChange: (limit: number) => void;
   onUpdateStatus: (request: PartyBookingRequest, status: PartyStatusFilter) => void;
   onOpenSession: (sessionID: string) => void;
 }) {
+  const controlsBusy = loading || busy !== "";
+  const actionBusy = controlsBusy ? busy || "loading" : "";
   return (
     <Card>
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
@@ -1100,7 +1159,7 @@ function PartyRequestsPanel({
             type="button"
             variant={status === statusFilter ? "primary" : "secondary"}
             onClick={() => onStatusFilterChange(status)}
-            disabled={loading || busy !== ""}
+            disabled={controlsBusy}
           >
             {partyStatusLabel(status)}
           </Button>
@@ -1125,7 +1184,19 @@ function PartyRequestsPanel({
 
       {requests.length > 0 ? (
         <>
-          <div className="mt-5 hidden overflow-x-auto rounded-md border border-line lg:block">
+          <PartyPaginationControls
+            className="mt-5"
+            count={requests.length}
+            status={statusFilter}
+            limit={limit}
+            offset={offset}
+            hasMore={hasMore}
+            busy={controlsBusy}
+            onPrevious={onPrevious}
+            onNext={onNext}
+            onLimitChange={onLimitChange}
+          />
+          <div className="mt-3 hidden overflow-x-auto rounded-md border border-line lg:block">
             <table className="w-full min-w-[1080px] text-left text-sm">
               <thead className="bg-slate-50 text-xs uppercase text-muted">
                 <tr>
@@ -1155,7 +1226,7 @@ function PartyRequestsPanel({
                     <td className="px-4 py-3">
                       <PartyRequestActions
                         request={request}
-                        busy={busy}
+                        busy={actionBusy}
                         onUpdateStatus={onUpdateStatus}
                         onOpenSession={onOpenSession}
                       />
@@ -1171,12 +1242,24 @@ function PartyRequestsPanel({
               <PartyRequestCard
                 key={request.id}
                 request={request}
-                busy={busy}
+                busy={actionBusy}
                 onUpdateStatus={onUpdateStatus}
                 onOpenSession={onOpenSession}
               />
             ))}
           </div>
+          <PartyPaginationControls
+            className="mt-4"
+            count={requests.length}
+            status={statusFilter}
+            limit={limit}
+            offset={offset}
+            hasMore={hasMore}
+            busy={controlsBusy}
+            onPrevious={onPrevious}
+            onNext={onNext}
+            onLimitChange={onLimitChange}
+          />
         </>
       ) : null}
     </Card>
@@ -1672,6 +1755,68 @@ function SessionPaginationControls({
   );
 }
 
+function PartyPaginationControls({
+  className = "",
+  count,
+  status,
+  limit,
+  offset,
+  hasMore,
+  busy,
+  onPrevious,
+  onNext,
+  onLimitChange
+}: {
+  className?: string;
+  count: number;
+  status: PartyStatusFilter;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+  busy: boolean;
+  onPrevious: () => void;
+  onNext: () => void;
+  onLimitChange: (limit: number) => void;
+}) {
+  const page = Math.floor(offset / limit) + 1;
+
+  return (
+    <div
+      className={`flex flex-col gap-3 rounded-md border border-line bg-slate-50 px-3 py-3 sm:flex-row sm:items-center sm:justify-between ${className}`}
+    >
+      <div className="text-sm leading-6 text-muted">{partyRequestRangeLabel(count, offset, hasMore, status)}</div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        <label className="flex items-center gap-2 text-sm text-muted">
+          Rows per page
+          <select
+            className="h-9 rounded-md border border-line bg-white px-2 text-sm font-medium text-ink outline-none focus:border-brand disabled:text-slate-400"
+            value={limit}
+            onChange={(event) => onLimitChange(Number(event.target.value))}
+            disabled={busy}
+          >
+            {partyRequestPageSizeOptions.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="flex items-center gap-2">
+          <Button type="button" variant="secondary" className="h-9 px-3" onClick={onPrevious} disabled={busy || offset === 0}>
+            <ChevronLeft className="h-4 w-4" />
+            Previous
+          </Button>
+          <span className="min-w-16 text-center text-sm font-semibold text-ink">Page {page}</span>
+          <Button type="button" variant="secondary" className="h-9 px-3" onClick={onNext} disabled={busy || !hasMore}>
+            Next
+            <ChevronRight className="h-4 w-4" />
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function sessionRangeLabel(count: number, offset: number, hasMore: boolean, filter: LifecycleFilter) {
   const label = filterLabel(filter).toLowerCase();
   if (count === 0) {
@@ -1681,6 +1826,17 @@ function sessionRangeLabel(count: number, offset: number, hasMore: boolean, filt
   const end = offset + count;
   const total = hasMore ? `at least ${end + 1}` : String(end);
   return `Showing ${start}-${end} of ${total} ${label} sessions`;
+}
+
+function partyRequestRangeLabel(count: number, offset: number, hasMore: boolean, status: PartyStatusFilter) {
+  const label = partyStatusLabel(status).toLowerCase();
+  if (count === 0) {
+    return `No ${label} party requests`;
+  }
+  const start = offset + 1;
+  const end = offset + count;
+  const total = hasMore ? `at least ${end + 1}` : String(end);
+  return `Showing ${start}-${end} of ${total} ${label} party requests`;
 }
 
 function countLabel(count: number, hasMore: boolean) {

@@ -278,7 +278,7 @@ func (f *phoneFlowConversationStore) ListBusinessHourPeriods(ctx context.Context
 	return []conversation.BusinessHourPeriod{}, nil
 }
 
-func (f *phoneFlowConversationStore) ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int) ([]conversation.PartyBookingRequest, error) {
+func (f *phoneFlowConversationStore) ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int, offset int) ([]conversation.PartyBookingRequest, error) {
 	return []conversation.PartyBookingRequest{}, nil
 }
 

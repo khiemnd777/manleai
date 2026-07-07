@@ -1196,20 +1196,30 @@ func (r *Repository) ListAppointments(ctx context.Context, salonID string, owner
 	return items, nil
 }
 
-func (r *Repository) ListBookingAttempts(ctx context.Context, salonID string, ownerUserID string, limit int) ([]BookingAttempt, error) {
+func (r *Repository) ListBookingAttempts(ctx context.Context, salonID string, ownerUserID string, status string, limit int, offset int) ([]BookingAttempt, error) {
 	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id::text, salon_id::text, source, status, pos_provider, COALESCE(pos_booking_id, ''),
-		       customer_name, customer_phone, COALESCE(customer_email, ''), COALESCE(service_id::text, ''),
-		       COALESCE(staff_id::text, ''), COALESCE(staff_selection_mode, 'specific'), requested_start_time, requested_end_time, COALESCE(notes, ''),
-		       COALESCE(error_code, ''), COALESCE(error_message, ''), created_at, updated_at
-		FROM booking_attempts
-		WHERE salon_id = $1
-		ORDER BY created_at DESC
-		LIMIT $2
-	`, salonID, limit)
+		SELECT ba.id::text, ba.salon_id::text, ba.source, ba.status, ba.pos_provider, COALESCE(ba.pos_booking_id, ''),
+		       ba.customer_name, ba.customer_phone, COALESCE(ba.customer_email, ''), COALESCE(ba.service_id::text, ''),
+		       COALESCE(ba.staff_id::text, ''), COALESCE(ba.staff_selection_mode, 'specific'), ba.requested_start_time, ba.requested_end_time, COALESCE(ba.notes, ''),
+		       COALESCE(ba.error_code, ''), COALESCE(ba.error_message, ''), ba.created_at, ba.updated_at,
+		       COALESCE(note.appointment_id::text, ''), COALESCE(note.type, ''), COALESCE(note.status, '')
+		FROM booking_attempts ba
+		LEFT JOIN LATERAL (
+			SELECT appointment_id, type, status
+			FROM owner_notifications
+			WHERE booking_attempt_id = ba.id
+			ORDER BY created_at DESC, id DESC
+			LIMIT 1
+		) note ON TRUE
+		WHERE ba.salon_id = $1
+		  AND ($2 = '' OR ba.status = $2)
+		ORDER BY ba.created_at DESC, ba.id DESC
+		LIMIT $3
+		OFFSET $4
+	`, salonID, status, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1238,9 +1248,13 @@ func (r *Repository) ListBookingAttempts(ctx context.Context, salonID string, ow
 			&item.ErrorMessage,
 			&item.CreatedAt,
 			&item.UpdatedAt,
+			&item.TargetAppointmentID,
+			&item.NotificationType,
+			&item.NotificationStatus,
 		); err != nil {
 			return nil, err
 		}
+		item.BookingAction = bookingActionForAttempt(item.Status, item.NotificationType)
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -1249,7 +1263,109 @@ func (r *Repository) ListBookingAttempts(ctx context.Context, salonID string, ow
 	if err := r.attachBookingAttemptSegments(ctx, items); err != nil {
 		return nil, err
 	}
+	if err := r.attachAttemptTargetAppointments(ctx, salonID, items); err != nil {
+		return nil, err
+	}
 	return items, nil
+}
+
+func (r *Repository) attachAttemptTargetAppointments(ctx context.Context, salonID string, items []BookingAttempt) error {
+	if len(items) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(items))
+	seen := make(map[string]bool, len(items))
+	for _, item := range items {
+		if item.TargetAppointmentID == "" || seen[item.TargetAppointmentID] {
+			continue
+		}
+		seen[item.TargetAppointmentID] = true
+		ids = append(ids, item.TargetAppointmentID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id::text, salon_id::text, booking_attempt_id::text, pos_provider, pos_appointment_id,
+		       COALESCE(pos_appointment_version, 0), status, customer_name, customer_phone,
+		       COALESCE(customer_email, ''), COALESCE(service_id::text, ''), COALESCE(staff_id::text, ''),
+		       COALESCE(staff_selection_mode, 'specific'), start_time, end_time, COALESCE(notes, ''), created_at, updated_at
+		FROM appointments
+		WHERE salon_id = $1
+		  AND id = ANY($2::uuid[])
+	`, salonID, pq.Array(ids))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	appointments := make([]Appointment, 0, len(ids))
+	for rows.Next() {
+		var item Appointment
+		if err := rows.Scan(
+			&item.ID,
+			&item.SalonID,
+			&item.BookingAttemptID,
+			&item.POSProvider,
+			&item.POSAppointmentID,
+			&item.POSAppointmentVersion,
+			&item.Status,
+			&item.CustomerName,
+			&item.CustomerPhone,
+			&item.CustomerEmail,
+			&item.ServiceID,
+			&item.StaffID,
+			&item.StaffSelectionMode,
+			&item.StartTime,
+			&item.EndTime,
+			&item.Notes,
+			&item.CreatedAt,
+			&item.UpdatedAt,
+		); err != nil {
+			return err
+		}
+		appointments = append(appointments, item)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := r.attachAppointmentSegments(ctx, appointments); err != nil {
+		return err
+	}
+
+	appointmentByID := make(map[string]Appointment, len(appointments))
+	for _, appointment := range appointments {
+		appointmentByID[appointment.ID] = appointment
+	}
+	for index := range items {
+		appointment, ok := appointmentByID[items[index].TargetAppointmentID]
+		if !ok {
+			continue
+		}
+		appointmentCopy := appointment
+		items[index].Appointment = &appointmentCopy
+	}
+	return nil
+}
+
+func bookingActionForAttempt(status string, notificationType string) string {
+	switch notificationType {
+	case NotificationTypeRescheduleFallback:
+		return BookingActionReschedule
+	case NotificationTypeCancellationFallback:
+		return BookingActionCancel
+	case NotificationTypeBookingFallback:
+		return BookingActionBook
+	}
+	switch status {
+	case StatusRescheduled:
+		return BookingActionReschedule
+	case StatusCancelled:
+		return BookingActionCancel
+	default:
+		return BookingActionBook
+	}
 }
 
 func (r *Repository) attachAppointmentSegments(ctx context.Context, items []Appointment) error {

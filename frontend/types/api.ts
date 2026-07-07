@@ -491,6 +491,10 @@ export type BookingAttempt = {
   notes?: string;
   error_code?: string;
   error_message?: string;
+  booking_action?: "book" | "reschedule" | "cancel";
+  target_appointment_id?: string;
+  notification_type?: string;
+  notification_status?: string;
   created_at: string;
   updated_at: string;
   appointment?: AppointmentRecord;

@@ -958,15 +958,21 @@ func (r *Repository) latestPartyRequest(ctx context.Context, sessionID string) (
 	return item, err
 }
 
-func (r *Repository) ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int) ([]PartyBookingRequest, error) {
-	if limit <= 0 || limit > 100 {
-		limit = 50
+func (r *Repository) ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int, offset int) ([]PartyBookingRequest, error) {
+	if limit <= 0 {
+		limit = defaultSessionListLimit
+	}
+	if limit > maxSessionListLimit+1 {
+		limit = maxSessionListLimit + 1
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	status = strings.TrimSpace(status)
 	statusFilter := ""
-	args := []any{salonID, ownerUserID, limit}
+	args := []any{salonID, ownerUserID, limit, offset}
 	if status != "" && status != "all" {
-		statusFilter = "AND req.status = $4"
+		statusFilter = "AND req.status = $5"
 		args = append(args, status)
 	}
 	rows, err := r.db.QueryContext(ctx, `
@@ -979,10 +985,11 @@ func (r *Repository) ListPartyBookingRequests(ctx context.Context, salonID strin
 		JOIN salons salon ON salon.id = req.salon_id
 		WHERE req.salon_id = $1
 		  AND salon.owner_user_id = $2
-		`+statusFilter+`
-		ORDER BY req.created_at DESC
-		LIMIT $3
-	`, args...)
+			`+statusFilter+`
+			ORDER BY req.created_at DESC
+			LIMIT $3
+			OFFSET $4
+		`, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -70,6 +70,54 @@ func TestAppointmentsDefaultsPagination(t *testing.T) {
 	}
 }
 
+func TestAttemptsReturnsPaginationMetadata(t *testing.T) {
+	store := newFakeStore()
+	store.bookingAttempts = make([]BookingAttempt, 51)
+	for i := range store.bookingAttempts {
+		store.bookingAttempts[i] = BookingAttempt{ID: "attempt_1", Status: StatusFallbackPending}
+	}
+	service := NewService(store, nil)
+
+	res, err := service.Attempts(context.Background(), "salon_1", "owner_1", StatusFallbackPending, 50, 20)
+	if err != nil {
+		t.Fatalf("Attempts returned error: %v", err)
+	}
+	if len(res.BookingAttempts) != 50 {
+		t.Fatalf("booking attempts = %d, want 50", len(res.BookingAttempts))
+	}
+	if res.Limit != 50 {
+		t.Fatalf("response limit = %d, want 50", res.Limit)
+	}
+	if res.Offset != 20 {
+		t.Fatalf("response offset = %d, want 20", res.Offset)
+	}
+	if res.Status != StatusFallbackPending {
+		t.Fatalf("response status = %s, want fallback_pending", res.Status)
+	}
+	if !res.HasMore {
+		t.Fatal("has_more = false, want true")
+	}
+	if store.listBookingAttemptStatus != StatusFallbackPending {
+		t.Fatalf("store status = %s, want fallback_pending", store.listBookingAttemptStatus)
+	}
+	if store.listBookingAttemptLimit != 51 {
+		t.Fatalf("store limit = %d, want 51", store.listBookingAttemptLimit)
+	}
+	if store.listBookingAttemptOffset != 20 {
+		t.Fatalf("store offset = %d, want 20", store.listBookingAttemptOffset)
+	}
+}
+
+func TestAttemptsRejectsInvalidStatusFilter(t *testing.T) {
+	store := newFakeStore()
+	service := NewService(store, nil)
+
+	_, err := service.Attempts(context.Background(), "salon_1", "owner_1", "unknown", 10, 0)
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("error = %v, want validation", err)
+	}
+}
+
 func TestRescheduleCandidatesRequiresCallerPhone(t *testing.T) {
 	store := newFakeStore()
 	service := NewService(store, nil)
@@ -1146,26 +1194,30 @@ func testStartTime() time.Time {
 }
 
 type fakeStore struct {
-	service               ServiceRef
-	services              []ServiceRef
-	staff                 StaffRef
-	staffRefs             []StaffRef
-	customer              CustomerRef
-	schedule              Schedule
-	appointment           AppointmentActionRef
-	pending               *PendingBookingRecord
-	confirmed             *ConfirmedBookingRecord
-	fallback              *FallbackBookingRecord
-	pendingAction         *PendingAppointmentActionRecord
-	rescheduled           *RescheduledAppointmentRecord
-	cancelled             *CancelledAppointmentRecord
-	actionFallback        *AppointmentActionFallbackRecord
-	appointments          []Appointment
-	listAppointmentLimit  int
-	listAppointmentOffset int
-	rescheduleLookup      RescheduleLookupRequest
-	linkedCustomer        *CustomerRef
-	linkCustomerErr       error
+	service                  ServiceRef
+	services                 []ServiceRef
+	staff                    StaffRef
+	staffRefs                []StaffRef
+	customer                 CustomerRef
+	schedule                 Schedule
+	appointment              AppointmentActionRef
+	pending                  *PendingBookingRecord
+	confirmed                *ConfirmedBookingRecord
+	fallback                 *FallbackBookingRecord
+	pendingAction            *PendingAppointmentActionRecord
+	rescheduled              *RescheduledAppointmentRecord
+	cancelled                *CancelledAppointmentRecord
+	actionFallback           *AppointmentActionFallbackRecord
+	appointments             []Appointment
+	bookingAttempts          []BookingAttempt
+	listAppointmentLimit     int
+	listAppointmentOffset    int
+	listBookingAttemptStatus string
+	listBookingAttemptLimit  int
+	listBookingAttemptOffset int
+	rescheduleLookup         RescheduleLookupRequest
+	linkedCustomer           *CustomerRef
+	linkCustomerErr          error
 }
 
 func newFakeStore() *fakeStore {
@@ -1517,8 +1569,11 @@ func (f *fakeStore) ListAppointments(ctx context.Context, salonID string, ownerU
 	return f.appointments, nil
 }
 
-func (f *fakeStore) ListBookingAttempts(ctx context.Context, salonID string, ownerUserID string, limit int) ([]BookingAttempt, error) {
-	return nil, nil
+func (f *fakeStore) ListBookingAttempts(ctx context.Context, salonID string, ownerUserID string, status string, limit int, offset int) ([]BookingAttempt, error) {
+	f.listBookingAttemptStatus = status
+	f.listBookingAttemptLimit = limit
+	f.listBookingAttemptOffset = offset
+	return f.bookingAttempts, nil
 }
 
 type fakeProvider struct {

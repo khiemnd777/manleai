@@ -14,6 +14,10 @@ const (
 	StatusRescheduled     = "rescheduled"
 	StatusCancelled       = "cancelled"
 
+	BookingActionBook       = "book"
+	BookingActionReschedule = "reschedule"
+	BookingActionCancel     = "cancel"
+
 	NotificationTypeBookingFallback      = "booking_fallback_pending"
 	NotificationTypeRescheduleFallback   = "reschedule_fallback_pending"
 	NotificationTypeCancellationFallback = "cancel_fallback_pending"
@@ -100,28 +104,32 @@ type AvailabilitySegment struct {
 }
 
 type BookingAttempt struct {
-	ID                 string                   `json:"id"`
-	SalonID            string                   `json:"salon_id"`
-	Source             string                   `json:"source"`
-	Status             string                   `json:"status"`
-	POSProvider        string                   `json:"pos_provider"`
-	POSBookingID       string                   `json:"pos_booking_id,omitempty"`
-	POSIdempotencyKey  string                   `json:"-"`
-	CustomerName       string                   `json:"customer_name"`
-	CustomerPhone      string                   `json:"customer_phone"`
-	CustomerEmail      string                   `json:"customer_email,omitempty"`
-	ServiceID          string                   `json:"service_id,omitempty"`
-	StaffID            string                   `json:"staff_id,omitempty"`
-	StaffSelectionMode string                   `json:"staff_selection_mode"`
-	Segments           []BookingSegmentSnapshot `json:"segments,omitempty"`
-	RequestedStartTime time.Time                `json:"requested_start_time"`
-	RequestedEndTime   time.Time                `json:"requested_end_time"`
-	Notes              string                   `json:"notes,omitempty"`
-	ErrorCode          string                   `json:"error_code,omitempty"`
-	ErrorMessage       string                   `json:"error_message,omitempty"`
-	CreatedAt          time.Time                `json:"created_at"`
-	UpdatedAt          time.Time                `json:"updated_at"`
-	Appointment        *Appointment             `json:"appointment,omitempty"`
+	ID                  string                   `json:"id"`
+	SalonID             string                   `json:"salon_id"`
+	Source              string                   `json:"source"`
+	Status              string                   `json:"status"`
+	POSProvider         string                   `json:"pos_provider"`
+	POSBookingID        string                   `json:"pos_booking_id,omitempty"`
+	POSIdempotencyKey   string                   `json:"-"`
+	CustomerName        string                   `json:"customer_name"`
+	CustomerPhone       string                   `json:"customer_phone"`
+	CustomerEmail       string                   `json:"customer_email,omitempty"`
+	ServiceID           string                   `json:"service_id,omitempty"`
+	StaffID             string                   `json:"staff_id,omitempty"`
+	StaffSelectionMode  string                   `json:"staff_selection_mode"`
+	Segments            []BookingSegmentSnapshot `json:"segments,omitempty"`
+	RequestedStartTime  time.Time                `json:"requested_start_time"`
+	RequestedEndTime    time.Time                `json:"requested_end_time"`
+	Notes               string                   `json:"notes,omitempty"`
+	ErrorCode           string                   `json:"error_code,omitempty"`
+	ErrorMessage        string                   `json:"error_message,omitempty"`
+	BookingAction       string                   `json:"booking_action,omitempty"`
+	TargetAppointmentID string                   `json:"target_appointment_id,omitempty"`
+	NotificationType    string                   `json:"notification_type,omitempty"`
+	NotificationStatus  string                   `json:"notification_status,omitempty"`
+	CreatedAt           time.Time                `json:"created_at"`
+	UpdatedAt           time.Time                `json:"updated_at"`
+	Appointment         *Appointment             `json:"appointment,omitempty"`
 }
 
 type Appointment struct {
@@ -151,6 +159,14 @@ type ListAppointmentsResponse struct {
 	Limit        int           `json:"limit"`
 	Offset       int           `json:"offset"`
 	HasMore      bool          `json:"has_more"`
+}
+
+type ListBookingAttemptsResponse struct {
+	BookingAttempts []BookingAttempt `json:"booking_attempts"`
+	Limit           int              `json:"limit"`
+	Offset          int              `json:"offset"`
+	HasMore         bool             `json:"has_more"`
+	Status          string           `json:"status,omitempty"`
 }
 
 type ServiceRef struct {

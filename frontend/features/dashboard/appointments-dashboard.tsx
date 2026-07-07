@@ -10,13 +10,14 @@ import {
   ChevronLeft,
   ChevronRight,
   ClipboardList,
-  RefreshCcw,
-  X
+  Pencil,
+  RefreshCcw
 } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
+import { Dialog } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   assignedTechniciansLabel,
@@ -61,6 +62,10 @@ type AppointmentsResponse = {
 
 type AttemptsResponse = {
   booking_attempts: BookingAttempt[];
+  limit?: number;
+  offset?: number;
+  has_more?: boolean;
+  status?: string;
 };
 
 type ServicesResponse = {
@@ -94,6 +99,8 @@ type ActionNotice = {
 const defaultAppointmentPageSize = 10;
 const appointmentPageSizeOptions = [10, 25, 50] as const;
 const appointmentOverviewLimit = 200;
+const defaultFallbackPageSize = 10;
+const fallbackOverviewLimit = 200;
 
 export function AppointmentsDashboard() {
   const [salon, setSalon] = useState<Salon | null>(null);
@@ -104,7 +111,12 @@ export function AppointmentsDashboard() {
   const [appointmentOffset, setAppointmentOffset] = useState(0);
   const [appointmentHasMore, setAppointmentHasMore] = useState(false);
   const [appointmentOverviewHasMore, setAppointmentOverviewHasMore] = useState(false);
-  const [attempts, setAttempts] = useState<BookingAttempt[]>([]);
+  const [fallbackRequests, setFallbackRequests] = useState<BookingAttempt[]>([]);
+  const [fallbackRows, setFallbackRows] = useState<BookingAttempt[]>([]);
+  const [fallbackLimit, setFallbackLimit] = useState(defaultFallbackPageSize);
+  const [fallbackOffset, setFallbackOffset] = useState(0);
+  const [fallbackHasMore, setFallbackHasMore] = useState(false);
+  const [fallbackOverviewHasMore, setFallbackOverviewHasMore] = useState(false);
   const [services, setServices] = useState<POSService[]>([]);
   const [staff, setStaff] = useState<POSStaffMember[]>([]);
   const [selectedDate, setSelectedDate] = useState(() => formatDateInput(new Date()));
@@ -129,6 +141,9 @@ export function AppointmentsDashboard() {
   const [savingAction, setSavingAction] = useState(false);
   const [actionError, setActionError] = useState("");
   const [actionNotice, setActionNotice] = useState<ActionNotice | null>(null);
+  const [fallbackListLoading, setFallbackListLoading] = useState(false);
+  const [fallbackReviewRequest, setFallbackReviewRequest] = useState<BookingAttempt | null>(null);
+  const [appointmentReviewAppointment, setAppointmentReviewAppointment] = useState<AppointmentRecord | null>(null);
 
   function appointmentListPath(salonID: string, limit: number, offset: number) {
     const params = new URLSearchParams({
@@ -158,6 +173,35 @@ export function AppointmentsDashboard() {
     setAppointmentHasMore(Boolean(response.has_more));
   }
 
+  function fallbackListPath(salonID: string, limit: number, offset: number) {
+    const params = new URLSearchParams({
+      status: "fallback_pending",
+      limit: String(limit),
+      offset: String(offset)
+    });
+    return `/api/salons/${salonID}/booking-attempts?${params.toString()}`;
+  }
+
+  async function fetchFallbackPage(salonID: string, limit: number, offset: number) {
+    return apiRequest<AttemptsResponse>(fallbackListPath(salonID, limit, offset));
+  }
+
+  async function fetchFallbackPageWithFallback(salonID: string, limit: number, offset: number) {
+    let response = await fetchFallbackPage(salonID, limit, offset);
+    if (response.booking_attempts.length === 0 && offset > 0) {
+      const previousOffset = Math.max(0, offset - limit);
+      response = await fetchFallbackPage(salonID, limit, previousOffset);
+    }
+    return response;
+  }
+
+  function applyFallbackPage(response: AttemptsResponse, requestedLimit: number, requestedOffset: number) {
+    setFallbackRows(response.booking_attempts);
+    setFallbackLimit(response.limit ?? requestedLimit);
+    setFallbackOffset(response.offset ?? requestedOffset);
+    setFallbackHasMore(Boolean(response.has_more));
+  }
+
   async function reloadAppointmentRows(salonID: string, offset = appointmentOffset, limit = appointmentLimit) {
     setAppointmentListLoading(true);
     try {
@@ -168,16 +212,29 @@ export function AppointmentsDashboard() {
     }
   }
 
+  async function reloadFallbackRows(salonID: string, offset = fallbackOffset, limit = fallbackLimit) {
+    setFallbackListLoading(true);
+    try {
+      const response = await fetchFallbackPageWithFallback(salonID, limit, offset);
+      applyFallbackPage(response, limit, offset);
+    } finally {
+      setFallbackListLoading(false);
+    }
+  }
+
   async function load({
     silent = false,
     offset = appointmentOffset,
-    limit = appointmentLimit
-  }: { silent?: boolean; offset?: number; limit?: number } = {}) {
+    limit = appointmentLimit,
+    fallbackPageOffset = fallbackOffset,
+    fallbackPageLimit = fallbackLimit
+  }: { silent?: boolean; offset?: number; limit?: number; fallbackPageOffset?: number; fallbackPageLimit?: number } = {}) {
     setError("");
     if (!silent) {
       setLoading(true);
     } else {
       setAppointmentListLoading(true);
+      setFallbackListLoading(true);
     }
     try {
       const salonResponse = await apiRequest<SalonListResponse>("/api/salons");
@@ -189,26 +246,34 @@ export function AppointmentsDashboard() {
         setAppointmentRows([]);
         setAppointmentHasMore(false);
         setAppointmentOverviewHasMore(false);
-        setAttempts([]);
+        setFallbackRequests([]);
+        setFallbackRows([]);
+        setFallbackHasMore(false);
+        setFallbackOverviewHasMore(false);
         setServices([]);
         setStaff([]);
         return;
       }
 
-      const [statusResponse, appointmentResponse, attemptResponse, serviceResponse, staffResponse] =
+      const [statusResponse, appointmentResponse, fallbackResponse, serviceResponse, staffResponse] =
         await Promise.all([
           apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
           fetchAppointmentPageWithFallback(firstSalon.id, limit, offset),
-          apiRequest<AttemptsResponse>(`/api/salons/${firstSalon.id}/booking-attempts?limit=50`),
+          fetchFallbackPageWithFallback(firstSalon.id, fallbackPageLimit, fallbackPageOffset),
           apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
           apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`)
         ]);
-      const overviewResponse = await fetchAppointmentPage(firstSalon.id, appointmentOverviewLimit, 0);
+      const [overviewResponse, fallbackOverviewResponse] = await Promise.all([
+        fetchAppointmentPage(firstSalon.id, appointmentOverviewLimit, 0),
+        fetchFallbackPage(firstSalon.id, fallbackOverviewLimit, 0)
+      ]);
       setStatus(statusResponse);
       applyAppointmentPage(appointmentResponse, limit, offset);
+      applyFallbackPage(fallbackResponse, fallbackPageLimit, fallbackPageOffset);
       setAppointments(overviewResponse.appointments);
       setAppointmentOverviewHasMore(Boolean(overviewResponse.has_more));
-      setAttempts(attemptResponse.booking_attempts);
+      setFallbackRequests(fallbackOverviewResponse.booking_attempts);
+      setFallbackOverviewHasMore(Boolean(fallbackOverviewResponse.has_more));
       setServices(serviceResponse.services);
       setStaff(staffResponse.staff);
       setAvailabilityServiceID((current) => current || firstBookableServiceID(serviceResponse.services));
@@ -219,6 +284,7 @@ export function AppointmentsDashboard() {
         setLoading(false);
       } else {
         setAppointmentListLoading(false);
+        setFallbackListLoading(false);
       }
     }
   }
@@ -244,8 +310,8 @@ export function AppointmentsDashboard() {
     [staff]
   );
   const pendingRequests = useMemo(
-    () => attempts.filter((item) => item.status === "fallback_pending"),
-    [attempts]
+    () => fallbackRequests,
+    [fallbackRequests]
   );
   const dayAppointments = useMemo(
     () =>
@@ -362,6 +428,40 @@ export function AppointmentsDashboard() {
     }
   }
 
+  function updateFallbackPageSize(limit: number) {
+    setFallbackLimit(limit);
+    setFallbackOffset(0);
+    if (salon) {
+      void reloadFallbackRows(salon.id, 0, limit);
+    }
+  }
+
+  function goToPreviousFallbackPage() {
+    const previousOffset = Math.max(0, fallbackOffset - fallbackLimit);
+    setFallbackOffset(previousOffset);
+    if (salon) {
+      void reloadFallbackRows(salon.id, previousOffset, fallbackLimit);
+    }
+  }
+
+  function goToNextFallbackPage() {
+    if (!fallbackHasMore) return;
+    const nextOffset = fallbackOffset + fallbackLimit;
+    setFallbackOffset(nextOffset);
+    if (salon) {
+      void reloadFallbackRows(salon.id, nextOffset, fallbackLimit);
+    }
+  }
+
+  function openAppointmentReview(appointment: AppointmentRecord) {
+    setAppointmentReviewAppointment(appointment);
+    setFallbackReviewRequest(null);
+  }
+
+  function closeAppointmentReview() {
+    setAppointmentReviewAppointment(null);
+  }
+
   function openCreateBooking() {
     setActionMode("create");
     setSelectedAppointment(null);
@@ -374,11 +474,33 @@ export function AppointmentsDashboard() {
     resetActionAvailability();
   }
 
-  function openReschedule(appointment: AppointmentRecord) {
+  function openCreateBookingFromFallback(request: BookingAttempt) {
+    const retryServiceID = bookingAttemptPrimaryServiceID(request);
+    const retryStaffID = bookingAttemptRetryStaffID(request);
+    setActionMode("create");
+    setSelectedAppointment(null);
+    setFallbackReviewRequest(null);
+    setActionForm({
+      ...emptyActionForm(formatDateInput(new Date(request.requested_start_time), salon?.timezone)),
+      customerName: request.customer_name,
+      customerPhone: request.customer_phone,
+      customerEmail: request.customer_email ?? "",
+      serviceID: bookableServices.some((item) => item.id === retryServiceID) ? retryServiceID : "",
+      staffID: bookableStaff.some((item) => item.id === retryStaffID) ? retryStaffID : "",
+      notes: request.notes ?? ""
+    });
+    setActionError("");
+    setActionNotice(null);
+    resetActionAvailability();
+  }
+
+  function openReschedule(appointment: AppointmentRecord, preferredDate?: string) {
     setActionMode("reschedule");
     setSelectedAppointment(appointment);
+    setAppointmentReviewAppointment(null);
+    setFallbackReviewRequest(null);
     setActionForm({
-      ...emptyActionForm(formatDateInput(new Date(appointment.start_time), salon?.timezone)),
+      ...emptyActionForm(preferredDate ?? formatDateInput(new Date(appointment.start_time), salon?.timezone)),
       customerName: appointment.customer_name,
       customerPhone: appointment.customer_phone,
       customerEmail: appointment.customer_email ?? "",
@@ -391,9 +513,11 @@ export function AppointmentsDashboard() {
     resetActionAvailability();
   }
 
-  function openCancel(appointment: AppointmentRecord) {
+  function openCancel(appointment: AppointmentRecord, reason = "") {
     setActionMode("cancel");
     setSelectedAppointment(appointment);
+    setAppointmentReviewAppointment(null);
+    setFallbackReviewRequest(null);
     setActionForm({
       ...emptyActionForm(formatDateInput(new Date(appointment.start_time), salon?.timezone)),
       customerName: appointment.customer_name,
@@ -402,13 +526,40 @@ export function AppointmentsDashboard() {
       serviceID: appointmentPrimaryServiceID(appointment),
       staffID: "",
       notes: appointment.notes ?? "",
-      cancelReason: ""
+      cancelReason: reason
     });
     setActionError("");
     setActionNotice(null);
     setActionAvailabilityResult(null);
     setActionAvailabilityChecked(false);
     setActionAvailabilityError("");
+  }
+
+  function openFallbackReview(request: BookingAttempt) {
+    setFallbackReviewRequest(request);
+    setAppointmentReviewAppointment(null);
+  }
+
+  function closeFallbackReview() {
+    setFallbackReviewRequest(null);
+  }
+
+  function retryFallbackRequest(request: BookingAttempt) {
+    const action = fallbackBookingAction(request);
+    if (action === "book") {
+      openCreateBookingFromFallback(request);
+      return;
+    }
+    const appointment = request.appointment;
+    if (!appointment) {
+      setFallbackReviewRequest(request);
+      return;
+    }
+    if (action === "reschedule") {
+      openReschedule(appointment, formatDateInput(new Date(request.requested_start_time), salon?.timezone));
+      return;
+    }
+    openCancel(appointment, request.notes ?? "");
   }
 
   function closeActionPanel() {
@@ -639,37 +790,83 @@ export function AppointmentsDashboard() {
       <ReadinessPanel status={status} />
       <BookingBoundaryPanel />
 
-      {actionMode ? (
-        <BookingActionPanel
-          mode={actionMode}
-          form={actionForm}
-          selectedAppointment={selectedAppointment}
-          bookableServices={bookableServices}
-          bookableStaff={bookableStaff}
-          readyForManualBooking={readyForManualBooking}
-          timezone={salon.timezone}
-          availabilityChecked={actionAvailabilityChecked}
-          availabilityLoading={checkingActionAvailability}
-          availabilityResult={actionAvailabilityResult}
-          availabilityError={actionAvailabilityError}
-          selectedSlotKey={actionForm.selectedSlotKey}
-          selectedSlot={selectedActionSlot}
-          saving={savingAction}
-          actionError={actionError}
-          onChange={updateActionForm}
-          onClose={closeActionPanel}
-          onCheckAvailability={() => void checkActionAvailability()}
-          onSelectSlot={(slot) => updateActionForm({ selectedSlotKey: slotKey(slot) })}
-          onCreate={() => void submitCreateBooking()}
-          onReschedule={() => void submitReschedule()}
-          onCancelAppointment={() => void submitCancel()}
-        />
-      ) : null}
+      <Dialog
+        open={Boolean(actionMode)}
+        title={actionMode ? actionDialogTitle(actionMode) : "Appointment action"}
+        description={actionMode ? actionDialogDescription(actionMode) : undefined}
+        onClose={closeActionPanel}
+        closeDisabled={savingAction}
+        className={actionMode === "cancel" ? "max-w-2xl" : "max-w-4xl"}
+      >
+        {actionMode ? (
+          <BookingActionPanel
+            mode={actionMode}
+            form={actionForm}
+            selectedAppointment={selectedAppointment}
+            bookableServices={bookableServices}
+            bookableStaff={bookableStaff}
+            readyForManualBooking={readyForManualBooking}
+            timezone={salon.timezone}
+            availabilityChecked={actionAvailabilityChecked}
+            availabilityLoading={checkingActionAvailability}
+            availabilityResult={actionAvailabilityResult}
+            availabilityError={actionAvailabilityError}
+            selectedSlotKey={actionForm.selectedSlotKey}
+            selectedSlot={selectedActionSlot}
+            saving={savingAction}
+            actionError={actionError}
+            onChange={updateActionForm}
+            onClose={closeActionPanel}
+            onCheckAvailability={() => void checkActionAvailability()}
+            onSelectSlot={(slot) => updateActionForm({ selectedSlotKey: slotKey(slot) })}
+            onCreate={() => void submitCreateBooking()}
+            onReschedule={() => void submitReschedule()}
+            onCancelAppointment={() => void submitCancel()}
+          />
+        ) : null}
+      </Dialog>
+
+      <Dialog
+        open={Boolean(appointmentReviewAppointment)}
+        title="Edit appointment"
+        description="Review the POS-confirmed appointment and choose a safe appointment action."
+        onClose={closeAppointmentReview}
+        closeDisabled={savingAction}
+        className="max-w-2xl"
+      >
+        {appointmentReviewAppointment ? (
+          <AppointmentReviewDialog
+            appointment={appointmentReviewAppointment}
+            timezone={salon.timezone}
+            disabled={savingAction || !canChangeAppointment(appointmentReviewAppointment)}
+            onReschedule={openReschedule}
+            onCancel={openCancel}
+          />
+        ) : null}
+      </Dialog>
+
+      <Dialog
+        open={Boolean(fallbackReviewRequest)}
+        title="Review pending request"
+        description="This request is not POS-confirmed. Retry actions must still pass through Square Appointments."
+        onClose={closeFallbackReview}
+        closeDisabled={savingAction}
+        className="max-w-2xl"
+      >
+        {fallbackReviewRequest ? (
+          <FallbackReviewDialog
+            request={fallbackReviewRequest}
+            timezone={salon.timezone}
+            disabled={savingAction || !canRetryFallbackRequest(fallbackReviewRequest)}
+            onRetry={retryFallbackRequest}
+          />
+        ) : null}
+      </Dialog>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <Metric label="POS-confirmed appointments" value={confirmedCount} />
         <Metric label="Upcoming" value={upcomingCount} />
-        <Metric label="Pending requests" value={String(pendingRequests.length)} />
+        <Metric label="Pending requests" value={appointmentCountLabel(pendingRequests.length, fallbackOverviewHasMore)} />
         <Metric label="Last Square sync" value={formatOptionalDate(status?.connection.last_sync_at)} />
       </div>
 
@@ -703,6 +900,10 @@ export function AppointmentsDashboard() {
             serviceNames={serviceNames}
             staffNames={staffNames}
             timezone={salon.timezone}
+            onEdit={openAppointmentReview}
+            onReschedule={openReschedule}
+            onCancel={openCancel}
+            onReviewFallback={openFallbackReview}
           />
         </Card>
 
@@ -925,7 +1126,13 @@ export function AppointmentsDashboard() {
           <Badge value={pendingRequests.length > 0 ? "fallback_pending" : "disabled"} />
         </div>
 
-        {pendingRequests.length === 0 ? (
+        {fallbackListLoading ? (
+          <div className="mt-4 rounded-md border border-line bg-slate-50 px-3 py-2 text-sm text-muted">
+            Loading fallback requests...
+          </div>
+        ) : null}
+
+        {fallbackRows.length === 0 ? (
           <EmptyState
             icon={<ClipboardList className="h-5 w-5 text-muted" />}
             title="No pending requests"
@@ -933,21 +1140,35 @@ export function AppointmentsDashboard() {
           />
         ) : (
           <>
+            <AppointmentPaginationControls
+              className="mt-5"
+              count={fallbackRows.length}
+              limit={fallbackLimit}
+              offset={fallbackOffset}
+              hasMore={fallbackHasMore}
+              busy={fallbackListLoading || savingAction}
+              itemLabel="fallback requests"
+              onPrevious={goToPreviousFallbackPage}
+              onNext={goToNextFallbackPage}
+              onLimitChange={updateFallbackPageSize}
+            />
             <div className="mt-5 hidden overflow-x-auto rounded-md border border-line lg:block">
-              <table className="w-full min-w-[1080px] text-left text-sm">
+              <table className="w-full min-w-[1220px] text-left text-sm">
                 <thead className="bg-slate-50 text-xs uppercase text-muted">
                   <tr>
                     <th className="px-4 py-3">Requested time</th>
                     <th className="px-4 py-3">Customer</th>
+                    <th className="px-4 py-3">Request type</th>
                     <th className="px-4 py-3">Services</th>
                     <th className="px-4 py-3">Technician preference</th>
                     <th className="px-4 py-3">Assigned technicians</th>
                     <th className="px-4 py-3">Failure reason</th>
                     <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-line bg-white">
-                  {pendingRequests.map((item) => (
+                  {fallbackRows.map((item) => (
                     <tr key={item.id}>
                       <td className="px-4 py-3">
                         <div className="font-medium text-ink">{formatDate(item.requested_start_time, salon.timezone)}</div>
@@ -958,6 +1179,10 @@ export function AppointmentsDashboard() {
                       <td className="px-4 py-3">
                         <div className="font-medium text-ink">{item.customer_name}</div>
                         <div className="mt-1 text-xs text-muted">{item.customer_phone}</div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <Badge value={fallbackBookingAction(item)} />
+                        <div className="mt-1 text-xs text-muted">{fallbackActionLabel(item)}</div>
                       </td>
                       <td className="px-4 py-3 text-muted">{serviceNamesLabel(item, serviceNames)}</td>
                       <td className="px-4 py-3">
@@ -974,13 +1199,21 @@ export function AppointmentsDashboard() {
                       <td className="px-4 py-3">
                         <Badge value={item.status} />
                       </td>
+                      <td className="px-4 py-3">
+                        <FallbackActions
+                          request={item}
+                          disabled={savingAction}
+                          onReview={openFallbackReview}
+                          onRetry={retryFallbackRequest}
+                        />
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
             <div className="mt-5 space-y-3 lg:hidden">
-              {pendingRequests.map((item) => (
+              {fallbackRows.map((item) => (
                 <FallbackCard
                   key={item.id}
                   item={item}
@@ -988,9 +1221,24 @@ export function AppointmentsDashboard() {
                   staffName={assignedTechniciansLabel(item, staffNames)}
                   technicianPreference={technicianPreferenceLabel(item)}
                   timezone={salon.timezone}
+                  disabled={savingAction}
+                  onReview={openFallbackReview}
+                  onRetry={retryFallbackRequest}
                 />
               ))}
             </div>
+            <AppointmentPaginationControls
+              className="mt-4"
+              count={fallbackRows.length}
+              limit={fallbackLimit}
+              offset={fallbackOffset}
+              hasMore={fallbackHasMore}
+              busy={fallbackListLoading || savingAction}
+              itemLabel="fallback requests"
+              onPrevious={goToPreviousFallbackPage}
+              onNext={goToNextFallbackPage}
+              onLimitChange={updateFallbackPageSize}
+            />
           </>
         )}
       </Card>
@@ -1238,24 +1486,9 @@ function BookingActionPanel({
     mode === "reschedule" && readyForManualBooking && Boolean(selectedAppointment) && Boolean(selectedSlot) && !saving;
 
   return (
-    <Card>
-      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
-        <div>
-          <CardTitle>{title}</CardTitle>
-          <CardDescription>
-            {mode === "cancel"
-              ? "Cancellation is applied only after Square Appointments confirms it."
-              : "Check Square Appointments availability, choose a returned slot, then submit the POS action."}
-          </CardDescription>
-        </div>
-        <Button type="button" variant="ghost" onClick={onClose} disabled={saving} aria-label="Close booking action">
-          <X className="h-4 w-4" />
-          Close
-        </Button>
-      </div>
-
+    <div>
       {!readyForManualBooking && mode !== "cancel" ? (
-        <div className="mt-5 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
           Connect Square Appointments, select a location, and keep at least one AI-bookable service and staff member before creating or rescheduling bookings.
         </div>
       ) : null}
@@ -1386,7 +1619,7 @@ function BookingActionPanel({
           </div>
         </div>
       )}
-    </Card>
+    </div>
   );
 }
 
@@ -1608,6 +1841,35 @@ function AppointmentActions({
   );
 }
 
+function CalendarAppointmentActions({
+  appointment,
+  disabled,
+  onEdit,
+  onReschedule,
+  onCancel
+}: {
+  appointment: AppointmentRecord;
+  disabled: boolean;
+  onEdit: (appointment: AppointmentRecord) => void;
+  onReschedule: (appointment: AppointmentRecord) => void;
+  onCancel: (appointment: AppointmentRecord) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-2 sm:justify-end">
+      <Button type="button" variant="secondary" className="h-9 px-3" onClick={() => onEdit(appointment)} disabled={disabled}>
+        <Pencil className="h-4 w-4" />
+        Edit
+      </Button>
+      <Button type="button" variant="secondary" className="h-9 px-3" onClick={() => onReschedule(appointment)} disabled={disabled}>
+        Reschedule
+      </Button>
+      <Button type="button" variant="danger" className="h-9 px-3" onClick={() => onCancel(appointment)} disabled={disabled}>
+        Cancel
+      </Button>
+    </div>
+  );
+}
+
 function AppointmentPaginationControls({
   className = "",
   count,
@@ -1615,6 +1877,7 @@ function AppointmentPaginationControls({
   offset,
   hasMore,
   busy,
+  itemLabel = "POS-confirmed appointments",
   onPrevious,
   onNext,
   onLimitChange
@@ -1625,6 +1888,7 @@ function AppointmentPaginationControls({
   offset: number;
   hasMore: boolean;
   busy: boolean;
+  itemLabel?: string;
   onPrevious: () => void;
   onNext: () => void;
   onLimitChange: (limit: number) => void;
@@ -1635,7 +1899,7 @@ function AppointmentPaginationControls({
     <div
       className={`flex flex-col gap-3 rounded-md border border-line bg-slate-50 px-3 py-3 sm:flex-row sm:items-center sm:justify-between ${className}`}
     >
-      <div className="text-sm leading-6 text-muted">{appointmentRangeLabel(count, offset, hasMore)}</div>
+      <div className="text-sm leading-6 text-muted">{appointmentRangeLabel(count, offset, hasMore, itemLabel)}</div>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <label className="flex items-center gap-2 text-sm text-muted">
           Rows per page
@@ -1668,14 +1932,14 @@ function AppointmentPaginationControls({
   );
 }
 
-function appointmentRangeLabel(count: number, offset: number, hasMore: boolean) {
+function appointmentRangeLabel(count: number, offset: number, hasMore: boolean, itemLabel = "POS-confirmed appointments") {
   if (count === 0) {
-    return "No POS-confirmed appointments";
+    return `No ${itemLabel}`;
   }
   const start = offset + 1;
   const end = offset + count;
   const total = hasMore ? `at least ${end + 1}` : String(end);
-  return `Showing ${start}-${end} of ${total} POS-confirmed appointments`;
+  return `Showing ${start}-${end} of ${total} ${itemLabel}`;
 }
 
 function appointmentCountLabel(count: number, hasMore: boolean) {
@@ -1720,7 +1984,11 @@ function DaySchedule({
   pendingRequests,
   serviceNames,
   staffNames,
-  timezone
+  timezone,
+  onEdit,
+  onReschedule,
+  onCancel,
+  onReviewFallback
 }: {
   selectedDate: string;
   appointments: AppointmentRecord[];
@@ -1728,10 +1996,16 @@ function DaySchedule({
   serviceNames: Map<string, string>;
   staffNames: Map<string, string>;
   timezone?: string;
+  onEdit: (appointment: AppointmentRecord) => void;
+  onReschedule: (appointment: AppointmentRecord) => void;
+  onCancel: (appointment: AppointmentRecord) => void;
+  onReviewFallback: (request: BookingAttempt) => void;
 }) {
   const items = [
     ...appointments.map((item) => ({
       id: `appointment-${item.id}`,
+      appointment: item,
+      request: null,
       start: item.start_time,
       end: item.end_time,
       title: item.customer_name,
@@ -1741,6 +2015,8 @@ function DaySchedule({
     })),
     ...pendingRequests.map((item) => ({
       id: `pending-${item.id}`,
+      appointment: null,
+      request: item,
       start: item.requested_start_time,
       end: item.requested_end_time,
       title: item.customer_name,
@@ -1777,7 +2053,22 @@ function DaySchedule({
             <div className="mt-1 text-sm leading-6 text-muted">{item.subtitle}</div>
             <div className="mt-1 text-xs leading-5 text-muted">{item.detail}</div>
           </div>
-          <Badge value={item.status} />
+          <div className="flex flex-col gap-2 sm:items-end">
+            <Badge value={item.status} />
+            {item.appointment ? (
+              <CalendarAppointmentActions
+                appointment={item.appointment}
+                disabled={!canChangeAppointment(item.appointment)}
+                onEdit={onEdit}
+                onReschedule={onReschedule}
+                onCancel={onCancel}
+              />
+            ) : item.request ? (
+              <Button type="button" variant="secondary" className="h-9 px-3" onClick={() => onReviewFallback(item.request)}>
+                Review
+              </Button>
+            ) : null}
+          </div>
         </div>
       ))}
     </div>
@@ -1951,13 +2242,19 @@ function FallbackCard({
   serviceName,
   staffName,
   technicianPreference,
-  timezone
+  timezone,
+  disabled,
+  onReview,
+  onRetry
 }: {
   item: BookingAttempt;
   serviceName: string;
   staffName: string;
   technicianPreference: string;
   timezone?: string;
+  disabled: boolean;
+  onReview: (request: BookingAttempt) => void;
+  onRetry: (request: BookingAttempt) => void;
 }) {
   return (
     <div className="rounded-md border border-line p-4">
@@ -1971,6 +2268,7 @@ function FallbackCard({
       <InfoGrid
         items={[
           ["Requested", `${formatDate(item.requested_start_time, timezone)} ${formatTimeRange(item.requested_start_time, item.requested_end_time, timezone)}`],
+          ["Request type", fallbackActionLabel(item)],
           ["Services", serviceName],
           ["Technician preference", technicianPreference],
           ["Assigned technicians", staffName],
@@ -1981,6 +2279,135 @@ function FallbackCard({
       <div className="mt-3 text-sm leading-6 text-muted">
         {item.error_message || "Review POS logs for details."}
       </div>
+      <div className="mt-4">
+        <FallbackActions request={item} disabled={disabled} onReview={onReview} onRetry={onRetry} />
+      </div>
+    </div>
+  );
+}
+
+function AppointmentReviewDialog({
+  appointment,
+  timezone,
+  disabled,
+  onReschedule,
+  onCancel
+}: {
+  appointment: AppointmentRecord;
+  timezone?: string;
+  disabled: boolean;
+  onReschedule: (appointment: AppointmentRecord) => void;
+  onCancel: (appointment: AppointmentRecord) => void;
+}) {
+  return (
+    <div>
+      <AppointmentActionSummary appointment={appointment} timezone={timezone} />
+      <div className="mt-5 rounded-md border border-line bg-slate-50 p-4 text-sm leading-6 text-muted">
+        Customer details and service history stay tied to the POS-confirmed appointment. Time changes and cancellations are applied only after Square Appointments confirms the update.
+      </div>
+      <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:justify-end">
+        <Button type="button" variant="secondary" onClick={() => onReschedule(appointment)} disabled={disabled}>
+          Reschedule appointment
+        </Button>
+        <Button type="button" variant="danger" onClick={() => onCancel(appointment)} disabled={disabled}>
+          Cancel appointment
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function FallbackReviewDialog({
+  request,
+  timezone,
+  disabled,
+  onRetry
+}: {
+  request: BookingAttempt;
+  timezone?: string;
+  disabled: boolean;
+  onRetry: (request: BookingAttempt) => void;
+}) {
+  const action = fallbackBookingAction(request);
+  const retryDisabledReason = fallbackRetryDisabledReason(request);
+
+  return (
+    <div>
+      <div className="rounded-md border border-line bg-slate-50 p-4">
+        <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+          <div>
+            <div className="text-sm font-semibold text-ink">{request.customer_name || "Unknown customer"}</div>
+            <div className="mt-1 text-sm leading-6 text-muted">{request.customer_phone}</div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Badge value={action} />
+            <Badge value={request.status} />
+          </div>
+        </div>
+        <InfoGrid
+          items={[
+            ["Requested", `${formatDate(request.requested_start_time, timezone)} ${formatTimeRange(request.requested_start_time, request.requested_end_time, timezone)}`],
+            ["Request type", fallbackActionLabel(request)],
+            ["Services", serviceNamesLabel(request)],
+            ["Assigned technicians", assignedTechniciansLabel(request)],
+            ["Technician preference", technicianPreferenceLabel(request)],
+            ["POS error", request.error_code || "POS error"]
+          ]}
+        />
+        <SegmentAssignmentList record={request} />
+      </div>
+
+      <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
+        {request.error_message || "Square Appointments did not confirm this request. Owner review is required."}
+      </div>
+
+      {request.appointment && action !== "book" ? (
+        <div className="mt-5">
+          <div className="text-sm font-semibold text-ink">Current POS-confirmed appointment</div>
+          <div className="mt-3">
+            <AppointmentActionSummary appointment={request.appointment} timezone={timezone} />
+          </div>
+        </div>
+      ) : null}
+
+      {retryDisabledReason ? (
+        <div className="mt-4 rounded-md border border-line bg-slate-50 p-4 text-sm leading-6 text-muted">
+          {retryDisabledReason}
+        </div>
+      ) : null}
+
+      <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:justify-end">
+        <Button type="button" onClick={() => onRetry(request)} disabled={disabled}>
+          <RefreshCcw className="h-4 w-4" />
+          {fallbackRetryLabel(request)}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function FallbackActions({
+  request,
+  disabled,
+  onReview,
+  onRetry
+}: {
+  request: BookingAttempt;
+  disabled: boolean;
+  onReview: (request: BookingAttempt) => void;
+  onRetry: (request: BookingAttempt) => void;
+}) {
+  const retryDisabled = disabled || !canRetryFallbackRequest(request);
+
+  return (
+    <div className="flex flex-col gap-2 sm:flex-row">
+      <Button type="button" variant="secondary" onClick={() => onReview(request)} disabled={disabled}>
+        Review
+      </Button>
+      <Button type="button" onClick={() => onRetry(request)} disabled={retryDisabled}>
+        <RefreshCcw className="h-4 w-4" />
+        {fallbackRetryLabel(request)}
+      </Button>
     </div>
   );
 }
@@ -2176,6 +2603,73 @@ function canChangeAppointment(appointment: AppointmentRecord) {
 
 function isBookingAttempt(response: AppointmentRecord | BookingAttempt): response is BookingAttempt {
   return "requested_start_time" in response;
+}
+
+function actionDialogTitle(mode: AppointmentActionMode) {
+  if (mode === "create") return "New booking";
+  if (mode === "reschedule") return "Reschedule appointment";
+  return "Cancel appointment";
+}
+
+function actionDialogDescription(mode: AppointmentActionMode) {
+  if (mode === "cancel") {
+    return "Cancellation is applied only after Square Appointments confirms it.";
+  }
+  return "Check Square Appointments availability, choose a returned slot, then submit the POS action.";
+}
+
+function fallbackBookingAction(request: BookingAttempt): "book" | "reschedule" | "cancel" {
+  if (request.booking_action === "reschedule" || request.notification_type === "reschedule_fallback_pending") {
+    return "reschedule";
+  }
+  if (request.booking_action === "cancel" || request.notification_type === "cancel_fallback_pending") {
+    return "cancel";
+  }
+  return "book";
+}
+
+function fallbackActionLabel(request: BookingAttempt) {
+  const action = fallbackBookingAction(request);
+  if (action === "reschedule") return "Reschedule";
+  if (action === "cancel") return "Cancellation";
+  return "New booking";
+}
+
+function fallbackRetryLabel(request: BookingAttempt) {
+  const action = fallbackBookingAction(request);
+  if (action === "reschedule") return "Retry reschedule";
+  if (action === "cancel") return "Retry cancellation";
+  return "Retry booking";
+}
+
+function canRetryFallbackRequest(request: BookingAttempt) {
+  const action = fallbackBookingAction(request);
+  if (action === "book") {
+    return Boolean(bookingAttemptPrimaryServiceID(request) && request.customer_name.trim() && request.customer_phone.trim());
+  }
+  return Boolean(request.appointment && canChangeAppointment(request.appointment));
+}
+
+function fallbackRetryDisabledReason(request: BookingAttempt) {
+  if (canRetryFallbackRequest(request)) {
+    return "";
+  }
+  const action = fallbackBookingAction(request);
+  if (action === "book") {
+    return "This pending booking is missing customer or service details needed to retry through Square Appointments.";
+  }
+  return "This pending appointment action is missing the target POS-confirmed appointment, so retry is gated until the appointment context is available.";
+}
+
+function bookingAttemptPrimaryServiceID(request: BookingAttempt) {
+  return orderedSegments(request).find((segment) => segment.service_id)?.service_id ?? request.service_id ?? "";
+}
+
+function bookingAttemptRetryStaffID(request: BookingAttempt) {
+  if (request.staff_selection_mode === "anyone") {
+    return "";
+  }
+  return orderedSegments(request).find((segment) => segment.staff_id)?.staff_id ?? request.staff_id ?? "";
 }
 
 function slotKey(slot: AvailabilitySlot) {
