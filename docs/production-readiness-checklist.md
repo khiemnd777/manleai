@@ -149,8 +149,9 @@
 
 - [x] Add sanitized owner-scoped configuration export with stable schema version.
 - [x] Exclude services, staff, customers, appointments, call sessions, transcripts, POS OAuth tokens, API keys, client secrets, encrypted secrets, and operational records.
-- [x] Include service category taxonomy and service category aliases in schema v4 while continuing to exclude service records and provider state.
+- [x] Include service category taxonomy, service category aliases, and service aliases in schema v5 while continuing to exclude service records and provider state.
 - [x] Use stable category slugs and normalized alias keys so repeated imports update existing taxonomy instead of duplicating it.
+- [x] Resolve imported service aliases only against existing target-salon services and skip unresolved alias targets without creating services.
 - [x] Add import preview and apply flows for existing salons and onboarding.
 - [x] Use request IDs for repeated import applies so retries do not create duplicate import runs.
 - [x] Gate live `ai_enabled`, confirmed booking mode, and public catalog publishing until Square Appointments readiness passes on the target salon.

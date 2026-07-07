@@ -160,8 +160,10 @@
 ## Configuration Transfer
 
 - Verify configuration export returns schema version, exported timestamp, excluded data, and secret re-entry requirements.
-- Verify export never includes services, staff, customers, appointments, booking attempts, call sessions, transcripts, POS OAuth tokens, API keys, client secrets, encrypted secrets, or operational records.
+- Verify export never includes services, staff, customers, appointments, booking attempts, call sessions, transcripts, POS OAuth tokens, API keys, client secrets, encrypted secrets, provider switch runs, POS sync records, voice webhook/audio records, or operational records.
 - Verify import preview is dry-run only and reports creates, updates, skips, conflicts, and gated live states without writing records.
+- Verify Twilio stream transport and OpenAI realtime settings round-trip through export, preview, and apply without importing secrets.
+- Verify service aliases import only when their target service resolves on the target salon, skip unresolved target services, and conflict with active category aliases.
 - Verify import apply uses `request_id` idempotency so repeated applies do not create duplicate import runs or duplicate knowledge items.
 - Verify onboarding import can create a salon from a valid bundle but still skips secrets and readiness-gated live states.
 - Verify import refuses schema versions or malformed bundles that would break contract stability.

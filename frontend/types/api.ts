@@ -150,6 +150,7 @@ export type ConfigurationBundle = {
   integrations: IntegrationConfigs;
   pos_connection: ConfigurationPOSConnection;
   service_categories: ConfigurationServiceCategoryBundle;
+  service_aliases: ConfigurationServiceAliasBundle;
   knowledge_base: ConfigurationKnowledgeBase;
 };
 
@@ -234,6 +235,29 @@ export type ConfigurationServiceCategoryAlias = {
   confidence: number;
   created_at: string;
   updated_at: string;
+};
+
+export type ConfigurationServiceAliasBundle = {
+  items: ConfigurationServiceAlias[];
+  count: number;
+};
+
+export type ConfigurationServiceAlias = {
+  source_key: string;
+  alias: string;
+  normalized_alias: string;
+  target_service: ConfigurationServiceAliasTarget;
+  source: string;
+  status: string;
+  confidence: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ConfigurationServiceAliasTarget = {
+  name: string;
+  duration_minutes?: number;
+  price_display?: string;
 };
 
 export type ConfigurationKnowledgeItem = {

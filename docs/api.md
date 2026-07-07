@@ -296,22 +296,25 @@ configuration only:
 - Public booking page settings
 - Integration runtime settings without secrets
 - Service category taxonomy and service category aliases
+- Service aliases that can be matched to existing target services
 - AI Training knowledge base
 
 Secret-bearing integrations return only configuration values and secret status
 metadata such as `client_secret_configured`, `auth_token_configured`,
 `api_key_configured`, and `*_source`. It does not export services, staff,
 customers, appointments, booking attempts, fallback requests, call sessions,
-transcripts, recordings, summaries, owner corrections, POS OAuth tokens, API
-keys, client secrets, encrypted secrets, or POS connection token state.
+transcripts, recordings, summaries, owner corrections, POS entity links, POS
+sync jobs/logs/errors, provider switch runs/matches, synced business hour
+periods, party booking requests, voice webhook/audio records, POS OAuth tokens,
+API keys, client secrets, encrypted secrets, or POS connection token state.
 
 ```json
 {
-  "schema_version": "manleai.salon_configuration.v4",
+  "schema_version": "manleai.salon_configuration.v5",
   "exported_at": "2026-06-26T15:00:00Z",
   "secrets_exported": false,
   "operational_data_exported": false,
-  "excluded_data": ["services", "staff", "customers", "appointments", "call_sessions", "pos_oauth_tokens", "api_keys", "client_secrets"],
+  "excluded_data": ["services", "staff", "customers", "appointments", "call_sessions", "pos_entity_links", "pos_sync_jobs", "pos_sync_logs", "pos_errors", "provider_switch_runs", "provider_switch_matches", "salon_business_hour_periods", "party_booking_requests", "voice_webhook_events", "voice_audio_outputs", "pos_oauth_tokens", "api_keys", "client_secrets", "encrypted_secrets"],
   "requires_secret_reentry": ["square", "twilio", "openai"],
   "salon_profile": {
     "name": "Lotus Nails Studio",
@@ -429,6 +432,26 @@ keys, client secrets, encrypted secrets, or POS connection token state.
       }
     ]
   },
+  "service_aliases": {
+    "count": 1,
+    "items": [
+      {
+        "source_key": "service_alias:overlay",
+        "alias": "overlay",
+        "normalized_alias": "overlay",
+        "target_service": {
+          "name": "Builder Gel",
+          "duration_minutes": 75,
+          "price_display": "$70.00"
+        },
+        "source": "owner",
+        "status": "active",
+        "confidence": 0.94,
+        "created_at": "2026-06-25T14:30:00Z",
+        "updated_at": "2026-06-25T14:30:00Z"
+      }
+    ]
+  },
   "knowledge_base": {
     "count": 1,
     "items": [
@@ -457,7 +480,7 @@ Request shape, with the full exported bundle in `configuration`:
 ```json
 {
   "configuration": {
-    "schema_version": "manleai.salon_configuration.v4",
+    "schema_version": "manleai.salon_configuration.v5",
     "...": "full exported configuration bundle"
   }
 }
@@ -470,18 +493,19 @@ Response:
   "request_id": "import-preview-id",
   "dry_run": true,
   "status": "previewed",
-  "schema_version": "manleai.salon_configuration.v4",
+  "schema_version": "manleai.salon_configuration.v5",
   "can_apply": true,
   "summary": [
     {"section": "salon_profile", "created": 0, "updated": 6, "unchanged": 5, "skipped": 0, "conflicts": 0},
     {"section": "service_categories", "created": 2, "updated": 1, "unchanged": 4, "skipped": 0, "conflicts": 0},
+    {"section": "service_aliases", "created": 3, "updated": 1, "unchanged": 4, "skipped": 2, "conflicts": 0},
     {"section": "knowledge_base", "created": 4, "updated": 2, "unchanged": 8, "skipped": 0, "conflicts": 0}
   ],
   "warnings": [
     {"section": "integrations", "code": "secret_reentry_required", "message": "square secret values are not included in the export. Re-enter secrets or reconnect this provider after import.", "field": "square"}
   ],
   "conflicts": [],
-  "excluded_data": ["services", "staff", "customers", "appointments", "call_sessions", "pos_oauth_tokens", "api_keys", "client_secrets"],
+  "excluded_data": ["services", "staff", "customers", "appointments", "call_sessions", "pos_entity_links", "pos_sync_jobs", "pos_sync_logs", "pos_errors", "provider_switch_runs", "provider_switch_matches", "salon_business_hour_periods", "party_booking_requests", "voice_webhook_events", "voice_audio_outputs", "pos_oauth_tokens", "api_keys", "client_secrets", "encrypted_secrets"],
   "requires_secret_reentry": ["square", "twilio", "openai"]
 }
 ```
@@ -497,7 +521,7 @@ idempotent, while reusing it with a different payload returns a conflict.
 {
   "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
   "configuration": {
-    "schema_version": "manleai.salon_configuration.v4",
+    "schema_version": "manleai.salon_configuration.v5",
     "...": "full exported configuration bundle"
   }
 }
@@ -508,6 +532,7 @@ Import idempotency:
 - Salon profile, AI receptionist, public booking page, and integration settings update the existing salon-scoped rows.
 - Integration secrets are preserved if already present and are never imported from the transfer file.
 - Service categories upsert by stable slug; category aliases upsert by normalized alias and conflict with active service aliases.
+- Service aliases upsert by normalized alias only when their target service resolves to exactly one existing target-salon service by name and duration; missing targets are skipped with warnings, and active category-alias conflicts block apply.
 - Knowledge base entries upsert by `source_key`, backed by a unique `(salon_id, import_key)` index.
 - Re-importing the same file reports `unchanged` or `updated`; it does not create duplicate knowledge rows.
 - If the bundle requests `ai_enabled=true` or `booking_mode=confirmed_booking`, those fields are skipped unless the target salon has passed Square booking readiness.
@@ -531,7 +556,7 @@ returns the same `salon_id` and `import_run_id`.
 {
   "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
   "configuration": {
-    "schema_version": "manleai.salon_configuration.v4",
+    "schema_version": "manleai.salon_configuration.v5",
     "...": "full exported configuration bundle"
   }
 }
@@ -546,12 +571,12 @@ Response includes the created salon id:
   "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
   "dry_run": false,
   "status": "applied",
-  "schema_version": "manleai.salon_configuration.v4",
+  "schema_version": "manleai.salon_configuration.v5",
   "can_apply": true,
   "summary": [],
   "warnings": [],
   "conflicts": [],
-  "excluded_data": ["services", "staff", "customers", "appointments", "call_sessions", "pos_oauth_tokens", "api_keys", "client_secrets"],
+  "excluded_data": ["services", "staff", "customers", "appointments", "call_sessions", "pos_entity_links", "pos_sync_jobs", "pos_sync_logs", "pos_errors", "provider_switch_runs", "provider_switch_matches", "salon_business_hour_periods", "party_booking_requests", "voice_webhook_events", "voice_audio_outputs", "pos_oauth_tokens", "api_keys", "client_secrets", "encrypted_secrets"],
   "requires_secret_reentry": ["square", "twilio", "openai"]
 }
 ```
@@ -559,7 +584,8 @@ Response includes the created salon id:
 Onboarding import never imports services, staff, customers, appointments, POS
 tokens, API keys, client secrets, or encrypted secrets. It can import service
 category taxonomy and aliases because those are understanding configuration,
-not service records or provider state. If the bundle requests `ai_enabled=true`,
+not service records or provider state. Service aliases whose target services do
+not exist yet are skipped with warnings during onboarding import. If the bundle requests `ai_enabled=true`,
 `booking_mode=confirmed_booking`, or public catalog publishing, those live
 states are skipped until Square Appointments is connected, synced, and
 booking-ready.

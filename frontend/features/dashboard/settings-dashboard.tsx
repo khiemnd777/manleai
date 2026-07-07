@@ -592,13 +592,13 @@ function ConfigurationTransferCard({
         <div className="rounded-md border border-line p-4">
           <div className="text-sm font-semibold text-ink">Included</div>
           <div className="mt-3 flex flex-wrap gap-2">
-            {["Salon profile", "AI receptionist", "Public booking page", "Integrations", "Knowledge base"].map((item) => (
+            {["Salon profile", "AI receptionist", "Public booking page", "Integrations", "Service categories", "Service aliases", "Knowledge base"].map((item) => (
               <Badge key={item} value={item.toLowerCase().replaceAll(" ", "_")} />
             ))}
           </div>
           <div className="mt-5 text-sm font-semibold text-ink">Excluded</div>
           <div className="mt-2 text-sm leading-6 text-muted">
-            Services, staff, customers, appointments, fallback requests, call data, POS tokens, API keys, and client secrets.
+            Services, staff, customers, appointments, fallback requests, call data, POS connection state, business-hour sync periods, POS tokens, API keys, and client secrets.
           </div>
         </div>
 

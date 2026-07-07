@@ -19,7 +19,7 @@ func TestGetBuildsSanitizedConfigurationExportWithKnowledgeBase(t *testing.T) {
 	exportedAt := time.Date(2026, 6, 26, 11, 0, 0, 0, time.UTC)
 	lastSyncAt := updatedAt.Add(-time.Hour)
 	service := newTestService(updatedAt)
-	service.pos = &fakePOSConnectionReader{
+	posReader := &fakePOSConnectionReader{
 		connection: &pos.Connection{
 			ID:                    "connection_1",
 			SalonID:               "salon_1",
@@ -35,7 +35,28 @@ func TestGetBuildsSanitizedConfigurationExportWithKnowledgeBase(t *testing.T) {
 			CreatedAt:             updatedAt,
 			UpdatedAt:             updatedAt,
 		},
+		services: []pos.Service{{
+			ID:              "service_1",
+			Name:            "Builder Gel",
+			DurationMinutes: 75,
+			PriceDisplay:    "$70.00",
+		}},
 	}
+	service.pos = posReader
+	service.services = posReader
+	service.knowledge.(*fakeKnowledgeReader).aliases = []training.ServiceAlias{{
+		ID:              "alias_1",
+		SalonID:         "salon_1",
+		ServiceID:       "service_1",
+		ServiceName:     "Builder Gel",
+		Alias:           "overlay",
+		NormalizedAlias: "overlay",
+		Source:          training.AliasSourceOwner,
+		Status:          training.AliasStatusActive,
+		Confidence:      0.94,
+		CreatedAt:       updatedAt,
+		UpdatedAt:       updatedAt,
+	}}
 	service.categories = &fakeServiceCategoryReader{items: []pos.ServiceCategory{{
 		ID:          "cat_1",
 		SalonID:     "salon_1",
@@ -78,6 +99,12 @@ func TestGetBuildsSanitizedConfigurationExportWithKnowledgeBase(t *testing.T) {
 	}
 	if result.ServiceCategories.Count != 1 || result.ServiceCategories.Items[0].SourceKey != "service_category:manicure" {
 		t.Fatalf("service categories were not exported with stable source key: %#v", result.ServiceCategories)
+	}
+	if result.ServiceAliases.Count != 1 || result.ServiceAliases.Items[0].SourceKey != "service_alias:overlay" {
+		t.Fatalf("service aliases were not exported with stable source key: %#v", result.ServiceAliases)
+	}
+	if target := result.ServiceAliases.Items[0].TargetService; target.Name != "Builder Gel" || target.DurationMinutes != 75 {
+		t.Fatalf("service alias target = %#v, want Builder Gel reference", target)
 	}
 	if got := result.ServiceCategories.Items[0].Aliases[0].SourceKey; got != "service_category_alias:mani" {
 		t.Fatalf("category alias source key = %q, want stable alias key", got)
@@ -190,6 +217,169 @@ func TestNormalizeImportBundleDefaultsLegacyAITone(t *testing.T) {
 	}
 	if normalized.AIReceptionist.AITone != "professional_warm" {
 		t.Fatalf("legacy AI tone = %q, want professional_warm", normalized.AIReceptionist.AITone)
+	}
+}
+
+func TestPreviewImportPlansRealtimeAndStreamIntegrationFields(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
+	service := newTestService(updatedAt)
+	bundle := testImportBundle(updatedAt)
+	bundle.Integrations.Twilio.StreamPath = "/api/voice/twilio/live-stream"
+	bundle.Integrations.Twilio.VoiceTransport = "realtime_stream"
+	bundle.Integrations.OpenAI.RealtimeEnabled = true
+	bundle.Integrations.OpenAI.RealtimeModel = "gpt-realtime-2"
+	bundle.Integrations.OpenAI.RealtimeVoice = "marin"
+	bundle.Integrations.OpenAI.RealtimeNoiseProfile = "noisy_salon"
+	bundle.Integrations.OpenAI.RealtimeInstructions = "Keep answers short."
+
+	result, err := service.PreviewImport(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "req-realtime",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("PreviewImport returned error: %v", err)
+	}
+	if sectionSummary(result.Summary, SectionIntegrations).Updated < 6 {
+		t.Fatalf("integration summary = %#v, want stream and realtime field changes", result.Summary)
+	}
+}
+
+func TestPreviewImportSkipsServiceAliasWhenTargetServiceMissing(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
+	service := newTestService(updatedAt)
+	bundle := testImportBundle(updatedAt)
+	bundle.ServiceAliases = ServiceAliasBundleExport{
+		Items: []ServiceAliasExport{{
+			SourceKey:       "service_alias:overlay",
+			Alias:           "overlay",
+			NormalizedAlias: "overlay",
+			TargetService:   ServiceAliasTargetExport{Name: "Builder Gel", DurationMinutes: 75},
+			Source:          training.AliasSourceImport,
+			Status:          training.AliasStatusActive,
+			Confidence:      0.94,
+			CreatedAt:       updatedAt,
+			UpdatedAt:       updatedAt,
+		}},
+		Count: 1,
+	}
+
+	result, err := service.PreviewImport(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "req-alias-missing-target",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("PreviewImport returned error: %v", err)
+	}
+	if !result.CanApply {
+		t.Fatalf("missing service alias target should skip alias without blocking other configuration: %#v", result)
+	}
+	if sectionSummary(result.Summary, SectionServiceAliases).Skipped != 1 {
+		t.Fatalf("service alias summary = %#v, want one skipped alias", result.Summary)
+	}
+	if len(result.Warnings) == 0 || result.Warnings[len(result.Warnings)-1].Code != "service_alias_target_not_found" {
+		t.Fatalf("warnings = %#v, want missing target warning", result.Warnings)
+	}
+}
+
+func TestPreviewImportPlansServiceAliasForResolvedTargetService(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
+	targetKey := serviceAliasTargetKey(ServiceAliasTargetExport{Name: "Builder Gel", DurationMinutes: 75})
+	store := &fakeImportStore{
+		publicCanPublish: true,
+		canEnableAI:      true,
+		targetServices: map[string]importServiceAliasTarget{
+			targetKey: {
+				ServiceID:       "target_service_1",
+				Name:            "Builder Gel",
+				DurationMinutes: 75,
+			},
+		},
+	}
+	service := newTestService(updatedAt)
+	service.imports = store
+	bundle := testImportBundle(updatedAt)
+	bundle.ServiceAliases = ServiceAliasBundleExport{
+		Items: []ServiceAliasExport{{
+			SourceKey:       "service_alias:overlay",
+			Alias:           "overlay",
+			NormalizedAlias: "overlay",
+			TargetService:   ServiceAliasTargetExport{Name: "Builder Gel", DurationMinutes: 75},
+			Source:          training.AliasSourceImport,
+			Status:          training.AliasStatusActive,
+			Confidence:      0.94,
+			CreatedAt:       updatedAt,
+			UpdatedAt:       updatedAt,
+		}},
+		Count: 1,
+	}
+
+	result, err := service.PreviewImport(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "req-alias-resolved",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("PreviewImport returned error: %v", err)
+	}
+	if sectionSummary(result.Summary, SectionServiceAliases).Created != 1 {
+		t.Fatalf("service alias summary = %#v, want one created alias", result.Summary)
+	}
+	plan, err := service.buildImportPlan(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "req-alias-resolved-plan",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("buildImportPlan returned error: %v", err)
+	}
+	if len(plan.ServiceAliases) != 1 || plan.ServiceAliases[0].TargetServiceID != "target_service_1" {
+		t.Fatalf("planned service aliases = %#v, want resolved target service id", plan.ServiceAliases)
+	}
+}
+
+func TestPreviewImportBlocksServiceAliasCategoryAliasConflict(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
+	targetKey := serviceAliasTargetKey(ServiceAliasTargetExport{Name: "Builder Gel", DurationMinutes: 75})
+	store := &fakeImportStore{
+		publicCanPublish:        true,
+		canEnableAI:             true,
+		activeCategoryAliasKeys: map[string]bool{"overlay": true},
+		targetServices: map[string]importServiceAliasTarget{
+			targetKey: {
+				ServiceID:       "target_service_1",
+				Name:            "Builder Gel",
+				DurationMinutes: 75,
+			},
+		},
+	}
+	service := newTestService(updatedAt)
+	service.imports = store
+	bundle := testImportBundle(updatedAt)
+	bundle.ServiceAliases = ServiceAliasBundleExport{
+		Items: []ServiceAliasExport{{
+			SourceKey:       "service_alias:overlay",
+			Alias:           "overlay",
+			NormalizedAlias: "overlay",
+			TargetService:   ServiceAliasTargetExport{Name: "Builder Gel", DurationMinutes: 75},
+			Source:          training.AliasSourceImport,
+			Status:          training.AliasStatusActive,
+			Confidence:      0.94,
+			CreatedAt:       updatedAt,
+			UpdatedAt:       updatedAt,
+		}},
+		Count: 1,
+	}
+
+	result, err := service.PreviewImport(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "req-alias-category-conflict",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("PreviewImport returned error: %v", err)
+	}
+	if result.CanApply {
+		t.Fatalf("preview should block active service/category alias conflict: %#v", result)
+	}
+	if len(result.Conflicts) != 1 || result.Conflicts[0].Code != "service_alias_conflicts_with_category_alias" {
+		t.Fatalf("conflicts = %#v, want service alias category conflict", result.Conflicts)
 	}
 }
 
@@ -572,9 +762,12 @@ func testIntegrationResponse(updatedAt time.Time) *integrationconfig.Integration
 			IncomingPath:        "/api/voice/twilio/incoming",
 			TurnPath:            "/api/voice/twilio/turn",
 			RecordingPath:       "/api/voice/twilio/recording",
+			StreamPath:          "/api/voice/twilio/stream",
+			VoiceTransport:      "recording",
 			InboundWebhookURL:   "https://api.example.com/api/voice/twilio/incoming",
 			TurnWebhookURL:      "https://api.example.com/api/voice/twilio/turn",
 			RecordingWebhookURL: "https://api.example.com/api/voice/twilio/recording",
+			StreamWebhookURL:    "wss://api.example.com/api/voice/twilio/stream",
 			AuthTokenConfigured: true,
 			AuthTokenSource:     integrationconfig.SecretSourceDatabase,
 			UpdatedAt:           &updatedAt,
@@ -588,6 +781,7 @@ func testIntegrationResponse(updatedAt time.Time) *integrationconfig.Integration
 			ReplyModel:         "gpt-4.1-mini",
 			SpeechModel:        "gpt-4o-mini-tts",
 			SpeechVoice:        "alloy",
+			RealtimeVoice:      "alloy",
 			APIKeyConfigured:   true,
 			APIKeySource:       integrationconfig.SecretSourceDatabase,
 			UpdatedAt:          &updatedAt,
@@ -657,8 +851,10 @@ func (f *fakeIntegrationReader) GetAll(ctx context.Context, salonID string, owne
 }
 
 type fakePOSConnectionReader struct {
-	connection *pos.Connection
-	err        error
+	connection  *pos.Connection
+	err         error
+	services    []pos.Service
+	servicesErr error
 }
 
 func (f *fakePOSConnectionReader) GetConnection(ctx context.Context, salonID string, provider string) (*pos.Connection, error) {
@@ -669,6 +865,13 @@ func (f *fakePOSConnectionReader) GetConnection(ctx context.Context, salonID str
 		return nil, pos.ErrNotFound
 	}
 	return f.connection, nil
+}
+
+func (f *fakePOSConnectionReader) ListServices(ctx context.Context, salonID string, provider string) ([]pos.Service, error) {
+	if f.servicesErr != nil {
+		return nil, f.servicesErr
+	}
+	return append([]pos.Service{}, f.services...), nil
 }
 
 type fakeServiceCategoryReader struct {
@@ -684,8 +887,9 @@ func (f *fakeServiceCategoryReader) ListServiceCategories(ctx context.Context, s
 }
 
 type fakeKnowledgeReader struct {
-	items []training.KnowledgeItem
-	err   error
+	items   []training.KnowledgeItem
+	aliases []training.ServiceAlias
+	err     error
 }
 
 func (f *fakeKnowledgeReader) ListKnowledge(ctx context.Context, salonID string, ownerUserID string) ([]training.KnowledgeItem, error) {
@@ -695,19 +899,29 @@ func (f *fakeKnowledgeReader) ListKnowledge(ctx context.Context, salonID string,
 	return append([]training.KnowledgeItem{}, f.items...), nil
 }
 
+func (f *fakeKnowledgeReader) ListServiceAliases(ctx context.Context, salonID string, ownerUserID string) ([]training.ServiceAlias, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return append([]training.ServiceAlias{}, f.aliases...), nil
+}
+
 type fakeImportStore struct {
-	publicCanPublish       bool
-	canEnableAI            bool
-	slugTaken              bool
-	slugErr                error
-	lastSlugSalonID        string
-	ownerHasSalon          bool
-	knowledge              *fakeKnowledgeReader
-	activeServiceAliasKeys map[string]bool
-	appliedRuns            map[string]string
-	onboardingRuns         map[string]fakeOnboardingRun
-	onboardingCreates      int
-	lastOnboardingPlan     *importPlan
+	publicCanPublish        bool
+	canEnableAI             bool
+	slugTaken               bool
+	slugErr                 error
+	lastSlugSalonID         string
+	ownerHasSalon           bool
+	knowledge               *fakeKnowledgeReader
+	activeServiceAliasKeys  map[string]bool
+	activeCategoryAliasKeys map[string]bool
+	targetServices          map[string]importServiceAliasTarget
+	ambiguousServiceTargets map[string]bool
+	appliedRuns             map[string]string
+	onboardingRuns          map[string]fakeOnboardingRun
+	onboardingCreates       int
+	lastOnboardingPlan      *importPlan
 }
 
 type fakeOnboardingRun struct {
@@ -721,6 +935,7 @@ func (f *fakeImportStore) TargetImportState(ctx context.Context, salonID string,
 	byContentHash := map[string]KnowledgeItemExport{}
 	categoryBySlug := map[string]ServiceCategoryExport{}
 	categoryAliasByKey := map[string]ServiceCategoryAliasExport{}
+	serviceAliasByKey := map[string]ServiceAliasExport{}
 	for _, item := range current.KnowledgeBase.Items {
 		byImportKey[item.SourceKey] = item
 		byContentHash[knowledgeContentHash(item)] = item
@@ -731,18 +946,25 @@ func (f *fakeImportStore) TargetImportState(ctx context.Context, salonID string,
 			categoryAliasByKey[alias.NormalizedAlias] = alias
 		}
 	}
+	for _, item := range current.ServiceAliases.Items {
+		serviceAliasByKey[item.NormalizedAlias] = item
+	}
 	return &importTargetState{
-		SalonProfile:           current.SalonProfile,
-		AIReceptionist:         current.AIReceptionist,
-		PublicBookingPage:      current.PublicBookingPage,
-		PublicCanPublish:       f.publicCanPublish,
-		CanEnableAIBooking:     f.canEnableAI,
-		Integrations:           current.Integrations,
-		ServiceCategoryBySlug:  categoryBySlug,
-		CategoryAliasByKey:     categoryAliasByKey,
-		ActiveServiceAliasKeys: f.activeServiceAliasKeys,
-		KnowledgeByImportKey:   byImportKey,
-		KnowledgeByContentHash: byContentHash,
+		SalonProfile:                 current.SalonProfile,
+		AIReceptionist:               current.AIReceptionist,
+		PublicBookingPage:            current.PublicBookingPage,
+		PublicCanPublish:             f.publicCanPublish,
+		CanEnableAIBooking:           f.canEnableAI,
+		Integrations:                 current.Integrations,
+		ServiceCategoryBySlug:        categoryBySlug,
+		CategoryAliasByKey:           categoryAliasByKey,
+		ActiveServiceAliasKeys:       f.activeServiceAliasKeys,
+		ActiveCategoryAliasKeys:      f.activeCategoryAliasKeys,
+		ServiceAliasByKey:            serviceAliasByKey,
+		ServiceAliasTargetsByKey:     f.targetServices,
+		AmbiguousServiceAliasTargets: f.ambiguousServiceTargets,
+		KnowledgeByImportKey:         byImportKey,
+		KnowledgeByContentHash:       byContentHash,
 	}, nil
 }
 

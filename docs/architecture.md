@@ -131,12 +131,16 @@ present a web booking as confirmed.
 
 Configuration transfer exports sanitized setup data only, including salon
 profile, AI settings, public catalog settings, integration runtime settings,
-service category taxonomy, service category aliases, and owner-authored
-knowledge. Import previews and applies use stable request IDs, skip secrets
-and operational records, and must not recreate services, staff, customers,
-appointments, POS tokens, call sessions, transcripts, or provider-side state.
-Service category imports use stable slug and normalized-alias keys and reject
-category aliases that conflict with active service aliases.
+service category taxonomy, service category aliases, service aliases that can
+be matched to existing target services, and owner-authored knowledge. Import
+previews and applies use stable request IDs, skip secrets and operational
+records, and must not recreate services, staff, customers, appointments, POS
+tokens, call sessions, transcripts, provider connections, synced business hour
+periods, provider switch runs, party booking requests, voice webhook events, or
+provider-side state. Service category imports use stable slug and
+normalized-alias keys and reject category aliases that conflict with active
+service aliases. Service alias imports use stable normalized-alias keys and
+skip aliases whose target service cannot be resolved on the target salon.
 
 ## Next Milestone
 

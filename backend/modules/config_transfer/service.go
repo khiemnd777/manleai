@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -44,8 +45,16 @@ type ServiceCategoryReader interface {
 	ListServiceCategories(ctx context.Context, salonID string, ownerUserID string) ([]pos.ServiceCategory, error)
 }
 
+type ServiceCatalogReader interface {
+	ListServices(ctx context.Context, salonID string, provider string) ([]pos.Service, error)
+}
+
 type KnowledgeListReader interface {
 	ListKnowledge(ctx context.Context, salonID string, ownerUserID string) ([]training.KnowledgeItem, error)
+}
+
+type ServiceAliasReader interface {
+	ListServiceAliases(ctx context.Context, salonID string, ownerUserID string) ([]training.ServiceAlias, error)
 }
 
 type ImportStore interface {
@@ -62,7 +71,9 @@ type Service struct {
 	integrations IntegrationConfigReader
 	pos          POSConnectionReader
 	categories   ServiceCategoryReader
+	services     ServiceCatalogReader
 	knowledge    KnowledgeListReader
+	aliases      ServiceAliasReader
 	imports      ImportStore
 	now          func() time.Time
 }
@@ -74,12 +85,22 @@ func NewService(salons SalonReader, integrations IntegrationConfigReader, posCon
 	} else if reader, ok := posConnections.(ServiceCategoryReader); ok {
 		categories = reader
 	}
+	var services ServiceCatalogReader
+	if reader, ok := posConnections.(ServiceCatalogReader); ok {
+		services = reader
+	}
+	var aliases ServiceAliasReader
+	if reader, ok := knowledge.(ServiceAliasReader); ok {
+		aliases = reader
+	}
 	return &Service{
 		salons:       salons,
 		integrations: integrations,
 		pos:          posConnections,
 		categories:   categories,
+		services:     services,
 		knowledge:    knowledge,
+		aliases:      aliases,
 		imports:      imports,
 		now:          time.Now,
 	}
@@ -112,14 +133,22 @@ func (s *Service) Get(ctx context.Context, salonID string, ownerUserID string) (
 	if err != nil {
 		return nil, err
 	}
-	categories, err := s.serviceCategories(ctx, salonID, ownerUserID)
-	if err != nil {
-		return nil, err
-	}
 
 	activeProvider := strings.TrimSpace(item.ActivePOSProvider)
 	if activeProvider == "" {
 		activeProvider = pos.ProviderSquare
+	}
+	categories, err := s.serviceCategories(ctx, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	services, err := s.serviceCatalog(ctx, salonID, activeProvider)
+	if err != nil {
+		return nil, err
+	}
+	serviceAliases, err := s.serviceAliases(ctx, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
 	}
 
 	connection, err := s.posConnection(ctx, salonID, activeProvider)
@@ -142,6 +171,7 @@ func (s *Service) Get(ctx context.Context, salonID string, ownerUserID string) (
 		Integrations:            *integrations,
 		POSConnection:           posConnectionExport(activeProvider, connection),
 		ServiceCategories:       serviceCategoriesExport(categories),
+		ServiceAliases:          serviceAliasesExport(serviceAliases, services),
 		KnowledgeBase:           knowledgeBaseExport(knowledge),
 	}, nil
 }
@@ -282,6 +312,7 @@ func (s *Service) buildImportPlan(ctx context.Context, salonID string, ownerUser
 	planPublicBookingPage(ctx, s.imports, salonID, plan)
 	planIntegrations(plan)
 	planServiceCategories(plan)
+	planServiceAliases(plan)
 	planKnowledge(plan)
 	if len(plan.Conflicts) > 0 {
 		plan.CanApply = false
@@ -351,6 +382,21 @@ func newImportPlan(bundle ConfigurationBundle, fingerprint string, requestID str
 			Message: "This export did not include service category taxonomy or category aliases.",
 		})
 	}
+	if bundle.SchemaVersion == LegacySchemaV1 || bundle.SchemaVersion == LegacySchemaV2 || bundle.SchemaVersion == LegacySchemaV3 || bundle.SchemaVersion == LegacySchemaV4 {
+		plan.Warnings = append(plan.Warnings, ImportIssue{
+			Section: SectionServiceAliases,
+			Code:    "legacy_schema_missing_service_aliases",
+			Message: "This export did not include service aliases.",
+		})
+	}
+	if plan.Bundle.POSConnection.Status != "" {
+		plan.Warnings = append(plan.Warnings, ImportIssue{
+			Section: SectionIntegrations,
+			Code:    "pos_connection_metadata_not_imported",
+			Message: "POS connection metadata is exported for reference only. OAuth tokens and provider connection state are not imported.",
+			Field:   "pos_connection",
+		})
+	}
 	for _, provider := range plan.RequiresSecretReentry {
 		plan.Warnings = append(plan.Warnings, ImportIssue{
 			Section: SectionIntegrations,
@@ -380,13 +426,17 @@ func onboardingImportTargetState() *importTargetState {
 			ReminderHoursBefore:     24,
 			HandoffEnabled:          true,
 		},
-		PublicCanPublish:       false,
-		CanEnableAIBooking:     false,
-		ServiceCategoryBySlug:  map[string]ServiceCategoryExport{},
-		CategoryAliasByKey:     map[string]ServiceCategoryAliasExport{},
-		ActiveServiceAliasKeys: map[string]bool{},
-		KnowledgeByImportKey:   map[string]KnowledgeItemExport{},
-		KnowledgeByContentHash: map[string]KnowledgeItemExport{},
+		PublicCanPublish:             false,
+		CanEnableAIBooking:           false,
+		ServiceCategoryBySlug:        map[string]ServiceCategoryExport{},
+		CategoryAliasByKey:           map[string]ServiceCategoryAliasExport{},
+		ActiveServiceAliasKeys:       map[string]bool{},
+		ActiveCategoryAliasKeys:      map[string]bool{},
+		ServiceAliasByKey:            map[string]ServiceAliasExport{},
+		ServiceAliasTargetsByKey:     map[string]importServiceAliasTarget{},
+		AmbiguousServiceAliasTargets: map[string]bool{},
+		KnowledgeByImportKey:         map[string]KnowledgeItemExport{},
+		KnowledgeByContentHash:       map[string]KnowledgeItemExport{},
 	}
 }
 
@@ -517,17 +567,25 @@ func planIntegrations(plan *importPlan) {
 	fieldChange(plan, SectionIntegrations, "twilio.incoming_path", target.Twilio.IncomingPath, incoming.Twilio.IncomingPath)
 	fieldChange(plan, SectionIntegrations, "twilio.turn_path", target.Twilio.TurnPath, incoming.Twilio.TurnPath)
 	fieldChange(plan, SectionIntegrations, "twilio.recording_path", target.Twilio.RecordingPath, incoming.Twilio.RecordingPath)
+	fieldChange(plan, SectionIntegrations, "twilio.stream_path", target.Twilio.StreamPath, incoming.Twilio.StreamPath)
+	fieldChange(plan, SectionIntegrations, "twilio.voice_transport", target.Twilio.VoiceTransport, incoming.Twilio.VoiceTransport)
 	fieldChange(plan, SectionIntegrations, "openai.enabled", boolString(target.OpenAI.Enabled), boolString(incoming.OpenAI.Enabled))
 	fieldChange(plan, SectionIntegrations, "openai.base_url", target.OpenAI.BaseURL, incoming.OpenAI.BaseURL)
 	fieldChange(plan, SectionIntegrations, "openai.transcription_model", target.OpenAI.TranscriptionModel, incoming.OpenAI.TranscriptionModel)
 	fieldChange(plan, SectionIntegrations, "openai.reply_model", target.OpenAI.ReplyModel, incoming.OpenAI.ReplyModel)
 	fieldChange(plan, SectionIntegrations, "openai.speech_model", target.OpenAI.SpeechModel, incoming.OpenAI.SpeechModel)
 	fieldChange(plan, SectionIntegrations, "openai.speech_voice", target.OpenAI.SpeechVoice, incoming.OpenAI.SpeechVoice)
+	fieldChange(plan, SectionIntegrations, "openai.realtime_enabled", boolString(target.OpenAI.RealtimeEnabled), boolString(incoming.OpenAI.RealtimeEnabled))
+	fieldChange(plan, SectionIntegrations, "openai.realtime_model", target.OpenAI.RealtimeModel, incoming.OpenAI.RealtimeModel)
+	fieldChange(plan, SectionIntegrations, "openai.realtime_voice", target.OpenAI.RealtimeVoice, incoming.OpenAI.RealtimeVoice)
+	fieldChange(plan, SectionIntegrations, "openai.realtime_noise_profile", target.OpenAI.RealtimeNoiseProfile, incoming.OpenAI.RealtimeNoiseProfile)
+	fieldChange(plan, SectionIntegrations, "openai.realtime_instructions", target.OpenAI.RealtimeInstructions, incoming.OpenAI.RealtimeInstructions)
 }
 
 func planServiceCategories(plan *importPlan) {
 	seenSlugs := map[string]bool{}
 	seenAliases := map[string]bool{}
+	incomingServiceAliasKeys := activeBundleServiceAliasKeys(plan.Bundle.ServiceAliases.Items)
 	for _, item := range plan.Bundle.ServiceCategories.Items {
 		if seenSlugs[item.Slug] {
 			summary(plan, SectionCategories).Conflicts++
@@ -580,6 +638,17 @@ func planServiceCategories(plan *importPlan) {
 				})
 				continue
 			}
+			if incomingServiceAliasKeys[alias.NormalizedAlias] {
+				summary(plan, SectionCategories).Conflicts++
+				plan.Conflicts = append(plan.Conflicts, ImportIssue{
+					Section:   SectionCategories,
+					Code:      "category_alias_conflicts_with_imported_service_alias",
+					Message:   "The import file contains the same active normalized phrase as both a category alias and a service alias.",
+					Field:     "normalized_alias",
+					SourceKey: alias.SourceKey,
+				})
+				continue
+			}
 
 			aliasOperation := "created"
 			if existing, ok := plan.Target.CategoryAliasByKey[alias.NormalizedAlias]; ok {
@@ -600,6 +669,92 @@ func planServiceCategories(plan *importPlan) {
 			})
 		}
 		plan.ServiceCategories = append(plan.ServiceCategories, planned)
+	}
+}
+
+func planServiceAliases(plan *importPlan) {
+	seen := map[string]bool{}
+	incomingCategoryAliasKeys := activeBundleCategoryAliasKeys(plan.Bundle.ServiceCategories.Items)
+	for _, item := range plan.Bundle.ServiceAliases.Items {
+		if seen[item.NormalizedAlias] {
+			summary(plan, SectionServiceAliases).Conflicts++
+			plan.Conflicts = append(plan.Conflicts, ImportIssue{
+				Section:   SectionServiceAliases,
+				Code:      "duplicate_service_alias",
+				Message:   "The import file contains more than one service alias with the same normalized alias.",
+				Field:     "normalized_alias",
+				SourceKey: item.SourceKey,
+			})
+			continue
+		}
+		seen[item.NormalizedAlias] = true
+		if item.Status == training.AliasStatusActive && (plan.Target.ActiveCategoryAliasKeys[item.NormalizedAlias] || incomingCategoryAliasKeys[item.NormalizedAlias]) {
+			summary(plan, SectionServiceAliases).Conflicts++
+			plan.Conflicts = append(plan.Conflicts, ImportIssue{
+				Section:   SectionServiceAliases,
+				Code:      "service_alias_conflicts_with_category_alias",
+				Message:   "A service alias conflicts with an active service category alias.",
+				Field:     "normalized_alias",
+				SourceKey: item.SourceKey,
+			})
+			continue
+		}
+
+		targetKey := serviceAliasTargetKey(item.TargetService)
+		if targetKey == "" {
+			summary(plan, SectionServiceAliases).Skipped++
+			plan.Warnings = append(plan.Warnings, ImportIssue{
+				Section:   SectionServiceAliases,
+				Code:      "service_alias_target_missing",
+				Message:   "A service alias was skipped because the import file did not include a target service reference.",
+				Field:     "target_service",
+				SourceKey: item.SourceKey,
+			})
+			plan.ServiceAliases = append(plan.ServiceAliases, plannedServiceAlias{Item: item, Operation: "skipped"})
+			continue
+		}
+		if plan.Target.AmbiguousServiceAliasTargets[targetKey] {
+			summary(plan, SectionServiceAliases).Conflicts++
+			plan.Conflicts = append(plan.Conflicts, ImportIssue{
+				Section:   SectionServiceAliases,
+				Code:      "service_alias_target_ambiguous",
+				Message:   "A service alias target matched more than one service on the target salon.",
+				Field:     "target_service",
+				SourceKey: item.SourceKey,
+			})
+			continue
+		}
+		target, ok := plan.Target.ServiceAliasTargetsByKey[targetKey]
+		if !ok {
+			summary(plan, SectionServiceAliases).Skipped++
+			plan.Warnings = append(plan.Warnings, ImportIssue{
+				Section:   SectionServiceAliases,
+				Code:      "service_alias_target_not_found",
+				Message:   "A service alias was skipped because its target service was not found on the target salon.",
+				Field:     "target_service",
+				SourceKey: item.SourceKey,
+			})
+			plan.ServiceAliases = append(plan.ServiceAliases, plannedServiceAlias{Item: item, Operation: "skipped"})
+			continue
+		}
+
+		operation := "created"
+		if existing, ok := plan.Target.ServiceAliasByKey[item.NormalizedAlias]; ok {
+			if serviceAliasEqual(existing, item) {
+				operation = "unchanged"
+				summary(plan, SectionServiceAliases).Unchanged++
+			} else {
+				operation = "updated"
+				summary(plan, SectionServiceAliases).Updated++
+			}
+		} else {
+			summary(plan, SectionServiceAliases).Created++
+		}
+		plan.ServiceAliases = append(plan.ServiceAliases, plannedServiceAlias{
+			Item:            item,
+			Operation:       operation,
+			TargetServiceID: target.ServiceID,
+		})
 	}
 }
 
@@ -650,7 +805,7 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 	if bundle.SchemaVersion == "" {
 		return bundle, ErrValidation
 	}
-	if bundle.SchemaVersion != SchemaVersion && bundle.SchemaVersion != LegacySchemaV3 && bundle.SchemaVersion != LegacySchemaV2 && bundle.SchemaVersion != LegacySchemaV1 {
+	if bundle.SchemaVersion != SchemaVersion && bundle.SchemaVersion != LegacySchemaV4 && bundle.SchemaVersion != LegacySchemaV3 && bundle.SchemaVersion != LegacySchemaV2 && bundle.SchemaVersion != LegacySchemaV1 {
 		return bundle, ErrUnsupportedSchema
 	}
 	if bundle.SecretsExported || bundle.OperationalDataExported {
@@ -693,6 +848,14 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 		bundle.ServiceCategories.Items[i] = item
 	}
 	bundle.ServiceCategories.Count = len(bundle.ServiceCategories.Items)
+	for i := range bundle.ServiceAliases.Items {
+		item := normalizeServiceAliasItem(bundle.ServiceAliases.Items[i])
+		if item.Alias == "" || item.NormalizedAlias == "" || item.TargetService.Name == "" || !validServiceAliasStatus(item.Status) || !validServiceAliasSource(item.Source) || item.Confidence <= 0 || item.Confidence > 1 {
+			return bundle, ErrValidation
+		}
+		bundle.ServiceAliases.Items[i] = item
+	}
+	bundle.ServiceAliases.Count = len(bundle.ServiceAliases.Items)
 	for i := range bundle.KnowledgeBase.Items {
 		item := normalizeKnowledgeItem(bundle.KnowledgeBase.Items[i])
 		if item.Title == "" || item.Body == "" || !validKnowledgeCategory(item.Category) || !validKnowledgeStatus(item.Status) {
@@ -756,12 +919,18 @@ func normalizeIntegrationConfigs(configs integrationconfig.IntegrationConfigsRes
 	configs.Twilio.IncomingPath = defaultString(strings.TrimSpace(configs.Twilio.IncomingPath), "/api/voice/twilio/incoming")
 	configs.Twilio.TurnPath = defaultString(strings.TrimSpace(configs.Twilio.TurnPath), "/api/voice/twilio/turn")
 	configs.Twilio.RecordingPath = defaultString(strings.TrimSpace(configs.Twilio.RecordingPath), "/api/voice/twilio/recording")
+	configs.Twilio.StreamPath = defaultString(strings.TrimSpace(configs.Twilio.StreamPath), "/api/voice/twilio/stream")
+	configs.Twilio.VoiceTransport = normalizeVoiceTransport(configs.Twilio.VoiceTransport)
 	configs.OpenAI.Provider = integrationconfig.ProviderOpenAI
 	configs.OpenAI.BaseURL = defaultString(strings.TrimRight(strings.TrimSpace(configs.OpenAI.BaseURL), "/"), "https://api.openai.com/v1")
 	configs.OpenAI.TranscriptionModel = defaultString(strings.TrimSpace(configs.OpenAI.TranscriptionModel), "gpt-4o-mini-transcribe")
 	configs.OpenAI.ReplyModel = defaultString(strings.TrimSpace(configs.OpenAI.ReplyModel), "gpt-4.1-mini")
 	configs.OpenAI.SpeechModel = defaultString(strings.TrimSpace(configs.OpenAI.SpeechModel), "gpt-4o-mini-tts")
 	configs.OpenAI.SpeechVoice = defaultString(strings.TrimSpace(configs.OpenAI.SpeechVoice), "alloy")
+	configs.OpenAI.RealtimeModel = strings.TrimSpace(configs.OpenAI.RealtimeModel)
+	configs.OpenAI.RealtimeVoice = defaultString(strings.TrimSpace(configs.OpenAI.RealtimeVoice), configs.OpenAI.SpeechVoice)
+	configs.OpenAI.RealtimeNoiseProfile = strings.TrimSpace(configs.OpenAI.RealtimeNoiseProfile)
+	configs.OpenAI.RealtimeInstructions = strings.TrimSpace(configs.OpenAI.RealtimeInstructions)
 	return configs
 }
 
@@ -809,11 +978,28 @@ func normalizeServiceCategoryAliasItem(item ServiceCategoryAliasExport) ServiceC
 	return item
 }
 
+func normalizeServiceAliasItem(item ServiceAliasExport) ServiceAliasExport {
+	item.Alias = strings.TrimSpace(item.Alias)
+	item.NormalizedAlias = normalizeConfigAlias(defaultString(strings.TrimSpace(item.NormalizedAlias), item.Alias))
+	item.SourceKey = defaultString(strings.TrimSpace(item.SourceKey), serviceAliasSourceKey(item.NormalizedAlias))
+	item.TargetService.Name = strings.TrimSpace(item.TargetService.Name)
+	item.TargetService.PriceDisplay = strings.TrimSpace(item.TargetService.PriceDisplay)
+	item.Source = defaultString(strings.ToLower(strings.TrimSpace(item.Source)), training.AliasSourceImport)
+	item.Status = defaultString(strings.ToLower(strings.TrimSpace(item.Status)), training.AliasStatusActive)
+	if item.Confidence == 0 {
+		item.Confidence = 0.94
+	}
+	return item
+}
+
 func validateIntegrationURLs(configs integrationconfig.IntegrationConfigsResponse) error {
 	if configs.Square.RedirectURL == "" || configs.Square.APIVersion == "" {
 		return ErrValidation
 	}
 	if configs.OpenAI.Enabled && (configs.OpenAI.BaseURL == "" || configs.OpenAI.TranscriptionModel == "" || configs.OpenAI.ReplyModel == "" || configs.OpenAI.SpeechModel == "" || configs.OpenAI.SpeechVoice == "") {
+		return ErrValidation
+	}
+	if configs.OpenAI.Enabled && configs.OpenAI.RealtimeEnabled && (configs.OpenAI.RealtimeModel == "" || configs.OpenAI.RealtimeVoice == "") {
 		return ErrValidation
 	}
 	for _, value := range []string{configs.Square.RedirectURL, configs.Twilio.PublicBaseURL, configs.OpenAI.BaseURL} {
@@ -844,6 +1030,20 @@ func (s *Service) serviceCategories(ctx context.Context, salonID string, ownerUs
 		return []pos.ServiceCategory{}, nil
 	}
 	return s.categories.ListServiceCategories(ctx, salonID, ownerUserID)
+}
+
+func (s *Service) serviceCatalog(ctx context.Context, salonID string, provider string) ([]pos.Service, error) {
+	if s.services == nil {
+		return []pos.Service{}, nil
+	}
+	return s.services.ListServices(ctx, salonID, provider)
+}
+
+func (s *Service) serviceAliases(ctx context.Context, salonID string, ownerUserID string) ([]training.ServiceAlias, error) {
+	if s.aliases == nil {
+		return []training.ServiceAlias{}, nil
+	}
+	return s.aliases.ListServiceAliases(ctx, salonID, ownerUserID)
 }
 
 func salonProfileExport(item *salon.Salon) SalonProfileExport {
@@ -950,6 +1150,37 @@ func serviceCategoriesExport(items []pos.ServiceCategory) ServiceCategoryBundleE
 	return ServiceCategoryBundleExport{Items: out, Count: len(out)}
 }
 
+func serviceAliasesExport(items []training.ServiceAlias, services []pos.Service) ServiceAliasBundleExport {
+	servicesByID := map[string]pos.Service{}
+	for _, service := range services {
+		if strings.TrimSpace(service.ID) == "" {
+			continue
+		}
+		servicesByID[service.ID] = service
+	}
+	out := make([]ServiceAliasExport, 0, len(items))
+	for _, item := range items {
+		target := ServiceAliasTargetExport{Name: item.ServiceName}
+		if service, ok := servicesByID[item.ServiceID]; ok {
+			target.Name = service.Name
+			target.DurationMinutes = service.DurationMinutes
+			target.PriceDisplay = service.PriceDisplay
+		}
+		out = append(out, ServiceAliasExport{
+			SourceKey:       serviceAliasSourceKey(item.NormalizedAlias),
+			Alias:           item.Alias,
+			NormalizedAlias: item.NormalizedAlias,
+			TargetService:   target,
+			Source:          item.Source,
+			Status:          item.Status,
+			Confidence:      item.Confidence,
+			CreatedAt:       item.CreatedAt,
+			UpdatedAt:       item.UpdatedAt,
+		})
+	}
+	return ServiceAliasBundleExport{Items: out, Count: len(out)}
+}
+
 func knowledgeBaseExport(items []training.KnowledgeItem) KnowledgeBaseExport {
 	out := make([]KnowledgeItemExport, 0, len(items))
 	for _, item := range items {
@@ -981,6 +1212,10 @@ func serviceCategorySourceKey(slug string) string {
 
 func serviceCategoryAliasSourceKey(normalizedAlias string) string {
 	return "service_category_alias:" + normalizeConfigAlias(normalizedAlias)
+}
+
+func serviceAliasSourceKey(normalizedAlias string) string {
+	return "service_alias:" + normalizeConfigAlias(normalizedAlias)
 }
 
 func knowledgeContentHash(item KnowledgeItemExport) string {
@@ -1018,6 +1253,15 @@ func serviceCategoryEqual(a ServiceCategoryExport, b ServiceCategoryExport) bool
 func serviceCategoryAliasEqual(a ServiceCategoryAliasExport, b ServiceCategoryAliasExport) bool {
 	return strings.TrimSpace(a.Alias) == strings.TrimSpace(b.Alias) &&
 		strings.TrimSpace(a.NormalizedAlias) == strings.TrimSpace(b.NormalizedAlias) &&
+		strings.TrimSpace(a.Status) == strings.TrimSpace(b.Status) &&
+		strings.TrimSpace(a.Source) == strings.TrimSpace(b.Source) &&
+		a.Confidence == b.Confidence
+}
+
+func serviceAliasEqual(a ServiceAliasExport, b ServiceAliasExport) bool {
+	return strings.TrimSpace(a.Alias) == strings.TrimSpace(b.Alias) &&
+		strings.TrimSpace(a.NormalizedAlias) == strings.TrimSpace(b.NormalizedAlias) &&
+		serviceAliasTargetKey(a.TargetService) == serviceAliasTargetKey(b.TargetService) &&
 		strings.TrimSpace(a.Status) == strings.TrimSpace(b.Status) &&
 		strings.TrimSpace(a.Source) == strings.TrimSpace(b.Source) &&
 		a.Confidence == b.Confidence
@@ -1063,7 +1307,7 @@ func importResponse(plan *importPlan, dryRun bool, runID string) *ImportResponse
 
 func newSummaryMap() map[string]*ImportSectionSummary {
 	out := map[string]*ImportSectionSummary{}
-	for _, section := range []string{SectionSalon, SectionAI, SectionPublic, SectionIntegrations, SectionCategories, SectionKnowledge} {
+	for _, section := range []string{SectionSalon, SectionAI, SectionPublic, SectionIntegrations, SectionCategories, SectionServiceAliases, SectionKnowledge} {
 		out[section] = &ImportSectionSummary{Section: section}
 	}
 	return out
@@ -1079,7 +1323,7 @@ func summary(plan *importPlan, section string) *ImportSectionSummary {
 }
 
 func summaryValues(items map[string]*ImportSectionSummary) []ImportSectionSummary {
-	order := []string{SectionSalon, SectionAI, SectionPublic, SectionIntegrations, SectionCategories, SectionKnowledge}
+	order := []string{SectionSalon, SectionAI, SectionPublic, SectionIntegrations, SectionCategories, SectionServiceAliases, SectionKnowledge}
 	out := make([]ImportSectionSummary, 0, len(order))
 	for _, section := range order {
 		if item := items[section]; item != nil {
@@ -1174,6 +1418,24 @@ func validServiceCategoryAliasSource(source string) bool {
 	}
 }
 
+func validServiceAliasStatus(status string) bool {
+	switch status {
+	case training.AliasStatusActive, training.AliasStatusArchived:
+		return true
+	default:
+		return false
+	}
+}
+
+func validServiceAliasSource(source string) bool {
+	switch source {
+	case training.AliasSourceOwner, training.AliasSourceCorrection, training.AliasSourceImport:
+		return true
+	default:
+		return false
+	}
+}
+
 func validKnowledgeStatus(status string) bool {
 	switch status {
 	case training.StatusDraft, training.StatusActive, training.StatusArchived:
@@ -1189,6 +1451,13 @@ func normalizeEnvironment(value string) string {
 		return "production"
 	}
 	return "sandbox"
+}
+
+func normalizeVoiceTransport(value string) string {
+	if strings.TrimSpace(value) == "realtime_stream" {
+		return "realtime_stream"
+	}
+	return "recording"
 }
 
 func normalizePublicSlug(value string) string {
@@ -1226,6 +1495,44 @@ func normalizeConfigSlug(value string) string {
 
 func normalizeConfigAlias(value string) string {
 	return strings.TrimSpace(normalizeConfigText(value, " "))
+}
+
+func serviceAliasTargetKey(target ServiceAliasTargetExport) string {
+	name := normalizeConfigAlias(target.Name)
+	if name == "" {
+		return ""
+	}
+	return name + "|" + strconv.Itoa(target.DurationMinutes)
+}
+
+func activeBundleServiceAliasKeys(items []ServiceAliasExport) map[string]bool {
+	out := map[string]bool{}
+	for _, item := range items {
+		if item.Status != "" && item.Status != training.AliasStatusActive {
+			continue
+		}
+		key := normalizeConfigAlias(defaultString(item.NormalizedAlias, item.Alias))
+		if key != "" {
+			out[key] = true
+		}
+	}
+	return out
+}
+
+func activeBundleCategoryAliasKeys(items []ServiceCategoryExport) map[string]bool {
+	out := map[string]bool{}
+	for _, category := range items {
+		for _, item := range category.Aliases {
+			if item.Status != "" && item.Status != pos.ServiceCategoryStatusActive {
+				continue
+			}
+			key := normalizeConfigAlias(defaultString(item.NormalizedAlias, item.Alias))
+			if key != "" {
+				out[key] = true
+			}
+		}
+	}
+	return out
 }
 
 func normalizeConfigText(value string, separator string) string {

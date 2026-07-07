@@ -89,6 +89,10 @@ export function sectionLabel(section: string) {
       return "Integrations";
     case "knowledge_base":
       return "Knowledge base";
+    case "service_categories":
+      return "Service categories";
+    case "service_aliases":
+      return "Service aliases";
     default:
       return section;
   }

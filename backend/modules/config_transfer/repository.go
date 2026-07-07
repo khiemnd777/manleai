@@ -38,6 +38,7 @@ func (r *Repository) TargetImportState(ctx context.Context, salonID string, owne
 	byContentHash := map[string]KnowledgeItemExport{}
 	categoryBySlug := map[string]ServiceCategoryExport{}
 	categoryAliasByKey := map[string]ServiceCategoryAliasExport{}
+	serviceAliasByKey := map[string]ServiceAliasExport{}
 	for _, item := range current.KnowledgeBase.Items {
 		key := strings.TrimSpace(item.SourceKey)
 		if key != "" {
@@ -57,22 +58,40 @@ func (r *Repository) TargetImportState(ctx context.Context, salonID string, owne
 			}
 		}
 	}
+	for _, item := range current.ServiceAliases.Items {
+		key := strings.TrimSpace(item.NormalizedAlias)
+		if key != "" {
+			serviceAliasByKey[key] = item
+		}
+	}
 	activeServiceAliasKeys, err := r.activeServiceAliasKeys(ctx, salonID)
 	if err != nil {
 		return nil, err
 	}
+	activeCategoryAliasKeys, err := r.activeCategoryAliasKeys(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	targetsByKey, ambiguousTargets, err := r.serviceAliasTargets(ctx, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
 	return &importTargetState{
-		SalonProfile:           current.SalonProfile,
-		AIReceptionist:         current.AIReceptionist,
-		PublicBookingPage:      current.PublicBookingPage,
-		PublicCanPublish:       publicCanPublish,
-		CanEnableAIBooking:     canEnableAI,
-		Integrations:           current.Integrations,
-		ServiceCategoryBySlug:  categoryBySlug,
-		CategoryAliasByKey:     categoryAliasByKey,
-		ActiveServiceAliasKeys: activeServiceAliasKeys,
-		KnowledgeByImportKey:   byImportKey,
-		KnowledgeByContentHash: byContentHash,
+		SalonProfile:                 current.SalonProfile,
+		AIReceptionist:               current.AIReceptionist,
+		PublicBookingPage:            current.PublicBookingPage,
+		PublicCanPublish:             publicCanPublish,
+		CanEnableAIBooking:           canEnableAI,
+		Integrations:                 current.Integrations,
+		ServiceCategoryBySlug:        categoryBySlug,
+		CategoryAliasByKey:           categoryAliasByKey,
+		ActiveServiceAliasKeys:       activeServiceAliasKeys,
+		ActiveCategoryAliasKeys:      activeCategoryAliasKeys,
+		ServiceAliasByKey:            serviceAliasByKey,
+		ServiceAliasTargetsByKey:     targetsByKey,
+		AmbiguousServiceAliasTargets: ambiguousTargets,
+		KnowledgeByImportKey:         byImportKey,
+		KnowledgeByContentHash:       byContentHash,
 	}, nil
 }
 
@@ -130,6 +149,66 @@ func (r *Repository) activeServiceAliasKeys(ctx context.Context, salonID string)
 		out[key] = true
 	}
 	return out, rows.Err()
+}
+
+func (r *Repository) activeCategoryAliasKeys(ctx context.Context, salonID string) (map[string]bool, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT normalized_alias
+		FROM service_category_aliases
+		WHERE salon_id = $1
+		  AND status = 'active'
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[string]bool{}
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		key = strings.TrimSpace(key)
+		if key != "" {
+			out[key] = true
+		}
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) serviceAliasTargets(ctx context.Context, salonID string, ownerUserID string) (map[string]importServiceAliasTarget, map[string]bool, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT svc.id::text, svc.name, svc.duration_minutes, COALESCE(svc.price_display, '')
+		FROM services svc
+		WHERE svc.salon_id = $1
+		  AND svc.archived_at IS NULL
+		  AND EXISTS (SELECT 1 FROM salons WHERE salons.id = svc.salon_id AND salons.owner_user_id = $2)
+		ORDER BY svc.name ASC, svc.duration_minutes ASC
+	`, salonID, ownerUserID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	targets := map[string]importServiceAliasTarget{}
+	ambiguous := map[string]bool{}
+	for rows.Next() {
+		var target importServiceAliasTarget
+		if err := rows.Scan(&target.ServiceID, &target.Name, &target.DurationMinutes, &target.PriceDisplay); err != nil {
+			return nil, nil, err
+		}
+		key := serviceAliasTargetKey(ServiceAliasTargetExport{Name: target.Name, DurationMinutes: target.DurationMinutes})
+		if key == "" {
+			continue
+		}
+		if _, exists := targets[key]; exists {
+			ambiguous[key] = true
+			continue
+		}
+		targets[key] = target
+	}
+	return targets, ambiguous, rows.Err()
 }
 
 func (r *Repository) ExistingOnboardingImport(ctx context.Context, ownerUserID string, requestID string, fingerprint string) (string, string, bool, bool, error) {
@@ -198,6 +277,9 @@ func (r *Repository) ApplyImport(ctx context.Context, salonID string, ownerUserI
 		return "", false, err
 	}
 	if err := r.upsertServiceCategories(ctx, tx, salonID, plan.ServiceCategories); err != nil {
+		return "", false, err
+	}
+	if err := r.upsertServiceAliases(ctx, tx, salonID, plan.ServiceAliases); err != nil {
 		return "", false, err
 	}
 	if err := r.upsertKnowledge(ctx, tx, salonID, plan.Knowledge); err != nil {
@@ -279,6 +361,9 @@ func (r *Repository) ApplyOnboardingImport(ctx context.Context, ownerUserID stri
 		return "", "", false, err
 	}
 	if err := r.upsertServiceCategories(ctx, tx, salonID, plan.ServiceCategories); err != nil {
+		return "", "", false, err
+	}
+	if err := r.upsertServiceAliases(ctx, tx, salonID, plan.ServiceAliases); err != nil {
 		return "", "", false, err
 	}
 	if err := r.upsertKnowledge(ctx, tx, salonID, plan.Knowledge); err != nil {
@@ -474,17 +559,24 @@ func upsertTwilioConfig(ctx context.Context, tx *sql.Tx, salonID string, cfg int
 		"incoming_path":   cfg.IncomingPath,
 		"turn_path":       cfg.TurnPath,
 		"recording_path":  cfg.RecordingPath,
+		"stream_path":     cfg.StreamPath,
+		"voice_transport": cfg.VoiceTransport,
 	}
 	return upsertConfigSettings(ctx, tx, salonID, "twilio", true, settings)
 }
 
 func upsertOpenAIConfig(ctx context.Context, tx *sql.Tx, salonID string, cfg integrationconfig.OpenAISettingsResponse) error {
 	settings := map[string]string{
-		"base_url":            cfg.BaseURL,
-		"transcription_model": cfg.TranscriptionModel,
-		"reply_model":         cfg.ReplyModel,
-		"speech_model":        cfg.SpeechModel,
-		"speech_voice":        cfg.SpeechVoice,
+		"base_url":               cfg.BaseURL,
+		"transcription_model":    cfg.TranscriptionModel,
+		"reply_model":            cfg.ReplyModel,
+		"speech_model":           cfg.SpeechModel,
+		"speech_voice":           cfg.SpeechVoice,
+		"realtime_enabled":       boolString(cfg.RealtimeEnabled),
+		"realtime_model":         cfg.RealtimeModel,
+		"realtime_voice":         cfg.RealtimeVoice,
+		"realtime_noise_profile": cfg.RealtimeNoiseProfile,
+		"realtime_instructions":  cfg.RealtimeInstructions,
 	}
 	return upsertConfigSettings(ctx, tx, salonID, "openai", cfg.Enabled, settings)
 }
@@ -588,12 +680,62 @@ func (r *Repository) upsertServiceCategories(ctx context.Context, tx *sql.Tx, sa
 	return nil
 }
 
+func (r *Repository) upsertServiceAliases(ctx context.Context, tx *sql.Tx, salonID string, items []plannedServiceAlias) error {
+	for _, planned := range items {
+		if planned.Operation == "unchanged" || planned.Operation == "skipped" {
+			continue
+		}
+		item := planned.Item
+		if planned.TargetServiceID == "" || item.NormalizedAlias == "" {
+			continue
+		}
+		conflict, err := activeCategoryAliasExistsTx(ctx, tx, salonID, item.NormalizedAlias)
+		if err != nil {
+			return err
+		}
+		if conflict {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO service_aliases (
+				salon_id, service_id, alias, normalized_alias, source, status, confidence, correction_id
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)
+			ON CONFLICT (salon_id, normalized_alias)
+			DO UPDATE SET service_id = EXCLUDED.service_id,
+			              alias = EXCLUDED.alias,
+			              source = EXCLUDED.source,
+			              status = EXCLUDED.status,
+			              confidence = EXCLUDED.confidence,
+			              correction_id = NULL,
+			              updated_at = now()
+		`, salonID, planned.TargetServiceID, item.Alias, item.NormalizedAlias, item.Source, item.Status, item.Confidence); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func activeServiceAliasExistsTx(ctx context.Context, tx *sql.Tx, salonID string, normalizedAlias string) (bool, error) {
 	var exists bool
 	err := tx.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1
 			FROM service_aliases
+			WHERE salon_id = $1
+			  AND normalized_alias = $2
+			  AND status = 'active'
+		)
+	`, salonID, normalizedAlias).Scan(&exists)
+	return exists, err
+}
+
+func activeCategoryAliasExistsTx(ctx context.Context, tx *sql.Tx, salonID string, normalizedAlias string) (bool, error) {
+	var exists bool
+	err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM service_category_aliases
 			WHERE salon_id = $1
 			  AND normalized_alias = $2
 			  AND status = 'active'

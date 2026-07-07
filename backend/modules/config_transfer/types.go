@@ -7,19 +7,21 @@ import (
 )
 
 const (
-	SchemaVersion       = "manleai.salon_configuration.v4"
-	LegacySchemaV3      = "manleai.salon_configuration.v3"
-	LegacySchemaV2      = "manleai.salon_configuration.v2"
-	LegacySchemaV1      = "manleai.salon_configuration.v1"
-	StatusPreviewed     = "previewed"
-	StatusApplied       = "applied"
-	StatusFailed        = "failed"
-	SectionSalon        = "salon_profile"
-	SectionAI           = "ai_receptionist"
-	SectionPublic       = "public_booking_page"
-	SectionIntegrations = "integrations"
-	SectionKnowledge    = "knowledge_base"
-	SectionCategories   = "service_categories"
+	SchemaVersion         = "manleai.salon_configuration.v5"
+	LegacySchemaV4        = "manleai.salon_configuration.v4"
+	LegacySchemaV3        = "manleai.salon_configuration.v3"
+	LegacySchemaV2        = "manleai.salon_configuration.v2"
+	LegacySchemaV1        = "manleai.salon_configuration.v1"
+	StatusPreviewed       = "previewed"
+	StatusApplied         = "applied"
+	StatusFailed          = "failed"
+	SectionSalon          = "salon_profile"
+	SectionAI             = "ai_receptionist"
+	SectionPublic         = "public_booking_page"
+	SectionIntegrations   = "integrations"
+	SectionKnowledge      = "knowledge_base"
+	SectionCategories     = "service_categories"
+	SectionServiceAliases = "service_aliases"
 )
 
 var excludedData = []string{
@@ -34,6 +36,16 @@ var excludedData = []string{
 	"recordings",
 	"summaries",
 	"owner_corrections",
+	"pos_entity_links",
+	"pos_sync_jobs",
+	"pos_sync_logs",
+	"pos_errors",
+	"provider_switch_runs",
+	"provider_switch_matches",
+	"salon_business_hour_periods",
+	"party_booking_requests",
+	"voice_webhook_events",
+	"voice_audio_outputs",
 	"pos_oauth_tokens",
 	"api_keys",
 	"client_secrets",
@@ -53,6 +65,7 @@ type ConfigurationBundle struct {
 	Integrations            integrationconfig.IntegrationConfigsResponse `json:"integrations"`
 	POSConnection           POSConnectionExport                          `json:"pos_connection"`
 	ServiceCategories       ServiceCategoryBundleExport                  `json:"service_categories"`
+	ServiceAliases          ServiceAliasBundleExport                     `json:"service_aliases"`
 	KnowledgeBase           KnowledgeBaseExport                          `json:"knowledge_base"`
 }
 
@@ -137,6 +150,29 @@ type ServiceCategoryAliasExport struct {
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
+type ServiceAliasBundleExport struct {
+	Items []ServiceAliasExport `json:"items"`
+	Count int                  `json:"count"`
+}
+
+type ServiceAliasExport struct {
+	SourceKey       string                   `json:"source_key"`
+	Alias           string                   `json:"alias"`
+	NormalizedAlias string                   `json:"normalized_alias"`
+	TargetService   ServiceAliasTargetExport `json:"target_service"`
+	Source          string                   `json:"source"`
+	Status          string                   `json:"status"`
+	Confidence      float64                  `json:"confidence"`
+	CreatedAt       time.Time                `json:"created_at"`
+	UpdatedAt       time.Time                `json:"updated_at"`
+}
+
+type ServiceAliasTargetExport struct {
+	Name            string `json:"name"`
+	DurationMinutes int    `json:"duration_minutes,omitempty"`
+	PriceDisplay    string `json:"price_display,omitempty"`
+}
+
 type KnowledgeItemExport struct {
 	SourceKey string    `json:"source_key"`
 	Title     string    `json:"title"`
@@ -202,6 +238,7 @@ type importPlan struct {
 	AIEnabled             bool
 	BookingMode           string
 	ServiceCategories     []plannedServiceCategory
+	ServiceAliases        []plannedServiceAlias
 }
 
 type plannedKnowledgeItem struct {
@@ -221,16 +258,33 @@ type plannedServiceCategoryAlias struct {
 	Operation    string
 }
 
+type plannedServiceAlias struct {
+	Item            ServiceAliasExport
+	Operation       string
+	TargetServiceID string
+}
+
+type importServiceAliasTarget struct {
+	ServiceID       string
+	Name            string
+	DurationMinutes int
+	PriceDisplay    string
+}
+
 type importTargetState struct {
-	SalonProfile           SalonProfileExport
-	AIReceptionist         AIReceptionistExport
-	PublicBookingPage      PublicBookingPageExport
-	PublicCanPublish       bool
-	CanEnableAIBooking     bool
-	Integrations           integrationconfig.IntegrationConfigsResponse
-	ServiceCategoryBySlug  map[string]ServiceCategoryExport
-	CategoryAliasByKey     map[string]ServiceCategoryAliasExport
-	ActiveServiceAliasKeys map[string]bool
-	KnowledgeByImportKey   map[string]KnowledgeItemExport
-	KnowledgeByContentHash map[string]KnowledgeItemExport
+	SalonProfile                 SalonProfileExport
+	AIReceptionist               AIReceptionistExport
+	PublicBookingPage            PublicBookingPageExport
+	PublicCanPublish             bool
+	CanEnableAIBooking           bool
+	Integrations                 integrationconfig.IntegrationConfigsResponse
+	ServiceCategoryBySlug        map[string]ServiceCategoryExport
+	CategoryAliasByKey           map[string]ServiceCategoryAliasExport
+	ActiveServiceAliasKeys       map[string]bool
+	ActiveCategoryAliasKeys      map[string]bool
+	ServiceAliasByKey            map[string]ServiceAliasExport
+	ServiceAliasTargetsByKey     map[string]importServiceAliasTarget
+	AmbiguousServiceAliasTargets map[string]bool
+	KnowledgeByImportKey         map[string]KnowledgeItemExport
+	KnowledgeByContentHash       map[string]KnowledgeItemExport
 }
