@@ -4519,8 +4519,8 @@ func TestMessageCompletesMultiTurnPartyPlanFromCategoryClarification(t *testing.
 		t.Fatalf("party plan = %#v, want persisted four-person plan with manicure/pedicure groups", session.PartyPlan)
 	}
 	reply := strings.ToLower(store.lastTurn.AIMessage)
-	if !strings.Contains(reply, "for the two manicures") ||
-		!strings.Contains(reply, "which services would you like") ||
+	if !strings.Contains(reply, "for the two people getting manicures") ||
+		!strings.Contains(reply, "which manicure services should i book") ||
 		!strings.Contains(reply, "classic manicure") ||
 		!strings.Contains(reply, "dip powder manicure") ||
 		!strings.Contains(reply, "gel manicure") ||
@@ -4617,11 +4617,11 @@ func TestMessageDoesNotResolvePartyPlanAffirmativeWithoutSingleOptionPrompt(t *t
 		t.Fatalf("Message returned error: %v", err)
 	}
 	firstReply := strings.ToLower(store.lastTurn.AIMessage)
-	if strings.Contains(firstReply, "should i book") || strings.Contains(firstReply, "noted") {
+	if strings.Contains(firstReply, "should i book one") || strings.Contains(firstReply, "noted") {
 		t.Fatalf("reply should ask an open service choice without debug-style state wording: %s", store.lastTurn.AIMessage)
 	}
-	if !strings.Contains(firstReply, "for the two manicures") ||
-		!strings.Contains(firstReply, "which services would you like") ||
+	if !strings.Contains(firstReply, "for the two people getting manicures") ||
+		!strings.Contains(firstReply, "which manicure services should i book") ||
 		!strings.Contains(firstReply, "classic manicure") ||
 		!strings.Contains(firstReply, "gel manicure") {
 		t.Fatalf("reply should ask an open manicure clarification: %s", store.lastTurn.AIMessage)
@@ -4697,7 +4697,7 @@ func TestMessageKeepsPartyPlanNaturalAcrossMenuRejectionAndGroupQuestions(t *tes
 	if strings.Contains(firstReply, "noted") || strings.Contains(firstReply, "should i book one") {
 		t.Fatalf("initial party prompt should not expose stored date or assume one-each: %s", store.lastTurn.AIMessage)
 	}
-	if !strings.Contains(firstReply, "for the two manicures") || !strings.Contains(firstReply, "which services would you like") {
+	if !strings.Contains(firstReply, "for the two people getting manicures") || !strings.Contains(firstReply, "which manicure services should i book") {
 		t.Fatalf("initial party prompt should ask the active group naturally: %s", store.lastTurn.AIMessage)
 	}
 	if strings.TrimSpace(session.RequestedDate) == "" {
@@ -4717,7 +4717,7 @@ func TestMessageKeepsPartyPlanNaturalAcrossMenuRejectionAndGroupQuestions(t *tes
 	if !strings.Contains(reply, "for pedicures") ||
 		!strings.Contains(reply, "classic pedicure") ||
 		!strings.Contains(reply, "spa pedicure") ||
-		!strings.Contains(reply, "for the two manicures") {
+		!strings.Contains(reply, "for the two people getting manicures") {
 		t.Fatalf("reply should answer the requested group menu, then return to active unresolved group: %s", store.lastTurn.AIMessage)
 	}
 	if strings.Contains(reply, "noted") {
@@ -4778,7 +4778,7 @@ func TestMessageKeepsPartyPlanNaturalAcrossMenuRejectionAndGroupQuestions(t *tes
 		t.Fatalf("booking tools should wait for pedicure group, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
 	}
 	reply = strings.ToLower(store.lastTurn.AIMessage)
-	if !strings.Contains(reply, "for the two pedicures") ||
+	if !strings.Contains(reply, "for the two people getting pedicures") ||
 		!strings.Contains(reply, "classic pedicure") ||
 		!strings.Contains(reply, "spa pedicure") {
 		t.Fatalf("reply should move to unresolved pedicure group: %s", store.lastTurn.AIMessage)
@@ -5457,6 +5457,174 @@ func TestMessagePreservesPartySizeAfterAmbiguousServiceClarification(t *testing.
 	}
 	if got := session.BookingSegments; len(got) != 2 || got[0].ServiceID != "service_gel" || got[1].ServiceID != "service_gel" {
 		t.Fatalf("session booking segments = %#v, want two Gel Manicure segments", got)
+	}
+}
+
+func TestExtractPartyIntentDistinguishesPeopleAndServiceCounts(t *testing.T) {
+	services := []ServiceOption{
+		{ID: "service_classic", Name: "Classic Manicure", DurationMinutes: 45},
+		{ID: "service_gel", Name: "Gel Manicure", DurationMinutes: 45},
+	}
+	tests := []struct {
+		name          string
+		message       string
+		wantParty     bool
+		wantPartySize int
+		wantGroups    int
+		wantReason    string
+	}{
+		{
+			name:          "category for guests",
+			message:       "I need manicures for 2 guests tomorrow.",
+			wantParty:     true,
+			wantPartySize: 2,
+			wantGroups:    1,
+		},
+		{
+			name:          "service counts infer party size",
+			message:       "two classic manicures and one gel manicure tomorrow.",
+			wantParty:     true,
+			wantPartySize: 3,
+			wantGroups:    2,
+		},
+		{
+			name:          "person and service count mismatch",
+			message:       "two people need three classic manicures tomorrow.",
+			wantParty:     true,
+			wantPartySize: 2,
+			wantGroups:    1,
+			wantReason:    partyIntentClarifyReasonServiceCountMismatch,
+		},
+		{
+			name:      "one person is not a party",
+			message:   "one person needs one classic manicure and one gel manicure tomorrow.",
+			wantParty: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := Session{}
+			understanding := interpretServiceForSession(tt.message, session, services, nil, nil)
+			intent := extractPartyIntent(tt.message, session, understanding, services, nil, nil)
+			if !tt.wantParty {
+				if intent.IsParty {
+					t.Fatalf("intent = %#v, want no party intent", intent)
+				}
+				return
+			}
+			if !intent.IsParty || intent.PartySize != tt.wantPartySize || len(intent.Groups) != tt.wantGroups || intent.ClarifyReason != tt.wantReason {
+				t.Fatalf("intent = %#v, want party size %d groups %d reason %q", intent, tt.wantPartySize, tt.wantGroups, tt.wantReason)
+			}
+			if len(intent.Evidence) == 0 {
+				t.Fatalf("intent evidence should explain count role: %#v", intent)
+			}
+		})
+	}
+}
+
+func TestMessageCompletesGuestPartyWithDistinctServicesWithoutHardcodedTranscript(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_classic", Name: "Classic Manicure", DurationMinutes: 45},
+		{ID: "service_gel", Name: "Gel Manicure", DurationMinutes: 45},
+	}
+	slotStart := time.Date(2026, 6, 11, 19, 0, 0, 0, time.UTC)
+	bookingTool := &fakeBookingTool{
+		attempt: &booking.BookingAttempt{
+			ID:           "attempt_guest_party",
+			Status:       booking.StatusConfirmed,
+			POSBookingID: "booking_guest_party",
+			Appointment:  &booking.Appointment{ID: "appointment_guest_party", Status: booking.StatusConfirmed},
+		},
+		availabilityResult: &booking.AvailabilityResult{
+			ServiceID:          "service_classic",
+			ServiceName:        "Classic Manicure",
+			StaffSelectionMode: booking.StaffSelectionAnyone,
+			PreferredDate:      "2026-06-11",
+			DurationMinutes:    90,
+			Timezone:           "America/Chicago",
+			Slots: []booking.AvailabilitySlot{{
+				StartTime:          slotStart,
+				EndTime:            slotStart.Add(90 * time.Minute),
+				StaffID:            "staff_1",
+				StaffName:          "Mai Nguyen",
+				StaffSelectionMode: booking.StaffSelectionAnyone,
+				Segments: []booking.AvailabilitySegment{
+					{ServiceID: "service_classic", ServiceName: "Classic Manicure", StaffID: "staff_1", StaffName: "Mai Nguyen", StaffSelectionMode: booking.StaffSelectionAnyone, DurationMinutes: 45},
+					{ServiceID: "service_gel", ServiceName: "Gel Manicure", StaffID: "staff_2", StaffName: "Lena Pham", StaffSelectionMode: booking.StaffSelectionAnyone, DurationMinutes: 45},
+				},
+			}},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I need manicures for 2 guests tomorrow.",
+	})
+	if err != nil {
+		t.Fatalf("first Message returned error: %v", err)
+	}
+	reply := strings.ToLower(store.lastTurn.AIMessage)
+	if !strings.Contains(reply, "for the two people getting manicures") || strings.Contains(reply, "for the two manicures") {
+		t.Fatalf("reply should frame the count as people, not services: %s", store.lastTurn.AIMessage)
+	}
+	if session.PartyPlan == nil || session.PartyPlan.PartySize != 2 || partyPlanComplete(session.PartyPlan) {
+		t.Fatalf("party plan = %#v, want unresolved two-person manicure plan", session.PartyPlan)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Classic for one and gel for the other.",
+	})
+	if err != nil {
+		t.Fatalf("service selection Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 1 || bookingTool.calls != 0 {
+		t.Fatalf("booking tool calls after service split = availability %d booking %d, want availability only", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if got := bookingTool.availabilityRequest.Segments; len(got) != 2 || got[0].ServiceID != "service_classic" || got[1].ServiceID != "service_gel" {
+		t.Fatalf("availability segments = %#v, want Classic and Gel", got)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "The first one works. My name is Kevin, phone 312-555-0101.",
+	})
+	if err != nil {
+		t.Fatalf("slot selection Message returned error: %v", err)
+	}
+	if bookingTool.calls != 1 {
+		t.Fatalf("booking calls = %d, want 1; reply=%q session=%#v", bookingTool.calls, store.lastTurn.AIMessage, session)
+	}
+	confirmation := store.lastTurn.AIMessage
+	if session.Outcome != OutcomeBookingConfirmed || !strings.Contains(confirmation, "for two people: 1 Classic Manicure and 1 Gel Manicure") {
+		t.Fatalf("confirmation should summarize party by people and services, outcome=%s reply=%s", session.Outcome, confirmation)
+	}
+}
+
+func TestMessageClarifiesPartySizeServiceCountMismatchBeforeAvailability(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_classic", Name: "Classic Manicure", DurationMinutes: 45},
+	}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I need two people and three classic manicures tomorrow.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("booking tools should not run on party mismatch, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if session.PartyPlan == nil || session.PartyPlan.ClarifyReason != partyIntentClarifyReasonServiceCountMismatch || partyPlanComplete(session.PartyPlan) {
+		t.Fatalf("party plan = %#v, want incomplete mismatch plan", session.PartyPlan)
+	}
+	reply := strings.ToLower(store.lastTurn.AIMessage)
+	if !strings.Contains(reply, "i heard two people but three services") {
+		t.Fatalf("reply should ask mismatch clarification: %s", store.lastTurn.AIMessage)
 	}
 }
 

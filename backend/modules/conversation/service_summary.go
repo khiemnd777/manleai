@@ -104,7 +104,11 @@ func confirmedMessage(session Session, services []ServiceOption, staff []StaffOp
 	}
 	parts := []string{}
 	if service != "" {
-		parts = append(parts, "for your "+service)
+		if activePartyPlan(session.PartyPlan) {
+			parts = append(parts, "for "+service)
+		} else {
+			parts = append(parts, "for your "+service)
+		}
 	}
 	if when != "" {
 		parts = append(parts, "on "+when)
@@ -224,7 +228,12 @@ func joinChoiceList(values []string) string {
 }
 
 func serviceSummary(session Session, services []ServiceOption) string {
-	if activePartyPlan(session.PartyPlan) || hasRepeatedBookingService(session.BookingSegments) {
+	if activePartyPlan(session.PartyPlan) {
+		if summary := partyPlanServiceSummary(session, services); summary != "" {
+			return summary
+		}
+	}
+	if hasRepeatedBookingService(session.BookingSegments) {
 		if summary := selectedServiceCountSummary(session, services); summary != "" {
 			return summary
 		}
@@ -234,6 +243,21 @@ func serviceSummary(session Session, services []ServiceOption) string {
 		return joinHumanList(names)
 	}
 	return ""
+}
+
+func partyPlanServiceSummary(session Session, services []ServiceOption) string {
+	if session.PartyPlan == nil || session.PartyPlan.PartySize <= 0 {
+		return ""
+	}
+	people := countWord(session.PartyPlan.PartySize) + " people"
+	if session.PartyPlan.PartySize == 1 {
+		people = "one person"
+	}
+	serviceCounts := selectedServiceCountSummary(session, services)
+	if serviceCounts == "" {
+		return people
+	}
+	return people + ": " + serviceCounts
 }
 
 func hasRepeatedBookingService(segments []booking.BookingSegmentRequest) bool {

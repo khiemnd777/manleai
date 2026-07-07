@@ -354,12 +354,16 @@ type PartyGuestService struct {
 }
 
 type PartyPlan struct {
-	PartySize              int                `json:"party_size,omitempty"`
-	Groups                 []PartyPlanGroup   `json:"groups,omitempty"`
-	SplitOptions           []PartySplitOption `json:"split_options,omitempty"`
-	SelectedSplitOptionID  string             `json:"selected_split_option_id,omitempty"`
-	SplitBookingAttemptIDs []string           `json:"split_booking_attempt_ids,omitempty"`
-	SplitAppointmentIDs    []string           `json:"split_appointment_ids,omitempty"`
+	PartySize              int                 `json:"party_size,omitempty"`
+	Groups                 []PartyPlanGroup    `json:"groups,omitempty"`
+	ParseSource            string              `json:"parse_source,omitempty"`
+	ParseConfidence        float64             `json:"parse_confidence,omitempty"`
+	ClarifyReason          string              `json:"clarify_reason,omitempty"`
+	Evidence               []PartyPlanEvidence `json:"evidence,omitempty"`
+	SplitOptions           []PartySplitOption  `json:"split_options,omitempty"`
+	SelectedSplitOptionID  string              `json:"selected_split_option_id,omitempty"`
+	SplitBookingAttemptIDs []string            `json:"split_booking_attempt_ids,omitempty"`
+	SplitAppointmentIDs    []string            `json:"split_appointment_ids,omitempty"`
 }
 
 type PartyPlanGroup struct {
@@ -367,6 +371,19 @@ type PartyPlanGroup struct {
 	Count               int      `json:"count,omitempty"`
 	CandidateServiceIDs []string `json:"candidate_service_ids,omitempty"`
 	ResolvedServiceIDs  []string `json:"resolved_service_ids,omitempty"`
+	Source              string   `json:"source,omitempty"`
+}
+
+type PartyPlanEvidence struct {
+	Kind       string  `json:"kind,omitempty"`
+	Source     string  `json:"source,omitempty"`
+	Text       string  `json:"text,omitempty"`
+	Value      int     `json:"value,omitempty"`
+	Start      int     `json:"start,omitempty"`
+	End        int     `json:"end,omitempty"`
+	ServiceID  string  `json:"service_id,omitempty"`
+	CategoryID string  `json:"category_id,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
 }
 
 type PartySplitOption struct {

@@ -2,24 +2,15 @@ package conversation
 
 import (
 	"fmt"
-	"github.com/manleai/ai-receptionist/modules/booking"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
+
+	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
 type partyBookingPlan struct {
 	PartySize int
 	Segments  []booking.BookingSegmentRequest
-}
-
-type partyServiceCountMatch struct {
-	Start     int
-	End       int
-	Count     int
-	Service   ServiceOption
-	PhraseLen int
 }
 
 type partyServicePhrase struct {
@@ -66,14 +57,6 @@ type partyPlanPhrase struct {
 	Candidates []ServiceOption
 }
 
-type partyPlanCountMatch struct {
-	Start     int
-	End       int
-	Count     int
-	Phrase    partyPlanPhrase
-	PhraseLen int
-}
-
 type partyPlanServiceSelection struct {
 	Start     int
 	End       int
@@ -87,26 +70,6 @@ func partyPlanFromMessage(message string, services []ServiceOption, aliases []Se
 	if plan, ok := partyPlanFromSignal(signal, session); ok {
 		return plan, true
 	}
-	partySize := partySizeFromMessage(message)
-	groups := partyPlanGroupsFromMessage(message, services, aliases, categoryAliases)
-	if len(groups) > 0 {
-		total := 0
-		for _, group := range groups {
-			total += group.Count
-		}
-		if total < 2 {
-			return nil, false
-		}
-		if partySize > 0 && total != partySize {
-			return nil, false
-		}
-		if partySize == 0 {
-			partySize = total
-		}
-		plan := &PartyPlan{PartySize: partySize, Groups: groups}
-		autoResolveSingleCandidatePartyGroups(plan)
-		return plan, true
-	}
 	if plan, ok := partyBookingPlanFromMessage(message, services, session); ok {
 		return completedPartyPlanFromSegments(plan, services), true
 	}
@@ -114,84 +77,7 @@ func partyPlanFromMessage(message string, services []ServiceOption, aliases []Se
 }
 
 func partyPlanGroupsFromMessage(message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) []PartyPlanGroup {
-	normalized := normalizeServiceText(message)
-	if normalized == "" {
-		return nil
-	}
-	phrases := partyPlanPhrases(services, aliases, categoryAliases)
-	matches := make([]partyPlanCountMatch, 0)
-	for _, phrase := range phrases {
-		if strings.TrimSpace(phrase.Phrase) == "" || len(phrase.Candidates) == 0 {
-			continue
-		}
-		beforePattern := regexp.MustCompile(`\b(` + partyCountTokenPattern() + `)\s+` + regexp.QuoteMeta(phrase.Phrase) + `\b`)
-		for _, indexes := range beforePattern.FindAllStringSubmatchIndex(normalized, -1) {
-			if len(indexes) < 4 {
-				continue
-			}
-			countToken := normalized[indexes[2]:indexes[3]]
-			count, ok := partyCountTokenValue(countToken)
-			if !ok || count < 1 {
-				continue
-			}
-			matches = append(matches, partyPlanCountMatch{
-				Start:     indexes[0],
-				End:       indexes[1],
-				Count:     count,
-				Phrase:    phrase,
-				PhraseLen: len(phrase.Phrase),
-			})
-		}
-		afterPattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(phrase.Phrase) + `\s+(?:for\s+)?(` + partyCountTokenPattern() + `)\s+(?:people|persons|guests|clients|appointments)\b`)
-		for _, indexes := range afterPattern.FindAllStringSubmatchIndex(normalized, -1) {
-			if len(indexes) < 4 {
-				continue
-			}
-			countToken := normalized[indexes[2]:indexes[3]]
-			count, ok := partyCountTokenValue(countToken)
-			if !ok || count < 1 {
-				continue
-			}
-			matches = append(matches, partyPlanCountMatch{
-				Start:     indexes[0],
-				End:       indexes[1],
-				Count:     count,
-				Phrase:    phrase,
-				PhraseLen: len(phrase.Phrase),
-			})
-		}
-	}
-	if len(matches) == 0 {
-		return nil
-	}
-	sort.SliceStable(matches, func(i, j int) bool {
-		if matches[i].Start == matches[j].Start {
-			return matches[i].PhraseLen > matches[j].PhraseLen
-		}
-		return matches[i].Start < matches[j].Start
-	})
-	accepted := make([]partyPlanCountMatch, 0, len(matches))
-	for _, match := range matches {
-		if partyPlanCountMatchOverlaps(accepted, match) {
-			continue
-		}
-		accepted = append(accepted, match)
-	}
-	groups := make([]PartyPlanGroup, 0, len(accepted))
-	for _, match := range accepted {
-		group := PartyPlanGroup{
-			Label:               partyPlanGroupLabel(match.Phrase),
-			Count:               match.Count,
-			CandidateServiceIDs: serviceIDsFromOptions(match.Phrase.Candidates),
-		}
-		if len(group.CandidateServiceIDs) == 1 {
-			group.ResolvedServiceIDs = repeatedString(group.CandidateServiceIDs[0], group.Count)
-		}
-		if group.Count > 0 && len(group.CandidateServiceIDs) > 0 {
-			groups = append(groups, group)
-		}
-	}
-	return groups
+	return partyIntentGroupsFromMessage(message, services, aliases, categoryAliases)
 }
 
 func partyPlanPhrases(services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) []partyPlanPhrase {
@@ -313,15 +199,6 @@ func partyPlanGroupLabel(phrase partyPlanPhrase) string {
 	return singularServiceToken(parts[len(parts)-1])
 }
 
-func partyPlanCountMatchOverlaps(accepted []partyPlanCountMatch, candidate partyPlanCountMatch) bool {
-	for _, item := range accepted {
-		if candidate.Start < item.End && item.Start < candidate.End {
-			return true
-		}
-	}
-	return false
-}
-
 func completedPartyPlanFromSegments(plan partyBookingPlan, services []ServiceOption) *PartyPlan {
 	if len(plan.Segments) == 0 {
 		return nil
@@ -346,6 +223,7 @@ func completedPartyPlanFromSegments(plan partyBookingPlan, services []ServiceOpt
 			Count:               1,
 			CandidateServiceIDs: []string{serviceID},
 			ResolvedServiceIDs:  []string{serviceID},
+			Source:              partyIntentSourceServiceGroupCount,
 		})
 	}
 	if len(groups) == 0 {
@@ -371,6 +249,10 @@ func clonePartyPlan(plan *PartyPlan) *PartyPlan {
 	out := &PartyPlan{
 		PartySize:              plan.PartySize,
 		Groups:                 make([]PartyPlanGroup, 0, len(plan.Groups)),
+		ParseSource:            plan.ParseSource,
+		ParseConfidence:        plan.ParseConfidence,
+		ClarifyReason:          plan.ClarifyReason,
+		Evidence:               append([]PartyPlanEvidence(nil), plan.Evidence...),
 		SplitOptions:           make([]PartySplitOption, 0, len(plan.SplitOptions)),
 		SelectedSplitOptionID:  plan.SelectedSplitOptionID,
 		SplitBookingAttemptIDs: append([]string(nil), plan.SplitBookingAttemptIDs...),
@@ -382,6 +264,7 @@ func clonePartyPlan(plan *PartyPlan) *PartyPlan {
 			Count:               group.Count,
 			CandidateServiceIDs: append([]string(nil), group.CandidateServiceIDs...),
 			ResolvedServiceIDs:  append([]string(nil), group.ResolvedServiceIDs...),
+			Source:              group.Source,
 		})
 	}
 	for _, option := range plan.SplitOptions {
@@ -408,6 +291,9 @@ func clonePartyPlan(plan *PartyPlan) *PartyPlan {
 
 func partyPlanComplete(plan *PartyPlan) bool {
 	if plan == nil || plan.PartySize < 2 || len(plan.Groups) == 0 {
+		return false
+	}
+	if strings.TrimSpace(plan.ClarifyReason) != "" {
 		return false
 	}
 	total := 0
@@ -816,6 +702,9 @@ func partyPlanSegments(plan *PartyPlan, session Session) []booking.BookingSegmen
 }
 
 func partyPlanClarificationPrompt(session Session, plan *PartyPlan, services []ServiceOption, cfg *RuntimeConfig) string {
+	if strings.TrimSpace(plan.ClarifyReason) == partyIntentClarifyReasonServiceCountMismatch {
+		return partyPlanMismatchPrompt(plan)
+	}
 	groupIndex := firstUnresolvedPartyPlanGroup(plan)
 	if groupIndex < 0 {
 		return "Which service would you like for the group appointment?"
@@ -834,14 +723,13 @@ func partyPlanClarificationPrompt(session Session, plan *PartyPlan, services []S
 	if remaining < 1 {
 		remaining = group.Count
 	}
-	countLabel := partyPlanCountLabel(remaining, label)
 	switch {
 	case len(options) == 1:
-		return "Should I book " + serviceCountSpeech(remaining, options[0]) + "?"
+		return "Should I book " + serviceCountSpeech(remaining, options[0]) + " for " + partyPlanPeopleScope(plan, group, remaining) + "?"
 	case remaining > 1:
-		return "For " + countLabel + ", which services would you like: " + joinChoiceList(options) + "?"
+		return "For " + partyPlanPeopleScope(plan, group, remaining) + ", which " + label + " services should I book: " + joinChoiceList(options) + "?"
 	default:
-		return "Which " + label + " service would you like: " + joinChoiceList(options) + "?"
+		return "Which " + label + " service should I book for " + partyPlanPeopleScope(plan, group, remaining) + ": " + joinChoiceList(options) + "?"
 	}
 }
 
@@ -873,23 +761,34 @@ func partyPlanDeclinesServiceSuggestion(message string) bool {
 		strings.Contains(normalized, "do not want that")
 }
 
-func partyPlanCountLabel(count int, label string) string {
-	label = strings.TrimSpace(label)
-	if label == "" {
-		label = "service"
+func partyPlanPeopleScope(plan *PartyPlan, group PartyPlanGroup, remaining int) string {
+	count := remaining
+	if count <= 0 {
+		count = group.Count
 	}
-	switch count {
-	case 1:
-		return "the " + label
-	case 2:
-		return "the two " + pluralServicePhrase(label)
-	case 3:
-		return "the three " + pluralServicePhrase(label)
-	case 4:
-		return "the four " + pluralServicePhrase(label)
-	default:
-		return fmt.Sprintf("the %d %s", count, pluralServicePhrase(label))
+	if count <= 0 && plan != nil {
+		count = plan.PartySize
 	}
+	people := "the " + countWord(count) + " people"
+	if count == 1 {
+		people = "the remaining person"
+	}
+	label := strings.TrimSpace(group.Label)
+	if label == "" || normalizeServiceText(label) == "service" {
+		return people
+	}
+	return people + " getting " + pluralServicePhrase(label)
+}
+
+func partyPlanMismatchPrompt(plan *PartyPlan) string {
+	if plan == nil {
+		return "I want to make sure I book the right group size. How many people need appointments, and which services should each person get?"
+	}
+	serviceTotal := partyPlanGroupsTotal(plan.Groups)
+	if serviceTotal > 0 && plan.PartySize > 0 {
+		return "I heard " + countWord(plan.PartySize) + " people but " + countWord(serviceTotal) + " services. How many people need appointments, and which services should each person get?"
+	}
+	return "I want to make sure I book the right group size. How many people need appointments, and which services should each person get?"
 }
 
 func serviceCountSpeech(count int, service string) string {
@@ -963,9 +862,13 @@ func applyPartyPlanMetadata(turn *TurnRecord, plan *PartyPlan) {
 		return
 	}
 	turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, map[string]any{
-		"party_plan_active":     true,
-		"party_plan_complete":   partyPlanComplete(plan),
-		"party_plan_party_size": plan.PartySize,
+		"party_plan_active":      true,
+		"party_plan_complete":    partyPlanComplete(plan),
+		"party_plan_party_size":  plan.PartySize,
+		"party_parse_source":     plan.ParseSource,
+		"party_parse_confidence": plan.ParseConfidence,
+		"party_clarify_reason":   plan.ClarifyReason,
+		"party_evidence":         plan.Evidence,
 	})
 }
 
@@ -1006,73 +909,7 @@ func nonEmptyStrings(values []string) []string {
 }
 
 func partyServiceCountSegmentsFromMessage(message string, services []ServiceOption, session Session) []booking.BookingSegmentRequest {
-	normalized := normalizeServiceText(message)
-	if normalized == "" {
-		return nil
-	}
-	phrases := partyServicePhrases(services)
-	matches := make([]partyServiceCountMatch, 0)
-	for _, phrase := range phrases {
-		pattern := regexp.MustCompile(`\b(` + partyCountTokenPattern() + `)\s+` + regexp.QuoteMeta(phrase.Phrase) + `\b`)
-		for _, indexes := range pattern.FindAllStringSubmatchIndex(normalized, -1) {
-			if len(indexes) < 4 {
-				continue
-			}
-			countToken := normalized[indexes[2]:indexes[3]]
-			count, ok := partyCountTokenValue(countToken)
-			if !ok || count < 1 {
-				continue
-			}
-			matches = append(matches, partyServiceCountMatch{
-				Start:     indexes[0],
-				End:       indexes[1],
-				Count:     count,
-				Service:   phrase.Service,
-				PhraseLen: len(phrase.Phrase),
-			})
-		}
-	}
-	if len(matches) == 0 {
-		return nil
-	}
-	sort.SliceStable(matches, func(i, j int) bool {
-		if matches[i].Start == matches[j].Start {
-			return matches[i].PhraseLen > matches[j].PhraseLen
-		}
-		return matches[i].Start < matches[j].Start
-	})
-	accepted := make([]partyServiceCountMatch, 0, len(matches))
-	for _, match := range matches {
-		if partyCountMatchOverlaps(accepted, match) {
-			continue
-		}
-		accepted = append(accepted, match)
-	}
-	mode := staffSelectionModeForServiceRequest(session)
-	staffID := strings.TrimSpace(session.StaffID)
-	if mode == booking.StaffSelectionAnyone {
-		staffID = ""
-	}
-	segments := make([]booking.BookingSegmentRequest, 0)
-	for _, match := range accepted {
-		for i := 0; i < match.Count; i++ {
-			segments = append(segments, booking.BookingSegmentRequest{
-				ServiceID:          strings.TrimSpace(match.Service.ID),
-				StaffID:            staffID,
-				StaffSelectionMode: mode,
-			})
-		}
-	}
-	return segments
-}
-
-func partyCountMatchOverlaps(accepted []partyServiceCountMatch, candidate partyServiceCountMatch) bool {
-	for _, item := range accepted {
-		if candidate.Start < item.End && item.Start < candidate.End {
-			return true
-		}
-	}
-	return false
+	return partyServiceCountSegmentsFromIntent(message, services, session)
 }
 
 func partySegmentsForService(service ServiceOption, count int, session Session) []booking.BookingSegmentRequest {
@@ -1202,39 +1039,6 @@ func singularServiceToken(token string) string {
 	default:
 		return token
 	}
-}
-
-func partyCountTokenPattern() string {
-	return `[1-9]|one|two|three|four|five|six|seven|eight|nine`
-}
-
-func partyCountTokenValue(token string) (int, bool) {
-	token = strings.TrimSpace(strings.ToLower(token))
-	switch token {
-	case "one":
-		return 1, true
-	case "two":
-		return 2, true
-	case "three":
-		return 3, true
-	case "four":
-		return 4, true
-	case "five":
-		return 5, true
-	case "six":
-		return 6, true
-	case "seven":
-		return 7, true
-	case "eight":
-		return 8, true
-	case "nine":
-		return 9, true
-	}
-	value, err := strconv.Atoi(token)
-	if err != nil || value < 1 || value > 9 {
-		return 0, false
-	}
-	return value, true
 }
 
 func applyPartyBookingPlan(session *Session, plan partyBookingPlan) bool {

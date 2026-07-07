@@ -1,15 +1,15 @@
 package conversation
 
-import (
-	"regexp"
-	"strings"
-)
+import "strings"
 
 type partySignal struct {
-	IsParty   bool
-	PartySize int
-	Groups    []partySignalGroup
-	Source    string
+	IsParty       bool
+	PartySize     int
+	Groups        []partySignalGroup
+	Source        string
+	Confidence    float64
+	ClarifyReason string
+	Evidence      []PartyPlanEvidence
 }
 
 type partySignalGroup struct {
@@ -21,83 +21,34 @@ type partySignalGroup struct {
 }
 
 func detectPartySignal(message string, session Session, serviceUnderstanding serviceUnderstandingResult, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) partySignal {
-	partySize, sizeSource, hasSize := extractPartySize(message)
-	groups := partyPlanGroupsFromMessage(message, services, aliases, categoryAliases)
-	if len(groups) > 0 {
-		total := partyPlanGroupsTotal(groups)
-		if total < 2 {
-			return partySignal{}
-		}
-		if hasSize && partySize > 0 && partySize != total {
-			return partySignal{}
-		}
-		if partySize == 0 {
-			partySize = total
-			sizeSource = "service_group_counts"
-		}
-		return partySignal{
-			IsParty:   true,
-			PartySize: partySize,
-			Groups:    partySignalGroupsFromPlanGroups(groups, "service_group_counts"),
-			Source:    sizeSource,
-		}
-	}
-	if !hasSize || partySize < 2 {
+	intent := extractPartyIntent(message, session, serviceUnderstanding, services, aliases, categoryAliases)
+	if !intent.IsParty {
 		return partySignal{}
 	}
-	group := partySignalGroupFromUnderstanding(partySize, session, serviceUnderstanding, services)
-	if group.Count <= 0 {
-		return partySignal{}
+	groups := make([]partySignalGroup, 0, len(intent.Groups))
+	for _, group := range intent.Groups {
+		groups = append(groups, partySignalGroup{
+			Count:               group.Count,
+			Label:               group.Label,
+			CandidateServiceIDs: append([]string(nil), group.CandidateServiceIDs...),
+			ResolvedServiceIDs:  append([]string(nil), group.ResolvedServiceIDs...),
+			Source:              group.Source,
+		})
 	}
 	return partySignal{
-		IsParty:   true,
-		PartySize: partySize,
-		Groups:    []partySignalGroup{group},
-		Source:    sizeSource,
+		IsParty:       true,
+		PartySize:     intent.PartySize,
+		Groups:        groups,
+		Source:        intent.Source,
+		Confidence:    intent.Confidence,
+		ClarifyReason: intent.ClarifyReason,
+		Evidence:      append([]PartyPlanEvidence(nil), intent.Evidence...),
 	}
 }
 
 func extractPartySize(message string) (int, string, bool) {
-	normalized := normalizeLooseText(message)
-	if normalized == "" {
-		return 0, "", false
-	}
-	if containsLoosePhrase(normalized, "my friend and i") ||
-		containsLoosePhrase(normalized, "me and my friend") ||
-		containsLoosePhrase(normalized, "my client and i") ||
-		containsLoosePhrase(normalized, "me and my client") {
-		return 2, "me_and_one", true
-	}
-	if containsLoosePhrase(normalized, "me and two friends") ||
-		containsLoosePhrase(normalized, "me and two clients") ||
-		containsLoosePhrase(normalized, "me and two guests") {
-		return 3, "me_and_two", true
-	}
-	if containsLoosePhrase(normalized, "me and three friends") ||
-		containsLoosePhrase(normalized, "me and three clients") ||
-		containsLoosePhrase(normalized, "me and three guests") {
-		return 4, "me_and_three", true
-	}
-
-	patterns := []struct {
-		Source  string
-		Pattern *regexp.Regexp
-	}{
-		{"party_of", regexp.MustCompile(`\b(?:party|group)\s+of\s+(` + partyCountTokenPattern() + `)\b`)},
-		{"for_people", regexp.MustCompile(`\bfor\s+(` + partyCountTokenPattern() + `)\s+(?:people|persons|guests|clients)\b`)},
-		{"people", regexp.MustCompile(`\b(` + partyCountTokenPattern() + `)\s+(?:people|persons|guests|clients)\b`)},
-		{"appointments", regexp.MustCompile(`\b(` + partyCountTokenPattern() + `)\s+appointments\b`)},
-	}
-	for _, pattern := range patterns {
-		matches := pattern.Pattern.FindStringSubmatch(normalized)
-		if len(matches) != 2 {
-			continue
-		}
-		if value, ok := partyCountTokenValue(matches[1]); ok {
-			return value, pattern.Source, true
-		}
-	}
-	return 0, "", false
+	size, source, _, ok := extractPartyPersonCount(normalizeLooseText(message))
+	return size, source, ok
 }
 
 func partyPlanFromSignal(signal partySignal, session Session) (*PartyPlan, bool) {
@@ -115,6 +66,7 @@ func partyPlanFromSignal(signal partySignal, session Session) (*PartyPlan, bool)
 			Count:               signalGroup.Count,
 			CandidateServiceIDs: nonEmptyStrings(signalGroup.CandidateServiceIDs),
 			ResolvedServiceIDs:  nonEmptyStrings(signalGroup.ResolvedServiceIDs),
+			Source:              strings.TrimSpace(signalGroup.Source),
 		}
 		if group.Label == "" {
 			group.Label = "service"
@@ -128,10 +80,20 @@ func partyPlanFromSignal(signal partySignal, session Session) (*PartyPlan, bool)
 		total += group.Count
 		groups = append(groups, group)
 	}
-	if total != signal.PartySize || len(groups) == 0 {
+	if len(groups) == 0 {
 		return nil, false
 	}
-	plan := &PartyPlan{PartySize: signal.PartySize, Groups: groups}
+	plan := &PartyPlan{
+		PartySize:       signal.PartySize,
+		Groups:          groups,
+		ParseSource:     signal.Source,
+		ParseConfidence: signal.Confidence,
+		ClarifyReason:   signal.ClarifyReason,
+		Evidence:        append([]PartyPlanEvidence(nil), signal.Evidence...),
+	}
+	if total != signal.PartySize && signal.ClarifyReason != partyIntentClarifyReasonServiceCountMismatch {
+		return nil, false
+	}
 	autoResolveSingleCandidatePartyGroups(plan)
 	return plan, true
 }
