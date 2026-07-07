@@ -7,14 +7,14 @@ import (
 )
 
 func shouldHandoff(message string) bool {
-	lower := strings.ToLower(message)
+	normalized := normalizeLooseText(message)
 	triggers := []string{
 		"human", "owner", "manager", "person", "representative", "complaint",
-		"refund", "payment dispute", "dispute", "chargeback", "wedding", "party",
+		"refund", "payment dispute", "dispute", "chargeback", "wedding",
 		"talk to someone", "speak to someone",
 	}
 	for _, trigger := range triggers {
-		if strings.Contains(lower, trigger) {
+		if containsLoosePhrase(normalized, trigger) {
 			return true
 		}
 	}
@@ -47,71 +47,11 @@ func shouldComplaintHandoff(message string) bool {
 	return false
 }
 
-func shouldGroupBookingHandoff(message string) bool {
-	lower := strings.ToLower(message)
+func hasBookingVerbSignal(message string) bool {
 	normalized := normalizeLooseText(message)
-	triggers := []string{
-		"group booking",
-		"large group",
-		"me and my friend",
-		"my friend and i",
-		"me and two friends",
-		"me and three friends",
-		"my friends and i",
-		"for me and",
-		"for my friends",
-		"party of",
-		"appointments",
-	}
-	for _, trigger := range triggers {
-		if strings.Contains(lower, trigger) || strings.Contains(normalized, trigger) {
-			if strings.Contains(trigger, "appointments") && !containsMultiAppointmentQuantity(normalized) {
-				continue
-			}
-			return true
-		}
-	}
-	return containsMultiPersonQuantity(normalized)
-}
-
-func containsMultiAppointmentQuantity(normalized string) bool {
-	return strings.Contains(normalized, "two appointments") ||
-		strings.Contains(normalized, "three appointments") ||
-		strings.Contains(normalized, "four appointments") ||
-		strings.Contains(normalized, "2 appointments") ||
-		strings.Contains(normalized, "3 appointments") ||
-		strings.Contains(normalized, "4 appointments")
-}
-
-func containsMultiPersonQuantity(normalized string) bool {
-	patterns := []string{
-		"for 2 people",
-		"for 3 people",
-		"for 4 people",
-		"for two people",
-		"for three people",
-		"for four people",
-		"two people",
-		"three people",
-		"four people",
-	}
-	for _, pattern := range patterns {
-		if strings.Contains(normalized, pattern) {
-			return true
-		}
-	}
-	return false
-}
-
-func groupBookingHandoffReply() string {
-	return "For multiple people, the owner needs to coordinate the services, timing, and technicians. I'll send this request to the owner to review. This is not a confirmed appointment."
-}
-
-func hasBookingSignal(message string) bool {
-	lower := strings.ToLower(message)
-	signals := []string{"book", "booking", "appointment", "schedule", "reschedule", "manicure", "pedicure", "nail", "acrylic", "gel"}
+	signals := []string{"book", "booking", "appointment", "schedule", "reschedule"}
 	for _, signal := range signals {
-		if strings.Contains(lower, signal) {
+		if containsLoosePhrase(normalized, signal) {
 			return true
 		}
 	}
@@ -392,7 +332,7 @@ func addServiceName(names *[]string, seen map[string]bool, name string) {
 	*names = append(*names, name)
 }
 
-func selectRescheduleCandidate(message string, candidates []RescheduleCandidate, loc *time.Location, now func() time.Time) *RescheduleCandidate {
+func selectRescheduleCandidate(message string, candidates []RescheduleCandidate, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, loc *time.Location, now func() time.Time) *RescheduleCandidate {
 	if len(candidates) == 0 {
 		return nil
 	}
@@ -402,7 +342,7 @@ func selectRescheduleCandidate(message string, candidates []RescheduleCandidate,
 	if selected := selectRescheduleCandidateByDateTime(message, candidates, loc, now); selected != nil {
 		return selected
 	}
-	if selected := selectRescheduleCandidateByService(message, candidates); selected != nil {
+	if selected := selectRescheduleCandidateByService(message, candidates, services, aliases, categoryAliases); selected != nil {
 		return selected
 	}
 	if selected := selectRescheduleCandidateByOrdinal(message, candidates); selected != nil {
@@ -469,19 +409,24 @@ func selectRescheduleCandidateByClock(message string, candidates []RescheduleCan
 	return nil
 }
 
-func selectRescheduleCandidateByService(message string, candidates []RescheduleCandidate) *RescheduleCandidate {
-	messageFamilies := rescheduleServiceFamilies(message)
-	if len(messageFamilies) == 0 {
+func selectRescheduleCandidateByService(message string, candidates []RescheduleCandidate, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) *RescheduleCandidate {
+	servicePool := rescheduleCandidateServicePool(candidates, services)
+	if len(servicePool) == 0 {
 		return nil
+	}
+	result := interpretServiceWithCategoryAliases(message, servicePool, aliases, categoryAliases)
+	matchedServiceIDs := serviceIDsFromServiceUnderstanding(result)
+	if len(matchedServiceIDs) == 0 {
+		return nil
+	}
+	matched := map[string]bool{}
+	for _, serviceID := range matchedServiceIDs {
+		matched[strings.TrimSpace(serviceID)] = true
 	}
 	matches := make([]int, 0, len(candidates))
 	for i := range candidates {
-		candidateFamilies := rescheduleServiceFamilies(candidates[i].ServiceLabel)
-		for family := range messageFamilies {
-			if candidateFamilies[family] {
-				matches = append(matches, i)
-				break
-			}
+		if rescheduleCandidateHasService(candidates[i], matched) {
+			matches = append(matches, i)
 		}
 	}
 	if len(matches) == 1 {
@@ -490,22 +435,57 @@ func selectRescheduleCandidateByService(message string, candidates []RescheduleC
 	return nil
 }
 
-func rescheduleServiceFamilies(value string) map[string]bool {
-	normalized := normalizeServiceText(value)
-	families := map[string]bool{}
-	for _, token := range strings.Fields(normalized) {
-		switch token {
-		case "mani", "manis", "manicure", "manicures":
-			families["manicure"] = true
-		case "pedi", "pedis", "pedicure", "pedicures":
-			families["pedicure"] = true
-		default:
-			if len([]rune(token)) >= 4 {
-				families[token] = true
+func serviceIDsFromServiceUnderstanding(result serviceUnderstandingResult) []string {
+	switch result.Status {
+	case serviceUnderstandingStatusSelected, serviceUnderstandingStatusAmbiguous:
+		return serviceIDsFromOptions(result.Candidates)
+	default:
+		return nil
+	}
+}
+
+func rescheduleCandidateServicePool(candidates []RescheduleCandidate, services []ServiceOption) []ServiceOption {
+	servicesByID := map[string]ServiceOption{}
+	for _, service := range services {
+		serviceID := strings.TrimSpace(service.ID)
+		if serviceID == "" {
+			continue
+		}
+		servicesByID[serviceID] = service
+	}
+	pool := make([]ServiceOption, 0, len(services))
+	for _, candidate := range candidates {
+		for _, serviceID := range rescheduleCandidateServiceIDs(candidate) {
+			service, ok := servicesByID[serviceID]
+			if !ok {
+				service = ServiceOption{ID: serviceID, Name: strings.TrimSpace(candidate.ServiceLabel)}
 			}
+			pool = appendUniqueService(pool, service)
 		}
 	}
-	return families
+	return orderedServices(pool)
+}
+
+func rescheduleCandidateServiceIDs(candidate RescheduleCandidate) []string {
+	ids := make([]string, 0, 1+len(candidate.Segments))
+	if serviceID := strings.TrimSpace(candidate.ServiceID); serviceID != "" {
+		ids = append(ids, serviceID)
+	}
+	for _, segment := range candidate.Segments {
+		if serviceID := strings.TrimSpace(segment.ServiceID); serviceID != "" {
+			ids = append(ids, serviceID)
+		}
+	}
+	return uniqueStrings(ids)
+}
+
+func rescheduleCandidateHasService(candidate RescheduleCandidate, serviceIDs map[string]bool) bool {
+	for _, serviceID := range rescheduleCandidateServiceIDs(candidate) {
+		if serviceIDs[strings.TrimSpace(serviceID)] {
+			return true
+		}
+	}
+	return false
 }
 
 func selectRescheduleCandidateByOrdinal(message string, candidates []RescheduleCandidate) *RescheduleCandidate {

@@ -877,18 +877,28 @@ func TestMessageRescheduleSelectsTargetBySpokenDateTimeBeforeNewSlot(t *testing.
 	}
 }
 
-func TestMessageRescheduleSelectsTargetByServiceFamily(t *testing.T) {
+func TestMessageRescheduleSelectsTargetByServiceAlias(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = []ServiceOption{
-		{ID: "service_manicure", Name: "Classic Manicure", DurationMinutes: 45},
-		{ID: "service_pedicure", Name: "Classic Pedicure", DurationMinutes: 45},
+		{ID: "service_shell", Name: "Shell Polish", DurationMinutes: 45},
+		{ID: "service_spa", Name: "Spa Foot Care", DurationMinutes: 45},
 	}
+	store.serviceAliases = []ServiceAlias{{
+		ID:              "alias_chrome",
+		ServiceID:       "service_shell",
+		ServiceName:     "Shell Polish",
+		Alias:           "chrome shine",
+		NormalizedAlias: "chrome shine",
+		Source:          "owner",
+		Confidence:      1,
+	}}
+	store.categoryAliases = nil
 	store.session.BookingAction = BookingActionReschedule
 	store.session.Intent = IntentBooking
 	store.session.CustomerPhone = "+13125550101"
 	candidates := []booking.AppointmentActionRef{
-		testRescheduleAppointmentAt("appointment_manicure", "service_manicure", "Classic Manicure", time.Date(2026, 7, 6, 18, 0, 0, 0, time.UTC)),
-		testRescheduleAppointmentAt("appointment_pedicure", "service_pedicure", "Classic Pedicure", time.Date(2026, 7, 6, 18, 30, 0, 0, time.UTC)),
+		testRescheduleAppointmentAt("appointment_shell", "service_shell", "Shell Polish", time.Date(2026, 7, 6, 18, 0, 0, 0, time.UTC)),
+		testRescheduleAppointmentAt("appointment_spa", "service_spa", "Spa Foot Care", time.Date(2026, 7, 6, 18, 30, 0, 0, time.UTC)),
 	}
 	store.session.RescheduleCandidates = rescheduleCandidatesFromAppointments(candidates)
 	bookingTool := &fakeBookingTool{}
@@ -896,19 +906,134 @@ func TestMessageRescheduleSelectsTargetByServiceFamily(t *testing.T) {
 	service.now = fixedNow
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
-		Message: "regular pedi",
+		Message: "chrome shine",
 	})
 	if err != nil {
 		t.Fatalf("Message returned error: %v", err)
 	}
-	if session.TargetAppointmentID != "appointment_pedicure" {
-		t.Fatalf("target appointment = %s, want appointment_pedicure", session.TargetAppointmentID)
+	if session.TargetAppointmentID != "appointment_shell" {
+		t.Fatalf("target appointment = %s, want appointment_shell", session.TargetAppointmentID)
 	}
-	if session.ServiceID != "service_pedicure" {
-		t.Fatalf("service = %s, want service_pedicure", session.ServiceID)
+	if session.ServiceID != "service_shell" {
+		t.Fatalf("service = %s, want service_shell", session.ServiceID)
 	}
 	if session.RequestedStartTime != nil {
 		t.Fatalf("service target selection should not set a new time: %v", session.RequestedStartTime)
+	}
+}
+
+func TestMessageCancelSelectsTargetByCategoryAlias(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_shell", Name: "Shell Polish", CategoryID: "cat_finish", CategoryName: "Finish Services", DurationMinutes: 45},
+		{ID: "service_spa", Name: "Spa Foot Care", CategoryID: "cat_care", CategoryName: "Care Services", DurationMinutes: 45},
+	}
+	store.categoryAliases = []ServiceCategoryAlias{{
+		ID:              "category_alias_finish",
+		CategoryID:      "cat_finish",
+		CategoryName:    "Finish Services",
+		Alias:           "finishing",
+		NormalizedAlias: "finishing",
+		Source:          "owner",
+		Confidence:      1,
+	}}
+	store.session.BookingAction = BookingActionCancel
+	store.session.Intent = IntentBooking
+	store.session.CustomerPhone = "+13125550101"
+	candidates := []booking.AppointmentActionRef{
+		testRescheduleAppointmentAt("appointment_shell", "service_shell", "Shell Polish", time.Date(2026, 7, 6, 18, 0, 0, 0, time.UTC)),
+		testRescheduleAppointmentAt("appointment_spa", "service_spa", "Spa Foot Care", time.Date(2026, 7, 6, 18, 30, 0, 0, time.UTC)),
+	}
+	store.session.RescheduleCandidates = rescheduleCandidatesFromAppointments(candidates)
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "cancel the finishing one",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.TargetAppointmentID != "appointment_shell" {
+		t.Fatalf("target appointment = %s, want appointment_shell", session.TargetAppointmentID)
+	}
+	if bookingTool.cancelCalls != 0 {
+		t.Fatalf("cancel calls = %d, want confirmation before POS cancel", bookingTool.cancelCalls)
+	}
+	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "is this the appointment") {
+		t.Fatalf("AI message = %q, want cancellation target confirmation", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageRescheduleCategoryAliasDoesNotSelectAmbiguousTarget(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_shell", Name: "Shell Polish", CategoryID: "cat_finish", CategoryName: "Finish Services", DurationMinutes: 45},
+		{ID: "service_lacquer", Name: "Lacquer Refresh", CategoryID: "cat_finish", CategoryName: "Finish Services", DurationMinutes: 30},
+	}
+	store.categoryAliases = []ServiceCategoryAlias{{
+		ID:              "category_alias_finish",
+		CategoryID:      "cat_finish",
+		CategoryName:    "Finish Services",
+		Alias:           "finish work",
+		NormalizedAlias: "finish work",
+		Source:          "owner",
+		Confidence:      1,
+	}}
+	store.session.BookingAction = BookingActionReschedule
+	store.session.Intent = IntentBooking
+	store.session.CustomerPhone = "+13125550101"
+	candidates := []booking.AppointmentActionRef{
+		testRescheduleAppointmentAt("appointment_shell", "service_shell", "Shell Polish", time.Date(2026, 7, 6, 18, 0, 0, 0, time.UTC)),
+		testRescheduleAppointmentAt("appointment_lacquer", "service_lacquer", "Lacquer Refresh", time.Date(2026, 7, 6, 18, 30, 0, 0, time.UTC)),
+	}
+	store.session.RescheduleCandidates = rescheduleCandidatesFromAppointments(candidates)
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "finish work",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.TargetAppointmentID != "" {
+		t.Fatalf("target appointment = %s, want still unselected", session.TargetAppointmentID)
+	}
+	if bookingTool.rescheduleCalls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("calls = reschedule %d availability %d, want none before target is clear", bookingTool.rescheduleCalls, bookingTool.availabilityCalls)
+	}
+}
+
+func TestMessageRescheduleDoesNotUseHardcodedServiceFamilyWords(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_shell", Name: "Shell Polish", DurationMinutes: 45},
+	}
+	store.session.BookingAction = BookingActionReschedule
+	store.session.Intent = IntentBooking
+	store.session.CustomerPhone = "+13125550101"
+	candidates := []booking.AppointmentActionRef{
+		testRescheduleAppointmentAt("appointment_shell", "service_shell", "Shell Polish", time.Date(2026, 7, 6, 18, 0, 0, 0, time.UTC)),
+	}
+	store.session.RescheduleCandidates = rescheduleCandidatesFromAppointments(candidates)
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "pedi",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.TargetAppointmentID != "" {
+		t.Fatalf("target appointment = %s, want still unselected without catalog or alias match", session.TargetAppointmentID)
+	}
+	if session.ServiceID != "" {
+		t.Fatalf("service = %s, want no selected service from hardcoded wording", session.ServiceID)
 	}
 }
 
@@ -5269,8 +5394,312 @@ func TestMessageClarifiesAmbiguousMultiPersonServiceFamily(t *testing.T) {
 		t.Fatalf("booking tool calls = availability %d booking %d, want none for ambiguous party service", bookingTool.availabilityCalls, bookingTool.calls)
 	}
 	reply := strings.ToLower(store.lastTurn.AIMessage)
-	if !strings.Contains(reply, "which manicure") || !strings.Contains(reply, "classic manicure") || !strings.Contains(reply, "gel manicure") {
+	if !strings.Contains(reply, "manicure") || !strings.Contains(reply, "classic manicure") || !strings.Contains(reply, "gel manicure") {
 		t.Fatalf("reply should clarify manicure service family: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessagePreservesPartySizeAfterAmbiguousServiceClarification(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_classic", Name: "Classic Manicure", DurationMinutes: 45},
+		{ID: "service_gel", Name: "Gel Manicure", DurationMinutes: 45},
+	}
+	slotStart := time.Date(2026, 6, 11, 18, 0, 0, 0, time.UTC)
+	bookingTool := &fakeBookingTool{
+		availabilityResult: &booking.AvailabilityResult{
+			ServiceID:          "service_gel",
+			ServiceName:        "Gel Manicure",
+			StaffSelectionMode: booking.StaffSelectionAnyone,
+			PreferredDate:      "2026-06-11",
+			DurationMinutes:    90,
+			Timezone:           "America/Chicago",
+			Slots: []booking.AvailabilitySlot{{
+				StartTime:          slotStart,
+				EndTime:            slotStart.Add(90 * time.Minute),
+				StaffID:            "staff_1",
+				StaffName:          "Mai Nguyen",
+				StaffSelectionMode: booking.StaffSelectionAnyone,
+				Segments: []booking.AvailabilitySegment{
+					{ServiceID: "service_gel", ServiceName: "Gel Manicure", StaffID: "staff_1", StaffName: "Mai Nguyen", StaffSelectionMode: booking.StaffSelectionAnyone, DurationMinutes: 45},
+					{ServiceID: "service_gel", ServiceName: "Gel Manicure", StaffID: "staff_2", StaffName: "Lena Pham", StaffSelectionMode: booking.StaffSelectionAnyone, DurationMinutes: 45},
+				},
+			}},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I want to book manicures for two people tomorrow.",
+	})
+	if err != nil {
+		t.Fatalf("first Message returned error: %v", err)
+	}
+	if session.PartyPlan == nil || session.PartyPlan.PartySize != 2 || partyPlanComplete(session.PartyPlan) {
+		t.Fatalf("party plan after ambiguous family = %#v, want unresolved two-person plan", session.PartyPlan)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("booking tool calls before clarification = availability %d booking %d, want none", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Gel manicure.",
+	})
+	if err != nil {
+		t.Fatalf("service clarification Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 1 || bookingTool.calls != 0 {
+		t.Fatalf("booking tool calls after clarification = availability %d booking %d, want availability only", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if got := bookingTool.availabilityRequest.Segments; len(got) != 2 || got[0].ServiceID != "service_gel" || got[1].ServiceID != "service_gel" {
+		t.Fatalf("availability segments = %#v, want two Gel Manicure segments", got)
+	}
+	if got := session.BookingSegments; len(got) != 2 || got[0].ServiceID != "service_gel" || got[1].ServiceID != "service_gel" {
+		t.Fatalf("session booking segments = %#v, want two Gel Manicure segments", got)
+	}
+}
+
+func TestMessageUsesServiceAliasForPartyWithoutHardcodedServiceWords(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_shell", Name: "Shell Polish", DurationMinutes: 45},
+	}
+	store.serviceAliases = []ServiceAlias{{
+		ID:              "alias_chrome",
+		ServiceID:       "service_shell",
+		ServiceName:     "Shell Polish",
+		Alias:           "chrome shine",
+		NormalizedAlias: "chrome shine",
+		Source:          "owner",
+		Confidence:      1,
+	}}
+	slotStart := time.Date(2026, 6, 11, 18, 0, 0, 0, time.UTC)
+	bookingTool := &fakeBookingTool{
+		availabilityResult: &booking.AvailabilityResult{
+			ServiceID:          "service_shell",
+			ServiceName:        "Shell Polish",
+			StaffSelectionMode: booking.StaffSelectionAnyone,
+			PreferredDate:      "2026-06-11",
+			DurationMinutes:    90,
+			Timezone:           "America/Chicago",
+			Slots: []booking.AvailabilitySlot{{
+				StartTime:          slotStart,
+				EndTime:            slotStart.Add(90 * time.Minute),
+				StaffID:            "staff_1",
+				StaffName:          "Mai Nguyen",
+				StaffSelectionMode: booking.StaffSelectionAnyone,
+			}},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "chrome shine for two persons tomorrow.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.Status == StatusHandoff || session.Outcome == OutcomeHandoffRequested {
+		t.Fatalf("session status/outcome = %s/%s, want supported party booking", session.Status, session.Outcome)
+	}
+	if bookingTool.availabilityCalls != 1 {
+		t.Fatalf("availability calls = %d, want 1", bookingTool.availabilityCalls)
+	}
+	if got := bookingTool.availabilityRequest.Segments; len(got) != 2 || got[0].ServiceID != "service_shell" || got[1].ServiceID != "service_shell" {
+		t.Fatalf("availability segments = %#v, want two Shell Polish segments from service alias", got)
+	}
+}
+
+func TestMessageUsesCategoryAliasForPartyClarificationWithoutHardcodedServiceWords(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_shell", Name: "Shell Polish", CategoryID: "cat_hand", CategoryName: "Hand Services", DurationMinutes: 45},
+		{ID: "service_basic", Name: "Basic Polish", CategoryID: "cat_hand", CategoryName: "Hand Services", DurationMinutes: 30},
+	}
+	store.categoryAliases = []ServiceCategoryAlias{{
+		ID:              "cat_alias_hand_work",
+		CategoryID:      "cat_hand",
+		CategoryName:    "Hand Services",
+		Alias:           "hand work",
+		NormalizedAlias: "hand work",
+		Source:          "owner",
+		Confidence:      1,
+	}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "hand work for two clients tomorrow.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.PartyPlan == nil || session.PartyPlan.PartySize != 2 || partyPlanComplete(session.PartyPlan) {
+		t.Fatalf("party plan = %#v, want unresolved category-alias party plan", session.PartyPlan)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("booking tool calls = availability %d booking %d, want none before concrete service", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	reply := strings.ToLower(store.lastTurn.AIMessage)
+	if !strings.Contains(reply, "shell polish") || !strings.Contains(reply, "basic polish") {
+		t.Fatalf("reply should clarify category alias candidates: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageBuildsMixedPartySegmentsFromServiceAliases(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_shell", Name: "Shell Polish", DurationMinutes: 45},
+		{ID: "service_spa", Name: "Spa Foot Care", DurationMinutes: 60},
+	}
+	store.serviceAliases = []ServiceAlias{
+		{ID: "alias_chrome", ServiceID: "service_shell", ServiceName: "Shell Polish", Alias: "chrome shine", NormalizedAlias: "chrome shine", Source: "owner", Confidence: 1},
+		{ID: "alias_spa", ServiceID: "service_spa", ServiceName: "Spa Foot Care", Alias: "spa foot care", NormalizedAlias: "spa foot care", Source: "owner", Confidence: 1},
+	}
+	slotStart := time.Date(2026, 6, 11, 18, 0, 0, 0, time.UTC)
+	bookingTool := &fakeBookingTool{
+		availabilityResult: &booking.AvailabilityResult{
+			ServiceID:          "service_shell",
+			ServiceName:        "Shell Polish",
+			StaffSelectionMode: booking.StaffSelectionAnyone,
+			PreferredDate:      "2026-06-11",
+			DurationMinutes:    105,
+			Timezone:           "America/Chicago",
+			Slots: []booking.AvailabilitySlot{{
+				StartTime:          slotStart,
+				EndTime:            slotStart.Add(105 * time.Minute),
+				StaffID:            "staff_1",
+				StaffName:          "Mai Nguyen",
+				StaffSelectionMode: booking.StaffSelectionAnyone,
+			}},
+		},
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	_, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "one chrome shine and one spa foot care tomorrow.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 1 {
+		t.Fatalf("availability calls = %d, want 1", bookingTool.availabilityCalls)
+	}
+	if got := bookingTool.availabilityRequest.Segments; len(got) != 2 || got[0].ServiceID != "service_shell" || got[1].ServiceID != "service_spa" {
+		t.Fatalf("availability segments = %#v, want one Shell Polish and one Spa Foot Care", got)
+	}
+}
+
+func TestMessageBookingIntentDoesNotDependOnHardcodedServiceWords(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{{ID: "service_shell", Name: "Shell Polish", DurationMinutes: 45}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "gel",
+	})
+	if err != nil {
+		t.Fatalf("unknown service word Message returned error: %v", err)
+	}
+	if session.Intent == IntentBooking || session.ServiceID != "" || len(session.BookingSegments) != 0 {
+		t.Fatalf("session intent/service/segments = %s/%s/%#v, want no booking from hardcoded service word", session.Intent, session.ServiceID, session.BookingSegments)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("booking tool calls = availability %d booking %d, want none", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+
+	aliasStore := newFakeConversationStore()
+	aliasStore.services = []ServiceOption{{ID: "service_shell", Name: "Shell Polish", DurationMinutes: 45}}
+	aliasStore.serviceAliases = []ServiceAlias{{
+		ID:              "alias_chrome",
+		ServiceID:       "service_shell",
+		ServiceName:     "Shell Polish",
+		Alias:           "chrome shine",
+		NormalizedAlias: "chrome shine",
+		Source:          "owner",
+		Confidence:      1,
+	}}
+	aliasBookingTool := &fakeBookingTool{}
+	aliasService := NewService(aliasStore, aliasBookingTool)
+	aliasService.now = fixedNow
+
+	session, err = aliasService.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "chrome shine tomorrow.",
+	})
+	if err != nil {
+		t.Fatalf("alias Message returned error: %v", err)
+	}
+	if session.Intent != IntentBooking || session.ServiceID != "service_shell" {
+		t.Fatalf("session intent/service = %s/%s, want alias-backed booking", session.Intent, session.ServiceID)
+	}
+	if aliasBookingTool.availabilityCalls != 1 {
+		t.Fatalf("alias availability calls = %d, want 1", aliasBookingTool.availabilityCalls)
+	}
+}
+
+func TestMessageSupportedPartyWordDoesNotHandoff(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{{ID: "service_shell", Name: "Shell Polish", DurationMinutes: 45}}
+	store.serviceAliases = []ServiceAlias{{
+		ID:              "alias_chrome",
+		ServiceID:       "service_shell",
+		ServiceName:     "Shell Polish",
+		Alias:           "chrome shine",
+		NormalizedAlias: "chrome shine",
+		Source:          "owner",
+		Confidence:      1,
+	}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "party of two for chrome shine tomorrow.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.Status == StatusHandoff || session.Outcome == OutcomeHandoffRequested || session.Intent == IntentHandoff {
+		t.Fatalf("session status/outcome/intent = %s/%s/%s, want supported party booking flow", session.Status, session.Outcome, session.Intent)
+	}
+	if got := bookingTool.availabilityRequest.Segments; len(got) != 2 || got[0].ServiceID != "service_shell" || got[1].ServiceID != "service_shell" {
+		t.Fatalf("availability segments = %#v, want two Shell Polish segments", got)
+	}
+}
+
+func TestMessageWeddingPartyStillHandoff(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{{ID: "service_shell", Name: "Shell Polish", DurationMinutes: 45}}
+	store.serviceAliases = []ServiceAlias{{
+		ID:              "alias_chrome",
+		ServiceID:       "service_shell",
+		ServiceName:     "Shell Polish",
+		Alias:           "chrome shine",
+		NormalizedAlias: "chrome shine",
+		Source:          "owner",
+		Confidence:      1,
+	}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I need a wedding party for chrome shine tomorrow.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.Status != StatusHandoff || session.Outcome != OutcomeHandoffRequested {
+		t.Fatalf("session status/outcome = %s/%s, want owner handoff for wedding party", session.Status, session.Outcome)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("booking tool calls = availability %d booking %d, want none for wedding handoff", bookingTool.availabilityCalls, bookingTool.calls)
 	}
 }
 

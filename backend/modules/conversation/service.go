@@ -310,6 +310,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	loc := timezoneLocation(cfg.Timezone)
 	pendingNameCandidate := voiceCustomerNamePendingConfirmationCandidate(message, *session)
 	serviceUnderstanding := interpretServiceForSession(message, *session, services, serviceAliases, categoryAliases)
+	partySignal := detectPartySignal(message, *session, serviceUnderstanding, services, serviceAliases, categoryAliases)
 	if shouldClarifyCancelReschedule(*session, message) {
 		next.Intent = IntentBooking
 		turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
@@ -320,7 +321,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	}
 	if shouldRouteCancel(*session, message) {
 		applyExtraction(&next, message, services, serviceAliases, categoryAliases, staff, loc, s.now)
-		return s.handleCancelMessage(ctx, ownerUserID, *session, next, message, eventKey, services, staff, cfg, knowledge)
+		return s.handleCancelMessage(ctx, ownerUserID, *session, next, message, eventKey, services, serviceAliases, categoryAliases, staff, cfg, knowledge)
 	}
 	if activePartyPlan(session.PartyPlan) && !partyPlanComplete(session.PartyPlan) {
 		if reply, ok := partyPlanServiceMenuReply(message, *session, services, cfg); ok {
@@ -353,7 +354,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		finalizeTurnMetadata(&turn, *session, *session, "", "", "service_inquiry")
 		return s.store.SaveTurn(ctx, turn)
 	}
-	if !hasBookingProgress(*session) && !hasBookingSignal(message) {
+	if !hasBookingProgress(*session) && !hasBookingVerbSignal(message) && !partySignal.IsParty && !serviceUnderstandingStartsBooking(serviceUnderstanding, message) {
 		route := routeNonBookingAnswer(message, *session, answerCtx, cfg, s.now)
 		if route.Handled && route.Source != answerSourceBookingRedirect {
 			turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
@@ -366,14 +367,14 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	}
 	applyExtraction(&next, message, services, serviceAliases, categoryAliases, staff, loc, s.now)
 	if shouldRouteReschedule(*session, message) {
-		return s.handleRescheduleMessage(ctx, ownerUserID, *session, next, message, eventKey, services, staff, cfg, knowledge)
+		return s.handleRescheduleMessage(ctx, ownerUserID, *session, next, message, eventKey, services, serviceAliases, categoryAliases, staff, cfg, knowledge)
 	}
 	partyPlanApplied := false
 	partyPlanTouched := false
 	if activePartyPlan(next.PartyPlan) && !partyPlanComplete(next.PartyPlan) {
 		partyPlanTouched = true
 		plan := clonePartyPlan(next.PartyPlan)
-		resolvePartyPlanFromMessage(plan, message, services, serviceAliases)
+		resolvePartyPlanFromMessage(plan, message, services, serviceAliases, categoryAliases)
 		autoResolveSingleCandidatePartyGroups(plan)
 		next.PartyPlan = plan
 		next.Intent = IntentBooking
@@ -390,8 +391,8 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 			finalizeTurnMetadata(&turn, *session, next, "service", "service", "party_plan_clarification")
 			return s.store.SaveTurn(ctx, turn)
 		}
-	} else if shouldGroupBookingHandoff(message) {
-		if plan, ok := partyPlanFromMessage(message, services, serviceAliases, categoryAliases, next); ok {
+	} else if partySignal.IsParty {
+		if plan, ok := partyPlanFromSignal(partySignal, next); ok {
 			partyPlanTouched = true
 			next.PartyPlan = plan
 			next.Intent = IntentBooking
@@ -438,7 +439,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	if staffChange.Intent && !selectedOfferedSlot {
 		next.OfferedSlots = nil
 	}
-	intent := resolveIntent(session.Intent, message, next)
+	intent := resolveIntent(session.Intent, message, next, serviceUnderstanding, partySignal)
 	next.Intent = intent
 
 	turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
@@ -588,7 +589,7 @@ func shouldClarifyCancelReschedule(session Session, message string) bool {
 		!hasCancelNegation(message)
 }
 
-func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID string, before Session, next Session, message string, eventKey string, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
+func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID string, before Session, next Session, message string, eventKey string, services []ServiceOption, serviceAliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
 	loc := timezoneLocation(timezoneFromConfig(cfg))
 	firstRescheduleTurn := bookingActionForSession(before) != BookingActionReschedule && hasRescheduleSignal(message)
 	next.BookingAction = BookingActionReschedule
@@ -625,7 +626,7 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 
 	if strings.TrimSpace(next.TargetAppointmentID) == "" {
 		clearNewRescheduleSlot(&next)
-		if selected := selectRescheduleCandidate(message, next.RescheduleCandidates, loc, s.now); selected != nil {
+		if selected := selectRescheduleCandidate(message, next.RescheduleCandidates, services, serviceAliases, categoryAliases, loc, s.now); selected != nil {
 			applyRescheduleCandidate(&next, *selected)
 			syncTurnUpdate(&turn, next, services, staff, cfg)
 		} else {
@@ -708,7 +709,7 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 	return s.tryReschedule(ctx, ownerUserID, turn, next, services, staff, cfg)
 }
 
-func (s *Service) handleCancelMessage(ctx context.Context, ownerUserID string, before Session, next Session, message string, eventKey string, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
+func (s *Service) handleCancelMessage(ctx context.Context, ownerUserID string, before Session, next Session, message string, eventKey string, services []ServiceOption, serviceAliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
 	loc := timezoneLocation(timezoneFromConfig(cfg))
 	firstCancelTurn := bookingActionForSession(before) != BookingActionCancel && hasCancelSignal(message)
 	next.BookingAction = BookingActionCancel
@@ -739,7 +740,7 @@ func (s *Service) handleCancelMessage(ctx context.Context, ownerUserID string, b
 	}
 
 	if strings.TrimSpace(next.TargetAppointmentID) == "" {
-		if selected := selectRescheduleCandidate(message, next.RescheduleCandidates, loc, s.now); selected != nil {
+		if selected := selectRescheduleCandidate(message, next.RescheduleCandidates, services, serviceAliases, categoryAliases, loc, s.now); selected != nil {
 			applyCancelCandidate(&next, *selected, loc)
 			syncTurnUpdate(&turn, next, services, staff, cfg)
 			turn.AIMessage = cancelSingleCandidatePrompt(*selected, loc)
@@ -759,7 +760,7 @@ func (s *Service) handleCancelMessage(ctx context.Context, ownerUserID string, b
 			next.RescheduleCandidates = rescheduleCandidatesFromAppointments(candidates)
 			syncTurnUpdate(&turn, next, services, staff, cfg)
 		}
-		if selected := selectRescheduleCandidate(message, next.RescheduleCandidates, loc, s.now); selected != nil {
+		if selected := selectRescheduleCandidate(message, next.RescheduleCandidates, services, serviceAliases, categoryAliases, loc, s.now); selected != nil {
 			applyCancelCandidate(&next, *selected, loc)
 			syncTurnUpdate(&turn, next, services, staff, cfg)
 			turn.AIMessage = cancelSingleCandidatePrompt(*selected, loc)

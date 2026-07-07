@@ -724,7 +724,7 @@ func cleanBareCustomerName(raw string) string {
 	if len([]rune(name)) < 2 || len([]rune(name)) > 80 {
 		return ""
 	}
-	if phonePattern.MatchString(name) || emailPattern.MatchString(name) || hasBookingSignal(name) || hasCancelSignal(name) {
+	if phonePattern.MatchString(name) || emailPattern.MatchString(name) || hasBookingVerbSignal(name) || hasCancelSignal(name) {
 		return ""
 	}
 	if isAffirmativeOnly(name) || isConnectionCheck(name) || isGoodbyeUtterance(name) || isNameRepairRequest(name) || looksLikeDateOrTimeInsteadOfName(name) {

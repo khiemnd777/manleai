@@ -32,6 +32,9 @@ func partyBookingPlanFromMessage(message string, services []ServiceOption, sessi
 	partySize := partySizeFromMessage(message)
 	counted := partyServiceCountSegmentsFromMessage(message, services, session)
 	if len(counted) > 0 {
+		if partySize == 0 && len(counted) < 2 {
+			return partyBookingPlan{}, false
+		}
 		if partySize > 0 && len(counted) != partySize {
 			return partyBookingPlan{}, false
 		}
@@ -79,6 +82,11 @@ type partyPlanServiceSelection struct {
 }
 
 func partyPlanFromMessage(message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, session Session) (*PartyPlan, bool) {
+	serviceUnderstanding := interpretServiceForSession(message, session, services, aliases, categoryAliases)
+	signal := detectPartySignal(message, session, serviceUnderstanding, services, aliases, categoryAliases)
+	if plan, ok := partyPlanFromSignal(signal, session); ok {
+		return plan, true
+	}
 	partySize := partySizeFromMessage(message)
 	groups := partyPlanGroupsFromMessage(message, services, aliases, categoryAliases)
 	if len(groups) > 0 {
@@ -116,8 +124,26 @@ func partyPlanGroupsFromMessage(message string, services []ServiceOption, aliase
 		if strings.TrimSpace(phrase.Phrase) == "" || len(phrase.Candidates) == 0 {
 			continue
 		}
-		pattern := regexp.MustCompile(`\b(` + partyCountTokenPattern() + `)\s+` + regexp.QuoteMeta(phrase.Phrase) + `\b`)
-		for _, indexes := range pattern.FindAllStringSubmatchIndex(normalized, -1) {
+		beforePattern := regexp.MustCompile(`\b(` + partyCountTokenPattern() + `)\s+` + regexp.QuoteMeta(phrase.Phrase) + `\b`)
+		for _, indexes := range beforePattern.FindAllStringSubmatchIndex(normalized, -1) {
+			if len(indexes) < 4 {
+				continue
+			}
+			countToken := normalized[indexes[2]:indexes[3]]
+			count, ok := partyCountTokenValue(countToken)
+			if !ok || count < 1 {
+				continue
+			}
+			matches = append(matches, partyPlanCountMatch{
+				Start:     indexes[0],
+				End:       indexes[1],
+				Count:     count,
+				Phrase:    phrase,
+				PhraseLen: len(phrase.Phrase),
+			})
+		}
+		afterPattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(phrase.Phrase) + `\s+(?:for\s+)?(` + partyCountTokenPattern() + `)\s+(?:people|persons|guests|clients|appointments)\b`)
+		for _, indexes := range afterPattern.FindAllStringSubmatchIndex(normalized, -1) {
 			if len(indexes) < 4 {
 				continue
 			}
@@ -528,7 +554,7 @@ func partyPlanGroupMenuPhrases(group PartyPlanGroup, candidates []ServiceOption)
 	return out
 }
 
-func resolvePartyPlanFromMessage(plan *PartyPlan, message string, services []ServiceOption, aliases []ServiceAlias) bool {
+func resolvePartyPlanFromMessage(plan *PartyPlan, message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) bool {
 	if plan == nil {
 		return false
 	}
@@ -551,9 +577,9 @@ func resolvePartyPlanFromMessage(plan *PartyPlan, message string, services []Ser
 			return false
 		}
 	}
-	selected := partyPlanSelectedServices(message, candidates, services, aliases, *group)
+	selected := partyPlanSelectedServices(message, candidates, services, aliases, categoryAliases, *group)
 	if len(selected) == 0 {
-		return false
+		return narrowPartyPlanGroupFromMessage(group, message, candidates, services, aliases, categoryAliases)
 	}
 	ids := serviceIDsFromOptions(selected)
 	switch {
@@ -581,7 +607,7 @@ func firstUnresolvedPartyPlanGroup(plan *PartyPlan) int {
 	return -1
 }
 
-func partyPlanSelectedServices(message string, candidates []ServiceOption, services []ServiceOption, aliases []ServiceAlias, group PartyPlanGroup) []ServiceOption {
+func partyPlanSelectedServices(message string, candidates []ServiceOption, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, group PartyPlanGroup) []ServiceOption {
 	normalized := normalizeServiceText(message)
 	if normalized == "" || len(candidates) == 0 {
 		return nil
@@ -605,7 +631,7 @@ func partyPlanSelectedServices(message string, candidates []ServiceOption, servi
 		})
 	}
 	if len(matches) == 0 {
-		result := interpretServiceWithCategoryAliases(message, pool, aliases, nil)
+		result := interpretServiceWithCategoryAliases(message, pool, aliases, categoryAliases)
 		if result.Status == serviceUnderstandingStatusSelected {
 			return append([]ServiceOption(nil), result.Candidates...)
 		}
@@ -641,6 +667,21 @@ func partyPlanSelectedServices(message string, candidates []ServiceOption, servi
 		out = append(out, match.Service)
 	}
 	return out
+}
+
+func narrowPartyPlanGroupFromMessage(group *PartyPlanGroup, message string, candidates []ServiceOption, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) bool {
+	if group == nil {
+		return false
+	}
+	pool := partyPlanSelectionPool(services, candidates, *group)
+	result := interpretServiceWithCategoryAliases(message, pool, aliases, categoryAliases)
+	if result.Status != serviceUnderstandingStatusAmbiguous || len(result.Candidates) == 0 {
+		return false
+	}
+	group.CandidateServiceIDs = serviceIDsFromOptions(result.Candidates)
+	group.Label = partyLabelFromServiceUnderstanding(result)
+	group.ResolvedServiceIDs = nil
+	return len(group.CandidateServiceIDs) > 0
 }
 
 func partyPlanSelectionPool(services []ServiceOption, candidates []ServiceOption, group PartyPlanGroup) []ServiceOption {
@@ -1164,12 +1205,14 @@ func singularServiceToken(token string) string {
 }
 
 func partyCountTokenPattern() string {
-	return `[2-9]|two|three|four|five|six|seven|eight|nine`
+	return `[1-9]|one|two|three|four|five|six|seven|eight|nine`
 }
 
 func partyCountTokenValue(token string) (int, bool) {
 	token = strings.TrimSpace(strings.ToLower(token))
 	switch token {
+	case "one":
+		return 1, true
 	case "two":
 		return 2, true
 	case "three":
@@ -1188,7 +1231,7 @@ func partyCountTokenValue(token string) (int, bool) {
 		return 9, true
 	}
 	value, err := strconv.Atoi(token)
-	if err != nil || value < 2 || value > 9 {
+	if err != nil || value < 1 || value > 9 {
 		return 0, false
 	}
 	return value, true

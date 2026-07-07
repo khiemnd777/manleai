@@ -3,8 +3,6 @@ package conversation
 import (
 	"context"
 	"github.com/manleai/ai-receptionist/modules/booking"
-	"regexp"
-	"strconv"
 	"strings"
 )
 
@@ -653,49 +651,4 @@ func partyGuestServicesFromSession(session Session, services []ServiceOption) []
 		items = append(items, item)
 	}
 	return items
-}
-
-func partySizeFromMessage(message string) int {
-	normalized := normalizeLooseText(message)
-	if normalized == "" {
-		return 0
-	}
-	if strings.Contains(normalized, "my friend and i") || strings.Contains(normalized, "me and my friend") {
-		return 2
-	}
-	wordNumbers := map[string]int{
-		"two":   2,
-		"three": 3,
-		"four":  4,
-		"five":  5,
-		"six":   6,
-	}
-	if strings.Contains(normalized, "me and two friends") {
-		return 3
-	}
-	if strings.Contains(normalized, "me and three friends") {
-		return 4
-	}
-	patterns := []*regexp.Regexp{
-		regexp.MustCompile(`party of ([2-9])`),
-		regexp.MustCompile(`for ([2-9]) people`),
-		regexp.MustCompile(`([2-9]) people`),
-		regexp.MustCompile(`([2-9]) appointments`),
-	}
-	for _, pattern := range patterns {
-		if matches := pattern.FindStringSubmatch(normalized); len(matches) == 2 {
-			if value, err := strconv.Atoi(matches[1]); err == nil {
-				return value
-			}
-		}
-	}
-	for word, value := range wordNumbers {
-		if strings.Contains(normalized, "party of "+word) ||
-			strings.Contains(normalized, "for "+word+" people") ||
-			strings.Contains(normalized, word+" people") ||
-			strings.Contains(normalized, word+" appointments") {
-			return value
-		}
-	}
-	return 0
 }

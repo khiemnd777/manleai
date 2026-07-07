@@ -357,14 +357,27 @@ func bookingSafetyEnabled(aiEnabled bool) bool {
 	return aiEnabled
 }
 
-func resolveIntent(current string, message string, session Session) string {
+func resolveIntent(current string, message string, session Session, serviceUnderstanding serviceUnderstandingResult, signal partySignal) string {
 	if shouldHandoff(message) {
 		return IntentHandoff
 	}
-	if current == IntentBooking || hasBookingSignal(message) || session.ServiceID != "" || session.RequestedDate != "" || session.RequestedStartTime != nil {
+	if current == IntentBooking || hasBookingVerbSignal(message) || signal.IsParty || session.ServiceID != "" || session.RequestedDate != "" || session.RequestedStartTime != nil {
+		return IntentBooking
+	}
+	if serviceUnderstandingStartsBooking(serviceUnderstanding, message) {
 		return IntentBooking
 	}
 	return IntentUnknown
+}
+
+func serviceUnderstandingStartsBooking(result serviceUnderstandingResult, message string) bool {
+	if result.Status == serviceUnderstandingStatusUnknown {
+		return false
+	}
+	normalized := normalizeLooseText(message)
+	return hasSchedulingAvailabilitySignal(normalized) ||
+		looksLikeDateOrTimeInsteadOfName(message) ||
+		hasExplicitBookingRequestSignal(normalized)
 }
 
 func applyExtraction(session *Session, message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, staff []StaffOption, loc *time.Location, now func() time.Time) {
