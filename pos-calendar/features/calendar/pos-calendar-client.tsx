@@ -13,7 +13,8 @@ import {
   Pencil,
   Plus,
   RefreshCcw,
-  Trash2
+  Trash2,
+  X
 } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -137,6 +138,10 @@ export function POSCalendarClient() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [actionMode, setActionMode] = useState<ActionMode | null>(null);
   const [selectedAppointment, setSelectedAppointment] = useState<AppointmentRecord | null>(null);
+  const [selectedCalendarItemID, setSelectedCalendarItemID] = useState("");
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [selectedDayKey, setSelectedDayKey] = useState("");
+  const [dayDrawerOpen, setDayDrawerOpen] = useState(false);
   const [actionForm, setActionForm] = useState<ActionForm>(() => emptyActionForm(formatDateInput(new Date())));
   const [availabilityResult, setAvailabilityResult] = useState<AvailabilityResult | null>(null);
   const [availabilityChecked, setAvailabilityChecked] = useState(false);
@@ -174,16 +179,56 @@ export function POSCalendarClient() {
     () => buildCalendarItems(calendar, serviceNames, staffNames, salon?.timezone),
     [calendar, salon?.timezone, serviceNames, staffNames]
   );
+  const visibleCalendarItems = useMemo(
+    () => visibleItemsForView(items, view, anchorDate, salon?.timezone),
+    [anchorDate, items, salon?.timezone, view]
+  );
   const selectedActionSlot = useMemo(
     () => (availabilityResult?.slots ?? []).find((slot) => slotKey(slot) === actionForm.selectedSlotKey) ?? null,
     [actionForm.selectedSlotKey, availabilityResult]
   );
-  const lastSyncAt = status?.connection?.last_sync_at || calendarLatestSync(calendar);
-  const activeProvider = status?.connection?.provider || salon?.active_pos_provider || "square";
-  const warningTotal = calendar
-    ? calendar.warnings.total_warnings ??
-      calendar.warnings.not_synced + calendar.warnings.sync_failed + calendar.warnings.pending_pos_sync + calendar.warnings.fallback_pending
-    : 0;
+  const selectedCalendarItem = useMemo(
+    () => items.find((item) => item.id === selectedCalendarItemID) ?? defaultSelectedCalendarItem(items),
+    [items, selectedCalendarItemID]
+  );
+  const selectedDayItems = useMemo(
+    () =>
+      selectedDayKey
+        ? items
+            .filter((item) => dateKey(item.start, salon?.timezone) === selectedDayKey)
+            .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime())
+        : [],
+    [items, salon?.timezone, selectedDayKey]
+  );
+
+  useEffect(() => {
+    if (items.length === 0) {
+      if (selectedCalendarItemID) setSelectedCalendarItemID("");
+      if (detailOpen) setDetailOpen(false);
+      return;
+    }
+    if (!items.some((item) => item.id === selectedCalendarItemID)) {
+      setSelectedCalendarItemID(defaultSelectedCalendarItem(items)?.id ?? items[0].id);
+    }
+  }, [detailOpen, items, selectedCalendarItemID]);
+
+  useEffect(() => {
+    setDetailOpen(false);
+    setDayDrawerOpen(false);
+    setSelectedDayKey("");
+  }, [anchorDate, view]);
+
+  function selectCalendarItem(itemID: string) {
+    setSelectedCalendarItemID(itemID);
+    setDayDrawerOpen(false);
+    setDetailOpen(true);
+  }
+
+  function openDayAppointments(day: string) {
+    setSelectedDayKey(day);
+    setDetailOpen(false);
+    setDayDrawerOpen(true);
+  }
 
   async function loadShell() {
     setLoadingShell(true);
@@ -509,17 +554,12 @@ export function POSCalendarClient() {
 
   if (loadingShell) {
     return (
-      <main className="min-h-screen bg-shell px-4 py-5 sm:px-6 lg:px-8">
-        <div className="mx-auto max-w-7xl space-y-5">
-          <Skeleton className="h-20" />
-          <Skeleton className="h-16" />
-          <div className="grid gap-4 lg:grid-cols-4">
-            <Skeleton className="h-28" />
-            <Skeleton className="h-28" />
-            <Skeleton className="h-28" />
-            <Skeleton className="h-28" />
+      <main className="h-screen overflow-hidden bg-shell p-3 sm:p-4">
+        <div className="flex h-full min-h-0 flex-col gap-3">
+          <Skeleton className="h-24" />
+          <div className="flex min-h-0 flex-1">
+            <Skeleton className="min-h-0 flex-1" />
           </div>
-          <Skeleton className="h-96" />
         </div>
       </main>
     );
@@ -542,160 +582,155 @@ export function POSCalendarClient() {
   }
 
   return (
-    <main className="min-h-screen bg-shell px-4 py-5 sm:px-6 lg:px-8">
-      <div className="mx-auto max-w-7xl space-y-5">
-        <header className="rounded-lg border border-line bg-panel p-4 shadow-soft">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <CalendarDays className="h-5 w-5 text-brand" />
-                <Badge value={activeProvider} />
-                <Badge value={status?.connection?.status ?? "not_connected"} />
-              </div>
-              <h1 className="mt-3 text-2xl font-bold text-ink sm:text-3xl">POS Calendar</h1>
-              <p className="mt-1 text-sm leading-6 text-muted">
-                {salon.name} · Last sync {formatOptionalDate(lastSyncAt, salon.timezone)}
-              </p>
+    <main className="h-screen overflow-hidden bg-shell p-2 text-ink sm:p-3">
+      <div className="flex h-full min-h-0 flex-col gap-2">
+        <header className="shrink-0 rounded-lg border border-line bg-panel px-3 py-2 shadow-soft">
+          <div className="grid gap-2 lg:grid-cols-[auto_1fr_auto] lg:items-center">
+            <div className="flex min-w-0 items-center gap-2">
+              <CalendarDays className="h-4 w-4 flex-none text-brand" />
+              <h1 className="whitespace-nowrap text-base font-bold text-ink">POS Calendar</h1>
             </div>
-            <div className="flex flex-col gap-2 sm:flex-row lg:items-center">
-              <Button type="button" variant="secondary" onClick={syncCalendar} disabled={busy === "sync"}>
-                <RefreshCcw className={cn("h-4 w-4", busy === "sync" ? "animate-spin" : "")} />
+
+            <div className="flex min-w-0 flex-wrap items-center justify-center gap-1.5 lg:flex-nowrap">
+              <div className="grid grid-cols-4 gap-1 rounded-md border border-line bg-slate-50 p-1">
+                {views.map((item) => (
+                  <Button
+                    key={item}
+                    type="button"
+                    variant={view === item ? "primary" : "ghost"}
+                    className="h-8 px-2 text-xs"
+                    onClick={() => setView(item)}
+                  >
+                    {capitalize(item)}
+                  </Button>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-1 rounded-md border border-line bg-white px-1">
+                <Button type="button" variant="ghost" className="h-8 px-2" onClick={() => moveRange(-1)} aria-label="Previous range">
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                </Button>
+                <div className="min-w-40 whitespace-nowrap px-1 text-center text-xs font-bold text-ink">
+                  {rangeLabel(view, range, salon.timezone)}
+                </div>
+                <Button type="button" variant="ghost" className="h-8 px-2" onClick={() => moveRange(1)} aria-label="Next range">
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+
+              {view === "day" || view === "agenda" ? (
+                <div className="flex items-center gap-1.5">
+                  <Button type="button" variant="secondary" className="h-8 px-2 text-xs" onClick={() => setShortcut(0)}>
+                    Today
+                  </Button>
+                  <Button type="button" variant="secondary" className="h-8 px-2 text-xs" onClick={() => setShortcut(1)}>
+                    Tomorrow
+                  </Button>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex flex-wrap items-center justify-start gap-1.5 lg:justify-end">
+              <Button type="button" variant="secondary" className="h-8 px-2 text-xs" onClick={syncCalendar} disabled={busy === "sync"}>
+                <RefreshCcw className={cn("h-3.5 w-3.5", busy === "sync" ? "animate-spin" : "")} />
                 {busy === "sync" ? "Syncing..." : "Sync Square"}
               </Button>
-              <Button type="button" onClick={openCreate} disabled={!readyForBooking}>
-                <Plus className="h-4 w-4" />
-                Add
+              <Button type="button" className="h-8 px-2 text-xs" onClick={openCreate} disabled={!readyForBooking}>
+                <Plus className="h-3.5 w-3.5" />
+                Add Appointment
               </Button>
-              <Button type="button" variant="ghost" onClick={signOut} disabled={busy === "logout"}>
-                <LogOut className="h-4 w-4" />
+              <Button type="button" variant="ghost" className="h-8 px-2 text-xs" onClick={signOut} disabled={busy === "logout"}>
+                <LogOut className="h-3.5 w-3.5" />
                 Sign out
               </Button>
             </div>
           </div>
         </header>
 
-        <section className="rounded-lg border border-line bg-panel p-4 shadow-soft">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="grid grid-cols-2 gap-2 sm:flex">
-              {views.map((item) => (
-                <Button
-                  key={item}
-                  type="button"
-                  variant={view === item ? "primary" : "secondary"}
-                  onClick={() => setView(item)}
-                >
-                  {capitalize(item)}
-                </Button>
-              ))}
-            </div>
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-              <div className="flex gap-2">
-                <Button type="button" variant="secondary" onClick={() => setShortcut(0)}>
-                  Today
-                </Button>
-                <Button type="button" variant="secondary" onClick={() => setShortcut(1)}>
-                  Tomorrow
-                </Button>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button type="button" variant="ghost" className="h-10 px-3" onClick={() => moveRange(-1)} aria-label="Previous range">
-                  <ChevronLeft className="h-4 w-4" />
-                </Button>
-                <input
-                  className="h-10 w-40 rounded-md border border-line bg-white px-3 text-sm font-semibold text-ink outline-none focus:border-brand"
-                  type="date"
-                  value={anchorDate}
-                  onChange={(event) => setAnchorDate(event.target.value)}
-                />
-                <Button type="button" variant="ghost" className="h-10 px-3" onClick={() => moveRange(1)} aria-label="Next range">
-                  <ChevronRight className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-          </div>
-          <div className="mt-3 text-sm font-semibold text-ink">{rangeLabel(view, range, salon.timezone)}</div>
-        </section>
-
         {error ? <Alert title="Calendar error" message={error} /> : null}
         {notice ? <Alert type={notice.type} title={notice.title} message={notice.message} /> : null}
-        {!readyForBooking ? (
-          <Alert
-            type="warning"
-            title="Booking actions gated"
-            message="Connect Square Appointments, select a location, and sync bookable services and staff before adding or editing appointments."
-          />
-        ) : null}
 
-        <section className="grid gap-4 md:grid-cols-4">
-          <MetricCard label="Appointments" value={String(calendar?.appointments.length ?? 0)} detail="POS-confirmed records" />
-          <MetricCard label="Pending" value={String(calendar?.pending_requests.length ?? 0)} detail="Owner-review fallback requests" />
-          <MetricCard label="Warnings" value={String(warningTotal)} detail="Sync gaps in this range" tone={warningTotal ? "warning" : "normal"} />
-          <MetricCard label="Bookable staff" value={String(bookableStaff.length)} detail={`${bookableServices.length} bookable services`} />
+        <section className="min-h-0 flex-1">
+          <Card className="flex h-full min-w-0 flex-col overflow-hidden p-0">
+            <div className="flex h-full min-h-0 flex-col p-2 sm:p-3">
+              {loadingCalendar ? (
+                <div className="flex h-full min-h-0 flex-col gap-3">
+                  <Skeleton className="h-12" />
+                  <Skeleton className="min-h-0 flex-1" />
+                </div>
+              ) : (
+                <div className="flex h-full min-h-0 flex-col gap-2">
+                  <CalendarViewSummary
+                    label={`${capitalize(view)} view`}
+                    title={calendarSummaryTitle(view, anchorDate, salon.timezone)}
+                    items={visibleCalendarItems}
+                    bookableStaffCount={bookableStaff.length}
+                    bookableServiceCount={bookableServices.length}
+                  />
+                  {view === "agenda" && visibleCalendarItems.length === 0 ? (
+                    <EmptyState
+                      title="No calendar items"
+                      message="POS-confirmed appointments and pending fallback requests for this range will appear here."
+                    />
+                  ) : view === "day" ? (
+                    <DayScheduler
+                      items={items}
+                      anchorDate={anchorDate}
+                      timezone={salon.timezone}
+                      selectedItemID={selectedCalendarItem?.id ?? ""}
+                      onSelect={selectCalendarItem}
+                    />
+                  ) : view === "agenda" ? (
+                    <AgendaList
+                      items={visibleCalendarItems}
+                      timezone={salon.timezone}
+                      selectedItemID={selectedCalendarItem?.id ?? ""}
+                      onSelect={selectCalendarItem}
+                      onEdit={openEdit}
+                      onDelete={openDelete}
+                    />
+                  ) : view === "week" ? (
+                    <WeekScheduler
+                      items={items}
+                      anchorDate={anchorDate}
+                      timezone={salon.timezone}
+                      selectedItemID={selectedCalendarItem?.id ?? ""}
+                      onSelect={selectCalendarItem}
+                    />
+                  ) : (
+                    <MonthGrid
+                      items={items}
+                      anchorDate={anchorDate}
+                      timezone={salon.timezone}
+                      selectedItemID={selectedCalendarItem?.id ?? ""}
+                      onSelect={selectCalendarItem}
+                      onDayOpen={openDayAppointments}
+                    />
+                  )}
+                </div>
+              )}
+            </div>
+          </Card>
         </section>
 
-        <Card className="p-0">
-          <div className="border-b border-line px-5 py-4">
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <CardTitle>{capitalize(view)} view</CardTitle>
-                <CardDescription>
-                  POS-confirmed appointments and fallback requests from the selected range.
-                </CardDescription>
-              </div>
-              {calendar ? (
-                <div className="flex flex-wrap gap-2">
-                  <Badge value={`not_synced ${calendar.warnings.not_synced}`} />
-                  <Badge value={`sync_failed ${calendar.warnings.sync_failed}`} />
-                  <Badge value={`pending ${calendar.warnings.pending_pos_sync}`} />
-                </div>
-              ) : null}
-            </div>
-          </div>
-          <div className="p-5">
-            {loadingCalendar ? (
-              <div className="space-y-3">
-                <Skeleton className="h-12" />
-                <Skeleton className="h-[34rem]" />
-              </div>
-            ) : view === "agenda" && items.length === 0 ? (
-              <EmptyState
-                title="No calendar items"
-                message="POS-confirmed appointments and pending fallback requests for this range will appear here."
-              />
-            ) : view === "day" ? (
-              <DayScheduler
-                items={items}
-                anchorDate={anchorDate}
-                timezone={salon.timezone}
-                onEdit={openEdit}
-                onDelete={openDelete}
-              />
-            ) : view === "agenda" ? (
-              <AgendaList
-                items={items}
-                timezone={salon.timezone}
-                onEdit={openEdit}
-                onDelete={openDelete}
-              />
-            ) : view === "week" ? (
-              <WeekScheduler
-                items={items}
-                anchorDate={anchorDate}
-                timezone={salon.timezone}
-                onEdit={openEdit}
-                onDelete={openDelete}
-              />
-            ) : (
-              <MonthGrid
-                items={items}
-                anchorDate={anchorDate}
-                timezone={salon.timezone}
-                onEdit={openEdit}
-                onDelete={openDelete}
-              />
-            )}
-          </div>
-        </Card>
+        <AppointmentDetailDrawer
+          open={detailOpen}
+          selectedItem={selectedCalendarItem}
+          readyForBooking={readyForBooking}
+          timezone={salon.timezone}
+          onClose={() => setDetailOpen(false)}
+          onEdit={openEdit}
+          onDelete={openDelete}
+        />
+
+        <DayAppointmentsDrawer
+          open={dayDrawerOpen}
+          day={selectedDayKey}
+          items={selectedDayItems}
+          timezone={salon.timezone}
+          onClose={() => setDayDrawerOpen(false)}
+          onSelect={selectCalendarItem}
+        />
 
         <ActionDialog
           mode={actionMode}
@@ -727,41 +762,33 @@ export function POSCalendarClient() {
   );
 }
 
-function MetricCard({
-  label,
-  value,
-  detail,
-  tone = "normal"
-}: {
-  label: string;
-  value: string;
-  detail: string;
-  tone?: "normal" | "warning";
-}) {
-  return (
-    <Card className={tone === "warning" ? "border-amber-200 bg-amber-50" : ""}>
-      <div className="text-sm font-medium text-muted">{label}</div>
-      <div className="mt-2 text-3xl font-bold text-ink">{value}</div>
-      <div className="mt-1 text-sm leading-6 text-muted">{detail}</div>
-    </Card>
-  );
-}
-
 function AgendaList({
   items,
   timezone,
+  selectedItemID,
+  onSelect,
   onEdit,
   onDelete
 }: {
   items: CalendarItem[];
   timezone?: string;
+  selectedItemID: string;
+  onSelect: (itemID: string) => void;
   onEdit: (appointment: AppointmentRecord) => void;
   onDelete: (appointment: AppointmentRecord) => void;
 }) {
   return (
-    <div className="space-y-3">
+    <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
       {items.map((item) => (
-        <CalendarItemRow key={item.id} item={item} timezone={timezone} onEdit={onEdit} onDelete={onDelete} />
+        <CalendarItemRow
+          key={item.id}
+          item={item}
+          timezone={timezone}
+          selected={item.id === selectedItemID}
+          onSelect={onSelect}
+          onEdit={onEdit}
+          onDelete={onDelete}
+        />
       ))}
     </div>
   );
@@ -771,14 +798,14 @@ function DayScheduler({
   items,
   anchorDate,
   timezone,
-  onEdit,
-  onDelete
+  selectedItemID,
+  onSelect
 }: {
   items: CalendarItem[];
   anchorDate: string;
   timezone?: string;
-  onEdit: (appointment: AppointmentRecord) => void;
-  onDelete: (appointment: AppointmentRecord) => void;
+  selectedItemID: string;
+  onSelect: (itemID: string) => void;
 }) {
   const dayItems = items
     .filter((item) => dateKey(item.start, timezone) === anchorDate)
@@ -787,71 +814,65 @@ function DayScheduler({
   const positionedItems = positionSchedulerItems(dayItems, hours, timezone);
 
   return (
-    <div className="space-y-4">
-      <CalendarViewSummary label="Day view" title={formatFullInputDateLabel(anchorDate)} items={dayItems} />
-
-      <div className="overflow-x-auto rounded-md border border-line bg-white shadow-sm">
-        <div className="min-w-[720px]">
-          <div className="grid grid-cols-[4.75rem_1fr] border-b border-line bg-slate-50">
-            <div className="border-r border-line px-3 py-3 text-xs font-semibold uppercase text-muted">Day</div>
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-line bg-white shadow-sm">
+      <div className="grid shrink-0 grid-cols-[3.5rem_minmax(0,1fr)] border-b border-line bg-slate-50">
+        <div className="border-r border-line px-2 py-3 text-xs font-semibold uppercase text-muted">Day</div>
+        <div
+          className={cn(
+            "px-3 py-3 text-center",
+            isTodayInput(anchorDate, timezone) ? "bg-teal-50 text-brand" : "text-ink"
+          )}
+        >
+          <div className="text-xs font-semibold uppercase text-muted">{weekdayLabel(anchorDate)}</div>
+          <div
+            className={cn(
+              "mx-auto mt-1 flex h-7 w-7 items-center justify-center rounded-full text-sm font-bold",
+              isTodayInput(anchorDate, timezone) ? "bg-brand text-white" : "text-ink"
+            )}
+          >
+            {dayNumberLabel(anchorDate)}
+          </div>
+        </div>
+      </div>
+      <div className="grid shrink-0 grid-cols-[3.5rem_minmax(0,1fr)] border-b border-line">
+        <div className="border-r border-line bg-slate-50 px-2 py-2 text-xs font-semibold text-muted">All-day</div>
+        <div className="min-h-9 bg-white px-2 py-2" />
+      </div>
+      <div className="grid min-h-0 flex-1 grid-cols-[3.5rem_minmax(0,1fr)] overflow-y-auto">
+        <div>
+          {hours.map((hour) => (
             <div
-              className={cn(
-                "px-4 py-3 text-center",
-                isTodayInput(anchorDate, timezone) ? "bg-teal-50 text-brand" : "text-ink"
-              )}
+              key={hour}
+              className="border-r border-line bg-slate-50 px-2 pt-2 text-right text-[11px] font-semibold text-muted"
+              style={{ height: schedulerRowHeight }}
             >
-              <div className="text-xs font-semibold uppercase text-muted">{weekdayLabel(anchorDate)}</div>
-              <div
-                className={cn(
-                  "mx-auto mt-1 flex h-7 w-7 items-center justify-center rounded-full text-sm font-bold",
-                  isTodayInput(anchorDate, timezone) ? "bg-brand text-white" : "text-ink"
-                )}
-              >
-                {dayNumberLabel(anchorDate)}
-              </div>
+              {hourLabel(hour)}
             </div>
-          </div>
-          <div className="grid grid-cols-[4.75rem_1fr] border-b border-line">
-            <div className="border-r border-line bg-slate-50 px-3 py-2 text-xs font-semibold text-muted">All-day</div>
-            <div className="min-h-9 bg-white px-3 py-2" />
-          </div>
-          <div className="grid grid-cols-[4.75rem_1fr]">
-            <div>
-              {hours.map((hour) => (
-                <div
-                  key={hour}
-                  className="border-r border-line bg-slate-50 px-3 pt-2 text-right text-xs font-semibold text-muted"
-                  style={{ height: schedulerRowHeight }}
-                >
-                  {hourLabel(hour)}
-                </div>
-              ))}
+          ))}
+        </div>
+        <div className="relative min-w-0 bg-white" style={{ height: hours.length * schedulerRowHeight }}>
+          {hours.map((hour) => (
+            <div
+              key={hour}
+              className="border-b border-dashed border-line last:border-b-0"
+              style={{ height: schedulerRowHeight }}
+            />
+          ))}
+          {positionedItems.length === 0 ? (
+            <div className="absolute inset-0 flex items-center justify-center text-sm font-medium text-muted">
+              No appointments scheduled
             </div>
-            <div className="relative bg-white" style={{ height: hours.length * schedulerRowHeight }}>
-              {hours.map((hour) => (
-                <div
-                  key={hour}
-                  className="border-b border-dashed border-line last:border-b-0"
-                  style={{ height: schedulerRowHeight }}
-                />
-              ))}
-              {positionedItems.length === 0 ? (
-                <div className="absolute inset-0 flex items-center justify-center text-sm font-medium text-muted">
-                  No appointments scheduled
-                </div>
-              ) : null}
-              <div className="absolute inset-x-3 top-0 bottom-0">
-                {positionedItems.map((positioned) => (
-                  <SchedulerEventBlock
-                    key={positioned.item.id}
-                    positioned={positioned}
-                    timezone={timezone}
-                    onEdit={onEdit}
-                    onDelete={onDelete}
-                  />
-                ))}
-              </div>
-            </div>
+          ) : null}
+          <div className="absolute inset-x-2 top-0 bottom-0">
+            {positionedItems.map((positioned) => (
+              <SchedulerEventBlock
+                key={positioned.item.id}
+                positioned={positioned}
+                timezone={timezone}
+                selected={positioned.item.id === selectedItemID}
+                onSelect={onSelect}
+              />
+            ))}
           </div>
         </div>
       </div>
@@ -863,14 +884,14 @@ function WeekScheduler({
   items,
   anchorDate,
   timezone,
-  onEdit,
-  onDelete
+  selectedItemID,
+  onSelect
 }: {
   items: CalendarItem[];
   anchorDate: string;
   timezone?: string;
-  onEdit: (appointment: AppointmentRecord) => void;
-  onDelete: (appointment: AppointmentRecord) => void;
+  selectedItemID: string;
+  onSelect: (itemID: string) => void;
 }) {
   const weekStart = startOfWeekInput(anchorDate);
   const days = Array.from({ length: 7 }, (_, index) => addDaysInput(weekStart, index));
@@ -879,93 +900,81 @@ function WeekScheduler({
   const gridHeight = hours.length * schedulerRowHeight;
 
   return (
-    <div className="space-y-4">
-      <CalendarViewSummary label="Week view" title={rangeLabel("week", rangeForView("week", anchorDate), timezone)} items={weekItems} />
-
-      <div className="overflow-x-auto rounded-md border border-line bg-white shadow-sm">
-        <div className="min-w-[1080px]">
-          <div className="grid grid-cols-[4.75rem_repeat(7,minmax(8.75rem,1fr))] border-b border-line bg-slate-50">
-            <div className="border-r border-line px-3 py-3 text-xs font-semibold uppercase text-muted">Week</div>
-            {days.map((day) => (
-              <div
-                key={day}
-                className={cn(
-                  "border-r border-line px-3 py-2 text-center last:border-r-0",
-                  isTodayInput(day, timezone) ? "bg-teal-50 text-brand" : "text-ink"
-                )}
-              >
-                <div className="text-xs font-semibold uppercase text-muted">{weekdayLabel(day)}</div>
-                <div
-                  className={cn(
-                    "mx-auto mt-1 flex h-7 w-7 items-center justify-center rounded-full text-sm font-bold",
-                    isTodayInput(day, timezone) ? "bg-brand text-white" : "text-ink"
-                  )}
-                >
-                  {dayNumberLabel(day)}
-                </div>
-              </div>
-            ))}
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-line bg-white shadow-sm">
+      <div className="grid shrink-0 grid-cols-[3.5rem_repeat(7,minmax(0,1fr))] border-b border-line bg-slate-50">
+        <div className="border-r border-line px-2 py-3 text-xs font-semibold uppercase text-muted">Week</div>
+        {days.map((day) => (
+          <div
+            key={day}
+            className={cn(
+              "min-w-0 border-r border-line px-2 py-2 text-center last:border-r-0",
+              isTodayInput(day, timezone) ? "bg-teal-50 text-brand" : "text-ink"
+            )}
+          >
+            <div className="truncate text-[11px] font-semibold uppercase text-muted">{weekdayLabel(day)}</div>
+            <div
+              className={cn(
+                "mx-auto mt-1 flex h-7 w-7 items-center justify-center rounded-full text-sm font-bold",
+                isTodayInput(day, timezone) ? "bg-brand text-white" : "text-ink"
+              )}
+            >
+              {dayNumberLabel(day)}
+            </div>
           </div>
-          <div className="grid grid-cols-[4.75rem_repeat(7,minmax(8.75rem,1fr))] border-b border-line">
-            <div className="border-r border-line bg-slate-50 px-3 py-2 text-xs font-semibold text-muted">All-day</div>
-            {days.map((day) => (
-              <div
-                key={day}
-                className={cn(
-                  "min-h-9 border-r border-line px-2 py-2 last:border-r-0",
-                  isTodayInput(day, timezone) ? "bg-teal-50/40" : "bg-white"
-                )}
-              />
-            ))}
-          </div>
-          <div className="grid grid-cols-[4.75rem_repeat(7,minmax(8.75rem,1fr))]">
-            <div>
+        ))}
+      </div>
+      <div className="grid shrink-0 grid-cols-[3.5rem_repeat(7,minmax(0,1fr))] border-b border-line">
+        <div className="border-r border-line bg-slate-50 px-2 py-2 text-[11px] font-semibold text-muted">All-day</div>
+        {days.map((day) => (
+          <div key={day} className="min-h-9 min-w-0 border-r border-line bg-white px-1 py-2 last:border-r-0" />
+        ))}
+      </div>
+      <div className="grid min-h-0 flex-1 grid-cols-[3.5rem_repeat(7,minmax(0,1fr))] overflow-y-auto">
+        <div>
+          {hours.map((hour) => (
+            <div
+              key={hour}
+              className="border-r border-line bg-slate-50 px-2 pt-2 text-right text-[11px] font-semibold text-muted"
+              style={{ height: schedulerRowHeight }}
+            >
+              {hourLabel(hour)}
+            </div>
+          ))}
+        </div>
+        {days.map((day) => {
+          const dayItems = weekItems.filter((item) => dateKey(item.start, timezone) === day);
+          const positionedItems = positionSchedulerItems(dayItems, hours, timezone);
+          return (
+            <div
+              key={day}
+              className={cn(
+                "relative min-w-0 border-r border-line bg-white last:border-r-0",
+                isTodayInput(day, timezone) ? "bg-teal-50/25" : ""
+              )}
+              style={{ height: gridHeight }}
+            >
               {hours.map((hour) => (
                 <div
                   key={hour}
-                  className="border-r border-line bg-slate-50 px-3 pt-2 text-right text-xs font-semibold text-muted"
+                  className="border-b border-dashed border-line last:border-b-0"
                   style={{ height: schedulerRowHeight }}
-                >
-                  {hourLabel(hour)}
-                </div>
+                />
               ))}
+              <div className="absolute inset-x-1 top-0 bottom-0">
+                {positionedItems.map((positioned) => (
+                  <SchedulerEventBlock
+                    key={positioned.item.id}
+                    positioned={positioned}
+                    timezone={timezone}
+                    compact
+                    selected={positioned.item.id === selectedItemID}
+                    onSelect={onSelect}
+                  />
+                ))}
+              </div>
             </div>
-            {days.map((day) => {
-              const dayItems = items.filter((item) => dateKey(item.start, timezone) === day);
-              const positionedItems = positionSchedulerItems(dayItems, hours, timezone);
-              return (
-                <div
-                  key={day}
-                  className={cn(
-                    "relative border-r border-line last:border-r-0",
-                    isTodayInput(day, timezone) ? "bg-teal-50/30" : "bg-white"
-                  )}
-                  style={{ height: gridHeight }}
-                >
-                  {hours.map((hour) => (
-                    <div
-                      key={hour}
-                      className="border-b border-dashed border-line last:border-b-0"
-                      style={{ height: schedulerRowHeight }}
-                    />
-                  ))}
-                  <div className="absolute inset-x-2 top-0 bottom-0">
-                    {positionedItems.map((positioned) => (
-                      <SchedulerEventBlock
-                        key={positioned.item.id}
-                        positioned={positioned}
-                        timezone={timezone}
-                        compact
-                        onEdit={onEdit}
-                        onDelete={onDelete}
-                      />
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -975,76 +984,116 @@ function MonthGrid({
   items,
   anchorDate,
   timezone,
-  onEdit,
-  onDelete
+  selectedItemID,
+  onSelect,
+  onDayOpen
 }: {
   items: CalendarItem[];
   anchorDate: string;
   timezone?: string;
-  onEdit: (appointment: AppointmentRecord) => void;
-  onDelete: (appointment: AppointmentRecord) => void;
+  selectedItemID: string;
+  onSelect: (itemID: string) => void;
+  onDayOpen: (day: string) => void;
 }) {
   const days = monthGridDays(anchorDate);
-  const monthItems = items.filter((item) => dateKey(item.start, timezone).slice(0, 7) === anchorDate.slice(0, 7));
   return (
-    <div className="space-y-4">
-      <CalendarViewSummary label="Month view" title={monthTitle(anchorDate)} items={monthItems} />
-
-      <div className="overflow-x-auto rounded-md border border-line bg-white shadow-sm">
-        <div className="min-w-[940px]">
-          <div className="grid grid-cols-7 border-b border-line bg-slate-50 text-xs font-semibold uppercase text-muted">
-            {weekdayLabels.map((label) => (
-              <div key={label} className="border-r border-line px-3 py-2 last:border-r-0">
-                {label}
-              </div>
-            ))}
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-line bg-white shadow-sm">
+      <div className="grid shrink-0 grid-cols-7 border-b border-line bg-slate-50 text-[11px] font-semibold uppercase text-muted">
+        {weekdayLabels.map((label) => (
+          <div key={label} className="min-w-0 border-r border-line px-2 py-2 last:border-r-0">
+            {label}
           </div>
-          <div className="grid grid-cols-7">
-            {days.map((day) => {
-              const dayItems = items.filter((item) => dateKey(item.start, timezone) === day);
-              const muted = day.slice(0, 7) !== anchorDate.slice(0, 7);
-              const warnings = warningCount(dayItems);
-              return (
-                <div
-                  key={day}
+        ))}
+      </div>
+      <div className="grid min-h-0 flex-1 grid-cols-7 grid-rows-6">
+        {days.map((day) => {
+          const dayItems = items
+            .filter((item) => dateKey(item.start, timezone) === day)
+            .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+          const muted = day.slice(0, 7) !== anchorDate.slice(0, 7);
+          const warnings = warningCount(dayItems);
+          const pending = dayItems.filter((item) => item.kind === "pending").length;
+          const visibleItems = dayItems.slice(0, 3);
+          return (
+            <div
+              key={day}
+              onClick={() => onDayOpen(day)}
+              className={cn(
+                "flex min-h-0 min-w-0 cursor-pointer flex-col overflow-hidden border-r border-b border-line bg-white p-2 transition hover:bg-slate-50 last:border-r-0",
+                muted ? "bg-slate-50 text-muted" : "",
+                isTodayInput(day, timezone) ? "relative z-10 ring-2 ring-brand ring-inset" : ""
+              )}
+            >
+              <div className="mb-2 flex items-start justify-between gap-1">
+                <button
+                  type="button"
                   className={cn(
-                    "min-h-36 border-r border-b border-line bg-white p-3 last:border-r-0",
-                    muted ? "bg-slate-50 text-muted" : "",
-                    isTodayInput(day, timezone) ? "relative z-10 ring-2 ring-brand ring-inset" : ""
+                    "flex h-7 min-w-7 items-center justify-center rounded-full px-2 text-sm font-bold outline-none focus:ring-2 focus:ring-brand",
+                    isTodayInput(day, timezone) ? "bg-brand text-white" : muted ? "text-slate-400" : "text-ink"
                   )}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onDayOpen(day);
+                  }}
+                  aria-label={`Open appointments for ${formatFullInputDateLabel(day)}`}
                 >
-                  <div className="mb-2 flex items-start justify-between gap-2">
-                    <div
-                      className={cn(
-                        "flex h-7 min-w-7 items-center justify-center rounded-full px-2 text-sm font-bold",
-                        isTodayInput(day, timezone) ? "bg-brand text-white" : muted ? "text-slate-400" : "text-ink"
-                      )}
-                    >
-                      {monthCellDayLabel(day)}
-                    </div>
-                    {warnings > 0 ? <AlertTriangle className="h-4 w-4 flex-none text-amber-600" /> : null}
-                  </div>
-                  <div className="space-y-1.5">
-                    {dayItems.slice(0, 3).map((item) => (
-                      <MonthEventChip
-                        key={item.id}
-                        item={item}
-                        timezone={timezone}
-                        onEdit={onEdit}
-                        onDelete={onDelete}
-                      />
-                    ))}
-                    {dayItems.length > 3 ? (
-                      <div className="rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold text-muted">
-                        +{dayItems.length - 3} more
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
+                  {monthCellDayLabel(day)}
+                </button>
+                {warnings > 0 ? <AlertTriangle className="h-4 w-4 flex-none text-amber-600" /> : null}
+              </div>
+              {dayItems.length > 1 ? (
+                <button
+                  type="button"
+                  className="mb-1 flex min-w-0 flex-wrap items-center gap-1 text-left text-[10px] font-semibold text-muted outline-none focus:ring-2 focus:ring-brand"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onDayOpen(day);
+                  }}
+                >
+                  <span>{dayItems.length} appts</span>
+                  {pending > 0 ? <span>{pending} pending</span> : null}
+                  {warnings > 0 ? <span>{warnings} warn</span> : null}
+                </button>
+              ) : null}
+              <div className="min-h-0 space-y-1 overflow-hidden">
+                {visibleItems.map((item, index) => (
+                  <MonthEventChip
+                    key={item.id}
+                    item={item}
+                    timezone={timezone}
+                    selected={item.id === selectedItemID}
+                    className={index > 1 ? "hidden xl:flex" : ""}
+                    onSelect={onSelect}
+                  />
+                ))}
+                {dayItems.length > 2 ? (
+                  <button
+                    type="button"
+                    className="block w-full truncate rounded-md bg-slate-100 px-2 py-1 text-left text-[10px] font-semibold text-muted outline-none hover:bg-slate-200 focus:ring-2 focus:ring-brand xl:hidden"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onDayOpen(day);
+                    }}
+                  >
+                    +{dayItems.length - 2} more
+                  </button>
+                ) : null}
+                {dayItems.length > 3 ? (
+                  <button
+                    type="button"
+                    className="hidden w-full truncate rounded-md bg-slate-100 px-2 py-1 text-left text-[10px] font-semibold text-muted outline-none hover:bg-slate-200 focus:ring-2 focus:ring-brand xl:block"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onDayOpen(day);
+                    }}
+                  >
+                    +{dayItems.length - 3} more
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -1053,43 +1102,69 @@ function MonthGrid({
 function CalendarViewSummary({
   label,
   title,
-  items
+  items,
+  bookableStaffCount,
+  bookableServiceCount
 }: {
   label: string;
   title: string;
   items: CalendarItem[];
+  bookableStaffCount: number;
+  bookableServiceCount: number;
 }) {
+  const appointments = items.filter((item) => item.kind === "appointment").length;
+  const pending = items.filter((item) => item.kind === "pending").length;
   const warnings = warningCount(items);
   return (
-    <div className="flex flex-col gap-3 rounded-md border border-line bg-slate-50 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-      <div>
-        <div className="text-xs font-bold uppercase tracking-wide text-muted">{label}</div>
-        <div className="mt-1 text-lg font-bold text-ink">{title}</div>
-      </div>
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-        <CalendarLegend />
-        <div className="flex flex-wrap gap-2">
-          <CountPill value={String(items.length)} label={items.length === 1 ? "event" : "events"} />
-          <CountPill value={String(warnings)} label="warnings" tone={warnings > 0 ? "warning" : "neutral"} />
+    <div className="shrink-0 rounded-md border border-line bg-slate-50 px-3 py-2">
+      <div className="text-[10px] font-bold uppercase tracking-wide text-muted">{label}</div>
+      <div className="mt-1 grid gap-1.5 lg:grid-cols-[auto_1fr_auto] lg:items-center">
+        <div className="min-w-0 flex-none whitespace-nowrap text-sm font-bold text-ink xl:text-base">{title}</div>
+        <div className="flex min-w-0 flex-wrap justify-center gap-1 lg:flex-nowrap lg:justify-self-center">
+          <SummaryStatCard label="Appointments" value={String(appointments)} />
+          <SummaryStatCard label="Pending" value={String(pending)} tone={pending > 0 ? "warning" : "normal"} />
+          <SummaryStatCard label="Warnings" value={String(warnings)} tone={warnings > 0 ? "warning" : "normal"} />
+          <SummaryStatCard label="Staff" value={String(bookableStaffCount)} />
+          <SummaryStatCard label="Services" value={String(bookableServiceCount)} />
+        </div>
+        <div className="flex-none lg:justify-self-end">
+          <CalendarLegend />
         </div>
       </div>
     </div>
   );
 }
 
+function SummaryStatCard({
+  label,
+  value,
+  tone = "normal"
+}: {
+  label: string;
+  value: string;
+  tone?: "normal" | "warning";
+}) {
+  return (
+    <div className={cn("w-20 flex-none rounded-md border px-1.5 py-1 lg:w-24 xl:w-28 xl:px-2 xl:py-1.5", tone === "warning" ? "border-amber-200 bg-amber-50" : "border-line bg-white")}>
+      <div className="truncate text-[9px] font-semibold uppercase tracking-wide text-muted xl:text-[10px]">{label}</div>
+      <div className="text-xs font-bold text-ink xl:mt-0.5 xl:text-sm">{value}</div>
+    </div>
+  );
+}
+
 function CalendarLegend() {
   return (
-    <div className="flex flex-wrap items-center gap-3 text-xs font-semibold text-muted">
+    <div className="flex flex-wrap items-center gap-2 text-[11px] font-semibold text-muted xl:gap-3 xl:text-xs">
       <span className="inline-flex items-center gap-1.5">
-        <span className="h-2 w-2 rounded-full bg-emerald-500" />
+        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 xl:h-2 xl:w-2" />
         confirmed
       </span>
       <span className="inline-flex items-center gap-1.5">
-        <span className="h-2 w-2 rounded-full bg-amber-500" />
+        <span className="h-1.5 w-1.5 rounded-full bg-amber-500 xl:h-2 xl:w-2" />
         pending
       </span>
       <span className="inline-flex items-center gap-1.5">
-        <span className="h-2 w-2 rounded-full bg-red-500" />
+        <span className="h-1.5 w-1.5 rounded-full bg-red-500 xl:h-2 xl:w-2" />
         warning
       </span>
     </div>
@@ -1100,28 +1175,37 @@ function SchedulerEventBlock({
   positioned,
   timezone,
   compact = false,
-  onEdit,
-  onDelete
+  selected,
+  onSelect
 }: {
   positioned: PositionedCalendarItem;
   timezone?: string;
   compact?: boolean;
-  onEdit: (appointment: AppointmentRecord) => void;
-  onDelete: (appointment: AppointmentRecord) => void;
+  selected: boolean;
+  onSelect: (itemID: string) => void;
 }) {
   const item = positioned.item;
-  const appointment = item.appointment;
   return (
     <div
+      role="button"
+      tabIndex={0}
       className={cn(
-        "absolute overflow-hidden rounded-md border p-2 text-left shadow-sm transition hover:shadow-md",
-        item.warning ? "border-amber-300 bg-amber-50" : item.kind === "pending" ? "border-amber-200 bg-amber-50" : "border-emerald-200 bg-emerald-50"
+        "absolute cursor-pointer overflow-hidden rounded-md border p-2 text-left shadow-sm outline-none transition hover:shadow-md focus:ring-2 focus:ring-brand",
+        item.warning ? "border-amber-300 bg-amber-50" : item.kind === "pending" ? "border-amber-200 bg-amber-50" : "border-emerald-200 bg-emerald-50",
+        selected ? "ring-2 ring-brand ring-offset-1" : ""
       )}
       style={{
         top: positioned.top,
         height: positioned.height,
         left: `calc(${(positioned.lane / positioned.laneCount) * 100}% + 2px)`,
         width: `calc(${100 / positioned.laneCount}% - 4px)`
+      }}
+      onClick={() => onSelect(item.id)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onSelect(item.id);
+        }
       }}
     >
       <div className="flex items-start justify-between gap-2">
@@ -1137,30 +1221,6 @@ function SchedulerEventBlock({
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         <Badge value={item.kind === "pending" ? "fallback_pending" : item.status} className="px-2 py-0.5" />
-        {appointment ? (
-          <>
-            <Button
-              type="button"
-              variant="secondary"
-              className="h-6 w-6 px-0"
-              onClick={() => onEdit(appointment)}
-              disabled={!canEditAppointment(appointment)}
-              aria-label="Edit appointment"
-            >
-              <Pencil className="h-3 w-3" />
-            </Button>
-            <Button
-              type="button"
-              variant="danger"
-              className="h-6 w-6 px-0"
-              onClick={() => onDelete(appointment)}
-              disabled={!canDeleteAppointment(appointment)}
-              aria-label="Delete appointment"
-            >
-              <Trash2 className="h-3 w-3" />
-            </Button>
-          </>
-        ) : null}
       </div>
     </div>
   );
@@ -1169,55 +1229,242 @@ function SchedulerEventBlock({
 function MonthEventChip({
   item,
   timezone,
-  onEdit,
-  onDelete
+  selected,
+  className,
+  onSelect
 }: {
   item: CalendarItem;
   timezone?: string;
+  selected: boolean;
+  className?: string;
+  onSelect: (itemID: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={cn(
+        "group flex w-full items-start gap-1.5 rounded-md border px-1.5 py-1 text-left text-[10px] outline-none transition hover:shadow-sm focus:ring-2 focus:ring-brand",
+        item.warning ? "border-amber-300 bg-amber-50" : item.kind === "pending" ? "border-amber-200 bg-amber-50" : "border-emerald-200 bg-emerald-50",
+        selected ? "ring-2 ring-brand ring-offset-1" : "",
+        className
+      )}
+      onClick={(event) => {
+        event.stopPropagation();
+        onSelect(item.id);
+      }}
+    >
+      <span className="min-w-0 flex-1">
+        <span className="block truncate font-bold text-ink">
+          {formatTime(item.start, timezone)} · {item.customerName || "Unknown"}
+        </span>
+        <span className="block truncate leading-4 text-muted">{compactServiceLabel(item)}</span>
+      </span>
+      <span className="flex flex-none items-center gap-1">
+        {item.kind === "pending" ? <span className="rounded bg-amber-100 px-1 text-[9px] font-semibold text-amber-700">pending</span> : null}
+        {item.warning ? <AlertTriangle className="mt-0.5 h-3 w-3 flex-none text-amber-600" /> : null}
+      </span>
+    </button>
+  );
+}
+
+function DayAppointmentsDrawer({
+  open,
+  day,
+  items,
+  timezone,
+  onClose,
+  onSelect
+}: {
+  open: boolean;
+  day: string;
+  items: CalendarItem[];
+  timezone?: string;
+  onClose: () => void;
+  onSelect: (itemID: string) => void;
+}) {
+  const pending = items.filter((item) => item.kind === "pending").length;
+  const warnings = warningCount(items);
+  const visible = open && Boolean(day);
+
+  return (
+    <div className={cn("fixed inset-0 z-50 transition", visible ? "pointer-events-auto" : "pointer-events-none")}>
+      <button
+        type="button"
+        aria-label="Close day appointments"
+        className={cn("absolute inset-0 bg-slate-950/20 transition-opacity", visible ? "opacity-100" : "opacity-0")}
+        onClick={onClose}
+      />
+      <aside
+        className={cn(
+          "absolute right-0 top-0 flex h-full w-full max-w-md flex-col border-l border-line bg-panel shadow-2xl transition-transform duration-200",
+          visible ? "translate-x-0" : "translate-x-full"
+        )}
+      >
+        <div className="border-b border-line px-4 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <CardTitle>Day appointments</CardTitle>
+              <CardDescription>{day ? formatFullInputDateLabel(day) : "Selected day"}</CardDescription>
+            </div>
+            <Button type="button" variant="ghost" className="h-9 px-2" onClick={onClose} aria-label="Close day appointments">
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs font-semibold text-muted">
+            <span>{items.length} appointments</span>
+            {pending > 0 ? <span>{pending} pending</span> : null}
+            {warnings > 0 ? <span>{warnings} warnings</span> : null}
+          </div>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          {items.length === 0 ? (
+            <div className="rounded-md border border-dashed border-line bg-slate-50 p-5 text-center text-sm text-muted">
+              No appointments scheduled for this day.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {items.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={cn(
+                    "w-full rounded-md border p-3 text-left outline-none transition hover:shadow-sm focus:ring-2 focus:ring-brand",
+                    item.warning
+                      ? "border-amber-300 bg-amber-50"
+                      : item.kind === "pending"
+                        ? "border-amber-200 bg-amber-50"
+                        : "border-line bg-white"
+                  )}
+                  onClick={() => onSelect(item.id)}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-bold text-ink">
+                        {formatTimeRange(item.start, item.end, timezone)} · {item.customerName || "Unknown"}
+                      </div>
+                      <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{compactServiceLabel(item)}</div>
+                    </div>
+                    {item.warning ? <AlertTriangle className="h-4 w-4 flex-none text-amber-600" /> : null}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <Badge value={item.kind === "pending" ? "fallback_pending" : item.status} />
+                    {item.warning ? <Badge value="warning" /> : null}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function AppointmentDetailDrawer({
+  open,
+  selectedItem,
+  readyForBooking,
+  timezone,
+  onClose,
+  onEdit,
+  onDelete
+}: {
+  open: boolean;
+  selectedItem: CalendarItem | null;
+  readyForBooking: boolean;
+  timezone?: string;
+  onClose: () => void;
   onEdit: (appointment: AppointmentRecord) => void;
   onDelete: (appointment: AppointmentRecord) => void;
 }) {
-  const appointment = item.appointment;
+  const appointment = selectedItem?.appointment;
+
   return (
-    <div
-      className={cn(
-        "group flex items-start gap-1.5 rounded-md border px-2 py-1.5 text-xs",
-        item.warning ? "border-amber-300 bg-amber-50" : item.kind === "pending" ? "border-amber-200 bg-amber-50" : "border-emerald-200 bg-emerald-50"
-      )}
-    >
-      {appointment ? (
-        <button
-          type="button"
-          className="min-w-0 flex-1 text-left"
-          onClick={() => onEdit(appointment)}
-          disabled={!canEditAppointment(appointment)}
-          aria-label="Edit appointment"
-        >
-          <span className="block truncate font-bold text-ink">
-            {formatTime(item.start, timezone)} · {item.customerName || "Unknown"}
-          </span>
-          <span className="block truncate leading-5 text-muted">{compactServiceLabel(item)}</span>
-        </button>
-      ) : (
-        <div className="min-w-0 flex-1">
-          <div className="truncate font-bold text-ink">
-            {formatTime(item.start, timezone)} · {item.customerName || "Unknown"}
+    <div className={cn("fixed inset-0 z-50 transition", open && selectedItem ? "pointer-events-auto" : "pointer-events-none")}>
+      <button
+        type="button"
+        aria-label="Close appointment detail"
+        className={cn("absolute inset-0 bg-slate-950/20 transition-opacity", open && selectedItem ? "opacity-100" : "opacity-0")}
+        onClick={onClose}
+      />
+      <aside
+        className={cn(
+          "absolute right-0 top-0 flex h-full w-full max-w-md flex-col border-l border-line bg-panel shadow-2xl transition-transform duration-200",
+          open && selectedItem ? "translate-x-0" : "translate-x-full"
+        )}
+      >
+        <div className="border-b border-line px-4 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <CardTitle>Appointment Detail</CardTitle>
+              <CardDescription>Selected booking and sync health.</CardDescription>
+            </div>
+            <Button type="button" variant="ghost" className="h-9 px-2" onClick={onClose} aria-label="Close appointment detail">
+              <X className="h-4 w-4" />
+            </Button>
           </div>
-          <div className="truncate leading-5 text-muted">{compactServiceLabel(item)}</div>
+          {!readyForBooking ? (
+            <div className="mt-3 rounded-md border border-line bg-slate-50 p-3 text-xs leading-5 text-muted">
+              Booking disabled: connect Square Appointments and sync bookable staff/services.
+            </div>
+          ) : null}
         </div>
-      )}
-      {item.warning ? <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-none text-amber-600" /> : null}
-      {appointment ? (
-        <button
-          type="button"
-          className="hidden h-5 w-5 flex-none items-center justify-center rounded border border-red-200 bg-white text-red-700 hover:bg-red-50 group-hover:flex disabled:text-slate-300"
-          onClick={() => onDelete(appointment)}
-          disabled={!canDeleteAppointment(appointment)}
-          aria-label="Delete appointment"
-        >
-          <Trash2 className="h-3 w-3" />
-        </button>
-      ) : null}
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          {selectedItem ? (
+            <div className="rounded-md border border-line bg-white p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge value={selectedItem.kind === "pending" ? "fallback_pending" : selectedItem.status} />
+                {selectedItem.warning ? <Badge value="warning" /> : null}
+              </div>
+              <div className="mt-3 text-lg font-bold text-ink">{selectedItem.customerName || "Unknown customer"}</div>
+              <div className="mt-1 text-sm font-semibold text-ink">{formatTimeRange(selectedItem.start, selectedItem.end, timezone)}</div>
+              <div className="mt-2 text-sm leading-6 text-muted">{compactServiceLabel(selectedItem)}</div>
+              <div className="mt-1 text-xs leading-5 text-muted">{selectedItem.detail}</div>
+              {selectedItem.warning ? (
+                <div className="mt-3 flex gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 flex-none" />
+                  <span>{selectedItem.warning}</span>
+                </div>
+              ) : null}
+              {!appointment ? (
+                <div className="mt-3 rounded-md border border-line bg-slate-50 p-3 text-xs leading-5 text-muted">
+                  Needs owner review. This request is not a confirmed POS appointment, so edit and delete actions are disabled.
+                </div>
+              ) : null}
+              <div className="mt-4 grid grid-cols-2 gap-2">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => {
+                    if (!appointment) return;
+                    onEdit(appointment);
+                    onClose();
+                  }}
+                  disabled={!appointment || !canEditAppointment(appointment)}
+                >
+                  <Pencil className="h-4 w-4" />
+                  Edit
+                </Button>
+                <Button
+                  type="button"
+                  variant="danger"
+                  onClick={() => {
+                    if (!appointment) return;
+                    onDelete(appointment);
+                    onClose();
+                  }}
+                  disabled={!appointment || !canDeleteAppointment(appointment)}
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete
+                </Button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </aside>
     </div>
   );
 }
@@ -1225,17 +1472,35 @@ function MonthEventChip({
 function CalendarItemRow({
   item,
   timezone,
+  selected,
+  onSelect,
   onEdit,
   onDelete
 }: {
   item: CalendarItem;
   timezone?: string;
+  selected: boolean;
+  onSelect: (itemID: string) => void;
   onEdit: (appointment: AppointmentRecord) => void;
   onDelete: (appointment: AppointmentRecord) => void;
 }) {
   const appointment = item.appointment;
   return (
-    <div className="grid gap-3 rounded-md border border-line bg-white p-4 md:grid-cols-[11rem_1fr_auto] md:items-start">
+    <div
+      role="button"
+      tabIndex={0}
+      className={cn(
+        "grid cursor-pointer gap-3 rounded-md border bg-white p-4 outline-none transition hover:border-brand/60 md:grid-cols-[11rem_1fr_auto] md:items-start",
+        selected ? "border-brand ring-2 ring-teal-100" : "border-line"
+      )}
+      onClick={() => onSelect(item.id)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onSelect(item.id);
+        }
+      }}
+    >
       <div>
         <div className="text-sm font-semibold text-ink">{formatTimeRange(item.start, item.end, timezone)}</div>
         <div className="mt-1 text-xs text-muted">{formatDate(item.start, timezone)}</div>
@@ -1258,11 +1523,29 @@ function CalendarItemRow({
       <div className="flex flex-wrap gap-2 md:justify-end">
         {appointment ? (
           <>
-            <Button type="button" variant="secondary" className="h-9 px-3" onClick={() => onEdit(appointment)} disabled={!canEditAppointment(appointment)}>
+            <Button
+              type="button"
+              variant="secondary"
+              className="h-9 px-3"
+              onClick={(event) => {
+                event.stopPropagation();
+                onEdit(appointment);
+              }}
+              disabled={!canEditAppointment(appointment)}
+            >
               <Pencil className="h-4 w-4" />
               Edit
             </Button>
-            <Button type="button" variant="danger" className="h-9 px-3" onClick={() => onDelete(appointment)} disabled={!canDeleteAppointment(appointment)}>
+            <Button
+              type="button"
+              variant="danger"
+              className="h-9 px-3"
+              onClick={(event) => {
+                event.stopPropagation();
+                onDelete(appointment);
+              }}
+              disabled={!canDeleteAppointment(appointment)}
+            >
               <Trash2 className="h-4 w-4" />
               Delete
             </Button>
@@ -1272,54 +1555,6 @@ function CalendarItemRow({
         )}
       </div>
     </div>
-  );
-}
-
-function CalendarItemActions({
-  appointment,
-  onEdit,
-  onDelete
-}: {
-  appointment?: AppointmentRecord;
-  onEdit: (appointment: AppointmentRecord) => void;
-  onDelete: (appointment: AppointmentRecord) => void;
-}) {
-  if (!appointment) {
-    return <Badge value="needs_review" />;
-  }
-  return (
-    <div className="flex flex-wrap gap-2 lg:justify-end">
-      <Button type="button" variant="secondary" className="h-9 px-3" onClick={() => onEdit(appointment)} disabled={!canEditAppointment(appointment)}>
-        <Pencil className="h-4 w-4" />
-        Edit
-      </Button>
-      <Button type="button" variant="danger" className="h-9 px-3" onClick={() => onDelete(appointment)} disabled={!canDeleteAppointment(appointment)}>
-        <Trash2 className="h-4 w-4" />
-        Delete
-      </Button>
-    </div>
-  );
-}
-
-function CountPill({
-  value,
-  label,
-  tone = "neutral"
-}: {
-  value: string;
-  label: string;
-  tone?: "neutral" | "warning";
-}) {
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-semibold ring-1",
-        tone === "warning" ? "bg-amber-50 text-amber-700 ring-amber-200" : "bg-white text-muted ring-line"
-      )}
-    >
-      <span className="text-ink">{value}</span>
-      {label}
-    </span>
   );
 }
 
@@ -1661,7 +1896,7 @@ function SegmentList({ record }: { record: AppointmentRecord | BookingAttempt | 
 
 function EmptyState({ title, message }: { title: string; message: string }) {
   return (
-    <div className="rounded-md border border-dashed border-line bg-slate-50 p-6 text-center">
+    <div className="flex min-h-0 flex-1 flex-col items-center justify-center rounded-md border border-dashed border-line bg-slate-50 p-6 text-center">
       <CalendarClock className="mx-auto h-6 w-6 text-muted" />
       <div className="mt-3 text-sm font-semibold text-ink">{title}</div>
       <div className="mt-1 text-sm leading-6 text-muted">{message}</div>
@@ -1701,6 +1936,19 @@ function buildCalendarItems(
     request: item
   }));
   return [...appointments, ...pending].sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+}
+
+function defaultSelectedCalendarItem(items: CalendarItem[]) {
+  return prioritizedCalendarItems(items)[0] ?? null;
+}
+
+function prioritizedCalendarItems(items: CalendarItem[]) {
+  return [...items].sort((a, b) => {
+    const aReview = a.warning || a.kind === "pending" ? 0 : 1;
+    const bReview = b.warning || b.kind === "pending" ? 0 : 1;
+    if (aReview !== bReview) return aReview - bReview;
+    return new Date(a.start).getTime() - new Date(b.start).getTime();
+  });
 }
 
 function appointmentWarning(item: AppointmentRecord) {
@@ -1939,6 +2187,31 @@ function rangeForView(view: CalendarView, anchorDate: string) {
   return { start: anchorDate, end: addDaysInput(anchorDate, 14) };
 }
 
+function visibleItemsForView(items: CalendarItem[], view: CalendarView, anchorDate: string, timezone?: string) {
+  if (view === "day") {
+    return items.filter((item) => dateKey(item.start, timezone) === anchorDate);
+  }
+  if (view === "week") {
+    const start = startOfWeekInput(anchorDate);
+    const days = new Set(Array.from({ length: 7 }, (_, index) => addDaysInput(start, index)));
+    return items.filter((item) => days.has(dateKey(item.start, timezone)));
+  }
+  if (view === "month") {
+    return items.filter((item) => dateKey(item.start, timezone).slice(0, 7) === anchorDate.slice(0, 7));
+  }
+  return items;
+}
+
+function calendarSummaryTitle(view: CalendarView, anchorDate: string, timezone?: string) {
+  if (view === "day") {
+    return formatFullInputDateLabel(anchorDate);
+  }
+  if (view === "month") {
+    return monthTitle(anchorDate);
+  }
+  return rangeLabel(view, rangeForView(view, anchorDate), timezone);
+}
+
 function rangeLabel(view: CalendarView, range: { start: string; end: string }, timezone?: string) {
   if (view === "day") {
     return formatInputDateLabel(range.start);
@@ -2172,24 +2445,6 @@ function formatTime(value: string, timezone?: string) {
 
 function formatTimeRange(start: string, end: string, timezone?: string) {
   return `${formatTime(start, timezone)} - ${formatTime(end, timezone)}`;
-}
-
-function formatOptionalDate(value?: string, timezone?: string) {
-  if (!value) return "not synced";
-  return new Date(value).toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-    timeZone: timezone
-  });
-}
-
-function calendarLatestSync(calendar: CalendarRangeResponse | null) {
-  if (!calendar) return "";
-  const values = calendar.appointments
-    .map((item) => item.last_pos_synced_at)
-    .filter((value): value is string => Boolean(value));
-  values.sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
-  return values[0] ?? "";
 }
 
 function capitalize(value: string) {
