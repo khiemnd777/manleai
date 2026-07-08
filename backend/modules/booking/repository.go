@@ -500,6 +500,13 @@ func (r *Repository) SaveConfirmedBooking(ctx context.Context, record ConfirmedB
 		return nil, err
 	}
 
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO owner_notifications (salon_id, booking_attempt_id, appointment_id, type, status, title, message)
+		VALUES ($1, $2, $3, $4, 'pending', $5, $6)
+	`, record.SalonID, attempt.ID, appointment.ID, NotificationTypeBookingConfirmed, "New POS-confirmed appointment", confirmedNotificationMessage(record)); err != nil {
+		return nil, err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -1380,7 +1387,7 @@ func (r *Repository) ListCalendarPendingRequests(ctx context.Context, salonID st
 			LIMIT 1
 		) note ON TRUE
 		WHERE ba.salon_id = $1
-		  AND ba.status = 'fallback_pending'
+		  AND ba.status IN ('fallback_pending', 'pos_pending')
 		  AND ba.requested_start_time < $3
 		  AND ba.requested_end_time > $2
 		ORDER BY ba.requested_start_time ASC, ba.id ASC
@@ -1429,6 +1436,73 @@ func (r *Repository) ListCalendarPendingRequests(ctx context.Context, salonID st
 		return nil, err
 	}
 	if err := r.attachAttemptTargetAppointments(ctx, salonID, items); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (r *Repository) ListCalendarEvents(ctx context.Context, salonID string, ownerUserID string, cursor CalendarEventCursor, limit int) ([]CalendarEvent, error) {
+	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT n.id::text, n.salon_id::text, n.type, n.status, n.title, n.message,
+		       COALESCE(n.booking_attempt_id::text, ''), COALESCE(n.appointment_id::text, ''),
+		       COALESCE(ba.source, ''), COALESCE(ba.status, ''), COALESCE(ba.customer_name, ''),
+		       COALESCE(ba.service_id::text, ''), COALESCE(ba.staff_id::text, ''),
+		       COALESCE(a.start_time, ba.requested_start_time, n.created_at),
+		       COALESCE(a.end_time, ba.requested_end_time, n.created_at),
+		       n.created_at
+		FROM owner_notifications n
+		LEFT JOIN booking_attempts ba
+		  ON ba.id = n.booking_attempt_id
+		 AND ba.salon_id = n.salon_id
+		LEFT JOIN appointments a
+		  ON a.id = n.appointment_id
+		 AND a.salon_id = n.salon_id
+		WHERE n.salon_id = $1
+		  AND n.type IN ($2, $3)
+		  AND (
+		        n.created_at > $4
+		        OR (n.created_at = $4 AND n.id::text > $5)
+		      )
+		ORDER BY n.created_at ASC, n.id::text ASC
+		LIMIT $6
+	`, salonID, NotificationTypeBookingConfirmed, NotificationTypeBookingFallback, cursor.CreatedAt, cursor.ID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]CalendarEvent, 0)
+	for rows.Next() {
+		var item CalendarEvent
+		if err := rows.Scan(
+			&item.ID,
+			&item.SalonID,
+			&item.Type,
+			&item.NotificationStatus,
+			&item.Title,
+			&item.Message,
+			&item.BookingAttemptID,
+			&item.AppointmentID,
+			&item.Source,
+			&item.BookingStatus,
+			&item.CustomerName,
+			&item.ServiceID,
+			&item.StaffID,
+			&item.StartTime,
+			&item.EndTime,
+			&item.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return items, nil
@@ -2018,6 +2092,11 @@ func insertAppointmentServices(ctx context.Context, tx *sql.Tx, appointmentID st
 func fallbackNotificationMessage(record FallbackBookingRecord) string {
 	when := record.StartTime.Format(time.RFC3339)
 	return fmt.Sprintf("%s requested %s with %s at %s. POS returned %s: %s", record.CustomerName, record.Service.Name, record.Staff.Name, when, record.ErrorCode, record.ErrorMessage)
+}
+
+func confirmedNotificationMessage(record ConfirmedBookingRecord) string {
+	when := record.StartTime.Format(time.RFC3339)
+	return fmt.Sprintf("%s booked %s with %s at %s. The active POS returned a booking ID.", record.CustomerName, record.Service.Name, record.Staff.Name, when)
 }
 
 func appointmentActionFallbackTitle(record AppointmentActionFallbackRecord) string {

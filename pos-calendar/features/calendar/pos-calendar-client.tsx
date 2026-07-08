@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
@@ -22,7 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Dialog } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { apiRequest, getAccessToken, logoutSession } from "@/lib/api/client";
+import { apiRequest, apiStream, getAccessToken, logoutSession } from "@/lib/api/client";
 import { cn } from "@/lib/utils/cn";
 import type {
   AvailabilityResult,
@@ -30,6 +30,7 @@ import type {
   AppointmentRecord,
   BookingAttempt,
   BookingSegmentRequest,
+  CalendarEvent,
   CalendarRangeResponse,
   CalendarSyncResponse,
   CalendarView,
@@ -78,6 +79,14 @@ type Notice = {
   type: "success" | "warning" | "error";
   title: string;
   message: string;
+};
+
+type CalendarToast = {
+  id: string;
+  type: "success" | "warning";
+  title: string;
+  message: string;
+  event: CalendarEvent;
 };
 
 type CalendarItem = {
@@ -136,9 +145,11 @@ export function POSCalendarClient() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [calendarToasts, setCalendarToasts] = useState<CalendarToast[]>([]);
   const [actionMode, setActionMode] = useState<ActionMode | null>(null);
   const [selectedAppointment, setSelectedAppointment] = useState<AppointmentRecord | null>(null);
   const [selectedCalendarItemID, setSelectedCalendarItemID] = useState("");
+  const [pendingFocusItemID, setPendingFocusItemID] = useState("");
   const [detailOpen, setDetailOpen] = useState(false);
   const [selectedDayKey, setSelectedDayKey] = useState("");
   const [dayDrawerOpen, setDayDrawerOpen] = useState(false);
@@ -149,6 +160,8 @@ export function POSCalendarClient() {
   const [checkingAvailability, setCheckingAvailability] = useState(false);
   const [savingAction, setSavingAction] = useState(false);
   const [actionError, setActionError] = useState("");
+  const seenCalendarEventIDs = useRef<Set<string>>(new Set());
+  const toastTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   useEffect(() => {
     if (!getAccessToken()) {
@@ -213,10 +226,77 @@ export function POSCalendarClient() {
   }, [detailOpen, items, selectedCalendarItemID]);
 
   useEffect(() => {
+    if (!pendingFocusItemID) return;
+    if (!items.some((item) => item.id === pendingFocusItemID)) return;
+    selectCalendarItem(pendingFocusItemID);
+    setPendingFocusItemID("");
+  }, [items, pendingFocusItemID]);
+
+  useEffect(() => {
     setDetailOpen(false);
     setDayDrawerOpen(false);
     setSelectedDayKey("");
   }, [anchorDate, view]);
+
+  useEffect(() => {
+    if (!salon) return;
+    let active = true;
+    let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    const controller = new AbortController();
+    const cursorKey = calendarEventCursorKey(salon.id);
+
+    const scheduleRangeReload = () => {
+      if (reloadTimer) clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => {
+        if (!active) return;
+        void loadCalendarRange(salon.id, view, anchorDate);
+      }, 400);
+    };
+
+    const connect = async () => {
+      if (!active) return;
+      const cursor = window.sessionStorage.getItem(cursorKey);
+      const params = new URLSearchParams();
+      if (cursor) params.set("cursor", cursor);
+      try {
+        const response = await apiStream(
+          `/api/salons/${salon.id}/calendar/events/stream${params.toString() ? `?${params.toString()}` : ""}`,
+          { signal: controller.signal }
+        );
+        await readCalendarEventStream(response, (event) => {
+          if (!active || seenCalendarEventIDs.current.has(event.id)) return;
+          seenCalendarEventIDs.current.add(event.id);
+          if (event.cursor) window.sessionStorage.setItem(cursorKey, event.cursor);
+          pushCalendarToast(event);
+          if (calendarEventIntersectsRange(event, rangeForView(view, anchorDate))) {
+            scheduleRangeReload();
+          }
+        });
+        if (active) reconnectTimer = setTimeout(connect, 1000);
+      } catch {
+        if (active && !controller.signal.aborted) reconnectTimer = setTimeout(connect, 3000);
+      }
+    };
+
+    void connect();
+
+    return () => {
+      active = false;
+      controller.abort();
+      if (reloadTimer) clearTimeout(reloadTimer);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+    };
+  }, [anchorDate, salon, view]);
+
+  useEffect(() => {
+    return () => {
+      for (const timer of toastTimers.current.values()) {
+        clearTimeout(timer);
+      }
+      toastTimers.current.clear();
+    };
+  }, []);
 
   function selectCalendarItem(itemID: string) {
     setSelectedCalendarItemID(itemID);
@@ -228,6 +308,36 @@ export function POSCalendarClient() {
     setSelectedDayKey(day);
     setDetailOpen(false);
     setDayDrawerOpen(true);
+  }
+
+  function pushCalendarToast(event: CalendarEvent) {
+    const toast = calendarToastFromEvent(event);
+    setCalendarToasts((current) => [toast, ...current.filter((item) => item.id !== toast.id)].slice(0, 3));
+    const existingTimer = toastTimers.current.get(toast.id);
+    if (existingTimer) clearTimeout(existingTimer);
+    const timer = setTimeout(() => dismissCalendarToast(toast.id), 8000);
+    toastTimers.current.set(toast.id, timer);
+  }
+
+  function dismissCalendarToast(id: string) {
+    const timer = toastTimers.current.get(id);
+    if (timer) clearTimeout(timer);
+    toastTimers.current.delete(id);
+    setCalendarToasts((current) => current.filter((item) => item.id !== id));
+  }
+
+  function focusCalendarEvent(event: CalendarEvent) {
+    const itemID = calendarItemIDForEvent(event);
+    if (!itemID) return;
+    const nextAnchorDate = formatDateInput(new Date(event.start_time), salon?.timezone);
+    const currentRange = rangeForView(view, anchorDate);
+    if (calendarEventIntersectsRange(event, currentRange) && items.some((item) => item.id === itemID)) {
+      selectCalendarItem(itemID);
+      return;
+    }
+    setPendingFocusItemID(itemID);
+    setAnchorDate(nextAnchorDate);
+    void loadCalendarRange(event.salon_id, view, nextAnchorDate);
   }
 
   async function loadShell() {
@@ -643,12 +753,19 @@ export function POSCalendarClient() {
                 <LogOut className="h-3.5 w-3.5" />
                 Sign out
               </Button>
+              </div>
             </div>
-          </div>
-        </header>
+          </header>
 
-        {error ? <Alert title="Calendar error" message={error} /> : null}
-        {notice ? <Alert type={notice.type} title={notice.title} message={notice.message} /> : null}
+          <CalendarToastStack
+            toasts={calendarToasts}
+            timezone={salon.timezone}
+            onView={focusCalendarEvent}
+            onDismiss={dismissCalendarToast}
+          />
+
+          {error ? <Alert title="Calendar error" message={error} /> : null}
+          {notice ? <Alert type={notice.type} title={notice.title} message={notice.message} /> : null}
 
         <section className="min-h-0 flex-1">
           <Card className="flex h-full min-w-0 flex-col overflow-hidden p-0">
@@ -659,19 +776,19 @@ export function POSCalendarClient() {
                   <Skeleton className="min-h-0 flex-1" />
                 </div>
               ) : (
-                <div className="flex h-full min-h-0 flex-col gap-2">
-                  <CalendarViewSummary
-                    label={`${capitalize(view)} view`}
-                    title={calendarSummaryTitle(view, anchorDate, salon.timezone)}
-                    items={visibleCalendarItems}
-                    bookableStaffCount={bookableStaff.length}
-                    bookableServiceCount={bookableServices.length}
-                  />
-                  {view === "agenda" && visibleCalendarItems.length === 0 ? (
-                    <EmptyState
-                      title="No calendar items"
-                      message="POS-confirmed appointments and pending fallback requests for this range will appear here."
+                  <div className="flex h-full min-h-0 flex-col gap-2">
+                    <CalendarViewSummary
+                      label={`${capitalize(view)} view`}
+                      title={calendarSummaryTitle(view, anchorDate, salon.timezone)}
+                      items={visibleCalendarItems}
+                      bookableStaffCount={bookableStaff.length}
+                      bookableServiceCount={bookableServices.length}
                     />
+                    {view === "agenda" && visibleCalendarItems.length === 0 ? (
+                      <EmptyState
+                        title="No calendar items"
+                        message="POS-confirmed appointments and pending booking requests for this range will appear here."
+                      />
                   ) : view === "day" ? (
                     <DayScheduler
                       items={items}
@@ -759,6 +876,60 @@ export function POSCalendarClient() {
         />
       </div>
     </main>
+  );
+  }
+
+function CalendarToastStack({
+  toasts,
+  timezone,
+  onView,
+  onDismiss
+}: {
+  toasts: CalendarToast[];
+  timezone?: string;
+  onView: (event: CalendarEvent) => void;
+  onDismiss: (id: string) => void;
+}) {
+  if (toasts.length === 0) return null;
+  return (
+    <div className="fixed right-4 top-4 z-[70] flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-2">
+      {toasts.map((toast) => (
+        <div
+          key={toast.id}
+          className={cn(
+            "rounded-lg border bg-panel p-3 shadow-2xl ring-1 ring-black/5",
+            toast.type === "warning" ? "border-amber-200" : "border-emerald-200"
+          )}
+        >
+          <div className="flex items-start gap-3">
+            <div
+              className={cn(
+                "mt-0.5 h-2.5 w-2.5 flex-none rounded-full",
+                toast.type === "warning" ? "bg-amber-400" : "bg-emerald-500"
+              )}
+            />
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-bold text-ink">{toast.title}</div>
+              <div className="mt-1 text-xs font-semibold text-ink">
+                {toast.event.customer_name || "New customer"} · {formatShortDateTime(toast.event.start_time, timezone)}
+              </div>
+              <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{toast.message}</div>
+              <div className="mt-3 flex items-center gap-2">
+                <Button type="button" variant="secondary" className="h-7 px-2 text-xs" onClick={() => onView(toast.event)}>
+                  View
+                </Button>
+                <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onDismiss(toast.id)}>
+                  Dismiss
+                </Button>
+              </div>
+            </div>
+            <Button type="button" variant="ghost" className="h-7 px-2" onClick={() => onDismiss(toast.id)} aria-label="Dismiss notification">
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -1220,7 +1391,7 @@ function SchedulerEventBlock({
         {item.warning ? <AlertTriangle className="h-4 w-4 flex-none text-amber-600" /> : null}
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
-        <Badge value={item.kind === "pending" ? "fallback_pending" : item.status} className="px-2 py-0.5" />
+        <Badge value={item.status} className="px-2 py-0.5" />
       </div>
     </div>
   );
@@ -1348,7 +1519,7 @@ function DayAppointmentsDrawer({
                     {item.warning ? <AlertTriangle className="h-4 w-4 flex-none text-amber-600" /> : null}
                   </div>
                   <div className="mt-2 flex flex-wrap gap-1.5">
-                    <Badge value={item.kind === "pending" ? "fallback_pending" : item.status} />
+                    <Badge value={item.status} />
                     {item.warning ? <Badge value="warning" /> : null}
                   </div>
                 </button>
@@ -1415,7 +1586,7 @@ function AppointmentDetailDrawer({
           {selectedItem ? (
             <div className="rounded-md border border-line bg-white p-3">
               <div className="flex flex-wrap items-center gap-2">
-                <Badge value={selectedItem.kind === "pending" ? "fallback_pending" : selectedItem.status} />
+                <Badge value={selectedItem.status} />
                 {selectedItem.warning ? <Badge value="warning" /> : null}
               </div>
               <div className="mt-3 text-lg font-bold text-ink">{selectedItem.customerName || "Unknown customer"}</div>
@@ -1505,12 +1676,11 @@ function CalendarItemRow({
         <div className="text-sm font-semibold text-ink">{formatTimeRange(item.start, item.end, timezone)}</div>
         <div className="mt-1 text-xs text-muted">{formatDate(item.start, timezone)}</div>
       </div>
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="text-sm font-semibold text-ink">{item.customerName || "Unknown customer"}</div>
-          <Badge value={item.status} />
-          {item.kind === "pending" ? <Badge value="fallback_pending" /> : null}
-        </div>
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="text-sm font-semibold text-ink">{item.customerName || "Unknown customer"}</div>
+            <Badge value={item.status} />
+          </div>
         <div className="mt-1 text-sm leading-6 text-muted">{item.subtitle}</div>
         <div className="mt-1 text-xs leading-5 text-muted">{item.detail}</div>
         {item.warning ? (
@@ -1949,6 +2119,71 @@ function prioritizedCalendarItems(items: CalendarItem[]) {
     if (aReview !== bReview) return aReview - bReview;
     return new Date(a.start).getTime() - new Date(b.start).getTime();
   });
+}
+
+function calendarEventCursorKey(salonID: string) {
+  return `pos-calendar-event-cursor:${salonID}`;
+}
+
+async function readCalendarEventStream(response: Response, onEvent: (event: CalendarEvent) => void) {
+  if (!response.body) return;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() ?? "";
+    frames.forEach((frame) => {
+      const event = parseCalendarEventFrame(frame);
+      if (event) onEvent(event);
+    });
+  }
+}
+
+function parseCalendarEventFrame(frame: string): CalendarEvent | null {
+  const data = frame
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart())
+    .join("\n");
+  if (!data) return null;
+  try {
+    const event = JSON.parse(data) as CalendarEvent;
+    return event.id && event.type ? event : null;
+  } catch {
+    return null;
+  }
+}
+
+function calendarToastFromEvent(event: CalendarEvent): CalendarToast {
+  const confirmed = event.type === "booking_confirmed" || event.booking_status === "confirmed";
+  return {
+    id: event.id,
+    type: confirmed ? "success" : "warning",
+    title: confirmed ? "New POS-confirmed appointment" : "New pending booking request",
+    message: confirmed
+      ? "The active POS returned a booking ID before the calendar updated."
+      : "Square Appointments has not confirmed this booking yet.",
+    event
+  };
+}
+
+function calendarItemIDForEvent(event: CalendarEvent) {
+  if (event.appointment_id) return `appointment-${event.appointment_id}`;
+  if (event.booking_attempt_id) return `pending-${event.booking_attempt_id}`;
+  return "";
+}
+
+function calendarEventIntersectsRange(event: CalendarEvent, range: { start: string; end: string }) {
+  if (!event.start_time || !event.end_time) return false;
+  const start = new Date(event.start_time).getTime();
+  const end = new Date(event.end_time).getTime();
+  const rangeStart = inputDateToLocalDate(range.start).getTime();
+  const rangeEnd = inputDateToLocalDate(range.end).getTime();
+  return start < rangeEnd && end > rangeStart;
 }
 
 function appointmentWarning(item: AppointmentRecord) {
@@ -2430,6 +2665,18 @@ function formatDate(value: string, timezone?: string) {
     month: "short",
     day: "numeric",
     year: "numeric",
+    timeZone: timezone
+  });
+}
+
+function formatShortDateTime(value: string, timezone?: string) {
+  if (!value) return "Not scheduled";
+  return new Date(value).toLocaleString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
     timeZone: timezone
   });
 }

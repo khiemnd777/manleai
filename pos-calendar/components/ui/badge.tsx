@@ -12,6 +12,7 @@ const statusClass: Record<string, string> = {
   confirmed: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   rescheduled: "bg-blue-50 text-blue-700 ring-blue-200",
   cancelled: "bg-slate-100 text-slate-700 ring-slate-200",
+  pos_pending: "bg-amber-50 text-amber-700 ring-amber-200",
   fallback_pending: "bg-amber-50 text-amber-700 ring-amber-200",
   pending: "bg-amber-50 text-amber-700 ring-amber-200",
   not_synced: "bg-amber-50 text-amber-700 ring-amber-200",

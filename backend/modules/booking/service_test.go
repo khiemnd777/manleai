@@ -148,6 +148,11 @@ func TestCalendarReturnsRangeAppointmentsPendingRequestsAndWarnings(t *testing.T
 		Status:             StatusFallbackPending,
 		RequestedStartTime: testStartTime().Add(3 * time.Hour),
 		RequestedEndTime:   testStartTime().Add(4 * time.Hour),
+	}, {
+		ID:                 "attempt_pos_pending",
+		Status:             StatusPOSPending,
+		RequestedStartTime: testStartTime().Add(5 * time.Hour),
+		RequestedEndTime:   testStartTime().Add(6 * time.Hour),
 	}}
 	service := NewService(store, nil)
 	start := testStartTime().Add(-24 * time.Hour)
@@ -164,8 +169,8 @@ func TestCalendarReturnsRangeAppointmentsPendingRequestsAndWarnings(t *testing.T
 	if !store.calendarStartTime.Equal(start) || !store.calendarEndTime.Equal(end) {
 		t.Fatalf("calendar range = %s/%s, want %s/%s", store.calendarStartTime, store.calendarEndTime, start, end)
 	}
-	if len(res.Appointments) != 2 || len(res.PendingRequests) != 1 {
-		t.Fatalf("calendar counts appointments=%d pending=%d, want 2/1", len(res.Appointments), len(res.PendingRequests))
+	if len(res.Appointments) != 2 || len(res.PendingRequests) != 2 {
+		t.Fatalf("calendar counts appointments=%d pending=%d, want 2/2", len(res.Appointments), len(res.PendingRequests))
 	}
 	if res.Appointments[0].SyncWarning != "" {
 		t.Fatalf("synced appointment warning = %q, want empty", res.Appointments[0].SyncWarning)
@@ -176,8 +181,43 @@ func TestCalendarReturnsRangeAppointmentsPendingRequestsAndWarnings(t *testing.T
 	if res.PendingRequests[0].SyncWarning == "" || !res.PendingRequests[0].CanRetry {
 		t.Fatalf("pending request warning/retry = %#v, want warning and retry", res.PendingRequests[0])
 	}
-	if res.Warnings.SyncFailed != 1 || res.Warnings.FallbackPending != 1 || res.Warnings.TotalWarnings != 2 {
-		t.Fatalf("warnings = %#v, want one sync failed and one fallback", res.Warnings)
+	if res.PendingRequests[1].SyncWarning == "" || res.PendingRequests[1].CanRetry {
+		t.Fatalf("pos pending warning/retry = %#v, want warning and no retry", res.PendingRequests[1])
+	}
+	if res.Warnings.SyncFailed != 1 || res.Warnings.FallbackPending != 1 || res.Warnings.PendingPOSSync != 1 || res.Warnings.TotalWarnings != 3 {
+		t.Fatalf("warnings = %#v, want one sync failed, one fallback, one pending POS sync", res.Warnings)
+	}
+}
+
+func TestCalendarEventsDefaultsLimitAndAssignsReplayCursor(t *testing.T) {
+	store := newFakeStore()
+	createdAt := testStartTime()
+	store.calendarEvents = []CalendarEvent{{
+		ID:            "notification_1",
+		SalonID:       "salon_1",
+		Type:          NotificationTypeBookingConfirmed,
+		Title:         "New POS-confirmed appointment",
+		BookingStatus: StatusConfirmed,
+		CustomerName:  "Kevin",
+		StartTime:     createdAt.Add(time.Hour),
+		EndTime:       createdAt.Add(2 * time.Hour),
+		CreatedAt:     createdAt,
+	}}
+	service := NewService(store, nil)
+	cursor := CalendarEventCursor{CreatedAt: createdAt.Add(-time.Second), ID: "notification_0"}
+
+	events, err := service.CalendarEvents(context.Background(), "salon_1", "owner_1", cursor, 0)
+	if err != nil {
+		t.Fatalf("CalendarEvents returned error: %v", err)
+	}
+	if store.calendarEventLimit != 20 {
+		t.Fatalf("event limit = %d, want default 20", store.calendarEventLimit)
+	}
+	if !store.calendarEventCursor.CreatedAt.Equal(cursor.CreatedAt) || store.calendarEventCursor.ID != cursor.ID {
+		t.Fatalf("event cursor = %#v, want %#v", store.calendarEventCursor, cursor)
+	}
+	if len(events) != 1 || events[0].Cursor == "" {
+		t.Fatalf("events = %#v, want event with replay cursor", events)
 	}
 }
 
@@ -1327,6 +1367,9 @@ type fakeStore struct {
 	bookingAttempts          []BookingAttempt
 	calendarAppointments     []Appointment
 	calendarPendingRequests  []BookingAttempt
+	calendarEvents           []CalendarEvent
+	calendarEventCursor      CalendarEventCursor
+	calendarEventLimit       int
 	calendarStartTime        time.Time
 	calendarEndTime          time.Time
 	calendarImports          []CalendarAppointmentImport
@@ -1719,6 +1762,12 @@ func (f *fakeStore) ListCalendarPendingRequests(ctx context.Context, salonID str
 	f.calendarStartTime = startTime
 	f.calendarEndTime = endTime
 	return f.calendarPendingRequests, nil
+}
+
+func (f *fakeStore) ListCalendarEvents(ctx context.Context, salonID string, ownerUserID string, cursor CalendarEventCursor, limit int) ([]CalendarEvent, error) {
+	f.calendarEventCursor = cursor
+	f.calendarEventLimit = limit
+	return f.calendarEvents, nil
 }
 
 func (f *fakeStore) UpsertCalendarAppointments(ctx context.Context, salonID string, provider string, items []CalendarAppointmentImport) (CalendarSyncSummary, error) {

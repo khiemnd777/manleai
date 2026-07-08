@@ -57,7 +57,9 @@ shortcuts, active-provider calendar sync, and POS-backed add, edit, and delete
 actions. Add still creates a booking attempt through the booking service; edit
 currently uses the existing POS-backed reschedule contract for time/staff/notes;
 delete uses the existing POS-backed cancel contract and never hard-deletes
-appointment history.
+appointment history. The page also opens an authenticated calendar event stream
+so new customer booking attempts can update the visible range and show a
+top-right toast without treating pending POS work as confirmed.
 
 ## Core Boundary
 
@@ -108,9 +110,10 @@ The booking service depends on `modules/pos.POSProvider`. It must not import `mo
 
 Booking workflow state belongs to the backend. Create-booking, reschedule, cancel, and dashboard test-booking requests first create a `booking_attempts` row with `pos_pending` and a backend-owned POS idempotency key. The POS adapter is then called as an outbound writer. For customer identity, booking resolves or creates the ManleAI canonical customer, reuses an active `pos_entity_links` customer mapping when present, or asks the active `POSProvider` to search/create a provider customer and then stores the mapping. If customer lookup/linking or appointment creation fails, the same attempt is finalized as `fallback_pending`, a POS error and owner notification are recorded, and no confirmed appointment is created. If the provider returns a POS booking ID and booking version, the same attempt is finalized as confirmed/rescheduled/cancelled and the appointment state is written in the backend database. Reschedule, cancel, and test-booking cleanup requests must leave the internal appointment unchanged unless the provider succeeds.
 
-Calendar range reads are local mirror reads over POS-confirmed appointments and
-fallback pending booking attempts. Calendar sync is an active-provider import
-path: the provider-neutral POS layer may expose `ListAppointments`, and the
+Calendar range reads are local mirror reads over POS-confirmed appointments,
+`pos_pending` booking attempts, and fallback pending booking attempts. Calendar
+sync is an active-provider import path: the provider-neutral POS layer may
+expose `ListAppointments`, and the
 Square adapter maps Square Bookings list results into backend appointment
 mirror rows keyed by `(salon_id, pos_provider, pos_appointment_id)`. Imported
 appointments carry `pos_sync_status`, `last_pos_synced_at`, and

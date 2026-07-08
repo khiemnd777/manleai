@@ -41,6 +41,7 @@ type Store interface {
 	ListBookingAttempts(ctx context.Context, salonID string, ownerUserID string, status string, limit int, offset int) ([]BookingAttempt, error)
 	ListCalendarAppointments(ctx context.Context, salonID string, ownerUserID string, startTime time.Time, endTime time.Time) ([]Appointment, error)
 	ListCalendarPendingRequests(ctx context.Context, salonID string, ownerUserID string, startTime time.Time, endTime time.Time) ([]BookingAttempt, error)
+	ListCalendarEvents(ctx context.Context, salonID string, ownerUserID string, cursor CalendarEventCursor, limit int) ([]CalendarEvent, error)
 	UpsertCalendarAppointments(ctx context.Context, salonID string, provider string, items []CalendarAppointmentImport) (CalendarSyncSummary, error)
 	CreateCalendarSyncLog(ctx context.Context, salonID string, provider string) (string, error)
 	CompleteCalendarSyncLog(ctx context.Context, id string, status string, message string) error
@@ -527,6 +528,30 @@ func (s *Service) Calendar(ctx context.Context, salonID string, ownerUserID stri
 	}, nil
 }
 
+func (s *Service) EnsureCalendarEventAccess(ctx context.Context, salonID string, ownerUserID string) error {
+	return s.store.EnsureSalonOwner(ctx, salonID, ownerUserID)
+}
+
+func (s *Service) CalendarEvents(ctx context.Context, salonID string, ownerUserID string, cursor CalendarEventCursor, limit int) ([]CalendarEvent, error) {
+	if strings.TrimSpace(salonID) == "" || strings.TrimSpace(ownerUserID) == "" {
+		return nil, ErrValidation
+	}
+	if cursor.CreatedAt.IsZero() {
+		cursor.CreatedAt = time.Now().UTC()
+	}
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	events, err := s.store.ListCalendarEvents(ctx, salonID, ownerUserID, cursor, limit)
+	if err != nil {
+		return nil, err
+	}
+	for idx := range events {
+		events[idx].Cursor = calendarEventCursor(events[idx].CreatedAt, events[idx].ID)
+	}
+	return events, nil
+}
+
 func (s *Service) SyncCalendar(ctx context.Context, salonID string, ownerUserID string, req CalendarSyncRequest) (*CalendarSyncResponse, error) {
 	rangeReq := normalizeCalendarRangeRequest(CalendarRangeRequest{StartTime: req.StartTime, EndTime: req.EndTime})
 	if err := validateCalendarRange(rangeReq); err != nil {
@@ -748,14 +773,18 @@ func calendarAppointmentCanChange(item Appointment) bool {
 func annotateCalendarPendingRequests(items []BookingAttempt) []BookingAttempt {
 	for idx := range items {
 		item := &items[idx]
-		item.SyncWarning = "Pending request: Square Appointments did not confirm this action."
+		if item.Status == StatusPOSPending {
+			item.SyncWarning = "Square booking is still pending. Do not treat this request as confirmed until Square returns a booking ID."
+		} else {
+			item.SyncWarning = "Pending request: Square Appointments did not confirm this action."
+		}
 		item.CanRetry = item.Status == StatusFallbackPending
 	}
 	return items
 }
 
 func calendarWarningSummary(appointments []Appointment, pending []BookingAttempt) CalendarWarningSummary {
-	summary := CalendarWarningSummary{FallbackPending: len(pending)}
+	summary := CalendarWarningSummary{}
 	for _, item := range appointments {
 		if strings.TrimSpace(item.SyncWarning) == "" {
 			continue
@@ -769,8 +798,35 @@ func calendarWarningSummary(appointments []Appointment, pending []BookingAttempt
 			summary.NotSynced++
 		}
 	}
+	for _, item := range pending {
+		if item.Status == StatusPOSPending {
+			summary.PendingPOSSync++
+		} else {
+			summary.FallbackPending++
+		}
+	}
 	summary.TotalWarnings = summary.SyncFailed + summary.NotSynced + summary.PendingPOSSync + summary.FallbackPending
 	return summary
+}
+
+func parseCalendarEventCursor(raw string) (CalendarEventCursor, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return CalendarEventCursor{}, nil
+	}
+	createdAtRaw, id, ok := strings.Cut(raw, "|")
+	if !ok {
+		return CalendarEventCursor{}, ErrValidation
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, createdAtRaw)
+	if err != nil {
+		return CalendarEventCursor{}, ErrValidation
+	}
+	return CalendarEventCursor{CreatedAt: createdAt.UTC(), ID: strings.TrimSpace(id)}, nil
+}
+
+func calendarEventCursor(createdAt time.Time, id string) string {
+	return createdAt.UTC().Format(time.RFC3339Nano) + "|" + strings.TrimSpace(id)
 }
 
 func calendarImportFromPOSAppointment(provider string, item pos.ListedAppointment) (CalendarAppointmentImport, bool) {

@@ -235,6 +235,26 @@ export type CalendarRangeResponse = {
   warnings: CalendarWarningSummary;
 };
 
+export type CalendarEvent = {
+  id: string;
+  cursor: string;
+  salon_id: string;
+  type: "booking_confirmed" | "booking_fallback_pending" | string;
+  notification_status: string;
+  title: string;
+  message: string;
+  booking_attempt_id?: string;
+  appointment_id?: string;
+  source?: string;
+  booking_status?: string;
+  customer_name?: string;
+  service_id?: string;
+  staff_id?: string;
+  start_time: string;
+  end_time: string;
+  created_at: string;
+};
+
 export type CalendarSyncSummary = {
   imported: number;
   updated: number;

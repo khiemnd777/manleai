@@ -1,7 +1,11 @@
 package booking
 
 import (
+	"bufio"
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -81,6 +85,33 @@ func (h *Handler) Calendar(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusInternalServerError, "CALENDAR_FAILED", "Could not load calendar.")
 	}
 	return respond.JSON(c, fiber.StatusOK, res)
+}
+
+func (h *Handler) CalendarEventStream(c *fiber.Ctx) error {
+	cursor, err := parseCalendarEventCursor(c.Query("cursor"))
+	if err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Calendar event cursor is invalid.")
+	}
+	if cursor.CreatedAt.IsZero() {
+		cursor.CreatedAt = time.Now().UTC()
+	}
+
+	salonID := c.Params("id")
+	ownerUserID := middleware.UserID(c)
+	if err := h.service.EnsureCalendarEventAccess(c.UserContext(), salonID, ownerUserID); err != nil {
+		if errors.Is(err, pos.ErrNotFound) {
+			return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+		}
+		return respond.Error(c, fiber.StatusInternalServerError, "CALENDAR_EVENTS_FAILED", "Could not open calendar event stream.")
+	}
+
+	c.Set("Content-Type", "text/event-stream")
+	c.Set("Cache-Control", "no-cache")
+	c.Set("Connection", "keep-alive")
+	c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
+		streamCalendarEvents(w, h.service, salonID, ownerUserID, cursor)
+	})
+	return nil
 }
 
 func (h *Handler) SyncCalendar(c *fiber.Ctx) error {
@@ -187,6 +218,74 @@ func (h *Handler) Attempts(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusInternalServerError, "BOOKING_ATTEMPTS_FAILED", "Could not load booking attempts.")
 	}
 	return respond.JSON(c, fiber.StatusOK, res)
+}
+
+func streamCalendarEvents(w *bufio.Writer, service *Service, salonID string, ownerUserID string, cursor CalendarEventCursor) {
+	pollTicker := time.NewTicker(2 * time.Second)
+	heartbeatTicker := time.NewTicker(15 * time.Second)
+	defer pollTicker.Stop()
+	defer heartbeatTicker.Stop()
+
+	if err := writeCalendarStreamComment(w, "connected"); err != nil {
+		return
+	}
+	if err := w.Flush(); err != nil {
+		return
+	}
+
+	for {
+		events, err := service.CalendarEvents(context.Background(), salonID, ownerUserID, cursor, 20)
+		if err != nil {
+			_ = writeCalendarStreamError(w, "Calendar events are temporarily unavailable.")
+			_ = w.Flush()
+			return
+		}
+		for _, event := range events {
+			if err := writeCalendarStreamEvent(w, event); err != nil {
+				return
+			}
+			cursor = CalendarEventCursor{CreatedAt: event.CreatedAt, ID: event.ID}
+		}
+		if err := w.Flush(); err != nil {
+			return
+		}
+
+		select {
+		case <-pollTicker.C:
+		case <-heartbeatTicker.C:
+			if err := writeCalendarStreamComment(w, "heartbeat"); err != nil {
+				return
+			}
+			if err := w.Flush(); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func writeCalendarStreamEvent(w *bufio.Writer, event CalendarEvent) error {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "id: %s\nevent: calendar.booking\ndata: %s\n\n", event.Cursor, payload); err != nil {
+		return err
+	}
+	return nil
+}
+
+func writeCalendarStreamComment(w *bufio.Writer, message string) error {
+	_, err := fmt.Fprintf(w, ": %s\n\n", message)
+	return err
+}
+
+func writeCalendarStreamError(w *bufio.Writer, message string) error {
+	payload, err := json.Marshal(map[string]string{"message": message})
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "event: calendar.error\ndata: %s\n\n", payload)
+	return err
 }
 
 func parseLimit(raw string) int {

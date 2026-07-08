@@ -56,6 +56,24 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   return parseResponse<T>(response);
 }
 
+export async function apiStream(path: string, init: RequestInit = {}): Promise<Response> {
+  const streamInit = streamRequestInit(init);
+  const response = await sendRequest(path, streamInit);
+  if (response.status === 401 && shouldAttemptRefresh(path)) {
+    const refreshedToken = await refreshAccessToken();
+    if (refreshedToken) {
+      const refreshedResponse = await sendRequest(path, streamInit, refreshedToken);
+      if (refreshedResponse.ok) return refreshedResponse;
+      await throwResponseError(refreshedResponse);
+    }
+    redirectToLogin();
+  }
+  if (!response.ok) {
+    await throwResponseError(response);
+  }
+  return response;
+}
+
 export async function logoutSession() {
   const refreshToken = getRefreshToken();
   clearSession();
@@ -78,7 +96,9 @@ export async function logoutSession() {
 
 async function sendRequest(path: string, init: RequestInit, accessToken = getAccessToken()) {
   const headers = new Headers(init.headers);
-  headers.set("Accept", "application/json");
+  if (!headers.has("Accept")) {
+    headers.set("Accept", "application/json");
+  }
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
@@ -95,16 +115,15 @@ async function sendRequest(path: string, init: RequestInit, accessToken = getAcc
   });
 }
 
+function streamRequestInit(init: RequestInit) {
+  const headers = new Headers(init.headers);
+  headers.set("Accept", "text/event-stream");
+  return { ...init, headers };
+}
+
 async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    let error: ApiError = { code: "REQUEST_FAILED", message: "Request failed." };
-    try {
-      const parsed = await response.json();
-      error = parsed.error ?? error;
-    } catch {
-      // Keep structured fallback when a proxy or provider returns non-JSON.
-    }
-    throw new RequestError(response.status, error.code, error.message);
+    await throwResponseError(response);
   }
 
   if (response.status === 204) {
@@ -112,6 +131,17 @@ async function parseResponse<T>(response: Response): Promise<T> {
   }
 
   return response.json() as Promise<T>;
+}
+
+async function throwResponseError(response: Response): Promise<never> {
+  let error: ApiError = { code: "REQUEST_FAILED", message: "Request failed." };
+  try {
+    const parsed = await response.json();
+    error = parsed.error ?? error;
+  } catch {
+    // Keep structured fallback when a proxy or provider returns non-JSON.
+  }
+  throw new RequestError(response.status, error.code, error.message);
 }
 
 function shouldAttachAccessToken(path: string) {

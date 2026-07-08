@@ -1215,12 +1215,13 @@ Returns appointments recorded after POS success, including confirmed, reschedule
 `GET /api/salons/:id/calendar?start=<date-or-rfc3339>&end=<date-or-rfc3339>&view=<day|week|month|agenda>`
 
 Returns a range view for the standalone POS Calendar app. The response includes
-POS-confirmed `appointments`, `pending_requests` from fallback pending booking
-attempts, and a `warnings` summary. Calendar appointment items include the
+POS-confirmed `appointments`, `pending_requests` from `pos_pending` and
+`fallback_pending` booking attempts, and a `warnings` summary. Calendar
+appointment items include the
 normal appointment fields plus `pos_sync_status`, `last_pos_synced_at`,
 `pos_sync_error`, `sync_warning`, `can_edit`, and `can_delete`. A warning means
 the item is not verified as cleanly synced from the active POS calendar, or the
-record is a fallback pending request that must not be treated as confirmed.
+record is a pending booking request that must not be treated as confirmed.
 
 ```json
 {
@@ -1238,6 +1239,22 @@ record is a fallback pending request that must not be treated as confirmed.
   }
 }
 ```
+
+`GET /api/salons/:id/calendar/events/stream?cursor=<created_at|notification_id>`
+
+Streams authenticated `text/event-stream` frames for new booking events used by
+the standalone POS Calendar app. The request uses the same bearer token auth as
+other protected salon APIs; access tokens must not be passed in the query
+string. The optional `cursor` is the last event cursor returned by the stream.
+When no cursor is supplied, the stream starts from the current server time so
+old notifications do not replay as fresh toasts.
+
+Each `calendar.booking` event includes a durable notification `id`, replay
+`cursor`, `type` (`booking_confirmed` or `booking_fallback_pending`),
+`booking_attempt_id`, optional `appointment_id`, booking status, source,
+customer display name, start/end time, and created timestamp. `booking_confirmed`
+means the active POS returned a booking ID. `booking_fallback_pending` and any
+calendar `pos_pending` item must be shown as pending, not confirmed.
 
 `POST /api/salons/:id/calendar/sync`
 

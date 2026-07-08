@@ -25,6 +25,7 @@ const (
 	BookingActionCancel     = "cancel"
 
 	NotificationTypeBookingFallback      = "booking_fallback_pending"
+	NotificationTypeBookingConfirmed     = "booking_confirmed"
 	NotificationTypeRescheduleFallback   = "reschedule_fallback_pending"
 	NotificationTypeCancellationFallback = "cancel_fallback_pending"
 
@@ -205,6 +206,31 @@ type CalendarWarningSummary struct {
 	NotSynced       int `json:"not_synced"`
 	PendingPOSSync  int `json:"pending_pos_sync"`
 	FallbackPending int `json:"fallback_pending"`
+}
+
+type CalendarEventCursor struct {
+	CreatedAt time.Time
+	ID        string
+}
+
+type CalendarEvent struct {
+	ID                 string    `json:"id"`
+	Cursor             string    `json:"cursor"`
+	SalonID            string    `json:"salon_id"`
+	Type               string    `json:"type"`
+	NotificationStatus string    `json:"notification_status"`
+	Title              string    `json:"title"`
+	Message            string    `json:"message"`
+	BookingAttemptID   string    `json:"booking_attempt_id,omitempty"`
+	AppointmentID      string    `json:"appointment_id,omitempty"`
+	Source             string    `json:"source,omitempty"`
+	BookingStatus      string    `json:"booking_status,omitempty"`
+	CustomerName       string    `json:"customer_name,omitempty"`
+	ServiceID          string    `json:"service_id,omitempty"`
+	StaffID            string    `json:"staff_id,omitempty"`
+	StartTime          time.Time `json:"start_time"`
+	EndTime            time.Time `json:"end_time"`
+	CreatedAt          time.Time `json:"created_at"`
 }
 
 type CalendarSyncRequest struct {

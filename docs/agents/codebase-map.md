@@ -175,7 +175,7 @@ name collection, availability replies, party bookings, or transcript output.
 | Route | Page file | Main component | Data/API helpers |
 | --- | --- | --- | --- |
 | `/login` | `pos-calendar/app/login/page.tsx` | `pos-calendar/features/auth/login-form.tsx` | `pos-calendar/lib/api/client.ts` |
-| `/calendar` | `pos-calendar/app/calendar/page.tsx` | `pos-calendar/features/calendar/pos-calendar-client.tsx` | calendar range/sync, availability, booking attempts, reschedule, cancel, Square status, services, staff |
+| `/calendar` | `pos-calendar/app/calendar/page.tsx` | `pos-calendar/features/calendar/pos-calendar-client.tsx` | calendar range/sync, calendar event stream/toasts, availability, booking attempts, reschedule, cancel, Square status, services, staff |
 
 The POS calendar app is a standalone authenticated Next.js app with no
 dashboard sidebar. Local runtime port is `3091`; production domain is
@@ -236,8 +236,8 @@ dashboard sidebar. Local runtime port is `3091`; production domain is
   `backend/modules/conversation`.
 - Frontend owner: `frontend/features/dashboard/appointments-dashboard.tsx`,
   `frontend/features/integrations/square-integration.tsx` for test booking,
-  `pos-calendar/features/calendar/pos-calendar-client.tsx` for standalone
-  calendar add/edit/delete.
+	  `pos-calendar/features/calendar/pos-calendar-client.tsx` for standalone
+	  calendar add/edit/delete and realtime booking toasts.
 - Data owner: `booking_attempts`, `booking_attempt_segments`,
   `appointments`, `appointment_services`, `appointments.pos_sync_status`,
   `appointments.last_pos_synced_at`, `appointments.pos_sync_error`, `pos_errors`,
