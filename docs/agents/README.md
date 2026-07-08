@@ -1,8 +1,10 @@
 # Agent Configuration
 
-This repo uses three Codex configuration layers:
+This repo uses these Codex configuration layers:
 
 - `AGENTS.md` for repo-wide working instructions.
+- `docs/agents/codebase-map.md` for mandatory feature/function/utility/helper,
+  UI, keyword, and owner-surface routing before triage or code scanning.
 - `.agents/skills/**/SKILL.md` for reusable repo-local workflows.
 - `.codex/agents/*.toml` for project-scoped custom subagents.
 - `.codex/hooks.json` for project-scoped lifecycle hooks, including the write approval gate.
@@ -10,6 +12,22 @@ This repo uses three Codex configuration layers:
 OpenAI's Codex docs say skills are directories with a required `SKILL.md` plus optional `scripts`, `references`, `assets`, and `agents/openai.yaml`. Repo skills are discovered under `.agents/skills` from the current directory up to the repo root.
 
 OpenAI's subagent docs say project-scoped custom agents live under `.codex/agents` and each standalone TOML file must define `name`, `description`, and `developer_instructions`.
+
+## Mandatory Codebase Map
+
+- Agents and subagents must read `docs/agents/codebase-map.md` before
+  repository triage, diagnosis, planning, implementation, review, or handoff.
+- Use the map's triage keywords to choose the first docs, files, skills, and
+  subagents to inspect. Keywords accelerate search only; they are not runtime
+  business logic.
+- If code evidence conflicts with the map, code wins and the map must be
+  corrected in the same approved scope.
+- Any mapping-affecting code change must update
+  `docs/agents/codebase-map.md` before the task is reported complete. If no map
+  update is needed, the final response must include `Mapping impact: none` with
+  the reason.
+- Subagents must classify mapping impact as `map update required`, `map already
+  accurate`, or `map conflict found`.
 
 ## Repo Skills
 
@@ -60,7 +78,8 @@ OpenAI's subagent docs say project-scoped custom agents live under `.codex/agent
 
 Ask Codex to spawn:
 
-- `repo_mapper` before broad changes or unfamiliar flows.
+- `repo_mapper` before broad changes, unfamiliar flows, or map conflicts. The
+  parent agent must still load `docs/agents/codebase-map.md` before handoff.
 - `pos_backend_reviewer` for POS, auth, tenant, token, and migration changes.
 - `frontend_product_reviewer` for dashboard UX and frontend contracts.
 - `security_privacy_reviewer` for secrets, tenant isolation, phone/SMS/call data, and auth.
@@ -73,3 +92,14 @@ For party booking work, ask `repo_mapper` to map group detection, party segment 
 For AI tone work, ask `repo_mapper` to map the settings/API/config-transfer/runtime path, `frontend_product_reviewer` to review the Settings UI contract, and `pos_backend_reviewer` to verify no booking guardrail changed.
 
 Subagents inherit the parent sandbox and approvals. Keep most review agents read-only and let the parent agent apply final edits.
+
+## Maintenance
+
+- Keep `docs/agents/codebase-map.md` current whenever feature behavior,
+  functions, utilities, helpers, UI surfaces, API routes, tests, or ownership
+  boundaries change.
+- Do not finish a mapping-affecting code change until the map has been updated
+  or the final response explicitly states `Mapping impact: none` with the
+  reason.
+- Add triage keywords when they would materially speed future root-cause search.
+- Do not use triage keywords as runtime logic.

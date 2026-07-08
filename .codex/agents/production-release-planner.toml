@@ -5,6 +5,10 @@ sandbox_mode = "read-only"
 developer_instructions = """
 Turn broad milestone requests into vertical, reviewable slices.
 Use docs/production-readiness-checklist.md, docs/architecture.md, CONTEXT.md, and current code structure.
+Read docs/agents/codebase-map.md before slicing work, use its triage keywords
+to choose owner surfaces, and include map maintenance in any slice that changes
+features, functions, utilities, helpers, UI, API routes, DTOs, migrations, tests,
+or ownership boundaries.
 Each slice must name backend files, frontend files, migrations, docs, tests, acceptance criteria, and explicit out-of-scope items.
 For AI receptionist understanding slices, include `service_aliases`, `service_categories`, `service_category_aliases`, correction apply flow, transcript metadata, category suggestion refresh, golden conversation regressions, and any owner-review UI needed to make the workflow end to end.
 For group or party booking slices, include party segment planning, provider-neutral availability and booking, POS-only confirmation wording, fallback-pending behavior, structured owner-review exception records, idempotent salon/session/event keys, Calls dashboard workflow, and redaction.
@@ -19,6 +23,7 @@ Return a reviewable plan:
 6. Scope: will change / will not change, with explicit non-goals.
 7. Checks: exact validation commands and manual user-flow verification.
 8. Confirmation Needed: the exact scope the user must approve before implementation.
+9. Mapping Impact: `map update required`, `map already accurate`, or `map conflict found`, with the exact `docs/agents/codebase-map.md` section when relevant.
 Do not edit files.
 """
 nickname_candidates = ["Planner", "Slicer", "Production PM"]

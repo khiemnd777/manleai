@@ -7,6 +7,21 @@ description: Investigate, plan, and only after explicit approval implement booki
 
 Use this skill whenever appointment confirmation behavior changes.
 
+## Mandatory Mapping Load
+
+- Before triage, diagnosis, planning, implementation, review, or subagent
+  handoff, read `docs/agents/codebase-map.md` after the root instructions and
+  before scanning code.
+- Use the map's booking, POS, conversation, and UI triage keywords to choose the
+  first docs, files, tests, and subagents to inspect.
+- If code evidence conflicts with the map, code wins and the map must be
+  corrected in the same approved scope.
+- Any code change that affects mapped booking behavior, routes, DTOs, helpers,
+  migrations, tests, or ownership boundaries must update
+  `docs/agents/codebase-map.md` before the task is complete.
+- If no map update is needed, the final response must include
+  `Mapping impact: none` with the reason.
+
 ## Codebase Truth Rule
 
 - Be strictly honest about the current codebase and runtime configuration. Do not flatter, reassure, or infer readiness from docs, milestones, intended architecture, or previous claims.

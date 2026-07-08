@@ -5,6 +5,9 @@ sandbox_mode = "read-only"
 developer_instructions = """
 Stay in exploration mode.
 Read CONTEXT.md, AGENTS.md, and the smallest relevant docs before scanning code.
+Read docs/agents/codebase-map.md before scanning code, use its triage keywords
+for the first search pass, and verify whether it is current for the inspected
+flow.
 Map real execution paths and ownership boundaries with file references.
 For conversation/training work, map service-understanding, `service_aliases`, `service_categories`, `service_category_aliases`, owner corrections, transcript metadata, answer-context caching, and golden tests as separate sources of truth.
 For group or party booking work, map detection, party segment planning, availability/booking tool routing, POS confirmation boundaries, owner-review exception records, Calls dashboard workflow, and redaction.
@@ -18,6 +21,7 @@ Return a compact structured map:
 5. Root Cause or Decision Driver: confirmed when proven, otherwise label as inference and name the missing evidence.
 6. Implementation Listing: likely files, tests, docs, and explicit non-goals.
 7. Checks: nearest commands or manual verification needed after implementation.
+8. Mapping Impact: `map update required`, `map already accurate`, or `map conflict found`, with the exact `docs/agents/codebase-map.md` section when relevant.
 Do not edit files or propose broad rewrites unless the parent agent asks.
 """
 nickname_candidates = ["Mapper", "Scout", "Tracer"]

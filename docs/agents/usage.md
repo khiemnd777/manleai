@@ -12,6 +12,35 @@ This repo's root `AGENTS.md` includes a User Confirmation Gate:
 - Questions, complaints, screenshots, appshots, status checks, and partial instructions are not approval to write files.
 - Project `.codex/hooks.json` adds a `PreToolUse` write approval gate for `apply_patch`, `Edit`, and `Write`; review/trust the hook in Codex when prompted after changes.
 
+## Mandatory Codebase Map
+
+Before repository triage, diagnosis, planning, implementation, review, or
+subagent handoff, load `docs/agents/codebase-map.md`.
+
+Use the map for:
+
+- Feature/workflow owner routing.
+- Backend function, utility, helper, DTO, repository, provider, and test lookup.
+- Frontend route, UI component, API helper, and state-surface lookup.
+- Triage keywords that accelerate root-cause search.
+- Choosing the right repo-local skill and read-only subagent.
+
+The map is mandatory context, not proof of behavior. Inspect code before making
+current-behavior claims. If the map conflicts with code, code wins and the map
+must be corrected in the same approved scope.
+
+For any code change, report mapping impact in the final response:
+
+```txt
+Mapping impact: updated docs/agents/codebase-map.md
+```
+
+or:
+
+```txt
+Mapping impact: none - <reason>
+```
+
 ## Skills
 
 Repo-local skills live in `.agents/skills`. Analysis and review skills may be selected implicitly. Skills that can lead to edits disable implicit invocation in `agents/openai.yaml`; invoke them explicitly and still require plan-first approval before writes.
@@ -53,6 +82,8 @@ Use $voice-ai-runtime to investigate AI tone, service understanding, salon-scope
 ## Subagents
 
 Project-scoped custom agents live in `.codex/agents`. Ask Codex to spawn them explicitly.
+The parent agent and subagent must both use `docs/agents/codebase-map.md`; do
+not rely on a natural-language prompt alone to provide mapping context.
 
 Recommended prompts:
 
@@ -78,6 +109,14 @@ Have repo_mapper map ai_tone from Settings/API/config transfer through conversat
 
 ## Maintenance
 
+- Keep `docs/agents/codebase-map.md` current whenever code changes affect
+  features, functions, utilities, helpers, UI, API routes, DTOs, migrations,
+  tests, source-of-truth ownership, or agent routing.
+- Add or adjust triage keywords when a new recurring symptom, UI label, route,
+  provider state, error code, or workflow term would speed future root-cause
+  search.
+- Subagent outputs should state `map update required`, `map already accurate`,
+  or `map conflict found` when reviewing code-changing work.
 - Keep skills concise. Move long reference material into `docs/` or skill `references/`.
 - Update `CONTEXT.md` when domain terms become stable.
 - Update this inventory when new repo-local skill triggers, project agents, or domain source-of-truth tables/settings such as `service_aliases`, `service_categories`, `service_category_aliases`, `party_booking_requests`, or `salon_settings.ai_tone` are added.

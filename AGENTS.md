@@ -13,6 +13,8 @@ or implementing work in any area below, read the listed source docs first and
 treat them as binding:
 
 - Architecture/current module ownership: `docs/architecture.md`
+- Mandatory agent mapping, feature/function/UI routing, and triage keywords:
+  `docs/agents/codebase-map.md`
 - POS booking, Square, and confirmation safety: `docs/pos-adapter-layer.md`, `docs/square-integration.md`
 - API surface and authenticated status/debug endpoints: `docs/api.md`
 - Production, deployment, provider runtime config, and dashboard-managed provider settings: `docs/deployment.md`
@@ -26,6 +28,29 @@ change adds, deletes, renames, or materially changes a `.md` file that affects
 agent routing, product behavior, operational setup, source-of-truth ownership,
 or validation workflow, update this routing rule or the relevant agent rule in
 the same approved documentation scope.
+
+## Mandatory Mapping Load And Drift Guard
+
+- Before any repository triage, diagnosis, planning, implementation, review, or
+  subagent handoff, read `docs/agents/codebase-map.md` and use its feature,
+  function, utility, helper, UI, keyword, and owner-surface routing before
+  scanning code.
+- Treat `docs/agents/codebase-map.md` as the mandatory first-pass map, not as
+  proof of current behavior. If code evidence conflicts with the map, code
+  evidence wins and the map must be corrected in the same approved scope.
+- Any code change that adds, updates, deletes, renames, or moves feature
+  behavior, API routes, UI routes/components, services, repositories, provider
+  adapters, migrations, DTOs/types, utilities, helpers, tests, runtime config,
+  or ownership boundaries must check whether `docs/agents/codebase-map.md`
+  needs an update.
+- If a code change affects the mapping, update `docs/agents/codebase-map.md`
+  before reporting the work complete. If it does not affect the mapping, the
+  final response must include `Mapping impact: none` with the reason.
+- Subagents and review skills must classify mapping impact as `map update
+  required`, `map already accurate`, or `map conflict found` when reviewing or
+  planning code changes.
+- Do not use triage keywords as production logic. They are only for agent
+  routing, search acceleration, and root-cause investigation.
 
 ## Repository Layout
 

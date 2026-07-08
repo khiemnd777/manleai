@@ -7,6 +7,22 @@ description: Turn ambiguous product, operations, or customer requests for this A
 
 Use this skill before implementation when the request is broad, ambiguous, workflow-heavy, or product-facing.
 
+## Mandatory Mapping Load
+
+- Before triage, diagnosis, planning, implementation, review, or subagent
+  handoff, read `docs/agents/codebase-map.md` after the root instructions and
+  before scanning code.
+- Use the map's feature, function, utility, helper, UI, and triage keyword
+  routing to identify owner workflow, source of truth, adjacent controls, and
+  likely implementation files.
+- If code evidence conflicts with the map, code wins and the map must be
+  corrected in the same approved scope.
+- Any code change that affects mapped features, functions, utilities, helpers,
+  UI surfaces, API routes, DTOs, migrations, tests, or ownership boundaries must
+  update `docs/agents/codebase-map.md` before the task is complete.
+- If no map update is needed, the final response must include
+  `Mapping impact: none` with the reason.
+
 ## Codebase Truth Rule
 
 - Be strictly honest about the current codebase and runtime configuration. Do not flatter, reassure, or infer readiness from docs, milestones, intended architecture, or previous claims.
