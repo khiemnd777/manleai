@@ -521,6 +521,59 @@ func (a *SquareAdapter) CancelAppointment(ctx context.Context, salonID string, a
 	return mapSquareBooking(response.Booking, 0)
 }
 
+func (a *SquareAdapter) ListAppointments(ctx context.Context, salonID string, input pos.AppointmentListInput) (*pos.AppointmentListResult, error) {
+	token, locationID, err := a.accessTokenAndLocation(ctx, salonID)
+	if err != nil {
+		_ = a.repo.LogError(ctx, pos.POSError{
+			SalonID:      salonID,
+			Provider:     pos.ProviderSquare,
+			Operation:    "list_bookings",
+			ErrorCode:    normalizeSquareError(err),
+			ErrorMessage: err.Error(),
+		})
+		return nil, err
+	}
+	cfg, err := a.configFor(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	values := url.Values{}
+	values.Set("location_id", locationID)
+	if !input.StartTime.IsZero() {
+		values.Set("start_at_min", input.StartTime.UTC().Format(time.RFC3339))
+	}
+	if !input.EndTime.IsZero() {
+		values.Set("start_at_max", input.EndTime.UTC().Format(time.RFC3339))
+	}
+	limit := input.Limit
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	values.Set("limit", strconv.Itoa(limit))
+	if strings.TrimSpace(input.Cursor) != "" {
+		values.Set("cursor", strings.TrimSpace(input.Cursor))
+	}
+	var response squareBookingListResponse
+	if err := a.doJSON(ctx, cfg, http.MethodGet, a.apiBaseURL(cfg)+"/v2/bookings?"+values.Encode(), token, nil, &response); err != nil {
+		_ = a.repo.LogError(ctx, pos.POSError{
+			SalonID:      salonID,
+			Provider:     pos.ProviderSquare,
+			Operation:    "list_bookings",
+			ErrorCode:    normalizeSquareError(err),
+			ErrorMessage: err.Error(),
+		})
+		return nil, err
+	}
+	items := make([]pos.ListedAppointment, 0, len(response.Bookings))
+	for _, booking := range response.Bookings {
+		item, ok := mapSquareListedBooking(booking)
+		if ok {
+			items = append(items, item)
+		}
+	}
+	return &pos.AppointmentListResult{Appointments: items, Cursor: response.Cursor}, nil
+}
+
 func (a *SquareAdapter) Sync(ctx context.Context, salonID string) error {
 	_, err := a.SyncWithSummary(ctx, salonID)
 	return err
@@ -1093,6 +1146,33 @@ func mapSquareBooking(booking squareBooking, fallbackDuration int) (*pos.Appoint
 	}, nil
 }
 
+func mapSquareListedBooking(booking squareBooking) (pos.ListedAppointment, bool) {
+	appointment, err := mapSquareBooking(booking, 0)
+	if err != nil || appointment == nil || strings.TrimSpace(appointment.POSAppointmentID) == "" || appointment.StartTime.IsZero() {
+		return pos.ListedAppointment{}, false
+	}
+	segments := make([]pos.ListedAppointmentSegment, 0, len(booking.AppointmentSegments))
+	for _, segment := range booking.AppointmentSegments {
+		segments = append(segments, pos.ListedAppointmentSegment{
+			POSServiceID:      strings.TrimSpace(segment.ServiceVariationID),
+			POSServiceVersion: segment.ServiceVariationVersion,
+			POSStaffID:        strings.TrimSpace(segment.TeamMemberID),
+			DurationMinutes:   segment.DurationMinutes,
+		})
+	}
+	return pos.ListedAppointment{
+		POSAppointmentID:      appointment.POSAppointmentID,
+		POSAppointmentVersion: appointment.POSAppointmentVersion,
+		Status:                appointment.Status,
+		POSCustomerID:         strings.TrimSpace(booking.CustomerID),
+		CustomerName:          "Square customer",
+		StartTime:             appointment.StartTime,
+		EndTime:               appointment.EndTime,
+		Notes:                 firstNonEmpty(booking.CustomerNote, booking.SellerNote),
+		Segments:              segments,
+	}, true
+}
+
 func squareSegmentDuration(segments []squareAppointmentSegment) int {
 	total := 0
 	for _, segment := range segments {
@@ -1101,6 +1181,15 @@ func squareSegmentDuration(segments []squareAppointmentSegment) int {
 		}
 	}
 	return total
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func availabilityRange(preferredDate string) (time.Time, time.Time, error) {
@@ -1310,6 +1399,11 @@ type squareAvailability struct {
 
 type squareBookingResponse struct {
 	Booking squareBooking `json:"booking"`
+}
+
+type squareBookingListResponse struct {
+	Bookings []squareBooking `json:"bookings"`
+	Cursor   string          `json:"cursor"`
 }
 
 type squareCreateBookingRequest struct {

@@ -26,6 +26,7 @@ This repository currently implements Milestone 1, Milestone 2, Milestone 3 booki
 - Backend service/staff list endpoints for synced and local canonical data.
 - Next.js admin shell with login, create-account, dashboard, onboarding profile creation, Square integration status, appointments, calls, customers, services, staff, settings, billing gate, and AI Training.
 - Public salon catalog app in `landing/` for customer-facing services, staff, hours, and call-to-book pages.
+- POS calendar app in `pos-calendar/` with standalone login, day/week/month/agenda views, Square calendar sync, and POS-backed add/edit/delete actions.
 - Repo-local Codex guidance through `AGENTS.md`, `.agents/skills`, and `.codex/agents`.
 
 Square Appointments create, reschedule, cancel, and dashboard test-booking operations are implemented through `POSProvider`. AI booking can only be enabled after Square is connected, a location is selected, services/staff/business hour periods are synced, and at least one service and staff member are booking-ready for the active provider. Square test booking create/cancel is an optional POS write smoke test, not an AI enablement gate. Until Square returns a successful POS booking ID and booking version, failed provider calls create fallback pending requests instead of confirmed appointments or internal appointment state changes.
@@ -63,6 +64,15 @@ Docker Compose. For non-Docker landing development:
 
 ```bash
 cd landing
+npm install
+npm run dev
+```
+
+The POS calendar app runs separately at `http://localhost:3091` when using
+Docker Compose. For non-Docker POS calendar development:
+
+```bash
+cd pos-calendar
 npm install
 npm run dev
 ```
@@ -153,6 +163,7 @@ Fully implemented now:
 - Dashboard Calls page correction capture for reviewed transcript messages
 - Dashboard AI Training answer preview for active knowledge evaluation
 - Owner-published public catalog pages in `landing/` backed by safe unauthenticated `/api/public/salon` and `/api/public/salons/:slug` reads
+- Standalone POS Calendar in `pos-calendar/` backed by authenticated calendar range/sync APIs, with no sidebar, `Today` and `Tomorrow` shortcuts, day/week/month/agenda views, and appointment-level POS sync warnings
 - POS sync and error logs
 - Admin shell, login, create-account, dashboard, onboarding profile creation/import, integrations page, appointments, calls, customers, services, staff, settings, billing gate, and training pages
 

@@ -651,6 +651,38 @@ func TestRetrieveBookingGetsVersion(t *testing.T) {
 	}
 }
 
+func TestMapSquareListedBookingPreservesSegmentsAndNotes(t *testing.T) {
+	item, ok := mapSquareListedBooking(squareBooking{
+		ID:           "booking_1",
+		Version:      8,
+		Status:       "ACCEPTED",
+		CustomerID:   "customer_1",
+		CustomerNote: "Customer note",
+		StartAt:      "2026-06-17T17:00:00Z",
+		AppointmentSegments: []squareAppointmentSegment{{
+			DurationMinutes:         45,
+			TeamMemberID:            "team_1",
+			ServiceVariationID:      "service_1",
+			ServiceVariationVersion: 123,
+		}},
+	})
+	if !ok {
+		t.Fatalf("mapSquareListedBooking ok = false, want true")
+	}
+	if item.POSAppointmentID != "booking_1" || item.POSAppointmentVersion != 8 || item.POSCustomerID != "customer_1" {
+		t.Fatalf("listed appointment identity = %#v", item)
+	}
+	if item.EndTime.Sub(item.StartTime) != 45*time.Minute {
+		t.Fatalf("duration = %s, want 45m", item.EndTime.Sub(item.StartTime))
+	}
+	if item.Notes != "Customer note" {
+		t.Fatalf("notes = %q, want Customer note", item.Notes)
+	}
+	if len(item.Segments) != 1 || item.Segments[0].POSServiceID != "service_1" || item.Segments[0].POSStaffID != "team_1" {
+		t.Fatalf("segments = %#v, want provider segment", item.Segments)
+	}
+}
+
 type capturingTransport struct {
 	squareVersion string
 }

@@ -4,6 +4,7 @@
 
 - [x] Monorepo structure
 - [x] Docker Compose for PostgreSQL, Redis, API, frontend
+- [x] Standalone POS Calendar app with local port `3091` and production domain wiring for `pos.knasoftware.com`
 - [x] Go/Fiber API
 - [x] Startup foundation migration
 - [x] Ent schema mirror
@@ -36,6 +37,7 @@
 - [x] Implement reschedule/cancel appointment in SquareAdapter.
 - [x] Add booking test UI and AI booking enablement gate.
 - [x] Add owner appointments dashboard with confirmed POS bookings and fallback pending requests.
+- [x] Add POS calendar range/sync APIs and standalone calendar view with day/week/month/agenda modes.
 - [x] Add service/staff AI booking controls for synced Square records.
 - [x] Add Customers dashboard with internal customer activity and gated Square phone lookup.
 

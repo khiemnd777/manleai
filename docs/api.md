@@ -1212,6 +1212,63 @@ Searches the active provider by phone through `POSProvider.SearchCustomerByPhone
 
 Returns appointments recorded after POS success, including confirmed, rescheduled, and cancelled statuses. The optional `limit` query parameter defaults to 50 and is capped at 200. The optional `offset` query parameter defaults to 0. Responses include `appointments`, `limit`, `offset`, and `has_more`; `has_more` is computed by requesting one extra row and does not require an exact total count. Each item includes `staff_selection_mode` and, when available, ordered `segments[]` from `appointment_services` with service names, assigned technician names, durations, and segment-level staff selection mode. `staff_selection_mode=anyone` means the customer did not request a named technician even though the POS-confirmed appointment stores the staff assignment used to book.
 
+`GET /api/salons/:id/calendar?start=<date-or-rfc3339>&end=<date-or-rfc3339>&view=<day|week|month|agenda>`
+
+Returns a range view for the standalone POS Calendar app. The response includes
+POS-confirmed `appointments`, `pending_requests` from fallback pending booking
+attempts, and a `warnings` summary. Calendar appointment items include the
+normal appointment fields plus `pos_sync_status`, `last_pos_synced_at`,
+`pos_sync_error`, `sync_warning`, `can_edit`, and `can_delete`. A warning means
+the item is not verified as cleanly synced from the active POS calendar, or the
+record is a fallback pending request that must not be treated as confirmed.
+
+```json
+{
+  "salon_id": "...",
+  "start_time": "2026-07-08T00:00:00Z",
+  "end_time": "2026-07-15T00:00:00Z",
+  "view": "week",
+  "appointments": [],
+  "pending_requests": [],
+  "warnings": {
+    "not_synced": 0,
+    "sync_failed": 0,
+    "pending_pos_sync": 0,
+    "fallback_pending": 0
+  }
+}
+```
+
+`POST /api/salons/:id/calendar/sync`
+
+Imports appointments from the active POS provider for the requested range. For
+Square Appointments, this uses the Square Bookings list path and upserts local
+appointment mirrors by `(salon_id, pos_provider, pos_appointment_id)`. The
+import does not bypass the POS-first confirmation rule; it mirrors provider
+records and records POS errors when sync fails.
+
+```json
+{
+  "start_time": "2026-07-08",
+  "end_time": "2026-07-15"
+}
+```
+
+```json
+{
+  "provider": "square",
+  "summary": {
+    "imported": 2,
+    "updated": 8,
+    "skipped": 0
+  },
+  "range": {
+    "start_time": "2026-07-08T00:00:00Z",
+    "end_time": "2026-07-15T00:00:00Z"
+  }
+}
+```
+
 `POST /api/salons/:id/appointments/:appointment_id/reschedule`
 
 ```json
@@ -1857,6 +1914,8 @@ Lists Square locations through the Square adapter.
 Imports Square services, staff, selected-location business hour periods, and
 customers into local canonical tables. The button label is `Sync` in the owner
 dashboard because the action is no longer limited to services and staff.
+Calendar appointment imports are handled separately by
+`POST /api/salons/:id/calendar/sync`, scoped to a requested calendar range.
 
 ```json
 {

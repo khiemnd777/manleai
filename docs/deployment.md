@@ -1,18 +1,20 @@
 # Deployment
 
 This release deploys the Go API, PostgreSQL, Redis, the owner admin dashboard,
-and the public salon landing app. Public HTTP and HTTPS are owned by the shared
-VPS edge gateway, not by the ManleAI Docker Compose project.
+the public salon landing app, and the POS calendar app. Public HTTP and HTTPS
+are owned by the shared VPS edge gateway, not by the ManleAI Docker Compose
+project.
 
 ## Production Domains
 
 - Admin dashboard: `https://ai.knasoftware.com`
 - API through the admin origin: `https://ai.knasoftware.com/api/*`
 - Public salon landing app: `https://salon.knasoftware.com`
+- POS calendar app: `https://pos.knasoftware.com`
 - Square redirect URL: `https://ai.knasoftware.com/api/integrations/square/callback`
 - Voice public base URL: `https://ai.knasoftware.com`
 
-Both DNS `A` records must point to the VPS before Caddy can issue certificates.
+All DNS `A` records must point to the VPS before Caddy can issue certificates.
 
 ## Edge Gateway
 
@@ -26,6 +28,7 @@ ManleAI exposes:
 127.0.0.1:18089 -> api:8080
 127.0.0.1:13088 -> frontend:3000
 127.0.0.1:13090 -> landing:3000
+127.0.0.1:13091 -> pos-calendar:3000
 ```
 
 The CI/CD deploy job renders `deploy/manleai.caddy.template` into
@@ -45,7 +48,7 @@ make release TAG=v2026.06.25.1
 
 That command requires a clean `main` worktree, creates an annotated git tag, and
 pushes the tag to `origin`. The tag push runs backend tests, typechecks and
-builds both web apps, uploads a release archive, decodes `PROJECT_ENV_B64` into
+builds the web apps, uploads a release archive, decodes `PROJECT_ENV_B64` into
 `/opt/manleai/project.env`, runs the ManleAI compose stack, then validates and
 reloads the shared edge gateway:
 
@@ -166,4 +169,4 @@ the legacy fallback path for a fresh deployment with no saved dashboard config.
 - Keep Twilio and OpenAI secrets out of logs and docs; dashboard responses expose only configured/source metadata.
 - Enable OpenAI voice AI in the Integrations dashboard only when external AI voice turns should be enabled.
 - Keep OpenAI model and voice settings configurable through the dashboard so model changes do not require code changes.
-- Restrict CORS to the deployed admin and landing origins.
+- Restrict CORS to the deployed admin, landing, and POS calendar origins.

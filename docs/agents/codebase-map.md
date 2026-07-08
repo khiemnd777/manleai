@@ -58,10 +58,10 @@ cluster. Before making a claim about a specific function/helper or editing it,
 inspect the concrete symbols in code:
 
 - Go functions/types: `rg -n "^(func|type) " backend/modules backend/internal backend/cmd`.
-- Frontend components/helpers: `rg -n "^(export (async )?function|export function|export const|function |const [A-Z])" frontend landing -g '!**/node_modules/**' -g '!**/.next/**'`.
-- API calls from UI: `rg -n "apiRequest<|apiRequest\\(" frontend -g '!frontend/node_modules/**' -g '!frontend/.next/**'`.
+- Frontend components/helpers: `rg -n "^(export (async )?function|export function|export const|function |const [A-Z])" frontend landing pos-calendar -g '!**/node_modules/**' -g '!**/.next/**'`.
+- API calls from UI: `rg -n "apiRequest<|apiRequest\\(" frontend pos-calendar -g '!frontend/node_modules/**' -g '!frontend/.next/**' -g '!pos-calendar/node_modules/**' -g '!pos-calendar/.next/**'`.
 - Routes: `rg -n "func RegisterRoutes|api\\.|app\\." backend/modules backend/cmd/api/main.go`.
-- DTOs: `rg -n "type .* struct|export type|export interface" backend/modules frontend/types landing/lib`.
+- DTOs: `rg -n "type .* struct|export type|export interface" backend/modules frontend/types landing/lib pos-calendar/types`.
 
 When a change creates, renames, deletes, or changes the ownership or triage
 meaning of a function/helper/component, update the relevant map section and
@@ -94,9 +94,9 @@ triage keyword table.
 | --- | --- | --- | --- |
 | Auth and sessions | `backend/modules/auth/*`, `backend/internal/middleware/auth.go` | Login, refresh, bootstrap owner, JWT auth, user/salon claims | `backend/modules/auth/service_test.go` |
 | Salon profile/settings | `backend/modules/salon/*` | Salon CRUD, settings, AI tone, public catalog settings, imported business hours | `backend/modules/salon/service_test.go` |
-| POS provider-neutral layer | `backend/modules/pos/*` | `POSProvider` contracts, POS entity links, service/staff/customer catalog, sync jobs/logs/errors, provider switching, category taxonomy, category aliases | `backend/modules/pos/service_test.go`, `backend/modules/pos/sync_processor_test.go` |
-| Square adapter | `backend/modules/pos_square/*` | Square OAuth, locations, sync, Square payloads, token refresh, provider error mapping | `backend/modules/pos_square/*_test.go` |
-| Booking | `backend/modules/booking/*` | Availability, booking attempts, confirmed appointments, fallback pending, reschedule, cancel, POS idempotency, POS error writes | `backend/modules/booking/service_test.go` |
+| POS provider-neutral layer | `backend/modules/pos/*` | `POSProvider` contracts, optional appointment listing capability, POS entity links, service/staff/customer catalog, sync jobs/logs/errors, provider switching, category taxonomy, category aliases | `backend/modules/pos/service_test.go`, `backend/modules/pos/sync_processor_test.go` |
+| Square adapter | `backend/modules/pos_square/*` | Square OAuth, locations, sync, Square payloads, booking list import, token refresh, provider error mapping | `backend/modules/pos_square/*_test.go` |
+| Booking | `backend/modules/booking/*` | Availability, booking attempts, confirmed appointments, fallback pending, calendar range/sync APIs, reschedule, cancel, POS idempotency, POS error writes | `backend/modules/booking/service_test.go` |
 | Customers | `backend/modules/customer/*` | Canonical customer CRUD, archive, search, activity read model, provider customer lookup facade | `backend/modules/customer/service_test.go` |
 | Conversation runtime | `backend/modules/conversation/*` | Simulator/phone session state, intent, slot preservation, service understanding, answer routing, booking tool routing, party booking planning, handoff, transcript metadata, retention | `backend/modules/conversation/*_test.go` |
 | Training | `backend/modules/training/*` | Knowledge items, owner corrections, correction apply/dismiss, service alias application, training evaluation | `backend/modules/training/service_test.go` |
@@ -170,6 +170,17 @@ name collection, availability replies, party bookings, or transcript output.
 | `/dashboard/integrations` | `frontend/app/dashboard/integrations/page.tsx` | `frontend/features/integrations/square-integration.tsx` | Square OAuth/status/sync/test booking, provider config, provider switching |
 | `/dashboard/billing` | `frontend/app/dashboard/billing/page.tsx` | `frontend/features/dashboard/billing-dashboard.tsx` | static gated billing surface |
 
+## POS Calendar Surface Map
+
+| Route | Page file | Main component | Data/API helpers |
+| --- | --- | --- | --- |
+| `/login` | `pos-calendar/app/login/page.tsx` | `pos-calendar/features/auth/login-form.tsx` | `pos-calendar/lib/api/client.ts` |
+| `/calendar` | `pos-calendar/app/calendar/page.tsx` | `pos-calendar/features/calendar/pos-calendar-client.tsx` | calendar range/sync, availability, booking attempts, reschedule, cancel, Square status, services, staff |
+
+The POS calendar app is a standalone authenticated Next.js app with no
+dashboard sidebar. Local runtime port is `3091`; production domain is
+`pos.knasoftware.com`. It reuses the same admin auth tokens as `frontend/`.
+
 ## Frontend Helper And Utility Map
 
 - API client/session/refresh: `frontend/lib/api/client.ts`.
@@ -206,7 +217,8 @@ name collection, availability replies, party bookings, or transcript output.
   `backend/modules/integration_config`.
 - Frontend owner: `frontend/features/integrations/square-integration.tsx`,
   `frontend/features/dashboard/services-dashboard.tsx`,
-  `frontend/features/dashboard/staff-dashboard.tsx`.
+  `frontend/features/dashboard/staff-dashboard.tsx`,
+  `pos-calendar/features/calendar/pos-calendar-client.tsx` for calendar sync.
 - Data owner: `pos_connections`, `pos_entity_links`, `pos_sync_jobs`,
   `pos_sync_logs`, `pos_errors`, `salon_integration_configs`,
   `salons.active_pos_provider`.
@@ -223,9 +235,12 @@ name collection, availability replies, party bookings, or transcript output.
 - Backend owner: `backend/modules/booking` with conversation callers in
   `backend/modules/conversation`.
 - Frontend owner: `frontend/features/dashboard/appointments-dashboard.tsx`,
-  `frontend/features/integrations/square-integration.tsx` for test booking.
+  `frontend/features/integrations/square-integration.tsx` for test booking,
+  `pos-calendar/features/calendar/pos-calendar-client.tsx` for standalone
+  calendar add/edit/delete.
 - Data owner: `booking_attempts`, `booking_attempt_segments`,
-  `appointments`, `appointment_services`, `pos_errors`,
+  `appointments`, `appointment_services`, `appointments.pos_sync_status`,
+  `appointments.last_pos_synced_at`, `appointments.pos_sync_error`, `pos_errors`,
   `owner_notifications`.
 - Tests: `backend/modules/booking/service_test.go`,
   `backend/modules/conversation/service_test.go`,
@@ -345,14 +360,14 @@ name collection, availability replies, party bookings, or transcript output.
 | Keywords / symptoms | Start with | Then inspect |
 | --- | --- | --- |
 | confirm, confirmed, booking ID, fallback pending, POS failed, no booking id, duplicate appointment | `booking-safety-tdd`, `backend/modules/booking/service.go` | `backend/modules/conversation/service_booking_flow.go`, `backend/modules/pos/types.go`, booking tests |
-| availability, open slots, offered slots, no common time, split, staggered, staff assignment | `backend/modules/booking`, `backend/modules/conversation/service_availability.go` | POS provider adapter, `appointments-dashboard.tsx`, conversation tests |
-| Square OAuth, token expired, refresh token, location, sync, catalog import | `pos-adapter-slice`, `backend/modules/pos_square` | `backend/modules/pos`, `integration_config`, integrations UI |
+| availability, open slots, offered slots, no common time, split, staggered, staff assignment | `backend/modules/booking`, `backend/modules/conversation/service_availability.go` | POS provider adapter, `appointments-dashboard.tsx`, `pos-calendar/features/calendar/pos-calendar-client.tsx`, conversation tests |
+| Square OAuth, token expired, refresh token, location, sync, catalog import, calendar sync | `pos-adapter-slice`, `backend/modules/pos_square` | `backend/modules/pos`, `integration_config`, integrations UI, POS calendar UI |
 | POS mapping, provider link, active provider, AI bookable, local only, sync failed | `backend/modules/pos`, `docs/canonical-pos-ownership-checklist.md` | Services/Staff UI, `pos_entity_links`, sync tests |
 | service alias, category alias, service understanding, caller said "mani", wrong service | `voice-ai-runtime`, conversation service understanding files | `backend/modules/training`, services UI, transcript metadata tests |
 | AI training, owner correction, knowledge, FAQ answer, stale policy | `backend/modules/training`, answer router/context | training UI, knowledge tests |
 | party booking, group booking, two people, split booking, party request | conversation party files | booking service, Calls UI party request panel |
 | name captured wrong, service instead of name, spelling, phone/email | `service_customer_name.go` | conversation golden tests, transcript metadata |
-| reschedule, cancel, move appointment, appointment target, ordinal option | `service_intent.go`, `backend/modules/booking/service.go` | Appointments UI, booking tests |
+| reschedule, cancel, move appointment, appointment target, ordinal option, day view, week view, month view, agenda, Tomorrow button, appointment warning | `service_intent.go`, `backend/modules/booking/service.go` | Appointments UI, POS Calendar UI, booking tests |
 | Twilio signature, webhook, TwiML, recording, media stream, stream fallback | `backend/modules/voice_twilio` | `backend/modules/voice`, phone demo memo |
 | OpenAI STT, TTS, realtime, model, voice, guarded reply | `backend/modules/voice_openai`, `backend/modules/voice` | integration config, voice tests |
 | AI tone, speaking style, concise/warm/professional | `backend/modules/salon`, `conversation.RuntimeConfig`, `voice.ModelRequest` | Settings UI, config transfer |

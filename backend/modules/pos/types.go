@@ -126,6 +126,10 @@ type POSWriteProvider interface {
 	UpsertCustomer(ctx context.Context, salonID string, customer Customer) (*ProviderSyncResult, error)
 }
 
+type AppointmentListProvider interface {
+	ListAppointments(ctx context.Context, salonID string, input AppointmentListInput) (*AppointmentListResult, error)
+}
+
 type ProviderCapabilities struct {
 	ServiceUpsert  bool `json:"service_upsert"`
 	ServiceArchive bool `json:"service_archive"`
@@ -540,6 +544,39 @@ type Appointment struct {
 	StartTime             time.Time `json:"start_time"`
 	EndTime               time.Time `json:"end_time"`
 	Status                string    `json:"status"`
+}
+
+type AppointmentListInput struct {
+	StartTime time.Time
+	EndTime   time.Time
+	Limit     int
+	Cursor    string
+}
+
+type AppointmentListResult struct {
+	Appointments []ListedAppointment
+	Cursor       string
+}
+
+type ListedAppointment struct {
+	POSAppointmentID      string
+	POSAppointmentVersion int
+	Status                string
+	POSCustomerID         string
+	CustomerName          string
+	CustomerPhone         string
+	CustomerEmail         string
+	StartTime             time.Time
+	EndTime               time.Time
+	Notes                 string
+	Segments              []ListedAppointmentSegment
+}
+
+type ListedAppointmentSegment struct {
+	POSServiceID      string
+	POSServiceVersion int64
+	POSStaffID        string
+	DurationMinutes   int
 }
 
 type CreateCustomerInput struct {

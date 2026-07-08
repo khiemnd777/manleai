@@ -20,3 +20,8 @@
 	import common_headers
 	reverse_proxy 127.0.0.1:{{LANDING_PORT}}
 }
+
+{{POS_DOMAIN}} {
+	import common_headers
+	reverse_proxy 127.0.0.1:{{POS_CALENDAR_PORT}}
+}

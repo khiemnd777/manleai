@@ -7,12 +7,18 @@ const (
 	SourceSquareTestBooking       = "square_test_booking"
 	SourceAIConversationSimulator = "ai_conversation_simulator"
 	SourceAIVoiceCall             = "ai_voice_call"
+	SourcePOSCalendarSync         = "pos_calendar_sync"
 
 	StatusPOSPending      = "pos_pending"
 	StatusConfirmed       = "confirmed"
 	StatusFallbackPending = "fallback_pending"
 	StatusRescheduled     = "rescheduled"
 	StatusCancelled       = "cancelled"
+
+	POSSyncStatusSynced    = "synced"
+	POSSyncStatusNotSynced = "not_synced"
+	POSSyncStatusFailed    = "sync_failed"
+	POSSyncStatusPending   = "pending"
 
 	BookingActionBook       = "book"
 	BookingActionReschedule = "reschedule"
@@ -127,6 +133,8 @@ type BookingAttempt struct {
 	TargetAppointmentID string                   `json:"target_appointment_id,omitempty"`
 	NotificationType    string                   `json:"notification_type,omitempty"`
 	NotificationStatus  string                   `json:"notification_status,omitempty"`
+	SyncWarning         string                   `json:"sync_warning,omitempty"`
+	CanRetry            bool                     `json:"can_retry,omitempty"`
 	CreatedAt           time.Time                `json:"created_at"`
 	UpdatedAt           time.Time                `json:"updated_at"`
 	Appointment         *Appointment             `json:"appointment,omitempty"`
@@ -150,6 +158,12 @@ type Appointment struct {
 	StartTime             time.Time                `json:"start_time"`
 	EndTime               time.Time                `json:"end_time"`
 	Notes                 string                   `json:"notes,omitempty"`
+	POSSyncStatus         string                   `json:"pos_sync_status,omitempty"`
+	LastPOSSyncedAt       *time.Time               `json:"last_pos_synced_at,omitempty"`
+	POSSyncError          string                   `json:"pos_sync_error,omitempty"`
+	SyncWarning           string                   `json:"sync_warning,omitempty"`
+	CanEdit               bool                     `json:"can_edit"`
+	CanDelete             bool                     `json:"can_delete"`
 	CreatedAt             time.Time                `json:"created_at"`
 	UpdatedAt             time.Time                `json:"updated_at"`
 }
@@ -167,6 +181,75 @@ type ListBookingAttemptsResponse struct {
 	Offset          int              `json:"offset"`
 	HasMore         bool             `json:"has_more"`
 	Status          string           `json:"status,omitempty"`
+}
+
+type CalendarRangeRequest struct {
+	StartTime time.Time `json:"start_time"`
+	EndTime   time.Time `json:"end_time"`
+	View      string    `json:"view"`
+}
+
+type CalendarRangeResponse struct {
+	SalonID         string                 `json:"salon_id"`
+	StartTime       time.Time              `json:"start_time"`
+	EndTime         time.Time              `json:"end_time"`
+	View            string                 `json:"view"`
+	Appointments    []Appointment          `json:"appointments"`
+	PendingRequests []BookingAttempt       `json:"pending_requests"`
+	Warnings        CalendarWarningSummary `json:"warnings"`
+}
+
+type CalendarWarningSummary struct {
+	TotalWarnings   int `json:"total_warnings"`
+	SyncFailed      int `json:"sync_failed"`
+	NotSynced       int `json:"not_synced"`
+	PendingPOSSync  int `json:"pending_pos_sync"`
+	FallbackPending int `json:"fallback_pending"`
+}
+
+type CalendarSyncRequest struct {
+	StartTime time.Time `json:"start_time"`
+	EndTime   time.Time `json:"end_time"`
+}
+
+type CalendarSyncResponse struct {
+	Provider string              `json:"provider"`
+	Summary  CalendarSyncSummary `json:"summary"`
+	Range    CalendarSyncRange   `json:"range"`
+}
+
+type CalendarSyncRange struct {
+	StartTime time.Time `json:"start_time"`
+	EndTime   time.Time `json:"end_time"`
+}
+
+type CalendarSyncSummary struct {
+	Imported     int `json:"imported"`
+	Updated      int `json:"updated"`
+	Skipped      int `json:"skipped"`
+	WarningCount int `json:"warning_count"`
+}
+
+type CalendarAppointmentImport struct {
+	Provider              string
+	POSAppointmentID      string
+	POSAppointmentVersion int
+	Status                string
+	POSCustomerID         string
+	CustomerName          string
+	CustomerPhone         string
+	CustomerEmail         string
+	StartTime             time.Time
+	EndTime               time.Time
+	Notes                 string
+	Segments              []CalendarAppointmentSegmentImport
+}
+
+type CalendarAppointmentSegmentImport struct {
+	POSServiceID      string
+	POSServiceVersion int64
+	POSStaffID        string
+	DurationMinutes   int
 }
 
 type ServiceRef struct {

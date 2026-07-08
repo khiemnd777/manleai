@@ -45,6 +45,7 @@ jobs:
         app:
           - frontend
           - landing
+          - pos-calendar
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -123,6 +124,9 @@ jobs:
             --exclude='landing/.next' \
             --exclude='landing/node_modules' \
             --exclude='landing/tsconfig.tsbuildinfo' \
+            --exclude='pos-calendar/.next' \
+            --exclude='pos-calendar/node_modules' \
+            --exclude='pos-calendar/tsconfig.tsbuildinfo' \
             -czf "$RUNNER_TEMP/$RELEASE_NAME" .
           echo "RELEASE_ARCHIVE=$RUNNER_TEMP/$RELEASE_NAME" >> "$GITHUB_ENV"
 
@@ -228,9 +232,11 @@ jobs:
 
           ADMIN_DOMAIN="${ADMIN_DOMAIN:-ai.knasoftware.com}"
           LANDING_DOMAIN="${LANDING_DOMAIN:-salon.knasoftware.com}"
+          POS_DOMAIN="${POS_DOMAIN:-pos.knasoftware.com}"
           API_PORT="${API_PORT:-18089}"
           FRONTEND_PORT="${FRONTEND_PORT:-13088}"
           LANDING_PORT="${LANDING_PORT:-13090}"
+          POS_CALENDAR_PORT="${POS_CALENDAR_PORT:-13091}"
 
           for attempt in $(seq 1 30); do
             if command -v curl >/dev/null 2>&1; then
@@ -254,9 +260,11 @@ jobs:
           sed \
             -e "s#{{ADMIN_DOMAIN}}#${ADMIN_DOMAIN}#g" \
             -e "s#{{LANDING_DOMAIN}}#${LANDING_DOMAIN}#g" \
+            -e "s#{{POS_DOMAIN}}#${POS_DOMAIN}#g" \
             -e "s#{{API_PORT}}#${API_PORT}#g" \
             -e "s#{{FRONTEND_PORT}}#${FRONTEND_PORT}#g" \
             -e "s#{{LANDING_PORT}}#${LANDING_PORT}#g" \
+            -e "s#{{POS_CALENDAR_PORT}}#${POS_CALENDAR_PORT}#g" \
             "$release_dir/deploy/manleai.caddy.template" > "$tmp_caddy"
 
           edge_conf="$EDGE_PATH/conf.d/manleai.caddy"

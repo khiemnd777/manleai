@@ -52,7 +52,7 @@ services:
       REFRESH_TOKEN_TTL_HOURS: ${REFRESH_TOKEN_TTL_HOURS:-720}
       TOKEN_ENCRYPTION_KEY_BASE64: ${TOKEN_ENCRYPTION_KEY_BASE64:?TOKEN_ENCRYPTION_KEY_BASE64 is required}
       AUTO_MIGRATE: ${AUTO_MIGRATE:-true}
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://ai.knasoftware.com,https://salon.knasoftware.com}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://ai.knasoftware.com,https://salon.knasoftware.com,https://pos.knasoftware.com}
       FRONTEND_URL: ${FRONTEND_URL:-https://ai.knasoftware.com}
       SQUARE_ENVIRONMENT: ${SQUARE_ENVIRONMENT:-production}
       SQUARE_CLIENT_ID: ${SQUARE_CLIENT_ID:-}
@@ -125,6 +125,27 @@ services:
       - "3000"
     ports:
       - "${LANDING_BIND_HOST:-127.0.0.1}:${LANDING_PORT:-13090}:3000"
+    networks:
+      - app
+
+  pos-calendar:
+    build:
+      context: ./pos-calendar
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://ai.knasoftware.com}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      HOSTNAME: 0.0.0.0
+      PORT: 3000
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://ai.knasoftware.com}
+    expose:
+      - "3000"
+    ports:
+      - "${POS_CALENDAR_BIND_HOST:-127.0.0.1}:${POS_CALENDAR_PORT:-13091}:3000"
     networks:
       - app
 

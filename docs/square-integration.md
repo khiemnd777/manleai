@@ -14,6 +14,7 @@
 - Staff sync
 - Business hour period sync from the selected Square location
 - Customer sync from Square Customers search pagination
+- Calendar appointment list sync from Square Bookings into local appointment mirrors
 - Customer search/create
 - Availability checks
 - Create appointment
@@ -57,6 +58,14 @@ stored locally as `salon_business_hour_periods` using Square-style
 Settings page is read-only for business hours and does not collapse split-day
 periods. Availability filtering only offers slots that fit inside one synced
 period.
+
+The POS Calendar `Sync Square` action imports Square Bookings for the selected
+calendar range through the provider-neutral `ListAppointments` capability. The
+import upserts local appointment mirrors by Square booking ID, stores segment
+service/staff mappings when those provider IDs can be resolved, and marks each
+imported row `pos_sync_status=synced`. Failed or unavailable calendar sync
+paths must write POS errors and surface appointment-level warnings instead of
+marking records confirmed from UI state alone.
 
 The provider-neutral booking service records backend `pos_pending` attempts
 before calling Square, passes backend-owned idempotency keys into the adapter,

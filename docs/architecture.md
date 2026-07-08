@@ -49,6 +49,16 @@ owner admin dashboard in `frontend/`. The landing app reads only public-safe
 catalog data through unauthenticated `/api/public/*` endpoints and does not
 create booking attempts or confirmed appointments.
 
+The POS calendar operator surface lives in `pos-calendar/`, separate from the
+owner admin dashboard shell. It uses the same authenticated owner API and admin
+session tokens, but does not include the dashboard sidebar. Its first workflow
+is `/calendar`, with day/week/month/agenda views, `Today` and `Tomorrow`
+shortcuts, active-provider calendar sync, and POS-backed add, edit, and delete
+actions. Add still creates a booking attempt through the booking service; edit
+currently uses the existing POS-backed reschedule contract for time/staff/notes;
+delete uses the existing POS-backed cancel contract and never hard-deletes
+appointment history.
+
 ## Core Boundary
 
 ManleAI is the system of record for salon operational data: canonical services,
@@ -97,6 +107,15 @@ HTTP handler -> service -> repository/provider interface -> concrete adapter
 The booking service depends on `modules/pos.POSProvider`. It must not import `modules/pos_square`.
 
 Booking workflow state belongs to the backend. Create-booking, reschedule, cancel, and dashboard test-booking requests first create a `booking_attempts` row with `pos_pending` and a backend-owned POS idempotency key. The POS adapter is then called as an outbound writer. For customer identity, booking resolves or creates the ManleAI canonical customer, reuses an active `pos_entity_links` customer mapping when present, or asks the active `POSProvider` to search/create a provider customer and then stores the mapping. If customer lookup/linking or appointment creation fails, the same attempt is finalized as `fallback_pending`, a POS error and owner notification are recorded, and no confirmed appointment is created. If the provider returns a POS booking ID and booking version, the same attempt is finalized as confirmed/rescheduled/cancelled and the appointment state is written in the backend database. Reschedule, cancel, and test-booking cleanup requests must leave the internal appointment unchanged unless the provider succeeds.
+
+Calendar range reads are local mirror reads over POS-confirmed appointments and
+fallback pending booking attempts. Calendar sync is an active-provider import
+path: the provider-neutral POS layer may expose `ListAppointments`, and the
+Square adapter maps Square Bookings list results into backend appointment
+mirror rows keyed by `(salon_id, pos_provider, pos_appointment_id)`. Imported
+appointments carry `pos_sync_status`, `last_pos_synced_at`, and
+`pos_sync_error` so the calendar can show warnings on each appointment when a
+record is not synced, pending verification, or failed its latest POS sync.
 
 The Milestone 4 conversation simulator and Milestone 5 live phone webhook path call the booking service through a provider-neutral booking tool. They do not import Square packages, read POS tokens, build Square payloads, or use Square location IDs directly. The runtime owns booking slot state, including date-only requests before a time is known, so LLM wording cannot erase already-collected service, date, time, customer, or staff details. The runtime checks provider-neutral availability, offers available slots to the caller, stores offered slot segment assignments on the call session, and only calls booking creation after the caller selects a slot and required customer details are present. Selected segments and `staff_selection_mode=anyone` survive later turns so simulator and phone bookings can create the same provider-neutral multi-service request while avoiding customer-facing named-technician wording unless the customer chose a specific technician. Booking confirmations remain impossible unless the booking service returns a POS-confirmed booking attempt and appointment. If AI booking is disabled, a customer requests a human, or the booking path cannot confirm through POS, the runtime creates a handoff or fallback pending flow and avoids confirmed wording.
 

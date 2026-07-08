@@ -20,6 +20,7 @@ var (
 
 type Store interface {
 	EnsureSalonOwner(ctx context.Context, salonID string, ownerUserID string) error
+	GetActiveProvider(ctx context.Context, salonID string, ownerUserID string) (string, error)
 	GetBookableService(ctx context.Context, salonID string, serviceID string) (*ServiceRef, error)
 	GetBookableStaff(ctx context.Context, salonID string, staffID string) (*StaffRef, error)
 	ListBookableStaffRefs(ctx context.Context, salonID string) ([]StaffRef, error)
@@ -38,6 +39,13 @@ type Store interface {
 	LatestTestBooking(ctx context.Context, salonID string, ownerUserID string) (*TestBookingRecord, error)
 	ListAppointments(ctx context.Context, salonID string, ownerUserID string, limit int, offset int) ([]Appointment, error)
 	ListBookingAttempts(ctx context.Context, salonID string, ownerUserID string, status string, limit int, offset int) ([]BookingAttempt, error)
+	ListCalendarAppointments(ctx context.Context, salonID string, ownerUserID string, startTime time.Time, endTime time.Time) ([]Appointment, error)
+	ListCalendarPendingRequests(ctx context.Context, salonID string, ownerUserID string, startTime time.Time, endTime time.Time) ([]BookingAttempt, error)
+	UpsertCalendarAppointments(ctx context.Context, salonID string, provider string, items []CalendarAppointmentImport) (CalendarSyncSummary, error)
+	CreateCalendarSyncLog(ctx context.Context, salonID string, provider string) (string, error)
+	CompleteCalendarSyncLog(ctx context.Context, id string, status string, message string) error
+	MarkCalendarSyncComplete(ctx context.Context, salonID string, provider string, status string, message string) error
+	LogPOSError(ctx context.Context, salonID string, provider string, operation string, err error) error
 }
 
 type Service struct {
@@ -490,6 +498,115 @@ func (s *Service) LatestTestBooking(ctx context.Context, salonID string, ownerUs
 	return s.store.LatestTestBooking(ctx, salonID, ownerUserID)
 }
 
+func (s *Service) Calendar(ctx context.Context, salonID string, ownerUserID string, req CalendarRangeRequest) (*CalendarRangeResponse, error) {
+	req = normalizeCalendarRangeRequest(req)
+	if err := validateCalendarRange(req); err != nil {
+		return nil, err
+	}
+	if err := s.store.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	appointments, err := s.store.ListCalendarAppointments(ctx, salonID, ownerUserID, req.StartTime, req.EndTime)
+	if err != nil {
+		return nil, err
+	}
+	pending, err := s.store.ListCalendarPendingRequests(ctx, salonID, ownerUserID, req.StartTime, req.EndTime)
+	if err != nil {
+		return nil, err
+	}
+	appointments = annotateCalendarAppointments(appointments)
+	pending = annotateCalendarPendingRequests(pending)
+	return &CalendarRangeResponse{
+		SalonID:         salonID,
+		StartTime:       req.StartTime,
+		EndTime:         req.EndTime,
+		View:            req.View,
+		Appointments:    appointments,
+		PendingRequests: pending,
+		Warnings:        calendarWarningSummary(appointments, pending),
+	}, nil
+}
+
+func (s *Service) SyncCalendar(ctx context.Context, salonID string, ownerUserID string, req CalendarSyncRequest) (*CalendarSyncResponse, error) {
+	rangeReq := normalizeCalendarRangeRequest(CalendarRangeRequest{StartTime: req.StartTime, EndTime: req.EndTime})
+	if err := validateCalendarRange(rangeReq); err != nil {
+		return nil, err
+	}
+	providerName, err := s.store.GetActiveProvider(ctx, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	provider := s.providers[providerName]
+	if provider == nil {
+		return nil, ErrProviderUnavailable
+	}
+	lister, ok := provider.(pos.AppointmentListProvider)
+	if !ok {
+		return nil, ErrProviderUnavailable
+	}
+
+	logID, logErr := s.store.CreateCalendarSyncLog(ctx, salonID, providerName)
+	if logErr != nil {
+		return nil, logErr
+	}
+
+	imported := make([]CalendarAppointmentImport, 0)
+	skipped := 0
+	cursor := ""
+	for page := 0; page < 20; page++ {
+		result, err := lister.ListAppointments(ctx, salonID, pos.AppointmentListInput{
+			StartTime: rangeReq.StartTime,
+			EndTime:   rangeReq.EndTime,
+			Limit:     100,
+			Cursor:    cursor,
+		})
+		if err != nil {
+			_ = s.store.LogPOSError(context.WithoutCancel(ctx), salonID, providerName, "calendar_sync", err)
+			_ = s.store.CompleteCalendarSyncLog(context.WithoutCancel(ctx), logID, "failed", err.Error())
+			_ = s.store.MarkCalendarSyncComplete(context.WithoutCancel(ctx), salonID, providerName, pos.StatusError, err.Error())
+			return nil, err
+		}
+		if result == nil {
+			break
+		}
+		for _, item := range result.Appointments {
+			mapped, ok := calendarImportFromPOSAppointment(providerName, item)
+			if !ok {
+				skipped++
+				continue
+			}
+			imported = append(imported, mapped)
+		}
+		cursor = strings.TrimSpace(result.Cursor)
+		if cursor == "" {
+			break
+		}
+	}
+
+	summary, err := s.store.UpsertCalendarAppointments(postPOSPersistenceContext(ctx), salonID, providerName, imported)
+	if err != nil {
+		_ = s.store.CompleteCalendarSyncLog(context.WithoutCancel(ctx), logID, "failed", err.Error())
+		_ = s.store.MarkCalendarSyncComplete(context.WithoutCancel(ctx), salonID, providerName, pos.StatusError, err.Error())
+		return nil, err
+	}
+	summary.Skipped += skipped
+	message := calendarSyncSummaryMessage(summary)
+	if err := s.store.CompleteCalendarSyncLog(postPOSPersistenceContext(ctx), logID, "succeeded", message); err != nil {
+		return nil, err
+	}
+	if err := s.store.MarkCalendarSyncComplete(postPOSPersistenceContext(ctx), salonID, providerName, pos.StatusActive, ""); err != nil {
+		return nil, err
+	}
+	return &CalendarSyncResponse{
+		Provider: providerName,
+		Summary:  summary,
+		Range: CalendarSyncRange{
+			StartTime: rangeReq.StartTime,
+			EndTime:   rangeReq.EndTime,
+		},
+	}, nil
+}
+
 func (s *Service) saveFallback(ctx context.Context, pending BookingAttempt, segments []BookingSegmentRecord, req CreateBookingRequest, endTime time.Time, operation string, providerErr error) (*BookingAttempt, error) {
 	primary := segments[0]
 	return s.store.SaveFallbackBooking(ctx, FallbackBookingRecord{
@@ -563,6 +680,171 @@ func normalizeRequest(req CreateBookingRequest) CreateBookingRequest {
 	req.Segments = normalizeBookingSegmentRequests(req.Segments, req.StaffSelectionMode)
 	req.Notes = strings.TrimSpace(req.Notes)
 	return req
+}
+
+func normalizeCalendarRangeRequest(req CalendarRangeRequest) CalendarRangeRequest {
+	req.View = strings.TrimSpace(strings.ToLower(req.View))
+	if req.View == "" {
+		req.View = "week"
+	}
+	req.StartTime = req.StartTime.UTC()
+	req.EndTime = req.EndTime.UTC()
+	return req
+}
+
+func validateCalendarRange(req CalendarRangeRequest) error {
+	if req.StartTime.IsZero() || req.EndTime.IsZero() || !req.EndTime.After(req.StartTime) {
+		return ErrValidation
+	}
+	if req.EndTime.Sub(req.StartTime) > 93*24*time.Hour {
+		return ErrValidation
+	}
+	switch req.View {
+	case "day", "week", "month", "agenda", "":
+		return nil
+	default:
+		return ErrValidation
+	}
+}
+
+func annotateCalendarAppointments(items []Appointment) []Appointment {
+	for idx := range items {
+		item := &items[idx]
+		status := strings.TrimSpace(item.POSSyncStatus)
+		if status == "" {
+			status = POSSyncStatusSynced
+			if item.LastPOSSyncedAt == nil {
+				status = POSSyncStatusNotSynced
+			}
+		}
+		item.POSSyncStatus = status
+		item.CanEdit = calendarAppointmentCanChange(*item)
+		item.CanDelete = item.CanEdit
+		switch {
+		case item.Status == StatusCancelled:
+			item.CanEdit = false
+			item.CanDelete = false
+		case strings.TrimSpace(item.POSAppointmentID) == "" || item.POSAppointmentVersion < 0:
+			item.SyncWarning = "Missing POS booking metadata. Do not treat this appointment as editable until Square sync is repaired."
+			item.CanEdit = false
+			item.CanDelete = false
+		case status == POSSyncStatusFailed:
+			item.SyncWarning = firstNonEmpty(item.POSSyncError, "Latest POS calendar sync failed for this appointment.")
+		case status == POSSyncStatusNotSynced:
+			item.SyncWarning = "This appointment has not been synced from Square Appointments yet."
+		case status == POSSyncStatusPending:
+			item.SyncWarning = "Square sync is pending for this appointment."
+		}
+	}
+	return items
+}
+
+func calendarAppointmentCanChange(item Appointment) bool {
+	return item.Status != StatusCancelled &&
+		strings.TrimSpace(item.POSAppointmentID) != "" &&
+		item.POSAppointmentVersion >= 0
+}
+
+func annotateCalendarPendingRequests(items []BookingAttempt) []BookingAttempt {
+	for idx := range items {
+		item := &items[idx]
+		item.SyncWarning = "Pending request: Square Appointments did not confirm this action."
+		item.CanRetry = item.Status == StatusFallbackPending
+	}
+	return items
+}
+
+func calendarWarningSummary(appointments []Appointment, pending []BookingAttempt) CalendarWarningSummary {
+	summary := CalendarWarningSummary{FallbackPending: len(pending)}
+	for _, item := range appointments {
+		if strings.TrimSpace(item.SyncWarning) == "" {
+			continue
+		}
+		switch item.POSSyncStatus {
+		case POSSyncStatusFailed:
+			summary.SyncFailed++
+		case POSSyncStatusPending:
+			summary.PendingPOSSync++
+		default:
+			summary.NotSynced++
+		}
+	}
+	summary.TotalWarnings = summary.SyncFailed + summary.NotSynced + summary.PendingPOSSync + summary.FallbackPending
+	return summary
+}
+
+func calendarImportFromPOSAppointment(provider string, item pos.ListedAppointment) (CalendarAppointmentImport, bool) {
+	if strings.TrimSpace(item.POSAppointmentID) == "" || item.StartTime.IsZero() {
+		return CalendarAppointmentImport{}, false
+	}
+	endTime := item.EndTime
+	if endTime.IsZero() {
+		duration := 0
+		for _, segment := range item.Segments {
+			duration += segment.DurationMinutes
+		}
+		if duration <= 0 {
+			return CalendarAppointmentImport{}, false
+		}
+		endTime = item.StartTime.Add(time.Duration(duration) * time.Minute)
+	}
+	if !endTime.After(item.StartTime) {
+		return CalendarAppointmentImport{}, false
+	}
+	segments := make([]CalendarAppointmentSegmentImport, 0, len(item.Segments))
+	for _, segment := range item.Segments {
+		segments = append(segments, CalendarAppointmentSegmentImport{
+			POSServiceID:      strings.TrimSpace(segment.POSServiceID),
+			POSServiceVersion: segment.POSServiceVersion,
+			POSStaffID:        strings.TrimSpace(segment.POSStaffID),
+			DurationMinutes:   segment.DurationMinutes,
+		})
+	}
+	return CalendarAppointmentImport{
+		Provider:              provider,
+		POSAppointmentID:      strings.TrimSpace(item.POSAppointmentID),
+		POSAppointmentVersion: item.POSAppointmentVersion,
+		Status:                normalizeImportedAppointmentStatus(item.Status),
+		POSCustomerID:         strings.TrimSpace(item.POSCustomerID),
+		CustomerName:          defaultString(strings.TrimSpace(item.CustomerName), "Square customer"),
+		CustomerPhone:         validation.NormalizePhone(item.CustomerPhone),
+		CustomerEmail:         strings.TrimSpace(item.CustomerEmail),
+		StartTime:             item.StartTime.UTC(),
+		EndTime:               endTime.UTC(),
+		Notes:                 strings.TrimSpace(item.Notes),
+		Segments:              segments,
+	}, true
+}
+
+func normalizeImportedAppointmentStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "cancelled", "canceled":
+		return StatusCancelled
+	case "rescheduled":
+		return StatusRescheduled
+	default:
+		return StatusConfirmed
+	}
+}
+
+func calendarSyncSummaryMessage(summary CalendarSyncSummary) string {
+	return fmt.Sprintf("Calendar sync imported %d, updated %d, skipped %d.", summary.Imported, summary.Updated, summary.Skipped)
+}
+
+func defaultString(value string, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func normalizeRescheduleRequest(req RescheduleRequest) RescheduleRequest {

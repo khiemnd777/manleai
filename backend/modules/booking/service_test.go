@@ -118,6 +118,121 @@ func TestAttemptsRejectsInvalidStatusFilter(t *testing.T) {
 	}
 }
 
+func TestCalendarReturnsRangeAppointmentsPendingRequestsAndWarnings(t *testing.T) {
+	store := newFakeStore()
+	lastSyncedAt := testStartTime().Add(-time.Hour)
+	store.calendarAppointments = []Appointment{
+		{
+			ID:                    "appointment_synced",
+			POSAppointmentID:      "booking_synced",
+			POSAppointmentVersion: 2,
+			Status:                StatusConfirmed,
+			POSSyncStatus:         POSSyncStatusSynced,
+			LastPOSSyncedAt:       &lastSyncedAt,
+			StartTime:             testStartTime(),
+			EndTime:               testStartTime().Add(45 * time.Minute),
+		},
+		{
+			ID:                    "appointment_failed",
+			POSAppointmentID:      "booking_failed",
+			POSAppointmentVersion: 3,
+			Status:                StatusConfirmed,
+			POSSyncStatus:         POSSyncStatusFailed,
+			POSSyncError:          "Square timeout",
+			StartTime:             testStartTime().Add(time.Hour),
+			EndTime:               testStartTime().Add(2 * time.Hour),
+		},
+	}
+	store.calendarPendingRequests = []BookingAttempt{{
+		ID:                 "attempt_pending",
+		Status:             StatusFallbackPending,
+		RequestedStartTime: testStartTime().Add(3 * time.Hour),
+		RequestedEndTime:   testStartTime().Add(4 * time.Hour),
+	}}
+	service := NewService(store, nil)
+	start := testStartTime().Add(-24 * time.Hour)
+	end := testStartTime().Add(24 * time.Hour)
+
+	res, err := service.Calendar(context.Background(), "salon_1", "owner_1", CalendarRangeRequest{
+		StartTime: start,
+		EndTime:   end,
+		View:      "week",
+	})
+	if err != nil {
+		t.Fatalf("Calendar returned error: %v", err)
+	}
+	if !store.calendarStartTime.Equal(start) || !store.calendarEndTime.Equal(end) {
+		t.Fatalf("calendar range = %s/%s, want %s/%s", store.calendarStartTime, store.calendarEndTime, start, end)
+	}
+	if len(res.Appointments) != 2 || len(res.PendingRequests) != 1 {
+		t.Fatalf("calendar counts appointments=%d pending=%d, want 2/1", len(res.Appointments), len(res.PendingRequests))
+	}
+	if res.Appointments[0].SyncWarning != "" {
+		t.Fatalf("synced appointment warning = %q, want empty", res.Appointments[0].SyncWarning)
+	}
+	if res.Appointments[1].SyncWarning != "Square timeout" {
+		t.Fatalf("failed warning = %q, want Square timeout", res.Appointments[1].SyncWarning)
+	}
+	if res.PendingRequests[0].SyncWarning == "" || !res.PendingRequests[0].CanRetry {
+		t.Fatalf("pending request warning/retry = %#v, want warning and retry", res.PendingRequests[0])
+	}
+	if res.Warnings.SyncFailed != 1 || res.Warnings.FallbackPending != 1 || res.Warnings.TotalWarnings != 2 {
+		t.Fatalf("warnings = %#v, want one sync failed and one fallback", res.Warnings)
+	}
+}
+
+func TestSyncCalendarListsPOSAppointmentsAndUpsertsProviderNeutralImports(t *testing.T) {
+	store := newFakeStore()
+	store.calendarSyncSummary = CalendarSyncSummary{Imported: 1, Updated: 0}
+	provider := &fakeProvider{
+		listAppointments: []pos.ListedAppointment{{
+			POSAppointmentID:      "booking_square_1",
+			POSAppointmentVersion: 5,
+			Status:                "accepted",
+			POSCustomerID:         "customer_square_1",
+			StartTime:             testStartTime(),
+			EndTime:               testStartTime().Add(45 * time.Minute),
+			Notes:                 "Imported from Square",
+			Segments: []pos.ListedAppointmentSegment{{
+				POSServiceID:      "square_service_1",
+				POSServiceVersion: 123,
+				POSStaffID:        "square_staff_1",
+				DurationMinutes:   45,
+			}},
+		}},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+	start := testStartTime().Add(-24 * time.Hour)
+	end := testStartTime().Add(24 * time.Hour)
+
+	res, err := service.SyncCalendar(context.Background(), "salon_1", "owner_1", CalendarSyncRequest{
+		StartTime: start,
+		EndTime:   end,
+	})
+	if err != nil {
+		t.Fatalf("SyncCalendar returned error: %v", err)
+	}
+	if provider.listAppointmentCalls != 1 {
+		t.Fatalf("list calls = %d, want 1", provider.listAppointmentCalls)
+	}
+	if !provider.lastListInput.StartTime.Equal(start) || !provider.lastListInput.EndTime.Equal(end) {
+		t.Fatalf("provider range = %#v, want start/end", provider.lastListInput)
+	}
+	if len(store.calendarImports) != 1 {
+		t.Fatalf("imports = %d, want 1", len(store.calendarImports))
+	}
+	got := store.calendarImports[0]
+	if got.POSAppointmentID != "booking_square_1" || got.Status != StatusConfirmed || got.Segments[0].POSServiceID != "square_service_1" {
+		t.Fatalf("import = %#v, want provider-neutral Square booking", got)
+	}
+	if store.calendarSyncLogStatus != "succeeded" || store.calendarProviderStatus != pos.StatusActive {
+		t.Fatalf("sync log/provider status = %s/%s, want succeeded/active", store.calendarSyncLogStatus, store.calendarProviderStatus)
+	}
+	if res.Provider != pos.ProviderSquare || res.Summary.Imported != 1 {
+		t.Fatalf("response = %#v, want square imported summary", res)
+	}
+}
+
 func TestRescheduleCandidatesRequiresCallerPhone(t *testing.T) {
 	store := newFakeStore()
 	service := NewService(store, nil)
@@ -1210,6 +1325,17 @@ type fakeStore struct {
 	actionFallback           *AppointmentActionFallbackRecord
 	appointments             []Appointment
 	bookingAttempts          []BookingAttempt
+	calendarAppointments     []Appointment
+	calendarPendingRequests  []BookingAttempt
+	calendarStartTime        time.Time
+	calendarEndTime          time.Time
+	calendarImports          []CalendarAppointmentImport
+	calendarSyncSummary      CalendarSyncSummary
+	calendarSyncLogStatus    string
+	calendarSyncLogMessage   string
+	calendarProviderStatus   string
+	calendarProviderMessage  string
+	posErrorOperation        string
 	listAppointmentLimit     int
 	listAppointmentOffset    int
 	listBookingAttemptStatus string
@@ -1309,6 +1435,13 @@ func (f *fakeStore) EnsureSalonOwner(ctx context.Context, salonID string, ownerU
 		return pos.ErrNotFound
 	}
 	return nil
+}
+
+func (f *fakeStore) GetActiveProvider(ctx context.Context, salonID string, ownerUserID string) (string, error) {
+	if salonID != "salon_1" || ownerUserID != "owner_1" {
+		return "", pos.ErrNotFound
+	}
+	return pos.ProviderSquare, nil
 }
 
 func (f *fakeStore) GetBookableService(ctx context.Context, salonID string, serviceID string) (*ServiceRef, error) {
@@ -1576,6 +1709,44 @@ func (f *fakeStore) ListBookingAttempts(ctx context.Context, salonID string, own
 	return f.bookingAttempts, nil
 }
 
+func (f *fakeStore) ListCalendarAppointments(ctx context.Context, salonID string, ownerUserID string, startTime time.Time, endTime time.Time) ([]Appointment, error) {
+	f.calendarStartTime = startTime
+	f.calendarEndTime = endTime
+	return f.calendarAppointments, nil
+}
+
+func (f *fakeStore) ListCalendarPendingRequests(ctx context.Context, salonID string, ownerUserID string, startTime time.Time, endTime time.Time) ([]BookingAttempt, error) {
+	f.calendarStartTime = startTime
+	f.calendarEndTime = endTime
+	return f.calendarPendingRequests, nil
+}
+
+func (f *fakeStore) UpsertCalendarAppointments(ctx context.Context, salonID string, provider string, items []CalendarAppointmentImport) (CalendarSyncSummary, error) {
+	f.calendarImports = append([]CalendarAppointmentImport(nil), items...)
+	return f.calendarSyncSummary, nil
+}
+
+func (f *fakeStore) CreateCalendarSyncLog(ctx context.Context, salonID string, provider string) (string, error) {
+	return "sync_log_1", nil
+}
+
+func (f *fakeStore) CompleteCalendarSyncLog(ctx context.Context, id string, status string, message string) error {
+	f.calendarSyncLogStatus = status
+	f.calendarSyncLogMessage = message
+	return nil
+}
+
+func (f *fakeStore) MarkCalendarSyncComplete(ctx context.Context, salonID string, provider string, status string, message string) error {
+	f.calendarProviderStatus = status
+	f.calendarProviderMessage = message
+	return nil
+}
+
+func (f *fakeStore) LogPOSError(ctx context.Context, salonID string, provider string, operation string, err error) error {
+	f.posErrorOperation = operation
+	return nil
+}
+
 type fakeProvider struct {
 	customer               *pos.Customer
 	appointment            *pos.Appointment
@@ -1586,13 +1757,16 @@ type fakeProvider struct {
 	createBookingErr       error
 	rescheduleErr          error
 	cancelErr              error
+	listAppointmentsErr    error
 	availabilityErr        error
 	store                  *fakeStore
 	availabilitySlots      []pos.TimeSlot
+	listAppointments       []pos.ListedAppointment
 	lastAvailabilityInput  pos.AvailabilityInput
 	lastCreateInput        pos.CreateAppointmentInput
 	lastRescheduleInput    pos.RescheduleInput
 	lastCancelInput        pos.CancelInput
+	lastListInput          pos.AppointmentListInput
 	searchSawPending       bool
 	searchCustomerCalls    int
 	createCustomerCalls    int
@@ -1600,6 +1774,7 @@ type fakeProvider struct {
 	createAppointmentCalls int
 	rescheduleCalls        int
 	cancelCalls            int
+	listAppointmentCalls   int
 	afterCreateAppointment func()
 }
 
@@ -1683,6 +1858,15 @@ func (f *fakeProvider) CancelAppointment(ctx context.Context, salonID string, ap
 		return nil, f.cancelErr
 	}
 	return f.cancelledAppointment, nil
+}
+
+func (f *fakeProvider) ListAppointments(ctx context.Context, salonID string, input pos.AppointmentListInput) (*pos.AppointmentListResult, error) {
+	f.listAppointmentCalls++
+	f.lastListInput = input
+	if f.listAppointmentsErr != nil {
+		return nil, f.listAppointmentsErr
+	}
+	return &pos.AppointmentListResult{Appointments: f.listAppointments}, nil
 }
 
 func (f *fakeProvider) Sync(ctx context.Context, salonID string) error {

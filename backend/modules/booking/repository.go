@@ -33,6 +33,27 @@ func (r *Repository) EnsureSalonOwner(ctx context.Context, salonID string, owner
 	return nil
 }
 
+func (r *Repository) GetActiveProvider(ctx context.Context, salonID string, ownerUserID string) (string, error) {
+	var provider string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT active_pos_provider
+		FROM salons
+		WHERE id = $1
+		  AND owner_user_id = $2
+	`, salonID, ownerUserID).Scan(&provider)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", pos.ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return pos.ProviderSquare, nil
+	}
+	return provider, nil
+}
+
 func (r *Repository) GetBookableService(ctx context.Context, salonID string, serviceID string) (*ServiceRef, error) {
 	var item ServiceRef
 	err := r.db.QueryRowContext(ctx, `
@@ -1148,7 +1169,8 @@ func (r *Repository) ListAppointments(ctx context.Context, salonID string, owner
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id::text, salon_id::text, booking_attempt_id::text, pos_provider, pos_appointment_id,
 		       COALESCE(pos_appointment_version, 0), status, customer_name, customer_phone, COALESCE(customer_email, ''), COALESCE(service_id::text, ''),
-		       COALESCE(staff_id::text, ''), COALESCE(staff_selection_mode, 'specific'), start_time, end_time, COALESCE(notes, ''), created_at, updated_at
+		       COALESCE(staff_id::text, ''), COALESCE(staff_selection_mode, 'specific'), start_time, end_time, COALESCE(notes, ''),
+		       COALESCE(pos_sync_status, 'synced'), last_pos_synced_at, COALESCE(pos_sync_error, ''), created_at, updated_at
 		FROM appointments
 		WHERE salon_id = $1
 		ORDER BY start_time DESC, id DESC
@@ -1163,6 +1185,7 @@ func (r *Repository) ListAppointments(ctx context.Context, salonID string, owner
 	items := make([]Appointment, 0)
 	for rows.Next() {
 		var item Appointment
+		var lastPOSSyncedAt sql.NullTime
 		if err := rows.Scan(
 			&item.ID,
 			&item.SalonID,
@@ -1180,10 +1203,16 @@ func (r *Repository) ListAppointments(ctx context.Context, salonID string, owner
 			&item.StartTime,
 			&item.EndTime,
 			&item.Notes,
+			&item.POSSyncStatus,
+			&lastPOSSyncedAt,
+			&item.POSSyncError,
 			&item.CreatedAt,
 			&item.UpdatedAt,
 		); err != nil {
 			return nil, err
+		}
+		if lastPOSSyncedAt.Valid {
+			item.LastPOSSyncedAt = &lastPOSSyncedAt.Time
 		}
 		items = append(items, item)
 	}
@@ -1267,6 +1296,447 @@ func (r *Repository) ListBookingAttempts(ctx context.Context, salonID string, ow
 		return nil, err
 	}
 	return items, nil
+}
+
+func (r *Repository) ListCalendarAppointments(ctx context.Context, salonID string, ownerUserID string, startTime time.Time, endTime time.Time) ([]Appointment, error) {
+	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id::text, salon_id::text, booking_attempt_id::text, pos_provider, pos_appointment_id,
+		       COALESCE(pos_appointment_version, 0), status, customer_name, customer_phone, COALESCE(customer_email, ''), COALESCE(service_id::text, ''),
+		       COALESCE(staff_id::text, ''), COALESCE(staff_selection_mode, 'specific'), start_time, end_time, COALESCE(notes, ''),
+		       COALESCE(pos_sync_status, 'synced'), last_pos_synced_at, COALESCE(pos_sync_error, ''), created_at, updated_at
+		FROM appointments
+		WHERE salon_id = $1
+		  AND start_time < $3
+		  AND end_time > $2
+		ORDER BY start_time ASC, id ASC
+	`, salonID, startTime, endTime)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]Appointment, 0)
+	for rows.Next() {
+		var item Appointment
+		var lastPOSSyncedAt sql.NullTime
+		if err := rows.Scan(
+			&item.ID,
+			&item.SalonID,
+			&item.BookingAttemptID,
+			&item.POSProvider,
+			&item.POSAppointmentID,
+			&item.POSAppointmentVersion,
+			&item.Status,
+			&item.CustomerName,
+			&item.CustomerPhone,
+			&item.CustomerEmail,
+			&item.ServiceID,
+			&item.StaffID,
+			&item.StaffSelectionMode,
+			&item.StartTime,
+			&item.EndTime,
+			&item.Notes,
+			&item.POSSyncStatus,
+			&lastPOSSyncedAt,
+			&item.POSSyncError,
+			&item.CreatedAt,
+			&item.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if lastPOSSyncedAt.Valid {
+			item.LastPOSSyncedAt = &lastPOSSyncedAt.Time
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := r.attachAppointmentSegments(ctx, items); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (r *Repository) ListCalendarPendingRequests(ctx context.Context, salonID string, ownerUserID string, startTime time.Time, endTime time.Time) ([]BookingAttempt, error) {
+	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT ba.id::text, ba.salon_id::text, ba.source, ba.status, ba.pos_provider, COALESCE(ba.pos_booking_id, ''),
+		       ba.customer_name, ba.customer_phone, COALESCE(ba.customer_email, ''), COALESCE(ba.service_id::text, ''),
+		       COALESCE(ba.staff_id::text, ''), COALESCE(ba.staff_selection_mode, 'specific'), ba.requested_start_time, ba.requested_end_time, COALESCE(ba.notes, ''),
+		       COALESCE(ba.error_code, ''), COALESCE(ba.error_message, ''), ba.created_at, ba.updated_at,
+		       COALESCE(note.appointment_id::text, ''), COALESCE(note.type, ''), COALESCE(note.status, '')
+		FROM booking_attempts ba
+		LEFT JOIN LATERAL (
+			SELECT appointment_id, type, status
+			FROM owner_notifications
+			WHERE booking_attempt_id = ba.id
+			ORDER BY created_at DESC, id DESC
+			LIMIT 1
+		) note ON TRUE
+		WHERE ba.salon_id = $1
+		  AND ba.status = 'fallback_pending'
+		  AND ba.requested_start_time < $3
+		  AND ba.requested_end_time > $2
+		ORDER BY ba.requested_start_time ASC, ba.id ASC
+	`, salonID, startTime, endTime)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]BookingAttempt, 0)
+	for rows.Next() {
+		var item BookingAttempt
+		if err := rows.Scan(
+			&item.ID,
+			&item.SalonID,
+			&item.Source,
+			&item.Status,
+			&item.POSProvider,
+			&item.POSBookingID,
+			&item.CustomerName,
+			&item.CustomerPhone,
+			&item.CustomerEmail,
+			&item.ServiceID,
+			&item.StaffID,
+			&item.StaffSelectionMode,
+			&item.RequestedStartTime,
+			&item.RequestedEndTime,
+			&item.Notes,
+			&item.ErrorCode,
+			&item.ErrorMessage,
+			&item.CreatedAt,
+			&item.UpdatedAt,
+			&item.TargetAppointmentID,
+			&item.NotificationType,
+			&item.NotificationStatus,
+		); err != nil {
+			return nil, err
+		}
+		item.BookingAction = bookingActionForAttempt(item.Status, item.NotificationType)
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := r.attachBookingAttemptSegments(ctx, items); err != nil {
+		return nil, err
+	}
+	if err := r.attachAttemptTargetAppointments(ctx, salonID, items); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (r *Repository) UpsertCalendarAppointments(ctx context.Context, salonID string, provider string, items []CalendarAppointmentImport) (CalendarSyncSummary, error) {
+	summary := CalendarSyncSummary{}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return summary, err
+	}
+	defer tx.Rollback()
+
+	for _, item := range items {
+		if strings.TrimSpace(item.POSAppointmentID) == "" || item.StartTime.IsZero() || !item.EndTime.After(item.StartTime) {
+			summary.Skipped++
+			continue
+		}
+		item.Provider = defaultString(strings.TrimSpace(item.Provider), provider)
+		item.Status = normalizeImportedAppointmentStatus(item.Status)
+		item.CustomerName = defaultString(strings.TrimSpace(item.CustomerName), "Square customer")
+		item.CustomerPhone = validation.NormalizePhone(item.CustomerPhone)
+		segments, err := r.resolveCalendarImportSegments(ctx, tx, salonID, item.Provider, item)
+		if err != nil {
+			return summary, err
+		}
+		primary := segments[0]
+		var existingAppointmentID string
+		var existingAttemptID string
+		err = tx.QueryRowContext(ctx, `
+			SELECT id::text, booking_attempt_id::text
+			FROM appointments
+			WHERE salon_id = $1
+			  AND pos_provider = $2
+			  AND pos_appointment_id = $3
+		`, salonID, item.Provider, item.POSAppointmentID).Scan(&existingAppointmentID, &existingAttemptID)
+		if errors.Is(err, sql.ErrNoRows) {
+			if err := tx.QueryRowContext(ctx, `
+				INSERT INTO booking_attempts (
+					salon_id, source, status, pos_provider, pos_booking_id, customer_name, customer_phone,
+					customer_email, service_id, staff_id, staff_selection_mode, requested_start_time,
+					requested_end_time, notes
+				)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), $9, $10, $11, $12, $13, NULLIF($14, ''))
+				RETURNING id::text
+			`, salonID, SourcePOSCalendarSync, item.Status, item.Provider, item.POSAppointmentID, item.CustomerName, item.CustomerPhone, item.CustomerEmail, primary.serviceID(), primary.staffID(), primary.staffSelectionMode(), item.StartTime, item.EndTime, item.Notes).Scan(&existingAttemptID); err != nil {
+				return summary, err
+			}
+			if err := tx.QueryRowContext(ctx, `
+				INSERT INTO appointments (
+					salon_id, booking_attempt_id, pos_provider, pos_appointment_id, pos_appointment_version,
+					status, customer_name, customer_phone, customer_email, service_id, staff_id,
+					staff_selection_mode, start_time, end_time, notes, pos_sync_status, last_pos_synced_at,
+					pos_sync_error
+				)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10, $11, $12, $13, $14, NULLIF($15, ''), 'synced', now(), NULL)
+				RETURNING id::text
+			`, salonID, existingAttemptID, item.Provider, item.POSAppointmentID, item.POSAppointmentVersion, item.Status, item.CustomerName, item.CustomerPhone, item.CustomerEmail, primary.serviceID(), primary.staffID(), primary.staffSelectionMode(), item.StartTime, item.EndTime, item.Notes).Scan(&existingAppointmentID); err != nil {
+				return summary, err
+			}
+			summary.Imported++
+		} else if err != nil {
+			return summary, err
+		} else {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE booking_attempts
+				SET status = $4,
+				    pos_booking_id = $5,
+				    customer_name = CASE WHEN $6 = 'Square customer' AND customer_name <> '' THEN customer_name ELSE $6 END,
+				    customer_phone = CASE WHEN NULLIF($7, '') IS NULL AND customer_phone <> '' THEN customer_phone ELSE $7 END,
+				    customer_email = COALESCE(NULLIF($8, ''), customer_email),
+				    service_id = $9,
+				    staff_id = $10,
+				    staff_selection_mode = $11,
+				    requested_start_time = $12,
+				    requested_end_time = $13,
+				    notes = COALESCE(NULLIF($14, ''), notes),
+				    updated_at = now()
+				WHERE salon_id = $1
+				  AND id = $2
+				  AND pos_provider = $3
+			`, salonID, existingAttemptID, item.Provider, item.Status, item.POSAppointmentID, item.CustomerName, item.CustomerPhone, item.CustomerEmail, primary.serviceID(), primary.staffID(), primary.staffSelectionMode(), item.StartTime, item.EndTime, item.Notes); err != nil {
+				return summary, err
+			}
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE appointments
+				SET pos_appointment_version = $4,
+				    status = $5,
+				    customer_name = CASE WHEN $6 = 'Square customer' AND customer_name <> '' THEN customer_name ELSE $6 END,
+				    customer_phone = CASE WHEN NULLIF($7, '') IS NULL AND customer_phone <> '' THEN customer_phone ELSE $7 END,
+				    customer_email = COALESCE(NULLIF($8, ''), customer_email),
+				    service_id = $9,
+				    staff_id = $10,
+				    staff_selection_mode = $11,
+				    start_time = $12,
+				    end_time = $13,
+				    notes = COALESCE(NULLIF($14, ''), notes),
+				    pos_sync_status = 'synced',
+				    last_pos_synced_at = now(),
+				    pos_sync_error = NULL,
+				    updated_at = now()
+				WHERE salon_id = $1
+				  AND id = $2
+				  AND pos_provider = $3
+			`, salonID, existingAppointmentID, item.Provider, item.POSAppointmentVersion, item.Status, item.CustomerName, item.CustomerPhone, item.CustomerEmail, primary.serviceID(), primary.staffID(), primary.staffSelectionMode(), item.StartTime, item.EndTime, item.Notes); err != nil {
+				return summary, err
+			}
+			summary.Updated++
+		}
+		if err := r.replaceCalendarAppointmentSegments(ctx, tx, existingAppointmentID, segments); err != nil {
+			return summary, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return summary, err
+	}
+	return summary, nil
+}
+
+type calendarImportSegmentRef struct {
+	Service           *ServiceRef
+	Staff             *StaffRef
+	POSServiceID      string
+	POSServiceVersion int64
+	POSStaffID        string
+	Name              string
+	DurationMinutes   int
+	PriceFrom         float64
+	SortOrder         int
+}
+
+func (s calendarImportSegmentRef) serviceID() any {
+	if s.Service == nil || strings.TrimSpace(s.Service.ID) == "" {
+		return nil
+	}
+	return s.Service.ID
+}
+
+func (s calendarImportSegmentRef) staffID() any {
+	if s.Staff == nil || strings.TrimSpace(s.Staff.ID) == "" {
+		return nil
+	}
+	return s.Staff.ID
+}
+
+func (s calendarImportSegmentRef) staffSelectionMode() string {
+	if s.Staff == nil || strings.TrimSpace(s.Staff.ID) == "" {
+		return StaffSelectionAnyone
+	}
+	return StaffSelectionSpecific
+}
+
+func (r *Repository) resolveCalendarImportSegments(ctx context.Context, tx *sql.Tx, salonID string, provider string, item CalendarAppointmentImport) ([]calendarImportSegmentRef, error) {
+	rawSegments := item.Segments
+	if len(rawSegments) == 0 {
+		rawSegments = []CalendarAppointmentSegmentImport{{
+			DurationMinutes: int(item.EndTime.Sub(item.StartTime).Minutes()),
+		}}
+	}
+	segments := make([]calendarImportSegmentRef, 0, len(rawSegments))
+	for idx, raw := range rawSegments {
+		service, err := r.findCalendarServiceRef(ctx, tx, salonID, provider, raw.POSServiceID)
+		if err != nil {
+			return nil, err
+		}
+		staff, err := r.findCalendarStaffRef(ctx, tx, salonID, provider, raw.POSStaffID)
+		if err != nil {
+			return nil, err
+		}
+		name := "Square appointment"
+		duration := raw.DurationMinutes
+		price := float64(0)
+		if service != nil {
+			name = service.Name
+			if duration <= 0 {
+				duration = service.DurationMinutes
+			}
+			price = service.PriceFrom
+		} else if strings.TrimSpace(raw.POSServiceID) != "" {
+			name = "Square service"
+		}
+		if duration <= 0 {
+			duration = int(item.EndTime.Sub(item.StartTime).Minutes())
+		}
+		segments = append(segments, calendarImportSegmentRef{
+			Service:           service,
+			Staff:             staff,
+			POSServiceID:      defaultString(strings.TrimSpace(raw.POSServiceID), "unmapped"),
+			POSServiceVersion: raw.POSServiceVersion,
+			POSStaffID:        strings.TrimSpace(raw.POSStaffID),
+			Name:              name,
+			DurationMinutes:   duration,
+			PriceFrom:         price,
+			SortOrder:         idx + 1,
+		})
+	}
+	return segments, nil
+}
+
+func (r *Repository) findCalendarServiceRef(ctx context.Context, tx *sql.Tx, salonID string, provider string, posServiceID string) (*ServiceRef, error) {
+	posServiceID = strings.TrimSpace(posServiceID)
+	if posServiceID == "" {
+		return nil, nil
+	}
+	var item ServiceRef
+	err := tx.QueryRowContext(ctx, `
+		SELECT id::text, pos_provider, pos_service_id, COALESCE(pos_service_version, 0),
+		       name, duration_minutes, COALESCE(price_from, 0)
+		FROM services
+		WHERE salon_id = $1
+		  AND pos_provider = $2
+		  AND pos_service_id = $3
+		ORDER BY archived_at IS NULL DESC, updated_at DESC
+		LIMIT 1
+	`, salonID, provider, posServiceID).Scan(&item.ID, &item.POSProvider, &item.POSServiceID, &item.POSServiceVersion, &item.Name, &item.DurationMinutes, &item.PriceFrom)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (r *Repository) findCalendarStaffRef(ctx context.Context, tx *sql.Tx, salonID string, provider string, posStaffID string) (*StaffRef, error) {
+	posStaffID = strings.TrimSpace(posStaffID)
+	if posStaffID == "" {
+		return nil, nil
+	}
+	var item StaffRef
+	err := tx.QueryRowContext(ctx, `
+		SELECT id::text, pos_provider, pos_staff_id, name
+		FROM staff
+		WHERE salon_id = $1
+		  AND pos_provider = $2
+		  AND pos_staff_id = $3
+		ORDER BY archived_at IS NULL DESC, updated_at DESC
+		LIMIT 1
+	`, salonID, provider, posStaffID).Scan(&item.ID, &item.POSProvider, &item.POSStaffID, &item.Name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (r *Repository) replaceCalendarAppointmentSegments(ctx context.Context, tx *sql.Tx, appointmentID string, segments []calendarImportSegmentRef) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM appointment_services WHERE appointment_id = $1`, appointmentID); err != nil {
+		return err
+	}
+	for _, segment := range segments {
+		var price any
+		if segment.PriceFrom > 0 {
+			price = segment.PriceFrom
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO appointment_services (
+				appointment_id, service_id, staff_id, staff_selection_mode, pos_service_id,
+				pos_service_version, name, duration_minutes, price_from, sort_order
+			)
+			VALUES ($1, $2, $3, $4, $5, NULLIF($6::bigint, 0), $7, $8, $9, $10)
+		`, appointmentID, segment.serviceID(), segment.staffID(), segment.staffSelectionMode(), segment.POSServiceID, segment.POSServiceVersion, segment.Name, segment.DurationMinutes, price, segment.SortOrder); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Repository) CreateCalendarSyncLog(ctx context.Context, salonID string, provider string) (string, error) {
+	var id string
+	err := r.db.QueryRowContext(ctx, `
+		INSERT INTO pos_sync_logs (salon_id, provider, sync_type, status)
+		VALUES ($1, $2, 'calendar_import', 'started')
+		RETURNING id::text
+	`, salonID, provider).Scan(&id)
+	return id, err
+}
+
+func (r *Repository) CompleteCalendarSyncLog(ctx context.Context, id string, status string, message string) error {
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE pos_sync_logs
+		SET status = $2, message = NULLIF($3, ''), completed_at = now()
+		WHERE id = $1
+	`, id, status, message)
+	return err
+}
+
+func (r *Repository) MarkCalendarSyncComplete(ctx context.Context, salonID string, provider string, status string, message string) error {
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE pos_connections
+		SET status = $3, last_sync_at = CASE WHEN $3 = 'active' THEN now() ELSE last_sync_at END,
+		    error_message = NULLIF($4, ''), updated_at = now()
+		WHERE salon_id = $1 AND provider = $2
+	`, salonID, provider, status, message)
+	return err
+}
+
+func (r *Repository) LogPOSError(ctx context.Context, salonID string, provider string, operation string, providerErr error) error {
+	if providerErr == nil {
+		return nil
+	}
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO pos_errors (salon_id, provider, operation, error_code, error_message)
+		VALUES ($1, $2, $3, $4, $5)
+	`, salonID, provider, operation, posErrorCode(providerErr), providerErr.Error())
+	return err
 }
 
 func (r *Repository) attachAttemptTargetAppointments(ctx context.Context, salonID string, items []BookingAttempt) error {

@@ -30,6 +30,9 @@ func (Appointment) Fields() []ent.Field {
 		field.Time("start_time"),
 		field.Time("end_time"),
 		field.String("notes").Optional(),
+		field.String("pos_sync_status").Default("synced"),
+		field.Time("last_pos_synced_at").Optional().Nillable(),
+		field.String("pos_sync_error").Optional(),
 		field.Time("created_at").Default(time.Now),
 		field.Time("updated_at").Default(time.Now).UpdateDefault(time.Now),
 	}
