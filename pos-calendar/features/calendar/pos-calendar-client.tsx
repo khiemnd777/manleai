@@ -1356,6 +1356,11 @@ function SchedulerEventBlock({
   onSelect: (itemID: string) => void;
 }) {
   const item = positioned.item;
+  const customerLabel = item.customerName || "Unknown";
+  const serviceLabel = compactServiceLabel(item);
+  const primaryLine = `${formatTime(item.start, timezone)} · ${customerLabel} - ${serviceLabel}`;
+  const showStatusBadge = compact || positioned.height >= 54;
+
   return (
     <div
       role="button"
@@ -1380,19 +1385,25 @@ function SchedulerEventBlock({
       }}
     >
       <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="truncate text-xs font-bold text-ink">
-            {formatTime(item.start, timezone)} · {item.customerName || "Unknown"}
-          </div>
-          <div className={cn("mt-1 text-xs leading-5 text-muted", compact ? "line-clamp-2" : "line-clamp-3")}>
-            {compactServiceLabel(item)}
-          </div>
+        <div className="min-w-0 flex-1">
+          {compact ? (
+            <>
+              <div className="truncate text-xs font-bold text-ink">
+                {formatTime(item.start, timezone)} · {customerLabel}
+              </div>
+              <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{serviceLabel}</div>
+            </>
+          ) : (
+            <div className="truncate text-xs font-bold text-ink">{primaryLine}</div>
+          )}
         </div>
         {item.warning ? <AlertTriangle className="h-4 w-4 flex-none text-amber-600" /> : null}
       </div>
-      <div className="mt-2 flex flex-wrap items-center gap-1.5">
-        <Badge value={item.status} className="px-2 py-0.5" />
-      </div>
+      {showStatusBadge ? (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <Badge value={item.status} className="px-2 py-0.5" />
+        </div>
+      ) : null}
     </div>
   );
 }
