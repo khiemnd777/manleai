@@ -3339,14 +3339,33 @@ func TestMessageDoesNotTreatServicePhraseAsCustomerName(t *testing.T) {
 	if session.CustomerName != "" {
 		t.Fatalf("customer name = %q, want empty for service phrase", session.CustomerName)
 	}
+	if session.ServiceID != "service_gel" {
+		t.Fatalf("service id = %s, want unchanged service_gel before service-change confirmation", session.ServiceID)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("service phrase in name slot should wait for service confirmation, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "I have Gel Manicure") || !strings.Contains(store.lastTurn.AIMessage, "switch to Shell Manicure") {
+		t.Fatalf("AI should confirm service change before returning to name collection: %s", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Yes.",
+	})
+	if err != nil {
+		t.Fatalf("service change confirmation returned error: %v", err)
+	}
+	if session.CustomerName != "" {
+		t.Fatalf("customer name = %q, want empty after service confirmation", session.CustomerName)
+	}
 	if session.ServiceID != "service_shell" {
-		t.Fatalf("service id = %s, want service correction to service_shell", session.ServiceID)
+		t.Fatalf("service id = %s, want service correction to service_shell after confirmation", session.ServiceID)
 	}
 	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 1 {
-		t.Fatalf("service phrase in name slot should recheck availability without booking, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+		t.Fatalf("confirmed service phrase should recheck availability without booking, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
 	}
 	if !strings.Contains(store.lastTurn.AIMessage, "Shell Manicure") || !strings.Contains(store.lastTurn.AIMessage, "What name") {
-		t.Fatalf("AI should confirm corrected service and return to name collection: %s", store.lastTurn.AIMessage)
+		t.Fatalf("AI should return to name collection after confirmed service change: %s", store.lastTurn.AIMessage)
 	}
 }
 
@@ -3382,18 +3401,37 @@ func TestMessageDoesNotTreatServiceAliasAsCustomerName(t *testing.T) {
 	if session.CustomerName != "" {
 		t.Fatalf("customer name = %q, want empty for service alias phrase", session.CustomerName)
 	}
+	if session.ServiceID != "service_gel" {
+		t.Fatalf("service id = %s, want unchanged service_gel before service-change confirmation", session.ServiceID)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("service alias in name slot should wait for service confirmation, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "I have Gel Manicure") || !strings.Contains(store.lastTurn.AIMessage, "switch to Shellac Gel Manicure") {
+		t.Fatalf("AI should confirm alias service change before returning to name collection: %s", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Yes, switch.",
+	})
+	if err != nil {
+		t.Fatalf("alias service change confirmation returned error: %v", err)
+	}
+	if session.CustomerName != "" {
+		t.Fatalf("customer name = %q, want empty after alias service confirmation", session.CustomerName)
+	}
 	if session.ServiceID != "service_shell" {
-		t.Fatalf("service id = %s, want service correction to service_shell", session.ServiceID)
+		t.Fatalf("service id = %s, want service correction to service_shell after confirmation", session.ServiceID)
 	}
 	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 1 {
-		t.Fatalf("service alias in name slot should recheck availability without booking, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+		t.Fatalf("confirmed service alias should recheck availability without booking, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
 	}
 	if !strings.Contains(store.lastTurn.AIMessage, "Shellac Gel Manicure") || !strings.Contains(store.lastTurn.AIMessage, "What name") {
-		t.Fatalf("AI should confirm corrected alias service and return to name collection: %s", store.lastTurn.AIMessage)
+		t.Fatalf("AI should return to name collection after confirmed alias service change: %s", store.lastTurn.AIMessage)
 	}
 }
 
-func TestMessageChangesServiceAndRefreshesOfferedSlotsBeforeBooking(t *testing.T) {
+func TestMessageConfirmsServiceChangeBeforeRefreshingOfferedSlots(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = append(store.services, ServiceOption{
 		ID:              "service_gel",
@@ -3423,6 +3461,28 @@ func TestMessageChangesServiceAndRefreshesOfferedSlotsBeforeBooking(t *testing.T
 	})
 	if err != nil {
 		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("service change request should not call tools before confirmation, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if session.ServiceID != "service_1" {
+		t.Fatalf("session service = %s, want unchanged Classic Manicure before confirmation", session.ServiceID)
+	}
+	if got := session.BookingSegments; len(got) != 1 || got[0].ServiceID != "service_1" {
+		t.Fatalf("session booking segments = %#v, want unchanged Classic Manicure before confirmation", got)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "I have Classic Manicure") || !strings.Contains(store.lastTurn.AIMessage, "switch to Gel Manicure") {
+		t.Fatalf("AI should ask before switching service: %s", store.lastTurn.AIMessage)
+	}
+	if store.lastTurn.AIMetadata["pending_service_edit_mode"] != pendingServiceEditModeReplaceConfirmation {
+		t.Fatalf("pending service edit mode = %#v, want replace confirmation", store.lastTurn.AIMetadata["pending_service_edit_mode"])
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Yes, switch it.",
+	})
+	if err != nil {
+		t.Fatalf("confirmation Message returned error: %v", err)
 	}
 	if bookingTool.availabilityCalls != 1 {
 		t.Fatalf("availability calls = %d, want 1 for corrected service", bookingTool.availabilityCalls)
@@ -3488,6 +3548,22 @@ func TestMessageBooksCorrectedServiceForExistingExactTime(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("corrected exact time should wait for service confirmation, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if session.ServiceID != "service_1" || session.Outcome == OutcomeBookingConfirmed {
+		t.Fatalf("session after service change request = %#v, want unchanged and unconfirmed before confirmation", session)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "I have Classic Manicure") || !strings.Contains(store.lastTurn.AIMessage, "switch to Gel Manicure") {
+		t.Fatalf("AI should ask before changing exact-time booking service: %s", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Yes.",
+	})
+	if err != nil {
+		t.Fatalf("service change confirmation returned error: %v", err)
 	}
 	if bookingTool.availabilityCalls != 1 {
 		t.Fatalf("availability calls = %d, want 1 for corrected exact time", bookingTool.availabilityCalls)
@@ -3737,6 +3813,22 @@ func TestMessageBareServiceSwitchAfterRejectedSlotRefreshesAvailabilityWithPrefe
 	})
 	if err != nil {
 		t.Fatalf("Message returned error for service switch: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("bare service switch should wait for confirmation, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if session.ServiceID != "service_1" || len(session.BookingSegments) != 1 || session.BookingSegments[0].ServiceID != "service_1" {
+		t.Fatalf("service state before switch confirmation = %s segments %#v, want Classic Manicure", session.ServiceID, session.BookingSegments)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "I have Classic Manicure") || !strings.Contains(store.lastTurn.AIMessage, "switch to Gel Removal") {
+		t.Fatalf("service switch should ask for confirmation: %s", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Yes, switch.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error for service switch confirmation: %v", err)
 	}
 	if bookingTool.availabilityCalls != 1 {
 		t.Fatalf("availability calls = %d, want 1 for bare service switch", bookingTool.availabilityCalls)
@@ -4053,7 +4145,7 @@ func TestMessageClarifiesBareServiceAfterExistingServiceWithoutScheduleContext(t
 	}
 }
 
-func TestMessageAcknowledgesBareServiceSwitchAfterSlotOffer(t *testing.T) {
+func TestMessageRequiresConfirmationForBareServiceSwitchAfterSlotOffer(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = append(store.services, ServiceOption{
 		ID:              "service_pedicure",
@@ -4084,8 +4176,27 @@ func TestMessageAcknowledgesBareServiceSwitchAfterSlotOffer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Message returned error: %v", err)
 	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("bare service switch should not check availability before confirmation, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if session.ServiceID != "service_1" {
+		t.Fatalf("service = %s, want unchanged Classic Manicure before confirmation", session.ServiceID)
+	}
+	if got := session.BookingSegments; len(got) != 1 || got[0].ServiceID != "service_1" {
+		t.Fatalf("booking segments = %#v, want unchanged Classic Manicure before confirmation", got)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "I have Classic Manicure") || !strings.Contains(store.lastTurn.AIMessage, "switch to Classic Pedicure") {
+		t.Fatalf("switch reply should ask for service confirmation: %s", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Yes.",
+	})
+	if err != nil {
+		t.Fatalf("confirmation Message returned error: %v", err)
+	}
 	if bookingTool.availabilityCalls != 1 || bookingTool.calls != 0 {
-		t.Fatalf("switch should recheck availability only, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+		t.Fatalf("confirmed switch should recheck availability only, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
 	}
 	if session.ServiceID != "service_pedicure" {
 		t.Fatalf("service = %s, want Classic Pedicure", session.ServiceID)
@@ -4095,6 +4206,58 @@ func TestMessageAcknowledgesBareServiceSwitchAfterSlotOffer(t *testing.T) {
 	}
 	if !strings.Contains(store.lastTurn.AIMessage, "Switching to Classic Pedicure.") || !strings.Contains(store.lastTurn.AIMessage, "For your Classic Pedicure") {
 		t.Fatalf("switch reply should acknowledge service change and offer slots: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageKeepsCurrentServiceWhenSlotChosenInsteadOfSwitchConfirmation(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = append(store.services, ServiceOption{
+		ID:              "service_pedicure",
+		Name:            "Classic Pedicure",
+		DurationMinutes: 45,
+		PriceFrom:       40,
+	})
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.RequestedDate = "2026-07-02"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{
+		ServiceID:          "service_1",
+		StaffSelectionMode: booking.StaffSelectionAnyone,
+	}}
+	store.session.OfferedSlots = offeredPMSlots()
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Classic Pedicure.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.ServiceID != "service_1" || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("service change request state = %s availability=%d, want unchanged without availability", session.ServiceID, bookingTool.availabilityCalls)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "1 PM.",
+	})
+	if err != nil {
+		t.Fatalf("slot selection returned error: %v", err)
+	}
+	if session.ServiceID != "service_1" {
+		t.Fatalf("service = %s, want original Classic Manicure after non-confirming slot selection", session.ServiceID)
+	}
+	if session.RequestedStartTime == nil || !session.RequestedStartTime.Equal(time.Date(2026, 7, 2, 18, 0, 0, 0, time.UTC)) {
+		t.Fatalf("requested start = %#v, want original offered 1 PM slot", session.RequestedStartTime)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("non-confirming slot selection should not recheck or book yet, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "What name") {
+		t.Fatalf("AI should continue the original booking flow: %s", store.lastTurn.AIMessage)
 	}
 }
 
@@ -4177,6 +4340,7 @@ func TestMessageCompletesLatestTranscriptAfterServiceInquiryAndSwitch(t *testing
 		"I want to book the service Classic Manicure.",
 		"Next Monday.",
 		"classic pedicure.",
+		"Yes, switch.",
 		"1:30 PM.",
 		"Classic Pedicure.",
 		"Kevin.",

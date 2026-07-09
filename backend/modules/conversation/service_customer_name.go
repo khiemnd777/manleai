@@ -297,7 +297,7 @@ func setPendingServiceCandidateMetadata(turn *TurnRecord, result serviceUndersta
 	})
 }
 
-func setPendingServiceEditMetadata(turn *TurnRecord, candidates []ServiceOption) {
+func setPendingServiceEditMetadata(turn *TurnRecord, candidates []ServiceOption, mode string) {
 	if turn == nil || len(candidates) == 0 {
 		return
 	}
@@ -311,30 +311,38 @@ func setPendingServiceEditMetadata(turn *TurnRecord, candidates []ServiceOption)
 			names = append(names, name)
 		}
 	}
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		mode = pendingServiceEditModeAddOrSwitch
+	}
 	turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{
 		"pending_service_edit_candidate_ids": ids,
 		"pending_service_edit_candidates":    names,
-		"pending_service_edit_mode":          "add_or_switch",
+		"pending_service_edit_mode":          mode,
 	})
 }
 
-func pendingServiceEdit(session Session, services []ServiceOption) ([]ServiceOption, bool) {
+func pendingServiceEdit(session Session, services []ServiceOption) ([]ServiceOption, string, bool) {
 	for i := len(session.Transcript) - 1; i >= 0; i-- {
 		msg := session.Transcript[i]
 		if msg.Speaker != SpeakerAI {
 			continue
 		}
 		if metadataBool(msg.Metadata, "pending_service_edit_cleared") {
-			return nil, false
+			return nil, "", false
 		}
 		ids := metadataStringSlice(msg.Metadata, "pending_service_edit_candidate_ids")
 		if len(ids) == 0 {
 			continue
 		}
 		items := servicesByIDs(services, ids)
-		return items, len(items) > 0
+		mode := strings.TrimSpace(metadataString(msg.Metadata, "pending_service_edit_mode"))
+		if mode == "" {
+			mode = pendingServiceEditModeAddOrSwitch
+		}
+		return items, mode, len(items) > 0
 	}
-	return nil, false
+	return nil, "", false
 }
 
 func servicesByIDs(services []ServiceOption, ids []string) []ServiceOption {
@@ -371,6 +379,22 @@ func isPendingServiceReplaceDecision(message string) bool {
 	default:
 		return strings.Contains(normalized, "only") ||
 			strings.Contains(normalized, "instead")
+	}
+}
+
+func isPendingServiceKeepDecision(message string) bool {
+	normalized := normalizeLooseText(message)
+	switch normalized {
+	case "no", "nope", "nah", "do not switch", "dont switch", "don't switch", "do not change", "dont change", "don't change", "keep it", "keep that", "keep current", "keep the current service", "keep original", "keep the original", "same service":
+		return true
+	default:
+		return strings.Contains(normalized, "keep ") ||
+			strings.Contains(normalized, "do not switch") ||
+			strings.Contains(normalized, "dont switch") ||
+			strings.Contains(normalized, "don't switch") ||
+			strings.Contains(normalized, "do not change") ||
+			strings.Contains(normalized, "dont change") ||
+			strings.Contains(normalized, "don't change")
 	}
 }
 

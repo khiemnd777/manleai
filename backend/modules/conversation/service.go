@@ -121,7 +121,12 @@ const (
 	serviceEditReplace          serviceEditAction = "replace_service"
 	serviceEditDuplicate        serviceEditAction = "duplicate_service"
 	serviceEditClarifyAddSwitch serviceEditAction = "clarify_add_or_switch"
+	serviceEditConfirmReplace   serviceEditAction = "confirm_replace_service"
+	serviceEditKeepCurrent      serviceEditAction = "keep_current_service"
 	serviceEditClearAmbiguous   serviceEditAction = "clear_ambiguous_service"
+
+	pendingServiceEditModeAddOrSwitch         = "add_or_switch"
+	pendingServiceEditModeReplaceConfirmation = "replace_confirmation"
 )
 
 type serviceEditDecision struct {
@@ -280,7 +285,9 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	}
 
 	staffChange := detectStaffChangeRequest(message, *session, services, serviceAliases, categoryAliases, staff, activeStaff)
-	if !staffChange.Intent && bookingActionForSession(*session) != BookingActionCancel {
+	_, pendingServiceEditMode, pendingServiceEditOK := pendingServiceEdit(*session, services)
+	pendingServiceReplaceConfirmation := pendingServiceEditOK && pendingServiceEditMode == pendingServiceEditModeReplaceConfirmation
+	if !pendingServiceReplaceConfirmation && !staffChange.Intent && bookingActionForSession(*session) != BookingActionCancel {
 		if reply, handoff := customerNameSlotRepairReply(message, *session, services, serviceAliases, categoryAliases, cfg); reply != "" {
 			turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
 			if handoff {
@@ -480,9 +487,16 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonAIBookingDisabled, "AI booking is not enabled yet. I can take the request for the owner, but this is not a confirmed appointment.", services, staff, cfg)
 	}
 
+	if serviceEdit.Action == serviceEditConfirmReplace && !partyPlanApplied {
+		turn.AIMessage = serviceChangeConfirmationPrompt(*session, serviceEdit.Candidates, services, cfg)
+		setPendingServiceEditMetadata(&turn, serviceEdit.Candidates, pendingServiceEditModeReplaceConfirmation)
+		finalizeTurnMetadata(&turn, *session, next, "service", "service", "service_change_confirmation")
+		return s.store.SaveTurn(ctx, turn)
+	}
+
 	if serviceEdit.Action == serviceEditClarifyAddSwitch && !partyPlanApplied {
 		turn.AIMessage = serviceEditClarificationPrompt(*session, serviceEdit.Candidates, services)
-		setPendingServiceEditMetadata(&turn, serviceEdit.Candidates)
+		setPendingServiceEditMetadata(&turn, serviceEdit.Candidates, pendingServiceEditModeAddOrSwitch)
 		finalizeTurnMetadata(&turn, *session, next, "service", "service", "service_edit_clarification")
 		return s.store.SaveTurn(ctx, turn)
 	}
@@ -518,6 +532,11 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		if missing == "requested_time" || missing == "requested_start_time" {
 			if len(next.OfferedSlots) > 0 {
 				turn.AIMessage = formatSlotOfferForSession(next.OfferedSlots, loc, false, next, services)
+				if serviceEdit.Action == serviceEditKeepCurrent {
+					if prefix := serviceKeepCurrentAcknowledgement(next, services); prefix != "" {
+						turn.AIMessage = prefix + " " + turn.AIMessage
+					}
+				}
 				s.applyReplyGenerator(ctx, &turn, next, services, cfg, missing, missing, knowledge)
 				finalizeTurnMetadata(&turn, *session, next, missing, missing, "availability_offer_repeated")
 				return s.store.SaveTurn(ctx, turn)
@@ -559,6 +578,11 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		}
 		if exactRequestedTimeSelected {
 			turn.AIMessage = selectedRequestedTimeReply(next, services, staff, cfg, missing)
+		}
+		if serviceEdit.Action == serviceEditKeepCurrent {
+			if prefix := serviceKeepCurrentAcknowledgement(next, services); prefix != "" {
+				turn.AIMessage = prefix + " " + turn.AIMessage
+			}
 		}
 		s.applyReplyGenerator(ctx, &turn, next, services, cfg, missing, missing, knowledge)
 		finalizeTurnMetadata(&turn, *session, next, missing, missing, "missing_field")

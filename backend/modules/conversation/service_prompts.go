@@ -248,6 +248,31 @@ func serviceEditClarificationPrompt(session Session, candidates []ServiceOption,
 	return "Do you want to add " + requested + " to " + current + ", or switch to one of those services only?"
 }
 
+func serviceChangeConfirmationPrompt(session Session, candidates []ServiceOption, services []ServiceOption, cfg *RuntimeConfig) string {
+	options := serviceCandidateNames(candidates, 3)
+	requested := joinHumanList(options)
+	if requested == "" {
+		requested = "that service"
+	}
+	current := strings.TrimSpace(serviceSummary(session, services))
+	if current == "" {
+		return "Do you want to switch to " + requested + "?"
+	}
+	context := strings.TrimSpace(appointmentContextPhrase(session, cfg))
+	if context != "" {
+		return "I have " + current + " for " + context + ". Do you want to switch to " + requested + "?"
+	}
+	return "I have " + current + ". Do you want to switch to " + requested + "?"
+}
+
+func serviceKeepCurrentAcknowledgement(session Session, services []ServiceOption) string {
+	current := strings.TrimSpace(serviceSummary(session, services))
+	if current == "" {
+		return ""
+	}
+	return "Okay, keeping " + current + "."
+}
+
 func serviceUnderstandingForClarification(session Session, services []ServiceOption, result serviceUnderstandingResult) serviceUnderstandingResult {
 	if result.Status == serviceUnderstandingStatusAmbiguous && len(result.Candidates) > 0 {
 		return result

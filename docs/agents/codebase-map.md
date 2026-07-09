@@ -135,6 +135,9 @@ name collection, availability replies, party bookings, or transcript output.
   `backend/modules/conversation/service_extraction.go`,
   `backend/modules/conversation/service_matching_parsing.go`,
   `backend/modules/conversation/service_understanding.go`.
+  Existing-service change confirmation and pending service-edit metadata also
+  live in this cluster; caller service changes must confirm before replacing a
+  selected booking service or refreshing availability.
 - Caller name, phone, email, and name-slot repair:
   `backend/modules/conversation/service_customer_name.go`.
 - Party/group booking detection and planning:
@@ -363,7 +366,7 @@ dashboard sidebar. Local runtime port is `3091`; production domain is
 | availability, open slots, offered slots, no common time, split, staggered, staff assignment | `backend/modules/booking`, `backend/modules/conversation/service_availability.go` | POS provider adapter, `appointments-dashboard.tsx`, `pos-calendar/features/calendar/pos-calendar-client.tsx`, conversation tests |
 | Square OAuth, token expired, refresh token, location, sync, catalog import, calendar sync | `pos-adapter-slice`, `backend/modules/pos_square` | `backend/modules/pos`, `integration_config`, integrations UI, POS calendar UI |
 | POS mapping, provider link, active provider, AI bookable, local only, sync failed | `backend/modules/pos`, `docs/canonical-pos-ownership-checklist.md` | Services/Staff UI, `pos_entity_links`, sync tests |
-| service alias, category alias, service understanding, caller said "mani", wrong service | `voice-ai-runtime`, conversation service understanding files | `backend/modules/training`, services UI, transcript metadata tests |
+| service alias, category alias, service understanding, caller said "mani", wrong service, change service, switch service | `voice-ai-runtime`, conversation service understanding files | `backend/modules/training`, services UI, transcript metadata tests |
 | AI training, owner correction, knowledge, FAQ answer, stale policy | `backend/modules/training`, answer router/context | training UI, knowledge tests |
 | party booking, group booking, two people, split booking, party request | conversation party files | booking service, Calls UI party request panel |
 | name captured wrong, service instead of name, spelling, phone/email | `service_customer_name.go` | conversation golden tests, transcript metadata |

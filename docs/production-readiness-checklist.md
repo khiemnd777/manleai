@@ -107,7 +107,7 @@
 - [x] Prevent one normalized phrase from being both an active service alias and an active category alias.
 - [x] Feed active service aliases into simulator and phone conversation runtime.
 - [x] Feed active service categories and category aliases into simulator and phone conversation runtime.
-- [x] Re-check availability when a caller corrects the service after a time or slot was already collected.
+- [x] Re-check availability when a caller confirms a service correction after a time or slot was already collected.
 - [x] Record service-understanding status, reason, confidence, candidates, selected service, alias source, alias ID, category ID, and category name in transcript metadata.
 
 ## Production Answer Routing
