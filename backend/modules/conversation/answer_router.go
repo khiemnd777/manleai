@@ -24,15 +24,24 @@ type answerRoute struct {
 	SourceRecordIDs []string
 }
 
-func routeServiceInquiryAnswer(session Session, result serviceUnderstandingResult, answerCtx *AIAnswerContext) answerRoute {
+func routeServiceInquiryAnswer(message string, session Session, result serviceUnderstandingResult, answerCtx *AIAnswerContext) answerRoute {
 	services := answerServices(answerCtx)
+	kind := classifyServiceCatalogQuestion(message, result)
+	reason := result.Reason
+	intent := "service_inquiry"
+	confidence := result.Confidence
+	if kind == serviceCatalogQuestionCount {
+		reason = "service_catalog_count"
+		intent = "service_catalog_count"
+		confidence = maxFloat(confidence, 0.9)
+	}
 	route := answerRoute{
 		Handled:         true,
-		Reply:           serviceInquiryReply(session, result, services),
+		Reply:           serviceInquiryReply(message, session, result, services),
 		Source:          answerSourceServiceCatalog,
-		Reason:          result.Reason,
-		Intent:          "service_inquiry",
-		Confidence:      result.Confidence,
+		Reason:          reason,
+		Intent:          intent,
+		Confidence:      confidence,
 		SourceRecordIDs: answerServiceIDs(result.Candidates),
 	}
 	if len(route.SourceRecordIDs) == 0 {
@@ -47,6 +56,16 @@ func routeNonBookingAnswer(message string, session Session, answerCtx *AIAnswerC
 	activeStaff := answerActiveStaff(answerCtx)
 	knowledge := answerKnowledge(answerCtx)
 	hours := answerBusinessHours(answerCtx)
+
+	if classifyServiceCatalogQuestion(message, serviceUnderstandingResult{Status: serviceUnderstandingStatusUnknown}) == serviceCatalogQuestionCount {
+		return routeServiceInquiryAnswer(message, session, serviceUnderstandingResult{
+			Status:       serviceUnderstandingStatusAmbiguous,
+			Reason:       "service_catalog_count",
+			Confidence:   0.96,
+			Candidates:   services,
+			MatchedToken: "service",
+		}, answerCtx)
+	}
 
 	if asksServiceMenu(message) {
 		names := serviceCandidateNames(services, 8)

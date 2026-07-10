@@ -405,6 +405,199 @@ func TestMessageAnswersServiceMenuWithBookableServices(t *testing.T) {
 	}
 }
 
+func TestMessageAnswersServiceCountDuringPendingClarificationAndResumesBooking(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = testManicureCatalog()
+	bookingTool := &fakeBookingTool{}
+	replyGenerator := &fakeReplyGenerator{message: "Which service would you like?"}
+	service := NewService(store, bookingTool)
+	service.SetReplyGenerator(replyGenerator)
+	service.now = fixedNow
+
+	steps := []string{
+		"I want to book an appointment.",
+		"Manicure.",
+	}
+	var session *Session
+	var err error
+	for _, message := range steps {
+		session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+			Message: message,
+		})
+		if err != nil {
+			t.Fatalf("Message %q returned error: %v", message, err)
+		}
+	}
+	replyGeneratorCallsBeforeCount := replyGenerator.calls
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "How many manicure do you have?",
+	})
+	if err != nil {
+		t.Fatalf("service count Message returned error: %v", err)
+	}
+
+	if session.Intent != IntentBooking || session.ServiceID != "" || len(session.BookingSegments) != 0 {
+		t.Fatalf("booking state = intent %s service %q segments %#v, want unresolved booking service", session.Intent, session.ServiceID, session.BookingSegments)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("service count question should not call booking tools, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	if replyGenerator.calls != replyGeneratorCallsBeforeCount {
+		t.Fatalf("service count facts should stay deterministic, reply generator calls before=%d after=%d", replyGeneratorCallsBeforeCount, replyGenerator.calls)
+	}
+	for _, want := range []string{
+		"I can help book three manicure options",
+		"Classic Manicure",
+		"Dip Powder Manicure",
+		"Gel Manicure",
+		"Which one would you like?",
+	} {
+		if !strings.Contains(store.lastTurn.AIMessage, want) {
+			t.Fatalf("service count reply missing %q: %s", want, store.lastTurn.AIMessage)
+		}
+	}
+	if got := metadataStringSlice(store.lastTurn.AIMetadata, "source_record_ids"); !sameStrings(got, []string{"service_classic", "service_dip", "service_gel"}) {
+		t.Fatalf("service count source ids = %#v", got)
+	}
+	if store.lastTurn.AIMetadata["answer_source_reason"] != "service_catalog_count" ||
+		store.lastTurn.AIMetadata["router_intent"] != "service_catalog_count" {
+		t.Fatalf("service count routing metadata = %#v", store.lastTurn.AIMetadata)
+	}
+	if pending := pendingServiceCandidateServices(*session, store.services); len(pending) != 3 {
+		t.Fatalf("pending service candidates = %#v, want three retained candidates", pending)
+	}
+
+	service.SetReplyGenerator(nil)
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Gel.",
+	})
+	if err != nil {
+		t.Fatalf("service selection Message returned error: %v", err)
+	}
+	if session.ServiceID != "service_gel" || session.ServiceName != "Gel Manicure" {
+		t.Fatalf("selected service = %s/%s, want Gel Manicure", session.ServiceID, session.ServiceName)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "What day") {
+		t.Fatalf("service selection should continue booking after count answer: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageAnswersDifferentCategoryCountThenResumesPendingService(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_classic_mani", Name: "Classic Manicure", CategoryID: "cat_mani", CategoryName: "Manicure", CategorySlug: "manicure"},
+		{ID: "service_gel_mani", Name: "Gel Manicure", CategoryID: "cat_mani", CategoryName: "Manicure", CategorySlug: "manicure"},
+		{ID: "service_classic_pedi", Name: "Classic Pedicure", CategoryID: "cat_pedi", CategoryName: "Pedicure", CategorySlug: "pedicure"},
+		{ID: "service_spa_pedi", Name: "Spa Pedicure", CategoryID: "cat_pedi", CategoryName: "Pedicure", CategorySlug: "pedicure"},
+	}
+	store.session.Intent = IntentBooking
+	store.session.Transcript = []TranscriptMessage{{
+		Speaker: SpeakerAI,
+		Body:    "Which manicure service would you like: Classic Manicure or Gel Manicure?",
+		Metadata: map[string]any{
+			"pending_service_candidate_ids": []string{"service_classic_mani", "service_gel_mani"},
+			"pending_service_token":         "manicure",
+		},
+	}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Could you tell me how many pedicure options are there?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.ServiceID != "" || bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("informational detour changed booking state or called tools: session=%#v booking=%d availability=%d", session, bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	for _, want := range []string{
+		"I can help book two pedicure options",
+		"Classic Pedicure",
+		"Spa Pedicure",
+		"For your appointment, which manicure service would you like?",
+	} {
+		if !strings.Contains(store.lastTurn.AIMessage, want) {
+			t.Fatalf("different-category count reply missing %q: %s", want, store.lastTurn.AIMessage)
+		}
+	}
+	if pending := pendingServiceCandidateServices(*session, store.services); !sameStrings(serviceIDs(pending), []string{"service_classic_mani", "service_gel_mani"}) {
+		t.Fatalf("pending manicure candidates = %#v", pending)
+	}
+}
+
+func TestMessageAnswersWholeCatalogCountWithoutStartingBooking(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_1", Name: "Classic Manicure"},
+		{ID: "service_2", Name: "Gel Manicure"},
+		{ID: "service_3", Name: "Classic Pedicure"},
+		{ID: "service_4", Name: "Spa Pedicure"},
+		{ID: "service_5", Name: "Acrylic Full Set"},
+		{ID: "service_6", Name: "Gel Removal"},
+		{ID: "service_7", Name: "Nail Art"},
+	}
+	bookingTool := &fakeBookingTool{}
+	replyGenerator := &fakeReplyGenerator{message: "Which service would you like?"}
+	service := NewService(store, bookingTool)
+	service.SetReplyGenerator(replyGenerator)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "How many services do you offer?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.Intent != IntentUnknown || session.ServiceID != "" || len(session.BookingSegments) != 0 {
+		t.Fatalf("catalog count should stay informational: session=%#v", session)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("whole-catalog count should not call booking tools, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	if replyGenerator.calls != 0 {
+		t.Fatalf("whole-catalog count facts should stay deterministic, reply generator calls=%d", replyGenerator.calls)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "I can help book seven service options, including") ||
+		!strings.Contains(store.lastTurn.AIMessage, "Would you like to book one of those?") {
+		t.Fatalf("whole-catalog count reply = %s", store.lastTurn.AIMessage)
+	}
+	if got := metadataStringSlice(store.lastTurn.AIMetadata, "source_record_ids"); len(got) != 7 {
+		t.Fatalf("whole-catalog source ids = %#v, want all seven counted services", got)
+	}
+}
+
+func TestMessageDoesNotTreatPartyOrCapacityQuestionsAsServiceCatalogCounts(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{name: "party quantity", message: "I need two manicures for two people."},
+		{name: "appointment capacity", message: "How many manicure appointments are available tomorrow at 2 PM?"},
+		{name: "simultaneous capacity", message: "How many manicures can you do at once?"},
+		{name: "unrelated business count", message: "How many employees do you have?"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeConversationStore()
+			store.services = testManicureCatalog()
+			bookingTool := &fakeBookingTool{}
+			service := NewService(store, bookingTool)
+			service.now = fixedNow
+
+			_, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: tt.message})
+			if err != nil {
+				t.Fatalf("Message returned error: %v", err)
+			}
+			if store.lastTurn.AIMetadata["router_intent"] == "service_catalog_count" ||
+				strings.Contains(store.lastTurn.AIMessage, "I can help book") {
+				t.Fatalf("question was incorrectly routed as a service catalog count: metadata=%#v reply=%s", store.lastTurn.AIMetadata, store.lastTurn.AIMessage)
+			}
+		})
+	}
+}
+
 func TestMessageAnswersExactServiceInquiryWithoutSelectingBookingService(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = append(store.services, ServiceOption{ID: "service_removal", Name: "Gel Removal", DurationMinutes: 30})
@@ -4889,6 +5082,26 @@ func TestMessageKeepsPartyPlanNaturalAcrossMenuRejectionAndGroupQuestions(t *tes
 	}
 	if session.PartyPlan == nil || partyPlanComplete(session.PartyPlan) {
 		t.Fatalf("party plan = %#v, want still incomplete after informational menu question", session.PartyPlan)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "how many pedicure options do you offer?",
+	})
+	if err != nil {
+		t.Fatalf("pedicure count Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("pedicure count question should not run booking tools, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	reply = strings.ToLower(store.lastTurn.AIMessage)
+	if !strings.Contains(reply, "i can help book two pedicure options") ||
+		!strings.Contains(reply, "classic pedicure") ||
+		!strings.Contains(reply, "spa pedicure") ||
+		!strings.Contains(reply, "for the two people getting manicures") {
+		t.Fatalf("party count reply should answer the requested group count, then return to the unresolved group: %s", store.lastTurn.AIMessage)
+	}
+	if session.PartyPlan == nil || partyPlanComplete(session.PartyPlan) {
+		t.Fatalf("party plan = %#v, want still incomplete after service count question", session.PartyPlan)
 	}
 
 	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{

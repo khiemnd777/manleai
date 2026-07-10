@@ -355,6 +355,9 @@ func partyPlanServiceMenuReply(message string, session Session, services []Servi
 		label = "service"
 	}
 	reply := "For " + pluralServicePhrase(label) + ", we offer " + joinHumanList(options) + ". "
+	if asksServiceCatalogCount(message) {
+		reply = serviceCatalogCountStatement(label, candidates, 6) + " "
+	}
 	if menuGroupIndex == activeGroupIndex {
 		reply += partyPlanMenuFollowUpPrompt(group)
 	} else {
@@ -380,7 +383,7 @@ func partyPlanMenuGroupIndex(message string, plan *PartyPlan, services []Service
 			return i, true
 		}
 	}
-	if asksServiceMenu(message) {
+	if asksServiceMenu(message) || asksServiceCatalogCount(message) {
 		if groupIndex := firstUnresolvedPartyPlanGroup(plan); groupIndex >= 0 {
 			return groupIndex, true
 		}
@@ -389,7 +392,7 @@ func partyPlanMenuGroupIndex(message string, plan *PartyPlan, services []Service
 }
 
 func isPartyPlanServiceMenuQuestion(message string) bool {
-	if asksServiceMenu(message) {
+	if asksServiceMenu(message) || asksServiceCatalogCount(message) {
 		return true
 	}
 	normalized := normalizeLooseText(message)

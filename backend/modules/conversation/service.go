@@ -317,6 +317,9 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	loc := timezoneLocation(cfg.Timezone)
 	pendingNameCandidate := voiceCustomerNamePendingConfirmationCandidate(message, *session)
 	serviceUnderstanding := interpretServiceForSession(message, *session, services, serviceAliases, categoryAliases)
+	if catalogUnderstanding := interpretServiceWithCategoryAliases(message, services, serviceAliases, categoryAliases); isServiceInquiry(message, catalogUnderstanding) {
+		serviceUnderstanding = catalogUnderstanding
+	}
 	partySignal := detectPartySignal(message, *session, serviceUnderstanding, services, serviceAliases, categoryAliases)
 	if shouldClarifyCancelReschedule(*session, message) {
 		next.Intent = IntentBooking
@@ -340,13 +343,15 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 			return s.store.SaveTurn(ctx, turn)
 		}
 	}
-	if asksServiceMenu(message) && serviceUnderstanding.Status == serviceUnderstandingStatusUnknown {
+	if (asksServiceMenu(message) || classifyServiceCatalogQuestion(message, serviceUnderstanding) == serviceCatalogQuestionCount) && serviceUnderstanding.Status == serviceUnderstandingStatusUnknown {
 		route := routeNonBookingAnswer(message, *session, answerCtx, cfg, s.now)
 		if route.Handled && route.Source != answerSourceBookingRedirect {
 			turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
 			turn.AIMessage = route.Reply
 			applyAnswerRouteMetadata(&turn, route, answerCtx)
-			s.applyReplyGenerator(ctx, &turn, *session, services, cfg, "", "", knowledge)
+			if route.Intent != "service_catalog_count" {
+				s.applyReplyGenerator(ctx, &turn, *session, services, cfg, "", "", knowledge)
+			}
 			finalizeTurnMetadata(&turn, *session, *session, "", "", "answer_router")
 			return s.store.SaveTurn(ctx, turn)
 		}
@@ -355,7 +360,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
 		applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
 		applyServiceInquiryMetadata(&turn, serviceUnderstanding)
-		route := routeServiceInquiryAnswer(*session, serviceUnderstanding, answerCtx)
+		route := routeServiceInquiryAnswer(message, *session, serviceUnderstanding, answerCtx)
 		turn.AIMessage = route.Reply
 		applyAnswerRouteMetadata(&turn, route, answerCtx)
 		finalizeTurnMetadata(&turn, *session, *session, "", "", "service_inquiry")

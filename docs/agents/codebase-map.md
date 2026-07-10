@@ -144,7 +144,7 @@ name collection, availability replies, party bookings, or transcript output.
   `backend/modules/conversation/service_party.go`,
   `backend/modules/conversation/service_party_intent.go`,
   `backend/modules/conversation/service_party_signal.go`.
-- Spoken prompts and menu/service clarification:
+- Spoken prompts, menu/service clarification, and catalog count/list questions:
   `backend/modules/conversation/service_prompts.go`.
 - Answer-source routing and cached structured context:
   `backend/modules/conversation/answer_context.go`,
@@ -367,6 +367,7 @@ dashboard sidebar. Local runtime port is `3091`; production domain is
 | Square OAuth, token expired, refresh token, location, sync, catalog import, calendar sync | `pos-adapter-slice`, `backend/modules/pos_square` | `backend/modules/pos`, `integration_config`, integrations UI, POS calendar UI |
 | POS mapping, provider link, active provider, AI bookable, local only, sync failed | `backend/modules/pos`, `docs/canonical-pos-ownership-checklist.md` | Services/Staff UI, `pos_entity_links`, sync tests |
 | service alias, category alias, service understanding, caller said "mani", wrong service, change service, switch service | `voice-ai-runtime`, conversation service understanding files | `backend/modules/training`, services UI, transcript metadata tests |
+| service menu, how many services, service count, repeated clarification, informational service question | `backend/modules/conversation/service_prompts.go`, `backend/modules/conversation/answer_router.go` | `backend/modules/conversation/service.go`, party flow, conversation golden tests |
 | AI training, owner correction, knowledge, FAQ answer, stale policy | `backend/modules/training`, answer router/context | training UI, knowledge tests |
 | party booking, group booking, two people, split booking, party request | conversation party files | booking service, Calls UI party request panel |
 | name captured wrong, service instead of name, spelling, phone/email | `service_customer_name.go` | conversation golden tests, transcript metadata |
