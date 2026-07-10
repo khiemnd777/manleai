@@ -3778,64 +3778,285 @@ func TestMessageBooksCorrectedServiceForExistingExactTime(t *testing.T) {
 	}
 }
 
-func TestMessageClearsServiceForAmbiguousServiceCorrection(t *testing.T) {
+func TestMessageKeepsCurrentServiceWhileClarifyingAmbiguousReplacement(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = []ServiceOption{
 		{
-			ID:              "service_dip",
-			Name:            "Dip Powder Manicure",
-			DurationMinutes: 75,
-			PriceFrom:       55,
+			ID:           "service_gel",
+			Name:         "Gel Manicure",
+			CategoryID:   "cat_mani",
+			CategoryName: "Manicure",
 		},
 		{
-			ID:              "service_1",
-			Name:            "Classic Manicure",
-			DurationMinutes: 45,
-			PriceFrom:       35,
+			ID:           "service_classic_pedi",
+			Name:         "Classic Pedicure",
+			CategoryID:   "cat_pedi",
+			CategoryName: "Pedicure",
 		},
 		{
-			ID:              "service_gel",
-			Name:            "Gel Manicure",
-			DurationMinutes: 45,
-			PriceFrom:       38,
+			ID:           "service_spa_pedi",
+			Name:         "Spa Pedicure",
+			CategoryID:   "cat_pedi",
+			CategoryName: "Pedicure",
 		},
 	}
+	store.categoryAliases = []ServiceCategoryAlias{{
+		ID:              "alias_pedi",
+		CategoryID:      "cat_pedi",
+		CategoryName:    "Pedicure",
+		Alias:           "pedi",
+		NormalizedAlias: "pedi",
+		Source:          "system",
+		Confidence:      0.9,
+	}}
 	store.session.Intent = IntentBooking
-	store.session.ServiceID = "service_1"
-	store.session.ServiceName = "Classic Manicure"
+	store.session.ServiceID = "service_gel"
+	store.session.ServiceName = "Gel Manicure"
 	store.session.RequestedDate = "2026-07-02"
 	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
 	store.session.BookingSegments = []booking.BookingSegmentRequest{{
-		ServiceID:          "service_1",
+		ServiceID:          "service_gel",
 		StaffSelectionMode: booking.StaffSelectionAnyone,
 	}}
 	store.session.OfferedSlots = offeredPMSlots()
-	bookingTool := &fakeBookingTool{}
+	originalOfferedSlots := append([]OfferedSlot(nil), store.session.OfferedSlots...)
+	newSlotStart := time.Date(2026, 7, 2, 21, 0, 0, 0, time.UTC)
+	bookingTool := &fakeBookingTool{
+		availabilityResult: availabilityResultForStart("service_spa_pedi", "Spa Pedicure", newSlotStart),
+	}
 	service := NewService(store, bookingTool)
 	service.now = fixedNow
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
-		Message: "Actually child manicure.",
+		Message: "I want to change pedi.",
 	})
 	if err != nil {
 		t.Fatalf("Message returned error: %v", err)
 	}
 	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
-		t.Fatalf("ambiguous correction should not call tools, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+		t.Fatalf("ambiguous replacement should not call tools before target selection, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
 	}
-	if session.ServiceID != "" || len(session.BookingSegments) != 0 || len(session.OfferedSlots) != 0 {
-		t.Fatalf("session service/segments/slots = %q/%#v/%#v, want cleared service state", session.ServiceID, session.BookingSegments, session.OfferedSlots)
+	if session.ServiceID != "service_gel" || len(session.BookingSegments) != 1 || session.BookingSegments[0].ServiceID != "service_gel" {
+		t.Fatalf("session service state = %q/%#v, want Gel Manicure preserved", session.ServiceID, session.BookingSegments)
+	}
+	if len(session.OfferedSlots) != len(originalOfferedSlots) || !session.OfferedSlots[0].StartTime.Equal(originalOfferedSlots[0].StartTime) {
+		t.Fatalf("offered slots changed before replacement target selection: %#v", session.OfferedSlots)
 	}
 	reply := strings.ToLower(store.lastTurn.AIMessage)
-	if !strings.Contains(reply, "which manicure service") ||
-		strings.Contains(reply, "noted") ||
-		!strings.Contains(store.lastTurn.AIMessage, "Classic Manicure") ||
-		!strings.Contains(store.lastTurn.AIMessage, "Gel Manicure") ||
-		!strings.Contains(store.lastTurn.AIMessage, "Dip Powder Manicure") {
-		t.Fatalf("ambiguous service correction should ask for service clarification: %s", store.lastTurn.AIMessage)
+	if !strings.Contains(reply, "which pedicure would you like instead of gel manicure") ||
+		!strings.Contains(reply, "classic pedicure") ||
+		!strings.Contains(reply, "spa pedicure") {
+		t.Fatalf("ambiguous replacement should ask for one concrete pedicure: %s", store.lastTurn.AIMessage)
 	}
-	if strings.TrimSpace(session.RequestedDate) == "" {
-		t.Fatalf("requested date should stay in session even when not repeated in wording: %#v", session)
+	if store.lastTurn.AIMetadata["pending_service_edit_mode"] != pendingServiceEditModeReplaceSelection {
+		t.Fatalf("pending edit mode = %#v, want replace selection", store.lastTurn.AIMetadata["pending_service_edit_mode"])
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Spa Pedicure.",
+	})
+	if err != nil {
+		t.Fatalf("replacement target Message returned error: %v", err)
+	}
+	if session.ServiceID != "service_spa_pedi" || len(session.BookingSegments) != 1 || session.BookingSegments[0].ServiceID != "service_spa_pedi" {
+		t.Fatalf("session service state = %q/%#v, want Spa Pedicure only", session.ServiceID, session.BookingSegments)
+	}
+	if bookingTool.availabilityCalls != 1 || bookingTool.availabilityRequest.ServiceID != "service_spa_pedi" {
+		t.Fatalf("resolved replacement should recheck Spa Pedicure availability once: calls=%d request=%#v", bookingTool.availabilityCalls, bookingTool.availabilityRequest)
+	}
+	if len(session.OfferedSlots) != 1 || !session.OfferedSlots[0].StartTime.Equal(newSlotStart) {
+		t.Fatalf("offered slots = %#v, want refreshed Spa Pedicure slot", session.OfferedSlots)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Spa Pedicure") {
+		t.Fatalf("replacement should continue with Spa Pedicure availability: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageClarifiesAddOrSwitchBeforeApplyingAmbiguousServiceFamily(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_gel", Name: "Gel Manicure", CategoryID: "cat_mani", CategoryName: "Manicure"},
+		{ID: "service_classic_pedi", Name: "Classic Pedicure", CategoryID: "cat_pedi", CategoryName: "Pedicure"},
+		{ID: "service_spa_pedi", Name: "Spa Pedicure", CategoryID: "cat_pedi", CategoryName: "Pedicure"},
+	}
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_gel"
+	store.session.ServiceName = "Gel Manicure"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{ServiceID: "service_gel", StaffSelectionMode: booking.StaffSelectionAnyone}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Pedicure."})
+	if err != nil {
+		t.Fatalf("family Message returned error: %v", err)
+	}
+	if session.ServiceID != "service_gel" || len(session.BookingSegments) != 1 {
+		t.Fatalf("family mention changed service state before operation choice: %#v", session)
+	}
+	reply := strings.ToLower(store.lastTurn.AIMessage)
+	if !strings.Contains(reply, "switch to a pedicure") || !strings.Contains(reply, "add a pedicure") || !strings.Contains(reply, "gel manicure") {
+		t.Fatalf("AI should ask add versus switch for ambiguous family: %s", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Add it."})
+	if err != nil {
+		t.Fatalf("add operation Message returned error: %v", err)
+	}
+	if session.ServiceID != "service_gel" || len(session.BookingSegments) != 1 {
+		t.Fatalf("add operation changed service state before target choice: %#v", session)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Which pedicure would you like to add") {
+		t.Fatalf("AI should ask for one pedicure to add: %s", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Classic Pedicure."})
+	if err != nil {
+		t.Fatalf("add target Message returned error: %v", err)
+	}
+	if got := selectedServiceIDs(*session); !sameStrings(got, []string{"service_gel", "service_classic_pedi"}) {
+		t.Fatalf("selected services = %#v, want Gel Manicure plus Classic Pedicure", got)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("service edit before date should not call tools, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
+func TestMessageClarifiesAdditiveServiceFamilyBeforeAddingConcreteService(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_classic_mani", Name: "Classic Manicure"},
+		{ID: "service_dip_mani", Name: "Dip Powder Manicure"},
+		{ID: "service_gel_mani", Name: "Gel Manicure"},
+		{ID: "service_classic_pedi", Name: "Classic Pedicure"},
+		{ID: "service_spa_pedi", Name: "Spa Pedicure"},
+	}
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_spa_pedi"
+	store.session.ServiceName = "Spa Pedicure"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{ServiceID: "service_spa_pedi", StaffSelectionMode: booking.StaffSelectionAnyone}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Manicure as well."})
+	if err != nil {
+		t.Fatalf("family add Message returned error: %v", err)
+	}
+	if got := selectedServiceIDs(*session); !sameStrings(got, []string{"service_spa_pedi"}) {
+		t.Fatalf("selected services = %#v, want Spa Pedicure preserved until a concrete manicure is selected", got)
+	}
+	reply := strings.ToLower(store.lastTurn.AIMessage)
+	if !strings.Contains(reply, "which manicure would you like to add") ||
+		!strings.Contains(reply, "classic manicure") ||
+		!strings.Contains(reply, "dip powder manicure") ||
+		!strings.Contains(reply, "gel manicure") {
+		t.Fatalf("AI should clarify one concrete manicure before adding: %s", store.lastTurn.AIMessage)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("ambiguous family add should not call tools, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Classic, please."})
+	if err != nil {
+		t.Fatalf("short add target Message returned error: %v", err)
+	}
+	if got := selectedServiceIDs(*session); !sameStrings(got, []string{"service_spa_pedi", "service_classic_mani"}) {
+		t.Fatalf("selected services = %#v, want Spa Pedicure plus Classic Manicure", got)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("resolved add without date should not call tools, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+}
+
+func TestMessageGenericDifferentServiceCollectsOperationThenTarget(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_gel", Name: "Gel Manicure"},
+		{ID: "service_art", Name: "Nail Art"},
+	}
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_gel"
+	store.session.ServiceName = "Gel Manicure"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{ServiceID: "service_gel", StaffSelectionMode: booking.StaffSelectionAnyone}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "I want another service."})
+	if err != nil {
+		t.Fatalf("generic edit Message returned error: %v", err)
+	}
+	if session.ServiceID != "service_gel" || len(session.BookingSegments) != 1 {
+		t.Fatalf("generic edit changed service state: %#v", session)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "replace Gel Manicure") || !strings.Contains(store.lastTurn.AIMessage, "add another service") {
+		t.Fatalf("AI should ask operation before target: %s", store.lastTurn.AIMessage)
+	}
+
+	_, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Add it."})
+	if err != nil {
+		t.Fatalf("generic add operation Message returned error: %v", err)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Which service would you like to add") {
+		t.Fatalf("AI should ask which service to add: %s", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Nail Art."})
+	if err != nil {
+		t.Fatalf("generic add target Message returned error: %v", err)
+	}
+	if got := selectedServiceIDs(*session); !sameStrings(got, []string{"service_gel", "service_art"}) {
+		t.Fatalf("selected services = %#v, want Gel Manicure plus Nail Art", got)
+	}
+}
+
+func TestMessageMultiServiceSwitchAsksWhichCurrentServiceToReplace(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_gel", Name: "Gel Manicure"},
+		{ID: "service_art", Name: "Nail Art"},
+		{ID: "service_pedi", Name: "Classic Pedicure"},
+	}
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_gel"
+	store.session.ServiceName = "Gel Manicure"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{
+		{ServiceID: "service_gel", StaffSelectionMode: booking.StaffSelectionAnyone},
+		{ServiceID: "service_art", StaffSelectionMode: booking.StaffSelectionAnyone},
+	}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Classic Pedicure."})
+	if err != nil {
+		t.Fatalf("new service Message returned error: %v", err)
+	}
+	if got := selectedServiceIDs(*session); !sameStrings(got, []string{"service_gel", "service_art"}) {
+		t.Fatalf("new service changed multi-service state: %#v", got)
+	}
+
+	_, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Switch."})
+	if err != nil {
+		t.Fatalf("switch operation Message returned error: %v", err)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Which current service would you like to replace") ||
+		!strings.Contains(store.lastTurn.AIMessage, "Gel Manicure") ||
+		!strings.Contains(store.lastTurn.AIMessage, "Nail Art") {
+		t.Fatalf("AI should ask which current service to replace: %s", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Gel Manicure."})
+	if err != nil {
+		t.Fatalf("replace source Message returned error: %v", err)
+	}
+	if got := selectedServiceIDs(*session); !sameStrings(got, []string{"service_pedi", "service_art"}) {
+		t.Fatalf("selected services = %#v, want Classic Pedicure plus Nail Art", got)
 	}
 }
 

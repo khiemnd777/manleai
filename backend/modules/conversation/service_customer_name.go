@@ -298,7 +298,7 @@ func setPendingServiceCandidateMetadata(turn *TurnRecord, result serviceUndersta
 }
 
 func setPendingServiceEditMetadata(turn *TurnRecord, candidates []ServiceOption, mode string) {
-	if turn == nil || len(candidates) == 0 {
+	if turn == nil {
 		return
 	}
 	ids := make([]string, 0, len(candidates))
@@ -332,15 +332,18 @@ func pendingServiceEdit(session Session, services []ServiceOption) ([]ServiceOpt
 			return nil, "", false
 		}
 		ids := metadataStringSlice(msg.Metadata, "pending_service_edit_candidate_ids")
-		if len(ids) == 0 {
-			continue
-		}
-		items := servicesByIDs(services, ids)
 		mode := strings.TrimSpace(metadataString(msg.Metadata, "pending_service_edit_mode"))
 		if mode == "" {
+			if len(ids) == 0 {
+				continue
+			}
 			mode = pendingServiceEditModeAddOrSwitch
 		}
-		return items, mode, len(items) > 0
+		items := servicesByIDs(services, ids)
+		if len(ids) > 0 && len(items) == 0 {
+			return nil, "", false
+		}
+		return items, mode, true
 	}
 	return nil, "", false
 }

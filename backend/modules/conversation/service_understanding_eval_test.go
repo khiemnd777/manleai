@@ -42,6 +42,14 @@ func TestServiceUnderstandingGoldenEval(t *testing.T) {
 			wantCandidate: []string{"classic_manicure", "gel_manicure", "dip_powder"},
 		},
 		{
+			name:          "additive family wording stays ambiguous",
+			catalog:       lotusCatalog,
+			utterance:     "manicure as well",
+			wantStatus:    serviceUnderstandingStatusAmbiguous,
+			wantReason:    serviceUnderstandingAmbiguousFamily,
+			wantCandidate: []string{"classic_manicure", "gel_manicure", "dip_powder"},
+		},
+		{
 			name:          "stt typo uses fuzzy catalog family",
 			catalog:       lotusCatalog,
 			utterance:     "Menikur.",

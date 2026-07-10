@@ -33,6 +33,54 @@ func TestServiceInterpreterReturnsCatalogCandidatesForAmbiguousFamily(t *testing
 	}
 }
 
+func TestServiceInterpreterKeepsAdditiveFamilyPhraseAmbiguous(t *testing.T) {
+	result := interpretService("Manicure as well.", testManicureCatalog())
+
+	if result.Status != serviceUnderstandingStatusAmbiguous {
+		t.Fatalf("status = %s, want ambiguous; result=%#v", result.Status, result)
+	}
+	if result.Reason != serviceUnderstandingAmbiguousFamily {
+		t.Fatalf("reason = %s, want ambiguous family", result.Reason)
+	}
+	if got := serviceIDs(result.Candidates); !sameStrings(got, []string{"service_classic", "service_dip", "service_gel"}) {
+		t.Fatalf("candidate ids = %#v", got)
+	}
+	if result.Selected != nil {
+		t.Fatalf("additive family phrase should not guess a concrete service: %#v", result.Selected)
+	}
+}
+
+func TestServiceInterpreterUsesPendingEditCandidatesForShortTargetReply(t *testing.T) {
+	services := append(testManicureCatalog(),
+		ServiceOption{ID: "service_classic_pedi", Name: "Classic Pedicure"},
+		ServiceOption{ID: "service_art", Name: "Nail Art"},
+	)
+	for _, mode := range []string{pendingServiceEditModeAddSelection, pendingServiceEditModeReplaceSelection} {
+		t.Run(mode, func(t *testing.T) {
+			session := Session{
+				ServiceID: "service_spa_pedi",
+				Transcript: []TranscriptMessage{{
+					Speaker: SpeakerAI,
+					Metadata: map[string]any{
+						"pending_service_edit_candidate_ids": []string{"service_classic", "service_dip", "service_gel"},
+						"pending_service_edit_mode":          mode,
+					},
+				}},
+			}
+
+			result := interpretServiceForSession("Classic.", session, services, nil, nil)
+			if result.Status != serviceUnderstandingStatusSelected || result.Selected == nil || result.Selected.ID != "service_classic" {
+				t.Fatalf("result = %#v, want Classic Manicure within pending manicure candidates", result)
+			}
+
+			result = interpretServiceForSession("Nail Art.", session, services, nil, nil)
+			if result.Status != serviceUnderstandingStatusSelected || result.Selected == nil || result.Selected.ID != "service_art" {
+				t.Fatalf("result = %#v, want full-catalog fallback to Nail Art", result)
+			}
+		})
+	}
+}
+
 func TestServiceInterpreterUsesCatalogFuzzyFamilyWithoutHardcodedAliases(t *testing.T) {
 	tests := []string{"Menikur.", "Manecu."}
 	for _, message := range tests {

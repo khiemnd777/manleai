@@ -602,7 +602,8 @@ func unknownStaffChangeReply(name string, staff []StaffOption) string {
 
 func serviceEditDecisionForMessage(session Session, message string, result serviceUnderstandingResult, services []ServiceOption) serviceEditDecision {
 	if pending, mode, ok := pendingServiceEdit(session, services); ok {
-		if mode == pendingServiceEditModeReplaceConfirmation {
+		switch mode {
+		case pendingServiceEditModeReplaceConfirmation:
 			switch {
 			case isPendingServiceKeepDecision(message):
 				return serviceEditDecision{Action: serviceEditKeepCurrent, Candidates: pending, Source: "pending_service_edit"}
@@ -616,14 +617,59 @@ func serviceEditDecisionForMessage(session Session, message string, result servi
 			default:
 				return serviceEditDecision{Action: serviceEditKeepCurrent, Candidates: pending, Source: "pending_service_edit"}
 			}
-		}
-		if result.Status == serviceUnderstandingStatusUnknown {
+		case pendingServiceEditModeAddSelection:
+			if result.Status == serviceUnderstandingStatusSelected && len(result.Candidates) > 0 {
+				return serviceEditDecision{Action: serviceEditAdd, Candidates: result.Candidates, Source: "pending_service_add_target"}
+			}
+			if result.Status == serviceUnderstandingStatusAmbiguous && len(result.Candidates) > 0 {
+				return serviceEditDecision{Action: serviceEditClarifyAddTarget, Candidates: result.Candidates, Source: "pending_service_add_target"}
+			}
+			if hasServiceReplaceSignal(message) || isPendingServiceReplaceDecision(message) {
+				return serviceEditDecision{Action: serviceEditClarifyReplaceTarget, Candidates: pending, Source: "pending_service_edit_operation_change"}
+			}
+			return serviceEditDecision{Action: serviceEditClarifyAddTarget, Candidates: pending, Source: "pending_service_add_target"}
+		case pendingServiceEditModeReplaceSelection:
+			if result.Status == serviceUnderstandingStatusSelected && len(result.Candidates) > 0 {
+				if len(selectedServiceIDs(session)) > 1 {
+					return serviceEditDecision{Action: serviceEditClarifyReplaceSource, Candidates: result.Candidates, Source: "pending_service_replace_target"}
+				}
+				return serviceEditDecision{Action: serviceEditReplace, Candidates: result.Candidates, Source: "pending_service_replace_target"}
+			}
+			if result.Status == serviceUnderstandingStatusAmbiguous && len(result.Candidates) > 0 {
+				return serviceEditDecision{Action: serviceEditClarifyReplaceTarget, Candidates: result.Candidates, Source: "pending_service_replace_target"}
+			}
+			if hasServiceAddSignal(message) || isPendingServiceAddDecision(message) {
+				return serviceEditDecision{Action: serviceEditClarifyAddTarget, Candidates: pending, Source: "pending_service_edit_operation_change"}
+			}
+			return serviceEditDecision{Action: serviceEditClarifyReplaceTarget, Candidates: pending, Source: "pending_service_replace_target"}
+		case pendingServiceEditModeReplaceSourceSelection:
+			if result.Status == serviceUnderstandingStatusSelected && len(result.Candidates) == 1 {
+				sourceID := strings.TrimSpace(result.Candidates[0].ID)
+				if selectedServiceContains(session, sourceID) && !serviceCandidatesContainID(pending, sourceID) {
+					return serviceEditDecision{Action: serviceEditReplaceSegment, Candidates: pending, ReplaceServiceID: sourceID, Source: "pending_service_replace_source"}
+				}
+			}
+			return serviceEditDecision{Action: serviceEditClarifyReplaceSource, Candidates: pending, Source: "pending_service_replace_source"}
+		case pendingServiceEditModeAddOrSwitch:
 			switch {
 			case hasServiceAddSignal(message) || isPendingServiceAddDecision(message):
-				return serviceEditDecision{Action: serviceEditAdd, Candidates: pending, Source: "pending_service_edit"}
-			case hasServiceCorrectionSignal(message) || isPendingServiceReplaceDecision(message):
+				if len(pending) == 1 {
+					return serviceEditDecision{Action: serviceEditAdd, Candidates: pending, Source: "pending_service_edit"}
+				}
+				return serviceEditDecision{Action: serviceEditClarifyAddTarget, Candidates: pending, Source: "pending_service_edit"}
+			case hasServiceReplaceSignal(message) || isPendingServiceReplaceDecision(message):
+				if len(pending) != 1 {
+					return serviceEditDecision{Action: serviceEditClarifyReplaceTarget, Candidates: pending, Source: "pending_service_edit"}
+				}
+				if len(selectedServiceIDs(session)) > 1 {
+					return serviceEditDecision{Action: serviceEditClarifyReplaceSource, Candidates: pending, Source: "pending_service_edit"}
+				}
 				return serviceEditDecision{Action: serviceEditReplace, Candidates: pending, Source: "pending_service_edit"}
+			case result.Status == serviceUnderstandingStatusSelected && len(result.Candidates) > 0:
+				return serviceEditDecision{Action: serviceEditClarifyAddSwitch, Candidates: result.Candidates, Source: "pending_service_edit_new_target"}
 			case isAffirmativeOnly(message):
+				return serviceEditDecision{Action: serviceEditClarifyAddSwitch, Candidates: pending, Source: "pending_service_edit"}
+			default:
 				return serviceEditDecision{Action: serviceEditClarifyAddSwitch, Candidates: pending, Source: "pending_service_edit"}
 			}
 		}
@@ -663,11 +709,22 @@ func serviceEditDecisionForMessage(session Session, message string, result servi
 		if strings.TrimSpace(session.ServiceID) == "" {
 			return serviceEditDecision{}
 		}
-		if hasServiceCorrectionSignal(message) {
-			return serviceEditDecision{Action: serviceEditClearAmbiguous, Candidates: result.Candidates, Source: "ambiguous_service_correction"}
+		if hasServiceReplaceSignal(message) {
+			return serviceEditDecision{Action: serviceEditClarifyReplaceTarget, Candidates: result.Candidates, Source: "ambiguous_service_correction"}
 		}
 		if hasServiceAddSignal(message) {
-			return serviceEditDecision{Action: serviceEditClarifyAddSwitch, Candidates: result.Candidates, Source: "ambiguous_service_add"}
+			return serviceEditDecision{Action: serviceEditClarifyAddTarget, Candidates: result.Candidates, Source: "ambiguous_service_add"}
+		}
+		return serviceEditDecision{Action: serviceEditClarifyAddSwitch, Candidates: result.Candidates, Source: "ambiguous_service_edit"}
+	case serviceUnderstandingStatusUnknown:
+		if strings.TrimSpace(session.ServiceID) != "" && requestsGenericServiceEdit(message) {
+			if hasServiceAddSignal(message) {
+				return serviceEditDecision{Action: serviceEditClarifyAddTarget, Source: "generic_service_edit"}
+			}
+			if hasServiceReplaceSignal(message) {
+				return serviceEditDecision{Action: serviceEditClarifyReplaceTarget, Source: "generic_service_edit"}
+			}
+			return serviceEditDecision{Action: serviceEditClarifyAddSwitch, Source: "generic_service_edit"}
 		}
 	}
 	return serviceEditDecision{}
@@ -682,12 +739,8 @@ func applyServiceEditDecision(session *Session, decision serviceEditDecision) bo
 		return applyServiceSelection(session, decision.Candidates)
 	case serviceEditAdd:
 		return addServiceSelection(session, decision.Candidates)
-	case serviceEditClearAmbiguous:
-		if strings.TrimSpace(session.ServiceID) == "" && len(session.BookingSegments) == 0 && len(session.OfferedSlots) == 0 {
-			return false
-		}
-		clearServiceSelection(session)
-		return true
+	case serviceEditReplaceSegment:
+		return replaceServiceSegment(session, decision.ReplaceServiceID, decision.Candidates)
 	default:
 		return false
 	}
@@ -713,11 +766,20 @@ func applyServiceEditMetadata(turn *TurnRecord, decision serviceEditDecision) {
 		"service_edit_candidate_ids": ids,
 		"service_edit_candidates":    names,
 	})
-	if decision.Action != serviceEditClarifyAddSwitch && decision.Action != serviceEditConfirmReplace {
+	if !isServiceEditClarification(decision.Action) && decision.Action != serviceEditConfirmReplace {
 		turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{
 			"pending_service_edit_cleared": true,
 			"pending_service_edit_reason":  string(decision.Action),
 		})
+	}
+}
+
+func isServiceEditClarification(action serviceEditAction) bool {
+	switch action {
+	case serviceEditClarifyAddSwitch, serviceEditClarifyAddTarget, serviceEditClarifyReplaceTarget, serviceEditClarifyReplaceSource:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -940,15 +1002,49 @@ func addServiceSelection(session *Session, matches []ServiceOption) bool {
 	return !sameStringSlices(before, selectedServiceIDs(*session))
 }
 
-func clearServiceSelection(session *Session) {
-	if session == nil {
-		return
+func replaceServiceSegment(session *Session, sourceServiceID string, matches []ServiceOption) bool {
+	if session == nil || strings.TrimSpace(sourceServiceID) == "" || len(matches) != 1 {
+		return false
 	}
-	session.ServiceID = ""
-	session.ServiceName = ""
-	session.BookingSegments = nil
+	target := matches[0]
+	targetID := strings.TrimSpace(target.ID)
+	if targetID == "" || targetID == strings.TrimSpace(sourceServiceID) {
+		return false
+	}
+	before := selectedServiceIDs(*session)
+	targetAlreadySelected := false
+	for _, segment := range session.BookingSegments {
+		if strings.TrimSpace(segment.ServiceID) == targetID && strings.TrimSpace(segment.ServiceID) != strings.TrimSpace(sourceServiceID) {
+			targetAlreadySelected = true
+			break
+		}
+	}
+	segments := make([]booking.BookingSegmentRequest, 0, len(session.BookingSegments))
+	replaced := false
+	for _, segment := range session.BookingSegments {
+		if !replaced && strings.TrimSpace(segment.ServiceID) == strings.TrimSpace(sourceServiceID) {
+			replaced = true
+			if targetAlreadySelected {
+				continue
+			}
+			segment.ServiceID = targetID
+		}
+		segments = append(segments, segment)
+	}
+	if !replaced || len(segments) == 0 {
+		return false
+	}
+	session.BookingSegments = segments
 	session.PartyPlan = nil
 	session.OfferedSlots = nil
+	session.ServiceID = strings.TrimSpace(segments[0].ServiceID)
+	if session.ServiceID == targetID {
+		session.ServiceName = strings.TrimSpace(target.Name)
+	}
+	if len(segments) > 0 {
+		session.StaffSelectionMode = segments[0].StaffSelectionMode
+	}
+	return !sameStringSlices(before, selectedServiceIDs(*session))
 }
 
 func sameServiceSelection(session Session, matches []ServiceOption) bool {
@@ -962,6 +1058,26 @@ func sameServiceSelection(session Session, matches []ServiceOption) bool {
 		}
 	}
 	return true
+}
+
+func selectedServiceContains(session Session, serviceID string) bool {
+	serviceID = strings.TrimSpace(serviceID)
+	for _, selectedID := range selectedServiceIDs(session) {
+		if strings.TrimSpace(selectedID) == serviceID {
+			return true
+		}
+	}
+	return false
+}
+
+func serviceCandidatesContainID(candidates []ServiceOption, serviceID string) bool {
+	serviceID = strings.TrimSpace(serviceID)
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate.ID) == serviceID {
+			return true
+		}
+	}
+	return false
 }
 
 func selectedServiceIDs(session Session) []string {
@@ -1072,4 +1188,39 @@ func hasServiceCorrectionSignal(message string) bool {
 	}
 	cleaned := strings.TrimLeft(lower, " ,.;:!?")
 	return strings.HasPrefix(cleaned, "no ") || strings.HasPrefix(cleaned, "no,") || strings.Contains(lower, " not ")
+}
+
+func hasServiceReplaceSignal(message string) bool {
+	if hasServiceCorrectionSignal(message) || hasExplicitServiceReplacementPhrase(message) {
+		return true
+	}
+	normalized := normalizeLooseText(message)
+	for _, signal := range []string{"change", "switch", "replace"} {
+		if containsLoosePhrase(normalized, signal) || strings.HasPrefix(normalized, signal+" ") || strings.Contains(normalized, " want to "+signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func requestsGenericServiceEdit(message string) bool {
+	normalized := normalizeLooseText(message)
+	for _, phrase := range []string{
+		"another service",
+		"a different service",
+		"different service",
+		"an other service",
+		"other service",
+		"other services",
+		"different services",
+		"change service",
+		"switch service",
+		"replace service",
+		"something else",
+	} {
+		if strings.Contains(normalized, phrase) {
+			return true
+		}
+	}
+	return false
 }

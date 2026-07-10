@@ -25,6 +25,7 @@ const (
 	fuzzyServicePendingMinToken  = 0.50
 	fuzzyServiceStrictMargin     = 0.12
 	fuzzyServicePendingMargin    = 0.16
+	fuzzyDistinctiveTokenMinimum = 0.72
 )
 
 type serviceUnderstandingStatus string
@@ -71,7 +72,22 @@ func interpretServiceForSession(message string, session Session, services []Serv
 			return result
 		}
 	}
+	if pending, mode, ok := pendingServiceEdit(session, services); ok && len(pending) > 0 && pendingServiceEditNeedsTarget(mode) {
+		result := newServiceCatalogIndex(pending, nil, categoryAliases).InterpretPending(message)
+		if result.Status != serviceUnderstandingStatusUnknown {
+			return result
+		}
+	}
 	return interpretServiceWithCategoryAliases(message, services, aliases, categoryAliases)
+}
+
+func pendingServiceEditNeedsTarget(mode string) bool {
+	switch strings.TrimSpace(mode) {
+	case pendingServiceEditModeAddSelection, pendingServiceEditModeReplaceSelection:
+		return true
+	default:
+		return false
+	}
 }
 
 func pendingServiceCandidateServices(session Session, services []ServiceOption) []ServiceOption {
@@ -363,6 +379,25 @@ func (idx serviceCatalogIndex) interpret(message string, pendingCandidates bool)
 		result.MatchedCategoryName = strings.TrimSpace(categoryAliasMatch.Alias.CategoryName)
 		return result
 	}
+	directMatches := idx.directTokenMatches(normalized)
+	if len(directMatches) > 1 {
+		if fuzzyMatch, ok := idx.fuzzyServiceMatch(normalized, pendingCandidates); ok && idx.hasDistinctiveFuzzyServiceEvidence(normalized, fuzzyMatch.service) {
+			result.Status = serviceUnderstandingStatusSelected
+			result.Reason = serviceUnderstandingFuzzyService
+			result.Confidence = fuzzyMatch.score
+			result.Candidates = []ServiceOption{fuzzyMatch.service}
+			result.MatchedToken = fuzzyMatch.token
+			item := fuzzyMatch.service
+			result.Selected = &item
+			return result
+		}
+		result.Status = serviceUnderstandingStatusAmbiguous
+		result.Reason = serviceUnderstandingAmbiguousFamily
+		result.Confidence = 0.72
+		result.Candidates = directMatches
+		result.MatchedToken = firstMatchedFamilyToken(normalized, idx.familyTokens)
+		return result
+	}
 	if fuzzyMatch, ok := idx.fuzzyServiceMatch(normalized, pendingCandidates); ok {
 		result.Status = serviceUnderstandingStatusSelected
 		result.Reason = serviceUnderstandingFuzzyService
@@ -373,7 +408,6 @@ func (idx serviceCatalogIndex) interpret(message string, pendingCandidates bool)
 		result.Selected = &item
 		return result
 	}
-	directMatches := idx.directTokenMatches(normalized)
 	if len(directMatches) == 1 {
 		result.Status = serviceUnderstandingStatusSelected
 		result.Reason = serviceUnderstandingCatalogToken
@@ -381,14 +415,6 @@ func (idx serviceCatalogIndex) interpret(message string, pendingCandidates bool)
 		item := directMatches[0]
 		result.Selected = &item
 		result.Candidates = directMatches
-		return result
-	}
-	if len(directMatches) > 1 {
-		result.Status = serviceUnderstandingStatusAmbiguous
-		result.Reason = serviceUnderstandingAmbiguousFamily
-		result.Confidence = 0.72
-		result.Candidates = directMatches
-		result.MatchedToken = firstMatchedFamilyToken(normalized, idx.familyTokens)
 		return result
 	}
 	fuzzyToken, fuzzyCandidates := idx.fuzzyFamilyMatch(normalized)
@@ -400,6 +426,30 @@ func (idx serviceCatalogIndex) interpret(message string, pendingCandidates bool)
 		result.MatchedToken = fuzzyToken
 	}
 	return result
+}
+
+func (idx serviceCatalogIndex) hasDistinctiveFuzzyServiceEvidence(normalized string, service ServiceOption) bool {
+	sharedTokens := map[string]bool{}
+	for token := range idx.familyTokens {
+		if containsNormalizedPhrase(normalized, token) {
+			sharedTokens[token] = true
+		}
+	}
+	inputTokens := serviceNameTokens(normalized)
+	for _, serviceToken := range serviceNameTokens(service.Name) {
+		if sharedTokens[serviceToken] {
+			continue
+		}
+		for _, inputToken := range inputTokens {
+			if sharedTokens[inputToken] {
+				continue
+			}
+			if fuzzyServiceTokenScore(inputToken, serviceToken) >= fuzzyDistinctiveTokenMinimum {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (idx serviceCatalogIndex) categoryMatch(normalized string) (serviceCategoryPhrase, bool) {

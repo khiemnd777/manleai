@@ -115,24 +115,31 @@ type serviceMatch struct {
 type serviceEditAction string
 
 const (
-	serviceEditNone             serviceEditAction = ""
-	serviceEditSelectInitial    serviceEditAction = "initial_select"
-	serviceEditAdd              serviceEditAction = "add_service"
-	serviceEditReplace          serviceEditAction = "replace_service"
-	serviceEditDuplicate        serviceEditAction = "duplicate_service"
-	serviceEditClarifyAddSwitch serviceEditAction = "clarify_add_or_switch"
-	serviceEditConfirmReplace   serviceEditAction = "confirm_replace_service"
-	serviceEditKeepCurrent      serviceEditAction = "keep_current_service"
-	serviceEditClearAmbiguous   serviceEditAction = "clear_ambiguous_service"
+	serviceEditNone                 serviceEditAction = ""
+	serviceEditSelectInitial        serviceEditAction = "initial_select"
+	serviceEditAdd                  serviceEditAction = "add_service"
+	serviceEditReplace              serviceEditAction = "replace_service"
+	serviceEditDuplicate            serviceEditAction = "duplicate_service"
+	serviceEditClarifyAddSwitch     serviceEditAction = "clarify_add_or_switch"
+	serviceEditClarifyAddTarget     serviceEditAction = "clarify_add_target"
+	serviceEditClarifyReplaceTarget serviceEditAction = "clarify_replace_target"
+	serviceEditClarifyReplaceSource serviceEditAction = "clarify_replace_source"
+	serviceEditReplaceSegment       serviceEditAction = "replace_service_segment"
+	serviceEditConfirmReplace       serviceEditAction = "confirm_replace_service"
+	serviceEditKeepCurrent          serviceEditAction = "keep_current_service"
 
-	pendingServiceEditModeAddOrSwitch         = "add_or_switch"
-	pendingServiceEditModeReplaceConfirmation = "replace_confirmation"
+	pendingServiceEditModeAddOrSwitch            = "add_or_switch"
+	pendingServiceEditModeAddSelection           = "add_selection"
+	pendingServiceEditModeReplaceSelection       = "replace_selection"
+	pendingServiceEditModeReplaceSourceSelection = "replace_source_selection"
+	pendingServiceEditModeReplaceConfirmation    = "replace_confirmation"
 )
 
 type serviceEditDecision struct {
-	Action     serviceEditAction
-	Candidates []ServiceOption
-	Source     string
+	Action           serviceEditAction
+	Candidates       []ServiceOption
+	ReplaceServiceID string
+	Source           string
 }
 
 type staffChangeRequest struct {
@@ -432,7 +439,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	if pendingNameCandidate != "" {
 		next.CustomerName = ""
 	}
-	if !serviceChanged && serviceEdit.Action != serviceEditClarifyAddSwitch && serviceEdit.Action != serviceEditClearAmbiguous {
+	if !serviceChanged && !isServiceEditClarification(serviceEdit.Action) {
 		if selectedSplit, ok := selectPartySplitOption(message, next.PartyPlan, loc); ok {
 			applySelectedPartySplitOption(&next, selectedSplit.Option, selectedSplit.DateConsentConfirmed)
 			selectedOfferedSlot = true
@@ -503,6 +510,27 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		turn.AIMessage = serviceEditClarificationPrompt(*session, serviceEdit.Candidates, services)
 		setPendingServiceEditMetadata(&turn, serviceEdit.Candidates, pendingServiceEditModeAddOrSwitch)
 		finalizeTurnMetadata(&turn, *session, next, "service", "service", "service_edit_clarification")
+		return s.store.SaveTurn(ctx, turn)
+	}
+
+	if serviceEdit.Action == serviceEditClarifyAddTarget && !partyPlanApplied {
+		turn.AIMessage = serviceEditTargetPrompt(*session, serviceEdit.Candidates, services, true)
+		setPendingServiceEditMetadata(&turn, serviceEdit.Candidates, pendingServiceEditModeAddSelection)
+		finalizeTurnMetadata(&turn, *session, next, "service", "service", "service_add_target_clarification")
+		return s.store.SaveTurn(ctx, turn)
+	}
+
+	if serviceEdit.Action == serviceEditClarifyReplaceTarget && !partyPlanApplied {
+		turn.AIMessage = serviceEditTargetPrompt(*session, serviceEdit.Candidates, services, false)
+		setPendingServiceEditMetadata(&turn, serviceEdit.Candidates, pendingServiceEditModeReplaceSelection)
+		finalizeTurnMetadata(&turn, *session, next, "service", "service", "service_replace_target_clarification")
+		return s.store.SaveTurn(ctx, turn)
+	}
+
+	if serviceEdit.Action == serviceEditClarifyReplaceSource && !partyPlanApplied {
+		turn.AIMessage = serviceEditReplaceSourcePrompt(*session, services)
+		setPendingServiceEditMetadata(&turn, serviceEdit.Candidates, pendingServiceEditModeReplaceSourceSelection)
+		finalizeTurnMetadata(&turn, *session, next, "service", "service", "service_replace_source_clarification")
 		return s.store.SaveTurn(ctx, turn)
 	}
 

@@ -408,10 +408,20 @@ func serviceClarificationPrompt(session Session, result serviceUnderstandingResu
 
 func serviceEditClarificationPrompt(session Session, candidates []ServiceOption, services []ServiceOption) string {
 	options := serviceCandidateNames(candidates, 3)
-	if len(options) == 0 {
-		return "Do you want to add that service to the appointment, or switch to that service only?"
-	}
 	current := strings.TrimSpace(serviceSummary(session, services))
+	if len(options) == 0 {
+		if current == "" {
+			return "Would you like to add another service, or replace the current service?"
+		}
+		return "Would you like to replace " + current + ", or add another service?"
+	}
+	if family := commonServiceFamily(candidates); family != "" && len(candidates) > 1 && current != "" {
+		article := "a "
+		if startsWithVowelSound(family) {
+			article = "an "
+		}
+		return "You already have " + current + ". Would you like to switch to " + article + family + ", or add " + article + family + " to this appointment?"
+	}
 	requested := joinHumanList(options)
 	if current == "" {
 		return "Do you want " + requested + " for this appointment?"
@@ -420,6 +430,67 @@ func serviceEditClarificationPrompt(session Session, candidates []ServiceOption,
 		return "Do you want to add " + requested + " to " + current + ", or switch to " + requested + " only?"
 	}
 	return "Do you want to add " + requested + " to " + current + ", or switch to one of those services only?"
+}
+
+func serviceEditTargetPrompt(session Session, candidates []ServiceOption, services []ServiceOption, add bool) string {
+	current := strings.TrimSpace(serviceSummary(session, services))
+	family := commonServiceFamily(candidates)
+	options := serviceCandidateNames(candidates, 5)
+	label := "service"
+	if family != "" {
+		label = family
+	}
+	action := "to add"
+	if !add && current != "" {
+		action = "instead of " + current
+	}
+	prompt := "Which " + label + " would you like " + action
+	if len(options) > 0 {
+		prompt += ": " + joinChoiceList(options)
+	}
+	return prompt + "?"
+}
+
+func serviceEditReplaceSourcePrompt(session Session, services []ServiceOption) string {
+	options := make([]string, 0, len(session.BookingSegments))
+	for _, segment := range session.BookingSegments {
+		if name := strings.TrimSpace(serviceName(segment.ServiceID, services, "")); name != "" {
+			options = append(options, name)
+		}
+	}
+	if len(options) == 0 {
+		return "Which current service would you like to replace?"
+	}
+	return "Which current service would you like to replace: " + joinChoiceList(options) + "?"
+}
+
+func commonServiceFamily(candidates []ServiceOption) string {
+	var family string
+	categoryBacked := len(candidates) > 0
+	for _, candidate := range candidates {
+		name := strings.TrimSpace(candidate.CategoryName)
+		if name == "" {
+			categoryBacked = false
+			break
+		}
+		if family == "" {
+			family = name
+			continue
+		}
+		if !strings.EqualFold(family, name) {
+			categoryBacked = false
+			break
+		}
+	}
+	if categoryBacked && family != "" {
+		return strings.ToLower(family)
+	}
+	return singularServiceToken(commonServiceNameToken(candidates))
+}
+
+func startsWithVowelSound(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value != "" && strings.ContainsRune("aeiou", rune(value[0]))
 }
 
 func serviceChangeConfirmationPrompt(session Session, candidates []ServiceOption, services []ServiceOption, cfg *RuntimeConfig) string {

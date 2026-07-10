@@ -136,8 +136,12 @@ name collection, availability replies, party bookings, or transcript output.
   `backend/modules/conversation/service_matching_parsing.go`,
   `backend/modules/conversation/service_understanding.go`.
   Existing-service change confirmation and pending service-edit metadata also
-  live in this cluster; caller service changes must confirm before replacing a
-  selected booking service or refreshing availability.
+  live in this cluster. Service edits resolve add versus replace, a concrete
+  catalog target, and (for multi-service bookings) the current service being
+  replaced before mutating selected services or refreshing availability.
+  Exact family evidence must remain ambiguous unless a distinct service token
+  resolves one candidate; pending add/replace target replies are interpreted
+  against their saved candidate set before full-catalog fallback.
 - Caller name, phone, email, and name-slot repair:
   `backend/modules/conversation/service_customer_name.go`.
 - Party/group booking detection and planning:
@@ -366,7 +370,7 @@ dashboard sidebar. Local runtime port is `3091`; production domain is
 | availability, open slots, offered slots, no common time, split, staggered, staff assignment | `backend/modules/booking`, `backend/modules/conversation/service_availability.go` | POS provider adapter, `appointments-dashboard.tsx`, `pos-calendar/features/calendar/pos-calendar-client.tsx`, conversation tests |
 | Square OAuth, token expired, refresh token, location, sync, catalog import, calendar sync | `pos-adapter-slice`, `backend/modules/pos_square` | `backend/modules/pos`, `integration_config`, integrations UI, POS calendar UI |
 | POS mapping, provider link, active provider, AI bookable, local only, sync failed | `backend/modules/pos`, `docs/canonical-pos-ownership-checklist.md` | Services/Staff UI, `pos_entity_links`, sync tests |
-| service alias, category alias, service understanding, caller said "mani", wrong service, change service, switch service | `voice-ai-runtime`, conversation service understanding files | `backend/modules/training`, services UI, transcript metadata tests |
+| service alias, category alias, service understanding, caller said "mani", wrong service, change service, switch service, change pedi, another service, add or replace, manicure as well, fuzzy Gel guess | `voice-ai-runtime`, conversation service understanding and pending service-edit files | `backend/modules/training`, services UI, transcript metadata and golden conversation tests |
 | service menu, how many services, service count, repeated clarification, informational service question | `backend/modules/conversation/service_prompts.go`, `backend/modules/conversation/answer_router.go` | `backend/modules/conversation/service.go`, party flow, conversation golden tests |
 | AI training, owner correction, knowledge, FAQ answer, stale policy | `backend/modules/training`, answer router/context | training UI, knowledge tests |
 | party booking, group booking, two people, split booking, party request | conversation party files | booking service, Calls UI party request panel |
