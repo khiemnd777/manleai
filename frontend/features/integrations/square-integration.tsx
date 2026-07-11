@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 import {
   AlertTriangle,
@@ -27,6 +27,7 @@ import { apiRequest } from "@/lib/api/client";
 import type {
   AvailabilityResult,
   AvailabilitySlot,
+  BookingAttempt,
   IntegrationConfigs,
   OpenAIIntegrationConfig,
   POSConnection,
@@ -68,11 +69,7 @@ type LocationsResponse = {
 };
 
 type TestBookingResponse = {
-  booking_attempt?: {
-    status: string;
-    error_code?: string;
-    error_message?: string;
-  };
+  booking_attempt?: BookingAttempt;
   appointment?: {
     status: string;
   };
@@ -188,6 +185,40 @@ const defaultOpenAIConfigForm: OpenAIConfigForm = {
   realtime_instructions: ""
 };
 
+function operationKeyForPayload(
+  ref: { current: { key: string; fingerprint: string } | null },
+  payload: Record<string, unknown>
+) {
+  const fingerprint = JSON.stringify(payload);
+  if (!ref.current) {
+    ref.current = { key: crypto.randomUUID(), fingerprint };
+  }
+  return ref.current.key;
+}
+
+function testWriteBlocked(attempt: BookingAttempt | null, latest?: TestBookingRecord) {
+  return Boolean(
+    attempt?.status === "pos_pending" ||
+      attempt?.provider_outcome === "in_flight" ||
+      attempt?.provider_outcome === "unknown" ||
+      attempt?.retry_policy === "blocked" ||
+      attempt?.reconciliation_status === "required" ||
+      latest?.status === "pos_pending" ||
+      latest?.provider_outcome === "in_flight" ||
+      latest?.provider_outcome === "unknown" ||
+      latest?.retry_policy === "blocked" ||
+      latest?.reconciliation_status === "required"
+  );
+}
+
+function testWriteBlockedReason(attempt: BookingAttempt | null, latest?: TestBookingRecord) {
+  return (
+    attempt?.retry_blocked_reason ||
+    latest?.retry_blocked_reason ||
+    "The provider write is still in flight or its result is unknown. Verify the action in Square before submitting another write."
+  );
+}
+
 export function SquareIntegration() {
   const [salons, setSalons] = useState<Salon[]>([]);
   const [status, setStatus] = useState<StatusResponse | null>(null);
@@ -213,6 +244,9 @@ export function SquareIntegration() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [testWriteAttempt, setTestWriteAttempt] = useState<BookingAttempt | null>(null);
+  const testBookingOperationRef = useRef<{ key: string; fingerprint: string } | null>(null);
+  const testCancelOperationRef = useRef<{ key: string; fingerprint: string } | null>(null);
 
   const salon = salons[0];
   const connection = status?.connection;
@@ -257,6 +291,7 @@ export function SquareIntegration() {
         apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`)
       ]);
       setStatus(squareStatus);
+      setTestWriteAttempt(null);
       setIntegrationConfigs(configResponse);
       setSquareConfigForm(squareConfigToForm(configResponse.square));
       setTwilioConfigForm(twilioConfigToForm(configResponse.twilio));
@@ -411,18 +446,28 @@ export function SquareIntegration() {
     setError("");
     setSuccess("");
     try {
+      const payload = {
+        salon_id: salon.id,
+        ...form,
+        start_time: form.start_time
+      };
+      const operationKey = operationKeyForPayload(testBookingOperationRef, payload);
       const response = await apiRequest<TestBookingResponse>("/api/integrations/square/test-booking", {
         method: "POST",
         body: JSON.stringify({
-          salon_id: salon.id,
-          ...form,
-          start_time: form.start_time
+          operation_key: operationKey,
+          ...payload
         })
       });
       applyReadiness(response.readiness);
-      if (response.booking_attempt?.status === "fallback_pending") {
-        setError(response.booking_attempt.error_message || "Test booking is pending owner review.");
+      setTestWriteAttempt(response.booking_attempt ?? null);
+      if (response.booking_attempt?.status !== "confirmed" || !response.booking_attempt?.pos_booking_id) {
+        if (response.booking_attempt?.retry_policy === "safe") {
+          testBookingOperationRef.current = null;
+        }
+        setError(response.booking_attempt?.error_message || "Test booking is pending owner review.");
       } else {
+        testBookingOperationRef.current = null;
         setSuccess("Square test booking created. Cancel it when you finish the optional POS smoke test.");
       }
     } catch (err) {
@@ -438,21 +483,31 @@ export function SquareIntegration() {
     setError("");
     setSuccess("");
     try {
+      const payload = {
+        salon_id: salon.id,
+        appointment_id: latestTest.appointment_id,
+        reason: "AI booking readiness test cleanup"
+      };
+      const operationKey = operationKeyForPayload(testCancelOperationRef, payload);
       const response = await apiRequest<TestBookingResponse>(
         "/api/integrations/square/cancel-test-booking",
         {
           method: "POST",
           body: JSON.stringify({
-            salon_id: salon.id,
-            appointment_id: latestTest.appointment_id,
-            reason: "AI booking readiness test cleanup"
+            operation_key: operationKey,
+            ...payload
           })
         }
       );
       applyReadiness(response.readiness);
-      if (response.booking_attempt?.status === "fallback_pending") {
+      setTestWriteAttempt(response.booking_attempt ?? null);
+      if (response.booking_attempt && response.booking_attempt.status !== "cancelled") {
+        if (response.booking_attempt.retry_policy === "safe") {
+          testCancelOperationRef.current = null;
+        }
         setError(response.booking_attempt.error_message || "Test booking cancellation needs owner review.");
       } else {
+        testCancelOperationRef.current = null;
         setSuccess("Square test booking cancelled.");
       }
     } catch (err) {
@@ -651,8 +706,12 @@ export function SquareIntegration() {
     Boolean(form.service_id) &&
     Boolean(form.staff_id) &&
     Boolean(form.start_time) &&
+    !testWriteBlocked(testWriteAttempt, latestTest) &&
     busy === "";
-  const canCancelTest = Boolean(readiness?.can_cancel_test_booking && latestTest?.appointment_id) && busy === "";
+  const canCancelTest =
+    Boolean(readiness?.can_cancel_test_booking && latestTest?.appointment_id) &&
+    !testWriteBlocked(testWriteAttempt, latestTest) &&
+    busy === "";
   const canEnable = Boolean(readiness?.can_enable_ai_booking) && busy === "";
   const aiEnabled = Boolean(readiness?.ai_enabled ?? salon.ai_enabled);
   const squareConfigConfigured = Boolean(integrationConfigs?.square.configured);
@@ -876,6 +935,27 @@ export function SquareIntegration() {
             latest={latestTest}
             readiness={readiness}
           />
+
+          {testWriteBlocked(testWriteAttempt, latestTest) ? (
+            <div className="mt-5 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" />
+                <div className="min-w-0">
+                  <div className="font-semibold">Reconciliation required</div>
+                  <p className="mt-1 leading-6">
+                    Square may have completed this test action. Check Square Appointments before trying again.
+                  </p>
+                  <p className="mt-2 text-xs leading-5 text-amber-800">
+                    {testWriteBlockedReason(testWriteAttempt, latestTest)}
+                  </p>
+                  <Button className="mt-3" type="button" variant="secondary" onClick={() => void load()} disabled={busy !== ""}>
+                    <RefreshCcw className="h-4 w-4" />
+                    Refresh Square status
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ) : null}
 
           <div className="mt-5 grid gap-4 md:grid-cols-2">
             <Field label="Service">

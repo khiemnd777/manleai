@@ -913,6 +913,10 @@ func normalizeServiceWriteRequest(req ServiceWriteRequest, defaultActive bool) (
 	if req.PriceFrom != nil && *req.PriceFrom < 0 {
 		return ServiceMutation{}, ErrValidation
 	}
+	aiDescription := strings.TrimSpace(req.AIDescription)
+	if len([]rune(aiDescription)) > 320 {
+		return ServiceMutation{}, ErrValidation
+	}
 	active := defaultActive
 	if req.Active != nil {
 		active = *req.Active
@@ -920,7 +924,7 @@ func normalizeServiceWriteRequest(req ServiceWriteRequest, defaultActive bool) (
 	return ServiceMutation{
 		Name:              name,
 		Description:       strings.TrimSpace(req.Description),
-		AIDescription:     strings.TrimSpace(req.AIDescription),
+		AIDescription:     aiDescription,
 		DurationMinutes:   req.DurationMinutes,
 		PriceFrom:         req.PriceFrom,
 		Active:            active,

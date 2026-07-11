@@ -318,7 +318,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		return s.store.SaveTurn(ctx, turn)
 	}
 
-	next := *session
+	next := cloneSessionForTurn(*session)
 	selectedOfferedSlot := false
 	exactRequestedTimeSelected := false
 	loc := timezoneLocation(cfg.Timezone)
@@ -328,6 +328,9 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		serviceUnderstanding = catalogUnderstanding
 	}
 	partySignal := detectPartySignal(message, *session, serviceUnderstanding, services, serviceAliases, categoryAliases)
+	if handled, updated, err := s.handleServiceConsultation(ctx, ownerUserID, *session, message, eventKey, serviceUnderstanding, services, staff, cfg); handled {
+		return updated, err
+	}
 	if shouldClarifyCancelReschedule(*session, message) {
 		next.Intent = IntentBooking
 		turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
@@ -462,6 +465,9 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	next.Intent = intent
 
 	turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
+	if len(pendingConsultationServices(*session, services)) > 0 && (serviceChanged || next.Intent != IntentConsultation) {
+		clearPendingConsultationMetadata(&turn, "conversation_progressed")
+	}
 	applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
 	applyServiceEditMetadata(&turn, serviceEdit)
 	applyStaffChangeMetadata(&turn, staffChange)

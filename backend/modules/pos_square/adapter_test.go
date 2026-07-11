@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -14,6 +15,35 @@ import (
 	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/modules/pos"
 )
+
+func TestSquareWriteErrorClassifiesOnlyDefinitiveClientRejectionsAsRetrySafe(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		outcome pos.WriteOutcome
+		phase   string
+	}{
+		{name: "validation rejection", err: &squareHTTPError{StatusCode: http.StatusBadRequest, Code: "BAD_REQUEST"}, outcome: pos.WriteOutcomeDefinitiveFailure, phase: pos.WritePhaseResponse},
+		{name: "permission rejection", err: &squareHTTPError{StatusCode: http.StatusForbidden, Code: "FORBIDDEN"}, outcome: pos.WriteOutcomeDefinitiveFailure, phase: pos.WritePhaseResponse},
+		{name: "request timeout", err: &squareHTTPError{StatusCode: http.StatusRequestTimeout}, outcome: pos.WriteOutcomeUnknown, phase: pos.WritePhaseResponse},
+		{name: "unclassified client response", err: &squareHTTPError{StatusCode: http.StatusTeapot}, outcome: pos.WriteOutcomeUnknown, phase: pos.WritePhaseResponse},
+		{name: "server error", err: &squareHTTPError{StatusCode: http.StatusInternalServerError}, outcome: pos.WriteOutcomeUnknown, phase: pos.WritePhaseResponse},
+		{name: "truncated response", err: &squareResponseError{Err: io.ErrUnexpectedEOF}, outcome: pos.WriteOutcomeUnknown, phase: pos.WritePhaseResponse},
+		{name: "connection reset", err: io.ErrClosedPipe, outcome: pos.WriteOutcomeUnknown, phase: pos.WritePhaseDispatch},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := squareWriteError(tt.err, pos.WritePhaseDispatch)
+			if got := pos.WriteOutcomeForError(err); got != tt.outcome {
+				t.Fatalf("outcome = %s, want %s", got, tt.outcome)
+			}
+			var writeErr *pos.WriteError
+			if !errors.As(err, &writeErr) || writeErr.Phase != tt.phase {
+				t.Fatalf("write error = %#v, want %s phase", err, tt.phase)
+			}
+		})
+	}
+}
 
 func TestDoJSONSendsSquareVersionHeader(t *testing.T) {
 	transport := &capturingTransport{}
@@ -264,6 +294,7 @@ func TestBuildSquareAvailabilityRequest(t *testing.T) {
 		ServiceID:       "svc_1",
 		StaffID:         "staff_1",
 		PreferredDate:   "2026-06-10",
+		Timezone:        "America/Chicago",
 		DurationMinutes: 45,
 	})
 	if err != nil {
@@ -273,7 +304,7 @@ func TestBuildSquareAvailabilityRequest(t *testing.T) {
 	if filter.LocationID != "loc_1" {
 		t.Fatalf("location id = %s, want loc_1", filter.LocationID)
 	}
-	if filter.StartAtRange.StartAt != "2026-06-10T00:00:00Z" || filter.StartAtRange.EndAt != "2026-06-11T00:00:00Z" {
+	if filter.StartAtRange.StartAt != "2026-06-10T05:00:00Z" || filter.StartAtRange.EndAt != "2026-06-11T05:00:00Z" {
 		t.Fatalf("unexpected date range: %#v", filter.StartAtRange)
 	}
 	if len(filter.SegmentFilters) != 1 {
@@ -291,6 +322,7 @@ func TestBuildSquareAvailabilityRequest(t *testing.T) {
 func TestBuildSquareAvailabilityRequestUsesSegmentInputs(t *testing.T) {
 	request, err := buildSquareAvailabilityRequest("loc_1", pos.AvailabilityInput{
 		PreferredDate: "2026-06-10",
+		Timezone:      "America/Chicago",
 		Segments: []pos.AvailabilitySegmentInput{
 			{ServiceID: "svc_1", StaffID: "staff_1", DurationMinutes: 30},
 			{ServiceID: "svc_2", StaffID: "staff_2", DurationMinutes: 45},
@@ -308,6 +340,32 @@ func TestBuildSquareAvailabilityRequestUsesSegmentInputs(t *testing.T) {
 	}
 	if filters[1].ServiceVariationID != "svc_2" || filters[1].TeamMemberIDFilter == nil || filters[1].TeamMemberIDFilter.Any[0] != "staff_2" {
 		t.Fatalf("second segment filter = %#v, want svc_2/staff_2", filters[1])
+	}
+}
+
+func TestAvailabilityRangeUsesSalonLocalDayAcrossDST(t *testing.T) {
+	tests := []struct {
+		date      string
+		wantStart string
+		wantEnd   string
+		wantHours time.Duration
+	}{
+		{date: "2026-03-08", wantStart: "2026-03-08T06:00:00Z", wantEnd: "2026-03-09T05:00:00Z", wantHours: 23 * time.Hour},
+		{date: "2026-11-01", wantStart: "2026-11-01T05:00:00Z", wantEnd: "2026-11-02T06:00:00Z", wantHours: 25 * time.Hour},
+	}
+	for _, tt := range tests {
+		t.Run(tt.date, func(t *testing.T) {
+			start, end, err := availabilityRange(tt.date, "America/Chicago")
+			if err != nil {
+				t.Fatalf("availabilityRange failed: %v", err)
+			}
+			if start.Format(time.RFC3339) != tt.wantStart || end.Format(time.RFC3339) != tt.wantEnd {
+				t.Fatalf("range = %s..%s, want %s..%s", start.Format(time.RFC3339), end.Format(time.RFC3339), tt.wantStart, tt.wantEnd)
+			}
+			if end.Sub(start) != tt.wantHours {
+				t.Fatalf("duration = %s, want %s", end.Sub(start), tt.wantHours)
+			}
+		})
 	}
 }
 

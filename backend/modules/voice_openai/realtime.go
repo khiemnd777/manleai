@@ -74,12 +74,24 @@ func (s *realtimeSession) AppendInputAudio(ctx context.Context, base64Audio stri
 	})
 }
 
-func (s *realtimeSession) Speak(ctx context.Context, text string) error {
-	text = strings.TrimSpace(text)
+func (s *realtimeSession) Speak(ctx context.Context, req voice.RealtimeSpeakRequest) error {
+	text := strings.TrimSpace(req.Text)
 	if text == "" {
 		return nil
 	}
-	return s.write(ctx, realtimeResponseCreatePayload(s.legacyProtocol, text))
+	return s.write(ctx, realtimeResponseCreatePayload(s.legacyProtocol, strings.TrimSpace(req.RequestID), text))
+}
+
+func (s *realtimeSession) CancelResponse(ctx context.Context, responseID string) error {
+	payload := map[string]any{"type": "response.cancel"}
+	if responseID = strings.TrimSpace(responseID); responseID != "" {
+		payload["response_id"] = responseID
+	}
+	return s.write(ctx, payload)
+}
+
+func (s *realtimeSession) RequiresResponseIdentity() bool {
+	return !s.legacyProtocol
 }
 
 func (s *realtimeSession) Events() <-chan voice.RealtimeEvent {
@@ -155,7 +167,7 @@ func truncateRealtimeTranscriptionPrompt(value string) string {
 	return strings.TrimSpace(string(runes[:realtimeTranscriptionPromptMaxLength]))
 }
 
-func realtimeResponseCreatePayload(legacyProtocol bool, text string) map[string]any {
+func realtimeResponseCreatePayload(legacyProtocol bool, requestID string, text string) map[string]any {
 	response := map[string]any{
 		"instructions": strings.Join([]string{
 			"Read this backend-approved phone response exactly as written.",
@@ -163,6 +175,9 @@ func realtimeResponseCreatePayload(legacyProtocol bool, text string) map[string]
 			"Response:",
 			strings.TrimSpace(text),
 		}, "\n"),
+	}
+	if requestID = strings.TrimSpace(requestID); requestID != "" {
+		response["metadata"] = map[string]string{"manleai_request_id": requestID}
 	}
 	if legacyProtocol {
 		response["modalities"] = []string{"audio"}
@@ -286,9 +301,15 @@ func parseRealtimeEvent(raw []byte) voice.RealtimeEvent {
 	var event struct {
 		Type       string `json:"type"`
 		ItemID     string `json:"item_id"`
+		ResponseID string `json:"response_id"`
 		Delta      string `json:"delta"`
 		Transcript string `json:"transcript"`
-		Error      struct {
+		Response   struct {
+			ID       string         `json:"id"`
+			Status   string         `json:"status"`
+			Metadata map[string]any `json:"metadata"`
+		} `json:"response"`
+		Error struct {
 			Type    string `json:"type"`
 			Code    string `json:"code"`
 			Param   string `json:"param"`
@@ -300,20 +321,44 @@ func parseRealtimeEvent(raw []byte) voice.RealtimeEvent {
 	}
 	switch event.Type {
 	case "response.audio.delta", "response.output_audio.delta":
-		return voice.RealtimeEvent{Type: voice.RealtimeEventAudioDelta, AudioBase64: strings.TrimSpace(event.Delta)}
+		return voice.RealtimeEvent{Type: voice.RealtimeEventAudioDelta, ResponseID: strings.TrimSpace(event.ResponseID), AudioBase64: strings.TrimSpace(event.Delta)}
+	case "response.audio_transcript.delta", "response.output_audio_transcript.delta":
+		return voice.RealtimeEvent{Type: voice.RealtimeEventAudioTranscriptDelta, ResponseID: strings.TrimSpace(event.ResponseID), AudioTranscript: event.Delta}
+	case "response.audio_transcript.done", "response.output_audio_transcript.done":
+		return voice.RealtimeEvent{Type: voice.RealtimeEventAudioTranscriptDone, ResponseID: strings.TrimSpace(event.ResponseID), AudioTranscript: strings.TrimSpace(event.Transcript)}
 	case "conversation.item.input_audio_transcription.completed":
 		return voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: strings.TrimSpace(event.ItemID), Transcript: strings.TrimSpace(event.Transcript)}
 	case "input_audio_buffer.speech_started":
 		return voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStarted}
+	case "response.created":
+		return voice.RealtimeEvent{
+			Type:              voice.RealtimeEventResponseCreated,
+			ResponseID:        strings.TrimSpace(event.Response.ID),
+			ResponseRequestID: realtimeRequestID(event.Response.Metadata),
+			ResponseStatus:    strings.TrimSpace(event.Response.Status),
+		}
 	case "response.done":
-		return voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
+		return voice.RealtimeEvent{
+			Type:              voice.RealtimeEventResponseDone,
+			ResponseID:        strings.TrimSpace(event.Response.ID),
+			ResponseRequestID: realtimeRequestID(event.Response.Metadata),
+			ResponseStatus:    strings.TrimSpace(event.Response.Status),
+		}
 	case "session.updated":
 		return voice.RealtimeEvent{Type: voice.RealtimeEventSessionUpdated}
 	case "error":
-		return voice.RealtimeEvent{Type: voice.RealtimeEventError, Error: realtimeErrorMessage(event.Error.Type, event.Error.Code, event.Error.Param, event.Error.Message)}
+		return voice.RealtimeEvent{Type: voice.RealtimeEventError, ErrorCode: strings.TrimSpace(event.Error.Code), ErrorParam: strings.TrimSpace(event.Error.Param), Error: realtimeErrorMessage(event.Error.Type, event.Error.Code, event.Error.Param, event.Error.Message)}
 	default:
 		return voice.RealtimeEvent{}
 	}
+}
+
+func realtimeRequestID(metadata map[string]any) string {
+	if metadata == nil {
+		return ""
+	}
+	value, _ := metadata["manleai_request_id"].(string)
+	return strings.TrimSpace(value)
 }
 
 func realtimeErrorMessage(errorType string, code string, param string, message string) string {

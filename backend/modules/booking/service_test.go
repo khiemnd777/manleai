@@ -3,6 +3,8 @@ package booking
 import (
 	"context"
 	"errors"
+	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -118,6 +120,23 @@ func TestAttemptsRejectsInvalidStatusFilter(t *testing.T) {
 	}
 }
 
+func TestLatestTestBookingExpiresOperationLeaseBeforeRead(t *testing.T) {
+	store := newFakeStore()
+	store.latestTest = &TestBookingRecord{BookingAttemptID: "attempt_test_1", Status: StatusFallbackPending}
+	service := NewService(store, nil)
+
+	latest, err := service.LatestTestBooking(context.Background(), "salon_1", "owner_1")
+	if err != nil {
+		t.Fatalf("LatestTestBooking returned error: %v", err)
+	}
+	if latest == nil || latest.BookingAttemptID != "attempt_test_1" {
+		t.Fatalf("latest = %#v, want persisted test attempt", latest)
+	}
+	if store.expireLeaseCalls != 1 {
+		t.Fatalf("expire lease calls = %d, want one before latest test read", store.expireLeaseCalls)
+	}
+}
+
 func TestCalendarReturnsRangeAppointmentsPendingRequestsAndWarnings(t *testing.T) {
 	store := newFakeStore()
 	lastSyncedAt := testStartTime().Add(-time.Hour)
@@ -146,6 +165,7 @@ func TestCalendarReturnsRangeAppointmentsPendingRequestsAndWarnings(t *testing.T
 	store.calendarPendingRequests = []BookingAttempt{{
 		ID:                 "attempt_pending",
 		Status:             StatusFallbackPending,
+		RetryPolicy:        RetryPolicySafe,
 		RequestedStartTime: testStartTime().Add(3 * time.Hour),
 		RequestedEndTime:   testStartTime().Add(4 * time.Hour),
 	}, {
@@ -565,7 +585,7 @@ func TestCreateStoresFallbackPendingWhenPOSBookingFails(t *testing.T) {
 	store := newFakeStore()
 	provider := &fakeProvider{
 		customer:         &pos.Customer{POSCustomerID: "cust_1", Name: "Linh Tran", Phone: "+13125550101"},
-		createBookingErr: errors.New("square booking conflict"),
+		createBookingErr: pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhaseDispatch, errors.New("square booking conflict")),
 	}
 	service := NewService(store, []pos.POSProvider{provider})
 
@@ -596,6 +616,144 @@ func TestCreateStoresFallbackPendingWhenPOSBookingFails(t *testing.T) {
 	}
 	if store.fallback.ErrorCode != pos.ErrorBookingConflict {
 		t.Fatalf("error code = %s, want %s", store.fallback.ErrorCode, pos.ErrorBookingConflict)
+	}
+	if attempt.ProviderOutcome != ProviderOutcomeFailed || attempt.RetryPolicy != RetryPolicySafe || !attempt.CanRetry {
+		t.Fatalf("fallback policy = outcome=%s retry=%s can_retry=%t, want failed/safe/true", attempt.ProviderOutcome, attempt.RetryPolicy, attempt.CanRetry)
+	}
+}
+
+func TestCreateBlocksRetryAndRequiresReconciliationWhenPOSResultIsUnknown(t *testing.T) {
+	store := newFakeStore()
+	provider := &fakeProvider{
+		customer:         &pos.Customer{POSCustomerID: "cust_1", Name: "Linh Tran", Phone: "+13125550101"},
+		createBookingErr: context.DeadlineExceeded,
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+	req := validCreateRequest()
+	req.OperationKey = "voice-call-1-booking"
+
+	attempt, err := service.Create(context.Background(), "salon_1", "owner_1", req)
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if attempt.Status != StatusFallbackPending || attempt.ProviderOutcome != ProviderOutcomeUnknown {
+		t.Fatalf("attempt = %#v, want fallback_pending/unknown", attempt)
+	}
+	if attempt.RetryPolicy != RetryPolicyBlocked || attempt.Reconciliation != ReconciliationRequired || attempt.CanRetry {
+		t.Fatalf("unknown result policy = retry=%s reconciliation=%s can_retry=%t, want blocked/required/false", attempt.RetryPolicy, attempt.Reconciliation, attempt.CanRetry)
+	}
+}
+
+func TestCreateTreatsUntypedPostDispatchErrorAsUnknown(t *testing.T) {
+	store := newFakeStore()
+	provider := &fakeProvider{
+		customer:         &pos.Customer{POSCustomerID: "cust_1", Name: "Linh Tran", Phone: "+13125550101"},
+		createBookingErr: io.ErrUnexpectedEOF,
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+	req := validCreateRequest()
+	req.OperationKey = "voice-call-truncated-provider-response"
+
+	attempt, err := service.Create(context.Background(), "salon_1", "owner_1", req)
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if attempt.ProviderOutcome != ProviderOutcomeUnknown || attempt.RetryPolicy != RetryPolicyBlocked || attempt.Reconciliation != ReconciliationRequired || attempt.CanRetry {
+		t.Fatalf("attempt = %#v, want unknown provider result with retry blocked", attempt)
+	}
+}
+
+func TestCreateReusesDurableOperationResultWithoutSecondPOSCall(t *testing.T) {
+	store := newFakeStore()
+	provider := &fakeProvider{
+		customer: &pos.Customer{POSCustomerID: "cust_1", Name: "Linh Tran", Phone: "+13125550101"},
+		appointment: &pos.Appointment{
+			POSAppointmentID: "booking_1", POSAppointmentVersion: 7,
+			StartTime: testStartTime(), EndTime: testStartTime().Add(45 * time.Minute), Status: StatusConfirmed,
+		},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+	req := validCreateRequest()
+	req.OperationKey = "voice-call-2-booking"
+
+	first, err := service.Create(context.Background(), "salon_1", "owner_1", req)
+	if err != nil {
+		t.Fatalf("first Create returned error: %v", err)
+	}
+	second, err := service.Create(context.Background(), "salon_1", "owner_1", req)
+	if err != nil {
+		t.Fatalf("second Create returned error: %v", err)
+	}
+	if first.Status != StatusConfirmed || second.Status != StatusConfirmed || second.Appointment == nil {
+		t.Fatalf("durable results first=%#v second=%#v, want confirmed result reused", first, second)
+	}
+	if provider.createAppointmentCalls != 1 {
+		t.Fatalf("POS create calls = %d, want 1", provider.createAppointmentCalls)
+	}
+}
+
+func TestCreateRejectsOperationKeyReuseWithDifferentPayload(t *testing.T) {
+	store := newFakeStore()
+	provider := &fakeProvider{
+		customer: &pos.Customer{POSCustomerID: "cust_1", Name: "Linh Tran", Phone: "+13125550101"},
+		appointment: &pos.Appointment{
+			POSAppointmentID: "booking_1", POSAppointmentVersion: 7,
+			StartTime: testStartTime(), EndTime: testStartTime().Add(45 * time.Minute), Status: StatusConfirmed,
+		},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+	req := validCreateRequest()
+	req.OperationKey = "voice-call-3-booking"
+	if _, err := service.Create(context.Background(), "salon_1", "owner_1", req); err != nil {
+		t.Fatalf("first Create returned error: %v", err)
+	}
+	req.Notes = "Different request payload"
+	if _, err := service.Create(context.Background(), "salon_1", "owner_1", req); !errors.Is(err, ErrOperationConflict) {
+		t.Fatalf("second Create error = %v, want operation conflict", err)
+	}
+	if provider.createAppointmentCalls != 1 {
+		t.Fatalf("POS create calls = %d, want 1", provider.createAppointmentCalls)
+	}
+}
+
+func TestCreateConcurrentDuplicateClaimsOnlyOnePOSWriter(t *testing.T) {
+	store := newFakeStore()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	provider := &fakeProvider{
+		customer: &pos.Customer{POSCustomerID: "cust_1", Name: "Linh Tran", Phone: "+13125550101"},
+		appointment: &pos.Appointment{
+			POSAppointmentID: "booking_1", POSAppointmentVersion: 7,
+			StartTime: testStartTime(), EndTime: testStartTime().Add(45 * time.Minute), Status: StatusConfirmed,
+		},
+		beforeCreateAppointment: func() {
+			close(started)
+			<-release
+		},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+	req := validCreateRequest()
+	req.OperationKey = "voice-call-4-booking"
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := service.Create(context.Background(), "salon_1", "owner_1", req)
+		firstDone <- err
+	}()
+	<-started
+	duplicate, err := service.Create(context.Background(), "salon_1", "owner_1", req)
+	if err != nil {
+		t.Fatalf("duplicate Create returned error: %v", err)
+	}
+	if duplicate.Status != StatusPOSPending || duplicate.ProviderOutcome != ProviderOutcomeInFlight {
+		t.Fatalf("duplicate = %#v, want existing in-flight attempt", duplicate)
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Create returned error: %v", err)
+	}
+	if provider.createAppointmentCalls != 1 {
+		t.Fatalf("POS create calls = %d, want 1", provider.createAppointmentCalls)
 	}
 }
 
@@ -921,7 +1079,7 @@ func TestRescheduleSupportsMultipleSegments(t *testing.T) {
 
 func TestRescheduleStoresFallbackWhenPOSFails(t *testing.T) {
 	store := newFakeStore()
-	provider := &fakeProvider{rescheduleErr: errors.New("square booking conflict")}
+	provider := &fakeProvider{rescheduleErr: pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhaseDispatch, errors.New("square booking conflict"))}
 	service := NewService(store, []pos.POSProvider{provider})
 
 	appointment, fallback, err := service.Reschedule(context.Background(), "salon_1", "owner_1", "appointment_1", RescheduleRequest{
@@ -948,6 +1106,9 @@ func TestRescheduleStoresFallbackWhenPOSFails(t *testing.T) {
 	if store.actionFallback.ErrorCode != pos.ErrorBookingConflict {
 		t.Fatalf("error code = %s, want %s", store.actionFallback.ErrorCode, pos.ErrorBookingConflict)
 	}
+	if fallback.RetryPolicy != RetryPolicySafe || !fallback.CanRetry || fallback.Reconciliation != ReconciliationNotRequired {
+		t.Fatalf("reschedule fallback policy = %#v, want retry-safe without reconciliation", fallback)
+	}
 }
 
 func TestRescheduleMultiSegmentFallbackLeavesAppointmentUnchanged(t *testing.T) {
@@ -956,7 +1117,7 @@ func TestRescheduleMultiSegmentFallbackLeavesAppointmentUnchanged(t *testing.T) 
 	originalStart := store.appointment.StartTime
 	originalEnd := store.appointment.EndTime
 	originalSegments := append([]BookingSegmentRecord(nil), store.appointment.Segments...)
-	provider := &fakeProvider{rescheduleErr: errors.New("square booking conflict")}
+	provider := &fakeProvider{rescheduleErr: pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhaseDispatch, errors.New("square booking conflict"))}
 	service := NewService(store, []pos.POSProvider{provider})
 
 	appointment, fallback, err := service.Reschedule(context.Background(), "salon_1", "owner_1", "appointment_1", RescheduleRequest{
@@ -1030,7 +1191,7 @@ func TestCancelPersistsOnlyAfterPOSSuccess(t *testing.T) {
 
 func TestCancelStoresFallbackWhenPOSFails(t *testing.T) {
 	store := newFakeStore()
-	provider := &fakeProvider{cancelErr: errors.New("square permission denied")}
+	provider := &fakeProvider{cancelErr: pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhaseDispatch, errors.New("square permission denied"))}
 	service := NewService(store, []pos.POSProvider{provider})
 
 	appointment, fallback, err := service.Cancel(context.Background(), "salon_1", "owner_1", "appointment_1", CancelRequest{
@@ -1057,12 +1218,38 @@ func TestCancelStoresFallbackWhenPOSFails(t *testing.T) {
 	if store.actionFallback.ErrorCode != pos.ErrorPermissionDenied {
 		t.Fatalf("error code = %s, want %s", store.actionFallback.ErrorCode, pos.ErrorPermissionDenied)
 	}
+	if fallback.RetryPolicy != RetryPolicySafe || !fallback.CanRetry || fallback.Reconciliation != ReconciliationNotRequired {
+		t.Fatalf("cancel fallback policy = %#v, want retry-safe without reconciliation", fallback)
+	}
+}
+
+func TestCancelTimeoutBlocksRetryUntilProviderReconciliation(t *testing.T) {
+	store := newFakeStore()
+	provider := &fakeProvider{cancelErr: context.DeadlineExceeded}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	appointment, fallback, err := service.Cancel(context.Background(), "salon_1", "owner_1", "appointment_1", CancelRequest{
+		OperationKey: "voice-call-cancel-timeout",
+		Reason:       "Caller asked to cancel the appointment",
+	})
+	if err != nil {
+		t.Fatalf("Cancel returned error: %v", err)
+	}
+	if appointment != nil {
+		t.Fatalf("appointment should remain unchanged after unknown POS result")
+	}
+	if fallback == nil || fallback.ProviderOutcome != ProviderOutcomeUnknown || fallback.RetryPolicy != RetryPolicyBlocked || fallback.Reconciliation != ReconciliationRequired || fallback.CanRetry {
+		t.Fatalf("timeout fallback = %#v, want unknown/blocked/reconciliation-required", fallback)
+	}
+	if store.appointment.Status != StatusConfirmed {
+		t.Fatalf("stored appointment status = %s, want original confirmed state", store.appointment.Status)
+	}
 }
 
 func TestCancelFallbackSnapshotsMultipleSegments(t *testing.T) {
 	store := newFakeStore()
 	store.addSecondAppointmentSegment()
-	provider := &fakeProvider{cancelErr: errors.New("square permission denied")}
+	provider := &fakeProvider{cancelErr: pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhaseDispatch, errors.New("square permission denied"))}
 	service := NewService(store, []pos.POSProvider{provider})
 
 	appointment, fallback, err := service.Cancel(context.Background(), "salon_1", "owner_1", "appointment_1", CancelRequest{
@@ -1130,6 +1317,9 @@ func TestAvailableSlotsFiltersBusinessHoursAndMapsStaff(t *testing.T) {
 	if provider.lastAvailabilityInput.ServiceID != "square_service_1" || provider.lastAvailabilityInput.StaffID != "square_staff_1" {
 		t.Fatalf("provider input = %#v, want POS service/staff IDs", provider.lastAvailabilityInput)
 	}
+	if provider.lastAvailabilityInput.Timezone != "America/Chicago" {
+		t.Fatalf("provider timezone = %q, want salon timezone", provider.lastAvailabilityInput.Timezone)
+	}
 	if len(result.Slots) != 1 {
 		t.Fatalf("slots = %#v, want one business-hours slot", result.Slots)
 	}
@@ -1139,6 +1329,57 @@ func TestAvailableSlotsFiltersBusinessHoursAndMapsStaff(t *testing.T) {
 	}
 	if !slot.StartTime.Equal(time.Date(2026, 6, 15, 10, 0, 0, 0, loc).UTC()) {
 		t.Fatalf("slot start = %s, want 10am local", slot.StartTime)
+	}
+}
+
+func TestCreateAndAvailabilityRejectStaleNonActiveProviderMappings(t *testing.T) {
+	store := newFakeStore()
+	store.activeProvider = "future_pos"
+	provider := &fakeProvider{}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	attempt, err := service.Create(context.Background(), "salon_1", "owner_1", validCreateRequest())
+	if !errors.Is(err, pos.ErrNotFound) || attempt != nil {
+		t.Fatalf("Create = attempt %#v err %v, want stale Square mapping rejected", attempt, err)
+	}
+	if provider.createAppointmentCalls != 0 {
+		t.Fatalf("provider create calls = %d, want zero", provider.createAppointmentCalls)
+	}
+
+	result, err := service.AvailableSlots(context.Background(), "salon_1", "owner_1", AvailabilityRequest{
+		ServiceID:     "service_1",
+		StaffID:       "staff_1",
+		PreferredDate: "2026-06-15",
+	})
+	if !errors.Is(err, pos.ErrNotFound) || result != nil {
+		t.Fatalf("AvailableSlots = result %#v err %v, want stale Square mapping rejected", result, err)
+	}
+	if provider.availabilityCalls != 0 {
+		t.Fatalf("provider availability calls = %d, want zero", provider.availabilityCalls)
+	}
+}
+
+func TestRescheduleKeepsHistoricalAppointmentProviderAfterActiveProviderSwitch(t *testing.T) {
+	store := newFakeStore()
+	store.activeProvider = "future_pos"
+	provider := &fakeProvider{rescheduledAppointment: &pos.Appointment{
+		POSAppointmentID:      "booking_1",
+		POSAppointmentVersion: 8,
+		StartTime:             testStartTime().Add(24 * time.Hour),
+		EndTime:               testStartTime().Add(24*time.Hour + 45*time.Minute),
+		Status:                StatusConfirmed,
+	}}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	appointment, fallback, err := service.Reschedule(context.Background(), "salon_1", "owner_1", "appointment_1", RescheduleRequest{
+		OperationKey: "historical-square-reschedule",
+		StartTime:    testStartTime().Add(24 * time.Hour),
+	})
+	if err != nil || fallback != nil || appointment == nil {
+		t.Fatalf("Reschedule = appointment %#v fallback %#v err %v, want historical Square action", appointment, fallback, err)
+	}
+	if provider.rescheduleCalls != 1 {
+		t.Fatalf("Square reschedule calls = %d, want one", provider.rescheduleCalls)
 	}
 }
 
@@ -1349,6 +1590,9 @@ func testStartTime() time.Time {
 }
 
 type fakeStore struct {
+	mu                       sync.Mutex
+	operations               map[string]*BookingAttempt
+	activeProvider           string
 	service                  ServiceRef
 	services                 []ServiceRef
 	staff                    StaffRef
@@ -1387,10 +1631,14 @@ type fakeStore struct {
 	rescheduleLookup         RescheduleLookupRequest
 	linkedCustomer           *CustomerRef
 	linkCustomerErr          error
+	expireLeaseCalls         int
+	latestTest               *TestBookingRecord
 }
 
 func newFakeStore() *fakeStore {
 	store := &fakeStore{
+		operations:     map[string]*BookingAttempt{},
+		activeProvider: pos.ProviderSquare,
 		service: ServiceRef{
 			ID:                "service_1",
 			POSProvider:       pos.ProviderSquare,
@@ -1484,12 +1732,12 @@ func (f *fakeStore) GetActiveProvider(ctx context.Context, salonID string, owner
 	if salonID != "salon_1" || ownerUserID != "owner_1" {
 		return "", pos.ErrNotFound
 	}
-	return pos.ProviderSquare, nil
+	return f.activeProvider, nil
 }
 
-func (f *fakeStore) GetBookableService(ctx context.Context, salonID string, serviceID string) (*ServiceRef, error) {
+func (f *fakeStore) GetBookableService(ctx context.Context, salonID string, provider string, serviceID string) (*ServiceRef, error) {
 	for _, service := range f.services {
-		if serviceID == service.ID {
+		if serviceID == service.ID && provider == service.POSProvider {
 			item := service
 			return &item, nil
 		}
@@ -1497,9 +1745,9 @@ func (f *fakeStore) GetBookableService(ctx context.Context, salonID string, serv
 	return nil, pos.ErrNotFound
 }
 
-func (f *fakeStore) GetBookableStaff(ctx context.Context, salonID string, staffID string) (*StaffRef, error) {
+func (f *fakeStore) GetBookableStaff(ctx context.Context, salonID string, provider string, staffID string) (*StaffRef, error) {
 	for _, staff := range f.staffRefs {
-		if staffID == staff.ID {
+		if staffID == staff.ID && provider == staff.POSProvider {
 			item := staff
 			return &item, nil
 		}
@@ -1507,8 +1755,14 @@ func (f *fakeStore) GetBookableStaff(ctx context.Context, salonID string, staffI
 	return nil, pos.ErrNotFound
 }
 
-func (f *fakeStore) ListBookableStaffRefs(ctx context.Context, salonID string) ([]StaffRef, error) {
-	return f.staffRefs, nil
+func (f *fakeStore) ListBookableStaffRefs(ctx context.Context, salonID string, provider string) ([]StaffRef, error) {
+	items := make([]StaffRef, 0, len(f.staffRefs))
+	for _, staff := range f.staffRefs {
+		if staff.POSProvider == provider {
+			items = append(items, staff)
+		}
+	}
+	return items, nil
 }
 
 func (f *fakeStore) ResolveBookingCustomer(ctx context.Context, salonID string, provider string, name string, phone string, email string) (*CustomerRef, error) {
@@ -1553,15 +1807,31 @@ func (f *fakeStore) GetSchedule(ctx context.Context, salonID string) (*Schedule,
 	return &f.schedule, nil
 }
 
-func (f *fakeStore) CreatePendingBookingAttempt(ctx context.Context, record PendingBookingRecord) (*BookingAttempt, error) {
+func (f *fakeStore) ClaimPendingBookingAttempt(ctx context.Context, record PendingBookingRecord) (*BookingOperationClaim, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.pending = &record
-	return &BookingAttempt{
+	if existing, ok := f.operations[record.OperationKey]; ok {
+		if existing.RequestFingerprint != record.RequestFingerprint {
+			return nil, ErrOperationConflict
+		}
+		copy := *existing
+		return &BookingOperationClaim{Attempt: &copy, Acquired: false}, nil
+	}
+	attempt := &BookingAttempt{
 		ID:                 "attempt_1",
 		SalonID:            record.SalonID,
 		Source:             record.Source,
 		Status:             StatusPOSPending,
 		POSProvider:        record.Provider,
 		POSIdempotencyKey:  record.POSIdempotencyKey,
+		OperationKey:       record.OperationKey,
+		RequestFingerprint: record.RequestFingerprint,
+		OperationType:      BookingActionBook,
+		ProcessingToken:    record.ProcessingToken,
+		ProviderOutcome:    ProviderOutcomeNotStarted,
+		RetryPolicy:        RetryPolicyNone,
+		Reconciliation:     ReconciliationNotRequired,
 		CustomerName:       record.CustomerName,
 		CustomerPhone:      record.CustomerPhone,
 		ServiceID:          record.Service.ID,
@@ -1569,7 +1839,29 @@ func (f *fakeStore) CreatePendingBookingAttempt(ctx context.Context, record Pend
 		StaffSelectionMode: record.StaffSelectionMode,
 		RequestedStartTime: record.StartTime,
 		RequestedEndTime:   record.EndTime,
-	}, nil
+	}
+	f.operations[record.OperationKey] = attempt
+	copy := *attempt
+	return &BookingOperationClaim{Attempt: &copy, Acquired: true}, nil
+}
+
+func (f *fakeStore) MarkBookingOperationStarted(ctx context.Context, salonID string, attemptID string, processingToken string, leaseExpiresAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, attempt := range f.operations {
+		if attempt.ID == attemptID && attempt.SalonID == salonID && attempt.ProcessingToken == processingToken {
+			attempt.ProviderOutcome = ProviderOutcomeInFlight
+			value := leaseExpiresAt
+			attempt.ProcessingLeaseEnds = &value
+			return nil
+		}
+	}
+	return ErrOperationInProgress
+}
+
+func (f *fakeStore) ExpireBookingOperationLeases(ctx context.Context, salonID string) error {
+	f.expireLeaseCalls++
+	return nil
 }
 
 func (f *fakeStore) SaveConfirmedBooking(ctx context.Context, record ConfirmedBookingRecord) (*BookingAttempt, error) {
@@ -1577,11 +1869,15 @@ func (f *fakeStore) SaveConfirmedBooking(ctx context.Context, record ConfirmedBo
 		return nil, err
 	}
 	f.confirmed = &record
-	return &BookingAttempt{
+	attempt := &BookingAttempt{
 		ID:                 record.AttemptID,
 		SalonID:            record.SalonID,
 		Source:             record.Source,
 		Status:             StatusConfirmed,
+		OperationType:      BookingActionBook,
+		ProviderOutcome:    ProviderOutcomeSucceeded,
+		RetryPolicy:        RetryPolicyNone,
+		Reconciliation:     ReconciliationNotRequired,
 		POSProvider:        record.Provider,
 		POSBookingID:       record.POSBookingID,
 		CustomerName:       record.CustomerName,
@@ -1598,16 +1894,22 @@ func (f *fakeStore) SaveConfirmedBooking(ctx context.Context, record ConfirmedBo
 			Status:                StatusConfirmed,
 			StaffSelectionMode:    record.StaffSelectionMode,
 		},
-	}, nil
+	}
+	f.setOperationResult(record.AttemptID, attempt)
+	return attempt, nil
 }
 
 func (f *fakeStore) SaveFallbackBooking(ctx context.Context, record FallbackBookingRecord) (*BookingAttempt, error) {
 	f.fallback = &record
-	return &BookingAttempt{
+	attempt := &BookingAttempt{
 		ID:                 record.AttemptID,
 		SalonID:            record.SalonID,
 		Source:             record.Source,
 		Status:             StatusFallbackPending,
+		OperationType:      BookingActionBook,
+		ProviderOutcome:    record.ProviderOutcome,
+		RetryPolicy:        record.RetryPolicy,
+		Reconciliation:     record.Reconciliation,
 		POSProvider:        record.Provider,
 		CustomerName:       record.CustomerName,
 		CustomerPhone:      record.CustomerPhone,
@@ -1618,7 +1920,10 @@ func (f *fakeStore) SaveFallbackBooking(ctx context.Context, record FallbackBook
 		RequestedEndTime:   record.EndTime,
 		ErrorCode:          record.ErrorCode,
 		ErrorMessage:       record.ErrorMessage,
-	}, nil
+	}
+	annotateBookingAttemptPolicy(attempt)
+	f.setOperationResult(record.AttemptID, attempt)
+	return attempt, nil
 }
 
 func (f *fakeStore) GetAppointmentForOwner(ctx context.Context, salonID string, ownerUserID string, appointmentID string) (*AppointmentActionRef, error) {
@@ -1652,7 +1957,9 @@ func last10Digits(value string) string {
 	return digits[len(digits)-10:]
 }
 
-func (f *fakeStore) CreatePendingAppointmentAction(ctx context.Context, record PendingAppointmentActionRecord) (*BookingAttempt, error) {
+func (f *fakeStore) ClaimPendingAppointmentAction(ctx context.Context, record PendingAppointmentActionRecord) (*BookingOperationClaim, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	segments := record.Segments
 	if len(segments) == 0 {
 		segments = appointmentActionSegments(record.Appointment)
@@ -1660,7 +1967,14 @@ func (f *fakeStore) CreatePendingAppointmentAction(ctx context.Context, record P
 	primary := segments[0]
 	record.Segments = segments
 	f.pendingAction = &record
-	return &BookingAttempt{
+	if existing, ok := f.operations[record.OperationKey]; ok {
+		if existing.RequestFingerprint != record.RequestFingerprint {
+			return nil, ErrOperationConflict
+		}
+		copy := *existing
+		return &BookingOperationClaim{Attempt: &copy, Acquired: false}, nil
+	}
+	attempt := &BookingAttempt{
 		ID:                 "attempt_action_1",
 		SalonID:            record.SalonID,
 		Source:             record.Source,
@@ -1668,6 +1982,13 @@ func (f *fakeStore) CreatePendingAppointmentAction(ctx context.Context, record P
 		POSProvider:        record.Provider,
 		POSBookingID:       record.Appointment.POSAppointmentID,
 		POSIdempotencyKey:  record.POSIdempotencyKey,
+		OperationKey:       record.OperationKey,
+		RequestFingerprint: record.RequestFingerprint,
+		OperationType:      record.OperationType,
+		ProcessingToken:    record.ProcessingToken,
+		ProviderOutcome:    ProviderOutcomeNotStarted,
+		RetryPolicy:        RetryPolicyNone,
+		Reconciliation:     ReconciliationNotRequired,
 		CustomerName:       record.Appointment.CustomerName,
 		CustomerPhone:      record.Appointment.CustomerPhone,
 		ServiceID:          primary.Service.ID,
@@ -1676,7 +1997,10 @@ func (f *fakeStore) CreatePendingAppointmentAction(ctx context.Context, record P
 		Segments:           bookingSegmentSnapshots(segments),
 		RequestedStartTime: record.RequestedStartTime,
 		RequestedEndTime:   record.RequestedEndTime,
-	}, nil
+	}
+	f.operations[record.OperationKey] = attempt
+	copy := *attempt
+	return &BookingOperationClaim{Attempt: &copy, Acquired: true}, nil
 }
 
 func (f *fakeStore) SaveRescheduledAppointment(ctx context.Context, record RescheduledAppointmentRecord) (*Appointment, error) {
@@ -1698,6 +2022,12 @@ func (f *fakeStore) SaveRescheduledAppointment(ctx context.Context, record Resch
 	f.appointment.StaffSelectionMode = primary.StaffSelectionMode
 	f.appointment.Segments = segments
 	f.appointment.POSAppointmentVersion = record.POSBookingVersion
+	f.setOperationResult(record.AttemptID, &BookingAttempt{
+		ID: record.AttemptID, SalonID: record.Appointment.SalonID, Status: StatusRescheduled,
+		OperationType: BookingActionReschedule, ProviderOutcome: ProviderOutcomeSucceeded,
+		RetryPolicy: RetryPolicyNone, Reconciliation: ReconciliationNotRequired,
+		Appointment: appointmentFromActionRef(f.appointment),
+	})
 	return appointmentFromActionRef(f.appointment), nil
 }
 
@@ -1705,6 +2035,12 @@ func (f *fakeStore) SaveCancelledAppointment(ctx context.Context, record Cancell
 	f.cancelled = &record
 	f.appointment.Status = StatusCancelled
 	f.appointment.POSAppointmentVersion = record.POSBookingVersion
+	f.setOperationResult(record.AttemptID, &BookingAttempt{
+		ID: record.AttemptID, SalonID: record.Appointment.SalonID, Status: StatusCancelled,
+		OperationType: BookingActionCancel, ProviderOutcome: ProviderOutcomeSucceeded,
+		RetryPolicy: RetryPolicyNone, Reconciliation: ReconciliationNotRequired,
+		Appointment: appointmentFromActionRef(f.appointment),
+	})
 	return appointmentFromActionRef(f.appointment), nil
 }
 
@@ -1716,10 +2052,13 @@ func (f *fakeStore) SaveAppointmentActionFallback(ctx context.Context, record Ap
 	primary := segments[0]
 	record.Segments = segments
 	f.actionFallback = &record
-	return &BookingAttempt{
+	attempt := &BookingAttempt{
 		ID:                 record.AttemptID,
 		SalonID:            record.SalonID,
 		Status:             StatusFallbackPending,
+		ProviderOutcome:    record.ProviderOutcome,
+		RetryPolicy:        record.RetryPolicy,
+		Reconciliation:     record.Reconciliation,
 		POSProvider:        record.Provider,
 		POSBookingID:       record.Appointment.POSAppointmentID,
 		CustomerName:       record.Appointment.CustomerName,
@@ -1732,11 +2071,39 @@ func (f *fakeStore) SaveAppointmentActionFallback(ctx context.Context, record Ap
 		RequestedEndTime:   record.RequestedEndTime,
 		ErrorCode:          record.ErrorCode,
 		ErrorMessage:       record.ErrorMessage,
-	}, nil
+	}
+	if record.NotificationType == NotificationTypeRescheduleFallback {
+		attempt.OperationType = BookingActionReschedule
+	} else {
+		attempt.OperationType = BookingActionCancel
+	}
+	annotateBookingAttemptPolicy(attempt)
+	f.setOperationResult(record.AttemptID, attempt)
+	return attempt, nil
+}
+
+func (f *fakeStore) setOperationResult(attemptID string, result *BookingAttempt) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for key, existing := range f.operations {
+		if existing.ID != attemptID {
+			continue
+		}
+		copy := *result
+		copy.OperationKey = existing.OperationKey
+		copy.RequestFingerprint = existing.RequestFingerprint
+		copy.POSIdempotencyKey = existing.POSIdempotencyKey
+		f.operations[key] = &copy
+		return
+	}
 }
 
 func (f *fakeStore) LatestTestBooking(ctx context.Context, salonID string, ownerUserID string) (*TestBookingRecord, error) {
-	return nil, pos.ErrNotFound
+	if f.latestTest == nil {
+		return nil, pos.ErrNotFound
+	}
+	item := *f.latestTest
+	return &item, nil
 }
 
 func (f *fakeStore) ListAppointments(ctx context.Context, salonID string, ownerUserID string, limit int, offset int) ([]Appointment, error) {
@@ -1797,34 +2164,35 @@ func (f *fakeStore) LogPOSError(ctx context.Context, salonID string, provider st
 }
 
 type fakeProvider struct {
-	customer               *pos.Customer
-	appointment            *pos.Appointment
-	rescheduledAppointment *pos.Appointment
-	cancelledAppointment   *pos.Appointment
-	searchCustomerErr      error
-	createCustomerErr      error
-	createBookingErr       error
-	rescheduleErr          error
-	cancelErr              error
-	listAppointmentsErr    error
-	availabilityErr        error
-	store                  *fakeStore
-	availabilitySlots      []pos.TimeSlot
-	listAppointments       []pos.ListedAppointment
-	lastAvailabilityInput  pos.AvailabilityInput
-	lastCreateInput        pos.CreateAppointmentInput
-	lastRescheduleInput    pos.RescheduleInput
-	lastCancelInput        pos.CancelInput
-	lastListInput          pos.AppointmentListInput
-	searchSawPending       bool
-	searchCustomerCalls    int
-	createCustomerCalls    int
-	availabilityCalls      int
-	createAppointmentCalls int
-	rescheduleCalls        int
-	cancelCalls            int
-	listAppointmentCalls   int
-	afterCreateAppointment func()
+	customer                *pos.Customer
+	appointment             *pos.Appointment
+	rescheduledAppointment  *pos.Appointment
+	cancelledAppointment    *pos.Appointment
+	searchCustomerErr       error
+	createCustomerErr       error
+	createBookingErr        error
+	rescheduleErr           error
+	cancelErr               error
+	listAppointmentsErr     error
+	availabilityErr         error
+	store                   *fakeStore
+	availabilitySlots       []pos.TimeSlot
+	listAppointments        []pos.ListedAppointment
+	lastAvailabilityInput   pos.AvailabilityInput
+	lastCreateInput         pos.CreateAppointmentInput
+	lastRescheduleInput     pos.RescheduleInput
+	lastCancelInput         pos.CancelInput
+	lastListInput           pos.AppointmentListInput
+	searchSawPending        bool
+	searchCustomerCalls     int
+	createCustomerCalls     int
+	availabilityCalls       int
+	createAppointmentCalls  int
+	rescheduleCalls         int
+	cancelCalls             int
+	listAppointmentCalls    int
+	afterCreateAppointment  func()
+	beforeCreateAppointment func()
 }
 
 func (f *fakeProvider) Name() string {
@@ -1882,6 +2250,9 @@ func (f *fakeProvider) CheckAvailability(ctx context.Context, salonID string, in
 func (f *fakeProvider) CreateAppointment(ctx context.Context, salonID string, input pos.CreateAppointmentInput) (*pos.Appointment, error) {
 	f.createAppointmentCalls++
 	f.lastCreateInput = input
+	if f.beforeCreateAppointment != nil {
+		f.beforeCreateAppointment()
+	}
 	if f.createBookingErr != nil {
 		return nil, f.createBookingErr
 	}

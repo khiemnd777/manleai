@@ -128,6 +128,52 @@ func TestSignedTwilioWebhookDrivesPhoneBookingFlowThroughConversation(t *testing
 	}
 }
 
+func TestSignedTwilioWebhookConsultsThenBooksExplicitCatalogChoice(t *testing.T) {
+	adapter := NewAdapter(config.TwilioVoiceConfig{AuthToken: "secret", IncomingPath: "/api/voice/twilio/incoming", TurnPath: "/api/voice/twilio/turn", RecordingPath: "/api/voice/twilio/recording"}, "")
+	conversationStore := newPhoneFlowConversationStore()
+	conversationStore.services[0].AIDescription = "Nail shaping and regular polish"
+	conversationStore.services = append(conversationStore.services, conversation.ServiceOption{ID: "service_gel", Name: "Gel Manicure", AIDescription: "Nail shaping and gel polish", DurationMinutes: 50, PriceFrom: 45})
+	bookingTool := &phoneFlowBookingTool{attempt: &booking.BookingAttempt{ID: "attempt_consultation", Status: booking.StatusConfirmed, POSBookingID: "square_booking_consultation", Appointment: &booking.Appointment{ID: "appointment_consultation", Status: booking.StatusConfirmed}}}
+	conversationService := conversation.NewService(conversationStore, bookingTool)
+	voiceStore := newPhoneFlowVoiceStore(conversationStore)
+	voiceService := voice.NewService(voiceStore, conversationService, config.VoiceConfig{Provider: voice.ProviderTwilio, Twilio: config.TwilioVoiceConfig{AuthToken: "secret", IncomingPath: "/api/voice/twilio/incoming", TurnPath: "/api/voice/twilio/turn", RecordingPath: "/api/voice/twilio/recording"}}, voice.AIProviders{})
+	app := testTwilioApp(adapter, voiceService)
+
+	incoming := url.Values{"CallSid": {"CA_CONSULT"}, "From": {"+13125550199"}, "To": {"+13125550101"}}
+	if res := signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/incoming", incoming); res.StatusCode != fiber.StatusOK {
+		t.Fatalf("incoming status = %d", res.StatusCode)
+	}
+
+	consult := url.Values{"CallSid": {"CA_CONSULT"}, "From": {"+13125550199"}, "To": {"+13125550101"}, "SpeechResult": {"Help me choose between Classic Manicure and Gel Manicure."}}
+	consultBody := readBody(t, signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", consult))
+	for _, fact := range []string{"Nail shaping and regular polish", "Nail shaping and gel polish", "Which service would you like"} {
+		if !strings.Contains(consultBody, fact) {
+			t.Fatalf("consultation response missing %q: %s", fact, consultBody)
+		}
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("consultation called booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+
+	ambiguous := url.Values{"CallSid": {"CA_CONSULT"}, "From": {"+13125550199"}, "To": {"+13125550101"}, "SpeechResult": {"Yes."}}
+	ambiguousBody := readBody(t, signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", ambiguous))
+	if !strings.Contains(ambiguousBody, "Which service would you like") || conversationStore.session.ServiceID != "" {
+		t.Fatalf("ambiguous affirmative selected a service: body=%s session=%#v", ambiguousBody, conversationStore.session)
+	}
+
+	choose := url.Values{"CallSid": {"CA_CONSULT"}, "From": {"+13125550199"}, "To": {"+13125550101"}, "SpeechResult": {"Gel Manicure on 2026-06-10."}}
+	chooseBody := readBody(t, signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", choose))
+	if !strings.Contains(chooseBody, "I have openings") || bookingTool.availabilityCalls != 1 || bookingTool.availabilityRequest.ServiceID != "service_gel" {
+		t.Fatalf("explicit consultation choice did not check gel availability: body=%s request=%#v", chooseBody, bookingTool.availabilityRequest)
+	}
+
+	book := url.Values{"CallSid": {"CA_CONSULT"}, "From": {"+13125550199"}, "To": {"+13125550101"}, "SpeechResult": {"The first one works. My name is Linh Tran and my phone is 312-555-0101."}}
+	bookBody := readBody(t, signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", book))
+	if !strings.Contains(bookBody, "confirmed with Lotus Nails") || bookingTool.calls != 1 || bookingTool.request.ServiceID != "service_gel" {
+		t.Fatalf("consultation booking did not confirm selected catalog service: body=%s request=%#v", bookBody, bookingTool.request)
+	}
+}
+
 type phoneFlowConversationStore struct {
 	cfg         conversation.RuntimeConfig
 	session     conversation.Session
@@ -329,6 +375,7 @@ func (f *phoneFlowConversationStore) SaveTurn(ctx context.Context, record conver
 		SalonID:   session.SalonID,
 		Speaker:   conversation.SpeakerCustomer,
 		Body:      record.CustomerMessage,
+		Metadata:  record.CustomerMetadata,
 		Sequence:  nextSequence,
 		CreatedAt: time.Date(2026, 6, 10, 14, 1, 0, 0, time.UTC),
 	})
@@ -340,6 +387,7 @@ func (f *phoneFlowConversationStore) SaveTurn(ctx context.Context, record conver
 			SalonID:   session.SalonID,
 			Speaker:   conversation.SpeakerTool,
 			Body:      record.ToolMessage,
+			Metadata:  record.ToolMetadata,
 			Sequence:  nextSequence,
 			CreatedAt: time.Date(2026, 6, 10, 14, 1, 5, 0, time.UTC),
 		})
@@ -351,6 +399,7 @@ func (f *phoneFlowConversationStore) SaveTurn(ctx context.Context, record conver
 		SalonID:   session.SalonID,
 		Speaker:   conversation.SpeakerAI,
 		Body:      record.AIMessage,
+		Metadata:  record.AIMetadata,
 		Sequence:  nextSequence,
 		CreatedAt: time.Date(2026, 6, 10, 14, 1, 10, 0, time.UTC),
 	})
@@ -377,55 +426,62 @@ type phoneFlowBookingTool struct {
 func (f *phoneFlowBookingTool) AvailableSlots(ctx context.Context, salonID string, ownerUserID string, req booking.AvailabilityRequest) (*booking.AvailabilityResult, error) {
 	f.availabilityCalls++
 	f.availabilityRequest = req
+	serviceID := strings.TrimSpace(req.ServiceID)
+	serviceName := "Classic Manicure"
+	durationMinutes := 45
+	if serviceID == "service_gel" {
+		serviceName = "Gel Manicure"
+		durationMinutes = 50
+	}
 	return &booking.AvailabilityResult{
-		ServiceID:          "service_1",
-		ServiceName:        "Classic Manicure",
+		ServiceID:          serviceID,
+		ServiceName:        serviceName,
 		StaffSelectionMode: req.StaffSelectionMode,
 		Segments: []booking.AvailabilitySegment{
 			{
-				ServiceID:          "service_1",
-				ServiceName:        "Classic Manicure",
+				ServiceID:          serviceID,
+				ServiceName:        serviceName,
 				StaffID:            "staff_1",
 				StaffName:          "Mai Nguyen",
 				StaffSelectionMode: req.StaffSelectionMode,
-				DurationMinutes:    45,
+				DurationMinutes:    durationMinutes,
 			},
 		},
 		PreferredDate:   req.PreferredDate,
-		DurationMinutes: 45,
+		DurationMinutes: durationMinutes,
 		Timezone:        "America/Chicago",
 		Slots: []booking.AvailabilitySlot{
 			{
 				StartTime:          phoneFlowFirstSlotStart(),
-				EndTime:            phoneFlowFirstSlotStart().Add(45 * time.Minute),
+				EndTime:            phoneFlowFirstSlotStart().Add(time.Duration(durationMinutes) * time.Minute),
 				StaffID:            "staff_1",
 				StaffName:          "Mai Nguyen",
 				StaffSelectionMode: req.StaffSelectionMode,
 				Segments: []booking.AvailabilitySegment{
 					{
-						ServiceID:          "service_1",
-						ServiceName:        "Classic Manicure",
+						ServiceID:          serviceID,
+						ServiceName:        serviceName,
 						StaffID:            "staff_1",
 						StaffName:          "Mai Nguyen",
 						StaffSelectionMode: req.StaffSelectionMode,
-						DurationMinutes:    45,
+						DurationMinutes:    durationMinutes,
 					},
 				},
 			},
 			{
 				StartTime:          phoneFlowFirstSlotStart().Add(time.Hour),
-				EndTime:            phoneFlowFirstSlotStart().Add(time.Hour + 45*time.Minute),
+				EndTime:            phoneFlowFirstSlotStart().Add(time.Hour + time.Duration(durationMinutes)*time.Minute),
 				StaffID:            "staff_1",
 				StaffName:          "Mai Nguyen",
 				StaffSelectionMode: req.StaffSelectionMode,
 				Segments: []booking.AvailabilitySegment{
 					{
-						ServiceID:          "service_1",
-						ServiceName:        "Classic Manicure",
+						ServiceID:          serviceID,
+						ServiceName:        serviceName,
 						StaffID:            "staff_1",
 						StaffName:          "Mai Nguyen",
 						StaffSelectionMode: req.StaffSelectionMode,
-						DurationMinutes:    45,
+						DurationMinutes:    durationMinutes,
 					},
 				},
 			},

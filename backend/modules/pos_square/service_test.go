@@ -119,6 +119,19 @@ func TestBuildReadinessAllowsEnableWhenSquareIsBookingReady(t *testing.T) {
 	if !withoutTest.CanEnableAIBooking {
 		t.Fatalf("enable should not require an optional Square test booking")
 	}
+
+	pending := buildReadiness(false, connection, services, staff, periods, &booking.TestBookingRecord{
+		Status:          booking.StatusPOSPending,
+		ProviderOutcome: booking.ProviderOutcomeInFlight,
+		RetryPolicy:     booking.RetryPolicyNone,
+		Reconciliation:  booking.ReconciliationNotRequired,
+	}, nil, nil)
+	if pending.CanTestBooking || pending.CanCancelTestBooking {
+		t.Fatalf("another test write must be blocked while the prior operation is in flight")
+	}
+	if !pending.CanEnableAIBooking {
+		t.Fatalf("an optional in-flight test must not redefine the independent AI enablement gate")
+	}
 }
 
 func TestBuildReadinessBlocksTestBookingWithoutBookableRecords(t *testing.T) {

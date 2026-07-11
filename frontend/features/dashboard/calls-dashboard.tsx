@@ -610,6 +610,7 @@ export function CallsDashboard() {
     [staff]
   );
   const selectedBookingRecord = selectedSession ? conversationBookingRecord(selectedSession) : null;
+  const consultationTrace = selectedSession ? consultationTraceForSession(selectedSession) : null;
   const lastRealtimeEvent = realtimeEvents.length > 0 ? realtimeEvents[realtimeEvents.length - 1] : null;
 
   if (initialLoading) {
@@ -800,6 +801,13 @@ export function CallsDashboard() {
               />
               <Info label="Booking attempt" value={selectedSession.booking_attempt_id || "None"} />
               <Info label="Target appointment" value={selectedSession.target_appointment_id || "None"} />
+              {consultationTrace ? (
+                <>
+                  <Info label="Consultation state" value={<Badge value={consultationTrace.state} />} />
+                  <Info label="Consultation options" value={consultationTrace.candidates.join(", ") || "No catalog options recorded"} />
+                  <Info label="Consultation result" value={consultationTrace.result} />
+                </>
+              ) : null}
               {selectedSession.party_request ? (
                 <>
                   <Info label="Party request" value={<Badge value={selectedSession.party_request.status} />} />
@@ -1610,6 +1618,40 @@ function TranscriptBubble({
       </div>
     </div>
   );
+}
+
+function consultationTraceForSession(session: ConversationSession) {
+  let candidates: string[] = [];
+  let pending = false;
+  let cleared = false;
+  for (const item of session.transcript ?? []) {
+    if (item.speaker !== "ai" || !item.metadata) continue;
+    const recorded = stringArrayMetadata(item.metadata.pending_consultation_candidates);
+    if (recorded.length > 0) {
+      candidates = recorded;
+      pending = true;
+      cleared = false;
+    }
+    if (item.metadata.pending_consultation_cleared === true) {
+      pending = false;
+      cleared = true;
+    }
+  }
+  if (session.handoff?.reason === "consultation_safety") {
+    return { state: "owner_review", candidates, result: "Safety question routed to the owner; no service was selected." };
+  }
+  if (cleared && session.service_id) {
+    return { state: "selected", candidates, result: session.service_name || "Catalog service selected" };
+  }
+  if (pending) {
+    return { state: "awaiting_choice", candidates, result: "Waiting for the caller to name one catalog service." };
+  }
+  return null;
+}
+
+function stringArrayMetadata(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => (typeof item === "string" ? item.trim() : "")).filter(Boolean);
 }
 
 function EmptyTranscript() {

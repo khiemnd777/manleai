@@ -28,12 +28,15 @@ const (
 	InputModeRecording      = "recording"
 	InputModeRealtimeStream = "realtime_stream"
 
-	RealtimeEventAudioDelta     = "audio_delta"
-	RealtimeEventTranscriptDone = "transcript_done"
-	RealtimeEventSpeechStarted  = "speech_started"
-	RealtimeEventResponseDone   = "response_done"
-	RealtimeEventSessionUpdated = "session_updated"
-	RealtimeEventError          = "error"
+	RealtimeEventAudioDelta           = "audio_delta"
+	RealtimeEventAudioTranscriptDelta = "audio_transcript_delta"
+	RealtimeEventAudioTranscriptDone  = "audio_transcript_done"
+	RealtimeEventTranscriptDone       = "transcript_done"
+	RealtimeEventSpeechStarted        = "speech_started"
+	RealtimeEventResponseCreated      = "response_created"
+	RealtimeEventResponseDone         = "response_done"
+	RealtimeEventSessionUpdated       = "session_updated"
+	RealtimeEventError                = "error"
 )
 
 var (
@@ -92,9 +95,16 @@ type RealtimeSpeechProvider interface {
 
 type RealtimeSession interface {
 	AppendInputAudio(ctx context.Context, base64Audio string) error
-	Speak(ctx context.Context, text string) error
+	Speak(ctx context.Context, req RealtimeSpeakRequest) error
+	CancelResponse(ctx context.Context, responseID string) error
+	RequiresResponseIdentity() bool
 	Events() <-chan RealtimeEvent
 	Close() error
+}
+
+type RealtimeSpeakRequest struct {
+	RequestID string
+	Text      string
 }
 
 type RealtimeSessionOptions struct {
@@ -106,11 +116,17 @@ type RealtimeSessionOptions struct {
 }
 
 type RealtimeEvent struct {
-	Type        string
-	ItemID      string
-	Transcript  string
-	AudioBase64 string
-	Error       string
+	Type              string
+	ItemID            string
+	ResponseID        string
+	ResponseRequestID string
+	ResponseStatus    string
+	Transcript        string
+	AudioBase64       string
+	AudioTranscript   string
+	ErrorCode         string
+	ErrorParam        string
+	Error             string
 }
 
 type ConfigResolver interface {
@@ -136,6 +152,7 @@ type ModelRequest struct {
 	SelectedServiceNames []string
 	Summary              string
 	KnowledgeContext     string
+	ReplyPolicy          string
 }
 
 type ModelReply struct {

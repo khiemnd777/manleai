@@ -329,7 +329,8 @@ func (r *Repository) RedactExpiredSessions(ctx context.Context, limit int) (int,
 
 func (r *Repository) ListBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT svc.id::text, svc.name, svc.duration_minutes, COALESCE(svc.price_from, 0), COALESCE(svc.price_display, ''),
+		SELECT svc.id::text, svc.name, COALESCE(svc.description, ''), COALESCE(svc.ai_description, ''),
+		       svc.duration_minutes, COALESCE(svc.price_from, 0), COALESCE(svc.price_display, ''),
 		       COALESCE(cat.id::text, ''), COALESCE(cat.name, ''), COALESCE(cat.slug, '')
 		FROM services svc
 		JOIN salons salon ON salon.id = svc.salon_id
@@ -362,7 +363,7 @@ func (r *Repository) ListBookableServices(ctx context.Context, salonID string) (
 	items := make([]ServiceOption, 0)
 	for rows.Next() {
 		var item ServiceOption
-		if err := rows.Scan(&item.ID, &item.Name, &item.DurationMinutes, &item.PriceFrom, &item.PriceDisplay, &item.CategoryID, &item.CategoryName, &item.CategorySlug); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.AIDescription, &item.DurationMinutes, &item.PriceFrom, &item.PriceDisplay, &item.CategoryID, &item.CategoryName, &item.CategorySlug); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

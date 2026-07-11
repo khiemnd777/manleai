@@ -367,6 +367,9 @@ func resolveIntent(current string, message string, session Session, serviceUnder
 	if serviceUnderstandingStartsBooking(serviceUnderstanding, message) {
 		return IntentBooking
 	}
+	if current == IntentConsultation && serviceUnderstanding.Status == serviceUnderstandingStatusSelected && !isAffirmativeOnly(message) {
+		return IntentBooking
+	}
 	return IntentUnknown
 }
 

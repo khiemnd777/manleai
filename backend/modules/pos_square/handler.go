@@ -2,6 +2,7 @@ package pos_square
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/manleai/ai-receptionist/internal/config"
@@ -136,6 +137,9 @@ func (h *Handler) TestBooking(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
 	}
+	if strings.TrimSpace(req.OperationKey) == "" {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "operation_key is required for a retry-safe test booking request.")
+	}
 	if req.SalonID == "" {
 		req.SalonID = middleware.SalonID(c)
 	}
@@ -147,7 +151,7 @@ func (h *Handler) TestBooking(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusBadGateway, "SQUARE_TEST_BOOKING_FAILED", "Square test booking did not return a response.")
 	}
 	status := fiber.StatusCreated
-	if res.BookingAttempt != nil && res.BookingAttempt.Status == booking.StatusFallbackPending {
+	if res.BookingAttempt != nil && (res.BookingAttempt.Status == booking.StatusFallbackPending || res.BookingAttempt.Status == booking.StatusPOSPending) {
 		status = fiber.StatusAccepted
 	}
 	return respond.JSON(c, status, res)
@@ -157,6 +161,9 @@ func (h *Handler) CancelTestBooking(c *fiber.Ctx) error {
 	var req CancelTestBookingRequest
 	if err := c.BodyParser(&req); err != nil {
 		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
+	}
+	if strings.TrimSpace(req.OperationKey) == "" {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "operation_key is required for a retry-safe test cancellation request.")
 	}
 	if req.SalonID == "" {
 		req.SalonID = middleware.SalonID(c)
@@ -169,7 +176,7 @@ func (h *Handler) CancelTestBooking(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusBadGateway, "SQUARE_CANCEL_TEST_BOOKING_FAILED", "Square test booking cancellation did not return a response.")
 	}
 	status := fiber.StatusOK
-	if res.BookingAttempt != nil && res.BookingAttempt.Status == booking.StatusFallbackPending {
+	if res.BookingAttempt != nil && (res.BookingAttempt.Status == booking.StatusFallbackPending || res.BookingAttempt.Status == booking.StatusPOSPending) {
 		status = fiber.StatusAccepted
 	}
 	return respond.JSON(c, status, res)

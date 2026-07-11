@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -28,6 +29,9 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
 	}
+	if strings.TrimSpace(req.OperationKey) == "" {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "operation_key is required for a retry-safe booking request.")
+	}
 	attempt, err := h.service.Create(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Booking request is missing required customer, service, staff, or start time data.")
@@ -38,11 +42,14 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 	if errors.Is(err, ErrProviderUnavailable) {
 		return respond.Error(c, fiber.StatusConflict, "POS_PROVIDER_UNAVAILABLE", "The active POS provider is unavailable.")
 	}
+	if errors.Is(err, ErrOperationConflict) {
+		return respond.Error(c, fiber.StatusConflict, "BOOKING_OPERATION_CONFLICT", "This operation key is already assigned to a different booking request.")
+	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "BOOKING_CREATE_FAILED", "Could not create booking request.")
 	}
 	status := fiber.StatusCreated
-	if attempt.Status == StatusFallbackPending {
+	if attempt.Status == StatusFallbackPending || attempt.Status == StatusPOSPending {
 		status = fiber.StatusAccepted
 	}
 	return respond.JSON(c, status, attempt)
@@ -161,6 +168,9 @@ func (h *Handler) Reschedule(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
 	}
+	if strings.TrimSpace(req.OperationKey) == "" {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "operation_key is required for a retry-safe reschedule request.")
+	}
 	appointment, fallback, err := h.service.Reschedule(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("appointment_id"), req)
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Reschedule request is missing required appointment, POS version, staff, service, or start time data.")
@@ -170,6 +180,9 @@ func (h *Handler) Reschedule(c *fiber.Ctx) error {
 	}
 	if errors.Is(err, ErrProviderUnavailable) {
 		return respond.Error(c, fiber.StatusConflict, "POS_PROVIDER_UNAVAILABLE", "The active POS provider is unavailable.")
+	}
+	if errors.Is(err, ErrOperationConflict) {
+		return respond.Error(c, fiber.StatusConflict, "BOOKING_OPERATION_CONFLICT", "This operation key is already assigned to a different reschedule request.")
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "APPOINTMENT_RESCHEDULE_FAILED", "Could not reschedule appointment.")
@@ -187,6 +200,9 @@ func (h *Handler) Cancel(c *fiber.Ctx) error {
 			return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
 		}
 	}
+	if strings.TrimSpace(req.OperationKey) == "" {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "operation_key is required for a retry-safe cancellation request.")
+	}
 	appointment, fallback, err := h.service.Cancel(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("appointment_id"), req)
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Cancel request is missing required appointment or POS version data.")
@@ -196,6 +212,9 @@ func (h *Handler) Cancel(c *fiber.Ctx) error {
 	}
 	if errors.Is(err, ErrProviderUnavailable) {
 		return respond.Error(c, fiber.StatusConflict, "POS_PROVIDER_UNAVAILABLE", "The active POS provider is unavailable.")
+	}
+	if errors.Is(err, ErrOperationConflict) {
+		return respond.Error(c, fiber.StatusConflict, "BOOKING_OPERATION_CONFLICT", "This operation key is already assigned to a different cancellation request.")
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "APPOINTMENT_CANCEL_FAILED", "Could not cancel appointment.")

@@ -426,15 +426,15 @@ func (a *SquareAdapter) CheckAvailability(ctx context.Context, salonID string, i
 func (a *SquareAdapter) CreateAppointment(ctx context.Context, salonID string, input pos.CreateAppointmentInput) (*pos.Appointment, error) {
 	token, locationID, err := a.accessTokenAndLocation(ctx, salonID)
 	if err != nil {
-		return nil, err
+		return nil, pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhasePrepare, err)
 	}
 	cfg, err := a.configFor(ctx, salonID)
 	if err != nil {
-		return nil, err
+		return nil, pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhasePrepare, err)
 	}
 	request, err := buildSquareCreateBookingRequest(locationID, input)
 	if err != nil {
-		return nil, err
+		return nil, pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhasePrepare, err)
 	}
 	var response squareBookingResponse
 	if err := a.doJSON(ctx, cfg, http.MethodPost, a.apiBaseURL(cfg)+"/v2/bookings", token, request, &response); err != nil {
@@ -445,7 +445,7 @@ func (a *SquareAdapter) CreateAppointment(ctx context.Context, salonID string, i
 			ErrorCode:    normalizeSquareError(err),
 			ErrorMessage: err.Error(),
 		})
-		return nil, err
+		return nil, squareWriteError(err, pos.WritePhaseDispatch)
 	}
 	if response.Booking.Version < 0 && strings.TrimSpace(response.Booking.ID) != "" {
 		response.Booking, err = a.retrieveBooking(ctx, cfg, token, response.Booking.ID)
@@ -457,12 +457,12 @@ func (a *SquareAdapter) CreateAppointment(ctx context.Context, salonID string, i
 				ErrorCode:    normalizeSquareError(err),
 				ErrorMessage: err.Error(),
 			})
-			return nil, err
+			return nil, pos.NewWriteError(pos.WriteOutcomeUnknown, pos.WritePhasePostWriteRead, err)
 		}
 	}
 	appointment, err := mapSquareBooking(response.Booking, appointmentFallbackDuration(input.Segments, input.DurationMinutes))
 	if err != nil {
-		return nil, err
+		return nil, pos.NewWriteError(pos.WriteOutcomeUnknown, pos.WritePhaseResponse, err)
 	}
 	return appointment, nil
 }
@@ -470,15 +470,15 @@ func (a *SquareAdapter) CreateAppointment(ctx context.Context, salonID string, i
 func (a *SquareAdapter) RescheduleAppointment(ctx context.Context, salonID string, appointmentID string, input pos.RescheduleInput) (*pos.Appointment, error) {
 	token, locationID, err := a.accessTokenAndLocation(ctx, salonID)
 	if err != nil {
-		return nil, err
+		return nil, pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhasePrepare, err)
 	}
 	cfg, err := a.configFor(ctx, salonID)
 	if err != nil {
-		return nil, err
+		return nil, pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhasePrepare, err)
 	}
 	request, err := buildSquareUpdateBookingRequest(locationID, input)
 	if err != nil {
-		return nil, err
+		return nil, pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhasePrepare, err)
 	}
 	var response squareBookingResponse
 	if err := a.doJSON(ctx, cfg, http.MethodPut, a.apiBaseURL(cfg)+"/v2/bookings/"+url.PathEscape(appointmentID), token, request, &response); err != nil {
@@ -489,23 +489,27 @@ func (a *SquareAdapter) RescheduleAppointment(ctx context.Context, salonID strin
 			ErrorCode:    normalizeSquareError(err),
 			ErrorMessage: err.Error(),
 		})
-		return nil, err
+		return nil, squareWriteError(err, pos.WritePhaseDispatch)
 	}
-	return mapSquareBooking(response.Booking, appointmentFallbackDuration(input.Segments, input.DurationMinutes))
+	appointment, err := mapSquareBooking(response.Booking, appointmentFallbackDuration(input.Segments, input.DurationMinutes))
+	if err != nil {
+		return nil, pos.NewWriteError(pos.WriteOutcomeUnknown, pos.WritePhaseResponse, err)
+	}
+	return appointment, nil
 }
 
 func (a *SquareAdapter) CancelAppointment(ctx context.Context, salonID string, appointmentID string, input pos.CancelInput) (*pos.Appointment, error) {
 	token, err := a.accessToken(ctx, salonID)
 	if err != nil {
-		return nil, err
+		return nil, pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhasePrepare, err)
 	}
 	cfg, err := a.configFor(ctx, salonID)
 	if err != nil {
-		return nil, err
+		return nil, pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhasePrepare, err)
 	}
 	request, err := buildSquareCancelBookingRequest(input)
 	if err != nil {
-		return nil, err
+		return nil, pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhasePrepare, err)
 	}
 	var response squareBookingResponse
 	if err := a.doJSON(ctx, cfg, http.MethodPost, a.apiBaseURL(cfg)+"/v2/bookings/"+url.PathEscape(appointmentID)+"/cancel", token, request, &response); err != nil {
@@ -516,9 +520,13 @@ func (a *SquareAdapter) CancelAppointment(ctx context.Context, salonID string, a
 			ErrorCode:    normalizeSquareError(err),
 			ErrorMessage: err.Error(),
 		})
-		return nil, err
+		return nil, squareWriteError(err, pos.WritePhaseDispatch)
 	}
-	return mapSquareBooking(response.Booking, 0)
+	appointment, err := mapSquareBooking(response.Booking, 0)
+	if err != nil {
+		return nil, pos.NewWriteError(pos.WriteOutcomeUnknown, pos.WritePhaseResponse, err)
+	}
+	return appointment, nil
 }
 
 func (a *SquareAdapter) ListAppointments(ctx context.Context, salonID string, input pos.AppointmentListInput) (*pos.AppointmentListResult, error) {
@@ -697,14 +705,78 @@ func (a *SquareAdapter) doJSON(ctx context.Context, cfg config.SquareConfig, met
 		var squareErr squareErrorResponse
 		_ = json.NewDecoder(res.Body).Decode(&squareErr)
 		if len(squareErr.Errors) > 0 {
-			return fmt.Errorf("square %s: %s", squareErr.Errors[0].Code, squareErr.Errors[0].Detail)
+			return &squareHTTPError{StatusCode: res.StatusCode, Code: squareErr.Errors[0].Code, Detail: squareErr.Errors[0].Detail}
 		}
-		return fmt.Errorf("square returned status %d", res.StatusCode)
+		return &squareHTTPError{StatusCode: res.StatusCode}
 	}
 	if output == nil {
 		return nil
 	}
-	return json.NewDecoder(res.Body).Decode(output)
+	if err := json.NewDecoder(res.Body).Decode(output); err != nil {
+		return &squareResponseError{Err: err}
+	}
+	return nil
+}
+
+type squareResponseError struct {
+	Err error
+}
+
+func (e *squareResponseError) Error() string {
+	if e == nil || e.Err == nil {
+		return "square response could not be decoded"
+	}
+	return e.Err.Error()
+}
+
+func (e *squareResponseError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+type squareHTTPError struct {
+	StatusCode int
+	Code       string
+	Detail     string
+}
+
+func (e *squareHTTPError) Error() string {
+	if e == nil {
+		return "square request failed"
+	}
+	if strings.TrimSpace(e.Code) != "" {
+		return fmt.Sprintf("square %s: %s", e.Code, e.Detail)
+	}
+	return fmt.Sprintf("square returned status %d", e.StatusCode)
+}
+
+func squareWriteError(err error, phase string) error {
+	var httpErr *squareHTTPError
+	if errors.As(err, &httpErr) && definitiveSquareWriteRejection(httpErr.StatusCode) {
+		return pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhaseResponse, err)
+	}
+	var responseErr *squareResponseError
+	if errors.As(err, &responseErr) || errors.As(err, &httpErr) {
+		phase = pos.WritePhaseResponse
+	}
+	return pos.NewWriteError(pos.WriteOutcomeUnknown, phase, err)
+}
+
+func definitiveSquareWriteRejection(statusCode int) bool {
+	switch statusCode {
+	case http.StatusBadRequest,
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+		http.StatusNotFound,
+		http.StatusConflict,
+		http.StatusUnprocessableEntity,
+		http.StatusTooManyRequests:
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *SquareAdapter) configFor(ctx context.Context, salonID string) (config.SquareConfig, error) {
@@ -824,7 +896,7 @@ func buildSquareAvailabilityRequest(locationID string, input pos.AvailabilityInp
 	if strings.TrimSpace(locationID) == "" {
 		return squareAvailabilityRequest{}, ErrLocationNotSelected
 	}
-	startAt, endAt, err := availabilityRange(input.PreferredDate)
+	startAt, endAt, err := availabilityRange(input.PreferredDate, input.Timezone)
 	if err != nil {
 		return squareAvailabilityRequest{}, err
 	}
@@ -1192,21 +1264,29 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func availabilityRange(preferredDate string) (time.Time, time.Time, error) {
+func availabilityRange(preferredDate string, timezone string) (time.Time, time.Time, error) {
 	value := strings.TrimSpace(preferredDate)
 	if value == "" {
 		return time.Time{}, time.Time{}, fmt.Errorf("preferred date is required")
 	}
-	if day, err := time.Parse("2006-01-02", value); err == nil {
-		start := day.UTC()
-		return start, start.Add(24 * time.Hour), nil
+	locationName := strings.TrimSpace(timezone)
+	if locationName == "" {
+		return time.Time{}, time.Time{}, fmt.Errorf("salon timezone is required")
 	}
-	start, err := time.Parse(time.RFC3339, value)
+	loc, err := time.LoadLocation(locationName)
 	if err != nil {
 		return time.Time{}, time.Time{}, err
 	}
-	start = start.UTC()
-	return start, start.Add(24 * time.Hour), nil
+	if day, err := time.ParseInLocation("2006-01-02", value, loc); err == nil {
+		return day.UTC(), day.AddDate(0, 0, 1).UTC(), nil
+	}
+	instant, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	local := instant.In(loc)
+	start := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
+	return start.UTC(), start.AddDate(0, 0, 1).UTC(), nil
 }
 
 func splitCustomerName(name string) (string, string) {

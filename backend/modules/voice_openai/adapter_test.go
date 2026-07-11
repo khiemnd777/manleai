@@ -154,9 +154,13 @@ func TestSynthesizeReturnsAudioBytes(t *testing.T) {
 }
 
 func TestParseRealtimeEvents(t *testing.T) {
-	audio := parseRealtimeEvent([]byte(`{"type":"response.output_audio.delta","delta":"abc123"}`))
-	if audio.Type != voice.RealtimeEventAudioDelta || audio.AudioBase64 != "abc123" {
+	audio := parseRealtimeEvent([]byte(`{"type":"response.output_audio.delta","response_id":"resp_1","delta":"abc123"}`))
+	if audio.Type != voice.RealtimeEventAudioDelta || audio.ResponseID != "resp_1" || audio.AudioBase64 != "abc123" {
 		t.Fatalf("audio event = %#v", audio)
+	}
+	audioTranscript := parseRealtimeEvent([]byte(`{"type":"response.output_audio_transcript.done","response_id":"resp_1","transcript":"Backend reply."}`))
+	if audioTranscript.Type != voice.RealtimeEventAudioTranscriptDone || audioTranscript.ResponseID != "resp_1" || audioTranscript.AudioTranscript != "Backend reply." {
+		t.Fatalf("audio transcript event = %#v", audioTranscript)
 	}
 
 	transcript := parseRealtimeEvent([]byte(`{"type":"conversation.item.input_audio_transcription.completed","item_id":"item_1","transcript":"gel removal"}`))
@@ -164,8 +168,13 @@ func TestParseRealtimeEvents(t *testing.T) {
 		t.Fatalf("transcript event = %#v", transcript)
 	}
 
-	done := parseRealtimeEvent([]byte(`{"type":"response.done"}`))
-	if done.Type != voice.RealtimeEventResponseDone {
+	created := parseRealtimeEvent([]byte(`{"type":"response.created","response":{"id":"resp_1","metadata":{"manleai_request_id":"reply_7"}}}`))
+	if created.Type != voice.RealtimeEventResponseCreated || created.ResponseID != "resp_1" || created.ResponseRequestID != "reply_7" {
+		t.Fatalf("created event = %#v", created)
+	}
+
+	done := parseRealtimeEvent([]byte(`{"type":"response.done","response":{"id":"resp_1","status":"completed","metadata":{"manleai_request_id":"reply_7"}}}`))
+	if done.Type != voice.RealtimeEventResponseDone || done.ResponseID != "resp_1" || done.ResponseRequestID != "reply_7" || done.ResponseStatus != "completed" {
 		t.Fatalf("done event = %#v", done)
 	}
 
@@ -175,7 +184,7 @@ func TestParseRealtimeEvents(t *testing.T) {
 	}
 
 	apiErr := parseRealtimeEvent([]byte(`{"type":"error","error":{"type":"invalid_request_error","code":"invalid_value","param":"session.audio.input.format","message":"Unsupported audio format."}}`))
-	if apiErr.Type != voice.RealtimeEventError || !strings.Contains(apiErr.Error, "invalid_request_error") || !strings.Contains(apiErr.Error, "Unsupported audio format.") {
+	if apiErr.Type != voice.RealtimeEventError || apiErr.ErrorCode != "invalid_value" || apiErr.ErrorParam != "session.audio.input.format" || !strings.Contains(apiErr.Error, "invalid_request_error") || !strings.Contains(apiErr.Error, "Unsupported audio format.") {
 		t.Fatalf("api error event = %#v", apiErr)
 	}
 }
@@ -365,7 +374,7 @@ func TestRealtimeSessionConfigUsesQuietRoomVADProfile(t *testing.T) {
 }
 
 func TestRealtimeResponseCreatePayloadUsesProtocolShape(t *testing.T) {
-	ga := realtimeResponseCreatePayload(false, "Hello.")
+	ga := realtimeResponseCreatePayload(false, "reply-1", "Hello.")
 	gaResponse, ok := ga["response"].(map[string]any)
 	if !ok {
 		t.Fatalf("GA response.create payload missing response: %#v", ga)
@@ -376,8 +385,12 @@ func TestRealtimeResponseCreatePayloadUsesProtocolShape(t *testing.T) {
 	if outputModalities, ok := gaResponse["output_modalities"].([]string); !ok || len(outputModalities) != 1 || outputModalities[0] != "audio" {
 		t.Fatalf("GA response.create should include audio output_modalities: %#v", gaResponse)
 	}
+	metadata, ok := gaResponse["metadata"].(map[string]string)
+	if !ok || metadata["manleai_request_id"] != "reply-1" {
+		t.Fatalf("GA response metadata = %#v", gaResponse["metadata"])
+	}
 
-	legacy := realtimeResponseCreatePayload(true, "Hello.")
+	legacy := realtimeResponseCreatePayload(true, "reply-2", "Hello.")
 	legacyResponse, ok := legacy["response"].(map[string]any)
 	if !ok {
 		t.Fatalf("legacy response.create payload missing response: %#v", legacy)

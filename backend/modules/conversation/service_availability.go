@@ -60,22 +60,33 @@ func shouldCheckAvailabilityForRequestedTime(before Session, after Session, sele
 	if selectedOfferedSlot || strings.TrimSpace(after.ServiceID) == "" || after.RequestedStartTime == nil {
 		return false
 	}
-	if strings.TrimSpace(before.ServiceID) != strings.TrimSpace(after.ServiceID) {
-		return true
+	return !sameAvailabilityRequest(before, after) || !hasStaffAssignment(before)
+}
+
+func sameAvailabilityRequest(left Session, right Session) bool {
+	if strings.TrimSpace(left.ServiceID) != strings.TrimSpace(right.ServiceID) ||
+		strings.TrimSpace(left.RequestedDate) != strings.TrimSpace(right.RequestedDate) ||
+		!sameOptionalTime(left.RequestedStartTime, right.RequestedStartTime) {
+		return false
 	}
-	if strings.TrimSpace(before.ServiceID) == "" || !sameOptionalTime(before.RequestedStartTime, after.RequestedStartTime) {
-		return true
+	leftMode := staffSelectionModeForAvailability(left)
+	rightMode := staffSelectionModeForAvailability(right)
+	if leftMode != rightMode {
+		return false
 	}
-	if strings.TrimSpace(before.RequestedDate) != strings.TrimSpace(after.RequestedDate) {
-		return true
+	leftSegments := availabilitySegmentsForSession(left, leftMode)
+	rightSegments := availabilitySegmentsForSession(right, rightMode)
+	if len(leftSegments) != len(rightSegments) {
+		return false
 	}
-	if staffSelectionModeForAvailability(before) != staffSelectionModeForAvailability(after) {
-		return true
+	for index := range leftSegments {
+		if strings.TrimSpace(leftSegments[index].ServiceID) != strings.TrimSpace(rightSegments[index].ServiceID) ||
+			strings.TrimSpace(leftSegments[index].StaffID) != strings.TrimSpace(rightSegments[index].StaffID) ||
+			normalizeConversationStaffSelectionMode(leftSegments[index].StaffSelectionMode) != normalizeConversationStaffSelectionMode(rightSegments[index].StaffSelectionMode) {
+			return false
+		}
 	}
-	if strings.TrimSpace(before.StaffID) != strings.TrimSpace(after.StaffID) {
-		return true
-	}
-	return !hasStaffAssignment(before)
+	return len(leftSegments) > 0
 }
 
 func sameOptionalTime(left *time.Time, right *time.Time) bool {
@@ -1262,15 +1273,36 @@ func offeredSlotFromAvailability(result *booking.AvailabilityResult, slot bookin
 }
 
 func offeredSlotMatchesServiceSelection(slot OfferedSlot, session Session) bool {
-	want := selectedServiceIDs(session)
+	mode := staffSelectionModeForAvailability(session)
+	want := availabilitySegmentsForSession(session, mode)
 	if len(want) == 0 {
 		return true
 	}
-	got := offeredSlotServiceIDs(slot)
-	if len(got) == 0 {
-		return true
+	if len(slot.Segments) == 0 {
+		if len(want) != 1 {
+			return false
+		}
+		return segmentStaffMatchesOfferedSlot(want[0], slot.StaffID)
 	}
-	return sameStringSlices(want, got)
+	if len(want) != len(slot.Segments) {
+		return false
+	}
+	for index := range want {
+		if strings.TrimSpace(want[index].ServiceID) != strings.TrimSpace(slot.Segments[index].ServiceID) ||
+			!segmentStaffMatchesOfferedSlot(want[index], slot.Segments[index].StaffID) {
+			return false
+		}
+	}
+	return true
+}
+
+func segmentStaffMatchesOfferedSlot(segment booking.BookingSegmentRequest, offeredStaffID string) bool {
+	mode := normalizeConversationStaffSelectionMode(segment.StaffSelectionMode)
+	if mode == booking.StaffSelectionAnyone {
+		return strings.TrimSpace(offeredStaffID) != ""
+	}
+	wantStaffID := strings.TrimSpace(segment.StaffID)
+	return wantStaffID != "" && wantStaffID == strings.TrimSpace(offeredStaffID)
 }
 
 func offeredSlotServiceIDs(slot OfferedSlot) []string {
@@ -1561,6 +1593,21 @@ func syncTurnUpdate(turn *TurnRecord, session Session, services []ServiceOption,
 	turn.Update.BookingSegments = session.BookingSegments
 	turn.Update.PartyPlan = clonePartyPlan(session.PartyPlan)
 	turn.Update.Summary = summaryFor(session, services, staff, cfg)
+}
+
+func cloneSessionForTurn(session Session) Session {
+	cloned := session
+	cloned.BookingSegments = append([]booking.BookingSegmentRequest(nil), session.BookingSegments...)
+	cloned.RescheduleCandidates = append([]RescheduleCandidate(nil), session.RescheduleCandidates...)
+	cloned.PartyPlan = clonePartyPlan(session.PartyPlan)
+	if session.OfferedSlots != nil {
+		cloned.OfferedSlots = make([]OfferedSlot, len(session.OfferedSlots))
+		for index := range session.OfferedSlots {
+			cloned.OfferedSlots[index] = session.OfferedSlots[index]
+			cloned.OfferedSlots[index].Segments = append([]OfferedSlotSegment(nil), session.OfferedSlots[index].Segments...)
+		}
+	}
+	return cloned
 }
 
 func newTurnRecord(salonID string, ownerUserID string, before Session, after Session, message string, eventKey string, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) TurnRecord {

@@ -745,11 +745,24 @@ queue a `pos_sync_jobs` outbox job and move through `syncing`, `synced`, or
 `sync_failed`. Square Appointments service writes are not enabled in the current
 slice.
 
+`ai_description` is the owner-approved consultation summary the AI receptionist
+may use when callers compare services. It is trimmed and limited to 320 Unicode
+characters. When empty, consultation may fall back to `description`; otherwise
+the runtime uses only structured service name, category, duration, and price.
+Health or medical suitability questions are handed to the owner and are not
+answered from this field.
+
+Consultation candidate IDs/names are stored on AI transcript metadata. A later
+AI transcript writes `pending_consultation_cleared=true` when the caller selects
+a concrete catalog service or the conversation leaves consultation. Appointment
+cancel, reschedule, human handoff, and active party-plan actions take precedence
+over consultation routing.
+
 ```json
 {
   "name": "Gel Removal",
   "description": "Removal service for existing gel polish.",
-  "ai_description": "Gel polish removal",
+  "ai_description": "Removes existing gel polish before a new service.",
   "duration_minutes": 20,
   "price_from": 10,
   "active": true,
@@ -787,7 +800,7 @@ is saved, `ai_bookable` is also disabled.
 {
   "name": "Classic Manicure",
   "description": "Trim, shape, cuticle care, and polish.",
-  "ai_description": "Classic manicure",
+  "ai_description": "Includes nail shaping, cuticle care, and regular polish.",
   "duration_minutes": 45,
   "price_from": 35,
   "active": true,
@@ -1037,6 +1050,10 @@ for one or more AI-bookable services and optional AI-bookable staff members. Use
 fields remain supported for single-service booking. These IDs are ManleAI
 canonical IDs that must resolve through a valid active-provider link before the
 POS adapter is called.
+The backend resolves all requested services and staff against
+`salons.active_pos_provider`. The provider request covers the requested
+salon-local calendar day, including daylight-saving boundaries; API clients do
+not send a provider timezone or construct UTC day ranges.
 `staff_selection_mode` is either `specific` or `anyone`; `anyone` means the
 customer did not request a named technician. Results are filtered to synced
 business hour periods in the salon timezone. A slot must fit inside one imported
@@ -1290,34 +1307,51 @@ records and records POS errors when sync fails.
 
 ```json
 {
+	"operation_key": "dashboard-reschedule-7f60e4bf",
   "start_time": "2026-06-11T16:00:00Z",
   "staff_id": "...",
   "notes": "Customer requested later time"
 }
 ```
 
-Returns `200` with the updated appointment only when the active `POSProvider` successfully reschedules the POS booking. Returns `202` with status `fallback_pending` when the POS provider fails; the internal appointment remains unchanged.
+Returns `200` with the updated appointment only when the active `POSProvider` successfully reschedules the POS booking. Returns `202` with the existing `pos_pending` attempt when the same operation is already executing, or with status `fallback_pending` when the POS provider fails; the internal appointment remains unchanged. Reusing an `operation_key` with a different normalized payload returns `409 BOOKING_OPERATION_CONFLICT`.
 
 `POST /api/salons/:id/appointments/:appointment_id/cancel`
 
 ```json
 {
+	"operation_key": "dashboard-cancel-9aa95f18",
   "reason": "Customer requested cancellation"
 }
 ```
 
-Returns `200` with the cancelled appointment only when the active `POSProvider` successfully cancels the POS booking. Returns `202` with status `fallback_pending` when the POS provider fails; the internal appointment remains unchanged.
+Returns `200` with the cancelled appointment only when the active `POSProvider` successfully cancels the POS booking. Returns `202` with the existing `pos_pending` attempt when the same operation is already executing, or with status `fallback_pending` when the POS provider fails; the internal appointment remains unchanged. Reusing an `operation_key` with a different normalized payload returns `409 BOOKING_OPERATION_CONFLICT`.
 
 `GET /api/salons/:id/booking-attempts`
 
 Returns booking attempts, including transient `pos_pending` records and `fallback_pending` records that need owner review. The optional `status` query parameter filters by attempt status such as `fallback_pending`. The optional `limit` query parameter defaults to 50 and is capped at 200. The optional `offset` query parameter defaults to 0. Responses include `booking_attempts`, `limit`, `offset`, `has_more`, and `status` when a filter is applied; `has_more` is computed by requesting one extra row and does not require an exact total count.
 
-Each item includes `staff_selection_mode` and, when available, ordered `segments[]` from `booking_attempt_segments` so owner dashboards can distinguish the customer preference (`anyone` or `specific`) from the staff assignment attempted through the POS provider. Fallback action rows include `booking_action` (`book`, `reschedule`, or `cancel`) derived from backend notification/audit state, plus `target_appointment_id` and `appointment` when a failed reschedule or cancellation has a POS-confirmed appointment target. Dashboard retry actions must still call the booking service and active POS provider; a fallback request must not be marked confirmed, rescheduled, or cancelled from the list response alone.
+Each item includes `staff_selection_mode` and, when available, ordered `segments[]` from `booking_attempt_segments` so owner dashboards can distinguish the customer preference (`anyone` or `specific`) from the staff assignment attempted through the POS provider. Fallback action rows include backend-owned `booking_action` (`book`, `reschedule`, or `cancel`), plus `target_appointment_id` and `appointment` when a failed reschedule or cancellation has a POS-confirmed appointment target. Dashboard retry actions must still call the booking service and active POS provider; a fallback request must not be marked confirmed, rescheduled, or cancelled from the list response alone.
+
+Booking attempts also expose backend-owned operation integrity state:
+
+- `operation_type`: `book`, `reschedule`, or `cancel`.
+- `provider_outcome`: `not_started`, `in_flight`, `succeeded`, `failed`, or `unknown`.
+- `retry_policy`: `none`, `safe`, or `blocked`.
+- `reconciliation_status`: `not_required`, `required`, or `resolved`.
+- `processing_lease_expires_at`: present while one worker owns the durable operation claim.
+- `can_retry`: authoritative backend retry gate. Dashboard clients must not infer retry safety only from `fallback_pending`.
+- `retry_blocked_reason`: owner-facing reason when provider reconciliation is required before retry.
+
+`provider_outcome=unknown` means a provider write timed out, was cancelled in flight, returned HTTP 5xx, lost or truncated its response, failed to decode a success response, failed during a post-write provider lookup, or returned insufficient booking metadata after it may have succeeded. Such attempts use `retry_policy=blocked` and `reconciliation_status=required`; they must be verified in the active POS before another operation is submitted. Only a typed definitive provider rejection is eligible for `retry_policy=safe`; untyped provider-write errors default to unknown.
+
+When an in-flight processing lease expires, the next owner booking-attempt or calendar read atomically moves the attempt to `fallback_pending`, records a `POS_TIMEOUT`, creates one owner notification, and applies the same unknown-result retry block. Repeated reads do not create duplicate reconciliation records because only `in_flight` attempts are transitioned.
 
 `POST /api/salons/:id/booking-attempts`
 
 ```json
 {
+	"operation_key": "voice-session-0dfd-book",
   "customer_name": "Linh Tran",
   "customer_phone": "+13125550101",
   "customer_email": "linh@example.com",
@@ -1336,6 +1370,8 @@ Each item includes `staff_selection_mode` and, when available, ordered `segments
 }
 ```
 
+`operation_key` is required and identifies one logical booking operation. It is generated once per dashboard action or deterministically from the conversation session. The backend stores a normalized request fingerprint under a salon-scoped unique operation claim before customer or POS side effects. Replaying the same key and payload returns the existing attempt and reuses its POS idempotency key without a second POS writer. Reusing the same key with a different payload returns `409 BOOKING_OPERATION_CONFLICT`.
+
 Creates a backend booking attempt before calling the active `POSProvider`. For
 multi-service booking, each segment is resolved to provider-neutral
 service/staff records and persisted in `booking_attempt_segments`; confirmed
@@ -1347,8 +1383,14 @@ booked. `staff_selection_mode=anyone` records that the customer did not request
 a named technician; the backend still stores the POS-compatible staff assignment
 used for the booking attempt. Returns `201` with status `confirmed` only when
 the POS provider returns a POS booking ID and booking version. Returns `202`
-with status `fallback_pending` when the POS provider fails, times out, or does
-not return required booking metadata.
+with the existing `pos_pending` attempt for an in-flight duplicate. A typed
+definitive provider rejection returns `fallback_pending`,
+`provider_outcome=failed`, and `retry_policy=safe`. A transport error, HTTP 5xx,
+response/decode ambiguity, post-write lookup failure, timeout, or missing
+required provider metadata returns
+`fallback_pending`, `provider_outcome=unknown`, `retry_policy=blocked`, and
+`reconciliation_status=required`; it must not be automatically retried or
+described as confirmed.
 
 ## Conversation Sessions
 
@@ -1692,7 +1734,7 @@ RecordingUrl
 
 `GET /api/voice/twilio/stream`
 
-Public Twilio Media Streams WebSocket endpoint for realtime audio mode. The endpoint is not configured directly in Twilio Console; the incoming webhook returns `<Connect><Stream>` with signed custom parameters for the existing call session. The stream forwards Twilio g711 audio frames to the configured OpenAI Realtime adapter, routes completed transcripts through the same backend conversation engine and booking service, then streams backend-approved audio responses back to Twilio. Realtime replies are serialized so a new OpenAI `response.create` is not sent until the active response finishes; caller barge-in clears Twilio playback and suppresses stale audio after AI audio has started and passed the noise guard while preserving the latest queued backend reply. If realtime configuration is missing, voice status falls back to the recording or gather path.
+Public Twilio Media Streams WebSocket endpoint for realtime audio mode. The endpoint is not configured directly in Twilio Console; the incoming webhook returns `<Connect><Stream>` with signed custom parameters for the existing call session. The stream forwards Twilio g711 audio frames to the configured OpenAI Realtime adapter, routes completed transcripts through the same backend conversation engine and booking service, then streams backend-approved audio responses back to Twilio. Backend replies enter a bounded FIFO and each `response.create` carries an application request ID. GA Realtime sessions require `response.created`, audio deltas, output-audio transcript, and terminal events to match the active provider response ID. Audio is held in a bounded buffer and released to Twilio only when the completed output transcript matches the backend-approved reply; missing identity, mismatched speech, duplicate identity, failed/incomplete responses, or buffer overflow use terminal fallback. Caller barge-in clears Twilio playback and sends `response.cancel` for the active response. Legacy preview sessions retain the compatibility streaming branch. Operational facts are not sent through style rewriting. If realtime configuration is missing, voice status falls back to the recording or gather path.
 
 `GET /api/voice/audio/:id`
 
@@ -1957,6 +1999,7 @@ Calendar appointment imports are handled separately by
 
 ```json
 {
+	"operation_key": "square-test-booking-4fa6c4e2",
   "salon_id": "...",
   "customer_name": "ManleAI Test Customer",
   "customer_phone": "+13125550199",
@@ -1970,10 +2013,19 @@ Calendar appointment imports are handled separately by
 
 Creates a real Square booking through the provider-neutral booking service. Returns `201` when Square confirms the booking, or `202` with `fallback_pending` when POS booking fails.
 
+The test-booking response and `latest_test_booking` include
+`provider_outcome`, `retry_policy`, `reconciliation_status`, `can_retry`, and
+`retry_blocked_reason`. The dashboard reuses the same operation key after a
+network error with no response, rotates it only for an explicit safe retry, and
+disables another test write while the previous operation is `pos_pending`,
+in-flight, or requires reconciliation. Square status reads expire stale
+in-flight leases before returning `latest_test_booking`.
+
 `POST /api/integrations/square/cancel-test-booking`
 
 ```json
 {
+	"operation_key": "square-test-cancel-b8c8f001",
   "salon_id": "...",
   "appointment_id": "...",
   "reason": "AI booking readiness test cleanup"

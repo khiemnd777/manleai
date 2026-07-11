@@ -162,6 +162,7 @@ export function POSCalendarClient() {
   const [actionError, setActionError] = useState("");
   const seenCalendarEventIDs = useRef<Set<string>>(new Set());
   const toastTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const actionOperationKeyRef = useRef("");
 
   useEffect(() => {
     if (!getAccessToken()) {
@@ -443,6 +444,7 @@ export function POSCalendarClient() {
   }
 
   function openCreate() {
+    actionOperationKeyRef.current = crypto.randomUUID();
     setActionMode("create");
     setSelectedAppointment(null);
     setActionForm({
@@ -454,6 +456,7 @@ export function POSCalendarClient() {
   }
 
   function openEdit(appointment: AppointmentRecord) {
+    actionOperationKeyRef.current = crypto.randomUUID();
     setActionMode("edit");
     setSelectedAppointment(appointment);
     setActionForm({
@@ -470,6 +473,7 @@ export function POSCalendarClient() {
   }
 
   function openDelete(appointment: AppointmentRecord) {
+    actionOperationKeyRef.current = crypto.randomUUID();
     setActionMode("delete");
     setSelectedAppointment(appointment);
     setActionForm({
@@ -487,6 +491,7 @@ export function POSCalendarClient() {
   }
 
   function closeActionDialog() {
+    actionOperationKeyRef.current = "";
     setActionMode(null);
     setSelectedAppointment(null);
     setActionError("");
@@ -538,6 +543,7 @@ export function POSCalendarClient() {
       const attempt = await apiRequest<BookingAttempt>(`/api/salons/${salon.id}/booking-attempts`, {
         method: "POST",
         body: JSON.stringify({
+          operation_key: currentActionOperationKey(),
           source: "owner_dashboard",
           customer_name: actionForm.customerName,
           customer_phone: actionForm.customerPhone,
@@ -550,7 +556,7 @@ export function POSCalendarClient() {
           notes: actionForm.notes
         })
       });
-      if (attempt.status === "fallback_pending") {
+      if (attempt.status !== "confirmed" || !attempt.pos_booking_id) {
         setNotice({
           type: "warning",
           title: "Booking needs owner review",
@@ -582,6 +588,7 @@ export function POSCalendarClient() {
         {
           method: "POST",
           body: JSON.stringify({
+            operation_key: currentActionOperationKey(),
             start_time: selectedActionSlot.start_time,
             staff_id: actionForm.staffID,
             notes: actionForm.notes
@@ -619,7 +626,7 @@ export function POSCalendarClient() {
         `/api/salons/${salon.id}/appointments/${selectedAppointment.id}/cancel`,
         {
           method: "POST",
-          body: JSON.stringify({ reason: actionForm.cancelReason })
+          body: JSON.stringify({ operation_key: currentActionOperationKey(), reason: actionForm.cancelReason })
         }
       );
       if (isBookingAttempt(response)) {
@@ -642,6 +649,13 @@ export function POSCalendarClient() {
     } finally {
       setSavingAction(false);
     }
+  }
+
+  function currentActionOperationKey() {
+    if (!actionOperationKeyRef.current) {
+      actionOperationKeyRef.current = crypto.randomUUID();
+    }
+    return actionOperationKeyRef.current;
   }
 
   function moveRange(direction: -1 | 1) {

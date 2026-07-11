@@ -1067,7 +1067,15 @@ func applySelectedOfferedSlot(session *Session, slot OfferedSlot) {
 	session.StaffID = slot.StaffID
 	session.StaffName = slot.StaffName
 	session.StaffSelectionMode = offeredSlotStaffSelectionMode(slot)
-	session.BookingSegments = bookingSegmentsFromOfferedSlot(slot)
+	segments := bookingSegmentsFromOfferedSlot(slot)
+	if len(segments) == 0 {
+		segments = availabilitySegmentsForSession(*session, offeredSlotStaffSelectionMode(slot))
+		if len(segments) == 1 {
+			segments[0].StaffID = strings.TrimSpace(slot.StaffID)
+			segments[0].StaffSelectionMode = offeredSlotStaffSelectionMode(slot)
+		}
+	}
+	session.BookingSegments = segments
 	if session.StaffID == "" && len(slot.Segments) > 0 {
 		session.StaffID = slot.Segments[0].StaffID
 		session.StaffName = slot.Segments[0].StaffName

@@ -17,9 +17,13 @@ const (
 	StatusHandoff   = "handoff"
 	StatusFailed    = "failed"
 
-	IntentUnknown = "unknown"
-	IntentBooking = "booking"
-	IntentHandoff = "handoff"
+	IntentUnknown      = "unknown"
+	IntentBooking      = "booking"
+	IntentHandoff      = "handoff"
+	IntentConsultation = "consultation"
+
+	ReplyPolicyOperationalFact = "operational_fact"
+	ReplyPolicyStyleOnly       = "style_only"
 
 	OutcomeCollecting             = "collecting"
 	OutcomeBookingConfirmed       = "booking_confirmed"
@@ -47,6 +51,7 @@ const (
 	HandoffReasonBookingUnavailable         = "booking_unavailable"
 	HandoffReasonCustomerDetailsUnavailable = "customer_details_unavailable"
 	HandoffReasonGroupBooking               = "group_booking"
+	HandoffReasonConsultationSafety         = "consultation_safety"
 
 	PartyRequestStatusPending   = "pending"
 	PartyRequestStatusContacted = "contacted"
@@ -146,6 +151,7 @@ type ReplyGenerationRequest struct {
 	SelectedServiceNames []string
 	Summary              string
 	KnowledgeContext     string
+	ReplyPolicy          string
 }
 
 type ReplyGenerationResult struct {
@@ -174,6 +180,8 @@ type RuntimeConfig struct {
 type ServiceOption struct {
 	ID              string  `json:"id"`
 	Name            string  `json:"name"`
+	Description     string  `json:"description,omitempty"`
+	AIDescription   string  `json:"ai_description,omitempty"`
 	DurationMinutes int     `json:"duration_minutes"`
 	PriceFrom       float64 `json:"price_from,omitempty"`
 	PriceDisplay    string  `json:"price_display,omitempty"`
@@ -444,6 +452,7 @@ type TurnRecord struct {
 	Update           SessionUpdate
 	Handoff          *HandoffRecord
 	PartyRequest     *PartyRequestRecord
+	ReplyPolicy      string
 }
 
 type SessionUpdate struct {

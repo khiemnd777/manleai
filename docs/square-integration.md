@@ -84,6 +84,29 @@ after reconnecting or updating the seller account.
 
 Booking attempts and confirmed appointments snapshot service/staff segments in backend tables before or after the Square call as appropriate. Provider-neutral POS DTOs now carry segment arrays, and `SquareAdapter` maps those arrays into Square booking `appointment_segments` and availability `segment_filters`. `staff_selection_mode=anyone` is retained as internal/customer preference metadata; Square-specific appointment payload requirements remain isolated inside `SquareAdapter`.
 
+Square availability ranges are built from the requested salon-local calendar
+day. The adapter converts local midnight and the following local midnight to
+RFC3339 timestamps, including 23-hour and 25-hour daylight-saving transition
+days, instead of querying a fixed UTC day.
+
+Square mutation failures are returned as typed provider-write errors. Only an
+allowlist of explicit rejection statuses (`400`, `401`, `403`, `404`, `409`,
+`422`, and `429`) is treated as definitive failure. Other 4xx responses,
+transport errors, request timeout, HTTP 5xx, response decode failures, missing
+provider metadata, and failures while retrieving a just-created booking are
+unknown outcomes. Unknown outcomes remain `fallback_pending` with retry blocked
+until the owner reconciles the action in Square Appointments. Square's official
+Create, Update, and Cancel Booking references define idempotency keys for these
+mutations: <https://developer.squareup.com/reference/square/bookings-api/CreateBooking>,
+<https://developer.squareup.com/reference/square/bookings-api/update-booking>,
+and <https://developer.squareup.com/reference/square/bookings-api/CancelBooking>.
+
+The optional dashboard smoke test preserves one operation key across response
+loss. A pending or unknown latest test write gates additional test create/cancel
+actions, and Square status reads expire stale processing leases before exposing
+the latest test state. This temporary test-action gate does not make the
+optional smoke test a prerequisite for enabling AI booking.
+
 ## Configuration
 
 Square Appointments app credentials are configured in the Integrations

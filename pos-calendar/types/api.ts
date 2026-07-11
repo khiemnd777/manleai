@@ -127,6 +127,11 @@ export type BookingAttempt = {
   status: string;
   pos_provider: string;
   pos_booking_id?: string;
+  operation_type: "book" | "reschedule" | "cancel";
+  provider_outcome: "not_started" | "in_flight" | "succeeded" | "failed" | "unknown";
+  retry_policy: "none" | "safe" | "blocked";
+  reconciliation_status: "not_required" | "required" | "resolved";
+  processing_lease_expires_at?: string;
   customer_name: string;
   customer_phone: string;
   customer_email?: string;
@@ -140,7 +145,8 @@ export type BookingAttempt = {
   error_code?: string;
   error_message?: string;
   sync_warning?: string;
-  can_retry?: boolean;
+  can_retry: boolean;
+  retry_blocked_reason?: string;
   booking_action?: "book" | "reschedule" | "cancel";
   target_appointment_id?: string;
   notification_type?: string;

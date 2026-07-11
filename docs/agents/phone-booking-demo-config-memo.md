@@ -347,6 +347,17 @@ style-only: it must not change required booking slots, handoff decisions,
 availability checks, or POS-first confirmation wording. Realtime should speak
 backend-approved replies and should not rely on independent realtime
 instructions for tone changes.
+Realtime reply order is backend-owned: each queued reply has an application
+request ID, binds to the provider `response_id`, and ignores late audio from a
+cancelled or prior response. Barge-in must clear Twilio playback and cancel the
+bound active response. A failed, incomplete, conflicting, or overflowed reply
+must use terminal fallback rather than guessing which audio belongs to the
+current turn.
+For GA Realtime sessions, output audio is buffered until the provider's final
+audio transcript matches the backend-approved reply. Missing or changed
+response identity, transcript mismatch, or audio buffer overflow must not be
+played to the caller. Preview-model sessions use the documented compatibility
+branch and should not be treated as equivalent release evidence.
 
 If OpenAI is not configured, do not block the whole phone webhook demo. Use Twilio Gather / deterministic safe replies for initial testing.
 

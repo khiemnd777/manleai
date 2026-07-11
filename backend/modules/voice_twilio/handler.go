@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
@@ -24,6 +25,8 @@ const (
 	realtimeTurnTimeout          = 25 * time.Second
 	realtimeBackendProgressDelay = 1200 * time.Millisecond
 	realtimeBackendProgressReply = "One moment while I check that."
+	realtimeReplyQueueLimit      = 16
+	realtimeBufferedAudioLimit   = 8 * 1024 * 1024
 )
 
 type Handler struct {
@@ -468,7 +471,12 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	activeInterrupted := false
 	playbackAudioStartedAt := time.Time{}
 	suppressAudioUntilDone := false
-	pendingReply := realtimeQueuedReply{}
+	activeReply := realtimeQueuedReply{}
+	activeResponseID := ""
+	activeAudioTranscript := strings.Builder{}
+	activeAudioChunks := []string{}
+	activeBufferedAudioBytes := 0
+	pendingReplies := []realtimeQueuedReply{}
 	pendingCloseMark := ""
 	closeDrainTimer := (<-chan time.Time)(nil)
 	markSequence := 0
@@ -478,6 +486,8 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	turnProgressTimer := (<-chan time.Time)(nil)
 	turnProgressSpoken := false
 	activeResponseCreatedAt := time.Time{}
+	responseSequence := 0
+	requireResponseIdentity := realtime.RequiresResponseIdentity()
 	if now == nil {
 		now = time.Now
 	}
@@ -583,10 +593,21 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 			return true
 		}
 		if responseActive {
-			pendingReply = realtimeQueuedReply{message: message, closeAfter: closeAfter}
+			if len(pendingReplies) >= realtimeReplyQueueLimit {
+				_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "reply_queue_overflow", errors.New("realtime reply queue limit exceeded"))
+				closeStream("realtime_reply_queue_overflow")
+				return false
+			}
+			pendingReplies = append(pendingReplies, realtimeQueuedReply{message: message, closeAfter: closeAfter})
 			return true
 		}
-		if err := realtime.Speak(ctx, message); err != nil {
+		responseSequence++
+		reply := realtimeQueuedReply{
+			requestID:  "manleai-reply-" + strconv.Itoa(responseSequence),
+			message:    message,
+			closeAfter: closeAfter,
+		}
+		if err := realtime.Speak(ctx, voice.RealtimeSpeakRequest{RequestID: reply.requestID, Text: reply.message}); err != nil {
 			_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_response_create", err)
 			closeStream("openai_response_create_failed")
 			return false
@@ -596,6 +617,11 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 			"close_after": strconv.FormatBool(closeAfter),
 		})
 		responseActive = true
+		activeReply = reply
+		activeResponseID = ""
+		activeAudioTranscript.Reset()
+		activeAudioChunks = nil
+		activeBufferedAudioBytes = 0
 		activeCloseAfter = closeAfter
 		activeAudioSent = false
 		activeInterrupted = false
@@ -605,12 +631,29 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	}
 
 	flushPendingReply := func() bool {
-		if strings.TrimSpace(pendingReply.message) == "" {
+		if len(pendingReplies) == 0 {
 			return true
 		}
-		reply := pendingReply
-		pendingReply = realtimeQueuedReply{}
+		reply := pendingReplies[0]
+		pendingReplies = pendingReplies[1:]
 		return speakReply(reply.message, reply.closeAfter)
+	}
+
+	responseEventMatchesActive := func(event voice.RealtimeEvent) bool {
+		if !responseActive {
+			return false
+		}
+		if requestID := strings.TrimSpace(event.ResponseRequestID); requestID != "" && requestID != activeReply.requestID {
+			return false
+		}
+		responseID := strings.TrimSpace(event.ResponseID)
+		if requireResponseIdentity {
+			return activeResponseID != "" && responseID == activeResponseID
+		}
+		if activeResponseID != "" {
+			return responseID == "" || responseID == activeResponseID
+		}
+		return responseID == ""
 	}
 
 	clearPendingCloseMark := func() {
@@ -681,7 +724,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 				continue
 			default:
 			}
-			if turnInFlight && !turnProgressSpoken && !responseActive && strings.TrimSpace(pendingReply.message) == "" {
+			if turnInFlight && !turnProgressSpoken && !responseActive && len(pendingReplies) == 0 {
 				turnProgressSpoken = true
 				if !speakReply(realtimeBackendProgressReply, false) {
 					return
@@ -700,8 +743,43 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 				return
 			}
 			switch event.Type {
+			case voice.RealtimeEventResponseCreated:
+				if !responseActive {
+					continue
+				}
+				requestID := strings.TrimSpace(event.ResponseRequestID)
+				responseID := strings.TrimSpace(event.ResponseID)
+				if requireResponseIdentity && (requestID == "" || responseID == "") {
+					_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_response_identity_missing", errors.New("realtime response identity missing"))
+					closeStream("openai_response_identity_missing")
+					return
+				}
+				if requestID != "" && requestID != activeReply.requestID {
+					continue
+				}
+				if activeResponseID != "" && responseID != "" && responseID != activeResponseID {
+					_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_response_identity_conflict", errors.New("realtime response identity changed"))
+					closeStream("openai_response_identity_conflict")
+					return
+				}
+				if responseID != "" {
+					activeResponseID = responseID
+				}
 			case voice.RealtimeEventAudioDelta:
+				if !responseEventMatchesActive(event) {
+					continue
+				}
 				if suppressAudioUntilDone {
+					continue
+				}
+				if requireResponseIdentity && strings.TrimSpace(event.AudioBase64) != "" {
+					activeBufferedAudioBytes += len(event.AudioBase64)
+					if activeBufferedAudioBytes > realtimeBufferedAudioLimit {
+						_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_audio_buffer_overflow", errors.New("realtime audio buffer limit exceeded"))
+						closeStream("openai_audio_buffer_overflow")
+						return
+					}
+					activeAudioChunks = append(activeAudioChunks, event.AudioBase64)
 					continue
 				}
 				if strings.TrimSpace(event.AudioBase64) != "" && streamSID != "" {
@@ -716,18 +794,32 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 						_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "first_audio_delta", activeResponseCreatedAt, nil)
 					}
 				}
+			case voice.RealtimeEventAudioTranscriptDelta:
+				if responseEventMatchesActive(event) {
+					activeAudioTranscript.WriteString(event.AudioTranscript)
+				}
+			case voice.RealtimeEventAudioTranscriptDone:
+				if responseEventMatchesActive(event) && strings.TrimSpace(event.AudioTranscript) != "" {
+					activeAudioTranscript.Reset()
+					activeAudioTranscript.WriteString(event.AudioTranscript)
+				}
 			case voice.RealtimeEventSpeechStarted:
 				_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "speech_started", time.Time{}, nil)
-				if !shouldInterruptPlayback() {
+				if !requireResponseIdentity && !shouldInterruptPlayback() {
 					continue
 				}
 				clearPendingCloseMark()
 				if streamSID != "" {
 					_ = writeJSON(twilioClearMessage{Event: "clear", StreamSid: streamSID})
 				}
-				if responseActive {
+				if responseActive && !activeInterrupted {
 					suppressAudioUntilDone = true
 					activeInterrupted = true
+					if err := realtime.CancelResponse(ctx, activeResponseID); err != nil {
+						_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_response_cancel", err)
+						closeStream("openai_response_cancel_failed")
+						return
+					}
 				}
 			case voice.RealtimeEventTranscriptDone:
 				transcript := strings.TrimSpace(event.Transcript)
@@ -749,15 +841,66 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 				})
 				startNextTurn()
 			case voice.RealtimeEventResponseDone:
+				if !responseEventMatchesActive(event) {
+					continue
+				}
+				responseStatus := strings.ToLower(strings.TrimSpace(event.ResponseStatus))
+				if requireResponseIdentity && responseStatus == "" {
+					_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_response_status_missing", errors.New("realtime response status missing"))
+					closeStream("openai_response_status_missing")
+					return
+				}
+				if responseStatus == "failed" || responseStatus == "incomplete" {
+					_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_response_"+responseStatus, errors.New("realtime response "+responseStatus))
+					closeStream("openai_response_" + responseStatus)
+					return
+				}
+				if responseStatus == "cancelled" && !activeInterrupted {
+					_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_response_unexpected_cancel", errors.New("realtime response cancelled without caller interruption"))
+					closeStream("openai_response_unexpected_cancel")
+					return
+				}
+				if requireResponseIdentity && responseStatus != "cancelled" {
+					if len(activeAudioChunks) == 0 {
+						_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_audio_missing", errors.New("realtime response completed without audio"))
+						closeStream("openai_audio_missing")
+						return
+					}
+					if !sameSpokenReply(activeReply.message, activeAudioTranscript.String()) {
+						_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_spoken_fact_mismatch", errors.New("realtime audio transcript did not match backend reply"))
+						closeStream("openai_spoken_fact_mismatch")
+						return
+					}
+					for _, payload := range activeAudioChunks {
+						if streamSID == "" || strings.TrimSpace(payload) == "" {
+							continue
+						}
+						if err := writeJSON(twilioOutboundMedia{Event: "media", StreamSid: streamSID, Media: twilioOutboundMediaPayload{Payload: payload}}); err != nil {
+							_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "twilio_media_write", err)
+							closeStream("twilio_media_write_failed")
+							return
+						}
+						activeAudioSent = true
+					}
+					if activeAudioSent {
+						playbackAudioStartedAt = now()
+						_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "first_audio_delta", activeResponseCreatedAt, map[string]string{"buffered": "true"})
+					}
+				}
 				completedCloseAfter := activeCloseAfter
 				completedAudioSent := activeAudioSent
 				completedInterrupted := activeInterrupted
-				hadPendingReply := strings.TrimSpace(pendingReply.message) != ""
+				hadPendingReply := len(pendingReplies) > 0
 				_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "response_done", activeResponseCreatedAt, map[string]string{
 					"close_after": strconv.FormatBool(completedCloseAfter),
 					"interrupted": strconv.FormatBool(completedInterrupted),
 				})
 				responseActive = false
+				activeReply = realtimeQueuedReply{}
+				activeResponseID = ""
+				activeAudioTranscript.Reset()
+				activeAudioChunks = nil
+				activeBufferedAudioBytes = 0
 				activeCloseAfter = false
 				activeAudioSent = false
 				activeInterrupted = false
@@ -775,10 +918,10 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 				if strings.TrimSpace(event.Error) == "" {
 					continue
 				}
-				if isActiveRealtimeResponseConflict(event.Error) {
-					_ = h.recordRealtimeFailure(ctx, providerCallID, sessionID, streamSID, "openai_event", errors.New(event.Error))
-					responseActive = true
-					continue
+				if isActiveRealtimeResponseConflict(event) {
+					_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_response_conflict", errors.New(event.Error))
+					closeStream("openai_response_conflict")
+					return
 				}
 				_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_event", errors.New(event.Error))
 				closeStream("openai_event_error")
@@ -789,6 +932,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 }
 
 type realtimeQueuedReply struct {
+	requestID  string
 	message    string
 	closeAfter bool
 }
@@ -807,8 +951,31 @@ type realtimeTurnResult struct {
 	completedAt time.Time
 }
 
-func isActiveRealtimeResponseConflict(message string) bool {
-	return strings.Contains(strings.ToLower(message), "conversation_already_has_active_response")
+func isActiveRealtimeResponseConflict(event voice.RealtimeEvent) bool {
+	return strings.EqualFold(strings.TrimSpace(event.ErrorCode), "conversation_already_has_active_response") ||
+		strings.Contains(strings.ToLower(event.Error), "conversation_already_has_active_response")
+}
+
+func sameSpokenReply(expected string, actual string) bool {
+	return normalizeSpokenReply(expected) != "" && normalizeSpokenReply(expected) == normalizeSpokenReply(actual)
+}
+
+func normalizeSpokenReply(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var normalized strings.Builder
+	space := false
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			normalized.WriteRune(r)
+			space = false
+			continue
+		}
+		if !space && normalized.Len() > 0 {
+			normalized.WriteByte(' ')
+			space = true
+		}
+	}
+	return strings.TrimSpace(normalized.String())
 }
 
 func (h *Handler) recordRealtimeTiming(ctx context.Context, providerCallID string, sessionID string, streamSID string, stage string, startedAt time.Time, extra map[string]string) error {

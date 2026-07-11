@@ -16,6 +16,7 @@ func TestGuardedReplyGeneratorRejectsUnsafeConfirmation(t *testing.T) {
 		Channel:          conversation.ChannelPhone,
 		SafeReply:        "I could not confirm that in Square Appointments. This is not a confirmed appointment.",
 		BookingConfirmed: false,
+		ReplyPolicy:      conversation.ReplyPolicyStyleOnly,
 	})
 	if err == nil {
 		t.Fatalf("GenerateReply accepted unsafe confirmation wording")
@@ -29,9 +30,10 @@ func TestGuardedReplyGeneratorAcceptsOneQuestionPhoneReply(t *testing.T) {
 	generator := NewGuardedReplyGenerator(provider)
 
 	reply, err := generator.GenerateReply(context.Background(), conversation.ReplyGenerationRequest{
-		Channel:   conversation.ChannelPhone,
-		SafeReply: "What phone number should we use?",
-		AITone:    "natural_human",
+		Channel:     conversation.ChannelPhone,
+		SafeReply:   "What phone number should we use?",
+		AITone:      "natural_human",
+		ReplyPolicy: conversation.ReplyPolicyStyleOnly,
 	})
 	if err != nil {
 		t.Fatalf("GenerateReply returned error: %v", err)
@@ -54,6 +56,7 @@ func TestGuardedReplyGeneratorRejectsAskingKnownDateAgain(t *testing.T) {
 		SafeReply:          "I have Thursday. What time works best?",
 		KnownBookingFields: []string{"service", "requested_date"},
 		NextRequiredField:  "requested_time",
+		ReplyPolicy:        conversation.ReplyPolicyStyleOnly,
 	})
 	if err == nil {
 		t.Fatalf("GenerateReply accepted a reply that asks for a known date")
@@ -70,6 +73,7 @@ func TestGuardedReplyGeneratorRejectsConfirmingKnownTimeAgain(t *testing.T) {
 		SafeReply:          "What name should I put on the appointment?",
 		KnownBookingFields: []string{"service", "requested_date", "requested_time", "requested_start_time"},
 		NextRequiredField:  "customer_name",
+		ReplyPolicy:        conversation.ReplyPolicyStyleOnly,
 	})
 	if err == nil {
 		t.Fatalf("GenerateReply accepted a reply that confirms a known time again")
@@ -85,6 +89,7 @@ func TestGuardedReplyGeneratorRejectsCasualOpeners(t *testing.T) {
 		Channel:           conversation.ChannelPhone,
 		SafeReply:         "What name should I put on the appointment?",
 		NextRequiredField: "customer_name",
+		ReplyPolicy:       conversation.ReplyPolicyStyleOnly,
 	})
 	if err == nil {
 		t.Fatalf("GenerateReply accepted casual opener")
@@ -101,6 +106,7 @@ func TestGuardedReplyGeneratorRejectsDroppedSelectedService(t *testing.T) {
 		SafeReply:            "For your Classic Manicure and Gel Removal, I found these openings: first: Monday, June 15 at 1:00 PM. Which works?",
 		SelectedServiceNames: []string{"Classic Manicure", "Gel Removal"},
 		NextRequiredField:    "requested_time",
+		ReplyPolicy:          conversation.ReplyPolicyStyleOnly,
 	})
 	if err == nil {
 		t.Fatalf("GenerateReply accepted rewrite that dropped selected service")
@@ -113,10 +119,28 @@ func TestGuardedReplyGeneratorSkipsSimulatorChannel(t *testing.T) {
 	})
 
 	if _, err := generator.GenerateReply(context.Background(), conversation.ReplyGenerationRequest{
-		Channel:   conversation.ChannelSimulator,
-		SafeReply: "What phone number should we use?",
+		Channel:     conversation.ChannelSimulator,
+		SafeReply:   "What phone number should we use?",
+		ReplyPolicy: conversation.ReplyPolicyStyleOnly,
 	}); err == nil {
 		t.Fatalf("GenerateReply should not run for simulator channel")
+	}
+}
+
+func TestGuardedReplyGeneratorRejectsOperationalFactByDefault(t *testing.T) {
+	provider := &fakeLanguageModelProvider{
+		reply: ModelReply{Message: "I found noon.", Confidence: 0.9},
+	}
+	generator := NewGuardedReplyGenerator(provider)
+
+	if _, err := generator.GenerateReply(context.Background(), conversation.ReplyGenerationRequest{
+		Channel:   conversation.ChannelPhone,
+		SafeReply: "I found noon.",
+	}); err == nil {
+		t.Fatalf("GenerateReply should reject an operational-fact turn without explicit style-only policy")
+	}
+	if provider.req.SafeReply != "" {
+		t.Fatalf("provider should not be called for operational-fact turn")
 	}
 }
 

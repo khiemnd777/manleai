@@ -24,6 +24,20 @@ const (
 	BookingActionReschedule = "reschedule"
 	BookingActionCancel     = "cancel"
 
+	ProviderOutcomeNotStarted = "not_started"
+	ProviderOutcomeInFlight   = "in_flight"
+	ProviderOutcomeSucceeded  = "succeeded"
+	ProviderOutcomeFailed     = "failed"
+	ProviderOutcomeUnknown    = "unknown"
+
+	RetryPolicyNone    = "none"
+	RetryPolicySafe    = "safe"
+	RetryPolicyBlocked = "blocked"
+
+	ReconciliationNotRequired = "not_required"
+	ReconciliationRequired    = "required"
+	ReconciliationResolved    = "resolved"
+
 	NotificationTypeBookingFallback      = "booking_fallback_pending"
 	NotificationTypeBookingConfirmed     = "booking_confirmed"
 	NotificationTypeRescheduleFallback   = "reschedule_fallback_pending"
@@ -34,6 +48,7 @@ const (
 )
 
 type CreateBookingRequest struct {
+	OperationKey       string                  `json:"operation_key"`
 	Source             string                  `json:"source"`
 	CustomerName       string                  `json:"customer_name"`
 	CustomerPhone      string                  `json:"customer_phone"`
@@ -53,10 +68,11 @@ type BookingSegmentRequest struct {
 }
 
 type RescheduleRequest struct {
-	StartTime time.Time `json:"start_time"`
-	StaffID   string    `json:"staff_id"`
-	Notes     string    `json:"notes"`
-	Source    string    `json:"-"`
+	OperationKey string    `json:"operation_key"`
+	StartTime    time.Time `json:"start_time"`
+	StaffID      string    `json:"staff_id"`
+	Notes        string    `json:"notes"`
+	Source       string    `json:"-"`
 }
 
 type RescheduleLookupRequest struct {
@@ -66,8 +82,9 @@ type RescheduleLookupRequest struct {
 }
 
 type CancelRequest struct {
-	Reason string `json:"reason"`
-	Source string `json:"-"`
+	OperationKey string `json:"operation_key"`
+	Reason       string `json:"reason"`
+	Source       string `json:"-"`
 }
 
 type AvailabilityRequest struct {
@@ -118,6 +135,14 @@ type BookingAttempt struct {
 	POSProvider         string                   `json:"pos_provider"`
 	POSBookingID        string                   `json:"pos_booking_id,omitempty"`
 	POSIdempotencyKey   string                   `json:"-"`
+	OperationKey        string                   `json:"operation_key,omitempty"`
+	RequestFingerprint  string                   `json:"-"`
+	OperationType       string                   `json:"operation_type"`
+	ProcessingToken     string                   `json:"-"`
+	ProcessingLeaseEnds *time.Time               `json:"processing_lease_expires_at,omitempty"`
+	ProviderOutcome     string                   `json:"provider_outcome"`
+	RetryPolicy         string                   `json:"retry_policy"`
+	Reconciliation      string                   `json:"reconciliation_status"`
 	CustomerName        string                   `json:"customer_name"`
 	CustomerPhone       string                   `json:"customer_phone"`
 	CustomerEmail       string                   `json:"customer_email,omitempty"`
@@ -135,7 +160,8 @@ type BookingAttempt struct {
 	NotificationType    string                   `json:"notification_type,omitempty"`
 	NotificationStatus  string                   `json:"notification_status,omitempty"`
 	SyncWarning         string                   `json:"sync_warning,omitempty"`
-	CanRetry            bool                     `json:"can_retry,omitempty"`
+	CanRetry            bool                     `json:"can_retry"`
+	RetryBlockedReason  string                   `json:"retry_blocked_reason,omitempty"`
 	CreatedAt           time.Time                `json:"created_at"`
 	UpdatedAt           time.Time                `json:"updated_at"`
 	Appointment         *Appointment             `json:"appointment,omitempty"`
@@ -350,6 +376,10 @@ type PendingBookingRecord struct {
 	Source             string
 	Provider           string
 	POSIdempotencyKey  string
+	OperationKey       string
+	RequestFingerprint string
+	ProcessingToken    string
+	LeaseExpiresAt     time.Time
 	CustomerName       string
 	CustomerPhone      string
 	CustomerEmail      string
@@ -379,6 +409,7 @@ type ConfirmedBookingRecord struct {
 	Notes              string
 	POSBookingID       string
 	POSBookingVersion  int
+	ProcessingToken    string
 }
 
 type FallbackBookingRecord struct {
@@ -399,6 +430,10 @@ type FallbackBookingRecord struct {
 	Notes              string
 	ErrorCode          string
 	ErrorMessage       string
+	ProcessingToken    string
+	ProviderOutcome    string
+	RetryPolicy        string
+	Reconciliation     string
 }
 
 type PendingAppointmentActionRecord struct {
@@ -411,6 +446,11 @@ type PendingAppointmentActionRecord struct {
 	RequestedEndTime   time.Time
 	Notes              string
 	POSIdempotencyKey  string
+	OperationKey       string
+	RequestFingerprint string
+	OperationType      string
+	ProcessingToken    string
+	LeaseExpiresAt     time.Time
 }
 
 type RescheduledAppointmentRecord struct {
@@ -423,6 +463,7 @@ type RescheduledAppointmentRecord struct {
 	EndTime           time.Time
 	Notes             string
 	POSBookingVersion int
+	ProcessingToken   string
 }
 
 type CancelledAppointmentRecord struct {
@@ -431,6 +472,7 @@ type CancelledAppointmentRecord struct {
 	Source            string
 	Reason            string
 	POSBookingVersion int
+	ProcessingToken   string
 }
 
 type AppointmentActionFallbackRecord struct {
@@ -447,6 +489,15 @@ type AppointmentActionFallbackRecord struct {
 	Notes              string
 	ErrorCode          string
 	ErrorMessage       string
+	ProcessingToken    string
+	ProviderOutcome    string
+	RetryPolicy        string
+	Reconciliation     string
+}
+
+type BookingOperationClaim struct {
+	Attempt  *BookingAttempt
+	Acquired bool
 }
 
 type BookingSegmentRecord struct {
@@ -481,6 +532,11 @@ type TestBookingRecord struct {
 	EndTime               time.Time `json:"end_time,omitempty"`
 	ErrorCode             string    `json:"error_code,omitempty"`
 	ErrorMessage          string    `json:"error_message,omitempty"`
+	ProviderOutcome       string    `json:"provider_outcome"`
+	RetryPolicy           string    `json:"retry_policy"`
+	Reconciliation        string    `json:"reconciliation_status"`
+	CanRetry              bool      `json:"can_retry"`
+	RetryBlockedReason    string    `json:"retry_blocked_reason,omitempty"`
 	CreatedAt             time.Time `json:"created_at,omitempty"`
 	UpdatedAt             time.Time `json:"updated_at,omitempty"`
 }

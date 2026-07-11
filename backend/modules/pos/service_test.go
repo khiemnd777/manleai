@@ -3,6 +3,7 @@ package pos
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -78,6 +79,17 @@ func TestCreateServiceNormalizesInputAndDefaultsActive(t *testing.T) {
 	}
 	if store.serviceCreate.provider != ProviderSquare {
 		t.Fatalf("provider = %s, want square", store.serviceCreate.provider)
+	}
+}
+
+func TestNormalizeServiceWriteRequestRejectsAIConsultationSummaryOver320Runes(t *testing.T) {
+	_, err := normalizeServiceWriteRequest(ServiceWriteRequest{
+		Name:            "Classic Manicure",
+		DurationMinutes: 30,
+		AIDescription:   strings.Repeat("é", 321),
+	}, true)
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("error = %v, want ErrValidation", err)
 	}
 }
 

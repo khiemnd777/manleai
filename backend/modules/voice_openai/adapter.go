@@ -271,6 +271,7 @@ func modelInput(req voice.ModelRequest) string {
 		"selected_service_names": req.SelectedServiceNames,
 		"summary":                req.Summary,
 		"knowledge_context":      req.KnowledgeContext,
+		"reply_policy":           req.ReplyPolicy,
 	})
 	return string(raw)
 }

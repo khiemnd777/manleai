@@ -2,6 +2,7 @@ package pos
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -87,6 +88,64 @@ const (
 	SwitchMatchStatusConfirmed = "confirmed"
 	SwitchMatchStatusSkipped   = "skipped"
 )
+
+type WriteOutcome string
+
+const (
+	WriteOutcomeDefinitiveFailure WriteOutcome = "definitive_failure"
+	WriteOutcomeUnknown           WriteOutcome = "unknown"
+)
+
+const (
+	WritePhasePrepare       = "prepare"
+	WritePhaseDispatch      = "dispatch"
+	WritePhaseResponse      = "response"
+	WritePhasePostWriteRead = "post_write_read"
+)
+
+// WriteError preserves whether a provider mutation is known to have failed or
+// may have completed despite the returned error. Callers must treat untyped
+// provider-write errors as unknown rather than assuming they are retry-safe.
+type WriteError struct {
+	Outcome WriteOutcome
+	Phase   string
+	Err     error
+}
+
+func (e *WriteError) Error() string {
+	if e == nil || e.Err == nil {
+		return "provider write failed"
+	}
+	return e.Err.Error()
+}
+
+func (e *WriteError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func NewWriteError(outcome WriteOutcome, phase string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if outcome != WriteOutcomeDefinitiveFailure {
+		outcome = WriteOutcomeUnknown
+	}
+	return &WriteError{Outcome: outcome, Phase: phase, Err: err}
+}
+
+func WriteOutcomeForError(err error) WriteOutcome {
+	if err == nil {
+		return WriteOutcomeDefinitiveFailure
+	}
+	var writeErr *WriteError
+	if errors.As(err, &writeErr) && writeErr.Outcome == WriteOutcomeDefinitiveFailure {
+		return WriteOutcomeDefinitiveFailure
+	}
+	return WriteOutcomeUnknown
+}
 
 type POSProvider interface {
 	Name() string
@@ -589,6 +648,7 @@ type AvailabilityInput struct {
 	ServiceID       string
 	StaffID         string
 	PreferredDate   string
+	Timezone        string
 	DurationMinutes int
 	Segments        []AvailabilitySegmentInput
 }

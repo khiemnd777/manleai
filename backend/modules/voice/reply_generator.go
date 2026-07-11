@@ -25,6 +25,9 @@ func (g *GuardedReplyGenerator) GenerateReply(ctx context.Context, req conversat
 	if g == nil || g.provider == nil || !g.provider.Configured(ctx, req.SalonID) || req.Channel != conversation.ChannelPhone {
 		return conversation.ReplyGenerationResult{}, ErrProviderDisabled
 	}
+	if req.ReplyPolicy != conversation.ReplyPolicyStyleOnly {
+		return conversation.ReplyGenerationResult{}, errUnsafeReply
+	}
 	reply, err := g.provider.GenerateReply(ctx, ModelRequest{
 		SalonID:              req.SalonID,
 		SessionID:            req.SessionID,
@@ -43,6 +46,7 @@ func (g *GuardedReplyGenerator) GenerateReply(ctx context.Context, req conversat
 		SelectedServiceNames: append([]string(nil), req.SelectedServiceNames...),
 		Summary:              req.Summary,
 		KnowledgeContext:     req.KnowledgeContext,
+		ReplyPolicy:          req.ReplyPolicy,
 	})
 	if err != nil {
 		return conversation.ReplyGenerationResult{}, err

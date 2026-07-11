@@ -66,6 +66,12 @@ func interpretServiceWithCategoryAliases(message string, services []ServiceOptio
 }
 
 func interpretServiceForSession(message string, session Session, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) serviceUnderstandingResult {
+	if pending := pendingConsultationServices(session, services); len(pending) > 0 {
+		result := newServiceCatalogIndex(pending, aliases, categoryAliases).InterpretPending(message)
+		if result.Status != serviceUnderstandingStatusUnknown {
+			return result
+		}
+	}
 	if pending := pendingServiceCandidateServices(session, services); len(pending) > 0 {
 		result := newServiceCatalogIndex(pending, nil, categoryAliases).InterpretPending(message)
 		if result.Status != serviceUnderstandingStatusUnknown {

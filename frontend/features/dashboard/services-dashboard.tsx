@@ -994,13 +994,32 @@ function ServiceForm({
             disabled={busy || archived}
           />
         </Field>
-        <Field label="AI description">
-          <textarea
-            className="min-h-24 w-full rounded-md border border-line px-3 py-2 text-sm text-ink outline-none focus:border-brand"
-            value={form.aiDescription}
-            onChange={(event) => onChange({ ...form, aiDescription: event.target.value })}
-            disabled={busy || archived}
-          />
+        <Field label="AI receptionist consultation summary">
+          <div className="space-y-2">
+            <textarea
+              className="min-h-24 w-full rounded-md border border-line px-3 py-2 text-sm text-ink outline-none focus:border-brand disabled:bg-surface-subtle"
+              value={form.aiDescription}
+              maxLength={320}
+              aria-describedby="ai-consultation-summary-help"
+              onChange={(event) => onChange({ ...form, aiDescription: event.target.value })}
+              disabled={busy || archived}
+            />
+            <div id="ai-consultation-summary-help" className="flex flex-wrap items-start justify-between gap-2 text-xs text-ink-muted">
+              <span>
+                Approved facts the receptionist may use when helping callers compare services. Avoid medical advice or unverified claims.
+              </span>
+              <span className="shrink-0 tabular-nums" aria-live="polite">
+                {form.aiDescription.length}/320
+              </span>
+            </div>
+            <p className="text-xs font-medium text-ink">
+              {form.aiDescription.trim()
+                ? "Consultation facts ready"
+                : form.description.trim()
+                  ? "Using the standard description until a consultation summary is added"
+                  : "No consultation description; the AI will use only name, category, duration, and price"}
+            </p>
+          </div>
         </Field>
       </div>
 

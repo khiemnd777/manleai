@@ -37,6 +37,13 @@ owners, but it must not be used for POS availability or POS booking. `AI
 bookable` can only be enabled for an active canonical record with a valid link
 for the active POS provider.
 
+The booking service resolves every new-booking and availability service/staff
+reference with an explicit provider scope obtained from
+`salons.active_pos_provider`. Repository lookups enforce the same provider
+scope. Reschedule and cancellation of an existing appointment intentionally use
+the provider recorded on that appointment so a provider switch does not orphan
+historical POS bookings.
+
 Provider switch activation must be a gated workflow, not a status toggle. A new
 provider cannot become active until its adapter exists, provider data has been
 imported, canonical services/staff/customers have been matched or resolved,
@@ -98,6 +105,12 @@ it imports services, staff, selected-location business hour periods, and
 customers. Business hours use provider-native period semantics instead of a
 single open/close pair per day, and booking availability filters require a slot
 to fit inside one imported period.
+
+Provider-neutral availability input carries the salon timezone. Date-only
+queries represent one salon-local calendar day; adapters convert local midnight
+and the next local midnight to provider timestamps. Calendar-day arithmetic is
+required instead of a fixed 24-hour interval so daylight-saving transitions
+remain correct.
 
 ## POS Sync Jobs
 
@@ -164,6 +177,12 @@ customer-facing multi-service booking. `staff_selection_mode=anyone` is stored
 as the customer's technician preference while the provider adapter receives
 whatever staff assignment the provider contract requires. Real Square payloads
 must remain inside `SquareAdapter`, not in handlers or booking services.
+
+Provider write errors carry a provider-neutral outcome and phase. A definitive
+provider rejection may be retry-safe. A transport failure, HTTP 5xx, truncated
+success response, decode failure, or post-write lookup failure has an unknown
+outcome unless the adapter can prove the mutation was rejected. Unknown writes
+require POS reconciliation and must not be retried with a new operation key.
 
 ## Adding Future Providers
 

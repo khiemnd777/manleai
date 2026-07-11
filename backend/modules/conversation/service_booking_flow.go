@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"github.com/manleai/ai-receptionist/modules/booking"
+	"strconv"
 	"strings"
 )
 
@@ -17,6 +18,7 @@ func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnR
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, bookingErrorReply(), services, staff, cfg)
 	}
 	attempt, err := s.bookingTool.Create(ctx, turn.SalonID, ownerUserID, booking.CreateBookingRequest{
+		OperationKey:       conversationOperationKey(session, booking.BookingActionBook),
 		Source:             bookingSourceForSession(session),
 		CustomerName:       session.CustomerName,
 		CustomerPhone:      session.CustomerPhone,
@@ -87,13 +89,13 @@ func (s *Service) tryPartySplitBooking(ctx context.Context, ownerUserID string, 
 
 	successfulAttempts := []*booking.BookingAttempt{}
 	successfulAppointmentIDs := []string{}
-	for _, block := range option.Blocks {
+	for blockIndex, block := range option.Blocks {
 		if block.StartTime.IsZero() || len(block.Segments) == 0 {
 			rollback := s.rollbackPartySplitBookings(ctx, ownerUserID, turn.SalonID, session, successfulAppointmentIDs)
 			turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, partySplitBookingFailureMetadata(len(successfulAttempts), totalSegments, rollback))
 			return s.saveHandoffTurn(ctx, turn, session, HandoffReasonGroupBooking, partySplitBookingFailureReply(len(successfulAttempts), totalSegments), services, staff, cfg)
 		}
-		for _, segment := range block.Segments {
+		for segmentIndex, segment := range block.Segments {
 			if strings.TrimSpace(segment.ServiceID) == "" {
 				rollback := s.rollbackPartySplitBookings(ctx, ownerUserID, turn.SalonID, session, successfulAppointmentIDs)
 				turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, partySplitBookingFailureMetadata(len(successfulAttempts), totalSegments, rollback))
@@ -101,6 +103,7 @@ func (s *Service) tryPartySplitBooking(ctx context.Context, ownerUserID string, 
 			}
 			mode := firstNonEmpty(segment.StaffSelectionMode, booking.StaffSelectionSpecific)
 			req := booking.CreateBookingRequest{
+				OperationKey:       conversationOperationKey(session, "split", strconv.Itoa(blockIndex), strconv.Itoa(segmentIndex)),
 				Source:             bookingSourceForSession(session),
 				CustomerName:       session.CustomerName,
 				CustomerPhone:      session.CustomerPhone,
@@ -182,15 +185,16 @@ func (s *Service) rollbackPartySplitBookings(ctx context.Context, ownerUserID st
 		result.Failed = len(appointmentIDs)
 		return result
 	}
-	for _, appointmentID := range appointmentIDs {
+	for rollbackIndex, appointmentID := range appointmentIDs {
 		appointmentID = strings.TrimSpace(appointmentID)
 		if appointmentID == "" {
 			result.Failed++
 			continue
 		}
 		_, fallback, err := s.bookingTool.Cancel(ctx, salonID, ownerUserID, appointmentID, booking.CancelRequest{
-			Reason: "Split party booking rollback after partial POS failure.",
-			Source: bookingSourceForSession(session),
+			OperationKey: conversationOperationKey(session, "split_rollback", strconv.Itoa(rollbackIndex), appointmentID),
+			Reason:       "Split party booking rollback after partial POS failure.",
+			Source:       bookingSourceForSession(session),
 		})
 		if err != nil || fallback != nil {
 			result.Failed++
@@ -271,10 +275,11 @@ func (s *Service) tryReschedule(ctx context.Context, ownerUserID string, turn Tu
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, rescheduleErrorReply(), services, staff, cfg)
 	}
 	appointment, fallback, err := s.bookingTool.Reschedule(ctx, turn.SalonID, ownerUserID, session.TargetAppointmentID, booking.RescheduleRequest{
-		Source:    bookingSourceForSession(session),
-		StartTime: *session.RequestedStartTime,
-		StaffID:   session.StaffID,
-		Notes:     "AI receptionist reschedule request.",
+		OperationKey: conversationOperationKey(session, booking.BookingActionReschedule, session.TargetAppointmentID),
+		Source:       bookingSourceForSession(session),
+		StartTime:    *session.RequestedStartTime,
+		StaffID:      session.StaffID,
+		Notes:        "AI receptionist reschedule request.",
 	})
 	if err != nil {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, rescheduleErrorReply(), services, staff, cfg)
@@ -319,8 +324,9 @@ func (s *Service) tryCancel(ctx context.Context, ownerUserID string, turn TurnRe
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, cancelErrorReply(), services, staff, cfg)
 	}
 	appointment, fallback, err := s.bookingTool.Cancel(ctx, turn.SalonID, ownerUserID, session.TargetAppointmentID, booking.CancelRequest{
-		Source: bookingSourceForSession(session),
-		Reason: "AI receptionist cancellation request.",
+		OperationKey: conversationOperationKey(session, booking.BookingActionCancel, session.TargetAppointmentID),
+		Source:       bookingSourceForSession(session),
+		Reason:       "AI receptionist cancellation request.",
 	})
 	if err != nil {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, cancelErrorReply(), services, staff, cfg)
@@ -358,6 +364,16 @@ func (s *Service) tryCancel(ctx context.Context, ownerUserID string, turn TurnRe
 	turn.Update.Summary = summaryFor(session, services, staff, cfg)
 	finalizeTurnMetadata(&turn, turn.Session, session, "", "", "cancel_result")
 	return s.store.SaveTurn(ctx, turn)
+}
+
+func conversationOperationKey(session Session, operation string, suffixes ...string) string {
+	parts := []string{"conversation", strings.TrimSpace(session.ID), strings.TrimSpace(operation)}
+	for _, suffix := range suffixes {
+		if value := strings.TrimSpace(suffix); value != "" {
+			parts = append(parts, value)
+		}
+	}
+	return strings.Join(parts, ":")
 }
 
 func bookingFallbackReply() string {
@@ -406,23 +422,23 @@ func rescheduledMessage(session Session, cfg *RuntimeConfig) string {
 
 func bookingServiceSelectionConsistent(session Session) bool {
 	if len(session.BookingSegments) == 0 {
-		return true
-	}
-	primaryServiceID := strings.TrimSpace(session.ServiceID)
-	if primaryServiceID == "" {
 		return false
 	}
-	hasPrimary := false
+	primaryServiceID := strings.TrimSpace(session.ServiceID)
+	if primaryServiceID == "" || primaryServiceID != strings.TrimSpace(session.BookingSegments[0].ServiceID) {
+		return false
+	}
 	for _, segment := range session.BookingSegments {
 		segmentServiceID := strings.TrimSpace(segment.ServiceID)
-		if segmentServiceID == "" {
-			continue
+		if segmentServiceID == "" || strings.TrimSpace(segment.StaffID) == "" {
+			return false
 		}
-		if segmentServiceID == primaryServiceID {
-			hasPrimary = true
+		mode := normalizeConversationStaffSelectionMode(segment.StaffSelectionMode)
+		if mode != booking.StaffSelectionSpecific && mode != booking.StaffSelectionAnyone {
+			return false
 		}
 	}
-	return hasPrimary
+	return true
 }
 
 func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, session Session, services []ServiceOption, cfg *RuntimeConfig, missing string, nextRequired string, knowledge []KnowledgeSnippet) {
@@ -448,6 +464,16 @@ func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, ses
 		})
 		return
 	}
+	if turn.ReplyPolicy != ReplyPolicyStyleOnly {
+		turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{
+			"safe_reply":          safeReply,
+			"llm_guardrail":       "skipped_operational_fact",
+			"reply_policy":        ReplyPolicyOperationalFact,
+			"reply_source":        "safe_reply",
+			"next_required_field": nextRequired,
+		})
+		return
+	}
 	result, err := s.replyGenerator.GenerateReply(ctx, ReplyGenerationRequest{
 		SalonID:              turn.SalonID,
 		SessionID:            session.ID,
@@ -466,6 +492,7 @@ func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, ses
 		SelectedServiceNames: selectedServiceNames(session, services),
 		Summary:              turn.Update.Summary,
 		KnowledgeContext:     formatKnowledgeContext(knowledge),
+		ReplyPolicy:          turn.ReplyPolicy,
 	})
 	if err != nil {
 		turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{

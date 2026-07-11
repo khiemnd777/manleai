@@ -76,6 +76,7 @@ type ReadinessCheck struct {
 }
 
 type TestBookingRequest struct {
+	OperationKey  string    `json:"operation_key"`
 	SalonID       string    `json:"salon_id"`
 	CustomerName  string    `json:"customer_name"`
 	CustomerPhone string    `json:"customer_phone"`
@@ -94,6 +95,7 @@ type TestBookingResponse struct {
 }
 
 type CancelTestBookingRequest struct {
+	OperationKey  string `json:"operation_key"`
 	SalonID       string `json:"salon_id"`
 	AppointmentID string `json:"appointment_id"`
 	Reason        string `json:"reason"`
@@ -282,6 +284,7 @@ func (s *Service) CreateTestBooking(ctx context.Context, salonID string, ownerUs
 		return nil, ErrReadinessGate
 	}
 	attempt, err := s.bookingService.Create(ctx, req.SalonID, ownerUserID, booking.CreateBookingRequest{
+		OperationKey:  req.OperationKey,
 		Source:        booking.SourceSquareTestBooking,
 		CustomerName:  req.CustomerName,
 		CustomerPhone: req.CustomerPhone,
@@ -329,8 +332,9 @@ func (s *Service) CancelTestBooking(ctx context.Context, salonID string, ownerUs
 		return nil, ErrReadinessGate
 	}
 	appointment, fallback, err := s.bookingService.Cancel(ctx, req.SalonID, ownerUserID, appointmentID, booking.CancelRequest{
-		Reason: req.Reason,
-		Source: booking.SourceSquareTestBooking,
+		OperationKey: req.OperationKey,
+		Reason:       req.Reason,
+		Source:       booking.SourceSquareTestBooking,
 	})
 	if err != nil {
 		return nil, err
@@ -402,13 +406,16 @@ func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.S
 	servicesReady := synced && serviceCount > 0
 	staffReady := synced && staffCount > 0
 	businessHoursReady := synced && businessHourCount > 0
-	canTest := connected && locationSelected && synced && servicesReady && staffReady && businessHoursReady
+	testWriteBlocked := testBookingWriteBlocked(latest)
+	bookingReady := connected && locationSelected && synced && servicesReady && staffReady && businessHoursReady
+	canTest := bookingReady && !testWriteBlocked
 	canCancel := latest != nil &&
 		latest.AppointmentID != "" &&
 		latest.POSBookingID != "" &&
-		latest.AppointmentStatus != booking.StatusCancelled
+		latest.AppointmentStatus != booking.StatusCancelled &&
+		!testWriteBlocked
 	bookingWriteBlocker := bookingWriteBlockerFromError(bookingWriteError, latest)
-	canEnable := canTest && !bookingWriteBlocker.Blocked
+	canEnable := bookingReady && !bookingWriteBlocker.Blocked
 
 	checks := []ReadinessCheck{
 		{Key: "connect_square", Label: "Connect Square", Complete: connected, Message: incompleteMessage(connected, "Square Appointments is not connected.")},
@@ -440,6 +447,17 @@ func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.S
 		LatestTestBooking:                   latest,
 		Checks:                              checks,
 	}
+}
+
+func testBookingWriteBlocked(latest *booking.TestBookingRecord) bool {
+	if latest == nil {
+		return false
+	}
+	return latest.Status == booking.StatusPOSPending ||
+		latest.ProviderOutcome == booking.ProviderOutcomeInFlight ||
+		latest.ProviderOutcome == booking.ProviderOutcomeUnknown ||
+		latest.RetryPolicy == booking.RetryPolicyBlocked ||
+		latest.Reconciliation == booking.ReconciliationRequired
 }
 
 type bookingWriteBlocker struct {
@@ -570,6 +588,7 @@ func defaultString(value string, fallback string) string {
 }
 
 func normalizeTestBookingRequest(salonID string, req TestBookingRequest) TestBookingRequest {
+	req.OperationKey = strings.TrimSpace(req.OperationKey)
 	req.SalonID = defaultString(strings.TrimSpace(req.SalonID), strings.TrimSpace(salonID))
 	req.CustomerName = defaultString(strings.TrimSpace(req.CustomerName), "ManleAI Test Customer")
 	req.CustomerPhone = defaultString(strings.TrimSpace(req.CustomerPhone), "+13125550199")
@@ -581,6 +600,7 @@ func normalizeTestBookingRequest(salonID string, req TestBookingRequest) TestBoo
 }
 
 func normalizeCancelTestBookingRequest(salonID string, req CancelTestBookingRequest) CancelTestBookingRequest {
+	req.OperationKey = strings.TrimSpace(req.OperationKey)
 	req.SalonID = defaultString(strings.TrimSpace(req.SalonID), strings.TrimSpace(salonID))
 	req.AppointmentID = strings.TrimSpace(req.AppointmentID)
 	req.Reason = defaultString(strings.TrimSpace(req.Reason), "AI booking readiness test cleanup")

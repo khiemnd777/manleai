@@ -2,6 +2,9 @@ package booking
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -16,23 +19,29 @@ import (
 var (
 	ErrValidation          = errors.New("booking validation failed")
 	ErrProviderUnavailable = errors.New("pos provider unavailable")
+	ErrOperationConflict   = errors.New("booking operation key conflicts with a different request")
+	ErrOperationInProgress = errors.New("booking operation is already in progress")
 )
+
+const bookingOperationLeaseDuration = 5 * time.Minute
 
 type Store interface {
 	EnsureSalonOwner(ctx context.Context, salonID string, ownerUserID string) error
 	GetActiveProvider(ctx context.Context, salonID string, ownerUserID string) (string, error)
-	GetBookableService(ctx context.Context, salonID string, serviceID string) (*ServiceRef, error)
-	GetBookableStaff(ctx context.Context, salonID string, staffID string) (*StaffRef, error)
-	ListBookableStaffRefs(ctx context.Context, salonID string) ([]StaffRef, error)
+	GetBookableService(ctx context.Context, salonID string, provider string, serviceID string) (*ServiceRef, error)
+	GetBookableStaff(ctx context.Context, salonID string, provider string, staffID string) (*StaffRef, error)
+	ListBookableStaffRefs(ctx context.Context, salonID string, provider string) ([]StaffRef, error)
 	ResolveBookingCustomer(ctx context.Context, salonID string, provider string, name string, phone string, email string) (*CustomerRef, error)
 	LinkBookingCustomer(ctx context.Context, salonID string, provider string, customerID string, customer pos.Customer) (*CustomerRef, error)
 	GetSchedule(ctx context.Context, salonID string) (*Schedule, error)
 	GetAppointmentForOwner(ctx context.Context, salonID string, ownerUserID string, appointmentID string) (*AppointmentActionRef, error)
 	ListRescheduleCandidates(ctx context.Context, salonID string, ownerUserID string, req RescheduleLookupRequest) ([]AppointmentActionRef, error)
-	CreatePendingBookingAttempt(ctx context.Context, record PendingBookingRecord) (*BookingAttempt, error)
+	ClaimPendingBookingAttempt(ctx context.Context, record PendingBookingRecord) (*BookingOperationClaim, error)
+	MarkBookingOperationStarted(ctx context.Context, salonID string, attemptID string, processingToken string, leaseExpiresAt time.Time) error
+	ExpireBookingOperationLeases(ctx context.Context, salonID string) error
 	SaveConfirmedBooking(ctx context.Context, record ConfirmedBookingRecord) (*BookingAttempt, error)
 	SaveFallbackBooking(ctx context.Context, record FallbackBookingRecord) (*BookingAttempt, error)
-	CreatePendingAppointmentAction(ctx context.Context, record PendingAppointmentActionRecord) (*BookingAttempt, error)
+	ClaimPendingAppointmentAction(ctx context.Context, record PendingAppointmentActionRecord) (*BookingOperationClaim, error)
 	SaveRescheduledAppointment(ctx context.Context, record RescheduledAppointmentRecord) (*Appointment, error)
 	SaveCancelledAppointment(ctx context.Context, record CancelledAppointmentRecord) (*Appointment, error)
 	SaveAppointmentActionFallback(ctx context.Context, record AppointmentActionFallbackRecord) (*BookingAttempt, error)
@@ -86,29 +95,36 @@ func (s *Service) Create(ctx context.Context, salonID string, ownerUserID string
 	if err := s.store.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
 	}
-	resolvedSegments, err := s.resolveBookingSegments(ctx, salonID, req)
+	activeProvider, err := s.store.GetActiveProvider(ctx, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	resolvedSegments, err := s.resolveBookingSegments(ctx, salonID, activeProvider, req)
 	if err != nil {
 		return nil, err
 	}
 	primary := resolvedSegments[0]
 
-	provider := s.providers[primary.Service.POSProvider]
+	provider := s.providers[activeProvider]
 	if provider == nil {
 		return nil, ErrProviderUnavailable
-	}
-	customerRef, err := s.store.ResolveBookingCustomer(ctx, salonID, provider.Name(), req.CustomerName, req.CustomerPhone, req.CustomerEmail)
-	if err != nil {
-		return nil, err
 	}
 
 	durationMinutes := bookingSegmentsDuration(resolvedSegments)
 	endTime := req.StartTime.Add(time.Duration(durationMinutes) * time.Minute)
 	segments := bookingSegmentRecords(resolvedSegments)
-	pending, err := s.store.CreatePendingBookingAttempt(ctx, PendingBookingRecord{
+	processingToken := uuid.NewString()
+	leaseExpiresAt := time.Now().UTC().Add(bookingOperationLeaseDuration)
+	operationKey := bookingOperationKey(req.OperationKey)
+	claim, err := s.store.ClaimPendingBookingAttempt(ctx, PendingBookingRecord{
 		SalonID:            salonID,
 		Source:             req.Source,
 		Provider:           provider.Name(),
 		POSIdempotencyKey:  newPOSIdempotencyKey(),
+		OperationKey:       operationKey,
+		RequestFingerprint: createRequestFingerprint(provider.Name(), req, resolvedSegments),
+		ProcessingToken:    processingToken,
+		LeaseExpiresAt:     leaseExpiresAt,
 		CustomerName:       req.CustomerName,
 		CustomerPhone:      req.CustomerPhone,
 		CustomerEmail:      req.CustomerEmail,
@@ -123,11 +139,25 @@ func (s *Service) Create(ctx context.Context, salonID string, ownerUserID string
 	if err != nil {
 		return nil, err
 	}
+	if claim == nil || claim.Attempt == nil {
+		return nil, ErrOperationInProgress
+	}
+	if !claim.Acquired {
+		return claim.Attempt, nil
+	}
+	pending := claim.Attempt
+	if err := s.store.MarkBookingOperationStarted(ctx, salonID, pending.ID, processingToken, leaseExpiresAt); err != nil {
+		return nil, err
+	}
 
 	persistCtx := postPOSPersistenceContext(ctx)
+	customerRef, err := s.store.ResolveBookingCustomer(ctx, salonID, provider.Name(), req.CustomerName, req.CustomerPhone, req.CustomerEmail)
+	if err != nil {
+		return s.saveFallback(persistCtx, *pending, segments, req, endTime, "resolve_customer", err, false)
+	}
 	posCustomer, operation, err := s.resolvePOSCustomer(ctx, salonID, provider, *customerRef, req)
 	if err != nil {
-		return s.saveFallback(persistCtx, *pending, segments, req, endTime, operation, err)
+		return s.saveFallback(persistCtx, *pending, segments, req, endTime, operation, err, operation == "create_customer" && isUncertainProviderError(err))
 	}
 
 	appointment, err := provider.CreateAppointment(ctx, salonID, pos.CreateAppointmentInput{
@@ -142,13 +172,13 @@ func (s *Service) Create(ctx context.Context, salonID string, ownerUserID string
 		Segments:        posAppointmentSegments(resolvedSegments),
 	})
 	if err != nil {
-		return s.saveFallback(persistCtx, *pending, segments, req, endTime, "create_booking", err)
+		return s.saveFallback(persistCtx, *pending, segments, req, endTime, "create_booking", err, isUncertainProviderError(err))
 	}
 	if appointment == nil || strings.TrimSpace(appointment.POSAppointmentID) == "" {
-		return s.saveFallback(persistCtx, *pending, segments, req, endTime, "create_booking", fmt.Errorf("pos booking id was not returned"))
+		return s.saveFallback(persistCtx, *pending, segments, req, endTime, "create_booking", fmt.Errorf("pos booking id was not returned"), true)
 	}
 	if appointment.POSAppointmentVersion < 0 {
-		return s.saveFallback(persistCtx, *pending, segments, req, endTime, "create_booking", fmt.Errorf("pos booking version was not returned"))
+		return s.saveFallback(persistCtx, *pending, segments, req, endTime, "create_booking", fmt.Errorf("pos booking version was not returned"), true)
 	}
 	if !appointment.EndTime.IsZero() {
 		endTime = appointment.EndTime
@@ -175,12 +205,13 @@ func (s *Service) Create(ctx context.Context, salonID string, ownerUserID string
 		Notes:              req.Notes,
 		POSBookingID:       appointment.POSAppointmentID,
 		POSBookingVersion:  appointment.POSAppointmentVersion,
+		ProcessingToken:    processingToken,
 	})
 }
 
 func (s *Service) Reschedule(ctx context.Context, salonID string, ownerUserID string, appointmentID string, req RescheduleRequest) (*Appointment, *BookingAttempt, error) {
 	req = normalizeRescheduleRequest(req)
-	if req.StartTime.IsZero() {
+	if req.StartTime.IsZero() || !validOperationKey(req.OperationKey) {
 		return nil, nil, ErrValidation
 	}
 	appointment, err := s.store.GetAppointmentForOwner(ctx, salonID, ownerUserID, strings.TrimSpace(appointmentID))
@@ -195,7 +226,7 @@ func (s *Service) Reschedule(ctx context.Context, salonID string, ownerUserID st
 	if req.StaffID != "" {
 		staffOverride := appointment.Staff
 		if req.StaffID != appointment.Staff.ID {
-			nextStaff, err := s.store.GetBookableStaff(ctx, salonID, req.StaffID)
+			nextStaff, err := s.store.GetBookableStaff(ctx, salonID, appointment.POSProvider, req.StaffID)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -232,11 +263,18 @@ func (s *Service) Reschedule(ctx context.Context, salonID string, ownerUserID st
 		notes = appointment.Notes
 	}
 	endTime := req.StartTime.Add(time.Duration(durationMinutes) * time.Minute)
-	pending, err := s.store.CreatePendingAppointmentAction(ctx, PendingAppointmentActionRecord{
+	processingToken := uuid.NewString()
+	leaseExpiresAt := time.Now().UTC().Add(bookingOperationLeaseDuration)
+	claim, err := s.store.ClaimPendingAppointmentAction(ctx, PendingAppointmentActionRecord{
 		SalonID:            salonID,
 		Appointment:        *appointment,
 		Provider:           appointment.POSProvider,
 		Source:             req.Source,
+		OperationKey:       bookingOperationKey(req.OperationKey),
+		RequestFingerprint: appointmentActionFingerprint(BookingActionReschedule, *appointment, req.StartTime, segments, notes),
+		OperationType:      BookingActionReschedule,
+		ProcessingToken:    processingToken,
+		LeaseExpiresAt:     leaseExpiresAt,
 		Segments:           segments,
 		RequestedStartTime: req.StartTime,
 		RequestedEndTime:   endTime,
@@ -244,6 +282,16 @@ func (s *Service) Reschedule(ctx context.Context, salonID string, ownerUserID st
 		POSIdempotencyKey:  newPOSIdempotencyKey(),
 	})
 	if err != nil {
+		return nil, nil, err
+	}
+	if claim == nil || claim.Attempt == nil {
+		return nil, nil, ErrOperationInProgress
+	}
+	if !claim.Acquired {
+		return appointmentActionClaimResult(BookingActionReschedule, claim.Attempt)
+	}
+	pending := claim.Attempt
+	if err := s.store.MarkBookingOperationStarted(ctx, salonID, pending.ID, processingToken, leaseExpiresAt); err != nil {
 		return nil, nil, err
 	}
 
@@ -260,15 +308,15 @@ func (s *Service) Reschedule(ctx context.Context, salonID string, ownerUserID st
 		Segments:        posAppointmentSegmentsFromRecords(segments),
 	})
 	if err != nil {
-		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "reschedule_booking", req.Source, NotificationTypeRescheduleFallback, segments, req.StartTime, endTime, notes, err)
+		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "reschedule_booking", req.Source, NotificationTypeRescheduleFallback, segments, req.StartTime, endTime, notes, err, processingToken, isUncertainProviderError(err))
 		return nil, fallback, saveErr
 	}
 	if posAppointment == nil || strings.TrimSpace(posAppointment.POSAppointmentID) == "" {
-		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "reschedule_booking", req.Source, NotificationTypeRescheduleFallback, segments, req.StartTime, endTime, notes, fmt.Errorf("pos booking id was not returned"))
+		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "reschedule_booking", req.Source, NotificationTypeRescheduleFallback, segments, req.StartTime, endTime, notes, fmt.Errorf("pos booking id was not returned"), processingToken, true)
 		return nil, fallback, saveErr
 	}
 	if posAppointment.POSAppointmentVersion < 0 {
-		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "reschedule_booking", req.Source, NotificationTypeRescheduleFallback, segments, req.StartTime, endTime, notes, fmt.Errorf("pos booking version was not returned"))
+		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "reschedule_booking", req.Source, NotificationTypeRescheduleFallback, segments, req.StartTime, endTime, notes, fmt.Errorf("pos booking version was not returned"), processingToken, true)
 		return nil, fallback, saveErr
 	}
 	startTime := req.StartTime
@@ -289,6 +337,7 @@ func (s *Service) Reschedule(ctx context.Context, salonID string, ownerUserID st
 		EndTime:           endTime,
 		Notes:             notes,
 		POSBookingVersion: posAppointment.POSAppointmentVersion,
+		ProcessingToken:   processingToken,
 	})
 	return saved, nil, err
 }
@@ -312,13 +361,17 @@ func (s *Service) AvailableSlots(ctx context.Context, salonID string, ownerUserI
 	if err := s.store.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
 	}
-	resolvedSegments, err := s.resolveAvailabilitySegments(ctx, salonID, req)
+	activeProvider, err := s.store.GetActiveProvider(ctx, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	resolvedSegments, err := s.resolveAvailabilitySegments(ctx, salonID, activeProvider, req)
 	if err != nil {
 		return nil, err
 	}
 	primary := resolvedSegments[0]
 	durationMinutes := availabilitySegmentsDuration(resolvedSegments)
-	provider := s.providers[primary.Service.POSProvider]
+	provider := s.providers[activeProvider]
 	if provider == nil {
 		return nil, ErrProviderUnavailable
 	}
@@ -349,6 +402,7 @@ func (s *Service) AvailableSlots(ctx context.Context, salonID string, ownerUserI
 		ServiceID:       primary.Service.POSServiceID,
 		StaffID:         availabilityPrimaryStaffID(primary),
 		PreferredDate:   req.PreferredDate,
+		Timezone:        schedule.Timezone,
 		DurationMinutes: durationMinutes,
 		Segments:        posAvailabilitySegments(resolvedSegments),
 	})
@@ -394,6 +448,9 @@ func (s *Service) AvailableSlots(ctx context.Context, salonID string, ownerUserI
 
 func (s *Service) Cancel(ctx context.Context, salonID string, ownerUserID string, appointmentID string, req CancelRequest) (*Appointment, *BookingAttempt, error) {
 	req = normalizeCancelRequest(req)
+	if !validOperationKey(req.OperationKey) {
+		return nil, nil, ErrValidation
+	}
 	appointment, err := s.store.GetAppointmentForOwner(ctx, salonID, ownerUserID, strings.TrimSpace(appointmentID))
 	if err != nil {
 		return nil, nil, err
@@ -408,11 +465,18 @@ func (s *Service) Cancel(ctx context.Context, salonID string, ownerUserID string
 		return nil, nil, ErrProviderUnavailable
 	}
 
-	pending, err := s.store.CreatePendingAppointmentAction(ctx, PendingAppointmentActionRecord{
+	processingToken := uuid.NewString()
+	leaseExpiresAt := time.Now().UTC().Add(bookingOperationLeaseDuration)
+	claim, err := s.store.ClaimPendingAppointmentAction(ctx, PendingAppointmentActionRecord{
 		SalonID:            salonID,
 		Appointment:        *appointment,
 		Provider:           appointment.POSProvider,
 		Source:             req.Source,
+		OperationKey:       bookingOperationKey(req.OperationKey),
+		RequestFingerprint: appointmentActionFingerprint(BookingActionCancel, *appointment, appointment.StartTime, segments, req.Reason),
+		OperationType:      BookingActionCancel,
+		ProcessingToken:    processingToken,
+		LeaseExpiresAt:     leaseExpiresAt,
 		Segments:           segments,
 		RequestedStartTime: appointment.StartTime,
 		RequestedEndTime:   appointment.EndTime,
@@ -420,6 +484,16 @@ func (s *Service) Cancel(ctx context.Context, salonID string, ownerUserID string
 		POSIdempotencyKey:  newPOSIdempotencyKey(),
 	})
 	if err != nil {
+		return nil, nil, err
+	}
+	if claim == nil || claim.Attempt == nil {
+		return nil, nil, ErrOperationInProgress
+	}
+	if !claim.Acquired {
+		return appointmentActionClaimResult(BookingActionCancel, claim.Attempt)
+	}
+	pending := claim.Attempt
+	if err := s.store.MarkBookingOperationStarted(ctx, salonID, pending.ID, processingToken, leaseExpiresAt); err != nil {
 		return nil, nil, err
 	}
 
@@ -430,15 +504,15 @@ func (s *Service) Cancel(ctx context.Context, salonID string, ownerUserID string
 		Reason:         req.Reason,
 	})
 	if err != nil {
-		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "cancel_booking", req.Source, NotificationTypeCancellationFallback, segments, appointment.StartTime, appointment.EndTime, req.Reason, err)
+		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "cancel_booking", req.Source, NotificationTypeCancellationFallback, segments, appointment.StartTime, appointment.EndTime, req.Reason, err, processingToken, isUncertainProviderError(err))
 		return nil, fallback, saveErr
 	}
 	if posAppointment == nil || strings.TrimSpace(posAppointment.POSAppointmentID) == "" {
-		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "cancel_booking", req.Source, NotificationTypeCancellationFallback, segments, appointment.StartTime, appointment.EndTime, req.Reason, fmt.Errorf("pos booking id was not returned"))
+		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "cancel_booking", req.Source, NotificationTypeCancellationFallback, segments, appointment.StartTime, appointment.EndTime, req.Reason, fmt.Errorf("pos booking id was not returned"), processingToken, true)
 		return nil, fallback, saveErr
 	}
 	if posAppointment.POSAppointmentVersion < 0 {
-		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "cancel_booking", req.Source, NotificationTypeCancellationFallback, segments, appointment.StartTime, appointment.EndTime, req.Reason, fmt.Errorf("pos booking version was not returned"))
+		fallback, saveErr := s.saveActionFallback(persistCtx, pending.ID, salonID, *appointment, appointment.POSProvider, "cancel_booking", req.Source, NotificationTypeCancellationFallback, segments, appointment.StartTime, appointment.EndTime, req.Reason, fmt.Errorf("pos booking version was not returned"), processingToken, true)
 		return nil, fallback, saveErr
 	}
 
@@ -448,6 +522,7 @@ func (s *Service) Cancel(ctx context.Context, salonID string, ownerUserID string
 		Source:            req.Source,
 		Reason:            req.Reason,
 		POSBookingVersion: posAppointment.POSAppointmentVersion,
+		ProcessingToken:   processingToken,
 	})
 	return saved, nil, err
 }
@@ -478,6 +553,12 @@ func (s *Service) Attempts(ctx context.Context, salonID string, ownerUserID stri
 	}
 	pageLimit := clampLimit(limit)
 	pageOffset := clampOffset(offset)
+	if err := s.store.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	if err := s.store.ExpireBookingOperationLeases(ctx, salonID); err != nil {
+		return nil, err
+	}
 	items, err := s.store.ListBookingAttempts(ctx, salonID, ownerUserID, pageStatus, pageLimit+1, pageOffset)
 	if err != nil {
 		return nil, err
@@ -496,6 +577,12 @@ func (s *Service) Attempts(ctx context.Context, salonID string, ownerUserID stri
 }
 
 func (s *Service) LatestTestBooking(ctx context.Context, salonID string, ownerUserID string) (*TestBookingRecord, error) {
+	if err := s.store.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	if err := s.store.ExpireBookingOperationLeases(ctx, salonID); err != nil {
+		return nil, err
+	}
 	return s.store.LatestTestBooking(ctx, salonID, ownerUserID)
 }
 
@@ -505,6 +592,9 @@ func (s *Service) Calendar(ctx context.Context, salonID string, ownerUserID stri
 		return nil, err
 	}
 	if err := s.store.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	if err := s.store.ExpireBookingOperationLeases(ctx, salonID); err != nil {
 		return nil, err
 	}
 	appointments, err := s.store.ListCalendarAppointments(ctx, salonID, ownerUserID, req.StartTime, req.EndTime)
@@ -632,8 +722,9 @@ func (s *Service) SyncCalendar(ctx context.Context, salonID string, ownerUserID 
 	}, nil
 }
 
-func (s *Service) saveFallback(ctx context.Context, pending BookingAttempt, segments []BookingSegmentRecord, req CreateBookingRequest, endTime time.Time, operation string, providerErr error) (*BookingAttempt, error) {
+func (s *Service) saveFallback(ctx context.Context, pending BookingAttempt, segments []BookingSegmentRecord, req CreateBookingRequest, endTime time.Time, operation string, providerErr error, uncertain bool) (*BookingAttempt, error) {
 	primary := segments[0]
+	outcome, retryPolicy, reconciliation := fallbackOperationPolicy(uncertain)
 	return s.store.SaveFallbackBooking(ctx, FallbackBookingRecord{
 		AttemptID:          pending.ID,
 		SalonID:            pending.SalonID,
@@ -652,13 +743,18 @@ func (s *Service) saveFallback(ctx context.Context, pending BookingAttempt, segm
 		Notes:              req.Notes,
 		ErrorCode:          posErrorCode(providerErr),
 		ErrorMessage:       providerErr.Error(),
+		ProcessingToken:    pending.ProcessingToken,
+		ProviderOutcome:    outcome,
+		RetryPolicy:        retryPolicy,
+		Reconciliation:     reconciliation,
 	})
 }
 
-func (s *Service) saveActionFallback(ctx context.Context, attemptID string, salonID string, appointment AppointmentActionRef, provider string, operation string, source string, notificationType string, segments []BookingSegmentRecord, startTime time.Time, endTime time.Time, notes string, providerErr error) (*BookingAttempt, error) {
+func (s *Service) saveActionFallback(ctx context.Context, attemptID string, salonID string, appointment AppointmentActionRef, provider string, operation string, source string, notificationType string, segments []BookingSegmentRecord, startTime time.Time, endTime time.Time, notes string, providerErr error, processingToken string, uncertain bool) (*BookingAttempt, error) {
 	if strings.TrimSpace(source) == "" {
 		source = SourceOwnerDashboard
 	}
+	outcome, retryPolicy, reconciliation := fallbackOperationPolicy(uncertain)
 	return s.store.SaveAppointmentActionFallback(ctx, AppointmentActionFallbackRecord{
 		AttemptID:          attemptID,
 		SalonID:            salonID,
@@ -673,11 +769,142 @@ func (s *Service) saveActionFallback(ctx context.Context, attemptID string, salo
 		Notes:              notes,
 		ErrorCode:          posErrorCode(providerErr),
 		ErrorMessage:       providerErr.Error(),
+		ProcessingToken:    processingToken,
+		ProviderOutcome:    outcome,
+		RetryPolicy:        retryPolicy,
+		Reconciliation:     reconciliation,
 	})
 }
 
 func newPOSIdempotencyKey() string {
 	return uuid.NewString()
+}
+
+func bookingOperationKey(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return uuid.NewString()
+	}
+	return value
+}
+
+func validOperationKey(value string) bool {
+	return len(strings.TrimSpace(value)) <= 200
+}
+
+func createRequestFingerprint(provider string, req CreateBookingRequest, segments []resolvedBookingSegment) string {
+	type fingerprintSegment struct {
+		ServiceID          string `json:"service_id"`
+		POSServiceID       string `json:"pos_service_id"`
+		POSServiceVersion  int64  `json:"pos_service_version"`
+		StaffID            string `json:"staff_id"`
+		POSStaffID         string `json:"pos_staff_id"`
+		StaffSelectionMode string `json:"staff_selection_mode"`
+	}
+	payload := struct {
+		OperationType string               `json:"operation_type"`
+		Provider      string               `json:"provider"`
+		CustomerName  string               `json:"customer_name"`
+		CustomerPhone string               `json:"customer_phone"`
+		CustomerEmail string               `json:"customer_email"`
+		StartTime     string               `json:"start_time"`
+		Notes         string               `json:"notes"`
+		Segments      []fingerprintSegment `json:"segments"`
+	}{
+		OperationType: BookingActionBook,
+		Provider:      strings.TrimSpace(provider),
+		CustomerName:  req.CustomerName,
+		CustomerPhone: req.CustomerPhone,
+		CustomerEmail: strings.ToLower(req.CustomerEmail),
+		StartTime:     req.StartTime.UTC().Format(time.RFC3339Nano),
+		Notes:         req.Notes,
+		Segments:      make([]fingerprintSegment, 0, len(segments)),
+	}
+	for _, segment := range segments {
+		payload.Segments = append(payload.Segments, fingerprintSegment{
+			ServiceID:          segment.Service.ID,
+			POSServiceID:       segment.Service.POSServiceID,
+			POSServiceVersion:  segment.Service.POSServiceVersion,
+			StaffID:            segment.Staff.ID,
+			POSStaffID:         segment.Staff.POSStaffID,
+			StaffSelectionMode: segment.StaffSelectionMode,
+		})
+	}
+	return fingerprintJSON(payload)
+}
+
+func appointmentActionFingerprint(operationType string, appointment AppointmentActionRef, startTime time.Time, segments []BookingSegmentRecord, notes string) string {
+	type fingerprintSegment struct {
+		ServiceID          string `json:"service_id"`
+		POSServiceID       string `json:"pos_service_id"`
+		POSServiceVersion  int64  `json:"pos_service_version"`
+		StaffID            string `json:"staff_id"`
+		POSStaffID         string `json:"pos_staff_id"`
+		StaffSelectionMode string `json:"staff_selection_mode"`
+	}
+	payload := struct {
+		OperationType         string               `json:"operation_type"`
+		Provider              string               `json:"provider"`
+		AppointmentID         string               `json:"appointment_id"`
+		POSAppointmentID      string               `json:"pos_appointment_id"`
+		POSAppointmentVersion int                  `json:"pos_appointment_version"`
+		StartTime             string               `json:"start_time"`
+		Notes                 string               `json:"notes"`
+		Segments              []fingerprintSegment `json:"segments"`
+	}{
+		OperationType:         operationType,
+		Provider:              appointment.POSProvider,
+		AppointmentID:         appointment.ID,
+		POSAppointmentID:      appointment.POSAppointmentID,
+		POSAppointmentVersion: appointment.POSAppointmentVersion,
+		StartTime:             startTime.UTC().Format(time.RFC3339Nano),
+		Notes:                 strings.TrimSpace(notes),
+		Segments:              make([]fingerprintSegment, 0, len(segments)),
+	}
+	for _, segment := range segments {
+		payload.Segments = append(payload.Segments, fingerprintSegment{
+			ServiceID:          segment.Service.ID,
+			POSServiceID:       segment.Service.POSServiceID,
+			POSServiceVersion:  segment.Service.POSServiceVersion,
+			StaffID:            segment.Staff.ID,
+			POSStaffID:         segment.Staff.POSStaffID,
+			StaffSelectionMode: segment.StaffSelectionMode,
+		})
+	}
+	return fingerprintJSON(payload)
+}
+
+func fingerprintJSON(value any) string {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
+}
+
+func isUncertainProviderError(err error) bool {
+	return pos.WriteOutcomeForError(err) == pos.WriteOutcomeUnknown
+}
+
+func fallbackOperationPolicy(uncertain bool) (string, string, string) {
+	if uncertain {
+		return ProviderOutcomeUnknown, RetryPolicyBlocked, ReconciliationRequired
+	}
+	return ProviderOutcomeFailed, RetryPolicySafe, ReconciliationNotRequired
+}
+
+func appointmentActionClaimResult(operationType string, attempt *BookingAttempt) (*Appointment, *BookingAttempt, error) {
+	if attempt == nil {
+		return nil, nil, ErrOperationInProgress
+	}
+	if operationType == BookingActionReschedule && attempt.Status == StatusRescheduled && attempt.Appointment != nil {
+		return attempt.Appointment, nil, nil
+	}
+	if operationType == BookingActionCancel && attempt.Status == StatusCancelled && attempt.Appointment != nil {
+		return attempt.Appointment, nil, nil
+	}
+	return nil, attempt, nil
 }
 
 func postPOSPersistenceContext(ctx context.Context) context.Context {
@@ -688,6 +915,7 @@ func postPOSPersistenceContext(ctx context.Context) context.Context {
 }
 
 func normalizeRequest(req CreateBookingRequest) CreateBookingRequest {
+	req.OperationKey = strings.TrimSpace(req.OperationKey)
 	req.Source = strings.TrimSpace(req.Source)
 	if req.Source == "" {
 		req.Source = SourceOwnerDashboard
@@ -778,7 +1006,7 @@ func annotateCalendarPendingRequests(items []BookingAttempt) []BookingAttempt {
 		} else {
 			item.SyncWarning = "Pending request: Square Appointments did not confirm this action."
 		}
-		item.CanRetry = item.Status == StatusFallbackPending
+		annotateBookingAttemptPolicy(item)
 	}
 	return items
 }
@@ -904,6 +1132,7 @@ func firstNonEmpty(values ...string) string {
 }
 
 func normalizeRescheduleRequest(req RescheduleRequest) RescheduleRequest {
+	req.OperationKey = strings.TrimSpace(req.OperationKey)
 	req.Source = strings.TrimSpace(req.Source)
 	if req.Source == "" {
 		req.Source = SourceOwnerDashboard
@@ -926,6 +1155,7 @@ func normalizeRescheduleLookupRequest(req RescheduleLookupRequest) RescheduleLoo
 }
 
 func normalizeCancelRequest(req CancelRequest) CancelRequest {
+	req.OperationKey = strings.TrimSpace(req.OperationKey)
 	req.Source = strings.TrimSpace(req.Source)
 	if req.Source == "" {
 		req.Source = SourceOwnerDashboard
@@ -948,7 +1178,7 @@ func normalizeAvailabilityRequest(req AvailabilityRequest) AvailabilityRequest {
 }
 
 func validateRequest(req CreateBookingRequest) error {
-	if req.CustomerName == "" || req.CustomerPhone == "" || req.StartTime.IsZero() {
+	if req.CustomerName == "" || req.CustomerPhone == "" || req.StartTime.IsZero() || !validOperationKey(req.OperationKey) {
 		return ErrValidation
 	}
 	if !validStaffSelectionMode(req.StaffSelectionMode) {
@@ -1064,19 +1294,19 @@ func bookableStaffHasProviderLink(staff *StaffRef) bool {
 		strings.TrimSpace(staff.POSStaffID) != ""
 }
 
-func (s *Service) resolveBookingSegments(ctx context.Context, salonID string, req CreateBookingRequest) ([]resolvedBookingSegment, error) {
+func (s *Service) resolveBookingSegments(ctx context.Context, salonID string, activeProvider string, req CreateBookingRequest) ([]resolvedBookingSegment, error) {
 	segments := requestSegments(req.Segments, req.ServiceID, req.StaffID, req.StaffSelectionMode)
 	resolved := make([]resolvedBookingSegment, 0, len(segments))
 	provider := ""
 	for index, segment := range segments {
-		service, err := s.store.GetBookableService(ctx, salonID, segment.ServiceID)
+		service, err := s.store.GetBookableService(ctx, salonID, activeProvider, segment.ServiceID)
 		if err != nil {
 			return nil, err
 		}
-		if !bookableServiceHasProviderLink(service) {
+		if !bookableServiceHasProviderLink(service) || service.POSProvider != activeProvider {
 			return nil, ErrValidation
 		}
-		staff, err := s.store.GetBookableStaff(ctx, salonID, segment.StaffID)
+		staff, err := s.store.GetBookableStaff(ctx, salonID, activeProvider, segment.StaffID)
 		if err != nil {
 			return nil, err
 		}
@@ -1102,16 +1332,16 @@ func (s *Service) resolveBookingSegments(ctx context.Context, salonID string, re
 	return resolved, nil
 }
 
-func (s *Service) resolveAvailabilitySegments(ctx context.Context, salonID string, req AvailabilityRequest) ([]resolvedAvailabilitySegment, error) {
+func (s *Service) resolveAvailabilitySegments(ctx context.Context, salonID string, activeProvider string, req AvailabilityRequest) ([]resolvedAvailabilitySegment, error) {
 	segments := requestSegments(req.Segments, req.ServiceID, req.StaffID, req.StaffSelectionMode)
 	resolved := make([]resolvedAvailabilitySegment, 0, len(segments))
 	provider := ""
 	for index, segment := range segments {
-		service, err := s.store.GetBookableService(ctx, salonID, segment.ServiceID)
+		service, err := s.store.GetBookableService(ctx, salonID, activeProvider, segment.ServiceID)
 		if err != nil {
 			return nil, err
 		}
-		if !bookableServiceHasProviderLink(service) {
+		if !bookableServiceHasProviderLink(service) || service.POSProvider != activeProvider {
 			return nil, ErrValidation
 		}
 		if provider == "" {
@@ -1122,7 +1352,7 @@ func (s *Service) resolveAvailabilitySegments(ctx context.Context, salonID strin
 		}
 		var staff *StaffRef
 		if segment.StaffID != "" {
-			staff, err = s.store.GetBookableStaff(ctx, salonID, segment.StaffID)
+			staff, err = s.store.GetBookableStaff(ctx, salonID, activeProvider, segment.StaffID)
 			if err != nil {
 				return nil, err
 			}
@@ -1494,7 +1724,7 @@ func (s *Service) bookableStaffByPOSID(ctx context.Context, salonID string, prov
 		}
 		return refs, nil
 	}
-	staff, err := s.store.ListBookableStaffRefs(ctx, salonID)
+	staff, err := s.store.ListBookableStaffRefs(ctx, salonID, provider)
 	if err != nil {
 		return nil, err
 	}

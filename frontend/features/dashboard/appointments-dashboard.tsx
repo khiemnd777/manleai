@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   AlertTriangle,
@@ -103,6 +103,7 @@ const defaultFallbackPageSize = 10;
 const fallbackOverviewLimit = 200;
 
 export function AppointmentsDashboard() {
+  const actionOperationKeyRef = useRef("");
   const [salon, setSalon] = useState<Salon | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [appointments, setAppointments] = useState<AppointmentRecord[]>([]);
@@ -463,6 +464,7 @@ export function AppointmentsDashboard() {
   }
 
   function openCreateBooking() {
+    actionOperationKeyRef.current = crypto.randomUUID();
     setActionMode("create");
     setSelectedAppointment(null);
     setActionForm({
@@ -475,6 +477,7 @@ export function AppointmentsDashboard() {
   }
 
   function openCreateBookingFromFallback(request: BookingAttempt) {
+    actionOperationKeyRef.current = crypto.randomUUID();
     const retryServiceID = bookingAttemptPrimaryServiceID(request);
     const retryStaffID = bookingAttemptRetryStaffID(request);
     setActionMode("create");
@@ -495,6 +498,7 @@ export function AppointmentsDashboard() {
   }
 
   function openReschedule(appointment: AppointmentRecord, preferredDate?: string) {
+    actionOperationKeyRef.current = crypto.randomUUID();
     setActionMode("reschedule");
     setSelectedAppointment(appointment);
     setAppointmentReviewAppointment(null);
@@ -514,6 +518,7 @@ export function AppointmentsDashboard() {
   }
 
   function openCancel(appointment: AppointmentRecord, reason = "") {
+    actionOperationKeyRef.current = crypto.randomUUID();
     setActionMode("cancel");
     setSelectedAppointment(appointment);
     setAppointmentReviewAppointment(null);
@@ -563,6 +568,7 @@ export function AppointmentsDashboard() {
   }
 
   function closeActionPanel() {
+    actionOperationKeyRef.current = "";
     setActionMode(null);
     setSelectedAppointment(null);
     setActionError("");
@@ -619,6 +625,7 @@ export function AppointmentsDashboard() {
       const attempt = await apiRequest<BookingAttempt>(`/api/salons/${salon.id}/booking-attempts`, {
         method: "POST",
         body: JSON.stringify({
+          operation_key: currentActionOperationKey(),
           source: "owner_dashboard",
           customer_name: actionForm.customerName,
           customer_phone: actionForm.customerPhone,
@@ -631,7 +638,7 @@ export function AppointmentsDashboard() {
           notes: actionForm.notes
         })
       });
-      if (attempt.status === "fallback_pending") {
+      if (attempt.status !== "confirmed" || !attempt.pos_booking_id) {
         setActionNotice({
           tone: "warning",
           title: "Booking needs owner review",
@@ -664,6 +671,7 @@ export function AppointmentsDashboard() {
         {
           method: "POST",
           body: JSON.stringify({
+            operation_key: currentActionOperationKey(),
             start_time: selectedActionSlot.start_time,
             staff_id: actionForm.staffID,
             notes: actionForm.notes
@@ -702,7 +710,7 @@ export function AppointmentsDashboard() {
         `/api/salons/${salon.id}/appointments/${selectedAppointment.id}/cancel`,
         {
           method: "POST",
-          body: JSON.stringify({ reason: actionForm.cancelReason })
+          body: JSON.stringify({ operation_key: currentActionOperationKey(), reason: actionForm.cancelReason })
         }
       );
       if (isBookingAttempt(response)) {
@@ -725,6 +733,13 @@ export function AppointmentsDashboard() {
     } finally {
       setSavingAction(false);
     }
+  }
+
+  function currentActionOperationKey() {
+    if (!actionOperationKeyRef.current) {
+      actionOperationKeyRef.current = crypto.randomUUID();
+    }
+    return actionOperationKeyRef.current;
   }
 
   if (loading) {
@@ -2351,7 +2366,9 @@ function FallbackReviewDialog({
             ["Services", serviceNamesLabel(request)],
             ["Assigned technicians", assignedTechniciansLabel(request)],
             ["Technician preference", technicianPreferenceLabel(request)],
-            ["POS error", request.error_code || "POS error"]
+            ["POS error", request.error_code || "POS error"],
+            ["Retry policy", retryPolicyLabel(request)],
+            ["Reconciliation", reconciliationLabel(request)]
           ]}
         />
         <SegmentAssignmentList record={request} />
@@ -2643,6 +2660,9 @@ function fallbackRetryLabel(request: BookingAttempt) {
 }
 
 function canRetryFallbackRequest(request: BookingAttempt) {
+  if (!request.can_retry) {
+    return false;
+  }
   const action = fallbackBookingAction(request);
   if (action === "book") {
     return Boolean(bookingAttemptPrimaryServiceID(request) && request.customer_name.trim() && request.customer_phone.trim());
@@ -2651,6 +2671,12 @@ function canRetryFallbackRequest(request: BookingAttempt) {
 }
 
 function fallbackRetryDisabledReason(request: BookingAttempt) {
+  if (request.retry_blocked_reason) {
+    return request.retry_blocked_reason;
+  }
+  if (request.reconciliation_status === "required") {
+    return "Square may have completed this action. Reconcile it with Square Appointments before retrying.";
+  }
   if (canRetryFallbackRequest(request)) {
     return "";
   }
@@ -2659,6 +2685,18 @@ function fallbackRetryDisabledReason(request: BookingAttempt) {
     return "This pending booking is missing customer or service details needed to retry through Square Appointments.";
   }
   return "This pending appointment action is missing the target POS-confirmed appointment, so retry is gated until the appointment context is available.";
+}
+
+function retryPolicyLabel(request: BookingAttempt) {
+  if (request.retry_policy === "safe") return "Retry allowed";
+  if (request.retry_policy === "blocked") return "Retry blocked";
+  return "No retry needed";
+}
+
+function reconciliationLabel(request: BookingAttempt) {
+  if (request.reconciliation_status === "required") return "Provider review required";
+  if (request.reconciliation_status === "resolved") return "Resolved";
+  return "Not required";
 }
 
 function bookingAttemptPrimaryServiceID(request: BookingAttempt) {
