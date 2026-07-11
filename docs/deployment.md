@@ -65,6 +65,7 @@ does it move `/opt/manleai/current` to the new release:
 
 ```bash
 docker login ghcr.io
+docker builder prune --all --force
 for image in manleai-api manleai-frontend manleai-landing manleai-pos-calendar; do
   docker pull "ghcr.io/khiemnd777/$image:<release-tag>"
 done
@@ -85,6 +86,14 @@ store after `docker logout`. The workflow uses the repository-scoped
 The VPS pulls release images one at a time to bound memory, CPU, network, and
 disk-extraction pressure on the 2 GB host. Docker Compose starts containers only
 after every required image is present locally.
+
+`docker builder prune --all --force` removes only unused BuildKit cache from the
+former VPS-build workflow; it does not remove running containers, their images,
+or Docker volumes. During the first GHCR migration, an old running container can
+refer to image metadata that Docker no longer retains. The workflow reports that
+case and proceeds without automatic image rollback; after the first successful
+GHCR release, every running application image is tag-addressable and rollback
+is available again.
 
 If the remote deploy command fails or its SSH session disconnects, the workflow
 opens a short diagnostic SSH session and reports memory, deploy-path disk

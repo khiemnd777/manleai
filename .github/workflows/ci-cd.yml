@@ -338,6 +338,11 @@ jobs:
                 return
               fi
               image_id="$(docker inspect --format '{{.Image}}' "$container_id")"
+              if ! docker image inspect "$image_id" >/dev/null 2>&1; then
+                echo "::warning::The current $service container has no locally retained image; automatic rollback is unavailable for this one-time GHCR migration."
+                rm -f "$rollback_images"
+                return
+              fi
               docker image tag "$image_id" "manleai-rollback/manleai-$service:$RELEASE_ID"
             done
           }
@@ -356,6 +361,8 @@ jobs:
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
           trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
 
+          echo "Removing unused Docker build cache from legacy VPS builds."
+          docker builder prune --all --force
           pull_release_images
           capture_rollback_images
           compose up -d --no-build --remove-orphans
