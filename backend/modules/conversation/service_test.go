@@ -7322,6 +7322,7 @@ func newFakeConversationStore() *fakeConversationStore {
 			Outcome:            OutcomeCollecting,
 			BookingAction:      BookingActionBook,
 			LifecycleStatus:    LifecycleActive,
+			DialogState:        normalizedDialogState(DialogState{}),
 			RetentionExpiresAt: time.Now().UTC().Add(90 * 24 * time.Hour),
 		},
 		services: []ServiceOption{{
@@ -7508,6 +7509,7 @@ func (f *fakeConversationStore) SaveTurn(ctx context.Context, record TurnRecord)
 	session.OfferedSlots = record.Update.OfferedSlots
 	session.BookingSegments = append([]booking.BookingSegmentRequest(nil), record.Update.BookingSegments...)
 	session.PartyPlan = clonePartyPlan(record.Update.PartyPlan)
+	session.DialogState = cloneDialogState(record.Update.DialogState)
 	session.BookingAttemptID = record.Update.BookingAttemptID
 	session.AppointmentID = record.Update.AppointmentID
 	session.Summary = record.Update.Summary

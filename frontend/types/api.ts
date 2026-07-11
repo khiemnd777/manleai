@@ -806,6 +806,41 @@ export type OfferedSlotSegment = {
   duration_minutes?: number;
 };
 
+export type PendingConversationAct = {
+  kind: string;
+  source_service_ids?: string[];
+  target_service_ids?: string[];
+  source_category_id?: string;
+  source_category_name?: string;
+  target_category_id?: string;
+  target_category_name?: string;
+  scope?: string;
+  guest_scope?: "caller" | "another_guest" | string;
+  prompt_key: string;
+};
+
+export type ConversationDraftMutation = {
+  kind: string;
+  before_service_id?: string;
+  before_service_name?: string;
+  before_service_ids: string[];
+  before_segments: BookingSegmentRequest[];
+  after_service_ids: string[];
+  after_segments: BookingSegmentRequest[];
+};
+
+export type ConversationDialogState = {
+  version: number;
+  phase: "open" | "drafting" | "clarifying" | "availability" | "review" | string;
+  pending?: PendingConversationAct;
+  last_mutation?: ConversationDraftMutation;
+  review_required: boolean;
+  review_accepted: boolean;
+  no_progress_count: number;
+  last_prompt_key?: string;
+  last_act_kind?: string;
+};
+
 export type ConversationSession = {
   id: string;
   salon_id: string;
@@ -832,6 +867,7 @@ export type ConversationSession = {
   requested_start_time?: string;
   offered_slots?: OfferedSlot[];
   booking_segments?: BookingSegmentRequest[];
+  dialog_state: ConversationDialogState;
   booking_attempt_id?: string;
   appointment_id?: string;
   summary?: string;

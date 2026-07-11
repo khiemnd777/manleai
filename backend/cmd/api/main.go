@@ -123,6 +123,7 @@ func main() {
 		Realtime: openAIVoiceAdapter,
 	}
 	conversationService.SetReplyGenerator(voice.NewGuardedReplyGenerator(aiProviders.LLM))
+	conversationService.SetConversationActInterpreter(voice.NewGuardedConversationActInterpreter(openAIVoiceAdapter))
 	voiceService := voice.NewService(voiceRepo, conversationService, cfg.Voice, aiProviders)
 	voiceService.SetConfigResolver(integrationConfigService)
 	voice.RegisterRoutes(api, voice.NewHandler(voiceService), cfg.JWTSecret)

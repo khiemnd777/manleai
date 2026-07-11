@@ -22,6 +22,15 @@ A salon-scoped speaking-style preset stored on `salon_settings.ai_tone`. It can 
 **Conversation Engine**
 The state machine and tool-calling layer behind the AI Receptionist. It must not know Square payloads, OAuth tokens, or provider-specific booking details.
 
+**Conversation Act**
+A typed, catalog-validated interpretation of one caller turn, such as add, replace, remove, undo, summarize the current booking draft, or authorize the final review. A conversation act keeps replacement source, replacement target, scope, and guest scope separate. Deterministic catalog evidence owns known service facts; a configured structured-AI fallback may propose an act but cannot mutate state or call booking tools directly.
+
+**Appointment Draft**
+The mutable, non-confirmed service, guest, staff, date/time, and customer-detail selection collected during a call. Draft acknowledgements and final-review acceptance are not confirmed appointments. Service, staff, or time mutations invalidate dependent availability and require a fresh review before booking execution.
+
+**Dialog State**
+Versioned call-session state that records the current conversation phase, pending typed clarification, last reversible draft mutation, final-review gate, and bounded no-progress count. A pending candidate set helps resolve short answers but must not prevent a clearly different catalog-backed target from superseding stale context.
+
 **Service Understanding**
 The backend-owned interpretation layer that maps customer service utterances to active salon services. It uses the salon catalog, service categories, active service aliases, and active service category aliases; asks clarification for category, generic, or fuzzy family matches; and records diagnostic transcript metadata.
 
@@ -79,6 +88,8 @@ A normalized, salon-scoped record of provider failures. Use codes such as `POS_T
 - Service categories are menu/understanding configuration, not confirmed-booking entities. Category matches should clarify to real services before availability or booking.
 - Supported group or party booking requests may be booked by the AI when party size and guest service counts resolve to bookable catalog services, availability returns bookable slots, and the active POS provider returns a successful booking ID. Unsupported or unsafe party requests require owner review and must not be described as confirmed appointments.
 - AI tone changes reply style only. It must not change required booking slots, handoff decisions, availability checks, service selection, or confirmed-booking wording.
+- Pending clarification is context, not a closed vocabulary. A caller may ask an informational question without losing the draft, or explicitly change to a different catalog-backed target without being trapped in stale candidates.
+- Final review is mandatory for persisted production dialog state before a new booking write. Accepting the review authorizes the booking attempt but is not confirmation; only active-POS success with a booking ID creates confirmed wording.
 - Square is the first real integration; future POS names are architecture targets, not implemented features.
 - Vietnamese language support is product scope, but English remains the primary commercial release language unless a feature explicitly says otherwise.
 

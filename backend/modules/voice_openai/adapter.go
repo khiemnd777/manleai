@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/manleai/ai-receptionist/internal/config"
+	"github.com/manleai/ai-receptionist/modules/conversation"
 	"github.com/manleai/ai-receptionist/modules/voice"
 )
 
@@ -174,6 +175,97 @@ func (a *Adapter) GenerateReply(ctx context.Context, req voice.ModelRequest) (vo
 	return parsed, nil
 }
 
+func (a *Adapter) ClassifyConversationAct(ctx context.Context, req voice.ActModelRequest) (voice.ActModelReply, error) {
+	cfg, enabled, err := a.configFor(ctx, req.SalonID)
+	if err != nil {
+		return voice.ActModelReply{}, err
+	}
+	if !enabled || strings.TrimSpace(cfg.APIKey) == "" || strings.TrimSpace(cfg.ReplyModel) == "" {
+		return voice.ActModelReply{}, voice.ErrProviderDisabled
+	}
+	payload := responseRequest{
+		Model: strings.TrimSpace(cfg.ReplyModel),
+		Instructions: strings.Join([]string{
+			"Classify one caller utterance for a US nail salon appointment draft.",
+			"Return a structured dialogue act only; never write a customer-facing reply.",
+			"Use only service and category IDs present in catalog_services.",
+			"Distinguish the salon catalog from the caller's current booking draft.",
+			"For replacements, preserve source (what is being replaced) separately from target (the new service).",
+			"Use guest_scope=another_guest only when the caller explicitly assigns the added service to another person.",
+			"A pending clarification is context, not a restriction: a clearly different new target may supersede it.",
+			"Use summarize_booking for questions about what the caller currently has or how many services they are booking.",
+			"Use unknown when the message is not an add, replace, remove, undo, summary, or final-review authorization act.",
+			"Do not infer booking confirmation, availability, customer identity, prices, or policy.",
+			"Return strict JSON matching the schema.",
+		}, "\n"),
+		Input: actModelInput(req),
+		Text: responseTextFormat{Format: responseFormat{
+			Type: "json_schema",
+			Name: "conversation_act",
+			Schema: map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]any{
+					"kind": map[string]any{"type": "string", "enum": []string{
+						conversation.ConversationActUnknown,
+						conversation.ConversationActAdd,
+						conversation.ConversationActReplace,
+						conversation.ConversationActRemove,
+						conversation.ConversationActUndo,
+						conversation.ConversationActSummarize,
+						conversation.ConversationActReview,
+					}},
+					"source_service_ids":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"target_service_ids":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"source_category_id":   map[string]any{"type": "string"},
+					"source_category_name": map[string]any{"type": "string"},
+					"target_category_id":   map[string]any{"type": "string"},
+					"target_category_name": map[string]any{"type": "string"},
+					"scope": map[string]any{"type": "string", "enum": []string{
+						"", conversation.ConversationScopeOne, conversation.ConversationScopeAllMatching, conversation.ConversationScopeAll,
+					}},
+					"guest_scope": map[string]any{"type": "string", "enum": []string{"", conversation.ConversationGuestCaller, conversation.ConversationGuestAnother}},
+					"subject":     map[string]any{"type": "string", "enum": []string{"", "catalog", "current_booking"}},
+					"confidence":  map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+					"reason":      map[string]any{"type": "string"},
+				},
+				"required": []string{
+					"kind", "source_service_ids", "target_service_ids", "source_category_id", "source_category_name",
+					"target_category_id", "target_category_name", "scope", "guest_scope", "subject", "confidence", "reason",
+				},
+			},
+			Strict: true,
+		}},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return voice.ActModelReply{}, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url(cfg, "/responses"), bytes.NewReader(raw))
+	if err != nil {
+		return voice.ActModelReply{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	a.authorize(httpReq, cfg)
+
+	var res responseResponse
+	if err := a.do(httpReq, &res); err != nil {
+		return voice.ActModelReply{}, err
+	}
+	text := strings.TrimSpace(res.OutputText)
+	if text == "" {
+		text = strings.TrimSpace(res.firstText())
+	}
+	if text == "" {
+		return voice.ActModelReply{}, errors.New("openai conversation act response has no text")
+	}
+	var parsed voice.ActModelReply
+	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
+		return voice.ActModelReply{}, err
+	}
+	return parsed, nil
+}
+
 func (a *Adapter) Synthesize(ctx context.Context, salonID string, text string, requestedVoice string) ([]byte, error) {
 	cfg, enabled, err := a.configFor(ctx, salonID)
 	if err != nil {
@@ -272,6 +364,18 @@ func modelInput(req voice.ModelRequest) string {
 		"summary":                req.Summary,
 		"knowledge_context":      req.KnowledgeContext,
 		"reply_policy":           req.ReplyPolicy,
+	})
+	return string(raw)
+}
+
+func actModelInput(req voice.ActModelRequest) string {
+	raw, _ := json.Marshal(map[string]any{
+		"channel":               req.Channel,
+		"customer_message":      req.CustomerMessage,
+		"selected_services":     req.SelectedServices,
+		"catalog_services":      req.CatalogServices,
+		"pending":               req.Pending,
+		"current_booking_stage": req.CurrentBookingStage,
 	})
 	return string(raw)
 }

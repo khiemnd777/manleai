@@ -1592,6 +1592,7 @@ func syncTurnUpdate(turn *TurnRecord, session Session, services []ServiceOption,
 	turn.Update.OfferedSlots = session.OfferedSlots
 	turn.Update.BookingSegments = session.BookingSegments
 	turn.Update.PartyPlan = clonePartyPlan(session.PartyPlan)
+	turn.Update.DialogState = cloneDialogState(session.DialogState)
 	turn.Update.Summary = summaryFor(session, services, staff, cfg)
 }
 
@@ -1600,6 +1601,7 @@ func cloneSessionForTurn(session Session) Session {
 	cloned.BookingSegments = append([]booking.BookingSegmentRequest(nil), session.BookingSegments...)
 	cloned.RescheduleCandidates = append([]RescheduleCandidate(nil), session.RescheduleCandidates...)
 	cloned.PartyPlan = clonePartyPlan(session.PartyPlan)
+	cloned.DialogState = cloneDialogState(session.DialogState)
 	if session.OfferedSlots != nil {
 		cloned.OfferedSlots = make([]OfferedSlot, len(session.OfferedSlots))
 		for index := range session.OfferedSlots {
@@ -1635,6 +1637,7 @@ func newTurnRecord(salonID string, ownerUserID string, before Session, after Ses
 			OfferedSlots:         after.OfferedSlots,
 			BookingSegments:      after.BookingSegments,
 			PartyPlan:            clonePartyPlan(after.PartyPlan),
+			DialogState:          cloneDialogState(after.DialogState),
 			Summary:              summaryFor(after, services, staff, cfg),
 		},
 	}

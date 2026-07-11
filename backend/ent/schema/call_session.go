@@ -34,6 +34,7 @@ func (CallSession) Fields() []ent.Field {
 		field.Time("requested_start_time").Optional().Nillable(),
 		field.JSON("offered_slots", []map[string]any{}).Optional(),
 		field.JSON("booking_segments", []map[string]any{}).Optional(),
+		field.JSON("dialog_state", map[string]any{}).Optional(),
 		field.UUID("booking_attempt_id", uuid.UUID{}).Optional().Nillable(),
 		field.UUID("appointment_id", uuid.UUID{}).Optional().Nillable(),
 		field.String("summary").Optional(),

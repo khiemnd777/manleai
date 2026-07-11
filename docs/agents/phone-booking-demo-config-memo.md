@@ -404,14 +404,17 @@ go run ./cmd/twilio-sim \
   -auth-token "$VOICE_TWILIO_AUTH_TOKEN" \
   -to "+16292536211" \
   -turn "I need a classic manicure tomorrow." \
-  -turn "The first one works. My name is Linh Tran and my phone is 312-555-0199."
+  -turn "The first one works. My name is Linh Tran and my phone is 312-555-0199." \
+  -turn "Yes, please book it."
 ```
 
 Expected flow:
 
 1. Incoming call returns TwiML `<Gather>` greeting.
 2. First turn returns available slot offers, not confirmation.
-3. Second turn either confirms in Square Appointments if POS booking succeeds, or creates fallback pending owner review.
+3. After service, slot, and customer details are complete, the AI reads a final review and asks whether it should book.
+4. Only the caller's explicit final-review authorization may trigger the POS booking attempt.
+5. Square success with a booking ID produces booked/confirmed wording; POS failure creates fallback pending owner review.
 
 If the simulator fails signature verification, compare:
 
@@ -426,11 +429,12 @@ When simulator passes:
 
 1. Call the Twilio number.
 2. Ask for a specific service and day.
-3. Confirm one of the offered slots.
+3. Select one of the offered slots.
 4. Provide name and phone.
-5. Verify the call only says confirmed if Square returns a POS booking ID.
-6. Verify the appointment appears in Booking Calendar / Square Appointments.
-7. Verify Calls dashboard shows the session, offered slots, selected slot, and booking outcome.
+5. Listen to the final review and explicitly authorize booking.
+6. Verify the call only says confirmed if Square returns a POS booking ID.
+7. Verify the appointment appears in Booking Calendar / Square Appointments.
+8. Verify Calls dashboard shows the session, offered slots, selected slot, review state, typed conversation-act metadata, and booking outcome.
 
 ## Common Failure Map
 

@@ -137,14 +137,22 @@ name collection, availability replies, party bookings, or transcript output.
 - Service extraction, matching, parsing, and understanding:
   `backend/modules/conversation/service_extraction.go`,
   `backend/modules/conversation/service_matching_parsing.go`,
-  `backend/modules/conversation/service_understanding.go`.
-  Existing-service change confirmation and pending service-edit metadata also
-  live in this cluster. Service edits resolve add versus replace, a concrete
-  catalog target, and (for multi-service bookings) the current service being
-  replaced before mutating selected services or refreshing availability.
-  Exact family evidence must remain ambiguous unless a distinct service token
-  resolves one candidate; pending add/replace target replies are interpreted
-  against their saved candidate set before full-catalog fallback.
+  `backend/modules/conversation/service_understanding.go`, and
+  `backend/modules/conversation/conversation_act.go`.
+  Existing-service changes first become typed conversation acts with separate
+  source, target, mutation scope, and guest scope. Pending candidates remain
+  useful for short answers, but a clearly different exact catalog target can
+  supersede stale pending context. The pure draft reducer owns add, replace,
+  remove, undo, current-draft summary, same-category guest-scope clarification,
+  and bounded no-progress handoff before availability is refreshed.
+- Versioned active dialog state and cloning:
+  `backend/modules/conversation/conversation_dialog_state.go`,
+  `backend/modules/conversation/types.go`,
+  `backend/modules/conversation/repository.go`, and migration
+  `backend/migrations/V36__conversation_dialog_state.sql`. `dialog_state`
+  persists pending typed clarification, the reversible last mutation,
+  no-progress count, and the final-review gate. Transcript metadata remains
+  diagnostic evidence, not the only active-state source of truth.
 - Service consultation and safety handoff:
   `backend/modules/conversation/service_consultation.go`. Consultation reads
   only active-provider bookable `ServiceOption` facts, persists pending
@@ -168,6 +176,11 @@ name collection, availability replies, party bookings, or transcript output.
   `backend/modules/conversation/retention_processor.go`.
 - Persistence: `backend/modules/conversation/repository.go`.
 - DTOs/state: `backend/modules/conversation/types.go`.
+- Structured-AI act fallback: `backend/modules/voice/act_interpreter.go`,
+  `backend/modules/voice/types.go`, and
+  `backend/modules/voice_openai/adapter.go`. Model-proposed acts are
+  confidence-gated and active-catalog validated inside conversation ownership;
+  they cannot call booking tools directly.
 
 ## Frontend Route And UI Map
 
@@ -304,12 +317,16 @@ dashboard sidebar. Local runtime port is `3091`; production domain is
   Detected details from transcript metadata.
 - Data owner: `knowledge_items`, `owner_corrections`, `service_aliases`,
   `service_categories`, `service_category_aliases`,
-  service consultation copy in `services.ai_description`, and pending
-  consultation metadata on `call_transcript_messages`.
+  service consultation copy in `services.ai_description`, persisted
+  `call_sessions.dialog_state`, and diagnostic metadata on
+  `call_transcript_messages`.
 - Tests: `backend/modules/conversation/service_understanding_test.go`,
   `backend/modules/conversation/service_understanding_eval_test.go`,
+  `backend/modules/conversation/conversation_act_test.go`,
   `backend/modules/conversation/service_test.go`,
-  `backend/modules/training/service_test.go`.
+  `backend/modules/training/service_test.go`,
+  `backend/modules/voice/act_interpreter_test.go`, and
+  `backend/modules/voice_openai/adapter_test.go`.
 - Skill/subagent: `voice-ai-runtime`, `salon-ops-workflow`,
   `business-logic-overlap-analysis`, `repo_mapper`.
 
@@ -392,8 +409,9 @@ dashboard sidebar. Local runtime port is `3091`; production domain is
 | availability, local day, timezone, DST, open slots, offered slots, stale segment, no common time, split, staggered, staff assignment | `backend/modules/booking`, `backend/modules/conversation/service_availability.go` | POS provider adapter, `service_matching_parsing.go`, `appointments-dashboard.tsx`, `pos-calendar/features/calendar/pos-calendar-client.tsx`, conversation tests |
 | Square OAuth, token expired, refresh token, location, sync, catalog import, calendar sync | `pos-adapter-slice`, `backend/modules/pos_square` | `backend/modules/pos`, `integration_config`, integrations UI, POS calendar UI |
 | POS mapping, provider link, active provider, AI bookable, local only, sync failed | `backend/modules/pos`, `docs/canonical-pos-ownership-checklist.md` | Services/Staff UI, `pos_entity_links`, sync tests |
-| service alias, category alias, service understanding, caller said "mani", wrong service, change service, switch service, change pedi, another service, add or replace, manicure as well, fuzzy Gel guess | `voice-ai-runtime`, conversation service understanding and pending service-edit files | `backend/modules/training`, services UI, transcript metadata and golden conversation tests |
-| service menu, how many services, service count, repeated clarification, informational service question | `backend/modules/conversation/service_prompts.go`, `backend/modules/conversation/answer_router.go` | `backend/modules/conversation/service.go`, party flow, conversation golden tests |
+| service alias, category alias, service understanding, caller said "mani", wrong service, change service, switch service, change from/to, change pedi, another service, add/replace/remove/undo, make that, rather have, scratch that, manicure as well, fuzzy Gel guess | `backend/modules/conversation/conversation_act.go`, conversation service understanding files | dialog state/repository, structured-AI act fallback, training aliases, transcript metadata, golden conversation tests |
+| service menu, how many services, how many I book, what do I have, current booking summary, service count, repeated clarification, informational service question | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/service_prompts.go`, `backend/modules/conversation/answer_router.go` | `backend/modules/conversation/service.go`, dialog state, party flow, golden tests |
+| final review, review accepted, book it, booking ran before review, correction during review, dialog state, no progress loop | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/service.go` | `backend/modules/conversation/repository.go`, V36 migration, booking flow, conversation and phone tests |
 | AI training, owner correction, knowledge, FAQ answer, stale policy | `backend/modules/training`, answer router/context | training UI, knowledge tests |
 | party booking, group booking, two people, split booking, party request | conversation party files | booking service, Calls UI party request panel |
 | name captured wrong, service instead of name, spelling, phone/email | `service_customer_name.go` | conversation golden tests, transcript metadata |

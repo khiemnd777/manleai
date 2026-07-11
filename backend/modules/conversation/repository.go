@@ -793,6 +793,10 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session,
 		}
 		partyPlanJSON = string(partyPlanBytes)
 	}
+	dialogStateJSON, err := json.Marshal(normalizedDialogState(record.Update.DialogState))
+	if err != nil {
+		return nil, err
+	}
 	rescheduleCandidates := record.Update.RescheduleCandidates
 	if rescheduleCandidates == nil {
 		rescheduleCandidates = []RescheduleCandidate{}
@@ -829,14 +833,15 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session,
 			    offered_slots = $15::jsonb,
 			    booking_segments = $16::jsonb,
 			    party_plan = $17::jsonb,
-			    booking_attempt_id = NULLIF($18, '')::uuid,
-			    appointment_id = NULLIF($19, '')::uuid,
-			    summary = NULLIF($20, ''),
-			    ended_at = CASE WHEN $21 THEN now() ELSE ended_at END,
+			    dialog_state = $18::jsonb,
+			    booking_attempt_id = NULLIF($19, '')::uuid,
+			    appointment_id = NULLIF($20, '')::uuid,
+			    summary = NULLIF($21, ''),
+			    ended_at = CASE WHEN $22 THEN now() ELSE ended_at END,
 			    updated_at = now()
-			WHERE id = $22
-			  AND salon_id = $23
-		`, record.Update.Status, record.Update.Intent, record.Update.Outcome, bookingAction, record.Update.TargetAppointmentID, string(rescheduleCandidatesJSON), record.Update.CustomerName, record.Update.CustomerPhone, record.Update.CustomerEmail, record.Update.ServiceID, record.Update.StaffID, staffSelectionMode, record.Update.RequestedDate, record.Update.RequestedStartTime, string(offeredSlotsJSON), string(bookingSegmentsJSON), partyPlanJSON, record.Update.BookingAttemptID, record.Update.AppointmentID, record.Update.Summary, record.Update.EndSession, record.Session.ID, record.SalonID); err != nil {
+			WHERE id = $23
+			  AND salon_id = $24
+		`, record.Update.Status, record.Update.Intent, record.Update.Outcome, bookingAction, record.Update.TargetAppointmentID, string(rescheduleCandidatesJSON), record.Update.CustomerName, record.Update.CustomerPhone, record.Update.CustomerEmail, record.Update.ServiceID, record.Update.StaffID, staffSelectionMode, record.Update.RequestedDate, record.Update.RequestedStartTime, string(offeredSlotsJSON), string(bookingSegmentsJSON), partyPlanJSON, string(dialogStateJSON), record.Update.BookingAttemptID, record.Update.AppointmentID, record.Update.Summary, record.Update.EndSession, record.Session.ID, record.SalonID); err != nil {
 		return nil, err
 	}
 
@@ -1231,6 +1236,7 @@ func sessionSelect() string {
 		       cs.requested_start_time, COALESCE(cs.offered_slots, '[]'::jsonb),
 		       COALESCE(cs.booking_segments, '[]'::jsonb),
 		       COALESCE(cs.party_plan, '{}'::jsonb),
+		       COALESCE(cs.dialog_state, '{"version":1,"phase":"open","review_required":true,"review_accepted":false,"no_progress_count":0}'::jsonb),
 		       COALESCE(cs.booking_attempt_id::text, ''),
 		       COALESCE(cs.appointment_id::text, ''), COALESCE(cs.summary, ''),
 		       cs.lifecycle_status, cs.archived_at, cs.redacted_at, cs.retention_expires_at,
@@ -1255,6 +1261,7 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 	var offeredSlots []byte
 	var bookingSegments []byte
 	var partyPlan []byte
+	var dialogState []byte
 	var rescheduleCandidates []byte
 	if err := scanner.Scan(
 		&item.ID,
@@ -1283,6 +1290,7 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 		&offeredSlots,
 		&bookingSegments,
 		&partyPlan,
+		&dialogState,
 		&item.BookingAttemptID,
 		&item.AppointmentID,
 		&item.Summary,
@@ -1323,6 +1331,12 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 			return nil, err
 		}
 	}
+	if len(dialogState) > 0 {
+		if err := json.Unmarshal(dialogState, &item.DialogState); err != nil {
+			return nil, err
+		}
+	}
+	item.DialogState = normalizedDialogState(item.DialogState)
 	if item.StaffSelectionMode == "" {
 		item.StaffSelectionMode = booking.StaffSelectionSpecific
 	}

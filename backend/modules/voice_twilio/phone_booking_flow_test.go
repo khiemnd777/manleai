@@ -96,14 +96,32 @@ func TestSignedTwilioWebhookDrivesPhoneBookingFlowThroughConversation(t *testing
 	if secondTurnRes.StatusCode != fiber.StatusOK {
 		t.Fatalf("second turn status = %d, body = %s", secondTurnRes.StatusCode, secondTurnBody)
 	}
-	if strings.Contains(secondTurnBody, "<Gather") {
-		t.Fatalf("confirmed booking should end gather loop: %s", secondTurnBody)
+	if !strings.Contains(secondTurnBody, "<Gather") || !strings.Contains(secondTurnBody, "Let me review everything") || !strings.Contains(secondTurnBody, "Would you like me to book it") {
+		t.Fatalf("second turn should request final review authorization: %s", secondTurnBody)
 	}
-	if !strings.Contains(secondTurnBody, "confirmed with Lotus Nails") || strings.Contains(secondTurnBody, "available technician") || strings.Contains(secondTurnBody, "Mai Nguyen") || !strings.Contains(secondTurnBody, "under Linh Tran") || !strings.Contains(secondTurnBody, "<Hangup/>") {
-		t.Fatalf("second turn should return final confirmed TwiML: %s", secondTurnBody)
+	if bookingTool.calls != 0 {
+		t.Fatalf("booking calls = %d, want 0 before final review authorization", bookingTool.calls)
 	}
-	if strings.Contains(strings.ToLower(secondTurnBody), "square") || strings.Contains(strings.ToLower(secondTurnBody), "provider") || strings.Contains(strings.ToLower(secondTurnBody), "pos") {
-		t.Fatalf("confirmed TwiML should not expose provider internals: %s", secondTurnBody)
+
+	thirdTurn := url.Values{
+		"CallSid":      {"CA_FLOW"},
+		"From":         {"+13125550199"},
+		"To":           {"+13125550101"},
+		"SpeechResult": {"Yes, please book it."},
+	}
+	thirdTurnRes := signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", thirdTurn)
+	thirdTurnBody := readBody(t, thirdTurnRes)
+	if thirdTurnRes.StatusCode != fiber.StatusOK {
+		t.Fatalf("third turn status = %d, body = %s", thirdTurnRes.StatusCode, thirdTurnBody)
+	}
+	if strings.Contains(thirdTurnBody, "<Gather") {
+		t.Fatalf("confirmed booking should end gather loop: %s", thirdTurnBody)
+	}
+	if !strings.Contains(thirdTurnBody, "confirmed with Lotus Nails") || strings.Contains(thirdTurnBody, "available technician") || strings.Contains(thirdTurnBody, "Mai Nguyen") || !strings.Contains(thirdTurnBody, "under Linh Tran") || !strings.Contains(thirdTurnBody, "<Hangup/>") {
+		t.Fatalf("third turn should return final confirmed TwiML: %s", thirdTurnBody)
+	}
+	if strings.Contains(strings.ToLower(thirdTurnBody), "square") || strings.Contains(strings.ToLower(thirdTurnBody), "provider") || strings.Contains(strings.ToLower(thirdTurnBody), "pos") {
+		t.Fatalf("confirmed TwiML should not expose provider internals: %s", thirdTurnBody)
 	}
 	if bookingTool.calls != 1 {
 		t.Fatalf("booking calls = %d, want 1 after slot selection", bookingTool.calls)
@@ -123,8 +141,8 @@ func TestSignedTwilioWebhookDrivesPhoneBookingFlowThroughConversation(t *testing
 	if bookingTool.request.StaffID != "staff_1" || !bookingTool.request.StartTime.Equal(phoneFlowFirstSlotStart()) {
 		t.Fatalf("booking request = %#v, want selected offered slot", bookingTool.request)
 	}
-	if len(voiceStore.events) != 3 {
-		t.Fatalf("webhook events = %#v, want incoming plus two speech turns", voiceStore.events)
+	if len(voiceStore.events) != 4 {
+		t.Fatalf("webhook events = %#v, want incoming plus three speech turns", voiceStore.events)
 	}
 }
 
@@ -169,8 +187,13 @@ func TestSignedTwilioWebhookConsultsThenBooksExplicitCatalogChoice(t *testing.T)
 
 	book := url.Values{"CallSid": {"CA_CONSULT"}, "From": {"+13125550199"}, "To": {"+13125550101"}, "SpeechResult": {"The first one works. My name is Linh Tran and my phone is 312-555-0101."}}
 	bookBody := readBody(t, signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", book))
-	if !strings.Contains(bookBody, "confirmed with Lotus Nails") || bookingTool.calls != 1 || bookingTool.request.ServiceID != "service_gel" {
-		t.Fatalf("consultation booking did not confirm selected catalog service: body=%s request=%#v", bookBody, bookingTool.request)
+	if !strings.Contains(bookBody, "Let me review everything") || bookingTool.calls != 0 {
+		t.Fatalf("consultation booking skipped final review: body=%s calls=%d", bookBody, bookingTool.calls)
+	}
+	authorize := url.Values{"CallSid": {"CA_CONSULT"}, "From": {"+13125550199"}, "To": {"+13125550101"}, "SpeechResult": {"Yes, please book it."}}
+	authorizeBody := readBody(t, signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", authorize))
+	if !strings.Contains(authorizeBody, "confirmed with Lotus Nails") || bookingTool.calls != 1 || bookingTool.request.ServiceID != "service_gel" {
+		t.Fatalf("consultation booking did not confirm selected catalog service after review: body=%s request=%#v", authorizeBody, bookingTool.request)
 	}
 }
 
@@ -228,9 +251,14 @@ func (f *phoneFlowConversationStore) CreateSession(ctx context.Context, record c
 		Intent:         conversation.IntentUnknown,
 		Outcome:        conversation.OutcomeCollecting,
 		CustomerPhone:  record.CustomerPhone,
-		StartedAt:      now,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		DialogState: conversation.DialogState{
+			Version:        conversation.DialogStateVersion,
+			Phase:          conversation.DialogPhaseOpen,
+			ReviewRequired: true,
+		},
+		StartedAt: now,
+		CreatedAt: now,
+		UpdatedAt: now,
 		Transcript: []conversation.TranscriptMessage{{
 			ID:        "msg_1",
 			SessionID: "session_phone_flow",
@@ -360,6 +388,7 @@ func (f *phoneFlowConversationStore) SaveTurn(ctx context.Context, record conver
 	session.RequestedDate = record.Update.RequestedDate
 	session.OfferedSlots = record.Update.OfferedSlots
 	session.BookingSegments = append([]booking.BookingSegmentRequest(nil), record.Update.BookingSegments...)
+	session.DialogState = record.Update.DialogState
 	session.BookingAttemptID = record.Update.BookingAttemptID
 	session.AppointmentID = record.Update.AppointmentID
 	session.Summary = record.Update.Summary

@@ -25,6 +25,29 @@ const (
 	ReplyPolicyOperationalFact = "operational_fact"
 	ReplyPolicyStyleOnly       = "style_only"
 
+	DialogStateVersion = 1
+
+	DialogPhaseOpen         = "open"
+	DialogPhaseDrafting     = "drafting"
+	DialogPhaseClarifying   = "clarifying"
+	DialogPhaseAvailability = "availability"
+	DialogPhaseReview       = "review"
+
+	ConversationActUnknown   = "unknown"
+	ConversationActAdd       = "add_service"
+	ConversationActReplace   = "replace_service"
+	ConversationActRemove    = "remove_service"
+	ConversationActUndo      = "undo_service_edit"
+	ConversationActSummarize = "summarize_booking"
+	ConversationActReview    = "accept_review"
+
+	ConversationScopeOne         = "one"
+	ConversationScopeAllMatching = "all_matching"
+	ConversationScopeAll         = "all"
+
+	ConversationGuestCaller  = "caller"
+	ConversationGuestAnother = "another_guest"
+
 	OutcomeCollecting             = "collecting"
 	OutcomeBookingConfirmed       = "booking_confirmed"
 	OutcomeBookingRescheduled     = "booking_rescheduled"
@@ -52,6 +75,7 @@ const (
 	HandoffReasonCustomerDetailsUnavailable = "customer_details_unavailable"
 	HandoffReasonGroupBooking               = "group_booking"
 	HandoffReasonConsultationSafety         = "consultation_safety"
+	HandoffReasonServiceClarification       = "service_clarification_unresolved"
 
 	PartyRequestStatusPending   = "pending"
 	PartyRequestStatusContacted = "contacted"
@@ -76,6 +100,79 @@ type BookingTool interface {
 
 type ReplyGenerator interface {
 	GenerateReply(ctx context.Context, req ReplyGenerationRequest) (ReplyGenerationResult, error)
+}
+
+type ConversationActInterpreter interface {
+	InterpretConversationAct(ctx context.Context, req ConversationActInterpretationRequest) (ConversationAct, error)
+}
+
+type ConversationActInterpretationRequest struct {
+	SalonID             string
+	SessionID           string
+	Channel             string
+	CustomerMessage     string
+	SelectedServices    []ConversationServiceRef
+	CatalogServices     []ConversationServiceRef
+	Pending             *PendingConversationAct
+	CurrentBookingStage string
+}
+
+type ConversationServiceRef struct {
+	ServiceID    string `json:"service_id"`
+	ServiceName  string `json:"service_name"`
+	CategoryID   string `json:"category_id,omitempty"`
+	CategoryName string `json:"category_name,omitempty"`
+}
+
+type ConversationAct struct {
+	Kind               string   `json:"kind"`
+	SourceServiceIDs   []string `json:"source_service_ids"`
+	TargetServiceIDs   []string `json:"target_service_ids"`
+	SourceCategoryID   string   `json:"source_category_id"`
+	SourceCategoryName string   `json:"source_category_name"`
+	TargetCategoryID   string   `json:"target_category_id"`
+	TargetCategoryName string   `json:"target_category_name"`
+	Scope              string   `json:"scope"`
+	GuestScope         string   `json:"guest_scope"`
+	Subject            string   `json:"subject"`
+	Confidence         float64  `json:"confidence"`
+	Reason             string   `json:"reason"`
+	Source             string   `json:"source"`
+}
+
+type PendingConversationAct struct {
+	Kind               string   `json:"kind"`
+	SourceServiceIDs   []string `json:"source_service_ids,omitempty"`
+	TargetServiceIDs   []string `json:"target_service_ids,omitempty"`
+	SourceCategoryID   string   `json:"source_category_id,omitempty"`
+	SourceCategoryName string   `json:"source_category_name,omitempty"`
+	TargetCategoryID   string   `json:"target_category_id,omitempty"`
+	TargetCategoryName string   `json:"target_category_name,omitempty"`
+	Scope              string   `json:"scope,omitempty"`
+	GuestScope         string   `json:"guest_scope,omitempty"`
+	PromptKey          string   `json:"prompt_key"`
+}
+
+type DraftMutation struct {
+	Kind              string                          `json:"kind"`
+	BeforeServiceID   string                          `json:"before_service_id,omitempty"`
+	BeforeServiceName string                          `json:"before_service_name,omitempty"`
+	BeforeServiceIDs  []string                        `json:"before_service_ids"`
+	BeforeSegments    []booking.BookingSegmentRequest `json:"before_segments"`
+	AfterServiceIDs   []string                        `json:"after_service_ids"`
+	AfterSegments     []booking.BookingSegmentRequest `json:"after_segments"`
+}
+
+type DialogState struct {
+	Version         int                     `json:"version"`
+	Phase           string                  `json:"phase"`
+	Pending         *PendingConversationAct `json:"pending,omitempty"`
+	LastMutation    *DraftMutation          `json:"last_mutation,omitempty"`
+	ReviewRequired  bool                    `json:"review_required"`
+	ReviewAccepted  bool                    `json:"review_accepted"`
+	NoProgressCount int                     `json:"no_progress_count"`
+	LastPromptKey   string                  `json:"last_prompt_key,omitempty"`
+	LastActKind     string                  `json:"last_act_kind,omitempty"`
 }
 
 type Store interface {
@@ -265,6 +362,7 @@ type Session struct {
 	OfferedSlots         []OfferedSlot                   `json:"offered_slots,omitempty"`
 	BookingSegments      []booking.BookingSegmentRequest `json:"booking_segments,omitempty"`
 	PartyPlan            *PartyPlan                      `json:"party_plan,omitempty"`
+	DialogState          DialogState                     `json:"dialog_state"`
 	BookingAttemptID     string                          `json:"booking_attempt_id,omitempty"`
 	AppointmentID        string                          `json:"appointment_id,omitempty"`
 	Summary              string                          `json:"summary,omitempty"`
@@ -473,6 +571,7 @@ type SessionUpdate struct {
 	OfferedSlots         []OfferedSlot
 	BookingSegments      []booking.BookingSegmentRequest
 	PartyPlan            *PartyPlan
+	DialogState          DialogState
 	BookingAttemptID     string
 	AppointmentID        string
 	Summary              string

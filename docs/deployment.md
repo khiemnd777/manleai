@@ -201,6 +201,14 @@ takes precedence over `project.env`, `.env`, and GitHub deployment secrets.
 Keep provider secrets out of production env files unless intentionally using
 the legacy fallback path for a fresh deployment with no saved dashboard config.
 
+The configured OpenAI reply model may serve two guarded roles: style-only
+rewriting for eligible safe replies, and strict structured classification for
+otherwise unresolved appointment-draft conversation acts. Structured act input
+is limited to the redacted caller utterance, selected/catalog service and
+category references, pending act, and dialog phase. The backend rejects
+low-confidence or non-catalog IDs; the model cannot mutate the draft, call the
+booking service, or produce confirmed appointment state.
+
 ## Production Rules
 
 - Do not run `backend/seed/local.sql` in production.

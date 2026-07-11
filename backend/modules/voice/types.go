@@ -80,6 +80,38 @@ type LanguageModelProvider interface {
 	GenerateReply(ctx context.Context, req ModelRequest) (ModelReply, error)
 }
 
+type ConversationActModelProvider interface {
+	Name() string
+	Configured(ctx context.Context, salonID string) bool
+	ClassifyConversationAct(ctx context.Context, req ActModelRequest) (ActModelReply, error)
+}
+
+type ActModelRequest struct {
+	SalonID             string
+	SessionID           string
+	Channel             string
+	CustomerMessage     string
+	SelectedServices    []conversation.ConversationServiceRef
+	CatalogServices     []conversation.ConversationServiceRef
+	Pending             *conversation.PendingConversationAct
+	CurrentBookingStage string
+}
+
+type ActModelReply struct {
+	Kind               string   `json:"kind"`
+	SourceServiceIDs   []string `json:"source_service_ids"`
+	TargetServiceIDs   []string `json:"target_service_ids"`
+	SourceCategoryID   string   `json:"source_category_id"`
+	SourceCategoryName string   `json:"source_category_name"`
+	TargetCategoryID   string   `json:"target_category_id"`
+	TargetCategoryName string   `json:"target_category_name"`
+	Scope              string   `json:"scope"`
+	GuestScope         string   `json:"guest_scope"`
+	Subject            string   `json:"subject"`
+	Confidence         float64  `json:"confidence"`
+	Reason             string   `json:"reason"`
+}
+
 type TextToSpeechProvider interface {
 	Name() string
 	Configured(ctx context.Context, salonID string) bool

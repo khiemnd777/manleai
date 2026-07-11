@@ -9,8 +9,56 @@ import (
 	"testing"
 
 	"github.com/manleai/ai-receptionist/internal/config"
+	"github.com/manleai/ai-receptionist/modules/conversation"
 	"github.com/manleai/ai-receptionist/modules/voice"
 )
+
+func TestClassifyConversationActUsesStrictCatalogBoundSchema(t *testing.T) {
+	adapter := NewAdapter(config.OpenAIVoiceConfig{
+		APIKey:     "test-key",
+		BaseURL:    "https://openai.test/v1",
+		ReplyModel: "gpt-test",
+	})
+	adapter.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		instructions, _ := req["instructions"].(string)
+		if !strings.Contains(instructions, "Use only service and category IDs present in catalog_services") || !strings.Contains(instructions, "pending clarification is context, not a restriction") {
+			t.Fatalf("conversation act instructions = %s", instructions)
+		}
+		input, _ := req["input"].(string)
+		var modelInput map[string]any
+		if err := json.Unmarshal([]byte(input), &modelInput); err != nil {
+			t.Fatalf("decode model input: %v", err)
+		}
+		if modelInput["customer_message"] != "Make that a spa pedicure instead." {
+			t.Fatalf("customer_message = %#v", modelInput["customer_message"])
+		}
+		body, _ := json.Marshal(map[string]any{
+			"output_text": `{"kind":"replace_service","source_service_ids":["service_gel"],"target_service_ids":["service_spa"],"source_category_id":"","source_category_name":"","target_category_id":"cat_pedi","target_category_name":"Pedicure","scope":"one","guest_scope":"","subject":"current_booking","confidence":0.95,"reason":"explicit replacement"}`,
+		})
+		return jsonResponse(body), nil
+	})}
+
+	reply, err := adapter.ClassifyConversationAct(context.Background(), voice.ActModelRequest{
+		SalonID:         "salon_1",
+		CustomerMessage: "Make that a spa pedicure instead.",
+		SelectedServices: []conversation.ConversationServiceRef{{
+			ServiceID: "service_gel", ServiceName: "Gel Manicure",
+		}},
+		CatalogServices: []conversation.ConversationServiceRef{{
+			ServiceID: "service_spa", ServiceName: "Spa Pedicure", CategoryID: "cat_pedi", CategoryName: "Pedicure",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ClassifyConversationAct: %v", err)
+	}
+	if reply.Kind != conversation.ConversationActReplace || reply.TargetServiceIDs[0] != "service_spa" || reply.Confidence != 0.95 {
+		t.Fatalf("reply = %#v", reply)
+	}
+}
 
 func TestGenerateReplyParsesStructuredResponse(t *testing.T) {
 	adapter := NewAdapter(config.OpenAIVoiceConfig{
