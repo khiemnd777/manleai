@@ -489,6 +489,9 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	turnProgressTimer := (<-chan time.Time)(nil)
 	turnProgressSpoken := false
 	progressSpokenForCall := false
+	vadStartByItem := map[string]int{}
+	vadDurationByItem := map[string]int{}
+	lastVADStartMS := 0
 	activeResponseCreatedAt := time.Time{}
 	responseSequence := 0
 	requireResponseIdentity := realtime.RequiresResponseIdentity()
@@ -809,6 +812,12 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					activeAudioTranscript.WriteString(event.AudioTranscript)
 				}
 			case voice.RealtimeEventSpeechStarted:
+				if event.AudioStartMS >= 0 {
+					lastVADStartMS = event.AudioStartMS
+					if itemID := strings.TrimSpace(event.ItemID); itemID != "" {
+						vadStartByItem[itemID] = event.AudioStartMS
+					}
+				}
 				_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "speech_started", time.Time{}, nil)
 				if !requireResponseIdentity && !shouldInterruptPlayback() {
 					continue
@@ -826,31 +835,45 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 						return
 					}
 				}
+			case voice.RealtimeEventSpeechStopped:
+				itemID := strings.TrimSpace(event.ItemID)
+				startMS := lastVADStartMS
+				if value, ok := vadStartByItem[itemID]; ok {
+					startMS = value
+				}
+				if itemID != "" && event.AudioEndMS >= startMS {
+					vadDurationByItem[itemID] = event.AudioEndMS - startMS
+				}
 			case voice.RealtimeEventTranscriptDone:
+				itemID := strings.TrimSpace(event.ItemID)
+				clearVADDiagnostics := func() {
+					delete(vadStartByItem, itemID)
+					delete(vadDurationByItem, itemID)
+				}
 				transcript := strings.TrimSpace(event.Transcript)
 				if transcript == "" {
+					clearVADDiagnostics()
 					continue
 				}
+				diagnostics := realtimeTranscriptDiagnostics(event, vadDurationByItem[itemID])
 				if meanLogProb, ok := realtimeTranscriptMeanLogProb(event.TranscriptLogProbs); ok && meanLogProb < realtimeMinMeanLogProb {
-					_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "transcript_rejected_low_confidence", time.Time{}, map[string]string{
-						"item_id":      strings.TrimSpace(event.ItemID),
-						"mean_logprob": strconv.FormatFloat(meanLogProb, 'f', 4, 64),
-					})
+					_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "transcript_rejected_low_confidence", time.Time{}, diagnostics)
+					clearVADDiagnostics()
 					if !speakReply(realtimeLowConfidenceReply, false) {
 						return
 					}
 					continue
 				}
-				key := strings.TrimSpace(event.ItemID) + "|" + strings.ToLower(transcript)
+				key := itemID + "|" + strings.ToLower(transcript)
 				if _, exists := seenTranscripts[key]; exists {
+					clearVADDiagnostics()
 					continue
 				}
 				seenTranscripts[key] = struct{}{}
-				_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "transcript_done", time.Time{}, map[string]string{
-					"item_id": strings.TrimSpace(event.ItemID),
-				})
+				_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "transcript_done", time.Time{}, diagnostics)
+				clearVADDiagnostics()
 				turnQueue = append(turnQueue, realtimeTurnTask{
-					itemID:     strings.TrimSpace(event.ItemID),
+					itemID:     itemID,
 					transcript: transcript,
 					queuedAt:   time.Now(),
 				})
@@ -1010,6 +1033,38 @@ func realtimeTranscriptMeanLogProb(values []float64) (float64, bool) {
 		return 0, false
 	}
 	return total / float64(count), true
+}
+
+func realtimeTranscriptMinLogProb(values []float64) (float64, bool) {
+	minimum := 0.0
+	found := false
+	for _, value := range values {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			continue
+		}
+		if !found || value < minimum {
+			minimum = value
+			found = true
+		}
+	}
+	return minimum, found
+}
+
+func realtimeTranscriptDiagnostics(event voice.RealtimeEvent, vadDurationMS int) map[string]string {
+	diagnostics := map[string]string{"item_id": strings.TrimSpace(event.ItemID)}
+	if mean, ok := realtimeTranscriptMeanLogProb(event.TranscriptLogProbs); ok {
+		diagnostics["mean_logprob"] = strconv.FormatFloat(mean, 'f', 4, 64)
+	}
+	if minimum, ok := realtimeTranscriptMinLogProb(event.TranscriptLogProbs); ok {
+		diagnostics["min_logprob"] = strconv.FormatFloat(minimum, 'f', 4, 64)
+	}
+	if len(event.TranscriptLogProbs) > 0 {
+		diagnostics["token_count"] = strconv.Itoa(len(event.TranscriptLogProbs))
+	}
+	if vadDurationMS > 0 {
+		diagnostics["vad_duration_ms"] = strconv.Itoa(vadDurationMS)
+	}
+	return diagnostics
 }
 
 func (h *Handler) recordRealtimeTiming(ctx context.Context, providerCallID string, sessionID string, streamSID string, stage string, startedAt time.Time, extra map[string]string) error {

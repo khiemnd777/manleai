@@ -129,7 +129,10 @@ name collection, availability replies, party bookings, or transcript output.
   `backend/modules/conversation/service_availability.go`.
   Availability invalidation compares complete ordered segment requests and
   deep-cloned before/after session state; offered-slot selection validates
-  service and specific-staff assignments.
+  service and specific-staff assignments. Deterministic availability-question
+  evidence overrides a conflicting semantic current-booking summary so an
+  in-progress request either repeats valid offered slots or rechecks the active
+  provider for the requested date.
 - Booking tool flow and terminal booking wording:
   `backend/modules/conversation/service_booking_flow.go`.
 - Intent, reschedule, cancel, and appointment-target selection:
@@ -139,6 +142,7 @@ name collection, availability replies, party bookings, or transcript output.
   `backend/modules/conversation/service_matching_parsing.go`,
   `backend/modules/conversation/service_understanding.go`,
   `backend/modules/conversation/conversation_act.go`,
+  `backend/modules/conversation/service_datetime_confirmation.go`,
   `backend/modules/conversation/turn_reducer.go`, and
   `backend/modules/conversation/next_action_planner.go`.
   Configured production turns enter a multi-act/question semantic contract
@@ -146,6 +150,10 @@ name collection, availability replies, party bookings, or transcript output.
   the reducer owns draft mutation and dependency invalidation; the planner owns
   missing-field, review, and booking readiness. Pending candidates remain
   contextual, and provider failure preserves the draft with safe clarification.
+  A new-booking date/time correction made after slots were offered is persisted
+  as a typed pending confirmation; rejection preserves the original slots, and
+  confirmation invalidates them and performs a fresh provider availability
+  check.
 - Versioned active dialog state and cloning:
   `backend/modules/conversation/conversation_dialog_state.go`,
   `backend/modules/conversation/draft_revision.go`,
@@ -305,10 +313,14 @@ dashboard sidebar. Local runtime port is `3091`; production domain is
   stale-audio rejection. GA output audio is buffered until the output-audio
   transcript exactly matches the backend-approved reply. Noisy/balanced GA
   input uses near-field noise reduction plus transcription logprobs; confidence-
-  rejected transcripts do not enter conversation state. Backend progress copy
-  is delayed and limited to once per call. Terminal realtime failure resumes the
-  last approved prompt through recording/gather while the session remains
-  active; legacy preview sessions use a separate compatibility branch.
+  rejected transcripts do not enter conversation state. Accepted and rejected
+  transcript timing events retain PII-free item ID, mean/min logprob, token
+  count, and VAD duration diagnostics when available. Transcription steering is
+  a concise salon/catalog/alias keyword list rather than conversational example
+  sentences. Backend progress copy is delayed and limited to once per call.
+  Terminal realtime failure resumes the last approved prompt through
+  recording/gather while the session remains active; legacy preview sessions
+  use a separate compatibility branch.
 - Tests: `backend/modules/voice/*_test.go`,
   `backend/modules/voice_twilio/*_test.go`,
   `backend/modules/voice_openai/*_test.go`.

@@ -490,13 +490,16 @@ func TestForwardRealtimeEventsRecordsTimingStages(t *testing.T) {
 		return nil
 	}, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{}, nil, realtimeTerminalDrainTimeout, 0, time.Now)
 
-	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_1", Transcript: "one p.m."}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStarted, ItemID: "item_1", AudioStartMS: 100}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStopped, ItemID: "item_1", AudioEndMS: 1350}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_1", Transcript: "one p.m.", TranscriptLogProbs: []float64{-0.2, -0.4}}
 	_ = waitForSpeak(t, realtime)
 	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventAudioDelta, AudioBase64: "first-audio"}
 	_ = waitForWrite(t, writes)
 	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
 
 	waitForTimingStages(t, store, []string{"transcript_done", "backend_turn_start", "backend_turn_done", "response_create", "first_audio_delta", "response_done"})
+	foundTranscriptDiagnostics := false
 	for _, event := range store.eventsSnapshot() {
 		if event.EventType != voice.EventRealtimeTiming {
 			continue
@@ -504,6 +507,16 @@ func TestForwardRealtimeEventsRecordsTimingStages(t *testing.T) {
 		if event.Payload["transcript"] != "" || event.Payload["audio"] != "" {
 			t.Fatalf("timing event should not include transcript or audio payload: %#v", event)
 		}
+		if event.Payload["stage"] == "transcript_done" {
+			foundTranscriptDiagnostics = event.Payload["item_id"] == "item_1" &&
+				event.Payload["mean_logprob"] == "-0.3000" &&
+				event.Payload["min_logprob"] == "-0.4000" &&
+				event.Payload["token_count"] == "2" &&
+				event.Payload["vad_duration_ms"] == "1250"
+		}
+	}
+	if !foundTranscriptDiagnostics {
+		t.Fatalf("accepted transcript diagnostics were not recorded: %#v", store.eventsSnapshot())
 	}
 }
 

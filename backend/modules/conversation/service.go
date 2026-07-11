@@ -267,6 +267,10 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	activeStaff := answerCtx.ActiveStaff
 	knowledge := answerCtx.Knowledge
 
+	if handled, updated, err := s.handlePendingOfferedSlotDateTimeCorrection(ctx, salonID, ownerUserID, *session, message, eventKey, services, staff, cfg, knowledge); handled {
+		return updated, err
+	}
+
 	if handled, updated, err := s.handlePendingCustomerNameConfirmation(ctx, salonID, ownerUserID, *session, message, eventKey, services, staff, cfg, knowledge); handled {
 		return updated, err
 	}
@@ -327,6 +331,9 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	selectedOfferedSlot := false
 	exactRequestedTimeSelected := false
 	loc := timezoneLocation(cfg.Timezone)
+	if handled, updated, err := s.guardOfferedSlotDateTimeCorrection(ctx, salonID, ownerUserID, *session, message, eventKey, services, serviceAliases, categoryAliases, staff, cfg); handled {
+		return updated, err
+	}
 	pendingNameCandidate := voiceCustomerNamePendingConfirmationCandidate(message, *session)
 	serviceUnderstanding := interpretServiceForSession(message, *session, services, serviceAliases, categoryAliases)
 	if catalogUnderstanding := interpretServiceWithCategoryAliases(message, services, serviceAliases, categoryAliases); isServiceInquiry(message, catalogUnderstanding) {

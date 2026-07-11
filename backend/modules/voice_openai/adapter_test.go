@@ -218,6 +218,14 @@ func TestParseRealtimeEvents(t *testing.T) {
 	if len(transcript.TranscriptLogProbs) != 2 || transcript.TranscriptLogProbs[0] != -0.2 || transcript.TranscriptLogProbs[1] != -0.4 {
 		t.Fatalf("transcript logprobs = %#v", transcript.TranscriptLogProbs)
 	}
+	speechStarted := parseRealtimeEvent([]byte(`{"type":"input_audio_buffer.speech_started","item_id":"item_1","audio_start_ms":120}`))
+	if speechStarted.Type != voice.RealtimeEventSpeechStarted || speechStarted.ItemID != "item_1" || speechStarted.AudioStartMS != 120 {
+		t.Fatalf("speech started event = %#v", speechStarted)
+	}
+	speechStopped := parseRealtimeEvent([]byte(`{"type":"input_audio_buffer.speech_stopped","item_id":"item_1","audio_end_ms":1460}`))
+	if speechStopped.Type != voice.RealtimeEventSpeechStopped || speechStopped.ItemID != "item_1" || speechStopped.AudioEndMS != 1460 {
+		t.Fatalf("speech stopped event = %#v", speechStopped)
+	}
 
 	created := parseRealtimeEvent([]byte(`{"type":"response.created","response":{"id":"resp_1","metadata":{"manleai_request_id":"reply_7"}}}`))
 	if created.Type != voice.RealtimeEventResponseCreated || created.ResponseID != "resp_1" || created.ResponseRequestID != "reply_7" {

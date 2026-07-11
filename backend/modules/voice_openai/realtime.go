@@ -316,6 +316,8 @@ func parseRealtimeEvent(raw []byte) voice.RealtimeEvent {
 		ResponseID string `json:"response_id"`
 		Delta      string `json:"delta"`
 		Transcript string `json:"transcript"`
+		AudioStart int    `json:"audio_start_ms"`
+		AudioEnd   int    `json:"audio_end_ms"`
 		LogProbs   []struct {
 			LogProb float64 `json:"logprob"`
 		} `json:"logprobs"`
@@ -353,7 +355,9 @@ func parseRealtimeEvent(raw []byte) voice.RealtimeEvent {
 			TranscriptLogProbs: logProbs,
 		}
 	case "input_audio_buffer.speech_started":
-		return voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStarted}
+		return voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStarted, ItemID: strings.TrimSpace(event.ItemID), AudioStartMS: event.AudioStart}
+	case "input_audio_buffer.speech_stopped":
+		return voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStopped, ItemID: strings.TrimSpace(event.ItemID), AudioEndMS: event.AudioEnd}
 	case "response.created":
 		return voice.RealtimeEvent{
 			Type:              voice.RealtimeEventResponseCreated,

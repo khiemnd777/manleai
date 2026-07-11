@@ -590,21 +590,19 @@ func serviceCandidateNames(candidates []ServiceOption, limit int) []string {
 
 func transcriptionContextPrompt(session Session, cfg *RuntimeConfig, services []ServiceOption, aliases []ServiceAlias) string {
 	parts := []string{
-		"Nail salon appointment call. The caller may speak Vietnamese-accented English or switch between Vietnamese and English.",
-		"Transcribe only speech that is clearly present in the audio. Do not infer or invent a service name from background noise.",
-		"Use the salon vocabulary below only to spell words the caller actually says.",
+		"Context: US nail salon appointment call. Languages: English and Vietnamese.",
 	}
 	if salon := salonName(cfg); salon != "" {
-		parts = append(parts, "Salon: "+salon+".")
+		parts = append(parts, "Salon keyword: "+salon+".")
 	}
 	if pending := serviceCandidateNames(pendingServiceCandidateServices(session, services), 8); len(pending) > 0 {
-		parts = append(parts, "Current service options being clarified: "+strings.Join(pending, "; ")+".")
+		parts = append(parts, "Priority keywords: "+strings.Join(pending, ", ")+".")
 	}
 	if names := transcriptionServiceNames(services, 40); len(names) > 0 {
-		parts = append(parts, "Active service names: "+strings.Join(names, "; ")+".")
+		parts = append(parts, "Catalog keywords: "+strings.Join(names, ", ")+".")
 	}
-	if aliasLines := transcriptionAliasLines(aliases, 40); len(aliasLines) > 0 {
-		parts = append(parts, "Active service aliases: "+strings.Join(aliasLines, "; ")+".")
+	if aliasKeywords := transcriptionAliasKeywords(aliases, 40); len(aliasKeywords) > 0 {
+		parts = append(parts, "Alias keywords: "+strings.Join(aliasKeywords, ", ")+".")
 	}
 	return truncateRunes(strings.Join(parts, "\n"), 1500)
 }
@@ -630,26 +628,25 @@ func transcriptionServiceNames(services []ServiceOption, limit int) []string {
 	return names
 }
 
-func transcriptionAliasLines(aliases []ServiceAlias, limit int) []string {
-	lines := make([]string, 0, len(aliases))
+func transcriptionAliasKeywords(aliases []ServiceAlias, limit int) []string {
+	keywords := make([]string, 0, len(aliases))
 	seen := map[string]bool{}
 	for _, alias := range aliases {
-		if len(lines) >= limit {
+		if len(keywords) >= limit {
 			break
 		}
 		phrase := strings.TrimSpace(firstNonEmpty(alias.Alias, alias.NormalizedAlias))
-		serviceName := strings.TrimSpace(alias.ServiceName)
-		if phrase == "" || serviceName == "" {
+		if phrase == "" {
 			continue
 		}
-		key := strings.ToLower(phrase + "=>" + serviceName)
+		key := strings.ToLower(phrase)
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		lines = append(lines, phrase+" -> "+serviceName)
+		keywords = append(keywords, phrase)
 	}
-	return lines
+	return keywords
 }
 
 func truncateRunes(value string, limit int) string {

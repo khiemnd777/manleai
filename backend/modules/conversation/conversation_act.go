@@ -76,10 +76,45 @@ func (s *Service) turnUnderstandingForMessage(ctx context.Context, session Sessi
 			}
 		}
 		validated = reconcileSemanticServiceTargets(validated, catalogUnderstanding)
+		validated = reconcileDeterministicInformationQuestions(message, validated)
 		return validated
 	}
 	fallback.Reason = "semantic_interpretation_rejected"
 	return fallback
+}
+
+func reconcileDeterministicInformationQuestions(message string, turn TurnUnderstanding) TurnUnderstanding {
+	if !asksAvailabilityQuestion(message) {
+		return turn
+	}
+	acts := make([]ConversationAct, 0, len(turn.Acts))
+	for _, act := range turn.Acts {
+		if act.Kind != ConversationActSummarize {
+			acts = append(acts, act)
+		}
+	}
+	questions := make([]ConversationQuestion, 0, len(turn.Questions)+1)
+	hasAvailability := false
+	for _, question := range turn.Questions {
+		switch question.Subject {
+		case ConversationQuestionCurrentBooking:
+			continue
+		case ConversationQuestionAvailability:
+			hasAvailability = true
+		}
+		questions = append(questions, question)
+	}
+	if !hasAvailability {
+		questions = append(questions, ConversationQuestion{
+			Subject:    ConversationQuestionAvailability,
+			Confidence: 1,
+			Reason:     "deterministic_availability_evidence",
+		})
+	}
+	turn.Acts = acts
+	turn.Questions = questions
+	turn.Reason = "deterministic_availability_evidence"
+	return turn
 }
 
 func shouldUseCatalogServiceEditFallback(session Session, message string, result serviceUnderstandingResult) bool {

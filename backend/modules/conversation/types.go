@@ -216,6 +216,8 @@ type PendingConversationAct struct {
 	TargetCategoryName string   `json:"target_category_name,omitempty"`
 	Scope              string   `json:"scope,omitempty"`
 	GuestScope         string   `json:"guest_scope,omitempty"`
+	ProposedDate       string   `json:"proposed_date,omitempty"`
+	ProposedStartISO   string   `json:"proposed_start_iso,omitempty"`
 	PromptKey          string   `json:"prompt_key"`
 }
 

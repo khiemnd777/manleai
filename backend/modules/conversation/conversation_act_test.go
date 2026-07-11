@@ -331,8 +331,19 @@ func TestSemanticSummaryCannotDiscardDeterministicDateCorrection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Message returned error: %v", err)
 	}
+	if session.RequestedDate != "2026-06-10" || session.DialogState.Pending == nil {
+		t.Fatalf("date correction should wait for confirmation: %#v", session)
+	}
+	if bookingTool.availabilityCalls != 0 || !strings.Contains(store.lastTurn.AIMessage, "Monday") {
+		t.Fatalf("date correction prompt = %q calls=%d", store.lastTurn.AIMessage, bookingTool.availabilityCalls)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Yes."})
+	if err != nil {
+		t.Fatalf("confirmation Message returned error: %v", err)
+	}
 	if session.RequestedDate != "2026-06-15" {
-		t.Fatalf("requested date = %q, want 2026-06-15", session.RequestedDate)
+		t.Fatalf("confirmed requested date = %q, want 2026-06-15", session.RequestedDate)
 	}
 	if bookingTool.availabilityCalls != 1 || bookingTool.availabilityRequest.PreferredDate != "2026-06-15" {
 		t.Fatalf("availability request = %#v calls=%d", bookingTool.availabilityRequest, bookingTool.availabilityCalls)

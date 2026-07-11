@@ -33,6 +33,7 @@ const (
 	RealtimeEventAudioTranscriptDone  = "audio_transcript_done"
 	RealtimeEventTranscriptDone       = "transcript_done"
 	RealtimeEventSpeechStarted        = "speech_started"
+	RealtimeEventSpeechStopped        = "speech_stopped"
 	RealtimeEventResponseCreated      = "response_created"
 	RealtimeEventResponseDone         = "response_done"
 	RealtimeEventSessionUpdated       = "session_updated"
@@ -179,6 +180,8 @@ type RealtimeEvent struct {
 	ResponseStatus     string
 	Transcript         string
 	TranscriptLogProbs []float64
+	AudioStartMS       int
+	AudioEndMS         int
 	AudioBase64        string
 	AudioTranscript    string
 	ErrorCode          string

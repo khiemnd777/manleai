@@ -324,14 +324,17 @@ func TestTranscriptionContextIncludesCatalogAliasesAndPendingCandidatesWithoutCu
 	if err != nil {
 		t.Fatalf("TranscriptionContext returned error: %v", err)
 	}
-	if !strings.Contains(context.Prompt, "Active service names: Classic Manicure; Gel Manicure.") {
+	if !strings.Contains(context.Prompt, "Catalog keywords: Classic Manicure, Gel Manicure.") {
 		t.Fatalf("prompt missing service names: %s", context.Prompt)
 	}
-	if !strings.Contains(context.Prompt, "shell manicure -> Gel Manicure") {
+	if !strings.Contains(context.Prompt, "Alias keywords: shell manicure.") {
 		t.Fatalf("prompt missing service alias: %s", context.Prompt)
 	}
-	if !strings.Contains(context.Prompt, "Current service options being clarified: Classic Manicure; Gel Manicure.") {
+	if !strings.Contains(context.Prompt, "Priority keywords: Classic Manicure, Gel Manicure.") {
 		t.Fatalf("prompt missing pending candidates: %s", context.Prompt)
+	}
+	if strings.Contains(context.Prompt, "Do not infer") || strings.Contains(context.Prompt, "Transcribe only") {
+		t.Fatalf("prompt should use concise keyword steering instead of long instructions: %s", context.Prompt)
 	}
 	if strings.Contains(context.Prompt, "Linh Tran") || strings.Contains(context.Prompt, "3125550101") {
 		t.Fatalf("prompt should not include customer PII: %s", context.Prompt)
@@ -6896,6 +6899,140 @@ func TestMessageRoutesAvailabilityQuestionToBookingSourceWithoutGuessing(t *test
 	}
 	if store.lastTurn.AIMetadata["answer_source"] != answerSourceAvailability {
 		t.Fatalf("answer source = %#v, want booking availability", store.lastTurn.AIMetadata["answer_source"])
+	}
+}
+
+func TestMessageAvailabilityEvidenceOverridesSemanticCurrentBookingSummary(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_removal", Name: "Gel Removal"},
+		{ID: "service_classic", Name: "Classic Manicure"},
+	}
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_removal"
+	store.session.ServiceName = "Gel Removal"
+	store.session.RequestedDate = "2026-06-15"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{
+		{ServiceID: "service_removal", StaffSelectionMode: booking.StaffSelectionAnyone},
+		{ServiceID: "service_classic", StaffSelectionMode: booking.StaffSelectionAnyone},
+	}
+	start := time.Date(2026, 6, 15, 17, 0, 0, 0, time.UTC)
+	bookingTool := &fakeBookingTool{availabilityResult: &booking.AvailabilityResult{
+		PreferredDate: "2026-06-15",
+		Timezone:      "America/Chicago",
+		Slots: []booking.AvailabilitySlot{{
+			StartTime:          start,
+			EndTime:            start.Add(50 * time.Minute),
+			StaffID:            "staff_1",
+			StaffName:          "Mai Nguyen",
+			StaffSelectionMode: booking.StaffSelectionAnyone,
+			Segments: []booking.AvailabilitySegment{
+				{ServiceID: "service_removal", StaffID: "staff_1", StaffName: "Mai Nguyen", StaffSelectionMode: booking.StaffSelectionAnyone},
+				{ServiceID: "service_classic", StaffID: "staff_1", StaffName: "Mai Nguyen", StaffSelectionMode: booking.StaffSelectionAnyone},
+			},
+		}},
+	}}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal: "information", Confidence: 0.96,
+		Questions: []ConversationQuestion{{Subject: ConversationQuestionCurrentBooking, Confidence: 0.95}},
+	}})
+	service.now = fixedNow
+
+	_, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Give me the available time?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 1 {
+		t.Fatalf("availability calls = %d, want 1", bookingTool.availabilityCalls)
+	}
+	if strings.Contains(store.lastTurn.AIMessage, "You currently have") || !strings.Contains(store.lastTurn.AIMessage, "I have openings") {
+		t.Fatalf("availability question was misrouted: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageProtectsOfferedSlotsUntilDateTimeCorrectionIsConfirmed(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{{ID: "service_classic", Name: "Classic Manicure"}}
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_classic"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.RequestedDate = "2026-06-15"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{
+		ServiceID: "service_classic", StaffSelectionMode: booking.StaffSelectionAnyone,
+	}}
+	originalStart := time.Date(2026, 6, 15, 17, 0, 0, 0, time.UTC)
+	store.session.OfferedSlots = []OfferedSlot{{
+		StartTime: originalStart,
+		EndTime:   originalStart.Add(30 * time.Minute),
+		Segments: []OfferedSlotSegment{{
+			ServiceID: "service_classic", StaffID: "staff_1", StaffSelectionMode: booking.StaffSelectionAnyone,
+		}},
+	}}
+	proposedStart := time.Date(2026, 6, 10, 19, 30, 0, 0, time.UTC)
+	bookingTool := &fakeBookingTool{availabilityResult: availabilityResultForStart("service_classic", "Classic Manicure", proposedStart)}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Could we try tomorrow around 2:30 PM instead?",
+	})
+	if err != nil {
+		t.Fatalf("correction Message returned error: %v", err)
+	}
+	if session.RequestedDate != "2026-06-15" || session.RequestedStartTime != nil || len(session.OfferedSlots) != 1 {
+		t.Fatalf("unconfirmed correction mutated draft: %#v", session)
+	}
+	if session.DialogState.Pending == nil || session.DialogState.Pending.PromptKey != "offered_slot_datetime_correction" {
+		t.Fatalf("pending correction = %#v", session.DialogState.Pending)
+	}
+	if bookingTool.availabilityCalls != 0 || !strings.Contains(store.lastTurn.AIMessage, "change") {
+		t.Fatalf("correction should wait for confirmation, calls=%d reply=%s", bookingTool.availabilityCalls, store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Yes, please."})
+	if err != nil {
+		t.Fatalf("confirmation Message returned error: %v", err)
+	}
+	if session.RequestedDate != "2026-06-10" || session.RequestedStartTime == nil || !session.RequestedStartTime.Equal(proposedStart) {
+		t.Fatalf("confirmed correction state = %#v", session)
+	}
+	if bookingTool.availabilityCalls != 1 || !strings.Contains(store.lastTurn.AIMessage, "is available") {
+		t.Fatalf("confirmed correction should check availability, calls=%d reply=%s", bookingTool.availabilityCalls, store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageRejectsOfferedSlotDateTimeCorrectionWithoutLosingOffer(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{{ID: "service_gel", Name: "Gel Manicure"}}
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_gel"
+	store.session.ServiceName = "Gel Manicure"
+	store.session.RequestedDate = "2026-06-15"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{ServiceID: "service_gel", StaffSelectionMode: booking.StaffSelectionAnyone}}
+	start := time.Date(2026, 6, 15, 18, 0, 0, 0, time.UTC)
+	store.session.OfferedSlots = []OfferedSlot{{StartTime: start, EndTime: start.Add(45 * time.Minute)}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Maybe Wednesday at 4 PM instead."}); err != nil {
+		t.Fatalf("correction Message returned error: %v", err)
+	}
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "No."})
+	if err != nil {
+		t.Fatalf("rejection Message returned error: %v", err)
+	}
+	if session.RequestedDate != "2026-06-15" || len(session.OfferedSlots) != 1 || session.DialogState.Pending != nil {
+		t.Fatalf("rejected correction lost original offer: %#v", session)
+	}
+	if bookingTool.availabilityCalls != 0 || !strings.Contains(store.lastTurn.AIMessage, "I have openings") {
+		t.Fatalf("rejection should repeat original offer, calls=%d reply=%s", bookingTool.availabilityCalls, store.lastTurn.AIMessage)
 	}
 }
 

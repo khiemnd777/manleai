@@ -146,6 +146,55 @@ func TestSignedTwilioWebhookDrivesPhoneBookingFlowThroughConversation(t *testing
 	}
 }
 
+func TestGoldenPhoneFlowKeepsOfferedSlotsWhenCallerAsksAvailabilityDuringUnconfirmedCorrection(t *testing.T) {
+	adapter := NewAdapter(config.TwilioVoiceConfig{AuthToken: "secret", IncomingPath: "/api/voice/twilio/incoming", TurnPath: "/api/voice/twilio/turn", RecordingPath: "/api/voice/twilio/recording"}, "")
+	conversationStore := newPhoneFlowConversationStore()
+	bookingTool := &phoneFlowBookingTool{}
+	conversationService := conversation.NewService(conversationStore, bookingTool)
+	voiceStore := newPhoneFlowVoiceStore(conversationStore)
+	voiceService := voice.NewService(voiceStore, conversationService, config.VoiceConfig{Provider: voice.ProviderTwilio, Twilio: config.TwilioVoiceConfig{AuthToken: "secret", IncomingPath: "/api/voice/twilio/incoming", TurnPath: "/api/voice/twilio/turn", RecordingPath: "/api/voice/twilio/recording"}}, voice.AIProviders{})
+	app := testTwilioApp(adapter, voiceService)
+	base := url.Values{"CallSid": {"CA_AVAILABILITY_GOLDEN"}, "From": {"+13125550199"}, "To": {"+13125550101"}}
+
+	if res := signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/incoming", base); res.StatusCode != fiber.StatusOK {
+		t.Fatalf("incoming status = %d", res.StatusCode)
+	}
+	book := cloneURLValues(base)
+	book.Set("SpeechResult", "Classic Manicure on 2026-06-10.")
+	bookBody := readBody(t, signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", book))
+	if !strings.Contains(bookBody, "I have openings") || bookingTool.availabilityCalls != 1 {
+		t.Fatalf("initial availability offer failed: body=%s calls=%d", bookBody, bookingTool.availabilityCalls)
+	}
+
+	correction := cloneURLValues(base)
+	correction.Set("SpeechResult", "Could we move it to Friday, June 12 at 3 PM?")
+	correctionBody := readBody(t, signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", correction))
+	if !strings.Contains(correctionBody, "Did you want to change") || bookingTool.availabilityCalls != 1 {
+		t.Fatalf("date correction should wait for confirmation: body=%s calls=%d", correctionBody, bookingTool.availabilityCalls)
+	}
+	if conversationStore.session.RequestedDate != "2026-06-10" || len(conversationStore.session.OfferedSlots) != 2 {
+		t.Fatalf("unconfirmed phone correction mutated draft: %#v", conversationStore.session)
+	}
+
+	availability := cloneURLValues(base)
+	availability.Set("SpeechResult", "Which appointment slots are still open?")
+	availabilityBody := readBody(t, signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", availability))
+	if !strings.Contains(availabilityBody, "I have openings") || strings.Contains(availabilityBody, "You currently have") {
+		t.Fatalf("availability request did not repeat the active offer: %s", availabilityBody)
+	}
+	if bookingTool.availabilityCalls != 1 || conversationStore.session.RequestedDate != "2026-06-10" || len(conversationStore.session.OfferedSlots) != 2 {
+		t.Fatalf("availability request should preserve offered slots, calls=%d session=%#v", bookingTool.availabilityCalls, conversationStore.session)
+	}
+}
+
+func cloneURLValues(values url.Values) url.Values {
+	cloned := make(url.Values, len(values))
+	for key, items := range values {
+		cloned[key] = append([]string(nil), items...)
+	}
+	return cloned
+}
+
 func TestSignedTwilioWebhookConsultsThenBooksExplicitCatalogChoice(t *testing.T) {
 	adapter := NewAdapter(config.TwilioVoiceConfig{AuthToken: "secret", IncomingPath: "/api/voice/twilio/incoming", TurnPath: "/api/voice/twilio/turn", RecordingPath: "/api/voice/twilio/recording"}, "")
 	conversationStore := newPhoneFlowConversationStore()
