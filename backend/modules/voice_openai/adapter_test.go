@@ -13,7 +13,7 @@ import (
 	"github.com/manleai/ai-receptionist/modules/voice"
 )
 
-func TestClassifyConversationActUsesStrictCatalogBoundSchema(t *testing.T) {
+func TestInterpretTurnUsesStrictCatalogBoundMultiActSchema(t *testing.T) {
 	adapter := NewAdapter(config.OpenAIVoiceConfig{
 		APIKey:     "test-key",
 		BaseURL:    "https://openai.test/v1",
@@ -37,12 +37,12 @@ func TestClassifyConversationActUsesStrictCatalogBoundSchema(t *testing.T) {
 			t.Fatalf("customer_message = %#v", modelInput["customer_message"])
 		}
 		body, _ := json.Marshal(map[string]any{
-			"output_text": `{"kind":"replace_service","source_service_ids":["service_gel"],"target_service_ids":["service_spa"],"source_category_id":"","source_category_name":"","target_category_id":"cat_pedi","target_category_name":"Pedicure","scope":"one","guest_scope":"","subject":"current_booking","confidence":0.95,"reason":"explicit replacement"}`,
+			"output_text": `{"goal":"book_appointment","acts":[{"kind":"replace_service","entity":"service","source_ids":["service_gel"],"target_ids":["service_spa"],"source_category_id":"","source_category_name":"","target_category_id":"cat_pedi","target_category_name":"Pedicure","scope":"one","guest_scope":"","guest_ref":"","subject":"","value":"","count":0,"confidence":0.95,"reason":"explicit replacement"}],"questions":[{"subject":"availability","service_ids":["service_spa"],"staff_ids":[],"confidence":0.92,"reason":"caller asked about availability"}],"confidence":0.95,"reason":"correction plus question"}`,
 		})
 		return jsonResponse(body), nil
 	})}
 
-	reply, err := adapter.ClassifyConversationAct(context.Background(), voice.ActModelRequest{
+	reply, err := adapter.InterpretTurn(context.Background(), voice.TurnModelRequest{
 		SalonID:         "salon_1",
 		CustomerMessage: "Make that a spa pedicure instead.",
 		SelectedServices: []conversation.ConversationServiceRef{{
@@ -53,9 +53,9 @@ func TestClassifyConversationActUsesStrictCatalogBoundSchema(t *testing.T) {
 		}},
 	})
 	if err != nil {
-		t.Fatalf("ClassifyConversationAct: %v", err)
+		t.Fatalf("InterpretTurn: %v", err)
 	}
-	if reply.Kind != conversation.ConversationActReplace || reply.TargetServiceIDs[0] != "service_spa" || reply.Confidence != 0.95 {
+	if len(reply.Acts) != 1 || reply.Acts[0].Kind != conversation.ConversationActReplace || reply.Acts[0].TargetIDs[0] != "service_spa" || len(reply.Questions) != 1 || reply.Confidence != 0.95 {
 		t.Fatalf("reply = %#v", reply)
 	}
 }

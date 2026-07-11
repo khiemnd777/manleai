@@ -8,17 +8,6 @@ import (
 	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
-var (
-	serviceReplaceFromToPattern  = regexp.MustCompile(`(?i)\b(?:switch|change|swap|replace|move)\s+from\s+(.+?)\s+(?:to|with)\s+(.+)$`)
-	serviceReplaceWithPattern    = regexp.MustCompile(`(?i)\breplace\s+(.+?)\s+with\s+(.+)$`)
-	serviceNotThisButThatPattern = regexp.MustCompile(`(?i)\bnot\s+(.+?)(?:,|;|\s+but\s+)(.+)$`)
-	serviceReplaceTargetPattern  = regexp.MustCompile(`(?i)\b(?:switch|change|swap|move)(?:\s+(?:it|this|that|the service))?\s+(?:to|with)\s+(.+)$`)
-	serviceMakeTargetPattern     = regexp.MustCompile(`(?i)\bmake\s+(?:it|that|the service)\s+(.+?)(?:\s+instead)?$`)
-	serviceRatherTargetPattern   = regexp.MustCompile(`(?i)\b(?:i(?:'d| would)?\s+)?rather\s+(?:have|get|book)?\s*(.+)$`)
-	serviceRemoveTargetPattern   = regexp.MustCompile(`(?i)\b(?:remove|drop|delete|take off|take out)\s+(.+)$`)
-	serviceRemoveSuffixPattern   = regexp.MustCompile(`(?i)\b(.+?)\s+(?:off|out)\s+(?:the|my|this)?\s*(?:appointment|booking)?$`)
-)
-
 type conversationDraftResult struct {
 	Handled       bool
 	Changed       bool
@@ -29,54 +18,74 @@ type conversationDraftResult struct {
 	Act           ConversationAct
 }
 
-func (s *Service) conversationActForMessage(ctx context.Context, session Session, message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) ConversationAct {
-	act := deterministicConversationAct(session, message, services, aliases, categoryAliases)
-	if activePartyPlan(session.PartyPlan) && act.Kind != ConversationActSummarize && act.Kind != ConversationActReview {
-		return ConversationAct{Kind: ConversationActUnknown, Source: "deterministic"}
+func (s *Service) turnUnderstandingForMessage(ctx context.Context, session Session, message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, staff []StaffOption) TurnUnderstanding {
+	deterministic := deterministicConversationAct(session, message, services, aliases, categoryAliases)
+	if activePartyPlan(session.PartyPlan) && isServiceMutationAct(deterministic.Kind) {
+		deterministic = ConversationAct{Kind: ConversationActUnknown, Source: "deterministic"}
 	}
-	if act.Kind != ConversationActUnknown || s.actInterpreter == nil || !hasBookingProgress(session) || !shouldUseStructuredActFallback(message, session) {
-		return act
+	if deterministic.Kind != ConversationActUnknown && deterministic.Entity == "" {
+		deterministic.Entity = defaultConversationActEntity(deterministic.Kind)
 	}
-	interpreted, err := s.actInterpreter.InterpretConversationAct(ctx, ConversationActInterpretationRequest{
+	fallback := TurnUnderstanding{Source: "deterministic", Confidence: deterministic.Confidence, Reason: deterministic.Reason}
+	if deterministic.Kind != ConversationActUnknown {
+		fallback.Acts = []ConversationAct{deterministic}
+	}
+	if s.turnInterpreter == nil {
+		return fallback
+	}
+	interpreted, err := s.turnInterpreter.InterpretTurn(ctx, TurnInterpretationRequest{
 		SalonID:             session.SalonID,
 		SessionID:           session.ID,
 		Channel:             session.Channel,
-		CustomerMessage:     sanitizedActInterpreterMessage(message),
+		CustomerMessage:     sanitizedTurnInterpreterMessage(message, session),
 		SelectedServices:    conversationServiceRefs(selectedServiceOptions(session, services)),
 		CatalogServices:     conversationServiceRefs(services),
+		SelectedStaff:       conversationStaffRefs(selectedStaffOptions(session, staff)),
+		CatalogStaff:        conversationStaffRefs(staff),
 		Pending:             clonePendingConversationAct(session.DialogState.Pending),
 		CurrentBookingStage: normalizedDialogState(session.DialogState).Phase,
+		BookingAction:       bookingActionForSession(session),
+		CurrentDraft:        conversationDraftRef(session),
 	})
+	fallback.ModelInvoked = true
 	if err != nil {
-		return act
+		fallback.Reason = "semantic_interpreter_unavailable"
+		return fallback
 	}
-	if validated, ok := validateInterpretedConversationAct(interpreted, session, services); ok {
+	interpreted.ModelInvoked = true
+	if validated, ok := validateTurnUnderstanding(interpreted, session, services, staff); ok {
 		validated.Source = "structured_ai"
+		for index := range validated.Acts {
+			validated.Acts[index].Source = "structured_ai"
+			if validated.Acts[index].Entity == "" {
+				validated.Acts[index].Entity = defaultConversationActEntity(validated.Acts[index].Kind)
+			}
+		}
+		if len(validated.Acts) == 0 && len(validated.Questions) == 0 && (validated.Goal == "" || validated.Goal == "unknown") {
+			return fallback
+		}
 		return validated
 	}
-	return act
+	fallback.Reason = "semantic_interpretation_rejected"
+	return fallback
 }
 
-func shouldUseStructuredActFallback(message string, session Session) bool {
-	if normalizedDialogState(session.DialogState).Pending != nil || normalizedDialogState(session.DialogState).Phase == DialogPhaseReview {
-		return true
+func primaryConversationAct(understanding TurnUnderstanding) ConversationAct {
+	if len(understanding.Acts) == 0 {
+		return ConversationAct{Kind: ConversationActUnknown, Source: understanding.Source}
 	}
-	normalized := normalizeLooseText(message)
-	for _, cue := range []string{
-		"instead", "rather", "make it", "swap", "switch", "change", "replace", "also", "as well",
-		"add", "remove", "drop", "take off", "undo", "go back", "keep the original", "what do i have",
-		"what am i booking", "how many i book", "how many am i booking", "read it back", "recap",
-	} {
-		if containsLoosePhrase(normalized, cue) || strings.Contains(normalized, cue) {
-			return true
-		}
-	}
-	return false
+	return understanding.Acts[0]
 }
 
-func sanitizedActInterpreterMessage(message string) string {
+func sanitizedTurnInterpreterMessage(message string, session Session) string {
 	message = phonePattern.ReplaceAllString(message, "[phone]")
 	message = emailPattern.ReplaceAllString(message, "[email]")
+	for _, name := range []string{strings.TrimSpace(session.CustomerName)} {
+		if name == "" {
+			continue
+		}
+		message = regexp.MustCompile(`(?i)`+regexp.QuoteMeta(name)).ReplaceAllString(message, "[customer_name]")
+	}
 	return strings.TrimSpace(message)
 }
 
@@ -89,58 +98,12 @@ func deterministicConversationAct(session Session, message string, services []Se
 	if state.Phase == DialogPhaseReview && isReviewAuthorization(message) {
 		return ConversationAct{Kind: ConversationActReview, Confidence: 1, Reason: "review_authorization", Source: "deterministic"}
 	}
-	if asksCurrentBookingSummary(message) && hasBookingProgress(session) {
-		act := ConversationAct{Kind: ConversationActSummarize, Subject: "current_booking", Confidence: 0.98, Reason: "current_booking_summary", Source: "deterministic"}
-		applyUnderstandingToAct(&act, interpretServiceWithCategoryAliases(message, services, aliases, categoryAliases), false, session)
-		return act
-	}
-	if asksToUndoServiceEdit(message) && state.LastMutation != nil {
-		return ConversationAct{Kind: ConversationActUndo, Confidence: 0.98, Reason: "undo_service_edit", Source: "deterministic"}
-	}
-
 	if state.Pending != nil {
 		if act := conversationActFromPending(session, message, services, aliases, categoryAliases, *state.Pending); act.Kind != ConversationActUnknown {
 			return act
 		}
 	}
 
-	if source, target, ok := directionalServiceReplacement(message); ok {
-		act := ConversationAct{Kind: ConversationActReplace, Confidence: 0.99, Reason: "directional_service_replacement", Source: "deterministic"}
-		applyServiceFragmentToAct(&act, source, true, session, services, aliases, categoryAliases)
-		applyServiceFragmentToAct(&act, target, false, session, services, aliases, categoryAliases)
-		if len(act.TargetServiceIDs) == 0 {
-			return ConversationAct{Kind: ConversationActUnknown, Source: "deterministic"}
-		}
-		if len(act.SourceServiceIDs) > 1 {
-			act.Scope = ConversationScopeAllMatching
-		} else {
-			act.Scope = ConversationScopeOne
-		}
-		return act
-	}
-	if target, ok := targetOnlyServiceReplacement(message); ok {
-		act := ConversationAct{Kind: ConversationActReplace, Confidence: 0.96, Reason: "target_service_replacement", Source: "deterministic"}
-		applyServiceFragmentToAct(&act, target, false, session, services, aliases, categoryAliases)
-		if len(act.TargetServiceIDs) == 0 {
-			return ConversationAct{Kind: ConversationActUnknown, Source: "deterministic"}
-		}
-		return act
-	}
-	if target, ok := removeServiceTarget(message); ok && hasBookingProgress(session) {
-		act := ConversationAct{Kind: ConversationActRemove, Confidence: 0.96, Reason: "remove_service", Source: "deterministic"}
-		applyServiceFragmentToAct(&act, target, true, session, services, aliases, categoryAliases)
-		return act
-	}
-	if hasServiceAddSignal(message) && hasBookingProgress(session) {
-		understanding := interpretServiceWithCategoryAliases(message, services, aliases, categoryAliases)
-		act := ConversationAct{Kind: ConversationActAdd, Confidence: 0.92, Reason: "add_service", Source: "deterministic"}
-		applyUnderstandingToAct(&act, understanding, false, session)
-		act.GuestScope = guestScopeForMessage(message)
-		if len(act.TargetServiceIDs) == 0 {
-			return ConversationAct{Kind: ConversationActUnknown, Source: "deterministic"}
-		}
-		return act
-	}
 	return ConversationAct{Kind: ConversationActUnknown, Source: "deterministic"}
 }
 
@@ -212,55 +175,6 @@ func hasExplicitFullCatalogServiceEvidence(result serviceUnderstandingResult) bo
 	}
 }
 
-func directionalServiceReplacement(message string) (string, string, bool) {
-	for _, pattern := range []*regexp.Regexp{serviceReplaceFromToPattern, serviceReplaceWithPattern, serviceNotThisButThatPattern} {
-		match := pattern.FindStringSubmatch(strings.TrimSpace(message))
-		if len(match) == 3 {
-			return cleanServiceActFragment(match[1]), cleanServiceActFragment(match[2]), true
-		}
-	}
-	return "", "", false
-}
-
-func targetOnlyServiceReplacement(message string) (string, bool) {
-	for _, pattern := range []*regexp.Regexp{serviceReplaceTargetPattern, serviceMakeTargetPattern, serviceRatherTargetPattern} {
-		match := pattern.FindStringSubmatch(strings.TrimSpace(message))
-		if len(match) == 2 {
-			return cleanServiceActFragment(match[1]), true
-		}
-	}
-	return "", false
-}
-
-func removeServiceTarget(message string) (string, bool) {
-	message = strings.TrimSpace(strings.Trim(message, " .!?"))
-	for _, pattern := range []*regexp.Regexp{serviceRemoveTargetPattern, serviceRemoveSuffixPattern} {
-		match := pattern.FindStringSubmatch(message)
-		if len(match) == 2 {
-			return cleanServiceActFragment(match[1]), true
-		}
-	}
-	return "", false
-}
-
-func cleanServiceActFragment(value string) string {
-	value = strings.TrimSpace(strings.Trim(value, " ,.;?!\"'"))
-	for _, suffix := range []string{" please", " for me", " instead", " from the appointment", " from my appointment"} {
-		if strings.HasSuffix(strings.ToLower(value), suffix) {
-			value = strings.TrimSpace(value[:len(value)-len(suffix)])
-		}
-	}
-	return value
-}
-
-func applyServiceFragmentToAct(act *ConversationAct, fragment string, source bool, session Session, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) {
-	if act == nil || strings.TrimSpace(fragment) == "" {
-		return
-	}
-	result := interpretServiceWithCategoryAliases(fragment, services, aliases, categoryAliases)
-	applyUnderstandingToAct(act, result, source, session)
-}
-
 func applyUnderstandingToAct(act *ConversationAct, result serviceUnderstandingResult, source bool, session Session) {
 	if act == nil || result.Status == serviceUnderstandingStatusUnknown {
 		return
@@ -294,7 +208,12 @@ func (s *Service) applyConversationActToDraft(session *Session, act Conversation
 		result.ReplySource = "current_booking_summary"
 		return result
 	case ConversationActReview:
-		state.ReviewAccepted = true
+		state.ReviewAccepted = state.Phase == DialogPhaseReview && state.ReviewedRevision == state.DraftRevision
+		if state.ReviewAccepted {
+			state.AuthorizedRevision = state.DraftRevision
+		} else {
+			state.AuthorizedRevision = 0
+		}
 		state.Pending = nil
 		state.NoProgressCount = 0
 		state.LastActKind = act.Kind
@@ -302,18 +221,27 @@ func (s *Service) applyConversationActToDraft(session *Session, act Conversation
 		result.ReplySource = "review_accepted"
 		return result
 	case ConversationActUndo:
-		if state.LastMutation == nil {
+		if len(state.MutationHistory) == 0 && state.LastMutation == nil {
 			result.Reply = "There is no recent service change to undo. " + currentBookingSummaryReply(*session, services)
 			result.ReplySource = "undo_unavailable"
 			return result
 		}
 		mutation := state.LastMutation
+		if len(state.MutationHistory) > 0 {
+			last := cloneDraftMutation(state.MutationHistory[len(state.MutationHistory)-1])
+			mutation = &last
+			state.MutationHistory = state.MutationHistory[:len(state.MutationHistory)-1]
+		}
 		session.ServiceID = mutation.BeforeServiceID
 		session.ServiceName = mutation.BeforeServiceName
 		session.BookingSegments = append([]booking.BookingSegmentRequest(nil), mutation.BeforeSegments...)
 		session.OfferedSlots = nil
 		state = resetDialogProgress(state, DialogPhaseDrafting)
 		state.LastMutation = nil
+		if len(state.MutationHistory) > 0 {
+			last := cloneDraftMutation(state.MutationHistory[len(state.MutationHistory)-1])
+			state.LastMutation = &last
+		}
 		state.LastActKind = act.Kind
 		session.DialogState = state
 		result.Changed = true
@@ -394,7 +322,7 @@ func (s *Service) applyConversationActToDraft(session *Session, act Conversation
 	}
 	state = resetDialogProgress(state, DialogPhaseDrafting)
 	state.LastActKind = act.Kind
-	state.LastMutation = &DraftMutation{
+	mutation := DraftMutation{
 		Kind:              act.Kind,
 		BeforeServiceID:   beforeID,
 		BeforeServiceName: beforeName,
@@ -403,6 +331,11 @@ func (s *Service) applyConversationActToDraft(session *Session, act Conversation
 		AfterServiceIDs:   selectedServiceIDs(*session),
 		AfterSegments:     append([]booking.BookingSegmentRequest(nil), session.BookingSegments...),
 	}
+	state.MutationHistory = append(state.MutationHistory, cloneDraftMutation(mutation))
+	if len(state.MutationHistory) > 5 {
+		state.MutationHistory = append([]DraftMutation(nil), state.MutationHistory[len(state.MutationHistory)-5:]...)
+	}
+	state.LastMutation = &mutation
 	session.DialogState = state
 	result.ReplySource = "conversation_act_reducer"
 	return result
@@ -580,31 +513,6 @@ func dedupeBookingSegments(segments []booking.BookingSegmentRequest) []booking.B
 	return out
 }
 
-func asksCurrentBookingSummary(message string) bool {
-	normalized := normalizeLooseText(message)
-	for _, phrase := range []string{
-		"what do i have", "what have i got", "what am i booking", "what did i book",
-		"what services am i booking", "what service am i booking", "my booking so far",
-		"my appointment so far", "read it back", "read that back", "recap my booking",
-		"how many did i book", "how many am i booking", "how many i book", "how many services i book",
-	} {
-		if containsLoosePhrase(normalized, phrase) || strings.Contains(normalized, phrase) {
-			return true
-		}
-	}
-	return strings.Contains(normalized, "how many") && strings.Contains(normalized, " i book")
-}
-
-func asksToUndoServiceEdit(message string) bool {
-	normalized := normalizeLooseText(message)
-	for _, phrase := range []string{"undo", "go back", "keep the original", "restore the original", "never mind", "never mind the change", "scratch that", "change it back"} {
-		if containsLoosePhrase(normalized, phrase) || strings.Contains(normalized, phrase) {
-			return true
-		}
-	}
-	return false
-}
-
 func guestScopeForMessage(message string) string {
 	normalized := normalizeLooseText(message)
 	for _, phrase := range []string{"another guest", "another person", "someone else", "my friend", "my daughter", "my mom", "my mother", "my sister", "my partner", "my wife", "my husband"} {
@@ -665,6 +573,57 @@ func conversationServiceRefs(services []ServiceOption) []ConversationServiceRef 
 	return out
 }
 
+func selectedStaffOptions(session Session, staff []StaffOption) []StaffOption {
+	staffID := strings.TrimSpace(session.StaffID)
+	if staffID == "" {
+		return nil
+	}
+	for _, option := range staff {
+		if strings.TrimSpace(option.ID) == staffID {
+			return []StaffOption{option}
+		}
+	}
+	return nil
+}
+
+func conversationStaffRefs(staff []StaffOption) []ConversationStaffRef {
+	out := make([]ConversationStaffRef, 0, len(staff))
+	for _, option := range staff {
+		out = append(out, ConversationStaffRef{StaffID: option.ID, StaffName: option.Name})
+	}
+	return out
+}
+
+func conversationDraftRef(session Session) ConversationDraftRef {
+	state := normalizedDialogState(session.DialogState)
+	requestedStart := ""
+	if session.RequestedStartTime != nil {
+		requestedStart = session.RequestedStartTime.UTC().Format("2006-01-02T15:04:05Z07:00")
+	}
+	partySize := 0
+	partyGroups := []ConversationPartyGroupRef(nil)
+	if session.PartyPlan != nil {
+		partySize = session.PartyPlan.PartySize
+		for _, group := range session.PartyPlan.Groups {
+			partyGroups = append(partyGroups, ConversationPartyGroupRef{
+				GuestRef: strings.TrimSpace(group.Label), Count: group.Count,
+				ServiceIDs: append([]string(nil), group.ResolvedServiceIDs...),
+			})
+		}
+	}
+	return ConversationDraftRef{
+		ServiceIDs:        selectedServiceIDs(session),
+		StaffID:           strings.TrimSpace(session.StaffID),
+		RequestedDate:     strings.TrimSpace(session.RequestedDate),
+		RequestedStartISO: requestedStart,
+		PartySize:         partySize,
+		PartyGroups:       partyGroups,
+		HasCustomerName:   strings.TrimSpace(session.CustomerName) != "",
+		HasCustomerPhone:  strings.TrimSpace(session.CustomerPhone) != "",
+		DraftRevision:     state.DraftRevision,
+	}
+}
+
 func clonePendingConversationAct(pending *PendingConversationAct) *PendingConversationAct {
 	if pending == nil {
 		return nil
@@ -679,9 +638,25 @@ func validateInterpretedConversationAct(act ConversationAct, session Session, se
 	allowed := map[string]bool{
 		ConversationActAdd: true, ConversationActReplace: true, ConversationActRemove: true,
 		ConversationActUndo: true, ConversationActSummarize: true, ConversationActReview: true,
+		ConversationActSet: true, ConversationActClear: true,
 	}
 	if !allowed[act.Kind] || act.Confidence < 0.78 {
 		return ConversationAct{}, false
+	}
+	if act.Entity == "" {
+		act.Entity = defaultConversationActEntity(act.Kind)
+	}
+	if isServiceMutationAct(act.Kind) && act.Entity != ConversationEntityService {
+		return ConversationAct{}, false
+	}
+	if act.Kind == ConversationActSet || act.Kind == ConversationActClear {
+		allowedEntity := map[string]bool{
+			ConversationEntityStaff: true, ConversationEntityDateTime: true,
+			ConversationEntityGuest: true, ConversationEntityCustomer: true,
+		}
+		if !allowedEntity[act.Entity] {
+			return ConversationAct{}, false
+		}
 	}
 	validCatalog := stringSet(serviceOptionIDs(services))
 	validCategories := map[string]bool{}
@@ -690,15 +665,17 @@ func validateInterpretedConversationAct(act ConversationAct, session Session, se
 			validCategories[categoryID] = true
 		}
 	}
-	for _, id := range append(append([]string(nil), act.SourceServiceIDs...), act.TargetServiceIDs...) {
-		if !validCatalog[strings.TrimSpace(id)] {
-			return ConversationAct{}, false
+	if act.Entity == ConversationEntityService || isServiceMutationAct(act.Kind) {
+		for _, id := range append(append([]string(nil), act.SourceServiceIDs...), act.TargetServiceIDs...) {
+			if !validCatalog[strings.TrimSpace(id)] {
+				return ConversationAct{}, false
+			}
 		}
-	}
-	for _, categoryID := range []string{act.SourceCategoryID, act.TargetCategoryID} {
-		categoryID = strings.TrimSpace(categoryID)
-		if categoryID != "" && !validCategories[categoryID] {
-			return ConversationAct{}, false
+		for _, categoryID := range []string{act.SourceCategoryID, act.TargetCategoryID} {
+			categoryID = strings.TrimSpace(categoryID)
+			if categoryID != "" && !validCategories[categoryID] {
+				return ConversationAct{}, false
+			}
 		}
 	}
 	if act.Kind == ConversationActReview && normalizedDialogState(session.DialogState).Phase != DialogPhaseReview {
@@ -707,7 +684,111 @@ func validateInterpretedConversationAct(act ConversationAct, session Session, se
 	if act.GuestScope != "" && act.GuestScope != ConversationGuestCaller && act.GuestScope != ConversationGuestAnother {
 		return ConversationAct{}, false
 	}
+	if act.Count < 0 || act.Count > 20 {
+		return ConversationAct{}, false
+	}
 	return act, true
+}
+
+func validateTurnUnderstanding(turn TurnUnderstanding, session Session, services []ServiceOption, staff []StaffOption) (TurnUnderstanding, bool) {
+	if turn.Confidence > 0 && turn.Confidence < 0.78 {
+		return TurnUnderstanding{}, false
+	}
+	allowedGoals := map[string]bool{
+		"": true, "unknown": true, "book_appointment": true, "reschedule_appointment": true,
+		"cancel_appointment": true, "consultation": true, "information": true, "human_handoff": true,
+	}
+	if !allowedGoals[strings.TrimSpace(turn.Goal)] {
+		return TurnUnderstanding{}, false
+	}
+	validatedActs := make([]ConversationAct, 0, len(turn.Acts))
+	validStaff := map[string]bool{}
+	for _, option := range staff {
+		if id := strings.TrimSpace(option.ID); id != "" {
+			validStaff[id] = true
+		}
+	}
+	for _, act := range turn.Acts {
+		if act.Kind == ConversationActUnknown {
+			continue
+		}
+		validated, ok := validateInterpretedConversationAct(act, session, services)
+		if !ok {
+			return TurnUnderstanding{}, false
+		}
+		if activePartyPlan(session.PartyPlan) && isServiceMutationAct(validated.Kind) && !partyGuestRefExists(session.PartyPlan, validated.GuestRef) {
+			return TurnUnderstanding{}, false
+		}
+		for _, staffID := range append(append([]string(nil), validated.SourceServiceIDs...), validated.TargetServiceIDs...) {
+			if validated.Entity == ConversationEntityStaff && !validStaff[strings.TrimSpace(staffID)] {
+				return TurnUnderstanding{}, false
+			}
+		}
+		validatedActs = append(validatedActs, validated)
+	}
+	validServices := stringSet(serviceOptionIDs(services))
+	allowedQuestions := map[string]bool{
+		ConversationQuestionCurrentBooking: true,
+		ConversationQuestionCatalog:        true,
+		ConversationQuestionAvailability:   true,
+		ConversationQuestionPrice:          true,
+		ConversationQuestionHours:          true,
+		ConversationQuestionStaff:          true,
+		ConversationQuestionPolicy:         true,
+	}
+	validatedQuestions := make([]ConversationQuestion, 0, len(turn.Questions))
+	for _, question := range turn.Questions {
+		question.Subject = strings.TrimSpace(question.Subject)
+		if !allowedQuestions[question.Subject] || question.Confidence < 0.78 {
+			return TurnUnderstanding{}, false
+		}
+		for _, serviceID := range question.ServiceIDs {
+			if !validServices[strings.TrimSpace(serviceID)] {
+				return TurnUnderstanding{}, false
+			}
+		}
+		for _, staffID := range question.StaffIDs {
+			if !validStaff[strings.TrimSpace(staffID)] {
+				return TurnUnderstanding{}, false
+			}
+		}
+		validatedQuestions = append(validatedQuestions, question)
+	}
+	turn.Acts = validatedActs
+	turn.Questions = validatedQuestions
+	if len(turn.Acts) == 0 && len(turn.Questions) == 0 {
+		return turn, true
+	}
+	return turn, true
+}
+
+func partyGuestRefExists(plan *PartyPlan, guestRef string) bool {
+	guestRef = strings.TrimSpace(guestRef)
+	if plan == nil || guestRef == "" {
+		return false
+	}
+	for _, group := range plan.Groups {
+		if strings.EqualFold(strings.TrimSpace(group.Label), guestRef) {
+			return true
+		}
+	}
+	return false
+}
+
+func defaultConversationActEntity(kind string) string {
+	if isServiceMutationAct(kind) {
+		return ConversationEntityService
+	}
+	return ""
+}
+
+func isServiceMutationAct(kind string) bool {
+	switch kind {
+	case ConversationActAdd, ConversationActReplace, ConversationActRemove, ConversationActUndo:
+		return true
+	default:
+		return false
+	}
 }
 
 func intersectServiceIDs(left []string, right []string) []string {
@@ -753,6 +834,7 @@ func applyConversationActMetadata(turn *TurnRecord, act ConversationAct, result 
 		"conversation_act_confidence":           act.Confidence,
 		"conversation_act_scope":                act.Scope,
 		"conversation_act_guest_scope":          act.GuestScope,
+		"conversation_act_guest_ref":            act.GuestRef,
 		"conversation_act_subject":              act.Subject,
 		"conversation_act_source_service_ids":   append([]string(nil), act.SourceServiceIDs...),
 		"conversation_act_target_service_ids":   append([]string(nil), act.TargetServiceIDs...),

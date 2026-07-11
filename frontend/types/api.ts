@@ -834,11 +834,16 @@ export type ConversationDialogState = {
   phase: "open" | "drafting" | "clarifying" | "availability" | "review" | string;
   pending?: PendingConversationAct;
   last_mutation?: ConversationDraftMutation;
+  mutation_history?: ConversationDraftMutation[];
   review_required: boolean;
   review_accepted: boolean;
   no_progress_count: number;
   last_prompt_key?: string;
   last_act_kind?: string;
+  draft_revision: number;
+  reviewed_revision: number;
+  authorized_revision: number;
+  last_mutation_revision?: number;
 };
 
 export type ConversationSession = {

@@ -175,93 +175,67 @@ func (a *Adapter) GenerateReply(ctx context.Context, req voice.ModelRequest) (vo
 	return parsed, nil
 }
 
-func (a *Adapter) ClassifyConversationAct(ctx context.Context, req voice.ActModelRequest) (voice.ActModelReply, error) {
+func (a *Adapter) InterpretTurn(ctx context.Context, req voice.TurnModelRequest) (voice.TurnModelReply, error) {
 	cfg, enabled, err := a.configFor(ctx, req.SalonID)
 	if err != nil {
-		return voice.ActModelReply{}, err
+		return voice.TurnModelReply{}, err
 	}
 	if !enabled || strings.TrimSpace(cfg.APIKey) == "" || strings.TrimSpace(cfg.ReplyModel) == "" {
-		return voice.ActModelReply{}, voice.ErrProviderDisabled
+		return voice.TurnModelReply{}, voice.ErrProviderDisabled
 	}
 	payload := responseRequest{
 		Model: strings.TrimSpace(cfg.ReplyModel),
 		Instructions: strings.Join([]string{
-			"Classify one caller utterance for a US nail salon appointment draft.",
-			"Return a structured dialogue act only; never write a customer-facing reply.",
+			"Interpret one caller turn for a US nail salon receptionist.",
+			"Return structured operations and questions only; never write a customer-facing reply.",
+			"A turn may contain multiple operations and questions. Preserve their spoken order.",
 			"Use only service and category IDs present in catalog_services.",
+			"Use only staff IDs present in catalog_staff.",
 			"Distinguish the salon catalog from the caller's current booking draft.",
 			"For replacements, preserve source (what is being replaced) separately from target (the new service).",
 			"Use guest_scope=another_guest only when the caller explicitly assigns the added service to another person.",
+			"For an existing party plan, set guest_ref to an exact current_draft.party_groups guest_ref for every service mutation; never flatten guest groups.",
 			"A pending clarification is context, not a restriction: a clearly different new target may supersede it.",
-			"Use summarize_booking for questions about what the caller currently has or how many services they are booking.",
-			"Use unknown when the message is not an add, replace, remove, undo, summary, or final-review authorization act.",
+			"For an initial concrete service selection, emit add_service with entity=service and the catalog target ID.",
+			"Represent questions about the current draft as questions with subject=current_booking.",
+			"A final-review acceptance may coexist with a correction; include both and never suppress the correction.",
+			"Use set_field or clear_field for staff, date/time, guest, or customer-field corrections.",
 			"Do not infer booking confirmation, availability, customer identity, prices, or policy.",
 			"Return strict JSON matching the schema.",
 		}, "\n"),
-		Input: actModelInput(req),
+		Input: turnModelInput(req),
 		Text: responseTextFormat{Format: responseFormat{
-			Type: "json_schema",
-			Name: "conversation_act",
-			Schema: map[string]any{
-				"type":                 "object",
-				"additionalProperties": false,
-				"properties": map[string]any{
-					"kind": map[string]any{"type": "string", "enum": []string{
-						conversation.ConversationActUnknown,
-						conversation.ConversationActAdd,
-						conversation.ConversationActReplace,
-						conversation.ConversationActRemove,
-						conversation.ConversationActUndo,
-						conversation.ConversationActSummarize,
-						conversation.ConversationActReview,
-					}},
-					"source_service_ids":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-					"target_service_ids":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-					"source_category_id":   map[string]any{"type": "string"},
-					"source_category_name": map[string]any{"type": "string"},
-					"target_category_id":   map[string]any{"type": "string"},
-					"target_category_name": map[string]any{"type": "string"},
-					"scope": map[string]any{"type": "string", "enum": []string{
-						"", conversation.ConversationScopeOne, conversation.ConversationScopeAllMatching, conversation.ConversationScopeAll,
-					}},
-					"guest_scope": map[string]any{"type": "string", "enum": []string{"", conversation.ConversationGuestCaller, conversation.ConversationGuestAnother}},
-					"subject":     map[string]any{"type": "string", "enum": []string{"", "catalog", "current_booking"}},
-					"confidence":  map[string]any{"type": "number", "minimum": 0, "maximum": 1},
-					"reason":      map[string]any{"type": "string"},
-				},
-				"required": []string{
-					"kind", "source_service_ids", "target_service_ids", "source_category_id", "source_category_name",
-					"target_category_id", "target_category_name", "scope", "guest_scope", "subject", "confidence", "reason",
-				},
-			},
+			Type:   "json_schema",
+			Name:   "turn_understanding",
+			Schema: turnUnderstandingSchema(),
 			Strict: true,
 		}},
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return voice.ActModelReply{}, err
+		return voice.TurnModelReply{}, err
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url(cfg, "/responses"), bytes.NewReader(raw))
 	if err != nil {
-		return voice.ActModelReply{}, err
+		return voice.TurnModelReply{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	a.authorize(httpReq, cfg)
 
 	var res responseResponse
 	if err := a.do(httpReq, &res); err != nil {
-		return voice.ActModelReply{}, err
+		return voice.TurnModelReply{}, err
 	}
 	text := strings.TrimSpace(res.OutputText)
 	if text == "" {
 		text = strings.TrimSpace(res.firstText())
 	}
 	if text == "" {
-		return voice.ActModelReply{}, errors.New("openai conversation act response has no text")
+		return voice.TurnModelReply{}, errors.New("openai turn interpretation response has no text")
 	}
-	var parsed voice.ActModelReply
+	var parsed voice.TurnModelReply
 	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
-		return voice.ActModelReply{}, err
+		return voice.TurnModelReply{}, err
 	}
 	return parsed, nil
 }
@@ -368,14 +342,86 @@ func modelInput(req voice.ModelRequest) string {
 	return string(raw)
 }
 
-func actModelInput(req voice.ActModelRequest) string {
+func turnUnderstandingSchema() map[string]any {
+	act := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"kind": map[string]any{"type": "string", "enum": []string{
+				conversation.ConversationActUnknown, conversation.ConversationActAdd, conversation.ConversationActReplace,
+				conversation.ConversationActRemove, conversation.ConversationActUndo, conversation.ConversationActSummarize,
+				conversation.ConversationActReview, conversation.ConversationActSet, conversation.ConversationActClear,
+			}},
+			"entity": map[string]any{"type": "string", "enum": []string{
+				"", conversation.ConversationEntityService, conversation.ConversationEntityStaff,
+				conversation.ConversationEntityDateTime, conversation.ConversationEntityGuest, conversation.ConversationEntityCustomer,
+			}},
+			"source_ids":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"target_ids":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"source_category_id":   map[string]any{"type": "string"},
+			"source_category_name": map[string]any{"type": "string"},
+			"target_category_id":   map[string]any{"type": "string"},
+			"target_category_name": map[string]any{"type": "string"},
+			"scope": map[string]any{"type": "string", "enum": []string{
+				"", conversation.ConversationScopeOne, conversation.ConversationScopeAllMatching, conversation.ConversationScopeAll,
+			}},
+			"guest_scope": map[string]any{"type": "string", "enum": []string{"", conversation.ConversationGuestCaller, conversation.ConversationGuestAnother}},
+			"guest_ref":   map[string]any{"type": "string"},
+			"subject":     map[string]any{"type": "string"},
+			"value":       map[string]any{"type": "string"},
+			"count":       map[string]any{"type": "integer", "minimum": 0, "maximum": 20},
+			"confidence":  map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+			"reason":      map[string]any{"type": "string"},
+		},
+		"required": []string{
+			"kind", "entity", "source_ids", "target_ids", "source_category_id", "source_category_name",
+			"target_category_id", "target_category_name", "scope", "guest_scope", "guest_ref", "subject", "value", "count", "confidence", "reason",
+		},
+	}
+	question := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"subject": map[string]any{"type": "string", "enum": []string{
+				conversation.ConversationQuestionCurrentBooking, conversation.ConversationQuestionCatalog,
+				conversation.ConversationQuestionAvailability, conversation.ConversationQuestionPrice,
+				conversation.ConversationQuestionHours, conversation.ConversationQuestionStaff, conversation.ConversationQuestionPolicy,
+			}},
+			"service_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"staff_ids":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"confidence":  map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+			"reason":      map[string]any{"type": "string"},
+		},
+		"required": []string{"subject", "service_ids", "staff_ids", "confidence", "reason"},
+	}
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"goal": map[string]any{"type": "string", "enum": []string{
+				"unknown", "book_appointment", "reschedule_appointment", "cancel_appointment", "consultation", "information", "human_handoff",
+			}},
+			"acts":       map[string]any{"type": "array", "items": act},
+			"questions":  map[string]any{"type": "array", "items": question},
+			"confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+			"reason":     map[string]any{"type": "string"},
+		},
+		"required": []string{"goal", "acts", "questions", "confidence", "reason"},
+	}
+}
+
+func turnModelInput(req voice.TurnModelRequest) string {
 	raw, _ := json.Marshal(map[string]any{
 		"channel":               req.Channel,
 		"customer_message":      req.CustomerMessage,
 		"selected_services":     req.SelectedServices,
 		"catalog_services":      req.CatalogServices,
+		"selected_staff":        req.SelectedStaff,
+		"catalog_staff":         req.CatalogStaff,
 		"pending":               req.Pending,
 		"current_booking_stage": req.CurrentBookingStage,
+		"booking_action":        req.BookingAction,
+		"current_draft":         req.CurrentDraft,
 	})
 	return string(raw)
 }

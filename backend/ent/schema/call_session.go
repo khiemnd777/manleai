@@ -34,7 +34,10 @@ func (CallSession) Fields() []ent.Field {
 		field.Time("requested_start_time").Optional().Nillable(),
 		field.JSON("offered_slots", []map[string]any{}).Optional(),
 		field.JSON("booking_segments", []map[string]any{}).Optional(),
-		field.JSON("dialog_state", map[string]any{}).Optional(),
+		field.JSON("dialog_state", map[string]any{}).Default(map[string]any{
+			"version": 2, "phase": "open", "review_required": true, "review_accepted": false,
+			"no_progress_count": 0, "draft_revision": 1, "reviewed_revision": 0, "authorized_revision": 0,
+		}),
 		field.UUID("booking_attempt_id", uuid.UUID{}).Optional().Nillable(),
 		field.UUID("appointment_id", uuid.UUID{}).Optional().Nillable(),
 		field.String("summary").Optional(),

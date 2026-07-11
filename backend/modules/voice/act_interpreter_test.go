@@ -9,8 +9,8 @@ import (
 
 type fakeActModelProvider struct {
 	configured bool
-	reply      ActModelReply
-	request    ActModelRequest
+	reply      TurnModelReply
+	request    TurnModelRequest
 }
 
 func (f *fakeActModelProvider) Name() string { return ProviderOpenAI }
@@ -19,22 +19,21 @@ func (f *fakeActModelProvider) Configured(ctx context.Context, salonID string) b
 	return f.configured
 }
 
-func (f *fakeActModelProvider) ClassifyConversationAct(ctx context.Context, req ActModelRequest) (ActModelReply, error) {
+func (f *fakeActModelProvider) InterpretTurn(ctx context.Context, req TurnModelRequest) (TurnModelReply, error) {
 	f.request = req
 	return f.reply, nil
 }
 
-func TestGuardedConversationActInterpreterMapsStructuredResultWithoutPIIExpansion(t *testing.T) {
-	provider := &fakeActModelProvider{configured: true, reply: ActModelReply{
-		Kind:             conversation.ConversationActReplace,
-		SourceServiceIDs: []string{"service_gel"},
-		TargetServiceIDs: []string{"service_spa"},
-		Scope:            conversation.ConversationScopeOne,
-		Confidence:       0.94,
-		Reason:           "caller requested a replacement",
+func TestGuardedTurnInterpreterMapsStructuredResultWithoutPIIExpansion(t *testing.T) {
+	provider := &fakeActModelProvider{configured: true, reply: TurnModelReply{
+		Goal: "book_appointment", Confidence: 0.94, Acts: []ActModelReply{{
+			Kind: conversation.ConversationActReplace, Entity: conversation.ConversationEntityService,
+			SourceIDs: []string{"service_gel"}, TargetIDs: []string{"service_spa"},
+			Scope: conversation.ConversationScopeOne, Confidence: 0.94, Reason: "caller requested a replacement",
+		}},
 	}}
-	interpreter := NewGuardedConversationActInterpreter(provider)
-	act, err := interpreter.InterpretConversationAct(context.Background(), conversation.ConversationActInterpretationRequest{
+	interpreter := NewGuardedTurnInterpreter(provider)
+	turn, err := interpreter.InterpretTurn(context.Background(), conversation.TurnInterpretationRequest{
 		SalonID:         "salon_1",
 		SessionID:       "session_1",
 		Channel:         conversation.ChannelPhone,
@@ -47,8 +46,9 @@ func TestGuardedConversationActInterpreterMapsStructuredResultWithoutPIIExpansio
 		}},
 	})
 	if err != nil {
-		t.Fatalf("InterpretConversationAct: %v", err)
+		t.Fatalf("InterpretTurn: %v", err)
 	}
+	act := turn.Acts[0]
 	if act.Kind != conversation.ConversationActReplace || act.Source != "structured_ai" || act.Confidence != 0.94 {
 		t.Fatalf("act = %#v", act)
 	}
@@ -57,9 +57,9 @@ func TestGuardedConversationActInterpreterMapsStructuredResultWithoutPIIExpansio
 	}
 }
 
-func TestGuardedConversationActInterpreterRequiresConfiguredProvider(t *testing.T) {
-	interpreter := NewGuardedConversationActInterpreter(&fakeActModelProvider{})
-	if _, err := interpreter.InterpretConversationAct(context.Background(), conversation.ConversationActInterpretationRequest{SalonID: "salon_1"}); err != ErrProviderDisabled {
+func TestGuardedTurnInterpreterRequiresConfiguredProvider(t *testing.T) {
+	interpreter := NewGuardedTurnInterpreter(&fakeActModelProvider{})
+	if _, err := interpreter.InterpretTurn(context.Background(), conversation.TurnInterpretationRequest{SalonID: "salon_1"}); err != ErrProviderDisabled {
 		t.Fatalf("error = %v, want ErrProviderDisabled", err)
 	}
 }

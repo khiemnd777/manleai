@@ -202,12 +202,15 @@ Keep provider secrets out of production env files unless intentionally using
 the legacy fallback path for a fresh deployment with no saved dashboard config.
 
 The configured OpenAI reply model may serve two guarded roles: style-only
-rewriting for eligible safe replies, and strict structured classification for
-otherwise unresolved appointment-draft conversation acts. Structured act input
-is limited to the redacted caller utterance, selected/catalog service and
-category references, pending act, and dialog phase. The backend rejects
-low-confidence or non-catalog IDs; the model cannot mutate the draft, call the
-booking service, or produce confirmed appointment state.
+rewriting for eligible safe replies, and strict structured interpretation of
+every freeform turn that reaches conversation orchestration. Turn input is limited to a PII-reduced caller utterance,
+boolean customer-field presence, selected/catalog service and staff references,
+party-group references, pending act, booking action, dialog phase, and draft revision. The backend
+rejects low-confidence goals, invalid entity/operation combinations, malformed
+counts, and non-catalog IDs. The model cannot mutate the draft, call booking,
+or produce confirmed appointment state. When the provider is disabled or
+unavailable, ambiguous mutations preserve the current draft and enter safe
+clarification/handoff behavior.
 
 ## Production Rules
 

@@ -1236,7 +1236,7 @@ func sessionSelect() string {
 		       cs.requested_start_time, COALESCE(cs.offered_slots, '[]'::jsonb),
 		       COALESCE(cs.booking_segments, '[]'::jsonb),
 		       COALESCE(cs.party_plan, '{}'::jsonb),
-		       COALESCE(cs.dialog_state, '{"version":1,"phase":"open","review_required":true,"review_accepted":false,"no_progress_count":0}'::jsonb),
+		       COALESCE(cs.dialog_state, '{"version":2,"phase":"open","review_required":true,"review_accepted":false,"no_progress_count":0,"draft_revision":1,"reviewed_revision":0,"authorized_revision":0}'::jsonb),
 		       COALESCE(cs.booking_attempt_id::text, ''),
 		       COALESCE(cs.appointment_id::text, ''), COALESCE(cs.summary, ''),
 		       cs.lifecycle_status, cs.archived_at, cs.redacted_at, cs.retention_expires_at,

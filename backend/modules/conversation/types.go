@@ -25,7 +25,7 @@ const (
 	ReplyPolicyOperationalFact = "operational_fact"
 	ReplyPolicyStyleOnly       = "style_only"
 
-	DialogStateVersion = 1
+	DialogStateVersion = 2
 
 	DialogPhaseOpen         = "open"
 	DialogPhaseDrafting     = "drafting"
@@ -40,6 +40,22 @@ const (
 	ConversationActUndo      = "undo_service_edit"
 	ConversationActSummarize = "summarize_booking"
 	ConversationActReview    = "accept_review"
+	ConversationActSet       = "set_field"
+	ConversationActClear     = "clear_field"
+
+	ConversationEntityService  = "service"
+	ConversationEntityStaff    = "staff"
+	ConversationEntityDateTime = "date_time"
+	ConversationEntityGuest    = "guest"
+	ConversationEntityCustomer = "customer"
+
+	ConversationQuestionCurrentBooking = "current_booking"
+	ConversationQuestionCatalog        = "catalog"
+	ConversationQuestionAvailability   = "availability"
+	ConversationQuestionPrice          = "price"
+	ConversationQuestionHours          = "hours"
+	ConversationQuestionStaff          = "staff"
+	ConversationQuestionPolicy         = "policy"
 
 	ConversationScopeOne         = "one"
 	ConversationScopeAllMatching = "all_matching"
@@ -102,19 +118,23 @@ type ReplyGenerator interface {
 	GenerateReply(ctx context.Context, req ReplyGenerationRequest) (ReplyGenerationResult, error)
 }
 
-type ConversationActInterpreter interface {
-	InterpretConversationAct(ctx context.Context, req ConversationActInterpretationRequest) (ConversationAct, error)
+type TurnInterpreter interface {
+	InterpretTurn(ctx context.Context, req TurnInterpretationRequest) (TurnUnderstanding, error)
 }
 
-type ConversationActInterpretationRequest struct {
+type TurnInterpretationRequest struct {
 	SalonID             string
 	SessionID           string
 	Channel             string
 	CustomerMessage     string
 	SelectedServices    []ConversationServiceRef
 	CatalogServices     []ConversationServiceRef
+	SelectedStaff       []ConversationStaffRef
+	CatalogStaff        []ConversationStaffRef
 	Pending             *PendingConversationAct
 	CurrentBookingStage string
+	BookingAction       string
+	CurrentDraft        ConversationDraftRef
 }
 
 type ConversationServiceRef struct {
@@ -124,8 +144,32 @@ type ConversationServiceRef struct {
 	CategoryName string `json:"category_name,omitempty"`
 }
 
+type ConversationStaffRef struct {
+	StaffID   string `json:"staff_id"`
+	StaffName string `json:"staff_name"`
+}
+
+type ConversationDraftRef struct {
+	ServiceIDs        []string                    `json:"service_ids"`
+	StaffID           string                      `json:"staff_id,omitempty"`
+	RequestedDate     string                      `json:"requested_date,omitempty"`
+	RequestedStartISO string                      `json:"requested_start_iso,omitempty"`
+	PartySize         int                         `json:"party_size,omitempty"`
+	PartyGroups       []ConversationPartyGroupRef `json:"party_groups,omitempty"`
+	HasCustomerName   bool                        `json:"has_customer_name"`
+	HasCustomerPhone  bool                        `json:"has_customer_phone"`
+	DraftRevision     int                         `json:"draft_revision"`
+}
+
+type ConversationPartyGroupRef struct {
+	GuestRef   string   `json:"guest_ref"`
+	Count      int      `json:"count"`
+	ServiceIDs []string `json:"service_ids"`
+}
+
 type ConversationAct struct {
 	Kind               string   `json:"kind"`
+	Entity             string   `json:"entity"`
 	SourceServiceIDs   []string `json:"source_service_ids"`
 	TargetServiceIDs   []string `json:"target_service_ids"`
 	SourceCategoryID   string   `json:"source_category_id"`
@@ -134,10 +178,31 @@ type ConversationAct struct {
 	TargetCategoryName string   `json:"target_category_name"`
 	Scope              string   `json:"scope"`
 	GuestScope         string   `json:"guest_scope"`
+	GuestRef           string   `json:"guest_ref"`
 	Subject            string   `json:"subject"`
+	Value              string   `json:"value"`
+	Count              int      `json:"count"`
 	Confidence         float64  `json:"confidence"`
 	Reason             string   `json:"reason"`
 	Source             string   `json:"source"`
+}
+
+type ConversationQuestion struct {
+	Subject    string   `json:"subject"`
+	ServiceIDs []string `json:"service_ids"`
+	StaffIDs   []string `json:"staff_ids"`
+	Confidence float64  `json:"confidence"`
+	Reason     string   `json:"reason"`
+}
+
+type TurnUnderstanding struct {
+	Goal         string                 `json:"goal"`
+	Acts         []ConversationAct      `json:"acts"`
+	Questions    []ConversationQuestion `json:"questions"`
+	Confidence   float64                `json:"confidence"`
+	Reason       string                 `json:"reason"`
+	Source       string                 `json:"source"`
+	ModelInvoked bool                   `json:"-"`
 }
 
 type PendingConversationAct struct {
@@ -164,15 +229,20 @@ type DraftMutation struct {
 }
 
 type DialogState struct {
-	Version         int                     `json:"version"`
-	Phase           string                  `json:"phase"`
-	Pending         *PendingConversationAct `json:"pending,omitempty"`
-	LastMutation    *DraftMutation          `json:"last_mutation,omitempty"`
-	ReviewRequired  bool                    `json:"review_required"`
-	ReviewAccepted  bool                    `json:"review_accepted"`
-	NoProgressCount int                     `json:"no_progress_count"`
-	LastPromptKey   string                  `json:"last_prompt_key,omitempty"`
-	LastActKind     string                  `json:"last_act_kind,omitempty"`
+	Version              int                     `json:"version"`
+	Phase                string                  `json:"phase"`
+	Pending              *PendingConversationAct `json:"pending,omitempty"`
+	LastMutation         *DraftMutation          `json:"last_mutation,omitempty"`
+	MutationHistory      []DraftMutation         `json:"mutation_history,omitempty"`
+	ReviewRequired       bool                    `json:"review_required"`
+	ReviewAccepted       bool                    `json:"review_accepted"`
+	NoProgressCount      int                     `json:"no_progress_count"`
+	LastPromptKey        string                  `json:"last_prompt_key,omitempty"`
+	LastActKind          string                  `json:"last_act_kind,omitempty"`
+	DraftRevision        int                     `json:"draft_revision"`
+	ReviewedRevision     int                     `json:"reviewed_revision"`
+	AuthorizedRevision   int                     `json:"authorized_revision"`
+	LastMutationRevision int                     `json:"last_mutation_revision,omitempty"`
 }
 
 type Store interface {

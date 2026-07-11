@@ -22,14 +22,17 @@ A salon-scoped speaking-style preset stored on `salon_settings.ai_tone`. It can 
 **Conversation Engine**
 The state machine and tool-calling layer behind the AI Receptionist. It must not know Square payloads, OAuth tokens, or provider-specific booking details.
 
+**Turn Understanding**
+A typed, catalog-validated semantic interpretation of one caller turn. One turn may contain multiple ordered operations and questions, such as correcting a service, changing a technician, asking about availability, and conditionally accepting a review. The configured semantic interpreter is not gated by a fixed service-edit keyword list. Deterministic catalog/date/phone evidence remains authoritative, and model output cannot mutate state or call booking tools directly.
+
 **Conversation Act**
-A typed, catalog-validated interpretation of one caller turn, such as add, replace, remove, undo, summarize the current booking draft, or authorize the final review. A conversation act keeps replacement source, replacement target, scope, and guest scope separate. Deterministic catalog evidence owns known service facts; a configured structured-AI fallback may propose an act but cannot mutate state or call booking tools directly.
+One validated operation inside a turn understanding, such as add, replace, remove, set, clear, undo, or authorize review. Service replacement keeps source, target, scope, and guest scope separate; staff, date/time, guest, and customer corrections use the same reducer boundary.
 
 **Appointment Draft**
 The mutable, non-confirmed service, guest, staff, date/time, and customer-detail selection collected during a call. Draft acknowledgements and final-review acceptance are not confirmed appointments. Service, staff, or time mutations invalidate dependent availability and require a fresh review before booking execution.
 
 **Dialog State**
-Versioned call-session state that records the current conversation phase, pending typed clarification, last reversible draft mutation, final-review gate, and bounded no-progress count. A pending candidate set helps resolve short answers but must not prevent a clearly different catalog-backed target from superseding stale context.
+Versioned call-session state that records the current conversation phase, pending typed clarification, bounded mutation history, no-progress count, and draft/review/authorization revisions. Booking authorization is valid only when all three revisions identify the same unchanged draft.
 
 **Service Understanding**
 The backend-owned interpretation layer that maps customer service utterances to active salon services. It uses the salon catalog, service categories, active service aliases, and active service category aliases; asks clarification for category, generic, or fuzzy family matches; and records diagnostic transcript metadata.
@@ -90,6 +93,7 @@ A normalized, salon-scoped record of provider failures. Use codes such as `POS_T
 - AI tone changes reply style only. It must not change required booking slots, handoff decisions, availability checks, service selection, or confirmed-booking wording.
 - Pending clarification is context, not a closed vocabulary. A caller may ask an informational question without losing the draft, or explicitly change to a different catalog-backed target without being trapped in stale candidates.
 - Final review is mandatory for persisted production dialog state before a new booking write. Accepting the review authorizes the booking attempt but is not confirmation; only active-POS success with a booking ID creates confirmed wording.
+- A configured semantic turn interpreter runs for every freeform turn that reaches conversation orchestration, including wording not present in a phrase list. Provider-event dedupe and already-scoped confirmations may resolve earlier. Invalid, low-confidence, unavailable, or non-catalog interpretation must preserve the draft and clarify or hand off safely.
 - Square is the first real integration; future POS names are architecture targets, not implemented features.
 - Vietnamese language support is product scope, but English remains the primary commercial release language unless a feature explicitly says otherwise.
 

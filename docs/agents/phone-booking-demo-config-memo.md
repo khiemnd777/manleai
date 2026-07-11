@@ -434,7 +434,7 @@ When simulator passes:
 5. Listen to the final review and explicitly authorize booking.
 6. Verify the call only says confirmed if Square returns a POS booking ID.
 7. Verify the appointment appears in Booking Calendar / Square Appointments.
-8. Verify Calls dashboard shows the session, offered slots, selected slot, review state, typed conversation-act metadata, and booking outcome.
+8. Verify Calls dashboard shows the session, offered slots, selected slot, draft/review revisions, typed turn-understanding metadata, and booking outcome.
 
 ## Common Failure Map
 

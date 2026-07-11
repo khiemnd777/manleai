@@ -80,36 +80,60 @@ type LanguageModelProvider interface {
 	GenerateReply(ctx context.Context, req ModelRequest) (ModelReply, error)
 }
 
-type ConversationActModelProvider interface {
+type TurnModelProvider interface {
 	Name() string
 	Configured(ctx context.Context, salonID string) bool
-	ClassifyConversationAct(ctx context.Context, req ActModelRequest) (ActModelReply, error)
+	InterpretTurn(ctx context.Context, req TurnModelRequest) (TurnModelReply, error)
 }
 
-type ActModelRequest struct {
+type TurnModelRequest struct {
 	SalonID             string
 	SessionID           string
 	Channel             string
 	CustomerMessage     string
 	SelectedServices    []conversation.ConversationServiceRef
 	CatalogServices     []conversation.ConversationServiceRef
+	SelectedStaff       []conversation.ConversationStaffRef
+	CatalogStaff        []conversation.ConversationStaffRef
 	Pending             *conversation.PendingConversationAct
 	CurrentBookingStage string
+	BookingAction       string
+	CurrentDraft        conversation.ConversationDraftRef
 }
 
 type ActModelReply struct {
 	Kind               string   `json:"kind"`
-	SourceServiceIDs   []string `json:"source_service_ids"`
-	TargetServiceIDs   []string `json:"target_service_ids"`
+	Entity             string   `json:"entity"`
+	SourceIDs          []string `json:"source_ids"`
+	TargetIDs          []string `json:"target_ids"`
 	SourceCategoryID   string   `json:"source_category_id"`
 	SourceCategoryName string   `json:"source_category_name"`
 	TargetCategoryID   string   `json:"target_category_id"`
 	TargetCategoryName string   `json:"target_category_name"`
 	Scope              string   `json:"scope"`
 	GuestScope         string   `json:"guest_scope"`
+	GuestRef           string   `json:"guest_ref"`
 	Subject            string   `json:"subject"`
+	Value              string   `json:"value"`
+	Count              int      `json:"count"`
 	Confidence         float64  `json:"confidence"`
 	Reason             string   `json:"reason"`
+}
+
+type QuestionModelReply struct {
+	Subject    string   `json:"subject"`
+	ServiceIDs []string `json:"service_ids"`
+	StaffIDs   []string `json:"staff_ids"`
+	Confidence float64  `json:"confidence"`
+	Reason     string   `json:"reason"`
+}
+
+type TurnModelReply struct {
+	Goal       string               `json:"goal"`
+	Acts       []ActModelReply      `json:"acts"`
+	Questions  []QuestionModelReply `json:"questions"`
+	Confidence float64              `json:"confidence"`
+	Reason     string               `json:"reason"`
 }
 
 type TextToSpeechProvider interface {
