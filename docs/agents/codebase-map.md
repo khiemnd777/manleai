@@ -407,7 +407,7 @@ dashboard sidebar. Local runtime port is `3091`; production domain is
 | archive, redaction, retention, transcript PII, call audio cleanup | conversation repository/retention processor | Calls UI lifecycle filters, worker |
 | auth, tenant leak, salon ownership, token exposure, cross salon | `security_privacy_reviewer`, middleware/repositories | handlers, frontend API surfaces |
 | loading, empty, error, disabled, gated UI, copy, responsive | `salon-dashboard-ui`, `DESIGN.md` | page component and API helper |
-| CI/CD deploy, release tag, VPS deploy, SSH broken pipe, Compose build, healthcheck, Caddy reload | `.github/workflows/ci-cd.yml` | `docs/deployment.md`, `docker-compose.prod.yml`, GitHub Actions deploy log |
+| CI/CD deploy, release tag, VPS deploy, GHCR image publish/pull, SSH broken pipe, Compose pull, healthcheck, Caddy reload | `.github/workflows/ci-cd.yml` | `docs/deployment.md`, `docker-compose.prod.yml`, GitHub Actions deploy log |
 
 ## Map Maintenance Checklist
 

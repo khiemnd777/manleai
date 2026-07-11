@@ -48,21 +48,40 @@ make release TAG=v2026.06.25.1
 
 That command requires a clean `main` worktree, creates an annotated git tag, and
 pushes the tag to `origin`. The tag push runs backend tests, typechecks and
-builds the web apps, uploads a release archive, decodes `PROJECT_ENV_B64` into
-`/opt/manleai/project.env`, then builds and starts the ManleAI compose stack
-one image at a time. Every deploy SSH/SCP connection has a 15-second connection
-timeout and sends keepalives during long-running work. Only after the API
-healthcheck and shared edge gateway reload succeed does the job move
-`/opt/manleai/current` to the new release:
+builds the web apps, then builds and publishes the four application images to
+GitHub Container Registry (GHCR) with that immutable release tag. The VPS
+receives only the Compose/Caddy deployment bundle, `project.env`, and the image
+tag metadata. It logs into GHCR with the job's ephemeral `GITHUB_TOKEN`, pulls
+the tagged images, logs out, and starts the stack without compiling application
+source code. Each image carries the `org.opencontainers.image.source` label for
+this repository, so the GHCR package inherits repository access permissions.
+
+Every deploy SSH/SCP connection has a 15-second connection timeout and sends
+keepalives during long-running work. Before replacing containers, the VPS tags
+the currently running application images locally. If the API healthcheck or
+edge-gateway validation/reload fails, it restores those images and keeps the
+previous `/opt/manleai/current` release active. Only after both checks succeed
+does it move `/opt/manleai/current` to the new release:
 
 ```bash
-for service in api frontend landing pos-calendar; do
-  docker compose --env-file /opt/manleai/project.env -f docker-compose.prod.yml -p manleai build "$service"
-done
-docker compose --env-file /opt/manleai/project.env -f docker-compose.prod.yml -p manleai up -d --no-build --remove-orphans
+docker login ghcr.io
+docker compose \
+  --env-file /opt/manleai/project.env \
+  --env-file /opt/manleai/releases/<release>/images.env \
+  -f docker-compose.prod.yml -p manleai pull api frontend landing pos-calendar
+docker logout ghcr.io
+docker compose \
+  --env-file /opt/manleai/project.env \
+  --env-file /opt/manleai/releases/<release>/images.env \
+  -f docker-compose.prod.yml -p manleai up -d --no-build --remove-orphans
 docker exec edge-gateway-caddy caddy validate --config /etc/caddy/Caddyfile
 docker exec edge-gateway-caddy caddy reload --config /etc/caddy/Caddyfile
 ```
+
+The GHCR credential exists only in the encrypted SSH session. It is never added
+to `project.env`, committed to the repository, or left in Docker's credential
+store after `docker logout`. The workflow uses the repository-scoped
+`GITHUB_TOKEN`; no additional long-lived GitHub secret is required.
 
 If the remote deploy command fails or its SSH session disconnects, the workflow
 opens a short diagnostic SSH session and reports memory, deploy-path disk

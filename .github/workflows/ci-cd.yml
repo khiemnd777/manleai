@@ -9,12 +9,19 @@ concurrency:
   group: manleai-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  packages: write
+
 env:
   DEPLOY_PATH: /opt/manleai
   EDGE_CADDY_CONTAINER: edge-gateway-caddy
   EDGE_PATH: /opt/edge-gateway
   RELEASE_ID: ${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
   RELEASE_NAME: manleai-release-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}.tgz
+  IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}
+  IMAGE_TAG: ${{ github.ref_name }}
+  IMAGE_SOURCE_URL: https://github.com/${{ github.repository }}
 
 jobs:
   backend:
@@ -73,12 +80,55 @@ jobs:
           NEXT_PUBLIC_API_BASE_URL: http://localhost:18089
           NEXT_PUBLIC_LANDING_BASE_URL: http://localhost:3090
 
+  build-images:
+    name: Build and publish images
+    runs-on: ubuntu-latest
+    needs:
+      - backend
+      - web
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate build configuration
+        env:
+          PROJECT_ENV_B64: ${{ secrets.PROJECT_ENV_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PROJECT_ENV_B64:-}" ]; then
+            echo "::error::Missing GitHub secret: PROJECT_ENV_B64"
+            exit 1
+          fi
+          printf '%s' "$PROJECT_ENV_B64" | base64 -d >/dev/null
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish release images
+        env:
+          PROJECT_ENV_B64: ${{ secrets.PROJECT_ENV_B64 }}
+        run: |
+          set -euo pipefail
+          project_env="$RUNNER_TEMP/project.env"
+          trap 'rm -f "$project_env"' EXIT
+          printf '%s' "$PROJECT_ENV_B64" | base64 -d > "$project_env"
+          chmod 600 "$project_env"
+
+          docker compose --env-file "$project_env" -f docker-compose.prod.yml build api frontend landing pos-calendar
+          docker compose --env-file "$project_env" -f docker-compose.prod.yml push api frontend landing pos-calendar
+
   deploy:
     name: Deploy VPS
     runs-on: ubuntu-latest
     needs:
       - backend
       - web
+      - build-images
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - name: Checkout
@@ -106,28 +156,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y sshpass
 
-      - name: Create release archive
+      - name: Create deployment bundle
         run: |
           set -euo pipefail
-          tar \
-            --exclude='.git' \
-            --exclude='.github' \
-            --exclude='.env' \
-            --exclude='.env.*' \
-            --exclude='project.env' \
-            --exclude='deploy/project.env' \
-            --exclude='backend/.gocache' \
-            --exclude='backend/tmp' \
-            --exclude='frontend/.next' \
-            --exclude='frontend/node_modules' \
-            --exclude='frontend/tsconfig.tsbuildinfo' \
-            --exclude='landing/.next' \
-            --exclude='landing/node_modules' \
-            --exclude='landing/tsconfig.tsbuildinfo' \
-            --exclude='pos-calendar/.next' \
-            --exclude='pos-calendar/node_modules' \
-            --exclude='pos-calendar/tsconfig.tsbuildinfo' \
-            -czf "$RUNNER_TEMP/$RELEASE_NAME" .
+          tar -czf "$RUNNER_TEMP/$RELEASE_NAME" docker-compose.prod.yml deploy
           echo "RELEASE_ARCHIVE=$RUNNER_TEMP/$RELEASE_NAME" >> "$GITHUB_ENV"
 
       - name: Preflight VPS
@@ -175,9 +207,11 @@ jobs:
           mkdir -p "$DEPLOY_PATH/releases"
           REMOTE
 
-      - name: Upload release and env
+      - name: Upload deployment bundle and env
         env:
           DEPLOY_PATH: ${{ env.DEPLOY_PATH }}
+          IMAGE_REPOSITORY: ${{ env.IMAGE_REPOSITORY }}
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
           PROJECT_ENV_B64: ${{ secrets.PROJECT_ENV_B64 }}
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
           SERVER_IP: ${{ secrets.SERVER_IP }}
@@ -186,12 +220,19 @@ jobs:
           set -euo pipefail
           export SSHPASS="$SSH_PASSWORD"
           env_file="$RUNNER_TEMP/project.env"
-          trap 'rm -f "$env_file"' EXIT
+          images_file="$RUNNER_TEMP/manleai-images.env"
+          trap 'rm -f "$env_file" "$images_file"' EXIT
           printf '%s' "$PROJECT_ENV_B64" | base64 -d > "$env_file"
           chmod 600 "$env_file"
+          {
+            printf 'IMAGE_REPOSITORY=%s\n' "$IMAGE_REPOSITORY"
+            printf 'IMAGE_TAG=%s\n' "$IMAGE_TAG"
+          } > "$images_file"
+          chmod 600 "$images_file"
 
           sshpass -e scp -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$RELEASE_ARCHIVE" "$REMOTE_USER@$SERVER_IP:/tmp/$RELEASE_NAME"
           sshpass -e scp -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$env_file" "$REMOTE_USER@$SERVER_IP:/tmp/manleai-project.env"
+          sshpass -e scp -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$images_file" "$REMOTE_USER@$SERVER_IP:/tmp/manleai-images.env"
 
           sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
           set -euo pipefail
@@ -199,6 +240,8 @@ jobs:
           mv /tmp/manleai-project.env "$DEPLOY_PATH/project.env.tmp"
           chmod 600 "$DEPLOY_PATH/project.env.tmp"
           mv "$DEPLOY_PATH/project.env.tmp" "$DEPLOY_PATH/project.env"
+          mv /tmp/manleai-images.env "$DEPLOY_PATH/images.env.tmp"
+          chmod 600 "$DEPLOY_PATH/images.env.tmp"
           REMOTE
 
       - name: Deploy release
@@ -210,6 +253,8 @@ jobs:
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
           SERVER_IP: ${{ secrets.SERVER_IP }}
           SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           export SSHPASS="$SSH_PASSWORD"
@@ -248,20 +293,62 @@ jobs:
           }
 
           trap collect_deploy_diagnostics ERR
-          sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' EDGE_CADDY_CONTAINER='$EDGE_CADDY_CONTAINER' EDGE_PATH='$EDGE_PATH' RELEASE_ID='$RELEASE_ID' RELEASE_NAME='$RELEASE_NAME' bash -s" <<'REMOTE'
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' EDGE_CADDY_CONTAINER='$EDGE_CADDY_CONTAINER' EDGE_PATH='$EDGE_PATH' RELEASE_ID='$RELEASE_ID' RELEASE_NAME='$RELEASE_NAME' GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN='$GHCR_TOKEN' bash -s" <<'REMOTE'
           set -euo pipefail
 
           release_dir="$DEPLOY_PATH/releases/$RELEASE_ID"
           archive="/tmp/$RELEASE_NAME"
           mkdir -p "$release_dir"
           tar -xzf "$archive" -C "$release_dir"
+          if [ ! -f "$DEPLOY_PATH/images.env.tmp" ]; then
+            echo "::error::Release image metadata is missing."
+            exit 1
+          fi
+          mv "$DEPLOY_PATH/images.env.tmp" "$release_dir/images.env"
+          chmod 600 "$release_dir/images.env"
 
-          cd "$release_dir"
-          for service in api frontend landing pos-calendar; do
-            docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai build "$service"
-          done
-          docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai up -d --no-build --remove-orphans
-          docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai ps
+          compose() {
+            docker compose \
+              --env-file "$DEPLOY_PATH/project.env" \
+              --env-file "$release_dir/images.env" \
+              -f "$release_dir/docker-compose.prod.yml" \
+              -p manleai "$@"
+          }
+
+          rollback_images="$release_dir/rollback-images.env"
+          rollback_release() {
+            if [ ! -f "$rollback_images" ]; then
+              return
+            fi
+            echo "Restoring the application images that were running before this release."
+            docker compose \
+              --env-file "$DEPLOY_PATH/project.env" \
+              --env-file "$rollback_images" \
+              -f "$release_dir/docker-compose.prod.yml" \
+              -p manleai up -d --no-build --remove-orphans || true
+          }
+
+          capture_rollback_images() {
+            : > "$rollback_images"
+            printf 'IMAGE_REPOSITORY=manleai-rollback\nIMAGE_TAG=%s\n' "$RELEASE_ID" >> "$rollback_images"
+            for service in api frontend landing pos-calendar; do
+              container_id="$(compose ps -q "$service" || true)"
+              if [ -z "$container_id" ]; then
+                rm -f "$rollback_images"
+                return
+              fi
+              image_id="$(docker inspect --format '{{.Image}}' "$container_id")"
+              docker image tag "$image_id" "manleai-rollback/manleai-$service:$RELEASE_ID"
+            done
+          }
+
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+
+          compose pull api frontend landing pos-calendar
+          capture_rollback_images
+          compose up -d --no-build --remove-orphans
+          compose ps
 
           set -a
           . "$DEPLOY_PATH/project.env"
@@ -287,7 +374,8 @@ jobs:
             fi
             if [ "$attempt" -eq 30 ]; then
               echo "::error::API healthcheck failed after deploy."
-              docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai logs --tail=120 api
+              compose logs --tail=120 api
+              rollback_release
               exit 1
             fi
             sleep 2
@@ -321,10 +409,21 @@ jobs:
             fi
             docker exec "$EDGE_CADDY_CONTAINER" caddy validate --config /etc/caddy/Caddyfile >/dev/null || true
             echo "::error::Rendered ManleAI Caddy route failed validation; restored previous edge config."
+            rollback_release
             exit 1
           fi
 
-          docker exec "$EDGE_CADDY_CONTAINER" caddy reload --config /etc/caddy/Caddyfile
+          if ! docker exec "$EDGE_CADDY_CONTAINER" caddy reload --config /etc/caddy/Caddyfile; then
+            if [ -f "$backup" ]; then
+              cp "$backup" "$edge_conf"
+            else
+              rm -f "$edge_conf"
+            fi
+            docker exec "$EDGE_CADDY_CONTAINER" caddy reload --config /etc/caddy/Caddyfile >/dev/null || true
+            rollback_release
+            echo "::error::Reloading the ManleAI edge route failed; restored the previous route and application images."
+            exit 1
+          fi
           ln -sfn "$release_dir" "$DEPLOY_PATH/current"
           rm -f "$archive"
           REMOTE
