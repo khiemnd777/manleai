@@ -342,10 +342,21 @@ jobs:
             done
           }
 
+          pull_release_images() {
+            set -a
+            . "$release_dir/images.env"
+            set +a
+            for service in api frontend landing pos-calendar; do
+              image="$IMAGE_REPOSITORY/manleai-$service:$IMAGE_TAG"
+              echo "Pulling $image"
+              docker pull "$image"
+            done
+          }
+
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
           trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
 
-          compose pull api frontend landing pos-calendar
+          pull_release_images
           capture_rollback_images
           compose up -d --no-build --remove-orphans
           compose ps

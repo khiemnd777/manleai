@@ -65,10 +65,9 @@ does it move `/opt/manleai/current` to the new release:
 
 ```bash
 docker login ghcr.io
-docker compose \
-  --env-file /opt/manleai/project.env \
-  --env-file /opt/manleai/releases/<release>/images.env \
-  -f docker-compose.prod.yml -p manleai pull api frontend landing pos-calendar
+for image in manleai-api manleai-frontend manleai-landing manleai-pos-calendar; do
+  docker pull "ghcr.io/khiemnd777/$image:<release-tag>"
+done
 docker logout ghcr.io
 docker compose \
   --env-file /opt/manleai/project.env \
@@ -82,6 +81,10 @@ The GHCR credential exists only in the encrypted SSH session. It is never added
 to `project.env`, committed to the repository, or left in Docker's credential
 store after `docker logout`. The workflow uses the repository-scoped
 `GITHUB_TOKEN`; no additional long-lived GitHub secret is required.
+
+The VPS pulls release images one at a time to bound memory, CPU, network, and
+disk-extraction pressure on the 2 GB host. Docker Compose starts containers only
+after every required image is present locally.
 
 If the remote deploy command fails or its SSH session disconnects, the workflow
 opens a short diagnostic SSH session and reports memory, deploy-path disk
