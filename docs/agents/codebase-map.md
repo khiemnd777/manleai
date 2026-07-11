@@ -183,7 +183,11 @@ name collection, availability replies, party bookings, or transcript output.
   `backend/modules/voice/types.go`, and
   `backend/modules/voice_openai/adapter.go`. Model-proposed acts are
   multi-act/question, confidence-gated, PII-reduced, and active-catalog
-  validated inside conversation ownership; it cannot call booking tools.
+  validated inside conversation ownership; catalog category ambiguity remains
+  authoritative over a model-proposed concrete target, bare in-progress service
+  switches return to catalog-backed confirmation, and deterministic slot
+  corrections cannot be discarded by a model-only summary. The interpreter
+  cannot call booking tools.
 
 ## Frontend Route And UI Map
 
@@ -299,8 +303,12 @@ dashboard sidebar. Local runtime port is `3091`; production domain is
   `backend/modules/voice_openai/realtime.go`. Replies use bounded FIFO,
   application request IDs, provider response IDs, explicit cancellation, and
   stale-audio rejection. GA output audio is buffered until the output-audio
-  transcript matches the backend-approved reply; legacy preview sessions use a
-  separate compatibility branch.
+  transcript exactly matches the backend-approved reply. Noisy/balanced GA
+  input uses near-field noise reduction plus transcription logprobs; confidence-
+  rejected transcripts do not enter conversation state. Backend progress copy
+  is delayed and limited to once per call. Terminal realtime failure resumes the
+  last approved prompt through recording/gather while the session remains
+  active; legacy preview sessions use a separate compatibility branch.
 - Tests: `backend/modules/voice/*_test.go`,
   `backend/modules/voice_twilio/*_test.go`,
   `backend/modules/voice_openai/*_test.go`.
@@ -412,7 +420,7 @@ dashboard sidebar. Local runtime port is `3091`; production domain is
 | availability, local day, timezone, DST, open slots, offered slots, stale segment, no common time, split, staggered, staff assignment | `backend/modules/booking`, `backend/modules/conversation/service_availability.go` | POS provider adapter, `service_matching_parsing.go`, `appointments-dashboard.tsx`, `pos-calendar/features/calendar/pos-calendar-client.tsx`, conversation tests |
 | Square OAuth, token expired, refresh token, location, sync, catalog import, calendar sync | `pos-adapter-slice`, `backend/modules/pos_square` | `backend/modules/pos`, `integration_config`, integrations UI, POS calendar UI |
 | POS mapping, provider link, active provider, AI bookable, local only, sync failed | `backend/modules/pos`, `docs/canonical-pos-ownership-checklist.md` | Services/Staff UI, `pos_entity_links`, sync tests |
-| semantic turn, multi-intent, service alias, category alias, service understanding, wrong service, staff/date/customer correction, add/replace/remove/undo, question plus correction, non-native wording, ASR paraphrase | `backend/modules/conversation/conversation_act.go`, `turn_reducer.go`, `next_action_planner.go` | dialog state/repository, voice semantic interpreter, training aliases, transcript metadata, golden conversation tests |
+| semantic turn, multi-intent, service alias, category alias, service understanding, wrong service, category narrowed to one service, bare service switch, stale date after summary, staff/date/customer correction, add/replace/remove/undo, question plus correction, non-native wording, ASR paraphrase | `backend/modules/conversation/conversation_act.go`, `turn_reducer.go`, `next_action_planner.go` | dialog state/repository, voice semantic interpreter, training aliases, transcript metadata, golden conversation tests |
 | service menu, how many services, how many I book, what do I have, current booking summary, service count, repeated clarification, informational service question | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/service_prompts.go`, `backend/modules/conversation/answer_router.go` | `backend/modules/conversation/service.go`, dialog state, party flow, golden tests |
 | final review, stale review, draft revision, reviewed revision, authorized revision, book it, correction during review, no progress loop | `backend/modules/conversation/draft_revision.go`, `next_action_planner.go`, `service.go` | repository, V36/V37 migrations, booking flow, conversation and phone tests |
 | AI training, owner correction, knowledge, FAQ answer, stale policy | `backend/modules/training`, answer router/context | training UI, knowledge tests |
@@ -420,7 +428,7 @@ dashboard sidebar. Local runtime port is `3091`; production domain is
 | name captured wrong, service instead of name, spelling, phone/email | `service_customer_name.go` | conversation golden tests, transcript metadata |
 | reschedule, cancel, move appointment, appointment target, ordinal option, day view, week view, month view, agenda, Tomorrow button, appointment warning | `service_intent.go`, `backend/modules/booking/service.go` | Appointments UI, POS Calendar UI, booking tests |
 | Twilio signature, webhook, TwiML, recording, media stream, stream fallback | `backend/modules/voice_twilio` | `backend/modules/voice`, phone demo memo |
-| OpenAI STT, TTS, realtime, model, voice, guarded reply | `backend/modules/voice_openai`, `backend/modules/voice` | integration config, voice tests |
+| OpenAI STT, TTS, realtime, model, voice, guarded reply, background noise, false transcript, transcript logprob, repeated progress reply, spoken fact mismatch, realtime transport fallback | `backend/modules/voice_openai`, `backend/modules/voice`, `backend/modules/voice_twilio/handler.go` | integration config, conversation runtime, realtime event timeline, voice tests |
 | AI tone, speaking style, concise/warm/professional | `backend/modules/salon`, `conversation.RuntimeConfig`, `voice.ModelRequest` | Settings UI, config transfer |
 | integration config, provider secrets, dashboard settings, env fallback | `backend/modules/integration_config` | deployment docs, integrations UI |
 | public catalog, published slug, public services, landing page, staff privacy | `backend/modules/public_catalog`, `landing/app/s/[slug]/page.tsx` | Settings UI public catalog card |

@@ -196,13 +196,14 @@ type ConversationQuestion struct {
 }
 
 type TurnUnderstanding struct {
-	Goal         string                 `json:"goal"`
-	Acts         []ConversationAct      `json:"acts"`
-	Questions    []ConversationQuestion `json:"questions"`
-	Confidence   float64                `json:"confidence"`
-	Reason       string                 `json:"reason"`
-	Source       string                 `json:"source"`
-	ModelInvoked bool                   `json:"-"`
+	Goal            string                 `json:"goal"`
+	Acts            []ConversationAct      `json:"acts"`
+	Questions       []ConversationQuestion `json:"questions"`
+	Confidence      float64                `json:"confidence"`
+	Reason          string                 `json:"reason"`
+	Source          string                 `json:"source"`
+	ModelInvoked    bool                   `json:"-"`
+	CatalogFallback bool                   `json:"-"`
 }
 
 type PendingConversationAct struct {

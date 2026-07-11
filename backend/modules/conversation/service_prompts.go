@@ -46,7 +46,7 @@ func promptForMissingField(field string) string {
 	case "staff":
 		return "Which technician would you like, or should I use anyone available?"
 	case "requested_date":
-		return "What day would you like? I will check available times."
+		return "What day would you like?"
 	case "requested_time":
 		return "What time works for that day?"
 	case "requested_start_time":
@@ -65,7 +65,7 @@ func promptForMissingFieldWithServiceContext(field string, session Session, serv
 	}
 	switch field {
 	case "requested_date":
-		return "Got it, " + service + ". What day would you like? I will check available times."
+		return "What day would you like for " + service + "?"
 	case "requested_time", "requested_start_time":
 		if date := strings.TrimSpace(session.RequestedDate); date != "" {
 			return "For " + service + " on " + requestedDateLabel(date, timezoneLocation(timezoneFromConfig(cfg))) + ", what time works?"
@@ -591,7 +591,8 @@ func serviceCandidateNames(candidates []ServiceOption, limit int) []string {
 func transcriptionContextPrompt(session Session, cfg *RuntimeConfig, services []ServiceOption, aliases []ServiceAlias) string {
 	parts := []string{
 		"Nail salon appointment call. The caller may speak Vietnamese-accented English or switch between Vietnamese and English.",
-		"When audio sounds close to an active service name or alias, transcribe the likely service name clearly.",
+		"Transcribe only speech that is clearly present in the audio. Do not infer or invent a service name from background noise.",
+		"Use the salon vocabulary below only to spell words the caller actually says.",
 	}
 	if salon := salonName(cfg); salon != "" {
 		parts = append(parts, "Salon: "+salon+".")

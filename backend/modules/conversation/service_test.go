@@ -776,7 +776,7 @@ func TestMessageSelectsBookingServiceAfterPriorServiceInquiry(t *testing.T) {
 	if strings.Contains(store.lastTurn.AIMessage, "add Classic Manicure") || strings.Contains(store.lastTurn.AIMessage, "switch") {
 		t.Fatalf("booking after inquiry should not ask add/switch: %s", store.lastTurn.AIMessage)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "Got it, Classic Manicure") || !strings.Contains(store.lastTurn.AIMessage, "What day") {
+	if store.lastTurn.AIMessage != "What day would you like for Classic Manicure?" {
 		t.Fatalf("booking after inquiry reply = %s", store.lastTurn.AIMessage)
 	}
 }

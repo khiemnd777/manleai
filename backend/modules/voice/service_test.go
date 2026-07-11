@@ -392,8 +392,11 @@ func TestRealtimeFallbackMessageRequiresTerminalRealtimeFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RealtimeFallbackMessage returned error after terminal failure: %v", err)
 	}
-	if !strings.Contains(message, "live phone connection had a problem") {
-		t.Fatalf("fallback message = %q, want connection problem", message)
+	if message != "I had an audio issue, but we can continue. What time works for you?" {
+		t.Fatalf("fallback message = %q, want resumable approved prompt", message)
+	}
+	if strings.Contains(strings.ToLower(message), "owner") {
+		t.Fatalf("fallback message should not imply an owner handoff: %q", message)
 	}
 }
 

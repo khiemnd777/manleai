@@ -335,15 +335,26 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	turnUnderstanding := s.turnUnderstandingForMessage(ctx, *session, message, services, serviceAliases, categoryAliases, staff)
 	conversationAct := primaryConversationAct(turnUnderstanding)
 	partySignal := detectPartySignal(message, *session, serviceUnderstanding, services, serviceAliases, categoryAliases)
+	extractionApplied := false
 	if turnIsStandaloneDraftSummary(turnUnderstanding) {
-		next := cloneSessionForTurn(*session)
-		result := s.applyTurnUnderstandingToDraft(&next, turnUnderstanding, services, staff)
-		turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
-		turn.AIMessage = result.Reply
-		applyConversationActMetadata(&turn, conversationAct, result)
-		applyTurnUnderstandingMetadata(&turn, turnUnderstanding, result)
-		finalizeTurnMetadata(&turn, *session, next, "", "", result.ReplySource)
-		return s.store.SaveTurn(ctx, turn)
+		extracted := cloneSessionForTurn(*session)
+		applyExtraction(&extracted, message, services, serviceAliases, categoryAliases, staff, loc, s.now)
+		if !draftChanged(*session, extracted) {
+			result := s.applyTurnUnderstandingToDraft(&next, turnUnderstanding, services, staff)
+			turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
+			turn.AIMessage = result.Reply
+			applyConversationActMetadata(&turn, conversationAct, result)
+			applyTurnUnderstandingMetadata(&turn, turnUnderstanding, result)
+			finalizeTurnMetadata(&turn, *session, next, "", "", result.ReplySource)
+			return s.store.SaveTurn(ctx, turn)
+		}
+		next = extracted
+		extractionApplied = true
+		turnUnderstanding.Acts = nil
+		turnUnderstanding.Questions = nil
+		turnUnderstanding.Goal = "book_appointment"
+		turnUnderstanding.Reason = "deterministic_extraction_overrode_summary"
+		conversationAct = primaryConversationAct(turnUnderstanding)
 	}
 	if len(turnUnderstanding.Acts) == 0 && len(turnUnderstanding.Questions) == 0 && (turnUnderstanding.Goal == "" || turnUnderstanding.Goal == "unknown") {
 		if handled, updated, err := s.handleServiceConsultation(ctx, ownerUserID, *session, message, eventKey, serviceUnderstanding, services, staff, cfg); handled {
@@ -417,7 +428,9 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 			return s.store.SaveTurn(ctx, turn)
 		}
 	}
-	applyExtraction(&next, message, services, serviceAliases, categoryAliases, staff, loc, s.now)
+	if !extractionApplied {
+		applyExtraction(&next, message, services, serviceAliases, categoryAliases, staff, loc, s.now)
+	}
 	if shouldRouteReschedule(*session, message) || turnGoalIs(turnUnderstanding, "reschedule_appointment") {
 		return s.handleRescheduleMessage(ctx, ownerUserID, *session, next, message, eventKey, services, serviceAliases, categoryAliases, staff, cfg, knowledge)
 	}
@@ -477,7 +490,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		return s.store.SaveTurn(ctx, turn)
 	}
 	serviceEdit := serviceEditDecision{}
-	if !conversationResult.Handled && !turnUnderstanding.ModelInvoked {
+	if !conversationResult.Handled && (!turnUnderstanding.ModelInvoked || turnUnderstanding.CatalogFallback) {
 		// Compatibility fallback for deployments/tests without a semantic provider.
 		// It remains catalog-backed and never owns the configured production path.
 		serviceEdit = serviceEditDecisionForMessage(*session, message, serviceUnderstanding, services)
@@ -693,7 +706,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 			return s.store.SaveTurn(ctx, turn)
 		}
 		turn.AIMessage = promptForMissingField(missing)
-		if contextual := promptForMissingFieldWithServiceContext(missing, next, services, cfg); contextual != "" {
+		if contextual := promptForMissingFieldWithServiceContext(missing, next, services, cfg); contextual != "" && !conversationResult.Changed {
 			turn.AIMessage = contextual
 		}
 		if missing == "service" {

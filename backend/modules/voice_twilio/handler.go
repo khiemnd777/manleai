@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/url"
 	"strconv"
 	"strings"
@@ -23,8 +24,10 @@ const (
 	realtimeTerminalDrainTimeout = 12 * time.Second
 	realtimeBargeInGuard         = 850 * time.Millisecond
 	realtimeTurnTimeout          = 25 * time.Second
-	realtimeBackendProgressDelay = 1200 * time.Millisecond
-	realtimeBackendProgressReply = "One moment while I check that."
+	realtimeBackendProgressDelay = 3 * time.Second
+	realtimeBackendProgressReply = "Thanks. I'm checking that now."
+	realtimeLowConfidenceReply   = "I didn't catch that clearly. Could you say it again?"
+	realtimeMinMeanLogProb       = -1.0
 	realtimeReplyQueueLimit      = 16
 	realtimeBufferedAudioLimit   = 8 * 1024 * 1024
 )
@@ -131,9 +134,9 @@ func (h *Handler) StreamFallback(c *fiber.Ctx) error {
 	}
 	recordingURL := appendQueryParam(adapter.RecordingURL(requestBaseURL(c)), fallbackInputModeQuery, voice.InputModeRecording)
 	if strings.TrimSpace(recordingURL) != "" {
-		return h.twiml(c, adapter.RecordResponse(message+" Please tell me again how I can help.", recordingURL, ""))
+		return h.twiml(c, adapter.RecordResponse(message, recordingURL, ""))
 	}
-	return h.twiml(c, adapter.GatherResponse(message+" Please tell me again how I can help.", adapter.TurnURL(requestBaseURL(c)), ""))
+	return h.twiml(c, adapter.GatherResponse(message, adapter.TurnURL(requestBaseURL(c)), ""))
 }
 
 func (h *Handler) handleTurn(c *fiber.Ctx) error {
@@ -485,6 +488,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	turnInFlight := false
 	turnProgressTimer := (<-chan time.Time)(nil)
 	turnProgressSpoken := false
+	progressSpokenForCall := false
 	activeResponseCreatedAt := time.Time{}
 	responseSequence := 0
 	requireResponseIdentity := realtime.RequiresResponseIdentity()
@@ -724,8 +728,9 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 				continue
 			default:
 			}
-			if turnInFlight && !turnProgressSpoken && !responseActive && len(pendingReplies) == 0 {
+			if turnInFlight && !turnProgressSpoken && !progressSpokenForCall && !responseActive && len(pendingReplies) == 0 {
 				turnProgressSpoken = true
+				progressSpokenForCall = true
 				if !speakReply(realtimeBackendProgressReply, false) {
 					return
 				}
@@ -824,6 +829,16 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 			case voice.RealtimeEventTranscriptDone:
 				transcript := strings.TrimSpace(event.Transcript)
 				if transcript == "" {
+					continue
+				}
+				if meanLogProb, ok := realtimeTranscriptMeanLogProb(event.TranscriptLogProbs); ok && meanLogProb < realtimeMinMeanLogProb {
+					_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "transcript_rejected_low_confidence", time.Time{}, map[string]string{
+						"item_id":      strings.TrimSpace(event.ItemID),
+						"mean_logprob": strconv.FormatFloat(meanLogProb, 'f', 4, 64),
+					})
+					if !speakReply(realtimeLowConfidenceReply, false) {
+						return
+					}
 					continue
 				}
 				key := strings.TrimSpace(event.ItemID) + "|" + strings.ToLower(transcript)
@@ -976,6 +991,25 @@ func normalizeSpokenReply(value string) string {
 		}
 	}
 	return strings.TrimSpace(normalized.String())
+}
+
+func realtimeTranscriptMeanLogProb(values []float64) (float64, bool) {
+	if len(values) == 0 {
+		return 0, false
+	}
+	total := 0.0
+	count := 0
+	for _, value := range values {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			continue
+		}
+		total += value
+		count++
+	}
+	if count == 0 {
+		return 0, false
+	}
+	return total / float64(count), true
 }
 
 func (h *Handler) recordRealtimeTiming(ctx context.Context, providerCallID string, sessionID string, streamSID string, stage string, startedAt time.Time, extra map[string]string) error {

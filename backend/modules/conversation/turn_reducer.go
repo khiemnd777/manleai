@@ -142,7 +142,7 @@ func answerWithoutGenericBookingOffer(reply string) string {
 }
 
 func semanticServiceEditFallback(session *Session, turn TurnUnderstanding, understanding serviceUnderstandingResult, services []ServiceOption) conversationDraftResult {
-	if session == nil || !turn.ModelInvoked || len(turn.Acts) > 0 || len(turn.Questions) > 0 || !hasBookingProgress(*session) {
+	if session == nil || !turn.ModelInvoked || turn.CatalogFallback || len(turn.Acts) > 0 || len(turn.Questions) > 0 || !hasBookingProgress(*session) {
 		return conversationDraftResult{}
 	}
 	if goal := strings.TrimSpace(turn.Goal); goal != "" && goal != "unknown" && goal != "book_appointment" {

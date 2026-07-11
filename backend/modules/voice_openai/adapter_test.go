@@ -211,9 +211,12 @@ func TestParseRealtimeEvents(t *testing.T) {
 		t.Fatalf("audio transcript event = %#v", audioTranscript)
 	}
 
-	transcript := parseRealtimeEvent([]byte(`{"type":"conversation.item.input_audio_transcription.completed","item_id":"item_1","transcript":"gel removal"}`))
+	transcript := parseRealtimeEvent([]byte(`{"type":"conversation.item.input_audio_transcription.completed","item_id":"item_1","transcript":"gel removal","logprobs":[{"token":"gel","logprob":-0.2},{"token":" removal","logprob":-0.4}]}`))
 	if transcript.Type != voice.RealtimeEventTranscriptDone || transcript.ItemID != "item_1" || transcript.Transcript != "gel removal" {
 		t.Fatalf("transcript event = %#v", transcript)
+	}
+	if len(transcript.TranscriptLogProbs) != 2 || transcript.TranscriptLogProbs[0] != -0.2 || transcript.TranscriptLogProbs[1] != -0.4 {
+		t.Fatalf("transcript logprobs = %#v", transcript.TranscriptLogProbs)
 	}
 
 	created := parseRealtimeEvent([]byte(`{"type":"response.created","response":{"id":"resp_1","metadata":{"manleai_request_id":"reply_7"}}}`))
@@ -402,6 +405,17 @@ func TestRealtimeSessionConfigDefaultsToNoisySalonVAD(t *testing.T) {
 	if turnDetection["create_response"] != false || turnDetection["interrupt_response"] != false {
 		t.Fatalf("realtime bridge should disable provider autonomous response/interrupt: %#v", turnDetection)
 	}
+	session := realtimeSessionConfig(cfg, voice.RealtimeSessionOptions{})
+	include, ok := session["include"].([]string)
+	if !ok || len(include) != 1 || include[0] != "item.input_audio_transcription.logprobs" {
+		t.Fatalf("GA realtime session include = %#v, want transcription logprobs", session["include"])
+	}
+	audio := session["audio"].(map[string]any)
+	input := audio["input"].(map[string]any)
+	noiseReduction, ok := input["noise_reduction"].(map[string]any)
+	if !ok || noiseReduction["type"] != "near_field" {
+		t.Fatalf("noisy salon input noise reduction = %#v", input["noise_reduction"])
+	}
 }
 
 func TestRealtimeSessionConfigUsesQuietRoomVADProfile(t *testing.T) {
@@ -418,6 +432,12 @@ func TestRealtimeSessionConfigUsesQuietRoomVADProfile(t *testing.T) {
 	}
 	if turnDetection["silence_duration_ms"] != 450 {
 		t.Fatalf("silence duration = %#v, want quiet room duration", turnDetection["silence_duration_ms"])
+	}
+	session := realtimeSessionConfig(cfg, voice.RealtimeSessionOptions{})
+	audio := session["audio"].(map[string]any)
+	input := audio["input"].(map[string]any)
+	if _, ok := input["noise_reduction"]; ok {
+		t.Fatalf("quiet room should not force input noise reduction: %#v", input)
 	}
 }
 

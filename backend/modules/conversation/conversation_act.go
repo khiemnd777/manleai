@@ -64,10 +64,68 @@ func (s *Service) turnUnderstandingForMessage(ctx context.Context, session Sessi
 		if len(validated.Acts) == 0 && len(validated.Questions) == 0 && (validated.Goal == "" || validated.Goal == "unknown") {
 			return fallback
 		}
+		catalogUnderstanding := interpretServiceWithCategoryAliases(message, services, aliases, categoryAliases)
+		if shouldUseCatalogServiceEditFallback(session, message, catalogUnderstanding) {
+			return TurnUnderstanding{
+				Goal:            validated.Goal,
+				Confidence:      validated.Confidence,
+				Reason:          "catalog_backed_service_edit_fallback",
+				Source:          "catalog_fallback",
+				ModelInvoked:    true,
+				CatalogFallback: true,
+			}
+		}
+		validated = reconcileSemanticServiceTargets(validated, catalogUnderstanding)
 		return validated
 	}
 	fallback.Reason = "semantic_interpretation_rejected"
 	return fallback
+}
+
+func shouldUseCatalogServiceEditFallback(session Session, message string, result serviceUnderstandingResult) bool {
+	return result.Status == serviceUnderstandingStatusSelected &&
+		shouldApplyBareServiceSwitch(session, message, result) &&
+		hasServiceSwitchContext(session)
+}
+
+func reconcileSemanticServiceTargets(turn TurnUnderstanding, result serviceUnderstandingResult) TurnUnderstanding {
+	if result.Status != serviceUnderstandingStatusAmbiguous || len(result.Candidates) < 2 || !isCategoryLevelServiceUnderstanding(result) {
+		return turn
+	}
+	targetIDs := serviceOptionIDs(result.Candidates)
+	candidateSet := stringSet(targetIDs)
+	for index := range turn.Acts {
+		act := &turn.Acts[index]
+		if act.Entity != ConversationEntityService || (act.Kind != ConversationActAdd && act.Kind != ConversationActReplace) {
+			continue
+		}
+		if len(act.TargetServiceIDs) == 0 || !allServiceIDsInSet(act.TargetServiceIDs, candidateSet) {
+			continue
+		}
+		act.TargetServiceIDs = append([]string(nil), targetIDs...)
+		act.TargetCategoryID = strings.TrimSpace(result.MatchedCategoryID)
+		act.TargetCategoryName = strings.TrimSpace(result.MatchedCategoryName)
+		act.Reason = "catalog_ambiguity_preserved"
+	}
+	return turn
+}
+
+func isCategoryLevelServiceUnderstanding(result serviceUnderstandingResult) bool {
+	switch result.Reason {
+	case serviceUnderstandingCategory, serviceUnderstandingCategoryAlias:
+		return true
+	default:
+		return false
+	}
+}
+
+func allServiceIDsInSet(ids []string, allowed map[string]bool) bool {
+	for _, id := range ids {
+		if !allowed[strings.TrimSpace(id)] {
+			return false
+		}
+	}
+	return true
 }
 
 func primaryConversationAct(understanding TurnUnderstanding) ConversationAct {
@@ -860,11 +918,20 @@ func prependConversationMutationAcknowledgement(turn *TurnRecord, result convers
 		return
 	}
 	acknowledgement := ""
+	summary := strings.TrimSpace(serviceSummary(session, services))
 	switch result.Act.Kind {
 	case ConversationActAdd:
-		acknowledgement = "Okay, I added that service."
+		if summary != "" {
+			acknowledgement = "Okay, I added " + summary + "."
+		} else {
+			acknowledgement = "Okay, I added that service."
+		}
 	case ConversationActReplace:
-		acknowledgement = "Okay, I changed your service selection."
+		if summary != "" {
+			acknowledgement = "Okay, I changed it to " + summary + "."
+		} else {
+			acknowledgement = "Okay, I changed your service selection."
+		}
 	case ConversationActRemove:
 		acknowledgement = "Okay, I removed that service."
 	case ConversationActUndo:
@@ -873,7 +940,7 @@ func prependConversationMutationAcknowledgement(turn *TurnRecord, result convers
 	if acknowledgement == "" {
 		return
 	}
-	if summary := serviceSummary(session, services); summary != "" {
+	if summary != "" && result.Act.Kind != ConversationActAdd && result.Act.Kind != ConversationActReplace {
 		acknowledgement += " You now have " + summary + "."
 	}
 	turn.AIMessage = acknowledgement + " " + turn.AIMessage

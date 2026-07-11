@@ -172,17 +172,18 @@ type RealtimeSessionOptions struct {
 }
 
 type RealtimeEvent struct {
-	Type              string
-	ItemID            string
-	ResponseID        string
-	ResponseRequestID string
-	ResponseStatus    string
-	Transcript        string
-	AudioBase64       string
-	AudioTranscript   string
-	ErrorCode         string
-	ErrorParam        string
-	Error             string
+	Type               string
+	ItemID             string
+	ResponseID         string
+	ResponseRequestID  string
+	ResponseStatus     string
+	Transcript         string
+	TranscriptLogProbs []float64
+	AudioBase64        string
+	AudioTranscript    string
+	ErrorCode          string
+	ErrorParam         string
+	Error              string
 }
 
 type ConfigResolver interface {

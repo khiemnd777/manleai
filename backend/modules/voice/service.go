@@ -445,7 +445,11 @@ func (s *Service) RealtimeFallbackMessage(ctx context.Context, provider string, 
 	if session == nil || session.Status != conversation.StatusActive {
 		return "", nil
 	}
-	return "The live phone connection had a problem. Please call again or wait for the owner.", nil
+	approvedReply := strings.TrimSpace(lastAIMessage(session))
+	if approvedReply == "" {
+		approvedReply = "How can I help you today?"
+	}
+	return "I had an audio issue, but we can continue. " + approvedReply, nil
 }
 
 func (s *Service) realtimeVoice(ctx context.Context, salonID string) string {

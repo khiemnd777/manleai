@@ -48,7 +48,7 @@ func advanceDraftRevision(before Session, after *Session) bool {
 	}
 	state := normalizedDialogState(after.DialogState)
 	beforeState := normalizedDialogState(before.DialogState)
-	if reflect.DeepEqual(draftFingerprint(before), draftFingerprint(*after)) {
+	if !draftChanged(before, *after) {
 		after.DialogState = state
 		return false
 	}
@@ -64,6 +64,10 @@ func advanceDraftRevision(before Session, after *Session) bool {
 	}
 	after.DialogState = state
 	return true
+}
+
+func draftChanged(before Session, after Session) bool {
+	return !reflect.DeepEqual(draftFingerprint(before), draftFingerprint(after))
 }
 
 func reviewAuthorizationCurrent(state DialogState) bool {

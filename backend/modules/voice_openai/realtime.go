@@ -133,22 +133,34 @@ func realtimeSessionConfig(cfg config.OpenAIVoiceConfig, opts voice.RealtimeSess
 			"turn_detection":            realtimeTurnDetection(cfg),
 		}
 	}
+	input := map[string]any{
+		"format":         map[string]any{"type": realtimeG711ULawFormat},
+		"transcription":  realtimeTranscriptionConfig(cfg, opts),
+		"turn_detection": realtimeTurnDetection(cfg),
+	}
+	if noiseReduction := realtimeInputNoiseReduction(cfg.RealtimeNoiseProfile); noiseReduction != nil {
+		input["noise_reduction"] = noiseReduction
+	}
 	return map[string]any{
 		"type":              "realtime",
 		"output_modalities": []string{"audio"},
 		"instructions":      realtimeInstructions(opts.Instructions),
+		"include":           []string{"item.input_audio_transcription.logprobs"},
 		"audio": map[string]any{
-			"input": map[string]any{
-				"format":         map[string]any{"type": realtimeG711ULawFormat},
-				"transcription":  realtimeTranscriptionConfig(cfg, opts),
-				"turn_detection": realtimeTurnDetection(cfg),
-			},
+			"input": input,
 			"output": map[string]any{
 				"format": map[string]any{"type": realtimeG711ULawFormat},
 				"voice":  voiceName,
 			},
 		},
 	}
+}
+
+func realtimeInputNoiseReduction(profile string) map[string]any {
+	if config.NormalizeOpenAIRealtimeNoiseProfile(profile) == "quiet_room" {
+		return nil
+	}
+	return map[string]any{"type": "near_field"}
 }
 
 func realtimeTranscriptionConfig(cfg config.OpenAIVoiceConfig, opts voice.RealtimeSessionOptions) map[string]any {
@@ -304,7 +316,10 @@ func parseRealtimeEvent(raw []byte) voice.RealtimeEvent {
 		ResponseID string `json:"response_id"`
 		Delta      string `json:"delta"`
 		Transcript string `json:"transcript"`
-		Response   struct {
+		LogProbs   []struct {
+			LogProb float64 `json:"logprob"`
+		} `json:"logprobs"`
+		Response struct {
 			ID       string         `json:"id"`
 			Status   string         `json:"status"`
 			Metadata map[string]any `json:"metadata"`
@@ -327,7 +342,16 @@ func parseRealtimeEvent(raw []byte) voice.RealtimeEvent {
 	case "response.audio_transcript.done", "response.output_audio_transcript.done":
 		return voice.RealtimeEvent{Type: voice.RealtimeEventAudioTranscriptDone, ResponseID: strings.TrimSpace(event.ResponseID), AudioTranscript: strings.TrimSpace(event.Transcript)}
 	case "conversation.item.input_audio_transcription.completed":
-		return voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: strings.TrimSpace(event.ItemID), Transcript: strings.TrimSpace(event.Transcript)}
+		logProbs := make([]float64, 0, len(event.LogProbs))
+		for _, item := range event.LogProbs {
+			logProbs = append(logProbs, item.LogProb)
+		}
+		return voice.RealtimeEvent{
+			Type:               voice.RealtimeEventTranscriptDone,
+			ItemID:             strings.TrimSpace(event.ItemID),
+			Transcript:         strings.TrimSpace(event.Transcript),
+			TranscriptLogProbs: logProbs,
+		}
 	case "input_audio_buffer.speech_started":
 		return voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStarted}
 	case "response.created":

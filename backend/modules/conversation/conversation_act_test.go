@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/manleai/ai-receptionist/modules/booking"
 )
@@ -225,6 +226,178 @@ func TestStructuredAIConversationActIsCatalogValidatedBeforeMutation(t *testing.
 	}
 	if session.ServiceID != "service_spa" {
 		t.Fatalf("invalid catalog ID mutated service: %#v", session)
+	}
+}
+
+func TestSemanticInitialCategorySelectionPreservesCatalogAmbiguity(t *testing.T) {
+	tests := []struct {
+		name            string
+		message         string
+		services        []ServiceOption
+		categoryAliases []ServiceCategoryAlias
+		modelTargetID   string
+		wantIDs         []string
+		wantReply       string
+	}{
+		{
+			name:    "category name",
+			message: "I want to book a manicure service.",
+			services: []ServiceOption{
+				{ID: "service_classic_mani", Name: "Classic Manicure", CategoryID: "cat_mani", CategoryName: "Manicure"},
+				{ID: "service_gel_mani", Name: "Gel Manicure", CategoryID: "cat_mani", CategoryName: "Manicure"},
+			},
+			modelTargetID: "service_classic_mani",
+			wantIDs:       []string{"service_classic_mani", "service_gel_mani"},
+			wantReply:     "Which manicure",
+		},
+		{
+			name:    "different category alias wording",
+			message: "Could I get something from the foot care menu?",
+			services: []ServiceOption{
+				{ID: "service_classic_pedi", Name: "Classic Pedicure", CategoryID: "cat_pedi", CategoryName: "Pedicure"},
+				{ID: "service_spa_pedi", Name: "Spa Pedicure", CategoryID: "cat_pedi", CategoryName: "Pedicure"},
+			},
+			categoryAliases: []ServiceCategoryAlias{{
+				ID: "alias_foot_care", CategoryID: "cat_pedi", CategoryName: "Pedicure",
+				Alias: "foot care", NormalizedAlias: "foot care", Source: "owner", Confidence: 0.95,
+			}},
+			modelTargetID: "service_classic_pedi",
+			wantIDs:       []string{"service_classic_pedi", "service_spa_pedi"},
+			wantReply:     "Which pedicure",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := newFakeConversationStore()
+			store.services = test.services
+			store.categoryAliases = test.categoryAliases
+			bookingTool := &fakeBookingTool{}
+			service := NewService(store, bookingTool)
+			service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+				Goal: "book_appointment", Confidence: 0.96,
+				Acts: []ConversationAct{{
+					Kind: ConversationActAdd, Entity: ConversationEntityService,
+					TargetServiceIDs: []string{test.modelTargetID}, Confidence: 0.96,
+				}},
+			}})
+
+			session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: test.message})
+			if err != nil {
+				t.Fatalf("Message returned error: %v", err)
+			}
+			if session.ServiceID != "" || len(session.BookingSegments) != 0 {
+				t.Fatalf("category request selected a concrete service: %#v", session)
+			}
+			if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+				t.Fatalf("category request called booking tools: availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+			}
+			if session.DialogState.Pending == nil || !sameStrings(session.DialogState.Pending.TargetServiceIDs, test.wantIDs) {
+				t.Fatalf("pending candidates = %#v, want %#v", session.DialogState.Pending, test.wantIDs)
+			}
+			if !strings.Contains(store.lastTurn.AIMessage, test.wantReply) {
+				t.Fatalf("clarification reply = %q, want %q", store.lastTurn.AIMessage, test.wantReply)
+			}
+		})
+	}
+}
+
+func TestSemanticSummaryCannotDiscardDeterministicDateCorrection(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.RequestedDate = "2026-06-10"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{
+		ServiceID: "service_1", StaffSelectionMode: booking.StaffSelectionAnyone,
+	}}
+	store.session.OfferedSlots = []OfferedSlot{{
+		StartTime: time.Date(2026, 6, 10, 17, 0, 0, 0, time.UTC),
+		EndTime:   time.Date(2026, 6, 10, 17, 45, 0, 0, time.UTC),
+		StaffID:   "staff_1",
+	}}
+	bookingTool := &fakeBookingTool{availabilityResult: availabilityResultForStart(
+		"service_1", "Classic Manicure", time.Date(2026, 6, 15, 17, 0, 0, 0, time.UTC),
+	)}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal: "information", Confidence: 0.95,
+		Questions: []ConversationQuestion{{Subject: ConversationQuestionCurrentBooking, Confidence: 0.95}},
+	}})
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Next Monday."})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.RequestedDate != "2026-06-15" {
+		t.Fatalf("requested date = %q, want 2026-06-15", session.RequestedDate)
+	}
+	if bookingTool.availabilityCalls != 1 || bookingTool.availabilityRequest.PreferredDate != "2026-06-15" {
+		t.Fatalf("availability request = %#v calls=%d", bookingTool.availabilityRequest, bookingTool.availabilityCalls)
+	}
+	if strings.Contains(store.lastTurn.AIMessage, "Wednesday") || !strings.Contains(store.lastTurn.AIMessage, "Monday") {
+		t.Fatalf("date correction reply used stale day: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestSemanticBareServiceSwitchUsesCatalogConfirmationFlow(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_classic", Name: "Classic Manicure", CategoryID: "cat_mani", CategoryName: "Manicure"},
+		{ID: "service_removal", Name: "Gel Removal", CategoryID: "cat_removal", CategoryName: "Removal"},
+	}
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_classic"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.RequestedDate = "2026-06-15"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{
+		ServiceID: "service_classic", StaffSelectionMode: booking.StaffSelectionAnyone,
+	}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal: "book_appointment", Confidence: 0.97,
+		Acts: []ConversationAct{{
+			Kind: ConversationActReplace, Entity: ConversationEntityService,
+			SourceServiceIDs: []string{"service_classic"}, TargetServiceIDs: []string{"service_removal"}, Confidence: 0.97,
+		}},
+	}})
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Gel Removal."})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.ServiceID != "service_classic" || bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("bare semantic switch mutated before confirmation: session=%#v availability=%d booking=%d", session, bookingTool.availabilityCalls, bookingTool.calls)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "I have Classic Manicure") || !strings.Contains(store.lastTurn.AIMessage, "switch to Gel Removal") {
+		t.Fatalf("bare semantic switch reply = %q", store.lastTurn.AIMessage)
+	}
+	if got := store.lastTurn.CustomerMetadata["turn_understanding_reason"]; got != "catalog_backed_service_edit_fallback" {
+		t.Fatalf("turn fallback reason = %#v", got)
+	}
+}
+
+func TestSemanticConcreteServiceReplyAcknowledgesOnce(t *testing.T) {
+	store := newFakeConversationStore()
+	service := NewService(store, &fakeBookingTool{})
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal: "book_appointment", Confidence: 0.97,
+		Acts: []ConversationAct{{
+			Kind: ConversationActAdd, Entity: ConversationEntityService,
+			TargetServiceIDs: []string{"service_1"}, Confidence: 0.97,
+		}},
+	}})
+
+	_, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Please book Classic Manicure."})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if got, want := store.lastTurn.AIMessage, "Okay, I added Classic Manicure. What day would you like?"; got != want {
+		t.Fatalf("concise service acknowledgement = %q, want %q", got, want)
 	}
 }
 

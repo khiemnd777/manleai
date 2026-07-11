@@ -191,7 +191,7 @@ func TestStreamFallbackHangsUpForActiveSessionWithoutTerminalFailure(t *testing.
 	}
 }
 
-func TestStreamFallbackSaysConnectionProblemForTerminalFailure(t *testing.T) {
+func TestStreamFallbackResumesApprovedPromptForTerminalFailure(t *testing.T) {
 	adapter, service, store, _ := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Thank you for calling.", conversation.StatusActive, conversation.OutcomeCollecting))
 	_ = store.RecordWebhookEvent(context.Background(), voice.WebhookEvent{
 		Provider:       voice.ProviderTwilio,
@@ -209,10 +209,13 @@ func TestStreamFallbackSaysConnectionProblemForTerminalFailure(t *testing.T) {
 	if res.StatusCode != fiber.StatusOK {
 		t.Fatalf("status = %d, body = %s", res.StatusCode, body)
 	}
-	if !strings.Contains(body, "live phone connection had a problem") ||
+	if !strings.Contains(body, "I had an audio issue, but we can continue. Thank you for calling.") ||
 		!strings.Contains(body, "<Record") ||
 		!strings.Contains(body, "voice_fallback_mode=recording") {
-		t.Fatalf("terminal stream fallback should explain the connection problem and continue in recording mode: %s", body)
+		t.Fatalf("terminal stream fallback should resume the approved prompt in recording mode: %s", body)
+	}
+	if strings.Contains(body, "wait for the owner. Please tell me again") {
+		t.Fatalf("terminal stream fallback should not imply an immediate owner handoff: %s", body)
 	}
 }
 
@@ -423,6 +426,55 @@ func TestForwardRealtimeEventsSpeaksProgressWhileBackendTurnIsPending(t *testing
 		t.Fatalf("final queued speak = %q", got)
 	}
 	assertNoClose(t, closed)
+}
+
+func TestForwardRealtimeEventsSpeaksProgressAtMostOncePerCall(t *testing.T) {
+	adapter, service, _, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("What name should I put on the appointment?", conversation.StatusActive, conversation.OutcomeCollecting))
+	engine.messageDelay = 80 * time.Millisecond
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go handler.forwardRealtimeEventsWithRealtimePolicyAndProgress(ctx, cancel, closeStreamRecorder(make(chan string, 1)), realtime, func(any) error { return nil }, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{}, nil, realtimeTerminalDrainTimeout, 0, 10*time.Millisecond, time.Now)
+
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_1", Transcript: "one p.m."}
+	if got := waitForSpeak(t, realtime); got != realtimeBackendProgressReply {
+		t.Fatalf("first progress speak = %q", got)
+	}
+	time.Sleep(100 * time.Millisecond)
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
+	if got := waitForSpeak(t, realtime); got != "What name should I put on the appointment?" {
+		t.Fatalf("first final speak = %q", got)
+	}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
+
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_2", Transcript: "two p.m."}
+	if got := waitForSpeak(t, realtime); got != "What name should I put on the appointment?" {
+		t.Fatalf("second turn should skip repeated progress, got %q", got)
+	}
+}
+
+func TestForwardRealtimeEventsRejectsLowConfidenceTranscriptWithoutMutatingConversation(t *testing.T) {
+	adapter, service, store, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Which service would you like?", conversation.StatusActive, conversation.OutcomeCollecting))
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go handler.forwardRealtimeEvents(ctx, cancel, closeStreamRecorder(make(chan string, 1)), realtime, func(any) error { return nil }, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{}, nil)
+
+	realtime.events <- voice.RealtimeEvent{
+		Type: voice.RealtimeEventTranscriptDone, ItemID: "item_noise", Transcript: "gel removal",
+		TranscriptLogProbs: []float64{-2.4, -1.8},
+	}
+	if got := waitForSpeak(t, realtime); got != realtimeLowConfidenceReply {
+		t.Fatalf("low-confidence reply = %q", got)
+	}
+	if engine.lastMessage != "" {
+		t.Fatalf("low-confidence transcript reached conversation engine: %q", engine.lastMessage)
+	}
+	waitForTimingStages(t, store, []string{"transcript_rejected_low_confidence"})
 }
 
 func TestForwardRealtimeEventsRecordsTimingStages(t *testing.T) {
