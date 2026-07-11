@@ -88,6 +88,18 @@ triage keyword table.
   `backend/migrations/*.sql`.
 - Ent schema mirror: `backend/ent/schema/*.go`.
 
+## Production Runtime And Release
+
+- Release workflow: `.github/workflows/ci-cd.yml`.
+- Runtime stack: `docker-compose.prod.yml`; API owns startup migrations and the
+  worker starts only after API health with `AUTO_MIGRATE=false`.
+- Container targets: `backend/Dockerfile` targets `api` and `worker`.
+- Shared edge route and manifest templates:
+  `deploy/manleai.caddy.template`, `deploy/manleai.edge-manifest.template`.
+- VPS Caddy ownership: `project-edgectl validate/upsert manleai` manages only
+  the ManleAI route under `/etc/caddy/projects`; never modify the Caddy root
+  config from the release workflow.
+
 ## Backend Module Map
 
 | Area | Owner files | Responsibilities | Tests |
@@ -448,7 +460,7 @@ dashboard sidebar. Local runtime port is `3091`; production domain is
 | archive, redaction, retention, transcript PII, call audio cleanup | conversation repository/retention processor | Calls UI lifecycle filters, worker |
 | auth, tenant leak, salon ownership, token exposure, cross salon | `security_privacy_reviewer`, middleware/repositories | handlers, frontend API surfaces |
 | loading, empty, error, disabled, gated UI, copy, responsive | `salon-dashboard-ui`, `DESIGN.md` | page component and API helper |
-| CI/CD deploy, release tag, VPS deploy, GHCR image publish/sequential pull, Docker BuildKit cache, SSH broken pipe, image extraction, healthcheck, Caddy reload | `.github/workflows/ci-cd.yml` | `docs/deployment.md`, `docker-compose.prod.yml`, GitHub Actions deploy log |
+| CI/CD deploy, release tag, VPS deploy, GHCR image publish/sequential pull, SSH key, image extraction, healthcheck, systemd Caddy, project-edgectl, worker image | `.github/workflows/ci-cd.yml` | `docs/deployment.md`, `docker-compose.prod.yml`, `backend/Dockerfile`, deploy templates, GitHub Actions deploy log |
 
 ## Map Maintenance Checklist
 

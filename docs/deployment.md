@@ -1,9 +1,9 @@
 # Deployment
 
-This release deploys the Go API, PostgreSQL, Redis, the owner admin dashboard,
-the public salon landing app, and the POS calendar app. Public HTTP and HTTPS
-are owned by the shared VPS edge gateway, not by the ManleAI Docker Compose
-project.
+This release deploys the Go API, background worker, PostgreSQL, Redis, the
+owner admin dashboard, the public salon landing app, and the POS calendar app.
+Public HTTP and HTTPS are owned by the shared VPS edge gateway, not by the
+ManleAI Docker Compose project.
 
 ## Production Domains
 
@@ -18,9 +18,15 @@ All DNS `A` records must point to the VPS before Caddy can issue certificates.
 
 ## Edge Gateway
 
-The VPS has one shared Caddy gateway under `/opt/edge-gateway`. It owns ports
-`80` and `443` and routes public domains to localhost ports exposed by app
-stacks. ManleAI does not run its own Caddy container.
+The VPS has one shared systemd Caddy service. It owns ports `80` and `443`; its
+managed root config imports `/etc/caddy/projects/*.caddy`. ManleAI does not run
+its own Caddy container and must never edit `/etc/caddy/Caddyfile` directly.
+
+`project-edgectl` is the only supported project route manager. It stores each
+project route under `/etc/caddy/projects/<project-id>.caddy`, records ownership
+in `/var/lib/project-edge/registry/<project-id>.json`, validates the combined
+Caddy config, rejects domain or upstream conflicts, backs up the project route,
+and reloads Caddy with rollback on failure.
 
 ManleAI exposes:
 
@@ -31,10 +37,17 @@ ManleAI exposes:
 127.0.0.1:13091 -> pos-calendar:3000
 ```
 
-The CI/CD deploy job renders `deploy/manleai.caddy.template` into
-`/opt/edge-gateway/conf.d/manleai.caddy`, validates the full Caddy config inside
-the `edge-gateway-caddy` container, and reloads Caddy only after validation
-passes. If validation fails, the previous ManleAI route file is restored.
+The CI/CD deploy job renders `deploy/manleai.caddy.template` and
+`deploy/manleai.edge-manifest.template`, then runs:
+
+```bash
+sudo -n project-edgectl validate manleai <route-file> <manifest-file>
+sudo -n project-edgectl upsert manleai <route-file> <manifest-file>
+```
+
+`upsert` runs only after the ManleAI API loopback healthcheck succeeds. It can
+change only the ManleAI route and manifest; existing project route files remain
+owned by their registered projects.
 
 ## GitHub Actions
 
@@ -48,7 +61,7 @@ make release TAG=v2026.06.25.1
 
 That command requires a clean `main` worktree, creates an annotated git tag, and
 pushes the tag to `origin`. The tag push runs backend tests, typechecks and
-builds the web apps, then builds and publishes the four application images to
+builds the web apps, then builds and publishes the five application images to
 GitHub Container Registry (GHCR) with that immutable release tag. The VPS
 receives only the Compose/Caddy deployment bundle, `project.env`, and the image
 tag metadata. It logs into GHCR with the job's ephemeral `GITHUB_TOKEN`, pulls
@@ -65,8 +78,7 @@ does it move `/opt/manleai/current` to the new release:
 
 ```bash
 docker login ghcr.io
-docker builder prune --all --force
-for image in manleai-api manleai-frontend manleai-landing manleai-pos-calendar; do
+for image in manleai-api manleai-worker manleai-frontend manleai-landing manleai-pos-calendar; do
   docker pull "ghcr.io/khiemnd777/$image:<release-tag>"
 done
 docker logout ghcr.io
@@ -74,26 +86,26 @@ docker compose \
   --env-file /opt/manleai/project.env \
   --env-file /opt/manleai/releases/<release>/images.env \
   -f docker-compose.prod.yml -p manleai up -d --no-build --remove-orphans
-docker exec edge-gateway-caddy caddy validate --config /etc/caddy/Caddyfile
-docker exec edge-gateway-caddy caddy reload --config /etc/caddy/Caddyfile
+sudo -n project-edgectl validate manleai <route-file> <manifest-file>
+sudo -n project-edgectl upsert manleai <route-file> <manifest-file>
 ```
 
-The GHCR credential exists only in the encrypted SSH session. It is never added
-to `project.env`, committed to the repository, or left in Docker's credential
-store after `docker logout`. The workflow uses the repository-scoped
-`GITHUB_TOKEN`; no additional long-lived GitHub secret is required.
+The workflow uses an SSH private key for the deploy identity. The GHCR token is
+written to a mode-`600` temporary file on the VPS only for `docker login`, then
+removed on normal success and failure paths; diagnostics also attempt removal.
+It is never added to `project.env`, committed to the repository, passed as a
+remote command argument, or left in Docker's credential store after
+`docker logout`. The workflow uses the repository-scoped `GITHUB_TOKEN`; no
+additional long-lived GHCR credential is required.
 
 The VPS pulls release images one at a time to bound memory, CPU, network, and
-disk-extraction pressure on the 2 GB host. Docker Compose starts containers only
-after every required image is present locally.
-
-`docker builder prune --all --force` removes only unused BuildKit cache from the
-former VPS-build workflow; it does not remove running containers, their images,
-or Docker volumes. During the first GHCR migration, an old running container can
-refer to image metadata that Docker no longer retains. The workflow reports that
-case and proceeds without automatic image rollback; after the first successful
-GHCR release, every running application image is tag-addressable and rollback
-is available again.
+disk-extraction pressure. It does not prune shared Docker build cache. Docker
+Compose starts containers only after every required image is present locally.
+During the first GHCR migration, an old running container can refer to image
+metadata that Docker no longer retains. The workflow reports that case and
+proceeds without automatic image rollback; after the first successful GHCR
+release, every running application image is tag-addressable and rollback is
+available again.
 
 If the remote deploy command fails or its SSH session disconnects, the workflow
 opens a short diagnostic SSH session and reports memory, deploy-path disk
@@ -106,12 +118,13 @@ Required GitHub Secrets:
 ```txt
 SERVER_IP
 REMOTE_USER
-SSH_PASSWORD
+SSH_PRIVATE_KEY
 PROJECT_ENV_B64
 ```
 
-Use the VPS host and user values directly for `SERVER_IP` and `REMOTE_USER`.
-Do not commit the SSH password or production environment file.
+Use the VPS host and dedicated deploy identity for `SERVER_IP` and
+`REMOTE_USER`. `SSH_PRIVATE_KEY` must be the matching private key. Do not
+commit the private key or production environment file.
 
 ## Project Env
 
@@ -152,14 +165,18 @@ base64 -i project.env | tr -d '\n'
 
 - Docker Engine with Docker Compose v2.
 - Ports `80` and `443` open to the internet.
-- DNS for `ai.knasoftware.com` and `salon.knasoftware.com` pointing to the VPS.
-- Shared edge gateway running as container `edge-gateway-caddy`.
-- Edge gateway compose file at `/opt/edge-gateway/docker-compose.yml`.
+- DNS for `ai.knasoftware.com`, `salon.knasoftware.com`, and
+  `pos.knasoftware.com` pointing to the VPS before certificate issuance.
+- Systemd Caddy active with managed root `/etc/caddy/Caddyfile` and
+  `project-edgectl` installed.
+- A dedicated deploy identity that can access Docker, owns `/opt/manleai`, and
+  has passwordless sudo only for `/usr/local/bin/project-edgectl`.
+- SSH public-key access for that deploy identity; the matching private key is
+  stored only in the `SSH_PRIVATE_KEY` GitHub secret.
 
-Existing Certbot files under `/etc/letsencrypt` are not modified by this
-deployment. Caddy manages HTTPS certificates in its Docker data volume.
-Do not restart app-owned Caddy containers such as `perfect-pitch-caddy-1`; the
-shared edge gateway is now the only container that should bind `80` and `443`.
+Existing project Caddy routes are not modified by this deployment. Do not
+install another Caddy container, restart Caddy manually, or bind application
+containers to ports `80` or `443`.
 
 ## Dashboard-Managed Provider Configuration
 
@@ -216,7 +233,9 @@ clarification/handoff behavior.
 
 - Do not run `backend/seed/local.sql` in production.
 - Do not log Square access or refresh tokens.
-- Keep `AUTO_MIGRATE=true` unless another release process applies the same SQL migrations.
+- Keep `AUTO_MIGRATE=true` for the API unless another release process applies
+  the same SQL migrations. The worker runs with `AUTO_MIGRATE=false` and starts
+  only after the API healthcheck succeeds.
 - Configure the Square redirect URL in the Integrations dashboard to the deployed API callback.
 - Configure the dashboard Twilio public base URL to the deployed API origin used in Twilio webhook settings; `VOICE_PUBLIC_BASE_URL` is only the fallback source when no dashboard Twilio config exists.
 - Configure realtime phone mode from the Integrations dashboard: Twilio `voice_transport=realtime_stream`, Twilio stream path, OpenAI realtime model/voice, and the realtime noise profile. The env names above are fallback-only values.

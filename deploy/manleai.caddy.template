@@ -1,7 +1,10 @@
-# Managed by ManleAI CI/CD.
-
 {{ADMIN_DOMAIN}} {
-	import common_headers
+	encode gzip zstd
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "SAMEORIGIN"
+	}
 
 	handle /api/* {
 		reverse_proxy 127.0.0.1:{{API_PORT}}
@@ -17,11 +20,21 @@
 }
 
 {{LANDING_DOMAIN}} {
-	import common_headers
+	encode gzip zstd
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "SAMEORIGIN"
+	}
 	reverse_proxy 127.0.0.1:{{LANDING_PORT}}
 }
 
 {{POS_DOMAIN}} {
-	import common_headers
+	encode gzip zstd
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "SAMEORIGIN"
+	}
 	reverse_proxy 127.0.0.1:{{POS_CALENDAR_PORT}}
 }

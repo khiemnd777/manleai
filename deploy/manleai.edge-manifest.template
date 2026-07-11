@@ -1,0 +1,15 @@
+{
+  "project_id": "manleai",
+  "compose_project": "manleai",
+  "domains": [
+    "{{ADMIN_DOMAIN}}",
+    "{{LANDING_DOMAIN}}",
+    "{{POS_DOMAIN}}"
+  ],
+  "upstreams": [
+    {"name": "api", "address": "127.0.0.1:{{API_PORT}}"},
+    {"name": "frontend", "address": "127.0.0.1:{{FRONTEND_PORT}}"},
+    {"name": "landing", "address": "127.0.0.1:{{LANDING_PORT}}"},
+    {"name": "pos-calendar", "address": "127.0.0.1:{{POS_CALENDAR_PORT}}"}
+  ]
+}

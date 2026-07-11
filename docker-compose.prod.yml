@@ -37,6 +37,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      target: api
       labels:
         org.opencontainers.image.source: ${IMAGE_SOURCE_URL:-https://github.com/khiemnd777/manleai}
     restart: unless-stopped
@@ -45,7 +46,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    environment:
+    environment: &backend_runtime_environment
       APP_ENV: production
       SERVER_PORT: 8080
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
@@ -85,6 +86,24 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+    networks:
+      - app
+
+  worker:
+    image: ${IMAGE_REPOSITORY:-manleai}/manleai-worker:${IMAGE_TAG:-local}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: worker
+      labels:
+        org.opencontainers.image.source: ${IMAGE_SOURCE_URL:-https://github.com/khiemnd777/manleai}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      <<: *backend_runtime_environment
+      AUTO_MIGRATE: "false"
     networks:
       - app
 

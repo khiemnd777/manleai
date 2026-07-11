@@ -15,8 +15,6 @@ permissions:
 
 env:
   DEPLOY_PATH: /opt/manleai
-  EDGE_CADDY_CONTAINER: edge-gateway-caddy
-  EDGE_PATH: /opt/edge-gateway
   RELEASE_ID: ${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
   RELEASE_NAME: manleai-release-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}.tgz
   IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}
@@ -119,8 +117,8 @@ jobs:
           printf '%s' "$PROJECT_ENV_B64" | base64 -d > "$project_env"
           chmod 600 "$project_env"
 
-          docker compose --env-file "$project_env" -f docker-compose.prod.yml build api frontend landing pos-calendar
-          docker compose --env-file "$project_env" -f docker-compose.prod.yml push api frontend landing pos-calendar
+          docker compose --env-file "$project_env" -f docker-compose.prod.yml build api worker frontend landing pos-calendar
+          docker compose --env-file "$project_env" -f docker-compose.prod.yml push api worker frontend landing pos-calendar
 
   deploy:
     name: Deploy VPS
@@ -139,10 +137,10 @@ jobs:
           PROJECT_ENV_B64: ${{ secrets.PROJECT_ENV_B64 }}
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
           SERVER_IP: ${{ secrets.SERVER_IP }}
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          for key in PROJECT_ENV_B64 REMOTE_USER SERVER_IP SSH_PASSWORD; do
+          for key in PROJECT_ENV_B64 REMOTE_USER SERVER_IP SSH_PRIVATE_KEY; do
             if [ -z "${!key:-}" ]; then
               echo "::error::Missing GitHub secret: ${key}"
               exit 1
@@ -150,11 +148,14 @@ jobs:
           done
           printf '%s' "$PROJECT_ENV_B64" | base64 -d >/dev/null
 
-      - name: Install SSH tooling
+      - name: Configure deployment SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y sshpass
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
 
       - name: Create deployment bundle
         run: |
@@ -165,15 +166,11 @@ jobs:
       - name: Preflight VPS
         env:
           DEPLOY_PATH: ${{ env.DEPLOY_PATH }}
-          EDGE_CADDY_CONTAINER: ${{ env.EDGE_CADDY_CONTAINER }}
-          EDGE_PATH: ${{ env.EDGE_PATH }}
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
           SERVER_IP: ${{ secrets.SERVER_IP }}
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
           set -euo pipefail
-          export SSHPASS="$SSH_PASSWORD"
-          sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' EDGE_CADDY_CONTAINER='$EDGE_CADDY_CONTAINER' EDGE_PATH='$EDGE_PATH' bash -s" <<'REMOTE'
+          ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
           set -euo pipefail
 
           if ! command -v docker >/dev/null 2>&1; then
@@ -181,29 +178,15 @@ jobs:
             exit 1
           fi
 
+          if ! docker info >/dev/null 2>&1; then
+            echo "::error::The deploy identity cannot access Docker."
+            exit 1
+          fi
+
           docker compose version >/dev/null
-
-          if [ ! -f "$EDGE_PATH/docker-compose.yml" ]; then
-            echo "::error::Edge gateway compose file is missing at $EDGE_PATH/docker-compose.yml."
-            exit 1
-          fi
-
-          if [ ! -d "$EDGE_PATH/conf.d" ]; then
-            echo "::error::Edge gateway conf.d directory is missing at $EDGE_PATH/conf.d."
-            exit 1
-          fi
-
-          if docker ps --format '{{.Names}}' | grep -qx 'perfect-pitch-caddy-1'; then
-            echo "::error::Legacy perfect-pitch Caddy container is still running and may own ports 80/443."
-            exit 1
-          fi
-
-          if ! docker ps --format '{{.Names}}' | grep -qx "$EDGE_CADDY_CONTAINER"; then
-            echo "::error::Edge gateway Caddy container $EDGE_CADDY_CONTAINER is not running."
-            exit 1
-          fi
-
-          docker exec "$EDGE_CADDY_CONTAINER" caddy validate --config /etc/caddy/Caddyfile >/dev/null
+          command -v project-edgectl >/dev/null
+          systemctl is-active --quiet caddy
+          sudo -n project-edgectl list >/dev/null
           mkdir -p "$DEPLOY_PATH/releases"
           REMOTE
 
@@ -212,16 +195,25 @@ jobs:
           DEPLOY_PATH: ${{ env.DEPLOY_PATH }}
           IMAGE_REPOSITORY: ${{ env.IMAGE_REPOSITORY }}
           IMAGE_TAG: ${{ env.IMAGE_TAG }}
+          RELEASE_ID: ${{ env.RELEASE_ID }}
           PROJECT_ENV_B64: ${{ secrets.PROJECT_ENV_B64 }}
+          GHCR_TOKEN: ${{ github.token }}
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
           SERVER_IP: ${{ secrets.SERVER_IP }}
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
           set -euo pipefail
-          export SSHPASS="$SSH_PASSWORD"
           env_file="$RUNNER_TEMP/project.env"
           images_file="$RUNNER_TEMP/manleai-images.env"
-          trap 'rm -f "$env_file" "$images_file"' EXIT
+          ghcr_token_file="$RUNNER_TEMP/manleai-ghcr-token"
+          ghcr_token_remote="/tmp/manleai-ghcr-token-$RELEASE_ID"
+          remote_token_uploaded=false
+          cleanup_remote_token() {
+            if [ "$remote_token_uploaded" = true ]; then
+              ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 "$REMOTE_USER@$SERVER_IP" "rm -f '$ghcr_token_remote'" || true
+            fi
+          }
+          trap 'rm -f "$env_file" "$images_file" "$ghcr_token_file"' EXIT
+          trap cleanup_remote_token ERR
           printf '%s' "$PROJECT_ENV_B64" | base64 -d > "$env_file"
           chmod 600 "$env_file"
           {
@@ -229,12 +221,16 @@ jobs:
             printf 'IMAGE_TAG=%s\n' "$IMAGE_TAG"
           } > "$images_file"
           chmod 600 "$images_file"
+          printf '%s' "$GHCR_TOKEN" > "$ghcr_token_file"
+          chmod 600 "$ghcr_token_file"
 
-          sshpass -e scp -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$RELEASE_ARCHIVE" "$REMOTE_USER@$SERVER_IP:/tmp/$RELEASE_NAME"
-          sshpass -e scp -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$env_file" "$REMOTE_USER@$SERVER_IP:/tmp/manleai-project.env"
-          sshpass -e scp -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$images_file" "$REMOTE_USER@$SERVER_IP:/tmp/manleai-images.env"
+          scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$RELEASE_ARCHIVE" "$REMOTE_USER@$SERVER_IP:/tmp/$RELEASE_NAME"
+          scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$env_file" "$REMOTE_USER@$SERVER_IP:/tmp/manleai-project.env"
+          scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$images_file" "$REMOTE_USER@$SERVER_IP:/tmp/manleai-images.env"
+          scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$ghcr_token_file" "$REMOTE_USER@$SERVER_IP:$ghcr_token_remote"
+          remote_token_uploaded=true
 
-          sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' GHCR_TOKEN_FILE='$ghcr_token_remote' bash -s" <<'REMOTE'
           set -euo pipefail
           mkdir -p "$DEPLOY_PATH"
           mv /tmp/manleai-project.env "$DEPLOY_PATH/project.env.tmp"
@@ -242,34 +238,33 @@ jobs:
           mv "$DEPLOY_PATH/project.env.tmp" "$DEPLOY_PATH/project.env"
           mv /tmp/manleai-images.env "$DEPLOY_PATH/images.env.tmp"
           chmod 600 "$DEPLOY_PATH/images.env.tmp"
+          test -s "$GHCR_TOKEN_FILE"
+          chmod 600 "$GHCR_TOKEN_FILE"
           REMOTE
+          trap - ERR
 
       - name: Deploy release
         env:
           DEPLOY_PATH: ${{ env.DEPLOY_PATH }}
-          EDGE_CADDY_CONTAINER: ${{ env.EDGE_CADDY_CONTAINER }}
-          EDGE_PATH: ${{ env.EDGE_PATH }}
           RELEASE_ID: ${{ env.RELEASE_ID }}
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
           SERVER_IP: ${{ secrets.SERVER_IP }}
-          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
           GHCR_USERNAME: ${{ github.actor }}
-          GHCR_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          export SSHPASS="$SSH_PASSWORD"
+          ghcr_token_remote="/tmp/manleai-ghcr-token-$RELEASE_ID"
 
           collect_deploy_diagnostics() {
             status=$?
             trap - ERR
             set +e
             echo "::group::VPS deploy diagnostics"
-            sshpass -e ssh \
+            ssh -i "$HOME/.ssh/id_ed25519" \
               -o StrictHostKeyChecking=accept-new \
               -o ConnectTimeout=15 \
               -o ServerAliveInterval=30 \
               -o ServerAliveCountMax=2 \
-              "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' RELEASE_ID='$RELEASE_ID' bash -s" <<'REMOTE'
+              "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' RELEASE_ID='$RELEASE_ID' GHCR_TOKEN_FILE='$ghcr_token_remote' bash -s" <<'REMOTE'
             set +e
             release_dir="$DEPLOY_PATH/releases/$RELEASE_ID"
 
@@ -285,19 +280,27 @@ jobs:
               echo "== Compose status =="
               docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai ps || true
               echo "== Application logs =="
-              docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai logs --tail=120 api frontend landing pos-calendar || true
+              docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai logs --tail=120 api worker frontend landing pos-calendar || true
             fi
+            rm -f "$GHCR_TOKEN_FILE" || true
           REMOTE
             echo "::endgroup::"
             exit "$status"
           }
 
           trap collect_deploy_diagnostics ERR
-          sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' EDGE_CADDY_CONTAINER='$EDGE_CADDY_CONTAINER' EDGE_PATH='$EDGE_PATH' RELEASE_ID='$RELEASE_ID' RELEASE_NAME='$RELEASE_NAME' GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN='$GHCR_TOKEN' bash -s" <<'REMOTE'
+          ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' RELEASE_ID='$RELEASE_ID' RELEASE_NAME='$RELEASE_NAME' GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN_FILE='$ghcr_token_remote' bash -s" <<'REMOTE'
           set -euo pipefail
 
           release_dir="$DEPLOY_PATH/releases/$RELEASE_ID"
           archive="/tmp/$RELEASE_NAME"
+          tmp_caddy=""
+          tmp_manifest=""
+          cleanup_release_credentials() {
+            docker logout ghcr.io >/dev/null 2>&1 || true
+            rm -f "$GHCR_TOKEN_FILE" "$tmp_caddy" "$tmp_manifest"
+          }
+          trap cleanup_release_credentials EXIT
           mkdir -p "$release_dir"
           tar -xzf "$archive" -C "$release_dir"
           if [ ! -f "$DEPLOY_PATH/images.env.tmp" ]; then
@@ -306,6 +309,10 @@ jobs:
           fi
           mv "$DEPLOY_PATH/images.env.tmp" "$release_dir/images.env"
           chmod 600 "$release_dir/images.env"
+          if [ ! -s "$GHCR_TOKEN_FILE" ]; then
+            echo "::error::GHCR token file is missing."
+            exit 1
+          fi
 
           compose() {
             docker compose \
@@ -331,7 +338,7 @@ jobs:
           capture_rollback_images() {
             : > "$rollback_images"
             printf 'IMAGE_REPOSITORY=manleai-rollback\nIMAGE_TAG=%s\n' "$RELEASE_ID" >> "$rollback_images"
-            for service in api frontend landing pos-calendar; do
+            for service in api worker frontend landing pos-calendar; do
               container_id="$(compose ps -q "$service" || true)"
               if [ -z "$container_id" ]; then
                 rm -f "$rollback_images"
@@ -351,18 +358,15 @@ jobs:
             set -a
             . "$release_dir/images.env"
             set +a
-            for service in api frontend landing pos-calendar; do
+            for service in api worker frontend landing pos-calendar; do
               image="$IMAGE_REPOSITORY/manleai-$service:$IMAGE_TAG"
               echo "Pulling $image"
               docker pull "$image"
             done
           }
 
-          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
-          trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin < "$GHCR_TOKEN_FILE"
 
-          echo "Removing unused Docker build cache from legacy VPS builds."
-          docker builder prune --all --force
           pull_release_images
           capture_rollback_images
           compose up -d --no-build --remove-orphans
@@ -400,6 +404,7 @@ jobs:
           done
 
           tmp_caddy="$(mktemp)"
+          tmp_manifest="$(mktemp)"
           sed \
             -e "s#{{ADMIN_DOMAIN}}#${ADMIN_DOMAIN}#g" \
             -e "s#{{LANDING_DOMAIN}}#${LANDING_DOMAIN}#g" \
@@ -410,39 +415,32 @@ jobs:
             -e "s#{{POS_CALENDAR_PORT}}#${POS_CALENDAR_PORT}#g" \
             "$release_dir/deploy/manleai.caddy.template" > "$tmp_caddy"
 
-          edge_conf="$EDGE_PATH/conf.d/manleai.caddy"
-          backup="$EDGE_PATH/conf.d/manleai.caddy.before-$RELEASE_ID"
-          if [ -f "$edge_conf" ]; then
-            cp "$edge_conf" "$backup"
-          fi
+          sed \
+            -e "s#{{ADMIN_DOMAIN}}#${ADMIN_DOMAIN}#g" \
+            -e "s#{{LANDING_DOMAIN}}#${LANDING_DOMAIN}#g" \
+            -e "s#{{POS_DOMAIN}}#${POS_DOMAIN}#g" \
+            -e "s#{{API_PORT}}#${API_PORT}#g" \
+            -e "s#{{FRONTEND_PORT}}#${FRONTEND_PORT}#g" \
+            -e "s#{{LANDING_PORT}}#${LANDING_PORT}#g" \
+            -e "s#{{POS_CALENDAR_PORT}}#${POS_CALENDAR_PORT}#g" \
+            "$release_dir/deploy/manleai.edge-manifest.template" > "$tmp_manifest"
 
-          cp "$tmp_caddy" "$edge_conf"
-          rm -f "$tmp_caddy"
-
-          if ! docker exec "$EDGE_CADDY_CONTAINER" caddy validate --config /etc/caddy/Caddyfile; then
-            if [ -f "$backup" ]; then
-              cp "$backup" "$edge_conf"
-            else
-              rm -f "$edge_conf"
-            fi
-            docker exec "$EDGE_CADDY_CONTAINER" caddy validate --config /etc/caddy/Caddyfile >/dev/null || true
-            echo "::error::Rendered ManleAI Caddy route failed validation; restored previous edge config."
+          if ! sudo -n project-edgectl validate manleai "$tmp_caddy" "$tmp_manifest"; then
+            echo "::error::Rendered ManleAI route failed project-edge validation."
             rollback_release
             exit 1
           fi
 
-          if ! docker exec "$EDGE_CADDY_CONTAINER" caddy reload --config /etc/caddy/Caddyfile; then
-            if [ -f "$backup" ]; then
-              cp "$backup" "$edge_conf"
-            else
-              rm -f "$edge_conf"
-            fi
-            docker exec "$EDGE_CADDY_CONTAINER" caddy reload --config /etc/caddy/Caddyfile >/dev/null || true
+          if ! sudo -n project-edgectl upsert manleai "$tmp_caddy" "$tmp_manifest"; then
             rollback_release
-            echo "::error::Reloading the ManleAI edge route failed; restored the previous route and application images."
+            echo "::error::Project-edge upsert failed; restored the prior ManleAI route and application images."
             exit 1
           fi
           ln -sfn "$release_dir" "$DEPLOY_PATH/current"
           rm -f "$archive"
           REMOTE
           trap - ERR
+
+      - name: Remove deployment SSH key
+        if: ${{ always() }}
+        run: rm -f "$HOME/.ssh/id_ed25519"

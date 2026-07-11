@@ -4,13 +4,25 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+
+FROM build AS api-build
 RUN go build -o /bin/api ./cmd/api
 
-FROM alpine:3.20
+FROM build AS worker-build
+RUN go build -o /bin/worker ./cmd/worker
+
+FROM alpine:3.20 AS runtime
 RUN apk add --no-cache tzdata
 RUN adduser -D -H appuser
 WORKDIR /app
-COPY --from=build /bin/api /bin/api
+
+FROM runtime AS api
+COPY --from=api-build /bin/api /bin/api
 USER appuser
 EXPOSE 8080
 CMD ["/bin/api"]
+
+FROM runtime AS worker
+COPY --from=worker-build /bin/worker /bin/worker
+USER appuser
+CMD ["/bin/worker"]
