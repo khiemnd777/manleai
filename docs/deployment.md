@@ -49,14 +49,25 @@ make release TAG=v2026.06.25.1
 That command requires a clean `main` worktree, creates an annotated git tag, and
 pushes the tag to `origin`. The tag push runs backend tests, typechecks and
 builds the web apps, uploads a release archive, decodes `PROJECT_ENV_B64` into
-`/opt/manleai/project.env`, runs the ManleAI compose stack, then validates and
-reloads the shared edge gateway:
+`/opt/manleai/project.env`, then builds and starts the ManleAI compose stack
+one image at a time. The deploy SSH connection sends keepalives during this
+long-running work. Only after the API healthcheck and shared edge gateway reload
+succeed does the job move `/opt/manleai/current` to the new release:
 
 ```bash
-docker compose --env-file /opt/manleai/project.env -f docker-compose.prod.yml -p manleai up -d --build --remove-orphans
+for service in api frontend landing pos-calendar; do
+  docker compose --env-file /opt/manleai/project.env -f docker-compose.prod.yml -p manleai build "$service"
+done
+docker compose --env-file /opt/manleai/project.env -f docker-compose.prod.yml -p manleai up -d --no-build --remove-orphans
 docker exec edge-gateway-caddy caddy validate --config /etc/caddy/Caddyfile
 docker exec edge-gateway-caddy caddy reload --config /etc/caddy/Caddyfile
 ```
+
+If the remote deploy command fails or its SSH session disconnects, the workflow
+opens a short diagnostic SSH session and reports memory, deploy-path disk
+usage, Docker disk usage, Compose status, and bounded application logs. It does
+not print `project.env` or any deployment secret. If that follow-up connection
+also fails, the original deploy failure remains the authoritative result.
 
 Required GitHub Secrets:
 

@@ -141,7 +141,7 @@ jobs:
         run: |
           set -euo pipefail
           export SSHPASS="$SSH_PASSWORD"
-          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' EDGE_CADDY_CONTAINER='$EDGE_CADDY_CONTAINER' EDGE_PATH='$EDGE_PATH' bash -s" <<'REMOTE'
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' EDGE_CADDY_CONTAINER='$EDGE_CADDY_CONTAINER' EDGE_PATH='$EDGE_PATH' bash -s" <<'REMOTE'
           set -euo pipefail
 
           if ! command -v docker >/dev/null 2>&1; then
@@ -190,10 +190,10 @@ jobs:
           printf '%s' "$PROJECT_ENV_B64" | base64 -d > "$env_file"
           chmod 600 "$env_file"
 
-          sshpass -e scp -o StrictHostKeyChecking=accept-new "$RELEASE_ARCHIVE" "$REMOTE_USER@$SERVER_IP:/tmp/$RELEASE_NAME"
-          sshpass -e scp -o StrictHostKeyChecking=accept-new "$env_file" "$REMOTE_USER@$SERVER_IP:/tmp/manleai-project.env"
+          sshpass -e scp -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$RELEASE_ARCHIVE" "$REMOTE_USER@$SERVER_IP:/tmp/$RELEASE_NAME"
+          sshpass -e scp -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$env_file" "$REMOTE_USER@$SERVER_IP:/tmp/manleai-project.env"
 
-          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
           set -euo pipefail
           mkdir -p "$DEPLOY_PATH"
           mv /tmp/manleai-project.env "$DEPLOY_PATH/project.env.tmp"
@@ -213,17 +213,54 @@ jobs:
         run: |
           set -euo pipefail
           export SSHPASS="$SSH_PASSWORD"
-          sshpass -e ssh -o StrictHostKeyChecking=accept-new "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' EDGE_CADDY_CONTAINER='$EDGE_CADDY_CONTAINER' EDGE_PATH='$EDGE_PATH' RELEASE_ID='$RELEASE_ID' RELEASE_NAME='$RELEASE_NAME' bash -s" <<'REMOTE'
+
+          collect_deploy_diagnostics() {
+            status=$?
+            trap - ERR
+            set +e
+            echo "::group::VPS deploy diagnostics"
+            sshpass -e ssh \
+              -o StrictHostKeyChecking=accept-new \
+              -o ConnectTimeout=15 \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=2 \
+              "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' RELEASE_ID='$RELEASE_ID' bash -s" <<'REMOTE'
+            set +e
+            release_dir="$DEPLOY_PATH/releases/$RELEASE_ID"
+
+            echo "== Memory =="
+            free -h || true
+            echo "== Disk =="
+            df -h "$DEPLOY_PATH" || true
+            echo "== Docker disk usage =="
+            docker system df || true
+
+            if [ -f "$release_dir/docker-compose.prod.yml" ]; then
+              cd "$release_dir"
+              echo "== Compose status =="
+              docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai ps || true
+              echo "== Application logs =="
+              docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai logs --tail=120 api frontend landing pos-calendar || true
+            fi
+          REMOTE
+            echo "::endgroup::"
+            exit "$status"
+          }
+
+          trap collect_deploy_diagnostics ERR
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' EDGE_CADDY_CONTAINER='$EDGE_CADDY_CONTAINER' EDGE_PATH='$EDGE_PATH' RELEASE_ID='$RELEASE_ID' RELEASE_NAME='$RELEASE_NAME' bash -s" <<'REMOTE'
           set -euo pipefail
 
           release_dir="$DEPLOY_PATH/releases/$RELEASE_ID"
           archive="/tmp/$RELEASE_NAME"
           mkdir -p "$release_dir"
           tar -xzf "$archive" -C "$release_dir"
-          ln -sfn "$release_dir" "$DEPLOY_PATH/current"
 
-          cd "$DEPLOY_PATH/current"
-          docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai up -d --build --remove-orphans
+          cd "$release_dir"
+          for service in api frontend landing pos-calendar; do
+            docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai build "$service"
+          done
+          docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai up -d --no-build --remove-orphans
           docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai ps
 
           set -a
@@ -288,5 +325,7 @@ jobs:
           fi
 
           docker exec "$EDGE_CADDY_CONTAINER" caddy reload --config /etc/caddy/Caddyfile
+          ln -sfn "$release_dir" "$DEPLOY_PATH/current"
           rm -f "$archive"
           REMOTE
+          trap - ERR
