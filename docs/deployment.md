@@ -50,9 +50,10 @@ That command requires a clean `main` worktree, creates an annotated git tag, and
 pushes the tag to `origin`. The tag push runs backend tests, typechecks and
 builds the web apps, uploads a release archive, decodes `PROJECT_ENV_B64` into
 `/opt/manleai/project.env`, then builds and starts the ManleAI compose stack
-one image at a time. The deploy SSH connection sends keepalives during this
-long-running work. Only after the API healthcheck and shared edge gateway reload
-succeed does the job move `/opt/manleai/current` to the new release:
+one image at a time. Every deploy SSH/SCP connection has a 15-second connection
+timeout and sends keepalives during long-running work. Only after the API
+healthcheck and shared edge gateway reload succeed does the job move
+`/opt/manleai/current` to the new release:
 
 ```bash
 for service in api frontend landing pos-calendar; do
