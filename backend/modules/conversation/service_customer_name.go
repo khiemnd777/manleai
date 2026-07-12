@@ -95,10 +95,13 @@ func voiceCustomerNamePendingConfirmationCandidate(message string, session Sessi
 	if spelled := spelledCustomerName(message); spelled != "" {
 		return ""
 	}
-	candidate := customerNameCandidate(message, session)
-	if !isRiskySingleWordVoiceName(candidate) {
+	if explicit := extractName(message); explicit != "" {
+		if isRiskySingleWordVoiceName(explicit) {
+			return explicit
+		}
 		return ""
 	}
+	candidate := customerNameCandidate(message, session)
 	return candidate
 }
 

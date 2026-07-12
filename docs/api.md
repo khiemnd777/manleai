@@ -1702,9 +1702,12 @@ SpeechResult
 `GET /api/salons/:id/conversation-sessions/:session_id/realtime-events`
 
 Owner-authenticated debug endpoint for the selected phone call session. It
-returns realtime stream audit events recorded in `voice_webhook_events`, scoped
-by salon ownership and session ID. The response intentionally exposes only
-debug-safe fields extracted from provider payloads; raw Twilio/OpenAI payloads
+returns the latest realtime lifecycle and timing audit events recorded in
+`voice_webhook_events`, scoped by salon ownership and session ID and ordered
+chronologically. The response intentionally exposes only debug-safe fields
+extracted from provider payloads, including transcript admission decisions,
+noise profile, confidence/VAD measurements, response correlation IDs, and
+salted canonical-output hashes. Raw transcript, audio, and provider payloads
 are not returned.
 
 Example response:
@@ -1717,9 +1720,16 @@ Example response:
       "provider": "twilio",
       "provider_call_id": "CA2a47b5e8e5777820f84d6447132b1574",
       "event_type": "realtime_failed",
-      "stage": "openai_event",
+      "stage": "openai_spoken_fact_mismatch",
       "stream_sid": "MZ...",
-      "error": "invalid_request_error: invalid_value: session.audio.input.format: Unsupported audio format.",
+      "error": "realtime audio transcript did not match backend reply",
+      "diagnostics": {
+        "request_id": "manleai-reply-2",
+        "response_id": "resp_...",
+        "match_classification": "canonical_fact_mismatch",
+        "expected_hash": "d0be2dc421be4fcd",
+        "actual_hash": "78b3fbc972cf74f1"
+      },
       "created_at": "2026-06-29T00:13:10Z"
     }
   ]
@@ -1742,7 +1752,7 @@ RecordingUrl
 
 `GET /api/voice/twilio/stream`
 
-Public Twilio Media Streams WebSocket endpoint for realtime audio mode. The endpoint is not configured directly in Twilio Console; the incoming webhook returns `<Connect><Stream>` with signed custom parameters for the existing call session. The stream forwards Twilio g711 audio frames to the configured OpenAI Realtime adapter, routes accepted completed transcripts through the same backend conversation engine and booking service, then streams backend-approved audio responses back to Twilio. GA sessions using the noisy-salon or balanced profile enable near-field input noise reduction and request `item.input_audio_transcription.logprobs`; transcripts with a mean log probability below the backend confidence floor are audited as `transcript_rejected_low_confidence`, leave the conversation draft unchanged, and receive a concise repeat prompt. Accepted and rejected transcript timing events record PII-free `item_id`, mean/min logprob, token count, and VAD duration when available; timing payloads do not store transcript or audio bodies. Transcription steering uses concise salon, catalog, pending-candidate, and alias keyword lists instead of example booking sentences. Backend replies enter a bounded FIFO and each `response.create` carries an application request ID. A generic backend progress reply is delayed for three seconds and can be spoken at most once per call. GA Realtime sessions require `response.created`, audio deltas, output-audio transcript, and terminal events to match the active provider response ID. Audio is held in a bounded buffer and released to Twilio only when the completed output transcript exactly matches the backend-approved reply. Missing identity, mismatched speech, duplicate identity, failed/incomplete responses, or buffer overflow close the realtime stream without releasing unapproved audio; while the conversation session remains active, the signed fallback redirect resumes the last backend-approved prompt through recording or gather transport and does not create or imply an owner handoff. Caller barge-in clears Twilio playback and sends `response.cancel` for the active response. Legacy preview sessions retain the compatibility streaming branch. Operational facts are not sent through style rewriting. If realtime configuration is missing, voice status falls back to the recording or gather path.
+Public Twilio Media Streams WebSocket endpoint for realtime audio mode. The endpoint is not configured directly in Twilio Console; the incoming webhook returns `<Connect><Stream>` with signed custom parameters for the existing call session. The stream forwards Twilio g711 audio frames to the configured OpenAI Realtime adapter, routes accepted completed transcripts through the same backend conversation engine and booking service, then streams backend-approved audio responses back to Twilio. GA sessions request `item.input_audio_transcription.logprobs`; noisy-salon and balanced profiles also enable near-field input noise reduction. Admission is profile-aware and fail-closed: missing/invalid confidence metadata, low mean confidence, low-tail token confidence, or transcript density inconsistent with VAD duration is audited as `transcript_rejected_low_confidence`, leaves the conversation draft unchanged, and receives a concise repeat prompt. Accepted and rejected transcript timing events record PII-free `item_id`, decision/reason, profile, mean/min logprob, token count, and VAD duration when available; timing payloads do not store transcript or audio bodies. Transcription steering uses concise salon, catalog, pending-candidate, and alias keyword lists instead of example booking sentences. Backend replies enter a bounded FIFO and each GA `response.create` carries an application request ID and uses an out-of-band `conversation: none` context. A generic backend progress reply is delayed for three seconds and can be spoken at most once per call. GA Realtime sessions require `response.created`, audio deltas, output-audio transcript, and terminal events to match the active provider response ID. Audio is held in a bounded buffer and released to Twilio only when the completed output transcript matches the backend-approved operational facts after canonical normalization of punctuation, contractions, spoken numbers, times, dates, and digit sequences. Missing output transcript, missing identity, mismatched facts, duplicate identity, failed/incomplete responses, or buffer overflow close the realtime stream without releasing unapproved audio; while the conversation session remains active, the signed fallback redirect resumes the last backend-approved prompt through recording or gather transport and does not create or imply an owner handoff. Caller barge-in clears Twilio playback and sends `response.cancel` only after protected playback has passed the configured guard. Legacy preview sessions retain the compatibility streaming branch. Operational facts are not sent through style rewriting. If realtime configuration is missing, voice status falls back to the recording or gather path.
 
 `GET /api/voice/audio/:id`
 

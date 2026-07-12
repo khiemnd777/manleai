@@ -582,17 +582,18 @@ type PartySplitBlock struct {
 }
 
 type WebhookEventLog struct {
-	ID             string    `json:"id"`
-	Provider       string    `json:"provider"`
-	ProviderCallID string    `json:"provider_call_id,omitempty"`
-	EventType      string    `json:"event_type"`
-	Stage          string    `json:"stage,omitempty"`
-	StreamSID      string    `json:"stream_sid,omitempty"`
-	StreamEvent    string    `json:"stream_event,omitempty"`
-	StreamError    string    `json:"stream_error,omitempty"`
-	Error          string    `json:"error,omitempty"`
-	Redacted       bool      `json:"redacted,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID             string            `json:"id"`
+	Provider       string            `json:"provider"`
+	ProviderCallID string            `json:"provider_call_id,omitempty"`
+	EventType      string            `json:"event_type"`
+	Stage          string            `json:"stage,omitempty"`
+	StreamSID      string            `json:"stream_sid,omitempty"`
+	StreamEvent    string            `json:"stream_event,omitempty"`
+	StreamError    string            `json:"stream_error,omitempty"`
+	Error          string            `json:"error,omitempty"`
+	Diagnostics    map[string]string `json:"diagnostics,omitempty"`
+	Redacted       bool              `json:"redacted,omitempty"`
+	CreatedAt      time.Time         `json:"created_at"`
 }
 
 type NewSessionRecord struct {

@@ -162,23 +162,28 @@ func (r *Repository) ListSessions(ctx context.Context, salonID string, ownerUser
 
 func (r *Repository) ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int) ([]WebhookEventLog, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT v.id::text, v.provider, COALESCE(v.provider_call_id, ''), v.event_type, v.payload, v.created_at
-		FROM call_sessions cs
-		JOIN salons salon ON salon.id = cs.salon_id
-		JOIN voice_webhook_events v ON (
-			v.call_session_id = cs.id
-			OR (
-				v.call_session_id IS NULL
-				AND v.provider = cs.provider
-				AND v.provider_call_id = cs.provider_call_id
+		SELECT recent.id, recent.provider, recent.provider_call_id, recent.event_type, recent.payload, recent.created_at
+		FROM (
+			SELECT v.id::text AS id, v.provider, COALESCE(v.provider_call_id, '') AS provider_call_id,
+				v.event_type, v.payload, v.created_at
+			FROM call_sessions cs
+			JOIN salons salon ON salon.id = cs.salon_id
+			JOIN voice_webhook_events v ON (
+				v.call_session_id = cs.id
+				OR (
+					v.call_session_id IS NULL
+					AND v.provider = cs.provider
+					AND v.provider_call_id = cs.provider_call_id
+				)
 			)
-		)
-		WHERE cs.id = $1
-		  AND cs.salon_id = $2
-		  AND salon.owner_user_id = $3
-		  AND v.event_type IN ('realtime_connected', 'realtime_failed', 'realtime_stopped')
-		ORDER BY v.created_at ASC
-		LIMIT $4
+			WHERE cs.id = $1
+			  AND cs.salon_id = $2
+			  AND salon.owner_user_id = $3
+			  AND v.event_type IN ('realtime_connected', 'realtime_timing', 'realtime_failed', 'realtime_stopped')
+			ORDER BY v.created_at DESC
+			LIMIT $4
+		) recent
+		ORDER BY recent.created_at ASC
 	`, sessionID, salonID, ownerUserID, limit)
 	if err != nil {
 		return nil, err
@@ -1191,6 +1196,28 @@ func applyWebhookPayload(item *WebhookEventLog, raw []byte) {
 	item.StreamEvent = stringPayload(payload, "StreamEvent", "stream_event")
 	item.StreamError = stringPayload(payload, "StreamError", "stream_error")
 	item.Error = stringPayload(payload, "error", "Error")
+	item.Diagnostics = safeRealtimeDiagnostics(payload)
+}
+
+func safeRealtimeDiagnostics(payload map[string]any) map[string]string {
+	allowed := []string{
+		"decision", "reason", "profile", "require_logprobs", "duration_ms", "item_id",
+		"mean_logprob", "min_logprob", "min_mean_logprob", "min_token_logprob", "token_count",
+		"vad_duration_ms", "tokens_per_second", "max_tokens_per_second",
+		"request_id", "response_id", "expected_hash", "actual_hash", "expected_token_count", "actual_token_count",
+		"audio_chunk_count", "buffered_audio_bytes", "match_classification", "interrupted", "close_after",
+		"status", "progress_spoken", "queued_remaining", "terminal",
+	}
+	diagnostics := map[string]string{}
+	for _, key := range allowed {
+		if value := stringPayload(payload, key); value != "" {
+			diagnostics[key] = value
+		}
+	}
+	if len(diagnostics) == 0 {
+		return nil
+	}
+	return diagnostics
 }
 
 func stringPayload(payload map[string]any, keys ...string) string {

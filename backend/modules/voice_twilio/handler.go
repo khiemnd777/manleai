@@ -2,10 +2,13 @@ package voice_twilio
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,7 +30,6 @@ const (
 	realtimeBackendProgressDelay = 3 * time.Second
 	realtimeBackendProgressReply = "Thanks. I'm checking that now."
 	realtimeLowConfidenceReply   = "I didn't catch that clearly. Could you say it again?"
-	realtimeMinMeanLogProb       = -1.0
 	realtimeReplyQueueLimit      = 16
 	realtimeBufferedAudioLimit   = 8 * 1024 * 1024
 )
@@ -313,11 +315,15 @@ func (h *Handler) Stream(c *websocket.Conn) {
 				return
 			}
 			connected.Store(true)
-			_ = h.service.RecordRealtimeEvent(ctx, voice.ProviderTwilio, providerCallID, sessionID, voice.EventRealtimeConnected, map[string]string{
+			connectedPayload := map[string]string{
 				"stage":       "openai_connected",
 				"stream_sid":  streamSID,
 				"duration_ms": durationMilliseconds(openAIConnectAt, time.Now()),
-			})
+			}
+			for key, value := range realtimeTranscriptPolicyDiagnostics(realtime.TranscriptPolicy()) {
+				connectedPayload[key] = value
+			}
+			_ = h.service.RecordRealtimeEvent(ctx, voice.ProviderTwilio, providerCallID, sessionID, voice.EventRealtimeConnected, connectedPayload)
 			go h.forwardRealtimeEventsWithInitialReply(ctx, cancel, closeStream, realtime, writeJSON, streamSID, providerCallID, sessionID, fromPhone, toPhone, initialMessage, seenTranscripts, twilioMarks)
 		case "media":
 			if realtime == nil || msg.Media == nil || strings.TrimSpace(msg.Media.Payload) == "" {
@@ -477,6 +483,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	activeReply := realtimeQueuedReply{}
 	activeResponseID := ""
 	activeAudioTranscript := strings.Builder{}
+	activeAudioTranscriptDone := false
 	activeAudioChunks := []string{}
 	activeBufferedAudioBytes := 0
 	pendingReplies := []realtimeQueuedReply{}
@@ -495,6 +502,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	activeResponseCreatedAt := time.Time{}
 	responseSequence := 0
 	requireResponseIdentity := realtime.RequiresResponseIdentity()
+	transcriptPolicy := normalizedRealtimeTranscriptPolicy(realtime.TranscriptPolicy())
 	if now == nil {
 		now = time.Now
 	}
@@ -627,6 +635,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 		activeReply = reply
 		activeResponseID = ""
 		activeAudioTranscript.Reset()
+		activeAudioTranscriptDone = false
 		activeAudioChunks = nil
 		activeBufferedAudioBytes = 0
 		activeCloseAfter = closeAfter
@@ -807,9 +816,12 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					activeAudioTranscript.WriteString(event.AudioTranscript)
 				}
 			case voice.RealtimeEventAudioTranscriptDone:
-				if responseEventMatchesActive(event) && strings.TrimSpace(event.AudioTranscript) != "" {
-					activeAudioTranscript.Reset()
-					activeAudioTranscript.WriteString(event.AudioTranscript)
+				if responseEventMatchesActive(event) {
+					activeAudioTranscriptDone = true
+					if strings.TrimSpace(event.AudioTranscript) != "" {
+						activeAudioTranscript.Reset()
+						activeAudioTranscript.WriteString(event.AudioTranscript)
+					}
 				}
 			case voice.RealtimeEventSpeechStarted:
 				if event.AudioStartMS >= 0 {
@@ -819,7 +831,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					}
 				}
 				_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "speech_started", time.Time{}, nil)
-				if !requireResponseIdentity && !shouldInterruptPlayback() {
+				if !shouldInterruptPlayback() {
 					continue
 				}
 				clearPendingCloseMark()
@@ -855,8 +867,10 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					clearVADDiagnostics()
 					continue
 				}
-				diagnostics := realtimeTranscriptDiagnostics(event, vadDurationByItem[itemID])
-				if meanLogProb, ok := realtimeTranscriptMeanLogProb(event.TranscriptLogProbs); ok && meanLogProb < realtimeMinMeanLogProb {
+				accepted, rejectionReason, diagnostics := realtimeTranscriptAdmission(event, vadDurationByItem[itemID], transcriptPolicy)
+				if !accepted {
+					diagnostics["decision"] = "rejected"
+					diagnostics["reason"] = rejectionReason
 					_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "transcript_rejected_low_confidence", time.Time{}, diagnostics)
 					clearVADDiagnostics()
 					if !speakReply(realtimeLowConfidenceReply, false) {
@@ -870,6 +884,8 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					continue
 				}
 				seenTranscripts[key] = struct{}{}
+				diagnostics["decision"] = "accepted"
+				diagnostics["reason"] = "confidence_and_vad_admitted"
 				_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "transcript_done", time.Time{}, diagnostics)
 				clearVADDiagnostics()
 				turnQueue = append(turnQueue, realtimeTurnTask{
@@ -898,14 +914,19 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					closeStream("openai_response_unexpected_cancel")
 					return
 				}
-				if requireResponseIdentity && responseStatus != "cancelled" {
+				if requireResponseIdentity && responseStatus != "cancelled" && !activeInterrupted {
 					if len(activeAudioChunks) == 0 {
 						_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_audio_missing", errors.New("realtime response completed without audio"))
 						closeStream("openai_audio_missing")
 						return
 					}
+					if !activeAudioTranscriptDone {
+						_ = h.recordRealtimeTerminalFailureWithExtra(ctx, providerCallID, sessionID, streamSID, "openai_output_transcript_missing", errors.New("realtime response completed without output transcript"), realtimeOutputDiagnostics(activeReply, activeResponseID, activeAudioTranscript.String(), activeAudioChunks, activeBufferedAudioBytes, activeInterrupted))
+						closeStream("openai_output_transcript_missing")
+						return
+					}
 					if !sameSpokenReply(activeReply.message, activeAudioTranscript.String()) {
-						_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_spoken_fact_mismatch", errors.New("realtime audio transcript did not match backend reply"))
+						_ = h.recordRealtimeTerminalFailureWithExtra(ctx, providerCallID, sessionID, streamSID, "openai_spoken_fact_mismatch", errors.New("realtime audio transcript did not match backend reply"), realtimeOutputDiagnostics(activeReply, activeResponseID, activeAudioTranscript.String(), activeAudioChunks, activeBufferedAudioBytes, activeInterrupted))
 						closeStream("openai_spoken_fact_mismatch")
 						return
 					}
@@ -937,6 +958,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 				activeReply = realtimeQueuedReply{}
 				activeResponseID = ""
 				activeAudioTranscript.Reset()
+				activeAudioTranscriptDone = false
 				activeAudioChunks = nil
 				activeBufferedAudioBytes = 0
 				activeCloseAfter = false
@@ -998,8 +1020,26 @@ func sameSpokenReply(expected string, actual string) bool {
 	return normalizeSpokenReply(expected) != "" && normalizeSpokenReply(expected) == normalizeSpokenReply(actual)
 }
 
+var spokenReplyClockPattern = regexp.MustCompile(`(?i)\b([0-9]{1,2}):00\b`)
+
 func normalizeSpokenReply(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.NewReplacer(
+		"’", "'",
+		"i'm", "i am",
+		"you're", "you are",
+		"we're", "we are",
+		"that's", "that is",
+		"it's", "it is",
+		"don't", "do not",
+		"can't", "cannot",
+		"won't", "will not",
+		"p.m.", "pm",
+		"p.m", "pm",
+		"a.m.", "am",
+		"a.m", "am",
+	).Replace(value)
+	value = spokenReplyClockPattern.ReplaceAllString(value, "$1")
 	var normalized strings.Builder
 	space := false
 	for _, r := range value {
@@ -1013,7 +1053,98 @@ func normalizeSpokenReply(value string) string {
 			space = true
 		}
 	}
-	return strings.TrimSpace(normalized.String())
+	rawTokens := strings.Fields(strings.TrimSpace(normalized.String()))
+	tokens := make([]string, 0, len(rawTokens))
+	for index := 0; index < len(rawTokens); index++ {
+		token := rawTokens[index]
+		if index+1 < len(rawTokens) && ((token == "p" && rawTokens[index+1] == "m") || (token == "a" && rawTokens[index+1] == "m")) {
+			tokens = append(tokens, token+"m")
+			index++
+			continue
+		}
+		if token == "oclock" {
+			continue
+		}
+		if ordinal, ok := spokenOrdinalCardinal[token]; ok {
+			token = ordinal
+		}
+		if isASCIIDigits(token) {
+			if len(token) >= 3 {
+				for _, digit := range token {
+					tokens = append(tokens, spokenDigitWords[digit-'0'])
+				}
+				continue
+			}
+			if number, err := strconv.Atoi(token); err == nil && number >= 0 && number < 100 {
+				tokens = append(tokens, spokenNumberUnder100(number)...)
+				continue
+			}
+		}
+		tokens = append(tokens, token)
+	}
+	return strings.Join(tokens, " ")
+}
+
+var spokenDigitWords = []string{"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"}
+
+var spokenOrdinalCardinal = map[string]string{
+	"first": "one", "second": "two", "third": "three", "fourth": "four", "fifth": "five",
+	"sixth": "six", "seventh": "seven", "eighth": "eight", "ninth": "nine", "tenth": "ten",
+	"eleventh": "eleven", "twelfth": "twelve", "thirteenth": "thirteen", "fourteenth": "fourteen",
+	"fifteenth": "fifteen", "sixteenth": "sixteen", "seventeenth": "seventeen", "eighteenth": "eighteen",
+	"nineteenth": "nineteen", "twentieth": "twenty", "twentyfirst": "twenty one", "twentysecond": "twenty two",
+	"twentythird": "twenty three", "twentyfourth": "twenty four", "twentyfifth": "twenty five",
+	"twentysixth": "twenty six", "twentyseventh": "twenty seven", "twentyeighth": "twenty eight",
+	"twentyninth": "twenty nine", "thirtieth": "thirty", "thirtyfirst": "thirty one",
+}
+
+func isASCIIDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func spokenNumberUnder100(value int) []string {
+	if value < 20 {
+		return []string{[]string{"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"}[value]}
+	}
+	tens := []string{"", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"}
+	if value%10 == 0 {
+		return []string{tens[value/10]}
+	}
+	return []string{tens[value/10], spokenDigitWords[value%10]}
+}
+
+func realtimeOutputDiagnostics(reply realtimeQueuedReply, responseID string, actual string, audioChunks []string, bufferedAudioBytes int, interrupted bool) map[string]string {
+	expectedCanonical := normalizeSpokenReply(reply.message)
+	actualCanonical := normalizeSpokenReply(actual)
+	classification := "canonical_fact_mismatch"
+	if actualCanonical == "" {
+		classification = "missing_output_transcript"
+	}
+	return map[string]string{
+		"request_id":           strings.TrimSpace(reply.requestID),
+		"response_id":          strings.TrimSpace(responseID),
+		"expected_hash":        saltedRealtimeTextHash(reply.requestID, expectedCanonical),
+		"actual_hash":          saltedRealtimeTextHash(reply.requestID, actualCanonical),
+		"expected_token_count": strconv.Itoa(len(strings.Fields(expectedCanonical))),
+		"actual_token_count":   strconv.Itoa(len(strings.Fields(actualCanonical))),
+		"audio_chunk_count":    strconv.Itoa(len(audioChunks)),
+		"buffered_audio_bytes": strconv.Itoa(bufferedAudioBytes),
+		"interrupted":          strconv.FormatBool(interrupted),
+		"match_classification": classification,
+	}
+}
+
+func saltedRealtimeTextHash(requestID string, value string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(requestID) + "\x00" + strings.TrimSpace(value)))
+	return hex.EncodeToString(sum[:8])
 }
 
 func realtimeTranscriptMeanLogProb(values []float64) (float64, bool) {
@@ -1067,6 +1198,61 @@ func realtimeTranscriptDiagnostics(event voice.RealtimeEvent, vadDurationMS int)
 	return diagnostics
 }
 
+func normalizedRealtimeTranscriptPolicy(policy voice.RealtimeTranscriptPolicy) voice.RealtimeTranscriptPolicy {
+	if strings.TrimSpace(policy.Profile) == "" {
+		policy.Profile = "unspecified"
+	}
+	if policy.MinMeanLogProb == 0 {
+		policy.MinMeanLogProb = -1.0
+	}
+	if policy.MinTokenLogProb == 0 {
+		policy.MinTokenLogProb = -2.0
+	}
+	if policy.MaxTokensPerSecond < 0 {
+		policy.MaxTokensPerSecond = 0
+	}
+	return policy
+}
+
+func realtimeTranscriptPolicyDiagnostics(policy voice.RealtimeTranscriptPolicy) map[string]string {
+	policy = normalizedRealtimeTranscriptPolicy(policy)
+	return map[string]string{
+		"profile":               policy.Profile,
+		"require_logprobs":      strconv.FormatBool(policy.RequireLogProbs),
+		"min_mean_logprob":      strconv.FormatFloat(policy.MinMeanLogProb, 'f', 4, 64),
+		"min_token_logprob":     strconv.FormatFloat(policy.MinTokenLogProb, 'f', 4, 64),
+		"max_tokens_per_second": strconv.FormatFloat(policy.MaxTokensPerSecond, 'f', 2, 64),
+	}
+}
+
+func realtimeTranscriptAdmission(event voice.RealtimeEvent, vadDurationMS int, policy voice.RealtimeTranscriptPolicy) (bool, string, map[string]string) {
+	policy = normalizedRealtimeTranscriptPolicy(policy)
+	diagnostics := realtimeTranscriptDiagnostics(event, vadDurationMS)
+	diagnostics["profile"] = policy.Profile
+	diagnostics["min_mean_logprob"] = strconv.FormatFloat(policy.MinMeanLogProb, 'f', 4, 64)
+	diagnostics["min_token_logprob"] = strconv.FormatFloat(policy.MinTokenLogProb, 'f', 4, 64)
+	mean, hasMean := realtimeTranscriptMeanLogProb(event.TranscriptLogProbs)
+	minimum, hasMinimum := realtimeTranscriptMinLogProb(event.TranscriptLogProbs)
+	if policy.RequireLogProbs && (!hasMean || !hasMinimum) {
+		return false, "missing_confidence_metadata", diagnostics
+	}
+	if hasMean && mean < policy.MinMeanLogProb {
+		return false, "mean_logprob_below_profile_threshold", diagnostics
+	}
+	if hasMinimum && minimum < policy.MinTokenLogProb {
+		return false, "token_logprob_below_profile_threshold", diagnostics
+	}
+	if vadDurationMS > 0 && policy.MaxTokensPerSecond > 0 && len(event.TranscriptLogProbs) >= 4 {
+		tokensPerSecond := float64(len(event.TranscriptLogProbs)) / (float64(vadDurationMS) / 1000)
+		diagnostics["tokens_per_second"] = strconv.FormatFloat(tokensPerSecond, 'f', 2, 64)
+		diagnostics["max_tokens_per_second"] = strconv.FormatFloat(policy.MaxTokensPerSecond, 'f', 2, 64)
+		if tokensPerSecond > policy.MaxTokensPerSecond {
+			return false, "transcript_density_incoherent_with_vad", diagnostics
+		}
+	}
+	return true, "confidence_and_vad_admitted", diagnostics
+}
+
 func (h *Handler) recordRealtimeTiming(ctx context.Context, providerCallID string, sessionID string, streamSID string, stage string, startedAt time.Time, extra map[string]string) error {
 	payload := map[string]string{
 		"stage":      strings.TrimSpace(stage),
@@ -1102,6 +1288,25 @@ func (h *Handler) recordRealtimeFailure(ctx context.Context, providerCallID stri
 
 func (h *Handler) recordRealtimeTerminalFailure(ctx context.Context, providerCallID string, sessionID string, streamSID string, stage string, err error) error {
 	return h.recordRealtimeFailureWithTerminal(ctx, providerCallID, sessionID, streamSID, stage, err, true)
+}
+
+func (h *Handler) recordRealtimeTerminalFailureWithExtra(ctx context.Context, providerCallID string, sessionID string, streamSID string, stage string, err error, extra map[string]string) error {
+	payload := map[string]string{
+		"stage":      strings.TrimSpace(stage),
+		"stream_sid": strings.TrimSpace(streamSID),
+		"terminal":   "true",
+	}
+	if err != nil {
+		payload["error"] = err.Error()
+	}
+	for key, value := range extra {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key != "" && value != "" {
+			payload[key] = value
+		}
+	}
+	return h.service.RecordRealtimeEvent(ctx, voice.ProviderTwilio, providerCallID, sessionID, voice.EventRealtimeFailed, payload)
 }
 
 func (h *Handler) recordRealtimeFailureWithTerminal(ctx context.Context, providerCallID string, sessionID string, streamSID string, stage string, err error, terminal bool) error {

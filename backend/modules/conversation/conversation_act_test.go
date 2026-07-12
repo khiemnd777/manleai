@@ -171,12 +171,43 @@ func TestFinalReviewRequiresAuthorizationBeforePOSBooking(t *testing.T) {
 		t.Fatalf("review prompt = %s", store.lastTurn.AIMessage)
 	}
 
-	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Yes, please book it."})
+	interpreter := &fakeConversationActInterpreter{act: ConversationAct{
+		Kind:             ConversationActAdd,
+		TargetServiceIDs: []string{"service_1"},
+		Confidence:       0.99,
+	}}
+	service.SetTurnInterpreter(interpreter)
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Yes, just book this for me."})
 	if err != nil {
 		t.Fatalf("booking authorization: %v", err)
 	}
 	if bookingTool.calls != 1 || session.Outcome != OutcomeBookingConfirmed || session.AppointmentID == "" {
 		t.Fatalf("booking result: calls=%d session=%#v", bookingTool.calls, session)
+	}
+	if interpreter.calls != 0 {
+		t.Fatalf("deterministic review authorization was overridden by semantic interpreter: calls=%d", interpreter.calls)
+	}
+}
+
+func TestReviewAuthorizationAcceptsNaturalDirectivesAndRejectsCorrections(t *testing.T) {
+	for _, message := range []string{
+		"Sure, go ahead and make the appointment for me.",
+		"Okay, please schedule it now.",
+		"Everything looks good, book it.",
+		"Go ahead.",
+	} {
+		if !isReviewAuthorization(message) {
+			t.Fatalf("natural review authorization was rejected: %q", message)
+		}
+	}
+	for _, message := range []string{
+		"Yes, but switch it to Spa Pedicure.",
+		"Actually, book another service too.",
+		"Yes, do not book it yet.",
+	} {
+		if isReviewAuthorization(message) {
+			t.Fatalf("review correction was treated as authorization: %q", message)
+		}
 	}
 }
 
@@ -495,6 +526,48 @@ func TestConversationActClarifiesSameCategoryServiceGuestScope(t *testing.T) {
 	}
 	if session.PartyPlan == nil || session.PartyPlan.PartySize != 2 || !partyPlanComplete(session.PartyPlan) {
 		t.Fatalf("party plan = %#v", session.PartyPlan)
+	}
+}
+
+func TestConversationActResolvesSameCategoryCallerScopeWithoutSemanticLoop(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "service_gel", Name: "Gel Manicure", CategoryID: "cat_mani", CategoryName: "Manicure"},
+		{ID: "service_classic", Name: "Classic Manicure", CategoryID: "cat_mani", CategoryName: "Manicure"},
+	}
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_gel"
+	store.session.ServiceName = "Gel Manicure"
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{ServiceID: "service_gel", StaffSelectionMode: booking.StaffSelectionAnyone}}
+	interpreter := &fakeConversationActInterpreter{act: ConversationAct{
+		Kind: ConversationActAdd, Entity: ConversationEntityService,
+		TargetServiceIDs: []string{"service_classic"}, Confidence: 0.95,
+	}}
+	service := NewService(store, &fakeBookingTool{})
+	service.SetTurnInterpreter(interpreter)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Please add Classic Manicure too."})
+	if err != nil {
+		t.Fatalf("same-category add: %v", err)
+	}
+	if session.DialogState.Pending == nil || session.DialogState.Pending.PromptKey != "same_category_add_scope" {
+		t.Fatalf("pending clarification = %#v", session.DialogState.Pending)
+	}
+	callsBeforeResolution := interpreter.calls
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "This one is for me."})
+	if err != nil {
+		t.Fatalf("caller-scope response: %v", err)
+	}
+	if interpreter.calls != callsBeforeResolution {
+		t.Fatalf("resolved pending scope reached semantic interpreter: before=%d after=%d", callsBeforeResolution, interpreter.calls)
+	}
+	if got := selectedServiceIDs(*session); !sameStrings(got, []string{"service_gel", "service_classic"}) {
+		t.Fatalf("selected services = %#v", got)
+	}
+	if session.DialogState.Pending != nil {
+		t.Fatalf("resolved scope left a clarification loop: %#v", session.DialogState.Pending)
 	}
 }
 

@@ -911,6 +911,7 @@ export type RealtimeEventLog = {
   stream_event?: string;
   stream_error?: string;
   error?: string;
+  diagnostics?: Record<string, string>;
   redacted?: boolean;
   created_at: string;
 };

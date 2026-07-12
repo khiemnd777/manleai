@@ -161,7 +161,12 @@ name collection, availability replies, party bookings, or transcript output.
   without a keyword gate. Catalog validation owns referenced service/staff IDs;
   the reducer owns draft mutation and dependency invalidation; the planner owns
   missing-field, review, and booking readiness. Pending candidates remain
-  contextual, and provider failure preserves the draft with safe clarification.
+  contextual. Review authorization and a resolved same-category guest-scope
+  clarification are deterministic state-owned controls that cannot be overwritten
+  by semantic interpretation; correction/negation evidence prevents review
+  authorization. Phone customer-name collection confirms bare ASR candidates
+  before persisting them unless the caller explicitly introduces a non-risky name
+  or spells it. Provider failure preserves the draft with safe clarification.
   A new-booking date/time correction made after slots were offered is persisted
   as a typed pending confirmation; rejection preserves the original slots, and
   confirmation invalidates them and performs a fresh provider availability
@@ -322,12 +327,17 @@ dashboard sidebar. Local runtime port is `3091`; production domain is
   DTO/parser contract: `backend/modules/voice/types.go` and
   `backend/modules/voice_openai/realtime.go`. Replies use bounded FIFO,
   application request IDs, provider response IDs, explicit cancellation, and
-  stale-audio rejection. GA output audio is buffered until the output-audio
-  transcript exactly matches the backend-approved reply. Noisy/balanced GA
-  input uses near-field noise reduction plus transcription logprobs; confidence-
-  rejected transcripts do not enter conversation state. Accepted and rejected
-  transcript timing events retain PII-free item ID, mean/min logprob, token
-  count, and VAD duration diagnostics when available. Transcription steering is
+  stale-audio rejection. GA output requests use out-of-band conversation context,
+  and audio is buffered until the output-audio transcript preserves the canonical
+  backend-approved facts across punctuation, contractions, spoken numbers, times,
+  dates, and digit sequences. GA input requires transcription logprobs and applies
+  profile-aware mean, low-tail, and VAD-coherence admission; confidence-rejected
+  transcripts do not enter conversation state. Noisy/balanced input also uses
+  near-field noise reduction. Accepted and rejected transcript timing events
+  retain PII-free decision/reason, profile, item ID, mean/min logprob, token count,
+  and VAD duration diagnostics when available. Output failures retain correlation
+  IDs, counts, and salted canonical hashes without transcript/audio bodies. The
+  owner-scoped Calls timeline exposes these whitelisted diagnostics. Transcription steering is
   a concise salon/catalog/alias keyword list rather than conversational example
   sentences. Backend progress copy is delayed and limited to once per call.
   Terminal realtime failure resumes the last approved prompt through
@@ -446,10 +456,10 @@ dashboard sidebar. Local runtime port is `3091`; production domain is
 | POS mapping, provider link, active provider, AI bookable, local only, sync failed | `backend/modules/pos`, `docs/canonical-pos-ownership-checklist.md` | Services/Staff UI, `pos_entity_links`, sync tests |
 | semantic turn, multi-intent, service alias, category alias, service understanding, wrong service, category narrowed to one service, bare service switch, stale date after summary, staff/date/customer correction, add/replace/remove/undo, question plus correction, non-native wording, ASR paraphrase | `backend/modules/conversation/conversation_act.go`, `turn_reducer.go`, `next_action_planner.go` | dialog state/repository, voice semantic interpreter, training aliases, transcript metadata, golden conversation tests |
 | service menu, how many services, how many I book, what do I have, current booking summary, service count, repeated clarification, informational service question | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/service_prompts.go`, `backend/modules/conversation/answer_router.go` | `backend/modules/conversation/service.go`, dialog state, party flow, golden tests |
-| final review, stale review, draft revision, reviewed revision, authorized revision, book it, correction during review, no progress loop | `backend/modules/conversation/draft_revision.go`, `next_action_planner.go`, `service.go` | repository, V36/V37 migrations, booking flow, conversation and phone tests |
+| final review, stale review, draft revision, reviewed revision, authorized revision, book it, just book this for me, correction during review, repeated same-category guest question, no progress loop | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/draft_revision.go`, `next_action_planner.go`, `service.go` | repository, V36/V37 migrations, booking flow, conversation and phone tests |
 | AI training, owner correction, knowledge, FAQ answer, stale policy | `backend/modules/training`, answer router/context | training UI, knowledge tests |
 | party booking, group booking, two people, split booking, party request | conversation party files | booking service, Calls UI party request panel |
-| name captured wrong, service instead of name, spelling, phone/email | `service_customer_name.go` | conversation golden tests, transcript metadata |
+| name captured wrong, background phrase captured as name, bare phone name, service instead of name, spelling, phone/email | `service_customer_name.go` | conversation golden tests, transcript metadata |
 | reschedule, cancel, move appointment, appointment target, ordinal option, day view, week view, month view, agenda, Tomorrow button, appointment warning | `service_intent.go`, `backend/modules/booking/service.go` | Appointments UI, POS Calendar UI, booking tests |
 | Twilio signature, webhook, TwiML, recording, media stream, stream fallback | `backend/modules/voice_twilio` | `backend/modules/voice`, phone demo memo |
 | OpenAI STT, TTS, realtime, model, voice, guarded reply, background noise, false transcript, transcript logprob, repeated progress reply, spoken fact mismatch, realtime transport fallback | `backend/modules/voice_openai`, `backend/modules/voice`, `backend/modules/voice_twilio/handler.go` | integration config, conversation runtime, realtime event timeline, voice tests |

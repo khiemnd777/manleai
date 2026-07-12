@@ -838,6 +838,9 @@ export function CallsDashboard() {
         events={realtimeEvents}
         loading={realtimeEventsLoading}
         error={realtimeEventsError}
+        onRefresh={() => {
+          if (salon && selectedSession) void loadRealtimeEvents(salon.id, selectedSession.id);
+        }}
       />
 
       <PartyRequestsPanel
@@ -1434,28 +1437,47 @@ function RealtimeEventsPanel({
   session,
   events,
   loading,
-  error
+  error,
+  onRefresh
 }: {
   session: ConversationSession | null;
   events: RealtimeEventLog[];
   loading: boolean;
   error: string;
+  onRefresh: () => void;
 }) {
   if (!session || session.channel !== "phone") {
     return null;
   }
 
   const last = events.length > 0 ? events[events.length - 1] : null;
+  const accepted = events.filter((event) => event.diagnostics?.decision === "accepted").length;
+  const rejected = events.filter((event) => event.diagnostics?.decision === "rejected").length;
+  const outputFailures = events.filter((event) => event.stage === "openai_spoken_fact_mismatch" || event.stage === "openai_output_transcript_missing").length;
 
   return (
     <Card>
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
         <div>
           <CardTitle>Realtime event timeline</CardTitle>
-          <CardDescription>Twilio stream lifecycle and backend realtime failures for the selected call.</CardDescription>
+          <CardDescription>Twilio lifecycle, transcript admission decisions, and privacy-safe output validation diagnostics.</CardDescription>
         </div>
-        <Badge value={last?.event_type || (loading ? "loading" : "no_events")} />
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge value={last?.event_type || (loading ? "loading" : "no_events")} />
+          <Button type="button" variant="secondary" className="h-9 px-3" disabled={loading} onClick={onRefresh}>
+            <RefreshCcw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </Button>
+        </div>
       </div>
+
+      {events.length > 0 ? (
+        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          <Info label="Accepted transcripts" value={String(accepted)} />
+          <Info label="Rejected transcripts" value={String(rejected)} />
+          <Info label="Output validation failures" value={String(outputFailures)} />
+        </div>
+      ) : null}
 
       {error ? <Alert title="Realtime events unavailable" message={error} /> : null}
 
@@ -1476,12 +1498,14 @@ function RealtimeEventsPanel({
       {events.length > 0 ? (
         <>
           <div className="mt-5 hidden overflow-x-auto rounded-md border border-line md:block">
-            <table className="w-full min-w-[900px] text-left text-sm">
+            <table className="w-full min-w-[1100px] text-left text-sm">
               <thead className="bg-slate-50 text-xs uppercase text-muted">
                 <tr>
                   <th className="px-4 py-3">Time</th>
                   <th className="px-4 py-3">Event</th>
                   <th className="px-4 py-3">Stage</th>
+                  <th className="px-4 py-3">Decision</th>
+                  <th className="px-4 py-3">Profile</th>
                   <th className="px-4 py-3">Stream SID</th>
                   <th className="px-4 py-3">Detail</th>
                 </tr>
@@ -1494,6 +1518,8 @@ function RealtimeEventsPanel({
                       <Badge value={event.event_type} />
                     </td>
                     <td className="px-4 py-3 text-muted">{event.stage || "Not recorded"}</td>
+                    <td className="px-4 py-3 text-muted">{event.diagnostics?.decision || "-"}</td>
+                    <td className="px-4 py-3 text-muted">{event.diagnostics?.profile || "-"}</td>
                     <td className="px-4 py-3 font-mono text-xs text-muted">{event.stream_sid || "-"}</td>
                     <td className="max-w-[360px] break-words px-4 py-3 text-muted">{realtimeEventDetail(event)}</td>
                   </tr>
@@ -1511,6 +1537,8 @@ function RealtimeEventsPanel({
                 </div>
                 <dl className="mt-3 grid gap-3 text-sm">
                   <Info label="Stage" value={event.stage || "Not recorded"} />
+                  <Info label="Decision" value={event.diagnostics?.decision || "-"} />
+                  <Info label="Noise profile" value={event.diagnostics?.profile || "-"} />
                   <Info label="Stream SID" value={<span className="break-all font-mono text-xs">{event.stream_sid || "-"}</span>} />
                   <Info label="Detail" value={realtimeEventDetail(event)} />
                 </dl>
@@ -1947,6 +1975,22 @@ function realtimeEventDetail(event: RealtimeEventLog) {
   if (event.error) return event.error;
   if (event.stream_error) return event.stream_error;
   if (event.stream_event) return event.stream_event;
+  if (event.diagnostics) {
+    const keys = [
+      "reason",
+      "mean_logprob",
+      "min_logprob",
+      "token_count",
+      "vad_duration_ms",
+      "request_id",
+      "response_id",
+      "match_classification",
+      "expected_hash",
+      "actual_hash"
+    ];
+    const values = keys.flatMap((key) => (event.diagnostics?.[key] ? [`${key}: ${event.diagnostics[key]}`] : []));
+    if (values.length > 0) return values.join(" · ");
+  }
   return "No additional detail recorded.";
 }
 

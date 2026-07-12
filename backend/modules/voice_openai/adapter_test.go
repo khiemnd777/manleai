@@ -461,6 +461,12 @@ func TestRealtimeResponseCreatePayloadUsesProtocolShape(t *testing.T) {
 	if outputModalities, ok := gaResponse["output_modalities"].([]string); !ok || len(outputModalities) != 1 || outputModalities[0] != "audio" {
 		t.Fatalf("GA response.create should include audio output_modalities: %#v", gaResponse)
 	}
+	if gaResponse["conversation"] != "none" {
+		t.Fatalf("GA response.create should be isolated from the default conversation: %#v", gaResponse)
+	}
+	if input, ok := gaResponse["input"].([]any); !ok || len(input) != 0 {
+		t.Fatalf("GA response.create should use isolated empty input: %#v", gaResponse["input"])
+	}
 	metadata, ok := gaResponse["metadata"].(map[string]string)
 	if !ok || metadata["manleai_request_id"] != "reply-1" {
 		t.Fatalf("GA response metadata = %#v", gaResponse["metadata"])
@@ -476,6 +482,20 @@ func TestRealtimeResponseCreatePayloadUsesProtocolShape(t *testing.T) {
 	}
 	if _, ok := legacyResponse["output_modalities"]; ok {
 		t.Fatalf("legacy response.create should not include GA output_modalities: %#v", legacyResponse)
+	}
+	if _, ok := legacyResponse["conversation"]; ok {
+		t.Fatalf("legacy response.create should not include GA conversation isolation: %#v", legacyResponse)
+	}
+}
+
+func TestRealtimeTranscriptPolicyUsesNoiseProfileAndRequiresGAConfidence(t *testing.T) {
+	ga := realtimeTranscriptPolicyForConfig(config.OpenAIVoiceConfig{RealtimeModel: "gpt-realtime-2", RealtimeNoiseProfile: "noisy"})
+	if !ga.RequireLogProbs || ga.Profile != "noisy_salon" || ga.MinMeanLogProb != -0.8 || ga.MinTokenLogProb != -1.6 || ga.MaxTokensPerSecond != 8 {
+		t.Fatalf("noisy GA transcript policy = %#v", ga)
+	}
+	legacy := realtimeTranscriptPolicyForConfig(config.OpenAIVoiceConfig{RealtimeModel: "gpt-4o-realtime-preview", RealtimeNoiseProfile: "quiet_room"})
+	if legacy.RequireLogProbs {
+		t.Fatalf("legacy protocol must not require unavailable GA logprobs: %#v", legacy)
 	}
 }
 

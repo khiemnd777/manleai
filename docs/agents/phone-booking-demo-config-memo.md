@@ -349,8 +349,14 @@ backend-approved replies and should not rely on independent realtime
 instructions for tone changes.
 Realtime reply order is backend-owned: each queued reply has an application
 request ID, binds to the provider `response_id`, and ignores late audio from a
-cancelled or prior response. Barge-in must clear Twilio playback and cancel the
-bound active response. A failed, incomplete, conflicting, or overflowed reply
+cancelled or prior response. GA input requires confidence metadata and applies
+the selected noise profile to mean, low-tail, and VAD-coherence admission; a
+rejected transcript is reprompted without changing conversation state. Barge-in
+must pass the playback guard before clearing Twilio playback and cancelling the
+bound active response. GA output runs out of band from the provider's default
+conversation and is released only when its completed transcript preserves the
+backend-approved facts after canonical spoken-number/time/date normalization.
+A missing transcript, failed, incomplete, conflicting, or overflowed reply
 must use terminal fallback rather than guessing which audio belongs to the
 current turn.
 For GA Realtime sessions, output audio is buffered until the provider's final

@@ -394,6 +394,72 @@ func TestSameSpokenReplyPreservesUnicodeFacts(t *testing.T) {
 	if sameSpokenReply("Dịch vụ gel", "Dịch vụ bột") {
 		t.Fatal("different unicode service facts must not match")
 	}
+	for _, tc := range []struct {
+		expected string
+		actual   string
+	}{
+		{expected: "You have 1 service at 4:00 PM.", actual: "You have one service at four p.m."},
+		{expected: "Monday, July 13, phone ending in 4572.", actual: "Monday July thirteenth phone ending in four five seven two"},
+		{expected: "That's correct; I'm booking it.", actual: "That is correct. I am booking it."},
+	} {
+		if !sameSpokenReply(tc.expected, tc.actual) {
+			t.Fatalf("equivalent spoken facts did not match: expected=%q actual=%q normalized=%q/%q", tc.expected, tc.actual, normalizeSpokenReply(tc.expected), normalizeSpokenReply(tc.actual))
+		}
+	}
+	if sameSpokenReply("Your service is at 4:00 PM.", "Your service is at five p.m.") {
+		t.Fatal("different appointment times must not match")
+	}
+}
+
+func TestRealtimeTranscriptAdmissionFailsClosedForGAMetadataAndNoise(t *testing.T) {
+	policy := voice.RealtimeTranscriptPolicy{
+		Profile: "noisy", RequireLogProbs: true,
+		MinMeanLogProb: -0.8, MinTokenLogProb: -1.6, MaxTokensPerSecond: 8,
+	}
+	accepted, reason, diagnostics := realtimeTranscriptAdmission(voice.RealtimeEvent{ItemID: "missing", Transcript: "background words"}, 500, policy)
+	if accepted || reason != "missing_confidence_metadata" || diagnostics["profile"] != "noisy" {
+		t.Fatalf("missing confidence decision = accepted:%v reason:%q diagnostics:%#v", accepted, reason, diagnostics)
+	}
+	accepted, reason, _ = realtimeTranscriptAdmission(voice.RealtimeEvent{
+		ItemID: "tail", Transcript: "book another guest", TranscriptLogProbs: []float64{-0.1, -0.2, -2.0},
+	}, 900, policy)
+	if accepted || reason != "token_logprob_below_profile_threshold" {
+		t.Fatalf("low-tail decision = accepted:%v reason:%q", accepted, reason)
+	}
+	accepted, reason, _ = realtimeTranscriptAdmission(voice.RealtimeEvent{
+		ItemID: "clean", Transcript: "yes please", TranscriptLogProbs: []float64{-0.1, -0.2},
+	}, 500, policy)
+	if !accepted || reason != "confidence_and_vad_admitted" {
+		t.Fatalf("clean decision = accepted:%v reason:%q", accepted, reason)
+	}
+}
+
+func TestForwardRealtimeEventsDoesNotCancelStrictResponseBeforePlayback(t *testing.T) {
+	adapter, service, _, _ := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Backend reply.", conversation.StatusActive, conversation.OutcomeCollecting))
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	realtime.strictIdentity = true
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes := make(chan any, 3)
+
+	go handler.forwardRealtimeEventsWithRealtimePolicy(ctx, cancel, closeStreamRecorder(make(chan string, 1)), realtime, func(value any) error {
+		writes <- value
+		return nil
+	}, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{}, nil, realtimeTerminalDrainTimeout, realtimeBargeInGuard, time.Now)
+
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_1", Transcript: "first"}
+	_ = waitForSpeak(t, realtime)
+	request := waitForSpeakRequest(t, realtime)
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseCreated, ResponseID: "resp_current", ResponseRequestID: request.RequestID}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventAudioDelta, ResponseID: "resp_current", AudioBase64: "buffered-audio"}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStarted, ItemID: "ambient", AudioStartMS: 100}
+	select {
+	case responseID := <-realtime.cancels:
+		t.Fatalf("strict response was cancelled before playback began: %q", responseID)
+	case <-time.After(30 * time.Millisecond):
+	}
+	assertNoWrite(t, writes)
 }
 
 func TestForwardRealtimeEventsSpeaksProgressWhileBackendTurnIsPending(t *testing.T) {
@@ -1117,12 +1183,13 @@ func (f fakeTwilioRealtimeProvider) ConnectRealtime(ctx context.Context, salonID
 }
 
 type fakeRealtimeSession struct {
-	events         chan voice.RealtimeEvent
-	speaks         chan string
-	appends        chan string
-	cancels        chan string
-	speakRequests  chan voice.RealtimeSpeakRequest
-	strictIdentity bool
+	events           chan voice.RealtimeEvent
+	speaks           chan string
+	appends          chan string
+	cancels          chan string
+	speakRequests    chan voice.RealtimeSpeakRequest
+	strictIdentity   bool
+	transcriptPolicy voice.RealtimeTranscriptPolicy
 }
 
 func newFakeRealtimeSession() *fakeRealtimeSession {
@@ -1175,6 +1242,10 @@ func (f *fakeRealtimeSession) CancelResponse(ctx context.Context, responseID str
 
 func (f *fakeRealtimeSession) RequiresResponseIdentity() bool {
 	return f.strictIdentity
+}
+
+func (f *fakeRealtimeSession) TranscriptPolicy() voice.RealtimeTranscriptPolicy {
+	return f.transcriptPolicy
 }
 
 func (f *fakeRealtimeSession) Events() <-chan voice.RealtimeEvent {

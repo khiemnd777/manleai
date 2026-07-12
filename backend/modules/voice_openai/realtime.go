@@ -34,11 +34,12 @@ func (a *Adapter) ConnectRealtime(ctx context.Context, salonID string, opts voic
 		return nil, err
 	}
 	session := &realtimeSession{
-		conn:           conn,
-		legacyProtocol: realtimeUsesLegacyProtocol(cfg.RealtimeModel),
-		events:         make(chan voice.RealtimeEvent, 128),
-		done:           make(chan struct{}),
-		ready:          make(chan error, 1),
+		conn:             conn,
+		legacyProtocol:   realtimeUsesLegacyProtocol(cfg.RealtimeModel),
+		transcriptPolicy: realtimeTranscriptPolicyForConfig(cfg),
+		events:           make(chan voice.RealtimeEvent, 128),
+		done:             make(chan struct{}),
+		ready:            make(chan error, 1),
 	}
 	go session.readLoop()
 	if err := session.update(ctx, cfg, opts); err != nil {
@@ -53,14 +54,15 @@ func (a *Adapter) ConnectRealtime(ctx context.Context, salonID string, opts voic
 }
 
 type realtimeSession struct {
-	conn           *websocket.Conn
-	legacyProtocol bool
-	writeMu        sync.Mutex
-	closeOnce      sync.Once
-	readyOnce      sync.Once
-	events         chan voice.RealtimeEvent
-	done           chan struct{}
-	ready          chan error
+	conn             *websocket.Conn
+	legacyProtocol   bool
+	transcriptPolicy voice.RealtimeTranscriptPolicy
+	writeMu          sync.Mutex
+	closeOnce        sync.Once
+	readyOnce        sync.Once
+	events           chan voice.RealtimeEvent
+	done             chan struct{}
+	ready            chan error
 }
 
 func (s *realtimeSession) AppendInputAudio(ctx context.Context, base64Audio string) error {
@@ -92,6 +94,10 @@ func (s *realtimeSession) CancelResponse(ctx context.Context, responseID string)
 
 func (s *realtimeSession) RequiresResponseIdentity() bool {
 	return !s.legacyProtocol
+}
+
+func (s *realtimeSession) TranscriptPolicy() voice.RealtimeTranscriptPolicy {
+	return s.transcriptPolicy
 }
 
 func (s *realtimeSession) Events() <-chan voice.RealtimeEvent {
@@ -195,11 +201,35 @@ func realtimeResponseCreatePayload(legacyProtocol bool, requestID string, text s
 		response["modalities"] = []string{"audio"}
 	} else {
 		response["output_modalities"] = []string{"audio"}
+		response["conversation"] = "none"
+		response["input"] = []any{}
 	}
 	return map[string]any{
 		"type":     "response.create",
 		"response": response,
 	}
+}
+
+func realtimeTranscriptPolicyForConfig(cfg config.OpenAIVoiceConfig) voice.RealtimeTranscriptPolicy {
+	profile := config.NormalizeOpenAIRealtimeNoiseProfile(cfg.RealtimeNoiseProfile)
+	policy := voice.RealtimeTranscriptPolicy{
+		Profile:            profile,
+		RequireLogProbs:    !realtimeUsesLegacyProtocol(cfg.RealtimeModel),
+		MinMeanLogProb:     -1.0,
+		MinTokenLogProb:    -2.0,
+		MaxTokensPerSecond: 10,
+	}
+	switch profile {
+	case "quiet_room":
+		policy.MinMeanLogProb = -1.2
+		policy.MinTokenLogProb = -2.5
+		policy.MaxTokensPerSecond = 12
+	case "noisy_salon":
+		policy.MinMeanLogProb = -0.8
+		policy.MinTokenLogProb = -1.6
+		policy.MaxTokensPerSecond = 8
+	}
+	return policy
 }
 
 type realtimeNoisePolicy struct {

@@ -183,7 +183,9 @@
 - [x] Clear customer PII, transcript bodies, handoff summaries, webhook payloads, and temporary voice audio while preserving booking/handoff/provider-call audit links.
 - [x] Add Twilio Media Streams and OpenAI Realtime adapter path with completed transcripts routed back through the same conversation engine and booking service.
 - [x] Correlate realtime response creation, audio, cancellation, and completion by application request ID and provider response ID; serialize replies through a bounded FIFO and reject stale audio.
-- [x] Buffer GA realtime output and verify its completed audio transcript against the backend-approved reply before releasing audio to Twilio.
+- [x] Fail closed on missing GA transcription confidence, apply profile-aware mean/low-tail/VAD-coherence admission, and keep rejected noise out of conversation state.
+- [x] Buffer isolated GA realtime output and verify canonical operational facts in its completed audio transcript before releasing audio to Twilio.
+- [x] Expose owner-scoped, PII-free realtime admission and output-validation diagnostics in the Calls timeline without transcript or audio bodies.
 - [x] Keep operational facts deterministic and allow guarded LLM rewriting only for explicitly style-only replies.
 - [x] Compare services from active-provider synced catalog facts, require explicit selection after consultation, and hand health-suitability questions to the owner without medical advice.
 - [x] Clear consultation candidate state after catalog selection or workflow exit, and keep cancel/reschedule/handoff/party actions ahead of consultation routing.

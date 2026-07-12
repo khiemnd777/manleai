@@ -3450,7 +3450,7 @@ func TestMessageAcceptsSpelledVoiceName(t *testing.T) {
 	}
 }
 
-func TestMessageAcceptsNormalFullVoiceName(t *testing.T) {
+func TestMessageConfirmsBareFullVoiceNameBeforeAccepting(t *testing.T) {
 	tests := []struct {
 		message string
 		want    string
@@ -3473,16 +3473,49 @@ func TestMessageAcceptsNormalFullVoiceName(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Message returned error: %v", err)
 			}
-			if session.CustomerName != tt.want {
-				t.Fatalf("customer name = %q, want %s", session.CustomerName, tt.want)
+			if session.CustomerName != "" {
+				t.Fatalf("customer name = %q, want pending confirmation", session.CustomerName)
 			}
-			if _, ok := store.lastTurn.AIMetadata["pending_customer_name"]; ok {
-				t.Fatalf("normal full name should not remain pending: %#v", store.lastTurn.AIMetadata)
+			if got := store.lastTurn.AIMetadata["pending_customer_name"]; got != tt.want {
+				t.Fatalf("pending customer name = %#v, want %q", got, tt.want)
+			}
+			if !strings.Contains(store.lastTurn.AIMessage, "I heard "+tt.want) {
+				t.Fatalf("AI should confirm the bare voice name: %s", store.lastTurn.AIMessage)
+			}
+
+			session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Yes."})
+			if err != nil {
+				t.Fatalf("Message returned error after name confirmation: %v", err)
+			}
+			if session.CustomerName != tt.want {
+				t.Fatalf("confirmed customer name = %q, want %s", session.CustomerName, tt.want)
 			}
 			if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "phone") {
-				t.Fatalf("AI should move to phone after full name: %s", store.lastTurn.AIMessage)
+				t.Fatalf("AI should move to phone after name confirmation: %s", store.lastTurn.AIMessage)
 			}
 		})
+	}
+}
+
+func TestMessageConfirmsAmbientPhraseBeforeUsingItAsVoiceName(t *testing.T) {
+	store := newFakeConversationStore()
+	seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
+	store.session.Channel = ChannelPhone
+	service := NewService(store, &fakeBookingTool{})
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Cảm ơn."})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.CustomerName != "" {
+		t.Fatalf("ambient phrase was committed as customer name: %q", session.CustomerName)
+	}
+	if got := store.lastTurn.AIMetadata["pending_customer_name"]; got != "Cảm ơn" {
+		t.Fatalf("pending customer name = %#v, want Cảm ơn", got)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "correct name") {
+		t.Fatalf("AI should confirm the uncertain voice name: %s", store.lastTurn.AIMessage)
 	}
 }
 

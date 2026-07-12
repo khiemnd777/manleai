@@ -155,8 +155,17 @@ type RealtimeSession interface {
 	Speak(ctx context.Context, req RealtimeSpeakRequest) error
 	CancelResponse(ctx context.Context, responseID string) error
 	RequiresResponseIdentity() bool
+	TranscriptPolicy() RealtimeTranscriptPolicy
 	Events() <-chan RealtimeEvent
 	Close() error
+}
+
+type RealtimeTranscriptPolicy struct {
+	Profile            string
+	RequireLogProbs    bool
+	MinMeanLogProb     float64
+	MinTokenLogProb    float64
+	MaxTokensPerSecond float64
 }
 
 type RealtimeSpeakRequest struct {

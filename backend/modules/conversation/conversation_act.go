@@ -30,6 +30,9 @@ func (s *Service) turnUnderstandingForMessage(ctx context.Context, session Sessi
 	if deterministic.Kind != ConversationActUnknown {
 		fallback.Acts = []ConversationAct{deterministic}
 	}
+	if deterministicConversationActOwnsTurn(session, deterministic) {
+		return fallback
+	}
 	if s.turnInterpreter == nil {
 		return fallback
 	}
@@ -81,6 +84,17 @@ func (s *Service) turnUnderstandingForMessage(ctx context.Context, session Sessi
 	}
 	fallback.Reason = "semantic_interpretation_rejected"
 	return fallback
+}
+
+func deterministicConversationActOwnsTurn(session Session, act ConversationAct) bool {
+	if act.Kind == ConversationActUnknown {
+		return false
+	}
+	if act.Kind == ConversationActReview {
+		return true
+	}
+	pending := normalizedDialogState(session.DialogState).Pending
+	return pending != nil && pending.PromptKey == "same_category_add_scope" && act.GuestScope != ""
 }
 
 func reconcileDeterministicInformationQuestions(message string, turn TurnUnderstanding) TurnUnderstanding {
@@ -246,11 +260,15 @@ func conversationActFromPending(session Session, message string, services []Serv
 			Source:             "deterministic",
 		}
 	case "same_category_add_scope":
+		guestScope := guestScopeForMessage(message)
+		if guestScope == "" {
+			return ConversationAct{Kind: ConversationActUnknown, Source: "deterministic"}
+		}
 		return ConversationAct{
 			Kind:             ConversationActAdd,
 			SourceServiceIDs: append([]string(nil), pending.SourceServiceIDs...),
 			TargetServiceIDs: append([]string(nil), pending.TargetServiceIDs...),
-			GuestScope:       guestScopeForMessage(message),
+			GuestScope:       guestScope,
 			Confidence:       0.94,
 			Reason:           "pending_same_category_guest_scope",
 			Source:           "deterministic",
@@ -642,16 +660,38 @@ func selectedSameCategoryServiceIDs(session Session, target ServiceOption, servi
 
 func isReviewAuthorization(message string) bool {
 	normalized := normalizeLooseText(message)
-	for _, phrase := range []string{
-		"yes", "yes please", "yeah", "yep", "correct", "that is correct", "thats correct",
-		"everything is correct", "book it", "please book it", "yes please book it", "go ahead",
-		"yes go ahead", "confirm it", "confirm the booking",
-	} {
-		if normalized == phrase {
-			return true
+	if normalized == "" {
+		return false
+	}
+	tokens := strings.Fields(normalized)
+	for _, token := range tokens {
+		switch token {
+		case "no", "not", "but", "actually", "instead", "wait", "change", "switch", "replace", "remove", "add", "another", "different", "cancel", "reschedule":
+			return false
 		}
 	}
-	return false
+	allowed := map[string]bool{
+		"yes": true, "yeah": true, "yep": true, "sure": true, "okay": true, "ok": true,
+		"correct": true, "everything": true, "looks": true, "good": true, "right": true,
+		"please": true, "just": true, "go": true, "ahead": true, "and": true, "do": true, "so": true,
+		"book": true, "confirm": true, "make": true, "schedule": true,
+		"it": true, "this": true, "that": true, "the": true, "appointment": true, "booking": true,
+		"for": true, "me": true, "us": true, "now": true, "is": true,
+	}
+	hasAuthorization := false
+	for _, token := range tokens {
+		if !allowed[token] {
+			return false
+		}
+		switch token {
+		case "yes", "yeah", "yep", "sure", "okay", "ok", "correct", "book", "confirm", "make", "schedule", "good", "right":
+			hasAuthorization = true
+		}
+	}
+	if containsLoosePhrase(normalized, "go ahead") {
+		hasAuthorization = true
+	}
+	return hasAuthorization
 }
 
 func selectedServiceOptions(session Session, services []ServiceOption) []ServiceOption {
