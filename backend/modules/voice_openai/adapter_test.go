@@ -1,17 +1,120 @@
 package voice_openai
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/modules/conversation"
 	"github.com/manleai/ai-receptionist/modules/voice"
 )
+
+func TestStreamSpeechEmitsTwilioAudioBeforeProviderResponseCompletes(t *testing.T) {
+	firstHalf, secondHalf := testPCM16WAVParts(t, 24000, 960)
+	release := make(chan struct{})
+	pipeReader, pipeWriter := io.Pipe()
+
+	adapter := NewAdapter(config.OpenAIVoiceConfig{
+		APIKey:      "test-key",
+		BaseURL:     "https://openai.test/v1",
+		SpeechModel: "tts-1",
+		SpeechVoice: "alloy",
+	})
+	adapter.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		go func() {
+			_, _ = pipeWriter.Write(firstHalf)
+			<-release
+			_, _ = pipeWriter.Write(secondHalf)
+			_ = pipeWriter.Close()
+		}()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type": []string{"audio/wav"},
+				"X-Request-Id": []string{"req_provider_1"},
+			},
+			Body: pipeReader,
+		}, nil
+	})}
+	firstChunk := make(chan voice.SpeechChunk, 1)
+	done := make(chan voice.SpeechStreamResult, 1)
+	errs := make(chan error, 1)
+	go func() {
+		result, err := adapter.StreamSpeech(context.Background(), "salon_1", voice.SpeechStreamRequest{
+			RequestID: "reply_1",
+			Text:      "Your appointment request is ready.",
+			Voice:     "alloy",
+		}, func(chunk voice.SpeechChunk) error {
+			select {
+			case firstChunk <- chunk:
+			default:
+			}
+			return nil
+		})
+		if err != nil {
+			errs <- err
+			return
+		}
+		done <- result
+	}()
+
+	select {
+	case chunk := <-firstChunk:
+		if len(chunk.Audio) != twilioFrameBytes || chunk.Sequence != 0 {
+			t.Fatalf("first chunk = sequence %d bytes %d", chunk.Sequence, len(chunk.Audio))
+		}
+	case err := <-errs:
+		t.Fatalf("StreamSpeech before provider completion: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("first audio chunk was not emitted before provider completion")
+	}
+	select {
+	case <-done:
+		t.Fatal("speech stream completed before the provider response was released")
+	default:
+	}
+	close(release)
+	select {
+	case result := <-done:
+		if result.ProviderRequestID != "req_provider_1" || result.Encoding != "audio/x-mulaw" || result.SampleRate != 8000 || result.ChunkCount < 2 {
+			t.Fatalf("stream result = %#v", result)
+		}
+	case err := <-errs:
+		t.Fatalf("StreamSpeech: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("speech stream did not complete")
+	}
+}
+
+func testPCM16WAVParts(t *testing.T, sampleRate int, sampleCount int) ([]byte, []byte) {
+	t.Helper()
+	pcm := make([]byte, sampleCount*2)
+	for i := 0; i < sampleCount; i++ {
+		binary.LittleEndian.PutUint16(pcm[i*2:], uint16(int16((i%200)-100)*100))
+	}
+	var header bytes.Buffer
+	header.WriteString("RIFF")
+	_ = binary.Write(&header, binary.LittleEndian, uint32(36+len(pcm)))
+	header.WriteString("WAVEfmt ")
+	_ = binary.Write(&header, binary.LittleEndian, uint32(16))
+	_ = binary.Write(&header, binary.LittleEndian, uint16(1))
+	_ = binary.Write(&header, binary.LittleEndian, uint16(1))
+	_ = binary.Write(&header, binary.LittleEndian, uint32(sampleRate))
+	_ = binary.Write(&header, binary.LittleEndian, uint32(sampleRate*2))
+	_ = binary.Write(&header, binary.LittleEndian, uint16(2))
+	_ = binary.Write(&header, binary.LittleEndian, uint16(16))
+	header.WriteString("data")
+	_ = binary.Write(&header, binary.LittleEndian, uint32(len(pcm)))
+	firstPCMBytes := 480 * 2
+	return append(header.Bytes(), pcm[:firstPCMBytes]...), pcm[firstPCMBytes:]
+}
 
 func TestInterpretTurnUsesStrictCatalogBoundMultiActSchema(t *testing.T) {
 	adapter := NewAdapter(config.OpenAIVoiceConfig{

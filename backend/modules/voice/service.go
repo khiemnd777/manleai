@@ -617,8 +617,9 @@ func (s *Service) voiceConfig(ctx context.Context, salonID string) (config.Voice
 	cfg.AI.OpenAI.BaseURL = defaultString(strings.TrimRight(strings.TrimSpace(cfg.AI.OpenAI.BaseURL), "/"), "https://api.openai.com/v1")
 	cfg.AI.OpenAI.TranscriptionModel = defaultString(strings.TrimSpace(cfg.AI.OpenAI.TranscriptionModel), "gpt-4o-mini-transcribe")
 	cfg.AI.OpenAI.ReplyModel = defaultString(strings.TrimSpace(cfg.AI.OpenAI.ReplyModel), "gpt-4.1-mini")
-	cfg.AI.OpenAI.SpeechModel = defaultString(strings.TrimSpace(cfg.AI.OpenAI.SpeechModel), "gpt-4o-mini-tts")
+	cfg.AI.OpenAI.SpeechModel = defaultString(strings.TrimSpace(cfg.AI.OpenAI.SpeechModel), "tts-1")
 	cfg.AI.OpenAI.SpeechVoice = defaultString(strings.TrimSpace(cfg.AI.OpenAI.SpeechVoice), "alloy")
+	cfg.AI.OpenAI.SpeechOutputMode = config.NormalizeOpenAISpeechOutputMode(cfg.AI.OpenAI.SpeechOutputMode)
 	cfg.AI.OpenAI.RealtimeModel = config.NormalizeOpenAIRealtimeModel(cfg.AI.OpenAI.RealtimeModel)
 	cfg.AI.OpenAI.RealtimeVoice = defaultString(strings.TrimSpace(cfg.AI.OpenAI.RealtimeVoice), cfg.AI.OpenAI.SpeechVoice)
 	cfg.AI.OpenAI.RealtimeNoiseProfile = config.NormalizeOpenAIRealtimeNoiseProfile(cfg.AI.OpenAI.RealtimeNoiseProfile)
@@ -652,6 +653,25 @@ func (s *Service) openAIConfig(ctx context.Context, salonID string) (config.Open
 		return s.cfg.AI.OpenAI, strings.TrimSpace(s.cfg.AI.Provider) == ProviderOpenAI, nil
 	}
 	return s.configResolver.ResolveOpenAIConfig(ctx, salonID)
+}
+
+func (s *Service) StreamingSpeechEnabled(ctx context.Context, salonID string) (bool, error) {
+	cfg, enabled, err := s.openAIConfig(ctx, salonID)
+	if err != nil {
+		return false, err
+	}
+	return enabled && cfg.RealtimeEnabled && config.NormalizeOpenAISpeechOutputMode(cfg.SpeechOutputMode) == config.OpenAISpeechOutputStreamingTTS && s.providers.StreamingTTS != nil && s.providers.StreamingTTS.Configured(ctx, salonID), nil
+}
+
+func (s *Service) StreamSpeech(ctx context.Context, salonID string, requestID string, text string, onChunk func(SpeechChunk) error) (SpeechStreamResult, error) {
+	if s.providers.StreamingTTS == nil || !s.providers.StreamingTTS.Configured(ctx, salonID) {
+		return SpeechStreamResult{}, ErrProviderDisabled
+	}
+	return s.providers.StreamingTTS.StreamSpeech(ctx, salonID, SpeechStreamRequest{
+		RequestID: strings.TrimSpace(requestID),
+		Text:      strings.TrimSpace(text),
+		Voice:     s.ttsVoice(ctx, salonID),
+	}, onChunk)
 }
 
 func (s *Service) getOrStartPhoneSession(ctx context.Context, salonID string, ownerUserID string, provider string, providerCallID string, fromPhone string, toPhone string) (*conversation.Session, error) {

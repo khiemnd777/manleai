@@ -29,6 +29,26 @@ agent routing, product behavior, operational setup, source-of-truth ownership,
 or validation workflow, update this routing rule or the relevant agent rule in
 the same approved documentation scope.
 
+## Provider Configuration Source Of Truth
+
+- Active Square, Twilio, and OpenAI configuration is salon-scoped operational
+  data stored in `salon_integration_configs` and managed through
+  `/dashboard/integrations`.
+- For active-runtime claims or diagnosis, inspect the dashboard-backed API
+  state (`GET /api/salons/:id/integration-configs`), the relevant readiness or
+  debug endpoint such as `GET /api/salons/:id/voice/status`, persisted provider
+  state, and the runtime resolver code as applicable.
+- Never inspect, quote, or infer active provider configuration from `.env`,
+  `project.env`, env templates, Docker Compose defaults, GitHub secrets, or
+  process environment values. Those sources are not evidence of the
+  salon-scoped configuration currently used by runtime.
+- Legacy environment fallback code may be considered only when the task
+  explicitly targets bootstrap/legacy fallback behavior and code or database
+  evidence proves that no stored provider config exists for the salon. Label
+  that path as legacy fallback, never as current UI-managed behavior.
+- Repository env files and env templates are infrastructure-only. Do not add
+  Square, Twilio, or OpenAI provider settings back to them.
+
 ## Mandatory Mapping Load And Drift Guard
 
 - Before any repository triage, diagnosis, planning, implementation, review, or

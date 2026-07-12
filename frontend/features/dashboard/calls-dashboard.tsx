@@ -1453,14 +1453,18 @@ function RealtimeEventsPanel({
   const last = events.length > 0 ? events[events.length - 1] : null;
   const accepted = events.filter((event) => event.diagnostics?.decision === "accepted").length;
   const rejected = events.filter((event) => event.diagnostics?.decision === "rejected").length;
-  const outputFailures = events.filter((event) => event.stage === "openai_spoken_fact_mismatch" || event.stage === "openai_output_transcript_missing").length;
+  const outputFailures = events.filter((event) =>
+    event.stage === "openai_spoken_fact_mismatch" ||
+    event.stage === "openai_output_transcript_missing" ||
+    event.stage === "openai_speech_stream"
+  ).length;
 
   return (
     <Card>
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
         <div>
           <CardTitle>Realtime event timeline</CardTitle>
-          <CardDescription>Twilio lifecycle, transcript admission decisions, and privacy-safe output validation diagnostics.</CardDescription>
+          <CardDescription>Twilio lifecycle, transcript admission, streaming speech latency, and privacy-safe output diagnostics.</CardDescription>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Badge value={last?.event_type || (loading ? "loading" : "no_events")} />
@@ -1475,7 +1479,7 @@ function RealtimeEventsPanel({
         <div className="mt-4 grid gap-3 sm:grid-cols-3">
           <Info label="Accepted transcripts" value={String(accepted)} />
           <Info label="Rejected transcripts" value={String(rejected)} />
-          <Info label="Output validation failures" value={String(outputFailures)} />
+          <Info label="Speech output failures" value={String(outputFailures)} />
         </div>
       ) : null}
 
@@ -1983,7 +1987,14 @@ function realtimeEventDetail(event: RealtimeEventLog) {
       "token_count",
       "vad_duration_ms",
       "request_id",
+      "provider_request_id",
       "response_id",
+      "duration_ms",
+      "audio_chunk_count",
+      "audio_bytes",
+      "audio_encoding",
+      "sample_rate",
+      "mark_name",
       "match_classification",
       "expected_hash",
       "actual_hash"

@@ -52,7 +52,7 @@ func TestSquareResponseMasksEncryptedClientSecret(t *testing.T) {
 	}
 }
 
-func TestOpenAIResponseDefaultsRealtimeNoiseProfile(t *testing.T) {
+func TestOpenAIResponseDefaultsRealtimeNoiseProfileAndStreamingSpeechOutput(t *testing.T) {
 	cipher, err := encryption.NewTokenCipher("test-secret")
 	if err != nil {
 		t.Fatalf("NewTokenCipher: %v", err)
@@ -93,5 +93,8 @@ func TestOpenAIResponseDefaultsRealtimeNoiseProfile(t *testing.T) {
 
 	if response.RealtimeNoiseProfile != config.DefaultOpenAIRealtimeNoiseProfile {
 		t.Fatalf("noise profile = %q, want %q", response.RealtimeNoiseProfile, config.DefaultOpenAIRealtimeNoiseProfile)
+	}
+	if response.SpeechOutputMode != config.OpenAISpeechOutputStreamingTTS {
+		t.Fatalf("speech output mode = %q, want %q", response.SpeechOutputMode, config.OpenAISpeechOutputStreamingTTS)
 	}
 }

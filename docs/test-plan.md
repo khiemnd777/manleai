@@ -176,7 +176,8 @@
 - Verify redaction rejects active sessions, is irreversible, clears customer PII/transcripts/handoff summaries/webhook payloads/audio, and preserves booking/handoff/provider-call audit links.
 - Verify the worker redacts expired sessions according to `retention_expires_at` without touching non-expired active sessions.
 - Verify realtime stream status/fallback events are recorded without leaking raw provider payloads or secrets.
-- Verify realtime stream replies serialize OpenAI `response.create` calls, queue the latest backend-approved reply until `response.done`, suppress interrupted audio after caller barge-in, and treat `conversation_already_has_active_response` as a recoverable event instead of closing the stream.
+- Verify `streaming_tts` sends the first backend-approved PCMU frame to Twilio before Speech completion, preserves FIFO order, cancels and clears on caller barge-in, rejects stale-generation chunks, and closes terminal replies after the matching Twilio mark or timeout.
+- Verify legacy `buffered_realtime` still serializes OpenAI `response.create`, waits for matching `response.done` and output-transcript validation, suppresses interrupted audio, and rejects response identity conflicts.
 - Verify completed realtime transcripts enter the same conversation engine and booking service and cannot confirm without POS success.
 
 ## Regression Guardrails

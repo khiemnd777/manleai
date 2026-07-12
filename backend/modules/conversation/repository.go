@@ -1207,6 +1207,8 @@ func safeRealtimeDiagnostics(payload map[string]any) map[string]string {
 		"request_id", "response_id", "expected_hash", "actual_hash", "expected_token_count", "actual_token_count",
 		"audio_chunk_count", "buffered_audio_bytes", "match_classification", "interrupted", "close_after",
 		"status", "progress_spoken", "queued_remaining", "terminal",
+		"provider_request_id", "audio_bytes", "audio_encoding", "sample_rate", "audio_end_ms",
+		"mark_name",
 	}
 	diagnostics := map[string]string{}
 	for _, key := range allowed {

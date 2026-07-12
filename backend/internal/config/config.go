@@ -60,6 +60,7 @@ type OpenAIVoiceConfig struct {
 	ReplyModel           string
 	SpeechModel          string
 	SpeechVoice          string
+	SpeechOutputMode     string
 	RealtimeEnabled      bool
 	RealtimeModel        string
 	RealtimeVoice        string
@@ -68,10 +69,21 @@ type OpenAIVoiceConfig struct {
 }
 
 const (
-	DefaultOpenAIRealtimeModel        = "gpt-realtime-2"
-	LegacyOpenAIRealtimePreviewModel  = "gpt-4o-realtime-preview"
-	DefaultOpenAIRealtimeNoiseProfile = "noisy_salon"
+	DefaultOpenAIRealtimeModel         = "gpt-realtime-2"
+	LegacyOpenAIRealtimePreviewModel   = "gpt-4o-realtime-preview"
+	DefaultOpenAIRealtimeNoiseProfile  = "noisy_salon"
+	OpenAISpeechOutputStreamingTTS     = "streaming_tts"
+	OpenAISpeechOutputBufferedRealtime = "buffered_realtime"
 )
+
+func NormalizeOpenAISpeechOutputMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case OpenAISpeechOutputBufferedRealtime:
+		return OpenAISpeechOutputBufferedRealtime
+	default:
+		return OpenAISpeechOutputStreamingTTS
+	}
+}
 
 func NormalizeOpenAIRealtimeModel(model string) string {
 	model = strings.TrimSpace(model)
@@ -129,7 +141,7 @@ func Load() Config {
 					BaseURL:              strings.TrimRight(env("VOICE_OPENAI_BASE_URL", "https://api.openai.com/v1"), "/"),
 					TranscriptionModel:   env("VOICE_OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe"),
 					ReplyModel:           env("VOICE_OPENAI_REPLY_MODEL", "gpt-4.1-mini"),
-					SpeechModel:          env("VOICE_OPENAI_SPEECH_MODEL", "gpt-4o-mini-tts"),
+					SpeechModel:          env("VOICE_OPENAI_SPEECH_MODEL", "tts-1"),
 					SpeechVoice:          env("VOICE_OPENAI_SPEECH_VOICE", "alloy"),
 					RealtimeEnabled:      envBool("VOICE_OPENAI_REALTIME_ENABLED", false),
 					RealtimeModel:        NormalizeOpenAIRealtimeModel(env("VOICE_OPENAI_REALTIME_MODEL", DefaultOpenAIRealtimeModel)),

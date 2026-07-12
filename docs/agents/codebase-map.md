@@ -47,9 +47,14 @@ production feature behavior.
 6. If the request mentions voice/conversation, map caller goal, known fields,
    missing fields, service/category ambiguity, availability gate, booking gate,
    and handoff gate.
-7. If the request mentions provider setup, prefer dashboard-managed
-   `salon_integration_configs` over environment variables unless the code path
-   is bootstrap/local fallback.
+7. For provider setup or active-runtime diagnosis, treat dashboard-managed
+   `salon_integration_configs` as the source of truth. Start with
+   `/dashboard/integrations`, `GET /api/salons/:id/integration-configs`, the
+   relevant readiness/debug endpoint, persisted provider state, and the runtime
+   resolver. Never use env files, Compose defaults, GitHub secrets, or process
+   environment values as evidence of active salon configuration. Inspect
+   legacy environment fallback only when the task explicitly targets that path
+   and evidence proves the salon has no stored provider config.
 
 ## Function And Helper Lookup Contract
 
@@ -112,9 +117,9 @@ triage keyword table.
 | Customers | `backend/modules/customer/*` | Canonical customer CRUD, archive, search, activity read model, provider customer lookup facade | `backend/modules/customer/service_test.go` |
 | Conversation runtime | `backend/modules/conversation/*` | Simulator/phone session state, intent, slot preservation, service understanding, answer routing, booking tool routing, party booking planning, handoff, transcript metadata, retention | `backend/modules/conversation/*_test.go` |
 | Training | `backend/modules/training/*` | Knowledge items, owner corrections, correction apply/dismiss, service alias application, training evaluation | `backend/modules/training/service_test.go` |
-| Voice provider-neutral | `backend/modules/voice/*` | Voice readiness/status, inbound routing, STT/LLM/TTS/realtime interfaces, speech turns, audio output | `backend/modules/voice/*_test.go` |
+| Voice provider-neutral | `backend/modules/voice/*` | Voice readiness/status, inbound routing, STT/LLM/TTS/realtime and streaming-speech interfaces, speech turns, audio output | `backend/modules/voice/*_test.go` |
 | Twilio adapter | `backend/modules/voice_twilio/*` | Twilio signatures, form parsing, TwiML, recording mode, Media Streams bridge | `backend/modules/voice_twilio/*_test.go` |
-| OpenAI voice adapter | `backend/modules/voice_openai/*` | OpenAI STT, guarded reply, TTS, Realtime payloads/session | `backend/modules/voice_openai/*_test.go` |
+| OpenAI voice adapter | `backend/modules/voice_openai/*` | OpenAI STT, guarded reply, whole-response TTS, dedicated streaming Speech-to-PCMU conversion, Realtime input session | `backend/modules/voice_openai/*_test.go` |
 | Integration config | `backend/modules/integration_config/*` | Salon-scoped Square/Twilio/OpenAI runtime settings, encrypted secrets, dashboard-managed provider config | `backend/modules/integration_config/service_test.go` |
 | Configuration transfer | `backend/modules/config_transfer/*` | Sanitized export/import preview/apply, stable request IDs, skip secrets/operational records | `backend/modules/config_transfer/*_test.go` |
 | Public catalog API | `backend/modules/public_catalog/*` | Public-safe salon catalog read endpoints | `backend/modules/public_catalog/service_test.go` |
@@ -123,7 +128,7 @@ triage keyword table.
 
 | Helper area | Files | Use when triaging |
 | --- | --- | --- |
-| Config/env defaults | `backend/internal/config/config.go` | Server ports, CORS, JWT, legacy Square/Twilio/OpenAI fallback env, realtime model normalization |
+| Server/bootstrap defaults | `backend/internal/config/config.go` | Server ports, CORS, JWT, and provider model normalization; active salon provider settings still resolve from dashboard-backed integration config |
 | Database/migrations | `backend/internal/database/database.go`, `backend/internal/database/migrate.go`, `backend/migrations/*.sql` | Schema drift, startup migrator, migration checksums, version ordering |
 | Encryption | `backend/internal/encryption/encryption.go` | POS/provider secret encryption, AES-GCM token handling |
 | Auth middleware | `backend/internal/middleware/auth.go` | Tenant/user claims, protected routes, salon ownership context |
@@ -323,19 +328,21 @@ dashboard sidebar. Local runtime port is `3091`; production domain is
 - Data owner: `call_sessions`, `call_transcript_messages`,
   `voice_webhook_events`, `voice_audio_outputs`,
   `salon_integration_configs`.
-- Realtime sequencing owner: `backend/modules/voice_twilio/handler.go`; response
-  DTO/parser contract: `backend/modules/voice/types.go` and
-  `backend/modules/voice_openai/realtime.go`. Replies use bounded FIFO,
-  application request IDs, provider response IDs, explicit cancellation, and
-  stale-audio rejection. GA output requests use out-of-band conversation context,
-  and audio is buffered until the output-audio transcript preserves the canonical
-  backend-approved facts across punctuation, contractions, spoken numbers, times,
-  dates, and digit sequences. GA input requires transcription logprobs and applies
+- Realtime sequencing owner: `backend/modules/voice_twilio/handler.go`; provider-neutral
+  contracts: `backend/modules/voice/types.go`; OpenAI input and output adapters:
+  `backend/modules/voice_openai/realtime.go` and `speech_stream.go`. The default
+  dashboard mode `streaming_tts` uses Realtime only for input, sends backend-approved
+  text to dedicated Speech TTS, converts WAV incrementally to PCMU 8 kHz, and forwards
+  each chunk to Twilio before stream completion. Replies use a bounded FIFO,
+  application request IDs, explicit cancellation, Twilio clear/mark, and stale-generation
+  rejection. `buffered_realtime` is the legacy fallback that still binds provider
+  response IDs and validates the complete output transcript before release. GA input
+  requires transcription logprobs and applies
   profile-aware mean, low-tail, and VAD-coherence admission; confidence-rejected
   transcripts do not enter conversation state. Noisy/balanced input also uses
   near-field noise reduction. Accepted and rejected transcript timing events
   retain PII-free decision/reason, profile, item ID, mean/min logprob, token count,
-  and VAD duration diagnostics when available. Output failures retain correlation
+  and VAD duration diagnostics when available. Speech output timing/failures retain correlation
   IDs, counts, and salted canonical hashes without transcript/audio bodies. The
   owner-scoped Calls timeline exposes these whitelisted diagnostics. Transcription steering is
   a concise salon/catalog/alias keyword list rather than conversational example
@@ -464,7 +471,7 @@ dashboard sidebar. Local runtime port is `3091`; production domain is
 | Twilio signature, webhook, TwiML, recording, media stream, stream fallback | `backend/modules/voice_twilio` | `backend/modules/voice`, phone demo memo |
 | OpenAI STT, TTS, realtime, model, voice, guarded reply, background noise, false transcript, transcript logprob, repeated progress reply, spoken fact mismatch, realtime transport fallback | `backend/modules/voice_openai`, `backend/modules/voice`, `backend/modules/voice_twilio/handler.go` | integration config, conversation runtime, realtime event timeline, voice tests |
 | AI tone, speaking style, concise/warm/professional | `backend/modules/salon`, `conversation.RuntimeConfig`, `voice.ModelRequest` | Settings UI, config transfer |
-| integration config, provider secrets, dashboard settings, env fallback | `backend/modules/integration_config` | deployment docs, integrations UI |
+| integration config, provider secrets, dashboard settings, active provider config, env fallback | `backend/modules/integration_config`, `/dashboard/integrations`, authenticated integration/status APIs | runtime resolver code first; deployment docs only for an explicitly scoped legacy fallback task |
 | public catalog, published slug, public services, landing page, staff privacy | `backend/modules/public_catalog`, `landing/app/s/[slug]/page.tsx` | Settings UI public catalog card |
 | config transfer, export, import preview, request id, duplicate import | `backend/modules/config_transfer` | Settings/onboarding import UI |
 | archive, redaction, retention, transcript PII, call audio cleanup | conversation repository/retention processor | Calls UI lifecycle filters, worker |

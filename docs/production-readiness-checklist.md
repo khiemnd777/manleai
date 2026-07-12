@@ -184,7 +184,9 @@
 - [x] Add Twilio Media Streams and OpenAI Realtime adapter path with completed transcripts routed back through the same conversation engine and booking service.
 - [x] Correlate realtime response creation, audio, cancellation, and completion by application request ID and provider response ID; serialize replies through a bounded FIFO and reject stale audio.
 - [x] Fail closed on missing GA transcription confidence, apply profile-aware mean/low-tail/VAD-coherence admission, and keep rejected noise out of conversation state.
-- [x] Buffer isolated GA realtime output and verify canonical operational facts in its completed audio transcript before releasing audio to Twilio.
+- [x] Retain the legacy buffered-Realtime rollback path that verifies canonical operational facts in the completed audio transcript before release.
+- [x] Add dashboard-selectable low-latency streaming TTS that keeps Realtime input-only, converts provider WAV incrementally to Twilio PCMU 8 kHz, forwards the first chunk before completion, and retains buffered Realtime as a legacy rollback mode.
+- [x] Cancel streaming speech on barge-in, clear Twilio playback, reject stale generations, and close terminal replies only after a Twilio playback mark or timeout.
 - [x] Expose owner-scoped, PII-free realtime admission and output-validation diagnostics in the Calls timeline without transcript or audio bodies.
 - [x] Keep operational facts deterministic and allow guarded LLM rewriting only for explicitly style-only replies.
 - [x] Compare services from active-provider synced catalog facts, require explicit selection after consultation, and hand health-suitability questions to the owner without medical advice.

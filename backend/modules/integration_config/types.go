@@ -69,6 +69,7 @@ type OpenAISettingsResponse struct {
 	ReplyModel           string     `json:"reply_model"`
 	SpeechModel          string     `json:"speech_model"`
 	SpeechVoice          string     `json:"speech_voice"`
+	SpeechOutputMode     string     `json:"speech_output_mode"`
 	RealtimeEnabled      bool       `json:"realtime_enabled"`
 	RealtimeModel        string     `json:"realtime_model"`
 	RealtimeVoice        string     `json:"realtime_voice"`
@@ -109,6 +110,7 @@ type UpdateOpenAISettingsRequest struct {
 	ReplyModel           string `json:"reply_model"`
 	SpeechModel          string `json:"speech_model"`
 	SpeechVoice          string `json:"speech_voice"`
+	SpeechOutputMode     string `json:"speech_output_mode"`
 	RealtimeEnabled      bool   `json:"realtime_enabled"`
 	RealtimeModel        string `json:"realtime_model"`
 	RealtimeVoice        string `json:"realtime_voice"`

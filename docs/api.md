@@ -384,8 +384,9 @@ API keys, client secrets, encrypted secrets, or POS connection token state.
       "base_url": "https://api.openai.com/v1",
       "transcription_model": "gpt-4o-mini-transcribe",
       "reply_model": "gpt-4.1-mini",
-      "speech_model": "gpt-4o-mini-tts",
+      "speech_model": "tts-1",
       "speech_voice": "alloy",
+      "speech_output_mode": "streaming_tts",
       "realtime_enabled": true,
       "realtime_model": "gpt-realtime-2",
       "realtime_voice": "alloy",
@@ -633,8 +634,9 @@ configured and whether it came from dashboard storage or environment fallback.
     "base_url": "https://api.openai.com/v1",
     "transcription_model": "gpt-4o-mini-transcribe",
     "reply_model": "gpt-4.1-mini",
-    "speech_model": "gpt-4o-mini-tts",
+    "speech_model": "tts-1",
     "speech_voice": "alloy",
+    "speech_output_mode": "streaming_tts",
     "realtime_enabled": true,
     "realtime_model": "gpt-realtime-2",
     "realtime_voice": "alloy",
@@ -685,8 +687,9 @@ configured and whether it came from dashboard storage or environment fallback.
   "base_url": "https://api.openai.com/v1",
   "transcription_model": "gpt-4o-mini-transcribe",
   "reply_model": "gpt-4.1-mini",
-  "speech_model": "gpt-4o-mini-tts",
+  "speech_model": "tts-1",
   "speech_voice": "alloy",
+  "speech_output_mode": "streaming_tts",
   "realtime_enabled": true,
   "realtime_model": "gpt-realtime-2",
   "realtime_voice": "alloy",
@@ -1660,7 +1663,7 @@ Returns owner-scoped live voice, phone booking, and external AI provider readine
       "provider": "openai",
       "configured": true,
       "ready": true,
-      "model": "gpt-4o-mini-tts",
+      "model": "tts-1",
       "voice": "alloy"
     },
     "realtime": {
@@ -1752,7 +1755,11 @@ RecordingUrl
 
 `GET /api/voice/twilio/stream`
 
-Public Twilio Media Streams WebSocket endpoint for realtime audio mode. The endpoint is not configured directly in Twilio Console; the incoming webhook returns `<Connect><Stream>` with signed custom parameters for the existing call session. The stream forwards Twilio g711 audio frames to the configured OpenAI Realtime adapter, routes accepted completed transcripts through the same backend conversation engine and booking service, then streams backend-approved audio responses back to Twilio. GA sessions request `item.input_audio_transcription.logprobs`; noisy-salon and balanced profiles also enable near-field input noise reduction. Admission is profile-aware and fail-closed: missing/invalid confidence metadata, low mean confidence, low-tail token confidence, or transcript density inconsistent with VAD duration is audited as `transcript_rejected_low_confidence`, leaves the conversation draft unchanged, and receives a concise repeat prompt. Accepted and rejected transcript timing events record PII-free `item_id`, decision/reason, profile, mean/min logprob, token count, and VAD duration when available; timing payloads do not store transcript or audio bodies. Transcription steering uses concise salon, catalog, pending-candidate, and alias keyword lists instead of example booking sentences. Backend replies enter a bounded FIFO and each GA `response.create` carries an application request ID and uses an out-of-band `conversation: none` context. A generic backend progress reply is delayed for three seconds and can be spoken at most once per call. GA Realtime sessions require `response.created`, audio deltas, output-audio transcript, and terminal events to match the active provider response ID. Audio is held in a bounded buffer and released to Twilio only when the completed output transcript matches the backend-approved operational facts after canonical normalization of punctuation, contractions, spoken numbers, times, dates, and digit sequences. Missing output transcript, missing identity, mismatched facts, duplicate identity, failed/incomplete responses, or buffer overflow close the realtime stream without releasing unapproved audio; while the conversation session remains active, the signed fallback redirect resumes the last backend-approved prompt through recording or gather transport and does not create or imply an owner handoff. Caller barge-in clears Twilio playback and sends `response.cancel` only after protected playback has passed the configured guard. Legacy preview sessions retain the compatibility streaming branch. Operational facts are not sent through style rewriting. If realtime configuration is missing, voice status falls back to the recording or gather path.
+Public Twilio Media Streams WebSocket endpoint for realtime audio mode. The endpoint is not configured directly in Twilio Console; the incoming webhook returns `<Connect><Stream>` with signed custom parameters for the existing call session. The stream forwards Twilio g711 audio frames to the configured OpenAI Realtime adapter for VAD and transcription, then routes accepted completed transcripts through the same backend conversation engine and booking service. GA sessions request `item.input_audio_transcription.logprobs`; noisy-salon and balanced profiles also enable near-field input noise reduction. Admission is profile-aware and fail-closed: missing/invalid confidence metadata, low mean confidence, low-tail token confidence, or transcript density inconsistent with VAD duration is audited as `transcript_rejected_low_confidence`, leaves the conversation draft unchanged, and receives a concise repeat prompt. Accepted and rejected transcript timing events record PII-free `item_id`, decision/reason, profile, mean/min logprob, token count, and VAD duration when available; timing payloads do not store transcript or audio bodies. Transcription steering uses concise salon, catalog, pending-candidate, and alias keyword lists instead of example booking sentences.
+
+With dashboard setting `speech_output_mode=streaming_tts`, backend-approved text is sent to the dedicated Speech API. WAV input is parsed incrementally, converted to raw PCMU 8 kHz frames, and each frame is sent to Twilio immediately; playback does not wait for the Speech response to complete or for a Realtime `response.done` event. A bounded FIFO preserves reply order. Caller barge-in clears Twilio playback, cancels the active speech request after the playback guard, and rejects late chunks by generation. Terminal replies use a Twilio `mark` before the stream closes. PII-free stages include `speech_stopped`, `transcript_admitted`, `backend_turn_start`, `backend_turn_done`, `tts_request_start`, `tts_first_provider_chunk`, `twilio_first_media_sent`, `tts_stream_done`, and playback completion through the terminal mark. Speech output failures close through the signed recording/gather fallback without changing booking state or creating a second booking attempt.
+
+`speech_output_mode=buffered_realtime` is a legacy fallback. Only that mode uses Realtime `response.create`, response identity binding, complete output-transcript validation, and release after `response.done`. Operational facts are never allowed to bypass backend/POS ownership in either mode. If realtime configuration is missing, voice status falls back to the recording or gather path.
 
 `GET /api/voice/audio/:id`
 

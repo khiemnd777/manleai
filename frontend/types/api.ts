@@ -121,6 +121,7 @@ export type OpenAIIntegrationConfig = {
   reply_model: string;
   speech_model: string;
   speech_voice: string;
+  speech_output_mode: "streaming_tts" | "buffered_realtime" | string;
   realtime_enabled: boolean;
   realtime_model: string;
   realtime_voice: string;

@@ -572,6 +572,7 @@ func upsertOpenAIConfig(ctx context.Context, tx *sql.Tx, salonID string, cfg int
 		"reply_model":            cfg.ReplyModel,
 		"speech_model":           cfg.SpeechModel,
 		"speech_voice":           cfg.SpeechVoice,
+		"speech_output_mode":     cfg.SpeechOutputMode,
 		"realtime_enabled":       boolString(cfg.RealtimeEnabled),
 		"realtime_model":         cfg.RealtimeModel,
 		"realtime_voice":         cfg.RealtimeVoice,

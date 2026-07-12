@@ -131,6 +131,7 @@ type OpenAIConfigForm = {
   reply_model: string;
   speech_model: string;
   speech_voice: string;
+  speech_output_mode: "streaming_tts" | "buffered_realtime";
   realtime_enabled: boolean;
   realtime_model: string;
   realtime_voice: string;
@@ -176,8 +177,9 @@ const defaultOpenAIConfigForm: OpenAIConfigForm = {
   base_url: "https://api.openai.com/v1",
   transcription_model: "gpt-4o-mini-transcribe",
   reply_model: "gpt-4.1-mini",
-  speech_model: "gpt-4o-mini-tts",
+  speech_model: "tts-1",
   speech_voice: "alloy",
+  speech_output_mode: "streaming_tts",
   realtime_enabled: false,
   realtime_model: "gpt-realtime-2",
   realtime_voice: "alloy",
@@ -1185,7 +1187,11 @@ function ProviderConfigurationPanel({
         <ConfigStatusBlock
           label="OpenAI Voice AI"
           status={openAI?.configured ? "configured" : openAI?.enabled ? "needs_config" : "disabled"}
-          detail={openAI?.configured ? `STT, reply, speech, and${openAI.realtime_enabled ? "" : " optional"} realtime settings are ready.` : openAI?.enabled ? "API key and models are required." : "External AI voice is off."}
+          detail={openAI?.configured
+            ? openAI.realtime_enabled && openAI.speech_output_mode === "streaming_tts"
+              ? "STT and low-latency streaming speech are ready."
+              : `STT, reply, speech, and${openAI.realtime_enabled ? "" : " optional"} realtime settings are ready.`
+            : openAI?.enabled ? "API key and models are required." : "External AI voice is off."}
         />
       </div>
 
@@ -1422,6 +1428,23 @@ function ProviderConfigurationPanel({
                 disabled={busy !== "" || !openAIForm.enabled}
               />
             </Field>
+            <Field label="Speech output mode">
+              <select
+                className="h-10 w-full rounded-md border border-line bg-panel px-3 text-sm text-ink"
+                value={openAIForm.speech_output_mode}
+                onChange={(event) => setOpenAIForm((current) => ({
+                  ...current,
+                  speech_output_mode: event.target.value as OpenAIConfigForm["speech_output_mode"]
+                }))}
+                disabled={busy !== "" || !openAIForm.enabled}
+              >
+                <option value="streaming_tts">Low-latency streaming TTS (recommended)</option>
+                <option value="buffered_realtime">Buffered Realtime output (legacy fallback)</option>
+              </select>
+              <p className="mt-1 text-xs leading-5 text-muted">
+                Streaming TTS sends approved backend speech to the caller as audio arrives. The legacy mode waits for full Realtime output validation.
+              </p>
+            </Field>
           </div>
           <div className="rounded-md border border-line p-4">
             <div className="flex flex-col justify-between gap-3 md:flex-row md:items-start">
@@ -1638,6 +1661,7 @@ function openAIConfigToForm(config?: OpenAIIntegrationConfig): OpenAIConfigForm 
     reply_model: config.reply_model || defaultOpenAIConfigForm.reply_model,
     speech_model: config.speech_model || defaultOpenAIConfigForm.speech_model,
     speech_voice: config.speech_voice || defaultOpenAIConfigForm.speech_voice,
+    speech_output_mode: config.speech_output_mode === "buffered_realtime" ? "buffered_realtime" : "streaming_tts",
     realtime_enabled: config.realtime_enabled,
     realtime_model: config.realtime_model || defaultOpenAIConfigForm.realtime_model,
     realtime_voice: config.realtime_voice || defaultOpenAIConfigForm.realtime_voice,
@@ -1684,6 +1708,7 @@ function emptyIntegrationConfigs(): IntegrationConfigs {
       reply_model: defaultOpenAIConfigForm.reply_model,
       speech_model: defaultOpenAIConfigForm.speech_model,
       speech_voice: defaultOpenAIConfigForm.speech_voice,
+      speech_output_mode: defaultOpenAIConfigForm.speech_output_mode,
       realtime_enabled: defaultOpenAIConfigForm.realtime_enabled,
       realtime_model: defaultOpenAIConfigForm.realtime_model,
       realtime_voice: defaultOpenAIConfigForm.realtime_voice,

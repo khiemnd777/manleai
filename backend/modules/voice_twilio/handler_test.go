@@ -2,6 +2,7 @@ package voice_twilio
 
 import (
 	"context"
+	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -256,6 +257,86 @@ func TestForwardRealtimeEventsQueuesReplyUntilResponseDone(t *testing.T) {
 	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
 	if got := waitForSpeak(t, realtime); got != "What name should I put on the appointment?" {
 		t.Fatalf("queued speak = %q", got)
+	}
+	assertNoClose(t, closed)
+}
+
+func TestStreamingSpeechSendsFirstMediaBeforeSpeechStreamCompletes(t *testing.T) {
+	adapter, _, store, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("What day works for you?", conversation.StatusActive, conversation.OutcomeCollecting))
+	streamer := &fakeStreamingSpeechProvider{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	service := voice.NewService(store, engine, config.VoiceConfig{
+		Provider: voice.ProviderTwilio,
+		AI: config.VoiceAIConfig{Provider: voice.ProviderOpenAI, OpenAI: config.OpenAIVoiceConfig{
+			SpeechVoice: "alloy",
+		}},
+	}, voice.AIProviders{StreamingTTS: streamer})
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes := make(chan any, 8)
+
+	go handler.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
+		ctx, cancel, closeStreamRecorder(make(chan string, 1)), realtime,
+		func(value any) error { writes <- value; return nil },
+		"MZ123", "CA123", "session_phone", "+13125550101", "+13125550102",
+		"Welcome to Lotus Nails.", map[string]struct{}{}, nil,
+		realtimeTerminalDrainTimeout, 0, realtimeBackendProgressDelay, time.Now,
+		&streamingSpeechOutput{salonID: "salon_1"},
+	)
+
+	select {
+	case <-streamer.started:
+	case <-time.After(time.Second):
+		t.Fatal("streaming speech did not start")
+	}
+	got := waitForWrite(t, writes)
+	media, ok := got.(twilioOutboundMedia)
+	if !ok {
+		t.Fatalf("first write = %#v, want Twilio media", got)
+	}
+	if decoded, err := base64.StdEncoding.DecodeString(media.Media.Payload); err != nil || string(decoded) != "first-frame" {
+		t.Fatalf("first media payload = %q, err = %v", media.Media.Payload, err)
+	}
+	assertNoSpeak(t, realtime)
+	close(streamer.release)
+}
+
+func TestStreamingSpeechBargeInClearsTwilioAndCancelsSpeech(t *testing.T) {
+	adapter, _, store, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("What day works for you?", conversation.StatusActive, conversation.OutcomeCollecting))
+	streamer := &fakeStreamingSpeechProvider{started: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{}, 1)}
+	service := voice.NewService(store, engine, config.VoiceConfig{
+		Provider: voice.ProviderTwilio,
+		AI:       config.VoiceAIConfig{Provider: voice.ProviderOpenAI, OpenAI: config.OpenAIVoiceConfig{SpeechVoice: "alloy"}},
+	}, voice.AIProviders{StreamingTTS: streamer})
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes := make(chan any, 8)
+	closed := make(chan string, 1)
+
+	go handler.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
+		ctx, cancel, closeStreamRecorder(closed), realtime,
+		func(value any) error { writes <- value; return nil },
+		"MZ123", "CA123", "session_phone", "+13125550101", "+13125550102",
+		"Welcome to Lotus Nails.", map[string]struct{}{}, nil,
+		realtimeTerminalDrainTimeout, 0, realtimeBackendProgressDelay, time.Now,
+		&streamingSpeechOutput{salonID: "salon_1"},
+	)
+
+	_ = waitForWrite(t, writes)
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStarted, AudioStartMS: 200}
+	if got := waitForWrite(t, writes); got != (twilioClearMessage{Event: "clear", StreamSid: "MZ123"}) {
+		t.Fatalf("barge-in write = %#v, want Twilio clear", got)
+	}
+	select {
+	case <-streamer.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("barge-in did not cancel streaming speech")
 	}
 	assertNoClose(t, closed)
 }
@@ -1168,6 +1249,38 @@ func (f *fakeTwilioConversationEngine) TranscriptionContext(ctx context.Context,
 
 type fakeTwilioRealtimeProvider struct {
 	configured bool
+}
+
+type fakeStreamingSpeechProvider struct {
+	started  chan struct{}
+	release  chan struct{}
+	canceled chan struct{}
+}
+
+func (f *fakeStreamingSpeechProvider) Name() string { return voice.ProviderOpenAI }
+
+func (f *fakeStreamingSpeechProvider) Configured(context.Context, string) bool { return true }
+
+func (f *fakeStreamingSpeechProvider) StreamSpeech(ctx context.Context, _ string, _ voice.SpeechStreamRequest, onChunk func(voice.SpeechChunk) error) (voice.SpeechStreamResult, error) {
+	if err := onChunk(voice.SpeechChunk{Sequence: 0, Audio: []byte("first-frame")}); err != nil {
+		return voice.SpeechStreamResult{}, err
+	}
+	close(f.started)
+	select {
+	case <-f.release:
+	case <-ctx.Done():
+		if f.canceled != nil {
+			select {
+			case f.canceled <- struct{}{}:
+			default:
+			}
+		}
+		return voice.SpeechStreamResult{}, ctx.Err()
+	}
+	if err := onChunk(voice.SpeechChunk{Sequence: 1, Audio: []byte("last-frame")}); err != nil {
+		return voice.SpeechStreamResult{}, err
+	}
+	return voice.SpeechStreamResult{ProviderRequestID: "provider_req_1", Encoding: "audio/x-mulaw", SampleRate: 8000, ChunkCount: 2, AudioBytes: 21}, nil
 }
 
 func (f fakeTwilioRealtimeProvider) Name() string {

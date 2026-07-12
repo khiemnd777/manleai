@@ -144,6 +144,34 @@ type TextToSpeechProvider interface {
 	Synthesize(ctx context.Context, salonID string, text string, voice string) ([]byte, error)
 }
 
+// StreamingSpeechProvider renders backend-approved text without generating a
+// new assistant response. Chunks are raw audio in the encoding declared by
+// SpeechStreamResult and are delivered in sequence order.
+type StreamingSpeechProvider interface {
+	Name() string
+	Configured(ctx context.Context, salonID string) bool
+	StreamSpeech(ctx context.Context, salonID string, req SpeechStreamRequest, onChunk func(SpeechChunk) error) (SpeechStreamResult, error)
+}
+
+type SpeechStreamRequest struct {
+	RequestID string
+	Text      string
+	Voice     string
+}
+
+type SpeechChunk struct {
+	Sequence int
+	Audio    []byte
+}
+
+type SpeechStreamResult struct {
+	ProviderRequestID string
+	Encoding          string
+	SampleRate        int
+	ChunkCount        int
+	AudioBytes        int
+}
+
 type RealtimeSpeechProvider interface {
 	Name() string
 	Configured(ctx context.Context, salonID string) bool
@@ -359,10 +387,11 @@ type Status struct {
 }
 
 type AIProviders struct {
-	STT      SpeechToTextProvider
-	LLM      LanguageModelProvider
-	TTS      TextToSpeechProvider
-	Realtime RealtimeSpeechProvider
+	STT          SpeechToTextProvider
+	LLM          LanguageModelProvider
+	TTS          TextToSpeechProvider
+	StreamingTTS StreamingSpeechProvider
+	Realtime     RealtimeSpeechProvider
 }
 
 type AudioOutputRecord struct {

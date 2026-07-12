@@ -181,42 +181,23 @@ containers to ports `80` or `443`.
 ## Dashboard-Managed Provider Configuration
 
 Square Appointments, Twilio, and OpenAI credentials are configured in the
-Integrations dashboard and stored encrypted per salon. The environment values
-below are optional bootstrap or fallback values:
+Integrations dashboard and stored encrypted per salon in
+`salon_integration_configs`. Repository env files and env templates contain
+infrastructure settings only; do not add provider credentials, provider model
+settings, webhook paths, transports, or provider URLs to them.
 
-```txt
-SQUARE_ENVIRONMENT
-SQUARE_CLIENT_ID
-SQUARE_CLIENT_SECRET
-SQUARE_REDIRECT_URL
-SQUARE_API_VERSION
-VOICE_PROVIDER
-VOICE_PUBLIC_BASE_URL
-VOICE_TWILIO_AUTH_TOKEN
-VOICE_TWILIO_INCOMING_PATH
-VOICE_TWILIO_TURN_PATH
-VOICE_TWILIO_RECORDING_PATH
-VOICE_TWILIO_STREAM_PATH
-VOICE_TWILIO_VOICE_TRANSPORT
-VOICE_AI_PROVIDER
-VOICE_OPENAI_API_KEY
-VOICE_OPENAI_BASE_URL
-VOICE_OPENAI_TRANSCRIPTION_MODEL
-VOICE_OPENAI_REPLY_MODEL
-VOICE_OPENAI_SPEECH_MODEL
-VOICE_OPENAI_SPEECH_VOICE
-VOICE_OPENAI_REALTIME_ENABLED
-VOICE_OPENAI_REALTIME_MODEL
-VOICE_OPENAI_REALTIME_VOICE
-VOICE_OPENAI_REALTIME_INSTRUCTIONS
-```
+For active-runtime diagnosis, use `/dashboard/integrations`,
+`GET /api/salons/:id/integration-configs`, the relevant readiness/debug endpoint
+such as `GET /api/salons/:id/voice/status`, persisted provider records, and the
+runtime resolver code. Never use `project.env`, `.env`, Compose defaults,
+GitHub secrets, or process environment values as evidence of the active
+salon-scoped provider configuration.
 
-Do not troubleshoot active Square, Twilio, or OpenAI provider behavior by
-editing `project.env` before checking the Integrations dashboard. When a salon
-has dashboard-saved provider configuration, that encrypted salon-scoped config
-takes precedence over `project.env`, `.env`, and GitHub deployment secrets.
-Keep provider secrets out of production env files unless intentionally using
-the legacy fallback path for a fresh deployment with no saved dashboard config.
+The backend retains legacy environment fallback code for compatibility. That
+path is not the normal production configuration workflow and is intentionally
+absent from repository env templates. Inspect it only for an explicitly scoped
+bootstrap/legacy task after proving that the salon has no stored provider
+configuration.
 
 The configured OpenAI reply model may serve two guarded roles: style-only
 rewriting for eligible safe replies, and strict structured interpretation of
@@ -237,8 +218,8 @@ clarification/handoff behavior.
   the same SQL migrations. The worker runs with `AUTO_MIGRATE=false` and starts
   only after the API healthcheck succeeds.
 - Configure the Square redirect URL in the Integrations dashboard to the deployed API callback.
-- Configure the dashboard Twilio public base URL to the deployed API origin used in Twilio webhook settings; `VOICE_PUBLIC_BASE_URL` is only the fallback source when no dashboard Twilio config exists.
-- Configure realtime phone mode from the Integrations dashboard: Twilio `voice_transport=realtime_stream`, Twilio stream path, OpenAI realtime model/voice, and the realtime noise profile. The env names above are fallback-only values.
+- Configure the dashboard Twilio public base URL to the deployed API origin used in Twilio webhook settings.
+- Configure realtime phone mode from the Integrations dashboard: Twilio `voice_transport=realtime_stream`; OpenAI realtime model/voice and noise profile for input; and `speech_output_mode=streaming_tts` for low-latency backend-approved output. `buffered_realtime` is a legacy rollback mode.
 - Keep Twilio and OpenAI secrets out of logs and docs; dashboard responses expose only configured/source metadata.
 - Enable OpenAI voice AI in the Integrations dashboard only when external AI voice turns should be enabled.
 - Keep OpenAI model and voice settings configurable through the dashboard so model changes do not require code changes.

@@ -55,22 +55,9 @@ does not require an owner login for public catalog reads.
 
 ## External Voice AI
 
-The local app can run without external AI providers. To exercise Milestone 6 voice provider readiness and recording-mode turns, configure OpenAI in the Integrations dashboard. The legacy env values below remain optional fallback values:
+The local app can run without external AI providers. To exercise voice provider readiness and recording-mode turns, configure OpenAI in the Integrations dashboard. Provider models, voices, output mode, and secrets are dashboard/database configuration and must not be placed in env files.
 
-```bash
-VOICE_AI_PROVIDER=openai
-VOICE_OPENAI_API_KEY=...
-VOICE_OPENAI_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
-VOICE_OPENAI_REPLY_MODEL=gpt-4.1-mini
-VOICE_OPENAI_SPEECH_MODEL=gpt-4o-mini-tts
-VOICE_OPENAI_SPEECH_VOICE=alloy
-VOICE_OPENAI_REALTIME_ENABLED=false
-VOICE_OPENAI_REALTIME_MODEL=gpt-realtime-2
-VOICE_OPENAI_REALTIME_VOICE=alloy
-VOICE_OPENAI_REALTIME_NOISE_PROFILE=noisy_salon
-```
-
-When external STT is configured, Twilio can use `/api/voice/twilio/recording`; otherwise the existing `/api/voice/twilio/turn` speech gather path remains available. For lower latency, configure Twilio `voice_transport=realtime_stream` and OpenAI realtime settings in the Integrations dashboard; local env values are fallback-only unless no dashboard config exists.
+When external STT is configured, Twilio can use `/api/voice/twilio/recording`; otherwise the existing `/api/voice/twilio/turn` speech gather path remains available. For lower latency, configure Twilio `voice_transport=realtime_stream`, OpenAI Realtime input, and `Low-latency streaming TTS` output in the Integrations dashboard.
 
 ## Simulate Twilio Phone Booking Webhooks
 

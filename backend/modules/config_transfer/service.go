@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/manleai/ai-receptionist/internal/config"
 	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/salon"
@@ -575,6 +576,7 @@ func planIntegrations(plan *importPlan) {
 	fieldChange(plan, SectionIntegrations, "openai.reply_model", target.OpenAI.ReplyModel, incoming.OpenAI.ReplyModel)
 	fieldChange(plan, SectionIntegrations, "openai.speech_model", target.OpenAI.SpeechModel, incoming.OpenAI.SpeechModel)
 	fieldChange(plan, SectionIntegrations, "openai.speech_voice", target.OpenAI.SpeechVoice, incoming.OpenAI.SpeechVoice)
+	fieldChange(plan, SectionIntegrations, "openai.speech_output_mode", target.OpenAI.SpeechOutputMode, incoming.OpenAI.SpeechOutputMode)
 	fieldChange(plan, SectionIntegrations, "openai.realtime_enabled", boolString(target.OpenAI.RealtimeEnabled), boolString(incoming.OpenAI.RealtimeEnabled))
 	fieldChange(plan, SectionIntegrations, "openai.realtime_model", target.OpenAI.RealtimeModel, incoming.OpenAI.RealtimeModel)
 	fieldChange(plan, SectionIntegrations, "openai.realtime_voice", target.OpenAI.RealtimeVoice, incoming.OpenAI.RealtimeVoice)
@@ -925,8 +927,9 @@ func normalizeIntegrationConfigs(configs integrationconfig.IntegrationConfigsRes
 	configs.OpenAI.BaseURL = defaultString(strings.TrimRight(strings.TrimSpace(configs.OpenAI.BaseURL), "/"), "https://api.openai.com/v1")
 	configs.OpenAI.TranscriptionModel = defaultString(strings.TrimSpace(configs.OpenAI.TranscriptionModel), "gpt-4o-mini-transcribe")
 	configs.OpenAI.ReplyModel = defaultString(strings.TrimSpace(configs.OpenAI.ReplyModel), "gpt-4.1-mini")
-	configs.OpenAI.SpeechModel = defaultString(strings.TrimSpace(configs.OpenAI.SpeechModel), "gpt-4o-mini-tts")
+	configs.OpenAI.SpeechModel = defaultString(strings.TrimSpace(configs.OpenAI.SpeechModel), "tts-1")
 	configs.OpenAI.SpeechVoice = defaultString(strings.TrimSpace(configs.OpenAI.SpeechVoice), "alloy")
+	configs.OpenAI.SpeechOutputMode = config.NormalizeOpenAISpeechOutputMode(configs.OpenAI.SpeechOutputMode)
 	configs.OpenAI.RealtimeModel = strings.TrimSpace(configs.OpenAI.RealtimeModel)
 	configs.OpenAI.RealtimeVoice = defaultString(strings.TrimSpace(configs.OpenAI.RealtimeVoice), configs.OpenAI.SpeechVoice)
 	configs.OpenAI.RealtimeNoiseProfile = strings.TrimSpace(configs.OpenAI.RealtimeNoiseProfile)

@@ -10,7 +10,7 @@ Customer calls -> AI answers through Twilio -> customer asks for a booking -> AI
 
 - Guide one configuration step at a time. Do not dump every step unless the user asks for the full checklist.
 - After each step, ask the user to confirm what is done before moving on.
-- Never ask the user to paste secrets into chat. Tell them which Integrations dashboard field or provider console field needs the secret. Mention env variables only when explicitly using the legacy local fallback path before dashboard config exists.
+- Never ask the user to paste secrets into chat. Tell them which Integrations dashboard field or provider console field needs the secret. Do not inspect or use env files to configure or diagnose active provider behavior.
 - Never say the demo is ready until `GET /api/salons/:id/voice/status` returns both `ready: true` and `phone_booking_ready: true`.
 - Keep Square as the first real POS provider. Do not claim generic POS support for this demo.
 - Keep the POS-first invariant explicit: no confirmed appointment unless Square returns a POS booking ID.
@@ -18,8 +18,9 @@ Customer calls -> AI answers through Twilio -> customer asks for a booking -> AI
 
 ## Source Of Truth
 
-- Backend env names: `backend/.env.example` for infrastructure and legacy provider fallback only.
-- Dashboard provider config: `/dashboard/integrations` and `GET /api/salons/:id/integration-configs`.
+- Backend env files: infrastructure only; they do not contain provider configuration.
+- Dashboard provider config: `/dashboard/integrations` and `GET /api/salons/:id/integration-configs` are the source of truth.
+- Runtime readiness/debug evidence: `GET /api/salons/:id/voice/status` and the owner-scoped Calls realtime timeline.
 - Local commands: `docs/local-development.md`
 - Deployment secrets: `docs/deployment.md`
 - Square behavior: `docs/square-integration.md`
@@ -112,9 +113,8 @@ Square redirect URL: https://<public-api-url>/api/integrations/square/callback
 
 If deployed, use the deployed API origin for both values.
 
-Do not use the frontend URL for these two dashboard fields. The env values
-`VOICE_PUBLIC_BASE_URL` and `SQUARE_REDIRECT_URL` are fallback-only values when
-no dashboard provider config exists.
+Do not use the frontend URL for these two dashboard fields and do not copy the
+values into env files. Save them in the Integrations dashboard.
 
 ## Step 3 - Core Backend Env
 
@@ -132,9 +132,8 @@ AUTO_MIGRATE=true
 ```
 
 For deployed/staging, replace `CORS_ALLOWED_ORIGINS` and `FRONTEND_URL` with the deployed frontend origin.
-Do not put Square, Twilio, or OpenAI provider secrets here unless intentionally
-using the legacy fallback path before the Integrations dashboard has saved
-provider config.
+Do not put Square, Twilio, or OpenAI provider settings or secrets in env files.
+Save them through the Integrations dashboard.
 
 ## Step 4 - Square Configuration
 
@@ -155,10 +154,6 @@ In the ManleAI Integrations dashboard, Square tab:
 - `Redirect URL`: `https://<public-api-url>/api/integrations/square/callback`
 - `Square API version`: `2026-05-20`
 - `Square API base URL`: blank, or `https://connect.squareupsandbox.com`
-
-Legacy env fallback names, used only when no dashboard Square config exists:
-`SQUARE_ENVIRONMENT`, `SQUARE_CLIENT_ID`, `SQUARE_CLIENT_SECRET`,
-`SQUARE_REDIRECT_URL`, and `SQUARE_API_VERSION`.
 
 The adapter requests these Square scopes:
 
@@ -284,12 +279,6 @@ In the ManleAI Integrations dashboard, Twilio tab:
 - `Stream path`: `/api/voice/twilio/stream`
 - `Voice transport`: `recording` for the legacy recording loop, or `realtime_stream` for Twilio Media Streams + OpenAI Realtime.
 
-Legacy env fallback names, used only when no dashboard Twilio config exists:
-`VOICE_PROVIDER`, `VOICE_PUBLIC_BASE_URL`, `VOICE_TWILIO_AUTH_TOKEN`,
-`VOICE_TWILIO_INCOMING_PATH`, `VOICE_TWILIO_TURN_PATH`, and
-`VOICE_TWILIO_RECORDING_PATH`, `VOICE_TWILIO_STREAM_PATH`, and
-`VOICE_TWILIO_VOICE_TRANSPORT`.
-
 In Twilio phone number voice settings:
 
 ```txt
@@ -303,8 +292,8 @@ call-session parameters when `Voice transport` is `realtime_stream` and OpenAI
 Realtime is ready.
 
 Twilio webhook signature verification uses the dashboard-saved Twilio auth
-token first, then `VOICE_TWILIO_AUTH_TOKEN` only as fallback. If the token is
-wrong, Twilio webhooks return `TWILIO_SIGNATURE_INVALID`.
+token. If the token is wrong, Twilio webhooks return
+`TWILIO_SIGNATURE_INVALID`.
 
 The salon phone in the dashboard/database must match the Twilio number receiving the call. The backend routes inbound calls by matching Twilio `To` to `salons.phone`.
 
@@ -317,21 +306,15 @@ The local app can run Twilio speech `<Gather>` without OpenAI STT/TTS. For a ful
 - `Base URL`: `https://api.openai.com/v1`
 - `Transcription model`: `gpt-4o-mini-transcribe`
 - `Reply model`: `gpt-4.1-mini`
-- `Speech model`: `gpt-4o-mini-tts`
+- `Speech model`: `tts-1`
 - `Speech voice`: `alloy`
+- `Speech output mode`: `Low-latency streaming TTS (recommended)`; use buffered Realtime only as a legacy rollback mode
 - Optional realtime mode:
   - Enable realtime
   - `Realtime model`: `gpt-realtime-2`
   - `Realtime voice`: `alloy`
   - `Noise profile`: `Noisy salon (recommended)` unless the call test is in a quiet room
   - `Realtime instructions`: optional non-secret operating notes for the audio bridge
-
-Legacy env fallback names, used only when no dashboard OpenAI config exists:
-`VOICE_AI_PROVIDER`, `VOICE_OPENAI_API_KEY`, `VOICE_OPENAI_BASE_URL`,
-`VOICE_OPENAI_TRANSCRIPTION_MODEL`, `VOICE_OPENAI_REPLY_MODEL`,
-`VOICE_OPENAI_SPEECH_MODEL`, `VOICE_OPENAI_SPEECH_VOICE`,
-`VOICE_OPENAI_REALTIME_ENABLED`, `VOICE_OPENAI_REALTIME_MODEL`,
-`VOICE_OPENAI_REALTIME_VOICE`, and `VOICE_OPENAI_REALTIME_INSTRUCTIONS`.
 
 Readiness meaning:
 
@@ -348,22 +331,17 @@ availability checks, or POS-first confirmation wording. Realtime should speak
 backend-approved replies and should not rely on independent realtime
 instructions for tone changes.
 Realtime reply order is backend-owned: each queued reply has an application
-request ID, binds to the provider `response_id`, and ignores late audio from a
-cancelled or prior response. GA input requires confidence metadata and applies
+request ID and ignores late audio from a cancelled or prior generation. GA input requires confidence metadata and applies
 the selected noise profile to mean, low-tail, and VAD-coherence admission; a
 rejected transcript is reprompted without changing conversation state. Barge-in
 must pass the playback guard before clearing Twilio playback and cancelling the
-bound active response. GA output runs out of band from the provider's default
-conversation and is released only when its completed transcript preserves the
-backend-approved facts after canonical spoken-number/time/date normalization.
-A missing transcript, failed, incomplete, conflicting, or overflowed reply
-must use terminal fallback rather than guessing which audio belongs to the
-current turn.
-For GA Realtime sessions, output audio is buffered until the provider's final
-audio transcript matches the backend-approved reply. Missing or changed
-response identity, transcript mismatch, or audio buffer overflow must not be
-played to the caller. Preview-model sessions use the documented compatibility
-branch and should not be treated as equivalent release evidence.
+active speech stream. In `streaming_tts` mode, OpenAI Realtime is input-only;
+backend-approved text is sent to the Speech endpoint and each PCMU chunk is
+forwarded immediately without waiting for `response.done`. Completion is used
+for audit and queue cleanup. A provider or conversion failure uses terminal
+fallback and never retries booking. `buffered_realtime` is the legacy rollback
+mode: it still binds response identity, buffers complete output, and validates
+the final audio transcript before release.
 
 If OpenAI is not configured, do not block the whole phone webhook demo. Use Twilio Gather / deterministic safe replies for initial testing.
 
@@ -406,13 +384,19 @@ Use the simulator before placing a live call:
 
 ```bash
 cd backend
+read -s TWILIO_SIM_AUTH_TOKEN
 go run ./cmd/twilio-sim \
-  -auth-token "$VOICE_TWILIO_AUTH_TOKEN" \
+  -auth-token "$TWILIO_SIM_AUTH_TOKEN" \
   -to "+16292536211" \
   -turn "I need a classic manicure tomorrow." \
   -turn "The first one works. My name is Linh Tran and my phone is 312-555-0199." \
   -turn "Yes, please book it."
+unset TWILIO_SIM_AUTH_TOKEN
 ```
+
+Enter the Twilio auth token locally when prompted. This transient shell value
+is only for signing the simulator request; do not store it in an env file or
+paste it into chat.
 
 Expected flow:
 
@@ -424,10 +408,10 @@ Expected flow:
 
 If the simulator fails signature verification, compare:
 
-- dashboard Twilio `Public API base URL`, or fallback `VOICE_PUBLIC_BASE_URL`
+- dashboard Twilio `Public API base URL`
 - simulator `-base-url`
 - simulator `-signature-base-url`
-- dashboard Twilio auth token, or fallback `VOICE_TWILIO_AUTH_TOKEN`
+- dashboard Twilio auth token entered locally for `TWILIO_SIM_AUTH_TOKEN`
 
 ## Step 9 - Live Call Test
 
@@ -448,13 +432,12 @@ When simulator passes:
 
 - Wrong Twilio auth token.
 - Public URL mismatch between Twilio request URL and backend verification URL.
-- Webhook path differs from the dashboard Twilio path, or from the fallback env path when no dashboard config exists.
+- Webhook path differs from the dashboard Twilio path.
 
 `VOICE_PROVIDER_NOT_CONFIGURED`
 
 - Dashboard Twilio config is missing, disabled, or incomplete.
-- Fallback `VOICE_PROVIDER` is not `twilio` when no dashboard config exists.
-- Dashboard Twilio auth token is empty, or fallback `VOICE_TWILIO_AUTH_TOKEN` is empty when no dashboard config exists.
+- Dashboard Twilio auth token is empty.
 
 `We could not route this call to a salon`
 
