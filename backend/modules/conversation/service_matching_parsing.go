@@ -714,9 +714,9 @@ func selectedSlotIndex(message string) (int, bool) {
 		index   int
 		signals []string
 	}{
-		{0, []string{"first", "1st", "number 1", "option 1", "the 1"}},
-		{1, []string{"second", "2nd", "number 2", "option 2", "the 2"}},
-		{2, []string{"third", "3rd", "number 3", "option 3", "the 3"}},
+		{0, []string{"first", "1st", "number 1", "number one", "option 1", "option one", "the 1"}},
+		{1, []string{"second", "2nd", "number 2", "number two", "option 2", "option two", "the 2"}},
+		{2, []string{"third", "3rd", "number 3", "number three", "option 3", "option three", "the 3"}},
 	}
 	for _, check := range checks {
 		for _, signal := range check.signals {
@@ -736,6 +736,30 @@ func selectedSlotIndex(message string) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+var (
+	stateScopedOfferedSlotSelectorPattern = regexp.MustCompile(`^(?:(?:i ll|i will|please|let s) (?:take|choose|pick|go with|do|have|want) )?(?:the )?(?:(?:option|number) )?(?:first|second|third|one|two|three|1st|2nd|3rd|1|2|3)(?: (?:one|option))?(?: (?:work|works|for me|is fine|is good|is okay|please|thank you|thanks))*$`)
+	stateScopedSlotAffirmativePattern     = regexp.MustCompile(`^(?:yes|yeah|yep|ok|okay|sure|correct|right|that works|works for me|sounds good)(?: please)?$`)
+)
+
+func stateScopedOfferedSlotSelection(message string, session Session, loc *time.Location) bool {
+	if len(session.OfferedSlots) == 0 || normalizedDialogState(session.DialogState).Pending != nil {
+		return false
+	}
+	normalized := normalizeLooseText(message)
+	if normalized == "" {
+		return false
+	}
+	if stateScopedOfferedSlotSelectorPattern.MatchString(normalized) {
+		selected := selectOfferedSlot(message, session.OfferedSlots, loc)
+		return selected != nil && offeredSlotMatchesServiceSelection(*selected, session)
+	}
+	if stateScopedSlotAffirmativePattern.MatchString(normalized) {
+		selected := selectConfirmedOfferedSlot(message, session, loc)
+		return selected != nil && offeredSlotMatchesServiceSelection(*selected, session)
+	}
+	return false
 }
 
 func selectConfirmedOfferedSlot(message string, session Session, loc *time.Location) *OfferedSlot {

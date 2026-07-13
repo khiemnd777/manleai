@@ -300,8 +300,17 @@ type StartPhoneCallRequest struct {
 }
 
 type MessageRequest struct {
-	Message  string `json:"message"`
-	EventKey string `json:"event_key,omitempty"`
+	Message        string             `json:"message"`
+	EventKey       string             `json:"event_key,omitempty"`
+	TimingRecorder TurnTimingRecorder `json:"-"`
+}
+
+type TurnTimingRecorder func(TurnTiming)
+
+type TurnTiming struct {
+	Stage    string
+	Duration time.Duration
+	Result   string
 }
 
 type VoiceInputHandoffRequest struct {

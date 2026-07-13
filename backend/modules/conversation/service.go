@@ -238,25 +238,43 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	if salonID == "" || ownerUserID == "" || sessionID == "" || message == "" {
 		return nil, ErrValidation
 	}
+	ctx = withTurnTimingRecorder(ctx, req.TimingRecorder)
+	sessionLoadStartedAt := time.Now()
+	sessionLoadRecorded := false
+	recordSessionLoad := func(result string) {
+		if sessionLoadRecorded {
+			return
+		}
+		sessionLoadRecorded = true
+		recordTurnTiming(ctx, TurnTimingStageSessionLoad, sessionLoadStartedAt, result)
+	}
 	session, err := s.store.GetSessionForOwner(ctx, salonID, ownerUserID, sessionID)
 	if err != nil {
+		recordSessionLoad(TurnTimingResultError)
 		return nil, err
 	}
 	if eventKey != "" {
 		if processed, ok, err := s.store.GetSessionByTurnEventKey(ctx, salonID, ownerUserID, sessionID, eventKey); err != nil {
+			recordSessionLoad(TurnTimingResultError)
 			return nil, err
 		} else if ok {
+			recordSessionLoad(TurnTimingResultDeduplicated)
 			return processed, nil
 		}
 	}
 	if session.Status != StatusActive {
+		recordSessionLoad(TurnTimingResultSessionClosed)
 		return nil, ErrSessionClosed
 	}
 	cfg, err := s.store.GetRuntimeConfig(ctx, salonID, ownerUserID)
 	if err != nil {
+		recordSessionLoad(TurnTimingResultError)
 		return nil, err
 	}
+	recordSessionLoad(TurnTimingResultOK)
+	answerContextStartedAt := time.Now()
 	answerCtx, err := s.loadAnswerContext(ctx, salonID)
+	recordTurnTiming(ctx, TurnTimingStageAnswerContext, answerContextStartedAt, turnTimingResult(err))
 	if err != nil {
 		return nil, err
 	}
@@ -339,7 +357,18 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	if catalogUnderstanding := interpretServiceWithCategoryAliases(message, services, serviceAliases, categoryAliases); isServiceInquiry(message, catalogUnderstanding) {
 		serviceUnderstanding = catalogUnderstanding
 	}
-	turnUnderstanding := s.turnUnderstandingForMessage(ctx, *session, message, services, serviceAliases, categoryAliases, staff)
+	turnUnderstanding := TurnUnderstanding{}
+	if stateScopedOfferedSlotSelection(message, *session, loc) {
+		turnUnderstanding = TurnUnderstanding{
+			Goal:       "book_appointment",
+			Confidence: 1,
+			Reason:     "state_scoped_offered_slot_selection",
+			Source:     "deterministic",
+		}
+		recordSkippedTurnTiming(ctx, TurnTimingStageTurnInterpreter, TurnTimingPathStateScoped)
+	} else {
+		turnUnderstanding = s.turnUnderstandingForMessage(ctx, *session, message, services, serviceAliases, categoryAliases, staff)
+	}
 	conversationAct := primaryConversationAct(turnUnderstanding)
 	partySignal := detectPartySignal(message, *session, serviceUnderstanding, services, serviceAliases, categoryAliases)
 	extractionApplied := false
@@ -824,11 +853,13 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 			syncTurnUpdate(&turn, next, services, staff, cfg)
 		} else {
 			if len(next.RescheduleCandidates) == 0 {
+				startedAt := time.Now()
 				candidates, err := s.bookingTool.RescheduleCandidates(ctx, before.SalonID, ownerUserID, booking.RescheduleLookupRequest{
 					CustomerName:  next.CustomerName,
 					CustomerPhone: next.CustomerPhone,
 					Limit:         3,
 				})
+				recordTurnTiming(ctx, TurnTimingStageAvailabilityPOS, startedAt, turnTimingResult(err))
 				if err != nil {
 					return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not look up the appointment safely, so I will send this reschedule request to the owner. The appointment is not rescheduled yet.", services, staff, cfg)
 				}
@@ -942,11 +973,13 @@ func (s *Service) handleCancelMessage(ctx context.Context, ownerUserID string, b
 			return s.store.SaveTurn(ctx, turn)
 		}
 		if len(next.RescheduleCandidates) == 0 {
+			startedAt := time.Now()
 			candidates, err := s.bookingTool.RescheduleCandidates(ctx, before.SalonID, ownerUserID, booking.RescheduleLookupRequest{
 				CustomerName:  next.CustomerName,
 				CustomerPhone: next.CustomerPhone,
 				Limit:         3,
 			})
+			recordTurnTiming(ctx, TurnTimingStageAvailabilityPOS, startedAt, turnTimingResult(err))
 			if err != nil {
 				return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not look up the appointment safely, so I will send this cancellation request to the owner. The appointment is not cancelled yet.", services, staff, cfg)
 			}

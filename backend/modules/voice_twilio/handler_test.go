@@ -689,7 +689,12 @@ func TestForwardRealtimeEventsUsesProgressiveNoiseRecoveryAndTypedHandoff(t *tes
 }
 
 func TestForwardRealtimeEventsRecordsTimingStages(t *testing.T) {
-	adapter, service, store, _ := testTwilioRuntimeWithStore(phoneSessionWithAIReply("What name should I put on the appointment?", conversation.StatusActive, conversation.OutcomeCollecting))
+	adapter, service, store, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("What name should I put on the appointment?", conversation.StatusActive, conversation.OutcomeCollecting))
+	engine.messageTimings = []conversation.TurnTiming{
+		{Stage: conversation.TurnTimingStageSessionLoad, Duration: 4 * time.Millisecond, Result: conversation.TurnTimingResultOK},
+		{Stage: conversation.TurnTimingStageTurnInterpreter, Duration: 9 * time.Millisecond, Result: conversation.TurnTimingPathStructuredAI},
+		{Stage: conversation.TurnTimingStageSaveTurn, Duration: 5 * time.Millisecond, Result: conversation.TurnTimingResultOK},
+	}
 	handler := NewHandler(adapter, service)
 	realtime := newFakeRealtimeSession()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -711,6 +716,7 @@ func TestForwardRealtimeEventsRecordsTimingStages(t *testing.T) {
 
 	waitForTimingStages(t, store, []string{"transcript_done", "backend_turn_start", "backend_turn_done", "response_create", "first_audio_delta", "response_done"})
 	foundTranscriptDiagnostics := false
+	foundBackendDiagnostics := false
 	for _, event := range store.eventsSnapshot() {
 		if event.EventType != voice.EventRealtimeTiming {
 			continue
@@ -725,9 +731,18 @@ func TestForwardRealtimeEventsRecordsTimingStages(t *testing.T) {
 				event.Payload["token_count"] == "2" &&
 				event.Payload["vad_duration_ms"] == "1250"
 		}
+		if event.Payload["stage"] == "backend_turn_done" {
+			foundBackendDiagnostics = event.Payload["session_load_ms"] == "4" &&
+				event.Payload["turn_interpreter_ms"] == "9" &&
+				event.Payload["turn_interpreter_path"] == conversation.TurnTimingPathStructuredAI &&
+				event.Payload["save_turn_ms"] == "5"
+		}
 	}
 	if !foundTranscriptDiagnostics {
 		t.Fatalf("accepted transcript diagnostics were not recorded: %#v", store.eventsSnapshot())
+	}
+	if !foundBackendDiagnostics {
+		t.Fatalf("backend substage diagnostics were not recorded: %#v", store.eventsSnapshot())
 	}
 }
 
@@ -1262,6 +1277,7 @@ type fakeTwilioConversationEngine struct {
 	messageCalls     int
 	voiceInputCalls  int
 	voiceInputEvent  string
+	messageTimings   []conversation.TurnTiming
 }
 
 func (f *fakeTwilioConversationEngine) StartPhoneCall(ctx context.Context, salonID string, ownerUserID string, req conversation.StartPhoneCallRequest) (*conversation.Session, error) {
@@ -1283,6 +1299,11 @@ func (f *fakeTwilioConversationEngine) Message(ctx context.Context, salonID stri
 		}
 	}
 	f.lastMessage = req.Message
+	for _, timing := range f.messageTimings {
+		if req.TimingRecorder != nil {
+			req.TimingRecorder(timing)
+		}
+	}
 	if f.messageCompleted != nil {
 		select {
 		case f.messageCompleted <- struct{}{}:

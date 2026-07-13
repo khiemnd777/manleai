@@ -330,7 +330,9 @@ func (s *Service) availableSlotsWithLimit(ctx context.Context, salonID string, o
 		PreferredDate:      preferredDate,
 		Limit:              limit,
 	}
+	startedAt := time.Now()
 	result, err := s.bookingTool.AvailableSlots(ctx, salonID, ownerUserID, req)
+	recordTurnTiming(ctx, TurnTimingStageAvailabilityPOS, startedAt, turnTimingResult(err))
 	if err != nil || result == nil {
 		return result, err
 	}

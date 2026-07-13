@@ -594,13 +594,19 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 		if result.err != nil {
 			status = "error"
 		}
-		_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "backend_turn_done", result.startedAt, map[string]string{
+		diagnostics := map[string]string{
 			"duration_ms":      durationMilliseconds(result.startedAt, result.completedAt),
 			"item_id":          result.task.itemID,
 			"status":           status,
 			"progress_spoken":  strconv.FormatBool(turnProgressSpoken),
 			"queued_remaining": strconv.Itoa(len(turnQueue)),
-		})
+		}
+		if result.reply != nil {
+			for key, value := range result.reply.BackendDiagnostics {
+				diagnostics[key] = value
+			}
+		}
+		_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "backend_turn_done", result.startedAt, diagnostics)
 		if result.err != nil {
 			if !speakReply("I could not process that clearly. Please say it again, or the owner can help directly.", false) {
 				return false

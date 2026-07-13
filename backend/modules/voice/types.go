@@ -302,12 +302,13 @@ type SpeechToTextRequest struct {
 }
 
 type CallReply struct {
-	Message       string
-	OpeningNotice string
-	Continue      bool
-	Session       *conversation.Session
-	AudioURL      string
-	InputMode     string
+	Message            string
+	OpeningNotice      string
+	Continue           bool
+	Session            *conversation.Session
+	AudioURL           string
+	InputMode          string
+	BackendDiagnostics map[string]string
 }
 
 type WebhookEvent struct {

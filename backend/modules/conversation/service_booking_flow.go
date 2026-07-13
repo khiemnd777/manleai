@@ -2,9 +2,11 @@ package conversation
 
 import (
 	"context"
-	"github.com/manleai/ai-receptionist/modules/booking"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
 func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnRecord, session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
@@ -17,6 +19,7 @@ func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnR
 	if !bookingServiceSelectionConsistent(session) {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, bookingErrorReply(), services, staff, cfg)
 	}
+	startedAt := time.Now()
 	attempt, err := s.bookingTool.Create(ctx, turn.SalonID, ownerUserID, booking.CreateBookingRequest{
 		OperationKey:       conversationOperationKey(session, booking.BookingActionBook),
 		Source:             bookingSourceForSession(session),
@@ -30,6 +33,7 @@ func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnR
 		StartTime:          *session.RequestedStartTime,
 		Notes:              bookingNotesForSession(session),
 	})
+	recordTurnTiming(ctx, TurnTimingStageAvailabilityPOS, startedAt, turnTimingResult(err))
 	if err != nil {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, bookingErrorReply(), services, staff, cfg)
 	}
@@ -119,7 +123,9 @@ func (s *Service) tryPartySplitBooking(ctx context.Context, ownerUserID string, 
 				StartTime: block.StartTime,
 				Notes:     bookingNotesForSplitParty(session),
 			}
+			startedAt := time.Now()
 			attempt, err := s.bookingTool.Create(ctx, turn.SalonID, ownerUserID, req)
+			recordTurnTiming(ctx, TurnTimingStageAvailabilityPOS, startedAt, turnTimingResult(err))
 			if err != nil || !bookingAttemptConfirmed(attempt) {
 				rollback := s.rollbackPartySplitBookings(ctx, ownerUserID, turn.SalonID, session, successfulAppointmentIDs)
 				turn.ToolMessage = "Booking service did not confirm every split party appointment through POS."
@@ -191,11 +197,13 @@ func (s *Service) rollbackPartySplitBookings(ctx context.Context, ownerUserID st
 			result.Failed++
 			continue
 		}
+		startedAt := time.Now()
 		_, fallback, err := s.bookingTool.Cancel(ctx, salonID, ownerUserID, appointmentID, booking.CancelRequest{
 			OperationKey: conversationOperationKey(session, "split_rollback", strconv.Itoa(rollbackIndex), appointmentID),
 			Reason:       "Split party booking rollback after partial POS failure.",
 			Source:       bookingSourceForSession(session),
 		})
+		recordTurnTiming(ctx, TurnTimingStageAvailabilityPOS, startedAt, turnTimingResult(err))
 		if err != nil || fallback != nil {
 			result.Failed++
 			continue
@@ -274,6 +282,7 @@ func (s *Service) tryReschedule(ctx context.Context, ownerUserID string, turn Tu
 	if s.bookingTool == nil || strings.TrimSpace(session.TargetAppointmentID) == "" || session.RequestedStartTime == nil {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, rescheduleErrorReply(), services, staff, cfg)
 	}
+	startedAt := time.Now()
 	appointment, fallback, err := s.bookingTool.Reschedule(ctx, turn.SalonID, ownerUserID, session.TargetAppointmentID, booking.RescheduleRequest{
 		OperationKey: conversationOperationKey(session, booking.BookingActionReschedule, session.TargetAppointmentID),
 		Source:       bookingSourceForSession(session),
@@ -281,6 +290,7 @@ func (s *Service) tryReschedule(ctx context.Context, ownerUserID string, turn Tu
 		StaffID:      session.StaffID,
 		Notes:        "AI receptionist reschedule request.",
 	})
+	recordTurnTiming(ctx, TurnTimingStageAvailabilityPOS, startedAt, turnTimingResult(err))
 	if err != nil {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, rescheduleErrorReply(), services, staff, cfg)
 	}
@@ -323,11 +333,13 @@ func (s *Service) tryCancel(ctx context.Context, ownerUserID string, turn TurnRe
 	if s.bookingTool == nil || strings.TrimSpace(session.TargetAppointmentID) == "" {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, cancelErrorReply(), services, staff, cfg)
 	}
+	startedAt := time.Now()
 	appointment, fallback, err := s.bookingTool.Cancel(ctx, turn.SalonID, ownerUserID, session.TargetAppointmentID, booking.CancelRequest{
 		OperationKey: conversationOperationKey(session, booking.BookingActionCancel, session.TargetAppointmentID),
 		Source:       bookingSourceForSession(session),
 		Reason:       "AI receptionist cancellation request.",
 	})
+	recordTurnTiming(ctx, TurnTimingStageAvailabilityPOS, startedAt, turnTimingResult(err))
 	if err != nil {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, cancelErrorReply(), services, staff, cfg)
 	}

@@ -148,6 +148,14 @@ func (s *Service) prewarmAnswerContext(ctx context.Context, salonID string) {
 }
 
 func (s *Service) HandleSpeechTurn(ctx context.Context, req SpeechTurnRequest) (*CallReply, error) {
+	routeConfigStartedAt := time.Now()
+	backendDiagnostics := newBackendTurnDiagnostics()
+	finishReply := func(reply *CallReply) *CallReply {
+		if reply != nil {
+			reply.BackendDiagnostics = backendDiagnostics.Snapshot()
+		}
+		return reply
+	}
 	req = normalizeSpeechTurn(req)
 	if req.Provider == "" || req.ProviderCallID == "" {
 		return nil, ErrValidation
@@ -185,6 +193,7 @@ func (s *Service) HandleSpeechTurn(ctx context.Context, req SpeechTurnRequest) (
 	if !s.configured(voiceCfg) {
 		return nil, ErrProviderDisabled
 	}
+	backendDiagnostics.add(backendTimingStageRouteConfig, time.Since(routeConfigStartedAt), conversation.TurnTimingResultOK)
 
 	if req.SpeechText == "" && len(req.Audio) > 0 {
 		text, transcribeErr := s.transcribe(ctx, route.SalonID, route.OwnerUserID, route.SessionID, req)
@@ -198,11 +207,11 @@ func (s *Service) HandleSpeechTurn(ctx context.Context, req SpeechTurnRequest) (
 				Payload:        req.Payload,
 			})
 			session, _ := s.conversation.Get(ctx, route.SalonID, route.OwnerUserID, route.SessionID)
-			return s.buildReplyWithInputMode(ctx, CallReply{
+			return finishReply(s.buildReplyWithInputMode(ctx, CallReply{
 				Message:  "I could not hear that clearly. Please say it again, or the owner can help directly.",
 				Continue: true,
 				Session:  session,
-			}, session, req.Provider, req.ProviderCallID, req.InputModeOverride), nil
+			}, session, req.Provider, req.ProviderCallID, req.InputModeOverride)), nil
 		}
 		req.SpeechText = strings.TrimSpace(text)
 	}
@@ -217,24 +226,25 @@ func (s *Service) HandleSpeechTurn(ctx context.Context, req SpeechTurnRequest) (
 			Payload:        req.Payload,
 		})
 		session, _ := s.conversation.Get(ctx, route.SalonID, route.OwnerUserID, route.SessionID)
-		return s.buildReplyWithInputMode(ctx, CallReply{
+		return finishReply(s.buildReplyWithInputMode(ctx, CallReply{
 			Message:  "I did not hear that. How can I help you today?",
 			Continue: true,
 			Session:  session,
-		}, session, req.Provider, req.ProviderCallID, req.InputModeOverride), nil
+		}, session, req.Provider, req.ProviderCallID, req.InputModeOverride)), nil
 	}
 
 	session, err := s.conversation.Message(ctx, route.SalonID, route.OwnerUserID, route.SessionID, conversation.MessageRequest{
-		Message:  req.SpeechText,
-		EventKey: speechTurnEventKey(req),
+		Message:        req.SpeechText,
+		EventKey:       speechTurnEventKey(req),
+		TimingRecorder: backendDiagnostics.Record,
 	})
 	if errors.Is(err, conversation.ErrSessionClosed) {
 		session, _ = s.conversation.Get(ctx, route.SalonID, route.OwnerUserID, route.SessionID)
-		return s.buildReplyWithInputMode(ctx, CallReply{
+		return finishReply(s.buildReplyWithInputMode(ctx, CallReply{
 			Message:  "This request is already complete. The owner can help with anything else.",
 			Continue: false,
 			Session:  session,
-		}, session, req.Provider, req.ProviderCallID, req.InputModeOverride), nil
+		}, session, req.Provider, req.ProviderCallID, req.InputModeOverride)), nil
 	}
 	if err != nil {
 		return nil, err
@@ -247,11 +257,11 @@ func (s *Service) HandleSpeechTurn(ctx context.Context, req SpeechTurnRequest) (
 		EventType:      EventSpeechTurn,
 		Payload:        req.Payload,
 	})
-	return s.buildReplyWithInputMode(ctx, CallReply{
+	return finishReply(s.buildReplyWithInputMode(ctx, CallReply{
 		Message:  lastAIMessage(session),
 		Continue: session.Status == conversation.StatusActive,
 		Session:  session,
-	}, session, req.Provider, req.ProviderCallID, req.InputModeOverride), nil
+	}, session, req.Provider, req.ProviderCallID, req.InputModeOverride)), nil
 }
 
 func (s *Service) configured(cfg config.VoiceConfig) bool {

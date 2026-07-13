@@ -228,6 +228,14 @@ func TestSpeechTurnRoutesLiveCallThroughAvailabilityOffer(t *testing.T) {
 	store := newFakeVoiceStore()
 	store.route = &CallRoute{SalonID: "salon_1", OwnerUserID: "owner_1", SessionID: "session_phone"}
 	engine := newFakeConversationEngine()
+	engine.messageTimings = []conversation.TurnTiming{
+		{Stage: conversation.TurnTimingStageSessionLoad, Duration: 5 * time.Millisecond, Result: conversation.TurnTimingResultOK},
+		{Stage: conversation.TurnTimingStageAnswerContext, Duration: 3 * time.Millisecond, Result: conversation.TurnTimingResultOK},
+		{Stage: conversation.TurnTimingStageTurnInterpreter, Duration: 7 * time.Millisecond, Result: conversation.TurnTimingPathStructuredAI},
+		{Stage: conversation.TurnTimingStageAvailabilityPOS, Duration: 11 * time.Millisecond, Result: conversation.TurnTimingResultOK},
+		{Stage: conversation.TurnTimingStageAvailabilityPOS, Duration: 4 * time.Millisecond, Result: conversation.TurnTimingResultOK},
+		{Stage: conversation.TurnTimingStageSaveTurn, Duration: 6 * time.Millisecond, Result: conversation.TurnTimingResultOK},
+	}
 	engine.messageSession = phoneSessionWithAIReply("I found these openings: first: Wed Jun 10 at 10:00 AM with Mai Nguyen. Which works?", conversation.StatusActive, conversation.OutcomeCollecting)
 	engine.messageSession.Intent = conversation.IntentBooking
 	engine.messageSession.ServiceID = "service_1"
@@ -263,6 +271,21 @@ func TestSpeechTurnRoutesLiveCallThroughAvailabilityOffer(t *testing.T) {
 	}
 	if len(reply.Session.OfferedSlots) != 1 {
 		t.Fatalf("offered slots = %#v, want one", reply.Session.OfferedSlots)
+	}
+	for key, want := range map[string]string{
+		"session_load_ms":       "5",
+		"answer_context_ms":     "3",
+		"turn_interpreter_ms":   "7",
+		"turn_interpreter_path": conversation.TurnTimingPathStructuredAI,
+		"availability_pos_ms":   "15",
+		"save_turn_ms":          "6",
+	} {
+		if got := reply.BackendDiagnostics[key]; got != want {
+			t.Fatalf("backend diagnostic %s = %q, want %q; all=%#v", key, got, want, reply.BackendDiagnostics)
+		}
+	}
+	if _, ok := reply.BackendDiagnostics["route_config_ms"]; !ok {
+		t.Fatalf("route/config timing missing: %#v", reply.BackendDiagnostics)
 	}
 	if len(store.events) != 1 || store.events[0].EventType != EventSpeechTurn || store.events[0].CallSessionID != "session_phone" {
 		t.Fatalf("events = %#v, want speech turn event for call session", store.events)
@@ -563,6 +586,7 @@ type fakeConversationEngine struct {
 	messageSession       *conversation.Session
 	transcriptionContext conversation.TranscriptionContext
 	prewarmDone          chan struct{}
+	messageTimings       []conversation.TurnTiming
 }
 
 type fakeRealtimeProvider struct {
@@ -630,6 +654,11 @@ func (f *fakeConversationEngine) PrewarmAnswerContext(ctx context.Context, salon
 func (f *fakeConversationEngine) Message(ctx context.Context, salonID string, ownerUserID string, sessionID string, req conversation.MessageRequest) (*conversation.Session, error) {
 	f.messageCalls++
 	f.lastMessage = req.Message
+	for _, timing := range f.messageTimings {
+		if req.TimingRecorder != nil {
+			req.TimingRecorder(timing)
+		}
+	}
 	if f.messageSession != nil {
 		return f.messageSession, nil
 	}

@@ -3281,17 +3281,36 @@ func TestMessageSelectsOfferedSlotThenCollectsCustomerName(t *testing.T) {
 		},
 	}
 	bookingTool := &fakeBookingTool{}
+	interpreter := &fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal: "information", Confidence: 0.99,
+		Questions: []ConversationQuestion{{Subject: ConversationQuestionPrice, Confidence: 0.99}},
+	}}
 	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(interpreter)
 	service.now = fixedNow
+	var timings []TurnTiming
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
-		Message: "The second one works.",
+		Message:        "Option two works for me.",
+		TimingRecorder: func(timing TurnTiming) { timings = append(timings, timing) },
 	})
 	if err != nil {
 		t.Fatalf("Message returned error: %v", err)
 	}
 	if bookingTool.calls != 0 {
 		t.Fatalf("booking should not be called until customer details are collected")
+	}
+	if interpreter.calls != 0 {
+		t.Fatalf("state-scoped slot selector reached semantic interpreter: calls=%d", interpreter.calls)
+	}
+	foundFastPath := false
+	for _, timing := range timings {
+		if timing.Stage == TurnTimingStageTurnInterpreter && timing.Result == TurnTimingPathStateScoped {
+			foundFastPath = true
+		}
+	}
+	if !foundFastPath {
+		t.Fatalf("missing state-scoped interpreter timing: %#v", timings)
 	}
 	if session.RequestedStartTime == nil || !session.RequestedStartTime.Equal(time.Date(2026, 6, 10, 16, 0, 0, 0, time.UTC)) {
 		t.Fatalf("requested start = %v, want second offered slot", session.RequestedStartTime)
@@ -3304,6 +3323,25 @@ func TestMessageSelectsOfferedSlotThenCollectsCustomerName(t *testing.T) {
 	}
 	if !strings.Contains(store.lastTurn.AIMessage, "What name") {
 		t.Fatalf("AI reply should collect name after slot selection: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestStateScopedOfferedSlotSelectionRejectsCorrectionsQuestionsAndMultiIntent(t *testing.T) {
+	session := Session{
+		ServiceID: "service_1",
+		OfferedSlots: []OfferedSlot{
+			{StartTime: time.Date(2026, 7, 2, 18, 0, 0, 0, time.UTC), StaffID: "staff_1"},
+			{StartTime: time.Date(2026, 7, 2, 19, 0, 0, 0, time.UTC), StaffID: "staff_1"},
+		},
+	}
+	for _, message := range []string{
+		"The second one works, but switch it to a gel manicure.",
+		"I will take the first option, and what does it cost?",
+		"Is the second one still available?",
+	} {
+		if stateScopedOfferedSlotSelection(message, session, time.UTC) {
+			t.Fatalf("complex turn bypassed semantic interpreter: %q", message)
+		}
 	}
 }
 

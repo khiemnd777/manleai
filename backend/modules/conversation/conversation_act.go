@@ -4,6 +4,7 @@ import (
 	"context"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/manleai/ai-receptionist/modules/booking"
 )
@@ -19,6 +20,7 @@ type conversationDraftResult struct {
 }
 
 func (s *Service) turnUnderstandingForMessage(ctx context.Context, session Session, message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, staff []StaffOption) TurnUnderstanding {
+	startedAt := time.Now()
 	deterministic := deterministicConversationAct(session, message, services, aliases, categoryAliases)
 	if activePartyPlan(session.PartyPlan) && isServiceMutationAct(deterministic.Kind) {
 		deterministic = ConversationAct{Kind: ConversationActUnknown, Source: "deterministic"}
@@ -31,9 +33,11 @@ func (s *Service) turnUnderstandingForMessage(ctx context.Context, session Sessi
 		fallback.Acts = []ConversationAct{deterministic}
 	}
 	if deterministicConversationActOwnsTurn(session, deterministic) {
+		recordTurnTiming(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathDeterministic)
 		return fallback
 	}
 	if s.turnInterpreter == nil {
+		recordTurnTiming(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathInterpreterAbsent)
 		return fallback
 	}
 	interpreted, err := s.turnInterpreter.InterpretTurn(ctx, TurnInterpretationRequest{
@@ -53,6 +57,7 @@ func (s *Service) turnUnderstandingForMessage(ctx context.Context, session Sessi
 	fallback.ModelInvoked = true
 	if err != nil {
 		fallback.Reason = "semantic_interpreter_unavailable"
+		recordTurnTiming(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathProviderFallback)
 		return fallback
 	}
 	interpreted.ModelInvoked = true
@@ -65,10 +70,12 @@ func (s *Service) turnUnderstandingForMessage(ctx context.Context, session Sessi
 			}
 		}
 		if len(validated.Acts) == 0 && len(validated.Questions) == 0 && (validated.Goal == "" || validated.Goal == "unknown") {
+			recordTurnTiming(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathProviderFallback)
 			return fallback
 		}
 		catalogUnderstanding := interpretServiceWithCategoryAliases(message, services, aliases, categoryAliases)
 		if shouldUseCatalogServiceEditFallback(session, message, catalogUnderstanding) {
+			recordTurnTiming(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathStructuredAI)
 			return TurnUnderstanding{
 				Goal:            validated.Goal,
 				Confidence:      validated.Confidence,
@@ -80,9 +87,11 @@ func (s *Service) turnUnderstandingForMessage(ctx context.Context, session Sessi
 		}
 		validated = reconcileSemanticServiceTargets(validated, catalogUnderstanding)
 		validated = reconcileDeterministicInformationQuestions(message, validated)
+		recordTurnTiming(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathStructuredAI)
 		return validated
 	}
 	fallback.Reason = "semantic_interpretation_rejected"
+	recordTurnTiming(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathProviderFallback)
 	return fallback
 }
 
