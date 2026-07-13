@@ -30,7 +30,6 @@ const (
 	realtimeTurnTimeout          = 25 * time.Second
 	realtimeBackendProgressDelay = 3 * time.Second
 	realtimeBackendProgressReply = "Thanks. I'm checking that now."
-	realtimeLowConfidenceReply   = "I didn't catch that clearly. Could you say it again?"
 	realtimeReplyQueueLimit      = 16
 	realtimeBufferedAudioLimit   = 8 * 1024 * 1024
 )
@@ -519,6 +518,9 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	var activeSpeechCancel context.CancelFunc
 	activeSpeechGeneration := 0
 	transcriptPolicy := normalizedRealtimeTranscriptPolicy(realtime.TranscriptPolicy())
+	inputRecovery := realtimeInputRecovery{}
+	inputRecoveryFinalized := false
+	lastApprovedPrompt := strings.TrimSpace(initialMessage)
 	if now == nil {
 		now = time.Now
 	}
@@ -607,6 +609,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 			return true
 		}
 		if result.reply != nil && strings.TrimSpace(result.reply.Message) != "" {
+			lastApprovedPrompt = strings.TrimSpace(result.reply.Message)
 			if streamingSpeech && responseActive && activeReply.message == realtimeBackendProgressReply && activeSpeechCancel != nil {
 				activeInterrupted = true
 				suppressAudioUntilDone = true
@@ -974,6 +977,9 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					}
 				}
 				_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "speech_started", time.Time{}, nil)
+				if inputRecoveryFinalized {
+					continue
+				}
 				if !shouldInterruptPlayback() {
 					continue
 				}
@@ -1009,6 +1015,9 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					"vad_duration_ms": strconv.Itoa(vadDurationByItem[itemID]),
 				})
 			case voice.RealtimeEventTranscriptDone:
+				if inputRecoveryFinalized {
+					continue
+				}
 				itemID := strings.TrimSpace(event.ItemID)
 				clearVADDiagnostics := func() {
 					delete(vadStartByItem, itemID)
@@ -1021,15 +1030,41 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 				}
 				accepted, rejectionReason, diagnostics := realtimeTranscriptAdmission(event, vadDurationByItem[itemID], transcriptPolicy)
 				if !accepted {
+					recovery := inputRecovery.Reject(lastApprovedPrompt)
 					diagnostics["decision"] = "rejected"
 					diagnostics["reason"] = rejectionReason
+					diagnostics["rejection_streak"] = strconv.Itoa(recovery.Streak)
+					diagnostics["recovery_action"] = recovery.Action
 					_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "transcript_rejected_low_confidence", time.Time{}, diagnostics)
 					clearVADDiagnostics()
-					if !speakReply(realtimeLowConfidenceReply, false) {
+					if recovery.Handoff {
+						reply, handoffErr := h.service.HandleUnintelligibleRealtimeInput(ctx, voice.ProviderTwilio, providerCallID, sessionID, itemID)
+						if handoffErr != nil || reply == nil || strings.TrimSpace(reply.Message) == "" {
+							_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "voice_input_handoff_failed", time.Time{}, map[string]string{
+								"item_id": itemID,
+								"status":  "error",
+							})
+							if !speakReply(recoveryMessage("I don't want to get your details wrong. Please move closer to the phone or somewhere quieter, then answer once more.", lastApprovedPrompt), false) {
+								return
+							}
+							continue
+						}
+						_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "voice_input_handoff_done", time.Time{}, map[string]string{
+							"item_id": itemID,
+							"status":  "ok",
+						})
+						inputRecoveryFinalized = true
+						if !speakReply(reply.Message, !reply.Continue) {
+							return
+						}
+						continue
+					}
+					if !speakReply(recovery.Message, false) {
 						return
 					}
 					continue
 				}
+				inputRecovery.Reset()
 				key := itemID + "|" + strings.ToLower(transcript)
 				if _, exists := seenTranscripts[key]; exists {
 					clearVADDiagnostics()

@@ -400,6 +400,28 @@ func TestRealtimeFallbackMessageRequiresTerminalRealtimeFailure(t *testing.T) {
 	}
 }
 
+func TestHandleUnintelligibleRealtimeInputUsesTypedConversationHandoff(t *testing.T) {
+	store := newFakeVoiceStore()
+	store.route = &CallRoute{SalonID: "salon_1", OwnerUserID: "owner_1", SessionID: "session_phone"}
+	engine := newFakeConversationEngine()
+	engine.messageSession = phoneSessionWithAIReply("I'm sorry, the line is too noisy. I'll ask the salon to call you back at this number. This is not a confirmed appointment.", conversation.StatusHandoff, conversation.OutcomeHandoffRequested)
+	service := NewService(store, engine, testVoiceConfig(), AIProviders{})
+
+	reply, err := service.HandleUnintelligibleRealtimeInput(context.Background(), ProviderTwilio, "CA123", "session_phone", "item_4")
+	if err != nil {
+		t.Fatalf("HandleUnintelligibleRealtimeInput returned error: %v", err)
+	}
+	if reply.Continue || reply.InputMode != InputModeRealtimeStream || !strings.Contains(reply.Message, "call you back") {
+		t.Fatalf("reply = %#v", reply)
+	}
+	if engine.voiceInputCalls != 1 || engine.lastVoiceInputEvent != "voice-input-unintelligible:session_phone" {
+		t.Fatalf("typed handoff calls/event = %d/%q", engine.voiceInputCalls, engine.lastVoiceInputEvent)
+	}
+	if engine.messageCalls != 0 {
+		t.Fatalf("voice recovery must not synthesize a customer message, calls = %d", engine.messageCalls)
+	}
+}
+
 func testVoiceConfig() config.VoiceConfig {
 	return config.VoiceConfig{
 		Provider:      ProviderTwilio,
@@ -531,9 +553,11 @@ func (f *fakeVoiceStore) GetAudioOutput(ctx context.Context, id string) (*AudioO
 type fakeConversationEngine struct {
 	startCalls           int
 	messageCalls         int
+	voiceInputCalls      int
 	prewarmCalls         int
 	startRequest         conversation.StartPhoneCallRequest
 	lastMessage          string
+	lastVoiceInputEvent  string
 	prewarmSalonID       string
 	startSession         *conversation.Session
 	messageSession       *conversation.Session
@@ -610,6 +634,15 @@ func (f *fakeConversationEngine) Message(ctx context.Context, salonID string, ow
 		return f.messageSession, nil
 	}
 	return phoneSessionWithAIReply("I can help with appointments. What service would you like to book?", conversation.StatusActive, conversation.OutcomeCollecting), nil
+}
+
+func (f *fakeConversationEngine) HandleUnintelligibleVoiceInput(ctx context.Context, salonID string, ownerUserID string, sessionID string, req conversation.VoiceInputHandoffRequest) (*conversation.Session, error) {
+	f.voiceInputCalls++
+	f.lastVoiceInputEvent = req.EventKey
+	if f.messageSession != nil {
+		return f.messageSession, nil
+	}
+	return f.startSession, nil
 }
 
 func (f *fakeConversationEngine) Get(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*conversation.Session, error) {

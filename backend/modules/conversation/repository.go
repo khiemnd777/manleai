@@ -119,10 +119,9 @@ func (r *Repository) GetSessionByTurnEventKey(ctx context.Context, salonID strin
 		    SELECT 1
 		    FROM call_transcript_messages ctm
 		    WHERE ctm.session_id = cs.id
-		      AND ctm.speaker = $4
-		      AND ctm.metadata->>'event_key' = $5
+		      AND ctm.metadata->>'event_key' = $4
 		  )
-	`, sessionID, salonID, ownerUserID, SpeakerCustomer, eventKey)
+	`, sessionID, salonID, ownerUserID, eventKey)
 	if errors.Is(err, ErrNotFound) {
 		return nil, false, nil
 	}
@@ -670,10 +669,9 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session,
 				SELECT 1
 				FROM call_transcript_messages
 				WHERE session_id = $1
-				  AND speaker = $2
-				  AND metadata->>'event_key' = $3
+				  AND metadata->>'event_key' = $2
 			)
-		`, record.Session.ID, SpeakerCustomer, eventKey).Scan(&exists); err != nil {
+		`, record.Session.ID, eventKey).Scan(&exists); err != nil {
 			return nil, err
 		}
 		if exists {
@@ -702,12 +700,14 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (*Session,
 	if err != nil {
 		return nil, err
 	}
-	sequence++
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO call_transcript_messages (session_id, salon_id, speaker, body, metadata, sequence)
-		VALUES ($1, $2, $3, $4, $5::jsonb, $6)
-	`, record.Session.ID, record.SalonID, SpeakerCustomer, record.CustomerMessage, customerMetadata, sequence); err != nil {
-		return nil, err
+	if strings.TrimSpace(record.CustomerMessage) != "" {
+		sequence++
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO call_transcript_messages (session_id, salon_id, speaker, body, metadata, sequence)
+			VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+		`, record.Session.ID, record.SalonID, SpeakerCustomer, record.CustomerMessage, customerMetadata, sequence); err != nil {
+			return nil, err
+		}
 	}
 	if record.ToolMessage != "" {
 		sequence++
@@ -1206,7 +1206,7 @@ func safeRealtimeDiagnostics(payload map[string]any) map[string]string {
 		"vad_duration_ms", "tokens_per_second", "max_tokens_per_second",
 		"request_id", "response_id", "expected_hash", "actual_hash", "expected_token_count", "actual_token_count",
 		"audio_chunk_count", "buffered_audio_bytes", "match_classification", "interrupted", "close_after",
-		"status", "progress_spoken", "queued_remaining", "terminal",
+		"status", "progress_spoken", "queued_remaining", "terminal", "rejection_streak", "recovery_action",
 		"provider_request_id", "audio_bytes", "audio_encoding", "sample_rate", "audio_end_ms",
 		"mark_name",
 	}

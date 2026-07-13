@@ -128,6 +128,84 @@ func TestListRejectsInvalidLifecycle(t *testing.T) {
 	}
 }
 
+func TestHandleUnintelligibleVoiceInputCreatesIdempotentCallbackHandoffWithoutFakeCustomerTurn(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.Channel = ChannelPhone
+	store.session.InboundPhone = "+13125550101"
+	store.session.CustomerPhone = "+13125550101"
+	store.session.ServiceID = "service_1"
+	service := NewService(store, &fakeBookingTool{})
+
+	session, err := service.HandleUnintelligibleVoiceInput(context.Background(), "salon_1", "owner_1", "session_1", VoiceInputHandoffRequest{EventKey: "voice-input-unintelligible:item-4"})
+	if err != nil {
+		t.Fatalf("HandleUnintelligibleVoiceInput returned error: %v", err)
+	}
+	if session.Status != StatusHandoff || session.Outcome != OutcomeHandoffRequested {
+		t.Fatalf("session status/outcome = %q/%q, want handoff/handoff_requested", session.Status, session.Outcome)
+	}
+	if session.Handoff == nil || session.Handoff.Reason != HandoffReasonVoiceInputUnintelligible || session.Handoff.CustomerPhone != "+13125550101" {
+		t.Fatalf("handoff = %#v", session.Handoff)
+	}
+	if store.lastTurn.CustomerMessage != "" {
+		t.Fatalf("system recovery must not invent a customer message: %q", store.lastTurn.CustomerMessage)
+	}
+	if store.lastTurn.AIMetadata["event_key"] != "voice-input-unintelligible:item-4" {
+		t.Fatalf("AI metadata event key = %#v", store.lastTurn.AIMetadata)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "background noise") || !strings.Contains(store.lastTurn.AIMessage, "call you back") || !strings.Contains(store.lastTurn.AIMessage, "not a confirmed appointment") {
+		t.Fatalf("handoff reply = %q", store.lastTurn.AIMessage)
+	}
+	if session.ServiceID != "service_1" {
+		t.Fatalf("handoff must preserve draft service, got %q", session.ServiceID)
+	}
+
+	if _, err := service.HandleUnintelligibleVoiceInput(context.Background(), "salon_1", "owner_1", "session_1", VoiceInputHandoffRequest{EventKey: "voice-input-unintelligible:item-4"}); err != nil {
+		t.Fatalf("idempotent retry returned error: %v", err)
+	}
+	if len(store.processedEventKeys) != 1 {
+		t.Fatalf("processed event keys = %#v", store.processedEventKeys)
+	}
+}
+
+func TestHandleUnintelligibleVoiceInputWithoutCallableNumberEndsSafelyWithoutHandoff(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.Channel = ChannelPhone
+	store.session.InboundPhone = "anonymous"
+	store.session.CustomerPhone = "anonymous"
+	store.session.BookingAction = BookingActionReschedule
+	service := NewService(store, &fakeBookingTool{})
+
+	session, err := service.HandleUnintelligibleVoiceInput(context.Background(), "salon_1", "owner_1", "session_1", VoiceInputHandoffRequest{EventKey: "voice-input-unintelligible:item-private"})
+	if err != nil {
+		t.Fatalf("HandleUnintelligibleVoiceInput returned error: %v", err)
+	}
+	if session.Status != StatusCompleted || session.Outcome != OutcomeFailed || session.Handoff != nil {
+		t.Fatalf("session = status:%q outcome:%q handoff:%#v", session.Status, session.Outcome, session.Handoff)
+	}
+	if strings.Contains(store.lastTurn.AIMessage, "call you back") || !strings.Contains(store.lastTurn.AIMessage, "call again from a quieter place") || !strings.Contains(store.lastTurn.AIMessage, "not been rescheduled") {
+		t.Fatalf("no-callback reply = %q", store.lastTurn.AIMessage)
+	}
+}
+
+func TestVoiceInputSafetySuffixReflectsCurrentOperation(t *testing.T) {
+	tests := []struct {
+		name   string
+		action string
+		want   string
+	}{
+		{name: "new booking", action: BookingActionBook, want: "not a confirmed appointment"},
+		{name: "reschedule", action: BookingActionReschedule, want: "not been rescheduled"},
+		{name: "cancellation", action: BookingActionCancel, want: "not been cancelled"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := voiceInputSafetySuffix(Session{BookingAction: test.action}); !strings.Contains(got, test.want) {
+				t.Fatalf("voiceInputSafetySuffix(%q) = %q", test.action, got)
+			}
+		})
+	}
+}
+
 func TestListWebhookEventsDelegatesToStore(t *testing.T) {
 	store := newFakeConversationStore()
 	service := NewService(store, &fakeBookingTool{})
@@ -7712,13 +7790,16 @@ func (f *fakeConversationStore) SaveTurn(ctx context.Context, record TurnRecord)
 		f.partyRequests = append(f.partyRequests, request)
 		session.PartyRequest = &request
 	}
-	nextSequence := len(session.Transcript) + 1
-	session.Transcript = append(session.Transcript, TranscriptMessage{
-		Speaker:  SpeakerCustomer,
-		Body:     record.CustomerMessage,
-		Metadata: record.CustomerMetadata,
-		Sequence: nextSequence,
-	})
+	nextSequence := len(session.Transcript)
+	if strings.TrimSpace(record.CustomerMessage) != "" {
+		nextSequence++
+		session.Transcript = append(session.Transcript, TranscriptMessage{
+			Speaker:  SpeakerCustomer,
+			Body:     record.CustomerMessage,
+			Metadata: record.CustomerMetadata,
+			Sequence: nextSequence,
+		})
+	}
 	if strings.TrimSpace(record.ToolMessage) != "" {
 		nextSequence++
 		session.Transcript = append(session.Transcript, TranscriptMessage{

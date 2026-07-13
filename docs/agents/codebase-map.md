@@ -207,6 +207,12 @@ name collection, availability replies, party bookings, or transcript output.
 - Summaries, handoffs, retention:
   `backend/modules/conversation/service_summary.go`,
   `backend/modules/conversation/retention_processor.go`.
+- Typed voice-input recovery handoff and no-callback completion:
+  `backend/modules/conversation/service_voice_recovery.go`. Confidence-rejected
+  speech never becomes a synthetic customer turn; the fourth consecutive
+  rejection may create one `voice_input_unintelligible` handoff only after a
+  callable caller number is available. A stable per-session event key dedupes
+  repeated or concurrent recovery execution.
 - Persistence: `backend/modules/conversation/repository.go`.
 - DTOs/state: `backend/modules/conversation/types.go`.
 - Structured semantic-turn interpretation: `backend/modules/voice/act_interpreter.go`,
@@ -336,7 +342,9 @@ detail rather than part of the event title.
   `salon_integration_configs`.
 - Realtime sequencing owner: `backend/modules/voice_twilio/handler.go`; provider-neutral
   contracts: `backend/modules/voice/types.go`; OpenAI input and output adapters:
-  `backend/modules/voice_openai/realtime.go` and `speech_stream.go`. The default
+  `backend/modules/voice_openai/realtime.go` and `speech_stream.go`; bounded
+  confidence-rejection recovery policy: `backend/modules/voice_twilio/realtime_recovery.go`.
+  The default
   dashboard mode `streaming_tts` uses Realtime only for input, sends backend-approved
   text to dedicated Speech TTS, converts WAV incrementally to PCMU 8 kHz, and forwards
   each chunk to Twilio before stream completion. Replies use a bounded FIFO,
@@ -345,10 +353,16 @@ detail rather than part of the event title.
   response IDs and validates the complete output transcript before release. GA input
   requires transcription logprobs and applies
   profile-aware mean, low-tail, and VAD-coherence admission; confidence-rejected
-  transcripts do not enter conversation state. Noisy/balanced input also uses
-  near-field noise reduction. Accepted and rejected transcript timing events
-  retain PII-free decision/reason, profile, item ID, mean/min logprob, token count,
-  and VAD duration diagnostics when available. Speech output timing/failures retain correlation
+  transcripts do not enter conversation state. Rejected transcripts use bounded
+  in-stream recovery and do not trigger recording/gather fallback: short retry,
+  scoped retry with the last approved question, noise coaching, then a typed
+  `voice_input_unintelligible` owner callback handoff on the fourth consecutive
+  rejection when the caller number is callable. Missing caller ID completes with
+  call-again guidance without promising a callback. Accepted transcripts reset
+  the streak. Noisy/balanced input also uses near-field noise reduction. Accepted
+  and rejected transcript timing events retain PII-free decision/reason, profile,
+  item ID, mean/min logprob, token count, VAD duration, rejection streak, and
+  recovery action diagnostics when available. Speech output timing/failures retain correlation
   IDs, counts, and salted canonical hashes without transcript/audio bodies. The
   owner-scoped Calls timeline exposes these whitelisted diagnostics. Transcription steering is
   a concise salon/catalog/alias keyword list rather than conversational example

@@ -615,13 +615,77 @@ func TestForwardRealtimeEventsRejectsLowConfidenceTranscriptWithoutMutatingConve
 		Type: voice.RealtimeEventTranscriptDone, ItemID: "item_noise", Transcript: "gel removal",
 		TranscriptLogProbs: []float64{-2.4, -1.8},
 	}
-	if got := waitForSpeak(t, realtime); got != realtimeLowConfidenceReply {
+	if got := waitForSpeak(t, realtime); got != "Sorry, could you say that again?" {
 		t.Fatalf("low-confidence reply = %q", got)
 	}
 	if engine.lastMessage != "" {
 		t.Fatalf("low-confidence transcript reached conversation engine: %q", engine.lastMessage)
 	}
 	waitForTimingStages(t, store, []string{"transcript_rejected_low_confidence"})
+}
+
+func TestForwardRealtimeEventsUsesProgressiveNoiseRecoveryAndTypedHandoff(t *testing.T) {
+	handoff := phoneSessionWithAIReply("I'm sorry, the background noise is making it hard to get your details right. I'll ask the salon to call you back at this number. This is not a confirmed appointment.", conversation.StatusHandoff, conversation.OutcomeHandoffRequested)
+	adapter, service, store, engine := testTwilioRuntimeWithStore(handoff)
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	closed := make(chan string, 1)
+
+	go handler.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(ctx, cancel, closeStreamRecorder(closed), realtime, func(any) error { return nil }, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", "Which service would you like?", map[string]struct{}{}, nil, realtimeTerminalDrainTimeout, 0, realtimeBackendProgressDelay, time.Now, nil)
+
+	if got := waitForSpeak(t, realtime); got != "Which service would you like?" {
+		t.Fatalf("initial reply = %q", got)
+	}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
+
+	rejected := func(itemID string) string {
+		realtime.events <- voice.RealtimeEvent{
+			Type: voice.RealtimeEventTranscriptDone, ItemID: itemID, Transcript: "background words",
+			TranscriptLogProbs: []float64{-2.4, -1.8},
+		}
+		return waitForSpeak(t, realtime)
+	}
+	if got := rejected("item_1"); got != "Sorry, could you say that again?" {
+		t.Fatalf("first recovery = %q", got)
+	}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
+	if got := rejected("item_2"); !strings.Contains(got, "one short answer") || !strings.Contains(got, "Which service would you like?") {
+		t.Fatalf("second recovery = %q", got)
+	}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
+	if got := rejected("item_3"); !strings.Contains(got, "move closer") || !strings.Contains(got, "Which service would you like?") {
+		t.Fatalf("third recovery = %q", got)
+	}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
+	if got := rejected("item_4"); !strings.Contains(got, "call you back") || strings.Contains(got, "audio issue") {
+		t.Fatalf("fourth recovery = %q", got)
+	}
+	if engine.voiceInputCalls != 1 || engine.voiceInputEvent != "voice-input-unintelligible:session_phone" {
+		t.Fatalf("typed voice handoff calls/event = %d/%q", engine.voiceInputCalls, engine.voiceInputEvent)
+	}
+	if engine.messageCalls != 0 {
+		t.Fatalf("rejected transcripts reached conversation Message: %d", engine.messageCalls)
+	}
+	realtime.events <- voice.RealtimeEvent{
+		Type: voice.RealtimeEventTranscriptDone, ItemID: "item_5", Transcript: "more background words",
+		TranscriptLogProbs: []float64{-2.6, -2.0},
+	}
+	assertNoSpeak(t, realtime)
+	if engine.voiceInputCalls != 1 {
+		t.Fatalf("finalized recovery created duplicate handoff calls: %d", engine.voiceInputCalls)
+	}
+
+	foundFourth := false
+	for _, event := range store.eventsSnapshot() {
+		if event.EventType == voice.EventRealtimeTiming && event.Payload["stage"] == "transcript_rejected_low_confidence" && event.Payload["rejection_streak"] == "4" {
+			foundFourth = event.Payload["recovery_action"] == realtimeRecoveryOwnerHandoff
+		}
+	}
+	if !foundFourth {
+		t.Fatalf("missing fourth-rejection handoff diagnostics: %#v", store.eventsSnapshot())
+	}
 }
 
 func TestForwardRealtimeEventsRecordsTimingStages(t *testing.T) {
@@ -1196,6 +1260,8 @@ type fakeTwilioConversationEngine struct {
 	messageCompleted chan struct{}
 	messageReplies   []string
 	messageCalls     int
+	voiceInputCalls  int
+	voiceInputEvent  string
 }
 
 func (f *fakeTwilioConversationEngine) StartPhoneCall(ctx context.Context, salonID string, ownerUserID string, req conversation.StartPhoneCallRequest) (*conversation.Session, error) {
@@ -1230,6 +1296,15 @@ func (f *fakeTwilioConversationEngine) Message(ctx context.Context, salonID stri
 		f.messageCalls++
 		return &session, nil
 	}
+	if f.messageSession != nil {
+		return f.messageSession, nil
+	}
+	return f.startSession, nil
+}
+
+func (f *fakeTwilioConversationEngine) HandleUnintelligibleVoiceInput(ctx context.Context, salonID string, ownerUserID string, sessionID string, req conversation.VoiceInputHandoffRequest) (*conversation.Session, error) {
+	f.voiceInputCalls++
+	f.voiceInputEvent = req.EventKey
 	if f.messageSession != nil {
 		return f.messageSession, nil
 	}

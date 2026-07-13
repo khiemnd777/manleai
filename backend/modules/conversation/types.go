@@ -92,6 +92,7 @@ const (
 	HandoffReasonGroupBooking               = "group_booking"
 	HandoffReasonConsultationSafety         = "consultation_safety"
 	HandoffReasonServiceClarification       = "service_clarification_unresolved"
+	HandoffReasonVoiceInputUnintelligible   = "voice_input_unintelligible"
 
 	PartyRequestStatusPending   = "pending"
 	PartyRequestStatusContacted = "contacted"
@@ -301,6 +302,10 @@ type StartPhoneCallRequest struct {
 type MessageRequest struct {
 	Message  string `json:"message"`
 	EventKey string `json:"event_key,omitempty"`
+}
+
+type VoiceInputHandoffRequest struct {
+	EventKey string
 }
 
 type ReplyGenerationRequest struct {

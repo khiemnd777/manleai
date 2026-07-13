@@ -16,6 +16,8 @@ func TestApplyWebhookPayloadExposesOnlySafeRealtimeDiagnostics(t *testing.T) {
 		"provider_request_id": "speech_req_1",
 		"audio_chunk_count":   "7",
 		"audio_bytes":         "1120",
+		"rejection_streak":    "3",
+		"recovery_action":     "noise_coaching",
 		"transcript":          "private caller speech",
 		"audio":               "private audio payload",
 		"unapproved_detail":   "internal",
@@ -30,6 +32,9 @@ func TestApplyWebhookPayloadExposesOnlySafeRealtimeDiagnostics(t *testing.T) {
 	}
 	if item.Diagnostics["provider_request_id"] != "speech_req_1" || item.Diagnostics["audio_chunk_count"] != "7" || item.Diagnostics["audio_bytes"] != "1120" {
 		t.Fatalf("streaming diagnostics = %#v", item.Diagnostics)
+	}
+	if item.Diagnostics["rejection_streak"] != "3" || item.Diagnostics["recovery_action"] != "noise_coaching" {
+		t.Fatalf("recovery diagnostics = %#v", item.Diagnostics)
 	}
 	for _, key := range []string{"transcript", "audio", "unapproved_detail"} {
 		if _, ok := item.Diagnostics[key]; ok {

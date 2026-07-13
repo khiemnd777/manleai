@@ -50,6 +50,7 @@ var (
 type ConversationEngine interface {
 	StartPhoneCall(ctx context.Context, salonID string, ownerUserID string, req conversation.StartPhoneCallRequest) (*conversation.Session, error)
 	Message(ctx context.Context, salonID string, ownerUserID string, sessionID string, req conversation.MessageRequest) (*conversation.Session, error)
+	HandleUnintelligibleVoiceInput(ctx context.Context, salonID string, ownerUserID string, sessionID string, req conversation.VoiceInputHandoffRequest) (*conversation.Session, error)
 	Get(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*conversation.Session, error)
 	TranscriptionContext(ctx context.Context, salonID string, ownerUserID string, sessionID string) (conversation.TranscriptionContext, error)
 }

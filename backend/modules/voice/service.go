@@ -418,6 +418,38 @@ func (s *Service) RecordRealtimeEvent(ctx context.Context, provider string, prov
 	return s.repo.RecordWebhookEvent(ctx, event)
 }
 
+func (s *Service) HandleUnintelligibleRealtimeInput(ctx context.Context, provider string, providerCallID string, sessionID string, itemID string) (*CallReply, error) {
+	provider = defaultProvider(provider)
+	providerCallID = strings.TrimSpace(providerCallID)
+	sessionID = strings.TrimSpace(sessionID)
+	itemID = strings.TrimSpace(itemID)
+	if providerCallID == "" || sessionID == "" || itemID == "" {
+		return nil, ErrValidation
+	}
+	route, err := s.repo.FindCallRoute(ctx, provider, providerCallID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, ErrRouteNotFound
+		}
+		return nil, err
+	}
+	if route.SessionID != sessionID {
+		return nil, ErrRouteNotFound
+	}
+	session, err := s.conversation.HandleUnintelligibleVoiceInput(ctx, route.SalonID, route.OwnerUserID, route.SessionID, conversation.VoiceInputHandoffRequest{
+		EventKey: "voice-input-unintelligible:" + route.SessionID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &CallReply{
+		Message:   lastAIMessage(session),
+		Continue:  session != nil && session.Status == conversation.StatusActive,
+		Session:   session,
+		InputMode: InputModeRealtimeStream,
+	}, nil
+}
+
 func (s *Service) RealtimeFallbackMessage(ctx context.Context, provider string, providerCallID string) (string, error) {
 	provider = defaultProvider(provider)
 	providerCallID = strings.TrimSpace(providerCallID)
