@@ -199,6 +199,7 @@ func (a *Adapter) InterpretTurn(ctx context.Context, req voice.TurnModelRequest)
 			"A pending clarification is context, not a restriction: a clearly different new target may supersede it.",
 			"For an initial concrete service selection, emit add_service with entity=service and the catalog target ID.",
 			"Represent questions about the current draft as questions with subject=current_booking.",
+			"For availability constraints, set time_preference.direction to before, after, or exact and time_preference.minutes to salon-local minutes after midnight. Use direction empty and minutes -1 when no time constraint is present.",
 			"A final-review acceptance may coexist with a correction; include both and never suppress the correction.",
 			"Use set_field or clear_field for staff, date/time, guest, or customer-field corrections.",
 			"Do not infer booking confirmation, availability, customer identity, prices, or policy.",
@@ -390,10 +391,19 @@ func turnUnderstandingSchema() map[string]any {
 			}},
 			"service_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			"staff_ids":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-			"confidence":  map[string]any{"type": "number", "minimum": 0, "maximum": 1},
-			"reason":      map[string]any{"type": "string"},
+			"time_preference": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]any{
+					"direction": map[string]any{"type": "string", "enum": []string{"", conversation.TimePreferenceBefore, conversation.TimePreferenceAfter, conversation.TimePreferenceExact}},
+					"minutes":   map[string]any{"type": "integer", "minimum": -1, "maximum": 1439},
+				},
+				"required": []string{"direction", "minutes"},
+			},
+			"confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+			"reason":     map[string]any{"type": "string"},
 		},
-		"required": []string{"subject", "service_ids", "staff_ids", "confidence", "reason"},
+		"required": []string{"subject", "service_ids", "staff_ids", "time_preference", "confidence", "reason"},
 	}
 	return map[string]any{
 		"type":                 "object",

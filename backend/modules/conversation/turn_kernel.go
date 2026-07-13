@@ -178,6 +178,9 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 	if _, ok := offeredSlotRejectionForMessage(message, session, timezoneLocation(timezoneFromConfig(cfg))); ok {
 		return finalizeTurnPlan(plan, TurnRouteFastLane, "offered_slot_rejection", TurnCoverageComplete, session, services, staff)
 	}
+	if _, ok := directionalSlotTimePreferenceForMessage(message, session); ok {
+		return finalizeTurnPlan(plan, TurnRouteFastLane, "offered_slot_time_preference", TurnCoverageComplete, session, services, staff)
+	}
 	if reply, _ := customerNameSlotRepairReply(message, session, services, aliases, categoryAliases, cfg); reply != "" {
 		return finalizeTurnPlan(plan, TurnRouteRecoveryLane, "customer_name_repair", TurnCoverageComplete, session, services, staff)
 	}

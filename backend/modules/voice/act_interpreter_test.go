@@ -60,6 +60,26 @@ func TestGuardedTurnInterpreterMapsStructuredResultWithoutPIIExpansion(t *testin
 	}
 }
 
+func TestGuardedTurnInterpreterMapsStructuredAvailabilityTimePreference(t *testing.T) {
+	provider := &fakeActModelProvider{configured: true, reply: TurnModelReply{
+		Goal: "book_appointment", Confidence: 0.93,
+		Questions: []QuestionModelReply{{
+			Subject:        conversation.ConversationQuestionAvailability,
+			TimePreference: TimePreferenceModelReply{Direction: conversation.TimePreferenceBefore, Minutes: 14*60 + 30},
+			Confidence:     0.93, Reason: "caller requested an earlier time",
+		}},
+	}}
+	interpreter := NewGuardedTurnInterpreter(provider)
+
+	turn, err := interpreter.InterpretTurn(context.Background(), conversation.TurnInterpretationRequest{SalonID: "salon_1"})
+	if err != nil {
+		t.Fatalf("InterpretTurn: %v", err)
+	}
+	if len(turn.Questions) != 1 || turn.Questions[0].TimePreference == nil || turn.Questions[0].TimePreference.Direction != conversation.TimePreferenceBefore || turn.Questions[0].TimePreference.Minutes != 14*60+30 {
+		t.Fatalf("turn = %#v", turn)
+	}
+}
+
 func TestGuardedTurnInterpreterRequiresConfiguredProvider(t *testing.T) {
 	interpreter := NewGuardedTurnInterpreter(&fakeActModelProvider{})
 	if _, err := interpreter.InterpretTurn(context.Background(), conversation.TurnInterpretationRequest{SalonID: "salon_1"}); !errors.Is(err, ErrProviderDisabled) {

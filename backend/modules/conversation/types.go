@@ -57,6 +57,10 @@ const (
 	ConversationQuestionStaff          = "staff"
 	ConversationQuestionPolicy         = "policy"
 
+	TimePreferenceBefore = "before"
+	TimePreferenceAfter  = "after"
+	TimePreferenceExact  = "exact"
+
 	ConversationScopeOne         = "one"
 	ConversationScopeAllMatching = "all_matching"
 	ConversationScopeAll         = "all"
@@ -195,11 +199,12 @@ type ConversationAct struct {
 }
 
 type ConversationQuestion struct {
-	Subject    string   `json:"subject"`
-	ServiceIDs []string `json:"service_ids"`
-	StaffIDs   []string `json:"staff_ids"`
-	Confidence float64  `json:"confidence"`
-	Reason     string   `json:"reason"`
+	Subject        string          `json:"subject"`
+	ServiceIDs     []string        `json:"service_ids"`
+	StaffIDs       []string        `json:"staff_ids"`
+	TimePreference *TimePreference `json:"time_preference,omitempty"`
+	Confidence     float64         `json:"confidence"`
+	Reason         string          `json:"reason"`
 }
 
 type TurnUnderstanding struct {
@@ -240,6 +245,11 @@ type DraftMutation struct {
 	AfterSegments     []booking.BookingSegmentRequest `json:"after_segments"`
 }
 
+type TimePreference struct {
+	Direction string `json:"direction"`
+	Minutes   int    `json:"minutes"`
+}
+
 type DialogState struct {
 	Version              int                     `json:"version"`
 	Phase                string                  `json:"phase"`
@@ -255,6 +265,7 @@ type DialogState struct {
 	ReviewedRevision     int                     `json:"reviewed_revision"`
 	AuthorizedRevision   int                     `json:"authorized_revision"`
 	LastMutationRevision int                     `json:"last_mutation_revision,omitempty"`
+	TimePreference       *TimePreference         `json:"time_preference,omitempty"`
 }
 
 type Store interface {
@@ -263,7 +274,7 @@ type Store interface {
 	GetSessionForOwner(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error)
 	GetSessionByTurnEventKey(ctx context.Context, salonID string, ownerUserID string, sessionID string, eventKey string) (*Session, bool, error)
 	ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int, offset int) ([]Session, error)
-	ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int) ([]WebhookEventLog, error)
+	ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int, offset int) ([]WebhookEventLog, error)
 	ArchiveSession(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error)
 	RedactSession(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error)
 	ListBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error)
@@ -298,6 +309,13 @@ type ListPartyBookingRequestsResponse struct {
 	Limit                int                   `json:"limit"`
 	Offset               int                   `json:"offset"`
 	HasMore              bool                  `json:"has_more"`
+}
+
+type ListWebhookEventsResponse struct {
+	Events  []WebhookEventLog `json:"events"`
+	Limit   int               `json:"limit"`
+	Offset  int               `json:"offset"`
+	HasMore bool              `json:"has_more"`
 }
 
 type StartPhoneCallRequest struct {

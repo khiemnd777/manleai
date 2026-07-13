@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -210,18 +211,38 @@ func TestListWebhookEventsDelegatesToStore(t *testing.T) {
 	store := newFakeConversationStore()
 	service := NewService(store, &fakeBookingTool{})
 
-	events, err := service.ListWebhookEvents(context.Background(), " salon_1 ", " owner_1 ", " session_1 ", 500)
+	response, err := service.ListWebhookEvents(context.Background(), " salon_1 ", " owner_1 ", " session_1 ", 500, 25)
 	if err != nil {
 		t.Fatalf("ListWebhookEvents returned error: %v", err)
 	}
-	if len(events) != 1 || events[0].EventType != "realtime_failed" {
-		t.Fatalf("events = %#v", events)
+	if len(response.Events) != 1 || response.Events[0].EventType != "realtime_failed" || response.Limit != maxWebhookLimit || response.Offset != 25 || response.HasMore {
+		t.Fatalf("response = %#v", response)
 	}
 	if store.webhookSessionID != "session_1" {
 		t.Fatalf("webhook session = %q, want session_1", store.webhookSessionID)
 	}
-	if store.webhookLimit != maxWebhookLimit {
-		t.Fatalf("webhook limit = %d, want %d", store.webhookLimit, maxWebhookLimit)
+	if store.webhookLimit != maxWebhookLimit+1 || store.webhookOffset != 25 {
+		t.Fatalf("webhook page = limit %d offset %d, want limit %d offset 25", store.webhookLimit, store.webhookOffset, maxWebhookLimit+1)
+	}
+}
+
+func TestListWebhookEventsReturnsNewestPageAndSignalsOlderEvents(t *testing.T) {
+	store := newFakeConversationStore()
+	store.webhookEvents = make([]WebhookEventLog, maxWebhookLimit+1)
+	for index := range store.webhookEvents {
+		store.webhookEvents[index] = WebhookEventLog{ID: fmt.Sprintf("event_%03d", index)}
+	}
+	service := NewService(store, &fakeBookingTool{})
+
+	response, err := service.ListWebhookEvents(context.Background(), "salon_1", "owner_1", "session_1", maxWebhookLimit, 0)
+	if err != nil {
+		t.Fatalf("ListWebhookEvents returned error: %v", err)
+	}
+	if !response.HasMore || len(response.Events) != maxWebhookLimit {
+		t.Fatalf("response = %#v, want full page with older events", response)
+	}
+	if response.Events[0].ID != "event_001" || response.Events[len(response.Events)-1].ID != "event_100" {
+		t.Fatalf("events = first %q last %q, want newest chronological page", response.Events[0].ID, response.Events[len(response.Events)-1].ID)
 	}
 }
 
@@ -3345,6 +3366,24 @@ func TestStateScopedOfferedSlotSelectionRejectsCorrectionsQuestionsAndMultiInten
 	}
 }
 
+func TestDirectionalTimePreferenceRejectsQuestionsAndMultiIntent(t *testing.T) {
+	session := Session{
+		Intent:        IntentBooking,
+		ServiceID:     "service_1",
+		RequestedDate: "2026-07-02",
+		OfferedSlots:  offeredPMSlots(),
+	}
+	for _, message := range []string{
+		"Before 3:00 PM, and what does it cost?",
+		"Can you do anything after 1:00 PM and switch me to gel?",
+		"Is anything before 2:00 PM available?",
+	} {
+		if preference, ok := directionalSlotTimePreferenceForMessage(message, session); ok {
+			t.Fatalf("complex turn bypassed semantic interpreter: message=%q preference=%#v", message, preference)
+		}
+	}
+}
+
 func TestMessageSelectsOfferedSlotBySpokenTimeWithoutAvailabilityRetry(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -3388,6 +3427,145 @@ func TestMessageSelectsOfferedSlotBySpokenTimeWithoutAvailabilityRetry(t *testin
 				t.Fatalf("AI reply should collect name after spoken time selection: %s", store.lastTurn.AIMessage)
 			}
 		})
+	}
+}
+
+func TestMessageSelectsExactOfferedClockOnFastLane(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.RequestedDate = "2026-07-02"
+	store.session.OfferedSlots = offeredPMSlots()
+	store.session.DialogState.TimePreference = &TimePreference{Direction: TimePreferenceBefore, Minutes: 14 * 60}
+	interpreter := &immediateTimeoutTurnInterpreter{}
+	service := NewService(store, &fakeBookingTool{})
+	service.SetTurnInterpreter(interpreter)
+	service.now = fixedNow
+	var timings []TurnTiming
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I'd like the 1:00 PM opening.", TimingRecorder: func(timing TurnTiming) { timings = append(timings, timing) },
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if interpreter.calls != 0 {
+		t.Fatalf("exact offered clock invoked semantic interpreter %d times", interpreter.calls)
+	}
+	want := time.Date(2026, 7, 2, 18, 0, 0, 0, time.UTC)
+	if session.RequestedStartTime == nil || !session.RequestedStartTime.Equal(want) {
+		t.Fatalf("requested start = %v, want %s", session.RequestedStartTime, want)
+	}
+	if session.DialogState.TimePreference != nil {
+		t.Fatalf("exact slot selection kept stale range preference: %#v", session.DialogState.TimePreference)
+	}
+	fastPath := false
+	for _, timing := range timings {
+		if timing.Stage == TurnTimingStageTurnInterpreter && timing.Result == TurnTimingPathStateScoped {
+			fastPath = true
+		}
+	}
+	if !fastPath {
+		t.Fatalf("timings = %#v, want state-scoped fast path", timings)
+	}
+}
+
+func TestMessageAppliesAvailabilityTimePreferenceAcrossSemanticAndFastLanes(t *testing.T) {
+	tests := []struct {
+		name            string
+		message         string
+		minutes         int
+		slots           []OfferedSlot
+		wantInterpreter int
+		wantCount       int
+		wantPresent     string
+		wantAbsent      string
+	}{
+		{
+			name: "mixed_vietnamese_before_three", message: "Trước 3 giờ đi PM.", minutes: 15 * 60,
+			slots: []OfferedSlot{
+				{StartTime: time.Date(2026, 7, 2, 17, 0, 0, 0, time.UTC), StaffID: "staff_1"},
+				{StartTime: time.Date(2026, 7, 2, 20, 30, 0, 0, time.UTC), StaffID: "staff_1"},
+				{StartTime: time.Date(2026, 7, 2, 21, 0, 0, 0, time.UTC), StaffID: "staff_1"},
+			},
+			wantInterpreter: 1, wantCount: 1, wantPresent: "12:00 PM", wantAbsent: "3:30 PM",
+		},
+		{
+			name: "different_wording_and_boundary", message: "Could you keep it earlier than 12:45 PM?", minutes: 12*60 + 45,
+			slots: offeredPMSlots(), wantInterpreter: 0, wantCount: 2, wantPresent: "12:30 PM", wantAbsent: "1:00 PM",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := newFakeConversationStore()
+			store.session.Intent = IntentBooking
+			store.session.ServiceID = "service_1"
+			store.session.ServiceName = "Classic Manicure"
+			store.session.RequestedDate = "2026-07-02"
+			store.session.OfferedSlots = test.slots
+			interpreter := &fakeConversationActInterpreter{turn: TurnUnderstanding{
+				Goal: "book_appointment", Confidence: 0.94,
+				Questions: []ConversationQuestion{{
+					Subject: ConversationQuestionAvailability, TimePreference: &TimePreference{Direction: TimePreferenceBefore, Minutes: test.minutes},
+					Confidence: 0.94, Reason: "caller supplied a salon-local upper time bound",
+				}},
+			}}
+			bookingTool := &fakeBookingTool{}
+			service := NewService(store, bookingTool)
+			service.SetTurnInterpreter(interpreter)
+			service.now = fixedNow
+
+			session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: test.message})
+			if err != nil {
+				t.Fatalf("Message returned error: %v", err)
+			}
+			if interpreter.calls != test.wantInterpreter || bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+				t.Fatalf("turn routing: interpreter=%d booking=%d availability=%d", interpreter.calls, bookingTool.calls, bookingTool.availabilityCalls)
+			}
+			if len(session.OfferedSlots) != test.wantCount {
+				t.Fatalf("offered slots = %#v, want %d filtered slots", session.OfferedSlots, test.wantCount)
+			}
+			preference := session.DialogState.TimePreference
+			if preference == nil || preference.Direction != TimePreferenceBefore || preference.Minutes != test.minutes {
+				t.Fatalf("time preference = %#v", preference)
+			}
+			if !strings.Contains(store.lastTurn.AIMessage, test.wantPresent) || strings.Contains(store.lastTurn.AIMessage, test.wantAbsent) {
+				t.Fatalf("filtered offer reply = %s", store.lastTurn.AIMessage)
+			}
+		})
+	}
+}
+
+func TestMessageExpandsAvailabilityWhenDirectionalPreferenceExcludesCurrentOffers(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.RequestedDate = "2026-07-02"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{ServiceID: "service_1", StaffSelectionMode: booking.StaffSelectionAnyone}}
+	store.session.OfferedSlots = offeredPMSlots()
+	bookingTool := &fakeBookingTool{availabilityResult: &booking.AvailabilityResult{
+		ServiceID: "service_1", ServiceName: "Classic Manicure", PreferredDate: "2026-07-02", StaffSelectionMode: booking.StaffSelectionAnyone,
+		Slots: []booking.AvailabilitySlot{
+			{StartTime: time.Date(2026, 7, 2, 18, 0, 0, 0, time.UTC), EndTime: time.Date(2026, 7, 2, 18, 45, 0, 0, time.UTC), StaffID: "staff_1"},
+			{StartTime: time.Date(2026, 7, 2, 19, 0, 0, 0, time.UTC), EndTime: time.Date(2026, 7, 2, 19, 45, 0, 0, time.UTC), StaffID: "staff_1"},
+			{StartTime: time.Date(2026, 7, 2, 20, 0, 0, 0, time.UTC), EndTime: time.Date(2026, 7, 2, 20, 45, 0, 0, time.UTC), StaffID: "staff_1"},
+		},
+	}}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Anything after 1:00 PM works."})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if bookingTool.availabilityCalls != 1 || bookingTool.availabilityRequest.Limit != exactAvailabilityLimit {
+		t.Fatalf("availability request = calls %d request %#v", bookingTool.availabilityCalls, bookingTool.availabilityRequest)
+	}
+	if len(session.OfferedSlots) != 2 || !strings.Contains(store.lastTurn.AIMessage, "2:00 PM") || !strings.Contains(store.lastTurn.AIMessage, "3:00 PM") || strings.Contains(store.lastTurn.AIMessage, "1:00 PM") {
+		t.Fatalf("expanded filtered offer: slots=%#v reply=%s", session.OfferedSlots, store.lastTurn.AIMessage)
 	}
 }
 
@@ -3500,6 +3678,49 @@ func TestMessageConfirmsShortBareVoiceNameBeforeAccepting(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "phone") {
 		t.Fatalf("AI should move to phone after name confirmation: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageConfirmedVoiceNameReadsFinalReviewBeforePOSBooking(t *testing.T) {
+	store := newFakeConversationStore()
+	seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
+	store.session.Channel = ChannelPhone
+	store.session.CustomerPhone = "+13125550177"
+	store.session.DialogState = DialogState{
+		Version: DialogStateVersion, Phase: DialogPhaseDrafting, ReviewRequired: true, DraftRevision: 3,
+	}
+	bookingTool := &fakeBookingTool{attempt: &booking.BookingAttempt{
+		ID: "attempt_name_review", Status: booking.StatusConfirmed, POSBookingID: "pos_name_review",
+		Appointment: &booking.Appointment{ID: "appointment_name_review", Status: booking.StatusConfirmed},
+	}}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Mia."}); err != nil {
+		t.Fatalf("pending name turn: %v", err)
+	}
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Yes, that is right."})
+	if err != nil {
+		t.Fatalf("name confirmation turn: %v", err)
+	}
+	if bookingTool.calls != 0 {
+		t.Fatalf("name confirmation bypassed final review: booking calls=%d", bookingTool.calls)
+	}
+	if session.DialogState.Phase != DialogPhaseReview || session.DialogState.DraftRevision != 4 || session.DialogState.ReviewedRevision != 4 || session.DialogState.AuthorizedRevision != 0 {
+		t.Fatalf("review state after name confirmation = %#v", session.DialogState)
+	}
+	for _, expected := range []string{"Let me review everything", "Mia", "Would you like me to book it"} {
+		if !strings.Contains(store.lastTurn.AIMessage, expected) {
+			t.Fatalf("final review missing %q: %s", expected, store.lastTurn.AIMessage)
+		}
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Everything is correct, please book it."})
+	if err != nil {
+		t.Fatalf("review authorization turn: %v", err)
+	}
+	if bookingTool.calls != 1 || session.Outcome != OutcomeBookingConfirmed || session.AppointmentID != "appointment_name_review" {
+		t.Fatalf("authorized booking result: calls=%d session=%#v", bookingTool.calls, session)
 	}
 }
 
@@ -7572,6 +7793,8 @@ type fakeConversationStore struct {
 	listSessions        []Session
 	webhookSessionID    string
 	webhookLimit        int
+	webhookOffset       int
+	webhookEvents       []WebhookEventLog
 	archivedSessionID   string
 	redactedSessionID   string
 }
@@ -7657,9 +7880,13 @@ func (f *fakeConversationStore) ListSessions(ctx context.Context, salonID string
 	return []Session{f.session}, nil
 }
 
-func (f *fakeConversationStore) ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int) ([]WebhookEventLog, error) {
+func (f *fakeConversationStore) ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int, offset int) ([]WebhookEventLog, error) {
 	f.webhookSessionID = sessionID
 	f.webhookLimit = limit
+	f.webhookOffset = offset
+	if f.webhookEvents != nil {
+		return f.webhookEvents, nil
+	}
 	return []WebhookEventLog{{
 		ID:        "event_1",
 		EventType: "realtime_failed",

@@ -159,7 +159,7 @@ func (r *Repository) ListSessions(ctx context.Context, salonID string, ownerUser
 	return items, rows.Err()
 }
 
-func (r *Repository) ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int) ([]WebhookEventLog, error) {
+func (r *Repository) ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int, offset int) ([]WebhookEventLog, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT recent.id, recent.provider, recent.provider_call_id, recent.event_type, recent.payload, recent.created_at
 		FROM (
@@ -179,11 +179,12 @@ func (r *Repository) ListWebhookEvents(ctx context.Context, salonID string, owne
 			  AND cs.salon_id = $2
 			  AND salon.owner_user_id = $3
 			  AND v.event_type IN ('realtime_connected', 'realtime_timing', 'realtime_failed', 'realtime_stopped')
-			ORDER BY v.created_at DESC
+			ORDER BY v.created_at DESC, v.id DESC
 			LIMIT $4
+			OFFSET $5
 		) recent
-		ORDER BY recent.created_at ASC
-	`, sessionID, salonID, ownerUserID, limit)
+		ORDER BY recent.created_at ASC, recent.id ASC
+	`, sessionID, salonID, ownerUserID, limit, offset)
 	if err != nil {
 		return nil, err
 	}

@@ -1048,6 +1048,14 @@ func validateTurnUnderstanding(turn TurnUnderstanding, session Session, services
 				return TurnUnderstanding{}, false
 			}
 		}
+		if question.TimePreference != nil {
+			if question.Subject != ConversationQuestionAvailability {
+				return TurnUnderstanding{}, false
+			}
+			if _, ok := normalizedSlotTimePreference(question.TimePreference); !ok {
+				return TurnUnderstanding{}, false
+			}
+		}
 		validatedQuestions = append(validatedQuestions, question)
 	}
 	turn.Acts = validatedActs

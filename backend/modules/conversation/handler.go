@@ -84,7 +84,7 @@ func (h *Handler) Get(c *fiber.Ctx) error {
 }
 
 func (h *Handler) RealtimeEvents(c *fiber.Ctx) error {
-	events, err := h.service.ListWebhookEvents(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("session_id"), parseLimit(c.Query("limit")))
+	response, err := h.service.ListWebhookEvents(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("session_id"), parseLimit(c.Query("limit")), parseOffset(c.Query("offset")))
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Conversation session request is invalid.")
 	}
@@ -94,7 +94,7 @@ func (h *Handler) RealtimeEvents(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "CONVERSATION_REALTIME_EVENTS_FAILED", "Could not load realtime events.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"events": events})
+	return respond.JSON(c, fiber.StatusOK, response)
 }
 
 func (h *Handler) ListPartyBookingRequests(c *fiber.Ctx) error {

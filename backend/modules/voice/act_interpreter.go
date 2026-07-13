@@ -64,9 +64,15 @@ func (g *GuardedTurnInterpreter) InterpretTurn(ctx context.Context, req conversa
 		})
 	}
 	for _, question := range reply.Questions {
+		var timePreference *conversation.TimePreference
+		direction := strings.TrimSpace(question.TimePreference.Direction)
+		if direction != "" || question.TimePreference.Minutes != -1 {
+			timePreference = &conversation.TimePreference{Direction: direction, Minutes: question.TimePreference.Minutes}
+		}
 		turn.Questions = append(turn.Questions, conversation.ConversationQuestion{
 			Subject: strings.TrimSpace(question.Subject), ServiceIDs: append([]string(nil), question.ServiceIDs...),
-			StaffIDs: append([]string(nil), question.StaffIDs...), Confidence: question.Confidence, Reason: strings.TrimSpace(question.Reason),
+			StaffIDs: append([]string(nil), question.StaffIDs...), TimePreference: timePreference,
+			Confidence: question.Confidence, Reason: strings.TrimSpace(question.Reason),
 		})
 	}
 	return turn, nil

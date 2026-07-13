@@ -30,6 +30,10 @@ func normalizedDialogState(state DialogState) DialogState {
 		}
 		state.MutationHistory = history
 	}
+	if state.TimePreference != nil {
+		preference := *state.TimePreference
+		state.TimePreference = &preference
+	}
 	return state
 }
 

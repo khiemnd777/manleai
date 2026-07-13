@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   AlertTriangle,
@@ -66,6 +66,9 @@ type SessionsResponse = {
 
 type RealtimeEventsResponse = {
   events: RealtimeEventLog[];
+  limit?: number;
+  offset?: number;
+  has_more?: boolean;
 };
 
 type PartyRequestsResponse = {
@@ -89,6 +92,7 @@ const defaultPartyRequestPageSize = 10;
 const sessionPageSizeOptions = [10, 25, 50] as const;
 const partyRequestPageSizeOptions = [10, 25, 50] as const;
 const readinessMetricLimit = 100;
+const realtimeEventPageSize = 100;
 
 type ServicesResponse = {
   services: POSService[];
@@ -104,6 +108,7 @@ type CorrectionTarget = {
 };
 
 export function CallsDashboard() {
+  const realtimeEventsRequestID = useRef(0);
   const [salon, setSalon] = useState<Salon | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
@@ -291,6 +296,7 @@ export function CallsDashboard() {
 
   useEffect(() => {
     if (!salon || !selectedSession || selectedSession.channel !== "phone") {
+      realtimeEventsRequestID.current += 1;
       setRealtimeEvents([]);
       setRealtimeEventsError("");
       setRealtimeEventsLoading(false);
@@ -300,23 +306,39 @@ export function CallsDashboard() {
   }, [salon?.id, selectedSession?.id, selectedSession?.updated_at, selectedSession?.channel]);
 
   async function loadRealtimeEvents(salonID: string, sessionID: string) {
+    const requestID = ++realtimeEventsRequestID.current;
     setRealtimeEventsLoading(true);
     setRealtimeEventsError("");
     try {
-      const response = await apiRequest<RealtimeEventsResponse>(
-        `/api/salons/${salonID}/conversation-sessions/${sessionID}/realtime-events?limit=50`
-      );
-      setRealtimeEvents(response.events);
+      const eventsByID = new Map<string, RealtimeEventLog>();
+      let offset = 0;
+      let hasMore = true;
+      while (hasMore) {
+        const response = await apiRequest<RealtimeEventsResponse>(
+          `/api/salons/${salonID}/conversation-sessions/${sessionID}/realtime-events?limit=${realtimeEventPageSize}&offset=${offset}`
+        );
+        if (requestID !== realtimeEventsRequestID.current) return;
+        for (const event of response.events) eventsByID.set(event.id, event);
+        hasMore = response.has_more === true && response.events.length > 0;
+        offset += response.limit || realtimeEventPageSize;
+      }
+      const events = Array.from(eventsByID.values()).sort((left, right) => {
+        const timeOrder = new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
+        return timeOrder !== 0 ? timeOrder : left.id.localeCompare(right.id);
+      });
+      setRealtimeEvents(events);
     } catch (err) {
+      if (requestID !== realtimeEventsRequestID.current) return;
       setRealtimeEvents([]);
       setRealtimeEventsError(err instanceof Error ? err.message : "Could not load realtime events.");
     } finally {
-      setRealtimeEventsLoading(false);
+      if (requestID === realtimeEventsRequestID.current) setRealtimeEventsLoading(false);
     }
   }
 
   async function loadRealtimeEventsForSession(salonID: string, session: ConversationSession) {
     if (session.channel !== "phone") {
+      realtimeEventsRequestID.current += 1;
       setRealtimeEvents([]);
       setRealtimeEventsError("");
       setRealtimeEventsLoading(false);

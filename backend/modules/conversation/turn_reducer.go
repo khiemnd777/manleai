@@ -32,18 +32,36 @@ func (s *Service) applyTurnUnderstandingToDraft(session *Session, turn TurnUnder
 		}
 	}
 	for _, question := range turn.Questions {
-		if question.Subject != ConversationQuestionCurrentBooking {
-			continue
+		switch question.Subject {
+		case ConversationQuestionAvailability:
+			if applyAvailabilityQuestionTimePreference(session, question) {
+				aggregate.Handled = true
+				aggregate.Changed = true
+				aggregate.ReplySource = "availability_time_preference"
+			}
+		case ConversationQuestionCurrentBooking:
+			aggregate.Handled = true
+			aggregate.Reply = currentBookingSummaryReply(*session, services, question.ServiceIDs...)
+			state := normalizedDialogState(session.DialogState)
+			if state.Pending != nil {
+				aggregate.Reply += " " + pendingConversationPrompt(*session, services, state, false)
+			}
+			aggregate.ReplySource = "current_booking_summary"
 		}
-		aggregate.Handled = true
-		aggregate.Reply = currentBookingSummaryReply(*session, services, question.ServiceIDs...)
-		state := normalizedDialogState(session.DialogState)
-		if state.Pending != nil {
-			aggregate.Reply += " " + pendingConversationPrompt(*session, services, state, false)
-		}
-		aggregate.ReplySource = "current_booking_summary"
 	}
 	return aggregate
+}
+
+func applyAvailabilityQuestionTimePreference(session *Session, question ConversationQuestion) bool {
+	if session == nil || question.Subject != ConversationQuestionAvailability {
+		return false
+	}
+	preference, ok := normalizedSlotTimePreference(question.TimePreference)
+	if !ok {
+		return false
+	}
+	setSlotTimePreference(session, preference)
+	return true
 }
 
 func mergeConversationDraftResults(left conversationDraftResult, right conversationDraftResult) conversationDraftResult {
@@ -330,9 +348,16 @@ func applyTurnUnderstandingMetadata(turnRecord *TurnRecord, understanding TurnUn
 	}
 	questions := make([]map[string]any, 0, len(understanding.Questions))
 	for _, question := range understanding.Questions {
+		preferenceDirection := ""
+		preferenceMinutes := -1
+		if preference, ok := normalizedSlotTimePreference(question.TimePreference); ok {
+			preferenceDirection = preference.Direction
+			preferenceMinutes = preference.Minutes
+		}
 		questions = append(questions, map[string]any{
 			"subject": question.Subject, "service_ids": append([]string(nil), question.ServiceIDs...),
-			"staff_ids": append([]string(nil), question.StaffIDs...), "confidence": question.Confidence, "reason": question.Reason,
+			"staff_ids": append([]string(nil), question.StaffIDs...), "time_preference_direction": preferenceDirection,
+			"time_preference_minutes": preferenceMinutes, "confidence": question.Confidence, "reason": question.Reason,
 		})
 	}
 	turnRecord.CustomerMetadata = mergeMetadata(turnRecord.CustomerMetadata, map[string]any{

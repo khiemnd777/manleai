@@ -1702,11 +1702,15 @@ To
 SpeechResult
 ```
 
-`GET /api/salons/:id/conversation-sessions/:session_id/realtime-events`
+`GET /api/salons/:id/conversation-sessions/:session_id/realtime-events?limit=100&offset=0`
 
 Owner-authenticated debug endpoint for the selected phone call session. It
-returns the latest realtime lifecycle and timing audit events recorded in
-`voice_webhook_events`, scoped by salon ownership and session ID and ordered
+returns a page from the latest realtime lifecycle and timing audit events
+recorded in `voice_webhook_events`, scoped by salon ownership and session ID
+and ordered chronologically within the page. `limit` defaults to 50 and is
+bounded to 100; `offset` defaults to 0. `has_more=true` means older events are
+available at `offset + limit`. The Calls dashboard follows those pages,
+deduplicates immutable event IDs, and sorts the complete selected-call timeline
 chronologically. The response intentionally exposes only debug-safe fields
 extracted from provider payloads, including transcript admission decisions,
 noise profile, confidence/VAD measurements, response correlation IDs, and
@@ -1735,7 +1739,10 @@ Example response:
       },
       "created_at": "2026-06-29T00:13:10Z"
     }
-  ]
+  ],
+  "limit": 100,
+  "offset": 0,
+  "has_more": true
 }
 ```
 

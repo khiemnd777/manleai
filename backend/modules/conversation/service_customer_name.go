@@ -50,6 +50,7 @@ func (s *Service) handlePendingCustomerNameConfirmation(ctx context.Context, sal
 		if next.CustomerEmail == "" {
 			next.CustomerEmail = extractEmail(message)
 		}
+		advanceDraftRevision(session, &next)
 		turn := newTurnRecord(salonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
 		clearPendingCustomerNameMetadata(&turn, "confirmed")
 		updated, err := s.continueAfterCustomerName(ctx, ownerUserID, turn, next, services, staff, cfg, knowledge)
@@ -85,7 +86,7 @@ func (s *Service) continueAfterCustomerName(ctx context.Context, ownerUserID str
 		finalizeTurnMetadata(&turn, turn.Session, next, missing, missing, "customer_name_confirmed")
 		return s.store.SaveTurn(ctx, turn)
 	}
-	return s.tryBooking(ctx, ownerUserID, turn, next, services, staff, cfg, knowledge)
+	return s.continueAfterDraftReady(ctx, ownerUserID, turn, turn.Session, next, services, staff, cfg, knowledge)
 }
 
 func voiceCustomerNamePendingConfirmationCandidate(message string, session Session) string {

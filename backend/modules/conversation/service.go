@@ -96,10 +96,7 @@ type assignmentCandidate struct {
 	Slot           booking.AvailabilitySlot
 }
 
-type slotTimePreference struct {
-	Direction string
-	Minutes   int
-}
+type slotTimePreference = TimePreference
 
 type slotRejection struct {
 	Preference slotTimePreference
@@ -313,7 +310,8 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	}
 
 	if rejection, ok := offeredSlotRejectionForMessage(message, *session, timezoneLocation(timezoneFromConfig(cfg))); ok {
-		next := *session
+		next := cloneSessionForTurn(*session)
+		setSlotTimePreference(&next, rejection.Preference)
 		next.OfferedSlots = rejection.Remaining
 		turn := newPlannedTurn(*session, next)
 		applySlotRejectionMetadata(&turn, rejection)
@@ -323,6 +321,29 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 			turn.AIMessage = rejectedSlotNoRemainingReply(rejection.Preference.Direction)
 		}
 		finalizeTurnMetadata(&turn, *session, next, "requested_time", "requested_time", "offered_slot_rejection")
+		return s.store.SaveTurn(ctx, turn)
+	}
+
+	if preference, ok := directionalSlotTimePreferenceForMessage(message, *session); ok {
+		next := cloneSessionForTurn(*session)
+		setSlotTimePreference(&next, preference)
+		next.OfferedSlots = filterOfferedSlotsByPreference(next.OfferedSlots, preference, timezoneLocation(timezoneFromConfig(cfg)))
+		turn := newPlannedTurn(*session, next)
+		if len(next.OfferedSlots) == 0 {
+			preferredDate := preferredDateForAvailability(next, message, timezoneLocation(timezoneFromConfig(cfg)), s.now)
+			if preferredDate != "" && next.ServiceID != "" {
+				if err := s.offerAvailableSlots(ctx, ownerUserID, &turn, &next, services, staff, preferredDate, false, cfg); err != nil {
+					return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check appointment availability, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
+				}
+			}
+		}
+		applyDirectionalSlotTimePreferenceMetadata(&turn, preference, len(next.OfferedSlots))
+		if len(next.OfferedSlots) > 0 {
+			turn.AIMessage = formatSlotOfferForSession(next.OfferedSlots, timezoneLocation(timezoneFromConfig(cfg)), false, next, services)
+		} else {
+			turn.AIMessage = "I don't have an opening in that time range. What other time works?"
+		}
+		finalizeTurnMetadata(&turn, *session, next, "requested_time", "requested_time", "offered_slot_time_preference")
 		return s.store.SaveTurn(ctx, turn)
 	}
 
@@ -527,6 +548,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		}
 	}
 	conversationResult := s.applyTurnUnderstandingToDraft(&next, turnUnderstanding, services, staff)
+	applyActiveSlotTimePreferenceToOfferedSlots(&next, loc)
 	if conversationResult.Clarification {
 		next.Intent = IntentBooking
 		turn := newPlannedTurn(*session, next)
@@ -789,26 +811,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		return s.store.SaveTurn(ctx, turn)
 	}
 
-	nextAction = planNextConversationAction(next, "")
-	if nextAction.Kind == AssistantActionReadReview {
-		state := normalizedDialogState(next.DialogState)
-		if state.ReviewRequired {
-			state.Phase = DialogPhaseReview
-			state.Pending = nil
-			state.ReviewAccepted = false
-			state.ReviewedRevision = state.DraftRevision
-			state.AuthorizedRevision = 0
-			state.NoProgressCount = 0
-			state.LastPromptKey = "final_review"
-			next.DialogState = state
-			syncTurnUpdate(&turn, next, services, staff, cfg)
-			turn.AIMessage = finalBookingReviewPrompt(next, services, staff, cfg)
-			turn.ReplyPolicy = ReplyPolicyOperationalFact
-			finalizeTurnMetadata(&turn, *session, next, "booking_review", "booking_review", "final_booking_review")
-			return s.store.SaveTurn(ctx, turn)
-		}
-	}
-	return s.tryBooking(ctx, ownerUserID, turn, next, services, staff, cfg, knowledge)
+	return s.continueAfterDraftReady(ctx, ownerUserID, turn, *session, next, services, staff, cfg, knowledge)
 }
 
 func shouldRouteReschedule(session Session, message string) bool {
@@ -1111,14 +1114,24 @@ func (s *Service) TranscriptionContext(ctx context.Context, salonID string, owne
 	}, nil
 }
 
-func (s *Service) ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int) ([]WebhookEventLog, error) {
+func (s *Service) ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int, offset int) (*ListWebhookEventsResponse, error) {
 	salonID = strings.TrimSpace(salonID)
 	ownerUserID = strings.TrimSpace(ownerUserID)
 	sessionID = strings.TrimSpace(sessionID)
 	if salonID == "" || ownerUserID == "" || sessionID == "" {
 		return nil, ErrValidation
 	}
-	return s.store.ListWebhookEvents(ctx, salonID, ownerUserID, sessionID, clampWebhookLimit(limit))
+	pageLimit := clampWebhookLimit(limit)
+	pageOffset := clampOffset(offset)
+	items, err := s.store.ListWebhookEvents(ctx, salonID, ownerUserID, sessionID, pageLimit+1, pageOffset)
+	if err != nil {
+		return nil, err
+	}
+	hasMore := len(items) > pageLimit
+	if hasMore {
+		items = items[1:]
+	}
+	return &ListWebhookEventsResponse{Events: items, Limit: pageLimit, Offset: pageOffset, HasMore: hasMore}, nil
 }
 
 func (s *Service) ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int, offset int) (*ListPartyBookingRequestsResponse, error) {

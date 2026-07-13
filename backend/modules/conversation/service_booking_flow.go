@@ -10,6 +10,9 @@ import (
 )
 
 func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnRecord, session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
+	if nextAction := planNextConversationAction(session, missingBookingField(session)); nextAction.Kind != AssistantActionExecuteBooking {
+		return s.continueAfterDraftReady(ctx, ownerUserID, turn, turn.Session, session, services, staff, cfg, knowledge)
+	}
 	if s.bookingTool == nil {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, bookingErrorReply(), services, staff, cfg)
 	}

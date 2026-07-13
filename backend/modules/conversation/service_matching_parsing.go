@@ -400,6 +400,7 @@ func applyRequestedStartTime(session *Session, requestedAt time.Time, loc *time.
 	}
 	start := requestedAt.UTC()
 	session.RequestedStartTime = &start
+	clearSlotTimePreference(session)
 	if loc == nil {
 		loc = time.UTC
 	}
@@ -490,6 +491,34 @@ func offeredSlotRejectionForMessage(message string, session Session, loc *time.L
 	return slotRejection{Preference: preference, Remaining: remaining}, true
 }
 
+func directionalSlotTimePreferenceForMessage(message string, session Session) (slotTimePreference, bool) {
+	if len(session.OfferedSlots) == 0 || missingBookingField(session) != "requested_time" {
+		return slotTimePreference{}, false
+	}
+	normalized := normalizeLooseText(message)
+	if normalized == "" || !stateScopedDirectionalSlotTimePattern.MatchString(normalized) {
+		return slotTimePreference{}, false
+	}
+	direction := ""
+	switch {
+	case containsAnyLoosePhrase(normalized, []string{"no earlier than", "not before"}):
+		direction = TimePreferenceAfter
+	case containsAnyLoosePhrase(normalized, []string{"no later than", "not after"}):
+		direction = TimePreferenceBefore
+	case containsAnyLoosePhrase(normalized, []string{"before", "earlier than", "trước", "truoc", "sớm hơn", "som hon"}):
+		direction = TimePreferenceBefore
+	case containsAnyLoosePhrase(normalized, []string{"after", "later than", "sau", "trễ hơn", "tre hon"}):
+		direction = TimePreferenceAfter
+	default:
+		return slotTimePreference{}, false
+	}
+	candidates := clockCandidatesFromText(message)
+	if len(candidates) != 1 {
+		return slotTimePreference{}, false
+	}
+	return slotTimePreference{Direction: direction, Minutes: candidates[0]}, true
+}
+
 func hasOfferedSlotRejectionSignal(message string) bool {
 	normalized := normalizeLooseText(message)
 	if normalized == "" {
@@ -564,6 +593,8 @@ func filterOfferedSlotsByPreference(slots []OfferedSlot, preference slotTimePref
 			keep = minutes > preference.Minutes
 		case "before":
 			keep = minutes < preference.Minutes
+		case TimePreferenceExact:
+			keep = minutes == preference.Minutes
 		default:
 			keep = minutes != preference.Minutes
 		}
@@ -601,7 +632,26 @@ func applySlotRejectionMetadata(turn *TurnRecord, rejection slotRejection) {
 	})
 }
 
+func applyDirectionalSlotTimePreferenceMetadata(turn *TurnRecord, preference slotTimePreference, remaining int) {
+	if turn == nil {
+		return
+	}
+	turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, map[string]any{
+		"slot_time_preference_direction": preference.Direction,
+		"slot_time_preference_minutes":   preference.Minutes,
+		"remaining_offered_slot_count":   remaining,
+	})
+	turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{
+		"slot_time_preference_direction": preference.Direction,
+		"slot_time_preference_minutes":   preference.Minutes,
+		"slot_time_preference_source":    "directional_constraint",
+	})
+}
+
 func activeSlotTimePreference(session Session) (slotTimePreference, bool) {
+	if preference, ok := normalizedSlotTimePreference(session.DialogState.TimePreference); ok {
+		return preference, true
+	}
 	for i := len(session.Transcript) - 1; i >= 0; i-- {
 		msg := session.Transcript[i]
 		if msg.Speaker != SpeakerAI {
@@ -615,6 +665,55 @@ func activeSlotTimePreference(session Session) (slotTimePreference, bool) {
 		return slotTimePreference{Direction: direction, Minutes: minutes}, true
 	}
 	return slotTimePreference{}, false
+}
+
+func normalizedSlotTimePreference(value *TimePreference) (slotTimePreference, bool) {
+	if value == nil || value.Minutes < 0 || value.Minutes >= 24*60 {
+		return slotTimePreference{}, false
+	}
+	direction := strings.TrimSpace(value.Direction)
+	switch direction {
+	case TimePreferenceBefore, TimePreferenceAfter, TimePreferenceExact:
+		return slotTimePreference{Direction: direction, Minutes: value.Minutes}, true
+	default:
+		return slotTimePreference{}, false
+	}
+}
+
+func setSlotTimePreference(session *Session, preference slotTimePreference) bool {
+	if session == nil {
+		return false
+	}
+	normalized, ok := normalizedSlotTimePreference(&preference)
+	if !ok {
+		return false
+	}
+	state := normalizedDialogState(session.DialogState)
+	changed := state.TimePreference == nil || state.TimePreference.Direction != normalized.Direction || state.TimePreference.Minutes != normalized.Minutes
+	stored := TimePreference(normalized)
+	state.TimePreference = &stored
+	session.DialogState = state
+	return changed
+}
+
+func clearSlotTimePreference(session *Session) {
+	if session == nil {
+		return
+	}
+	state := normalizedDialogState(session.DialogState)
+	state.TimePreference = nil
+	session.DialogState = state
+}
+
+func applyActiveSlotTimePreferenceToOfferedSlots(session *Session, loc *time.Location) {
+	if session == nil || len(session.OfferedSlots) == 0 {
+		return
+	}
+	preference, ok := activeSlotTimePreference(*session)
+	if !ok {
+		return
+	}
+	session.OfferedSlots = filterOfferedSlotsByPreference(session.OfferedSlots, preference, loc)
 }
 
 func selectOfferedSlot(message string, slots []OfferedSlot, loc *time.Location) *OfferedSlot {
@@ -741,6 +840,8 @@ func selectedSlotIndex(message string) (int, bool) {
 var (
 	stateScopedOfferedSlotSelectorPattern = regexp.MustCompile(`^(?:(?:i ll|i will|please|let s) (?:take|choose|pick|go with|do|have|want) )?(?:the )?(?:(?:option|number) )?(?:first|second|third|one|two|three|1st|2nd|3rd|1|2|3)(?: (?:one|option))?(?: (?:work|works|for me|is fine|is good|is okay|please|thank you|thanks))*$`)
 	stateScopedSlotAffirmativePattern     = regexp.MustCompile(`^(?:yes|yeah|yep|ok|okay|sure|correct|right|that works|works for me|sounds good)(?: please)?$`)
+	stateScopedOfferedSlotClockPattern    = regexp.MustCompile(`^(?:(?:i d|i would|i ll|i will|i|please|let s) (?:like|take|choose|pick|go with|do|have|want|prefer) (?:the )?)?(?:(?:opening|slot|time) (?:at )?)?(?:at )?(?:[0-9]{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?: [0-5][0-9])? (?:a m|p m|am|pm|bpm|tm)(?: (?:opening|slot|time))?(?: (?:please|works|works for me|is fine|is good|is okay|thank you|thanks))*$`)
+	stateScopedDirectionalSlotTimePattern = regexp.MustCompile(`^(?:(?:(?:could|can|would) you (?:keep it|make it|find something|show me) )|(?:(?:i d|i would|i ll|i will|i|please) (?:like|want|need|prefer) (?:something |anything |it )?)|(?:anything |something ))?(?:no earlier than|no later than|not before|not after|earlier than|later than|before|after|trước|truoc|sớm hơn|som hon|sau|trễ hơn|tre hon) (?:[0-9]{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?: [0-5][0-9])? (?:a m|p m|am|pm|bpm|tm)(?: (?:works|would work|is fine|is good|is okay|please|if possible))*$`)
 )
 
 func stateScopedOfferedSlotSelection(message string, session Session, loc *time.Location) bool {
@@ -753,6 +854,10 @@ func stateScopedOfferedSlotSelection(message string, session Session, loc *time.
 	}
 	if stateScopedOfferedSlotSelectorPattern.MatchString(normalized) {
 		selected := selectOfferedSlot(message, session.OfferedSlots, loc)
+		return selected != nil && offeredSlotMatchesServiceSelection(*selected, session)
+	}
+	if stateScopedOfferedSlotClockPattern.MatchString(normalized) {
+		selected := offeredSlotForClockCandidates(clockCandidatesFromText(message), session.OfferedSlots, loc)
 		return selected != nil && offeredSlotMatchesServiceSelection(*selected, session)
 	}
 	if stateScopedSlotAffirmativePattern.MatchString(normalized) {
@@ -1087,6 +1192,7 @@ func applySelectedOfferedSlot(session *Session, slot OfferedSlot) {
 	}
 	start := slot.StartTime
 	session.RequestedStartTime = &start
+	clearSlotTimePreference(session)
 	session.RequestedDate = start.Format("2006-01-02")
 	session.StaffID = slot.StaffID
 	session.StaffName = slot.StaffName

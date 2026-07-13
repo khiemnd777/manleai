@@ -337,7 +337,7 @@ func (f *phoneFlowConversationStore) ListSessions(ctx context.Context, salonID s
 	return []conversation.Session{session}, nil
 }
 
-func (f *phoneFlowConversationStore) ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int) ([]conversation.WebhookEventLog, error) {
+func (f *phoneFlowConversationStore) ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int, offset int) ([]conversation.WebhookEventLog, error) {
 	return []conversation.WebhookEventLog{}, nil
 }
 

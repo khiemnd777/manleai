@@ -126,11 +126,17 @@ type ActModelReply struct {
 }
 
 type QuestionModelReply struct {
-	Subject    string   `json:"subject"`
-	ServiceIDs []string `json:"service_ids"`
-	StaffIDs   []string `json:"staff_ids"`
-	Confidence float64  `json:"confidence"`
-	Reason     string   `json:"reason"`
+	Subject        string                   `json:"subject"`
+	ServiceIDs     []string                 `json:"service_ids"`
+	StaffIDs       []string                 `json:"staff_ids"`
+	TimePreference TimePreferenceModelReply `json:"time_preference"`
+	Confidence     float64                  `json:"confidence"`
+	Reason         string                   `json:"reason"`
+}
+
+type TimePreferenceModelReply struct {
+	Direction string `json:"direction"`
+	Minutes   int    `json:"minutes"`
 }
 
 type TurnModelReply struct {

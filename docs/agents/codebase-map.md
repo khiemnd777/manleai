@@ -186,7 +186,14 @@ name collection, availability replies, party bookings, or transcript output.
   independently validated catalog and captured-field evidence before asking the
   next missing-field question. Catalog validation owns referenced service/staff IDs;
   the reducer owns draft mutation and dependency invalidation; the planner owns
-  missing-field, review, and booking readiness. Pending candidates remain
+  missing-field, review, and booking readiness. Customer-name confirmation and
+  the main orchestration path both execute that same planner gate; the booking
+  executor rechecks the gate defensively before any POS write. Exact offered
+  clock selections use the state-scoped fast lane only when one offered slot
+  matches a bounded single-choice grammar. Directional time constraints use a
+  typed `before`/`after`/`exact` plus salon-local minutes contract, persist in
+  `dialog_state`, filter current and refreshed offers, and are cleared when an
+  exact slot is selected. Pending candidates remain
   contextual. A service correction against an active completed `party_plan`
   remains party-owned: `dialog_state.pending` stores separate target, guest/group,
   operation, and replacement-source prompts, and short guest/add/replace/source
@@ -269,7 +276,7 @@ name collection, availability replies, party bookings, or transcript output.
 | `/onboarding` | `frontend/app/onboarding/page.tsx` | `frontend/features/onboarding/salon-profile-form.tsx` | `frontend/lib/api/client.ts`, `frontend/lib/api/configuration-transfer.ts` |
 | `/dashboard` | `frontend/app/dashboard/page.tsx` | `frontend/features/dashboard/dashboard-home.tsx` | status, voice, calls, appointments, attempts, services, staff APIs |
 | `/dashboard/appointments` | `frontend/app/dashboard/appointments/page.tsx` | `frontend/features/dashboard/appointments-dashboard.tsx` | availability, booking attempts, reschedule, cancel |
-| `/dashboard/calls` | `frontend/app/dashboard/calls/page.tsx` | `frontend/features/dashboard/calls-dashboard.tsx` | sessions, realtime events, party requests, owner corrections |
+| `/dashboard/calls` | `frontend/app/dashboard/calls/page.tsx` | `frontend/features/dashboard/calls-dashboard.tsx` | sessions, paginated full-call realtime events, party requests, owner corrections |
 | `/dashboard/customers` | `frontend/app/dashboard/customers/page.tsx` | `frontend/features/dashboard/customers-dashboard.tsx` | customer CRUD, archive, search |
 | `/dashboard/services` | `frontend/app/dashboard/services/page.tsx` | `frontend/features/dashboard/services-dashboard.tsx` | services, categories, category aliases, service aliases, AI bookable |
 | `/dashboard/staff` | `frontend/app/dashboard/staff/page.tsx` | `frontend/features/dashboard/staff-dashboard.tsx` | staff CRUD, archive, AI bookable |
