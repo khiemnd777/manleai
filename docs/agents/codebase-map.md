@@ -247,6 +247,12 @@ name collection, availability replies, party bookings, or transcript output.
 The POS calendar app is a standalone authenticated Next.js app with no
 dashboard sidebar. Local runtime port is `3091`; production domain is
 `pos.knasoftware.com`. It reuses the same admin auth tokens as `frontend/`.
+The Day view groups timed appointments into horizontally scrollable technician
+lanes, keeps unassigned and referenced inactive technicians visible, and uses
+ordered appointment segments when one booking has multiple technician
+assignments. Calendar event titles across day, week, month, agenda, and the day
+drawer use `time · customer · technician`; service names remain supporting
+detail rather than part of the event title.
 
 ## Frontend Helper And Utility Map
 

@@ -91,16 +91,32 @@ type CalendarToast = {
 
 type CalendarItem = {
   id: string;
+  sourceItemID?: string;
   kind: "appointment" | "pending";
   start: string;
   end: string;
   status: string;
   customerName: string;
+  serviceLabel: string;
+  technicians: CalendarTechnician[];
+  technicianLabel: string;
+  dayLaneKey?: string;
   subtitle: string;
   detail: string;
   warning: string;
   appointment?: AppointmentRecord;
   request?: BookingAttempt;
+};
+
+type CalendarTechnician = {
+  id: string;
+  name: string;
+};
+
+type TechnicianLane = {
+  key: string;
+  name: string;
+  inactive?: boolean;
 };
 
 type PositionedCalendarItem = {
@@ -806,6 +822,7 @@ export function POSCalendarClient() {
                   ) : view === "day" ? (
                     <DayScheduler
                       items={items}
+                      staff={staff}
                       anchorDate={anchorDate}
                       timezone={salon.timezone}
                       selectedItemID={selectedCalendarItem?.id ?? ""}
@@ -981,12 +998,14 @@ function AgendaList({
 
 function DayScheduler({
   items,
+  staff,
   anchorDate,
   timezone,
   selectedItemID,
   onSelect
 }: {
   items: CalendarItem[];
+  staff: POSStaffMember[];
   anchorDate: string;
   timezone?: string;
   selectedItemID: string;
@@ -995,69 +1014,86 @@ function DayScheduler({
   const dayItems = items
     .filter((item) => dateKey(item.start, timezone) === anchorDate)
     .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
-  const hours = schedulerHours(dayItems, timezone);
-  const positionedItems = positionSchedulerItems(dayItems, hours, timezone);
+  const schedulerItems = buildDaySchedulerItems(dayItems);
+  const lanes = buildTechnicianLanes(staff, schedulerItems);
+  const hours = schedulerHours(schedulerItems, timezone);
+  const gridHeight = hours.length * schedulerRowHeight;
+  const gridTemplateColumns = `3.5rem repeat(${lanes.length}, minmax(11rem, 1fr))`;
+  const minGridWidth = 56 + lanes.length * 176;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-line bg-white shadow-sm">
-      <div className="grid shrink-0 grid-cols-[3.5rem_minmax(0,1fr)] border-b border-line bg-slate-50">
-        <div className="border-r border-line px-2 py-3 text-xs font-semibold uppercase text-muted">Day</div>
-        <div
-          className={cn(
-            "px-3 py-3 text-center",
-            isTodayInput(anchorDate, timezone) ? "bg-teal-50 text-brand" : "text-ink"
-          )}
-        >
-          <div className="text-xs font-semibold uppercase text-muted">{weekdayLabel(anchorDate)}</div>
+      <div className="min-h-0 flex-1 overflow-auto">
+        <div className="relative min-h-full" style={{ minWidth: minGridWidth }}>
           <div
-            className={cn(
-              "mx-auto mt-1 flex h-7 w-7 items-center justify-center rounded-full text-sm font-bold",
-              isTodayInput(anchorDate, timezone) ? "bg-brand text-white" : "text-ink"
-            )}
+            className="sticky top-0 z-30 grid border-b border-line bg-slate-50 shadow-sm"
+            style={{ gridTemplateColumns }}
           >
-            {dayNumberLabel(anchorDate)}
-          </div>
-        </div>
-      </div>
-      <div className="grid shrink-0 grid-cols-[3.5rem_minmax(0,1fr)] border-b border-line">
-        <div className="border-r border-line bg-slate-50 px-2 py-2 text-xs font-semibold text-muted">All-day</div>
-        <div className="min-h-9 bg-white px-2 py-2" />
-      </div>
-      <div className="grid min-h-0 flex-1 grid-cols-[3.5rem_minmax(0,1fr)] overflow-y-auto">
-        <div>
-          {hours.map((hour) => (
             <div
-              key={hour}
-              className="border-r border-line bg-slate-50 px-2 pt-2 text-right text-[11px] font-semibold text-muted"
-              style={{ height: schedulerRowHeight }}
+              className={cn(
+                "sticky left-0 z-40 flex min-h-14 flex-col justify-center border-r border-line bg-slate-50 px-2 text-center",
+                isTodayInput(anchorDate, timezone) ? "text-brand" : "text-ink"
+              )}
             >
-              {hourLabel(hour)}
+              <div className="text-[10px] font-semibold uppercase text-muted">{weekdayLabel(anchorDate)}</div>
+              <div className="text-sm font-bold">{dayNumberLabel(anchorDate)}</div>
             </div>
-          ))}
-        </div>
-        <div className="relative min-w-0 bg-white" style={{ height: hours.length * schedulerRowHeight }}>
-          {hours.map((hour) => (
-            <div
-              key={hour}
-              className="border-b border-dashed border-line last:border-b-0"
-              style={{ height: schedulerRowHeight }}
-            />
-          ))}
-          {positionedItems.length === 0 ? (
-            <div className="absolute inset-0 flex items-center justify-center text-sm font-medium text-muted">
-              No appointments scheduled
-            </div>
-          ) : null}
-          <div className="absolute inset-x-2 top-0 bottom-0">
-            {positionedItems.map((positioned) => (
-              <SchedulerEventBlock
-                key={positioned.item.id}
-                positioned={positioned}
-                timezone={timezone}
-                selected={positioned.item.id === selectedItemID}
-                onSelect={onSelect}
-              />
+            {lanes.map((lane) => (
+              <div key={lane.key} className="min-w-0 border-r border-line px-3 py-3 text-center last:border-r-0">
+                <div className="truncate text-xs font-bold text-ink" title={lane.name}>
+                  {lane.name}
+                </div>
+                {lane.inactive ? <div className="mt-0.5 text-[10px] font-semibold text-muted">inactive</div> : null}
+              </div>
             ))}
+          </div>
+          <div className="grid" style={{ gridTemplateColumns }}>
+            <div className="sticky left-0 z-20 bg-slate-50">
+              {hours.map((hour) => (
+                <div
+                  key={hour}
+                  className="border-r border-line px-2 pt-2 text-right text-[11px] font-semibold text-muted"
+                  style={{ height: schedulerRowHeight }}
+                >
+                  {hourLabel(hour)}
+                </div>
+              ))}
+            </div>
+            {lanes.map((lane, laneIndex) => {
+              const laneItems = schedulerItems.filter((item) => dayLaneKey(item) === lane.key);
+              const positionedItems = positionSchedulerItems(laneItems, hours, timezone);
+              return (
+                <div
+                  key={lane.key}
+                  className="relative min-w-0 border-r border-line bg-white last:border-r-0"
+                  style={{ height: gridHeight }}
+                >
+                  {hours.map((hour) => (
+                    <div
+                      key={hour}
+                      className="border-b border-dashed border-line last:border-b-0"
+                      style={{ height: schedulerRowHeight }}
+                    />
+                  ))}
+                  {schedulerItems.length === 0 && laneIndex === 0 ? (
+                    <div className="absolute inset-x-3 top-6 text-center text-sm font-medium text-muted">
+                      No appointments scheduled
+                    </div>
+                  ) : null}
+                  <div className="absolute inset-x-1 top-0 bottom-0">
+                    {positionedItems.map((positioned) => (
+                      <SchedulerEventBlock
+                        key={positioned.item.id}
+                        positioned={positioned}
+                        timezone={timezone}
+                        selected={calendarItemSelectionID(positioned.item) === selectedItemID}
+                        onSelect={onSelect}
+                      />
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
@@ -1370,9 +1406,6 @@ function SchedulerEventBlock({
   onSelect: (itemID: string) => void;
 }) {
   const item = positioned.item;
-  const customerLabel = item.customerName || "Unknown";
-  const serviceLabel = compactServiceLabel(item);
-  const primaryLine = `${formatTime(item.start, timezone)} · ${customerLabel} - ${serviceLabel}`;
   const showStatusBadge = compact || positioned.height >= 54;
 
   return (
@@ -1390,11 +1423,11 @@ function SchedulerEventBlock({
         left: `calc(${(positioned.lane / positioned.laneCount) * 100}% + 2px)`,
         width: `calc(${100 / positioned.laneCount}% - 4px)`
       }}
-      onClick={() => onSelect(item.id)}
+      onClick={() => onSelect(calendarItemSelectionID(item))}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
-          onSelect(item.id);
+          onSelect(calendarItemSelectionID(item));
         }
       }}
     >
@@ -1402,13 +1435,14 @@ function SchedulerEventBlock({
         <div className="min-w-0 flex-1">
           {compact ? (
             <>
-              <div className="truncate text-xs font-bold text-ink">
-                {formatTime(item.start, timezone)} · {customerLabel}
-              </div>
-              <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{serviceLabel}</div>
+              <div className="truncate text-xs font-bold text-ink">{calendarItemTitle(item, timezone)}</div>
+              <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{compactServiceLabel(item)}</div>
             </>
           ) : (
-            <div className="truncate text-xs font-bold text-ink">{primaryLine}</div>
+            <>
+              <div className="truncate text-xs font-bold text-ink">{calendarItemTitle(item, timezone)}</div>
+              <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{compactServiceLabel(item)}</div>
+            </>
           )}
         </div>
         {item.warning ? <AlertTriangle className="h-4 w-4 flex-none text-amber-600" /> : null}
@@ -1450,9 +1484,7 @@ function MonthEventChip({
       }}
     >
       <span className="min-w-0 flex-1">
-        <span className="block truncate font-bold text-ink">
-          {formatTime(item.start, timezone)} · {item.customerName || "Unknown"}
-        </span>
+        <span className="block truncate font-bold text-ink">{calendarItemTitle(item, timezone)}</span>
         <span className="block truncate leading-4 text-muted">{compactServiceLabel(item)}</span>
       </span>
       <span className="flex flex-none items-center gap-1">
@@ -1536,9 +1568,7 @@ function DayAppointmentsDrawer({
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <div className="truncate text-sm font-bold text-ink">
-                        {formatTimeRange(item.start, item.end, timezone)} · {item.customerName || "Unknown"}
-                      </div>
+                      <div className="truncate text-sm font-bold text-ink">{calendarItemTitle(item, timezone)}</div>
                       <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{compactServiceLabel(item)}</div>
                     </div>
                     {item.warning ? <AlertTriangle className="h-4 w-4 flex-none text-amber-600" /> : null}
@@ -1616,7 +1646,8 @@ function AppointmentDetailDrawer({
               </div>
               <div className="mt-3 text-lg font-bold text-ink">{selectedItem.customerName || "Unknown customer"}</div>
               <div className="mt-1 text-sm font-semibold text-ink">{formatTimeRange(selectedItem.start, selectedItem.end, timezone)}</div>
-              <div className="mt-2 text-sm leading-6 text-muted">{compactServiceLabel(selectedItem)}</div>
+              <div className="mt-2 text-sm leading-6 text-muted">Service: {compactServiceLabel(selectedItem)}</div>
+              <div className="mt-1 text-sm leading-6 text-muted">Technician: {selectedItem.technicianLabel}</div>
               <div className="mt-1 text-xs leading-5 text-muted">{selectedItem.detail}</div>
               {selectedItem.warning ? (
                 <div className="mt-3 flex gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">
@@ -1701,11 +1732,11 @@ function CalendarItemRow({
         <div className="text-sm font-semibold text-ink">{formatTimeRange(item.start, item.end, timezone)}</div>
         <div className="mt-1 text-xs text-muted">{formatDate(item.start, timezone)}</div>
       </div>
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="text-sm font-semibold text-ink">{item.customerName || "Unknown customer"}</div>
-            <Badge value={item.status} />
-          </div>
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="text-sm font-semibold text-ink">{calendarItemTitle(item, timezone)}</div>
+          <Badge value={item.status} />
+        </div>
         <div className="mt-1 text-sm leading-6 text-muted">{item.subtitle}</div>
         <div className="mt-1 text-xs leading-5 text-muted">{item.detail}</div>
         {item.warning ? (
@@ -2106,30 +2137,42 @@ function buildCalendarItems(
   timezone?: string
 ): CalendarItem[] {
   if (!calendar) return [];
-  const appointments: CalendarItem[] = calendar.appointments.map((item) => ({
-    id: `appointment-${item.id}`,
-    kind: "appointment",
-    start: item.start_time,
-    end: item.end_time,
-    status: item.status,
-    customerName: item.customer_name,
-    subtitle: bookingSummaryLabel(item, serviceNames, staffNames),
-    detail: item.pos_appointment_id ? `${item.pos_provider}: ${item.pos_appointment_id}` : "POS booking ID missing",
-    warning: appointmentWarning(item),
-    appointment: item
-  }));
-  const pending: CalendarItem[] = calendar.pending_requests.map((item) => ({
-    id: `pending-${item.id}`,
-    kind: "pending",
-    start: item.requested_start_time,
-    end: item.requested_end_time,
-    status: item.status,
-    customerName: item.customer_name,
-    subtitle: bookingSummaryLabel(item, serviceNames, staffNames),
-    detail: item.error_code || formatDate(item.requested_start_time, timezone),
-    warning: item.sync_warning || item.error_message || "This request is not confirmed in POS and needs owner review.",
-    request: item
-  }));
+  const appointments: CalendarItem[] = calendar.appointments.map((item) => {
+    const technicians = assignedTechnicians(item, staffNames);
+    return {
+      id: `appointment-${item.id}`,
+      kind: "appointment",
+      start: item.start_time,
+      end: item.end_time,
+      status: item.status,
+      customerName: item.customer_name,
+      serviceLabel: serviceNamesLabel(item, serviceNames),
+      technicians,
+      technicianLabel: calendarTechnicianLabel(technicians),
+      subtitle: bookingSummaryLabel(item, serviceNames, staffNames),
+      detail: item.pos_appointment_id ? `${item.pos_provider}: ${item.pos_appointment_id}` : "POS booking ID missing",
+      warning: appointmentWarning(item),
+      appointment: item
+    };
+  });
+  const pending: CalendarItem[] = calendar.pending_requests.map((item) => {
+    const technicians = assignedTechnicians(item, staffNames);
+    return {
+      id: `pending-${item.id}`,
+      kind: "pending",
+      start: item.requested_start_time,
+      end: item.requested_end_time,
+      status: item.status,
+      customerName: item.customer_name,
+      serviceLabel: serviceNamesLabel(item, serviceNames),
+      technicians,
+      technicianLabel: calendarTechnicianLabel(technicians),
+      subtitle: bookingSummaryLabel(item, serviceNames, staffNames),
+      detail: item.error_code || formatDate(item.requested_start_time, timezone),
+      warning: item.sync_warning || item.error_message || "This request is not confirmed in POS and needs owner review.",
+      request: item
+    };
+  });
   return [...appointments, ...pending].sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
 }
 
@@ -2411,12 +2454,8 @@ function technicianPreferenceLabel(record: AppointmentRecord | BookingAttempt | 
 }
 
 function assignedTechniciansLabel(record: AppointmentRecord | BookingAttempt | AvailabilitySlot, staffNames?: Map<string, string>) {
-  const names = orderedSegments(record)
-    .map((segment) => segment.staff_name || (segment.staff_id ? staffNames?.get(segment.staff_id) : "") || "")
-    .filter(Boolean);
-  if (names.length > 0) {
-    return [...new Set(names)].join(", ");
-  }
+  const technicians = assignedTechnicians(record, staffNames);
+  if (technicians.length > 0) return calendarTechnicianLabel(technicians);
   if ("staff_name" in record && record.staff_name) {
     return record.staff_name;
   }
@@ -2424,6 +2463,138 @@ function assignedTechniciansLabel(record: AppointmentRecord | BookingAttempt | A
     return staffNames?.get(record.staff_id) || "Assigned technician";
   }
   return record.staff_selection_mode === "anyone" ? "Anyone available" : "Unassigned technician";
+}
+
+function assignedTechnicians(
+  record: AppointmentRecord | BookingAttempt | AvailabilitySlot,
+  staffNames?: Map<string, string>
+): CalendarTechnician[] {
+  const technicians = orderedSegments(record)
+    .map((segment) => ({
+      id: segment.staff_id ?? "",
+      name: segment.staff_name || (segment.staff_id ? staffNames?.get(segment.staff_id) : "") || ""
+    }))
+    .filter((technician) => technician.id || technician.name);
+
+  if (technicians.length === 0) {
+    const staffID = "staff_id" in record ? record.staff_id ?? "" : "";
+    const staffName = "staff_name" in record ? record.staff_name ?? "" : "";
+    const resolvedName = staffName || (staffID ? staffNames?.get(staffID) : "") || "";
+    if (staffID || resolvedName) technicians.push({ id: staffID, name: resolvedName || "Assigned technician" });
+  }
+
+  const unique = new Map<string, CalendarTechnician>();
+  technicians.forEach((technician) => {
+    const key = technicianLaneKey(technician);
+    if (!unique.has(key)) unique.set(key, technician);
+  });
+  return [...unique.values()];
+}
+
+function calendarTechnicianLabel(technicians: CalendarTechnician[]) {
+  if (technicians.length === 0) return "Unassigned";
+  return technicians.map((technician) => technician.name || "Assigned technician").join(", ");
+}
+
+function buildDaySchedulerItems(items: CalendarItem[]) {
+  return items.flatMap((item) => {
+    if (item.technicians.length <= 1) return [item];
+    const record = item.appointment ?? item.request;
+    if (!record) return [{ ...item, dayLaneKey: "multiple" }];
+
+    const segments = orderedSegments(record);
+    const startTime = new Date(item.start).getTime();
+    const endTime = new Date(item.end).getTime();
+    const totalDuration = segments.reduce((total, segment) => total + (segment.duration_minutes ?? 0), 0);
+    const appointmentDuration = (endTime - startTime) / 60_000;
+    const canSplit =
+      segments.length > 1 &&
+      Number.isFinite(startTime) &&
+      Number.isFinite(endTime) &&
+      endTime > startTime &&
+      totalDuration > 0 &&
+      totalDuration <= appointmentDuration + 1 &&
+      segments.every((segment) => (segment.duration_minutes ?? 0) > 0 && Boolean(segment.staff_id || segment.staff_name));
+
+    if (!canSplit) return [{ ...item, dayLaneKey: "multiple" }];
+
+    let cursor = startTime;
+    return segments.map((segment, index) => {
+      const technician = calendarTechnicianForSegment(segment, item.technicians);
+      const segmentEnd = Math.min(endTime, cursor + (segment.duration_minutes ?? 0) * 60_000);
+      const schedulerItem: CalendarItem = {
+        ...item,
+        id: `${item.id}-segment-${index}`,
+        sourceItemID: item.id,
+        start: new Date(cursor).toISOString(),
+        end: new Date(segmentEnd).toISOString(),
+        serviceLabel: segment.service_name || item.serviceLabel,
+        technicians: technician ? [technician] : [],
+        technicianLabel: technician ? calendarTechnicianLabel([technician]) : "Unassigned"
+      };
+      cursor = segmentEnd;
+      return schedulerItem;
+    });
+  });
+}
+
+function calendarTechnicianForSegment(segment: DisplaySegment, technicians: CalendarTechnician[]) {
+  const matching = segment.staff_id ? technicians.find((technician) => technician.id === segment.staff_id) : undefined;
+  const name = segment.staff_name || matching?.name || "";
+  if (!segment.staff_id && !name) return null;
+  return { id: segment.staff_id ?? matching?.id ?? "", name: name || "Assigned technician" };
+}
+
+function buildTechnicianLanes(staff: POSStaffMember[], items: CalendarItem[]): TechnicianLane[] {
+  const lanes = new Map<string, TechnicianLane>();
+  lanes.set("unassigned", { key: "unassigned", name: "Unassigned" });
+
+  const staffByKey = new Map<string, POSStaffMember>();
+  staff.forEach((member) => {
+    const key = technicianLaneKey({ id: member.id ?? "", name: member.name });
+    staffByKey.set(key, member);
+  });
+
+  staff
+    .filter((member) => member.active)
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .forEach((member) => {
+      const key = technicianLaneKey({ id: member.id ?? "", name: member.name });
+      lanes.set(key, { key, name: member.name });
+    });
+
+  items.forEach((item) => {
+    if (item.dayLaneKey === "multiple") {
+      lanes.set("multiple", { key: "multiple", name: "Multiple technicians" });
+      return;
+    }
+    item.technicians.forEach((technician) => {
+      const key = technicianLaneKey(technician);
+      if (lanes.has(key)) return;
+      const member = staffByKey.get(key);
+      lanes.set(key, {
+        key,
+        name: technician.name || member?.name || "Assigned technician",
+        inactive: !member?.active
+      });
+    });
+  });
+
+  return [...lanes.values()];
+}
+
+function technicianLaneKey(technician: CalendarTechnician) {
+  if (technician.id) return `staff:${technician.id}`;
+  const normalizedName = technician.name.trim().toLocaleLowerCase();
+  return normalizedName ? `staff-name:${normalizedName}` : "unassigned";
+}
+
+function dayLaneKey(item: CalendarItem) {
+  return item.dayLaneKey || (item.technicians[0] ? technicianLaneKey(item.technicians[0]) : "unassigned");
+}
+
+function calendarItemSelectionID(item: CalendarItem) {
+  return item.sourceItemID || item.id;
 }
 
 function slotKey(slot: AvailabilitySlot) {
@@ -2656,10 +2827,11 @@ function hourLabel(hour: number) {
 }
 
 function compactServiceLabel(item: CalendarItem) {
-  const parts = item.subtitle.split(" · ");
-  const services = parts[0] || "Unknown service";
-  const assigned = parts.find((part) => part.startsWith("Assigned: "))?.replace("Assigned: ", "");
-  return assigned ? `${services} · ${assigned}` : services;
+  return item.serviceLabel || "Unknown service";
+}
+
+function calendarItemTitle(item: CalendarItem, timezone?: string) {
+  return `${formatEventTime(item.start, timezone)} · ${item.customerName || "Unknown customer"} · ${item.technicianLabel}`;
 }
 
 function weekdayLabel(value: string) {
@@ -2713,6 +2885,18 @@ function formatTime(value: string, timezone?: string) {
     minute: "2-digit",
     timeZone: timezone
   });
+}
+
+function formatEventTime(value: string, timezone?: string) {
+  if (!value) return "";
+  return new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: timezone
+  })
+    .format(new Date(value))
+    .replace(/\s/g, "");
 }
 
 function formatTimeRange(start: string, end: string, timezone?: string) {
