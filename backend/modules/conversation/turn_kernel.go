@@ -56,6 +56,7 @@ type TurnPlan struct {
 	Reason                string
 	DeterministicCoverage string
 	Understanding         TurnUnderstanding
+	ReviewResponse        reviewResponseKind
 
 	ServiceUnderstanding serviceUnderstandingResult
 	StaffChange          staffChangeRequest
@@ -66,7 +67,7 @@ type TurnPlan struct {
 }
 
 func (p TurnPlan) timingAttributes() map[string]string {
-	return map[string]string{
+	attributes := map[string]string{
 		"turn_route":                  p.Route,
 		"turn_expected_input":         p.ExpectedInput,
 		"turn_route_reason":           p.Reason,
@@ -74,20 +75,28 @@ func (p TurnPlan) timingAttributes() map[string]string {
 		"turn_model_service_count":    strconv.Itoa(len(p.SemanticServices)),
 		"turn_model_staff_count":      strconv.Itoa(len(p.SemanticStaff)),
 	}
+	if p.ReviewResponse != "" {
+		attributes["turn_review_response"] = string(p.ReviewResponse)
+	}
+	return attributes
 }
 
 func applyTurnPlanMetadata(turn *TurnRecord, plan TurnPlan) {
 	if turn == nil {
 		return
 	}
-	turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, map[string]any{
+	metadata := map[string]any{
 		"turn_route":                  plan.Route,
 		"turn_expected_input":         plan.ExpectedInput,
 		"turn_route_reason":           plan.Reason,
 		"turn_deterministic_coverage": plan.DeterministicCoverage,
 		"turn_model_service_count":    len(plan.SemanticServices),
 		"turn_model_staff_count":      len(plan.SemanticStaff),
-	})
+	}
+	if plan.ReviewResponse != "" {
+		metadata["turn_review_response"] = string(plan.ReviewResponse)
+	}
+	turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, metadata)
 }
 
 func expectedInputForSession(session Session) string {
@@ -204,12 +213,22 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 	if isServiceInquiry(message, plan.ServiceUnderstanding) {
 		answer = routeServiceInquiryAnswer(message, session, plan.ServiceUnderstanding, answerCtx)
 	}
+	if state.Phase == DialogPhaseReview {
+		plan.ReviewResponse = classifyReviewResponse(message, reviewResponseEvidence{
+			HasDraftMutation:       len(signals) > 0,
+			HasInformationQuestion: answer.Handled && answer.Source != answerSourceBookingRedirect,
+			RequestsOtherAction: shouldClarifyCancelReschedule(session, message) ||
+				shouldRouteCancel(session, message) || shouldRouteReschedule(session, message) ||
+				shouldComplaintHandoff(message) || shouldHandoff(message),
+			HasPartyMutation: plan.PartySignal.IsParty,
+		})
+	}
 	if answer.Handled && answer.Source != answerSourceBookingRedirect && len(signals) == 0 {
 		plan.Understanding = deterministicAnswerUnderstanding(answer)
 		return finalizeTurnPlan(plan, TurnRouteAnswerLane, "structured_answer", TurnCoverageComplete, session, services, staff)
 	}
 
-	deterministic := deterministicConversationAct(session, message, services, aliases, categoryAliases)
+	deterministic := deterministicConversationActForReviewResponse(session, message, services, aliases, categoryAliases, plan.ReviewResponse)
 	if deterministic.Kind != ConversationActUnknown {
 		if deterministic.Entity == "" {
 			deterministic.Entity = defaultConversationActEntity(deterministic.Kind)

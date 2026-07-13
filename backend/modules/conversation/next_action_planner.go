@@ -9,6 +9,7 @@ const (
 	AssistantActionCheckAvailability = "check_availability"
 	AssistantActionOfferSlots        = "offer_slots"
 	AssistantActionReadReview        = "read_final_review"
+	AssistantActionAskReview         = "ask_review_authorization"
 	AssistantActionExecuteBooking    = "execute_booking"
 	AssistantActionHandoffOwner      = "handoff_owner"
 	AssistantActionInformResult      = "inform_result"
@@ -34,6 +35,9 @@ func planNextConversationAction(session Session, missing string) AssistantAction
 	if reviewAuthorizationCurrent(state) {
 		return AssistantAction{Kind: AssistantActionExecuteBooking, Reason: "current_revision_authorized"}
 	}
+	if state.Phase == DialogPhaseReview && state.ReviewedRevision == state.DraftRevision {
+		return AssistantAction{Kind: AssistantActionAskReview, Reason: "current_revision_reviewed_authorization_missing"}
+	}
 	return AssistantAction{Kind: AssistantActionReadReview, Reason: "review_missing_or_stale"}
 }
 
@@ -44,6 +48,20 @@ func (s *Service) continueAfterDraftReady(ctx context.Context, ownerUserID strin
 		turn.AIMessage = promptForMissingField(missing)
 		s.applyReplyGenerator(ctx, &turn, next, services, cfg, missing, missing, knowledge)
 		finalizeTurnMetadata(&turn, before, next, missing, missing, "missing_field")
+		return s.store.SaveTurn(ctx, turn)
+	}
+	if nextAction.Kind == AssistantActionAskReview {
+		state := normalizedDialogState(next.DialogState)
+		state.Phase = DialogPhaseReview
+		state.Pending = nil
+		state.ReviewAccepted = false
+		state.AuthorizedRevision = 0
+		state.LastPromptKey = "final_review_retry"
+		next.DialogState = state
+		syncTurnUpdate(&turn, next, services, staff, cfg)
+		turn.AIMessage = "I didn't catch that. Would you like me to book these details?"
+		turn.ReplyPolicy = ReplyPolicyOperationalFact
+		finalizeTurnMetadata(&turn, before, next, "booking_review", "booking_review", "final_booking_review_retry")
 		return s.store.SaveTurn(ctx, turn)
 	}
 	if nextAction.Kind == AssistantActionReadReview {

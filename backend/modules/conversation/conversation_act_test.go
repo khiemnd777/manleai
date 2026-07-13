@@ -177,7 +177,7 @@ func TestFinalReviewRequiresAuthorizationBeforePOSBooking(t *testing.T) {
 		Confidence:       0.99,
 	}}
 	service.SetTurnInterpreter(interpreter)
-	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Yes, just book this for me."})
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Yes, I would."})
 	if err != nil {
 		t.Fatalf("booking authorization: %v", err)
 	}
@@ -187,6 +187,12 @@ func TestFinalReviewRequiresAuthorizationBeforePOSBooking(t *testing.T) {
 	if interpreter.calls != 0 {
 		t.Fatalf("deterministic review authorization was overridden by semantic interpreter: calls=%d", interpreter.calls)
 	}
+	if got := store.lastTurn.CustomerMetadata["turn_route"]; got != TurnRouteFastLane {
+		t.Fatalf("review authorization route = %#v, want fast_lane", got)
+	}
+	if got := store.lastTurn.CustomerMetadata["turn_review_response"]; got != string(reviewResponseAccept) {
+		t.Fatalf("review response = %#v, want accept", got)
+	}
 }
 
 func TestReviewAuthorizationAcceptsNaturalDirectivesAndRejectsCorrections(t *testing.T) {
@@ -195,6 +201,10 @@ func TestReviewAuthorizationAcceptsNaturalDirectivesAndRejectsCorrections(t *tes
 		"Okay, please schedule it now.",
 		"Everything looks good, book it.",
 		"Go ahead.",
+		"Yes, of course.",
+		"Yes, I would.",
+		"Absolutely, please proceed.",
+		"Can you book it?",
 	} {
 		if !isReviewAuthorization(message) {
 			t.Fatalf("natural review authorization was rejected: %q", message)
@@ -204,10 +214,77 @@ func TestReviewAuthorizationAcceptsNaturalDirectivesAndRejectsCorrections(t *tes
 		"Yes, but switch it to Spa Pedicure.",
 		"Actually, book another service too.",
 		"Yes, do not book it yet.",
+		"Yes, but move it to Friday.",
+		"Yes, I have a question about the price.",
+		"How should I proceed?",
 	} {
 		if isReviewAuthorization(message) {
 			t.Fatalf("review correction was treated as authorization: %q", message)
 		}
+	}
+}
+
+func TestFinalReviewSemanticTimeoutUsesConciseRetryWithoutBooking(t *testing.T) {
+	store := newFakeConversationStore()
+	requestedStart := time.Date(2026, 6, 11, 18, 0, 0, 0, time.UTC)
+	store.session.Channel = ChannelPhone
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{
+		ServiceID:          "service_1",
+		StaffID:            "staff_1",
+		StaffSelectionMode: booking.StaffSelectionAnyone,
+	}}
+	store.session.StaffID = "staff_1"
+	store.session.StaffName = "Mai Nguyen"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.RequestedDate = "2026-06-11"
+	store.session.RequestedStartTime = &requestedStart
+	store.session.CustomerName = "Jordan"
+	store.session.CustomerPhone = "+13125550199"
+	store.session.DialogState = DialogState{
+		Version:            DialogStateVersion,
+		Phase:              DialogPhaseReview,
+		ReviewRequired:     true,
+		LastPromptKey:      "final_review",
+		DraftRevision:      5,
+		ReviewedRevision:   5,
+		AuthorizedRevision: 0,
+	}
+	bookingTool := &fakeBookingTool{}
+	interpreter := &immediateTimeoutTurnInterpreter{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(interpreter)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Maybe."})
+	if err != nil {
+		t.Fatalf("review retry: %v", err)
+	}
+	if interpreter.calls != 1 {
+		t.Fatalf("semantic interpreter calls = %d, want 1", interpreter.calls)
+	}
+	if bookingTool.calls != 0 {
+		t.Fatalf("booking calls = %d, want 0 for ambiguous timed-out review", bookingTool.calls)
+	}
+	if session.DialogState.DraftRevision != 5 || session.DialogState.ReviewedRevision != 5 || session.DialogState.AuthorizedRevision != 0 || session.DialogState.ReviewAccepted {
+		t.Fatalf("review retry changed authorization state: %#v", session.DialogState)
+	}
+	if strings.Contains(store.lastTurn.AIMessage, "Let me review everything") {
+		t.Fatalf("review retry repeated the full summary: %q", store.lastTurn.AIMessage)
+	}
+	if store.lastTurn.AIMessage != "I didn't catch that. Would you like me to book these details?" {
+		t.Fatalf("review retry prompt = %q", store.lastTurn.AIMessage)
+	}
+	if got := store.lastTurn.AIMetadata["turn_path"]; got != "final_booking_review_retry" {
+		t.Fatalf("turn path = %#v, want final_booking_review_retry", got)
+	}
+	if got := store.lastTurn.CustomerMetadata["turn_review_response"]; got != string(reviewResponseAmbiguous) {
+		t.Fatalf("review response = %#v, want ambiguous", got)
+	}
+	if got := store.lastTurn.CustomerMetadata["turn_interpreter_outcome"]; got != TurnInterpreterOutcomeTimeout {
+		t.Fatalf("interpreter outcome = %#v, want timeout", got)
 	}
 }
 

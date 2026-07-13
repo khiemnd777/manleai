@@ -205,7 +205,12 @@ name collection, availability replies, party bookings, or transcript output.
   becomes unavailable. Review authorization and a
   resolved same-category guest-scope clarification are deterministic state-owned
   controls that cannot be overwritten by semantic interpretation;
-  correction/negation evidence prevents review authorization. Phone
+  correction/negation evidence prevents review authorization. Natural concise
+  approval frames are classified from the active review state plus deterministic
+  mutation, question, party, and action evidence instead of an all-token
+  allowlist. If the current draft was already read and authorization remains
+  ambiguous after semantic failure, the planner asks one concise authorization
+  retry without repeating the full review or calling the booking tool. Phone
   customer-name collection confirms bare ASR candidates
   before persisting them unless the caller explicitly introduces a non-risky name
   or spells it. Provider failure preserves the draft with safe clarification.
@@ -535,7 +540,7 @@ detail rather than part of the event title.
 | POS mapping, provider link, active provider, AI bookable, local only, sync failed | `backend/modules/pos`, `docs/canonical-pos-ownership-checklist.md` | Services/Staff UI, `pos_entity_links`, sync tests |
 | semantic turn, multi-intent, service alias, category alias, service understanding, wrong service, category narrowed to one service, bare service switch, stale date after summary, staff/date/customer correction, add/replace/remove/undo, question plus correction, non-native wording, ASR paraphrase | `backend/modules/conversation/conversation_act.go`, `turn_reducer.go`, `next_action_planner.go` | dialog state/repository, voice semantic interpreter, training aliases, transcript metadata, golden conversation tests |
 | service menu, how many services, how many I book, what do I have, current booking summary, service count, repeated clarification, informational service question | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/service_prompts.go`, `backend/modules/conversation/answer_router.go` | `backend/modules/conversation/service.go`, dialog state, party flow, golden tests |
-| final review, stale review, draft revision, reviewed revision, authorized revision, book it, just book this for me, correction during review, repeated same-category guest question, no progress loop | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/draft_revision.go`, `next_action_planner.go`, `service.go` | repository, V36/V37 migrations, booking flow, conversation and phone tests |
+| final review, stale review, draft revision, reviewed revision, authorized revision, natural approval, repeated final review, review timeout, concise review retry, book it, just book this for me, correction during review, repeated same-category guest question, no progress loop | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/draft_revision.go`, `next_action_planner.go`, `service.go` | repository, V36/V37 migrations, booking flow, conversation and phone tests |
 | AI training, owner correction, knowledge, FAQ answer, stale policy | `backend/modules/training`, answer router/context | training UI, knowledge tests |
 | party booking, group booking, two people, split booking, party request, party service correction, guest_ref, party_service_guest, party_service_operation, party_service_source | `backend/modules/conversation/service_party.go`, `conversation_act.go`, `turn_reducer.go` | dialog state/types, booking service, Calls UI party request panel, party golden tests |
 | name captured wrong, background phrase captured as name, bare phone name, service instead of name, spelling, phone/email | `service_customer_name.go` | conversation golden tests, transcript metadata |

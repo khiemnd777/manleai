@@ -23,6 +23,22 @@ type conversationDraftResult struct {
 	Act           ConversationAct
 }
 
+type reviewResponseKind string
+
+const (
+	reviewResponseAccept     reviewResponseKind = "accept"
+	reviewResponseReject     reviewResponseKind = "reject"
+	reviewResponseCorrection reviewResponseKind = "correction"
+	reviewResponseAmbiguous  reviewResponseKind = "ambiguous"
+)
+
+type reviewResponseEvidence struct {
+	HasDraftMutation       bool
+	HasInformationQuestion bool
+	RequestsOtherAction    bool
+	HasPartyMutation       bool
+}
+
 func (s *Service) turnUnderstandingForMessage(ctx context.Context, session Session, message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, staff []StaffOption) TurnUnderstanding {
 	plan := TurnPlan{
 		Route:                 TurnRouteSemanticLane,
@@ -279,12 +295,23 @@ func sanitizedTurnInterpreterMessage(message string, session Session) string {
 }
 
 func deterministicConversationAct(session Session, message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) ConversationAct {
+	return deterministicConversationActForReviewResponse(
+		session,
+		message,
+		services,
+		aliases,
+		categoryAliases,
+		classifyReviewResponse(message, reviewResponseEvidence{}),
+	)
+}
+
+func deterministicConversationActForReviewResponse(session Session, message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, reviewResponse reviewResponseKind) ConversationAct {
 	normalized := normalizeLooseText(message)
 	if normalized == "" {
 		return ConversationAct{Kind: ConversationActUnknown, Source: "deterministic"}
 	}
 	state := normalizedDialogState(session.DialogState)
-	if state.Phase == DialogPhaseReview && isReviewAuthorization(message) {
+	if state.Phase == DialogPhaseReview && reviewResponse == reviewResponseAccept {
 		return ConversationAct{Kind: ConversationActReview, Confidence: 1, Reason: "review_authorization", Source: "deterministic"}
 	}
 	if state.Pending != nil && !invalidServiceEditPending(session) {
@@ -822,39 +849,105 @@ func selectedSameCategoryServiceIDs(session Session, target ServiceOption, servi
 }
 
 func isReviewAuthorization(message string) bool {
+	return classifyReviewResponse(message, reviewResponseEvidence{}) == reviewResponseAccept
+}
+
+func classifyReviewResponse(message string, evidence reviewResponseEvidence) reviewResponseKind {
 	normalized := normalizeLooseText(message)
 	if normalized == "" {
+		return reviewResponseAmbiguous
+	}
+	if evidence.HasDraftMutation || evidence.RequestsOtherAction || evidence.HasPartyMutation || hasReviewCorrectionEvidence(normalized) {
+		return reviewResponseCorrection
+	}
+	if hasReviewRejectionEvidence(normalized) {
+		return reviewResponseReject
+	}
+	if evidence.HasInformationQuestion || hasReviewInformationQuestion(message, normalized) {
+		return reviewResponseAmbiguous
+	}
+	if hasNaturalReviewApproval(normalized) {
+		return reviewResponseAccept
+	}
+	return reviewResponseAmbiguous
+}
+
+func hasReviewCorrectionEvidence(normalized string) bool {
+	for _, token := range strings.Fields(normalized) {
+		switch token {
+		case "but", "actually", "instead", "wait", "change", "switch", "replace", "remove", "add", "another", "different", "cancel", "reschedule", "move":
+			return true
+		}
+	}
+	return false
+}
+
+func hasReviewRejectionEvidence(normalized string) bool {
+	for _, token := range strings.Fields(normalized) {
+		switch token {
+		case "no", "nope", "nah", "not", "never", "stop", "cannot":
+			return true
+		}
+	}
+	return containsAnyLoosePhrase(normalized, []string{"do not", "don t", "can t", "will not", "won t"})
+}
+
+func hasReviewInformationQuestion(message string, normalized string) bool {
+	hasQuestionSignal := strings.Contains(message, "?") || containsAnyLoosePhrase(normalized, []string{
+		"what", "which", "when", "where", "why", "how", "who",
+		"can you tell", "could you tell", "i have a question", "price", "how much",
+	})
+	if !hasQuestionSignal {
 		return false
 	}
-	tokens := strings.Fields(normalized)
-	for _, token := range tokens {
-		switch token {
-		case "no", "not", "but", "actually", "instead", "wait", "change", "switch", "replace", "remove", "add", "another", "different", "cancel", "reschedule":
-			return false
+	return !isExplicitReviewBookingRequestQuestion(normalized)
+}
+
+func isExplicitReviewBookingRequestQuestion(normalized string) bool {
+	return containsAnyLoosePhrase(normalized, []string{
+		"can you book it", "can you book this", "can you book the appointment",
+		"could you book it", "could you book this", "could you book the appointment",
+		"would you book it", "would you book this", "will you book it", "will you book this",
+		"can you schedule it", "could you schedule it", "can you confirm it", "could you confirm it",
+	})
+}
+
+func hasNaturalReviewApproval(normalized string) bool {
+	if normalized == "i would" || normalized == "i would like that" || normalized == "i do" ||
+		normalized == "please do" || normalized == "do it" || normalized == "sounds good" ||
+		normalized == "that works" || normalized == "everything looks good" {
+		return true
+	}
+	remainder, hasPositivePrefix := trimReviewPositivePrefix(normalized)
+	if hasPositivePrefix {
+		if remainder == "" || remainder == "please" || remainder == "of course" || remainder == "i would" ||
+			remainder == "i would like that" || remainder == "i do" || remainder == "sounds good" || remainder == "that works" {
+			return true
+		}
+		return hasReviewBookingDirective(remainder)
+	}
+	return hasReviewBookingDirective(normalized)
+}
+
+func trimReviewPositivePrefix(normalized string) (string, bool) {
+	for _, prefix := range []string{"of course", "absolutely", "certainly", "yes", "yeah", "yep", "sure", "okay", "ok", "correct", "right"} {
+		if normalized == prefix {
+			return "", true
+		}
+		if strings.HasPrefix(normalized, prefix+" ") {
+			return strings.TrimSpace(strings.TrimPrefix(normalized, prefix)), true
 		}
 	}
-	allowed := map[string]bool{
-		"yes": true, "yeah": true, "yep": true, "sure": true, "okay": true, "ok": true,
-		"correct": true, "everything": true, "looks": true, "good": true, "right": true,
-		"please": true, "just": true, "go": true, "ahead": true, "and": true, "do": true, "so": true,
-		"book": true, "confirm": true, "make": true, "schedule": true,
-		"it": true, "this": true, "that": true, "the": true, "appointment": true, "booking": true,
-		"for": true, "me": true, "us": true, "now": true, "is": true,
-	}
-	hasAuthorization := false
-	for _, token := range tokens {
-		if !allowed[token] {
-			return false
-		}
-		switch token {
-		case "yes", "yeah", "yep", "sure", "okay", "ok", "correct", "book", "confirm", "make", "schedule", "good", "right":
-			hasAuthorization = true
-		}
-	}
-	if containsLoosePhrase(normalized, "go ahead") {
-		hasAuthorization = true
-	}
-	return hasAuthorization
+	return normalized, false
+}
+
+func hasReviewBookingDirective(normalized string) bool {
+	return containsAnyLoosePhrase(normalized, []string{
+		"book it", "book this", "book that", "book the appointment",
+		"confirm it", "confirm this", "confirm that", "confirm the appointment",
+		"make the appointment", "schedule it", "schedule this", "schedule that", "schedule the appointment",
+		"go ahead", "please proceed", "proceed", "please do", "do it", "do so",
+	})
 }
 
 func selectedServiceOptions(session Session, services []ServiceOption) []ServiceOption {

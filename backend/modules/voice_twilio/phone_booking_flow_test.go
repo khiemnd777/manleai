@@ -107,7 +107,7 @@ func TestSignedTwilioWebhookDrivesPhoneBookingFlowThroughConversation(t *testing
 		"CallSid":      {"CA_FLOW"},
 		"From":         {"+13125550199"},
 		"To":           {"+13125550101"},
-		"SpeechResult": {"Yes, please book it."},
+		"SpeechResult": {"Yes, of course."},
 	}
 	thirdTurnRes := signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", thirdTurn)
 	thirdTurnBody := readBody(t, thirdTurnRes)
@@ -116,6 +116,9 @@ func TestSignedTwilioWebhookDrivesPhoneBookingFlowThroughConversation(t *testing
 	}
 	if strings.Contains(thirdTurnBody, "<Gather") {
 		t.Fatalf("confirmed booking should end gather loop: %s", thirdTurnBody)
+	}
+	if strings.Contains(thirdTurnBody, "Let me review everything") {
+		t.Fatalf("natural review authorization should not repeat the final review: %s", thirdTurnBody)
 	}
 	if !strings.Contains(thirdTurnBody, "confirmed with Lotus Nails") || strings.Contains(thirdTurnBody, "available technician") || strings.Contains(thirdTurnBody, "Mai Nguyen") || !strings.Contains(thirdTurnBody, "under Linh Tran") || !strings.Contains(thirdTurnBody, "<Hangup/>") {
 		t.Fatalf("third turn should return final confirmed TwiML: %s", thirdTurnBody)
