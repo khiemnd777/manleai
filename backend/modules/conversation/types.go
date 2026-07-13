@@ -128,6 +128,7 @@ type TurnInterpretationRequest struct {
 	SessionID           string
 	Channel             string
 	CustomerMessage     string
+	ExpectedInput       string
 	SelectedServices    []ConversationServiceRef
 	CatalogServices     []ConversationServiceRef
 	SelectedStaff       []ConversationStaffRef
@@ -197,14 +198,15 @@ type ConversationQuestion struct {
 }
 
 type TurnUnderstanding struct {
-	Goal            string                 `json:"goal"`
-	Acts            []ConversationAct      `json:"acts"`
-	Questions       []ConversationQuestion `json:"questions"`
-	Confidence      float64                `json:"confidence"`
-	Reason          string                 `json:"reason"`
-	Source          string                 `json:"source"`
-	ModelInvoked    bool                   `json:"-"`
-	CatalogFallback bool                   `json:"-"`
+	Goal               string                 `json:"goal"`
+	Acts               []ConversationAct      `json:"acts"`
+	Questions          []ConversationQuestion `json:"questions"`
+	Confidence         float64                `json:"confidence"`
+	Reason             string                 `json:"reason"`
+	Source             string                 `json:"source"`
+	ModelInvoked       bool                   `json:"-"`
+	CatalogFallback    bool                   `json:"-"`
+	InterpreterOutcome string                 `json:"-"`
 }
 
 type PendingConversationAct struct {
@@ -308,9 +310,10 @@ type MessageRequest struct {
 type TurnTimingRecorder func(TurnTiming)
 
 type TurnTiming struct {
-	Stage    string
-	Duration time.Duration
-	Result   string
+	Stage      string
+	Duration   time.Duration
+	Result     string
+	Attributes map[string]string
 }
 
 type VoiceInputHandoffRequest struct {

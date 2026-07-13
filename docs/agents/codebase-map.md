@@ -161,16 +161,22 @@ name collection, availability replies, party bookings, or transcript output.
   `backend/modules/conversation/service_extraction.go`,
   `backend/modules/conversation/service_matching_parsing.go`,
   `backend/modules/conversation/service_understanding.go`,
+  `backend/modules/conversation/turn_kernel.go`,
   `backend/modules/conversation/conversation_act.go`,
+  `backend/modules/conversation/turn_interpreter_error.go`,
   `backend/modules/conversation/service_datetime_confirmation.go`,
   `backend/modules/conversation/turn_reducer.go`, and
   `backend/modules/conversation/next_action_planner.go`.
-  Configured production turns enter a multi-act/question semantic contract
-  without a keyword gate. A narrow state-scoped fast path accepts only an
-  unambiguous ordinal selector or affirmation that resolves one currently
-  offered slot; corrections, questions, multi-intent turns, pending
-  clarifications, and service/staff mismatches still enter semantic
-  interpretation. Catalog validation owns referenced service/staff IDs;
+  Configured production turns first enter the Turn Kernel, which derives the
+  expected input from dialog state, measures deterministic coverage, scopes
+  service/staff model context, and selects a fast, answer, action, recovery, or
+  semantic lane. Complete state-scoped evidence such as offered-slot choices,
+  typed confirmations, structured questions, actions, and expected fields
+  avoids a model round trip. Corrections, multi-intent turns, ambiguity, and
+  partial or unconsumed evidence enter the multi-act/question semantic contract
+  without a keyword-only gate. Semantic interpretation has a 2.5-second budget;
+  typed timeout, provider, output, confidence, and catalog rejection outcomes
+  preserve the draft. Catalog validation owns referenced service/staff IDs;
   the reducer owns draft mutation and dependency invalidation; the planner owns
   missing-field, review, and booking readiness. Pending candidates remain
   contextual. Review authorization and a resolved same-category guest-scope
@@ -223,7 +229,9 @@ name collection, availability replies, party bookings, or transcript output.
 - Persistence: `backend/modules/conversation/repository.go`.
 - PII-free turn substage timing contract and recorder:
   `backend/modules/conversation/turn_timing.go`; persistence timing remains
-  inside `backend/modules/conversation/repository.go`.
+  inside `backend/modules/conversation/repository.go`. Router timing and safe
+  attributes include lane, expected input, decision reason, deterministic
+  coverage, scoped model service/staff counts, and interpreter outcome.
 - DTOs/state: `backend/modules/conversation/types.go`.
 - Structured semantic-turn interpretation: `backend/modules/voice/act_interpreter.go`,
   `backend/modules/voice/types.go`, and
@@ -373,10 +381,10 @@ detail rather than part of the event title.
   and rejected transcript timing events retain PII-free decision/reason, profile,
   item ID, mean/min logprob, token count, VAD duration, rejection streak, and
   recovery action diagnostics when available. `backend_turn_done` accumulates
-  route/config, session-load, answer-context, semantic-interpreter,
+  route/config, session-load, answer-context, turn-router, semantic-interpreter,
   availability/POS, and turn-persistence durations through
-  `backend/modules/voice/backend_turn_diagnostics.go`; it records only a safe
-  interpreter path label, never transcript or caller data. Speech output timing/failures retain correlation
+  `backend/modules/voice/backend_turn_diagnostics.go`; it records only safe
+  router/interpreter labels and scoped-context counts, never transcript or caller data. Speech output timing/failures retain correlation
   IDs, counts, and salted canonical hashes without transcript/audio bodies. The
   owner-scoped Calls timeline exposes these whitelisted diagnostics. Transcription steering is
   a concise salon/catalog/alias keyword list rather than conversational example
@@ -504,7 +512,7 @@ detail rather than part of the event title.
 | reschedule, cancel, move appointment, appointment target, ordinal option, day view, week view, month view, agenda, Tomorrow button, appointment warning | `service_intent.go`, `backend/modules/booking/service.go` | Appointments UI, POS Calendar UI, booking tests |
 | Twilio signature, webhook, TwiML, recording, media stream, stream fallback | `backend/modules/voice_twilio` | `backend/modules/voice`, phone demo memo |
 | OpenAI STT, TTS, realtime, model, voice, guarded reply, background noise, false transcript, transcript logprob, repeated progress reply, spoken fact mismatch, realtime transport fallback | `backend/modules/voice_openai`, `backend/modules/voice`, `backend/modules/voice_twilio/handler.go` | integration config, conversation runtime, realtime event timeline, voice tests |
-| slow AI response, backend latency, backend_turn_done, turn_interpreter_ms, availability_pos_ms, save_turn_ms, state-scoped slot fast path | `backend/modules/voice/backend_turn_diagnostics.go`, `backend/modules/conversation/turn_timing.go`, `backend/modules/voice_twilio/handler.go` | conversation service/interpreter, provider availability/POS calls, Calls realtime event timeline, voice and conversation tests |
+| slow AI response, backend latency, backend_turn_done, turn_router_ms, turn_route, turn_expected_input, turn_interpreter_ms, turn_interpreter_outcome, availability_pos_ms, save_turn_ms, fast lane, semantic lane | `backend/modules/conversation/turn_kernel.go`, `backend/modules/voice/backend_turn_diagnostics.go`, `backend/modules/conversation/turn_timing.go`, `backend/modules/voice_twilio/handler.go` | conversation router/service/interpreter, provider availability/POS calls, Calls realtime event timeline, voice and conversation tests |
 | AI tone, speaking style, concise/warm/professional | `backend/modules/salon`, `conversation.RuntimeConfig`, `voice.ModelRequest` | Settings UI, config transfer |
 | integration config, provider secrets, dashboard settings, active provider config, env fallback | `backend/modules/integration_config`, `/dashboard/integrations`, authenticated integration/status APIs | runtime resolver code first; deployment docs only for an explicitly scoped legacy fallback task |
 | public catalog, published slug, public services, landing page, staff privacy | `backend/modules/public_catalog`, `landing/app/s/[slug]/page.tsx` | Settings UI public catalog card |

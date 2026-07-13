@@ -692,7 +692,11 @@ func TestForwardRealtimeEventsRecordsTimingStages(t *testing.T) {
 	adapter, service, store, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("What name should I put on the appointment?", conversation.StatusActive, conversation.OutcomeCollecting))
 	engine.messageTimings = []conversation.TurnTiming{
 		{Stage: conversation.TurnTimingStageSessionLoad, Duration: 4 * time.Millisecond, Result: conversation.TurnTimingResultOK},
-		{Stage: conversation.TurnTimingStageTurnInterpreter, Duration: 9 * time.Millisecond, Result: conversation.TurnTimingPathStructuredAI},
+		{Stage: conversation.TurnTimingStageTurnRouter, Duration: 2 * time.Millisecond, Result: conversation.TurnRouteFastLane, Attributes: map[string]string{
+			"turn_route": conversation.TurnRouteFastLane, "turn_expected_input": conversation.ExpectedInputRequestedTime,
+			"turn_route_reason": "expected_input_resolved", "turn_deterministic_coverage": conversation.TurnCoverageComplete,
+		}},
+		{Stage: conversation.TurnTimingStageTurnInterpreter, Duration: 9 * time.Millisecond, Result: conversation.TurnTimingPathFastLane, Attributes: map[string]string{"turn_interpreter_outcome": "skipped_fast_lane"}},
 		{Stage: conversation.TurnTimingStageSaveTurn, Duration: 5 * time.Millisecond, Result: conversation.TurnTimingResultOK},
 	}
 	handler := NewHandler(adapter, service)
@@ -733,8 +737,14 @@ func TestForwardRealtimeEventsRecordsTimingStages(t *testing.T) {
 		}
 		if event.Payload["stage"] == "backend_turn_done" {
 			foundBackendDiagnostics = event.Payload["session_load_ms"] == "4" &&
+				event.Payload["turn_router_ms"] == "2" &&
+				event.Payload["turn_route"] == conversation.TurnRouteFastLane &&
+				event.Payload["turn_expected_input"] == conversation.ExpectedInputRequestedTime &&
+				event.Payload["turn_route_reason"] == "expected_input_resolved" &&
+				event.Payload["turn_deterministic_coverage"] == conversation.TurnCoverageComplete &&
 				event.Payload["turn_interpreter_ms"] == "9" &&
-				event.Payload["turn_interpreter_path"] == conversation.TurnTimingPathStructuredAI &&
+				event.Payload["turn_interpreter_path"] == conversation.TurnTimingPathFastLane &&
+				event.Payload["turn_interpreter_outcome"] == "skipped_fast_lane" &&
 				event.Payload["save_turn_ms"] == "5"
 		}
 	}

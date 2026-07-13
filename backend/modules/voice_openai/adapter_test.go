@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -139,6 +140,9 @@ func TestInterpretTurnUsesStrictCatalogBoundMultiActSchema(t *testing.T) {
 		if modelInput["customer_message"] != "Make that a spa pedicure instead." {
 			t.Fatalf("customer_message = %#v", modelInput["customer_message"])
 		}
+		if modelInput["expected_input"] != conversation.ExpectedInputService {
+			t.Fatalf("expected_input = %#v", modelInput["expected_input"])
+		}
 		body, _ := json.Marshal(map[string]any{
 			"output_text": `{"goal":"book_appointment","acts":[{"kind":"replace_service","entity":"service","source_ids":["service_gel"],"target_ids":["service_spa"],"source_category_id":"","source_category_name":"","target_category_id":"cat_pedi","target_category_name":"Pedicure","scope":"one","guest_scope":"","guest_ref":"","subject":"","value":"","count":0,"confidence":0.95,"reason":"explicit replacement"}],"questions":[{"subject":"availability","service_ids":["service_spa"],"staff_ids":[],"confidence":0.92,"reason":"caller asked about availability"}],"confidence":0.95,"reason":"correction plus question"}`,
 		})
@@ -148,6 +152,7 @@ func TestInterpretTurnUsesStrictCatalogBoundMultiActSchema(t *testing.T) {
 	reply, err := adapter.InterpretTurn(context.Background(), voice.TurnModelRequest{
 		SalonID:         "salon_1",
 		CustomerMessage: "Make that a spa pedicure instead.",
+		ExpectedInput:   conversation.ExpectedInputService,
 		SelectedServices: []conversation.ConversationServiceRef{{
 			ServiceID: "service_gel", ServiceName: "Gel Manicure",
 		}},
@@ -160,6 +165,30 @@ func TestInterpretTurnUsesStrictCatalogBoundMultiActSchema(t *testing.T) {
 	}
 	if len(reply.Acts) != 1 || reply.Acts[0].Kind != conversation.ConversationActReplace || reply.Acts[0].TargetIDs[0] != "service_spa" || len(reply.Questions) != 1 || reply.Confidence != 0.95 {
 		t.Fatalf("reply = %#v", reply)
+	}
+}
+
+func TestInterpretTurnClassifiesEmptyAndInvalidStructuredOutput(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want error
+	}{
+		{name: "empty", text: "", want: voice.ErrTurnModelEmptyOutput},
+		{name: "invalid", text: "not-json", want: voice.ErrTurnModelInvalidOutput},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			adapter := NewAdapter(config.OpenAIVoiceConfig{APIKey: "test-key", BaseURL: "https://openai.test/v1", ReplyModel: "gpt-test"})
+			adapter.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				body, _ := json.Marshal(map[string]any{"output_text": test.text})
+				return jsonResponse(body), nil
+			})}
+			_, err := adapter.InterpretTurn(context.Background(), voice.TurnModelRequest{SalonID: "salon_1"})
+			if !errors.Is(err, test.want) {
+				t.Fatalf("error = %v, want %v", err, test.want)
+			}
+		})
 	}
 }
 

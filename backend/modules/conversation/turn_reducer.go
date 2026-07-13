@@ -210,6 +210,7 @@ func applyTurnUnderstandingMetadata(turnRecord *TurnRecord, understanding TurnUn
 		"turn_understanding_model_invoked": understanding.ModelInvoked,
 		"turn_understanding_acts":          acts,
 		"turn_understanding_questions":     questions,
+		"turn_interpreter_outcome":         understanding.InterpreterOutcome,
 	})
 	turnRecord.AIMetadata = mergeMetadata(turnRecord.AIMetadata, map[string]any{
 		"draft_revision":      turnRecord.Update.DialogState.DraftRevision,

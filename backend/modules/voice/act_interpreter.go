@@ -2,6 +2,7 @@ package voice
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/manleai/ai-receptionist/modules/conversation"
@@ -17,13 +18,14 @@ func NewGuardedTurnInterpreter(provider TurnModelProvider) *GuardedTurnInterpret
 
 func (g *GuardedTurnInterpreter) InterpretTurn(ctx context.Context, req conversation.TurnInterpretationRequest) (conversation.TurnUnderstanding, error) {
 	if g == nil || g.provider == nil || !g.provider.Configured(ctx, req.SalonID) {
-		return conversation.TurnUnderstanding{}, ErrProviderDisabled
+		return conversation.TurnUnderstanding{}, conversation.NewTurnInterpreterError(conversation.TurnInterpreterOutcomeProviderDisabled, ErrProviderDisabled)
 	}
 	reply, err := g.provider.InterpretTurn(ctx, TurnModelRequest{
 		SalonID:             req.SalonID,
 		SessionID:           req.SessionID,
 		Channel:             req.Channel,
 		CustomerMessage:     req.CustomerMessage,
+		ExpectedInput:       req.ExpectedInput,
 		SelectedServices:    append([]conversation.ConversationServiceRef(nil), req.SelectedServices...),
 		CatalogServices:     append([]conversation.ConversationServiceRef(nil), req.CatalogServices...),
 		SelectedStaff:       append([]conversation.ConversationStaffRef(nil), req.SelectedStaff...),
@@ -34,7 +36,18 @@ func (g *GuardedTurnInterpreter) InterpretTurn(ctx context.Context, req conversa
 		CurrentDraft:        req.CurrentDraft,
 	})
 	if err != nil {
-		return conversation.TurnUnderstanding{}, err
+		outcome := conversation.TurnInterpreterOutcomeProviderError
+		switch {
+		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+			outcome = conversation.TurnInterpreterOutcomeTimeout
+		case errors.Is(err, ErrProviderDisabled):
+			outcome = conversation.TurnInterpreterOutcomeProviderDisabled
+		case errors.Is(err, ErrTurnModelEmptyOutput):
+			outcome = conversation.TurnInterpreterOutcomeEmptyOutput
+		case errors.Is(err, ErrTurnModelInvalidOutput):
+			outcome = conversation.TurnInterpreterOutcomeSchemaInvalid
+		}
+		return conversation.TurnUnderstanding{}, conversation.NewTurnInterpreterError(outcome, err)
 	}
 	turn := conversation.TurnUnderstanding{
 		Goal: reply.Goal, Confidence: reply.Confidence, Reason: strings.TrimSpace(reply.Reason), Source: "structured_ai", ModelInvoked: true,

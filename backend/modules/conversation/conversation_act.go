@@ -2,12 +2,16 @@ package conversation
 
 import (
 	"context"
+	"errors"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/manleai/ai-receptionist/modules/booking"
 )
+
+const semanticTurnTimeout = 2500 * time.Millisecond
 
 type conversationDraftResult struct {
 	Handled       bool
@@ -20,35 +24,46 @@ type conversationDraftResult struct {
 }
 
 func (s *Service) turnUnderstandingForMessage(ctx context.Context, session Session, message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, staff []StaffOption) TurnUnderstanding {
+	plan := TurnPlan{
+		Route:                 TurnRouteSemanticLane,
+		ExpectedInput:         expectedInputForSession(session),
+		DeterministicCoverage: TurnCoverageNone,
+		SemanticServices:      append([]ServiceOption(nil), services...),
+		SemanticStaff:         append([]StaffOption(nil), staff...),
+	}
+	return s.turnUnderstandingForPlan(ctx, session, message, services, aliases, categoryAliases, staff, plan)
+}
+
+func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session, message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, staff []StaffOption, plan TurnPlan) TurnUnderstanding {
 	startedAt := time.Now()
-	deterministic := deterministicConversationAct(session, message, services, aliases, categoryAliases)
-	if activePartyPlan(session.PartyPlan) && isServiceMutationAct(deterministic.Kind) {
-		deterministic = ConversationAct{Kind: ConversationActUnknown, Source: "deterministic"}
+	fallback := plan.Understanding
+	if fallback.Source == "" {
+		fallback.Source = "turn_kernel"
 	}
-	if deterministic.Kind != ConversationActUnknown && deterministic.Entity == "" {
-		deterministic.Entity = defaultConversationActEntity(deterministic.Kind)
-	}
-	fallback := TurnUnderstanding{Source: "deterministic", Confidence: deterministic.Confidence, Reason: deterministic.Reason}
-	if deterministic.Kind != ConversationActUnknown {
-		fallback.Acts = []ConversationAct{deterministic}
-	}
-	if deterministicConversationActOwnsTurn(session, deterministic) {
-		recordTurnTiming(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathDeterministic)
-		return fallback
+	if fallback.Reason == "" {
+		fallback.Reason = plan.Reason
 	}
 	if s.turnInterpreter == nil {
-		recordTurnTiming(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathInterpreterAbsent)
+		fallback.InterpreterOutcome = "interpreter_absent"
+		recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathInterpreterAbsent, map[string]string{
+			"turn_interpreter_outcome": fallback.InterpreterOutcome,
+		})
 		return fallback
 	}
-	interpreted, err := s.turnInterpreter.InterpretTurn(ctx, TurnInterpretationRequest{
+	semanticServices := plan.SemanticServices
+	semanticStaff := plan.SemanticStaff
+	interpretCtx, cancel := context.WithTimeout(ctx, semanticTurnTimeout)
+	defer cancel()
+	interpreted, err := s.turnInterpreter.InterpretTurn(interpretCtx, TurnInterpretationRequest{
 		SalonID:             session.SalonID,
 		SessionID:           session.ID,
 		Channel:             session.Channel,
 		CustomerMessage:     sanitizedTurnInterpreterMessage(message, session),
+		ExpectedInput:       plan.ExpectedInput,
 		SelectedServices:    conversationServiceRefs(selectedServiceOptions(session, services)),
-		CatalogServices:     conversationServiceRefs(services),
+		CatalogServices:     conversationServiceRefs(semanticServices),
 		SelectedStaff:       conversationStaffRefs(selectedStaffOptions(session, staff)),
-		CatalogStaff:        conversationStaffRefs(staff),
+		CatalogStaff:        conversationStaffRefs(semanticStaff),
 		Pending:             clonePendingConversationAct(session.DialogState.Pending),
 		CurrentBookingStage: normalizedDialogState(session.DialogState).Phase,
 		BookingAction:       bookingActionForSession(session),
@@ -56,13 +71,22 @@ func (s *Service) turnUnderstandingForMessage(ctx context.Context, session Sessi
 	})
 	fallback.ModelInvoked = true
 	if err != nil {
-		fallback.Reason = "semantic_interpreter_unavailable"
-		recordTurnTiming(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathProviderFallback)
+		fallback.InterpreterOutcome = turnInterpreterErrorOutcome(err)
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(interpretCtx.Err(), context.DeadlineExceeded) {
+			fallback.InterpreterOutcome = TurnInterpreterOutcomeTimeout
+		}
+		fallback.Reason = "semantic_interpreter_" + fallback.InterpreterOutcome
+		recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathProviderFallback, map[string]string{
+			"turn_interpreter_outcome": fallback.InterpreterOutcome,
+			"turn_model_service_count": strconv.Itoa(len(semanticServices)),
+			"turn_model_staff_count":   strconv.Itoa(len(semanticStaff)),
+		})
 		return fallback
 	}
 	interpreted.ModelInvoked = true
-	if validated, ok := validateTurnUnderstanding(interpreted, session, services, staff); ok {
+	if validated, ok := validateTurnUnderstanding(interpreted, session, semanticServices, semanticStaff); ok {
 		validated.Source = "structured_ai"
+		validated.InterpreterOutcome = TurnInterpreterOutcomeAccepted
 		for index := range validated.Acts {
 			validated.Acts[index].Source = "structured_ai"
 			if validated.Acts[index].Entity == "" {
@@ -70,40 +94,89 @@ func (s *Service) turnUnderstandingForMessage(ctx context.Context, session Sessi
 			}
 		}
 		if len(validated.Acts) == 0 && len(validated.Questions) == 0 && (validated.Goal == "" || validated.Goal == "unknown") {
-			recordTurnTiming(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathProviderFallback)
+			fallback.InterpreterOutcome = "empty_understanding"
+			fallback.Reason = "semantic_interpreter_empty_understanding"
+			recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathProviderFallback, map[string]string{
+				"turn_interpreter_outcome": fallback.InterpreterOutcome,
+			})
 			return fallback
 		}
 		catalogUnderstanding := interpretServiceWithCategoryAliases(message, services, aliases, categoryAliases)
 		if shouldUseCatalogServiceEditFallback(session, message, catalogUnderstanding) {
-			recordTurnTiming(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathStructuredAI)
+			recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathStructuredAI, map[string]string{
+				"turn_interpreter_outcome": "catalog_fallback",
+			})
 			return TurnUnderstanding{
-				Goal:            validated.Goal,
-				Confidence:      validated.Confidence,
-				Reason:          "catalog_backed_service_edit_fallback",
-				Source:          "catalog_fallback",
-				ModelInvoked:    true,
-				CatalogFallback: true,
+				Goal:               validated.Goal,
+				Confidence:         validated.Confidence,
+				Reason:             "catalog_backed_service_edit_fallback",
+				Source:             "catalog_fallback",
+				ModelInvoked:       true,
+				CatalogFallback:    true,
+				InterpreterOutcome: "catalog_fallback",
 			}
 		}
 		validated = reconcileSemanticServiceTargets(validated, catalogUnderstanding)
 		validated = reconcileDeterministicInformationQuestions(message, validated)
-		recordTurnTiming(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathStructuredAI)
+		recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathStructuredAI, map[string]string{
+			"turn_interpreter_outcome": validated.InterpreterOutcome,
+		})
 		return validated
 	}
-	fallback.Reason = "semantic_interpretation_rejected"
-	recordTurnTiming(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathProviderFallback)
+	fallback.InterpreterOutcome = rejectedTurnUnderstandingOutcome(interpreted, semanticServices, semanticStaff)
+	fallback.Reason = "semantic_interpretation_" + fallback.InterpreterOutcome
+	recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathProviderFallback, map[string]string{
+		"turn_interpreter_outcome": fallback.InterpreterOutcome,
+	})
 	return fallback
 }
 
-func deterministicConversationActOwnsTurn(session Session, act ConversationAct) bool {
-	if act.Kind == ConversationActUnknown {
-		return false
+func rejectedTurnUnderstandingOutcome(turn TurnUnderstanding, services []ServiceOption, staff []StaffOption) string {
+	if turn.Confidence > 0 && turn.Confidence < 0.78 {
+		return TurnInterpreterOutcomeLowConfidence
 	}
-	if act.Kind == ConversationActReview {
-		return true
+	for _, act := range turn.Acts {
+		if act.Confidence > 0 && act.Confidence < 0.78 {
+			return TurnInterpreterOutcomeLowConfidence
+		}
 	}
-	pending := normalizedDialogState(session.DialogState).Pending
-	return pending != nil && pending.PromptKey == "same_category_add_scope" && act.GuestScope != ""
+	for _, question := range turn.Questions {
+		if question.Confidence > 0 && question.Confidence < 0.78 {
+			return TurnInterpreterOutcomeLowConfidence
+		}
+	}
+	validServices := stringSet(serviceOptionIDs(services))
+	validStaff := map[string]bool{}
+	for _, option := range staff {
+		validStaff[strings.TrimSpace(option.ID)] = true
+	}
+	for _, act := range turn.Acts {
+		ids := append(append([]string(nil), act.SourceServiceIDs...), act.TargetServiceIDs...)
+		for _, id := range ids {
+			if act.Entity == ConversationEntityStaff {
+				if !validStaff[strings.TrimSpace(id)] {
+					return TurnInterpreterOutcomeCatalogRejected
+				}
+				continue
+			}
+			if (act.Entity == ConversationEntityService || isServiceMutationAct(act.Kind)) && !validServices[strings.TrimSpace(id)] {
+				return TurnInterpreterOutcomeCatalogRejected
+			}
+		}
+	}
+	for _, question := range turn.Questions {
+		for _, id := range question.ServiceIDs {
+			if !validServices[strings.TrimSpace(id)] {
+				return TurnInterpreterOutcomeCatalogRejected
+			}
+		}
+		for _, id := range question.StaffIDs {
+			if !validStaff[strings.TrimSpace(id)] {
+				return TurnInterpreterOutcomeCatalogRejected
+			}
+		}
+	}
+	return TurnInterpreterOutcomeSchemaInvalid
 }
 
 func reconcileDeterministicInformationQuestions(message string, turn TurnUnderstanding) TurnUnderstanding {

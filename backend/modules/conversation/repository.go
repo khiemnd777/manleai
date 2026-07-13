@@ -1211,7 +1211,8 @@ func safeRealtimeDiagnostics(payload map[string]any) map[string]string {
 		"request_id", "response_id", "expected_hash", "actual_hash", "expected_token_count", "actual_token_count",
 		"audio_chunk_count", "buffered_audio_bytes", "match_classification", "interrupted", "close_after",
 		"status", "progress_spoken", "queued_remaining", "terminal", "rejection_streak", "recovery_action",
-		"route_config_ms", "session_load_ms", "answer_context_ms", "turn_interpreter_ms", "turn_interpreter_path", "availability_pos_ms", "save_turn_ms",
+		"route_config_ms", "session_load_ms", "answer_context_ms", "turn_router_ms", "turn_interpreter_ms", "turn_interpreter_path", "availability_pos_ms", "save_turn_ms",
+		"turn_route", "turn_expected_input", "turn_route_reason", "turn_deterministic_coverage", "turn_interpreter_outcome", "turn_model_service_count", "turn_model_staff_count",
 		"provider_request_id", "audio_bytes", "audio_encoding", "sample_rate", "audio_end_ms",
 		"mark_name",
 	}

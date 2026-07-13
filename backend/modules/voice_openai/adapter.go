@@ -187,6 +187,7 @@ func (a *Adapter) InterpretTurn(ctx context.Context, req voice.TurnModelRequest)
 		Model: strings.TrimSpace(cfg.ReplyModel),
 		Instructions: strings.Join([]string{
 			"Interpret one caller turn for a US nail salon receptionist.",
+			"expected_input describes the state-owned field or decision currently awaiting an answer; use it as context, not as a closed vocabulary.",
 			"Return structured operations and questions only; never write a customer-facing reply.",
 			"A turn may contain multiple operations and questions. Preserve their spoken order.",
 			"Use only service and category IDs present in catalog_services.",
@@ -231,11 +232,11 @@ func (a *Adapter) InterpretTurn(ctx context.Context, req voice.TurnModelRequest)
 		text = strings.TrimSpace(res.firstText())
 	}
 	if text == "" {
-		return voice.TurnModelReply{}, errors.New("openai turn interpretation response has no text")
+		return voice.TurnModelReply{}, fmt.Errorf("%w: openai response has no text", voice.ErrTurnModelEmptyOutput)
 	}
 	var parsed voice.TurnModelReply
 	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
-		return voice.TurnModelReply{}, err
+		return voice.TurnModelReply{}, fmt.Errorf("%w: %v", voice.ErrTurnModelInvalidOutput, err)
 	}
 	return parsed, nil
 }
@@ -414,6 +415,7 @@ func turnModelInput(req voice.TurnModelRequest) string {
 	raw, _ := json.Marshal(map[string]any{
 		"channel":               req.Channel,
 		"customer_message":      req.CustomerMessage,
+		"expected_input":        req.ExpectedInput,
 		"selected_services":     req.SelectedServices,
 		"catalog_services":      req.CatalogServices,
 		"selected_staff":        req.SelectedStaff,

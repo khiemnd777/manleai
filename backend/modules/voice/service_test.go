@@ -231,7 +231,11 @@ func TestSpeechTurnRoutesLiveCallThroughAvailabilityOffer(t *testing.T) {
 	engine.messageTimings = []conversation.TurnTiming{
 		{Stage: conversation.TurnTimingStageSessionLoad, Duration: 5 * time.Millisecond, Result: conversation.TurnTimingResultOK},
 		{Stage: conversation.TurnTimingStageAnswerContext, Duration: 3 * time.Millisecond, Result: conversation.TurnTimingResultOK},
-		{Stage: conversation.TurnTimingStageTurnInterpreter, Duration: 7 * time.Millisecond, Result: conversation.TurnTimingPathStructuredAI},
+		{Stage: conversation.TurnTimingStageTurnRouter, Duration: 2 * time.Millisecond, Result: conversation.TurnRouteSemanticLane, Attributes: map[string]string{
+			"turn_route": conversation.TurnRouteSemanticLane, "turn_expected_input": conversation.ExpectedInputCallerGoal,
+			"turn_route_reason": "semantic_context_required", "turn_deterministic_coverage": conversation.TurnCoverageNone,
+		}},
+		{Stage: conversation.TurnTimingStageTurnInterpreter, Duration: 7 * time.Millisecond, Result: conversation.TurnTimingPathStructuredAI, Attributes: map[string]string{"turn_interpreter_outcome": conversation.TurnInterpreterOutcomeAccepted}},
 		{Stage: conversation.TurnTimingStageAvailabilityPOS, Duration: 11 * time.Millisecond, Result: conversation.TurnTimingResultOK},
 		{Stage: conversation.TurnTimingStageAvailabilityPOS, Duration: 4 * time.Millisecond, Result: conversation.TurnTimingResultOK},
 		{Stage: conversation.TurnTimingStageSaveTurn, Duration: 6 * time.Millisecond, Result: conversation.TurnTimingResultOK},
@@ -273,12 +277,18 @@ func TestSpeechTurnRoutesLiveCallThroughAvailabilityOffer(t *testing.T) {
 		t.Fatalf("offered slots = %#v, want one", reply.Session.OfferedSlots)
 	}
 	for key, want := range map[string]string{
-		"session_load_ms":       "5",
-		"answer_context_ms":     "3",
-		"turn_interpreter_ms":   "7",
-		"turn_interpreter_path": conversation.TurnTimingPathStructuredAI,
-		"availability_pos_ms":   "15",
-		"save_turn_ms":          "6",
+		"session_load_ms":             "5",
+		"answer_context_ms":           "3",
+		"turn_router_ms":              "2",
+		"turn_route":                  conversation.TurnRouteSemanticLane,
+		"turn_expected_input":         conversation.ExpectedInputCallerGoal,
+		"turn_route_reason":           "semantic_context_required",
+		"turn_deterministic_coverage": conversation.TurnCoverageNone,
+		"turn_interpreter_ms":         "7",
+		"turn_interpreter_path":       conversation.TurnTimingPathStructuredAI,
+		"turn_interpreter_outcome":    conversation.TurnInterpreterOutcomeAccepted,
+		"availability_pos_ms":         "15",
+		"save_turn_ms":                "6",
 	} {
 		if got := reply.BackendDiagnostics[key]; got != want {
 			t.Fatalf("backend diagnostic %s = %q, want %q; all=%#v", key, got, want, reply.BackendDiagnostics)

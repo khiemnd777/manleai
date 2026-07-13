@@ -31,6 +31,17 @@ func (d *backendTurnDiagnostics) Record(timing conversation.TurnTiming) {
 		return
 	}
 	d.add(timing.Stage, timing.Duration, timing.Result)
+	if len(timing.Attributes) > 0 {
+		d.mu.Lock()
+		for key, value := range timing.Attributes {
+			key = strings.TrimSpace(key)
+			value = strings.TrimSpace(value)
+			if key != "" && value != "" {
+				d.paths[key] = value
+			}
+		}
+		d.mu.Unlock()
+	}
 }
 
 func (d *backendTurnDiagnostics) add(stage string, duration time.Duration, result string) {
@@ -61,6 +72,7 @@ func (d *backendTurnDiagnostics) Snapshot() map[string]string {
 		backendTimingStageRouteConfig,
 		conversation.TurnTimingStageSessionLoad,
 		conversation.TurnTimingStageAnswerContext,
+		conversation.TurnTimingStageTurnRouter,
 		conversation.TurnTimingStageTurnInterpreter,
 		conversation.TurnTimingStageAvailabilityPOS,
 		conversation.TurnTimingStageSaveTurn,
@@ -72,6 +84,14 @@ func (d *backendTurnDiagnostics) Snapshot() map[string]string {
 	}
 	if path := d.paths[conversation.TurnTimingStageTurnInterpreter]; path != "" {
 		diagnostics[conversation.TurnTimingStageTurnInterpreter+"_path"] = path
+	}
+	for _, key := range []string{
+		"turn_route", "turn_expected_input", "turn_route_reason", "turn_deterministic_coverage",
+		"turn_interpreter_outcome", "turn_model_service_count", "turn_model_staff_count",
+	} {
+		if value := d.paths[key]; value != "" {
+			diagnostics[key] = value
+		}
 	}
 	if len(diagnostics) == 0 {
 		return nil

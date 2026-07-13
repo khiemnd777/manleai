@@ -284,6 +284,14 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	staff := answerCtx.Staff
 	activeStaff := answerCtx.ActiveStaff
 	knowledge := answerCtx.Knowledge
+	routerStartedAt := time.Now()
+	turnPlan := s.planTurn(message, *session, answerCtx, cfg)
+	recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnRouter, routerStartedAt, turnPlan.Route, turnPlan.timingAttributes())
+	newPlannedTurn := func(before Session, after Session) TurnRecord {
+		turn := newTurnRecord(salonID, ownerUserID, before, after, message, eventKey, services, staff, cfg)
+		applyTurnPlanMetadata(&turn, turnPlan)
+		return turn
+	}
 
 	if handled, updated, err := s.handlePendingOfferedSlotDateTimeCorrection(ctx, salonID, ownerUserID, *session, message, eventKey, services, staff, cfg, knowledge); handled {
 		return updated, err
@@ -294,7 +302,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	}
 
 	if reply := salonIdentityReplyForMessage(message, *session, cfg); reply != "" {
-		turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
+		turn := newPlannedTurn(*session, *session)
 		turn.AIMessage = reply
 		missing := ""
 		if hasBookingProgress(*session) {
@@ -307,7 +315,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	if rejection, ok := offeredSlotRejectionForMessage(message, *session, timezoneLocation(timezoneFromConfig(cfg))); ok {
 		next := *session
 		next.OfferedSlots = rejection.Remaining
-		turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
+		turn := newPlannedTurn(*session, next)
 		applySlotRejectionMetadata(&turn, rejection)
 		if len(next.OfferedSlots) > 0 {
 			turn.AIMessage = formatSlotOffer(next.OfferedSlots, timezoneLocation(timezoneFromConfig(cfg)), false)
@@ -318,12 +326,12 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		return s.store.SaveTurn(ctx, turn)
 	}
 
-	staffChange := detectStaffChangeRequest(message, *session, services, serviceAliases, categoryAliases, staff, activeStaff)
+	staffChange := turnPlan.StaffChange
 	_, pendingServiceEditMode, pendingServiceEditOK := pendingServiceEdit(*session, services)
 	pendingServiceReplaceConfirmation := pendingServiceEditOK && pendingServiceEditMode == pendingServiceEditModeReplaceConfirmation
 	if !pendingServiceReplaceConfirmation && !staffChange.Intent && bookingActionForSession(*session) != BookingActionCancel {
 		if reply, handoff := customerNameSlotRepairReply(message, *session, services, serviceAliases, categoryAliases, cfg); reply != "" {
-			turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
+			turn := newPlannedTurn(*session, *session)
 			if handoff {
 				return s.saveHandoffTurn(ctx, turn, *session, HandoffReasonCustomerDetailsUnavailable, reply, services, staff, cfg)
 			}
@@ -335,7 +343,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	}
 
 	if repairReply := repairReplyForMessage(message, *session, cfg); repairReply != "" {
-		turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
+		turn := newPlannedTurn(*session, *session)
 		turn.AIMessage = repairReply
 		missing := ""
 		if session.Intent == IntentBooking || session.ServiceID != "" || session.RequestedDate != "" || session.RequestedStartTime != nil {
@@ -352,32 +360,29 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	if handled, updated, err := s.guardOfferedSlotDateTimeCorrection(ctx, salonID, ownerUserID, *session, message, eventKey, services, serviceAliases, categoryAliases, staff, cfg); handled {
 		return updated, err
 	}
-	pendingNameCandidate := voiceCustomerNamePendingConfirmationCandidate(message, *session)
-	serviceUnderstanding := interpretServiceForSession(message, *session, services, serviceAliases, categoryAliases)
-	if catalogUnderstanding := interpretServiceWithCategoryAliases(message, services, serviceAliases, categoryAliases); isServiceInquiry(message, catalogUnderstanding) {
-		serviceUnderstanding = catalogUnderstanding
-	}
-	turnUnderstanding := TurnUnderstanding{}
-	if stateScopedOfferedSlotSelection(message, *session, loc) {
-		turnUnderstanding = TurnUnderstanding{
-			Goal:       "book_appointment",
-			Confidence: 1,
-			Reason:     "state_scoped_offered_slot_selection",
-			Source:     "deterministic",
-		}
-		recordSkippedTurnTiming(ctx, TurnTimingStageTurnInterpreter, TurnTimingPathStateScoped)
+	pendingNameCandidate := turnPlan.PendingNameCandidate
+	serviceUnderstanding := turnPlan.ServiceUnderstanding
+	turnUnderstanding := turnPlan.Understanding
+	if turnPlan.Route == TurnRouteSemanticLane {
+		turnUnderstanding = s.turnUnderstandingForPlan(ctx, *session, message, services, serviceAliases, categoryAliases, staff, turnPlan)
 	} else {
-		turnUnderstanding = s.turnUnderstandingForMessage(ctx, *session, message, services, serviceAliases, categoryAliases, staff)
+		path := turnPlan.Route
+		if turnPlan.Reason == "offered_slot_selection" {
+			path = TurnTimingPathStateScoped
+		}
+		recordSkippedTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, path, map[string]string{
+			"turn_interpreter_outcome": firstNonEmpty(turnUnderstanding.InterpreterOutcome, "skipped_"+turnPlan.Route),
+		})
 	}
 	conversationAct := primaryConversationAct(turnUnderstanding)
-	partySignal := detectPartySignal(message, *session, serviceUnderstanding, services, serviceAliases, categoryAliases)
+	partySignal := turnPlan.PartySignal
 	extractionApplied := false
 	if turnIsStandaloneDraftSummary(turnUnderstanding) {
 		extracted := cloneSessionForTurn(*session)
 		applyExtraction(&extracted, message, services, serviceAliases, categoryAliases, staff, loc, s.now)
 		if !draftChanged(*session, extracted) {
 			result := s.applyTurnUnderstandingToDraft(&next, turnUnderstanding, services, staff)
-			turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
+			turn := newPlannedTurn(*session, next)
 			turn.AIMessage = result.Reply
 			applyConversationActMetadata(&turn, conversationAct, result)
 			applyTurnUnderstandingMetadata(&turn, turnUnderstanding, result)
@@ -399,7 +404,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	}
 	if fallback := semanticServiceEditFallback(&next, turnUnderstanding, serviceUnderstanding, services); fallback.Clarification {
 		next.Intent = IntentBooking
-		turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
+		turn := newPlannedTurn(*session, next)
 		turn.AIMessage = fallback.Reply
 		applyTurnUnderstandingMetadata(&turn, turnUnderstanding, fallback)
 		if fallback.Escalate {
@@ -410,7 +415,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	}
 	if shouldClarifyCancelReschedule(*session, message) {
 		next.Intent = IntentBooking
-		turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
+		turn := newPlannedTurn(*session, next)
 		turn.AIMessage = "Do you want to cancel the existing appointment, or move it to a new time?"
 		turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{"booking_action_clarification": "cancel_or_reschedule"})
 		finalizeTurnMetadata(&turn, *session, next, "booking_action", "booking_action", "appointment_action_clarification")
@@ -422,7 +427,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	}
 	if activePartyPlan(session.PartyPlan) && !partyPlanComplete(session.PartyPlan) {
 		if reply, ok := partyPlanServiceMenuReply(message, *session, services, cfg); ok {
-			turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
+			turn := newPlannedTurn(*session, *session)
 			applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
 			applyPartyPlanMetadata(&turn, session.PartyPlan)
 			turn.AIMessage = reply
@@ -433,7 +438,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	if (asksServiceMenu(message) || classifyServiceCatalogQuestion(message, serviceUnderstanding) == serviceCatalogQuestionCount) && serviceUnderstanding.Status == serviceUnderstandingStatusUnknown {
 		route := routeNonBookingAnswer(message, *session, answerCtx, cfg, s.now)
 		if route.Handled && route.Source != answerSourceBookingRedirect {
-			turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
+			turn := newPlannedTurn(*session, *session)
 			turn.AIMessage = route.Reply
 			applyAnswerRouteMetadata(&turn, route, answerCtx)
 			if route.Intent != "service_catalog_count" {
@@ -444,7 +449,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		}
 	}
 	if !turnHasMutations(turnUnderstanding) && isServiceInquiry(message, serviceUnderstanding) && !asksStaffQuestion(message, staff, activeStaff) {
-		turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
+		turn := newPlannedTurn(*session, *session)
 		applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
 		applyServiceInquiryMetadata(&turn, serviceUnderstanding)
 		route := routeServiceInquiryAnswer(message, *session, serviceUnderstanding, answerCtx)
@@ -456,7 +461,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	if !hasBookingProgress(*session) && !hasBookingVerbSignal(message) && !partySignal.IsParty && !serviceUnderstandingStartsBooking(serviceUnderstanding, message) {
 		route := routeNonBookingAnswer(message, *session, answerCtx, cfg, s.now)
 		if route.Handled && route.Source != answerSourceBookingRedirect {
-			turn := newTurnRecord(salonID, ownerUserID, *session, *session, message, eventKey, services, staff, cfg)
+			turn := newPlannedTurn(*session, *session)
 			turn.AIMessage = route.Reply
 			applyAnswerRouteMetadata(&turn, route, answerCtx)
 			s.applyReplyGenerator(ctx, &turn, *session, services, cfg, "", "", knowledge)
@@ -485,7 +490,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 				Segments:  partyPlanSegments(plan, next),
 			})
 		} else {
-			turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
+			turn := newPlannedTurn(*session, next)
 			applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
 			applyPartyPlanMetadata(&turn, plan)
 			turn.AIMessage = partyPlanClarificationReply(message, next, plan, services, cfg)
@@ -503,7 +508,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 					Segments:  partyPlanSegments(plan, next),
 				})
 			} else {
-				turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
+				turn := newPlannedTurn(*session, next)
 				applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
 				applyPartyPlanMetadata(&turn, plan)
 				turn.AIMessage = partyPlanClarificationReply(message, next, plan, services, cfg)
@@ -515,7 +520,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	conversationResult := s.applyTurnUnderstandingToDraft(&next, turnUnderstanding, services, staff)
 	if conversationResult.Clarification {
 		next.Intent = IntentBooking
-		turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
+		turn := newPlannedTurn(*session, next)
 		turn.AIMessage = conversationResult.Reply
 		applyConversationActMetadata(&turn, conversationAct, conversationResult)
 		applyTurnUnderstandingMetadata(&turn, turnUnderstanding, conversationResult)
@@ -527,8 +532,8 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	}
 	serviceEdit := serviceEditDecision{}
 	if !conversationResult.Handled && (!turnUnderstanding.ModelInvoked || turnUnderstanding.CatalogFallback) {
-		// Compatibility fallback for deployments/tests without a semantic provider.
-		// It remains catalog-backed and never owns the configured production path.
+		// State-scoped fast lanes and safe semantic fallback reuse the catalog-backed
+		// service decision without giving the model or parser side-effect ownership.
 		serviceEdit = serviceEditDecisionForMessage(*session, message, serviceUnderstanding, services)
 	}
 	serviceChanged := false
@@ -567,7 +572,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	next.Intent = intent
 	advanceDraftRevision(*session, &next)
 
-	turn := newTurnRecord(salonID, ownerUserID, *session, next, message, eventKey, services, staff, cfg)
+	turn := newPlannedTurn(*session, next)
 	if len(pendingConsultationServices(*session, services)) > 0 && (serviceChanged || next.Intent != IntentConsultation) {
 		clearPendingConsultationMetadata(&turn, "conversation_progressed")
 	}

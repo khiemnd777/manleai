@@ -131,7 +131,8 @@
 - [x] Require explicit final-review authorization before production call-session booking writes; review acceptance itself is never confirmed wording.
 - [x] Add a strict structured semantic-turn interpreter that is data-minimized, catalog-validated, confidence-gated, and unable to call POS or mutate state directly.
 - [x] Add golden transcript and invariant tests for directional switching, stale pending escape, review corrections, duplicate-safe turn handling, and bounded clarification handoff.
-- [x] Interpret every configured-production freeform orchestration turn without a keyword-gated semantic entrypoint and allow multiple ordered acts/questions in one turn.
+- [x] Route every configured-production freeform orchestration turn through the state-driven Turn Kernel; use deterministic fast/answer/action/recovery lanes when coverage is complete and a multi-act semantic lane for correction, ambiguity, or partial coverage without a keyword-only gate.
+- [x] Bound semantic interpretation to 2.5 seconds, scope service/staff context to the active turn, and expose PII-free route, expected-input, context-size, and interpreter-outcome diagnostics.
 - [x] Route service, staff, date/time, customer, and guest corrections through one validated reducer boundary with dependency invalidation.
 - [x] Bind final-review authorization to the exact draft revision and invalidate it after every draft correction.
 - [x] Keep a bounded mutation history for repeated undo without storing control state only in transcript metadata.

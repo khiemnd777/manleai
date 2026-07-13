@@ -41,10 +41,12 @@ const (
 )
 
 var (
-	ErrValidation       = errors.New("voice validation failed")
-	ErrNotFound         = errors.New("voice record not found")
-	ErrProviderDisabled = errors.New("voice provider is not configured")
-	ErrRouteNotFound    = errors.New("voice route not found")
+	ErrValidation             = errors.New("voice validation failed")
+	ErrNotFound               = errors.New("voice record not found")
+	ErrProviderDisabled       = errors.New("voice provider is not configured")
+	ErrRouteNotFound          = errors.New("voice route not found")
+	ErrTurnModelEmptyOutput   = errors.New("turn model returned no structured output")
+	ErrTurnModelInvalidOutput = errors.New("turn model returned invalid structured output")
 )
 
 type ConversationEngine interface {
@@ -93,6 +95,7 @@ type TurnModelRequest struct {
 	SessionID           string
 	Channel             string
 	CustomerMessage     string
+	ExpectedInput       string
 	SelectedServices    []conversation.ConversationServiceRef
 	CatalogServices     []conversation.ConversationServiceRef
 	SelectedStaff       []conversation.ConversationStaffRef

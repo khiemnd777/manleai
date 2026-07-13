@@ -2,6 +2,7 @@ package voice
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/manleai/ai-receptionist/modules/conversation"
@@ -11,6 +12,7 @@ type fakeActModelProvider struct {
 	configured bool
 	reply      TurnModelReply
 	request    TurnModelRequest
+	err        error
 }
 
 func (f *fakeActModelProvider) Name() string { return ProviderOpenAI }
@@ -21,7 +23,7 @@ func (f *fakeActModelProvider) Configured(ctx context.Context, salonID string) b
 
 func (f *fakeActModelProvider) InterpretTurn(ctx context.Context, req TurnModelRequest) (TurnModelReply, error) {
 	f.request = req
-	return f.reply, nil
+	return f.reply, f.err
 }
 
 func TestGuardedTurnInterpreterMapsStructuredResultWithoutPIIExpansion(t *testing.T) {
@@ -38,6 +40,7 @@ func TestGuardedTurnInterpreterMapsStructuredResultWithoutPIIExpansion(t *testin
 		SessionID:       "session_1",
 		Channel:         conversation.ChannelPhone,
 		CustomerMessage: "Make that a spa pedicure instead.",
+		ExpectedInput:   conversation.ExpectedInputService,
 		SelectedServices: []conversation.ConversationServiceRef{{
 			ServiceID: "service_gel", ServiceName: "Gel Manicure",
 		}},
@@ -52,14 +55,37 @@ func TestGuardedTurnInterpreterMapsStructuredResultWithoutPIIExpansion(t *testin
 	if act.Kind != conversation.ConversationActReplace || act.Source != "structured_ai" || act.Confidence != 0.94 {
 		t.Fatalf("act = %#v", act)
 	}
-	if provider.request.CustomerMessage != "Make that a spa pedicure instead." || provider.request.SalonID != "salon_1" {
+	if provider.request.CustomerMessage != "Make that a spa pedicure instead." || provider.request.SalonID != "salon_1" || provider.request.ExpectedInput != conversation.ExpectedInputService {
 		t.Fatalf("provider request = %#v", provider.request)
 	}
 }
 
 func TestGuardedTurnInterpreterRequiresConfiguredProvider(t *testing.T) {
 	interpreter := NewGuardedTurnInterpreter(&fakeActModelProvider{})
-	if _, err := interpreter.InterpretTurn(context.Background(), conversation.TurnInterpretationRequest{SalonID: "salon_1"}); err != ErrProviderDisabled {
+	if _, err := interpreter.InterpretTurn(context.Background(), conversation.TurnInterpretationRequest{SalonID: "salon_1"}); !errors.Is(err, ErrProviderDisabled) {
 		t.Fatalf("error = %v, want ErrProviderDisabled", err)
+	}
+}
+
+func TestGuardedTurnInterpreterClassifiesProviderFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		outcome string
+	}{
+		{name: "timeout", err: context.DeadlineExceeded, outcome: conversation.TurnInterpreterOutcomeTimeout},
+		{name: "empty", err: ErrTurnModelEmptyOutput, outcome: conversation.TurnInterpreterOutcomeEmptyOutput},
+		{name: "invalid", err: ErrTurnModelInvalidOutput, outcome: conversation.TurnInterpreterOutcomeSchemaInvalid},
+		{name: "provider", err: errors.New("upstream unavailable"), outcome: conversation.TurnInterpreterOutcomeProviderError},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			interpreter := NewGuardedTurnInterpreter(&fakeActModelProvider{configured: true, err: test.err})
+			_, err := interpreter.InterpretTurn(context.Background(), conversation.TurnInterpretationRequest{SalonID: "salon_1"})
+			var typed *conversation.TurnInterpreterError
+			if !errors.As(err, &typed) || typed.Outcome != test.outcome {
+				t.Fatalf("error = %#v, want outcome %q", err, test.outcome)
+			}
+		})
 	}
 }
