@@ -1,7 +1,6 @@
 package voice_openai
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -18,7 +17,7 @@ import (
 )
 
 func TestStreamSpeechEmitsTwilioAudioBeforeProviderResponseCompletes(t *testing.T) {
-	firstHalf, secondHalf := testPCM16WAVParts(t, 24000, 960)
+	firstHalf, secondHalf := testPCM16Parts(1400, 700)
 	release := make(chan struct{})
 	pipeReader, pipeWriter := io.Pipe()
 
@@ -29,6 +28,13 @@ func TestStreamSpeechEmitsTwilioAudioBeforeProviderResponseCompletes(t *testing.
 		SpeechVoice: "alloy",
 	})
 	adapter.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode speech request: %v", err)
+		}
+		if payload["response_format"] != "pcm" {
+			t.Fatalf("response_format = %#v, want pcm", payload["response_format"])
+		}
 		go func() {
 			_, _ = pipeWriter.Write(firstHalf)
 			<-release
@@ -38,7 +44,7 @@ func TestStreamSpeechEmitsTwilioAudioBeforeProviderResponseCompletes(t *testing.
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header: http.Header{
-				"Content-Type": []string{"audio/wav"},
+				"Content-Type": []string{"audio/pcm"},
 				"X-Request-Id": []string{"req_provider_1"},
 			},
 			Body: pipeReader,
@@ -94,27 +100,13 @@ func TestStreamSpeechEmitsTwilioAudioBeforeProviderResponseCompletes(t *testing.
 	}
 }
 
-func testPCM16WAVParts(t *testing.T, sampleRate int, sampleCount int) ([]byte, []byte) {
-	t.Helper()
+func testPCM16Parts(sampleCount int, splitSamples int) ([]byte, []byte) {
 	pcm := make([]byte, sampleCount*2)
 	for i := 0; i < sampleCount; i++ {
 		binary.LittleEndian.PutUint16(pcm[i*2:], uint16(int16((i%200)-100)*100))
 	}
-	var header bytes.Buffer
-	header.WriteString("RIFF")
-	_ = binary.Write(&header, binary.LittleEndian, uint32(36+len(pcm)))
-	header.WriteString("WAVEfmt ")
-	_ = binary.Write(&header, binary.LittleEndian, uint32(16))
-	_ = binary.Write(&header, binary.LittleEndian, uint16(1))
-	_ = binary.Write(&header, binary.LittleEndian, uint16(1))
-	_ = binary.Write(&header, binary.LittleEndian, uint32(sampleRate))
-	_ = binary.Write(&header, binary.LittleEndian, uint32(sampleRate*2))
-	_ = binary.Write(&header, binary.LittleEndian, uint16(2))
-	_ = binary.Write(&header, binary.LittleEndian, uint16(16))
-	header.WriteString("data")
-	_ = binary.Write(&header, binary.LittleEndian, uint32(len(pcm)))
-	firstPCMBytes := 480 * 2
-	return append(header.Bytes(), pcm[:firstPCMBytes]...), pcm[firstPCMBytes:]
+	splitBytes := splitSamples * 2
+	return pcm[:splitBytes], pcm[splitBytes:]
 }
 
 func TestInterpretTurnUsesStrictCatalogBoundMultiActSchema(t *testing.T) {

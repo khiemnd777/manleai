@@ -15,6 +15,7 @@ import (
 )
 
 const (
+	openAISpeechSampleRate = 24000
 	twilioSampleRate       = 8000
 	twilioFrameBytes       = 160 // 20 ms of 8 kHz mu-law audio.
 	maxSpeechResponseBytes = 10 * 1024 * 1024
@@ -41,7 +42,7 @@ func (a *Adapter) StreamSpeech(ctx context.Context, salonID string, input voice.
 		"model":           strings.TrimSpace(cfg.SpeechModel),
 		"voice":           voiceName,
 		"input":           text,
-		"response_format": "wav",
+		"response_format": "pcm",
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -67,7 +68,7 @@ func (a *Adapter) StreamSpeech(ctx context.Context, salonID string, input voice.
 	}
 
 	limited := &io.LimitedReader{R: res.Body, N: maxSpeechResponseBytes + 1}
-	result, err := streamWAVAsTwilioMulaw(ctx, limited, onChunk)
+	result, err := streamPCM24kAsTwilioMulaw(ctx, limited, onChunk)
 	result.ProviderRequestID = strings.TrimSpace(res.Header.Get("x-request-id"))
 	if limited.N == 0 {
 		return result, errors.New("openai speech response exceeded the audio size limit")
@@ -78,78 +79,12 @@ func (a *Adapter) StreamSpeech(ctx context.Context, salonID string, input voice.
 	return result, nil
 }
 
-type wavFormat struct {
-	audioFormat   uint16
-	channels      uint16
-	sampleRate    uint32
-	bitsPerSample uint16
-}
-
-func streamWAVAsTwilioMulaw(ctx context.Context, reader io.Reader, onChunk func(voice.SpeechChunk) error) (voice.SpeechStreamResult, error) {
+func streamPCM24kAsTwilioMulaw(ctx context.Context, reader io.Reader, onChunk func(voice.SpeechChunk) error) (voice.SpeechStreamResult, error) {
 	result := voice.SpeechStreamResult{Encoding: "audio/x-mulaw", SampleRate: twilioSampleRate}
-	header := make([]byte, 12)
-	if _, err := io.ReadFull(reader, header); err != nil {
-		return result, fmt.Errorf("read wav header: %w", err)
-	}
-	if string(header[:4]) != "RIFF" || string(header[8:12]) != "WAVE" {
-		return result, errors.New("speech response is not a RIFF/WAVE stream")
-	}
-
-	var format wavFormat
-	for {
-		chunkHeader := make([]byte, 8)
-		if _, err := io.ReadFull(reader, chunkHeader); err != nil {
-			return result, fmt.Errorf("read wav chunk header: %w", err)
-		}
-		chunkID := string(chunkHeader[:4])
-		chunkSize := binary.LittleEndian.Uint32(chunkHeader[4:])
-		switch chunkID {
-		case "fmt ":
-			if chunkSize < 16 || chunkSize > 4096 {
-				return result, fmt.Errorf("unsupported wav fmt chunk size %d", chunkSize)
-			}
-			data := make([]byte, chunkSize)
-			if _, err := io.ReadFull(reader, data); err != nil {
-				return result, fmt.Errorf("read wav fmt chunk: %w", err)
-			}
-			format = wavFormat{
-				audioFormat:   binary.LittleEndian.Uint16(data[0:2]),
-				channels:      binary.LittleEndian.Uint16(data[2:4]),
-				sampleRate:    binary.LittleEndian.Uint32(data[4:8]),
-				bitsPerSample: binary.LittleEndian.Uint16(data[14:16]),
-			}
-			if chunkSize%2 == 1 {
-				if _, err := io.CopyN(io.Discard, reader, 1); err != nil {
-					return result, err
-				}
-			}
-		case "data":
-			if format.audioFormat != 1 || format.bitsPerSample != 16 || format.channels == 0 || format.sampleRate == 0 {
-				return result, fmt.Errorf("unsupported wav format: encoding=%d channels=%d sample_rate=%d bits=%d", format.audioFormat, format.channels, format.sampleRate, format.bitsPerSample)
-			}
-			dataReader := reader
-			if chunkSize != 0 && chunkSize != ^uint32(0) {
-				dataReader = io.LimitReader(reader, int64(chunkSize))
-			}
-			return streamPCM16AsMulaw(ctx, dataReader, format, result, onChunk)
-		default:
-			if chunkSize > maxSpeechResponseBytes {
-				return result, fmt.Errorf("wav metadata chunk %q is too large", chunkID)
-			}
-			if _, err := io.CopyN(io.Discard, reader, int64(chunkSize)+(int64(chunkSize)&1)); err != nil {
-				return result, fmt.Errorf("skip wav chunk %q: %w", chunkID, err)
-			}
-		}
-	}
-}
-
-func streamPCM16AsMulaw(ctx context.Context, reader io.Reader, format wavFormat, result voice.SpeechStreamResult, onChunk func(voice.SpeechChunk) error) (voice.SpeechStreamResult, error) {
-	frameBytes := int(format.channels) * 2
+	resampler := newSpeechResampler()
 	readBuffer := make([]byte, 4096)
-	pendingPCM := make([]byte, 0, 4096+frameBytes)
+	pendingPCM := make([]byte, 0, len(readBuffer)+1)
 	pendingMulaw := make([]byte, 0, twilioFrameBytes*2)
-	var inputIndex uint64
-	var outputIndex uint64
 
 	emit := func(final bool) error {
 		for len(pendingMulaw) >= twilioFrameBytes || final && len(pendingMulaw) > 0 {
@@ -159,8 +94,7 @@ func streamPCM16AsMulaw(ctx context.Context, reader io.Reader, format wavFormat,
 			}
 			audio := append([]byte(nil), pendingMulaw[:size]...)
 			pendingMulaw = pendingMulaw[size:]
-			chunk := voice.SpeechChunk{Sequence: result.ChunkCount, Audio: audio}
-			if err := onChunk(chunk); err != nil {
+			if err := onChunk(voice.SpeechChunk{Sequence: result.ChunkCount, Audio: audio}); err != nil {
 				return err
 			}
 			result.ChunkCount++
@@ -176,19 +110,12 @@ func streamPCM16AsMulaw(ctx context.Context, reader io.Reader, format wavFormat,
 		n, readErr := reader.Read(readBuffer)
 		if n > 0 {
 			pendingPCM = append(pendingPCM, readBuffer[:n]...)
-			completeBytes := len(pendingPCM) - len(pendingPCM)%frameBytes
-			for offset := 0; offset < completeBytes; offset += frameBytes {
-				var mixed int32
-				for channel := 0; channel < int(format.channels); channel++ {
-					start := offset + channel*2
-					mixed += int32(int16(binary.LittleEndian.Uint16(pendingPCM[start : start+2])))
+			completeBytes := len(pendingPCM) - len(pendingPCM)%2
+			for offset := 0; offset < completeBytes; offset += 2 {
+				sample := int16(binary.LittleEndian.Uint16(pendingPCM[offset : offset+2]))
+				if output, ok := resampler.Push(sample); ok {
+					pendingMulaw = append(pendingMulaw, linearPCMToMulaw(output))
 				}
-				sample := int16(mixed / int32(format.channels))
-				if inputIndex*twilioSampleRate >= outputIndex*uint64(format.sampleRate) {
-					pendingMulaw = append(pendingMulaw, linearPCMToMulaw(sample))
-					outputIndex++
-				}
-				inputIndex++
 			}
 			pendingPCM = append(pendingPCM[:0], pendingPCM[completeBytes:]...)
 			if err := emit(false); err != nil {
@@ -200,7 +127,10 @@ func streamPCM16AsMulaw(ctx context.Context, reader io.Reader, format wavFormat,
 				return result, readErr
 			}
 			if len(pendingPCM) != 0 {
-				return result, errors.New("wav data ended mid-sample")
+				return result, errors.New("PCM data ended mid-sample")
+			}
+			for _, output := range resampler.Flush() {
+				pendingMulaw = append(pendingMulaw, linearPCMToMulaw(output))
 			}
 			if err := emit(true); err != nil {
 				return result, err

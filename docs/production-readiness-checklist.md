@@ -188,7 +188,7 @@
 - [x] Correlate realtime response creation, audio, cancellation, and completion by application request ID and provider response ID; serialize replies through a bounded FIFO and reject stale audio.
 - [x] Fail closed on missing GA transcription confidence, apply profile-aware mean/low-tail/VAD-coherence admission, and keep rejected noise out of conversation state.
 - [x] Retain the legacy buffered-Realtime rollback path that verifies canonical operational facts in the completed audio transcript before release.
-- [x] Add dashboard-selectable low-latency streaming TTS that keeps Realtime input-only, converts provider WAV incrementally to Twilio PCMU 8 kHz, uses a bounded 200 ms startup buffer before continuing playback ahead of Speech completion, flushes short replies safely, and retains buffered Realtime as a legacy rollback mode.
+- [x] Add dashboard-selectable low-latency streaming TTS that keeps Realtime input-only, converts raw provider PCM 24 kHz through a stateful anti-aliasing resampler to Twilio PCMU 8 kHz, sends a bounded 200 ms startup block, then drains a bounded backpressure queue at one 160-byte frame per 20 ms, flushes short replies safely, and retains buffered Realtime as a legacy rollback mode.
 - [x] Cancel streaming speech on barge-in, clear Twilio playback, reject stale generations, and close terminal replies only after a Twilio playback mark or timeout.
 - [x] Expose owner-scoped, PII-free realtime admission and output-validation diagnostics in the Calls timeline without transcript or audio bodies.
 - [x] Keep operational facts deterministic and allow guarded LLM rewriting only for explicitly style-only replies.

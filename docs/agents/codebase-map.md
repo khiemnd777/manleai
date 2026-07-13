@@ -384,13 +384,18 @@ detail rather than part of the event title.
   `salon_integration_configs`.
 - Realtime sequencing owner: `backend/modules/voice_twilio/handler.go`; provider-neutral
   contracts: `backend/modules/voice/types.go`; OpenAI input and output adapters:
-  `backend/modules/voice_openai/realtime.go` and `speech_stream.go`; bounded
+  `backend/modules/voice_openai/realtime.go`, `speech_stream.go`, and
+  `speech_resampler.go`; paced Twilio output buffering:
+  `backend/modules/voice_twilio/speech_playout.go`; bounded
   confidence-rejection recovery policy: `backend/modules/voice_twilio/realtime_recovery.go`.
   The default
   dashboard mode `streaming_tts` uses Realtime only for input, sends backend-approved
-  text to dedicated Speech TTS, converts WAV incrementally to PCMU 8 kHz, holds a
-  bounded 200 ms startup buffer, and then forwards ordered audio to Twilio before
-  stream completion. Replies use a bounded FIFO,
+  text to dedicated Speech TTS, requests raw signed little-endian PCM 24 kHz,
+  applies a stateful anti-aliasing 3:1 resampler, and encodes PCMU 8 kHz. It sends
+  one bounded 200 ms startup block, then drains a bounded backpressure queue on a
+  monotonic 20 ms cadence instead of using provider HTTP chunk timing. Provider
+  completion and Twilio playout completion are separate lifecycle stages. Replies
+  use a bounded FIFO,
   application request IDs, explicit cancellation, Twilio clear/mark, and stale-generation
   rejection. `buffered_realtime` is the legacy fallback that still binds provider
   response IDs and validates the complete output transcript before release. GA input

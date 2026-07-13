@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -270,8 +272,9 @@ func TestStreamingSpeechBuildsStartupBufferBeforeFirstMediaAndStillStreamsBefore
 		release:     make(chan struct{}),
 		finish:      make(chan struct{}),
 		firstChunk:  bytes.Repeat([]byte{0x11}, 160),
-		secondChunk: bytes.Repeat([]byte{0x22}, streamingSpeechStartupBytes-160+80),
+		secondChunk: bytes.Repeat([]byte{0x22}, streamingSpeechStartupBytes-160+streamingSpeechFrameBytes),
 	}
+	ticker := newManualSpeechTicker()
 	service := voice.NewService(store, engine, config.VoiceConfig{
 		Provider: voice.ProviderTwilio,
 		AI: config.VoiceAIConfig{Provider: voice.ProviderOpenAI, OpenAI: config.OpenAIVoiceConfig{
@@ -290,7 +293,7 @@ func TestStreamingSpeechBuildsStartupBufferBeforeFirstMediaAndStillStreamsBefore
 		"MZ123", "CA123", "session_phone", "+13125550101", "+13125550102",
 		"Would you prefer gel or dip powder?", map[string]struct{}{}, nil,
 		realtimeTerminalDrainTimeout, 0, realtimeBackendProgressDelay, time.Now,
-		&streamingSpeechOutput{salonID: "salon_1"},
+		&streamingSpeechOutput{salonID: "salon_1", tickerFactory: func(time.Duration) streamingSpeechTicker { return ticker }},
 	)
 
 	select {
@@ -314,6 +317,8 @@ func TestStreamingSpeechBuildsStartupBufferBeforeFirstMediaAndStillStreamsBefore
 	if len(decoded) != streamingSpeechStartupBytes || !bytes.Equal(decoded[:160], streamer.firstChunk) || !bytes.Equal(decoded[160:], streamer.secondChunk[:startupSecondBytes]) {
 		t.Fatalf("first media bytes = %d, want ordered %d-byte startup buffer", len(decoded), streamingSpeechStartupBytes)
 	}
+	assertNoWrite(t, writes)
+	ticker.Tick()
 	got = waitForWrite(t, writes)
 	media, ok = got.(twilioOutboundMedia)
 	if !ok {
@@ -326,6 +331,7 @@ func TestStreamingSpeechBuildsStartupBufferBeforeFirstMediaAndStillStreamsBefore
 	assertNoSpeak(t, realtime)
 	waitForTimingStages(t, store, []string{"tts_first_provider_chunk", "tts_startup_buffer_ready", "twilio_first_media_sent"})
 	close(streamer.finish)
+	waitForTimingStages(t, store, []string{"tts_stream_done", "tts_playout_done"})
 }
 
 func TestStreamingSpeechFlushesShortReplyWhenStreamCompletesBeforeStartupTarget(t *testing.T) {
@@ -492,6 +498,315 @@ func TestStreamingSpeechBargeInClearsTwilioAndCancelsSpeech(t *testing.T) {
 		t.Fatal("barge-in did not cancel streaming speech")
 	}
 	assertNoClose(t, closed)
+}
+
+func TestStreamingSpeechCountsProviderGapWithoutBurstingCatchUpFrames(t *testing.T) {
+	adapter, _, store, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Is morning or afternoon better for you?", conversation.StatusActive, conversation.OutcomeCollecting))
+	streamer := &fakeStreamingSpeechProvider{
+		started:     make(chan struct{}),
+		release:     make(chan struct{}),
+		finish:      make(chan struct{}),
+		secondSent:  make(chan struct{}),
+		firstChunk:  bytes.Repeat([]byte{0x61}, streamingSpeechStartupBytes),
+		secondChunk: bytes.Repeat([]byte{0x62}, streamingSpeechFrameBytes),
+	}
+	ticker := newManualSpeechTicker()
+	service := voice.NewService(store, engine, config.VoiceConfig{
+		Provider: voice.ProviderTwilio,
+		AI:       config.VoiceAIConfig{Provider: voice.ProviderOpenAI, OpenAI: config.OpenAIVoiceConfig{SpeechVoice: "alloy"}},
+	}, voice.AIProviders{StreamingTTS: streamer})
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes := make(chan any, 8)
+
+	go handler.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
+		ctx, cancel, closeStreamRecorder(make(chan string, 1)), realtime,
+		func(value any) error { writes <- value; return nil },
+		"MZ123", "CA123", "session_phone", "+13125550101", "+13125550102",
+		"Is morning or afternoon better for you?", map[string]struct{}{}, nil,
+		realtimeTerminalDrainTimeout, 0, realtimeBackendProgressDelay, time.Now,
+		&streamingSpeechOutput{salonID: "salon_1", tickerFactory: func(time.Duration) streamingSpeechTicker { return ticker }},
+	)
+
+	_ = waitForWrite(t, writes)
+	ticker.Tick()
+	assertNoWrite(t, writes)
+	close(streamer.release)
+	select {
+	case <-streamer.secondSent:
+	case <-time.After(time.Second):
+		t.Fatal("second provider chunk was not accepted")
+	}
+	assertNoWrite(t, writes)
+	ticker.Tick()
+	media, ok := waitForWrite(t, writes).(twilioOutboundMedia)
+	if !ok {
+		t.Fatalf("paced write should be media")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(media.Media.Payload)
+	if err != nil || !bytes.Equal(decoded, streamer.secondChunk) {
+		t.Fatalf("paced provider-gap frame = %d bytes, err=%v", len(decoded), err)
+	}
+	close(streamer.finish)
+	waitForTimingStages(t, store, []string{"tts_stream_done", "tts_playout_done"})
+	var streamDone, playoutDone map[string]string
+	for _, event := range store.eventsSnapshot() {
+		if event.Payload["stage"] == "tts_stream_done" {
+			streamDone = event.Payload
+		}
+		if event.Payload["stage"] == "tts_playout_done" {
+			playoutDone = event.Payload
+		}
+	}
+	if streamDone["provider_gap_max_ms"] == "" || streamDone["provider_gap_max_ms"] == "0" {
+		t.Fatalf("provider gap diagnostics = %#v", streamDone)
+	}
+	if playoutDone["underrun_count"] == "" || playoutDone["underrun_count"] == "0" {
+		t.Fatalf("playout underrun diagnostics = %#v", playoutDone)
+	}
+}
+
+func TestStreamingSpeechBargeInBeforeStartupDiscardsBufferedAudio(t *testing.T) {
+	adapter, _, store, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Which polish color family do you prefer?", conversation.StatusActive, conversation.OutcomeCollecting))
+	streamer := &fakeStreamingSpeechProvider{
+		started:     make(chan struct{}),
+		release:     make(chan struct{}),
+		canceled:    make(chan struct{}, 1),
+		firstChunk:  bytes.Repeat([]byte{0x71}, streamingSpeechFrameBytes),
+		secondChunk: []byte{},
+	}
+	service := voice.NewService(store, engine, config.VoiceConfig{
+		Provider: voice.ProviderTwilio,
+		AI:       config.VoiceAIConfig{Provider: voice.ProviderOpenAI, OpenAI: config.OpenAIVoiceConfig{SpeechVoice: "alloy"}},
+	}, voice.AIProviders{StreamingTTS: streamer})
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes := make(chan any, 8)
+
+	go handler.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
+		ctx, cancel, closeStreamRecorder(make(chan string, 1)), realtime,
+		func(value any) error { writes <- value; return nil },
+		"MZ123", "CA123", "session_phone", "+13125550101", "+13125550102",
+		"Which polish color family do you prefer?", map[string]struct{}{}, nil,
+		realtimeTerminalDrainTimeout, 0, realtimeBackendProgressDelay, time.Now,
+		&streamingSpeechOutput{salonID: "salon_1"},
+	)
+
+	select {
+	case <-streamer.started:
+	case <-time.After(time.Second):
+		t.Fatal("streaming speech did not buffer its first frame")
+	}
+	assertNoWrite(t, writes)
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStarted, AudioStartMS: 40}
+	if got := waitForWrite(t, writes); got != (twilioClearMessage{Event: "clear", StreamSid: "MZ123"}) {
+		t.Fatalf("pre-start barge-in write = %#v, want Twilio clear", got)
+	}
+	select {
+	case <-streamer.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("pre-start barge-in did not cancel streaming speech")
+	}
+	assertNoWrite(t, writes)
+}
+
+func TestStreamingSpeechBargeInAfterProviderDoneDiscardsQueuedFrames(t *testing.T) {
+	adapter, _, store, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("I can offer a basic or deluxe package.", conversation.StatusActive, conversation.OutcomeCollecting))
+	streamer := &immediateStreamingSpeechProvider{calls: make(chan string, 1)}
+	ticker := newManualSpeechTicker()
+	service := voice.NewService(store, engine, config.VoiceConfig{
+		Provider: voice.ProviderTwilio,
+		AI:       config.VoiceAIConfig{Provider: voice.ProviderOpenAI, OpenAI: config.OpenAIVoiceConfig{SpeechVoice: "alloy"}},
+	}, voice.AIProviders{StreamingTTS: streamer})
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes := make(chan any, 8)
+
+	go handler.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
+		ctx, cancel, closeStreamRecorder(make(chan string, 1)), realtime,
+		func(value any) error { writes <- value; return nil },
+		"MZ123", "CA123", "session_phone", "+13125550101", "+13125550102",
+		"I can offer a basic or deluxe package.", map[string]struct{}{}, nil,
+		realtimeTerminalDrainTimeout, 0, realtimeBackendProgressDelay, time.Now,
+		&streamingSpeechOutput{salonID: "salon_1", tickerFactory: func(time.Duration) streamingSpeechTicker { return ticker }},
+	)
+
+	_ = waitForSpeechProviderCall(t, streamer.calls)
+	_ = waitForWrite(t, writes)
+	waitForTimingStages(t, store, []string{"tts_stream_done"})
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStarted, AudioStartMS: 120}
+	if got := waitForWrite(t, writes); got != (twilioClearMessage{Event: "clear", StreamSid: "MZ123"}) {
+		t.Fatalf("barge-in write = %#v, want Twilio clear", got)
+	}
+	ticker.Tick()
+	waitForTimingStages(t, store, []string{"tts_playout_done"})
+	assertNoWrite(t, writes)
+}
+
+func TestStreamingSpeechAppliesBackpressureAtBoundedQueue(t *testing.T) {
+	adapter, _, store, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Let me describe the available nail art packages.", conversation.StatusActive, conversation.OutcomeCollecting))
+	streamer := &burstStreamingSpeechProvider{frameCount: 400, started: make(chan struct{})}
+	ticker := newManualSpeechTicker()
+	service := voice.NewService(store, engine, config.VoiceConfig{
+		Provider: voice.ProviderTwilio,
+		AI:       config.VoiceAIConfig{Provider: voice.ProviderOpenAI, OpenAI: config.OpenAIVoiceConfig{SpeechVoice: "alloy"}},
+	}, voice.AIProviders{StreamingTTS: streamer})
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes := make(chan any, 8)
+
+	go handler.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
+		ctx, cancel, closeStreamRecorder(make(chan string, 1)), realtime,
+		func(value any) error { writes <- value; return nil },
+		"MZ123", "CA123", "session_phone", "+13125550101", "+13125550102",
+		"Let me describe the available nail art packages.", map[string]struct{}{}, nil,
+		realtimeTerminalDrainTimeout, 0, realtimeBackendProgressDelay, time.Now,
+		&streamingSpeechOutput{salonID: "salon_1", tickerFactory: func(time.Duration) streamingSpeechTicker { return ticker }},
+	)
+
+	_ = waitForWrite(t, writes)
+	deadline := time.Now().Add(time.Second)
+	previous := int32(-1)
+	stable := 0
+	for time.Now().Before(deadline) {
+		current := streamer.delivered.Load()
+		if current == previous {
+			stable++
+			if stable >= 5 {
+				break
+			}
+		} else {
+			previous = current
+			stable = 0
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	delivered := streamer.delivered.Load()
+	if delivered >= int32(streamer.frameCount) {
+		t.Fatalf("provider delivered all %d frames without backpressure", delivered)
+	}
+	if delivered < int32(streamingSpeechQueueFrameLimit) {
+		t.Fatalf("backpressure engaged before bounded playout queue filled: %d", delivered)
+	}
+}
+
+func TestStreamingSpeechKeepsRepliesFIFOThroughPlayoutDrain(t *testing.T) {
+	adapter, _, store, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Would you like the same technician?", conversation.StatusActive, conversation.OutcomeCollecting))
+	engine.messageCompleted = make(chan struct{}, 1)
+	streamer := &immediateStreamingSpeechProvider{calls: make(chan string, 4)}
+	tickers := make(chan *manualSpeechTicker, 4)
+	service := voice.NewService(store, engine, config.VoiceConfig{
+		Provider: voice.ProviderTwilio,
+		Twilio:   config.TwilioVoiceConfig{AuthToken: "secret"},
+		AI:       config.VoiceAIConfig{Provider: voice.ProviderOpenAI, OpenAI: config.OpenAIVoiceConfig{SpeechVoice: "alloy"}},
+	}, voice.AIProviders{StreamingTTS: streamer})
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes := make(chan any, 16)
+
+	go handler.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
+		ctx, cancel, closeStreamRecorder(make(chan string, 1)), realtime,
+		func(value any) error { writes <- value; return nil },
+		"MZ123", "CA123", "session_phone", "+13125550101", "+13125550102",
+		"I found two openings for Thursday.", map[string]struct{}{}, nil,
+		realtimeTerminalDrainTimeout, 0, realtimeBackendProgressDelay, time.Now,
+		&streamingSpeechOutput{salonID: "salon_1", tickerFactory: func(time.Duration) streamingSpeechTicker {
+			ticker := newManualSpeechTicker()
+			tickers <- ticker
+			return ticker
+		}},
+	)
+
+	if first := waitForSpeechProviderCall(t, streamer.calls); first != "I found two openings for Thursday." {
+		t.Fatalf("first speech call = %q", first)
+	}
+	_ = waitForWrite(t, writes)
+	firstTicker := waitForManualTicker(t, tickers)
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_fifo_1", Transcript: "The later one works."}
+	select {
+	case <-engine.messageCompleted:
+	case <-time.After(time.Second):
+		t.Fatal("backend reply did not complete")
+	}
+	select {
+	case call := <-streamer.calls:
+		t.Fatalf("next speech reply started before prior playout drained: %q", call)
+	case <-time.After(100 * time.Millisecond):
+	}
+	assertNoWrite(t, writes)
+	firstTicker.Tick()
+	_ = waitForWrite(t, writes)
+	if second := waitForSpeechProviderCall(t, streamer.calls); second != "Would you like the same technician?" {
+		t.Fatalf("second speech call = %q", second)
+	}
+}
+
+func TestStreamingSpeechWritesTerminalMarkOnlyAfterPlayoutDrain(t *testing.T) {
+	completed := phoneSessionWithAIReply("Your appointment is confirmed for Friday at 2:00 PM. Thank you, goodbye.", conversation.StatusCompleted, conversation.OutcomeBookingConfirmed)
+	completed.BookingAttemptID = "attempt_streaming_terminal"
+	completed.AppointmentID = "appointment_streaming_terminal"
+	adapter, _, store, engine := testTwilioRuntimeWithStore(completed)
+	streamer := &immediateStreamingSpeechProvider{calls: make(chan string, 2)}
+	tickers := make(chan *manualSpeechTicker, 2)
+	service := voice.NewService(store, engine, config.VoiceConfig{
+		Provider: voice.ProviderTwilio,
+		Twilio:   config.TwilioVoiceConfig{AuthToken: "secret"},
+		AI:       config.VoiceAIConfig{Provider: voice.ProviderOpenAI, OpenAI: config.OpenAIVoiceConfig{SpeechVoice: "alloy"}},
+	}, voice.AIProviders{StreamingTTS: streamer})
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	closed := make(chan string, 1)
+	writes := make(chan any, 16)
+	marks := make(chan string, 2)
+
+	go handler.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
+		ctx, cancel, closeStreamRecorder(closed), realtime,
+		func(value any) error { writes <- value; return nil },
+		"MZ123", "CA123", "session_phone", "+13125550101", "+13125550102",
+		"", map[string]struct{}{}, marks,
+		realtimeTerminalDrainTimeout, 0, realtimeBackendProgressDelay, time.Now,
+		&streamingSpeechOutput{salonID: "salon_1", tickerFactory: func(time.Duration) streamingSpeechTicker {
+			ticker := newManualSpeechTicker()
+			tickers <- ticker
+			return ticker
+		}},
+	)
+
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_terminal_1", Transcript: "Please book it."}
+	if call := waitForSpeechProviderCall(t, streamer.calls); !strings.Contains(call, "Thank you, goodbye") {
+		t.Fatalf("terminal speech call = %q", call)
+	}
+	if _, ok := waitForWrite(t, writes).(twilioOutboundMedia); !ok {
+		t.Fatal("terminal startup write should be media")
+	}
+	ticker := waitForManualTicker(t, tickers)
+	assertNoWrite(t, writes)
+	ticker.Tick()
+	if _, ok := waitForWrite(t, writes).(twilioOutboundMedia); !ok {
+		t.Fatal("terminal paced frame should be media")
+	}
+	mark, ok := waitForWrite(t, writes).(twilioOutboundMark)
+	if !ok || mark.Mark.Name == "" {
+		t.Fatalf("terminal write after drain = %#v, want mark", mark)
+	}
+	assertNoClose(t, closed)
+	marks <- mark.Mark.Name
+	if reason := waitForClose(t, closed); reason != "response_complete" {
+		t.Fatalf("close reason = %q", reason)
+	}
+	waitForTimingStages(t, store, []string{"tts_stream_done", "tts_playout_done", "twilio_playback_done"})
 }
 
 func TestForwardRealtimeEventsKeepsAllBackendRepliesInFIFOOrder(t *testing.T) {
@@ -1515,9 +1830,30 @@ type fakeStreamingSpeechProvider struct {
 	release     chan struct{}
 	finish      chan struct{}
 	canceled    chan struct{}
+	secondSent  chan struct{}
 	firstChunk  []byte
 	secondChunk []byte
 	streamErr   error
+}
+
+type manualSpeechTicker struct {
+	ticks   chan time.Time
+	stopped chan struct{}
+	once    sync.Once
+}
+
+func newManualSpeechTicker() *manualSpeechTicker {
+	return &manualSpeechTicker{ticks: make(chan time.Time, 512), stopped: make(chan struct{})}
+}
+
+func (t *manualSpeechTicker) C() <-chan time.Time { return t.ticks }
+
+func (t *manualSpeechTicker) Stop() {
+	t.once.Do(func() { close(t.stopped) })
+}
+
+func (t *manualSpeechTicker) Tick() {
+	t.ticks <- time.Now()
 }
 
 func (f *fakeStreamingSpeechProvider) Name() string { return voice.ProviderOpenAI }
@@ -1555,6 +1891,9 @@ func (f *fakeStreamingSpeechProvider) StreamSpeech(ctx context.Context, _ string
 		chunkCount++
 		audioBytes += len(secondChunk)
 	}
+	if f.secondSent != nil {
+		close(f.secondSent)
+	}
 	if err := f.waitForSpeechTestSignal(ctx, f.finish); err != nil {
 		return voice.SpeechStreamResult{}, err
 	}
@@ -1563,6 +1902,66 @@ func (f *fakeStreamingSpeechProvider) StreamSpeech(ctx context.Context, _ string
 		return result, f.streamErr
 	}
 	return result, nil
+}
+
+type burstStreamingSpeechProvider struct {
+	frameCount int
+	started    chan struct{}
+	delivered  atomic.Int32
+}
+
+type immediateStreamingSpeechProvider struct {
+	calls     chan string
+	callCount atomic.Int32
+}
+
+func (f *immediateStreamingSpeechProvider) Name() string { return voice.ProviderOpenAI }
+
+func (f *immediateStreamingSpeechProvider) Configured(context.Context, string) bool { return true }
+
+func (f *immediateStreamingSpeechProvider) StreamSpeech(_ context.Context, _ string, input voice.SpeechStreamRequest, onChunk func(voice.SpeechChunk) error) (voice.SpeechStreamResult, error) {
+	callNumber := f.callCount.Add(1)
+	if f.calls != nil {
+		f.calls <- input.Text
+	}
+	startup := bytes.Repeat([]byte{byte(0x30 + callNumber)}, streamingSpeechStartupBytes)
+	trailing := bytes.Repeat([]byte{byte(0x60 + callNumber)}, streamingSpeechFrameBytes)
+	if err := onChunk(voice.SpeechChunk{Sequence: 0, Audio: startup}); err != nil {
+		return voice.SpeechStreamResult{}, err
+	}
+	if err := onChunk(voice.SpeechChunk{Sequence: 1, Audio: trailing}); err != nil {
+		return voice.SpeechStreamResult{}, err
+	}
+	return voice.SpeechStreamResult{
+		ProviderRequestID: "provider_immediate_" + strconv.FormatInt(int64(callNumber), 10),
+		Encoding:          "audio/x-mulaw",
+		SampleRate:        8000,
+		ChunkCount:        2,
+		AudioBytes:        len(startup) + len(trailing),
+	}, nil
+}
+
+func (f *burstStreamingSpeechProvider) Name() string { return voice.ProviderOpenAI }
+
+func (f *burstStreamingSpeechProvider) Configured(context.Context, string) bool { return true }
+
+func (f *burstStreamingSpeechProvider) StreamSpeech(ctx context.Context, _ string, _ voice.SpeechStreamRequest, onChunk func(voice.SpeechChunk) error) (voice.SpeechStreamResult, error) {
+	for index := 0; index < f.frameCount; index++ {
+		if err := onChunk(voice.SpeechChunk{Sequence: index, Audio: bytes.Repeat([]byte{byte(index % 251)}, streamingSpeechFrameBytes)}); err != nil {
+			return voice.SpeechStreamResult{}, err
+		}
+		f.delivered.Add(1)
+		if index == 0 && f.started != nil {
+			close(f.started)
+		}
+	}
+	return voice.SpeechStreamResult{
+		ProviderRequestID: "provider_burst_1",
+		Encoding:          "audio/x-mulaw",
+		SampleRate:        8000,
+		ChunkCount:        f.frameCount,
+		AudioBytes:        f.frameCount * streamingSpeechFrameBytes,
+	}, nil
 }
 
 func (f *fakeStreamingSpeechProvider) waitForSpeechTestSignal(ctx context.Context, signal <-chan struct{}) error {
@@ -1734,6 +2133,28 @@ func waitForWrite(t *testing.T, writes <-chan any) any {
 		return got
 	case <-time.After(time.Second):
 		t.Fatalf("timed out waiting for websocket write")
+		return nil
+	}
+}
+
+func waitForSpeechProviderCall(t *testing.T, calls <-chan string) string {
+	t.Helper()
+	select {
+	case call := <-calls:
+		return call
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for speech provider call")
+		return ""
+	}
+}
+
+func waitForManualTicker(t *testing.T, tickers <-chan *manualSpeechTicker) *manualSpeechTicker {
+	t.Helper()
+	select {
+	case ticker := <-tickers:
+		return ticker
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for playout ticker")
 		return nil
 	}
 }

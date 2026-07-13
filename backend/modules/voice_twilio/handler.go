@@ -515,10 +515,28 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	responseSequence := 0
 	streamingSpeech := streamingOutput != nil
 	requireResponseIdentity := !streamingSpeech && realtime.RequiresResponseIdentity()
-	speechEvents := make(chan streamingSpeechEvent, 64)
+	speechEvents := make(chan streamingSpeechEvent, streamingSpeechEventBufferLimit)
 	var activeSpeechCancel context.CancelFunc
 	activeSpeechGeneration := 0
-	streamingStartupAudio := make([]byte, 0, streamingSpeechStartupBytes)
+	streamingPlayout := newStreamingSpeechPlayout()
+	var streamingPlayoutTicker streamingSpeechTicker
+	streamingPlayoutTicks := (<-chan time.Time)(nil)
+	streamingTickerFactory := newRealtimeSpeechTicker
+	if streamingOutput != nil && streamingOutput.tickerFactory != nil {
+		streamingTickerFactory = streamingOutput.tickerFactory
+	}
+	speechProviderDone := false
+	speechProviderResult := voice.SpeechStreamResult{}
+	speechRequestStartedAt := time.Time{}
+	firstSpeechChunkAt := time.Time{}
+	lastSpeechChunkAt := time.Time{}
+	maxSpeechProviderGap := time.Duration(0)
+	playoutAudioBytes := 0
+	playoutFrameCount := 0
+	playoutBatchCount := 0
+	playoutUnderrunCount := 0
+	playoutWriteTotal := time.Duration(0)
+	playoutWriteMax := time.Duration(0)
 	firstSpeechChunkSeen := false
 	transcriptPolicy := normalizedRealtimeTranscriptPolicy(realtime.TranscriptPolicy())
 	inputRecovery := realtimeInputRecovery{}
@@ -529,6 +547,21 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	}
 	if progressDelay <= 0 {
 		progressDelay = realtimeBackendProgressDelay
+	}
+	stopStreamingPlayoutTicker := func() {
+		if streamingPlayoutTicker != nil {
+			streamingPlayoutTicker.Stop()
+			streamingPlayoutTicker = nil
+		}
+		streamingPlayoutTicks = nil
+	}
+	defer stopStreamingPlayoutTicker()
+	startStreamingPlayoutTicker := func() {
+		if streamingPlayoutTicker != nil {
+			return
+		}
+		streamingPlayoutTicker = streamingTickerFactory(streamingSpeechFrameDuration)
+		streamingPlayoutTicks = streamingPlayoutTicker.C()
 	}
 	recordBackendClose := func(reason string) {
 		reason = strings.TrimSpace(reason)
@@ -622,6 +655,10 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 			if streamingSpeech && responseActive && activeReply.message == realtimeBackendProgressReply && activeSpeechCancel != nil {
 				activeInterrupted = true
 				suppressAudioUntilDone = true
+				streamingPlayout.Clear()
+				if !speechProviderDone {
+					stopStreamingPlayoutTicker()
+				}
 				activeSpeechCancel()
 				if streamSID != "" {
 					_ = writeJSON(twilioClearMessage{Event: "clear", StreamSid: streamSID})
@@ -679,7 +716,20 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 		activeInterrupted = false
 		playbackAudioStartedAt = time.Time{}
 		suppressAudioUntilDone = false
-		streamingStartupAudio = streamingStartupAudio[:0]
+		stopStreamingPlayoutTicker()
+		streamingPlayout = newStreamingSpeechPlayout()
+		speechProviderDone = false
+		speechProviderResult = voice.SpeechStreamResult{}
+		speechRequestStartedAt = time.Now()
+		firstSpeechChunkAt = time.Time{}
+		lastSpeechChunkAt = time.Time{}
+		maxSpeechProviderGap = 0
+		playoutAudioBytes = 0
+		playoutFrameCount = 0
+		playoutBatchCount = 0
+		playoutUnderrunCount = 0
+		playoutWriteTotal = 0
+		playoutWriteMax = 0
 		firstSpeechChunkSeen = false
 		if streamingSpeech {
 			activeSpeechGeneration++
@@ -687,17 +737,40 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 			speechCtx, speechCancel := context.WithCancel(ctx)
 			activeSpeechCancel = speechCancel
 			go func(reply realtimeQueuedReply, generation int) {
+				producerBackpressureTotal := time.Duration(0)
+				producerBackpressureMax := time.Duration(0)
+				producerBackpressureEvents := 0
 				result, err := h.service.StreamSpeech(speechCtx, streamingOutput.salonID, reply.requestID, reply.message, func(chunk voice.SpeechChunk) error {
-					event := streamingSpeechEvent{generation: generation, requestID: reply.requestID, chunk: &chunk, arrivedAt: time.Now()}
-					select {
-					case speechEvents <- event:
-						return nil
-					case <-speechCtx.Done():
-						return speechCtx.Err()
+					arrivedAt := time.Now()
+					for offset := 0; offset < len(chunk.Audio); offset += streamingSpeechFrameBytes {
+						end := offset + streamingSpeechFrameBytes
+						if end > len(chunk.Audio) {
+							end = len(chunk.Audio)
+						}
+						frame := voice.SpeechChunk{Sequence: chunk.Sequence, Audio: append([]byte(nil), chunk.Audio[offset:end]...)}
+						event := streamingSpeechEvent{generation: generation, requestID: reply.requestID, chunk: &frame, arrivedAt: arrivedAt}
+						waitStartedAt := time.Now()
+						select {
+						case speechEvents <- event:
+							waitDuration := time.Since(waitStartedAt)
+							producerBackpressureTotal += waitDuration
+							if waitDuration > producerBackpressureMax {
+								producerBackpressureMax = waitDuration
+							}
+							if waitDuration >= time.Millisecond {
+								producerBackpressureEvents++
+							}
+						case <-speechCtx.Done():
+							return speechCtx.Err()
+						}
 					}
+					return nil
 				})
 				select {
-				case speechEvents <- streamingSpeechEvent{generation: generation, requestID: reply.requestID, result: result, err: err, done: true}:
+				case speechEvents <- streamingSpeechEvent{
+					generation: generation, requestID: reply.requestID, result: result, err: err, done: true, arrivedAt: time.Now(),
+					backpressureTotal: producerBackpressureTotal, backpressureMax: producerBackpressureMax, backpressureEvents: producerBackpressureEvents,
+				}:
 				case <-ctx.Done():
 				}
 			}(reply, generation)
@@ -769,7 +842,14 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 			return true
 		}
 		payload := base64.StdEncoding.EncodeToString(audio)
-		if err := writeJSON(twilioOutboundMedia{Event: "media", StreamSid: streamSID, Media: twilioOutboundMediaPayload{Payload: payload}}); err != nil {
+		writeStartedAt := time.Now()
+		err := writeJSON(twilioOutboundMedia{Event: "media", StreamSid: streamSID, Media: twilioOutboundMediaPayload{Payload: payload}})
+		writeDuration := time.Since(writeStartedAt)
+		playoutWriteTotal += writeDuration
+		if writeDuration > playoutWriteMax {
+			playoutWriteMax = writeDuration
+		}
+		if err != nil {
 			_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "twilio_media_write", err)
 			if activeSpeechCancel != nil {
 				activeSpeechCancel()
@@ -777,36 +857,87 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 			closeStream("twilio_media_write_failed")
 			return false
 		}
+		playoutBatchCount++
+		playoutAudioBytes += len(audio)
+		playoutFrameCount += (len(audio) + streamingSpeechFrameBytes - 1) / streamingSpeechFrameBytes
 		activeAudioSent = true
 		if playbackAudioStartedAt.IsZero() {
 			playbackAudioStartedAt = now()
 			_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "twilio_first_media_sent", activeResponseCreatedAt, map[string]string{
-				"request_id":     activeReply.requestID,
-				"audio_encoding": "audio/x-mulaw",
-				"sample_rate":    strconv.Itoa(8000),
-				"audio_bytes":    strconv.Itoa(len(audio)),
+				"request_id":        activeReply.requestID,
+				"audio_encoding":    "audio/x-mulaw",
+				"sample_rate":       strconv.Itoa(streamingSpeechSampleRate),
+				"input_sample_rate": strconv.Itoa(streamingSpeechInputSampleRate),
+				"audio_bytes":       strconv.Itoa(len(audio)),
 			})
 		}
 		return true
 	}
 
-	flushStreamingStartupAudio := func(reason string) bool {
-		if activeAudioSent || len(streamingStartupAudio) == 0 {
+	sendStreamingStartupAudio := func(audio []byte, reason string) bool {
+		if len(audio) == 0 {
 			return true
 		}
-		audio := append([]byte(nil), streamingStartupAudio...)
-		streamingStartupAudio = streamingStartupAudio[:0]
 		_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "tts_startup_buffer_ready", activeResponseCreatedAt, map[string]string{
 			"request_id":  activeReply.requestID,
 			"audio_bytes": strconv.Itoa(len(audio)),
 			"reason":      reason,
 		})
-		return sendStreamingAudio(audio)
+		if !sendStreamingAudio(audio) {
+			return false
+		}
+		if !speechProviderDone || !streamingPlayout.Empty() {
+			startStreamingPlayoutTicker()
+		}
+		return true
+	}
+
+	completeStreamingReply := func() bool {
+		completedInterrupted := activeInterrupted
+		completedCloseAfter := activeCloseAfter
+		completedAudioSent := activeAudioSent
+		hadPendingReply := len(pendingReplies) > 0
+		_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "tts_playout_done", activeResponseCreatedAt, map[string]string{
+			"request_id":          activeReply.requestID,
+			"provider_request_id": speechProviderResult.ProviderRequestID,
+			"interrupted":         strconv.FormatBool(completedInterrupted),
+			"close_after":         strconv.FormatBool(completedCloseAfter),
+			"playout_duration_ms": strconv.Itoa(playoutAudioBytes * 1000 / streamingSpeechSampleRate),
+			"playout_frame_count": strconv.Itoa(playoutFrameCount),
+			"playout_batch_count": strconv.Itoa(playoutBatchCount),
+			"queue_max_frames":    strconv.Itoa(streamingPlayout.MaxObservedFrames()),
+			"queue_max_ms":        strconv.Itoa(streamingPlayout.MaxObservedFrames() * int(streamingSpeechFrameDuration/time.Millisecond)),
+			"underrun_count":      strconv.Itoa(playoutUnderrunCount),
+			"write_max_ms":        strconv.FormatInt(playoutWriteMax.Milliseconds(), 10),
+			"write_total_ms":      strconv.FormatInt(playoutWriteTotal.Milliseconds(), 10),
+		})
+		stopStreamingPlayoutTicker()
+		if activeSpeechCancel != nil {
+			activeSpeechCancel()
+		}
+		responseActive = false
+		activeReply = realtimeQueuedReply{}
+		activeCloseAfter = false
+		activeAudioSent = false
+		activeInterrupted = false
+		activeResponseCreatedAt = time.Time{}
+		activeSpeechCancel = nil
+		suppressAudioUntilDone = false
+		streamingPlayout.Clear()
+		firstSpeechChunkSeen = false
+		speechProviderDone = false
+		if !flushPendingReply() {
+			return false
+		}
+		if !hadPendingReply && completedCloseAfter && !completedInterrupted {
+			return beginTerminalCloseDrain(completedAudioSent)
+		}
+		return true
 	}
 
 	shouldInterruptPlayback := func() bool {
 		if playbackAudioStartedAt.IsZero() {
-			return false
+			return streamingSpeech && responseActive
 		}
 		if bargeInGuard <= 0 {
 			return true
@@ -819,6 +950,10 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	}
 
 	for {
+		speechEventInput := (<-chan streamingSpeechEvent)(speechEvents)
+		if streamingSpeech && streamingPlayout.Full() {
+			speechEventInput = nil
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -857,7 +992,33 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 			if !handleTurnResult(result) {
 				return
 			}
-		case streamed := <-speechEvents:
+		case <-streamingPlayoutTicks:
+			if !streamingSpeech {
+				continue
+			}
+			if suppressAudioUntilDone {
+				if speechProviderDone && !completeStreamingReply() {
+					return
+				}
+				continue
+			}
+			frame := streamingPlayout.Pop()
+			if len(frame) == 0 {
+				if !speechProviderDone {
+					playoutUnderrunCount++
+				}
+				if speechProviderDone && streamingPlayout.Empty() && !completeStreamingReply() {
+					return
+				}
+				continue
+			}
+			if !sendStreamingAudio(frame) {
+				return
+			}
+			if speechProviderDone && streamingPlayout.Empty() && !completeStreamingReply() {
+				return
+			}
+		case streamed := <-speechEventInput:
 			if !streamingSpeech || streamed.generation != activeSpeechGeneration || streamed.requestID != activeReply.requestID {
 				continue
 			}
@@ -868,32 +1029,24 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 				if streamSID == "" {
 					continue
 				}
+				if !lastSpeechChunkAt.IsZero() && streamed.arrivedAt.After(lastSpeechChunkAt) {
+					if gap := streamed.arrivedAt.Sub(lastSpeechChunkAt); gap > maxSpeechProviderGap {
+						maxSpeechProviderGap = gap
+					}
+				}
+				lastSpeechChunkAt = streamed.arrivedAt
 				if !firstSpeechChunkSeen {
 					firstSpeechChunkSeen = true
+					firstSpeechChunkAt = streamed.arrivedAt
 					_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "tts_first_provider_chunk", time.Time{}, map[string]string{
 						"request_id":     streamed.requestID,
 						"audio_encoding": "audio/x-mulaw",
-						"sample_rate":    strconv.Itoa(8000),
+						"sample_rate":    strconv.Itoa(streamingSpeechSampleRate),
 						"audio_bytes":    strconv.Itoa(len(streamed.chunk.Audio)),
 						"duration_ms":    durationMilliseconds(activeResponseCreatedAt, streamed.arrivedAt),
 					})
 				}
-				if !activeAudioSent {
-					needed := streamingSpeechStartupBytes - len(streamingStartupAudio)
-					if len(streamed.chunk.Audio) < needed {
-						streamingStartupAudio = append(streamingStartupAudio, streamed.chunk.Audio...)
-						continue
-					}
-					streamingStartupAudio = append(streamingStartupAudio, streamed.chunk.Audio[:needed]...)
-					if !flushStreamingStartupAudio("target_reached") {
-						return
-					}
-					if len(streamed.chunk.Audio) > needed && !sendStreamingAudio(streamed.chunk.Audio[needed:]) {
-						return
-					}
-					continue
-				}
-				if !sendStreamingAudio(streamed.chunk.Audio) {
+				if startup := streamingPlayout.Add(streamed.chunk.Audio); len(startup) > 0 && !sendStreamingStartupAudio(startup, "target_reached") {
 					return
 				}
 				continue
@@ -902,9 +1055,47 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 				continue
 			}
 			completedInterrupted := activeInterrupted
-			completedAudioSent := activeAudioSent
+			speechProviderDone = true
+			speechProviderResult = streamed.result
+			producerStartedAt := firstSpeechChunkAt
+			if producerStartedAt.IsZero() {
+				producerStartedAt = speechRequestStartedAt
+			}
+			producerDuration := streamed.arrivedAt.Sub(producerStartedAt)
+			if producerDuration < 0 {
+				producerDuration = 0
+			}
+			producerDurationMS := producerDuration.Milliseconds()
+			producerActiveDuration := producerDuration - streamed.backpressureTotal
+			if producerActiveDuration < 0 {
+				producerActiveDuration = 0
+			}
+			producerActiveMS := producerActiveDuration.Milliseconds()
+			producerAudioMS := int64(streamed.result.AudioBytes) * 1000 / int64(streamingSpeechSampleRate)
+			producerRateX1000 := int64(0)
+			if producerActiveMS > 0 {
+				producerRateX1000 = producerAudioMS * 1000 / producerActiveMS
+			}
+			_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "tts_stream_done", activeResponseCreatedAt, map[string]string{
+				"request_id":            streamed.requestID,
+				"provider_request_id":   streamed.result.ProviderRequestID,
+				"audio_chunk_count":     strconv.Itoa(streamed.result.ChunkCount),
+				"audio_bytes":           strconv.Itoa(streamed.result.AudioBytes),
+				"interrupted":           strconv.FormatBool(completedInterrupted),
+				"close_after":           strconv.FormatBool(activeCloseAfter),
+				"producer_duration_ms":  strconv.FormatInt(producerDurationMS, 10),
+				"producer_active_ms":    strconv.FormatInt(producerActiveMS, 10),
+				"producer_audio_ms":     strconv.FormatInt(producerAudioMS, 10),
+				"producer_rate_x1000":   strconv.FormatInt(producerRateX1000, 10),
+				"provider_gap_max_ms":   strconv.FormatInt(maxSpeechProviderGap.Milliseconds(), 10),
+				"backpressure_total_ms": strconv.FormatInt(streamed.backpressureTotal.Milliseconds(), 10),
+				"backpressure_max_ms":   strconv.FormatInt(streamed.backpressureMax.Milliseconds(), 10),
+				"backpressure_events":   strconv.Itoa(streamed.backpressureEvents),
+			})
 			if streamed.err != nil && !completedInterrupted {
-				if completedAudioSent && streamSID != "" {
+				streamingPlayout.Clear()
+				stopStreamingPlayoutTicker()
+				if activeAudioSent && streamSID != "" {
 					_ = writeJSON(twilioClearMessage{Event: "clear", StreamSid: streamSID})
 				}
 				_ = h.recordRealtimeTerminalFailureWithExtra(ctx, providerCallID, sessionID, streamSID, "openai_speech_stream", streamed.err, map[string]string{
@@ -916,39 +1107,21 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 				closeStream("openai_speech_stream_failed")
 				return
 			}
-			if streamed.err == nil && !completedInterrupted && !suppressAudioUntilDone && !activeAudioSent && len(streamingStartupAudio) > 0 {
-				if !flushStreamingStartupAudio("stream_complete") {
+			if completedInterrupted || suppressAudioUntilDone {
+				streamingPlayout.Clear()
+				if !completeStreamingReply() {
 					return
 				}
+				continue
 			}
-			completedCloseAfter := activeCloseAfter
-			completedAudioSent = activeAudioSent
-			hadPendingReply := len(pendingReplies) > 0
-			_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "tts_stream_done", activeResponseCreatedAt, map[string]string{
-				"request_id":          streamed.requestID,
-				"provider_request_id": streamed.result.ProviderRequestID,
-				"audio_chunk_count":   strconv.Itoa(streamed.result.ChunkCount),
-				"audio_bytes":         strconv.Itoa(streamed.result.AudioBytes),
-				"interrupted":         strconv.FormatBool(completedInterrupted),
-				"close_after":         strconv.FormatBool(completedCloseAfter),
-			})
-			responseActive = false
-			activeReply = realtimeQueuedReply{}
-			activeCloseAfter = false
-			activeAudioSent = false
-			activeInterrupted = false
-			activeResponseCreatedAt = time.Time{}
-			activeSpeechCancel = nil
-			suppressAudioUntilDone = false
-			streamingStartupAudio = streamingStartupAudio[:0]
-			firstSpeechChunkSeen = false
-			if !flushPendingReply() {
+			if startup := streamingPlayout.Finish(); len(startup) > 0 && !sendStreamingStartupAudio(startup, "stream_complete") {
 				return
 			}
-			if !hadPendingReply && completedCloseAfter && !completedInterrupted {
-				if !beginTerminalCloseDrain(completedAudioSent) {
-					return
-				}
+			if streamingPlayout.Empty() && !completeStreamingReply() {
+				return
+			}
+			if !streamingPlayout.Empty() {
+				startStreamingPlayoutTicker()
 			}
 		case event, ok := <-realtime.Events():
 			if !ok {
@@ -1056,6 +1229,10 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					suppressAudioUntilDone = true
 					activeInterrupted = true
 					if streamingSpeech && activeSpeechCancel != nil {
+						streamingPlayout.Clear()
+						if !speechProviderDone {
+							stopStreamingPlayoutTicker()
+						}
 						activeSpeechCancel()
 						continue
 					}
@@ -1268,17 +1445,21 @@ type realtimeTurnResult struct {
 }
 
 type streamingSpeechOutput struct {
-	salonID string
+	salonID       string
+	tickerFactory func(time.Duration) streamingSpeechTicker
 }
 
 type streamingSpeechEvent struct {
-	generation int
-	requestID  string
-	chunk      *voice.SpeechChunk
-	result     voice.SpeechStreamResult
-	err        error
-	done       bool
-	arrivedAt  time.Time
+	generation         int
+	requestID          string
+	chunk              *voice.SpeechChunk
+	result             voice.SpeechStreamResult
+	err                error
+	done               bool
+	arrivedAt          time.Time
+	backpressureTotal  time.Duration
+	backpressureMax    time.Duration
+	backpressureEvents int
 }
 
 func isActiveRealtimeResponseConflict(event voice.RealtimeEvent) bool {

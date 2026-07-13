@@ -16,6 +16,17 @@ func TestApplyWebhookPayloadExposesOnlySafeRealtimeDiagnostics(t *testing.T) {
 		"provider_request_id":   "speech_req_1",
 		"audio_chunk_count":     "7",
 		"audio_bytes":           "1120",
+		"input_sample_rate":     "24000",
+		"producer_duration_ms":  "350",
+		"producer_active_ms":    "330",
+		"producer_rate_x1000":   "4000",
+		"provider_gap_max_ms":   "14",
+		"backpressure_total_ms": "420",
+		"backpressure_events":   "21",
+		"playout_duration_ms":   "1400",
+		"queue_max_frames":      "22",
+		"underrun_count":        "0",
+		"write_max_ms":          "3",
 		"rejection_streak":      "3",
 		"recovery_action":       "noise_coaching",
 		"route_config_ms":       "12",
@@ -39,6 +50,23 @@ func TestApplyWebhookPayloadExposesOnlySafeRealtimeDiagnostics(t *testing.T) {
 	}
 	if item.Diagnostics["provider_request_id"] != "speech_req_1" || item.Diagnostics["audio_chunk_count"] != "7" || item.Diagnostics["audio_bytes"] != "1120" {
 		t.Fatalf("streaming diagnostics = %#v", item.Diagnostics)
+	}
+	for key, want := range map[string]string{
+		"input_sample_rate":     "24000",
+		"producer_duration_ms":  "350",
+		"producer_active_ms":    "330",
+		"producer_rate_x1000":   "4000",
+		"provider_gap_max_ms":   "14",
+		"backpressure_total_ms": "420",
+		"backpressure_events":   "21",
+		"playout_duration_ms":   "1400",
+		"queue_max_frames":      "22",
+		"underrun_count":        "0",
+		"write_max_ms":          "3",
+	} {
+		if got := item.Diagnostics[key]; got != want {
+			t.Fatalf("playout diagnostic %s = %q, want %q; all=%#v", key, got, want, item.Diagnostics)
+		}
 	}
 	if item.Diagnostics["rejection_streak"] != "3" || item.Diagnostics["recovery_action"] != "noise_coaching" {
 		t.Fatalf("recovery diagnostics = %#v", item.Diagnostics)
