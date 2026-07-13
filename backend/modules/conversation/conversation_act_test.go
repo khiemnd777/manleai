@@ -260,14 +260,13 @@ func TestStructuredAIConversationActIsCatalogValidatedBeforeMutation(t *testing.
 	}
 }
 
-func TestSemanticInitialCategorySelectionPreservesCatalogAmbiguity(t *testing.T) {
+func TestInitialCategorySelectionPreservesCatalogAmbiguityWithoutAddOrReplacePrompt(t *testing.T) {
 	tests := []struct {
 		name            string
 		message         string
 		services        []ServiceOption
 		categoryAliases []ServiceCategoryAlias
 		modelTargetID   string
-		wantIDs         []string
 		wantReply       string
 	}{
 		{
@@ -278,7 +277,6 @@ func TestSemanticInitialCategorySelectionPreservesCatalogAmbiguity(t *testing.T)
 				{ID: "service_gel_mani", Name: "Gel Manicure", CategoryID: "cat_mani", CategoryName: "Manicure"},
 			},
 			modelTargetID: "service_classic_mani",
-			wantIDs:       []string{"service_classic_mani", "service_gel_mani"},
 			wantReply:     "Which manicure",
 		},
 		{
@@ -293,7 +291,6 @@ func TestSemanticInitialCategorySelectionPreservesCatalogAmbiguity(t *testing.T)
 				Alias: "foot care", NormalizedAlias: "foot care", Source: "owner", Confidence: 0.95,
 			}},
 			modelTargetID: "service_classic_pedi",
-			wantIDs:       []string{"service_classic_pedi", "service_spa_pedi"},
 			wantReply:     "Which pedicure",
 		},
 	}
@@ -323,8 +320,10 @@ func TestSemanticInitialCategorySelectionPreservesCatalogAmbiguity(t *testing.T)
 			if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
 				t.Fatalf("category request called booking tools: availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
 			}
-			if session.DialogState.Pending == nil || !sameStrings(session.DialogState.Pending.TargetServiceIDs, test.wantIDs) {
-				t.Fatalf("pending candidates = %#v, want %#v", session.DialogState.Pending, test.wantIDs)
+			if pending := session.DialogState.Pending; pending != nil {
+				if pending.PromptKey != "add_target" || !sameStrings(pending.TargetServiceIDs, serviceOptionIDs(test.services)) {
+					t.Fatalf("initial category pending state = %#v", pending)
+				}
 			}
 			if !strings.Contains(store.lastTurn.AIMessage, test.wantReply) {
 				t.Fatalf("clarification reply = %q, want %q", store.lastTurn.AIMessage, test.wantReply)
@@ -423,7 +422,7 @@ func TestSemanticBareServiceSwitchUsesCatalogConfirmationFlow(t *testing.T) {
 	}
 }
 
-func TestSemanticConcreteServiceReplyAcknowledgesOnce(t *testing.T) {
+func TestInitialConcreteServiceReplyContinuesFieldCollection(t *testing.T) {
 	store := newFakeConversationStore()
 	service := NewService(store, &fakeBookingTool{})
 	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
@@ -438,8 +437,8 @@ func TestSemanticConcreteServiceReplyAcknowledgesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Message returned error: %v", err)
 	}
-	if got, want := store.lastTurn.AIMessage, "Okay, I added Classic Manicure. What day would you like?"; got != want {
-		t.Fatalf("concise service acknowledgement = %q, want %q", got, want)
+	if got, want := store.lastTurn.AIMessage, "What day would you like for Classic Manicure?"; got != want {
+		t.Fatalf("service field collection reply = %q, want %q", got, want)
 	}
 }
 
@@ -922,6 +921,97 @@ func TestSemanticPartyServiceCorrectionPreservesGuestGroups(t *testing.T) {
 	turn.Acts[0].GuestRef = ""
 	if _, ok := validateTurnUnderstanding(turn, session, services, nil); ok {
 		t.Fatal("party service correction without guest_ref was accepted")
+	}
+}
+
+func TestPartyServiceCorrectionReplacesOnlySelectedMultiGuestGroup(t *testing.T) {
+	services := []ServiceOption{
+		{ID: "classic_mani", Name: "Classic Manicure"},
+		{ID: "gel_mani", Name: "Gel Manicure"},
+		{ID: "classic_pedi", Name: "Classic Pedicure"},
+	}
+	session := Session{
+		Intent: IntentBooking, ServiceID: "classic_mani", ServiceName: "Classic Manicure",
+		PartyPlan: &PartyPlan{PartySize: 4, Groups: []PartyPlanGroup{
+			{Label: "Manicure", Count: 2, ResolvedServiceIDs: []string{"classic_mani", "classic_mani"}},
+			{Label: "Pedicure", Count: 2, ResolvedServiceIDs: []string{"classic_pedi", "classic_pedi"}},
+		}},
+		BookingSegments: []booking.BookingSegmentRequest{
+			{ServiceID: "classic_mani"}, {ServiceID: "classic_mani"}, {ServiceID: "classic_pedi"}, {ServiceID: "classic_pedi"},
+		},
+	}
+	act := ConversationAct{
+		Kind: ConversationActReplace, Entity: ConversationEntityService, GuestRef: "Manicure",
+		SourceServiceIDs: []string{"classic_mani"}, TargetServiceIDs: []string{"gel_mani"}, Confidence: 0.98,
+	}
+
+	result := applyPartyServiceConversationAct(&session, act, services)
+	if !result.Changed || !partyPlanComplete(session.PartyPlan) {
+		t.Fatalf("group correction result=%#v plan=%#v", result, session.PartyPlan)
+	}
+	if got := session.PartyPlan.Groups[0].ResolvedServiceIDs; !sameStrings(got, []string{"gel_mani", "gel_mani"}) {
+		t.Fatalf("selected group = %#v", got)
+	}
+	if got := session.PartyPlan.Groups[1].ResolvedServiceIDs; !sameStrings(got, []string{"classic_pedi", "classic_pedi"}) {
+		t.Fatalf("unselected group changed = %#v", got)
+	}
+	if got := selectedServiceIDs(session); !sameStrings(got, []string{"gel_mani", "gel_mani", "classic_pedi", "classic_pedi"}) {
+		t.Fatalf("booking segments = %#v", got)
+	}
+}
+
+func TestPartyServiceCorrectionClarifiesSourceWithoutMutatingMultiServiceGuest(t *testing.T) {
+	services := []ServiceOption{
+		{ID: "classic_mani", Name: "Classic Manicure"},
+		{ID: "spa_pedi", Name: "Spa Pedicure"},
+		{ID: "dip_mani", Name: "Dip Powder Manicure"},
+		{ID: "gel_mani", Name: "Gel Manicure"},
+	}
+	session := Session{
+		Intent: IntentBooking, ServiceID: "classic_mani",
+		PartyPlan: &PartyPlan{PartySize: 2, Groups: []PartyPlanGroup{
+			{Label: "caller", Count: 1, ResolvedServiceIDs: []string{"classic_mani", "spa_pedi"}},
+			{Label: "guest 2", Count: 1, ResolvedServiceIDs: []string{"gel_mani"}},
+		}},
+		BookingSegments: []booking.BookingSegmentRequest{{ServiceID: "classic_mani"}, {ServiceID: "spa_pedi"}, {ServiceID: "gel_mani"}},
+		OfferedSlots:    []OfferedSlot{{StartTime: testStartTime()}},
+		DialogState: DialogState{
+			Version: DialogStateVersion, Phase: DialogPhaseReview, DraftRevision: 3,
+			ReviewRequired: true, ReviewAccepted: true, ReviewedRevision: 3, AuthorizedRevision: 3,
+		},
+	}
+	act := ConversationAct{
+		Kind: ConversationActReplace, Entity: ConversationEntityService, GuestRef: "caller",
+		TargetServiceIDs: []string{"dip_mani"}, Confidence: 0.98,
+	}
+
+	result := applyPartyServiceConversationAct(&session, act, services)
+	if !result.Clarification || result.Changed {
+		t.Fatalf("source clarification result = %#v", result)
+	}
+	if pending := session.DialogState.Pending; pending == nil || pending.PromptKey != PendingPartyServiceSource || pending.GuestRef != "caller" || !sameStrings(pending.SourceServiceIDs, []string{"classic_mani", "spa_pedi"}) {
+		t.Fatalf("source pending = %#v", pending)
+	}
+	if !session.DialogState.ReviewAccepted || len(session.OfferedSlots) != 1 || !sameStrings(session.PartyPlan.Groups[0].ResolvedServiceIDs, []string{"classic_mani", "spa_pedi"}) {
+		t.Fatalf("clarification changed draft/review: state=%#v plan=%#v slots=%#v", session.DialogState, session.PartyPlan, session.OfferedSlots)
+	}
+
+	resolved := conversationActFromPending(session, "The Spa Pedicure.", services, nil, nil, *session.DialogState.Pending)
+	if resolved.Kind != ConversationActReplace || resolved.GuestRef != "caller" || !sameStrings(resolved.SourceServiceIDs, []string{"spa_pedi"}) {
+		t.Fatalf("resolved source act = %#v", resolved)
+	}
+	result = applyPartyServiceConversationAct(&session, resolved, services)
+	if !result.Changed || !sameStrings(session.PartyPlan.Groups[0].ResolvedServiceIDs, []string{"classic_mani", "dip_mani"}) || !sameStrings(session.PartyPlan.Groups[1].ResolvedServiceIDs, []string{"gel_mani"}) {
+		t.Fatalf("resolved source correction result=%#v plan=%#v", result, session.PartyPlan)
+	}
+	if session.DialogState.Pending != nil || session.DialogState.ReviewAccepted || len(session.OfferedSlots) != 0 {
+		t.Fatalf("resolved source state=%#v slots=%#v", session.DialogState, session.OfferedSlots)
+	}
+}
+
+func TestPartyServiceOperationRejectsMixedAddAndReplaceSignals(t *testing.T) {
+	if got := partyServiceOperationForMessage("Add it, or replace the current one."); got != ConversationActUnknown {
+		t.Fatalf("mixed operation = %q, want unknown clarification", got)
 	}
 }
 

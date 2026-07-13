@@ -93,6 +93,9 @@ func applyTurnPlanMetadata(turn *TurnRecord, plan TurnPlan) {
 func expectedInputForSession(session Session) string {
 	state := normalizedDialogState(session.DialogState)
 	if state.Pending != nil {
+		if invalidServiceEditPending(session) {
+			return ExpectedInputService
+		}
 		switch state.Pending.PromptKey {
 		case pendingOfferedSlotDateTimeCorrection:
 			return ExpectedInputDateTimeConfirmation
@@ -239,9 +242,13 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 		plan.Understanding = deterministicGoalUnderstanding("book_appointment", "expected_input_resolved")
 		return finalizeTurnPlan(plan, TurnRouteFastLane, "expected_input_resolved", TurnCoverageComplete, session, services, staff)
 	}
-	if len(signals) > 1 || (answer.Handled && answer.Source != answerSourceBookingRedirect) {
+	if len(signals) > 1 {
 		plan.DeterministicCoverage = TurnCoveragePartial
-		return finalizeTurnPlan(plan, TurnRouteSemanticLane, "multiple_or_unconsumed_signals", TurnCoveragePartial, session, services, staff)
+		return finalizeTurnPlan(plan, TurnRouteSemanticLane, "multiple_signals", TurnCoveragePartial, session, services, staff)
+	}
+	if answer.Handled && answer.Source != answerSourceBookingRedirect {
+		plan.DeterministicCoverage = TurnCoveragePartial
+		return finalizeTurnPlan(plan, TurnRouteSemanticLane, "structured_answer_conflict", TurnCoveragePartial, session, services, staff)
 	}
 	return finalizeTurnPlan(plan, TurnRouteSemanticLane, "semantic_context_required", TurnCoverageNone, session, services, staff)
 }
@@ -340,7 +347,7 @@ func deterministicTurnSignals(envelope TurnEnvelope, plan TurnPlan, now func() t
 func signalMatchesExpectedInput(signal string, expected string, session Session) bool {
 	switch signal {
 	case ConversationEntityService:
-		return expected == ExpectedInputService && strings.TrimSpace(session.ServiceID) == ""
+		return !hasSelectedServiceDraft(session) && (expected == ExpectedInputService || expected == ExpectedInputCallerGoal)
 	case ConversationEntityStaff:
 		return expected == ExpectedInputStaff && !hasStaffAssignment(session)
 	case ConversationEntityDateTime:
@@ -404,6 +411,43 @@ func hasOperationalBookingProgress(session Session) bool {
 		activePartyPlan(session.PartyPlan) ||
 		strings.TrimSpace(session.CustomerName) != "" ||
 		hasStaffAssignment(session)
+}
+
+func hasSelectedServiceDraft(session Session) bool {
+	if strings.TrimSpace(session.ServiceID) != "" {
+		return true
+	}
+	for _, segment := range session.BookingSegments {
+		if strings.TrimSpace(segment.ServiceID) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func invalidServiceEditPending(session Session) bool {
+	if hasSelectedServiceDraft(session) {
+		return false
+	}
+	state := normalizedDialogState(session.DialogState)
+	if state.Pending == nil {
+		return false
+	}
+	switch state.Pending.PromptKey {
+	case "semantic_add_or_replace", "replace_target", "replace_source", "remove_source", "same_category_add_scope",
+		PendingPartyServiceTarget, PendingPartyServiceGuest, PendingPartyServiceOperation, PendingPartyServiceSource:
+		return true
+	default:
+		return false
+	}
+}
+
+func repairInvalidServiceEditPending(session *Session) bool {
+	if session == nil || !invalidServiceEditPending(*session) {
+		return false
+	}
+	session.DialogState = resetDialogProgress(session.DialogState, DialogPhaseDrafting)
+	return true
 }
 
 func hasServiceMutationLanguage(message string) bool {

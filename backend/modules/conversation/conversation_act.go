@@ -287,7 +287,7 @@ func deterministicConversationAct(session Session, message string, services []Se
 	if state.Phase == DialogPhaseReview && isReviewAuthorization(message) {
 		return ConversationAct{Kind: ConversationActReview, Confidence: 1, Reason: "review_authorization", Source: "deterministic"}
 	}
-	if state.Pending != nil {
+	if state.Pending != nil && !invalidServiceEditPending(session) {
 		if act := conversationActFromPending(session, message, services, aliases, categoryAliases, *state.Pending); act.Kind != ConversationActUnknown {
 			return act
 		}
@@ -299,6 +299,78 @@ func deterministicConversationAct(session Session, message string, services []Se
 func conversationActFromPending(session Session, message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, pending PendingConversationAct) ConversationAct {
 	full := interpretServiceWithCategoryAliases(message, services, aliases, categoryAliases)
 	switch pending.PromptKey {
+	case PendingPartyServiceGuest:
+		guestRef := partyGuestRefFromMessage(session.PartyPlan, message, pending.TargetServiceIDs, services)
+		if guestRef == "" {
+			return ConversationAct{Kind: ConversationActUnknown, Source: "deterministic"}
+		}
+		return ConversationAct{
+			Kind:       ConversationActSet,
+			Entity:     ConversationEntityGuest,
+			GuestRef:   guestRef,
+			Confidence: 0.98,
+			Reason:     "pending_party_service_guest",
+			Source:     "deterministic",
+		}
+	case PendingPartyServiceOperation:
+		kind := partyServiceOperationForMessage(message)
+		if kind == ConversationActUnknown || strings.TrimSpace(pending.GuestRef) == "" {
+			return ConversationAct{Kind: ConversationActUnknown, Source: "deterministic"}
+		}
+		return ConversationAct{
+			Kind:             kind,
+			Entity:           ConversationEntityService,
+			SourceServiceIDs: append([]string(nil), pending.SourceServiceIDs...),
+			TargetServiceIDs: append([]string(nil), pending.TargetServiceIDs...),
+			Scope:            ConversationScopeOne,
+			GuestRef:         pending.GuestRef,
+			Confidence:       0.98,
+			Reason:           "pending_party_service_operation",
+			Source:           "deterministic",
+		}
+	case PendingPartyServiceSource:
+		candidates := servicesByIDs(services, pending.SourceServiceIDs)
+		chosen := newServiceCatalogIndex(candidates, nil, nil).InterpretPending(message)
+		if chosen.Status != serviceUnderstandingStatusSelected || len(chosen.Candidates) != 1 || strings.TrimSpace(pending.GuestRef) == "" {
+			return ConversationAct{Kind: ConversationActUnknown, Source: "deterministic"}
+		}
+		return ConversationAct{
+			Kind:             ConversationActReplace,
+			Entity:           ConversationEntityService,
+			SourceServiceIDs: []string{chosen.Candidates[0].ID},
+			TargetServiceIDs: append([]string(nil), pending.TargetServiceIDs...),
+			Scope:            ConversationScopeOne,
+			GuestRef:         pending.GuestRef,
+			Confidence:       0.98,
+			Reason:           "pending_party_service_source",
+			Source:           "deterministic",
+		}
+	case "semantic_add_or_replace":
+		if !hasSelectedServiceDraft(session) {
+			return ConversationAct{Kind: ConversationActUnknown, Source: "deterministic"}
+		}
+		kind := ConversationActUnknown
+		switch {
+		case hasServiceAddSignal(message), isPendingServiceAddDecision(message):
+			kind = ConversationActAdd
+		case hasServiceReplaceSignal(message), isPendingServiceReplaceDecision(message):
+			kind = ConversationActReplace
+		default:
+			return ConversationAct{Kind: ConversationActUnknown, Source: "deterministic"}
+		}
+		targetIDs := append([]string(nil), pending.TargetServiceIDs...)
+		if full.Status == serviceUnderstandingStatusSelected && len(full.Candidates) > 0 {
+			targetIDs = serviceOptionIDs(full.Candidates)
+		}
+		return ConversationAct{
+			Kind:             kind,
+			SourceServiceIDs: append([]string(nil), pending.SourceServiceIDs...),
+			TargetServiceIDs: targetIDs,
+			Scope:            ConversationScopeOne,
+			Confidence:       0.96,
+			Reason:           "pending_add_or_replace_response",
+			Source:           "deterministic",
+		}
 	case "replace_target", "add_target":
 		chosen := full
 		pendingServices := servicesByIDs(services, pending.TargetServiceIDs)
@@ -580,6 +652,15 @@ func pendingConversationPrompt(session Session, services []ServiceOption, state 
 	}
 	pending := state.Pending
 	switch pending.PromptKey {
+	case PendingPartyServiceTarget:
+		candidates := servicesByIDs(services, pending.TargetServiceIDs)
+		return "Which specific service should I use for the group change: " + joinChoiceList(serviceCandidateNames(candidates, 6)) + "?"
+	case PendingPartyServiceGuest:
+		return partyServiceGuestPrompt(session.PartyPlan, pending.TargetServiceIDs, services)
+	case PendingPartyServiceOperation:
+		return partyServiceOperationPrompt(session.PartyPlan, *pending, services)
+	case PendingPartyServiceSource:
+		return partyServiceSourcePrompt(session.PartyPlan, *pending, services)
 	case "replace_target", "add_target":
 		candidates := servicesByIDs(services, pending.TargetServiceIDs)
 		prefix := ""
@@ -1076,6 +1157,20 @@ func prependConversationMutationAcknowledgement(turn *TurnRecord, result convers
 	}
 	acknowledgement := ""
 	summary := strings.TrimSpace(serviceSummary(session, services))
+	if activePartyPlan(session.PartyPlan) && strings.TrimSpace(result.Act.GuestRef) != "" {
+		target := partyServiceTargetName(result.Act.TargetServiceIDs, services)
+		scope := partyGroupSpokenScope(session.PartyPlan, result.Act.GuestRef)
+		switch result.Act.Kind {
+		case ConversationActAdd:
+			acknowledgement = "Okay, I added " + target + " for " + scope + "."
+		case ConversationActReplace:
+			acknowledgement = "Okay, I changed the service for " + scope + " to " + target + "."
+		}
+		if acknowledgement != "" {
+			turn.AIMessage = acknowledgement + " " + turn.AIMessage
+			return
+		}
+	}
 	switch result.Act.Kind {
 	case ConversationActAdd:
 		if summary != "" {

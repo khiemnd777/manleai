@@ -64,6 +64,11 @@ const (
 	ConversationGuestCaller  = "caller"
 	ConversationGuestAnother = "another_guest"
 
+	PendingPartyServiceTarget    = "party_service_target"
+	PendingPartyServiceGuest     = "party_service_guest"
+	PendingPartyServiceOperation = "party_service_operation"
+	PendingPartyServiceSource    = "party_service_source"
+
 	OutcomeCollecting             = "collecting"
 	OutcomeBookingConfirmed       = "booking_confirmed"
 	OutcomeBookingRescheduled     = "booking_rescheduled"
@@ -219,6 +224,7 @@ type PendingConversationAct struct {
 	TargetCategoryName string   `json:"target_category_name,omitempty"`
 	Scope              string   `json:"scope,omitempty"`
 	GuestScope         string   `json:"guest_scope,omitempty"`
+	GuestRef           string   `json:"guest_ref,omitempty"`
 	ProposedDate       string   `json:"proposed_date,omitempty"`
 	ProposedStartISO   string   `json:"proposed_start_iso,omitempty"`
 	PromptKey          string   `json:"prompt_key"`

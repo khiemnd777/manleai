@@ -133,10 +133,12 @@
 - [x] Add golden transcript and invariant tests for directional switching, stale pending escape, review corrections, duplicate-safe turn handling, and bounded clarification handoff.
 - [x] Route every configured-production freeform orchestration turn through the state-driven Turn Kernel; use deterministic fast/answer/action/recovery lanes when coverage is complete and a multi-act semantic lane for correction, ambiguity, or partial coverage without a keyword-only gate.
 - [x] Bound semantic interpretation to 2.5 seconds, scope service/staff context to the active turn, and expose PII-free route, expected-input, context-size, and interpreter-outcome diagnostics.
+- [x] Treat initial catalog service/category evidence as booking field collection, reject add-or-replace operation pending state without a selected service, and continue from independently validated captured fields when semantic interpretation is not accepted.
 - [x] Route service, staff, date/time, customer, and guest corrections through one validated reducer boundary with dependency invalidation.
 - [x] Bind final-review authorization to the exact draft revision and invalidate it after every draft correction.
 - [x] Keep a bounded mutation history for repeated undo without storing control state only in transcript metadata.
 - [x] Preserve the draft and clarify or hand off when semantic interpretation is disabled, unavailable, low-confidence, malformed, or contains invented catalog IDs.
+- [x] Keep completed party-plan service corrections out of generic single-draft fallback; collect target, guest/group, operation, and replacement source as typed pending state, resolve short replies without another model call, mutate only the selected group, prevent duplicate adds, block booking while unresolved, and invalidate slots/review only after resolution.
 
 ## Party Booking
 

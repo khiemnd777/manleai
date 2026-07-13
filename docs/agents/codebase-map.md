@@ -172,17 +172,34 @@ name collection, availability replies, party bookings, or transcript output.
   service/staff model context, and selects a fast, answer, action, recovery, or
   semantic lane. Complete state-scoped evidence such as offered-slot choices,
   typed confirmations, structured questions, actions, and expected fields
-  avoids a model round trip. Corrections, multi-intent turns, ambiguity, and
+  avoids a model round trip. An initial catalog-backed service or category
+  request is field collection, not a service-edit operation: it may select one
+  exact service or ask for one concrete category option without creating an
+  add-or-replace operation prompt. Pending replacement/removal, add-or-replace
+  choice, and same-category scope require an existing selected service; an
+  initial category-target clarification may retain only its candidate set.
+  Corrections, multi-intent turns, ambiguity, and
   partial or unconsumed evidence enter the multi-act/question semantic contract
   without a keyword-only gate. Semantic interpretation has a 2.5-second budget;
   typed timeout, provider, output, confidence, and catalog rejection outcomes
-  preserve the draft. Catalog validation owns referenced service/staff IDs;
+  preserve the draft. A non-accepted semantic outcome may still consume
+  independently validated catalog and captured-field evidence before asking the
+  next missing-field question. Catalog validation owns referenced service/staff IDs;
   the reducer owns draft mutation and dependency invalidation; the planner owns
   missing-field, review, and booking readiness. Pending candidates remain
-  contextual. Review authorization and a resolved same-category guest-scope
-  clarification are deterministic state-owned controls that cannot be overwritten
-  by semantic interpretation; correction/negation evidence prevents review
-  authorization. Phone customer-name collection confirms bare ASR candidates
+  contextual. A service correction against an active completed `party_plan`
+  remains party-owned: `dialog_state.pending` stores separate target, guest/group,
+  operation, and replacement-source prompts, and short guest/add/replace/source
+  replies resolve through the deterministic fast lane before
+  `turn_reducer.go` mutates only the selected party group. Review authorization
+  and offered slots remain intact while that correction is unresolved and are
+  invalidated only after a resolved mutation; unresolved party correction
+  pending state also gates availability and booking if the semantic interpreter
+  becomes unavailable. Review authorization and a
+  resolved same-category guest-scope clarification are deterministic state-owned
+  controls that cannot be overwritten by semantic interpretation;
+  correction/negation evidence prevents review authorization. Phone
+  customer-name collection confirms bare ASR candidates
   before persisting them unless the caller explicitly introduces a non-risky name
   or spells it. Provider failure preserves the draft with safe clarification.
   A new-booking date/time correction made after slots were offered is persisted
@@ -507,7 +524,7 @@ detail rather than part of the event title.
 | service menu, how many services, how many I book, what do I have, current booking summary, service count, repeated clarification, informational service question | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/service_prompts.go`, `backend/modules/conversation/answer_router.go` | `backend/modules/conversation/service.go`, dialog state, party flow, golden tests |
 | final review, stale review, draft revision, reviewed revision, authorized revision, book it, just book this for me, correction during review, repeated same-category guest question, no progress loop | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/draft_revision.go`, `next_action_planner.go`, `service.go` | repository, V36/V37 migrations, booking flow, conversation and phone tests |
 | AI training, owner correction, knowledge, FAQ answer, stale policy | `backend/modules/training`, answer router/context | training UI, knowledge tests |
-| party booking, group booking, two people, split booking, party request | conversation party files | booking service, Calls UI party request panel |
+| party booking, group booking, two people, split booking, party request, party service correction, guest_ref, party_service_guest, party_service_operation, party_service_source | `backend/modules/conversation/service_party.go`, `conversation_act.go`, `turn_reducer.go` | dialog state/types, booking service, Calls UI party request panel, party golden tests |
 | name captured wrong, background phrase captured as name, bare phone name, service instead of name, spelling, phone/email | `service_customer_name.go` | conversation golden tests, transcript metadata |
 | reschedule, cancel, move appointment, appointment target, ordinal option, day view, week view, month view, agenda, Tomorrow button, appointment warning | `service_intent.go`, `backend/modules/booking/service.go` | Appointments UI, POS Calendar UI, booking tests |
 | Twilio signature, webhook, TwiML, recording, media stream, stream fallback | `backend/modules/voice_twilio` | `backend/modules/voice`, phone demo memo |

@@ -354,6 +354,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	}
 
 	next := cloneSessionForTurn(*session)
+	repairInvalidServiceEditPending(&next)
 	selectedOfferedSlot := false
 	exactRequestedTimeSelected := false
 	loc := timezoneLocation(cfg.Timezone)
@@ -402,7 +403,15 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 			return updated, err
 		}
 	}
-	if fallback := semanticServiceEditFallback(&next, turnUnderstanding, serviceUnderstanding, services); fallback.Clarification {
+	fallback := semanticServiceEditFallback(&next, message, turnUnderstanding, serviceUnderstanding, services)
+	if fallback.Act.Kind != "" && fallback.Act.Kind != ConversationActUnknown {
+		turnUnderstanding.Goal = "book_appointment"
+		turnUnderstanding.Acts = []ConversationAct{fallback.Act}
+		turnUnderstanding.Questions = nil
+		turnUnderstanding.Reason = fallback.Act.Reason
+		conversationAct = fallback.Act
+	}
+	if fallback.Clarification {
 		next.Intent = IntentBooking
 		turn := newPlannedTurn(*session, next)
 		turn.AIMessage = fallback.Reply
@@ -531,7 +540,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		return s.store.SaveTurn(ctx, turn)
 	}
 	serviceEdit := serviceEditDecision{}
-	if !conversationResult.Handled && (!turnUnderstanding.ModelInvoked || turnUnderstanding.CatalogFallback) {
+	if !conversationResult.Handled && shouldUseDeterministicTurnFallback(turnUnderstanding) {
 		// State-scoped fast lanes and safe semantic fallback reuse the catalog-backed
 		// service decision without giving the model or parser side-effect ownership.
 		serviceEdit = serviceEditDecisionForMessage(*session, message, serviceUnderstanding, services)
@@ -641,6 +650,13 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 
 	if !cfg.AIEnabled {
 		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonAIBookingDisabled, "AI booking is not enabled yet. I can take the request for the owner, but this is not a confirmed appointment.", services, staff, cfg)
+	}
+
+	state := normalizedDialogState(next.DialogState)
+	if state.Pending != nil && isPartyServiceCorrectionPrompt(state.Pending.PromptKey) {
+		turn.AIMessage = pendingConversationPrompt(next, services, state, false)
+		finalizeTurnMetadata(&turn, *session, next, "party_service_correction", "party_service_correction", "party_service_correction_resume")
+		return s.store.SaveTurn(ctx, turn)
 	}
 
 	if serviceEdit.Action == serviceEditConfirmReplace && !partyPlanApplied {

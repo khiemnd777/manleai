@@ -303,11 +303,159 @@ func partyPlanComplete(plan *PartyPlan) bool {
 		}
 		total += group.Count
 		resolved := nonEmptyStrings(group.ResolvedServiceIDs)
-		if len(resolved) != group.Count {
+		if len(resolved) < group.Count {
 			return false
 		}
 	}
 	return total == plan.PartySize
+}
+
+func partyGuestRefFromMessage(plan *PartyPlan, message string, targetServiceIDs []string, services []ServiceOption) string {
+	if plan == nil {
+		return ""
+	}
+	normalized := normalizeLooseText(message)
+	if normalized == "" {
+		return ""
+	}
+	targets := stringSet(targetServiceIDs)
+	matches := make([]string, 0, 1)
+	for index, group := range plan.Groups {
+		if !partyMessageSelectsGroup(normalized, index, group, targets, services) {
+			continue
+		}
+		matches = append(matches, strings.TrimSpace(group.Label))
+	}
+	if len(matches) != 1 {
+		return ""
+	}
+	return matches[0]
+}
+
+func partyMessageSelectsGroup(normalized string, index int, group PartyPlanGroup, targetServiceIDs map[string]bool, services []ServiceOption) bool {
+	label := normalizeServiceText(group.Label)
+	switch label {
+	case "caller":
+		if normalized == "me" || normalized == "myself" || containsAnyLoosePhrase(normalized, []string{"for me", "my service", "mine", "the caller"}) {
+			return true
+		}
+	default:
+		if strings.HasPrefix(label, "guest ") && containsLoosePhrase(normalized, label) {
+			return true
+		}
+	}
+	if label != "" && containsAnyLoosePhrase(normalized, []string{
+		label + " group",
+		label + " guest",
+		pluralServicePhrase(label) + " group",
+		"people getting " + pluralServicePhrase(label),
+		"person getting " + label,
+	}) {
+		return true
+	}
+	for _, serviceID := range uniqueStrings(group.ResolvedServiceIDs) {
+		if targetServiceIDs[strings.TrimSpace(serviceID)] {
+			continue
+		}
+		name := normalizeServiceText(serviceName(serviceID, services, ""))
+		if name != "" && containsLoosePhrase(normalized, name) {
+			return true
+		}
+	}
+	ordinal := partyGroupOrdinal(index)
+	return ordinal != "" && (normalized == ordinal || containsAnyLoosePhrase(normalized, []string{
+		ordinal + " guest", ordinal + " group", ordinal + " one", ordinal + " person",
+	}))
+}
+
+func partyGroupOrdinal(index int) string {
+	ordinals := []string{"first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"}
+	if index < 0 || index >= len(ordinals) {
+		return ""
+	}
+	return ordinals[index]
+}
+
+func partyGroupServiceIDs(plan *PartyPlan, guestRef string) []string {
+	if plan == nil {
+		return nil
+	}
+	for _, group := range plan.Groups {
+		if strings.EqualFold(strings.TrimSpace(group.Label), strings.TrimSpace(guestRef)) {
+			return uniqueStrings(nonEmptyStrings(group.ResolvedServiceIDs))
+		}
+	}
+	return nil
+}
+
+func partyGroupSpokenScope(plan *PartyPlan, guestRef string) string {
+	if plan == nil {
+		return "that guest"
+	}
+	for _, group := range plan.Groups {
+		if !strings.EqualFold(strings.TrimSpace(group.Label), strings.TrimSpace(guestRef)) {
+			continue
+		}
+		label := normalizeServiceText(group.Label)
+		switch {
+		case label == "caller":
+			return "you"
+		case strings.HasPrefix(label, "guest "):
+			return strings.TrimSpace(group.Label)
+		case group.Count > 1:
+			return partyPlanPeopleScope(plan, group, group.Count)
+		case label != "" && label != "service":
+			return "the guest getting " + strings.TrimSpace(group.Label)
+		default:
+			return "that guest"
+		}
+	}
+	return "that guest"
+}
+
+func partyServiceGuestPrompt(plan *PartyPlan, targetServiceIDs []string, services []ServiceOption) string {
+	target := partyServiceTargetName(targetServiceIDs, services)
+	if plan == nil {
+		return "Which guest should get " + target + "?"
+	}
+	choices := make([]string, 0, len(plan.Groups))
+	for _, group := range plan.Groups {
+		choices = append(choices, partyGroupSpokenScope(plan, group.Label))
+	}
+	if len(choices) == 0 {
+		return "Which guest should get " + target + "?"
+	}
+	return "Who should get " + target + ": " + joinChoiceList(choices) + "?"
+}
+
+func partyServiceOperationPrompt(plan *PartyPlan, pending PendingConversationAct, services []ServiceOption) string {
+	target := partyServiceTargetName(pending.TargetServiceIDs, services)
+	scope := partyGroupSpokenScope(plan, pending.GuestRef)
+	sources := serviceCandidateNames(servicesByIDs(services, pending.SourceServiceIDs), 3)
+	replace := "replace the current service"
+	if len(sources) == 1 {
+		replace = "replace " + sources[0]
+	} else if len(sources) > 1 {
+		replace = "replace one of the current services"
+	}
+	return "For " + scope + ", should I add " + target + ", or " + replace + "?"
+}
+
+func partyServiceSourcePrompt(plan *PartyPlan, pending PendingConversationAct, services []ServiceOption) string {
+	scope := partyGroupSpokenScope(plan, pending.GuestRef)
+	target := partyServiceTargetName(pending.TargetServiceIDs, services)
+	sources := serviceCandidateNames(servicesByIDs(services, pending.SourceServiceIDs), 6)
+	if len(sources) == 0 {
+		return "Which current service for " + scope + " should I replace with " + target + "?"
+	}
+	return "Which current service for " + scope + " should I replace with " + target + ": " + joinChoiceList(sources) + "?"
+}
+
+func partyServiceTargetName(serviceIDs []string, services []ServiceOption) string {
+	if names := serviceCandidateNames(servicesByIDs(services, serviceIDs), 1); len(names) == 1 {
+		return names[0]
+	}
+	return "that service"
 }
 
 func autoResolveSingleCandidatePartyGroups(plan *PartyPlan) {

@@ -18,7 +18,7 @@ func (s *Service) applyTurnUnderstandingToDraft(session *Session, turn TurnUnder
 		case ConversationEntityCustomer:
 			result = applyCustomerConversationAct(session, act)
 		case ConversationEntityGuest:
-			result = applyGuestConversationAct(session, act)
+			result = applyGuestConversationAct(session, act, services)
 		default:
 			if session != nil && activePartyPlan(session.PartyPlan) && isServiceMutationAct(act.Kind) {
 				result = applyPartyServiceConversationAct(session, act, services)
@@ -141,12 +141,15 @@ func answerWithoutGenericBookingOffer(reply string) string {
 	return strings.TrimSpace(strings.TrimSuffix(reply, "Would you like help with an appointment?"))
 }
 
-func semanticServiceEditFallback(session *Session, turn TurnUnderstanding, understanding serviceUnderstandingResult, services []ServiceOption) conversationDraftResult {
-	if session == nil || !turn.ModelInvoked || turn.CatalogFallback || len(turn.Acts) > 0 || len(turn.Questions) > 0 || !hasBookingProgress(*session) {
+func semanticServiceEditFallback(session *Session, message string, turn TurnUnderstanding, understanding serviceUnderstandingResult, services []ServiceOption) conversationDraftResult {
+	if session == nil || !turn.ModelInvoked || turn.CatalogFallback || len(turn.Acts) > 0 || len(turn.Questions) > 0 || !hasSelectedServiceDraft(*session) {
 		return conversationDraftResult{}
 	}
 	if goal := strings.TrimSpace(turn.Goal); goal != "" && goal != "unknown" && goal != "book_appointment" {
 		return conversationDraftResult{}
+	}
+	if activePartyPlan(session.PartyPlan) {
+		return semanticPartyServiceEditFallback(session, message, understanding, services)
 	}
 	state := normalizedDialogState(session.DialogState)
 	candidates := understanding.Candidates
@@ -180,6 +183,136 @@ func semanticServiceEditFallback(session *Session, turn TurnUnderstanding, under
 		Handled: true, Clarification: true, ReplySource: "semantic_service_edit_safe_clarification",
 		Reply: "I heard " + target + ", but I couldn’t safely tell how you want to change the draft. Would you like to add it, or replace one of your current services?",
 	}
+}
+
+func semanticPartyServiceEditFallback(session *Session, message string, understanding serviceUnderstandingResult, services []ServiceOption) conversationDraftResult {
+	if session == nil || !partyPlanComplete(session.PartyPlan) {
+		return conversationDraftResult{}
+	}
+	state := normalizedDialogState(session.DialogState)
+	pending := clonePendingConversationAct(state.Pending)
+	if pending != nil && pending.PromptKey == PendingPartyServiceSource {
+		return setPartyServiceCorrectionPending(session, *pending, partyServiceSourcePrompt(session.PartyPlan, *pending, services))
+	}
+
+	candidates := understanding.Candidates
+	if pending != nil && isPartyServiceCorrectionPrompt(pending.PromptKey) && len(pending.TargetServiceIDs) > 0 {
+		if pending.PromptKey != PendingPartyServiceTarget || understanding.Status != serviceUnderstandingStatusSelected || len(understanding.Candidates) != 1 {
+			candidates = servicesByIDs(services, pending.TargetServiceIDs)
+		}
+	}
+	if len(candidates) == 0 {
+		return conversationDraftResult{}
+	}
+
+	kind := partyServiceOperationForMessage(message)
+	guestRef := partyGuestRefFromMessage(session.PartyPlan, message, serviceOptionIDs(candidates), services)
+	if pending != nil && isPartyServiceCorrectionPrompt(pending.PromptKey) {
+		if kind == ConversationActUnknown {
+			kind = pending.Kind
+		}
+		if guestRef == "" {
+			guestRef = strings.TrimSpace(pending.GuestRef)
+		}
+	}
+	if len(candidates) != 1 {
+		pendingState := PendingConversationAct{
+			Kind:             kind,
+			TargetServiceIDs: serviceOptionIDs(candidates),
+			GuestRef:         guestRef,
+			Scope:            ConversationScopeOne,
+			PromptKey:        PendingPartyServiceTarget,
+		}
+		reply := "Which specific service should I use for the group change: " + joinChoiceList(serviceCandidateNames(candidates, 6)) + "?"
+		return setPartyServiceCorrectionPending(session, pendingState, reply)
+	}
+
+	pendingState := PendingConversationAct{
+		Kind:             kind,
+		TargetServiceIDs: []string{candidates[0].ID},
+		GuestRef:         guestRef,
+		Scope:            ConversationScopeOne,
+	}
+	if guestRef == "" {
+		pendingState.PromptKey = PendingPartyServiceGuest
+		return setPartyServiceCorrectionPending(session, pendingState, partyServiceGuestPrompt(session.PartyPlan, pendingState.TargetServiceIDs, services))
+	}
+	pendingState.SourceServiceIDs = partyGroupServiceIDs(session.PartyPlan, guestRef)
+	if kind == ConversationActUnknown {
+		pendingState.PromptKey = PendingPartyServiceOperation
+		return setPartyServiceCorrectionPending(session, pendingState, partyServiceOperationPrompt(session.PartyPlan, pendingState, services))
+	}
+	return conversationDraftResult{Act: partyServiceActFromPending(pendingState, "semantic_party_service_fallback")}
+}
+
+func partyServiceOperationForMessage(message string) string {
+	add := hasServiceAddSignal(message) || isPendingServiceAddDecision(message)
+	replace := hasServiceReplaceSignal(message) || isPendingServiceReplaceDecision(message)
+	switch {
+	case add && !replace:
+		return ConversationActAdd
+	case replace && !add:
+		return ConversationActReplace
+	default:
+		return ConversationActUnknown
+	}
+}
+
+func partyServiceActFromPending(pending PendingConversationAct, reason string) ConversationAct {
+	return ConversationAct{
+		Kind:             pending.Kind,
+		Entity:           ConversationEntityService,
+		SourceServiceIDs: append([]string(nil), pending.SourceServiceIDs...),
+		TargetServiceIDs: append([]string(nil), pending.TargetServiceIDs...),
+		Scope:            ConversationScopeOne,
+		GuestRef:         strings.TrimSpace(pending.GuestRef),
+		Confidence:       0.98,
+		Reason:           reason,
+		Source:           "deterministic",
+	}
+}
+
+func setPartyServiceCorrectionPending(session *Session, pending PendingConversationAct, reply string) conversationDraftResult {
+	if session == nil {
+		return conversationDraftResult{}
+	}
+	state := normalizedDialogState(session.DialogState)
+	if state.LastPromptKey == pending.PromptKey {
+		state.NoProgressCount++
+	} else {
+		state.NoProgressCount = 0
+	}
+	state.Phase = DialogPhaseClarifying
+	state.LastPromptKey = pending.PromptKey
+	state.LastActKind = pending.Kind
+	state.Pending = clonePendingConversationAct(&pending)
+	session.DialogState = state
+	if state.NoProgressCount >= 3 {
+		return conversationDraftResult{
+			Handled: true, Clarification: true, Escalate: true, ReplySource: "party_service_correction_handoff",
+			Reply: "I’m sorry, I still can’t determine the group service change safely. I’ll send this to the owner without changing the appointment draft. This is not a confirmed appointment.",
+		}
+	}
+	return conversationDraftResult{
+		Handled: true, Clarification: true, Reply: reply, ReplySource: "party_service_correction_clarification",
+	}
+}
+
+func isPartyServiceCorrectionPrompt(promptKey string) bool {
+	switch promptKey {
+	case PendingPartyServiceTarget, PendingPartyServiceGuest, PendingPartyServiceOperation, PendingPartyServiceSource:
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldUseDeterministicTurnFallback(turn TurnUnderstanding) bool {
+	if !turn.ModelInvoked || turn.CatalogFallback {
+		return true
+	}
+	outcome := strings.TrimSpace(turn.InterpreterOutcome)
+	return outcome != "" && outcome != TurnInterpreterOutcomeAccepted
 }
 
 func applyTurnUnderstandingMetadata(turnRecord *TurnRecord, understanding TurnUnderstanding, result conversationDraftResult) {
@@ -291,8 +424,24 @@ func applyCustomerConversationAct(session *Session, act ConversationAct) convers
 	return result
 }
 
-func applyGuestConversationAct(session *Session, act ConversationAct) conversationDraftResult {
+func applyGuestConversationAct(session *Session, act ConversationAct, services []ServiceOption) conversationDraftResult {
 	result := conversationDraftResult{Handled: true, Act: act, ReplySource: "party_plan_semantic_context"}
+	if session != nil && act.Kind == ConversationActSet && strings.TrimSpace(act.GuestRef) != "" {
+		state := normalizedDialogState(session.DialogState)
+		if state.Pending != nil && state.Pending.PromptKey == PendingPartyServiceGuest && activePartyPlan(session.PartyPlan) {
+			if !partyGuestRefExists(session.PartyPlan, act.GuestRef) {
+				return setPartyServiceCorrectionPending(session, *state.Pending, partyServiceGuestPrompt(session.PartyPlan, state.Pending.TargetServiceIDs, services))
+			}
+			pending := *clonePendingConversationAct(state.Pending)
+			pending.GuestRef = strings.TrimSpace(act.GuestRef)
+			pending.SourceServiceIDs = partyGroupServiceIDs(session.PartyPlan, pending.GuestRef)
+			if pending.Kind == ConversationActUnknown || pending.Kind == "" {
+				pending.PromptKey = PendingPartyServiceOperation
+				return setPartyServiceCorrectionPending(session, pending, partyServiceOperationPrompt(session.PartyPlan, pending, services))
+			}
+			return applyPartyServiceConversationAct(session, partyServiceActFromPending(pending, "pending_party_service_guest"), services)
+		}
+	}
 	if session == nil || act.Kind != ConversationActSet || act.Count <= 1 {
 		return result
 	}
@@ -346,28 +495,47 @@ func applyPartyServiceConversationAct(session *Session, act ConversationAct, ser
 		before := append([]string(nil), group.ResolvedServiceIDs...)
 		switch act.Kind {
 		case ConversationActAdd:
-			targets := append([]string(nil), act.TargetServiceIDs...)
+			targets := uniqueStrings(act.TargetServiceIDs)
 			if len(group.ResolvedServiceIDs) == 0 && len(targets) == 1 && group.Count > 1 {
 				for len(targets) < group.Count {
 					targets = append(targets, targets[0])
 				}
+			} else if len(group.ResolvedServiceIDs) > 0 && len(targets) == 1 && group.Count > 1 {
+				for len(targets) < group.Count {
+					targets = append(targets, targets[0])
+				}
 			}
-			group.ResolvedServiceIDs = append(group.ResolvedServiceIDs, targets...)
+			existing := stringSet(group.ResolvedServiceIDs)
+			for _, target := range targets {
+				if !existing[strings.TrimSpace(target)] {
+					group.ResolvedServiceIDs = append(group.ResolvedServiceIDs, target)
+				}
+			}
 		case ConversationActReplace:
 			if len(act.TargetServiceIDs) != 1 {
 				result.Clarification = true
 				result.Reply = "Which specific service should " + group.Label + " receive?"
 				return result
 			}
-			remove := stringSet(act.SourceServiceIDs)
+			sourceIDs := uniqueStrings(act.SourceServiceIDs)
+			if len(sourceIDs) == 0 {
+				sourceIDs = uniqueStrings(group.ResolvedServiceIDs)
+				if len(sourceIDs) > 1 {
+					pending := PendingConversationAct{
+						Kind: ConversationActReplace, SourceServiceIDs: sourceIDs,
+						TargetServiceIDs: append([]string(nil), act.TargetServiceIDs...), GuestRef: group.Label,
+						Scope: ConversationScopeOne, PromptKey: PendingPartyServiceSource,
+					}
+					return setPartyServiceCorrectionPending(session, pending, partyServiceSourcePrompt(plan, pending, services))
+				}
+			}
+			remove := stringSet(sourceIDs)
 			updated := make([]string, 0, len(group.ResolvedServiceIDs)+1)
 			replaced := false
 			for _, serviceID := range group.ResolvedServiceIDs {
-				if remove[serviceID] || (len(remove) == 0 && !replaced) {
-					if !replaced {
-						updated = append(updated, act.TargetServiceIDs[0])
-						replaced = true
-					}
+				if remove[serviceID] {
+					updated = append(updated, act.TargetServiceIDs[0])
+					replaced = true
 					continue
 				}
 				updated = append(updated, serviceID)
@@ -393,6 +561,12 @@ func applyPartyServiceConversationAct(session *Session, act ConversationAct, ser
 		break
 	}
 	if !result.Changed {
+		state := resetDialogProgress(session.DialogState, DialogPhaseDrafting)
+		state.LastActKind = act.Kind
+		session.DialogState = state
+		result.Clarification = true
+		result.Reply = partyServiceTargetName(act.TargetServiceIDs, services) + " is already assigned to " + partyGroupSpokenScope(plan, act.GuestRef) + "."
+		result.ReplySource = "party_service_correction_no_change"
 		return result
 	}
 	plan.ParseSource = "semantic_turn"
@@ -400,6 +574,9 @@ func applyPartyServiceConversationAct(session *Session, act ConversationAct, ser
 	plan.ClarifyReason = ""
 	session.PartyPlan = plan
 	session.OfferedSlots = nil
+	state := resetDialogProgress(session.DialogState, DialogPhaseDrafting)
+	state.LastActKind = act.Kind
+	session.DialogState = state
 	if partyPlanComplete(plan) {
 		applyPartyBookingPlan(session, partyBookingPlan{PartySize: plan.PartySize, Segments: partyPlanSegments(plan, *session)})
 		session.ServiceName = serviceName(session.ServiceID, services, "")
