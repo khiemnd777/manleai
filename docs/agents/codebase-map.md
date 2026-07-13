@@ -99,6 +99,9 @@ triage keyword table.
 - Runtime stack: `docker-compose.prod.yml`; API owns startup migrations and the
   worker starts only after API health with `AUTO_MIGRATE=false`.
 - Container targets: `backend/Dockerfile` targets `api` and `worker`.
+- Local stack: `docker-compose.yml` must build the backend API with
+  `target: api`; without an explicit target the multi-stage Dockerfile ends on
+  the `worker` stage and the API healthcheck cannot succeed.
 - Shared edge route and manifest templates:
   `deploy/manleai.caddy.template`, `deploy/manleai.edge-manifest.template`.
 - VPS Caddy ownership: `project-edgectl validate/upsert manleai` manages only
