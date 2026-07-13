@@ -32,6 +32,7 @@ const (
 	realtimeBackendProgressReply = "Thanks. I'm checking that now."
 	realtimeReplyQueueLimit      = 16
 	realtimeBufferedAudioLimit   = 8 * 1024 * 1024
+	streamingSpeechStartupBytes  = 1600 // 200 ms of 8 kHz mu-law audio.
 )
 
 type Handler struct {
@@ -517,6 +518,8 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	speechEvents := make(chan streamingSpeechEvent, 64)
 	var activeSpeechCancel context.CancelFunc
 	activeSpeechGeneration := 0
+	streamingStartupAudio := make([]byte, 0, streamingSpeechStartupBytes)
+	firstSpeechChunkSeen := false
 	transcriptPolicy := normalizedRealtimeTranscriptPolicy(realtime.TranscriptPolicy())
 	inputRecovery := realtimeInputRecovery{}
 	inputRecoveryFinalized := false
@@ -676,6 +679,8 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 		activeInterrupted = false
 		playbackAudioStartedAt = time.Time{}
 		suppressAudioUntilDone = false
+		streamingStartupAudio = streamingStartupAudio[:0]
+		firstSpeechChunkSeen = false
 		if streamingSpeech {
 			activeSpeechGeneration++
 			generation := activeSpeechGeneration
@@ -759,6 +764,46 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 		return true
 	}
 
+	sendStreamingAudio := func(audio []byte) bool {
+		if len(audio) == 0 || streamSID == "" {
+			return true
+		}
+		payload := base64.StdEncoding.EncodeToString(audio)
+		if err := writeJSON(twilioOutboundMedia{Event: "media", StreamSid: streamSID, Media: twilioOutboundMediaPayload{Payload: payload}}); err != nil {
+			_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "twilio_media_write", err)
+			if activeSpeechCancel != nil {
+				activeSpeechCancel()
+			}
+			closeStream("twilio_media_write_failed")
+			return false
+		}
+		activeAudioSent = true
+		if playbackAudioStartedAt.IsZero() {
+			playbackAudioStartedAt = now()
+			_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "twilio_first_media_sent", activeResponseCreatedAt, map[string]string{
+				"request_id":     activeReply.requestID,
+				"audio_encoding": "audio/x-mulaw",
+				"sample_rate":    strconv.Itoa(8000),
+				"audio_bytes":    strconv.Itoa(len(audio)),
+			})
+		}
+		return true
+	}
+
+	flushStreamingStartupAudio := func(reason string) bool {
+		if activeAudioSent || len(streamingStartupAudio) == 0 {
+			return true
+		}
+		audio := append([]byte(nil), streamingStartupAudio...)
+		streamingStartupAudio = streamingStartupAudio[:0]
+		_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "tts_startup_buffer_ready", activeResponseCreatedAt, map[string]string{
+			"request_id":  activeReply.requestID,
+			"audio_bytes": strconv.Itoa(len(audio)),
+			"reason":      reason,
+		})
+		return sendStreamingAudio(audio)
+	}
+
 	shouldInterruptPlayback := func() bool {
 		if playbackAudioStartedAt.IsZero() {
 			return false
@@ -823,37 +868,41 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 				if streamSID == "" {
 					continue
 				}
-				payload := base64.StdEncoding.EncodeToString(streamed.chunk.Audio)
-				if err := writeJSON(twilioOutboundMedia{Event: "media", StreamSid: streamSID, Media: twilioOutboundMediaPayload{Payload: payload}}); err != nil {
-					_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "twilio_media_write", err)
-					if activeSpeechCancel != nil {
-						activeSpeechCancel()
-					}
-					closeStream("twilio_media_write_failed")
-					return
-				}
-				activeAudioSent = true
-				if playbackAudioStartedAt.IsZero() {
-					playbackAudioStartedAt = now()
-					diagnostics := map[string]string{
+				if !firstSpeechChunkSeen {
+					firstSpeechChunkSeen = true
+					_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "tts_first_provider_chunk", time.Time{}, map[string]string{
 						"request_id":     streamed.requestID,
 						"audio_encoding": "audio/x-mulaw",
 						"sample_rate":    strconv.Itoa(8000),
+						"audio_bytes":    strconv.Itoa(len(streamed.chunk.Audio)),
+						"duration_ms":    durationMilliseconds(activeResponseCreatedAt, streamed.arrivedAt),
+					})
+				}
+				if !activeAudioSent {
+					needed := streamingSpeechStartupBytes - len(streamingStartupAudio)
+					if len(streamed.chunk.Audio) < needed {
+						streamingStartupAudio = append(streamingStartupAudio, streamed.chunk.Audio...)
+						continue
 					}
-					providerDiagnostics := copyStringMap(diagnostics)
-					providerDiagnostics["duration_ms"] = durationMilliseconds(activeResponseCreatedAt, streamed.arrivedAt)
-					_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "tts_first_provider_chunk", time.Time{}, providerDiagnostics)
-					_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "twilio_first_media_sent", activeResponseCreatedAt, diagnostics)
+					streamingStartupAudio = append(streamingStartupAudio, streamed.chunk.Audio[:needed]...)
+					if !flushStreamingStartupAudio("target_reached") {
+						return
+					}
+					if len(streamed.chunk.Audio) > needed && !sendStreamingAudio(streamed.chunk.Audio[needed:]) {
+						return
+					}
+					continue
+				}
+				if !sendStreamingAudio(streamed.chunk.Audio) {
+					return
 				}
 				continue
 			}
 			if !streamed.done {
 				continue
 			}
-			completedCloseAfter := activeCloseAfter
-			completedAudioSent := activeAudioSent
 			completedInterrupted := activeInterrupted
-			hadPendingReply := len(pendingReplies) > 0
+			completedAudioSent := activeAudioSent
 			if streamed.err != nil && !completedInterrupted {
 				if completedAudioSent && streamSID != "" {
 					_ = writeJSON(twilioClearMessage{Event: "clear", StreamSid: streamSID})
@@ -867,6 +916,14 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 				closeStream("openai_speech_stream_failed")
 				return
 			}
+			if streamed.err == nil && !completedInterrupted && !suppressAudioUntilDone && !activeAudioSent && len(streamingStartupAudio) > 0 {
+				if !flushStreamingStartupAudio("stream_complete") {
+					return
+				}
+			}
+			completedCloseAfter := activeCloseAfter
+			completedAudioSent = activeAudioSent
+			hadPendingReply := len(pendingReplies) > 0
 			_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "tts_stream_done", activeResponseCreatedAt, map[string]string{
 				"request_id":          streamed.requestID,
 				"provider_request_id": streamed.result.ProviderRequestID,
@@ -883,6 +940,8 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 			activeResponseCreatedAt = time.Time{}
 			activeSpeechCancel = nil
 			suppressAudioUntilDone = false
+			streamingStartupAudio = streamingStartupAudio[:0]
+			firstSpeechChunkSeen = false
 			if !flushPendingReply() {
 				return
 			}

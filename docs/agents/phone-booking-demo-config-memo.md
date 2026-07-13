@@ -336,9 +336,11 @@ the selected noise profile to mean, low-tail, and VAD-coherence admission; a
 rejected transcript is reprompted without changing conversation state. Barge-in
 must pass the playback guard before clearing Twilio playback and cancelling the
 active speech stream. In `streaming_tts` mode, OpenAI Realtime is input-only;
-backend-approved text is sent to the Speech endpoint and each PCMU chunk is
-forwarded immediately without waiting for `response.done`. Completion is used
-for audit and queue cleanup. A provider or conversion failure uses terminal
+backend-approved text is sent to the Speech endpoint, converted incrementally,
+and held in a bounded 200 ms startup buffer before the first Twilio media
+message. Audio then continues streaming without waiting for `response.done` or
+full Speech completion; short replies flush at Speech completion. Completion is
+used for audit and queue cleanup. A provider or conversion failure uses terminal
 fallback and never retries booking. `buffered_realtime` is the legacy rollback
 mode: it still binds response identity, buffers complete output, and validates
 the final audio transcript before release.
