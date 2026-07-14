@@ -361,14 +361,24 @@ func applyTurnUnderstandingMetadata(turnRecord *TurnRecord, understanding TurnUn
 		})
 	}
 	turnRecord.CustomerMetadata = mergeMetadata(turnRecord.CustomerMetadata, map[string]any{
-		"turn_understanding_source":        understanding.Source,
-		"turn_understanding_goal":          understanding.Goal,
-		"turn_understanding_confidence":    understanding.Confidence,
-		"turn_understanding_reason":        understanding.Reason,
-		"turn_understanding_model_invoked": understanding.ModelInvoked,
-		"turn_understanding_acts":          acts,
-		"turn_understanding_questions":     questions,
-		"turn_interpreter_outcome":         understanding.InterpreterOutcome,
+		"turn_understanding_source":          understanding.Source,
+		"turn_understanding_goal":            understanding.Goal,
+		"turn_understanding_confidence":      understanding.Confidence,
+		"turn_understanding_reason":          understanding.Reason,
+		"turn_understanding_model_invoked":   understanding.ModelInvoked,
+		"turn_understanding_acts":            acts,
+		"turn_understanding_questions":       questions,
+		"turn_interpreter_outcome":           understanding.InterpreterOutcome,
+		"consultation_current_system":        understanding.Consultation.CurrentSystem,
+		"consultation_desired_outcome":       understanding.Consultation.DesiredOutcome,
+		"consultation_length_change":         understanding.Consultation.LengthChange,
+		"consultation_priorities":            append([]string(nil), understanding.Consultation.Priorities...),
+		"consultation_desired_finishes":      append([]string(nil), understanding.Consultation.DesiredFinishes...),
+		"consultation_compared_service_ids":  append([]string(nil), understanding.Consultation.ComparedServiceIDs...),
+		"consultation_booking_requested":     understanding.Consultation.BookingRequested,
+		"consultation_conversation_complete": understanding.Consultation.ConversationComplete,
+		"consultation_confidence":            understanding.Consultation.Confidence,
+		"consultation_reason":                understanding.Consultation.Reason,
 	})
 	turnRecord.AIMetadata = mergeMetadata(turnRecord.AIMetadata, map[string]any{
 		"draft_revision":      turnRecord.Update.DialogState.DraftRevision,

@@ -121,8 +121,20 @@ func TestInterpretTurnUsesStrictCatalogBoundMultiActSchema(t *testing.T) {
 			t.Fatalf("decode request: %v", err)
 		}
 		instructions, _ := req["instructions"].(string)
-		if !strings.Contains(instructions, "Use only service and category IDs present in catalog_services") || !strings.Contains(instructions, "pending clarification is context, not a restriction") {
+		if !strings.Contains(instructions, "Use only service and category IDs present in catalog_services") || !strings.Contains(instructions, "pending clarification is context, not a restriction") || !strings.Contains(instructions, "Never recommend a service in model output") {
 			t.Fatalf("conversation act instructions = %s", instructions)
+		}
+		textConfig, _ := req["text"].(map[string]any)
+		format, _ := textConfig["format"].(map[string]any)
+		schema, _ := format["schema"].(map[string]any)
+		properties, _ := schema["properties"].(map[string]any)
+		consultationSchema, ok := properties["consultation"].(map[string]any)
+		if !ok {
+			t.Fatalf("structured schema is missing consultation: %#v", schema)
+		}
+		consultationProperties, _ := consultationSchema["properties"].(map[string]any)
+		if _, ok := consultationProperties["desired_finishes"]; !ok {
+			t.Fatalf("consultation schema is missing desired_finishes: %#v", consultationSchema)
 		}
 		input, _ := req["input"].(string)
 		var modelInput map[string]any
@@ -136,7 +148,7 @@ func TestInterpretTurnUsesStrictCatalogBoundMultiActSchema(t *testing.T) {
 			t.Fatalf("expected_input = %#v", modelInput["expected_input"])
 		}
 		body, _ := json.Marshal(map[string]any{
-			"output_text": `{"goal":"book_appointment","acts":[{"kind":"replace_service","entity":"service","source_ids":["service_gel"],"target_ids":["service_spa"],"source_category_id":"","source_category_name":"","target_category_id":"cat_pedi","target_category_name":"Pedicure","scope":"one","guest_scope":"","guest_ref":"","subject":"","value":"","count":0,"confidence":0.95,"reason":"explicit replacement"}],"questions":[{"subject":"availability","service_ids":["service_spa"],"staff_ids":[],"time_preference":{"direction":"","minutes":-1},"confidence":0.92,"reason":"caller asked about availability"}],"confidence":0.95,"reason":"correction plus question"}`,
+			"output_text": `{"goal":"book_appointment","acts":[{"kind":"replace_service","entity":"service","source_ids":["service_gel"],"target_ids":["service_spa"],"source_category_id":"","source_category_name":"","target_category_id":"cat_pedi","target_category_name":"Pedicure","scope":"one","guest_scope":"","guest_ref":"","subject":"","value":"","count":0,"confidence":0.95,"reason":"explicit replacement"}],"questions":[{"subject":"availability","service_ids":["service_spa"],"staff_ids":[],"time_preference":{"direction":"","minutes":-1},"confidence":0.92,"reason":"caller asked about availability"}],"confidence":0.95,"reason":"correction plus question","consultation":{"current_system":"","desired_outcome":"","length_change":"","priorities":[],"desired_finishes":[],"compared_service_ids":[],"booking_requested":false,"conversation_complete":false,"confidence":0,"reason":""}}`,
 		})
 		return jsonResponse(body), nil
 	})}

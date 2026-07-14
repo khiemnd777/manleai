@@ -198,7 +198,10 @@ Returns salons owned by the authenticated user.
 Returns and updates owner-scoped AI receptionist settings. `ai_tone` accepts
 `professional_warm`, `natural_human`, `friendly_young`, or `concise_calm`.
 The tone controls spoken reply style only; booking guardrails and POS-first
-confirmation rules still override style.
+confirmation rules still override style. `consultation_enabled` is the salon-wide
+runtime gate for AI service consultation. It does not make any service eligible by
+itself; eligibility still requires an active-provider link, AI booking eligibility,
+and a ready service consultation profile.
 
 ```json
 {
@@ -211,7 +214,8 @@ confirmation rules still override style.
   "sms_confirmation_enabled": true,
   "sms_reminder_enabled": true,
   "reminder_hours_before": 24,
-  "handoff_enabled": true
+  "handoff_enabled": true,
+  "consultation_enabled": true
 }
 ```
 
@@ -301,20 +305,24 @@ configuration only:
 
 Secret-bearing integrations return only configuration values and secret status
 metadata such as `client_secret_configured`, `auth_token_configured`,
-`api_key_configured`, and `*_source`. It does not export services, staff,
+`api_key_configured`, and `*_source`. It does not export services, service
+consultation profiles, staff,
 customers, appointments, booking attempts, fallback requests, call sessions,
 transcripts, recordings, summaries, owner corrections, POS entity links, POS
 sync jobs/logs/errors, provider switch runs/matches, synced business hour
 periods, party booking requests, voice webhook/audio records, POS OAuth tokens,
 API keys, client secrets, encrypted secrets, or POS connection token state.
+Schema v6 adds `ai_receptionist.consultation_enabled`. Import remains backward
+compatible with v1-v5 bundles; those legacy bundles default consultation to
+enabled because they contain no explicit consultation runtime setting.
 
 ```json
 {
-  "schema_version": "manleai.salon_configuration.v5",
+  "schema_version": "manleai.salon_configuration.v6",
   "exported_at": "2026-06-26T15:00:00Z",
   "secrets_exported": false,
   "operational_data_exported": false,
-  "excluded_data": ["services", "staff", "customers", "appointments", "call_sessions", "pos_entity_links", "pos_sync_jobs", "pos_sync_logs", "pos_errors", "provider_switch_runs", "provider_switch_matches", "salon_business_hour_periods", "party_booking_requests", "voice_webhook_events", "voice_audio_outputs", "pos_oauth_tokens", "api_keys", "client_secrets", "encrypted_secrets"],
+  "excluded_data": ["services", "service_consultation_profiles", "staff", "customers", "appointments", "call_sessions", "pos_entity_links", "pos_sync_jobs", "pos_sync_logs", "pos_errors", "provider_switch_runs", "provider_switch_matches", "salon_business_hour_periods", "party_booking_requests", "voice_webhook_events", "voice_audio_outputs", "pos_oauth_tokens", "api_keys", "client_secrets", "encrypted_secrets"],
   "requires_secret_reentry": ["square", "twilio", "openai"],
   "salon_profile": {
     "name": "Lotus Nails Studio",
@@ -342,6 +350,7 @@ API keys, client secrets, encrypted secrets, or POS connection token state.
     "sms_reminder_enabled": true,
     "reminder_hours_before": 24,
     "handoff_enabled": true,
+    "consultation_enabled": true,
     "updated_at": "2026-06-25T14:30:00Z"
   },
   "public_booking_page": {
@@ -481,7 +490,7 @@ Request shape, with the full exported bundle in `configuration`:
 ```json
 {
   "configuration": {
-    "schema_version": "manleai.salon_configuration.v5",
+    "schema_version": "manleai.salon_configuration.v6",
     "...": "full exported configuration bundle"
   }
 }
@@ -494,7 +503,7 @@ Response:
   "request_id": "import-preview-id",
   "dry_run": true,
   "status": "previewed",
-  "schema_version": "manleai.salon_configuration.v5",
+  "schema_version": "manleai.salon_configuration.v6",
   "can_apply": true,
   "summary": [
     {"section": "salon_profile", "created": 0, "updated": 6, "unchanged": 5, "skipped": 0, "conflicts": 0},
@@ -506,7 +515,7 @@ Response:
     {"section": "integrations", "code": "secret_reentry_required", "message": "square secret values are not included in the export. Re-enter secrets or reconnect this provider after import.", "field": "square"}
   ],
   "conflicts": [],
-  "excluded_data": ["services", "staff", "customers", "appointments", "call_sessions", "pos_entity_links", "pos_sync_jobs", "pos_sync_logs", "pos_errors", "provider_switch_runs", "provider_switch_matches", "salon_business_hour_periods", "party_booking_requests", "voice_webhook_events", "voice_audio_outputs", "pos_oauth_tokens", "api_keys", "client_secrets", "encrypted_secrets"],
+  "excluded_data": ["services", "service_consultation_profiles", "staff", "customers", "appointments", "call_sessions", "pos_entity_links", "pos_sync_jobs", "pos_sync_logs", "pos_errors", "provider_switch_runs", "provider_switch_matches", "salon_business_hour_periods", "party_booking_requests", "voice_webhook_events", "voice_audio_outputs", "pos_oauth_tokens", "api_keys", "client_secrets", "encrypted_secrets"],
   "requires_secret_reentry": ["square", "twilio", "openai"]
 }
 ```
@@ -522,7 +531,7 @@ idempotent, while reusing it with a different payload returns a conflict.
 {
   "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
   "configuration": {
-    "schema_version": "manleai.salon_configuration.v5",
+    "schema_version": "manleai.salon_configuration.v6",
     "...": "full exported configuration bundle"
   }
 }
@@ -557,7 +566,7 @@ returns the same `salon_id` and `import_run_id`.
 {
   "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
   "configuration": {
-    "schema_version": "manleai.salon_configuration.v5",
+    "schema_version": "manleai.salon_configuration.v6",
     "...": "full exported configuration bundle"
   }
 }
@@ -572,12 +581,12 @@ Response includes the created salon id:
   "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
   "dry_run": false,
   "status": "applied",
-  "schema_version": "manleai.salon_configuration.v5",
+  "schema_version": "manleai.salon_configuration.v6",
   "can_apply": true,
   "summary": [],
   "warnings": [],
   "conflicts": [],
-  "excluded_data": ["services", "staff", "customers", "appointments", "call_sessions", "pos_entity_links", "pos_sync_jobs", "pos_sync_logs", "pos_errors", "provider_switch_runs", "provider_switch_matches", "salon_business_hour_periods", "party_booking_requests", "voice_webhook_events", "voice_audio_outputs", "pos_oauth_tokens", "api_keys", "client_secrets", "encrypted_secrets"],
+  "excluded_data": ["services", "service_consultation_profiles", "staff", "customers", "appointments", "call_sessions", "pos_entity_links", "pos_sync_jobs", "pos_sync_logs", "pos_errors", "provider_switch_runs", "provider_switch_matches", "salon_business_hour_periods", "party_booking_requests", "voice_webhook_events", "voice_audio_outputs", "pos_oauth_tokens", "api_keys", "client_secrets", "encrypted_secrets"],
   "requires_secret_reentry": ["square", "twilio", "openai"]
 }
 ```
@@ -731,7 +740,18 @@ is manageable by the owner but not eligible for availability or booking.
       "category_slug": "manicure",
       "category_source": "manual",
       "category_confidence": 1,
-      "category_reviewed_at": "2026-06-25T14:30:00Z"
+      "category_reviewed_at": "2026-06-25T14:30:00Z",
+      "consultation_profile": {
+        "status": "ready",
+        "recommended_outcomes": ["maintain", "color_refresh"],
+        "compatible_current_systems": ["natural", "regular_polish"],
+        "length_capabilities": ["keep", "shorten"],
+        "priority_tags": ["shorter_visit", "lower_cost"],
+        "finish_options": ["regular_polish", "glossy"],
+        "maintenance_note": "Owner-approved upkeep guidance.",
+        "owner_approved_summary": "Classic nail care with regular polish.",
+        "revision": 3
+      }
     }
   ]
 }
@@ -748,18 +768,28 @@ queue a `pos_sync_jobs` outbox job and move through `syncing`, `synced`, or
 `sync_failed`. Square Appointments service writes are not enabled in the current
 slice.
 
-`ai_description` is the owner-approved consultation summary the AI receptionist
-may use when callers compare services. It is trimmed and limited to 320 Unicode
-characters. When empty, consultation may fall back to `description`; otherwise
-the runtime uses only structured service name, category, duration, and price.
-Health or medical suitability questions are handed to the owner and are not
-answered from this field.
+`consultation_profile` is the optional owner-managed child record for this
+service. Its controlled arrays accept outcomes (`maintain`, `shorten`,
+`add_length`, `add_strength`, `repair`, `removal`, `color_refresh`), current
+systems (`natural`, `regular_polish`, `gel`, `dip`, `acrylic`, `extension`),
+length capabilities (`keep`, `shorten`, `add_length`), priorities
+(`durability`, `lower_maintenance`, `lower_cost`, `shorter_visit`), and finishes
+(`natural`, `regular_polish`, `gel_polish`, `glossy`, `matte`, `nail_art`). A
+`ready` profile requires at least one structured value. Summary and maintenance
+text are trimmed and limited to 320 Unicode characters. Identical retry payloads
+are no-ops; a changed profile increments `revision`.
 
-Consultation candidate IDs/names are stored on AI transcript metadata. A later
-AI transcript writes `pending_consultation_cleared=true` when the caller selects
-a concrete catalog service or the conversation leaves consultation. Appointment
-cancel, reschedule, human handoff, and active party-plan actions take precedence
-over consultation routing.
+Only `ready` profiles attached to active-provider, POS-linked, AI-bookable
+services participate in consultation ranking. `ai_description`, then
+`description`, remains a display-summary fallback for legacy records; neither
+field can make a draft or disabled profile recommendation-eligible. Health or
+medical suitability questions are handed to the owner.
+
+Active consultation control state lives in `call_sessions.dialog_state`, with
+transcript metadata retained only as audit evidence. Appointment cancel,
+reschedule, human handoff, and active party-plan actions take precedence over
+consultation. Selecting a service during consultation does not start booking
+until the caller also gives explicit booking intent.
 
 ```json
 {
@@ -769,7 +799,17 @@ over consultation routing.
   "duration_minutes": 20,
   "price_from": 10,
   "active": true,
-  "service_category_id": "category-removal-id"
+  "service_category_id": "category-removal-id",
+  "consultation_profile": {
+    "status": "draft",
+    "recommended_outcomes": ["removal"],
+    "compatible_current_systems": ["gel"],
+    "length_capabilities": [],
+    "priority_tags": [],
+    "finish_options": [],
+    "maintenance_note": "",
+    "owner_approved_summary": "Removes existing gel polish before a new service."
+  }
 }
 ```
 
@@ -788,7 +828,17 @@ Returns `201`:
     "source": "local",
     "pos_linked": false,
     "service_category_id": "category-removal-id",
-    "category_source": "manual"
+    "category_source": "manual",
+    "consultation_profile": {
+      "status": "draft",
+      "recommended_outcomes": ["removal"],
+      "compatible_current_systems": ["gel"],
+      "length_capabilities": [],
+      "priority_tags": [],
+      "finish_options": [],
+      "owner_approved_summary": "Removes existing gel polish before a new service.",
+      "revision": 1
+    }
   }
 }
 ```
@@ -807,7 +857,17 @@ is saved, `ai_bookable` is also disabled.
   "duration_minutes": 45,
   "price_from": 35,
   "active": true,
-  "service_category_id": "category-manicure-id"
+  "service_category_id": "category-manicure-id",
+  "consultation_profile": {
+    "status": "ready",
+    "recommended_outcomes": ["maintain", "color_refresh"],
+    "compatible_current_systems": ["natural", "regular_polish"],
+    "length_capabilities": ["keep", "shorten"],
+    "priority_tags": ["shorter_visit"],
+    "finish_options": ["regular_polish"],
+    "maintenance_note": "Owner-approved upkeep guidance.",
+    "owner_approved_summary": "Includes nail shaping, cuticle care, and regular polish."
+  }
 }
 ```
 
@@ -1413,7 +1473,7 @@ Creates a simulator session and writes the initial AI transcript message. The in
 
 `GET /api/salons/:id/conversation-sessions/:session_id`
 
-Returns one conversation session with transcript messages and the latest handoff request when present. Booking state includes `requested_date` when the customer has provided a day but not a specific time, and `requested_start_time` only after a concrete start time or offered slot is selected. `dialog_state` is a versioned operational state object containing phase, pending typed clarification, bounded mutation history, no-progress count, `draft_revision`, `reviewed_revision`, and `authorized_revision`. Transcript messages may include PII-reduced turn-understanding diagnostics, validated acts/questions, revision transitions, slot state, event keys, guardrail outcomes, answer sources, and next required booking field.
+Returns one conversation session with transcript messages and the latest handoff request when present. Booking state includes `requested_date` when the customer has provided a day but not a specific time, and `requested_start_time` only after a concrete start time or offered slot is selected. `dialog_state` is a versioned operational state object containing phase, pending typed clarification, bounded mutation history, no-progress count, `draft_revision`, `reviewed_revision`, `authorized_revision`, and optional `consultation` state. Consultation state includes controlled caller needs such as desired finish, candidate and recommended service IDs, selected service ID, last asked field, profile revisions, recommendation reasons, bounded no-progress count, resume phase, and exit reason. Transcript messages may include PII-reduced turn-understanding diagnostics, validated acts/questions, revision transitions, slot state, event keys, guardrail outcomes, answer sources, consultation audit metadata, and next required field.
 
 Production-created sessions use `dialog_state.review_required=true`. When every booking field is complete, the runtime sets `reviewed_revision=draft_revision`, returns `phase=review`, and asks the caller to review the draft. A later explicit authorization sets `authorized_revision` only for that same revision. Booking requires `draft_revision == reviewed_revision == authorized_revision`; review acceptance is not booking confirmation.
 
@@ -1435,6 +1495,8 @@ Irreversibly redacts a completed or otherwise non-active owner-scoped conversati
 ```
 
 Processes one simulated customer message through the deterministic conversation engine. `event_key` is optional for simulator callers and is used by voice adapters to dedupe provider retries. The simulator asks one question at a time, preserves already-collected booking slots, handles greeting-only or connection-check turns without replaying the full welcome or forcing booking intent, handles date-only turns such as weekdays before a time is known, can create owner handoffs for human requests or disabled AI booking, checks provider-neutral availability before selecting a booking time, offers available slots from Square Appointments, and calls the provider-neutral booking service only after the customer selects a slot and required customer details are collected. Deterministic date, time, staff, customer, and explicit availability-question evidence is applied before a model-proposed standalone summary can return, so a concrete correction or request for openings cannot be dropped or misrouted by semantic classification. If a new-booking caller proposes a different date or time after availability slots were offered, the engine preserves those slots and stores a typed pending correction until the caller confirms; rejection or a renewed availability question keeps and repeats the prior slots, while confirmation invalidates them and performs a fresh provider availability check. Service utterances are interpreted against the active salon catalog, active `service_aliases`, active `service_categories`, and active `service_category_aliases`; exact catalog service names win over aliases, alias matches can select one service, category/category-alias matches ask the caller to choose a real service in that group, and generic or fuzzy family matches ask for catalog-backed clarification instead of selecting a service. A structured semantic act cannot narrow a category/category-alias candidate set to one service without concrete service evidence. Exact family evidence takes precedence over fuzzy service guessing unless another caller token distinctly identifies one catalog service, so conversational wording such as "manicure as well" cannot be misread as "Gel Manicure." If the caller mentions a different service after a service is already selected, the engine distinguishes adding from replacing before mutating the booking; a bare concrete service switch uses confirmation before clearing slots or changing the draft. A generic request such as another service first asks whether to add or replace; an ambiguous service family then asks for one concrete catalog service; and a multi-service replacement also asks which current service to replace. While a family target is pending, short replies are interpreted against that candidate set first, with full-catalog fallback for a clearly different service. The engine preserves the selected services and offered slots until the operation and concrete target are resolved, never applies every candidate from an ambiguous family, and only then clears stale offered slots and rechecks availability when date or time context already exists. Non-booking answers are routed from structured sources before knowledge: active-provider AI-bookable services, imported business hour periods, active-provider staff, booking availability prompts, then active knowledge. Informational service menu and count questions are answered from the full matched bookable catalog without selecting a service, clearing pending candidates, or calling availability/booking tools; if a booking is already in progress, the reply then resumes the unresolved service question. Transcript metadata may include `service_understanding_status`, `service_understanding_reason`, `service_understanding_confidence`, candidate service IDs/names, selected service, alias source, alias ID, category ID, category name, `answer_source`, `answer_source_reason`, `answer_source_confidence`, `router_intent`, `source_record_ids`, and `answer_context_cache_hit` for debugging. Supported group or party booking requests resolve party size and guest service counts into ordered `booking_segments`, call availability, and can be booked through the same POS-first booking service after the caller selects a slot and provides required customer details. Party parsing distinguishes person-count phrases such as "for two guests" from service-count phrases such as "two manicures"; session `party_plan` may include optional `parse_source`, `parse_confidence`, `clarify_reason`, group `source`, and `evidence` fields for debugging and review. Ambiguous party service families and party-size/service-count mismatches ask for catalog-backed clarification before availability. Offered slots may include ordered `segments` with provider-neutral service/staff assignments. The engine can select a unique offered slot from ordinal replies, spoken times such as "one p.m.", or a "Yes" reply to a prompt that confirmed one specific offered time; unclear time fragments repeat the existing offered slots instead of rerunning availability. Once a customer selects a slot, the session stores selected `booking_segments` and `staff_selection_mode` so simulator and phone flows can create one multi-service or supported party POS-first booking request. When `staff_selection_mode=anyone`, the customer did not choose a named technician, so the conversation avoids presenting the POS staff assignment as a customer-selected technician. Reschedule and cancellation requests use `booking_action` values `reschedule` and `cancel`, look up upcoming POS-backed appointments by caller phone, ask the caller to select or confirm the target appointment, and then call the provider-neutral booking service. A simulator booking is marked `booking_confirmed` only when the booking service returns a confirmed booking attempt with a POS booking ID and appointment. Cancellation is marked `booking_cancelled` only when the booking service returns a POS-cancelled appointment. POS failures create `booking_fallback_pending` wording and do not create confirmed, rescheduled, or cancelled appointment language.
+
+When `consultation_enabled=true`, a caller may enter AI Consultation without a booking request. The semantic lane extracts controlled consultation needs but does not choose a service. Backend ranking uses only `ready` profiles from the eligible active-provider service catalog, stores the profile revisions and reasons in dialog state, and asks one useful question per turn. Consultation never calls availability or booking tools. A recommendation with one result asks whether the caller wants booking help; multiple results ask for a concrete service choice, and that choice still requires a separate booking-intent confirmation. A caller may end with `outcome=consultation_completed`, return to an unchanged booking draft, or enter owner handoff for safety or repeated unresolved input.
 
 Configured production turns first enter the state-driven Turn Kernel. The kernel derives `expected_input`, measures deterministic coverage, and selects one explicit route: `fast_lane`, `answer_lane`, `action_lane`, `recovery_lane`, or `semantic_lane`. Unambiguous expected-field evidence, offered-slot choices, state-scoped confirmations, structured questions, and operational actions avoid a reply-model round trip. For a new booking with no selected service, an exact catalog service advances directly to the next missing field and a category asks for one concrete catalog option; neither path asks whether to add or replace. An add-or-replace operation choice is valid only after a service has been selected. The semantic lane uses a strict `TurnUnderstanding` object containing a goal, zero or more ordered acts, and zero or more questions. Acts cover add/replace/remove/undo plus set/clear corrections for service, staff, date/time, customer, and guest state. One utterance may contain both a correction and a question; the reducer applies validated correction semantics first, answers the question from structured sources, then resumes one useful pending question. Replacement source and target remain separate. Pending candidates are context rather than a closed vocabulary, current-draft questions do not become catalog-count questions, and repeated unresolved clarification is bounded. For a completed `party_plan`, service correction pending state uses `party_service_target`, `party_service_guest`, `party_service_operation`, and `party_service_source` with `guest_ref`; short replies resolve deterministically, only the selected party group may change, and offered slots/review authorization are invalidated only after the correction resolves. Unresolved party-correction pending state blocks availability and booking even when semantic interpretation is unavailable.
 

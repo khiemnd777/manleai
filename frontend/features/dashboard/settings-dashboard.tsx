@@ -24,6 +24,7 @@ import type {
   ConfigurationBundle,
   ConfigurationImportResponse,
   POSConnection,
+  POSService,
   PublicCatalogSettings,
   Salon,
   SalonSettings,
@@ -43,6 +44,10 @@ type StatusResponse = {
 
 type BusinessHoursResponse = {
   periods: BusinessHourPeriod[];
+};
+
+type ServicesResponse = {
+  services: POSService[];
 };
 
 type SalonFormState = {
@@ -67,6 +72,7 @@ type SettingsFormState = {
   smsReminderEnabled: boolean;
   reminderHoursBefore: string;
   handoffEnabled: boolean;
+  consultationEnabled: boolean;
 };
 
 type PublicCatalogFormState = {
@@ -104,6 +110,7 @@ export function SettingsDashboard() {
   const [settings, setSettings] = useState<SalonSettings | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [periods, setPeriods] = useState<BusinessHourPeriod[]>([]);
+  const [services, setServices] = useState<POSService[]>([]);
   const [salonForm, setSalonForm] = useState<SalonFormState>(emptySalonForm());
   const [settingsForm, setSettingsForm] = useState<SettingsFormState>(emptySettingsForm());
   const [publicCatalog, setPublicCatalog] = useState<PublicCatalogSettings | null>(null);
@@ -130,6 +137,7 @@ export function SettingsDashboard() {
         setSettings(null);
         setStatus(null);
         setPeriods([]);
+        setServices([]);
         setSalonForm(emptySalonForm());
         setSettingsForm(emptySettingsForm());
         setPublicCatalog(null);
@@ -138,16 +146,18 @@ export function SettingsDashboard() {
         return;
       }
 
-      const [statusResponse, settingsResponse, businessHoursResponse, publicCatalogResponse] = await Promise.all([
+      const [statusResponse, settingsResponse, businessHoursResponse, publicCatalogResponse, servicesResponse] = await Promise.all([
         apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
         apiRequest<SalonSettings>(`/api/salons/${firstSalon.id}/settings`),
         apiRequest<BusinessHoursResponse>(`/api/salons/${firstSalon.id}/business-hours`),
-        apiRequest<PublicCatalogSettings>(`/api/salons/${firstSalon.id}/public-catalog`)
+        apiRequest<PublicCatalogSettings>(`/api/salons/${firstSalon.id}/public-catalog`),
+        apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`)
       ]);
 
       setStatus(statusResponse);
       setSettings(settingsResponse);
       setPeriods(businessHoursResponse.periods ?? []);
+      setServices(servicesResponse.services ?? []);
       setPublicCatalog(publicCatalogResponse);
       setSalonForm(salonToForm(firstSalon));
       setSettingsForm(settingsToForm(settingsResponse));
@@ -166,6 +176,14 @@ export function SettingsDashboard() {
   }, []);
 
   const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
+  const consultationEligibleServices = useMemo(
+    () => services.filter((service) => service.active && service.pos_linked && service.ai_bookable && !service.archived_at),
+    [services]
+  );
+  const consultationReadyCount = useMemo(
+    () => consultationEligibleServices.filter((service) => service.consultation_profile?.status === "ready").length,
+    [consultationEligibleServices]
+  );
   const activeProvider = salon?.active_pos_provider || "square";
   const activeProviderLabel = activeProvider === "square" ? "Square" : activeProvider;
   const importedProviderPeriods = useMemo(() => periods.filter((period) => isImportedProviderPeriod(period, activeProvider)), [activeProvider, periods]);
@@ -242,7 +260,8 @@ export function SettingsDashboard() {
           sms_confirmation_enabled: settingsForm.smsConfirmationEnabled,
           sms_reminder_enabled: settingsForm.smsReminderEnabled,
           reminder_hours_before: reminderHours,
-          handoff_enabled: settingsForm.handoffEnabled
+          handoff_enabled: settingsForm.handoffEnabled,
+          consultation_enabled: settingsForm.consultationEnabled
         })
       });
       setSettings(updated);
@@ -465,6 +484,8 @@ export function SettingsDashboard() {
       <AISettingsForm
         form={settingsForm}
         aiEnabled={aiEnabled}
+        consultationReadyCount={consultationReadyCount}
+        consultationEligibleCount={consultationEligibleServices.length}
         busy={busy === "save-settings"}
         onChange={setSettingsForm}
         onSave={() => void saveSettings()}
@@ -836,12 +857,16 @@ function SalonProfileForm({
 function AISettingsForm({
   form,
   aiEnabled,
+  consultationReadyCount,
+  consultationEligibleCount,
   busy,
   onChange,
   onSave
 }: {
   form: SettingsFormState;
   aiEnabled: boolean;
+  consultationReadyCount: number;
+  consultationEligibleCount: number;
   busy: boolean;
   onChange: (next: SettingsFormState) => void;
   onSave: () => void;
@@ -917,6 +942,26 @@ function AISettingsForm({
           onChange={(checked) => onChange({ ...form, smsReminderEnabled: checked })}
         />
         <CheckboxRow label="Owner handoff enabled" checked={form.handoffEnabled} disabled={busy} onChange={(checked) => onChange({ ...form, handoffEnabled: checked })} />
+        <CheckboxRow
+          label="AI service consultation enabled"
+          checked={form.consultationEnabled}
+          disabled={busy}
+          onChange={(checked) => onChange({ ...form, consultationEnabled: checked })}
+        />
+      </div>
+
+      <div className="mt-5 rounded-md border border-line bg-slate-50 p-4 text-sm">
+        <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+          <div>
+            <div className="font-semibold text-ink">Consultation profile coverage</div>
+            <div className="mt-1 text-xs leading-5 text-muted">
+              {consultationReadyCount} of {consultationEligibleCount} AI-bookable services have an owner-approved ready profile.
+            </div>
+          </div>
+          <Link className="text-sm font-semibold text-brand hover:underline" href="/dashboard/services">
+            Manage service profiles
+          </Link>
+        </div>
       </div>
 
       <div className="mt-5 flex justify-end">
@@ -1153,7 +1198,8 @@ function emptySettingsForm(): SettingsFormState {
     smsConfirmationEnabled: true,
     smsReminderEnabled: true,
     reminderHoursBefore: "24",
-    handoffEnabled: true
+    handoffEnabled: true,
+    consultationEnabled: true
   };
 }
 
@@ -1173,7 +1219,8 @@ function settingsToForm(settings: SalonSettings): SettingsFormState {
     smsConfirmationEnabled: settings.sms_confirmation_enabled,
     smsReminderEnabled: settings.sms_reminder_enabled,
     reminderHoursBefore: String(settings.reminder_hours_before || 24),
-    handoffEnabled: settings.handoff_enabled
+    handoffEnabled: settings.handoff_enabled,
+    consultationEnabled: settings.consultation_enabled
   };
 }
 

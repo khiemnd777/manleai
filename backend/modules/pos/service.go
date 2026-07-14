@@ -3,6 +3,7 @@ package pos
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -917,19 +918,105 @@ func normalizeServiceWriteRequest(req ServiceWriteRequest, defaultActive bool) (
 	if len([]rune(aiDescription)) > 320 {
 		return ServiceMutation{}, ErrValidation
 	}
+	consultationProfile, err := normalizeConsultationProfileWriteRequest(req.ConsultationProfile)
+	if err != nil {
+		return ServiceMutation{}, err
+	}
 	active := defaultActive
 	if req.Active != nil {
 		active = *req.Active
 	}
 	return ServiceMutation{
-		Name:              name,
-		Description:       strings.TrimSpace(req.Description),
-		AIDescription:     aiDescription,
-		DurationMinutes:   req.DurationMinutes,
-		PriceFrom:         req.PriceFrom,
-		Active:            active,
-		ServiceCategoryID: strings.TrimSpace(req.ServiceCategoryID),
+		Name:                name,
+		Description:         strings.TrimSpace(req.Description),
+		AIDescription:       aiDescription,
+		DurationMinutes:     req.DurationMinutes,
+		PriceFrom:           req.PriceFrom,
+		Active:              active,
+		ServiceCategoryID:   strings.TrimSpace(req.ServiceCategoryID),
+		ConsultationProfile: consultationProfile,
 	}, nil
+}
+
+func normalizeConsultationProfileWriteRequest(req *ServiceConsultationProfileWriteRequest) (*ServiceConsultationProfileMutation, error) {
+	if req == nil {
+		return nil, nil
+	}
+	status := strings.TrimSpace(req.Status)
+	if status == "" {
+		status = ConsultationProfileStatusDraft
+	}
+	if status != ConsultationProfileStatusDraft && status != ConsultationProfileStatusReady && status != ConsultationProfileStatusDisabled {
+		return nil, ErrValidation
+	}
+	outcomes, ok := normalizedConsultationValues(req.RecommendedOutcomes, map[string]bool{
+		ConsultationOutcomeMaintain: true, ConsultationOutcomeShorten: true, ConsultationOutcomeAddLength: true,
+		ConsultationOutcomeAddStrength: true, ConsultationOutcomeRepair: true, ConsultationOutcomeRemoval: true,
+		ConsultationOutcomeColorRefresh: true,
+	})
+	if !ok {
+		return nil, ErrValidation
+	}
+	systems, ok := normalizedConsultationValues(req.CompatibleCurrentSystems, map[string]bool{
+		ConsultationSystemNatural: true, ConsultationSystemRegularPolish: true, ConsultationSystemGel: true,
+		ConsultationSystemDip: true, ConsultationSystemAcrylic: true, ConsultationSystemExtension: true,
+	})
+	if !ok {
+		return nil, ErrValidation
+	}
+	lengths, ok := normalizedConsultationValues(req.LengthCapabilities, map[string]bool{
+		ConsultationLengthKeep: true, ConsultationLengthShorten: true, ConsultationLengthAddLength: true,
+	})
+	if !ok {
+		return nil, ErrValidation
+	}
+	priorities, ok := normalizedConsultationValues(req.PriorityTags, map[string]bool{
+		ConsultationPriorityDurability: true, ConsultationPriorityLowerMaintenance: true,
+		ConsultationPriorityLowerCost: true, ConsultationPriorityShorterVisit: true,
+	})
+	if !ok {
+		return nil, ErrValidation
+	}
+	finishes, ok := normalizedConsultationValues(req.FinishOptions, map[string]bool{
+		ConsultationFinishNatural: true, ConsultationFinishRegularPolish: true, ConsultationFinishGelPolish: true,
+		ConsultationFinishGlossy: true, ConsultationFinishMatte: true, ConsultationFinishNailArt: true,
+	})
+	if !ok {
+		return nil, ErrValidation
+	}
+	maintenanceNote := strings.TrimSpace(req.MaintenanceNote)
+	ownerSummary := strings.TrimSpace(req.OwnerApprovedSummary)
+	if len([]rune(maintenanceNote)) > 320 || len([]rune(ownerSummary)) > 320 {
+		return nil, ErrValidation
+	}
+	if status == ConsultationProfileStatusReady && len(outcomes)+len(systems)+len(lengths)+len(priorities)+len(finishes) == 0 {
+		return nil, ErrValidation
+	}
+	return &ServiceConsultationProfileMutation{
+		Status: status, RecommendedOutcomes: outcomes, CompatibleCurrentSystems: systems,
+		LengthCapabilities: lengths, PriorityTags: priorities, FinishOptions: finishes,
+		MaintenanceNote: maintenanceNote, OwnerApprovedSummary: ownerSummary,
+	}, nil
+}
+
+func normalizedConsultationValues(values []string, allowed map[string]bool) ([]string, bool) {
+	out := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if !allowed[value] {
+			return nil, false
+		}
+		if !seen[value] {
+			seen[value] = true
+			out = append(out, value)
+		}
+	}
+	sort.Strings(out)
+	return out, true
 }
 
 func normalizeServiceCategoryWriteRequest(req ServiceCategoryWriteRequest) (ServiceCategoryMutation, error) {

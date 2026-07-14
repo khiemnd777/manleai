@@ -34,6 +34,7 @@ func (g *GuardedTurnInterpreter) InterpretTurn(ctx context.Context, req conversa
 		CurrentBookingStage: req.CurrentBookingStage,
 		BookingAction:       req.BookingAction,
 		CurrentDraft:        req.CurrentDraft,
+		Consultation:        req.Consultation,
 	})
 	if err != nil {
 		outcome := conversation.TurnInterpreterOutcomeProviderError
@@ -51,6 +52,14 @@ func (g *GuardedTurnInterpreter) InterpretTurn(ctx context.Context, req conversa
 	}
 	turn := conversation.TurnUnderstanding{
 		Goal: reply.Goal, Confidence: reply.Confidence, Reason: strings.TrimSpace(reply.Reason), Source: "structured_ai", ModelInvoked: true,
+		Consultation: conversation.ConsultationNeedProfile{
+			CurrentSystem: strings.TrimSpace(reply.Consultation.CurrentSystem), DesiredOutcome: strings.TrimSpace(reply.Consultation.DesiredOutcome),
+			LengthChange: strings.TrimSpace(reply.Consultation.LengthChange), Priorities: append([]string(nil), reply.Consultation.Priorities...),
+			DesiredFinishes:    append([]string(nil), reply.Consultation.DesiredFinishes...),
+			ComparedServiceIDs: append([]string(nil), reply.Consultation.ComparedServiceIDs...), BookingRequested: reply.Consultation.BookingRequested,
+			ConversationComplete: reply.Consultation.ConversationComplete, Confidence: reply.Consultation.Confidence,
+			Reason: strings.TrimSpace(reply.Consultation.Reason),
+		},
 	}
 	for _, act := range reply.Acts {
 		turn.Acts = append(turn.Acts, conversation.ConversationAct{

@@ -113,8 +113,8 @@ triage keyword table.
 | Area | Owner files | Responsibilities | Tests |
 | --- | --- | --- | --- |
 | Auth and sessions | `backend/modules/auth/*`, `backend/internal/middleware/auth.go` | Login, refresh, bootstrap owner, JWT auth, user/salon claims | `backend/modules/auth/service_test.go` |
-| Salon profile/settings | `backend/modules/salon/*` | Salon CRUD, settings, AI tone, public catalog settings, imported business hours | `backend/modules/salon/service_test.go` |
-| POS provider-neutral layer | `backend/modules/pos/*` | `POSProvider` contracts, typed provider-write outcome/phase errors, optional appointment listing capability, POS entity links, service/staff/customer catalog, sync jobs/logs/errors, provider switching, category taxonomy, category aliases | `backend/modules/pos/service_test.go`, `backend/modules/pos/sync_processor_test.go` |
+| Salon profile/settings | `backend/modules/salon/*` | Salon CRUD, settings, AI tone, salon-wide consultation toggle, public catalog settings, imported business hours | `backend/modules/salon/service_test.go` |
+| POS provider-neutral layer | `backend/modules/pos/*` | `POSProvider` contracts, typed provider-write outcome/phase errors, optional appointment listing capability, POS entity links, service/staff/customer catalog, service consultation profile persistence/validation, sync jobs/logs/errors, provider switching, category taxonomy, category aliases | `backend/modules/pos/service_test.go`, `backend/modules/pos/sync_processor_test.go` |
 | Square adapter | `backend/modules/pos_square/*` | Square OAuth, locations, sync, Square payloads, salon-local availability ranges, booking list import, token refresh, provider write outcome/error mapping | `backend/modules/pos_square/*_test.go` |
 | Booking | `backend/modules/booking/*` | Active-provider-scoped new booking/availability resolution, historical appointment-provider actions, durable booking operation claims/fingerprints/leases, confirmed appointments, fallback pending, unknown-result reconciliation gates, backend retry policy, calendar range/sync APIs, reschedule, cancel, POS idempotency, POS error writes | `backend/modules/booking/service_test.go`, `backend/modules/booking/repository_integration_test.go` |
 | Customers | `backend/modules/customer/*` | Canonical customer CRUD, archive, search, activity read model, provider customer lookup facade | `backend/modules/customer/service_test.go` |
@@ -223,18 +223,26 @@ name collection, availability replies, party bookings, or transcript output.
   `backend/modules/conversation/draft_revision.go`,
   `backend/modules/conversation/types.go`,
   `backend/modules/conversation/repository.go`, and migration
-  `backend/migrations/V36__conversation_dialog_state.sql`, and
-  `backend/migrations/V37__conversation_draft_revision.sql`. `dialog_state`
-  persists pending clarification, bounded mutation history, no-progress count,
-  and draft/review/authorization revisions. Transcript metadata remains audit
-  evidence, not active-state source of truth.
+  `backend/migrations/V36__conversation_dialog_state.sql`,
+  `backend/migrations/V37__conversation_draft_revision.sql`, and
+  `backend/migrations/V38__service_consultation_profiles.sql`. `dialog_state`
+  persists pending clarification, active consultation state, bounded mutation
+  history, no-progress count, and draft/review/authorization revisions.
+  Transcript metadata remains audit evidence, not active-state source of truth.
 - Service consultation and safety handoff:
-  `backend/modules/conversation/service_consultation.go`. Consultation reads
-  only active-provider bookable `ServiceOption` facts, persists pending
-  candidate IDs in transcript metadata, rejects ambiguous affirmatives, and
-  routes health-suitability questions to owner handoff. Consultation candidate
-  lifecycle uses explicit pending/cleared metadata; cancel, reschedule,
-  handoff, and active party-plan actions retain routing precedence.
+  `backend/modules/conversation/service_consultation.go`, profile contracts in
+  `backend/modules/pos/types.go`, profile persistence in
+  `backend/modules/pos/repository.go`, and schema/migration
+  `backend/ent/schema/service_consultation_profile.go` plus
+  `backend/migrations/V38__service_consultation_profiles.sql`. Consultation is
+  one state-owned lane under the Conversation Supervisor. It collects typed
+  needs, ranks only eligible services with `ready` owner-approved profiles,
+  records reasons/revisions in `dialog_state`, asks one question at a time,
+  and never calls availability or POS tools. Service selection alone enters
+  `awaiting_booking`; explicit booking intent is required to mutate the draft.
+  Existing booking drafts retain a resume phase. Cancel, reschedule, handoff,
+  active party plans, safety handoff, and bounded unresolved handoff retain
+  routing precedence.
 - Caller name, phone, email, and name-slot repair:
   `backend/modules/conversation/service_customer_name.go`.
 - Party/group booking detection and planning:
@@ -269,8 +277,11 @@ name collection, availability replies, party bookings, or transcript output.
   validated inside conversation ownership; catalog category ambiguity remains
   authoritative over a model-proposed concrete target, bare in-progress service
   switches return to catalog-backed confirmation, and deterministic slot
-  corrections cannot be discarded by a model-only summary. The interpreter
-  cannot call booking tools.
+  corrections cannot be discarded by a model-only summary. Consultation model
+  output is extraction-only: controlled needs including finish preferences,
+  compared catalog IDs, booking
+  request, and completion state. The interpreter cannot recommend a service,
+  mutate state, or call booking tools.
 
 ## Frontend Route And UI Map
 
@@ -281,11 +292,11 @@ name collection, availability replies, party bookings, or transcript output.
 | `/onboarding` | `frontend/app/onboarding/page.tsx` | `frontend/features/onboarding/salon-profile-form.tsx` | `frontend/lib/api/client.ts`, `frontend/lib/api/configuration-transfer.ts` |
 | `/dashboard` | `frontend/app/dashboard/page.tsx` | `frontend/features/dashboard/dashboard-home.tsx` | status, voice, calls, appointments, attempts, services, staff APIs |
 | `/dashboard/appointments` | `frontend/app/dashboard/appointments/page.tsx` | `frontend/features/dashboard/appointments-dashboard.tsx` | availability, booking attempts, reschedule, cancel |
-| `/dashboard/calls` | `frontend/app/dashboard/calls/page.tsx` | `frontend/features/dashboard/calls-dashboard.tsx` | sessions, paginated full-call realtime events, party requests, owner corrections |
+| `/dashboard/calls` | `frontend/app/dashboard/calls/page.tsx` | `frontend/features/dashboard/calls-dashboard.tsx` | sessions, typed consultation state/revisions, paginated full-call realtime events, party requests, owner corrections |
 | `/dashboard/customers` | `frontend/app/dashboard/customers/page.tsx` | `frontend/features/dashboard/customers-dashboard.tsx` | customer CRUD, archive, search |
-| `/dashboard/services` | `frontend/app/dashboard/services/page.tsx` | `frontend/features/dashboard/services-dashboard.tsx` | services, categories, category aliases, service aliases, AI bookable |
+| `/dashboard/services` | `frontend/app/dashboard/services/page.tsx` | `frontend/features/dashboard/services-dashboard.tsx` | services, nested consultation profiles, categories, category aliases, service aliases, AI bookable |
 | `/dashboard/staff` | `frontend/app/dashboard/staff/page.tsx` | `frontend/features/dashboard/staff-dashboard.tsx` | staff CRUD, archive, AI bookable |
-| `/dashboard/settings` | `frontend/app/dashboard/settings/page.tsx` | `frontend/features/dashboard/settings-dashboard.tsx` | salon profile, settings, AI tone, business hours, public catalog, config transfer |
+| `/dashboard/settings` | `frontend/app/dashboard/settings/page.tsx` | `frontend/features/dashboard/settings-dashboard.tsx` | salon profile, settings, AI tone, consultation toggle/profile coverage, business hours, public catalog, config transfer |
 | `/dashboard/training` | `frontend/app/dashboard/training/page.tsx` | `frontend/features/dashboard/training-dashboard.tsx` | knowledge items, owner corrections, evaluation |
 | `/dashboard/integrations` | `frontend/app/dashboard/integrations/page.tsx` | `frontend/features/integrations/square-integration.tsx` | Square OAuth/status/sync/test booking, provider config, provider switching |
 | `/dashboard/billing` | `frontend/app/dashboard/billing/page.tsx` | `frontend/features/dashboard/billing-dashboard.tsx` | static gated billing surface |
@@ -441,14 +452,15 @@ detail rather than part of the event title.
 - Frontend owner: `frontend/features/dashboard/training-dashboard.tsx`,
   `frontend/features/dashboard/services-dashboard.tsx`,
   `frontend/features/dashboard/calls-dashboard.tsx`.
-- Consultation owner UI: service copy stays inside the existing Service edit
-  form; per-call consultation candidates/state/result are shown in Calls >
-  Detected details from transcript metadata.
+- Consultation owner UI: each structured consultation profile stays inside its
+  parent Service edit form; the salon-wide runtime toggle and coverage stay in
+  Settings; per-call needs, recommendations, profile revisions, selection, and
+  exit result are shown in Calls from typed dialog state.
 - Data owner: `knowledge_items`, `owner_corrections`, `service_aliases`,
   `service_categories`, `service_category_aliases`,
-  service consultation copy in `services.ai_description`, persisted
-  `call_sessions.dialog_state`, and diagnostic metadata on
-  `call_transcript_messages`.
+  `service_consultation_profiles`, the legacy summary fallback in
+  `services.ai_description`, `salon_settings.consultation_enabled`, persisted
+  `call_sessions.dialog_state`, and diagnostic metadata on transcript messages.
 - Tests: `backend/modules/conversation/service_understanding_test.go`,
   `backend/modules/conversation/service_understanding_eval_test.go`,
   `backend/modules/conversation/conversation_act_test.go`,
@@ -468,8 +480,9 @@ detail rather than part of the event title.
 - Frontend owner: `frontend/features/dashboard/services-dashboard.tsx`,
   `frontend/features/dashboard/staff-dashboard.tsx`,
   `frontend/features/dashboard/customers-dashboard.tsx`.
-- Data owner: `services`, `staff`, `customers`, `service_categories`,
-  `service_category_aliases`, `service_aliases`, `pos_entity_links`.
+- Data owner: `services`, `service_consultation_profiles`, `staff`, `customers`,
+  `service_categories`, `service_category_aliases`, `service_aliases`,
+  `pos_entity_links`.
 - Tests: `backend/modules/pos/service_test.go`,
   `backend/modules/customer/service_test.go`.
 - Skill/subagent: `salon-dashboard-ui`, `salon-ops-workflow`,
@@ -539,6 +552,7 @@ detail rather than part of the event title.
 | Square OAuth, token expired, refresh token, location, sync, catalog import, calendar sync | `pos-adapter-slice`, `backend/modules/pos_square` | `backend/modules/pos`, `integration_config`, integrations UI, POS calendar UI |
 | POS mapping, provider link, active provider, AI bookable, local only, sync failed | `backend/modules/pos`, `docs/canonical-pos-ownership-checklist.md` | Services/Staff UI, `pos_entity_links`, sync tests |
 | semantic turn, multi-intent, service alias, category alias, service understanding, wrong service, category narrowed to one service, bare service switch, stale date after summary, staff/date/customer correction, add/replace/remove/undo, question plus correction, non-native wording, ASR paraphrase | `backend/modules/conversation/conversation_act.go`, `turn_reducer.go`, `next_action_planner.go` | dialog state/repository, voice semantic interpreter, training aliases, transcript metadata, golden conversation tests |
+| AI consultation, service recommendation, help me choose, current nail system, desired outcome, lower maintenance, consultation profile, consultation_completed, awaiting_booking, profile revision, safety handoff | `backend/modules/conversation/service_consultation.go`, `backend/modules/pos/types.go`, `backend/modules/pos/repository.go` | V38 migration/Ent schema, semantic consultation extraction, Services profile UI, Settings toggle/coverage, Calls typed audit state, consultation golden tests |
 | service menu, how many services, how many I book, what do I have, current booking summary, service count, repeated clarification, informational service question | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/service_prompts.go`, `backend/modules/conversation/answer_router.go` | `backend/modules/conversation/service.go`, dialog state, party flow, golden tests |
 | final review, stale review, draft revision, reviewed revision, authorized revision, natural approval, repeated final review, review timeout, concise review retry, book it, just book this for me, correction during review, repeated same-category guest question, no progress loop | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/draft_revision.go`, `next_action_planner.go`, `service.go` | repository, V36/V37 migrations, booking flow, conversation and phone tests |
 | AI training, owner correction, knowledge, FAQ answer, stale policy | `backend/modules/training`, answer router/context | training UI, knowledge tests |

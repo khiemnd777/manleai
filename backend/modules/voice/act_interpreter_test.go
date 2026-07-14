@@ -80,6 +80,38 @@ func TestGuardedTurnInterpreterMapsStructuredAvailabilityTimePreference(t *testi
 	}
 }
 
+func TestGuardedTurnInterpreterMapsConsultationNeedsWithoutRecommendationAuthority(t *testing.T) {
+	provider := &fakeActModelProvider{configured: true, reply: TurnModelReply{
+		Goal: "consultation", Confidence: 0.96, Reason: "caller described desired nail outcome",
+		Consultation: ConsultationModelReply{
+			CurrentSystem: conversation.ConsultationSystemAcrylic, DesiredOutcome: conversation.ConsultationOutcomeShorten,
+			LengthChange: conversation.ConsultationLengthShorten, Priorities: []string{conversation.ConsultationPriorityLowerMaintenance},
+			DesiredFinishes:    []string{conversation.ConsultationFinishMatte},
+			ComparedServiceIDs: []string{"service_acrylic_fill"}, Confidence: 0.96, Reason: "structured needs only",
+		},
+	}}
+	interpreter := NewGuardedTurnInterpreter(provider)
+	current := &conversation.ConsultationState{Status: conversation.ConsultationStatusCollectingNeeds}
+
+	turn, err := interpreter.InterpretTurn(context.Background(), conversation.TurnInterpretationRequest{
+		SalonID: "salon_1", CustomerMessage: "My acrylics are too long and I want less upkeep.", Consultation: current,
+	})
+	if err != nil {
+		t.Fatalf("InterpretTurn: %v", err)
+	}
+	if turn.Goal != "consultation" || turn.Consultation.CurrentSystem != conversation.ConsultationSystemAcrylic ||
+		turn.Consultation.DesiredOutcome != conversation.ConsultationOutcomeShorten || len(turn.Consultation.Priorities) != 1 ||
+		len(turn.Consultation.DesiredFinishes) != 1 || turn.Consultation.DesiredFinishes[0] != conversation.ConsultationFinishMatte {
+		t.Fatalf("turn = %#v", turn)
+	}
+	if len(turn.Acts) != 0 || len(turn.Questions) != 0 {
+		t.Fatalf("consultation extraction gained action authority: %#v", turn)
+	}
+	if provider.request.Consultation != current {
+		t.Fatalf("current consultation state was not passed to provider: %#v", provider.request.Consultation)
+	}
+}
+
 func TestGuardedTurnInterpreterRequiresConfiguredProvider(t *testing.T) {
 	interpreter := NewGuardedTurnInterpreter(&fakeActModelProvider{})
 	if _, err := interpreter.InterpretTurn(context.Background(), conversation.TurnInterpretationRequest{SalonID: "salon_1"}); !errors.Is(err, ErrProviderDisabled) {

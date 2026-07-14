@@ -7,7 +7,8 @@ import (
 )
 
 const (
-	SchemaVersion         = "manleai.salon_configuration.v5"
+	SchemaVersion         = "manleai.salon_configuration.v6"
+	LegacySchemaV5        = "manleai.salon_configuration.v5"
 	LegacySchemaV4        = "manleai.salon_configuration.v4"
 	LegacySchemaV3        = "manleai.salon_configuration.v3"
 	LegacySchemaV2        = "manleai.salon_configuration.v2"
@@ -26,6 +27,7 @@ const (
 
 var excludedData = []string{
 	"services",
+	"service_consultation_profiles",
 	"staff",
 	"customers",
 	"appointments",
@@ -96,6 +98,7 @@ type AIReceptionistExport struct {
 	SMSReminderEnabled      bool      `json:"sms_reminder_enabled"`
 	ReminderHoursBefore     int       `json:"reminder_hours_before"`
 	HandoffEnabled          bool      `json:"handoff_enabled"`
+	ConsultationEnabled     bool      `json:"consultation_enabled"`
 	UpdatedAt               time.Time `json:"updated_at"`
 }
 

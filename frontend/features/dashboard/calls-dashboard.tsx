@@ -632,7 +632,7 @@ export function CallsDashboard() {
     [staff]
   );
   const selectedBookingRecord = selectedSession ? conversationBookingRecord(selectedSession) : null;
-  const consultationTrace = selectedSession ? consultationTraceForSession(selectedSession) : null;
+  const consultationTrace = selectedSession ? consultationTraceForSession(selectedSession, services) : null;
   const lastRealtimeEvent = realtimeEvents.length > 0 ? realtimeEvents[realtimeEvents.length - 1] : null;
 
   if (initialLoading) {
@@ -827,6 +827,8 @@ export function CallsDashboard() {
                 <>
                   <Info label="Consultation state" value={<Badge value={consultationTrace.state} />} />
                   <Info label="Consultation options" value={consultationTrace.candidates.join(", ") || "No catalog options recorded"} />
+                  <Info label="Consultation needs" value={consultationTrace.needs || "No structured needs recorded"} />
+                  <Info label="Profile revisions" value={consultationTrace.revisions || "No ready profile used"} />
                   <Info label="Consultation result" value={consultationTrace.result} />
                 </>
               ) : null}
@@ -1674,7 +1676,30 @@ function TranscriptBubble({
   );
 }
 
-function consultationTraceForSession(session: ConversationSession) {
+function consultationTraceForSession(session: ConversationSession, services: POSService[]) {
+  const state = session.dialog_state?.consultation;
+  if (state) {
+    const names = new Map(services.flatMap((service) => (service.id ? [[service.id, service.name] as const] : [])));
+    const ids = state.recommended_service_ids?.length ? state.recommended_service_ids : state.candidate_service_ids ?? [];
+    const candidates = ids.map((id) => names.get(id) || id);
+    const needs = [
+      state.needs.current_system ? `Current: ${humanizeValue(state.needs.current_system)}` : "",
+      state.needs.desired_outcome ? `Goal: ${humanizeValue(state.needs.desired_outcome)}` : "",
+      state.needs.length_change ? `Length: ${humanizeValue(state.needs.length_change)}` : "",
+      state.needs.priorities?.length ? `Priorities: ${state.needs.priorities.map(humanizeValue).join(", ")}` : "",
+      state.needs.desired_finishes?.length ? `Finish: ${state.needs.desired_finishes.map(humanizeValue).join(", ")}` : ""
+    ].filter(Boolean).join(" · ");
+    const revisions = Object.entries(state.profile_revisions ?? {})
+      .map(([serviceID, revision]) => `${names.get(serviceID) || serviceID} v${revision}`)
+      .join(", ");
+    let result = "Consultation is still in progress.";
+    if (state.status === "awaiting_selection") result = "Waiting for the caller to select a recommended catalog service.";
+    if (state.status === "awaiting_booking") result = "Service selected; waiting for explicit booking intent.";
+    if (state.status === "completed" && state.selected_service_id) result = `${names.get(state.selected_service_id) || state.selected_service_id} selected; booking flow is separate.`;
+    if (state.status === "completed" && !state.selected_service_id) result = "Consultation completed without a booking request.";
+    if (state.status === "handed_off") result = `Routed to owner: ${humanizeValue(state.exit_reason || "consultation unresolved")}.`;
+    return { state: state.status, candidates, needs, revisions, result };
+  }
   let candidates: string[] = [];
   let pending = false;
   let cleared = false;
@@ -1692,15 +1717,19 @@ function consultationTraceForSession(session: ConversationSession) {
     }
   }
   if (session.handoff?.reason === "consultation_safety") {
-    return { state: "owner_review", candidates, result: "Safety question routed to the owner; no service was selected." };
+    return { state: "owner_review", candidates, needs: "", revisions: "", result: "Safety question routed to the owner; no service was selected." };
   }
   if (cleared && session.service_id) {
-    return { state: "selected", candidates, result: session.service_name || "Catalog service selected" };
+    return { state: "selected", candidates, needs: "", revisions: "", result: session.service_name || "Catalog service selected" };
   }
   if (pending) {
-    return { state: "awaiting_choice", candidates, result: "Waiting for the caller to name one catalog service." };
+    return { state: "awaiting_choice", candidates, needs: "", revisions: "", result: "Waiting for the caller to name one catalog service." };
   }
   return null;
+}
+
+function humanizeValue(value: string) {
+  return value.replaceAll("_", " ");
 }
 
 function stringArrayMetadata(value: unknown): string[] {

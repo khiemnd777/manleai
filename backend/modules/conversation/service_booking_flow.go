@@ -623,6 +623,8 @@ func rejectRescheduleReplyRewrite(turn *TurnRecord, nextRequired string, message
 }
 
 func (s *Service) saveHandoffTurn(ctx context.Context, turn TurnRecord, session Session, reason string, reply string, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (*Session, error) {
+	closeConsultationForWorkflow(&session, reason, true)
+	turn.Update.DialogState = cloneDialogState(session.DialogState)
 	summary := summaryFor(session, services, staff, cfg)
 	turn.AIMessage = reply
 	turn.Update.Status = StatusHandoff

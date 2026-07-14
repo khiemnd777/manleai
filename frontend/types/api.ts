@@ -51,6 +51,7 @@ export type SalonSettings = {
   sms_reminder_enabled: boolean;
   reminder_hours_before: number;
   handoff_enabled: boolean;
+  consultation_enabled: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -184,6 +185,7 @@ export type ConfigurationAIReceptionist = {
   sms_reminder_enabled: boolean;
   reminder_hours_before: number;
   handoff_enabled: boolean;
+  consultation_enabled: boolean;
   updated_at: string;
 };
 
@@ -347,6 +349,19 @@ export type POSService = {
   category_source: string;
   category_confidence?: number;
   category_reviewed_at?: string;
+  consultation_profile?: ServiceConsultationProfile;
+};
+
+export type ServiceConsultationProfile = {
+  status: "draft" | "ready" | "disabled" | string;
+  recommended_outcomes: string[];
+  compatible_current_systems: string[];
+  length_capabilities: string[];
+  priority_tags: string[];
+  finish_options: string[];
+  maintenance_note?: string;
+  owner_approved_summary?: string;
+  revision: number;
 };
 
 export type POSServiceCategory = {
@@ -845,6 +860,30 @@ export type ConversationDialogState = {
   reviewed_revision: number;
   authorized_revision: number;
   last_mutation_revision?: number;
+  consultation?: ConversationConsultationState;
+};
+
+export type ConversationConsultationState = {
+  status: string;
+  resume_phase: string;
+  needs: {
+    current_system?: string;
+    desired_outcome?: string;
+    length_change?: string;
+    priorities?: string[];
+    desired_finishes?: string[];
+    compared_service_ids?: string[];
+    booking_requested?: boolean;
+    conversation_complete?: boolean;
+  };
+  candidate_service_ids?: string[];
+  recommended_service_ids?: string[];
+  selected_service_id?: string;
+  last_asked_field?: string;
+  profile_revisions?: Record<string, number>;
+  recommendation_reasons?: Record<string, string[]>;
+  no_progress_count: number;
+  exit_reason?: string;
 };
 
 export type ConversationSession = {

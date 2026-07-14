@@ -93,6 +93,75 @@ func TestNormalizeServiceWriteRequestRejectsAIConsultationSummaryOver320Runes(t 
 	}
 }
 
+func TestNormalizeServiceWriteRequestNormalizesConsultationProfile(t *testing.T) {
+	input, err := normalizeServiceWriteRequest(ServiceWriteRequest{
+		Name:            "Gel Manicure",
+		DurationMinutes: 45,
+		ConsultationProfile: &ServiceConsultationProfileWriteRequest{
+			Status:                   " ready ",
+			RecommendedOutcomes:      []string{"shorten", "shorten", "color_refresh"},
+			CompatibleCurrentSystems: []string{" gel ", "acrylic"},
+			LengthCapabilities:       []string{"shorten"},
+			PriorityTags:             []string{"lower_maintenance"},
+			FinishOptions:            []string{"gel_polish"},
+			MaintenanceNote:          "  Return guidance approved by the owner. ",
+			OwnerApprovedSummary:     "  A lower-maintenance color service. ",
+		},
+	}, true)
+	if err != nil {
+		t.Fatalf("normalizeServiceWriteRequest returned error: %v", err)
+	}
+	profile := input.ConsultationProfile
+	if profile == nil || profile.Status != ConsultationProfileStatusReady {
+		t.Fatalf("profile = %#v, want ready profile", profile)
+	}
+	if !samePOSStrings(profile.RecommendedOutcomes, []string{"color_refresh", "shorten"}) ||
+		!samePOSStrings(profile.CompatibleCurrentSystems, []string{"acrylic", "gel"}) {
+		t.Fatalf("controlled values were not trimmed and deduplicated: %#v", profile)
+	}
+	if profile.MaintenanceNote != "Return guidance approved by the owner." || profile.OwnerApprovedSummary != "A lower-maintenance color service." {
+		t.Fatalf("profile copy was not normalized: %#v", profile)
+	}
+}
+
+func TestNormalizeServiceWriteRequestRejectsUnsafeConsultationProfileValues(t *testing.T) {
+	base := ServiceWriteRequest{Name: "Gel Manicure", DurationMinutes: 45}
+	for name, profile := range map[string]*ServiceConsultationProfileWriteRequest{
+		"unknown controlled value": {
+			Status:              ConsultationProfileStatusDraft,
+			RecommendedOutcomes: []string{"diagnose_infection"},
+		},
+		"ready without structured facts": {
+			Status:               ConsultationProfileStatusReady,
+			OwnerApprovedSummary: "General summary only",
+		},
+		"summary too long": {
+			Status:               ConsultationProfileStatusDraft,
+			OwnerApprovedSummary: strings.Repeat("é", 321),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := base
+			request.ConsultationProfile = profile
+			if _, err := normalizeServiceWriteRequest(request, true); !errors.Is(err, ErrValidation) {
+				t.Fatalf("error = %v, want ErrValidation", err)
+			}
+		})
+	}
+}
+
+func samePOSStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestCreateServiceQueuesSyncWhenProviderSupportsServiceUpsert(t *testing.T) {
 	store := &fakePOSStore{activeProvider: ProviderSquare}
 	service := NewService(store, fakeCapabilityProvider{name: ProviderSquare, capabilities: ProviderCapabilities{ServiceUpsert: true}})

@@ -231,10 +231,16 @@ func TestSignedTwilioWebhookConsultsThenBooksExplicitCatalogChoice(t *testing.T)
 		t.Fatalf("ambiguous affirmative selected a service: body=%s session=%#v", ambiguousBody, conversationStore.session)
 	}
 
-	choose := url.Values{"CallSid": {"CA_CONSULT"}, "From": {"+13125550199"}, "To": {"+13125550101"}, "SpeechResult": {"Gel Manicure on 2026-06-10."}}
+	choose := url.Values{"CallSid": {"CA_CONSULT"}, "From": {"+13125550199"}, "To": {"+13125550101"}, "SpeechResult": {"Gel Manicure."}}
 	chooseBody := readBody(t, signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", choose))
-	if !strings.Contains(chooseBody, "I have openings") || bookingTool.availabilityCalls != 1 || bookingTool.availabilityRequest.ServiceID != "service_gel" {
-		t.Fatalf("explicit consultation choice did not check gel availability: body=%s request=%#v", chooseBody, bookingTool.availabilityRequest)
+	if !strings.Contains(chooseBody, "Would you like help booking Gel Manicure") || bookingTool.availabilityCalls != 0 || conversationStore.session.ServiceID != "" {
+		t.Fatalf("explicit consultation choice should await booking intent: body=%s session=%#v", chooseBody, conversationStore.session)
+	}
+
+	startBooking := url.Values{"CallSid": {"CA_CONSULT"}, "From": {"+13125550199"}, "To": {"+13125550101"}, "SpeechResult": {"Yes, please book it on 2026-06-10."}}
+	startBookingBody := readBody(t, signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", startBooking))
+	if !strings.Contains(startBookingBody, "I have openings") || bookingTool.availabilityCalls != 1 || bookingTool.availabilityRequest.ServiceID != "service_gel" {
+		t.Fatalf("explicit booking intent did not check gel availability: body=%s request=%#v", startBookingBody, bookingTool.availabilityRequest)
 	}
 
 	book := url.Values{"CallSid": {"CA_CONSULT"}, "From": {"+13125550199"}, "To": {"+13125550101"}, "SpeechResult": {"The first one works. My name is Linh Tran and my phone is 312-555-0101."}}
@@ -264,11 +270,12 @@ type phoneFlowConversationStore struct {
 func newPhoneFlowConversationStore() *phoneFlowConversationStore {
 	return &phoneFlowConversationStore{
 		cfg: conversation.RuntimeConfig{
-			SalonName:      "Lotus Nails",
-			Timezone:       "America/Chicago",
-			AIEnabled:      true,
-			HandoffEnabled: true,
-			AIGreeting:     "Thank you for calling. How can I help you today?",
+			SalonName:           "Lotus Nails",
+			Timezone:            "America/Chicago",
+			AIEnabled:           true,
+			HandoffEnabled:      true,
+			ConsultationEnabled: true,
+			AIGreeting:          "Thank you for calling. How can I help you today?",
 		},
 		services: []conversation.ServiceOption{{
 			ID:              "service_1",

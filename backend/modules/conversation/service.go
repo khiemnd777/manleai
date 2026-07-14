@@ -419,8 +419,9 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		turnUnderstanding.Reason = "deterministic_extraction_overrode_summary"
 		conversationAct = primaryConversationAct(turnUnderstanding)
 	}
-	if len(turnUnderstanding.Acts) == 0 && len(turnUnderstanding.Questions) == 0 && (turnUnderstanding.Goal == "" || turnUnderstanding.Goal == "unknown") {
-		if handled, updated, err := s.handleServiceConsultation(ctx, ownerUserID, *session, message, eventKey, serviceUnderstanding, services, staff, cfg); handled {
+	if consultationStateActive(normalizedDialogState(session.DialogState).Consultation) || turnGoalIs(turnUnderstanding, "consultation") ||
+		(len(turnUnderstanding.Acts) == 0 && len(turnUnderstanding.Questions) == 0 && (turnUnderstanding.Goal == "" || turnUnderstanding.Goal == "unknown")) {
+		if handled, updated, err := s.handleServiceConsultation(ctx, ownerUserID, *session, message, eventKey, serviceUnderstanding, turnUnderstanding, services, staff, cfg); handled {
 			return updated, err
 		}
 	}
@@ -453,6 +454,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	}
 	if shouldRouteCancel(*session, message) || turnGoalIs(turnUnderstanding, "cancel_appointment") {
 		applyExtraction(&next, message, services, serviceAliases, categoryAliases, staff, loc, s.now)
+		closeConsultationForWorkflow(&next, "cancel_requested", false)
 		return s.handleCancelMessage(ctx, ownerUserID, *session, next, message, eventKey, services, serviceAliases, categoryAliases, staff, cfg, knowledge)
 	}
 	if activePartyPlan(session.PartyPlan) && !partyPlanComplete(session.PartyPlan) {
@@ -503,6 +505,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		applyExtraction(&next, message, services, serviceAliases, categoryAliases, staff, loc, s.now)
 	}
 	if shouldRouteReschedule(*session, message) || turnGoalIs(turnUnderstanding, "reschedule_appointment") {
+		closeConsultationForWorkflow(&next, "reschedule_requested", false)
 		return s.handleRescheduleMessage(ctx, ownerUserID, *session, next, message, eventKey, services, serviceAliases, categoryAliases, staff, cfg, knowledge)
 	}
 	partyPlanApplied := false
@@ -601,6 +604,9 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	intent := resolveIntent(session.Intent, message, next, serviceUnderstanding, partySignal)
 	intent = intentForTurnGoal(turnUnderstanding, intent)
 	next.Intent = intent
+	if consultationStateActive(normalizedDialogState(session.DialogState).Consultation) && intent == IntentBooking {
+		closeConsultationForWorkflow(&next, "caller_requested_booking", false)
+	}
 	advanceDraftRevision(*session, &next)
 
 	turn := newPlannedTurn(*session, next)

@@ -104,6 +104,7 @@ type TurnModelRequest struct {
 	CurrentBookingStage string
 	BookingAction       string
 	CurrentDraft        conversation.ConversationDraftRef
+	Consultation        *conversation.ConsultationState
 }
 
 type ActModelReply struct {
@@ -140,11 +141,25 @@ type TimePreferenceModelReply struct {
 }
 
 type TurnModelReply struct {
-	Goal       string               `json:"goal"`
-	Acts       []ActModelReply      `json:"acts"`
-	Questions  []QuestionModelReply `json:"questions"`
-	Confidence float64              `json:"confidence"`
-	Reason     string               `json:"reason"`
+	Goal         string                 `json:"goal"`
+	Acts         []ActModelReply        `json:"acts"`
+	Questions    []QuestionModelReply   `json:"questions"`
+	Confidence   float64                `json:"confidence"`
+	Reason       string                 `json:"reason"`
+	Consultation ConsultationModelReply `json:"consultation"`
+}
+
+type ConsultationModelReply struct {
+	CurrentSystem        string   `json:"current_system"`
+	DesiredOutcome       string   `json:"desired_outcome"`
+	LengthChange         string   `json:"length_change"`
+	Priorities           []string `json:"priorities"`
+	DesiredFinishes      []string `json:"desired_finishes"`
+	ComparedServiceIDs   []string `json:"compared_service_ids"`
+	BookingRequested     bool     `json:"booking_requested"`
+	ConversationComplete bool     `json:"conversation_complete"`
+	Confidence           float64  `json:"confidence"`
+	Reason               string   `json:"reason"`
 }
 
 type TextToSpeechProvider interface {

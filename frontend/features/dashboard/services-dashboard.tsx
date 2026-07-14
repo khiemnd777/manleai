@@ -67,6 +67,13 @@ type ServiceFormState = {
   priceFrom: string;
   serviceCategoryID: string;
   active: boolean;
+  consultationStatus: "draft" | "ready" | "disabled";
+  recommendedOutcomes: string[];
+  compatibleCurrentSystems: string[];
+  lengthCapabilities: string[];
+  priorityTags: string[];
+  finishOptions: string[];
+  maintenanceNote: string;
 };
 
 type ServiceCategoryFormState = {
@@ -78,6 +85,26 @@ type ServiceCategoryFormState = {
 type CategoryReviewFilter = "all" | "unassigned" | "suggested" | "manual" | "imported";
 
 const categoryReviewFilters: CategoryReviewFilter[] = ["all", "unassigned", "suggested", "manual", "imported"];
+
+const consultationOptionGroups = {
+  recommendedOutcomes: [
+    ["maintain", "Maintain current set"], ["shorten", "Shorten"], ["add_length", "Add length"],
+    ["add_strength", "Add strength"], ["repair", "Repair"], ["removal", "Removal"], ["color_refresh", "Color refresh"]
+  ],
+  compatibleCurrentSystems: [
+    ["natural", "Natural nails"], ["regular_polish", "Regular polish"], ["gel", "Gel"],
+    ["dip", "Dip"], ["acrylic", "Acrylic"], ["extension", "Extensions"]
+  ],
+  lengthCapabilities: [["keep", "Keep length"], ["shorten", "Shorten"], ["add_length", "Add length"]],
+  priorityTags: [
+    ["durability", "Durability"], ["lower_maintenance", "Lower maintenance"],
+    ["lower_cost", "Lower cost"], ["shorter_visit", "Shorter visit"]
+  ],
+  finishOptions: [
+    ["natural", "Natural"], ["regular_polish", "Regular polish"], ["gel_polish", "Gel polish"],
+    ["glossy", "Glossy"], ["matte", "Matte"], ["nail_art", "Nail art"]
+  ]
+} satisfies Record<string, Array<[string, string]>>;
 
 export function ServicesDashboard() {
   const [salon, setSalon] = useState<Salon | null>(null);
@@ -182,6 +209,11 @@ export function ServicesDashboard() {
 
   async function saveService() {
     if (!salon) return;
+    if (form.consultationStatus === "ready" && !consultationProfileHasStructuredValue(form)) {
+      setError("A ready consultation profile needs at least one approved outcome, current system, length capability, priority, or finish option.");
+      setSuccess("");
+      return;
+    }
     setBusy("save-service");
     setError("");
     setSuccess("");
@@ -920,6 +952,8 @@ function ServiceForm({
   onSave: () => void;
 }) {
   const archived = Boolean(service?.archived_at);
+  const consultationGated = archived || !service?.pos_linked;
+  const consultationReadyIncomplete = form.consultationStatus === "ready" && !consultationProfileHasStructuredValue(form);
   return (
     <Card>
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
@@ -929,7 +963,91 @@ function ServiceForm({
             {service ? serviceGateReason(service) : "New services start as ManleAI local records and are not booking-ready until linked to Square Appointments."}
           </CardDescription>
         </div>
-        {service ? <Badge value={service.sync_status || "local_only"} /> : <Badge value="local_only" />}
+        <div className="flex flex-wrap gap-2">
+          {service ? <Badge value={service.sync_status || "local_only"} /> : <Badge value="local_only" />}
+          <Badge value={form.consultationStatus} />
+        </div>
+      </div>
+
+      <div className="mt-5 rounded-md border border-line bg-slate-50 p-4">
+        <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+          <div>
+            <div className="text-sm font-semibold text-ink">AI consultation profile</div>
+            <p className="mt-1 text-xs leading-5 text-muted">
+              Structured, owner-approved facts used for service recommendations. This profile never confirms or creates an appointment.
+            </p>
+          </div>
+          <select
+            className="h-10 rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-100 disabled:text-slate-400"
+            value={form.consultationStatus}
+            onChange={(event) => onChange({ ...form, consultationStatus: event.target.value as ServiceFormState["consultationStatus"] })}
+            disabled={busy || consultationGated}
+            aria-label="Consultation profile status"
+          >
+            <option value="draft">Draft</option>
+            <option value="ready">Ready for consultation</option>
+            <option value="disabled">Disabled</option>
+          </select>
+        </div>
+
+        {consultationGated ? (
+          <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+            Consultation controls become available after this active service is linked to the salon's current POS provider.
+          </div>
+        ) : null}
+        {consultationReadyIncomplete ? (
+          <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs leading-5 text-red-800">
+            Select at least one structured consultation value before marking this profile ready.
+          </div>
+        ) : null}
+
+        <div className="mt-4 grid gap-4 lg:grid-cols-2">
+          <ConsultationOptionGroup
+            label="Recommended outcomes"
+            options={consultationOptionGroups.recommendedOutcomes}
+            selected={form.recommendedOutcomes}
+            disabled={busy || consultationGated}
+            onChange={(recommendedOutcomes) => onChange({ ...form, recommendedOutcomes })}
+          />
+          <ConsultationOptionGroup
+            label="Compatible current systems"
+            options={consultationOptionGroups.compatibleCurrentSystems}
+            selected={form.compatibleCurrentSystems}
+            disabled={busy || consultationGated}
+            onChange={(compatibleCurrentSystems) => onChange({ ...form, compatibleCurrentSystems })}
+          />
+          <ConsultationOptionGroup
+            label="Length capabilities"
+            options={consultationOptionGroups.lengthCapabilities}
+            selected={form.lengthCapabilities}
+            disabled={busy || consultationGated}
+            onChange={(lengthCapabilities) => onChange({ ...form, lengthCapabilities })}
+          />
+          <ConsultationOptionGroup
+            label="Caller priorities"
+            options={consultationOptionGroups.priorityTags}
+            selected={form.priorityTags}
+            disabled={busy || consultationGated}
+            onChange={(priorityTags) => onChange({ ...form, priorityTags })}
+          />
+          <ConsultationOptionGroup
+            label="Finish options"
+            options={consultationOptionGroups.finishOptions}
+            selected={form.finishOptions}
+            disabled={busy || consultationGated}
+            onChange={(finishOptions) => onChange({ ...form, finishOptions })}
+          />
+          <Field label="Maintenance note">
+            <textarea
+              className="min-h-24 w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-100 disabled:text-slate-400"
+              value={form.maintenanceNote}
+              maxLength={320}
+              onChange={(event) => onChange({ ...form, maintenanceNote: event.target.value })}
+              disabled={busy || consultationGated}
+              placeholder="Owner-approved upkeep or return-visit guidance"
+            />
+          </Field>
+        </div>
       </div>
 
       <div className="mt-5 grid gap-4 md:grid-cols-2">
@@ -1027,7 +1145,7 @@ function ServiceForm({
         <Button type="button" variant="secondary" onClick={onCancel} disabled={busy}>
           Cancel
         </Button>
-        <Button type="button" onClick={onSave} disabled={busy || archived}>
+        <Button type="button" onClick={onSave} disabled={busy || archived || consultationReadyIncomplete}>
           {busy ? "Saving..." : "Save service"}
         </Button>
       </div>
@@ -1476,6 +1594,7 @@ function AIStatus({ service }: { service: POSService }) {
   return (
     <div className="space-y-1">
       <Badge value={service.ai_bookable && canEnableAI(service) ? "allowed" : "blocked"} />
+      <div><Badge value={service.consultation_profile?.status || "consultation_draft"} /></div>
       <div className="max-w-56 text-xs leading-5 text-muted">{serviceGateReason(service)}</div>
     </div>
   );
@@ -1537,6 +1656,38 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+function ConsultationOptionGroup({
+  label,
+  options,
+  selected,
+  disabled,
+  onChange
+}: {
+  label: string;
+  options: Array<[string, string]>;
+  selected: string[];
+  disabled: boolean;
+  onChange: (next: string[]) => void;
+}) {
+  return (
+    <fieldset className="rounded-md border border-line bg-white p-3" disabled={disabled}>
+      <legend className="px-1 text-sm font-medium text-ink">{label}</legend>
+      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+        {options.map(([value, optionLabel]) => (
+          <label key={value} className="flex items-center gap-2 text-sm text-ink">
+            <input
+              type="checkbox"
+              checked={selected.includes(value)}
+              onChange={(event) => onChange(event.target.checked ? [...selected, value] : selected.filter((item) => item !== value))}
+            />
+            {optionLabel}
+          </label>
+        ))}
+      </div>
+    </fieldset>
+  );
+}
+
 function InfoGrid({ items }: { items: [string, string][] }) {
   return (
     <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
@@ -1569,19 +1720,34 @@ function emptyServiceForm(): ServiceFormState {
     durationMinutes: "45",
     priceFrom: "",
     serviceCategoryID: "",
-    active: true
+    active: true,
+    consultationStatus: "draft",
+    recommendedOutcomes: [],
+    compatibleCurrentSystems: [],
+    lengthCapabilities: [],
+    priorityTags: [],
+    finishOptions: [],
+    maintenanceNote: ""
   };
 }
 
 function serviceToForm(service: POSService): ServiceFormState {
+  const profile = service.consultation_profile;
   return {
     name: service.name,
     description: service.description ?? "",
-    aiDescription: service.ai_description ?? "",
+    aiDescription: profile?.owner_approved_summary ?? service.ai_description ?? "",
     durationMinutes: service.duration_minutes > 0 ? String(service.duration_minutes) : "",
     priceFrom: service.price_from ? String(service.price_from) : "",
     serviceCategoryID: service.service_category_id ?? "",
-    active: service.active
+    active: service.active,
+    consultationStatus: profile?.status === "ready" || profile?.status === "disabled" ? profile.status : "draft",
+    recommendedOutcomes: profile?.recommended_outcomes ?? [],
+    compatibleCurrentSystems: profile?.compatible_current_systems ?? [],
+    lengthCapabilities: profile?.length_capabilities ?? [],
+    priorityTags: profile?.priority_tags ?? [],
+    finishOptions: profile?.finish_options ?? [],
+    maintenanceNote: profile?.maintenance_note ?? ""
   };
 }
 
@@ -1594,8 +1760,22 @@ function servicePayload(form: ServiceFormState) {
     duration_minutes: Number(form.durationMinutes),
     price_from: Number.isFinite(price) ? price : null,
     service_category_id: form.serviceCategoryID,
-    active: form.active
+    active: form.active,
+    consultation_profile: {
+      status: form.consultationStatus,
+      recommended_outcomes: form.recommendedOutcomes,
+      compatible_current_systems: form.compatibleCurrentSystems,
+      length_capabilities: form.lengthCapabilities,
+      priority_tags: form.priorityTags,
+      finish_options: form.finishOptions,
+      maintenance_note: form.maintenanceNote,
+      owner_approved_summary: form.aiDescription
+    }
   };
+}
+
+function consultationProfileHasStructuredValue(form: ServiceFormState) {
+  return form.recommendedOutcomes.length + form.compatibleCurrentSystems.length + form.lengthCapabilities.length + form.priorityTags.length + form.finishOptions.length > 0;
 }
 
 function emptyCategoryForm(): ServiceCategoryFormState {

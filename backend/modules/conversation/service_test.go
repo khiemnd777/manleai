@@ -795,14 +795,24 @@ func TestMessageConsultationExplicitChoiceStartsBooking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("choice Message returned error: %v", err)
 	}
+	if session.Intent != IntentConsultation || session.ServiceID != "" || len(session.BookingSegments) != 0 {
+		t.Fatalf("choice should await booking intent: intent %s service %q segments %#v", session.Intent, session.ServiceID, session.BookingSegments)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Would you like help booking Gel Manicure") {
+		t.Fatalf("choice should ask for booking intent: %s", store.lastTurn.AIMessage)
+	}
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Yes, please"})
+	if err != nil {
+		t.Fatalf("booking intent Message returned error: %v", err)
+	}
 	if session.Intent != IntentBooking || session.ServiceID != "gel" || len(session.BookingSegments) != 1 {
-		t.Fatalf("choice state = intent %s service %q segments %#v", session.Intent, session.ServiceID, session.BookingSegments)
+		t.Fatalf("booking transition = intent %s service %q segments %#v", session.Intent, session.ServiceID, session.BookingSegments)
 	}
 	if !strings.Contains(store.lastTurn.AIMessage, "What day") {
-		t.Fatalf("choice should resume booking collection: %s", store.lastTurn.AIMessage)
+		t.Fatalf("booking transition should resume collection: %s", store.lastTurn.AIMessage)
 	}
-	if store.lastTurn.AIMetadata["pending_consultation_cleared"] != true || len(pendingConsultationServices(*session, store.services)) != 0 {
-		t.Fatalf("consultation pending state was not cleared: metadata=%#v transcript=%#v", store.lastTurn.AIMetadata, session.Transcript)
+	if consultation := normalizedDialogState(session.DialogState).Consultation; consultation == nil || consultation.Status != ConsultationStatusCompleted {
+		t.Fatalf("consultation state was not completed: %#v", consultation)
 	}
 }
 
@@ -816,7 +826,7 @@ func TestServiceConsultationDoesNotOverrideAppointmentActionOrPartyPlan(t *testi
 		{SalonID: "salon_1", BookingAction: BookingActionReschedule},
 		{SalonID: "salon_1", BookingAction: BookingActionBook, PartyPlan: &PartyPlan{PartySize: 2}},
 	} {
-		handled, _, err := service.handleServiceConsultation(context.Background(), "owner_1", session, "Help me choose a service", "event_1", understanding, store.services, store.staff, &store.cfg)
+		handled, _, err := service.handleServiceConsultation(context.Background(), "owner_1", session, "Help me choose a service", "event_1", understanding, TurnUnderstanding{Goal: "consultation"}, store.services, store.staff, &store.cfg)
 		if err != nil {
 			t.Fatalf("handleServiceConsultation returned error: %v", err)
 		}
@@ -843,6 +853,332 @@ func TestMessageConsultationHealthConcernHandsOffWithoutBooking(t *testing.T) {
 	}
 	if !strings.Contains(store.lastTurn.AIMessage, "cannot give medical advice") || !strings.Contains(store.lastTurn.AIMessage, "not a confirmed appointment") {
 		t.Fatalf("unsafe handoff reply: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageConsultationCollectsOneNeedAtATimeWithoutBookingTools(t *testing.T) {
+	store := newFakeConversationStore()
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal:       "consultation",
+		Confidence: 0.96,
+		Consultation: ConsultationNeedProfile{
+			DesiredOutcome: ConsultationOutcomeShorten,
+			LengthChange:   ConsultationLengthShorten,
+			Confidence:     0.96,
+			Reason:         "caller_wants_shorter_nails",
+		},
+	}})
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "These nails have gotten way too long. What should I switch to?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if got := store.lastTurn.AIMessage; got != "What is currently on your nails: natural nails, regular polish, gel, dip, acrylic, or extensions?" {
+		t.Fatalf("golden reply = %q", got)
+	}
+	state := normalizedDialogState(session.DialogState).Consultation
+	if state == nil || state.Status != ConsultationStatusCollectingNeeds || state.LastAskedField != "current_system" || state.Needs.DesiredOutcome != ConsultationOutcomeShorten {
+		t.Fatalf("consultation state = %#v", state)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("consultation invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
+func TestMessageConsultationRanksOnlyReadyOwnerApprovedProfiles(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = consultationTestServices()
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal:       "consultation",
+		Confidence: 0.97,
+		Consultation: ConsultationNeedProfile{
+			CurrentSystem:  ConsultationSystemAcrylic,
+			DesiredOutcome: ConsultationOutcomeShorten,
+			LengthChange:   ConsultationLengthShorten,
+			Priorities:     []string{ConsultationPriorityLowerMaintenance},
+			Confidence:     0.97,
+			Reason:         "acrylic_shorter_lower_maintenance",
+		},
+	}})
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I have acrylic extensions now, but I want them much shorter and easier to keep up.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if got := store.lastTurn.AIMessage; got != "Short Acrylic Rebalance: Shortens an existing acrylic set with lower-maintenance upkeep. Upkeep: Return every three weeks. Would you like help booking it?" {
+		t.Fatalf("golden recommendation = %q", got)
+	}
+	state := normalizedDialogState(session.DialogState).Consultation
+	if state == nil || state.Status != ConsultationStatusAwaitingBooking || state.SelectedServiceID != "acrylic_rebalance" {
+		t.Fatalf("consultation state = %#v", state)
+	}
+	if state.ProfileRevisions["acrylic_rebalance"] != 4 || len(state.RecommendedServiceIDs) != 1 {
+		t.Fatalf("recommendation audit = %#v", state)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("recommendation invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
+func TestRankConsultationServicesRequiresApprovedEvidenceForEveryStatedNeed(t *testing.T) {
+	needs := ConsultationNeedProfile{
+		CurrentSystem:   ConsultationSystemAcrylic,
+		DesiredOutcome:  ConsultationOutcomeShorten,
+		LengthChange:    ConsultationLengthShorten,
+		Priorities:      []string{ConsultationPriorityLowerMaintenance},
+		DesiredFinishes: []string{ConsultationFinishMatte},
+	}
+	services := []ServiceOption{
+		{
+			ID: "priority_only", Name: "Priority Only",
+			ConsultationProfile: &ServiceConsultationProfile{
+				Status: ConsultationProfileStatusReady, PriorityTags: []string{ConsultationPriorityLowerMaintenance},
+			},
+		},
+		{
+			ID: "glossy_match", Name: "Glossy Match",
+			ConsultationProfile: &ServiceConsultationProfile{
+				Status: ConsultationProfileStatusReady, RecommendedOutcomes: []string{ConsultationOutcomeShorten},
+				CompatibleCurrentSystems: []string{ConsultationSystemAcrylic}, LengthCapabilities: []string{ConsultationLengthShorten},
+				PriorityTags: []string{ConsultationPriorityLowerMaintenance}, FinishOptions: []string{ConsultationFinishGlossy},
+			},
+		},
+		{
+			ID: "matte_match", Name: "Matte Match",
+			ConsultationProfile: &ServiceConsultationProfile{
+				Status: ConsultationProfileStatusReady, RecommendedOutcomes: []string{ConsultationOutcomeShorten},
+				CompatibleCurrentSystems: []string{ConsultationSystemAcrylic}, LengthCapabilities: []string{ConsultationLengthShorten},
+				PriorityTags: []string{ConsultationPriorityLowerMaintenance}, FinishOptions: []string{ConsultationFinishMatte},
+			},
+		},
+	}
+
+	ranked := rankConsultationServices(services, needs, nil)
+	if len(ranked) != 1 || ranked[0].Service.ID != "matte_match" {
+		t.Fatalf("ranked services = %#v", ranked)
+	}
+}
+
+func TestMessageActiveConsultationListsCatalogWithoutBookingTools(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = consultationTestServices()
+	store.session.Intent = IntentConsultation
+	store.session.DialogState = normalizedDialogState(DialogState{
+		Phase: DialogPhaseConsultation,
+		Consultation: &ConsultationState{
+			Status:          ConsultationStatusCollectingNeeds,
+			LastAskedField:  "owner_help",
+			NoProgressCount: 2,
+		},
+	})
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal:       "consultation",
+		Confidence: 0.95,
+	}})
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Could you list the services you have instead?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if got := store.lastTurn.AIMessage; !strings.HasPrefix(got, "Bookable services include ") || !strings.HasSuffix(got, "Which ones would you like me to compare?") {
+		t.Fatalf("consultation menu reply = %q", got)
+	}
+	state := normalizedDialogState(session.DialogState).Consultation
+	if state == nil || state.Status != ConsultationStatusCollectingNeeds || state.LastAskedField != "service_comparison" || state.NoProgressCount != 0 {
+		t.Fatalf("consultation menu state = %#v", state)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("consultation menu invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
+func TestMessageConsultationCanCompleteWithoutBooking(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = consultationTestServices()
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal:       "consultation",
+		Confidence: 0.95,
+		Consultation: ConsultationNeedProfile{
+			CurrentSystem:  ConsultationSystemAcrylic,
+			DesiredOutcome: ConsultationOutcomeShorten,
+			LengthChange:   ConsultationLengthShorten,
+			Confidence:     0.95,
+		},
+	}})
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "What is best if I need my acrylic set shorter?"}); err != nil {
+		t.Fatalf("consultation Message returned error: %v", err)
+	}
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "No thanks, that answers it. Goodbye."})
+	if err != nil {
+		t.Fatalf("completion Message returned error: %v", err)
+	}
+	if session.Status != StatusCompleted || session.Outcome != OutcomeConsultationCompleted || session.ServiceID != "" {
+		t.Fatalf("completion state = status %s outcome %s service %q", session.Status, session.Outcome, session.ServiceID)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("consultation completion invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
+func TestMessageConsultationBookingDeclineCompletesWithoutTools(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = consultationTestServices()
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal:       "consultation",
+		Confidence: 0.96,
+		Consultation: ConsultationNeedProfile{
+			CurrentSystem:  ConsultationSystemAcrylic,
+			DesiredOutcome: ConsultationOutcomeShorten,
+			LengthChange:   ConsultationLengthShorten,
+			Confidence:     0.96,
+		},
+	}})
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "My acrylic extensions need to be much shorter."}); err != nil {
+		t.Fatalf("consultation Message returned error: %v", err)
+	}
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Not today, thanks."})
+	if err != nil {
+		t.Fatalf("decline Message returned error: %v", err)
+	}
+	if session.Status != StatusCompleted || session.Outcome != OutcomeConsultationCompleted || session.ServiceID != "" {
+		t.Fatalf("declined consultation session = %#v", session)
+	}
+	if got := store.lastTurn.AIMessage; got != "No problem. Thanks for calling. You can ask us to book it whenever you're ready." {
+		t.Fatalf("decline reply = %q", got)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("declined consultation invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
+func TestMessageConsultationDetourPreservesAndResumesBookingDraft(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = append([]ServiceOption{{ID: "classic", Name: "Classic Manicure", DurationMinutes: 30}}, consultationTestServices()...)
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "classic"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.BookingSegments = bookingSegmentsFromServices(store.services[:1], store.session)
+	store.session.RequestedDate = "2026-08-20"
+	store.session.DialogState = normalizedDialogState(DialogState{Phase: DialogPhaseDrafting, DraftRevision: 3, ReviewRequired: true})
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&scriptedTurnInterpreter{interpret: func(req TurnInterpretationRequest) TurnUnderstanding {
+		if strings.Contains(strings.ToLower(req.CustomerMessage), "original booking") {
+			return TurnUnderstanding{Goal: "book_appointment", Confidence: 0.96}
+		}
+		return TurnUnderstanding{
+			Goal: "consultation", Confidence: 0.96,
+			Consultation: ConsultationNeedProfile{
+				CurrentSystem: ConsultationSystemAcrylic, DesiredOutcome: ConsultationOutcomeShorten,
+				LengthChange: ConsultationLengthShorten, Confidence: 0.96,
+			},
+		}
+	}})
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Before we finish, what is best for shortening acrylic?"})
+	if err != nil {
+		t.Fatalf("detour Message returned error: %v", err)
+	}
+	if session.Intent != IntentConsultation || session.ServiceID != "classic" || session.RequestedDate != "2026-08-20" {
+		t.Fatalf("consultation detour changed draft: %#v", session)
+	}
+	if state := normalizedDialogState(session.DialogState).Consultation; state == nil || state.ResumePhase != DialogPhaseDrafting {
+		t.Fatalf("resume phase = %#v", state)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Let's continue with my original booking."})
+	if err != nil {
+		t.Fatalf("resume Message returned error: %v", err)
+	}
+	if session.Intent != IntentBooking || session.ServiceID != "classic" || session.RequestedDate != "2026-08-20" {
+		t.Fatalf("resumed draft = %#v", session)
+	}
+	if state := normalizedDialogState(session.DialogState).Consultation; state == nil || state.Status != ConsultationStatusCompleted || state.ExitReason != "resumed_existing_booking" {
+		t.Fatalf("completed consultation = %#v", state)
+	}
+}
+
+func TestMessageConsultationDeclineResumesExistingBookingDraft(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = append([]ServiceOption{{ID: "classic", Name: "Classic Manicure", DurationMinutes: 30}}, consultationTestServices()...)
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "classic"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.RequestedDate = "2026-08-20"
+	store.session.DialogState = normalizedDialogState(DialogState{Phase: DialogPhaseDrafting, DraftRevision: 2})
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal: "consultation", Confidence: 0.96,
+		Consultation: ConsultationNeedProfile{
+			CurrentSystem: ConsultationSystemAcrylic, DesiredOutcome: ConsultationOutcomeShorten,
+			LengthChange: ConsultationLengthShorten, Confidence: 0.96,
+		},
+	}})
+
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Before that, what works for shortening acrylic extensions?"}); err != nil {
+		t.Fatalf("consultation detour Message returned error: %v", err)
+	}
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Not today, thank you."})
+	if err != nil {
+		t.Fatalf("consultation decline Message returned error: %v", err)
+	}
+	if session.Status != StatusActive || session.Intent != IntentBooking || session.ServiceID != "classic" || session.RequestedDate != "2026-08-20" {
+		t.Fatalf("resumed booking draft = %#v", session)
+	}
+	state := normalizedDialogState(session.DialogState).Consultation
+	if state == nil || state.Status != ConsultationStatusCompleted || state.ExitReason != "resumed_existing_booking" {
+		t.Fatalf("consultation state = %#v", state)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("consultation decline invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
+func consultationTestServices() []ServiceOption {
+	return []ServiceOption{
+		{
+			ID: "acrylic_rebalance", Name: "Short Acrylic Rebalance", DurationMinutes: 60,
+			ConsultationProfile: &ServiceConsultationProfile{
+				Status: ConsultationProfileStatusReady, RecommendedOutcomes: []string{ConsultationOutcomeShorten},
+				CompatibleCurrentSystems: []string{ConsultationSystemAcrylic, ConsultationSystemExtension},
+				LengthCapabilities:       []string{ConsultationLengthShorten}, PriorityTags: []string{ConsultationPriorityLowerMaintenance},
+				FinishOptions: []string{ConsultationFinishMatte}, MaintenanceNote: "Return every three weeks.",
+				OwnerApprovedSummary: "Shortens an existing acrylic set with lower-maintenance upkeep.", Revision: 4,
+			},
+		},
+		{
+			ID: "gel_color", Name: "Gel Color Refresh", DurationMinutes: 45,
+			ConsultationProfile: &ServiceConsultationProfile{
+				Status: ConsultationProfileStatusReady, RecommendedOutcomes: []string{ConsultationOutcomeColorRefresh},
+				CompatibleCurrentSystems: []string{ConsultationSystemGel}, OwnerApprovedSummary: "Refreshes gel color.", Revision: 2,
+			},
+		},
+		{
+			ID: "unapproved", Name: "Unapproved Experimental Service", DurationMinutes: 30,
+			ConsultationProfile: &ServiceConsultationProfile{
+				Status: "draft", RecommendedOutcomes: []string{ConsultationOutcomeShorten},
+				CompatibleCurrentSystems: []string{ConsultationSystemAcrylic}, Revision: 9,
+			},
+		},
 	}
 }
 
@@ -7818,6 +8154,7 @@ func newFakeConversationStore() *fakeConversationStore {
 			Timezone:                "America/Chicago",
 			AIEnabled:               true,
 			HandoffEnabled:          true,
+			ConsultationEnabled:     true,
 			AIGreeting:              defaultGreeting,
 			RecordingEnabled:        true,
 			RecordingConsentMessage: recordingDisclosure,

@@ -171,7 +171,7 @@
 
 - [x] Add sanitized owner-scoped configuration export with stable schema version.
 - [x] Exclude services, staff, customers, appointments, call sessions, transcripts, POS OAuth tokens, API keys, client secrets, encrypted secrets, and operational records.
-- [x] Include service category taxonomy, service category aliases, and service aliases in schema v5 while continuing to exclude service records and provider state.
+- [x] Include service category taxonomy, service category aliases, and service aliases in schema v5, then add the salon consultation runtime toggle in schema v6 while continuing to exclude service records, service consultation profiles, and provider state.
 - [x] Use stable category slugs and normalized alias keys so repeated imports update existing taxonomy instead of duplicating it.
 - [x] Resolve imported service aliases only against existing target-salon services and skip unresolved alias targets without creating services.
 - [x] Add import preview and apply flows for existing salons and onboarding.
@@ -192,5 +192,11 @@
 - [x] Cancel streaming speech on barge-in, clear Twilio playback, reject stale generations, and close terminal replies only after a Twilio playback mark or timeout.
 - [x] Expose owner-scoped, PII-free realtime admission and output-validation diagnostics in the Calls timeline without transcript or audio bodies.
 - [x] Keep operational facts deterministic and allow guarded LLM rewriting only for explicitly style-only replies.
-- [x] Compare services from active-provider synced catalog facts, require explicit selection after consultation, and hand health-suitability questions to the owner without medical advice.
-- [x] Clear consultation candidate state after catalog selection or workflow exit, and keep cancel/reschedule/handoff/party actions ahead of consultation routing.
+- [x] Persist structured service consultation profiles with stable `(salon_id, service_id)` ownership, controlled values, owner-approved copy, no-op identical retries, and revision increments only when data changes.
+- [x] Rank only active-provider, POS-linked, AI-bookable services whose consultation profile is `ready`; record recommendation reasons and profile revisions for audit.
+- [x] Keep semantic consultation output extraction-only and unable to recommend services, mutate booking state, or call availability/POS tools.
+- [x] Persist active consultation needs, candidates, recommendations, selection, resume phase, no-progress count, and exit reason in versioned `dialog_state`; transcript metadata remains audit evidence.
+- [x] Require both a concrete service selection and explicit booking intent before transitioning from consultation to booking, and preserve an existing booking draft across consultation detours.
+- [x] Support consultation-only completion with `consultation_completed`, bounded unresolved handoff, and safety handoff without medical advice.
+- [x] Keep cancel, reschedule, handoff, and active party-plan actions ahead of consultation routing.
+- [x] Expose per-service consultation profile controls in Services, the salon-wide toggle and coverage in Settings, and typed consultation audit state in Calls.

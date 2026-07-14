@@ -34,7 +34,40 @@ func normalizedDialogState(state DialogState) DialogState {
 		preference := *state.TimePreference
 		state.TimePreference = &preference
 	}
+	if state.Consultation != nil {
+		consultation := *state.Consultation
+		consultation.Needs.Priorities = append([]string(nil), state.Consultation.Needs.Priorities...)
+		consultation.Needs.DesiredFinishes = append([]string(nil), state.Consultation.Needs.DesiredFinishes...)
+		consultation.Needs.ComparedServiceIDs = append([]string(nil), state.Consultation.Needs.ComparedServiceIDs...)
+		consultation.CandidateServiceIDs = append([]string(nil), state.Consultation.CandidateServiceIDs...)
+		consultation.RecommendedServiceIDs = append([]string(nil), state.Consultation.RecommendedServiceIDs...)
+		consultation.ProfileRevisions = cloneStringIntMap(state.Consultation.ProfileRevisions)
+		consultation.RecommendationReasons = cloneStringSliceMap(state.Consultation.RecommendationReasons)
+		state.Consultation = &consultation
+	}
 	return state
+}
+
+func cloneStringIntMap(source map[string]int) map[string]int {
+	if source == nil {
+		return nil
+	}
+	cloned := make(map[string]int, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func cloneStringSliceMap(source map[string][]string) map[string][]string {
+	if source == nil {
+		return nil
+	}
+	cloned := make(map[string][]string, len(source))
+	for key, value := range source {
+		cloned[key] = append([]string(nil), value...)
+	}
+	return cloned
 }
 
 func cloneDraftMutation(source DraftMutation) DraftMutation {

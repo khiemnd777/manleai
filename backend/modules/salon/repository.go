@@ -121,7 +121,7 @@ func (r *Repository) GetSettings(ctx context.Context, salonID string, ownerUserI
 	row := r.db.QueryRowContext(ctx, `
 		SELECT ss.id::text, ss.salon_id::text, ss.ai_greeting, ss.ai_voice, COALESCE(ss.ai_tone, 'professional_warm'), ss.booking_mode, ss.recording_enabled,
 		       ss.recording_consent_message, ss.sms_confirmation_enabled, ss.sms_reminder_enabled,
-		       ss.reminder_hours_before, ss.handoff_enabled, ss.created_at, ss.updated_at
+		       ss.reminder_hours_before, ss.handoff_enabled, ss.consultation_enabled, ss.created_at, ss.updated_at
 		FROM salon_settings ss
 		JOIN salons s ON s.id = ss.salon_id
 		WHERE ss.salon_id = $1 AND s.owner_user_id = $2
@@ -142,10 +142,11 @@ func (r *Repository) UpdateSettings(ctx context.Context, salonID string, ownerUs
 		    sms_reminder_enabled = $8,
 		    reminder_hours_before = $9,
 		    handoff_enabled = $10,
+		    consultation_enabled = $11,
 		    updated_at = now()
-		WHERE salon_id = $11
-		  AND EXISTS (SELECT 1 FROM salons WHERE salons.id = salon_settings.salon_id AND salons.owner_user_id = $12)
-	`, req.AIGreeting, req.AIVoice, req.AITone, req.BookingMode, req.RecordingEnabled, req.RecordingConsentMessage, req.SMSConfirmationEnabled, req.SMSReminderEnabled, req.ReminderHoursBefore, req.HandoffEnabled, salonID, ownerUserID)
+		WHERE salon_id = $12
+		  AND EXISTS (SELECT 1 FROM salons WHERE salons.id = salon_settings.salon_id AND salons.owner_user_id = $13)
+	`, req.AIGreeting, req.AIVoice, req.AITone, req.BookingMode, req.RecordingEnabled, req.RecordingConsentMessage, req.SMSConfirmationEnabled, req.SMSReminderEnabled, req.ReminderHoursBefore, req.HandoffEnabled, req.ConsultationEnabled, salonID, ownerUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -351,6 +352,7 @@ func scanSettings(row rowScanner) (*Settings, error) {
 		&settings.SMSReminderEnabled,
 		&settings.ReminderHoursBefore,
 		&settings.HandoffEnabled,
+		&settings.ConsultationEnabled,
 		&settings.CreatedAt,
 		&settings.UpdatedAt,
 	)

@@ -203,6 +203,8 @@ func (a *Adapter) InterpretTurn(ctx context.Context, req voice.TurnModelRequest)
 			"A final-review acceptance may coexist with a correction; include both and never suppress the correction.",
 			"Use set_field or clear_field for staff, date/time, guest, or customer-field corrections.",
 			"Do not infer booking confirmation, availability, customer identity, prices, or policy.",
+			"For consultation, extract only the caller's stated current nail system, desired outcome, length change, priorities, desired finishes, compared catalog service IDs, booking request, and whether the caller is done. Never recommend a service in model output.",
+			"Use empty strings and arrays when consultation details are not present. Do not infer health suitability or treatment claims.",
 			"Return strict JSON matching the schema.",
 		}, "\n"),
 		Input: turnModelInput(req),
@@ -405,6 +407,43 @@ func turnUnderstandingSchema() map[string]any {
 		},
 		"required": []string{"subject", "service_ids", "staff_ids", "time_preference", "confidence", "reason"},
 	}
+	consultation := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"current_system": map[string]any{"type": "string", "enum": []string{
+				"", conversation.ConsultationSystemNatural, conversation.ConsultationSystemRegularPolish,
+				conversation.ConsultationSystemGel, conversation.ConsultationSystemDip, conversation.ConsultationSystemAcrylic,
+				conversation.ConsultationSystemExtension, conversation.ConsultationSystemUnknown,
+			}},
+			"desired_outcome": map[string]any{"type": "string", "enum": []string{
+				"", conversation.ConsultationOutcomeMaintain, conversation.ConsultationOutcomeShorten,
+				conversation.ConsultationOutcomeAddLength, conversation.ConsultationOutcomeAddStrength,
+				conversation.ConsultationOutcomeRepair, conversation.ConsultationOutcomeRemoval,
+				conversation.ConsultationOutcomeColorRefresh, conversation.ConsultationOutcomeCompare,
+				conversation.ConsultationOutcomeUnknown,
+			}},
+			"length_change": map[string]any{"type": "string", "enum": []string{
+				"", conversation.ConsultationLengthKeep, conversation.ConsultationLengthShorten,
+				conversation.ConsultationLengthAddLength, conversation.ConsultationLengthUnknown,
+			}},
+			"priorities": map[string]any{"type": "array", "uniqueItems": true, "items": map[string]any{"type": "string", "enum": []string{
+				conversation.ConsultationPriorityDurability, conversation.ConsultationPriorityLowerMaintenance,
+				conversation.ConsultationPriorityLowerCost, conversation.ConsultationPriorityShorterVisit,
+			}}},
+			"desired_finishes": map[string]any{"type": "array", "uniqueItems": true, "items": map[string]any{"type": "string", "enum": []string{
+				conversation.ConsultationFinishNatural, conversation.ConsultationFinishRegularPolish,
+				conversation.ConsultationFinishGelPolish, conversation.ConsultationFinishGlossy,
+				conversation.ConsultationFinishMatte, conversation.ConsultationFinishNailArt,
+			}}},
+			"compared_service_ids":  map[string]any{"type": "array", "uniqueItems": true, "items": map[string]any{"type": "string"}},
+			"booking_requested":     map[string]any{"type": "boolean"},
+			"conversation_complete": map[string]any{"type": "boolean"},
+			"confidence":            map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+			"reason":                map[string]any{"type": "string"},
+		},
+		"required": []string{"current_system", "desired_outcome", "length_change", "priorities", "desired_finishes", "compared_service_ids", "booking_requested", "conversation_complete", "confidence", "reason"},
+	}
 	return map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
@@ -412,12 +451,13 @@ func turnUnderstandingSchema() map[string]any {
 			"goal": map[string]any{"type": "string", "enum": []string{
 				"unknown", "book_appointment", "reschedule_appointment", "cancel_appointment", "consultation", "information", "human_handoff",
 			}},
-			"acts":       map[string]any{"type": "array", "items": act},
-			"questions":  map[string]any{"type": "array", "items": question},
-			"confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
-			"reason":     map[string]any{"type": "string"},
+			"acts":         map[string]any{"type": "array", "items": act},
+			"questions":    map[string]any{"type": "array", "items": question},
+			"confidence":   map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+			"reason":       map[string]any{"type": "string"},
+			"consultation": consultation,
 		},
-		"required": []string{"goal", "acts", "questions", "confidence", "reason"},
+		"required": []string{"goal", "acts", "questions", "confidence", "reason", "consultation"},
 	}
 }
 
@@ -434,6 +474,7 @@ func turnModelInput(req voice.TurnModelRequest) string {
 		"current_booking_stage": req.CurrentBookingStage,
 		"booking_action":        req.BookingAction,
 		"current_draft":         req.CurrentDraft,
+		"consultation":          req.Consultation,
 	})
 	return string(raw)
 }

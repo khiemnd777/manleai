@@ -97,6 +97,9 @@ func asksServiceMenu(message string) bool {
 			return true
 		}
 	}
+	if strings.Contains(normalized, "list") && strings.Contains(normalized, "service") {
+		return true
+	}
 	if strings.HasPrefix(normalized, "what ") {
 		for _, signal := range []string{
 			"service do you have",

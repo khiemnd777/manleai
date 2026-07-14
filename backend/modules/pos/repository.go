@@ -3,6 +3,7 @@ package pos
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -773,11 +774,19 @@ func (r *Repository) ListServices(ctx context.Context, salonID string, provider 
 		             AND link.sync_status = 'synced'
 		       ) AS pos_linked,
 		       COALESCE(cat.id::text, ''), COALESCE(cat.name, ''), COALESCE(cat.slug, ''),
-		       svc.service_category_source, COALESCE(svc.service_category_confidence, 0), svc.service_category_reviewed_at
+		       svc.service_category_source, COALESCE(svc.service_category_confidence, 0), svc.service_category_reviewed_at,
+		       COALESCE(profile.id::text, ''), COALESCE(profile.status, 'draft'),
+		       COALESCE(profile.recommended_outcomes, '[]'::jsonb), COALESCE(profile.compatible_current_systems, '[]'::jsonb),
+		       COALESCE(profile.length_capabilities, '[]'::jsonb), COALESCE(profile.priority_tags, '[]'::jsonb),
+		       COALESCE(profile.finish_options, '[]'::jsonb), COALESCE(profile.maintenance_note, ''),
+		       COALESCE(profile.owner_approved_summary, ''), COALESCE(profile.revision, 0),
+		       COALESCE(profile.updated_by::text, ''), profile.created_at, profile.updated_at
 		FROM services svc
 		LEFT JOIN service_categories cat ON cat.id = svc.service_category_id
 		                                AND cat.salon_id = svc.salon_id
 		                                AND cat.status = 'active'
+		LEFT JOIN service_consultation_profiles profile ON profile.salon_id = svc.salon_id
+		                                                  AND profile.service_id = svc.id
 		WHERE svc.salon_id = $1 AND svc.pos_provider = $2
 		ORDER BY (svc.archived_at IS NOT NULL) ASC, svc.active DESC, COALESCE(cat.sort_order, 9999), COALESCE(cat.name, ''), svc.name ASC
 	`, salonID, provider)
@@ -1213,6 +1222,11 @@ func (r *Repository) CreateService(ctx context.Context, salonID string, ownerUse
 	`, salonID, serviceID, provider); err != nil {
 		return nil, err
 	}
+	if input.ConsultationProfile != nil {
+		if err := upsertServiceConsultationProfileTx(ctx, tx, salonID, serviceID, ownerUserID, *input.ConsultationProfile); err != nil {
+			return nil, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -1232,7 +1246,12 @@ func (r *Repository) UpdateService(ctx context.Context, salonID string, ownerUse
 			return nil, err
 		}
 	}
-	if _, err := r.db.ExecContext(ctx, `
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE services
 		SET name = $1,
 		    description = NULLIF($2, ''),
@@ -1251,6 +1270,14 @@ func (r *Repository) UpdateService(ctx context.Context, salonID string, ownerUse
 		WHERE id = $7
 		  AND salon_id = $8
 	`, input.Name, input.Description, input.AIDescription, input.DurationMinutes, servicePriceValue(input.PriceFrom), input.Active, serviceID, salonID, input.ServiceCategoryID, ownerUserID); err != nil {
+		return nil, err
+	}
+	if input.ConsultationProfile != nil {
+		if err := upsertServiceConsultationProfileTx(ctx, tx, salonID, serviceID, ownerUserID, *input.ConsultationProfile); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return r.getServiceForOwner(ctx, salonID, ownerUserID, serviceID)
@@ -1462,11 +1489,19 @@ func (r *Repository) GetServiceForSync(ctx context.Context, salonID string, serv
 		             AND link.sync_status = 'synced'
 		       ) AS pos_linked,
 		       COALESCE(cat.id::text, ''), COALESCE(cat.name, ''), COALESCE(cat.slug, ''),
-		       svc.service_category_source, COALESCE(svc.service_category_confidence, 0), svc.service_category_reviewed_at
+		       svc.service_category_source, COALESCE(svc.service_category_confidence, 0), svc.service_category_reviewed_at,
+		       COALESCE(profile.id::text, ''), COALESCE(profile.status, 'draft'),
+		       COALESCE(profile.recommended_outcomes, '[]'::jsonb), COALESCE(profile.compatible_current_systems, '[]'::jsonb),
+		       COALESCE(profile.length_capabilities, '[]'::jsonb), COALESCE(profile.priority_tags, '[]'::jsonb),
+		       COALESCE(profile.finish_options, '[]'::jsonb), COALESCE(profile.maintenance_note, ''),
+		       COALESCE(profile.owner_approved_summary, ''), COALESCE(profile.revision, 0),
+		       COALESCE(profile.updated_by::text, ''), profile.created_at, profile.updated_at
 		FROM services svc
 		LEFT JOIN service_categories cat ON cat.id = svc.service_category_id
 		                                AND cat.salon_id = svc.salon_id
 		                                AND cat.status = 'active'
+		LEFT JOIN service_consultation_profiles profile ON profile.salon_id = svc.salon_id
+		                                                  AND profile.service_id = svc.id
 		WHERE svc.id = $1
 		  AND svc.salon_id = $2
 	`, serviceID, salonID)
@@ -1953,11 +1988,19 @@ func (r *Repository) getServiceForOwner(ctx context.Context, salonID string, own
 		             AND link.sync_status = 'synced'
 		       ) AS pos_linked,
 		       COALESCE(cat.id::text, ''), COALESCE(cat.name, ''), COALESCE(cat.slug, ''),
-		       svc.service_category_source, COALESCE(svc.service_category_confidence, 0), svc.service_category_reviewed_at
+		       svc.service_category_source, COALESCE(svc.service_category_confidence, 0), svc.service_category_reviewed_at,
+		       COALESCE(profile.id::text, ''), COALESCE(profile.status, 'draft'),
+		       COALESCE(profile.recommended_outcomes, '[]'::jsonb), COALESCE(profile.compatible_current_systems, '[]'::jsonb),
+		       COALESCE(profile.length_capabilities, '[]'::jsonb), COALESCE(profile.priority_tags, '[]'::jsonb),
+		       COALESCE(profile.finish_options, '[]'::jsonb), COALESCE(profile.maintenance_note, ''),
+		       COALESCE(profile.owner_approved_summary, ''), COALESCE(profile.revision, 0),
+		       COALESCE(profile.updated_by::text, ''), profile.created_at, profile.updated_at
 		FROM services svc
 		LEFT JOIN service_categories cat ON cat.id = svc.service_category_id
 		                                AND cat.salon_id = svc.salon_id
 		                                AND cat.status = 'active'
+		LEFT JOIN service_consultation_profiles profile ON profile.salon_id = svc.salon_id
+		                                                  AND profile.service_id = svc.id
 		JOIN salons salon ON salon.id = svc.salon_id
 		WHERE svc.id = $1
 		  AND svc.salon_id = $2
@@ -2165,6 +2208,67 @@ func servicePriceValue(price *float64) any {
 	return *price
 }
 
+func upsertServiceConsultationProfileTx(ctx context.Context, tx *sql.Tx, salonID string, serviceID string, ownerUserID string, input ServiceConsultationProfileMutation) error {
+	outcomes, err := json.Marshal(input.RecommendedOutcomes)
+	if err != nil {
+		return err
+	}
+	systems, err := json.Marshal(input.CompatibleCurrentSystems)
+	if err != nil {
+		return err
+	}
+	lengths, err := json.Marshal(input.LengthCapabilities)
+	if err != nil {
+		return err
+	}
+	priorities, err := json.Marshal(input.PriorityTags)
+	if err != nil {
+		return err
+	}
+	finishes, err := json.Marshal(input.FinishOptions)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO service_consultation_profiles (
+			salon_id, service_id, status, recommended_outcomes, compatible_current_systems,
+			length_capabilities, priority_tags, finish_options, maintenance_note,
+			owner_approved_summary, updated_by
+		)
+		VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, NULLIF($9, ''), NULLIF($10, ''), $11)
+		ON CONFLICT (salon_id, service_id)
+		DO UPDATE SET status = EXCLUDED.status,
+		              recommended_outcomes = EXCLUDED.recommended_outcomes,
+		              compatible_current_systems = EXCLUDED.compatible_current_systems,
+		              length_capabilities = EXCLUDED.length_capabilities,
+		              priority_tags = EXCLUDED.priority_tags,
+		              finish_options = EXCLUDED.finish_options,
+		              maintenance_note = EXCLUDED.maintenance_note,
+		              owner_approved_summary = EXCLUDED.owner_approved_summary,
+		              revision = service_consultation_profiles.revision + 1,
+		              updated_by = EXCLUDED.updated_by,
+		              updated_at = now()
+		WHERE (service_consultation_profiles.status,
+		       service_consultation_profiles.recommended_outcomes,
+		       service_consultation_profiles.compatible_current_systems,
+		       service_consultation_profiles.length_capabilities,
+		       service_consultation_profiles.priority_tags,
+		       service_consultation_profiles.finish_options,
+		       service_consultation_profiles.maintenance_note,
+		       service_consultation_profiles.owner_approved_summary)
+		      IS DISTINCT FROM
+		      (EXCLUDED.status,
+		       EXCLUDED.recommended_outcomes,
+		       EXCLUDED.compatible_current_systems,
+		       EXCLUDED.length_capabilities,
+		       EXCLUDED.priority_tags,
+		       EXCLUDED.finish_options,
+		       EXCLUDED.maintenance_note,
+		       EXCLUDED.owner_approved_summary)
+	`, salonID, serviceID, input.Status, string(outcomes), string(systems), string(lengths), string(priorities), string(finishes), input.MaintenanceNote, input.OwnerApprovedSummary, ownerUserID)
+	return err
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }
@@ -2174,6 +2278,19 @@ func scanService(row rowScanner) (*Service, error) {
 	var archivedAt sql.NullTime
 	var lastSyncedAt sql.NullTime
 	var categoryReviewedAt sql.NullTime
+	var profileID string
+	var profileStatus string
+	var profileOutcomes []byte
+	var profileSystems []byte
+	var profileLengths []byte
+	var profilePriorities []byte
+	var profileFinishes []byte
+	var profileMaintenanceNote string
+	var profileOwnerSummary string
+	var profileRevision int
+	var profileUpdatedBy string
+	var profileCreatedAt sql.NullTime
+	var profileUpdatedAt sql.NullTime
 	err := row.Scan(
 		&item.ID,
 		&item.SalonID,
@@ -2200,6 +2317,19 @@ func scanService(row rowScanner) (*Service, error) {
 		&item.CategorySource,
 		&item.CategoryConfidence,
 		&categoryReviewedAt,
+		&profileID,
+		&profileStatus,
+		&profileOutcomes,
+		&profileSystems,
+		&profileLengths,
+		&profilePriorities,
+		&profileFinishes,
+		&profileMaintenanceNote,
+		&profileOwnerSummary,
+		&profileRevision,
+		&profileUpdatedBy,
+		&profileCreatedAt,
+		&profileUpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -2215,6 +2345,35 @@ func scanService(row rowScanner) (*Service, error) {
 	}
 	if categoryReviewedAt.Valid {
 		item.CategoryReviewedAt = &categoryReviewedAt.Time
+	}
+	if profileID != "" {
+		profile := &ServiceConsultationProfile{
+			ID: profileID, SalonID: item.SalonID, ServiceID: item.ID, Status: profileStatus,
+			MaintenanceNote: profileMaintenanceNote, OwnerApprovedSummary: profileOwnerSummary,
+			Revision: profileRevision, UpdatedBy: profileUpdatedBy,
+		}
+		if err := json.Unmarshal(profileOutcomes, &profile.RecommendedOutcomes); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(profileSystems, &profile.CompatibleCurrentSystems); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(profileLengths, &profile.LengthCapabilities); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(profilePriorities, &profile.PriorityTags); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(profileFinishes, &profile.FinishOptions); err != nil {
+			return nil, err
+		}
+		if profileCreatedAt.Valid {
+			profile.CreatedAt = &profileCreatedAt.Time
+		}
+		if profileUpdatedAt.Valid {
+			profile.UpdatedAt = &profileUpdatedAt.Time
+		}
+		item.ConsultationProfile = profile
 	}
 	return &item, nil
 }

@@ -426,6 +426,7 @@ func onboardingImportTargetState() *importTargetState {
 			SMSReminderEnabled:      true,
 			ReminderHoursBefore:     24,
 			HandoffEnabled:          true,
+			ConsultationEnabled:     true,
 		},
 		PublicCanPublish:             false,
 		CanEnableAIBooking:           false,
@@ -499,6 +500,7 @@ func planAIReceptionist(plan *importPlan) {
 	fieldChange(plan, SectionAI, "sms_reminder_enabled", boolString(target.SMSReminderEnabled), boolString(incoming.SMSReminderEnabled))
 	fieldChange(plan, SectionAI, "reminder_hours_before", intString(target.ReminderHoursBefore), intString(incoming.ReminderHoursBefore))
 	fieldChange(plan, SectionAI, "handoff_enabled", boolString(target.HandoffEnabled), boolString(incoming.HandoffEnabled))
+	fieldChange(plan, SectionAI, "consultation_enabled", boolString(target.ConsultationEnabled), boolString(incoming.ConsultationEnabled))
 
 	if incoming.BookingMode == "confirmed_booking" && !plan.Target.CanEnableAIBooking {
 		summary(plan, SectionAI).Skipped++
@@ -807,7 +809,7 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 	if bundle.SchemaVersion == "" {
 		return bundle, ErrValidation
 	}
-	if bundle.SchemaVersion != SchemaVersion && bundle.SchemaVersion != LegacySchemaV4 && bundle.SchemaVersion != LegacySchemaV3 && bundle.SchemaVersion != LegacySchemaV2 && bundle.SchemaVersion != LegacySchemaV1 {
+	if bundle.SchemaVersion != SchemaVersion && bundle.SchemaVersion != LegacySchemaV5 && bundle.SchemaVersion != LegacySchemaV4 && bundle.SchemaVersion != LegacySchemaV3 && bundle.SchemaVersion != LegacySchemaV2 && bundle.SchemaVersion != LegacySchemaV1 {
 		return bundle, ErrUnsupportedSchema
 	}
 	if bundle.SecretsExported || bundle.OperationalDataExported {
@@ -818,6 +820,9 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 	bundle.SalonProfile = normalizeSalonProfile(bundle.SalonProfile)
 	if bundle.SalonProfile.Name == "" || bundle.SalonProfile.Phone == "" {
 		return bundle, ErrValidation
+	}
+	if bundle.SchemaVersion != SchemaVersion {
+		bundle.AIReceptionist.ConsultationEnabled = true
 	}
 	bundle.AIReceptionist = normalizeAIReceptionist(bundle.AIReceptionist)
 	if bundle.AIReceptionist.AIGreeting == "" || bundle.AIReceptionist.RecordingConsentMessage == "" || bundle.AIReceptionist.ReminderHoursBefore <= 0 {
@@ -1079,6 +1084,7 @@ func aiReceptionistExport(settings *salon.Settings) AIReceptionistExport {
 		SMSReminderEnabled:      settings.SMSReminderEnabled,
 		ReminderHoursBefore:     settings.ReminderHoursBefore,
 		HandoffEnabled:          settings.HandoffEnabled,
+		ConsultationEnabled:     settings.ConsultationEnabled,
 		UpdatedAt:               settings.UpdatedAt,
 	}
 }

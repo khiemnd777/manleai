@@ -25,13 +25,58 @@ const (
 	ReplyPolicyOperationalFact = "operational_fact"
 	ReplyPolicyStyleOnly       = "style_only"
 
-	DialogStateVersion = 2
+	DialogStateVersion = 3
 
 	DialogPhaseOpen         = "open"
 	DialogPhaseDrafting     = "drafting"
 	DialogPhaseClarifying   = "clarifying"
 	DialogPhaseAvailability = "availability"
 	DialogPhaseReview       = "review"
+	DialogPhaseConsultation = "consultation"
+
+	ConsultationStatusCollectingNeeds   = "collecting_needs"
+	ConsultationStatusComparing         = "comparing"
+	ConsultationStatusAwaitingSelection = "awaiting_selection"
+	ConsultationStatusAwaitingBooking   = "awaiting_booking"
+	ConsultationStatusCompleted         = "completed"
+	ConsultationStatusHandedOff         = "handed_off"
+
+	ConsultationProfileStatusReady = "ready"
+
+	ConsultationSystemNatural       = "natural"
+	ConsultationSystemRegularPolish = "regular_polish"
+	ConsultationSystemGel           = "gel"
+	ConsultationSystemDip           = "dip"
+	ConsultationSystemAcrylic       = "acrylic"
+	ConsultationSystemExtension     = "extension"
+	ConsultationSystemUnknown       = "unknown"
+
+	ConsultationOutcomeMaintain     = "maintain"
+	ConsultationOutcomeShorten      = "shorten"
+	ConsultationOutcomeAddLength    = "add_length"
+	ConsultationOutcomeAddStrength  = "add_strength"
+	ConsultationOutcomeRepair       = "repair"
+	ConsultationOutcomeRemoval      = "removal"
+	ConsultationOutcomeColorRefresh = "color_refresh"
+	ConsultationOutcomeCompare      = "compare"
+	ConsultationOutcomeUnknown      = "unknown"
+
+	ConsultationLengthKeep      = "keep"
+	ConsultationLengthShorten   = "shorten"
+	ConsultationLengthAddLength = "add_length"
+	ConsultationLengthUnknown   = "unknown"
+
+	ConsultationPriorityDurability       = "durability"
+	ConsultationPriorityLowerMaintenance = "lower_maintenance"
+	ConsultationPriorityLowerCost        = "lower_cost"
+	ConsultationPriorityShorterVisit     = "shorter_visit"
+
+	ConsultationFinishNatural       = "natural"
+	ConsultationFinishRegularPolish = "regular_polish"
+	ConsultationFinishGelPolish     = "gel_polish"
+	ConsultationFinishGlossy        = "glossy"
+	ConsultationFinishMatte         = "matte"
+	ConsultationFinishNailArt       = "nail_art"
 
 	ConversationActUnknown   = "unknown"
 	ConversationActAdd       = "add_service"
@@ -79,6 +124,7 @@ const (
 	OutcomeBookingCancelled       = "booking_cancelled"
 	OutcomeBookingFallbackPending = "booking_fallback_pending"
 	OutcomeHandoffRequested       = "handoff_requested"
+	OutcomeConsultationCompleted  = "consultation_completed"
 	OutcomeAIDisabled             = "ai_disabled"
 	OutcomeFailed                 = "failed"
 
@@ -100,6 +146,7 @@ const (
 	HandoffReasonCustomerDetailsUnavailable = "customer_details_unavailable"
 	HandoffReasonGroupBooking               = "group_booking"
 	HandoffReasonConsultationSafety         = "consultation_safety"
+	HandoffReasonConsultationUnresolved     = "consultation_unresolved"
 	HandoffReasonServiceClarification       = "service_clarification_unresolved"
 	HandoffReasonVoiceInputUnintelligible   = "voice_input_unintelligible"
 
@@ -146,6 +193,7 @@ type TurnInterpretationRequest struct {
 	CurrentBookingStage string
 	BookingAction       string
 	CurrentDraft        ConversationDraftRef
+	Consultation        *ConsultationState
 }
 
 type ConversationServiceRef struct {
@@ -208,15 +256,16 @@ type ConversationQuestion struct {
 }
 
 type TurnUnderstanding struct {
-	Goal               string                 `json:"goal"`
-	Acts               []ConversationAct      `json:"acts"`
-	Questions          []ConversationQuestion `json:"questions"`
-	Confidence         float64                `json:"confidence"`
-	Reason             string                 `json:"reason"`
-	Source             string                 `json:"source"`
-	ModelInvoked       bool                   `json:"-"`
-	CatalogFallback    bool                   `json:"-"`
-	InterpreterOutcome string                 `json:"-"`
+	Goal               string                  `json:"goal"`
+	Acts               []ConversationAct       `json:"acts"`
+	Questions          []ConversationQuestion  `json:"questions"`
+	Confidence         float64                 `json:"confidence"`
+	Reason             string                  `json:"reason"`
+	Consultation       ConsultationNeedProfile `json:"consultation"`
+	Source             string                  `json:"source"`
+	ModelInvoked       bool                    `json:"-"`
+	CatalogFallback    bool                    `json:"-"`
+	InterpreterOutcome string                  `json:"-"`
 }
 
 type PendingConversationAct struct {
@@ -250,6 +299,33 @@ type TimePreference struct {
 	Minutes   int    `json:"minutes"`
 }
 
+type ConsultationNeedProfile struct {
+	CurrentSystem        string   `json:"current_system,omitempty"`
+	DesiredOutcome       string   `json:"desired_outcome,omitempty"`
+	LengthChange         string   `json:"length_change,omitempty"`
+	Priorities           []string `json:"priorities,omitempty"`
+	DesiredFinishes      []string `json:"desired_finishes,omitempty"`
+	ComparedServiceIDs   []string `json:"compared_service_ids,omitempty"`
+	BookingRequested     bool     `json:"booking_requested,omitempty"`
+	ConversationComplete bool     `json:"conversation_complete,omitempty"`
+	Confidence           float64  `json:"confidence,omitempty"`
+	Reason               string   `json:"reason,omitempty"`
+}
+
+type ConsultationState struct {
+	Status                string                  `json:"status"`
+	ResumePhase           string                  `json:"resume_phase"`
+	Needs                 ConsultationNeedProfile `json:"needs"`
+	CandidateServiceIDs   []string                `json:"candidate_service_ids,omitempty"`
+	RecommendedServiceIDs []string                `json:"recommended_service_ids,omitempty"`
+	SelectedServiceID     string                  `json:"selected_service_id,omitempty"`
+	LastAskedField        string                  `json:"last_asked_field,omitempty"`
+	ProfileRevisions      map[string]int          `json:"profile_revisions,omitempty"`
+	RecommendationReasons map[string][]string     `json:"recommendation_reasons,omitempty"`
+	NoProgressCount       int                     `json:"no_progress_count"`
+	ExitReason            string                  `json:"exit_reason,omitempty"`
+}
+
 type DialogState struct {
 	Version              int                     `json:"version"`
 	Phase                string                  `json:"phase"`
@@ -266,6 +342,7 @@ type DialogState struct {
 	AuthorizedRevision   int                     `json:"authorized_revision"`
 	LastMutationRevision int                     `json:"last_mutation_revision,omitempty"`
 	TimePreference       *TimePreference         `json:"time_preference,omitempty"`
+	Consultation         *ConsultationState      `json:"consultation,omitempty"`
 }
 
 type Store interface {
@@ -382,6 +459,7 @@ type RuntimeConfig struct {
 	AIEnabled               bool
 	HandoffPhone            string
 	HandoffEnabled          bool
+	ConsultationEnabled     bool
 	AIGreeting              string
 	AITone                  string
 	RecordingEnabled        bool
@@ -389,16 +467,29 @@ type RuntimeConfig struct {
 }
 
 type ServiceOption struct {
-	ID              string  `json:"id"`
-	Name            string  `json:"name"`
-	Description     string  `json:"description,omitempty"`
-	AIDescription   string  `json:"ai_description,omitempty"`
-	DurationMinutes int     `json:"duration_minutes"`
-	PriceFrom       float64 `json:"price_from,omitempty"`
-	PriceDisplay    string  `json:"price_display,omitempty"`
-	CategoryID      string  `json:"category_id,omitempty"`
-	CategoryName    string  `json:"category_name,omitempty"`
-	CategorySlug    string  `json:"category_slug,omitempty"`
+	ID                  string                      `json:"id"`
+	Name                string                      `json:"name"`
+	Description         string                      `json:"description,omitempty"`
+	AIDescription       string                      `json:"ai_description,omitempty"`
+	DurationMinutes     int                         `json:"duration_minutes"`
+	PriceFrom           float64                     `json:"price_from,omitempty"`
+	PriceDisplay        string                      `json:"price_display,omitempty"`
+	CategoryID          string                      `json:"category_id,omitempty"`
+	CategoryName        string                      `json:"category_name,omitempty"`
+	CategorySlug        string                      `json:"category_slug,omitempty"`
+	ConsultationProfile *ServiceConsultationProfile `json:"consultation_profile,omitempty"`
+}
+
+type ServiceConsultationProfile struct {
+	Status                   string   `json:"status"`
+	RecommendedOutcomes      []string `json:"recommended_outcomes"`
+	CompatibleCurrentSystems []string `json:"compatible_current_systems"`
+	LengthCapabilities       []string `json:"length_capabilities"`
+	PriorityTags             []string `json:"priority_tags"`
+	FinishOptions            []string `json:"finish_options"`
+	MaintenanceNote          string   `json:"maintenance_note,omitempty"`
+	OwnerApprovedSummary     string   `json:"owner_approved_summary,omitempty"`
+	Revision                 int      `json:"revision"`
 }
 
 type ServiceAlias struct {

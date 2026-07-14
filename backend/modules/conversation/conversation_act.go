@@ -84,6 +84,7 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 		CurrentBookingStage: normalizedDialogState(session.DialogState).Phase,
 		BookingAction:       bookingActionForSession(session),
 		CurrentDraft:        conversationDraftRef(session),
+		Consultation:        cloneDialogState(session.DialogState).Consultation,
 	})
 	fallback.ModelInvoked = true
 	if err != nil {
@@ -190,6 +191,11 @@ func rejectedTurnUnderstandingOutcome(turn TurnUnderstanding, services []Service
 			if !validStaff[strings.TrimSpace(id)] {
 				return TurnInterpreterOutcomeCatalogRejected
 			}
+		}
+	}
+	for _, id := range turn.Consultation.ComparedServiceIDs {
+		if !validServices[strings.TrimSpace(id)] {
+			return TurnInterpreterOutcomeCatalogRejected
 		}
 	}
 	return TurnInterpreterOutcomeSchemaInvalid
@@ -1151,12 +1157,86 @@ func validateTurnUnderstanding(turn TurnUnderstanding, session Session, services
 		}
 		validatedQuestions = append(validatedQuestions, question)
 	}
+	consultation, ok := validateConsultationNeedProfile(turn.Consultation, validServices)
+	if !ok {
+		return TurnUnderstanding{}, false
+	}
 	turn.Acts = validatedActs
 	turn.Questions = validatedQuestions
+	turn.Consultation = consultation
 	if len(turn.Acts) == 0 && len(turn.Questions) == 0 {
 		return turn, true
 	}
 	return turn, true
+}
+
+func validateConsultationNeedProfile(profile ConsultationNeedProfile, validServices map[string]bool) (ConsultationNeedProfile, bool) {
+	profile.CurrentSystem = strings.TrimSpace(profile.CurrentSystem)
+	profile.DesiredOutcome = strings.TrimSpace(profile.DesiredOutcome)
+	profile.LengthChange = strings.TrimSpace(profile.LengthChange)
+	profile.Reason = strings.TrimSpace(profile.Reason)
+	if !allowedConsultationValue(profile.CurrentSystem, "", ConsultationSystemNatural, ConsultationSystemRegularPolish, ConsultationSystemGel, ConsultationSystemDip, ConsultationSystemAcrylic, ConsultationSystemExtension, ConsultationSystemUnknown) {
+		return ConsultationNeedProfile{}, false
+	}
+	if !allowedConsultationValue(profile.DesiredOutcome, "", ConsultationOutcomeMaintain, ConsultationOutcomeShorten, ConsultationOutcomeAddLength, ConsultationOutcomeAddStrength, ConsultationOutcomeRepair, ConsultationOutcomeRemoval, ConsultationOutcomeColorRefresh, ConsultationOutcomeCompare, ConsultationOutcomeUnknown) {
+		return ConsultationNeedProfile{}, false
+	}
+	if !allowedConsultationValue(profile.LengthChange, "", ConsultationLengthKeep, ConsultationLengthShorten, ConsultationLengthAddLength, ConsultationLengthUnknown) {
+		return ConsultationNeedProfile{}, false
+	}
+	priorities := make([]string, 0, len(profile.Priorities))
+	seenPriorities := map[string]bool{}
+	for _, priority := range profile.Priorities {
+		priority = strings.TrimSpace(priority)
+		if !allowedConsultationValue(priority, ConsultationPriorityDurability, ConsultationPriorityLowerMaintenance, ConsultationPriorityLowerCost, ConsultationPriorityShorterVisit) {
+			return ConsultationNeedProfile{}, false
+		}
+		if !seenPriorities[priority] {
+			seenPriorities[priority] = true
+			priorities = append(priorities, priority)
+		}
+	}
+	finishes := make([]string, 0, len(profile.DesiredFinishes))
+	seenFinishes := map[string]bool{}
+	for _, finish := range profile.DesiredFinishes {
+		finish = strings.TrimSpace(finish)
+		if !allowedConsultationValue(finish, ConsultationFinishNatural, ConsultationFinishRegularPolish, ConsultationFinishGelPolish, ConsultationFinishGlossy, ConsultationFinishMatte, ConsultationFinishNailArt) {
+			return ConsultationNeedProfile{}, false
+		}
+		if !seenFinishes[finish] {
+			seenFinishes[finish] = true
+			finishes = append(finishes, finish)
+		}
+	}
+	compared := make([]string, 0, len(profile.ComparedServiceIDs))
+	seenServices := map[string]bool{}
+	for _, id := range profile.ComparedServiceIDs {
+		id = strings.TrimSpace(id)
+		if id == "" || !validServices[id] {
+			return ConsultationNeedProfile{}, false
+		}
+		if !seenServices[id] {
+			seenServices[id] = true
+			compared = append(compared, id)
+		}
+	}
+	meaningful := profile.CurrentSystem != "" || profile.DesiredOutcome != "" || profile.LengthChange != "" || len(priorities) > 0 || len(finishes) > 0 || len(compared) > 0 || profile.BookingRequested || profile.ConversationComplete
+	if meaningful && profile.Confidence < 0.78 {
+		return ConsultationNeedProfile{}, false
+	}
+	profile.Priorities = priorities
+	profile.DesiredFinishes = finishes
+	profile.ComparedServiceIDs = compared
+	return profile, true
+}
+
+func allowedConsultationValue(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func partyGuestRefExists(plan *PartyPlan, guestRef string) bool {

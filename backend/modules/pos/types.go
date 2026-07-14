@@ -62,6 +62,41 @@ const (
 	ServiceCategoryAssignmentSuggested  = "suggested"
 	ServiceCategoryAssignmentManual     = "manual"
 
+	ConsultationProfileStatusDraft    = "draft"
+	ConsultationProfileStatusReady    = "ready"
+	ConsultationProfileStatusDisabled = "disabled"
+
+	ConsultationOutcomeMaintain     = "maintain"
+	ConsultationOutcomeShorten      = "shorten"
+	ConsultationOutcomeAddLength    = "add_length"
+	ConsultationOutcomeAddStrength  = "add_strength"
+	ConsultationOutcomeRepair       = "repair"
+	ConsultationOutcomeRemoval      = "removal"
+	ConsultationOutcomeColorRefresh = "color_refresh"
+
+	ConsultationSystemNatural       = "natural"
+	ConsultationSystemRegularPolish = "regular_polish"
+	ConsultationSystemGel           = "gel"
+	ConsultationSystemDip           = "dip"
+	ConsultationSystemAcrylic       = "acrylic"
+	ConsultationSystemExtension     = "extension"
+
+	ConsultationLengthKeep      = "keep"
+	ConsultationLengthShorten   = "shorten"
+	ConsultationLengthAddLength = "add_length"
+
+	ConsultationPriorityDurability       = "durability"
+	ConsultationPriorityLowerMaintenance = "lower_maintenance"
+	ConsultationPriorityLowerCost        = "lower_cost"
+	ConsultationPriorityShorterVisit     = "shorter_visit"
+
+	ConsultationFinishNatural       = "natural"
+	ConsultationFinishRegularPolish = "regular_polish"
+	ConsultationFinishGelPolish     = "gel_polish"
+	ConsultationFinishGlossy        = "glossy"
+	ConsultationFinishMatte         = "matte"
+	ConsultationFinishNailArt       = "nail_art"
+
 	BusinessHourSourceImported      = "imported"
 	BusinessHourSourceLocalMigrated = "local_migrated"
 	BusinessHourSourceLocalOverride = "local_override"
@@ -415,51 +450,94 @@ type SyncSummary struct {
 }
 
 type Service struct {
-	ID                 string     `json:"id,omitempty"`
-	SalonID            string     `json:"salon_id,omitempty"`
-	POSProvider        string     `json:"pos_provider"`
-	POSServiceID       string     `json:"pos_service_id"`
-	POSServiceVersion  int64      `json:"pos_service_version,omitempty"`
-	Name               string     `json:"name"`
-	Description        string     `json:"description,omitempty"`
-	AIDescription      string     `json:"ai_description,omitempty"`
-	DurationMinutes    int        `json:"duration_minutes"`
-	PriceFrom          float64    `json:"price_from,omitempty"`
-	PriceDisplay       string     `json:"price_display,omitempty"`
-	AIBookable         bool       `json:"ai_bookable"`
-	Active             bool       `json:"active"`
-	SyncStatus         string     `json:"sync_status"`
-	ArchivedAt         *time.Time `json:"archived_at,omitempty"`
-	LastSyncedAt       *time.Time `json:"last_synced_at,omitempty"`
-	SyncError          string     `json:"sync_error,omitempty"`
-	Source             string     `json:"source"`
-	POSLinked          bool       `json:"pos_linked"`
-	ServiceCategoryID  string     `json:"service_category_id,omitempty"`
-	CategoryName       string     `json:"category_name,omitempty"`
-	CategorySlug       string     `json:"category_slug,omitempty"`
-	CategorySource     string     `json:"category_source"`
-	CategoryConfidence float64    `json:"category_confidence,omitempty"`
-	CategoryReviewedAt *time.Time `json:"category_reviewed_at,omitempty"`
+	ID                  string                      `json:"id,omitempty"`
+	SalonID             string                      `json:"salon_id,omitempty"`
+	POSProvider         string                      `json:"pos_provider"`
+	POSServiceID        string                      `json:"pos_service_id"`
+	POSServiceVersion   int64                       `json:"pos_service_version,omitempty"`
+	Name                string                      `json:"name"`
+	Description         string                      `json:"description,omitempty"`
+	AIDescription       string                      `json:"ai_description,omitempty"`
+	DurationMinutes     int                         `json:"duration_minutes"`
+	PriceFrom           float64                     `json:"price_from,omitempty"`
+	PriceDisplay        string                      `json:"price_display,omitempty"`
+	AIBookable          bool                        `json:"ai_bookable"`
+	Active              bool                        `json:"active"`
+	SyncStatus          string                      `json:"sync_status"`
+	ArchivedAt          *time.Time                  `json:"archived_at,omitempty"`
+	LastSyncedAt        *time.Time                  `json:"last_synced_at,omitempty"`
+	SyncError           string                      `json:"sync_error,omitempty"`
+	Source              string                      `json:"source"`
+	POSLinked           bool                        `json:"pos_linked"`
+	ServiceCategoryID   string                      `json:"service_category_id,omitempty"`
+	CategoryName        string                      `json:"category_name,omitempty"`
+	CategorySlug        string                      `json:"category_slug,omitempty"`
+	CategorySource      string                      `json:"category_source"`
+	CategoryConfidence  float64                     `json:"category_confidence,omitempty"`
+	CategoryReviewedAt  *time.Time                  `json:"category_reviewed_at,omitempty"`
+	ConsultationProfile *ServiceConsultationProfile `json:"consultation_profile,omitempty"`
+}
+
+type ServiceConsultationProfile struct {
+	ID                       string     `json:"id,omitempty"`
+	SalonID                  string     `json:"salon_id,omitempty"`
+	ServiceID                string     `json:"service_id,omitempty"`
+	Status                   string     `json:"status"`
+	RecommendedOutcomes      []string   `json:"recommended_outcomes"`
+	CompatibleCurrentSystems []string   `json:"compatible_current_systems"`
+	LengthCapabilities       []string   `json:"length_capabilities"`
+	PriorityTags             []string   `json:"priority_tags"`
+	FinishOptions            []string   `json:"finish_options"`
+	MaintenanceNote          string     `json:"maintenance_note,omitempty"`
+	OwnerApprovedSummary     string     `json:"owner_approved_summary,omitempty"`
+	Revision                 int        `json:"revision"`
+	UpdatedBy                string     `json:"updated_by,omitempty"`
+	CreatedAt                *time.Time `json:"created_at,omitempty"`
+	UpdatedAt                *time.Time `json:"updated_at,omitempty"`
+}
+
+type ServiceConsultationProfileWriteRequest struct {
+	Status                   string   `json:"status"`
+	RecommendedOutcomes      []string `json:"recommended_outcomes"`
+	CompatibleCurrentSystems []string `json:"compatible_current_systems"`
+	LengthCapabilities       []string `json:"length_capabilities"`
+	PriorityTags             []string `json:"priority_tags"`
+	FinishOptions            []string `json:"finish_options"`
+	MaintenanceNote          string   `json:"maintenance_note"`
+	OwnerApprovedSummary     string   `json:"owner_approved_summary"`
+}
+
+type ServiceConsultationProfileMutation struct {
+	Status                   string
+	RecommendedOutcomes      []string
+	CompatibleCurrentSystems []string
+	LengthCapabilities       []string
+	PriorityTags             []string
+	FinishOptions            []string
+	MaintenanceNote          string
+	OwnerApprovedSummary     string
 }
 
 type ServiceWriteRequest struct {
-	Name              string   `json:"name"`
-	Description       string   `json:"description"`
-	AIDescription     string   `json:"ai_description"`
-	DurationMinutes   int      `json:"duration_minutes"`
-	PriceFrom         *float64 `json:"price_from"`
-	Active            *bool    `json:"active"`
-	ServiceCategoryID string   `json:"service_category_id"`
+	Name                string                                  `json:"name"`
+	Description         string                                  `json:"description"`
+	AIDescription       string                                  `json:"ai_description"`
+	DurationMinutes     int                                     `json:"duration_minutes"`
+	PriceFrom           *float64                                `json:"price_from"`
+	Active              *bool                                   `json:"active"`
+	ServiceCategoryID   string                                  `json:"service_category_id"`
+	ConsultationProfile *ServiceConsultationProfileWriteRequest `json:"consultation_profile,omitempty"`
 }
 
 type ServiceMutation struct {
-	Name              string
-	Description       string
-	AIDescription     string
-	DurationMinutes   int
-	PriceFrom         *float64
-	Active            bool
-	ServiceCategoryID string
+	Name                string
+	Description         string
+	AIDescription       string
+	DurationMinutes     int
+	PriceFrom           *float64
+	Active              bool
+	ServiceCategoryID   string
+	ConsultationProfile *ServiceConsultationProfileMutation
 }
 
 type ServiceCategory struct {

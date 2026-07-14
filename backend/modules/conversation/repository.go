@@ -29,7 +29,7 @@ func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, owner
 	var cfg RuntimeConfig
 	err := r.db.QueryRowContext(ctx, `
 			SELECT s.name, s.timezone, COALESCE(s.handoff_phone, ''), s.ai_enabled,
-			       COALESCE(ss.handoff_enabled, true), COALESCE(ss.ai_greeting, ''), COALESCE(ss.ai_tone, 'professional_warm'),
+			       COALESCE(ss.handoff_enabled, true), COALESCE(ss.consultation_enabled, true), COALESCE(ss.ai_greeting, ''), COALESCE(ss.ai_tone, 'professional_warm'),
 			       COALESCE(ss.recording_enabled, true), COALESCE(ss.recording_consent_message, '')
 		FROM salons s
 		LEFT JOIN salon_settings ss ON ss.salon_id = s.id
@@ -41,6 +41,7 @@ func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, owner
 		&cfg.HandoffPhone,
 		&cfg.AIEnabled,
 		&cfg.HandoffEnabled,
+		&cfg.ConsultationEnabled,
 		&cfg.AIGreeting,
 		&cfg.AITone,
 		&cfg.RecordingEnabled,
@@ -336,7 +337,11 @@ func (r *Repository) ListBookableServices(ctx context.Context, salonID string) (
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT svc.id::text, svc.name, COALESCE(svc.description, ''), COALESCE(svc.ai_description, ''),
 		       svc.duration_minutes, COALESCE(svc.price_from, 0), COALESCE(svc.price_display, ''),
-		       COALESCE(cat.id::text, ''), COALESCE(cat.name, ''), COALESCE(cat.slug, '')
+		       COALESCE(cat.id::text, ''), COALESCE(cat.name, ''), COALESCE(cat.slug, ''),
+		       COALESCE(profile.id::text, ''), COALESCE(profile.status, 'draft'), COALESCE(profile.recommended_outcomes, '[]'::jsonb),
+		       COALESCE(profile.compatible_current_systems, '[]'::jsonb), COALESCE(profile.length_capabilities, '[]'::jsonb),
+		       COALESCE(profile.priority_tags, '[]'::jsonb), COALESCE(profile.finish_options, '[]'::jsonb),
+		       COALESCE(profile.maintenance_note, ''), COALESCE(profile.owner_approved_summary, ''), COALESCE(profile.revision, 0)
 		FROM services svc
 		JOIN salons salon ON salon.id = svc.salon_id
 		JOIN pos_entity_links link
@@ -350,6 +355,8 @@ func (r *Repository) ListBookableServices(ctx context.Context, salonID string) (
 		LEFT JOIN service_categories cat ON cat.id = svc.service_category_id
 		                                AND cat.salon_id = svc.salon_id
 		                                AND cat.status = 'active'
+		LEFT JOIN service_consultation_profiles profile ON profile.salon_id = svc.salon_id
+		                                                  AND profile.service_id = svc.id
 		WHERE svc.salon_id = $1
 		  AND svc.pos_provider = salon.active_pos_provider
 		  AND svc.active = true
@@ -368,8 +375,37 @@ func (r *Repository) ListBookableServices(ctx context.Context, salonID string) (
 	items := make([]ServiceOption, 0)
 	for rows.Next() {
 		var item ServiceOption
-		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.AIDescription, &item.DurationMinutes, &item.PriceFrom, &item.PriceDisplay, &item.CategoryID, &item.CategoryName, &item.CategorySlug); err != nil {
+		var profileID string
+		profile := &ServiceConsultationProfile{}
+		var outcomes []byte
+		var systems []byte
+		var lengths []byte
+		var priorities []byte
+		var finishes []byte
+		if err := rows.Scan(
+			&item.ID, &item.Name, &item.Description, &item.AIDescription, &item.DurationMinutes, &item.PriceFrom, &item.PriceDisplay,
+			&item.CategoryID, &item.CategoryName, &item.CategorySlug, &profileID, &profile.Status, &outcomes, &systems, &lengths,
+			&priorities, &finishes, &profile.MaintenanceNote, &profile.OwnerApprovedSummary, &profile.Revision,
+		); err != nil {
 			return nil, err
+		}
+		if profileID != "" {
+			if err := json.Unmarshal(outcomes, &profile.RecommendedOutcomes); err != nil {
+				return nil, err
+			}
+			if err := json.Unmarshal(systems, &profile.CompatibleCurrentSystems); err != nil {
+				return nil, err
+			}
+			if err := json.Unmarshal(lengths, &profile.LengthCapabilities); err != nil {
+				return nil, err
+			}
+			if err := json.Unmarshal(priorities, &profile.PriorityTags); err != nil {
+				return nil, err
+			}
+			if err := json.Unmarshal(finishes, &profile.FinishOptions); err != nil {
+				return nil, err
+			}
+			item.ConsultationProfile = profile
 		}
 		items = append(items, item)
 	}

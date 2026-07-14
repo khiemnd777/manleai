@@ -17,21 +17,25 @@ const (
 	TurnCoveragePartial  = "partial"
 	TurnCoverageComplete = "complete"
 
-	ExpectedInputCallerGoal               = "caller_goal"
-	ExpectedInputService                  = "service"
-	ExpectedInputRequestedDate            = "requested_date"
-	ExpectedInputRequestedTime            = "requested_time"
-	ExpectedInputOfferedSlot              = "offered_slot"
-	ExpectedInputCustomerName             = "customer_name"
-	ExpectedInputCustomerNameConfirmation = "customer_name_confirmation"
-	ExpectedInputCustomerPhone            = "customer_phone"
-	ExpectedInputStaff                    = "staff"
-	ExpectedInputPartySplitDateConsent    = "party_split_date_consent"
-	ExpectedInputPendingServiceOperation  = "pending_service_operation"
-	ExpectedInputDateTimeConfirmation     = "date_time_confirmation"
-	ExpectedInputAppointmentTarget        = "appointment_target"
-	ExpectedInputBookingReview            = "booking_review"
-	ExpectedInputBookingContinuation      = "booking_continuation"
+	ExpectedInputCallerGoal                 = "caller_goal"
+	ExpectedInputService                    = "service"
+	ExpectedInputRequestedDate              = "requested_date"
+	ExpectedInputRequestedTime              = "requested_time"
+	ExpectedInputOfferedSlot                = "offered_slot"
+	ExpectedInputCustomerName               = "customer_name"
+	ExpectedInputCustomerNameConfirmation   = "customer_name_confirmation"
+	ExpectedInputCustomerPhone              = "customer_phone"
+	ExpectedInputStaff                      = "staff"
+	ExpectedInputPartySplitDateConsent      = "party_split_date_consent"
+	ExpectedInputPendingServiceOperation    = "pending_service_operation"
+	ExpectedInputDateTimeConfirmation       = "date_time_confirmation"
+	ExpectedInputAppointmentTarget          = "appointment_target"
+	ExpectedInputBookingReview              = "booking_review"
+	ExpectedInputBookingContinuation        = "booking_continuation"
+	ExpectedInputConsultationCurrentSystem  = "consultation_current_system"
+	ExpectedInputConsultationDesiredOutcome = "consultation_desired_outcome"
+	ExpectedInputConsultationSelection      = "consultation_selection"
+	ExpectedInputConsultationBooking        = "consultation_booking"
 )
 
 // TurnEnvelope is the immutable state and catalog snapshot used to route one
@@ -101,6 +105,19 @@ func applyTurnPlanMetadata(turn *TurnRecord, plan TurnPlan) {
 
 func expectedInputForSession(session Session) string {
 	state := normalizedDialogState(session.DialogState)
+	if consultation := state.Consultation; consultationStateActive(consultation) {
+		switch consultation.Status {
+		case ConsultationStatusAwaitingSelection:
+			return ExpectedInputConsultationSelection
+		case ConsultationStatusAwaitingBooking:
+			return ExpectedInputConsultationBooking
+		default:
+			if consultation.LastAskedField == "current_system" {
+				return ExpectedInputConsultationCurrentSystem
+			}
+			return ExpectedInputConsultationDesiredOutcome
+		}
+	}
 	if state.Pending != nil {
 		if invalidServiceEditPending(session) {
 			return ExpectedInputService
@@ -195,6 +212,29 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 	}
 	if repairReplyForMessage(message, session, cfg) != "" {
 		return finalizeTurnPlan(plan, TurnRouteRecoveryLane, "deterministic_repair", TurnCoverageComplete, session, services, staff)
+	}
+	if consultationStateActive(state.Consultation) {
+		if shouldClarifyCancelReschedule(session, message) {
+			return finalizeTurnPlan(plan, TurnRouteActionLane, "cancel_reschedule_clarification", TurnCoverageComplete, session, services, staff)
+		}
+		if shouldComplaintHandoff(message) || shouldHandoff(message) {
+			return finalizeTurnPlan(plan, TurnRouteActionLane, "owner_handoff", TurnCoverageComplete, session, services, staff)
+		}
+		if shouldRouteCancel(session, message) {
+			plan.Understanding = deterministicGoalUnderstanding("cancel_appointment", "cancel_action")
+			return finalizeTurnPlan(plan, TurnRouteActionLane, "cancel_action", TurnCoverageComplete, session, services, staff)
+		}
+		if shouldRouteReschedule(session, message) {
+			plan.Understanding = deterministicGoalUnderstanding("reschedule_appointment", "reschedule_action")
+			return finalizeTurnPlan(plan, TurnRouteActionLane, "reschedule_action", TurnCoverageComplete, session, services, staff)
+		}
+		if isGoodbyeUtterance(message) || isConsultationSafetyConcern(message) ||
+			(state.Consultation.Status == ConsultationStatusAwaitingBooking && isAffirmativeOnly(message)) ||
+			(state.Consultation.Status == ConsultationStatusAwaitingSelection && plan.ServiceUnderstanding.Status == serviceUnderstandingStatusSelected) {
+			plan.Understanding = deterministicGoalUnderstanding("consultation", "consultation_state_owned_turn")
+			return finalizeTurnPlan(plan, TurnRouteFastLane, "consultation_state_owned_turn", TurnCoverageComplete, session, services, staff)
+		}
+		return finalizeTurnPlan(plan, TurnRouteSemanticLane, "consultation_context_required", TurnCoverageNone, session, services, staff)
 	}
 
 	loc := timezoneLocation(timezoneFromConfig(cfg))
@@ -405,6 +445,9 @@ func turnGoalForRoute(route string, session Session) string {
 	if route == TurnRouteAnswerLane || route == TurnRouteRecoveryLane {
 		return "unknown"
 	}
+	if consultationStateActive(normalizedDialogState(session.DialogState).Consultation) || strings.TrimSpace(session.Intent) == IntentConsultation {
+		return "consultation"
+	}
 	if hasOperationalBookingProgress(session) || strings.TrimSpace(session.Intent) == IntentBooking {
 		return "book_appointment"
 	}
@@ -415,6 +458,9 @@ func semanticServiceScope(plan TurnPlan, session Session, services []ServiceOpti
 	selected := selectedServiceOptions(session, services)
 	if plan.Route != TurnRouteSemanticLane {
 		return selected
+	}
+	if strings.HasPrefix(plan.ExpectedInput, "consultation_") {
+		return append([]ServiceOption(nil), services...)
 	}
 	if plan.ExpectedInput == ExpectedInputService || plan.ExpectedInput == ExpectedInputCallerGoal || session.PartyPlan != nil ||
 		(hasOperationalBookingProgress(session) && (hasServiceMutationLanguage(plan.Message) || hasReferentialServiceMutation(plan.Message, session) ||

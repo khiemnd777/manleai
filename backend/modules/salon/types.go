@@ -63,6 +63,7 @@ type Settings struct {
 	SMSReminderEnabled      bool      `json:"sms_reminder_enabled"`
 	ReminderHoursBefore     int       `json:"reminder_hours_before"`
 	HandoffEnabled          bool      `json:"handoff_enabled"`
+	ConsultationEnabled     bool      `json:"consultation_enabled"`
 	CreatedAt               time.Time `json:"created_at"`
 	UpdatedAt               time.Time `json:"updated_at"`
 }
@@ -78,6 +79,7 @@ type UpdateSettingsRequest struct {
 	SMSReminderEnabled      bool   `json:"sms_reminder_enabled"`
 	ReminderHoursBefore     int    `json:"reminder_hours_before"`
 	HandoffEnabled          bool   `json:"handoff_enabled"`
+	ConsultationEnabled     bool   `json:"consultation_enabled"`
 }
 
 type PublicCatalogSettings struct {
