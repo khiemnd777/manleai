@@ -171,7 +171,9 @@
 
 - [x] Add sanitized owner-scoped configuration export with stable schema version.
 - [x] Exclude services, staff, customers, appointments, call sessions, transcripts, POS OAuth tokens, API keys, client secrets, encrypted secrets, and operational records.
-- [x] Include service category taxonomy, service category aliases, and service aliases in schema v5, then add the salon consultation runtime toggle in schema v6 while continuing to exclude service records, service consultation profiles, and provider state.
+- [x] Include service category taxonomy, service category aliases, and service aliases in schema v5, add the salon consultation runtime toggle in schema v6, then add portable service consultation profiles and scoped `included_sections` data packs in schema v7 while continuing to exclude service records and provider state.
+- [x] Resolve v7 consultation profiles only against existing target services by normalized name plus duration; block missing, ambiguous, or ineligible ready targets without creating services or POS mappings.
+- [x] Keep consultation profile import idempotent by `(salon_id, service_id)` and leave profile revision unchanged when imported data is identical.
 - [x] Use stable category slugs and normalized alias keys so repeated imports update existing taxonomy instead of duplicating it.
 - [x] Resolve imported service aliases only against existing target-salon services and skip unresolved alias targets without creating services.
 - [x] Add import preview and apply flows for existing salons and onboarding.

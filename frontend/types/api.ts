@@ -144,16 +144,18 @@ export type ConfigurationBundle = {
   exported_at: string;
   secrets_exported: boolean;
   operational_data_exported: boolean;
+  included_sections?: string[];
   excluded_data: string[];
   requires_secret_reentry: string[];
-  salon_profile: ConfigurationSalonProfile;
-  ai_receptionist: ConfigurationAIReceptionist;
-  public_booking_page: ConfigurationPublicBookingPage;
-  integrations: IntegrationConfigs;
-  pos_connection: ConfigurationPOSConnection;
-  service_categories: ConfigurationServiceCategoryBundle;
-  service_aliases: ConfigurationServiceAliasBundle;
-  knowledge_base: ConfigurationKnowledgeBase;
+  salon_profile?: ConfigurationSalonProfile;
+  ai_receptionist?: ConfigurationAIReceptionist;
+  public_booking_page?: ConfigurationPublicBookingPage;
+  integrations?: IntegrationConfigs;
+  pos_connection?: ConfigurationPOSConnection;
+  service_categories?: ConfigurationServiceCategoryBundle;
+  service_aliases?: ConfigurationServiceAliasBundle;
+  service_consultation_profiles?: ConfigurationServiceConsultationProfileBundle;
+  knowledge_base?: ConfigurationKnowledgeBase;
 };
 
 export type ConfigurationExport = ConfigurationBundle;
@@ -261,6 +263,26 @@ export type ConfigurationServiceAliasTarget = {
   name: string;
   duration_minutes?: number;
   price_display?: string;
+};
+
+export type ConfigurationServiceConsultationProfileBundle = {
+  items: ConfigurationServiceConsultationProfile[];
+  count: number;
+};
+
+export type ConfigurationServiceConsultationProfile = {
+  source_key: string;
+  target_service: ConfigurationServiceAliasTarget;
+  status: string;
+  recommended_outcomes: string[];
+  compatible_current_systems: string[];
+  length_capabilities: string[];
+  priority_tags: string[];
+  finish_options: string[];
+  maintenance_note?: string;
+  owner_approved_summary?: string;
+  created_at?: string;
+  updated_at?: string;
 };
 
 export type ConfigurationKnowledgeItem = {

@@ -164,6 +164,11 @@
 - Verify import preview is dry-run only and reports creates, updates, skips, conflicts, and gated live states without writing records.
 - Verify Twilio stream transport and OpenAI realtime settings round-trip through export, preview, and apply without importing secrets.
 - Verify service aliases import only when their target service resolves on the target salon, skip unresolved target services, and conflict with active category aliases.
+- Verify v7 exports portable consultation profiles without salon/service UUIDs, profile IDs, owner IDs, or revision/audit metadata.
+- Verify scoped `included_sections` packs change only their declared sections and cannot overwrite salon profile, provider configuration, or AI runtime settings.
+- Verify consultation profile preview resolves normalized service name plus duration, blocks missing or ambiguous targets, and rejects `ready` targets that are not active-provider, POS-linked, synced, and AI-bookable.
+- Verify repeated consultation profile imports do not create duplicates or increment revision when profile data is identical.
+- Verify onboarding rejects partial packs and defers full-bundle consultation profiles until Square services exist after sync.
 - Verify import apply uses `request_id` idempotency so repeated applies do not create duplicate import runs or duplicate knowledge items.
 - Verify onboarding import can create a salon from a valid bundle but still skips secrets and readiness-gated live states.
 - Verify import refuses schema versions or malformed bundles that would break contract stability.

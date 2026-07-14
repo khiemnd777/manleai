@@ -172,7 +172,11 @@ present a web booking as confirmed.
 Configuration transfer exports sanitized setup data only, including salon
 profile, AI settings, public catalog settings, integration runtime settings,
 service category taxonomy, service category aliases, service aliases that can
-be matched to existing target services, and owner-authored knowledge. Import
+be matched to existing target services, portable service consultation profiles,
+and owner-authored knowledge. Schema v7 bundles declare `included_sections`, so
+curated data packs can import taxonomy, aliases, and consultation profiles
+without overwriting salon profile, provider configuration, or AI runtime
+settings. Import
 previews and applies use stable request IDs, skip secrets and operational
 records, and must not recreate services, staff, customers, appointments, POS
 tokens, call sessions, transcripts, provider connections, synced business hour
@@ -181,6 +185,11 @@ provider-side state. Service category imports use stable slug and
 normalized-alias keys and reject category aliases that conflict with active
 service aliases. Service alias imports use stable normalized-alias keys and
 skip aliases whose target service cannot be resolved on the target salon.
+Consultation profile imports resolve an existing target service by normalized
+name plus duration, block missing or ambiguous targets, require `ready` profiles
+to resolve to active-provider, POS-linked, synced, AI-bookable services, and
+upsert by stable `(salon_id, service_id)` without changing revisions for
+identical data. Services and provider mappings are never created by transfer.
 
 ## Next Milestone
 

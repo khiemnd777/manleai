@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
+	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/salon"
 )
 
@@ -39,6 +40,7 @@ func (r *Repository) TargetImportState(ctx context.Context, salonID string, owne
 	categoryBySlug := map[string]ServiceCategoryExport{}
 	categoryAliasByKey := map[string]ServiceCategoryAliasExport{}
 	serviceAliasByKey := map[string]ServiceAliasExport{}
+	consultationProfileByTarget := map[string]ServiceConsultationProfileExport{}
 	for _, item := range current.KnowledgeBase.Items {
 		key := strings.TrimSpace(item.SourceKey)
 		if key != "" {
@@ -64,6 +66,12 @@ func (r *Repository) TargetImportState(ctx context.Context, salonID string, owne
 			serviceAliasByKey[key] = item
 		}
 	}
+	for _, item := range current.ConsultationProfiles.Items {
+		key := serviceAliasTargetKey(item.TargetService)
+		if key != "" {
+			consultationProfileByTarget[key] = item
+		}
+	}
 	activeServiceAliasKeys, err := r.activeServiceAliasKeys(ctx, salonID)
 	if err != nil {
 		return nil, err
@@ -72,7 +80,7 @@ func (r *Repository) TargetImportState(ctx context.Context, salonID string, owne
 	if err != nil {
 		return nil, err
 	}
-	targetsByKey, ambiguousTargets, err := r.serviceAliasTargets(ctx, salonID, ownerUserID)
+	targetsByKey, ambiguousTargets, consultationTargets, ambiguousConsultationTargets, err := r.serviceImportTargets(ctx, salonID, ownerUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -88,8 +96,11 @@ func (r *Repository) TargetImportState(ctx context.Context, salonID string, owne
 		ActiveServiceAliasKeys:       activeServiceAliasKeys,
 		ActiveCategoryAliasKeys:      activeCategoryAliasKeys,
 		ServiceAliasByKey:            serviceAliasByKey,
-		ServiceAliasTargetsByKey:     targetsByKey,
-		AmbiguousServiceAliasTargets: ambiguousTargets,
+		ConsultationProfileByTarget:  consultationProfileByTarget,
+		ServiceTargetsByKey:          targetsByKey,
+		AmbiguousServiceTargets:      ambiguousTargets,
+		ConsultationTargetsByKey:     consultationTargets,
+		AmbiguousConsultationTargets: ambiguousConsultationTargets,
 		KnowledgeByImportKey:         byImportKey,
 		KnowledgeByContentHash:       byContentHash,
 	}, nil
@@ -177,26 +188,49 @@ func (r *Repository) activeCategoryAliasKeys(ctx context.Context, salonID string
 	return out, rows.Err()
 }
 
-func (r *Repository) serviceAliasTargets(ctx context.Context, salonID string, ownerUserID string) (map[string]importServiceAliasTarget, map[string]bool, error) {
+func (r *Repository) serviceImportTargets(ctx context.Context, salonID string, ownerUserID string) (map[string]importServiceTarget, map[string]bool, map[string]importServiceTarget, map[string]bool, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT svc.id::text, svc.name, svc.duration_minutes, COALESCE(svc.price_display, '')
+		SELECT svc.id::text,
+		       svc.name,
+		       svc.duration_minutes,
+		       COALESCE(svc.price_display, ''),
+		       (svc.pos_provider = salon.active_pos_provider
+		        AND svc.active = true
+		        AND svc.ai_bookable = true
+		        AND svc.sync_status = 'synced'
+		        AND svc.duration_minutes > 0
+		        AND COALESCE(svc.pos_service_version, 0) > 0
+		        AND EXISTS (
+		            SELECT 1
+		            FROM pos_entity_links link
+		            WHERE link.salon_id = svc.salon_id
+		              AND link.entity_type = 'service'
+		              AND link.entity_id = svc.id
+		              AND link.provider = salon.active_pos_provider
+		              AND link.sync_status = 'synced'
+		              AND link.provider_entity_id IS NOT NULL
+		              AND link.provider_entity_id <> ''
+		        )) AS consultation_eligible
 		FROM services svc
+		JOIN salons salon ON salon.id = svc.salon_id
 		WHERE svc.salon_id = $1
 		  AND svc.archived_at IS NULL
-		  AND EXISTS (SELECT 1 FROM salons WHERE salons.id = svc.salon_id AND salons.owner_user_id = $2)
+		  AND salon.owner_user_id = $2
 		ORDER BY svc.name ASC, svc.duration_minutes ASC
 	`, salonID, ownerUserID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	defer rows.Close()
 
-	targets := map[string]importServiceAliasTarget{}
+	targets := map[string]importServiceTarget{}
 	ambiguous := map[string]bool{}
+	consultationTargets := map[string]importServiceTarget{}
+	ambiguousConsultation := map[string]bool{}
 	for rows.Next() {
-		var target importServiceAliasTarget
-		if err := rows.Scan(&target.ServiceID, &target.Name, &target.DurationMinutes, &target.PriceDisplay); err != nil {
-			return nil, nil, err
+		var target importServiceTarget
+		if err := rows.Scan(&target.ServiceID, &target.Name, &target.DurationMinutes, &target.PriceDisplay, &target.ConsultationEligible); err != nil {
+			return nil, nil, nil, nil, err
 		}
 		key := serviceAliasTargetKey(ServiceAliasTargetExport{Name: target.Name, DurationMinutes: target.DurationMinutes})
 		if key == "" {
@@ -204,11 +238,18 @@ func (r *Repository) serviceAliasTargets(ctx context.Context, salonID string, ow
 		}
 		if _, exists := targets[key]; exists {
 			ambiguous[key] = true
-			continue
+		} else {
+			targets[key] = target
 		}
-		targets[key] = target
+		if target.ConsultationEligible {
+			if _, exists := consultationTargets[key]; exists {
+				ambiguousConsultation[key] = true
+			} else {
+				consultationTargets[key] = target
+			}
+		}
 	}
-	return targets, ambiguous, rows.Err()
+	return targets, ambiguous, consultationTargets, ambiguousConsultation, rows.Err()
 }
 
 func (r *Repository) ExistingOnboardingImport(ctx context.Context, ownerUserID string, requestID string, fingerprint string) (string, string, bool, bool, error) {
@@ -264,26 +305,45 @@ func (r *Repository) ApplyImport(ctx context.Context, salonID string, ownerUserI
 	if err := r.ensureSalonOwnerTx(ctx, tx, salonID, ownerUserID); err != nil {
 		return "", false, err
 	}
-	if err := r.updateSalonProfile(ctx, tx, salonID, ownerUserID, plan.Bundle.SalonProfile, plan.AIEnabled); err != nil {
-		return "", false, err
+	if plan.includes(SectionSalon) {
+		if err := r.updateSalonProfile(ctx, tx, salonID, ownerUserID, plan.Bundle.SalonProfile, plan.AIEnabled); err != nil {
+			return "", false, err
+		}
 	}
-	if err := r.updateAIReceptionist(ctx, tx, salonID, ownerUserID, plan.Bundle.AIReceptionist, plan.BookingMode); err != nil {
-		return "", false, err
+	if plan.includes(SectionPublic) {
+		if err := r.updatePublicBookingPage(ctx, tx, salonID, ownerUserID, plan.Bundle.PublicBookingPage, plan.PublicCatalogEnabled); err != nil {
+			return "", false, err
+		}
 	}
-	if err := r.updatePublicBookingPage(ctx, tx, salonID, ownerUserID, plan.Bundle.PublicBookingPage, plan.PublicCatalogEnabled); err != nil {
-		return "", false, err
+	if plan.includes(SectionIntegrations) {
+		if err := r.upsertIntegrationConfigs(ctx, tx, salonID, plan.Bundle.Integrations); err != nil {
+			return "", false, err
+		}
 	}
-	if err := r.upsertIntegrationConfigs(ctx, tx, salonID, plan.Bundle.Integrations); err != nil {
-		return "", false, err
+	if plan.includes(SectionCategories) {
+		if err := r.upsertServiceCategories(ctx, tx, salonID, plan.ServiceCategories); err != nil {
+			return "", false, err
+		}
 	}
-	if err := r.upsertServiceCategories(ctx, tx, salonID, plan.ServiceCategories); err != nil {
-		return "", false, err
+	if plan.includes(SectionServiceAliases) {
+		if err := r.upsertServiceAliases(ctx, tx, salonID, plan.ServiceAliases); err != nil {
+			return "", false, err
+		}
 	}
-	if err := r.upsertServiceAliases(ctx, tx, salonID, plan.ServiceAliases); err != nil {
-		return "", false, err
+	if plan.includes(SectionConsultation) {
+		if err := r.upsertServiceConsultationProfiles(ctx, tx, salonID, ownerUserID, plan.ConsultationProfiles); err != nil {
+			return "", false, err
+		}
 	}
-	if err := r.upsertKnowledge(ctx, tx, salonID, plan.Knowledge); err != nil {
-		return "", false, err
+	if plan.includes(SectionAI) {
+		if err := r.updateAIReceptionist(ctx, tx, salonID, ownerUserID, plan.Bundle.AIReceptionist, plan.BookingMode, plan.ConsultationEnabled); err != nil {
+			return "", false, err
+		}
+	}
+	if plan.includes(SectionKnowledge) {
+		if err := r.upsertKnowledge(ctx, tx, salonID, plan.Knowledge); err != nil {
+			return "", false, err
+		}
 	}
 	runID, err := r.createImportRun(ctx, tx, salonID, ownerUserID, plan)
 	if err != nil {
@@ -351,7 +411,7 @@ func (r *Repository) ApplyOnboardingImport(ctx context.Context, ownerUserID stri
 			reminder_hours_before, handoff_enabled, consultation_enabled
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-	`, salonID, settings.AIGreeting, settings.AIVoice, settings.AITone, plan.BookingMode, settings.RecordingEnabled, settings.RecordingConsentMessage, settings.SMSConfirmationEnabled, settings.SMSReminderEnabled, settings.ReminderHoursBefore, settings.HandoffEnabled, settings.ConsultationEnabled); err != nil {
+	`, salonID, settings.AIGreeting, settings.AIVoice, settings.AITone, plan.BookingMode, settings.RecordingEnabled, settings.RecordingConsentMessage, settings.SMSConfirmationEnabled, settings.SMSReminderEnabled, settings.ReminderHoursBefore, settings.HandoffEnabled, plan.ConsultationEnabled); err != nil {
 		return "", "", false, err
 	}
 	if err := insertDefaultBusinessHours(ctx, tx, salonID); err != nil {
@@ -488,7 +548,7 @@ func (r *Repository) updateSalonProfile(ctx context.Context, tx *sql.Tx, salonID
 	return nil
 }
 
-func (r *Repository) updateAIReceptionist(ctx context.Context, tx *sql.Tx, salonID string, ownerUserID string, settings AIReceptionistExport, bookingMode string) error {
+func (r *Repository) updateAIReceptionist(ctx context.Context, tx *sql.Tx, salonID string, ownerUserID string, settings AIReceptionistExport, bookingMode string, consultationEnabled bool) error {
 	result, err := tx.ExecContext(ctx, `
 		UPDATE salon_settings
 		SET ai_greeting = $1,
@@ -505,7 +565,7 @@ func (r *Repository) updateAIReceptionist(ctx context.Context, tx *sql.Tx, salon
 		    updated_at = now()
 		WHERE salon_id = $12
 		  AND EXISTS (SELECT 1 FROM salons WHERE salons.id = salon_settings.salon_id AND salons.owner_user_id = $13)
-	`, settings.AIGreeting, settings.AIVoice, settings.AITone, bookingMode, settings.RecordingEnabled, settings.RecordingConsentMessage, settings.SMSConfirmationEnabled, settings.SMSReminderEnabled, settings.ReminderHoursBefore, settings.HandoffEnabled, settings.ConsultationEnabled, salonID, ownerUserID)
+	`, settings.AIGreeting, settings.AIVoice, settings.AITone, bookingMode, settings.RecordingEnabled, settings.RecordingConsentMessage, settings.SMSConfirmationEnabled, settings.SMSReminderEnabled, settings.ReminderHoursBefore, settings.HandoffEnabled, consultationEnabled, salonID, ownerUserID)
 	if err != nil {
 		return err
 	}
@@ -712,6 +772,32 @@ func (r *Repository) upsertServiceAliases(ctx context.Context, tx *sql.Tx, salon
 			              correction_id = NULL,
 			              updated_at = now()
 		`, salonID, planned.TargetServiceID, item.Alias, item.NormalizedAlias, item.Source, item.Status, item.Confidence); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Repository) upsertServiceConsultationProfiles(ctx context.Context, tx *sql.Tx, salonID string, ownerUserID string, items []plannedServiceConsultationProfile) error {
+	for _, planned := range items {
+		if planned.Operation == "unchanged" {
+			continue
+		}
+		item := planned.Item
+		if planned.TargetServiceID == "" {
+			return ErrValidation
+		}
+		mutation := pos.ServiceConsultationProfileMutation{
+			Status:                   item.Status,
+			RecommendedOutcomes:      copyStringsPreserveOrder(item.RecommendedOutcomes),
+			CompatibleCurrentSystems: copyStringsPreserveOrder(item.CompatibleCurrentSystems),
+			LengthCapabilities:       copyStringsPreserveOrder(item.LengthCapabilities),
+			PriorityTags:             copyStringsPreserveOrder(item.PriorityTags),
+			FinishOptions:            copyStringsPreserveOrder(item.FinishOptions),
+			MaintenanceNote:          item.MaintenanceNote,
+			OwnerApprovedSummary:     item.OwnerApprovedSummary,
+		}
+		if err := pos.UpsertServiceConsultationProfileTx(ctx, tx, salonID, planned.TargetServiceID, ownerUserID, mutation); err != nil {
 			return err
 		}
 	}

@@ -918,7 +918,7 @@ func normalizeServiceWriteRequest(req ServiceWriteRequest, defaultActive bool) (
 	if len([]rune(aiDescription)) > 320 {
 		return ServiceMutation{}, ErrValidation
 	}
-	consultationProfile, err := normalizeConsultationProfileWriteRequest(req.ConsultationProfile)
+	consultationProfile, err := NormalizeConsultationProfileWriteRequest(req.ConsultationProfile)
 	if err != nil {
 		return ServiceMutation{}, err
 	}
@@ -938,7 +938,9 @@ func normalizeServiceWriteRequest(req ServiceWriteRequest, defaultActive bool) (
 	}, nil
 }
 
-func normalizeConsultationProfileWriteRequest(req *ServiceConsultationProfileWriteRequest) (*ServiceConsultationProfileMutation, error) {
+// NormalizeConsultationProfileWriteRequest is the provider-neutral validation
+// boundary shared by direct service edits and portable configuration imports.
+func NormalizeConsultationProfileWriteRequest(req *ServiceConsultationProfileWriteRequest) (*ServiceConsultationProfileMutation, error) {
 	if req == nil {
 		return nil, nil
 	}

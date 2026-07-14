@@ -7,7 +7,8 @@ import (
 )
 
 const (
-	SchemaVersion         = "manleai.salon_configuration.v6"
+	SchemaVersion         = "manleai.salon_configuration.v7"
+	LegacySchemaV6        = "manleai.salon_configuration.v6"
 	LegacySchemaV5        = "manleai.salon_configuration.v5"
 	LegacySchemaV4        = "manleai.salon_configuration.v4"
 	LegacySchemaV3        = "manleai.salon_configuration.v3"
@@ -23,11 +24,11 @@ const (
 	SectionKnowledge      = "knowledge_base"
 	SectionCategories     = "service_categories"
 	SectionServiceAliases = "service_aliases"
+	SectionConsultation   = "service_consultation_profiles"
 )
 
 var excludedData = []string{
 	"services",
-	"service_consultation_profiles",
 	"staff",
 	"customers",
 	"appointments",
@@ -59,6 +60,7 @@ type ConfigurationBundle struct {
 	ExportedAt              time.Time                                    `json:"exported_at"`
 	SecretsExported         bool                                         `json:"secrets_exported"`
 	OperationalDataExported bool                                         `json:"operational_data_exported"`
+	IncludedSections        []string                                     `json:"included_sections,omitempty"`
 	ExcludedData            []string                                     `json:"excluded_data"`
 	RequiresSecretReentry   []string                                     `json:"requires_secret_reentry"`
 	SalonProfile            SalonProfileExport                           `json:"salon_profile"`
@@ -68,6 +70,7 @@ type ConfigurationBundle struct {
 	POSConnection           POSConnectionExport                          `json:"pos_connection"`
 	ServiceCategories       ServiceCategoryBundleExport                  `json:"service_categories"`
 	ServiceAliases          ServiceAliasBundleExport                     `json:"service_aliases"`
+	ConsultationProfiles    ServiceConsultationProfileBundleExport       `json:"service_consultation_profiles"`
 	KnowledgeBase           KnowledgeBaseExport                          `json:"knowledge_base"`
 }
 
@@ -176,6 +179,26 @@ type ServiceAliasTargetExport struct {
 	PriceDisplay    string `json:"price_display,omitempty"`
 }
 
+type ServiceConsultationProfileBundleExport struct {
+	Items []ServiceConsultationProfileExport `json:"items"`
+	Count int                                `json:"count"`
+}
+
+type ServiceConsultationProfileExport struct {
+	SourceKey                string                   `json:"source_key"`
+	TargetService            ServiceAliasTargetExport `json:"target_service"`
+	Status                   string                   `json:"status"`
+	RecommendedOutcomes      []string                 `json:"recommended_outcomes"`
+	CompatibleCurrentSystems []string                 `json:"compatible_current_systems"`
+	LengthCapabilities       []string                 `json:"length_capabilities"`
+	PriorityTags             []string                 `json:"priority_tags"`
+	FinishOptions            []string                 `json:"finish_options"`
+	MaintenanceNote          string                   `json:"maintenance_note,omitempty"`
+	OwnerApprovedSummary     string                   `json:"owner_approved_summary,omitempty"`
+	CreatedAt                *time.Time               `json:"created_at,omitempty"`
+	UpdatedAt                *time.Time               `json:"updated_at,omitempty"`
+}
+
 type KnowledgeItemExport struct {
 	SourceKey string    `json:"source_key"`
 	Title     string    `json:"title"`
@@ -240,8 +263,13 @@ type importPlan struct {
 	PublicCatalogEnabled  bool
 	AIEnabled             bool
 	BookingMode           string
+	ConsultationEnabled   bool
 	ServiceCategories     []plannedServiceCategory
 	ServiceAliases        []plannedServiceAlias
+	ConsultationProfiles  []plannedServiceConsultationProfile
+	ConsultationReady     bool
+	Onboarding            bool
+	IncludedSections      map[string]bool
 }
 
 type plannedKnowledgeItem struct {
@@ -267,11 +295,18 @@ type plannedServiceAlias struct {
 	TargetServiceID string
 }
 
-type importServiceAliasTarget struct {
-	ServiceID       string
-	Name            string
-	DurationMinutes int
-	PriceDisplay    string
+type plannedServiceConsultationProfile struct {
+	Item            ServiceConsultationProfileExport
+	Operation       string
+	TargetServiceID string
+}
+
+type importServiceTarget struct {
+	ServiceID            string
+	Name                 string
+	DurationMinutes      int
+	PriceDisplay         string
+	ConsultationEligible bool
 }
 
 type importTargetState struct {
@@ -286,8 +321,11 @@ type importTargetState struct {
 	ActiveServiceAliasKeys       map[string]bool
 	ActiveCategoryAliasKeys      map[string]bool
 	ServiceAliasByKey            map[string]ServiceAliasExport
-	ServiceAliasTargetsByKey     map[string]importServiceAliasTarget
-	AmbiguousServiceAliasTargets map[string]bool
+	ConsultationProfileByTarget  map[string]ServiceConsultationProfileExport
+	ServiceTargetsByKey          map[string]importServiceTarget
+	AmbiguousServiceTargets      map[string]bool
+	ConsultationTargetsByKey     map[string]importServiceTarget
+	AmbiguousConsultationTargets map[string]bool
 	KnowledgeByImportKey         map[string]KnowledgeItemExport
 	KnowledgeByContentHash       map[string]KnowledgeItemExport
 }

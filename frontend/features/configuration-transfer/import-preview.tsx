@@ -93,6 +93,8 @@ export function sectionLabel(section: string) {
       return "Service categories";
     case "service_aliases":
       return "Service aliases";
+    case "service_consultation_profiles":
+      return "Service consultation profiles";
     default:
       return section;
   }

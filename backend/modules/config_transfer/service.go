@@ -28,6 +28,17 @@ var (
 	ErrOnboardingSalonExists = errors.New("onboarding import requires an owner without a salon")
 )
 
+var fullConfigurationSections = []string{
+	SectionSalon,
+	SectionAI,
+	SectionPublic,
+	SectionIntegrations,
+	SectionCategories,
+	SectionServiceAliases,
+	SectionConsultation,
+	SectionKnowledge,
+}
+
 type SalonReader interface {
 	Get(ctx context.Context, salonID string, ownerUserID string) (*salon.Salon, error)
 	GetSettings(ctx context.Context, salonID string, ownerUserID string) (*salon.Settings, error)
@@ -164,6 +175,7 @@ func (s *Service) Get(ctx context.Context, salonID string, ownerUserID string) (
 		ExportedAt:              s.now().UTC(),
 		SecretsExported:         false,
 		OperationalDataExported: false,
+		IncludedSections:        copyStrings(fullConfigurationSections),
 		ExcludedData:            copyStrings(excludedData),
 		RequiresSecretReentry:   secretReentryProviders(*integrations),
 		SalonProfile:            profile,
@@ -173,6 +185,7 @@ func (s *Service) Get(ctx context.Context, salonID string, ownerUserID string) (
 		POSConnection:           posConnectionExport(activeProvider, connection),
 		ServiceCategories:       serviceCategoriesExport(categories),
 		ServiceAliases:          serviceAliasesExport(serviceAliases, services),
+		ConsultationProfiles:    serviceConsultationProfilesExport(services),
 		KnowledgeBase:           knowledgeBaseExport(knowledge),
 	}, nil
 }
@@ -308,13 +321,30 @@ func (s *Service) buildImportPlan(ctx context.Context, salonID string, ownerUser
 		return nil, err
 	}
 	plan := newImportPlan(bundle, fingerprint, requestID, salonID, target)
-	planSalonProfile(ctx, s.imports, plan)
-	planAIReceptionist(plan)
-	planPublicBookingPage(ctx, s.imports, salonID, plan)
-	planIntegrations(plan)
-	planServiceCategories(plan)
-	planServiceAliases(plan)
-	planKnowledge(plan)
+	if plan.includes(SectionSalon) {
+		planSalonProfile(ctx, s.imports, plan)
+	}
+	if plan.includes(SectionPublic) {
+		planPublicBookingPage(ctx, s.imports, salonID, plan)
+	}
+	if plan.includes(SectionIntegrations) {
+		planIntegrations(plan)
+	}
+	if plan.includes(SectionCategories) {
+		planServiceCategories(plan)
+	}
+	if plan.includes(SectionServiceAliases) {
+		planServiceAliases(plan)
+	}
+	if plan.includes(SectionConsultation) {
+		planServiceConsultationProfiles(plan)
+	}
+	if plan.includes(SectionAI) {
+		planAIReceptionist(plan)
+	}
+	if plan.includes(SectionKnowledge) {
+		planKnowledge(plan)
+	}
 	if len(plan.Conflicts) > 0 {
 		plan.CanApply = false
 	}
@@ -328,6 +358,15 @@ func (s *Service) buildOnboardingImportPlan(ctx context.Context, ownerUserID str
 	}
 	target := onboardingImportTargetState()
 	plan := newImportPlan(bundle, fingerprint, requestID, "", target)
+	plan.Onboarding = true
+	if !plan.includes(SectionSalon) || !plan.includes(SectionAI) || !plan.includes(SectionPublic) || !plan.includes(SectionIntegrations) {
+		summary(plan, SectionSalon).Conflicts++
+		plan.Conflicts = append(plan.Conflicts, ImportIssue{
+			Section: SectionSalon,
+			Code:    "onboarding_requires_full_bundle",
+			Message: "Partial configuration packs can only be imported into an existing salon after onboarding.",
+		})
+	}
 	if !skipExistingSalonCheck {
 		hasSalon, err := s.imports.OwnerHasSalon(ctx, ownerUserID)
 		if err != nil {
@@ -342,12 +381,27 @@ func (s *Service) buildOnboardingImportPlan(ctx context.Context, ownerUserID str
 			})
 		}
 	}
-	planSalonProfile(ctx, s.imports, plan)
-	planAIReceptionist(plan)
-	planPublicBookingPage(ctx, s.imports, "", plan)
-	planIntegrations(plan)
-	planServiceCategories(plan)
-	planKnowledge(plan)
+	if plan.includes(SectionSalon) {
+		planSalonProfile(ctx, s.imports, plan)
+	}
+	if plan.includes(SectionConsultation) {
+		planOnboardingServiceConsultationProfiles(plan)
+	}
+	if plan.includes(SectionAI) {
+		planAIReceptionist(plan)
+	}
+	if plan.includes(SectionPublic) {
+		planPublicBookingPage(ctx, s.imports, "", plan)
+	}
+	if plan.includes(SectionIntegrations) {
+		planIntegrations(plan)
+	}
+	if plan.includes(SectionCategories) {
+		planServiceCategories(plan)
+	}
+	if plan.includes(SectionKnowledge) {
+		planKnowledge(plan)
+	}
 	if len(plan.Conflicts) > 0 {
 		plan.CanApply = false
 	}
@@ -361,13 +415,15 @@ func newImportPlan(bundle ConfigurationBundle, fingerprint string, requestID str
 		SchemaVersion:         bundle.SchemaVersion,
 		SalonID:               salonID,
 		RequestID:             requestID,
-		Summary:               newSummaryMap(),
+		Summary:               newSummaryMap(bundle.IncludedSections),
 		RequiresSecretReentry: secretReentryProviders(bundle.Integrations),
 		CanApply:              true,
 		Target:                target,
 		PublicCatalogEnabled:  target.PublicBookingPage.PublicCatalogEnabled,
 		AIEnabled:             target.SalonProfile.AIEnabled,
 		BookingMode:           target.AIReceptionist.BookingMode,
+		ConsultationEnabled:   target.AIReceptionist.ConsultationEnabled,
+		IncludedSections:      sectionSet(bundle.IncludedSections),
 	}
 	if bundle.SchemaVersion == LegacySchemaV1 {
 		plan.Warnings = append(plan.Warnings, ImportIssue{
@@ -390,13 +446,23 @@ func newImportPlan(bundle ConfigurationBundle, fingerprint string, requestID str
 			Message: "This export did not include service aliases.",
 		})
 	}
-	if plan.Bundle.POSConnection.Status != "" {
+	if bundle.SchemaVersion != SchemaVersion {
+		plan.Warnings = append(plan.Warnings, ImportIssue{
+			Section: SectionConsultation,
+			Code:    "legacy_schema_missing_service_consultation_profiles",
+			Message: "This legacy export did not include portable service consultation profiles.",
+		})
+	}
+	if plan.includes(SectionIntegrations) && plan.Bundle.POSConnection.Status != "" {
 		plan.Warnings = append(plan.Warnings, ImportIssue{
 			Section: SectionIntegrations,
 			Code:    "pos_connection_metadata_not_imported",
 			Message: "POS connection metadata is exported for reference only. OAuth tokens and provider connection state are not imported.",
 			Field:   "pos_connection",
 		})
+	}
+	if !plan.includes(SectionIntegrations) {
+		plan.RequiresSecretReentry = []string{}
 	}
 	for _, provider := range plan.RequiresSecretReentry {
 		plan.Warnings = append(plan.Warnings, ImportIssue{
@@ -435,8 +501,11 @@ func onboardingImportTargetState() *importTargetState {
 		ActiveServiceAliasKeys:       map[string]bool{},
 		ActiveCategoryAliasKeys:      map[string]bool{},
 		ServiceAliasByKey:            map[string]ServiceAliasExport{},
-		ServiceAliasTargetsByKey:     map[string]importServiceAliasTarget{},
-		AmbiguousServiceAliasTargets: map[string]bool{},
+		ConsultationProfileByTarget:  map[string]ServiceConsultationProfileExport{},
+		ServiceTargetsByKey:          map[string]importServiceTarget{},
+		AmbiguousServiceTargets:      map[string]bool{},
+		ConsultationTargetsByKey:     map[string]importServiceTarget{},
+		AmbiguousConsultationTargets: map[string]bool{},
 		KnowledgeByImportKey:         map[string]KnowledgeItemExport{},
 		KnowledgeByContentHash:       map[string]KnowledgeItemExport{},
 	}
@@ -500,7 +569,33 @@ func planAIReceptionist(plan *importPlan) {
 	fieldChange(plan, SectionAI, "sms_reminder_enabled", boolString(target.SMSReminderEnabled), boolString(incoming.SMSReminderEnabled))
 	fieldChange(plan, SectionAI, "reminder_hours_before", intString(target.ReminderHoursBefore), intString(incoming.ReminderHoursBefore))
 	fieldChange(plan, SectionAI, "handoff_enabled", boolString(target.HandoffEnabled), boolString(incoming.HandoffEnabled))
-	fieldChange(plan, SectionAI, "consultation_enabled", boolString(target.ConsultationEnabled), boolString(incoming.ConsultationEnabled))
+	if incoming.ConsultationEnabled && plan.Bundle.SchemaVersion == SchemaVersion {
+		switch {
+		case plan.Onboarding:
+			plan.ConsultationEnabled = false
+			summary(plan, SectionAI).Skipped++
+			plan.Warnings = append(plan.Warnings, ImportIssue{
+				Section: SectionAI,
+				Code:    "consultation_enablement_deferred_until_service_sync",
+				Message: "AI consultation remains disabled until Square services are synced and the consultation profile pack is imported into the existing salon.",
+				Field:   "consultation_enabled",
+			})
+		case !plan.includes(SectionConsultation) || !plan.ConsultationReady:
+			summary(plan, SectionAI).Conflicts++
+			plan.Conflicts = append(plan.Conflicts, ImportIssue{
+				Section: SectionAI,
+				Code:    "consultation_profiles_required",
+				Message: "AI consultation cannot be enabled because the v7 bundle does not resolve at least one ready profile to an eligible Square service.",
+				Field:   "consultation_enabled",
+			})
+		default:
+			plan.ConsultationEnabled = true
+			fieldChange(plan, SectionAI, "consultation_enabled", boolString(target.ConsultationEnabled), "true")
+		}
+	} else {
+		plan.ConsultationEnabled = incoming.ConsultationEnabled
+		fieldChange(plan, SectionAI, "consultation_enabled", boolString(target.ConsultationEnabled), boolString(incoming.ConsultationEnabled))
+	}
 
 	if incoming.BookingMode == "confirmed_booking" && !plan.Target.CanEnableAIBooking {
 		summary(plan, SectionAI).Skipped++
@@ -589,7 +684,10 @@ func planIntegrations(plan *importPlan) {
 func planServiceCategories(plan *importPlan) {
 	seenSlugs := map[string]bool{}
 	seenAliases := map[string]bool{}
-	incomingServiceAliasKeys := activeBundleServiceAliasKeys(plan.Bundle.ServiceAliases.Items)
+	incomingServiceAliasKeys := map[string]bool{}
+	if plan.includes(SectionServiceAliases) {
+		incomingServiceAliasKeys = activeBundleServiceAliasKeys(plan.Bundle.ServiceAliases.Items)
+	}
 	for _, item := range plan.Bundle.ServiceCategories.Items {
 		if seenSlugs[item.Slug] {
 			summary(plan, SectionCategories).Conflicts++
@@ -678,7 +776,10 @@ func planServiceCategories(plan *importPlan) {
 
 func planServiceAliases(plan *importPlan) {
 	seen := map[string]bool{}
-	incomingCategoryAliasKeys := activeBundleCategoryAliasKeys(plan.Bundle.ServiceCategories.Items)
+	incomingCategoryAliasKeys := map[string]bool{}
+	if plan.includes(SectionCategories) {
+		incomingCategoryAliasKeys = activeBundleCategoryAliasKeys(plan.Bundle.ServiceCategories.Items)
+	}
 	for _, item := range plan.Bundle.ServiceAliases.Items {
 		if seen[item.NormalizedAlias] {
 			summary(plan, SectionServiceAliases).Conflicts++
@@ -717,7 +818,7 @@ func planServiceAliases(plan *importPlan) {
 			plan.ServiceAliases = append(plan.ServiceAliases, plannedServiceAlias{Item: item, Operation: "skipped"})
 			continue
 		}
-		if plan.Target.AmbiguousServiceAliasTargets[targetKey] {
+		if plan.Target.AmbiguousServiceTargets[targetKey] {
 			summary(plan, SectionServiceAliases).Conflicts++
 			plan.Conflicts = append(plan.Conflicts, ImportIssue{
 				Section:   SectionServiceAliases,
@@ -728,7 +829,7 @@ func planServiceAliases(plan *importPlan) {
 			})
 			continue
 		}
-		target, ok := plan.Target.ServiceAliasTargetsByKey[targetKey]
+		target, ok := plan.Target.ServiceTargetsByKey[targetKey]
 		if !ok {
 			summary(plan, SectionServiceAliases).Skipped++
 			plan.Warnings = append(plan.Warnings, ImportIssue{
@@ -760,6 +861,120 @@ func planServiceAliases(plan *importPlan) {
 			TargetServiceID: target.ServiceID,
 		})
 	}
+}
+
+func planServiceConsultationProfiles(plan *importPlan) {
+	items := plan.Bundle.ConsultationProfiles.Items
+	if len(items) == 0 {
+		plan.ConsultationReady = false
+		return
+	}
+
+	seenTargets := map[string]bool{}
+	resolvedAll := true
+	readyCount := 0
+	for _, item := range items {
+		targetKey := serviceAliasTargetKey(item.TargetService)
+		if targetKey == "" {
+			resolvedAll = false
+			summary(plan, SectionConsultation).Conflicts++
+			plan.Conflicts = append(plan.Conflicts, ImportIssue{
+				Section:   SectionConsultation,
+				Code:      "consultation_profile_target_missing",
+				Message:   "A consultation profile is missing its portable target service name and duration.",
+				Field:     "target_service",
+				SourceKey: item.SourceKey,
+			})
+			continue
+		}
+		if seenTargets[targetKey] {
+			resolvedAll = false
+			summary(plan, SectionConsultation).Conflicts++
+			plan.Conflicts = append(plan.Conflicts, ImportIssue{
+				Section:   SectionConsultation,
+				Code:      "duplicate_consultation_profile_target",
+				Message:   "The import file contains more than one consultation profile for the same target service.",
+				Field:     "target_service",
+				SourceKey: item.SourceKey,
+			})
+			continue
+		}
+		seenTargets[targetKey] = true
+		targets := plan.Target.ServiceTargetsByKey
+		ambiguousTargets := plan.Target.AmbiguousServiceTargets
+		if item.Status == pos.ConsultationProfileStatusReady {
+			targets = plan.Target.ConsultationTargetsByKey
+			ambiguousTargets = plan.Target.AmbiguousConsultationTargets
+		}
+		if ambiguousTargets[targetKey] {
+			resolvedAll = false
+			summary(plan, SectionConsultation).Conflicts++
+			plan.Conflicts = append(plan.Conflicts, ImportIssue{
+				Section:   SectionConsultation,
+				Code:      "consultation_profile_target_ambiguous",
+				Message:   "A consultation profile target matched more than one eligible service on the target salon.",
+				Field:     "target_service",
+				SourceKey: item.SourceKey,
+			})
+			continue
+		}
+		target, ok := targets[targetKey]
+		if !ok {
+			resolvedAll = false
+			summary(plan, SectionConsultation).Conflicts++
+			code := "consultation_profile_target_not_found"
+			message := "A consultation profile target was not found. Sync the matching Square service before applying this pack."
+			if item.Status == pos.ConsultationProfileStatusReady {
+				if _, exists := plan.Target.ServiceTargetsByKey[targetKey]; exists || plan.Target.AmbiguousServiceTargets[targetKey] {
+					code = "consultation_profile_target_ineligible"
+					message = "A ready consultation profile can only target an active-provider, POS-linked, synced, AI-bookable Square service."
+				}
+			}
+			plan.Conflicts = append(plan.Conflicts, ImportIssue{
+				Section:   SectionConsultation,
+				Code:      code,
+				Message:   message,
+				Field:     "target_service",
+				SourceKey: item.SourceKey,
+			})
+			continue
+		}
+
+		operation := "created"
+		if existing, ok := plan.Target.ConsultationProfileByTarget[targetKey]; ok {
+			if serviceConsultationProfileEqual(existing, item) {
+				operation = "unchanged"
+				summary(plan, SectionConsultation).Unchanged++
+			} else {
+				operation = "updated"
+				summary(plan, SectionConsultation).Updated++
+			}
+		} else {
+			summary(plan, SectionConsultation).Created++
+		}
+		if item.Status == pos.ConsultationProfileStatusReady {
+			readyCount++
+		}
+		plan.ConsultationProfiles = append(plan.ConsultationProfiles, plannedServiceConsultationProfile{
+			Item:            item,
+			Operation:       operation,
+			TargetServiceID: target.ServiceID,
+		})
+	}
+	plan.ConsultationReady = resolvedAll && readyCount > 0 && len(plan.ConsultationProfiles) == len(items)
+}
+
+func planOnboardingServiceConsultationProfiles(plan *importPlan) {
+	count := len(plan.Bundle.ConsultationProfiles.Items)
+	if count == 0 {
+		return
+	}
+	summary(plan, SectionConsultation).Skipped += count
+	plan.Warnings = append(plan.Warnings, ImportIssue{
+		Section: SectionConsultation,
+		Code:    "consultation_profiles_deferred_until_service_sync",
+		Message: "Consultation profiles were deferred because onboarding has no synced Square services yet. Import the same pack from Settings after Square sync.",
+	})
 }
 
 func planKnowledge(plan *importPlan) {
@@ -809,68 +1024,103 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 	if bundle.SchemaVersion == "" {
 		return bundle, ErrValidation
 	}
-	if bundle.SchemaVersion != SchemaVersion && bundle.SchemaVersion != LegacySchemaV5 && bundle.SchemaVersion != LegacySchemaV4 && bundle.SchemaVersion != LegacySchemaV3 && bundle.SchemaVersion != LegacySchemaV2 && bundle.SchemaVersion != LegacySchemaV1 {
+	if bundle.SchemaVersion != SchemaVersion && bundle.SchemaVersion != LegacySchemaV6 && bundle.SchemaVersion != LegacySchemaV5 && bundle.SchemaVersion != LegacySchemaV4 && bundle.SchemaVersion != LegacySchemaV3 && bundle.SchemaVersion != LegacySchemaV2 && bundle.SchemaVersion != LegacySchemaV1 {
 		return bundle, ErrUnsupportedSchema
 	}
 	if bundle.SecretsExported || bundle.OperationalDataExported {
 		return bundle, ErrValidation
 	}
-	bundle.ExcludedData = copyStrings(excludedData)
-	bundle.RequiresSecretReentry = secretReentryProviders(bundle.Integrations)
-	bundle.SalonProfile = normalizeSalonProfile(bundle.SalonProfile)
-	if bundle.SalonProfile.Name == "" || bundle.SalonProfile.Phone == "" {
-		return bundle, ErrValidation
-	}
-	if bundle.SchemaVersion != SchemaVersion {
-		bundle.AIReceptionist.ConsultationEnabled = true
-	}
-	bundle.AIReceptionist = normalizeAIReceptionist(bundle.AIReceptionist)
-	if bundle.AIReceptionist.AIGreeting == "" || bundle.AIReceptionist.RecordingConsentMessage == "" || bundle.AIReceptionist.ReminderHoursBefore <= 0 {
-		return bundle, ErrValidation
-	}
-	if !validBookingMode(bundle.AIReceptionist.BookingMode) {
-		return bundle, ErrValidation
-	}
-	bundle.PublicBookingPage.PublicSlug = normalizePublicSlug(bundle.PublicBookingPage.PublicSlug)
-	if bundle.PublicBookingPage.PublicCatalogEnabled && bundle.PublicBookingPage.PublicSlug == "" {
-		return bundle, ErrValidation
-	}
-	bundle.PublicBookingPage.PublicPath = publicPath(bundle.PublicBookingPage.PublicSlug)
-	bundle.Integrations = normalizeIntegrationConfigs(bundle.Integrations)
-	if err := validateIntegrationURLs(bundle.Integrations); err != nil {
+	sections, err := normalizeIncludedSections(bundle.SchemaVersion, bundle.IncludedSections)
+	if err != nil {
 		return bundle, err
 	}
-	for i := range bundle.ServiceCategories.Items {
-		item := normalizeServiceCategoryItem(bundle.ServiceCategories.Items[i])
-		if item.Name == "" || item.Slug == "" || !validServiceCategoryStatus(item.Status) || !validServiceCategorySource(item.Source) {
+	bundle.IncludedSections = sections
+	bundle.ExcludedData = copyStrings(excludedData)
+	if bundleIncludes(bundle, SectionIntegrations) {
+		bundle.RequiresSecretReentry = secretReentryProviders(bundle.Integrations)
+	} else {
+		bundle.RequiresSecretReentry = []string{}
+	}
+	if bundleIncludes(bundle, SectionSalon) {
+		bundle.SalonProfile = normalizeSalonProfile(bundle.SalonProfile)
+		if bundle.SalonProfile.Name == "" || bundle.SalonProfile.Phone == "" {
 			return bundle, ErrValidation
 		}
-		for j := range item.Aliases {
-			alias := normalizeServiceCategoryAliasItem(item.Aliases[j])
-			if alias.Alias == "" || alias.NormalizedAlias == "" || !validServiceCategoryStatus(alias.Status) || !validServiceCategoryAliasSource(alias.Source) || alias.Confidence <= 0 || alias.Confidence > 1 {
+	}
+	if bundleIncludes(bundle, SectionAI) && legacySchemaMissingConsultationSetting(bundle.SchemaVersion) {
+		bundle.AIReceptionist.ConsultationEnabled = true
+	}
+	if bundleIncludes(bundle, SectionAI) {
+		bundle.AIReceptionist = normalizeAIReceptionist(bundle.AIReceptionist)
+		if bundle.AIReceptionist.AIGreeting == "" || bundle.AIReceptionist.RecordingConsentMessage == "" || bundle.AIReceptionist.ReminderHoursBefore <= 0 {
+			return bundle, ErrValidation
+		}
+		if !validBookingMode(bundle.AIReceptionist.BookingMode) {
+			return bundle, ErrValidation
+		}
+	}
+	if bundleIncludes(bundle, SectionPublic) {
+		bundle.PublicBookingPage.PublicSlug = normalizePublicSlug(bundle.PublicBookingPage.PublicSlug)
+		if bundle.PublicBookingPage.PublicCatalogEnabled && bundle.PublicBookingPage.PublicSlug == "" {
+			return bundle, ErrValidation
+		}
+		bundle.PublicBookingPage.PublicPath = publicPath(bundle.PublicBookingPage.PublicSlug)
+	}
+	if bundleIncludes(bundle, SectionIntegrations) {
+		bundle.Integrations = normalizeIntegrationConfigs(bundle.Integrations)
+		if err := validateIntegrationURLs(bundle.Integrations); err != nil {
+			return bundle, err
+		}
+	}
+	if bundleIncludes(bundle, SectionCategories) {
+		for i := range bundle.ServiceCategories.Items {
+			item := normalizeServiceCategoryItem(bundle.ServiceCategories.Items[i])
+			if item.Name == "" || item.Slug == "" || !validServiceCategoryStatus(item.Status) || !validServiceCategorySource(item.Source) {
 				return bundle, ErrValidation
 			}
-			item.Aliases[j] = alias
+			for j := range item.Aliases {
+				alias := normalizeServiceCategoryAliasItem(item.Aliases[j])
+				if alias.Alias == "" || alias.NormalizedAlias == "" || !validServiceCategoryStatus(alias.Status) || !validServiceCategoryAliasSource(alias.Source) || alias.Confidence <= 0 || alias.Confidence > 1 {
+					return bundle, ErrValidation
+				}
+				item.Aliases[j] = alias
+			}
+			bundle.ServiceCategories.Items[i] = item
 		}
-		bundle.ServiceCategories.Items[i] = item
+		bundle.ServiceCategories.Count = len(bundle.ServiceCategories.Items)
 	}
-	bundle.ServiceCategories.Count = len(bundle.ServiceCategories.Items)
-	for i := range bundle.ServiceAliases.Items {
-		item := normalizeServiceAliasItem(bundle.ServiceAliases.Items[i])
-		if item.Alias == "" || item.NormalizedAlias == "" || item.TargetService.Name == "" || !validServiceAliasStatus(item.Status) || !validServiceAliasSource(item.Source) || item.Confidence <= 0 || item.Confidence > 1 {
-			return bundle, ErrValidation
+	if bundleIncludes(bundle, SectionServiceAliases) {
+		for i := range bundle.ServiceAliases.Items {
+			item := normalizeServiceAliasItem(bundle.ServiceAliases.Items[i])
+			if item.Alias == "" || item.NormalizedAlias == "" || item.TargetService.Name == "" || !validServiceAliasStatus(item.Status) || !validServiceAliasSource(item.Source) || item.Confidence <= 0 || item.Confidence > 1 {
+				return bundle, ErrValidation
+			}
+			bundle.ServiceAliases.Items[i] = item
 		}
-		bundle.ServiceAliases.Items[i] = item
+		bundle.ServiceAliases.Count = len(bundle.ServiceAliases.Items)
 	}
-	bundle.ServiceAliases.Count = len(bundle.ServiceAliases.Items)
-	for i := range bundle.KnowledgeBase.Items {
-		item := normalizeKnowledgeItem(bundle.KnowledgeBase.Items[i])
-		if item.Title == "" || item.Body == "" || !validKnowledgeCategory(item.Category) || !validKnowledgeStatus(item.Status) {
-			return bundle, ErrValidation
+	if bundleIncludes(bundle, SectionConsultation) {
+		for i := range bundle.ConsultationProfiles.Items {
+			item, err := normalizeServiceConsultationProfileItem(bundle.ConsultationProfiles.Items[i])
+			if err != nil {
+				return bundle, err
+			}
+			bundle.ConsultationProfiles.Items[i] = item
 		}
-		bundle.KnowledgeBase.Items[i] = item
+		bundle.ConsultationProfiles.Count = len(bundle.ConsultationProfiles.Items)
+	} else {
+		bundle.ConsultationProfiles = ServiceConsultationProfileBundleExport{Items: []ServiceConsultationProfileExport{}}
 	}
-	bundle.KnowledgeBase.Count = len(bundle.KnowledgeBase.Items)
+	if bundleIncludes(bundle, SectionKnowledge) {
+		for i := range bundle.KnowledgeBase.Items {
+			item := normalizeKnowledgeItem(bundle.KnowledgeBase.Items[i])
+			if item.Title == "" || item.Body == "" || !validKnowledgeCategory(item.Category) || !validKnowledgeStatus(item.Status) {
+				return bundle, ErrValidation
+			}
+			bundle.KnowledgeBase.Items[i] = item
+		}
+		bundle.KnowledgeBase.Count = len(bundle.KnowledgeBase.Items)
+	}
 	return bundle, nil
 }
 
@@ -1000,6 +1250,37 @@ func normalizeServiceAliasItem(item ServiceAliasExport) ServiceAliasExport {
 	return item
 }
 
+func normalizeServiceConsultationProfileItem(item ServiceConsultationProfileExport) (ServiceConsultationProfileExport, error) {
+	item.TargetService.Name = strings.TrimSpace(item.TargetService.Name)
+	item.TargetService.PriceDisplay = strings.TrimSpace(item.TargetService.PriceDisplay)
+	if item.TargetService.Name == "" || item.TargetService.DurationMinutes <= 0 {
+		return item, ErrValidation
+	}
+	item.SourceKey = defaultString(strings.TrimSpace(item.SourceKey), serviceConsultationProfileSourceKey(item.TargetService))
+	mutation, err := pos.NormalizeConsultationProfileWriteRequest(&pos.ServiceConsultationProfileWriteRequest{
+		Status:                   item.Status,
+		RecommendedOutcomes:      item.RecommendedOutcomes,
+		CompatibleCurrentSystems: item.CompatibleCurrentSystems,
+		LengthCapabilities:       item.LengthCapabilities,
+		PriorityTags:             item.PriorityTags,
+		FinishOptions:            item.FinishOptions,
+		MaintenanceNote:          item.MaintenanceNote,
+		OwnerApprovedSummary:     item.OwnerApprovedSummary,
+	})
+	if err != nil || mutation == nil {
+		return item, ErrValidation
+	}
+	item.Status = mutation.Status
+	item.RecommendedOutcomes = copyStringsPreserveOrder(mutation.RecommendedOutcomes)
+	item.CompatibleCurrentSystems = copyStringsPreserveOrder(mutation.CompatibleCurrentSystems)
+	item.LengthCapabilities = copyStringsPreserveOrder(mutation.LengthCapabilities)
+	item.PriorityTags = copyStringsPreserveOrder(mutation.PriorityTags)
+	item.FinishOptions = copyStringsPreserveOrder(mutation.FinishOptions)
+	item.MaintenanceNote = mutation.MaintenanceNote
+	item.OwnerApprovedSummary = mutation.OwnerApprovedSummary
+	return item, nil
+}
+
 func validateIntegrationURLs(configs integrationconfig.IntegrationConfigsResponse) error {
 	if configs.Square.RedirectURL == "" || configs.Square.APIVersion == "" {
 		return ErrValidation
@@ -1052,6 +1333,10 @@ func (s *Service) serviceAliases(ctx context.Context, salonID string, ownerUserI
 		return []training.ServiceAlias{}, nil
 	}
 	return s.aliases.ListServiceAliases(ctx, salonID, ownerUserID)
+}
+
+func (plan *importPlan) includes(section string) bool {
+	return plan != nil && plan.IncludedSections[section]
 }
 
 func salonProfileExport(item *salon.Salon) SalonProfileExport {
@@ -1190,6 +1475,36 @@ func serviceAliasesExport(items []training.ServiceAlias, services []pos.Service)
 	return ServiceAliasBundleExport{Items: out, Count: len(out)}
 }
 
+func serviceConsultationProfilesExport(services []pos.Service) ServiceConsultationProfileBundleExport {
+	out := make([]ServiceConsultationProfileExport, 0, len(services))
+	for _, service := range services {
+		profile := service.ConsultationProfile
+		if profile == nil {
+			continue
+		}
+		target := ServiceAliasTargetExport{
+			Name:            service.Name,
+			DurationMinutes: service.DurationMinutes,
+			PriceDisplay:    service.PriceDisplay,
+		}
+		out = append(out, ServiceConsultationProfileExport{
+			SourceKey:                serviceConsultationProfileSourceKey(target),
+			TargetService:            target,
+			Status:                   profile.Status,
+			RecommendedOutcomes:      copyStringsPreserveOrder(profile.RecommendedOutcomes),
+			CompatibleCurrentSystems: copyStringsPreserveOrder(profile.CompatibleCurrentSystems),
+			LengthCapabilities:       copyStringsPreserveOrder(profile.LengthCapabilities),
+			PriorityTags:             copyStringsPreserveOrder(profile.PriorityTags),
+			FinishOptions:            copyStringsPreserveOrder(profile.FinishOptions),
+			MaintenanceNote:          profile.MaintenanceNote,
+			OwnerApprovedSummary:     profile.OwnerApprovedSummary,
+			CreatedAt:                profile.CreatedAt,
+			UpdatedAt:                profile.UpdatedAt,
+		})
+	}
+	return ServiceConsultationProfileBundleExport{Items: out, Count: len(out)}
+}
+
 func knowledgeBaseExport(items []training.KnowledgeItem) KnowledgeBaseExport {
 	out := make([]KnowledgeItemExport, 0, len(items))
 	for _, item := range items {
@@ -1225,6 +1540,10 @@ func serviceCategoryAliasSourceKey(normalizedAlias string) string {
 
 func serviceAliasSourceKey(normalizedAlias string) string {
 	return "service_alias:" + normalizeConfigAlias(normalizedAlias)
+}
+
+func serviceConsultationProfileSourceKey(target ServiceAliasTargetExport) string {
+	return "service_consultation_profile:" + serviceAliasTargetKey(target)
 }
 
 func knowledgeContentHash(item KnowledgeItemExport) string {
@@ -1276,6 +1595,18 @@ func serviceAliasEqual(a ServiceAliasExport, b ServiceAliasExport) bool {
 		a.Confidence == b.Confidence
 }
 
+func serviceConsultationProfileEqual(a ServiceConsultationProfileExport, b ServiceConsultationProfileExport) bool {
+	return serviceAliasTargetKey(a.TargetService) == serviceAliasTargetKey(b.TargetService) &&
+		strings.TrimSpace(a.Status) == strings.TrimSpace(b.Status) &&
+		equalStringSlices(a.RecommendedOutcomes, b.RecommendedOutcomes) &&
+		equalStringSlices(a.CompatibleCurrentSystems, b.CompatibleCurrentSystems) &&
+		equalStringSlices(a.LengthCapabilities, b.LengthCapabilities) &&
+		equalStringSlices(a.PriorityTags, b.PriorityTags) &&
+		equalStringSlices(a.FinishOptions, b.FinishOptions) &&
+		strings.TrimSpace(a.MaintenanceNote) == strings.TrimSpace(b.MaintenanceNote) &&
+		strings.TrimSpace(a.OwnerApprovedSummary) == strings.TrimSpace(b.OwnerApprovedSummary)
+}
+
 func secretReentryProviders(configs integrationconfig.IntegrationConfigsResponse) []string {
 	providers := []string{}
 	if configs.Square.ClientSecretConfigured {
@@ -1314,9 +1645,9 @@ func importResponse(plan *importPlan, dryRun bool, runID string) *ImportResponse
 	}
 }
 
-func newSummaryMap() map[string]*ImportSectionSummary {
+func newSummaryMap(sections []string) map[string]*ImportSectionSummary {
 	out := map[string]*ImportSectionSummary{}
-	for _, section := range []string{SectionSalon, SectionAI, SectionPublic, SectionIntegrations, SectionCategories, SectionServiceAliases, SectionKnowledge} {
+	for _, section := range sections {
 		out[section] = &ImportSectionSummary{Section: section}
 	}
 	return out
@@ -1332,7 +1663,7 @@ func summary(plan *importPlan, section string) *ImportSectionSummary {
 }
 
 func summaryValues(items map[string]*ImportSectionSummary) []ImportSectionSummary {
-	order := []string{SectionSalon, SectionAI, SectionPublic, SectionIntegrations, SectionCategories, SectionServiceAliases, SectionKnowledge}
+	order := []string{SectionSalon, SectionAI, SectionPublic, SectionIntegrations, SectionCategories, SectionServiceAliases, SectionConsultation, SectionKnowledge}
 	out := make([]ImportSectionSummary, 0, len(order))
 	for _, section := range order {
 		if item := items[section]; item != nil {
@@ -1380,6 +1711,73 @@ func copyStrings(values []string) []string {
 	out := append([]string{}, values...)
 	sort.Strings(out)
 	return out
+}
+
+func copyStringsPreserveOrder(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return append([]string{}, values...)
+}
+
+func equalStringSlices(a []string, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func sectionSet(sections []string) map[string]bool {
+	out := map[string]bool{}
+	for _, section := range sections {
+		out[section] = true
+	}
+	return out
+}
+
+func bundleIncludes(bundle ConfigurationBundle, section string) bool {
+	for _, item := range bundle.IncludedSections {
+		if item == section {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeIncludedSections(schemaVersion string, sections []string) ([]string, error) {
+	if schemaVersion != SchemaVersion || len(sections) == 0 {
+		return append([]string{}, fullConfigurationSections...), nil
+	}
+	requested := map[string]bool{}
+	allowed := sectionSet(fullConfigurationSections)
+	for _, section := range sections {
+		section = strings.TrimSpace(section)
+		if section == "" || !allowed[section] || requested[section] {
+			return nil, ErrValidation
+		}
+		requested[section] = true
+	}
+	out := make([]string, 0, len(requested))
+	for _, section := range fullConfigurationSections {
+		if requested[section] {
+			out = append(out, section)
+		}
+	}
+	return out, nil
+}
+
+func legacySchemaMissingConsultationSetting(schemaVersion string) bool {
+	switch schemaVersion {
+	case LegacySchemaV1, LegacySchemaV2, LegacySchemaV3, LegacySchemaV4, LegacySchemaV5:
+		return true
+	default:
+		return false
+	}
 }
 
 func validBookingMode(value string) bool {

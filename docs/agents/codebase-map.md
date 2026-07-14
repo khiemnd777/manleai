@@ -124,7 +124,7 @@ triage keyword table.
 | Twilio adapter | `backend/modules/voice_twilio/*` | Twilio signatures, form parsing, TwiML, recording mode, Media Streams bridge | `backend/modules/voice_twilio/*_test.go` |
 | OpenAI voice adapter | `backend/modules/voice_openai/*` | OpenAI STT, guarded reply, whole-response TTS, dedicated streaming Speech-to-PCMU conversion, Realtime input session | `backend/modules/voice_openai/*_test.go` |
 | Integration config | `backend/modules/integration_config/*` | Salon-scoped Square/Twilio/OpenAI runtime settings, encrypted secrets, dashboard-managed provider config | `backend/modules/integration_config/service_test.go` |
-| Configuration transfer | `backend/modules/config_transfer/*` | Sanitized export/import preview/apply, stable request IDs, skip secrets/operational records | `backend/modules/config_transfer/*_test.go` |
+| Configuration transfer | `backend/modules/config_transfer/*` | Sanitized schema v7 export/import preview/apply, scoped `included_sections` data packs, stable request IDs, portable service consultation profile resolution, skip secrets/operational records | `backend/modules/config_transfer/*_test.go` |
 | Public catalog API | `backend/modules/public_catalog/*` | Public-safe salon catalog read endpoints | `backend/modules/public_catalog/service_test.go` |
 
 ## Backend Helper And Utility Map
@@ -322,7 +322,9 @@ detail rather than part of the event title.
 
 - API client/session/refresh: `frontend/lib/api/client.ts`.
 - Configuration transfer helpers:
-  `frontend/lib/api/configuration-transfer.ts`.
+  `frontend/lib/api/configuration-transfer.ts`; preview section labels and
+  responsive summaries live in
+  `frontend/features/configuration-transfer/import-preview.tsx`.
 - Environment config: `frontend/lib/config/env.ts`.
 - Classname helper: `frontend/lib/utils/cn.ts`.
 - Shared API DTOs: `frontend/types/api.ts`.
@@ -510,7 +512,7 @@ detail rather than part of the event title.
   `frontend/features/configuration-transfer/import-preview.tsx`,
   `frontend/features/dashboard/settings-dashboard.tsx`,
   `frontend/features/onboarding/salon-profile-form.tsx`.
-- Data owner: sanitized import/export DTOs; no secrets or operational records.
+- Data owner: sanitized import/export DTOs, including portable consultation profiles that resolve to existing target services; no service records, provider mappings, secrets, or operational records. Provider-neutral profile normalization and idempotent transaction writes remain owned by `backend/modules/pos`.
 - Tests: `backend/modules/config_transfer/*_test.go`.
 - Skill/subagent: `business-analysis`, `production_release_planner`,
   `security_privacy_reviewer`.
@@ -556,6 +558,7 @@ detail rather than part of the event title.
 | service menu, how many services, how many I book, what do I have, current booking summary, service count, repeated clarification, informational service question | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/service_prompts.go`, `backend/modules/conversation/answer_router.go` | `backend/modules/conversation/service.go`, dialog state, party flow, golden tests |
 | final review, stale review, draft revision, reviewed revision, authorized revision, natural approval, repeated final review, review timeout, concise review retry, book it, just book this for me, correction during review, repeated same-category guest question, no progress loop | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/draft_revision.go`, `next_action_planner.go`, `service.go` | repository, V36/V37 migrations, booking flow, conversation and phone tests |
 | AI training, owner correction, knowledge, FAQ answer, stale policy | `backend/modules/training`, answer router/context | training UI, knowledge tests |
+| configuration transfer, configuration import, v7 data pack, included_sections, consultation profile import, profile target missing, profile target ambiguous, repeated import | `backend/modules/config_transfer/service.go`, `backend/modules/config_transfer/types.go` | repository transaction/upserts, provider-neutral profile helpers in `backend/modules/pos`, Settings/onboarding preview UI, `docs/lotus-investor-demo-consultation-pack-v7.json`, config transfer tests |
 | party booking, group booking, two people, split booking, party request, party service correction, guest_ref, party_service_guest, party_service_operation, party_service_source | `backend/modules/conversation/service_party.go`, `conversation_act.go`, `turn_reducer.go` | dialog state/types, booking service, Calls UI party request panel, party golden tests |
 | name captured wrong, background phrase captured as name, bare phone name, service instead of name, spelling, phone/email | `service_customer_name.go` | conversation golden tests, transcript metadata |
 | reschedule, cancel, move appointment, appointment target, ordinal option, day view, week view, month view, agenda, Tomorrow button, appointment warning | `service_intent.go`, `backend/modules/booking/service.go` | Appointments UI, POS Calendar UI, booking tests |

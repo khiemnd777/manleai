@@ -210,6 +210,29 @@ or produce confirmed appointment state. When the provider is disabled or
 unavailable, ambiguous mutations preserve the current draft and enter safe
 clarification/handoff behavior.
 
+## Consultation Data Pack After Deployment
+
+Schema migration V38 creates the consultation profile table, but schema
+migrations do not contain tenant-specific salon data. To reproduce the investor
+demo catalog configuration without manual re-entry:
+
+1. Deploy the release and connect the target salon to Square Appointments.
+2. Sync Square until the seven target services exist with matching names and
+   durations and are active-provider, POS-linked, synced, and AI-bookable.
+3. In `/dashboard/settings`, open Configuration transfer and choose
+   `docs/lotus-investor-demo-consultation-pack-v7.json`.
+4. Confirm the pack contains 5 service categories and 20 category aliases;
+   Preview reports 25 taxonomy creates, 7 service alias creates, and 7 service
+   consultation profile creates with zero conflicts, then Apply once.
+5. Verify the consultation toggle and profile coverage in Settings before the
+   production call test.
+
+The scoped v7 pack does not overwrite salon profile, integration configuration,
+AI runtime settings, secrets, services, or POS mappings. Missing, ambiguous, or
+ineligible profile targets block Apply. Reapplying the same payload is
+idempotent and does not create duplicate profiles or increment unchanged profile
+revisions.
+
 ## Production Rules
 
 - Do not run `backend/seed/local.sql` in production.

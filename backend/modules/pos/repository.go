@@ -1223,7 +1223,7 @@ func (r *Repository) CreateService(ctx context.Context, salonID string, ownerUse
 		return nil, err
 	}
 	if input.ConsultationProfile != nil {
-		if err := upsertServiceConsultationProfileTx(ctx, tx, salonID, serviceID, ownerUserID, *input.ConsultationProfile); err != nil {
+		if err := UpsertServiceConsultationProfileTx(ctx, tx, salonID, serviceID, ownerUserID, *input.ConsultationProfile); err != nil {
 			return nil, err
 		}
 	}
@@ -1273,7 +1273,7 @@ func (r *Repository) UpdateService(ctx context.Context, salonID string, ownerUse
 		return nil, err
 	}
 	if input.ConsultationProfile != nil {
-		if err := upsertServiceConsultationProfileTx(ctx, tx, salonID, serviceID, ownerUserID, *input.ConsultationProfile); err != nil {
+		if err := UpsertServiceConsultationProfileTx(ctx, tx, salonID, serviceID, ownerUserID, *input.ConsultationProfile); err != nil {
 			return nil, err
 		}
 	}
@@ -2208,7 +2208,9 @@ func servicePriceValue(price *float64) any {
 	return *price
 }
 
-func upsertServiceConsultationProfileTx(ctx context.Context, tx *sql.Tx, salonID string, serviceID string, ownerUserID string, input ServiceConsultationProfileMutation) error {
+// UpsertServiceConsultationProfileTx keeps profile writes idempotent inside an
+// existing salon-scoped transaction. Identical data leaves the revision intact.
+func UpsertServiceConsultationProfileTx(ctx context.Context, tx *sql.Tx, salonID string, serviceID string, ownerUserID string, input ServiceConsultationProfileMutation) error {
 	outcomes, err := json.Marshal(input.RecommendedOutcomes)
 	if err != nil {
 		return err

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +42,23 @@ func TestGetBuildsSanitizedConfigurationExportWithKnowledgeBase(t *testing.T) {
 			Name:            "Builder Gel",
 			DurationMinutes: 75,
 			PriceDisplay:    "$70.00",
+			ConsultationProfile: &pos.ServiceConsultationProfile{
+				ID:                       "profile_1",
+				SalonID:                  "salon_1",
+				ServiceID:                "service_1",
+				Status:                   pos.ConsultationProfileStatusReady,
+				RecommendedOutcomes:      []string{pos.ConsultationOutcomeAddStrength},
+				CompatibleCurrentSystems: []string{pos.ConsultationSystemNatural},
+				LengthCapabilities:       []string{pos.ConsultationLengthKeep},
+				PriorityTags:             []string{pos.ConsultationPriorityDurability},
+				FinishOptions:            []string{pos.ConsultationFinishGlossy},
+				MaintenanceNote:          "Return for a professional rebalance.",
+				OwnerApprovedSummary:     "A structured overlay for added strength.",
+				Revision:                 4,
+				UpdatedBy:                "owner_1",
+				CreatedAt:                &updatedAt,
+				UpdatedAt:                &updatedAt,
+			},
 		}},
 	}
 	service.pos = posReader
@@ -106,6 +125,13 @@ func TestGetBuildsSanitizedConfigurationExportWithKnowledgeBase(t *testing.T) {
 	if target := result.ServiceAliases.Items[0].TargetService; target.Name != "Builder Gel" || target.DurationMinutes != 75 {
 		t.Fatalf("service alias target = %#v, want Builder Gel reference", target)
 	}
+	if result.ConsultationProfiles.Count != 1 {
+		t.Fatalf("consultation profiles = %#v, want one portable profile", result.ConsultationProfiles)
+	}
+	consultation := result.ConsultationProfiles.Items[0]
+	if consultation.TargetService.Name != "Builder Gel" || consultation.TargetService.DurationMinutes != 75 || consultation.Status != pos.ConsultationProfileStatusReady {
+		t.Fatalf("consultation profile target = %#v, want portable Builder Gel profile", consultation)
+	}
 	if got := result.ServiceCategories.Items[0].Aliases[0].SourceKey; got != "service_category_alias:mani" {
 		t.Fatalf("category alias source key = %q, want stable alias key", got)
 	}
@@ -129,6 +155,8 @@ func TestGetBuildsSanitizedConfigurationExportWithKnowledgeBase(t *testing.T) {
 		"owner_user_id",
 		"settings_1",
 		"salon_1",
+		"profile_1",
+		"owner_1",
 		"do not export operational sync errors",
 	} {
 		if strings.Contains(rawJSON, forbidden) {
@@ -287,7 +315,7 @@ func TestPreviewImportPlansServiceAliasForResolvedTargetService(t *testing.T) {
 	store := &fakeImportStore{
 		publicCanPublish: true,
 		canEnableAI:      true,
-		targetServices: map[string]importServiceAliasTarget{
+		targetServices: map[string]importServiceTarget{
 			targetKey: {
 				ServiceID:       "target_service_1",
 				Name:            "Builder Gel",
@@ -342,7 +370,7 @@ func TestPreviewImportBlocksServiceAliasCategoryAliasConflict(t *testing.T) {
 		publicCanPublish:        true,
 		canEnableAI:             true,
 		activeCategoryAliasKeys: map[string]bool{"overlay": true},
-		targetServices: map[string]importServiceAliasTarget{
+		targetServices: map[string]importServiceTarget{
 			targetKey: {
 				ServiceID:       "target_service_1",
 				Name:            "Builder Gel",
@@ -380,6 +408,311 @@ func TestPreviewImportBlocksServiceAliasCategoryAliasConflict(t *testing.T) {
 	}
 	if len(result.Conflicts) != 1 || result.Conflicts[0].Code != "service_alias_conflicts_with_category_alias" {
 		t.Fatalf("conflicts = %#v, want service alias category conflict", result.Conflicts)
+	}
+}
+
+func TestPreviewImportPlansReadyConsultationProfileForEligibleSquareService(t *testing.T) {
+	updatedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	target := ServiceAliasTargetExport{Name: "Structured Gel Overlay", DurationMinutes: 70}
+	store := &fakeImportStore{
+		publicCanPublish: true,
+		canEnableAI:      true,
+		targetServices: map[string]importServiceTarget{
+			serviceAliasTargetKey(target): {
+				ServiceID:            "target_service_overlay",
+				Name:                 target.Name,
+				DurationMinutes:      target.DurationMinutes,
+				ConsultationEligible: true,
+			},
+		},
+	}
+	service := newTestService(updatedAt)
+	service.imports = store
+	bundle := testImportBundle(updatedAt)
+	bundle.ConsultationProfiles = testConsultationProfileBundle(target, updatedAt)
+	bundle.AIReceptionist.ConsultationEnabled = true
+
+	result, err := service.PreviewImport(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "req-consultation-overlay",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("PreviewImport returned error: %v", err)
+	}
+	if !result.CanApply {
+		t.Fatalf("eligible consultation profile should be applyable: %#v", result)
+	}
+	if got := sectionSummary(result.Summary, SectionConsultation).Created; got != 1 {
+		t.Fatalf("consultation summary created = %d, want 1: %#v", got, result.Summary)
+	}
+	plan, err := service.buildImportPlan(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "req-consultation-overlay-plan",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("buildImportPlan returned error: %v", err)
+	}
+	if len(plan.ConsultationProfiles) != 1 || plan.ConsultationProfiles[0].TargetServiceID != "target_service_overlay" || !plan.ConsultationReady || !plan.ConsultationEnabled {
+		t.Fatalf("consultation plan = %#v, want resolved ready profile and enabled runtime", plan)
+	}
+}
+
+func TestPreviewImportBlocksMissingConsultationProfileTarget(t *testing.T) {
+	updatedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	service := newTestService(updatedAt)
+	bundle := testImportBundle(updatedAt)
+	bundle.ConsultationProfiles = testConsultationProfileBundle(ServiceAliasTargetExport{Name: "Silk Wrap Repair", DurationMinutes: 55}, updatedAt)
+	bundle.AIReceptionist.ConsultationEnabled = true
+
+	result, err := service.PreviewImport(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "req-consultation-target-missing",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("PreviewImport returned error: %v", err)
+	}
+	if result.CanApply {
+		t.Fatalf("missing consultation target should block apply: %#v", result)
+	}
+	if got := sectionSummary(result.Summary, SectionConsultation).Conflicts; got != 1 {
+		t.Fatalf("consultation conflicts = %d, want 1: %#v", got, result)
+	}
+	if !hasIssueCode(result.Conflicts, "consultation_profile_target_not_found") {
+		t.Fatalf("conflicts = %#v, want target-not-found issue", result.Conflicts)
+	}
+}
+
+func TestPreviewImportBlocksReadyProfileForIneligibleService(t *testing.T) {
+	updatedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	target := ServiceAliasTargetExport{Name: "Natural Nail Repair", DurationMinutes: 35}
+	service := newTestService(updatedAt)
+	service.imports = &fakeImportStore{
+		publicCanPublish: true,
+		canEnableAI:      true,
+		targetServices: map[string]importServiceTarget{
+			serviceAliasTargetKey(target): {
+				ServiceID:            "target_service_repair",
+				Name:                 target.Name,
+				DurationMinutes:      target.DurationMinutes,
+				ConsultationEligible: false,
+			},
+		},
+	}
+	bundle := testImportBundle(updatedAt)
+	bundle.ConsultationProfiles = testConsultationProfileBundle(target, updatedAt)
+
+	result, err := service.PreviewImport(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "req-consultation-ineligible",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("PreviewImport returned error: %v", err)
+	}
+	if result.CanApply || !hasIssueCode(result.Conflicts, "consultation_profile_target_ineligible") {
+		t.Fatalf("ineligible ready profile should block apply: %#v", result)
+	}
+}
+
+func TestPreviewImportBlocksAmbiguousConsultationProfileTarget(t *testing.T) {
+	updatedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	target := ServiceAliasTargetExport{Name: "Express Gel Color", DurationMinutes: 40}
+	key := serviceAliasTargetKey(target)
+	service := newTestService(updatedAt)
+	service.imports = &fakeImportStore{
+		publicCanPublish:             true,
+		canEnableAI:                  true,
+		ambiguousServiceTargets:      map[string]bool{key: true},
+		ambiguousConsultationTargets: map[string]bool{key: true},
+		targetServices: map[string]importServiceTarget{
+			key: {ServiceID: "one_of_two_services", Name: target.Name, DurationMinutes: target.DurationMinutes, ConsultationEligible: true},
+		},
+	}
+	bundle := testImportBundle(updatedAt)
+	bundle.ConsultationProfiles = testConsultationProfileBundle(target, updatedAt)
+
+	result, err := service.PreviewImport(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "req-consultation-ambiguous",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("PreviewImport returned error: %v", err)
+	}
+	if result.CanApply || !hasIssueCode(result.Conflicts, "consultation_profile_target_ambiguous") {
+		t.Fatalf("ambiguous consultation target should block apply: %#v", result)
+	}
+}
+
+func TestReadyProfileUsesUniqueEligibleTargetWhenLegacyServiceNameIsDuplicated(t *testing.T) {
+	updatedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	target := ServiceAliasTargetExport{Name: "Gel Rebalance", DurationMinutes: 60}
+	key := serviceAliasTargetKey(target)
+	service := newTestService(updatedAt)
+	service.imports = &fakeImportStore{
+		publicCanPublish:        true,
+		canEnableAI:             true,
+		ambiguousServiceTargets: map[string]bool{key: true},
+		targetServices: map[string]importServiceTarget{
+			key: {ServiceID: "active_square_service", Name: target.Name, DurationMinutes: target.DurationMinutes, ConsultationEligible: true},
+		},
+	}
+	bundle := testImportBundle(updatedAt)
+	bundle.ConsultationProfiles = testConsultationProfileBundle(target, updatedAt)
+
+	result, err := service.PreviewImport(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "req-consultation-unique-eligible",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("PreviewImport returned error: %v", err)
+	}
+	if !result.CanApply || len(result.Conflicts) != 0 {
+		t.Fatalf("one eligible active-provider target should resolve despite an ineligible duplicate: %#v", result)
+	}
+}
+
+func TestPreviewImportLeavesIdenticalConsultationProfileUnchanged(t *testing.T) {
+	updatedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	target := ServiceAliasTargetExport{Name: "Builder Overlay", DurationMinutes: 65, PriceDisplay: "$72.00"}
+	profileBundle := testConsultationProfileBundle(target, updatedAt)
+	profile := profileBundle.Items[0]
+	service := newTestService(updatedAt)
+	posReader := &fakePOSConnectionReader{
+		err: pos.ErrNotFound,
+		services: []pos.Service{{
+			ID:              "existing_service_overlay",
+			Name:            target.Name,
+			DurationMinutes: target.DurationMinutes,
+			PriceDisplay:    target.PriceDisplay,
+			ConsultationProfile: &pos.ServiceConsultationProfile{
+				Status:                   profile.Status,
+				RecommendedOutcomes:      profile.RecommendedOutcomes,
+				CompatibleCurrentSystems: profile.CompatibleCurrentSystems,
+				LengthCapabilities:       profile.LengthCapabilities,
+				PriorityTags:             profile.PriorityTags,
+				FinishOptions:            profile.FinishOptions,
+				MaintenanceNote:          profile.MaintenanceNote,
+				OwnerApprovedSummary:     profile.OwnerApprovedSummary,
+			},
+		}},
+	}
+	service.pos = posReader
+	service.services = posReader
+	service.imports = &fakeImportStore{
+		publicCanPublish: true,
+		canEnableAI:      true,
+		targetServices: map[string]importServiceTarget{
+			serviceAliasTargetKey(target): {
+				ServiceID:            "existing_service_overlay",
+				Name:                 target.Name,
+				DurationMinutes:      target.DurationMinutes,
+				ConsultationEligible: true,
+			},
+		},
+	}
+	bundle := testImportBundle(updatedAt)
+	bundle.ConsultationProfiles = profileBundle
+
+	plan, err := service.buildImportPlan(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "req-consultation-unchanged",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("buildImportPlan returned error: %v", err)
+	}
+	if len(plan.ConsultationProfiles) != 1 || plan.ConsultationProfiles[0].Operation != "unchanged" {
+		t.Fatalf("consultation plan = %#v, want unchanged", plan.ConsultationProfiles)
+	}
+	if got := summary(plan, SectionConsultation).Unchanged; got != 1 {
+		t.Fatalf("consultation unchanged = %d, want 1", got)
+	}
+}
+
+func TestNormalizeV6BundlePreservesExplicitConsultationToggle(t *testing.T) {
+	updatedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	bundle := testImportBundle(updatedAt)
+	bundle.SchemaVersion = LegacySchemaV6
+	bundle.AIReceptionist.ConsultationEnabled = false
+
+	normalized, err := normalizeImportBundle(bundle)
+	if err != nil {
+		t.Fatalf("normalizeImportBundle returned error: %v", err)
+	}
+	if normalized.AIReceptionist.ConsultationEnabled {
+		t.Fatalf("v6 explicit consultation_enabled=false was overwritten")
+	}
+	if normalized.ConsultationProfiles.Count != 0 || len(normalized.ConsultationProfiles.Items) != 0 {
+		t.Fatalf("v6 should not import v7 consultation profile data: %#v", normalized.ConsultationProfiles)
+	}
+}
+
+func TestInvestorConsultationPackIsValidPortableV7Data(t *testing.T) {
+	raw, err := os.ReadFile("../../../docs/lotus-investor-demo-consultation-pack-v7.json")
+	if err != nil {
+		t.Fatalf("ReadFile returned error: %v", err)
+	}
+	var bundle ConfigurationBundle
+	if err := json.Unmarshal(raw, &bundle); err != nil {
+		t.Fatalf("Unmarshal returned error: %v", err)
+	}
+	normalized, err := normalizeImportBundle(bundle)
+	if err != nil {
+		t.Fatalf("consultation pack is not importable: %v", err)
+	}
+	if normalized.ServiceCategories.Count != 5 || normalized.ServiceAliases.Count != 7 || normalized.ConsultationProfiles.Count != 7 {
+		t.Fatalf("consultation pack counts = categories:%d aliases:%d profiles:%d, want 5/7/7", normalized.ServiceCategories.Count, normalized.ServiceAliases.Count, normalized.ConsultationProfiles.Count)
+	}
+	if bundleIncludes(normalized, SectionSalon) || bundleIncludes(normalized, SectionIntegrations) || bundleIncludes(normalized, SectionAI) {
+		t.Fatalf("consultation pack must not overwrite salon, provider, or AI runtime settings: %#v", normalized.IncludedSections)
+	}
+	targets := map[string]importServiceTarget{}
+	for i, item := range normalized.ConsultationProfiles.Items {
+		targets[serviceAliasTargetKey(item.TargetService)] = importServiceTarget{
+			ServiceID:            "production_service_" + strconv.Itoa(i+1),
+			Name:                 item.TargetService.Name,
+			DurationMinutes:      item.TargetService.DurationMinutes,
+			PriceDisplay:         item.TargetService.PriceDisplay,
+			ConsultationEligible: true,
+		}
+	}
+	service := newTestService(time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC))
+	service.imports = &fakeImportStore{publicCanPublish: true, canEnableAI: true, targetServices: targets}
+	preview, err := service.PreviewImport(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "req-investor-consultation-pack",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("PreviewImport returned error: %v", err)
+	}
+	if !preview.CanApply || len(preview.Conflicts) != 0 {
+		t.Fatalf("consultation pack preview should apply cleanly: %#v", preview)
+	}
+	if got := sectionSummary(preview.Summary, SectionCategories).Created; got != 25 {
+		t.Fatalf("category taxonomy creates = %d, want 5 categories plus 20 aliases", got)
+	}
+	if got := sectionSummary(preview.Summary, SectionServiceAliases).Created; got != 7 {
+		t.Fatalf("service alias creates = %d, want 7", got)
+	}
+	if got := sectionSummary(preview.Summary, SectionConsultation).Created; got != 7 {
+		t.Fatalf("consultation profile creates = %d, want 7", got)
+	}
+}
+
+func TestPreviewOnboardingBlocksPartialConsultationPack(t *testing.T) {
+	updatedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	bundle := testImportBundle(updatedAt)
+	bundle.IncludedSections = []string{SectionCategories, SectionServiceAliases, SectionConsultation}
+	bundle.ConsultationProfiles = testConsultationProfileBundle(ServiceAliasTargetExport{Name: "Builder Overlay", DurationMinutes: 65}, updatedAt)
+	service := newTestService(updatedAt)
+
+	result, err := service.PreviewOnboardingImport(context.Background(), "owner_1", ImportRequest{
+		RequestID:     "req-partial-onboarding",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("PreviewOnboardingImport returned error: %v", err)
+	}
+	if result.CanApply || !hasIssueCode(result.Conflicts, "onboarding_requires_full_bundle") {
+		t.Fatalf("partial data pack must be imported after onboarding: %#v", result)
 	}
 }
 
@@ -798,6 +1131,37 @@ func sectionSummary(items []ImportSectionSummary, section string) ImportSectionS
 	return ImportSectionSummary{}
 }
 
+func hasIssueCode(items []ImportIssue, code string) bool {
+	for _, item := range items {
+		if item.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func testConsultationProfileBundle(target ServiceAliasTargetExport, updatedAt time.Time) ServiceConsultationProfileBundleExport {
+	return ServiceConsultationProfileBundleExport{
+		Items: []ServiceConsultationProfileExport{
+			{
+				SourceKey:                serviceConsultationProfileSourceKey(target),
+				TargetService:            target,
+				Status:                   pos.ConsultationProfileStatusReady,
+				RecommendedOutcomes:      []string{pos.ConsultationOutcomeAddStrength},
+				CompatibleCurrentSystems: []string{pos.ConsultationSystemNatural},
+				LengthCapabilities:       []string{pos.ConsultationLengthKeep},
+				PriorityTags:             []string{pos.ConsultationPriorityDurability},
+				FinishOptions:            []string{pos.ConsultationFinishGlossy},
+				MaintenanceNote:          "Return for professional maintenance.",
+				OwnerApprovedSummary:     "A structured service for clients who want added strength.",
+				CreatedAt:                &updatedAt,
+				UpdatedAt:                &updatedAt,
+			},
+		},
+		Count: 1,
+	}
+}
+
 type fakeSalonReader struct {
 	salon    *salon.Salon
 	settings *salon.Settings
@@ -907,21 +1271,22 @@ func (f *fakeKnowledgeReader) ListServiceAliases(ctx context.Context, salonID st
 }
 
 type fakeImportStore struct {
-	publicCanPublish        bool
-	canEnableAI             bool
-	slugTaken               bool
-	slugErr                 error
-	lastSlugSalonID         string
-	ownerHasSalon           bool
-	knowledge               *fakeKnowledgeReader
-	activeServiceAliasKeys  map[string]bool
-	activeCategoryAliasKeys map[string]bool
-	targetServices          map[string]importServiceAliasTarget
-	ambiguousServiceTargets map[string]bool
-	appliedRuns             map[string]string
-	onboardingRuns          map[string]fakeOnboardingRun
-	onboardingCreates       int
-	lastOnboardingPlan      *importPlan
+	publicCanPublish             bool
+	canEnableAI                  bool
+	slugTaken                    bool
+	slugErr                      error
+	lastSlugSalonID              string
+	ownerHasSalon                bool
+	knowledge                    *fakeKnowledgeReader
+	activeServiceAliasKeys       map[string]bool
+	activeCategoryAliasKeys      map[string]bool
+	targetServices               map[string]importServiceTarget
+	ambiguousServiceTargets      map[string]bool
+	ambiguousConsultationTargets map[string]bool
+	appliedRuns                  map[string]string
+	onboardingRuns               map[string]fakeOnboardingRun
+	onboardingCreates            int
+	lastOnboardingPlan           *importPlan
 }
 
 type fakeOnboardingRun struct {
@@ -936,6 +1301,7 @@ func (f *fakeImportStore) TargetImportState(ctx context.Context, salonID string,
 	categoryBySlug := map[string]ServiceCategoryExport{}
 	categoryAliasByKey := map[string]ServiceCategoryAliasExport{}
 	serviceAliasByKey := map[string]ServiceAliasExport{}
+	consultationProfileByTarget := map[string]ServiceConsultationProfileExport{}
 	for _, item := range current.KnowledgeBase.Items {
 		byImportKey[item.SourceKey] = item
 		byContentHash[knowledgeContentHash(item)] = item
@@ -949,6 +1315,20 @@ func (f *fakeImportStore) TargetImportState(ctx context.Context, salonID string,
 	for _, item := range current.ServiceAliases.Items {
 		serviceAliasByKey[item.NormalizedAlias] = item
 	}
+	for _, item := range current.ConsultationProfiles.Items {
+		consultationProfileByTarget[serviceAliasTargetKey(item.TargetService)] = item
+	}
+	consultationTargets := map[string]importServiceTarget{}
+	ambiguousConsultationTargets := map[string]bool{}
+	for key, target := range f.targetServices {
+		if !target.ConsultationEligible {
+			continue
+		}
+		consultationTargets[key] = target
+		if f.ambiguousConsultationTargets[key] {
+			ambiguousConsultationTargets[key] = true
+		}
+	}
 	return &importTargetState{
 		SalonProfile:                 current.SalonProfile,
 		AIReceptionist:               current.AIReceptionist,
@@ -961,8 +1341,11 @@ func (f *fakeImportStore) TargetImportState(ctx context.Context, salonID string,
 		ActiveServiceAliasKeys:       f.activeServiceAliasKeys,
 		ActiveCategoryAliasKeys:      f.activeCategoryAliasKeys,
 		ServiceAliasByKey:            serviceAliasByKey,
-		ServiceAliasTargetsByKey:     f.targetServices,
-		AmbiguousServiceAliasTargets: f.ambiguousServiceTargets,
+		ConsultationProfileByTarget:  consultationProfileByTarget,
+		ServiceTargetsByKey:          f.targetServices,
+		AmbiguousServiceTargets:      f.ambiguousServiceTargets,
+		ConsultationTargetsByKey:     consultationTargets,
+		AmbiguousConsultationTargets: ambiguousConsultationTargets,
 		KnowledgeByImportKey:         byImportKey,
 		KnowledgeByContentHash:       byContentHash,
 	}, nil

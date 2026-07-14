@@ -287,9 +287,9 @@ function ImportConfigurationPanel({
 
       <div className="mt-5 grid min-w-0 gap-4 lg:grid-cols-[0.8fr_1.2fr]">
         <div className="min-w-0 rounded-md border border-line p-4">
-          <div className="text-sm font-semibold text-ink">Included</div>
+          <div className="text-sm font-semibold text-ink">Full bundle includes</div>
           <div className="mt-3 flex flex-wrap gap-2">
-            {["Salon profile", "AI receptionist", "Public booking page", "Integrations", "Service categories", "Service aliases", "Knowledge base"].map((item) => (
+            {["Salon profile", "AI receptionist", "Public booking page", "Integrations", "Service categories", "Service aliases", "Consultation profiles", "Knowledge base"].map((item) => (
               <Badge key={item} value={item.toLowerCase().replaceAll(" ", "_")} />
             ))}
           </div>
