@@ -163,7 +163,7 @@ func realtimeSessionConfig(cfg config.OpenAIVoiceConfig, opts voice.RealtimeSess
 }
 
 func realtimeInputNoiseReduction(profile string) map[string]any {
-	if config.NormalizeOpenAIRealtimeNoiseProfile(profile) == "quiet_room" {
+	if config.NormalizeOpenAIRealtimeNoiseProfile(profile) == config.OpenAIRealtimeNoiseMinimal {
 		return nil
 	}
 	return map[string]any{"type": "near_field"}
@@ -214,20 +214,29 @@ func realtimeTranscriptPolicyForConfig(cfg config.OpenAIVoiceConfig) voice.Realt
 	profile := config.NormalizeOpenAIRealtimeNoiseProfile(cfg.RealtimeNoiseProfile)
 	policy := voice.RealtimeTranscriptPolicy{
 		Profile:            profile,
+		EffectiveProfile:   profile,
 		RequireLogProbs:    !realtimeUsesLegacyProtocol(cfg.RealtimeModel),
 		MinMeanLogProb:     -1.0,
 		MinTokenLogProb:    -2.0,
 		MaxTokensPerSecond: 10,
 	}
 	switch profile {
-	case "quiet_room":
+	case config.OpenAIRealtimeNoiseMinimal:
 		policy.MinMeanLogProb = -1.2
 		policy.MinTokenLogProb = -2.5
 		policy.MaxTokensPerSecond = 12
-	case "noisy_salon":
+	case config.OpenAIRealtimeNoiseStrongRejection:
 		policy.MinMeanLogProb = -0.8
 		policy.MinTokenLogProb = -1.6
 		policy.MaxTokensPerSecond = 8
+	case config.OpenAIRealtimeNoiseAutomatic:
+		policy.EffectiveProfile = config.OpenAIRealtimeNoiseStandard
+		policy.AdaptiveStrongNoise = &voice.RealtimeTranscriptThresholds{
+			Profile:            config.OpenAIRealtimeNoiseStrongRejection,
+			MinMeanLogProb:     -0.8,
+			MinTokenLogProb:    -1.6,
+			MaxTokensPerSecond: 8,
+		}
 	}
 	return policy
 }
@@ -252,9 +261,9 @@ func realtimeTurnDetection(cfg config.OpenAIVoiceConfig) map[string]any {
 
 func realtimeNoisePolicyForProfile(profile string) realtimeNoisePolicy {
 	switch config.NormalizeOpenAIRealtimeNoiseProfile(profile) {
-	case "quiet_room":
+	case config.OpenAIRealtimeNoiseMinimal:
 		return realtimeNoisePolicy{threshold: 0.5, prefixPaddingMS: 300, silenceDurationMS: 450}
-	case "balanced":
+	case config.OpenAIRealtimeNoiseAutomatic, config.OpenAIRealtimeNoiseStandard:
 		return realtimeNoisePolicy{threshold: 0.65, prefixPaddingMS: 300, silenceDurationMS: 650}
 	default:
 		return realtimeNoisePolicy{threshold: 0.78, prefixPaddingMS: 300, silenceDurationMS: 850}

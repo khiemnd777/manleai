@@ -1220,7 +1220,7 @@ func normalizeIntegrationConfigs(configs integrationconfig.IntegrationConfigsRes
 	configs.OpenAI.SpeechOutputMode = config.NormalizeOpenAISpeechOutputMode(configs.OpenAI.SpeechOutputMode)
 	configs.OpenAI.RealtimeModel = strings.TrimSpace(configs.OpenAI.RealtimeModel)
 	configs.OpenAI.RealtimeVoice = defaultString(strings.TrimSpace(configs.OpenAI.RealtimeVoice), configs.OpenAI.SpeechVoice)
-	configs.OpenAI.RealtimeNoiseProfile = strings.TrimSpace(configs.OpenAI.RealtimeNoiseProfile)
+	configs.OpenAI.RealtimeNoiseProfile = config.NormalizeOpenAIRealtimeNoiseProfile(configs.OpenAI.RealtimeNoiseProfile)
 	configs.OpenAI.RealtimeInstructions = strings.TrimSpace(configs.OpenAI.RealtimeInstructions)
 	return configs
 }

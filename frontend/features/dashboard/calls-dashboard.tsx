@@ -1533,7 +1533,7 @@ function RealtimeEventsPanel({
                   <th className="px-4 py-3">Event</th>
                   <th className="px-4 py-3">Stage</th>
                   <th className="px-4 py-3">Decision</th>
-                  <th className="px-4 py-3">Profile</th>
+                  <th className="px-4 py-3">Audio handling</th>
                   <th className="px-4 py-3">Stream SID</th>
                   <th className="px-4 py-3">Detail</th>
                 </tr>
@@ -1547,7 +1547,7 @@ function RealtimeEventsPanel({
                     </td>
                     <td className="px-4 py-3 text-muted">{event.stage || "Not recorded"}</td>
                     <td className="px-4 py-3 text-muted">{event.diagnostics?.decision || "-"}</td>
-                    <td className="px-4 py-3 text-muted">{event.diagnostics?.profile || "-"}</td>
+                    <td className="px-4 py-3 text-muted">{audioHandlingLabel(event.diagnostics?.profile)}</td>
                     <td className="px-4 py-3 font-mono text-xs text-muted">{event.stream_sid || "-"}</td>
                     <td className="max-w-[360px] break-words px-4 py-3 text-muted">{realtimeEventDetail(event)}</td>
                   </tr>
@@ -1566,7 +1566,7 @@ function RealtimeEventsPanel({
                 <dl className="mt-3 grid gap-3 text-sm">
                   <Info label="Stage" value={event.stage || "Not recorded"} />
                   <Info label="Decision" value={event.diagnostics?.decision || "-"} />
-                  <Info label="Noise profile" value={event.diagnostics?.profile || "-"} />
+                  <Info label="Audio handling" value={audioHandlingLabel(event.diagnostics?.profile)} />
                   <Info label="Stream SID" value={<span className="break-all font-mono text-xs">{event.stream_sid || "-"}</span>} />
                   <Info label="Detail" value={realtimeEventDetail(event)} />
                 </dl>
@@ -2032,6 +2032,9 @@ function realtimeEventDetail(event: RealtimeEventLog) {
   if (event.stream_event) return event.stream_event;
   if (event.diagnostics) {
     const keys = [
+      "effective_profile",
+      "audio_quality_signal",
+      "runtime_action",
       "reason",
       "mean_logprob",
       "min_logprob",
@@ -2050,10 +2053,57 @@ function realtimeEventDetail(event: RealtimeEventLog) {
       "expected_hash",
       "actual_hash"
     ];
-    const values = keys.flatMap((key) => (event.diagnostics?.[key] ? [`${key}: ${event.diagnostics[key]}`] : []));
+    const values = keys.flatMap((key) => {
+      const value = event.diagnostics?.[key];
+      if (!value) return [];
+      return [`${realtimeDiagnosticLabel(key)}: ${realtimeDiagnosticValue(key, value)}`];
+    });
     if (values.length > 0) return values.join(" · ");
   }
   return "No additional detail recorded.";
+}
+
+function audioHandlingLabel(value?: string) {
+  switch (value) {
+    case "automatic":
+      return "Automatic";
+    case "standard":
+    case "balanced":
+      return "Standard";
+    case "strong_noise_rejection":
+    case "high_background_noise":
+    case "noisy_salon":
+      return "Stronger noise rejection";
+    case "minimal_processing":
+    case "quiet_room":
+      return "Minimal processing";
+    default:
+      return value || "-";
+  }
+}
+
+function realtimeDiagnosticLabel(key: string) {
+  switch (key) {
+    case "effective_profile":
+      return "Effective handling";
+    case "audio_quality_signal":
+      return "Audio quality signal";
+    case "runtime_action":
+      return "Runtime action";
+    default:
+      return key;
+  }
+}
+
+function realtimeDiagnosticValue(key: string, value: string) {
+  if (key === "effective_profile") return audioHandlingLabel(value);
+  if (key === "audio_quality_signal" && value === "low_confidence") return "Low confidence";
+  if (key === "runtime_action") {
+    if (value === "standard_speech_admission") return "Standard speech admission";
+    if (value === "stronger_speech_admission") return "Stronger speech admission";
+    if (value === "stronger_speech_admission_next_turn") return "Stronger speech admission on next turn";
+  }
+  return value;
 }
 
 function formatDateTime(value: string) {

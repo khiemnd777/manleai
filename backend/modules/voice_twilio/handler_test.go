@@ -983,6 +983,62 @@ func TestRealtimeTranscriptAdmissionFailsClosedForGAMetadataAndNoise(t *testing.
 	}
 }
 
+func TestRealtimeAutomaticAdmissionEscalatesPerCallFromStructuredAudioEvidence(t *testing.T) {
+	controller := newRealtimeTranscriptAdmissionController(voice.RealtimeTranscriptPolicy{
+		Profile:             "automatic",
+		EffectiveProfile:    "standard",
+		RequireLogProbs:     true,
+		MinMeanLogProb:      -1,
+		MinTokenLogProb:     -2,
+		MaxTokensPerSecond:  10,
+		AdaptiveStrongNoise: &voice.RealtimeTranscriptThresholds{Profile: "strong_noise_rejection", MinMeanLogProb: -0.8, MinTokenLogProb: -1.6, MaxTokensPerSecond: 8},
+	})
+
+	accepted, reason, diagnostics := controller.Admit(voice.RealtimeEvent{
+		ItemID: "street_audio", Transcript: "Could you repeat the available times?", TranscriptLogProbs: []float64{-0.9, -1.3},
+	}, 900)
+	if accepted || reason != "mean_logprob_below_profile_threshold" {
+		t.Fatalf("first degraded turn = accepted:%v reason:%q", accepted, reason)
+	}
+	if diagnostics["profile"] != "automatic" || diagnostics["effective_profile"] != "standard" || diagnostics["audio_quality_signal"] != "low_confidence" || diagnostics["runtime_action"] != "stronger_speech_admission_next_turn" {
+		t.Fatalf("first degraded diagnostics = %#v", diagnostics)
+	}
+
+	accepted, reason, diagnostics = controller.Admit(voice.RealtimeEvent{
+		ItemID: "home_audio", Transcript: "Dạ, chiều thứ sáu.", TranscriptLogProbs: []float64{-0.2, -0.4},
+	}, 700)
+	if !accepted || reason != "confidence_and_vad_admitted" {
+		t.Fatalf("clean follow-up = accepted:%v reason:%q", accepted, reason)
+	}
+	if diagnostics["profile"] != "automatic" || diagnostics["effective_profile"] != "strong_noise_rejection" || diagnostics["runtime_action"] != "stronger_speech_admission" {
+		t.Fatalf("adapted diagnostics = %#v", diagnostics)
+	}
+}
+
+func TestRealtimeAutomaticAdmissionDoesNotTreatMissingProviderMetadataAsNoise(t *testing.T) {
+	controller := newRealtimeTranscriptAdmissionController(voice.RealtimeTranscriptPolicy{
+		Profile:             "automatic",
+		EffectiveProfile:    "standard",
+		RequireLogProbs:     true,
+		MinMeanLogProb:      -1,
+		MinTokenLogProb:     -2,
+		MaxTokensPerSecond:  10,
+		AdaptiveStrongNoise: &voice.RealtimeTranscriptThresholds{Profile: "strong_noise_rejection", MinMeanLogProb: -0.8, MinTokenLogProb: -1.6, MaxTokensPerSecond: 8},
+	})
+
+	accepted, reason, diagnostics := controller.Admit(voice.RealtimeEvent{ItemID: "provider_gap", Transcript: "Four o'clock."}, 600)
+	if accepted || reason != "missing_confidence_metadata" || diagnostics["runtime_action"] != "standard_speech_admission" || diagnostics["audio_quality_signal"] != "" {
+		t.Fatalf("missing metadata diagnostics = accepted:%v reason:%q diagnostics:%#v", accepted, reason, diagnostics)
+	}
+
+	accepted, reason, diagnostics = controller.Admit(voice.RealtimeEvent{
+		ItemID: "moderate_audio", Transcript: "Any technician is fine.", TranscriptLogProbs: []float64{-0.85, -0.9},
+	}, 650)
+	if !accepted || reason != "confidence_and_vad_admitted" || diagnostics["effective_profile"] != "standard" {
+		t.Fatalf("metadata counterexample = accepted:%v reason:%q diagnostics:%#v", accepted, reason, diagnostics)
+	}
+}
+
 func TestForwardRealtimeEventsDoesNotCancelStrictResponseBeforePlayback(t *testing.T) {
 	adapter, service, _, _ := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Backend reply.", conversation.StatusActive, conversation.OutcomeCollecting))
 	handler := NewHandler(adapter, service)
@@ -1090,6 +1146,41 @@ func TestForwardRealtimeEventsRejectsLowConfidenceTranscriptWithoutMutatingConve
 		t.Fatalf("low-confidence transcript reached conversation engine: %q", engine.lastMessage)
 	}
 	waitForTimingStages(t, store, []string{"transcript_rejected_low_confidence"})
+}
+
+func TestForwardRealtimeEventsDeduplicatesRejectedProviderEvents(t *testing.T) {
+	adapter, service, store, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Which service would you like?", conversation.StatusActive, conversation.OutcomeCollecting))
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go handler.forwardRealtimeEvents(ctx, cancel, closeStreamRecorder(make(chan string, 1)), realtime, func(any) error { return nil }, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{}, nil)
+
+	event := voice.RealtimeEvent{
+		Type: voice.RealtimeEventTranscriptDone, ItemID: "item_replayed", Transcript: "side conversation",
+		TranscriptLogProbs: []float64{-2.4, -1.8},
+	}
+	realtime.events <- event
+	if got := waitForSpeak(t, realtime); got != "Sorry, could you say that again?" {
+		t.Fatalf("first low-confidence reply = %q", got)
+	}
+	waitForTimingStages(t, store, []string{"transcript_rejected_low_confidence"})
+
+	realtime.events <- event
+	assertNoSpeak(t, realtime)
+	if engine.messageCalls != 0 || engine.voiceInputCalls != 0 {
+		t.Fatalf("duplicate rejected event mutated workflow: messages=%d handoffs=%d", engine.messageCalls, engine.voiceInputCalls)
+	}
+	rejections := 0
+	for _, recorded := range store.eventsSnapshot() {
+		if recorded.EventType == voice.EventRealtimeTiming && recorded.Payload["stage"] == "transcript_rejected_low_confidence" {
+			rejections++
+		}
+	}
+	if rejections != 1 {
+		t.Fatalf("duplicate rejected event count = %d, want 1", rejections)
+	}
 }
 
 func TestForwardRealtimeEventsUsesProgressiveNoiseRecoveryAndTypedHandoff(t *testing.T) {

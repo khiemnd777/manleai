@@ -10,7 +10,11 @@ func TestApplyWebhookPayloadExposesOnlySafeRealtimeDiagnostics(t *testing.T) {
 		"stage":                 "transcript_done",
 		"decision":              "accepted",
 		"reason":                "confidence_and_vad_admitted",
-		"profile":               "noisy_salon",
+		"profile":               "automatic",
+		"effective_profile":     "strong_noise_rejection",
+		"adaptive":              "true",
+		"runtime_action":        "stronger_speech_admission",
+		"audio_quality_signal":  "low_confidence",
 		"mean_logprob":          "-0.2000",
 		"vad_duration_ms":       "700",
 		"provider_request_id":   "speech_req_1",
@@ -45,8 +49,11 @@ func TestApplyWebhookPayloadExposesOnlySafeRealtimeDiagnostics(t *testing.T) {
 	}
 	item := WebhookEventLog{}
 	applyWebhookPayload(&item, payload)
-	if item.Stage != "transcript_done" || item.Diagnostics["decision"] != "accepted" || item.Diagnostics["profile"] != "noisy_salon" {
+	if item.Stage != "transcript_done" || item.Diagnostics["decision"] != "accepted" || item.Diagnostics["profile"] != "automatic" {
 		t.Fatalf("safe diagnostics = %#v", item)
+	}
+	if item.Diagnostics["effective_profile"] != "strong_noise_rejection" || item.Diagnostics["adaptive"] != "true" || item.Diagnostics["runtime_action"] != "stronger_speech_admission" || item.Diagnostics["audio_quality_signal"] != "low_confidence" {
+		t.Fatalf("adaptive diagnostics = %#v", item.Diagnostics)
 	}
 	if item.Diagnostics["provider_request_id"] != "speech_req_1" || item.Diagnostics["audio_chunk_count"] != "7" || item.Diagnostics["audio_bytes"] != "1120" {
 		t.Fatalf("streaming diagnostics = %#v", item.Diagnostics)

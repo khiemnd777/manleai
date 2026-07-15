@@ -565,15 +565,22 @@ detail rather than part of the event title.
   rejection. `buffered_realtime` is the legacy fallback that still binds provider
   response IDs and validates the complete output transcript before release. GA input
   requires transcription logprobs and applies
-  profile-aware mean, low-tail, and VAD-coherence admission; confidence-rejected
-  transcripts do not enter conversation state. Rejected transcripts use bounded
+  location-neutral policy-aware mean, low-tail, and VAD-coherence admission;
+  `automatic` starts each call at `standard` and switches that call to
+  `strong_noise_rejection` after structured degraded-audio evidence; confidence-rejected
+  transcripts do not enter conversation state. Provider transcript-completion
+  replays are deduplicated before admission/recovery by their item/transcript key.
+  Rejected transcripts use bounded
   in-stream recovery and do not trigger recording/gather fallback: short retry,
   scoped retry with the last approved question, noise coaching, then a typed
   `voice_input_unintelligible` owner callback handoff on the fourth consecutive
   rejection when the caller number is callable. Missing caller ID completes with
   call-again guidance without promising a callback. Accepted transcripts reset
-  the streak. Noisy/balanced input also uses near-field noise reduction. Accepted
-  and rejected transcript timing events retain PII-free decision/reason, profile,
+  the streak. Automatic, standard, and stronger-rejection input use near-field
+  noise reduction; minimal processing does not force it. Legacy `noisy_salon`,
+  `balanced`, and `quiet_room` config values normalize to canonical location-neutral
+  policies. Accepted and rejected transcript timing events retain PII-free
+  decision/reason, configured/effective policy, adaptive action/audio-quality signal,
   item ID, mean/min logprob, token count, VAD duration, rejection streak, and
   recovery action diagnostics when available. `backend_turn_done` accumulates
   route/config, session-load, answer-context, turn-router, semantic-interpreter,
@@ -714,7 +721,7 @@ detail rather than part of the event title.
 | name captured wrong, background phrase captured as name, pending customer name, salon/service/staff name collision, arbitrary utterance replaced name, bare phone name, service instead of name, spelling, phone/email, another technician, staff alternative | `service_customer_name.go`, `turn_reducer.go`, `turn_kernel.go` | typed dialog pending state, conversation golden tests, transcript audit metadata |
 | reschedule, cancel, move appointment, appointment target, ordinal option, day view, week view, month view, agenda, Tomorrow button, appointment warning | `service_intent.go`, `backend/modules/booking/service.go` | Appointments UI, POS Calendar UI, booking tests |
 | Twilio signature, webhook, TwiML, recording, media stream, stream fallback | `backend/modules/voice_twilio` | `backend/modules/voice`, phone demo memo |
-| OpenAI STT, TTS, realtime, model, voice, guarded reply, background noise, false transcript, transcript logprob, repeated progress reply, spoken fact mismatch, clipped first syllable, stuttered TTS startup, startup audio buffer, realtime transport fallback | `backend/modules/voice_openai`, `backend/modules/voice`, `backend/modules/voice_twilio/handler.go` | integration config, conversation runtime, realtime event timeline, voice tests |
+| OpenAI STT, TTS, realtime, model, voice, guarded reply, background noise, background-noise handling, automatic, strong noise rejection, false transcript, transcript logprob, repeated progress reply, spoken fact mismatch, clipped first syllable, stuttered TTS startup, startup audio buffer, realtime transport fallback | `backend/modules/voice_openai`, `backend/modules/voice`, `backend/modules/voice_twilio/handler.go` | integration config, conversation runtime, realtime event timeline, voice tests |
 | slow AI response, backend latency, backend_turn_done, turn_router_ms, turn_route, turn_expected_input, turn_interpreter_ms, turn_interpreter_outcome, turn_interpreter_failure_stage, turn_interpreter_http_status_class, turn_interpreter_request_id, availability_pos_ms, save_turn_ms, fast lane, semantic lane | `backend/modules/conversation/turn_kernel.go`, `backend/modules/voice/backend_turn_diagnostics.go`, `backend/modules/conversation/turn_timing.go`, `backend/modules/voice_twilio/handler.go` | conversation router/service/interpreter, provider availability/POS calls, Calls realtime event timeline, voice and conversation tests |
 | AI tone, speaking style, concise/warm/professional | `backend/modules/salon`, `conversation.RuntimeConfig`, `voice.ModelRequest` | Settings UI, config transfer |
 | integration config, provider secrets, dashboard settings, active provider config, env fallback | `backend/modules/integration_config`, `/dashboard/integrations`, authenticated integration/status APIs | runtime resolver code first; deployment docs only for an explicitly scoped legacy fallback task |

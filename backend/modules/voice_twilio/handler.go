@@ -538,7 +538,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	playoutWriteTotal := time.Duration(0)
 	playoutWriteMax := time.Duration(0)
 	firstSpeechChunkSeen := false
-	transcriptPolicy := normalizedRealtimeTranscriptPolicy(realtime.TranscriptPolicy())
+	transcriptAdmission := newRealtimeTranscriptAdmissionController(realtime.TranscriptPolicy())
 	inputRecovery := realtimeInputRecovery{}
 	inputRecoveryFinalized := false
 	lastApprovedPrompt := strings.TrimSpace(initialMessage)
@@ -1270,7 +1270,13 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					clearVADDiagnostics()
 					continue
 				}
-				accepted, rejectionReason, diagnostics := realtimeTranscriptAdmission(event, vadDurationByItem[itemID], transcriptPolicy)
+				key := itemID + "|" + strings.ToLower(transcript)
+				if _, exists := seenTranscripts[key]; exists {
+					clearVADDiagnostics()
+					continue
+				}
+				seenTranscripts[key] = struct{}{}
+				accepted, rejectionReason, diagnostics := transcriptAdmission.Admit(event, vadDurationByItem[itemID])
 				if !accepted {
 					recovery := inputRecovery.Reject(lastApprovedPrompt)
 					diagnostics["decision"] = "rejected"
@@ -1307,12 +1313,6 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					continue
 				}
 				inputRecovery.Reset()
-				key := itemID + "|" + strings.ToLower(transcript)
-				if _, exists := seenTranscripts[key]; exists {
-					clearVADDiagnostics()
-					continue
-				}
-				seenTranscripts[key] = struct{}{}
 				diagnostics["decision"] = "accepted"
 				diagnostics["reason"] = "confidence_and_vad_admitted"
 				_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "transcript_done", time.Time{}, diagnostics)
@@ -1653,6 +1653,9 @@ func normalizedRealtimeTranscriptPolicy(policy voice.RealtimeTranscriptPolicy) v
 	if strings.TrimSpace(policy.Profile) == "" {
 		policy.Profile = "unspecified"
 	}
+	if strings.TrimSpace(policy.EffectiveProfile) == "" {
+		policy.EffectiveProfile = policy.Profile
+	}
 	if policy.MinMeanLogProb == 0 {
 		policy.MinMeanLogProb = -1.0
 	}
@@ -1662,6 +1665,22 @@ func normalizedRealtimeTranscriptPolicy(policy voice.RealtimeTranscriptPolicy) v
 	if policy.MaxTokensPerSecond < 0 {
 		policy.MaxTokensPerSecond = 0
 	}
+	if policy.AdaptiveStrongNoise != nil {
+		adaptive := *policy.AdaptiveStrongNoise
+		if strings.TrimSpace(adaptive.Profile) == "" {
+			adaptive.Profile = policy.EffectiveProfile
+		}
+		if adaptive.MinMeanLogProb == 0 {
+			adaptive.MinMeanLogProb = policy.MinMeanLogProb
+		}
+		if adaptive.MinTokenLogProb == 0 {
+			adaptive.MinTokenLogProb = policy.MinTokenLogProb
+		}
+		if adaptive.MaxTokensPerSecond < 0 {
+			adaptive.MaxTokensPerSecond = 0
+		}
+		policy.AdaptiveStrongNoise = &adaptive
+	}
 	return policy
 }
 
@@ -1669,10 +1688,64 @@ func realtimeTranscriptPolicyDiagnostics(policy voice.RealtimeTranscriptPolicy) 
 	policy = normalizedRealtimeTranscriptPolicy(policy)
 	return map[string]string{
 		"profile":               policy.Profile,
+		"effective_profile":     policy.EffectiveProfile,
+		"adaptive":              strconv.FormatBool(policy.AdaptiveStrongNoise != nil),
 		"require_logprobs":      strconv.FormatBool(policy.RequireLogProbs),
 		"min_mean_logprob":      strconv.FormatFloat(policy.MinMeanLogProb, 'f', 4, 64),
 		"min_token_logprob":     strconv.FormatFloat(policy.MinTokenLogProb, 'f', 4, 64),
 		"max_tokens_per_second": strconv.FormatFloat(policy.MaxTokensPerSecond, 'f', 2, 64),
+	}
+}
+
+type realtimeTranscriptAdmissionController struct {
+	configured voice.RealtimeTranscriptPolicy
+	effective  voice.RealtimeTranscriptPolicy
+}
+
+func newRealtimeTranscriptAdmissionController(policy voice.RealtimeTranscriptPolicy) *realtimeTranscriptAdmissionController {
+	policy = normalizedRealtimeTranscriptPolicy(policy)
+	effective := policy
+	effective.Profile = policy.EffectiveProfile
+	effective.AdaptiveStrongNoise = nil
+	return &realtimeTranscriptAdmissionController{configured: policy, effective: effective}
+}
+
+func (c *realtimeTranscriptAdmissionController) Admit(event voice.RealtimeEvent, vadDurationMS int) (bool, string, map[string]string) {
+	accepted, reason, diagnostics := realtimeTranscriptAdmission(event, vadDurationMS, c.effective)
+	diagnostics["profile"] = c.configured.Profile
+	diagnostics["effective_profile"] = c.effective.Profile
+	if c.configured.AdaptiveStrongNoise == nil {
+		return accepted, reason, diagnostics
+	}
+
+	if c.effective.Profile == c.configured.AdaptiveStrongNoise.Profile {
+		diagnostics["runtime_action"] = "stronger_speech_admission"
+	} else {
+		diagnostics["runtime_action"] = "standard_speech_admission"
+	}
+	if accepted || !realtimeAdmissionIndicatesDegradedAudio(reason) {
+		return accepted, reason, diagnostics
+	}
+
+	diagnostics["audio_quality_signal"] = "low_confidence"
+	if c.effective.Profile != c.configured.AdaptiveStrongNoise.Profile {
+		strong := c.configured.AdaptiveStrongNoise
+		c.effective.Profile = strong.Profile
+		c.effective.EffectiveProfile = strong.Profile
+		c.effective.MinMeanLogProb = strong.MinMeanLogProb
+		c.effective.MinTokenLogProb = strong.MinTokenLogProb
+		c.effective.MaxTokensPerSecond = strong.MaxTokensPerSecond
+		diagnostics["runtime_action"] = "stronger_speech_admission_next_turn"
+	}
+	return accepted, reason, diagnostics
+}
+
+func realtimeAdmissionIndicatesDegradedAudio(reason string) bool {
+	switch strings.TrimSpace(reason) {
+	case "mean_logprob_below_profile_threshold", "token_logprob_below_profile_threshold", "transcript_density_incoherent_with_vad":
+		return true
+	default:
+		return false
 	}
 }
 

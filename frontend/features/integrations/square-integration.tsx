@@ -189,7 +189,7 @@ const defaultOpenAIConfigForm: OpenAIConfigForm = {
   realtime_enabled: false,
   realtime_model: "gpt-realtime-2",
   realtime_voice: "alloy",
-  realtime_noise_profile: "noisy_salon",
+  realtime_noise_profile: "automatic",
   realtime_instructions: ""
 };
 
@@ -1616,19 +1616,22 @@ function ProviderConfigurationPanel({
                   disabled={busy !== "" || !openAIForm.enabled || !openAIForm.realtime_enabled}
                 />
               </Field>
-              <Field label="Noise profile">
+              <Field label="Background-noise handling">
                 <select
                   className="h-10 w-full rounded-md border border-line bg-panel px-3 text-sm text-ink"
                   value={openAIForm.realtime_noise_profile}
                   onChange={(event) => setOpenAIForm((current) => ({ ...current, realtime_noise_profile: event.target.value }))}
                   disabled={busy !== "" || !openAIForm.enabled || !openAIForm.realtime_enabled}
                 >
-                  <option value="noisy_salon">Noisy salon (recommended)</option>
-                  <option value="balanced">Balanced</option>
-                  <option value="quiet_room">Quiet room</option>
+                  <option value="automatic">Automatic (recommended)</option>
+                  <optgroup label="Advanced">
+                    <option value="standard">Standard</option>
+                    <option value="strong_noise_rejection">Stronger noise rejection</option>
+                    <option value="minimal_processing">Minimal processing</option>
+                  </optgroup>
                 </select>
                 <p className="mt-1 text-xs leading-5 text-muted">
-                  Reduces accidental interruption from salon background noise. Caller interruption still works after AI audio starts.
+                  {backgroundNoiseHandlingDescription(openAIForm.realtime_noise_profile)}
                 </p>
               </Field>
               <div className="md:col-span-2">
@@ -1806,6 +1809,19 @@ function openAIConfigToForm(config?: OpenAIIntegrationConfig): OpenAIConfigForm 
     realtime_noise_profile: config.realtime_noise_profile || defaultOpenAIConfigForm.realtime_noise_profile,
     realtime_instructions: config.realtime_instructions || ""
   };
+}
+
+function backgroundNoiseHandlingDescription(value: string) {
+  switch (value) {
+    case "strong_noise_rejection":
+      return "Requires higher-confidence speech to reduce accidental turns in heavy background noise.";
+    case "minimal_processing":
+      return "Uses more permissive speech admission and does not force input noise reduction.";
+    case "standard":
+      return "Uses standard speech admission without changing policy during the call.";
+    default:
+      return "Adjusts speech admission for each call from incoming audio confidence. The caller may be anywhere.";
+  }
 }
 
 function emptyIntegrationConfigs(): IntegrationConfigs {

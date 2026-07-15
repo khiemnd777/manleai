@@ -73,7 +73,11 @@ type OpenAIVoiceConfig struct {
 const (
 	DefaultOpenAIRealtimeModel         = "gpt-realtime-2"
 	LegacyOpenAIRealtimePreviewModel   = "gpt-4o-realtime-preview"
-	DefaultOpenAIRealtimeNoiseProfile  = "noisy_salon"
+	OpenAIRealtimeNoiseAutomatic       = "automatic"
+	OpenAIRealtimeNoiseMinimal         = "minimal_processing"
+	OpenAIRealtimeNoiseStandard        = "standard"
+	OpenAIRealtimeNoiseStrongRejection = "strong_noise_rejection"
+	DefaultOpenAIRealtimeNoiseProfile  = OpenAIRealtimeNoiseAutomatic
 	OpenAISpeechOutputStreamingTTS     = "streaming_tts"
 	OpenAISpeechOutputBufferedRealtime = "buffered_realtime"
 )
@@ -97,8 +101,14 @@ func NormalizeOpenAIRealtimeModel(model string) string {
 
 func NormalizeOpenAIRealtimeNoiseProfile(profile string) string {
 	switch strings.ToLower(strings.TrimSpace(profile)) {
-	case "quiet_room", "balanced", "noisy_salon":
-		return strings.ToLower(strings.TrimSpace(profile))
+	case OpenAIRealtimeNoiseAutomatic:
+		return OpenAIRealtimeNoiseAutomatic
+	case OpenAIRealtimeNoiseMinimal, "quiet_room":
+		return OpenAIRealtimeNoiseMinimal
+	case OpenAIRealtimeNoiseStandard, "balanced":
+		return OpenAIRealtimeNoiseStandard
+	case OpenAIRealtimeNoiseStrongRejection, "high_background_noise", "noisy_salon":
+		return OpenAIRealtimeNoiseStrongRejection
 	default:
 		return DefaultOpenAIRealtimeNoiseProfile
 	}

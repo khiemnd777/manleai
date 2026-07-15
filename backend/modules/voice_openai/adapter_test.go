@@ -671,7 +671,7 @@ func TestRealtimeSessionConfigCapsLegacyTranscriptionPrompt(t *testing.T) {
 	}
 }
 
-func TestRealtimeSessionConfigDefaultsToNoisySalonVAD(t *testing.T) {
+func TestRealtimeSessionConfigDefaultsToAutomaticBackgroundNoiseHandling(t *testing.T) {
 	cfg := config.OpenAIVoiceConfig{
 		RealtimeModel:      "gpt-realtime-2",
 		TranscriptionModel: "gpt-4o-mini-transcribe",
@@ -682,11 +682,11 @@ func TestRealtimeSessionConfigDefaultsToNoisySalonVAD(t *testing.T) {
 	if turnDetection["type"] != "server_vad" {
 		t.Fatalf("turn detection type = %#v, want server_vad", turnDetection["type"])
 	}
-	if turnDetection["threshold"] != 0.78 {
-		t.Fatalf("threshold = %#v, want noisy salon threshold", turnDetection["threshold"])
+	if turnDetection["threshold"] != 0.65 {
+		t.Fatalf("threshold = %#v, want automatic baseline threshold", turnDetection["threshold"])
 	}
-	if turnDetection["silence_duration_ms"] != 850 {
-		t.Fatalf("silence duration = %#v, want noisy salon duration", turnDetection["silence_duration_ms"])
+	if turnDetection["silence_duration_ms"] != 650 {
+		t.Fatalf("silence duration = %#v, want automatic baseline duration", turnDetection["silence_duration_ms"])
 	}
 	if turnDetection["create_response"] != false || turnDetection["interrupt_response"] != false {
 		t.Fatalf("realtime bridge should disable provider autonomous response/interrupt: %#v", turnDetection)
@@ -700,11 +700,11 @@ func TestRealtimeSessionConfigDefaultsToNoisySalonVAD(t *testing.T) {
 	input := audio["input"].(map[string]any)
 	noiseReduction, ok := input["noise_reduction"].(map[string]any)
 	if !ok || noiseReduction["type"] != "near_field" {
-		t.Fatalf("noisy salon input noise reduction = %#v", input["noise_reduction"])
+		t.Fatalf("automatic input noise reduction = %#v", input["noise_reduction"])
 	}
 }
 
-func TestRealtimeSessionConfigUsesQuietRoomVADProfile(t *testing.T) {
+func TestRealtimeSessionConfigPreservesLegacyQuietRoomAsMinimalProcessing(t *testing.T) {
 	cfg := config.OpenAIVoiceConfig{
 		RealtimeModel:        "gpt-realtime-2",
 		TranscriptionModel:   "gpt-4o-mini-transcribe",
@@ -714,16 +714,16 @@ func TestRealtimeSessionConfigUsesQuietRoomVADProfile(t *testing.T) {
 	turnDetection := gaTurnDetection(t, realtimeSessionConfig(cfg, voice.RealtimeSessionOptions{}))
 
 	if turnDetection["threshold"] != 0.5 {
-		t.Fatalf("threshold = %#v, want quiet room threshold", turnDetection["threshold"])
+		t.Fatalf("threshold = %#v, want minimal processing threshold", turnDetection["threshold"])
 	}
 	if turnDetection["silence_duration_ms"] != 450 {
-		t.Fatalf("silence duration = %#v, want quiet room duration", turnDetection["silence_duration_ms"])
+		t.Fatalf("silence duration = %#v, want minimal processing duration", turnDetection["silence_duration_ms"])
 	}
 	session := realtimeSessionConfig(cfg, voice.RealtimeSessionOptions{})
 	audio := session["audio"].(map[string]any)
 	input := audio["input"].(map[string]any)
 	if _, ok := input["noise_reduction"]; ok {
-		t.Fatalf("quiet room should not force input noise reduction: %#v", input)
+		t.Fatalf("minimal processing should not force input noise reduction: %#v", input)
 	}
 }
 
@@ -767,9 +767,16 @@ func TestRealtimeResponseCreatePayloadUsesProtocolShape(t *testing.T) {
 }
 
 func TestRealtimeTranscriptPolicyUsesNoiseProfileAndRequiresGAConfidence(t *testing.T) {
-	ga := realtimeTranscriptPolicyForConfig(config.OpenAIVoiceConfig{RealtimeModel: "gpt-realtime-2", RealtimeNoiseProfile: "noisy"})
-	if !ga.RequireLogProbs || ga.Profile != "noisy_salon" || ga.MinMeanLogProb != -0.8 || ga.MinTokenLogProb != -1.6 || ga.MaxTokensPerSecond != 8 {
-		t.Fatalf("noisy GA transcript policy = %#v", ga)
+	ga := realtimeTranscriptPolicyForConfig(config.OpenAIVoiceConfig{RealtimeModel: "gpt-realtime-2"})
+	if !ga.RequireLogProbs || ga.Profile != config.OpenAIRealtimeNoiseAutomatic || ga.EffectiveProfile != config.OpenAIRealtimeNoiseStandard || ga.MinMeanLogProb != -1 || ga.MinTokenLogProb != -2 || ga.MaxTokensPerSecond != 10 {
+		t.Fatalf("automatic GA transcript policy = %#v", ga)
+	}
+	if ga.AdaptiveStrongNoise == nil || ga.AdaptiveStrongNoise.Profile != config.OpenAIRealtimeNoiseStrongRejection || ga.AdaptiveStrongNoise.MinMeanLogProb != -0.8 || ga.AdaptiveStrongNoise.MinTokenLogProb != -1.6 || ga.AdaptiveStrongNoise.MaxTokensPerSecond != 8 {
+		t.Fatalf("automatic strong-noise policy = %#v", ga.AdaptiveStrongNoise)
+	}
+	legacyStrong := realtimeTranscriptPolicyForConfig(config.OpenAIVoiceConfig{RealtimeModel: "gpt-realtime-2", RealtimeNoiseProfile: "noisy_salon"})
+	if legacyStrong.Profile != config.OpenAIRealtimeNoiseStrongRejection || legacyStrong.AdaptiveStrongNoise != nil || legacyStrong.MinMeanLogProb != -0.8 {
+		t.Fatalf("legacy noisy_salon policy = %#v", legacyStrong)
 	}
 	legacy := realtimeTranscriptPolicyForConfig(config.OpenAIVoiceConfig{RealtimeModel: "gpt-4o-realtime-preview", RealtimeNoiseProfile: "quiet_room"})
 	if legacy.RequireLogProbs {

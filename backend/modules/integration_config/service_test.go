@@ -185,6 +185,22 @@ func TestOpenAIResponseDefaultsRealtimeNoiseProfileAndStreamingSpeechOutput(t *t
 	}
 }
 
+func TestOpenAIResponseCanonicalizesLegacyRealtimeNoiseProfile(t *testing.T) {
+	service := NewService(nil, nil, config.Config{
+		Voice: config.VoiceConfig{AI: config.VoiceAIConfig{OpenAI: config.OpenAIVoiceConfig{}}},
+	})
+
+	response := service.openAIResponse(&StoredConfig{
+		SalonID:  "salon_1",
+		Provider: ProviderOpenAI,
+		Settings: map[string]string{"realtime_noise_profile": "noisy_salon"},
+	})
+
+	if response.RealtimeNoiseProfile != config.OpenAIRealtimeNoiseStrongRejection {
+		t.Fatalf("legacy noise profile = %q, want %q", response.RealtimeNoiseProfile, config.OpenAIRealtimeNoiseStrongRejection)
+	}
+}
+
 type fakeIntegrationConfigStore struct {
 	existing    *StoredConfig
 	upserted    StoredConfig

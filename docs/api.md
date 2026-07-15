@@ -407,7 +407,7 @@ schema v6 and later preserve the explicit value subject to profile readiness.
       "realtime_enabled": true,
       "realtime_model": "gpt-realtime-2",
       "realtime_voice": "alloy",
-      "realtime_noise_profile": "noisy_salon",
+      "realtime_noise_profile": "automatic",
       "realtime_instructions": "",
       "api_key_configured": true,
       "api_key_source": "database"
@@ -690,7 +690,7 @@ configured and whether it came from dashboard storage or environment fallback.
     "realtime_enabled": true,
     "realtime_model": "gpt-realtime-2",
     "realtime_voice": "alloy",
-    "realtime_noise_profile": "noisy_salon",
+    "realtime_noise_profile": "automatic",
     "realtime_instructions": "",
     "api_key_configured": true,
     "api_key_source": "database"
@@ -753,10 +753,20 @@ exports a webhook signature key; that key must be re-entered at the target.
   "realtime_enabled": true,
   "realtime_model": "gpt-realtime-2",
   "realtime_voice": "alloy",
-  "realtime_noise_profile": "noisy_salon",
+  "realtime_noise_profile": "automatic",
   "realtime_instructions": ""
 }
 ```
+
+`realtime_noise_profile` is the compatibility field name for the location-neutral
+background-noise handling policy. Canonical values are `automatic` (default),
+`standard`, `strong_noise_rejection`, and `minimal_processing`. Automatic mode
+starts each call with standard transcript admission and switches only that call
+to stronger admission after structured confidence/VAD evidence of degraded
+audio. Missing provider confidence metadata fails closed but does not count as
+noise evidence. Legacy imports are canonicalized without losing their prior
+behavior: `noisy_salon` becomes `strong_noise_rejection`, `balanced` becomes
+`standard`, and `quiet_room` becomes `minimal_processing`.
 
 `GET /api/salons/:id/services`
 
@@ -2006,7 +2016,7 @@ available at `offset + limit`. The Calls dashboard follows those pages,
 deduplicates immutable event IDs, and sorts the complete selected-call timeline
 chronologically. The response intentionally exposes only debug-safe fields
 extracted from provider payloads, including transcript admission decisions,
-noise profile, confidence/VAD measurements, response correlation IDs, and
+configured/effective audio handling, confidence/VAD measurements, response correlation IDs, and
 salted canonical-output hashes. Raw transcript, audio, and provider payloads
 are not returned.
 
@@ -2055,7 +2065,7 @@ RecordingUrl
 
 `GET /api/voice/twilio/stream`
 
-Public Twilio Media Streams WebSocket endpoint for realtime audio mode. The endpoint is not configured directly in Twilio Console; the incoming webhook returns `<Connect><Stream>` with signed custom parameters for the existing call session. The stream forwards Twilio g711 audio frames to the configured OpenAI Realtime adapter for VAD and transcription, then routes accepted completed transcripts through the same backend conversation engine and booking service. GA sessions request `item.input_audio_transcription.logprobs`; noisy-salon and balanced profiles also enable near-field input noise reduction. Admission is profile-aware and fail-closed: missing/invalid confidence metadata, low mean confidence, low-tail token confidence, or transcript density inconsistent with VAD duration is audited as `transcript_rejected_low_confidence` and leaves the conversation draft unchanged. Consecutive rejected transcripts use bounded in-stream recovery: a short retry, a one-answer retry that repeats the last backend-approved question, then background-noise coaching. A fourth consecutive rejection calls a typed conversation action instead of fabricating a customer message; it creates one `voice_input_unintelligible` owner callback handoff when the session has a callable caller number, or completes the call with a quieter-place retry instruction when it does not. The handoff uses a stable per-session event key so repeated or concurrent execution does not create duplicate owner work, and it must persist before callback wording is spoken. A successfully admitted transcript resets the rejection streak. Confidence rejection never switches the call to recording/gather; that fallback remains reserved for terminal Realtime/provider failures. Accepted and rejected transcript timing events record PII-free `item_id`, decision/reason, profile, mean/min logprob, token count, VAD duration, `rejection_streak`, and `recovery_action` when available; timing payloads do not store transcript or audio bodies. Transcription steering uses concise salon, catalog, pending-candidate, and alias keyword lists instead of example booking sentences.
+Public Twilio Media Streams WebSocket endpoint for realtime audio mode. The endpoint is not configured directly in Twilio Console; the incoming webhook returns `<Connect><Stream>` with signed custom parameters for the existing call session. The stream forwards Twilio g711 audio frames to the configured OpenAI Realtime adapter for VAD and transcription, then routes accepted completed transcripts through the same backend conversation engine and booking service. GA sessions request `item.input_audio_transcription.logprobs`; `automatic`, `standard`, and `strong_noise_rejection` enable near-field input noise reduction, while `minimal_processing` does not force input noise reduction. Admission is policy-aware and fail-closed: missing/invalid confidence metadata, low mean confidence, low-tail token confidence, or transcript density inconsistent with VAD duration is audited as `transcript_rejected_low_confidence` and leaves the conversation draft unchanged. Automatic mode begins with standard admission and, after structured low-confidence or VAD-coherence evidence, switches the current call to stronger admission for later turns. It does not inspect transcript wording or infer the caller's location; missing provider metadata is not treated as noise evidence. Replayed transcript-completion events with the same provider item/transcript key are ignored before admission, recovery, or conversation mutation. Consecutive rejected transcripts use bounded in-stream recovery: a short retry, a one-answer retry that repeats the last backend-approved question, then background-noise coaching. A fourth consecutive rejection calls a typed conversation action instead of fabricating a customer message; it creates one `voice_input_unintelligible` owner callback handoff when the session has a callable caller number, or completes the call with a quieter-place retry instruction when it does not. The handoff uses a stable per-session event key so repeated or concurrent execution does not create duplicate owner work, and it must persist before callback wording is spoken. A successfully admitted transcript resets the rejection streak. Confidence rejection never switches the call to recording/gather; that fallback remains reserved for terminal Realtime/provider failures. Accepted and rejected transcript timing events record PII-free `item_id`, decision/reason, configured `profile`, `effective_profile`, `adaptive`, `runtime_action`, `audio_quality_signal`, mean/min logprob, token count, VAD duration, `rejection_streak`, and `recovery_action` when available; timing payloads do not store transcript or audio bodies. Transcription steering uses concise salon, catalog, pending-candidate, and alias keyword lists instead of example booking sentences.
 
 With dashboard setting `speech_output_mode=streaming_tts`, backend-approved text is sent to the dedicated Speech API with raw PCM output. OpenAI PCM is signed little-endian mono audio at 24 kHz; the adapter incrementally applies a stateful anti-aliasing 3:1 FIR resampler and encodes raw PCMU 8 kHz frames. The bridge sends one bounded 200 ms startup block, then releases one 160-byte frame every 20 ms from a bounded queue. Queue saturation applies producer backpressure, so provider HTTP chunk speed cannot create a WebSocket burst or reorder/drop audio. A reply shorter than the startup target flushes when its Speech stream completes. Speech provider completion is recorded at `tts_stream_done`, while the reply remains active until the local playout queue drains and records `tts_playout_done`; only then may the FIFO start the next reply or emit a terminal Twilio `mark`. Caller barge-in before or after startup clears local queued audio and Twilio playback, cancels the active speech request, and rejects late chunks by generation. Provider failure clears any partial playback and enters terminal fallback.
 

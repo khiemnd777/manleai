@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/manleai/ai-receptionist/internal/config"
 	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/salon"
@@ -307,6 +308,32 @@ func TestPreviewImportPlansRealtimeAndStreamIntegrationFields(t *testing.T) {
 	}
 	if sectionSummary(result.Summary, SectionIntegrations).Updated < 6 {
 		t.Fatalf("integration summary = %#v, want stream and realtime field changes", result.Summary)
+	}
+}
+
+func TestNormalizeImportBundleMigratesLocationSpecificRealtimeNoiseProfiles(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
+	tests := []struct {
+		legacy string
+		want   string
+	}{
+		{legacy: "noisy_salon", want: config.OpenAIRealtimeNoiseStrongRejection},
+		{legacy: "balanced", want: config.OpenAIRealtimeNoiseStandard},
+		{legacy: "quiet_room", want: config.OpenAIRealtimeNoiseMinimal},
+	}
+
+	for _, test := range tests {
+		t.Run(test.legacy, func(t *testing.T) {
+			bundle := testImportBundle(updatedAt)
+			bundle.Integrations.OpenAI.RealtimeNoiseProfile = test.legacy
+			normalized, err := normalizeImportBundle(bundle)
+			if err != nil {
+				t.Fatalf("normalizeImportBundle returned error: %v", err)
+			}
+			if normalized.Integrations.OpenAI.RealtimeNoiseProfile != test.want {
+				t.Fatalf("noise profile = %q, want %q", normalized.Integrations.OpenAI.RealtimeNoiseProfile, test.want)
+			}
+		})
 	}
 }
 

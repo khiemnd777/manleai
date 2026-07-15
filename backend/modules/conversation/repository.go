@@ -1502,7 +1502,7 @@ func applyWebhookPayload(item *WebhookEventLog, raw []byte) {
 
 func safeRealtimeDiagnostics(payload map[string]any) map[string]string {
 	allowed := []string{
-		"decision", "reason", "profile", "require_logprobs", "duration_ms", "item_id",
+		"decision", "reason", "profile", "effective_profile", "adaptive", "runtime_action", "audio_quality_signal", "require_logprobs", "duration_ms", "item_id",
 		"mean_logprob", "min_logprob", "min_mean_logprob", "min_token_logprob", "token_count",
 		"vad_duration_ms", "tokens_per_second", "max_tokens_per_second",
 		"request_id", "response_id", "expected_hash", "actual_hash", "expected_token_count", "actual_token_count",

@@ -335,8 +335,21 @@ type RealtimeSession interface {
 }
 
 type RealtimeTranscriptPolicy struct {
+	Profile             string
+	EffectiveProfile    string
+	RequireLogProbs     bool
+	MinMeanLogProb      float64
+	MinTokenLogProb     float64
+	MaxTokensPerSecond  float64
+	AdaptiveStrongNoise *RealtimeTranscriptThresholds
+}
+
+// RealtimeTranscriptThresholds carries provider-owned confidence bounds that
+// a telephony bridge may activate for the remainder of one call after
+// structured audio-quality evidence. It contains no transcript text or
+// location assumptions.
+type RealtimeTranscriptThresholds struct {
 	Profile            string
-	RequireLogProbs    bool
 	MinMeanLogProb     float64
 	MinTokenLogProb    float64
 	MaxTokensPerSecond float64

@@ -313,7 +313,7 @@ The local app can run Twilio speech `<Gather>` without OpenAI STT/TTS. For a ful
   - Enable realtime
   - `Realtime model`: `gpt-realtime-2`
   - `Realtime voice`: `alloy`
-  - `Noise profile`: `Noisy salon (recommended)` unless the call test is in a quiet room
+  - `Background-noise handling`: `Automatic (recommended)`; this adapts each call from incoming audio evidence and does not assume where the caller is
   - `Realtime instructions`: optional non-secret operating notes for the audio bridge
 
 Readiness meaning:
@@ -336,7 +336,7 @@ backend-approved replies and should not rely on independent realtime
 instructions for tone changes.
 Realtime reply order is backend-owned: each queued reply has an application
 request ID and ignores late audio from a cancelled or prior generation. GA input requires confidence metadata and applies
-the selected noise profile to mean, low-tail, and VAD-coherence admission; a
+the selected background-noise policy to mean, low-tail, and VAD-coherence admission; automatic mode can strengthen admission for the current call after structured degraded-audio evidence; a
 rejected transcript is reprompted without changing conversation state. Barge-in
 before first playback cancels the active streaming reply immediately; after
 playback begins it must pass the playback guard before Twilio clear/cancel. In
