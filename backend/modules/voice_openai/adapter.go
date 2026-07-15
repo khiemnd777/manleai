@@ -92,7 +92,7 @@ func (a *Adapter) Transcribe(ctx context.Context, salonID string, req voice.Spee
 	a.authorize(httpReq, cfg)
 
 	var res transcriptionResponse
-	if err := a.do(httpReq, &res); err != nil {
+	if err := a.do(httpReq, &res, "transcription_response"); err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(res.Text), nil
@@ -156,7 +156,7 @@ func (a *Adapter) GenerateReply(ctx context.Context, req voice.ModelRequest) (vo
 	a.authorize(httpReq, cfg)
 
 	var res responseResponse
-	if err := a.do(httpReq, &res); err != nil {
+	if err := a.do(httpReq, &res, "reply_response"); err != nil {
 		return voice.ModelReply{}, err
 	}
 	text := strings.TrimSpace(res.OutputText)
@@ -229,7 +229,7 @@ func (a *Adapter) InterpretTurn(ctx context.Context, req voice.TurnModelRequest)
 	a.authorize(httpReq, cfg)
 
 	var res responseResponse
-	if err := a.do(httpReq, &res); err != nil {
+	if err := a.do(httpReq, &res, "turn_interpretation_response"); err != nil {
 		return voice.TurnModelReply{}, err
 	}
 	text := strings.TrimSpace(res.OutputText)
@@ -293,16 +293,35 @@ func (a *Adapter) Synthesize(ctx context.Context, salonID string, text string, r
 	return io.ReadAll(io.LimitReader(res.Body, 10*1024*1024))
 }
 
-func (a *Adapter) do(req *http.Request, output any) error {
+func (a *Adapter) do(req *http.Request, output any, stage string) error {
 	res, err := a.httpClient.Do(req)
 	if err != nil {
-		return err
+		return &voice.ProviderRequestError{Provider: voice.ProviderOpenAI, Stage: stage, Err: err}
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("openai request failed with status %d", res.StatusCode)
+		return &voice.ProviderRequestError{
+			Provider: voice.ProviderOpenAI, Stage: stage, StatusCode: res.StatusCode,
+			RequestID: firstNonEmptyHeader(res.Header, "x-request-id", "request-id"),
+			Err:       fmt.Errorf("openai request failed with status %d", res.StatusCode),
+		}
 	}
-	return json.NewDecoder(res.Body).Decode(output)
+	if err := json.NewDecoder(res.Body).Decode(output); err != nil {
+		return &voice.ProviderRequestError{
+			Provider: voice.ProviderOpenAI, Stage: stage + "_decode",
+			RequestID: firstNonEmptyHeader(res.Header, "x-request-id", "request-id"), Err: err,
+		}
+	}
+	return nil
+}
+
+func firstNonEmptyHeader(header http.Header, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(header.Get(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (a *Adapter) authorize(req *http.Request, cfg config.OpenAIVoiceConfig) {

@@ -60,6 +60,26 @@ func TestGuardedTurnInterpreterMapsStructuredResultWithoutPIIExpansion(t *testin
 	}
 }
 
+func TestGuardedTurnInterpreterPreservesSafeProviderDiagnostics(t *testing.T) {
+	provider := &fakeActModelProvider{configured: true, err: &ProviderRequestError{
+		Provider: ProviderOpenAI, Stage: "turn_interpretation_response", StatusCode: 429,
+		RequestID: "req_rate_limit_1", Err: errors.New("provider rate limited"),
+	}}
+	interpreter := NewGuardedTurnInterpreter(provider)
+
+	_, err := interpreter.InterpretTurn(context.Background(), conversation.TurnInterpretationRequest{SalonID: "salon_1"})
+	if err == nil {
+		t.Fatal("InterpretTurn error = nil")
+	}
+	var typed *conversation.TurnInterpreterError
+	if !errors.As(err, &typed) {
+		t.Fatalf("error type = %T", err)
+	}
+	if typed.Outcome != conversation.TurnInterpreterOutcomeProviderError || typed.Diagnostics["http_status_class"] != "4xx" || typed.Diagnostics["request_id"] != "req_rate_limit_1" {
+		t.Fatalf("typed error = %#v", typed)
+	}
+}
+
 func TestGuardedTurnInterpreterMapsStructuredAvailabilityTimePreference(t *testing.T) {
 	provider := &fakeActModelProvider{configured: true, reply: TurnModelReply{
 		Goal: "book_appointment", Confidence: 0.93,

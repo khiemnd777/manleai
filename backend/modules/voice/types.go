@@ -3,6 +3,9 @@ package voice
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/manleai/ai-receptionist/internal/config"
@@ -48,6 +51,75 @@ var (
 	ErrTurnModelEmptyOutput   = errors.New("turn model returned no structured output")
 	ErrTurnModelInvalidOutput = errors.New("turn model returned invalid structured output")
 )
+
+// ProviderRequestError carries only bounded, non-secret correlation data from
+// a provider request. It deliberately excludes response bodies and request
+// payloads so callers can expose the diagnostics in operational timelines.
+type ProviderRequestError struct {
+	Provider   string
+	Stage      string
+	StatusCode int
+	RequestID  string
+	Err        error
+}
+
+func (e *ProviderRequestError) Error() string {
+	if e == nil {
+		return "provider request failed"
+	}
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	if e.StatusCode > 0 {
+		return fmt.Sprintf("%s request failed with status %d", strings.TrimSpace(e.Provider), e.StatusCode)
+	}
+	return strings.TrimSpace(e.Provider) + " request failed"
+}
+
+func (e *ProviderRequestError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func (e *ProviderRequestError) SafeDiagnostics() map[string]string {
+	if e == nil {
+		return nil
+	}
+	diagnostics := map[string]string{}
+	if value := safeProviderDiagnosticValue(e.Provider); value != "" {
+		diagnostics["provider"] = value
+	}
+	if value := safeProviderDiagnosticValue(e.Stage); value != "" {
+		diagnostics["failure_stage"] = value
+	}
+	if e.StatusCode >= 100 && e.StatusCode <= 599 {
+		diagnostics["http_status"] = strconv.Itoa(e.StatusCode)
+		diagnostics["http_status_class"] = strconv.Itoa(e.StatusCode/100) + "xx"
+	}
+	if value := safeProviderDiagnosticValue(e.RequestID); value != "" {
+		diagnostics["request_id"] = value
+	}
+	if len(diagnostics) == 0 {
+		return nil
+	}
+	return diagnostics
+}
+
+func safeProviderDiagnosticValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 128 {
+		return ""
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("._:-", r) {
+			continue
+		}
+		return ""
+	}
+	return value
+}
 
 type ConversationEngine interface {
 	StartPhoneCall(ctx context.Context, salonID string, ownerUserID string, req conversation.StartPhoneCallRequest) (*conversation.Session, error)

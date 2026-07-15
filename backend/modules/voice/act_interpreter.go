@@ -48,7 +48,7 @@ func (g *GuardedTurnInterpreter) InterpretTurn(ctx context.Context, req conversa
 		case errors.Is(err, ErrTurnModelInvalidOutput):
 			outcome = conversation.TurnInterpreterOutcomeSchemaInvalid
 		}
-		return conversation.TurnUnderstanding{}, conversation.NewTurnInterpreterError(outcome, err)
+		return conversation.TurnUnderstanding{}, conversation.NewTurnInterpreterErrorWithDiagnostics(outcome, err, safeTurnProviderDiagnostics(err))
 	}
 	turn := conversation.TurnUnderstanding{
 		Goal: reply.Goal, Confidence: reply.Confidence, Reason: strings.TrimSpace(reply.Reason), Source: "structured_ai", ModelInvoked: true,
@@ -96,4 +96,15 @@ func (g *GuardedTurnInterpreter) InterpretTurn(ctx context.Context, req conversa
 		})
 	}
 	return turn, nil
+}
+
+func safeTurnProviderDiagnostics(err error) map[string]string {
+	type safeDiagnosticError interface {
+		SafeDiagnostics() map[string]string
+	}
+	var diagnosticErr safeDiagnosticError
+	if errors.As(err, &diagnosticErr) {
+		return diagnosticErr.SafeDiagnostics()
+	}
+	return nil
 }

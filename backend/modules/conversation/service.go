@@ -443,6 +443,10 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 		return s.store.SaveTurn(ctx, turn)
 	}
 
+	if handled, updated, err := s.handleGuidanceRecovery(ctx, ownerUserID, *session, message, eventKey, turnPlan, turnUnderstanding, turnPlan.ServiceUnderstanding, services, staff, cfg); handled {
+		return updated, err
+	}
+
 	next := cloneSessionForTurn(*session)
 	repairInvalidServiceEditPending(&next)
 	selectedOfferedSlot := false
@@ -648,6 +652,9 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 		}
 	}
 	serviceChanged = serviceChanged || partyPlanApplied
+	if serviceChanged {
+		clearGuidanceRecoveryState(&next, DialogPhaseDrafting)
+	}
 	if pendingNameCandidate != "" {
 		next.CustomerName = ""
 	}

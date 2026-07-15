@@ -178,6 +178,37 @@ func TestInterpretTurnUsesStrictCatalogBoundMultiActSchema(t *testing.T) {
 	}
 }
 
+func TestInterpretTurnReturnsPIIFreeProviderDiagnosticsWithoutResponseBody(t *testing.T) {
+	adapter := NewAdapter(config.OpenAIVoiceConfig{
+		APIKey: "test-key", BaseURL: "https://openai.test/v1", ReplyModel: "gpt-test",
+	})
+	adapter.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Header:     http.Header{"X-Request-Id": []string{"req_provider_safe_1"}},
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"customer transcript must stay private"}}`)),
+		}, nil
+	})}
+
+	_, err := adapter.InterpretTurn(context.Background(), voice.TurnModelRequest{
+		SalonID: "salon_1", SessionID: "session_1", CustomerMessage: "private caller wording",
+	})
+	if err == nil {
+		t.Fatal("InterpretTurn error = nil")
+	}
+	var providerErr *voice.ProviderRequestError
+	if !errors.As(err, &providerErr) {
+		t.Fatalf("error type = %T", err)
+	}
+	diagnostics := providerErr.SafeDiagnostics()
+	if diagnostics["provider"] != voice.ProviderOpenAI || diagnostics["failure_stage"] != "turn_interpretation_response" || diagnostics["http_status_class"] != "5xx" || diagnostics["request_id"] != "req_provider_safe_1" {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+	if strings.Contains(err.Error(), "customer transcript") || strings.Contains(err.Error(), "private caller wording") {
+		t.Fatalf("error leaked provider body or request text: %q", err.Error())
+	}
+}
+
 func TestInterpretTurnClassifiesEmptyAndInvalidStructuredOutput(t *testing.T) {
 	tests := []struct {
 		name string

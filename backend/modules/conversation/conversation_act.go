@@ -89,15 +89,18 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 	fallback.ModelInvoked = true
 	if err != nil {
 		fallback.InterpreterOutcome = turnInterpreterErrorOutcome(err)
+		fallback.InterpreterDiagnostics = turnInterpreterErrorDiagnostics(err)
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(interpretCtx.Err(), context.DeadlineExceeded) {
 			fallback.InterpreterOutcome = TurnInterpreterOutcomeTimeout
 		}
 		fallback.Reason = "semantic_interpreter_" + fallback.InterpreterOutcome
-		recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathProviderFallback, map[string]string{
+		attributes := map[string]string{
 			"turn_interpreter_outcome": fallback.InterpreterOutcome,
 			"turn_model_service_count": strconv.Itoa(len(semanticServices)),
 			"turn_model_staff_count":   strconv.Itoa(len(semanticStaff)),
-		})
+		}
+		mergeStringAttributes(attributes, turnInterpreterDiagnosticAttributes(fallback.InterpreterDiagnostics))
+		recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathProviderFallback, attributes)
 		return fallback
 	}
 	interpreted.ModelInvoked = true
@@ -167,6 +170,30 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 		"turn_interpreter_outcome": fallback.InterpreterOutcome,
 	})
 	return fallback
+}
+
+func turnInterpreterDiagnosticAttributes(diagnostics map[string]string) map[string]string {
+	if len(diagnostics) == 0 {
+		return nil
+	}
+	mapping := map[string]string{
+		"provider": "turn_interpreter_provider", "failure_stage": "turn_interpreter_failure_stage",
+		"http_status": "turn_interpreter_http_status", "http_status_class": "turn_interpreter_http_status_class",
+		"request_id": "turn_interpreter_request_id",
+	}
+	attributes := map[string]string{}
+	for source, target := range mapping {
+		if value := strings.TrimSpace(diagnostics[source]); value != "" {
+			attributes[target] = value
+		}
+	}
+	return attributes
+}
+
+func mergeStringAttributes(target map[string]string, values map[string]string) {
+	for key, value := range values {
+		target[key] = value
+	}
 }
 
 func rejectedTurnUnderstandingOutcome(turn TurnUnderstanding, services []ServiceOption, staff []StaffOption) string {

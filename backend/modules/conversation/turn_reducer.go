@@ -380,6 +380,9 @@ func applyTurnUnderstandingMetadata(turnRecord *TurnRecord, understanding TurnUn
 		"consultation_confidence":            understanding.Consultation.Confidence,
 		"consultation_reason":                understanding.Consultation.Reason,
 	})
+	for key, value := range turnInterpreterDiagnosticAttributes(understanding.InterpreterDiagnostics) {
+		turnRecord.CustomerMetadata[key] = value
+	}
 	turnRecord.AIMetadata = mergeMetadata(turnRecord.AIMetadata, map[string]any{
 		"draft_revision":      turnRecord.Update.DialogState.DraftRevision,
 		"reviewed_revision":   turnRecord.Update.DialogState.ReviewedRevision,

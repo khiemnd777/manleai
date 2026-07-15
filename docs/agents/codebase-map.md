@@ -173,6 +173,7 @@ name collection, availability replies, party bookings, or transcript output.
   `backend/modules/conversation/turn_kernel.go`,
   `backend/modules/conversation/conversation_act.go`,
   `backend/modules/conversation/turn_interpreter_error.go`,
+  `backend/modules/conversation/service_guidance_recovery.go`,
   `backend/modules/conversation/service_datetime_confirmation.go`,
   `backend/modules/conversation/turn_reducer.go`, and
   `backend/modules/conversation/next_action_planner.go`.
@@ -193,7 +194,13 @@ name collection, availability replies, party bookings, or transcript output.
   typed timeout, provider, output, confidence, and catalog rejection outcomes
   preserve the draft. A non-accepted semantic outcome may still consume
   independently validated catalog and captured-field evidence before asking the
-  next missing-field question. Catalog validation owns referenced service/staff IDs;
+  next missing-field question. When the unresolved field is caller goal or
+  service, `service_guidance_recovery.go` owns a state-scoped fallback that
+  offers booking, catalog listing, or consultation choices, preserves exact
+  catalog selections, and hands off after three no-progress prompts. This
+  recovery is gated by dialog state plus a typed non-accepted interpreter
+  outcome; it does not become the primary caller-intent parser. Catalog
+  validation owns referenced service/staff IDs;
   the reducer owns draft mutation and dependency invalidation; the planner owns
   missing-field, review, and booking readiness. Customer-name confirmation and
   the main orchestration path both execute that same planner gate; the booking
@@ -504,7 +511,9 @@ detail rather than part of the event title.
   route/config, session-load, answer-context, turn-router, semantic-interpreter,
   availability/POS, and turn-persistence durations through
   `backend/modules/voice/backend_turn_diagnostics.go`; it records only safe
-  router/interpreter labels and scoped-context counts, never transcript or caller data. Speech output timing/failures retain correlation
+  router/interpreter labels, scoped-context counts, and bounded interpreter
+  provider/status/stage/request-ID correlation fields, never transcript,
+  provider response body, or caller data. Speech output timing/failures retain correlation
   IDs, counts, and salted canonical hashes without transcript/audio bodies. The
   owner-scoped Calls timeline exposes these whitelisted diagnostics. Transcription steering is
   a concise salon/catalog/alias keyword list rather than conversational example
@@ -625,7 +634,7 @@ detail rather than part of the event title.
 | availability, availability quote, quote expired, quote cleanup, quote retention, unbounded quote growth, slot fingerprint, local day, timezone, DST, open slots, offered slots, stale segment, no common time, split, staggered, staff assignment | `backend/modules/booking`, `backend/modules/conversation/service_availability.go` | `quote_cleanup_processor.go`, booking repository, worker, V39 quote tables/indexes, POS provider adapter, `service_matching_parsing.go`, `appointments-dashboard.tsx`, `pos-calendar/features/calendar/pos-calendar-client.tsx`, conversation tests |
 | Square OAuth, token expired, refresh token, location, sync, catalog import, `available_for_booking`, team member booking profile, non-bookable staff, calendar sync, booking webhook, signature key, notification URL, event dedupe, claim token, calendar repair, stale booking version | `pos-adapter-slice`, `backend/modules/pos_square` | `backend/modules/pos`, `integration_config`, V41 webhook/repair tables, worker, integrations UI, POS calendar UI |
 | POS mapping, provider link, active provider, AI bookable, local only, sync failed | `backend/modules/pos`, `docs/canonical-pos-ownership-checklist.md` | Services/Staff UI, `pos_entity_links`, sync tests |
-| semantic turn, multi-intent, service alias, category alias, service understanding, wrong service, category narrowed to one service, bare service switch, stale date after summary, staff/date/customer correction, add/replace/remove/undo, question plus correction, non-native wording, ASR paraphrase | `backend/modules/conversation/conversation_act.go`, `turn_reducer.go`, `next_action_planner.go` | dialog state/repository, voice semantic interpreter, training aliases, transcript metadata, golden conversation tests |
+| semantic turn, semantic provider error, service guidance recovery, caller goal recovery, no-progress handoff, multi-intent, service alias, category alias, service understanding, wrong service, category narrowed to one service, bare service switch, stale date after summary, staff/date/customer correction, add/replace/remove/undo, question plus correction, non-native wording, ASR paraphrase | `backend/modules/conversation/conversation_act.go`, `service_guidance_recovery.go`, `turn_reducer.go`, `next_action_planner.go` | dialog state/repository, voice semantic interpreter, training aliases, transcript metadata, golden conversation tests |
 | AI consultation, service recommendation, help me choose, current nail system, desired outcome, lower maintenance, consultation mutation, replace preference, clear preference, consultation profile, consultation_completed, awaiting_booking, profile revision, safety handoff, medical suitability | `backend/modules/conversation/service_consultation.go`, `backend/modules/pos/types.go`, `backend/modules/pos/repository.go` | V38/V40 migrations and Ent schema, global deterministic/structured safety gate, semantic consultation extraction, Services profile UI, Settings toggle/coverage, Calls typed audit state, consultation golden tests |
 | service menu, how many services, how many I book, what do I have, current booking summary, service count, repeated clarification, informational service question | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/service_prompts.go`, `backend/modules/conversation/answer_router.go` | `backend/modules/conversation/service.go`, dialog state, party flow, golden tests |
 | final review, stale review, draft revision, reviewed revision, authorized revision, natural approval, repeated final review, review timeout, concise review retry, book it, just book this for me, correction during review, repeated same-category guest question, no progress loop | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/draft_revision.go`, `next_action_planner.go`, `service.go` | repository, V36/V37 migrations, booking flow, conversation and phone tests |
@@ -637,7 +646,7 @@ detail rather than part of the event title.
 | reschedule, cancel, move appointment, appointment target, ordinal option, day view, week view, month view, agenda, Tomorrow button, appointment warning | `service_intent.go`, `backend/modules/booking/service.go` | Appointments UI, POS Calendar UI, booking tests |
 | Twilio signature, webhook, TwiML, recording, media stream, stream fallback | `backend/modules/voice_twilio` | `backend/modules/voice`, phone demo memo |
 | OpenAI STT, TTS, realtime, model, voice, guarded reply, background noise, false transcript, transcript logprob, repeated progress reply, spoken fact mismatch, clipped first syllable, stuttered TTS startup, startup audio buffer, realtime transport fallback | `backend/modules/voice_openai`, `backend/modules/voice`, `backend/modules/voice_twilio/handler.go` | integration config, conversation runtime, realtime event timeline, voice tests |
-| slow AI response, backend latency, backend_turn_done, turn_router_ms, turn_route, turn_expected_input, turn_interpreter_ms, turn_interpreter_outcome, availability_pos_ms, save_turn_ms, fast lane, semantic lane | `backend/modules/conversation/turn_kernel.go`, `backend/modules/voice/backend_turn_diagnostics.go`, `backend/modules/conversation/turn_timing.go`, `backend/modules/voice_twilio/handler.go` | conversation router/service/interpreter, provider availability/POS calls, Calls realtime event timeline, voice and conversation tests |
+| slow AI response, backend latency, backend_turn_done, turn_router_ms, turn_route, turn_expected_input, turn_interpreter_ms, turn_interpreter_outcome, turn_interpreter_failure_stage, turn_interpreter_http_status_class, turn_interpreter_request_id, availability_pos_ms, save_turn_ms, fast lane, semantic lane | `backend/modules/conversation/turn_kernel.go`, `backend/modules/voice/backend_turn_diagnostics.go`, `backend/modules/conversation/turn_timing.go`, `backend/modules/voice_twilio/handler.go` | conversation router/service/interpreter, provider availability/POS calls, Calls realtime event timeline, voice and conversation tests |
 | AI tone, speaking style, concise/warm/professional | `backend/modules/salon`, `conversation.RuntimeConfig`, `voice.ModelRequest` | Settings UI, config transfer |
 | integration config, provider secrets, dashboard settings, active provider config, env fallback | `backend/modules/integration_config`, `/dashboard/integrations`, authenticated integration/status APIs | runtime resolver code first; deployment docs only for an explicitly scoped legacy fallback task |
 | public catalog, published slug, public services, landing page, staff privacy | `backend/modules/public_catalog`, `landing/app/s/[slug]/page.tsx` | Settings UI public catalog card |

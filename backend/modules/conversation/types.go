@@ -279,18 +279,19 @@ type ConversationQuestion struct {
 }
 
 type TurnUnderstanding struct {
-	Goal                  string                     `json:"goal"`
-	Acts                  []ConversationAct          `json:"acts"`
-	Questions             []ConversationQuestion     `json:"questions"`
-	Confidence            float64                    `json:"confidence"`
-	Reason                string                     `json:"reason"`
-	Consultation          ConsultationNeedProfile    `json:"consultation"`
-	ConsultationMutations []ConsultationNeedMutation `json:"consultation_mutations,omitempty"`
-	Safety                SafetyAssessment           `json:"safety"`
-	Source                string                     `json:"source"`
-	ModelInvoked          bool                       `json:"-"`
-	CatalogFallback       bool                       `json:"-"`
-	InterpreterOutcome    string                     `json:"-"`
+	Goal                   string                     `json:"goal"`
+	Acts                   []ConversationAct          `json:"acts"`
+	Questions              []ConversationQuestion     `json:"questions"`
+	Confidence             float64                    `json:"confidence"`
+	Reason                 string                     `json:"reason"`
+	Consultation           ConsultationNeedProfile    `json:"consultation"`
+	ConsultationMutations  []ConsultationNeedMutation `json:"consultation_mutations,omitempty"`
+	Safety                 SafetyAssessment           `json:"safety"`
+	Source                 string                     `json:"source"`
+	ModelInvoked           bool                       `json:"-"`
+	CatalogFallback        bool                       `json:"-"`
+	InterpreterOutcome     string                     `json:"-"`
+	InterpreterDiagnostics map[string]string          `json:"-"`
 }
 
 type PendingConversationAct struct {

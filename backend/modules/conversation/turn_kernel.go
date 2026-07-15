@@ -105,6 +105,9 @@ func applyTurnPlanMetadata(turn *TurnRecord, plan TurnPlan) {
 
 func expectedInputForSession(session Session) string {
 	state := normalizedDialogState(session.DialogState)
+	if isGuidanceRecoveryPrompt(state.LastPromptKey) {
+		return guidanceRecoveryExpectedInput(state.LastPromptKey)
+	}
 	if consultation := state.Consultation; consultationStateActive(consultation) {
 		switch consultation.Status {
 		case ConsultationStatusAwaitingSelection:
