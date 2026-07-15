@@ -1,0 +1,2 @@
+ALTER TABLE call_sessions
+    ADD COLUMN IF NOT EXISTS state_revision BIGINT NOT NULL DEFAULT 0;

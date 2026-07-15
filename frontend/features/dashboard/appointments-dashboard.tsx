@@ -33,6 +33,8 @@ import type {
   AvailabilitySlot,
   AppointmentRecord,
   BookingAttempt,
+  BookingReconciliationCandidate,
+  BookingReconciliationTask,
   BookingSegmentRequest,
   POSConnection,
   POSService,
@@ -68,6 +70,27 @@ type AttemptsResponse = {
   status?: string;
 };
 
+type ReconciliationTasksResponse = {
+  tasks: BookingReconciliationTask[];
+  limit?: number;
+  offset?: number;
+  has_more?: boolean;
+};
+
+type ReconciliationCandidatesResponse = {
+  candidates: BookingReconciliationCandidate[];
+};
+
+type ReconciliationQueueStatus = "open" | "escalated";
+
+type ReconciliationPageState = Record<
+  ReconciliationQueueStatus,
+  {
+    offset: number;
+    hasMore: boolean;
+  }
+>;
+
 type ServicesResponse = {
   services: POSService[];
 };
@@ -88,6 +111,10 @@ type AppointmentActionForm = {
   selectedSlotKey: string;
   notes: string;
   cancelReason: string;
+  preservedSegments: BookingSegmentRequest[];
+  retryOfAttemptID: string;
+  retryRequestedStartTime: string;
+  retryRequestedEndTime: string;
 };
 
 type ActionNotice = {
@@ -101,9 +128,20 @@ const appointmentPageSizeOptions = [10, 25, 50] as const;
 const appointmentOverviewLimit = 200;
 const defaultFallbackPageSize = 10;
 const fallbackOverviewLimit = 200;
+const reconciliationPageSize = 25;
+const reconciliationQueueStatuses: ReconciliationQueueStatus[] = ["open", "escalated"];
 
 export function AppointmentsDashboard() {
-  const actionOperationKeyRef = useRef("");
+  const actionOperationKeyRef = useRef<{ key: string; fingerprint: string } | null>(null);
+  const reconciliationActionRef = useRef<{ key: string; fingerprint: string } | null>(null);
+  const reconciliationCandidateRequestIDRef = useRef(0);
+  const reconciliationListRequestIDRef = useRef(0);
+  const reconciliationSalonIDRef = useRef("");
+  const salonDateContextRef = useRef("");
+  const availabilityRequestIDRef = useRef(0);
+  const actionAvailabilityRequestIDRef = useRef(0);
+  const availabilityExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const actionAvailabilityExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [salon, setSalon] = useState<Salon | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [appointments, setAppointments] = useState<AppointmentRecord[]>([]);
@@ -145,6 +183,20 @@ export function AppointmentsDashboard() {
   const [fallbackListLoading, setFallbackListLoading] = useState(false);
   const [fallbackReviewRequest, setFallbackReviewRequest] = useState<BookingAttempt | null>(null);
   const [appointmentReviewAppointment, setAppointmentReviewAppointment] = useState<AppointmentRecord | null>(null);
+  const [reconciliationTasks, setReconciliationTasks] = useState<BookingReconciliationTask[]>([]);
+  const [reconciliationLoading, setReconciliationLoading] = useState(false);
+  const [reconciliationListError, setReconciliationListError] = useState("");
+  const [reconciliationPageState, setReconciliationPageState] = useState<ReconciliationPageState>(() =>
+    emptyReconciliationPageState()
+  );
+  const [reconciliationTask, setReconciliationTask] = useState<BookingReconciliationTask | null>(null);
+  const [reconciliationCandidates, setReconciliationCandidates] = useState<BookingReconciliationCandidate[]>([]);
+  const [reconciliationCandidatesLoading, setReconciliationCandidatesLoading] = useState(false);
+  const [reconciliationCandidateID, setReconciliationCandidateID] = useState("");
+  const [reconciliationNote, setReconciliationNote] = useState("");
+  const [reconciliationNotCreatedConfirmed, setReconciliationNotCreatedConfirmed] = useState(false);
+  const [reconciliationSaving, setReconciliationSaving] = useState(false);
+  const [reconciliationError, setReconciliationError] = useState("");
 
   function appointmentListPath(salonID: string, limit: number, offset: number) {
     const params = new URLSearchParams({
@@ -187,6 +239,29 @@ export function AppointmentsDashboard() {
     return apiRequest<AttemptsResponse>(fallbackListPath(salonID, limit, offset));
   }
 
+  function reconciliationListPath(
+    salonID: string,
+    status: ReconciliationQueueStatus,
+    limit: number,
+    offset: number
+  ) {
+    const params = new URLSearchParams({
+      status,
+      limit: String(limit),
+      offset: String(offset)
+    });
+    return `/api/salons/${salonID}/booking-reconciliations?${params.toString()}`;
+  }
+
+  async function fetchReconciliationPage(
+    salonID: string,
+    status: ReconciliationQueueStatus,
+    limit: number,
+    offset: number
+  ) {
+    return apiRequest<ReconciliationTasksResponse>(reconciliationListPath(salonID, status, limit, offset));
+  }
+
   async function fetchFallbackPageWithFallback(salonID: string, limit: number, offset: number) {
     let response = await fetchFallbackPage(salonID, limit, offset);
     if (response.booking_attempts.length === 0 && offset > 0) {
@@ -223,6 +298,89 @@ export function AppointmentsDashboard() {
     }
   }
 
+  async function reloadReconciliationTasks(salonID: string) {
+    const requestID = ++reconciliationListRequestIDRef.current;
+    if (reconciliationSalonIDRef.current !== salonID) {
+      reconciliationSalonIDRef.current = salonID;
+      setReconciliationTasks([]);
+      setReconciliationPageState(emptyReconciliationPageState());
+    }
+    setReconciliationLoading(true);
+    setReconciliationListError("");
+    try {
+      const pages = await Promise.all(
+        reconciliationQueueStatuses.map(async (status) => ({
+          status,
+          response: await fetchReconciliationPage(salonID, status, reconciliationPageSize, 0)
+        }))
+      );
+      if (requestID !== reconciliationListRequestIDRef.current) return;
+
+      const nextPageState = emptyReconciliationPageState();
+      for (const page of pages) {
+        nextPageState[page.status] = nextReconciliationPageState(page.response, 0, page.status);
+      }
+      setReconciliationTasks(mergeReconciliationTasks(...pages.map((page) => page.response.tasks)));
+      setReconciliationPageState(nextPageState);
+    } catch (err) {
+      if (requestID !== reconciliationListRequestIDRef.current) return;
+      setReconciliationListError(
+        err instanceof Error ? err.message : "Could not load provider reconciliation tasks."
+      );
+    } finally {
+      if (requestID === reconciliationListRequestIDRef.current) {
+        setReconciliationLoading(false);
+      }
+    }
+  }
+
+  async function loadMoreReconciliationTasks() {
+    if (!salon || reconciliationLoading) return;
+    const statuses = reconciliationQueueStatuses.filter((status) => reconciliationPageState[status].hasMore);
+    if (statuses.length === 0) return;
+
+    const requestID = ++reconciliationListRequestIDRef.current;
+    setReconciliationLoading(true);
+    setReconciliationListError("");
+    try {
+      const pages = await Promise.all(
+        statuses.map(async (status) => {
+          const requestedOffset = reconciliationPageState[status].offset;
+          return {
+            status,
+            requestedOffset,
+            response: await fetchReconciliationPage(salon.id, status, reconciliationPageSize, requestedOffset)
+          };
+        })
+      );
+      if (requestID !== reconciliationListRequestIDRef.current) return;
+
+      const pageUpdates = pages.map((page) => ({
+        status: page.status,
+        state: nextReconciliationPageState(page.response, page.requestedOffset, page.status)
+      }));
+      setReconciliationTasks((current) =>
+        mergeReconciliationTasks(current, ...pages.map((page) => page.response.tasks))
+      );
+      setReconciliationPageState((current) => {
+        const next = cloneReconciliationPageState(current);
+        for (const update of pageUpdates) {
+          next[update.status] = update.state;
+        }
+        return next;
+      });
+    } catch (err) {
+      if (requestID !== reconciliationListRequestIDRef.current) return;
+      setReconciliationListError(
+        err instanceof Error ? err.message : "Could not load more provider reconciliation tasks."
+      );
+    } finally {
+      if (requestID === reconciliationListRequestIDRef.current) {
+        setReconciliationLoading(false);
+      }
+    }
+  }
+
   async function load({
     silent = false,
     offset = appointmentOffset,
@@ -242,6 +400,9 @@ export function AppointmentsDashboard() {
       const firstSalon = salonResponse.salons[0] ?? null;
       setSalon(firstSalon);
       if (!firstSalon) {
+        reconciliationListRequestIDRef.current += 1;
+        reconciliationSalonIDRef.current = "";
+        salonDateContextRef.current = "";
         setStatus(null);
         setAppointments([]);
         setAppointmentRows([]);
@@ -251,19 +412,30 @@ export function AppointmentsDashboard() {
         setFallbackRows([]);
         setFallbackHasMore(false);
         setFallbackOverviewHasMore(false);
+        setReconciliationTasks([]);
+        setReconciliationPageState(emptyReconciliationPageState());
+        setReconciliationListError("");
+        setReconciliationLoading(false);
         setServices([]);
         setStaff([]);
         return;
       }
 
-      const [statusResponse, appointmentResponse, fallbackResponse, serviceResponse, staffResponse] =
-        await Promise.all([
-          apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
-          fetchAppointmentPageWithFallback(firstSalon.id, limit, offset),
-          fetchFallbackPageWithFallback(firstSalon.id, fallbackPageLimit, fallbackPageOffset),
-          apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
-          apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`)
-        ]);
+      const dateContext = `${firstSalon.id}:${firstSalon.timezone}`;
+      if (salonDateContextRef.current !== dateContext) {
+        salonDateContextRef.current = dateContext;
+        setSelectedDate(formatDateInput(new Date(), firstSalon.timezone));
+      }
+
+      // Keep queue failures inside the reconciliation card instead of rejecting the core dashboard load.
+      void reloadReconciliationTasks(firstSalon.id);
+      const [statusResponse, appointmentResponse, fallbackResponse, serviceResponse, staffResponse] = await Promise.all([
+        apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
+        fetchAppointmentPageWithFallback(firstSalon.id, limit, offset),
+        fetchFallbackPageWithFallback(firstSalon.id, fallbackPageLimit, fallbackPageOffset),
+        apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
+        apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`)
+      ]);
       const [overviewResponse, fallbackOverviewResponse] = await Promise.all([
         fetchAppointmentPage(firstSalon.id, appointmentOverviewLimit, 0),
         fetchFallbackPage(firstSalon.id, fallbackOverviewLimit, 0)
@@ -292,6 +464,12 @@ export function AppointmentsDashboard() {
 
   useEffect(() => {
     void load();
+    return () => {
+      reconciliationListRequestIDRef.current += 1;
+      reconciliationCandidateRequestIDRef.current += 1;
+      clearAvailabilityExpiryTimer(availabilityExpiryTimerRef);
+      clearAvailabilityExpiryTimer(actionAvailabilityExpiryTimerRef);
+    };
   }, []);
 
   const serviceNames = useMemo(
@@ -314,6 +492,9 @@ export function AppointmentsDashboard() {
     () => fallbackRequests,
     [fallbackRequests]
   );
+  const reconciliationHasMore = reconciliationQueueStatuses.some(
+    (status) => reconciliationPageState[status].hasMore
+  );
   const dayAppointments = useMemo(
     () =>
       appointments
@@ -331,13 +512,13 @@ export function AppointmentsDashboard() {
   const upcomingCount = useMemo(() => {
     const now = Date.now();
     return appointmentCountLabel(
-      appointments.filter((item) => item.status !== "cancelled" && new Date(item.start_time).getTime() >= now)
+      appointments.filter((item) => isPOSConfirmedStatus(item.status) && new Date(item.start_time).getTime() >= now)
         .length,
       appointmentOverviewHasMore
     );
   }, [appointments, appointmentOverviewHasMore]);
   const confirmedCount = appointmentCountLabel(
-    appointments.filter((item) => item.status === "confirmed").length,
+    appointments.filter((item) => isPOSConfirmedStatus(item.status)).length,
     appointmentOverviewHasMore
   );
   const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
@@ -349,59 +530,104 @@ export function AppointmentsDashboard() {
     () => (actionAvailabilityResult?.slots ?? []).find((slot) => slotKey(slot) === actionForm.selectedSlotKey) ?? null,
     [actionAvailabilityResult, actionForm.selectedSlotKey]
   );
-
+  const selectedReconciliationAttempt = useMemo(
+    () => reconciliationAttemptForTask(reconciliationTask, fallbackRequests),
+    [fallbackRequests, reconciliationTask]
+  );
   async function checkAvailability() {
     if (!salon || !availabilityServiceID || !selectedDate || !readyForAvailability) return;
+    const requestID = ++availabilityRequestIDRef.current;
+    clearAvailabilityExpiryTimer(availabilityExpiryTimerRef);
     setAvailabilityError("");
     setAvailabilityChecked(true);
     setCheckingAvailability(true);
-    try {
-      const staffSelectionMode = availabilityStaffID ? "specific" : "anyone";
-      const result = await apiRequest<AvailabilityResult>(`/api/salons/${salon.id}/availability`, {
-        method: "POST",
-        body: JSON.stringify({
+    const staffSelectionMode = availabilityStaffID ? "specific" : "anyone";
+    const payload = {
+      service_id: availabilityServiceID,
+      staff_id: availabilityStaffID,
+      staff_selection_mode: staffSelectionMode,
+      segments: [
+        {
           service_id: availabilityServiceID,
           staff_id: availabilityStaffID,
-          staff_selection_mode: staffSelectionMode,
-          segments: [
-            {
-              service_id: availabilityServiceID,
-              staff_id: availabilityStaffID,
-              staff_selection_mode: staffSelectionMode
-            }
-          ],
-          preferred_date: selectedDate,
-          limit: 5
-        })
+          staff_selection_mode: staffSelectionMode
+        }
+      ],
+      preferred_date: selectedDate,
+      limit: 5
+    };
+    try {
+      const result = await apiRequest<AvailabilityResult>(`/api/salons/${salon.id}/availability`, {
+        method: "POST",
+        body: JSON.stringify(payload)
       });
+      if (requestID !== availabilityRequestIDRef.current) return;
       setAvailabilityResult(result);
+      scheduleAvailabilityExpiry(
+        availabilityExpiryTimerRef,
+        result.expires_at,
+        requestID,
+        availabilityRequestIDRef,
+        () => {
+          setAvailabilityResult(null);
+          setAvailabilityChecked(false);
+          setAvailabilityError("These availability results expired. Check Square Appointments again for current slots.");
+        }
+      );
     } catch (err) {
+      if (requestID !== availabilityRequestIDRef.current) return;
       setAvailabilityResult(null);
       setAvailabilityError(err instanceof Error ? err.message : "Could not check Square Appointments availability.");
     } finally {
-      setCheckingAvailability(false);
+      if (requestID === availabilityRequestIDRef.current) {
+        setCheckingAvailability(false);
+      }
     }
   }
 
   function setDateFromShortcut(offsetDays: number) {
-    const next = new Date();
-    next.setDate(next.getDate() + offsetDays);
-    setSelectedDate(formatDateInput(next));
-    setAvailabilityResult(null);
-    setAvailabilityError("");
-    setAvailabilityChecked(false);
+    const today = formatDateInput(new Date(), salon?.timezone);
+    setSelectedDate(addDaysInput(today, offsetDays));
+    resetOverviewAvailability();
   }
 
   function updateActionForm(patch: Partial<AppointmentActionForm>) {
-    setActionForm((current) => ({ ...current, ...patch }));
+    const invalidatesAvailability =
+      Object.prototype.hasOwnProperty.call(patch, "serviceID") ||
+      Object.prototype.hasOwnProperty.call(patch, "staffID") ||
+      Object.prototype.hasOwnProperty.call(patch, "preferredDate") ||
+      Object.prototype.hasOwnProperty.call(patch, "preservedSegments");
+    if (invalidatesAvailability) {
+      invalidateActionAvailability();
+    }
+    setActionForm((current) => ({
+      ...current,
+      ...patch,
+      ...(invalidatesAvailability ? { selectedSlotKey: "" } : {})
+    }));
   }
 
-  function resetActionAvailability() {
+  function resetOverviewAvailability() {
+    availabilityRequestIDRef.current += 1;
+    clearAvailabilityExpiryTimer(availabilityExpiryTimerRef);
+    setAvailabilityResult(null);
+    setAvailabilityChecked(false);
+    setCheckingAvailability(false);
+    setAvailabilityError("");
+  }
+
+  function invalidateActionAvailability(message = "") {
+    actionAvailabilityRequestIDRef.current += 1;
+    clearAvailabilityExpiryTimer(actionAvailabilityExpiryTimerRef);
     setActionAvailabilityResult(null);
     setActionAvailabilityChecked(false);
     setCheckingActionAvailability(false);
-    setActionAvailabilityError("");
-    updateActionForm({ selectedSlotKey: "" });
+    setActionAvailabilityError(message);
+    setActionForm((current) => ({ ...current, selectedSlotKey: "" }));
+  }
+
+  function resetActionAvailability() {
+    invalidateActionAvailability();
   }
 
   function updateAppointmentPageSize(limit: number) {
@@ -464,7 +690,7 @@ export function AppointmentsDashboard() {
   }
 
   function openCreateBooking() {
-    actionOperationKeyRef.current = crypto.randomUUID();
+    actionOperationKeyRef.current = null;
     setActionMode("create");
     setSelectedAppointment(null);
     setActionForm({
@@ -477,9 +703,10 @@ export function AppointmentsDashboard() {
   }
 
   function openCreateBookingFromFallback(request: BookingAttempt) {
-    actionOperationKeyRef.current = crypto.randomUUID();
+    actionOperationKeyRef.current = null;
     const retryServiceID = bookingAttemptPrimaryServiceID(request);
     const retryStaffID = bookingAttemptRetryStaffID(request);
+    const preservedSegments = bookingAttemptRetrySegments(request);
     setActionMode("create");
     setSelectedAppointment(null);
     setFallbackReviewRequest(null);
@@ -490,15 +717,19 @@ export function AppointmentsDashboard() {
       customerEmail: request.customer_email ?? "",
       serviceID: bookableServices.some((item) => item.id === retryServiceID) ? retryServiceID : "",
       staffID: bookableStaff.some((item) => item.id === retryStaffID) ? retryStaffID : "",
-      notes: request.notes ?? ""
+      notes: request.notes ?? "",
+      preservedSegments,
+      retryOfAttemptID: request.id,
+      retryRequestedStartTime: request.requested_start_time,
+      retryRequestedEndTime: request.requested_end_time
     });
     setActionError("");
     setActionNotice(null);
     resetActionAvailability();
   }
 
-  function openReschedule(appointment: AppointmentRecord, preferredDate?: string) {
-    actionOperationKeyRef.current = crypto.randomUUID();
+  function openReschedule(appointment: AppointmentRecord, preferredDate?: string, retryRequest?: BookingAttempt) {
+    actionOperationKeyRef.current = null;
     setActionMode("reschedule");
     setSelectedAppointment(appointment);
     setAppointmentReviewAppointment(null);
@@ -510,15 +741,19 @@ export function AppointmentsDashboard() {
       customerEmail: appointment.customer_email ?? "",
       serviceID: appointmentPrimaryServiceID(appointment),
       staffID: "",
-      notes: appointment.notes ?? ""
+      notes: retryRequest?.notes ?? appointment.notes ?? "",
+      preservedSegments: retryRequest ? bookingAttemptRetrySegments(retryRequest) : [],
+      retryOfAttemptID: retryRequest?.id ?? "",
+      retryRequestedStartTime: retryRequest?.requested_start_time ?? "",
+      retryRequestedEndTime: retryRequest?.requested_end_time ?? ""
     });
     setActionError("");
     setActionNotice(null);
     resetActionAvailability();
   }
 
-  function openCancel(appointment: AppointmentRecord, reason = "") {
-    actionOperationKeyRef.current = crypto.randomUUID();
+  function openCancel(appointment: AppointmentRecord, reason = "", retryRequest?: BookingAttempt) {
+    actionOperationKeyRef.current = null;
     setActionMode("cancel");
     setSelectedAppointment(appointment);
     setAppointmentReviewAppointment(null);
@@ -531,13 +766,15 @@ export function AppointmentsDashboard() {
       serviceID: appointmentPrimaryServiceID(appointment),
       staffID: "",
       notes: appointment.notes ?? "",
-      cancelReason: reason
+      cancelReason: reason,
+      preservedSegments: retryRequest ? bookingAttemptRetrySegments(retryRequest) : [],
+      retryOfAttemptID: retryRequest?.id ?? "",
+      retryRequestedStartTime: retryRequest?.requested_start_time ?? "",
+      retryRequestedEndTime: retryRequest?.requested_end_time ?? ""
     });
     setActionError("");
     setActionNotice(null);
-    setActionAvailabilityResult(null);
-    setActionAvailabilityChecked(false);
-    setActionAvailabilityError("");
+	resetActionAvailability();
   }
 
   function openFallbackReview(request: BookingAttempt) {
@@ -547,6 +784,112 @@ export function AppointmentsDashboard() {
 
   function closeFallbackReview() {
     setFallbackReviewRequest(null);
+  }
+
+  async function openReconciliation(task: BookingReconciliationTask) {
+    if (!salon) return;
+    const requestID = ++reconciliationCandidateRequestIDRef.current;
+    reconciliationActionRef.current = null;
+    setReconciliationTask(task);
+    setReconciliationCandidates([]);
+    setReconciliationCandidatesLoading(true);
+    setReconciliationCandidateID("");
+    setReconciliationNote("");
+    setReconciliationNotCreatedConfirmed(false);
+    setReconciliationError("");
+    setFallbackReviewRequest(null);
+    try {
+      const response = await apiRequest<ReconciliationCandidatesResponse>(
+        `/api/salons/${salon.id}/booking-reconciliations/${task.booking_attempt_id}/candidates`
+      );
+      if (requestID !== reconciliationCandidateRequestIDRef.current) return;
+      setReconciliationCandidates(response.candidates);
+    } catch (err) {
+      if (requestID !== reconciliationCandidateRequestIDRef.current) return;
+      setReconciliationError(
+        err instanceof Error ? err.message : "Could not load verified provider booking candidates."
+      );
+    } finally {
+      if (requestID === reconciliationCandidateRequestIDRef.current) {
+        setReconciliationCandidatesLoading(false);
+      }
+    }
+  }
+
+  function openReconciliationForRequest(request: BookingAttempt) {
+    const task = reconciliationTasks.find((item) => item.booking_attempt_id === request.id);
+    if (!task) {
+      setActionNotice({
+        tone: "warning",
+        title: "Reconciliation task is not loaded",
+        message: "Load more provider results or reload the reconciliation queue before resolving it. Retry remains blocked."
+      });
+      return;
+    }
+    void openReconciliation(task);
+  }
+
+  function closeReconciliation() {
+    if (reconciliationSaving) return;
+    reconciliationCandidateRequestIDRef.current += 1;
+    reconciliationActionRef.current = null;
+    setReconciliationTask(null);
+    setReconciliationCandidates([]);
+    setReconciliationCandidatesLoading(false);
+    setReconciliationCandidateID("");
+    setReconciliationNote("");
+    setReconciliationNotCreatedConfirmed(false);
+    setReconciliationError("");
+  }
+
+  async function resolveReconciliation(action: "provider_attached" | "not_created" | "escalated") {
+    if (!salon || !reconciliationTask || !selectedReconciliationAttempt) return;
+    const candidate = reconciliationCandidates.find((item) => item.appointment_id === reconciliationCandidateID);
+    if (action === "provider_attached" && !candidate) {
+      setReconciliationError("Select a provider-synced appointment that matches this request.");
+      return;
+    }
+    if (action === "not_created" && !reconciliationNotCreatedConfirmed) {
+      setReconciliationError("Confirm that Square Appointments was checked and the requested booking action was not applied.");
+      return;
+    }
+    const payload = {
+      action,
+      provider_appointment_id: candidate?.provider_appointment_id ?? "",
+      provider_appointment_version: candidate?.provider_appointment_version ?? 0,
+      provider_status: action === "provider_attached" ? candidate?.provider_status ?? "" : "",
+      note: reconciliationNote.trim()
+    };
+    const actionKey = operationKeyForPayload(reconciliationActionRef, payload);
+    setReconciliationSaving(true);
+    setReconciliationError("");
+    try {
+      await apiRequest<BookingReconciliationTask>(
+        `/api/salons/${salon.id}/booking-reconciliations/${reconciliationTask.booking_attempt_id}/resolve`,
+        {
+          method: "POST",
+          body: JSON.stringify({ ...payload, action_key: actionKey })
+        }
+      );
+      setActionNotice({
+        tone: action === "escalated" ? "warning" : "success",
+        title: action === "escalated" ? "Reconciliation escalated" : "Reconciliation saved",
+        message:
+          action === "provider_attached"
+            ? "The request was linked only after a matching provider-synced appointment was verified."
+            : action === "not_created"
+              ? "The request is marked safe to retry because the owner verified that the requested Square action was not applied."
+              : "Retry remains blocked until the provider result is resolved."
+      });
+      setReconciliationTask(null);
+      setReconciliationCandidates([]);
+      reconciliationActionRef.current = null;
+      await load({ silent: true });
+    } catch (err) {
+      setReconciliationError(err instanceof Error ? err.message : "Could not resolve provider reconciliation.");
+    } finally {
+      setReconciliationSaving(false);
+    }
   }
 
   function retryFallbackRequest(request: BookingAttempt) {
@@ -561,14 +904,18 @@ export function AppointmentsDashboard() {
       return;
     }
     if (action === "reschedule") {
-      openReschedule(appointment, formatDateInput(new Date(request.requested_start_time), salon?.timezone));
+      openReschedule(
+        appointment,
+        formatDateInput(new Date(request.requested_start_time), salon?.timezone),
+        request
+      );
       return;
     }
-    openCancel(appointment, request.notes ?? "");
+    openCancel(appointment, request.notes ?? "", request);
   }
 
   function closeActionPanel() {
-    actionOperationKeyRef.current = "";
+    actionOperationKeyRef.current = null;
     setActionMode(null);
     setSelectedAppointment(null);
     setActionError("");
@@ -579,16 +926,18 @@ export function AppointmentsDashboard() {
     if (!salon || !actionMode || actionMode === "cancel" || !actionForm.preferredDate || !readyForManualBooking) {
       return;
     }
+    const requestID = ++actionAvailabilityRequestIDRef.current;
+    clearAvailabilityExpiryTimer(actionAvailabilityExpiryTimerRef);
     setActionAvailabilityError("");
     setActionAvailabilityChecked(true);
     setCheckingActionAvailability(true);
-    updateActionForm({ selectedSlotKey: "" });
+    setActionForm((current) => ({ ...current, selectedSlotKey: "" }));
     try {
       const segments = actionAvailabilitySegments(actionMode, actionForm, selectedAppointment);
       if (segments.length === 0 || segments.some((segment) => !segment.service_id)) {
         throw new Error("This appointment is missing service details needed to check availability.");
       }
-      const staffSelectionMode = actionMode === "create" && !actionForm.staffID ? "anyone" : "specific";
+      const staffSelectionMode = aggregateStaffSelectionMode(segments);
       const result = await apiRequest<AvailabilityResult>(`/api/salons/${salon.id}/availability`, {
         method: "POST",
         body: JSON.stringify({
@@ -600,43 +949,73 @@ export function AppointmentsDashboard() {
           limit: 5
         })
       });
-      setActionAvailabilityResult(result);
+      if (requestID !== actionAvailabilityRequestIDRef.current) return;
+      const exactRetrySlots = actionForm.retryOfAttemptID
+        ? result.slots.filter((slot) => retrySlotMatchesStoredRequest(actionForm, slot))
+        : result.slots;
+      const nextResult = exactRetrySlots === result.slots ? result : { ...result, slots: exactRetrySlots };
+      setActionAvailabilityResult(nextResult);
+      if (actionForm.retryOfAttemptID && exactRetrySlots.length === 0) {
+        setActionAvailabilityError(
+          "The original requested time and technician assignments are no longer available. Close this retry and create a new request instead of changing this retry lineage."
+        );
+      }
+      scheduleAvailabilityExpiry(
+        actionAvailabilityExpiryTimerRef,
+        result.expires_at,
+        requestID,
+        actionAvailabilityRequestIDRef,
+        () => {
+          setActionAvailabilityResult(null);
+          setActionAvailabilityChecked(false);
+          setActionForm((current) => ({ ...current, selectedSlotKey: "" }));
+          setActionAvailabilityError("This availability quote expired. Check Square Appointments again before submitting.");
+        }
+      );
     } catch (err) {
+      if (requestID !== actionAvailabilityRequestIDRef.current) return;
       setActionAvailabilityResult(null);
       setActionAvailabilityError(
         err instanceof Error ? err.message : "Could not check Square Appointments availability."
       );
     } finally {
-      setCheckingActionAvailability(false);
+      if (requestID === actionAvailabilityRequestIDRef.current) {
+        setCheckingActionAvailability(false);
+      }
     }
   }
 
   async function submitCreateBooking() {
-    if (!salon || !selectedActionSlot) return;
+    if (!salon || !selectedActionSlot || !actionAvailabilityResult) return;
     setSavingAction(true);
     setActionError("");
     setActionNotice(null);
     try {
-      const staffSelectionMode = actionForm.staffID ? "specific" : "anyone";
-      const segments = slotBookingSegments(selectedActionSlot, actionForm.serviceID, staffSelectionMode);
+      assertAvailabilityQuoteUsable(actionAvailabilityResult, selectedActionSlot);
+	  const requestedSegments = actionAvailabilitySegments("create", actionForm, null);
+	  const segments = slotBookingSegments(selectedActionSlot, requestedSegments);
       if (segments.length === 0 || segments.some((segment) => !segment.staff_id)) {
         throw new Error("Select a returned Square slot before creating the booking.");
       }
+      const staffSelectionMode = aggregateStaffSelectionMode(segments);
+      const payload = {
+        retry_of_attempt_id: actionForm.retryOfAttemptID || undefined,
+        availability_quote_id: actionAvailabilityResult.quote_id,
+        slot_fingerprint: selectedActionSlot.fingerprint,
+        source: "owner_dashboard",
+        customer_name: actionForm.customerName,
+        customer_phone: actionForm.customerPhone,
+        customer_email: actionForm.customerEmail,
+        service_id: segments[0].service_id,
+        staff_id: segments[0].staff_id,
+        staff_selection_mode: staffSelectionMode,
+        segments,
+        start_time: selectedActionSlot.start_time,
+        notes: actionForm.notes
+      };
       const attempt = await apiRequest<BookingAttempt>(`/api/salons/${salon.id}/booking-attempts`, {
         method: "POST",
-        body: JSON.stringify({
-          operation_key: currentActionOperationKey(),
-          source: "owner_dashboard",
-          customer_name: actionForm.customerName,
-          customer_phone: actionForm.customerPhone,
-          customer_email: actionForm.customerEmail,
-          service_id: segments[0].service_id,
-          staff_id: segments[0].staff_id,
-          staff_selection_mode: staffSelectionMode,
-          segments,
-          start_time: selectedActionSlot.start_time,
-          notes: actionForm.notes
-        })
+        body: JSON.stringify({ ...payload, operation_key: operationKeyForPayload(actionOperationKeyRef, payload) })
       });
       if (attempt.status !== "confirmed" || !attempt.pos_booking_id) {
         setActionNotice({
@@ -666,16 +1045,29 @@ export function AppointmentsDashboard() {
     setActionError("");
     setActionNotice(null);
     try {
+      if (!actionAvailabilityResult) {
+        throw new Error("Check Square Appointments availability again before rescheduling.");
+      }
+      assertAvailabilityQuoteUsable(actionAvailabilityResult, selectedActionSlot);
+	  const requestedSegments = actionAvailabilitySegments("reschedule", actionForm, selectedAppointment);
+	  const segments = slotBookingSegments(selectedActionSlot, requestedSegments);
+	  if (segments.length === 0) {
+		throw new Error("Square availability did not preserve every requested service. Check availability again.");
+	  }
+      const payload = {
+        retry_of_attempt_id: actionForm.retryOfAttemptID || undefined,
+        availability_quote_id: actionAvailabilityResult.quote_id,
+        slot_fingerprint: selectedActionSlot.fingerprint,
+        start_time: selectedActionSlot.start_time,
+        staff_id: actionForm.staffID,
+        segments,
+        notes: actionForm.notes
+      };
       const response = await apiRequest<AppointmentRecord | BookingAttempt>(
         `/api/salons/${salon.id}/appointments/${selectedAppointment.id}/reschedule`,
         {
           method: "POST",
-          body: JSON.stringify({
-            operation_key: currentActionOperationKey(),
-            start_time: selectedActionSlot.start_time,
-            staff_id: actionForm.staffID,
-            notes: actionForm.notes
-          })
+          body: JSON.stringify({ ...payload, operation_key: operationKeyForPayload(actionOperationKeyRef, payload) })
         }
       );
       if (isBookingAttempt(response)) {
@@ -706,11 +1098,19 @@ export function AppointmentsDashboard() {
     setActionError("");
     setActionNotice(null);
     try {
+      const payload = {
+        retry_of_attempt_id: actionForm.retryOfAttemptID || undefined,
+        segments:
+          actionForm.preservedSegments.length > 0
+            ? actionForm.preservedSegments
+            : appointmentRequestSegments(selectedAppointment, ""),
+        reason: actionForm.cancelReason
+      };
       const response = await apiRequest<AppointmentRecord | BookingAttempt>(
         `/api/salons/${salon.id}/appointments/${selectedAppointment.id}/cancel`,
         {
           method: "POST",
-          body: JSON.stringify({ operation_key: currentActionOperationKey(), reason: actionForm.cancelReason })
+          body: JSON.stringify({ ...payload, operation_key: operationKeyForPayload(actionOperationKeyRef, payload) })
         }
       );
       if (isBookingAttempt(response)) {
@@ -733,13 +1133,6 @@ export function AppointmentsDashboard() {
     } finally {
       setSavingAction(false);
     }
-  }
-
-  function currentActionOperationKey() {
-    if (!actionOperationKeyRef.current) {
-      actionOperationKeyRef.current = crypto.randomUUID();
-    }
-    return actionOperationKeyRef.current;
   }
 
   if (loading) {
@@ -874,6 +1267,35 @@ export function AppointmentsDashboard() {
             timezone={salon.timezone}
             disabled={savingAction || !canRetryFallbackRequest(fallbackReviewRequest)}
             onRetry={retryFallbackRequest}
+            onReconcile={openReconciliationForRequest}
+          />
+        ) : null}
+      </Dialog>
+
+      <Dialog
+        open={Boolean(reconciliationTask)}
+        title="Resolve provider result"
+        description="Verify the result against provider-synced data before changing retry or confirmation state."
+        onClose={closeReconciliation}
+        closeDisabled={reconciliationSaving}
+        className="max-w-2xl"
+      >
+        {reconciliationTask && selectedReconciliationAttempt ? (
+          <ReconciliationDialog
+            task={reconciliationTask}
+            attempt={selectedReconciliationAttempt}
+            candidates={reconciliationCandidates}
+            candidatesLoading={reconciliationCandidatesLoading}
+            selectedCandidateID={reconciliationCandidateID}
+            note={reconciliationNote}
+            notCreatedConfirmed={reconciliationNotCreatedConfirmed}
+            timezone={salon.timezone}
+            saving={reconciliationSaving}
+            error={reconciliationError}
+            onCandidateChange={setReconciliationCandidateID}
+            onNoteChange={setReconciliationNote}
+            onNotCreatedConfirmedChange={setReconciliationNotCreatedConfirmed}
+            onResolve={(action) => void resolveReconciliation(action)}
           />
         ) : null}
       </Dialog>
@@ -902,9 +1324,7 @@ export function AppointmentsDashboard() {
             onShortcut={setDateFromShortcut}
             onChange={(value) => {
               setSelectedDate(value);
-              setAvailabilityResult(null);
-              setAvailabilityError("");
-              setAvailabilityChecked(false);
+              resetOverviewAvailability();
             }}
           />
 
@@ -947,9 +1367,7 @@ export function AppointmentsDashboard() {
                 value={availabilityServiceID}
                 onChange={(event) => {
                   setAvailabilityServiceID(event.target.value);
-                  setAvailabilityResult(null);
-                  setAvailabilityError("");
-                  setAvailabilityChecked(false);
+                  resetOverviewAvailability();
                 }}
                 disabled={!readyForAvailability || checkingAvailability}
               >
@@ -969,9 +1387,7 @@ export function AppointmentsDashboard() {
                 value={availabilityStaffID}
                 onChange={(event) => {
                   setAvailabilityStaffID(event.target.value);
-                  setAvailabilityResult(null);
-                  setAvailabilityError("");
-                  setAvailabilityChecked(false);
+                  resetOverviewAvailability();
                 }}
                 disabled={!readyForAvailability || checkingAvailability}
               >
@@ -1009,9 +1425,9 @@ export function AppointmentsDashboard() {
       <Card>
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
           <div>
-            <CardTitle>POS-confirmed appointments</CardTitle>
+            <CardTitle>Provider appointment records</CardTitle>
             <CardDescription>
-              These rows are confirmed only because Square Appointments returned a booking ID.
+              Accepted and rescheduled rows are POS-confirmed. Other provider states remain visibly distinct.
             </CardDescription>
           </div>
           <Badge value={appointments.length > 0 ? "active" : "disabled"} />
@@ -1019,7 +1435,7 @@ export function AppointmentsDashboard() {
 
         {appointmentListLoading ? (
           <div className="mt-4 rounded-md border border-line bg-slate-50 px-3 py-2 text-sm text-muted">
-            Loading POS-confirmed appointments...
+            Loading provider appointment records...
           </div>
         ) : null}
 
@@ -1027,7 +1443,7 @@ export function AppointmentsDashboard() {
           <EmptyState
             icon={<CalendarClock className="h-5 w-5 text-muted" />}
             title="No appointments yet"
-            message="POS-confirmed bookings will appear here after Square Appointments returns a booking ID."
+            message="Square Appointments records will appear here with their normalized operational status."
           >
             <Button
               type="button"
@@ -1048,6 +1464,7 @@ export function AppointmentsDashboard() {
               offset={appointmentOffset}
               hasMore={appointmentHasMore}
               busy={appointmentListLoading || savingAction}
+              itemLabel="provider appointment records"
               onPrevious={goToPreviousAppointmentPage}
               onNext={goToNextAppointmentPage}
               onLimitChange={updateAppointmentPageSize}
@@ -1122,12 +1539,96 @@ export function AppointmentsDashboard() {
               offset={appointmentOffset}
               hasMore={appointmentHasMore}
               busy={appointmentListLoading || savingAction}
+              itemLabel="provider appointment records"
               onPrevious={goToPreviousAppointmentPage}
               onNext={goToNextAppointmentPage}
               onLimitChange={updateAppointmentPageSize}
             />
           </>
         )}
+      </Card>
+
+      <Card>
+        <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+          <div>
+            <CardTitle>Provider reconciliation</CardTitle>
+            <CardDescription>
+              Unknown or pending provider outcomes stay blocked until a provider-synced appointment is matched or the owner verifies that the requested booking action was not applied.
+            </CardDescription>
+          </div>
+          <Badge
+            value={reconciliationListError ? "error" : reconciliationTasks.length > 0 ? "needs_review" : "disabled"}
+          />
+        </div>
+
+        {reconciliationLoading ? (
+          <div className="mt-4 rounded-md border border-line bg-slate-50 px-3 py-2 text-sm text-muted">
+            {reconciliationTasks.length > 0
+              ? "Loading more provider reconciliation tasks..."
+              : "Loading provider reconciliation tasks..."}
+          </div>
+        ) : null}
+
+        {reconciliationListError ? (
+          <div className="mt-4 space-y-3" role="alert">
+            <Alert title="Provider reconciliation unavailable" message={reconciliationListError} />
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={reconciliationLoading}
+              onClick={() => void reloadReconciliationTasks(salon.id)}
+            >
+              <RefreshCcw className="h-4 w-4" />
+              Reload reconciliation queue
+            </Button>
+          </div>
+        ) : null}
+
+        {!reconciliationLoading && !reconciliationListError && reconciliationTasks.length === 0 ? (
+          <EmptyState
+            icon={<ClipboardList className="h-5 w-5 text-muted" />}
+            title="No provider results need reconciliation"
+            message="Uncertain POS writes and provider-pending bookings will appear here without being marked confirmed."
+          />
+        ) : null}
+
+        {reconciliationTasks.length > 0 ? (
+          <>
+            <div className="mt-5 grid gap-3 lg:grid-cols-2">
+              {reconciliationTasks.map((task) => {
+                const attempt = reconciliationAttemptForTask(task, fallbackRequests);
+                return attempt ? (
+                  <ReconciliationTaskCard
+                    key={task.id}
+                    task={task}
+                    attempt={attempt}
+                    timezone={salon.timezone}
+                    disabled={reconciliationSaving}
+                    onReview={(task) => void openReconciliation(task)}
+                  />
+                ) : null;
+              })}
+            </div>
+            <div className="mt-4 flex flex-col justify-between gap-3 border-t border-line pt-4 text-sm text-muted sm:flex-row sm:items-center">
+              <span>
+                Showing {reconciliationTasks.length} open or escalated provider result
+                {reconciliationTasks.length === 1 ? "" : "s"}.
+              </span>
+              {reconciliationHasMore ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={reconciliationLoading}
+                  onClick={() => void loadMoreReconciliationTasks()}
+                >
+                  {reconciliationLoading ? "Loading more..." : "Load more provider results"}
+                </Button>
+              ) : (
+                <span>All currently open and escalated results are loaded.</span>
+              )}
+            </div>
+          </>
+        ) : null}
       </Card>
 
       <Card>
@@ -1261,10 +1762,51 @@ export function AppointmentsDashboard() {
   );
 }
 
+function emptyReconciliationPageState(): ReconciliationPageState {
+  return {
+    open: { offset: 0, hasMore: false },
+    escalated: { offset: 0, hasMore: false }
+  };
+}
+
+function cloneReconciliationPageState(state: ReconciliationPageState): ReconciliationPageState {
+  return {
+    open: { ...state.open },
+    escalated: { ...state.escalated }
+  };
+}
+
+function nextReconciliationPageState(
+  response: ReconciliationTasksResponse,
+  requestedOffset: number,
+  status: ReconciliationQueueStatus
+) {
+  if (response.has_more && response.tasks.length === 0) {
+    throw new Error(`Could not advance the ${status} reconciliation queue.`);
+  }
+  return {
+    offset: (response.offset ?? requestedOffset) + response.tasks.length,
+    hasMore: Boolean(response.has_more)
+  };
+}
+
+function mergeReconciliationTasks(...groups: BookingReconciliationTask[][]) {
+  const tasksByID = new Map<string, BookingReconciliationTask>();
+  for (const group of groups) {
+    for (const task of group) {
+      tasksByID.set(task.id, task);
+    }
+  }
+  return [...tasksByID.values()].sort((left, right) => {
+    const createdAtDifference = new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
+    return createdAtDifference || left.id.localeCompare(right.id);
+  });
+}
+
 function ReadinessPanel({ status }: { status: StatusResponse | null }) {
   const connection = status?.connection;
   const readiness = status?.readiness;
-  const connected = Boolean(connection?.id) && connection?.status !== "not_connected";
+  const connected = Boolean(connection?.id) && connection?.status === "active" && Boolean(connection?.last_sync_at);
   const locationSelected = Boolean(connection?.location_id);
   const readyForBookings =
     connected && locationSelected && (readiness?.service_count ?? 0) > 0 && (readiness?.staff_count ?? 0) > 0;
@@ -1484,21 +2026,32 @@ function BookingActionPanel({
 }) {
   const title =
     mode === "create" ? "New booking" : mode === "reschedule" ? "Reschedule appointment" : "Cancel appointment";
+  const retrying = Boolean(form.retryOfAttemptID);
+  const retryServiceLabel = segmentServiceNames(form.preservedSegments, bookableServices);
+  const retryStaffLabel = segmentStaffNames(form.preservedSegments, bookableStaff);
   const canCheckAvailability =
     readyForManualBooking &&
     !availabilityLoading &&
     !saving &&
     Boolean(form.preferredDate) &&
-    (mode === "create" ? Boolean(form.serviceID) : Boolean(selectedAppointment));
+    (mode === "create" ? Boolean(form.serviceID || form.preservedSegments.length > 0) : Boolean(selectedAppointment));
   const canSubmitCreate =
     mode === "create" &&
     readyForManualBooking &&
     Boolean(selectedSlot) &&
+    Boolean(selectedSlot?.fingerprint) &&
+    availabilityQuoteIsUsable(availabilityResult) &&
     Boolean(form.customerName.trim()) &&
     Boolean(form.customerPhone.trim()) &&
     !saving;
   const canSubmitReschedule =
-    mode === "reschedule" && readyForManualBooking && Boolean(selectedAppointment) && Boolean(selectedSlot) && !saving;
+    mode === "reschedule" &&
+    readyForManualBooking &&
+    Boolean(selectedAppointment) &&
+    Boolean(selectedSlot) &&
+    Boolean(selectedSlot?.fingerprint) &&
+    availabilityQuoteIsUsable(availabilityResult) &&
+    !saving;
 
   return (
     <div>
@@ -1518,20 +2071,29 @@ function BookingActionPanel({
         <CancelAppointmentForm
           appointment={selectedAppointment}
           reason={form.cancelReason}
+          retrying={retrying}
           saving={saving}
           onReasonChange={(value) => onChange({ cancelReason: value })}
           onSubmit={onCancelAppointment}
         />
       ) : (
         <div className="mt-5 grid gap-5">
+          {retrying ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+              <div className="font-semibold">Retrying a stored POS request</div>
+              <div className="mt-1 leading-6">
+                The original customer, time, notes, ordered service segments, technician assignments, and retry lineage are locked. Availability must return that exact request before it can be retried.
+              </div>
+            </div>
+          ) : null}
           {mode === "create" ? (
-            <CustomerFields form={form} disabled={saving} onChange={onChange} />
+            <CustomerFields form={form} disabled={saving || retrying} onChange={onChange} />
           ) : (
             <AppointmentActionSummary appointment={selectedAppointment} timezone={timezone} />
           )}
 
           <div className="grid gap-4 lg:grid-cols-3">
-            {mode === "create" ? (
+            {mode === "create" && !retrying ? (
               <label className="block">
                 <span className="text-sm font-medium text-ink">Service</span>
                 <select
@@ -1550,26 +2112,32 @@ function BookingActionPanel({
                   ))}
                 </select>
               </label>
+            ) : mode === "create" ? (
+              <ReadOnlyField label="Services" value={retryServiceLabel} />
             ) : (
               <ReadOnlyField label="Services" value={selectedAppointment ? serviceNamesLabel(selectedAppointment) : "-"} />
             )}
 
-            <label className="block">
-              <span className="text-sm font-medium text-ink">Staff</span>
-              <select
-                className={selectClassName}
-                value={form.staffID}
-                onChange={(event) => onChange({ staffID: event.target.value, selectedSlotKey: "" })}
-                disabled={!readyForManualBooking || saving || availabilityLoading}
-              >
-                <option value="">{mode === "create" ? "Anyone available" : "Keep assigned technicians"}</option>
-                {bookableStaff.map((item) => (
-                  <option key={item.id} value={item.id ?? ""}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+            {retrying ? (
+              <ReadOnlyField label="Technician assignments" value={retryStaffLabel} />
+            ) : (
+              <label className="block">
+                <span className="text-sm font-medium text-ink">Staff</span>
+                <select
+                  className={selectClassName}
+                  value={form.staffID}
+                  onChange={(event) => onChange({ staffID: event.target.value, selectedSlotKey: "" })}
+                  disabled={!readyForManualBooking || saving || availabilityLoading}
+                >
+                  <option value="">{mode === "create" ? "Anyone available" : "Keep assigned technicians"}</option>
+                  {bookableStaff.map((item) => (
+                    <option key={item.id} value={item.id ?? ""}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
 
             <label className="block">
               <span className="text-sm font-medium text-ink">Date</span>
@@ -1578,7 +2146,7 @@ function BookingActionPanel({
                 type="date"
                 value={form.preferredDate}
                 onChange={(event) => onChange({ preferredDate: event.target.value, selectedSlotKey: "" })}
-                disabled={!readyForManualBooking || saving || availabilityLoading}
+                disabled={!readyForManualBooking || saving || availabilityLoading || retrying}
               />
             </label>
           </div>
@@ -1590,7 +2158,7 @@ function BookingActionPanel({
               value={form.notes}
               onChange={(event) => onChange({ notes: event.target.value })}
               placeholder={mode === "create" ? "First visit, preferred color, or owner notes" : "Reason for the new time"}
-              disabled={saving}
+              disabled={saving || retrying}
             />
           </label>
 
@@ -1612,6 +2180,7 @@ function BookingActionPanel({
             checked={availabilityChecked}
             loading={availabilityLoading}
             result={availabilityResult}
+            retrying={retrying}
             selectedSlotKey={selectedSlotKey}
             timezone={timezone}
             onSelect={onSelectSlot}
@@ -1717,12 +2286,14 @@ function AppointmentActionSummary({
 function CancelAppointmentForm({
   appointment,
   reason,
+  retrying,
   saving,
   onReasonChange,
   onSubmit
 }: {
   appointment: AppointmentRecord | null;
   reason: string;
+  retrying: boolean;
   saving: boolean;
   onReasonChange: (value: string) => void;
   onSubmit: () => void;
@@ -1730,6 +2301,11 @@ function CancelAppointmentForm({
   return (
     <div className="mt-5 grid gap-5">
       <AppointmentActionSummary appointment={appointment} />
+      {retrying ? (
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
+          This retry keeps the original cancellation reason and request lineage. Close it and start a new cancellation if the reason must change.
+        </div>
+      ) : null}
       <label className="block">
         <span className="text-sm font-medium text-ink">Cancellation reason</span>
         <textarea
@@ -1737,7 +2313,7 @@ function CancelAppointmentForm({
           value={reason}
           onChange={(event) => onReasonChange(event.target.value)}
           placeholder="Customer requested cancellation"
-          disabled={saving}
+          disabled={saving || retrying}
         />
       </label>
       <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
@@ -1767,6 +2343,7 @@ function ActionAvailabilitySlots({
   checked,
   loading,
   result,
+  retrying,
   selectedSlotKey,
   timezone,
   onSelect
@@ -1774,6 +2351,7 @@ function ActionAvailabilitySlots({
   checked: boolean;
   loading: boolean;
   result: AvailabilityResult | null;
+  retrying: boolean;
   selectedSlotKey: string;
   timezone?: string;
   onSelect: (slot: AvailabilitySlot) => void;
@@ -1798,12 +2376,19 @@ function ActionAvailabilitySlots({
       <EmptyState
         icon={<CalendarSearch className="h-5 w-5 text-muted" />}
         title="No available slots returned"
-        message="Try another day, service, or technician before submitting this POS action."
+        message={
+          retrying
+            ? "The original requested time and technician assignments are unavailable. Close this retry and create a new request if the booking details must change."
+            : "Try another day, service, or technician before submitting this POS action."
+        }
       />
     );
   }
   return (
     <div className="space-y-3">
+      <div className="rounded-md border border-line bg-slate-50 px-3 py-2 text-xs leading-5 text-muted">
+        Availability quote valid until {formatQuoteExpiry(result.expires_at, timezone)}. Changing service, technician, or date requires a new check.
+      </div>
       {result.slots.map((slot) => {
         const key = slotKey(slot);
         const selected = key === selectedSlotKey;
@@ -2026,7 +2611,7 @@ function DaySchedule({
       title: item.customer_name,
       subtitle: bookingSummaryLabel(item, serviceNames, staffNames),
       status: item.status,
-      detail: item.pos_appointment_id ? "POS-confirmed: Square booking ID returned" : "POS booking ID missing"
+      detail: appointmentOperationalDetail(item)
     })),
     ...pendingRequests.map((item) => ({
       id: `pending-${item.id}`,
@@ -2138,6 +2723,9 @@ function AvailabilitySlotsPanel({
         <div className="mt-1 text-xs leading-5 text-muted">
           AI can offer these slots, but booking still requires Square Appointments confirmation
           {result.timezone ? ` (${result.timezone})` : ""}.
+        </div>
+        <div className="mt-1 text-xs leading-5 text-muted">
+          Quote valid until {formatQuoteExpiry(result.expires_at, timezone)}.
         </div>
       </div>
       {slots.map((slot) => (
@@ -2336,12 +2924,14 @@ function FallbackReviewDialog({
   request,
   timezone,
   disabled,
-  onRetry
+  onRetry,
+  onReconcile
 }: {
   request: BookingAttempt;
   timezone?: string;
   disabled: boolean;
   onRetry: (request: BookingAttempt) => void;
+  onReconcile: (request: BookingAttempt) => void;
 }) {
   const action = fallbackBookingAction(request);
   const retryDisabledReason = fallbackRetryDisabledReason(request);
@@ -2394,9 +2984,199 @@ function FallbackReviewDialog({
       ) : null}
 
       <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:justify-end">
+        {request.reconciliation_status === "required" ? (
+          <Button type="button" variant="secondary" onClick={() => onReconcile(request)}>
+            Resolve provider result
+          </Button>
+        ) : null}
         <Button type="button" onClick={() => onRetry(request)} disabled={disabled}>
           <RefreshCcw className="h-4 w-4" />
           {fallbackRetryLabel(request)}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+type ReconciliationAction = "provider_attached" | "not_created" | "escalated";
+
+function ReconciliationTaskCard({
+  task,
+  attempt,
+  timezone,
+  disabled,
+  onReview
+}: {
+  task: BookingReconciliationTask;
+  attempt: BookingAttempt;
+  timezone?: string;
+  disabled: boolean;
+  onReview: (task: BookingReconciliationTask) => void;
+}) {
+  return (
+    <div className="rounded-md border border-amber-200 bg-amber-50 p-4">
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div>
+          <div className="text-sm font-semibold text-ink">{attempt.customer_name || "Unknown customer"}</div>
+          <div className="mt-1 text-xs text-muted">{attempt.customer_phone || "No customer phone"}</div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Badge value={attempt.operation_type || fallbackBookingAction(attempt)} />
+          <Badge value={task.status === "escalated" ? "escalated" : "needs_review"} />
+        </div>
+      </div>
+      <div className="mt-3 text-sm font-medium text-ink">
+        {formatDate(attempt.requested_start_time, timezone)} {formatTimeRange(attempt.requested_start_time, attempt.requested_end_time, timezone)}
+      </div>
+      <div className="mt-2 text-sm leading-6 text-amber-900">
+        {attempt.error_message || "The provider result is not safe to retry or confirm without reconciliation."}
+      </div>
+      <Button type="button" className="mt-4" variant="secondary" onClick={() => onReview(task)} disabled={disabled}>
+        Review provider result
+      </Button>
+    </div>
+  );
+}
+
+function ReconciliationDialog({
+  task,
+  attempt,
+  candidates,
+  candidatesLoading,
+  selectedCandidateID,
+  note,
+  notCreatedConfirmed,
+  timezone,
+  saving,
+  error,
+  onCandidateChange,
+  onNoteChange,
+  onNotCreatedConfirmedChange,
+  onResolve
+}: {
+  task: BookingReconciliationTask;
+  attempt: BookingAttempt;
+  candidates: BookingReconciliationCandidate[];
+  candidatesLoading: boolean;
+  selectedCandidateID: string;
+  note: string;
+  notCreatedConfirmed: boolean;
+  timezone?: string;
+  saving: boolean;
+  error: string;
+  onCandidateChange: (value: string) => void;
+  onNoteChange: (value: string) => void;
+  onNotCreatedConfirmedChange: (value: boolean) => void;
+  onResolve: (action: ReconciliationAction) => void;
+}) {
+  const operation = attempt.operation_type || fallbackBookingAction(attempt);
+  const providerMutationVisible = candidates.length > 0;
+  const notCreatedBlocked =
+    attempt.status === "provider_pending" ||
+    (operation === "book" && Boolean(attempt.pos_booking_id)) ||
+    providerMutationVisible;
+  const notCreatedBlockedReason =
+    attempt.status === "provider_pending"
+      ? " The provider result is still pending and must be reconciled first."
+      : operation === "book" && attempt.pos_booking_id
+        ? " A provider booking ID already exists, so the booking must be attached or escalated."
+        : providerMutationVisible
+          ? " The latest provider-synced version shows that this booking or appointment action exists."
+          : "";
+  return (
+    <div>
+      <div className="rounded-md border border-line bg-slate-50 p-4">
+        <div className="flex flex-wrap gap-2">
+          <Badge value={attempt.operation_type || fallbackBookingAction(attempt)} />
+          <Badge value={attempt.provider_outcome} />
+          <Badge value={task.status} />
+        </div>
+        <InfoGrid
+          items={[
+            ["Customer", attempt.customer_name || "Unknown customer"],
+            ["Phone", attempt.customer_phone || "Unavailable"],
+            ["Requested", `${formatDate(attempt.requested_start_time, timezone)} ${formatTimeRange(attempt.requested_start_time, attempt.requested_end_time, timezone)}`],
+            ["Provider", attempt.pos_provider],
+            ["Provider booking ID", attempt.pos_booking_id || "Not returned"],
+            ["Retry policy", retryPolicyLabel(attempt)]
+          ]}
+        />
+      </div>
+
+      <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
+        Check Square Appointments first. A request is confirmed only by linking the exact appointment already imported by provider calendar sync.
+      </div>
+
+      <label className="mt-4 block text-sm font-medium text-ink">
+        Matching provider-synced appointment
+        <select
+          className="mt-2 h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink"
+          value={selectedCandidateID}
+          onChange={(event) => onCandidateChange(event.target.value)}
+          disabled={saving || candidatesLoading || candidates.length === 0}
+        >
+          <option value="">Select a verified Square appointment</option>
+          {candidates.map((candidate) => (
+            <option key={candidate.appointment_id} value={candidate.appointment_id}>
+              {formatDate(candidate.start_time, timezone)} {formatTimeRange(candidate.start_time, candidate.end_time, timezone)} · {candidate.customer_name} · {candidate.provider_appointment_id}
+            </option>
+          ))}
+        </select>
+      </label>
+      {candidatesLoading ? (
+        <div className="mt-2 text-xs leading-5 text-muted">Loading exact provider-synced matches...</div>
+      ) : candidates.length === 0 ? (
+        <div className="mt-2 text-xs leading-5 text-muted">
+          No exact provider-synced match is loaded. Sync the Square calendar and refresh before attaching a booking.
+        </div>
+      ) : null}
+
+      <label className="mt-4 block text-sm font-medium text-ink">
+        Resolution note
+        <textarea
+          className="mt-2 min-h-24 w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink"
+          value={note}
+          maxLength={2000}
+          onChange={(event) => onNoteChange(event.target.value)}
+          placeholder="What was verified in Square Appointments?"
+          disabled={saving}
+        />
+      </label>
+
+      <label className="mt-4 flex items-start gap-3 rounded-md border border-line bg-slate-50 p-3 text-sm leading-6 text-ink">
+        <input
+          className="mt-1 h-4 w-4"
+          type="checkbox"
+          checked={notCreatedConfirmed}
+          onChange={(event) => onNotCreatedConfirmedChange(event.target.checked)}
+          disabled={saving || candidatesLoading || notCreatedBlocked}
+        />
+        <span>
+          I checked Square Appointments and verified that this action did not create or change a booking.
+          {notCreatedBlockedReason}
+        </span>
+      </label>
+
+      {error ? <div className="mt-4"><Alert title="Reconciliation failed" message={error} /></div> : null}
+
+      <div className="mt-5 grid gap-3 sm:grid-cols-3">
+        <Button
+          type="button"
+          onClick={() => onResolve("provider_attached")}
+          disabled={saving || !selectedCandidateID}
+        >
+          {saving ? "Saving..." : "Attach verified booking"}
+        </Button>
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={() => onResolve("not_created")}
+          disabled={saving || candidatesLoading || notCreatedBlocked || !notCreatedConfirmed}
+        >
+          {operation === "book" ? "Mark not created" : "Mark action not applied"}
+        </Button>
+        <Button type="button" variant="secondary" onClick={() => onResolve("escalated")} disabled={saving}>
+          Escalate review
         </Button>
       </div>
     </div>
@@ -2463,6 +3243,16 @@ function formatTimeRange(start: string, end: string, timezone?: string) {
   return `${startLabel} - ${endLabel}`;
 }
 
+function formatQuoteExpiry(value: string | undefined, timezone?: string) {
+  if (!value) return "an unknown time";
+  return new Date(value).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZone: timezone
+  });
+}
+
 function formatDateInput(date: Date, timezone?: string) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     day: "2-digit",
@@ -2472,6 +3262,60 @@ function formatDateInput(date: Date, timezone?: string) {
   }).formatToParts(date);
   const values = new Map(parts.map((part) => [part.type, part.value]));
   return `${values.get("year")}-${values.get("month")}-${values.get("day")}`;
+}
+
+function addDaysInput(value: string, days: number) {
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day + days));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(
+    date.getUTCDate()
+  ).padStart(2, "0")}`;
+}
+
+function clearAvailabilityExpiryTimer(ref: { current: ReturnType<typeof setTimeout> | null }) {
+  if (ref.current) {
+    clearTimeout(ref.current);
+    ref.current = null;
+  }
+}
+
+function scheduleAvailabilityExpiry(
+  timerRef: { current: ReturnType<typeof setTimeout> | null },
+  expiresAt: string | undefined,
+  requestID: number,
+  requestIDRef: { current: number },
+  onExpire: () => void
+) {
+  clearAvailabilityExpiryTimer(timerRef);
+  if (!expiresAt) return;
+  const expiresAtMs = new Date(expiresAt).getTime();
+  const delay = expiresAtMs - Date.now();
+  if (!Number.isFinite(expiresAtMs) || delay <= 0) {
+    if (requestID === requestIDRef.current) onExpire();
+    return;
+  }
+  timerRef.current = setTimeout(() => {
+    if (requestID !== requestIDRef.current) return;
+    requestIDRef.current += 1;
+    timerRef.current = null;
+    onExpire();
+  }, Math.min(delay, 2_147_483_647));
+}
+
+function assertAvailabilityQuoteUsable(result: AvailabilityResult, slot: AvailabilitySlot) {
+  if (!result.quote_id || !result.request_fingerprint || !result.expires_at || !slot.fingerprint) {
+    throw new Error("Square availability did not return a verifiable quote. Check availability again.");
+  }
+  const expiresAt = new Date(result.expires_at).getTime();
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    throw new Error("This availability quote expired. Check Square Appointments again before submitting.");
+  }
+}
+
+function availabilityQuoteIsUsable(result: AvailabilityResult | null) {
+  if (!result?.quote_id || !result.request_fingerprint || !result.expires_at) return false;
+  const expiresAt = new Date(result.expires_at).getTime();
+  return Number.isFinite(expiresAt) && expiresAt > Date.now();
 }
 
 function sameDateInput(value: string, selectedDate: string, timezone?: string) {
@@ -2520,7 +3364,7 @@ function staffIsBookable(member: POSStaffMember) {
 function bookingPathReady(status: StatusResponse | null) {
   const connection = status?.connection;
   const readiness = status?.readiness;
-  const connected = Boolean(connection?.id) && connection?.status !== "not_connected";
+  const connected = Boolean(connection?.id) && connection?.status === "active" && Boolean(connection?.last_sync_at);
   const locationSelected = Boolean(connection?.location_id);
   return connected && locationSelected && (readiness?.service_count ?? 0) > 0 && (readiness?.staff_count ?? 0) > 0;
 }
@@ -2535,7 +3379,11 @@ function emptyActionForm(preferredDate: string): AppointmentActionForm {
     preferredDate,
     selectedSlotKey: "",
     notes: "",
-    cancelReason: ""
+    cancelReason: "",
+    preservedSegments: [],
+    retryOfAttemptID: "",
+    retryRequestedStartTime: "",
+    retryRequestedEndTime: ""
   };
 }
 
@@ -2545,6 +3393,9 @@ function actionAvailabilitySegments(
   appointment: AppointmentRecord | null
 ): BookingSegmentRequest[] {
   if (mode === "create") {
+    if (form.preservedSegments.length > 0) {
+      return form.preservedSegments;
+    }
     return [
       {
         service_id: form.serviceID,
@@ -2555,6 +3406,9 @@ function actionAvailabilitySegments(
   }
   if (mode !== "reschedule" || !appointment) {
     return [];
+  }
+  if (form.preservedSegments.length > 0) {
+    return form.preservedSegments;
   }
   return appointmentRequestSegments(appointment, form.staffID);
 }
@@ -2583,22 +3437,28 @@ function appointmentRequestSegments(appointment: AppointmentRecord, staffID: str
 
 function slotBookingSegments(
   slot: AvailabilitySlot,
-  fallbackServiceID: string,
-  staffSelectionMode: StaffSelectionMode
+	requestedSegments: BookingSegmentRequest[]
 ): BookingSegmentRequest[] {
   const segments = slot.segments ?? [];
   if (segments.length > 0) {
-    return segments.map((segment) => ({
-      service_id: segment.service_id,
-      staff_id: segment.staff_id ?? "",
-      staff_selection_mode: staffSelectionMode
-    }));
+	return segments.map((segment, index) => {
+	  const requested = requestedSegments[index];
+	  const staffID = segment.staff_id ?? "";
+	  return {
+		service_id: segment.service_id,
+		staff_id: staffID,
+		staff_selection_mode: staffMode(requested?.staff_selection_mode ?? segment.staff_selection_mode, staffID)
+	  };
+	});
   }
+	if (requestedSegments.length !== 1) return [];
+	const requested = requestedSegments[0];
+	const staffID = slot.staff_id ?? "";
   return [
     {
-      service_id: fallbackServiceID,
-      staff_id: slot.staff_id ?? "",
-      staff_selection_mode: staffSelectionMode
+	  service_id: requested.service_id,
+	  staff_id: staffID,
+	  staff_selection_mode: staffMode(requested.staff_selection_mode ?? slot.staff_selection_mode, staffID)
     }
   ];
 }
@@ -2614,8 +3474,64 @@ function appointmentPrimaryServiceID(appointment: AppointmentRecord) {
   return orderedSegments(appointment).find((segment) => segment.service_id)?.service_id ?? appointment.service_id ?? "";
 }
 
+function aggregateStaffSelectionMode(segments: BookingSegmentRequest[]): StaffSelectionMode {
+  return segments.some((segment) => segment.staff_selection_mode === "anyone") ? "anyone" : "specific";
+}
+
+function segmentServiceNames(segments: BookingSegmentRequest[], services: POSService[]) {
+  const names = new Map(services.flatMap((service) => (service.id ? [[service.id, service.name] as const] : [])));
+  const values = segments.map((segment) => names.get(segment.service_id) || "Unavailable service");
+  return values.length > 0 ? values.join(" + ") : "Service details unavailable";
+}
+
+function segmentStaffNames(segments: BookingSegmentRequest[], staff: POSStaffMember[]) {
+  const names = new Map(staff.flatMap((member) => (member.id ? [[member.id, member.name] as const] : [])));
+  const values = segments.map((segment) =>
+    segment.staff_selection_mode === "anyone"
+      ? "Anyone available"
+      : names.get(segment.staff_id ?? "") || "Assigned technician unavailable"
+  );
+  return values.length > 0 ? values.join(" + ") : "Technician details unavailable";
+}
+
+function bookingAttemptRetrySegments(request: BookingAttempt): BookingSegmentRequest[] {
+  const segments = orderedSegments(request);
+  if (segments.length > 0) {
+    return segments.map((segment) => ({
+      service_id: segment.service_id ?? request.service_id ?? "",
+      staff_id: segment.staff_id ?? "",
+      staff_selection_mode: staffMode(segment.staff_selection_mode, segment.staff_id ?? "")
+    }));
+  }
+  return [
+    {
+      service_id: request.service_id ?? "",
+      staff_id: request.staff_id ?? "",
+      staff_selection_mode: staffMode(request.staff_selection_mode, request.staff_id ?? "")
+    }
+  ];
+}
+
 function canChangeAppointment(appointment: AppointmentRecord) {
-  return appointment.status !== "cancelled" && Boolean(appointment.pos_appointment_id);
+  if (appointment.can_edit === false && appointment.can_cancel === false) return false;
+  return isPOSConfirmedStatus(appointment.status) && Boolean(appointment.pos_appointment_id);
+}
+
+function isPOSConfirmedStatus(status: string) {
+  return status === "confirmed" || status === "rescheduled";
+}
+
+function appointmentOperationalDetail(appointment: AppointmentRecord) {
+  if (isPOSConfirmedStatus(appointment.status) && appointment.pos_appointment_id) {
+    return "POS-confirmed: the provider returned a booking ID.";
+  }
+  if (appointment.status === "provider_pending") {
+    return "Provider pending: this is not a confirmed appointment yet.";
+  }
+  if (appointment.status === "declined") return "Provider declined this appointment.";
+  if (appointment.status === "no_show") return "Provider marked this appointment as no-show.";
+  if (appointment.status === "cancelled") return "Provider marked this appointment as cancelled.";
+  return "Provider status is unknown; verify this appointment before acting.";
 }
 
 function isBookingAttempt(response: AppointmentRecord | BookingAttempt): response is BookingAttempt {
@@ -2665,7 +3581,11 @@ function canRetryFallbackRequest(request: BookingAttempt) {
   }
   const action = fallbackBookingAction(request);
   if (action === "book") {
-    return Boolean(bookingAttemptPrimaryServiceID(request) && request.customer_name.trim() && request.customer_phone.trim());
+	const storedSegments = orderedSegments(request);
+	const hasEveryService = storedSegments.length > 0
+	  ? storedSegments.every((segment) => Boolean(segment.service_id))
+	  : Boolean(request.service_id);
+	return hasEveryService && Boolean(request.customer_name.trim() && request.customer_phone.trim());
   }
   return Boolean(request.appointment && canChangeAppointment(request.appointment));
 }
@@ -2699,6 +3619,44 @@ function reconciliationLabel(request: BookingAttempt) {
   return "Not required";
 }
 
+function reconciliationAttemptForTask(
+  task: BookingReconciliationTask | null,
+  fallbackRequests: BookingAttempt[]
+) {
+  if (!task) return null;
+  return fallbackRequests.find((item) => item.id === task.booking_attempt_id) ?? task.booking_attempt ?? null;
+}
+
+function retrySlotMatchesStoredRequest(form: AppointmentActionForm, slot: AvailabilitySlot) {
+  if (!form.retryRequestedStartTime || !form.retryRequestedEndTime || form.preservedSegments.length === 0) {
+    return false;
+  }
+  if (
+    new Date(slot.start_time).getTime() !== new Date(form.retryRequestedStartTime).getTime() ||
+    new Date(slot.end_time).getTime() !== new Date(form.retryRequestedEndTime).getTime()
+  ) {
+    return false;
+  }
+  const slotSegments = slotBookingSegments(slot, form.preservedSegments);
+  return slotSegments.length === form.preservedSegments.length && slotSegments.every((segment, index) => {
+    const stored = form.preservedSegments[index];
+    return segment.service_id === stored.service_id &&
+      (segment.staff_id ?? "") === (stored.staff_id ?? "") &&
+      segment.staff_selection_mode === stored.staff_selection_mode;
+  });
+}
+
+function operationKeyForPayload(
+  ref: { current: { key: string; fingerprint: string } | null },
+  payload: Record<string, unknown>
+) {
+  const fingerprint = JSON.stringify(payload);
+  if (!ref.current || ref.current.fingerprint !== fingerprint) {
+    ref.current = { key: crypto.randomUUID(), fingerprint };
+  }
+  return ref.current.key;
+}
+
 function bookingAttemptPrimaryServiceID(request: BookingAttempt) {
   return orderedSegments(request).find((segment) => segment.service_id)?.service_id ?? request.service_id ?? "";
 }
@@ -2711,7 +3669,7 @@ function bookingAttemptRetryStaffID(request: BookingAttempt) {
 }
 
 function slotKey(slot: AvailabilitySlot) {
-  return `${slot.start_time}-${slot.end_time}-${slot.staff_id || assignedTechniciansLabel(slot)}`;
+  return slot.fingerprint || `${slot.start_time}-${slot.end_time}-${slot.staff_id || assignedTechniciansLabel(slot)}`;
 }
 
 const inputClassName =

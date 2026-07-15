@@ -26,7 +26,7 @@ func (SalonSettings) Fields() []ent.Field {
 		field.Bool("sms_reminder_enabled").Default(true),
 		field.Int("reminder_hours_before").Default(24),
 		field.Bool("handoff_enabled").Default(true),
-		field.Bool("consultation_enabled").Default(true),
+		field.Bool("consultation_enabled").Default(false),
 		field.Time("created_at").Default(time.Now),
 		field.Time("updated_at").Default(time.Now).UpdateDefault(time.Now),
 	}

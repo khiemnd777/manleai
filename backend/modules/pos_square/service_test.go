@@ -1,6 +1,8 @@
 package pos_square
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -150,6 +152,166 @@ func TestBuildReadinessBlocksTestBookingWithoutBookableRecords(t *testing.T) {
 	}
 }
 
+func TestTestBookingRequestMappersForwardSafeRetryLineage(t *testing.T) {
+	const createAttemptID = "00000000-0000-4000-8000-000000000041"
+	createRequest := normalizeTestBookingRequest("salon_1", TestBookingRequest{
+		OperationKey:     " create-retry ",
+		RetryOfAttemptID: " " + createAttemptID + " ",
+	})
+	create := testBookingCreateRequest(createRequest)
+	if create.RetryOfAttemptID != createAttemptID {
+		t.Fatalf("create retry_of_attempt_id = %q, want %q", create.RetryOfAttemptID, createAttemptID)
+	}
+	if create.Source != booking.SourceSquareTestBooking {
+		t.Fatalf("create source = %q, want %q", create.Source, booking.SourceSquareTestBooking)
+	}
+
+	const cancelAttemptID = "00000000-0000-4000-8000-000000000051"
+	cancelRequest := normalizeCancelTestBookingRequest("salon_1", CancelTestBookingRequest{
+		OperationKey:     " cancel-retry ",
+		RetryOfAttemptID: " " + cancelAttemptID + " ",
+	})
+	cancel := testBookingCancelRequest(cancelRequest)
+	if cancel.RetryOfAttemptID != cancelAttemptID {
+		t.Fatalf("cancel retry_of_attempt_id = %q, want %q", cancel.RetryOfAttemptID, cancelAttemptID)
+	}
+	if cancel.Source != booking.SourceSquareTestBooking {
+		t.Fatalf("cancel source = %q, want %q", cancel.Source, booking.SourceSquareTestBooking)
+	}
+}
+
+func TestCreateTestBookingReplaysBeforeReadinessGate(t *testing.T) {
+	startTime := time.Date(2026, 7, 15, 16, 0, 0, 0, time.UTC)
+	replayed := &booking.BookingAttempt{
+		ID:                 "attempt_1",
+		Status:             booking.StatusConfirmed,
+		OperationType:      booking.BookingActionBook,
+		POSBookingID:       "square_booking_1",
+		Appointment:        &booking.Appointment{ID: "appointment_1", Status: booking.StatusConfirmed},
+		OperationKey:       "square-test-create-replay",
+		CustomerName:       "Linh Tran",
+		CustomerPhone:      "+13125550101",
+		ServiceID:          "service_1",
+		StaffID:            "staff_1",
+		RequestedStartTime: startTime,
+	}
+	operations := &fakeBookingOperationService{replayCreateAttempt: replayed, replayCreateFound: true}
+	readinessCalls := 0
+	service := &Service{
+		bookingService: operations,
+		readinessLoader: func(context.Context, string, string) (*ReadinessStatus, error) {
+			readinessCalls++
+			return &ReadinessStatus{CanTestBooking: false}, nil
+		},
+	}
+
+	response, err := service.CreateTestBooking(context.Background(), "salon_1", "owner_1", TestBookingRequest{
+		OperationKey:        "square-test-create-replay",
+		AvailabilityQuoteID: "00000000-0000-4000-8000-000000000040",
+		SlotFingerprint:     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		CustomerName:        "Linh Tran",
+		CustomerPhone:       "+13125550101",
+		ServiceID:           "service_1",
+		StaffID:             "staff_1",
+		StartTime:           startTime,
+	})
+	if err != nil {
+		t.Fatalf("CreateTestBooking replay returned error: %v", err)
+	}
+	if response == nil || response.BookingAttempt != replayed || response.Appointment != replayed.Appointment {
+		t.Fatalf("CreateTestBooking response = %#v, want hydrated replay", response)
+	}
+	if operations.replayCreateCalls != 1 || operations.createCalls != 0 || readinessCalls != 1 {
+		t.Fatalf("calls replay=%d create=%d readiness=%d, want 1/0/1", operations.replayCreateCalls, operations.createCalls, readinessCalls)
+	}
+}
+
+func TestCreateTestBookingNewOperationStillHonorsReadinessGate(t *testing.T) {
+	operations := &fakeBookingOperationService{}
+	service := &Service{
+		bookingService: operations,
+		readinessLoader: func(context.Context, string, string) (*ReadinessStatus, error) {
+			return &ReadinessStatus{CanTestBooking: false}, nil
+		},
+	}
+
+	response, err := service.CreateTestBooking(context.Background(), "salon_1", "owner_1", TestBookingRequest{
+		OperationKey:        "square-test-create-new",
+		AvailabilityQuoteID: "00000000-0000-4000-8000-000000000040",
+		SlotFingerprint:     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		ServiceID:           "service_1",
+		StaffID:             "staff_1",
+		StartTime:           time.Date(2026, 7, 15, 16, 0, 0, 0, time.UTC),
+	})
+	if !errors.Is(err, ErrReadinessGate) || response != nil {
+		t.Fatalf("CreateTestBooking response=%#v err=%v, want readiness gate", response, err)
+	}
+	if operations.replayCreateCalls != 1 || operations.createCalls != 0 {
+		t.Fatalf("calls replay=%d create=%d, want 1/0", operations.replayCreateCalls, operations.createCalls)
+	}
+}
+
+func TestCancelTestBookingReplaysBeforeLatestCancelledGate(t *testing.T) {
+	appointment := &booking.Appointment{ID: "appointment_1", Status: booking.StatusCancelled}
+	attempt := &booking.BookingAttempt{ID: "attempt_cancel_1", Status: booking.StatusCancelled, OperationType: booking.BookingActionCancel}
+	operations := &fakeBookingOperationService{
+		latest: &booking.TestBookingRecord{
+			AppointmentID:     appointment.ID,
+			AppointmentStatus: booking.StatusCancelled,
+		},
+		replayCancelAppointment: appointment,
+		replayCancelAttempt:     attempt,
+		replayCancelFound:       true,
+	}
+	service := &Service{
+		bookingService: operations,
+		readinessLoader: func(context.Context, string, string) (*ReadinessStatus, error) {
+			return &ReadinessStatus{LatestTestBooking: operations.latest}, nil
+		},
+	}
+
+	response, err := service.CancelTestBooking(context.Background(), "salon_1", "owner_1", CancelTestBookingRequest{
+		OperationKey: "square-test-cancel-replay",
+		Reason:       "AI booking readiness test cleanup",
+	})
+	if err != nil {
+		t.Fatalf("CancelTestBooking replay returned error: %v", err)
+	}
+	if response == nil || response.Appointment != appointment || response.BookingAttempt != attempt {
+		t.Fatalf("CancelTestBooking response = %#v, want hydrated replay", response)
+	}
+	if operations.latestCalls != 1 || operations.replayCancelCalls != 1 || operations.cancelCalls != 0 {
+		t.Fatalf("calls latest=%d replay=%d cancel=%d, want 1/1/0", operations.latestCalls, operations.replayCancelCalls, operations.cancelCalls)
+	}
+}
+
+func TestCancelTestBookingExplicitTargetReplaysBeforeLatestRead(t *testing.T) {
+	appointment := &booking.Appointment{ID: "appointment_1", Status: booking.StatusCancelled}
+	operations := &fakeBookingOperationService{
+		latestErr:               errors.New("latest state unavailable"),
+		replayCancelAppointment: appointment,
+		replayCancelFound:       true,
+	}
+	service := &Service{
+		bookingService: operations,
+		readinessLoader: func(context.Context, string, string) (*ReadinessStatus, error) {
+			return &ReadinessStatus{}, nil
+		},
+	}
+
+	response, err := service.CancelTestBooking(context.Background(), "salon_1", "owner_1", CancelTestBookingRequest{
+		OperationKey:  "square-test-cancel-explicit-replay",
+		AppointmentID: appointment.ID,
+		Reason:        "AI booking readiness test cleanup",
+	})
+	if err != nil || response == nil || response.Appointment != appointment {
+		t.Fatalf("CancelTestBooking response=%#v err=%v, want explicit replay", response, err)
+	}
+	if operations.latestCalls != 0 || operations.replayCancelCalls != 1 || operations.cancelCalls != 0 {
+		t.Fatalf("calls latest=%d replay=%d cancel=%d, want 0/1/0", operations.latestCalls, operations.replayCancelCalls, operations.cancelCalls)
+	}
+}
+
 func TestBuildReadinessBlocksEnableWhenCreateBookingPermissionDenied(t *testing.T) {
 	now := time.Date(2026, 7, 6, 17, 0, 0, 0, time.UTC)
 	connection, services, staff, periods := squareReadyPrerequisites(now)
@@ -268,4 +430,55 @@ func findReadinessCheck(checks []ReadinessCheck, key string) *ReadinessCheck {
 		}
 	}
 	return nil
+}
+
+type fakeBookingOperationService struct {
+	replayCreateAttempt *booking.BookingAttempt
+	replayCreateFound   bool
+	replayCreateErr     error
+	replayCreateCalls   int
+	createAttempt       *booking.BookingAttempt
+	createErr           error
+	createCalls         int
+
+	latest      *booking.TestBookingRecord
+	latestErr   error
+	latestCalls int
+
+	replayCancelAppointment *booking.Appointment
+	replayCancelAttempt     *booking.BookingAttempt
+	replayCancelFound       bool
+	replayCancelErr         error
+	replayCancelCalls       int
+	replayCancelTarget      string
+	cancelAppointment       *booking.Appointment
+	cancelAttempt           *booking.BookingAttempt
+	cancelErr               error
+	cancelCalls             int
+}
+
+func (f *fakeBookingOperationService) Create(context.Context, string, string, booking.CreateBookingRequest) (*booking.BookingAttempt, error) {
+	f.createCalls++
+	return f.createAttempt, f.createErr
+}
+
+func (f *fakeBookingOperationService) ReplayCreate(context.Context, string, string, booking.CreateBookingRequest) (*booking.BookingAttempt, bool, error) {
+	f.replayCreateCalls++
+	return f.replayCreateAttempt, f.replayCreateFound, f.replayCreateErr
+}
+
+func (f *fakeBookingOperationService) Cancel(context.Context, string, string, string, booking.CancelRequest) (*booking.Appointment, *booking.BookingAttempt, error) {
+	f.cancelCalls++
+	return f.cancelAppointment, f.cancelAttempt, f.cancelErr
+}
+
+func (f *fakeBookingOperationService) ReplayCancel(_ context.Context, _ string, _ string, appointmentID string, _ booking.CancelRequest) (*booking.Appointment, *booking.BookingAttempt, bool, error) {
+	f.replayCancelCalls++
+	f.replayCancelTarget = appointmentID
+	return f.replayCancelAppointment, f.replayCancelAttempt, f.replayCancelFound, f.replayCancelErr
+}
+
+func (f *fakeBookingOperationService) LatestTestBooking(context.Context, string, string) (*booking.TestBookingRecord, error) {
+	f.latestCalls++
+	return f.latest, f.latestErr
 }

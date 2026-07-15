@@ -78,6 +78,28 @@ const (
 	ConsultationFinishMatte         = "matte"
 	ConsultationFinishNailArt       = "nail_art"
 
+	ConsultationNeedFieldCurrentSystem      = "current_system"
+	ConsultationNeedFieldDesiredOutcome     = "desired_outcome"
+	ConsultationNeedFieldLengthChange       = "length_change"
+	ConsultationNeedFieldPriorities         = "priorities"
+	ConsultationNeedFieldDesiredFinishes    = "desired_finishes"
+	ConsultationNeedFieldComparedServiceIDs = "compared_service_ids"
+
+	ConsultationNeedOperationSet     = "set"
+	ConsultationNeedOperationReplace = "replace"
+	ConsultationNeedOperationAdd     = "add"
+	ConsultationNeedOperationRemove  = "remove"
+	ConsultationNeedOperationClear   = "clear"
+
+	SafetyCategoryPain               = "pain"
+	SafetyCategoryInjury             = "injury"
+	SafetyCategoryInfection          = "infection"
+	SafetyCategoryAllergy            = "allergy"
+	SafetyCategoryBleeding           = "bleeding"
+	SafetyCategorySwelling           = "swelling"
+	SafetyCategoryMedicalSuitability = "medical_suitability"
+	SafetyCategoryOtherHealth        = "other_health"
+
 	ConversationActUnknown   = "unknown"
 	ConversationActAdd       = "add_service"
 	ConversationActReplace   = "replace_service"
@@ -157,10 +179,11 @@ const (
 )
 
 var (
-	ErrValidation    = errors.New("conversation validation failed")
-	ErrNotFound      = errors.New("conversation record not found")
-	ErrSessionClosed = errors.New("conversation session is closed")
-	ErrLifecycle     = errors.New("conversation lifecycle action is not allowed")
+	ErrValidation           = errors.New("conversation validation failed")
+	ErrNotFound             = errors.New("conversation record not found")
+	ErrSessionClosed        = errors.New("conversation session is closed")
+	ErrSessionStateConflict = errors.New("conversation session state changed")
+	ErrLifecycle            = errors.New("conversation lifecycle action is not allowed")
 )
 
 type BookingTool interface {
@@ -256,16 +279,18 @@ type ConversationQuestion struct {
 }
 
 type TurnUnderstanding struct {
-	Goal               string                  `json:"goal"`
-	Acts               []ConversationAct       `json:"acts"`
-	Questions          []ConversationQuestion  `json:"questions"`
-	Confidence         float64                 `json:"confidence"`
-	Reason             string                  `json:"reason"`
-	Consultation       ConsultationNeedProfile `json:"consultation"`
-	Source             string                  `json:"source"`
-	ModelInvoked       bool                    `json:"-"`
-	CatalogFallback    bool                    `json:"-"`
-	InterpreterOutcome string                  `json:"-"`
+	Goal                  string                     `json:"goal"`
+	Acts                  []ConversationAct          `json:"acts"`
+	Questions             []ConversationQuestion     `json:"questions"`
+	Confidence            float64                    `json:"confidence"`
+	Reason                string                     `json:"reason"`
+	Consultation          ConsultationNeedProfile    `json:"consultation"`
+	ConsultationMutations []ConsultationNeedMutation `json:"consultation_mutations,omitempty"`
+	Safety                SafetyAssessment           `json:"safety"`
+	Source                string                     `json:"source"`
+	ModelInvoked          bool                       `json:"-"`
+	CatalogFallback       bool                       `json:"-"`
+	InterpreterOutcome    string                     `json:"-"`
 }
 
 type PendingConversationAct struct {
@@ -312,6 +337,26 @@ type ConsultationNeedProfile struct {
 	Reason               string   `json:"reason,omitempty"`
 }
 
+// ConsultationNeedMutation carries field-level edit intent from the semantic
+// interpreter. The reducer remains the only owner allowed to mutate persisted
+// consultation state.
+type ConsultationNeedMutation struct {
+	Field      string   `json:"field"`
+	Operation  string   `json:"operation"`
+	Values     []string `json:"values"`
+	Confidence float64  `json:"confidence"`
+	Reason     string   `json:"reason"`
+}
+
+// SafetyAssessment is extraction-only evidence. A validated concern is handled
+// before any booking, availability, or consultation mutation is applied.
+type SafetyAssessment struct {
+	Concern    bool    `json:"concern"`
+	Category   string  `json:"category"`
+	Confidence float64 `json:"confidence"`
+	Reason     string  `json:"reason"`
+}
+
 type ConsultationState struct {
 	Status                string                  `json:"status"`
 	ResumePhase           string                  `json:"resume_phase"`
@@ -347,6 +392,7 @@ type DialogState struct {
 
 type Store interface {
 	GetRuntimeConfig(ctx context.Context, salonID string, ownerUserID string) (*RuntimeConfig, error)
+	GetAnswerContextFence(ctx context.Context, salonID string) (AnswerContextFence, error)
 	CreateSession(ctx context.Context, record NewSessionRecord) (*Session, error)
 	GetSessionForOwner(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error)
 	GetSessionByTurnEventKey(ctx context.Context, salonID string, ownerUserID string, sessionID string, eventKey string) (*Session, bool, error)
@@ -365,6 +411,19 @@ type Store interface {
 	ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int, offset int) ([]PartyBookingRequest, error)
 	UpdatePartyBookingRequestStatus(ctx context.Context, salonID string, ownerUserID string, requestID string, status string) (*PartyBookingRequest, error)
 	SaveTurn(ctx context.Context, record TurnRecord) (*Session, error)
+}
+
+// AnswerContextFence identifies the active provider snapshot that owns
+// structured conversation context. It is read from PostgreSQL on every turn so
+// each API replica can reject a locally cached snapshot after provider,
+// location, generation, or readiness changes.
+type AnswerContextFence struct {
+	ActiveProvider     string
+	ConnectionStatus   string
+	LocationID         string
+	SnapshotGeneration int64
+	LastSyncAtRFC3339  string
+	Ready              bool
 }
 
 type StartSessionRequest struct {
@@ -551,6 +610,7 @@ type Session struct {
 	Status               string                          `json:"status"`
 	Intent               string                          `json:"intent"`
 	Outcome              string                          `json:"outcome"`
+	StateRevision        int64                           `json:"state_revision"`
 	BookingAction        string                          `json:"booking_action"`
 	TargetAppointmentID  string                          `json:"target_appointment_id,omitempty"`
 	RescheduleCandidates []RescheduleCandidate           `json:"reschedule_candidates,omitempty"`
@@ -564,6 +624,8 @@ type Session struct {
 	StaffSelectionMode   string                          `json:"staff_selection_mode,omitempty"`
 	RequestedDate        string                          `json:"requested_date,omitempty"`
 	RequestedStartTime   *time.Time                      `json:"requested_start_time,omitempty"`
+	AvailabilityQuoteID  string                          `json:"availability_quote_id,omitempty"`
+	SlotFingerprint      string                          `json:"availability_slot_fingerprint,omitempty"`
 	OfferedSlots         []OfferedSlot                   `json:"offered_slots,omitempty"`
 	BookingSegments      []booking.BookingSegmentRequest `json:"booking_segments,omitempty"`
 	PartyPlan            *PartyPlan                      `json:"party_plan,omitempty"`
@@ -582,15 +644,22 @@ type Session struct {
 	Transcript           []TranscriptMessage             `json:"transcript,omitempty"`
 	Handoff              *HandoffRequest                 `json:"handoff,omitempty"`
 	PartyRequest         *PartyBookingRequest            `json:"party_request,omitempty"`
+	// ReplayAIMessage is an internal response override for a deduplicated
+	// provider event. The persisted session and transcript remain at their
+	// newest state while the voice layer replays the exact historical reply.
+	ReplayEventKey  string `json:"-"`
+	ReplayAIMessage string `json:"-"`
 }
 
 type OfferedSlot struct {
-	StartTime          time.Time            `json:"start_time"`
-	EndTime            time.Time            `json:"end_time"`
-	StaffID            string               `json:"staff_id"`
-	StaffName          string               `json:"staff_name"`
-	StaffSelectionMode string               `json:"staff_selection_mode,omitempty"`
-	Segments           []OfferedSlotSegment `json:"segments,omitempty"`
+	AvailabilityQuoteID string               `json:"availability_quote_id,omitempty"`
+	SlotFingerprint     string               `json:"availability_slot_fingerprint,omitempty"`
+	StartTime           time.Time            `json:"start_time"`
+	EndTime             time.Time            `json:"end_time"`
+	StaffID             string               `json:"staff_id"`
+	StaffName           string               `json:"staff_name"`
+	StaffSelectionMode  string               `json:"staff_selection_mode,omitempty"`
+	Segments            []OfferedSlotSegment `json:"segments,omitempty"`
 }
 
 type OfferedSlotSegment struct {
@@ -711,6 +780,13 @@ type PartySplitBlock struct {
 	StartTime time.Time                       `json:"start_time"`
 	EndTime   time.Time                       `json:"end_time"`
 	Segments  []booking.BookingSegmentRequest `json:"segments,omitempty"`
+	QuoteRefs []PartySplitQuoteRef            `json:"quote_refs,omitempty"`
+}
+
+type PartySplitQuoteRef struct {
+	ServiceID           string `json:"service_id"`
+	AvailabilityQuoteID string `json:"availability_quote_id"`
+	SlotFingerprint     string `json:"availability_slot_fingerprint"`
 }
 
 type WebhookEventLog struct {
@@ -743,20 +819,21 @@ type NewSessionRecord struct {
 }
 
 type TurnRecord struct {
-	SalonID          string
-	OwnerUserID      string
-	Session          Session
-	CustomerMessage  string
-	ToolMessage      string
-	AIMessage        string
-	EventKey         string
-	CustomerMetadata map[string]any
-	ToolMetadata     map[string]any
-	AIMetadata       map[string]any
-	Update           SessionUpdate
-	Handoff          *HandoffRecord
-	PartyRequest     *PartyRequestRecord
-	ReplyPolicy      string
+	SalonID               string
+	OwnerUserID           string
+	Session               Session
+	ExpectedStateRevision int64
+	CustomerMessage       string
+	ToolMessage           string
+	AIMessage             string
+	EventKey              string
+	CustomerMetadata      map[string]any
+	ToolMetadata          map[string]any
+	AIMetadata            map[string]any
+	Update                SessionUpdate
+	Handoff               *HandoffRecord
+	PartyRequest          *PartyRequestRecord
+	ReplyPolicy           string
 }
 
 type SessionUpdate struct {
@@ -774,6 +851,8 @@ type SessionUpdate struct {
 	StaffSelectionMode   string
 	RequestedDate        string
 	RequestedStartTime   *time.Time
+	AvailabilityQuoteID  string
+	SlotFingerprint      string
 	OfferedSlots         []OfferedSlot
 	BookingSegments      []booking.BookingSegmentRequest
 	PartyPlan            *PartyPlan

@@ -53,6 +53,27 @@ func (h *Handler) Callback(c *fiber.Ctx) error {
 	return c.Redirect(redirect, fiber.StatusFound)
 }
 
+func (h *Handler) Webhook(c *fiber.Ctx) error {
+	receipt, err := h.service.ReceiveBookingWebhook(
+		c.UserContext(),
+		c.Body(),
+		c.Get("X-Square-HmacSha256-Signature"),
+	)
+	if errors.Is(err, ErrWebhookPayloadInvalid) {
+		return respond.Error(c, fiber.StatusBadRequest, "SQUARE_WEBHOOK_INVALID", "Square webhook payload is invalid.")
+	}
+	if errors.Is(err, ErrWebhookSignatureInvalid) {
+		return respond.Error(c, fiber.StatusForbidden, "SQUARE_WEBHOOK_SIGNATURE_INVALID", "Square webhook signature is invalid.")
+	}
+	if errors.Is(err, ErrWebhookConfigMissing) {
+		return respond.Error(c, fiber.StatusServiceUnavailable, "SQUARE_WEBHOOK_NOT_CONFIGURED", "Square webhook verification is not configured.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusServiceUnavailable, "SQUARE_WEBHOOK_UNAVAILABLE", "Square webhook could not be persisted.")
+	}
+	return respond.JSON(c, fiber.StatusOK, receipt)
+}
+
 func (h *Handler) Status(c *fiber.Ctx) error {
 	salonID := c.Query("salon_id")
 	if salonID == "" {
@@ -127,6 +148,9 @@ func (h *Handler) Sync(c *fiber.Ctx) error {
 		if errors.Is(err, ErrNotConnected) {
 			return respond.Error(c, fiber.StatusConflict, "SQUARE_NOT_CONNECTED", "Square is not connected.")
 		}
+		if errors.Is(err, pos.ErrStaleProviderSnapshot) {
+			return respond.Error(c, fiber.StatusConflict, "SQUARE_SYNC_STALE", "The Square location or sync generation changed while this sync was running. Run Sync again for the selected location.")
+		}
 		return respond.Error(c, fiber.StatusBadGateway, "SQUARE_SYNC_FAILED", err.Error())
 	}
 	return respond.JSON(c, fiber.StatusOK, fiber.Map{"ok": true, "summary": summary})
@@ -151,7 +175,7 @@ func (h *Handler) TestBooking(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusBadGateway, "SQUARE_TEST_BOOKING_FAILED", "Square test booking did not return a response.")
 	}
 	status := fiber.StatusCreated
-	if res.BookingAttempt != nil && (res.BookingAttempt.Status == booking.StatusFallbackPending || res.BookingAttempt.Status == booking.StatusPOSPending) {
+	if res.BookingAttempt != nil && (res.BookingAttempt.Status == booking.StatusFallbackPending || res.BookingAttempt.Status == booking.StatusPOSPending || res.BookingAttempt.Status == booking.StatusProviderPending) {
 		status = fiber.StatusAccepted
 	}
 	return respond.JSON(c, status, res)
@@ -176,7 +200,7 @@ func (h *Handler) CancelTestBooking(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusBadGateway, "SQUARE_CANCEL_TEST_BOOKING_FAILED", "Square test booking cancellation did not return a response.")
 	}
 	status := fiber.StatusOK
-	if res.BookingAttempt != nil && (res.BookingAttempt.Status == booking.StatusFallbackPending || res.BookingAttempt.Status == booking.StatusPOSPending) {
+	if res.BookingAttempt != nil && (res.BookingAttempt.Status == booking.StatusFallbackPending || res.BookingAttempt.Status == booking.StatusPOSPending || res.BookingAttempt.Status == booking.StatusProviderPending) {
 		status = fiber.StatusAccepted
 	}
 	return respond.JSON(c, status, res)
@@ -217,6 +241,12 @@ func (h *Handler) handleGateError(c *fiber.Ctx, err error, internalCode string) 
 	}
 	if errors.Is(err, ErrValidation) || errors.Is(err, booking.ErrValidation) {
 		return true, respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Request is missing required booking readiness data.")
+	}
+	if errors.Is(err, booking.ErrAvailabilityQuoteRequired) {
+		return true, respond.Error(c, fiber.StatusConflict, "AVAILABILITY_QUOTE_REQUIRED", "Check current provider availability and choose a returned slot before creating a test booking.")
+	}
+	if errors.Is(err, booking.ErrAvailabilityQuoteStale) {
+		return true, respond.Error(c, fiber.StatusConflict, "AVAILABILITY_QUOTE_STALE", "Availability changed or expired. Check availability again before creating a test booking.")
 	}
 	if errors.Is(err, ErrReadinessGate) {
 		message := "Square readiness checks have not passed."

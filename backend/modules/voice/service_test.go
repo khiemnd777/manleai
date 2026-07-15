@@ -302,6 +302,37 @@ func TestSpeechTurnRoutesLiveCallThroughAvailabilityOffer(t *testing.T) {
 	}
 }
 
+func TestSpeechTurnUsesExactReplayReplyWithoutReplacingCurrentSessionState(t *testing.T) {
+	store := newFakeVoiceStore()
+	store.route = &CallRoute{SalonID: "salon_1", OwnerUserID: "owner_1", SessionID: "session_phone"}
+	engine := newFakeConversationEngine()
+	engine.messageSession = phoneSessionWithAIReply("Reply for newer event E2.", conversation.StatusActive, conversation.OutcomeCollecting)
+	engine.messageSession.ReplayEventKey = "event-e1"
+	engine.messageSession.ReplayAIMessage = "Exact reply for retried event E1."
+	service := NewService(store, engine, testVoiceConfig(), AIProviders{})
+
+	reply, err := service.HandleSpeechTurn(context.Background(), SpeechTurnRequest{
+		Provider:       ProviderTwilio,
+		ProviderCallID: "CA123",
+		SpeechText:     "Provider replay for E1",
+		Payload:        map[string]string{"SpeechResult": "Provider replay for E1"},
+	})
+	if err != nil {
+		t.Fatalf("HandleSpeechTurn replay: %v", err)
+	}
+	if reply.Message != "Exact reply for retried event E1." {
+		t.Fatalf("voice replay = %q, want exact E1 reply", reply.Message)
+	}
+	if got := reply.Session.Transcript[len(reply.Session.Transcript)-1].Body; got != "Reply for newer event E2." {
+		t.Fatalf("current session transcript was replaced: latest=%q", got)
+	}
+	emptyReplay := *engine.messageSession
+	emptyReplay.ReplayAIMessage = ""
+	if got := lastAIMessage(&emptyReplay); got != "" {
+		t.Fatalf("empty exact replay fell through to newer reply: got=%q", got)
+	}
+}
+
 func TestSpeechTurnPassesTranscriptionContextToSTT(t *testing.T) {
 	store := newFakeVoiceStore()
 	store.route = &CallRoute{SalonID: "salon_1", OwnerUserID: "owner_1", SessionID: "session_phone"}

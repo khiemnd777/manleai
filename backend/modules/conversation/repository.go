@@ -3,8 +3,10 @@ package conversation
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -13,23 +15,118 @@ import (
 )
 
 const (
-	redactedTranscriptBody = "[redacted]"
-	redactedSummaryBody    = "Redacted by call session retention policy."
+	redactedTranscriptBody   = "[redacted]"
+	redactedSummaryBody      = "Redacted by call session retention policy."
+	defaultSessionTurnSlots  = 8
+	sessionTurnUnlockTimeout = 5 * time.Second
+	sessionTurnLockKeyPrefix = "conversation-session-turn:"
 )
 
 type Repository struct {
-	db *sql.DB
+	db               *sql.DB
+	sessionTurnSlots chan struct{}
 }
 
+var _ sessionTurnSerializer = (*Repository)(nil)
+
 func NewRepository(db *sql.DB) *Repository {
-	return &Repository{db: db}
+	return &Repository{
+		db:               db,
+		sessionTurnSlots: make(chan struct{}, sessionTurnSlotLimit(db)),
+	}
+}
+
+func sessionTurnSlotLimit(db *sql.DB) int {
+	if db == nil {
+		return 1
+	}
+	maxOpenConnections := db.Stats().MaxOpenConnections
+	if maxOpenConnections <= 0 {
+		return defaultSessionTurnSlots
+	}
+	limit := maxOpenConnections / 2
+	if limit < 1 {
+		return 1
+	}
+	return limit
+}
+
+func (r *Repository) WithSessionTurnSerialization(
+	ctx context.Context,
+	salonID string,
+	ownerUserID string,
+	sessionID string,
+	operation func(context.Context) (*Session, error),
+) (session *Session, err error) {
+	salonID = strings.TrimSpace(salonID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	sessionID = strings.TrimSpace(sessionID)
+	if salonID == "" || ownerUserID == "" || sessionID == "" || operation == nil {
+		return nil, ErrValidation
+	}
+	if r.db == nil {
+		return nil, errors.New("conversation repository database is not configured")
+	}
+	if r.db.Stats().MaxOpenConnections == 1 {
+		return nil, errors.New("conversation session turn serialization requires at least two database connections")
+	}
+	select {
+	case r.sessionTurnSlots <- struct{}{}:
+		defer func() { <-r.sessionTurnSlots }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	conn, err := r.db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	lockKey := sessionTurnLockKeyPrefix + salonID + ":" + sessionID
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock(hashtextextended($1, 0))`, lockKey); err != nil {
+		discardSessionTurnConnection(conn)
+		return nil, fmt.Errorf("acquire conversation session turn lock: %w", err)
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionTurnUnlockTimeout)
+		defer cancel()
+
+		var unlocked bool
+		cleanupErr := conn.QueryRowContext(cleanupCtx, `SELECT pg_advisory_unlock(hashtextextended($1, 0))`, lockKey).Scan(&unlocked)
+		if cleanupErr == nil && !unlocked {
+			cleanupErr = errors.New("conversation session turn lock was not held")
+		}
+		if cleanupErr != nil {
+			discardSessionTurnConnection(conn)
+		} else if closeErr := conn.Close(); closeErr != nil {
+			cleanupErr = closeErr
+			discardSessionTurnConnection(conn)
+		}
+		if cleanupErr == nil {
+			return
+		}
+		cleanupErr = fmt.Errorf("release conversation session turn lock: %w", cleanupErr)
+		if err == nil {
+			err = cleanupErr
+			return
+		}
+		err = errors.Join(err, cleanupErr)
+	}()
+
+	return operation(ctx)
+}
+
+func discardSessionTurnConnection(conn *sql.Conn) {
+	_ = conn.Raw(func(any) error {
+		return driver.ErrBadConn
+	})
+	_ = conn.Close()
 }
 
 func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, ownerUserID string) (*RuntimeConfig, error) {
 	var cfg RuntimeConfig
 	err := r.db.QueryRowContext(ctx, `
 			SELECT s.name, s.timezone, COALESCE(s.handoff_phone, ''), s.ai_enabled,
-			       COALESCE(ss.handoff_enabled, true), COALESCE(ss.consultation_enabled, true), COALESCE(ss.ai_greeting, ''), COALESCE(ss.ai_tone, 'professional_warm'),
+			       COALESCE(ss.handoff_enabled, true), COALESCE(ss.consultation_enabled, false), COALESCE(ss.ai_greeting, ''), COALESCE(ss.ai_tone, 'professional_warm'),
 			       COALESCE(ss.recording_enabled, true), COALESCE(ss.recording_consent_message, '')
 		FROM salons s
 		LEFT JOIN salon_settings ss ON ss.salon_id = s.id
@@ -55,6 +152,44 @@ func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, owner
 	}
 	cfg.AIEnabled = bookingSafetyEnabled(cfg.AIEnabled)
 	return &cfg, nil
+}
+
+func (r *Repository) GetAnswerContextFence(ctx context.Context, salonID string) (AnswerContextFence, error) {
+	var fence AnswerContextFence
+	var lastSyncAt sql.NullTime
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COALESCE(NULLIF(BTRIM(s.active_pos_provider), ''), 'square'),
+		       COALESCE(connection.status, ''),
+		       COALESCE(BTRIM(connection.location_id), ''),
+		       COALESCE(connection.snapshot_generation, 0),
+		       connection.last_sync_at
+		FROM salons s
+		LEFT JOIN pos_connections connection
+		  ON connection.salon_id = s.id
+		 AND connection.provider = COALESCE(NULLIF(BTRIM(s.active_pos_provider), ''), 'square')
+		WHERE s.id = $1
+	`, strings.TrimSpace(salonID)).Scan(
+		&fence.ActiveProvider,
+		&fence.ConnectionStatus,
+		&fence.LocationID,
+		&fence.SnapshotGeneration,
+		&lastSyncAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AnswerContextFence{}, ErrNotFound
+	}
+	if err != nil {
+		return AnswerContextFence{}, err
+	}
+	if lastSyncAt.Valid {
+		fence.LastSyncAtRFC3339 = lastSyncAt.Time.UTC().Format(time.RFC3339Nano)
+	}
+	fence.Ready = strings.TrimSpace(fence.ActiveProvider) != "" &&
+		fence.ConnectionStatus == "active" &&
+		strings.TrimSpace(fence.LocationID) != "" &&
+		fence.SnapshotGeneration > 0 &&
+		lastSyncAt.Valid
+	return fence, nil
 }
 
 func (r *Repository) CreateSession(ctx context.Context, record NewSessionRecord) (*Session, error) {
@@ -132,7 +267,60 @@ func (r *Repository) GetSessionByTurnEventKey(ctx context.Context, salonID strin
 	if err := r.loadSessionDetails(ctx, session); err != nil {
 		return nil, false, err
 	}
+	reply, err := r.turnReplayAIMessage(ctx, salonID, sessionID, eventKey)
+	if err != nil {
+		return nil, false, err
+	}
+	session.ReplayEventKey = eventKey
+	session.ReplayAIMessage = reply
 	return session, true, nil
+}
+
+func (r *Repository) turnReplayAIMessage(ctx context.Context, salonID string, sessionID string, eventKey string) (string, error) {
+	var reply string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT body
+		FROM call_transcript_messages
+		WHERE session_id = $1
+		  AND salon_id = $2
+		  AND speaker = $3
+		  AND metadata->>'event_key' = $4
+		ORDER BY sequence ASC
+		LIMIT 1
+	`, sessionID, salonID, SpeakerAI, eventKey).Scan(&reply)
+	if err == nil {
+		return reply, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+
+	// Backward-compatible correlation for turns written before AI transcript
+	// rows carried event_key. SaveTurn is atomic and serial per session, so the
+	// first AI row after the keyed non-AI row is that turn's exact reply.
+	err = r.db.QueryRowContext(ctx, `
+		WITH source AS (
+			SELECT MIN(sequence) AS sequence
+			FROM call_transcript_messages
+			WHERE session_id = $1
+			  AND salon_id = $2
+			  AND speaker <> $3
+			  AND metadata->>'event_key' = $4
+		)
+		SELECT ai.body
+		FROM source
+		JOIN call_transcript_messages ai
+		  ON ai.session_id = $1
+		 AND ai.salon_id = $2
+		 AND ai.speaker = $3
+		 AND ai.sequence > source.sequence
+		ORDER BY ai.sequence ASC
+		LIMIT 1
+	`, sessionID, salonID, SpeakerAI, eventKey).Scan(&reply)
+	if err != nil {
+		return "", fmt.Errorf("load exact reply for processed conversation event: %w", err)
+	}
+	return reply, nil
 }
 
 func (r *Repository) ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int, offset int) ([]Session, error) {
@@ -344,6 +532,13 @@ func (r *Repository) ListBookableServices(ctx context.Context, salonID string) (
 		       COALESCE(profile.maintenance_note, ''), COALESCE(profile.owner_approved_summary, ''), COALESCE(profile.revision, 0)
 		FROM services svc
 		JOIN salons salon ON salon.id = svc.salon_id
+		JOIN pos_connections connection
+		  ON connection.salon_id = svc.salon_id
+		 AND connection.provider = salon.active_pos_provider
+		 AND connection.status = 'active'
+		 AND NULLIF(BTRIM(connection.location_id), '') IS NOT NULL
+		 AND connection.snapshot_generation > 0
+		 AND connection.last_sync_at IS NOT NULL
 		JOIN pos_entity_links link
 		  ON link.salon_id = svc.salon_id
 		 AND link.entity_type = 'service'
@@ -417,6 +612,13 @@ func (r *Repository) ListBookableStaff(ctx context.Context, salonID string) ([]S
 		SELECT st.id::text, st.name, st.ai_bookable
 		FROM staff st
 		JOIN salons salon ON salon.id = st.salon_id
+		JOIN pos_connections connection
+		  ON connection.salon_id = st.salon_id
+		 AND connection.provider = salon.active_pos_provider
+		 AND connection.status = 'active'
+		 AND NULLIF(BTRIM(connection.location_id), '') IS NOT NULL
+		 AND connection.snapshot_generation > 0
+		 AND connection.last_sync_at IS NOT NULL
 		JOIN pos_entity_links link
 		  ON link.salon_id = st.salon_id
 		 AND link.entity_type = 'staff'
@@ -454,6 +656,13 @@ func (r *Repository) ListActiveStaff(ctx context.Context, salonID string) ([]Sta
 		SELECT st.id::text, st.name, st.ai_bookable
 		FROM staff st
 		JOIN salons salon ON salon.id = st.salon_id
+		JOIN pos_connections connection
+		  ON connection.salon_id = st.salon_id
+		 AND connection.provider = salon.active_pos_provider
+		 AND connection.status = 'active'
+		 AND NULLIF(BTRIM(connection.location_id), '') IS NOT NULL
+		 AND connection.snapshot_generation > 0
+		 AND connection.last_sync_at IS NOT NULL
 		JOIN pos_entity_links link
 		  ON link.salon_id = st.salon_id
 		 AND link.entity_type = 'staff'
@@ -557,6 +766,13 @@ func (r *Repository) ListActiveServiceAliases(ctx context.Context, salonID strin
 		FROM service_aliases sa
 		JOIN services svc ON svc.id = sa.service_id
 		JOIN salons salon ON salon.id = svc.salon_id
+		JOIN pos_connections connection
+		  ON connection.salon_id = svc.salon_id
+		 AND connection.provider = salon.active_pos_provider
+		 AND connection.status = 'active'
+		 AND NULLIF(BTRIM(connection.location_id), '') IS NOT NULL
+		 AND connection.snapshot_generation > 0
+		 AND connection.last_sync_at IS NOT NULL
 		JOIN pos_entity_links link
 		  ON link.salon_id = svc.salon_id
 		 AND link.entity_type = 'service'
@@ -602,6 +818,14 @@ func (r *Repository) ListActiveServiceCategoryAliases(ctx context.Context, salon
 		JOIN service_categories cat ON cat.id = alias.category_id
 		                           AND cat.salon_id = alias.salon_id
 		                           AND cat.status = 'active'
+		JOIN salons salon ON salon.id = alias.salon_id
+		JOIN pos_connections connection
+		  ON connection.salon_id = alias.salon_id
+		 AND connection.provider = salon.active_pos_provider
+		 AND connection.status = 'active'
+		 AND NULLIF(BTRIM(connection.location_id), '') IS NOT NULL
+		 AND connection.snapshot_generation > 0
+		 AND connection.last_sync_at IS NOT NULL
 		WHERE alias.salon_id = $1
 		  AND alias.status = 'active'
 		ORDER BY alias.updated_at DESC
@@ -654,9 +878,17 @@ func (r *Repository) ListBusinessHourPeriods(ctx context.Context, salonID string
 		       bhp.end_local_time::text, bhp.source, bhp.provider
 		FROM salon_business_hour_periods bhp
 		JOIN salons salon ON salon.id = bhp.salon_id
+		JOIN pos_connections connection
+		  ON connection.salon_id = bhp.salon_id
+		 AND connection.provider = salon.active_pos_provider
+		 AND connection.status = 'active'
+		 AND NULLIF(BTRIM(connection.location_id), '') IS NOT NULL
+		 AND connection.snapshot_generation > 0
+		 AND connection.last_sync_at IS NOT NULL
 		WHERE bhp.salon_id = $1
 		  AND bhp.source = 'imported'
 		  AND bhp.provider = salon.active_pos_provider
+		  AND bhp.provider_location_id = connection.location_id
 		ORDER BY bhp.day_of_week ASC, bhp.start_local_time ASC, bhp.provider_period_index ASC
 	`, salonID)
 	if err != nil {
@@ -686,9 +918,9 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (session *
 	}
 	defer tx.Rollback()
 
-	var lockedID string
+	var lockedStateRevision int64
 	if err := tx.QueryRowContext(ctx, `
-		SELECT cs.id::text
+		SELECT cs.state_revision
 		FROM call_sessions cs
 		JOIN salons s ON s.id = cs.salon_id
 		WHERE cs.id = $1
@@ -696,7 +928,7 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (session *
 		  AND s.owner_user_id = $3
 		  AND cs.lifecycle_status <> $4
 		FOR UPDATE
-		`, record.Session.ID, record.SalonID, record.OwnerUserID, LifecycleRedacted).Scan(&lockedID); err != nil {
+		`, record.Session.ID, record.SalonID, record.OwnerUserID, LifecycleRedacted).Scan(&lockedStateRevision); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -717,8 +949,18 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (session *
 		}
 		if exists {
 			_ = tx.Rollback()
-			return r.GetSessionForOwner(ctx, record.SalonID, record.OwnerUserID, record.Session.ID)
+			processed, ok, err := r.GetSessionByTurnEventKey(ctx, record.SalonID, record.OwnerUserID, record.Session.ID, eventKey)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				return nil, errors.New("processed conversation event has no replay result")
+			}
+			return processed, nil
 		}
+	}
+	if lockedStateRevision != record.ExpectedStateRevision {
+		return nil, ErrSessionStateConflict
 	}
 
 	var sequence int
@@ -728,6 +970,10 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (session *
 		WHERE session_id = $1
 	`, record.Session.ID).Scan(&sequence); err != nil {
 		return nil, err
+	}
+	if eventKey != "" {
+		record.CustomerMetadata = mergeMetadata(record.CustomerMetadata, map[string]any{"event_key": eventKey})
+		record.AIMetadata = mergeMetadata(record.AIMetadata, map[string]any{"event_key": eventKey})
 	}
 	customerMetadata, err := metadataJSON(record.CustomerMetadata)
 	if err != nil {
@@ -860,11 +1106,12 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (session *
 		bookingAction = BookingActionBook
 	}
 
-	if _, err := tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		UPDATE call_sessions
 		SET status = $1,
 		    intent = $2,
 		    outcome = $3,
+		    state_revision = state_revision + 1,
 		    booking_action = $4,
 		    target_appointment_id = NULLIF($5, '')::uuid,
 		    reschedule_candidates = $6::jsonb,
@@ -874,21 +1121,32 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (session *
 		    service_id = NULLIF($10, '')::uuid,
 			    staff_id = NULLIF($11, '')::uuid,
 			    staff_selection_mode = $12,
-			    requested_date = NULLIF($13, '')::date,
-			    requested_start_time = $14,
-			    offered_slots = $15::jsonb,
-			    booking_segments = $16::jsonb,
-			    party_plan = $17::jsonb,
-			    dialog_state = $18::jsonb,
-			    booking_attempt_id = NULLIF($19, '')::uuid,
-			    appointment_id = NULLIF($20, '')::uuid,
-			    summary = NULLIF($21, ''),
-			    ended_at = CASE WHEN $22 THEN now() ELSE ended_at END,
-			    updated_at = now()
-			WHERE id = $23
-			  AND salon_id = $24
-		`, record.Update.Status, record.Update.Intent, record.Update.Outcome, bookingAction, record.Update.TargetAppointmentID, string(rescheduleCandidatesJSON), record.Update.CustomerName, record.Update.CustomerPhone, record.Update.CustomerEmail, record.Update.ServiceID, record.Update.StaffID, staffSelectionMode, record.Update.RequestedDate, record.Update.RequestedStartTime, string(offeredSlotsJSON), string(bookingSegmentsJSON), partyPlanJSON, string(dialogStateJSON), record.Update.BookingAttemptID, record.Update.AppointmentID, record.Update.Summary, record.Update.EndSession, record.Session.ID, record.SalonID); err != nil {
+		    requested_date = NULLIF($13, '')::date,
+		    requested_start_time = $14,
+		    availability_quote_id = NULLIF($15, '')::uuid,
+		    availability_slot_fingerprint = NULLIF($16, ''),
+		    offered_slots = $17::jsonb,
+		    booking_segments = $18::jsonb,
+		    party_plan = $19::jsonb,
+		    dialog_state = $20::jsonb,
+		    booking_attempt_id = NULLIF($21, '')::uuid,
+		    appointment_id = NULLIF($22, '')::uuid,
+		    summary = NULLIF($23, ''),
+		    ended_at = CASE WHEN $24 THEN now() ELSE ended_at END,
+		    updated_at = now()
+		WHERE id = $25
+		  AND salon_id = $26
+		  AND state_revision = $27
+		`, record.Update.Status, record.Update.Intent, record.Update.Outcome, bookingAction, record.Update.TargetAppointmentID, string(rescheduleCandidatesJSON), record.Update.CustomerName, record.Update.CustomerPhone, record.Update.CustomerEmail, record.Update.ServiceID, record.Update.StaffID, staffSelectionMode, record.Update.RequestedDate, record.Update.RequestedStartTime, record.Update.AvailabilityQuoteID, record.Update.SlotFingerprint, string(offeredSlotsJSON), string(bookingSegmentsJSON), partyPlanJSON, string(dialogStateJSON), record.Update.BookingAttemptID, record.Update.AppointmentID, record.Update.Summary, record.Update.EndSession, record.Session.ID, record.SalonID, record.ExpectedStateRevision)
+	if err != nil {
 		return nil, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if affected != 1 {
+		return nil, ErrSessionStateConflict
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -1105,6 +1363,8 @@ func redactSessionInTx(ctx context.Context, execer sqlExecer, sessionID string, 
 		    inbound_phone = NULL,
 		    outbound_phone = NULL,
 		    summary = CASE WHEN summary IS NULL THEN NULL ELSE $2 END,
+		    availability_quote_id = NULL,
+		    availability_slot_fingerprint = NULL,
 		    offered_slots = '[]'::jsonb,
 		    updated_at = now()
 		WHERE id = $3
@@ -1299,7 +1559,7 @@ func sessionSelect() string {
 		SELECT cs.id::text, cs.salon_id::text, cs.channel,
 		       COALESCE(cs.provider, ''), COALESCE(cs.provider_call_id, ''),
 		       COALESCE(cs.inbound_phone, ''), COALESCE(cs.outbound_phone, ''),
-		       cs.status, cs.intent, cs.outcome,
+		       cs.status, cs.intent, cs.outcome, cs.state_revision,
 		       COALESCE(cs.booking_action, 'book'), COALESCE(cs.target_appointment_id::text, ''),
 		       COALESCE(cs.reschedule_candidates, '[]'::jsonb),
 		       COALESCE(cs.customer_name, ''), COALESCE(cs.customer_phone, ''), COALESCE(cs.customer_email, ''),
@@ -1307,7 +1567,10 @@ func sessionSelect() string {
 		       COALESCE(cs.staff_id::text, ''), COALESCE(st.name, ''),
 		       COALESCE(cs.staff_selection_mode, 'specific'),
 		       COALESCE(cs.requested_date::text, ''),
-		       cs.requested_start_time, COALESCE(cs.offered_slots, '[]'::jsonb),
+		       cs.requested_start_time,
+		       COALESCE(cs.availability_quote_id::text, ''),
+		       COALESCE(cs.availability_slot_fingerprint, ''),
+		       COALESCE(cs.offered_slots, '[]'::jsonb),
 		       COALESCE(cs.booking_segments, '[]'::jsonb),
 		       COALESCE(cs.party_plan, '{}'::jsonb),
 		       COALESCE(cs.dialog_state, '{"version":2,"phase":"open","review_required":true,"review_accepted":false,"no_progress_count":0,"draft_revision":1,"reviewed_revision":0,"authorized_revision":0}'::jsonb),
@@ -1348,6 +1611,7 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 		&item.Status,
 		&item.Intent,
 		&item.Outcome,
+		&item.StateRevision,
 		&item.BookingAction,
 		&item.TargetAppointmentID,
 		&rescheduleCandidates,
@@ -1361,6 +1625,8 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 		&item.StaffSelectionMode,
 		&item.RequestedDate,
 		&requestedStartAt,
+		&item.AvailabilityQuoteID,
+		&item.SlotFingerprint,
 		&offeredSlots,
 		&bookingSegments,
 		&partyPlan,

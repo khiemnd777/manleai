@@ -13,7 +13,13 @@ const statusClass: Record<string, string> = {
   rescheduled: "bg-blue-50 text-blue-700 ring-blue-200",
   cancelled: "bg-slate-100 text-slate-700 ring-slate-200",
   pos_pending: "bg-amber-50 text-amber-700 ring-amber-200",
+  provider_pending: "bg-amber-50 text-amber-700 ring-amber-200",
   fallback_pending: "bg-amber-50 text-amber-700 ring-amber-200",
+  in_flight: "bg-blue-50 text-blue-700 ring-blue-200",
+  succeeded: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+  declined: "bg-red-50 text-red-700 ring-red-200",
+  no_show: "bg-purple-50 text-purple-700 ring-purple-200",
+  unknown: "bg-slate-100 text-slate-700 ring-slate-200",
   pending: "bg-amber-50 text-amber-700 ring-amber-200",
   not_synced: "bg-amber-50 text-amber-700 ring-amber-200",
   available: "bg-emerald-50 text-emerald-700 ring-emerald-200",
@@ -21,6 +27,11 @@ const statusClass: Record<string, string> = {
   anyone: "bg-blue-50 text-blue-700 ring-blue-200",
   specific: "bg-slate-100 text-slate-700 ring-slate-200",
   blocked: "bg-amber-50 text-amber-700 ring-amber-200",
+  open: "bg-amber-50 text-amber-700 ring-amber-200",
+  escalated: "bg-red-50 text-red-700 ring-red-200",
+  required: "bg-amber-50 text-amber-700 ring-amber-200",
+  provider_attached: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+  not_created: "bg-blue-50 text-blue-700 ring-blue-200",
   warning: "bg-amber-50 text-amber-700 ring-amber-200"
 };
 

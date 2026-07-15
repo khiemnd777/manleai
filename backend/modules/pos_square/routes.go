@@ -8,6 +8,7 @@ import (
 func RegisterRoutes(api fiber.Router, handler *Handler, jwtSecret string) {
 	group := api.Group("/integrations/square")
 	group.Get("/callback", handler.Callback)
+	group.Post("/webhook", handler.Webhook)
 
 	protected := group.Group("", middleware.RequireAuth(jwtSecret))
 	protected.Get("/connect-url", handler.ConnectURL)

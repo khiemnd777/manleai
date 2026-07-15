@@ -32,6 +32,10 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 	if strings.TrimSpace(req.OperationKey) == "" {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "operation_key is required for a retry-safe booking request.")
 	}
+	if strings.TrimSpace(req.AvailabilityQuoteID) == "" || strings.TrimSpace(req.SlotFingerprint) == "" {
+		return respond.Error(c, fiber.StatusConflict, "AVAILABILITY_QUOTE_REQUIRED", "Check current provider availability and choose a returned slot before booking.")
+	}
+	req.Source = SourceOwnerDashboard
 	attempt, err := h.service.Create(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Booking request is missing required customer, service, staff, or start time data.")
@@ -45,11 +49,17 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 	if errors.Is(err, ErrOperationConflict) {
 		return respond.Error(c, fiber.StatusConflict, "BOOKING_OPERATION_CONFLICT", "This operation key is already assigned to a different booking request.")
 	}
+	if errors.Is(err, ErrAvailabilityQuoteRequired) {
+		return respond.Error(c, fiber.StatusConflict, "AVAILABILITY_QUOTE_REQUIRED", "Check current provider availability and choose a returned slot before booking.")
+	}
+	if errors.Is(err, ErrAvailabilityQuoteStale) {
+		return respond.Error(c, fiber.StatusConflict, "AVAILABILITY_QUOTE_STALE", "Availability changed or expired. Check availability again before booking.")
+	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "BOOKING_CREATE_FAILED", "Could not create booking request.")
 	}
 	status := fiber.StatusCreated
-	if attempt.Status == StatusFallbackPending || attempt.Status == StatusPOSPending {
+	if attempt.Status == StatusFallbackPending || attempt.Status == StatusPOSPending || attempt.Status == StatusProviderPending {
 		status = fiber.StatusAccepted
 	}
 	return respond.JSON(c, status, attempt)
@@ -171,6 +181,10 @@ func (h *Handler) Reschedule(c *fiber.Ctx) error {
 	if strings.TrimSpace(req.OperationKey) == "" {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "operation_key is required for a retry-safe reschedule request.")
 	}
+	if strings.TrimSpace(req.AvailabilityQuoteID) == "" || strings.TrimSpace(req.SlotFingerprint) == "" {
+		return respond.Error(c, fiber.StatusConflict, "AVAILABILITY_QUOTE_REQUIRED", "Check current provider availability and choose a returned slot before rescheduling.")
+	}
+	req.Source = SourceOwnerDashboard
 	appointment, fallback, err := h.service.Reschedule(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("appointment_id"), req)
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Reschedule request is missing required appointment, POS version, staff, service, or start time data.")
@@ -183,6 +197,12 @@ func (h *Handler) Reschedule(c *fiber.Ctx) error {
 	}
 	if errors.Is(err, ErrOperationConflict) {
 		return respond.Error(c, fiber.StatusConflict, "BOOKING_OPERATION_CONFLICT", "This operation key is already assigned to a different reschedule request.")
+	}
+	if errors.Is(err, ErrAvailabilityQuoteRequired) {
+		return respond.Error(c, fiber.StatusConflict, "AVAILABILITY_QUOTE_REQUIRED", "Check current provider availability and choose a returned slot before rescheduling.")
+	}
+	if errors.Is(err, ErrAvailabilityQuoteStale) {
+		return respond.Error(c, fiber.StatusConflict, "AVAILABILITY_QUOTE_STALE", "Availability changed or expired. Check availability again before rescheduling.")
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "APPOINTMENT_RESCHEDULE_FAILED", "Could not reschedule appointment.")
@@ -203,6 +223,7 @@ func (h *Handler) Cancel(c *fiber.Ctx) error {
 	if strings.TrimSpace(req.OperationKey) == "" {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "operation_key is required for a retry-safe cancellation request.")
 	}
+	req.Source = SourceOwnerDashboard
 	appointment, fallback, err := h.service.Cancel(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("appointment_id"), req)
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Cancel request is missing required appointment or POS version data.")
@@ -237,6 +258,58 @@ func (h *Handler) Attempts(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusInternalServerError, "BOOKING_ATTEMPTS_FAILED", "Could not load booking attempts.")
 	}
 	return respond.JSON(c, fiber.StatusOK, res)
+}
+
+func (h *Handler) ReconciliationTasks(c *fiber.Ctx) error {
+	res, err := h.service.ReconciliationTasks(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Query("status"), parseLimit(c.Query("limit")), parseOffset(c.Query("offset")))
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Reconciliation status filter is invalid.")
+	}
+	if errors.Is(err, pos.ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "RECONCILIATION_TASKS_FAILED", "Could not load booking reconciliation tasks.")
+	}
+	return respond.JSON(c, fiber.StatusOK, res)
+}
+
+func (h *Handler) ReconciliationCandidates(c *fiber.Ctx) error {
+	res, err := h.service.ReconciliationCandidates(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("attempt_id"))
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Booking reconciliation attempt is invalid.")
+	}
+	if errors.Is(err, pos.ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "RECONCILIATION_TASK_NOT_FOUND", "Reconciliation task was not found.")
+	}
+	if errors.Is(err, ErrOperationConflict) {
+		return respond.Error(c, fiber.StatusConflict, "RECONCILIATION_CONFLICT", "This reconciliation task is already resolved or no longer requires provider matching.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "RECONCILIATION_CANDIDATES_FAILED", "Could not load verified provider booking candidates.")
+	}
+	return respond.JSON(c, fiber.StatusOK, res)
+}
+
+func (h *Handler) ResolveReconciliation(c *fiber.Ctx) error {
+	var req ResolveReconciliationRequest
+	if err := c.BodyParser(&req); err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
+	}
+	task, err := h.service.ResolveReconciliation(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("attempt_id"), req)
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Reconciliation action or provider result is invalid.")
+	}
+	if errors.Is(err, pos.ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "RECONCILIATION_TASK_NOT_FOUND", "Reconciliation task was not found.")
+	}
+	if errors.Is(err, ErrOperationConflict) {
+		return respond.Error(c, fiber.StatusConflict, "RECONCILIATION_CONFLICT", "This reconciliation task was already resolved or no longer matches the booking attempt.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "RECONCILIATION_RESOLVE_FAILED", "Could not resolve booking reconciliation task.")
+	}
+	return respond.JSON(c, fiber.StatusOK, task)
 }
 
 func streamCalendarEvents(w *bufio.Writer, service *Service, salonID string, ownerUserID string, cursor CalendarEventCursor) {

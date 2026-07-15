@@ -24,6 +24,7 @@ func (CallSession) Fields() []ent.Field {
 		field.String("status").Default("active"),
 		field.String("intent").Default("unknown"),
 		field.String("outcome").Default("collecting"),
+		field.Int64("state_revision").Default(0).NonNegative(),
 		field.String("customer_name").Optional(),
 		field.String("customer_phone").Optional(),
 		field.String("customer_email").Optional(),
@@ -32,6 +33,8 @@ func (CallSession) Fields() []ent.Field {
 		field.String("staff_selection_mode").Default("specific"),
 		field.Time("requested_date").Optional().Nillable(),
 		field.Time("requested_start_time").Optional().Nillable(),
+		field.UUID("availability_quote_id", uuid.UUID{}).Optional().Nillable(),
+		field.String("availability_slot_fingerprint").Optional(),
 		field.JSON("offered_slots", []map[string]any{}).Optional(),
 		field.JSON("booking_segments", []map[string]any{}).Optional(),
 		field.JSON("dialog_state", map[string]any{}).Default(map[string]any{

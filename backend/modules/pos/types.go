@@ -3,6 +3,7 @@ package pos
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -125,6 +126,39 @@ const (
 )
 
 type WriteOutcome string
+
+// AppointmentStatus is the provider-neutral status returned by POS adapters.
+// Booking callers must compare the normalized value instead of treating a
+// provider booking ID as proof that the provider accepted the appointment.
+type AppointmentStatus string
+
+const (
+	AppointmentStatusAccepted  AppointmentStatus = "accepted"
+	AppointmentStatusPending   AppointmentStatus = "pending"
+	AppointmentStatusCancelled AppointmentStatus = "cancelled"
+	AppointmentStatusDeclined  AppointmentStatus = "declined"
+	AppointmentStatusNoShow    AppointmentStatus = "no_show"
+	AppointmentStatusUnknown   AppointmentStatus = "unknown"
+)
+
+func NormalizeAppointmentStatus(value string) AppointmentStatus {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.NewReplacer("-", "_", " ", "_").Replace(normalized)
+	switch normalized {
+	case "accepted", "confirmed":
+		return AppointmentStatusAccepted
+	case "pending":
+		return AppointmentStatusPending
+	case "cancelled", "canceled", "cancelled_by_customer", "canceled_by_customer", "cancelled_by_seller", "canceled_by_seller":
+		return AppointmentStatusCancelled
+	case "declined", "rejected":
+		return AppointmentStatusDeclined
+	case "no_show", "noshow":
+		return AppointmentStatusNoShow
+	default:
+		return AppointmentStatusUnknown
+	}
+}
 
 const (
 	WriteOutcomeDefinitiveFailure WriteOutcome = "definitive_failure"
@@ -407,6 +441,7 @@ type Connection struct {
 	SalonID               string     `json:"salon_id"`
 	Provider              string     `json:"provider"`
 	Status                string     `json:"status"`
+	SnapshotGeneration    int64      `json:"-"`
 	AccessTokenEncrypted  string     `json:"-"`
 	RefreshTokenEncrypted string     `json:"-"`
 	MerchantID            string     `json:"merchant_id,omitempty"`
@@ -442,11 +477,22 @@ type BusinessHourPeriod struct {
 }
 
 type SyncSummary struct {
-	ServicesSynced            int `json:"services_synced"`
-	StaffSynced               int `json:"staff_synced"`
-	BusinessHourPeriodsSynced int `json:"business_hour_periods_synced"`
-	CustomersSynced           int `json:"customers_synced"`
-	CustomersSkipped          int `json:"customers_skipped"`
+	ServicesSynced            int   `json:"services_synced"`
+	StaffSynced               int   `json:"staff_synced"`
+	BusinessHourPeriodsSynced int   `json:"business_hour_periods_synced"`
+	CustomersSynced           int   `json:"customers_synced"`
+	CustomersSkipped          int   `json:"customers_skipped"`
+	SnapshotGeneration        int64 `json:"-"`
+}
+
+type ProviderSnapshot struct {
+	Provider            string
+	LocationID          string
+	Generation          int64
+	Services            []Service
+	Staff               []StaffMember
+	BusinessHourPeriods []BusinessHourPeriod
+	Customers           []Customer
 }
 
 type Service struct {
@@ -684,10 +730,11 @@ type Appointment struct {
 }
 
 type AppointmentListInput struct {
-	StartTime time.Time
-	EndTime   time.Time
-	Limit     int
-	Cursor    string
+	StartTime     time.Time
+	EndTime       time.Time
+	Limit         int
+	Cursor        string
+	ProviderFence ProviderFence
 }
 
 type AppointmentListResult struct {
@@ -722,6 +769,13 @@ type CreateCustomerInput struct {
 	Email string
 }
 
+// ProviderFence binds a provider operation to the exact catalog snapshot that
+// supplied its service and staff identifiers.
+type ProviderFence struct {
+	LocationID         string
+	SnapshotGeneration int64
+}
+
 type AvailabilityInput struct {
 	ServiceID       string
 	StaffID         string
@@ -729,6 +783,7 @@ type AvailabilityInput struct {
 	Timezone        string
 	DurationMinutes int
 	Segments        []AvailabilitySegmentInput
+	ProviderFence   ProviderFence
 }
 
 type AvailabilitySegmentInput struct {
@@ -747,6 +802,7 @@ type CreateAppointmentInput struct {
 	DurationMinutes int
 	Notes           string
 	Segments        []AppointmentSegmentInput
+	ProviderFence   ProviderFence
 }
 
 type AppointmentSegmentInput struct {
@@ -766,12 +822,14 @@ type RescheduleInput struct {
 	DurationMinutes int
 	Notes           string
 	Segments        []AppointmentSegmentInput
+	ProviderFence   ProviderFence
 }
 
 type CancelInput struct {
 	IdempotencyKey string
 	BookingVersion int
 	Reason         string
+	ProviderFence  ProviderFence
 }
 
 type POSError struct {

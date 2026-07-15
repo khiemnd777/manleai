@@ -135,6 +135,14 @@ func TestNormalizeServiceWriteRequestRejectsUnsafeConsultationProfileValues(t *t
 			Status:               ConsultationProfileStatusReady,
 			OwnerApprovedSummary: "General summary only",
 		},
+		"ready without current system": {
+			Status:              ConsultationProfileStatusReady,
+			RecommendedOutcomes: []string{ConsultationOutcomeMaintain},
+		},
+		"ready without recommended outcome": {
+			Status:                   ConsultationProfileStatusReady,
+			CompatibleCurrentSystems: []string{ConsultationSystemNatural},
+		},
 		"summary too long": {
 			Status:               ConsultationProfileStatusDraft,
 			OwnerApprovedSummary: strings.Repeat("é", 321),
@@ -516,6 +524,50 @@ func TestProviderSwitchReadinessBlocksWithoutBookableMappings(t *testing.T) {
 	}
 	if readiness.BlockedReason != findReadinessCheck(readiness.Checks, "services_mapped").Message {
 		t.Fatalf("blocked reason = %q, want services_mapped message", readiness.BlockedReason)
+	}
+}
+
+func TestProviderSwitchReadinessRequiresActiveCompletedSync(t *testing.T) {
+	now := testTime()
+	for _, test := range []struct {
+		name       string
+		status     string
+		wantSynced bool
+	}{
+		{name: "connected timestamp is stale", status: StatusConnected},
+		{name: "syncing timestamp is stale", status: StatusSyncing},
+		{name: "active completed sync", status: StatusActive, wantSynced: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := &fakePOSStore{
+				activeProvider: ProviderSquare,
+				connection: &Connection{
+					ID:         "conn_1",
+					SalonID:    "salon_1",
+					Provider:   ProviderSquare,
+					Status:     test.status,
+					LocationID: "loc_1",
+					LastSyncAt: &now,
+				},
+				summary: ProviderMappingSummary{
+					BookableServiceCount: 1,
+					BookableStaffCount:   1,
+				},
+			}
+			service := NewService(store, fakeCapabilityProvider{name: ProviderSquare}, fakeCapabilityProvider{name: "future_pos"})
+
+			readiness, err := service.ProviderSwitchReadiness(context.Background(), "salon_1", "owner_1")
+			if err != nil {
+				t.Fatalf("ProviderSwitchReadiness returned error: %v", err)
+			}
+			syncedCheck := findReadinessCheck(readiness.Checks, "provider_synced")
+			if syncedCheck.Complete != test.wantSynced {
+				t.Fatalf("provider synced check = %#v, want complete=%t", syncedCheck, test.wantSynced)
+			}
+			if readiness.DryRunBookingReady != test.wantSynced {
+				t.Fatalf("dry-run booking readiness = %t, want %t", readiness.DryRunBookingReady, test.wantSynced)
+			}
+		})
 	}
 }
 

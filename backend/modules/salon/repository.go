@@ -156,6 +156,51 @@ func (r *Repository) UpdateSettings(ctx context.Context, salonID string, ownerUs
 	return r.GetSettings(ctx, salonID, ownerUserID)
 }
 
+func (r *Repository) CountConsultationReadyServices(ctx context.Context, salonID string, ownerUserID string) (int, error) {
+	var count int
+	err := r.db.QueryRowContext(ctx, `
+		SELECT (
+			SELECT COUNT(DISTINCT svc.id)::int
+			FROM services svc
+			JOIN pos_connections connection
+			  ON connection.salon_id = svc.salon_id
+			 AND connection.provider = salon.active_pos_provider
+			 AND connection.status = 'active'
+			 AND NULLIF(BTRIM(connection.location_id), '') IS NOT NULL
+			 AND connection.snapshot_generation > 0
+			 AND connection.last_sync_at IS NOT NULL
+			JOIN pos_entity_links link
+			  ON link.salon_id = svc.salon_id
+			 AND link.entity_type = 'service'
+			 AND link.entity_id = svc.id
+			 AND link.provider = salon.active_pos_provider
+			 AND link.sync_status = 'synced'
+			 AND COALESCE(link.provider_entity_id, '') <> ''
+			 AND COALESCE(link.provider_version, svc.pos_service_version, 0) > 0
+			JOIN service_consultation_profiles profile
+			  ON profile.salon_id = svc.salon_id
+			 AND profile.service_id = svc.id
+			 AND profile.status = 'ready'
+			 AND jsonb_array_length(profile.recommended_outcomes) > 0
+			 AND jsonb_array_length(profile.compatible_current_systems) > 0
+			WHERE svc.salon_id = salon.id
+			  AND svc.pos_provider = salon.active_pos_provider
+			  AND svc.active = true
+			  AND svc.ai_bookable = true
+			  AND svc.archived_at IS NULL
+			  AND svc.sync_status = 'synced'
+			  AND svc.duration_minutes > 0
+		)
+		FROM salons salon
+		WHERE salon.id = $1
+		  AND salon.owner_user_id = $2
+	`, salonID, ownerUserID).Scan(&count)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return count, err
+}
+
 func (r *Repository) GetPublicCatalogSettings(ctx context.Context, salonID string, ownerUserID string) (*PublicCatalogSettings, error) {
 	row := r.db.QueryRowContext(ctx, publicCatalogSettingsQuery(), salonID, ownerUserID)
 	return scanPublicCatalogSettings(row)

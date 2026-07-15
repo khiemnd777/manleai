@@ -132,6 +132,7 @@ func main() {
 	voice_twilio.RegisterRoutes(api, voice_twilio.NewHandler(twilioVoiceAdapter, voiceService))
 
 	squareService := pos_square.NewService(posRepo, squareAdapter, cfg.JWTSecret, bookingService)
+	squareService.SetWebhookRepository(pos_square.NewWebhookRepository(db))
 	pos_square.RegisterRoutes(api, pos_square.NewHandler(squareService, cfg), cfg.JWTSecret)
 
 	logg.Info("api listening", "port", cfg.ServerPort, "env", cfg.AppEnv)

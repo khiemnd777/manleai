@@ -11,6 +11,21 @@ func (s *Service) HandleUnintelligibleVoiceInput(ctx context.Context, salonID st
 	salonID = strings.TrimSpace(salonID)
 	ownerUserID = strings.TrimSpace(ownerUserID)
 	sessionID = strings.TrimSpace(sessionID)
+	req.EventKey = normalizeEventKey(req.EventKey)
+	if salonID == "" || ownerUserID == "" || sessionID == "" || req.EventKey == "" {
+		return nil, ErrValidation
+	}
+	return s.withSessionTurnSerialization(ctx, salonID, ownerUserID, sessionID, func(serializedCtx context.Context) (*Session, error) {
+		return retrySessionStateConflict(serializedCtx, func() (*Session, error) {
+			return s.handleUnintelligibleVoiceInputOnce(serializedCtx, salonID, ownerUserID, sessionID, req)
+		})
+	})
+}
+
+func (s *Service) handleUnintelligibleVoiceInputOnce(ctx context.Context, salonID string, ownerUserID string, sessionID string, req VoiceInputHandoffRequest) (*Session, error) {
+	salonID = strings.TrimSpace(salonID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	sessionID = strings.TrimSpace(sessionID)
 	eventKey := normalizeEventKey(req.EventKey)
 	if salonID == "" || ownerUserID == "" || sessionID == "" || eventKey == "" {
 		return nil, ErrValidation

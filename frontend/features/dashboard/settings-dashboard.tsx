@@ -181,7 +181,13 @@ export function SettingsDashboard() {
     [services]
   );
   const consultationReadyCount = useMemo(
-    () => consultationEligibleServices.filter((service) => service.consultation_profile?.status === "ready").length,
+    () =>
+      consultationEligibleServices.filter(
+        (service) =>
+          service.consultation_profile?.status === "ready" &&
+          service.consultation_profile.recommended_outcomes.length > 0 &&
+          service.consultation_profile.compatible_current_systems.length > 0
+      ).length,
     [consultationEligibleServices]
   );
   const activeProvider = salon?.active_pos_provider || "square";
@@ -241,6 +247,10 @@ export function SettingsDashboard() {
     }
     if (!Number.isFinite(reminderHours) || reminderHours <= 0) {
       setError("Reminder hours before must be greater than zero.");
+      return;
+    }
+    if (settingsForm.consultationEnabled && consultationReadyCount === 0) {
+      setError("Complete and mark at least one eligible service consultation profile as ready before enabling AI service consultation.");
       return;
     }
 
@@ -1199,7 +1209,7 @@ function emptySettingsForm(): SettingsFormState {
     smsReminderEnabled: true,
     reminderHoursBefore: "24",
     handoffEnabled: true,
-    consultationEnabled: true
+    consultationEnabled: false
   };
 }
 

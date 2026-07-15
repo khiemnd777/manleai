@@ -30,16 +30,20 @@ type IntegrationConfigsResponse struct {
 }
 
 type SquareSettingsResponse struct {
-	Provider               string     `json:"provider"`
-	Configured             bool       `json:"configured"`
-	Environment            string     `json:"environment"`
-	ClientID               string     `json:"client_id"`
-	RedirectURL            string     `json:"redirect_url"`
-	APIVersion             string     `json:"api_version"`
-	APIBaseURL             string     `json:"api_base_url,omitempty"`
-	ClientSecretConfigured bool       `json:"client_secret_configured"`
-	ClientSecretSource     string     `json:"client_secret_source"`
-	UpdatedAt              *time.Time `json:"updated_at,omitempty"`
+	Provider                      string     `json:"provider"`
+	Configured                    bool       `json:"configured"`
+	Environment                   string     `json:"environment"`
+	ClientID                      string     `json:"client_id"`
+	RedirectURL                   string     `json:"redirect_url"`
+	APIVersion                    string     `json:"api_version"`
+	APIBaseURL                    string     `json:"api_base_url,omitempty"`
+	ClientSecretConfigured        bool       `json:"client_secret_configured"`
+	ClientSecretSource            string     `json:"client_secret_source"`
+	WebhookNotificationURL        string     `json:"webhook_notification_url,omitempty"`
+	WebhookConfigured             bool       `json:"webhook_configured"`
+	WebhookSignatureKeyConfigured bool       `json:"webhook_signature_key_configured"`
+	WebhookSignatureKeySource     string     `json:"webhook_signature_key_source"`
+	UpdatedAt                     *time.Time `json:"updated_at,omitempty"`
 }
 
 type TwilioSettingsResponse struct {
@@ -81,13 +85,16 @@ type OpenAISettingsResponse struct {
 }
 
 type UpdateSquareSettingsRequest struct {
-	Environment       string `json:"environment"`
-	ClientID          string `json:"client_id"`
-	ClientSecret      string `json:"client_secret"`
-	ClearClientSecret bool   `json:"clear_client_secret"`
-	RedirectURL       string `json:"redirect_url"`
-	APIVersion        string `json:"api_version"`
-	APIBaseURL        string `json:"api_base_url"`
+	Environment              string  `json:"environment"`
+	ClientID                 string  `json:"client_id"`
+	ClientSecret             string  `json:"client_secret"`
+	ClearClientSecret        bool    `json:"clear_client_secret"`
+	RedirectURL              string  `json:"redirect_url"`
+	APIVersion               string  `json:"api_version"`
+	APIBaseURL               string  `json:"api_base_url"`
+	WebhookNotificationURL   *string `json:"webhook_notification_url,omitempty"`
+	WebhookSignatureKey      string  `json:"webhook_signature_key"`
+	ClearWebhookSignatureKey bool    `json:"clear_webhook_signature_key"`
 }
 
 type UpdateTwilioSettingsRequest struct {

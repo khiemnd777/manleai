@@ -60,6 +60,17 @@ func (g *GuardedTurnInterpreter) InterpretTurn(ctx context.Context, req conversa
 			ConversationComplete: reply.Consultation.ConversationComplete, Confidence: reply.Consultation.Confidence,
 			Reason: strings.TrimSpace(reply.Consultation.Reason),
 		},
+		Safety: conversation.SafetyAssessment{
+			Concern: reply.Safety.Concern, Category: strings.TrimSpace(reply.Safety.Category),
+			Confidence: reply.Safety.Confidence, Reason: strings.TrimSpace(reply.Safety.Reason),
+		},
+	}
+	for _, mutation := range reply.Consultation.Mutations {
+		turn.ConsultationMutations = append(turn.ConsultationMutations, conversation.ConsultationNeedMutation{
+			Field: strings.TrimSpace(mutation.Field), Operation: strings.TrimSpace(mutation.Operation),
+			Values: append([]string(nil), mutation.Values...), Confidence: mutation.Confidence,
+			Reason: strings.TrimSpace(mutation.Reason),
+		})
 	}
 	for _, act := range reply.Acts {
 		turn.Acts = append(turn.Acts, conversation.ConversationAct{

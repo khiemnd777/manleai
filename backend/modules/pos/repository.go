@@ -12,7 +12,11 @@ import (
 	"github.com/manleai/ai-receptionist/internal/validation"
 )
 
-var ErrNotFound = errors.New("pos record not found")
+var (
+	ErrNotFound              = errors.New("pos record not found")
+	ErrStaleProviderSnapshot = errors.New("provider snapshot is stale")
+	ErrStaleProviderFence    = errors.New("provider catalog fence is stale")
+)
 
 type Repository struct {
 	db *sql.DB
@@ -101,7 +105,7 @@ func (r *Repository) GetConnection(ctx context.Context, salonID string, provider
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id::text, salon_id::text, provider, status, COALESCE(access_token_encrypted, ''),
 		       COALESCE(refresh_token_encrypted, ''), COALESCE(merchant_id, ''), COALESCE(location_id, ''),
-		       scopes, last_sync_at, COALESCE(error_message, ''), created_at, updated_at
+		       snapshot_generation, scopes, last_sync_at, COALESCE(error_message, ''), created_at, updated_at
 		FROM pos_connections
 		WHERE salon_id = $1 AND provider = $2
 	`, salonID, provider)
@@ -124,7 +128,7 @@ func (r *Repository) UpsertConnection(ctx context.Context, connection Connection
 		              updated_at = now()
 		RETURNING id::text, salon_id::text, provider, status, COALESCE(access_token_encrypted, ''),
 		          COALESCE(refresh_token_encrypted, ''), COALESCE(merchant_id, ''), COALESCE(location_id, ''),
-		          scopes, last_sync_at, COALESCE(error_message, ''), created_at, updated_at
+		          snapshot_generation, scopes, last_sync_at, COALESCE(error_message, ''), created_at, updated_at
 	`, connection.SalonID, connection.Provider, connection.Status, connection.AccessTokenEncrypted, connection.RefreshTokenEncrypted, connection.MerchantID, connection.LocationID, pq.Array(connection.Scopes), connection.ErrorMessage)
 	return scanConnection(row)
 }
@@ -133,20 +137,63 @@ func (r *Repository) UpdateLocation(ctx context.Context, salonID string, provide
 	row := r.db.QueryRowContext(ctx, `
 		UPDATE pos_connections
 		SET location_id = $1,
-		    status = CASE WHEN status = 'connected' THEN 'active' ELSE status END,
+		    snapshot_generation = CASE
+		        WHEN COALESCE(location_id, '') IS DISTINCT FROM $1 THEN snapshot_generation + 1
+		        ELSE snapshot_generation
+		    END,
+		    status = CASE
+		        WHEN COALESCE(location_id, '') IS DISTINCT FROM $1
+		         AND status IN ('connected', 'active', 'syncing', 'error') THEN 'connected'
+		        ELSE status
+		    END,
+		    last_sync_at = CASE
+		        WHEN COALESCE(location_id, '') IS DISTINCT FROM $1 THEN NULL
+		        ELSE last_sync_at
+		    END,
+		    error_message = CASE
+		        WHEN COALESCE(location_id, '') IS DISTINCT FROM $1
+		         AND status IN ('connected', 'active', 'syncing', 'error') THEN NULL
+		        ELSE error_message
+		    END,
 		    updated_at = now()
 		WHERE salon_id = $2 AND provider = $3
 		RETURNING id::text, salon_id::text, provider, status, COALESCE(access_token_encrypted, ''),
 		          COALESCE(refresh_token_encrypted, ''), COALESCE(merchant_id, ''), COALESCE(location_id, ''),
-		          scopes, last_sync_at, COALESCE(error_message, ''), created_at, updated_at
+		          snapshot_generation, scopes, last_sync_at, COALESCE(error_message, ''), created_at, updated_at
 	`, locationID, salonID, provider)
 	return scanConnection(row)
+}
+
+func (r *Repository) BeginProviderSnapshot(ctx context.Context, salonID string, provider string, locationID string) (int64, error) {
+	salonID = strings.TrimSpace(salonID)
+	provider = strings.TrimSpace(provider)
+	locationID = strings.TrimSpace(locationID)
+	if salonID == "" || provider == "" || locationID == "" {
+		return 0, ErrValidation
+	}
+	var generation int64
+	err := r.db.QueryRowContext(ctx, `
+		UPDATE pos_connections
+		SET snapshot_generation = snapshot_generation + 1,
+		    status = 'syncing',
+		    last_sync_at = NULL,
+		    error_message = NULL,
+		    updated_at = now()
+		WHERE salon_id = $1
+		  AND provider = $2
+		  AND COALESCE(location_id, '') = $3
+		RETURNING snapshot_generation
+	`, salonID, provider, locationID).Scan(&generation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrStaleProviderSnapshot
+	}
+	return generation, err
 }
 
 func (r *Repository) MarkSyncing(ctx context.Context, salonID string, provider string) error {
 	_, err := r.db.ExecContext(ctx, `
 		UPDATE pos_connections
-		SET status = 'syncing', updated_at = now()
+		SET status = 'syncing', last_sync_at = NULL, updated_at = now()
 		WHERE salon_id = $1 AND provider = $2
 	`, salonID, provider)
 	return err
@@ -155,10 +202,40 @@ func (r *Repository) MarkSyncing(ctx context.Context, salonID string, provider s
 func (r *Repository) MarkSyncComplete(ctx context.Context, salonID string, provider string, status string, message string) error {
 	_, err := r.db.ExecContext(ctx, `
 		UPDATE pos_connections
-		SET status = $3, last_sync_at = now(), error_message = NULLIF($4, ''), updated_at = now()
+		SET status = $3,
+		    last_sync_at = CASE WHEN $3 = 'active' THEN now() ELSE NULL END,
+		    error_message = NULLIF($4, ''),
+		    updated_at = now()
 		WHERE salon_id = $1 AND provider = $2
 	`, salonID, provider, status, message)
 	return err
+}
+
+func (r *Repository) MarkSyncCompleteForGeneration(ctx context.Context, salonID string, provider string, generation int64, status string, message string) error {
+	if generation <= 0 {
+		return ErrValidation
+	}
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE pos_connections
+		SET status = $4,
+		    last_sync_at = CASE WHEN $4 = 'active' THEN now() ELSE NULL END,
+		    error_message = NULLIF($5, ''),
+		    updated_at = now()
+		WHERE salon_id = $1
+		  AND provider = $2
+		  AND snapshot_generation = $3
+	`, salonID, provider, generation, status, message)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return ErrStaleProviderSnapshot
+	}
+	return nil
 }
 
 func (r *Repository) CreateSyncLog(ctx context.Context, salonID string, provider string, syncType string) (string, error) {
@@ -421,7 +498,13 @@ func (r *Repository) UpsertServices(ctx context.Context, salonID string, service
 		return err
 	}
 	defer tx.Rollback()
+	if err := upsertServicesTx(ctx, tx, salonID, services); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
+func upsertServicesTx(ctx context.Context, tx *sql.Tx, salonID string, services []Service) error {
 	for _, svc := range services {
 		provider := svc.POSProvider
 		if provider == "" {
@@ -429,6 +512,7 @@ func (r *Repository) UpsertServices(ctx context.Context, salonID string, service
 		}
 		var serviceID string
 		var archived bool
+		// Provider eligibility is a hard cap: sync may revoke AI booking, but it must not silently re-enable an owner-disabled service.
 		if err := tx.QueryRowContext(ctx, `
 			INSERT INTO services (
 				salon_id, pos_provider, pos_service_id, pos_service_version, name, description, ai_description,
@@ -444,7 +528,10 @@ func (r *Repository) UpsertServices(ctx context.Context, salonID string, service
 			              price_from = EXCLUDED.price_from,
 			              price_display = EXCLUDED.price_display,
 			              active = CASE WHEN services.archived_at IS NULL THEN EXCLUDED.active ELSE false END,
-			              ai_bookable = CASE WHEN services.archived_at IS NULL THEN services.ai_bookable ELSE false END,
+			              ai_bookable = CASE
+			                  WHEN services.archived_at IS NULL THEN services.ai_bookable AND EXCLUDED.ai_bookable
+			                  ELSE false
+			              END,
 			              sync_status = CASE WHEN services.archived_at IS NULL THEN 'synced' ELSE 'archived' END,
 			              last_synced_at = now(),
 			              sync_error = NULL,
@@ -474,7 +561,7 @@ func (r *Repository) UpsertServices(ctx context.Context, salonID string, service
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (r *Repository) UpsertStaff(ctx context.Context, salonID string, staff []StaffMember) error {
@@ -483,7 +570,13 @@ func (r *Repository) UpsertStaff(ctx context.Context, salonID string, staff []St
 		return err
 	}
 	defer tx.Rollback()
+	if err := upsertStaffTx(ctx, tx, salonID, staff); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
+func upsertStaffTx(ctx context.Context, tx *sql.Tx, salonID string, staff []StaffMember) error {
 	for _, member := range staff {
 		provider := member.POSProvider
 		if provider == "" {
@@ -491,6 +584,7 @@ func (r *Repository) UpsertStaff(ctx context.Context, salonID string, staff []St
 		}
 		var staffID string
 		var archived bool
+		// Provider eligibility is a hard cap: sync may revoke AI booking, but it must not silently re-enable an owner-disabled staff member.
 		if err := tx.QueryRowContext(ctx, `
 			INSERT INTO staff (
 				salon_id, pos_provider, pos_staff_id, name, phone, email, ai_bookable, active,
@@ -502,7 +596,10 @@ func (r *Repository) UpsertStaff(ctx context.Context, salonID string, staff []St
 			              phone = EXCLUDED.phone,
 			              email = EXCLUDED.email,
 			              active = CASE WHEN staff.archived_at IS NULL THEN EXCLUDED.active ELSE false END,
-			              ai_bookable = CASE WHEN staff.archived_at IS NULL THEN staff.ai_bookable ELSE false END,
+			              ai_bookable = CASE
+			                  WHEN staff.archived_at IS NULL THEN staff.ai_bookable AND EXCLUDED.ai_bookable
+			                  ELSE false
+			              END,
 			              sync_status = CASE WHEN staff.archived_at IS NULL THEN 'synced' ELSE 'archived' END,
 			              last_synced_at = now(),
 			              sync_error = NULL,
@@ -531,7 +628,7 @@ func (r *Repository) UpsertStaff(ctx context.Context, salonID string, staff []St
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (r *Repository) UpsertBusinessHourPeriods(ctx context.Context, salonID string, provider string, locationID string, periods []BusinessHourPeriod) (int, error) {
@@ -549,7 +646,17 @@ func (r *Repository) UpsertBusinessHourPeriods(ctx context.Context, salonID stri
 		return 0, err
 	}
 	defer tx.Rollback()
+	count, err := upsertBusinessHourPeriodsTx(ctx, tx, salonID, provider, locationID, periods)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
 
+func upsertBusinessHourPeriodsTx(ctx context.Context, tx *sql.Tx, salonID string, provider string, locationID string, periods []BusinessHourPeriod) (int, error) {
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM salon_business_hour_periods
 		WHERE salon_id = $1
@@ -592,9 +699,6 @@ func (r *Repository) UpsertBusinessHourPeriods(ctx context.Context, salonID stri
 			return 0, err
 		}
 		count++
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
 	}
 	return count, nil
 }
@@ -651,7 +755,17 @@ func (r *Repository) UpsertCustomers(ctx context.Context, salonID string, provid
 		return 0, 0, err
 	}
 	defer tx.Rollback()
+	synced, skipped, err := upsertCustomersTx(ctx, tx, salonID, provider, customers)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return synced, skipped, nil
+}
 
+func upsertCustomersTx(ctx context.Context, tx *sql.Tx, salonID string, provider string, customers []Customer) (int, int, error) {
 	synced := 0
 	skipped := 0
 	for _, customer := range customers {
@@ -751,10 +865,186 @@ func (r *Repository) UpsertCustomers(ctx context.Context, salonID string, provid
 		}
 		synced++
 	}
-	if err := tx.Commit(); err != nil {
-		return 0, 0, err
-	}
 	return synced, skipped, nil
+}
+
+func (r *Repository) ApplyProviderSnapshot(ctx context.Context, salonID string, snapshot ProviderSnapshot) (*SyncSummary, error) {
+	provider := strings.TrimSpace(snapshot.Provider)
+	if provider == "" {
+		provider = ProviderSquare
+	}
+	locationID := strings.TrimSpace(snapshot.LocationID)
+	if locationID == "" || snapshot.Generation <= 0 {
+		return nil, ErrValidation
+	}
+	for index := range snapshot.Services {
+		serviceProvider := strings.TrimSpace(snapshot.Services[index].POSProvider)
+		if serviceProvider != "" && serviceProvider != provider {
+			return nil, ErrValidation
+		}
+		snapshot.Services[index].POSProvider = provider
+	}
+	for index := range snapshot.Staff {
+		staffProvider := strings.TrimSpace(snapshot.Staff[index].POSProvider)
+		if staffProvider != "" && staffProvider != provider {
+			return nil, ErrValidation
+		}
+		snapshot.Staff[index].POSProvider = provider
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(
+		ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		"pos-provider-snapshot:"+salonID+":"+provider,
+	); err != nil {
+		return nil, err
+	}
+	var currentLocationID string
+	var currentGeneration int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT COALESCE(location_id, ''), snapshot_generation
+		FROM pos_connections
+		WHERE salon_id = $1 AND provider = $2
+		FOR UPDATE
+	`, salonID, provider).Scan(&currentLocationID, &currentGeneration)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrStaleProviderSnapshot
+	}
+	if err != nil {
+		return nil, err
+	}
+	if currentLocationID != locationID || currentGeneration != snapshot.Generation {
+		return nil, ErrStaleProviderSnapshot
+	}
+
+	if err := upsertServicesTx(ctx, tx, salonID, snapshot.Services); err != nil {
+		return nil, err
+	}
+	if err := markMissingImportedServicesTx(ctx, tx, salonID, provider, snapshot.Services); err != nil {
+		return nil, err
+	}
+	if err := upsertStaffTx(ctx, tx, salonID, snapshot.Staff); err != nil {
+		return nil, err
+	}
+	if err := markMissingImportedStaffTx(ctx, tx, salonID, provider, snapshot.Staff); err != nil {
+		return nil, err
+	}
+	periodsSynced, err := upsertBusinessHourPeriodsTx(ctx, tx, salonID, provider, locationID, snapshot.BusinessHourPeriods)
+	if err != nil {
+		return nil, err
+	}
+	customersSynced, customersSkipped, err := upsertCustomersTx(ctx, tx, salonID, provider, snapshot.Customers)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &SyncSummary{
+		ServicesSynced:            len(snapshot.Services),
+		StaffSynced:               len(snapshot.Staff),
+		BusinessHourPeriodsSynced: periodsSynced,
+		CustomersSynced:           customersSynced,
+		CustomersSkipped:          customersSkipped,
+		SnapshotGeneration:        snapshot.Generation,
+	}, nil
+}
+
+func markMissingImportedServicesTx(ctx context.Context, tx *sql.Tx, salonID string, provider string, services []Service) error {
+	providerIDs := make([]string, 0, len(services))
+	for _, service := range services {
+		if providerID := strings.TrimSpace(service.POSServiceID); providerID != "" {
+			providerIDs = append(providerIDs, providerID)
+		}
+	}
+	const reason = "Missing from latest provider snapshot"
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE services
+		SET active = false,
+		    ai_bookable = false,
+		    sync_status = 'unmapped',
+		    last_synced_at = now(),
+		    sync_error = $4,
+		    updated_at = now()
+		WHERE salon_id = $1
+		  AND pos_provider = $2
+		  AND source = 'imported'
+		  AND archived_at IS NULL
+		  AND NOT (COALESCE(pos_service_id, '') = ANY($3::text[]))
+	`, salonID, provider, pq.Array(providerIDs), reason); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `
+		UPDATE pos_entity_links link
+		SET sync_status = 'unmapped',
+		    last_synced_at = now(),
+		    last_error = $4,
+		    updated_at = now()
+		WHERE link.salon_id = $1
+		  AND link.provider = $2
+		  AND link.entity_type = 'service'
+		  AND NOT (COALESCE(link.provider_entity_id, '') = ANY($3::text[]))
+		  AND EXISTS (
+		      SELECT 1
+		      FROM services svc
+		      WHERE svc.id = link.entity_id
+		        AND svc.salon_id = link.salon_id
+		        AND svc.source = 'imported'
+		        AND svc.archived_at IS NULL
+		  )
+	`, salonID, provider, pq.Array(providerIDs), reason)
+	return err
+}
+
+func markMissingImportedStaffTx(ctx context.Context, tx *sql.Tx, salonID string, provider string, staff []StaffMember) error {
+	providerIDs := make([]string, 0, len(staff))
+	for _, member := range staff {
+		if providerID := strings.TrimSpace(member.POSStaffID); providerID != "" {
+			providerIDs = append(providerIDs, providerID)
+		}
+	}
+	const reason = "Missing from latest provider snapshot"
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE staff
+		SET active = false,
+		    ai_bookable = false,
+		    sync_status = 'unmapped',
+		    last_synced_at = now(),
+		    sync_error = $4,
+		    updated_at = now()
+		WHERE salon_id = $1
+		  AND pos_provider = $2
+		  AND source = 'imported'
+		  AND archived_at IS NULL
+		  AND NOT (COALESCE(pos_staff_id, '') = ANY($3::text[]))
+	`, salonID, provider, pq.Array(providerIDs), reason); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `
+		UPDATE pos_entity_links link
+		SET sync_status = 'unmapped',
+		    last_synced_at = now(),
+		    last_error = $4,
+		    updated_at = now()
+		WHERE link.salon_id = $1
+		  AND link.provider = $2
+		  AND link.entity_type = 'staff'
+		  AND NOT (COALESCE(link.provider_entity_id, '') = ANY($3::text[]))
+		  AND EXISTS (
+		      SELECT 1
+		      FROM staff member
+		      WHERE member.id = link.entity_id
+		        AND member.salon_id = link.salon_id
+		        AND member.source = 'imported'
+		        AND member.archived_at IS NULL
+		  )
+	`, salonID, provider, pq.Array(providerIDs), reason)
+	return err
 }
 
 func (r *Repository) ListServices(ctx context.Context, salonID string, provider string) ([]Service, error) {
@@ -2770,6 +3060,7 @@ func scanConnection(row rowScanner) (*Connection, error) {
 		&item.RefreshTokenEncrypted,
 		&item.MerchantID,
 		&item.LocationID,
+		&item.SnapshotGeneration,
 		pq.Array(&scopes),
 		&lastSync,
 		&item.ErrorMessage,

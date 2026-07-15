@@ -197,7 +197,31 @@ The backend retains legacy environment fallback code for compatibility. That
 path is not the normal production configuration workflow and is intentionally
 absent from repository env templates. Inspect it only for an explicitly scoped
 bootstrap/legacy task after proving that the salon has no stored provider
-configuration.
+configuration. The current runtime resolver does not yet distinguish exact
+not-found from repository/decryption failure before taking that fallback; treat
+this as a release blocker for strict fail-closed provider configuration.
+
+Square booking-webhook verification is also salon-scoped dashboard data. Store
+the exact public HTTPS notification URL and write-only signature key in
+`/dashboard/integrations`; do not add either value to repository env templates.
+`webhook_configured` means verifier credentials are present, not that the
+Square subscription or deliveries are healthy. Configuration transfer
+preserves the destination deployment URL and requires secret re-entry. The API
+process receives and durably enqueues events; the worker processes fenced
+claims and runs scheduled calendar repair. Migrations V39-V42 add booking
+integrity/reconciliation/quotes, fail-closed consultation defaults, Square
+webhook/repair persistence, and conversation state revision. They remain under
+the existing startup migrator and must not be run manually during source review.
+Migration V43 adds the monotonic location-scoped provider snapshot generation
+used to reject stale and out-of-order full imports. On first deployment it
+preserves Square credentials and terminal connection states, but changes every
+previously runnable Square connection to `connected`, clears `last_sync_at`,
+and requires one successful full sync for the selected location before catalog,
+availability, retry, or booking paths become ready again. Do not bypass that
+resync by editing connection status or timestamps. Every later full snapshot
+also clears `last_sync_at` when it begins; an error completion keeps it empty,
+and only an `active` successful completion restores the timestamp and synced
+readiness.
 
 The configured OpenAI reply model may serve two guarded roles: style-only
 rewriting for eligible safe replies, and strict structured interpretation of
@@ -240,10 +264,58 @@ revisions.
 - Keep `AUTO_MIGRATE=true` for the API unless another release process applies
   the same SQL migrations. The worker runs with `AUTO_MIGRATE=false` and starts
   only after the API healthcheck succeeds.
+- V39 intentionally aborts when one request fingerprint has multiple historical
+  attempts whose provider dispatch cannot be proven not started. Reconcile
+  those POS outcomes before retrying the migration; do not force the unique
+  fingerprint index by deleting or auto-closing unknown attempts.
 - Configure the Square redirect URL in the Integrations dashboard to the deployed API callback.
+- Configure the exact Square booking-webhook HTTPS notification URL and signature key in the Integrations dashboard, then verify subscription/delivery health separately in Square; the local configured badge is not a delivery-health check.
+- Run the worker for booking lease expiry, bounded availability-quote cleanup, Square webhook processing, scheduled calendar repair, and retention; monitor failures without exposing event bodies or secrets. Each job has an independent synchronous recurring loop, preventing overlap within one job while ensuring a slow webhook/repair batch cannot starve lease recovery. Quote cleanup runs every five minutes, drains at most eight batches of 250 quotes per run, keeps a 24-hour post-expiry grace for unconsumed quotes and a 30-day audit window for orphaned consumed quotes, and preserves every quote still linked to a booking attempt.
 - Configure the dashboard Twilio public base URL to the deployed API origin used in Twilio webhook settings.
 - Configure realtime phone mode from the Integrations dashboard: Twilio `voice_transport=realtime_stream`; OpenAI realtime model/voice and noise profile for input; and `speech_output_mode=streaming_tts` for low-latency backend-approved output. `buffered_realtime` is a legacy rollback mode.
 - Keep Twilio and OpenAI secrets out of logs and docs; dashboard responses expose only configured/source metadata.
 - Enable OpenAI voice AI in the Integrations dashboard only when external AI voice turns should be enabled.
 - Keep OpenAI model and voice settings configurable through the dashboard so model changes do not require code changes.
 - Restrict CORS to the deployed admin, landing, and POS calendar origins.
+
+### V39 booking-attempt preflight
+
+Run this read-only query against the pre-V39 database during an approved change
+window, after taking the normal deployment backup. It intentionally uses only
+columns that exist before V39; `superseded_at` is created by V39 and must not be
+referenced by the preflight.
+
+```sql
+SELECT
+    salon_id,
+    operation_type,
+    request_fingerprint,
+    count(*) FILTER (WHERE provider_outcome <> 'not_started') AS dispatched_or_uncertain_count,
+    array_agg(id ORDER BY created_at, id) AS attempt_ids,
+    array_agg(status ORDER BY created_at, id) AS statuses,
+    array_agg(provider_outcome ORDER BY created_at, id) AS provider_outcomes,
+    array_agg(COALESCE(pos_booking_id, '') ORDER BY created_at, id) AS provider_booking_ids
+FROM booking_attempts
+WHERE request_fingerprint IS NOT NULL
+  AND (
+      status = 'pos_pending'
+      OR reconciliation_status = 'required'
+  )
+GROUP BY salon_id, operation_type, request_fingerprint
+HAVING count(*) FILTER (WHERE provider_outcome <> 'not_started') > 1
+ORDER BY salon_id, operation_type, request_fingerprint;
+```
+
+Zero rows means the V39 duplicate-safety guard has no known ambiguous group to
+block. Any returned row blocks the release. V39 cannot create its reconciliation
+tables until the migration transaction commits, so there is no in-product V39
+resolution workflow available for this preflight state. For each returned
+attempt, verify the authoritative POS booking outcome, provider booking ID and
+version, requested time, customer, and idempotency evidence under the normal
+provider-access and privacy controls. Escalate required corrections through a
+peer-reviewed DBA/product reconciliation change that keeps the booking attempt,
+appointment, provider identity/version, notification, and audit records
+consistent in one transaction. Do not delete, merge, auto-close, or mark an
+unknown/dispatched attempt as `not_started` merely to make the query or index
+pass. Rerun the read-only query only after authoritative reconciliation proves
+that each fingerprint group has at most one dispatched or uncertain attempt.

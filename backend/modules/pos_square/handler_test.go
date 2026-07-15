@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
 func TestHandleGateErrorMarksErrorAsHandledWhenResponseWriteSucceeds(t *testing.T) {
@@ -48,5 +49,45 @@ func TestHandleGateErrorMarksErrorAsHandledWhenResponseWriteSucceeds(t *testing.
 	}
 	if body.Error.Message != "booking service did not return a booking attempt" {
 		t.Fatalf("message = %q", body.Error.Message)
+	}
+}
+
+func TestHandleGateErrorMapsAvailabilityQuoteConflicts(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		code string
+	}{
+		{name: "required", err: booking.ErrAvailabilityQuoteRequired, code: "AVAILABILITY_QUOTE_REQUIRED"},
+		{name: "stale", err: booking.ErrAvailabilityQuoteStale, code: "AVAILABILITY_QUOTE_STALE"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app := fiber.New()
+			handler := &Handler{}
+			app.Get("/", func(c *fiber.Ctx) error {
+				_, err := handler.handleGateError(c, test.err, "SQUARE_TEST_BOOKING_FAILED")
+				return err
+			})
+
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != fiber.StatusConflict {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusConflict)
+			}
+			var body struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode response failed: %v", err)
+			}
+			if body.Error.Code != test.code {
+				t.Fatalf("code = %q, want %q", body.Error.Code, test.code)
+			}
+		})
 	}
 }

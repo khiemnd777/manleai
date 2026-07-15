@@ -733,8 +733,8 @@ func TestMessageAnswersExactServiceInquiryWithoutSelectingBookingService(t *test
 func TestMessageConsultationUsesApprovedCatalogFactsWithoutSelecting(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = []ServiceOption{
-		{ID: "classic", Name: "Classic Manicure", AIDescription: "Nail shaping and regular polish", Description: "fallback must not win", DurationMinutes: 30, PriceFrom: 25, CategoryName: "Manicure"},
-		{ID: "gel", Name: "Gel Manicure", AIDescription: "Nail shaping and gel polish", DurationMinutes: 45, PriceFrom: 40, CategoryName: "Manicure"},
+		{ID: "classic", Name: "Classic Manicure", AIDescription: "Nail shaping and regular polish", Description: "fallback must not win", DurationMinutes: 30, PriceFrom: 25, CategoryName: "Manicure", ConsultationProfile: readyComparisonProfile(ConsultationOutcomeMaintain, ConsultationSystemNatural)},
+		{ID: "gel", Name: "Gel Manicure", AIDescription: "Nail shaping and gel polish", DurationMinutes: 45, PriceFrom: 40, CategoryName: "Manicure", ConsultationProfile: readyComparisonProfile(ConsultationOutcomeColorRefresh, ConsultationSystemGel)},
 	}
 	bookingTool := &fakeBookingTool{}
 	service := NewService(store, bookingTool)
@@ -762,8 +762,8 @@ func TestMessageConsultationUsesApprovedCatalogFactsWithoutSelecting(t *testing.
 func TestMessageConsultationBareAffirmativeDoesNotSelectService(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = []ServiceOption{
-		{ID: "classic", Name: "Classic Manicure", AIDescription: "Regular polish", DurationMinutes: 30},
-		{ID: "gel", Name: "Gel Manicure", AIDescription: "Gel polish", DurationMinutes: 45},
+		{ID: "classic", Name: "Classic Manicure", AIDescription: "Regular polish", DurationMinutes: 30, ConsultationProfile: readyComparisonProfile(ConsultationOutcomeMaintain, ConsultationSystemNatural)},
+		{ID: "gel", Name: "Gel Manicure", AIDescription: "Gel polish", DurationMinutes: 45, ConsultationProfile: readyComparisonProfile(ConsultationOutcomeColorRefresh, ConsultationSystemGel)},
 	}
 	service := NewService(store, &fakeBookingTool{})
 	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Help me choose between Classic Manicure and Gel Manicure"}); err != nil {
@@ -784,8 +784,8 @@ func TestMessageConsultationBareAffirmativeDoesNotSelectService(t *testing.T) {
 func TestMessageConsultationExplicitChoiceStartsBooking(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = []ServiceOption{
-		{ID: "classic", Name: "Classic Manicure", AIDescription: "Regular polish", DurationMinutes: 30},
-		{ID: "gel", Name: "Gel Manicure", AIDescription: "Gel polish", DurationMinutes: 45},
+		{ID: "classic", Name: "Classic Manicure", AIDescription: "Regular polish", DurationMinutes: 30, ConsultationProfile: readyComparisonProfile(ConsultationOutcomeMaintain, ConsultationSystemNatural)},
+		{ID: "gel", Name: "Gel Manicure", AIDescription: "Gel polish", DurationMinutes: 45, ConsultationProfile: readyComparisonProfile(ConsultationOutcomeColorRefresh, ConsultationSystemGel)},
 	}
 	service := NewService(store, &fakeBookingTool{})
 	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Compare Classic Manicure and Gel Manicure"}); err != nil {
@@ -856,6 +856,178 @@ func TestMessageConsultationHealthConcernHandsOffWithoutBooking(t *testing.T) {
 	}
 }
 
+func TestMessageBareHealthSymptomHandsOffWithoutInterpreter(t *testing.T) {
+	store := newFakeConversationStore()
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "The skin beside my thumb keeps bleeding.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.Handoff == nil || session.Handoff.Reason != HandoffReasonConsultationSafety || session.Status != StatusHandoff {
+		t.Fatalf("bare symptom did not fail closed to safety handoff: %#v", session)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("bare symptom invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
+func TestMessageMedicalSuitabilitySafetyPreemptsUnavailableInterpreter(t *testing.T) {
+	store := newFakeConversationStore()
+	bookingTool := &fakeBookingTool{}
+	interpreter := &immediateTimeoutTurnInterpreter{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(interpreter)
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Would my health condition make this treatment inappropriate?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if interpreter.calls != 0 {
+		t.Fatalf("safety gate called the semantic interpreter %d times, want 0", interpreter.calls)
+	}
+	if session.Handoff == nil || session.Handoff.Reason != HandoffReasonConsultationSafety || session.Status != StatusHandoff {
+		t.Fatalf("medical suitability did not fail closed to safety handoff: %#v", session)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("medical suitability invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
+func TestMessageConsultationSafetyPreemptsActiveBookingState(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{ServiceID: "service_1", StaffSelectionMode: booking.StaffSelectionAnyone}}
+	store.session.OfferedSlots = []OfferedSlot{{StartTime: testStartTime(), EndTime: testStartTime().Add(45 * time.Minute)}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "There is swelling around one nail. Can I still keep this manicure appointment?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.Handoff == nil || session.Handoff.Reason != HandoffReasonConsultationSafety || session.Status != StatusHandoff {
+		t.Fatalf("safety did not preempt booking flow: %#v", session)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("safety pre-routing invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	if got := store.lastTurn.CustomerMetadata["consultation_safety_source"]; got != "deterministic" {
+		t.Fatalf("safety source = %#v", got)
+	}
+}
+
+func TestMessageStructuredSafetyPreemptsOrdinarySemanticRouting(t *testing.T) {
+	store := newFakeConversationStore()
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal: "consultation", Confidence: 0.20,
+		Safety: SafetyAssessment{Concern: true, Category: SafetyCategoryMedicalSuitability, Confidence: 0.97, Reason: "caller_requests_health_suitability_advice"},
+	}})
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Could you advise whether the sensitivity I mentioned changes what I should choose?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.Handoff == nil || session.Handoff.Reason != HandoffReasonConsultationSafety {
+		t.Fatalf("structured safety did not hand off: %#v", session)
+	}
+	if got := store.lastTurn.CustomerMetadata["consultation_safety_source"]; got != "structured_ai" {
+		t.Fatalf("structured safety source = %#v", got)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("structured safety invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
+func TestMessageStructuredSafetyPreemptsEarlyDateTimeCorrection(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.RequestedDate = "2026-06-15"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{
+		ServiceID: "service_1", StaffSelectionMode: booking.StaffSelectionAnyone,
+	}}
+	originalStart := time.Date(2026, 6, 15, 17, 0, 0, 0, time.UTC)
+	store.session.OfferedSlots = []OfferedSlot{{StartTime: originalStart, EndTime: originalStart.Add(45 * time.Minute)}}
+	message := "Could we try tomorrow around 2:30 PM instead, and would the sensitivity I mentioned make this treatment a bad fit?"
+	if isConsultationSafetyConcern(message) {
+		t.Fatal("test message unexpectedly matched the deterministic safety gate")
+	}
+	proposed := cloneSessionForTurn(store.session)
+	applyExtraction(&proposed, message, store.services, nil, nil, store.staff, timezoneLocation(store.cfg.Timezone), fixedNow)
+	if !dateTimeSelectionChanged(store.session, proposed) || !sameStringSlices(selectedServiceIDs(store.session), selectedServiceIDs(proposed)) {
+		t.Fatalf("test message does not exercise the early date/time correction path: %#v", proposed)
+	}
+
+	bookingTool := &fakeBookingTool{}
+	interpreter := &fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal: "consultation", Confidence: 0.96,
+		Safety: SafetyAssessment{Concern: true, Category: SafetyCategoryMedicalSuitability, Confidence: 0.98, Reason: "caller_asks_about_adverse_reaction_suitability"},
+	}}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(interpreter)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: message})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if interpreter.calls != 1 {
+		t.Fatalf("semantic interpreter calls = %d, want exactly one", interpreter.calls)
+	}
+	if session.Handoff == nil || session.Handoff.Reason != HandoffReasonConsultationSafety || session.Status != StatusHandoff {
+		t.Fatalf("structured safety did not preempt the date/time correction: %#v", session)
+	}
+	if session.DialogState.Pending != nil || session.RequestedDate != "2026-06-15" || len(session.OfferedSlots) != 1 {
+		t.Fatalf("early date/time correction mutated state before safety handoff: %#v", session)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("early date/time correction invoked tools before safety handoff: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	if got := store.lastTurn.CustomerMetadata["consultation_safety_source"]; got != "structured_ai" {
+		t.Fatalf("structured safety source = %#v", got)
+	}
+}
+
+func TestConsultationSafetyDetectorIgnoresExplicitlyNegatedSymptoms(t *testing.T) {
+	if isConsultationSafetyConcern("I have no pain and no swelling. Can I book a gel manicure?") {
+		t.Fatal("explicitly negated symptoms were treated as a safety concern")
+	}
+	if isConsultationSafetyConcern("I don't have pain or swelling. Can I book a gel manicure?") {
+		t.Fatal("contracted symptom negation was treated as a safety concern")
+	}
+	if !isConsultationSafetyConcern("I had no pain earlier, but now there is pain. Can I still book?") {
+		t.Fatal("a current positive symptom was hidden by an earlier negated occurrence")
+	}
+	if !isConsultationSafetyConcern("I developed an adverse reaction after the last product.") {
+		t.Fatal("an adverse reaction was not treated as deterministic safety evidence")
+	}
+	if !isConsultationSafetyConcern("Would this pedicure be medically suitable for me?") {
+		t.Fatal("an explicit medical suitability question was not treated as deterministic safety evidence")
+	}
+	if isConsultationSafetyConcern("Is it safe to delete the draft from the simulator?") {
+		t.Fatal("a context-free operational safety question was treated as a health concern")
+	}
+	if isConsultationSafetyConcern("Which service is suitable for short natural nails?") {
+		t.Fatal("an ordinary service-fit consultation was treated as a medical suitability concern")
+	}
+}
+
 func TestMessageConsultationCollectsOneNeedAtATimeWithoutBookingTools(t *testing.T) {
 	store := newFakeConversationStore()
 	bookingTool := &fakeBookingTool{}
@@ -869,6 +1041,10 @@ func TestMessageConsultationCollectsOneNeedAtATimeWithoutBookingTools(t *testing
 			Confidence:     0.96,
 			Reason:         "caller_wants_shorter_nails",
 		},
+		ConsultationMutations: initialConsultationMutations(ConsultationNeedProfile{
+			DesiredOutcome: ConsultationOutcomeShorten,
+			LengthChange:   ConsultationLengthShorten,
+		}, 0.96),
 	}})
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -905,6 +1081,12 @@ func TestMessageConsultationRanksOnlyReadyOwnerApprovedProfiles(t *testing.T) {
 			Confidence:     0.97,
 			Reason:         "acrylic_shorter_lower_maintenance",
 		},
+		ConsultationMutations: initialConsultationMutations(ConsultationNeedProfile{
+			CurrentSystem:  ConsultationSystemAcrylic,
+			DesiredOutcome: ConsultationOutcomeShorten,
+			LengthChange:   ConsultationLengthShorten,
+			Priorities:     []string{ConsultationPriorityLowerMaintenance},
+		}, 0.97),
 	}})
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -925,6 +1107,159 @@ func TestMessageConsultationRanksOnlyReadyOwnerApprovedProfiles(t *testing.T) {
 	}
 	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
 		t.Fatalf("recommendation invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
+func TestMessageConsultationRevalidatesProfileRevisionBeforeRecommendationAcceptance(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = consultationTestServices()
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal: "consultation", Confidence: 0.97,
+		Consultation: ConsultationNeedProfile{
+			CurrentSystem: ConsultationSystemAcrylic, DesiredOutcome: ConsultationOutcomeShorten,
+			LengthChange: ConsultationLengthShorten, Priorities: []string{ConsultationPriorityLowerMaintenance}, Confidence: 0.97,
+		},
+		ConsultationMutations: initialConsultationMutations(ConsultationNeedProfile{
+			CurrentSystem: ConsultationSystemAcrylic, DesiredOutcome: ConsultationOutcomeShorten,
+			LengthChange: ConsultationLengthShorten, Priorities: []string{ConsultationPriorityLowerMaintenance},
+		}, 0.97),
+	}})
+
+	first, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I have acrylic extensions and want a shorter, lower-maintenance option.",
+	})
+	if err != nil {
+		t.Fatalf("initial consultation returned error: %v", err)
+	}
+	initialState := normalizedDialogState(first.DialogState).Consultation
+	if initialState == nil || initialState.ProfileRevisions["acrylic_rebalance"] != 4 {
+		t.Fatalf("initial recommendation audit = %#v", initialState)
+	}
+
+	fresh := consultationTestServices()
+	fresh[0].ConsultationProfile.Revision = 5
+	fresh[0].ConsultationProfile.OwnerApprovedSummary = "Updated owner-approved guidance for the rebalance service."
+	store.services = fresh
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Yes, please book that."})
+	if err != nil {
+		t.Fatalf("stale recommendation acceptance returned error: %v", err)
+	}
+	state := normalizedDialogState(session.DialogState).Consultation
+	if session.Intent != IntentConsultation || session.ServiceID != "" || state == nil || state.Status != ConsultationStatusAwaitingBooking {
+		t.Fatalf("stale recommendation mutated booking state: session=%#v consultation=%#v", session, state)
+	}
+	if state.ProfileRevisions["acrylic_rebalance"] != 5 || state.SelectedServiceID != "acrylic_rebalance" {
+		t.Fatalf("recommendation was not refreshed from current profile: %#v", state)
+	}
+	if reply := store.lastTurn.AIMessage; !strings.Contains(reply, "guidance changed") || !strings.Contains(reply, "Updated owner-approved guidance") {
+		t.Fatalf("stale recommendation reply = %q", reply)
+	}
+	if _, ok := service.answerContextCache.get("salon_1", store.answerContextFence); ok {
+		t.Fatal("stale answer context remained cached after profile revision mismatch")
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("stale recommendation invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
+func TestMessageConsultationAppliesReplaceAddRemoveAndClearMutations(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = consultationTestServices()
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&scriptedTurnInterpreter{interpret: func(req TurnInterpretationRequest) TurnUnderstanding {
+		if strings.Contains(strings.ToLower(req.CustomerMessage), "correction") {
+			return TurnUnderstanding{
+				Goal: "consultation", Confidence: 0.97,
+				Consultation: ConsultationNeedProfile{
+					CurrentSystem: ConsultationSystemGel, Priorities: []string{ConsultationPriorityLowerCost},
+					DesiredFinishes: []string{ConsultationFinishGlossy}, Confidence: 0.97,
+				},
+				ConsultationMutations: []ConsultationNeedMutation{
+					{Field: ConsultationNeedFieldCurrentSystem, Operation: ConsultationNeedOperationReplace, Values: []string{ConsultationSystemDip}, Confidence: 0.97},
+					{Field: ConsultationNeedFieldPriorities, Operation: ConsultationNeedOperationRemove, Values: []string{ConsultationPriorityLowerCost}, Confidence: 0.97},
+					{Field: ConsultationNeedFieldPriorities, Operation: ConsultationNeedOperationAdd, Values: []string{ConsultationPriorityLowerMaintenance}, Confidence: 0.97},
+					{Field: ConsultationNeedFieldDesiredFinishes, Operation: ConsultationNeedOperationClear, Values: []string{}, Confidence: 0.97},
+				},
+			}
+		}
+		return TurnUnderstanding{
+			Goal: "consultation", Confidence: 0.96,
+			ConsultationMutations: []ConsultationNeedMutation{
+				{Field: ConsultationNeedFieldCurrentSystem, Operation: ConsultationNeedOperationSet, Values: []string{ConsultationSystemGel}, Confidence: 0.96},
+				{Field: ConsultationNeedFieldDesiredOutcome, Operation: ConsultationNeedOperationSet, Values: []string{ConsultationOutcomeColorRefresh}, Confidence: 0.96},
+				{Field: ConsultationNeedFieldPriorities, Operation: ConsultationNeedOperationSet, Values: []string{ConsultationPriorityDurability, ConsultationPriorityLowerCost}, Confidence: 0.96},
+				{Field: ConsultationNeedFieldDesiredFinishes, Operation: ConsultationNeedOperationSet, Values: []string{ConsultationFinishGlossy}, Confidence: 0.96},
+			},
+		}
+	}})
+
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I have gel now, want a color refresh, care about durability and price, and prefer glossy.",
+	}); err != nil {
+		t.Fatalf("initial consultation turn: %v", err)
+	}
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Correction: it is dip, cost does not matter now, maintenance does, and ignore the finish.",
+	})
+	if err != nil {
+		t.Fatalf("correction consultation turn: %v", err)
+	}
+	state := normalizedDialogState(session.DialogState).Consultation
+	if state == nil || state.Needs.CurrentSystem != ConsultationSystemDip {
+		t.Fatalf("current system was not replaced: %#v", state)
+	}
+	if !sameStrings(state.Needs.Priorities, []string{ConsultationPriorityDurability, ConsultationPriorityLowerMaintenance}) || len(state.Needs.DesiredFinishes) != 0 {
+		t.Fatalf("list mutation semantics were not applied: %#v", state.Needs)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("consultation corrections invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
+func TestConsultationSnapshotDeltaWithoutMutationsCannotChangePersistedNeeds(t *testing.T) {
+	current := ConsultationNeedProfile{
+		CurrentSystem:      ConsultationSystemGel,
+		DesiredOutcome:     ConsultationOutcomeMaintain,
+		LengthChange:       ConsultationLengthKeep,
+		Priorities:         []string{ConsultationPriorityDurability},
+		DesiredFinishes:    []string{ConsultationFinishGlossy},
+		ComparedServiceIDs: []string{"service_existing"},
+	}
+	semanticSnapshot := ConsultationNeedProfile{
+		CurrentSystem:        ConsultationSystemDip,
+		DesiredOutcome:       ConsultationOutcomeRemoval,
+		LengthChange:         ConsultationLengthShorten,
+		Priorities:           []string{ConsultationPriorityLowerCost},
+		DesiredFinishes:      []string{ConsultationFinishMatte},
+		ComparedServiceIDs:   []string{"service_unrequested"},
+		BookingRequested:     true,
+		ConversationComplete: true,
+		Confidence:           0.99,
+		Reason:               "snapshot_without_field_mutations",
+	}
+	deterministicFallback := ConsultationNeedProfile{
+		CurrentSystem:   ConsultationSystemDip,
+		Priorities:      []string{ConsultationPriorityLowerCost},
+		DesiredFinishes: []string{ConsultationFinishMatte},
+		Confidence:      1,
+		Reason:          "must_not_backfill_after_model_invocation",
+	}
+
+	got := applyConsultationNeedTurn(current, semanticSnapshot, deterministicFallback, nil, false)
+	if got.CurrentSystem != current.CurrentSystem || got.DesiredOutcome != current.DesiredOutcome || got.LengthChange != current.LengthChange ||
+		!sameStrings(got.Priorities, current.Priorities) || !sameStrings(got.DesiredFinishes, current.DesiredFinishes) ||
+		!sameStrings(got.ComparedServiceIDs, current.ComparedServiceIDs) {
+		t.Fatalf("snapshot-only model output changed persisted consultation needs: before=%#v after=%#v", current, got)
+	}
+	if !got.BookingRequested || !got.ConversationComplete {
+		t.Fatalf("turn control signals were not preserved: %#v", got)
+	}
+	if got.Confidence != current.Confidence || got.Reason != current.Reason {
+		t.Fatalf("snapshot-only confidence/reason changed persisted consultation needs: before=%#v after=%#v", current, got)
 	}
 }
 
@@ -1018,6 +1353,10 @@ func TestMessageConsultationCanCompleteWithoutBooking(t *testing.T) {
 			LengthChange:   ConsultationLengthShorten,
 			Confidence:     0.95,
 		},
+		ConsultationMutations: initialConsultationMutations(ConsultationNeedProfile{
+			CurrentSystem: ConsultationSystemAcrylic, DesiredOutcome: ConsultationOutcomeShorten,
+			LengthChange: ConsultationLengthShorten,
+		}, 0.95),
 	}})
 	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "What is best if I need my acrylic set shorter?"}); err != nil {
 		t.Fatalf("consultation Message returned error: %v", err)
@@ -1049,6 +1388,10 @@ func TestMessageConsultationBookingDeclineCompletesWithoutTools(t *testing.T) {
 			LengthChange:   ConsultationLengthShorten,
 			Confidence:     0.96,
 		},
+		ConsultationMutations: initialConsultationMutations(ConsultationNeedProfile{
+			CurrentSystem: ConsultationSystemAcrylic, DesiredOutcome: ConsultationOutcomeShorten,
+			LengthChange: ConsultationLengthShorten,
+		}, 0.96),
 	}})
 	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "My acrylic extensions need to be much shorter."}); err != nil {
 		t.Fatalf("consultation Message returned error: %v", err)
@@ -1090,6 +1433,10 @@ func TestMessageConsultationDetourPreservesAndResumesBookingDraft(t *testing.T) 
 				CurrentSystem: ConsultationSystemAcrylic, DesiredOutcome: ConsultationOutcomeShorten,
 				LengthChange: ConsultationLengthShorten, Confidence: 0.96,
 			},
+			ConsultationMutations: initialConsultationMutations(ConsultationNeedProfile{
+				CurrentSystem: ConsultationSystemAcrylic, DesiredOutcome: ConsultationOutcomeShorten,
+				LengthChange: ConsultationLengthShorten,
+			}, 0.96),
 		}
 	}})
 
@@ -1132,6 +1479,10 @@ func TestMessageConsultationDeclineResumesExistingBookingDraft(t *testing.T) {
 			CurrentSystem: ConsultationSystemAcrylic, DesiredOutcome: ConsultationOutcomeShorten,
 			LengthChange: ConsultationLengthShorten, Confidence: 0.96,
 		},
+		ConsultationMutations: initialConsultationMutations(ConsultationNeedProfile{
+			CurrentSystem: ConsultationSystemAcrylic, DesiredOutcome: ConsultationOutcomeShorten,
+			LengthChange: ConsultationLengthShorten,
+		}, 0.96),
 	}})
 
 	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Before that, what works for shortening acrylic extensions?"}); err != nil {
@@ -1151,6 +1502,178 @@ func TestMessageConsultationDeclineResumesExistingBookingDraft(t *testing.T) {
 	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
 		t.Fatalf("consultation decline invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
 	}
+}
+
+func TestMessageConsultationRecommendationClarifiesBeforeChangingMultiServiceDraft(t *testing.T) {
+	store := newFakeConversationStore()
+	recommended := consultationTestServices()[0]
+	store.services = append([]ServiceOption{
+		{ID: "classic", Name: "Classic Manicure", DurationMinutes: 30},
+		{ID: "spa", Name: "Spa Pedicure", DurationMinutes: 45},
+	}, consultationTestServices()...)
+	store.session.Intent = IntentConsultation
+	store.session.ServiceID = "classic"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.BookingSegments = []booking.BookingSegmentRequest{
+		{ServiceID: "classic", StaffSelectionMode: booking.StaffSelectionAnyone},
+		{ServiceID: "spa", StaffSelectionMode: booking.StaffSelectionAnyone},
+	}
+	originalSlot := OfferedSlot{StartTime: testStartTime(), EndTime: testStartTime().Add(75 * time.Minute)}
+	store.session.OfferedSlots = []OfferedSlot{originalSlot}
+	store.session.DialogState = normalizedDialogState(DialogState{
+		Phase:              DialogPhaseConsultation,
+		DraftRevision:      7,
+		ReviewRequired:     true,
+		ReviewAccepted:     true,
+		ReviewedRevision:   7,
+		AuthorizedRevision: 7,
+		Consultation: &ConsultationState{
+			Status:                ConsultationStatusAwaitingBooking,
+			ResumePhase:           DialogPhaseDrafting,
+			SelectedServiceID:     recommended.ID,
+			RecommendedServiceIDs: []string{recommended.ID},
+			ProfileRevisions:      map[string]int{recommended.ID: recommended.ConsultationProfile.Revision},
+		},
+	})
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Yes, please help me book that."})
+	if err != nil {
+		t.Fatalf("recommendation acceptance returned error: %v", err)
+	}
+	if got := selectedServiceIDs(*session); !sameStrings(got, []string{"classic", "spa"}) {
+		t.Fatalf("recommendation acceptance changed services before clarification: %#v", got)
+	}
+	if len(session.OfferedSlots) != 1 || !session.OfferedSlots[0].StartTime.Equal(originalSlot.StartTime) {
+		t.Fatalf("recommendation acceptance cleared the existing offer: %#v", session.OfferedSlots)
+	}
+	state := normalizedDialogState(session.DialogState)
+	if state.Pending == nil || state.Pending.PromptKey != "semantic_add_or_replace" || !sameStrings(state.Pending.TargetServiceIDs, []string{recommended.ID}) {
+		t.Fatalf("service-operation clarification = %#v", state.Pending)
+	}
+	if state.ReviewAccepted || state.ReviewedRevision != 0 || state.AuthorizedRevision != 0 || state.DraftRevision != 7 {
+		t.Fatalf("clarification retained stale authorization or changed revision: %#v", state)
+	}
+	if state.Consultation == nil || state.Consultation.Status != ConsultationStatusCompleted || state.Consultation.ExitReason != "caller_requested_booking_service_change_pending" {
+		t.Fatalf("consultation transition = %#v", state.Consultation)
+	}
+	if reply := strings.ToLower(store.lastTurn.AIMessage); !strings.Contains(reply, "add it") || !strings.Contains(reply, "replace") {
+		t.Fatalf("clarification reply = %q", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Add it to my booking."})
+	if err != nil {
+		t.Fatalf("add decision returned error: %v", err)
+	}
+	if got := selectedServiceIDs(*session); !sameStrings(got, []string{"classic", "spa", recommended.ID}) {
+		t.Fatalf("add decision services = %#v", got)
+	}
+	state = normalizedDialogState(session.DialogState)
+	if state.Pending != nil || state.DraftRevision != 8 || len(session.OfferedSlots) != 0 {
+		t.Fatalf("resolved service edit state = %#v slots=%#v", state, session.OfferedSlots)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("service clarification invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
+func TestMessageConsultationRecommendationPreservesPartyDraftThroughScopeClarification(t *testing.T) {
+	store := newFakeConversationStore()
+	recommended := consultationTestServices()[0]
+	store.services = append([]ServiceOption{
+		{ID: "classic", Name: "Classic Manicure", DurationMinutes: 30},
+		{ID: "spa", Name: "Spa Pedicure", DurationMinutes: 45},
+	}, consultationTestServices()...)
+	store.session.Intent = IntentConsultation
+	store.session.ServiceID = "classic"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.BookingSegments = []booking.BookingSegmentRequest{
+		{ServiceID: "classic", StaffSelectionMode: booking.StaffSelectionAnyone},
+		{ServiceID: "spa", StaffSelectionMode: booking.StaffSelectionAnyone},
+	}
+	store.session.PartyPlan = &PartyPlan{
+		PartySize: 2,
+		Groups: []PartyPlanGroup{
+			{Label: "caller", Count: 1, ResolvedServiceIDs: []string{"classic"}},
+			{Label: "guest 2", Count: 1, ResolvedServiceIDs: []string{"spa"}},
+		},
+	}
+	originalSlot := OfferedSlot{StartTime: testStartTime(), EndTime: testStartTime().Add(45 * time.Minute)}
+	store.session.OfferedSlots = []OfferedSlot{originalSlot}
+	store.session.DialogState = normalizedDialogState(DialogState{
+		Phase:         DialogPhaseConsultation,
+		DraftRevision: 4,
+		Consultation: &ConsultationState{
+			Status:                ConsultationStatusAwaitingBooking,
+			ResumePhase:           DialogPhaseDrafting,
+			SelectedServiceID:     recommended.ID,
+			RecommendedServiceIDs: []string{recommended.ID},
+			ProfileRevisions:      map[string]int{recommended.ID: recommended.ConsultationProfile.Revision},
+		},
+	})
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Yes, help me book that recommendation."})
+	if err != nil {
+		t.Fatalf("party recommendation acceptance returned error: %v", err)
+	}
+	if got := selectedServiceIDs(*session); !sameStrings(got, []string{"classic", "spa"}) {
+		t.Fatalf("party recommendation changed services before guest scope: %#v", got)
+	}
+	if session.PartyPlan == nil || len(session.PartyPlan.Groups) != 2 || len(session.OfferedSlots) != 1 {
+		t.Fatalf("party recommendation changed the draft: plan=%#v slots=%#v", session.PartyPlan, session.OfferedSlots)
+	}
+	state := normalizedDialogState(session.DialogState)
+	if state.Pending == nil || state.Pending.PromptKey != PendingPartyServiceGuest || !sameStrings(state.Pending.TargetServiceIDs, []string{recommended.ID}) {
+		t.Fatalf("party guest clarification = %#v", state.Pending)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "For guest 2."})
+	if err != nil {
+		t.Fatalf("party guest scope returned error: %v", err)
+	}
+	state = normalizedDialogState(session.DialogState)
+	if state.Pending == nil || state.Pending.PromptKey != PendingPartyServiceOperation || state.Pending.GuestRef != "guest 2" {
+		t.Fatalf("party operation clarification = %#v", state.Pending)
+	}
+	if reply := strings.ToLower(store.lastTurn.AIMessage); !strings.Contains(reply, "add") || !strings.Contains(reply, "replace") {
+		t.Fatalf("party operation reply = %q", store.lastTurn.AIMessage)
+	}
+	if got := selectedServiceIDs(*session); !sameStrings(got, []string{"classic", "spa"}) || len(session.OfferedSlots) != 1 {
+		t.Fatalf("party scope clarification mutated draft: services=%#v slots=%#v", got, session.OfferedSlots)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("party service clarification invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
+func initialConsultationMutations(needs ConsultationNeedProfile, confidence float64) []ConsultationNeedMutation {
+	mutations := make([]ConsultationNeedMutation, 0, 6)
+	appendScalar := func(field string, value string) {
+		if value == "" {
+			return
+		}
+		mutations = append(mutations, ConsultationNeedMutation{
+			Field: field, Operation: ConsultationNeedOperationSet, Values: []string{value}, Confidence: confidence,
+		})
+	}
+	appendList := func(field string, values []string) {
+		if len(values) == 0 {
+			return
+		}
+		mutations = append(mutations, ConsultationNeedMutation{
+			Field: field, Operation: ConsultationNeedOperationSet, Values: append([]string(nil), values...), Confidence: confidence,
+		})
+	}
+	appendScalar(ConsultationNeedFieldCurrentSystem, needs.CurrentSystem)
+	appendScalar(ConsultationNeedFieldDesiredOutcome, needs.DesiredOutcome)
+	appendScalar(ConsultationNeedFieldLengthChange, needs.LengthChange)
+	appendList(ConsultationNeedFieldPriorities, needs.Priorities)
+	appendList(ConsultationNeedFieldDesiredFinishes, needs.DesiredFinishes)
+	appendList(ConsultationNeedFieldComparedServiceIDs, needs.ComparedServiceIDs)
+	return mutations
 }
 
 func consultationTestServices() []ServiceOption {
@@ -1179,6 +1702,13 @@ func consultationTestServices() []ServiceOption {
 				CompatibleCurrentSystems: []string{ConsultationSystemAcrylic}, Revision: 9,
 			},
 		},
+	}
+}
+
+func readyComparisonProfile(outcome string, currentSystem string) *ServiceConsultationProfile {
+	return &ServiceConsultationProfile{
+		Status: ConsultationProfileStatusReady, RecommendedOutcomes: []string{outcome},
+		CompatibleCurrentSystems: []string{currentSystem}, Revision: 1,
 	}
 }
 
@@ -1376,6 +1906,9 @@ func TestMessageConfirmsOnlyAfterBookingToolSuccess(t *testing.T) {
 	if bookingTool.request.Source != booking.SourceAIConversationSimulator {
 		t.Fatalf("source = %s, want %s", bookingTool.request.Source, booking.SourceAIConversationSimulator)
 	}
+	if bookingTool.request.AvailabilityQuoteID != "00000000-0000-0000-0000-000000000002" || bookingTool.request.SlotFingerprint != fmt.Sprintf("%064x", 2001) {
+		t.Fatalf("booking availability proof = %q/%q, want selected provider quote and slot", bookingTool.request.AvailabilityQuoteID, bookingTool.request.SlotFingerprint)
+	}
 	if session.Status != StatusCompleted || session.Outcome != OutcomeBookingConfirmed {
 		t.Fatalf("session status/outcome = %s/%s, want completed/booking_confirmed", session.Status, session.Outcome)
 	}
@@ -1389,6 +1922,147 @@ func TestMessageConfirmsOnlyAfterBookingToolSuccess(t *testing.T) {
 		}
 	}
 	assertCustomerReplyHidesProvider(t, reply)
+}
+
+func TestTryBookingReoffersWhenFreshExactSlotDurationChanged(t *testing.T) {
+	store := newFakeConversationStore()
+	start := defaultAvailabilityStartTime()
+	session := store.session
+	session.Intent = IntentBooking
+	session.CustomerName = "Linh Tran"
+	session.CustomerPhone = "+13125550101"
+	session.ServiceID = "service_1"
+	session.ServiceName = "Classic Manicure"
+	session.StaffID = "staff_1"
+	session.StaffName = "Mai Nguyen"
+	session.StaffSelectionMode = booking.StaffSelectionSpecific
+	session.RequestedDate = "2026-06-10"
+	session.RequestedStartTime = &start
+	session.AvailabilityQuoteID = "00000000-0000-0000-0000-000000000099"
+	session.SlotFingerprint = strings.Repeat("9", 64)
+	session.BookingSegments = []booking.BookingSegmentRequest{{ServiceID: "service_1", StaffID: "staff_1", StaffSelectionMode: booking.StaffSelectionSpecific}}
+	store.session = session
+
+	bookingTool := &fakeBookingTool{
+		availabilityResult: &booking.AvailabilityResult{
+			ServiceID:          "service_1",
+			ServiceName:        "Classic Manicure",
+			StaffSelectionMode: booking.StaffSelectionSpecific,
+			PreferredDate:      "2026-06-10",
+			DurationMinutes:    60,
+			Timezone:           "America/Chicago",
+			Slots: []booking.AvailabilitySlot{{
+				StartTime:          start,
+				EndTime:            start.Add(60 * time.Minute),
+				StaffID:            "staff_1",
+				StaffName:          "Mai Nguyen",
+				StaffSelectionMode: booking.StaffSelectionSpecific,
+			}},
+		},
+		attempt: confirmedAttempt("attempt_should_not_run", "pos_should_not_run", "appointment_should_not_run"),
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+	turn := newTurnRecord("salon_1", "owner_1", session, session, "Yes, please go ahead with that time.", "event_fresh_booking", store.services, store.staff, &store.cfg)
+
+	updated, err := service.tryBooking(context.Background(), "owner_1", turn, session, store.services, store.staff, &store.cfg, nil)
+	if err != nil {
+		t.Fatalf("tryBooking returned error: %v", err)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 1 {
+		t.Fatalf("booking/availability calls = %d/%d, want 0/1", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	if updated.RequestedStartTime != nil || updated.Outcome == OutcomeBookingConfirmed {
+		t.Fatalf("updated session = %#v, want re-offer without confirmation", updated)
+	}
+	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "opening changed") {
+		t.Fatalf("reply = %q, want availability-changed explanation", store.lastTurn.AIMessage)
+	}
+}
+
+func TestTryRescheduleReoffersWhenFreshExactSlotDisappears(t *testing.T) {
+	store := newFakeConversationStore()
+	start := time.Date(2026, 6, 10, 21, 0, 0, 0, time.UTC)
+	session := store.session
+	session.Intent = IntentBooking
+	session.BookingAction = BookingActionReschedule
+	session.TargetAppointmentID = "appointment_1"
+	session.CustomerName = "Linh Tran"
+	session.CustomerPhone = "+13125550101"
+	session.ServiceID = "service_1"
+	session.StaffID = "staff_1"
+	session.StaffSelectionMode = booking.StaffSelectionSpecific
+	session.RequestedDate = "2026-06-10"
+	session.RequestedStartTime = &start
+	session.AvailabilityQuoteID = "00000000-0000-0000-0000-000000000098"
+	session.SlotFingerprint = strings.Repeat("8", 64)
+	session.BookingSegments = []booking.BookingSegmentRequest{{ServiceID: "service_1", StaffID: "staff_1", StaffSelectionMode: booking.StaffSelectionSpecific}}
+	store.session = session
+
+	bookingTool := &fakeBookingTool{availabilityResult: &booking.AvailabilityResult{
+		ServiceID: "service_1", PreferredDate: "2026-06-10", Timezone: "America/Chicago", Slots: []booking.AvailabilitySlot{},
+	}}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+	turn := newTurnRecord("salon_1", "owner_1", session, session, "Please move it to that opening.", "event_fresh_reschedule", store.services, store.staff, &store.cfg)
+
+	updated, err := service.tryReschedule(context.Background(), "owner_1", turn, session, store.services, store.staff, &store.cfg)
+	if err != nil {
+		t.Fatalf("tryReschedule returned error: %v", err)
+	}
+	if bookingTool.rescheduleCalls != 0 || bookingTool.availabilityCalls != 1 {
+		t.Fatalf("reschedule/availability calls = %d/%d, want 0/1", bookingTool.rescheduleCalls, bookingTool.availabilityCalls)
+	}
+	if updated.RequestedStartTime != nil || updated.Outcome == OutcomeBookingRescheduled {
+		t.Fatalf("updated session = %#v, want re-offer without reschedule", updated)
+	}
+}
+
+func TestCarriedAvailabilityProofInvalidatesOnlyWhenSlotDependenciesChange(t *testing.T) {
+	start := defaultAvailabilityStartTime()
+	base := Session{
+		BookingAction:       BookingActionReschedule,
+		TargetAppointmentID: "appointment_1",
+		CustomerName:        "Linh Tran",
+		CustomerPhone:       "+13125550101",
+		ServiceID:           "service_1",
+		StaffID:             "staff_1",
+		StaffSelectionMode:  booking.StaffSelectionSpecific,
+		RequestedDate:       "2026-06-10",
+		RequestedStartTime:  &start,
+		AvailabilityQuoteID: "00000000-0000-0000-0000-000000000097",
+		SlotFingerprint:     strings.Repeat("7", 64),
+		BookingSegments:     []booking.BookingSegmentRequest{{ServiceID: "service_1", StaffID: "staff_1", StaffSelectionMode: booking.StaffSelectionSpecific}},
+	}
+	tests := []struct {
+		name        string
+		mutate      func(*Session)
+		wantCleared bool
+	}{
+		{name: "customer details survive", mutate: func(item *Session) { item.CustomerEmail = "linh@example.com" }, wantCleared: false},
+		{name: "service", mutate: func(item *Session) { item.ServiceID = "service_2" }, wantCleared: true},
+		{name: "staff", mutate: func(item *Session) { item.StaffID = "staff_2"; item.BookingSegments[0].StaffID = "staff_2" }, wantCleared: true},
+		{name: "date", mutate: func(item *Session) { item.RequestedDate = "2026-06-11" }, wantCleared: true},
+		{name: "time", mutate: func(item *Session) { changed := start.Add(time.Hour); item.RequestedStartTime = &changed }, wantCleared: true},
+		{name: "party", mutate: func(item *Session) { item.PartyPlan = &PartyPlan{PartySize: 2} }, wantCleared: true},
+		{name: "target", mutate: func(item *Session) { item.TargetAppointmentID = "appointment_2" }, wantCleared: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			after := cloneSessionForTurn(base)
+			test.mutate(&after)
+			cleared := invalidateCarriedAvailabilityProof(base, &after)
+			if cleared != test.wantCleared {
+				t.Fatalf("cleared = %t, want %t", cleared, test.wantCleared)
+			}
+			if test.wantCleared && (after.AvailabilityQuoteID != "" || after.SlotFingerprint != "") {
+				t.Fatalf("proof = %q/%q, want cleared", after.AvailabilityQuoteID, after.SlotFingerprint)
+			}
+			if !test.wantCleared && (after.AvailabilityQuoteID == "" || after.SlotFingerprint == "") {
+				t.Fatalf("proof = %q/%q, want preserved", after.AvailabilityQuoteID, after.SlotFingerprint)
+			}
+		})
+	}
 }
 
 func TestMessageStartsAutoRescheduleWithTargetConfirmation(t *testing.T) {
@@ -2036,6 +2710,7 @@ func TestMessageRescheduleSelectsOfferedSlotByOClockWithoutAvailabilityRetry(t *
 			store.session.OfferedSlots = reschedulePedicureOfferedSlots()
 			newStart := time.Date(2026, 7, 7, 18, 0, 0, 0, time.UTC)
 			bookingTool := &fakeBookingTool{
+				availabilityResult: availabilityResultForStart("service_pedicure", "Classic Pedicure", newStart),
 				rescheduledAppointment: &booking.Appointment{
 					ID:               "appointment_pedicure",
 					Status:           booking.StatusRescheduled,
@@ -2053,8 +2728,8 @@ func TestMessageRescheduleSelectsOfferedSlotByOClockWithoutAvailabilityRetry(t *
 			if err != nil {
 				t.Fatalf("Message returned error: %v", err)
 			}
-			if bookingTool.availabilityCalls != 0 {
-				t.Fatalf("availability calls = %d, want 0 when selecting existing offered slot", bookingTool.availabilityCalls)
+			if bookingTool.availabilityCalls != 1 {
+				t.Fatalf("availability calls = %d, want 1 fresh proof check before reschedule", bookingTool.availabilityCalls)
 			}
 			if bookingTool.rescheduleCalls != 1 {
 				t.Fatalf("reschedule calls = %d, want 1", bookingTool.rescheduleCalls)
@@ -2064,6 +2739,9 @@ func TestMessageRescheduleSelectsOfferedSlotByOClockWithoutAvailabilityRetry(t *
 			}
 			if bookingTool.rescheduleRequest.StaffID != "staff_1" {
 				t.Fatalf("reschedule staff = %s, want Mai staff_1", bookingTool.rescheduleRequest.StaffID)
+			}
+			if bookingTool.rescheduleRequest.AvailabilityQuoteID != "00000000-0000-0000-0000-000000000001" || bookingTool.rescheduleRequest.SlotFingerprint != fmt.Sprintf("%064x", 1001) {
+				t.Fatalf("reschedule availability proof = %q/%q, want selected provider quote and slot", bookingTool.rescheduleRequest.AvailabilityQuoteID, bookingTool.rescheduleRequest.SlotFingerprint)
 			}
 			if session.Outcome != OutcomeBookingRescheduled {
 				t.Fatalf("outcome = %s, want booking_rescheduled", session.Outcome)
@@ -4019,16 +4697,19 @@ func TestMessageConfirmsShortBareVoiceNameBeforeAccepting(t *testing.T) {
 
 func TestMessageConfirmedVoiceNameReadsFinalReviewBeforePOSBooking(t *testing.T) {
 	store := newFakeConversationStore()
-	seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
+	start := seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
 	store.session.Channel = ChannelPhone
 	store.session.CustomerPhone = "+13125550177"
 	store.session.DialogState = DialogState{
 		Version: DialogStateVersion, Phase: DialogPhaseDrafting, ReviewRequired: true, DraftRevision: 3,
 	}
-	bookingTool := &fakeBookingTool{attempt: &booking.BookingAttempt{
-		ID: "attempt_name_review", Status: booking.StatusConfirmed, POSBookingID: "pos_name_review",
-		Appointment: &booking.Appointment{ID: "appointment_name_review", Status: booking.StatusConfirmed},
-	}}
+	bookingTool := &fakeBookingTool{
+		availabilityResult: availabilityResultForStart("service_gel", "Gel Manicure", start),
+		attempt: &booking.BookingAttempt{
+			ID: "attempt_name_review", Status: booking.StatusConfirmed, POSBookingID: "pos_name_review",
+			Appointment: &booking.Appointment{ID: "appointment_name_review", Status: booking.StatusConfirmed},
+		},
+	}
 	service := NewService(store, bookingTool)
 	service.now = fixedNow
 
@@ -4589,8 +5270,8 @@ func TestMessageBooksCorrectedServiceForExistingExactTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("service change confirmation returned error: %v", err)
 	}
-	if bookingTool.availabilityCalls != 1 {
-		t.Fatalf("availability calls = %d, want 1 for corrected exact time", bookingTool.availabilityCalls)
+	if bookingTool.availabilityCalls != 2 {
+		t.Fatalf("availability calls = %d, want initial validation plus fresh proof for corrected exact time", bookingTool.availabilityCalls)
 	}
 	if bookingTool.calls != 1 {
 		t.Fatalf("booking calls = %d, want 1 after corrected exact time is available", bookingTool.calls)
@@ -4600,6 +5281,9 @@ func TestMessageBooksCorrectedServiceForExistingExactTime(t *testing.T) {
 	}
 	if got := bookingTool.request.Segments; len(got) != 1 || got[0].ServiceID != "service_gel" {
 		t.Fatalf("booking segments = %#v, want corrected service_gel segment", got)
+	}
+	if bookingTool.request.AvailabilityQuoteID != "00000000-0000-0000-0000-000000000002" {
+		t.Fatalf("booking quote = %q, want fresh second-call evidence", bookingTool.request.AvailabilityQuoteID)
 	}
 	if session.Outcome != OutcomeBookingConfirmed || session.AppointmentID != "appointment_corrected" {
 		t.Fatalf("session outcome/link = %s/%s, want confirmed corrected appointment", session.Outcome, session.AppointmentID)
@@ -5167,6 +5851,7 @@ func TestMessageBooksSelectedAvailableSlotAfterCustomerDetails(t *testing.T) {
 		},
 	}
 	bookingTool := &fakeBookingTool{
+		availabilityResult: availabilityResultForStart("service_1", "Classic Manicure", time.Date(2026, 6, 10, 16, 0, 0, 0, time.UTC)),
 		attempt: &booking.BookingAttempt{
 			ID:           "attempt_selected",
 			Status:       booking.StatusConfirmed,
@@ -5658,8 +6343,8 @@ func TestMessageCompletesLatestTranscriptAfterServiceInquiryAndSwitch(t *testing
 		}
 	}
 
-	if bookingTool.availabilityCalls != 2 {
-		t.Fatalf("availability calls = %d, want 2", bookingTool.availabilityCalls)
+	if bookingTool.availabilityCalls != 3 {
+		t.Fatalf("availability calls = %d, want two user-facing checks plus final fresh proof", bookingTool.availabilityCalls)
 	}
 	if bookingTool.calls != 1 {
 		t.Fatalf("booking calls = %d, want 1", bookingTool.calls)
@@ -5951,11 +6636,11 @@ func TestMessageCompletesMultiTurnPartyPlanFromCategoryClarification(t *testing.
 			ServiceName:        "Classic Manicure",
 			StaffSelectionMode: booking.StaffSelectionAnyone,
 			PreferredDate:      "2026-06-11",
-			DurationMinutes:    210,
+			DurationMinutes:    195,
 			Timezone:           "America/Chicago",
 			Slots: []booking.AvailabilitySlot{{
 				StartTime:          slotStart,
-				EndTime:            slotStart.Add(210 * time.Minute),
+				EndTime:            slotStart.Add(195 * time.Minute),
 				StaffID:            "staff_1",
 				StaffName:          "Mai Nguyen",
 				StaffSelectionMode: booking.StaffSelectionAnyone,
@@ -6629,6 +7314,14 @@ func TestMessageBooksSelectedSplitPartyOptionThroughPOS(t *testing.T) {
 	if bookingTool.calls != 4 {
 		t.Fatalf("booking calls = %d, want one POS booking per split service", bookingTool.calls)
 	}
+	if len(bookingTool.availabilityCallsAtCreate) != 4 {
+		t.Fatalf("availability checkpoints at create = %#v, want one per split booking", bookingTool.availabilityCallsAtCreate)
+	}
+	for index, calls := range bookingTool.availabilityCallsAtCreate {
+		if calls != 9 {
+			t.Fatalf("split create %d started after %d availability calls, want all four fresh checks completed first", index, calls)
+		}
+	}
 	if session.Outcome != OutcomeBookingConfirmed {
 		t.Fatalf("outcome = %s, want confirmed after every split child POS booking succeeds", session.Outcome)
 	}
@@ -6639,6 +7332,9 @@ func TestMessageBooksSelectedSplitPartyOptionThroughPOS(t *testing.T) {
 		if len(req.Segments) != 1 || strings.TrimSpace(req.StaffID) == "" || req.StaffSelectionMode != booking.StaffSelectionSpecific {
 			t.Fatalf("split booking request %d = %#v, want one concrete staff-assigned service", i, req)
 		}
+		if strings.TrimSpace(req.AvailabilityQuoteID) == "" || len(req.SlotFingerprint) != 64 {
+			t.Fatalf("split booking request %d = %#v, want its provider quote and slot fingerprint", i, req)
+		}
 	}
 	reply := strings.ToLower(store.lastTurn.AIMessage)
 	for _, want := range []string{"you're confirmed", "2 spa pedicures", "1 classic manicure", "1 dip powder manicure", "appointments are under kevin"} {
@@ -6648,6 +7344,48 @@ func TestMessageBooksSelectedSplitPartyOptionThroughPOS(t *testing.T) {
 	}
 	if strings.Contains(reply, "not a confirmed") || strings.Contains(reply, "owner") {
 		t.Fatalf("confirmed split booking should not use fallback wording: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageDoesNotDispatchAnySplitChildWhenFreshProofFails(t *testing.T) {
+	store := newSplitPartyConversationStore()
+	results := splitPartyAvailabilityResults()
+	// Call eight is the fresh proof check for the third child. The first two
+	// refreshes succeed, but no POS write may start until every child is fresh.
+	results[7] = &booking.AvailabilityResult{
+		ServiceID: "service_classic_mani", PreferredDate: "2026-06-11", Timezone: "America/Chicago", Slots: []booking.AvailabilitySlot{},
+	}
+	bookingTool := &fakeBookingTool{
+		availabilityResults: results,
+		attempts:            splitConfirmedAttempts(4),
+	}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I need four appointments this Thursday: two manicures and two pedicures.",
+	}); err != nil {
+		t.Fatalf("initial Message returned error: %v", err)
+	}
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Make those classic and dip powder manicures.",
+	}); err != nil {
+		t.Fatalf("service clarification Message returned error: %v", err)
+	}
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "The first staggered choice works. This is Kevin at 312-555-0101.",
+	})
+	if err != nil {
+		t.Fatalf("split selection Message returned error: %v", err)
+	}
+	if bookingTool.calls != 0 || len(bookingTool.availabilityCallsAtCreate) != 0 {
+		t.Fatalf("split create calls/checkpoints = %d/%#v, want no POS child dispatch", bookingTool.calls, bookingTool.availabilityCallsAtCreate)
+	}
+	if session.Outcome == OutcomeBookingConfirmed {
+		t.Fatalf("outcome = %s, want replan/re-offer without confirmation", session.Outcome)
+	}
+	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "openings changed") {
+		t.Fatalf("reply = %q, want changed-availability explanation", store.lastTurn.AIMessage)
 	}
 }
 
@@ -7832,22 +8570,28 @@ func testRescheduleAppointmentAt(id string, serviceID string, serviceName string
 func offeredPMSlots() []OfferedSlot {
 	return []OfferedSlot{
 		{
-			StartTime: time.Date(2026, 7, 2, 17, 0, 0, 0, time.UTC),
-			EndTime:   time.Date(2026, 7, 2, 17, 45, 0, 0, time.UTC),
-			StaffID:   "staff_1",
-			StaffName: "Mai Nguyen",
+			AvailabilityQuoteID: "00000000-0000-0000-0000-000000000003",
+			SlotFingerprint:     fmt.Sprintf("%064x", 1),
+			StartTime:           time.Date(2026, 7, 2, 17, 0, 0, 0, time.UTC),
+			EndTime:             time.Date(2026, 7, 2, 17, 45, 0, 0, time.UTC),
+			StaffID:             "staff_1",
+			StaffName:           "Mai Nguyen",
 		},
 		{
-			StartTime: time.Date(2026, 7, 2, 17, 30, 0, 0, time.UTC),
-			EndTime:   time.Date(2026, 7, 2, 18, 15, 0, 0, time.UTC),
-			StaffID:   "staff_1",
-			StaffName: "Mai Nguyen",
+			AvailabilityQuoteID: "00000000-0000-0000-0000-000000000003",
+			SlotFingerprint:     fmt.Sprintf("%064x", 2),
+			StartTime:           time.Date(2026, 7, 2, 17, 30, 0, 0, time.UTC),
+			EndTime:             time.Date(2026, 7, 2, 18, 15, 0, 0, time.UTC),
+			StaffID:             "staff_1",
+			StaffName:           "Mai Nguyen",
 		},
 		{
-			StartTime: time.Date(2026, 7, 2, 18, 0, 0, 0, time.UTC),
-			EndTime:   time.Date(2026, 7, 2, 18, 45, 0, 0, time.UTC),
-			StaffID:   "staff_1",
-			StaffName: "Mai Nguyen",
+			AvailabilityQuoteID: "00000000-0000-0000-0000-000000000003",
+			SlotFingerprint:     fmt.Sprintf("%064x", 3),
+			StartTime:           time.Date(2026, 7, 2, 18, 0, 0, 0, time.UTC),
+			EndTime:             time.Date(2026, 7, 2, 18, 45, 0, 0, time.UTC),
+			StaffID:             "staff_1",
+			StaffName:           "Mai Nguyen",
 		},
 	}
 }
@@ -7863,14 +8607,16 @@ func reschedulePedicureOfferedSlots() []OfferedSlot {
 			DurationMinutes:    45,
 		}}
 	}
-	return []OfferedSlot{
+	slots := []OfferedSlot{
 		{
-			StartTime:          time.Date(2026, 7, 7, 17, 0, 0, 0, time.UTC),
-			EndTime:            time.Date(2026, 7, 7, 17, 45, 0, 0, time.UTC),
-			StaffID:            "staff_1",
-			StaffName:          "Mai Nguyen",
-			StaffSelectionMode: booking.StaffSelectionSpecific,
-			Segments:           serviceSegment(),
+			AvailabilityQuoteID: "00000000-0000-0000-0000-000000000004",
+			SlotFingerprint:     fmt.Sprintf("%064x", 1),
+			StartTime:           time.Date(2026, 7, 7, 17, 0, 0, 0, time.UTC),
+			EndTime:             time.Date(2026, 7, 7, 17, 45, 0, 0, time.UTC),
+			StaffID:             "staff_1",
+			StaffName:           "Mai Nguyen",
+			StaffSelectionMode:  booking.StaffSelectionSpecific,
+			Segments:            serviceSegment(),
 		},
 		{
 			StartTime:          time.Date(2026, 7, 7, 17, 30, 0, 0, time.UTC),
@@ -7889,6 +8635,11 @@ func reschedulePedicureOfferedSlots() []OfferedSlot {
 			Segments:           serviceSegment(),
 		},
 	}
+	for index := range slots {
+		slots[index].AvailabilityQuoteID = "00000000-0000-0000-0000-000000000004"
+		slots[index].SlotFingerprint = fmt.Sprintf("%064x", index+1)
+	}
+	return slots
 }
 
 func seedMissingCustomerNameSession(store *fakeConversationStore, aiPrompts []string) time.Time {
@@ -7997,6 +8748,15 @@ func splitPartyAvailabilityResults() []*booking.AvailabilityResult {
 		}),
 		spaCandidates,
 		spaCandidates,
+		// Fresh proof is collected for every child before the first POS write.
+		spaCandidates,
+		spaCandidates,
+		splitServiceAvailabilityResult("service_classic_mani", "Classic Manicure", 45, []splitAvailabilitySlot{
+			{Start: maniStart, StaffID: "staff_1", StaffName: "Mai Nguyen"},
+		}),
+		splitServiceAvailabilityResult("service_dip_mani", "Dip Powder Manicure", 60, []splitAvailabilitySlot{
+			{Start: maniStart, StaffID: "staff_2", StaffName: "Lena Pham"},
+		}),
 	}
 }
 
@@ -8014,6 +8774,15 @@ func multiDaySplitPartyAvailabilityResults() []*booking.AvailabilityResult {
 			Timezone:           "America/Chicago",
 			Slots:              []booking.AvailabilitySlot{},
 		},
+		splitServiceAvailabilityResult("service_classic_mani", "Classic Manicure", 45, []splitAvailabilitySlot{
+			{Start: maniStart, StaffID: "staff_1", StaffName: "Mai Nguyen"},
+		}),
+		splitServiceAvailabilityResult("service_dip_mani", "Dip Powder Manicure", 60, []splitAvailabilitySlot{
+			{Start: maniStart, StaffID: "staff_2", StaffName: "Lena Pham"},
+		}),
+		spaCandidates,
+		spaCandidates,
+		// Fresh proof is collected chronologically: Thursday services, then Friday.
 		splitServiceAvailabilityResult("service_classic_mani", "Classic Manicure", 45, []splitAvailabilitySlot{
 			{Start: maniStart, StaffID: "staff_1", StaffName: "Mai Nguyen"},
 		}),
@@ -8046,6 +8815,7 @@ func splitCandidate(serviceID string, staffID string, start time.Time, durationM
 
 func splitServiceAvailabilityResult(serviceID string, serviceName string, durationMinutes int, slots []splitAvailabilitySlot) *booking.AvailabilityResult {
 	result := &booking.AvailabilityResult{
+		QuoteID:            "00000000-0000-0000-0000-000000000002",
 		ServiceID:          serviceID,
 		ServiceName:        serviceName,
 		StaffSelectionMode: booking.StaffSelectionSpecific,
@@ -8054,8 +8824,9 @@ func splitServiceAvailabilityResult(serviceID string, serviceName string, durati
 		Timezone:           "America/Chicago",
 		Slots:              make([]booking.AvailabilitySlot, 0, len(slots)),
 	}
-	for _, slot := range slots {
+	for index, slot := range slots {
 		result.Slots = append(result.Slots, booking.AvailabilitySlot{
+			Fingerprint:        fmt.Sprintf("%064x", index+1),
 			StartTime:          slot.Start,
 			EndTime:            slot.Start.Add(time.Duration(durationMinutes) * time.Minute),
 			StaffID:            slot.StaffID,
@@ -8114,25 +8885,28 @@ type fakeConversationStore struct {
 		requestID string
 		status    string
 	}
-	assignmentStats     map[string]StaffAssignmentStat
-	assignmentFrom      time.Time
-	assignmentTo        time.Time
-	assignmentStaffIDs  []string
-	serviceListCalls    int
-	knowledgeListCalls  int
-	hoursListCalls      int
-	lastTurn            TurnRecord
-	processedEventKeys  map[string]bool
-	listLifecycleStatus string
-	listLimit           int
-	listOffset          int
-	listSessions        []Session
-	webhookSessionID    string
-	webhookLimit        int
-	webhookOffset       int
-	webhookEvents       []WebhookEventLog
-	archivedSessionID   string
-	redactedSessionID   string
+	assignmentStats      map[string]StaffAssignmentStat
+	assignmentFrom       time.Time
+	assignmentTo         time.Time
+	assignmentStaffIDs   []string
+	answerContextFence   AnswerContextFence
+	answerFenceCalls     int
+	serviceListCalls     int
+	knowledgeListCalls   int
+	hoursListCalls       int
+	lastTurn             TurnRecord
+	processedEventKeys   map[string]bool
+	processedTurnReplies map[string]string
+	listLifecycleStatus  string
+	listLimit            int
+	listOffset           int
+	listSessions         []Session
+	webhookSessionID     string
+	webhookLimit         int
+	webhookOffset        int
+	webhookEvents        []WebhookEventLog
+	archivedSessionID    string
+	redactedSessionID    string
 }
 
 type fakeReplyGenerator struct {
@@ -8182,12 +8956,22 @@ func newFakeConversationStore() *fakeConversationStore {
 			Name:       "Mai Nguyen",
 			AIBookable: true,
 		}},
-		processedEventKeys: map[string]bool{},
+		answerContextFence: AnswerContextFence{
+			ActiveProvider: "square", ConnectionStatus: "active", LocationID: "location_1",
+			SnapshotGeneration: 1, LastSyncAtRFC3339: "2026-06-01T12:00:00Z", Ready: true,
+		},
+		processedEventKeys:   map[string]bool{},
+		processedTurnReplies: map[string]string{},
 	}
 }
 
 func (f *fakeConversationStore) GetRuntimeConfig(ctx context.Context, salonID string, ownerUserID string) (*RuntimeConfig, error) {
 	return &f.cfg, nil
+}
+
+func (f *fakeConversationStore) GetAnswerContextFence(ctx context.Context, salonID string) (AnswerContextFence, error) {
+	f.answerFenceCalls++
+	return f.answerContextFence, nil
 }
 
 func (f *fakeConversationStore) CreateSession(ctx context.Context, record NewSessionRecord) (*Session, error) {
@@ -8202,6 +8986,8 @@ func (f *fakeConversationStore) GetSessionForOwner(ctx context.Context, salonID 
 func (f *fakeConversationStore) GetSessionByTurnEventKey(ctx context.Context, salonID string, ownerUserID string, sessionID string, eventKey string) (*Session, bool, error) {
 	if f.processedEventKeys[eventKey] {
 		session := f.session
+		session.ReplayEventKey = eventKey
+		session.ReplayAIMessage = f.processedTurnReplies[eventKey]
 		return &session, true, nil
 	}
 	return nil, false, nil
@@ -8246,6 +9032,7 @@ func (f *fakeConversationStore) RedactSession(ctx context.Context, salonID strin
 	session.CustomerName = ""
 	session.CustomerPhone = ""
 	session.CustomerEmail = ""
+	clearSelectedAvailabilityQuote(&session)
 	f.session = session
 	return &session, nil
 }
@@ -8327,6 +9114,7 @@ func (f *fakeConversationStore) SaveTurn(ctx context.Context, record TurnRecord)
 	f.lastTurn = record
 	if record.EventKey != "" {
 		f.processedEventKeys[record.EventKey] = true
+		f.processedTurnReplies[record.EventKey] = record.AIMessage
 	}
 	session := record.Session
 	session.Status = record.Update.Status
@@ -8356,6 +9144,8 @@ func (f *fakeConversationStore) SaveTurn(ctx context.Context, record TurnRecord)
 	}
 	session.RequestedStartTime = record.Update.RequestedStartTime
 	session.RequestedDate = record.Update.RequestedDate
+	session.AvailabilityQuoteID = record.Update.AvailabilityQuoteID
+	session.SlotFingerprint = record.Update.SlotFingerprint
 	session.OfferedSlots = record.Update.OfferedSlots
 	session.BookingSegments = append([]booking.BookingSegmentRequest(nil), record.Update.BookingSegments...)
 	session.PartyPlan = clonePartyPlan(record.Update.PartyPlan)
@@ -8423,35 +9213,36 @@ func (f *fakeConversationStore) SaveTurn(ctx context.Context, record TurnRecord)
 }
 
 type fakeBookingTool struct {
-	calls                   int
-	cancelCalls             int
-	rescheduleCalls         int
-	candidateCalls          int
-	availabilityCalls       int
-	request                 booking.CreateBookingRequest
-	requests                []booking.CreateBookingRequest
-	cancelAppointmentIDs    []string
-	cancelRequest           booking.CancelRequest
-	rescheduleRequest       booking.RescheduleRequest
-	availabilityRequest     booking.AvailabilityRequest
-	availabilityRequests    []booking.AvailabilityRequest
-	rescheduleAppointmentID string
-	candidateRequest        booking.RescheduleLookupRequest
-	attempt                 *booking.BookingAttempt
-	attempts                []*booking.BookingAttempt
-	rescheduledAppointment  *booking.Appointment
-	cancelledAppointment    *booking.Appointment
-	rescheduleFallback      *booking.BookingAttempt
-	candidates              []booking.AppointmentActionRef
-	availabilityResult      *booking.AvailabilityResult
-	availabilityResults     []*booking.AvailabilityResult
-	err                     error
-	errs                    []error
-	cancelErr               error
-	cancelFallback          *booking.BookingAttempt
-	rescheduleErr           error
-	candidateErr            error
-	availabilityErr         error
+	calls                     int
+	cancelCalls               int
+	rescheduleCalls           int
+	candidateCalls            int
+	availabilityCalls         int
+	availabilityCallsAtCreate []int
+	request                   booking.CreateBookingRequest
+	requests                  []booking.CreateBookingRequest
+	cancelAppointmentIDs      []string
+	cancelRequest             booking.CancelRequest
+	rescheduleRequest         booking.RescheduleRequest
+	availabilityRequest       booking.AvailabilityRequest
+	availabilityRequests      []booking.AvailabilityRequest
+	rescheduleAppointmentID   string
+	candidateRequest          booking.RescheduleLookupRequest
+	attempt                   *booking.BookingAttempt
+	attempts                  []*booking.BookingAttempt
+	rescheduledAppointment    *booking.Appointment
+	cancelledAppointment      *booking.Appointment
+	rescheduleFallback        *booking.BookingAttempt
+	candidates                []booking.AppointmentActionRef
+	availabilityResult        *booking.AvailabilityResult
+	availabilityResults       []*booking.AvailabilityResult
+	err                       error
+	errs                      []error
+	cancelErr                 error
+	cancelFallback            *booking.BookingAttempt
+	rescheduleErr             error
+	candidateErr              error
+	availabilityErr           error
 }
 
 func (f *fakeBookingTool) AvailableSlots(ctx context.Context, salonID string, ownerUserID string, req booking.AvailabilityRequest) (*booking.AvailabilityResult, error) {
@@ -8466,12 +9257,13 @@ func (f *fakeBookingTool) AvailableSlots(ctx context.Context, salonID string, ow
 		if index >= len(f.availabilityResults) {
 			index = len(f.availabilityResults) - 1
 		}
-		return f.availabilityResults[index], nil
+		return fakeAvailabilityResultForCall(f.availabilityResults[index], f.availabilityCalls), nil
 	}
 	if f.availabilityResult != nil {
-		return f.availabilityResult, nil
+		return fakeAvailabilityResultForCall(f.availabilityResult, f.availabilityCalls), nil
 	}
-	return &booking.AvailabilityResult{
+	result := &booking.AvailabilityResult{
+		QuoteID:         "00000000-0000-0000-0000-000000000001",
 		ServiceID:       req.ServiceID,
 		ServiceName:     "Classic Manicure",
 		StaffID:         req.StaffID,
@@ -8481,17 +9273,36 @@ func (f *fakeBookingTool) AvailableSlots(ctx context.Context, salonID string, ow
 		Timezone:        "America/Chicago",
 		Slots: []booking.AvailabilitySlot{
 			{
-				StartTime: defaultAvailabilityStartTime(),
-				EndTime:   defaultAvailabilityStartTime().Add(45 * time.Minute),
-				StaffID:   "staff_1",
-				StaffName: "Mai Nguyen",
+				Fingerprint: strings.Repeat("a", 64),
+				StartTime:   defaultAvailabilityStartTime(),
+				EndTime:     defaultAvailabilityStartTime().Add(45 * time.Minute),
+				StaffID:     "staff_1",
+				StaffName:   "Mai Nguyen",
 			},
 		},
-	}, nil
+	}
+	return fakeAvailabilityResultForCall(result, f.availabilityCalls), nil
+}
+
+func fakeAvailabilityResultForCall(source *booking.AvailabilityResult, call int) *booking.AvailabilityResult {
+	if source == nil {
+		return nil
+	}
+	result := *source
+	result.QuoteID = fmt.Sprintf("00000000-0000-0000-0000-%012d", call)
+	result.Segments = append([]booking.AvailabilitySegment(nil), source.Segments...)
+	result.Slots = make([]booking.AvailabilitySlot, len(source.Slots))
+	for index := range source.Slots {
+		result.Slots[index] = source.Slots[index]
+		result.Slots[index].Fingerprint = fmt.Sprintf("%064x", call*1000+index+1)
+		result.Slots[index].Segments = append([]booking.AvailabilitySegment(nil), source.Slots[index].Segments...)
+	}
+	return &result
 }
 
 func (f *fakeBookingTool) Create(ctx context.Context, salonID string, ownerUserID string, req booking.CreateBookingRequest) (*booking.BookingAttempt, error) {
 	f.calls++
+	f.availabilityCallsAtCreate = append(f.availabilityCallsAtCreate, f.availabilityCalls)
 	f.request = req
 	f.requests = append(f.requests, req)
 	index := f.calls - 1

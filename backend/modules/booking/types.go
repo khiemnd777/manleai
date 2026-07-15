@@ -1,6 +1,10 @@
 package booking
 
-import "time"
+import (
+	"time"
+
+	"github.com/manleai/ai-receptionist/modules/pos"
+)
 
 const (
 	SourceOwnerDashboard          = "owner_dashboard"
@@ -10,10 +14,14 @@ const (
 	SourcePOSCalendarSync         = "pos_calendar_sync"
 
 	StatusPOSPending      = "pos_pending"
+	StatusProviderPending = "provider_pending"
 	StatusConfirmed       = "confirmed"
 	StatusFallbackPending = "fallback_pending"
 	StatusRescheduled     = "rescheduled"
 	StatusCancelled       = "cancelled"
+	StatusDeclined        = "declined"
+	StatusNoShow          = "no_show"
+	StatusUnknown         = "unknown"
 
 	POSSyncStatusSynced    = "synced"
 	POSSyncStatusNotSynced = "not_synced"
@@ -38,6 +46,11 @@ const (
 	ReconciliationRequired    = "required"
 	ReconciliationResolved    = "resolved"
 
+	ReconciliationActionProviderAttached = "provider_attached"
+	ReconciliationActionNotCreated       = "not_created"
+	ReconciliationActionEscalated        = "escalated"
+	ReconciliationResolutionSuperseded   = "superseded"
+
 	NotificationTypeBookingFallback      = "booking_fallback_pending"
 	NotificationTypeBookingConfirmed     = "booking_confirmed"
 	NotificationTypeRescheduleFallback   = "reschedule_fallback_pending"
@@ -48,17 +61,20 @@ const (
 )
 
 type CreateBookingRequest struct {
-	OperationKey       string                  `json:"operation_key"`
-	Source             string                  `json:"source"`
-	CustomerName       string                  `json:"customer_name"`
-	CustomerPhone      string                  `json:"customer_phone"`
-	CustomerEmail      string                  `json:"customer_email"`
-	ServiceID          string                  `json:"service_id"`
-	StaffID            string                  `json:"staff_id"`
-	StaffSelectionMode string                  `json:"staff_selection_mode"`
-	Segments           []BookingSegmentRequest `json:"segments"`
-	StartTime          time.Time               `json:"start_time"`
-	Notes              string                  `json:"notes"`
+	OperationKey        string                  `json:"operation_key"`
+	RetryOfAttemptID    string                  `json:"retry_of_attempt_id"`
+	AvailabilityQuoteID string                  `json:"availability_quote_id"`
+	SlotFingerprint     string                  `json:"slot_fingerprint"`
+	Source              string                  `json:"source"`
+	CustomerName        string                  `json:"customer_name"`
+	CustomerPhone       string                  `json:"customer_phone"`
+	CustomerEmail       string                  `json:"customer_email"`
+	ServiceID           string                  `json:"service_id"`
+	StaffID             string                  `json:"staff_id"`
+	StaffSelectionMode  string                  `json:"staff_selection_mode"`
+	Segments            []BookingSegmentRequest `json:"segments"`
+	StartTime           time.Time               `json:"start_time"`
+	Notes               string                  `json:"notes"`
 }
 
 type BookingSegmentRequest struct {
@@ -68,11 +84,14 @@ type BookingSegmentRequest struct {
 }
 
 type RescheduleRequest struct {
-	OperationKey string    `json:"operation_key"`
-	StartTime    time.Time `json:"start_time"`
-	StaffID      string    `json:"staff_id"`
-	Notes        string    `json:"notes"`
-	Source       string    `json:"-"`
+	OperationKey        string    `json:"operation_key"`
+	RetryOfAttemptID    string    `json:"retry_of_attempt_id"`
+	AvailabilityQuoteID string    `json:"availability_quote_id"`
+	SlotFingerprint     string    `json:"slot_fingerprint"`
+	StartTime           time.Time `json:"start_time"`
+	StaffID             string    `json:"staff_id"`
+	Notes               string    `json:"notes"`
+	Source              string    `json:"-"`
 }
 
 type RescheduleLookupRequest struct {
@@ -82,9 +101,10 @@ type RescheduleLookupRequest struct {
 }
 
 type CancelRequest struct {
-	OperationKey string `json:"operation_key"`
-	Reason       string `json:"reason"`
-	Source       string `json:"-"`
+	OperationKey     string `json:"operation_key"`
+	RetryOfAttemptID string `json:"retry_of_attempt_id"`
+	Reason           string `json:"reason"`
+	Source           string `json:"-"`
 }
 
 type AvailabilityRequest struct {
@@ -97,6 +117,9 @@ type AvailabilityRequest struct {
 }
 
 type AvailabilityResult struct {
+	QuoteID            string                `json:"quote_id,omitempty"`
+	RequestFingerprint string                `json:"request_fingerprint,omitempty"`
+	ExpiresAt          *time.Time            `json:"expires_at,omitempty"`
 	ServiceID          string                `json:"service_id"`
 	ServiceName        string                `json:"service_name"`
 	StaffID            string                `json:"staff_id,omitempty"`
@@ -110,6 +133,7 @@ type AvailabilityResult struct {
 }
 
 type AvailabilitySlot struct {
+	Fingerprint        string                `json:"fingerprint"`
 	StartTime          time.Time             `json:"start_time"`
 	EndTime            time.Time             `json:"end_time"`
 	StaffID            string                `json:"staff_id,omitempty"`
@@ -128,43 +152,57 @@ type AvailabilitySegment struct {
 }
 
 type BookingAttempt struct {
-	ID                  string                   `json:"id"`
-	SalonID             string                   `json:"salon_id"`
-	Source              string                   `json:"source"`
-	Status              string                   `json:"status"`
-	POSProvider         string                   `json:"pos_provider"`
-	POSBookingID        string                   `json:"pos_booking_id,omitempty"`
-	POSIdempotencyKey   string                   `json:"-"`
-	OperationKey        string                   `json:"operation_key,omitempty"`
-	RequestFingerprint  string                   `json:"-"`
-	OperationType       string                   `json:"operation_type"`
-	ProcessingToken     string                   `json:"-"`
-	ProcessingLeaseEnds *time.Time               `json:"processing_lease_expires_at,omitempty"`
-	ProviderOutcome     string                   `json:"provider_outcome"`
-	RetryPolicy         string                   `json:"retry_policy"`
-	Reconciliation      string                   `json:"reconciliation_status"`
-	CustomerName        string                   `json:"customer_name"`
-	CustomerPhone       string                   `json:"customer_phone"`
-	CustomerEmail       string                   `json:"customer_email,omitempty"`
-	ServiceID           string                   `json:"service_id,omitempty"`
-	StaffID             string                   `json:"staff_id,omitempty"`
-	StaffSelectionMode  string                   `json:"staff_selection_mode"`
-	Segments            []BookingSegmentSnapshot `json:"segments,omitempty"`
-	RequestedStartTime  time.Time                `json:"requested_start_time"`
-	RequestedEndTime    time.Time                `json:"requested_end_time"`
-	Notes               string                   `json:"notes,omitempty"`
-	ErrorCode           string                   `json:"error_code,omitempty"`
-	ErrorMessage        string                   `json:"error_message,omitempty"`
-	BookingAction       string                   `json:"booking_action,omitempty"`
-	TargetAppointmentID string                   `json:"target_appointment_id,omitempty"`
-	NotificationType    string                   `json:"notification_type,omitempty"`
-	NotificationStatus  string                   `json:"notification_status,omitempty"`
-	SyncWarning         string                   `json:"sync_warning,omitempty"`
-	CanRetry            bool                     `json:"can_retry"`
-	RetryBlockedReason  string                   `json:"retry_blocked_reason,omitempty"`
-	CreatedAt           time.Time                `json:"created_at"`
-	UpdatedAt           time.Time                `json:"updated_at"`
-	Appointment         *Appointment             `json:"appointment,omitempty"`
+	ID                        string                   `json:"id"`
+	SalonID                   string                   `json:"salon_id"`
+	Source                    string                   `json:"source"`
+	Status                    string                   `json:"status"`
+	POSProvider               string                   `json:"pos_provider"`
+	POSBookingID              string                   `json:"pos_booking_id,omitempty"`
+	POSBookingVersion         int                      `json:"pos_booking_version,omitempty"`
+	TargetPOSBookingVersion   int                      `json:"-"`
+	POSIdempotencyKey         string                   `json:"-"`
+	OperationKey              string                   `json:"operation_key,omitempty"`
+	RequestFingerprint        string                   `json:"-"`
+	RetryOfAttemptID          string                   `json:"retry_of_attempt_id,omitempty"`
+	SupersededByAttemptID     string                   `json:"superseded_by_attempt_id,omitempty"`
+	RetrySequence             int                      `json:"retry_sequence"`
+	SupersededAt              *time.Time               `json:"superseded_at,omitempty"`
+	AvailabilityQuoteID       string                   `json:"availability_quote_id,omitempty"`
+	SlotFingerprint           string                   `json:"availability_slot_fingerprint,omitempty"`
+	ProviderFence             pos.ProviderFence        `json:"-"`
+	OperationType             string                   `json:"operation_type"`
+	ProcessingToken           string                   `json:"-"`
+	ProcessingLeaseEnds       *time.Time               `json:"processing_lease_expires_at,omitempty"`
+	ProviderOutcome           string                   `json:"provider_outcome"`
+	RetryPolicy               string                   `json:"retry_policy"`
+	Reconciliation            string                   `json:"reconciliation_status"`
+	ReconciliationResolution  string                   `json:"reconciliation_resolution,omitempty"`
+	ReconciliationResolvedAt  *time.Time               `json:"reconciliation_resolved_at,omitempty"`
+	CustomerName              string                   `json:"customer_name"`
+	CustomerPhone             string                   `json:"customer_phone"`
+	CustomerEmail             string                   `json:"customer_email,omitempty"`
+	ServiceID                 string                   `json:"service_id,omitempty"`
+	StaffID                   string                   `json:"staff_id,omitempty"`
+	StaffSelectionMode        string                   `json:"staff_selection_mode"`
+	Segments                  []BookingSegmentSnapshot `json:"segments,omitempty"`
+	RequestedStartTime        time.Time                `json:"requested_start_time"`
+	RequestedEndTime          time.Time                `json:"requested_end_time"`
+	Notes                     string                   `json:"notes,omitempty"`
+	ErrorCode                 string                   `json:"error_code,omitempty"`
+	ErrorMessage              string                   `json:"error_message,omitempty"`
+	BookingAction             string                   `json:"booking_action,omitempty"`
+	TargetAppointmentID       string                   `json:"target_appointment_id,omitempty"`
+	NotificationType          string                   `json:"notification_type,omitempty"`
+	NotificationStatus        string                   `json:"notification_status,omitempty"`
+	SyncWarning               string                   `json:"sync_warning,omitempty"`
+	CanRetry                  bool                     `json:"can_retry"`
+	RetryBlockedReason        string                   `json:"retry_blocked_reason,omitempty"`
+	retryPrerequisitesChecked bool
+	retryPrerequisitesCurrent bool
+	retryPrerequisitesReason  string
+	CreatedAt                 time.Time    `json:"created_at"`
+	UpdatedAt                 time.Time    `json:"updated_at"`
+	Appointment               *Appointment `json:"appointment,omitempty"`
 }
 
 type Appointment struct {
@@ -174,6 +212,7 @@ type Appointment struct {
 	POSProvider           string                   `json:"pos_provider"`
 	POSAppointmentID      string                   `json:"pos_appointment_id"`
 	POSAppointmentVersion int                      `json:"pos_appointment_version,omitempty"`
+	POSCustomerID         string                   `json:"-"`
 	Status                string                   `json:"status"`
 	CustomerName          string                   `json:"customer_name"`
 	CustomerPhone         string                   `json:"customer_phone"`
@@ -312,13 +351,15 @@ type ServiceRef struct {
 	Name              string
 	DurationMinutes   int
 	PriceFrom         float64
+	ProviderFence     pos.ProviderFence
 }
 
 type StaffRef struct {
-	ID          string
-	POSProvider string
-	POSStaffID  string
-	Name        string
+	ID            string
+	POSProvider   string
+	POSStaffID    string
+	Name          string
+	ProviderFence pos.ProviderFence
 }
 
 type CustomerRef struct {
@@ -354,6 +395,8 @@ type AppointmentActionRef struct {
 	SalonID               string
 	BookingAttemptID      string
 	POSProvider           string
+	ProviderLocationID    string
+	ProviderFence         pos.ProviderFence
 	POSAppointmentID      string
 	POSAppointmentVersion int
 	Status                string
@@ -372,24 +415,28 @@ type AppointmentActionRef struct {
 }
 
 type PendingBookingRecord struct {
-	SalonID            string
-	Source             string
-	Provider           string
-	POSIdempotencyKey  string
-	OperationKey       string
-	RequestFingerprint string
-	ProcessingToken    string
-	LeaseExpiresAt     time.Time
-	CustomerName       string
-	CustomerPhone      string
-	CustomerEmail      string
-	Service            ServiceRef
-	Staff              StaffRef
-	StaffSelectionMode string
-	Segments           []BookingSegmentRecord
-	StartTime          time.Time
-	EndTime            time.Time
-	Notes              string
+	SalonID             string
+	Source              string
+	Provider            string
+	POSIdempotencyKey   string
+	OperationKey        string
+	RequestFingerprint  string
+	RetryOfAttemptID    string
+	AvailabilityQuoteID string
+	SlotFingerprint     string
+	ProviderFence       pos.ProviderFence
+	ProcessingToken     string
+	LeaseExpiresAt      time.Time
+	CustomerName        string
+	CustomerPhone       string
+	CustomerEmail       string
+	Service             ServiceRef
+	Staff               StaffRef
+	StaffSelectionMode  string
+	Segments            []BookingSegmentRecord
+	StartTime           time.Time
+	EndTime             time.Time
+	Notes               string
 }
 
 type ConfirmedBookingRecord struct {
@@ -400,6 +447,7 @@ type ConfirmedBookingRecord struct {
 	CustomerName       string
 	CustomerPhone      string
 	CustomerEmail      string
+	POSCustomerID      string
 	Service            ServiceRef
 	Staff              StaffRef
 	StaffSelectionMode string
@@ -410,6 +458,7 @@ type ConfirmedBookingRecord struct {
 	POSBookingID       string
 	POSBookingVersion  int
 	ProcessingToken    string
+	ProviderFence      pos.ProviderFence
 }
 
 type FallbackBookingRecord struct {
@@ -417,6 +466,8 @@ type FallbackBookingRecord struct {
 	SalonID            string
 	Source             string
 	Provider           string
+	POSBookingID       string
+	POSBookingVersion  int
 	Operation          string
 	CustomerName       string
 	CustomerPhone      string
@@ -434,23 +485,28 @@ type FallbackBookingRecord struct {
 	ProviderOutcome    string
 	RetryPolicy        string
 	Reconciliation     string
+	Status             string
 }
 
 type PendingAppointmentActionRecord struct {
-	SalonID            string
-	Appointment        AppointmentActionRef
-	Provider           string
-	Source             string
-	Segments           []BookingSegmentRecord
-	RequestedStartTime time.Time
-	RequestedEndTime   time.Time
-	Notes              string
-	POSIdempotencyKey  string
-	OperationKey       string
-	RequestFingerprint string
-	OperationType      string
-	ProcessingToken    string
-	LeaseExpiresAt     time.Time
+	SalonID             string
+	Appointment         AppointmentActionRef
+	Provider            string
+	Source              string
+	Segments            []BookingSegmentRecord
+	RequestedStartTime  time.Time
+	RequestedEndTime    time.Time
+	Notes               string
+	POSIdempotencyKey   string
+	OperationKey        string
+	RequestFingerprint  string
+	RetryOfAttemptID    string
+	AvailabilityQuoteID string
+	SlotFingerprint     string
+	ProviderFence       pos.ProviderFence
+	OperationType       string
+	ProcessingToken     string
+	LeaseExpiresAt      time.Time
 }
 
 type RescheduledAppointmentRecord struct {
@@ -480,6 +536,8 @@ type AppointmentActionFallbackRecord struct {
 	SalonID            string
 	Appointment        AppointmentActionRef
 	Provider           string
+	POSBookingID       string
+	POSBookingVersion  int
 	Operation          string
 	Source             string
 	NotificationType   string
@@ -493,11 +551,86 @@ type AppointmentActionFallbackRecord struct {
 	ProviderOutcome    string
 	RetryPolicy        string
 	Reconciliation     string
+	Status             string
 }
 
 type BookingOperationClaim struct {
 	Attempt  *BookingAttempt
 	Acquired bool
+}
+
+type AvailabilityQuoteRecord struct {
+	SalonID            string
+	Provider           string
+	ProviderFence      pos.ProviderFence
+	RequestFingerprint string
+	ExpiresAt          time.Time
+	Slots              []AvailabilitySlot
+}
+
+type AvailabilityQuote struct {
+	ID                 string             `json:"id"`
+	SalonID            string             `json:"salon_id"`
+	Provider           string             `json:"provider"`
+	ProviderFence      pos.ProviderFence  `json:"-"`
+	RequestFingerprint string             `json:"-"`
+	ExpiresAt          time.Time          `json:"expires_at"`
+	ConsumedAt         *time.Time         `json:"consumed_at,omitempty"`
+	CreatedAt          time.Time          `json:"created_at"`
+	Slots              []AvailabilitySlot `json:"slots,omitempty"`
+}
+
+type ReconciliationTask struct {
+	ID               string          `json:"id"`
+	SalonID          string          `json:"salon_id"`
+	BookingAttemptID string          `json:"booking_attempt_id"`
+	Status           string          `json:"status"`
+	Resolution       string          `json:"resolution,omitempty"`
+	ResolutionNote   string          `json:"resolution_note,omitempty"`
+	ResolvedAt       *time.Time      `json:"resolved_at,omitempty"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
+	Attempt          *BookingAttempt `json:"booking_attempt,omitempty"`
+}
+
+type ListReconciliationTasksResponse struct {
+	Tasks   []ReconciliationTask `json:"tasks"`
+	Limit   int                  `json:"limit"`
+	Offset  int                  `json:"offset"`
+	HasMore bool                 `json:"has_more"`
+}
+
+type ReconciliationCandidate struct {
+	AppointmentID              string    `json:"appointment_id"`
+	Provider                   string    `json:"provider"`
+	ProviderAppointmentID      string    `json:"provider_appointment_id"`
+	ProviderAppointmentVersion int       `json:"provider_appointment_version"`
+	ProviderStatus             string    `json:"provider_status"`
+	CustomerName               string    `json:"customer_name"`
+	CustomerPhone              string    `json:"customer_phone"`
+	CustomerEmail              string    `json:"customer_email,omitempty"`
+	ServiceID                  string    `json:"service_id"`
+	StaffID                    string    `json:"staff_id,omitempty"`
+	StartTime                  time.Time `json:"start_time"`
+	EndTime                    time.Time `json:"end_time"`
+}
+
+type ListReconciliationCandidatesResponse struct {
+	Candidates []ReconciliationCandidate `json:"candidates"`
+}
+
+type ResolveReconciliationRequest struct {
+	ActionKey                  string `json:"action_key"`
+	Action                     string `json:"action"`
+	ProviderAppointmentID      string `json:"provider_appointment_id"`
+	ProviderAppointmentVersion int    `json:"provider_appointment_version"`
+	ProviderStatus             string `json:"provider_status"`
+	Note                       string `json:"note"`
+	PayloadFingerprint         string `json:"-"`
+}
+
+type LeaseSweepSummary struct {
+	Expired int `json:"expired"`
 }
 
 type BookingSegmentRecord struct {
@@ -509,8 +642,11 @@ type BookingSegmentRecord struct {
 
 type BookingSegmentSnapshot struct {
 	ServiceID          string `json:"service_id,omitempty"`
+	POSServiceID       string `json:"-"`
+	POSServiceVersion  int64  `json:"-"`
 	ServiceName        string `json:"service_name"`
 	StaffID            string `json:"staff_id,omitempty"`
+	POSStaffID         string `json:"-"`
 	StaffName          string `json:"staff_name,omitempty"`
 	StaffSelectionMode string `json:"staff_selection_mode"`
 	DurationMinutes    int    `json:"duration_minutes,omitempty"`
@@ -519,6 +655,7 @@ type BookingSegmentSnapshot struct {
 
 type TestBookingRecord struct {
 	BookingAttemptID      string    `json:"booking_attempt_id,omitempty"`
+	OperationType         string    `json:"operation_type"`
 	AppointmentID         string    `json:"appointment_id,omitempty"`
 	Status                string    `json:"status"`
 	AppointmentStatus     string    `json:"appointment_status,omitempty"`

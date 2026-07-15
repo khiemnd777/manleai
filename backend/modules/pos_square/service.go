@@ -27,14 +27,28 @@ var (
 )
 
 type Service struct {
-	repo           *pos.Repository
-	adapter        *SquareAdapter
-	stateSecret    string
-	bookingService *booking.Service
+	repo            *pos.Repository
+	adapter         *SquareAdapter
+	stateSecret     string
+	bookingService  bookingOperationService
+	webhookRepo     SquareWebhookStore
+	readinessLoader func(context.Context, string, string) (*ReadinessStatus, error)
+}
+
+type bookingOperationService interface {
+	Create(ctx context.Context, salonID string, ownerUserID string, req booking.CreateBookingRequest) (*booking.BookingAttempt, error)
+	ReplayCreate(ctx context.Context, salonID string, ownerUserID string, req booking.CreateBookingRequest) (*booking.BookingAttempt, bool, error)
+	Cancel(ctx context.Context, salonID string, ownerUserID string, appointmentID string, req booking.CancelRequest) (*booking.Appointment, *booking.BookingAttempt, error)
+	ReplayCancel(ctx context.Context, salonID string, ownerUserID string, appointmentID string, req booking.CancelRequest) (*booking.Appointment, *booking.BookingAttempt, bool, error)
+	LatestTestBooking(ctx context.Context, salonID string, ownerUserID string) (*booking.TestBookingRecord, error)
 }
 
 func NewService(repo *pos.Repository, adapter *SquareAdapter, stateSecret string, bookingService *booking.Service) *Service {
 	return &Service{repo: repo, adapter: adapter, stateSecret: stateSecret, bookingService: bookingService}
+}
+
+func (s *Service) SetWebhookRepository(repo SquareWebhookStore) {
+	s.webhookRepo = repo
 }
 
 type ConnectURLResponse struct {
@@ -76,15 +90,18 @@ type ReadinessCheck struct {
 }
 
 type TestBookingRequest struct {
-	OperationKey  string    `json:"operation_key"`
-	SalonID       string    `json:"salon_id"`
-	CustomerName  string    `json:"customer_name"`
-	CustomerPhone string    `json:"customer_phone"`
-	CustomerEmail string    `json:"customer_email"`
-	ServiceID     string    `json:"service_id"`
-	StaffID       string    `json:"staff_id"`
-	StartTime     time.Time `json:"start_time"`
-	Notes         string    `json:"notes"`
+	OperationKey        string    `json:"operation_key"`
+	RetryOfAttemptID    string    `json:"retry_of_attempt_id,omitempty"`
+	SalonID             string    `json:"salon_id"`
+	AvailabilityQuoteID string    `json:"availability_quote_id,omitempty"`
+	SlotFingerprint     string    `json:"slot_fingerprint,omitempty"`
+	CustomerName        string    `json:"customer_name"`
+	CustomerPhone       string    `json:"customer_phone"`
+	CustomerEmail       string    `json:"customer_email"`
+	ServiceID           string    `json:"service_id"`
+	StaffID             string    `json:"staff_id"`
+	StartTime           time.Time `json:"start_time"`
+	Notes               string    `json:"notes"`
 }
 
 type TestBookingResponse struct {
@@ -95,10 +112,11 @@ type TestBookingResponse struct {
 }
 
 type CancelTestBookingRequest struct {
-	OperationKey  string `json:"operation_key"`
-	SalonID       string `json:"salon_id"`
-	AppointmentID string `json:"appointment_id"`
-	Reason        string `json:"reason"`
+	OperationKey     string `json:"operation_key"`
+	RetryOfAttemptID string `json:"retry_of_attempt_id,omitempty"`
+	SalonID          string `json:"salon_id"`
+	AppointmentID    string `json:"appointment_id"`
+	Reason           string `json:"reason"`
 }
 
 type GateRequest struct {
@@ -199,9 +217,6 @@ func (s *Service) Sync(ctx context.Context, salonID string, ownerUserID string) 
 	if err != nil {
 		return nil, err
 	}
-	if err := s.repo.MarkSyncing(ctx, salonID, pos.ProviderSquare); err != nil {
-		return nil, err
-	}
 	summary, err := s.adapter.SyncWithSummary(ctx, salonID)
 	if err != nil {
 		_ = s.repo.LogError(ctx, pos.POSError{
@@ -212,13 +227,15 @@ func (s *Service) Sync(ctx context.Context, salonID string, ownerUserID string) 
 			ErrorMessage: err.Error(),
 		})
 		_ = s.repo.CompleteSyncLog(ctx, logID, "failed", err.Error())
-		_ = s.repo.MarkSyncComplete(ctx, salonID, pos.ProviderSquare, pos.StatusError, err.Error())
+		if generation, ok := providerSnapshotGenerationFromError(err); ok {
+			_ = s.repo.MarkSyncCompleteForGeneration(ctx, salonID, pos.ProviderSquare, generation, pos.StatusError, err.Error())
+		}
 		return nil, err
 	}
 	if err := s.repo.CompleteSyncLog(ctx, logID, "succeeded", syncSummaryMessage(summary)); err != nil {
 		return nil, err
 	}
-	return summary, s.repo.MarkSyncComplete(ctx, salonID, pos.ProviderSquare, pos.StatusActive, "")
+	return summary, s.repo.MarkSyncCompleteForGeneration(ctx, salonID, pos.ProviderSquare, summary.SnapshotGeneration, pos.StatusActive, "")
 }
 
 func (s *Service) Readiness(ctx context.Context, salonID string, ownerUserID string) (*ReadinessStatus, error) {
@@ -268,39 +285,62 @@ func (s *Service) Readiness(ctx context.Context, salonID string, ownerUserID str
 	return buildReadiness(aiEnabled, connection, services, staff, periods, latest, bookingWriteError, appointmentChangeError), nil
 }
 
+func (s *Service) loadReadiness(ctx context.Context, salonID string, ownerUserID string) (*ReadinessStatus, error) {
+	if s.readinessLoader != nil {
+		return s.readinessLoader(ctx, salonID, ownerUserID)
+	}
+	return s.Readiness(ctx, salonID, ownerUserID)
+}
+
 func (s *Service) CreateTestBooking(ctx context.Context, salonID string, ownerUserID string, req TestBookingRequest) (*TestBookingResponse, error) {
 	if s.bookingService == nil {
 		return nil, ErrBookingServiceUnavailable
 	}
 	req = normalizeTestBookingRequest(salonID, req)
+	if req.OperationKey == "" {
+		return nil, ErrValidation
+	}
+	createRequest := testBookingCreateRequest(req)
+	replayed, found, err := s.bookingService.ReplayCreate(ctx, req.SalonID, ownerUserID, createRequest)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		if replayed == nil {
+			return nil, fmt.Errorf("booking service returned an empty create replay")
+		}
+		readiness, err := s.loadReadiness(ctx, req.SalonID, ownerUserID)
+		if err != nil {
+			return nil, err
+		}
+		return &TestBookingResponse{
+			BookingAttempt:    replayed,
+			Appointment:       replayed.Appointment,
+			LatestTestBooking: readiness.LatestTestBooking,
+			Readiness:         readiness,
+		}, nil
+	}
 	if req.SalonID == "" || req.ServiceID == "" || req.StaffID == "" || req.StartTime.IsZero() {
 		return nil, ErrValidation
 	}
-	readiness, err := s.Readiness(ctx, req.SalonID, ownerUserID)
+	if req.AvailabilityQuoteID == "" || req.SlotFingerprint == "" {
+		return nil, booking.ErrAvailabilityQuoteRequired
+	}
+	readiness, err := s.loadReadiness(ctx, req.SalonID, ownerUserID)
 	if err != nil {
 		return nil, err
 	}
 	if !readiness.CanTestBooking {
 		return nil, ErrReadinessGate
 	}
-	attempt, err := s.bookingService.Create(ctx, req.SalonID, ownerUserID, booking.CreateBookingRequest{
-		OperationKey:  req.OperationKey,
-		Source:        booking.SourceSquareTestBooking,
-		CustomerName:  req.CustomerName,
-		CustomerPhone: req.CustomerPhone,
-		CustomerEmail: req.CustomerEmail,
-		ServiceID:     req.ServiceID,
-		StaffID:       req.StaffID,
-		StartTime:     req.StartTime,
-		Notes:         req.Notes,
-	})
+	attempt, err := s.bookingService.Create(ctx, req.SalonID, ownerUserID, createRequest)
 	if err != nil {
 		return nil, err
 	}
 	if attempt == nil {
 		return nil, fmt.Errorf("booking service did not return a booking attempt")
 	}
-	readiness, err = s.Readiness(ctx, req.SalonID, ownerUserID)
+	readiness, err = s.loadReadiness(ctx, req.SalonID, ownerUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -312,34 +352,59 @@ func (s *Service) CreateTestBooking(ctx context.Context, salonID string, ownerUs
 	}, nil
 }
 
+func testBookingCreateRequest(req TestBookingRequest) booking.CreateBookingRequest {
+	return booking.CreateBookingRequest{
+		OperationKey:        req.OperationKey,
+		RetryOfAttemptID:    req.RetryOfAttemptID,
+		AvailabilityQuoteID: req.AvailabilityQuoteID,
+		SlotFingerprint:     req.SlotFingerprint,
+		Source:              booking.SourceSquareTestBooking,
+		CustomerName:        req.CustomerName,
+		CustomerPhone:       req.CustomerPhone,
+		CustomerEmail:       req.CustomerEmail,
+		ServiceID:           req.ServiceID,
+		StaffID:             req.StaffID,
+		StartTime:           req.StartTime,
+		Notes:               req.Notes,
+	}
+}
+
 func (s *Service) CancelTestBooking(ctx context.Context, salonID string, ownerUserID string, req CancelTestBookingRequest) (*TestBookingResponse, error) {
 	if s.bookingService == nil {
 		return nil, ErrBookingServiceUnavailable
 	}
 	req = normalizeCancelTestBookingRequest(salonID, req)
-	if req.SalonID == "" {
+	if req.SalonID == "" || req.OperationKey == "" {
 		return nil, ErrValidation
+	}
+	appointmentID := strings.TrimSpace(req.AppointmentID)
+	if appointmentID != "" {
+		response, found, err := s.replayTestBookingCancellation(ctx, ownerUserID, req, appointmentID)
+		if err != nil || found {
+			return response, err
+		}
 	}
 	latest, err := s.latestTestBooking(ctx, req.SalonID, ownerUserID)
 	if err != nil {
 		return nil, err
 	}
-	appointmentID := strings.TrimSpace(req.AppointmentID)
 	if appointmentID == "" && latest != nil {
 		appointmentID = latest.AppointmentID
+		if appointmentID != "" {
+			response, found, err := s.replayTestBookingCancellation(ctx, ownerUserID, req, appointmentID)
+			if err != nil || found {
+				return response, err
+			}
+		}
 	}
 	if appointmentID == "" || latest == nil || latest.AppointmentStatus == booking.StatusCancelled {
 		return nil, ErrReadinessGate
 	}
-	appointment, fallback, err := s.bookingService.Cancel(ctx, req.SalonID, ownerUserID, appointmentID, booking.CancelRequest{
-		OperationKey: req.OperationKey,
-		Reason:       req.Reason,
-		Source:       booking.SourceSquareTestBooking,
-	})
+	appointment, fallback, err := s.bookingService.Cancel(ctx, req.SalonID, ownerUserID, appointmentID, testBookingCancelRequest(req))
 	if err != nil {
 		return nil, err
 	}
-	readiness, err := s.Readiness(ctx, req.SalonID, ownerUserID)
+	readiness, err := s.loadReadiness(ctx, req.SalonID, ownerUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -349,6 +414,35 @@ func (s *Service) CancelTestBooking(ctx context.Context, salonID string, ownerUs
 		LatestTestBooking: readiness.LatestTestBooking,
 		Readiness:         readiness,
 	}, nil
+}
+
+func (s *Service) replayTestBookingCancellation(ctx context.Context, ownerUserID string, req CancelTestBookingRequest, appointmentID string) (*TestBookingResponse, bool, error) {
+	appointment, fallback, found, err := s.bookingService.ReplayCancel(ctx, req.SalonID, ownerUserID, appointmentID, testBookingCancelRequest(req))
+	if err != nil || !found {
+		return nil, found, err
+	}
+	if appointment == nil && fallback == nil {
+		return nil, false, fmt.Errorf("booking service returned an empty cancel replay")
+	}
+	readiness, err := s.loadReadiness(ctx, req.SalonID, ownerUserID)
+	if err != nil {
+		return nil, false, err
+	}
+	return &TestBookingResponse{
+		BookingAttempt:    fallback,
+		Appointment:       appointment,
+		LatestTestBooking: readiness.LatestTestBooking,
+		Readiness:         readiness,
+	}, true, nil
+}
+
+func testBookingCancelRequest(req CancelTestBookingRequest) booking.CancelRequest {
+	return booking.CancelRequest{
+		OperationKey:     req.OperationKey,
+		RetryOfAttemptID: req.RetryOfAttemptID,
+		Reason:           req.Reason,
+		Source:           booking.SourceSquareTestBooking,
+	}
 }
 
 func (s *Service) EnableAIBooking(ctx context.Context, salonID string, ownerUserID string) (*GateResponse, error) {
@@ -589,7 +683,10 @@ func defaultString(value string, fallback string) string {
 
 func normalizeTestBookingRequest(salonID string, req TestBookingRequest) TestBookingRequest {
 	req.OperationKey = strings.TrimSpace(req.OperationKey)
+	req.RetryOfAttemptID = strings.TrimSpace(req.RetryOfAttemptID)
 	req.SalonID = defaultString(strings.TrimSpace(req.SalonID), strings.TrimSpace(salonID))
+	req.AvailabilityQuoteID = strings.TrimSpace(req.AvailabilityQuoteID)
+	req.SlotFingerprint = strings.TrimSpace(req.SlotFingerprint)
 	req.CustomerName = defaultString(strings.TrimSpace(req.CustomerName), "ManleAI Test Customer")
 	req.CustomerPhone = defaultString(strings.TrimSpace(req.CustomerPhone), "+13125550199")
 	req.CustomerEmail = strings.TrimSpace(req.CustomerEmail)
@@ -601,6 +698,7 @@ func normalizeTestBookingRequest(salonID string, req TestBookingRequest) TestBoo
 
 func normalizeCancelTestBookingRequest(salonID string, req CancelTestBookingRequest) CancelTestBookingRequest {
 	req.OperationKey = strings.TrimSpace(req.OperationKey)
+	req.RetryOfAttemptID = strings.TrimSpace(req.RetryOfAttemptID)
 	req.SalonID = defaultString(strings.TrimSpace(req.SalonID), strings.TrimSpace(salonID))
 	req.AppointmentID = strings.TrimSpace(req.AppointmentID)
 	req.Reason = defaultString(strings.TrimSpace(req.Reason), "AI booking readiness test cleanup")

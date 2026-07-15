@@ -88,7 +88,12 @@ func TestGuardedTurnInterpreterMapsConsultationNeedsWithoutRecommendationAuthori
 			LengthChange: conversation.ConsultationLengthShorten, Priorities: []string{conversation.ConsultationPriorityLowerMaintenance},
 			DesiredFinishes:    []string{conversation.ConsultationFinishMatte},
 			ComparedServiceIDs: []string{"service_acrylic_fill"}, Confidence: 0.96, Reason: "structured needs only",
+			Mutations: []ConsultationMutationModelReply{{
+				Field: conversation.ConsultationNeedFieldCurrentSystem, Operation: conversation.ConsultationNeedOperationReplace,
+				Values: []string{conversation.ConsultationSystemAcrylic}, Confidence: 0.96, Reason: "caller corrected current system",
+			}},
 		},
+		Safety: SafetyModelReply{Concern: true, Category: conversation.SafetyCategoryAllergy, Confidence: 0.98, Reason: "caller asked about an allergic reaction"},
 	}}
 	interpreter := NewGuardedTurnInterpreter(provider)
 	current := &conversation.ConsultationState{Status: conversation.ConsultationStatusCollectingNeeds}
@@ -106,6 +111,10 @@ func TestGuardedTurnInterpreterMapsConsultationNeedsWithoutRecommendationAuthori
 	}
 	if len(turn.Acts) != 0 || len(turn.Questions) != 0 {
 		t.Fatalf("consultation extraction gained action authority: %#v", turn)
+	}
+	if len(turn.ConsultationMutations) != 1 || turn.ConsultationMutations[0].Operation != conversation.ConsultationNeedOperationReplace ||
+		!turn.Safety.Concern || turn.Safety.Category != conversation.SafetyCategoryAllergy {
+		t.Fatalf("consultation mutation or safety extraction was lost: %#v", turn)
 	}
 	if provider.request.Consultation != current {
 		t.Fatalf("current consultation state was not passed to provider: %#v", provider.request.Consultation)

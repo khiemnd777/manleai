@@ -20,6 +20,7 @@ func (Appointment) Fields() []ent.Field {
 		field.String("pos_provider").Default("square"),
 		field.String("pos_appointment_id").NotEmpty(),
 		field.Int("pos_appointment_version").Default(0),
+		field.String("pos_customer_id").Optional(),
 		field.String("status").NotEmpty(),
 		field.String("customer_name").NotEmpty(),
 		field.String("customer_phone").NotEmpty(),

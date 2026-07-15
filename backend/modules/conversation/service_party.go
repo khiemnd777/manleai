@@ -268,23 +268,28 @@ func clonePartyPlan(plan *PartyPlan) *PartyPlan {
 		})
 	}
 	for _, option := range plan.SplitOptions {
-		cloned := PartySplitOption{
-			ID:                   option.ID,
-			DatePolicy:           option.DatePolicy,
-			RequiresDateConsent:  option.RequiresDateConsent,
-			DateConsentConfirmed: option.DateConsentConfirmed,
-			SpanMinutes:          option.SpanMinutes,
-			FinishSpreadMinutes:  option.FinishSpreadMinutes,
-			Blocks:               make([]PartySplitBlock, 0, len(option.Blocks)),
-		}
-		for _, block := range option.Blocks {
-			cloned.Blocks = append(cloned.Blocks, PartySplitBlock{
-				StartTime: block.StartTime,
-				EndTime:   block.EndTime,
-				Segments:  append([]booking.BookingSegmentRequest(nil), block.Segments...),
-			})
-		}
-		out.SplitOptions = append(out.SplitOptions, cloned)
+		out.SplitOptions = append(out.SplitOptions, clonePartySplitOption(option))
+	}
+	return out
+}
+
+func clonePartySplitOption(option PartySplitOption) PartySplitOption {
+	out := PartySplitOption{
+		ID:                   option.ID,
+		DatePolicy:           option.DatePolicy,
+		RequiresDateConsent:  option.RequiresDateConsent,
+		DateConsentConfirmed: option.DateConsentConfirmed,
+		SpanMinutes:          option.SpanMinutes,
+		FinishSpreadMinutes:  option.FinishSpreadMinutes,
+		Blocks:               make([]PartySplitBlock, 0, len(option.Blocks)),
+	}
+	for _, block := range option.Blocks {
+		out.Blocks = append(out.Blocks, PartySplitBlock{
+			StartTime: block.StartTime,
+			EndTime:   block.EndTime,
+			Segments:  append([]booking.BookingSegmentRequest(nil), block.Segments...),
+			QuoteRefs: append([]PartySplitQuoteRef(nil), block.QuoteRefs...),
+		})
 	}
 	return out
 }

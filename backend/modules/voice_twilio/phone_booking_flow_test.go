@@ -202,7 +202,21 @@ func TestSignedTwilioWebhookConsultsThenBooksExplicitCatalogChoice(t *testing.T)
 	adapter := NewAdapter(config.TwilioVoiceConfig{AuthToken: "secret", IncomingPath: "/api/voice/twilio/incoming", TurnPath: "/api/voice/twilio/turn", RecordingPath: "/api/voice/twilio/recording"}, "")
 	conversationStore := newPhoneFlowConversationStore()
 	conversationStore.services[0].AIDescription = "Nail shaping and regular polish"
-	conversationStore.services = append(conversationStore.services, conversation.ServiceOption{ID: "service_gel", Name: "Gel Manicure", AIDescription: "Nail shaping and gel polish", DurationMinutes: 50, PriceFrom: 45})
+	conversationStore.services[0].ConsultationProfile = &conversation.ServiceConsultationProfile{
+		Status:                   conversation.ConsultationProfileStatusReady,
+		RecommendedOutcomes:      []string{conversation.ConsultationOutcomeMaintain},
+		CompatibleCurrentSystems: []string{conversation.ConsultationSystemRegularPolish},
+		Revision:                 1,
+	}
+	conversationStore.services = append(conversationStore.services, conversation.ServiceOption{
+		ID: "service_gel", Name: "Gel Manicure", AIDescription: "Nail shaping and gel polish", DurationMinutes: 50, PriceFrom: 45,
+		ConsultationProfile: &conversation.ServiceConsultationProfile{
+			Status:                   conversation.ConsultationProfileStatusReady,
+			RecommendedOutcomes:      []string{conversation.ConsultationOutcomeMaintain},
+			CompatibleCurrentSystems: []string{conversation.ConsultationSystemNatural},
+			Revision:                 1,
+		},
+	})
 	bookingTool := &phoneFlowBookingTool{attempt: &booking.BookingAttempt{ID: "attempt_consultation", Status: booking.StatusConfirmed, POSBookingID: "square_booking_consultation", Appointment: &booking.Appointment{ID: "appointment_consultation", Status: booking.StatusConfirmed}}}
 	conversationService := conversation.NewService(conversationStore, bookingTool)
 	voiceStore := newPhoneFlowVoiceStore(conversationStore)
@@ -256,15 +270,16 @@ func TestSignedTwilioWebhookConsultsThenBooksExplicitCatalogChoice(t *testing.T)
 }
 
 type phoneFlowConversationStore struct {
-	cfg         conversation.RuntimeConfig
-	session     conversation.Session
-	services    []conversation.ServiceOption
-	aliases     []conversation.ServiceAlias
-	catAliases  []conversation.ServiceCategoryAlias
-	staff       []conversation.StaffOption
-	activeStaff []conversation.StaffOption
-	knowledge   []conversation.KnowledgeSnippet
-	eventKeys   map[string]bool
+	cfg          conversation.RuntimeConfig
+	session      conversation.Session
+	services     []conversation.ServiceOption
+	aliases      []conversation.ServiceAlias
+	catAliases   []conversation.ServiceCategoryAlias
+	staff        []conversation.StaffOption
+	activeStaff  []conversation.StaffOption
+	knowledge    []conversation.KnowledgeSnippet
+	eventKeys    map[string]bool
+	eventReplies map[string]string
 }
 
 func newPhoneFlowConversationStore() *phoneFlowConversationStore {
@@ -288,12 +303,24 @@ func newPhoneFlowConversationStore() *phoneFlowConversationStore {
 			Name:       "Mai Nguyen",
 			AIBookable: true,
 		}},
-		eventKeys: map[string]bool{},
+		eventKeys:    map[string]bool{},
+		eventReplies: map[string]string{},
 	}
 }
 
 func (f *phoneFlowConversationStore) GetRuntimeConfig(ctx context.Context, salonID string, ownerUserID string) (*conversation.RuntimeConfig, error) {
 	return &f.cfg, nil
+}
+
+func (f *phoneFlowConversationStore) GetAnswerContextFence(ctx context.Context, salonID string) (conversation.AnswerContextFence, error) {
+	return conversation.AnswerContextFence{
+		ActiveProvider:     "square",
+		ConnectionStatus:   "active",
+		LocationID:         "location-phone-flow",
+		SnapshotGeneration: 1,
+		LastSyncAtRFC3339:  "2026-06-10T14:00:00Z",
+		Ready:              true,
+	}, nil
 }
 
 func (f *phoneFlowConversationStore) CreateSession(ctx context.Context, record conversation.NewSessionRecord) (*conversation.Session, error) {
@@ -337,7 +364,10 @@ func (f *phoneFlowConversationStore) GetSessionForOwner(ctx context.Context, sal
 
 func (f *phoneFlowConversationStore) GetSessionByTurnEventKey(ctx context.Context, salonID string, ownerUserID string, sessionID string, eventKey string) (*conversation.Session, bool, error) {
 	if f.eventKeys[eventKey] {
-		return f.copySession(), true, nil
+		session := f.copySession()
+		session.ReplayEventKey = eventKey
+		session.ReplayAIMessage = f.eventReplies[eventKey]
+		return session, true, nil
 	}
 	return nil, false, nil
 }
@@ -422,6 +452,7 @@ func (f *phoneFlowConversationStore) UpdatePartyBookingRequestStatus(ctx context
 func (f *phoneFlowConversationStore) SaveTurn(ctx context.Context, record conversation.TurnRecord) (*conversation.Session, error) {
 	if record.EventKey != "" {
 		f.eventKeys[record.EventKey] = true
+		f.eventReplies[record.EventKey] = record.AIMessage
 	}
 	session := record.Session
 	session.Status = record.Update.Status

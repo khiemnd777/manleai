@@ -109,6 +109,9 @@ type SquareConfigForm = {
   redirect_url: string;
   api_version: string;
   api_base_url: string;
+  webhook_notification_url: string;
+  webhook_signature_key: string;
+  clear_webhook_signature_key: boolean;
 };
 
 type TwilioConfigForm = {
@@ -156,7 +159,10 @@ const defaultSquareConfigForm: SquareConfigForm = {
   clear_client_secret: false,
   redirect_url: "http://localhost:18089/api/integrations/square/callback",
   api_version: "2026-05-20",
-  api_base_url: ""
+  api_base_url: "",
+  webhook_notification_url: "",
+  webhook_signature_key: "",
+  clear_webhook_signature_key: false
 };
 
 const defaultTwilioConfigForm: TwilioConfigForm = {
@@ -192,10 +198,34 @@ function operationKeyForPayload(
   payload: Record<string, unknown>
 ) {
   const fingerprint = JSON.stringify(payload);
-  if (!ref.current) {
+  if (!ref.current || ref.current.fingerprint !== fingerprint) {
     ref.current = { key: crypto.randomUUID(), fingerprint };
   }
   return ref.current.key;
+}
+
+function safeTestRetryAttemptID(
+  operationType: "book" | "cancel",
+  attempt: BookingAttempt | null,
+  latest?: TestBookingRecord
+) {
+  if (
+    attempt?.operation_type === operationType &&
+    attempt.status === "fallback_pending" &&
+    attempt.retry_policy === "safe" &&
+    attempt.can_retry
+  ) {
+    return attempt.id;
+  }
+  if (
+    latest?.operation_type === operationType &&
+    latest.status === "fallback_pending" &&
+    latest.retry_policy === "safe" &&
+    latest.can_retry
+  ) {
+    return latest.booking_attempt_id;
+  }
+  return undefined;
 }
 
 function testWriteBlocked(attempt: BookingAttempt | null, latest?: TestBookingRecord) {
@@ -249,6 +279,8 @@ export function SquareIntegration() {
   const [testWriteAttempt, setTestWriteAttempt] = useState<BookingAttempt | null>(null);
   const testBookingOperationRef = useRef<{ key: string; fingerprint: string } | null>(null);
   const testCancelOperationRef = useRef<{ key: string; fingerprint: string } | null>(null);
+  const availabilityRequestIDRef = useRef(0);
+  const availabilityExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const salon = salons[0];
   const connection = status?.connection;
@@ -340,6 +372,7 @@ export function SquareIntegration() {
 
   useEffect(() => {
     void load();
+    return () => clearAvailabilityExpiryTimer(availabilityExpiryTimerRef);
   }, []);
 
   useEffect(() => {
@@ -419,26 +452,53 @@ export function SquareIntegration() {
 
   async function checkAvailability() {
     if (!salon || !form.service_id || !form.staff_id || !bookingDate) return;
+    const requestID = ++availabilityRequestIDRef.current;
+    clearAvailabilityExpiryTimer(availabilityExpiryTimerRef);
     setAvailabilityError("");
     setAvailabilityChecked(true);
     setCheckingAvailability(true);
     setForm((current) => ({ ...current, start_time: "" }));
+    const payload = {
+      service_id: form.service_id,
+      staff_id: form.staff_id,
+      staff_selection_mode: "specific",
+      segments: [
+        {
+          service_id: form.service_id,
+          staff_id: form.staff_id,
+          staff_selection_mode: "specific"
+        }
+      ],
+      preferred_date: bookingDate,
+      limit: 20
+    };
     try {
       const result = await apiRequest<AvailabilityResult>(`/api/salons/${salon.id}/availability`, {
         method: "POST",
-        body: JSON.stringify({
-          service_id: form.service_id,
-          staff_id: form.staff_id,
-          preferred_date: bookingDate,
-          limit: 20
-        })
+        body: JSON.stringify(payload)
       });
+      if (requestID !== availabilityRequestIDRef.current) return;
       setAvailabilityResult(result);
+      scheduleAvailabilityExpiry(
+        availabilityExpiryTimerRef,
+        result.expires_at,
+        requestID,
+        availabilityRequestIDRef,
+        () => {
+          setAvailabilityResult(null);
+          setAvailabilityChecked(false);
+          setForm((current) => ({ ...current, start_time: "" }));
+          setAvailabilityError("This availability quote expired. Check Square Appointments again before creating the test booking.");
+        }
+      );
     } catch (err) {
+      if (requestID !== availabilityRequestIDRef.current) return;
       setAvailabilityResult(null);
       setAvailabilityError(err instanceof Error ? err.message : "Could not check Square Appointments availability.");
     } finally {
-      setCheckingAvailability(false);
+      if (requestID === availabilityRequestIDRef.current) {
+        setCheckingAvailability(false);
+      }
     }
   }
 
@@ -448,10 +508,22 @@ export function SquareIntegration() {
     setError("");
     setSuccess("");
     try {
+      if (!availabilityResult) {
+        throw new Error("Check Square Appointments availability and select a current quote first.");
+      }
+      const selectedSlot = availabilityResult.slots.find((slot) => slot.start_time === form.start_time);
+      if (!selectedSlot) {
+        throw new Error("Select a slot from the current Square availability quote.");
+      }
+      assertAvailabilityQuoteUsable(availabilityResult, selectedSlot);
+      const retryOfAttemptID = safeTestRetryAttemptID("book", testWriteAttempt, latestTest);
       const payload = {
         salon_id: salon.id,
         ...form,
-        start_time: form.start_time
+        start_time: form.start_time,
+        availability_quote_id: availabilityResult.quote_id,
+        slot_fingerprint: selectedSlot.fingerprint,
+        ...(retryOfAttemptID ? { retry_of_attempt_id: retryOfAttemptID } : {})
       };
       const operationKey = operationKeyForPayload(testBookingOperationRef, payload);
       const response = await apiRequest<TestBookingResponse>("/api/integrations/square/test-booking", {
@@ -485,10 +557,12 @@ export function SquareIntegration() {
     setError("");
     setSuccess("");
     try {
+      const retryOfAttemptID = safeTestRetryAttemptID("cancel", testWriteAttempt, latestTest);
       const payload = {
         salon_id: salon.id,
         appointment_id: latestTest.appointment_id,
-        reason: "AI booking readiness test cleanup"
+        reason: "AI booking readiness test cleanup",
+        ...(retryOfAttemptID ? { retry_of_attempt_id: retryOfAttemptID } : {})
       };
       const operationKey = operationKeyForPayload(testCancelOperationRef, payload);
       const response = await apiRequest<TestBookingResponse>(
@@ -654,9 +728,12 @@ export function SquareIntegration() {
   }
 
   function clearAvailability() {
+    availabilityRequestIDRef.current += 1;
+    clearAvailabilityExpiryTimer(availabilityExpiryTimerRef);
     setAvailabilityResult(null);
     setAvailabilityError("");
     setAvailabilityChecked(false);
+    setCheckingAvailability(false);
   }
 
   function updateService(value: string) {
@@ -708,6 +785,8 @@ export function SquareIntegration() {
     Boolean(form.service_id) &&
     Boolean(form.staff_id) &&
     Boolean(form.start_time) &&
+    Boolean(availabilityResult?.slots.some((slot) => slot.start_time === form.start_time && slot.fingerprint)) &&
+    availabilityQuoteIsUsable(availabilityResult) &&
     !testWriteBlocked(testWriteAttempt, latestTest) &&
     busy === "";
   const canCancelTest =
@@ -1023,8 +1102,8 @@ export function SquareIntegration() {
                 checked={availabilityChecked}
                 error={availabilityError}
                 loading={checkingAvailability}
+                result={availabilityResult}
                 selectedStartTime={form.start_time}
-                slots={availabilityResult?.slots ?? []}
                 timezone={displayTimezone}
                 onSelect={(slot) => setForm((current) => ({ ...current, start_time: slot.start_time }))}
               />
@@ -1261,6 +1340,62 @@ function ProviderConfigurationPanel({
                 />
               </Field>
             </div>
+            <div className="md:col-span-2 border-t border-line pt-4">
+              <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start">
+                <div>
+                  <div className="text-sm font-semibold text-ink">Booking webhook verification</div>
+                  <div className="mt-1 text-xs leading-5 text-muted">
+                    The notification URL and write-only signature key let this API verify inbound Square booking events. Stored credentials do not prove that a Square webhook subscription exists or that recent deliveries succeeded.
+                  </div>
+                </div>
+                <Badge value={square?.webhook_configured ? "verification_ready" : "needs_config"} />
+              </div>
+            </div>
+            <div className="md:col-span-2">
+              <Field label="Webhook notification URL">
+                <input
+                  className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                  type="url"
+                  value={squareForm.webhook_notification_url}
+                  placeholder="https://api.example.com/api/integrations/square/webhook"
+                  onChange={(event) =>
+                    setSquareForm((current) => ({ ...current, webhook_notification_url: event.target.value }))
+                  }
+                  disabled={busy !== ""}
+                />
+              </Field>
+            </div>
+            <Field label="Square webhook signature key">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                type="password"
+                value={squareForm.webhook_signature_key}
+                placeholder={
+                  square?.webhook_signature_key_configured ? "Stored - leave blank to keep" : "Paste webhook signature key"
+                }
+                onChange={(event) =>
+                  setSquareForm((current) => ({
+                    ...current,
+                    webhook_signature_key: event.target.value,
+                    clear_webhook_signature_key: false
+                  }))
+                }
+                disabled={busy !== "" || squareForm.clear_webhook_signature_key}
+              />
+            </Field>
+            <SecretControl
+              checked={squareForm.clear_webhook_signature_key}
+              configured={Boolean(square?.webhook_signature_key_configured)}
+              source={square?.webhook_signature_key_source}
+              label="Clear stored Square webhook signature key"
+              onChange={(checked) =>
+                setSquareForm((current) => ({
+                  ...current,
+                  clear_webhook_signature_key: checked,
+                  webhook_signature_key: checked ? "" : current.webhook_signature_key
+                }))
+              }
+            />
           </div>
           <ConfigActions
             busy={busy === "save-square-config"}
@@ -1632,7 +1767,10 @@ function squareConfigToForm(config?: SquareIntegrationConfig): SquareConfigForm 
     clear_client_secret: false,
     redirect_url: config.redirect_url || defaultSquareConfigForm.redirect_url,
     api_version: config.api_version || defaultSquareConfigForm.api_version,
-    api_base_url: config.api_base_url || ""
+    api_base_url: config.api_base_url || "",
+    webhook_notification_url: config.webhook_notification_url || "",
+    webhook_signature_key: "",
+    clear_webhook_signature_key: false
   };
 }
 
@@ -1681,7 +1819,11 @@ function emptyIntegrationConfigs(): IntegrationConfigs {
       api_version: defaultSquareConfigForm.api_version,
       api_base_url: defaultSquareConfigForm.api_base_url,
       client_secret_configured: false,
-      client_secret_source: "none"
+      client_secret_source: "none",
+      webhook_notification_url: defaultSquareConfigForm.webhook_notification_url,
+      webhook_configured: false,
+      webhook_signature_key_configured: false,
+      webhook_signature_key_source: "none"
     },
     twilio: {
       provider: "twilio",
@@ -2771,18 +2913,19 @@ function AvailabilityPicker({
   error,
   loading,
   onSelect,
+  result,
   selectedStartTime,
-  slots,
   timezone
 }: {
   checked: boolean;
   error: string;
   loading: boolean;
   onSelect: (slot: AvailabilitySlot) => void;
+  result: AvailabilityResult | null;
   selectedStartTime: string;
-  slots: AvailabilitySlot[];
   timezone?: string;
 }) {
+  const slots = result?.slots ?? [];
   if (error) {
     return <Alert title="Availability check failed" message={error} />;
   }
@@ -2817,6 +2960,9 @@ function AvailabilityPicker({
           <div className="mt-1 text-xs text-muted">
             Times are shown in {timezone || "the selected location timezone"}.
           </div>
+          <div className="mt-1 text-xs text-muted">
+            Quote valid until {formatQuoteExpiry(result?.expires_at, timezone)}.
+          </div>
         </div>
         {selected ? <Badge value="selected" /> : null}
       </div>
@@ -2825,7 +2971,7 @@ function AvailabilityPicker({
           const active = slot.start_time === selectedStartTime;
           return (
             <button
-              key={`${slot.start_time}-${slot.staff_id ?? ""}`}
+              key={slot.fingerprint || `${slot.start_time}-${slot.staff_id ?? ""}`}
               type="button"
               onClick={() => onSelect(slot)}
               className={`min-h-10 rounded-md border px-3 py-2 text-left text-sm font-medium transition ${
@@ -2883,9 +3029,7 @@ function staffIsBookable(member: POSStaffMember) {
 }
 
 function nextBookingDate(timezone?: string) {
-  const date = new Date();
-  date.setDate(date.getDate() + 1);
-  return formatDateInput(date, timezone);
+  return addDaysInput(formatDateInput(new Date(), timezone), 1);
 }
 
 function formatDate(value: string, timezone?: string) {
@@ -2909,6 +3053,16 @@ function formatTimeRange(start: string, end: string, timezone?: string) {
   return `${formatTime(start, timezone)} - ${formatTime(end, timezone)}`;
 }
 
+function formatQuoteExpiry(value?: string, timezone?: string) {
+  if (!value) return "an unknown time";
+  return new Date(value).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZone: timezone
+  });
+}
+
 function formatDateInput(date: Date, timezone?: string) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     day: "2-digit",
@@ -2918,4 +3072,53 @@ function formatDateInput(date: Date, timezone?: string) {
   }).formatToParts(date);
   const values = new Map(parts.map((part) => [part.type, part.value]));
   return `${values.get("year")}-${values.get("month")}-${values.get("day")}`;
+}
+
+function addDaysInput(value: string, days: number) {
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day + days));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(
+    date.getUTCDate()
+  ).padStart(2, "0")}`;
+}
+
+function clearAvailabilityExpiryTimer(ref: { current: ReturnType<typeof setTimeout> | null }) {
+  if (!ref.current) return;
+  clearTimeout(ref.current);
+  ref.current = null;
+}
+
+function scheduleAvailabilityExpiry(
+  timerRef: { current: ReturnType<typeof setTimeout> | null },
+  expiresAt: string | undefined,
+  requestID: number,
+  requestIDRef: { current: number },
+  onExpire: () => void
+) {
+  clearAvailabilityExpiryTimer(timerRef);
+  if (!expiresAt) return;
+  const expiresAtMs = new Date(expiresAt).getTime();
+  const delay = expiresAtMs - Date.now();
+  if (!Number.isFinite(expiresAtMs) || delay <= 0) {
+    if (requestID === requestIDRef.current) onExpire();
+    return;
+  }
+  timerRef.current = setTimeout(() => {
+    if (requestID !== requestIDRef.current) return;
+    requestIDRef.current += 1;
+    timerRef.current = null;
+    onExpire();
+  }, Math.min(delay, 2_147_483_647));
+}
+
+function availabilityQuoteIsUsable(result: AvailabilityResult | null) {
+  if (!result?.quote_id || !result.request_fingerprint || !result.expires_at) return false;
+  const expiresAt = new Date(result.expires_at).getTime();
+  return Number.isFinite(expiresAt) && expiresAt > Date.now();
+}
+
+function assertAvailabilityQuoteUsable(result: AvailabilityResult, slot: AvailabilitySlot) {
+  if (!availabilityQuoteIsUsable(result) || !slot.fingerprint) {
+    throw new Error("This availability quote is missing, invalid, or expired. Check Square Appointments again.");
+  }
 }

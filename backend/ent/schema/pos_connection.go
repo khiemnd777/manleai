@@ -22,6 +22,7 @@ func (POSConnection) Fields() []ent.Field {
 		field.String("refresh_token_encrypted").Optional().Sensitive(),
 		field.String("merchant_id").Optional(),
 		field.String("location_id").Optional(),
+		field.Int64("snapshot_generation").Default(0).NonNegative(),
 		field.Strings("scopes").Default([]string{}),
 		field.Time("last_sync_at").Optional().Nillable(),
 		field.String("error_message").Optional(),

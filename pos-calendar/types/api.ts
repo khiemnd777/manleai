@@ -76,6 +76,16 @@ export type POSStaffMember = {
 
 export type StaffSelectionMode = "specific" | "anyone" | string;
 
+export type AppointmentStatus =
+  | "confirmed"
+  | "rescheduled"
+  | "provider_pending"
+  | "cancelled"
+  | "declined"
+  | "no_show"
+  | "unknown"
+  | string;
+
 export type BookingSegmentSnapshot = {
   service_id?: string;
   service_name: string;
@@ -99,7 +109,7 @@ export type AppointmentRecord = {
   pos_provider: string;
   pos_appointment_id: string;
   pos_appointment_version?: number;
-  status: string;
+  status: AppointmentStatus;
   customer_name: string;
   customer_phone: string;
   customer_email?: string;
@@ -115,6 +125,7 @@ export type AppointmentRecord = {
   pos_sync_error?: string;
   sync_warning?: string;
   can_edit?: boolean;
+  can_cancel?: boolean;
   can_delete?: boolean;
   created_at: string;
   updated_at: string;
@@ -127,6 +138,7 @@ export type BookingAttempt = {
   status: string;
   pos_provider: string;
   pos_booking_id?: string;
+  pos_booking_version?: number;
   operation_type: "book" | "reschedule" | "cancel";
   provider_outcome: "not_started" | "in_flight" | "succeeded" | "failed" | "unknown";
   retry_policy: "none" | "safe" | "blocked";
@@ -149,6 +161,12 @@ export type BookingAttempt = {
   retry_blocked_reason?: string;
   booking_action?: "book" | "reschedule" | "cancel";
   target_appointment_id?: string;
+  retry_of_attempt_id?: string;
+  superseded_by_attempt_id?: string;
+  retry_sequence?: number;
+  superseded_at?: string;
+  reconciliation_resolution?: "provider_attached" | "not_created" | "escalated";
+  reconciliation_resolved_at?: string;
   notification_type?: string;
   notification_status?: string;
   created_at: string;
@@ -156,7 +174,21 @@ export type BookingAttempt = {
   appointment?: AppointmentRecord;
 };
 
+export type BookingReconciliationTask = {
+  id: string;
+  salon_id: string;
+  booking_attempt_id: string;
+  status: "open" | "resolved" | "escalated";
+  resolution?: "provider_attached" | "not_created" | "escalated";
+  resolution_note?: string;
+  resolved_at?: string;
+  created_at: string;
+  updated_at: string;
+  booking_attempt?: BookingAttempt;
+};
+
 export type AvailabilitySlot = {
+  fingerprint?: string;
   start_time: string;
   end_time: string;
   staff_id?: string;
@@ -175,6 +207,9 @@ export type AvailabilitySegment = {
 };
 
 export type AvailabilityResult = {
+  quote_id?: string;
+  request_fingerprint?: string;
+  expires_at?: string;
   service_id: string;
   service_name: string;
   staff_id?: string;
@@ -228,6 +263,7 @@ export type CalendarWarningSummary = {
   not_synced: number;
   sync_failed: number;
   pending_pos_sync: number;
+  provider_pending?: number;
   fallback_pending: number;
 };
 

@@ -21,6 +21,7 @@ func (AppointmentService) Fields() []ent.Field {
 		field.String("staff_selection_mode").Default("specific"),
 		field.String("pos_service_id").NotEmpty(),
 		field.Int64("pos_service_version").Optional(),
+		field.String("pos_staff_id").Optional(),
 		field.String("name").NotEmpty(),
 		field.Int("duration_minutes").Default(0),
 		field.Float("price_from").Optional(),

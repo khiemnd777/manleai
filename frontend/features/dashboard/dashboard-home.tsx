@@ -139,8 +139,12 @@ export function DashboardHome() {
 
   const primarySalon = salons[0];
   const phoneCount = sessions.filter((item) => item.channel === "phone").length;
-  const confirmedAppointments = appointments.filter((item) => item.status === "confirmed").length;
-  const pendingRequests = attempts.filter((item) => item.status === "fallback_pending").length;
+  const confirmedAppointments = appointments.filter((item) =>
+    item.status === "confirmed" || item.status === "rescheduled"
+  ).length;
+  const pendingRequests = attempts.filter(
+    (item) => item.status === "fallback_pending" || item.status === "provider_pending" || item.status === "pos_pending"
+  ).length;
   const bookingReadyServices = services.filter(serviceIsBookingReady).length;
   const bookingReadyStaff = staff.filter(staffIsBookingReady).length;
   const squareConnected = Boolean(status?.connection.id) && status?.connection.status !== "not_connected";

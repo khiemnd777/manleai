@@ -3,10 +3,12 @@ package conversation
 import (
 	"context"
 	"fmt"
-	"github.com/manleai/ai-receptionist/modules/booking"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
 func (s *Service) applyAvailabilityForRequestedTime(ctx context.Context, ownerUserID string, turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (bool, error) {
@@ -96,6 +98,48 @@ func sameOptionalTime(left *time.Time, right *time.Time) bool {
 	return left.Equal(*right)
 }
 
+func invalidateCarriedAvailabilityProof(before Session, after *Session) bool {
+	if after == nil {
+		return false
+	}
+	if after.RequestedStartTime == nil {
+		changed := strings.TrimSpace(after.AvailabilityQuoteID) != "" || strings.TrimSpace(after.SlotFingerprint) != ""
+		clearSelectedAvailabilityQuote(after)
+		return changed
+	}
+	if strings.TrimSpace(after.AvailabilityQuoteID) == "" && strings.TrimSpace(after.SlotFingerprint) == "" {
+		return false
+	}
+	// A newly selected/refreshed slot owns new proof and must survive this turn.
+	if strings.TrimSpace(after.AvailabilityQuoteID) != strings.TrimSpace(before.AvailabilityQuoteID) ||
+		strings.TrimSpace(after.SlotFingerprint) != strings.TrimSpace(before.SlotFingerprint) {
+		return false
+	}
+	if bookingActionForSession(before) == bookingActionForSession(*after) &&
+		strings.TrimSpace(before.TargetAppointmentID) == strings.TrimSpace(after.TargetAppointmentID) &&
+		sameAvailabilityRequest(before, *after) &&
+		partyAvailabilityIdentity(before.PartyPlan) == partyAvailabilityIdentity(after.PartyPlan) {
+		return false
+	}
+	clearSelectedAvailabilityQuote(after)
+	return true
+}
+
+func partyAvailabilityIdentity(plan *PartyPlan) string {
+	if plan == nil {
+		return ""
+	}
+	parts := []string{strconv.Itoa(plan.PartySize), strings.TrimSpace(plan.SelectedSplitOptionID)}
+	for _, group := range plan.Groups {
+		serviceIDs := append([]string(nil), group.ResolvedServiceIDs...)
+		for index := range serviceIDs {
+			serviceIDs[index] = strings.TrimSpace(serviceIDs[index])
+		}
+		parts = append(parts, strings.TrimSpace(group.Label)+":"+strconv.Itoa(group.Count)+":"+strings.Join(serviceIDs, ","))
+	}
+	return strings.Join(parts, "|")
+}
+
 func exactAvailabilityMatches(slots []booking.AvailabilitySlot, session Session) []booking.AvailabilitySlot {
 	if session.RequestedStartTime == nil {
 		return nil
@@ -111,6 +155,98 @@ func exactAvailabilityMatches(slots []booking.AvailabilitySlot, session Session)
 		matches = append(matches, slot)
 	}
 	return matches
+}
+
+func (s *Service) refreshSelectedAvailabilityProof(ctx context.Context, ownerUserID string, salonID string, session *Session, services []ServiceOption, cfg *RuntimeConfig) (*booking.AvailabilityResult, bool, error) {
+	if session == nil || session.RequestedStartTime == nil {
+		return nil, false, nil
+	}
+	preferredDate := preferredDateFromMessage("", session.RequestedStartTime, timezoneLocation(timezoneFromConfig(cfg)), s.now)
+	if preferredDate == "" {
+		return nil, false, nil
+	}
+	result, err := s.availableSlotsWithLimit(ctx, salonID, ownerUserID, *session, preferredDate, exactAvailabilityLimit)
+	if err != nil {
+		return nil, false, err
+	}
+	expectedEnd, hasExpectedEnd := expectedAvailabilityEnd(*session, services)
+	for _, rawSlot := range availabilitySlots(result) {
+		if !rawSlot.StartTime.Equal(*session.RequestedStartTime) {
+			continue
+		}
+		if hasExpectedEnd && !rawSlot.EndTime.Equal(expectedEnd) {
+			continue
+		}
+		offered := offeredSlotFromAvailability(result, rawSlot)
+		if !offeredSlotMatchesServiceSelection(offered, *session) {
+			continue
+		}
+		applySelectedOfferedSlot(session, offered)
+		return result, true, nil
+	}
+	clearSelectedAvailabilityQuote(session)
+	return result, false, nil
+}
+
+func expectedAvailabilityEnd(session Session, services []ServiceOption) (time.Time, bool) {
+	if session.RequestedStartTime == nil {
+		return time.Time{}, false
+	}
+	segments := bookingSegmentsForCreate(session)
+	if len(segments) == 0 {
+		return time.Time{}, false
+	}
+	totalMinutes := 0
+	for _, segment := range segments {
+		service := serviceByID(services, segment.ServiceID)
+		if service == nil || service.DurationMinutes <= 0 {
+			return time.Time{}, false
+		}
+		totalMinutes += service.DurationMinutes
+	}
+	if totalMinutes <= 0 {
+		return time.Time{}, false
+	}
+	return session.RequestedStartTime.Add(time.Duration(totalMinutes) * time.Minute), true
+}
+
+func (s *Service) refreshPartySplitOptionProofs(ctx context.Context, ownerUserID string, salonID string, session Session, option PartySplitOption, services []ServiceOption, cfg *RuntimeConfig) (PartySplitOption, bool, error) {
+	fresh := clonePartySplitOption(option)
+	for blockIndex := range fresh.Blocks {
+		block := &fresh.Blocks[blockIndex]
+		block.QuoteRefs = make([]PartySplitQuoteRef, len(block.Segments))
+		for segmentIndex, segment := range block.Segments {
+			start := block.StartTime
+			segmentSession := session
+			segmentSession.ServiceID = strings.TrimSpace(segment.ServiceID)
+			segmentSession.StaffID = strings.TrimSpace(segment.StaffID)
+			segmentSession.StaffSelectionMode = firstNonEmpty(segment.StaffSelectionMode, booking.StaffSelectionSpecific)
+			segmentSession.BookingSegments = []booking.BookingSegmentRequest{{
+				ServiceID:          segmentSession.ServiceID,
+				StaffID:            segmentSession.StaffID,
+				StaffSelectionMode: segmentSession.StaffSelectionMode,
+			}}
+			segmentSession.PartyPlan = nil
+			segmentSession.RequestedStartTime = &start
+			segmentSession.RequestedDate = start.In(timezoneLocation(timezoneFromConfig(cfg))).Format("2006-01-02")
+			segmentSession.OfferedSlots = nil
+			clearSelectedAvailabilityQuote(&segmentSession)
+
+			result, matched, err := s.refreshSelectedAvailabilityProof(ctx, ownerUserID, salonID, &segmentSession, services, cfg)
+			if err != nil {
+				return PartySplitOption{}, false, err
+			}
+			if !matched || result == nil || strings.TrimSpace(segmentSession.AvailabilityQuoteID) == "" || len(strings.TrimSpace(segmentSession.SlotFingerprint)) != 64 {
+				return fresh, false, nil
+			}
+			block.QuoteRefs[segmentIndex] = PartySplitQuoteRef{
+				ServiceID:           segmentSession.ServiceID,
+				AvailabilityQuoteID: strings.TrimSpace(segmentSession.AvailabilityQuoteID),
+				SlotFingerprint:     strings.TrimSpace(segmentSession.SlotFingerprint),
+			}
+		}
+	}
+	return fresh, true, nil
 }
 
 func (s *Service) selectAvailabilitySlot(ctx context.Context, salonID string, session Session, matches []booking.AvailabilitySlot, cfg *RuntimeConfig) (availabilitySelection, error) {
@@ -396,6 +532,7 @@ func (s *Service) applySpecificStaffUnavailableOffer(ctx context.Context, ownerU
 	}
 
 	session.RequestedStartTime = nil
+	clearSelectedAvailabilityQuote(session)
 	session.OfferedSlots = offered
 	turn.ToolMessage = availabilityToolMessage(len(offered))
 	turn.AIMessage = formatSpecificStaffUnavailableOffer(*session, staff, requestedStart, offered, timezoneLocation(timezoneFromConfig(cfg)))
@@ -429,6 +566,7 @@ func offeredSlotAlreadyIncluded(slots []OfferedSlot, candidate OfferedSlot) bool
 func applyAvailabilityOffer(turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, result *booking.AvailabilityResult, unavailableRequestedTime bool) {
 	offered := offeredSlotsFromAvailabilityForSession(result, *session, timezoneLocation(timezoneFromConfig(cfg)))
 	session.RequestedStartTime = nil
+	clearSelectedAvailabilityQuote(session)
 	session.OfferedSlots = offered
 	turn.ToolMessage = availabilityToolMessage(len(offered))
 	if len(offered) == 0 {
@@ -440,11 +578,13 @@ func applyAvailabilityOffer(turn *TurnRecord, session *Session, services []Servi
 }
 
 type partySplitCandidate struct {
-	Segment   booking.BookingSegmentRequest
-	StartTime time.Time
-	EndTime   time.Time
-	StaffID   string
-	StaffName string
+	Segment             booking.BookingSegmentRequest
+	AvailabilityQuoteID string
+	SlotFingerprint     string
+	StartTime           time.Time
+	EndTime             time.Time
+	StaffID             string
+	StaffName           string
 }
 
 type partySplitSelection struct {
@@ -481,6 +621,7 @@ func (s *Service) planPartySplitOptions(ctx context.Context, ownerUserID string,
 			StaffSelectionMode: firstNonEmpty(segment.StaffSelectionMode, session.StaffSelectionMode, booking.StaffSelectionAnyone),
 		}}
 		segmentSession.RequestedStartTime = nil
+		clearSelectedAvailabilityQuote(&segmentSession)
 		segmentSession.OfferedSlots = nil
 		segmentSession.PartyPlan = nil
 
@@ -544,10 +685,12 @@ func partySplitCandidatesFromAvailability(segment booking.BookingSegmentRequest,
 				StaffID:            staffID,
 				StaffSelectionMode: mode,
 			},
-			StartTime: slot.StartTime,
-			EndTime:   slot.EndTime,
-			StaffID:   staffID,
-			StaffName: staffName,
+			AvailabilityQuoteID: slot.AvailabilityQuoteID,
+			SlotFingerprint:     slot.SlotFingerprint,
+			StartTime:           slot.StartTime,
+			EndTime:             slot.EndTime,
+			StaffID:             staffID,
+			StaffName:           staffName,
 		})
 	}
 	return out
@@ -631,12 +774,18 @@ func partySplitOptionFromCandidates(candidates []partySplitCandidate, requestedD
 				StartTime: candidate.StartTime,
 				EndTime:   candidate.EndTime,
 				Segments:  []booking.BookingSegmentRequest{},
+				QuoteRefs: []PartySplitQuoteRef{},
 			})
 		}
 		if candidate.EndTime.After(blocks[index].EndTime) {
 			blocks[index].EndTime = candidate.EndTime
 		}
 		blocks[index].Segments = append(blocks[index].Segments, candidate.Segment)
+		blocks[index].QuoteRefs = append(blocks[index].QuoteRefs, PartySplitQuoteRef{
+			ServiceID:           strings.TrimSpace(candidate.Segment.ServiceID),
+			AvailabilityQuoteID: strings.TrimSpace(candidate.AvailabilityQuoteID),
+			SlotFingerprint:     strings.TrimSpace(candidate.SlotFingerprint),
+		})
 	}
 	sort.SliceStable(blocks, func(i, j int) bool {
 		return blocks[i].StartTime.Before(blocks[j].StartTime)
@@ -790,6 +939,7 @@ func applyPartySplitOffer(turn *TurnRecord, session *Session, services []Service
 	plan.SplitAppointmentIDs = nil
 	session.PartyPlan = plan
 	session.RequestedStartTime = nil
+	clearSelectedAvailabilityQuote(session)
 	session.OfferedSlots = nil
 	turn.ToolMessage = fmt.Sprintf("Availability check returned no full-party slots; split availability returned %d option(s).", len(options))
 	turn.AIMessage = partySplitOfferMessage(*session, services, cfg)
@@ -962,6 +1112,7 @@ func applySelectedPartySplitOption(session *Session, option PartySplitOption, da
 	}
 	session.PartyPlan = plan
 	session.RequestedStartTime = nil
+	clearSelectedAvailabilityQuote(session)
 	session.OfferedSlots = nil
 	session.BookingSegments = partySplitOptionSegments(option)
 	if strings.TrimSpace(session.ServiceID) == "" && len(session.BookingSegments) > 0 {
@@ -1257,12 +1408,14 @@ func offeredSlotsFromAvailabilityForSession(result *booking.AvailabilityResult, 
 
 func offeredSlotFromAvailability(result *booking.AvailabilityResult, slot booking.AvailabilitySlot) OfferedSlot {
 	offered := OfferedSlot{
-		StartTime:          slot.StartTime,
-		EndTime:            slot.EndTime,
-		StaffID:            slot.StaffID,
-		StaffName:          slot.StaffName,
-		StaffSelectionMode: firstNonEmpty(slot.StaffSelectionMode, result.StaffSelectionMode),
-		Segments:           offeredSlotSegments(result, slot),
+		AvailabilityQuoteID: strings.TrimSpace(result.QuoteID),
+		SlotFingerprint:     strings.TrimSpace(slot.Fingerprint),
+		StartTime:           slot.StartTime,
+		EndTime:             slot.EndTime,
+		StaffID:             slot.StaffID,
+		StaffName:           slot.StaffName,
+		StaffSelectionMode:  firstNonEmpty(slot.StaffSelectionMode, result.StaffSelectionMode),
+		Segments:            offeredSlotSegments(result, slot),
 	}
 	if offered.StaffSelectionMode == "" {
 		offered.StaffSelectionMode = booking.StaffSelectionSpecific
@@ -1580,6 +1733,7 @@ func ordinalSpeechLabel(index int) string {
 }
 
 func syncTurnUpdate(turn *TurnRecord, session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) {
+	invalidateCarriedAvailabilityProof(turn.Session, &session)
 	turn.Update.BookingAction = bookingActionForSession(session)
 	turn.Update.TargetAppointmentID = session.TargetAppointmentID
 	turn.Update.RescheduleCandidates = session.RescheduleCandidates
@@ -1591,6 +1745,8 @@ func syncTurnUpdate(turn *TurnRecord, session Session, services []ServiceOption,
 	turn.Update.StaffSelectionMode = staffSelectionModeForSession(session)
 	turn.Update.RequestedDate = session.RequestedDate
 	turn.Update.RequestedStartTime = session.RequestedStartTime
+	turn.Update.AvailabilityQuoteID = session.AvailabilityQuoteID
+	turn.Update.SlotFingerprint = session.SlotFingerprint
 	turn.Update.OfferedSlots = session.OfferedSlots
 	turn.Update.BookingSegments = session.BookingSegments
 	turn.Update.PartyPlan = clonePartyPlan(session.PartyPlan)
@@ -1615,12 +1771,14 @@ func cloneSessionForTurn(session Session) Session {
 }
 
 func newTurnRecord(salonID string, ownerUserID string, before Session, after Session, message string, eventKey string, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) TurnRecord {
+	invalidateCarriedAvailabilityProof(before, &after)
 	return TurnRecord{
-		SalonID:         salonID,
-		OwnerUserID:     ownerUserID,
-		Session:         before,
-		CustomerMessage: message,
-		EventKey:        eventKey,
+		SalonID:               salonID,
+		OwnerUserID:           ownerUserID,
+		Session:               before,
+		ExpectedStateRevision: before.StateRevision,
+		CustomerMessage:       message,
+		EventKey:              eventKey,
 		Update: SessionUpdate{
 			Status:               StatusActive,
 			Intent:               after.Intent,
@@ -1636,6 +1794,8 @@ func newTurnRecord(salonID string, ownerUserID string, before Session, after Ses
 			StaffSelectionMode:   staffSelectionModeForSession(after),
 			RequestedDate:        after.RequestedDate,
 			RequestedStartTime:   after.RequestedStartTime,
+			AvailabilityQuoteID:  after.AvailabilityQuoteID,
+			SlotFingerprint:      after.SlotFingerprint,
 			OfferedSlots:         after.OfferedSlots,
 			BookingSegments:      after.BookingSegments,
 			PartyPlan:            clonePartyPlan(after.PartyPlan),

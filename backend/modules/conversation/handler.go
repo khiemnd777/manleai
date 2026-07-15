@@ -49,6 +49,9 @@ func (h *Handler) Message(c *fiber.Ctx) error {
 	if errors.Is(err, ErrSessionClosed) {
 		return respond.Error(c, fiber.StatusConflict, "CONVERSATION_SESSION_CLOSED", "Start a new simulator session before sending another message.")
 	}
+	if errors.Is(err, ErrSessionStateConflict) {
+		return respond.Error(c, fiber.StatusConflict, "CONVERSATION_STATE_CONFLICT", "The conversation changed while this message was being processed. Retry the same message.")
+	}
 	if errors.Is(err, ErrNotFound) {
 		return respond.Error(c, fiber.StatusNotFound, "CONVERSATION_NOT_FOUND", "Conversation session was not found.")
 	}

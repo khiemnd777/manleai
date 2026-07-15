@@ -8,7 +8,7 @@ The backend is organized as:
 
 ```txt
 cmd/api              Fiber HTTP server
-cmd/worker           POS sync job and call retention worker entrypoint
+cmd/worker           Independently scheduled POS sync, booking lease, quote cleanup, Square webhook/repair, and call retention worker entrypoint
 internal/config      environment config
 internal/database    PostgreSQL connection bootstrap and startup migrations
 internal/encryption  AES-GCM token encryption
@@ -61,6 +61,14 @@ appointment history. The page also opens an authenticated calendar event stream
 so new customer booking attempts can update the visible range and show a
 top-right toast without treating pending POS work as confirmed.
 
+Calendar sync captures one owner-scoped active-provider fence before the first
+remote page, passes that same selected location and snapshot generation through
+every provider request, rejects any returned booking that identifies a
+different location, and revalidates the fence inside the mirror transaction
+before any write. A location switch, resync, or provider change therefore makes
+the import stale with zero appointment, attempt, notification, or
+reconciliation writes instead of mixing provider locations.
+
 ## Core Boundary
 
 ManleAI is the system of record for salon operational data: canonical services,
@@ -110,6 +118,101 @@ The booking service depends on `modules/pos.POSProvider`. It must not import `mo
 
 Booking workflow state belongs to the backend. Create-booking, reschedule, cancel, and dashboard test-booking requests first create a `booking_attempts` row with `pos_pending` and a backend-owned POS idempotency key. The POS adapter is then called as an outbound writer. For customer identity, booking resolves or creates the ManleAI canonical customer, reuses an active `pos_entity_links` customer mapping when present, or asks the active `POSProvider` to search/create a provider customer and then stores the mapping. If customer lookup/linking or appointment creation fails, the same attempt is finalized as `fallback_pending`, a POS error and owner notification are recorded, and no confirmed appointment is created. If the provider returns a POS booking ID and booking version, the same attempt is finalized as confirmed/rescheduled/cancelled and the appointment state is written in the backend database. Reschedule, cancel, and test-booking cleanup requests must leave the internal appointment unchanged unless the provider succeeds.
 
+The booking operation ledger is the concurrency and recovery boundary. Each
+logical mutation has a salon-scoped operation key, normalized request
+fingerprint, provider idempotency key, processing lease, provider outcome,
+retry policy, and optional retry lineage. Every create/reschedule provider
+write, including owner HTTP, Square test, simulator, and phone-conversation
+paths, consumes one short-lived availability quote whose slot, ordered segment
+snapshot, start/end, provider, salon, location, and snapshot generation must
+match exactly. HTTP callers submit quote proof; conversation callers retain
+the selected backend proof and refresh the exact slot immediately before
+dispatch. Party booking refreshes all child proofs before its first POS write. A
+safe retry reproduces the original normalized request and atomically supersedes
+one eligible fallback attempt. Lease recovery is phase-sensitive and shared by
+owner reads and the background worker. It first acquires the same salon calendar
+lock and checks current provider mirror truth: an exact authoritative mirror can
+terminalize an in-flight create/reschedule/cancel attempt without emitting a
+fallback. Otherwise an expired `not_started` row proves dispatch never began and
+becomes a retry-safe definitive fallback, while an expired `in_flight` row
+remains unknown, retry-blocked, and reconciliation required. Both fallback
+branches atomically write one deduplicated notification/outbox result and POS
+error; only the unknown branch creates reconciliation work.
+The worker runs lease recovery in its own non-overlapping recurring loop, so a
+slow Square webhook/calendar repair batch cannot delay lease-expiry recovery.
+An identical operation-key replay may safely resume an expired `not_started`
+claim before the recovery transaction wins; afterward, retry uses the normal
+explicit safe-lineage supersession contract.
+Before mutable catalog or appointment validation, an owner-scoped operation-key
+lookup recovers an already claimed operation. The service compares the stored
+logical intent rather than the now-mutated appointment state: an exact replay
+returns the existing pending, fallback, or successful result without another
+provider call, while any changed customer, target, time, notes, or ordered
+service/staff request conflicts. Refreshed quote IDs and slot-proof fingerprints
+are ephemeral dispatch evidence, not replay identity, so a response-loss retry
+can recover the prior result after conversation preflight refreshes the same
+logical slot. Operation keys are mandatory at both HTTP and booking-service
+boundaries.
+Unknown or provider-pending outcomes create a
+reconciliation task and remain blocked; resolution can attach only an exact
+provider-synced candidate revalidated under lock, record verified definitive
+non-creation, or escalate. V39 automatically supersedes a duplicate historical
+attempt only when `provider_outcome=not_started` proves that provider dispatch
+never began. It prefers any dispatched/unknown attempt as canonical and aborts
+the migration when one fingerprint group contains more than one attempt that
+cannot prove pre-dispatch safety; those outcomes must remain visible for POS
+reconciliation. Safely superseded attempts point to the canonical attempt,
+have their reconciliation bookkeeping closed with `status=resolved` and
+`resolution=superseded`, are excluded from reconciliation paths, and cannot be
+lease-swept, reacquired, started, or finalized by a stale worker. Reschedule and cancel attempts retain the target
+appointment's provider version from before dispatch; a synchronized mutation
+is accepted only when its provider version is newer than that baseline and its
+operation-specific state still matches the requested time and ordered
+service/staff assignment. The existing target booking ID alone is not evidence
+that a reschedule or cancellation succeeded. Direct reschedule/cancel success
+must return that exact target ID and a version newer than the captured baseline.
+All direct-success, fallback, and lease-recovery persistence paths acquire the
+salon calendar lock before appointment/attempt rows. If calendar sync has already
+stored the same provider outcome, create requires a known provider booking ID
+plus exact range and ordered canonical/raw segment proof; reschedule requires a
+current accepted/rescheduled version at least as new as the provider response,
+newer than the baseline, and exact requested range and segment proof; cancel
+requires a current cancelled version at least as new as the response and newer
+than the baseline. Those exact cases converge on the authoritative mirror and
+preserve its newer version. Any mismatch remains unconfirmed fallback with
+reconciliation instead of overwriting provider truth.
+The target appointment also retains its immutable originating provider
+location through the creating booking attempt. Owner lookup and action claims
+require that origin to match the currently active, synchronized location;
+reschedule additionally requires the fresh quote location to match, and cancel
+passes the current exact provider fence into the adapter. A location switch or
+legacy missing origin therefore fails closed before provider dispatch, while a
+newer snapshot generation at the same location remains usable only when every
+raw service/staff mapping and target version is still current.
+Its database write shares the calendar/reconciliation lock and cannot replace a
+newer stored provider version; an equal or newer mirror is accepted only as the
+operation-specific exact authoritative match described above, while a
+conflicting mirror produces an unknown fallback for reconciliation.
+Equal-version calendar import can enrich missing
+customer/service/staff mappings or resolve an action only after the locked
+persisted status, range, version, and ordered raw service ID/version/duration
+snapshot exactly matches the incoming provider snapshot. Manual reconciliation and
+provider calendar import acquire the same salon-scoped transaction advisory
+lock before row locks, so a zero-candidate decision cannot race an in-flight
+mirror insert and the two paths cannot invert attempt/appointment lock order.
+Owner notifications are durable outbox/in-product
+records here; no external delivery consumer is currently implemented.
+
+Availability quotes are short-lived operational evidence, not an unbounded
+audit log. Every five minutes the worker drains up to eight lock-skipping
+batches of 250 quotes (at most 2,000 per run and 24,000 per hour), retaining
+unconsumed quotes for 24 hours after expiry and orphaned consumed quotes for 30
+days after consumption. Each run stops early after a short batch so normal
+traffic does not hold cleanup resources unnecessarily. Any quote still referenced by
+`booking_attempts.availability_quote_id` or by its recorded consuming attempt
+is excluded. Eligible quote deletion cascades only to quote-slot children and
+does not mutate booking attempts.
+
 New booking and availability resolution is explicitly scoped to
 `salons.active_pos_provider` at both service and repository boundaries.
 Historical appointment actions continue through the provider recorded on the
@@ -127,12 +230,54 @@ mirror rows keyed by `(salon_id, pos_provider, pos_appointment_id)`. Imported
 appointments carry `pos_sync_status`, `last_pos_synced_at`, and
 `pos_sync_error` so the calendar can show warnings on each appointment when a
 record is not synced, pending verification, or failed its latest POS sync.
+An equal provider version remains immutable for status, time, and version, but
+may fill previously missing customer fields and internal service/staff mappings
+after catalog/customer sync makes those links available. This enrichment-only
+path can then re-evaluate blocked exact reconciliation without waiting for
+Square to increment the booking version.
+
+Square full catalog imports use `pos_connections.snapshot_generation` as a
+monotonic fence. A sync reserves its generation before provider reads and the
+atomic snapshot transaction rechecks both generation and selected location
+under a salon/provider advisory lock. Location changes invalidate in-flight
+snapshots and completed-sync readiness; concurrent syncs cannot finish out of
+order and overwrite newer catalog, staff, business-hour, or customer truth.
+The same provider fence follows catalog service/staff resolution through the
+business-hours schedule, provider availability request, persisted quote,
+booking attempt, and adapter dispatch. Any connection, location, or generation
+change invalidates the quote before a new POS write. Snapshot generation is not
+part of the logical operation fingerprint: an exact safe retry may use a fresh
+current-generation quote only when the location, ordered provider service and
+staff identities/versions, and appointment target/version baseline still
+match. Legacy attempts without stored provider-fence evidence are not marked
+retryable. V43 deliberately clears existing Square completed-sync readiness so
+one full post-deploy catalog sync establishes the first trusted fence.
+
+Square booking webhooks are an asynchronous mirror trigger, not booking
+confirmation authority. The public receiver resolves one unambiguous
+salon-scoped merchant/location mapping, verifies the raw body against the
+dashboard-stored notification URL and encrypted signature key, and durably
+dedupes before enqueue acknowledgement. Root and nested booking location IDs
+must agree when both are present. A claim-token-fenced worker retrieves current
+provider truth and applies version-aware calendar updates; scheduled repair uses
+its own claim token so stale completion cannot overwrite a newer lease. Repair
+is a separate backstop whose health does not mutate OAuth/catalog connection
+readiness. Webhook payload status cannot confirm an appointment by itself.
 
 The Milestone 4 conversation simulator and Milestone 5 live phone webhook path call the booking service through a provider-neutral booking tool. They do not import Square packages, read POS tokens, build Square payloads, or use Square location IDs directly. The runtime owns booking slot state, including date-only requests before a time is known, so model wording cannot erase already-collected service, date, time, customer, or staff details. Deterministic date, time, staff, and customer evidence is applied before accepting a model-only summary path, so a semantic summary classification cannot discard a concrete correction such as a new requested day. Mutable session booking segments, offered-slot segments, party plans, and versioned `dialog_state` are deep-cloned per turn. `dialog_state` owns pending typed clarifications, bounded mutation history, no-progress recovery, `draft_revision`, `reviewed_revision`, and `authorized_revision` instead of reconstructing active control state from transcript metadata.
 
 Every configured-production freeform turn that reaches conversation orchestration first enters the state-driven Turn Kernel. The kernel derives the expected input from versioned dialog state, measures deterministic coverage, and assigns one explicit lane: fast, answer, action, recovery, or semantic. Unambiguous state-scoped confirmations, offered-slot choices, structured questions, operational actions, and expected-field evidence avoid a model round trip. An initial catalog-backed service or category request is missing-field collection rather than a service-edit operation: an exact service advances to the next missing field, an ambiguous category asks for one concrete catalog option, and an add-or-replace operation choice is valid only after at least one service is selected. Corrections, multi-intent turns, partial coverage, and unresolved ambiguity use the strict semantic `TurnUnderstanding` contract, which may contain multiple ordered acts and questions. Semantic input includes only the services and staff relevant to the current state unless service discovery or correction requires the active catalog; the call has a bounded 2.5-second timeout. Provider-event dedupe, contextual review authorization, and resolved same-category guest scope remain deterministic state-owned controls that semantic interpretation cannot overwrite. A service correction against a completed `party_plan` cannot fall back to the generic single-draft add-or-replace prompt: typed pending state collects the concrete target, guest/group reference, add-or-replace operation, and replacement source one question at a time. Short follow-up replies use the deterministic fast lane, the party reducer mutates only the selected group, repeated add execution is duplicate-safe, and a party group may retain more service segments than people only after an explicit add operation. Offered slots and review authorization remain unchanged during unresolved clarification and are cleared only after the correction resolves; unresolved party-correction pending state blocks availability and booking even if the semantic interpreter becomes unavailable. Authorization grammar accepts concise natural approval directives but rejects turns containing correction, negation, cancellation, reschedule, or service-mutation evidence. Backend validation rejects low-confidence goals, invented service/staff/category IDs, invalid entity/operation combinations, unsafe party flattening, and malformed counts before the unified reducer runs. Deterministic catalog names, aliases, categories, staff records, date/time parsing, phone normalization, and context-scoped affirmative handling remain authoritative evidence. Bare customer-name candidates collected on the phone require a confirmation turn unless the caller explicitly introduces a non-risky name or spells it. The reducer owns service/staff/date-time/customer/guest mutation and dependency invalidation; the next-action planner owns missing-field, review, and booking readiness decisions. Informational questions preserve pending work and resume the next useful booking question. Any non-accepted semantic outcome preserves the draft and may still consume independently validated catalog and captured-field evidence before the next missing-field prompt; without such evidence the runtime clarifies or hands off instead of guessing.
 
-AI Consultation is a state-owned lane inside the same Conversation Supervisor, not a second tool-calling agent. The semantic interpreter may extract controlled current-system, desired-outcome, length, priority, desired-finish, compared-service, booking-intent, and completion fields, but deterministic backend code owns recommendation ranking. Ranking reads only active-provider, POS-linked, AI-bookable services whose `service_consultation_profiles.status=ready`, records the profile revisions and match reasons in `dialog_state`, asks one useful question at a time, and never invokes availability or POS booking tools. Selecting a recommendation alone moves to `awaiting_booking`; an additional explicit booking request is required before the service is applied to the appointment draft. Consultation detours preserve an existing draft and resume its prior phase. Health-suitability questions and bounded unresolved conversations hand off to the owner.
+Production turn execution is serialized by salon and conversation session before the first session read. `Message` and typed unintelligible-voice recovery use the conversation repository's session-scoped PostgreSQL advisory lock on a dedicated connection and hold it across planning, availability/POS side effects, bounded conflict retries, and `SaveTurn`. The repository bounds simultaneous lock connections from the configured SQL pool size so ordinary callback queries retain pool headroom; a one-connection pool is rejected because it cannot safely support this execution model. Cancellation-independent cleanup releases the lock before returning the connection. Provider-event dedupe and the persisted `state_revision` compare-and-swap remain defense-in-depth checks rather than the primary pre-side-effect concurrency boundary. Both customer and AI transcript rows carry the provider event key. A retry of an older event returns that event's exact historical AI reply for voice playback while leaving the newer current session state unchanged.
+
+AI Consultation is a state-owned lane inside the same Conversation Supervisor, not a second tool-calling agent. The semantic interpreter may extract controlled current-system, desired-outcome, length, priority, desired-finish, compared-service, booking-intent, completion, field-level consultation mutations, and a global safety assessment, but deterministic backend code owns all state changes and recommendation ranking. Validated field-level mutations are the sole persistence authority for consultation need fields; a free-standing model snapshot is evidence only and cannot overwrite scalar or list state. Mutations use validated `set`, `replace`, `add`, `remove`, and `clear` semantics so corrections do not become sticky unions. Ranking reads only active-provider, POS-linked, AI-bookable services whose `service_consultation_profiles.status=ready` and whose profile contains both a recommended outcome and compatible current system. The runtime records profile revisions and match reasons in `dialog_state`, asks one useful question at a time, and never invokes availability or POS booking tools from consultation. Selecting a recommendation alone moves to `awaiting_booking`; an additional explicit booking request is required before the service is applied to the appointment draft. Consultation detours preserve an existing draft and resume its prior phase. Deterministic health-suitability evidence is checked before normal routing, and validated structured safety evidence is handled before any mutation or tool action; safety and bounded unresolved conversations hand off to the owner.
+
+Structured answer context is cacheable only behind a database-owned active
+provider/location/generation/readiness fence. Every turn reads that fence from
+PostgreSQL even on a local cache hit. Cache misses load structured records and
+then re-read the fence; a concurrent switch or sync retries the load, while a
+non-active or incomplete snapshot removes provider-owned services, aliases,
+staff, and business hours but may retain salon-authored knowledge.
 
 The runtime checks provider-neutral availability, offers slots, and only calls booking creation after required fields are present and `draft_revision == reviewed_revision == authorized_revision`. Any service, staff, date/time, guest, party, or customer correction advances the draft revision; dependency-bearing changes clear offered slots and all corrections invalidate stale review authorization. Selected segments and `staff_selection_mode=anyone` survive unrelated turns. Booking confirmations remain impossible unless the booking service returns a POS-confirmed booking attempt, appointment, and provider booking ID. If AI booking is disabled, semantic interpretation cannot proceed safely, a customer requests a human, clarification cannot make progress, or POS cannot confirm, the runtime creates a handoff or fallback pending flow and avoids confirmed wording.
 

@@ -14,9 +14,21 @@ import (
 
 var ErrValidation = errors.New("integration config validation failed")
 
+type configStore interface {
+	EnsureSalonOwner(ctx context.Context, salonID string, ownerUserID string) error
+	ListForOwner(ctx context.Context, salonID string, ownerUserID string) ([]StoredConfig, error)
+	Get(ctx context.Context, salonID string, provider string) (*StoredConfig, error)
+	Upsert(ctx context.Context, cfg StoredConfig) (*StoredConfig, error)
+}
+
+type secretCipher interface {
+	Encrypt(plaintext string) (string, error)
+	Decrypt(encoded string) (string, error)
+}
+
 type Service struct {
-	repo   *Repository
-	cipher *encryption.TokenCipher
+	repo   configStore
+	cipher secretCipher
 	cfg    config.Config
 }
 
@@ -57,12 +69,24 @@ func (s *Service) UpdateSquare(ctx context.Context, salonID string, ownerUserID 
 	if err := s.repo.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
 	}
+	existing, secrets, err := s.existingConfigAndSecrets(ctx, salonID, ProviderSquare)
+	if err != nil {
+		return nil, err
+	}
+	webhookNotificationURL := ""
+	if existing != nil {
+		webhookNotificationURL = strings.TrimSpace(existing.Settings["webhook_notification_url"])
+	}
+	if req.WebhookNotificationURL != nil {
+		webhookNotificationURL = strings.TrimSpace(*req.WebhookNotificationURL)
+	}
 	settings := map[string]string{
-		"environment":  defaultString(normalizeEnvironment(req.Environment), defaultString(s.cfg.Square.Environment, "sandbox")),
-		"client_id":    strings.TrimSpace(req.ClientID),
-		"redirect_url": strings.TrimSpace(req.RedirectURL),
-		"api_version":  strings.TrimSpace(req.APIVersion),
-		"api_base_url": strings.TrimRight(strings.TrimSpace(req.APIBaseURL), "/"),
+		"environment":              defaultString(normalizeEnvironment(req.Environment), defaultString(s.cfg.Square.Environment, "sandbox")),
+		"client_id":                strings.TrimSpace(req.ClientID),
+		"redirect_url":             strings.TrimSpace(req.RedirectURL),
+		"api_version":              strings.TrimSpace(req.APIVersion),
+		"api_base_url":             strings.TrimRight(strings.TrimSpace(req.APIBaseURL), "/"),
+		"webhook_notification_url": webhookNotificationURL,
 	}
 	if settings["redirect_url"] == "" || settings["api_version"] == "" {
 		return nil, ErrValidation
@@ -75,23 +99,36 @@ func (s *Service) UpdateSquare(ctx context.Context, salonID string, ownerUserID 
 			return nil, ErrValidation
 		}
 	}
-	existing, secrets, err := s.existingConfigAndSecrets(ctx, salonID, ProviderSquare)
-	if err != nil {
-		return nil, err
+	if webhookNotificationURL != "" {
+		if !validSquareWebhookNotificationURL(webhookNotificationURL) {
+			return nil, ErrValidation
+		}
 	}
 	secrets = updateSecret(secrets, "client_secret", req.ClientSecret, req.ClearClientSecret)
+	secrets = updateSecret(secrets, "webhook_signature_key", req.WebhookSignatureKey, req.ClearWebhookSignatureKey)
+	if strings.TrimSpace(secrets["webhook_signature_key"]) != "" && webhookNotificationURL == "" {
+		return nil, ErrValidation
+	}
+	secretMutation := strings.TrimSpace(req.ClientSecret) != "" || req.ClearClientSecret ||
+		strings.TrimSpace(req.WebhookSignatureKey) != "" || req.ClearWebhookSignatureKey
+	encryptedSecrets := ""
+	if existing != nil && !secretMutation {
+		encryptedSecrets = existing.SecretsEncrypted
+	} else {
+		encryptedSecrets, err = s.encryptSecrets(secrets)
+		if err != nil {
+			return nil, err
+		}
+	}
 	updated, err := s.repo.Upsert(ctx, StoredConfig{
 		SalonID:          salonID,
 		Provider:         ProviderSquare,
 		Enabled:          true,
 		Settings:         settings,
-		SecretsEncrypted: s.mustEncryptSecrets(secrets),
+		SecretsEncrypted: encryptedSecrets,
 	})
 	if err != nil {
 		return nil, err
-	}
-	if existing != nil && strings.TrimSpace(req.ClientSecret) == "" && !req.ClearClientSecret {
-		updated.SecretsEncrypted = existing.SecretsEncrypted
 	}
 	returnPtr := s.squareResponse(updated)
 	return &returnPtr, nil
@@ -124,18 +161,25 @@ func (s *Service) UpdateTwilio(ctx context.Context, salonID string, ownerUserID 
 		return nil, err
 	}
 	secrets = updateSecret(secrets, "auth_token", req.AuthToken, req.ClearAuthToken)
+	secretMutation := strings.TrimSpace(req.AuthToken) != "" || req.ClearAuthToken
+	encryptedSecrets := ""
+	if existing != nil && !secretMutation {
+		encryptedSecrets = existing.SecretsEncrypted
+	} else {
+		encryptedSecrets, err = s.encryptSecrets(secrets)
+		if err != nil {
+			return nil, err
+		}
+	}
 	updated, err := s.repo.Upsert(ctx, StoredConfig{
 		SalonID:          salonID,
 		Provider:         ProviderTwilio,
 		Enabled:          true,
 		Settings:         settings,
-		SecretsEncrypted: s.mustEncryptSecrets(secrets),
+		SecretsEncrypted: encryptedSecrets,
 	})
 	if err != nil {
 		return nil, err
-	}
-	if existing != nil && strings.TrimSpace(req.AuthToken) == "" && !req.ClearAuthToken {
-		updated.SecretsEncrypted = existing.SecretsEncrypted
 	}
 	returnPtr := s.twilioResponse(updated)
 	return &returnPtr, nil
@@ -179,18 +223,25 @@ func (s *Service) UpdateOpenAI(ctx context.Context, salonID string, ownerUserID 
 		return nil, err
 	}
 	secrets = updateSecret(secrets, "api_key", req.APIKey, req.ClearAPIKey)
+	secretMutation := strings.TrimSpace(req.APIKey) != "" || req.ClearAPIKey
+	encryptedSecrets := ""
+	if existing != nil && !secretMutation {
+		encryptedSecrets = existing.SecretsEncrypted
+	} else {
+		encryptedSecrets, err = s.encryptSecrets(secrets)
+		if err != nil {
+			return nil, err
+		}
+	}
 	updated, err := s.repo.Upsert(ctx, StoredConfig{
 		SalonID:          salonID,
 		Provider:         ProviderOpenAI,
 		Enabled:          req.Enabled,
 		Settings:         settings,
-		SecretsEncrypted: s.mustEncryptSecrets(secrets),
+		SecretsEncrypted: encryptedSecrets,
 	})
 	if err != nil {
 		return nil, err
-	}
-	if existing != nil && strings.TrimSpace(req.APIKey) == "" && !req.ClearAPIKey {
-		updated.SecretsEncrypted = existing.SecretsEncrypted
 	}
 	returnPtr := s.openAIResponse(updated)
 	return &returnPtr, nil
@@ -198,6 +249,8 @@ func (s *Service) UpdateOpenAI(ctx context.Context, salonID string, ownerUserID 
 
 func (s *Service) ResolveSquareConfig(ctx context.Context, salonID string) (config.SquareConfig, error) {
 	cfg := s.cfg.Square
+	cfg.WebhookNotificationURL = ""
+	cfg.WebhookSignatureKey = ""
 	cfg.Environment = defaultString(normalizeEnvironment(cfg.Environment), "sandbox")
 	cfg.RedirectURL = defaultString(strings.TrimSpace(cfg.RedirectURL), "http://localhost:18089/api/integrations/square/callback")
 	cfg.APIVersion = defaultString(strings.TrimSpace(cfg.APIVersion), "2026-05-20")
@@ -208,9 +261,13 @@ func (s *Service) ResolveSquareConfig(ctx context.Context, salonID string) (conf
 		cfg.RedirectURL = defaultString(strings.TrimSpace(item.Settings["redirect_url"]), cfg.RedirectURL)
 		cfg.APIVersion = defaultString(strings.TrimSpace(item.Settings["api_version"]), cfg.APIVersion)
 		cfg.APIBaseURL = strings.TrimRight(strings.TrimSpace(item.Settings["api_base_url"]), "/")
+		cfg.WebhookNotificationURL = strings.TrimSpace(item.Settings["webhook_notification_url"])
 	}
 	if secret := strings.TrimSpace(secrets["client_secret"]); secret != "" {
 		cfg.ClientSecret = secret
+	}
+	if secret := strings.TrimSpace(secrets["webhook_signature_key"]); secret != "" {
+		cfg.WebhookSignatureKey = secret
 	}
 	return cfg, nil
 }
@@ -301,6 +358,8 @@ func (s *Service) resolveStored(ctx context.Context, salonID string, provider st
 
 func (s *Service) squareResponse(item *StoredConfig) SquareSettingsResponse {
 	cfg := s.cfg.Square
+	cfg.WebhookNotificationURL = ""
+	cfg.WebhookSignatureKey = ""
 	cfg.Environment = defaultString(normalizeEnvironment(cfg.Environment), "sandbox")
 	cfg.RedirectURL = defaultString(strings.TrimSpace(cfg.RedirectURL), "http://localhost:18089/api/integrations/square/callback")
 	cfg.APIVersion = defaultString(strings.TrimSpace(cfg.APIVersion), "2026-05-20")
@@ -312,11 +371,18 @@ func (s *Service) squareResponse(item *StoredConfig) SquareSettingsResponse {
 		cfg.RedirectURL = defaultString(strings.TrimSpace(item.Settings["redirect_url"]), cfg.RedirectURL)
 		cfg.APIVersion = defaultString(strings.TrimSpace(item.Settings["api_version"]), cfg.APIVersion)
 		cfg.APIBaseURL = strings.TrimRight(strings.TrimSpace(item.Settings["api_base_url"]), "/")
+		cfg.WebhookNotificationURL = strings.TrimSpace(item.Settings["webhook_notification_url"])
 	}
 	secretSource := SecretSourceNone
+	webhookSecretSource := SecretSourceNone
 	if item != nil {
-		if secrets, err := s.decryptSecrets(item.SecretsEncrypted); err == nil && strings.TrimSpace(secrets["client_secret"]) != "" {
-			secretSource = SecretSourceDatabase
+		if secrets, err := s.decryptSecrets(item.SecretsEncrypted); err == nil {
+			if strings.TrimSpace(secrets["client_secret"]) != "" {
+				secretSource = SecretSourceDatabase
+			}
+			if strings.TrimSpace(secrets["webhook_signature_key"]) != "" {
+				webhookSecretSource = SecretSourceDatabase
+			}
 		}
 	}
 	clientSecret := strings.TrimSpace(s.cfg.Square.ClientSecret)
@@ -325,16 +391,20 @@ func (s *Service) squareResponse(item *StoredConfig) SquareSettingsResponse {
 	}
 	updatedAt := updatedAt(item)
 	return SquareSettingsResponse{
-		Provider:               ProviderSquare,
-		Configured:             strings.TrimSpace(cfg.ClientID) != "" && (secretSource != SecretSourceNone) && strings.TrimSpace(cfg.RedirectURL) != "",
-		Environment:            defaultString(normalizeEnvironment(cfg.Environment), "sandbox"),
-		ClientID:               cfg.ClientID,
-		RedirectURL:            cfg.RedirectURL,
-		APIVersion:             defaultString(cfg.APIVersion, "2026-05-20"),
-		APIBaseURL:             cfg.APIBaseURL,
-		ClientSecretConfigured: secretSource != SecretSourceNone,
-		ClientSecretSource:     secretSource,
-		UpdatedAt:              updatedAt,
+		Provider:                      ProviderSquare,
+		Configured:                    strings.TrimSpace(cfg.ClientID) != "" && (secretSource != SecretSourceNone) && strings.TrimSpace(cfg.RedirectURL) != "",
+		Environment:                   defaultString(normalizeEnvironment(cfg.Environment), "sandbox"),
+		ClientID:                      cfg.ClientID,
+		RedirectURL:                   cfg.RedirectURL,
+		APIVersion:                    defaultString(cfg.APIVersion, "2026-05-20"),
+		APIBaseURL:                    cfg.APIBaseURL,
+		ClientSecretConfigured:        secretSource != SecretSourceNone,
+		ClientSecretSource:            secretSource,
+		WebhookNotificationURL:        cfg.WebhookNotificationURL,
+		WebhookConfigured:             cfg.WebhookNotificationURL != "" && webhookSecretSource == SecretSourceDatabase,
+		WebhookSignatureKeyConfigured: webhookSecretSource == SecretSourceDatabase,
+		WebhookSignatureKeySource:     webhookSecretSource,
+		UpdatedAt:                     updatedAt,
 	}
 }
 
@@ -450,6 +520,9 @@ func (s *Service) decryptSecrets(encrypted string) (map[string]string, error) {
 	if encrypted == "" {
 		return map[string]string{}, nil
 	}
+	if s.cipher == nil {
+		return nil, errors.New("integration config secret cipher is unavailable")
+	}
 	plaintext, err := s.cipher.Decrypt(encrypted)
 	if err != nil {
 		return nil, err
@@ -464,7 +537,7 @@ func (s *Service) decryptSecrets(encrypted string) (map[string]string, error) {
 	return secrets, nil
 }
 
-func (s *Service) mustEncryptSecrets(secrets map[string]string) string {
+func (s *Service) encryptSecrets(secrets map[string]string) (string, error) {
 	normalized := map[string]string{}
 	for key, value := range secrets {
 		value = strings.TrimSpace(value)
@@ -473,17 +546,16 @@ func (s *Service) mustEncryptSecrets(secrets map[string]string) string {
 		}
 	}
 	if len(normalized) == 0 {
-		return ""
+		return "", nil
 	}
 	raw, err := json.Marshal(normalized)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	encrypted, err := s.cipher.Encrypt(string(raw))
-	if err != nil {
-		return ""
+	if s.cipher == nil {
+		return "", errors.New("integration config secret cipher is unavailable")
 	}
-	return encrypted
+	return s.cipher.Encrypt(string(raw))
 }
 
 func updateSecret(secrets map[string]string, key string, value string, clear bool) map[string]string {
@@ -529,6 +601,11 @@ func normalizeEnvironment(value string) string {
 		return "production"
 	}
 	return "sandbox"
+}
+
+func validSquareWebhookNotificationURL(value string) bool {
+	parsed, err := url.ParseRequestURI(strings.TrimSpace(value))
+	return err == nil && parsed.Scheme == "https" && parsed.Host != ""
 }
 
 func normalizeVoiceTransport(value string) string {

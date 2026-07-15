@@ -68,7 +68,20 @@ func (s *Service) UpdateSettings(ctx context.Context, salonID string, ownerUserI
 	if req.BookingMode != "confirmed_booking" && req.BookingMode != "pending_approval" && req.BookingMode != "disabled" {
 		return nil, ErrValidation
 	}
+	if req.ConsultationEnabled {
+		readyCount, err := s.repo.CountConsultationReadyServices(ctx, salonID, ownerUserID)
+		if err != nil {
+			return nil, err
+		}
+		if !consultationCanBeEnabled(req.ConsultationEnabled, readyCount) {
+			return nil, ErrValidation
+		}
+	}
 	return s.repo.UpdateSettings(ctx, salonID, ownerUserID, req)
+}
+
+func consultationCanBeEnabled(requested bool, readyServiceCount int) bool {
+	return !requested || readyServiceCount > 0
 }
 
 func (s *Service) GetPublicCatalogSettings(ctx context.Context, salonID string, ownerUserID string) (*PublicCatalogSettings, error) {

@@ -352,7 +352,7 @@ func (s *ServiceLayer) ProviderSwitchReadiness(ctx context.Context, salonID stri
 	installed := s.installedProviderOptions(activeProvider, connection)
 	alternateInstalled := len(installed) > 1
 	connected := connectionReady(connection)
-	synced := connected && connection.LastSyncAt != nil
+	synced := connectionSynced(connection)
 	dryRunReady := connected && synced && summary.BookableServiceCount > 0 && summary.BookableStaffCount > 0
 	checks := []ProviderReadinessCheck{
 		{Key: "active_provider", Label: "Active provider selected", Complete: activeProvider != "", Message: incompleteProviderMessage(activeProvider != "", "No active POS provider is selected.")},
@@ -483,7 +483,7 @@ func (s *ServiceLayer) ProviderSwitchDryRunReadiness(ctx context.Context, salonI
 	importedRecordsExist := matchSummary.Total > 0
 	matchesResolved := importedRecordsExist && matchSummary.Suggested == 0 && matchSummary.Unmatched == 0 && matchSummary.Conflicts == 0
 	currentConnected := connectionReady(connection)
-	currentSynced := currentConnected && connection.LastSyncAt != nil
+	currentSynced := connectionSynced(connection)
 	currentBookingReady := activeProvider == run.FromProvider && currentSynced && mapping.BookableServiceCount > 0 && mapping.BookableStaffCount > 0
 	dryRunExecutionAvailable := false
 
@@ -991,7 +991,10 @@ func NormalizeConsultationProfileWriteRequest(req *ServiceConsultationProfileWri
 	if len([]rune(maintenanceNote)) > 320 || len([]rune(ownerSummary)) > 320 {
 		return nil, ErrValidation
 	}
-	if status == ConsultationProfileStatusReady && len(outcomes)+len(systems)+len(lengths)+len(priorities)+len(finishes) == 0 {
+	// Recommendation eligibility is fail-closed: an owner-approved profile must
+	// define both what it is recommended for and which current systems it can
+	// safely be compared against. Optional fields may refine ranking only.
+	if status == ConsultationProfileStatusReady && (len(outcomes) == 0 || len(systems) == 0) {
 		return nil, ErrValidation
 	}
 	return &ServiceConsultationProfileMutation{
@@ -1260,6 +1263,10 @@ func connectionReady(connection *Connection) bool {
 	default:
 		return strings.TrimSpace(connection.ID) != "" && strings.TrimSpace(connection.LocationID) != ""
 	}
+}
+
+func connectionSynced(connection *Connection) bool {
+	return connectionReady(connection) && connection.Status == StatusActive && connection.LastSyncAt != nil
 }
 
 func incompleteProviderMessage(complete bool, message string) string {

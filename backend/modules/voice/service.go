@@ -802,6 +802,9 @@ func lastAIMessage(session *conversation.Session) string {
 	if session == nil {
 		return "Thank you for calling. How can I help you today?"
 	}
+	if session.ReplayEventKey != "" {
+		return session.ReplayAIMessage
+	}
 	for i := len(session.Transcript) - 1; i >= 0; i-- {
 		if session.Transcript[i].Speaker == conversation.SpeakerAI {
 			return session.Transcript[i].Body

@@ -164,7 +164,7 @@ func (a *SquareAdapter) ListLocations(ctx context.Context, salonID string) ([]po
 }
 
 func (a *SquareAdapter) ListServices(ctx context.Context, salonID string) ([]pos.Service, error) {
-	token, err := a.accessToken(ctx, salonID)
+	token, locationID, err := a.accessTokenAndLocation(ctx, salonID)
 	if err != nil {
 		return nil, err
 	}
@@ -172,8 +172,8 @@ func (a *SquareAdapter) ListServices(ctx context.Context, salonID string) ([]pos
 	if err != nil {
 		return nil, err
 	}
-	var response squareCatalogResponse
-	if err := a.doJSON(ctx, cfg, http.MethodGet, a.apiBaseURL(cfg)+"/v2/catalog/list?types=ITEM,ITEM_VARIATION", token, nil, &response); err != nil {
+	services, err := a.listServices(ctx, cfg, token, locationID)
+	if err != nil {
 		_ = a.repo.LogError(ctx, pos.POSError{
 			SalonID:      salonID,
 			Provider:     pos.ProviderSquare,
@@ -183,14 +183,45 @@ func (a *SquareAdapter) ListServices(ctx context.Context, salonID string) ([]pos
 		})
 		return nil, err
 	}
-
-	return mapCatalogServices(response), nil
+	return services, nil
 }
 
 func mapCatalogServices(response squareCatalogResponse) []pos.Service {
+	return mapCatalogServicesForLocation(response, "")
+}
+
+func (a *SquareAdapter) listServices(ctx context.Context, cfg config.SquareConfig, token string, locationID string) ([]pos.Service, error) {
+	services := make([]pos.Service, 0)
+	cursor := ""
+	seenCursors := map[string]bool{}
+	for {
+		values := url.Values{}
+		values.Set("types", "ITEM,ITEM_VARIATION")
+		if cursor != "" {
+			values.Set("cursor", cursor)
+		}
+		var response squareCatalogResponse
+		if err := a.doJSON(ctx, cfg, http.MethodGet, a.apiBaseURL(cfg)+"/v2/catalog/list?"+values.Encode(), token, nil, &response); err != nil {
+			return nil, err
+		}
+		services = append(services, mapCatalogServicesForLocation(response, locationID)...)
+		next := strings.TrimSpace(response.Cursor)
+		if next == "" {
+			break
+		}
+		if seenCursors[next] {
+			return nil, fmt.Errorf("square catalog pagination repeated cursor")
+		}
+		seenCursors[next] = true
+		cursor = next
+	}
+	return services, nil
+}
+
+func mapCatalogServicesForLocation(response squareCatalogResponse, locationID string) []pos.Service {
 	var services []pos.Service
 	for _, object := range response.Objects {
-		if object.Type != "ITEM" {
+		if object.Type != "ITEM" || object.IsDeleted || !catalogObjectPresentAtLocation(object, locationID) {
 			continue
 		}
 		item := object.ItemData
@@ -204,12 +235,15 @@ func mapCatalogServices(response squareCatalogResponse) []pos.Service {
 				AIDescription:     item.Description,
 				DurationMinutes:   0,
 				PriceDisplay:      "starting at",
-				AIBookable:        true,
+				AIBookable:        false,
 				Active:            !object.IsDeleted,
 			})
 			continue
 		}
 		for _, variation := range item.Variations {
+			if variation.IsDeleted || !catalogObjectPresentAtLocation(variation, locationID) {
+				continue
+			}
 			price := float64(variation.ItemVariationData.PriceMoney.Amount) / 100
 			name := item.Name
 			if variation.ItemVariationData.Name != "" && variation.ItemVariationData.Name != "Regular" {
@@ -225,7 +259,7 @@ func mapCatalogServices(response squareCatalogResponse) []pos.Service {
 				DurationMinutes:   int(variation.ItemVariationData.ServiceDuration / 60000),
 				PriceFrom:         price,
 				PriceDisplay:      fmt.Sprintf("starting at $%.2f", price),
-				AIBookable:        true,
+				AIBookable:        catalogVariationIsBookable(variation),
 				Active:            !object.IsDeleted && !variation.IsDeleted,
 			})
 		}
@@ -233,8 +267,36 @@ func mapCatalogServices(response squareCatalogResponse) []pos.Service {
 	return services
 }
 
+func catalogVariationIsBookable(variation squareCatalogObject) bool {
+	return variation.ItemVariationData.AvailableForBooking != nil &&
+		*variation.ItemVariationData.AvailableForBooking &&
+		variation.ItemVariationData.ServiceDuration/60000 > 0
+}
+
+func catalogObjectPresentAtLocation(object squareCatalogObject, locationID string) bool {
+	locationID = strings.TrimSpace(locationID)
+	if locationID == "" {
+		return true
+	}
+	for _, absentID := range object.AbsentAtLocationIDs {
+		if strings.TrimSpace(absentID) == locationID {
+			return false
+		}
+	}
+	presentEverywhere := object.PresentAtAllLocations == nil || *object.PresentAtAllLocations
+	if presentEverywhere {
+		return true
+	}
+	for _, presentID := range object.PresentAtLocationIDs {
+		if strings.TrimSpace(presentID) == locationID {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *SquareAdapter) ListStaff(ctx context.Context, salonID string) ([]pos.StaffMember, error) {
-	token, err := a.accessToken(ctx, salonID)
+	token, locationID, err := a.accessTokenAndLocation(ctx, salonID)
 	if err != nil {
 		return nil, err
 	}
@@ -242,8 +304,8 @@ func (a *SquareAdapter) ListStaff(ctx context.Context, salonID string) ([]pos.St
 	if err != nil {
 		return nil, err
 	}
-	var response squareTeamMembersResponse
-	if err := a.doJSON(ctx, cfg, http.MethodPost, a.apiBaseURL(cfg)+"/v2/team-members/search", token, map[string]any{}, &response); err != nil {
+	staff, err := a.listStaff(ctx, cfg, token, locationID)
+	if err != nil {
 		_ = a.repo.LogError(ctx, pos.POSError{
 			SalonID:      salonID,
 			Provider:     pos.ProviderSquare,
@@ -253,20 +315,128 @@ func (a *SquareAdapter) ListStaff(ctx context.Context, salonID string) ([]pos.St
 		})
 		return nil, err
 	}
+	return staff, nil
+}
 
-	staff := make([]pos.StaffMember, 0, len(response.TeamMembers))
-	for _, member := range response.TeamMembers {
+func (a *SquareAdapter) listStaff(ctx context.Context, cfg config.SquareConfig, token string, locationID string) ([]pos.StaffMember, error) {
+	members, err := a.listActiveTeamMembers(ctx, cfg, token, locationID)
+	if err != nil {
+		return nil, err
+	}
+	profiles, err := a.listBookableTeamMemberProfiles(ctx, cfg, token, locationID)
+	if err != nil {
+		return nil, err
+	}
+	profilesByTeamMemberID := make(map[string]squareTeamMemberBookingProfile, len(profiles))
+	for _, profile := range profiles {
+		teamMemberID := strings.TrimSpace(profile.TeamMemberID)
+		if teamMemberID == "" {
+			continue
+		}
+		if !profile.IsBookable {
+			delete(profilesByTeamMemberID, teamMemberID)
+			continue
+		}
+		profilesByTeamMemberID[teamMemberID] = profile
+	}
+
+	staff := make([]pos.StaffMember, 0, len(members))
+	seenTeamMemberIDs := make(map[string]bool, len(members))
+	for _, member := range members {
+		teamMemberID := strings.TrimSpace(member.ID)
+		if teamMemberID == "" || seenTeamMemberIDs[teamMemberID] {
+			continue
+		}
+		profile, ok := profilesByTeamMemberID[teamMemberID]
+		if !ok {
+			continue
+		}
+		name := strings.TrimSpace(member.GivenName + " " + member.FamilyName)
+		if name == "" {
+			name = strings.TrimSpace(profile.DisplayName)
+		}
+		if name == "" {
+			continue
+		}
+		seenTeamMemberIDs[teamMemberID] = true
 		staff = append(staff, pos.StaffMember{
 			POSProvider: pos.ProviderSquare,
-			POSStaffID:  member.ID,
-			Name:        strings.TrimSpace(member.GivenName + " " + member.FamilyName),
+			POSStaffID:  teamMemberID,
+			Name:        name,
 			Phone:       member.PhoneNumber,
 			Email:       member.EmailAddress,
 			AIBookable:  true,
-			Active:      member.Status == "" || member.Status == "ACTIVE",
+			Active:      true,
 		})
 	}
 	return staff, nil
+}
+
+func (a *SquareAdapter) listActiveTeamMembers(ctx context.Context, cfg config.SquareConfig, token string, locationID string) ([]squareTeamMember, error) {
+	members := make([]squareTeamMember, 0)
+	cursor := ""
+	seenCursors := map[string]bool{}
+	for {
+		request := squareTeamMembersSearchRequest{
+			Query: squareTeamMembersSearchQuery{Filter: squareTeamMembersSearchFilter{
+				LocationIDs: []string{strings.TrimSpace(locationID)},
+				Status:      "ACTIVE",
+			}},
+			Limit:  200,
+			Cursor: cursor,
+		}
+		var response squareTeamMembersResponse
+		if err := a.doJSON(ctx, cfg, http.MethodPost, a.apiBaseURL(cfg)+"/v2/team-members/search", token, request, &response); err != nil {
+			return nil, err
+		}
+		for _, member := range response.TeamMembers {
+			status := strings.ToUpper(strings.TrimSpace(member.Status))
+			if status != "ACTIVE" {
+				continue
+			}
+			members = append(members, member)
+		}
+		next := strings.TrimSpace(response.Cursor)
+		if next == "" {
+			break
+		}
+		if seenCursors[next] {
+			return nil, fmt.Errorf("square team member pagination repeated cursor")
+		}
+		seenCursors[next] = true
+		cursor = next
+	}
+	return members, nil
+}
+
+func (a *SquareAdapter) listBookableTeamMemberProfiles(ctx context.Context, cfg config.SquareConfig, token string, locationID string) ([]squareTeamMemberBookingProfile, error) {
+	profiles := make([]squareTeamMemberBookingProfile, 0)
+	cursor := ""
+	seenCursors := map[string]bool{}
+	for {
+		values := url.Values{}
+		values.Set("bookable_only", "true")
+		values.Set("location_id", strings.TrimSpace(locationID))
+		values.Set("limit", "100")
+		if cursor != "" {
+			values.Set("cursor", cursor)
+		}
+		var response squareTeamMemberBookingProfilesResponse
+		if err := a.doJSON(ctx, cfg, http.MethodGet, a.apiBaseURL(cfg)+"/v2/bookings/team-member-booking-profiles?"+values.Encode(), token, nil, &response); err != nil {
+			return nil, err
+		}
+		profiles = append(profiles, response.TeamMemberBookingProfiles...)
+		next := strings.TrimSpace(response.Cursor)
+		if next == "" {
+			break
+		}
+		if seenCursors[next] {
+			return nil, fmt.Errorf("square team member booking profile pagination repeated cursor")
+		}
+		seenCursors[next] = true
+		cursor = next
+	}
+	return profiles, nil
 }
 
 func (a *SquareAdapter) ListBusinessHourPeriods(ctx context.Context, salonID string) ([]pos.BusinessHourPeriod, error) {
@@ -278,8 +448,8 @@ func (a *SquareAdapter) ListBusinessHourPeriods(ctx context.Context, salonID str
 	if err != nil {
 		return nil, err
 	}
-	var response squareLocationResponse
-	if err := a.doJSON(ctx, cfg, http.MethodGet, a.apiBaseURL(cfg)+"/v2/locations/"+url.PathEscape(locationID), token, nil, &response); err != nil {
+	periods, err := a.listBusinessHourPeriods(ctx, cfg, token, locationID)
+	if err != nil {
 		_ = a.repo.LogError(ctx, pos.POSError{
 			SalonID:      salonID,
 			Provider:     pos.ProviderSquare,
@@ -287,6 +457,14 @@ func (a *SquareAdapter) ListBusinessHourPeriods(ctx context.Context, salonID str
 			ErrorCode:    normalizeSquareError(err),
 			ErrorMessage: err.Error(),
 		})
+		return nil, err
+	}
+	return periods, nil
+}
+
+func (a *SquareAdapter) listBusinessHourPeriods(ctx context.Context, cfg config.SquareConfig, token string, locationID string) ([]pos.BusinessHourPeriod, error) {
+	var response squareLocationResponse
+	if err := a.doJSON(ctx, cfg, http.MethodGet, a.apiBaseURL(cfg)+"/v2/locations/"+url.PathEscape(locationID), token, nil, &response); err != nil {
 		return nil, err
 	}
 	return mapSquareBusinessHourPeriods(response.Location.BusinessHours.Periods), nil
@@ -302,8 +480,24 @@ func (a *SquareAdapter) ListCustomers(ctx context.Context, salonID string) ([]po
 		return nil, err
 	}
 
+	customers, err := a.listCustomers(ctx, cfg, token)
+	if err != nil {
+		_ = a.repo.LogError(ctx, pos.POSError{
+			SalonID:      salonID,
+			Provider:     pos.ProviderSquare,
+			Operation:    "list_customers",
+			ErrorCode:    normalizeSquareError(err),
+			ErrorMessage: err.Error(),
+		})
+		return nil, err
+	}
+	return customers, nil
+}
+
+func (a *SquareAdapter) listCustomers(ctx context.Context, cfg config.SquareConfig, token string) ([]pos.Customer, error) {
 	customers := make([]pos.Customer, 0)
 	cursor := ""
+	seenCursors := map[string]bool{}
 	for {
 		request := squareCustomerSearchRequest{
 			Limit:  100,
@@ -311,13 +505,6 @@ func (a *SquareAdapter) ListCustomers(ctx context.Context, salonID string) ([]po
 		}
 		var response squareCustomerSearchResponse
 		if err := a.doJSON(ctx, cfg, http.MethodPost, a.apiBaseURL(cfg)+"/v2/customers/search", token, request, &response); err != nil {
-			_ = a.repo.LogError(ctx, pos.POSError{
-				SalonID:      salonID,
-				Provider:     pos.ProviderSquare,
-				Operation:    "list_customers",
-				ErrorCode:    normalizeSquareError(err),
-				ErrorMessage: err.Error(),
-			})
 			return nil, err
 		}
 		for _, item := range response.Customers {
@@ -326,10 +513,15 @@ func (a *SquareAdapter) ListCustomers(ctx context.Context, salonID string) ([]po
 				customers = append(customers, customer)
 			}
 		}
-		cursor = strings.TrimSpace(response.Cursor)
-		if cursor == "" {
+		next := strings.TrimSpace(response.Cursor)
+		if next == "" {
 			break
 		}
+		if seenCursors[next] {
+			return nil, fmt.Errorf("square customer pagination repeated cursor")
+		}
+		seenCursors[next] = true
+		cursor = next
 	}
 	return customers, nil
 }
@@ -397,7 +589,7 @@ func (a *SquareAdapter) CreateCustomer(ctx context.Context, salonID string, inpu
 }
 
 func (a *SquareAdapter) CheckAvailability(ctx context.Context, salonID string, input pos.AvailabilityInput) ([]pos.TimeSlot, error) {
-	token, locationID, err := a.accessTokenAndLocation(ctx, salonID)
+	token, locationID, err := a.accessTokenAndProviderFence(ctx, salonID, input.ProviderFence)
 	if err != nil {
 		return nil, err
 	}
@@ -424,7 +616,7 @@ func (a *SquareAdapter) CheckAvailability(ctx context.Context, salonID string, i
 }
 
 func (a *SquareAdapter) CreateAppointment(ctx context.Context, salonID string, input pos.CreateAppointmentInput) (*pos.Appointment, error) {
-	token, locationID, err := a.accessTokenAndLocation(ctx, salonID)
+	token, locationID, err := a.accessTokenAndProviderFence(ctx, salonID, input.ProviderFence)
 	if err != nil {
 		return nil, pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhasePrepare, err)
 	}
@@ -468,7 +660,7 @@ func (a *SquareAdapter) CreateAppointment(ctx context.Context, salonID string, i
 }
 
 func (a *SquareAdapter) RescheduleAppointment(ctx context.Context, salonID string, appointmentID string, input pos.RescheduleInput) (*pos.Appointment, error) {
-	token, locationID, err := a.accessTokenAndLocation(ctx, salonID)
+	token, locationID, err := a.accessTokenAndProviderFence(ctx, salonID, input.ProviderFence)
 	if err != nil {
 		return nil, pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhasePrepare, err)
 	}
@@ -499,7 +691,7 @@ func (a *SquareAdapter) RescheduleAppointment(ctx context.Context, salonID strin
 }
 
 func (a *SquareAdapter) CancelAppointment(ctx context.Context, salonID string, appointmentID string, input pos.CancelInput) (*pos.Appointment, error) {
-	token, err := a.accessToken(ctx, salonID)
+	token, _, err := a.accessTokenAndProviderFence(ctx, salonID, input.ProviderFence)
 	if err != nil {
 		return nil, pos.NewWriteError(pos.WriteOutcomeDefinitiveFailure, pos.WritePhasePrepare, err)
 	}
@@ -530,7 +722,7 @@ func (a *SquareAdapter) CancelAppointment(ctx context.Context, salonID string, a
 }
 
 func (a *SquareAdapter) ListAppointments(ctx context.Context, salonID string, input pos.AppointmentListInput) (*pos.AppointmentListResult, error) {
-	token, locationID, err := a.accessTokenAndLocation(ctx, salonID)
+	token, locationID, err := a.accessTokenAndProviderFence(ctx, salonID, input.ProviderFence)
 	if err != nil {
 		_ = a.repo.LogError(ctx, pos.POSError{
 			SalonID:      salonID,
@@ -572,6 +764,16 @@ func (a *SquareAdapter) ListAppointments(ctx context.Context, salonID string, in
 		})
 		return nil, err
 	}
+	if err := validateSquareBookingLocations(response.Bookings, input.ProviderFence.LocationID); err != nil {
+		_ = a.repo.LogError(ctx, pos.POSError{
+			SalonID:      salonID,
+			Provider:     pos.ProviderSquare,
+			Operation:    "list_bookings",
+			ErrorCode:    normalizeSquareError(err),
+			ErrorMessage: err.Error(),
+		})
+		return nil, err
+	}
 	items := make([]pos.ListedAppointment, 0, len(response.Bookings))
 	for _, booking := range response.Bookings {
 		item, ok := mapSquareListedBooking(booking)
@@ -582,53 +784,101 @@ func (a *SquareAdapter) ListAppointments(ctx context.Context, salonID string, in
 	return &pos.AppointmentListResult{Appointments: items, Cursor: response.Cursor}, nil
 }
 
+func validateSquareBookingLocations(bookings []squareBooking, expectedLocationID string) error {
+	expectedLocationID = strings.TrimSpace(expectedLocationID)
+	if expectedLocationID == "" {
+		return pos.ErrStaleProviderFence
+	}
+	for _, booking := range bookings {
+		locationID := strings.TrimSpace(booking.LocationID)
+		if locationID != "" && locationID != expectedLocationID {
+			return pos.ErrStaleProviderFence
+		}
+	}
+	return nil
+}
+
 func (a *SquareAdapter) Sync(ctx context.Context, salonID string) error {
 	_, err := a.SyncWithSummary(ctx, salonID)
 	return err
 }
 
+type providerSnapshotSyncError struct {
+	Generation int64
+	Err        error
+}
+
+func (e *providerSnapshotSyncError) Error() string {
+	if e == nil || e.Err == nil {
+		return "provider snapshot sync failed"
+	}
+	return e.Err.Error()
+}
+
+func (e *providerSnapshotSyncError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func wrapProviderSnapshotSyncError(generation int64, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &providerSnapshotSyncError{Generation: generation, Err: err}
+}
+
+func providerSnapshotGenerationFromError(err error) (int64, bool) {
+	var syncErr *providerSnapshotSyncError
+	if !errors.As(err, &syncErr) || syncErr.Generation <= 0 {
+		return 0, false
+	}
+	return syncErr.Generation, true
+}
+
 func (a *SquareAdapter) SyncWithSummary(ctx context.Context, salonID string) (*pos.SyncSummary, error) {
-	services, err := a.ListServices(ctx, salonID)
+	token, locationID, err := a.accessTokenAndLocation(ctx, salonID)
 	if err != nil {
 		return nil, err
 	}
-	if err := a.repo.UpsertServices(ctx, salonID, services); err != nil {
-		return nil, err
-	}
-	staff, err := a.ListStaff(ctx, salonID)
+	generation, err := a.repo.BeginProviderSnapshot(ctx, salonID, pos.ProviderSquare, locationID)
 	if err != nil {
 		return nil, err
 	}
-	if err := a.repo.UpsertStaff(ctx, salonID, staff); err != nil {
-		return nil, err
-	}
-	_, locationID, err := a.accessTokenAndLocation(ctx, salonID)
+	cfg, err := a.configFor(ctx, salonID)
 	if err != nil {
-		return nil, err
+		return nil, wrapProviderSnapshotSyncError(generation, err)
 	}
-	periods, err := a.ListBusinessHourPeriods(ctx, salonID)
+	services, err := a.listServices(ctx, cfg, token, locationID)
 	if err != nil {
-		return nil, err
+		return nil, wrapProviderSnapshotSyncError(generation, err)
 	}
-	periodsSynced, err := a.repo.UpsertBusinessHourPeriods(ctx, salonID, pos.ProviderSquare, locationID, periods)
+	staff, err := a.listStaff(ctx, cfg, token, locationID)
 	if err != nil {
-		return nil, err
+		return nil, wrapProviderSnapshotSyncError(generation, err)
 	}
-	customers, err := a.ListCustomers(ctx, salonID)
+	periods, err := a.listBusinessHourPeriods(ctx, cfg, token, locationID)
 	if err != nil {
-		return nil, err
+		return nil, wrapProviderSnapshotSyncError(generation, err)
 	}
-	customersSynced, customersSkipped, err := a.repo.UpsertCustomers(ctx, salonID, pos.ProviderSquare, customers)
+	customers, err := a.listCustomers(ctx, cfg, token)
 	if err != nil {
-		return nil, err
+		return nil, wrapProviderSnapshotSyncError(generation, err)
 	}
-	return &pos.SyncSummary{
-		ServicesSynced:            len(services),
-		StaffSynced:               len(staff),
-		BusinessHourPeriodsSynced: periodsSynced,
-		CustomersSynced:           customersSynced,
-		CustomersSkipped:          customersSkipped,
-	}, nil
+	summary, err := a.repo.ApplyProviderSnapshot(ctx, salonID, pos.ProviderSnapshot{
+		Provider:            pos.ProviderSquare,
+		LocationID:          locationID,
+		Generation:          generation,
+		Services:            services,
+		Staff:               staff,
+		BusinessHourPeriods: periods,
+		Customers:           customers,
+	})
+	if err != nil {
+		return nil, wrapProviderSnapshotSyncError(generation, err)
+	}
+	return summary, nil
 }
 
 func (a *SquareAdapter) retrieveBooking(ctx context.Context, cfg config.SquareConfig, token string, bookingID string) (squareBooking, error) {
@@ -666,6 +916,34 @@ func (a *SquareAdapter) accessTokenAndLocation(ctx context.Context, salonID stri
 		return "", "", err
 	}
 	return token, connection.LocationID, nil
+}
+
+func (a *SquareAdapter) accessTokenAndProviderFence(ctx context.Context, salonID string, expected pos.ProviderFence) (string, string, error) {
+	connection, err := a.repo.GetConnection(ctx, salonID, pos.ProviderSquare)
+	if err != nil {
+		return "", "", ErrNotConnected
+	}
+	if !connectionMatchesProviderFence(connection, expected) {
+		return "", "", pos.ErrStaleProviderFence
+	}
+	if connection.AccessTokenEncrypted == "" {
+		return "", "", ErrNotConnected
+	}
+	token, err := a.cipher.Decrypt(connection.AccessTokenEncrypted)
+	if err != nil {
+		return "", "", err
+	}
+	return token, strings.TrimSpace(expected.LocationID), nil
+}
+
+func connectionMatchesProviderFence(connection *pos.Connection, expected pos.ProviderFence) bool {
+	return connection != nil &&
+		connection.Status == pos.StatusActive &&
+		connection.LastSyncAt != nil &&
+		strings.TrimSpace(expected.LocationID) != "" &&
+		expected.SnapshotGeneration > 0 &&
+		strings.TrimSpace(connection.LocationID) == strings.TrimSpace(expected.LocationID) &&
+		connection.SnapshotGeneration == expected.SnapshotGeneration
 }
 
 func (a *SquareAdapter) doJSON(ctx context.Context, cfg config.SquareConfig, method string, endpoint string, bearerToken string, input any, output any) error {
@@ -1361,22 +1639,27 @@ func (a squareAddress) String() string {
 
 type squareCatalogResponse struct {
 	Objects []squareCatalogObject `json:"objects"`
+	Cursor  string                `json:"cursor"`
 }
 
 type squareCatalogObject struct {
-	ID        string `json:"id"`
-	Type      string `json:"type"`
-	Version   int64  `json:"version"`
-	IsDeleted bool   `json:"is_deleted"`
-	ItemData  struct {
+	ID                    string   `json:"id"`
+	Type                  string   `json:"type"`
+	Version               int64    `json:"version"`
+	IsDeleted             bool     `json:"is_deleted"`
+	PresentAtAllLocations *bool    `json:"present_at_all_locations"`
+	PresentAtLocationIDs  []string `json:"present_at_location_ids"`
+	AbsentAtLocationIDs   []string `json:"absent_at_location_ids"`
+	ItemData              struct {
 		Name        string                `json:"name"`
 		Description string                `json:"description"`
 		Variations  []squareCatalogObject `json:"variations"`
 	} `json:"item_data"`
 	ItemVariationData struct {
-		Name            string `json:"name"`
-		ServiceDuration int64  `json:"service_duration"`
-		PriceMoney      struct {
+		Name                string `json:"name"`
+		ServiceDuration     int64  `json:"service_duration"`
+		AvailableForBooking *bool  `json:"available_for_booking"`
+		PriceMoney          struct {
 			Amount   int64  `json:"amount"`
 			Currency string `json:"currency"`
 		} `json:"price_money"`
@@ -1384,14 +1667,43 @@ type squareCatalogObject struct {
 }
 
 type squareTeamMembersResponse struct {
-	TeamMembers []struct {
-		ID           string `json:"id"`
-		GivenName    string `json:"given_name"`
-		FamilyName   string `json:"family_name"`
-		EmailAddress string `json:"email_address"`
-		PhoneNumber  string `json:"phone_number"`
-		Status       string `json:"status"`
-	} `json:"team_members"`
+	TeamMembers []squareTeamMember `json:"team_members"`
+	Cursor      string             `json:"cursor"`
+}
+
+type squareTeamMember struct {
+	ID           string `json:"id"`
+	GivenName    string `json:"given_name"`
+	FamilyName   string `json:"family_name"`
+	EmailAddress string `json:"email_address"`
+	PhoneNumber  string `json:"phone_number"`
+	Status       string `json:"status"`
+}
+
+type squareTeamMemberBookingProfilesResponse struct {
+	TeamMemberBookingProfiles []squareTeamMemberBookingProfile `json:"team_member_booking_profiles"`
+	Cursor                    string                           `json:"cursor"`
+}
+
+type squareTeamMemberBookingProfile struct {
+	TeamMemberID string `json:"team_member_id"`
+	DisplayName  string `json:"display_name"`
+	IsBookable   bool   `json:"is_bookable"`
+}
+
+type squareTeamMembersSearchRequest struct {
+	Query  squareTeamMembersSearchQuery `json:"query"`
+	Limit  int                          `json:"limit,omitempty"`
+	Cursor string                       `json:"cursor,omitempty"`
+}
+
+type squareTeamMembersSearchQuery struct {
+	Filter squareTeamMembersSearchFilter `json:"filter"`
+}
+
+type squareTeamMembersSearchFilter struct {
+	LocationIDs []string `json:"location_ids,omitempty"`
+	Status      string   `json:"status,omitempty"`
 }
 
 type squareCustomerSearchRequest struct {

@@ -8,20 +8,69 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
 )
 
 const slugCheckTestDriverName = "config_transfer_slug_check_driver"
 
 var slugCheckDriverState = struct {
 	sync.Mutex
-	query string
-	args  []driver.Value
-	taken bool
-	err   error
+	query     string
+	args      []driver.Value
+	execQuery string
+	execArgs  []driver.Value
+	taken     bool
+	err       error
 }{}
 
 func init() {
 	sql.Register(slugCheckTestDriverName, slugCheckTestDriver{})
+}
+
+func TestUpsertSquareConfigPreservesTargetWebhookURLAndDoesNotImportSourceURL(t *testing.T) {
+	db, err := sql.Open(slugCheckTestDriverName, "")
+	if err != nil {
+		t.Fatalf("sql.Open returned error: %v", err)
+	}
+	defer db.Close()
+
+	slugCheckDriverState.Lock()
+	slugCheckDriverState.execQuery = ""
+	slugCheckDriverState.execArgs = nil
+	slugCheckDriverState.err = nil
+	slugCheckDriverState.Unlock()
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx returned error: %v", err)
+	}
+	defer tx.Rollback()
+	err = upsertSquareConfig(context.Background(), tx, "salon_1", integrationconfig.SquareSettingsResponse{
+		Environment:            "sandbox",
+		ClientID:               "source-client-id",
+		RedirectURL:            "https://source.example.com/api/integrations/square/callback",
+		APIVersion:             "2026-05-20",
+		WebhookNotificationURL: "https://source.example.com/api/integrations/square/webhook",
+	})
+	if err != nil {
+		t.Fatalf("upsertSquareConfig returned error: %v", err)
+	}
+
+	slugCheckDriverState.Lock()
+	query := slugCheckDriverState.execQuery
+	args := append([]driver.Value(nil), slugCheckDriverState.execArgs...)
+	slugCheckDriverState.Unlock()
+	if !strings.Contains(query, "salon_integration_configs.settings->'webhook_notification_url'") {
+		t.Fatalf("query does not preserve target webhook URL: %s", query)
+	}
+	if len(args) != 2 {
+		t.Fatalf("exec args = %#v, want salon id and settings JSON", args)
+	}
+	settingsJSON, _ := args[1].(string)
+	if strings.Contains(settingsJSON, "source.example.com/api/integrations/square/webhook") || strings.Contains(settingsJSON, "webhook_notification_url") {
+		t.Fatalf("source-specific webhook URL was included in imported settings: %s", settingsJSON)
+	}
 }
 
 func TestPublicSlugTakenSupportsEmptyOnboardingSalonID(t *testing.T) {
@@ -95,7 +144,14 @@ func (s slugCheckTestStmt) NumInput() int {
 }
 
 func (s slugCheckTestStmt) Exec(args []driver.Value) (driver.Result, error) {
-	return nil, nil
+	slugCheckDriverState.Lock()
+	defer slugCheckDriverState.Unlock()
+	slugCheckDriverState.execQuery = s.query
+	slugCheckDriverState.execArgs = append([]driver.Value(nil), args...)
+	if slugCheckDriverState.err != nil {
+		return nil, slugCheckDriverState.err
+	}
+	return driver.RowsAffected(1), nil
 }
 
 func (s slugCheckTestStmt) Query(args []driver.Value) (driver.Rows, error) {

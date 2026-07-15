@@ -400,6 +400,7 @@ func applyRequestedStartTime(session *Session, requestedAt time.Time, loc *time.
 	}
 	start := requestedAt.UTC()
 	session.RequestedStartTime = &start
+	clearSelectedAvailabilityQuote(session)
 	clearSlotTimePreference(session)
 	if loc == nil {
 		loc = time.UTC
@@ -419,6 +420,7 @@ func applyRequestedDate(session *Session, requestedDate string) {
 	if session.RequestedDate != requestedDate {
 		session.RequestedDate = requestedDate
 		session.RequestedStartTime = nil
+		clearSelectedAvailabilityQuote(session)
 		session.OfferedSlots = nil
 		return
 	}
@@ -1192,6 +1194,8 @@ func applySelectedOfferedSlot(session *Session, slot OfferedSlot) {
 	}
 	start := slot.StartTime
 	session.RequestedStartTime = &start
+	session.AvailabilityQuoteID = strings.TrimSpace(slot.AvailabilityQuoteID)
+	session.SlotFingerprint = strings.TrimSpace(slot.SlotFingerprint)
 	clearSlotTimePreference(session)
 	session.RequestedDate = start.Format("2006-01-02")
 	session.StaffID = slot.StaffID
@@ -1211,6 +1215,14 @@ func applySelectedOfferedSlot(session *Session, slot OfferedSlot) {
 		session.StaffName = slot.Segments[0].StaffName
 	}
 	session.OfferedSlots = nil
+}
+
+func clearSelectedAvailabilityQuote(session *Session) {
+	if session == nil {
+		return
+	}
+	session.AvailabilityQuoteID = ""
+	session.SlotFingerprint = ""
 }
 
 func bookingSegmentsFromServices(services []ServiceOption, session Session) []booking.BookingSegmentRequest {

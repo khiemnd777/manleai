@@ -492,7 +492,7 @@ func onboardingImportTargetState() *importTargetState {
 			SMSReminderEnabled:      true,
 			ReminderHoursBefore:     24,
 			HandoffEnabled:          true,
-			ConsultationEnabled:     true,
+			ConsultationEnabled:     false,
 		},
 		PublicCanPublish:             false,
 		CanEnableAIBooking:           false,
@@ -569,7 +569,7 @@ func planAIReceptionist(plan *importPlan) {
 	fieldChange(plan, SectionAI, "sms_reminder_enabled", boolString(target.SMSReminderEnabled), boolString(incoming.SMSReminderEnabled))
 	fieldChange(plan, SectionAI, "reminder_hours_before", intString(target.ReminderHoursBefore), intString(incoming.ReminderHoursBefore))
 	fieldChange(plan, SectionAI, "handoff_enabled", boolString(target.HandoffEnabled), boolString(incoming.HandoffEnabled))
-	if incoming.ConsultationEnabled && plan.Bundle.SchemaVersion == SchemaVersion {
+	if incoming.ConsultationEnabled {
 		switch {
 		case plan.Onboarding:
 			plan.ConsultationEnabled = false
@@ -580,12 +580,20 @@ func planAIReceptionist(plan *importPlan) {
 				Message: "AI consultation remains disabled until Square services are synced and the consultation profile pack is imported into the existing salon.",
 				Field:   "consultation_enabled",
 			})
-		case !plan.includes(SectionConsultation) || !plan.ConsultationReady:
+		case plan.Bundle.SchemaVersion == SchemaVersion && (!plan.includes(SectionConsultation) || !plan.ConsultationReady):
 			summary(plan, SectionAI).Conflicts++
 			plan.Conflicts = append(plan.Conflicts, ImportIssue{
 				Section: SectionAI,
 				Code:    "consultation_profiles_required",
 				Message: "AI consultation cannot be enabled because the v7 bundle does not resolve at least one ready profile to an eligible Square service.",
+				Field:   "consultation_enabled",
+			})
+		case plan.Bundle.SchemaVersion != SchemaVersion && !targetHasCompleteReadyConsultationProfile(plan.Target):
+			summary(plan, SectionAI).Conflicts++
+			plan.Conflicts = append(plan.Conflicts, ImportIssue{
+				Section: SectionAI,
+				Code:    "consultation_ready_profile_required",
+				Message: "AI consultation cannot be enabled because the target salon does not have a complete ready profile on an eligible Square service.",
 				Field:   "consultation_enabled",
 			})
 		default:
@@ -609,6 +617,21 @@ func planAIReceptionist(plan *importPlan) {
 	}
 	plan.BookingMode = incoming.BookingMode
 	fieldChange(plan, SectionAI, "booking_mode", target.BookingMode, incoming.BookingMode)
+}
+
+func targetHasCompleteReadyConsultationProfile(target *importTargetState) bool {
+	if target == nil {
+		return false
+	}
+	for key, profile := range target.ConsultationProfileByTarget {
+		if _, eligible := target.ConsultationTargetsByKey[key]; !eligible {
+			continue
+		}
+		if profile.Status == pos.ConsultationProfileStatusReady && len(profile.RecommendedOutcomes) > 0 && len(profile.CompatibleCurrentSystems) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func planPublicBookingPage(ctx context.Context, store ImportStore, salonID string, plan *importPlan) {
@@ -661,6 +684,15 @@ func planIntegrations(plan *importPlan) {
 	fieldChange(plan, SectionIntegrations, "square.redirect_url", target.Square.RedirectURL, incoming.Square.RedirectURL)
 	fieldChange(plan, SectionIntegrations, "square.api_version", target.Square.APIVersion, incoming.Square.APIVersion)
 	fieldChange(plan, SectionIntegrations, "square.api_base_url", target.Square.APIBaseURL, incoming.Square.APIBaseURL)
+	if strings.TrimSpace(target.Square.WebhookNotificationURL) != "" || strings.TrimSpace(incoming.Square.WebhookNotificationURL) != "" {
+		summary(plan, SectionIntegrations).Skipped++
+		plan.Warnings = append(plan.Warnings, ImportIssue{
+			Section: SectionIntegrations,
+			Code:    "square_webhook_configuration_preserved",
+			Message: "Square webhook URL and signature key are deployment-specific and are not imported. The target salon's webhook URL is preserved; configure it on the target when none exists.",
+			Field:   "square.webhook_notification_url",
+		})
+	}
 	fieldChange(plan, SectionIntegrations, "twilio.public_base_url", target.Twilio.PublicBaseURL, incoming.Twilio.PublicBaseURL)
 	fieldChange(plan, SectionIntegrations, "twilio.incoming_path", target.Twilio.IncomingPath, incoming.Twilio.IncomingPath)
 	fieldChange(plan, SectionIntegrations, "twilio.turn_path", target.Twilio.TurnPath, incoming.Twilio.TurnPath)
@@ -1048,7 +1080,7 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 		}
 	}
 	if bundleIncludes(bundle, SectionAI) && legacySchemaMissingConsultationSetting(bundle.SchemaVersion) {
-		bundle.AIReceptionist.ConsultationEnabled = true
+		bundle.AIReceptionist.ConsultationEnabled = false
 	}
 	if bundleIncludes(bundle, SectionAI) {
 		bundle.AIReceptionist = normalizeAIReceptionist(bundle.AIReceptionist)
@@ -1171,6 +1203,7 @@ func normalizeIntegrationConfigs(configs integrationconfig.IntegrationConfigsRes
 	configs.Square.RedirectURL = strings.TrimSpace(configs.Square.RedirectURL)
 	configs.Square.APIVersion = strings.TrimSpace(configs.Square.APIVersion)
 	configs.Square.APIBaseURL = strings.TrimRight(strings.TrimSpace(configs.Square.APIBaseURL), "/")
+	configs.Square.WebhookNotificationURL = strings.TrimSpace(configs.Square.WebhookNotificationURL)
 	configs.Twilio.Provider = integrationconfig.ProviderTwilio
 	configs.Twilio.PublicBaseURL = strings.TrimRight(strings.TrimSpace(configs.Twilio.PublicBaseURL), "/")
 	configs.Twilio.IncomingPath = defaultString(strings.TrimSpace(configs.Twilio.IncomingPath), "/api/voice/twilio/incoming")
@@ -1297,6 +1330,12 @@ func validateIntegrationURLs(configs integrationconfig.IntegrationConfigsRespons
 		}
 		parsed, err := url.ParseRequestURI(value)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return ErrValidation
+		}
+	}
+	if value := strings.TrimSpace(configs.Square.WebhookNotificationURL); value != "" {
+		parsed, err := url.ParseRequestURI(value)
+		if err != nil || !strings.EqualFold(parsed.Scheme, "https") || parsed.Host == "" {
 			return ErrValidation
 		}
 	}
@@ -1609,7 +1648,7 @@ func serviceConsultationProfileEqual(a ServiceConsultationProfileExport, b Servi
 
 func secretReentryProviders(configs integrationconfig.IntegrationConfigsResponse) []string {
 	providers := []string{}
-	if configs.Square.ClientSecretConfigured {
+	if configs.Square.ClientSecretConfigured || configs.Square.WebhookSignatureKeyConfigured {
 		providers = append(providers, integrationconfig.ProviderSquare)
 	}
 	if configs.Twilio.AuthTokenConfigured {

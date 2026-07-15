@@ -101,6 +101,22 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 		return fallback
 	}
 	interpreted.ModelInvoked = true
+	// A validated safety concern must not be discarded because an unrelated part
+	// of the model reply is malformed or has lower confidence. The caller is
+	// handed off before any other interpreted fields are consumed.
+	if safety, ok := validateSafetyAssessment(interpreted.Safety); ok && safety.Concern {
+		interpreted.Acts = nil
+		interpreted.Questions = nil
+		interpreted.Consultation = ConsultationNeedProfile{}
+		interpreted.ConsultationMutations = nil
+		interpreted.Safety = safety
+		interpreted.Source = "structured_ai"
+		interpreted.InterpreterOutcome = TurnInterpreterOutcomeAccepted
+		recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathStructuredAI, map[string]string{
+			"turn_interpreter_outcome": interpreted.InterpreterOutcome,
+		})
+		return interpreted
+	}
 	if validated, ok := validateTurnUnderstanding(interpreted, session, semanticServices, semanticStaff); ok {
 		validated.Source = "structured_ai"
 		validated.InterpreterOutcome = TurnInterpreterOutcomeAccepted
@@ -110,7 +126,9 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 				validated.Acts[index].Entity = defaultConversationActEntity(validated.Acts[index].Kind)
 			}
 		}
-		if len(validated.Acts) == 0 && len(validated.Questions) == 0 && (validated.Goal == "" || validated.Goal == "unknown") {
+		if len(validated.Acts) == 0 && len(validated.Questions) == 0 && len(validated.ConsultationMutations) == 0 &&
+			!validated.Safety.Concern && !meaningfulConsultationNeeds(validated.Consultation) &&
+			(validated.Goal == "" || validated.Goal == "unknown") {
 			fallback.InterpreterOutcome = "empty_understanding"
 			fallback.Reason = "semantic_interpreter_empty_understanding"
 			recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathProviderFallback, map[string]string{
@@ -124,13 +142,16 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 				"turn_interpreter_outcome": "catalog_fallback",
 			})
 			return TurnUnderstanding{
-				Goal:               validated.Goal,
-				Confidence:         validated.Confidence,
-				Reason:             "catalog_backed_service_edit_fallback",
-				Source:             "catalog_fallback",
-				ModelInvoked:       true,
-				CatalogFallback:    true,
-				InterpreterOutcome: "catalog_fallback",
+				Goal:                  validated.Goal,
+				Confidence:            validated.Confidence,
+				Reason:                "catalog_backed_service_edit_fallback",
+				Consultation:          validated.Consultation,
+				ConsultationMutations: append([]ConsultationNeedMutation(nil), validated.ConsultationMutations...),
+				Safety:                validated.Safety,
+				Source:                "catalog_fallback",
+				ModelInvoked:          true,
+				CatalogFallback:       true,
+				InterpreterOutcome:    "catalog_fallback",
 			}
 		}
 		validated = reconcileSemanticServiceTargets(validated, catalogUnderstanding)
@@ -161,6 +182,14 @@ func rejectedTurnUnderstandingOutcome(turn TurnUnderstanding, services []Service
 		if question.Confidence > 0 && question.Confidence < 0.78 {
 			return TurnInterpreterOutcomeLowConfidence
 		}
+	}
+	for _, mutation := range turn.ConsultationMutations {
+		if mutation.Confidence > 0 && mutation.Confidence < 0.78 {
+			return TurnInterpreterOutcomeLowConfidence
+		}
+	}
+	if turn.Safety.Concern && turn.Safety.Confidence < 0.78 {
+		return TurnInterpreterOutcomeLowConfidence
 	}
 	validServices := stringSet(serviceOptionIDs(services))
 	validStaff := map[string]bool{}
@@ -196,6 +225,16 @@ func rejectedTurnUnderstandingOutcome(turn TurnUnderstanding, services []Service
 	for _, id := range turn.Consultation.ComparedServiceIDs {
 		if !validServices[strings.TrimSpace(id)] {
 			return TurnInterpreterOutcomeCatalogRejected
+		}
+	}
+	for _, mutation := range turn.ConsultationMutations {
+		if mutation.Field != ConsultationNeedFieldComparedServiceIDs {
+			continue
+		}
+		for _, id := range mutation.Values {
+			if !validServices[strings.TrimSpace(id)] {
+				return TurnInterpreterOutcomeCatalogRejected
+			}
 		}
 	}
 	return TurnInterpreterOutcomeSchemaInvalid
@@ -1161,9 +1200,23 @@ func validateTurnUnderstanding(turn TurnUnderstanding, session Session, services
 	if !ok {
 		return TurnUnderstanding{}, false
 	}
+	currentConsultationNeeds := ConsultationNeedProfile{}
+	if state := normalizedDialogState(session.DialogState); consultationStateActive(state.Consultation) {
+		currentConsultationNeeds = state.Consultation.Needs
+	}
+	mutations, ok := validateConsultationNeedMutations(turn.ConsultationMutations, currentConsultationNeeds, validServices)
+	if !ok {
+		return TurnUnderstanding{}, false
+	}
+	safety, ok := validateSafetyAssessment(turn.Safety)
+	if !ok {
+		return TurnUnderstanding{}, false
+	}
 	turn.Acts = validatedActs
 	turn.Questions = validatedQuestions
 	turn.Consultation = consultation
+	turn.ConsultationMutations = mutations
+	turn.Safety = safety
 	if len(turn.Acts) == 0 && len(turn.Questions) == 0 {
 		return turn, true
 	}
@@ -1237,6 +1290,192 @@ func allowedConsultationValue(value string, allowed ...string) bool {
 		}
 	}
 	return false
+}
+
+func validateConsultationNeedMutations(mutations []ConsultationNeedMutation, current ConsultationNeedProfile, validServices map[string]bool) ([]ConsultationNeedMutation, bool) {
+	if len(mutations) > 16 {
+		return nil, false
+	}
+	validated := make([]ConsultationNeedMutation, 0, len(mutations))
+	for _, mutation := range mutations {
+		mutation.Field = strings.TrimSpace(mutation.Field)
+		mutation.Operation = strings.TrimSpace(mutation.Operation)
+		mutation.Reason = strings.TrimSpace(mutation.Reason)
+		if mutation.Confidence < 0.78 || !allowedConsultationValue(mutation.Operation,
+			ConsultationNeedOperationSet, ConsultationNeedOperationReplace, ConsultationNeedOperationAdd,
+			ConsultationNeedOperationRemove, ConsultationNeedOperationClear) {
+			return nil, false
+		}
+
+		isScalar := mutation.Field == ConsultationNeedFieldCurrentSystem || mutation.Field == ConsultationNeedFieldDesiredOutcome || mutation.Field == ConsultationNeedFieldLengthChange
+		isList := mutation.Field == ConsultationNeedFieldPriorities || mutation.Field == ConsultationNeedFieldDesiredFinishes || mutation.Field == ConsultationNeedFieldComparedServiceIDs
+		if !isScalar && !isList {
+			return nil, false
+		}
+		if mutation.Operation == ConsultationNeedOperationClear {
+			if len(mutation.Values) != 0 {
+				return nil, false
+			}
+			if !consultationNeedMutationValidForState(current, mutation) {
+				return nil, false
+			}
+			validated = append(validated, mutation)
+			applyConsultationNeedMutation(&current, mutation)
+			continue
+		}
+		if isScalar && mutation.Operation != ConsultationNeedOperationSet && mutation.Operation != ConsultationNeedOperationReplace {
+			return nil, false
+		}
+		if len(mutation.Values) == 0 || (isScalar && len(mutation.Values) != 1) {
+			return nil, false
+		}
+		values := make([]string, 0, len(mutation.Values))
+		seen := map[string]bool{}
+		for _, value := range mutation.Values {
+			value = strings.TrimSpace(value)
+			if value == "" || !validConsultationMutationValue(mutation.Field, value, validServices) {
+				return nil, false
+			}
+			if seen[value] {
+				continue
+			}
+			seen[value] = true
+			values = append(values, value)
+		}
+		mutation.Values = values
+		if !consultationNeedMutationValidForState(current, mutation) {
+			return nil, false
+		}
+		validated = append(validated, mutation)
+		applyConsultationNeedMutation(&current, mutation)
+	}
+	return validated, true
+}
+
+func consultationNeedMutationValidForState(current ConsultationNeedProfile, mutation ConsultationNeedMutation) bool {
+	if mutation.Operation == ConsultationNeedOperationClear {
+		return consultationNeedFieldHasValue(current, mutation.Field)
+	}
+	if mutation.Field == ConsultationNeedFieldCurrentSystem || mutation.Field == ConsultationNeedFieldDesiredOutcome || mutation.Field == ConsultationNeedFieldLengthChange {
+		currentValue := consultationScalarNeedValue(current, mutation.Field)
+		if len(mutation.Values) != 1 {
+			return false
+		}
+		switch mutation.Operation {
+		case ConsultationNeedOperationSet:
+			return currentValue == ""
+		case ConsultationNeedOperationReplace:
+			return currentValue != "" && currentValue != mutation.Values[0]
+		default:
+			return false
+		}
+	}
+
+	currentValues := consultationListNeedValues(current, mutation.Field)
+	switch mutation.Operation {
+	case ConsultationNeedOperationSet:
+		return len(currentValues) == 0
+	case ConsultationNeedOperationReplace:
+		return len(currentValues) > 0 && !sameConsultationValueSet(currentValues, mutation.Values)
+	case ConsultationNeedOperationAdd:
+		present := stringSet(currentValues)
+		for _, value := range mutation.Values {
+			if !present[value] {
+				return true
+			}
+		}
+		return false
+	case ConsultationNeedOperationRemove:
+		present := stringSet(currentValues)
+		for _, value := range mutation.Values {
+			if !present[value] {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func consultationNeedFieldHasValue(current ConsultationNeedProfile, field string) bool {
+	if field == ConsultationNeedFieldCurrentSystem || field == ConsultationNeedFieldDesiredOutcome || field == ConsultationNeedFieldLengthChange {
+		return consultationScalarNeedValue(current, field) != ""
+	}
+	return len(consultationListNeedValues(current, field)) > 0
+}
+
+func consultationScalarNeedValue(current ConsultationNeedProfile, field string) string {
+	switch field {
+	case ConsultationNeedFieldCurrentSystem:
+		return strings.TrimSpace(current.CurrentSystem)
+	case ConsultationNeedFieldDesiredOutcome:
+		return strings.TrimSpace(current.DesiredOutcome)
+	case ConsultationNeedFieldLengthChange:
+		return strings.TrimSpace(current.LengthChange)
+	default:
+		return ""
+	}
+}
+
+func consultationListNeedValues(current ConsultationNeedProfile, field string) []string {
+	switch field {
+	case ConsultationNeedFieldPriorities:
+		return current.Priorities
+	case ConsultationNeedFieldDesiredFinishes:
+		return current.DesiredFinishes
+	case ConsultationNeedFieldComparedServiceIDs:
+		return current.ComparedServiceIDs
+	default:
+		return nil
+	}
+}
+
+func sameConsultationValueSet(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	rightSet := stringSet(right)
+	for _, value := range left {
+		if !rightSet[strings.TrimSpace(value)] {
+			return false
+		}
+	}
+	return true
+}
+
+func validConsultationMutationValue(field string, value string, validServices map[string]bool) bool {
+	switch field {
+	case ConsultationNeedFieldCurrentSystem:
+		return allowedConsultationValue(value, ConsultationSystemNatural, ConsultationSystemRegularPolish, ConsultationSystemGel, ConsultationSystemDip, ConsultationSystemAcrylic, ConsultationSystemExtension)
+	case ConsultationNeedFieldDesiredOutcome:
+		return allowedConsultationValue(value, ConsultationOutcomeMaintain, ConsultationOutcomeShorten, ConsultationOutcomeAddLength, ConsultationOutcomeAddStrength, ConsultationOutcomeRepair, ConsultationOutcomeRemoval, ConsultationOutcomeColorRefresh, ConsultationOutcomeCompare)
+	case ConsultationNeedFieldLengthChange:
+		return allowedConsultationValue(value, ConsultationLengthKeep, ConsultationLengthShorten, ConsultationLengthAddLength)
+	case ConsultationNeedFieldPriorities:
+		return allowedConsultationValue(value, ConsultationPriorityDurability, ConsultationPriorityLowerMaintenance, ConsultationPriorityLowerCost, ConsultationPriorityShorterVisit)
+	case ConsultationNeedFieldDesiredFinishes:
+		return allowedConsultationValue(value, ConsultationFinishNatural, ConsultationFinishRegularPolish, ConsultationFinishGelPolish, ConsultationFinishGlossy, ConsultationFinishMatte, ConsultationFinishNailArt)
+	case ConsultationNeedFieldComparedServiceIDs:
+		return validServices[value]
+	default:
+		return false
+	}
+}
+
+func validateSafetyAssessment(safety SafetyAssessment) (SafetyAssessment, bool) {
+	safety.Category = strings.TrimSpace(safety.Category)
+	safety.Reason = strings.TrimSpace(safety.Reason)
+	if !safety.Concern {
+		safety.Category = ""
+		return safety, true
+	}
+	if safety.Confidence < 0.78 || !allowedConsultationValue(safety.Category,
+		SafetyCategoryPain, SafetyCategoryInjury, SafetyCategoryInfection, SafetyCategoryAllergy,
+		SafetyCategoryBleeding, SafetyCategorySwelling, SafetyCategoryMedicalSuitability, SafetyCategoryOtherHealth) {
+		return SafetyAssessment{}, false
+	}
+	return safety, true
 }
 
 func partyGuestRefExists(plan *PartyPlan, guestRef string) bool {

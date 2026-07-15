@@ -106,6 +106,27 @@ customers. Business hours use provider-native period semantics instead of a
 single open/close pair per day, and booking availability filters require a slot
 to fit inside one imported period.
 
+Square pull sync paginates Catalog, Team/Booking Profiles, and Customers until
+cursor exhaustion and rejects a repeated cursor. Service variations must be
+available for booking with a positive normalized duration. Staff must be both
+an active Team member at the selected location and have a bookable Booking
+Profile. A complete provider snapshot is applied transactionally; rows missing
+from the snapshot are disabled/unmapped, and provider sync cannot re-enable an
+owner-disabled `ai_bookable` choice. Full imports reserve a monotonic
+salon/provider snapshot generation before provider reads. The transaction
+revalidates both that generation and the selected location before mutating
+canonical records; a location switch or a newer import rejects stale work.
+Beginning a snapshot clears the prior `last_sync_at`, and only an active
+successful completion restores it; a failed generation cannot remain visually
+or operationally "synced" through an older timestamp.
+
+Range-scoped calendar import uses the same fence discipline independently of a
+full catalog sync. The booking service captures one owner-scoped active
+provider/location/generation fence, the adapter revalidates it on every page,
+and the booking repository revalidates it again in the mirror transaction
+before any row mutation. Stale imports fail atomically and cannot mix bookings
+or customer data from two provider locations.
+
 Provider-neutral availability input carries the salon timezone. Date-only
 queries represent one salon-local calendar day; adapters convert local midnight
 and the next local midnight to provider timestamps. Calendar-day arithmetic is
@@ -183,6 +204,73 @@ provider rejection may be retry-safe. A transport failure, HTTP 5xx, truncated
 success response, decode failure, or post-write lookup failure has an unknown
 outcome unless the adapter can prove the mutation was rejected. Unknown writes
 require POS reconciliation and must not be retried with a new operation key.
+
+The durable processing lease preserves the same phase distinction across a
+process crash. Recovery acquires the calendar advisory lock before row locks and
+first converges an exact authoritative create/reschedule/cancel mirror when one
+already exists. Without that proof, `provider_outcome=not_started` records a
+definitive failed, retry-safe fallback without reconciliation, while
+`provider_outcome=in_flight` records an unknown, retry-blocked fallback and
+opens reconciliation. Owner reads and the background sweep use the same
+idempotent transaction and deduplicated notification/outbox keys.
+
+Historical fingerprint dedupe follows the same phase boundary. V39 may
+auto-supersede only a duplicate with `provider_outcome=not_started`; it aborts
+if one fingerprint group has multiple attempts whose dispatch may have begun.
+Superseded attempts are terminal and cannot be reacquired, lease-swept,
+started, or finalized by stale workers.
+
+Every create/reschedule writer consumes one persisted availability quote. The
+quote binds salon, provider, selected location and snapshot generation, request
+fingerprint, expiry, one selected slot, ordered segments, time range, and one
+consuming booking attempt. HTTP clients submit the proof; conversation paths
+refresh the exact backend-owned proof immediately before dispatch and refresh
+all party children before the first child write. A safe retry is a new operation
+key with the exact prior logical request fingerprint, a fresh current provider
+fence, and an atomic supersession link; changing booking details is a new
+request, not a retry. A generation-only change invalidates an old quote but does
+not change the logical fingerprint. Retry remains allowed only when the stored
+location, ordered raw provider service/staff identities and versions, and target
+appointment baseline still match current provider-synced state. An
+unknown or provider-pending write creates a reconciliation task. Resolution may
+attach only a tenant-scoped provider-synced candidate revalidated under lock,
+record a verified definitive non-creation, or remain escalated and blocked.
+Appointment mutations store the target provider version before dispatch.
+Reschedule/cancel reconciliation requires a provider-synced version newer than
+that baseline; reschedule also requires the exact requested range and ordered
+service/staff assignments. `not_created` treats the existing target booking ID
+as context, not proof that the requested mutation was applied. Calendar import
+persists the originating location fence on its mirror attempt. Reschedule and
+cancel owner lookup/action claims join that immutable origin to the current
+active synchronized connection and require an exact location match; cancel now
+carries the current fence through `pos.CancelInput`. Same-location generation
+advancement is allowed only after current raw mappings and the target baseline
+are revalidated. A location switch or legacy missing origin makes the action
+unavailable with zero provider calls instead of implicitly moving a booking.
+Calendar import
+and reconciliation resolution share one salon-scoped transaction advisory lock
+before either path locks attempt or appointment rows. Equal-version calendar
+enrichment and action resolution require an exact match against the locked
+persisted status, range, version, provider customer identity, and ordered raw
+service/staff snapshot.
+Direct success, fallback finalization, and lease recovery use that same lock
+order. A newer authoritative mirror is preserved and may complete the operation
+only when the create booking ID/range/segments, reschedule range and ordered
+canonical/raw segments, or cancelled target state match exactly; mismatches
+remain unconfirmed and reconciliation-required.
+
+Availability quotes are bounded operational evidence. A worker cleanup keeps a
+24-hour grace after unconsumed quote expiry, retains orphaned consumed quotes
+for 30 days after consumption, and skips every quote still referenced by a
+booking attempt or its recorded consumer. The cleanup uses bounded
+`FOR UPDATE SKIP LOCKED` batches; deleting an eligible quote cascades only to
+its quote-slot rows and never mutates the booking-attempt audit ledger.
+
+Booking webhooks remain provider-specific inbound adapters. Their raw signature
+validation, tenant routing, event dedupe, claim fencing, provider retrieval,
+and error mapping stay inside `modules/pos_square`; the normalized calendar
+mirror write remains in `modules/booking`. A webhook body is never direct
+confirmation evidence.
 
 ## Adding Future Providers
 

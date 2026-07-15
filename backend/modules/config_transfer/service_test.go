@@ -195,6 +195,44 @@ func TestPreviewImportSkipsUnsafeAIBookingEnablement(t *testing.T) {
 	}
 }
 
+func TestPreviewImportExplicitlyPreservesTargetSquareWebhookConfiguration(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
+	targetIntegrations := testIntegrationResponse(updatedAt)
+	targetIntegrations.Square.WebhookNotificationURL = "https://target.example.com/api/integrations/square/webhook"
+	service := newTestService(updatedAt)
+	service.integrations = &fakeIntegrationReader{response: targetIntegrations}
+	service.imports = &fakeImportStore{publicCanPublish: true, canEnableAI: true}
+	bundle := testImportBundle(updatedAt)
+	bundle.Integrations.Square.WebhookNotificationURL = "https://source.example.com/api/integrations/square/webhook"
+	bundle.Integrations.Square.ClientSecretConfigured = false
+	bundle.Integrations.Square.WebhookSignatureKeyConfigured = true
+
+	result, err := service.PreviewImport(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "req-preserve-square-webhook",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("PreviewImport returned error: %v", err)
+	}
+	if !hasIssueCode(result.Warnings, "square_webhook_configuration_preserved") {
+		t.Fatalf("warnings = %#v, want explicit Square webhook preservation warning", result.Warnings)
+	}
+	if sectionSummary(result.Summary, SectionIntegrations).Skipped == 0 {
+		t.Fatalf("integration summary = %#v, want skipped deployment-specific webhook field", result.Summary)
+	}
+	if len(result.RequiresSecretReentry) != 3 || result.RequiresSecretReentry[1] != integrationconfig.ProviderSquare {
+		t.Fatalf("secret re-entry providers = %#v, want Square included for webhook signature key", result.RequiresSecretReentry)
+	}
+}
+
+func TestNormalizeImportRejectsInsecureSquareWebhookReferenceURL(t *testing.T) {
+	bundle := testImportBundle(time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC))
+	bundle.Integrations.Square.WebhookNotificationURL = "http://source.example.com/api/integrations/square/webhook"
+	if _, err := normalizeImportBundle(bundle); !errors.Is(err, ErrValidation) {
+		t.Fatalf("normalize error = %v, want ErrValidation for non-HTTPS Square webhook URL", err)
+	}
+}
+
 func TestApplyImportIsIdempotentForKnowledgeSourceKeys(t *testing.T) {
 	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
 	knowledge := &fakeKnowledgeReader{items: []training.KnowledgeItem{}}
@@ -642,6 +680,67 @@ func TestNormalizeV6BundlePreservesExplicitConsultationToggle(t *testing.T) {
 	}
 	if normalized.ConsultationProfiles.Count != 0 || len(normalized.ConsultationProfiles.Items) != 0 {
 		t.Fatalf("v6 should not import v7 consultation profile data: %#v", normalized.ConsultationProfiles)
+	}
+}
+
+func TestPlanV6ConsultationEnablementRequiresExistingCompleteReadyProfile(t *testing.T) {
+	targetKey := serviceAliasTargetKey(ServiceAliasTargetExport{Name: "Structured Gel Manicure", DurationMinutes: 60})
+	newPlan := func(target *importTargetState) *importPlan {
+		return &importPlan{
+			Bundle: ConfigurationBundle{
+				SchemaVersion: LegacySchemaV6,
+				AIReceptionist: AIReceptionistExport{
+					ConsultationEnabled: true,
+				},
+			},
+			SchemaVersion:       LegacySchemaV6,
+			Target:              target,
+			Summary:             newSummaryMap([]string{SectionAI}),
+			IncludedSections:    map[string]bool{SectionAI: true},
+			ConsultationEnabled: target.AIReceptionist.ConsultationEnabled,
+		}
+	}
+
+	missing := newPlan(&importTargetState{
+		ConsultationProfileByTarget: map[string]ServiceConsultationProfileExport{},
+		ConsultationTargetsByKey:    map[string]importServiceTarget{},
+	})
+	planAIReceptionist(missing)
+	if missing.ConsultationEnabled || len(missing.Conflicts) != 1 || missing.Conflicts[0].Code != "consultation_ready_profile_required" {
+		t.Fatalf("v6 enablement without a complete eligible profile = %#v", missing)
+	}
+
+	incomplete := newPlan(&importTargetState{
+		ConsultationProfileByTarget: map[string]ServiceConsultationProfileExport{
+			targetKey: {
+				Status:              pos.ConsultationProfileStatusReady,
+				RecommendedOutcomes: []string{pos.ConsultationOutcomeMaintain},
+			},
+		},
+		ConsultationTargetsByKey: map[string]importServiceTarget{
+			targetKey: {ServiceID: "service_gel", ConsultationEligible: true},
+		},
+	})
+	planAIReceptionist(incomplete)
+	if incomplete.ConsultationEnabled || len(incomplete.Conflicts) != 1 {
+		t.Fatalf("v6 enablement accepted an incomplete ready profile = %#v", incomplete)
+	}
+
+	ready := newPlan(&importTargetState{
+		ConsultationProfileByTarget: map[string]ServiceConsultationProfileExport{
+			targetKey: {
+				Status:                   pos.ConsultationProfileStatusReady,
+				RecommendedOutcomes:      []string{pos.ConsultationOutcomeMaintain},
+				CompatibleCurrentSystems: []string{pos.ConsultationSystemNatural},
+			},
+		},
+		ConsultationTargetsByKey: map[string]importServiceTarget{
+			targetKey: {ServiceID: "service_gel", ConsultationEligible: true},
+		},
+	})
+	planAIReceptionist(ready)
+	if !ready.ConsultationEnabled || len(ready.Conflicts) != 0 {
+		t.Fatalf("v6 enablement with a complete eligible profile = %#v", ready)
 	}
 }
 

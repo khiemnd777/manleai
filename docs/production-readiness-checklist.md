@@ -112,13 +112,14 @@
 
 ## Production Answer Routing
 
-- [x] Load service, alias, category, staff, knowledge, and business-hour answer context once per salon turn window instead of scattering source reads.
+- [x] Load service, alias, category, staff, knowledge, and business-hour answer context once per salon turn window, but validate a database-owned provider/location/generation/readiness fence on every turn and double-read it around cache misses.
 - [x] Answer service/menu questions from active-provider, POS-linked, synced, AI-bookable services only.
 - [x] Answer open/close questions from imported business hour periods before owner-authored knowledge.
 - [x] Answer staff questions from active-provider staff records without exposing inactive or non-bookable staff as confirmed booking options.
 - [x] Route incomplete availability questions into booking-detail prompts instead of guessing availability or creating bookings.
 - [x] Use owner-authored knowledge only after structured service, hours, staff, and availability sources do not answer the request.
 - [x] Record answer source, reason, confidence, source record IDs, router intent, and answer-context cache state in transcript metadata.
+- [x] Fail structured answer context closed during provider switching/syncing so no replica serves stale service, alias, staff, or business-hour data from a local cache.
 
 ## Product-Grade Semantic Turns And Final Review
 
@@ -130,6 +131,7 @@
 - [x] Clarify whether an added same-category service is for the caller or another guest before mutating the draft when guest scope is missing.
 - [x] Require explicit final-review authorization before production call-session booking writes; review acceptance itself is never confirmed wording.
 - [x] Add a strict structured semantic-turn interpreter that is data-minimized, catalog-validated, confidence-gated, and unable to call POS or mutate state directly.
+- [x] Make validated field-level consultation mutations the sole persistence authority for need fields; free-standing semantic snapshots cannot overwrite scalar or list state.
 - [x] Add golden transcript and invariant tests for directional switching, stale pending escape, review corrections, duplicate-safe turn handling, and bounded clarification handoff.
 - [x] Route every configured-production freeform orchestration turn through the state-driven Turn Kernel; use deterministic fast/answer/action/recovery lanes when coverage is complete and a multi-act semantic lane for correction, ambiguity, or partial coverage without a keyword-only gate.
 - [x] Bound semantic interpretation to 2.5 seconds, scope service/staff context to the active turn, and expose PII-free route, expected-input, context-size, and interpreter-outcome diagnostics.
@@ -139,6 +141,8 @@
 - [x] Keep a bounded mutation history for repeated undo without storing control state only in transcript metadata.
 - [x] Preserve the draft and clarify or hand off when semantic interpretation is disabled, unavailable, low-confidence, malformed, or contains invented catalog IDs.
 - [x] Keep completed party-plan service corrections out of generic single-draft fallback; collect target, guest/group, operation, and replacement source as typed pending state, resolve short replies without another model call, mutate only the selected group, prevent duplicate adds, block booking while unresolved, and invalidate slots/review only after resolution.
+- [x] Serialize each production conversation session before its first state read and retain the lock across availability/POS side effects and the state/transcript commit; keep event-key dedupe and `state_revision` compare-and-swap as defense in depth.
+- [x] Persist provider event keys on both customer and AI transcript rows so an older-event retry returns its exact historical AI reply without mutating newer session state or repeating booking side effects.
 
 ## Party Booking
 
@@ -158,6 +162,35 @@
 - [x] Add provider switch readiness, switch run persistence, service/staff/customer match review, dry-run readiness, and gated import wizard shell.
 - [x] Keep provider switch import, dry-run, and activation disabled while Square Appointments is the only native POS adapter.
 - [ ] Enable executable alternate-provider import, dry-run, and activation only after a real alternate adapter exists.
+
+## Booking Integrity And Square Calendar Recovery
+
+- [x] Persist booking operation fingerprints, provider idempotency keys, processing leases, provider outcomes, retry policies, retry lineage, and atomic supersession.
+- [x] Auto-supersede historical duplicate fingerprints only when provider dispatch is proven not started; fail migration closed when multiple dispatched/unknown outcomes require POS reconciliation.
+- [x] Recover exact authoritative calendar outcomes before lease fallback; otherwise treat expired pre-dispatch (`not_started`) leases as definitive retry-safe fallbacks, keep expired `in_flight` writes unknown/reconciliation-required, and dedupe repeated worker/read recovery outputs.
+- [x] Schedule lease recovery independently from long-running Square webhook and calendar-repair batches while preventing overlap within each recurring worker job.
+- [x] Require single-use, location/generation-fenced, exact ordered-segment availability quotes for every create/reschedule path; refresh conversation and all party-child proofs before the first applicable POS write and return explicit required/stale conflicts.
+- [x] Bound availability-quote retention work with a five-minute cleanup cadence, at most eight batches of 250 quotes per run, a 24-hour post-expiry grace, 30-day orphan-consumed audit retention, and booking-attempt reference preservation.
+- [x] Keep unknown and provider-pending outcomes unconfirmed, create tenant-scoped reconciliation tasks, and revalidate exact provider-synced candidates under lock before attachment.
+- [x] Capture the pre-write provider version for reschedule/cancel and require a newer exact provider mirror before resolving the mutation as applied.
+- [x] Bind reschedule/cancel to the target booking's immutable originating provider location, pass a current exact fence through cancellation, and fail location switches or legacy missing origins before provider dispatch.
+- [x] Validate direct reschedule/cancel response identity and version, serialize persistence with calendar import, and never overwrite a newer stored provider version.
+- [x] Converge direct success, fallback, and lease recovery with exact authoritative calendar mirrors under one advisory-first lock order; require full canonical/raw segment proof and preserve newer provider versions.
+- [x] Allow equal-version calendar re-import to enrich only missing customer/service/staff mappings after exact locked status/time/version/raw-segment equality; conflicting snapshots cannot enrich mappings or resolve an action.
+- [x] Serialize reconciliation resolution with calendar mirror imports per salon before row locking to prevent phantom `not_created` decisions and lock-order deadlocks.
+- [x] Preserve operation keys only for identical logical intent (excluding refreshed ephemeral quote proof); lock safe-retry fields and require the original time/assignment to remain available.
+- [x] Require non-empty operation keys at HTTP and service boundaries, and recover semantic create/reschedule/cancel replays before current catalog or mutated-target validation; refreshed ephemeral quote proof does not change replay identity, so successful response-loss retries never dispatch a second POS write.
+- [x] Keep snapshot generation out of the logical operation fingerprint, require a fresh current-generation quote for a new dispatch, and allow retry only when stored location, ordered raw provider mappings/versions, and appointment target baseline still match.
+- [x] Import only Square service variations available for booking with positive duration and staff present in both the selected-location active Team and bookable Booking Profiles; apply snapshots atomically without re-enabling owner-disabled AI eligibility.
+- [x] Fence full provider snapshots by selected location and monotonic generation so location switches and out-of-order concurrent syncs cannot overwrite newer imported truth.
+- [x] Fence catalog resolution, schedule, availability, quote persistence/consumption, booking attempt, and provider dispatch with the same selected location and snapshot generation; force one trusted Square resync when V43 first introduces the fence.
+- [x] Fence range-scoped calendar pagination and mirror persistence with one captured provider location/generation, reject cross-location provider rows, and make a stale fence a zero-write failure.
+- [x] Clear completed-sync freshness when a snapshot begins or fails, and restore `last_sync_at` only after an active successful generation completes.
+- [x] Verify Square webhook signatures against dashboard-stored salon configuration, reject conflicting root/nested location IDs, dedupe event IDs, claim-token fence event and repair completion, and prevent stale provider versions from overwriting newer calendar truth.
+- [x] Keep scheduled calendar repair health separate from OAuth/catalog connection readiness.
+- [ ] Add a production external delivery consumer and operations policy for durable owner-notification outbox rows.
+- [ ] Add authenticated webhook backlog/dead-letter/replay and recent-delivery/repair health observability before claiming end-to-end webhook operations readiness.
+- [ ] Fail runtime Square/Twilio/OpenAI configuration resolution closed on repository or decryption errors; permit legacy bootstrap fallback only for an exact missing stored salon configuration.
 
 ## Public Catalog And Landing App
 
@@ -194,11 +227,11 @@
 - [x] Cancel streaming speech on barge-in, clear Twilio playback, reject stale generations, and close terminal replies only after a Twilio playback mark or timeout.
 - [x] Expose owner-scoped, PII-free realtime admission and output-validation diagnostics in the Calls timeline without transcript or audio bodies.
 - [x] Keep operational facts deterministic and allow guarded LLM rewriting only for explicitly style-only replies.
-- [x] Persist structured service consultation profiles with stable `(salon_id, service_id)` ownership, controlled values, owner-approved copy, no-op identical retries, and revision increments only when data changes.
-- [x] Rank only active-provider, POS-linked, AI-bookable services whose consultation profile is `ready`; record recommendation reasons and profile revisions for audit.
-- [x] Keep semantic consultation output extraction-only and unable to recommend services, mutate booking state, or call availability/POS tools.
+- [x] Persist structured service consultation profiles with stable `(salon_id, service_id)` ownership, controlled values, owner-approved copy, no-op identical retries, revision increments only when data changes, and a fail-closed `ready` contract requiring both a recommended outcome and compatible current system.
+- [x] Default salon consultation to disabled, reject enablement without at least one fully eligible profile, and rank only active-provider, POS-linked, AI-bookable services whose consultation profile satisfies the complete `ready` contract; record recommendation reasons and profile revisions for audit.
+- [x] Keep semantic consultation output extraction-only and unable to recommend services, mutate booking state, or call availability/POS tools; validate field-level set/replace/add/remove/clear semantics before the backend reducer applies them.
 - [x] Persist active consultation needs, candidates, recommendations, selection, resume phase, no-progress count, and exit reason in versioned `dialog_state`; transcript metadata remains audit evidence.
 - [x] Require both a concrete service selection and explicit booking intent before transitioning from consultation to booking, and preserve an existing booking draft across consultation detours.
-- [x] Support consultation-only completion with `consultation_completed`, bounded unresolved handoff, and safety handoff without medical advice.
+- [x] Support consultation-only completion with `consultation_completed`, bounded unresolved handoff, and global deterministic plus structured safety handoff before any mutation or tool action, without medical advice.
 - [x] Keep cancel, reschedule, handoff, and active party-plan actions ahead of consultation routing.
 - [x] Expose per-service consultation profile controls in Services, the salon-wide toggle and coverage in Settings, and typed consultation audit state in Calls.

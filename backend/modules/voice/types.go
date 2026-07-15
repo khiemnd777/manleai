@@ -147,19 +147,36 @@ type TurnModelReply struct {
 	Confidence   float64                `json:"confidence"`
 	Reason       string                 `json:"reason"`
 	Consultation ConsultationModelReply `json:"consultation"`
+	Safety       SafetyModelReply       `json:"safety"`
 }
 
 type ConsultationModelReply struct {
-	CurrentSystem        string   `json:"current_system"`
-	DesiredOutcome       string   `json:"desired_outcome"`
-	LengthChange         string   `json:"length_change"`
-	Priorities           []string `json:"priorities"`
-	DesiredFinishes      []string `json:"desired_finishes"`
-	ComparedServiceIDs   []string `json:"compared_service_ids"`
-	BookingRequested     bool     `json:"booking_requested"`
-	ConversationComplete bool     `json:"conversation_complete"`
-	Confidence           float64  `json:"confidence"`
-	Reason               string   `json:"reason"`
+	CurrentSystem        string                           `json:"current_system"`
+	DesiredOutcome       string                           `json:"desired_outcome"`
+	LengthChange         string                           `json:"length_change"`
+	Priorities           []string                         `json:"priorities"`
+	DesiredFinishes      []string                         `json:"desired_finishes"`
+	ComparedServiceIDs   []string                         `json:"compared_service_ids"`
+	BookingRequested     bool                             `json:"booking_requested"`
+	ConversationComplete bool                             `json:"conversation_complete"`
+	Confidence           float64                          `json:"confidence"`
+	Reason               string                           `json:"reason"`
+	Mutations            []ConsultationMutationModelReply `json:"mutations"`
+}
+
+type ConsultationMutationModelReply struct {
+	Field      string   `json:"field"`
+	Operation  string   `json:"operation"`
+	Values     []string `json:"values"`
+	Confidence float64  `json:"confidence"`
+	Reason     string   `json:"reason"`
+}
+
+type SafetyModelReply struct {
+	Concern    bool    `json:"concern"`
+	Category   string  `json:"category"`
+	Confidence float64 `json:"confidence"`
+	Reason     string  `json:"reason"`
 }
 
 type TextToSpeechProvider interface {

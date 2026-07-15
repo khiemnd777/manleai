@@ -55,6 +55,11 @@ production feature behavior.
    environment values as evidence of active salon configuration. Inspect
    legacy environment fallback only when the task explicitly targets that path
    and evidence proves the salon has no stored provider config.
+   Current-code warning: `integration_config.Service.resolveStored` still
+   treats repository/decryption failures like missing configuration and may
+   take the legacy fallback. This is a documented production-readiness gap, not
+   intended runtime ownership; route fixes through `backend/modules/integration_config`
+   and account for the shared Square OAuth resolver boundary.
 
 ## Function And Helper Lookup Contract
 
@@ -98,6 +103,10 @@ triage keyword table.
 - Release workflow: `.github/workflows/ci-cd.yml`.
 - Runtime stack: `docker-compose.prod.yml`; API owns startup migrations and the
   worker starts only after API health with `AUTO_MIGRATE=false`.
+- Worker scheduler: `backend/cmd/worker/scheduler.go` runs one startup-immediate,
+  non-overlapping recurring loop per job, so POS sync, booking lease recovery,
+  quote cleanup, Square webhook/repair, and retention do not starve each other;
+  `backend/cmd/worker/scheduler_test.go` owns isolation/non-overlap regressions.
 - Container targets: `backend/Dockerfile` targets `api` and `worker`.
 - Local stack: `docker-compose.yml` must build the backend API with
   `target: api`; without an explicit target the multi-stage Dockerfile ends on
@@ -113,12 +122,12 @@ triage keyword table.
 | Area | Owner files | Responsibilities | Tests |
 | --- | --- | --- | --- |
 | Auth and sessions | `backend/modules/auth/*`, `backend/internal/middleware/auth.go` | Login, refresh, bootstrap owner, JWT auth, user/salon claims | `backend/modules/auth/service_test.go` |
-| Salon profile/settings | `backend/modules/salon/*` | Salon CRUD, settings, AI tone, salon-wide consultation toggle, public catalog settings, imported business hours | `backend/modules/salon/service_test.go` |
-| POS provider-neutral layer | `backend/modules/pos/*` | `POSProvider` contracts, typed provider-write outcome/phase errors, optional appointment listing capability, POS entity links, service/staff/customer catalog, service consultation profile persistence/validation, sync jobs/logs/errors, provider switching, category taxonomy, category aliases | `backend/modules/pos/service_test.go`, `backend/modules/pos/sync_processor_test.go` |
-| Square adapter | `backend/modules/pos_square/*` | Square OAuth, locations, sync, Square payloads, salon-local availability ranges, booking list import, token refresh, provider write outcome/error mapping | `backend/modules/pos_square/*_test.go` |
-| Booking | `backend/modules/booking/*` | Active-provider-scoped new booking/availability resolution, historical appointment-provider actions, durable booking operation claims/fingerprints/leases, confirmed appointments, fallback pending, unknown-result reconciliation gates, backend retry policy, calendar range/sync APIs, reschedule, cancel, POS idempotency, POS error writes | `backend/modules/booking/service_test.go`, `backend/modules/booking/repository_integration_test.go` |
+| Salon profile/settings | `backend/modules/salon/*` | Salon CRUD, settings, AI tone, fail-closed salon-wide consultation toggle validation, public catalog settings, imported business hours | `backend/modules/salon/service_test.go` |
+| POS provider-neutral layer | `backend/modules/pos/*` | `POSProvider` contracts, typed provider-write outcome/phase errors, monotonic location/generation-fenced full snapshots, optional appointment listing capability, POS entity links, service/staff/customer catalog, service consultation profile persistence/validation, sync jobs/logs/errors, provider switching, category taxonomy, category aliases | `backend/modules/pos/service_test.go`, `backend/modules/pos/sync_processor_test.go`, `backend/modules/pos/repository_integration_test.go` |
+| Square adapter | `backend/modules/pos_square/*` | Square OAuth, locations, atomic location-scoped generation-fenced sync with fail-closed freshness, Catalog `available_for_booking`/duration eligibility, active Team plus bookable Booking Profile intersection, Square payloads, salon-local availability ranges, dashboard test create/cancel safe-retry forwarding, provider-fenced booking-list pagination with cross-location rejection, token refresh, provider write outcome/error mapping, signed booking-webhook ingestion with root/nested location consistency, exact tenant routing across recoverable connection states, claim-token-fenced event processing and scheduled calendar repair | `backend/modules/pos_square/*_test.go` |
+| Booking | `backend/modules/booking/*` | Active-provider-scoped new booking/availability resolution, end-to-end location/generation provider fences, owner-scoped operation-key replay before mutable validation, origin-location-fenced historical appointment actions, durable operation claims/logical fingerprints/leases, phase-aware idempotent lease recovery (`not_started` safe versus `in_flight` unknown unless exact calendar truth converges), single-use availability quotes, bounded reference-preserving quote retention cleanup, mapping- and target-validated safe-retry lineage/supersession, confirmed appointments, fallback/provider pending, reconciliation task/candidate/resolve APIs, authoritative backend retry policy, advisory-first direct/fallback/lease convergence with exact canonical/raw provider mirror proof, provider-fenced zero-write-stale calendar imports, monotonic calendar mirror writes, raw-identity-gated equal-version mapping enrichment, reschedule, cancel, POS idempotency, POS error/outbox writes | `backend/modules/booking/service_test.go`, `backend/modules/booking/quote_cleanup_processor_test.go`, `backend/modules/booking/repository_integration_test.go` |
 | Customers | `backend/modules/customer/*` | Canonical customer CRUD, archive, search, activity read model, provider customer lookup facade | `backend/modules/customer/service_test.go` |
-| Conversation runtime | `backend/modules/conversation/*` | Simulator/phone session state, intent, slot preservation, service understanding, answer routing, booking tool routing, party booking planning, handoff, transcript metadata, retention | `backend/modules/conversation/*_test.go` |
+| Conversation runtime | `backend/modules/conversation/*` | Simulator/phone session state, per-session pre-side-effect serialization, state-revision CAS, event-stable exact historical reply replay, database-fenced/fail-closed answer-context caching, intent, slot and backend quote preservation, pre-dispatch exact-slot refresh, all-child party quote preflight, service understanding, answer routing, booking tool routing, party booking planning, mutation-owned consultation/safety, handoff, transcript metadata, retention | `backend/modules/conversation/*_test.go` |
 | Training | `backend/modules/training/*` | Knowledge items, owner corrections, correction apply/dismiss, service alias application, training evaluation | `backend/modules/training/service_test.go` |
 | Voice provider-neutral | `backend/modules/voice/*` | Voice readiness/status, inbound routing, STT/LLM/TTS/realtime and streaming-speech interfaces, speech turns, audio output | `backend/modules/voice/*_test.go` |
 | Twilio adapter | `backend/modules/voice_twilio/*` | Twilio signatures, form parsing, TwiML, recording mode, Media Streams bridge | `backend/modules/voice_twilio/*_test.go` |
@@ -225,24 +234,47 @@ name collection, availability replies, party bookings, or transcript output.
   `backend/modules/conversation/repository.go`, and migration
   `backend/migrations/V36__conversation_dialog_state.sql`,
   `backend/migrations/V37__conversation_draft_revision.sql`, and
-  `backend/migrations/V38__service_consultation_profiles.sql`. `dialog_state`
+  `backend/migrations/V38__service_consultation_profiles.sql`, plus the
+  fail-closed profile/toggle constraints in
+  `backend/migrations/V40__consultation_fail_closed_defaults.sql` and session
+  revision in `backend/migrations/V42__conversation_state_revision.sql`. `dialog_state`
   persists pending clarification, active consultation state, bounded mutation
   history, no-progress count, and draft/review/authorization revisions.
   Transcript metadata remains audit evidence, not active-state source of truth.
+- Per-session turn serialization and optimistic conflict defense:
+  `backend/modules/conversation/service.go`,
+  `backend/modules/conversation/service_voice_recovery.go`, and
+  `backend/modules/conversation/repository.go`. Production `Message` and typed
+  unintelligible-voice recovery acquire one PostgreSQL session advisory lock on
+  a dedicated connection before the first session read, retain it across
+  planning, availability/POS side effects, bounded state-conflict retries, and
+  `SaveTurn`, then release it with cancellation-independent cleanup. Both sides
+  of a turn persist the event key, so replay of an older provider event returns
+  its exact historical AI reply without replacing current session state. Concurrent
+  lock holders are bounded from the configured SQL pool size so callback work
+  retains connection headroom. Event-key dedupe and `state_revision`
+  compare-and-swap remain defense in depth.
 - Service consultation and safety handoff:
   `backend/modules/conversation/service_consultation.go`, profile contracts in
   `backend/modules/pos/types.go`, profile persistence in
   `backend/modules/pos/repository.go`, and schema/migration
   `backend/ent/schema/service_consultation_profile.go` plus
-  `backend/migrations/V38__service_consultation_profiles.sql`. Consultation is
+  `backend/migrations/V38__service_consultation_profiles.sql` and
+  `backend/migrations/V40__consultation_fail_closed_defaults.sql`. Consultation is
   one state-owned lane under the Conversation Supervisor. It collects typed
-  needs, ranks only eligible services with `ready` owner-approved profiles,
+  needs with validated set/replace/add/remove/clear mutations as the sole
+  persistence authority for need fields; free-standing semantic snapshots are
+  evidence only. It ranks only
+  eligible services with complete `ready` owner-approved profiles containing
+  both recommended outcomes and compatible current systems,
   records reasons/revisions in `dialog_state`, asks one question at a time,
   and never calls availability or POS tools. Service selection alone enters
   `awaiting_booking`; explicit booking intent is required to mutate the draft.
-  Existing booking drafts retain a resume phase. Cancel, reschedule, handoff,
-  active party plans, safety handoff, and bounded unresolved handoff retain
-  routing precedence.
+  Existing booking drafts retain a resume phase. Deterministic safety evidence
+  is checked globally before normal routing, while validated structured safety
+  evidence is handled before state mutation or tool actions. Cancel,
+  reschedule, handoff, active party plans, safety handoff, and bounded
+  unresolved handoff retain routing precedence.
 - Caller name, phone, email, and name-slot repair:
   `backend/modules/conversation/service_customer_name.go`.
 - Party/group booking detection and planning:
@@ -291,14 +323,14 @@ name collection, availability replies, party bookings, or transcript output.
 | `/create-account` | `frontend/app/create-account/page.tsx` | `frontend/features/auth/create-account-form.tsx` | `frontend/lib/api/client.ts` |
 | `/onboarding` | `frontend/app/onboarding/page.tsx` | `frontend/features/onboarding/salon-profile-form.tsx` | `frontend/lib/api/client.ts`, `frontend/lib/api/configuration-transfer.ts` |
 | `/dashboard` | `frontend/app/dashboard/page.tsx` | `frontend/features/dashboard/dashboard-home.tsx` | status, voice, calls, appointments, attempts, services, staff APIs |
-| `/dashboard/appointments` | `frontend/app/dashboard/appointments/page.tsx` | `frontend/features/dashboard/appointments-dashboard.tsx` | availability, booking attempts, reschedule, cancel |
+| `/dashboard/appointments` | `frontend/app/dashboard/appointments/page.tsx` | `frontend/features/dashboard/appointments-dashboard.tsx` | availability quotes, payload-bound operations, exact safe retries, booking attempts, paginated reconciliation tasks/exact candidates/resolve, reschedule, cancel |
 | `/dashboard/calls` | `frontend/app/dashboard/calls/page.tsx` | `frontend/features/dashboard/calls-dashboard.tsx` | sessions, typed consultation state/revisions, paginated full-call realtime events, party requests, owner corrections |
 | `/dashboard/customers` | `frontend/app/dashboard/customers/page.tsx` | `frontend/features/dashboard/customers-dashboard.tsx` | customer CRUD, archive, search |
 | `/dashboard/services` | `frontend/app/dashboard/services/page.tsx` | `frontend/features/dashboard/services-dashboard.tsx` | services, nested consultation profiles, categories, category aliases, service aliases, AI bookable |
 | `/dashboard/staff` | `frontend/app/dashboard/staff/page.tsx` | `frontend/features/dashboard/staff-dashboard.tsx` | staff CRUD, archive, AI bookable |
 | `/dashboard/settings` | `frontend/app/dashboard/settings/page.tsx` | `frontend/features/dashboard/settings-dashboard.tsx` | salon profile, settings, AI tone, consultation toggle/profile coverage, business hours, public catalog, config transfer |
 | `/dashboard/training` | `frontend/app/dashboard/training/page.tsx` | `frontend/features/dashboard/training-dashboard.tsx` | knowledge items, owner corrections, evaluation |
-| `/dashboard/integrations` | `frontend/app/dashboard/integrations/page.tsx` | `frontend/features/integrations/square-integration.tsx` | Square OAuth/status/sync/test booking, provider config, provider switching |
+| `/dashboard/integrations` | `frontend/app/dashboard/integrations/page.tsx` | `frontend/features/integrations/square-integration.tsx` | Square OAuth/status/sync/quoted test booking with operation-matched safe-retry lineage, write-only webhook verifier config, provider config, provider switching |
 | `/dashboard/billing` | `frontend/app/dashboard/billing/page.tsx` | `frontend/features/dashboard/billing-dashboard.tsx` | static gated billing surface |
 
 ## POS Calendar Surface Map
@@ -306,7 +338,7 @@ name collection, availability replies, party bookings, or transcript output.
 | Route | Page file | Main component | Data/API helpers |
 | --- | --- | --- | --- |
 | `/login` | `pos-calendar/app/login/page.tsx` | `pos-calendar/features/auth/login-form.tsx` | `pos-calendar/lib/api/client.ts` |
-| `/calendar` | `pos-calendar/app/calendar/page.tsx` | `pos-calendar/features/calendar/pos-calendar-client.tsx` | calendar range/sync, calendar event stream/toasts, availability, booking attempts, reschedule, cancel, Square status, services, staff |
+| `/calendar` | `pos-calendar/app/calendar/page.tsx` | `pos-calendar/features/calendar/pos-calendar-client.tsx` | stale-response-guarded calendar range/sync, calendar event stream/toasts, availability quotes, payload-bound booking/reschedule/cancel operations, Square status, services, staff |
 
 The POS calendar app is a standalone authenticated Next.js app with no
 dashboard sidebar. Local runtime port is `3091`; production domain is
@@ -354,16 +386,27 @@ detail rather than part of the event title.
   `docs/api.md`.
 - Backend owner: `backend/modules/pos`, `backend/modules/pos_square`,
   `backend/modules/integration_config`.
+- Webhook/repair owner: `backend/modules/pos_square/webhook.go`,
+  `webhook_repository.go`, `webhook_processor.go`, public registration in
+  `backend/modules/pos_square/routes.go`, worker wiring in
+  `backend/cmd/worker/main.go`, schema in
+  `backend/migrations/V41__square_booking_webhooks_and_calendar_repair.sql`.
+- Full snapshot, range-calendar import, and booking-dispatch fence owner:
+  `backend/modules/pos/repository.go`, `backend/modules/booking/service.go`,
+  `backend/modules/booking/repository.go`, `backend/modules/pos_square/adapter.go`, and
+  `backend/migrations/V43__pos_snapshot_generation.sql`.
 - Frontend owner: `frontend/features/integrations/square-integration.tsx`,
   `frontend/features/dashboard/services-dashboard.tsx`,
   `frontend/features/dashboard/staff-dashboard.tsx`,
   `pos-calendar/features/calendar/pos-calendar-client.tsx` for calendar sync.
 - Data owner: `pos_connections`, `pos_entity_links`, `pos_sync_jobs`,
   `pos_sync_logs`, `pos_errors`, `salon_integration_configs`,
+  `square_booking_webhook_events`, `square_calendar_repair_state`,
   `salons.active_pos_provider`.
 - Tests: `backend/modules/pos/*_test.go`,
   `backend/modules/pos_square/*_test.go`,
-  `backend/modules/integration_config/service_test.go`.
+  `backend/modules/integration_config/service_test.go`,
+  `backend/modules/config_transfer/service_test.go`.
 - Skill/subagent: `pos-adapter-slice`, `pos_backend_reviewer`,
   `security_privacy_reviewer`.
 
@@ -373,12 +416,41 @@ detail rather than part of the event title.
   `docs/api.md`, `CONTEXT.md`.
 - Backend owner: `backend/modules/booking` with conversation callers in
   `backend/modules/conversation`.
+- Integrity/reconciliation owner: `backend/modules/booking/handler.go`,
+  `service.go`, `repository.go`, `types.go`, `routes.go`, and
+  `backend/migrations/V39__booking_integrity_reconciliation_quotes.sql`.
+  Phase-aware booking lease recovery is owned by
+  `Repository.ExpireBookingOperationLeases`,
+  `Repository.SweepExpiredBookingOperationLeases`, and worker wiring in
+  `backend/cmd/worker/main.go`; expired pre-dispatch claims are retry-safe,
+  while expired in-flight claims remain reconciliation-required unless exact
+  authoritative calendar truth converges under the advisory-first lock.
+  Candidate routing is
+  `GET /api/salons/:id/booking-reconciliations/:attempt_id/candidates`;
+  resolution uses the same exact repository predicate under lock, and manual
+  resolution/calendar import share a salon-scoped transaction advisory lock.
+  V39 normalizes only duplicates proven `not_started`, prefers a
+  dispatched/unknown canonical attempt, and aborts when one fingerprint group
+  contains multiple outcomes that require reconciliation. Safely superseded
+  rows point to their canonical attempt, close task bookkeeping as
+  `resolved/superseded`, and cannot be listed, resolved, lease-swept,
+  reacquired, started, or finalized.
+- Availability-quote retention owner:
+  `backend/modules/booking/quote_cleanup_processor.go`,
+  `backend/modules/booking/repository.go`, worker wiring in
+  `backend/cmd/worker/main.go`, and V39 cleanup indexes. Every five minutes the
+  bounded cleanup drains at most eight batches of 250 quotes, keeps a 24-hour
+  unconsumed-expiry grace and 30-day orphan-consumed audit window, and
+  preserves every booking-attempt reference.
 - Frontend owner: `frontend/features/dashboard/appointments-dashboard.tsx`,
   `frontend/features/integrations/square-integration.tsx` for test booking,
 	  `pos-calendar/features/calendar/pos-calendar-client.tsx` for standalone
 	  calendar add/edit/delete and realtime booking toasts.
 - Data owner: `booking_attempts` operation ledger (operation key, fingerprint,
-  processing lease, provider outcome, retry policy, reconciliation status), `booking_attempt_segments`,
+  processing lease, provider outcome, retry policy, reconciliation status,
+  target provider-version baseline for appointment mutations), `booking_attempt_segments`,
+  `availability_quotes`, `availability_quote_slots`,
+  `booking_reconciliation_tasks`, `booking_reconciliation_events`,
   `appointments`, `appointment_services`, `appointments.pos_sync_status`,
   `appointments.last_pos_synced_at`, `appointments.pos_sync_error`, `pos_errors`,
   `owner_notifications`.
@@ -549,16 +621,17 @@ detail rather than part of the event title.
 
 | Keywords / symptoms | Start with | Then inspect |
 | --- | --- | --- |
-| confirm, confirmed, booking ID, fallback pending, POS failed, no booking id, duplicate appointment, operation key, request fingerprint, retry blocked, reconciliation required, POS timeout unknown, HTTP 5xx write, truncated provider response, post-write lookup | `booking-safety-tdd`, `backend/modules/booking/service.go` | `backend/modules/booking/repository.go`, `backend/modules/conversation/service_booking_flow.go`, `backend/modules/pos/types.go`, `backend/modules/pos_square/adapter.go`, migrations V34-V35, booking tests |
-| availability, local day, timezone, DST, open slots, offered slots, stale segment, no common time, split, staggered, staff assignment | `backend/modules/booking`, `backend/modules/conversation/service_availability.go` | POS provider adapter, `service_matching_parsing.go`, `appointments-dashboard.tsx`, `pos-calendar/features/calendar/pos-calendar-client.tsx`, conversation tests |
-| Square OAuth, token expired, refresh token, location, sync, catalog import, calendar sync | `pos-adapter-slice`, `backend/modules/pos_square` | `backend/modules/pos`, `integration_config`, integrations UI, POS calendar UI |
+| confirm, confirmed, booking ID, fallback pending, provider pending, POS failed, no booking id, duplicate appointment, operation key, request fingerprint, retry lineage, Square test retry, superseded attempt, retry blocked, reconciliation required, candidate match, not_started lease, pre-dispatch crash, lease sweep, POS timeout unknown, HTTP 5xx write, truncated provider response, post-write lookup | `booking-safety-tdd`, `backend/modules/booking/service.go` | `backend/modules/booking/repository.go`, worker lease recovery, reconciliation routes/UI, `backend/modules/conversation/service_booking_flow.go`, `backend/modules/pos/types.go`, `backend/modules/pos_square/adapter.go`, migrations V34-V35/V39, booking tests |
+| availability, availability quote, quote expired, quote cleanup, quote retention, unbounded quote growth, slot fingerprint, local day, timezone, DST, open slots, offered slots, stale segment, no common time, split, staggered, staff assignment | `backend/modules/booking`, `backend/modules/conversation/service_availability.go` | `quote_cleanup_processor.go`, booking repository, worker, V39 quote tables/indexes, POS provider adapter, `service_matching_parsing.go`, `appointments-dashboard.tsx`, `pos-calendar/features/calendar/pos-calendar-client.tsx`, conversation tests |
+| Square OAuth, token expired, refresh token, location, sync, catalog import, `available_for_booking`, team member booking profile, non-bookable staff, calendar sync, booking webhook, signature key, notification URL, event dedupe, claim token, calendar repair, stale booking version | `pos-adapter-slice`, `backend/modules/pos_square` | `backend/modules/pos`, `integration_config`, V41 webhook/repair tables, worker, integrations UI, POS calendar UI |
 | POS mapping, provider link, active provider, AI bookable, local only, sync failed | `backend/modules/pos`, `docs/canonical-pos-ownership-checklist.md` | Services/Staff UI, `pos_entity_links`, sync tests |
 | semantic turn, multi-intent, service alias, category alias, service understanding, wrong service, category narrowed to one service, bare service switch, stale date after summary, staff/date/customer correction, add/replace/remove/undo, question plus correction, non-native wording, ASR paraphrase | `backend/modules/conversation/conversation_act.go`, `turn_reducer.go`, `next_action_planner.go` | dialog state/repository, voice semantic interpreter, training aliases, transcript metadata, golden conversation tests |
-| AI consultation, service recommendation, help me choose, current nail system, desired outcome, lower maintenance, consultation profile, consultation_completed, awaiting_booking, profile revision, safety handoff | `backend/modules/conversation/service_consultation.go`, `backend/modules/pos/types.go`, `backend/modules/pos/repository.go` | V38 migration/Ent schema, semantic consultation extraction, Services profile UI, Settings toggle/coverage, Calls typed audit state, consultation golden tests |
+| AI consultation, service recommendation, help me choose, current nail system, desired outcome, lower maintenance, consultation mutation, replace preference, clear preference, consultation profile, consultation_completed, awaiting_booking, profile revision, safety handoff, medical suitability | `backend/modules/conversation/service_consultation.go`, `backend/modules/pos/types.go`, `backend/modules/pos/repository.go` | V38/V40 migrations and Ent schema, global deterministic/structured safety gate, semantic consultation extraction, Services profile UI, Settings toggle/coverage, Calls typed audit state, consultation golden tests |
 | service menu, how many services, how many I book, what do I have, current booking summary, service count, repeated clarification, informational service question | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/service_prompts.go`, `backend/modules/conversation/answer_router.go` | `backend/modules/conversation/service.go`, dialog state, party flow, golden tests |
 | final review, stale review, draft revision, reviewed revision, authorized revision, natural approval, repeated final review, review timeout, concise review retry, book it, just book this for me, correction during review, repeated same-category guest question, no progress loop | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/draft_revision.go`, `next_action_planner.go`, `service.go` | repository, V36/V37 migrations, booking flow, conversation and phone tests |
+| concurrent conversation turn, duplicate POS side effect, stale session snapshot, session state conflict, advisory lock, same-event replay | `backend/modules/conversation/service.go`, `backend/modules/conversation/service_voice_recovery.go` | `backend/modules/conversation/repository.go`, conversation concurrency tests, booking operation ledger/idempotency |
 | AI training, owner correction, knowledge, FAQ answer, stale policy | `backend/modules/training`, answer router/context | training UI, knowledge tests |
-| configuration transfer, configuration import, v7 data pack, included_sections, consultation profile import, profile target missing, profile target ambiguous, repeated import | `backend/modules/config_transfer/service.go`, `backend/modules/config_transfer/types.go` | repository transaction/upserts, provider-neutral profile helpers in `backend/modules/pos`, Settings/onboarding preview UI, `docs/lotus-investor-demo-consultation-pack-v7.json`, config transfer tests |
+| configuration transfer, configuration import, v6 consultation toggle, v7 data pack, included_sections, consultation profile import, webhook URL preserve, signature secret re-entry, profile target missing, profile target ambiguous, repeated import | `backend/modules/config_transfer/service.go`, `backend/modules/config_transfer/types.go` | fail-closed consultation enablement/profile readiness, provider deployment URL preservation, repository transaction/upserts, provider-neutral profile helpers in `backend/modules/pos`, Settings/onboarding preview UI, `docs/lotus-investor-demo-consultation-pack-v7.json`, config transfer tests |
 | party booking, group booking, two people, split booking, party request, party service correction, guest_ref, party_service_guest, party_service_operation, party_service_source | `backend/modules/conversation/service_party.go`, `conversation_act.go`, `turn_reducer.go` | dialog state/types, booking service, Calls UI party request panel, party golden tests |
 | name captured wrong, background phrase captured as name, bare phone name, service instead of name, spelling, phone/email | `service_customer_name.go` | conversation golden tests, transcript metadata |
 | reschedule, cancel, move appointment, appointment target, ordinal option, day view, week view, month view, agenda, Tomorrow button, appointment warning | `service_intent.go`, `backend/modules/booking/service.go` | Appointments UI, POS Calendar UI, booking tests |

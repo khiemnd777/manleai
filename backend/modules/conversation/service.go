@@ -2,11 +2,13 @@ package conversation
 
 import (
 	"context"
-	"github.com/manleai/ai-receptionist/internal/validation"
-	"github.com/manleai/ai-receptionist/modules/booking"
+	"errors"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/manleai/ai-receptionist/internal/validation"
+	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
 const (
@@ -26,6 +28,7 @@ const (
 	splitAvailabilityLimit    = 5
 	splitPartyOptionLimit     = 2
 	splitCombinationLimit     = 256
+	maxStateConflictRetries   = 2
 
 	partySplitDatePolicyRequestedDate = "requested_date"
 	partySplitDatePolicyAlternateDate = "alternate_date"
@@ -80,6 +83,16 @@ type Service struct {
 	turnInterpreter    TurnInterpreter
 	answerContextCache *answerContextCache
 	now                func() time.Time
+}
+
+type sessionTurnSerializer interface {
+	WithSessionTurnSerialization(
+		ctx context.Context,
+		salonID string,
+		ownerUserID string,
+		sessionID string,
+		operation func(context.Context) (*Session, error),
+	) (*Session, error)
 }
 
 type availabilitySelection struct {
@@ -230,6 +243,50 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	salonID = strings.TrimSpace(salonID)
 	ownerUserID = strings.TrimSpace(ownerUserID)
 	sessionID = strings.TrimSpace(sessionID)
+	req.Message = strings.TrimSpace(req.Message)
+	if salonID == "" || ownerUserID == "" || sessionID == "" || req.Message == "" {
+		return nil, ErrValidation
+	}
+	return s.withSessionTurnSerialization(ctx, salonID, ownerUserID, sessionID, func(serializedCtx context.Context) (*Session, error) {
+		return retrySessionStateConflict(serializedCtx, func() (*Session, error) {
+			return s.messageOnce(serializedCtx, salonID, ownerUserID, sessionID, req)
+		})
+	})
+}
+
+func (s *Service) withSessionTurnSerialization(
+	ctx context.Context,
+	salonID string,
+	ownerUserID string,
+	sessionID string,
+	operation func(context.Context) (*Session, error),
+) (*Session, error) {
+	serializer, ok := s.store.(sessionTurnSerializer)
+	if !ok {
+		return operation(ctx)
+	}
+	return serializer.WithSessionTurnSerialization(ctx, salonID, ownerUserID, sessionID, operation)
+}
+
+func retrySessionStateConflict(ctx context.Context, operation func() (*Session, error)) (*Session, error) {
+	var conflictErr error
+	for attempt := 0; attempt <= maxStateConflictRetries; attempt++ {
+		session, err := operation()
+		if !errors.Is(err, ErrSessionStateConflict) {
+			return session, err
+		}
+		conflictErr = err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+	}
+	return nil, conflictErr
+}
+
+func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID string, sessionID string, req MessageRequest) (*Session, error) {
+	salonID = strings.TrimSpace(salonID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	sessionID = strings.TrimSpace(sessionID)
 	message := strings.TrimSpace(req.Message)
 	eventKey := normalizeEventKey(req.EventKey)
 	if salonID == "" || ownerUserID == "" || sessionID == "" || message == "" {
@@ -281,9 +338,21 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	staff := answerCtx.Staff
 	activeStaff := answerCtx.ActiveStaff
 	knowledge := answerCtx.Knowledge
+	if isConsultationSafetyConcern(message) {
+		return s.saveConsultationSafetyHandoff(ctx, ownerUserID, *session, message, eventKey, services, staff, cfg, "deterministic", SafetyAssessment{
+			Concern: true, Category: deterministicSafetyCategory(message), Confidence: 1, Reason: "deterministic_health_suitability_signal",
+		})
+	}
 	routerStartedAt := time.Now()
 	turnPlan := s.planTurn(message, *session, answerCtx, cfg)
 	recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnRouter, routerStartedAt, turnPlan.Route, turnPlan.timingAttributes())
+	turnUnderstanding := turnPlan.Understanding
+	if turnPlan.Route == TurnRouteSemanticLane {
+		turnUnderstanding = s.turnUnderstandingForPlan(ctx, *session, message, services, serviceAliases, categoryAliases, staff, turnPlan)
+		if turnUnderstanding.Safety.Concern {
+			return s.saveConsultationSafetyHandoff(ctx, ownerUserID, *session, message, eventKey, services, staff, cfg, "structured_ai", turnUnderstanding.Safety)
+		}
+	}
 	newPlannedTurn := func(before Session, after Session) TurnRecord {
 		turn := newTurnRecord(salonID, ownerUserID, before, after, message, eventKey, services, staff, cfg)
 		applyTurnPlanMetadata(&turn, turnPlan)
@@ -384,10 +453,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	}
 	pendingNameCandidate := turnPlan.PendingNameCandidate
 	serviceUnderstanding := turnPlan.ServiceUnderstanding
-	turnUnderstanding := turnPlan.Understanding
-	if turnPlan.Route == TurnRouteSemanticLane {
-		turnUnderstanding = s.turnUnderstandingForPlan(ctx, *session, message, services, serviceAliases, categoryAliases, staff, turnPlan)
-	} else {
+	if turnPlan.Route != TurnRouteSemanticLane {
 		path := turnPlan.Route
 		if turnPlan.Reason == "offered_slot_selection" {
 			path = TurnTimingPathStateScoped
@@ -395,6 +461,9 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 		recordSkippedTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, path, map[string]string{
 			"turn_interpreter_outcome": firstNonEmpty(turnUnderstanding.InterpreterOutcome, "skipped_"+turnPlan.Route),
 		})
+	}
+	if turnUnderstanding.Safety.Concern {
+		return s.saveConsultationSafetyHandoff(ctx, ownerUserID, *session, message, eventKey, services, staff, cfg, "structured_ai", turnUnderstanding.Safety)
 	}
 	conversationAct := primaryConversationAct(turnUnderstanding)
 	partySignal := turnPlan.PartySignal
@@ -601,6 +670,7 @@ func (s *Service) Message(ctx context.Context, salonID string, ownerUserID strin
 	if staffChange.Intent && !selectedOfferedSlot {
 		next.OfferedSlots = nil
 	}
+	invalidateCarriedAvailabilityProof(*session, &next)
 	intent := resolveIntent(session.Intent, message, next, serviceUnderstanding, partySignal)
 	intent = intentForTurnGoal(turnUnderstanding, intent)
 	next.Intent = intent
@@ -854,6 +924,7 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 		applySelectedOfferedSlot(&next, *selected)
 		selectedOfferedSlot = true
 	}
+	invalidateCarriedAvailabilityProof(before, &next)
 	turn := newTurnRecord(before.SalonID, ownerUserID, before, next, message, eventKey, services, staff, cfg)
 	turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{"booking_action": BookingActionReschedule})
 
@@ -948,6 +1019,9 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 		return s.store.SaveTurn(ctx, turn)
 	}
 
+	if invalidateCarriedAvailabilityProof(before, &next) {
+		syncTurnUpdate(&turn, next, services, staff, cfg)
+	}
 	if shouldCheckAvailabilityForRequestedTime(before, next, selectedOfferedSlot) {
 		available, err := s.applyAvailabilityForRequestedTime(ctx, ownerUserID, &turn, &next, services, staff, cfg)
 		if err != nil {

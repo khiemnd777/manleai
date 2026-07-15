@@ -34,6 +34,76 @@ func (f *fakeConversationActInterpreter) InterpretTurn(ctx context.Context, req 
 	return TurnUnderstanding{Goal: "book_appointment", Acts: []ConversationAct{f.act}, Confidence: f.act.Confidence, Source: "structured_ai"}, nil
 }
 
+func TestValidateConsultationNeedMutationsRejectsStateInvalidAndNoOpOperations(t *testing.T) {
+	validServices := map[string]bool{"service_1": true}
+	tests := []struct {
+		name     string
+		current  ConsultationNeedProfile
+		mutation ConsultationNeedMutation
+	}{
+		{
+			name:    "set overwrites scalar",
+			current: ConsultationNeedProfile{CurrentSystem: ConsultationSystemGel},
+			mutation: ConsultationNeedMutation{Field: ConsultationNeedFieldCurrentSystem, Operation: ConsultationNeedOperationSet,
+				Values: []string{ConsultationSystemDip}, Confidence: 0.96},
+		},
+		{
+			name: "replace initializes scalar",
+			mutation: ConsultationNeedMutation{Field: ConsultationNeedFieldCurrentSystem, Operation: ConsultationNeedOperationReplace,
+				Values: []string{ConsultationSystemDip}, Confidence: 0.96},
+		},
+		{
+			name:    "replace repeats scalar",
+			current: ConsultationNeedProfile{CurrentSystem: ConsultationSystemGel},
+			mutation: ConsultationNeedMutation{Field: ConsultationNeedFieldCurrentSystem, Operation: ConsultationNeedOperationReplace,
+				Values: []string{ConsultationSystemGel}, Confidence: 0.96},
+		},
+		{
+			name:    "add repeats list value",
+			current: ConsultationNeedProfile{Priorities: []string{ConsultationPriorityDurability}},
+			mutation: ConsultationNeedMutation{Field: ConsultationNeedFieldPriorities, Operation: ConsultationNeedOperationAdd,
+				Values: []string{ConsultationPriorityDurability}, Confidence: 0.96},
+		},
+		{
+			name:    "remove missing list value",
+			current: ConsultationNeedProfile{Priorities: []string{ConsultationPriorityDurability}},
+			mutation: ConsultationNeedMutation{Field: ConsultationNeedFieldPriorities, Operation: ConsultationNeedOperationRemove,
+				Values: []string{ConsultationPriorityLowerCost}, Confidence: 0.96},
+		},
+		{
+			name: "clear empty list",
+			mutation: ConsultationNeedMutation{Field: ConsultationNeedFieldDesiredFinishes, Operation: ConsultationNeedOperationClear,
+				Confidence: 0.96},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, ok := validateConsultationNeedMutations([]ConsultationNeedMutation{test.mutation}, test.current, validServices); ok {
+				t.Fatalf("state-invalid mutation was accepted: %#v current=%#v", test.mutation, test.current)
+			}
+		})
+	}
+}
+
+func TestValidateConsultationNeedMutationsAppliesValidSequenceAgainstWorkingState(t *testing.T) {
+	current := ConsultationNeedProfile{
+		CurrentSystem:   ConsultationSystemGel,
+		Priorities:      []string{ConsultationPriorityDurability, ConsultationPriorityLowerCost},
+		DesiredFinishes: []string{ConsultationFinishGlossy},
+	}
+	mutations := []ConsultationNeedMutation{
+		{Field: ConsultationNeedFieldCurrentSystem, Operation: ConsultationNeedOperationReplace, Values: []string{ConsultationSystemDip}, Confidence: 0.96},
+		{Field: ConsultationNeedFieldPriorities, Operation: ConsultationNeedOperationRemove, Values: []string{ConsultationPriorityLowerCost}, Confidence: 0.96},
+		{Field: ConsultationNeedFieldPriorities, Operation: ConsultationNeedOperationAdd, Values: []string{ConsultationPriorityLowerMaintenance}, Confidence: 0.96},
+		{Field: ConsultationNeedFieldDesiredFinishes, Operation: ConsultationNeedOperationClear, Confidence: 0.96},
+		{Field: ConsultationNeedFieldComparedServiceIDs, Operation: ConsultationNeedOperationSet, Values: []string{"service_1"}, Confidence: 0.96},
+	}
+	validated, ok := validateConsultationNeedMutations(mutations, current, map[string]bool{"service_1": true})
+	if !ok || len(validated) != len(mutations) {
+		t.Fatalf("valid stateful mutation sequence rejected: ok=%t mutations=%#v", ok, validated)
+	}
+}
+
 func TestConversationActGoldenSwitchesServiceFamilyWithoutPendingLoop(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = []ServiceOption{

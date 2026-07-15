@@ -22,19 +22,33 @@ func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnR
 	if !bookingServiceSelectionConsistent(session) {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, bookingErrorReply(), services, staff, cfg)
 	}
+	availabilityResult, fresh, err := s.refreshSelectedAvailabilityProof(ctx, ownerUserID, turn.SalonID, &session, services, cfg)
+	if err != nil {
+		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, bookingErrorReply(), services, staff, cfg)
+	}
+	if !fresh {
+		session.DialogState = resetDialogProgress(session.DialogState, DialogPhaseDrafting)
+		applyAvailabilityOffer(&turn, &session, services, staff, cfg, availabilityResult, true)
+		turn.AIMessage = "That opening changed before I could book it. " + turn.AIMessage
+		finalizeTurnMetadata(&turn, turn.Session, session, "requested_time", "requested_time", "availability_changed_before_booking")
+		return s.store.SaveTurn(ctx, turn)
+	}
+	syncTurnUpdate(&turn, session, services, staff, cfg)
 	startedAt := time.Now()
 	attempt, err := s.bookingTool.Create(ctx, turn.SalonID, ownerUserID, booking.CreateBookingRequest{
-		OperationKey:       conversationOperationKey(session, booking.BookingActionBook),
-		Source:             bookingSourceForSession(session),
-		CustomerName:       session.CustomerName,
-		CustomerPhone:      session.CustomerPhone,
-		CustomerEmail:      session.CustomerEmail,
-		ServiceID:          session.ServiceID,
-		StaffID:            session.StaffID,
-		StaffSelectionMode: staffSelectionModeForSession(session),
-		Segments:           bookingSegmentsForCreate(session),
-		StartTime:          *session.RequestedStartTime,
-		Notes:              bookingNotesForSession(session),
+		OperationKey:        conversationOperationKey(session, booking.BookingActionBook),
+		AvailabilityQuoteID: strings.TrimSpace(session.AvailabilityQuoteID),
+		SlotFingerprint:     strings.TrimSpace(session.SlotFingerprint),
+		Source:              bookingSourceForSession(session),
+		CustomerName:        session.CustomerName,
+		CustomerPhone:       session.CustomerPhone,
+		CustomerEmail:       session.CustomerEmail,
+		ServiceID:           session.ServiceID,
+		StaffID:             session.StaffID,
+		StaffSelectionMode:  staffSelectionModeForSession(session),
+		Segments:            bookingSegmentsForCreate(session),
+		StartTime:           *session.RequestedStartTime,
+		Notes:               bookingNotesForSession(session),
 	})
 	recordTurnTiming(ctx, TurnTimingStageAvailabilityPOS, startedAt, turnTimingResult(err))
 	if err != nil {
@@ -93,6 +107,14 @@ func (s *Service) tryPartySplitBooking(ctx context.Context, ownerUserID string, 
 	if strings.TrimSpace(session.CustomerName) == "" || strings.TrimSpace(session.CustomerPhone) == "" {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonCustomerDetailsUnavailable, partySplitBookingFailureReply(0, totalSegments), services, staff, cfg)
 	}
+	freshOption, fresh, err := s.refreshPartySplitOptionProofs(ctx, ownerUserID, turn.SalonID, session, option, services, cfg)
+	if err != nil {
+		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonGroupBooking, partySplitBookingFailureReply(0, totalSegments), services, staff, cfg)
+	}
+	if !fresh {
+		return s.reofferChangedPartySplitAvailability(ctx, ownerUserID, turn, session, services, staff, cfg, knowledge)
+	}
+	option = freshOption
 
 	successfulAttempts := []*booking.BookingAttempt{}
 	successfulAppointmentIDs := []string{}
@@ -108,16 +130,24 @@ func (s *Service) tryPartySplitBooking(ctx context.Context, ownerUserID string, 
 				turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, partySplitBookingFailureMetadata(len(successfulAttempts), totalSegments, rollback))
 				return s.saveHandoffTurn(ctx, turn, session, HandoffReasonGroupBooking, partySplitBookingFailureReply(len(successfulAttempts), totalSegments), services, staff, cfg)
 			}
+			quoteRef, ok := partySplitQuoteRef(block, segmentIndex, segment)
+			if !ok {
+				rollback := s.rollbackPartySplitBookings(ctx, ownerUserID, turn.SalonID, session, successfulAppointmentIDs)
+				turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, partySplitBookingFailureMetadata(len(successfulAttempts), totalSegments, rollback))
+				return s.saveHandoffTurn(ctx, turn, session, HandoffReasonGroupBooking, partySplitBookingFailureReply(len(successfulAttempts), totalSegments), services, staff, cfg)
+			}
 			mode := firstNonEmpty(segment.StaffSelectionMode, booking.StaffSelectionSpecific)
 			req := booking.CreateBookingRequest{
-				OperationKey:       conversationOperationKey(session, "split", strconv.Itoa(blockIndex), strconv.Itoa(segmentIndex)),
-				Source:             bookingSourceForSession(session),
-				CustomerName:       session.CustomerName,
-				CustomerPhone:      session.CustomerPhone,
-				CustomerEmail:      session.CustomerEmail,
-				ServiceID:          strings.TrimSpace(segment.ServiceID),
-				StaffID:            strings.TrimSpace(segment.StaffID),
-				StaffSelectionMode: mode,
+				OperationKey:        conversationOperationKey(session, "split", strconv.Itoa(blockIndex), strconv.Itoa(segmentIndex)),
+				AvailabilityQuoteID: quoteRef.AvailabilityQuoteID,
+				SlotFingerprint:     quoteRef.SlotFingerprint,
+				Source:              bookingSourceForSession(session),
+				CustomerName:        session.CustomerName,
+				CustomerPhone:       session.CustomerPhone,
+				CustomerEmail:       session.CustomerEmail,
+				ServiceID:           strings.TrimSpace(segment.ServiceID),
+				StaffID:             strings.TrimSpace(segment.StaffID),
+				StaffSelectionMode:  mode,
 				Segments: []booking.BookingSegmentRequest{{
 					ServiceID:          strings.TrimSpace(segment.ServiceID),
 					StaffID:            strings.TrimSpace(segment.StaffID),
@@ -179,6 +209,59 @@ func (s *Service) tryPartySplitBooking(ctx context.Context, ownerUserID string, 
 	})
 	s.applyReplyGenerator(ctx, &turn, session, services, cfg, "", "", knowledge)
 	finalizeTurnMetadata(&turn, turn.Session, session, "", "", "party_split_booking_result")
+	return s.store.SaveTurn(ctx, turn)
+}
+
+func partySplitQuoteRef(block PartySplitBlock, segmentIndex int, segment booking.BookingSegmentRequest) (PartySplitQuoteRef, bool) {
+	if segmentIndex < 0 || segmentIndex >= len(block.QuoteRefs) {
+		return PartySplitQuoteRef{}, false
+	}
+	ref := block.QuoteRefs[segmentIndex]
+	ref.ServiceID = strings.TrimSpace(ref.ServiceID)
+	ref.AvailabilityQuoteID = strings.TrimSpace(ref.AvailabilityQuoteID)
+	ref.SlotFingerprint = strings.TrimSpace(ref.SlotFingerprint)
+	if ref.ServiceID == "" || ref.ServiceID != strings.TrimSpace(segment.ServiceID) || ref.AvailabilityQuoteID == "" || len(ref.SlotFingerprint) != 64 {
+		return PartySplitQuoteRef{}, false
+	}
+	return ref, true
+}
+
+func (s *Service) reofferChangedPartySplitAvailability(ctx context.Context, ownerUserID string, turn TurnRecord, session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
+	preferredDate := strings.TrimSpace(session.RequestedDate)
+	if preferredDate == "" {
+		if option, ok := selectedPartySplitOption(session.PartyPlan); ok {
+			if first := partySplitFirstStart(option); !first.IsZero() {
+				preferredDate = first.In(timezoneLocation(timezoneFromConfig(cfg))).Format("2006-01-02")
+			}
+		}
+	}
+	options, err := s.planPartySplitOptions(ctx, ownerUserID, turn.SalonID, session, services, preferredDate, cfg)
+	if err != nil {
+		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonGroupBooking, partySplitBookingFailureReply(0, len(bookingSegmentsForCreate(session))), services, staff, cfg)
+	}
+	session.DialogState = resetDialogProgress(session.DialogState, DialogPhaseDrafting)
+	if len(options) > 0 {
+		applyPartySplitOffer(&turn, &session, services, staff, cfg, options, true)
+		turn.AIMessage = "Those group openings changed before booking. " + partySplitOfferMessage(session, services, cfg)
+	} else {
+		plan := clonePartyPlan(session.PartyPlan)
+		if plan == nil {
+			plan = &PartyPlan{}
+		}
+		plan.SplitOptions = nil
+		plan.SelectedSplitOptionID = ""
+		plan.SplitBookingAttemptIDs = nil
+		plan.SplitAppointmentIDs = nil
+		session.PartyPlan = plan
+		session.RequestedStartTime = nil
+		clearSelectedAvailabilityQuote(&session)
+		session.OfferedSlots = nil
+		syncTurnUpdate(&turn, session, services, staff, cfg)
+		turn.ToolMessage = "Fresh split availability no longer contained every selected child slot."
+		turn.AIMessage = "Those group openings changed before booking, and I do not see another safe split option. What other time or day works?"
+	}
+	s.applyReplyGenerator(ctx, &turn, session, services, cfg, "requested_time", "requested_time", knowledge)
+	finalizeTurnMetadata(&turn, turn.Session, session, "requested_time", "requested_time", "party_split_availability_changed_before_booking")
 	return s.store.SaveTurn(ctx, turn)
 }
 
@@ -285,13 +368,27 @@ func (s *Service) tryReschedule(ctx context.Context, ownerUserID string, turn Tu
 	if s.bookingTool == nil || strings.TrimSpace(session.TargetAppointmentID) == "" || session.RequestedStartTime == nil {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, rescheduleErrorReply(), services, staff, cfg)
 	}
+	availabilityResult, fresh, err := s.refreshSelectedAvailabilityProof(ctx, ownerUserID, turn.SalonID, &session, services, cfg)
+	if err != nil {
+		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, rescheduleErrorReply(), services, staff, cfg)
+	}
+	if !fresh {
+		session.DialogState = resetDialogProgress(session.DialogState, DialogPhaseDrafting)
+		applyAvailabilityOffer(&turn, &session, services, staff, cfg, availabilityResult, true)
+		turn.AIMessage = "That opening changed before I could reschedule it. " + turn.AIMessage
+		finalizeTurnMetadata(&turn, turn.Session, session, "requested_time", "requested_time", "availability_changed_before_reschedule")
+		return s.store.SaveTurn(ctx, turn)
+	}
+	syncTurnUpdate(&turn, session, services, staff, cfg)
 	startedAt := time.Now()
 	appointment, fallback, err := s.bookingTool.Reschedule(ctx, turn.SalonID, ownerUserID, session.TargetAppointmentID, booking.RescheduleRequest{
-		OperationKey: conversationOperationKey(session, booking.BookingActionReschedule, session.TargetAppointmentID),
-		Source:       bookingSourceForSession(session),
-		StartTime:    *session.RequestedStartTime,
-		StaffID:      session.StaffID,
-		Notes:        "AI receptionist reschedule request.",
+		OperationKey:        conversationOperationKey(session, booking.BookingActionReschedule, session.TargetAppointmentID),
+		AvailabilityQuoteID: strings.TrimSpace(session.AvailabilityQuoteID),
+		SlotFingerprint:     strings.TrimSpace(session.SlotFingerprint),
+		Source:              bookingSourceForSession(session),
+		StartTime:           *session.RequestedStartTime,
+		StaffID:             session.StaffID,
+		Notes:               "AI receptionist reschedule request.",
 	})
 	recordTurnTiming(ctx, TurnTimingStageAvailabilityPOS, startedAt, turnTimingResult(err))
 	if err != nil {

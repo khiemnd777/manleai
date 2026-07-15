@@ -611,7 +611,21 @@ func upsertSquareConfig(ctx context.Context, tx *sql.Tx, salonID string, cfg int
 		"api_version":  cfg.APIVersion,
 		"api_base_url": cfg.APIBaseURL,
 	}
-	return upsertConfigSettings(ctx, tx, salonID, "square", true, settings)
+	settingsJSON, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO salon_integration_configs (salon_id, provider, enabled, settings, secrets_encrypted)
+		VALUES ($1, 'square', true, $2::jsonb, NULL)
+		ON CONFLICT (salon_id, provider)
+		DO UPDATE SET enabled = EXCLUDED.enabled,
+		              settings = EXCLUDED.settings || jsonb_strip_nulls(jsonb_build_object(
+		                  'webhook_notification_url', salon_integration_configs.settings->'webhook_notification_url'
+		              )),
+		              updated_at = now()
+	`, salonID, string(settingsJSON))
+	return err
 }
 
 func upsertTwilioConfig(ctx context.Context, tx *sql.Tx, salonID string, cfg integrationconfig.TwilioSettingsResponse) error {

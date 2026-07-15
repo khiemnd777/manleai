@@ -2,12 +2,16 @@ package conversation
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
 )
 
-const defaultAnswerContextTTL = 45 * time.Second
+const (
+	defaultAnswerContextTTL        = 45 * time.Second
+	answerContextFenceLoadAttempts = 3
+)
 
 type AIAnswerContext struct {
 	Services        []ServiceOption
@@ -28,6 +32,7 @@ type answerContextCache struct {
 
 type answerContextCacheEntry struct {
 	context   AIAnswerContext
+	fence     AnswerContextFence
 	expiresAt time.Time
 }
 
@@ -41,7 +46,7 @@ func newAnswerContextCache(ttl time.Duration) *answerContextCache {
 	}
 }
 
-func (c *answerContextCache) get(salonID string) (*AIAnswerContext, bool) {
+func (c *answerContextCache) get(salonID string, fence AnswerContextFence) (*AIAnswerContext, bool) {
 	if c == nil {
 		return nil, false
 	}
@@ -59,12 +64,16 @@ func (c *answerContextCache) get(salonID string) (*AIAnswerContext, bool) {
 		delete(c.entries, key)
 		return nil, false
 	}
+	if entry.fence != fence {
+		delete(c.entries, key)
+		return nil, false
+	}
 	ctx := cloneAIAnswerContext(&entry.context)
 	ctx.CacheHit = true
 	return ctx, true
 }
 
-func (c *answerContextCache) set(salonID string, ctx AIAnswerContext) {
+func (c *answerContextCache) set(salonID string, fence AnswerContextFence, ctx AIAnswerContext) {
 	if c == nil {
 		return
 	}
@@ -77,6 +86,7 @@ func (c *answerContextCache) set(salonID string, ctx AIAnswerContext) {
 	defer c.mu.Unlock()
 	c.entries[key] = answerContextCacheEntry{
 		context:   *cloneAIAnswerContext(&ctx),
+		fence:     fence,
 		expiresAt: time.Now().Add(c.ttl),
 	}
 }
@@ -112,9 +122,49 @@ func cloneAIAnswerContext(ctx *AIAnswerContext) *AIAnswerContext {
 }
 
 func (s *Service) loadAnswerContext(ctx context.Context, salonID string) (*AIAnswerContext, error) {
-	if cached, ok := s.answerContextCache.get(salonID); ok {
-		return cached, nil
+	for attempt := 0; attempt < answerContextFenceLoadAttempts; attempt++ {
+		fence, err := s.store.GetAnswerContextFence(ctx, salonID)
+		if err != nil {
+			return nil, err
+		}
+		if cached, ok := s.answerContextCache.get(salonID, fence); ok {
+			return cached, nil
+		}
+
+		answerCtx, err := s.loadFreshAnswerContext(ctx, salonID)
+		if err != nil {
+			return nil, err
+		}
+		verifiedFence, err := s.store.GetAnswerContextFence(ctx, salonID)
+		if err != nil {
+			return nil, err
+		}
+		if fence != verifiedFence {
+			s.answerContextCache.clear(salonID)
+			continue
+		}
+		if !verifiedFence.Ready {
+			failClosedStructuredAnswerContext(answerCtx)
+		}
+		s.answerContextCache.set(salonID, verifiedFence, *answerCtx)
+		return cloneAIAnswerContext(answerCtx), nil
 	}
+	return nil, errors.New("conversation answer context readiness changed while loading")
+}
+
+func failClosedStructuredAnswerContext(answerCtx *AIAnswerContext) {
+	if answerCtx == nil {
+		return
+	}
+	answerCtx.Services = nil
+	answerCtx.ServiceAliases = nil
+	answerCtx.CategoryAliases = nil
+	answerCtx.Staff = nil
+	answerCtx.ActiveStaff = nil
+	answerCtx.BusinessHours = nil
+}
+
+func (s *Service) loadFreshAnswerContext(ctx context.Context, salonID string) (*AIAnswerContext, error) {
 	services, err := s.store.ListBookableServices(ctx, salonID)
 	if err != nil {
 		return nil, err
@@ -152,8 +202,7 @@ func (s *Service) loadAnswerContext(ctx context.Context, salonID string) (*AIAns
 		Knowledge:       knowledge,
 		BusinessHours:   hours,
 	}
-	s.answerContextCache.set(salonID, answerCtx)
-	return cloneAIAnswerContext(&answerCtx), nil
+	return &answerCtx, nil
 }
 
 func (s *Service) InvalidateAnswerContext(salonID string) {

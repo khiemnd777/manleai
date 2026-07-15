@@ -24,12 +24,14 @@ type Config struct {
 }
 
 type SquareConfig struct {
-	Environment  string
-	ClientID     string
-	ClientSecret string
-	RedirectURL  string
-	APIVersion   string
-	APIBaseURL   string
+	Environment            string
+	ClientID               string
+	ClientSecret           string
+	RedirectURL            string
+	APIVersion             string
+	APIBaseURL             string
+	WebhookNotificationURL string
+	WebhookSignatureKey    string
 }
 
 type VoiceConfig struct {

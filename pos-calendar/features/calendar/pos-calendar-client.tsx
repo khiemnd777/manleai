@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
+  Ban,
   CalendarClock,
   CalendarDays,
   ChevronLeft,
@@ -13,7 +14,6 @@ import {
   Pencil,
   Plus,
   RefreshCcw,
-  Trash2,
   X
 } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
@@ -61,7 +61,7 @@ type StaffResponse = {
   staff: POSStaffMember[];
 };
 
-type ActionMode = "create" | "edit" | "delete";
+type ActionMode = "create" | "edit" | "cancel";
 
 type ActionForm = {
   customerName: string;
@@ -178,7 +178,10 @@ export function POSCalendarClient() {
   const [actionError, setActionError] = useState("");
   const seenCalendarEventIDs = useRef<Set<string>>(new Set());
   const toastTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
-  const actionOperationKeyRef = useRef("");
+  const actionOperationKeyRef = useRef<{ key: string; fingerprint: string } | null>(null);
+  const calendarRequestIDRef = useRef(0);
+  const availabilityRequestIDRef = useRef(0);
+  const availabilityExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!getAccessToken()) {
@@ -286,7 +289,7 @@ export function POSCalendarClient() {
           seenCalendarEventIDs.current.add(event.id);
           if (event.cursor) window.sessionStorage.setItem(cursorKey, event.cursor);
           pushCalendarToast(event);
-          if (calendarEventIntersectsRange(event, rangeForView(view, anchorDate))) {
+          if (calendarEventIntersectsRange(event, rangeForView(view, anchorDate), salon.timezone)) {
             scheduleRangeReload();
           }
         });
@@ -308,6 +311,7 @@ export function POSCalendarClient() {
 
   useEffect(() => {
     return () => {
+      clearAvailabilityExpiryTimer(availabilityExpiryTimerRef);
       for (const timer of toastTimers.current.values()) {
         clearTimeout(timer);
       }
@@ -348,7 +352,7 @@ export function POSCalendarClient() {
     if (!itemID) return;
     const nextAnchorDate = formatDateInput(new Date(event.start_time), salon?.timezone);
     const currentRange = rangeForView(view, anchorDate);
-    if (calendarEventIntersectsRange(event, currentRange) && items.some((item) => item.id === itemID)) {
+    if (calendarEventIntersectsRange(event, currentRange, salon?.timezone) && items.some((item) => item.id === itemID)) {
       selectCalendarItem(itemID);
       return;
     }
@@ -379,6 +383,7 @@ export function POSCalendarClient() {
       setStatus(statusResponse);
       setServices(serviceResponse.services);
       setStaff(staffResponse.staff);
+      setAnchorDate(formatDateInput(new Date(), firstSalon.timezone));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load calendar workspace.");
     } finally {
@@ -392,22 +397,28 @@ export function POSCalendarClient() {
   }
 
   async function loadCalendarRange(salonID: string, nextView: CalendarView, date: string) {
+    const requestID = ++calendarRequestIDRef.current;
     setLoadingCalendar(true);
     setError("");
     try {
       const nextRange = rangeForView(nextView, date);
+      const apiRange = salonRangeRFC3339(nextRange, salon?.timezone);
       const params = new URLSearchParams({
-        start: nextRange.start,
-        end: nextRange.end,
+        start: apiRange.start,
+        end: apiRange.end,
         view: nextView
       });
       const response = await apiRequest<CalendarRangeResponse>(`/api/salons/${salonID}/calendar?${params.toString()}`);
+      if (requestID !== calendarRequestIDRef.current) return;
       setCalendar(response);
     } catch (err) {
+      if (requestID !== calendarRequestIDRef.current) return;
       setCalendar(null);
       setError(err instanceof Error ? err.message : "Could not load calendar range.");
     } finally {
-      setLoadingCalendar(false);
+      if (requestID === calendarRequestIDRef.current) {
+        setLoadingCalendar(false);
+      }
     }
   }
 
@@ -417,11 +428,12 @@ export function POSCalendarClient() {
     setNotice(null);
     setError("");
     try {
+      const apiRange = salonRangeRFC3339(range, salon.timezone);
       const response = await apiRequest<CalendarSyncResponse>(`/api/salons/${salon.id}/calendar/sync`, {
         method: "POST",
         body: JSON.stringify({
-          start_time: range.start,
-          end_time: range.end
+          start_time: apiRange.start,
+          end_time: apiRange.end
         })
       });
       setNotice({
@@ -448,19 +460,32 @@ export function POSCalendarClient() {
   }
 
   function updateActionForm(patch: Partial<ActionForm>) {
-    setActionForm((current) => ({ ...current, ...patch }));
+    const invalidatesAvailability =
+      Object.prototype.hasOwnProperty.call(patch, "serviceID") ||
+      Object.prototype.hasOwnProperty.call(patch, "staffID") ||
+      Object.prototype.hasOwnProperty.call(patch, "preferredDate");
+    if (invalidatesAvailability) {
+      resetAvailability();
+    }
+    setActionForm((current) => ({
+      ...current,
+      ...patch,
+      ...(invalidatesAvailability ? { selectedSlotKey: "" } : {})
+    }));
   }
 
-  function resetAvailability() {
+  function resetAvailability(message = "") {
+    availabilityRequestIDRef.current += 1;
+    clearAvailabilityExpiryTimer(availabilityExpiryTimerRef);
     setAvailabilityResult(null);
     setAvailabilityChecked(false);
-    setAvailabilityError("");
+    setAvailabilityError(message);
     setCheckingAvailability(false);
-    updateActionForm({ selectedSlotKey: "" });
+    setActionForm((current) => ({ ...current, selectedSlotKey: "" }));
   }
 
   function openCreate() {
-    actionOperationKeyRef.current = crypto.randomUUID();
+    actionOperationKeyRef.current = null;
     setActionMode("create");
     setSelectedAppointment(null);
     setActionForm({
@@ -472,7 +497,7 @@ export function POSCalendarClient() {
   }
 
   function openEdit(appointment: AppointmentRecord) {
-    actionOperationKeyRef.current = crypto.randomUUID();
+    actionOperationKeyRef.current = null;
     setActionMode("edit");
     setSelectedAppointment(appointment);
     setActionForm({
@@ -488,9 +513,9 @@ export function POSCalendarClient() {
     resetAvailability();
   }
 
-  function openDelete(appointment: AppointmentRecord) {
-    actionOperationKeyRef.current = crypto.randomUUID();
-    setActionMode("delete");
+  function openCancel(appointment: AppointmentRecord) {
+    actionOperationKeyRef.current = null;
+    setActionMode("cancel");
     setSelectedAppointment(appointment);
     setActionForm({
       ...emptyActionForm(formatDateInput(new Date(appointment.start_time), salon?.timezone)),
@@ -501,13 +526,11 @@ export function POSCalendarClient() {
       notes: appointment.notes ?? ""
     });
     setActionError("");
-    setAvailabilityResult(null);
-    setAvailabilityChecked(false);
-    setAvailabilityError("");
+	resetAvailability();
   }
 
   function closeActionDialog() {
-    actionOperationKeyRef.current = "";
+    actionOperationKeyRef.current = null;
     setActionMode(null);
     setSelectedAppointment(null);
     setActionError("");
@@ -515,17 +538,19 @@ export function POSCalendarClient() {
   }
 
   async function checkAvailability() {
-    if (!salon || !actionMode || actionMode === "delete" || !actionForm.preferredDate || !readyForBooking) return;
+    if (!salon || !actionMode || actionMode === "cancel" || !actionForm.preferredDate || !readyForBooking) return;
+    const requestID = ++availabilityRequestIDRef.current;
+    clearAvailabilityExpiryTimer(availabilityExpiryTimerRef);
     setAvailabilityError("");
     setAvailabilityChecked(true);
     setCheckingAvailability(true);
-    updateActionForm({ selectedSlotKey: "" });
+    setActionForm((current) => ({ ...current, selectedSlotKey: "" }));
     try {
       const segments = actionAvailabilitySegments(actionMode, actionForm, selectedAppointment);
       if (segments.length === 0 || segments.some((segment) => !segment.service_id)) {
         throw new Error("This appointment is missing service details needed to check availability.");
       }
-      const staffSelectionMode = actionMode === "create" && !actionForm.staffID ? "anyone" : "specific";
+      const staffSelectionMode = aggregateStaffSelectionMode(segments);
       const result = await apiRequest<AvailabilityResult>(`/api/salons/${salon.id}/availability`, {
         method: "POST",
         body: JSON.stringify({
@@ -537,40 +562,60 @@ export function POSCalendarClient() {
           limit: 10
         })
       });
+      if (requestID !== availabilityRequestIDRef.current) return;
       setAvailabilityResult(result);
+      scheduleAvailabilityExpiry(
+        availabilityExpiryTimerRef,
+        result.expires_at,
+        requestID,
+        availabilityRequestIDRef,
+        () => {
+          setAvailabilityResult(null);
+          setAvailabilityChecked(false);
+          setActionForm((current) => ({ ...current, selectedSlotKey: "" }));
+          setAvailabilityError("This availability quote expired. Check Square Appointments again before submitting.");
+        }
+      );
     } catch (err) {
+      if (requestID !== availabilityRequestIDRef.current) return;
       setAvailabilityResult(null);
       setAvailabilityError(err instanceof Error ? err.message : "Could not check Square Appointments availability.");
     } finally {
-      setCheckingAvailability(false);
+      if (requestID === availabilityRequestIDRef.current) {
+        setCheckingAvailability(false);
+      }
     }
   }
 
   async function submitCreate() {
-    if (!salon || !selectedActionSlot) return;
+    if (!salon || !selectedActionSlot || !availabilityResult) return;
     setSavingAction(true);
     setActionError("");
     try {
-      const staffSelectionMode = actionForm.staffID ? "specific" : "anyone";
-      const segments = slotBookingSegments(selectedActionSlot, actionForm.serviceID, staffSelectionMode);
+      assertAvailabilityQuoteUsable(availabilityResult, selectedActionSlot);
+	  const requestedSegments = actionAvailabilitySegments("create", actionForm, null);
+	  const segments = slotBookingSegments(selectedActionSlot, requestedSegments);
       if (segments.length === 0 || segments.some((segment) => !segment.staff_id)) {
         throw new Error("Select a returned Square slot before creating the booking.");
       }
+      const staffSelectionMode = aggregateStaffSelectionMode(segments);
+      const payload = {
+        availability_quote_id: availabilityResult.quote_id,
+        slot_fingerprint: selectedActionSlot.fingerprint,
+        source: "owner_dashboard",
+        customer_name: actionForm.customerName,
+        customer_phone: actionForm.customerPhone,
+        customer_email: actionForm.customerEmail,
+        service_id: segments[0].service_id,
+        staff_id: segments[0].staff_id,
+        staff_selection_mode: staffSelectionMode,
+        segments,
+        start_time: selectedActionSlot.start_time,
+        notes: actionForm.notes
+      };
       const attempt = await apiRequest<BookingAttempt>(`/api/salons/${salon.id}/booking-attempts`, {
         method: "POST",
-        body: JSON.stringify({
-          operation_key: currentActionOperationKey(),
-          source: "owner_dashboard",
-          customer_name: actionForm.customerName,
-          customer_phone: actionForm.customerPhone,
-          customer_email: actionForm.customerEmail,
-          service_id: segments[0].service_id,
-          staff_id: segments[0].staff_id,
-          staff_selection_mode: staffSelectionMode,
-          segments,
-          start_time: selectedActionSlot.start_time,
-          notes: actionForm.notes
-        })
+        body: JSON.stringify({ ...payload, operation_key: operationKeyForPayload(actionOperationKeyRef, payload) })
       });
       if (attempt.status !== "confirmed" || !attempt.pos_booking_id) {
         setNotice({
@@ -599,16 +644,28 @@ export function POSCalendarClient() {
     setSavingAction(true);
     setActionError("");
     try {
+      if (!availabilityResult) {
+        throw new Error("Check Square Appointments availability again before updating this appointment.");
+      }
+      assertAvailabilityQuoteUsable(availabilityResult, selectedActionSlot);
+	  const requestedSegments = actionAvailabilitySegments("edit", actionForm, selectedAppointment);
+	  const segments = slotBookingSegments(selectedActionSlot, requestedSegments);
+	  if (segments.length === 0) {
+		throw new Error("Square availability did not preserve every requested service. Check availability again.");
+	  }
+      const payload = {
+        availability_quote_id: availabilityResult.quote_id,
+        slot_fingerprint: selectedActionSlot.fingerprint,
+        start_time: selectedActionSlot.start_time,
+        staff_id: actionForm.staffID,
+        segments,
+        notes: actionForm.notes
+      };
       const response = await apiRequest<AppointmentRecord | BookingAttempt>(
         `/api/salons/${salon.id}/appointments/${selectedAppointment.id}/reschedule`,
         {
           method: "POST",
-          body: JSON.stringify({
-            operation_key: currentActionOperationKey(),
-            start_time: selectedActionSlot.start_time,
-            staff_id: actionForm.staffID,
-            notes: actionForm.notes
-          })
+          body: JSON.stringify({ ...payload, operation_key: operationKeyForPayload(actionOperationKeyRef, payload) })
         }
       );
       if (isBookingAttempt(response)) {
@@ -633,22 +690,23 @@ export function POSCalendarClient() {
     }
   }
 
-  async function submitDelete() {
+  async function submitCancel() {
     if (!salon || !selectedAppointment) return;
     setSavingAction(true);
     setActionError("");
     try {
+      const payload = { reason: actionForm.cancelReason };
       const response = await apiRequest<AppointmentRecord | BookingAttempt>(
         `/api/salons/${salon.id}/appointments/${selectedAppointment.id}/cancel`,
         {
           method: "POST",
-          body: JSON.stringify({ operation_key: currentActionOperationKey(), reason: actionForm.cancelReason })
+          body: JSON.stringify({ ...payload, operation_key: operationKeyForPayload(actionOperationKeyRef, payload) })
         }
       );
       if (isBookingAttempt(response)) {
         setNotice({
           type: "warning",
-          title: "Delete needs owner review",
+          title: "Cancellation needs owner review",
           message: "Square Appointments did not cancel this booking. The appointment remains unchanged."
         });
       } else {
@@ -667,13 +725,6 @@ export function POSCalendarClient() {
     }
   }
 
-  function currentActionOperationKey() {
-    if (!actionOperationKeyRef.current) {
-      actionOperationKeyRef.current = crypto.randomUUID();
-    }
-    return actionOperationKeyRef.current;
-  }
-
   function moveRange(direction: -1 | 1) {
     const days = view === "day" ? 1 : view === "week" ? 7 : view === "agenda" ? 14 : 32;
     const next = addDaysInput(anchorDate, days * direction);
@@ -687,9 +738,8 @@ export function POSCalendarClient() {
   }
 
   function setShortcut(offsetDays: number) {
-    const next = new Date();
-    next.setDate(next.getDate() + offsetDays);
-    setAnchorDate(formatDateInput(next));
+    const today = formatDateInput(new Date(), salon?.timezone);
+    setAnchorDate(addDaysInput(today, offsetDays));
   }
 
   if (loadingShell) {
@@ -835,7 +885,7 @@ export function POSCalendarClient() {
                       selectedItemID={selectedCalendarItem?.id ?? ""}
                       onSelect={selectCalendarItem}
                       onEdit={openEdit}
-                      onDelete={openDelete}
+                      onCancel={openCancel}
                     />
                   ) : view === "week" ? (
                     <WeekScheduler
@@ -868,7 +918,7 @@ export function POSCalendarClient() {
           timezone={salon.timezone}
           onClose={() => setDetailOpen(false)}
           onEdit={openEdit}
-          onDelete={openDelete}
+          onCancel={openCancel}
         />
 
         <DayAppointmentsDrawer
@@ -902,7 +952,7 @@ export function POSCalendarClient() {
           onSlotSelect={(slot) => updateActionForm({ selectedSlotKey: slotKey(slot) })}
           onSubmitCreate={submitCreate}
           onSubmitEdit={submitEdit}
-          onSubmitDelete={submitDelete}
+          onSubmitCancel={submitCancel}
           onClose={closeActionDialog}
         />
       </div>
@@ -970,14 +1020,14 @@ function AgendaList({
   selectedItemID,
   onSelect,
   onEdit,
-  onDelete
+  onCancel
 }: {
   items: CalendarItem[];
   timezone?: string;
   selectedItemID: string;
   onSelect: (itemID: string) => void;
   onEdit: (appointment: AppointmentRecord) => void;
-  onDelete: (appointment: AppointmentRecord) => void;
+  onCancel: (appointment: AppointmentRecord) => void;
 }) {
   return (
     <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
@@ -989,7 +1039,7 @@ function AgendaList({
           selected={item.id === selectedItemID}
           onSelect={onSelect}
           onEdit={onEdit}
-          onDelete={onDelete}
+          onCancel={onCancel}
         />
       ))}
     </div>
@@ -1594,7 +1644,7 @@ function AppointmentDetailDrawer({
   timezone,
   onClose,
   onEdit,
-  onDelete
+  onCancel
 }: {
   open: boolean;
   selectedItem: CalendarItem | null;
@@ -1602,7 +1652,7 @@ function AppointmentDetailDrawer({
   timezone?: string;
   onClose: () => void;
   onEdit: (appointment: AppointmentRecord) => void;
-  onDelete: (appointment: AppointmentRecord) => void;
+  onCancel: (appointment: AppointmentRecord) => void;
 }) {
   const appointment = selectedItem?.appointment;
 
@@ -1657,7 +1707,7 @@ function AppointmentDetailDrawer({
               ) : null}
               {!appointment ? (
                 <div className="mt-3 rounded-md border border-line bg-slate-50 p-3 text-xs leading-5 text-muted">
-                  Needs owner review. This request is not a confirmed POS appointment, so edit and delete actions are disabled.
+                  Needs owner review. This request is not a confirmed POS appointment, so edit and cancel actions are disabled.
                 </div>
               ) : null}
               <div className="mt-4 grid grid-cols-2 gap-2">
@@ -1679,13 +1729,13 @@ function AppointmentDetailDrawer({
                   variant="danger"
                   onClick={() => {
                     if (!appointment) return;
-                    onDelete(appointment);
+                    onCancel(appointment);
                     onClose();
                   }}
-                  disabled={!appointment || !canDeleteAppointment(appointment)}
+                  disabled={!appointment || !canCancelAppointment(appointment)}
                 >
-                  <Trash2 className="h-4 w-4" />
-                  Delete
+                  <Ban className="h-4 w-4" />
+                  Cancel
                 </Button>
               </div>
             </div>
@@ -1702,14 +1752,14 @@ function CalendarItemRow({
   selected,
   onSelect,
   onEdit,
-  onDelete
+  onCancel
 }: {
   item: CalendarItem;
   timezone?: string;
   selected: boolean;
   onSelect: (itemID: string) => void;
   onEdit: (appointment: AppointmentRecord) => void;
-  onDelete: (appointment: AppointmentRecord) => void;
+  onCancel: (appointment: AppointmentRecord) => void;
 }) {
   const appointment = item.appointment;
   return (
@@ -1768,12 +1818,12 @@ function CalendarItemRow({
               className="h-9 px-3"
               onClick={(event) => {
                 event.stopPropagation();
-                onDelete(appointment);
+                onCancel(appointment);
               }}
-              disabled={!canDeleteAppointment(appointment)}
+              disabled={!canCancelAppointment(appointment)}
             >
-              <Trash2 className="h-4 w-4" />
-              Delete
+              <Ban className="h-4 w-4" />
+              Cancel
             </Button>
           </>
         ) : (
@@ -1806,7 +1856,7 @@ function ActionDialog({
   onSlotSelect,
   onSubmitCreate,
   onSubmitEdit,
-  onSubmitDelete,
+  onSubmitCancel,
   onClose
 }: {
   mode: ActionMode | null;
@@ -1830,14 +1880,15 @@ function ActionDialog({
   onSlotSelect: (slot: AvailabilitySlot) => void;
   onSubmitCreate: () => void;
   onSubmitEdit: () => void;
-  onSubmitDelete: () => void;
+  onSubmitCancel: () => void;
   onClose: () => void;
 }) {
   if (!mode) return null;
 
-  const title = mode === "create" ? "Add appointment" : mode === "edit" ? "Edit appointment" : "Delete appointment";
+  const title = mode === "create" ? "Add appointment" : mode === "edit" ? "Edit appointment" : "Cancel appointment";
   const selectedServiceName = form.serviceID ? serviceNames.get(form.serviceID) || "Unknown service" : "No service";
   const selectedStaffName = appointment ? assignedTechniciansLabel(appointment, staffNames) : "Not assigned";
+  const selectedSlot = availabilityResult?.slots.find((slot) => slotKey(slot) === selectedSlotKey);
 
   return (
     <Dialog
@@ -1846,10 +1897,10 @@ function ActionDialog({
       description={actionDescription(mode)}
       onClose={onClose}
       closeDisabled={saving}
-      className={mode === "delete" ? "max-w-2xl" : "max-w-4xl"}
+      className={mode === "cancel" ? "max-w-2xl" : "max-w-4xl"}
     >
       {error ? <Alert title="Action failed" message={error} /> : null}
-      {mode === "delete" ? (
+      {mode === "cancel" ? (
         <div className="mt-5 grid gap-5">
           <AppointmentSummary appointment={appointment} serviceNames={serviceNames} staffNames={staffNames} timezone={timezone} />
           <label className="block">
@@ -1871,8 +1922,8 @@ function ActionDialog({
             <Button type="button" variant="ghost" onClick={onClose} disabled={saving}>
               Close
             </Button>
-            <Button type="button" variant="danger" onClick={onSubmitDelete} disabled={!appointment || saving}>
-              {saving ? "Cancelling..." : "Delete"}
+            <Button type="button" variant="danger" onClick={onSubmitCancel} disabled={!appointment || saving}>
+              {saving ? "Cancelling..." : "Cancel appointment"}
             </Button>
           </div>
         </div>
@@ -2001,7 +2052,7 @@ function ActionDialog({
             <Button
               type="button"
               onClick={mode === "create" ? onSubmitCreate : onSubmitEdit}
-              disabled={saving || !selectedSlotKey}
+              disabled={saving || !selectedSlot?.fingerprint || !availabilityQuoteIsUsable(availabilityResult)}
             >
               {saving ? "Saving..." : mode === "create" ? "Add" : "Save"}
             </Button>
@@ -2047,6 +2098,9 @@ function AvailabilitySlots({
   }
   return (
     <div className="space-y-3">
+      <div className="rounded-md border border-line bg-slate-50 px-3 py-2 text-xs leading-5 text-muted">
+        Availability quote valid until {formatQuoteExpiry(result.expires_at, timezone)}. Changing service, technician, or date requires a new check.
+      </div>
       {result.slots.map((slot) => {
         const key = slotKey(slot);
         const selected = key === selectedSlotKey;
@@ -2227,7 +2281,9 @@ function parseCalendarEventFrame(frame: string): CalendarEvent | null {
 }
 
 function calendarToastFromEvent(event: CalendarEvent): CalendarToast {
-  const confirmed = event.type === "booking_confirmed" || event.booking_status === "confirmed";
+  const confirmed =
+    event.type === "booking_confirmed" &&
+    (!event.booking_status || isPOSConfirmedStatus(event.booking_status));
   return {
     id: event.id,
     type: confirmed ? "success" : "warning",
@@ -2245,17 +2301,28 @@ function calendarItemIDForEvent(event: CalendarEvent) {
   return "";
 }
 
-function calendarEventIntersectsRange(event: CalendarEvent, range: { start: string; end: string }) {
+function calendarEventIntersectsRange(
+  event: CalendarEvent,
+  range: { start: string; end: string },
+  timezone?: string
+) {
   if (!event.start_time || !event.end_time) return false;
   const start = new Date(event.start_time).getTime();
   const end = new Date(event.end_time).getTime();
-  const rangeStart = inputDateToLocalDate(range.start).getTime();
-  const rangeEnd = inputDateToLocalDate(range.end).getTime();
+  const apiRange = salonRangeRFC3339(range, timezone);
+  const rangeStart = new Date(apiRange.start).getTime();
+  const rangeEnd = new Date(apiRange.end).getTime();
   return start < rangeEnd && end > rangeStart;
 }
 
 function appointmentWarning(item: AppointmentRecord) {
   if (item.sync_warning) return item.sync_warning;
+  if (item.status === "provider_pending") {
+    return "Square Appointments still reports this booking as pending. Do not treat it as confirmed.";
+  }
+  if (item.status === "declined") return "Square Appointments declined this booking.";
+  if (item.status === "no_show") return "Square Appointments marked this booking as a no-show.";
+  if (item.status === "unknown") return "The provider booking status is unknown and needs verification.";
   if (item.pos_sync_status === "sync_failed") {
     return item.pos_sync_error || "Latest POS calendar sync failed for this appointment.";
   }
@@ -2273,12 +2340,17 @@ function appointmentWarning(item: AppointmentRecord) {
 
 function canEditAppointment(appointment: AppointmentRecord) {
   if (appointment.can_edit === false) return false;
-  return appointment.status !== "cancelled" && Boolean(appointment.pos_appointment_id);
+  return isPOSConfirmedStatus(appointment.status) && Boolean(appointment.pos_appointment_id);
 }
 
-function canDeleteAppointment(appointment: AppointmentRecord) {
+function canCancelAppointment(appointment: AppointmentRecord) {
+  if (appointment.can_cancel === false) return false;
   if (appointment.can_delete === false) return false;
-  return appointment.status !== "cancelled" && Boolean(appointment.pos_appointment_id);
+  return isPOSConfirmedStatus(appointment.status) && Boolean(appointment.pos_appointment_id);
+}
+
+function isPOSConfirmedStatus(status: string) {
+  return status === "confirmed" || status === "rescheduled";
 }
 
 function actionDescription(mode: ActionMode) {
@@ -2318,7 +2390,7 @@ function staffIsBookable(member: POSStaffMember) {
 function bookingPathReady(status: StatusResponse | null) {
   const connection = status?.connection;
   const readiness = status?.readiness;
-  const connected = Boolean(connection?.id) && connection?.status !== "not_connected";
+  const connected = Boolean(connection?.id) && connection?.status === "active" && Boolean(connection?.last_sync_at);
   const locationSelected = Boolean(connection?.location_id);
   return connected && locationSelected && (readiness?.service_count ?? 0) > 0 && (readiness?.staff_count ?? 0) > 0 && !readiness?.booking_write_blocked;
 }
@@ -2385,22 +2457,28 @@ function appointmentRequestSegments(appointment: AppointmentRecord, staffID: str
 
 function slotBookingSegments(
   slot: AvailabilitySlot,
-  fallbackServiceID: string,
-  staffSelectionMode: StaffSelectionMode
+	requestedSegments: BookingSegmentRequest[]
 ): BookingSegmentRequest[] {
   const segments = slot.segments ?? [];
   if (segments.length > 0) {
-    return segments.map((segment) => ({
-      service_id: segment.service_id,
-      staff_id: segment.staff_id ?? "",
-      staff_selection_mode: staffSelectionMode
-    }));
+	return segments.map((segment, index) => {
+	  const requested = requestedSegments[index];
+	  const staffID = segment.staff_id ?? "";
+	  return {
+		service_id: segment.service_id,
+		staff_id: staffID,
+		staff_selection_mode: staffMode(requested?.staff_selection_mode ?? segment.staff_selection_mode, staffID)
+	  };
+	});
   }
+	if (requestedSegments.length !== 1) return [];
+	const requested = requestedSegments[0];
+	const staffID = slot.staff_id ?? "";
   return [
     {
-      service_id: fallbackServiceID,
-      staff_id: slot.staff_id ?? "",
-      staff_selection_mode: staffSelectionMode
+	  service_id: requested.service_id,
+	  staff_id: staffID,
+	  staff_selection_mode: staffMode(requested.staff_selection_mode ?? slot.staff_selection_mode, staffID)
     }
   ];
 }
@@ -2410,6 +2488,10 @@ function staffMode(value: StaffSelectionMode | undefined, staffID: string): Staf
     return value;
   }
   return staffID ? "specific" : "anyone";
+}
+
+function aggregateStaffSelectionMode(segments: BookingSegmentRequest[]): StaffSelectionMode {
+  return segments.some((segment) => segment.staff_selection_mode === "anyone") ? "anyone" : "specific";
 }
 
 function appointmentPrimaryServiceID(appointment: AppointmentRecord) {
@@ -2598,7 +2680,7 @@ function calendarItemSelectionID(item: CalendarItem) {
 }
 
 function slotKey(slot: AvailabilitySlot) {
-  return `${slot.start_time}-${slot.end_time}-${slot.staff_id || assignedTechniciansLabel(slot)}`;
+  return slot.fingerprint || `${slot.start_time}-${slot.end_time}-${slot.staff_id || assignedTechniciansLabel(slot)}`;
 }
 
 function rangeForView(view: CalendarView, anchorDate: string) {
@@ -2616,6 +2698,48 @@ function rangeForView(view: CalendarView, anchorDate: string) {
     return { start, end };
   }
   return { start: anchorDate, end: addDaysInput(anchorDate, 14) };
+}
+
+function salonRangeRFC3339(range: { start: string; end: string }, timezone?: string) {
+  return {
+    start: salonDateStartRFC3339(range.start, timezone),
+    end: salonDateStartRFC3339(range.end, timezone)
+  };
+}
+
+function salonDateStartRFC3339(value: string, timezone?: string) {
+  const [year, month, day] = value.split("-").map(Number);
+  if (!year || !month || !day) return value;
+  if (!timezone) return new Date(Date.UTC(year, month - 1, day)).toISOString();
+
+  const desiredLocalTime = Date.UTC(year, month - 1, day);
+  let instant = desiredLocalTime;
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  });
+  for (let iteration = 0; iteration < 4; iteration += 1) {
+    const parts = formatter.formatToParts(new Date(instant));
+    const values = new Map(parts.map((part) => [part.type, part.value]));
+    const representedLocalTime = Date.UTC(
+      Number(values.get("year")),
+      Number(values.get("month")) - 1,
+      Number(values.get("day")),
+      Number(values.get("hour")),
+      Number(values.get("minute")),
+      Number(values.get("second"))
+    );
+    const correction = desiredLocalTime - representedLocalTime;
+    instant += correction;
+    if (correction === 0) break;
+  }
+  return new Date(instant).toISOString();
 }
 
 function visibleItemsForView(items: CalendarItem[], view: CalendarView, anchorDate: string, timezone?: string) {
@@ -2901,6 +3025,68 @@ function formatEventTime(value: string, timezone?: string) {
 
 function formatTimeRange(start: string, end: string, timezone?: string) {
   return `${formatTime(start, timezone)} - ${formatTime(end, timezone)}`;
+}
+
+function formatQuoteExpiry(value: string | undefined, timezone?: string) {
+  if (!value) return "an unknown time";
+  return new Date(value).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZone: timezone
+  });
+}
+
+function clearAvailabilityExpiryTimer(ref: { current: ReturnType<typeof setTimeout> | null }) {
+  if (!ref.current) return;
+  clearTimeout(ref.current);
+  ref.current = null;
+}
+
+function scheduleAvailabilityExpiry(
+  timerRef: { current: ReturnType<typeof setTimeout> | null },
+  expiresAt: string | undefined,
+  requestID: number,
+  requestIDRef: { current: number },
+  onExpire: () => void
+) {
+  clearAvailabilityExpiryTimer(timerRef);
+  if (!expiresAt) return;
+  const expiresAtMs = new Date(expiresAt).getTime();
+  const delay = expiresAtMs - Date.now();
+  if (!Number.isFinite(expiresAtMs) || delay <= 0) {
+    if (requestID === requestIDRef.current) onExpire();
+    return;
+  }
+  timerRef.current = setTimeout(() => {
+    if (requestID !== requestIDRef.current) return;
+    requestIDRef.current += 1;
+    timerRef.current = null;
+    onExpire();
+  }, Math.min(delay, 2_147_483_647));
+}
+
+function availabilityQuoteIsUsable(result: AvailabilityResult | null) {
+  if (!result?.quote_id || !result.request_fingerprint || !result.expires_at) return false;
+  const expiresAt = new Date(result.expires_at).getTime();
+  return Number.isFinite(expiresAt) && expiresAt > Date.now();
+}
+
+function assertAvailabilityQuoteUsable(result: AvailabilityResult, slot: AvailabilitySlot) {
+  if (!availabilityQuoteIsUsable(result) || !slot.fingerprint) {
+    throw new Error("This availability quote is missing, invalid, or expired. Check Square Appointments again.");
+  }
+}
+
+function operationKeyForPayload(
+  ref: { current: { key: string; fingerprint: string } | null },
+  payload: Record<string, unknown>
+) {
+  const fingerprint = JSON.stringify(payload);
+  if (!ref.current || ref.current.fingerprint !== fingerprint) {
+    ref.current = { key: crypto.randomUUID(), fingerprint };
+  }
+  return ref.current.key;
 }
 
 function capitalize(value: string) {

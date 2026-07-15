@@ -33,3 +33,15 @@ func TestValidAITone(t *testing.T) {
 		t.Fatalf("validAITone accepted unsupported tone")
 	}
 }
+
+func TestConsultationCanBeEnabledRequiresReadyService(t *testing.T) {
+	if consultationCanBeEnabled(true, 0) {
+		t.Fatal("consultation enablement accepted zero eligible ready services")
+	}
+	if !consultationCanBeEnabled(true, 1) {
+		t.Fatal("consultation enablement rejected an eligible ready service")
+	}
+	if !consultationCanBeEnabled(false, 0) {
+		t.Fatal("consultation disablement must remain available")
+	}
+}

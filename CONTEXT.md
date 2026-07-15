@@ -23,7 +23,7 @@ A salon-scoped speaking-style preset stored on `salon_settings.ai_tone`. It can 
 A conversation lane that helps a caller clarify needs, compare eligible services, and choose one service from owner-approved facts. It does not own availability or POS tools. A selected recommendation becomes a booking draft only after the caller also expresses booking intent.
 
 **Service Consultation Profile**
-The structured, owner-approved child record for one canonical service, stored in `service_consultation_profiles` with a stable `(salon_id, service_id)` key and revision. Only `ready` profiles on active-provider, POS-linked, AI-bookable services participate in recommendation ranking; draft and disabled profiles remain management data.
+The structured, owner-approved child record for one canonical service, stored in `service_consultation_profiles` with a stable `(salon_id, service_id)` key and revision. Only `ready` profiles with at least one recommended outcome and one compatible current system on active-provider, POS-linked, AI-bookable services participate in recommendation ranking; draft, incomplete, and disabled profiles remain management data.
 
 **Conversation Engine**
 The state machine and tool-calling layer behind the AI Receptionist. It must not know Square payloads, OAuth tokens, or provider-specific booking details.
@@ -95,9 +95,9 @@ A normalized, salon-scoped record of provider failures. Use codes such as `POS_T
 - ManleAI owns canonical salon operational data; the active POS owns booking execution.
 - Service recognition must be catalog-backed and salon-scoped. Do not hardcode per-salon service keywords into prompts or generic matchers.
 - Service categories are menu/understanding configuration, not confirmed-booking entities. Category matches should clarify to real services before availability or booking.
-- AI consultation may rank only eligible services with `ready` owner-approved profiles. Semantic model output may extract needs and catalog IDs but cannot recommend a service, mutate the booking draft, or call POS tools directly.
+- AI consultation may rank only eligible services with complete `ready` owner-approved profiles. Semantic model output may extract needs, field-level consultation mutations, catalog IDs, and a safety assessment but cannot recommend a service, mutate persisted state, or call POS tools directly.
 - Service selection during consultation is not booking intent. The runtime must receive both a concrete selected service and an explicit booking request before entering booking collection; consultation-only calls may complete with `consultation_completed`.
-- Consultation safety concerns involving pain, injury, infection, allergy, bleeding, swelling, or medical suitability require owner handoff and no medical advice.
+- Consultation safety concerns involving pain, injury, infection, allergy, bleeding, swelling, or medical suitability require owner handoff and no medical advice. Deterministic safety evidence is checked before normal routing, and validated structured safety evidence is checked before any state mutation or tool action.
 - Supported group or party booking requests may be booked by the AI when party size and guest service counts resolve to bookable catalog services, availability returns bookable slots, and the active POS provider returns a successful booking ID. Unsupported or unsafe party requests require owner review and must not be described as confirmed appointments.
 - AI tone changes reply style only. It must not change required booking slots, handoff decisions, availability checks, service selection, or confirmed-booking wording.
 - Pending clarification is context, not a closed vocabulary. A caller may ask an informational question without losing the draft, or explicitly change to a different catalog-backed target without being trapped in stale candidates.

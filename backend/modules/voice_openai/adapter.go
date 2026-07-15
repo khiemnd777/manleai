@@ -204,6 +204,8 @@ func (a *Adapter) InterpretTurn(ctx context.Context, req voice.TurnModelRequest)
 			"Use set_field or clear_field for staff, date/time, guest, or customer-field corrections.",
 			"Do not infer booking confirmation, availability, customer identity, prices, or policy.",
 			"For consultation, extract only the caller's stated current nail system, desired outcome, length change, priorities, desired finishes, compared catalog service IDs, booking request, and whether the caller is done. Never recommend a service in model output.",
+			"For every consultation preference stated or corrected in this turn, emit a field-level mutation. Use set for an initial value, replace for a correction, add or remove for list items, and clear only when the caller explicitly withdraws the field. Never treat a negated value as an addition.",
+			"Classify safety.concern=true for pain, injury, infection, allergy, bleeding, swelling, adverse reaction, or a request for medical suitability or treatment advice. This safety classification applies regardless of the caller's booking or consultation goal.",
 			"Use empty strings and arrays when consultation details are not present. Do not infer health suitability or treatment claims.",
 			"Return strict JSON matching the schema.",
 		}, "\n"),
@@ -407,6 +409,26 @@ func turnUnderstandingSchema() map[string]any {
 		},
 		"required": []string{"subject", "service_ids", "staff_ids", "time_preference", "confidence", "reason"},
 	}
+	consultationMutation := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"field": map[string]any{"type": "string", "enum": []string{
+				conversation.ConsultationNeedFieldCurrentSystem, conversation.ConsultationNeedFieldDesiredOutcome,
+				conversation.ConsultationNeedFieldLengthChange, conversation.ConsultationNeedFieldPriorities,
+				conversation.ConsultationNeedFieldDesiredFinishes, conversation.ConsultationNeedFieldComparedServiceIDs,
+			}},
+			"operation": map[string]any{"type": "string", "enum": []string{
+				conversation.ConsultationNeedOperationSet, conversation.ConsultationNeedOperationReplace,
+				conversation.ConsultationNeedOperationAdd, conversation.ConsultationNeedOperationRemove,
+				conversation.ConsultationNeedOperationClear,
+			}},
+			"values":     map[string]any{"type": "array", "uniqueItems": true, "items": map[string]any{"type": "string"}},
+			"confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+			"reason":     map[string]any{"type": "string"},
+		},
+		"required": []string{"field", "operation", "values", "confidence", "reason"},
+	}
 	consultation := map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
@@ -441,8 +463,25 @@ func turnUnderstandingSchema() map[string]any {
 			"conversation_complete": map[string]any{"type": "boolean"},
 			"confidence":            map[string]any{"type": "number", "minimum": 0, "maximum": 1},
 			"reason":                map[string]any{"type": "string"},
+			"mutations":             map[string]any{"type": "array", "items": consultationMutation},
 		},
-		"required": []string{"current_system", "desired_outcome", "length_change", "priorities", "desired_finishes", "compared_service_ids", "booking_requested", "conversation_complete", "confidence", "reason"},
+		"required": []string{"current_system", "desired_outcome", "length_change", "priorities", "desired_finishes", "compared_service_ids", "booking_requested", "conversation_complete", "confidence", "reason", "mutations"},
+	}
+	safety := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"concern": map[string]any{"type": "boolean"},
+			"category": map[string]any{"type": "string", "enum": []string{
+				"", conversation.SafetyCategoryPain, conversation.SafetyCategoryInjury,
+				conversation.SafetyCategoryInfection, conversation.SafetyCategoryAllergy,
+				conversation.SafetyCategoryBleeding, conversation.SafetyCategorySwelling,
+				conversation.SafetyCategoryMedicalSuitability, conversation.SafetyCategoryOtherHealth,
+			}},
+			"confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+			"reason":     map[string]any{"type": "string"},
+		},
+		"required": []string{"concern", "category", "confidence", "reason"},
 	}
 	return map[string]any{
 		"type":                 "object",
@@ -456,8 +495,9 @@ func turnUnderstandingSchema() map[string]any {
 			"confidence":   map[string]any{"type": "number", "minimum": 0, "maximum": 1},
 			"reason":       map[string]any{"type": "string"},
 			"consultation": consultation,
+			"safety":       safety,
 		},
-		"required": []string{"goal", "acts", "questions", "confidence", "reason", "consultation"},
+		"required": []string{"goal", "acts", "questions", "confidence", "reason", "consultation", "safety"},
 	}
 }
 

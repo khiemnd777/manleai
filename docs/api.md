@@ -201,7 +201,10 @@ The tone controls spoken reply style only; booking guardrails and POS-first
 confirmation rules still override style. `consultation_enabled` is the salon-wide
 runtime gate for AI service consultation. It does not make any service eligible by
 itself; eligibility still requires an active-provider link, AI booking eligibility,
-and a ready service consultation profile.
+and a complete `ready` service consultation profile with at least one recommended
+outcome and one compatible current system. The setting defaults to `false`, and an
+enable request is rejected until at least one service meets that full eligibility
+contract.
 
 ```json
 {
@@ -316,9 +319,9 @@ Schema v7 adds portable `service_consultation_profiles` and
 `included_sections`. A full export lists every supported configuration section;
 a curated pack may list only taxonomy, service aliases, and consultation
 profiles so it cannot overwrite salon, provider, or AI runtime configuration.
-Import remains backward compatible with v1-v6 bundles. Only v1-v5 bundles
-default consultation to enabled because v6 already contains the explicit
-runtime toggle.
+Import remains backward compatible with v1-v6 bundles. Bundles from v1-v5 do
+not contain the consultation toggle and therefore default it to disabled;
+schema v6 and later preserve the explicit value subject to profile readiness.
 
 ```json
 {
@@ -652,7 +655,11 @@ configured and whether it came from dashboard storage or environment fallback.
     "redirect_url": "https://api.example.com/api/integrations/square/callback",
     "api_version": "2026-05-20",
     "client_secret_configured": true,
-    "client_secret_source": "database"
+    "client_secret_source": "database",
+    "webhook_notification_url": "https://api.example.com/api/integrations/square/webhook",
+    "webhook_configured": true,
+    "webhook_signature_key_configured": true,
+    "webhook_signature_key_source": "database"
   },
   "twilio": {
     "provider": "twilio",
@@ -701,9 +708,19 @@ configured and whether it came from dashboard storage or environment fallback.
   "clear_client_secret": false,
   "redirect_url": "https://api.example.com/api/integrations/square/callback",
   "api_version": "2026-05-20",
-  "api_base_url": ""
+  "api_base_url": "",
+  "webhook_notification_url": "https://api.example.com/api/integrations/square/webhook",
+  "webhook_signature_key": "new-signature-key-or-empty-to-keep-existing",
+  "clear_webhook_signature_key": false
 }
 ```
+
+`webhook_configured=true` means only that an HTTPS notification URL and an
+encrypted signature key are stored for inbound verification. It does not prove
+that a Square subscription exists or that recent deliveries succeeded. Secret
+encryption failures abort the update and preserve previously stored secrets.
+Configuration transfer preserves the target salon's deployment URL and never
+exports a webhook signature key; that key must be re-entered at the target.
 
 `PUT /api/salons/:id/integration-configs/twilio`
 
@@ -809,9 +826,11 @@ systems (`natural`, `regular_polish`, `gel`, `dip`, `acrylic`, `extension`),
 length capabilities (`keep`, `shorten`, `add_length`), priorities
 (`durability`, `lower_maintenance`, `lower_cost`, `shorter_visit`), and finishes
 (`natural`, `regular_polish`, `gel_polish`, `glossy`, `matte`, `nail_art`). A
-`ready` profile requires at least one structured value. Summary and maintenance
-text are trimmed and limited to 320 Unicode characters. Identical retry payloads
-are no-ops; a changed profile increments `revision`.
+`ready` profile requires at least one recommended outcome and at least one
+compatible current system. Optional length, priority, and finish fields refine
+ranking but cannot publish an otherwise incomplete profile. Summary and
+maintenance text are trimmed and limited to 320 Unicode characters. Identical
+retry payloads are no-ops; a changed profile increments `revision`.
 
 Only `ready` profiles attached to active-provider, POS-linked, AI-bookable
 services participate in consultation ranking. `ai_description`, then
@@ -1178,6 +1197,9 @@ Returns:
 
 ```json
 {
+  "quote_id": "availability-quote-uuid",
+  "request_fingerprint": "sha256-hex",
+  "expires_at": "2026-06-10T14:05:00Z",
   "service_id": "...",
   "service_name": "Classic Manicure",
   "staff_id": "...",
@@ -1198,6 +1220,7 @@ Returns:
   "timezone": "America/Chicago",
   "slots": [
     {
+      "fingerprint": "sha256-hex",
       "start_time": "2026-06-10T15:00:00Z",
       "end_time": "2026-06-10T15:45:00Z",
       "staff_id": "...",
@@ -1217,6 +1240,33 @@ Returns:
   ]
 }
 ```
+
+When at least one usable slot is returned, the backend persists a short-lived,
+single-use availability quote and returns `quote_id`, `request_fingerprint`,
+`expires_at`, and one `fingerprint` per slot. These fields are intentionally
+omitted when `slots` is empty. Owner-facing HTTP create, reschedule, and Square
+test-booking writes must submit the quote ID and selected slot fingerprint;
+missing evidence returns `409 AVAILABILITY_QUOTE_REQUIRED`, while expired,
+consumed, provider-snapshot-stale, or payload-mismatched evidence returns
+`409 AVAILABILITY_QUOTE_STALE`.
+
+Conversation callers do not accept client-supplied HTTP quote fields. They
+retain the backend quote proof attached to the selected offered slot and
+re-query provider availability immediately before create or reschedule. The
+runtime replaces the proof only when the refreshed slot has the same start,
+end, and ordered service/staff assignment. A changed or missing slot is
+re-offered and no POS write is dispatched. Party booking refreshes every child
+slot and quote before the first child write; a failed child preflight produces
+zero child writes for that attempt.
+
+Availability quotes are ephemeral authorization evidence, not the booking
+audit source of truth. The worker deletes unconsumed quotes only after expiry
+plus a 24-hour grace period and deletes orphaned consumed quotes only after a
+30-day audit window. Cleanup runs every five minutes and drains at most eight
+lock-skipping batches of 250 quotes per run; it never deletes a quote while any
+`booking_attempts.availability_quote_id` or
+`consumed_by_attempt_id` audit reference remains. Quote deletion cascades to
+its slot children only; the booking-attempt ledger is not modified.
 
 `GET /api/salons/:id/customers`
 
@@ -1376,7 +1426,12 @@ Imports appointments from the active POS provider for the requested range. For
 Square Appointments, this uses the Square Bookings list path and upserts local
 appointment mirrors by `(salon_id, pos_provider, pos_appointment_id)`. The
 import does not bypass the POS-first confirmation rule; it mirrors provider
-records and records POS errors when sync fails.
+records and records POS errors when sync fails. One owner-scoped selected
+location/snapshot-generation fence is captured before pagination and reused for
+every page. The persistence transaction revalidates that exact fence before
+its first write, so a provider, location, or generation change fails the import
+without partial mirror writes. A returned Square booking with a different
+non-empty `location_id` also fails the page.
 
 ```json
 {
@@ -1405,24 +1460,28 @@ records and records POS errors when sync fails.
 ```json
 {
 	"operation_key": "dashboard-reschedule-7f60e4bf",
+  "retry_of_attempt_id": "optional-safe-fallback-attempt-uuid",
+  "availability_quote_id": "availability-quote-uuid",
+  "slot_fingerprint": "sha256-hex",
   "start_time": "2026-06-11T16:00:00Z",
   "staff_id": "...",
   "notes": "Customer requested later time"
 }
 ```
 
-Returns `200` with the updated appointment only when the active `POSProvider` successfully reschedules the POS booking. Returns `202` with the existing `pos_pending` attempt when the same operation is already executing, or with status `fallback_pending` when the POS provider fails; the internal appointment remains unchanged. Reusing an `operation_key` with a different normalized payload returns `409 BOOKING_OPERATION_CONFLICT`.
+Returns `200` with the updated appointment only when the active `POSProvider` successfully reschedules the exact target booking and returns a version newer than the pre-dispatch baseline. The appointment's immutable originating provider location must match both the currently selected synchronized location and the fresh quote; a switched location or legacy missing origin fails before dispatch. Same-location generation advancement is allowed only when current raw service/staff mappings and the target version remain valid. Direct persistence is serialized with calendar import and cannot overwrite a newer stored provider version; an equal or newer authoritative mirror is accepted only when its version is at least the direct response, remains newer than baseline, and its synchronized time plus ordered canonical/raw assignment match exactly. Returns `202` with the existing `pos_pending` attempt when the same operation is already executing, or with an unconfirmed fallback/provider-pending attempt when the POS provider does not confirm the requested change or a conflicting mirror wins the persistence race; the internal appointment remains unchanged. Reusing an `operation_key` with a different normalized payload returns `409 BOOKING_OPERATION_CONFLICT`. A retry may name `retry_of_attempt_id` only when the prior attempt is a non-superseded `fallback_pending` row with `retry_policy=safe` and the new normalized request fingerprint is identical. A changed time, notes, service order, or technician assignment must start a new logical request instead of reusing that retry lineage.
 
 `POST /api/salons/:id/appointments/:appointment_id/cancel`
 
 ```json
 {
 	"operation_key": "dashboard-cancel-9aa95f18",
+  "retry_of_attempt_id": "optional-safe-fallback-attempt-uuid",
   "reason": "Customer requested cancellation"
 }
 ```
 
-Returns `200` with the cancelled appointment only when the active `POSProvider` successfully cancels the POS booking. Returns `202` with the existing `pos_pending` attempt when the same operation is already executing, or with status `fallback_pending` when the POS provider fails; the internal appointment remains unchanged. Reusing an `operation_key` with a different normalized payload returns `409 BOOKING_OPERATION_CONFLICT`.
+Returns `200` with the cancelled appointment only when the active `POSProvider` successfully cancels the exact target booking and returns a version newer than the pre-dispatch baseline. Its immutable originating provider location must match the currently selected synchronized location, and cancellation carries that current exact provider fence into the adapter; a location switch or legacy missing origin makes zero provider calls. The monotonic persistence guard never overwrites a newer calendar/webhook version; a current cancelled mirror at least as new as the direct response and newer than baseline is authoritative success. Returns `202` with the existing `pos_pending` attempt when the same operation is already executing, or with status `fallback_pending` when the POS provider fails or the direct result conflicts with stored provider truth; the internal appointment remains unchanged. Reusing an `operation_key` with a different normalized payload returns `409 BOOKING_OPERATION_CONFLICT`.
 
 `GET /api/salons/:id/booking-attempts`
 
@@ -1437,18 +1496,97 @@ Booking attempts also expose backend-owned operation integrity state:
 - `retry_policy`: `none`, `safe`, or `blocked`.
 - `reconciliation_status`: `not_required`, `required`, or `resolved`.
 - `processing_lease_expires_at`: present while one worker owns the durable operation claim.
-- `can_retry`: authoritative backend retry gate. Dashboard clients must not infer retry safety only from `fallback_pending`.
-- `retry_blocked_reason`: owner-facing reason when provider reconciliation is required before retry.
+- `can_retry`: authoritative backend retry gate. Dashboard clients must not infer retry safety only from `fallback_pending`. Book/reschedule retries require a non-legacy stored provider fence, the same currently active and synchronized provider location, exact current ordered provider service/staff mappings and versions, and an unchanged appointment target/version for reschedule. Cancel retry requires the unchanged target booking and baseline version. A newer snapshot generation requires a fresh quote but does not by itself change the logical request.
+- `retry_blocked_reason`: owner-facing reason when reconciliation, legacy evidence, provider readiness, catalog mapping, or target-version drift blocks retry.
 
 `provider_outcome=unknown` means a provider write timed out, was cancelled in flight, returned HTTP 5xx, lost or truncated its response, failed to decode a success response, failed during a post-write provider lookup, or returned insufficient booking metadata after it may have succeeded. Such attempts use `retry_policy=blocked` and `reconciliation_status=required`; they must be verified in the active POS before another operation is submitted. Only a typed definitive provider rejection is eligible for `retry_policy=safe`; untyped provider-write errors default to unknown.
 
-When an in-flight processing lease expires, the next owner booking-attempt or calendar read atomically moves the attempt to `fallback_pending`, records a `POS_TIMEOUT`, creates one owner notification, and applies the same unknown-result retry block. Repeated reads do not create duplicate reconciliation records because only `in_flight` attempts are transitioned.
+Lease expiry is phase-sensitive. Recovery first checks authoritative calendar
+truth under the same salon-scoped lock. An exact create/reschedule/cancel mirror
+terminalizes the attempt without a fallback. Otherwise an expired `not_started`
+operation proves the processing owner stopped before provider dispatch: it
+becomes `fallback_pending` with `provider_outcome=failed`,
+`retry_policy=safe`, and `reconciliation_status=not_required`. An expired
+`in_flight` operation may already have reached the provider, so it becomes
+`fallback_pending` with `provider_outcome=unknown`, `retry_policy=blocked`, and
+`reconciliation_status=required`.
+
+Owner booking-attempt/calendar reads and the background worker use the same
+atomic recovery transaction. The worker selects a bounded candidate list
+without row locks, then handles each row with calendar advisory lock first and
+appointment/attempt row locks afterward. It clears the processing token/lease, records one
+`POS_TIMEOUT`, and creates one deduplicated owner-notification outbox row. Only
+the `in_flight` branch creates reconciliation work. Repeated or concurrent
+sweeps do not duplicate POS errors, notifications, or reconciliation tasks and
+report no processed salon after its expired rows have already transitioned.
+A same-operation-key replay that wins before lease recovery may safely resume
+an expired `not_started` claim because provider dispatch has not begun; after
+the recovery transaction finalizes it as fallback, a new attempt must use the
+explicit safe-retry lineage.
+
+Owner notifications are currently durable in-product/outbox records with
+dedupe, payload, attempt count, and delivery metadata. This repository does not
+yet contain an external SMS/email/push delivery consumer for those records.
+
+`GET /api/salons/:id/booking-reconciliations?status=<open|resolved|escalated>&limit=100&offset=0`
+
+Returns a paginated owner-scoped reconciliation queue. Each task includes
+`booking_attempt_id` and an optional embedded `booking_attempt`. Unknown or
+provider-pending writes remain blocked until resolution. Only historical
+duplicates proven pre-dispatch with `provider_outcome=not_started` may be
+normalized automatically as superseded; their task is closed with
+`status=resolved` and `resolution=superseded`, and their candidate and
+resolution endpoints return `409 RECONCILIATION_CONFLICT`. V39 fails instead of
+collapsing a fingerprint group with more than one dispatched/unknown outcome.
+
+`GET /api/salons/:id/booking-reconciliations/:attempt_id/candidates`
+
+Returns `{ "candidates": [...] }` containing only tenant-scoped,
+provider-synced appointments that satisfy the same exact provider ID,
+operation, target appointment, status, version, time, service, and customer
+matching predicate used during resolution. Clients must use this endpoint
+rather than infer candidates from a truncated appointment list.
+
+For reschedule and cancel attempts, `version` means a provider appointment
+version strictly newer than the target version captured before the outbound
+write. Reschedule candidates must also match the requested start/end and the
+ordered service/staff assignment. The customer technician-preference flag is
+not compared because a provider calendar mirror records the assigned
+technician, while the original request may have used `staff_selection_mode=anyone`.
+
+`POST /api/salons/:id/booking-reconciliations/:attempt_id/resolve`
+
+```json
+{
+  "action_key": "owner-resolution-uuid",
+  "action": "provider_attached",
+  "provider_appointment_id": "square-booking-id",
+  "provider_appointment_version": 4,
+  "provider_status": "accepted",
+  "note": "Verified against the latest provider calendar sync."
+}
+```
+
+Actions are `provider_attached`, `not_created`, and `escalated`.
+`provider_attached` locks and revalidates the exact provider-synced candidate
+before linking it; `not_created` makes a definitive failure retryable only after
+owner verification. For reschedule/cancel, the existing target provider booking
+ID is not proof that the requested mutation succeeded. `not_created` is
+rejected whenever an exact provider-synced booking or newer appointment
+mutation is already visible.
+`escalated` keeps retry blocked. `action_key` is
+payload-bound and replay-safe. Resolution is serialized with provider calendar
+imports for the salon before either path takes row locks, preventing a
+concurrent mirror insert from passing a `not_created` absence check.
 
 `POST /api/salons/:id/booking-attempts`
 
 ```json
 {
-	"operation_key": "voice-session-0dfd-book",
+	"operation_key": "dashboard-booking-0dfd",
+  "retry_of_attempt_id": "optional-safe-fallback-attempt-uuid",
+  "availability_quote_id": "availability-quote-uuid",
+  "slot_fingerprint": "sha256-hex",
   "customer_name": "Linh Tran",
   "customer_phone": "+13125550101",
   "customer_email": "linh@example.com",
@@ -1467,7 +1605,13 @@ When an in-flight processing lease expires, the next owner booking-attempt or ca
 }
 ```
 
-`operation_key` is required and identifies one logical booking operation. It is generated once per dashboard action or deterministically from the conversation session. The backend stores a normalized request fingerprint under a salon-scoped unique operation claim before customer or POS side effects. Replaying the same key and payload returns the existing attempt and reuses its POS idempotency key without a second POS writer. Reusing the same key with a different payload returns `409 BOOKING_OPERATION_CONFLICT`.
+`operation_key` is required and identifies one logical booking operation. It is generated once per dashboard action or deterministically from the conversation session. The backend stores a normalized request fingerprint under a salon-scoped unique operation claim before customer or POS side effects. Replaying the same key and logical intent returns the existing attempt and reuses its POS idempotency key without a second POS writer. Ephemeral availability quote IDs and slot-proof fingerprints may be refreshed for the same logical request after response loss and are not replay-identity fields; they remain mandatory and exact for the first claim that can dispatch. Reusing the same key with different customer, retry lineage, target, time, notes, or ordered service/staff intent returns `409 BOOKING_OPERATION_CONFLICT`.
+
+For this authenticated HTTP endpoint, the handler assigns
+`source=owner_dashboard`; caller-supplied source values are not trusted. Quote
+evidence is required on this HTTP surface. Provider-neutral internal callers
+use the service directly and retain their own source and conversation
+authorization gates.
 
 Creates a backend booking attempt before calling the active `POSProvider`. For
 multi-service booking, each segment is resolved to provider-neutral
@@ -1530,11 +1674,27 @@ Irreversibly redacts a completed or otherwise non-active owner-scoped conversati
 
 Processes one simulated customer message through the deterministic conversation engine. `event_key` is optional for simulator callers and is used by voice adapters to dedupe provider retries. The simulator asks one question at a time, preserves already-collected booking slots, handles greeting-only or connection-check turns without replaying the full welcome or forcing booking intent, handles date-only turns such as weekdays before a time is known, can create owner handoffs for human requests or disabled AI booking, checks provider-neutral availability before selecting a booking time, offers available slots from Square Appointments, and calls the provider-neutral booking service only after the customer selects a slot and required customer details are collected. Deterministic date, time, staff, customer, and explicit availability-question evidence is applied before a model-proposed standalone summary can return, so a concrete correction or request for openings cannot be dropped or misrouted by semantic classification. If a new-booking caller proposes a different date or time after availability slots were offered, the engine preserves those slots and stores a typed pending correction until the caller confirms; rejection or a renewed availability question keeps and repeats the prior slots, while confirmation invalidates them and performs a fresh provider availability check. Service utterances are interpreted against the active salon catalog, active `service_aliases`, active `service_categories`, and active `service_category_aliases`; exact catalog service names win over aliases, alias matches can select one service, category/category-alias matches ask the caller to choose a real service in that group, and generic or fuzzy family matches ask for catalog-backed clarification instead of selecting a service. A structured semantic act cannot narrow a category/category-alias candidate set to one service without concrete service evidence. Exact family evidence takes precedence over fuzzy service guessing unless another caller token distinctly identifies one catalog service, so conversational wording such as "manicure as well" cannot be misread as "Gel Manicure." If the caller mentions a different service after a service is already selected, the engine distinguishes adding from replacing before mutating the booking; a bare concrete service switch uses confirmation before clearing slots or changing the draft. A generic request such as another service first asks whether to add or replace; an ambiguous service family then asks for one concrete catalog service; and a multi-service replacement also asks which current service to replace. While a family target is pending, short replies are interpreted against that candidate set first, with full-catalog fallback for a clearly different service. The engine preserves the selected services and offered slots until the operation and concrete target are resolved, never applies every candidate from an ambiguous family, and only then clears stale offered slots and rechecks availability when date or time context already exists. Non-booking answers are routed from structured sources before knowledge: active-provider AI-bookable services, imported business hour periods, active-provider staff, booking availability prompts, then active knowledge. Informational service menu and count questions are answered from the full matched bookable catalog without selecting a service, clearing pending candidates, or calling availability/booking tools; if a booking is already in progress, the reply then resumes the unresolved service question. Transcript metadata may include `service_understanding_status`, `service_understanding_reason`, `service_understanding_confidence`, candidate service IDs/names, selected service, alias source, alias ID, category ID, category name, `answer_source`, `answer_source_reason`, `answer_source_confidence`, `router_intent`, `source_record_ids`, and `answer_context_cache_hit` for debugging. Supported group or party booking requests resolve party size and guest service counts into ordered `booking_segments`, call availability, and can be booked through the same POS-first booking service after the caller selects a slot and provides required customer details. Party parsing distinguishes person-count phrases such as "for two guests" from service-count phrases such as "two manicures"; session `party_plan` may include optional `parse_source`, `parse_confidence`, `clarify_reason`, group `source`, and `evidence` fields for debugging and review. Ambiguous party service families and party-size/service-count mismatches ask for catalog-backed clarification before availability. Offered slots may include ordered `segments` with provider-neutral service/staff assignments. The engine can select a unique offered slot from ordinal replies, spoken times such as "one p.m.", or a "Yes" reply to a prompt that confirmed one specific offered time; unclear time fragments repeat the existing offered slots instead of rerunning availability. Once a customer selects a slot, the session stores selected `booking_segments` and `staff_selection_mode` so simulator and phone flows can create one multi-service or supported party POS-first booking request. When `staff_selection_mode=anyone`, the customer did not choose a named technician, so the conversation avoids presenting the POS staff assignment as a customer-selected technician. Reschedule and cancellation requests use `booking_action` values `reschedule` and `cancel`, look up upcoming POS-backed appointments by caller phone, ask the caller to select or confirm the target appointment, and then call the provider-neutral booking service. A simulator booking is marked `booking_confirmed` only when the booking service returns a confirmed booking attempt with a POS booking ID and appointment. Cancellation is marked `booking_cancelled` only when the booking service returns a POS-cancelled appointment. POS failures create `booking_fallback_pending` wording and do not create confirmed, rescheduled, or cancelled appointment language.
 
-When `consultation_enabled=true`, a caller may enter AI Consultation without a booking request. The semantic lane extracts controlled consultation needs but does not choose a service. Backend ranking uses only `ready` profiles from the eligible active-provider service catalog, stores the profile revisions and reasons in dialog state, and asks one useful question per turn. Consultation never calls availability or booking tools. A recommendation with one result asks whether the caller wants booking help; multiple results ask for a concrete service choice, and that choice still requires a separate booking-intent confirmation. A caller may end with `outcome=consultation_completed`, return to an unchanged booking draft, or enter owner handoff for safety or repeated unresolved input.
+Session responses include a persisted `state_revision`. Production message and
+typed voice-recovery execution acquire one session-scoped database lock before
+the first state read and retain it through any availability/POS side effect and
+the final transcript/state commit. `event_key` is persisted on both sides of
+the turn; replay returns that event's exact historical AI reply without
+reinterpreting the request or replacing a newer current session state. The repository also compares `state_revision` during `SaveTurn`; after a
+bounded retry, an unresolved stale write returns
+`409 CONVERSATION_STATE_CONFLICT` without silently overwriting newer state.
+
+When `consultation_enabled=true`, a caller may enter AI Consultation without a booking request. The semantic lane extracts controlled consultation needs but does not choose a service. Field-level `set`, `replace`, `add`, `remove`, and `clear` mutations are validated against controlled values and are the sole persistence authority for consultation need fields, so a free-standing semantic snapshot cannot overwrite scalar or list state and corrections do not accumulate stale preferences. Backend ranking uses only complete `ready` profiles from the eligible active-provider service catalog, stores the profile revisions and reasons in dialog state, and asks one useful question per turn. Consultation never calls availability or booking tools. A recommendation with one result asks whether the caller wants booking help; multiple results ask for a concrete service choice, and that choice still requires a separate booking-intent confirmation. Deterministic health signals are checked before normal turn routing; a validated structured safety assessment is also handled before any draft, availability, consultation, or POS action. A caller may end with `outcome=consultation_completed`, return to an unchanged booking draft, or enter owner handoff for safety or repeated unresolved input.
+
+Structured service, alias, staff, and business-hour answer context is guarded by
+a database-owned active-provider/location/generation/readiness fence on every
+turn. A local cache hit is accepted only when that current fence matches. Cache
+misses double-read the fence around context loading; a concurrent switch/sync
+retries, and a non-ready snapshot fails closed by hiding provider-owned
+structured data while retaining eligible salon-authored knowledge.
 
 Configured production turns first enter the state-driven Turn Kernel. The kernel derives `expected_input`, measures deterministic coverage, and selects one explicit route: `fast_lane`, `answer_lane`, `action_lane`, `recovery_lane`, or `semantic_lane`. Unambiguous expected-field evidence, offered-slot choices, state-scoped confirmations, structured questions, and operational actions avoid a reply-model round trip. For a new booking with no selected service, an exact catalog service advances directly to the next missing field and a category asks for one concrete catalog option; neither path asks whether to add or replace. An add-or-replace operation choice is valid only after a service has been selected. The semantic lane uses a strict `TurnUnderstanding` object containing a goal, zero or more ordered acts, and zero or more questions. Acts cover add/replace/remove/undo plus set/clear corrections for service, staff, date/time, customer, and guest state. One utterance may contain both a correction and a question; the reducer applies validated correction semantics first, answers the question from structured sources, then resumes one useful pending question. Replacement source and target remain separate. Pending candidates are context rather than a closed vocabulary, current-draft questions do not become catalog-count questions, and repeated unresolved clarification is bounded. For a completed `party_plan`, service correction pending state uses `party_service_target`, `party_service_guest`, `party_service_operation`, and `party_service_source` with `guest_ref`; short replies resolve deterministically, only the selected party group may change, and offered slots/review authorization are invalidated only after the correction resolves. Unresolved party-correction pending state blocks availability and booking even when semantic interpretation is unavailable.
 
-The configured OpenAI reply model interprets only `semantic_lane` turns selected from state and deterministic coverage, never from a keyword-only gate. Input contains `expected_input`, a PII-reduced utterance, selected or context-relevant service and staff references, current party-group references, pending act, booking action/stage, boolean customer-field presence, and current revision. Full active catalogs are included only when the current turn requires discovery, correction, or service disambiguation. Party service mutations must name an existing guest reference, while an initial multi-act party request may construct counted groups without flattening repeated services. The backend rejects low-confidence goals/questions/acts, invalid entity-operation combinations, malformed party counts, and IDs outside the salon's active catalog. A 2.5-second timeout, provider failure, empty output, invalid schema, low-confidence result, or rejected catalog reference preserves the draft and may fall back to independently validated catalog and already-captured field evidence before asking the next missing-field question. Without such evidence, the runtime safely clarifies or hands off. The model cannot call tools, mutate session state, or create confirmed wording.
+The configured OpenAI reply model interprets only `semantic_lane` turns selected from state and deterministic coverage, never from a keyword-only gate. Input contains `expected_input`, a PII-reduced utterance, selected or context-relevant service and staff references, current party-group references, pending act, booking action/stage, boolean customer-field presence, and current revision. Full active catalogs are included only when the current turn requires discovery, correction, or service disambiguation. Party service mutations must name an existing guest reference, while an initial multi-act party request may construct counted groups without flattening repeated services. The structured result also carries extraction-only consultation mutations and a global safety assessment; neither has side-effect authority. The backend rejects low-confidence goals/questions/acts, invalid mutation semantics, malformed party counts, safety categories outside the controlled contract, and IDs outside the salon's active catalog. A 2.5-second timeout, provider failure, empty output, invalid schema, low-confidence result, or rejected catalog reference preserves the draft and may fall back to independently validated catalog and already-captured field evidence before asking the next missing-field question. Without such evidence, the runtime safely clarifies or hands off. The model cannot call tools, mutate session state, or create confirmed wording.
 
 New booking execution requires revision-bound final review. Service, staff, date/time, guest/party, or customer changes advance the draft revision; dependency-bearing changes also invalidate offered availability. The active POS provider still owns booking execution, and confirmed wording still requires POS success plus a booking ID.
 
@@ -2068,6 +2228,24 @@ Response:
 
 ## Square
 
+`POST /api/integrations/square/webhook`
+
+Public Square booking-event receiver. The handler verifies HMAC-SHA256 against
+the exact dashboard-stored HTTPS notification URL plus raw request body, using
+the encrypted salon-scoped signature key and constant-time comparison. Event
+IDs are durably deduped before `200`; invalid signatures or bodies are rejected.
+If both envelope and nested booking location IDs are present, they must be
+identical before tenant routing. The worker fetches current Square booking truth
+rather than trusting event payload status, and scheduled calendar repair remains
+a backstop. Event and repair completions are claim-token fenced, so an expired
+worker cannot complete or overwrite a newer lease. A locally
+stored verifier configuration is not evidence of an active Square subscription
+or successful recent delivery. Tenant routing requires an exact
+merchant/location match and Square as the salon's active provider. Recoverable
+connection states (`connected`, `syncing`, `active`, `error`, and
+`expired_token`) may enqueue a valid signed event; `not_connected` and
+`disabled` connections cannot.
+
 `GET /api/integrations/square/connect-url?salon_id=<id>`
 
 Returns a Square OAuth URL and state.
@@ -2105,6 +2283,13 @@ customers into local canonical tables. The button label is `Sync` in the owner
 dashboard because the action is no longer limited to services and staff.
 Calendar appointment imports are handled separately by
 `POST /api/salons/:id/calendar/sync`, scoped to a requested calendar range.
+Catalog and customer pagination continue until cursor exhaustion and reject a
+repeated cursor. Services are imported only when the Square variation is
+available for booking and has a positive normalized duration. Staff are the
+intersection of active selected-location Team members and bookable Booking
+Profiles. The provider snapshot is applied transactionally; missing previously
+imported rows are disabled/unmapped, and sync never automatically re-enables an
+owner-disabled `ai_bookable` flag.
 
 ```json
 {
@@ -2127,9 +2312,14 @@ Calendar appointment imports are handled separately by
 
 `POST /api/integrations/square/test-booking`
 
+Safe-retry example; an initial write omits `retry_of_attempt_id`:
+
 ```json
 {
-	"operation_key": "square-test-booking-4fa6c4e2",
+  "operation_key": "square-test-booking-4fa6c4e2",
+  "retry_of_attempt_id": "a2a86a35-95d4-4ad1-a3ab-0dc4c71b1163",
+  "availability_quote_id": "availability-quote-uuid",
+  "slot_fingerprint": "sha256-hex",
   "salon_id": "...",
   "customer_name": "ManleAI Test Customer",
   "customer_phone": "+13125550199",
@@ -2141,28 +2331,50 @@ Calendar appointment imports are handled separately by
 }
 ```
 
-Creates a real Square booking through the provider-neutral booking service. Returns `201` when Square confirms the booking, or `202` with `fallback_pending` when POS booking fails.
+Creates a real Square booking through the provider-neutral booking service.
+The selected slot must come from the availability endpoint and include current
+quote evidence. Returns `201` only when Square returns an accepted booking ID;
+returns `202` for unconfirmed `pos_pending`, `provider_pending`, or
+`fallback_pending` outcomes.
 
-The test-booking response and `latest_test_booking` include
+`retry_of_attempt_id` is omitted on the initial write. After a definitive
+failure returns a safe `fallback_pending` attempt, an explicit retry uses a new
+operation key and supplies that exact attempt ID. A response-loss replay keeps
+the same operation key and logical payload, including the same retry lineage
+when the lost request was itself a retry; a freshly revalidated quote proof does
+not turn that replay into a new logical operation. The availability quote remains single-use for
+unrelated requests; the repository can atomically transfer its consumer only
+when `consumed_by_attempt_id` exactly matches `retry_of_attempt_id` and the
+quote has not expired.
+
+The test-booking response and `latest_test_booking` include `operation_type`,
 `provider_outcome`, `retry_policy`, `reconciliation_status`, `can_retry`, and
-`retry_blocked_reason`. The dashboard reuses the same operation key after a
-network error with no response, rotates it only for an explicit safe retry, and
-disables another test write while the previous operation is `pos_pending`,
-in-flight, or requires reconciliation. Square status reads expire stale
-in-flight leases before returning `latest_test_booking`.
+`retry_blocked_reason`. The dashboard selects retry lineage only from a safe
+fallback with the matching operation type (`book` for create and `cancel` for
+cancel), including after a page reload. It disables another test write while
+the previous operation is `pos_pending`, in-flight, or requires
+reconciliation. Square status reads recover stale test-operation leases before
+returning `latest_test_booking`.
 
 `POST /api/integrations/square/cancel-test-booking`
 
+Safe-retry example; an initial cancellation omits `retry_of_attempt_id`:
+
 ```json
 {
-	"operation_key": "square-test-cancel-b8c8f001",
+  "operation_key": "square-test-cancel-b8c8f001",
+  "retry_of_attempt_id": "069171f5-27a7-44ea-a759-8a986a10cd05",
   "salon_id": "...",
   "appointment_id": "...",
   "reason": "AI booking readiness test cleanup"
 }
 ```
 
-Cancels the latest Square test booking through the provider-neutral booking service. Returns `200` when Square cancels the booking, or `202` with `fallback_pending` when POS cancellation fails.
+Cancels the latest Square test booking through the provider-neutral booking
+service. Returns `200` when Square cancels the booking, or `202` with
+`fallback_pending` when POS cancellation fails. As with create, the optional
+`retry_of_attempt_id` is sent only for an explicit safe retry and must identify
+the matching prior `cancel` attempt; the retry uses a new operation key.
 
 `POST /api/integrations/square/enable-ai-booking`
 

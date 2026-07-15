@@ -202,45 +202,11 @@ func TestOAuthURLSendsSessionFalseInProduction(t *testing.T) {
 }
 
 func TestMapCatalogServicesKeepsVariationVersion(t *testing.T) {
-	services := mapCatalogServices(squareCatalogResponse{
-		Objects: []squareCatalogObject{
-			{
-				ID:      "ITEM_1",
-				Type:    "ITEM",
-				Version: 100,
-				ItemData: struct {
-					Name        string                `json:"name"`
-					Description string                `json:"description"`
-					Variations  []squareCatalogObject `json:"variations"`
-				}{
-					Name:        "Classic Manicure",
-					Description: "Manicure service",
-					Variations: []squareCatalogObject{
-						{
-							ID:      "VAR_1",
-							Type:    "ITEM_VARIATION",
-							Version: 1781282541083,
-							ItemVariationData: struct {
-								Name            string `json:"name"`
-								ServiceDuration int64  `json:"service_duration"`
-								PriceMoney      struct {
-									Amount   int64  `json:"amount"`
-									Currency string `json:"currency"`
-								} `json:"price_money"`
-							}{
-								Name:            "Regular",
-								ServiceDuration: 1800000,
-								PriceMoney: struct {
-									Amount   int64  `json:"amount"`
-									Currency string `json:"currency"`
-								}{Amount: 3000, Currency: "USD"},
-							},
-						},
-					},
-				},
-			},
-		},
-	})
+	var response squareCatalogResponse
+	if err := json.Unmarshal([]byte(`{"objects":[{"id":"ITEM_1","type":"ITEM","version":100,"item_data":{"name":"Classic Manicure","description":"Manicure service","variations":[{"id":"VAR_1","type":"ITEM_VARIATION","version":1781282541083,"item_variation_data":{"name":"Regular","service_duration":1800000,"available_for_booking":true,"price_money":{"amount":3000,"currency":"USD"}}}]}}]}`), &response); err != nil {
+		t.Fatalf("decode catalog response: %v", err)
+	}
+	services := mapCatalogServices(response)
 
 	if len(services) != 1 {
 		t.Fatalf("expected one service, got %d", len(services))
@@ -253,6 +219,254 @@ func TestMapCatalogServicesKeepsVariationVersion(t *testing.T) {
 	}
 	if services[0].DurationMinutes != 30 {
 		t.Fatalf("unexpected duration: %d", services[0].DurationMinutes)
+	}
+	if !services[0].AIBookable {
+		t.Fatal("expected positively eligible variation to be AI-bookable")
+	}
+}
+
+func TestMapCatalogServicesRequiresPositiveBookingEligibilityAndDuration(t *testing.T) {
+	var response squareCatalogResponse
+	if err := json.Unmarshal([]byte(`{"objects":[
+		{"id":"ITEM_NO_VARIATIONS","type":"ITEM","item_data":{"name":"No variation"}},
+		{"id":"ITEM_SERVICES","type":"ITEM","item_data":{"name":"Service","variations":[
+			{"id":"VAR_BOOKABLE","type":"ITEM_VARIATION","item_variation_data":{"name":"Bookable","service_duration":1800000,"available_for_booking":true}},
+			{"id":"VAR_PROVIDER_DISABLED","type":"ITEM_VARIATION","item_variation_data":{"name":"Provider disabled","service_duration":1800000,"available_for_booking":false}},
+			{"id":"VAR_ELIGIBILITY_MISSING","type":"ITEM_VARIATION","item_variation_data":{"name":"Eligibility missing","service_duration":1800000}},
+			{"id":"VAR_DURATION_MISSING","type":"ITEM_VARIATION","item_variation_data":{"name":"Duration missing","available_for_booking":true}},
+			{"id":"VAR_SUBMINUTE_DURATION","type":"ITEM_VARIATION","item_variation_data":{"name":"Subminute duration","service_duration":30000,"available_for_booking":true}}
+		]}}
+	]}`), &response); err != nil {
+		t.Fatalf("decode catalog response: %v", err)
+	}
+
+	services := mapCatalogServices(response)
+	if len(services) != 6 {
+		t.Fatalf("services = %#v, want six imported rows", services)
+	}
+	bookableByID := make(map[string]bool, len(services))
+	for _, service := range services {
+		bookableByID[service.POSServiceID] = service.AIBookable
+	}
+	if !bookableByID["VAR_BOOKABLE"] {
+		t.Fatal("VAR_BOOKABLE should be AI-bookable")
+	}
+	for _, providerID := range []string{"ITEM_NO_VARIATIONS", "VAR_PROVIDER_DISABLED", "VAR_ELIGIBILITY_MISSING", "VAR_DURATION_MISSING", "VAR_SUBMINUTE_DURATION"} {
+		if bookableByID[providerID] {
+			t.Fatalf("%s should not be AI-bookable", providerID)
+		}
+	}
+}
+
+func TestListServicesPaginatesAndFiltersSelectedLocation(t *testing.T) {
+	transport := &sequenceTransport{responses: []string{
+		`{"objects":[{"id":"ITEM_1","type":"ITEM","present_at_all_locations":false,"present_at_location_ids":["LOC_1"],"item_data":{"name":"Classic Manicure","variations":[{"id":"VAR_1","type":"ITEM_VARIATION","version":101,"present_at_all_locations":false,"present_at_location_ids":["LOC_1"],"item_variation_data":{"name":"Regular","service_duration":1800000,"available_for_booking":true,"price_money":{"amount":3000,"currency":"USD"}}}]} }],"cursor":"next-page"}`,
+		`{"objects":[{"id":"ITEM_2","type":"ITEM","absent_at_location_ids":["LOC_1"],"item_data":{"name":"Hidden Service","variations":[{"id":"VAR_2","type":"ITEM_VARIATION","version":102,"item_variation_data":{"name":"Regular","service_duration":1800000}}]}},{"id":"ITEM_3","type":"ITEM","item_data":{"name":"Gel Manicure","variations":[{"id":"VAR_3","type":"ITEM_VARIATION","version":103,"is_deleted":true,"item_variation_data":{"name":"Regular","service_duration":2700000}}]}}]}`,
+	}}
+	adapter := &SquareAdapter{
+		cfg:        config.SquareConfig{APIBaseURL: "https://square.test"},
+		httpClient: &http.Client{Transport: transport},
+	}
+
+	services, err := adapter.listServices(context.Background(), adapter.cfg, "token", "LOC_1")
+	if err != nil {
+		t.Fatalf("listServices failed: %v", err)
+	}
+	if len(services) != 1 || services[0].POSServiceID != "VAR_1" {
+		t.Fatalf("services = %#v, want only VAR_1", services)
+	}
+	if !services[0].AIBookable {
+		t.Fatal("VAR_1 should be AI-bookable")
+	}
+	if len(transport.requests) != 2 {
+		t.Fatalf("requests = %d, want 2", len(transport.requests))
+	}
+	if got := transport.requests[1].URL.Query().Get("cursor"); got != "next-page" {
+		t.Fatalf("second cursor = %q, want next-page", got)
+	}
+}
+
+func TestListServicesRejectsRepeatedPaginationCursor(t *testing.T) {
+	transport := &sequenceTransport{responses: []string{
+		`{"objects":[],"cursor":"same"}`,
+		`{"objects":[],"cursor":"same"}`,
+	}}
+	adapter := &SquareAdapter{
+		cfg:        config.SquareConfig{APIBaseURL: "https://square.test"},
+		httpClient: &http.Client{Transport: transport},
+	}
+
+	_, err := adapter.listServices(context.Background(), adapter.cfg, "token", "LOC_1")
+	if err == nil || !strings.Contains(err.Error(), "repeated cursor") {
+		t.Fatalf("error = %v, want repeated cursor error", err)
+	}
+}
+
+func TestListStaffPaginatesAndScopesSelectedLocation(t *testing.T) {
+	transport := &sequenceTransport{responses: []string{
+		`{"team_members":[{"id":"TEAM_1","given_name":"Linh","family_name":"Tran","email_address":"linh@example.com","phone_number":"+13125550101","status":"ACTIVE"},{"id":"TEAM_2","given_name":"Not","family_name":"Bookable","status":"ACTIVE"}],"cursor":"next-team-page"}`,
+		`{"team_members":[{"id":"TEAM_3","status":"ACTIVE"},{"id":"TEAM_INACTIVE","given_name":"Inactive","status":"INACTIVE"},{"id":"TEAM_STATUS_MISSING","given_name":"Unknown Status"}]}`,
+		`{"team_member_booking_profiles":[{"team_member_id":"TEAM_1","display_name":"Profile Linh","is_bookable":true},{"team_member_id":"TEAM_2","display_name":"Not Bookable","is_bookable":false},{"team_member_id":"TEAM_INACTIVE","display_name":"Inactive","is_bookable":true},{"team_member_id":"TEAM_STATUS_MISSING","display_name":"Unknown Status","is_bookable":true}],"cursor":"next-profile-page"}`,
+		`{"team_member_booking_profiles":[{"team_member_id":"TEAM_3","display_name":"Profile Fallback","is_bookable":true}]}`,
+	}}
+	adapter := &SquareAdapter{
+		cfg:        config.SquareConfig{APIBaseURL: "https://square.test"},
+		httpClient: &http.Client{Transport: transport},
+	}
+
+	staff, err := adapter.listStaff(context.Background(), adapter.cfg, "token", "LOC_1")
+	if err != nil {
+		t.Fatalf("listStaff failed: %v", err)
+	}
+	if len(staff) != 2 || staff[0].POSStaffID != "TEAM_1" || staff[1].POSStaffID != "TEAM_3" {
+		t.Fatalf("staff = %#v, want only active team members with bookable profiles", staff)
+	}
+	if staff[0].Name != "Linh Tran" || staff[0].Email != "linh@example.com" || staff[0].Phone != "+13125550101" {
+		t.Fatalf("team contact fields were not preserved: %#v", staff[0])
+	}
+	if staff[1].Name != "Profile Fallback" {
+		t.Fatalf("profile display-name fallback = %q, want Profile Fallback", staff[1].Name)
+	}
+	if len(transport.requestBodies) != 4 {
+		t.Fatalf("request bodies = %d, want 4", len(transport.requestBodies))
+	}
+	var first squareTeamMembersSearchRequest
+	if err := json.Unmarshal([]byte(transport.requestBodies[0]), &first); err != nil {
+		t.Fatalf("decode first request: %v", err)
+	}
+	if len(first.Query.Filter.LocationIDs) != 1 || first.Query.Filter.LocationIDs[0] != "LOC_1" {
+		t.Fatalf("location filter = %#v, want LOC_1", first.Query.Filter.LocationIDs)
+	}
+	var second squareTeamMembersSearchRequest
+	if err := json.Unmarshal([]byte(transport.requestBodies[1]), &second); err != nil {
+		t.Fatalf("decode second request: %v", err)
+	}
+	if second.Cursor != "next-team-page" {
+		t.Fatalf("second cursor = %q, want next-team-page", second.Cursor)
+	}
+	for index := 2; index < 4; index++ {
+		request := transport.requests[index]
+		if request.Method != http.MethodGet || request.URL.Path != "/v2/bookings/team-member-booking-profiles" {
+			t.Fatalf("profile request %d = %s %s", index, request.Method, request.URL.Path)
+		}
+		query := request.URL.Query()
+		if query.Get("bookable_only") != "true" || query.Get("location_id") != "LOC_1" || query.Get("limit") != "100" {
+			t.Fatalf("profile request query = %v", query)
+		}
+	}
+	if got := transport.requests[3].URL.Query().Get("cursor"); got != "next-profile-page" {
+		t.Fatalf("profile second cursor = %q, want next-profile-page", got)
+	}
+}
+
+func TestConnectionMatchesProviderFenceRequiresExactReadySnapshot(t *testing.T) {
+	syncedAt := time.Now().UTC()
+	ready := &pos.Connection{
+		Status:             pos.StatusActive,
+		LocationID:         "loc_1",
+		SnapshotGeneration: 7,
+		LastSyncAt:         &syncedAt,
+	}
+	want := pos.ProviderFence{LocationID: "loc_1", SnapshotGeneration: 7}
+	if !connectionMatchesProviderFence(ready, want) {
+		t.Fatal("exact active synced provider fence should match")
+	}
+	for _, test := range []struct {
+		name       string
+		connection pos.Connection
+		fence      pos.ProviderFence
+	}{
+		{name: "location changed", connection: *ready, fence: pos.ProviderFence{LocationID: "loc_2", SnapshotGeneration: 7}},
+		{name: "generation changed", connection: *ready, fence: pos.ProviderFence{LocationID: "loc_1", SnapshotGeneration: 6}},
+		{name: "sync incomplete", connection: func() pos.Connection { item := *ready; item.LastSyncAt = nil; return item }(), fence: want},
+		{name: "not active", connection: func() pos.Connection { item := *ready; item.Status = pos.StatusConnected; return item }(), fence: want},
+		{name: "missing expected fence", connection: *ready, fence: pos.ProviderFence{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if connectionMatchesProviderFence(&test.connection, test.fence) {
+				t.Fatalf("connection unexpectedly matched stale fence: connection=%#v fence=%#v", test.connection, test.fence)
+			}
+		})
+	}
+}
+
+func TestValidateSquareBookingLocationsFailsWholePageOnNonemptyMismatch(t *testing.T) {
+	bookings := []squareBooking{
+		{ID: "booking_1", LocationID: "loc_1"},
+		{ID: "booking_2", LocationID: ""},
+	}
+	if err := validateSquareBookingLocations(bookings, "loc_1"); err != nil {
+		t.Fatalf("matching and omitted booking locations should pass: %v", err)
+	}
+
+	bookings = append(bookings, squareBooking{ID: "booking_3", LocationID: "loc_2"})
+	if err := validateSquareBookingLocations(bookings, "loc_1"); !errors.Is(err, pos.ErrStaleProviderFence) {
+		t.Fatalf("mismatched page error = %v, want pos.ErrStaleProviderFence", err)
+	}
+	if err := validateSquareBookingLocations(nil, " "); !errors.Is(err, pos.ErrStaleProviderFence) {
+		t.Fatalf("missing expected location error = %v, want pos.ErrStaleProviderFence", err)
+	}
+}
+
+func TestListStaffRejectsRepeatedTeamMemberCursor(t *testing.T) {
+	transport := &sequenceTransport{responses: []string{
+		`{"team_members":[],"cursor":"same-team-cursor"}`,
+		`{"team_members":[],"cursor":"same-team-cursor"}`,
+	}}
+	adapter := &SquareAdapter{
+		cfg:        config.SquareConfig{APIBaseURL: "https://square.test"},
+		httpClient: &http.Client{Transport: transport},
+	}
+
+	staff, err := adapter.listStaff(context.Background(), adapter.cfg, "token", "LOC_1")
+	if err == nil || !strings.Contains(err.Error(), "team member pagination repeated cursor") {
+		t.Fatalf("staff/error = %#v/%v, want repeated team member cursor error", staff, err)
+	}
+}
+
+func TestListStaffRejectsRepeatedBookingProfileCursor(t *testing.T) {
+	transport := &sequenceTransport{responses: []string{
+		`{"team_members":[{"id":"TEAM_1","status":"ACTIVE"}]}`,
+		`{"team_member_booking_profiles":[{"team_member_id":"TEAM_1","display_name":"Linh","is_bookable":true}],"cursor":"same-profile-cursor"}`,
+		`{"team_member_booking_profiles":[],"cursor":"same-profile-cursor"}`,
+	}}
+	adapter := &SquareAdapter{
+		cfg:        config.SquareConfig{APIBaseURL: "https://square.test"},
+		httpClient: &http.Client{Transport: transport},
+	}
+
+	staff, err := adapter.listStaff(context.Background(), adapter.cfg, "token", "LOC_1")
+	if err == nil || !strings.Contains(err.Error(), "booking profile pagination repeated cursor") {
+		t.Fatalf("staff/error = %#v/%v, want repeated booking profile cursor error", staff, err)
+	}
+}
+
+func TestListCustomersPaginatesAndRejectsRepeatedCursor(t *testing.T) {
+	transport := &sequenceTransport{responses: []string{
+		`{"customers":[{"id":"CUSTOMER_1","given_name":"Linh","family_name":"Tran"}],"cursor":"next-customer-page"}`,
+		`{"customers":[{"id":"CUSTOMER_2","given_name":"Mai","family_name":"Nguyen"}],"cursor":"next-customer-page"}`,
+	}}
+	adapter := &SquareAdapter{
+		cfg:        config.SquareConfig{APIBaseURL: "https://square.test"},
+		httpClient: &http.Client{Transport: transport},
+	}
+
+	customers, err := adapter.listCustomers(context.Background(), adapter.cfg, "token")
+	if err == nil || !strings.Contains(err.Error(), "repeated cursor") {
+		t.Fatalf("customers/error = %#v/%v, want repeated cursor error", customers, err)
+	}
+	if len(customers) != 0 {
+		t.Fatalf("customers should not be returned on incomplete pagination: %#v", customers)
+	}
+	if len(transport.requestBodies) != 2 {
+		t.Fatalf("request bodies = %d, want 2", len(transport.requestBodies))
+	}
+	var second squareCustomerSearchRequest
+	if err := json.Unmarshal([]byte(transport.requestBodies[1]), &second); err != nil {
+		t.Fatalf("decode second request: %v", err)
+	}
+	if second.Cursor != "next-customer-page" {
+		t.Fatalf("second cursor = %q, want next-customer-page", second.Cursor)
 	}
 }
 
@@ -756,12 +970,23 @@ func (t *capturingTransport) RoundTrip(req *http.Request) (*http.Response, error
 }
 
 type sequenceTransport struct {
-	responses []string
-	requests  []*http.Request
+	responses     []string
+	requests      []*http.Request
+	requestBodies []string
 }
 
 func (t *sequenceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.requests = append(t.requests, req)
+	requestBody := ""
+	if req.Body != nil {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		requestBody = string(body)
+		req.Body = io.NopCloser(bytes.NewReader(body))
+	}
+	t.requestBodies = append(t.requestBodies, requestBody)
 	index := len(t.requests) - 1
 	body := `{}`
 	if index < len(t.responses) {
