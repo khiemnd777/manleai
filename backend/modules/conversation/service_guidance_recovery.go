@@ -2,6 +2,8 @@ package conversation
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"strings"
 )
 
@@ -47,39 +49,29 @@ func semanticInterpretationUnavailable(turn TurnUnderstanding) bool {
 	return outcome != "" && outcome != TurnInterpreterOutcomeAccepted
 }
 
-func classifyGuidanceRecoveryChoice(message string, understanding serviceUnderstandingResult) guidanceRecoveryChoice {
+func classifyGuidanceRecoveryChoice(message string, understanding serviceUnderstandingResult, active bool) guidanceRecoveryChoice {
 	if understanding.Status == serviceUnderstandingStatusSelected && len(understanding.Candidates) == 1 {
 		return guidanceRecoveryService
 	}
 	if shouldHandoff(message) || shouldComplaintHandoff(message) {
 		return guidanceRecoveryOwner
 	}
-	if asksServiceMenu(message) {
-		return guidanceRecoveryListServices
-	}
-	normalized := normalizeLooseText(message)
-	if normalized == "" {
+	if !active {
 		return guidanceRecoveryUnknown
 	}
-	consultationSignal := containsAnyLoosePhrase(normalized, []string{
-		"help me choose", "help choosing", "help choose", "choose for me", "which should i choose",
-		"what should i choose", "what service should", "which service should", "recommend a service",
-		"what do you recommend", "need a recommendation", "consult for me", "consultation", "advise me",
-		"need advice", "guide me", "right treatment", "right service", "compare services",
-	})
-	if consultationSignal {
+	normalized := normalizeLooseText(message)
+	switch normalized {
+	case "help me choose", "consultation", "service consultation", "choose a service":
 		return guidanceRecoveryConsult
-	}
-	if hasBookingVerbSignal(message) {
+	case "book", "booking", "book an appointment":
 		return guidanceRecoveryBook
-	}
-	if containsAnyLoosePhrase(normalized, []string{
-		"ask about the salon", "question about the salon", "salon question", "something about the salon",
-		"general question", "ask a question",
-	}) {
+	case "list services", "service list", "services":
+		return guidanceRecoveryListServices
+	case "salon question", "ask about the salon":
 		return guidanceRecoverySalonQuestion
+	default:
+		return guidanceRecoveryUnknown
 	}
-	return guidanceRecoveryUnknown
 }
 
 func guidanceRecoveryPrompt(promptKey string, repeated bool) string {
@@ -107,7 +99,7 @@ func serviceGuidanceMenuReply(services []ServiceOption) string {
 	return prefix + joinHumanList(names) + ". You can name one, or ask me to help you choose."
 }
 
-func setGuidanceRecoveryState(session *Session, promptKey string, promptCount int) {
+func setGuidanceRecoveryState(session *Session, promptKey string, promptCount int, providerFailureCount int) {
 	if session == nil {
 		return
 	}
@@ -119,7 +111,20 @@ func setGuidanceRecoveryState(session *Session, promptKey string, promptCount in
 	state.AuthorizedRevision = 0
 	state.LastPromptKey = promptKey
 	state.NoProgressCount = promptCount
+	state.ProviderFailureCount = providerFailureCount
+	state.ProgressFingerprint = guidanceProgressFingerprint(*session, promptKey)
 	session.DialogState = state
+}
+
+func guidanceProgressFingerprint(session Session, promptKey string) string {
+	state := normalizedDialogState(session.DialogState)
+	pendingKey := ""
+	if state.Pending != nil {
+		pendingKey = strings.TrimSpace(state.Pending.PromptKey)
+	}
+	raw := fmt.Sprintf("%s\x00%d\x00%s\x00%s", strings.TrimSpace(promptKey), state.DraftRevision, pendingKey, strings.TrimSpace(state.Phase))
+	sum := sha256.Sum256([]byte(raw))
+	return fmt.Sprintf("sha256:%x", sum[:12])
 }
 
 func clearGuidanceRecoveryState(session *Session, phase string) {
@@ -148,7 +153,7 @@ func (s *Service) handleGuidanceRecovery(
 	if active {
 		expectedInput = guidanceRecoveryExpectedInput(state.LastPromptKey)
 	}
-	choice := classifyGuidanceRecoveryChoice(message, serviceUnderstanding)
+	choice := classifyGuidanceRecoveryChoice(message, serviceUnderstanding, active)
 	if choice == guidanceRecoveryService {
 		return false, nil, nil
 	}
@@ -156,13 +161,6 @@ func (s *Service) handleGuidanceRecovery(
 	if !active {
 		if !semanticInterpretationUnavailable(turnUnderstanding) || (expectedInput != ExpectedInputCallerGoal && expectedInput != ExpectedInputService) {
 			return false, nil, nil
-		}
-		if choice == guidanceRecoveryConsult {
-			consultationTurn := turnUnderstanding
-			consultationTurn.Goal = "consultation"
-			consultationTurn.Source = "deterministic_recovery"
-			consultationTurn.Reason = "explicit_service_guidance_request"
-			return s.handleServiceConsultation(ctx, ownerUserID, session, message, eventKey, serviceUnderstanding, consultationTurn, services, staff, cfg)
 		}
 	}
 
@@ -184,10 +182,10 @@ func (s *Service) handleGuidanceRecovery(
 		return true, updated, err
 	case guidanceRecoveryListServices:
 		next.Intent = IntentBooking
-		setGuidanceRecoveryState(&next, promptServiceGuidanceRecovery, 1)
+		setGuidanceRecoveryState(&next, promptServiceGuidanceRecovery, 1, 0)
 	case guidanceRecoveryBook:
 		next.Intent = IntentBooking
-		setGuidanceRecoveryState(&next, promptServiceGuidanceRecovery, 1)
+		setGuidanceRecoveryState(&next, promptServiceGuidanceRecovery, 1, 0)
 	case guidanceRecoverySalonQuestion:
 		next.Intent = IntentUnknown
 		clearGuidanceRecoveryState(&next, DialogPhaseOpen)
@@ -204,8 +202,12 @@ func (s *Service) handleGuidanceRecovery(
 		if active && state.LastPromptKey == promptKey {
 			promptCount = state.NoProgressCount + 1
 		}
-		setGuidanceRecoveryState(&next, promptKey, promptCount)
-		if promptCount >= maxGuidanceRecoveryPrompts {
+		providerFailureCount := state.ProviderFailureCount + 1
+		if !active {
+			providerFailureCount = 1
+		}
+		setGuidanceRecoveryState(&next, promptKey, promptCount, providerFailureCount)
+		if providerFailureCount >= 2 || promptCount >= maxGuidanceRecoveryPrompts {
 			turn := newTurnRecord(session.SalonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
 			applyTurnPlanMetadata(&turn, plan)
 			applyTurnUnderstandingMetadata(&turn, turnUnderstanding, conversationDraftResult{})
@@ -223,6 +225,8 @@ func (s *Service) handleGuidanceRecovery(
 	applyTurnUnderstandingMetadata(&turn, turnUnderstanding, conversationDraftResult{})
 	turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, map[string]any{
 		"guidance_recovery_action": string(action), "guidance_recovery_prompt_count": next.DialogState.NoProgressCount,
+		"guidance_recovery_provider_failure_count": next.DialogState.ProviderFailureCount,
+		"guidance_recovery_progress_fingerprint":   next.DialogState.ProgressFingerprint,
 	})
 	switch choice {
 	case guidanceRecoveryListServices:

@@ -3,6 +3,7 @@ package conversation
 import (
 	"strings"
 
+	"github.com/manleai/ai-receptionist/internal/validation"
 	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
@@ -398,6 +399,34 @@ func applyStaffConversationAct(session *Session, act ConversationAct, staff []St
 		return result
 	}
 	beforeID := strings.TrimSpace(session.StaffID)
+	if act.Kind == ConversationActSet && strings.TrimSpace(act.Subject) == "alternative" && len(act.TargetServiceIDs) == 0 {
+		alternatives := make([]StaffOption, 0, len(staff))
+		for _, option := range staff {
+			if id := strings.TrimSpace(option.ID); id != "" && id != beforeID {
+				alternatives = append(alternatives, option)
+			}
+		}
+		if len(alternatives) == 1 {
+			act.TargetServiceIDs = []string{alternatives[0].ID}
+		} else if len(alternatives) > 1 {
+			state := normalizedDialogState(session.DialogState)
+			state.Phase = DialogPhaseClarifying
+			state.Pending = &PendingConversationAct{
+				Kind: ConversationActSet, Entity: ConversationEntityStaff, Subject: "alternative",
+				TargetServiceIDs: staffOptionIDs(alternatives), PromptKey: PendingStaffAlternative,
+			}
+			state.LastPromptKey = PendingStaffAlternative
+			session.DialogState = state
+			result.Clarification = true
+			result.Reply = "Other AI-bookable technicians are " + joinHumanList(staffOptionNames(alternatives)) + ". Which technician would you like?"
+			return result
+		} else {
+			result.Clarification = true
+			result.Escalate = true
+			result.Reply = "I don't have another AI-bookable technician to offer. I'll ask the owner to help without changing your booking draft. This is not a confirmed appointment."
+			return result
+		}
+	}
 	if act.Kind == ConversationActClear {
 		session.StaffID = ""
 		session.StaffName = ""
@@ -412,6 +441,12 @@ func applyStaffConversationAct(session *Session, act ConversationAct, staff []St
 			session.StaffName = option.Name
 			session.StaffSelectionMode = booking.StaffSelectionSpecific
 			applySpecificStaffToBookingSegments(session, option)
+			state := normalizedDialogState(session.DialogState)
+			if state.Pending != nil && state.Pending.PromptKey == PendingStaffAlternative {
+				state.Pending = nil
+				state.LastPromptKey = ""
+				session.DialogState = state
+			}
 			break
 		}
 	}
@@ -445,7 +480,33 @@ func applyDateTimeConversationAct(session *Session, act ConversationAct) convers
 
 func applyCustomerConversationAct(session *Session, act ConversationAct) conversationDraftResult {
 	result := conversationDraftResult{Handled: true, Act: act, ReplySource: "customer_draft_reducer"}
-	if session == nil || act.Kind != ConversationActClear {
+	if session == nil {
+		return result
+	}
+	if act.Kind == ConversationActSet {
+		switch strings.TrimSpace(act.Subject) {
+		case "name":
+			value := strings.TrimSpace(act.Value)
+			result.Changed = value != "" && session.CustomerName != value
+			if value != "" {
+				session.CustomerName = value
+			}
+		case "phone":
+			value := validation.NormalizePhone(act.Value)
+			result.Changed = value != "" && session.CustomerPhone != value
+			if value != "" {
+				session.CustomerPhone = value
+			}
+		case "email":
+			value := strings.ToLower(strings.TrimSpace(act.Value))
+			result.Changed = value != "" && session.CustomerEmail != value
+			if value != "" {
+				session.CustomerEmail = value
+			}
+		}
+		return result
+	}
+	if act.Kind != ConversationActClear {
 		return result
 	}
 	switch strings.TrimSpace(act.Subject) {
@@ -460,6 +521,26 @@ func applyCustomerConversationAct(session *Session, act ConversationAct) convers
 		session.CustomerEmail = ""
 	}
 	return result
+}
+
+func staffOptionIDs(staff []StaffOption) []string {
+	ids := make([]string, 0, len(staff))
+	for _, option := range staff {
+		if id := strings.TrimSpace(option.ID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func staffOptionNames(staff []StaffOption) []string {
+	names := make([]string, 0, len(staff))
+	for _, option := range staff {
+		if name := strings.TrimSpace(option.Name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func applyGuestConversationAct(session *Session, act ConversationAct, services []ServiceOption) conversationDraftResult {

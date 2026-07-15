@@ -352,6 +352,12 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 		if turnUnderstanding.Safety.Concern {
 			return s.saveConsultationSafetyHandoff(ctx, ownerUserID, *session, message, eventKey, services, staff, cfg, "structured_ai", turnUnderstanding.Safety)
 		}
+		if !customerActsAreSafe(turnUnderstanding, cfg, services, staff) {
+			turnUnderstanding = TurnUnderstanding{
+				Goal: turnUnderstanding.Goal, ModelInvoked: true, Source: "structured_ai",
+				InterpreterOutcome: TurnInterpreterOutcomeCatalogRejected, Reason: "customer_field_validation_rejected",
+			}
+		}
 	}
 	newPlannedTurn := func(before Session, after Session) TurnRecord {
 		turn := newTurnRecord(salonID, ownerUserID, before, after, message, eventKey, services, staff, cfg)
@@ -363,7 +369,7 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 		return updated, err
 	}
 
-	if handled, updated, err := s.handlePendingCustomerNameConfirmation(ctx, salonID, ownerUserID, *session, message, eventKey, services, staff, cfg, knowledge); handled {
+	if handled, updated, err := s.handlePendingCustomerNameConfirmation(ctx, salonID, ownerUserID, *session, message, eventKey, turnUnderstanding, services, staff, cfg, knowledge); handled {
 		return updated, err
 	}
 
@@ -702,10 +708,14 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 	if question, ok := firstDeferredInformationQuestion(turnUnderstanding); ok {
 		if question.Subject == ConversationQuestionCurrentBooking && strings.TrimSpace(conversationResult.Reply) != "" {
 			turn.AIMessage = strings.TrimSpace(conversationResult.Reply)
-			if resume := resumeBookingPrompt(next, services, cfg); resume != "" && !strings.Contains(turn.AIMessage, resume) {
+			resume, expectedInput, reviewStateChanged := resumeAfterInformationPrompt(&next, services, staff, cfg)
+			if resume != "" && !strings.Contains(turn.AIMessage, resume) {
 				turn.AIMessage += " " + resume
 			}
-			finalizeTurnMetadata(&turn, *session, next, missingBookingField(next), missingBookingField(next), "turn_current_draft_then_resume")
+			if reviewStateChanged {
+				syncTurnUpdate(&turn, next, services, staff, cfg)
+			}
+			finalizeTurnMetadata(&turn, *session, next, expectedInput, expectedInput, "turn_current_draft_then_resume")
 			return s.store.SaveTurn(ctx, turn)
 		}
 		var route answerRoute
@@ -718,12 +728,16 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 		if route.Handled && strings.TrimSpace(route.Reply) != "" {
 			turn.AIMessage = strings.TrimSpace(route.Reply)
 			prependConversationMutationAcknowledgement(&turn, conversationResult, next, services)
-			if resume := resumeBookingPrompt(next, services, cfg); resume != "" {
+			resume, expectedInput, reviewStateChanged := resumeAfterInformationPrompt(&next, services, staff, cfg)
+			if resume != "" {
 				turn.AIMessage = answerWithoutGenericBookingOffer(turn.AIMessage)
 				turn.AIMessage += " " + resume
 			}
+			if reviewStateChanged {
+				syncTurnUpdate(&turn, next, services, staff, cfg)
+			}
 			applyAnswerRouteMetadata(&turn, route, answerCtx)
-			finalizeTurnMetadata(&turn, *session, next, missingBookingField(next), missingBookingField(next), "turn_question_then_resume")
+			finalizeTurnMetadata(&turn, *session, next, expectedInput, expectedInput, "turn_question_then_resume")
 			return s.store.SaveTurn(ctx, turn)
 		}
 	}
@@ -737,6 +751,8 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 	}
 
 	if pendingNameCandidate != "" && intent == IntentBooking {
+		setPendingCustomerName(&next, pendingNameCandidate)
+		syncTurnUpdate(&turn, next, services, staff, cfg)
 		turn.AIMessage = customerNameConfirmationPrompt(pendingNameCandidate)
 		setPendingCustomerNameMetadata(&turn, pendingNameCandidate, "voice_short_bare_name")
 		s.applyReplyGenerator(ctx, &turn, next, services, cfg, "customer_name", "customer_name", knowledge)

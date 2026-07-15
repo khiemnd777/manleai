@@ -82,6 +82,42 @@ func (s *Service) Status(ctx context.Context, salonID string, ownerUserID string
 	return status, nil
 }
 
+func (s *Service) SemanticCheck(ctx context.Context, salonID string, ownerUserID string) (*SemanticCheckStatus, error) {
+	salonID = strings.TrimSpace(salonID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	if salonID == "" || ownerUserID == "" {
+		return nil, ErrValidation
+	}
+	if _, err := s.repo.GetSalonVoiceStatus(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	status := &SemanticCheckStatus{Provider: ProviderOpenAI}
+	if s.providers.TurnModel == nil || !s.providers.TurnModel.Configured(ctx, salonID) {
+		return status, nil
+	}
+	status.Configured = true
+	verifier, ok := s.providers.TurnModel.(TurnContractVerifier)
+	if !ok {
+		return status, ErrProviderDisabled
+	}
+	check, err := verifier.CheckTurnContract(ctx, salonID)
+	status.Provider = strings.TrimSpace(check.Provider)
+	status.SchemaFingerprint = strings.TrimSpace(check.SchemaFingerprint)
+	status.RequestID = strings.TrimSpace(check.RequestID)
+	if err != nil {
+		status.Diagnostics = safeTurnProviderDiagnostics(err)
+		if status.SchemaFingerprint == "" {
+			status.SchemaFingerprint = status.Diagnostics["schema_fingerprint"]
+		}
+		if status.RequestID == "" {
+			status.RequestID = status.Diagnostics["request_id"]
+		}
+		return status, nil
+	}
+	status.Verified = true
+	return status, nil
+}
+
 func (s *Service) Audio(ctx context.Context, id string) (*AudioOutput, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {

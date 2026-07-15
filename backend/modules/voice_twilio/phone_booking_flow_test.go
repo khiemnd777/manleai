@@ -107,7 +107,7 @@ func TestSignedTwilioWebhookDrivesPhoneBookingFlowThroughConversation(t *testing
 		"CallSid":      {"CA_FLOW"},
 		"From":         {"+13125550199"},
 		"To":           {"+13125550101"},
-		"SpeechResult": {"Yes, of course."},
+		"SpeechResult": {"Yes."},
 	}
 	thirdTurnRes := signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", thirdTurn)
 	thirdTurnBody := readBody(t, thirdTurnRes)
@@ -219,6 +219,7 @@ func TestSignedTwilioWebhookConsultsThenBooksExplicitCatalogChoice(t *testing.T)
 	})
 	bookingTool := &phoneFlowBookingTool{attempt: &booking.BookingAttempt{ID: "attempt_consultation", Status: booking.StatusConfirmed, POSBookingID: "square_booking_consultation", Appointment: &booking.Appointment{ID: "appointment_consultation", Status: booking.StatusConfirmed}}}
 	conversationService := conversation.NewService(conversationStore, bookingTool)
+	conversationService.SetTurnInterpreter(&phoneFlowConsultationInterpreter{})
 	voiceStore := newPhoneFlowVoiceStore(conversationStore)
 	voiceService := voice.NewService(voiceStore, conversationService, config.VoiceConfig{Provider: voice.ProviderTwilio, Twilio: config.TwilioVoiceConfig{AuthToken: "secret", IncomingPath: "/api/voice/twilio/incoming", TurnPath: "/api/voice/twilio/turn", RecordingPath: "/api/voice/twilio/recording"}}, voice.AIProviders{})
 	app := testTwilioApp(adapter, voiceService)
@@ -262,11 +263,29 @@ func TestSignedTwilioWebhookConsultsThenBooksExplicitCatalogChoice(t *testing.T)
 	if !strings.Contains(bookBody, "Let me review everything") || bookingTool.calls != 0 {
 		t.Fatalf("consultation booking skipped final review: body=%s calls=%d", bookBody, bookingTool.calls)
 	}
-	authorize := url.Values{"CallSid": {"CA_CONSULT"}, "From": {"+13125550199"}, "To": {"+13125550101"}, "SpeechResult": {"Yes, please book it."}}
+	authorize := url.Values{"CallSid": {"CA_CONSULT"}, "From": {"+13125550199"}, "To": {"+13125550101"}, "SpeechResult": {"Yes."}}
 	authorizeBody := readBody(t, signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", authorize))
 	if !strings.Contains(authorizeBody, "confirmed with Lotus Nails") || bookingTool.calls != 1 || bookingTool.request.ServiceID != "service_gel" {
 		t.Fatalf("consultation booking did not confirm selected catalog service after review: body=%s request=%#v", authorizeBody, bookingTool.request)
 	}
+}
+
+type phoneFlowConsultationInterpreter struct {
+	calls int
+}
+
+func (f *phoneFlowConsultationInterpreter) InterpretTurn(ctx context.Context, req conversation.TurnInterpretationRequest) (conversation.TurnUnderstanding, error) {
+	f.calls++
+	return conversation.TurnUnderstanding{
+		Goal: "consultation", Confidence: 0.97,
+		Consultation: conversation.ConsultationNeedProfile{
+			DesiredOutcome: conversation.ConsultationOutcomeCompare, ComparedServiceIDs: []string{"service_1", "service_gel"}, Confidence: 0.97,
+		},
+		ConsultationMutations: []conversation.ConsultationNeedMutation{
+			{Field: conversation.ConsultationNeedFieldDesiredOutcome, Operation: conversation.ConsultationNeedOperationSet, Values: []string{conversation.ConsultationOutcomeCompare}, Confidence: 0.97},
+			{Field: conversation.ConsultationNeedFieldComparedServiceIDs, Operation: conversation.ConsultationNeedOperationSet, Values: []string{"service_1", "service_gel"}, Confidence: 0.97},
+		},
+	}, nil
 }
 
 type phoneFlowConversationStore struct {

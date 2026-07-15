@@ -2,6 +2,8 @@ package conversation
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -56,6 +58,8 @@ func (s *Service) handleServiceConsultation(ctx context.Context, ownerUserID str
 		dialog = resetDialogProgress(dialog, resumePhase)
 	}
 	consultation := initializeConsultationState(dialog, session)
+	consultation.LastInterpreterOutcome = strings.TrimSpace(turnUnderstanding.InterpreterOutcome)
+	consultation.LastInterpreterDiagnostics = cloneStringMap(turnUnderstanding.InterpreterDiagnostics)
 	dialog.Phase = DialogPhaseConsultation
 	dialog.Consultation = consultation
 	next.DialogState = dialog
@@ -79,7 +83,6 @@ func (s *Service) handleServiceConsultation(ctx context.Context, ownerUserID str
 		updated, err := s.store.SaveTurn(ctx, turn)
 		return true, updated, err
 	}
-
 	if isConsultationCompletionUtterance(message) || turnUnderstanding.Consultation.ConversationComplete {
 		consultation.Status = ConsultationStatusCompleted
 		consultation.ExitReason = "caller_completed_without_booking"
@@ -133,6 +136,23 @@ func (s *Service) handleServiceConsultation(ctx context.Context, ownerUserID str
 		finalizeTurnMetadata(&turn, session, next, "", "", "consultation_booking_declined")
 		updated, err := s.store.SaveTurn(ctx, turn)
 		return true, updated, err
+	}
+	if active && consultationInterpreterUnavailable(turnUnderstanding) {
+		consultation.ProviderFailureCount++
+		consultation.ProgressFingerprint = consultationProgressFingerprint(session, *consultation, expectedInputForSession(session))
+		dialog.Consultation = consultation
+		next.DialogState = dialog
+		if consultation.ProviderFailureCount >= 2 {
+			consultation.Status = ConsultationStatusHandedOff
+			consultation.ExitReason = HandoffReasonConsultationUnresolved
+			dialog.Consultation = consultation
+			next.DialogState = dialog
+			turn := newTurnRecord(session.SalonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
+			setConsultationMetadata(&turn, consultation, services)
+			updated, err := s.saveHandoffTurn(ctx, turn, next, HandoffReasonConsultationUnresolved, "I could not verify the salon's service guidance, so I won't guess. I'll ask the owner to help, and this is not a confirmed appointment.", services, staff, cfg)
+			return true, updated, err
+		}
+		return s.saveConsultationTurn(ctx, ownerUserID, session, next, message, eventKey, "I could not verify the salon's service guidance just now. Please try once more, or I can ask the owner to help.", "consultation_interpreter_unavailable", consultation, services, staff, cfg)
 	}
 	if active && asksServiceMenu(message) {
 		consultation.Status = ConsultationStatusCollectingNeeds
@@ -211,15 +231,9 @@ func (s *Service) handleServiceConsultation(ctx context.Context, ownerUserID str
 	}
 
 	beforeNeeds := consultation.Needs
-	consultation.Needs = applyConsultationNeedTurn(consultation.Needs, turnUnderstanding.Consultation, inferConsultationNeeds(message), turnUnderstanding.ConsultationMutations, !turnUnderstanding.ModelInvoked)
-	candidates := consultationCandidates(message, understanding, services)
-	if len(candidates) > consultationCandidateLimit {
-		candidates = candidates[:consultationCandidateLimit]
-	}
+	consultation.Needs = applyConsultationNeedTurn(consultation.Needs, turnUnderstanding.Consultation, turnUnderstanding.ConsultationMutations)
 	if consultationMutatesField(turnUnderstanding.ConsultationMutations, ConsultationNeedFieldComparedServiceIDs) {
 		consultation.CandidateServiceIDs = append([]string(nil), consultation.Needs.ComparedServiceIDs...)
-	} else if len(candidates) > 0 {
-		consultation.CandidateServiceIDs = serviceOptionIDs(candidates)
 	}
 	needsChanged := !consultationNeedsEqual(beforeNeeds, consultation.Needs)
 	if needsChanged {
@@ -228,7 +242,9 @@ func (s *Service) handleServiceConsultation(ctx context.Context, ownerUserID str
 		consultation.ProfileRevisions = map[string]int{}
 		consultation.RecommendationReasons = map[string][]string{}
 	}
-	if !needsChanged && active {
+	previousFingerprint := strings.TrimSpace(consultation.ProgressFingerprint)
+	consultation.ProgressFingerprint = consultationProgressFingerprint(session, *consultation, expectedInputForSession(session))
+	if !needsChanged && active && previousFingerprint == consultation.ProgressFingerprint {
 		consultation.NoProgressCount++
 	} else {
 		consultation.NoProgressCount = 0
@@ -245,34 +261,31 @@ func (s *Service) handleServiceConsultation(ctx context.Context, ownerUserID str
 	}
 
 	comparisonRequested := len(consultation.CandidateServiceIDs) > 1 || consultation.Needs.DesiredOutcome == ConsultationOutcomeCompare
-	if !comparisonRequested && consultation.Needs.DesiredOutcome == "" {
-		consultation.Status = ConsultationStatusCollectingNeeds
-		consultation.LastAskedField = "desired_outcome"
-		dialog.Consultation = consultation
-		next.DialogState = dialog
-		return s.saveConsultationTurn(ctx, ownerUserID, session, next, message, eventKey, "What would you like to change: shorten, add length, add strength, remove the current product, or refresh the color?", "consultation_ask_desired_outcome", consultation, services, staff, cfg)
-	}
-	if !comparisonRequested && consultation.Needs.CurrentSystem == "" {
-		consultation.Status = ConsultationStatusCollectingNeeds
-		consultation.LastAskedField = "current_system"
-		dialog.Consultation = consultation
-		next.DialogState = dialog
-		return s.saveConsultationTurn(ctx, ownerUserID, session, next, message, eventKey, "What is currently on your nails: natural nails, regular polish, gel, dip, acrylic, or extensions?", "consultation_ask_current_system", consultation, services, staff, cfg)
-	}
-
 	ranked := rankConsultationServices(services, consultation.Needs, consultation.CandidateServiceIDs)
+	question := nextConsultationQuestionSpec(services, consultation.Needs, consultation.CandidateServiceIDs)
+	if !comparisonRequested && consultationNeedsMoreDiscrimination(ranked, question) {
+		return s.askConsultationQuestion(ctx, ownerUserID, session, next, message, eventKey, consultation, question, services, staff, cfg)
+	}
 	if len(ranked) == 0 {
-		consultation.Status = ConsultationStatusCollectingNeeds
+		if question != nil {
+			return s.askConsultationQuestion(ctx, ownerUserID, session, next, message, eventKey, consultation, question, services, staff, cfg)
+		}
+		consultation.Status = ConsultationStatusHandedOff
 		consultation.LastAskedField = "owner_help"
+		consultation.ExitReason = HandoffReasonConsultationUnresolved
 		dialog.Consultation = consultation
 		next.DialogState = dialog
-		return s.saveConsultationTurn(ctx, ownerUserID, session, next, message, eventKey, "I don't have enough owner-approved service details to make a safe recommendation. I can ask the owner to help, or I can list the bookable services.", "consultation_no_approved_match", consultation, services, staff, cfg)
+		turn := newTurnRecord(session.SalonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
+		setConsultationMetadata(&turn, consultation, services)
+		updated, err := s.saveHandoffTurn(ctx, turn, next, HandoffReasonConsultationUnresolved, "I don't have enough owner-approved service details to recommend a service safely. I'll ask the owner to help, and this is not a confirmed appointment.", services, staff, cfg)
+		return true, updated, err
 	}
 
 	if len(ranked) > 2 {
 		ranked = ranked[:2]
 	}
 	consultation.Status = ConsultationStatusComparing
+	consultation.ProviderFailureCount = 0
 	consultation.RecommendedServiceIDs = nil
 	consultation.ProfileRevisions = map[string]int{}
 	consultation.RecommendationReasons = map[string][]string{}
@@ -549,6 +562,12 @@ func (s *Service) deferConsultationRecommendationToServiceEdit(ctx context.Conte
 }
 
 func (s *Service) saveConsultationTurn(ctx context.Context, ownerUserID string, before Session, next Session, message, eventKey, reply, source string, consultation *ConsultationState, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (bool, *Session, error) {
+	if consultation != nil {
+		consultation.ProgressFingerprint = consultationProgressFingerprint(next, *consultation, expectedInputForSession(next))
+		dialog := normalizedDialogState(next.DialogState)
+		dialog.Consultation = consultation
+		next.DialogState = dialog
+	}
 	turn := newTurnRecord(before.SalonID, ownerUserID, before, next, message, eventKey, services, staff, cfg)
 	turn.ReplyPolicy = ReplyPolicyOperationalFact
 	turn.AIMessage = reply
@@ -558,19 +577,9 @@ func (s *Service) saveConsultationTurn(ctx context.Context, ownerUserID string, 
 	return true, updated, err
 }
 
-func isConsultationRequest(message string, understanding serviceUnderstandingResult, turn TurnUnderstanding) bool {
+func isConsultationRequest(_ string, _ serviceUnderstandingResult, turn TurnUnderstanding) bool {
 	if strings.TrimSpace(turn.Goal) == "consultation" || meaningfulConsultationNeeds(turn.Consultation) || len(turn.ConsultationMutations) > 0 {
 		return true
-	}
-	normalized := normalizeLooseText(message)
-	signals := []string{
-		"help me choose", "not sure which", "which one should", "what do you recommend", "recommend a service",
-		"compare", "difference between", "what is the difference", "which is better", "tell me about",
-	}
-	for _, signal := range signals {
-		if containsLoosePhrase(normalized, signal) {
-			return understanding.Status != serviceUnderstandingStatusUnknown || mentionsGeneralServiceCatalog(normalized)
-		}
 	}
 	return false
 }
@@ -745,31 +754,6 @@ func containsAnyLoosePhrase(normalized string, phrases []string) bool {
 	return false
 }
 
-func consultationCandidates(message string, understanding serviceUnderstandingResult, services []ServiceOption) []ServiceOption {
-	normalized := normalizeLooseText(message)
-	out := make([]ServiceOption, 0, consultationCandidateLimit)
-	seen := map[string]bool{}
-	add := func(service ServiceOption) {
-		id := strings.TrimSpace(service.ID)
-		if id != "" && !seen[id] {
-			seen[id] = true
-			out = append(out, service)
-		}
-	}
-	for _, service := range services {
-		if name := normalizeLooseText(service.Name); name != "" && containsLoosePhrase(normalized, name) {
-			add(service)
-		}
-	}
-	for _, candidate := range understanding.Candidates {
-		add(candidate)
-	}
-	if understanding.Selected != nil {
-		add(*understanding.Selected)
-	}
-	return out
-}
-
 func consultationSelectedService(understanding serviceUnderstandingResult, state *ConsultationState) *ServiceOption {
 	if state == nil {
 		return nil
@@ -803,71 +787,14 @@ func onlyServiceID(ids []string) string {
 	return ""
 }
 
-func applyConsultationNeedTurn(current, semantic, fallback ConsultationNeedProfile, mutations []ConsultationNeedMutation, allowDeterministicFallback bool) ConsultationNeedProfile {
+func applyConsultationNeedTurn(current, semantic ConsultationNeedProfile, mutations []ConsultationNeedMutation) ConsultationNeedProfile {
 	merged := current
 	merged.BookingRequested = merged.BookingRequested || semantic.BookingRequested
 	merged.ConversationComplete = merged.ConversationComplete || semantic.ConversationComplete
-	touchedFields := map[string]bool{}
 	for _, mutation := range mutations {
-		touchedFields[mutation.Field] = true
 		applyConsultationNeedMutation(&merged, mutation)
 	}
-	// Structured snapshot fields are extraction evidence, not state changes.
-	// The deterministic fallback may initialize previously empty fields, but it
-	// is converted to the same field-level mutation contract and can never
-	// replace or remove persisted caller preferences.
-	if allowDeterministicFallback {
-		for _, mutation := range initialConsultationNeedMutations(merged, fallback, touchedFields) {
-			applyConsultationNeedMutation(&merged, mutation)
-		}
-	}
 	return merged
-}
-
-func initialConsultationNeedMutations(current ConsultationNeedProfile, fallback ConsultationNeedProfile, touchedFields map[string]bool) []ConsultationNeedMutation {
-	mutations := make([]ConsultationNeedMutation, 0, 6)
-	appendScalar := func(field string, currentValue string, fallbackValue string, unknownValue string) {
-		fallbackValue = strings.TrimSpace(fallbackValue)
-		if touchedFields[field] || strings.TrimSpace(currentValue) != "" || fallbackValue == "" || fallbackValue == unknownValue {
-			return
-		}
-		mutations = append(mutations, ConsultationNeedMutation{
-			Field: field, Operation: ConsultationNeedOperationSet, Values: []string{fallbackValue},
-			Confidence: fallback.Confidence, Reason: fallback.Reason,
-		})
-	}
-	appendList := func(field string, currentValues []string, fallbackValues []string) {
-		if touchedFields[field] || len(fallbackValues) == 0 {
-			return
-		}
-		existing := stringSet(currentValues)
-		values := make([]string, 0, len(fallbackValues))
-		for _, value := range fallbackValues {
-			value = strings.TrimSpace(value)
-			if value != "" && !existing[value] {
-				values = append(values, value)
-			}
-		}
-		if len(values) == 0 {
-			return
-		}
-		operation := ConsultationNeedOperationAdd
-		if len(currentValues) == 0 {
-			operation = ConsultationNeedOperationSet
-		}
-		mutations = append(mutations, ConsultationNeedMutation{
-			Field: field, Operation: operation, Values: values,
-			Confidence: fallback.Confidence, Reason: fallback.Reason,
-		})
-	}
-
-	appendScalar(ConsultationNeedFieldCurrentSystem, current.CurrentSystem, fallback.CurrentSystem, ConsultationSystemUnknown)
-	appendScalar(ConsultationNeedFieldDesiredOutcome, current.DesiredOutcome, fallback.DesiredOutcome, ConsultationOutcomeUnknown)
-	appendScalar(ConsultationNeedFieldLengthChange, current.LengthChange, fallback.LengthChange, ConsultationLengthUnknown)
-	appendList(ConsultationNeedFieldPriorities, current.Priorities, fallback.Priorities)
-	appendList(ConsultationNeedFieldDesiredFinishes, current.DesiredFinishes, fallback.DesiredFinishes)
-	appendList(ConsultationNeedFieldComparedServiceIDs, current.ComparedServiceIDs, fallback.ComparedServiceIDs)
-	return mutations
 }
 
 func applyConsultationNeedMutation(needs *ConsultationNeedProfile, mutation ConsultationNeedMutation) {
@@ -972,86 +899,209 @@ func consultationNeedsEqual(left, right ConsultationNeedProfile) bool {
 	return left.CurrentSystem == right.CurrentSystem && left.DesiredOutcome == right.DesiredOutcome && left.LengthChange == right.LengthChange && sameStringSlices(left.Priorities, right.Priorities) && sameStringSlices(left.DesiredFinishes, right.DesiredFinishes) && sameStringSlices(left.ComparedServiceIDs, right.ComparedServiceIDs) && left.BookingRequested == right.BookingRequested && left.ConversationComplete == right.ConversationComplete
 }
 
-func inferConsultationNeeds(message string) ConsultationNeedProfile {
-	normalized := normalizeLooseText(message)
-	needs := ConsultationNeedProfile{Confidence: 1, Reason: "state_scoped_deterministic_consultation_fallback"}
-	if hasCurrentSystemContext(normalized) {
-		for _, signal := range []struct {
-			value   string
-			phrases []string
-		}{
-			{ConsultationSystemRegularPolish, []string{"regular polish", "normal polish"}},
-			{ConsultationSystemGel, []string{"gel polish", "gel nails", "gel"}},
-			{ConsultationSystemDip, []string{"dip powder", "dip nails", "dip"}},
-			{ConsultationSystemAcrylic, []string{"acrylic"}},
-			{ConsultationSystemExtension, []string{"extensions", "extension", "tips"}},
-			{ConsultationSystemNatural, []string{"natural nails", "nothing on", "bare nails"}},
-		} {
-			if containsAnyLoosePhrase(normalized, signal.phrases) {
-				needs.CurrentSystem = signal.value
-				break
+func consultationInterpreterUnavailable(turn TurnUnderstanding) bool {
+	switch strings.TrimSpace(turn.InterpreterOutcome) {
+	case TurnInterpreterOutcomeProviderDisabled, TurnInterpreterOutcomeProviderError,
+		TurnInterpreterOutcomeTimeout, TurnInterpreterOutcomeEmptyOutput, TurnInterpreterOutcomeSchemaInvalid:
+		return true
+	default:
+		return false
+	}
+}
+
+func consultationProgressFingerprint(session Session, consultation ConsultationState, expectedInput string) string {
+	payload := struct {
+		ExpectedInput     string
+		DraftRevision     int
+		Pending           *PendingConversationAct
+		Status            string
+		Needs             ConsultationNeedProfile
+		CandidateIDs      []string
+		RecommendedIDs    []string
+		SelectedServiceID string
+		LastAskedField    string
+	}{
+		ExpectedInput: strings.TrimSpace(expectedInput), DraftRevision: normalizedDialogState(session.DialogState).DraftRevision,
+		Pending: clonePendingConversationAct(session.DialogState.Pending), Status: consultation.Status, Needs: consultation.Needs,
+		CandidateIDs:      append([]string(nil), consultation.CandidateServiceIDs...),
+		RecommendedIDs:    append([]string(nil), consultation.RecommendedServiceIDs...),
+		SelectedServiceID: strings.TrimSpace(consultation.SelectedServiceID), LastAskedField: strings.TrimSpace(consultation.LastAskedField),
+	}
+	raw, _ := json.Marshal(payload)
+	sum := sha256.Sum256(raw)
+	return fmt.Sprintf("sha256:%x", sum[:12])
+}
+
+func nextConsultationQuestionSpec(services []ServiceOption, needs ConsultationNeedProfile, candidateIDs []string) *ConsultationQuestionSpec {
+	allowed := stringSet(candidateIDs)
+	candidates := make([]ServiceOption, 0, len(services))
+	for _, service := range services {
+		if len(allowed) > 0 && !allowed[strings.TrimSpace(service.ID)] {
+			continue
+		}
+		if consultationProfileReadyForRecommendation(service.ConsultationProfile) && consultationProfileCompatibleWithKnownNeeds(service.ConsultationProfile, needs) {
+			candidates = append(candidates, service)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	unresolved := map[string]bool{
+		ConsultationNeedFieldCurrentSystem:   strings.TrimSpace(needs.CurrentSystem) == "",
+		ConsultationNeedFieldDesiredOutcome:  strings.TrimSpace(needs.DesiredOutcome) == "",
+		ConsultationNeedFieldLengthChange:    strings.TrimSpace(needs.LengthChange) == "",
+		ConsultationNeedFieldPriorities:      len(needs.Priorities) == 0,
+		ConsultationNeedFieldDesiredFinishes: len(needs.DesiredFinishes) == 0,
+	}
+	fields := make([]string, 0, len(unresolved))
+	for _, field := range []string{ConsultationNeedFieldCurrentSystem, ConsultationNeedFieldDesiredOutcome} {
+		if unresolved[field] {
+			fields = append(fields, field)
+		}
+	}
+	if len(fields) == 0 {
+		for _, field := range []string{ConsultationNeedFieldLengthChange, ConsultationNeedFieldPriorities, ConsultationNeedFieldDesiredFinishes} {
+			if unresolved[field] {
+				fields = append(fields, field)
 			}
 		}
 	}
-	for _, signal := range []struct {
-		value   string
-		phrases []string
-	}{
-		{ConsultationOutcomeShorten, []string{"too long", "shorter", "shorten", "cut down"}},
-		{ConsultationOutcomeAddLength, []string{"add length", "longer", "extensions"}},
-		{ConsultationOutcomeAddStrength, []string{"stronger", "add strength", "weak nails"}},
-		{ConsultationOutcomeRemoval, []string{"remove", "take off", "soak off"}},
-		{ConsultationOutcomeColorRefresh, []string{"new color", "change color", "refresh color"}},
-		{ConsultationOutcomeRepair, []string{"repair", "broken nail", "fix a nail"}},
-		{ConsultationOutcomeMaintain, []string{"maintain", "fill", "refill"}},
-		{ConsultationOutcomeCompare, []string{"compare", "difference between", "which is better"}},
-	} {
-		if containsAnyLoosePhrase(normalized, signal.phrases) {
-			needs.DesiredOutcome = signal.value
-			break
+	sort.Strings(fields)
+	bestScore := -1
+	var best *ConsultationQuestionSpec
+	for _, field := range fields {
+		options := []string{}
+		signatureCounts := map[string]int{}
+		revisions := map[string]int{}
+		ids := make([]string, 0, len(candidates))
+		for _, service := range candidates {
+			values := consultationProfileValues(service.ConsultationProfile, field)
+			sortedValues := appendUniqueStrings(nil, values...)
+			sort.Strings(sortedValues)
+			options = appendUniqueStrings(options, sortedValues...)
+			signatureCounts[strings.Join(sortedValues, "\x00")]++
+			ids = append(ids, service.ID)
+			revisions[service.ID] = service.ConsultationProfile.Revision
+		}
+		sort.Strings(options)
+		if len(options) == 0 {
+			continue
+		}
+		largestGroup := 0
+		for _, count := range signatureCounts {
+			if count > largestGroup {
+				largestGroup = count
+			}
+		}
+		score := len(signatureCounts)*1000 + len(options)*10 - largestGroup
+		if score > bestScore {
+			bestScore = score
+			best = &ConsultationQuestionSpec{
+				Field: field, Options: options, CandidateServiceIDs: ids, ProfileRevisions: revisions,
+			}
 		}
 	}
-	if containsAnyLoosePhrase(normalized, []string{"shorter", "shorten", "too long", "cut down"}) {
-		needs.LengthChange = ConsultationLengthShorten
-	} else if containsAnyLoosePhrase(normalized, []string{"longer", "add length"}) {
-		needs.LengthChange = ConsultationLengthAddLength
-	}
-	for _, signal := range []struct {
-		value   string
-		phrases []string
-	}{
-		{ConsultationPriorityDurability, []string{"last longer", "durable", "stronger"}},
-		{ConsultationPriorityLowerMaintenance, []string{"low maintenance", "less maintenance", "easy upkeep"}},
-		{ConsultationPriorityLowerCost, []string{"cheaper", "lower cost", "budget"}},
-		{ConsultationPriorityShorterVisit, []string{"quick", "shorter visit", "less time"}},
-	} {
-		if containsAnyLoosePhrase(normalized, signal.phrases) {
-			needs.Priorities = append(needs.Priorities, signal.value)
-		}
-	}
-	for _, signal := range []struct {
-		value   string
-		phrases []string
-	}{
-		{ConsultationFinishRegularPolish, []string{"want regular polish", "with regular polish"}},
-		{ConsultationFinishGelPolish, []string{"want gel polish", "with gel polish", "gel color"}},
-		{ConsultationFinishGlossy, []string{"glossy finish", "want glossy"}},
-		{ConsultationFinishMatte, []string{"matte finish", "want matte"}},
-		{ConsultationFinishNailArt, []string{"nail art", "want a design", "want designs"}},
-		{ConsultationFinishNatural, []string{"natural finish", "natural look"}},
-	} {
-		if containsAnyLoosePhrase(normalized, signal.phrases) {
-			needs.DesiredFinishes = append(needs.DesiredFinishes, signal.value)
-		}
-	}
-	return needs
+	return best
 }
 
-func hasCurrentSystemContext(normalized string) bool {
-	return containsAnyLoosePhrase(normalized, []string{
-		"i have", "ive got", "currently", "right now", "on my nails", "wearing",
-		"my nails are", "my acrylic", "my gel", "my dip", "my extensions", "nothing on", "bare nails",
+func consultationProfileCompatibleWithKnownNeeds(profile *ServiceConsultationProfile, needs ConsultationNeedProfile) bool {
+	if profile == nil {
+		return false
+	}
+	if needs.DesiredOutcome != "" && needs.DesiredOutcome != ConsultationOutcomeCompare && !containsString(profile.RecommendedOutcomes, needs.DesiredOutcome) {
+		return false
+	}
+	if needs.CurrentSystem != "" && !containsString(profile.CompatibleCurrentSystems, needs.CurrentSystem) {
+		return false
+	}
+	if needs.LengthChange != "" && !containsString(profile.LengthCapabilities, needs.LengthChange) {
+		return false
+	}
+	return len(needs.DesiredFinishes) == 0 || containsAnyString(profile.FinishOptions, needs.DesiredFinishes)
+}
+
+func consultationProfileValues(profile *ServiceConsultationProfile, field string) []string {
+	if profile == nil {
+		return nil
+	}
+	switch field {
+	case ConsultationNeedFieldCurrentSystem:
+		return profile.CompatibleCurrentSystems
+	case ConsultationNeedFieldDesiredOutcome:
+		return profile.RecommendedOutcomes
+	case ConsultationNeedFieldLengthChange:
+		return profile.LengthCapabilities
+	case ConsultationNeedFieldPriorities:
+		return profile.PriorityTags
+	case ConsultationNeedFieldDesiredFinishes:
+		return profile.FinishOptions
+	default:
+		return nil
+	}
+}
+
+func consultationNeedsMoreDiscrimination(ranked []consultationRankedService, question *ConsultationQuestionSpec) bool {
+	if question == nil {
+		return false
+	}
+	if question.Field == ConsultationNeedFieldCurrentSystem || question.Field == ConsultationNeedFieldDesiredOutcome {
+		return true
+	}
+	if len(ranked) == 0 || len(ranked) > 2 {
+		return true
+	}
+	return len(ranked) > 1 && ranked[0].Score == ranked[1].Score
+}
+
+func (s *Service) askConsultationQuestion(ctx context.Context, ownerUserID string, before Session, next Session, message, eventKey string, consultation *ConsultationState, question *ConsultationQuestionSpec, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (bool, *Session, error) {
+	if consultation == nil || question == nil {
+		return false, nil, nil
+	}
+	consultation.Status = ConsultationStatusCollectingNeeds
+	consultation.LastAskedField = strings.TrimSpace(question.Field)
+	consultation.LastQuestionOptions = append([]string(nil), question.Options...)
+	for id, revision := range question.ProfileRevisions {
+		if consultation.ProfileRevisions == nil {
+			consultation.ProfileRevisions = map[string]int{}
+		}
+		consultation.ProfileRevisions[id] = revision
+	}
+	dialog := normalizedDialogState(next.DialogState)
+	dialog.Phase = DialogPhaseConsultation
+	dialog.Consultation = consultation
+	next.DialogState = dialog
+	generator, ok := s.replyGenerator.(ConsultationQuestionGenerator)
+	if !ok {
+		return s.handleConsultationQuestionGenerationFailure(ctx, ownerUserID, before, next, message, eventKey, consultation, services, staff, cfg)
+	}
+	result, err := generator.GenerateConsultationQuestion(ctx, ConsultationQuestionRequest{
+		SalonID: before.SalonID, SessionID: before.ID, Channel: before.Channel, AITone: aiTone(cfg), Question: *question,
 	})
+	if err != nil || strings.TrimSpace(result.Message) == "" {
+		return s.handleConsultationQuestionGenerationFailure(ctx, ownerUserID, before, next, message, eventKey, consultation, services, staff, cfg)
+	}
+	consultation.ProviderFailureCount = 0
+	dialog.Consultation = consultation
+	next.DialogState = dialog
+	return s.saveConsultationTurn(ctx, ownerUserID, before, next, message, eventKey, strings.TrimSpace(result.Message), "consultation_profile_question", consultation, services, staff, cfg)
+}
+
+func (s *Service) handleConsultationQuestionGenerationFailure(ctx context.Context, ownerUserID string, before Session, next Session, message, eventKey string, consultation *ConsultationState, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (bool, *Session, error) {
+	consultation.ProviderFailureCount++
+	dialog := normalizedDialogState(next.DialogState)
+	dialog.Consultation = consultation
+	next.DialogState = dialog
+	if consultation.ProviderFailureCount < 2 {
+		return s.saveConsultationTurn(ctx, ownerUserID, before, next, message, eventKey, "I could not phrase the salon's next service question safely. Please try once more, or I can ask the owner to help.", "consultation_question_generation_unavailable", consultation, services, staff, cfg)
+	}
+	consultation.Status = ConsultationStatusHandedOff
+	consultation.ExitReason = HandoffReasonConsultationUnresolved
+	dialog.Consultation = consultation
+	next.DialogState = dialog
+	turn := newTurnRecord(before.SalonID, ownerUserID, before, next, message, eventKey, services, staff, cfg)
+	setConsultationMetadata(&turn, consultation, services)
+	updated, err := s.saveHandoffTurn(ctx, turn, next, HandoffReasonConsultationUnresolved, "I could not continue the salon's service consultation safely, so I'll ask the owner to help. This is not a confirmed appointment.", services, staff, cfg)
+	return true, updated, err
 }
 
 func rankConsultationServices(services []ServiceOption, needs ConsultationNeedProfile, candidateIDs []string) []consultationRankedService {
@@ -1268,6 +1318,10 @@ func setConsultationMetadata(turn *TurnRecord, state *ConsultationState, service
 		"consultation_recommendation_reasons":  cloneStringSliceMap(state.RecommendationReasons),
 		"pending_consultation_candidate_ids":   append([]string(nil), state.RecommendedServiceIDs...),
 		"pending_consultation_candidates":      serviceCandidateNames(servicesByIDs(services, state.RecommendedServiceIDs), consultationCandidateLimit),
+		"consultation_provider_failure_count":  state.ProviderFailureCount,
+		"consultation_progress_fingerprint":    state.ProgressFingerprint,
+		"consultation_last_asked_field":        state.LastAskedField,
+		"consultation_last_question_options":   append([]string(nil), state.LastQuestionOptions...),
 	})
 	turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, map[string]any{
 		"consultation_current_system":   state.Needs.CurrentSystem,
@@ -1275,7 +1329,14 @@ func setConsultationMetadata(turn *TurnRecord, state *ConsultationState, service
 		"consultation_length_change":    state.Needs.LengthChange,
 		"consultation_priorities":       append([]string(nil), state.Needs.Priorities...),
 		"consultation_desired_finishes": append([]string(nil), state.Needs.DesiredFinishes...),
+		"turn_interpreter_outcome":      state.LastInterpreterOutcome,
+		"turn_interpreter_diagnostics":  cloneStringMap(state.LastInterpreterDiagnostics),
 	})
+	diagnostics := map[string]any{}
+	for key, value := range turnInterpreterDiagnosticAttributes(state.LastInterpreterDiagnostics) {
+		diagnostics[key] = value
+	}
+	turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, diagnostics)
 }
 
 func clearPendingConsultationMetadata(turn *TurnRecord, reason string) {

@@ -320,6 +320,10 @@ Readiness meaning:
 
 - STT ready enables recording mode.
 - LLM ready allows safe reply rewriting, but it must not override POS-first confirmation safety.
+- Before testing freeform semantic turns, run the owner-authenticated
+  `POST /api/salons/:id/voice/semantic-check`. Require `configured=true` and
+  `verified=true`; a failed check returns only safe provider/status/schema
+  diagnostics and performs no conversation, availability, or POS writes.
 - TTS ready allows Twilio `<Play>` audio responses.
 - Realtime ready enables Twilio Media Streams input mode when the Twilio tab also selects `realtime_stream`. Completed transcripts still go through the backend Turn Kernel, conversation reducer/planner, and booking service. Deterministically complete turns use a fast/answer/action/recovery lane; only ambiguous, corrective, multi-intent, or partially covered turns enter the bounded semantic lane. OpenAI Realtime must not confirm bookings on its own.
 

@@ -144,6 +144,61 @@ func TestGuardedReplyGeneratorRejectsOperationalFactByDefault(t *testing.T) {
 	}
 }
 
+func TestGuardedReplyGeneratorPhrasesOnlyProfileBackedConsultationQuestion(t *testing.T) {
+	provider := &fakeLanguageModelProvider{reply: ModelReply{
+		Message: "Would you prefer a glossy or matte finish?", Confidence: 0.92,
+	}}
+	generator := NewGuardedReplyGenerator(provider)
+	spec := conversation.ConsultationQuestionSpec{
+		Field:               conversation.ConsultationNeedFieldDesiredFinishes,
+		Options:             []string{conversation.ConsultationFinishGlossy, conversation.ConsultationFinishMatte},
+		CandidateServiceIDs: []string{"service_dynamic_a", "service_dynamic_b"},
+		ProfileRevisions:    map[string]int{"service_dynamic_a": 4, "service_dynamic_b": 9},
+	}
+
+	reply, err := generator.GenerateConsultationQuestion(context.Background(), conversation.ConsultationQuestionRequest{
+		SalonID: "salon_1", SessionID: "session_1", Channel: conversation.ChannelPhone, AITone: "concise_calm", Question: spec,
+	})
+	if err != nil || reply.Message != "Would you prefer a glossy or matte finish?" {
+		t.Fatalf("consultation question reply=%#v err=%v", reply, err)
+	}
+	if provider.req.ReplyPolicy != conversation.ReplyPolicyConsultationQuestion || provider.req.ConsultationQuestion == nil ||
+		provider.req.ConsultationQuestion.Field != spec.Field || !sameStringValues(provider.req.ConsultationQuestion.Options, spec.Options) {
+		t.Fatalf("consultation model request = %#v", provider.req)
+	}
+}
+
+func TestGuardedReplyGeneratorRejectsUnsafeConsultationQuestionShape(t *testing.T) {
+	for _, message := range []string{
+		"Would you prefer glossy? Or would matte be better?",
+		"Your appointment is confirmed; which finish would you prefer?",
+		"Hey! Which finish would you prefer?",
+	} {
+		generator := NewGuardedReplyGenerator(&fakeLanguageModelProvider{reply: ModelReply{Message: message, Confidence: 0.9}})
+		_, err := generator.GenerateConsultationQuestion(context.Background(), conversation.ConsultationQuestionRequest{
+			SalonID: "salon_1", Question: conversation.ConsultationQuestionSpec{
+				Field:   conversation.ConsultationNeedFieldDesiredFinishes,
+				Options: []string{conversation.ConsultationFinishGlossy, conversation.ConsultationFinishMatte},
+			},
+		})
+		if err == nil {
+			t.Fatalf("unsafe consultation question accepted: %q", message)
+		}
+	}
+}
+
+func sameStringValues(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
 type fakeLanguageModelProvider struct {
 	reply ModelReply
 	req   ModelRequest

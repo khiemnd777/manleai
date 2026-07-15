@@ -327,7 +327,7 @@ func TestMessageFastLaneSkipsSemanticForUnseenExpectedDateWording(t *testing.T) 
 	}
 }
 
-func TestPhoneBookingCategoryThenExactServiceStaysDeterministic(t *testing.T) {
+func TestPhoneBookingCategoryProviderFailureUsesBoundedRecoveryThenExactCatalogService(t *testing.T) {
 	store := newFakeConversationStore()
 	store.session.Channel = ChannelPhone
 	store.session.CustomerPhone = "+13125550199"
@@ -349,8 +349,8 @@ func TestPhoneBookingCategoryThenExactServiceStaysDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("category Message: %v", err)
 	}
-	if interpreter.calls != 0 {
-		t.Fatalf("category booking invoked semantic interpreter %d times", interpreter.calls)
+	if interpreter.calls != 1 {
+		t.Fatalf("category booking semantic interpreter calls = %d, want 1", interpreter.calls)
 	}
 	if session.ServiceID != "" || len(session.BookingSegments) != 0 || session.Handoff != nil {
 		t.Fatalf("category booking state = service=%q segments=%#v handoff=%#v", session.ServiceID, session.BookingSegments, session.Handoff)
@@ -358,8 +358,8 @@ func TestPhoneBookingCategoryThenExactServiceStaysDeterministic(t *testing.T) {
 	if session.DialogState.Pending != nil && session.DialogState.Pending.PromptKey == "semantic_add_or_replace" {
 		t.Fatalf("initial category booking created service-edit pending state: %#v", session.DialogState)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "Express Manicure") || !strings.Contains(store.lastTurn.AIMessage, "Gel Manicure") {
-		t.Fatalf("category clarification = %q", store.lastTurn.AIMessage)
+	if !strings.Contains(store.lastTurn.AIMessage, "book") || !strings.Contains(store.lastTurn.AIMessage, "help choosing") {
+		t.Fatalf("provider failure recovery = %q", store.lastTurn.AIMessage)
 	}
 
 	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -368,8 +368,8 @@ func TestPhoneBookingCategoryThenExactServiceStaysDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("exact service Message: %v", err)
 	}
-	if interpreter.calls != 0 {
-		t.Fatalf("exact service invoked semantic interpreter %d times", interpreter.calls)
+	if interpreter.calls != 1 {
+		t.Fatalf("exact catalog service added semantic interpreter calls: total=%d, want 1", interpreter.calls)
 	}
 	if session.ServiceID != "gel_mani" || len(session.BookingSegments) != 1 || session.BookingSegments[0].ServiceID != "gel_mani" {
 		t.Fatalf("selected service state = service=%q segments=%#v", session.ServiceID, session.BookingSegments)

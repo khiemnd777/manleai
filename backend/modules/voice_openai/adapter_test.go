@@ -153,6 +153,15 @@ func TestInterpretTurnUsesStrictCatalogBoundMultiActSchema(t *testing.T) {
 		if modelInput["expected_input"] != conversation.ExpectedInputService {
 			t.Fatalf("expected_input = %#v", modelInput["expected_input"])
 		}
+		catalog, ok := modelInput["catalog_services"].([]any)
+		if !ok || len(catalog) != 1 {
+			t.Fatalf("catalog_services = %#v", modelInput["catalog_services"])
+		}
+		catalogService, _ := catalog[0].(map[string]any)
+		profile, _ := catalogService["consultation_profile"].(map[string]any)
+		if profile["owner_approved_summary"] != "A lower-maintenance pedicure with a glossy finish." || profile["revision"] != float64(7) {
+			t.Fatalf("consultation profile was not included in semantic input: %#v", profile)
+		}
 		body, _ := json.Marshal(map[string]any{
 			"output_text": `{"goal":"book_appointment","acts":[{"kind":"replace_service","entity":"service","source_ids":["service_gel"],"target_ids":["service_spa"],"source_category_id":"","source_category_name":"","target_category_id":"cat_pedi","target_category_name":"Pedicure","scope":"one","guest_scope":"","guest_ref":"","subject":"","value":"","count":0,"confidence":0.95,"reason":"explicit replacement"}],"questions":[{"subject":"availability","service_ids":["service_spa"],"staff_ids":[],"time_preference":{"direction":"","minutes":-1},"confidence":0.92,"reason":"caller asked about availability"}],"confidence":0.95,"reason":"correction plus question","consultation":{"current_system":"","desired_outcome":"","length_change":"","priorities":[],"desired_finishes":[],"compared_service_ids":[],"booking_requested":false,"conversation_complete":false,"confidence":0,"reason":"","mutations":[]},"safety":{"concern":false,"category":"","confidence":0,"reason":""}}`,
 		})
@@ -168,6 +177,11 @@ func TestInterpretTurnUsesStrictCatalogBoundMultiActSchema(t *testing.T) {
 		}},
 		CatalogServices: []conversation.ConversationServiceRef{{
 			ServiceID: "service_spa", ServiceName: "Spa Pedicure", CategoryID: "cat_pedi", CategoryName: "Pedicure",
+			ConsultationProfile: &conversation.ConversationConsultationProfileRef{
+				Status: conversation.ConsultationProfileStatusReady, RecommendedOutcomes: []string{conversation.ConsultationOutcomeMaintain},
+				CompatibleCurrentSystems: []string{conversation.ConsultationSystemNatural}, PriorityTags: []string{conversation.ConsultationPriorityLowerMaintenance},
+				FinishOptions: []string{conversation.ConsultationFinishGlossy}, OwnerApprovedSummary: "A lower-maintenance pedicure with a glossy finish.", Revision: 7,
+			},
 		}},
 	})
 	if err != nil {
@@ -186,7 +200,7 @@ func TestInterpretTurnReturnsPIIFreeProviderDiagnosticsWithoutResponseBody(t *te
 		return &http.Response{
 			StatusCode: http.StatusServiceUnavailable,
 			Header:     http.Header{"X-Request-Id": []string{"req_provider_safe_1"}},
-			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"customer transcript must stay private"}}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"type":"invalid_request_error","code":"invalid_json_schema","param":"text.format.schema","message":"customer transcript must stay private"}}`)),
 		}, nil
 	})}
 
@@ -201,12 +215,103 @@ func TestInterpretTurnReturnsPIIFreeProviderDiagnosticsWithoutResponseBody(t *te
 		t.Fatalf("error type = %T", err)
 	}
 	diagnostics := providerErr.SafeDiagnostics()
-	if diagnostics["provider"] != voice.ProviderOpenAI || diagnostics["failure_stage"] != "turn_interpretation_response" || diagnostics["http_status_class"] != "5xx" || diagnostics["request_id"] != "req_provider_safe_1" {
+	if diagnostics["provider"] != voice.ProviderOpenAI || diagnostics["failure_stage"] != "turn_interpretation_response" || diagnostics["http_status_class"] != "5xx" || diagnostics["request_id"] != "req_provider_safe_1" ||
+		diagnostics["error_type"] != "invalid_request_error" || diagnostics["error_code"] != "invalid_json_schema" || diagnostics["error_param"] != "text.format.schema" || diagnostics["schema_fingerprint"] == "" {
 		t.Fatalf("diagnostics = %#v", diagnostics)
 	}
 	if strings.Contains(err.Error(), "customer transcript") || strings.Contains(err.Error(), "private caller wording") {
 		t.Fatalf("error leaked provider body or request text: %q", err.Error())
 	}
+}
+
+func TestTurnUnderstandingSchemaUsesSupportedSubsetRecursively(t *testing.T) {
+	schema := turnUnderstandingSchema()
+	if err := validateStructuredOutputSchema(schema); err != nil {
+		t.Fatalf("current turn schema is invalid: %v", err)
+	}
+	properties := schema["properties"].(map[string]any)
+	consultation := properties["consultation"].(map[string]any)
+	consultationProperties := consultation["properties"].(map[string]any)
+	priorities := consultationProperties["priorities"].(map[string]any)
+	priorities["uniqueItems"] = true
+	if err := validateStructuredOutputSchema(schema); err == nil || !strings.Contains(err.Error(), "uniqueItems") || !strings.Contains(err.Error(), "consultation") {
+		t.Fatalf("recursive unsupported-key validation error = %v", err)
+	}
+}
+
+func TestTurnContractCircuitSuppressesRepeatedInvalidRequestsAndProbeClearsIt(t *testing.T) {
+	adapter := NewAdapter(config.OpenAIVoiceConfig{
+		APIKey: "test-key", BaseURL: "https://openai.test/v1", ReplyModel: "gpt-test",
+	})
+	requestCount := 0
+	adapter.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requestCount++
+		if requestCount == 1 {
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{"X-Request-Id": []string{"req_contract_bad_1"}},
+				Body: io.NopCloser(strings.NewReader(
+					`{"error":{"type":"invalid_request_error","code":"invalid_json_schema","param":"text.format.schema","message":"do not expose this body"}}`,
+				)),
+			}, nil
+		}
+		body, _ := json.Marshal(map[string]any{"output_text": validEmptyTurnOutput()})
+		return jsonResponse(body), nil
+	})}
+
+	request := voice.TurnModelRequest{SalonID: "salon_1", CustomerMessage: "Please help with a service."}
+	_, err := adapter.InterpretTurn(context.Background(), request)
+	var firstErr *voice.ProviderRequestError
+	if !errors.As(err, &firstErr) || firstErr.StatusCode != http.StatusBadRequest || firstErr.CircuitOpen {
+		t.Fatalf("first contract error = %#v", err)
+	}
+	_, err = adapter.InterpretTurn(context.Background(), request)
+	var circuitErr *voice.ProviderRequestError
+	if !errors.As(err, &circuitErr) || !circuitErr.CircuitOpen || requestCount != 1 {
+		t.Fatalf("open circuit error=%#v request_count=%d", err, requestCount)
+	}
+	if diagnostics := circuitErr.SafeDiagnostics(); diagnostics["circuit_open"] != "true" || diagnostics["error_code"] != "invalid_json_schema" {
+		t.Fatalf("circuit diagnostics = %#v", diagnostics)
+	}
+
+	check, err := adapter.CheckTurnContract(context.Background(), "salon_1")
+	if err != nil || check.SchemaFingerprint == "" || requestCount != 2 {
+		t.Fatalf("semantic probe check=%#v err=%v request_count=%d", check, err, requestCount)
+	}
+	if _, err := adapter.InterpretTurn(context.Background(), request); err != nil || requestCount != 3 {
+		t.Fatalf("post-probe interpretation err=%v request_count=%d", err, requestCount)
+	}
+}
+
+func TestTurnContractCircuitResetsWhenSalonRuntimeConfigurationChanges(t *testing.T) {
+	adapter := NewAdapter(config.OpenAIVoiceConfig{
+		APIKey: "test-key", BaseURL: "https://openai.test/v1", ReplyModel: "gpt-test-v1",
+	})
+	requestCount := 0
+	adapter.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requestCount++
+		if requestCount == 1 {
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"type":"invalid_request_error","code":"invalid_json_schema","param":"text.format.schema"}}`)),
+			}, nil
+		}
+		body, _ := json.Marshal(map[string]any{"output_text": validEmptyTurnOutput()})
+		return jsonResponse(body), nil
+	})}
+
+	request := voice.TurnModelRequest{SalonID: "salon_runtime_change"}
+	if _, err := adapter.InterpretTurn(context.Background(), request); err == nil {
+		t.Fatal("first invalid contract request succeeded")
+	}
+	adapter.cfg.ReplyModel = "gpt-test-v2"
+	if _, err := adapter.InterpretTurn(context.Background(), request); err != nil || requestCount != 2 {
+		t.Fatalf("changed runtime config did not reset circuit: err=%v request_count=%d", err, requestCount)
+	}
+}
+
+func validEmptyTurnOutput() string {
+	return `{"goal":"unknown","acts":[],"questions":[],"confidence":0,"reason":"contract check","consultation":{"current_system":"","desired_outcome":"","length_change":"","priorities":[],"desired_finishes":[],"compared_service_ids":[],"booking_requested":false,"conversation_complete":false,"confidence":0,"reason":"","mutations":[]},"safety":{"concern":false,"category":"","confidence":0,"reason":""}}`
 }
 
 func TestInterpretTurnClassifiesEmptyAndInvalidStructuredOutput(t *testing.T) {

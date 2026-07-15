@@ -56,11 +56,16 @@ var (
 // a provider request. It deliberately excludes response bodies and request
 // payloads so callers can expose the diagnostics in operational timelines.
 type ProviderRequestError struct {
-	Provider   string
-	Stage      string
-	StatusCode int
-	RequestID  string
-	Err        error
+	Provider          string
+	Stage             string
+	StatusCode        int
+	RequestID         string
+	ErrorType         string
+	ErrorCode         string
+	ErrorParam        string
+	SchemaFingerprint string
+	CircuitOpen       bool
+	Err               error
 }
 
 func (e *ProviderRequestError) Error() string {
@@ -100,6 +105,21 @@ func (e *ProviderRequestError) SafeDiagnostics() map[string]string {
 	}
 	if value := safeProviderDiagnosticValue(e.RequestID); value != "" {
 		diagnostics["request_id"] = value
+	}
+	if value := safeProviderDiagnosticValue(e.ErrorType); value != "" {
+		diagnostics["error_type"] = value
+	}
+	if value := safeProviderDiagnosticValue(e.ErrorCode); value != "" {
+		diagnostics["error_code"] = value
+	}
+	if value := safeProviderDiagnosticValue(e.ErrorParam); value != "" {
+		diagnostics["error_param"] = value
+	}
+	if value := safeProviderDiagnosticValue(e.SchemaFingerprint); value != "" {
+		diagnostics["schema_fingerprint"] = value
+	}
+	if e.CircuitOpen {
+		diagnostics["circuit_open"] = "true"
 	}
 	if len(diagnostics) == 0 {
 		return nil
@@ -160,6 +180,18 @@ type TurnModelProvider interface {
 	Name() string
 	Configured(ctx context.Context, salonID string) bool
 	InterpretTurn(ctx context.Context, req TurnModelRequest) (TurnModelReply, error)
+}
+
+// TurnContractVerifier runs the same structured-output contract used by live
+// turn interpretation without creating conversation state or calling tools.
+type TurnContractVerifier interface {
+	CheckTurnContract(ctx context.Context, salonID string) (TurnContractCheck, error)
+}
+
+type TurnContractCheck struct {
+	Provider          string `json:"provider"`
+	SchemaFingerprint string `json:"schema_fingerprint"`
+	RequestID         string `json:"request_id,omitempty"`
 }
 
 type TurnModelRequest struct {
@@ -364,6 +396,7 @@ type ModelRequest struct {
 	Summary              string
 	KnowledgeContext     string
 	ReplyPolicy          string
+	ConsultationQuestion *conversation.ConsultationQuestionSpec
 }
 
 type ModelReply struct {
@@ -484,6 +517,15 @@ type VoiceAIStatus struct {
 	Realtime   ProviderCapabilityStatus `json:"realtime"`
 }
 
+type SemanticCheckStatus struct {
+	Provider          string            `json:"provider"`
+	Configured        bool              `json:"configured"`
+	Verified          bool              `json:"verified"`
+	SchemaFingerprint string            `json:"schema_fingerprint,omitempty"`
+	RequestID         string            `json:"request_id,omitempty"`
+	Diagnostics       map[string]string `json:"diagnostics,omitempty"`
+}
+
 type Status struct {
 	Provider              string                `json:"provider"`
 	Configured            bool                  `json:"configured"`
@@ -504,6 +546,7 @@ type Status struct {
 type AIProviders struct {
 	STT          SpeechToTextProvider
 	LLM          LanguageModelProvider
+	TurnModel    TurnModelProvider
 	TTS          TextToSpeechProvider
 	StreamingTTS StreamingSpeechProvider
 	Realtime     RealtimeSpeechProvider

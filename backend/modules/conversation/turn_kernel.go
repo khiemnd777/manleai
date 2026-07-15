@@ -115,8 +115,8 @@ func expectedInputForSession(session Session) string {
 		case ConsultationStatusAwaitingBooking:
 			return ExpectedInputConsultationBooking
 		default:
-			if consultation.LastAskedField == "current_system" {
-				return ExpectedInputConsultationCurrentSystem
+			if field := strings.TrimSpace(consultation.LastAskedField); field != "" {
+				return "consultation_" + field
 			}
 			return ExpectedInputConsultationDesiredOutcome
 		}
@@ -128,6 +128,10 @@ func expectedInputForSession(session Session) string {
 		switch state.Pending.PromptKey {
 		case pendingOfferedSlotDateTimeCorrection:
 			return ExpectedInputDateTimeConfirmation
+		case PendingCustomerNameConfirmation:
+			return ExpectedInputCustomerNameConfirmation
+		case PendingStaffAlternative:
+			return ExpectedInputStaff
 		default:
 			return ExpectedInputPendingServiceOperation
 		}
@@ -191,13 +195,27 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 	plan.StaffChange = detectStaffChangeRequest(message, session, services, aliases, categoryAliases, staff, activeStaff)
 	plan.PartySignal = detectPartySignal(message, session, plan.ServiceUnderstanding, services, aliases, categoryAliases)
 	plan.PendingNameCandidate = voiceCustomerNamePendingConfirmationCandidate(message, session)
+	if plan.PendingNameCandidate != "" && !validCustomerNameCandidate(plan.PendingNameCandidate, cfg, services, staff) {
+		plan.PendingNameCandidate = ""
+	}
 
 	state := normalizedDialogState(session.DialogState)
+	if state.Pending != nil && state.Pending.PromptKey == PendingStaffAlternative {
+		if matched := matchStaff(message, staff); matched != nil && stringSet(state.Pending.TargetServiceIDs)[strings.TrimSpace(matched.ID)] {
+			plan.Understanding = TurnUnderstanding{
+				Goal: "book_appointment", Acts: []ConversationAct{{
+					Kind: ConversationActSet, Entity: ConversationEntityStaff, TargetServiceIDs: []string{matched.ID},
+					Confidence: 1, Reason: "pending_staff_alternative_selection", Source: "turn_kernel",
+				}}, Confidence: 1, Reason: "pending_staff_alternative_selection", Source: "turn_kernel", InterpreterOutcome: "skipped_fast_lane",
+			}
+			return finalizeTurnPlan(plan, TurnRouteFastLane, "pending_staff_alternative_selection", TurnCoverageComplete, session, services, staff)
+		}
+	}
 	if state.Pending != nil && state.Pending.PromptKey == pendingOfferedSlotDateTimeCorrection {
 		return finalizeTurnPlan(plan, TurnRouteFastLane, "pending_date_time_confirmation", TurnCoverageComplete, session, services, staff)
 	}
 	if envelope.ExpectedInput == ExpectedInputCustomerNameConfirmation {
-		if isAffirmativeOnly(message) || isNegativeNameConfirmation(message) || correctedCustomerNameCandidate(message, session) != "" {
+		if isPendingCustomerNameAffirmative(message) || isExactNegativeNameConfirmation(message) {
 			return finalizeTurnPlan(plan, TurnRouteFastLane, "pending_customer_name_confirmation", TurnCoverageComplete, session, services, staff)
 		}
 	}
@@ -233,6 +251,7 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 		}
 		if isGoodbyeUtterance(message) || isConsultationSafetyConcern(message) ||
 			(state.Consultation.Status == ConsultationStatusAwaitingBooking && isAffirmativeOnly(message)) ||
+			(state.Consultation.Status == ConsultationStatusAwaitingSelection && isExactAffirmativeResponse(message)) ||
 			(state.Consultation.Status == ConsultationStatusAwaitingSelection && plan.ServiceUnderstanding.Status == serviceUnderstandingStatusSelected) {
 			plan.Understanding = deterministicGoalUnderstanding("consultation", "consultation_state_owned_turn")
 			return finalizeTurnPlan(plan, TurnRouteFastLane, "consultation_state_owned_turn", TurnCoverageComplete, session, services, staff)
@@ -252,21 +271,26 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 		}
 		return finalizeTurnPlan(plan, TurnRouteAnswerLane, "current_booking_question", TurnCoverageComplete, session, services, staff)
 	}
+	if len(plan.ServiceUnderstanding.Candidates) > 1 && !asksServiceMenu(message) &&
+		classifyServiceCatalogQuestion(message, plan.ServiceUnderstanding) != serviceCatalogQuestionCount {
+		return finalizeTurnPlan(plan, TurnRouteSemanticLane, "multi_service_semantic_context", TurnCoveragePartial, session, services, staff)
+	}
 	answer := routeNonBookingAnswer(message, session, answerCtx, cfg, s.now)
 	if isServiceInquiry(message, plan.ServiceUnderstanding) {
 		answer = routeServiceInquiryAnswer(message, session, plan.ServiceUnderstanding, answerCtx)
 	}
 	if state.Phase == DialogPhaseReview {
-		plan.ReviewResponse = classifyReviewResponse(message, reviewResponseEvidence{
-			HasDraftMutation:       len(signals) > 0,
-			HasInformationQuestion: answer.Handled && answer.Source != answerSourceBookingRedirect,
-			RequestsOtherAction: shouldClarifyCancelReschedule(session, message) ||
-				shouldRouteCancel(session, message) || shouldRouteReschedule(session, message) ||
-				shouldComplaintHandoff(message) || shouldHandoff(message),
-			HasPartyMutation: plan.PartySignal.IsParty,
-		})
+		plan.ReviewResponse = classifyStateScopedReviewResponse(message)
+		if plan.ReviewResponse != reviewResponseAccept && plan.ReviewResponse != reviewResponseReject {
+			return finalizeTurnPlan(plan, TurnRouteSemanticLane, "review_semantic_context_required", TurnCoveragePartial, session, services, staff)
+		}
 	}
 	if answer.Handled && answer.Source != answerSourceBookingRedirect && len(signals) == 0 {
+		standaloneCatalogQuestion := answer.Source == answerSourceServiceCatalog &&
+			(asksServiceMenu(message) || classifyServiceCatalogQuestion(message, plan.ServiceUnderstanding) == serviceCatalogQuestionCount)
+		if hasOperationalBookingProgress(session) && !standaloneCatalogQuestion {
+			return finalizeTurnPlan(plan, TurnRouteSemanticLane, "booking_context_answer_or_correction", TurnCoveragePartial, session, services, staff)
+		}
 		plan.Understanding = deterministicAnswerUnderstanding(answer)
 		return finalizeTurnPlan(plan, TurnRouteAnswerLane, "structured_answer", TurnCoverageComplete, session, services, staff)
 	}

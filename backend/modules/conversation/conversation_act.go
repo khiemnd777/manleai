@@ -179,7 +179,9 @@ func turnInterpreterDiagnosticAttributes(diagnostics map[string]string) map[stri
 	mapping := map[string]string{
 		"provider": "turn_interpreter_provider", "failure_stage": "turn_interpreter_failure_stage",
 		"http_status": "turn_interpreter_http_status", "http_status_class": "turn_interpreter_http_status_class",
-		"request_id": "turn_interpreter_request_id",
+		"request_id": "turn_interpreter_request_id", "error_type": "turn_interpreter_error_type",
+		"error_code": "turn_interpreter_error_code", "error_param": "turn_interpreter_error_param",
+		"schema_fingerprint": "turn_interpreter_schema_fingerprint", "circuit_open": "turn_interpreter_circuit_open",
 	}
 	attributes := map[string]string{}
 	for source, target := range mapping {
@@ -944,6 +946,16 @@ func classifyReviewResponse(message string, evidence reviewResponseEvidence) rev
 	return reviewResponseAmbiguous
 }
 
+func classifyStateScopedReviewResponse(message string) reviewResponseKind {
+	if isExactAffirmativeResponse(message) {
+		return reviewResponseAccept
+	}
+	if isNegativeOnly(message) {
+		return reviewResponseReject
+	}
+	return reviewResponseAmbiguous
+}
+
 func hasReviewCorrectionEvidence(normalized string) bool {
 	for _, token := range strings.Fields(normalized) {
 		switch token {
@@ -1029,7 +1041,17 @@ func selectedServiceOptions(session Session, services []ServiceOption) []Service
 func conversationServiceRefs(services []ServiceOption) []ConversationServiceRef {
 	out := make([]ConversationServiceRef, 0, len(services))
 	for _, service := range services {
-		out = append(out, ConversationServiceRef{ServiceID: service.ID, ServiceName: service.Name, CategoryID: service.CategoryID, CategoryName: service.CategoryName})
+		ref := ConversationServiceRef{ServiceID: service.ID, ServiceName: service.Name, CategoryID: service.CategoryID, CategoryName: service.CategoryName}
+		if profile := service.ConsultationProfile; profile != nil {
+			ref.ConsultationProfile = &ConversationConsultationProfileRef{
+				Status: profile.Status, RecommendedOutcomes: append([]string(nil), profile.RecommendedOutcomes...),
+				CompatibleCurrentSystems: append([]string(nil), profile.CompatibleCurrentSystems...),
+				LengthCapabilities:       append([]string(nil), profile.LengthCapabilities...),
+				PriorityTags:             append([]string(nil), profile.PriorityTags...), FinishOptions: append([]string(nil), profile.FinishOptions...),
+				MaintenanceNote: profile.MaintenanceNote, OwnerApprovedSummary: profile.OwnerApprovedSummary, Revision: profile.Revision,
+			}
+		}
+		out = append(out, ref)
 	}
 	return out
 }
@@ -1116,6 +1138,18 @@ func validateInterpretedConversationAct(act ConversationAct, session Session, se
 			ConversationEntityGuest: true, ConversationEntityCustomer: true,
 		}
 		if !allowedEntity[act.Entity] {
+			return ConversationAct{}, false
+		}
+		if act.Entity == ConversationEntityCustomer {
+			subject := strings.TrimSpace(act.Subject)
+			if subject != "name" && subject != "phone" && subject != "email" {
+				return ConversationAct{}, false
+			}
+			if act.Kind == ConversationActSet && strings.TrimSpace(act.Value) == "" {
+				return ConversationAct{}, false
+			}
+		}
+		if act.Entity == ConversationEntityStaff && strings.TrimSpace(act.Subject) == "alternative" && len(act.TargetServiceIDs) != 0 {
 			return ConversationAct{}, false
 		}
 	}

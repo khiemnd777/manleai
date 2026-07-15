@@ -158,6 +158,109 @@ the same approved documentation scope.
 - After implementation, review the full relevant user-facing flow, not only unit state. If the output would sound robotic, misleading, repetitive, or hard to answer in the real workflow, the slice is not done.
 - If this contract is violated, stop immediately. Do not patch, format, test, or "fix forward" until the user chooses how to handle the current worktree. First classify the diff into approved changes, unapproved changes, and risk areas.
 
+## No-Hardcoding Contract
+
+This contract is mandatory across every thread for diagnosis, proposals, plans,
+implementation, review, tests, documentation, skills, and subagent handoffs. It
+applies even when a narrow hardcoded patch would be faster to write.
+
+### Source Of Truth Before Solution
+
+- Before proposing a fix, identify the actor workflow, owning module, persisted
+  or provider-backed source of truth, dynamic inputs, runtime consumers, and
+  existing UI/API used to manage that data.
+- Inspect existing profiles, catalogs, schemas, state machines, provider data,
+  contracts, and configuration before inventing a matcher, prompt table,
+  decision list, or fallback.
+- When an existing structured owner can represent the behavior, use or extend
+  that owner. Do not create a parallel list, map, prompt builder, UI option set,
+  or second taxonomy in another layer.
+- If the required source of truth does not exist, propose the smallest durable
+  data model or contract that should own it. Do not hide missing product data in
+  code constants or prompt prose.
+- A model or AI consultation profile must receive the relevant structured
+  source data. Do not discard that data upstream and then recreate its meaning
+  with deterministic phrases or field-specific copy downstream.
+
+### Forbidden Product Logic
+
+- Do not encode caller meaning, product decisions, salon policy, consultation
+  behavior, service selection, staff selection, workflow transitions, or
+  recommendations from exact phrases, transcript wording, screenshots, salon
+  names, service names, dates, times, staff names, customer names, or the latest
+  reported example.
+- Do not use phrase lists, keyword maps, regular expressions, substring checks,
+  allowlists, denylists, fixed menus, fixed question order, or switch branches
+  as the primary semantic classifier or business decision engine.
+- Do not duplicate dynamic enums, profile fields, catalog entries, aliases,
+  categories, provider capabilities, or UI choices in a second hardcoded list.
+  Derive them from the owning contract or expose shared metadata from that
+  owner.
+- Do not implement a "deterministic fallback" that guesses semantic meaning
+  from keywords when an AI or provider dependency fails. Preserve validated
+  state and use a generic clarification, safe retry, explicit failure, or human
+  handoff according to the workflow contract.
+- Do not let user-facing copy become hidden parser or business logic. Copy may
+  present a state-derived question or safe fallback, but changing the wording
+  must not change the underlying decision.
+- Do not approve a proposal whose behavior works only for one wording, one
+  transcript, one salon, one service combination, or one date/time example.
+
+### Narrowly Allowed Constants
+
+- Stable protocol tokens, API paths, status and field identifiers, schema
+  versions, security and booking-safety invariants, and validated numeric bounds
+  may be constants when their owner contract defines them as fixed.
+- Bounded parsing is allowed for an explicit protocol or active state contract,
+  such as selecting one of the currently offered options. It must not expand
+  into general caller-intent inference.
+- Presentation copy and emergency fallback copy may be fixed, but their choices
+  and next action must come from structured state, catalog data, provider data,
+  or a documented contract.
+- Every proposed fixed value must name its authoritative owner and explain why
+  it is invariant rather than salon-, user-, provider-, locale-, or
+  conversation-specific data.
+
+### Mandatory Hardcoding Audit
+
+- Every non-trivial triage, proposal, implementation plan, review, and subagent
+  handoff must include:
+  - `Source of truth`: the exact data, profile, schema, provider, state, or
+    contract that owns the behavior.
+  - `Dynamic inputs`: the values that must remain data-driven at runtime.
+  - `Fixed invariants`: any constants that remain and why they are truly fixed.
+  - `Hardcoding audit`: `passed`, `failed`, or `existing risk`, with concrete
+    file/function evidence.
+- A plan with `Hardcoding audit: failed` is not review-ready. Stop and redesign
+  it before showing code or requesting implementation approval.
+- When current code is hardcoded, identify the exact duplicated owner and
+  propose a migration to the authoritative data source. Do not extend or copy
+  the hardcoded path just because it already exists.
+- Review agents and subagents must classify hardcode risk as `none`, `existing`,
+  or `introduced`. An `introduced` classification blocks approval.
+
+### Generalization And Review Evidence
+
+- Treat the reported wording and data as one regression fixture, never as the
+  rule itself.
+- Tests for conversation, parser, formatter, workflow, booking, and UI-derived
+  behavior must include at least one materially different wording or data set
+  and one counterexample that must not match the reported case.
+- Where relevant, test dependency failure without semantic guessing, repeated
+  execution/idempotency, tenant isolation, empty or disabled source data, and
+  stale or conflicting state.
+- Before showing a large code listing or diff for review, present the source of
+  truth, data flow, general decision rule, and Hardcoding Audit. Do not spend
+  review effort on code whose ownership model has not passed this gate.
+- If the user rejects a hardcoded approach, withdraw it immediately. Do not
+  rename, wrap, relocate, or rephrase the same duplicated logic as a new
+  proposal.
+- After implementation, the final response must report
+  `Hardcoding audit: passed` with the data owner used, or stop and disclose the
+  unresolved risk.
+- Any change that creates, moves, or removes source-of-truth ownership must
+  update `docs/agents/codebase-map.md` in the same approved scope.
+
 ## Agent Response Shape Contract
 
 - For triage, root-cause, planning, review, and UI-change requests, answer in a concrete listing format instead of vague narrative.

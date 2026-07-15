@@ -47,6 +47,7 @@ func (g *GuardedReplyGenerator) GenerateReply(ctx context.Context, req conversat
 		Summary:              req.Summary,
 		KnowledgeContext:     req.KnowledgeContext,
 		ReplyPolicy:          req.ReplyPolicy,
+		ConsultationQuestion: req.ConsultationQuestion,
 	})
 	if err != nil {
 		return conversation.ReplyGenerationResult{}, err
@@ -60,6 +61,37 @@ func (g *GuardedReplyGenerator) GenerateReply(ctx context.Context, req conversat
 		Handoff:    reply.Handoff,
 		Reason:     reply.Reason,
 	}, nil
+}
+
+func (g *GuardedReplyGenerator) GenerateConsultationQuestion(ctx context.Context, req conversation.ConsultationQuestionRequest) (conversation.ReplyGenerationResult, error) {
+	if g == nil || g.provider == nil || !g.provider.Configured(ctx, req.SalonID) {
+		return conversation.ReplyGenerationResult{}, ErrProviderDisabled
+	}
+	if strings.TrimSpace(req.Question.Field) == "" || len(req.Question.Options) == 0 {
+		return conversation.ReplyGenerationResult{}, errUnsafeReply
+	}
+	reply, err := g.provider.GenerateReply(ctx, ModelRequest{
+		SalonID: req.SalonID, SessionID: req.SessionID, Channel: req.Channel, AITone: req.AITone,
+		ReplyPolicy: conversation.ReplyPolicyConsultationQuestion, ConsultationQuestion: &req.Question,
+	})
+	if err != nil {
+		return conversation.ReplyGenerationResult{}, err
+	}
+	message := strings.TrimSpace(reply.Message)
+	if !consultationQuestionAllowed(message, reply.Confidence) {
+		return conversation.ReplyGenerationResult{}, errUnsafeReply
+	}
+	return conversation.ReplyGenerationResult{Message: message, Confidence: reply.Confidence, Handoff: reply.Handoff, Reason: reply.Reason}, nil
+}
+
+func consultationQuestionAllowed(message string, confidence float64) bool {
+	if message == "" || strings.Count(message, "?") != 1 || len(strings.Fields(message)) > 35 {
+		return false
+	}
+	if confidence > 0 && confidence < 0.55 {
+		return false
+	}
+	return !hasUnsafeConfirmation(message) && !hasCasualOpener(message)
 }
 
 func replyAllowed(req conversation.ReplyGenerationRequest, reply ModelReply) bool {

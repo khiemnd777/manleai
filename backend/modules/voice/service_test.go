@@ -2,6 +2,7 @@ package voice
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,54 @@ func TestStatusReportsPhoneBookingReadiness(t *testing.T) {
 	}
 	if status.Booking.ServiceCount != 1 || status.Booking.StaffCount != 1 || status.Booking.BusinessHoursCount != 6 {
 		t.Fatalf("booking readiness counts = %#v", status.Booking)
+	}
+}
+
+func TestSemanticCheckVerifiesLiveContractWithoutConversationMutation(t *testing.T) {
+	store := newFakeVoiceStore()
+	engine := newFakeConversationEngine()
+	provider := &fakeTurnContractProvider{
+		configured: true,
+		check: TurnContractCheck{
+			Provider: ProviderOpenAI, SchemaFingerprint: "sha256:contract123", RequestID: "req_semantic_check_1",
+		},
+	}
+	service := NewService(store, engine, testVoiceConfig(), AIProviders{TurnModel: provider})
+
+	status, err := service.SemanticCheck(context.Background(), "salon_1", "owner_1")
+	if err != nil {
+		t.Fatalf("SemanticCheck: %v", err)
+	}
+	if !status.Configured || !status.Verified || status.Provider != ProviderOpenAI || status.SchemaFingerprint != "sha256:contract123" || status.RequestID != "req_semantic_check_1" {
+		t.Fatalf("semantic check status = %#v", status)
+	}
+	if provider.checkCalls != 1 || provider.interpretCalls != 0 || engine.startCalls != 0 || engine.messageCalls != 0 {
+		t.Fatalf("semantic check side effects: provider=%#v engine=%#v", provider, engine)
+	}
+	if store.voiceStatusSalonID != "salon_1" || store.voiceStatusOwnerUserID != "owner_1" {
+		t.Fatalf("owner scope check = salon %q owner %q", store.voiceStatusSalonID, store.voiceStatusOwnerUserID)
+	}
+}
+
+func TestSemanticCheckReturnsSafeProviderDiagnosticsAsStatus(t *testing.T) {
+	store := newFakeVoiceStore()
+	provider := &fakeTurnContractProvider{
+		configured: true,
+		check:      TurnContractCheck{Provider: ProviderOpenAI, SchemaFingerprint: "sha256:contract456"},
+		err: &ProviderRequestError{
+			Provider: ProviderOpenAI, Stage: "turn_interpretation_response", StatusCode: 400,
+			RequestID: "req_semantic_bad_1", ErrorType: "invalid_request_error", ErrorCode: "invalid_json_schema",
+			ErrorParam: "text.format.schema", SchemaFingerprint: "sha256:contract456", Err: errors.New("safe provider failure"),
+		},
+	}
+	service := NewService(store, newFakeConversationEngine(), testVoiceConfig(), AIProviders{TurnModel: provider})
+
+	status, err := service.SemanticCheck(context.Background(), "salon_1", "owner_1")
+	if err != nil {
+		t.Fatalf("SemanticCheck: %v", err)
+	}
+	if !status.Configured || status.Verified || status.Diagnostics["error_code"] != "invalid_json_schema" || status.Diagnostics["http_status_class"] != "4xx" || status.RequestID != "req_semantic_bad_1" {
+		t.Fatalf("semantic failure status = %#v", status)
 	}
 }
 
@@ -519,11 +568,13 @@ func phoneSessionWithAIReply(reply string, status string, outcome string) *conve
 }
 
 type fakeVoiceStore struct {
-	salon            *InboundSalon
-	route            *CallRoute
-	bookingReadiness *PhoneBookingReadiness
-	events           []WebhookEvent
-	audio            *AudioOutput
+	salon                  *InboundSalon
+	route                  *CallRoute
+	bookingReadiness       *PhoneBookingReadiness
+	events                 []WebhookEvent
+	audio                  *AudioOutput
+	voiceStatusSalonID     string
+	voiceStatusOwnerUserID string
 }
 
 func newFakeVoiceStore() *fakeVoiceStore {
@@ -558,7 +609,33 @@ func newFakeVoiceStore() *fakeVoiceStore {
 }
 
 func (f *fakeVoiceStore) GetSalonVoiceStatus(ctx context.Context, salonID string, ownerUserID string) (*SalonVoiceStatus, error) {
+	f.voiceStatusSalonID = salonID
+	f.voiceStatusOwnerUserID = ownerUserID
 	return &SalonVoiceStatus{SalonID: salonID, Phone: "+13125550102"}, nil
+}
+
+type fakeTurnContractProvider struct {
+	configured     bool
+	check          TurnContractCheck
+	err            error
+	checkCalls     int
+	interpretCalls int
+}
+
+func (f *fakeTurnContractProvider) Name() string { return ProviderOpenAI }
+
+func (f *fakeTurnContractProvider) Configured(ctx context.Context, salonID string) bool {
+	return f.configured
+}
+
+func (f *fakeTurnContractProvider) InterpretTurn(ctx context.Context, req TurnModelRequest) (TurnModelReply, error) {
+	f.interpretCalls++
+	return TurnModelReply{}, nil
+}
+
+func (f *fakeTurnContractProvider) CheckTurnContract(ctx context.Context, salonID string) (TurnContractCheck, error) {
+	f.checkCalls++
+	return f.check, f.err
 }
 
 func (f *fakeVoiceStore) GetPhoneBookingReadiness(ctx context.Context, salonID string, ownerUserID string) (*PhoneBookingReadiness, error) {

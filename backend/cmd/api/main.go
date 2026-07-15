@@ -119,6 +119,7 @@ func main() {
 	aiProviders := voice.AIProviders{
 		STT:          openAIVoiceAdapter,
 		LLM:          openAIVoiceAdapter,
+		TurnModel:    openAIVoiceAdapter,
 		TTS:          openAIVoiceAdapter,
 		StreamingTTS: openAIVoiceAdapter,
 		Realtime:     openAIVoiceAdapter,

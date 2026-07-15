@@ -1933,6 +1933,43 @@ Returns owner-scoped live voice, phone booking, and external AI provider readine
 }
 ```
 
+`POST /api/salons/:id/voice/semantic-check`
+
+Runs an authenticated, owner-scoped OpenAI semantic-contract probe using the
+same strict `TurnUnderstanding` schema and configured reply model as live turn
+interpretation. The synthetic request contains no caller transcript, creates no
+conversation turn, does not mutate a booking draft, and cannot call
+availability or POS booking tools.
+
+Provider rejection is returned as `200` with `verified=false` so the endpoint
+can be used as an operational diagnostic. Diagnostics are restricted to safe
+bounded fields; provider response bodies and error messages are never exposed.
+
+```json
+{
+  "provider": "openai",
+  "configured": true,
+  "verified": false,
+  "schema_fingerprint": "sha256:4d8f3a1c2b7e9f01a2345678",
+  "request_id": "req_123",
+  "diagnostics": {
+    "failure_stage": "turn_interpretation_response",
+    "http_status": "400",
+    "http_status_class": "4xx",
+    "error_type": "invalid_request_error",
+    "error_code": "invalid_json_schema",
+    "error_param": "text.format.schema",
+    "schema_fingerprint": "sha256:4d8f3a1c2b7e9f01a2345678"
+  }
+}
+```
+
+`configured=false` means the salon-scoped OpenAI integration is not enabled or
+does not have the required model/key configuration. A successful live-contract
+request returns `verified=true`. A successful probe also closes any local
+semantic-contract circuit previously opened for the same salon and current
+provider/model/schema configuration.
+
 `POST /api/voice/twilio/incoming`
 
 Public Twilio Programmable Voice webhook for a new inbound call. Requires a valid `X-Twilio-Signature` generated with the salon's configured Twilio auth token. The webhook matches Twilio `To` to the salon phone, creates or reuses a `phone` conversation session, records a `voice_webhook_events` audit row, and returns TwiML for the configured input mode: speech `<Gather>`, recording mode, or `<Connect><Stream>` when realtime streaming is enabled and ready.

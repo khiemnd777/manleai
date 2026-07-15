@@ -33,7 +33,7 @@ func extractName(message string) string {
 	return ""
 }
 
-func (s *Service) handlePendingCustomerNameConfirmation(ctx context.Context, salonID string, ownerUserID string, session Session, message string, eventKey string, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (bool, *Session, error) {
+func (s *Service) handlePendingCustomerNameConfirmation(ctx context.Context, salonID string, ownerUserID string, session Session, message string, eventKey string, turnUnderstanding TurnUnderstanding, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (bool, *Session, error) {
 	if missingBookingField(session) != "customer_name" {
 		return false, nil, nil
 	}
@@ -41,9 +41,10 @@ func (s *Service) handlePendingCustomerNameConfirmation(ctx context.Context, sal
 	if pendingName == "" {
 		return false, nil, nil
 	}
-	if isAffirmativeOnly(message) {
+	if isPendingCustomerNameAffirmative(message) {
 		next := session
 		next.CustomerName = pendingName
+		clearPendingCustomerName(&next)
 		if next.CustomerPhone == "" {
 			next.CustomerPhone = extractPhone(message)
 		}
@@ -56,8 +57,16 @@ func (s *Service) handlePendingCustomerNameConfirmation(ctx context.Context, sal
 		updated, err := s.continueAfterCustomerName(ctx, ownerUserID, turn, next, services, staff, cfg, knowledge)
 		return true, updated, err
 	}
-	if candidate := correctedCustomerNameCandidate(message, session); candidate != "" {
+	if candidate := semanticCustomerNameCorrection(turnUnderstanding); candidate != "" {
 		next := session
+		if !validCustomerNameCandidate(candidate, cfg, services, staff) {
+			turn := newTurnRecord(salonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
+			turn.AIMessage = "I couldn't verify that as a customer name, so I kept the name awaiting confirmation. Please say or spell the customer name."
+			finalizeTurnMetadata(&turn, session, next, "customer_name", "customer_name", "customer_name_semantic_correction_rejected")
+			updated, err := s.store.SaveTurn(ctx, turn)
+			return true, updated, err
+		}
+		setPendingCustomerName(&next, candidate)
 		turn := newTurnRecord(salonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
 		turn.AIMessage = customerNameConfirmationPrompt(candidate)
 		setPendingCustomerNameMetadata(&turn, candidate, "customer_corrected_name")
@@ -66,8 +75,9 @@ func (s *Service) handlePendingCustomerNameConfirmation(ctx context.Context, sal
 		updated, err := s.store.SaveTurn(ctx, turn)
 		return true, updated, err
 	}
-	if isNegativeNameConfirmation(message) {
+	if isExactNegativeNameConfirmation(message) {
 		next := session
+		clearPendingCustomerName(&next)
 		turn := newTurnRecord(salonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
 		turn.AIMessage = "Please say or spell the customer name for the appointment."
 		clearPendingCustomerNameMetadata(&turn, "rejected")
@@ -229,21 +239,61 @@ func customerNameConfirmationPrompt(name string) string {
 	return "I heard " + strings.TrimSpace(name) + ". Is that the correct name for the appointment?"
 }
 
-func isNegativeNameConfirmation(message string) bool {
-	normalized := normalizeLooseText(message)
-	return normalized == "no" ||
-		normalized == "nope" ||
-		normalized == "not correct" ||
-		normalized == "wrong" ||
-		normalized == "incorrect" ||
-		strings.HasPrefix(normalized, "no ") ||
-		strings.HasPrefix(normalized, "nope ")
+func isExactNegativeNameConfirmation(message string) bool {
+	switch normalizeLooseText(message) {
+	case "no", "nope", "not correct", "wrong", "incorrect":
+		return true
+	default:
+		return false
+	}
+}
+
+// isPendingCustomerNameAffirmative is a state-scoped grammar for short spoken
+// confirmations. It deliberately rejects any token outside the confirmation
+// grammar so corrections and compound turns continue through semantic parsing.
+func isPendingCustomerNameAffirmative(message string) bool {
+	if isExactAffirmativeResponse(message) {
+		return true
+	}
+	tokens := strings.Fields(normalizeLooseText(message))
+	if len(tokens) == 0 || len(tokens) > 8 {
+		return false
+	}
+	allowed := map[string]bool{
+		"yes": true, "yeah": true, "yep": true,
+		"that": true, "it": true, "is": true, "s": true,
+		"the": true, "my": true, "name": true, "appointment": true,
+		"correct": true, "right": true,
+	}
+	hasAffirmation := false
+	hasNameReference := false
+	for _, token := range tokens {
+		if !allowed[token] {
+			return false
+		}
+		switch token {
+		case "yes", "yeah", "yep", "correct", "right":
+			hasAffirmation = true
+		case "name":
+			hasNameReference = true
+		}
+	}
+	return hasAffirmation && hasNameReference
 }
 
 func pendingCustomerName(session Session) string {
 	if strings.TrimSpace(session.CustomerName) != "" {
 		return ""
 	}
+	state := normalizedDialogState(session.DialogState)
+	if pending := state.Pending; pending != nil && pending.PromptKey == PendingCustomerNameConfirmation && pending.Entity == ConversationEntityCustomer && pending.Subject == "name" {
+		return strings.TrimSpace(pending.Value)
+	}
+	if state.Pending != nil {
+		return ""
+	}
+	// Read-only compatibility for sessions created before customer-name pending
+	// state moved out of transcript metadata.
 	for i := len(session.Transcript) - 1; i >= 0; i-- {
 		msg := session.Transcript[i]
 		if msg.Speaker != SpeakerAI {
@@ -257,6 +307,93 @@ func pendingCustomerName(session Session) string {
 		}
 	}
 	return ""
+}
+
+func setPendingCustomerName(session *Session, name string) {
+	if session == nil {
+		return
+	}
+	state := normalizedDialogState(session.DialogState)
+	state.Phase = DialogPhaseClarifying
+	state.Pending = &PendingConversationAct{
+		Kind: ConversationActSet, Entity: ConversationEntityCustomer, Subject: "name",
+		Value: strings.TrimSpace(name), PromptKey: PendingCustomerNameConfirmation,
+	}
+	state.LastPromptKey = PendingCustomerNameConfirmation
+	session.DialogState = state
+}
+
+func clearPendingCustomerName(session *Session) {
+	if session == nil {
+		return
+	}
+	state := normalizedDialogState(session.DialogState)
+	if state.Pending != nil && state.Pending.PromptKey == PendingCustomerNameConfirmation {
+		state.Pending = nil
+		state.LastPromptKey = ""
+	}
+	session.DialogState = state
+}
+
+func semanticCustomerNameCorrection(turn TurnUnderstanding) string {
+	if strings.TrimSpace(turn.InterpreterOutcome) != TurnInterpreterOutcomeAccepted {
+		return ""
+	}
+	for _, act := range turn.Acts {
+		if act.Kind == ConversationActSet && act.Entity == ConversationEntityCustomer && strings.TrimSpace(act.Subject) == "name" {
+			return strings.TrimSpace(act.Value)
+		}
+	}
+	return ""
+}
+
+func validCustomerNameCandidate(candidate string, cfg *RuntimeConfig, services []ServiceOption, staff []StaffOption) bool {
+	candidate = cleanBareCustomerName(candidate)
+	if candidate == "" || isLowQualityVoiceCustomerName(candidate) {
+		return false
+	}
+	normalized := normalizeLooseText(candidate)
+	if normalized == "" {
+		return false
+	}
+	identities := []string{salonName(cfg)}
+	for _, service := range services {
+		identities = append(identities, service.Name)
+	}
+	for _, member := range staff {
+		identities = append(identities, member.Name)
+	}
+	for _, identity := range identities {
+		if normalized == normalizeLooseText(identity) {
+			return false
+		}
+	}
+	return true
+}
+
+func customerActsAreSafe(turn TurnUnderstanding, cfg *RuntimeConfig, services []ServiceOption, staff []StaffOption) bool {
+	for _, act := range turn.Acts {
+		if act.Kind != ConversationActSet || act.Entity != ConversationEntityCustomer {
+			continue
+		}
+		switch strings.TrimSpace(act.Subject) {
+		case "name":
+			if !validCustomerNameCandidate(act.Value, cfg, services, staff) {
+				return false
+			}
+		case "phone":
+			if extractPhone(act.Value) == "" {
+				return false
+			}
+		case "email":
+			if extractEmail(act.Value) == "" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func setPendingCustomerNameMetadata(turn *TurnRecord, name string, reason string) {
@@ -664,6 +801,29 @@ func isAffirmativeOnly(message string) bool {
 		strings.HasPrefix(normalized, "ok ") ||
 		strings.HasPrefix(normalized, "okay ") ||
 		strings.Contains(normalized, "i want to book")
+}
+
+func isExactAffirmativeResponse(message string) bool {
+	tokens := strings.Fields(normalizeLooseText(message))
+	if len(tokens) == 0 || len(tokens) > 5 {
+		return false
+	}
+	allowed := map[string]bool{
+		"yes": true, "yeah": true, "yep": true, "ok": true, "okay": true,
+		"sure": true, "correct": true, "right": true, "please": true,
+		"i": true, "would": true, "that": true, "is": true, "do": true,
+	}
+	hasAffirmation := false
+	for _, token := range tokens {
+		if !allowed[token] {
+			return false
+		}
+		switch token {
+		case "yes", "yeah", "yep", "ok", "okay", "sure", "correct", "right", "would", "do":
+			hasAffirmation = true
+		}
+	}
+	return hasAffirmation && (tokens[0] != "i" && tokens[0] != "that" && tokens[0] != "is" && tokens[0] != "would" && tokens[0] != "do")
 }
 
 func isGoodbyeUtterance(message string) bool {

@@ -265,22 +265,20 @@ func TestFinalReviewRequiresAuthorizationBeforePOSBooking(t *testing.T) {
 	}
 }
 
-func TestReviewAuthorizationAcceptsNaturalDirectivesAndRejectsCorrections(t *testing.T) {
+func TestReviewFastPathAcceptsOnlyBoundedStateResponses(t *testing.T) {
 	for _, message := range []string{
-		"Sure, go ahead and make the appointment for me.",
-		"Okay, please schedule it now.",
-		"Everything looks good, book it.",
-		"Go ahead.",
-		"Yes, of course.",
+		"Yes.",
+		"Okay.",
 		"Yes, I would.",
-		"Absolutely, please proceed.",
-		"Can you book it?",
 	} {
-		if !isReviewAuthorization(message) {
-			t.Fatalf("natural review authorization was rejected: %q", message)
+		if classifyStateScopedReviewResponse(message) != reviewResponseAccept {
+			t.Fatalf("bounded review authorization was rejected: %q", message)
 		}
 	}
 	for _, message := range []string{
+		"Sure, go ahead and make the appointment for me.",
+		"Everything looks good, book it.",
+		"Can you book it?",
 		"Yes, but switch it to Spa Pedicure.",
 		"Actually, book another service too.",
 		"Yes, do not book it yet.",
@@ -288,8 +286,8 @@ func TestReviewAuthorizationAcceptsNaturalDirectivesAndRejectsCorrections(t *tes
 		"Yes, I have a question about the price.",
 		"How should I proceed?",
 	} {
-		if isReviewAuthorization(message) {
-			t.Fatalf("review correction was treated as authorization: %q", message)
+		if classifyStateScopedReviewResponse(message) != reviewResponseAmbiguous {
+			t.Fatalf("freeform review turn bypassed semantic interpretation: %q", message)
 		}
 	}
 }
@@ -355,6 +353,139 @@ func TestFinalReviewSemanticTimeoutUsesConciseRetryWithoutBooking(t *testing.T) 
 	}
 	if got := store.lastTurn.CustomerMetadata["turn_interpreter_outcome"]; got != TurnInterpreterOutcomeTimeout {
 		t.Fatalf("interpreter outcome = %#v, want timeout", got)
+	}
+}
+
+func TestFinalReviewAppliesSemanticCorrectionBeforeAnswerAndReadsFreshReview(t *testing.T) {
+	store := newFakeConversationStore()
+	requestedStart := time.Date(2026, 6, 15, 18, 0, 0, 0, time.UTC)
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{
+		ServiceID: "service_1", StaffID: "staff_1", StaffSelectionMode: booking.StaffSelectionSpecific,
+	}}
+	store.session.StaffID = "staff_1"
+	store.session.StaffName = "Mai Nguyen"
+	store.session.StaffSelectionMode = booking.StaffSelectionSpecific
+	store.session.RequestedDate = "2026-06-15"
+	store.session.RequestedStartTime = &requestedStart
+	store.session.CustomerName = "Jordan Lee"
+	store.session.CustomerPhone = "+13125550188"
+	store.session.DialogState = normalizedDialogState(DialogState{
+		Phase: DialogPhaseReview, ReviewRequired: true, LastPromptKey: "final_review",
+		DraftRevision: 5, ReviewedRevision: 5,
+	})
+	store.businessHours = []BusinessHourPeriod{{
+		ID: "hours_mon", DayOfWeek: 1, StartLocalTime: "09:00:00", EndLocalTime: "19:00:00", Source: "imported", Provider: "square",
+	}}
+	bookingTool := &fakeBookingTool{}
+	interpreter := &fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal: "information", Confidence: 0.98,
+		Acts: []ConversationAct{{
+			Kind: ConversationActSet, Entity: ConversationEntityCustomer, Subject: "name", Value: "Avery Stone", Confidence: 0.98,
+		}},
+		Questions: []ConversationQuestion{{Subject: ConversationQuestionHours, Confidence: 0.97}},
+	}}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(interpreter)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Actually, put it under Avery Stone, and what time do you close Monday?",
+	})
+	if err != nil {
+		t.Fatalf("review correction and question: %v", err)
+	}
+	if interpreter.calls != 1 || session.CustomerName != "Avery Stone" || bookingTool.calls != 0 {
+		t.Fatalf("correction-before-answer result: interpreter=%d name=%q booking_calls=%d", interpreter.calls, session.CustomerName, bookingTool.calls)
+	}
+	if session.DialogState.DraftRevision != 6 || session.DialogState.Phase != DialogPhaseReview || session.DialogState.ReviewedRevision != 6 || session.DialogState.AuthorizedRevision != 0 {
+		t.Fatalf("fresh review state = %#v reply=%q", session.DialogState, store.lastTurn.AIMessage)
+	}
+	reply := store.lastTurn.AIMessage
+	for _, expected := range []string{"Monday are 9:00 AM to 7:00 PM", "Avery Stone", "Would you like me to book it"} {
+		if !strings.Contains(reply, expected) {
+			t.Fatalf("review answer/resume missing %q: %s", expected, reply)
+		}
+	}
+	if got := store.lastTurn.CustomerMetadata["turn_route"]; got != TurnRouteSemanticLane {
+		t.Fatalf("review correction route = %#v, want semantic_lane", got)
+	}
+}
+
+func TestSemanticUnnamedStaffAlternativeUsesCurrentCatalogAndPendingChoice(t *testing.T) {
+	store := newFakeConversationStore()
+	store.staff = []StaffOption{
+		{ID: "staff_kim", Name: "Kim", AIBookable: true},
+		{ID: "staff_lena", Name: "Lena", AIBookable: true},
+		{ID: "staff_priya", Name: "Priya", AIBookable: true},
+	}
+	store.activeStaff = append([]StaffOption(nil), store.staff...)
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.StaffID = "staff_kim"
+	store.session.StaffName = "Kim"
+	store.session.StaffSelectionMode = booking.StaffSelectionSpecific
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{
+		ServiceID: "service_1", StaffID: "staff_kim", StaffSelectionMode: booking.StaffSelectionSpecific,
+	}}
+	interpreter := &fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal: "book_appointment", Confidence: 0.96,
+		Acts: []ConversationAct{{
+			Kind: ConversationActSet, Entity: ConversationEntityStaff, Subject: "alternative", Confidence: 0.96,
+		}},
+	}}
+	service := NewService(store, &fakeBookingTool{})
+	service.SetTurnInterpreter(interpreter)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I'd rather use a different technician; please give me the available choices.",
+	})
+	if err != nil {
+		t.Fatalf("unnamed alternative: %v", err)
+	}
+	if session.StaffID != "staff_kim" || session.DialogState.Pending == nil || session.DialogState.Pending.PromptKey != PendingStaffAlternative ||
+		!sameStrings(session.DialogState.Pending.TargetServiceIDs, []string{"staff_lena", "staff_priya"}) {
+		t.Fatalf("data-driven alternatives state = staff %q dialog %#v", session.StaffID, session.DialogState)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Lena") || !strings.Contains(store.lastTurn.AIMessage, "Priya") || strings.Contains(store.lastTurn.AIMessage, "Kim") {
+		t.Fatalf("alternative choices reply = %q", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Priya, please."})
+	if err != nil {
+		t.Fatalf("pending alternative selection: %v", err)
+	}
+	if interpreter.calls != 1 || session.StaffID != "staff_priya" || session.DialogState.Pending != nil {
+		t.Fatalf("pending alternative selection = interpreter %d staff %q dialog %#v", interpreter.calls, session.StaffID, session.DialogState)
+	}
+	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "what day") {
+		t.Fatalf("alternative selection did not resume booking: %q", store.lastTurn.AIMessage)
+	}
+}
+
+func TestSemanticCustomerContactCorrectionsAreValidatedAndNormalized(t *testing.T) {
+	cfg := &RuntimeConfig{SalonName: "Cedar Glow Studio"}
+	valid := TurnUnderstanding{Acts: []ConversationAct{
+		{Kind: ConversationActSet, Entity: ConversationEntityCustomer, Subject: "phone", Value: "(312) 555-0188", Confidence: 0.96},
+		{Kind: ConversationActSet, Entity: ConversationEntityCustomer, Subject: "email", Value: "AVERY@EXAMPLE.COM", Confidence: 0.96},
+	}}
+	if !customerActsAreSafe(valid, cfg, nil, nil) {
+		t.Fatal("valid semantic customer contact corrections were rejected")
+	}
+	session := Session{}
+	result := (&Service{}).applyTurnUnderstandingToDraft(&session, valid, nil, nil)
+	if !result.Changed || session.CustomerPhone != "3125550188" || session.CustomerEmail != "avery@example.com" {
+		t.Fatalf("normalized semantic customer fields = phone %q email %q result %#v", session.CustomerPhone, session.CustomerEmail, result)
+	}
+	invalid := TurnUnderstanding{Acts: []ConversationAct{{
+		Kind: ConversationActSet, Entity: ConversationEntityCustomer, Subject: "phone", Value: "call me later", Confidence: 0.96,
+	}}}
+	if customerActsAreSafe(invalid, cfg, nil, nil) {
+		t.Fatal("invalid semantic customer phone correction was accepted")
 	}
 }
 

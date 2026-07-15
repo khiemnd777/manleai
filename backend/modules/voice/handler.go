@@ -30,6 +30,23 @@ func (h *Handler) Status(c *fiber.Ctx) error {
 	return respond.JSON(c, fiber.StatusOK, status)
 }
 
+func (h *Handler) SemanticCheck(c *fiber.Ctx) error {
+	status, err := h.service.SemanticCheck(c.UserContext(), c.Params("id"), middleware.UserID(c))
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VOICE_SEMANTIC_CHECK_INVALID", "Semantic check request is invalid.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if errors.Is(err, ErrProviderDisabled) {
+		return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_SEMANTIC_CHECK_UNAVAILABLE", "Semantic contract verification is unavailable.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "VOICE_SEMANTIC_CHECK_FAILED", "Could not verify the semantic contract.")
+	}
+	return respond.JSON(c, fiber.StatusOK, status)
+}
+
 func (h *Handler) Audio(c *fiber.Ctx) error {
 	output, err := h.service.Audio(c.UserContext(), c.Params("id"))
 	if errors.Is(err, ErrNotFound) {

@@ -3,13 +3,16 @@ package voice_openai
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/manleai/ai-receptionist/internal/config"
@@ -21,6 +24,13 @@ type Adapter struct {
 	cfg            config.OpenAIVoiceConfig
 	configResolver OpenAIConfigResolver
 	httpClient     *http.Client
+	circuitMu      sync.Mutex
+	turnCircuits   map[string]turnContractCircuit
+}
+
+type turnContractCircuit struct {
+	configFingerprint string
+	error             voice.ProviderRequestError
 }
 
 type OpenAIConfigResolver interface {
@@ -29,8 +39,9 @@ type OpenAIConfigResolver interface {
 
 func NewAdapter(cfg config.OpenAIVoiceConfig) *Adapter {
 	return &Adapter{
-		cfg:        cfg,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		cfg:          cfg,
+		httpClient:   &http.Client{Timeout: 30 * time.Second},
+		turnCircuits: map[string]turnContractCircuit{},
 	}
 }
 
@@ -106,25 +117,37 @@ func (a *Adapter) GenerateReply(ctx context.Context, req voice.ModelRequest) (vo
 	if !enabled || strings.TrimSpace(cfg.APIKey) == "" || strings.TrimSpace(cfg.ReplyModel) == "" {
 		return voice.ModelReply{}, voice.ErrProviderDisabled
 	}
-	payload := responseRequest{
-		Model: strings.TrimSpace(cfg.ReplyModel),
-		Instructions: strings.Join([]string{
+	instructions := []string{
+		"You are the AI phone receptionist for a US nail salon.",
+		"Rewrite only the safe_reply into a concise spoken response.",
+		"Ask at most one question.",
+		"Do not ask for booking fields listed in known_booking_fields.",
+		"If next_required_field is set, keep the response focused on that field.",
+		"Keep every selected_service_names item that appears in safe_reply; do not swap, omit, or add booking services.",
+		"Do not invent prices or policies.",
+		"Use knowledge_context only when it is relevant to the customer's question.",
+		toneInstruction(req.AITone),
+		"Do not add casual openers like Hey, Hi there, Awesome choice, or Great choice.",
+		"Do not say an appointment is confirmed unless booking_confirmed is true.",
+		"Do not mention POS providers, Square, Square Appointments, POS, or provider names in customer-facing replies.",
+		"For human requests, complaints, refunds, payment disputes, low confidence, or complex group bookings, route to the owner.",
+		"Return strict JSON with message, confidence, handoff, and reason.",
+	}
+	if req.ReplyPolicy == conversation.ReplyPolicyConsultationQuestion {
+		instructions = []string{
 			"You are the AI phone receptionist for a US nail salon.",
-			"Rewrite only the safe_reply into a concise spoken response.",
-			"Ask at most one question.",
-			"Do not ask for booking fields listed in known_booking_fields.",
-			"If next_required_field is set, keep the response focused on that field.",
-			"Keep every selected_service_names item that appears in safe_reply; do not swap, omit, or add booking services.",
-			"Do not invent prices or policies.",
-			"Use knowledge_context only when it is relevant to the customer's question.",
+			"Generate exactly one concise, natural spoken question from consultation_question.",
+			"Ask only about consultation_question.field and use only its option values as facts.",
+			"Do not recommend or name a service, invent suitability, price, policy, timing, or medical advice.",
+			"Do not mention internal fields, profile revisions, IDs, providers, or structured data.",
 			toneInstruction(req.AITone),
-			"Do not add casual openers like Hey, Hi there, Awesome choice, or Great choice.",
-			"Do not say an appointment is confirmed unless booking_confirmed is true.",
-			"Do not mention POS providers, Square, Square Appointments, POS, or provider names in customer-facing replies.",
-			"For human requests, complaints, refunds, payment disputes, low confidence, or complex group bookings, route to the owner.",
 			"Return strict JSON with message, confidence, handoff, and reason.",
-		}, "\n"),
-		Input: modelInput(req),
+		}
+	}
+	payload := responseRequest{
+		Model:        strings.TrimSpace(cfg.ReplyModel),
+		Instructions: strings.Join(instructions, "\n"),
+		Input:        modelInput(req),
 		Text: responseTextFormat{
 			Format: responseFormat{
 				Type: "json_schema",
@@ -176,12 +199,54 @@ func (a *Adapter) GenerateReply(ctx context.Context, req voice.ModelRequest) (vo
 }
 
 func (a *Adapter) InterpretTurn(ctx context.Context, req voice.TurnModelRequest) (voice.TurnModelReply, error) {
+	return a.interpretTurn(ctx, req, false)
+}
+
+func (a *Adapter) CheckTurnContract(ctx context.Context, salonID string) (voice.TurnContractCheck, error) {
+	req := voice.TurnModelRequest{
+		SalonID:         strings.TrimSpace(salonID),
+		Channel:         "semantic_contract_check",
+		CustomerMessage: "Validate the structured turn contract without proposing any operation.",
+		ExpectedInput:   "contract_validation",
+	}
+	reply, err := a.interpretTurn(ctx, req, true)
+	_ = reply
+	schemaFingerprint, fingerprintErr := structuredOutputSchemaFingerprint(turnUnderstandingSchema())
+	if fingerprintErr != nil {
+		return voice.TurnContractCheck{}, fingerprintErr
+	}
+	check := voice.TurnContractCheck{Provider: voice.ProviderOpenAI, SchemaFingerprint: schemaFingerprint}
+	if err != nil {
+		var providerErr *voice.ProviderRequestError
+		if errors.As(err, &providerErr) {
+			check.RequestID = strings.TrimSpace(providerErr.RequestID)
+		}
+		return check, err
+	}
+	return check, nil
+}
+
+func (a *Adapter) interpretTurn(ctx context.Context, req voice.TurnModelRequest, bypassCircuit bool) (voice.TurnModelReply, error) {
 	cfg, enabled, err := a.configFor(ctx, req.SalonID)
 	if err != nil {
 		return voice.TurnModelReply{}, err
 	}
 	if !enabled || strings.TrimSpace(cfg.APIKey) == "" || strings.TrimSpace(cfg.ReplyModel) == "" {
 		return voice.TurnModelReply{}, voice.ErrProviderDisabled
+	}
+	schema := turnUnderstandingSchema()
+	if err := validateStructuredOutputSchema(schema); err != nil {
+		return voice.TurnModelReply{}, fmt.Errorf("%w: %v", voice.ErrTurnModelInvalidOutput, err)
+	}
+	schemaFingerprint, err := structuredOutputSchemaFingerprint(schema)
+	if err != nil {
+		return voice.TurnModelReply{}, err
+	}
+	configFingerprint := turnContractConfigFingerprint(cfg, schemaFingerprint)
+	if !bypassCircuit {
+		if circuitErr := a.openTurnCircuitError(req.SalonID, configFingerprint); circuitErr != nil {
+			return voice.TurnModelReply{}, circuitErr
+		}
 	}
 	payload := responseRequest{
 		Model: strings.TrimSpace(cfg.ReplyModel),
@@ -202,6 +267,8 @@ func (a *Adapter) InterpretTurn(ctx context.Context, req voice.TurnModelRequest)
 			"For availability constraints, set time_preference.direction to before, after, or exact and time_preference.minutes to salon-local minutes after midnight. Use direction empty and minutes -1 when no time constraint is present.",
 			"A final-review acceptance may coexist with a correction; include both and never suppress the correction.",
 			"Use set_field or clear_field for staff, date/time, guest, or customer-field corrections.",
+			"For a customer-name correction, emit set_field with entity=customer, subject=name, and value equal to the corrected name.",
+			"For a request to use a different technician without naming one, emit set_field with entity=staff, subject=alternative, and no target ID; never choose a technician for the caller.",
 			"Do not infer booking confirmation, availability, customer identity, prices, or policy.",
 			"For consultation, extract only the caller's stated current nail system, desired outcome, length change, priorities, desired finishes, compared catalog service IDs, booking request, and whether the caller is done. Never recommend a service in model output.",
 			"For every consultation preference stated or corrected in this turn, emit a field-level mutation. Use set for an initial value, replace for a correction, add or remove for list items, and clear only when the caller explicitly withdraws the field. Never treat a negated value as an addition.",
@@ -213,7 +280,7 @@ func (a *Adapter) InterpretTurn(ctx context.Context, req voice.TurnModelRequest)
 		Text: responseTextFormat{Format: responseFormat{
 			Type:   "json_schema",
 			Name:   "turn_understanding",
-			Schema: turnUnderstandingSchema(),
+			Schema: schema,
 			Strict: true,
 		}},
 	}
@@ -230,8 +297,16 @@ func (a *Adapter) InterpretTurn(ctx context.Context, req voice.TurnModelRequest)
 
 	var res responseResponse
 	if err := a.do(httpReq, &res, "turn_interpretation_response"); err != nil {
+		var providerErr *voice.ProviderRequestError
+		if errors.As(err, &providerErr) {
+			providerErr.SchemaFingerprint = schemaFingerprint
+			if isNonRetryableTurnContractFailure(providerErr) {
+				a.openTurnCircuit(req.SalonID, configFingerprint, providerErr)
+			}
+		}
 		return voice.TurnModelReply{}, err
 	}
+	a.clearTurnCircuit(req.SalonID)
 	text := strings.TrimSpace(res.OutputText)
 	if text == "" {
 		text = strings.TrimSpace(res.firstText())
@@ -300,10 +375,12 @@ func (a *Adapter) do(req *http.Request, output any, stage string) error {
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		errorType, errorCode, errorParam := safeProviderErrorFields(res.Body)
 		return &voice.ProviderRequestError{
 			Provider: voice.ProviderOpenAI, Stage: stage, StatusCode: res.StatusCode,
 			RequestID: firstNonEmptyHeader(res.Header, "x-request-id", "request-id"),
-			Err:       fmt.Errorf("openai request failed with status %d", res.StatusCode),
+			ErrorType: errorType, ErrorCode: errorCode, ErrorParam: errorParam,
+			Err: fmt.Errorf("openai request failed with status %d", res.StatusCode),
 		}
 	}
 	if err := json.NewDecoder(res.Body).Decode(output); err != nil {
@@ -313,6 +390,186 @@ func (a *Adapter) do(req *http.Request, output any, stage string) error {
 		}
 	}
 	return nil
+}
+
+func safeProviderErrorFields(reader io.Reader) (string, string, string) {
+	var envelope struct {
+		Error struct {
+			Type  string `json:"type"`
+			Code  string `json:"code"`
+			Param string `json:"param"`
+		} `json:"error"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(reader, 64*1024))
+	if err := decoder.Decode(&envelope); err != nil {
+		return "", "", ""
+	}
+	return safeOpenAIErrorValue(envelope.Error.Type), safeOpenAIErrorValue(envelope.Error.Code), safeOpenAIErrorValue(envelope.Error.Param)
+}
+
+func safeOpenAIErrorValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 128 {
+		return ""
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("._:-[]", r) {
+			continue
+		}
+		return ""
+	}
+	return value
+}
+
+func structuredOutputSchemaFingerprint(schema map[string]any) (string, error) {
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return fmt.Sprintf("sha256:%x", sum[:12]), nil
+}
+
+func turnContractConfigFingerprint(cfg config.OpenAIVoiceConfig, schemaFingerprint string) string {
+	raw := strings.Join([]string{
+		strings.TrimSpace(cfg.BaseURL),
+		strings.TrimSpace(cfg.ReplyModel),
+		strings.TrimSpace(cfg.APIKey),
+		strings.TrimSpace(schemaFingerprint),
+	}, "\x00")
+	sum := sha256.Sum256([]byte(raw))
+	return fmt.Sprintf("sha256:%x", sum[:12])
+}
+
+func isNonRetryableTurnContractFailure(err *voice.ProviderRequestError) bool {
+	if err == nil || err.StatusCode < 400 || err.StatusCode >= 500 {
+		return false
+	}
+	switch err.StatusCode {
+	case http.StatusRequestTimeout, http.StatusConflict, http.StatusTooManyRequests:
+		return false
+	default:
+		return true
+	}
+}
+
+func (a *Adapter) openTurnCircuit(salonID string, configFingerprint string, providerErr *voice.ProviderRequestError) {
+	if a == nil || providerErr == nil {
+		return
+	}
+	a.circuitMu.Lock()
+	defer a.circuitMu.Unlock()
+	if a.turnCircuits == nil {
+		a.turnCircuits = map[string]turnContractCircuit{}
+	}
+	a.turnCircuits[strings.TrimSpace(salonID)] = turnContractCircuit{
+		configFingerprint: configFingerprint,
+		error: voice.ProviderRequestError{
+			Provider: providerErr.Provider, Stage: providerErr.Stage, StatusCode: providerErr.StatusCode,
+			RequestID: providerErr.RequestID, ErrorType: providerErr.ErrorType, ErrorCode: providerErr.ErrorCode,
+			ErrorParam: providerErr.ErrorParam, SchemaFingerprint: providerErr.SchemaFingerprint,
+		},
+	}
+}
+
+func (a *Adapter) openTurnCircuitError(salonID string, configFingerprint string) error {
+	if a == nil {
+		return nil
+	}
+	a.circuitMu.Lock()
+	defer a.circuitMu.Unlock()
+	key := strings.TrimSpace(salonID)
+	circuit, ok := a.turnCircuits[key]
+	if !ok {
+		return nil
+	}
+	if circuit.configFingerprint != configFingerprint {
+		delete(a.turnCircuits, key)
+		return nil
+	}
+	err := circuit.error
+	err.CircuitOpen = true
+	err.Err = errors.New("openai semantic contract circuit is open")
+	return &err
+}
+
+func (a *Adapter) clearTurnCircuit(salonID string) {
+	if a == nil {
+		return
+	}
+	a.circuitMu.Lock()
+	delete(a.turnCircuits, strings.TrimSpace(salonID))
+	a.circuitMu.Unlock()
+}
+
+func validateStructuredOutputSchema(schema map[string]any) error {
+	return validateStructuredOutputSchemaNode(schema, "$")
+}
+
+func validateStructuredOutputSchemaNode(schema map[string]any, path string) error {
+	allowed := map[string]struct{}{
+		"type": {}, "additionalProperties": {}, "properties": {}, "required": {},
+		"enum": {}, "items": {}, "minimum": {}, "maximum": {},
+	}
+	keys := make([]string, 0, len(schema))
+	for key := range schema {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if _, ok := allowed[key]; !ok {
+			return fmt.Errorf("unsupported structured-output keyword %q at %s", key, path)
+		}
+	}
+	if properties, ok := schema["properties"].(map[string]any); ok {
+		propertyNames := make([]string, 0, len(properties))
+		for name := range properties {
+			propertyNames = append(propertyNames, name)
+		}
+		sort.Strings(propertyNames)
+		required, ok := schema["required"].([]string)
+		if !ok || !sameStringSet(propertyNames, required) {
+			return fmt.Errorf("object properties must all be required at %s", path)
+		}
+		for _, name := range propertyNames {
+			child, ok := properties[name].(map[string]any)
+			if !ok {
+				return fmt.Errorf("property %q is not a schema object at %s", name, path)
+			}
+			if err := validateStructuredOutputSchemaNode(child, path+".properties."+name); err != nil {
+				return err
+			}
+		}
+	}
+	if items, ok := schema["items"]; ok {
+		child, ok := items.(map[string]any)
+		if !ok {
+			return fmt.Errorf("array items is not a schema object at %s", path)
+		}
+		if err := validateStructuredOutputSchemaNode(child, path+".items"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sameStringSet(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	want := make(map[string]int, len(left))
+	for _, value := range left {
+		want[value]++
+	}
+	for _, value := range right {
+		want[value]--
+	}
+	for _, count := range want {
+		if count != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func firstNonEmptyHeader(header http.Header, keys ...string) string {
@@ -363,6 +620,7 @@ func modelInput(req voice.ModelRequest) string {
 		"summary":                req.Summary,
 		"knowledge_context":      req.KnowledgeContext,
 		"reply_policy":           req.ReplyPolicy,
+		"consultation_question":  req.ConsultationQuestion,
 	})
 	return string(raw)
 }
@@ -442,7 +700,7 @@ func turnUnderstandingSchema() map[string]any {
 				conversation.ConsultationNeedOperationAdd, conversation.ConsultationNeedOperationRemove,
 				conversation.ConsultationNeedOperationClear,
 			}},
-			"values":     map[string]any{"type": "array", "uniqueItems": true, "items": map[string]any{"type": "string"}},
+			"values":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			"confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
 			"reason":     map[string]any{"type": "string"},
 		},
@@ -468,16 +726,16 @@ func turnUnderstandingSchema() map[string]any {
 				"", conversation.ConsultationLengthKeep, conversation.ConsultationLengthShorten,
 				conversation.ConsultationLengthAddLength, conversation.ConsultationLengthUnknown,
 			}},
-			"priorities": map[string]any{"type": "array", "uniqueItems": true, "items": map[string]any{"type": "string", "enum": []string{
+			"priorities": map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{
 				conversation.ConsultationPriorityDurability, conversation.ConsultationPriorityLowerMaintenance,
 				conversation.ConsultationPriorityLowerCost, conversation.ConsultationPriorityShorterVisit,
 			}}},
-			"desired_finishes": map[string]any{"type": "array", "uniqueItems": true, "items": map[string]any{"type": "string", "enum": []string{
+			"desired_finishes": map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{
 				conversation.ConsultationFinishNatural, conversation.ConsultationFinishRegularPolish,
 				conversation.ConsultationFinishGelPolish, conversation.ConsultationFinishGlossy,
 				conversation.ConsultationFinishMatte, conversation.ConsultationFinishNailArt,
 			}}},
-			"compared_service_ids":  map[string]any{"type": "array", "uniqueItems": true, "items": map[string]any{"type": "string"}},
+			"compared_service_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			"booking_requested":     map[string]any{"type": "boolean"},
 			"conversation_complete": map[string]any{"type": "boolean"},
 			"confidence":            map[string]any{"type": "number", "minimum": 0, "maximum": 1},

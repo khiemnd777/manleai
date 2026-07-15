@@ -42,7 +42,7 @@ func TestPhoneGuidanceRecoveryRespectsDisabledConsultationDuringProviderOutage(t
 	if session.Intent != IntentUnknown || consultationStateActive(session.DialogState.Consultation) {
 		t.Fatalf("disabled consultation state = intent=%q dialog=%#v", session.Intent, session.DialogState)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "AI consultation is not enabled") {
+	if !strings.Contains(store.lastTurn.AIMessage, "help choosing a service") {
 		t.Fatalf("disabled consultation reply = %q", store.lastTurn.AIMessage)
 	}
 	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
@@ -55,13 +55,14 @@ func TestPhoneGuidanceRecoveryEntersConsultationDuringSemanticProviderFailure(t 
 	store.session.Channel = ChannelPhone
 	store.session.CustomerPhone = "+13125550199"
 	store.services = []ServiceOption{
-		{ID: "classic_mani", Name: "Classic Manicure", CategoryID: "mani", CategoryName: "Manicure"},
-		{ID: "spa_pedi", Name: "Spa Pedicure", CategoryID: "pedi", CategoryName: "Pedicure"},
+		{ID: "classic_mani", Name: "Classic Manicure", CategoryID: "mani", CategoryName: "Manicure", ConsultationProfile: readyComparisonProfile(ConsultationOutcomeMaintain, ConsultationSystemNatural)},
+		{ID: "spa_pedi", Name: "Spa Pedicure", CategoryID: "pedi", CategoryName: "Pedicure", ConsultationProfile: readyComparisonProfile(ConsultationOutcomeColorRefresh, ConsultationSystemGel)},
 	}
 	bookingTool := &fakeBookingTool{}
 	interpreter := &providerFailureTurnInterpreter{}
 	service := NewService(store, bookingTool)
 	service.SetTurnInterpreter(interpreter)
+	service.SetReplyGenerator(&fakeReplyGenerator{message: "What result would you like from the service?"})
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
 		Message: "I'm new here and not sure where to begin.", EventKey: "turn_1",
@@ -83,7 +84,7 @@ func TestPhoneGuidanceRecoveryEntersConsultationDuringSemanticProviderFailure(t 
 	}
 
 	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
-		Message: "Could you guide me toward the right treatment?", EventKey: "turn_2",
+		Message: "Help me choose", EventKey: "turn_2",
 	})
 	if err != nil {
 		t.Fatalf("consultation Message: %v", err)
@@ -91,7 +92,7 @@ func TestPhoneGuidanceRecoveryEntersConsultationDuringSemanticProviderFailure(t 
 	if session.Intent != IntentConsultation || session.DialogState.Phase != DialogPhaseConsultation || !consultationStateActive(session.DialogState.Consultation) {
 		t.Fatalf("consultation state = intent=%q dialog=%#v", session.Intent, session.DialogState)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "What would you like to change") {
+	if store.lastTurn.AIMessage != "What result would you like from the service?" {
 		t.Fatalf("consultation reply = %q", store.lastTurn.AIMessage)
 	}
 	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
@@ -99,7 +100,7 @@ func TestPhoneGuidanceRecoveryEntersConsultationDuringSemanticProviderFailure(t 
 	}
 }
 
-func TestPhoneGuidanceRecoveryHandlesReportedServiceAdviceWording(t *testing.T) {
+func TestPhoneGuidanceRecoveryDoesNotInferConsultationFromReportedWordingDuringProviderFailure(t *testing.T) {
 	store := newFakeConversationStore()
 	store.session.Channel = ChannelPhone
 	bookingTool := &fakeBookingTool{}
@@ -112,8 +113,8 @@ func TestPhoneGuidanceRecoveryHandlesReportedServiceAdviceWording(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Message: %v", err)
 	}
-	if session.Intent != IntentConsultation || !consultationStateActive(session.DialogState.Consultation) {
-		t.Fatalf("reported wording did not enter consultation: intent=%q dialog=%#v reply=%q", session.Intent, session.DialogState, store.lastTurn.AIMessage)
+	if session.Intent != IntentUnknown || consultationStateActive(session.DialogState.Consultation) || session.DialogState.LastPromptKey != promptCallerGoalGuidanceRecovery {
+		t.Fatalf("provider failure should preserve semantic uncertainty: intent=%q dialog=%#v reply=%q", session.Intent, session.DialogState, store.lastTurn.AIMessage)
 	}
 	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
 		t.Fatalf("reported wording called booking tools: create=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
@@ -161,7 +162,7 @@ func TestPhoneGuidanceRecoveryDoesNotTreatBareYesAfterMenuAsServiceSelection(t *
 	service := NewService(store, bookingTool)
 	service.SetTurnInterpreter(&providerFailureTurnInterpreter{})
 
-	for index, message := range []string{"I'm undecided.", "Please list the services.", "Yes."} {
+	for index, message := range []string{"I'm undecided.", "List services", "Yes."} {
 		if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
 			Message: message, EventKey: "menu_turn_" + strconv.Itoa(index+1),
 		}); err != nil {
@@ -172,7 +173,7 @@ func TestPhoneGuidanceRecoveryDoesNotTreatBareYesAfterMenuAsServiceSelection(t *
 	if session.ServiceID != "" || len(session.BookingSegments) != 0 {
 		t.Fatalf("bare yes selected a service: service=%q segments=%#v", session.ServiceID, session.BookingSegments)
 	}
-	if session.DialogState.LastPromptKey != promptServiceGuidanceRecovery || !strings.Contains(store.lastTurn.AIMessage, "help me choose") {
+	if session.DialogState.LastPromptKey != promptServiceGuidanceRecovery || session.DialogState.ProviderFailureCount != 1 || !strings.Contains(store.lastTurn.AIMessage, "help me choose") {
 		t.Fatalf("bare yes recovery state=%#v reply=%q", session.DialogState, store.lastTurn.AIMessage)
 	}
 	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
@@ -192,7 +193,6 @@ func TestPhoneGuidanceRecoveryBoundsNoProgressAndHandsOffOnce(t *testing.T) {
 	messages := []string{
 		"I need a little more time to decide.",
 		"That still doesn't resolve it for me.",
-		"I'm still lost.",
 	}
 	var session *Session
 	for index, message := range messages {
@@ -212,7 +212,7 @@ func TestPhoneGuidanceRecoveryBoundsNoProgressAndHandsOffOnce(t *testing.T) {
 		t.Fatalf("bounded recovery called booking tools: create=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
 	}
 	transcriptLength := len(session.Transcript)
-	replayed, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: messages[2], EventKey: "recovery_turn_3"})
+	replayed, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: messages[1], EventKey: "recovery_turn_2"})
 	if err != nil {
 		t.Fatalf("handoff replay: %v", err)
 	}

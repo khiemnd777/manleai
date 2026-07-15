@@ -223,16 +223,36 @@ also clears `last_sync_at` when it begins; an error completion keeps it empty,
 and only an `active` successful completion restores the timestamp and synced
 readiness.
 
-The configured OpenAI reply model may serve two guarded roles: style-only
-rewriting for eligible safe replies, and strict structured interpretation of
-every freeform turn that reaches conversation orchestration. Turn input is limited to a PII-reduced caller utterance,
-boolean customer-field presence, selected/catalog service and staff references,
-party-group references, pending act, booking action, dialog phase, and draft revision. The backend
-rejects low-confidence goals, invalid entity/operation combinations, malformed
-counts, and non-catalog IDs. The model cannot mutate the draft, call booking,
-or produce confirmed appointment state. When the provider is disabled or
-unavailable, ambiguous mutations preserve the current draft and enter safe
+The configured OpenAI reply model may serve guarded style-only rewriting,
+strict structured interpretation for freeform semantic-lane turns, and phrasing
+of one backend-selected consultation question. Turn input is limited to a
+PII-reduced caller utterance, boolean customer-field presence,
+selected/catalog service and staff references, ready consultation profiles and
+revisions, party-group references, pending act, booking action, dialog phase,
+and draft revision. The backend rejects low-confidence goals, invalid
+entity/operation combinations, malformed counts, and non-catalog IDs. The model
+cannot mutate the draft, rank/recommend services, call booking, or produce
+confirmed appointment state. When the provider is disabled or unavailable,
+ambiguous mutations preserve the current draft and enter safe
 clarification/handoff behavior.
+
+After saving salon-scoped OpenAI settings, run:
+
+```txt
+POST /api/salons/:id/voice/semantic-check
+```
+
+This owner-authenticated probe uses the same configured reply model and strict
+structured-turn schema as live interpretation, but contains no caller
+transcript and creates no conversation/POS state. `verified=true` proves the
+provider accepted the current contract. A nonretryable live 4xx contract
+rejection opens a local circuit scoped to salon plus provider/model/key/schema
+fingerprint so repeated caller turns do not resend the same invalid request;
+changing that configuration resets the scope, and a successful semantic check
+closes the matching circuit. Operational output is limited to request ID,
+status class, safe provider error type/code/parameter, schema fingerprint, and
+circuit state; response bodies and provider messages are never logged or
+returned.
 
 ## Consultation Data Pack After Deployment
 

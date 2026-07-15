@@ -738,13 +738,14 @@ func TestMessageConsultationUsesApprovedCatalogFactsWithoutSelecting(t *testing.
 	}
 	bookingTool := &fakeBookingTool{}
 	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: comparisonConsultationTurn("classic", "gel")})
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "What is the difference between Classic Manicure and Gel Manicure?"})
 	if err != nil {
 		t.Fatalf("Message returned error: %v", err)
 	}
 	if session.Intent != IntentConsultation || session.ServiceID != "" || len(session.BookingSegments) != 0 {
-		t.Fatalf("consultation state = intent %s service %q segments %#v", session.Intent, session.ServiceID, session.BookingSegments)
+		t.Fatalf("consultation state = intent %s service %q segments %#v metadata=%#v reply=%q", session.Intent, session.ServiceID, session.BookingSegments, store.lastTurn.CustomerMetadata, store.lastTurn.AIMessage)
 	}
 	for _, fact := range []string{"Nail shaping and regular polish", "30 minutes", "from $25.00", "Nail shaping and gel polish", "45 minutes"} {
 		if !strings.Contains(store.lastTurn.AIMessage, fact) {
@@ -766,6 +767,7 @@ func TestMessageConsultationBareAffirmativeDoesNotSelectService(t *testing.T) {
 		{ID: "gel", Name: "Gel Manicure", AIDescription: "Gel polish", DurationMinutes: 45, ConsultationProfile: readyComparisonProfile(ConsultationOutcomeColorRefresh, ConsultationSystemGel)},
 	}
 	service := NewService(store, &fakeBookingTool{})
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: comparisonConsultationTurn("classic", "gel")})
 	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Help me choose between Classic Manicure and Gel Manicure"}); err != nil {
 		t.Fatalf("consultation Message returned error: %v", err)
 	}
@@ -788,6 +790,7 @@ func TestMessageConsultationExplicitChoiceStartsBooking(t *testing.T) {
 		{ID: "gel", Name: "Gel Manicure", AIDescription: "Gel polish", DurationMinutes: 45, ConsultationProfile: readyComparisonProfile(ConsultationOutcomeColorRefresh, ConsultationSystemGel)},
 	}
 	service := NewService(store, &fakeBookingTool{})
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: comparisonConsultationTurn("classic", "gel")})
 	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Compare Classic Manicure and Gel Manicure"}); err != nil {
 		t.Fatalf("consultation Message returned error: %v", err)
 	}
@@ -1030,8 +1033,11 @@ func TestConsultationSafetyDetectorIgnoresExplicitlyNegatedSymptoms(t *testing.T
 
 func TestMessageConsultationCollectsOneNeedAtATimeWithoutBookingTools(t *testing.T) {
 	store := newFakeConversationStore()
+	store.services = consultationTestServices()
 	bookingTool := &fakeBookingTool{}
 	service := NewService(store, bookingTool)
+	generator := &fakeReplyGenerator{message: "What is currently on your nails: acrylic, extensions, or gel?"}
+	service.SetReplyGenerator(generator)
 	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
 		Goal:       "consultation",
 		Confidence: 0.96,
@@ -1053,12 +1059,16 @@ func TestMessageConsultationCollectsOneNeedAtATimeWithoutBookingTools(t *testing
 	if err != nil {
 		t.Fatalf("Message returned error: %v", err)
 	}
-	if got := store.lastTurn.AIMessage; got != "What is currently on your nails: natural nails, regular polish, gel, dip, acrylic, or extensions?" {
+	if got := store.lastTurn.AIMessage; got != "What is currently on your nails: acrylic, extensions, or gel?" {
 		t.Fatalf("golden reply = %q", got)
 	}
 	state := normalizedDialogState(session.DialogState).Consultation
 	if state == nil || state.Status != ConsultationStatusCollectingNeeds || state.LastAskedField != "current_system" || state.Needs.DesiredOutcome != ConsultationOutcomeShorten {
 		t.Fatalf("consultation state = %#v", state)
+	}
+	if generator.lastConsultationRequest.Question.Field != ConsultationNeedFieldCurrentSystem ||
+		!sameStrings(generator.lastConsultationRequest.Question.Options, []string{ConsultationSystemAcrylic, ConsultationSystemExtension}) {
+		t.Fatalf("profile-driven question request = %#v", generator.lastConsultationRequest.Question)
 	}
 	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
 		t.Fatalf("consultation invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
@@ -1107,6 +1117,46 @@ func TestMessageConsultationRanksOnlyReadyOwnerApprovedProfiles(t *testing.T) {
 	}
 	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
 		t.Fatalf("recommendation invoked booking tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
+func TestMessageConsultationQuestionGenerationFailureRetriesThenHandsOff(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = consultationTestServices()
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetReplyGenerator(&fakeReplyGenerator{err: errors.New("question provider unavailable")})
+	needs := ConsultationNeedProfile{DesiredOutcome: ConsultationOutcomeShorten, LengthChange: ConsultationLengthShorten}
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal: "consultation", Confidence: 0.96, Consultation: ConsultationNeedProfile{
+			DesiredOutcome: ConsultationOutcomeShorten, LengthChange: ConsultationLengthShorten, Confidence: 0.96,
+		},
+		ConsultationMutations: initialConsultationMutations(needs, 0.96),
+	}})
+
+	first, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I want a shorter set with easier upkeep, but I need help choosing the right service.",
+	})
+	if err != nil {
+		t.Fatalf("first question generation failure: %v", err)
+	}
+	if first.Status != StatusActive || first.DialogState.Consultation == nil || first.DialogState.Consultation.ProviderFailureCount != 1 ||
+		!strings.Contains(store.lastTurn.AIMessage, "try once more") {
+		t.Fatalf("first safe retry state=%#v reply=%q", first.DialogState.Consultation, store.lastTurn.AIMessage)
+	}
+
+	second, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "I still need guidance based on the salon's service details.",
+	})
+	if err != nil {
+		t.Fatalf("second question generation failure: %v", err)
+	}
+	state := second.DialogState.Consultation
+	if second.Status != StatusHandoff || state == nil || state.ProviderFailureCount != 2 || state.ExitReason != HandoffReasonConsultationUnresolved {
+		t.Fatalf("bounded question-provider handoff = status %q state %#v", second.Status, state)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("question generation failure invoked tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
 	}
 }
 
@@ -1168,8 +1218,23 @@ func TestMessageConsultationRevalidatesProfileRevisionBeforeRecommendationAccept
 func TestMessageConsultationAppliesReplaceAddRemoveAndClearMutations(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = consultationTestServices()
+	store.services = append(store.services, ServiceOption{
+		ID: "dip_color", Name: "Dip Color Refresh", DurationMinutes: 55,
+		ConsultationProfile: &ServiceConsultationProfile{
+			Status: ConsultationProfileStatusReady, RecommendedOutcomes: []string{ConsultationOutcomeColorRefresh},
+			CompatibleCurrentSystems: []string{ConsultationSystemDip}, PriorityTags: []string{ConsultationPriorityLowerMaintenance},
+			OwnerApprovedSummary: "Refreshes dip color with owner-approved maintenance guidance.", Revision: 1,
+		},
+	})
+	for i := range store.services {
+		if store.services[i].ID == "gel_color" {
+			store.services[i].ConsultationProfile.PriorityTags = []string{ConsultationPriorityDurability, ConsultationPriorityLowerCost}
+			store.services[i].ConsultationProfile.FinishOptions = []string{ConsultationFinishGlossy}
+		}
+	}
 	bookingTool := &fakeBookingTool{}
 	service := NewService(store, bookingTool)
+	service.SetReplyGenerator(&fakeReplyGenerator{message: "Which finish would you prefer?"})
 	service.SetTurnInterpreter(&scriptedTurnInterpreter{interpret: func(req TurnInterpretationRequest) TurnUnderstanding {
 		if strings.Contains(strings.ToLower(req.CustomerMessage), "correction") {
 			return TurnUnderstanding{
@@ -1197,10 +1262,14 @@ func TestMessageConsultationAppliesReplaceAddRemoveAndClearMutations(t *testing.
 		}
 	}})
 
-	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+	initialSession, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
 		Message: "I have gel now, want a color refresh, care about durability and price, and prefer glossy.",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("initial consultation turn: %v", err)
+	}
+	if initialSession.Status != StatusActive {
+		t.Fatalf("initial consultation unexpectedly closed: status=%s outcome=%s reply=%q state=%#v", initialSession.Status, initialSession.Outcome, store.lastTurn.AIMessage, normalizedDialogState(initialSession.DialogState).Consultation)
 	}
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
 		Message: "Correction: it is dip, cost does not matter now, maintenance does, and ignore the finish.",
@@ -1241,15 +1310,7 @@ func TestConsultationSnapshotDeltaWithoutMutationsCannotChangePersistedNeeds(t *
 		Confidence:           0.99,
 		Reason:               "snapshot_without_field_mutations",
 	}
-	deterministicFallback := ConsultationNeedProfile{
-		CurrentSystem:   ConsultationSystemDip,
-		Priorities:      []string{ConsultationPriorityLowerCost},
-		DesiredFinishes: []string{ConsultationFinishMatte},
-		Confidence:      1,
-		Reason:          "must_not_backfill_after_model_invocation",
-	}
-
-	got := applyConsultationNeedTurn(current, semanticSnapshot, deterministicFallback, nil, false)
+	got := applyConsultationNeedTurn(current, semanticSnapshot, nil)
 	if got.CurrentSystem != current.CurrentSystem || got.DesiredOutcome != current.DesiredOutcome || got.LengthChange != current.LengthChange ||
 		!sameStrings(got.Priorities, current.Priorities) || !sameStrings(got.DesiredFinishes, current.DesiredFinishes) ||
 		!sameStrings(got.ComparedServiceIDs, current.ComparedServiceIDs) {
@@ -1674,6 +1735,18 @@ func initialConsultationMutations(needs ConsultationNeedProfile, confidence floa
 	appendList(ConsultationNeedFieldDesiredFinishes, needs.DesiredFinishes)
 	appendList(ConsultationNeedFieldComparedServiceIDs, needs.ComparedServiceIDs)
 	return mutations
+}
+
+func comparisonConsultationTurn(serviceIDs ...string) TurnUnderstanding {
+	needs := ConsultationNeedProfile{
+		DesiredOutcome:     ConsultationOutcomeCompare,
+		ComparedServiceIDs: append([]string(nil), serviceIDs...),
+		Confidence:         0.96,
+	}
+	return TurnUnderstanding{
+		Goal: "consultation", Confidence: 0.96, Consultation: needs,
+		ConsultationMutations: initialConsultationMutations(needs, 0.96),
+	}
 }
 
 func consultationTestServices() []ServiceOption {
@@ -4674,6 +4747,10 @@ func TestMessageConfirmsShortBareVoiceNameBeforeAccepting(t *testing.T) {
 	if store.lastTurn.AIMetadata["pending_customer_name"] != "Sim" {
 		t.Fatalf("pending metadata = %#v, want Sim", store.lastTurn.AIMetadata)
 	}
+	if session.DialogState.Pending == nil || session.DialogState.Pending.PromptKey != PendingCustomerNameConfirmation ||
+		session.DialogState.Pending.Entity != ConversationEntityCustomer || session.DialogState.Pending.Subject != "name" || session.DialogState.Pending.Value != "Sim" {
+		t.Fatalf("typed pending customer name = %#v", session.DialogState.Pending)
+	}
 	if !strings.Contains(store.lastTurn.AIMessage, "I heard Sim") || !strings.Contains(store.lastTurn.AIMessage, "correct name") {
 		t.Fatalf("AI should confirm risky short name: %s", store.lastTurn.AIMessage)
 	}
@@ -4692,6 +4769,48 @@ func TestMessageConfirmsShortBareVoiceNameBeforeAccepting(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "phone") {
 		t.Fatalf("AI should move to phone after name confirmation: %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestPendingCustomerNameCannotBeReplacedByUnrelatedUtterance(t *testing.T) {
+	store := newFakeConversationStore()
+	seedMissingCustomerNameSession(store, []string{"What name should I put on the appointment?"})
+	store.session.Channel = ChannelPhone
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Nia."}); err != nil {
+		t.Fatalf("pending name: %v", err)
+	}
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Could you explain the parking policy?",
+	})
+	if err != nil {
+		t.Fatalf("unrelated pending-name turn: %v", err)
+	}
+	if session.CustomerName != "" || pendingCustomerName(*session) != "Nia" {
+		t.Fatalf("unrelated utterance changed pending name: customer=%q pending=%q", session.CustomerName, pendingCustomerName(*session))
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("unrelated pending-name turn invoked tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "name") {
+		t.Fatalf("pending-name repair did not stay on the unresolved field: %q", store.lastTurn.AIMessage)
+	}
+}
+
+func TestCustomerNameValidationRejectsDynamicSalonServiceAndStaffIdentities(t *testing.T) {
+	cfg := &RuntimeConfig{SalonName: "Cedar Glow Studio"}
+	services := []ServiceOption{{ID: "service_1", Name: "Moonlight Pedicure"}}
+	staff := []StaffOption{{ID: "staff_1", Name: "Rina Patel"}}
+	for _, collision := range []string{"Cedar Glow Studio", "Moonlight Pedicure", "Rina Patel"} {
+		if validCustomerNameCandidate(collision, cfg, services, staff) {
+			t.Fatalf("dynamic operational identity accepted as customer name: %q", collision)
+		}
+	}
+	if !validCustomerNameCandidate("Avery Stone", cfg, services, staff) {
+		t.Fatal("ordinary customer name was rejected")
 	}
 }
 
@@ -4731,6 +4850,9 @@ func TestMessageConfirmedVoiceNameReadsFinalReviewBeforePOSBooking(t *testing.T)
 			t.Fatalf("final review missing %q: %s", expected, store.lastTurn.AIMessage)
 		}
 	}
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{act: ConversationAct{
+		Kind: ConversationActReview, Confidence: 0.99,
+	}})
 
 	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Everything is correct, please book it."})
 	if err != nil {
@@ -4748,6 +4870,12 @@ func TestMessageAllowsCustomerToCorrectPendingVoiceName(t *testing.T) {
 	bookingTool := &fakeBookingTool{}
 	service := NewService(store, bookingTool)
 	service.now = fixedNow
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal: "book_appointment", Confidence: 0.96,
+		Acts: []ConversationAct{{
+			Kind: ConversationActSet, Entity: ConversationEntityCustomer, Subject: "name", Value: "Khiem", Confidence: 0.96,
+		}},
+	}})
 
 	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Sim."}); err != nil {
 		t.Fatalf("Message returned error for initial name: %v", err)
@@ -8910,15 +9038,33 @@ type fakeConversationStore struct {
 }
 
 type fakeReplyGenerator struct {
-	calls       int
-	message     string
-	lastRequest ReplyGenerationRequest
+	calls                   int
+	message                 string
+	err                     error
+	lastRequest             ReplyGenerationRequest
+	lastConsultationRequest ConsultationQuestionRequest
 }
 
 func (f *fakeReplyGenerator) GenerateReply(ctx context.Context, req ReplyGenerationRequest) (ReplyGenerationResult, error) {
 	f.calls++
 	f.lastRequest = req
+	if f.err != nil {
+		return ReplyGenerationResult{}, f.err
+	}
 	return ReplyGenerationResult{Message: f.message, Confidence: 0.9}, nil
+}
+
+func (f *fakeReplyGenerator) GenerateConsultationQuestion(ctx context.Context, req ConsultationQuestionRequest) (ReplyGenerationResult, error) {
+	f.calls++
+	f.lastConsultationRequest = req
+	if f.err != nil {
+		return ReplyGenerationResult{}, f.err
+	}
+	message := strings.TrimSpace(f.message)
+	if message == "" {
+		message = "Which option fits best: " + joinHumanList(req.Question.Options) + "?"
+	}
+	return ReplyGenerationResult{Message: message, Confidence: 0.9}, nil
 }
 
 func newFakeConversationStore() *fakeConversationStore {

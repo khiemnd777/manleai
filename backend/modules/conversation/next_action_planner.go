@@ -41,6 +41,38 @@ func planNextConversationAction(session Session, missing string) AssistantAction
 	return AssistantAction{Kind: AssistantActionReadReview, Reason: "review_missing_or_stale"}
 }
 
+func resumeAfterInformationPrompt(session *Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (string, string, bool) {
+	if session == nil {
+		return "", "", false
+	}
+	missing := missingBookingField(*session)
+	action := planNextConversationAction(*session, missing)
+	switch action.Kind {
+	case AssistantActionReadReview:
+		state := normalizedDialogState(session.DialogState)
+		state.Phase = DialogPhaseReview
+		state.Pending = nil
+		state.ReviewAccepted = false
+		state.ReviewedRevision = state.DraftRevision
+		state.AuthorizedRevision = 0
+		state.NoProgressCount = 0
+		state.LastPromptKey = "final_review"
+		session.DialogState = state
+		return finalBookingReviewPrompt(*session, services, staff, cfg), "booking_review", true
+	case AssistantActionAskReview:
+		state := normalizedDialogState(session.DialogState)
+		state.Phase = DialogPhaseReview
+		state.Pending = nil
+		state.ReviewAccepted = false
+		state.AuthorizedRevision = 0
+		state.LastPromptKey = "final_review_retry"
+		session.DialogState = state
+		return "Would you like me to book these details?", "booking_review", true
+	default:
+		return resumeBookingPrompt(*session, services, cfg), missing, false
+	}
+}
+
 func (s *Service) continueAfterDraftReady(ctx context.Context, ownerUserID string, turn TurnRecord, before Session, next Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
 	nextAction := planNextConversationAction(next, missingBookingField(next))
 	if nextAction.Kind == AssistantActionAskMissingField {

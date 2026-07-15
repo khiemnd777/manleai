@@ -22,8 +22,9 @@ const (
 	IntentHandoff      = "handoff"
 	IntentConsultation = "consultation"
 
-	ReplyPolicyOperationalFact = "operational_fact"
-	ReplyPolicyStyleOnly       = "style_only"
+	ReplyPolicyOperationalFact      = "operational_fact"
+	ReplyPolicyStyleOnly            = "style_only"
+	ReplyPolicyConsultationQuestion = "consultation_question"
 
 	DialogStateVersion = 3
 
@@ -135,10 +136,12 @@ const (
 	ConversationGuestCaller  = "caller"
 	ConversationGuestAnother = "another_guest"
 
-	PendingPartyServiceTarget    = "party_service_target"
-	PendingPartyServiceGuest     = "party_service_guest"
-	PendingPartyServiceOperation = "party_service_operation"
-	PendingPartyServiceSource    = "party_service_source"
+	PendingPartyServiceTarget       = "party_service_target"
+	PendingPartyServiceGuest        = "party_service_guest"
+	PendingPartyServiceOperation    = "party_service_operation"
+	PendingPartyServiceSource       = "party_service_source"
+	PendingCustomerNameConfirmation = "customer_name_confirmation"
+	PendingStaffAlternative         = "staff_alternative"
 
 	OutcomeCollecting             = "collecting"
 	OutcomeBookingConfirmed       = "booking_confirmed"
@@ -198,6 +201,10 @@ type ReplyGenerator interface {
 	GenerateReply(ctx context.Context, req ReplyGenerationRequest) (ReplyGenerationResult, error)
 }
 
+type ConsultationQuestionGenerator interface {
+	GenerateConsultationQuestion(ctx context.Context, req ConsultationQuestionRequest) (ReplyGenerationResult, error)
+}
+
 type TurnInterpreter interface {
 	InterpretTurn(ctx context.Context, req TurnInterpretationRequest) (TurnUnderstanding, error)
 }
@@ -220,10 +227,23 @@ type TurnInterpretationRequest struct {
 }
 
 type ConversationServiceRef struct {
-	ServiceID    string `json:"service_id"`
-	ServiceName  string `json:"service_name"`
-	CategoryID   string `json:"category_id,omitempty"`
-	CategoryName string `json:"category_name,omitempty"`
+	ServiceID           string                              `json:"service_id"`
+	ServiceName         string                              `json:"service_name"`
+	CategoryID          string                              `json:"category_id,omitempty"`
+	CategoryName        string                              `json:"category_name,omitempty"`
+	ConsultationProfile *ConversationConsultationProfileRef `json:"consultation_profile,omitempty"`
+}
+
+type ConversationConsultationProfileRef struct {
+	Status                   string   `json:"status"`
+	RecommendedOutcomes      []string `json:"recommended_outcomes"`
+	CompatibleCurrentSystems []string `json:"compatible_current_systems"`
+	LengthCapabilities       []string `json:"length_capabilities"`
+	PriorityTags             []string `json:"priority_tags"`
+	FinishOptions            []string `json:"finish_options"`
+	MaintenanceNote          string   `json:"maintenance_note,omitempty"`
+	OwnerApprovedSummary     string   `json:"owner_approved_summary,omitempty"`
+	Revision                 int      `json:"revision"`
 }
 
 type ConversationStaffRef struct {
@@ -296,6 +316,7 @@ type TurnUnderstanding struct {
 
 type PendingConversationAct struct {
 	Kind               string   `json:"kind"`
+	Entity             string   `json:"entity,omitempty"`
 	SourceServiceIDs   []string `json:"source_service_ids,omitempty"`
 	TargetServiceIDs   []string `json:"target_service_ids,omitempty"`
 	SourceCategoryID   string   `json:"source_category_id,omitempty"`
@@ -305,6 +326,8 @@ type PendingConversationAct struct {
 	Scope              string   `json:"scope,omitempty"`
 	GuestScope         string   `json:"guest_scope,omitempty"`
 	GuestRef           string   `json:"guest_ref,omitempty"`
+	Subject            string   `json:"subject,omitempty"`
+	Value              string   `json:"value,omitempty"`
 	ProposedDate       string   `json:"proposed_date,omitempty"`
 	ProposedStartISO   string   `json:"proposed_start_iso,omitempty"`
 	PromptKey          string   `json:"prompt_key"`
@@ -359,17 +382,22 @@ type SafetyAssessment struct {
 }
 
 type ConsultationState struct {
-	Status                string                  `json:"status"`
-	ResumePhase           string                  `json:"resume_phase"`
-	Needs                 ConsultationNeedProfile `json:"needs"`
-	CandidateServiceIDs   []string                `json:"candidate_service_ids,omitempty"`
-	RecommendedServiceIDs []string                `json:"recommended_service_ids,omitempty"`
-	SelectedServiceID     string                  `json:"selected_service_id,omitempty"`
-	LastAskedField        string                  `json:"last_asked_field,omitempty"`
-	ProfileRevisions      map[string]int          `json:"profile_revisions,omitempty"`
-	RecommendationReasons map[string][]string     `json:"recommendation_reasons,omitempty"`
-	NoProgressCount       int                     `json:"no_progress_count"`
-	ExitReason            string                  `json:"exit_reason,omitempty"`
+	Status                     string                  `json:"status"`
+	ResumePhase                string                  `json:"resume_phase"`
+	Needs                      ConsultationNeedProfile `json:"needs"`
+	CandidateServiceIDs        []string                `json:"candidate_service_ids,omitempty"`
+	RecommendedServiceIDs      []string                `json:"recommended_service_ids,omitempty"`
+	SelectedServiceID          string                  `json:"selected_service_id,omitempty"`
+	LastAskedField             string                  `json:"last_asked_field,omitempty"`
+	LastQuestionOptions        []string                `json:"last_question_options,omitempty"`
+	ProfileRevisions           map[string]int          `json:"profile_revisions,omitempty"`
+	RecommendationReasons      map[string][]string     `json:"recommendation_reasons,omitempty"`
+	NoProgressCount            int                     `json:"no_progress_count"`
+	ProviderFailureCount       int                     `json:"provider_failure_count"`
+	ProgressFingerprint        string                  `json:"progress_fingerprint,omitempty"`
+	LastInterpreterOutcome     string                  `json:"last_interpreter_outcome,omitempty"`
+	LastInterpreterDiagnostics map[string]string       `json:"last_interpreter_diagnostics,omitempty"`
+	ExitReason                 string                  `json:"exit_reason,omitempty"`
 }
 
 type DialogState struct {
@@ -381,6 +409,8 @@ type DialogState struct {
 	ReviewRequired       bool                    `json:"review_required"`
 	ReviewAccepted       bool                    `json:"review_accepted"`
 	NoProgressCount      int                     `json:"no_progress_count"`
+	ProviderFailureCount int                     `json:"provider_failure_count"`
+	ProgressFingerprint  string                  `json:"progress_fingerprint,omitempty"`
 	LastPromptKey        string                  `json:"last_prompt_key,omitempty"`
 	LastActKind          string                  `json:"last_act_kind,omitempty"`
 	DraftRevision        int                     `json:"draft_revision"`
@@ -500,6 +530,22 @@ type ReplyGenerationRequest struct {
 	Summary              string
 	KnowledgeContext     string
 	ReplyPolicy          string
+	ConsultationQuestion *ConsultationQuestionSpec
+}
+
+type ConsultationQuestionRequest struct {
+	SalonID   string
+	SessionID string
+	Channel   string
+	AITone    string
+	Question  ConsultationQuestionSpec
+}
+
+type ConsultationQuestionSpec struct {
+	Field               string         `json:"field"`
+	Options             []string       `json:"options"`
+	CandidateServiceIDs []string       `json:"candidate_service_ids"`
+	ProfileRevisions    map[string]int `json:"profile_revisions"`
 }
 
 type ReplyGenerationResult struct {

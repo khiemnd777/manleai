@@ -41,11 +41,24 @@ func normalizedDialogState(state DialogState) DialogState {
 		consultation.Needs.ComparedServiceIDs = append([]string(nil), state.Consultation.Needs.ComparedServiceIDs...)
 		consultation.CandidateServiceIDs = append([]string(nil), state.Consultation.CandidateServiceIDs...)
 		consultation.RecommendedServiceIDs = append([]string(nil), state.Consultation.RecommendedServiceIDs...)
+		consultation.LastQuestionOptions = append([]string(nil), state.Consultation.LastQuestionOptions...)
 		consultation.ProfileRevisions = cloneStringIntMap(state.Consultation.ProfileRevisions)
 		consultation.RecommendationReasons = cloneStringSliceMap(state.Consultation.RecommendationReasons)
+		consultation.LastInterpreterDiagnostics = cloneStringMap(state.Consultation.LastInterpreterDiagnostics)
 		state.Consultation = &consultation
 	}
 	return state
+}
+
+func cloneStringMap(source map[string]string) map[string]string {
+	if source == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func cloneStringIntMap(source map[string]int) map[string]int {
@@ -88,6 +101,8 @@ func resetDialogProgress(state DialogState, phase string) DialogState {
 	state.Phase = phase
 	state.Pending = nil
 	state.NoProgressCount = 0
+	state.ProviderFailureCount = 0
+	state.ProgressFingerprint = ""
 	state.LastPromptKey = ""
 	state.ReviewAccepted = false
 	state.ReviewedRevision = 0
