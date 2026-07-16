@@ -242,10 +242,38 @@ func guidanceRecoveryPrompt(state GuidanceRecoveryState, repeated bool) string {
 }
 
 func guidanceProviderFailurePrompt(state GuidanceRecoveryState) string {
+	hasCatalog := containsString(state.OfferedActions, guidanceRecoveryActionCatalog)
+	hasConsultation := containsString(state.OfferedActions, guidanceRecoveryActionConsultation)
+	canBook := containsString(state.OfferedActions, guidanceRecoveryActionBook)
+	canAnswerSalonQuestion := containsString(state.OfferedActions, guidanceRecoveryActionSalonQuestion)
 	if state.Stage == GuidanceRecoveryStageService {
-		return "I'm having trouble interpreting that right now. Please name a bookable service or ask me to read the menu once more. I can also ask the owner to help."
+		switch {
+		case hasCatalog && hasConsultation:
+			return "I'm having trouble interpreting that right now. I can still read the bookable menu, or ask one question at a time to help narrow down which service fits. I can also ask the owner to help."
+		case hasConsultation:
+			return "I'm having trouble interpreting that right now. I can ask one question at a time to help narrow down which service fits, or ask the owner to help."
+		case hasCatalog:
+			return "I'm having trouble interpreting that right now. Please name a bookable service or ask me to read the menu once more. I can also ask the owner to help."
+		default:
+			return "I'm having trouble interpreting that right now, and I don't have a bookable service menu to guide us. I can ask the owner to help."
+		}
 	}
-	return "I'm having trouble interpreting that right now. You can ask me to read the service menu once more, or I can ask the owner to help."
+	switch {
+	case hasCatalog && hasConsultation:
+		return "I'm having trouble interpreting that right now. I can still read the bookable menu, or ask one question at a time to help narrow down which service fits. I can also ask the owner to help."
+	case hasConsultation:
+		return "I'm having trouble interpreting that right now. I can ask one question at a time to help narrow down which service fits, or ask the owner to help."
+	case hasCatalog:
+		return "I'm having trouble interpreting that right now. You can ask me to read the bookable service menu once more, or I can ask the owner to help."
+	case canBook && canAnswerSalonQuestion:
+		return "I'm having trouble interpreting that right now. Please say whether you'd like to start a booking or ask a question about the salon. I can also ask the owner to help."
+	case canBook:
+		return "I'm having trouble interpreting that right now. Please say if you'd like to start a booking, or I can ask the owner to help."
+	case canAnswerSalonQuestion:
+		return "I'm having trouble interpreting that right now. Please ask your salon question once more, or I can ask the owner to help."
+	default:
+		return "I'm having trouble interpreting that right now. I can ask the owner to help."
+	}
 }
 
 func serviceGuidanceMenuReply(services []ServiceOption, consultationAvailable bool) string {

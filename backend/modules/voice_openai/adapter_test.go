@@ -192,6 +192,62 @@ func TestInterpretTurnUsesStrictCatalogBoundMultiActSchema(t *testing.T) {
 	}
 }
 
+func TestInterpretTurnUsesCompactGuidanceContract(t *testing.T) {
+	adapter := NewAdapter(config.OpenAIVoiceConfig{
+		APIKey: "test-key", BaseURL: "https://openai.test/v1", ReplyModel: "gpt-test",
+	})
+	adapter.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		instructions, _ := req["instructions"].(string)
+		if !strings.Contains(instructions, "awaiting the caller's goal") || !strings.Contains(instructions, "never create booking operations or questions") {
+			t.Fatalf("guidance instructions = %s", instructions)
+		}
+		textConfig, _ := req["text"].(map[string]any)
+		format, _ := textConfig["format"].(map[string]any)
+		if format["name"] != "guidance_turn_understanding" {
+			t.Fatalf("schema name = %#v", format["name"])
+		}
+		schema, _ := format["schema"].(map[string]any)
+		properties, _ := schema["properties"].(map[string]any)
+		if _, exists := properties["acts"]; exists {
+			t.Fatalf("guidance schema retained acts: %#v", properties)
+		}
+		if _, exists := properties["questions"]; exists {
+			t.Fatalf("guidance schema retained questions: %#v", properties)
+		}
+		if _, exists := properties["consultation"]; !exists {
+			t.Fatalf("guidance schema lost consultation: %#v", properties)
+		}
+		if _, exists := properties["safety"]; !exists {
+			t.Fatalf("guidance schema lost safety: %#v", properties)
+		}
+		input, _ := req["input"].(string)
+		var modelInput map[string]any
+		if err := json.Unmarshal([]byte(input), &modelInput); err != nil {
+			t.Fatalf("decode model input: %v", err)
+		}
+		if modelInput["semantic_contract"] != conversation.TurnSemanticContractGuidance || modelInput["customer_message"] != "I'm undecided about which treatment fits me." {
+			t.Fatalf("guidance model input = %#v", modelInput)
+		}
+		body, _ := json.Marshal(map[string]any{"output_text": validGuidanceTurnOutput()})
+		return jsonResponse(body), nil
+	})}
+
+	reply, err := adapter.InterpretTurn(context.Background(), voice.TurnModelRequest{
+		SalonID: "salon_1", CustomerMessage: "I'm undecided about which treatment fits me.",
+		ExpectedInput: conversation.ExpectedInputCallerGoal, SemanticContract: conversation.TurnSemanticContractGuidance,
+	})
+	if err != nil {
+		t.Fatalf("InterpretTurn: %v", err)
+	}
+	if reply.Goal != "consultation" || reply.Consultation.DesiredOutcome != conversation.ConsultationOutcomeMaintain || len(reply.Acts) != 0 || len(reply.Questions) != 0 {
+		t.Fatalf("guidance reply = %#v", reply)
+	}
+}
+
 func TestInterpretTurnReturnsPIIFreeProviderDiagnosticsWithoutResponseBody(t *testing.T) {
 	adapter := NewAdapter(config.OpenAIVoiceConfig{
 		APIKey: "test-key", BaseURL: "https://openai.test/v1", ReplyModel: "gpt-test",
@@ -225,10 +281,13 @@ func TestInterpretTurnReturnsPIIFreeProviderDiagnosticsWithoutResponseBody(t *te
 }
 
 func TestTurnUnderstandingSchemaUsesSupportedSubsetRecursively(t *testing.T) {
-	schema := turnUnderstandingSchema()
-	if err := validateStructuredOutputSchema(schema); err != nil {
-		t.Fatalf("current turn schema is invalid: %v", err)
+	for _, contract := range []string{conversation.TurnSemanticContractFull, conversation.TurnSemanticContractGuidance} {
+		schema := turnUnderstandingSchemaForContract(contract)
+		if err := validateStructuredOutputSchema(schema); err != nil {
+			t.Fatalf("%s turn schema is invalid: %v", contract, err)
+		}
 	}
+	schema := turnUnderstandingSchema()
 	properties := schema["properties"].(map[string]any)
 	consultation := properties["consultation"].(map[string]any)
 	consultationProperties := consultation["properties"].(map[string]any)
@@ -246,6 +305,10 @@ func TestTurnContractCircuitSuppressesRepeatedInvalidRequestsAndProbeClearsIt(t 
 	requestCount := 0
 	adapter.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		requestCount++
+		var requestPayload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&requestPayload); err != nil {
+			t.Fatalf("decode contract request: %v", err)
+		}
 		if requestCount == 1 {
 			return &http.Response{
 				StatusCode: http.StatusBadRequest,
@@ -255,7 +318,13 @@ func TestTurnContractCircuitSuppressesRepeatedInvalidRequestsAndProbeClearsIt(t 
 				)),
 			}, nil
 		}
-		body, _ := json.Marshal(map[string]any{"output_text": validEmptyTurnOutput()})
+		output := validEmptyTurnOutput()
+		textConfig, _ := requestPayload["text"].(map[string]any)
+		format, _ := textConfig["format"].(map[string]any)
+		if format["name"] == "guidance_turn_understanding" {
+			output = validGuidanceTurnOutput()
+		}
+		body, _ := json.Marshal(map[string]any{"output_text": output})
 		return jsonResponse(body), nil
 	})}
 
@@ -275,10 +344,10 @@ func TestTurnContractCircuitSuppressesRepeatedInvalidRequestsAndProbeClearsIt(t 
 	}
 
 	check, err := adapter.CheckTurnContract(context.Background(), "salon_1")
-	if err != nil || check.SchemaFingerprint == "" || requestCount != 2 {
+	if err != nil || check.SchemaFingerprint == "" || requestCount != 3 {
 		t.Fatalf("semantic probe check=%#v err=%v request_count=%d", check, err, requestCount)
 	}
-	if _, err := adapter.InterpretTurn(context.Background(), request); err != nil || requestCount != 3 {
+	if _, err := adapter.InterpretTurn(context.Background(), request); err != nil || requestCount != 4 {
 		t.Fatalf("post-probe interpretation err=%v request_count=%d", err, requestCount)
 	}
 }
@@ -312,6 +381,10 @@ func TestTurnContractCircuitResetsWhenSalonRuntimeConfigurationChanges(t *testin
 
 func validEmptyTurnOutput() string {
 	return `{"goal":"unknown","acts":[],"questions":[],"confidence":0,"reason":"contract check","consultation":{"current_system":"","desired_outcome":"","length_change":"","priorities":[],"desired_finishes":[],"compared_service_ids":[],"booking_requested":false,"conversation_complete":false,"confidence":0,"reason":"","mutations":[]},"safety":{"concern":false,"category":"","confidence":0,"reason":""}}`
+}
+
+func validGuidanceTurnOutput() string {
+	return `{"goal":"consultation","confidence":0.96,"reason":"caller wants help choosing","consultation":{"current_system":"natural","desired_outcome":"maintain","length_change":"","priorities":[],"desired_finishes":[],"compared_service_ids":[],"booking_requested":false,"conversation_complete":false,"confidence":0.91,"reason":"caller wants upkeep guidance","mutations":[]},"safety":{"concern":false,"category":"","confidence":0,"reason":""}}`
 }
 
 func TestInterpretTurnClassifiesEmptyAndInvalidStructuredOutput(t *testing.T) {

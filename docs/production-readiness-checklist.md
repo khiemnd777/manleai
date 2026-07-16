@@ -134,9 +134,9 @@
 - [x] Make validated field-level consultation mutations the sole persistence authority for need fields; free-standing semantic snapshots cannot overwrite scalar or list state.
 - [x] Add golden transcript and invariant tests for directional switching, stale pending escape, review corrections, duplicate-safe turn handling, and bounded clarification handoff.
 - [x] Route every configured-production freeform orchestration turn through the state-driven Turn Kernel; use deterministic fast/answer/action/recovery lanes when coverage is complete and a multi-act semantic lane for correction, ambiguity, or partial coverage without a keyword-only gate.
-- [x] Bound semantic interpretation to 2.5 seconds, scope service/staff context to the active turn, and expose PII-free route, expected-input, context-size, and interpreter-outcome diagnostics.
+- [x] Bound semantic interpretation to 2.5 seconds, select compact `guidance_turn` versus full multi-act/question schema from operational state, scope service/staff context to the active turn, and expose PII-free route, expected-input, semantic-contract, context-size, and interpreter-outcome diagnostics.
 - [x] Validate the OpenAI structured-turn schema recursively before dispatch, exclude unsupported schema keywords, expose only bounded provider type/code/parameter/request/fingerprint diagnostics, and open a salon/config/schema-scoped circuit after nonretryable contract rejection.
-- [x] Add an authenticated owner-scoped semantic-contract probe that uses the live schema/model without caller PII, conversation writes, availability, or POS tools; a successful probe closes the matching local contract circuit.
+- [x] Add an authenticated owner-scoped semantic-contract probe that validates both full and guidance schemas with the live model without caller PII, conversation writes, availability, or POS tools; successful requests close the matching per-schema local contract circuits.
 - [x] Treat initial catalog service/category evidence as booking field collection, reject add-or-replace operation pending state without a selected service, and continue from independently validated captured fields when semantic interpretation is not accepted.
 - [x] Route service, staff, date/time, customer, and guest corrections through one validated reducer boundary with dependency invalidation.
 - [x] Bind final-review authorization to the exact draft revision and invalidate it after every draft correction.
@@ -224,11 +224,11 @@
 - [x] Add worker-driven 90-day retention redaction for expired active sessions.
 - [x] Clear customer PII, transcript bodies, handoff summaries, webhook payloads, and temporary voice audio while preserving booking/handoff/provider-call audit links.
 - [x] Add Twilio Media Streams and OpenAI Realtime adapter path with completed transcripts routed back through the same conversation engine and booking service.
-- [x] Correlate realtime response creation, audio, cancellation, and completion by application request ID and provider response ID; serialize replies through a bounded FIFO and reject stale audio.
+- [x] Correlate realtime response creation, audio, cancellation, and completion by application request ID and provider response ID; schedule typed replies by input generation/workflow priority, suppress superseded output, and reject stale audio.
 - [x] Fail closed on missing GA transcription confidence, apply profile-aware mean/low-tail/VAD-coherence admission, and keep rejected noise out of conversation state.
 - [x] Retain the legacy buffered-Realtime rollback path that verifies canonical operational facts in the completed audio transcript before release.
 - [x] Add dashboard-selectable low-latency streaming TTS that keeps Realtime input-only, converts raw provider PCM 24 kHz through a stateful anti-aliasing resampler to Twilio PCMU 8 kHz, sends a bounded 200 ms startup block, then drains a bounded backpressure queue at one 160-byte frame per 20 ms, flushes short replies safely, and retains buffered Realtime as a legacy rollback mode.
-- [x] Cancel streaming speech on barge-in, clear Twilio playback, reject stale generations, and close terminal replies only after a Twilio playback mark or timeout.
+- [x] Gate new TTS while caller speech/transcription is active, cancel streaming speech immediately on barge-in, let backend output supersede stale recovery/progress, enforce a recovery first-byte budget, reject stale generations, and latch terminal replies through one playback mark, interruption close, or timeout.
 - [x] Expose owner-scoped, PII-free realtime admission and output-validation diagnostics in the Calls timeline without transcript or audio bodies.
 - [x] Keep operational facts deterministic and allow guarded LLM rewriting only for explicitly style-only replies.
 - [x] Persist structured service consultation profiles with stable `(salon_id, service_id)` ownership, controlled values, owner-approved copy, no-op identical retries, revision increments only when data changes, and a fail-closed `ready` contract requiring both a recommended outcome and compatible current system.

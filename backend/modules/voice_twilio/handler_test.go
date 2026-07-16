@@ -483,7 +483,7 @@ func TestStreamingSpeechBargeInClearsTwilioAndCancelsSpeech(t *testing.T) {
 		func(value any) error { writes <- value; return nil },
 		"MZ123", "CA123", "session_phone", "+13125550101", "+13125550102",
 		"Welcome to Lotus Nails.", map[string]struct{}{}, nil,
-		realtimeTerminalDrainTimeout, 0, realtimeBackendProgressDelay, time.Now,
+		realtimeTerminalDrainTimeout, realtimeBargeInGuard, realtimeBackendProgressDelay, time.Now,
 		&streamingSpeechOutput{salonID: "salon_1"},
 	)
 
@@ -809,7 +809,7 @@ func TestStreamingSpeechWritesTerminalMarkOnlyAfterPlayoutDrain(t *testing.T) {
 	waitForTimingStages(t, store, []string{"tts_stream_done", "tts_playout_done", "twilio_playback_done"})
 }
 
-func TestForwardRealtimeEventsKeepsAllBackendRepliesInFIFOOrder(t *testing.T) {
+func TestForwardRealtimeEventsSuppressesSupersededBackendReplies(t *testing.T) {
 	adapter, service, _, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("unused", conversation.StatusActive, conversation.OutcomeCollecting))
 	engine.messageReplies = []string{"First backend reply.", "Second backend reply.", "Third backend reply."}
 	engine.messageCompleted = make(chan struct{}, 3)
@@ -835,12 +835,165 @@ func TestForwardRealtimeEventsKeepsAllBackendRepliesInFIFOOrder(t *testing.T) {
 	}
 
 	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
-	if got := waitForSpeak(t, realtime); got != "Second backend reply." {
-		t.Fatalf("second speak = %q", got)
-	}
-	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
 	if got := waitForSpeak(t, realtime); got != "Third backend reply." {
-		t.Fatalf("third speak = %q", got)
+		t.Fatalf("next speak = %q, want latest completed caller generation", got)
+	}
+	assertNoSpeak(t, realtime)
+}
+
+func TestEnqueueRealtimeReplyLetsBackendSupersedeRecoveryAndProgress(t *testing.T) {
+	pending := []realtimeQueuedReply{
+		{message: "noise recovery", kind: realtimeReplyRecovery, inputGeneration: 2},
+		{message: "still checking", kind: realtimeReplyProgress, inputGeneration: 1},
+		{message: "older backend", kind: realtimeReplyBackend, inputGeneration: 1},
+	}
+	pending = enqueueRealtimeReply(pending, realtimeQueuedReply{message: "current backend", kind: realtimeReplyBackend, inputGeneration: 2})
+	if len(pending) != 1 || pending[0].kind != realtimeReplyBackend || pending[0].message != "current backend" {
+		t.Fatalf("pending replies = %#v", pending)
+	}
+	pending = enqueueRealtimeReply(pending, realtimeQueuedReply{message: "goodbye", kind: realtimeReplyTerminal, inputGeneration: 2})
+	if len(pending) != 1 || pending[0].kind != realtimeReplyTerminal {
+		t.Fatalf("terminal did not replace pending replies: %#v", pending)
+	}
+}
+
+func TestForwardRealtimeEventsBackendReplySupersedesDeferredNoiseRecovery(t *testing.T) {
+	adapter, service, _, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Which service sounds closest to what you want?", conversation.StatusActive, conversation.OutcomeCollecting))
+	engine.messageDelay = 80 * time.Millisecond
+	engine.messageStarted = make(chan struct{}, 1)
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go handler.forwardRealtimeEvents(ctx, cancel, closeStreamRecorder(make(chan string, 1)), realtime, func(any) error { return nil }, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{}, nil)
+
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_guidance", Transcript: "I'm undecided about the treatment."}
+	select {
+	case <-engine.messageStarted:
+	case <-time.After(time.Second):
+		t.Fatal("backend turn did not start")
+	}
+	realtime.events <- voice.RealtimeEvent{
+		Type: voice.RealtimeEventTranscriptDone, ItemID: "item_noise", Transcript: "background television",
+		TranscriptLogProbs: []float64{-2.3, -1.9},
+	}
+	if got := waitForSpeak(t, realtime); got != "Which service sounds closest to what you want?" {
+		t.Fatalf("first speak = %q, want backend reply instead of stale recovery", got)
+	}
+	assertNoSpeak(t, realtime)
+}
+
+func TestForwardRealtimeEventsDefersBackendTTSWhileCallerIsSpeaking(t *testing.T) {
+	adapter, service, _, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Would you like help narrowing down the service?", conversation.StatusActive, conversation.OutcomeCollecting))
+	engine.messageDelay = 60 * time.Millisecond
+	engine.messageStarted = make(chan struct{}, 1)
+	engine.messageCompleted = make(chan struct{}, 1)
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go handler.forwardRealtimeEvents(ctx, cancel, closeStreamRecorder(make(chan string, 1)), realtime, func(any) error { return nil }, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{}, nil)
+
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_first", Transcript: "Please help me choose."}
+	select {
+	case <-engine.messageStarted:
+	case <-time.After(time.Second):
+		t.Fatal("backend turn did not start")
+	}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStarted, ItemID: "item_followup", AudioStartMS: 400}
+	select {
+	case <-engine.messageCompleted:
+	case <-time.After(time.Second):
+		t.Fatal("backend turn did not complete")
+	}
+	assertNoSpeak(t, realtime)
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStopped, ItemID: "item_followup", AudioEndMS: 900}
+	assertNoSpeak(t, realtime)
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_followup", Transcript: ""}
+	if got := waitForSpeak(t, realtime); got != "Would you like help narrowing down the service?" {
+		t.Fatalf("deferred speak = %q", got)
+	}
+}
+
+func TestStreamingRecoveryFirstByteTimeoutCancelsLowPrioritySpeech(t *testing.T) {
+	adapter, _, store, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Which service would you like?", conversation.StatusActive, conversation.OutcomeCollecting))
+	streamer := &fakeStreamingSpeechProvider{
+		started: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{}, 1), firstChunk: []byte{}, secondChunk: []byte{},
+	}
+	service := voice.NewService(store, engine, config.VoiceConfig{
+		Provider: voice.ProviderTwilio,
+		AI:       config.VoiceAIConfig{Provider: voice.ProviderOpenAI, OpenAI: config.OpenAIVoiceConfig{SpeechVoice: "alloy"}},
+	}, voice.AIProviders{StreamingTTS: streamer})
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes := make(chan any, 4)
+
+	go handler.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
+		ctx, cancel, closeStreamRecorder(make(chan string, 1)), realtime,
+		func(value any) error { writes <- value; return nil },
+		"MZ123", "CA123", "session_phone", "+13125550101", "+13125550102",
+		"", map[string]struct{}{}, nil,
+		realtimeTerminalDrainTimeout, realtimeBargeInGuard, realtimeBackendProgressDelay, time.Now,
+		&streamingSpeechOutput{salonID: "salon_1", firstByteTimeout: 20 * time.Millisecond},
+	)
+
+	realtime.events <- voice.RealtimeEvent{
+		Type: voice.RealtimeEventTranscriptDone, ItemID: "item_noise", Transcript: "room noise",
+		TranscriptLogProbs: []float64{-2.5, -2.0},
+	}
+	select {
+	case <-streamer.started:
+	case <-time.After(time.Second):
+		t.Fatal("recovery speech did not start")
+	}
+	select {
+	case <-streamer.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("recovery speech was not canceled after first-byte budget")
+	}
+	assertNoWrite(t, writes)
+	waitForTimingStages(t, store, []string{"tts_first_byte_timeout", "tts_playout_done"})
+}
+
+func TestStreamingBackendReplyCancelsActiveRecoverySpeech(t *testing.T) {
+	adapter, _, store, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Tell me the result you want, and I'll help narrow it down.", conversation.StatusActive, conversation.OutcomeCollecting))
+	streamer := &supersedingStreamingSpeechProvider{calls: make(chan string, 2), firstCanceled: make(chan struct{}, 1)}
+	service := voice.NewService(store, engine, config.VoiceConfig{
+		Provider: voice.ProviderTwilio,
+		Twilio:   config.TwilioVoiceConfig{AuthToken: "secret"},
+		AI:       config.VoiceAIConfig{Provider: voice.ProviderOpenAI, OpenAI: config.OpenAIVoiceConfig{SpeechVoice: "alloy"}},
+	}, voice.AIProviders{StreamingTTS: streamer})
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go handler.forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
+		ctx, cancel, closeStreamRecorder(make(chan string, 1)), realtime, func(any) error { return nil },
+		"MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", "", map[string]struct{}{}, nil,
+		realtimeTerminalDrainTimeout, realtimeBargeInGuard, realtimeBackendProgressDelay, time.Now,
+		&streamingSpeechOutput{salonID: "salon_1", firstByteTimeout: time.Second},
+	)
+
+	realtime.events <- voice.RealtimeEvent{
+		Type: voice.RealtimeEventTranscriptDone, ItemID: "item_noise", Transcript: "background television",
+		TranscriptLogProbs: []float64{-2.3, -1.9},
+	}
+	if first := waitForSpeechProviderCall(t, streamer.calls); !strings.Contains(first, "say that again") {
+		t.Fatalf("first speech call = %q, want recovery", first)
+	}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_guidance", Transcript: "I want help choosing a low-maintenance option."}
+	select {
+	case <-streamer.firstCanceled:
+	case <-time.After(time.Second):
+		t.Fatalf("active recovery speech was not canceled by backend output: %#v", store.eventsSnapshot())
+	}
+	if second := waitForSpeechProviderCall(t, streamer.calls); second != "Tell me the result you want, and I'll help narrow it down." {
+		t.Fatalf("second speech call = %q, want current backend reply", second)
 	}
 }
 
@@ -1289,6 +1442,7 @@ func TestForwardRealtimeEventsRecordsTimingStages(t *testing.T) {
 		}
 		if event.Payload["stage"] == "transcript_done" {
 			foundTranscriptDiagnostics = event.Payload["item_id"] == "item_1" &&
+				event.Payload["input_generation"] == "1" &&
 				event.Payload["mean_logprob"] == "-0.3000" &&
 				event.Payload["min_logprob"] == "-0.4000" &&
 				event.Payload["token_count"] == "2" &&
@@ -1304,6 +1458,7 @@ func TestForwardRealtimeEventsRecordsTimingStages(t *testing.T) {
 				event.Payload["turn_interpreter_ms"] == "9" &&
 				event.Payload["turn_interpreter_path"] == conversation.TurnTimingPathFastLane &&
 				event.Payload["turn_interpreter_outcome"] == "skipped_fast_lane" &&
+				event.Payload["input_generation"] == "1" &&
 				event.Payload["save_turn_ms"] == "5"
 		}
 	}
@@ -1350,6 +1505,7 @@ func TestForwardRealtimeEventsSuppressesInterruptedAudioUntilResponseDone(t *tes
 	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventAudioDelta, AudioBase64: "stale-audio"}
 	assertNoWrite(t, writes)
 	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStopped, ItemID: "item_2"}
 	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_2", Transcript: "please continue"}
 	_ = waitForSpeak(t, realtime)
 	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventAudioDelta, AudioBase64: "fresh-audio"}
@@ -1555,6 +1711,59 @@ func TestForwardRealtimeEventsClosesTerminalReplyImmediatelyWhenNoAudioWasSent(t
 	assertNoWrite(t, writes)
 }
 
+func TestForwardRealtimeEventsTerminalLatchRejectsFurtherCallerTurns(t *testing.T) {
+	completed := phoneSessionWithAIReply("The request is finished. Thank you, goodbye.", conversation.StatusCompleted, conversation.OutcomeBookingConfirmed)
+	completed.BookingAttemptID = "attempt_terminal_latch"
+	completed.AppointmentID = "appointment_terminal_latch"
+	adapter, service, _, engine := testTwilioRuntimeWithStore(completed)
+	engine.messageStarted = make(chan struct{}, 2)
+	handler := NewHandler(adapter, service)
+	realtime := newFakeRealtimeSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	closed := make(chan string, 1)
+	writes := make(chan any, 4)
+	marks := make(chan string, 1)
+
+	go handler.forwardRealtimeEventsWithRealtimePolicy(ctx, cancel, closeStreamRecorder(closed), realtime, func(value any) error {
+		writes <- value
+		return nil
+	}, "MZ123", "CA123", "session_phone", "+13125550101", "+13125550102", map[string]struct{}{}, marks, realtimeTerminalDrainTimeout, 0, time.Now)
+
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_terminal", Transcript: "Finish it."}
+	select {
+	case <-engine.messageStarted:
+	case <-time.After(time.Second):
+		t.Fatal("terminal backend turn did not start")
+	}
+	_ = waitForSpeak(t, realtime)
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventAudioDelta, AudioBase64: "terminal-audio"}
+	if _, ok := waitForWrite(t, writes).(twilioOutboundMedia); !ok {
+		t.Fatal("terminal response should begin media playback")
+	}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStarted, ItemID: "item_after_terminal", AudioStartMS: 100}
+	if got := waitForWrite(t, writes); got != (twilioClearMessage{Event: "clear", StreamSid: "MZ123"}) {
+		t.Fatalf("terminal interruption write = %#v", got)
+	}
+	_ = waitForCancel(t, realtime)
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventSpeechStopped, ItemID: "item_after_terminal", AudioEndMS: 600}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_after_terminal", Transcript: "Please start another request."}
+	select {
+	case <-engine.messageStarted:
+		t.Fatal("terminal latch allowed a second backend turn")
+	case <-time.After(100 * time.Millisecond):
+	}
+	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventResponseDone}
+	mark, ok := waitForWrite(t, writes).(twilioOutboundMark)
+	if !ok {
+		t.Fatalf("terminal latch should drain through a mark: %#v", mark)
+	}
+	marks <- mark.Mark.Name
+	if got := waitForClose(t, closed); got != "response_complete" {
+		t.Fatalf("close reason = %q", got)
+	}
+}
+
 func TestForwardRealtimeEventsClosesTerminalReplyOnPlaybackTimeout(t *testing.T) {
 	completed := phoneSessionWithAIReply("You're confirmed with Lotus Nails for your Classic Manicure. Thank you, goodbye.", conversation.StatusCompleted, conversation.OutcomeBookingConfirmed)
 	completed.BookingAttemptID = "attempt_voice"
@@ -1587,7 +1796,7 @@ func TestForwardRealtimeEventsClosesTerminalReplyOnPlaybackTimeout(t *testing.T)
 	}
 }
 
-func TestForwardRealtimeEventsInvalidatesTerminalMarkOnCallerInterruption(t *testing.T) {
+func TestForwardRealtimeEventsClosesLatchedTerminalMarkOnCallerInterruption(t *testing.T) {
 	completed := phoneSessionWithAIReply("You're confirmed with Lotus Nails for your Classic Manicure. Thank you, goodbye.", conversation.StatusCompleted, conversation.OutcomeBookingConfirmed)
 	completed.BookingAttemptID = "attempt_voice"
 	completed.AppointmentID = "appointment_voice"
@@ -1619,8 +1828,10 @@ func TestForwardRealtimeEventsInvalidatesTerminalMarkOnCallerInterruption(t *tes
 	if got := waitForWrite(t, writes); got != (twilioClearMessage{Event: "clear", StreamSid: "MZ123"}) {
 		t.Fatalf("write = %#v, want clear", got)
 	}
+	if got := waitForClose(t, closed); got != "terminal_reply_interrupted" {
+		t.Fatalf("close reason = %q, want terminal_reply_interrupted", got)
+	}
 	marks <- markWrite.Mark.Name
-	assertNoClose(t, closed)
 }
 
 func TestForwardRealtimeEventsKeepsTerminalMarkOnEarlyPlaybackNoise(t *testing.T) {
@@ -2004,6 +2215,36 @@ type burstStreamingSpeechProvider struct {
 type immediateStreamingSpeechProvider struct {
 	calls     chan string
 	callCount atomic.Int32
+}
+
+type supersedingStreamingSpeechProvider struct {
+	calls         chan string
+	firstCanceled chan struct{}
+	callCount     atomic.Int32
+}
+
+func (f *supersedingStreamingSpeechProvider) Name() string { return voice.ProviderOpenAI }
+
+func (f *supersedingStreamingSpeechProvider) Configured(context.Context, string) bool { return true }
+
+func (f *supersedingStreamingSpeechProvider) StreamSpeech(ctx context.Context, _ string, input voice.SpeechStreamRequest, onChunk func(voice.SpeechChunk) error) (voice.SpeechStreamResult, error) {
+	callNumber := f.callCount.Add(1)
+	f.calls <- input.Text
+	if callNumber == 1 {
+		<-ctx.Done()
+		select {
+		case f.firstCanceled <- struct{}{}:
+		default:
+		}
+		return voice.SpeechStreamResult{}, ctx.Err()
+	}
+	audio := bytes.Repeat([]byte{0x44}, streamingSpeechStartupBytes)
+	if err := onChunk(voice.SpeechChunk{Sequence: 0, Audio: audio}); err != nil {
+		return voice.SpeechStreamResult{}, err
+	}
+	return voice.SpeechStreamResult{
+		ProviderRequestID: "provider_superseding_2", Encoding: "audio/x-mulaw", SampleRate: 8000, ChunkCount: 1, AudioBytes: len(audio),
+	}, nil
 }
 
 func (f *immediateStreamingSpeechProvider) Name() string { return voice.ProviderOpenAI }

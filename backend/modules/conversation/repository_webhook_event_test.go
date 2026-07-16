@@ -33,6 +33,9 @@ func TestApplyWebhookPayloadExposesOnlySafeRealtimeDiagnostics(t *testing.T) {
 		"write_max_ms":          "3",
 		"rejection_streak":      "3",
 		"recovery_action":       "noise_coaching",
+		"input_generation":      "3",
+		"reply_kind":            "backend_turn",
+		"reply_suppressed":      "stale_input_generation",
 		"route_config_ms":       "12",
 		"session_load_ms":       "8",
 		"answer_context_ms":     "4",
@@ -77,6 +80,9 @@ func TestApplyWebhookPayloadExposesOnlySafeRealtimeDiagnostics(t *testing.T) {
 	}
 	if item.Diagnostics["rejection_streak"] != "3" || item.Diagnostics["recovery_action"] != "noise_coaching" {
 		t.Fatalf("recovery diagnostics = %#v", item.Diagnostics)
+	}
+	if item.Diagnostics["input_generation"] != "3" || item.Diagnostics["reply_kind"] != "backend_turn" || item.Diagnostics["reply_suppressed"] != "stale_input_generation" {
+		t.Fatalf("reply scheduler diagnostics = %#v", item.Diagnostics)
 	}
 	for key, want := range map[string]string{
 		"route_config_ms":       "12",

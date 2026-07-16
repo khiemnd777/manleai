@@ -68,6 +68,7 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 	}
 	semanticServices := plan.SemanticServices
 	semanticStaff := plan.SemanticStaff
+	semanticContract := semanticContractForTurnPlan(session, plan)
 	interpretCtx, cancel := context.WithTimeout(ctx, semanticTurnTimeout)
 	defer cancel()
 	interpreted, err := s.turnInterpreter.InterpretTurn(interpretCtx, TurnInterpretationRequest{
@@ -76,6 +77,7 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 		Channel:             session.Channel,
 		CustomerMessage:     sanitizedTurnInterpreterMessage(message, session),
 		ExpectedInput:       plan.ExpectedInput,
+		SemanticContract:    semanticContract,
 		SelectedServices:    conversationServiceRefs(selectedServiceOptions(session, services)),
 		CatalogServices:     conversationServiceRefs(semanticServices),
 		SelectedStaff:       conversationStaffRefs(selectedStaffOptions(session, staff)),
@@ -96,6 +98,7 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 		fallback.Reason = "semantic_interpreter_" + fallback.InterpreterOutcome
 		attributes := map[string]string{
 			"turn_interpreter_outcome": fallback.InterpreterOutcome,
+			"turn_semantic_contract":   semanticContract,
 			"turn_model_service_count": strconv.Itoa(len(semanticServices)),
 			"turn_model_staff_count":   strconv.Itoa(len(semanticStaff)),
 		}
@@ -117,6 +120,7 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 		interpreted.InterpreterOutcome = TurnInterpreterOutcomeAccepted
 		recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathStructuredAI, map[string]string{
 			"turn_interpreter_outcome": interpreted.InterpreterOutcome,
+			"turn_semantic_contract":   semanticContract,
 		})
 		return interpreted
 	}
@@ -136,6 +140,7 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 			fallback.Reason = "semantic_interpreter_empty_understanding"
 			recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathProviderFallback, map[string]string{
 				"turn_interpreter_outcome": fallback.InterpreterOutcome,
+				"turn_semantic_contract":   semanticContract,
 			})
 			return fallback
 		}
@@ -143,6 +148,7 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 		if shouldUseCatalogServiceEditFallback(session, message, catalogUnderstanding) {
 			recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathStructuredAI, map[string]string{
 				"turn_interpreter_outcome": "catalog_fallback",
+				"turn_semantic_contract":   semanticContract,
 			})
 			return TurnUnderstanding{
 				Goal:                  validated.Goal,
@@ -161,6 +167,7 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 		validated = reconcileDeterministicInformationQuestions(message, validated)
 		recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathStructuredAI, map[string]string{
 			"turn_interpreter_outcome": validated.InterpreterOutcome,
+			"turn_semantic_contract":   semanticContract,
 		})
 		return validated
 	}
@@ -168,8 +175,28 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 	fallback.Reason = "semantic_interpretation_" + fallback.InterpreterOutcome
 	recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathProviderFallback, map[string]string{
 		"turn_interpreter_outcome": fallback.InterpreterOutcome,
+		"turn_semantic_contract":   semanticContract,
 	})
 	return fallback
+}
+
+func semanticContractForTurnPlan(session Session, plan TurnPlan) string {
+	if plan.Route != TurnRouteSemanticLane || plan.DeterministicCoverage != TurnCoverageNone {
+		return TurnSemanticContractFull
+	}
+	if plan.ExpectedInput != ExpectedInputCallerGoal && plan.ExpectedInput != ExpectedInputService {
+		return TurnSemanticContractFull
+	}
+	state := normalizedDialogState(session.DialogState)
+	if state.Pending != nil || state.Phase == DialogPhaseReview || activePartyPlan(session.PartyPlan) {
+		return TurnSemanticContractFull
+	}
+	if strings.TrimSpace(session.ServiceID) != "" || len(session.BookingSegments) > 0 ||
+		strings.TrimSpace(session.RequestedDate) != "" || session.RequestedStartTime != nil || len(session.OfferedSlots) > 0 ||
+		strings.TrimSpace(session.CustomerName) != "" || strings.TrimSpace(session.StaffID) != "" {
+		return TurnSemanticContractFull
+	}
+	return TurnSemanticContractGuidance
 }
 
 func turnInterpreterDiagnosticAttributes(diagnostics map[string]string) map[string]string {

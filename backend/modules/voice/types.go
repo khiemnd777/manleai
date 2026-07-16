@@ -200,6 +200,7 @@ type TurnModelRequest struct {
 	Channel             string
 	CustomerMessage     string
 	ExpectedInput       string
+	SemanticContract    string
 	SelectedServices    []conversation.ConversationServiceRef
 	CatalogServices     []conversation.ConversationServiceRef
 	SelectedStaff       []conversation.ConversationStaffRef

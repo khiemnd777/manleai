@@ -29,8 +29,7 @@ type Adapter struct {
 }
 
 type turnContractCircuit struct {
-	configFingerprint string
-	error             voice.ProviderRequestError
+	error voice.ProviderRequestError
 }
 
 type OpenAIConfigResolver interface {
@@ -203,20 +202,28 @@ func (a *Adapter) InterpretTurn(ctx context.Context, req voice.TurnModelRequest)
 }
 
 func (a *Adapter) CheckTurnContract(ctx context.Context, salonID string) (voice.TurnContractCheck, error) {
-	req := voice.TurnModelRequest{
-		SalonID:         strings.TrimSpace(salonID),
-		Channel:         "semantic_contract_check",
-		CustomerMessage: "Validate the structured turn contract without proposing any operation.",
-		ExpectedInput:   "contract_validation",
+	contracts := []string{conversation.TurnSemanticContractFull, conversation.TurnSemanticContractGuidance}
+	fingerprints := make([]string, 0, len(contracts))
+	for _, contract := range contracts {
+		fingerprint, err := structuredOutputSchemaFingerprint(turnUnderstandingSchemaForContract(contract))
+		if err != nil {
+			return voice.TurnContractCheck{}, err
+		}
+		fingerprints = append(fingerprints, fingerprint)
 	}
-	reply, err := a.interpretTurn(ctx, req, true)
-	_ = reply
-	schemaFingerprint, fingerprintErr := structuredOutputSchemaFingerprint(turnUnderstandingSchema())
-	if fingerprintErr != nil {
-		return voice.TurnContractCheck{}, fingerprintErr
-	}
-	check := voice.TurnContractCheck{Provider: voice.ProviderOpenAI, SchemaFingerprint: schemaFingerprint}
-	if err != nil {
+	check := voice.TurnContractCheck{Provider: voice.ProviderOpenAI, SchemaFingerprint: turnContractSetFingerprint(fingerprints)}
+	for _, contract := range contracts {
+		req := voice.TurnModelRequest{
+			SalonID:          strings.TrimSpace(salonID),
+			Channel:          "semantic_contract_check",
+			CustomerMessage:  "Validate the structured turn contract without proposing any operation.",
+			ExpectedInput:    "contract_validation",
+			SemanticContract: contract,
+		}
+		_, err := a.interpretTurn(ctx, req, true)
+		if err == nil {
+			continue
+		}
 		var providerErr *voice.ProviderRequestError
 		if errors.As(err, &providerErr) {
 			check.RequestID = strings.TrimSpace(providerErr.RequestID)
@@ -234,7 +241,8 @@ func (a *Adapter) interpretTurn(ctx context.Context, req voice.TurnModelRequest,
 	if !enabled || strings.TrimSpace(cfg.APIKey) == "" || strings.TrimSpace(cfg.ReplyModel) == "" {
 		return voice.TurnModelReply{}, voice.ErrProviderDisabled
 	}
-	schema := turnUnderstandingSchema()
+	contract := normalizedTurnSemanticContract(req.SemanticContract)
+	schema := turnUnderstandingSchemaForContract(contract)
 	if err := validateStructuredOutputSchema(schema); err != nil {
 		return voice.TurnModelReply{}, fmt.Errorf("%w: %v", voice.ErrTurnModelInvalidOutput, err)
 	}
@@ -249,37 +257,12 @@ func (a *Adapter) interpretTurn(ctx context.Context, req voice.TurnModelRequest,
 		}
 	}
 	payload := responseRequest{
-		Model: strings.TrimSpace(cfg.ReplyModel),
-		Instructions: strings.Join([]string{
-			"Interpret one caller turn for a US nail salon receptionist.",
-			"expected_input describes the state-owned field or decision currently awaiting an answer; use it as context, not as a closed vocabulary.",
-			"Return structured operations and questions only; never write a customer-facing reply.",
-			"A turn may contain multiple operations and questions. Preserve their spoken order.",
-			"Use only service and category IDs present in catalog_services.",
-			"Use only staff IDs present in catalog_staff.",
-			"Distinguish the salon catalog from the caller's current booking draft.",
-			"For replacements, preserve source (what is being replaced) separately from target (the new service).",
-			"Use guest_scope=another_guest only when the caller explicitly assigns the added service to another person.",
-			"For an existing party plan, set guest_ref to an exact current_draft.party_groups guest_ref for every service mutation; never flatten guest groups.",
-			"A pending clarification is context, not a restriction: a clearly different new target may supersede it.",
-			"For an initial concrete service selection, emit add_service with entity=service and the catalog target ID.",
-			"Represent questions about the current draft as questions with subject=current_booking.",
-			"For availability constraints, set time_preference.direction to before, after, or exact and time_preference.minutes to salon-local minutes after midnight. Use direction empty and minutes -1 when no time constraint is present.",
-			"A final-review acceptance may coexist with a correction; include both and never suppress the correction.",
-			"Use set_field or clear_field for staff, date/time, guest, or customer-field corrections.",
-			"For a customer-name correction, emit set_field with entity=customer, subject=name, and value equal to the corrected name.",
-			"For a request to use a different technician without naming one, emit set_field with entity=staff, subject=alternative, and no target ID; never choose a technician for the caller.",
-			"Do not infer booking confirmation, availability, customer identity, prices, or policy.",
-			"For consultation, extract only the caller's stated current nail system, desired outcome, length change, priorities, desired finishes, compared catalog service IDs, booking request, and whether the caller is done. Never recommend a service in model output.",
-			"For every consultation preference stated or corrected in this turn, emit a field-level mutation. Use set for an initial value, replace for a correction, add or remove for list items, and clear only when the caller explicitly withdraws the field. Never treat a negated value as an addition.",
-			"Classify safety.concern=true for pain, injury, infection, allergy, bleeding, swelling, adverse reaction, or a request for medical suitability or treatment advice. This safety classification applies regardless of the caller's booking or consultation goal.",
-			"Use empty strings and arrays when consultation details are not present. Do not infer health suitability or treatment claims.",
-			"Return strict JSON matching the schema.",
-		}, "\n"),
-		Input: turnModelInput(req),
+		Model:        strings.TrimSpace(cfg.ReplyModel),
+		Instructions: strings.Join(turnUnderstandingInstructions(contract), "\n"),
+		Input:        turnModelInput(req),
 		Text: responseTextFormat{Format: responseFormat{
 			Type:   "json_schema",
-			Name:   "turn_understanding",
+			Name:   turnUnderstandingSchemaName(contract),
 			Schema: schema,
 			Strict: true,
 		}},
@@ -306,7 +289,7 @@ func (a *Adapter) interpretTurn(ctx context.Context, req voice.TurnModelRequest,
 		}
 		return voice.TurnModelReply{}, err
 	}
-	a.clearTurnCircuit(req.SalonID)
+	a.clearTurnCircuit(req.SalonID, configFingerprint)
 	text := strings.TrimSpace(res.OutputText)
 	if text == "" {
 		text = strings.TrimSpace(res.firstText())
@@ -441,6 +424,12 @@ func turnContractConfigFingerprint(cfg config.OpenAIVoiceConfig, schemaFingerpri
 	return fmt.Sprintf("sha256:%x", sum[:12])
 }
 
+func turnContractSetFingerprint(schemaFingerprints []string) string {
+	raw := strings.Join(schemaFingerprints, "\x00")
+	sum := sha256.Sum256([]byte(raw))
+	return fmt.Sprintf("sha256:%x", sum[:12])
+}
+
 func isNonRetryableTurnContractFailure(err *voice.ProviderRequestError) bool {
 	if err == nil || err.StatusCode < 400 || err.StatusCode >= 500 {
 		return false
@@ -462,8 +451,7 @@ func (a *Adapter) openTurnCircuit(salonID string, configFingerprint string, prov
 	if a.turnCircuits == nil {
 		a.turnCircuits = map[string]turnContractCircuit{}
 	}
-	a.turnCircuits[strings.TrimSpace(salonID)] = turnContractCircuit{
-		configFingerprint: configFingerprint,
+	a.turnCircuits[turnCircuitKey(salonID, configFingerprint)] = turnContractCircuit{
 		error: voice.ProviderRequestError{
 			Provider: providerErr.Provider, Stage: providerErr.Stage, StatusCode: providerErr.StatusCode,
 			RequestID: providerErr.RequestID, ErrorType: providerErr.ErrorType, ErrorCode: providerErr.ErrorCode,
@@ -478,13 +466,9 @@ func (a *Adapter) openTurnCircuitError(salonID string, configFingerprint string)
 	}
 	a.circuitMu.Lock()
 	defer a.circuitMu.Unlock()
-	key := strings.TrimSpace(salonID)
+	key := turnCircuitKey(salonID, configFingerprint)
 	circuit, ok := a.turnCircuits[key]
 	if !ok {
-		return nil
-	}
-	if circuit.configFingerprint != configFingerprint {
-		delete(a.turnCircuits, key)
 		return nil
 	}
 	err := circuit.error
@@ -493,13 +477,17 @@ func (a *Adapter) openTurnCircuitError(salonID string, configFingerprint string)
 	return &err
 }
 
-func (a *Adapter) clearTurnCircuit(salonID string) {
+func (a *Adapter) clearTurnCircuit(salonID string, configFingerprint string) {
 	if a == nil {
 		return
 	}
 	a.circuitMu.Lock()
-	delete(a.turnCircuits, strings.TrimSpace(salonID))
+	delete(a.turnCircuits, turnCircuitKey(salonID, configFingerprint))
 	a.circuitMu.Unlock()
+}
+
+func turnCircuitKey(salonID string, configFingerprint string) string {
+	return strings.TrimSpace(salonID) + "\x00" + strings.TrimSpace(configFingerprint)
 }
 
 func validateStructuredOutputSchema(schema map[string]any) error {
@@ -778,11 +766,75 @@ func turnUnderstandingSchema() map[string]any {
 	}
 }
 
+func normalizedTurnSemanticContract(contract string) string {
+	if strings.TrimSpace(contract) == conversation.TurnSemanticContractGuidance {
+		return conversation.TurnSemanticContractGuidance
+	}
+	return conversation.TurnSemanticContractFull
+}
+
+func turnUnderstandingSchemaForContract(contract string) map[string]any {
+	schema := turnUnderstandingSchema()
+	if normalizedTurnSemanticContract(contract) != conversation.TurnSemanticContractGuidance {
+		return schema
+	}
+	properties := schema["properties"].(map[string]any)
+	delete(properties, "acts")
+	delete(properties, "questions")
+	schema["required"] = []string{"goal", "confidence", "reason", "consultation", "safety"}
+	return schema
+}
+
+func turnUnderstandingSchemaName(contract string) string {
+	if normalizedTurnSemanticContract(contract) == conversation.TurnSemanticContractGuidance {
+		return "guidance_turn_understanding"
+	}
+	return "turn_understanding"
+}
+
+func turnUnderstandingInstructions(contract string) []string {
+	shared := []string{
+		"Interpret one caller turn for a US nail salon receptionist.",
+		"expected_input describes the state-owned field or decision currently awaiting an answer; use it as context, not as a closed vocabulary.",
+		"Use only service and category IDs present in catalog_services.",
+		"Do not infer booking confirmation, availability, customer identity, prices, or policy.",
+		"For consultation, extract only the caller's stated current nail system, desired outcome, length change, priorities, desired finishes, compared catalog service IDs, booking request, and whether the caller is done. Never recommend a service in model output.",
+		"For every consultation preference stated or corrected in this turn, emit a field-level mutation. Use set for an initial value, replace for a correction, add or remove for list items, and clear only when the caller explicitly withdraws the field. Never treat a negated value as an addition.",
+		"Classify safety.concern=true for pain, injury, infection, allergy, bleeding, swelling, adverse reaction, or a request for medical suitability or treatment advice. This safety classification applies regardless of the caller's booking or consultation goal.",
+		"Use empty strings and arrays when consultation details are not present. Do not infer health suitability or treatment claims.",
+		"Return strict JSON matching the schema.",
+	}
+	if normalizedTurnSemanticContract(contract) == conversation.TurnSemanticContractGuidance {
+		return append([]string{
+			"The dialog is awaiting the caller's goal or the kind of service guidance they want.",
+			"Return only the caller goal, extraction-only consultation details, confidence, reason, and safety assessment; never create booking operations or questions.",
+		}, shared...)
+	}
+	return append([]string{
+		"Return structured operations and questions only; never write a customer-facing reply.",
+		"A turn may contain multiple operations and questions. Preserve their spoken order.",
+		"Use only staff IDs present in catalog_staff.",
+		"Distinguish the salon catalog from the caller's current booking draft.",
+		"For replacements, preserve source (what is being replaced) separately from target (the new service).",
+		"Use guest_scope=another_guest only when the caller explicitly assigns the added service to another person.",
+		"For an existing party plan, set guest_ref to an exact current_draft.party_groups guest_ref for every service mutation; never flatten guest groups.",
+		"A pending clarification is context, not a restriction: a clearly different new target may supersede it.",
+		"For an initial concrete service selection, emit add_service with entity=service and the catalog target ID.",
+		"Represent questions about the current draft as questions with subject=current_booking.",
+		"For availability constraints, set time_preference.direction to before, after, or exact and time_preference.minutes to salon-local minutes after midnight. Use direction empty and minutes -1 when no time constraint is present.",
+		"A final-review acceptance may coexist with a correction; include both and never suppress the correction.",
+		"Use set_field or clear_field for staff, date/time, guest, or customer-field corrections.",
+		"For a customer-name correction, emit set_field with entity=customer, subject=name, and value equal to the corrected name.",
+		"For a request to use a different technician without naming one, emit set_field with entity=staff, subject=alternative, and no target ID; never choose a technician for the caller.",
+	}, shared...)
+}
+
 func turnModelInput(req voice.TurnModelRequest) string {
 	raw, _ := json.Marshal(map[string]any{
 		"channel":               req.Channel,
 		"customer_message":      req.CustomerMessage,
 		"expected_input":        req.ExpectedInput,
+		"semantic_contract":     normalizedTurnSemanticContract(req.SemanticContract),
 		"selected_services":     req.SelectedServices,
 		"catalog_services":      req.CatalogServices,
 		"selected_staff":        req.SelectedStaff,

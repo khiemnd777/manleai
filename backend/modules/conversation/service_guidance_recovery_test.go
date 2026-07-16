@@ -92,6 +92,50 @@ func TestGuidanceRecoveryOfferedActionsComeFromRuntimeCatalogAndReadyProfiles(t 
 	}
 }
 
+func TestGuidanceProviderFailurePromptOnlyOffersStateOwnedActions(t *testing.T) {
+	tests := []struct {
+		name      string
+		state     GuidanceRecoveryState
+		want      []string
+		doNotWant []string
+	}{
+		{
+			name: "catalog and consultation stay actionable",
+			state: GuidanceRecoveryState{Stage: GuidanceRecoveryStageService, OfferedActions: []string{
+				guidanceRecoveryActionCatalog, guidanceRecoveryActionNameService, guidanceRecoveryActionConsultation,
+			}},
+			want: []string{"bookable menu", "one question at a time"},
+		},
+		{
+			name: "catalog without ready profiles does not invent consultation",
+			state: GuidanceRecoveryState{Stage: GuidanceRecoveryStageService, OfferedActions: []string{
+				guidanceRecoveryActionCatalog, guidanceRecoveryActionNameService,
+			}},
+			want: []string{"bookable service", "read the menu"}, doNotWant: []string{"narrow down"},
+		},
+		{
+			name:  "missing catalog never offers a menu",
+			state: GuidanceRecoveryState{Stage: GuidanceRecoveryStageService},
+			want:  []string{"don't have a bookable service menu", "owner"}, doNotWant: []string{"read the menu"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prompt := guidanceProviderFailurePrompt(test.state)
+			for _, phrase := range test.want {
+				if !strings.Contains(prompt, phrase) {
+					t.Fatalf("prompt %q does not contain %q", prompt, phrase)
+				}
+			}
+			for _, phrase := range test.doNotWant {
+				if strings.Contains(prompt, phrase) {
+					t.Fatalf("prompt %q unexpectedly contains %q", prompt, phrase)
+				}
+			}
+		})
+	}
+}
+
 func TestNormalizedDialogStatePromotesLegacyGuidanceWithoutSQLMigration(t *testing.T) {
 	state := normalizedDialogState(DialogState{
 		Version: DialogStateVersion - 1, Phase: DialogPhaseClarifying,

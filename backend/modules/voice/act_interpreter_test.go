@@ -36,11 +36,12 @@ func TestGuardedTurnInterpreterMapsStructuredResultWithoutPIIExpansion(t *testin
 	}}
 	interpreter := NewGuardedTurnInterpreter(provider)
 	turn, err := interpreter.InterpretTurn(context.Background(), conversation.TurnInterpretationRequest{
-		SalonID:         "salon_1",
-		SessionID:       "session_1",
-		Channel:         conversation.ChannelPhone,
-		CustomerMessage: "Make that a spa pedicure instead.",
-		ExpectedInput:   conversation.ExpectedInputService,
+		SalonID:          "salon_1",
+		SessionID:        "session_1",
+		Channel:          conversation.ChannelPhone,
+		CustomerMessage:  "Make that a spa pedicure instead.",
+		ExpectedInput:    conversation.ExpectedInputService,
+		SemanticContract: conversation.TurnSemanticContractFull,
 		SelectedServices: []conversation.ConversationServiceRef{{
 			ServiceID: "service_gel", ServiceName: "Gel Manicure",
 		}},
@@ -55,7 +56,8 @@ func TestGuardedTurnInterpreterMapsStructuredResultWithoutPIIExpansion(t *testin
 	if act.Kind != conversation.ConversationActReplace || act.Source != "structured_ai" || act.Confidence != 0.94 {
 		t.Fatalf("act = %#v", act)
 	}
-	if provider.request.CustomerMessage != "Make that a spa pedicure instead." || provider.request.SalonID != "salon_1" || provider.request.ExpectedInput != conversation.ExpectedInputService {
+	if provider.request.CustomerMessage != "Make that a spa pedicure instead." || provider.request.SalonID != "salon_1" ||
+		provider.request.ExpectedInput != conversation.ExpectedInputService || provider.request.SemanticContract != conversation.TurnSemanticContractFull {
 		t.Fatalf("provider request = %#v", provider.request)
 	}
 }

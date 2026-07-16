@@ -26,6 +26,7 @@ func (g *GuardedTurnInterpreter) InterpretTurn(ctx context.Context, req conversa
 		Channel:             req.Channel,
 		CustomerMessage:     req.CustomerMessage,
 		ExpectedInput:       req.ExpectedInput,
+		SemanticContract:    req.SemanticContract,
 		SelectedServices:    append([]conversation.ConversationServiceRef(nil), req.SelectedServices...),
 		CatalogServices:     append([]conversation.ConversationServiceRef(nil), req.CatalogServices...),
 		SelectedStaff:       append([]conversation.ConversationStaffRef(nil), req.SelectedStaff...),

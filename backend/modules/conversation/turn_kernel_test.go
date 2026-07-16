@@ -227,9 +227,11 @@ func (i *immediateTimeoutTurnInterpreter) InterpretTurn(ctx context.Context, req
 type deadlineCapturingTurnInterpreter struct {
 	deadline  time.Time
 	remaining time.Duration
+	request   TurnInterpretationRequest
 }
 
 func (i *deadlineCapturingTurnInterpreter) InterpretTurn(ctx context.Context, req TurnInterpretationRequest) (TurnUnderstanding, error) {
+	i.request = req
 	i.deadline, _ = ctx.Deadline()
 	i.remaining = time.Until(i.deadline)
 	return TurnUnderstanding{}, nil
@@ -248,6 +250,43 @@ func TestTurnKernelAppliesSemanticTimeoutBudget(t *testing.T) {
 	service.turnUnderstandingForPlan(context.Background(), session, "I need some help choosing.", services, nil, nil, nil, plan)
 	if interpreter.deadline.IsZero() || interpreter.remaining <= semanticTurnTimeout-250*time.Millisecond || interpreter.remaining > semanticTurnTimeout {
 		t.Fatalf("semantic deadline budget = %s, want approximately %s", interpreter.remaining, semanticTurnTimeout)
+	}
+	if interpreter.request.SemanticContract != TurnSemanticContractGuidance {
+		t.Fatalf("semantic contract = %q, want %q", interpreter.request.SemanticContract, TurnSemanticContractGuidance)
+	}
+}
+
+func TestTurnKernelKeepsFullSemanticContractOutsideInitialGuidanceState(t *testing.T) {
+	basePlan := TurnPlan{
+		Route: TurnRouteSemanticLane, ExpectedInput: ExpectedInputService, DeterministicCoverage: TurnCoverageNone,
+	}
+	tests := []struct {
+		name    string
+		session Session
+		plan    TurnPlan
+	}{
+		{
+			name: "existing service may be corrected with unseen wording",
+			session: Session{
+				ServiceID: "gel", BookingSegments: []booking.BookingSegmentRequest{{ServiceID: "gel"}},
+				DialogState: DialogState{Version: DialogStateVersion, Phase: DialogPhaseDrafting},
+			},
+			plan: basePlan,
+		},
+		{
+			name:    "multi signal turn needs operations and questions",
+			session: Session{DialogState: DialogState{Version: DialogStateVersion, Phase: DialogPhaseDrafting}},
+			plan: TurnPlan{
+				Route: TurnRouteSemanticLane, ExpectedInput: ExpectedInputService, DeterministicCoverage: TurnCoveragePartial,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := semanticContractForTurnPlan(test.session, test.plan); got != TurnSemanticContractFull {
+				t.Fatalf("semantic contract = %q, want %q", got, TurnSemanticContractFull)
+			}
+		})
 	}
 }
 

@@ -210,12 +210,18 @@ type TurnInterpreter interface {
 	InterpretTurn(ctx context.Context, req TurnInterpretationRequest) (TurnUnderstanding, error)
 }
 
+const (
+	TurnSemanticContractFull     = "full_turn"
+	TurnSemanticContractGuidance = "guidance_turn"
+)
+
 type TurnInterpretationRequest struct {
 	SalonID             string
 	SessionID           string
 	Channel             string
 	CustomerMessage     string
 	ExpectedInput       string
+	SemanticContract    string
 	SelectedServices    []ConversationServiceRef
 	CatalogServices     []ConversationServiceRef
 	SelectedStaff       []ConversationStaffRef

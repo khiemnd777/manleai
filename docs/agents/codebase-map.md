@@ -154,11 +154,11 @@ triage keyword table.
 | Square adapter | `backend/modules/pos_square/*` | Square OAuth, locations, atomic location-scoped generation-fenced sync with fail-closed freshness, Catalog `available_for_booking`/duration eligibility, active Team plus bookable Booking Profile intersection, Square payloads, salon-local availability ranges, dashboard test create/cancel safe-retry forwarding, provider-fenced booking-list pagination with cross-location rejection, token refresh, provider write outcome/error mapping, signed booking-webhook ingestion with root/nested location consistency, exact tenant routing across recoverable connection states, claim-token-fenced event processing and scheduled calendar repair | `backend/modules/pos_square/*_test.go` |
 | Booking | `backend/modules/booking/*` | Active-provider-scoped new booking/availability resolution, end-to-end location/generation provider fences, owner-scoped operation-key replay before mutable validation, origin-location-fenced historical appointment actions, durable operation claims/logical fingerprints/leases, phase-aware idempotent lease recovery (`not_started` safe versus `in_flight` unknown unless exact calendar truth converges), single-use availability quotes, bounded reference-preserving quote retention cleanup, mapping- and target-validated safe-retry lineage/supersession, confirmed appointments, fallback/provider pending, reconciliation task/candidate/resolve APIs, authoritative backend retry policy, advisory-first direct/fallback/lease convergence with exact canonical/raw provider mirror proof, provider-fenced zero-write-stale calendar imports, monotonic calendar mirror writes, raw-identity-gated equal-version mapping enrichment, reschedule, cancel, POS idempotency, POS error/outbox writes | `backend/modules/booking/service_test.go`, `backend/modules/booking/quote_cleanup_processor_test.go`, `backend/modules/booking/repository_integration_test.go` |
 | Customers | `backend/modules/customer/*` | Canonical customer CRUD, archive, search, activity read model, provider customer lookup facade | `backend/modules/customer/service_test.go` |
-| Conversation runtime | `backend/modules/conversation/*` | Simulator/phone session state, per-session pre-side-effect serialization, state-revision CAS, event-stable exact historical reply replay, database-fenced/fail-closed answer-context caching, Turn Kernel routing, typed pending customer/staff/review state, intent, slot and backend quote preservation, pre-dispatch exact-slot refresh, all-child party quote preflight, service understanding, answer routing, booking tool routing, party booking planning, profile/state-driven mutation-owned consultation/safety, handoff, transcript metadata, retention | `backend/modules/conversation/*_test.go` |
+| Conversation runtime | `backend/modules/conversation/*` | Simulator/phone session state, per-session pre-side-effect serialization, state-revision CAS, event-stable exact historical reply replay, database-fenced/fail-closed answer-context caching, Turn Kernel routing and state-scoped full/guidance semantic contract selection, typed guidance recovery/actions, typed pending customer/staff/review state, intent, slot and backend quote preservation, pre-dispatch exact-slot refresh, all-child party quote preflight, service understanding, answer routing, booking tool routing, party booking planning, profile/state-driven mutation-owned consultation/safety, handoff, transcript metadata, retention | `backend/modules/conversation/*_test.go` |
 | Training | `backend/modules/training/*` | Knowledge items, owner corrections, correction apply/dismiss, service alias application, training evaluation | `backend/modules/training/service_test.go` |
 | Voice provider-neutral | `backend/modules/voice/*` | Voice readiness/status, owner-scoped semantic-contract verification, safe provider diagnostics, inbound routing, STT/LLM/TTS/realtime and streaming-speech interfaces, speech turns, audio output | `backend/modules/voice/*_test.go` |
-| Twilio adapter | `backend/modules/voice_twilio/*` | Twilio signatures, form parsing, TwiML, recording mode, Media Streams bridge | `backend/modules/voice_twilio/*_test.go` |
-| OpenAI voice adapter | `backend/modules/voice_openai/*` | OpenAI STT, strict structured-turn schema/input/output, salon/config/schema-scoped contract circuit, guarded operational/consultation-question reply, whole-response TTS, dedicated streaming Speech-to-PCMU conversion, Realtime input session | `backend/modules/voice_openai/*_test.go` |
+| Twilio adapter | `backend/modules/voice_twilio/*` | Twilio signatures, form parsing, TwiML, recording mode, Media Streams bridge, caller-input gate, typed reply scheduling, stale-generation suppression, recovery first-byte budget, terminal latch | `backend/modules/voice_twilio/*_test.go` |
+| OpenAI voice adapter | `backend/modules/voice_openai/*` | OpenAI STT, strict full/guidance structured-turn schemas and input/output, per-schema salon/config contract circuits, guarded operational/consultation-question reply, whole-response TTS, dedicated streaming Speech-to-PCMU conversion, Realtime input session | `backend/modules/voice_openai/*_test.go` |
 | Integration config | `backend/modules/integration_config/*` | Salon-scoped Square/Twilio/OpenAI runtime settings, encrypted secrets, dashboard-managed provider config | `backend/modules/integration_config/service_test.go` |
 | Configuration transfer | `backend/modules/config_transfer/*` | Sanitized schema v7 export/import preview/apply, scoped `included_sections` data packs, stable request IDs, portable service consultation profile resolution, skip secrets/operational records | `backend/modules/config_transfer/*_test.go` |
 | Public catalog API | `backend/modules/public_catalog/*` | Public-safe salon catalog read endpoints | `backend/modules/public_catalog/service_test.go` |
@@ -235,9 +235,11 @@ Conversation source-of-truth routing is mandatory:
   add-or-replace operation prompt. Pending replacement/removal, add-or-replace
   choice, and same-category scope require an existing selected service; an
   initial category-target clarification may retain only its candidate set.
-  Corrections, multi-intent turns, ambiguity, and
-  partial or unconsumed evidence enter the multi-act/question semantic contract
-  without a keyword-only gate. Semantic interpretation has a 2.5-second budget;
+  Initial caller-goal/service-guidance state with no booking progress uses the
+  compact `guidance_turn` semantic contract without acts/questions. Corrections,
+  multi-intent turns, ambiguity, pending/review/party state, existing booking
+  progress, and partial or unconsumed evidence use the full multi-act/question
+  contract without a keyword-only gate. Both contracts have a 2.5-second budget;
   typed timeout, provider, output, confidence, and catalog rejection outcomes
   preserve the draft. A non-accepted semantic outcome may still consume
   independently validated catalog and captured-field evidence before asking the
@@ -251,8 +253,10 @@ Conversation source-of-truth routing is mandatory:
   outcome, and progress fingerprint. Catalog menu or category progress resets
   both counters, exact catalog selection returns to the ordinary draft reducer,
   provider failure increments only the provider counter, and distinct bounded
-  handoff reasons separate provider unavailability from caller ambiguity. The
-  recovery is gated by dialog state plus typed evidence; it does not become the
+  handoff reasons separate provider unavailability from caller ambiguity.
+  Provider-failure copy is presentation over `offered_actions`: catalog and
+  ready-profile consultation options are offered only when present, and an empty
+  catalog cannot produce menu guidance. The recovery is gated by dialog state plus typed evidence; it does not become the
   primary caller-intent parser. Catalog
   validation owns referenced service/staff IDs;
   the reducer owns draft mutation and dependency invalidation; the planner owns
@@ -569,9 +573,13 @@ detail rather than part of the event title.
   one bounded 200 ms startup block, then drains a bounded backpressure queue on a
   monotonic 20 ms cadence instead of using provider HTTP chunk timing. Provider
   completion and Twilio playout completion are separate lifecycle stages. Replies
-  use a bounded FIFO,
-  application request IDs, explicit cancellation, Twilio clear/mark, and stale-generation
-  rejection. `buffered_realtime` is the legacy fallback that still binds provider
+  use a bounded typed scheduler with input generations and workflow priority;
+  backend results supersede stale recovery/progress output, no new TTS begins
+  during caller speech or pending transcription, and terminal output latches once.
+  Low-priority recovery TTS has a four-second first-provider-byte budget. Streaming
+  barge-in cancels immediately even within the legacy guard. Application request
+  IDs, Twilio clear/mark, and generation checks reject late audio.
+  `buffered_realtime` is the legacy fallback that still binds provider
   response IDs and validates the complete output transcript before release. GA input
   requires transcription logprobs and applies
   location-neutral policy-aware mean, low-tail, and VAD-coherence admission;
@@ -595,7 +603,8 @@ detail rather than part of the event title.
   route/config, session-load, answer-context, turn-router, semantic-interpreter,
   availability/POS, and turn-persistence durations through
   `backend/modules/voice/backend_turn_diagnostics.go`; it records only safe
-  router/interpreter labels, scoped-context counts, and bounded interpreter
+  router/interpreter labels including `turn_semantic_contract`, scoped-context
+  counts, reply kind/input generation/suppression, and bounded interpreter
   provider/status/stage/request-ID/error-type/error-code/error-parameter/schema-
   fingerprint/circuit correlation fields, never transcript,
   provider response body, or caller data. Speech output timing/failures retain correlation
@@ -730,8 +739,8 @@ detail rather than part of the event title.
 | name captured wrong, background phrase captured as name, pending customer name, salon/service/staff name collision, arbitrary utterance replaced name, bare phone name, service instead of name, spelling, phone/email, another technician, staff alternative | `service_customer_name.go`, `turn_reducer.go`, `turn_kernel.go` | typed dialog pending state, conversation golden tests, transcript audit metadata |
 | reschedule, cancel, move appointment, appointment target, ordinal option, day view, week view, month view, agenda, Tomorrow button, appointment warning | `service_intent.go`, `backend/modules/booking/service.go` | Appointments UI, POS Calendar UI, booking tests |
 | Twilio signature, webhook, TwiML, recording, media stream, stream fallback | `backend/modules/voice_twilio` | `backend/modules/voice`, phone demo memo |
-| OpenAI STT, TTS, realtime, model, voice, guarded reply, background noise, background-noise handling, automatic, strong noise rejection, false transcript, transcript logprob, repeated progress reply, spoken fact mismatch, clipped first syllable, stuttered TTS startup, startup audio buffer, realtime transport fallback | `backend/modules/voice_openai`, `backend/modules/voice`, `backend/modules/voice_twilio/handler.go` | integration config, conversation runtime, realtime event timeline, voice tests |
-| slow AI response, backend latency, backend_turn_done, turn_router_ms, turn_route, turn_expected_input, turn_interpreter_ms, turn_interpreter_outcome, turn_interpreter_failure_stage, turn_interpreter_http_status_class, turn_interpreter_request_id, availability_pos_ms, save_turn_ms, fast lane, semantic lane | `backend/modules/conversation/turn_kernel.go`, `backend/modules/voice/backend_turn_diagnostics.go`, `backend/modules/conversation/turn_timing.go`, `backend/modules/voice_twilio/handler.go` | conversation router/service/interpreter, provider availability/POS calls, Calls realtime event timeline, voice and conversation tests |
+| OpenAI STT, TTS, realtime, model, voice, guarded reply, background noise, background-noise handling, automatic, strong noise rejection, false transcript, transcript logprob, repeated progress reply, stale recovery reply, caller speaking over TTS, first-byte timeout, terminal reply repeated, spoken fact mismatch, clipped first syllable, stuttered TTS startup, startup audio buffer, realtime transport fallback | `backend/modules/voice_openai`, `backend/modules/voice`, `backend/modules/voice_twilio/handler.go` | integration config, conversation runtime, realtime event timeline, voice tests |
+| slow AI response, backend latency, backend_turn_done, turn_router_ms, turn_route, turn_expected_input, turn_semantic_contract, full_turn, guidance_turn, turn_interpreter_ms, turn_interpreter_outcome, turn_interpreter_failure_stage, turn_interpreter_http_status_class, turn_interpreter_request_id, input_generation, reply_kind, reply_suppressed, availability_pos_ms, save_turn_ms, fast lane, semantic lane | `backend/modules/conversation/turn_kernel.go`, `backend/modules/conversation/conversation_act.go`, `backend/modules/voice/backend_turn_diagnostics.go`, `backend/modules/conversation/turn_timing.go`, `backend/modules/voice_twilio/handler.go` | conversation router/service/interpreter, provider availability/POS calls, Calls realtime event timeline, voice and conversation tests |
 | AI tone, speaking style, concise/warm/professional | `backend/modules/salon`, `conversation.RuntimeConfig`, `voice.ModelRequest` | Settings UI, config transfer |
 | integration config, provider secrets, dashboard settings, active provider config, env fallback | `backend/modules/integration_config`, `/dashboard/integrations`, authenticated integration/status APIs | runtime resolver code first; deployment docs only for an explicitly scoped legacy fallback task |
 | public catalog, published slug, public services, landing page, staff privacy | `backend/modules/public_catalog`, `landing/app/s/[slug]/page.tsx` | Settings UI public catalog card |

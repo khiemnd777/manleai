@@ -27,6 +27,7 @@ const (
 	fallbackInputModeQuery       = "voice_fallback_mode"
 	realtimeTerminalDrainTimeout = 12 * time.Second
 	realtimeBargeInGuard         = 850 * time.Millisecond
+	realtimeRecoveryFirstByteTTL = 4 * time.Second
 	realtimeTurnTimeout          = 25 * time.Second
 	realtimeBackendProgressDelay = 3 * time.Second
 	realtimeBackendProgressReply = "Thanks. I'm checking that now."
@@ -499,6 +500,11 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	activeAudioChunks := []string{}
 	activeBufferedAudioBytes := 0
 	pendingReplies := []realtimeQueuedReply{}
+	callerSpeechActive := false
+	awaitingTranscriptItems := map[string]struct{}{}
+	inputGeneration := 0
+	latestAcceptedGeneration := 0
+	terminalLatched := false
 	pendingCloseMark := ""
 	closeDrainTimer := (<-chan time.Time)(nil)
 	markSequence := 0
@@ -538,6 +544,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	playoutWriteTotal := time.Duration(0)
 	playoutWriteMax := time.Duration(0)
 	firstSpeechChunkSeen := false
+	speechFirstByteTimer := (<-chan time.Time)(nil)
 	transcriptAdmission := newRealtimeTranscriptAdmissionController(realtime.TranscriptPolicy())
 	inputRecovery := realtimeInputRecovery{}
 	inputRecoveryFinalized := false
@@ -578,7 +585,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 		recordBackendClose(reason)
 		closeStream(reason)
 	}
-	var speakReply func(string, bool) bool
+	var speakReply func(realtimeReplyKind, string, bool, int) bool
 	startNextTurn := func() {
 		if turnInFlight || len(turnQueue) == 0 {
 			return
@@ -633,6 +640,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 		diagnostics := map[string]string{
 			"duration_ms":      durationMilliseconds(result.startedAt, result.completedAt),
 			"item_id":          result.task.itemID,
+			"input_generation": strconv.Itoa(result.task.inputGeneration),
 			"status":           status,
 			"progress_spoken":  strconv.FormatBool(turnProgressSpoken),
 			"queued_remaining": strconv.Itoa(len(turnQueue)),
@@ -642,9 +650,17 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 				diagnostics[key] = value
 			}
 		}
+		staleReply := result.task.inputGeneration < latestAcceptedGeneration && (result.reply == nil || result.reply.Continue)
+		if staleReply {
+			diagnostics["reply_suppressed"] = "stale_input_generation"
+		}
 		_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "backend_turn_done", result.startedAt, diagnostics)
+		if staleReply {
+			startNextTurn()
+			return true
+		}
 		if result.err != nil {
-			if !speakReply("I could not process that clearly. Please say it again, or the owner can help directly.", false) {
+			if !speakReply(realtimeReplyBackend, "I could not process that clearly. Please say it again, or the owner can help directly.", false, result.task.inputGeneration) {
 				return false
 			}
 			startNextTurn()
@@ -652,7 +668,8 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 		}
 		if result.reply != nil && strings.TrimSpace(result.reply.Message) != "" {
 			lastApprovedPrompt = strings.TrimSpace(result.reply.Message)
-			if streamingSpeech && responseActive && activeReply.message == realtimeBackendProgressReply && activeSpeechCancel != nil {
+			if streamingSpeech && responseActive &&
+				(activeReply.kind == realtimeReplyProgress || activeReply.kind == realtimeReplyRecovery) && activeSpeechCancel != nil {
 				activeInterrupted = true
 				suppressAudioUntilDone = true
 				streamingPlayout.Clear()
@@ -664,45 +681,53 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					_ = writeJSON(twilioClearMessage{Event: "clear", StreamSid: streamSID})
 				}
 			}
-			if !speakReply(result.reply.Message, !result.reply.Continue) {
-				return false
-			}
+			replyKind := realtimeReplyBackend
 			if !result.reply.Continue {
+				replyKind = realtimeReplyTerminal
 				turnQueue = nil
+			}
+			if !speakReply(replyKind, result.reply.Message, !result.reply.Continue, result.task.inputGeneration) {
+				return false
 			}
 		}
 		startNextTurn()
 		return true
 	}
 
-	speakReply = func(message string, closeAfter bool) bool {
+	speakReply = func(kind realtimeReplyKind, message string, closeAfter bool, generation int) bool {
 		message = strings.TrimSpace(message)
 		if message == "" {
 			return true
 		}
-		if responseActive {
-			if len(pendingReplies) >= realtimeReplyQueueLimit {
+		reply := realtimeQueuedReply{message: message, closeAfter: closeAfter, kind: kind, inputGeneration: generation}
+		if kind == realtimeReplyTerminal {
+			terminalLatched = true
+			turnQueue = nil
+			pendingReplies = nil
+		}
+		inputBusy := callerSpeechActive || len(awaitingTranscriptItems) > 0
+		waitForBackend := kind == realtimeReplyRecovery && (turnInFlight || len(turnQueue) > 0)
+		if responseActive || inputBusy || waitForBackend {
+			pendingReplies = enqueueRealtimeReply(pendingReplies, reply)
+			if len(pendingReplies) > realtimeReplyQueueLimit {
 				_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "reply_queue_overflow", errors.New("realtime reply queue limit exceeded"))
 				closeStream("realtime_reply_queue_overflow")
 				return false
 			}
-			pendingReplies = append(pendingReplies, realtimeQueuedReply{message: message, closeAfter: closeAfter})
 			return true
 		}
 		responseSequence++
-		reply := realtimeQueuedReply{
-			requestID:  "manleai-reply-" + strconv.Itoa(responseSequence),
-			message:    message,
-			closeAfter: closeAfter,
-		}
+		reply.requestID = "manleai-reply-" + strconv.Itoa(responseSequence)
 		activeResponseCreatedAt = now()
 		stage := "response_create"
 		if streamingSpeech {
 			stage = "tts_request_start"
 		}
 		_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, stage, time.Time{}, map[string]string{
-			"close_after": strconv.FormatBool(closeAfter),
-			"request_id":  reply.requestID,
+			"close_after":      strconv.FormatBool(closeAfter),
+			"input_generation": strconv.Itoa(generation),
+			"reply_kind":       string(kind),
+			"request_id":       reply.requestID,
 		})
 		responseActive = true
 		activeReply = reply
@@ -731,7 +756,15 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 		playoutWriteTotal = 0
 		playoutWriteMax = 0
 		firstSpeechChunkSeen = false
+		speechFirstByteTimer = nil
 		if streamingSpeech {
+			if kind == realtimeReplyRecovery {
+				firstByteTimeout := realtimeRecoveryFirstByteTTL
+				if streamingOutput.firstByteTimeout > 0 {
+					firstByteTimeout = streamingOutput.firstByteTimeout
+				}
+				speechFirstByteTimer = time.After(firstByteTimeout)
+			}
 			activeSpeechGeneration++
 			generation := activeSpeechGeneration
 			speechCtx, speechCancel := context.WithCancel(ctx)
@@ -785,12 +818,40 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	}
 
 	flushPendingReply := func() bool {
-		if len(pendingReplies) == 0 {
+		if responseActive || callerSpeechActive || len(awaitingTranscriptItems) > 0 || len(pendingReplies) == 0 {
 			return true
 		}
-		reply := pendingReplies[0]
-		pendingReplies = pendingReplies[1:]
-		return speakReply(reply.message, reply.closeAfter)
+		bestIndex := -1
+		bestPriority := -1
+		filtered := pendingReplies[:0]
+		for _, reply := range pendingReplies {
+			if reply.kind == realtimeReplyProgress && !turnInFlight {
+				continue
+			}
+			if reply.kind == realtimeReplyBackend && reply.inputGeneration < latestAcceptedGeneration {
+				continue
+			}
+			filtered = append(filtered, reply)
+		}
+		pendingReplies = filtered
+		for index, reply := range pendingReplies {
+			if terminalLatched && reply.kind != realtimeReplyTerminal {
+				continue
+			}
+			if (reply.kind == realtimeReplyBackend || reply.kind == realtimeReplyRecovery) && (turnInFlight || len(turnQueue) > 0) {
+				continue
+			}
+			if priority := realtimeReplyPriority(reply.kind); priority > bestPriority {
+				bestIndex = index
+				bestPriority = priority
+			}
+		}
+		if bestIndex < 0 {
+			return true
+		}
+		reply := pendingReplies[bestIndex]
+		pendingReplies = append(pendingReplies[:bestIndex], pendingReplies[bestIndex+1:]...)
+		return speakReply(reply.kind, reply.message, reply.closeAfter, reply.inputGeneration)
 	}
 
 	responseEventMatchesActive := func(event voice.RealtimeEvent) bool {
@@ -910,6 +971,8 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 			"underrun_count":      strconv.Itoa(playoutUnderrunCount),
 			"write_max_ms":        strconv.FormatInt(playoutWriteMax.Milliseconds(), 10),
 			"write_total_ms":      strconv.FormatInt(playoutWriteTotal.Milliseconds(), 10),
+			"reply_kind":          string(activeReply.kind),
+			"input_generation":    strconv.Itoa(activeReply.inputGeneration),
 		})
 		stopStreamingPlayoutTicker()
 		if activeSpeechCancel != nil {
@@ -925,9 +988,13 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 		suppressAudioUntilDone = false
 		streamingPlayout.Clear()
 		firstSpeechChunkSeen = false
+		speechFirstByteTimer = nil
 		speechProviderDone = false
 		if !flushPendingReply() {
 			return false
+		}
+		if completedCloseAfter && terminalLatched && !responseActive {
+			return beginTerminalCloseDrain(completedAudioSent)
 		}
 		if !hadPendingReply && completedCloseAfter && !completedInterrupted {
 			return beginTerminalCloseDrain(completedAudioSent)
@@ -936,8 +1003,11 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 	}
 
 	shouldInterruptPlayback := func() bool {
+		if streamingSpeech {
+			return responseActive
+		}
 		if playbackAudioStartedAt.IsZero() {
-			return streamingSpeech && responseActive
+			return false
 		}
 		if bargeInGuard <= 0 {
 			return true
@@ -945,7 +1015,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 		return !now().Before(playbackAudioStartedAt.Add(bargeInGuard))
 	}
 
-	if !speakReply(initialMessage, false) {
+	if !speakReply(realtimeReplyInitial, initialMessage, false, inputGeneration) {
 		return
 	}
 
@@ -984,9 +1054,31 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 			if turnInFlight && !turnProgressSpoken && !progressSpokenForCall && !responseActive && len(pendingReplies) == 0 {
 				turnProgressSpoken = true
 				progressSpokenForCall = true
-				if !speakReply(realtimeBackendProgressReply, false) {
+				if !speakReply(realtimeReplyProgress, realtimeBackendProgressReply, false, latestAcceptedGeneration) {
 					return
 				}
+			}
+		case <-speechFirstByteTimer:
+			speechFirstByteTimer = nil
+			if !streamingSpeech || !responseActive || firstSpeechChunkSeen || activeReply.kind != realtimeReplyRecovery {
+				continue
+			}
+			_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "tts_first_byte_timeout", activeResponseCreatedAt, map[string]string{
+				"request_id":       activeReply.requestID,
+				"reply_kind":       string(activeReply.kind),
+				"input_generation": strconv.Itoa(activeReply.inputGeneration),
+			})
+			activeInterrupted = true
+			suppressAudioUntilDone = true
+			streamingPlayout.Clear()
+			stopStreamingPlayoutTicker()
+			if activeSpeechCancel != nil {
+				activeSpeechCancel()
+			}
+			speechProviderDone = true
+			speechProviderResult = voice.SpeechStreamResult{}
+			if !completeStreamingReply() {
+				return
 			}
 		case result := <-turnResults:
 			if !handleTurnResult(result) {
@@ -1037,6 +1129,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 				lastSpeechChunkAt = streamed.arrivedAt
 				if !firstSpeechChunkSeen {
 					firstSpeechChunkSeen = true
+					speechFirstByteTimer = nil
 					firstSpeechChunkAt = streamed.arrivedAt
 					_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "tts_first_provider_chunk", time.Time{}, map[string]string{
 						"request_id":     streamed.requestID,
@@ -1044,6 +1137,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 						"sample_rate":    strconv.Itoa(streamingSpeechSampleRate),
 						"audio_bytes":    strconv.Itoa(len(streamed.chunk.Audio)),
 						"duration_ms":    durationMilliseconds(activeResponseCreatedAt, streamed.arrivedAt),
+						"reply_kind":     string(activeReply.kind),
 					})
 				}
 				if startup := streamingPlayout.Add(streamed.chunk.Audio); len(startup) > 0 && !sendStreamingStartupAudio(startup, "target_reached") {
@@ -1208,6 +1302,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					}
 				}
 			case voice.RealtimeEventSpeechStarted:
+				callerSpeechActive = true
 				if event.AudioStartMS >= 0 {
 					lastVADStartMS = event.AudioStartMS
 					if itemID := strings.TrimSpace(event.ItemID); itemID != "" {
@@ -1215,11 +1310,20 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					}
 				}
 				_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "speech_started", time.Time{}, nil)
-				if inputRecoveryFinalized {
+				if inputRecoveryFinalized && !terminalLatched {
 					continue
 				}
 				if !shouldInterruptPlayback() {
 					continue
+				}
+				if terminalLatched && !responseActive && pendingCloseMark != "" {
+					clearPendingCloseMark()
+					if streamSID != "" {
+						_ = writeJSON(twilioClearMessage{Event: "clear", StreamSid: streamSID})
+					}
+					cancel()
+					closeAfterBackendStop("terminal_reply_interrupted")
+					return
 				}
 				clearPendingCloseMark()
 				if streamSID != "" {
@@ -1244,6 +1348,10 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 				}
 			case voice.RealtimeEventSpeechStopped:
 				itemID := strings.TrimSpace(event.ItemID)
+				callerSpeechActive = false
+				if itemID != "" {
+					awaitingTranscriptItems[itemID] = struct{}{}
+				}
 				startMS := lastVADStartMS
 				if value, ok := vadStartByItem[itemID]; ok {
 					startMS = value
@@ -1257,26 +1365,40 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 					"vad_duration_ms": strconv.Itoa(vadDurationByItem[itemID]),
 				})
 			case voice.RealtimeEventTranscriptDone:
-				if inputRecoveryFinalized {
-					continue
-				}
 				itemID := strings.TrimSpace(event.ItemID)
+				delete(awaitingTranscriptItems, itemID)
 				clearVADDiagnostics := func() {
 					delete(vadStartByItem, itemID)
 					delete(vadDurationByItem, itemID)
 				}
+				if inputRecoveryFinalized || terminalLatched {
+					clearVADDiagnostics()
+					if !flushPendingReply() {
+						return
+					}
+					continue
+				}
 				transcript := strings.TrimSpace(event.Transcript)
 				if transcript == "" {
 					clearVADDiagnostics()
+					if !flushPendingReply() {
+						return
+					}
 					continue
 				}
 				key := itemID + "|" + strings.ToLower(transcript)
 				if _, exists := seenTranscripts[key]; exists {
 					clearVADDiagnostics()
+					if !flushPendingReply() {
+						return
+					}
 					continue
 				}
 				seenTranscripts[key] = struct{}{}
+				inputGeneration++
+				generation := inputGeneration
 				accepted, rejectionReason, diagnostics := transcriptAdmission.Admit(event, vadDurationByItem[itemID])
+				diagnostics["input_generation"] = strconv.Itoa(generation)
 				if !accepted {
 					recovery := inputRecovery.Reject(lastApprovedPrompt)
 					diagnostics["decision"] = "rejected"
@@ -1292,7 +1414,7 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 								"item_id": itemID,
 								"status":  "error",
 							})
-							if !speakReply(recoveryMessage("I don't want to get your details wrong. Please move closer to the phone or somewhere quieter, then answer once more.", lastApprovedPrompt), false) {
+							if !speakReply(realtimeReplyRecovery, recoveryMessage("I don't want to get your details wrong. Please move closer to the phone or somewhere quieter, then answer once more.", lastApprovedPrompt), false, generation) {
 								return
 							}
 							continue
@@ -1302,26 +1424,32 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 							"status":  "ok",
 						})
 						inputRecoveryFinalized = true
-						if !speakReply(reply.Message, !reply.Continue) {
+						replyKind := realtimeReplyRecovery
+						if !reply.Continue {
+							replyKind = realtimeReplyTerminal
+						}
+						if !speakReply(replyKind, reply.Message, !reply.Continue, generation) {
 							return
 						}
 						continue
 					}
-					if !speakReply(recovery.Message, false) {
+					if !speakReply(realtimeReplyRecovery, recovery.Message, false, generation) {
 						return
 					}
 					continue
 				}
 				inputRecovery.Reset()
+				latestAcceptedGeneration = generation
 				diagnostics["decision"] = "accepted"
 				diagnostics["reason"] = "confidence_and_vad_admitted"
 				_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "transcript_done", time.Time{}, diagnostics)
 				_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "transcript_admitted", time.Time{}, diagnostics)
 				clearVADDiagnostics()
 				turnQueue = append(turnQueue, realtimeTurnTask{
-					itemID:     itemID,
-					transcript: transcript,
-					queuedAt:   time.Now(),
+					itemID:          itemID,
+					transcript:      transcript,
+					inputGeneration: generation,
+					queuedAt:        time.Now(),
 				})
 				startNextTurn()
 			case voice.RealtimeEventResponseDone:
@@ -1399,8 +1527,15 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 				activeInterrupted = false
 				activeResponseCreatedAt = time.Time{}
 				suppressAudioUntilDone = false
+				speechFirstByteTimer = nil
 				if !flushPendingReply() {
 					return
+				}
+				if completedCloseAfter && terminalLatched && !responseActive {
+					if !beginTerminalCloseDrain(completedAudioSent) {
+						return
+					}
+					continue
 				}
 				if !hadPendingReply && completedCloseAfter && !completedInterrupted {
 					if !beginTerminalCloseDrain(completedAudioSent) {
@@ -1425,15 +1560,18 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 }
 
 type realtimeQueuedReply struct {
-	requestID  string
-	message    string
-	closeAfter bool
+	requestID       string
+	message         string
+	closeAfter      bool
+	kind            realtimeReplyKind
+	inputGeneration int
 }
 
 type realtimeTurnTask struct {
-	itemID     string
-	transcript string
-	queuedAt   time.Time
+	itemID          string
+	transcript      string
+	inputGeneration int
+	queuedAt        time.Time
 }
 
 type realtimeTurnResult struct {
@@ -1444,9 +1582,59 @@ type realtimeTurnResult struct {
 	completedAt time.Time
 }
 
+type realtimeReplyKind string
+
+const (
+	realtimeReplyInitial  realtimeReplyKind = "initial"
+	realtimeReplyBackend  realtimeReplyKind = "backend_turn"
+	realtimeReplyRecovery realtimeReplyKind = "input_recovery"
+	realtimeReplyProgress realtimeReplyKind = "progress"
+	realtimeReplyTerminal realtimeReplyKind = "terminal"
+)
+
+func enqueueRealtimeReply(pending []realtimeQueuedReply, reply realtimeQueuedReply) []realtimeQueuedReply {
+	if reply.kind == realtimeReplyTerminal {
+		return []realtimeQueuedReply{reply}
+	}
+	filtered := pending[:0]
+	for _, queued := range pending {
+		switch reply.kind {
+		case realtimeReplyBackend:
+			if queued.kind == realtimeReplyRecovery || queued.kind == realtimeReplyProgress ||
+				(queued.kind == realtimeReplyBackend && queued.inputGeneration <= reply.inputGeneration) {
+				continue
+			}
+		case realtimeReplyRecovery, realtimeReplyProgress:
+			if queued.kind == reply.kind {
+				continue
+			}
+		}
+		filtered = append(filtered, queued)
+	}
+	return append(filtered, reply)
+}
+
+func realtimeReplyPriority(kind realtimeReplyKind) int {
+	switch kind {
+	case realtimeReplyTerminal:
+		return 5
+	case realtimeReplyBackend:
+		return 4
+	case realtimeReplyInitial:
+		return 3
+	case realtimeReplyRecovery:
+		return 2
+	case realtimeReplyProgress:
+		return 1
+	default:
+		return 0
+	}
+}
+
 type streamingSpeechOutput struct {
-	salonID       string
-	tickerFactory func(time.Duration) streamingSpeechTicker
+	salonID          string
+	firstByteTimeout time.Duration
+	tickerFactory    func(time.Duration) streamingSpeechTicker
 }
 
 type streamingSpeechEvent struct {
