@@ -50,7 +50,7 @@ func (s *Service) handleServiceConsultation(ctx context.Context, ownerUserID str
 	}
 	next := cloneSessionForTurn(session)
 	dialog = normalizedDialogState(next.DialogState)
-	if isGuidanceRecoveryPrompt(dialog.LastPromptKey) {
+	if guidanceRecoveryStateActive(dialog.Guidance) {
 		resumePhase := DialogPhaseOpen
 		if hasOperationalBookingProgress(session) {
 			resumePhase = DialogPhaseDrafting

@@ -25,32 +25,116 @@ func (i *providerFailureTurnInterpreter) InterpretTurn(ctx context.Context, req 
 	})
 }
 
-func TestPhoneGuidanceRecoveryRespectsDisabledConsultationDuringProviderOutage(t *testing.T) {
+type staticGuidanceTurnInterpreter struct {
+	turn TurnUnderstanding
+}
+
+func (i *staticGuidanceTurnInterpreter) InterpretTurn(ctx context.Context, req TurnInterpretationRequest) (TurnUnderstanding, error) {
+	return i.turn, nil
+}
+
+func TestGuidanceRecoveryReducerSeparatesProviderFailureFromCallerNoProgress(t *testing.T) {
+	current := &GuidanceRecoveryState{
+		Stage: GuidanceRecoveryStageService, OfferedActions: []string{guidanceRecoveryActionCatalog},
+		NoProgressCount: 2, ProviderFailureCount: 0,
+	}
+	provider := reduceGuidanceRecoveryState(current, GuidanceRecoveryStageService, current.OfferedActions, guidanceRecoveryEvidence{
+		Kind: guidanceEvidenceProviderFailure, ProviderOutcome: TurnInterpreterOutcomeTimeout,
+	})
+	if provider.State.NoProgressCount != 2 || provider.State.ProviderFailureCount != 1 || provider.HandoffReason != "" {
+		t.Fatalf("provider transition = %#v", provider)
+	}
+	if current.ProviderFailureCount != 0 {
+		t.Fatalf("reducer mutated input = %#v", current)
+	}
+
+	progress := reduceGuidanceRecoveryState(provider.State, GuidanceRecoveryStageService, current.OfferedActions, guidanceRecoveryEvidence{
+		Kind: guidanceEvidenceCatalogMenu, ProviderOutcome: "skipped_answer_lane",
+	})
+	if progress.State.NoProgressCount != 0 || progress.State.ProviderFailureCount != 0 || progress.State.Stage != GuidanceRecoveryStageService {
+		t.Fatalf("progress transition = %#v", progress)
+	}
+
+	caller := reduceGuidanceRecoveryState(current, GuidanceRecoveryStageService, current.OfferedActions, guidanceRecoveryEvidence{
+		Kind: guidanceEvidenceCallerNoProgress, ProviderOutcome: TurnInterpreterOutcomeLowConfidence,
+	})
+	if caller.State.NoProgressCount != 3 || caller.State.ProviderFailureCount != 0 || caller.HandoffReason != HandoffReasonServiceClarification {
+		t.Fatalf("caller transition = %#v", caller)
+	}
+
+	providerAtLimit := *current
+	providerAtLimit.ProviderFailureCount = 1
+	providerHandoff := reduceGuidanceRecoveryState(&providerAtLimit, GuidanceRecoveryStageService, current.OfferedActions, guidanceRecoveryEvidence{
+		Kind: guidanceEvidenceProviderFailure, ProviderOutcome: TurnInterpreterOutcomeProviderError,
+	})
+	if providerHandoff.State.NoProgressCount != 2 || providerHandoff.State.ProviderFailureCount != 2 || providerHandoff.HandoffReason != HandoffReasonGuidanceProviderUnavailable {
+		t.Fatalf("provider handoff transition = %#v", providerHandoff)
+	}
+}
+
+func TestGuidanceRecoveryOfferedActionsComeFromRuntimeCatalogAndReadyProfiles(t *testing.T) {
+	services := []ServiceOption{{
+		ID: "classic", Name: "Classic Manicure",
+		ConsultationProfile: readyComparisonProfile(ConsultationOutcomeMaintain, ConsultationSystemNatural),
+	}}
+	disabled := guidanceRecoveryOfferedActions(GuidanceRecoveryStageService, services, &RuntimeConfig{ConsultationEnabled: false})
+	if !containsString(disabled, guidanceRecoveryActionCatalog) || !containsString(disabled, guidanceRecoveryActionNameService) || containsString(disabled, guidanceRecoveryActionConsultation) {
+		t.Fatalf("disabled consultation actions = %#v", disabled)
+	}
+	enabled := guidanceRecoveryOfferedActions(GuidanceRecoveryStageService, services, &RuntimeConfig{ConsultationEnabled: true})
+	if !containsString(enabled, guidanceRecoveryActionConsultation) {
+		t.Fatalf("ready consultation action missing = %#v", enabled)
+	}
+	draftProfile := append([]ServiceOption(nil), services...)
+	draftProfile[0].ConsultationProfile = &ServiceConsultationProfile{Status: "draft"}
+	if actions := guidanceRecoveryOfferedActions(GuidanceRecoveryStageService, draftProfile, &RuntimeConfig{ConsultationEnabled: true}); containsString(actions, guidanceRecoveryActionConsultation) {
+		t.Fatalf("draft profile exposed consultation action = %#v", actions)
+	}
+}
+
+func TestNormalizedDialogStatePromotesLegacyGuidanceWithoutSQLMigration(t *testing.T) {
+	state := normalizedDialogState(DialogState{
+		Version: DialogStateVersion - 1, Phase: DialogPhaseClarifying,
+		LastPromptKey: legacyPromptServiceGuidanceRecovery, NoProgressCount: 2,
+		ProviderFailureCount: 1, ProgressFingerprint: "legacy-fingerprint",
+	})
+	if state.Version != DialogStateVersion || state.Guidance == nil || state.Guidance.Stage != GuidanceRecoveryStageService {
+		t.Fatalf("normalized legacy state = %#v", state)
+	}
+	if state.Guidance.NoProgressCount != 2 || state.Guidance.ProviderFailureCount != 1 || state.Guidance.ProgressFingerprint != "legacy-fingerprint" {
+		t.Fatalf("promoted guidance counters = %#v", state.Guidance)
+	}
+	if state.LastPromptKey != "" || state.NoProgressCount != 0 || state.ProviderFailureCount != 0 || state.ProgressFingerprint != "" {
+		t.Fatalf("legacy guidance owner was not cleared = %#v", state)
+	}
+}
+
+func TestPhoneGuidanceRecoveryRespectsDisabledConsultationFromSemanticUnderstanding(t *testing.T) {
 	store := newFakeConversationStore()
 	store.session.Channel = ChannelPhone
 	store.cfg.ConsultationEnabled = false
 	bookingTool := &fakeBookingTool{}
 	service := NewService(store, bookingTool)
-	service.SetTurnInterpreter(&providerFailureTurnInterpreter{outcome: TurnInterpreterOutcomeProviderDisabled})
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: TurnUnderstanding{
+		Goal: "consultation", Confidence: 0.94, Reason: "caller_needs_service_guidance",
+	}})
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
-		Message: "I need advice choosing the right nail service.",
+		Message: "Could you walk me through what might suit me?",
 	})
 	if err != nil {
 		t.Fatalf("Message: %v", err)
 	}
-	if session.Intent != IntentUnknown || consultationStateActive(session.DialogState.Consultation) {
+	if session.Intent != IntentUnknown || consultationStateActive(session.DialogState.Consultation) || session.DialogState.Guidance != nil {
 		t.Fatalf("disabled consultation state = intent=%q dialog=%#v", session.Intent, session.DialogState)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "help choosing a service") {
+	if !strings.Contains(store.lastTurn.AIMessage, "not enabled") {
 		t.Fatalf("disabled consultation reply = %q", store.lastTurn.AIMessage)
 	}
-	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
-		t.Fatalf("disabled consultation called booking tools: create=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
-	}
+	assertGuidanceDidNotCallBookingTools(t, bookingTool)
 }
 
-func TestPhoneGuidanceRecoveryEntersConsultationDuringSemanticProviderFailure(t *testing.T) {
+func TestPhoneGuidanceRecoveryEntersConsultationFromNaturalSemanticParaphrase(t *testing.T) {
 	store := newFakeConversationStore()
 	store.session.Channel = ChannelPhone
 	store.session.CustomerPhone = "+13125550199"
@@ -59,48 +143,82 @@ func TestPhoneGuidanceRecoveryEntersConsultationDuringSemanticProviderFailure(t 
 		{ID: "spa_pedi", Name: "Spa Pedicure", CategoryID: "pedi", CategoryName: "Pedicure", ConsultationProfile: readyComparisonProfile(ConsultationOutcomeColorRefresh, ConsultationSystemGel)},
 	}
 	bookingTool := &fakeBookingTool{}
-	interpreter := &providerFailureTurnInterpreter{}
 	service := NewService(store, bookingTool)
-	service.SetTurnInterpreter(interpreter)
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: TurnUnderstanding{
+		Goal: "consultation", Confidence: 0.92, Reason: "caller_is_unsure_which_service_fits",
+	}})
 	service.SetReplyGenerator(&fakeReplyGenerator{message: "What result would you like from the service?"})
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
-		Message: "I'm new here and not sure where to begin.", EventKey: "turn_1",
+		Message: "I've never had this done and would love some direction.", EventKey: "semantic_guidance_1",
 	})
 	if err != nil {
-		t.Fatalf("first Message: %v", err)
-	}
-	if session.DialogState.LastPromptKey != promptCallerGoalGuidanceRecovery || session.DialogState.NoProgressCount != 1 {
-		t.Fatalf("first recovery state = %#v", session.DialogState)
-	}
-	if !strings.Contains(store.lastTurn.AIMessage, "help choosing a service") || strings.Contains(store.lastTurn.AIMessage, "Which service would you like?") {
-		t.Fatalf("first recovery reply = %q", store.lastTurn.AIMessage)
-	}
-	if got := store.lastTurn.CustomerMetadata["turn_interpreter_failure_stage"]; got != "turn_interpretation_response" {
-		t.Fatalf("failure stage metadata = %#v", got)
-	}
-	if got := store.lastTurn.CustomerMetadata["turn_interpreter_request_id"]; got != "req_safe_123" {
-		t.Fatalf("request id metadata = %#v", got)
-	}
-
-	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
-		Message: "Help me choose", EventKey: "turn_2",
-	})
-	if err != nil {
-		t.Fatalf("consultation Message: %v", err)
+		t.Fatalf("Message: %v", err)
 	}
 	if session.Intent != IntentConsultation || session.DialogState.Phase != DialogPhaseConsultation || !consultationStateActive(session.DialogState.Consultation) {
 		t.Fatalf("consultation state = intent=%q dialog=%#v", session.Intent, session.DialogState)
 	}
-	if store.lastTurn.AIMessage != "What result would you like from the service?" {
-		t.Fatalf("consultation reply = %q", store.lastTurn.AIMessage)
+	if session.DialogState.Guidance != nil || store.lastTurn.AIMessage != "What result would you like from the service?" {
+		t.Fatalf("consultation transition reply=%q dialog=%#v", store.lastTurn.AIMessage, session.DialogState)
 	}
-	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
-		t.Fatalf("guidance recovery called booking tools: create=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
-	}
+	assertGuidanceDidNotCallBookingTools(t, bookingTool)
 }
 
-func TestPhoneGuidanceRecoveryDoesNotInferConsultationFromReportedWordingDuringProviderFailure(t *testing.T) {
+func TestPhoneGuidanceRecoveryMenuProgressPreventsProviderFailureHandoff(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.Channel = ChannelPhone
+	store.services = []ServiceOption{
+		{ID: "classic_mani", Name: "Classic Manicure", CategoryID: "mani", CategoryName: "Manicure", ConsultationProfile: readyComparisonProfile(ConsultationOutcomeMaintain, ConsultationSystemNatural)},
+		{ID: "spa_pedi", Name: "Spa Pedicure", CategoryID: "pedi", CategoryName: "Pedicure", ConsultationProfile: readyComparisonProfile(ConsultationOutcomeColorRefresh, ConsultationSystemGel)},
+	}
+	bookingTool := &fakeBookingTool{}
+	interpreter := &providerFailureTurnInterpreter{outcome: TurnInterpreterOutcomeTimeout}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(interpreter)
+
+	messages := []string{
+		"I'm not sure where to start.",
+		"What services do you offer?",
+		"I only want something done for my nails.",
+	}
+	for index, message := range messages {
+		if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+			Message: message, EventKey: "menu_progress_" + strconv.Itoa(index+1),
+		}); err != nil {
+			t.Fatalf("Message %d: %v", index+1, err)
+		}
+		if index == 0 {
+			guidance := store.session.DialogState.Guidance
+			if guidance == nil || guidance.Stage != GuidanceRecoveryStageCallerGoal || guidance.ProviderFailureCount != 1 || guidance.NoProgressCount != 0 {
+				t.Fatalf("initial provider failure state = %#v", guidance)
+			}
+		}
+		if index == 1 {
+			guidance := store.session.DialogState.Guidance
+			if guidance == nil || guidance.Stage != GuidanceRecoveryStageService || guidance.ProviderFailureCount != 0 || guidance.NoProgressCount != 0 {
+				t.Fatalf("catalog progress state = %#v metadata=%#v", guidance, store.lastTurn.CustomerMetadata)
+			}
+			if !strings.Contains(store.lastTurn.AIMessage, "Classic Manicure") || !strings.Contains(store.lastTurn.AIMessage, "help narrow it down") {
+				t.Fatalf("catalog reply = %q", store.lastTurn.AIMessage)
+			}
+		}
+	}
+
+	session := store.session
+	guidance := session.DialogState.Guidance
+	if session.Status != StatusActive || session.Handoff != nil || guidance == nil || guidance.Stage != GuidanceRecoveryStageService {
+		t.Fatalf("final recovery session = status=%q handoff=%#v guidance=%#v", session.Status, session.Handoff, guidance)
+	}
+	if guidance.ProviderFailureCount != 1 || guidance.NoProgressCount != 0 || session.ServiceID != "" {
+		t.Fatalf("final recovery counters/service = guidance=%#v service=%q", guidance, session.ServiceID)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "trouble interpreting") || strings.Contains(store.lastTurn.AIMessage, "still not sure what help") {
+		t.Fatalf("provider recovery reply = %q", store.lastTurn.AIMessage)
+	}
+	assertGuidanceDidNotCallBookingTools(t, bookingTool)
+}
+
+func TestPhoneGuidanceRecoveryDoesNotInferConsultationFromWordingDuringProviderFailure(t *testing.T) {
 	store := newFakeConversationStore()
 	store.session.Channel = ChannelPhone
 	bookingTool := &fakeBookingTool{}
@@ -113,91 +231,103 @@ func TestPhoneGuidanceRecoveryDoesNotInferConsultationFromReportedWordingDuringP
 	if err != nil {
 		t.Fatalf("Message: %v", err)
 	}
-	if session.Intent != IntentUnknown || consultationStateActive(session.DialogState.Consultation) || session.DialogState.LastPromptKey != promptCallerGoalGuidanceRecovery {
+	guidance := session.DialogState.Guidance
+	if session.Intent != IntentUnknown || consultationStateActive(session.DialogState.Consultation) || guidance == nil || guidance.Stage != GuidanceRecoveryStageCallerGoal {
 		t.Fatalf("provider failure should preserve semantic uncertainty: intent=%q dialog=%#v reply=%q", session.Intent, session.DialogState, store.lastTurn.AIMessage)
 	}
-	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
-		t.Fatalf("reported wording called booking tools: create=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	if guidance.ProviderFailureCount != 1 || guidance.NoProgressCount != 0 {
+		t.Fatalf("provider failure counters = %#v", guidance)
 	}
+	assertGuidanceDidNotCallBookingTools(t, bookingTool)
 }
 
-func TestPhoneGuidanceRecoverySelectsCatalogServiceWithoutSemanticProvider(t *testing.T) {
+func TestPhoneGuidanceRecoverySelectsExactCatalogServiceWithoutSemanticProvider(t *testing.T) {
 	store := newFakeConversationStore()
 	store.session.Channel = ChannelPhone
 	store.services = []ServiceOption{{ID: "gel_mani", Name: "Gel Manicure", CategoryID: "mani", CategoryName: "Manicure"}}
 	bookingTool := &fakeBookingTool{}
-	interpreter := &providerFailureTurnInterpreter{}
 	service := NewService(store, bookingTool)
-	service.SetTurnInterpreter(interpreter)
+	service.SetTurnInterpreter(&providerFailureTurnInterpreter{})
 
-	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "I'm undecided.", EventKey: "turn_1"}); err != nil {
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "I'm undecided.", EventKey: "exact_1"}); err != nil {
 		t.Fatalf("recovery Message: %v", err)
 	}
-	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Gel Manicure, please.", EventKey: "turn_2"})
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Gel Manicure, please.", EventKey: "exact_2"})
 	if err != nil {
 		t.Fatalf("service selection Message: %v", err)
 	}
-	if session.ServiceID != "gel_mani" || session.Intent != IntentBooking {
-		t.Fatalf("selected service state = service=%q intent=%q", session.ServiceID, session.Intent)
-	}
-	if isGuidanceRecoveryPrompt(session.DialogState.LastPromptKey) || session.DialogState.NoProgressCount != 0 {
-		t.Fatalf("recovery state was not cleared: %#v", session.DialogState)
+	if session.ServiceID != "gel_mani" || session.Intent != IntentBooking || session.DialogState.Guidance != nil {
+		t.Fatalf("selected service state = service=%q intent=%q dialog=%#v", session.ServiceID, session.Intent, session.DialogState)
 	}
 	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "what day") {
 		t.Fatalf("next booking prompt = %q", store.lastTurn.AIMessage)
 	}
-	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
-		t.Fatalf("service collection called booking tools: create=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
-	}
+	assertGuidanceDidNotCallBookingTools(t, bookingTool)
 }
 
-func TestPhoneGuidanceRecoveryDoesNotTreatBareYesAfterMenuAsServiceSelection(t *testing.T) {
-	store := newFakeConversationStore()
-	store.session.Channel = ChannelPhone
-	store.services = []ServiceOption{
-		{ID: "classic_mani", Name: "Classic Manicure"},
-		{ID: "spa_pedi", Name: "Spa Pedicure"},
+func TestPhoneGuidanceRecoveryUsesOwnerManagedCategoryAliasButNotGenericNailsGuess(t *testing.T) {
+	services := []ServiceOption{
+		{ID: "classic_mani", Name: "Classic Manicure", CategoryID: "mani", CategoryName: "Manicure"},
+		{ID: "gel_mani", Name: "Gel Manicure", CategoryID: "mani", CategoryName: "Manicure"},
+		{ID: "spa_pedi", Name: "Spa Pedicure", CategoryID: "pedi", CategoryName: "Pedicure"},
 	}
-	bookingTool := &fakeBookingTool{}
-	service := NewService(store, bookingTool)
+
+	withAlias := newFakeConversationStore()
+	withAlias.session.Channel = ChannelPhone
+	withAlias.session.Intent = IntentBooking
+	withAlias.session.DialogState.Guidance = &GuidanceRecoveryState{Stage: GuidanceRecoveryStageService}
+	withAlias.services = services
+	withAlias.categoryAliases = []ServiceCategoryAlias{{ID: "alias_nails", CategoryID: "mani", CategoryName: "Manicure", Alias: "nails", NormalizedAlias: "nails"}}
+	service := NewService(withAlias, &fakeBookingTool{})
 	service.SetTurnInterpreter(&providerFailureTurnInterpreter{})
 
-	for index, message := range []string{"I'm undecided.", "List services", "Yes."} {
-		if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
-			Message: message, EventKey: "menu_turn_" + strconv.Itoa(index+1),
-		}); err != nil {
-			t.Fatalf("Message %d: %v", index+1, err)
-		}
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Just something for my nails.", EventKey: "alias_1"})
+	if err != nil {
+		t.Fatalf("alias Message: %v", err)
 	}
-	session := store.session
-	if session.ServiceID != "" || len(session.BookingSegments) != 0 {
-		t.Fatalf("bare yes selected a service: service=%q segments=%#v", session.ServiceID, session.BookingSegments)
+	if session.ServiceID != "" || session.DialogState.Guidance == nil || session.DialogState.Guidance.ProviderFailureCount != 0 {
+		t.Fatalf("category alias state = service=%q guidance=%#v", session.ServiceID, session.DialogState.Guidance)
 	}
-	if session.DialogState.LastPromptKey != promptServiceGuidanceRecovery || session.DialogState.ProviderFailureCount != 1 || !strings.Contains(store.lastTurn.AIMessage, "help me choose") {
-		t.Fatalf("bare yes recovery state=%#v reply=%q", session.DialogState, store.lastTurn.AIMessage)
+	if !strings.Contains(storeLower(withAlias.lastTurn.AIMessage), "classic manicure") || !strings.Contains(storeLower(withAlias.lastTurn.AIMessage), "gel manicure") || strings.Contains(storeLower(withAlias.lastTurn.AIMessage), "spa pedicure") {
+		t.Fatalf("category alias clarification = %q", withAlias.lastTurn.AIMessage)
 	}
-	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
-		t.Fatalf("menu recovery called booking tools: create=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+
+	withoutAlias := newFakeConversationStore()
+	withoutAlias.session.Channel = ChannelPhone
+	withoutAlias.session.Intent = IntentBooking
+	withoutAlias.session.DialogState.Guidance = &GuidanceRecoveryState{Stage: GuidanceRecoveryStageService}
+	withoutAlias.services = services
+	service = NewService(withoutAlias, &fakeBookingTool{})
+	service.SetTurnInterpreter(&providerFailureTurnInterpreter{})
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Just something for my nails.", EventKey: "no_alias_1"})
+	if err != nil {
+		t.Fatalf("no-alias Message: %v", err)
+	}
+	if session.ServiceID != "" || session.DialogState.Guidance == nil || session.DialogState.Guidance.ProviderFailureCount != 1 {
+		t.Fatalf("generic nails state = service=%q guidance=%#v", session.ServiceID, session.DialogState.Guidance)
+	}
+	if strings.Contains(storeLower(withoutAlias.lastTurn.AIMessage), "classic manicure") || strings.Contains(storeLower(withoutAlias.lastTurn.AIMessage), "gel manicure") {
+		t.Fatalf("generic nails guessed a category = %q", withoutAlias.lastTurn.AIMessage)
 	}
 }
 
-func TestPhoneGuidanceRecoveryBoundsNoProgressAndHandsOffOnce(t *testing.T) {
+func TestPhoneGuidanceRecoveryBoundsCallerNoProgressAndReplaysHandoffOnce(t *testing.T) {
 	store := newFakeConversationStore()
 	store.session.Channel = ChannelPhone
-	store.session.Intent = IntentBooking
 	bookingTool := &fakeBookingTool{}
-	interpreter := &providerFailureTurnInterpreter{}
 	service := NewService(store, bookingTool)
-	service.SetTurnInterpreter(interpreter)
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: TurnUnderstanding{Goal: "unknown", Confidence: 0.95}})
 
 	messages := []string{
 		"I need a little more time to decide.",
 		"That still doesn't resolve it for me.",
+		"I'm not ready to choose yet.",
 	}
 	var session *Session
 	for index, message := range messages {
 		var err error
-		session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: message, EventKey: "recovery_turn_" + strconv.Itoa(index+1)})
+		session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: message, EventKey: "no_progress_" + strconv.Itoa(index+1)})
 		if err != nil {
 			t.Fatalf("Message %d: %v", index+1, err)
 		}
@@ -205,18 +335,56 @@ func TestPhoneGuidanceRecoveryBoundsNoProgressAndHandsOffOnce(t *testing.T) {
 	if session.Status != StatusHandoff || session.Handoff == nil || session.Handoff.Reason != HandoffReasonServiceClarification {
 		t.Fatalf("bounded recovery result = status=%q handoff=%#v", session.Status, session.Handoff)
 	}
+	if session.DialogState.Guidance == nil || session.DialogState.Guidance.NoProgressCount != 3 || session.DialogState.Guidance.ProviderFailureCount != 0 {
+		t.Fatalf("bounded recovery counters = %#v", session.DialogState.Guidance)
+	}
 	if !strings.Contains(store.lastTurn.AIMessage, "not a confirmed appointment") {
 		t.Fatalf("handoff reply = %q", store.lastTurn.AIMessage)
 	}
-	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
-		t.Fatalf("bounded recovery called booking tools: create=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
-	}
 	transcriptLength := len(session.Transcript)
-	replayed, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: messages[1], EventKey: "recovery_turn_2"})
+	replayed, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: messages[2], EventKey: "no_progress_3"})
 	if err != nil {
 		t.Fatalf("handoff replay: %v", err)
 	}
 	if len(replayed.Transcript) != transcriptLength || replayed.Handoff == nil || replayed.Handoff.Reason != HandoffReasonServiceClarification {
 		t.Fatalf("handoff replay was not idempotent: transcript=%d want=%d handoff=%#v", len(replayed.Transcript), transcriptLength, replayed.Handoff)
 	}
+	assertGuidanceDidNotCallBookingTools(t, bookingTool)
+}
+
+func TestPhoneGuidanceRecoveryUsesDistinctProviderFailureHandoff(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.Channel = ChannelPhone
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&providerFailureTurnInterpreter{outcome: TurnInterpreterOutcomeTimeout})
+
+	for index, message := range []string{"I'm uncertain.", "I still need some direction."} {
+		if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+			Message: message, EventKey: "provider_failure_" + strconv.Itoa(index+1),
+		}); err != nil {
+			t.Fatalf("Message %d: %v", index+1, err)
+		}
+	}
+	if store.session.Status != StatusHandoff || store.session.Handoff == nil || store.session.Handoff.Reason != HandoffReasonGuidanceProviderUnavailable {
+		t.Fatalf("provider handoff = status=%q handoff=%#v", store.session.Status, store.session.Handoff)
+	}
+	if store.session.DialogState.Guidance == nil || store.session.DialogState.Guidance.NoProgressCount != 0 || store.session.DialogState.Guidance.ProviderFailureCount != 2 {
+		t.Fatalf("provider handoff counters = %#v", store.session.DialogState.Guidance)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "salon's service guidance") || !strings.Contains(store.lastTurn.AIMessage, "won't guess") {
+		t.Fatalf("provider handoff reply = %q", store.lastTurn.AIMessage)
+	}
+	assertGuidanceDidNotCallBookingTools(t, bookingTool)
+}
+
+func assertGuidanceDidNotCallBookingTools(t *testing.T, tool *fakeBookingTool) {
+	t.Helper()
+	if tool.calls != 0 || tool.availabilityCalls != 0 {
+		t.Fatalf("guidance recovery called booking tools: create=%d availability=%d", tool.calls, tool.availabilityCalls)
+	}
+}
+
+func storeLower(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }

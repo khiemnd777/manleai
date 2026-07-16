@@ -3,6 +3,21 @@ package conversation
 import "github.com/manleai/ai-receptionist/modules/booking"
 
 func normalizedDialogState(state DialogState) DialogState {
+	// Dialog state is persisted as JSONB. Promote the legacy guidance prompt
+	// fields into their typed owner before stamping the current schema version.
+	// Other users of the top-level prompt/counter fields remain unchanged.
+	if state.Guidance == nil && isLegacyGuidanceRecoveryPrompt(state.LastPromptKey) {
+		state.Guidance = &GuidanceRecoveryState{
+			Stage:                legacyGuidanceRecoveryStage(state.LastPromptKey),
+			NoProgressCount:      state.NoProgressCount,
+			ProviderFailureCount: state.ProviderFailureCount,
+			ProgressFingerprint:  state.ProgressFingerprint,
+		}
+		state.LastPromptKey = ""
+		state.NoProgressCount = 0
+		state.ProviderFailureCount = 0
+		state.ProgressFingerprint = ""
+	}
 	state.Version = DialogStateVersion
 	if state.Phase == "" {
 		state.Phase = DialogPhaseOpen
@@ -46,6 +61,11 @@ func normalizedDialogState(state DialogState) DialogState {
 		consultation.RecommendationReasons = cloneStringSliceMap(state.Consultation.RecommendationReasons)
 		consultation.LastInterpreterDiagnostics = cloneStringMap(state.Consultation.LastInterpreterDiagnostics)
 		state.Consultation = &consultation
+	}
+	if state.Guidance != nil {
+		guidance := *state.Guidance
+		guidance.OfferedActions = append([]string(nil), state.Guidance.OfferedActions...)
+		state.Guidance = &guidance
 	}
 	return state
 }
@@ -104,6 +124,7 @@ func resetDialogProgress(state DialogState, phase string) DialogState {
 	state.ProviderFailureCount = 0
 	state.ProgressFingerprint = ""
 	state.LastPromptKey = ""
+	state.Guidance = nil
 	state.ReviewAccepted = false
 	state.ReviewedRevision = 0
 	state.AuthorizedRevision = 0

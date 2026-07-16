@@ -242,12 +242,18 @@ Conversation source-of-truth routing is mandatory:
   preserve the draft. A non-accepted semantic outcome may still consume
   independently validated catalog and captured-field evidence before asking the
   next missing-field question. When the unresolved field is caller goal or
-  service, `service_guidance_recovery.go` owns a state-scoped fallback that
-  offers booking, catalog listing, or consultation choices, preserves exact
-  catalog selections, and separately bounds caller no-progress and repeated
-  semantic-provider failures before handoff. This
-  recovery is gated by dialog state plus a typed non-accepted interpreter
-  outcome; it does not become the primary caller-intent parser. Catalog
+  service, `service_guidance_recovery.go` owns a state-scoped evidence resolver
+  and pure state reducer. The resolver consumes typed `TurnUnderstanding`, Turn
+  Kernel answer/action decisions, and catalog/category evidence; it does not
+  parse freeform caller meaning with a recovery phrase list. Typed
+  `dialog_state.guidance` stores the current stage, dynamically available
+  actions, separate caller-no-progress/provider-failure counters, last provider
+  outcome, and progress fingerprint. Catalog menu or category progress resets
+  both counters, exact catalog selection returns to the ordinary draft reducer,
+  provider failure increments only the provider counter, and distinct bounded
+  handoff reasons separate provider unavailability from caller ambiguity. The
+  recovery is gated by dialog state plus typed evidence; it does not become the
+  primary caller-intent parser. Catalog
   validation owns referenced service/staff IDs;
   the reducer owns draft mutation and dependency invalidation; the planner owns
   missing-field, review, and booking readiness. Customer-name confirmation and
@@ -300,8 +306,11 @@ Conversation source-of-truth routing is mandatory:
   fail-closed profile/toggle constraints in
   `backend/migrations/V40__consultation_fail_closed_defaults.sql` and session
   revision in `backend/migrations/V42__conversation_state_revision.sql`. `dialog_state`
-  persists pending clarification, active consultation state, bounded mutation
-  history, no-progress count, and draft/review/authorization revisions.
+  version 4 persists pending clarification, active consultation and guidance
+  state, bounded mutation history, no-progress count, and
+  draft/review/authorization revisions. `normalizedDialogState` promotes legacy
+  version 3 guidance prompt/counter fields into the nested guidance object on
+  read; no SQL migration is required for that JSONB-only ownership move.
   Transcript metadata remains audit evidence, not active-state source of truth.
 - Per-session turn serialization and optimistic conflict defense:
   `backend/modules/conversation/service.go`,
@@ -710,7 +719,7 @@ detail rather than part of the event title.
 | availability, availability quote, quote expired, quote cleanup, quote retention, unbounded quote growth, slot fingerprint, local day, timezone, DST, open slots, offered slots, stale segment, no common time, split, staggered, staff assignment | `backend/modules/booking`, `backend/modules/conversation/service_availability.go` | `quote_cleanup_processor.go`, booking repository, worker, V39 quote tables/indexes, POS provider adapter, `service_matching_parsing.go`, `appointments-dashboard.tsx`, `pos-calendar/features/calendar/pos-calendar-client.tsx`, conversation tests |
 | Square OAuth, token expired, refresh token, location, sync, catalog import, `available_for_booking`, team member booking profile, non-bookable staff, calendar sync, booking webhook, signature key, notification URL, event dedupe, claim token, calendar repair, stale booking version | `pos-adapter-slice`, `backend/modules/pos_square` | `backend/modules/pos`, `integration_config`, V41 webhook/repair tables, worker, integrations UI, POS calendar UI |
 | POS mapping, provider link, active provider, AI bookable, local only, sync failed | `backend/modules/pos`, `docs/canonical-pos-ownership-checklist.md` | Services/Staff UI, `pos_entity_links`, sync tests |
-| semantic turn, semantic provider error, invalid schema, invalid_json_schema, schema fingerprint, semantic check, circuit open, service guidance recovery, caller goal recovery, no-progress handoff, multi-intent, service alias, category alias, service understanding, wrong service, category narrowed to one service, bare service switch, stale date after summary, staff/date/customer correction, add/replace/remove/undo, question plus correction, non-native wording, ASR paraphrase | `backend/modules/conversation/conversation_act.go`, `service_guidance_recovery.go`, `turn_reducer.go`, `next_action_planner.go`, `backend/modules/voice_openai/adapter.go` | dialog state/repository, voice semantic interpreter/check route, training aliases, transcript metadata, golden conversation and adapter contract tests |
+| semantic turn, semantic provider error, invalid schema, invalid_json_schema, schema fingerprint, semantic check, circuit open, service guidance recovery, caller goal recovery, guidance_provider_unavailable, separate provider failure counter, no-progress handoff, multi-intent, service alias, category alias, service understanding, wrong service, category narrowed to one service, bare service switch, stale date after summary, staff/date/customer correction, add/replace/remove/undo, question plus correction, non-native wording, ASR paraphrase | `backend/modules/conversation/conversation_act.go`, `service_guidance_recovery.go`, `turn_reducer.go`, `next_action_planner.go`, `backend/modules/voice_openai/adapter.go` | typed `dialog_state.guidance`, dialog-state normalization/repository, voice semantic interpreter/check route, training aliases, transcript metadata, golden conversation and adapter contract tests |
 | AI consultation, service recommendation, help me choose, current nail system, desired outcome, lower maintenance, consultation mutation, replace preference, clear preference, consultation question, profile options, provider failure count, progress fingerprint, consultation profile, consultation_completed, awaiting_booking, profile revision, safety handoff, medical suitability | `backend/modules/conversation/service_consultation.go`, `backend/modules/pos/types.go`, `backend/modules/pos/repository.go` | V38/V40 migrations and Ent schema, ready profile context, guarded question phrasing, global deterministic/structured safety gate, semantic consultation extraction, Services profile UI, Settings toggle/coverage, Calls typed audit state, consultation golden tests |
 | service menu, how many services, how many I book, what do I have, current booking summary, service count, repeated clarification, informational service question | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/service_prompts.go`, `backend/modules/conversation/answer_router.go` | `backend/modules/conversation/service.go`, dialog state, party flow, golden tests |
 | final review, stale review, draft revision, reviewed revision, authorized revision, natural approval, repeated final review, review timeout, concise review retry, book it, just book this for me, correction during review, repeated same-category guest question, no progress loop | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/draft_revision.go`, `next_action_planner.go`, `service.go` | repository, V36/V37 migrations, booking flow, conversation and phone tests |

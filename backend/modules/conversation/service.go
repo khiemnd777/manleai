@@ -449,7 +449,7 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 		return s.store.SaveTurn(ctx, turn)
 	}
 
-	if handled, updated, err := s.handleGuidanceRecovery(ctx, ownerUserID, *session, message, eventKey, turnPlan, turnUnderstanding, turnPlan.ServiceUnderstanding, services, staff, cfg); handled {
+	if handled, updated, err := s.handleGuidanceRecovery(ctx, ownerUserID, *session, message, eventKey, turnPlan, turnUnderstanding, turnPlan.ServiceUnderstanding, answerCtx, services, staff, cfg); handled {
 		return updated, err
 	}
 

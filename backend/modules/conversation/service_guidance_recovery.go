@@ -3,91 +3,252 @@ package conversation
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
 
 const (
-	promptCallerGoalGuidanceRecovery = "caller_goal_guidance_recovery"
-	promptServiceGuidanceRecovery    = "service_guidance_recovery"
-	maxGuidanceRecoveryPrompts       = 3
+	legacyPromptCallerGoalGuidanceRecovery = "caller_goal_guidance_recovery"
+	legacyPromptServiceGuidanceRecovery    = "service_guidance_recovery"
+
+	GuidanceRecoveryStageCallerGoal = "caller_goal"
+	GuidanceRecoveryStageService    = "service"
+
+	guidanceRecoveryActionBook          = "book"
+	guidanceRecoveryActionCatalog       = "service_catalog"
+	guidanceRecoveryActionConsultation  = "consultation"
+	guidanceRecoveryActionSalonQuestion = "salon_question"
+	guidanceRecoveryActionNameService   = "name_service"
+
+	maxGuidanceNoProgress       = 3
+	maxGuidanceProviderFailures = 2
 )
 
-type guidanceRecoveryChoice string
+type guidanceRecoveryEvidenceKind string
 
 const (
-	guidanceRecoveryUnknown       guidanceRecoveryChoice = ""
-	guidanceRecoveryBook          guidanceRecoveryChoice = "book"
-	guidanceRecoveryListServices  guidanceRecoveryChoice = "list_services"
-	guidanceRecoveryConsult       guidanceRecoveryChoice = "consultation"
-	guidanceRecoverySalonQuestion guidanceRecoveryChoice = "salon_question"
-	guidanceRecoveryOwner         guidanceRecoveryChoice = "owner"
-	guidanceRecoveryService       guidanceRecoveryChoice = "service_selected"
+	guidanceEvidenceNone             guidanceRecoveryEvidenceKind = ""
+	guidanceEvidenceServiceSelected  guidanceRecoveryEvidenceKind = "service_selected"
+	guidanceEvidenceCategoryScoped   guidanceRecoveryEvidenceKind = "category_scoped"
+	guidanceEvidenceCatalogMenu      guidanceRecoveryEvidenceKind = "catalog_menu"
+	guidanceEvidenceConsultation     guidanceRecoveryEvidenceKind = "consultation"
+	guidanceEvidenceBooking          guidanceRecoveryEvidenceKind = "booking"
+	guidanceEvidenceInformation      guidanceRecoveryEvidenceKind = "information_question"
+	guidanceEvidenceOwner            guidanceRecoveryEvidenceKind = "owner"
+	guidanceEvidenceProviderFailure  guidanceRecoveryEvidenceKind = "provider_failure"
+	guidanceEvidenceCallerNoProgress guidanceRecoveryEvidenceKind = "caller_no_progress"
 )
 
-func isGuidanceRecoveryPrompt(promptKey string) bool {
+type guidanceRecoveryEvidence struct {
+	Kind            guidanceRecoveryEvidenceKind
+	ProviderOutcome string
+}
+
+type guidanceRecoveryTransition struct {
+	State         *GuidanceRecoveryState
+	HandoffReason string
+}
+
+func isLegacyGuidanceRecoveryPrompt(promptKey string) bool {
 	switch strings.TrimSpace(promptKey) {
-	case promptCallerGoalGuidanceRecovery, promptServiceGuidanceRecovery:
+	case legacyPromptCallerGoalGuidanceRecovery, legacyPromptServiceGuidanceRecovery:
 		return true
 	default:
 		return false
 	}
 }
 
-func guidanceRecoveryExpectedInput(promptKey string) string {
-	if strings.TrimSpace(promptKey) == promptServiceGuidanceRecovery {
+func legacyGuidanceRecoveryStage(promptKey string) string {
+	if strings.TrimSpace(promptKey) == legacyPromptServiceGuidanceRecovery {
+		return GuidanceRecoveryStageService
+	}
+	return GuidanceRecoveryStageCallerGoal
+}
+
+func guidanceRecoveryStateActive(state *GuidanceRecoveryState) bool {
+	if state == nil {
+		return false
+	}
+	switch strings.TrimSpace(state.Stage) {
+	case GuidanceRecoveryStageCallerGoal, GuidanceRecoveryStageService:
+		return true
+	default:
+		return false
+	}
+}
+
+func guidanceRecoveryExpectedInput(state *GuidanceRecoveryState) string {
+	if state != nil && strings.TrimSpace(state.Stage) == GuidanceRecoveryStageService {
 		return ExpectedInputService
 	}
 	return ExpectedInputCallerGoal
 }
 
-func semanticInterpretationUnavailable(turn TurnUnderstanding) bool {
-	if !turn.ModelInvoked {
+// deriveGuidanceRecoveryEvidence consumes typed routing, semantic, and catalog
+// evidence only. Raw caller wording is intentionally absent: natural language
+// meaning belongs to TurnUnderstanding, while service identity belongs to the
+// catalog interpreter.
+func deriveGuidanceRecoveryEvidence(plan TurnPlan, turn TurnUnderstanding, understanding serviceUnderstandingResult) guidanceRecoveryEvidence {
+	outcome := strings.TrimSpace(turn.InterpreterOutcome)
+	if (plan.Route == TurnRouteActionLane && plan.Reason == "owner_handoff") || turnGoalIs(turn, "human_handoff") {
+		return guidanceRecoveryEvidence{Kind: guidanceEvidenceOwner, ProviderOutcome: outcome}
+	}
+	if question, ok := firstDeferredInformationQuestion(turn); ok {
+		if question.Subject == ConversationQuestionCatalog {
+			if strings.TrimSpace(turn.Reason) == "service_menu" || strings.TrimSpace(question.Reason) == "service_menu" {
+				return guidanceRecoveryEvidence{Kind: guidanceEvidenceCatalogMenu, ProviderOutcome: outcome}
+			}
+			return guidanceRecoveryEvidence{Kind: guidanceEvidenceInformation, ProviderOutcome: outcome}
+		}
+		return guidanceRecoveryEvidence{Kind: guidanceEvidenceInformation, ProviderOutcome: outcome}
+	}
+	if turnGoalIs(turn, "consultation") || meaningfulConsultationNeeds(turn.Consultation) || len(turn.ConsultationMutations) > 0 {
+		return guidanceRecoveryEvidence{Kind: guidanceEvidenceConsultation, ProviderOutcome: outcome}
+	}
+	if plan.Route == TurnRouteAnswerLane {
+		return guidanceRecoveryEvidence{Kind: guidanceEvidenceInformation, ProviderOutcome: outcome}
+	}
+	if understanding.Status == serviceUnderstandingStatusSelected && len(understanding.Candidates) == 1 {
+		return guidanceRecoveryEvidence{Kind: guidanceEvidenceServiceSelected, ProviderOutcome: outcome}
+	}
+	if understanding.Status == serviceUnderstandingStatusAmbiguous && len(understanding.Candidates) > 0 && isCategoryLevelServiceUnderstanding(understanding) {
+		return guidanceRecoveryEvidence{Kind: guidanceEvidenceCategoryScoped, ProviderOutcome: outcome}
+	}
+	if len(turn.Acts) > 0 || plan.PartySignal.IsParty {
+		return guidanceRecoveryEvidence{}
+	}
+	if turnGoalIs(turn, "book_appointment") {
+		return guidanceRecoveryEvidence{Kind: guidanceEvidenceBooking, ProviderOutcome: outcome}
+	}
+	if turnGoalIs(turn, "reschedule_appointment") || turnGoalIs(turn, "cancel_appointment") {
+		return guidanceRecoveryEvidence{}
+	}
+	if guidanceProviderFailureOutcome(outcome) {
+		return guidanceRecoveryEvidence{Kind: guidanceEvidenceProviderFailure, ProviderOutcome: outcome}
+	}
+	if turn.ModelInvoked {
+		return guidanceRecoveryEvidence{Kind: guidanceEvidenceCallerNoProgress, ProviderOutcome: outcome}
+	}
+	return guidanceRecoveryEvidence{}
+}
+
+func guidanceProviderFailureOutcome(outcome string) bool {
+	switch strings.TrimSpace(outcome) {
+	case TurnInterpreterOutcomeProviderDisabled, TurnInterpreterOutcomeProviderError,
+		TurnInterpreterOutcomeTimeout, TurnInterpreterOutcomeEmptyOutput, TurnInterpreterOutcomeSchemaInvalid:
+		return true
+	default:
 		return false
 	}
-	outcome := strings.TrimSpace(turn.InterpreterOutcome)
-	return outcome != "" && outcome != TurnInterpreterOutcomeAccepted
 }
 
-func classifyGuidanceRecoveryChoice(message string, understanding serviceUnderstandingResult, active bool) guidanceRecoveryChoice {
-	if understanding.Status == serviceUnderstandingStatusSelected && len(understanding.Candidates) == 1 {
-		return guidanceRecoveryService
+// reduceGuidanceRecoveryState is the sole transition owner for guidance
+// recovery counters. Provider failures never advance caller no-progress, and
+// accepted catalog/workflow progress resets both counters.
+func reduceGuidanceRecoveryState(current *GuidanceRecoveryState, initialStage string, offeredActions []string, evidence guidanceRecoveryEvidence) guidanceRecoveryTransition {
+	next := &GuidanceRecoveryState{Stage: strings.TrimSpace(initialStage)}
+	if current != nil {
+		*next = *current
+		next.OfferedActions = append([]string(nil), current.OfferedActions...)
 	}
-	if shouldHandoff(message) || shouldComplaintHandoff(message) {
-		return guidanceRecoveryOwner
+	if next.Stage == "" {
+		next.Stage = GuidanceRecoveryStageCallerGoal
 	}
-	if !active {
-		return guidanceRecoveryUnknown
-	}
-	normalized := normalizeLooseText(message)
-	switch normalized {
-	case "help me choose", "consultation", "service consultation", "choose a service":
-		return guidanceRecoveryConsult
-	case "book", "booking", "book an appointment":
-		return guidanceRecoveryBook
-	case "list services", "service list", "services":
-		return guidanceRecoveryListServices
-	case "salon question", "ask about the salon":
-		return guidanceRecoverySalonQuestion
-	default:
-		return guidanceRecoveryUnknown
-	}
-}
+	next.OfferedActions = append([]string(nil), offeredActions...)
+	next.ProgressFingerprint = ""
 
-func guidanceRecoveryPrompt(promptKey string, repeated bool) string {
-	if promptKey == promptServiceGuidanceRecovery {
-		if repeated {
-			return "You can say 'list services' or 'help me choose.' Which would you prefer?"
+	switch evidence.Kind {
+	case guidanceEvidenceCatalogMenu, guidanceEvidenceBooking, guidanceEvidenceCategoryScoped:
+		next.Stage = GuidanceRecoveryStageService
+		next.NoProgressCount = 0
+		next.ProviderFailureCount = 0
+		next.LastProviderOutcome = strings.TrimSpace(evidence.ProviderOutcome)
+	case guidanceEvidenceInformation:
+		next.NoProgressCount = 0
+		next.ProviderFailureCount = 0
+		next.LastProviderOutcome = strings.TrimSpace(evidence.ProviderOutcome)
+	case guidanceEvidenceProviderFailure:
+		next.ProviderFailureCount++
+		next.LastProviderOutcome = strings.TrimSpace(evidence.ProviderOutcome)
+		if next.ProviderFailureCount >= maxGuidanceProviderFailures {
+			return guidanceRecoveryTransition{State: next, HandoffReason: HandoffReasonGuidanceProviderUnavailable}
 		}
-		return "No problem. Would you like me to list the bookable services, or help you choose?"
+	case guidanceEvidenceCallerNoProgress:
+		next.NoProgressCount++
+		next.ProviderFailureCount = 0
+		next.LastProviderOutcome = strings.TrimSpace(evidence.ProviderOutcome)
+		if next.NoProgressCount >= maxGuidanceNoProgress {
+			return guidanceRecoveryTransition{State: next, HandoffReason: HandoffReasonServiceClarification}
+		}
 	}
-	if repeated {
-		return "I can help with booking, choosing a service, or a salon question. Which would you like?"
-	}
-	return "No problem. Are you looking to book, get help choosing a service, or ask about the salon?"
+	return guidanceRecoveryTransition{State: next}
 }
 
-func serviceGuidanceMenuReply(services []ServiceOption) string {
+func guidanceRecoveryOfferedActions(stage string, services []ServiceOption, cfg *RuntimeConfig) []string {
+	actions := []string{}
+	if strings.TrimSpace(stage) == GuidanceRecoveryStageCallerGoal {
+		actions = append(actions, guidanceRecoveryActionBook)
+	}
+	if len(services) > 0 {
+		actions = append(actions, guidanceRecoveryActionCatalog)
+		if strings.TrimSpace(stage) == GuidanceRecoveryStageService {
+			actions = append(actions, guidanceRecoveryActionNameService)
+		}
+	}
+	if consultationGuidanceAvailable(services, cfg) {
+		actions = append(actions, guidanceRecoveryActionConsultation)
+	}
+	if strings.TrimSpace(stage) == GuidanceRecoveryStageCallerGoal {
+		actions = append(actions, guidanceRecoveryActionSalonQuestion)
+	}
+	return actions
+}
+
+func consultationGuidanceAvailable(services []ServiceOption, cfg *RuntimeConfig) bool {
+	if cfg == nil || !cfg.ConsultationEnabled {
+		return false
+	}
+	for _, service := range services {
+		if consultationProfileReadyForRecommendation(service.ConsultationProfile) {
+			return true
+		}
+	}
+	return false
+}
+
+func guidanceRecoveryPrompt(state GuidanceRecoveryState, repeated bool) string {
+	hasCatalog := containsString(state.OfferedActions, guidanceRecoveryActionCatalog)
+	hasConsultation := containsString(state.OfferedActions, guidanceRecoveryActionConsultation)
+	if state.Stage == GuidanceRecoveryStageService {
+		switch {
+		case hasCatalog && hasConsultation && repeated:
+			return "You can name a service, ask me to read the menu, or tell me what result you want so I can help narrow it down. Which would be easiest?"
+		case hasCatalog && hasConsultation:
+			return "If you're not sure which service fits, I can help narrow it down from what you want, or read the bookable menu. You can also name a service you already know. What would be easiest?"
+		case hasCatalog:
+			return "You can name a service you already know, or ask me to read the bookable menu. Which would you prefer?"
+		default:
+			return "Which service would you like, or would you like the owner to help?"
+		}
+	}
+	if hasConsultation {
+		if repeated {
+			return "Would you like to book, talk through which service fits what you want, or ask a question about the salon?"
+		}
+		return "I can help you book, talk through which service fits what you want, or answer a question about the salon. What would be most useful?"
+	}
+	return "I can help you book an appointment or answer a question about the salon. What would you like help with?"
+}
+
+func guidanceProviderFailurePrompt(state GuidanceRecoveryState) string {
+	if state.Stage == GuidanceRecoveryStageService {
+		return "I'm having trouble interpreting that right now. Please name a bookable service or ask me to read the menu once more. I can also ask the owner to help."
+	}
+	return "I'm having trouble interpreting that right now. You can ask me to read the service menu once more, or I can ask the owner to help."
+}
+
+func serviceGuidanceMenuReply(services []ServiceOption, consultationAvailable bool) string {
 	names := serviceCandidateNames(services, 8)
 	if len(names) == 0 {
 		return "I don't have a bookable service list right now. I can ask the owner to help you choose."
@@ -96,39 +257,57 @@ func serviceGuidanceMenuReply(services []ServiceOption) string {
 	if len(services) > len(names) {
 		prefix = "Some bookable services include "
 	}
-	return prefix + joinHumanList(names) + ". You can name one, or ask me to help you choose."
+	reply := prefix + joinHumanList(names) + ". You can name one"
+	if consultationAvailable {
+		return reply + ", or tell me what you want for your nails and I can help narrow it down."
+	}
+	return reply + "."
 }
 
-func setGuidanceRecoveryState(session *Session, promptKey string, promptCount int, providerFailureCount int) {
-	if session == nil {
+func applyGuidanceRecoveryState(session *Session, state *GuidanceRecoveryState) {
+	if session == nil || state == nil {
 		return
 	}
-	state := normalizedDialogState(session.DialogState)
-	state.Phase = DialogPhaseClarifying
-	state.Pending = nil
-	state.ReviewAccepted = false
-	state.ReviewedRevision = 0
-	state.AuthorizedRevision = 0
-	state.LastPromptKey = promptKey
-	state.NoProgressCount = promptCount
-	state.ProviderFailureCount = providerFailureCount
-	state.ProgressFingerprint = guidanceProgressFingerprint(*session, promptKey)
-	session.DialogState = state
+	dialog := normalizedDialogState(session.DialogState)
+	dialog.Phase = DialogPhaseClarifying
+	dialog.Pending = nil
+	dialog.ReviewAccepted = false
+	dialog.ReviewedRevision = 0
+	dialog.AuthorizedRevision = 0
+	dialog.LastPromptKey = ""
+	dialog.NoProgressCount = 0
+	dialog.ProviderFailureCount = 0
+	dialog.ProgressFingerprint = ""
+	cloned := *state
+	cloned.OfferedActions = append([]string(nil), state.OfferedActions...)
+	dialog.Guidance = &cloned
+	session.DialogState = dialog
+	dialog.Guidance.ProgressFingerprint = guidanceProgressFingerprint(*session, *dialog.Guidance)
+	session.DialogState = dialog
 }
 
-func guidanceProgressFingerprint(session Session, promptKey string) string {
-	state := normalizedDialogState(session.DialogState)
-	pendingKey := ""
-	if state.Pending != nil {
-		pendingKey = strings.TrimSpace(state.Pending.PromptKey)
+func guidanceProgressFingerprint(session Session, guidance GuidanceRecoveryState) string {
+	payload := struct {
+		Stage            string
+		OfferedActions   []string
+		Intent           string
+		SelectedServices []string
+		DraftRevision    int
+		Pending          *PendingConversationAct
+		Phase            string
+	}{
+		Stage: strings.TrimSpace(guidance.Stage), OfferedActions: append([]string(nil), guidance.OfferedActions...),
+		Intent: strings.TrimSpace(session.Intent), SelectedServices: selectedServiceIDs(session),
+		DraftRevision: session.DialogState.DraftRevision, Pending: clonePendingConversationAct(session.DialogState.Pending),
+		Phase: strings.TrimSpace(session.DialogState.Phase),
 	}
-	raw := fmt.Sprintf("%s\x00%d\x00%s\x00%s", strings.TrimSpace(promptKey), state.DraftRevision, pendingKey, strings.TrimSpace(state.Phase))
-	sum := sha256.Sum256([]byte(raw))
+	raw, _ := json.Marshal(payload)
+	sum := sha256.Sum256(raw)
 	return fmt.Sprintf("sha256:%x", sum[:12])
 }
 
 func clearGuidanceRecoveryState(session *Session, phase string) {
-	if session == nil || !isGuidanceRecoveryPrompt(session.DialogState.LastPromptKey) {
+	if session == nil || !guidanceRecoveryStateActive(normalizedDialogState(session.DialogState).Guidance) {
 		return
 	}
 	session.DialogState = resetDialogProgress(session.DialogState, phase)
@@ -143,102 +322,134 @@ func (s *Service) handleGuidanceRecovery(
 	plan TurnPlan,
 	turnUnderstanding TurnUnderstanding,
 	serviceUnderstanding serviceUnderstandingResult,
+	answerCtx *AIAnswerContext,
 	services []ServiceOption,
 	staff []StaffOption,
 	cfg *RuntimeConfig,
 ) (bool, *Session, error) {
 	state := normalizedDialogState(session.DialogState)
-	active := isGuidanceRecoveryPrompt(state.LastPromptKey)
+	active := guidanceRecoveryStateActive(state.Guidance)
 	expectedInput := plan.ExpectedInput
 	if active {
-		expectedInput = guidanceRecoveryExpectedInput(state.LastPromptKey)
+		expectedInput = guidanceRecoveryExpectedInput(state.Guidance)
 	}
-	choice := classifyGuidanceRecoveryChoice(message, serviceUnderstanding, active)
-	if choice == guidanceRecoveryService {
+	evidence := deriveGuidanceRecoveryEvidence(plan, turnUnderstanding, serviceUnderstanding)
+	if evidence.Kind == guidanceEvidenceNone || evidence.Kind == guidanceEvidenceServiceSelected {
 		return false, nil, nil
 	}
-
+	if !active && expectedInput != ExpectedInputCallerGoal && expectedInput != ExpectedInputService {
+		return false, nil, nil
+	}
 	if !active {
-		if !semanticInterpretationUnavailable(turnUnderstanding) || (expectedInput != ExpectedInputCallerGoal && expectedInput != ExpectedInputService) {
+		switch evidence.Kind {
+		case guidanceEvidenceProviderFailure, guidanceEvidenceCallerNoProgress:
+		default:
 			return false, nil, nil
 		}
+	}
+
+	if evidence.Kind == guidanceEvidenceConsultation {
+		return s.handleServiceConsultation(ctx, ownerUserID, session, message, eventKey, serviceUnderstanding, turnUnderstanding, services, staff, cfg)
 	}
 
 	next := cloneSessionForTurn(session)
-	action := choice
-	switch choice {
-	case guidanceRecoveryConsult:
-		consultationTurn := turnUnderstanding
-		consultationTurn.Goal = "consultation"
-		consultationTurn.Source = "deterministic_recovery"
-		consultationTurn.Reason = "service_guidance_recovery_choice"
-		return s.handleServiceConsultation(ctx, ownerUserID, session, message, eventKey, serviceUnderstanding, consultationTurn, services, staff, cfg)
-	case guidanceRecoveryOwner:
+	initialStage := GuidanceRecoveryStageCallerGoal
+	if expectedInput == ExpectedInputService {
+		initialStage = GuidanceRecoveryStageService
+	}
+	actionStage := initialStage
+	if evidence.Kind == guidanceEvidenceCatalogMenu || evidence.Kind == guidanceEvidenceBooking || evidence.Kind == guidanceEvidenceCategoryScoped {
+		actionStage = GuidanceRecoveryStageService
+	}
+	offeredActions := guidanceRecoveryOfferedActions(actionStage, services, cfg)
+	transition := reduceGuidanceRecoveryState(state.Guidance, initialStage, offeredActions, evidence)
+	applyGuidanceRecoveryState(&next, transition.State)
+
+	if evidence.Kind == guidanceEvidenceOwner {
 		turn := newTurnRecord(session.SalonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
 		applyTurnPlanMetadata(&turn, plan)
 		applyTurnUnderstandingMetadata(&turn, turnUnderstanding, conversationDraftResult{})
-		turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, map[string]any{"guidance_recovery_action": string(choice)})
+		turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, map[string]any{"guidance_recovery_action": string(evidence.Kind)})
 		updated, err := s.saveHandoffTurn(ctx, turn, next, HandoffReasonHumanRequested, "I'll ask the owner to help directly. This is not a confirmed appointment.", services, staff, cfg)
 		return true, updated, err
-	case guidanceRecoveryListServices:
-		next.Intent = IntentBooking
-		setGuidanceRecoveryState(&next, promptServiceGuidanceRecovery, 1, 0)
-	case guidanceRecoveryBook:
-		next.Intent = IntentBooking
-		setGuidanceRecoveryState(&next, promptServiceGuidanceRecovery, 1, 0)
-	case guidanceRecoverySalonQuestion:
-		next.Intent = IntentUnknown
-		clearGuidanceRecoveryState(&next, DialogPhaseOpen)
-	default:
-		if active && (!semanticInterpretationUnavailable(turnUnderstanding) || plan.Route != TurnRouteSemanticLane) {
-			return false, nil, nil
+	}
+
+	if transition.HandoffReason != "" {
+		turn := newTurnRecord(session.SalonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
+		applyTurnPlanMetadata(&turn, plan)
+		applyTurnUnderstandingMetadata(&turn, turnUnderstanding, conversationDraftResult{})
+		turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, guidanceRecoveryMetadata(evidence.Kind, next.DialogState.Guidance))
+		reply := "I'm still not sure what kind of service help you need. I'll ask the owner to help, and this is not a confirmed appointment."
+		if transition.HandoffReason == HandoffReasonGuidanceProviderUnavailable {
+			reply = "I'm having trouble checking the salon's service guidance, so I won't guess. I'll ask the owner to help, and this is not a confirmed appointment."
 		}
-		promptKey := promptCallerGoalGuidanceRecovery
-		if expectedInput == ExpectedInputService {
-			promptKey = promptServiceGuidanceRecovery
-			next.Intent = IntentBooking
-		}
-		promptCount := 1
-		if active && state.LastPromptKey == promptKey {
-			promptCount = state.NoProgressCount + 1
-		}
-		providerFailureCount := state.ProviderFailureCount + 1
-		if !active {
-			providerFailureCount = 1
-		}
-		setGuidanceRecoveryState(&next, promptKey, promptCount, providerFailureCount)
-		if providerFailureCount >= 2 || promptCount >= maxGuidanceRecoveryPrompts {
-			turn := newTurnRecord(session.SalonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
-			applyTurnPlanMetadata(&turn, plan)
-			applyTurnUnderstandingMetadata(&turn, turnUnderstanding, conversationDraftResult{})
-			turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, map[string]any{
-				"guidance_recovery_action": "bounded_handoff", "guidance_recovery_prompt_count": promptCount,
-			})
-			updated, err := s.saveHandoffTurn(ctx, turn, next, HandoffReasonServiceClarification, "I'm still not sure what help you need. I'll ask the owner to help, and this is not a confirmed appointment.", services, staff, cfg)
-			return true, updated, err
-		}
-		action = guidanceRecoveryUnknown
+		updated, err := s.saveHandoffTurn(ctx, turn, next, transition.HandoffReason, reply, services, staff, cfg)
+		return true, updated, err
 	}
 
 	turn := newTurnRecord(session.SalonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
 	applyTurnPlanMetadata(&turn, plan)
 	applyTurnUnderstandingMetadata(&turn, turnUnderstanding, conversationDraftResult{})
-	turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, map[string]any{
-		"guidance_recovery_action": string(action), "guidance_recovery_prompt_count": next.DialogState.NoProgressCount,
-		"guidance_recovery_provider_failure_count": next.DialogState.ProviderFailureCount,
-		"guidance_recovery_progress_fingerprint":   next.DialogState.ProgressFingerprint,
-	})
-	switch choice {
-	case guidanceRecoveryListServices:
-		turn.AIMessage = serviceGuidanceMenuReply(services)
-	case guidanceRecoveryBook:
-		turn.AIMessage = "Sure. Which service would you like to book?"
-	case guidanceRecoverySalonQuestion:
-		turn.AIMessage = "What would you like to know about the salon?"
+	turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, guidanceRecoveryMetadata(evidence.Kind, next.DialogState.Guidance))
+
+	switch evidence.Kind {
+	case guidanceEvidenceCatalogMenu:
+		next.Intent = IntentBooking
+		applyGuidanceRecoveryState(&next, transition.State)
+		route := routeNonBookingAnswer(message, session, answerCtx, cfg, s.now)
+		turn = newTurnRecord(session.SalonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
+		applyTurnPlanMetadata(&turn, plan)
+		applyTurnUnderstandingMetadata(&turn, turnUnderstanding, conversationDraftResult{})
+		turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, guidanceRecoveryMetadata(evidence.Kind, next.DialogState.Guidance))
+		turn.AIMessage = route.Reply
+		if route.Intent == "service_menu" {
+			turn.AIMessage = serviceGuidanceMenuReply(services, consultationGuidanceAvailable(services, cfg))
+		}
+		applyAnswerRouteMetadata(&turn, route, answerCtx)
+	case guidanceEvidenceBooking:
+		next.Intent = IntentBooking
+		applyGuidanceRecoveryState(&next, transition.State)
+		turn = newTurnRecord(session.SalonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
+		applyTurnPlanMetadata(&turn, plan)
+		applyTurnUnderstandingMetadata(&turn, turnUnderstanding, conversationDraftResult{})
+		turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, guidanceRecoveryMetadata(evidence.Kind, next.DialogState.Guidance))
+		turn.AIMessage = guidanceRecoveryPrompt(*next.DialogState.Guidance, false)
+	case guidanceEvidenceCategoryScoped:
+		next.Intent = IntentBooking
+		applyGuidanceRecoveryState(&next, transition.State)
+		turn = newTurnRecord(session.SalonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
+		applyTurnPlanMetadata(&turn, plan)
+		applyTurnUnderstandingMetadata(&turn, turnUnderstanding, conversationDraftResult{})
+		turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, guidanceRecoveryMetadata(evidence.Kind, next.DialogState.Guidance))
+		turn.AIMessage = serviceClarificationPrompt(next, serviceUnderstanding, cfg)
+		setPendingServiceCandidateMetadata(&turn, serviceUnderstanding)
+	case guidanceEvidenceInformation:
+		route := routeNonBookingAnswer(message, session, answerCtx, cfg, s.now)
+		if !route.Handled || route.Source == answerSourceBookingRedirect {
+			return false, nil, nil
+		}
+		turn.AIMessage = strings.TrimSpace(answerWithoutGenericBookingOffer(route.Reply) + " " + guidanceRecoveryPrompt(*next.DialogState.Guidance, false))
+		applyAnswerRouteMetadata(&turn, route, answerCtx)
+	case guidanceEvidenceProviderFailure:
+		turn.AIMessage = guidanceProviderFailurePrompt(*next.DialogState.Guidance)
 	default:
-		turn.AIMessage = guidanceRecoveryPrompt(next.DialogState.LastPromptKey, next.DialogState.NoProgressCount > 1)
+		turn.AIMessage = guidanceRecoveryPrompt(*next.DialogState.Guidance, next.DialogState.Guidance.NoProgressCount > 1)
 	}
-	finalizeTurnMetadata(&turn, session, next, guidanceRecoveryExpectedInput(next.DialogState.LastPromptKey), guidanceRecoveryExpectedInput(next.DialogState.LastPromptKey), "guidance_recovery")
+	expected := guidanceRecoveryExpectedInput(next.DialogState.Guidance)
+	finalizeTurnMetadata(&turn, session, next, expected, expected, "guidance_recovery")
 	updated, err := s.store.SaveTurn(ctx, turn)
 	return true, updated, err
+}
+
+func guidanceRecoveryMetadata(action guidanceRecoveryEvidenceKind, state *GuidanceRecoveryState) map[string]any {
+	metadata := map[string]any{"guidance_recovery_action": string(action)}
+	if state == nil {
+		return metadata
+	}
+	metadata["guidance_recovery_stage"] = state.Stage
+	metadata["guidance_recovery_no_progress_count"] = state.NoProgressCount
+	metadata["guidance_recovery_provider_failure_count"] = state.ProviderFailureCount
+	metadata["guidance_recovery_progress_fingerprint"] = state.ProgressFingerprint
+	metadata["guidance_recovery_offered_actions"] = append([]string(nil), state.OfferedActions...)
+	return metadata
 }

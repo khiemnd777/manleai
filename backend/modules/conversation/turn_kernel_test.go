@@ -327,7 +327,7 @@ func TestMessageFastLaneSkipsSemanticForUnseenExpectedDateWording(t *testing.T) 
 	}
 }
 
-func TestPhoneBookingCategoryProviderFailureUsesBoundedRecoveryThenExactCatalogService(t *testing.T) {
+func TestPhoneBookingCategoryProviderFailureUsesCatalogClarificationThenExactService(t *testing.T) {
 	store := newFakeConversationStore()
 	store.session.Channel = ChannelPhone
 	store.session.CustomerPhone = "+13125550199"
@@ -358,8 +358,11 @@ func TestPhoneBookingCategoryProviderFailureUsesBoundedRecoveryThenExactCatalogS
 	if session.DialogState.Pending != nil && session.DialogState.Pending.PromptKey == "semantic_add_or_replace" {
 		t.Fatalf("initial category booking created service-edit pending state: %#v", session.DialogState)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "book") || !strings.Contains(store.lastTurn.AIMessage, "help choosing") {
-		t.Fatalf("provider failure recovery = %q", store.lastTurn.AIMessage)
+	if !strings.Contains(store.lastTurn.AIMessage, "Express Manicure") || !strings.Contains(store.lastTurn.AIMessage, "Gel Manicure") {
+		t.Fatalf("catalog-backed category clarification = %q", store.lastTurn.AIMessage)
+	}
+	if session.DialogState.Guidance != nil {
+		t.Fatalf("validated category evidence incorrectly entered generic guidance recovery: %#v", session.DialogState.Guidance)
 	}
 
 	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{

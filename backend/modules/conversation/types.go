@@ -26,7 +26,7 @@ const (
 	ReplyPolicyStyleOnly            = "style_only"
 	ReplyPolicyConsultationQuestion = "consultation_question"
 
-	DialogStateVersion = 3
+	DialogStateVersion = 4
 
 	DialogPhaseOpen         = "open"
 	DialogPhaseDrafting     = "drafting"
@@ -165,15 +165,16 @@ const (
 	BookingActionReschedule = "reschedule"
 	BookingActionCancel     = "cancel"
 
-	HandoffReasonHumanRequested             = "human_requested"
-	HandoffReasonAIBookingDisabled          = "ai_booking_disabled"
-	HandoffReasonBookingUnavailable         = "booking_unavailable"
-	HandoffReasonCustomerDetailsUnavailable = "customer_details_unavailable"
-	HandoffReasonGroupBooking               = "group_booking"
-	HandoffReasonConsultationSafety         = "consultation_safety"
-	HandoffReasonConsultationUnresolved     = "consultation_unresolved"
-	HandoffReasonServiceClarification       = "service_clarification_unresolved"
-	HandoffReasonVoiceInputUnintelligible   = "voice_input_unintelligible"
+	HandoffReasonHumanRequested              = "human_requested"
+	HandoffReasonAIBookingDisabled           = "ai_booking_disabled"
+	HandoffReasonBookingUnavailable          = "booking_unavailable"
+	HandoffReasonCustomerDetailsUnavailable  = "customer_details_unavailable"
+	HandoffReasonGroupBooking                = "group_booking"
+	HandoffReasonConsultationSafety          = "consultation_safety"
+	HandoffReasonConsultationUnresolved      = "consultation_unresolved"
+	HandoffReasonGuidanceProviderUnavailable = "guidance_provider_unavailable"
+	HandoffReasonServiceClarification        = "service_clarification_unresolved"
+	HandoffReasonVoiceInputUnintelligible    = "voice_input_unintelligible"
 
 	PartyRequestStatusPending   = "pending"
 	PartyRequestStatusContacted = "contacted"
@@ -400,6 +401,19 @@ type ConsultationState struct {
 	ExitReason                 string                  `json:"exit_reason,omitempty"`
 }
 
+// GuidanceRecoveryState owns the bounded recovery conversation used while the
+// caller's goal or requested service is unresolved. OfferedActions contains
+// state tokens derived from the current catalog and runtime capabilities; it
+// is presentation context, not a phrase-matching vocabulary.
+type GuidanceRecoveryState struct {
+	Stage                string   `json:"stage"`
+	OfferedActions       []string `json:"offered_actions,omitempty"`
+	NoProgressCount      int      `json:"no_progress_count"`
+	ProviderFailureCount int      `json:"provider_failure_count"`
+	ProgressFingerprint  string   `json:"progress_fingerprint,omitempty"`
+	LastProviderOutcome  string   `json:"last_provider_outcome,omitempty"`
+}
+
 type DialogState struct {
 	Version              int                     `json:"version"`
 	Phase                string                  `json:"phase"`
@@ -419,6 +433,7 @@ type DialogState struct {
 	LastMutationRevision int                     `json:"last_mutation_revision,omitempty"`
 	TimePreference       *TimePreference         `json:"time_preference,omitempty"`
 	Consultation         *ConsultationState      `json:"consultation,omitempty"`
+	Guidance             *GuidanceRecoveryState  `json:"guidance,omitempty"`
 }
 
 type Store interface {

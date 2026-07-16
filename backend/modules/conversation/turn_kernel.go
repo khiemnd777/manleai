@@ -105,8 +105,8 @@ func applyTurnPlanMetadata(turn *TurnRecord, plan TurnPlan) {
 
 func expectedInputForSession(session Session) string {
 	state := normalizedDialogState(session.DialogState)
-	if isGuidanceRecoveryPrompt(state.LastPromptKey) {
-		return guidanceRecoveryExpectedInput(state.LastPromptKey)
+	if guidanceRecoveryStateActive(state.Guidance) {
+		return guidanceRecoveryExpectedInput(state.Guidance)
 	}
 	if consultation := state.Consultation; consultationStateActive(consultation) {
 		switch consultation.Status {
@@ -276,7 +276,10 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 		return finalizeTurnPlan(plan, TurnRouteSemanticLane, "multi_service_semantic_context", TurnCoveragePartial, session, services, staff)
 	}
 	answer := routeNonBookingAnswer(message, session, answerCtx, cfg, s.now)
-	if isServiceInquiry(message, plan.ServiceUnderstanding) {
+	// A menu request is already owned by the structured catalog answer above.
+	// Do not downgrade it to a generic service inquiry merely because the
+	// caller's wording also matches the broader inquiry contract.
+	if isServiceInquiry(message, plan.ServiceUnderstanding) && !asksServiceMenu(message) {
 		answer = routeServiceInquiryAnswer(message, session, plan.ServiceUnderstanding, answerCtx)
 	}
 	if state.Phase == DialogPhaseReview {
