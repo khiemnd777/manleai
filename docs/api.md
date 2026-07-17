@@ -2122,10 +2122,12 @@ consultation extraction as exact, rejects invented booking/completion flags,
 and rejects positive consultation mutations not represented in the same-turn
 structured snapshot. Protocol `unknown` is normalized to field absence, and
 guidance actions remain the only initial workflow-transition authority.
-Reviewer contract `evidence-review-v8` explicitly checks
+Reviewer contract `evidence-review-v9` explicitly checks
 those consultation facts, the recorded local slot minutes and timezone, as well
 as machine-facing labels, silent service/staff/date/time mutations, and
-unnecessarily broad hours answers.
+unnecessarily broad hours answers. Version 9 also accepts explicit multi-turn
+journey evidence and requires the reviewer to inspect every retained
+transcript/state/tool turn rather than only the terminal reply.
 
 Direct-model mode is a local CLI workflow, not an API endpoint. Before any
 model call, the supplied salon ID selects both the encrypted OpenAI row in
@@ -2199,6 +2201,49 @@ passes and failures separately, and the CLI exits unsuccessfully when any review
 round fails. These model scores remain a secondary review layer: deterministic
 identifier-leak and booking-safety checks can fail a scenario before reviewer
 scoring.
+
+The independent multi-turn salon suite uses a different local command and
+artifact:
+
+```bash
+cd backend
+GOCACHE=/private/tmp/manleai-go-cache go run ./cmd/conversation-eval-real \
+  -mode structural \
+  -corpus modules/conversation/testdata/receptionist_real_salon_100.json \
+  -output modules/conversation/testdata/receptionist_real_salon_structural_report.json
+
+GOCACHE=/private/tmp/manleai-go-cache go run ./cmd/conversation-eval-real \
+  -mode deterministic-runtime \
+  -corpus modules/conversation/testdata/receptionist_real_salon_100.json \
+  -output /tmp/receptionist-real-salon-runtime.json
+```
+
+The first command validates exactly 100 independently authored journeys and
+must retain `passed=false`, `model_executed_count=0`, and
+`review_passed_count=0`. The second keeps one isolated production Conversation
+Service session across every turn, executes all 100 with retained scripted
+semantics, and retains complete transcripts, state transitions, tool attempts,
+handoff, and confirmation facts. Corpus, production-flow, and transcript-review
+contract versions are part of the run key, including the shared reviewer
+contract, so an incompatible checkpoint cannot be resumed. It still cannot
+claim a model pass. A paid
+canary is explicit and database-configured:
+
+```bash
+GOCACHE=/private/tmp/manleai-go-cache go run ./cmd/conversation-eval-real \
+  -mode live-canary \
+  -config-salon-id CONFIG_SALON_UUID \
+  -max-model-calls 60 \
+  -transient-retries 0 \
+  -output /tmp/receptionist-real-salon-live-10.json
+```
+
+The config salon selects only the encrypted database OpenAI integration; it
+does not own the isolated fixtures. Exactly ten corpus journeys are marked as
+live canaries. The runner stops on the first journey failure, never exceeds 60
+combined recognition/reply/consultation/review calls, and cannot pass until all
+ten journeys are model-executed and both five-journey multi-turn reviews pass.
+No live canary is run by repository tests or corpus generation.
 
 `POST /api/voice/twilio/incoming`
 

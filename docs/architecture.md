@@ -336,6 +336,27 @@ This harness can return synthetic availability and mutate its isolated in-memory
 session, but it cannot persist production conversation state or invoke booking,
 reschedule, cancellation, or POS operations.
 
+The separate `conversation-eval-real` harness owns the independently authored
+100-journey, multi-turn salon-operations suite. It does not expand the
+single-turn semantic corpus and does not count review records or paraphrases as
+customer journeys. Each journey keeps one isolated production Conversation
+Service session for three to twelve caller turns and carries its own catalog
+fixture, aliases, consultation profiles, staff, initial state, reply
+obligations, forbidden behavior, state expectations, and no-side-effect rule.
+The deterministic mode runs all 100 journeys with retained scripted semantic
+fixtures to test production state transitions, complete transcripts, question
+progression, handoff, tool-attempt, and POS-confirmation invariants without a
+model call. Scripted semantic execution is never labeled a model pass. Live
+evaluation is a separately selected set of exactly ten multi-turn canaries,
+resolves OpenAI configuration strictly from the encrypted database-backed
+integration record, checkpoints every paid call, stops after the first failed
+journey, and enforces a total ceiling of 60 recognition, reply, consultation,
+and review calls. A live result passes only after all ten journeys execute with
+the model and both five-journey transcript review rounds score at least 4/5 in
+every dimension. The isolated booking adapter may expose deterministic
+availability but blocks create, reschedule, and cancellation side effects, so
+no evaluation journey can confirm an appointment or call POS.
+
 OpenAI Realtime is the input/VAD/transcription channel. GA input requests transcription log probabilities and applies profile-aware mean, low-tail, and VAD-coherence admission before conversation state can change. The default dashboard-managed `streaming_tts` output mode sends backend-approved text to the dedicated Speech endpoint, converts raw PCM 24 kHz to PCMU 8 kHz through a stateful anti-aliasing resampler, and sends a bounded 200 ms startup block. Subsequent 20 ms frames drain from a bounded backpressure queue on a monotonic clock, independent of provider HTTP chunk timing. Short replies flush at provider completion; longer replies may finish provider generation before local playout drains. `tts_stream_done` is provider lifecycle evidence, while reply advancement and terminal marks wait for `tts_playout_done`. The bridge assigns each accepted caller turn an input generation and schedules typed output (`terminal`, backend turn, initial, input recovery, progress) by state and priority. Backend output supersedes stale recovery/progress output; superseded generations are suppressed; no new reply starts while caller speech or its transcript is active. Streaming barge-in cancels immediately even inside the legacy playback guard. Low-priority recovery speech has a four-second first-provider-byte budget, and a terminal decision latches once so later transcript events cannot restart the backend flow. The legacy dashboard option `buffered_realtime` retains response identity binding and complete output-transcript validation before audio release for rollback compatibility. Both modes retain bounded output, delayed single progress reply, terminal fallback, PII-free timing diagnostics, and the same backend conversation/POS path. OpenAI cannot call Square or independently confirm a booking.
 
 Provider app credentials and runtime settings for Square Appointments, Twilio,

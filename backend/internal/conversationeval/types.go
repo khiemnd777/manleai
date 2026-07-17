@@ -21,7 +21,7 @@ const (
 	// change to production-flow execution or reviewer semantics must bump the
 	// corresponding value so retained paid evidence cannot be mixed.
 	DirectEvaluationContractVersion = "production-flow-v8"
-	DirectReviewContractVersion     = "evidence-review-v8"
+	DirectReviewContractVersion     = "evidence-review-v9"
 )
 
 type Corpus struct {

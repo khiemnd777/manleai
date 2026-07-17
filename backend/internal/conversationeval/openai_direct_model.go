@@ -134,6 +134,8 @@ func (m *OpenAIDirectModel) ReviewReplies(ctx context.Context, salonID string, i
 		"model": strings.TrimSpace(cfg.ReplyModel),
 		"instructions": strings.Join([]string{
 			"Review up to five retained AI receptionist outputs from a US nail salon evaluation.",
+			"When input.multi_turn is true, review every interleaved turn and every retained state/tool fact in input.journey_results; do not judge only the last turn.",
+			"For multi-turn input, penalize a repeated question only when the caller already answered it or the retained state shows no useful handling of new evidence; do not penalize a concise repeat when the caller did not answer the unresolved question.",
 			"Judge final_reply against customer_message, backend_safe_reply, backend_evidence, structured recognition, errors, and tool attempts.",
 			"Score naturalness, catalog grounding, one-question compliance, booking safety, and caller usefulness from 1 to 5.",
 			"Set passed to true if and only if every score is at least 4; otherwise set it to false and explain the concrete failures.",

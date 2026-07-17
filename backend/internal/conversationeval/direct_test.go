@@ -477,11 +477,13 @@ func modelReplyFromExpected(expected ExpectedResult) voice.TurnModelReply {
 }
 
 type fakeDirectModel struct {
-	interpretCalls   int
-	replyCalls       int
-	reviewCalls      int
-	reviewFails      bool
-	reviewBatchSizes []int
+	interpretCalls     int
+	replyCalls         int
+	reviewCalls        int
+	reviewFails        bool
+	reviewBatchSizes   []int
+	reviewMultiTurn    []bool
+	reviewJourneySizes []int
 }
 
 func (f *fakeDirectModel) Identity(context.Context, string) (string, error) {
@@ -511,6 +513,8 @@ func (f *fakeDirectModel) GenerateConsultationQuestion(_ context.Context, reques
 func (f *fakeDirectModel) ReviewReplies(_ context.Context, _ string, input DirectReviewInput) (DirectReviewRound, ModelUsage, error) {
 	f.reviewCalls++
 	f.reviewBatchSizes = append(f.reviewBatchSizes, len(input.Results))
+	f.reviewMultiTurn = append(f.reviewMultiTurn, input.MultiTurn)
+	f.reviewJourneySizes = append(f.reviewJourneySizes, len(input.JourneyResults))
 	ids := make([]string, 0, len(input.Results))
 	for _, result := range input.Results {
 		ids = append(ids, result.ScenarioID)

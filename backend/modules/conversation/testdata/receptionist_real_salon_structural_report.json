@@ -1,0 +1,920 @@
+{
+  "schema_version": 1,
+  "contract_version": "real-salon-multi-turn-v1",
+  "evaluation_contract": "real-salon-production-flow-v1",
+  "review_contract": "real-salon-transcript-review-v1+evidence-review-v9",
+  "mode": "structural_validation_without_runtime_or_model_execution",
+  "run_key": "real-salon-v1-3329de594ebbc5c90ef69b05",
+  "overall_status": "structural_validated_model_not_run",
+  "passed": false,
+  "journey_count": 100,
+  "structural_validated_count": 100,
+  "runtime_executed_count": 0,
+  "model_executed_count": 0,
+  "review_passed_count": 0,
+  "failed_count": 0,
+  "not_run_count": 100,
+  "usage": {},
+  "results": [
+    {
+      "journey_id": "advice-001",
+      "family": "service_advice_discovery",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "advice-002",
+      "family": "service_advice_discovery",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "advice-003",
+      "family": "service_advice_discovery",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "advice-004",
+      "family": "service_advice_discovery",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "advice-005",
+      "family": "service_advice_discovery",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "advice-006",
+      "family": "service_advice_discovery",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "advice-007",
+      "family": "service_advice_discovery",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "advice-008",
+      "family": "service_advice_discovery",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "advice-009",
+      "family": "service_advice_discovery",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "advice-010",
+      "family": "service_advice_discovery",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "advice-011",
+      "family": "service_advice_discovery",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "advice-012",
+      "family": "service_advice_discovery",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "advice-013",
+      "family": "service_advice_discovery",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "advice-014",
+      "family": "service_advice_discovery",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "advice-015",
+      "family": "service_advice_discovery",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "consult-001",
+      "family": "service_consultation_recommendation",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "consult-002",
+      "family": "service_consultation_recommendation",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "consult-003",
+      "family": "service_consultation_recommendation",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "consult-004",
+      "family": "service_consultation_recommendation",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "consult-005",
+      "family": "service_consultation_recommendation",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "consult-006",
+      "family": "service_consultation_recommendation",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "consult-007",
+      "family": "service_consultation_recommendation",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "consult-008",
+      "family": "service_consultation_recommendation",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "consult-009",
+      "family": "service_consultation_recommendation",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "consult-010",
+      "family": "service_consultation_recommendation",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "consult-011",
+      "family": "service_consultation_recommendation",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "consult-012",
+      "family": "service_consultation_recommendation",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "consult-013",
+      "family": "service_consultation_recommendation",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "consult-014",
+      "family": "service_consultation_recommendation",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "consult-015",
+      "family": "service_consultation_recommendation",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "question-001",
+      "family": "catalog_and_salon_questions",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "question-002",
+      "family": "catalog_and_salon_questions",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "question-003",
+      "family": "catalog_and_salon_questions",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "question-004",
+      "family": "catalog_and_salon_questions",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "question-005",
+      "family": "catalog_and_salon_questions",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "question-006",
+      "family": "catalog_and_salon_questions",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "question-007",
+      "family": "catalog_and_salon_questions",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "question-008",
+      "family": "catalog_and_salon_questions",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "question-009",
+      "family": "catalog_and_salon_questions",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "question-010",
+      "family": "catalog_and_salon_questions",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-001",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-002",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-003",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-004",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-005",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-006",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-007",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-008",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-009",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-010",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-011",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-012",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-013",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-014",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-015",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-016",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-017",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-018",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-019",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "booking-020",
+      "family": "single_customer_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "party-001",
+      "family": "party_group_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "party-002",
+      "family": "party_group_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "party-003",
+      "family": "party_group_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "party-004",
+      "family": "party_group_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "party-005",
+      "family": "party_group_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "party-006",
+      "family": "party_group_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "party-007",
+      "family": "party_group_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "party-008",
+      "family": "party_group_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "party-009",
+      "family": "party_group_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "party-010",
+      "family": "party_group_booking",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "change-001",
+      "family": "reschedule_cancel",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "change-002",
+      "family": "reschedule_cancel",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "change-003",
+      "family": "reschedule_cancel",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "change-004",
+      "family": "reschedule_cancel",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "change-005",
+      "family": "reschedule_cancel",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "change-006",
+      "family": "reschedule_cancel",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "change-007",
+      "family": "reschedule_cancel",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "change-008",
+      "family": "reschedule_cancel",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "change-009",
+      "family": "reschedule_cancel",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "change-010",
+      "family": "reschedule_cancel",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "repair-001",
+      "family": "correction_interruption_multi_intent",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "repair-002",
+      "family": "correction_interruption_multi_intent",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "repair-003",
+      "family": "correction_interruption_multi_intent",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "repair-004",
+      "family": "correction_interruption_multi_intent",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "repair-005",
+      "family": "correction_interruption_multi_intent",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "repair-006",
+      "family": "correction_interruption_multi_intent",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "repair-007",
+      "family": "correction_interruption_multi_intent",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "repair-008",
+      "family": "correction_interruption_multi_intent",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "repair-009",
+      "family": "correction_interruption_multi_intent",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "repair-010",
+      "family": "correction_interruption_multi_intent",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "safety-001",
+      "family": "safety_handoff",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "safety-002",
+      "family": "safety_handoff",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "safety-003",
+      "family": "safety_handoff",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "safety-004",
+      "family": "safety_handoff",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "safety-005",
+      "family": "safety_handoff",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "failure-001",
+      "family": "disabled_empty_provider_failure",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "failure-002",
+      "family": "disabled_empty_provider_failure",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "failure-003",
+      "family": "disabled_empty_provider_failure",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "failure-004",
+      "family": "disabled_empty_provider_failure",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    },
+    {
+      "journey_id": "failure-005",
+      "family": "disabled_empty_provider_failure",
+      "status": "structural_validated",
+      "model_executed": false,
+      "review_passed": false,
+      "usage": {},
+      "turns": null
+    }
+  ]
+}

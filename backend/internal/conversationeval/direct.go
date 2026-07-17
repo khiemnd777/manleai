@@ -35,7 +35,9 @@ type DirectReviewInput struct {
 	Round              int                        `json:"round"`
 	EvaluationContract string                     `json:"evaluation_contract"`
 	ReviewContract     string                     `json:"review_contract"`
+	MultiTurn          bool                       `json:"multi_turn,omitempty"`
 	Results            []ScenarioEvaluationResult `json:"results"`
+	JourneyResults     []RealSalonJourneyResult   `json:"journey_results,omitempty"`
 }
 
 type BackendTurnResult struct {
