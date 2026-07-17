@@ -5,15 +5,6 @@ import (
 	"time"
 )
 
-type serviceCatalogQuestionKind string
-
-const (
-	serviceCatalogQuestionNone      serviceCatalogQuestionKind = ""
-	serviceCatalogQuestionMenu      serviceCatalogQuestionKind = "menu"
-	serviceCatalogQuestionCount     serviceCatalogQuestionKind = "count"
-	serviceCatalogQuestionExistence serviceCatalogQuestionKind = "existence"
-)
-
 func missingBookingField(session Session) string {
 	switch {
 	case strings.TrimSpace(session.ServiceID) == "":
@@ -76,150 +67,6 @@ func promptForMissingFieldWithServiceContext(field string, session Session, serv
 	}
 }
 
-func asksServiceMenu(message string) bool {
-	normalized := normalizeLooseText(message)
-	if normalized == "" {
-		return false
-	}
-	signals := []string{
-		"what service do you have",
-		"what services do you have",
-		"what service you have",
-		"what services you have",
-		"what services do you offer",
-		"what do you offer",
-		"service menu",
-		"services menu",
-		"list services",
-	}
-	for _, signal := range signals {
-		if strings.Contains(normalized, signal) {
-			return true
-		}
-	}
-	if strings.Contains(normalized, "list") && strings.Contains(normalized, "service") {
-		return true
-	}
-	if strings.HasPrefix(normalized, "what ") {
-		for _, signal := range []string{
-			"service do you have",
-			"services do you have",
-			"service you have",
-			"services you have",
-			"service do you offer",
-			"services do you offer",
-			"option do you have",
-			"options do you have",
-			"option do you offer",
-			"options do you offer",
-		} {
-			if strings.Contains(normalized, signal) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func asksServiceCatalogCount(message string) bool {
-	normalized := normalizeLooseText(message)
-	if normalized == "" || !containsLoosePhrase(normalized, "how many") {
-		return false
-	}
-	if hasExplicitBookingRequestSignal(normalized) ||
-		hasSchedulingAvailabilitySignal(normalized) ||
-		looksLikeDateOrTimeInsteadOfName(message) ||
-		mentionsPartyParticipants(normalized) {
-		return false
-	}
-	for _, signal := range []string{
-		"do you have",
-		"you have",
-		"do you offer",
-		"you offer",
-		"are there",
-		"option",
-		"options",
-		"choice",
-		"choices",
-		"kind",
-		"kinds",
-		"type",
-		"types",
-		"service",
-		"services",
-		"menu",
-	} {
-		if containsLoosePhrase(normalized, signal) {
-			return true
-		}
-	}
-	return false
-}
-
-func mentionsPartyParticipants(normalized string) bool {
-	for _, signal := range []string{
-		"person",
-		"people",
-		"guest",
-		"guests",
-		"client",
-		"clients",
-		"group",
-		"party",
-	} {
-		if containsLoosePhrase(normalized, signal) {
-			return true
-		}
-	}
-	return false
-}
-
-func classifyServiceCatalogQuestion(message string, result serviceUnderstandingResult) serviceCatalogQuestionKind {
-	normalized := normalizeLooseText(message)
-	if normalized == "" ||
-		hasExplicitBookingRequestSignal(normalized) ||
-		hasServiceAddSignal(message) ||
-		hasServiceCorrectionSignal(message) ||
-		hasExplicitServiceReplacementPhrase(message) ||
-		looksLikeDateOrTimeInsteadOfName(message) ||
-		hasSchedulingAvailabilitySignal(normalized) ||
-		mentionsPartyParticipants(normalized) {
-		return serviceCatalogQuestionNone
-	}
-	if asksServiceCatalogCount(message) {
-		if result.Status != serviceUnderstandingStatusUnknown || mentionsGeneralServiceCatalog(normalized) {
-			return serviceCatalogQuestionCount
-		}
-	}
-	if asksServiceMenu(message) {
-		return serviceCatalogQuestionMenu
-	}
-	if strings.HasPrefix(normalized, "do you have ") ||
-		strings.HasPrefix(normalized, "do you guys have ") ||
-		strings.HasPrefix(normalized, "do yall have ") ||
-		strings.HasPrefix(normalized, "you have ") ||
-		strings.HasPrefix(normalized, "do you offer ") ||
-		strings.HasPrefix(normalized, "do you do ") ||
-		strings.HasPrefix(normalized, "do you provide ") ||
-		strings.HasPrefix(normalized, "is there ") ||
-		(result.Status != serviceUnderstandingStatusUnknown &&
-			strings.HasPrefix(normalized, "is ") &&
-			strings.HasSuffix(normalized, " available")) {
-		return serviceCatalogQuestionExistence
-	}
-	return serviceCatalogQuestionNone
-}
-
-func mentionsGeneralServiceCatalog(normalized string) bool {
-	for _, signal := range []string{"service", "services", "service menu", "services menu"} {
-		if containsLoosePhrase(normalized, signal) {
-			return true
-		}
-	}
-	return false
-}
-
 func serviceMenuReply(services []ServiceOption) string {
 	names := serviceCandidateNames(services, 8)
 	if len(names) == 0 {
@@ -230,10 +77,6 @@ func serviceMenuReply(services []ServiceOption) string {
 		prefix = "Popular services include "
 	}
 	return prefix + joinHumanList(names) + ". Which one would you like to book?"
-}
-
-func isServiceInquiry(message string, result serviceUnderstandingResult) bool {
-	return classifyServiceCatalogQuestion(message, result) != serviceCatalogQuestionNone
 }
 
 func hasExplicitBookingRequestSignal(normalized string) bool {
@@ -277,41 +120,6 @@ func hasSchedulingAvailabilitySignal(normalized string) bool {
 	return false
 }
 
-func serviceInquiryReply(message string, session Session, result serviceUnderstandingResult, services []ServiceOption) string {
-	if classifyServiceCatalogQuestion(message, result) == serviceCatalogQuestionCount {
-		candidates := result.Candidates
-		if len(candidates) == 0 {
-			candidates = services
-		}
-		statement := serviceCatalogCountStatement(serviceCatalogQuestionLabel(result, candidates), candidates, 6)
-		if statement == "" {
-			return "I do not have a bookable service list available right now. What service are you looking for?"
-		}
-		return statement + " " + serviceInquiryResumePrompt(session, result, services)
-	}
-	switch result.Status {
-	case serviceUnderstandingStatusSelected:
-		names := serviceCandidateNames(result.Candidates, 3)
-		if len(names) == 0 {
-			break
-		}
-		service := joinHumanList(names)
-		if current := strings.TrimSpace(serviceSummary(session, services)); current != "" {
-			return "Yes, we offer " + service + ". Do you want to switch to " + service + ", or keep " + current + "?"
-		}
-		return "Yes, we offer " + service + ". Which service would you like to book?"
-	case serviceUnderstandingStatusAmbiguous:
-		names := serviceCandidateNames(result.Candidates, 5)
-		if len(names) > 0 {
-			return "We offer " + joinHumanList(names) + ". " + serviceInquiryResumePrompt(session, result, services)
-		}
-	}
-	if names := serviceCandidateNames(services, 8); len(names) > 0 {
-		return "I do not see that in the bookable service list. Services include " + joinHumanList(names) + ". Which service would you like to book?"
-	}
-	return "I do not see that in the bookable service list. Which service would you like?"
-}
-
 func serviceCatalogCountStatement(label string, candidates []ServiceOption, spokenLimit int) string {
 	allNames := serviceCandidateNames(candidates, 0)
 	if len(allNames) == 0 {
@@ -350,48 +158,6 @@ func serviceCatalogQuestionLabel(result serviceUnderstandingResult, candidates [
 		return singularServiceToken(label)
 	}
 	return "service"
-}
-
-func serviceInquiryResumePrompt(session Session, result serviceUnderstandingResult, services []ServiceOption) string {
-	pending := pendingServiceCandidateServices(session, services)
-	if len(pending) > 0 {
-		if len(result.Candidates) > 0 && !sameServiceCandidateSet(pending, result.Candidates) {
-			label := singularServiceToken(pendingServiceToken(session))
-			if label == "" {
-				label = serviceCatalogQuestionLabel(serviceUnderstandingResult{}, pending)
-			}
-			return "For your appointment, which " + label + " service would you like?"
-		}
-		if len(pending) == 1 {
-			return "Would you like that one?"
-		}
-		return "Which one would you like?"
-	}
-	if current := strings.TrimSpace(serviceSummary(session, services)); current != "" {
-		return "Would you like to keep " + current + ", or switch to another one?"
-	}
-	if hasBookingProgress(session) {
-		return "Which service would you like to book?"
-	}
-	return "Would you like to book one of those?"
-}
-
-func sameServiceCandidateSet(left []ServiceOption, right []ServiceOption) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	counts := map[string]int{}
-	for _, service := range left {
-		counts[strings.TrimSpace(service.ID)]++
-	}
-	for _, service := range right {
-		id := strings.TrimSpace(service.ID)
-		if counts[id] == 0 {
-			return false
-		}
-		counts[id]--
-	}
-	return true
 }
 
 func serviceClarificationPrompt(session Session, result serviceUnderstandingResult, cfg *RuntimeConfig) string {

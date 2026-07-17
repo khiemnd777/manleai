@@ -195,21 +195,54 @@ type TurnContractCheck struct {
 }
 
 type TurnModelRequest struct {
-	SalonID             string
-	SessionID           string
-	Channel             string
-	CustomerMessage     string
-	ExpectedInput       string
-	SemanticContract    string
-	SelectedServices    []conversation.ConversationServiceRef
-	CatalogServices     []conversation.ConversationServiceRef
-	SelectedStaff       []conversation.ConversationStaffRef
-	CatalogStaff        []conversation.ConversationStaffRef
-	Pending             *conversation.PendingConversationAct
-	CurrentBookingStage string
-	BookingAction       string
-	CurrentDraft        conversation.ConversationDraftRef
-	Consultation        *conversation.ConsultationState
+	SalonID                     string
+	SessionID                   string
+	Channel                     string
+	CustomerMessage             string
+	ExpectedInput               string
+	SemanticContract            string
+	RecognizableGuidanceActions []string
+	SelectedServices            []conversation.ConversationServiceRef
+	CatalogServices             []conversation.ConversationServiceRef
+	CatalogServiceAliases       []conversation.ConversationServiceAliasRef
+	CatalogCategories           []conversation.ConversationCategoryRef
+	SelectedStaff               []conversation.ConversationStaffRef
+	CatalogStaff                []conversation.ConversationStaffRef
+	Pending                     *conversation.PendingConversationAct
+	CurrentBookingStage         string
+	BookingAction               string
+	CurrentDraft                conversation.ConversationDraftRef
+	Consultation                *conversation.ConsultationState
+}
+
+// SemanticEvaluationRequest is an owner-authenticated, read-only semantic
+// contract probe. It carries the same structured state used by live turn
+// interpretation without creating a conversation session or invoking booking
+// tools.
+type SemanticEvaluationRequest struct {
+	ScenarioID                  string                                     `json:"scenario_id"`
+	Channel                     string                                     `json:"channel"`
+	CustomerMessage             string                                     `json:"customer_message"`
+	ExpectedInput               string                                     `json:"expected_input"`
+	SemanticContract            string                                     `json:"semantic_contract"`
+	RecognizableGuidanceActions []string                                   `json:"recognizable_guidance_actions"`
+	SelectedServices            []conversation.ConversationServiceRef      `json:"selected_services"`
+	CatalogServices             []conversation.ConversationServiceRef      `json:"catalog_services"`
+	CatalogServiceAliases       []conversation.ConversationServiceAliasRef `json:"catalog_service_aliases"`
+	CatalogCategories           []conversation.ConversationCategoryRef     `json:"catalog_categories"`
+	SelectedStaff               []conversation.ConversationStaffRef        `json:"selected_staff"`
+	CatalogStaff                []conversation.ConversationStaffRef        `json:"catalog_staff"`
+	Pending                     *conversation.PendingConversationAct       `json:"pending,omitempty"`
+	CurrentBookingStage         string                                     `json:"current_booking_stage"`
+	BookingAction               string                                     `json:"booking_action"`
+	CurrentDraft                conversation.ConversationDraftRef          `json:"current_draft"`
+	Consultation                *conversation.ConsultationState            `json:"consultation,omitempty"`
+}
+
+type SemanticEvaluationResponse struct {
+	ScenarioID string         `json:"scenario_id"`
+	Result     TurnModelReply `json:"result"`
+	DurationMS int64          `json:"duration_ms"`
 }
 
 type ActModelReply struct {
@@ -233,6 +266,7 @@ type ActModelReply struct {
 
 type QuestionModelReply struct {
 	Subject        string                   `json:"subject"`
+	Mode           string                   `json:"mode"`
 	ServiceIDs     []string                 `json:"service_ids"`
 	StaffIDs       []string                 `json:"staff_ids"`
 	TimePreference TimePreferenceModelReply `json:"time_preference"`
@@ -242,17 +276,26 @@ type QuestionModelReply struct {
 
 type TimePreferenceModelReply struct {
 	Direction string `json:"direction"`
-	Minutes   int    `json:"minutes"`
+	Hour      int    `json:"hour"`
+	Minute    int    `json:"minute"`
+	// Minutes is the provider-neutral canonical value computed by the adapter.
+	// It is not part of the external structured-output schema.
+	Minutes int `json:"-"`
 }
 
 type TurnModelReply struct {
-	Goal         string                 `json:"goal"`
-	Acts         []ActModelReply        `json:"acts"`
-	Questions    []QuestionModelReply   `json:"questions"`
-	Confidence   float64                `json:"confidence"`
-	Reason       string                 `json:"reason"`
-	Consultation ConsultationModelReply `json:"consultation"`
-	Safety       SafetyModelReply       `json:"safety"`
+	Goal                    string                 `json:"goal"`
+	GuidanceAction          string                 `json:"guidance_action"`
+	GuidanceCatalogMode     string                 `json:"guidance_catalog_mode"`
+	GuidanceQuestionSubject string                 `json:"guidance_question_subject"`
+	GuidancePartySize       int                    `json:"guidance_party_size"`
+	Acts                    []ActModelReply        `json:"acts"`
+	Questions               []QuestionModelReply   `json:"questions"`
+	Confidence              float64                `json:"confidence"`
+	Reason                  string                 `json:"reason"`
+	Consultation            ConsultationModelReply `json:"consultation"`
+	Safety                  SafetyModelReply       `json:"safety"`
+	Diagnostics             map[string]string      `json:"-"`
 }
 
 type ConsultationModelReply struct {
@@ -493,23 +536,35 @@ type ReadinessCheck struct {
 }
 
 type PhoneBookingReadiness struct {
-	Ready                     bool             `json:"ready"`
-	AIEnabled                 bool             `json:"ai_enabled"`
-	ActiveProvider            string           `json:"active_provider"`
-	ProviderConnected         bool             `json:"provider_connected"`
-	ProviderSynced            bool             `json:"provider_synced"`
-	SquareConnected           bool             `json:"square_connected"`
-	SquareSynced              bool             `json:"square_synced"`
-	TestBookingCancelled      bool             `json:"test_booking_cancelled"`
-	BookingWriteBlocked       bool             `json:"booking_write_blocked"`
-	BookingWriteBlockedCode   string           `json:"booking_write_blocked_code,omitempty"`
-	BookingWriteBlockedReason string           `json:"booking_write_blocked_reason,omitempty"`
-	BookingWriteBlockedAt     *time.Time       `json:"booking_write_blocked_at,omitempty"`
-	ServiceCount              int              `json:"service_count"`
-	StaffCount                int              `json:"staff_count"`
-	BusinessHoursCount        int              `json:"business_hours_count"`
-	Checks                    []ReadinessCheck `json:"checks"`
-	BlockedReason             string           `json:"blocked_reason,omitempty"`
+	Ready                     bool                     `json:"ready"`
+	AIEnabled                 bool                     `json:"ai_enabled"`
+	ActiveProvider            string                   `json:"active_provider"`
+	ProviderConnected         bool                     `json:"provider_connected"`
+	ProviderSynced            bool                     `json:"provider_synced"`
+	SquareConnected           bool                     `json:"square_connected"`
+	SquareSynced              bool                     `json:"square_synced"`
+	TestBookingCancelled      bool                     `json:"test_booking_cancelled"`
+	BookingWriteBlocked       bool                     `json:"booking_write_blocked"`
+	BookingWriteBlockedCode   string                   `json:"booking_write_blocked_code,omitempty"`
+	BookingWriteBlockedReason string                   `json:"booking_write_blocked_reason,omitempty"`
+	BookingWriteBlockedAt     *time.Time               `json:"booking_write_blocked_at,omitempty"`
+	ServiceCount              int                      `json:"service_count"`
+	ConsultationEnabled       bool                     `json:"consultation_enabled"`
+	ConsultationReadyServices int                      `json:"consultation_ready_service_count"`
+	ServiceGuidance           ServiceGuidanceReadiness `json:"service_guidance"`
+	StaffCount                int                      `json:"staff_count"`
+	BusinessHoursCount        int                      `json:"business_hours_count"`
+	Checks                    []ReadinessCheck         `json:"checks"`
+	BlockedReason             string                   `json:"blocked_reason,omitempty"`
+}
+
+type ServiceGuidanceReadiness struct {
+	Status              conversation.ServiceGuidanceCapabilityStatus `json:"status"`
+	CatalogAvailable    bool                                         `json:"catalog_available"`
+	ConsultationEnabled bool                                         `json:"consultation_enabled"`
+	RecommendationReady bool                                         `json:"recommendation_ready"`
+	ReadyServiceCount   int                                          `json:"ready_service_count"`
+	Message             string                                       `json:"message,omitempty"`
 }
 
 type ProviderCapabilityStatus struct {

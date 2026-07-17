@@ -148,9 +148,6 @@ func isSalonIdentityCheck(message string, cfg *RuntimeConfig) bool {
 	if normalized == "" {
 		return false
 	}
-	if shouldHandoff(message) {
-		return false
-	}
 	identityShape := strings.HasPrefix(normalized, "hi ") ||
 		strings.HasPrefix(normalized, "hello ") ||
 		strings.HasPrefix(normalized, "is this ") ||
@@ -358,9 +355,6 @@ func bookingSafetyEnabled(aiEnabled bool) bool {
 }
 
 func resolveIntent(current string, message string, session Session, serviceUnderstanding serviceUnderstandingResult, signal partySignal) string {
-	if shouldHandoff(message) {
-		return IntentHandoff
-	}
 	if current == IntentBooking || hasBookingVerbSignal(message) || signal.IsParty || session.ServiceID != "" || session.RequestedDate != "" || session.RequestedStartTime != nil {
 		return IntentBooking
 	}

@@ -14,6 +14,7 @@ const (
 	TurnInterpreterOutcomeSchemaInvalid    = "schema_invalid"
 	TurnInterpreterOutcomeLowConfidence    = "low_confidence"
 	TurnInterpreterOutcomeCatalogRejected  = "catalog_rejected"
+	TurnInterpreterOutcomeSourceUngrounded = "source_ungrounded"
 )
 
 type TurnInterpreterError struct {

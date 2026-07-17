@@ -70,6 +70,26 @@ func TestTurnKernelRoutesSimpleExpectedFieldsWithoutSemanticModel(t *testing.T) 
 	}
 }
 
+func TestTurnKernelKeepsDateQuestionWithAdditionalConstraintOnSemanticLane(t *testing.T) {
+	services := []ServiceOption{{ID: "classic", Name: "Classic Manicure"}}
+	session := Session{
+		ID: "session_1", SalonID: "salon_1", Intent: IntentBooking, Status: StatusActive,
+		ServiceID: "classic", ServiceName: "Classic Manicure",
+		BookingSegments: []booking.BookingSegmentRequest{{ServiceID: "classic", StaffSelectionMode: booking.StaffSelectionAnyone}},
+		DialogState:     DialogState{Version: DialogStateVersion, Phase: DialogPhaseDrafting},
+	}
+	service := NewService(newFakeConversationStore(), &fakeBookingTool{})
+	service.now = fixedNow
+	plan := service.planTurn("Are there openings next Saturday later in the day?", session, &AIAnswerContext{Services: services}, &RuntimeConfig{Timezone: "America/Chicago"})
+	if plan.Route != TurnRouteSemanticLane || plan.Reason != "expected_input_partial_coverage" || plan.DeterministicCoverage != TurnCoveragePartial {
+		t.Fatalf("date constraint plan = %#v", plan)
+	}
+	statementPlan := service.planTurn("Friday afternoon.", session, &AIAnswerContext{Services: services}, &RuntimeConfig{Timezone: "America/Chicago"})
+	if statementPlan.Route != TurnRouteSemanticLane || statementPlan.Reason != "expected_input_partial_coverage" {
+		t.Fatalf("unconsumed date-window statement plan = %#v", statementPlan)
+	}
+}
+
 func TestTurnKernelKeepsCorrectionsAndMultiIntentOnSemanticLane(t *testing.T) {
 	services := []ServiceOption{
 		{ID: "gel", Name: "Gel Manicure"},
@@ -145,7 +165,7 @@ func TestTurnKernelDistinguishesCurrentDraftCountFromCatalogCount(t *testing.T) 
 	ctx := &AIAnswerContext{Services: services}
 
 	catalog := service.planTurn("How many manicure services do you have?", session, ctx, &RuntimeConfig{Timezone: "UTC"})
-	if catalog.Route != TurnRouteAnswerLane || len(catalog.Understanding.Questions) != 1 || catalog.Understanding.Questions[0].Subject != ConversationQuestionCatalog {
+	if catalog.Route != TurnRouteSemanticLane || catalog.Reason != "multi_service_semantic_context" {
 		t.Fatalf("catalog plan = %#v", catalog)
 	}
 
@@ -237,28 +257,41 @@ func (i *deadlineCapturingTurnInterpreter) InterpretTurn(ctx context.Context, re
 	return TurnUnderstanding{}, nil
 }
 
-func TestTurnKernelAppliesSemanticTimeoutBudget(t *testing.T) {
+func TestTurnKernelUsesCallerDeadlineWithoutPrivateTimeoutCap(t *testing.T) {
 	interpreter := &deadlineCapturingTurnInterpreter{}
 	service := NewService(newFakeConversationStore(), &fakeBookingTool{})
 	service.SetTurnInterpreter(interpreter)
-	session := Session{ID: "session_1", SalonID: "salon_1", Intent: IntentBooking, DialogState: DialogState{Version: DialogStateVersion, Phase: DialogPhaseDrafting}}
-	services := []ServiceOption{{ID: "gel", Name: "Gel Manicure"}}
+	session := Session{ID: "session_1", SalonID: "salon_1", DialogState: DialogState{Version: DialogStateVersion, Phase: DialogPhaseOpen}}
+	services := []ServiceOption{{
+		ID: "gel", Name: "Gel Manicure",
+		ConsultationProfile: readyComparisonProfile(ConsultationOutcomeMaintain, ConsultationSystemNatural),
+	}}
 	plan := TurnPlan{
 		Route: TurnRouteSemanticLane, ExpectedInput: ExpectedInputService, DeterministicCoverage: TurnCoverageNone,
-		SemanticServices: services,
+		SemanticServices: services, RecognizableGuidanceActions: []string{GuidanceActionBook, GuidanceActionConsultation},
 	}
-	service.turnUnderstandingForPlan(context.Background(), session, "I need some help choosing.", services, nil, nil, nil, plan)
-	if interpreter.deadline.IsZero() || interpreter.remaining <= semanticTurnTimeout-250*time.Millisecond || interpreter.remaining > semanticTurnTimeout {
-		t.Fatalf("semantic deadline budget = %s, want approximately %s", interpreter.remaining, semanticTurnTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+	defer cancel()
+	service.turnUnderstandingForPlan(ctx, session, "I need some help choosing.", services, nil, nil, nil, plan)
+	if interpreter.deadline.IsZero() || interpreter.remaining <= 6*time.Second || interpreter.remaining > 7*time.Second {
+		t.Fatalf("semantic deadline budget = %s, want inherited caller deadline near 7s", interpreter.remaining)
 	}
 	if interpreter.request.SemanticContract != TurnSemanticContractGuidance {
 		t.Fatalf("semantic contract = %q, want %q", interpreter.request.SemanticContract, TurnSemanticContractGuidance)
 	}
+	if len(interpreter.request.CatalogServices) != 1 || interpreter.request.CatalogServices[0].ConsultationProfile != nil || len(interpreter.request.RecognizableGuidanceActions) != 2 {
+		t.Fatalf("guidance request retained recommendation profiles or lost actions: %#v", interpreter.request)
+	}
 }
 
 func TestTurnKernelKeepsFullSemanticContractOutsideInitialGuidanceState(t *testing.T) {
+	interpreter := &deadlineCapturingTurnInterpreter{}
+	service := NewService(newFakeConversationStore(), &fakeBookingTool{})
+	service.SetTurnInterpreter(interpreter)
+	services := []ServiceOption{{ID: "gel", Name: "Gel Manicure"}}
 	basePlan := TurnPlan{
 		Route: TurnRouteSemanticLane, ExpectedInput: ExpectedInputService, DeterministicCoverage: TurnCoverageNone,
+		RecognizableGuidanceActions: []string{GuidanceActionBook}, SemanticServices: services,
 	}
 	tests := []struct {
 		name    string
@@ -286,11 +319,48 @@ func TestTurnKernelKeepsFullSemanticContractOutsideInitialGuidanceState(t *testi
 			if got := semanticContractForTurnPlan(test.session, test.plan); got != TurnSemanticContractFull {
 				t.Fatalf("semantic contract = %q, want %q", got, TurnSemanticContractFull)
 			}
+			service.turnUnderstandingForPlan(context.Background(), test.session, "Please change that.", services, nil, nil, nil, test.plan)
+			if len(interpreter.request.RecognizableGuidanceActions) != 0 {
+				t.Fatalf("full semantic request leaked guidance actions: %#v", interpreter.request.RecognizableGuidanceActions)
+			}
 		})
 	}
 }
 
-func TestTurnKernelBoundsSemanticLatencyAndPreservesDraftFallback(t *testing.T) {
+func TestGuidanceActionValidationUsesOnlyCurrentStateOwnedActions(t *testing.T) {
+	turn := TurnUnderstanding{Goal: "consultation", GuidanceAction: GuidanceActionConsultation, Confidence: 0.95}
+	if _, ok := validateGuidanceActionForPlan(turn, TurnSemanticContractGuidance, []string{GuidanceActionBook}); ok {
+		t.Fatal("guidance action outside the current state offer was accepted")
+	}
+	if _, ok := validateGuidanceActionForPlan(turn, TurnSemanticContractGuidance, []string{GuidanceActionConsultation}); !ok {
+		t.Fatal("current state-owned guidance action was rejected")
+	}
+	if _, ok := validateGuidanceActionForPlan(turn, TurnSemanticContractFull, nil); ok {
+		t.Fatal("guidance action leaked into the full semantic contract")
+	}
+	if _, ok := validateGuidanceActionForPlan(TurnUnderstanding{
+		Goal: "information", GuidanceAction: GuidanceActionConsultation, Confidence: 0.95,
+	}, TurnSemanticContractGuidance, []string{GuidanceActionConsultation}); ok {
+		t.Fatal("guidance action with a conflicting goal was accepted")
+	}
+	if _, ok := validateGuidanceActionForPlan(TurnUnderstanding{
+		Goal: "consultation", Confidence: 0.95,
+	}, TurnSemanticContractGuidance, []string{GuidanceActionBook}); ok {
+		t.Fatal("non-unknown goal without a typed guidance action was accepted")
+	}
+	if _, ok := validateGuidanceActionForPlan(TurnUnderstanding{
+		Goal: "book_appointment", GuidanceAction: GuidanceActionBook, GuidancePartySize: 3, Confidence: 0.95,
+	}, TurnSemanticContractGuidance, []string{GuidanceActionBook}); !ok {
+		t.Fatal("valid typed party size was rejected")
+	}
+	if _, ok := validateGuidanceActionForPlan(TurnUnderstanding{
+		Goal: "information", GuidanceAction: GuidanceActionServiceCatalog, GuidancePartySize: 3, Confidence: 0.95,
+	}, TurnSemanticContractGuidance, []string{GuidanceActionServiceCatalog}); ok {
+		t.Fatal("party size attached to a non-book action was accepted")
+	}
+}
+
+func TestTurnKernelInheritsRequestDeadlineAndPreservesDraftFallback(t *testing.T) {
 	services := []ServiceOption{{ID: "gel", Name: "Gel Manicure"}, {ID: "spa", Name: "Spa Pedicure"}}
 	session := Session{
 		ID: "session_1", SalonID: "salon_1", Intent: IntentBooking, ServiceID: "gel",
@@ -584,7 +654,7 @@ func TestPartyCorrectionTimeoutCollectsGuestThenOperationWithoutLosingReviewStat
 	if !session.DialogState.ReviewAccepted || session.DialogState.AuthorizedRevision != 4 || len(session.OfferedSlots) != 1 {
 		t.Fatalf("unresolved correction cleared review/slots: state=%#v slots=%#v", session.DialogState, session.OfferedSlots)
 	}
-	if reply := strings.ToLower(store.lastTurn.AIMessage); !strings.Contains(reply, "who should get spa pedicure") || !strings.Contains(reply, "guest 2") {
+	if reply := strings.ToLower(store.lastTurn.AIMessage); !strings.Contains(reply, "who should get spa pedicure") || !strings.Contains(reply, "second guest") || strings.Contains(reply, "guest_2") {
 		t.Fatalf("guest prompt = %q", store.lastTurn.AIMessage)
 	}
 
@@ -616,7 +686,7 @@ func TestPartyCorrectionTimeoutCollectsGuestThenOperationWithoutLosingReviewStat
 	if !session.DialogState.ReviewAccepted || session.DialogState.AuthorizedRevision != 4 || len(session.OfferedSlots) != 1 {
 		t.Fatalf("guest selection cleared review/slots before mutation: state=%#v slots=%#v", session.DialogState, session.OfferedSlots)
 	}
-	if reply := strings.ToLower(store.lastTurn.AIMessage); !strings.Contains(reply, "for guest 2") || !strings.Contains(reply, "add spa pedicure") || !strings.Contains(reply, "replace classic pedicure") {
+	if reply := strings.ToLower(store.lastTurn.AIMessage); !strings.Contains(reply, "for the second guest") || !strings.Contains(reply, "add spa pedicure") || !strings.Contains(reply, "replace classic pedicure") {
 		t.Fatalf("operation prompt = %q", store.lastTurn.AIMessage)
 	}
 
@@ -639,7 +709,7 @@ func TestPartyCorrectionTimeoutCollectsGuestThenOperationWithoutLosingReviewStat
 	if session.DialogState.Pending != nil || session.DialogState.ReviewAccepted || session.DialogState.AuthorizedRevision != 0 || len(session.OfferedSlots) != 0 {
 		t.Fatalf("resolved correction state = %#v slots=%#v", session.DialogState, session.OfferedSlots)
 	}
-	if reply := strings.ToLower(store.lastTurn.AIMessage); !strings.Contains(reply, "changed the service for guest 2 to spa pedicure") {
+	if reply := strings.ToLower(store.lastTurn.AIMessage); !strings.Contains(reply, "changed the service for the second guest to spa pedicure") || strings.Contains(reply, "guest_2") {
 		t.Fatalf("scoped acknowledgement = %q", store.lastTurn.AIMessage)
 	}
 	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {

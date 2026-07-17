@@ -11,8 +11,6 @@ import (
 	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
-const semanticTurnTimeout = 2500 * time.Millisecond
-
 type conversationDraftResult struct {
 	Handled       bool
 	Changed       bool
@@ -52,6 +50,23 @@ func (s *Service) turnUnderstandingForMessage(ctx context.Context, session Sessi
 
 func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session, message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, staff []StaffOption, plan TurnPlan) TurnUnderstanding {
 	startedAt := time.Now()
+	semanticServices := plan.SemanticServices
+	semanticStaff := plan.SemanticStaff
+	semanticContract := semanticContractForTurnPlan(session, plan)
+	recognizableGuidanceActions := []string(nil)
+	if semanticContract == TurnSemanticContractGuidance {
+		recognizableGuidanceActions = append([]string(nil), plan.RecognizableGuidanceActions...)
+	}
+	finish := func(turn TurnUnderstanding) TurnUnderstanding {
+		diagnostics := cloneStringMap(turn.InterpreterDiagnostics)
+		if diagnostics == nil {
+			diagnostics = map[string]string{}
+		}
+		diagnostics["semantic_contract"] = semanticContract
+		diagnostics["duration_ms"] = strconv.FormatInt(time.Since(startedAt).Milliseconds(), 10)
+		turn.InterpreterDiagnostics = diagnostics
+		return turn
+	}
 	fallback := plan.Understanding
 	if fallback.Source == "" {
 		fallback.Source = "turn_kernel"
@@ -61,41 +76,45 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 	}
 	if s.turnInterpreter == nil {
 		fallback.InterpreterOutcome = "interpreter_absent"
+		fallback = finish(fallback)
 		recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathInterpreterAbsent, map[string]string{
 			"turn_interpreter_outcome": fallback.InterpreterOutcome,
+			"turn_semantic_contract":   semanticContract,
 		})
 		return fallback
 	}
-	semanticServices := plan.SemanticServices
-	semanticStaff := plan.SemanticStaff
-	semanticContract := semanticContractForTurnPlan(session, plan)
-	interpretCtx, cancel := context.WithTimeout(ctx, semanticTurnTimeout)
-	defer cancel()
-	interpreted, err := s.turnInterpreter.InterpretTurn(interpretCtx, TurnInterpretationRequest{
-		SalonID:             session.SalonID,
-		SessionID:           session.ID,
-		Channel:             session.Channel,
-		CustomerMessage:     sanitizedTurnInterpreterMessage(message, session),
-		ExpectedInput:       plan.ExpectedInput,
-		SemanticContract:    semanticContract,
-		SelectedServices:    conversationServiceRefs(selectedServiceOptions(session, services)),
-		CatalogServices:     conversationServiceRefs(semanticServices),
-		SelectedStaff:       conversationStaffRefs(selectedStaffOptions(session, staff)),
-		CatalogStaff:        conversationStaffRefs(semanticStaff),
-		Pending:             clonePendingConversationAct(session.DialogState.Pending),
-		CurrentBookingStage: normalizedDialogState(session.DialogState).Phase,
-		BookingAction:       bookingActionForSession(session),
-		CurrentDraft:        conversationDraftRef(session),
-		Consultation:        cloneDialogState(session.DialogState).Consultation,
+	// The caller/channel request owns the deadline. A nested fixed timeout used
+	// to cancel valid model work before the simulator or phone turn itself had
+	// expired, making identical semantic requests fail in both channels.
+	interpreted, err := s.turnInterpreter.InterpretTurn(ctx, TurnInterpretationRequest{
+		SalonID:                     session.SalonID,
+		SessionID:                   session.ID,
+		Channel:                     session.Channel,
+		CustomerMessage:             sanitizedTurnInterpreterMessage(message, session),
+		ExpectedInput:               plan.ExpectedInput,
+		SemanticContract:            semanticContract,
+		RecognizableGuidanceActions: recognizableGuidanceActions,
+		SelectedServices:            conversationServiceRefs(selectedServiceOptions(session, services)),
+		CatalogServices:             conversationServiceRefs(semanticServices),
+		CatalogServiceAliases:       conversationServiceAliasRefs(aliases, semanticServices),
+		CatalogCategories:           conversationCategoryRefs(semanticServices, categoryAliases),
+		SelectedStaff:               conversationStaffRefs(selectedStaffOptions(session, staff)),
+		CatalogStaff:                conversationStaffRefs(semanticStaff),
+		Pending:                     clonePendingConversationAct(session.DialogState.Pending),
+		CurrentBookingStage:         normalizedDialogState(session.DialogState).Phase,
+		BookingAction:               bookingActionForSession(session),
+		CurrentDraft:                conversationDraftRef(session),
+		Consultation:                cloneDialogState(session.DialogState).Consultation,
 	})
 	fallback.ModelInvoked = true
 	if err != nil {
 		fallback.InterpreterOutcome = turnInterpreterErrorOutcome(err)
 		fallback.InterpreterDiagnostics = turnInterpreterErrorDiagnostics(err)
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(interpretCtx.Err(), context.DeadlineExceeded) {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			fallback.InterpreterOutcome = TurnInterpreterOutcomeTimeout
 		}
 		fallback.Reason = "semantic_interpreter_" + fallback.InterpreterOutcome
+		fallback = finish(fallback)
 		attributes := map[string]string{
 			"turn_interpreter_outcome": fallback.InterpreterOutcome,
 			"turn_semantic_contract":   semanticContract,
@@ -107,6 +126,9 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 		return fallback
 	}
 	interpreted.ModelInvoked = true
+	interpreted = normalizeActiveConsultationTurn(interpreted, session)
+	interpreted = normalizeOperationalMutationGoal(interpreted, session)
+	interpreted = normalizeExpectedAvailabilityQuestions(interpreted, plan.ExpectedInput)
 	// A validated safety concern must not be discarded because an unrelated part
 	// of the model reply is malformed or has lower confidence. The caller is
 	// handed off before any other interpreted fields are consumed.
@@ -118,15 +140,34 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 		interpreted.Safety = safety
 		interpreted.Source = "structured_ai"
 		interpreted.InterpreterOutcome = TurnInterpreterOutcomeAccepted
+		interpreted = finish(interpreted)
 		recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathStructuredAI, map[string]string{
 			"turn_interpreter_outcome": interpreted.InterpreterOutcome,
 			"turn_semantic_contract":   semanticContract,
 		})
 		return interpreted
 	}
-	if validated, ok := validateTurnUnderstanding(interpreted, session, semanticServices, semanticStaff); ok {
+	validated, valid := validateTurnUnderstanding(interpreted, session, semanticServices, semanticStaff)
+	if valid {
+		validated, valid = validateGuidanceActionForPlan(validated, semanticContract, plan.RecognizableGuidanceActions)
+	}
+	if valid {
+		validated = normalizeGuidanceConsultationTransitionFlags(validated, semanticContract)
+	}
+	replacementSourceRejected := false
+	if valid && !semanticReplacementSourcesGrounded(validated, message, session, services, aliases, categoryAliases) {
+		valid = false
+		replacementSourceRejected = true
+	}
+	if valid {
 		validated.Source = "structured_ai"
 		validated.InterpreterOutcome = TurnInterpreterOutcomeAccepted
+		if semanticContract == TurnSemanticContractGuidance && validated.GuidanceAction == GuidanceActionBook && validated.GuidancePartySize >= 2 {
+			validated.Acts = append(validated.Acts, ConversationAct{
+				Kind: ConversationActSet, Entity: ConversationEntityGuest, Count: validated.GuidancePartySize,
+				Confidence: validated.Confidence, Reason: "guidance_party_size", Source: "structured_ai",
+			})
+		}
 		for index := range validated.Acts {
 			validated.Acts[index].Source = "structured_ai"
 			if validated.Acts[index].Entity == "" {
@@ -135,9 +176,11 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 		}
 		if len(validated.Acts) == 0 && len(validated.Questions) == 0 && len(validated.ConsultationMutations) == 0 &&
 			!validated.Safety.Concern && !meaningfulConsultationNeeds(validated.Consultation) &&
+			strings.TrimSpace(validated.GuidanceAction) == "" &&
 			(validated.Goal == "" || validated.Goal == "unknown") {
 			fallback.InterpreterOutcome = "empty_understanding"
 			fallback.Reason = "semantic_interpreter_empty_understanding"
+			fallback = finish(fallback)
 			recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathProviderFallback, map[string]string{
 				"turn_interpreter_outcome": fallback.InterpreterOutcome,
 				"turn_semantic_contract":   semanticContract,
@@ -150,8 +193,10 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 				"turn_interpreter_outcome": "catalog_fallback",
 				"turn_semantic_contract":   semanticContract,
 			})
-			return TurnUnderstanding{
+			return finish(TurnUnderstanding{
 				Goal:                  validated.Goal,
+				GuidanceAction:        validated.GuidanceAction,
+				GuidanceCatalogMode:   validated.GuidanceCatalogMode,
 				Confidence:            validated.Confidence,
 				Reason:                "catalog_backed_service_edit_fallback",
 				Consultation:          validated.Consultation,
@@ -161,18 +206,24 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 				ModelInvoked:          true,
 				CatalogFallback:       true,
 				InterpreterOutcome:    "catalog_fallback",
-			}
+			})
 		}
 		validated = reconcileSemanticServiceTargets(validated, catalogUnderstanding)
 		validated = reconcileDeterministicInformationQuestions(message, validated)
+		validated = finish(validated)
 		recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathStructuredAI, map[string]string{
 			"turn_interpreter_outcome": validated.InterpreterOutcome,
 			"turn_semantic_contract":   semanticContract,
 		})
 		return validated
 	}
-	fallback.InterpreterOutcome = rejectedTurnUnderstandingOutcome(interpreted, semanticServices, semanticStaff)
+	if replacementSourceRejected {
+		fallback.InterpreterOutcome = TurnInterpreterOutcomeSourceUngrounded
+	} else {
+		fallback.InterpreterOutcome = rejectedTurnUnderstandingOutcome(interpreted, semanticServices, semanticStaff)
+	}
 	fallback.Reason = "semantic_interpretation_" + fallback.InterpreterOutcome
+	fallback = finish(fallback)
 	recordTurnTimingWithAttributes(ctx, TurnTimingStageTurnInterpreter, startedAt, TurnTimingPathProviderFallback, map[string]string{
 		"turn_interpreter_outcome": fallback.InterpreterOutcome,
 		"turn_semantic_contract":   semanticContract,
@@ -180,8 +231,73 @@ func (s *Service) turnUnderstandingForPlan(ctx context.Context, session Session,
 	return fallback
 }
 
+func normalizeGuidanceConsultationTransitionFlags(turn TurnUnderstanding, semanticContract string) TurnUnderstanding {
+	if semanticContract != TurnSemanticContractGuidance || turn.GuidanceAction != GuidanceActionConsultation {
+		return turn
+	}
+	// Initial guidance selects the consultation workflow; booking/complete are
+	// state-transition signals owned by an already active consultation. Do not
+	// let an auxiliary extraction boolean skip that workflow boundary.
+	if turn.Consultation.BookingRequested || turn.Consultation.ConversationComplete {
+		turn.InterpreterDiagnostics = mergeInterpreterDiagnostic(turn.InterpreterDiagnostics, "guidance_consultation_transition_flags_dropped", "1")
+	}
+	turn.Consultation.BookingRequested = false
+	turn.Consultation.ConversationComplete = false
+	return turn
+}
+
+func validateGuidanceActionForPlan(turn TurnUnderstanding, contract string, recognizableActions []string) (TurnUnderstanding, bool) {
+	action := strings.TrimSpace(turn.GuidanceAction)
+	catalogMode := strings.TrimSpace(turn.GuidanceCatalogMode)
+	questionSubject := strings.TrimSpace(turn.GuidanceQuestionSubject)
+	partySize := turn.GuidancePartySize
+	turn.GuidanceAction = action
+	turn.GuidanceCatalogMode = catalogMode
+	turn.GuidanceQuestionSubject = questionSubject
+	if contract != TurnSemanticContractGuidance {
+		return turn, action == "" && catalogMode == "" && questionSubject == "" && partySize == 0
+	}
+	if action == "" {
+		return turn, strings.TrimSpace(turn.Goal) == "unknown" && catalogMode == "" && questionSubject == "" && partySize == 0
+	}
+	if !containsString(recognizableActions, action) {
+		return TurnUnderstanding{}, false
+	}
+	if action == GuidanceActionServiceCatalog {
+		if catalogMode == "" {
+			turn.GuidanceCatalogMode = ConversationQuestionModeList
+		} else if !validInformationQuestionMode(catalogMode) {
+			return TurnUnderstanding{}, false
+		}
+		if questionSubject == "" {
+			turn.GuidanceQuestionSubject = ConversationQuestionCatalog
+		} else if questionSubject != ConversationQuestionCatalog {
+			return TurnUnderstanding{}, false
+		}
+	} else if catalogMode != "" {
+		return TurnUnderstanding{}, false
+	}
+	if action == GuidanceActionSalonQuestion {
+		switch questionSubject {
+		case ConversationQuestionAvailability, ConversationQuestionPrice, ConversationQuestionHours, ConversationQuestionStaff, ConversationQuestionPolicy:
+		default:
+			return TurnUnderstanding{}, false
+		}
+	} else if action != GuidanceActionServiceCatalog && questionSubject != "" {
+		return TurnUnderstanding{}, false
+	}
+	if partySize != 0 {
+		if action != GuidanceActionBook || partySize < 2 || partySize > 20 {
+			return TurnUnderstanding{}, false
+		}
+	}
+	expectedGoal := GuidanceGoalForAction(action)
+	return turn, expectedGoal != "unknown" && strings.TrimSpace(turn.Goal) == expectedGoal
+}
+
 func semanticContractForTurnPlan(session Session, plan TurnPlan) string {
-	if plan.Route != TurnRouteSemanticLane || plan.DeterministicCoverage != TurnCoverageNone {
+	if plan.Route != TurnRouteSemanticLane || plan.Reason == "multiple_signals" ||
+		(plan.DeterministicCoverage == TurnCoveragePartial && plan.Reason != "multi_service_semantic_context") {
 		return TurnSemanticContractFull
 	}
 	if plan.ExpectedInput != ExpectedInputCallerGoal && plan.ExpectedInput != ExpectedInputService {
@@ -189,6 +305,10 @@ func semanticContractForTurnPlan(session Session, plan TurnPlan) string {
 	}
 	state := normalizedDialogState(session.DialogState)
 	if state.Pending != nil || state.Phase == DialogPhaseReview || activePartyPlan(session.PartyPlan) {
+		return TurnSemanticContractFull
+	}
+	if !guidanceRecoveryStateActive(state.Guidance) &&
+		(strings.TrimSpace(session.Intent) == IntentBooking || serviceSelectionScopedToPending(session, plan.SemanticServices)) {
 		return TurnSemanticContractFull
 	}
 	if strings.TrimSpace(session.ServiceID) != "" || len(session.BookingSegments) > 0 ||
@@ -205,10 +325,13 @@ func turnInterpreterDiagnosticAttributes(diagnostics map[string]string) map[stri
 	}
 	mapping := map[string]string{
 		"provider": "turn_interpreter_provider", "failure_stage": "turn_interpreter_failure_stage",
+		"semantic_contract": "turn_semantic_contract", "duration_ms": "turn_interpreter_ms",
 		"http_status": "turn_interpreter_http_status", "http_status_class": "turn_interpreter_http_status_class",
 		"request_id": "turn_interpreter_request_id", "error_type": "turn_interpreter_error_type",
 		"error_code": "turn_interpreter_error_code", "error_param": "turn_interpreter_error_param",
 		"schema_fingerprint": "turn_interpreter_schema_fingerprint", "circuit_open": "turn_interpreter_circuit_open",
+		"consultation_profile_dropped":   "turn_consultation_profile_dropped",
+		"consultation_mutations_dropped": "turn_consultation_mutations_dropped",
 	}
 	attributes := map[string]string{}
 	for source, target := range mapping {
@@ -356,6 +479,93 @@ func reconcileSemanticServiceTargets(turn TurnUnderstanding, result serviceUnder
 		act.Reason = "catalog_ambiguity_preserved"
 	}
 	return turn
+}
+
+func normalizeActiveConsultationTurn(turn TurnUnderstanding, session Session) TurnUnderstanding {
+	if !consultationStateActive(normalizedDialogState(session.DialogState).Consultation) {
+		return turn
+	}
+	// Consultation ranking and recommendation belong to the backend's
+	// owner-approved profiles. Model output is extraction-only while this state
+	// is active, so no model-authored operation may reach the booking reducer.
+	turn.Acts = nil
+	return turn
+}
+
+func normalizeOperationalMutationGoal(turn TurnUnderstanding, session Session) TurnUnderstanding {
+	if strings.TrimSpace(turn.Goal) != "consultation" || !turnHasMutations(turn) || meaningfulConsultationNeeds(turn.Consultation) || len(turn.ConsultationMutations) > 0 {
+		return turn
+	}
+	// A validated draft mutation is operational evidence. A bare consultation
+	// goal without consultation needs must not divert that mutation into the
+	// recommendation workflow.
+	turn.Goal = "unknown"
+	if strings.TrimSpace(session.Intent) == IntentBooking || hasOperationalBookingProgress(session) {
+		turn.Goal = "book_appointment"
+	}
+	turn.InterpreterDiagnostics = mergeInterpreterDiagnostic(turn.InterpreterDiagnostics, "bare_consultation_goal_overridden_by_operational_mutation", "1")
+	return turn
+}
+
+func normalizeExpectedAvailabilityQuestions(turn TurnUnderstanding, expectedInput string) TurnUnderstanding {
+	if expectedInput != ExpectedInputRequestedDate && expectedInput != ExpectedInputRequestedTime {
+		return turn
+	}
+	turn.Questions = append([]ConversationQuestion(nil), turn.Questions...)
+	for index := range turn.Questions {
+		if _, ok := normalizedSlotTimePreference(turn.Questions[index].TimePreference); !ok {
+			continue
+		}
+		turn.Questions[index].Subject = ConversationQuestionAvailability
+	}
+	return turn
+}
+
+func semanticReplacementSourcesGrounded(turn TurnUnderstanding, message string, session Session, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) bool {
+	// A single-service draft can safely resolve an implied source from its one
+	// current selection. A party plan cannot: every destructive mutation must
+	// retain guest-specific, catalog-grounded source evidence.
+	if !activePartyPlan(session.PartyPlan) {
+		return true
+	}
+	hasReplacement := false
+	for _, act := range turn.Acts {
+		if act.Kind == ConversationActReplace && act.Entity == ConversationEntityService {
+			hasReplacement = true
+			break
+		}
+	}
+	if !hasReplacement {
+		return true
+	}
+
+	state := normalizedDialogState(session.DialogState)
+	pendingSources := map[string]bool{}
+	if state.Pending != nil && state.Pending.Kind == ConversationActReplace {
+		pendingSources = stringSet(state.Pending.SourceServiceIDs)
+	}
+	selected := selectedServiceOptions(session, services)
+	explicit := interpretServiceWithCategoryAliases(message, selected, aliases, categoryAliases)
+	explicitSources := map[string]bool{}
+	if explicit.Reason == serviceUnderstandingExact || explicit.Reason == serviceUnderstandingAlias {
+		explicitSources = stringSet(serviceOptionIDs(explicit.Candidates))
+	}
+
+	for _, act := range turn.Acts {
+		if act.Kind != ConversationActReplace || act.Entity != ConversationEntityService {
+			continue
+		}
+		if len(act.SourceServiceIDs) == 0 {
+			return false
+		}
+		for _, sourceID := range act.SourceServiceIDs {
+			sourceID = strings.TrimSpace(sourceID)
+			if !explicitSources[sourceID] && !pendingSources[sourceID] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func isCategoryLevelServiceUnderstanding(result serviceUnderstandingResult) bool {
@@ -1069,16 +1279,53 @@ func conversationServiceRefs(services []ServiceOption) []ConversationServiceRef 
 	out := make([]ConversationServiceRef, 0, len(services))
 	for _, service := range services {
 		ref := ConversationServiceRef{ServiceID: service.ID, ServiceName: service.Name, CategoryID: service.CategoryID, CategoryName: service.CategoryName}
-		if profile := service.ConsultationProfile; profile != nil {
-			ref.ConsultationProfile = &ConversationConsultationProfileRef{
-				Status: profile.Status, RecommendedOutcomes: append([]string(nil), profile.RecommendedOutcomes...),
-				CompatibleCurrentSystems: append([]string(nil), profile.CompatibleCurrentSystems...),
-				LengthCapabilities:       append([]string(nil), profile.LengthCapabilities...),
-				PriorityTags:             append([]string(nil), profile.PriorityTags...), FinishOptions: append([]string(nil), profile.FinishOptions...),
-				MaintenanceNote: profile.MaintenanceNote, OwnerApprovedSummary: profile.OwnerApprovedSummary, Revision: profile.Revision,
-			}
-		}
 		out = append(out, ref)
+	}
+	return out
+}
+
+func conversationServiceAliasRefs(aliases []ServiceAlias, services []ServiceOption) []ConversationServiceAliasRef {
+	allowed := stringSet(serviceOptionIDs(services))
+	out := make([]ConversationServiceAliasRef, 0, len(aliases))
+	seen := map[string]bool{}
+	for _, alias := range aliases {
+		serviceID := strings.TrimSpace(alias.ServiceID)
+		phrase := strings.TrimSpace(alias.Alias)
+		key := serviceID + "\x00" + normalizeServiceText(phrase)
+		if !allowed[serviceID] || phrase == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, ConversationServiceAliasRef{ServiceID: serviceID, Alias: phrase})
+	}
+	return out
+}
+
+func conversationCategoryRefs(services []ServiceOption, aliases []ServiceCategoryAlias) []ConversationCategoryRef {
+	out := make([]ConversationCategoryRef, 0)
+	index := map[string]int{}
+	for _, service := range services {
+		categoryID := strings.TrimSpace(service.CategoryID)
+		if categoryID == "" {
+			continue
+		}
+		position, ok := index[categoryID]
+		if !ok {
+			position = len(out)
+			index[categoryID] = position
+			out = append(out, ConversationCategoryRef{
+				CategoryID: categoryID, CategoryName: strings.TrimSpace(service.CategoryName),
+			})
+		}
+		out[position].ServiceIDs = uniqueStrings(append(out[position].ServiceIDs, strings.TrimSpace(service.ID)))
+	}
+	for _, alias := range aliases {
+		position, ok := index[strings.TrimSpace(alias.CategoryID)]
+		phrase := strings.TrimSpace(alias.Alias)
+		if !ok || phrase == "" {
+			continue
+		}
+		out[position].Aliases = uniqueStrings(append(out[position].Aliases, phrase))
 	}
 	return out
 }
@@ -1155,6 +1402,21 @@ func validateInterpretedConversationAct(act ConversationAct, session Session, se
 	}
 	if act.Entity == "" {
 		act.Entity = defaultConversationActEntity(act.Kind)
+	}
+	if act.Kind == ConversationActSet && act.Entity == ConversationEntityStaff && strings.TrimSpace(act.Subject) == "alternative" {
+		// The alternative-staff protocol intentionally carries no selection.
+		// The reducer derives choices from the current salon staff catalog, so
+		// model-authored source/category/guest decoration is non-authoritative.
+		act.SourceServiceIDs = nil
+		act.SourceCategoryID = ""
+		act.SourceCategoryName = ""
+		act.TargetCategoryID = ""
+		act.TargetCategoryName = ""
+		act.Scope = ""
+		act.GuestScope = ""
+		act.GuestRef = ""
+		act.Value = ""
+		act.Count = 0
 	}
 	if isServiceMutationAct(act.Kind) && act.Entity != ConversationEntityService {
 		return ConversationAct{}, false
@@ -1238,8 +1500,14 @@ func validateTurnUnderstanding(turn TurnUnderstanding, session Session, services
 		if !ok {
 			return TurnUnderstanding{}, false
 		}
-		if activePartyPlan(session.PartyPlan) && isServiceMutationAct(validated.Kind) && !partyGuestRefExists(session.PartyPlan, validated.GuestRef) {
-			return TurnUnderstanding{}, false
+		if activePartyPlan(session.PartyPlan) && isServiceMutationAct(validated.Kind) {
+			if !partyGuestRefExists(session.PartyPlan, validated.GuestRef) {
+				return TurnUnderstanding{}, false
+			}
+			// The exact, state-owned guest reference is authoritative once a
+			// structured party plan exists. Remove the redundant broad scope so
+			// contradictory model labels cannot affect downstream interpretation.
+			validated.GuestScope = ""
 		}
 		for _, staffID := range append(append([]string(nil), validated.SourceServiceIDs...), validated.TargetServiceIDs...) {
 			if validated.Entity == ConversationEntityStaff && !validStaff[strings.TrimSpace(staffID)] {
@@ -1261,7 +1529,11 @@ func validateTurnUnderstanding(turn TurnUnderstanding, session Session, services
 	validatedQuestions := make([]ConversationQuestion, 0, len(turn.Questions))
 	for _, question := range turn.Questions {
 		question.Subject = strings.TrimSpace(question.Subject)
+		question.Mode = strings.TrimSpace(question.Mode)
 		if !allowedQuestions[question.Subject] || question.Confidence < 0.78 {
+			return TurnUnderstanding{}, false
+		}
+		if question.Mode != "" && !validInformationQuestionMode(question.Mode) {
 			return TurnUnderstanding{}, false
 		}
 		for _, serviceID := range question.ServiceIDs {
@@ -1284,17 +1556,21 @@ func validateTurnUnderstanding(turn TurnUnderstanding, session Session, services
 		}
 		validatedQuestions = append(validatedQuestions, question)
 	}
-	consultation, ok := validateConsultationNeedProfile(turn.Consultation, validServices)
-	if !ok {
-		return TurnUnderstanding{}, false
+	consultation, consultationValid := validateConsultationNeedProfile(turn.Consultation, validServices)
+	if !consultationValid {
+		// Consultation extraction is auxiliary to the primary act/question/guidance
+		// contract. A malformed or low-confidence snapshot must not erase a valid
+		// booking action, information question, or guidance decision.
+		consultation = ConsultationNeedProfile{}
+		turn.InterpreterDiagnostics = mergeInterpreterDiagnostic(turn.InterpreterDiagnostics, "consultation_profile_dropped", "1")
 	}
 	currentConsultationNeeds := ConsultationNeedProfile{}
 	if state := normalizedDialogState(session.DialogState); consultationStateActive(state.Consultation) {
 		currentConsultationNeeds = state.Consultation.Needs
 	}
-	mutations, ok := validateConsultationNeedMutations(turn.ConsultationMutations, currentConsultationNeeds, validServices)
-	if !ok {
-		return TurnUnderstanding{}, false
+	mutations, droppedMutations := validateConsultationNeedMutationsPartial(turn.ConsultationMutations, currentConsultationNeeds, validServices)
+	if droppedMutations > 0 {
+		turn.InterpreterDiagnostics = mergeInterpreterDiagnostic(turn.InterpreterDiagnostics, "consultation_mutations_dropped", strconv.Itoa(droppedMutations))
 	}
 	safety, ok := validateSafetyAssessment(turn.Safety)
 	if !ok {
@@ -1311,11 +1587,33 @@ func validateTurnUnderstanding(turn TurnUnderstanding, session Session, services
 	return turn, true
 }
 
+func validInformationQuestionMode(mode string) bool {
+	switch strings.TrimSpace(mode) {
+	case ConversationQuestionModeList, ConversationQuestionModeCount, ConversationQuestionModeExistence,
+		ConversationQuestionModeDetails, ConversationQuestionModeCompare:
+		return true
+	default:
+		return false
+	}
+}
+
 func validateConsultationNeedProfile(profile ConsultationNeedProfile, validServices map[string]bool) (ConsultationNeedProfile, bool) {
 	profile.CurrentSystem = strings.TrimSpace(profile.CurrentSystem)
 	profile.DesiredOutcome = strings.TrimSpace(profile.DesiredOutcome)
 	profile.LengthChange = strings.TrimSpace(profile.LengthChange)
 	profile.Reason = strings.TrimSpace(profile.Reason)
+	// Model-level "unknown" means the caller did not supply the field. It is
+	// never persisted as a consultation preference and must not make an
+	// otherwise empty auxiliary snapshot meaningful.
+	if profile.CurrentSystem == ConsultationSystemUnknown {
+		profile.CurrentSystem = ""
+	}
+	if profile.DesiredOutcome == ConsultationOutcomeUnknown {
+		profile.DesiredOutcome = ""
+	}
+	if profile.LengthChange == ConsultationLengthUnknown {
+		profile.LengthChange = ""
+	}
 	if !allowedConsultationValue(profile.CurrentSystem, "", ConsultationSystemNatural, ConsultationSystemRegularPolish, ConsultationSystemGel, ConsultationSystemDip, ConsultationSystemAcrylic, ConsultationSystemExtension, ConsultationSystemUnknown) {
 		return ConsultationNeedProfile{}, false
 	}
@@ -1438,6 +1736,36 @@ func validateConsultationNeedMutations(mutations []ConsultationNeedMutation, cur
 		applyConsultationNeedMutation(&current, mutation)
 	}
 	return validated, true
+}
+
+// validateConsultationNeedMutationsPartial preserves every state-valid,
+// catalog-grounded mutation in spoken order while dropping malformed and no-op
+// auxiliary mutations. Primary turn meaning is validated independently by
+// validateTurnUnderstanding.
+func validateConsultationNeedMutationsPartial(mutations []ConsultationNeedMutation, current ConsultationNeedProfile, validServices map[string]bool) ([]ConsultationNeedMutation, int) {
+	if len(mutations) > 16 {
+		return nil, len(mutations)
+	}
+	validated := make([]ConsultationNeedMutation, 0, len(mutations))
+	dropped := 0
+	for _, mutation := range mutations {
+		candidate, ok := validateConsultationNeedMutations([]ConsultationNeedMutation{mutation}, current, validServices)
+		if !ok || len(candidate) != 1 {
+			dropped++
+			continue
+		}
+		validated = append(validated, candidate[0])
+		applyConsultationNeedMutation(&current, candidate[0])
+	}
+	return validated, dropped
+}
+
+func mergeInterpreterDiagnostic(diagnostics map[string]string, key string, value string) map[string]string {
+	if diagnostics == nil {
+		diagnostics = map[string]string{}
+	}
+	diagnostics[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	return diagnostics
 }
 
 func consultationNeedMutationValidForState(current ConsultationNeedProfile, mutation ConsultationNeedMutation) bool {
@@ -1660,10 +1988,25 @@ func applyConversationActMetadata(turn *TurnRecord, act ConversationAct, result 
 }
 
 func prependConversationMutationAcknowledgement(turn *TurnRecord, result conversationDraftResult, session Session, services []ServiceOption) {
-	if turn == nil || !result.Changed || strings.TrimSpace(turn.AIMessage) == "" {
+	if turn == nil || strings.TrimSpace(turn.AIMessage) == "" {
+		return
+	}
+	staffChanged := strings.TrimSpace(turn.Session.StaffID) != strings.TrimSpace(turn.Update.StaffID)
+	if !result.Changed && !staffChanged {
 		return
 	}
 	acknowledgement := ""
+	if staffChanged || result.Act.Entity == ConversationEntityStaff {
+		if strings.TrimSpace(turn.Update.StaffID) == "" {
+			acknowledgement = "Okay, I'll use any available technician."
+		} else if name := strings.TrimSpace(session.StaffName); name != "" {
+			acknowledgement = "Okay, I changed the technician to " + name + "."
+		}
+		if acknowledgement != "" {
+			turn.AIMessage = acknowledgement + " " + turn.AIMessage
+			return
+		}
+	}
 	summary := strings.TrimSpace(serviceSummary(session, services))
 	if activePartyPlan(session.PartyPlan) && strings.TrimSpace(result.Act.GuestRef) != "" {
 		target := partyServiceTargetName(result.Act.TargetServiceIDs, services)

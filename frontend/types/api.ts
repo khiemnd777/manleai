@@ -431,6 +431,9 @@ export type ServiceCategorySuggestionRefresh = {
   skipped_reviewed_services: number;
   skipped_ambiguous_services: number;
   unmatched_unreviewed_services: number;
+  created_service_aliases: number;
+  updated_system_service_aliases: number;
+  skipped_service_alias_conflicts: number;
 };
 
 export type POSStaffMember = {
@@ -1070,6 +1073,16 @@ export type VoiceBookingReadiness = {
   booking_write_blocked_reason?: string;
   booking_write_blocked_at?: string;
   service_count: number;
+  consultation_enabled: boolean;
+  consultation_ready_service_count: number;
+  service_guidance: {
+    status: "recommendation_ready" | "catalog_only" | "consultation_disabled" | "catalog_unavailable";
+    catalog_available: boolean;
+    consultation_enabled: boolean;
+    recommendation_ready: boolean;
+    ready_service_count: number;
+    message?: string;
+  };
   staff_count: number;
   business_hours_count: number;
   checks: ReadinessCheck[];

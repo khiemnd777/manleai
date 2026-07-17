@@ -127,6 +127,18 @@ func TestGuardedReplyGeneratorSkipsSimulatorChannel(t *testing.T) {
 	}
 }
 
+func TestGuardedReplyGeneratorEvaluationUsesSameGuardrailsForSimulator(t *testing.T) {
+	provider := &fakeLanguageModelProvider{reply: ModelReply{Message: "Which service would you like to hear about?", Confidence: 0.9}}
+	generator := NewGuardedReplyGenerator(provider)
+	reply, err := generator.GenerateEvaluationReply(context.Background(), conversation.ReplyGenerationRequest{
+		Channel: conversation.ChannelSimulator, SafeReply: "Which service would you like to hear about?",
+		ReplyPolicy: conversation.ReplyPolicyStyleOnly,
+	})
+	if err != nil || reply.Message == "" || provider.req.Channel != conversation.ChannelSimulator {
+		t.Fatalf("simulator evaluation reply=%#v request=%#v err=%v", reply, provider.req, err)
+	}
+}
+
 func TestGuardedReplyGeneratorRejectsOperationalFactByDefault(t *testing.T) {
 	provider := &fakeLanguageModelProvider{
 		reply: ModelReply{Message: "I found noon.", Confidence: 0.9},
@@ -168,22 +180,34 @@ func TestGuardedReplyGeneratorPhrasesOnlyProfileBackedConsultationQuestion(t *te
 	}
 }
 
-func TestGuardedReplyGeneratorRejectsUnsafeConsultationQuestionShape(t *testing.T) {
+func TestGuardedReplyGeneratorFallsBackToStructuredConsultationQuestionForUnsafeModelCopy(t *testing.T) {
 	for _, message := range []string{
 		"Would you prefer glossy? Or would matte be better?",
 		"Your appointment is confirmed; which finish would you prefer?",
 		"Hey! Which finish would you prefer?",
 	} {
 		generator := NewGuardedReplyGenerator(&fakeLanguageModelProvider{reply: ModelReply{Message: message, Confidence: 0.9}})
-		_, err := generator.GenerateConsultationQuestion(context.Background(), conversation.ConsultationQuestionRequest{
+		reply, err := generator.GenerateConsultationQuestion(context.Background(), conversation.ConsultationQuestionRequest{
 			SalonID: "salon_1", Question: conversation.ConsultationQuestionSpec{
 				Field:   conversation.ConsultationNeedFieldDesiredFinishes,
 				Options: []string{conversation.ConsultationFinishGlossy, conversation.ConsultationFinishMatte},
 			},
 		})
-		if err == nil {
-			t.Fatalf("unsafe consultation question accepted: %q", message)
+		if err != nil || reply.Message != "What finish would you prefer: glossy or matte?" || reply.Reason != "structured_consultation_question_fallback" {
+			t.Fatalf("unsafe model copy=%q fallback=%#v err=%v", message, reply, err)
 		}
+	}
+}
+
+func TestGuardedReplyGeneratorRejectsUnsafeConsultationQuestionWithoutControlledOptions(t *testing.T) {
+	generator := NewGuardedReplyGenerator(&fakeLanguageModelProvider{reply: ModelReply{Message: "Hey! What works?", Confidence: 0.9}})
+	_, err := generator.GenerateConsultationQuestion(context.Background(), conversation.ConsultationQuestionRequest{
+		SalonID: "salon_1", Question: conversation.ConsultationQuestionSpec{
+			Field: "unsupported_field", Options: []string{"uncontrolled_option"},
+		},
+	})
+	if err == nil {
+		t.Fatal("unsafe question without controlled structured fallback was accepted")
 	}
 }
 

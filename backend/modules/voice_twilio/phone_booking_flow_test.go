@@ -276,7 +276,14 @@ type phoneFlowConsultationInterpreter struct {
 
 func (f *phoneFlowConsultationInterpreter) InterpretTurn(ctx context.Context, req conversation.TurnInterpretationRequest) (conversation.TurnUnderstanding, error) {
 	f.calls++
-	return conversation.TurnUnderstanding{
+	if req.SemanticContract != conversation.TurnSemanticContractGuidance && req.CurrentBookingStage != conversation.DialogPhaseConsultation {
+		// This fixture follows the production semantic contract: consultation is
+		// state-scoped and must not be reasserted after the caller has entered the
+		// ordinary booking draft. Later booking turns may rely on deterministic
+		// extraction while retaining a booking goal.
+		return conversation.TurnUnderstanding{Goal: "book_appointment", Confidence: 0.97}, nil
+	}
+	turn := conversation.TurnUnderstanding{
 		Goal: "consultation", Confidence: 0.97,
 		Consultation: conversation.ConsultationNeedProfile{
 			DesiredOutcome: conversation.ConsultationOutcomeCompare, ComparedServiceIDs: []string{"service_1", "service_gel"}, Confidence: 0.97,
@@ -285,7 +292,11 @@ func (f *phoneFlowConsultationInterpreter) InterpretTurn(ctx context.Context, re
 			{Field: conversation.ConsultationNeedFieldDesiredOutcome, Operation: conversation.ConsultationNeedOperationSet, Values: []string{conversation.ConsultationOutcomeCompare}, Confidence: 0.97},
 			{Field: conversation.ConsultationNeedFieldComparedServiceIDs, Operation: conversation.ConsultationNeedOperationSet, Values: []string{"service_1", "service_gel"}, Confidence: 0.97},
 		},
-	}, nil
+	}
+	if req.SemanticContract == conversation.TurnSemanticContractGuidance {
+		turn.GuidanceAction = conversation.GuidanceActionConsultation
+	}
+	return turn, nil
 }
 
 type phoneFlowConversationStore struct {

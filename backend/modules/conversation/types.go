@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/manleai/ai-receptionist/modules/booking"
@@ -26,7 +27,7 @@ const (
 	ReplyPolicyStyleOnly            = "style_only"
 	ReplyPolicyConsultationQuestion = "consultation_question"
 
-	DialogStateVersion = 4
+	DialogStateVersion = 5
 
 	DialogPhaseOpen         = "open"
 	DialogPhaseDrafting     = "drafting"
@@ -125,6 +126,12 @@ const (
 	ConversationQuestionStaff          = "staff"
 	ConversationQuestionPolicy         = "policy"
 
+	ConversationQuestionModeList      = "list"
+	ConversationQuestionModeCount     = "count"
+	ConversationQuestionModeExistence = "existence"
+	ConversationQuestionModeDetails   = "details"
+	ConversationQuestionModeCompare   = "compare"
+
 	TimePreferenceBefore = "before"
 	TimePreferenceAfter  = "after"
 	TimePreferenceExact  = "exact"
@@ -165,6 +172,15 @@ const (
 	BookingActionReschedule = "reschedule"
 	BookingActionCancel     = "cancel"
 
+	GuidanceActionBook           = "book"
+	GuidanceActionServiceCatalog = "service_catalog"
+	GuidanceActionConsultation   = "consultation"
+	GuidanceActionSalonQuestion  = "salon_question"
+	GuidanceActionNameService    = "name_service"
+	GuidanceActionHumanHandoff   = "human_handoff"
+	GuidanceActionReschedule     = "reschedule"
+	GuidanceActionCancel         = "cancel"
+
 	HandoffReasonHumanRequested              = "human_requested"
 	HandoffReasonAIBookingDisabled           = "ai_booking_disabled"
 	HandoffReasonBookingUnavailable          = "booking_unavailable"
@@ -181,6 +197,68 @@ const (
 	PartyRequestStatusResolved  = "resolved"
 	PartyRequestStatusDismissed = "dismissed"
 )
+
+// GuidanceActionValues exposes the stable semantic protocol vocabulary from
+// its owning conversation contract. These are meanings the interpreter must
+// always be able to recognize. Runtime capability is resolved separately and
+// must never remove a caller intent from this vocabulary.
+func GuidanceActionValues() []string {
+	return []string{
+		GuidanceActionBook,
+		GuidanceActionServiceCatalog,
+		GuidanceActionConsultation,
+		GuidanceActionSalonQuestion,
+		GuidanceActionNameService,
+		GuidanceActionHumanHandoff,
+		GuidanceActionReschedule,
+		GuidanceActionCancel,
+	}
+}
+
+func IsGuidanceAction(value string) bool {
+	return containsString(GuidanceActionValues(), strings.TrimSpace(value))
+}
+
+// GuidanceGoalForAction derives the legacy/general turn goal from the compact
+// guidance protocol. Guidance model output must not author both fields because
+// that would create two competing sources for the same routing decision.
+func GuidanceGoalForAction(action string) string {
+	switch strings.TrimSpace(action) {
+	case GuidanceActionBook, GuidanceActionNameService:
+		return "book_appointment"
+	case GuidanceActionServiceCatalog, GuidanceActionSalonQuestion:
+		return "information"
+	case GuidanceActionConsultation:
+		return "consultation"
+	case GuidanceActionHumanHandoff:
+		return "human_handoff"
+	case GuidanceActionReschedule:
+		return "reschedule_appointment"
+	case GuidanceActionCancel:
+		return "cancel_appointment"
+	default:
+		return "unknown"
+	}
+}
+
+func IsBookingAction(value string) bool {
+	switch strings.TrimSpace(value) {
+	case BookingActionBook, BookingActionReschedule, BookingActionCancel:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsDialogPhase(value string) bool {
+	switch strings.TrimSpace(value) {
+	case DialogPhaseOpen, DialogPhaseDrafting, DialogPhaseClarifying,
+		DialogPhaseAvailability, DialogPhaseReview, DialogPhaseConsultation:
+		return true
+	default:
+		return false
+	}
+}
 
 var (
 	ErrValidation           = errors.New("conversation validation failed")
@@ -216,21 +294,24 @@ const (
 )
 
 type TurnInterpretationRequest struct {
-	SalonID             string
-	SessionID           string
-	Channel             string
-	CustomerMessage     string
-	ExpectedInput       string
-	SemanticContract    string
-	SelectedServices    []ConversationServiceRef
-	CatalogServices     []ConversationServiceRef
-	SelectedStaff       []ConversationStaffRef
-	CatalogStaff        []ConversationStaffRef
-	Pending             *PendingConversationAct
-	CurrentBookingStage string
-	BookingAction       string
-	CurrentDraft        ConversationDraftRef
-	Consultation        *ConsultationState
+	SalonID                     string
+	SessionID                   string
+	Channel                     string
+	CustomerMessage             string
+	ExpectedInput               string
+	SemanticContract            string
+	RecognizableGuidanceActions []string
+	SelectedServices            []ConversationServiceRef
+	CatalogServices             []ConversationServiceRef
+	CatalogServiceAliases       []ConversationServiceAliasRef
+	CatalogCategories           []ConversationCategoryRef
+	SelectedStaff               []ConversationStaffRef
+	CatalogStaff                []ConversationStaffRef
+	Pending                     *PendingConversationAct
+	CurrentBookingStage         string
+	BookingAction               string
+	CurrentDraft                ConversationDraftRef
+	Consultation                *ConsultationState
 }
 
 type ConversationServiceRef struct {
@@ -239,6 +320,23 @@ type ConversationServiceRef struct {
 	CategoryID          string                              `json:"category_id,omitempty"`
 	CategoryName        string                              `json:"category_name,omitempty"`
 	ConsultationProfile *ConversationConsultationProfileRef `json:"consultation_profile,omitempty"`
+}
+
+// ConversationServiceAliasRef exposes only the salon-scoped alias and its
+// validated active-catalog target. The model cannot use an alias to invent a
+// service ID that is not already present in CatalogServices.
+type ConversationServiceAliasRef struct {
+	ServiceID string `json:"service_id"`
+	Alias     string `json:"alias"`
+}
+
+// ConversationCategoryRef is a non-bookable grouping contract. ServiceIDs are
+// the only concrete choices that may be offered after a category-level match.
+type ConversationCategoryRef struct {
+	CategoryID   string   `json:"category_id"`
+	CategoryName string   `json:"category_name"`
+	Aliases      []string `json:"aliases"`
+	ServiceIDs   []string `json:"service_ids"`
 }
 
 type ConversationConsultationProfileRef struct {
@@ -298,6 +396,7 @@ type ConversationAct struct {
 
 type ConversationQuestion struct {
 	Subject        string          `json:"subject"`
+	Mode           string          `json:"mode"`
 	ServiceIDs     []string        `json:"service_ids"`
 	StaffIDs       []string        `json:"staff_ids"`
 	TimePreference *TimePreference `json:"time_preference,omitempty"`
@@ -306,19 +405,23 @@ type ConversationQuestion struct {
 }
 
 type TurnUnderstanding struct {
-	Goal                   string                     `json:"goal"`
-	Acts                   []ConversationAct          `json:"acts"`
-	Questions              []ConversationQuestion     `json:"questions"`
-	Confidence             float64                    `json:"confidence"`
-	Reason                 string                     `json:"reason"`
-	Consultation           ConsultationNeedProfile    `json:"consultation"`
-	ConsultationMutations  []ConsultationNeedMutation `json:"consultation_mutations,omitempty"`
-	Safety                 SafetyAssessment           `json:"safety"`
-	Source                 string                     `json:"source"`
-	ModelInvoked           bool                       `json:"-"`
-	CatalogFallback        bool                       `json:"-"`
-	InterpreterOutcome     string                     `json:"-"`
-	InterpreterDiagnostics map[string]string          `json:"-"`
+	Goal                    string                     `json:"goal"`
+	GuidanceAction          string                     `json:"guidance_action,omitempty"`
+	GuidanceCatalogMode     string                     `json:"guidance_catalog_mode,omitempty"`
+	GuidanceQuestionSubject string                     `json:"guidance_question_subject,omitempty"`
+	GuidancePartySize       int                        `json:"guidance_party_size,omitempty"`
+	Acts                    []ConversationAct          `json:"acts"`
+	Questions               []ConversationQuestion     `json:"questions"`
+	Confidence              float64                    `json:"confidence"`
+	Reason                  string                     `json:"reason"`
+	Consultation            ConsultationNeedProfile    `json:"consultation"`
+	ConsultationMutations   []ConsultationNeedMutation `json:"consultation_mutations,omitempty"`
+	Safety                  SafetyAssessment           `json:"safety"`
+	Source                  string                     `json:"source"`
+	ModelInvoked            bool                       `json:"-"`
+	CatalogFallback         bool                       `json:"-"`
+	InterpreterOutcome      string                     `json:"-"`
+	InterpreterDiagnostics  map[string]string          `json:"-"`
 }
 
 type PendingConversationAct struct {

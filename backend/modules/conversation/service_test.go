@@ -483,6 +483,7 @@ func TestMessageAnswersServiceMenuWithBookableServices(t *testing.T) {
 	)
 	bookingTool := &fakeBookingTool{}
 	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testGuidanceUnderstanding(GuidanceActionServiceCatalog, ConversationQuestionModeList, ConversationQuestionCatalog)})
 	service.now = fixedNow
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -497,7 +498,7 @@ func TestMessageAnswersServiceMenuWithBookableServices(t *testing.T) {
 	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
 		t.Fatalf("service menu should not call booking tools, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
 	}
-	for _, want := range []string{"Classic Manicure", "Gel Removal", "Which one would you like to book"} {
+	for _, want := range []string{"Classic Manicure", "Gel Removal", "You can name one"} {
 		if !strings.Contains(store.lastTurn.AIMessage, want) {
 			t.Fatalf("service menu reply missing %q: %s", want, store.lastTurn.AIMessage)
 		}
@@ -531,6 +532,7 @@ func TestMessageAnswersServiceCountDuringPendingClarificationAndResumesBooking(t
 		}
 	}
 	replyGeneratorCallsBeforeCount := replyGenerator.calls
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testQuestionUnderstanding(ConversationQuestionCatalog, ConversationQuestionModeCount)})
 	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
 		Message: "How many manicure do you have?",
 	})
@@ -552,7 +554,7 @@ func TestMessageAnswersServiceCountDuringPendingClarificationAndResumesBooking(t
 		"Classic Manicure",
 		"Dip Powder Manicure",
 		"Gel Manicure",
-		"Which one would you like?",
+		"Which manicure service would you like?",
 	} {
 		if !strings.Contains(store.lastTurn.AIMessage, want) {
 			t.Fatalf("service count reply missing %q: %s", want, store.lastTurn.AIMessage)
@@ -603,6 +605,7 @@ func TestMessageAnswersDifferentCategoryCountThenResumesPendingService(t *testin
 	}}
 	bookingTool := &fakeBookingTool{}
 	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testQuestionUnderstanding(ConversationQuestionCatalog, ConversationQuestionModeCount, "service_classic_pedi", "service_spa_pedi")})
 	service.now = fixedNow
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -618,7 +621,7 @@ func TestMessageAnswersDifferentCategoryCountThenResumesPendingService(t *testin
 		"I can help book two pedicure options",
 		"Classic Pedicure",
 		"Spa Pedicure",
-		"For your appointment, which manicure service would you like?",
+		"Which manicure service would you like?",
 	} {
 		if !strings.Contains(store.lastTurn.AIMessage, want) {
 			t.Fatalf("different-category count reply missing %q: %s", want, store.lastTurn.AIMessage)
@@ -644,6 +647,7 @@ func TestMessageAnswersWholeCatalogCountWithoutStartingBooking(t *testing.T) {
 	replyGenerator := &fakeReplyGenerator{message: "Which service would you like?"}
 	service := NewService(store, bookingTool)
 	service.SetReplyGenerator(replyGenerator)
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testGuidanceUnderstanding(GuidanceActionServiceCatalog, ConversationQuestionModeCount, ConversationQuestionCatalog)})
 	service.now = fixedNow
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -662,7 +666,7 @@ func TestMessageAnswersWholeCatalogCountWithoutStartingBooking(t *testing.T) {
 		t.Fatalf("whole-catalog count facts should stay deterministic, reply generator calls=%d", replyGenerator.calls)
 	}
 	if !strings.Contains(store.lastTurn.AIMessage, "I can help book seven service options, including") ||
-		!strings.Contains(store.lastTurn.AIMessage, "Would you like to book one of those?") {
+		!strings.Contains(store.lastTurn.AIMessage, "Would you like to book one of those, or get help choosing?") {
 		t.Fatalf("whole-catalog count reply = %s", store.lastTurn.AIMessage)
 	}
 	if got := metadataStringSlice(store.lastTurn.AIMetadata, "source_record_ids"); len(got) != 7 {
@@ -705,6 +709,7 @@ func TestMessageAnswersExactServiceInquiryWithoutSelectingBookingService(t *test
 	store.services = append(store.services, ServiceOption{ID: "service_removal", Name: "Gel Removal", DurationMinutes: 30})
 	bookingTool := &fakeBookingTool{}
 	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testGuidanceUnderstanding(GuidanceActionServiceCatalog, ConversationQuestionModeExistence, ConversationQuestionCatalog)})
 	service.now = fixedNow
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -722,11 +727,47 @@ func TestMessageAnswersExactServiceInquiryWithoutSelectingBookingService(t *test
 	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
 		t.Fatalf("service inquiry should not call booking tools, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
 	}
-	if store.lastTurn.CustomerMetadata["service_inquiry"] != true {
-		t.Fatalf("service inquiry metadata = %#v", store.lastTurn.CustomerMetadata)
+	if store.lastTurn.AIMetadata["answer_source"] != answerSourceServiceCatalog {
+		t.Fatalf("service inquiry source metadata = %#v", store.lastTurn.AIMetadata)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "Yes, we offer Gel Removal") || !strings.Contains(store.lastTurn.AIMessage, "Which service would you like to book") {
+	if !strings.Contains(store.lastTurn.AIMessage, "Yes, we offer Gel Removal") || !strings.Contains(store.lastTurn.AIMessage, "Which one would you like") {
 		t.Fatalf("service inquiry reply = %s", store.lastTurn.AIMessage)
+	}
+}
+
+func TestMessageAnswersGenericServiceExistenceFromNonEmptyCatalog(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = testManicureCatalog()
+	service := NewService(store, &fakeBookingTool{})
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testGuidanceUnderstanding(GuidanceActionServiceCatalog, ConversationQuestionModeExistence, ConversationQuestionCatalog)})
+	service.now = fixedNow
+
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "Do you have services I can book?"}); err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if !strings.HasPrefix(store.lastTurn.AIMessage, "Yes.") || strings.Contains(store.lastTurn.AIMessage, "don't see that") {
+		t.Fatalf("generic catalog existence reply = %q", store.lastTurn.AIMessage)
+	}
+	if store.lastTurn.AIMetadata["answer_source"] != answerSourceServiceCatalog {
+		t.Fatalf("generic catalog source = %#v", store.lastTurn.AIMetadata)
+	}
+}
+
+func TestMessageAnswersGuidancePriceQuestionFromStructuredCatalog(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{{ID: "service_luna", Name: "Luna Renewal", PriceFrom: 42, DurationMinutes: 45}}
+	service := NewService(store, &fakeBookingTool{})
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testGuidanceUnderstanding(GuidanceActionSalonQuestion, "", ConversationQuestionPrice)})
+	service.now = fixedNow
+
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "What does Luna Renewal cost?"}); err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Luna Renewal is from $42.00") || strings.Contains(store.lastTurn.AIMessage, "Services include") {
+		t.Fatalf("structured price reply = %q", store.lastTurn.AIMessage)
+	}
+	if store.lastTurn.AIMetadata["router_intent"] != "service_price" {
+		t.Fatalf("price route metadata = %#v", store.lastTurn.AIMetadata)
 	}
 }
 
@@ -1380,6 +1421,9 @@ func TestMessageActiveConsultationListsCatalogWithoutBookingTools(t *testing.T) 
 	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
 		Goal:       "consultation",
 		Confidence: 0.95,
+		Questions: []ConversationQuestion{{
+			Subject: ConversationQuestionCatalog, Mode: ConversationQuestionModeList, Confidence: 0.95,
+		}},
 	}})
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -1790,6 +1834,7 @@ func TestMessageSelectsBookingServiceAfterPriorServiceInquiry(t *testing.T) {
 	store.services = append(store.services, ServiceOption{ID: "service_removal", Name: "Gel Removal", DurationMinutes: 30})
 	bookingTool := &fakeBookingTool{}
 	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testGuidanceUnderstanding(GuidanceActionServiceCatalog, ConversationQuestionModeExistence, ConversationQuestionCatalog)})
 	service.now = fixedNow
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -1802,6 +1847,7 @@ func TestMessageSelectsBookingServiceAfterPriorServiceInquiry(t *testing.T) {
 		t.Fatalf("service after inquiry = %s, want none", session.ServiceID)
 	}
 
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testGuidanceUnderstanding(GuidanceActionNameService, "", "")})
 	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
 		Message: "I want to book the service Classic Manicure.",
 	})
@@ -1809,7 +1855,7 @@ func TestMessageSelectsBookingServiceAfterPriorServiceInquiry(t *testing.T) {
 		t.Fatalf("booking Message returned error: %v", err)
 	}
 	if session.ServiceID != "service_1" || len(session.BookingSegments) != 1 || session.BookingSegments[0].ServiceID != "service_1" {
-		t.Fatalf("service state = %s %#v, want Classic Manicure only", session.ServiceID, session.BookingSegments)
+		t.Fatalf("service state = %s %#v, want Classic Manicure only; guidance=%#v metadata=%#v reply=%q", session.ServiceID, session.BookingSegments, session.DialogState.Guidance, store.lastTurn.CustomerMetadata, store.lastTurn.AIMessage)
 	}
 	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
 		t.Fatalf("service selection without date should not call tools, booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
@@ -1827,6 +1873,7 @@ func TestMessageBookingPhraseStillSelectsService(t *testing.T) {
 	store.services = append(store.services, ServiceOption{ID: "service_removal", Name: "Gel Removal", DurationMinutes: 30})
 	bookingTool := &fakeBookingTool{}
 	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testGuidanceUnderstanding(GuidanceActionNameService, "", "")})
 	service.now = fixedNow
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -1851,6 +1898,7 @@ func TestMessageClarifiesAmbiguousServiceInquiryWithoutSelectingService(t *testi
 	}
 	bookingTool := &fakeBookingTool{}
 	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testGuidanceUnderstanding(GuidanceActionServiceCatalog, ConversationQuestionModeExistence, ConversationQuestionCatalog)})
 	service.now = fixedNow
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -1878,6 +1926,7 @@ func TestMessageBookingRequestAfterGreetingStillCollectsService(t *testing.T) {
 	}}
 	bookingTool := &fakeBookingTool{}
 	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testGuidanceUnderstanding(GuidanceActionBook, "", "")})
 	service.now = fixedNow
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -1889,7 +1938,7 @@ func TestMessageBookingRequestAfterGreetingStillCollectsService(t *testing.T) {
 	if session.Intent != IntentBooking {
 		t.Fatalf("booking request intent = %s, want booking", session.Intent)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "Which service") {
+	if store.lastTurn.AIMessage != "Which bookable service would you like?" {
 		t.Fatalf("booking request should collect service: %s", store.lastTurn.AIMessage)
 	}
 }
@@ -1898,6 +1947,7 @@ func TestMessageShortComplaintCreatesOwnerHandoff(t *testing.T) {
 	store := newFakeConversationStore()
 	bookingTool := &fakeBookingTool{}
 	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testGuidanceUnderstanding(GuidanceActionHumanHandoff, "", "")})
 	service.now = fixedNow
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -5607,7 +5657,7 @@ func TestMessageClarifiesAdditiveServiceFamilyBeforeAddingConcreteService(t *tes
 		t.Fatalf("short add target Message returned error: %v", err)
 	}
 	if got := selectedServiceIDs(*session); !sameStrings(got, []string{"service_spa_pedi", "service_classic_mani"}) {
-		t.Fatalf("selected services = %#v, want Spa Pedicure plus Classic Manicure", got)
+		t.Fatalf("selected services = %#v, want Spa Pedicure plus Classic Manicure; pending=%#v metadata=%#v reply=%q", got, session.DialogState.Pending, store.lastTurn.CustomerMetadata, store.lastTurn.AIMessage)
 	}
 	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
 		t.Fatalf("resolved add without date should not call tools, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
@@ -6463,6 +6513,16 @@ func TestMessageCompletesLatestTranscriptAfterServiceInquiryAndSwitch(t *testing
 	var session *Session
 	var err error
 	for _, message := range steps {
+		switch message {
+		case "What service do you have?":
+			service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testGuidanceUnderstanding(GuidanceActionServiceCatalog, ConversationQuestionModeList, ConversationQuestionCatalog)})
+		case "Do you have gel removal?":
+			service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testGuidanceUnderstanding(GuidanceActionServiceCatalog, ConversationQuestionModeExistence, ConversationQuestionCatalog)})
+		case "I want to book the service Classic Manicure.":
+			service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testGuidanceUnderstanding(GuidanceActionNameService, "", "")})
+		default:
+			service.SetTurnInterpreter(nil)
+		}
 		session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
 			Message: message,
 		})
@@ -6982,7 +7042,12 @@ func TestMessageKeepsPartyPlanNaturalAcrossMenuRejectionAndGroupQuestions(t *tes
 		t.Fatalf("requested date should stay in session even when not repeated in wording: %#v", session)
 	}
 
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testQuestionUnderstanding(
+		ConversationQuestionCatalog, ConversationQuestionModeList, "service_classic_pedi", "service_spa_pedi",
+	)})
 	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		// The full-turn semantic result scopes the information request to the
+		// pedicure services without changing the unresolved manicure group.
 		Message: "what pedicure services do you have?",
 	})
 	if err != nil {
@@ -6992,7 +7057,7 @@ func TestMessageKeepsPartyPlanNaturalAcrossMenuRejectionAndGroupQuestions(t *tes
 		t.Fatalf("pedicure menu question should not run booking tools, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
 	}
 	reply := strings.ToLower(store.lastTurn.AIMessage)
-	if !strings.Contains(reply, "for pedicures") ||
+	if !strings.Contains(reply, "services include") ||
 		!strings.Contains(reply, "classic pedicure") ||
 		!strings.Contains(reply, "spa pedicure") ||
 		!strings.Contains(reply, "for the two people getting manicures") {
@@ -7005,6 +7070,9 @@ func TestMessageKeepsPartyPlanNaturalAcrossMenuRejectionAndGroupQuestions(t *tes
 		t.Fatalf("party plan = %#v, want still incomplete after informational menu question", session.PartyPlan)
 	}
 
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testQuestionUnderstanding(
+		ConversationQuestionCatalog, ConversationQuestionModeCount, "service_classic_pedi", "service_spa_pedi",
+	)})
 	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
 		Message: "how many pedicure options do you offer?",
 	})
@@ -7025,6 +7093,9 @@ func TestMessageKeepsPartyPlanNaturalAcrossMenuRejectionAndGroupQuestions(t *tes
 		t.Fatalf("party plan = %#v, want still incomplete after service count question", session.PartyPlan)
 	}
 
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testQuestionUnderstanding(
+		ConversationQuestionCatalog, ConversationQuestionModeList, "service_classic_mani", "service_gel_mani",
+	)})
 	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
 		Message: "No, what manicure services do you have?",
 	})
@@ -7035,11 +7106,10 @@ func TestMessageKeepsPartyPlanNaturalAcrossMenuRejectionAndGroupQuestions(t *tes
 		t.Fatalf("negative menu question should not run booking tools, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
 	}
 	reply = strings.ToLower(store.lastTurn.AIMessage)
-	if !strings.Contains(reply, "no problem") ||
-		!strings.Contains(reply, "for manicures") ||
+	if !strings.Contains(reply, "services include") ||
 		!strings.Contains(reply, "classic manicure") ||
 		!strings.Contains(reply, "gel manicure") ||
-		!strings.Contains(reply, "which two should i book") {
+		!strings.Contains(reply, "which manicure services should i book") {
 		t.Fatalf("reply should acknowledge rejection, answer menu, and ask open selection: %s", store.lastTurn.AIMessage)
 	}
 	if strings.Contains(reply, "noted") || strings.Contains(reply, "should i book one") {
@@ -7049,6 +7119,7 @@ func TestMessageKeepsPartyPlanNaturalAcrossMenuRejectionAndGroupQuestions(t *tes
 		t.Fatalf("party plan = %#v, want incomplete after negative menu question", session.PartyPlan)
 	}
 
+	service.SetTurnInterpreter(nil)
 	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
 		Message: "yes",
 	})
@@ -7138,6 +7209,9 @@ func TestMessageAnswersPartyPlanServiceMenuWithoutResolvingAllCandidates(t *test
 		t.Fatalf("booking tools should not run before pedicure clarification, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
 	}
 
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testQuestionUnderstanding(
+		ConversationQuestionCatalog, ConversationQuestionModeList, "service_classic_pedi", "service_spa_pedi",
+	)})
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
 		Message: "what pedicure service do you have?",
 	})
@@ -7148,7 +7222,7 @@ func TestMessageAnswersPartyPlanServiceMenuWithoutResolvingAllCandidates(t *test
 		t.Fatalf("service menu question should not call booking tools, availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
 	}
 	reply := strings.ToLower(store.lastTurn.AIMessage)
-	if !strings.Contains(reply, "we offer") || !strings.Contains(reply, "classic pedicure") || !strings.Contains(reply, "spa pedicure") {
+	if !strings.Contains(reply, "services include") || !strings.Contains(reply, "classic pedicure") || !strings.Contains(reply, "spa pedicure") {
 		t.Fatalf("reply should answer pedicure menu: %s", store.lastTurn.AIMessage)
 	}
 	if session.PartyPlan == nil || partyPlanComplete(session.PartyPlan) {
@@ -8206,6 +8280,13 @@ func TestMessageWeddingPartyStillHandoff(t *testing.T) {
 	}}
 	bookingTool := &fakeBookingTool{}
 	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&scriptedTurnInterpreter{interpret: func(req TurnInterpretationRequest) TurnUnderstanding {
+		turn := TurnUnderstanding{Goal: "human_handoff", Confidence: 0.97, Reason: "semantic_test_fixture"}
+		if req.SemanticContract == TurnSemanticContractGuidance {
+			turn.GuidanceAction = GuidanceActionHumanHandoff
+		}
+		return turn
+	}})
 	service.now = fixedNow
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -8250,6 +8331,7 @@ func TestMessageCreatesHandoffForHumanRequest(t *testing.T) {
 	store := newFakeConversationStore()
 	bookingTool := &fakeBookingTool{}
 	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testGuidanceUnderstanding(GuidanceActionHumanHandoff, "", "")})
 	service.now = fixedNow
 
 	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -8390,6 +8472,25 @@ func TestMessageAnswersBusinessHoursFromStructuredPeriodsBeforeKnowledge(t *test
 	}
 	if got := metadataStringSlice(store.lastTurn.AIMetadata, "source_record_ids"); !sameStrings(got, []string{"hours_mon_am", "hours_mon_pm"}) {
 		t.Fatalf("source ids = %#v, want Monday hour period ids", got)
+	}
+}
+
+func TestBusinessHoursWithoutRequestedDayAnswersTodayConcise(t *testing.T) {
+	periods := []BusinessHourPeriod{
+		{ID: "hours_mon", DayOfWeek: 1, StartLocalTime: "09:00:00", EndLocalTime: "19:00:00"},
+		{ID: "hours_tue", DayOfWeek: 2, StartLocalTime: "10:00:00", EndLocalTime: "18:00:00"},
+	}
+	reply, ids, confidence := businessHoursAnswer("When does the salon close?", periods, &RuntimeConfig{Timezone: "UTC"}, fixedNow)
+	if !strings.Contains(reply, "Today's hours are 10:00 AM to 6:00 PM") || strings.Contains(reply, "Monday") || strings.Count(reply, "?") != 1 {
+		t.Fatalf("unspecified-day hours reply = %q", reply)
+	}
+	if !sameStrings(ids, []string{"hours_tue"}) || confidence < 0.9 {
+		t.Fatalf("unspecified-day hours evidence = ids:%#v confidence:%f", ids, confidence)
+	}
+
+	explicit, explicitIDs, _ := businessHoursAnswer("What time do you close on Monday?", periods, &RuntimeConfig{Timezone: "UTC"}, fixedNow)
+	if !strings.Contains(explicit, "Hours for Monday are 9:00 AM to 7:00 PM") || !sameStrings(explicitIDs, []string{"hours_mon"}) {
+		t.Fatalf("explicit-day hours reply = %q ids=%#v", explicit, explicitIDs)
 	}
 }
 

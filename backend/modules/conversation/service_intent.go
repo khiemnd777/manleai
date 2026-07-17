@@ -6,47 +6,6 @@ import (
 	"time"
 )
 
-func shouldHandoff(message string) bool {
-	normalized := normalizeLooseText(message)
-	triggers := []string{
-		"human", "owner", "manager", "person", "representative", "complaint",
-		"refund", "payment dispute", "dispute", "chargeback", "wedding",
-		"talk to someone", "speak to someone",
-	}
-	for _, trigger := range triggers {
-		if containsLoosePhrase(normalized, trigger) {
-			return true
-		}
-	}
-	return false
-}
-
-func shouldComplaintHandoff(message string) bool {
-	normalized := normalizeLooseText(message)
-	if normalized == "" {
-		return false
-	}
-	triggers := []string{
-		"really bad",
-		"very bad",
-		"bad service",
-		"not good",
-		"not happy",
-		"unhappy",
-		"upset",
-		"angry",
-		"terrible",
-		"horrible",
-		"awful",
-	}
-	for _, trigger := range triggers {
-		if strings.Contains(normalized, trigger) {
-			return true
-		}
-	}
-	return false
-}
-
 func hasBookingVerbSignal(message string) bool {
 	normalized := normalizeLooseText(message)
 	signals := []string{"book", "booking", "appointment", "schedule", "reschedule"}

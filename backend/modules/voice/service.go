@@ -118,6 +118,255 @@ func (s *Service) SemanticCheck(ctx context.Context, salonID string, ownerUserID
 	return status, nil
 }
 
+func (s *Service) SemanticEvaluate(ctx context.Context, salonID string, ownerUserID string, req SemanticEvaluationRequest) (*SemanticEvaluationResponse, error) {
+	salonID = strings.TrimSpace(salonID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	if salonID == "" || ownerUserID == "" || !ValidSemanticEvaluationRequest(req) {
+		return nil, ErrValidation
+	}
+	if _, err := s.repo.GetSalonVoiceStatus(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
+	if s.providers.TurnModel == nil || !s.providers.TurnModel.Configured(ctx, salonID) {
+		return nil, ErrProviderDisabled
+	}
+	startedAt := time.Now()
+	result, err := s.providers.TurnModel.InterpretTurn(ctx, TurnModelRequest{
+		SalonID:                     salonID,
+		SessionID:                   "semantic-evaluation:" + strings.TrimSpace(req.ScenarioID),
+		Channel:                     strings.TrimSpace(req.Channel),
+		CustomerMessage:             strings.TrimSpace(req.CustomerMessage),
+		ExpectedInput:               strings.TrimSpace(req.ExpectedInput),
+		SemanticContract:            strings.TrimSpace(req.SemanticContract),
+		RecognizableGuidanceActions: append([]string(nil), req.RecognizableGuidanceActions...),
+		SelectedServices:            append([]conversation.ConversationServiceRef(nil), req.SelectedServices...),
+		CatalogServices:             append([]conversation.ConversationServiceRef(nil), req.CatalogServices...),
+		CatalogServiceAliases:       append([]conversation.ConversationServiceAliasRef(nil), req.CatalogServiceAliases...),
+		CatalogCategories:           append([]conversation.ConversationCategoryRef(nil), req.CatalogCategories...),
+		SelectedStaff:               append([]conversation.ConversationStaffRef(nil), req.SelectedStaff...),
+		CatalogStaff:                append([]conversation.ConversationStaffRef(nil), req.CatalogStaff...),
+		Pending:                     req.Pending,
+		CurrentBookingStage:         strings.TrimSpace(req.CurrentBookingStage),
+		BookingAction:               strings.TrimSpace(req.BookingAction),
+		CurrentDraft:                req.CurrentDraft,
+		Consultation:                req.Consultation,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &SemanticEvaluationResponse{
+		ScenarioID: strings.TrimSpace(req.ScenarioID),
+		Result:     result,
+		DurationMS: time.Since(startedAt).Milliseconds(),
+	}, nil
+}
+
+// ValidSemanticEvaluationRequest validates the read-only evaluation contract
+// against the same runtime vocabulary and catalog ownership invariants used by
+// the authenticated endpoint. Offline corpus validation calls this owner too.
+func ValidSemanticEvaluationRequest(req SemanticEvaluationRequest) bool {
+	message := strings.TrimSpace(req.CustomerMessage)
+	if message == "" || len(message) > 1000 || !boundedSemanticValue(req.ScenarioID, 128) {
+		return false
+	}
+	channel := strings.TrimSpace(req.Channel)
+	if channel != conversation.ChannelSimulator && channel != conversation.ChannelPhone {
+		return false
+	}
+	contract := strings.TrimSpace(req.SemanticContract)
+	if contract != conversation.TurnSemanticContractFull && contract != conversation.TurnSemanticContractGuidance {
+		return false
+	}
+	if !conversation.IsExpectedInput(req.ExpectedInput) {
+		return false
+	}
+	if !conversation.IsBookingAction(req.BookingAction) {
+		return false
+	}
+	if stage := strings.TrimSpace(req.CurrentBookingStage); stage != "" {
+		if !conversation.IsDialogPhase(stage) {
+			return false
+		}
+	}
+	if len(req.CatalogServices) > 100 || len(req.CatalogServiceAliases) > 500 ||
+		len(req.CatalogCategories) > 100 || len(req.CatalogStaff) > 100 ||
+		len(req.SelectedServices) > 20 || len(req.SelectedStaff) > 20 ||
+		len(req.RecognizableGuidanceActions) > 10 {
+		return false
+	}
+	serviceIDs := make(map[string]conversation.ConversationServiceRef, len(req.CatalogServices))
+	for _, service := range req.CatalogServices {
+		id := strings.TrimSpace(service.ServiceID)
+		if !boundedSemanticValue(id, 128) || !boundedSemanticValue(service.ServiceName, 256) {
+			return false
+		}
+		if _, exists := serviceIDs[id]; exists {
+			return false
+		}
+		serviceIDs[id] = service
+	}
+	for _, service := range req.SelectedServices {
+		catalogService, exists := serviceIDs[strings.TrimSpace(service.ServiceID)]
+		if !exists || strings.TrimSpace(service.ServiceName) != strings.TrimSpace(catalogService.ServiceName) ||
+			strings.TrimSpace(service.CategoryID) != strings.TrimSpace(catalogService.CategoryID) ||
+			strings.TrimSpace(service.CategoryName) != strings.TrimSpace(catalogService.CategoryName) {
+			return false
+		}
+	}
+	seenAliases := map[string]bool{}
+	for _, alias := range req.CatalogServiceAliases {
+		aliasKey := strings.ToLower(strings.Join(strings.Fields(alias.Alias), " "))
+		if !boundedSemanticValue(alias.Alias, 256) || seenAliases[aliasKey] {
+			return false
+		}
+		if _, exists := serviceIDs[strings.TrimSpace(alias.ServiceID)]; !exists {
+			return false
+		}
+		seenAliases[aliasKey] = true
+	}
+	categoryIDs := map[string]conversation.ConversationCategoryRef{}
+	categoryAliasKeys := map[string]bool{}
+	serviceCategoryOwners := map[string]string{}
+	for _, category := range req.CatalogCategories {
+		categoryID := strings.TrimSpace(category.CategoryID)
+		if !boundedSemanticValue(categoryID, 128) || !boundedSemanticValue(category.CategoryName, 256) {
+			return false
+		}
+		if _, exists := categoryIDs[categoryID]; exists {
+			return false
+		}
+		categoryIDs[categoryID] = category
+		for _, alias := range category.Aliases {
+			aliasKey := strings.ToLower(strings.Join(strings.Fields(alias), " "))
+			if !boundedSemanticValue(alias, 256) || categoryAliasKeys[aliasKey] || seenAliases[aliasKey] {
+				return false
+			}
+			categoryAliasKeys[aliasKey] = true
+		}
+		seenCategoryServices := map[string]bool{}
+		for _, serviceID := range category.ServiceIDs {
+			serviceID = strings.TrimSpace(serviceID)
+			if _, exists := serviceIDs[serviceID]; !exists || seenCategoryServices[serviceID] || serviceCategoryOwners[serviceID] != "" {
+				return false
+			}
+			seenCategoryServices[serviceID] = true
+			serviceCategoryOwners[serviceID] = categoryID
+		}
+	}
+	for _, service := range req.CatalogServices {
+		if categoryID := strings.TrimSpace(service.CategoryID); categoryID != "" {
+			category, exists := categoryIDs[categoryID]
+			if !exists || strings.TrimSpace(service.CategoryName) != strings.TrimSpace(category.CategoryName) || serviceCategoryOwners[strings.TrimSpace(service.ServiceID)] != categoryID {
+				return false
+			}
+		} else if strings.TrimSpace(service.CategoryName) != "" || serviceCategoryOwners[strings.TrimSpace(service.ServiceID)] != "" {
+			return false
+		}
+	}
+	staffIDs := make(map[string]bool, len(req.CatalogStaff))
+	for _, staff := range req.CatalogStaff {
+		id := strings.TrimSpace(staff.StaffID)
+		if !boundedSemanticValue(id, 128) || !boundedSemanticValue(staff.StaffName, 256) || staffIDs[id] {
+			return false
+		}
+		staffIDs[id] = true
+	}
+	for _, staff := range req.SelectedStaff {
+		staffID := strings.TrimSpace(staff.StaffID)
+		if !staffIDs[staffID] {
+			return false
+		}
+		for _, catalogStaff := range req.CatalogStaff {
+			if strings.TrimSpace(catalogStaff.StaffID) == staffID && strings.TrimSpace(catalogStaff.StaffName) != strings.TrimSpace(staff.StaffName) {
+				return false
+			}
+		}
+	}
+	for _, serviceID := range req.CurrentDraft.ServiceIDs {
+		if _, exists := serviceIDs[strings.TrimSpace(serviceID)]; !exists {
+			return false
+		}
+	}
+	if staffID := strings.TrimSpace(req.CurrentDraft.StaffID); staffID != "" && !staffIDs[staffID] {
+		return false
+	}
+	seenGuestRefs := map[string]bool{}
+	partyCount := 0
+	for _, group := range req.CurrentDraft.PartyGroups {
+		guestRef := strings.TrimSpace(group.GuestRef)
+		if !boundedSemanticValue(guestRef, 128) || seenGuestRefs[guestRef] || group.Count < 1 || group.Count > 20 {
+			return false
+		}
+		seenGuestRefs[guestRef] = true
+		partyCount += group.Count
+		for _, serviceID := range group.ServiceIDs {
+			if _, exists := serviceIDs[strings.TrimSpace(serviceID)]; !exists {
+				return false
+			}
+		}
+	}
+	if req.CurrentDraft.PartySize < 0 || req.CurrentDraft.PartySize > 20 {
+		return false
+	}
+	if len(req.CurrentDraft.PartyGroups) > 0 && (req.CurrentDraft.PartySize < 2 || partyCount != req.CurrentDraft.PartySize) {
+		return false
+	}
+	if req.CurrentDraft.DraftRevision < 0 {
+		return false
+	}
+	if req.Pending != nil {
+		for _, serviceID := range append(append([]string(nil), req.Pending.SourceServiceIDs...), req.Pending.TargetServiceIDs...) {
+			if _, exists := serviceIDs[strings.TrimSpace(serviceID)]; !exists {
+				return false
+			}
+		}
+		for _, categoryID := range []string{req.Pending.SourceCategoryID, req.Pending.TargetCategoryID} {
+			if categoryID = strings.TrimSpace(categoryID); categoryID != "" {
+				if _, exists := categoryIDs[categoryID]; !exists {
+					return false
+				}
+			}
+		}
+	}
+	if req.Consultation != nil {
+		consultationServiceIDs := append(append(append([]string(nil), req.Consultation.CandidateServiceIDs...), req.Consultation.RecommendedServiceIDs...), req.Consultation.Needs.ComparedServiceIDs...)
+		if selected := strings.TrimSpace(req.Consultation.SelectedServiceID); selected != "" {
+			consultationServiceIDs = append(consultationServiceIDs, selected)
+		}
+		for _, serviceID := range consultationServiceIDs {
+			if _, exists := serviceIDs[strings.TrimSpace(serviceID)]; !exists {
+				return false
+			}
+		}
+	}
+	seenGuidance := map[string]bool{}
+	for _, action := range req.RecognizableGuidanceActions {
+		action = strings.TrimSpace(action)
+		if !conversation.IsGuidanceAction(action) || seenGuidance[action] {
+			return false
+		}
+		seenGuidance[action] = true
+	}
+	if contract != conversation.TurnSemanticContractGuidance {
+		return len(req.RecognizableGuidanceActions) == 0
+	}
+	stableVocabulary := conversation.GuidanceActionValues()
+	if len(seenGuidance) != len(stableVocabulary) {
+		return false
+	}
+	for _, action := range stableVocabulary {
+		if !seenGuidance[action] {
+			return false
+		}
+	}
+	return true
+}
+
+func boundedSemanticValue(value string, max int) bool {
+	trimmed := strings.TrimSpace(value)
+	return trimmed != "" && len(trimmed) <= max
+}
+
 func (s *Service) Audio(ctx context.Context, id string) (*AudioOutput, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {

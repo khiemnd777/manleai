@@ -280,7 +280,7 @@ func TestAssignServiceCategoryDelegatesManualOwnerScopedAssignment(t *testing.T)
 	}
 }
 
-func TestRefreshServiceCategorySuggestionsUsesCommercialTaxonomySeeds(t *testing.T) {
+func TestRefreshServiceCategorySuggestionsDelegatesToDatabaseOwnedTaxonomy(t *testing.T) {
 	store := &fakePOSStore{}
 	service := NewService(store)
 
@@ -289,24 +289,10 @@ func TestRefreshServiceCategorySuggestionsUsesCommercialTaxonomySeeds(t *testing
 		t.Fatalf("RefreshServiceCategorySuggestions returned error: %v", err)
 	}
 	if result.CreatedCategories == 0 {
-		t.Fatalf("refresh result = %#v, want default taxonomy seeds", result)
+		t.Fatalf("refresh result = %#v, want repository materialization result", result)
 	}
-	if store.categoryRefresh.salonID != "salon_1" || store.categoryRefresh.ownerUserID != "owner_1" {
+	if !store.categoryRefresh.called || store.categoryRefresh.salonID != "salon_1" || store.categoryRefresh.ownerUserID != "owner_1" {
 		t.Fatalf("category refresh scope = %#v", store.categoryRefresh)
-	}
-	if len(store.categoryRefresh.seeds) < 5 {
-		t.Fatalf("seeds = %#v, want commercial nail salon taxonomy", store.categoryRefresh.seeds)
-	}
-	want := map[string]bool{"manicure": false, "pedicure": false, "acrylic": false, "dip-powder": false, "removal": false}
-	for _, seed := range store.categoryRefresh.seeds {
-		if _, ok := want[seed.Slug]; ok {
-			want[seed.Slug] = true
-		}
-	}
-	for slug, found := range want {
-		if !found {
-			t.Fatalf("seed slug %q missing from %#v", slug, store.categoryRefresh.seeds)
-		}
 	}
 }
 
@@ -1137,9 +1123,9 @@ type fakePOSStore struct {
 		categoryID  string
 	}
 	categoryRefresh struct {
+		called      bool
 		salonID     string
 		ownerUserID string
-		seeds       []ServiceCategorySeed
 	}
 	serviceCreate struct {
 		salonID     string
@@ -1315,11 +1301,11 @@ func (f *fakePOSStore) AssignServiceCategory(ctx context.Context, salonID string
 	return &Service{ID: serviceID, SalonID: salonID, ServiceCategoryID: categoryID, CategorySource: ServiceCategoryAssignmentManual, CategoryConfidence: 1}, nil
 }
 
-func (f *fakePOSStore) RefreshServiceCategorySuggestions(ctx context.Context, salonID string, ownerUserID string, seeds []ServiceCategorySeed) (*ServiceCategorySuggestionRefresh, error) {
+func (f *fakePOSStore) RefreshServiceCategorySuggestions(ctx context.Context, salonID string, ownerUserID string) (*ServiceCategorySuggestionRefresh, error) {
+	f.categoryRefresh.called = true
 	f.categoryRefresh.salonID = salonID
 	f.categoryRefresh.ownerUserID = ownerUserID
-	f.categoryRefresh.seeds = append([]ServiceCategorySeed(nil), seeds...)
-	return &ServiceCategorySuggestionRefresh{CreatedCategories: len(seeds)}, nil
+	return &ServiceCategorySuggestionRefresh{CreatedCategories: 1}, nil
 }
 
 func (f *fakePOSStore) ListStaff(ctx context.Context, salonID string, provider string) ([]StaffMember, error) {

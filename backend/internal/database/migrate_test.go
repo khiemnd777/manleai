@@ -1,6 +1,13 @@
 package database
 
-import "testing"
+import (
+	"context"
+	"database/sql"
+	"os"
+	"testing"
+
+	_ "github.com/lib/pq"
+)
 
 func TestMigrationFilesSortByNumericVersion(t *testing.T) {
 	files := []migrationFile{
@@ -36,5 +43,34 @@ func TestParseMigrationFileRejectsNonNumericVersion(t *testing.T) {
 	_, err := parseMigrationFile("VA__bad.sql", "SELECT 1;")
 	if err == nil {
 		t.Fatal("parseMigrationFile accepted non-numeric migration version")
+	}
+}
+
+func TestMigrateAppliesForwardMigrationOnceWithoutChangingAppliedChecksums(t *testing.T) {
+	databaseURL := os.Getenv("MIGRATION_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("MIGRATION_TEST_DATABASE_URL is not set")
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatalf("first migrate: %v", err)
+	}
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM app_schema_migrations WHERE version = '45'
+	`).Scan(&count); err != nil {
+		t.Fatalf("load V45 record: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("V45 migration records=%d, want 1", count)
 	}
 }

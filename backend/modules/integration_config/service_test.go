@@ -201,6 +201,42 @@ func TestOpenAIResponseCanonicalizesLegacyRealtimeNoiseProfile(t *testing.T) {
 	}
 }
 
+func TestResolveOpenAIConfigStrictUsesOnlyEncryptedDatabaseRecord(t *testing.T) {
+	store := &fakeIntegrationConfigStore{existing: &StoredConfig{
+		SalonID: "salon_1", Provider: ProviderOpenAI, Enabled: true,
+		Settings: map[string]string{
+			"base_url": "https://stored.openai.test/v1", "reply_model": "stored-model",
+			"transcription_model": "stored-transcribe", "speech_model": "stored-speech", "speech_voice": "alloy",
+		},
+		SecretsEncrypted: "ciphertext",
+	}}
+	service := &Service{
+		repo:   store,
+		cipher: &fakeSecretCipher{decryptPlaintext: `{"api_key":"database-key"}`},
+		cfg: config.Config{Voice: config.VoiceConfig{AI: config.VoiceAIConfig{OpenAI: config.OpenAIVoiceConfig{
+			APIKey: "legacy-environment-key", BaseURL: "https://legacy.test/v1", ReplyModel: "legacy-model",
+		}}}},
+	}
+
+	cfg, enabled, err := service.ResolveOpenAIConfigStrict(context.Background(), "salon_1")
+	if err != nil || !enabled {
+		t.Fatalf("strict resolve enabled=%t err=%v", enabled, err)
+	}
+	if cfg.APIKey != "database-key" || cfg.BaseURL != "https://stored.openai.test/v1" || cfg.ReplyModel != "stored-model" {
+		t.Fatalf("strict config used fallback or wrong source: %#v", cfg)
+	}
+}
+
+func TestResolveOpenAIConfigStrictFailsClosedWithoutStoredRecord(t *testing.T) {
+	service := &Service{
+		repo: &fakeIntegrationConfigStore{}, cipher: &fakeSecretCipher{},
+		cfg: config.Config{Voice: config.VoiceConfig{AI: config.VoiceAIConfig{OpenAI: config.OpenAIVoiceConfig{APIKey: "legacy-key"}}}},
+	}
+	if _, _, err := service.ResolveOpenAIConfigStrict(context.Background(), "salon_1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("strict resolve error=%v, want ErrNotFound", err)
+	}
+}
+
 type fakeIntegrationConfigStore struct {
 	existing    *StoredConfig
 	upserted    StoredConfig

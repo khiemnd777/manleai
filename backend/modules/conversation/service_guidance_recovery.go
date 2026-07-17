@@ -15,11 +15,14 @@ const (
 	GuidanceRecoveryStageCallerGoal = "caller_goal"
 	GuidanceRecoveryStageService    = "service"
 
-	guidanceRecoveryActionBook          = "book"
-	guidanceRecoveryActionCatalog       = "service_catalog"
-	guidanceRecoveryActionConsultation  = "consultation"
-	guidanceRecoveryActionSalonQuestion = "salon_question"
-	guidanceRecoveryActionNameService   = "name_service"
+	guidanceRecoveryActionBook          = GuidanceActionBook
+	guidanceRecoveryActionCatalog       = GuidanceActionServiceCatalog
+	guidanceRecoveryActionConsultation  = GuidanceActionConsultation
+	guidanceRecoveryActionSalonQuestion = GuidanceActionSalonQuestion
+	guidanceRecoveryActionNameService   = GuidanceActionNameService
+	guidanceRecoveryActionHumanHandoff  = GuidanceActionHumanHandoff
+	guidanceRecoveryActionReschedule    = GuidanceActionReschedule
+	guidanceRecoveryActionCancel        = GuidanceActionCancel
 
 	maxGuidanceNoProgress       = 3
 	maxGuidanceProviderFailures = 2
@@ -35,6 +38,7 @@ const (
 	guidanceEvidenceConsultation     guidanceRecoveryEvidenceKind = "consultation"
 	guidanceEvidenceBooking          guidanceRecoveryEvidenceKind = "booking"
 	guidanceEvidenceInformation      guidanceRecoveryEvidenceKind = "information_question"
+	guidanceEvidenceNameService      guidanceRecoveryEvidenceKind = "name_service"
 	guidanceEvidenceOwner            guidanceRecoveryEvidenceKind = "owner"
 	guidanceEvidenceProviderFailure  guidanceRecoveryEvidenceKind = "provider_failure"
 	guidanceEvidenceCallerNoProgress guidanceRecoveryEvidenceKind = "caller_no_progress"
@@ -91,8 +95,31 @@ func guidanceRecoveryExpectedInput(state *GuidanceRecoveryState) string {
 // catalog interpreter.
 func deriveGuidanceRecoveryEvidence(plan TurnPlan, turn TurnUnderstanding, understanding serviceUnderstandingResult) guidanceRecoveryEvidence {
 	outcome := strings.TrimSpace(turn.InterpreterOutcome)
-	if (plan.Route == TurnRouteActionLane && plan.Reason == "owner_handoff") || turnGoalIs(turn, "human_handoff") {
+	if (plan.Route == TurnRouteActionLane && plan.Reason == "owner_handoff") || turnGoalIs(turn, "human_handoff") || turn.GuidanceAction == GuidanceActionHumanHandoff {
 		return guidanceRecoveryEvidence{Kind: guidanceEvidenceOwner, ProviderOutcome: outcome}
+	}
+	switch strings.TrimSpace(turn.GuidanceAction) {
+	case GuidanceActionBook:
+		if turn.GuidancePartySize >= 2 {
+			return guidanceRecoveryEvidence{}
+		}
+		return guidanceRecoveryEvidence{Kind: guidanceEvidenceBooking, ProviderOutcome: outcome}
+	case GuidanceActionServiceCatalog:
+		return guidanceRecoveryEvidence{Kind: guidanceEvidenceCatalogMenu, ProviderOutcome: outcome}
+	case GuidanceActionConsultation:
+		return guidanceRecoveryEvidence{Kind: guidanceEvidenceConsultation, ProviderOutcome: outcome}
+	case GuidanceActionSalonQuestion:
+		return guidanceRecoveryEvidence{Kind: guidanceEvidenceInformation, ProviderOutcome: outcome}
+	case GuidanceActionNameService:
+		if understanding.Status == serviceUnderstandingStatusSelected && len(understanding.Candidates) == 1 {
+			return guidanceRecoveryEvidence{Kind: guidanceEvidenceServiceSelected, ProviderOutcome: outcome}
+		}
+		if understanding.Status == serviceUnderstandingStatusAmbiguous && len(understanding.Candidates) > 0 {
+			return guidanceRecoveryEvidence{Kind: guidanceEvidenceCategoryScoped, ProviderOutcome: outcome}
+		}
+		return guidanceRecoveryEvidence{Kind: guidanceEvidenceNameService, ProviderOutcome: outcome}
+	case GuidanceActionReschedule, GuidanceActionCancel:
+		return guidanceRecoveryEvidence{}
 	}
 	if question, ok := firstDeferredInformationQuestion(turn); ok {
 		if question.Subject == ConversationQuestionCatalog {
@@ -159,7 +186,7 @@ func reduceGuidanceRecoveryState(current *GuidanceRecoveryState, initialStage st
 	next.ProgressFingerprint = ""
 
 	switch evidence.Kind {
-	case guidanceEvidenceCatalogMenu, guidanceEvidenceBooking, guidanceEvidenceCategoryScoped:
+	case guidanceEvidenceCatalogMenu, guidanceEvidenceConsultation, guidanceEvidenceBooking, guidanceEvidenceCategoryScoped, guidanceEvidenceNameService:
 		next.Stage = GuidanceRecoveryStageService
 		next.NoProgressCount = 0
 		next.ProviderFailureCount = 0
@@ -202,6 +229,7 @@ func guidanceRecoveryOfferedActions(stage string, services []ServiceOption, cfg 
 	if strings.TrimSpace(stage) == GuidanceRecoveryStageCallerGoal {
 		actions = append(actions, guidanceRecoveryActionSalonQuestion)
 	}
+	actions = append(actions, guidanceRecoveryActionHumanHandoff)
 	return actions
 }
 
@@ -217,63 +245,68 @@ func consultationGuidanceAvailable(services []ServiceOption, cfg *RuntimeConfig)
 	return false
 }
 
-func guidanceRecoveryPrompt(state GuidanceRecoveryState, repeated bool) string {
-	hasCatalog := containsString(state.OfferedActions, guidanceRecoveryActionCatalog)
-	hasConsultation := containsString(state.OfferedActions, guidanceRecoveryActionConsultation)
-	if state.Stage == GuidanceRecoveryStageService {
-		switch {
-		case hasCatalog && hasConsultation && repeated:
-			return "You can name a service, ask me to read the menu, or tell me what result you want so I can help narrow it down. Which would be easiest?"
-		case hasCatalog && hasConsultation:
-			return "If you're not sure which service fits, I can help narrow it down from what you want, or read the bookable menu. You can also name a service you already know. What would be easiest?"
-		case hasCatalog:
-			return "You can name a service you already know, or ask me to read the bookable menu. Which would you prefer?"
-		default:
-			return "Which service would you like, or would you like the owner to help?"
+func guidanceRecoveryPrompt(state GuidanceRecoveryState, _ bool) string {
+	choices := make([]string, 0, len(state.OfferedActions))
+	for _, action := range state.OfferedActions {
+		if label := guidanceActionSpokenLabel(action); label != "" {
+			choices = append(choices, label)
 		}
 	}
-	if hasConsultation {
-		if repeated {
-			return "Would you like to book, talk through which service fits what you want, or ask a question about the salon?"
-		}
-		return "I can help you book, talk through which service fits what you want, or answer a question about the salon. What would be most useful?"
+	if len(choices) == 0 {
+		return "What would you like help with?"
 	}
-	return "I can help you book an appointment or answer a question about the salon. What would you like help with?"
+	return "Would you like to " + joinHumanList(choices) + "?"
 }
 
 func guidanceProviderFailurePrompt(state GuidanceRecoveryState) string {
-	hasCatalog := containsString(state.OfferedActions, guidanceRecoveryActionCatalog)
-	hasConsultation := containsString(state.OfferedActions, guidanceRecoveryActionConsultation)
-	canBook := containsString(state.OfferedActions, guidanceRecoveryActionBook)
-	canAnswerSalonQuestion := containsString(state.OfferedActions, guidanceRecoveryActionSalonQuestion)
-	if state.Stage == GuidanceRecoveryStageService {
-		switch {
-		case hasCatalog && hasConsultation:
-			return "I'm having trouble interpreting that right now. I can still read the bookable menu, or ask one question at a time to help narrow down which service fits. I can also ask the owner to help."
-		case hasConsultation:
-			return "I'm having trouble interpreting that right now. I can ask one question at a time to help narrow down which service fits, or ask the owner to help."
-		case hasCatalog:
-			return "I'm having trouble interpreting that right now. Please name a bookable service or ask me to read the menu once more. I can also ask the owner to help."
-		default:
-			return "I'm having trouble interpreting that right now, and I don't have a bookable service menu to guide us. I can ask the owner to help."
+	choices := make([]string, 0, len(state.OfferedActions))
+	for _, action := range state.OfferedActions {
+		if label := guidanceActionSpokenLabel(action); label != "" {
+			choices = append(choices, label)
 		}
 	}
-	switch {
-	case hasCatalog && hasConsultation:
-		return "I'm having trouble interpreting that right now. I can still read the bookable menu, or ask one question at a time to help narrow down which service fits. I can also ask the owner to help."
-	case hasConsultation:
-		return "I'm having trouble interpreting that right now. I can ask one question at a time to help narrow down which service fits, or ask the owner to help."
-	case hasCatalog:
-		return "I'm having trouble interpreting that right now. You can ask me to read the bookable service menu once more, or I can ask the owner to help."
-	case canBook && canAnswerSalonQuestion:
-		return "I'm having trouble interpreting that right now. Please say whether you'd like to start a booking or ask a question about the salon. I can also ask the owner to help."
-	case canBook:
-		return "I'm having trouble interpreting that right now. Please say if you'd like to start a booking, or I can ask the owner to help."
-	case canAnswerSalonQuestion:
-		return "I'm having trouble interpreting that right now. Please ask your salon question once more, or I can ask the owner to help."
-	default:
-		return "I'm having trouble interpreting that right now. I can ask the owner to help."
+	if len(choices) == 0 {
+		return "I'm having trouble checking the salon's service guidance. I can ask the owner to help."
 	}
+	return "I'm having trouble checking the salon's service guidance. Would you like to " + joinHumanList(choices) + "?"
+}
+
+type guidanceActionPresentation struct {
+	SpokenLabel string
+}
+
+// guidanceActionPresentations owns presentation copy for stable protocol
+// actions. Runtime availability still comes exclusively from OfferedActions;
+// adding copy here cannot make an unavailable workflow selectable.
+var guidanceActionPresentations = map[string]guidanceActionPresentation{
+	GuidanceActionBook: {
+		SpokenLabel: "book an appointment",
+	},
+	GuidanceActionServiceCatalog: {
+		SpokenLabel: "hear the bookable service menu",
+	},
+	GuidanceActionConsultation: {
+		SpokenLabel: "get help choosing a service",
+	},
+	GuidanceActionSalonQuestion: {
+		SpokenLabel: "ask a question about the salon",
+	},
+	GuidanceActionNameService: {
+		SpokenLabel: "name a service you already know",
+	},
+	GuidanceActionHumanHandoff: {
+		SpokenLabel: "have the owner help",
+	},
+	GuidanceActionReschedule: {
+		SpokenLabel: "reschedule an existing appointment",
+	},
+	GuidanceActionCancel: {
+		SpokenLabel: "cancel an existing appointment",
+	},
+}
+
+func guidanceActionSpokenLabel(action string) string {
+	return guidanceActionPresentations[strings.TrimSpace(action)].SpokenLabel
 }
 
 func serviceGuidanceMenuReply(services []ServiceOption, consultationAvailable bool) string {
@@ -372,11 +405,14 @@ func (s *Service) handleGuidanceRecovery(
 		switch evidence.Kind {
 		case guidanceEvidenceProviderFailure, guidanceEvidenceCallerNoProgress:
 		default:
-			return false, nil, nil
+			if strings.TrimSpace(turnUnderstanding.GuidanceAction) == "" {
+				return false, nil, nil
+			}
 		}
 	}
 
-	if evidence.Kind == guidanceEvidenceConsultation {
+	guidanceCapability := resolveServiceGuidanceCapability(services, cfg)
+	if evidence.Kind == guidanceEvidenceConsultation && guidanceCapability.RecommendationReady {
 		return s.handleServiceConsultation(ctx, ownerUserID, session, message, eventKey, serviceUnderstanding, turnUnderstanding, services, staff, cfg)
 	}
 
@@ -386,7 +422,7 @@ func (s *Service) handleGuidanceRecovery(
 		initialStage = GuidanceRecoveryStageService
 	}
 	actionStage := initialStage
-	if evidence.Kind == guidanceEvidenceCatalogMenu || evidence.Kind == guidanceEvidenceBooking || evidence.Kind == guidanceEvidenceCategoryScoped {
+	if evidence.Kind == guidanceEvidenceCatalogMenu || evidence.Kind == guidanceEvidenceConsultation || evidence.Kind == guidanceEvidenceBooking || evidence.Kind == guidanceEvidenceCategoryScoped || evidence.Kind == guidanceEvidenceNameService {
 		actionStage = GuidanceRecoveryStageService
 	}
 	offeredActions := guidanceRecoveryOfferedActions(actionStage, services, cfg)
@@ -419,19 +455,27 @@ func (s *Service) handleGuidanceRecovery(
 	applyTurnPlanMetadata(&turn, plan)
 	applyTurnUnderstandingMetadata(&turn, turnUnderstanding, conversationDraftResult{})
 	turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, guidanceRecoveryMetadata(evidence.Kind, next.DialogState.Guidance))
+	if evidence.Kind == guidanceEvidenceConsultation {
+		turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, serviceGuidanceCapabilityMetadata(guidanceCapability))
+	}
 
 	switch evidence.Kind {
+	case guidanceEvidenceConsultation:
+		turn.AIMessage = serviceGuidanceCapabilityReply(guidanceCapability, services)
 	case guidanceEvidenceCatalogMenu:
-		next.Intent = IntentBooking
 		applyGuidanceRecoveryState(&next, transition.State)
-		route := routeNonBookingAnswer(message, session, answerCtx, cfg, s.now)
+		question := ConversationQuestion{Subject: ConversationQuestionCatalog, Mode: turnUnderstanding.GuidanceCatalogMode, Confidence: turnUnderstanding.Confidence}
+		route := routeStructuredServiceQuestion(question, session, serviceUnderstanding, answerCtx)
 		turn = newTurnRecord(session.SalonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
 		applyTurnPlanMetadata(&turn, plan)
 		applyTurnUnderstandingMetadata(&turn, turnUnderstanding, conversationDraftResult{})
 		turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, guidanceRecoveryMetadata(evidence.Kind, next.DialogState.Guidance))
 		turn.AIMessage = route.Reply
-		if route.Intent == "service_menu" {
+		if question.Mode == "" || question.Mode == ConversationQuestionModeList {
 			turn.AIMessage = serviceGuidanceMenuReply(services, consultationGuidanceAvailable(services, cfg))
+		} else if question.Mode != ConversationQuestionModeExistence {
+			followUp := guidanceCatalogFollowUp(session, services, cfg)
+			turn.AIMessage = strings.TrimSpace(turn.AIMessage + " " + followUp)
 		}
 		applyAnswerRouteMetadata(&turn, route, answerCtx)
 	case guidanceEvidenceBooking:
@@ -441,7 +485,18 @@ func (s *Service) handleGuidanceRecovery(
 		applyTurnPlanMetadata(&turn, plan)
 		applyTurnUnderstandingMetadata(&turn, turnUnderstanding, conversationDraftResult{})
 		turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, guidanceRecoveryMetadata(evidence.Kind, next.DialogState.Guidance))
-		turn.AIMessage = guidanceRecoveryPrompt(*next.DialogState.Guidance, false)
+		// The semantic action already resolved the caller's goal. Continue the
+		// booking workflow by asking for its next missing field instead of
+		// presenting the caller-goal menu again.
+		turn.AIMessage = "Which bookable service would you like?"
+	case guidanceEvidenceNameService:
+		next.Intent = IntentBooking
+		applyGuidanceRecoveryState(&next, transition.State)
+		turn = newTurnRecord(session.SalonID, ownerUserID, session, next, message, eventKey, services, staff, cfg)
+		applyTurnPlanMetadata(&turn, plan)
+		applyTurnUnderstandingMetadata(&turn, turnUnderstanding, conversationDraftResult{})
+		turn.CustomerMetadata = mergeMetadata(turn.CustomerMetadata, guidanceRecoveryMetadata(evidence.Kind, next.DialogState.Guidance))
+		turn.AIMessage = "Which bookable service would you like?"
 	case guidanceEvidenceCategoryScoped:
 		next.Intent = IntentBooking
 		applyGuidanceRecoveryState(&next, transition.State)
@@ -452,11 +507,15 @@ func (s *Service) handleGuidanceRecovery(
 		turn.AIMessage = serviceClarificationPrompt(next, serviceUnderstanding, cfg)
 		setPendingServiceCandidateMetadata(&turn, serviceUnderstanding)
 	case guidanceEvidenceInformation:
-		route := routeNonBookingAnswer(message, session, answerCtx, cfg, s.now)
+		question := ConversationQuestion{Subject: turnUnderstanding.GuidanceQuestionSubject, Mode: turnUnderstanding.GuidanceCatalogMode, Confidence: turnUnderstanding.Confidence}
+		route := routeStructuredQuestionAnswer(message, question, session, serviceUnderstanding, answerCtx, cfg, s.now)
 		if !route.Handled || route.Source == answerSourceBookingRedirect {
 			return false, nil, nil
 		}
-		turn.AIMessage = strings.TrimSpace(answerWithoutGenericBookingOffer(route.Reply) + " " + guidanceRecoveryPrompt(*next.DialogState.Guidance, false))
+		// Answer the operational question that was actually asked. A generic
+		// guidance menu here makes a correct hours/price/policy answer sound like
+		// the system failed to understand the caller.
+		turn.AIMessage = strings.TrimSpace(answerWithoutGenericBookingOffer(route.Reply))
 		applyAnswerRouteMetadata(&turn, route, answerCtx)
 	case guidanceEvidenceProviderFailure:
 		turn.AIMessage = guidanceProviderFailurePrompt(*next.DialogState.Guidance)
@@ -467,6 +526,17 @@ func (s *Service) handleGuidanceRecovery(
 	finalizeTurnMetadata(&turn, session, next, expected, expected, "guidance_recovery")
 	updated, err := s.store.SaveTurn(ctx, turn)
 	return true, updated, err
+}
+
+func guidanceCatalogFollowUp(session Session, services []ServiceOption, cfg *RuntimeConfig) string {
+	if pending := pendingServiceCandidateServices(session, services); len(pending) > 0 {
+		label := serviceCatalogQuestionLabel(serviceUnderstandingResult{}, pending)
+		return "For your appointment, which " + label + " service would you like?"
+	}
+	if hasOperationalBookingProgress(session) {
+		return resumeBookingPrompt(session, services, cfg)
+	}
+	return "Would you like to book one of those, or get help choosing?"
 }
 
 func guidanceRecoveryMetadata(action guidanceRecoveryEvidenceKind, state *GuidanceRecoveryState) map[string]any {

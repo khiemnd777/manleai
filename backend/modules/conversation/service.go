@@ -536,39 +536,6 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 		closeConsultationForWorkflow(&next, "cancel_requested", false)
 		return s.handleCancelMessage(ctx, ownerUserID, *session, next, message, eventKey, services, serviceAliases, categoryAliases, staff, cfg, knowledge)
 	}
-	if activePartyPlan(session.PartyPlan) && !partyPlanComplete(session.PartyPlan) {
-		if reply, ok := partyPlanServiceMenuReply(message, *session, services, cfg); ok {
-			turn := newPlannedTurn(*session, *session)
-			applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
-			applyPartyPlanMetadata(&turn, session.PartyPlan)
-			turn.AIMessage = reply
-			finalizeTurnMetadata(&turn, *session, *session, "service", "service", "party_plan_service_menu")
-			return s.store.SaveTurn(ctx, turn)
-		}
-	}
-	if (asksServiceMenu(message) || classifyServiceCatalogQuestion(message, serviceUnderstanding) == serviceCatalogQuestionCount) && serviceUnderstanding.Status == serviceUnderstandingStatusUnknown {
-		route := routeNonBookingAnswer(message, *session, answerCtx, cfg, s.now)
-		if route.Handled && route.Source != answerSourceBookingRedirect {
-			turn := newPlannedTurn(*session, *session)
-			turn.AIMessage = route.Reply
-			applyAnswerRouteMetadata(&turn, route, answerCtx)
-			if route.Intent != "service_catalog_count" {
-				s.applyReplyGenerator(ctx, &turn, *session, services, cfg, "", "", knowledge)
-			}
-			finalizeTurnMetadata(&turn, *session, *session, "", "", "answer_router")
-			return s.store.SaveTurn(ctx, turn)
-		}
-	}
-	if !turnHasMutations(turnUnderstanding) && isServiceInquiry(message, serviceUnderstanding) && !asksStaffQuestion(message, staff, activeStaff) {
-		turn := newPlannedTurn(*session, *session)
-		applyServiceUnderstandingMetadata(&turn, serviceUnderstanding)
-		applyServiceInquiryMetadata(&turn, serviceUnderstanding)
-		route := routeServiceInquiryAnswer(message, *session, serviceUnderstanding, answerCtx)
-		turn.AIMessage = route.Reply
-		applyAnswerRouteMetadata(&turn, route, answerCtx)
-		finalizeTurnMetadata(&turn, *session, *session, "", "", "service_inquiry")
-		return s.store.SaveTurn(ctx, turn)
-	}
 	if !hasBookingProgress(*session) && !hasBookingVerbSignal(message) && !partySignal.IsParty && !serviceUnderstandingStartsBooking(serviceUnderstanding, message) {
 		route := routeNonBookingAnswer(message, *session, answerCtx, cfg, s.now)
 		if route.Handled && route.Source != answerSourceBookingRedirect {
@@ -586,6 +553,26 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 	if shouldRouteReschedule(*session, message) || turnGoalIs(turnUnderstanding, "reschedule_appointment") {
 		closeConsultationForWorkflow(&next, "reschedule_requested", false)
 		return s.handleRescheduleMessage(ctx, ownerUserID, *session, next, message, eventKey, services, serviceAliases, categoryAliases, staff, cfg, knowledge)
+	}
+	if len(turnUnderstanding.Acts) == 0 {
+		if question, ok := firstDeferredInformationQuestion(turnUnderstanding); ok && question.Subject != ConversationQuestionCurrentBooking {
+			route := routeStructuredQuestionAnswer(message, question, next, serviceUnderstanding, answerCtx, cfg, s.now)
+			if route.Handled && route.Source != answerSourceBookingRedirect && strings.TrimSpace(route.Reply) != "" {
+				turn := newPlannedTurn(*session, next)
+				turn.AIMessage = strings.TrimSpace(route.Reply)
+				resume, expectedInput, reviewStateChanged := resumeAfterInformationPrompt(&next, services, staff, cfg)
+				if resume != "" {
+					turn.AIMessage = answerWithoutGenericBookingOffer(turn.AIMessage) + " " + resume
+				}
+				if reviewStateChanged {
+					syncTurnUpdate(&turn, next, services, staff, cfg)
+				}
+				applyAnswerRouteMetadata(&turn, route, answerCtx)
+				applyTurnUnderstandingMetadata(&turn, turnUnderstanding, conversationDraftResult{})
+				finalizeTurnMetadata(&turn, *session, next, expectedInput, expectedInput, "turn_question_then_resume")
+				return s.store.SaveTurn(ctx, turn)
+			}
+		}
 	}
 	partyPlanApplied := false
 	partyPlanTouched := false
@@ -644,7 +631,10 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 		return s.store.SaveTurn(ctx, turn)
 	}
 	serviceEdit := serviceEditDecision{}
-	if !conversationResult.Handled && shouldUseDeterministicTurnFallback(turnUnderstanding) {
+	if !conversationResult.Handled && turnUnderstanding.GuidanceAction == GuidanceActionNameService &&
+		!hasSelectedServiceDraft(*session) && serviceUnderstanding.Status == serviceUnderstandingStatusSelected && len(serviceUnderstanding.Candidates) == 1 {
+		serviceEdit = serviceEditDecision{Action: serviceEditSelectInitial, Candidates: append([]ServiceOption(nil), serviceUnderstanding.Candidates...), Source: "semantic_guidance_catalog_selection"}
+	} else if !conversationResult.Handled && shouldUseDeterministicTurnFallback(turnUnderstanding) {
 		// State-scoped fast lanes and safe semantic fallback reuse the catalog-backed
 		// service decision without giving the model or parser side-effect ownership.
 		serviceEdit = serviceEditDecisionForMessage(*session, message, serviceUnderstanding, services)
@@ -718,13 +708,7 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 			finalizeTurnMetadata(&turn, *session, next, expectedInput, expectedInput, "turn_current_draft_then_resume")
 			return s.store.SaveTurn(ctx, turn)
 		}
-		var route answerRoute
-		switch question.Subject {
-		case ConversationQuestionCatalog, ConversationQuestionPrice:
-			route = routeServiceInquiryAnswer(message, next, serviceUnderstanding, answerCtx)
-		default:
-			route = routeNonBookingAnswer(message, next, answerCtx, cfg, s.now)
-		}
+		route := routeStructuredQuestionAnswer(message, question, next, serviceUnderstanding, answerCtx, cfg, s.now)
 		if route.Handled && strings.TrimSpace(route.Reply) != "" {
 			turn.AIMessage = strings.TrimSpace(route.Reply)
 			prependConversationMutationAcknowledgement(&turn, conversationResult, next, services)
@@ -742,11 +726,7 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 		}
 	}
 
-	if shouldComplaintHandoff(message) {
-		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonHumanRequested, "I'm sorry to hear that. I'll send this to the owner so they can help directly. This is not a confirmed appointment.", services, staff, cfg)
-	}
-
-	if shouldHandoff(message) || turnGoalIs(turnUnderstanding, "human_handoff") {
+	if turnGoalIs(turnUnderstanding, "human_handoff") {
 		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonHumanRequested, "I'll pass this to the owner so they can help directly. This is not a confirmed appointment.", services, staff, cfg)
 	}
 
@@ -884,7 +864,7 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 			return s.store.SaveTurn(ctx, turn)
 		}
 		turn.AIMessage = promptForMissingField(missing)
-		if contextual := promptForMissingFieldWithServiceContext(missing, next, services, cfg); contextual != "" && !conversationResult.Changed {
+		if contextual := promptForMissingFieldWithServiceContext(missing, next, services, cfg); contextual != "" {
 			turn.AIMessage = contextual
 		}
 		if missing == "service" {
@@ -899,7 +879,9 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 		if exactRequestedTimeSelected {
 			turn.AIMessage = selectedRequestedTimeReply(next, services, staff, cfg, missing)
 		}
-		prependConversationMutationAcknowledgement(&turn, conversationResult, next, services)
+		if hasOperationalBookingProgress(*session) {
+			prependConversationMutationAcknowledgement(&turn, conversationResult, next, services)
+		}
 		if serviceEdit.Action == serviceEditKeepCurrent {
 			if prefix := serviceKeepCurrentAcknowledgement(next, services); prefix != "" {
 				turn.AIMessage = prefix + " " + turn.AIMessage
@@ -951,12 +933,6 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 	turn := newTurnRecord(before.SalonID, ownerUserID, before, next, message, eventKey, services, staff, cfg)
 	turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{"booking_action": BookingActionReschedule})
 
-	if shouldComplaintHandoff(message) {
-		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonHumanRequested, "I'm sorry to hear that. I'll send this reschedule request to the owner so they can help directly. The appointment is not rescheduled yet.", services, staff, cfg)
-	}
-	if shouldHandoff(message) {
-		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonHumanRequested, "I'll pass this reschedule request to the owner so they can help directly. The appointment is not rescheduled yet.", services, staff, cfg)
-	}
 	if !cfg.AIEnabled {
 		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonAIBookingDisabled, "AI booking is not enabled yet. I can send this reschedule request to the owner, but the appointment is not rescheduled yet.", services, staff, cfg)
 	}
@@ -1071,12 +1047,6 @@ func (s *Service) handleCancelMessage(ctx context.Context, ownerUserID string, b
 	turn := newTurnRecord(before.SalonID, ownerUserID, before, next, message, eventKey, services, staff, cfg)
 	turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{"booking_action": BookingActionCancel})
 
-	if shouldComplaintHandoff(message) {
-		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonHumanRequested, "I'm sorry to hear that. I'll send this cancellation request to the owner so they can help directly. The appointment is not cancelled yet.", services, staff, cfg)
-	}
-	if shouldHandoff(message) {
-		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonHumanRequested, "I'll pass this cancellation request to the owner so they can help directly. The appointment is not cancelled yet.", services, staff, cfg)
-	}
 	if !cfg.AIEnabled {
 		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonAIBookingDisabled, "AI booking is not enabled yet. I can send this cancellation request to the owner, but the appointment is not cancelled yet.", services, staff, cfg)
 	}

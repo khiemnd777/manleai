@@ -150,16 +150,17 @@ triage keyword table.
 | --- | --- | --- | --- |
 | Auth and sessions | `backend/modules/auth/*`, `backend/internal/middleware/auth.go` | Login, refresh, bootstrap owner, JWT auth, user/salon claims | `backend/modules/auth/service_test.go` |
 | Salon profile/settings | `backend/modules/salon/*` | Salon CRUD, settings, AI tone, fail-closed salon-wide consultation toggle validation, public catalog settings, imported business hours | `backend/modules/salon/service_test.go` |
-| POS provider-neutral layer | `backend/modules/pos/*` | `POSProvider` contracts, typed provider-write outcome/phase errors, monotonic location/generation-fenced full snapshots, optional appointment listing capability, POS entity links, service/staff/customer catalog, service consultation profile persistence/validation, sync jobs/logs/errors, provider switching, category taxonomy, category aliases | `backend/modules/pos/service_test.go`, `backend/modules/pos/sync_processor_test.go`, `backend/modules/pos/repository_integration_test.go` |
+| POS provider-neutral layer | `backend/modules/pos/*` | `POSProvider` contracts, typed provider-write outcome/phase errors, monotonic location/generation-fenced full snapshots, optional appointment listing capability, POS entity links, service/staff/customer catalog, service consultation profile persistence/validation, sync jobs/logs/errors, provider switching, salon categories/aliases, and materialization from the active database-owned nail taxonomy release | `backend/modules/pos/service_test.go`, `backend/modules/pos/sync_processor_test.go`, `backend/modules/pos/repository_integration_test.go`, `backend/modules/pos/repository_taxonomy_integration_test.go` |
 | Square adapter | `backend/modules/pos_square/*` | Square OAuth, locations, atomic location-scoped generation-fenced sync with fail-closed freshness, Catalog `available_for_booking`/duration eligibility, active Team plus bookable Booking Profile intersection, Square payloads, salon-local availability ranges, dashboard test create/cancel safe-retry forwarding, provider-fenced booking-list pagination with cross-location rejection, token refresh, provider write outcome/error mapping, signed booking-webhook ingestion with root/nested location consistency, exact tenant routing across recoverable connection states, claim-token-fenced event processing and scheduled calendar repair | `backend/modules/pos_square/*_test.go` |
 | Booking | `backend/modules/booking/*` | Active-provider-scoped new booking/availability resolution, end-to-end location/generation provider fences, owner-scoped operation-key replay before mutable validation, origin-location-fenced historical appointment actions, durable operation claims/logical fingerprints/leases, phase-aware idempotent lease recovery (`not_started` safe versus `in_flight` unknown unless exact calendar truth converges), single-use availability quotes, bounded reference-preserving quote retention cleanup, mapping- and target-validated safe-retry lineage/supersession, confirmed appointments, fallback/provider pending, reconciliation task/candidate/resolve APIs, authoritative backend retry policy, advisory-first direct/fallback/lease convergence with exact canonical/raw provider mirror proof, provider-fenced zero-write-stale calendar imports, monotonic calendar mirror writes, raw-identity-gated equal-version mapping enrichment, reschedule, cancel, POS idempotency, POS error/outbox writes | `backend/modules/booking/service_test.go`, `backend/modules/booking/quote_cleanup_processor_test.go`, `backend/modules/booking/repository_integration_test.go` |
 | Customers | `backend/modules/customer/*` | Canonical customer CRUD, archive, search, activity read model, provider customer lookup facade | `backend/modules/customer/service_test.go` |
-| Conversation runtime | `backend/modules/conversation/*` | Simulator/phone session state, per-session pre-side-effect serialization, state-revision CAS, event-stable exact historical reply replay, database-fenced/fail-closed answer-context caching, Turn Kernel routing and state-scoped full/guidance semantic contract selection, typed guidance recovery/actions, typed pending customer/staff/review state, intent, slot and backend quote preservation, pre-dispatch exact-slot refresh, all-child party quote preflight, service understanding, answer routing, booking tool routing, party booking planning, profile/state-driven mutation-owned consultation/safety, handoff, transcript metadata, retention | `backend/modules/conversation/*_test.go` |
+| Conversation runtime | `backend/modules/conversation/*` | Simulator/phone session state, per-session pre-side-effect serialization, state-revision CAS, event-stable exact historical reply replay, database-fenced/fail-closed answer-context caching, Turn Kernel routing and state-scoped full/guidance semantic contract selection, partial-coverage routing for questions that contain both a deterministic field and a semantic constraint, stable guidance recognition separated from catalog/toggle/profile capability in `service_guidance_capability.go`, primary act/question/guidance validation isolated from auxiliary consultation snapshots/mutations, initial guidance-to-consultation transition flags isolated from active consultation state, validated operational draft mutations protected from diversion by a bare unsupported consultation goal, typed guidance recovery/actions that continue the selected workflow instead of replaying the generic menu, source-grounded party replacement with exact guest ownership and human spoken scopes, state-diff acknowledgements for staff changes, current-day structured hours answers when no day is requested, typed pending customer/staff/review state, intent, slot and backend quote preservation, pre-dispatch exact-slot refresh, all-child party quote preflight, service understanding, answer routing, booking tool routing, party booking planning, backend-profile/state-driven mutation-owned consultation/safety with active-consultation model acts discarded, handoff, transcript metadata, retention | `backend/modules/conversation/*_test.go` |
 | Training | `backend/modules/training/*` | Knowledge items, owner corrections, correction apply/dismiss, service alias application, training evaluation | `backend/modules/training/service_test.go` |
-| Voice provider-neutral | `backend/modules/voice/*` | Voice readiness/status, owner-scoped semantic-contract verification, safe provider diagnostics, inbound routing, STT/LLM/TTS/realtime and streaming-speech interfaces, speech turns, audio output | `backend/modules/voice/*_test.go` |
+| Voice provider-neutral | `backend/modules/voice/*` | Voice readiness/status with strict conversation-equivalent provider/catalog fences and typed service-guidance capability, owner-scoped semantic-contract verification, bounded read-only semantic evaluation, shared validated model-reply conversion including adapter-validated local hour/minute to canonical minutes-after-midnight conversion and positive consultation mutation/snapshot consistency, structured field/profile-option consultation-question fallback after unsafe model copy, production guarded replies plus simulator-permitted evaluation through the same guardrails, safe provider diagnostics, inbound routing, STT/LLM/TTS/realtime and streaming-speech interfaces, speech turns, audio output | `backend/modules/voice/*_test.go`, `backend/modules/voice/repository_readiness_integration_test.go` |
+| Conversation evaluation | `backend/internal/conversationeval/*`, `backend/cmd/conversation-eval*/*` | Schema-v2 deterministic 1,000-scenario single-turn contract corpus and 100-record structural audit; honest offline validation with zero model-pass claims; report-required authenticated runtime canary capped at 12; and a separate directly authored 50-execution/45-situation direct-model pilot with explicit scenario selectors for bounded canaries. The direct pilot resolves OpenAI configuration strictly from the encrypted database row, reuses production recognition and lets the production Conversation Service decide whether to call guarded reply or consultation-question generation, blocks all writes and POS actions, retains structured backend transition/reply-source/booking/handoff evidence with recognition/safe/final replies, local offered-slot minutes, time-preference timezone, and token usage, derives forbidden user-facing identifiers from each structured fixture/model result and matches them only at identifier boundaries, versions evaluation/review contracts in the run key, checkpoints every paid call, enforces a caller-supplied call ceiling, resumes without repeating completed work, deterministically rejects offers outside typed `before`/`after`/`exact` constraints, requires exact expected consultation extraction with protocol-unknown normalization and same-turn positive mutation consistency, and reviews batches of at most five outputs (10 rounds for the complete 50) with a minimum 4/5 score in every dimension plus explicit machine-label, invented-consultation-state, silent-mutation, time-constraint, and operational-answer checks | `backend/internal/conversationeval/*_test.go`, `backend/cmd/conversation-eval/*_test.go` |
 | Twilio adapter | `backend/modules/voice_twilio/*` | Twilio signatures, form parsing, TwiML, recording mode, Media Streams bridge, caller-input gate, typed reply scheduling, stale-generation suppression, recovery first-byte budget, terminal latch | `backend/modules/voice_twilio/*_test.go` |
-| OpenAI voice adapter | `backend/modules/voice_openai/*` | OpenAI STT, strict full/guidance structured-turn schemas and input/output, per-schema salon/config contract circuits, guarded operational/consultation-question reply, whole-response TTS, dedicated streaming Speech-to-PCMU conversion, Realtime input session | `backend/modules/voice_openai/*_test.go` |
-| Integration config | `backend/modules/integration_config/*` | Salon-scoped Square/Twilio/OpenAI runtime settings, encrypted secrets, dashboard-managed provider config | `backend/modules/integration_config/service_test.go` |
+| OpenAI voice adapter | `backend/modules/voice_openai/*` | OpenAI STT, strict full/guidance structured-turn schemas and input/output with consultation profiles stripped, separate validated local `hour`/`minute` availability constraints converted to canonical minutes, protocol-unknown consultation normalization, consultation mutation values limited to the controlled protocol vocabulary plus the current request's catalog service IDs, and guidance companion/transition fields normalized from the accepted action; per-schema salon/config contract circuits, guarded operational/consultation-question reply, response-token usage observation for evaluation, whole-response TTS, dedicated streaming Speech-to-PCMU conversion, Realtime input session | `backend/modules/voice_openai/*_test.go` |
+| Integration config | `backend/modules/integration_config/*` | Salon-scoped Square/Twilio/OpenAI runtime settings, encrypted secrets, dashboard-managed provider config, and fail-closed `ResolveOpenAIConfigStrict` for workflows that must not use legacy environment fallback | `backend/modules/integration_config/service_test.go` |
 | Configuration transfer | `backend/modules/config_transfer/*` | Sanitized schema v7 export/import preview/apply, scoped `included_sections` data packs, stable request IDs, portable service consultation profile resolution, skip secrets/operational records | `backend/modules/config_transfer/*_test.go` |
 | Public catalog API | `backend/modules/public_catalog/*` | Public-safe salon catalog read endpoints | `backend/modules/public_catalog/service_test.go` |
 
@@ -168,7 +169,7 @@ triage keyword table.
 | Helper area | Files | Use when triaging |
 | --- | --- | --- |
 | Server/bootstrap defaults | `backend/internal/config/config.go` | Server ports, CORS, JWT, and provider model normalization; active salon provider settings still resolve from dashboard-backed integration config |
-| Database/migrations | `backend/internal/database/database.go`, `backend/internal/database/migrate.go`, `backend/migrations/*.sql` | Schema drift, startup migrator, migration checksums, version ordering |
+| Database/migrations | `backend/internal/database/database.go`, `backend/internal/database/migrate.go`, `backend/migrations/*.sql` | Schema drift, startup migrator, migration checksums, version ordering; V44 owns the database nail taxonomy release and V45 forward-fills taxonomy aliases/suggestions onto the matching active owner/system category without rewriting V44 or overriding reviewed/manual ownership |
 | Encryption | `backend/internal/encryption/encryption.go` | POS/provider secret encryption, AES-GCM token handling |
 | Auth middleware | `backend/internal/middleware/auth.go` | Tenant/user claims, protected routes, salon ownership context |
 | Response helpers | `backend/internal/respond/respond.go` | API response/error shape |
@@ -194,7 +195,9 @@ Conversation source-of-truth routing is mandatory:
 - The active POS provider owns availability and booking results; conversation
   logic must not synthesize availability or confirmation.
 - `conversationServiceRefs` includes complete ready consultation profiles and
-  revisions in semantic model context. `service_consultation.go` selects the
+  revisions only for active consultation or full semantic model context;
+  initial `guidance_turn` input uses the stable recognition vocabulary and
+  omits full profiles. `service_consultation.go` selects the
   next unresolved discriminating field and option values from current dialog
   state plus those profiles; guarded generation owns phrasing only. Raw caller
   wording does not narrow consultation candidates unless validated
@@ -220,6 +223,7 @@ Conversation source-of-truth routing is mandatory:
   `backend/modules/conversation/turn_kernel.go`,
   `backend/modules/conversation/conversation_act.go`,
   `backend/modules/conversation/turn_interpreter_error.go`,
+  `backend/modules/conversation/service_guidance_capability.go`,
   `backend/modules/conversation/service_guidance_recovery.go`,
   `backend/modules/conversation/service_datetime_confirmation.go`,
   `backend/modules/conversation/turn_reducer.go`, and
@@ -236,28 +240,59 @@ Conversation source-of-truth routing is mandatory:
   choice, and same-category scope require an existing selected service; an
   initial category-target clarification may retain only its candidate set.
   Initial caller-goal/service-guidance state with no booking progress uses the
-  compact `guidance_turn` semantic contract without acts/questions. Corrections,
+  compact `guidance_turn` semantic contract without acts/questions. Its typed
+  `guidance_action` must be one of the stable recognizable actions; the
+  general goal is derived by the backend instead of being authored a second
+  time by the model. The contract also carries a bounded explicit
+  `guidance_party_size` so initial party bookings do not depend on a transcript
+  phrase parser. New booking, named-service, catalog, consultation, salon
+  question, reschedule, cancel, and handoff actions are represented explicitly.
+  Runtime fulfillment capability is separately derived from active
+  provider-fenced services, the salon consultation toggle, and ready profiles;
+  the shorter spoken recovery choices remain a separate state-owned subset.
+  A recognized consultation request therefore remains consultation in
+  `catalog_only`, `consultation_disabled`, and `catalog_unavailable` states,
+  with a catalog-grounded or truthful technical response instead of schema
+  rejection or semantic guessing.
+  Semantic service-menu intent always routes to
+  the active bookable catalog, never knowledge copy. Corrections,
   multi-intent turns, ambiguity, pending/review/party state, existing booking
   progress, and partial or unconsumed evidence use the full multi-act/question
-  contract without a keyword-only gate. Both contracts have a 2.5-second budget;
-  typed timeout, provider, output, confidence, and catalog rejection outcomes
+  contract without a keyword-only gate. The interpreter inherits the active
+  simulator/phone request context; there is no conversation-owned 2.5-second
+  deadline. The OpenAI adapter retains its 30-second transport ceiling. Typed
+  timeout, provider, output, confidence, and catalog rejection outcomes
   preserve the draft. A non-accepted semantic outcome may still consume
   independently validated catalog and captured-field evidence before asking the
-  next missing-field question. When the unresolved field is caller goal or
+  next missing-field question. A syntactic question that also contains a
+  deterministic expected-field value is partial coverage, not proof that the
+  complete turn was consumed, so constraints such as a requested date plus a
+  time window remain on the semantic lane. Valid primary acts, questions, and
+  guidance actions are validated independently from auxiliary consultation
+  snapshots and mutations: invalid, unknown-as-value, low-confidence, or no-op
+  consultation fields are dropped with bounded diagnostics instead of erasing
+  the primary turn. When the unresolved field is caller goal or
   service, `service_guidance_recovery.go` owns a state-scoped evidence resolver
   and pure state reducer. The resolver consumes typed `TurnUnderstanding`, Turn
   Kernel answer/action decisions, and catalog/category evidence; it does not
   parse freeform caller meaning with a recovery phrase list. Typed
   `dialog_state.guidance` stores the current stage, dynamically available
-  actions, separate caller-no-progress/provider-failure counters, last provider
-  outcome, and progress fingerprint. Catalog menu or category progress resets
+  actions, `awaiting_action_choice`, separate caller-no-progress/provider-failure
+  counters, last provider outcome, and progress fingerprint. Catalog menu or
+  category progress resets
   both counters, exact catalog selection returns to the ordinary draft reducer,
   provider failure increments only the provider counter, and distinct bounded
   handoff reasons separate provider unavailability from caller ambiguity.
   Provider-failure copy is presentation over `offered_actions`: catalog and
-  ready-profile consultation options are offered only when present, and an empty
-  catalog cannot produce menu guidance. The recovery is gated by dialog state plus typed evidence; it does not become the
-  primary caller-intent parser. Catalog
+  ready-profile consultation options are offered only when present, human
+  handoff remains available, and an empty catalog cannot produce menu guidance.
+  Only the immediately following `awaiting_action_choice` turn can use the
+  bounded option parser; it is inactive as a general intent classifier. The
+  recovery is gated by dialog state plus typed evidence; it does not become the
+  primary caller-intent parser. Once a guidance action is accepted, booking
+  asks for the next missing booking field and salon questions return their
+  structured answer; the generic action menu is reserved for genuine
+  no-progress or provider-failure recovery. Catalog
   validation owns referenced service/staff IDs;
   the reducer owns draft mutation and dependency invalidation; the planner owns
   missing-field, review, and booking readiness. Customer-name confirmation and
@@ -310,7 +345,7 @@ Conversation source-of-truth routing is mandatory:
   fail-closed profile/toggle constraints in
   `backend/migrations/V40__consultation_fail_closed_defaults.sql` and session
   revision in `backend/migrations/V42__conversation_state_revision.sql`. `dialog_state`
-  version 4 persists pending clarification, active consultation and guidance
+  version 5 persists pending clarification, active consultation and guidance
   state, bounded mutation history, no-progress count, and
   draft/review/authorization revisions. `normalizedDialogState` promotes legacy
   version 3 guidance prompt/counter fields into the nested guidance object on
@@ -366,7 +401,9 @@ Conversation source-of-truth routing is mandatory:
   `backend/modules/conversation/service_prompts.go`.
 - Answer-source routing and cached structured context:
   `backend/modules/conversation/answer_context.go`,
-  `backend/modules/conversation/answer_router.go`.
+  `backend/modules/conversation/answer_router.go`. A structured hours question
+  without an explicit day uses the salon-local current day; an explicit day
+  continues to select that day's provider-imported periods.
 - Summaries, handoffs, retention:
   `backend/modules/conversation/service_summary.go`,
   `backend/modules/conversation/retention_processor.go`.
@@ -385,7 +422,12 @@ Conversation source-of-truth routing is mandatory:
 - DTOs/state: `backend/modules/conversation/types.go`.
 - Structured semantic-turn interpretation: `backend/modules/voice/act_interpreter.go`,
   `backend/modules/voice/types.go`, and
-  `backend/modules/voice_openai/adapter.go`. Model-proposed acts are
+  `backend/modules/voice_openai/adapter.go`. The guidance contract always
+  receives the complete stable `recognizable_guidance_actions`; runtime
+  fulfillment remains separately owned by
+  `backend/modules/conversation/service_guidance_capability.go` using current
+  provider-fenced services, `salon_settings.consultation_enabled`, and ready
+  `service_consultation_profiles`. Model-proposed acts are
   multi-act/question, confidence-gated, PII-reduced, and active-catalog
   validated inside conversation ownership; catalog category ambiguity remains
   authoritative over a model-proposed concrete target, bare in-progress service
@@ -400,7 +442,10 @@ Conversation source-of-truth routing is mandatory:
   bounded type/code/parameter/request/fingerprint diagnostics. The owner-scoped
   `POST /api/salons/:id/voice/semantic-check` route sends a synthetic no-PII
   contract request without conversation/POS mutation; success closes the
-  matching circuit.
+  matching circuit. `POST /api/salons/:id/voice/semantic-evaluate` accepts one
+  bounded structured scenario, verifies owner scope and catalog references,
+  calls the same salon-scoped turn model, and returns validated structured output for
+  scoring without creating a session or invoking booking tools.
 
 ## Frontend Route And UI Map
 
@@ -635,6 +680,7 @@ detail rather than part of the event title.
   exit result are shown in Calls from typed dialog state.
 - Data owner: `knowledge_items`, `owner_corrections`, `service_aliases`,
   `service_categories`, `service_category_aliases`,
+  active `service_taxonomy_releases` plus its category/concept/alias children,
   `service_consultation_profiles`, the legacy summary fallback in
   `services.ai_description`, `salon_settings.consultation_enabled`, persisted
   `call_sessions.dialog_state`, and diagnostic metadata on transcript messages.
@@ -644,7 +690,8 @@ detail rather than part of the event title.
   `backend/modules/conversation/service_test.go`,
   `backend/modules/training/service_test.go`,
   `backend/modules/voice/act_interpreter_test.go`, and
-  `backend/modules/voice_openai/adapter_test.go`.
+  `backend/modules/voice_openai/adapter_test.go`, and the generated corpus plus
+  review artifacts under `backend/modules/conversation/testdata`.
 - Skill/subagent: `voice-ai-runtime`, `salon-ops-workflow`,
   `business-logic-overlap-analysis`, `repo_mapper`.
 
@@ -659,7 +706,9 @@ detail rather than part of the event title.
   `frontend/features/dashboard/customers-dashboard.tsx`.
 - Data owner: `services`, `service_consultation_profiles`, `staff`, `customers`,
   `service_categories`, `service_category_aliases`, `service_aliases`,
-  `pos_entity_links`.
+  `service_taxonomy_releases`, `service_taxonomy_categories`,
+  `service_taxonomy_category_aliases`, `service_taxonomy_service_concepts`,
+  `service_taxonomy_service_aliases`, and `pos_entity_links`.
 - Tests: `backend/modules/pos/service_test.go`,
   `backend/modules/customer/service_test.go`.
 - Skill/subagent: `salon-dashboard-ui`, `salon-ops-workflow`,
@@ -728,7 +777,7 @@ detail rather than part of the event title.
 | availability, availability quote, quote expired, quote cleanup, quote retention, unbounded quote growth, slot fingerprint, local day, timezone, DST, open slots, offered slots, stale segment, no common time, split, staggered, staff assignment | `backend/modules/booking`, `backend/modules/conversation/service_availability.go` | `quote_cleanup_processor.go`, booking repository, worker, V39 quote tables/indexes, POS provider adapter, `service_matching_parsing.go`, `appointments-dashboard.tsx`, `pos-calendar/features/calendar/pos-calendar-client.tsx`, conversation tests |
 | Square OAuth, token expired, refresh token, location, sync, catalog import, `available_for_booking`, team member booking profile, non-bookable staff, calendar sync, booking webhook, signature key, notification URL, event dedupe, claim token, calendar repair, stale booking version | `pos-adapter-slice`, `backend/modules/pos_square` | `backend/modules/pos`, `integration_config`, V41 webhook/repair tables, worker, integrations UI, POS calendar UI |
 | POS mapping, provider link, active provider, AI bookable, local only, sync failed | `backend/modules/pos`, `docs/canonical-pos-ownership-checklist.md` | Services/Staff UI, `pos_entity_links`, sync tests |
-| semantic turn, semantic provider error, invalid schema, invalid_json_schema, schema fingerprint, semantic check, circuit open, service guidance recovery, caller goal recovery, guidance_provider_unavailable, separate provider failure counter, no-progress handoff, multi-intent, service alias, category alias, service understanding, wrong service, category narrowed to one service, bare service switch, stale date after summary, staff/date/customer correction, add/replace/remove/undo, question plus correction, non-native wording, ASR paraphrase | `backend/modules/conversation/conversation_act.go`, `service_guidance_recovery.go`, `turn_reducer.go`, `next_action_planner.go`, `backend/modules/voice_openai/adapter.go` | typed `dialog_state.guidance`, dialog-state normalization/repository, voice semantic interpreter/check route, training aliases, transcript metadata, golden conversation and adapter contract tests |
+| semantic turn, semantic provider error, invalid schema, invalid_json_schema, schema fingerprint, semantic check, circuit open, guidance_action, recognizable_guidance_actions, available_guidance_actions, service_guidance_capability, catalog_only, consultation_disabled, catalog_unavailable, awaiting_action_choice, service guidance recovery, caller goal recovery, guidance_provider_unavailable, separate provider failure counter, no-progress handoff, multi-intent, service alias, category alias, service understanding, wrong service, category narrowed to one service, bare service switch, stale date after summary, staff/date/customer correction, add/replace/remove/undo, question plus correction, non-native wording, ASR paraphrase | `backend/modules/conversation/conversation_act.go`, `service_guidance_capability.go`, `service_guidance_recovery.go`, `turn_reducer.go`, `next_action_planner.go`, `backend/modules/voice_openai/adapter.go` | typed `dialog_state.guidance`, dialog-state normalization/repository, strict voice readiness fence, voice semantic interpreter/check route, structured service catalog answer routing, transcript metadata, golden conversation and adapter contract tests |
 | AI consultation, service recommendation, help me choose, current nail system, desired outcome, lower maintenance, consultation mutation, replace preference, clear preference, consultation question, profile options, provider failure count, progress fingerprint, consultation profile, consultation_completed, awaiting_booking, profile revision, safety handoff, medical suitability | `backend/modules/conversation/service_consultation.go`, `backend/modules/pos/types.go`, `backend/modules/pos/repository.go` | V38/V40 migrations and Ent schema, ready profile context, guarded question phrasing, global deterministic/structured safety gate, semantic consultation extraction, Services profile UI, Settings toggle/coverage, Calls typed audit state, consultation golden tests |
 | service menu, how many services, how many I book, what do I have, current booking summary, service count, repeated clarification, informational service question | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/service_prompts.go`, `backend/modules/conversation/answer_router.go` | `backend/modules/conversation/service.go`, dialog state, party flow, golden tests |
 | final review, stale review, draft revision, reviewed revision, authorized revision, natural approval, repeated final review, review timeout, concise review retry, book it, just book this for me, correction during review, repeated same-category guest question, no progress loop | `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/draft_revision.go`, `next_action_planner.go`, `service.go` | repository, V36/V37 migrations, booking flow, conversation and phone tests |
@@ -740,7 +789,7 @@ detail rather than part of the event title.
 | reschedule, cancel, move appointment, appointment target, ordinal option, day view, week view, month view, agenda, Tomorrow button, appointment warning | `service_intent.go`, `backend/modules/booking/service.go` | Appointments UI, POS Calendar UI, booking tests |
 | Twilio signature, webhook, TwiML, recording, media stream, stream fallback | `backend/modules/voice_twilio` | `backend/modules/voice`, phone demo memo |
 | OpenAI STT, TTS, realtime, model, voice, guarded reply, background noise, background-noise handling, automatic, strong noise rejection, false transcript, transcript logprob, repeated progress reply, stale recovery reply, caller speaking over TTS, first-byte timeout, terminal reply repeated, spoken fact mismatch, clipped first syllable, stuttered TTS startup, startup audio buffer, realtime transport fallback | `backend/modules/voice_openai`, `backend/modules/voice`, `backend/modules/voice_twilio/handler.go` | integration config, conversation runtime, realtime event timeline, voice tests |
-| slow AI response, backend latency, backend_turn_done, turn_router_ms, turn_route, turn_expected_input, turn_semantic_contract, full_turn, guidance_turn, turn_interpreter_ms, turn_interpreter_outcome, turn_interpreter_failure_stage, turn_interpreter_http_status_class, turn_interpreter_request_id, input_generation, reply_kind, reply_suppressed, availability_pos_ms, save_turn_ms, fast lane, semantic lane | `backend/modules/conversation/turn_kernel.go`, `backend/modules/conversation/conversation_act.go`, `backend/modules/voice/backend_turn_diagnostics.go`, `backend/modules/conversation/turn_timing.go`, `backend/modules/voice_twilio/handler.go` | conversation router/service/interpreter, provider availability/POS calls, Calls realtime event timeline, voice and conversation tests |
+| slow AI response, backend latency, backend_turn_done, turn_router_ms, turn_route, turn_expected_input, turn_semantic_contract, turn_recognizable_guidance_actions, turn_available_guidance_actions, turn_guidance_action, service_guidance_capability, service_guidance_catalog_available, service_guidance_recommendation_ready, full_turn, guidance_turn, turn_interpreter_ms, turn_interpreter_schema_fingerprint, turn_interpreter_outcome, turn_interpreter_failure_stage, turn_interpreter_http_status_class, turn_interpreter_request_id, input_generation, reply_kind, reply_suppressed, availability_pos_ms, save_turn_ms, fast lane, semantic lane | `backend/modules/conversation/turn_kernel.go`, `backend/modules/conversation/conversation_act.go`, `backend/modules/conversation/service_guidance_capability.go`, `backend/modules/voice/backend_turn_diagnostics.go`, `backend/modules/conversation/turn_timing.go`, `backend/modules/voice_twilio/handler.go` | conversation router/service/interpreter, provider availability/POS calls, Calls realtime event timeline, voice and conversation tests |
 | AI tone, speaking style, concise/warm/professional | `backend/modules/salon`, `conversation.RuntimeConfig`, `voice.ModelRequest` | Settings UI, config transfer |
 | integration config, provider secrets, dashboard settings, active provider config, env fallback | `backend/modules/integration_config`, `/dashboard/integrations`, authenticated integration/status APIs | runtime resolver code first; deployment docs only for an explicitly scoped legacy fallback task |
 | public catalog, published slug, public services, landing page, staff privacy | `backend/modules/public_catalog`, `landing/app/s/[slug]/page.tsx` | Settings UI public catalog card |

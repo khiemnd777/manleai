@@ -1,9 +1,14 @@
 package conversation
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+)
+
+var (
+	unconsumedSchedulingConstraintPattern = regexp.MustCompile(`(?i)\b(?:morning|afternoon|evening|noon|midday|lunch(?:time)?|early|earlier|earliest|late|later|latest|before|after|around|between)\b`)
 )
 
 const (
@@ -38,6 +43,22 @@ const (
 	ExpectedInputConsultationBooking        = "consultation_booking"
 )
 
+func IsExpectedInput(value string) bool {
+	switch strings.TrimSpace(value) {
+	case ExpectedInputCallerGoal, ExpectedInputService, ExpectedInputRequestedDate,
+		ExpectedInputRequestedTime, ExpectedInputOfferedSlot, ExpectedInputCustomerName,
+		ExpectedInputCustomerNameConfirmation, ExpectedInputCustomerPhone, ExpectedInputStaff,
+		ExpectedInputPartySplitDateConsent, ExpectedInputPendingServiceOperation,
+		ExpectedInputDateTimeConfirmation, ExpectedInputAppointmentTarget, ExpectedInputBookingReview,
+		ExpectedInputBookingContinuation, ExpectedInputConsultationCurrentSystem,
+		ExpectedInputConsultationDesiredOutcome, ExpectedInputConsultationSelection,
+		ExpectedInputConsultationBooking:
+		return true
+	default:
+		return false
+	}
+}
+
 // TurnEnvelope is the immutable state and catalog snapshot used to route one
 // caller turn. It deliberately contains no persistence or provider handles.
 type TurnEnvelope struct {
@@ -62,12 +83,14 @@ type TurnPlan struct {
 	Understanding         TurnUnderstanding
 	ReviewResponse        reviewResponseKind
 
-	ServiceUnderstanding serviceUnderstandingResult
-	StaffChange          staffChangeRequest
-	PartySignal          partySignal
-	PendingNameCandidate string
-	SemanticServices     []ServiceOption
-	SemanticStaff        []StaffOption
+	ServiceUnderstanding        serviceUnderstandingResult
+	StaffChange                 staffChangeRequest
+	PartySignal                 partySignal
+	PendingNameCandidate        string
+	RecognizableGuidanceActions []string
+	AvailableGuidanceActions    []string
+	SemanticServices            []ServiceOption
+	SemanticStaff               []StaffOption
 }
 
 func (p TurnPlan) timingAttributes() map[string]string {
@@ -90,12 +113,14 @@ func applyTurnPlanMetadata(turn *TurnRecord, plan TurnPlan) {
 		return
 	}
 	metadata := map[string]any{
-		"turn_route":                  plan.Route,
-		"turn_expected_input":         plan.ExpectedInput,
-		"turn_route_reason":           plan.Reason,
-		"turn_deterministic_coverage": plan.DeterministicCoverage,
-		"turn_model_service_count":    len(plan.SemanticServices),
-		"turn_model_staff_count":      len(plan.SemanticStaff),
+		"turn_route":                         plan.Route,
+		"turn_expected_input":                plan.ExpectedInput,
+		"turn_route_reason":                  plan.Reason,
+		"turn_deterministic_coverage":        plan.DeterministicCoverage,
+		"turn_model_service_count":           len(plan.SemanticServices),
+		"turn_model_staff_count":             len(plan.SemanticStaff),
+		"turn_recognizable_guidance_actions": append([]string(nil), plan.RecognizableGuidanceActions...),
+		"turn_available_guidance_actions":    append([]string(nil), plan.AvailableGuidanceActions...),
 	}
 	if plan.ReviewResponse != "" {
 		metadata["turn_review_response"] = string(plan.ReviewResponse)
@@ -189,7 +214,8 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 	}
 	plan := TurnPlan{Message: message, ExpectedInput: envelope.ExpectedInput, DeterministicCoverage: TurnCoverageNone}
 	plan.ServiceUnderstanding = interpretServiceForSession(message, session, services, aliases, categoryAliases)
-	if catalogUnderstanding := interpretServiceWithCategoryAliases(message, services, aliases, categoryAliases); isServiceInquiry(message, catalogUnderstanding) {
+	if catalogUnderstanding := interpretServiceWithCategoryAliases(message, services, aliases, categoryAliases); catalogUnderstanding.Status != serviceUnderstandingStatusUnknown &&
+		(plan.ServiceUnderstanding.Status == serviceUnderstandingStatusUnknown || !serviceSelectionScopedToPending(session, services)) {
 		plan.ServiceUnderstanding = catalogUnderstanding
 	}
 	plan.StaffChange = detectStaffChangeRequest(message, session, services, aliases, categoryAliases, staff, activeStaff)
@@ -200,6 +226,12 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 	}
 
 	state := normalizedDialogState(session.DialogState)
+	guidanceStage := GuidanceRecoveryStageCallerGoal
+	if envelope.ExpectedInput == ExpectedInputService {
+		guidanceStage = GuidanceRecoveryStageService
+	}
+	plan.RecognizableGuidanceActions = GuidanceActionValues()
+	plan.AvailableGuidanceActions = guidanceRecoveryOfferedActions(guidanceStage, services, cfg)
 	if state.Pending != nil && state.Pending.PromptKey == PendingStaffAlternative {
 		if matched := matchStaff(message, staff); matched != nil && stringSet(state.Pending.TargetServiceIDs)[strings.TrimSpace(matched.ID)] {
 			plan.Understanding = TurnUnderstanding{
@@ -238,9 +270,6 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 		if shouldClarifyCancelReschedule(session, message) {
 			return finalizeTurnPlan(plan, TurnRouteActionLane, "cancel_reschedule_clarification", TurnCoverageComplete, session, services, staff)
 		}
-		if shouldComplaintHandoff(message) || shouldHandoff(message) {
-			return finalizeTurnPlan(plan, TurnRouteActionLane, "owner_handoff", TurnCoverageComplete, session, services, staff)
-		}
 		if shouldRouteCancel(session, message) {
 			plan.Understanding = deterministicGoalUnderstanding("cancel_appointment", "cancel_action")
 			return finalizeTurnPlan(plan, TurnRouteActionLane, "cancel_action", TurnCoverageComplete, session, services, staff)
@@ -258,6 +287,17 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 		}
 		return finalizeTurnPlan(plan, TurnRouteSemanticLane, "consultation_context_required", TurnCoverageNone, session, services, staff)
 	}
+	if shouldClarifyCancelReschedule(session, message) {
+		return finalizeTurnPlan(plan, TurnRouteActionLane, "cancel_reschedule_clarification", TurnCoverageComplete, session, services, staff)
+	}
+	if shouldRouteCancel(session, message) {
+		plan.Understanding = deterministicGoalUnderstanding("cancel_appointment", "cancel_action")
+		return finalizeTurnPlan(plan, TurnRouteActionLane, "cancel_action", TurnCoverageComplete, session, services, staff)
+	}
+	if shouldRouteReschedule(session, message) {
+		plan.Understanding = deterministicGoalUnderstanding("reschedule_appointment", "reschedule_action")
+		return finalizeTurnPlan(plan, TurnRouteActionLane, "reschedule_action", TurnCoverageComplete, session, services, staff)
+	}
 
 	loc := timezoneLocation(timezoneFromConfig(cfg))
 	if stateScopedOfferedSlotSelection(message, session, loc) {
@@ -271,16 +311,27 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 		}
 		return finalizeTurnPlan(plan, TurnRouteAnswerLane, "current_booking_question", TurnCoverageComplete, session, services, staff)
 	}
-	if len(plan.ServiceUnderstanding.Candidates) > 1 && !asksServiceMenu(message) &&
-		classifyServiceCatalogQuestion(message, plan.ServiceUnderstanding) != serviceCatalogQuestionCount {
+	if len(plan.ServiceUnderstanding.Candidates) > 1 {
 		return finalizeTurnPlan(plan, TurnRouteSemanticLane, "multi_service_semantic_context", TurnCoveragePartial, session, services, staff)
 	}
+	// Freeform initial goals and guidance turns are classified by the semantic
+	// contract. Catalog/category matching contributes grounded evidence, but a
+	// phrase list must never decide whether the caller asked for a menu, advice,
+	// service details, or booking help.
+	if envelope.ExpectedInput == ExpectedInputCallerGoal || guidanceRecoveryStateActive(state.Guidance) {
+		reason := "initial_guidance_semantic_context"
+		coverage := TurnCoverageNone
+		if len(signals) > 1 {
+			reason = "multiple_signals"
+			coverage = TurnCoveragePartial
+		}
+		return finalizeTurnPlan(plan, TurnRouteSemanticLane, reason, coverage, session, services, staff)
+	}
 	answer := routeNonBookingAnswer(message, session, answerCtx, cfg, s.now)
-	// A menu request is already owned by the structured catalog answer above.
-	// Do not downgrade it to a generic service inquiry merely because the
-	// caller's wording also matches the broader inquiry contract.
-	if isServiceInquiry(message, plan.ServiceUnderstanding) && !asksServiceMenu(message) {
-		answer = routeServiceInquiryAnswer(message, session, plan.ServiceUnderstanding, answerCtx)
+	if answer.Source == answerSourceKnowledge &&
+		(envelope.ExpectedInput == ExpectedInputCallerGoal || envelope.ExpectedInput == ExpectedInputService) &&
+		!hasOperationalBookingProgress(session) {
+		answer = answerRoute{}
 	}
 	if state.Phase == DialogPhaseReview {
 		plan.ReviewResponse = classifyStateScopedReviewResponse(message)
@@ -289,8 +340,7 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 		}
 	}
 	if answer.Handled && answer.Source != answerSourceBookingRedirect && len(signals) == 0 {
-		standaloneCatalogQuestion := answer.Source == answerSourceServiceCatalog &&
-			(asksServiceMenu(message) || classifyServiceCatalogQuestion(message, plan.ServiceUnderstanding) == serviceCatalogQuestionCount)
+		standaloneCatalogQuestion := answer.Source == answerSourceServiceCatalog
 		if hasOperationalBookingProgress(session) && !standaloneCatalogQuestion {
 			return finalizeTurnPlan(plan, TurnRouteSemanticLane, "booking_context_answer_or_correction", TurnCoveragePartial, session, services, staff)
 		}
@@ -313,9 +363,6 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 	if shouldClarifyCancelReschedule(session, message) {
 		return finalizeTurnPlan(plan, TurnRouteActionLane, "cancel_reschedule_clarification", TurnCoverageComplete, session, services, staff)
 	}
-	if shouldComplaintHandoff(message) || shouldHandoff(message) {
-		return finalizeTurnPlan(plan, TurnRouteActionLane, "owner_handoff", TurnCoverageComplete, session, services, staff)
-	}
 	if shouldRouteCancel(session, message) {
 		plan.Understanding = deterministicGoalUnderstanding("cancel_appointment", "cancel_action")
 		return finalizeTurnPlan(plan, TurnRouteActionLane, "cancel_action", TurnCoverageComplete, session, services, staff)
@@ -330,9 +377,17 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 		return finalizeTurnPlan(plan, TurnRouteFastLane, "catalog_backed_party_plan", TurnCoverageComplete, session, services, staff)
 	}
 
-	if len(signals) == 1 && signalMatchesExpectedInput(signals[0], envelope.ExpectedInput, session) {
+	if len(signals) == 1 && signalMatchesExpectedInput(signals[0], envelope.ExpectedInput, session) &&
+		deterministicSignalFullyCoversTurn(message, signals[0], envelope.ExpectedInput) {
 		plan.Understanding = deterministicGoalUnderstanding("book_appointment", "expected_input_resolved")
 		return finalizeTurnPlan(plan, TurnRouteFastLane, "expected_input_resolved", TurnCoverageComplete, session, services, staff)
+	}
+	if len(signals) == 1 && signalMatchesExpectedInput(signals[0], envelope.ExpectedInput, session) {
+		// A syntactic question can contain a deterministically extractable field
+		// and an additional semantic constraint (for example, a date plus a time
+		// window). Extraction may retain the grounded field, but it does not prove
+		// that the whole caller turn has been consumed.
+		return finalizeTurnPlan(plan, TurnRouteSemanticLane, "expected_input_partial_coverage", TurnCoveragePartial, session, services, staff)
 	}
 	if len(signals) > 1 {
 		plan.DeterministicCoverage = TurnCoveragePartial
@@ -343,6 +398,17 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 		return finalizeTurnPlan(plan, TurnRouteSemanticLane, "structured_answer_conflict", TurnCoveragePartial, session, services, staff)
 	}
 	return finalizeTurnPlan(plan, TurnRouteSemanticLane, "semantic_context_required", TurnCoverageNone, session, services, staff)
+}
+
+func serviceSelectionScopedToPending(session Session, services []ServiceOption) bool {
+	if len(pendingServiceCandidateServices(session, services)) > 0 {
+		return true
+	}
+	if pending, mode, ok := pendingServiceEdit(session, services); ok && len(pending) > 0 && pendingServiceEditNeedsTarget(mode) {
+		return true
+	}
+	state := normalizedDialogState(session.DialogState)
+	return state.Pending != nil && (len(state.Pending.SourceServiceIDs) > 0 || len(state.Pending.TargetServiceIDs) > 0)
 }
 
 func asksCurrentBookingQuestion(message string, session Session) bool {
@@ -422,9 +488,9 @@ func deterministicTurnSignals(envelope TurnEnvelope, plan TurnPlan, now func() t
 		strings.TrimSpace(after.StaffSelectionMode) != strings.TrimSpace(envelope.Session.StaffSelectionMode) || plan.StaffChange.Intent {
 		signals[ConversationEntityStaff] = true
 	}
-	if !plan.PartySignal.IsParty && !isServiceInquiry(envelope.Message, plan.ServiceUnderstanding) &&
-		plan.ServiceUnderstanding.Status != serviceUnderstandingStatusUnknown &&
-		(hasOperationalBookingProgress(envelope.Session) || hasBookingVerbSignal(envelope.Message)) {
+	if !plan.PartySignal.IsParty && plan.ServiceUnderstanding.Status != serviceUnderstandingStatusUnknown &&
+		(plan.ExpectedInput == ExpectedInputService || plan.ExpectedInput == ExpectedInputCallerGoal ||
+			catalogSelectionDiffersFromDraft(plan.ServiceUnderstanding, envelope.Session)) {
 		signals[ConversationEntityService] = true
 	}
 	out := make([]string, 0, len(signals))
@@ -434,6 +500,20 @@ func deterministicTurnSignals(envelope TurnEnvelope, plan TurnPlan, now func() t
 		}
 	}
 	return out
+}
+
+func catalogSelectionDiffersFromDraft(understanding serviceUnderstandingResult, session Session) bool {
+	if !hasSelectedServiceDraft(session) {
+		return false
+	}
+	selected := stringSet(selectedServiceIDs(session))
+	for _, candidate := range understanding.Candidates {
+		id := strings.TrimSpace(candidate.ID)
+		if id != "" && !selected[id] {
+			return true
+		}
+	}
+	return false
 }
 
 func signalMatchesExpectedInput(signal string, expected string, session Session) bool {
@@ -450,6 +530,26 @@ func signalMatchesExpectedInput(signal string, expected string, session Session)
 		return expected == ExpectedInputCustomerPhone && strings.TrimSpace(session.CustomerPhone) == ""
 	default:
 		return false
+	}
+}
+
+func deterministicSignalFullyCoversTurn(message string, signal string, expected string) bool {
+	message = strings.TrimSpace(message)
+	if strings.Contains(message, "?") {
+		return false
+	}
+	if signal != ConversationEntityDateTime {
+		return true
+	}
+	switch expected {
+	case ExpectedInputRequestedDate, ExpectedInputRequestedTime:
+		// The deterministic extractor already proved that the expected field is
+		// present. Fast-lane completion is safe only when the remaining utterance
+		// does not carry a day-part or directional window that the extractor did
+		// not represent in state.
+		return !unconsumedSchedulingConstraintPattern.MatchString(message)
+	default:
+		return true
 	}
 }
 
@@ -488,6 +588,15 @@ func semanticServiceScope(plan TurnPlan, session Session, services []ServiceOpti
 	selected := selectedServiceOptions(session, services)
 	if plan.Route != TurnRouteSemanticLane {
 		return selected
+	}
+	state := normalizedDialogState(session.DialogState)
+	if state.Pending != nil {
+		pendingIDs := append([]string(nil), state.Pending.SourceServiceIDs...)
+		pendingIDs = append(pendingIDs, state.Pending.TargetServiceIDs...)
+		return mergeServiceOptions(selected, servicesByIDs(services, pendingIDs), plan.ServiceUnderstanding.Candidates)
+	}
+	if semanticContractForTurnPlan(session, plan) == TurnSemanticContractGuidance {
+		return mergeServiceOptions(selected, plan.ServiceUnderstanding.Candidates)
 	}
 	if strings.HasPrefix(plan.ExpectedInput, "consultation_") {
 		return append([]ServiceOption(nil), services...)

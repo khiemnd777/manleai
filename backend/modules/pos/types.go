@@ -642,24 +642,19 @@ type ServiceCategoryAliasMutation struct {
 	Confidence      float64
 }
 
-type ServiceCategorySeed struct {
-	Name        string
-	Slug        string
-	Description string
-	SortOrder   int
-	Aliases     []string
-}
-
 type ServiceCategorySuggestionRefresh struct {
-	CreatedCategories           int `json:"created_categories"`
-	RestoredSystemCategories    int `json:"restored_system_categories"`
-	CreatedAliases              int `json:"created_aliases"`
-	UpdatedSystemAliases        int `json:"updated_system_aliases"`
-	SkippedAliasConflicts       int `json:"skipped_alias_conflicts"`
-	SuggestedServices           int `json:"suggested_services"`
-	SkippedReviewedServices     int `json:"skipped_reviewed_services"`
-	SkippedAmbiguousServices    int `json:"skipped_ambiguous_services"`
-	UnmatchedUnreviewedServices int `json:"unmatched_unreviewed_services"`
+	CreatedCategories            int `json:"created_categories"`
+	RestoredSystemCategories     int `json:"restored_system_categories"`
+	CreatedAliases               int `json:"created_aliases"`
+	UpdatedSystemAliases         int `json:"updated_system_aliases"`
+	SkippedAliasConflicts        int `json:"skipped_alias_conflicts"`
+	SuggestedServices            int `json:"suggested_services"`
+	SkippedReviewedServices      int `json:"skipped_reviewed_services"`
+	SkippedAmbiguousServices     int `json:"skipped_ambiguous_services"`
+	UnmatchedUnreviewedServices  int `json:"unmatched_unreviewed_services"`
+	CreatedServiceAliases        int `json:"created_service_aliases"`
+	UpdatedSystemServiceAliases  int `json:"updated_system_service_aliases"`
+	SkippedServiceAliasConflicts int `json:"skipped_service_alias_conflicts"`
 }
 
 type ServiceCategoryAssignRequest struct {

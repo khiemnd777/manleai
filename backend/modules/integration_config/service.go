@@ -329,6 +329,45 @@ func (s *Service) ResolveOpenAIConfig(ctx context.Context, salonID string) (conf
 	return cfg, enabled, nil
 }
 
+// ResolveOpenAIConfigStrict resolves only the encrypted salon-scoped database
+// record. It deliberately has no legacy environment fallback and is used by
+// paid evaluation workflows that must fail closed on missing, unreadable, or
+// incomplete stored configuration.
+func (s *Service) ResolveOpenAIConfigStrict(ctx context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error) {
+	if s == nil || s.repo == nil || s.cipher == nil || strings.TrimSpace(salonID) == "" {
+		return config.OpenAIVoiceConfig{}, false, ErrValidation
+	}
+	item, err := s.repo.Get(ctx, strings.TrimSpace(salonID), ProviderOpenAI)
+	if err != nil {
+		return config.OpenAIVoiceConfig{}, false, err
+	}
+	secrets, err := s.decryptSecrets(item.SecretsEncrypted)
+	if err != nil {
+		return config.OpenAIVoiceConfig{}, false, err
+	}
+	cfg := config.OpenAIVoiceConfig{
+		APIKey:               strings.TrimSpace(secrets["api_key"]),
+		BaseURL:              strings.TrimRight(strings.TrimSpace(item.Settings["base_url"]), "/"),
+		TranscriptionModel:   strings.TrimSpace(item.Settings["transcription_model"]),
+		ReplyModel:           strings.TrimSpace(item.Settings["reply_model"]),
+		SpeechModel:          strings.TrimSpace(item.Settings["speech_model"]),
+		SpeechVoice:          strings.TrimSpace(item.Settings["speech_voice"]),
+		SpeechOutputMode:     config.NormalizeOpenAISpeechOutputMode(item.Settings["speech_output_mode"]),
+		RealtimeEnabled:      boolSetting(item.Settings["realtime_enabled"]),
+		RealtimeModel:        config.NormalizeOpenAIRealtimeModel(item.Settings["realtime_model"]),
+		RealtimeVoice:        strings.TrimSpace(item.Settings["realtime_voice"]),
+		RealtimeNoiseProfile: config.NormalizeOpenAIRealtimeNoiseProfile(item.Settings["realtime_noise_profile"]),
+		RealtimeInstructions: strings.TrimSpace(item.Settings["realtime_instructions"]),
+	}
+	if !item.Enabled {
+		return cfg, false, nil
+	}
+	if cfg.APIKey == "" || cfg.BaseURL == "" || cfg.ReplyModel == "" {
+		return config.OpenAIVoiceConfig{}, false, ErrValidation
+	}
+	return cfg, true, nil
+}
+
 func (s *Service) existingConfigAndSecrets(ctx context.Context, salonID string, provider string) (*StoredConfig, map[string]string, error) {
 	existing, err := s.repo.Get(ctx, salonID, provider)
 	if errors.Is(err, ErrNotFound) {

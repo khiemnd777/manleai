@@ -24,30 +24,117 @@ type answerRoute struct {
 	SourceRecordIDs []string
 }
 
-func routeServiceInquiryAnswer(message string, session Session, result serviceUnderstandingResult, answerCtx *AIAnswerContext) answerRoute {
-	services := answerServices(answerCtx)
-	kind := classifyServiceCatalogQuestion(message, result)
-	reason := result.Reason
-	intent := "service_inquiry"
-	confidence := result.Confidence
-	if kind == serviceCatalogQuestionCount {
-		reason = "service_catalog_count"
-		intent = "service_catalog_count"
-		confidence = maxFloat(confidence, 0.9)
+func routeServiceMenuAnswer(services []ServiceOption) answerRoute {
+	names := serviceCandidateNames(services, 8)
+	confidence := 0.96
+	if len(names) == 0 {
+		confidence = 0.72
 	}
-	route := answerRoute{
+	return answerRoute{
 		Handled:         true,
-		Reply:           serviceInquiryReply(message, session, result, services),
+		Reply:           serviceMenuReply(services),
 		Source:          answerSourceServiceCatalog,
-		Reason:          reason,
-		Intent:          intent,
+		Reason:          "service_menu",
+		Intent:          "service_menu",
 		Confidence:      confidence,
-		SourceRecordIDs: answerServiceIDs(result.Candidates),
+		SourceRecordIDs: answerServiceIDs(limitServices(services, 8)),
 	}
-	if len(route.SourceRecordIDs) == 0 {
-		route.SourceRecordIDs = answerServiceIDs(services)
+}
+
+func routeStructuredServiceQuestion(question ConversationQuestion, session Session, result serviceUnderstandingResult, answerCtx *AIAnswerContext) answerRoute {
+	services := answerServices(answerCtx)
+	candidates := servicesByIDs(services, question.ServiceIDs)
+	if len(candidates) == 0 && result.Status != serviceUnderstandingStatusUnknown {
+		candidates = append([]ServiceOption(nil), result.Candidates...)
 	}
-	return route
+	mode := strings.TrimSpace(question.Mode)
+	switch mode {
+	case ConversationQuestionModeCount:
+		if len(candidates) == 0 {
+			candidates = services
+		}
+		labelUnderstanding := result
+		if len(question.ServiceIDs) > 0 {
+			labelUnderstanding = serviceUnderstandingResult{}
+		}
+		statement := serviceCatalogCountStatement(serviceCatalogQuestionLabel(labelUnderstanding, candidates), candidates, 6)
+		if statement == "" {
+			statement = "I don't have a bookable service list available right now."
+		}
+		return answerRoute{Handled: true, Reply: statement, Source: answerSourceServiceCatalog, Reason: "service_catalog_count", Intent: "service_catalog_count", Confidence: 0.96, SourceRecordIDs: answerServiceIDs(candidates)}
+	case ConversationQuestionModeExistence:
+		if len(candidates) == 0 {
+			if len(question.ServiceIDs) == 0 && result.Status == serviceUnderstandingStatusUnknown && len(services) > 0 {
+				return answerRoute{Handled: true, Reply: "Yes. " + serviceMenuReply(services), Source: answerSourceServiceCatalog, Reason: "service_catalog_exists", Intent: "service_catalog_existence", Confidence: 0.96, SourceRecordIDs: answerServiceIDs(services)}
+			}
+			return answerRoute{Handled: true, Reply: "I don't see that in the current bookable service list. " + serviceMenuReply(services), Source: answerSourceServiceCatalog, Reason: "service_catalog_not_found", Intent: "service_catalog_existence", Confidence: 0.9, SourceRecordIDs: answerServiceIDs(services)}
+		}
+		return answerRoute{Handled: true, Reply: "Yes, we offer " + joinHumanList(serviceCandidateNames(candidates, 5)) + ". Which one would you like?", Source: answerSourceServiceCatalog, Reason: "service_catalog_exists", Intent: "service_catalog_existence", Confidence: 0.96, SourceRecordIDs: answerServiceIDs(candidates)}
+	case ConversationQuestionModeDetails, ConversationQuestionModeCompare:
+		if len(candidates) == 0 {
+			return routeServiceMenuAnswer(services)
+		}
+		return answerRoute{Handled: true, Reply: consultationComparisonReply(candidates), Source: answerSourceServiceCatalog, Reason: "service_catalog_details", Intent: "service_catalog_details", Confidence: 0.95, SourceRecordIDs: answerServiceIDs(candidates)}
+	default:
+		if len(candidates) > 0 {
+			return routeServiceMenuAnswer(candidates)
+		}
+		return routeServiceMenuAnswer(services)
+	}
+}
+
+func routeStructuredQuestionAnswer(message string, question ConversationQuestion, session Session, result serviceUnderstandingResult, answerCtx *AIAnswerContext, cfg *RuntimeConfig, now func() time.Time) answerRoute {
+	switch question.Subject {
+	case ConversationQuestionCatalog:
+		return routeStructuredServiceQuestion(question, session, result, answerCtx)
+	case ConversationQuestionPrice:
+		return routeStructuredPriceQuestion(question, result, answerCtx)
+	case ConversationQuestionHours:
+		reply, ids, confidence := businessHoursAnswer(message, answerBusinessHours(answerCtx), cfg, now)
+		return answerRoute{Handled: true, Reply: reply, Source: answerSourceBusinessHours, Reason: "business_hours", Intent: "hours_question", Confidence: confidence, SourceRecordIDs: ids}
+	case ConversationQuestionStaff:
+		reply, ids, confidence := staffAnswer(message, answerStaff(answerCtx), answerActiveStaff(answerCtx))
+		return answerRoute{Handled: true, Reply: reply, Source: answerSourceStaff, Reason: "staff_question", Intent: "staff_question", Confidence: confidence, SourceRecordIDs: ids}
+	case ConversationQuestionAvailability:
+		return answerRoute{Handled: true, Reply: availabilityPromptForSession(session, answerServices(answerCtx)), Source: answerSourceAvailability, Reason: "availability_intent_missing_details", Intent: "availability_question", Confidence: 0.9}
+	case ConversationQuestionPolicy:
+		if match := bestKnowledgeMatch(message, answerKnowledge(answerCtx)); match != nil && strings.TrimSpace(match.Body) != "" {
+			return answerRoute{Handled: true, Reply: knowledgeAnswerFromMatch(match), Source: answerSourceKnowledge, Reason: "knowledge_match", Intent: "knowledge_question", Confidence: 0.74, SourceRecordIDs: answerKnowledgeIDs(*match)}
+		}
+	}
+	return answerRoute{Handled: true, Reply: "I don't have a verified answer for that. I can ask the owner to help.", Source: answerSourceBookingRedirect, Reason: "structured_answer_unavailable", Intent: "owner_help", Confidence: 0.7}
+}
+
+func routeStructuredPriceQuestion(question ConversationQuestion, result serviceUnderstandingResult, answerCtx *AIAnswerContext) answerRoute {
+	services := answerServices(answerCtx)
+	candidates := servicesByIDs(services, question.ServiceIDs)
+	if len(candidates) == 0 && result.Status != serviceUnderstandingStatusUnknown {
+		candidates = append([]ServiceOption(nil), result.Candidates...)
+	}
+	if len(candidates) == 0 {
+		candidates = services
+	}
+	parts := make([]string, 0, len(candidates))
+	ids := make([]string, 0, len(candidates))
+	for _, service := range candidates {
+		if len(parts) >= 6 {
+			break
+		}
+		price := consultationPrice(service)
+		if price == "" {
+			continue
+		}
+		parts = append(parts, strings.TrimSpace(service.Name)+" is "+price)
+		ids = append(ids, strings.TrimSpace(service.ID))
+	}
+	if len(parts) == 0 {
+		return answerRoute{Handled: true, Reply: "I don't have verified pricing for that service. I can ask the owner to help.", Source: answerSourceServiceCatalog, Reason: "service_price_unavailable", Intent: "service_price", Confidence: 0.72}
+	}
+	reply := strings.Join(parts, ". ") + "."
+	if len(candidates) > len(parts) {
+		reply += " I can ask the owner about pricing for the other services."
+	}
+	return answerRoute{Handled: true, Reply: reply, Source: answerSourceServiceCatalog, Reason: "service_price", Intent: "service_price", Confidence: 0.96, SourceRecordIDs: ids}
 }
 
 func routeNonBookingAnswer(message string, session Session, answerCtx *AIAnswerContext, cfg *RuntimeConfig, now func() time.Time) answerRoute {
@@ -56,34 +143,6 @@ func routeNonBookingAnswer(message string, session Session, answerCtx *AIAnswerC
 	activeStaff := answerActiveStaff(answerCtx)
 	knowledge := answerKnowledge(answerCtx)
 	hours := answerBusinessHours(answerCtx)
-
-	if classifyServiceCatalogQuestion(message, serviceUnderstandingResult{Status: serviceUnderstandingStatusUnknown}) == serviceCatalogQuestionCount {
-		return routeServiceInquiryAnswer(message, session, serviceUnderstandingResult{
-			Status:       serviceUnderstandingStatusAmbiguous,
-			Reason:       "service_catalog_count",
-			Confidence:   0.96,
-			Candidates:   services,
-			MatchedToken: "service",
-		}, answerCtx)
-	}
-
-	if asksServiceMenu(message) {
-		names := serviceCandidateNames(services, 8)
-		reply := serviceMenuReply(services)
-		confidence := 0.96
-		if len(names) == 0 {
-			confidence = 0.72
-		}
-		return answerRoute{
-			Handled:         true,
-			Reply:           reply,
-			Source:          answerSourceServiceCatalog,
-			Reason:          "service_menu",
-			Intent:          "service_menu",
-			Confidence:      confidence,
-			SourceRecordIDs: answerServiceIDs(limitServices(services, 8)),
-		}
-	}
 
 	if asksBusinessHours(message) {
 		reply, ids, confidence := businessHoursAnswer(message, hours, cfg, now)
@@ -315,7 +374,11 @@ func businessHoursAnswer(message string, periods []BusinessHourPeriod, cfg *Runt
 		}
 		return "Hours for " + label + " are " + formatBusinessHourRanges(matches) + ". Would you like help with an appointment?", answerBusinessHourIDs(matches), 0.94
 	}
-	return "Hours are " + formatWeeklyBusinessHours(periods) + ". Would you like help with an appointment?", answerBusinessHourIDs(periods), 0.9
+	today := periodsForDay(periods, int(now().In(loc).Weekday()))
+	if len(today) == 0 {
+		return "The salon is closed today. Which day would you like our hours for?", nil, 0.9
+	}
+	return "Today's hours are " + formatBusinessHourRanges(today) + ". Would you like hours for another day?", answerBusinessHourIDs(today), 0.92
 }
 
 func requestedBusinessHourDay(message string, loc *time.Location, now func() time.Time) (int, string, bool) {

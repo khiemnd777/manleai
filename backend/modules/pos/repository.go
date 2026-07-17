@@ -22,18 +22,34 @@ type Repository struct {
 	db *sql.DB
 }
 
-type serviceCategorySuggestionRule struct {
-	CategoryID   string
-	CategoryName string
-	Phrase       string
-	Confidence   float64
-}
-
 type serviceCategorySuggestionCandidate struct {
 	ServiceID         string
 	ServiceName       string
 	CurrentCategoryID string
 	Source            string
+}
+
+type serviceTaxonomyAliasRecord struct {
+	Alias      string
+	Normalized string
+	Confidence float64
+}
+
+type serviceTaxonomyCategoryRecord struct {
+	Name        string
+	Slug        string
+	Description string
+	SortOrder   int
+	Confidence  float64
+	Aliases     []serviceTaxonomyAliasRecord
+}
+
+type serviceTaxonomyConceptRecord struct {
+	CategorySlug   string
+	CanonicalName  string
+	NormalizedName string
+	Confidence     float64
+	Aliases        []serviceTaxonomyAliasRecord
 }
 
 func NewRepository(db *sql.DB) *Repository {
@@ -1336,7 +1352,7 @@ func (r *Repository) AssignServiceCategory(ctx context.Context, salonID string, 
 	return r.getServiceForOwner(ctx, salonID, ownerUserID, serviceID)
 }
 
-func (r *Repository) RefreshServiceCategorySuggestions(ctx context.Context, salonID string, ownerUserID string, seeds []ServiceCategorySeed) (*ServiceCategorySuggestionRefresh, error) {
+func (r *Repository) RefreshServiceCategorySuggestions(ctx context.Context, salonID string, ownerUserID string) (*ServiceCategorySuggestionRefresh, error) {
 	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
 	}
@@ -1347,15 +1363,16 @@ func (r *Repository) RefreshServiceCategorySuggestions(ctx context.Context, salo
 	defer tx.Rollback()
 
 	result := &ServiceCategorySuggestionRefresh{}
-	for _, seed := range seeds {
-		slug := strings.TrimSpace(seed.Slug)
-		if slug == "" {
-			slug = normalizeCategorySlug(seed.Name)
-		}
-		if strings.TrimSpace(seed.Name) == "" || slug == "" {
-			continue
-		}
-		categoryID, status, created, restored, err := upsertSystemServiceCategory(ctx, tx, salonID, seed, slug)
+	taxonomyCategories, err := activeServiceTaxonomyCategories(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	if len(taxonomyCategories) == 0 {
+		return nil, errors.New("active nail service taxonomy is unavailable")
+	}
+	categoryIDsBySlug := make(map[string]string, len(taxonomyCategories))
+	for _, category := range taxonomyCategories {
+		categoryID, status, created, restored, err := upsertSystemServiceCategory(ctx, tx, salonID, category)
 		if err != nil {
 			return nil, err
 		}
@@ -1366,7 +1383,8 @@ func (r *Repository) RefreshServiceCategorySuggestions(ctx context.Context, salo
 			result.RestoredSystemCategories++
 		}
 		if status == ServiceCategoryStatusActive {
-			for _, alias := range seed.Aliases {
+			categoryIDsBySlug[category.Slug] = categoryID
+			for _, alias := range category.Aliases {
 				createdAlias, updatedAlias, skippedConflict, err := upsertSystemServiceCategoryAlias(ctx, tx, salonID, categoryID, alias)
 				if err != nil {
 					return nil, err
@@ -1384,9 +1402,13 @@ func (r *Repository) RefreshServiceCategorySuggestions(ctx context.Context, salo
 		}
 	}
 
-	rules, err := serviceCategorySuggestionRules(ctx, tx, salonID)
+	taxonomyConcepts, err := activeServiceTaxonomyConcepts(ctx, tx)
 	if err != nil {
 		return nil, err
+	}
+	conceptsByName := make(map[string][]serviceTaxonomyConceptRecord, len(taxonomyConcepts))
+	for _, concept := range taxonomyConcepts {
+		conceptsByName[concept.NormalizedName] = append(conceptsByName[concept.NormalizedName], concept)
 	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id::text, name, COALESCE(service_category_id::text, ''), service_category_source
@@ -1416,21 +1438,51 @@ func (r *Repository) RefreshServiceCategorySuggestions(ctx context.Context, salo
 		return nil, err
 	}
 
+	type aliasTarget struct {
+		Alias      string
+		Confidence float64
+		ServiceIDs map[string]bool
+	}
+	aliasTargets := map[string]*aliasTarget{}
 	for _, candidate := range candidates {
 		if candidate.Source != ServiceCategoryAssignmentUnassigned && candidate.Source != ServiceCategoryAssignmentSuggested {
 			result.SkippedReviewedServices++
+		}
+		matches := conceptsByName[normalizeAliasKey(candidate.ServiceName)]
+		if len(matches) == 0 {
+			if candidate.Source == ServiceCategoryAssignmentUnassigned || candidate.Source == ServiceCategoryAssignmentSuggested {
+				result.UnmatchedUnreviewedServices++
+			}
 			continue
 		}
-		rule, matched, ambiguous := bestServiceCategorySuggestion(candidate.ServiceName, rules)
-		if ambiguous {
+		if len(matches) != 1 {
+			if candidate.Source == ServiceCategoryAssignmentUnassigned || candidate.Source == ServiceCategoryAssignmentSuggested {
+				result.SkippedAmbiguousServices++
+			}
+			continue
+		}
+		concept := matches[0]
+		for _, alias := range concept.Aliases {
+			target := aliasTargets[alias.Normalized]
+			if target == nil {
+				target = &aliasTarget{Alias: alias.Alias, Confidence: alias.Confidence, ServiceIDs: map[string]bool{}}
+				aliasTargets[alias.Normalized] = target
+			}
+			if alias.Confidence > target.Confidence {
+				target.Alias = alias.Alias
+				target.Confidence = alias.Confidence
+			}
+			target.ServiceIDs[candidate.ServiceID] = true
+		}
+		if candidate.Source != ServiceCategoryAssignmentUnassigned && candidate.Source != ServiceCategoryAssignmentSuggested {
+			continue
+		}
+		categoryID := categoryIDsBySlug[concept.CategorySlug]
+		if categoryID == "" {
 			result.SkippedAmbiguousServices++
 			continue
 		}
-		if !matched {
-			result.UnmatchedUnreviewedServices++
-			continue
-		}
-		if candidate.CurrentCategoryID == rule.CategoryID && candidate.Source == ServiceCategoryAssignmentSuggested {
+		if candidate.CurrentCategoryID == categoryID && candidate.Source == ServiceCategoryAssignmentSuggested {
 			continue
 		}
 		execResult, err := tx.ExecContext(ctx, `
@@ -1444,12 +1496,37 @@ func (r *Repository) RefreshServiceCategorySuggestions(ctx context.Context, salo
 			WHERE id = $3
 			  AND salon_id = $4
 			  AND (service_category_source IN ('unassigned', 'suggested') OR service_category_id IS NULL)
-		`, rule.CategoryID, rule.Confidence, candidate.ServiceID, salonID)
+		`, categoryID, concept.Confidence, candidate.ServiceID, salonID)
 		if err != nil {
 			return nil, err
 		}
 		if affected, err := execResult.RowsAffected(); err == nil && affected > 0 {
 			result.SuggestedServices++
+		}
+	}
+	for normalized, target := range aliasTargets {
+		if normalized == "" || len(target.ServiceIDs) != 1 {
+			result.SkippedServiceAliasConflicts++
+			continue
+		}
+		serviceID := ""
+		for id := range target.ServiceIDs {
+			serviceID = id
+		}
+		created, updated, conflict, err := upsertSystemServiceAlias(ctx, tx, salonID, serviceID, serviceTaxonomyAliasRecord{
+			Alias: target.Alias, Normalized: normalized, Confidence: target.Confidence,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if created {
+			result.CreatedServiceAliases++
+		}
+		if updated {
+			result.UpdatedSystemServiceAliases++
+		}
+		if conflict {
+			result.SkippedServiceAliasConflicts++
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -2728,7 +2805,8 @@ func scanServiceCategoryAlias(row rowScanner) (*ServiceCategoryAlias, error) {
 	return &item, nil
 }
 
-func upsertSystemServiceCategory(ctx context.Context, tx *sql.Tx, salonID string, seed ServiceCategorySeed, slug string) (string, string, bool, bool, error) {
+func upsertSystemServiceCategory(ctx context.Context, tx *sql.Tx, salonID string, category serviceTaxonomyCategoryRecord) (string, string, bool, bool, error) {
+	slug := strings.TrimSpace(category.Slug)
 	var existingID, existingStatus, existingSource string
 	err := tx.QueryRowContext(ctx, `
 		SELECT id::text, status, source
@@ -2744,7 +2822,7 @@ func upsertSystemServiceCategory(ctx context.Context, tx *sql.Tx, salonID string
 			)
 			VALUES ($1, $2, $3, NULLIF($4, ''), $5, 'system', 'active')
 			RETURNING id::text, status
-		`, salonID, strings.TrimSpace(seed.Name), slug, strings.TrimSpace(seed.Description), seed.SortOrder).Scan(&categoryID, &status)
+		`, salonID, strings.TrimSpace(category.Name), slug, strings.TrimSpace(category.Description), category.SortOrder).Scan(&categoryID, &status)
 		return categoryID, status, true, false, err
 	}
 	if err != nil {
@@ -2766,13 +2844,13 @@ func upsertSystemServiceCategory(ctx context.Context, tx *sql.Tx, salonID string
 		WHERE id = $4
 		  AND salon_id = $5
 		RETURNING status
-	`, strings.TrimSpace(seed.Name), strings.TrimSpace(seed.Description), seed.SortOrder, existingID, salonID).Scan(&status)
+	`, strings.TrimSpace(category.Name), strings.TrimSpace(category.Description), category.SortOrder, existingID, salonID).Scan(&status)
 	return existingID, status, false, restored, err
 }
 
-func upsertSystemServiceCategoryAlias(ctx context.Context, tx *sql.Tx, salonID string, categoryID string, alias string) (bool, bool, bool, error) {
-	alias = strings.TrimSpace(alias)
-	normalized := normalizeAliasKey(alias)
+func upsertSystemServiceCategoryAlias(ctx context.Context, tx *sql.Tx, salonID string, categoryID string, record serviceTaxonomyAliasRecord) (bool, bool, bool, error) {
+	alias := strings.TrimSpace(record.Alias)
+	normalized := strings.TrimSpace(record.Normalized)
 	if alias == "" || normalized == "" {
 		return false, false, false, nil
 	}
@@ -2805,8 +2883,8 @@ func upsertSystemServiceCategoryAlias(ctx context.Context, tx *sql.Tx, salonID s
 			INSERT INTO service_category_aliases (
 				salon_id, category_id, alias, normalized_alias, source, status, confidence
 			)
-			VALUES ($1, $2, $3, $4, 'system', 'active', 0.860)
-		`, salonID, categoryID, alias, normalized); err != nil {
+			VALUES ($1, $2, $3, $4, 'system', 'active', $5)
+		`, salonID, categoryID, alias, normalized, record.Confidence); err != nil {
 			return false, false, false, err
 		}
 		return true, false, false, nil
@@ -2815,12 +2893,12 @@ func upsertSystemServiceCategoryAlias(ctx context.Context, tx *sql.Tx, salonID s
 		return false, false, false, err
 	}
 	if existingSource != ServiceCategoryAliasSourceSystem {
-		return false, false, false, nil
+		return false, false, existingCategoryID != categoryID || existingStatus != ServiceCategoryStatusActive, nil
 	}
 	needsUpdate := existingCategoryID != categoryID ||
 		existingAlias != alias ||
 		existingStatus != ServiceCategoryStatusActive ||
-		existingConfidence != 0.86
+		existingConfidence != record.Confidence
 	if !needsUpdate {
 		return false, false, false, nil
 	}
@@ -2829,101 +2907,160 @@ func upsertSystemServiceCategoryAlias(ctx context.Context, tx *sql.Tx, salonID s
 		SET category_id = $1,
 		    alias = $2,
 		    status = 'active',
-		    confidence = 0.860,
+		    confidence = $3,
 		    updated_at = now()
-		WHERE id = $3
-		  AND salon_id = $4
-	`, categoryID, alias, existingID, salonID); err != nil {
+		WHERE id = $4
+		  AND salon_id = $5
+	`, categoryID, alias, record.Confidence, existingID, salonID); err != nil {
 		return false, false, false, err
 	}
 	return false, true, false, nil
 }
 
-func serviceCategorySuggestionRules(ctx context.Context, tx *sql.Tx, salonID string) ([]serviceCategorySuggestionRule, error) {
+func activeServiceTaxonomyCategories(ctx context.Context, tx *sql.Tx) ([]serviceTaxonomyCategoryRecord, error) {
 	rows, err := tx.QueryContext(ctx, `
-		SELECT cat.id::text, cat.name, cat.slug, COALESCE(alias.normalized_alias, ''), COALESCE(alias.confidence, 0)
-		FROM service_categories cat
-		LEFT JOIN service_category_aliases alias ON alias.category_id = cat.id
-		                                      AND alias.salon_id = cat.salon_id
-		                                      AND alias.status = 'active'
-		WHERE cat.salon_id = $1
-		  AND cat.status = 'active'
-		ORDER BY cat.sort_order ASC, cat.name ASC, alias.normalized_alias ASC
-	`, salonID)
+		SELECT category.name, category.slug, COALESCE(category.description, ''),
+		       category.sort_order, category.confidence,
+		       COALESCE(alias.alias, ''), COALESCE(alias.normalized_alias, ''), COALESCE(alias.confidence, 0)
+		FROM service_taxonomy_releases release
+		JOIN service_taxonomy_categories category
+		  ON category.release_id = release.id AND category.status = 'active'
+		LEFT JOIN service_taxonomy_category_aliases alias
+		  ON alias.category_id = category.id AND alias.status = 'active'
+		WHERE release.locale = 'en-US'
+		  AND release.status = 'active'
+		ORDER BY category.sort_order ASC, category.name ASC, alias.normalized_alias ASC
+	`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	rules := make([]serviceCategorySuggestionRule, 0)
-	seenCategoryPhrase := map[string]bool{}
+	categories := make([]serviceTaxonomyCategoryRecord, 0)
+	indexes := map[string]int{}
 	for rows.Next() {
-		var categoryID, categoryName, slug, alias string
-		var aliasConfidence float64
-		if err := rows.Scan(&categoryID, &categoryName, &slug, &alias, &aliasConfidence); err != nil {
+		var category serviceTaxonomyCategoryRecord
+		var alias serviceTaxonomyAliasRecord
+		if err := rows.Scan(
+			&category.Name, &category.Slug, &category.Description, &category.SortOrder, &category.Confidence,
+			&alias.Alias, &alias.Normalized, &alias.Confidence,
+		); err != nil {
 			return nil, err
 		}
-		for _, phrase := range []string{categoryName, slug} {
-			normalized := normalizeAliasKey(phrase)
-			key := categoryID + ":" + normalized
-			if normalized == "" || seenCategoryPhrase[key] {
-				continue
-			}
-			seenCategoryPhrase[key] = true
-			rules = append(rules, serviceCategorySuggestionRule{
-				CategoryID:   categoryID,
-				CategoryName: categoryName,
-				Phrase:       normalized,
-				Confidence:   0.72,
-			})
+		index, ok := indexes[category.Slug]
+		if !ok {
+			index = len(categories)
+			indexes[category.Slug] = index
+			categories = append(categories, category)
 		}
-		if alias != "" {
-			rules = append(rules, serviceCategorySuggestionRule{
-				CategoryID:   categoryID,
-				CategoryName: categoryName,
-				Phrase:       alias,
-				Confidence:   aliasConfidence,
-			})
+		if alias.Alias != "" && alias.Normalized != "" {
+			categories[index].Aliases = append(categories[index].Aliases, alias)
 		}
 	}
-	return rules, rows.Err()
+	return categories, rows.Err()
 }
 
-func bestServiceCategorySuggestion(serviceName string, rules []serviceCategorySuggestionRule) (serviceCategorySuggestionRule, bool, bool) {
-	normalizedName := normalizeAliasKey(serviceName)
-	if normalizedName == "" {
-		return serviceCategorySuggestionRule{}, false, false
+func activeServiceTaxonomyConcepts(ctx context.Context, tx *sql.Tx) ([]serviceTaxonomyConceptRecord, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT category.slug, concept.canonical_name, concept.normalized_name, concept.confidence,
+		       COALESCE(alias.alias, ''), COALESCE(alias.normalized_alias, ''), COALESCE(alias.confidence, 0)
+		FROM service_taxonomy_releases release
+		JOIN service_taxonomy_service_concepts concept
+		  ON concept.release_id = release.id AND concept.status = 'active'
+		JOIN service_taxonomy_categories category
+		  ON category.id = concept.category_id AND category.status = 'active'
+		LEFT JOIN service_taxonomy_service_aliases alias
+		  ON alias.concept_id = concept.id AND alias.status = 'active'
+		WHERE release.locale = 'en-US'
+		  AND release.status = 'active'
+		ORDER BY concept.normalized_name ASC, alias.normalized_alias ASC
+	`)
+	if err != nil {
+		return nil, err
 	}
-	var best serviceCategorySuggestionRule
-	bestScore := -1
-	ambiguous := false
-	for _, rule := range rules {
-		if rule.Phrase == "" || !containsNormalizedPhrase(normalizedName, rule.Phrase) {
-			continue
+	defer rows.Close()
+
+	concepts := make([]serviceTaxonomyConceptRecord, 0)
+	indexes := map[string]int{}
+	for rows.Next() {
+		var concept serviceTaxonomyConceptRecord
+		var alias serviceTaxonomyAliasRecord
+		if err := rows.Scan(
+			&concept.CategorySlug, &concept.CanonicalName, &concept.NormalizedName, &concept.Confidence,
+			&alias.Alias, &alias.Normalized, &alias.Confidence,
+		); err != nil {
+			return nil, err
 		}
-		score := len(strings.Fields(rule.Phrase))*1000 + len(rule.Phrase)
-		switch {
-		case bestScore < 0 || score > bestScore:
-			best = rule
-			bestScore = score
-			ambiguous = false
-		case score == bestScore && rule.CategoryID != best.CategoryID:
-			ambiguous = true
-		case score == bestScore && rule.CategoryID == best.CategoryID && rule.Confidence > best.Confidence:
-			best = rule
+		key := concept.CategorySlug + ":" + concept.NormalizedName
+		index, ok := indexes[key]
+		if !ok {
+			index = len(concepts)
+			indexes[key] = index
+			concepts = append(concepts, concept)
+		}
+		if alias.Alias != "" && alias.Normalized != "" {
+			concepts[index].Aliases = append(concepts[index].Aliases, alias)
 		}
 	}
-	if bestScore < 0 {
-		return serviceCategorySuggestionRule{}, false, false
-	}
-	return best, true, ambiguous
+	return concepts, rows.Err()
 }
 
-func containsNormalizedPhrase(text string, phrase string) bool {
-	if text == phrase {
-		return true
+func upsertSystemServiceAlias(ctx context.Context, tx *sql.Tx, salonID string, serviceID string, record serviceTaxonomyAliasRecord) (bool, bool, bool, error) {
+	alias := strings.TrimSpace(record.Alias)
+	normalized := strings.TrimSpace(record.Normalized)
+	if alias == "" || normalized == "" || strings.TrimSpace(serviceID) == "" {
+		return false, false, false, nil
 	}
-	return strings.Contains(" "+text+" ", " "+phrase+" ")
+	var categoryAliasConflict bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM service_category_aliases
+			WHERE salon_id = $1 AND normalized_alias = $2 AND status = 'active'
+		)
+	`, salonID, normalized).Scan(&categoryAliasConflict); err != nil {
+		return false, false, false, err
+	}
+	if categoryAliasConflict {
+		return false, false, true, nil
+	}
+
+	var existingID, existingServiceID, existingAlias, existingSource, existingStatus string
+	var existingConfidence float64
+	err := tx.QueryRowContext(ctx, `
+		SELECT id::text, service_id::text, alias, source, status, confidence
+		FROM service_aliases
+		WHERE salon_id = $1 AND normalized_alias = $2
+	`, salonID, normalized).Scan(
+		&existingID, &existingServiceID, &existingAlias, &existingSource, &existingStatus, &existingConfidence,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO service_aliases (
+				salon_id, service_id, alias, normalized_alias, source, status, confidence
+			)
+			VALUES ($1, $2, $3, $4, 'system', 'active', $5)
+		`, salonID, serviceID, alias, normalized, record.Confidence)
+		return err == nil, false, false, err
+	}
+	if err != nil {
+		return false, false, false, err
+	}
+	if existingSource != "system" {
+		return false, false, existingServiceID != serviceID || existingStatus != "active", nil
+	}
+	if existingServiceID == serviceID && existingAlias == alias && existingStatus == "active" && existingConfidence == record.Confidence {
+		return false, false, false, nil
+	}
+	_, err = tx.ExecContext(ctx, `
+		UPDATE service_aliases
+		SET service_id = $1,
+		    alias = $2,
+		    status = 'active',
+		    confidence = $3,
+		    updated_at = now()
+		WHERE id = $4 AND salon_id = $5 AND source = 'system'
+	`, serviceID, alias, record.Confidence, existingID, salonID)
+	return false, err == nil, false, err
 }
 
 func (r *Repository) listServiceCategoryAliases(ctx context.Context, salonID string) ([]ServiceCategoryAlias, error) {

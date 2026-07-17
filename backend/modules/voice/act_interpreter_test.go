@@ -62,6 +62,29 @@ func TestGuardedTurnInterpreterMapsStructuredResultWithoutPIIExpansion(t *testin
 	}
 }
 
+func TestGuardedTurnInterpreterCarriesTypedGuidanceActionAndSafeDiagnostics(t *testing.T) {
+	provider := &fakeActModelProvider{configured: true, reply: TurnModelReply{
+		Goal: "book_appointment", GuidanceAction: conversation.GuidanceActionBook, GuidancePartySize: 3, Confidence: 0.96,
+		Diagnostics: map[string]string{"schema_fingerprint": "sha256:guidance123"},
+	}}
+	interpreter := NewGuardedTurnInterpreter(provider)
+	allowed := []string{conversation.GuidanceActionBook, conversation.GuidanceActionServiceCatalog}
+
+	turn, err := interpreter.InterpretTurn(context.Background(), conversation.TurnInterpretationRequest{
+		SalonID: "salon_1", SemanticContract: conversation.TurnSemanticContractGuidance,
+		RecognizableGuidanceActions: allowed,
+	})
+	if err != nil {
+		t.Fatalf("InterpretTurn: %v", err)
+	}
+	if turn.GuidanceAction != conversation.GuidanceActionBook || turn.GuidancePartySize != 3 || turn.InterpreterDiagnostics["schema_fingerprint"] != "sha256:guidance123" {
+		t.Fatalf("turn = %#v", turn)
+	}
+	if len(provider.request.RecognizableGuidanceActions) != 2 || provider.request.RecognizableGuidanceActions[1] != conversation.GuidanceActionServiceCatalog {
+		t.Fatalf("provider recognizable actions = %#v", provider.request.RecognizableGuidanceActions)
+	}
+}
+
 func TestGuardedTurnInterpreterPreservesSafeProviderDiagnostics(t *testing.T) {
 	provider := &fakeActModelProvider{configured: true, err: &ProviderRequestError{
 		Provider: ProviderOpenAI, Stage: "turn_interpretation_response", StatusCode: 429,
@@ -99,6 +122,67 @@ func TestGuardedTurnInterpreterMapsStructuredAvailabilityTimePreference(t *testi
 	}
 	if len(turn.Questions) != 1 || turn.Questions[0].TimePreference == nil || turn.Questions[0].TimePreference.Direction != conversation.TimePreferenceBefore || turn.Questions[0].TimePreference.Minutes != 14*60+30 {
 		t.Fatalf("turn = %#v", turn)
+	}
+}
+
+func TestGuardedTurnInterpreterNormalizesDirectionalClockHourToMinutesAfterMidnight(t *testing.T) {
+	provider := &fakeActModelProvider{configured: true, reply: TurnModelReply{
+		Questions: []QuestionModelReply{{
+			Subject:        conversation.ConversationQuestionAvailability,
+			TimePreference: TimePreferenceModelReply{Direction: conversation.TimePreferenceAfter, Minutes: 13},
+		}},
+	}}
+
+	turn, err := NewGuardedTurnInterpreter(provider).InterpretTurn(context.Background(), conversation.TurnInterpretationRequest{SalonID: "salon_1"})
+	if err != nil {
+		t.Fatalf("InterpretTurn: %v", err)
+	}
+	if len(turn.Questions) != 1 || turn.Questions[0].TimePreference == nil || turn.Questions[0].TimePreference.Minutes != 13*60 {
+		t.Fatalf("turn = %#v, want 13:00 normalized to 780 minutes after midnight", turn)
+	}
+}
+
+func TestGuardedTurnInterpreterPreservesCanonicalMinutesAfterMidnight(t *testing.T) {
+	tests := []struct {
+		name      string
+		direction string
+		minutes   int
+	}{
+		{name: "half_past_midnight", direction: conversation.TimePreferenceExact, minutes: 30},
+		{name: "afternoon_with_minutes", direction: conversation.TimePreferenceBefore, minutes: 13*60 + 30},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &fakeActModelProvider{configured: true, reply: TurnModelReply{
+				Questions: []QuestionModelReply{{
+					Subject:        conversation.ConversationQuestionAvailability,
+					TimePreference: TimePreferenceModelReply{Direction: test.direction, Minutes: test.minutes},
+				}},
+			}}
+			turn, err := NewGuardedTurnInterpreter(provider).InterpretTurn(context.Background(), conversation.TurnInterpretationRequest{SalonID: "salon_1"})
+			if err != nil {
+				t.Fatalf("InterpretTurn: %v", err)
+			}
+			if len(turn.Questions) != 1 || turn.Questions[0].TimePreference == nil || turn.Questions[0].TimePreference.Minutes != test.minutes {
+				t.Fatalf("turn = %#v, want canonical minutes %d unchanged", turn, test.minutes)
+			}
+		})
+	}
+}
+
+func TestGuardedTurnInterpreterPreservesNoTimeConstraintSentinel(t *testing.T) {
+	provider := &fakeActModelProvider{configured: true, reply: TurnModelReply{
+		Questions: []QuestionModelReply{{
+			Subject:        conversation.ConversationQuestionAvailability,
+			TimePreference: TimePreferenceModelReply{Minutes: -1},
+		}},
+	}}
+	turn, err := NewGuardedTurnInterpreter(provider).InterpretTurn(context.Background(), conversation.TurnInterpretationRequest{SalonID: "salon_1"})
+	if err != nil {
+		t.Fatalf("InterpretTurn: %v", err)
+	}
+	if len(turn.Questions) != 1 || turn.Questions[0].TimePreference != nil {
+		t.Fatalf("turn = %#v, want no stored time preference", turn)
 	}
 }
 
@@ -140,6 +224,44 @@ func TestGuardedTurnInterpreterMapsConsultationNeedsWithoutRecommendationAuthori
 	}
 	if provider.request.Consultation != current {
 		t.Fatalf("current consultation state was not passed to provider: %#v", provider.request.Consultation)
+	}
+}
+
+func TestGuardedTurnInterpreterDropsPositiveConsultationMutationMissingFromSnapshot(t *testing.T) {
+	provider := &fakeActModelProvider{configured: true, reply: TurnModelReply{
+		Goal: "consultation", GuidanceAction: conversation.GuidanceActionConsultation, Confidence: 0.92,
+		Consultation: ConsultationModelReply{
+			Mutations: []ConsultationMutationModelReply{{
+				Field: conversation.ConsultationNeedFieldDesiredOutcome, Operation: conversation.ConsultationNeedOperationSet,
+				Values: []string{conversation.ConsultationOutcomeMaintain}, Confidence: 0.92,
+			}},
+		},
+	}}
+	turn, err := NewGuardedTurnInterpreter(provider).InterpretTurn(context.Background(), conversation.TurnInterpretationRequest{SalonID: "salon_1"})
+	if err != nil {
+		t.Fatalf("InterpretTurn: %v", err)
+	}
+	if len(turn.ConsultationMutations) != 0 || turn.InterpreterDiagnostics["consultation_mutation_snapshot_mismatch"] != "dropped" {
+		t.Fatalf("ungrounded consultation mutation survived: %#v", turn)
+	}
+}
+
+func TestGuardedTurnInterpreterPreservesRemovalWithoutPositiveSnapshotValue(t *testing.T) {
+	provider := &fakeActModelProvider{configured: true, reply: TurnModelReply{
+		Goal: "consultation", Confidence: 0.94,
+		Consultation: ConsultationModelReply{
+			Mutations: []ConsultationMutationModelReply{{
+				Field: conversation.ConsultationNeedFieldPriorities, Operation: conversation.ConsultationNeedOperationRemove,
+				Values: []string{conversation.ConsultationPriorityLowerCost}, Confidence: 0.94,
+			}},
+		},
+	}}
+	turn, err := NewGuardedTurnInterpreter(provider).InterpretTurn(context.Background(), conversation.TurnInterpretationRequest{SalonID: "salon_1"})
+	if err != nil {
+		t.Fatalf("InterpretTurn: %v", err)
+	}
+	if len(turn.ConsultationMutations) != 1 || turn.ConsultationMutations[0].Operation != conversation.ConsultationNeedOperationRemove {
+		t.Fatalf("valid removal was dropped: %#v", turn)
 	}
 }
 

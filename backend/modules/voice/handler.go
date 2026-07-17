@@ -1,6 +1,7 @@
 package voice
 
 import (
+	"context"
 	"errors"
 
 	"github.com/gofiber/fiber/v2"
@@ -45,6 +46,30 @@ func (h *Handler) SemanticCheck(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusInternalServerError, "VOICE_SEMANTIC_CHECK_FAILED", "Could not verify the semantic contract.")
 	}
 	return respond.JSON(c, fiber.StatusOK, status)
+}
+
+func (h *Handler) SemanticEvaluate(c *fiber.Ctx) error {
+	var req SemanticEvaluationRequest
+	if err := c.BodyParser(&req); err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "VOICE_SEMANTIC_EVALUATION_INVALID", "Semantic evaluation request is invalid.")
+	}
+	result, err := h.service.SemanticEvaluate(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VOICE_SEMANTIC_EVALUATION_INVALID", "Semantic evaluation request is invalid.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if errors.Is(err, ErrProviderDisabled) {
+		return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_SEMANTIC_EVALUATION_UNAVAILABLE", "Semantic evaluation is unavailable.")
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return respond.Error(c, fiber.StatusGatewayTimeout, "VOICE_SEMANTIC_EVALUATION_TIMEOUT", "Semantic evaluation timed out.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusBadGateway, "VOICE_SEMANTIC_EVALUATION_FAILED", "Could not evaluate the semantic turn.")
+	}
+	return respond.JSON(c, fiber.StatusOK, result)
 }
 
 func (h *Handler) Audio(c *fiber.Ctx) error {

@@ -35,7 +35,7 @@ func (s *Service) handleServiceConsultation(ctx context.Context, ownerUserID str
 	partyRecommendationAcceptance := activePartyPlan(session.PartyPlan) && active &&
 		dialog.Consultation.Status == ConsultationStatusAwaitingBooking &&
 		(isAffirmativeOnly(message) || hasBookingVerbSignal(message) || turnUnderstanding.Consultation.BookingRequested)
-	if shouldHandoff(message) || shouldComplaintHandoff(message) || shouldRouteCancel(session, message) || shouldRouteReschedule(session, message) || bookingActionForSession(session) != BookingActionBook || (activePartyPlan(session.PartyPlan) && !partyRecommendationAcceptance) {
+	if turnGoalIs(turnUnderstanding, "human_handoff") || shouldRouteCancel(session, message) || shouldRouteReschedule(session, message) || bookingActionForSession(session) != BookingActionBook || (activePartyPlan(session.PartyPlan) && !partyRecommendationAcceptance) {
 		return false, nil, nil
 	}
 
@@ -154,7 +154,7 @@ func (s *Service) handleServiceConsultation(ctx context.Context, ownerUserID str
 		}
 		return s.saveConsultationTurn(ctx, ownerUserID, session, next, message, eventKey, "I could not verify the salon's service guidance just now. Please try once more, or I can ask the owner to help.", "consultation_interpreter_unavailable", consultation, services, staff, cfg)
 	}
-	if active && asksServiceMenu(message) {
+	if active && turnHasQuestionSubject(turnUnderstanding, ConversationQuestionCatalog) {
 		consultation.Status = ConsultationStatusCollectingNeeds
 		consultation.CandidateServiceIDs = nil
 		consultation.RecommendedServiceIDs = nil

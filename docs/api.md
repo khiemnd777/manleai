@@ -1044,11 +1044,16 @@ Archives one category alias.
 
 `POST /api/salons/:id/service-categories/suggestions/refresh`
 
-Idempotently seeds common nail-salon categories such as Manicure, Pedicure,
-Acrylic, Dip Powder, and Removal; creates system category aliases when they do
-not conflict with service aliases; and suggests categories only for services
-whose category source is `unassigned` or `suggested`. It does not override
-manual or imported assignments.
+Idempotently materializes the active `en-US` database-owned nail taxonomy
+release into salon system categories and aliases. Exact normalized local
+service names may receive a taxonomy category suggestion and service aliases
+only when the taxonomy concept resolves to one unique local service target.
+Unknown or ambiguous local services remain unassigned; system aliases that
+conflict with owner/imported aliases are skipped. The refresh never creates a
+service or POS entity link and never overrides manual/imported categories or
+owner/imported aliases. Taxonomy releases and their category/concept/alias
+children are versioned database data seeded by migration V44, not Go phrase
+maps or API request constants.
 
 ```json
 {
@@ -1058,6 +1063,9 @@ manual or imported assignments.
     "created_aliases": 0,
     "updated_system_aliases": 0,
     "skipped_alias_conflicts": 0,
+    "created_service_aliases": 12,
+    "updated_system_service_aliases": 0,
+    "skipped_service_alias_conflicts": 1,
     "suggested_services": 3,
     "skipped_reviewed_services": 5,
     "skipped_ambiguous_services": 0,
@@ -1661,7 +1669,7 @@ Creates a simulator session and writes the initial AI transcript message. The in
 
 `GET /api/salons/:id/conversation-sessions/:session_id`
 
-Returns one conversation session with transcript messages and the latest handoff request when present. Booking state includes `requested_date` when the customer has provided a day but not a specific time, and `requested_start_time` only after a concrete start time or offered slot is selected. `dialog_state` is a versioned operational state object containing phase, pending typed clarification, bounded mutation history, no-progress count, `draft_revision`, `reviewed_revision`, `authorized_revision`, and optional `consultation` and `guidance` state. Consultation state includes controlled caller needs such as desired finish, candidate and recommended service IDs, selected service ID, last asked field, profile revisions, recommendation reasons, bounded no-progress count, resume phase, and exit reason. Guidance state includes `stage`, dynamically derived `offered_actions`, separate `no_progress_count` and `provider_failure_count`, `progress_fingerprint`, and `last_provider_outcome`. Existing version 3 guidance prompt/counter fields are normalized into this version 4 nested object on read without a database migration. A bounded semantic-provider outage uses handoff reason `guidance_provider_unavailable`; caller ambiguity continues to use `service_clarification_unresolved`. Transcript messages may include PII-reduced turn-understanding diagnostics, validated acts/questions, revision transitions, slot state, event keys, guardrail outcomes, answer sources, consultation or guidance audit metadata, and next required field.
+Returns one conversation session with transcript messages and the latest handoff request when present. Booking state includes `requested_date` when the customer has provided a day but not a specific time, and `requested_start_time` only after a concrete start time or offered slot is selected. `dialog_state` is a versioned operational state object containing phase, pending typed clarification, bounded mutation history, no-progress count, `draft_revision`, `reviewed_revision`, `authorized_revision`, and optional `consultation` and `guidance` state. Consultation state includes controlled caller needs such as desired finish, candidate and recommended service IDs, selected service ID, last asked field, profile revisions, recommendation reasons, bounded no-progress count, resume phase, and exit reason. Guidance state includes `stage`, dynamically derived `offered_actions`, `awaiting_action_choice`, separate `no_progress_count` and `provider_failure_count`, `progress_fingerprint`, and `last_provider_outcome`. Existing legacy guidance prompt/counter fields are normalized into this version 5 nested object on read without a database migration. `awaiting_action_choice` enables only the bounded choices from the immediately preceding provider-failure prompt; it is not a general caller-intent classifier and is cleared on progress or terminal handoff. A bounded semantic-provider outage uses handoff reason `guidance_provider_unavailable`; caller ambiguity continues to use `service_clarification_unresolved`. Transcript messages may include PII-reduced turn-understanding diagnostics, validated acts/questions, revision transitions, slot state, event keys, guardrail outcomes, answer sources, consultation or guidance audit metadata, and next required field.
 
 Production-created sessions use `dialog_state.review_required=true`. When every booking field is complete, the runtime sets `reviewed_revision=draft_revision`, returns `phase=review`, and asks the caller to review the draft. A later explicit authorization sets `authorized_revision` only for that same revision. Booking requires `draft_revision == reviewed_revision == authorized_revision`; review acceptance is not booking confirmation.
 
@@ -1702,11 +1710,13 @@ misses double-read the fence around context loading; a concurrent switch/sync
 retries, and a non-ready snapshot fails closed by hiding provider-owned
 structured data while retaining eligible salon-authored knowledge.
 
-Configured production turns first enter the state-driven Turn Kernel. The kernel derives `expected_input`, measures deterministic coverage, and selects one explicit route: `fast_lane`, `answer_lane`, `action_lane`, `recovery_lane`, or `semantic_lane`. Unambiguous expected-field evidence, offered-slot choices, state-scoped confirmations, structured questions, and operational actions avoid a reply-model round trip. For a new booking with no selected service, an exact catalog service advances directly to the next missing field and a category asks for one concrete catalog option; neither path asks whether to add or replace. An add-or-replace operation choice is valid only after a service has been selected. The semantic lane selects one of two strict contracts from operational state, not caller wording. `guidance_turn` is limited to initial caller-goal or service-guidance state with no booking progress and returns goal, extraction-only consultation needs, confidence, reason, and safety without acts or questions. `full_turn` is required for corrections, multi-signal or partial-coverage turns, pending/review/party state, and any existing booking progress; it may return zero or more ordered acts and questions. Full-contract acts cover add/replace/remove/undo plus set/clear corrections for service, staff, date/time, customer, and guest state. One utterance may contain both a correction and a question; the reducer applies validated correction semantics first, answers the question from structured sources, then resumes one useful pending question. Replacement source and target remain separate. Pending candidates are context rather than a closed vocabulary, current-draft questions do not become catalog-count questions, and repeated unresolved clarification is bounded. For a completed `party_plan`, service correction pending state uses `party_service_target`, `party_service_guest`, `party_service_operation`, and `party_service_source` with `guest_ref`; short replies resolve deterministically, only the selected party group may change, and offered slots/review authorization are invalidated only after the correction resolves. Unresolved party-correction pending state blocks availability and booking even when semantic interpretation is unavailable.
+Configured production turns first enter the state-driven Turn Kernel. The kernel derives `expected_input`, measures deterministic coverage, and selects one explicit route: `fast_lane`, `answer_lane`, `action_lane`, `recovery_lane`, or `semantic_lane`. Unambiguous expected-field evidence, offered-slot choices, state-scoped confirmations, structured questions, and operational actions avoid a reply-model round trip. For a new booking with no selected service, an exact catalog service advances directly to the next missing field and a category asks for one concrete catalog option; neither path asks whether to add or replace. An add-or-replace operation choice is valid only after a service has been selected. The semantic lane selects one of two strict contracts from operational state, not caller wording. `guidance_turn` is limited to initial caller-goal or service-guidance state with no booking progress and returns a typed `guidance_action`, bounded explicit `guidance_party_size`, extraction-only consultation needs, confidence, reason, and safety without a separately model-authored goal, acts, or questions. The model always receives the complete stable `recognizable_guidance_actions` protocol (`book`, `service_catalog`, `consultation`, `salon_question`, `name_service`, `reschedule`, `cancel`, and `human_handoff`), so recognition of a caller's request is not disabled when a catalog or recommendation profile is unavailable. The backend separately derives `turn_available_guidance_actions` and the runtime service-guidance capability from the current catalog, salon consultation toggle, and ready owner-approved profiles. It validates the recognized action, derives the general goal, rejects party sizes outside 2-20 or attached to a non-book action, and then resolves whether that action can be fulfilled. A valid initial party size is translated into the same guest-count act consumed by the reducer. A recognized consultation request remains consultation even when personalized recommendation is disabled or unavailable: the reply truthfully offers catalog-backed grouping when possible, otherwise explains the technical service-guide limitation and offers owner help without guessing a service or blaming the caller. The shorter `dialog_state.guidance.offered_actions` remains the state-owned choice set used only during bounded dependency recovery. A semantic `service_catalog` action always renders from the active bookable service catalog; active knowledge text cannot become the service-menu source. `full_turn` is required for corrections, multi-signal or partial-coverage turns, pending/review/party state, and any existing booking progress; it may return zero or more ordered acts and questions. Full-contract acts cover add/replace/remove/undo plus set/clear corrections for service, staff, date/time, customer, and guest state. One utterance may contain both a correction and a question; the reducer applies validated correction semantics first, answers the question from structured sources, then resumes one useful pending question. Replacement source and target remain separate. Pending candidates are context rather than a closed vocabulary, current-draft questions do not become catalog-count questions, and repeated unresolved clarification is bounded. For a completed `party_plan`, service correction pending state uses `party_service_target`, `party_service_guest`, `party_service_operation`, and `party_service_source` with exact `guest_ref`; short replies resolve deterministically, redundant `guest_scope` is cleared, only the selected party group may change, and offered slots/review authorization are invalidated only after the correction resolves. Unresolved party-correction pending state blocks availability and booking even when semantic interpretation is unavailable.
 
-The configured OpenAI reply model interprets only `semantic_lane` turns selected from state and deterministic coverage, never from a keyword-only gate. Input contains `expected_input`, `semantic_contract`, a PII-reduced utterance, selected or context-relevant service and staff references, current party-group references, pending act, booking action/stage, boolean customer-field presence, and current revision. Full active catalogs are included only when the current turn requires discovery, correction, or service disambiguation. Party service mutations must name an existing guest reference, while an initial multi-act party request may construct counted groups without flattening repeated services. Both structured contracts carry extraction-only consultation mutations and a global safety assessment; neither has side-effect authority. The backend rejects low-confidence goals/questions/acts, invalid mutation semantics, malformed party counts, safety categories outside the controlled contract, and IDs outside the salon's active catalog. A 2.5-second timeout, provider failure, empty output, invalid schema, low-confidence result, or rejected catalog reference preserves the draft and may fall back to independently validated catalog and already-captured field evidence before asking the next missing-field question. Without such evidence, the runtime safely clarifies or hands off. Guidance provider-failure wording is selected only from typed `dialog_state.guidance.offered_actions`; it may offer profile-backed one-question consultation narrowing only when consultation is enabled and at least one eligible profile is ready, and it never offers a service menu when the runtime catalog is empty. The model cannot call tools, mutate session state, or create confirmed wording.
+The configured OpenAI reply model interprets only `semantic_lane` turns selected from state and deterministic coverage, never from a keyword-only gate. Input contains `expected_input`, `semantic_contract`, a PII-reduced utterance, selected or context-relevant service and staff identities, current party guest references/counts, pending act, booking action/stage, boolean customer-field presence, and current revision. Existing per-guest service assignments are not model input; they remain backend state so the model cannot manufacture replacement sources from draft layout. Initial guidance carries the full stable recognition vocabulary, while capability stays backend-owned. The accepted guidance action deterministically derives its general goal and protocol-owned companion fields: catalog questions own `catalog` subject, salon questions own their operational subject, and other actions cannot retain irrelevant catalog mode/subject decoration. Consultation profiles are never sent to the semantic model; owner-approved ready profiles remain backend-only inputs to consultation question planning and recommendation ranking. During an active consultation, model-authored booking/service acts are discarded before validation. Party service mutations must name an existing guest reference, and replacement sources must be grounded in the caller's current utterance; an initial multi-act party request may construct counted groups without flattening repeated services. A structured time preference is normalized to availability when the state is awaiting date/time, regardless of a model-authored staff or current-booking subject. Both structured contracts carry extraction-only consultation mutations and a global safety assessment; neither has side-effect authority. The backend rejects low-confidence goals/questions/acts, invalid guidance actions, invalid mutation semantics, malformed party counts, safety categories outside the controlled contract, and IDs outside the salon's active catalog. The interpreter inherits the simulator or phone request context and no longer installs a private 2.5-second deadline; the OpenAI adapter retains a 30-second HTTP transport ceiling. A caller-context timeout, provider failure, empty output, invalid schema, low-confidence result, or rejected catalog reference preserves the draft and may fall back to independently validated catalog and already-captured field evidence before asking the next missing-field question. Without such evidence, the runtime safely clarifies or hands off. Guidance provider-failure wording is selected only from typed `dialog_state.guidance.offered_actions`; the immediately following bounded choice can resolve one of those still-active actions without another provider call. It may offer profile-backed consultation only when consultation is enabled and at least one eligible profile is ready, and it never offers a service menu when the runtime catalog is empty. The model cannot call tools, mutate session state, or create confirmed wording.
 
 New booking execution requires revision-bound final review. Service, staff, date/time, guest/party, or customer changes advance the draft revision; dependency-bearing changes also invalidate offered availability. The active POS provider still owns booking execution, and confirmed wording still requires POS success plus a booking ID.
+
+Primary act/question/guidance validation is isolated from auxiliary consultation extraction. `unknown` is treated as absent, while malformed, low-confidence, catalog-invalid, and state-no-op consultation snapshots or mutations are dropped with `turn_consultation_profile_dropped` / `turn_consultation_mutations_dropped` diagnostics instead of rejecting valid primary meaning. Consultation mutation schema values come from the controlled protocol vocabulary plus current request catalog service IDs; runtime field/state validation remains authoritative. A syntactic question containing an expected-field value is partial coverage rather than an automatic fast-lane completion, so semantic constraints such as date plus time window are retained. Once guidance resolves to booking, the reply asks for the next missing booking field; a resolved salon question returns the structured answer without appending the generic caller-goal menu.
 
 Phone channel sessions are created by Twilio webhooks and use the same conversation engine. Phone bookings use source `ai_voice_call`; simulator bookings use source `ai_conversation_simulator`.
 
@@ -1898,6 +1908,15 @@ Returns owner-scoped live voice, phone booking, and external AI provider readine
     "test_booking_cancelled": true,
     "booking_write_blocked": false,
     "service_count": 4,
+    "consultation_enabled": true,
+    "consultation_ready_service_count": 2,
+    "service_guidance": {
+      "status": "recommendation_ready",
+      "catalog_available": true,
+      "consultation_enabled": true,
+      "recommendation_ready": true,
+      "ready_service_count": 2
+    },
     "staff_count": 3,
     "business_hours_count": 6,
     "checks": [
@@ -1943,6 +1962,16 @@ Returns owner-scoped live voice, phone booking, and external AI provider readine
 }
 ```
 
+`booking.service_count` and `booking.staff_count` use the same strict active
+provider, selected location, completed snapshot generation, synced entity-link,
+provider-version, active, non-archived, and AI-bookable fence as conversation
+runtime. `booking.service_guidance.status` is one of
+`recommendation_ready`, `catalog_only`, `consultation_disabled`, or
+`catalog_unavailable`.
+It reports whether the runtime can show the synced catalog and whether enough
+owner-approved consultation profiles exist to make a personalized
+recommendation; it is independent of Twilio transport readiness.
+
 `POST /api/salons/:id/voice/semantic-check`
 
 Runs an authenticated, owner-scoped OpenAI semantic-contract probe using both
@@ -1980,6 +2009,184 @@ does not have the required model/key configuration. A successful live-contract
 request set returns `verified=true`. A successful probe also closes the matching
 local semantic-contract circuits for the same salon and current
 provider/model/schema configurations.
+
+`POST /api/salons/:id/voice/semantic-evaluate`
+
+Runs one authenticated owner-scoped semantic scenario through the same
+salon-scoped turn model used by live phone and simulator turns. This is a
+read-only evaluation surface: it creates no conversation session or transcript,
+does not call availability or booking tools, and cannot produce a confirmed
+appointment. The request is bounded to 100 catalog services, 500 aliases, 100
+categories, and 100 staff. Every selected, pending, draft, alias, category, and
+party-group reference must point into the supplied catalog or the request is
+rejected before the provider call.
+
+```json
+{
+  "scenario_id": "guidance_catalog-001",
+  "channel": "phone",
+  "customer_message": "Could you walk me through the services you offer?",
+  "expected_input": "caller_goal",
+  "semantic_contract": "guidance_turn",
+  "recognizable_guidance_actions": ["book", "service_catalog", "consultation", "salon_question", "name_service", "human_handoff", "reschedule", "cancel"],
+  "booking_action": "book",
+  "catalog_services": [
+    {"service_id": "svc_luna", "service_name": "Luna Renewal", "category_id": "cat_ritual", "category_name": "Signature Ritual"}
+  ],
+  "catalog_service_aliases": [
+    {"service_id": "svc_luna", "alias": "moon refresh"}
+  ],
+  "catalog_categories": [
+    {"category_id": "cat_ritual", "category_name": "Signature Ritual", "aliases": ["renewal"], "service_ids": ["svc_luna"]}
+  ]
+}
+```
+
+The response contains `scenario_id`, the validated structured `result`, and
+`duration_ms`. Provider-disabled returns `503`; caller-context timeout returns
+`504`; provider failure returns `502`. Provider response bodies and secrets are
+never exposed.
+
+The generated corpus and deterministic review live at
+`backend/modules/conversation/testdata/receptionist_semantic_scenarios.json`
+and `receptionist_semantic_review.json`. The schema-v2 corpus contains 196
+authored base utterances: each has an exact phone and simulator instance, then
+transparent generated delivery variants expand the set to 1,000 single-turn
+semantic-contract scenarios. The 100 review records are deterministic corpus,
+source-of-truth, state, safety, and hardcoding audits; they are not model
+executions and are not semantic pass results. Regenerate and validate them with:
+
+```bash
+cd backend
+GOCACHE=/private/tmp/manleai-go-cache go run ./cmd/conversation-eval-corpus
+GOCACHE=/private/tmp/manleai-go-cache go run ./cmd/conversation-eval -mode offline
+```
+
+Offline mode writes
+`receptionist_semantic_offline_report.json` with
+`contract_validated_count=1000`, `model_evaluated_count=0`, `passed_count=0`,
+and `not_run_count=1000`. It proves corpus and scoring-contract validity only;
+it does not claim that a model passed any scenario.
+
+Live evaluation requires an authenticated owner token file and deliberately
+does not read provider configuration from environment files:
+
+```bash
+GOCACHE=/private/tmp/manleai-go-cache go run ./cmd/conversation-eval \
+  -mode live \
+  -api-base https://example.com/api \
+  -salon-id SALON_UUID \
+  -token-file /secure/path/owner-token \
+  -scenario-ids guidance_catalog-002,guidance_catalog-022,guidance_consultation-001,guidance_consultation-002,guidance_consultation-021,guidance_consultation-022 \
+  -output /tmp/conversation-eval-report.json
+```
+
+Live mode requires `-output` and is hard-capped at 12 selected scenarios. Use
+`-scenario-ids id-1,id-2` for targeted canaries or `-limit N` for a bounded
+prefix. `-sample-per-family N` remains available for deterministic offline
+subsets, but the current 14-family corpus exceeds the live cap even at one per
+family. The unselected 1,000-case corpus cannot be sent as a paid live batch.
+Selectors cannot be combined with each other or with `-limit`.
+`-transient-retries N` permits zero to three
+evaluator-only retries for endpoint `502`, `503`, or `504`; semantic mismatches
+are never retried. Reports retain the validated model result and duration for
+every pass and failure and expose both `transient_retry_count` and
+`recovered_transient_count`, so infrastructure recovery cannot be mistaken for
+semantic quality. This evaluator policy does not alter runtime phone or
+simulator retry behavior.
+
+For the separately bounded direct-model pilot, the generated artifact is
+`backend/modules/conversation/testdata/receptionist_semantic_pilot_50.json`.
+It contains 50 directly authored executions across 45 distinct nail-salon
+situations, with five core situations represented once for phone and once for
+simulator. It contains no generated paraphrase filler. Direct-model mode calls
+the stored OpenAI model once for recognition, then lets the production
+Conversation Service decide whether that turn needs a guarded style reply, a
+profile-backed consultation question, or no output-model call. It does not
+force a universal second rewrite. Review batches contain at most five retained
+outputs; the complete 50 therefore has 10 review rounds. With no retries the
+complete-run hard ceiling remains 110, while operational/terminal turns may use
+fewer calls. Evaluation contract `production-flow-v7` rejects final replies
+that expose any dynamic fixture identifier, uses separate typed salon-local
+`hour` and `minute` model fields so the provider never computes minutes after
+midnight, converts those clock components before production slot filtering,
+and deterministically verifies every retained offered slot against
+the recorded `before`, `after`, or `exact` constraint. It also treats expected
+consultation extraction as exact, rejects invented booking/completion flags,
+and rejects positive consultation mutations not represented in the same-turn
+structured snapshot. Protocol `unknown` is normalized to field absence, and
+guidance actions remain the only initial workflow-transition authority.
+Reviewer contract `evidence-review-v7` explicitly checks
+those consultation facts, the recorded local slot minutes and timezone, as well
+as machine-facing labels, silent service/staff/date/time mutations, and
+unnecessarily broad hours answers.
+
+Direct-model mode is a local CLI workflow, not an API endpoint. The supplied
+salon ID is used only to select the encrypted OpenAI row in
+`salon_integration_configs`. `ResolveOpenAIConfigStrict` fails closed if that
+database row is absent, disabled, undecryptable, or incomplete; it never falls
+back to environment provider values. Scenario state, catalogs, aliases,
+consultation profiles, staff, and availability are isolated evaluation
+fixtures. The runner does not use an owner token, does not create conversation
+records, does not call the internal semantic-evaluation API, and blocks every
+booking, reschedule, or cancellation write. Synthetic availability may be
+returned to exercise the caller-facing flow, but it is reported as a tool
+attempt and never reaches the POS.
+
+Run the exact pilot with an explicit paid-call ceiling and report path:
+
+```bash
+cd backend
+GOCACHE=/private/tmp/manleai-go-cache go run ./cmd/conversation-eval \
+  -mode direct-model \
+  -salon-id CONFIG_SALON_UUID \
+  -max-model-calls 110 \
+  -transient-retries 0 \
+  -output /tmp/conversation-eval-pilot-50.json
+```
+
+Run the approved ten-scenario canary before the complete pilot:
+
+```bash
+GOCACHE=/private/tmp/manleai-go-cache go run ./cmd/conversation-eval \
+  -mode direct-model \
+  -salon-id CONFIG_SALON_UUID \
+  -scenario-ids pilot-003,pilot-005,pilot-007,pilot-015,pilot-019,pilot-032,pilot-038,pilot-042,pilot-047,pilot-050 \
+  -max-model-calls 22 \
+  -transient-retries 0 \
+  -output /tmp/conversation-eval-canary-10.json
+```
+
+The complete pilot corpus is contract-validated before selectors are applied.
+`-scenario-ids`, `-limit`, and `-sample-per-family` are mutually exclusive.
+Direct review round count is derived from the selected results in batches of at
+most five, so the ten-scenario canary performs two review calls.
+
+The default checkpoint is
+`/tmp/conversation-eval-pilot-50.json.checkpoint.json`. It is written atomically
+with owner-only permissions before and after every model call. A matching
+checkpoint resumes completed recognition, service-selected output generation,
+and review work without repeating it. The run key includes explicit evaluation
+and reviewer contract versions, so a changed harness cannot resume incompatible
+evidence. If a process stops while a paid call is marked in flight, resume
+fails closed instead of silently repeating a possibly billed request. Raising
+`-transient-retries` from zero permits only bounded transport/provider retries;
+every retry consumes the same `-max-model-calls` budget and semantic mismatches
+are never retried. The report retains per-scenario structured recognition,
+backend-safe reply, final reply, structured backend route/transition/reply-source
+evidence, booking-confirmed and provider-ID facts, owner-request handoff mode,
+model calls, token usage, tool attempts, durations, failures, and the selected
+review records. Repository tests validate the
+harness and fixtures without making a paid model call; they do not claim that
+the current stored model passes the pilot. Review booking safety uses backend
+facts: the absence of a provider booking ID is safe when the backend did not
+confirm, and a recognition-only `booking_requested` flag is not confirmation.
+An `owner_request` handoff must not be rewritten as a live transfer. Each review
+round passes only when all five scores are at least 4/5; the report counts review
+passes and failures separately, and the CLI exits unsuccessfully when any review
+round fails. These model scores remain a secondary review layer: deterministic
+identifier-leak and booking-safety checks can fail a scenario before reviewer
+scoring.
 
 `POST /api/voice/twilio/incoming`
 
@@ -2070,7 +2277,7 @@ Public Twilio Media Streams WebSocket endpoint for realtime audio mode. The endp
 
 With dashboard setting `speech_output_mode=streaming_tts`, backend-approved text is sent to the dedicated Speech API with raw PCM output. OpenAI PCM is signed little-endian mono audio at 24 kHz; the adapter incrementally applies a stateful anti-aliasing 3:1 FIR resampler and encodes raw PCMU 8 kHz frames. The bridge sends one bounded 200 ms startup block, then releases one 160-byte frame every 20 ms from a bounded queue. Queue saturation applies producer backpressure, so provider HTTP chunk speed cannot create a WebSocket burst or reorder/drop audio. A reply shorter than the startup target flushes when its Speech stream completes. Speech provider completion is recorded at `tts_stream_done`, while the reply remains active until the local playout queue drains and records `tts_playout_done`; only then may the typed scheduler start the next eligible reply or emit a terminal Twilio `mark`. Output kinds are ordered by workflow authority: terminal, current backend turn, initial reply, input recovery, then progress. No new TTS request starts while caller speech is active or a stopped-speech item is awaiting its transcript. Caller barge-in before or after startup clears local queued audio and Twilio playback, cancels streaming speech immediately even inside the legacy playback guard, and rejects late chunks by generation. Input-recovery speech has a four-second first-provider-byte budget; on expiry it is canceled so current backend output can advance. A terminal backend or typed handoff reply latches the call, clears nonterminal pending output, ignores later transcripts, and closes exactly once after playout, interruption, or timeout. Provider failure clears any partial playback and enters terminal fallback.
 
-PII-free stages include `speech_stopped`, `transcript_admitted`, `backend_turn_start`, `backend_turn_done`, `tts_request_start`, `tts_first_provider_chunk`, `tts_first_byte_timeout`, `tts_startup_buffer_ready`, `twilio_first_media_sent`, `tts_stream_done`, `tts_playout_done`, and playback completion through the terminal mark. Speech diagnostics expose `input_generation`, `reply_kind`, stale-reply suppression, input/output sample rates, post-first-chunk producer wall/active/audio durations, producer rate excluding local backpressure, observed provider emit gap, producer backpressure duration/count, maximum queue depth, playout duration/frame/batch counts, underrun count, and WebSocket write latency. Backpressure metrics distinguish an upstream provider gap from time intentionally spent waiting for local queue capacity. `backend_turn_done` also exposes whitelisted substage durations for route/config resolution, session load, answer-context load, turn routing, turn interpretation, availability/POS calls, and turn persistence. Router diagnostics include `turn_route`, `turn_expected_input`, `turn_route_reason`, `turn_deterministic_coverage`, `turn_semantic_contract`, `turn_model_service_count`, and `turn_model_staff_count`. `turn_interpreter_path` and `turn_interpreter_outcome` distinguish a skipped model call, accepted structured interpretation, timeout, provider failure, empty or invalid output, confidence rejection, and catalog rejection. Provider failures may also expose the bounded fields `turn_interpreter_provider`, `turn_interpreter_failure_stage`, `turn_interpreter_http_status`, `turn_interpreter_http_status_class`, and `turn_interpreter_request_id`. Request and response bodies are never copied into these diagnostics. These diagnostics contain no transcript, audio, customer, or provider-secret values. Speech output failures close through the signed recording/gather fallback without changing booking state or creating a second booking attempt.
+PII-free stages include `speech_stopped`, `transcript_admitted`, `backend_turn_start`, `backend_turn_done`, `tts_request_start`, `tts_first_provider_chunk`, `tts_first_byte_timeout`, `tts_startup_buffer_ready`, `twilio_first_media_sent`, `tts_stream_done`, `tts_playout_done`, and playback completion through the terminal mark. Speech diagnostics expose `input_generation`, `reply_kind`, stale-reply suppression, input/output sample rates, post-first-chunk producer wall/active/audio durations, producer rate excluding local backpressure, observed provider emit gap, producer backpressure duration/count, maximum queue depth, playout duration/frame/batch counts, underrun count, and WebSocket write latency. Backpressure metrics distinguish an upstream provider gap from time intentionally spent waiting for local queue capacity. `backend_turn_done` also exposes whitelisted substage durations for route/config resolution, session load, answer-context load, turn routing, turn interpretation, availability/POS calls, and turn persistence. Router diagnostics include `turn_route`, `turn_expected_input`, `turn_route_reason`, `turn_deterministic_coverage`, `turn_semantic_contract`, `turn_recognizable_guidance_actions`, `turn_available_guidance_actions`, `turn_guidance_action`, `service_guidance_capability`, `service_guidance_catalog_available`, `service_guidance_recommendation_ready`, `turn_model_service_count`, and `turn_model_staff_count`. `turn_interpreter_path`, `turn_interpreter_outcome`, `turn_interpreter_ms`, and `turn_interpreter_schema_fingerprint` distinguish and time a skipped model call, accepted structured interpretation, timeout, provider failure, empty or invalid output, confidence rejection, and catalog rejection. Provider failures may also expose the bounded fields `turn_interpreter_provider`, `turn_interpreter_failure_stage`, `turn_interpreter_http_status`, `turn_interpreter_http_status_class`, and `turn_interpreter_request_id`. Request and response bodies are never copied into these diagnostics. These diagnostics contain no transcript, audio, customer, or provider-secret values. Speech output failures close through the signed recording/gather fallback without changing booking state or creating a second booking attempt.
 
 `speech_output_mode=buffered_realtime` is a legacy fallback. Only that mode uses Realtime `response.create`, response identity binding, complete output-transcript validation, and release after `response.done`. Operational facts are never allowed to bypass backend/POS ownership in either mode. If realtime configuration is missing, voice status falls back to the recording or gather path.
 

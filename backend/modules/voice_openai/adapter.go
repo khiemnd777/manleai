@@ -26,6 +26,14 @@ type Adapter struct {
 	httpClient     *http.Client
 	circuitMu      sync.Mutex
 	turnCircuits   map[string]turnContractCircuit
+	observerMu     sync.RWMutex
+	usageObserver  func(stage string, usage Usage)
+}
+
+type Usage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
 }
 
 type turnContractCircuit struct {
@@ -46,6 +54,29 @@ func NewAdapter(cfg config.OpenAIVoiceConfig) *Adapter {
 
 func (a *Adapter) SetConfigResolver(resolver OpenAIConfigResolver) {
 	a.configResolver = resolver
+}
+
+// SetUsageObserver exposes non-secret token counters for retained evaluation
+// reports. Production behavior is unchanged when no observer is installed.
+func (a *Adapter) SetUsageObserver(observer func(stage string, usage Usage)) {
+	if a == nil {
+		return
+	}
+	a.observerMu.Lock()
+	a.usageObserver = observer
+	a.observerMu.Unlock()
+}
+
+func (a *Adapter) observeUsage(stage string, usage Usage) {
+	if a == nil {
+		return
+	}
+	a.observerMu.RLock()
+	observer := a.usageObserver
+	a.observerMu.RUnlock()
+	if observer != nil {
+		observer(stage, usage)
+	}
 }
 
 func (a *Adapter) Name() string {
@@ -137,6 +168,9 @@ func (a *Adapter) GenerateReply(ctx context.Context, req voice.ModelRequest) (vo
 			"You are the AI phone receptionist for a US nail salon.",
 			"Generate exactly one concise, natural spoken question from consultation_question.",
 			"Ask only about consultation_question.field and use only its option values as facts.",
+			"Sound like a receptionist beginning a helpful consultation, not a form validator: briefly acknowledge that you can help, then ask the practical question.",
+			"Treat option values as semantic labels and express them in ordinary caller language; never read raw codes or underscores aloud.",
+			"Do not use bureaucratic verification language or claim that the question guarantees the best service.",
 			"Do not recommend or name a service, invent suitability, price, policy, timing, or medical advice.",
 			"Do not mention internal fields, profile revisions, IDs, providers, or structured data.",
 			toneInstruction(req.AITone),
@@ -181,6 +215,7 @@ func (a *Adapter) GenerateReply(ctx context.Context, req voice.ModelRequest) (vo
 	if err := a.do(httpReq, &res, "reply_response"); err != nil {
 		return voice.ModelReply{}, err
 	}
+	a.observeUsage("reply", res.Usage)
 	text := strings.TrimSpace(res.OutputText)
 	if text == "" {
 		text = strings.TrimSpace(res.firstText())
@@ -220,6 +255,9 @@ func (a *Adapter) CheckTurnContract(ctx context.Context, salonID string) (voice.
 			ExpectedInput:    "contract_validation",
 			SemanticContract: contract,
 		}
+		if contract == conversation.TurnSemanticContractGuidance {
+			req.RecognizableGuidanceActions = conversation.GuidanceActionValues()
+		}
 		_, err := a.interpretTurn(ctx, req, true)
 		if err == nil {
 			continue
@@ -242,7 +280,7 @@ func (a *Adapter) interpretTurn(ctx context.Context, req voice.TurnModelRequest,
 		return voice.TurnModelReply{}, voice.ErrProviderDisabled
 	}
 	contract := normalizedTurnSemanticContract(req.SemanticContract)
-	schema := turnUnderstandingSchemaForContract(contract)
+	schema := turnUnderstandingSchemaForContract(contract, turnModelCatalogServiceIDs(req.CatalogServices)...)
 	if err := validateStructuredOutputSchema(schema); err != nil {
 		return voice.TurnModelReply{}, fmt.Errorf("%w: %v", voice.ErrTurnModelInvalidOutput, err)
 	}
@@ -289,6 +327,7 @@ func (a *Adapter) interpretTurn(ctx context.Context, req voice.TurnModelRequest,
 		}
 		return voice.TurnModelReply{}, err
 	}
+	a.observeUsage("turn_interpretation", res.Usage)
 	a.clearTurnCircuit(req.SalonID, configFingerprint)
 	text := strings.TrimSpace(res.OutputText)
 	if text == "" {
@@ -301,7 +340,73 @@ func (a *Adapter) interpretTurn(ctx context.Context, req voice.TurnModelRequest,
 	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
 		return voice.TurnModelReply{}, fmt.Errorf("%w: %v", voice.ErrTurnModelInvalidOutput, err)
 	}
+	if err := normalizeTurnModelTimePreferences(&parsed); err != nil {
+		return voice.TurnModelReply{}, fmt.Errorf("%w: %v", voice.ErrTurnModelInvalidOutput, err)
+	}
+	parsed.Consultation = normalizeConsultationUnknownValues(parsed.Consultation)
+	if contract == conversation.TurnSemanticContractGuidance {
+		parsed = normalizeGuidanceModelReply(parsed)
+	}
+	parsed.Diagnostics = map[string]string{"schema_fingerprint": schemaFingerprint}
 	return parsed, nil
+}
+
+func normalizeGuidanceModelReply(reply voice.TurnModelReply) voice.TurnModelReply {
+	reply.Goal = conversation.GuidanceGoalForAction(reply.GuidanceAction)
+	// Guidance chooses the workflow. These flags are meaningful only after a
+	// consultation is active and must not become a second transition authority.
+	reply.Consultation.BookingRequested = false
+	reply.Consultation.ConversationComplete = false
+	switch strings.TrimSpace(reply.GuidanceAction) {
+	case conversation.GuidanceActionServiceCatalog:
+		reply.GuidanceQuestionSubject = conversation.ConversationQuestionCatalog
+	case conversation.GuidanceActionSalonQuestion:
+		reply.GuidanceCatalogMode = ""
+	default:
+		reply.GuidanceCatalogMode = ""
+		reply.GuidanceQuestionSubject = ""
+	}
+	return reply
+}
+
+func normalizeConsultationUnknownValues(reply voice.ConsultationModelReply) voice.ConsultationModelReply {
+	if strings.TrimSpace(reply.CurrentSystem) == conversation.ConsultationSystemUnknown {
+		reply.CurrentSystem = ""
+	}
+	if strings.TrimSpace(reply.DesiredOutcome) == conversation.ConsultationOutcomeUnknown {
+		reply.DesiredOutcome = ""
+	}
+	if strings.TrimSpace(reply.LengthChange) == conversation.ConsultationLengthUnknown {
+		reply.LengthChange = ""
+	}
+	return reply
+}
+
+func normalizeTurnModelTimePreferences(reply *voice.TurnModelReply) error {
+	if reply == nil {
+		return nil
+	}
+	for index := range reply.Questions {
+		preference := &reply.Questions[index].TimePreference
+		direction := strings.TrimSpace(preference.Direction)
+		if direction == "" {
+			if preference.Hour != -1 || preference.Minute != -1 {
+				return fmt.Errorf("question %d has time components without a direction", index)
+			}
+			preference.Minutes = -1
+			continue
+		}
+		switch direction {
+		case conversation.TimePreferenceBefore, conversation.TimePreferenceAfter, conversation.TimePreferenceExact:
+		default:
+			return fmt.Errorf("question %d has unsupported time direction", index)
+		}
+		if preference.Hour < 0 || preference.Hour > 23 || preference.Minute < 0 || preference.Minute > 59 {
+			return fmt.Errorf("question %d has invalid local clock components", index)
+		}
+		preference.Minutes = preference.Hour*60 + preference.Minute
+	}
+	return nil
 }
 
 func (a *Adapter) Synthesize(ctx context.Context, salonID string, text string, requestedVoice string) ([]byte, error) {
@@ -613,7 +718,7 @@ func modelInput(req voice.ModelRequest) string {
 	return string(raw)
 }
 
-func turnUnderstandingSchema() map[string]any {
+func turnUnderstandingSchema(catalogServiceIDs ...string) map[string]any {
 	act := map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
@@ -658,6 +763,11 @@ func turnUnderstandingSchema() map[string]any {
 				conversation.ConversationQuestionAvailability, conversation.ConversationQuestionPrice,
 				conversation.ConversationQuestionHours, conversation.ConversationQuestionStaff, conversation.ConversationQuestionPolicy,
 			}},
+			"mode": map[string]any{"type": "string", "enum": []string{
+				"", conversation.ConversationQuestionModeList, conversation.ConversationQuestionModeCount,
+				conversation.ConversationQuestionModeExistence, conversation.ConversationQuestionModeDetails,
+				conversation.ConversationQuestionModeCompare,
+			}},
 			"service_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			"staff_ids":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			"time_preference": map[string]any{
@@ -665,35 +775,17 @@ func turnUnderstandingSchema() map[string]any {
 				"additionalProperties": false,
 				"properties": map[string]any{
 					"direction": map[string]any{"type": "string", "enum": []string{"", conversation.TimePreferenceBefore, conversation.TimePreferenceAfter, conversation.TimePreferenceExact}},
-					"minutes":   map[string]any{"type": "integer", "minimum": -1, "maximum": 1439},
+					"hour":      map[string]any{"type": "integer", "minimum": -1, "maximum": 23},
+					"minute":    map[string]any{"type": "integer", "minimum": -1, "maximum": 59},
 				},
-				"required": []string{"direction", "minutes"},
+				"required": []string{"direction", "hour", "minute"},
 			},
 			"confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
 			"reason":     map[string]any{"type": "string"},
 		},
-		"required": []string{"subject", "service_ids", "staff_ids", "time_preference", "confidence", "reason"},
+		"required": []string{"subject", "mode", "service_ids", "staff_ids", "time_preference", "confidence", "reason"},
 	}
-	consultationMutation := map[string]any{
-		"type":                 "object",
-		"additionalProperties": false,
-		"properties": map[string]any{
-			"field": map[string]any{"type": "string", "enum": []string{
-				conversation.ConsultationNeedFieldCurrentSystem, conversation.ConsultationNeedFieldDesiredOutcome,
-				conversation.ConsultationNeedFieldLengthChange, conversation.ConsultationNeedFieldPriorities,
-				conversation.ConsultationNeedFieldDesiredFinishes, conversation.ConsultationNeedFieldComparedServiceIDs,
-			}},
-			"operation": map[string]any{"type": "string", "enum": []string{
-				conversation.ConsultationNeedOperationSet, conversation.ConsultationNeedOperationReplace,
-				conversation.ConsultationNeedOperationAdd, conversation.ConsultationNeedOperationRemove,
-				conversation.ConsultationNeedOperationClear,
-			}},
-			"values":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-			"confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
-			"reason":     map[string]any{"type": "string"},
-		},
-		"required": []string{"field", "operation", "values", "confidence", "reason"},
-	}
+	consultationMutation := consultationMutationSchema(catalogServiceIDs)
 	consultation := map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
@@ -766,6 +858,68 @@ func turnUnderstandingSchema() map[string]any {
 	}
 }
 
+func consultationMutationSchema(catalogServiceIDs []string) map[string]any {
+	values := []string{
+		conversation.ConsultationSystemNatural, conversation.ConsultationSystemRegularPolish,
+		conversation.ConsultationSystemGel, conversation.ConsultationSystemDip,
+		conversation.ConsultationSystemAcrylic, conversation.ConsultationSystemExtension,
+		conversation.ConsultationOutcomeMaintain, conversation.ConsultationOutcomeShorten,
+		conversation.ConsultationOutcomeAddLength, conversation.ConsultationOutcomeAddStrength,
+		conversation.ConsultationOutcomeRepair, conversation.ConsultationOutcomeRemoval,
+		conversation.ConsultationOutcomeColorRefresh, conversation.ConsultationOutcomeCompare,
+		conversation.ConsultationLengthKeep, conversation.ConsultationLengthShorten,
+		conversation.ConsultationLengthAddLength, conversation.ConsultationPriorityDurability,
+		conversation.ConsultationPriorityLowerMaintenance, conversation.ConsultationPriorityLowerCost,
+		conversation.ConsultationPriorityShorterVisit, conversation.ConsultationFinishNatural,
+		conversation.ConsultationFinishRegularPolish, conversation.ConsultationFinishGelPolish,
+		conversation.ConsultationFinishGlossy, conversation.ConsultationFinishMatte,
+		conversation.ConsultationFinishNailArt,
+	}
+	values = append(values, catalogServiceIDs...)
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"field": map[string]any{"type": "string", "enum": []string{
+				conversation.ConsultationNeedFieldCurrentSystem, conversation.ConsultationNeedFieldDesiredOutcome,
+				conversation.ConsultationNeedFieldLengthChange, conversation.ConsultationNeedFieldPriorities,
+				conversation.ConsultationNeedFieldDesiredFinishes, conversation.ConsultationNeedFieldComparedServiceIDs,
+			}},
+			"operation": map[string]any{"type": "string", "enum": []string{
+				conversation.ConsultationNeedOperationSet, conversation.ConsultationNeedOperationReplace,
+				conversation.ConsultationNeedOperationAdd, conversation.ConsultationNeedOperationRemove,
+				conversation.ConsultationNeedOperationClear,
+			}},
+			"values":     map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": uniqueNonEmptyStrings(values)}},
+			"confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+			"reason":     map[string]any{"type": "string"},
+		},
+		"required": []string{"field", "operation", "values", "confidence", "reason"},
+	}
+}
+
+func turnModelCatalogServiceIDs(services []conversation.ConversationServiceRef) []string {
+	ids := make([]string, 0, len(services))
+	for _, service := range services {
+		ids = append(ids, service.ServiceID)
+	}
+	return uniqueNonEmptyStrings(ids)
+}
+
+func uniqueNonEmptyStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
 func normalizedTurnSemanticContract(contract string) string {
 	if strings.TrimSpace(contract) == conversation.TurnSemanticContractGuidance {
 		return conversation.TurnSemanticContractGuidance
@@ -773,15 +927,28 @@ func normalizedTurnSemanticContract(contract string) string {
 	return conversation.TurnSemanticContractFull
 }
 
-func turnUnderstandingSchemaForContract(contract string) map[string]any {
-	schema := turnUnderstandingSchema()
+func turnUnderstandingSchemaForContract(contract string, catalogServiceIDs ...string) map[string]any {
+	schema := turnUnderstandingSchema(catalogServiceIDs...)
 	if normalizedTurnSemanticContract(contract) != conversation.TurnSemanticContractGuidance {
 		return schema
 	}
 	properties := schema["properties"].(map[string]any)
+	delete(properties, "goal")
 	delete(properties, "acts")
 	delete(properties, "questions")
-	schema["required"] = []string{"goal", "confidence", "reason", "consultation", "safety"}
+	properties["guidance_action"] = map[string]any{"type": "string", "enum": append([]string{""}, conversation.GuidanceActionValues()...)}
+	properties["guidance_catalog_mode"] = map[string]any{"type": "string", "enum": []string{
+		"", conversation.ConversationQuestionModeList, conversation.ConversationQuestionModeCount,
+		conversation.ConversationQuestionModeExistence, conversation.ConversationQuestionModeDetails,
+		conversation.ConversationQuestionModeCompare,
+	}}
+	properties["guidance_question_subject"] = map[string]any{"type": "string", "enum": []string{
+		"", conversation.ConversationQuestionCatalog, conversation.ConversationQuestionAvailability,
+		conversation.ConversationQuestionPrice, conversation.ConversationQuestionHours,
+		conversation.ConversationQuestionStaff, conversation.ConversationQuestionPolicy,
+	}}
+	properties["guidance_party_size"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 20}
+	schema["required"] = []string{"guidance_action", "guidance_catalog_mode", "guidance_question_subject", "guidance_party_size", "confidence", "reason", "consultation", "safety"}
 	return schema
 }
 
@@ -795,33 +962,49 @@ func turnUnderstandingSchemaName(contract string) string {
 func turnUnderstandingInstructions(contract string) []string {
 	shared := []string{
 		"Interpret one caller turn for a US nail salon receptionist.",
+		"The caller's explicit actionable request, question, correction, or cancellation owns the interpretation. Politeness, greetings, filler, and background context do not override it; only a later explicit change or withdrawal supersedes an earlier request.",
 		"expected_input describes the state-owned field or decision currently awaiting an answer; use it as context, not as a closed vocabulary.",
 		"Use only service and category IDs present in catalog_services.",
 		"Do not infer booking confirmation, availability, customer identity, prices, or policy.",
 		"For consultation, extract only the caller's stated current nail system, desired outcome, length change, priorities, desired finishes, compared catalog service IDs, booking request, and whether the caller is done. Never recommend a service in model output.",
-		"For every consultation preference stated or corrected in this turn, emit a field-level mutation. Use set for an initial value, replace for a correction, add or remove for list items, and clear only when the caller explicitly withdraws the field. Never treat a negated value as an addition.",
+		"For every consultation preference stated or corrected in this turn, emit a field-level mutation. Use set for an initial value, replace for a correction, add or remove for list items, and clear only when the caller explicitly withdraws the field. Every positive set, replace, or add value must also appear in the matching same-turn consultation snapshot field; never create a mutation from uncertainty, a question, or a guessed preference. Never treat a negated value as an addition. Unknown means absent: never emit unknown as a mutation value, and never emit a no-op mutation.",
 		"Classify safety.concern=true for pain, injury, infection, allergy, bleeding, swelling, adverse reaction, or a request for medical suitability or treatment advice. This safety classification applies regardless of the caller's booking or consultation goal.",
-		"Use empty strings and arrays when consultation details are not present. Do not infer health suitability or treatment claims.",
+		"Use empty strings and arrays when consultation details are not present. Set consultation booking_requested only for an explicit request to schedule or book after consultation; wanting a nail service, asking for advice, or entering consultation is not a booking request. Set conversation_complete only when the caller explicitly ends consultation. Do not infer health suitability or treatment claims.",
 		"Return strict JSON matching the schema.",
 	}
 	if normalizedTurnSemanticContract(contract) == conversation.TurnSemanticContractGuidance {
 		return append([]string{
 			"The dialog is awaiting the caller's goal or the kind of service guidance they want.",
-			"Return only the caller goal, extraction-only consultation details, confidence, reason, and safety assessment; never create booking operations or questions.",
+			"Choose guidance_action only from recognizable_guidance_actions in the input. These values describe meanings you must recognize; they do not claim the salon can fulfill every workflow. Use an empty guidance_action only when none matches the caller's meaning.",
+			"Use book for an explicit new appointment request, service_catalog for a request to hear or view available services, consultation for needs-based help choosing, salon_question for an operational salon question, name_service when the caller names or says they can name the desired service, reschedule for moving an existing appointment, cancel for cancelling an existing appointment, and human_handoff for an explicit request for a person.",
+			"When the caller identifies a concrete desired service or category from the supplied catalog, choose name_service even if the same sentence asks to book it. Choose book only when the caller wants to start a new booking without identifying the desired catalog service or category.",
+			"Choose consultation when the caller wants a nail service but has not identified a concrete catalog service and is asking for help, direction, a suggestion, or a way to determine what fits. This includes a broad stated desire for a nail service when no booking or scheduling request is present. Choose book for an explicit appointment or scheduling request without a named service. Choose service_catalog only when the caller asks to hear, view, count, check, describe, or compare catalog offerings without asking for needs-based help.",
+			"A request to check, describe, or compare named catalog services is service_catalog even when the caller is gathering information before deciding. A question about whether the salon offers a service, appointment type, price, staff, hours, policy, or opening is information, not an implicit booking command.",
+			"Set guidance_party_size to the explicit total party size only for a new booking covering two or more people; otherwise set it to zero. Never infer a party size from service quantity.",
+			"When guidance_action is service_catalog, set guidance_catalog_mode to list, count, existence, details, or compare from the caller's requested operation. Otherwise use an empty guidance_catalog_mode.",
+			"When guidance_action is service_catalog, set guidance_question_subject=catalog. When it is salon_question, set guidance_question_subject to availability, price, hours, staff, or policy. Otherwise use an empty guidance_question_subject.",
+			"Return only the typed guidance action, extraction-only consultation details, confidence, reason, and safety assessment; never create a separate goal, booking operations, or questions.",
 		}, shared...)
 	}
 	return append([]string{
 		"Return structured operations and questions only; never write a customer-facing reply.",
+		"When current_booking_stage is consultation, set goal=consultation unless the caller explicitly requests cancellation, rescheduling, or human handoff; keep acts empty and return only consultation extraction/mutations plus any structured information questions. Never select, add, replace, or remove a service from consultation needs.",
 		"A turn may contain multiple operations and questions. Preserve their spoken order.",
 		"Use only staff IDs present in catalog_staff.",
 		"Distinguish the salon catalog from the caller's current booking draft.",
 		"For replacements, preserve source (what is being replaced) separately from target (the new service).",
-		"Use guest_scope=another_guest only when the caller explicitly assigns the added service to another person.",
-		"For an existing party plan, set guest_ref to an exact current_draft.party_groups guest_ref for every service mutation; never flatten guest groups.",
+		"Choose an operation from the caller's stated change, never from current_draft contents. An additive or inclusive request is add_service even when the target shares a category with an existing service or the guest already has another service. Use replace_service only when the caller explicitly requests replacement in this turn. A replace_service source_id must identify a current service the caller explicitly referred to as the source being changed; never invent replacement wording or source_ids from the draft merely because that draft or guest already has another service.",
+		"For entity=staff, source_ids and target_ids may contain only IDs from catalog_staff and must never contain service IDs. When the caller asks for any different technician without naming one, use subject=alternative with empty source_ids and target_ids.",
+		"Use guest_scope=another_guest only before a structured party plan exists and the caller explicitly assigns a service to another person.",
+		"For an existing party plan, set guest_ref to an exact current_draft.party_groups guest_ref for every service mutation and leave guest_scope empty; guest_ref is authoritative and guest groups must never be flattened.",
 		"A pending clarification is context, not a restriction: a clearly different new target may supersede it.",
 		"For an initial concrete service selection, emit add_service with entity=service and the catalog target ID.",
+		"When the caller supplies or revises an appointment date or time, emit set_field with entity=date_time and subject=requested_date or requested_time. Never encode a requested appointment date or time as a current_booking question.",
+		"When expected_input is requested_date or requested_time and the caller supplies a scheduling constraint, acts must contain the corresponding set_field date_time operation, or questions must contain an availability time_preference when the caller is asking rather than selecting. A booking goal or consultation.booking_requested flag never substitutes for that structured scheduling signal; do not return both acts and questions empty.",
 		"Represent questions about the current draft as questions with subject=current_booking.",
-		"For availability constraints, set time_preference.direction to before, after, or exact and time_preference.minutes to salon-local minutes after midnight. Use direction empty and minutes -1 when no time constraint is present.",
+		"A request to list, count, check, describe, or compare services already in current_draft is always a current_booking question with the matching mode and current draft service_ids. Never turn a current-booking comparison into goal=consultation or consultation compared_service_ids.",
+		"For every information question, set mode to list, count, existence, details, or compare when that operation applies; otherwise use an empty mode.",
+		"For availability constraints, set time_preference.direction to before, after, or exact and use salon-local 24-hour clock components in time_preference.hour and time_preference.minute. For example, 1:30 PM is hour 13 and minute 30. Do not calculate minutes after midnight. Use direction empty with hour -1 and minute -1 when no time constraint is present.",
 		"A final-review acceptance may coexist with a correction; include both and never suppress the correction.",
 		"Use set_field or clear_field for staff, date/time, guest, or customer-field corrections.",
 		"For a customer-name correction, emit set_field with entity=customer, subject=name, and value equal to the corrected name.",
@@ -831,21 +1014,48 @@ func turnUnderstandingInstructions(contract string) []string {
 
 func turnModelInput(req voice.TurnModelRequest) string {
 	raw, _ := json.Marshal(map[string]any{
-		"channel":               req.Channel,
-		"customer_message":      req.CustomerMessage,
-		"expected_input":        req.ExpectedInput,
-		"semantic_contract":     normalizedTurnSemanticContract(req.SemanticContract),
-		"selected_services":     req.SelectedServices,
-		"catalog_services":      req.CatalogServices,
-		"selected_staff":        req.SelectedStaff,
-		"catalog_staff":         req.CatalogStaff,
-		"pending":               req.Pending,
-		"current_booking_stage": req.CurrentBookingStage,
-		"booking_action":        req.BookingAction,
-		"current_draft":         req.CurrentDraft,
-		"consultation":          req.Consultation,
+		"channel":                       req.Channel,
+		"customer_message":              req.CustomerMessage,
+		"expected_input":                req.ExpectedInput,
+		"semantic_contract":             normalizedTurnSemanticContract(req.SemanticContract),
+		"recognizable_guidance_actions": append([]string(nil), req.RecognizableGuidanceActions...),
+		"selected_services":             turnModelServiceRefs(req.SelectedServices),
+		"catalog_services":              turnModelServiceRefs(req.CatalogServices),
+		"catalog_service_aliases":       req.CatalogServiceAliases,
+		"catalog_categories":            req.CatalogCategories,
+		"selected_staff":                req.SelectedStaff,
+		"catalog_staff":                 req.CatalogStaff,
+		"pending":                       req.Pending,
+		"current_booking_stage":         req.CurrentBookingStage,
+		"booking_action":                req.BookingAction,
+		"current_draft":                 turnModelDraftRef(req.CurrentDraft),
+		"consultation":                  req.Consultation,
 	})
 	return string(raw)
+}
+
+func turnModelDraftRef(draft conversation.ConversationDraftRef) conversation.ConversationDraftRef {
+	copyDraft := draft
+	copyDraft.ServiceIDs = append([]string(nil), draft.ServiceIDs...)
+	copyDraft.PartyGroups = make([]conversation.ConversationPartyGroupRef, 0, len(draft.PartyGroups))
+	for _, group := range draft.PartyGroups {
+		// Guest identity and count are needed for assignment. Existing per-guest
+		// services stay backend-owned so the model cannot infer a destructive
+		// replacement source from draft layout rather than caller evidence.
+		copyDraft.PartyGroups = append(copyDraft.PartyGroups, conversation.ConversationPartyGroupRef{
+			GuestRef: strings.TrimSpace(group.GuestRef), Count: group.Count,
+		})
+	}
+	return copyDraft
+}
+
+func turnModelServiceRefs(refs []conversation.ConversationServiceRef) []conversation.ConversationServiceRef {
+	out := make([]conversation.ConversationServiceRef, 0, len(refs))
+	for _, ref := range refs {
+		ref.ConsultationProfile = nil
+		out = append(out, ref)
+	}
+	return out
 }
 
 func toneInstruction(tone string) string {
@@ -907,6 +1117,7 @@ type responseFormat struct {
 type responseResponse struct {
 	OutputText string           `json:"output_text"`
 	Output     []responseOutput `json:"output"`
+	Usage      Usage            `json:"usage"`
 }
 
 type responseOutput struct {

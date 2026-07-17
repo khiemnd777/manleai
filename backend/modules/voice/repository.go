@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/manleai/ai-receptionist/modules/conversation"
 )
 
 type Repository struct {
@@ -39,13 +41,14 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 	err := r.db.QueryRowContext(ctx, `
 		SELECT
 			s.ai_enabled,
+			COALESCE(settings.consultation_enabled, false),
 			s.active_pos_provider,
 			EXISTS (
 				SELECT 1
 				FROM pos_connections pc
 				WHERE pc.salon_id = s.id
 				  AND pc.provider = s.active_pos_provider
-				  AND pc.status NOT IN ('not_connected', 'error', 'expired_token', 'disabled')
+				  AND pc.status = 'active'
 				  AND COALESCE(pc.location_id, '') <> ''
 			) AS provider_connected,
 			EXISTS (
@@ -53,29 +56,92 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 				FROM pos_connections pc
 				WHERE pc.salon_id = s.id
 				  AND pc.provider = s.active_pos_provider
-				  AND pc.status NOT IN ('not_connected', 'error', 'expired_token', 'disabled')
+				  AND pc.status = 'active'
 				  AND COALESCE(pc.location_id, '') <> ''
+				  AND pc.snapshot_generation > 0
 				  AND pc.last_sync_at IS NOT NULL
 			) AS provider_synced,
 			(
-				SELECT COUNT(*)
+				SELECT COUNT(DISTINCT svc.id)
 				FROM services svc
+				JOIN pos_connections pc
+				  ON pc.salon_id = svc.salon_id
+				 AND pc.provider = s.active_pos_provider
+				 AND pc.status = 'active'
+				 AND NULLIF(BTRIM(pc.location_id), '') IS NOT NULL
+				 AND pc.snapshot_generation > 0
+				 AND pc.last_sync_at IS NOT NULL
+				JOIN pos_entity_links link
+				  ON link.salon_id = svc.salon_id
+				 AND link.entity_type = 'service'
+				 AND link.entity_id = svc.id
+				 AND link.provider = s.active_pos_provider
+				 AND link.sync_status = 'synced'
+				 AND NULLIF(BTRIM(link.provider_entity_id), '') IS NOT NULL
 				WHERE svc.salon_id = s.id
 				  AND svc.pos_provider = s.active_pos_provider
 				  AND svc.active = true
 				  AND svc.ai_bookable = true
-				  AND COALESCE(svc.pos_service_id, '') <> ''
-				  AND COALESCE(svc.pos_service_version, 0) > 0
+				  AND svc.archived_at IS NULL
+				  AND svc.sync_status = 'synced'
 				  AND svc.duration_minutes > 0
+				  AND COALESCE(link.provider_version, svc.pos_service_version, 0) > 0
 			) AS service_count,
 			(
-				SELECT COUNT(*)
+				SELECT COUNT(DISTINCT svc.id)
+				FROM services svc
+				JOIN pos_connections pc
+				  ON pc.salon_id = svc.salon_id
+				 AND pc.provider = s.active_pos_provider
+				 AND pc.status = 'active'
+				 AND NULLIF(BTRIM(pc.location_id), '') IS NOT NULL
+				 AND pc.snapshot_generation > 0
+				 AND pc.last_sync_at IS NOT NULL
+				JOIN pos_entity_links link
+				  ON link.salon_id = svc.salon_id
+				 AND link.entity_type = 'service'
+				 AND link.entity_id = svc.id
+				 AND link.provider = s.active_pos_provider
+				 AND link.sync_status = 'synced'
+				 AND NULLIF(BTRIM(link.provider_entity_id), '') IS NOT NULL
+				JOIN service_consultation_profiles profile
+				  ON profile.salon_id = svc.salon_id
+				 AND profile.service_id = svc.id
+				 AND profile.status = 'ready'
+				 AND jsonb_array_length(profile.recommended_outcomes) > 0
+				 AND jsonb_array_length(profile.compatible_current_systems) > 0
+				WHERE svc.salon_id = s.id
+				  AND svc.pos_provider = s.active_pos_provider
+				  AND svc.active = true
+				  AND svc.ai_bookable = true
+				  AND svc.archived_at IS NULL
+				  AND svc.sync_status = 'synced'
+				  AND svc.duration_minutes > 0
+				  AND COALESCE(link.provider_version, svc.pos_service_version, 0) > 0
+			) AS consultation_ready_service_count,
+			(
+				SELECT COUNT(DISTINCT st.id)
 				FROM staff st
+				JOIN pos_connections pc
+				  ON pc.salon_id = st.salon_id
+				 AND pc.provider = s.active_pos_provider
+				 AND pc.status = 'active'
+				 AND NULLIF(BTRIM(pc.location_id), '') IS NOT NULL
+				 AND pc.snapshot_generation > 0
+				 AND pc.last_sync_at IS NOT NULL
+				JOIN pos_entity_links link
+				  ON link.salon_id = st.salon_id
+				 AND link.entity_type = 'staff'
+				 AND link.entity_id = st.id
+				 AND link.provider = s.active_pos_provider
+				 AND link.sync_status = 'synced'
+				 AND NULLIF(BTRIM(link.provider_entity_id), '') IS NOT NULL
 				WHERE st.salon_id = s.id
 				  AND st.pos_provider = s.active_pos_provider
 				  AND st.active = true
 				  AND st.ai_bookable = true
-				  AND COALESCE(st.pos_staff_id, '') <> ''
+				  AND st.archived_at IS NULL
+				  AND st.sync_status = 'synced'
 			) AS staff_count,
 				(
 					SELECT COUNT(*)
@@ -127,14 +193,17 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 				ORDER BY pe.created_at DESC
 				LIMIT 1
 			) booking_write_blocker ON true
+			LEFT JOIN salon_settings settings ON settings.salon_id = s.id
 			WHERE s.id = $1
 			  AND s.owner_user_id = $2
 	`, salonID, ownerUserID).Scan(
 		&readiness.AIEnabled,
+		&readiness.ConsultationEnabled,
 		&readiness.ActiveProvider,
 		&readiness.ProviderConnected,
 		&readiness.ProviderSynced,
 		&readiness.ServiceCount,
+		&readiness.ConsultationReadyServices,
 		&readiness.StaffCount,
 		&readiness.BusinessHoursCount,
 		&readiness.TestBookingCancelled,
@@ -154,6 +223,9 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 	if bookingWriteBlockedAt.Valid {
 		readiness.BookingWriteBlockedAt = &bookingWriteBlockedAt.Time
 	}
+	readiness.ServiceGuidance = serviceGuidanceReadiness(
+		readiness.ServiceCount, readiness.ConsultationEnabled, readiness.ConsultationReadyServices,
+	)
 	providerLabel := readiness.ActiveProvider
 	if providerLabel == "square" {
 		providerLabel = "Square Appointments"
@@ -183,6 +255,28 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 		}
 	}
 	return &readiness, nil
+}
+
+func serviceGuidanceReadiness(serviceCount int, consultationEnabled bool, readyServiceCount int) ServiceGuidanceReadiness {
+	result := ServiceGuidanceReadiness{
+		CatalogAvailable: serviceCount > 0, ConsultationEnabled: consultationEnabled,
+		ReadyServiceCount: readyServiceCount,
+	}
+	switch {
+	case serviceCount == 0:
+		result.Status = conversation.ServiceGuidanceCapabilityCatalogUnavailable
+		result.Message = "The runtime service catalog is unavailable; sync at least one active provider-linked AI-bookable service."
+	case !consultationEnabled:
+		result.Status = conversation.ServiceGuidanceCapabilityDisabled
+		result.Message = "The service catalog is available, but personalized consultation is disabled."
+	case readyServiceCount == 0:
+		result.Status = conversation.ServiceGuidanceCapabilityCatalogOnly
+		result.Message = "The service catalog is available, but no owner-approved consultation profile is ready."
+	default:
+		result.Status = conversation.ServiceGuidanceCapabilityRecommendationReady
+		result.RecommendationReady = true
+	}
+	return result
 }
 
 func (r *Repository) FindSalonByPhone(ctx context.Context, phone string) (*InboundSalon, error) {

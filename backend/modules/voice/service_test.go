@@ -33,6 +33,34 @@ func TestStatusReportsPhoneBookingReadiness(t *testing.T) {
 	}
 }
 
+func TestServiceGuidanceReadinessSeparatesCatalogFromRecommendationCapability(t *testing.T) {
+	tests := []struct {
+		name                string
+		serviceCount        int
+		consultationEnabled bool
+		readyProfiles       int
+		wantStatus          conversation.ServiceGuidanceCapabilityStatus
+		wantCatalog         bool
+		wantRecommendation  bool
+	}{
+		{name: "catalog unavailable", wantStatus: conversation.ServiceGuidanceCapabilityCatalogUnavailable},
+		{name: "consultation disabled", serviceCount: 3, wantStatus: conversation.ServiceGuidanceCapabilityDisabled, wantCatalog: true},
+		{name: "catalog only", serviceCount: 3, consultationEnabled: true, wantStatus: conversation.ServiceGuidanceCapabilityCatalogOnly, wantCatalog: true},
+		{name: "recommendation ready", serviceCount: 3, consultationEnabled: true, readyProfiles: 2, wantStatus: conversation.ServiceGuidanceCapabilityRecommendationReady, wantCatalog: true, wantRecommendation: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := serviceGuidanceReadiness(test.serviceCount, test.consultationEnabled, test.readyProfiles)
+			if got.Status != test.wantStatus || got.CatalogAvailable != test.wantCatalog || got.RecommendationReady != test.wantRecommendation || got.ReadyServiceCount != test.readyProfiles {
+				t.Fatalf("readiness = %#v", got)
+			}
+			if got.Status != conversation.ServiceGuidanceCapabilityRecommendationReady && got.Message == "" {
+				t.Fatalf("degraded readiness has no operator message: %#v", got)
+			}
+		})
+	}
+}
+
 func TestSemanticCheckVerifiesLiveContractWithoutConversationMutation(t *testing.T) {
 	store := newFakeVoiceStore()
 	engine := newFakeConversationEngine()
@@ -78,6 +106,189 @@ func TestSemanticCheckReturnsSafeProviderDiagnosticsAsStatus(t *testing.T) {
 	}
 	if !status.Configured || status.Verified || status.Diagnostics["error_code"] != "invalid_json_schema" || status.Diagnostics["http_status_class"] != "4xx" || status.RequestID != "req_semantic_bad_1" {
 		t.Fatalf("semantic failure status = %#v", status)
+	}
+}
+
+func TestSemanticEvaluateCallsSalonScopedModelWithoutConversationOrBookingMutation(t *testing.T) {
+	store := newFakeVoiceStore()
+	engine := newFakeConversationEngine()
+	provider := &fakeTurnContractProvider{
+		configured: true,
+		interpretReply: TurnModelReply{
+			Goal:                    "information",
+			GuidanceAction:          conversation.GuidanceActionServiceCatalog,
+			GuidanceCatalogMode:     conversation.ConversationQuestionModeList,
+			GuidanceQuestionSubject: conversation.ConversationQuestionCatalog,
+			Confidence:              0.98,
+		},
+	}
+	service := NewService(store, engine, testVoiceConfig(), AIProviders{TurnModel: provider})
+	req := SemanticEvaluationRequest{
+		ScenarioID:                  "catalog-001",
+		Channel:                     conversation.ChannelSimulator,
+		CustomerMessage:             "Could you walk me through the services you offer?",
+		ExpectedInput:               conversation.ExpectedInputCallerGoal,
+		SemanticContract:            conversation.TurnSemanticContractGuidance,
+		BookingAction:               conversation.BookingActionBook,
+		RecognizableGuidanceActions: conversation.GuidanceActionValues(),
+		CatalogServices: []conversation.ConversationServiceRef{{
+			ServiceID: "service_luna", ServiceName: "Luna Renewal", CategoryID: "category_ritual", CategoryName: "Signature Ritual",
+		}},
+		CatalogServiceAliases: []conversation.ConversationServiceAliasRef{{ServiceID: "service_luna", Alias: "moon refresh"}},
+		CatalogCategories:     []conversation.ConversationCategoryRef{{CategoryID: "category_ritual", CategoryName: "Signature Ritual", ServiceIDs: []string{"service_luna"}}},
+	}
+
+	result, err := service.SemanticEvaluate(context.Background(), "salon_1", "owner_1", req)
+	if err != nil {
+		t.Fatalf("SemanticEvaluate: %v", err)
+	}
+	if result.ScenarioID != "catalog-001" || result.Result.GuidanceAction != conversation.GuidanceActionServiceCatalog {
+		t.Fatalf("semantic evaluation result = %#v", result)
+	}
+	if provider.interpretCalls != 1 || provider.interpretRequest.SalonID != "salon_1" ||
+		provider.interpretRequest.SessionID != "semantic-evaluation:catalog-001" ||
+		provider.interpretRequest.CatalogServices[0].ServiceName != "Luna Renewal" {
+		t.Fatalf("provider request = %#v", provider.interpretRequest)
+	}
+	if engine.startCalls != 0 || engine.messageCalls != 0 {
+		t.Fatalf("semantic evaluation mutated conversation state: %#v", engine)
+	}
+}
+
+func TestSemanticEvaluationRejectsCapabilityFilteredGuidanceVocabulary(t *testing.T) {
+	req := SemanticEvaluationRequest{
+		ScenarioID: "capability-filtered-guidance", Channel: conversation.ChannelSimulator,
+		CustomerMessage: "I need help choosing.", ExpectedInput: conversation.ExpectedInputCallerGoal,
+		SemanticContract: conversation.TurnSemanticContractGuidance, BookingAction: conversation.BookingActionBook,
+		RecognizableGuidanceActions: []string{conversation.GuidanceActionBook, conversation.GuidanceActionHumanHandoff},
+	}
+	if ValidSemanticEvaluationRequest(req) {
+		t.Fatalf("capability-filtered vocabulary was accepted: %#v", req.RecognizableGuidanceActions)
+	}
+	req.RecognizableGuidanceActions = conversation.GuidanceActionValues()
+	if !ValidSemanticEvaluationRequest(req) {
+		t.Fatalf("stable recognizable vocabulary was rejected: %#v", req.RecognizableGuidanceActions)
+	}
+}
+
+func TestSemanticEvaluateRejectsCatalogReferencesOutsideStructuredSource(t *testing.T) {
+	provider := &fakeTurnContractProvider{configured: true}
+	service := NewService(newFakeVoiceStore(), newFakeConversationEngine(), testVoiceConfig(), AIProviders{TurnModel: provider})
+	req := SemanticEvaluationRequest{
+		ScenarioID:       "invalid-alias-target",
+		Channel:          conversation.ChannelPhone,
+		CustomerMessage:  "I call it the moon refresh.",
+		SemanticContract: conversation.TurnSemanticContractFull,
+		CatalogServices:  []conversation.ConversationServiceRef{{ServiceID: "service_luna", ServiceName: "Luna Renewal"}},
+		CatalogServiceAliases: []conversation.ConversationServiceAliasRef{{
+			ServiceID: "invented_service", Alias: "moon refresh",
+		}},
+	}
+
+	if _, err := service.SemanticEvaluate(context.Background(), "salon_1", "owner_1", req); !errors.Is(err, ErrValidation) {
+		t.Fatalf("SemanticEvaluate error = %v, want ErrValidation", err)
+	}
+	if provider.interpretCalls != 0 {
+		t.Fatalf("invalid source data reached model provider: calls=%d", provider.interpretCalls)
+	}
+}
+
+func TestSemanticEvaluateRejectsNonRuntimeStateVocabulary(t *testing.T) {
+	provider := &fakeTurnContractProvider{configured: true}
+	service := NewService(newFakeVoiceStore(), newFakeConversationEngine(), testVoiceConfig(), AIProviders{TurnModel: provider})
+	req := SemanticEvaluationRequest{
+		ScenarioID:       "invalid-state-vocabulary",
+		Channel:          conversation.ChannelPhone,
+		CustomerMessage:  "Please edit my service.",
+		ExpectedInput:    "service_edit",
+		SemanticContract: conversation.TurnSemanticContractFull,
+		BookingAction:    conversation.BookingActionBook,
+		CatalogServices:  []conversation.ConversationServiceRef{{ServiceID: "service_luna", ServiceName: "Luna Renewal"}},
+	}
+
+	if _, err := service.SemanticEvaluate(context.Background(), "salon_1", "owner_1", req); !errors.Is(err, ErrValidation) {
+		t.Fatalf("SemanticEvaluate error = %v, want ErrValidation", err)
+	}
+	if provider.interpretCalls != 0 {
+		t.Fatalf("invalid runtime vocabulary reached model provider: calls=%d", provider.interpretCalls)
+	}
+}
+
+func TestSemanticEvaluateRejectsDraftStaffOutsideStructuredCatalog(t *testing.T) {
+	provider := &fakeTurnContractProvider{configured: true}
+	service := NewService(newFakeVoiceStore(), newFakeConversationEngine(), testVoiceConfig(), AIProviders{TurnModel: provider})
+	req := SemanticEvaluationRequest{
+		ScenarioID:       "invalid-draft-staff",
+		Channel:          conversation.ChannelSimulator,
+		CustomerMessage:  "Can I use another technician?",
+		ExpectedInput:    conversation.ExpectedInputStaff,
+		SemanticContract: conversation.TurnSemanticContractFull,
+		BookingAction:    conversation.BookingActionBook,
+		CatalogServices:  []conversation.ConversationServiceRef{{ServiceID: "service_luna", ServiceName: "Luna Renewal"}},
+		CatalogStaff:     []conversation.ConversationStaffRef{{StaffID: "staff_1", StaffName: "Mia"}},
+		CurrentDraft:     conversation.ConversationDraftRef{StaffID: "invented_staff"},
+	}
+
+	if _, err := service.SemanticEvaluate(context.Background(), "salon_1", "owner_1", req); !errors.Is(err, ErrValidation) {
+		t.Fatalf("SemanticEvaluate error = %v, want ErrValidation", err)
+	}
+	if provider.interpretCalls != 0 {
+		t.Fatalf("invalid draft staff reached model provider: calls=%d", provider.interpretCalls)
+	}
+}
+
+func TestSemanticEvaluateRejectsAliasOwnershipCollision(t *testing.T) {
+	provider := &fakeTurnContractProvider{configured: true}
+	service := NewService(newFakeVoiceStore(), newFakeConversationEngine(), testVoiceConfig(), AIProviders{TurnModel: provider})
+	req := SemanticEvaluationRequest{
+		ScenarioID:       "alias-owner-collision",
+		Channel:          conversation.ChannelSimulator,
+		CustomerMessage:  "I call it moon refresh.",
+		ExpectedInput:    conversation.ExpectedInputService,
+		SemanticContract: conversation.TurnSemanticContractFull,
+		BookingAction:    conversation.BookingActionBook,
+		CatalogServices: []conversation.ConversationServiceRef{{
+			ServiceID: "service_luna", ServiceName: "Luna Renewal", CategoryID: "category_ritual", CategoryName: "Signature Ritual",
+		}},
+		CatalogServiceAliases: []conversation.ConversationServiceAliasRef{{ServiceID: "service_luna", Alias: "moon refresh"}},
+		CatalogCategories: []conversation.ConversationCategoryRef{{
+			CategoryID: "category_ritual", CategoryName: "Signature Ritual", Aliases: []string{"moon refresh"}, ServiceIDs: []string{"service_luna"},
+		}},
+	}
+
+	if _, err := service.SemanticEvaluate(context.Background(), "salon_1", "owner_1", req); !errors.Is(err, ErrValidation) {
+		t.Fatalf("SemanticEvaluate error = %v, want ErrValidation", err)
+	}
+	if provider.interpretCalls != 0 {
+		t.Fatalf("conflicting alias ownership reached model provider: calls=%d", provider.interpretCalls)
+	}
+}
+
+func TestSemanticEvaluateRejectsInconsistentPartyGroups(t *testing.T) {
+	provider := &fakeTurnContractProvider{configured: true}
+	service := NewService(newFakeVoiceStore(), newFakeConversationEngine(), testVoiceConfig(), AIProviders{TurnModel: provider})
+	req := SemanticEvaluationRequest{
+		ScenarioID:       "inconsistent-party-groups",
+		Channel:          conversation.ChannelPhone,
+		CustomerMessage:  "Guest two wants the same service.",
+		ExpectedInput:    conversation.ExpectedInputService,
+		SemanticContract: conversation.TurnSemanticContractFull,
+		BookingAction:    conversation.BookingActionBook,
+		CatalogServices:  []conversation.ConversationServiceRef{{ServiceID: "service_luna", ServiceName: "Luna Renewal"}},
+		CurrentDraft: conversation.ConversationDraftRef{
+			PartySize: 3,
+			PartyGroups: []conversation.ConversationPartyGroupRef{
+				{GuestRef: "caller", Count: 1, ServiceIDs: []string{"service_luna"}},
+				{GuestRef: "guest_2", Count: 1, ServiceIDs: []string{"service_luna"}},
+			},
+		},
+	}
+
+	if _, err := service.SemanticEvaluate(context.Background(), "salon_1", "owner_1", req); !errors.Is(err, ErrValidation) {
+		t.Fatalf("SemanticEvaluate error = %v, want ErrValidation", err)
+	}
+	if provider.interpretCalls != 0 {
+		t.Fatalf("inconsistent party groups reached model provider: calls=%d", provider.interpretCalls)
 	}
 }
 
@@ -615,11 +826,14 @@ func (f *fakeVoiceStore) GetSalonVoiceStatus(ctx context.Context, salonID string
 }
 
 type fakeTurnContractProvider struct {
-	configured     bool
-	check          TurnContractCheck
-	err            error
-	checkCalls     int
-	interpretCalls int
+	configured       bool
+	check            TurnContractCheck
+	err              error
+	checkCalls       int
+	interpretCalls   int
+	interpretReply   TurnModelReply
+	interpretErr     error
+	interpretRequest TurnModelRequest
 }
 
 func (f *fakeTurnContractProvider) Name() string { return ProviderOpenAI }
@@ -630,7 +844,8 @@ func (f *fakeTurnContractProvider) Configured(ctx context.Context, salonID strin
 
 func (f *fakeTurnContractProvider) InterpretTurn(ctx context.Context, req TurnModelRequest) (TurnModelReply, error) {
 	f.interpretCalls++
-	return TurnModelReply{}, nil
+	f.interpretRequest = req
+	return f.interpretReply, f.interpretErr
 }
 
 func (f *fakeTurnContractProvider) CheckTurnContract(ctx context.Context, salonID string) (TurnContractCheck, error) {

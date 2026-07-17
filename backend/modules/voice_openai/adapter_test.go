@@ -121,7 +121,7 @@ func TestInterpretTurnUsesStrictCatalogBoundMultiActSchema(t *testing.T) {
 			t.Fatalf("decode request: %v", err)
 		}
 		instructions, _ := req["instructions"].(string)
-		if !strings.Contains(instructions, "Use only service and category IDs present in catalog_services") || !strings.Contains(instructions, "pending clarification is context, not a restriction") || !strings.Contains(instructions, "Never recommend a service in model output") || !strings.Contains(instructions, "safety classification applies regardless") {
+		if !strings.Contains(instructions, "Use only service and category IDs present in catalog_services") || !strings.Contains(instructions, "pending clarification is context, not a restriction") || !strings.Contains(instructions, "Never recommend a service in model output") || !strings.Contains(instructions, "safety classification applies regardless") || !strings.Contains(instructions, "guest_ref is authoritative") || !strings.Contains(instructions, "never invent replacement wording or source_ids") || !strings.Contains(instructions, "must never contain service IDs") || !strings.Contains(instructions, "keep acts empty") || !strings.Contains(instructions, "Never turn a current-booking comparison") || !strings.Contains(instructions, "salon-local 24-hour clock components") || !strings.Contains(instructions, "1:30 PM is hour 13 and minute 30") || !strings.Contains(instructions, "must also appear in the matching same-turn consultation snapshot") || !strings.Contains(instructions, "wanting a nail service, asking for advice, or entering consultation is not a booking request") {
 			t.Fatalf("conversation act instructions = %s", instructions)
 		}
 		textConfig, _ := req["text"].(map[string]any)
@@ -158,12 +158,11 @@ func TestInterpretTurnUsesStrictCatalogBoundMultiActSchema(t *testing.T) {
 			t.Fatalf("catalog_services = %#v", modelInput["catalog_services"])
 		}
 		catalogService, _ := catalog[0].(map[string]any)
-		profile, _ := catalogService["consultation_profile"].(map[string]any)
-		if profile["owner_approved_summary"] != "A lower-maintenance pedicure with a glossy finish." || profile["revision"] != float64(7) {
-			t.Fatalf("consultation profile was not included in semantic input: %#v", profile)
+		if profile := catalogService["consultation_profile"]; profile != nil {
+			t.Fatalf("consultation profile leaked into extraction-only model input: %#v", profile)
 		}
 		body, _ := json.Marshal(map[string]any{
-			"output_text": `{"goal":"book_appointment","acts":[{"kind":"replace_service","entity":"service","source_ids":["service_gel"],"target_ids":["service_spa"],"source_category_id":"","source_category_name":"","target_category_id":"cat_pedi","target_category_name":"Pedicure","scope":"one","guest_scope":"","guest_ref":"","subject":"","value":"","count":0,"confidence":0.95,"reason":"explicit replacement"}],"questions":[{"subject":"availability","service_ids":["service_spa"],"staff_ids":[],"time_preference":{"direction":"","minutes":-1},"confidence":0.92,"reason":"caller asked about availability"}],"confidence":0.95,"reason":"correction plus question","consultation":{"current_system":"","desired_outcome":"","length_change":"","priorities":[],"desired_finishes":[],"compared_service_ids":[],"booking_requested":false,"conversation_complete":false,"confidence":0,"reason":"","mutations":[]},"safety":{"concern":false,"category":"","confidence":0,"reason":""}}`,
+			"output_text": `{"goal":"book_appointment","acts":[{"kind":"replace_service","entity":"service","source_ids":["service_gel"],"target_ids":["service_spa"],"source_category_id":"","source_category_name":"","target_category_id":"cat_pedi","target_category_name":"Pedicure","scope":"one","guest_scope":"","guest_ref":"","subject":"","value":"","count":0,"confidence":0.95,"reason":"explicit replacement"}],"questions":[{"subject":"availability","service_ids":["service_spa"],"staff_ids":[],"time_preference":{"direction":"","hour":-1,"minute":-1},"confidence":0.92,"reason":"caller asked about availability"}],"confidence":0.95,"reason":"correction plus question","consultation":{"current_system":"","desired_outcome":"","length_change":"","priorities":[],"desired_finishes":[],"compared_service_ids":[],"booking_requested":false,"conversation_complete":false,"confidence":0,"reason":"","mutations":[]},"safety":{"concern":false,"category":"","confidence":0,"reason":""}}`,
 		})
 		return jsonResponse(body), nil
 	})}
@@ -187,8 +186,31 @@ func TestInterpretTurnUsesStrictCatalogBoundMultiActSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InterpretTurn: %v", err)
 	}
-	if len(reply.Acts) != 1 || reply.Acts[0].Kind != conversation.ConversationActReplace || reply.Acts[0].TargetIDs[0] != "service_spa" || len(reply.Questions) != 1 || reply.Confidence != 0.95 {
+	if len(reply.Acts) != 1 || reply.Acts[0].Kind != conversation.ConversationActReplace || reply.Acts[0].TargetIDs[0] != "service_spa" || len(reply.Questions) != 1 || reply.Questions[0].TimePreference.Minutes != -1 || reply.Confidence != 0.95 {
 		t.Fatalf("reply = %#v", reply)
+	}
+}
+
+func TestNormalizeTurnModelTimePreferencesComputesCanonicalMinutesFromClockParts(t *testing.T) {
+	reply := voice.TurnModelReply{Questions: []voice.QuestionModelReply{{
+		TimePreference: voice.TimePreferenceModelReply{
+			Direction: conversation.TimePreferenceAfter, Hour: 13, Minute: 30,
+		},
+	}}}
+	if err := normalizeTurnModelTimePreferences(&reply); err != nil {
+		t.Fatalf("normalize time preference: %v", err)
+	}
+	if reply.Questions[0].TimePreference.Minutes != 13*60+30 {
+		t.Fatalf("time preference = %#v", reply.Questions[0].TimePreference)
+	}
+}
+
+func TestNormalizeTurnModelTimePreferencesRejectsInconsistentNoConstraint(t *testing.T) {
+	reply := voice.TurnModelReply{Questions: []voice.QuestionModelReply{{
+		TimePreference: voice.TimePreferenceModelReply{Hour: 13, Minute: 0},
+	}}}
+	if err := normalizeTurnModelTimePreferences(&reply); err == nil {
+		t.Fatalf("inconsistent no-constraint preference accepted: %#v", reply.Questions[0].TimePreference)
 	}
 }
 
@@ -202,7 +224,10 @@ func TestInterpretTurnUsesCompactGuidanceContract(t *testing.T) {
 			t.Fatalf("decode request: %v", err)
 		}
 		instructions, _ := req["instructions"].(string)
-		if !strings.Contains(instructions, "awaiting the caller's goal") || !strings.Contains(instructions, "never create booking operations or questions") {
+		if !strings.Contains(instructions, "awaiting the caller's goal") || !strings.Contains(instructions, "never create a separate goal") ||
+			!strings.Contains(instructions, "concrete desired service or category from the supplied catalog") ||
+			!strings.Contains(instructions, "broad stated desire for a nail service") ||
+			!strings.Contains(instructions, "do not claim the salon can fulfill every workflow") {
 			t.Fatalf("guidance instructions = %s", instructions)
 		}
 		textConfig, _ := req["text"].(map[string]any)
@@ -215,8 +240,22 @@ func TestInterpretTurnUsesCompactGuidanceContract(t *testing.T) {
 		if _, exists := properties["acts"]; exists {
 			t.Fatalf("guidance schema retained acts: %#v", properties)
 		}
+		if _, exists := properties["goal"]; exists {
+			t.Fatalf("guidance schema retained duplicate goal: %#v", properties)
+		}
 		if _, exists := properties["questions"]; exists {
 			t.Fatalf("guidance schema retained questions: %#v", properties)
+		}
+		if _, exists := properties["guidance_action"]; !exists {
+			t.Fatalf("guidance schema lost typed action: %#v", properties)
+		}
+		if _, exists := properties["guidance_party_size"]; !exists {
+			t.Fatalf("guidance schema lost typed party size: %#v", properties)
+		}
+		actionSchema, _ := properties["guidance_action"].(map[string]any)
+		actionEnum := actionSchema["enum"]
+		if !testEnumContains(actionEnum, conversation.GuidanceActionReschedule) || !testEnumContains(actionEnum, conversation.GuidanceActionCancel) {
+			t.Fatalf("guidance schema lost appointment-management actions: %#v", actionEnum)
 		}
 		if _, exists := properties["consultation"]; !exists {
 			t.Fatalf("guidance schema lost consultation: %#v", properties)
@@ -229,7 +268,8 @@ func TestInterpretTurnUsesCompactGuidanceContract(t *testing.T) {
 		if err := json.Unmarshal([]byte(input), &modelInput); err != nil {
 			t.Fatalf("decode model input: %v", err)
 		}
-		if modelInput["semantic_contract"] != conversation.TurnSemanticContractGuidance || modelInput["customer_message"] != "I'm undecided about which treatment fits me." {
+		allowed, _ := modelInput["recognizable_guidance_actions"].([]any)
+		if modelInput["semantic_contract"] != conversation.TurnSemanticContractGuidance || modelInput["customer_message"] != "I'm undecided about which treatment fits me." || len(allowed) != 2 || allowed[1] != conversation.GuidanceActionConsultation {
 			t.Fatalf("guidance model input = %#v", modelInput)
 		}
 		body, _ := json.Marshal(map[string]any{"output_text": validGuidanceTurnOutput()})
@@ -239,12 +279,73 @@ func TestInterpretTurnUsesCompactGuidanceContract(t *testing.T) {
 	reply, err := adapter.InterpretTurn(context.Background(), voice.TurnModelRequest{
 		SalonID: "salon_1", CustomerMessage: "I'm undecided about which treatment fits me.",
 		ExpectedInput: conversation.ExpectedInputCallerGoal, SemanticContract: conversation.TurnSemanticContractGuidance,
+		RecognizableGuidanceActions: []string{conversation.GuidanceActionBook, conversation.GuidanceActionConsultation},
 	})
 	if err != nil {
 		t.Fatalf("InterpretTurn: %v", err)
 	}
-	if reply.Goal != "consultation" || reply.Consultation.DesiredOutcome != conversation.ConsultationOutcomeMaintain || len(reply.Acts) != 0 || len(reply.Questions) != 0 {
+	if reply.Goal != "consultation" || reply.GuidanceAction != conversation.GuidanceActionConsultation || reply.Consultation.DesiredOutcome != conversation.ConsultationOutcomeMaintain || len(reply.Acts) != 0 || len(reply.Questions) != 0 || reply.Diagnostics["schema_fingerprint"] == "" {
 		t.Fatalf("guidance reply = %#v", reply)
+	}
+}
+
+func TestTurnModelDraftRefKeepsPartyOwnershipWithoutPerGuestServiceHints(t *testing.T) {
+	draft := conversation.ConversationDraftRef{
+		ServiceIDs: []string{"svc_one", "svc_two"}, PartySize: 2,
+		PartyGroups: []conversation.ConversationPartyGroupRef{
+			{GuestRef: "guest_caller", Count: 1, ServiceIDs: []string{"svc_one"}},
+			{GuestRef: "guest_2", Count: 1, ServiceIDs: []string{"svc_two"}},
+		},
+	}
+	modelDraft := turnModelDraftRef(draft)
+	if len(modelDraft.ServiceIDs) != 2 || len(modelDraft.PartyGroups) != 2 || modelDraft.PartyGroups[1].GuestRef != "guest_2" {
+		t.Fatalf("model draft ownership = %#v", modelDraft)
+	}
+	for _, group := range modelDraft.PartyGroups {
+		if len(group.ServiceIDs) != 0 {
+			t.Fatalf("per-guest service hints leaked: %#v", modelDraft.PartyGroups)
+		}
+	}
+	if len(draft.PartyGroups[1].ServiceIDs) != 1 {
+		t.Fatalf("source draft mutated: %#v", draft)
+	}
+}
+
+func TestNormalizeGuidanceModelReplyDerivesProtocolOwnedFields(t *testing.T) {
+	book := normalizeGuidanceModelReply(voice.TurnModelReply{
+		GuidanceAction: conversation.GuidanceActionBook, GuidanceCatalogMode: conversation.ConversationQuestionModeList,
+		GuidanceQuestionSubject: conversation.ConversationQuestionAvailability,
+		Consultation: voice.ConsultationModelReply{
+			BookingRequested: true, ConversationComplete: true,
+		},
+	})
+	if book.Goal != "book_appointment" || book.GuidanceCatalogMode != "" || book.GuidanceQuestionSubject != "" || book.Consultation.BookingRequested || book.Consultation.ConversationComplete {
+		t.Fatalf("normalized book reply = %#v", book)
+	}
+	catalog := normalizeGuidanceModelReply(voice.TurnModelReply{
+		GuidanceAction: conversation.GuidanceActionServiceCatalog, GuidanceCatalogMode: conversation.ConversationQuestionModeCompare,
+		GuidanceQuestionSubject: conversation.ConversationQuestionStaff,
+	})
+	if catalog.Goal != "information" || catalog.GuidanceCatalogMode != conversation.ConversationQuestionModeCompare ||
+		catalog.GuidanceQuestionSubject != conversation.ConversationQuestionCatalog {
+		t.Fatalf("normalized catalog reply = %#v", catalog)
+	}
+	salon := normalizeGuidanceModelReply(voice.TurnModelReply{
+		GuidanceAction: conversation.GuidanceActionSalonQuestion, GuidanceCatalogMode: conversation.ConversationQuestionModeList,
+		GuidanceQuestionSubject: conversation.ConversationQuestionHours,
+	})
+	if salon.Goal != "information" || salon.GuidanceCatalogMode != "" || salon.GuidanceQuestionSubject != conversation.ConversationQuestionHours {
+		t.Fatalf("normalized salon reply = %#v", salon)
+	}
+}
+
+func TestNormalizeConsultationUnknownValuesTreatsProtocolUnknownAsAbsence(t *testing.T) {
+	normalized := normalizeConsultationUnknownValues(voice.ConsultationModelReply{
+		CurrentSystem: conversation.ConsultationSystemUnknown, DesiredOutcome: conversation.ConsultationOutcomeUnknown,
+		LengthChange: conversation.ConsultationLengthUnknown,
+	})
+	if normalized.CurrentSystem != "" || normalized.DesiredOutcome != "" || normalized.LengthChange != "" {
+		t.Fatalf("normalized consultation = %#v", normalized)
 	}
 }
 
@@ -296,6 +397,34 @@ func TestTurnUnderstandingSchemaUsesSupportedSubsetRecursively(t *testing.T) {
 	if err := validateStructuredOutputSchema(schema); err == nil || !strings.Contains(err.Error(), "uniqueItems") || !strings.Contains(err.Error(), "consultation") {
 		t.Fatalf("recursive unsupported-key validation error = %v", err)
 	}
+}
+
+func TestConsultationMutationSchemaUsesControlledVocabularyAndRequestCatalogIDs(t *testing.T) {
+	schema := turnUnderstandingSchema("service_from_catalog")
+	properties := schema["properties"].(map[string]any)
+	consultation := properties["consultation"].(map[string]any)
+	consultationProperties := consultation["properties"].(map[string]any)
+	mutations := consultationProperties["mutations"].(map[string]any)
+	mutation := mutations["items"].(map[string]any)
+	mutationProperties := mutation["properties"].(map[string]any)
+	values := mutationProperties["values"].(map[string]any)
+	items := values["items"].(map[string]any)
+	enum := items["enum"].([]string)
+	if !containsExactString(enum, "service_from_catalog") || !containsExactString(enum, conversation.ConsultationOutcomeAddStrength) {
+		t.Fatalf("mutation values enum = %#v", enum)
+	}
+	if containsExactString(enum, conversation.ConsultationOutcomeUnknown) || containsExactString(enum, conversation.ConsultationSystemUnknown) {
+		t.Fatalf("unknown was exposed as a persisted mutation value: %#v", enum)
+	}
+}
+
+func containsExactString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func TestTurnContractCircuitSuppressesRepeatedInvalidRequestsAndProbeClearsIt(t *testing.T) {
@@ -384,7 +513,25 @@ func validEmptyTurnOutput() string {
 }
 
 func validGuidanceTurnOutput() string {
-	return `{"goal":"consultation","confidence":0.96,"reason":"caller wants help choosing","consultation":{"current_system":"natural","desired_outcome":"maintain","length_change":"","priorities":[],"desired_finishes":[],"compared_service_ids":[],"booking_requested":false,"conversation_complete":false,"confidence":0.91,"reason":"caller wants upkeep guidance","mutations":[]},"safety":{"concern":false,"category":"","confidence":0,"reason":""}}`
+	return `{"guidance_action":"consultation","guidance_catalog_mode":"","guidance_question_subject":"","guidance_party_size":0,"confidence":0.96,"reason":"caller wants help choosing","consultation":{"current_system":"natural","desired_outcome":"maintain","length_change":"","priorities":[],"desired_finishes":[],"compared_service_ids":[],"booking_requested":false,"conversation_complete":false,"confidence":0.91,"reason":"caller wants upkeep guidance","mutations":[]},"safety":{"concern":false,"category":"","confidence":0,"reason":""}}`
+}
+
+func testEnumContains(values any, expected string) bool {
+	switch typed := values.(type) {
+	case []string:
+		for _, value := range typed {
+			if value == expected {
+				return true
+			}
+		}
+	case []any:
+		for _, value := range typed {
+			if value == expected {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func TestInterpretTurnClassifiesEmptyAndInvalidStructuredOutput(t *testing.T) {
@@ -449,9 +596,17 @@ func TestGenerateReplyParsesStructuredResponse(t *testing.T) {
 		}
 		body, _ := json.Marshal(map[string]any{
 			"output_text": `{"message":"What phone number should we use?","confidence":0.9,"handoff":false,"reason":""}`,
+			"usage":       map[string]any{"input_tokens": 17, "output_tokens": 6, "total_tokens": 23},
 		})
 		return jsonResponse(body), nil
 	})}
+	var observed Usage
+	adapter.SetUsageObserver(func(stage string, usage Usage) {
+		if stage != "reply" {
+			t.Fatalf("usage stage = %q", stage)
+		}
+		observed = usage
+	})
 
 	reply, err := adapter.GenerateReply(context.Background(), voice.ModelRequest{
 		SalonID:              "salon_1",
@@ -464,6 +619,41 @@ func TestGenerateReplyParsesStructuredResponse(t *testing.T) {
 	}
 	if reply.Message != "What phone number should we use?" || reply.Confidence != 0.9 {
 		t.Fatalf("reply = %#v", reply)
+	}
+	if observed.InputTokens != 17 || observed.OutputTokens != 6 || observed.TotalTokens != 23 {
+		t.Fatalf("observed usage = %#v", observed)
+	}
+}
+
+func TestGenerateConsultationQuestionUsesCallerLanguageInstructions(t *testing.T) {
+	adapter := NewAdapter(config.OpenAIVoiceConfig{
+		APIKey: "test-key", BaseURL: "https://openai.test/v1", ReplyModel: "gpt-test",
+	})
+	adapter.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		instructions, _ := payload["instructions"].(string)
+		for _, required := range []string{"helpful consultation", "semantic labels", "ordinary caller language", "form validator"} {
+			if !strings.Contains(instructions, required) {
+				t.Fatalf("consultation instructions missing %q: %s", required, instructions)
+			}
+		}
+		body, _ := json.Marshal(map[string]any{
+			"output_text": `{"message":"I can help with that. What do you currently have on your nails?","confidence":0.95,"handoff":false,"reason":""}`,
+		})
+		return jsonResponse(body), nil
+	})}
+	reply, err := adapter.GenerateReply(context.Background(), voice.ModelRequest{
+		SalonID: "salon_1", ReplyPolicy: conversation.ReplyPolicyConsultationQuestion,
+		ConsultationQuestion: &conversation.ConsultationQuestionSpec{
+			Field:   conversation.ConsultationNeedFieldCurrentSystem,
+			Options: []string{conversation.ConsultationSystemNatural, conversation.ConsultationSystemGel},
+		},
+	})
+	if err != nil || reply.Message != "I can help with that. What do you currently have on your nails?" {
+		t.Fatalf("consultation reply = %#v err=%v", reply, err)
 	}
 }
 

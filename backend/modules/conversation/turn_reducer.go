@@ -123,6 +123,15 @@ func firstDeferredInformationQuestion(turn TurnUnderstanding) (ConversationQuest
 	return ConversationQuestion{}, false
 }
 
+func turnHasQuestionSubject(turn TurnUnderstanding, subject string) bool {
+	for _, question := range turn.Questions {
+		if strings.TrimSpace(question.Subject) == strings.TrimSpace(subject) {
+			return true
+		}
+	}
+	return false
+}
+
 func turnGoalIs(turn TurnUnderstanding, goal string) bool {
 	return strings.TrimSpace(turn.Goal) == goal
 }
@@ -144,6 +153,13 @@ func resumeBookingPrompt(session Session, services []ServiceOption, cfg *Runtime
 	state := normalizedDialogState(session.DialogState)
 	if state.Pending != nil {
 		return pendingConversationPrompt(session, services, state, false)
+	}
+	if activePartyPlan(session.PartyPlan) && !partyPlanComplete(session.PartyPlan) {
+		return partyPlanClarificationPrompt(session, session.PartyPlan, services, cfg)
+	}
+	if pending := pendingServiceCandidateServices(session, services); len(pending) > 0 {
+		label := serviceCatalogQuestionLabel(serviceUnderstandingResult{}, pending)
+		return "Which " + label + " service would you like?"
 	}
 	missing := missingBookingField(session)
 	if missing == "" {
@@ -356,7 +372,7 @@ func applyTurnUnderstandingMetadata(turnRecord *TurnRecord, understanding TurnUn
 			preferenceMinutes = preference.Minutes
 		}
 		questions = append(questions, map[string]any{
-			"subject": question.Subject, "service_ids": append([]string(nil), question.ServiceIDs...),
+			"subject": question.Subject, "mode": question.Mode, "service_ids": append([]string(nil), question.ServiceIDs...),
 			"staff_ids": append([]string(nil), question.StaffIDs...), "time_preference_direction": preferenceDirection,
 			"time_preference_minutes": preferenceMinutes, "confidence": question.Confidence, "reason": question.Reason,
 		})
@@ -364,6 +380,10 @@ func applyTurnUnderstandingMetadata(turnRecord *TurnRecord, understanding TurnUn
 	turnRecord.CustomerMetadata = mergeMetadata(turnRecord.CustomerMetadata, map[string]any{
 		"turn_understanding_source":          understanding.Source,
 		"turn_understanding_goal":            understanding.Goal,
+		"turn_guidance_action":               understanding.GuidanceAction,
+		"turn_guidance_catalog_mode":         understanding.GuidanceCatalogMode,
+		"turn_guidance_question_subject":     understanding.GuidanceQuestionSubject,
+		"turn_guidance_party_size":           understanding.GuidancePartySize,
 		"turn_understanding_confidence":      understanding.Confidence,
 		"turn_understanding_reason":          understanding.Reason,
 		"turn_understanding_model_invoked":   understanding.ModelInvoked,

@@ -397,7 +397,7 @@ func partyGroupSpokenScope(plan *PartyPlan, guestRef string) string {
 	if plan == nil {
 		return "that guest"
 	}
-	for _, group := range plan.Groups {
+	for index, group := range plan.Groups {
 		if !strings.EqualFold(strings.TrimSpace(group.Label), strings.TrimSpace(guestRef)) {
 			continue
 		}
@@ -406,7 +406,10 @@ func partyGroupSpokenScope(plan *PartyPlan, guestRef string) string {
 		case label == "caller":
 			return "you"
 		case strings.HasPrefix(label, "guest "):
-			return strings.TrimSpace(group.Label)
+			if ordinal := partyGroupOrdinal(index); ordinal != "" {
+				return "the " + ordinal + " guest"
+			}
+			return "that guest"
 		case group.Count > 1:
 			return partyPlanPeopleScope(plan, group, group.Count)
 		case label != "" && label != "service":
@@ -482,118 +485,6 @@ func autoResolveSingleCandidatePartyGroups(plan *PartyPlan) {
 		}
 		group.ResolvedServiceIDs = resolved
 	}
-}
-
-func partyPlanServiceMenuReply(message string, session Session, services []ServiceOption, cfg *RuntimeConfig) (string, bool) {
-	plan := session.PartyPlan
-	activeGroupIndex := firstUnresolvedPartyPlanGroup(plan)
-	if activeGroupIndex < 0 {
-		return "", false
-	}
-	menuGroupIndex, ok := partyPlanMenuGroupIndex(message, plan, services)
-	if !ok {
-		return "", false
-	}
-	group := plan.Groups[menuGroupIndex]
-	candidates := servicesByIDs(services, group.CandidateServiceIDs)
-	if len(candidates) == 0 {
-		return "", false
-	}
-	options := serviceCandidateNames(candidates, 6)
-	if len(options) == 0 {
-		return "", false
-	}
-	label := strings.TrimSpace(group.Label)
-	if label == "" {
-		label = "service"
-	}
-	reply := "For " + pluralServicePhrase(label) + ", we offer " + joinHumanList(options) + ". "
-	if asksServiceCatalogCount(message) {
-		reply = serviceCatalogCountStatement(label, candidates, 6) + " "
-	}
-	if menuGroupIndex == activeGroupIndex {
-		reply += partyPlanMenuFollowUpPrompt(group)
-	} else {
-		reply += partyPlanClarificationPrompt(session, plan, services, cfg)
-	}
-	if partyPlanDeclinesServiceSuggestion(message) {
-		reply = "No problem. " + reply
-	}
-	return reply, true
-}
-
-func partyPlanMenuGroupIndex(message string, plan *PartyPlan, services []ServiceOption) (int, bool) {
-	if plan == nil || !isPartyPlanServiceMenuQuestion(message) {
-		return -1, false
-	}
-	normalized := normalizeLooseText(message)
-	for i, group := range plan.Groups {
-		candidates := servicesByIDs(services, group.CandidateServiceIDs)
-		if len(candidates) == 0 {
-			continue
-		}
-		if partyPlanQuestionMentionsGroup(normalized, group, candidates) {
-			return i, true
-		}
-	}
-	if asksServiceMenu(message) || asksServiceCatalogCount(message) {
-		if groupIndex := firstUnresolvedPartyPlanGroup(plan); groupIndex >= 0 {
-			return groupIndex, true
-		}
-	}
-	return -1, false
-}
-
-func isPartyPlanServiceMenuQuestion(message string) bool {
-	if asksServiceMenu(message) || asksServiceCatalogCount(message) {
-		return true
-	}
-	normalized := normalizeLooseText(message)
-	if normalized == "" {
-		return false
-	}
-	if !strings.Contains(normalized, "what") && !strings.Contains(normalized, "which") && !strings.Contains(normalized, "list") {
-		return false
-	}
-	if !strings.Contains(normalized, "service") && !strings.Contains(normalized, "option") && !strings.Contains(normalized, "have") && !strings.Contains(normalized, "offer") {
-		return false
-	}
-	return true
-}
-
-func partyPlanQuestionMentionsGroup(normalized string, group PartyPlanGroup, candidates []ServiceOption) bool {
-	for _, phrase := range partyPlanGroupMenuPhrases(group, candidates) {
-		if containsLoosePhrase(normalized, phrase) {
-			return true
-		}
-	}
-	return false
-}
-
-func partyPlanGroupMenuPhrases(group PartyPlanGroup, candidates []ServiceOption) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0)
-	add := func(value string) {
-		value = normalizeServiceText(value)
-		if value == "" || seen[value] {
-			return
-		}
-		seen[value] = true
-		out = append(out, value)
-		if plural := pluralServicePhrase(value); plural != "" && !seen[plural] {
-			seen[plural] = true
-			out = append(out, plural)
-		}
-	}
-	add(group.Label)
-	for _, candidate := range candidates {
-		add(candidate.CategoryName)
-		add(candidate.CategorySlug)
-		for _, token := range serviceNameTokens(candidate.Name) {
-			add(singularServiceToken(token))
-		}
-	}
-	return out
 }
 
 func resolvePartyPlanFromMessage(plan *PartyPlan, message string, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias) bool {

@@ -27,7 +27,7 @@ type Store interface {
 	UpsertServiceCategoryAlias(ctx context.Context, salonID string, ownerUserID string, input ServiceCategoryAliasMutation) (*ServiceCategoryAlias, error)
 	ArchiveServiceCategoryAlias(ctx context.Context, salonID string, ownerUserID string, aliasID string) (*ServiceCategoryAlias, error)
 	AssignServiceCategory(ctx context.Context, salonID string, ownerUserID string, serviceID string, categoryID string) (*Service, error)
-	RefreshServiceCategorySuggestions(ctx context.Context, salonID string, ownerUserID string, seeds []ServiceCategorySeed) (*ServiceCategorySuggestionRefresh, error)
+	RefreshServiceCategorySuggestions(ctx context.Context, salonID string, ownerUserID string) (*ServiceCategorySuggestionRefresh, error)
 	ListStaff(ctx context.Context, salonID string, provider string) ([]StaffMember, error)
 	CreateService(ctx context.Context, salonID string, ownerUserID string, provider string, input ServiceMutation) (*Service, error)
 	UpdateService(ctx context.Context, salonID string, ownerUserID string, serviceID string, input ServiceMutation) (*Service, error)
@@ -54,44 +54,6 @@ type Store interface {
 type ServiceLayer struct {
 	repo      Store
 	providers map[string]NamedProvider
-}
-
-var defaultServiceCategorySeeds = []ServiceCategorySeed{
-	{
-		Name:        "Manicure",
-		Slug:        "manicure",
-		Description: "Hand nail services such as classic, gel, and polish manicure appointments.",
-		SortOrder:   10,
-		Aliases:     []string{"manicure", "mani", "classic manicure", "gel manicure"},
-	},
-	{
-		Name:        "Pedicure",
-		Slug:        "pedicure",
-		Description: "Foot nail services such as classic, gel, spa, and polish pedicure appointments.",
-		SortOrder:   20,
-		Aliases:     []string{"pedicure", "pedi", "classic pedicure", "spa pedicure", "gel pedicure"},
-	},
-	{
-		Name:        "Acrylic",
-		Slug:        "acrylic",
-		Description: "Acrylic full sets, fills, overlays, and related extension services.",
-		SortOrder:   30,
-		Aliases:     []string{"acrylic", "acrylic full set", "full set", "fill", "fill in", "overlay"},
-	},
-	{
-		Name:        "Dip Powder",
-		Slug:        "dip-powder",
-		Description: "Dip powder and SNS-style nail services.",
-		SortOrder:   40,
-		Aliases:     []string{"dip powder", "dip", "sns", "powder manicure"},
-	},
-	{
-		Name:        "Removal",
-		Slug:        "removal",
-		Description: "Gel, acrylic, dip, polish, and enhancement removal services.",
-		SortOrder:   50,
-		Aliases:     []string{"removal", "remove", "take off", "soak off", "gel removal", "polish removal"},
-	},
 }
 
 func NewService(repo Store, providers ...NamedProvider) *ServiceLayer {
@@ -182,7 +144,7 @@ func (s *ServiceLayer) AssignServiceCategory(ctx context.Context, salonID string
 }
 
 func (s *ServiceLayer) RefreshServiceCategorySuggestions(ctx context.Context, salonID string, ownerUserID string) (*ServiceCategorySuggestionRefresh, error) {
-	return s.repo.RefreshServiceCategorySuggestions(ctx, salonID, ownerUserID, defaultServiceCategorySeeds)
+	return s.repo.RefreshServiceCategorySuggestions(ctx, salonID, ownerUserID)
 }
 
 func (s *ServiceLayer) Staff(ctx context.Context, salonID string, ownerUserID string) ([]StaffMember, error) {

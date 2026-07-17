@@ -22,16 +22,78 @@ type scriptedTurnInterpreter struct {
 }
 
 func (s *scriptedTurnInterpreter) InterpretTurn(ctx context.Context, req TurnInterpretationRequest) (TurnUnderstanding, error) {
-	return s.interpret(req), nil
+	return adaptTestTurnToSemanticContract(req, s.interpret(req)), nil
 }
 
 func (f *fakeConversationActInterpreter) InterpretTurn(ctx context.Context, req TurnInterpretationRequest) (TurnUnderstanding, error) {
 	f.calls++
 	f.request = req
 	if f.turn.Goal != "" || len(f.turn.Acts) > 0 || len(f.turn.Questions) > 0 {
-		return f.turn, nil
+		return adaptTestTurnToSemanticContract(req, f.turn), nil
 	}
-	return TurnUnderstanding{Goal: "book_appointment", Acts: []ConversationAct{f.act}, Confidence: f.act.Confidence, Source: "structured_ai"}, nil
+	return adaptTestTurnToSemanticContract(req, TurnUnderstanding{Goal: "book_appointment", Acts: []ConversationAct{f.act}, Confidence: f.act.Confidence, Source: "structured_ai"}), nil
+}
+
+// Tests that predate the compact guidance contract still describe semantic
+// meaning with full-turn acts/questions. Convert those fixtures to the same
+// typed guidance fields the production schema permits, so tests cannot pass on
+// model output that the real provider is unable to emit.
+func adaptTestTurnToSemanticContract(req TurnInterpretationRequest, turn TurnUnderstanding) TurnUnderstanding {
+	if req.SemanticContract != TurnSemanticContractGuidance || turn.GuidanceAction != "" || turn.Safety.Concern {
+		return turn
+	}
+	switch turn.Goal {
+	case "book_appointment":
+		turn.GuidanceAction = GuidanceActionBook
+		for _, act := range turn.Acts {
+			if act.Entity == ConversationEntityGuest && act.Count >= 2 {
+				turn.GuidancePartySize = act.Count
+				break
+			}
+			if act.Entity == ConversationEntityService {
+				turn.GuidanceAction = GuidanceActionNameService
+			}
+		}
+	case "consultation":
+		turn.GuidanceAction = GuidanceActionConsultation
+	case "information":
+		turn.GuidanceAction = GuidanceActionSalonQuestion
+		if len(turn.Questions) > 0 {
+			question := turn.Questions[0]
+			turn.GuidanceQuestionSubject = question.Subject
+			turn.GuidanceCatalogMode = question.Mode
+			if question.Subject == ConversationQuestionCatalog {
+				turn.GuidanceAction = GuidanceActionServiceCatalog
+			}
+		}
+	case "human_handoff":
+		turn.GuidanceAction = GuidanceActionHumanHandoff
+	case "reschedule_appointment":
+		turn.GuidanceAction = GuidanceActionReschedule
+	case "cancel_appointment":
+		turn.GuidanceAction = GuidanceActionCancel
+	}
+	turn.Acts = nil
+	turn.Questions = nil
+	return turn
+}
+
+func TestNormalizeExpectedAvailabilityQuestionsUsesStateAndStructuredTime(t *testing.T) {
+	turn := TurnUnderstanding{Questions: []ConversationQuestion{
+		{Subject: ConversationQuestionCurrentBooking, TimePreference: &TimePreference{Direction: TimePreferenceExact, Minutes: 15 * 60}},
+		{Subject: ConversationQuestionStaff, TimePreference: &TimePreference{Direction: "", Minutes: -1}},
+	}}
+	normalized := normalizeExpectedAvailabilityQuestions(turn, ExpectedInputRequestedDate)
+	if normalized.Questions[0].Subject != ConversationQuestionAvailability {
+		t.Fatalf("time-constrained subject = %q", normalized.Questions[0].Subject)
+	}
+	if normalized.Questions[1].Subject != ConversationQuestionStaff {
+		t.Fatalf("unconstrained subject changed = %q", normalized.Questions[1].Subject)
+	}
+	unchanged := normalizeExpectedAvailabilityQuestions(turn, ExpectedInputService)
+	if unchanged.Questions[0].Subject != ConversationQuestionCurrentBooking {
+		t.Fatalf("non-availability state changed subject = %q", unchanged.Questions[0].Subject)
+	}
 }
 
 func TestValidateConsultationNeedMutationsRejectsStateInvalidAndNoOpOperations(t *testing.T) {
@@ -101,6 +163,82 @@ func TestValidateConsultationNeedMutationsAppliesValidSequenceAgainstWorkingStat
 	validated, ok := validateConsultationNeedMutations(mutations, current, map[string]bool{"service_1": true})
 	if !ok || len(validated) != len(mutations) {
 		t.Fatalf("valid stateful mutation sequence rejected: ok=%t mutations=%#v", ok, validated)
+	}
+}
+
+func TestValidateTurnUnderstandingPreservesPrimaryActWhenAuxiliaryConsultationIsInvalid(t *testing.T) {
+	turn := TurnUnderstanding{
+		Goal: "book_appointment", Confidence: 0.97,
+		Acts: []ConversationAct{{
+			Kind: ConversationActAdd, Entity: ConversationEntityService,
+			TargetServiceIDs: []string{"service_1"}, Confidence: 0.96,
+		}},
+		Consultation: ConsultationNeedProfile{
+			BookingRequested: true, Confidence: 0,
+		},
+		ConsultationMutations: []ConsultationNeedMutation{{
+			Field: ConsultationNeedFieldDesiredOutcome, Operation: ConsultationNeedOperationSet,
+			Values: []string{ConsultationOutcomeUnknown}, Confidence: 0.96,
+		}},
+	}
+	validated, ok := validateTurnUnderstanding(turn, Session{}, []ServiceOption{{ID: "service_1", Name: "Gel Manicure"}}, nil)
+	if !ok || len(validated.Acts) != 1 || validated.Acts[0].TargetServiceIDs[0] != "service_1" {
+		t.Fatalf("primary act was rejected with auxiliary data: ok=%t turn=%#v", ok, validated)
+	}
+	if meaningfulConsultationNeeds(validated.Consultation) || len(validated.ConsultationMutations) != 0 {
+		t.Fatalf("invalid auxiliary consultation survived validation: %#v", validated)
+	}
+	if validated.InterpreterDiagnostics["consultation_profile_dropped"] != "1" || validated.InterpreterDiagnostics["consultation_mutations_dropped"] != "1" {
+		t.Fatalf("drop diagnostics = %#v", validated.InterpreterDiagnostics)
+	}
+}
+
+func TestGuidanceConsultationTransitionDoesNotConsumeActiveConsultationFlags(t *testing.T) {
+	turn := TurnUnderstanding{
+		Goal: "consultation", GuidanceAction: GuidanceActionConsultation, Confidence: 0.96,
+		Consultation: ConsultationNeedProfile{BookingRequested: true, ConversationComplete: true, Confidence: 0.96},
+		Safety:       SafetyAssessment{Concern: false, Confidence: 0.99},
+	}
+	validated := normalizeGuidanceConsultationTransitionFlags(turn, TurnSemanticContractGuidance)
+	if validated.Consultation.BookingRequested || validated.Consultation.ConversationComplete || validated.InterpreterDiagnostics["guidance_consultation_transition_flags_dropped"] != "1" {
+		t.Fatalf("guidance transition retained active-state flags: %#v", validated)
+	}
+}
+
+func TestOperationalMutationOverridesBareConsultationGoal(t *testing.T) {
+	turn := TurnUnderstanding{
+		Goal: "consultation",
+		Acts: []ConversationAct{{
+			Kind: ConversationActSet, Entity: ConversationEntityStaff, Subject: "alternative", Confidence: 0.94,
+		}},
+	}
+	normalized := normalizeOperationalMutationGoal(turn, Session{Intent: IntentBooking, ServiceID: "service_dynamic"})
+	if normalized.Goal != "book_appointment" || len(normalized.Acts) != 1 || normalized.InterpreterDiagnostics["bare_consultation_goal_overridden_by_operational_mutation"] != "1" {
+		t.Fatalf("normalized turn = %#v", normalized)
+	}
+}
+
+func TestOperationalMutationDoesNotOverrideGroundedConsultationGoal(t *testing.T) {
+	turn := TurnUnderstanding{
+		Goal: "consultation",
+		Acts: []ConversationAct{{
+			Kind: ConversationActSet, Entity: ConversationEntityStaff, Subject: "alternative", Confidence: 0.94,
+		}},
+		Consultation: ConsultationNeedProfile{DesiredOutcome: ConsultationOutcomeAddStrength, Confidence: 0.93},
+	}
+	normalized := normalizeOperationalMutationGoal(turn, Session{Intent: IntentBooking})
+	if normalized.Goal != "consultation" {
+		t.Fatalf("grounded consultation goal was overridden: %#v", normalized)
+	}
+}
+
+func TestValidateConsultationUnknownSnapshotNormalizesToAbsence(t *testing.T) {
+	profile, ok := validateConsultationNeedProfile(ConsultationNeedProfile{
+		CurrentSystem: ConsultationSystemUnknown, DesiredOutcome: ConsultationOutcomeUnknown,
+		LengthChange: ConsultationLengthUnknown,
+	}, nil)
+	if !ok || profile.CurrentSystem != "" || profile.DesiredOutcome != "" || profile.LengthChange != "" {
+		t.Fatalf("unknown snapshot = ok:%t profile:%#v", ok, profile)
 	}
 }
 
@@ -435,6 +573,8 @@ func TestSemanticUnnamedStaffAlternativeUsesCurrentCatalogAndPendingChoice(t *te
 		Goal: "book_appointment", Confidence: 0.96,
 		Acts: []ConversationAct{{
 			Kind: ConversationActSet, Entity: ConversationEntityStaff, Subject: "alternative", Confidence: 0.96,
+			SourceServiceIDs: []string{"service_1"}, SourceCategoryID: "category_service",
+			GuestScope: ConversationGuestAnother, GuestRef: "guest_2", Count: 1,
 		}},
 	}}
 	service := NewService(store, &fakeBookingTool{})
@@ -462,8 +602,25 @@ func TestSemanticUnnamedStaffAlternativeUsesCurrentCatalogAndPendingChoice(t *te
 	if interpreter.calls != 1 || session.StaffID != "staff_priya" || session.DialogState.Pending != nil {
 		t.Fatalf("pending alternative selection = interpreter %d staff %q dialog %#v", interpreter.calls, session.StaffID, session.DialogState)
 	}
-	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "what day") {
+	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "changed the technician to priya") || !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "what day") {
 		t.Fatalf("alternative selection did not resume booking: %q", store.lastTurn.AIMessage)
+	}
+}
+
+func TestSingleCatalogStaffAlternativeAcknowledgesResolvedTechnician(t *testing.T) {
+	staff := []StaffOption{{ID: "staff_mai", Name: "Mai"}, {ID: "staff_linh", Name: "Linh"}}
+	session := Session{StaffID: "staff_mai", StaffName: "Mai", StaffSelectionMode: booking.StaffSelectionSpecific}
+	result := applyStaffConversationAct(&session, ConversationAct{
+		Kind: ConversationActSet, Entity: ConversationEntityStaff, Subject: "alternative",
+	}, staff)
+	turn := TurnRecord{
+		Session:   Session{StaffID: "staff_mai"},
+		Update:    SessionUpdate{StaffID: "staff_linh"},
+		AIMessage: "What day would you like for Gel Manicure?",
+	}
+	prependConversationMutationAcknowledgement(&turn, result, session, nil)
+	if session.StaffID != "staff_linh" || !strings.Contains(turn.AIMessage, "changed the technician to Linh") || !strings.Contains(turn.AIMessage, "What day") {
+		t.Fatalf("single staff alternative = staff:%q result:%#v reply:%q", session.StaffID, result, turn.AIMessage)
 	}
 }
 
@@ -569,7 +726,7 @@ func TestInitialCategorySelectionPreservesCatalogAmbiguityWithoutAddOrReplacePro
 				Alias: "foot care", NormalizedAlias: "foot care", Source: "owner", Confidence: 0.95,
 			}},
 			modelTargetID: "service_classic_pedi",
-			wantReply:     "Which pedicure",
+			wantReply:     "Which foot care service",
 		},
 	}
 
@@ -799,7 +956,7 @@ func TestConversationActClarifiesSameCategoryServiceGuestScope(t *testing.T) {
 		t.Fatalf("another-guest response: %v", err)
 	}
 	if got := selectedServiceIDs(*session); !sameStrings(got, []string{"service_gel", "service_classic"}) {
-		t.Fatalf("selected services = %#v", got)
+		t.Fatalf("selected services = %#v pending=%#v metadata=%#v reply=%q", got, session.DialogState.Pending, store.lastTurn.CustomerMetadata, store.lastTurn.AIMessage)
 	}
 	if session.PartyPlan == nil || session.PartyPlan.PartySize != 2 || !partyPlanComplete(session.PartyPlan) {
 		t.Fatalf("party plan = %#v", session.PartyPlan)
@@ -1146,7 +1303,7 @@ func TestInformationalInterruptionAnswersThenResumesBookingQuestion(t *testing.T
 	store.session.ServiceID = "service_1"
 	store.session.ServiceName = "Classic Manicure"
 	store.session.BookingSegments = []booking.BookingSegmentRequest{{ServiceID: "service_1", StaffSelectionMode: booking.StaffSelectionAnyone}}
-	store.businessHours = []BusinessHourPeriod{{ID: "hours_mon", DayOfWeek: 1, StartLocalTime: "09:00:00", EndLocalTime: "19:00:00", Source: "imported", Provider: "square"}}
+	store.businessHours = []BusinessHourPeriod{{ID: "hours_tue", DayOfWeek: 2, StartLocalTime: "10:00:00", EndLocalTime: "18:00:00", Source: "imported", Provider: "square"}}
 	service := NewService(store, &fakeBookingTool{})
 	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
 		Goal: "information", Confidence: 0.96,
@@ -1158,7 +1315,7 @@ func TestInformationalInterruptionAnswersThenResumesBookingQuestion(t *testing.T
 	if err != nil {
 		t.Fatalf("informational interruption: %v", err)
 	}
-	if !strings.Contains(store.lastTurn.AIMessage, "Monday 9:00 AM to 7:00 PM") || !strings.Contains(store.lastTurn.AIMessage, "What day") {
+	if !strings.Contains(store.lastTurn.AIMessage, "Today's hours are 10:00 AM to 6:00 PM") || !strings.Contains(store.lastTurn.AIMessage, "What day") {
 		t.Fatalf("answer did not resume booking: %s", store.lastTurn.AIMessage)
 	}
 	if strings.Contains(store.lastTurn.AIMessage, "Would you like help with an appointment") {
@@ -1180,12 +1337,15 @@ func TestSemanticPartyServiceCorrectionPreservesGuestGroups(t *testing.T) {
 		BookingSegments: []booking.BookingSegmentRequest{{ServiceID: "service_gel"}, {ServiceID: "service_classic"}},
 	}
 	turn := TurnUnderstanding{Goal: "book_appointment", Confidence: 0.96, Acts: []ConversationAct{{
-		Kind: ConversationActReplace, Entity: ConversationEntityService, GuestRef: "guest 2",
+		Kind: ConversationActReplace, Entity: ConversationEntityService, GuestRef: "guest 2", GuestScope: ConversationGuestCaller,
 		SourceServiceIDs: []string{"service_classic"}, TargetServiceIDs: []string{"service_spa"}, Confidence: 0.96,
 	}}}
 	validated, ok := validateTurnUnderstanding(turn, session, services, nil)
 	if !ok {
 		t.Fatal("catalog-backed guest correction was rejected")
+	}
+	if validated.Acts[0].GuestScope != "" {
+		t.Fatalf("party guest scope was not normalized: %#v", validated.Acts[0])
 	}
 	service := &Service{}
 	result := service.applyTurnUnderstandingToDraft(&session, validated, services, nil)
@@ -1199,6 +1359,66 @@ func TestSemanticPartyServiceCorrectionPreservesGuestGroups(t *testing.T) {
 	turn.Acts[0].GuestRef = ""
 	if _, ok := validateTurnUnderstanding(turn, session, services, nil); ok {
 		t.Fatal("party service correction without guest_ref was accepted")
+	}
+}
+
+func TestPartyGroupSpokenScopeNeverExposesProtocolGuestReference(t *testing.T) {
+	plan := &PartyPlan{PartySize: 2, Groups: []PartyPlanGroup{
+		{Label: "caller", Count: 1},
+		{Label: "guest_2", Count: 1},
+	}}
+	if got := partyGroupSpokenScope(plan, "guest_2"); got != "the second guest" {
+		t.Fatalf("protocol guest reference spoken as %q", got)
+	}
+	if got := partyGroupSpokenScope(plan, "caller"); got != "you" {
+		t.Fatalf("caller group spoken as %q", got)
+	}
+}
+
+func TestSemanticReplacementRequiresCatalogGroundedSourceEvidence(t *testing.T) {
+	services := []ServiceOption{
+		{ID: "service_classic", Name: "Classic Manicure"},
+		{ID: "service_removal", Name: "Gel Removal"},
+	}
+	session := Session{
+		ServiceID: "service_classic", ServiceName: "Classic Manicure",
+		PartyPlan: &PartyPlan{PartySize: 2, Groups: []PartyPlanGroup{
+			{Label: "caller", Count: 1, ResolvedServiceIDs: []string{"service_classic"}},
+			{Label: "guest_2", Count: 1, ResolvedServiceIDs: []string{"service_classic"}},
+		}},
+	}
+	turn := TurnUnderstanding{Acts: []ConversationAct{{
+		Kind: ConversationActReplace, Entity: ConversationEntityService, GuestRef: "guest_2",
+		SourceServiceIDs: []string{"service_classic"}, TargetServiceIDs: []string{"service_removal"},
+	}}}
+
+	if semanticReplacementSourcesGrounded(turn, "Put Gel Removal on the second guest.", session, services, nil, nil) {
+		t.Fatal("replacement source invented from the draft was accepted")
+	}
+	if !semanticReplacementSourcesGrounded(turn, "Replace Classic Manicure with Gel Removal for the second guest.", session, services, nil, nil) {
+		t.Fatal("explicit catalog-backed replacement source was rejected")
+	}
+
+	session.DialogState = DialogState{Pending: &PendingConversationAct{
+		Kind: ConversationActReplace, SourceServiceIDs: []string{"service_classic"},
+	}}
+	if !semanticReplacementSourcesGrounded(turn, "Use Gel Removal instead.", session, services, nil, nil) {
+		t.Fatal("typed pending replacement source was rejected")
+	}
+}
+
+func TestActiveConsultationDropsModelAuthoredBookingActs(t *testing.T) {
+	session := Session{DialogState: DialogState{Consultation: &ConsultationState{Status: ConsultationStatusCollectingNeeds}}}
+	turn := TurnUnderstanding{
+		Goal: "book_appointment",
+		Acts: []ConversationAct{{Kind: ConversationActAdd, Entity: ConversationEntityService, TargetServiceIDs: []string{"service_classic"}}},
+		ConsultationMutations: []ConsultationNeedMutation{{
+			Field: ConsultationNeedFieldCurrentSystem, Operation: ConsultationNeedOperationSet, Values: []string{ConsultationSystemNatural},
+		}},
+	}
+	normalized := normalizeActiveConsultationTurn(turn, session)
+	if len(normalized.Acts) != 0 || len(normalized.ConsultationMutations) != 1 {
+		t.Fatalf("active consultation normalization = %#v", normalized)
 	}
 }
 

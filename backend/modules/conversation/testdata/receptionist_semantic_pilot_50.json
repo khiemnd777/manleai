@@ -1,0 +1,3974 @@
+{
+  "schema_version": 2,
+  "taxonomy_release": "us-nail-v1",
+  "expected_scenario_count": 50,
+  "expected_review_rounds": 10,
+  "catalog_fixtures": {
+    "aurora": {
+      "services": [
+        {
+          "service_id": "svc_luna",
+          "service_name": "Luna Renewal",
+          "category_id": "cat_ritual",
+          "category_name": "Signature Ritual",
+          "consultation_profile": {
+            "status": "ready",
+            "recommended_outcomes": [
+              "maintain"
+            ],
+            "compatible_current_systems": [
+              "natural"
+            ],
+            "length_capabilities": [
+              "keep"
+            ],
+            "priority_tags": [
+              "lower_maintenance"
+            ],
+            "finish_options": [
+              "natural"
+            ],
+            "owner_approved_summary": "A salon-defined renewal ritual for natural nails.",
+            "revision": 1
+          }
+        },
+        {
+          "service_id": "svc_velvet",
+          "service_name": "Velvet Shield",
+          "category_id": "cat_protective",
+          "category_name": "Protective Finish",
+          "consultation_profile": {
+            "status": "ready",
+            "recommended_outcomes": [
+              "add_strength"
+            ],
+            "compatible_current_systems": [
+              "natural"
+            ],
+            "length_capabilities": [
+              "keep"
+            ],
+            "priority_tags": [
+              "durability"
+            ],
+            "finish_options": [
+              "glossy"
+            ],
+            "owner_approved_summary": "A salon-defined protective finish.",
+            "revision": 1
+          }
+        },
+        {
+          "service_id": "svc_cloud",
+          "service_name": "Cloud Foot Reset",
+          "category_id": "cat_foot",
+          "category_name": "Foot Care"
+        }
+      ],
+      "aliases": [
+        {
+          "service_id": "svc_luna",
+          "alias": "moon refresh"
+        },
+        {
+          "service_id": "svc_velvet",
+          "alias": "soft armor"
+        },
+        {
+          "service_id": "svc_cloud",
+          "alias": "cloud pedi"
+        }
+      ],
+      "categories": [
+        {
+          "category_id": "cat_ritual",
+          "category_name": "Signature Ritual",
+          "aliases": [
+            "renewal"
+          ],
+          "service_ids": [
+            "svc_luna"
+          ]
+        },
+        {
+          "category_id": "cat_protective",
+          "category_name": "Protective Finish",
+          "aliases": [
+            "shield"
+          ],
+          "service_ids": [
+            "svc_velvet"
+          ]
+        },
+        {
+          "category_id": "cat_foot",
+          "category_name": "Foot Care",
+          "aliases": [
+            "foot ritual"
+          ],
+          "service_ids": [
+            "svc_cloud"
+          ]
+        }
+      ],
+      "staff": [
+        {
+          "staff_id": "staff_aria",
+          "staff_name": "Aria"
+        }
+      ],
+      "business_hours": [
+        {
+          "id": "hours_monday",
+          "day_of_week": 1,
+          "start_local_time": "09:00:00",
+          "end_local_time": "19:00:00"
+        },
+        {
+          "id": "hours_tuesday",
+          "day_of_week": 2,
+          "start_local_time": "09:00:00",
+          "end_local_time": "19:00:00"
+        },
+        {
+          "id": "hours_wednesday",
+          "day_of_week": 3,
+          "start_local_time": "09:00:00",
+          "end_local_time": "19:00:00"
+        },
+        {
+          "id": "hours_thursday",
+          "day_of_week": 4,
+          "start_local_time": "09:00:00",
+          "end_local_time": "19:00:00"
+        },
+        {
+          "id": "hours_friday",
+          "day_of_week": 5,
+          "start_local_time": "09:00:00",
+          "end_local_time": "19:00:00"
+        },
+        {
+          "id": "hours_saturday",
+          "day_of_week": 6,
+          "start_local_time": "10:00:00",
+          "end_local_time": "17:00:00"
+        },
+        {
+          "id": "hours_sunday",
+          "day_of_week": 0,
+          "start_local_time": "11:00:00",
+          "end_local_time": "16:00:00"
+        }
+      ]
+    },
+    "harbor": {
+      "services": [
+        {
+          "service_id": "svc_harbor",
+          "service_name": "Harbor Care",
+          "category_id": "cat_harbor",
+          "category_name": "Quiet Care"
+        }
+      ],
+      "aliases": [
+        {
+          "service_id": "svc_harbor",
+          "alias": "quiet reset"
+        }
+      ],
+      "categories": [
+        {
+          "category_id": "cat_harbor",
+          "category_name": "Quiet Care",
+          "aliases": [
+            "simple care"
+          ],
+          "service_ids": [
+            "svc_harbor"
+          ]
+        }
+      ],
+      "staff": [
+        {
+          "staff_id": "staff_sam",
+          "staff_name": "Sam"
+        }
+      ],
+      "business_hours": [
+        {
+          "id": "hours_monday",
+          "day_of_week": 1,
+          "start_local_time": "09:00:00",
+          "end_local_time": "19:00:00"
+        },
+        {
+          "id": "hours_tuesday",
+          "day_of_week": 2,
+          "start_local_time": "09:00:00",
+          "end_local_time": "19:00:00"
+        },
+        {
+          "id": "hours_wednesday",
+          "day_of_week": 3,
+          "start_local_time": "09:00:00",
+          "end_local_time": "19:00:00"
+        },
+        {
+          "id": "hours_thursday",
+          "day_of_week": 4,
+          "start_local_time": "09:00:00",
+          "end_local_time": "19:00:00"
+        },
+        {
+          "id": "hours_friday",
+          "day_of_week": 5,
+          "start_local_time": "09:00:00",
+          "end_local_time": "19:00:00"
+        },
+        {
+          "id": "hours_saturday",
+          "day_of_week": 6,
+          "start_local_time": "10:00:00",
+          "end_local_time": "17:00:00"
+        },
+        {
+          "id": "hours_sunday",
+          "day_of_week": 0,
+          "start_local_time": "11:00:00",
+          "end_local_time": "16:00:00"
+        }
+      ]
+    },
+    "lotus": {
+      "services": [
+        {
+          "service_id": "svc_classic_mani",
+          "service_name": "Classic Manicure",
+          "category_id": "cat_mani",
+          "category_name": "Manicure",
+          "consultation_profile": {
+            "status": "ready",
+            "recommended_outcomes": [
+              "maintain",
+              "color_refresh"
+            ],
+            "compatible_current_systems": [
+              "natural",
+              "regular_polish"
+            ],
+            "length_capabilities": [
+              "keep",
+              "shorten"
+            ],
+            "priority_tags": [
+              "lower_cost",
+              "shorter_visit"
+            ],
+            "finish_options": [
+              "regular_polish",
+              "natural"
+            ],
+            "owner_approved_summary": "Basic hand and nail care with regular polish options.",
+            "revision": 1
+          }
+        },
+        {
+          "service_id": "svc_gel_mani",
+          "service_name": "Gel Manicure",
+          "category_id": "cat_mani",
+          "category_name": "Manicure",
+          "consultation_profile": {
+            "status": "ready",
+            "recommended_outcomes": [
+              "maintain",
+              "color_refresh"
+            ],
+            "compatible_current_systems": [
+              "natural",
+              "gel"
+            ],
+            "length_capabilities": [
+              "keep",
+              "shorten"
+            ],
+            "priority_tags": [
+              "durability"
+            ],
+            "finish_options": [
+              "gel_polish",
+              "glossy"
+            ],
+            "owner_approved_summary": "Hand and nail care finished with gel polish.",
+            "revision": 1
+          }
+        },
+        {
+          "service_id": "svc_spa_pedi",
+          "service_name": "Spa Pedicure",
+          "category_id": "cat_pedi",
+          "category_name": "Pedicure"
+        },
+        {
+          "service_id": "svc_acrylic_full",
+          "service_name": "Acrylic Full Set",
+          "category_id": "cat_acrylic",
+          "category_name": "Acrylic"
+        },
+        {
+          "service_id": "svc_dip_mani",
+          "service_name": "Dip Powder Manicure",
+          "category_id": "cat_dip",
+          "category_name": "Dip Powder"
+        },
+        {
+          "service_id": "svc_gel_remove",
+          "service_name": "Gel Removal",
+          "category_id": "cat_removal",
+          "category_name": "Removal"
+        },
+        {
+          "service_id": "svc_nail_art",
+          "service_name": "Nail Art",
+          "category_id": "cat_art",
+          "category_name": "Nail Art"
+        },
+        {
+          "service_id": "svc_nail_repair",
+          "service_name": "Nail Repair",
+          "category_id": "cat_repair",
+          "category_name": "Nail Repair"
+        }
+      ],
+      "aliases": [
+        {
+          "service_id": "svc_gel_mani",
+          "alias": "no-chip hands"
+        },
+        {
+          "service_id": "svc_spa_pedi",
+          "alias": "fresh feet"
+        },
+        {
+          "service_id": "svc_dip_mani",
+          "alias": "powder color"
+        },
+        {
+          "service_id": "svc_gel_remove",
+          "alias": "gel takeoff"
+        }
+      ],
+      "categories": [
+        {
+          "category_id": "cat_mani",
+          "category_name": "Manicure",
+          "aliases": [
+            "hand nails",
+            "mani"
+          ],
+          "service_ids": [
+            "svc_classic_mani",
+            "svc_gel_mani"
+          ]
+        },
+        {
+          "category_id": "cat_pedi",
+          "category_name": "Pedicure",
+          "aliases": [
+            "foot care",
+            "pedi"
+          ],
+          "service_ids": [
+            "svc_spa_pedi"
+          ]
+        },
+        {
+          "category_id": "cat_acrylic",
+          "category_name": "Acrylic",
+          "aliases": null,
+          "service_ids": [
+            "svc_acrylic_full"
+          ]
+        },
+        {
+          "category_id": "cat_dip",
+          "category_name": "Dip Powder",
+          "aliases": null,
+          "service_ids": [
+            "svc_dip_mani"
+          ]
+        },
+        {
+          "category_id": "cat_removal",
+          "category_name": "Removal",
+          "aliases": null,
+          "service_ids": [
+            "svc_gel_remove"
+          ]
+        },
+        {
+          "category_id": "cat_art",
+          "category_name": "Nail Art",
+          "aliases": null,
+          "service_ids": [
+            "svc_nail_art"
+          ]
+        },
+        {
+          "category_id": "cat_repair",
+          "category_name": "Nail Repair",
+          "aliases": null,
+          "service_ids": [
+            "svc_nail_repair"
+          ]
+        }
+      ],
+      "staff": [
+        {
+          "staff_id": "staff_mai",
+          "staff_name": "Mai"
+        },
+        {
+          "staff_id": "staff_linh",
+          "staff_name": "Linh"
+        }
+      ],
+      "business_hours": [
+        {
+          "id": "hours_monday",
+          "day_of_week": 1,
+          "start_local_time": "09:00:00",
+          "end_local_time": "19:00:00"
+        },
+        {
+          "id": "hours_tuesday",
+          "day_of_week": 2,
+          "start_local_time": "09:00:00",
+          "end_local_time": "19:00:00"
+        },
+        {
+          "id": "hours_wednesday",
+          "day_of_week": 3,
+          "start_local_time": "09:00:00",
+          "end_local_time": "19:00:00"
+        },
+        {
+          "id": "hours_thursday",
+          "day_of_week": 4,
+          "start_local_time": "09:00:00",
+          "end_local_time": "19:00:00"
+        },
+        {
+          "id": "hours_friday",
+          "day_of_week": 5,
+          "start_local_time": "09:00:00",
+          "end_local_time": "19:00:00"
+        },
+        {
+          "id": "hours_saturday",
+          "day_of_week": 6,
+          "start_local_time": "10:00:00",
+          "end_local_time": "17:00:00"
+        },
+        {
+          "id": "hours_sunday",
+          "day_of_week": 0,
+          "start_local_time": "11:00:00",
+          "end_local_time": "16:00:00"
+        }
+      ]
+    }
+  },
+  "scenarios": [
+    {
+      "id": "pilot-001",
+      "family": "guidance_catalog",
+      "description": "Catalog questions across list, count, existence, details, and comparison modes.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_catalog-base-002",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "aurora",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "Show me your services.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "information",
+        "guidance_action": "service_catalog",
+        "guidance_catalog_mode": "list",
+        "guidance_question_subject": "catalog",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-002",
+      "family": "guidance_catalog",
+      "description": "Catalog questions across list, count, existence, details, and comparison modes.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_catalog-base-002",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "aurora",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "Show me your services.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "information",
+        "guidance_action": "service_catalog",
+        "guidance_catalog_mode": "list",
+        "guidance_question_subject": "catalog",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-003",
+      "family": "guidance_consultation",
+      "description": "Needs-based requests for help choosing a nail service.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_consultation-base-001",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "I don't know whether I should choose a service",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "consultation",
+        "guidance_action": "consultation",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-004",
+      "family": "guidance_consultation",
+      "description": "Needs-based requests for help choosing a nail service.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_consultation-base-001",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "I don't know whether I should choose a service",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "consultation",
+        "guidance_action": "consultation",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-005",
+      "family": "guidance_consultation",
+      "description": "Needs-based requests for help choosing a nail service.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_consultation-base-002",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "aurora",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "I want a service for my nails",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "consultation",
+        "guidance_action": "consultation",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-006",
+      "family": "guidance_consultation",
+      "description": "Needs-based requests for help choosing a nail service.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_consultation-base-002",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "aurora",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "I want a service for my nails",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "consultation",
+        "guidance_action": "consultation",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-007",
+      "family": "guidance_booking",
+      "description": "Explicit requests to begin booking or name a known service.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_booking-base-001",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "I'd like to book an appointment.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "book_appointment",
+        "guidance_action": "book",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-008",
+      "family": "guidance_booking",
+      "description": "Explicit requests to begin booking or name a known service.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_booking-base-001",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "I'd like to book an appointment.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "book_appointment",
+        "guidance_action": "book",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-009",
+      "family": "service_selection",
+      "description": "Concrete service selections against standard and nonstandard data-owned catalogs.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "service_selection-base-001",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "Book Gel Manicure for me.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "book_appointment",
+        "guidance_action": "name_service",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-010",
+      "family": "service_selection",
+      "description": "Concrete service selections against standard and nonstandard data-owned catalogs.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "service_selection-base-001",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "Book Gel Manicure for me.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "book_appointment",
+        "guidance_action": "name_service",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-011",
+      "family": "guidance_catalog",
+      "description": "Catalog questions across list, count, existence, details, and comparison modes.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_catalog-base-001",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "What services can I book?",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "information",
+        "guidance_action": "service_catalog",
+        "guidance_catalog_mode": "list",
+        "guidance_question_subject": "catalog",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-012",
+      "family": "guidance_consultation",
+      "description": "Needs-based requests for help choosing a nail service.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_consultation-base-003",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "harbor",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "What would fit someone who wants a durable finish?",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "consultation",
+        "guidance_action": "consultation",
+        "consultation": {
+          "priorities": [
+            "durability"
+          ]
+        },
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-013",
+      "family": "guidance_booking",
+      "description": "Explicit requests to begin booking or name a known service.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_booking-base-002",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "aurora",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "Can we start scheduling a visit?",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "book_appointment",
+        "guidance_action": "book",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-014",
+      "family": "guidance_salon_question",
+      "description": "Operational questions about hours, price, staff, policy, and availability.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_salon_question-base-001",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "What time do you open tomorrow?",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "information",
+        "guidance_action": "salon_question",
+        "guidance_question_subject": "hours",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-015",
+      "family": "guidance_handoff",
+      "description": "Explicit human help requests that must not be inferred from unrelated person language.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_handoff-base-001",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "Please connect me with the owner.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "human_handoff",
+        "guidance_action": "human_handoff",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-016",
+      "family": "service_selection",
+      "description": "Concrete service selections against standard and nonstandard data-owned catalogs.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "service_selection-base-002",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "I'd like Classic Manicure.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "book_appointment",
+        "guidance_action": "name_service",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-017",
+      "family": "service_edit",
+      "description": "Add, replace, remove, and undo operations on an existing booking draft.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "service_edit-base-001",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "Also add Spa Pedicure.",
+        "expected_input": "requested_date",
+        "semantic_contract": "full_turn",
+        "recognizable_guidance_actions": null,
+        "selected_services": [
+          {
+            "service_id": "svc_gel_mani",
+            "service_name": "Gel Manicure",
+            "category_id": "cat_mani",
+            "category_name": "Manicure",
+            "consultation_profile": {
+              "status": "ready",
+              "recommended_outcomes": [
+                "maintain",
+                "color_refresh"
+              ],
+              "compatible_current_systems": [
+                "natural",
+                "gel"
+              ],
+              "length_capabilities": [
+                "keep",
+                "shorten"
+              ],
+              "priority_tags": [
+                "durability"
+              ],
+              "finish_options": [
+                "gel_polish",
+                "glossy"
+              ],
+              "owner_approved_summary": "Hand and nail care finished with gel polish.",
+              "revision": 1
+            }
+          }
+        ],
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "drafting",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": [
+            "svc_gel_mani"
+          ],
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "required_acts": [
+          {
+            "kind": "add_service",
+            "entity": "service",
+            "target_ids": [
+              "svc_spa_pedi"
+            ]
+          }
+        ],
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-018",
+      "family": "availability",
+      "description": "Availability questions asked while a booking draft already contains a service.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "availability-base-001",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "What times are open tomorrow?",
+        "expected_input": "requested_date",
+        "semantic_contract": "full_turn",
+        "recognizable_guidance_actions": null,
+        "selected_services": [
+          {
+            "service_id": "svc_gel_mani",
+            "service_name": "Gel Manicure",
+            "category_id": "cat_mani",
+            "category_name": "Manicure",
+            "consultation_profile": {
+              "status": "ready",
+              "recommended_outcomes": [
+                "maintain",
+                "color_refresh"
+              ],
+              "compatible_current_systems": [
+                "natural",
+                "gel"
+              ],
+              "length_capabilities": [
+                "keep",
+                "shorten"
+              ],
+              "priority_tags": [
+                "durability"
+              ],
+              "finish_options": [
+                "gel_polish",
+                "glossy"
+              ],
+              "owner_approved_summary": "Hand and nail care finished with gel polish.",
+              "revision": 1
+            }
+          }
+        ],
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "drafting",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": [
+            "svc_gel_mani"
+          ],
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "availability_intent": true,
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-019",
+      "family": "party_booking",
+      "description": "Guest-scoped service changes for a real party booking draft.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "party_booking-base-001",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "Add Spa Pedicure for guest two.",
+        "expected_input": "service",
+        "semantic_contract": "full_turn",
+        "recognizable_guidance_actions": null,
+        "selected_services": [
+          {
+            "service_id": "svc_classic_mani",
+            "service_name": "Classic Manicure",
+            "category_id": "cat_mani",
+            "category_name": "Manicure",
+            "consultation_profile": {
+              "status": "ready",
+              "recommended_outcomes": [
+                "maintain",
+                "color_refresh"
+              ],
+              "compatible_current_systems": [
+                "natural",
+                "regular_polish"
+              ],
+              "length_capabilities": [
+                "keep",
+                "shorten"
+              ],
+              "priority_tags": [
+                "lower_cost",
+                "shorter_visit"
+              ],
+              "finish_options": [
+                "regular_polish",
+                "natural"
+              ],
+              "owner_approved_summary": "Basic hand and nail care with regular polish options.",
+              "revision": 1
+            }
+          },
+          {
+            "service_id": "svc_gel_mani",
+            "service_name": "Gel Manicure",
+            "category_id": "cat_mani",
+            "category_name": "Manicure",
+            "consultation_profile": {
+              "status": "ready",
+              "recommended_outcomes": [
+                "maintain",
+                "color_refresh"
+              ],
+              "compatible_current_systems": [
+                "natural",
+                "gel"
+              ],
+              "length_capabilities": [
+                "keep",
+                "shorten"
+              ],
+              "priority_tags": [
+                "durability"
+              ],
+              "finish_options": [
+                "gel_polish",
+                "glossy"
+              ],
+              "owner_approved_summary": "Hand and nail care finished with gel polish.",
+              "revision": 1
+            }
+          }
+        ],
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "drafting",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": [
+            "svc_gel_mani",
+            "svc_classic_mani"
+          ],
+          "party_size": 2,
+          "party_groups": [
+            {
+              "guest_ref": "guest_caller",
+              "count": 1,
+              "service_ids": [
+                "svc_gel_mani"
+              ]
+            },
+            {
+              "guest_ref": "guest_2",
+              "count": 1,
+              "service_ids": [
+                "svc_classic_mani"
+              ]
+            }
+          ],
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "required_acts": [
+          {
+            "kind": "add_service",
+            "entity": "service",
+            "target_ids": [
+              "svc_spa_pedi"
+            ],
+            "guest_ref": "guest_2"
+          }
+        ],
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-020",
+      "family": "consultation_details",
+      "description": "Structured consultation needs and corrections without model-authored recommendations.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "consultation_details-base-001",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "My nails are natural right now.",
+        "expected_input": "consultation_desired_outcome",
+        "semantic_contract": "full_turn",
+        "recognizable_guidance_actions": null,
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "consultation",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        },
+        "consultation": {
+          "status": "collecting_needs",
+          "resume_phase": "",
+          "needs": {},
+          "no_progress_count": 0,
+          "provider_failure_count": 0
+        }
+      },
+      "expected": {
+        "goal": "consultation",
+        "consultation": {
+          "current_system": "natural"
+        },
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-021",
+      "family": "current_booking",
+      "description": "Questions about the caller's current draft rather than the salon's full catalog.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "current_booking-base-001",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "What services are in my appointment now?",
+        "expected_input": "booking_review",
+        "semantic_contract": "full_turn",
+        "recognizable_guidance_actions": null,
+        "selected_services": [
+          {
+            "service_id": "svc_gel_mani",
+            "service_name": "Gel Manicure",
+            "category_id": "cat_mani",
+            "category_name": "Manicure",
+            "consultation_profile": {
+              "status": "ready",
+              "recommended_outcomes": [
+                "maintain",
+                "color_refresh"
+              ],
+              "compatible_current_systems": [
+                "natural",
+                "gel"
+              ],
+              "length_capabilities": [
+                "keep",
+                "shorten"
+              ],
+              "priority_tags": [
+                "durability"
+              ],
+              "finish_options": [
+                "gel_polish",
+                "glossy"
+              ],
+              "owner_approved_summary": "Hand and nail care finished with gel polish.",
+              "revision": 1
+            }
+          },
+          {
+            "service_id": "svc_spa_pedi",
+            "service_name": "Spa Pedicure",
+            "category_id": "cat_pedi",
+            "category_name": "Pedicure"
+          }
+        ],
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "review",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": [
+            "svc_gel_mani",
+            "svc_spa_pedi"
+          ],
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "current_booking_summary": true,
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-022",
+      "family": "reschedule_cancel",
+      "description": "Reschedule and cancellation goals that remain distinct from new booking.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "reschedule_cancel-base-001",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "I need to reschedule my appointment.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "reschedule_appointment",
+        "guidance_action": "reschedule",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-023",
+      "family": "safety",
+      "description": "Safety concerns that require a typed concern while preserving the caller's operational goal.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "safety-base-001",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "My nail is painful; is it safe to put acrylic over it?",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": true,
+          "category": "pain",
+          "alternative_categories": [
+            "medical_suitability"
+          ]
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-024",
+      "family": "counterexample",
+      "description": "Counterexamples for person, service-menu, and advice language previously vulnerable to phrase routing.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "counterexample-base-001",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "It is for another person.",
+        "expected_input": "service",
+        "semantic_contract": "full_turn",
+        "recognizable_guidance_actions": null,
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "party_size": 2,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "forbidden_goals": [
+          "human_handoff"
+        ],
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-025",
+      "family": "guidance_catalog",
+      "description": "Catalog questions across list, count, existence, details, and comparison modes.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_catalog-base-003",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "harbor",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "Could you walk me through the service menu?",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "information",
+        "guidance_action": "service_catalog",
+        "guidance_catalog_mode": "list",
+        "guidance_question_subject": "catalog",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-026",
+      "family": "guidance_consultation",
+      "description": "Needs-based requests for help choosing a nail service.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_consultation-base-004",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "Help me narrow down the right nail service.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "consultation",
+        "guidance_action": "consultation",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-027",
+      "family": "guidance_booking",
+      "description": "Explicit requests to begin booking or name a known service.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_booking-base-003",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "harbor",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "I want to make a nail appointment.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "book_appointment",
+        "guidance_action": "book",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-028",
+      "family": "guidance_salon_question",
+      "description": "Operational questions about hours, price, staff, policy, and availability.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_salon_question-base-002",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "aurora",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "What are your weekend hours?",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "information",
+        "guidance_action": "salon_question",
+        "guidance_question_subject": "hours",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-029",
+      "family": "guidance_handoff",
+      "description": "Explicit human help requests that must not be inferred from unrelated person language.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_handoff-base-002",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "aurora",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "I need to speak with a person.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "human_handoff",
+        "guidance_action": "human_handoff",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-030",
+      "family": "service_selection",
+      "description": "Concrete service selections against standard and nonstandard data-owned catalogs.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "service_selection-base-003",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "Please add Spa Pedicure as my service.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "book_appointment",
+        "guidance_action": "name_service",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-031",
+      "family": "service_edit",
+      "description": "Add, replace, remove, and undo operations on an existing booking draft.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "service_edit-base-002",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "Add Nail Art too.",
+        "expected_input": "requested_date",
+        "semantic_contract": "full_turn",
+        "recognizable_guidance_actions": null,
+        "selected_services": [
+          {
+            "service_id": "svc_gel_mani",
+            "service_name": "Gel Manicure",
+            "category_id": "cat_mani",
+            "category_name": "Manicure",
+            "consultation_profile": {
+              "status": "ready",
+              "recommended_outcomes": [
+                "maintain",
+                "color_refresh"
+              ],
+              "compatible_current_systems": [
+                "natural",
+                "gel"
+              ],
+              "length_capabilities": [
+                "keep",
+                "shorten"
+              ],
+              "priority_tags": [
+                "durability"
+              ],
+              "finish_options": [
+                "gel_polish",
+                "glossy"
+              ],
+              "owner_approved_summary": "Hand and nail care finished with gel polish.",
+              "revision": 1
+            }
+          }
+        ],
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "drafting",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": [
+            "svc_gel_mani"
+          ],
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "required_acts": [
+          {
+            "kind": "add_service",
+            "entity": "service",
+            "target_ids": [
+              "svc_nail_art"
+            ]
+          }
+        ],
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-032",
+      "family": "availability",
+      "description": "Availability questions asked while a booking draft already contains a service.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "availability-base-002",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "Do you have anything Friday afternoon?",
+        "expected_input": "requested_date",
+        "semantic_contract": "full_turn",
+        "recognizable_guidance_actions": null,
+        "selected_services": [
+          {
+            "service_id": "svc_gel_mani",
+            "service_name": "Gel Manicure",
+            "category_id": "cat_mani",
+            "category_name": "Manicure",
+            "consultation_profile": {
+              "status": "ready",
+              "recommended_outcomes": [
+                "maintain",
+                "color_refresh"
+              ],
+              "compatible_current_systems": [
+                "natural",
+                "gel"
+              ],
+              "length_capabilities": [
+                "keep",
+                "shorten"
+              ],
+              "priority_tags": [
+                "durability"
+              ],
+              "finish_options": [
+                "gel_polish",
+                "glossy"
+              ],
+              "owner_approved_summary": "Hand and nail care finished with gel polish.",
+              "revision": 1
+            }
+          }
+        ],
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "drafting",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": [
+            "svc_gel_mani"
+          ],
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "availability_intent": true,
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-033",
+      "family": "party_booking",
+      "description": "Guest-scoped service changes for a real party booking draft.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "party_booking-base-002",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "Guest two also wants Nail Art.",
+        "expected_input": "service",
+        "semantic_contract": "full_turn",
+        "recognizable_guidance_actions": null,
+        "selected_services": [
+          {
+            "service_id": "svc_classic_mani",
+            "service_name": "Classic Manicure",
+            "category_id": "cat_mani",
+            "category_name": "Manicure",
+            "consultation_profile": {
+              "status": "ready",
+              "recommended_outcomes": [
+                "maintain",
+                "color_refresh"
+              ],
+              "compatible_current_systems": [
+                "natural",
+                "regular_polish"
+              ],
+              "length_capabilities": [
+                "keep",
+                "shorten"
+              ],
+              "priority_tags": [
+                "lower_cost",
+                "shorter_visit"
+              ],
+              "finish_options": [
+                "regular_polish",
+                "natural"
+              ],
+              "owner_approved_summary": "Basic hand and nail care with regular polish options.",
+              "revision": 1
+            }
+          },
+          {
+            "service_id": "svc_gel_mani",
+            "service_name": "Gel Manicure",
+            "category_id": "cat_mani",
+            "category_name": "Manicure",
+            "consultation_profile": {
+              "status": "ready",
+              "recommended_outcomes": [
+                "maintain",
+                "color_refresh"
+              ],
+              "compatible_current_systems": [
+                "natural",
+                "gel"
+              ],
+              "length_capabilities": [
+                "keep",
+                "shorten"
+              ],
+              "priority_tags": [
+                "durability"
+              ],
+              "finish_options": [
+                "gel_polish",
+                "glossy"
+              ],
+              "owner_approved_summary": "Hand and nail care finished with gel polish.",
+              "revision": 1
+            }
+          }
+        ],
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "drafting",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": [
+            "svc_gel_mani",
+            "svc_classic_mani"
+          ],
+          "party_size": 2,
+          "party_groups": [
+            {
+              "guest_ref": "guest_caller",
+              "count": 1,
+              "service_ids": [
+                "svc_gel_mani"
+              ]
+            },
+            {
+              "guest_ref": "guest_2",
+              "count": 1,
+              "service_ids": [
+                "svc_classic_mani"
+              ]
+            }
+          ],
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "required_acts": [
+          {
+            "kind": "add_service",
+            "entity": "service",
+            "target_ids": [
+              "svc_nail_art"
+            ],
+            "guest_ref": "guest_2"
+          }
+        ],
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-034",
+      "family": "consultation_details",
+      "description": "Structured consultation needs and corrections without model-authored recommendations.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "consultation_details-base-002",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "I currently have gel on them.",
+        "expected_input": "consultation_desired_outcome",
+        "semantic_contract": "full_turn",
+        "recognizable_guidance_actions": null,
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "consultation",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        },
+        "consultation": {
+          "status": "collecting_needs",
+          "resume_phase": "",
+          "needs": {},
+          "no_progress_count": 0,
+          "provider_failure_count": 0
+        }
+      },
+      "expected": {
+        "goal": "consultation",
+        "consultation": {
+          "current_system": "gel"
+        },
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-035",
+      "family": "current_booking",
+      "description": "Questions about the caller's current draft rather than the salon's full catalog.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "current_booking-base-002",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "How many services have I selected?",
+        "expected_input": "booking_review",
+        "semantic_contract": "full_turn",
+        "recognizable_guidance_actions": null,
+        "selected_services": [
+          {
+            "service_id": "svc_gel_mani",
+            "service_name": "Gel Manicure",
+            "category_id": "cat_mani",
+            "category_name": "Manicure",
+            "consultation_profile": {
+              "status": "ready",
+              "recommended_outcomes": [
+                "maintain",
+                "color_refresh"
+              ],
+              "compatible_current_systems": [
+                "natural",
+                "gel"
+              ],
+              "length_capabilities": [
+                "keep",
+                "shorten"
+              ],
+              "priority_tags": [
+                "durability"
+              ],
+              "finish_options": [
+                "gel_polish",
+                "glossy"
+              ],
+              "owner_approved_summary": "Hand and nail care finished with gel polish.",
+              "revision": 1
+            }
+          },
+          {
+            "service_id": "svc_spa_pedi",
+            "service_name": "Spa Pedicure",
+            "category_id": "cat_pedi",
+            "category_name": "Pedicure"
+          }
+        ],
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "review",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": [
+            "svc_gel_mani",
+            "svc_spa_pedi"
+          ],
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "current_booking_summary": true,
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-036",
+      "family": "reschedule_cancel",
+      "description": "Reschedule and cancellation goals that remain distinct from new booking.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "reschedule_cancel-base-002",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "Can I move my booking to another day?",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "reschedule_appointment",
+        "guidance_action": "reschedule",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-037",
+      "family": "safety",
+      "description": "Safety concerns that require a typed concern while preserving the caller's operational goal.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "safety-base-002",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "I injured my finger and want to know which service treats it.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": true,
+          "category": "injury",
+          "alternative_categories": [
+            "medical_suitability"
+          ]
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-038",
+      "family": "counterexample",
+      "description": "Counterexamples for person, service-menu, and advice language previously vulnerable to phrase routing.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "counterexample-base-002",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "I need a different person to do the service.",
+        "expected_input": "staff",
+        "semantic_contract": "full_turn",
+        "recognizable_guidance_actions": null,
+        "selected_services": [
+          {
+            "service_id": "svc_gel_mani",
+            "service_name": "Gel Manicure",
+            "category_id": "cat_mani",
+            "category_name": "Manicure",
+            "consultation_profile": {
+              "status": "ready",
+              "recommended_outcomes": [
+                "maintain",
+                "color_refresh"
+              ],
+              "compatible_current_systems": [
+                "natural",
+                "gel"
+              ],
+              "length_capabilities": [
+                "keep",
+                "shorten"
+              ],
+              "priority_tags": [
+                "durability"
+              ],
+              "finish_options": [
+                "gel_polish",
+                "glossy"
+              ],
+              "owner_approved_summary": "Hand and nail care finished with gel polish.",
+              "revision": 1
+            }
+          }
+        ],
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": [
+          {
+            "staff_id": "staff_mai",
+            "staff_name": "Mai"
+          }
+        ],
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": [
+            "svc_gel_mani"
+          ],
+          "staff_id": "staff_mai",
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "forbidden_goals": [
+          "human_handoff"
+        ],
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-039",
+      "family": "guidance_catalog",
+      "description": "Catalog questions across list, count, existence, details, and comparison modes.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_catalog-base-004",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "What nail treatments do you offer?",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "information",
+        "guidance_action": "service_catalog",
+        "guidance_catalog_mode": "list",
+        "guidance_question_subject": "catalog",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-040",
+      "family": "guidance_consultation",
+      "description": "Needs-based requests for help choosing a nail service.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_consultation-base-005",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "aurora",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "I'm unsure what works for natural nails.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "consultation",
+        "guidance_action": "consultation",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-041",
+      "family": "guidance_booking",
+      "description": "Explicit requests to begin booking or name a known service.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_booking-base-004",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "Please help me reserve a time.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "book_appointment",
+        "guidance_action": "book",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-042",
+      "family": "guidance_salon_question",
+      "description": "Operational questions about hours, price, staff, policy, and availability.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_salon_question-base-003",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "harbor",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "When does the salon close?",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "information",
+        "guidance_action": "salon_question",
+        "guidance_question_subject": "hours",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-043",
+      "family": "guidance_handoff",
+      "description": "Explicit human help requests that must not be inferred from unrelated person language.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "guidance_handoff-base-003",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "harbor",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "Can a human receptionist help me?",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "human_handoff",
+        "guidance_action": "human_handoff",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-044",
+      "family": "service_selection",
+      "description": "Concrete service selections against standard and nonstandard data-owned catalogs.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "service_selection-base-004",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "I want Acrylic Full Set.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "book_appointment",
+        "guidance_action": "name_service",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-045",
+      "family": "service_edit",
+      "description": "Add, replace, remove, and undo operations on an existing booking draft.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "service_edit-base-003",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "Include Gel Removal with it.",
+        "expected_input": "requested_date",
+        "semantic_contract": "full_turn",
+        "recognizable_guidance_actions": null,
+        "selected_services": [
+          {
+            "service_id": "svc_gel_mani",
+            "service_name": "Gel Manicure",
+            "category_id": "cat_mani",
+            "category_name": "Manicure",
+            "consultation_profile": {
+              "status": "ready",
+              "recommended_outcomes": [
+                "maintain",
+                "color_refresh"
+              ],
+              "compatible_current_systems": [
+                "natural",
+                "gel"
+              ],
+              "length_capabilities": [
+                "keep",
+                "shorten"
+              ],
+              "priority_tags": [
+                "durability"
+              ],
+              "finish_options": [
+                "gel_polish",
+                "glossy"
+              ],
+              "owner_approved_summary": "Hand and nail care finished with gel polish.",
+              "revision": 1
+            }
+          }
+        ],
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "drafting",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": [
+            "svc_gel_mani"
+          ],
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "required_acts": [
+          {
+            "kind": "add_service",
+            "entity": "service",
+            "target_ids": [
+              "svc_gel_remove"
+            ]
+          }
+        ],
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-046",
+      "family": "availability",
+      "description": "Availability questions asked while a booking draft already contains a service.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "availability-base-003",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "Can I get an appointment before noon?",
+        "expected_input": "requested_date",
+        "semantic_contract": "full_turn",
+        "recognizable_guidance_actions": null,
+        "selected_services": [
+          {
+            "service_id": "svc_gel_mani",
+            "service_name": "Gel Manicure",
+            "category_id": "cat_mani",
+            "category_name": "Manicure",
+            "consultation_profile": {
+              "status": "ready",
+              "recommended_outcomes": [
+                "maintain",
+                "color_refresh"
+              ],
+              "compatible_current_systems": [
+                "natural",
+                "gel"
+              ],
+              "length_capabilities": [
+                "keep",
+                "shorten"
+              ],
+              "priority_tags": [
+                "durability"
+              ],
+              "finish_options": [
+                "gel_polish",
+                "glossy"
+              ],
+              "owner_approved_summary": "Hand and nail care finished with gel polish.",
+              "revision": 1
+            }
+          }
+        ],
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "drafting",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": [
+            "svc_gel_mani"
+          ],
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "availability_intent": true,
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-047",
+      "family": "party_booking",
+      "description": "Guest-scoped service changes for a real party booking draft.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "party_booking-base-003",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "Put Gel Removal on the second guest.",
+        "expected_input": "service",
+        "semantic_contract": "full_turn",
+        "recognizable_guidance_actions": null,
+        "selected_services": [
+          {
+            "service_id": "svc_classic_mani",
+            "service_name": "Classic Manicure",
+            "category_id": "cat_mani",
+            "category_name": "Manicure",
+            "consultation_profile": {
+              "status": "ready",
+              "recommended_outcomes": [
+                "maintain",
+                "color_refresh"
+              ],
+              "compatible_current_systems": [
+                "natural",
+                "regular_polish"
+              ],
+              "length_capabilities": [
+                "keep",
+                "shorten"
+              ],
+              "priority_tags": [
+                "lower_cost",
+                "shorter_visit"
+              ],
+              "finish_options": [
+                "regular_polish",
+                "natural"
+              ],
+              "owner_approved_summary": "Basic hand and nail care with regular polish options.",
+              "revision": 1
+            }
+          },
+          {
+            "service_id": "svc_gel_mani",
+            "service_name": "Gel Manicure",
+            "category_id": "cat_mani",
+            "category_name": "Manicure",
+            "consultation_profile": {
+              "status": "ready",
+              "recommended_outcomes": [
+                "maintain",
+                "color_refresh"
+              ],
+              "compatible_current_systems": [
+                "natural",
+                "gel"
+              ],
+              "length_capabilities": [
+                "keep",
+                "shorten"
+              ],
+              "priority_tags": [
+                "durability"
+              ],
+              "finish_options": [
+                "gel_polish",
+                "glossy"
+              ],
+              "owner_approved_summary": "Hand and nail care finished with gel polish.",
+              "revision": 1
+            }
+          }
+        ],
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "drafting",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": [
+            "svc_gel_mani",
+            "svc_classic_mani"
+          ],
+          "party_size": 2,
+          "party_groups": [
+            {
+              "guest_ref": "guest_caller",
+              "count": 1,
+              "service_ids": [
+                "svc_gel_mani"
+              ]
+            },
+            {
+              "guest_ref": "guest_2",
+              "count": 1,
+              "service_ids": [
+                "svc_classic_mani"
+              ]
+            }
+          ],
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "required_acts": [
+          {
+            "kind": "add_service",
+            "alternative_kinds": [
+              "replace_service"
+            ],
+            "entity": "service",
+            "target_ids": [
+              "svc_gel_remove"
+            ],
+            "guest_ref": "guest_2"
+          }
+        ],
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-048",
+      "family": "consultation_details",
+      "description": "Structured consultation needs and corrections without model-authored recommendations.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "consultation_details-base-003",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "I'm wearing acrylic now.",
+        "expected_input": "consultation_desired_outcome",
+        "semantic_contract": "full_turn",
+        "recognizable_guidance_actions": null,
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "consultation",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        },
+        "consultation": {
+          "status": "collecting_needs",
+          "resume_phase": "",
+          "needs": {},
+          "no_progress_count": 0,
+          "provider_failure_count": 0
+        }
+      },
+      "expected": {
+        "goal": "consultation",
+        "consultation": {
+          "current_system": "acrylic"
+        },
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-049",
+      "family": "current_booking",
+      "description": "Questions about the caller's current draft rather than the salon's full catalog.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "current_booking-base-003",
+        "utterance_variant": "direct_simulator",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "simulator",
+        "customer_message": "Is Gel Manicure still in my booking?",
+        "expected_input": "booking_review",
+        "semantic_contract": "full_turn",
+        "recognizable_guidance_actions": null,
+        "selected_services": [
+          {
+            "service_id": "svc_gel_mani",
+            "service_name": "Gel Manicure",
+            "category_id": "cat_mani",
+            "category_name": "Manicure",
+            "consultation_profile": {
+              "status": "ready",
+              "recommended_outcomes": [
+                "maintain",
+                "color_refresh"
+              ],
+              "compatible_current_systems": [
+                "natural",
+                "gel"
+              ],
+              "length_capabilities": [
+                "keep",
+                "shorten"
+              ],
+              "priority_tags": [
+                "durability"
+              ],
+              "finish_options": [
+                "gel_polish",
+                "glossy"
+              ],
+              "owner_approved_summary": "Hand and nail care finished with gel polish.",
+              "revision": 1
+            }
+          },
+          {
+            "service_id": "svc_spa_pedi",
+            "service_name": "Spa Pedicure",
+            "category_id": "cat_pedi",
+            "category_name": "Pedicure"
+          }
+        ],
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "review",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": [
+            "svc_gel_mani",
+            "svc_spa_pedi"
+          ],
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "current_booking_summary": true,
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    },
+    {
+      "id": "pilot-050",
+      "family": "reschedule_cancel",
+      "description": "Reschedule and cancellation goals that remain distinct from new booking.",
+      "evidence_level": "semantic_turn_contract",
+      "provenance": {
+        "base_case_id": "reschedule_cancel-base-003",
+        "utterance_variant": "direct_phone",
+        "generated": false,
+        "scope": "single_turn"
+      },
+      "catalog_fixture": "lotus",
+      "request": {
+        "scenario_id": "",
+        "channel": "phone",
+        "customer_message": "Please change the time of my existing appointment.",
+        "expected_input": "caller_goal",
+        "semantic_contract": "guidance_turn",
+        "recognizable_guidance_actions": [
+          "book",
+          "service_catalog",
+          "consultation",
+          "salon_question",
+          "name_service",
+          "human_handoff",
+          "reschedule",
+          "cancel"
+        ],
+        "selected_services": null,
+        "catalog_services": null,
+        "catalog_service_aliases": null,
+        "catalog_categories": null,
+        "selected_staff": null,
+        "catalog_staff": null,
+        "current_booking_stage": "",
+        "booking_action": "book",
+        "current_draft": {
+          "service_ids": null,
+          "has_customer_name": false,
+          "has_customer_phone": false,
+          "draft_revision": 0
+        }
+      },
+      "expected": {
+        "goal": "reschedule_appointment",
+        "guidance_action": "reschedule",
+        "consultation": {},
+        "safety": {
+          "checked": true,
+          "concern": false
+        }
+      },
+      "invariants": [
+        "catalog_bound_semantics",
+        "no_pos_confirmation",
+        "no_conversation_mutation",
+        "same_contract_across_channels"
+      ]
+    }
+  ]
+}

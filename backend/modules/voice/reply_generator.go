@@ -22,8 +22,22 @@ func NewGuardedReplyGenerator(provider LanguageModelProvider) *GuardedReplyGener
 }
 
 func (g *GuardedReplyGenerator) GenerateReply(ctx context.Context, req conversation.ReplyGenerationRequest) (conversation.ReplyGenerationResult, error) {
-	if g == nil || g.provider == nil || !g.provider.Configured(ctx, req.SalonID) || req.Channel != conversation.ChannelPhone {
+	return g.generateReply(ctx, req, false)
+}
+
+// GenerateEvaluationReply applies the exact production reply prompt and
+// guardrails while permitting simulator-channel evaluation. Production callers
+// continue through GenerateReply, which remains phone-only.
+func (g *GuardedReplyGenerator) GenerateEvaluationReply(ctx context.Context, req conversation.ReplyGenerationRequest) (conversation.ReplyGenerationResult, error) {
+	return g.generateReply(ctx, req, true)
+}
+
+func (g *GuardedReplyGenerator) generateReply(ctx context.Context, req conversation.ReplyGenerationRequest, allowSimulator bool) (conversation.ReplyGenerationResult, error) {
+	if g == nil || g.provider == nil || !g.provider.Configured(ctx, req.SalonID) || (!allowSimulator && req.Channel != conversation.ChannelPhone) {
 		return conversation.ReplyGenerationResult{}, ErrProviderDisabled
+	}
+	if req.Channel != conversation.ChannelPhone && req.Channel != conversation.ChannelSimulator {
+		return conversation.ReplyGenerationResult{}, ErrValidation
 	}
 	if req.ReplyPolicy != conversation.ReplyPolicyStyleOnly {
 		return conversation.ReplyGenerationResult{}, errUnsafeReply
@@ -79,9 +93,135 @@ func (g *GuardedReplyGenerator) GenerateConsultationQuestion(ctx context.Context
 	}
 	message := strings.TrimSpace(reply.Message)
 	if !consultationQuestionAllowed(message, reply.Confidence) {
+		if fallback := structuredConsultationQuestion(req.Question); fallback != "" {
+			return conversation.ReplyGenerationResult{
+				Message: fallback, Confidence: 1, Reason: "structured_consultation_question_fallback",
+			}, nil
+		}
 		return conversation.ReplyGenerationResult{}, errUnsafeReply
 	}
 	return conversation.ReplyGenerationResult{Message: message, Confidence: reply.Confidence, Handoff: reply.Handoff, Reason: reply.Reason}, nil
+}
+
+func structuredConsultationQuestion(spec conversation.ConsultationQuestionSpec) string {
+	labels := make([]string, 0, len(spec.Options))
+	seen := map[string]bool{}
+	for _, option := range spec.Options {
+		label := consultationOptionSpokenLabel(spec.Field, option)
+		if label == "" || seen[label] {
+			continue
+		}
+		seen[label] = true
+		labels = append(labels, label)
+	}
+	options := joinSpokenOptions(labels)
+	if options == "" {
+		return ""
+	}
+	switch strings.TrimSpace(spec.Field) {
+	case conversation.ConsultationNeedFieldCurrentSystem:
+		return "I can help with that. What do you currently have on your nails: " + options + "?"
+	case conversation.ConsultationNeedFieldDesiredOutcome:
+		return "I can help with that. What result are you looking for: " + options + "?"
+	case conversation.ConsultationNeedFieldLengthChange:
+		return "Would you like to " + options + "?"
+	case conversation.ConsultationNeedFieldPriorities:
+		return "What matters most to you: " + options + "?"
+	case conversation.ConsultationNeedFieldDesiredFinishes:
+		return "What finish would you prefer: " + options + "?"
+	default:
+		return ""
+	}
+}
+
+func consultationOptionSpokenLabel(field string, option string) string {
+	field = strings.TrimSpace(field)
+	option = strings.TrimSpace(option)
+	switch field {
+	case conversation.ConsultationNeedFieldCurrentSystem:
+		switch option {
+		case conversation.ConsultationSystemNatural:
+			return "natural nails"
+		case conversation.ConsultationSystemRegularPolish:
+			return "regular polish"
+		case conversation.ConsultationSystemGel:
+			return "gel"
+		case conversation.ConsultationSystemDip:
+			return "dip powder"
+		case conversation.ConsultationSystemAcrylic:
+			return "acrylic"
+		case conversation.ConsultationSystemExtension:
+			return "extensions"
+		}
+	case conversation.ConsultationNeedFieldDesiredOutcome:
+		switch option {
+		case conversation.ConsultationOutcomeMaintain:
+			return "maintain what you have"
+		case conversation.ConsultationOutcomeShorten:
+			return "shorter nails"
+		case conversation.ConsultationOutcomeAddLength:
+			return "add length"
+		case conversation.ConsultationOutcomeAddStrength:
+			return "more strength"
+		case conversation.ConsultationOutcomeRepair:
+			return "repair a nail"
+		case conversation.ConsultationOutcomeRemoval:
+			return "removal"
+		case conversation.ConsultationOutcomeColorRefresh:
+			return "refresh the color"
+		case conversation.ConsultationOutcomeCompare:
+			return "compare options"
+		}
+	case conversation.ConsultationNeedFieldLengthChange:
+		switch option {
+		case conversation.ConsultationLengthKeep:
+			return "keep your current length"
+		case conversation.ConsultationLengthShorten:
+			return "shorten your nails"
+		case conversation.ConsultationLengthAddLength:
+			return "add length"
+		}
+	case conversation.ConsultationNeedFieldPriorities:
+		switch option {
+		case conversation.ConsultationPriorityDurability:
+			return "durability"
+		case conversation.ConsultationPriorityLowerMaintenance:
+			return "lower maintenance"
+		case conversation.ConsultationPriorityLowerCost:
+			return "lower cost"
+		case conversation.ConsultationPriorityShorterVisit:
+			return "a shorter visit"
+		}
+	case conversation.ConsultationNeedFieldDesiredFinishes:
+		switch option {
+		case conversation.ConsultationFinishNatural:
+			return "a natural finish"
+		case conversation.ConsultationFinishRegularPolish:
+			return "regular polish"
+		case conversation.ConsultationFinishGelPolish:
+			return "gel polish"
+		case conversation.ConsultationFinishGlossy:
+			return "glossy"
+		case conversation.ConsultationFinishMatte:
+			return "matte"
+		case conversation.ConsultationFinishNailArt:
+			return "nail art"
+		}
+	}
+	return ""
+}
+
+func joinSpokenOptions(values []string) string {
+	switch len(values) {
+	case 0:
+		return ""
+	case 1:
+		return values[0]
+	case 2:
+		return values[0] + " or " + values[1]
+	default:
+		return strings.Join(values[:len(values)-1], ", ") + ", or " + values[len(values)-1]
+	}
 }
 
 func consultationQuestionAllowed(message string, confidence float64) bool {

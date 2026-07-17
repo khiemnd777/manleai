@@ -1848,7 +1848,9 @@ function refreshSummary(refresh: ServiceCategorySuggestionRefresh) {
   return [
     `Category suggestions refreshed: ${refresh.suggested_services} service suggestion${refresh.suggested_services === 1 ? "" : "s"}.`,
     `${refresh.created_categories} categor${refresh.created_categories === 1 ? "y" : "ies"} created, ${refresh.created_aliases} alias${refresh.created_aliases === 1 ? "" : "es"} created.`,
-    refresh.skipped_alias_conflicts > 0 ? `${refresh.skipped_alias_conflicts} alias conflict${refresh.skipped_alias_conflicts === 1 ? "" : "s"} skipped.` : ""
+    `${refresh.created_service_aliases} service alias${refresh.created_service_aliases === 1 ? "" : "es"} created, ${refresh.updated_system_service_aliases} updated.`,
+    refresh.skipped_alias_conflicts > 0 ? `${refresh.skipped_alias_conflicts} category alias conflict${refresh.skipped_alias_conflicts === 1 ? "" : "s"} skipped.` : "",
+    refresh.skipped_service_alias_conflicts > 0 ? `${refresh.skipped_service_alias_conflicts} service alias conflict${refresh.skipped_service_alias_conflicts === 1 ? "" : "s"} skipped.` : ""
   ]
     .filter(Boolean)
     .join(" ");
