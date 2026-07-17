@@ -399,6 +399,19 @@ func closeConsultationForWorkflow(session *Session, reason string, handedOff boo
 }
 
 func (s *Service) startBookingFromConsultation(ctx context.Context, ownerUserID string, before Session, next Session, message, eventKey string, selected ServiceOption, consultation *ConsultationState, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (bool, *Session, error) {
+	if !selected.BookingReady {
+		consultation.Status = ConsultationStatusHandedOff
+		consultation.SelectedServiceID = selected.ID
+		consultation.ExitReason = HandoffReasonBookingUnavailable
+		dialog := normalizedDialogState(next.DialogState)
+		dialog.Phase = consultationResumePhase(*consultation, next)
+		dialog.Consultation = consultation
+		next.DialogState = dialog
+		turn := newTurnRecord(before.SalonID, ownerUserID, before, next, message, eventKey, services, staff, cfg)
+		setConsultationMetadata(&turn, consultation, services)
+		updated, err := s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I can help you choose the service, but appointment booking is temporarily unavailable, so nothing is confirmed. The owner needs to help with the appointment.", services, staff, cfg)
+		return true, updated, err
+	}
 	selectedDraft := stringSet(selectedServiceIDs(before))
 	if activePartyPlan(before.PartyPlan) || (hasSelectedServiceDraft(before) && !selectedDraft[strings.TrimSpace(selected.ID)]) {
 		return s.deferConsultationRecommendationToServiceEdit(ctx, ownerUserID, before, next, message, eventKey, selected, consultation, services, staff, cfg)
@@ -454,10 +467,15 @@ func (s *Service) startBookingFromConsultation(ctx context.Context, ownerUserID 
 }
 
 func (s *Service) revalidateConsultationRecommendation(ctx context.Context, salonID string, consultation ConsultationState, selectedServiceID string) (*ServiceOption, []ServiceOption, bool, error) {
-	freshServices, err := s.store.ListBookableServices(ctx, strings.TrimSpace(salonID))
+	freshServices, err := s.store.ListGuidanceServices(ctx, strings.TrimSpace(salonID))
 	if err != nil {
 		return nil, nil, false, err
 	}
+	bookableServices, err := s.store.ListBookableServices(ctx, strings.TrimSpace(salonID))
+	if err != nil {
+		return nil, nil, false, err
+	}
+	markBookableServices(freshServices, bookableServices)
 	selected := serviceByID(freshServices, selectedServiceID)
 	expectedRevision, revisionRecorded := consultation.ProfileRevisions[strings.TrimSpace(selectedServiceID)]
 	if selected == nil || !revisionRecorded || expectedRevision <= 0 || !consultationProfileReadyForRecommendation(selected.ConsultationProfile) || selected.ConsultationProfile.Revision != expectedRevision {

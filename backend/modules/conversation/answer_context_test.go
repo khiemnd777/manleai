@@ -22,9 +22,9 @@ func TestLoadAnswerContextValidatesDatabaseReadinessFenceOnEveryTurn(t *testing.
 		t.Fatalf("location A answer context = %#v", first)
 	}
 
-	// Simulate another replica beginning a new provider snapshot. Even if an
-	// underlying store accidentally returns its previous rows, the service-level
-	// fence must not expose any provider-owned structured context.
+	// Simulate another replica beginning a new provider snapshot. Canonical
+	// active-provider service guidance remains usable, but provider-backed
+	// availability data and booking eligibility must fail closed.
 	store.answerContextFence = AnswerContextFence{
 		ActiveProvider: "square", ConnectionStatus: "syncing", LocationID: "location_2",
 		SnapshotGeneration: 2, Ready: false,
@@ -33,9 +33,10 @@ func TestLoadAnswerContextValidatesDatabaseReadinessFenceOnEveryTurn(t *testing.
 	if err != nil {
 		t.Fatalf("load syncing answer context: %v", err)
 	}
-	if len(notReady.Services) != 0 || len(notReady.ServiceAliases) != 0 || len(notReady.CategoryAliases) != 0 ||
+	if len(notReady.Services) != 1 || notReady.Services[0].ID != "service_1" || notReady.Services[0].BookingReady ||
+		len(notReady.ServiceAliases) != 1 || len(notReady.CategoryAliases) != 1 ||
 		len(notReady.Staff) != 0 || len(notReady.ActiveStaff) != 0 || len(notReady.BusinessHours) != 0 {
-		t.Fatalf("syncing context exposed stale provider data: %#v", notReady)
+		t.Fatalf("syncing context did not separate guidance from booking data: %#v", notReady)
 	}
 	if len(notReady.Knowledge) != 1 || notReady.Knowledge[0].ID != "knowledge_1" {
 		t.Fatalf("salon-authored knowledge should remain available: %#v", notReady.Knowledge)
@@ -45,7 +46,7 @@ func TestLoadAnswerContextValidatesDatabaseReadinessFenceOnEveryTurn(t *testing.
 	if err != nil {
 		t.Fatalf("reload stable syncing answer context: %v", err)
 	}
-	if !cachedNotReady.CacheHit || len(cachedNotReady.Services) != 0 {
+	if !cachedNotReady.CacheHit || len(cachedNotReady.Services) != 1 || cachedNotReady.Services[0].BookingReady {
 		t.Fatalf("stable fail-closed context was not cached safely: %#v", cachedNotReady)
 	}
 
@@ -63,7 +64,7 @@ func TestLoadAnswerContextValidatesDatabaseReadinessFenceOnEveryTurn(t *testing.
 	if err != nil {
 		t.Fatalf("load completed location B answer context: %v", err)
 	}
-	if len(locationB.Services) != 1 || locationB.Services[0].ID != "service_b" ||
+	if len(locationB.Services) != 1 || locationB.Services[0].ID != "service_b" || !locationB.Services[0].BookingReady ||
 		len(locationB.Staff) != 1 || locationB.Staff[0].ID != "staff_b" ||
 		len(locationB.ServiceAliases) != 1 || locationB.ServiceAliases[0].ID != "alias_b" ||
 		len(locationB.BusinessHours) != 1 || locationB.BusinessHours[0].ID != "hours_b" {

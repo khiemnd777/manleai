@@ -273,6 +273,10 @@ func (s *fixtureConversationStore) ListBookableServices(context.Context, string)
 	return append([]conversation.ServiceOption(nil), s.services...), nil
 }
 
+func (s *fixtureConversationStore) ListGuidanceServices(context.Context, string) ([]conversation.ServiceOption, error) {
+	return append([]conversation.ServiceOption(nil), s.services...), nil
+}
+
 func (s *fixtureConversationStore) ListBookableStaff(context.Context, string) ([]conversation.StaffOption, error) {
 	return append([]conversation.StaffOption(nil), s.staff...), nil
 }

@@ -1072,6 +1072,7 @@ export type VoiceBookingReadiness = {
   booking_write_blocked_code?: string;
   booking_write_blocked_reason?: string;
   booking_write_blocked_at?: string;
+  guidance_service_count: number;
   service_count: number;
   consultation_enabled: boolean;
   consultation_ready_service_count: number;

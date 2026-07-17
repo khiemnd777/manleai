@@ -20,6 +20,7 @@ import (
 	"github.com/manleai/ai-receptionist/internal/conversationeval"
 	"github.com/manleai/ai-receptionist/internal/database"
 	"github.com/manleai/ai-receptionist/internal/encryption"
+	"github.com/manleai/ai-receptionist/modules/conversation"
 	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
 	"github.com/manleai/ai-receptionist/modules/voice"
 )
@@ -62,7 +63,7 @@ func main() {
 	flag.StringVar(&corpusPath, "corpus", "", "corpus path; defaults to the 50-scenario pilot for direct-model and the 1,000-scenario corpus otherwise")
 	flag.StringVar(&mode, "mode", "offline", "evaluation mode: offline, runtime-canary (live alias), or direct-model")
 	flag.StringVar(&apiBase, "api-base", "http://127.0.0.1:8080/api", "API base URL for live mode")
-	flag.StringVar(&salonID, "salon-id", "", "owner-scoped salon ID for live mode; database config selector only for direct-model")
+	flag.StringVar(&salonID, "salon-id", "", "owner-scoped salon ID for live mode; database config and zero-token runtime-readiness selector for direct-model")
 	flag.StringVar(&tokenFile, "token-file", "", "path to a file containing an owner bearer token for live mode")
 	flag.StringVar(&outputPath, "output", "", "optional JSON report output path")
 	flag.StringVar(&scenarioIDs, "scenario-ids", "", "optional comma-separated scenario IDs; cannot be combined with -limit or -sample-per-family")
@@ -124,12 +125,14 @@ func main() {
 	case "offline":
 		review := conversationeval.ReviewCorpus(reviewCorpus)
 		report = conversationeval.EvaluationReport{
-			SchemaVersion:          conversationeval.SchemaVersion,
-			Mode:                   "offline_corpus_validation_without_model_execution",
-			ScenarioCount:          len(corpus.Scenarios),
-			ContractValidatedCount: len(corpus.Scenarios),
-			NotRunCount:            len(corpus.Scenarios),
-			Results:                offlineScenarioResults(corpus.Scenarios),
+			SchemaVersion:            conversationeval.SchemaVersion,
+			Mode:                     "offline_corpus_validation_without_model_execution",
+			ContextSource:            "corpus_fixture",
+			RuntimeReadinessVerified: false,
+			ScenarioCount:            len(corpus.Scenarios),
+			ContractValidatedCount:   len(corpus.Scenarios),
+			NotRunCount:              len(corpus.Scenarios),
+			Results:                  offlineScenarioResults(corpus.Scenarios),
 		}
 		if !review.Passed {
 			report.ContractValidatedCount = 0
@@ -163,7 +166,7 @@ func main() {
 		report = runLive(context.Background(), corpus, strings.TrimSpace(apiBase), strings.TrimSpace(salonID), strings.TrimSpace(string(token)), concurrency, requestTimeout, transientRetries)
 	case "direct-model":
 		if strings.TrimSpace(salonID) == "" {
-			fatalf("direct-model requires -salon-id only to select the encrypted database OpenAI config")
+			fatalf("direct-model requires -salon-id to select encrypted OpenAI config and run the zero-token runtime preflight")
 		}
 		if strings.TrimSpace(outputPath) == "" {
 			fatalf("direct-model requires -output so every paid result is retained")
@@ -189,6 +192,30 @@ func main() {
 			fatalf("open database for strict OpenAI config resolution: %v", err)
 		}
 		defer db.Close()
+		var ownerUserID string
+		if err := db.QueryRowContext(context.Background(), `
+			SELECT owner_user_id::text
+			FROM salons
+			WHERE id = $1
+		`, strings.TrimSpace(salonID)).Scan(&ownerUserID); err != nil {
+			fatalf("load salon owner for runtime preflight: %v", err)
+		}
+		readiness, err := voice.NewRepository(db).GetPhoneBookingReadiness(context.Background(), strings.TrimSpace(salonID), ownerUserID)
+		if err != nil {
+			fatalf("run zero-token runtime readiness preflight: %v", err)
+		}
+		runtimePreflight := &conversationeval.RuntimePreflightEvidence{
+			SalonID: strings.TrimSpace(salonID), CheckedAt: time.Now().UTC().Format(time.RFC3339Nano),
+			GuidanceServiceCount:     readiness.GuidanceServiceCount,
+			RecommendationReadyCount: readiness.ConsultationReadyServices,
+			ServiceGuidanceStatus:    string(readiness.ServiceGuidance.Status),
+			BookingServiceCount:      readiness.ServiceCount, ProviderSynced: readiness.ProviderSynced,
+			BookingReady: readiness.Ready,
+			Passed:       readiness.ServiceGuidance.Status == conversation.ServiceGuidanceCapabilityRecommendationReady,
+		}
+		if !runtimePreflight.Passed {
+			fatalf("zero-token runtime guidance preflight failed: status=%s guidance_services=%d ready_profiles=%d", runtimePreflight.ServiceGuidanceStatus, runtimePreflight.GuidanceServiceCount, runtimePreflight.RecommendationReadyCount)
+		}
 		cipher, err := encryption.NewTokenCipher(cfg.EncryptionKey)
 		if err != nil {
 			fatalf("create database secret cipher: %v", err)
@@ -210,6 +237,7 @@ func main() {
 			conversationeval.DirectRunOptions{
 				SalonID: "direct-model-evaluation", ModelCallBudget: maxModelCalls,
 				RequestTimeout: requestTimeout, TransientRetries: transientRetries,
+				RuntimePreflight: runtimePreflight,
 			},
 		)
 		if err != nil {
@@ -319,6 +347,7 @@ func runLive(ctx context.Context, corpus conversationeval.Corpus, apiBase string
 func runLiveWithClient(ctx context.Context, corpus conversationeval.Corpus, apiBase string, salonID string, token string, concurrency int, timeout time.Duration, transientRetries int, client *http.Client) conversationeval.EvaluationReport {
 	report := conversationeval.EvaluationReport{
 		SchemaVersion: conversationeval.SchemaVersion, Mode: "live_salon_scoped_model",
+		ContextSource: "runtime_model_with_request_fixture", RuntimeReadinessVerified: false,
 		ScenarioCount: len(corpus.Scenarios), ContractValidatedCount: len(corpus.Scenarios),
 	}
 	endpoint := strings.TrimRight(apiBase, "/") + "/salons/" + url.PathEscape(salonID) + "/voice/semantic-evaluate"

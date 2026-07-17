@@ -12,7 +12,7 @@ import (
 	"github.com/manleai/ai-receptionist/modules/pos"
 )
 
-func TestPhoneBookingReadinessUsesTheSameStrictCatalogFenceAsConversation(t *testing.T) {
+func TestPhoneReadinessSeparatesGuidanceFromBookingSnapshotFence(t *testing.T) {
 	databaseURL := os.Getenv("VOICE_READINESS_TEST_DATABASE_URL")
 	if databaseURL == "" {
 		t.Skip("VOICE_READINESS_TEST_DATABASE_URL is not set")
@@ -113,7 +113,7 @@ func TestPhoneBookingReadinessUsesTheSameStrictCatalogFenceAsConversation(t *tes
 	if err != nil {
 		t.Fatalf("ready status: %v", err)
 	}
-	if ready.ServiceCount != 1 || ready.StaffCount != 1 || ready.ConsultationReadyServices != 1 ||
+	if ready.GuidanceServiceCount != 1 || ready.ServiceCount != 1 || ready.StaffCount != 1 || ready.ConsultationReadyServices != 1 ||
 		ready.ServiceGuidance.Status != conversation.ServiceGuidanceCapabilityRecommendationReady {
 		t.Fatalf("ready status = %#v", ready)
 	}
@@ -127,8 +127,9 @@ func TestPhoneBookingReadinessUsesTheSameStrictCatalogFenceAsConversation(t *tes
 	if err != nil {
 		t.Fatalf("blocked status: %v", err)
 	}
-	if blocked.ProviderSynced || blocked.ServiceCount != 0 || blocked.StaffCount != 0 ||
-		blocked.ServiceGuidance.Status != conversation.ServiceGuidanceCapabilityCatalogUnavailable || blocked.ServiceGuidance.CatalogAvailable {
+	if blocked.ProviderSynced || blocked.GuidanceServiceCount != 1 || blocked.ServiceCount != 0 || blocked.StaffCount != 0 ||
+		blocked.ConsultationReadyServices != 1 || blocked.ServiceGuidance.Status != conversation.ServiceGuidanceCapabilityRecommendationReady ||
+		!blocked.ServiceGuidance.CatalogAvailable || !blocked.ServiceGuidance.RecommendationReady {
 		t.Fatalf("blocked status = %#v", blocked)
 	}
 }

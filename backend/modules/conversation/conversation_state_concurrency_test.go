@@ -305,6 +305,12 @@ func (s *concurrentCASConversationStore) ListBookableServices(ctx context.Contex
 	return s.fakeConversationStore.ListBookableServices(ctx, salonID)
 }
 
+func (s *concurrentCASConversationStore) ListGuidanceServices(ctx context.Context, salonID string) ([]ServiceOption, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeConversationStore.ListGuidanceServices(ctx, salonID)
+}
+
 func (s *concurrentCASConversationStore) ListActiveServiceAliases(ctx context.Context, salonID string) ([]ServiceAlias, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

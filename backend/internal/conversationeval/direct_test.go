@@ -16,8 +16,13 @@ func TestRunDirectExecutesRecognitionReplyAndActualAIReviewWithinBudget(t *testi
 	corpus := oneScenarioDirectCorpus()
 	model := &fakeDirectModel{}
 	checkpoint := &memoryCheckpoint{}
+	preflight := &RuntimePreflightEvidence{
+		SalonID: "salon_runtime", CheckedAt: "2026-07-17T00:00:00Z", GuidanceServiceCount: 2,
+		RecommendationReadyCount: 2, ServiceGuidanceStatus: string(conversation.ServiceGuidanceCapabilityRecommendationReady),
+		BookingServiceCount: 0, ProviderSynced: false, BookingReady: false, Passed: true,
+	}
 	report, err := RunDirect(context.Background(), corpus, model, fakeBackendTurnRunner{}, checkpoint, DirectRunOptions{
-		SalonID: "salon_config_owner", ModelCallBudget: 3, RequestTimeout: time.Second,
+		SalonID: "salon_config_owner", ModelCallBudget: 3, RequestTimeout: time.Second, RuntimePreflight: preflight,
 	})
 	if err != nil {
 		t.Fatalf("RunDirect: %v", err)
@@ -30,6 +35,23 @@ func TestRunDirectExecutesRecognitionReplyAndActualAIReviewWithinBudget(t *testi
 	}
 	if report.InFlightModelCall != nil || checkpoint.saves < 7 {
 		t.Fatalf("checkpoint fence = in_flight:%#v saves:%d", report.InFlightModelCall, checkpoint.saves)
+	}
+	if report.ContextSource != "isolated_fixture" || report.RuntimeReadinessVerified || report.RuntimePreflight == nil || !report.RuntimePreflight.Passed || report.RuntimePreflight.BookingReady {
+		t.Fatalf("direct evidence provenance = %#v", report)
+	}
+}
+
+func TestRunDirectRejectsFailedRuntimePreflightBeforePaidCalls(t *testing.T) {
+	model := &fakeDirectModel{}
+	_, err := RunDirect(context.Background(), oneScenarioDirectCorpus(), model, fakeBackendTurnRunner{}, &memoryCheckpoint{}, DirectRunOptions{
+		SalonID: "salon_config_owner", ModelCallBudget: 3, RequestTimeout: time.Second,
+		RuntimePreflight: &RuntimePreflightEvidence{SalonID: "salon_runtime", ServiceGuidanceStatus: string(conversation.ServiceGuidanceCapabilityCatalogUnavailable)},
+	})
+	if err == nil || !strings.Contains(err.Error(), "runtime guidance preflight did not pass") {
+		t.Fatalf("failed preflight error = %v", err)
+	}
+	if model.interpretCalls != 0 || model.replyCalls != 0 || model.reviewCalls != 0 {
+		t.Fatalf("failed preflight consumed model calls: %#v", model)
 	}
 }
 
@@ -93,17 +115,24 @@ func TestRunDirectResumeDoesNotRepeatCompletedPaidCalls(t *testing.T) {
 	corpus := oneScenarioDirectCorpus()
 	model := &fakeDirectModel{}
 	checkpoint := &memoryCheckpoint{}
-	opts := DirectRunOptions{SalonID: "salon_config_owner", ModelCallBudget: 3, RequestTimeout: time.Second}
+	opts := DirectRunOptions{
+		SalonID: "salon_config_owner", ModelCallBudget: 3, RequestTimeout: time.Second,
+		RuntimePreflight: &RuntimePreflightEvidence{SalonID: "salon_runtime", CheckedAt: "first", GuidanceServiceCount: 2, RecommendationReadyCount: 2, ServiceGuidanceStatus: "recommendation_ready", Passed: true},
+	}
 	first, err := RunDirect(context.Background(), corpus, model, fakeBackendTurnRunner{}, checkpoint, opts)
 	if err != nil {
 		t.Fatalf("first run: %v", err)
 	}
+	opts.RuntimePreflight = &RuntimePreflightEvidence{SalonID: "salon_runtime", CheckedAt: "second", GuidanceServiceCount: 2, RecommendationReadyCount: 2, ServiceGuidanceStatus: "recommendation_ready", BookingServiceCount: 2, ProviderSynced: true, BookingReady: true, Passed: true}
 	second, err := RunDirect(context.Background(), corpus, model, fakeBackendTurnRunner{}, checkpoint, opts)
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	if first.ModelCallCount != second.ModelCallCount || model.interpretCalls != 1 || model.replyCalls != 1 || model.reviewCalls != 1 || !second.Results[0].Resumed {
 		t.Fatalf("resume repeated paid work: first=%d second=%d model=%#v result=%#v", first.ModelCallCount, second.ModelCallCount, model, second.Results[0])
+	}
+	if second.RuntimePreflight == nil || second.RuntimePreflight.CheckedAt != "second" || !second.RuntimePreflight.BookingReady {
+		t.Fatalf("resume did not retain latest zero-call preflight: %#v", second.RuntimePreflight)
 	}
 }
 

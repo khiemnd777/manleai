@@ -521,8 +521,37 @@ func (r *Repository) RedactExpiredSessions(ctx context.Context, limit int) (int,
 	return len(items), nil
 }
 
+func (r *Repository) ListGuidanceServices(ctx context.Context, salonID string) ([]ServiceOption, error) {
+	rows, err := r.db.QueryContext(ctx, serviceOptionsQuery(false), salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanServiceOptions(rows, false)
+}
+
 func (r *Repository) ListBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.QueryContext(ctx, serviceOptionsQuery(true), salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanServiceOptions(rows, true)
+}
+
+func serviceOptionsQuery(requireCurrentSnapshot bool) string {
+	connectionJoin := ""
+	if requireCurrentSnapshot {
+		connectionJoin = `
+		JOIN pos_connections connection
+		  ON connection.salon_id = svc.salon_id
+		 AND connection.provider = salon.active_pos_provider
+		 AND connection.status = 'active'
+		 AND NULLIF(BTRIM(connection.location_id), '') IS NOT NULL
+		 AND connection.snapshot_generation > 0
+		 AND connection.last_sync_at IS NOT NULL`
+	}
+	return `
 		SELECT svc.id::text, svc.name, COALESCE(svc.description, ''), COALESCE(svc.ai_description, ''),
 		       svc.duration_minutes, COALESCE(svc.price_from, 0), COALESCE(svc.price_display, ''),
 		       COALESCE(cat.id::text, ''), COALESCE(cat.name, ''), COALESCE(cat.slug, ''),
@@ -532,13 +561,7 @@ func (r *Repository) ListBookableServices(ctx context.Context, salonID string) (
 		       COALESCE(profile.maintenance_note, ''), COALESCE(profile.owner_approved_summary, ''), COALESCE(profile.revision, 0)
 		FROM services svc
 		JOIN salons salon ON salon.id = svc.salon_id
-		JOIN pos_connections connection
-		  ON connection.salon_id = svc.salon_id
-		 AND connection.provider = salon.active_pos_provider
-		 AND connection.status = 'active'
-		 AND NULLIF(BTRIM(connection.location_id), '') IS NOT NULL
-		 AND connection.snapshot_generation > 0
-		 AND connection.last_sync_at IS NOT NULL
+		` + connectionJoin + `
 		JOIN pos_entity_links link
 		  ON link.salon_id = svc.salon_id
 		 AND link.entity_type = 'service'
@@ -561,12 +584,10 @@ func (r *Repository) ListBookableServices(ctx context.Context, salonID string) (
 		  AND svc.duration_minutes > 0
 		  AND COALESCE(link.provider_version, svc.pos_service_version, 0) > 0
 		ORDER BY COALESCE(cat.sort_order, 9999), COALESCE(cat.name, ''), svc.name ASC
-	`, salonID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+	`
+}
 
+func scanServiceOptions(rows *sql.Rows, bookingReady bool) ([]ServiceOption, error) {
 	items := make([]ServiceOption, 0)
 	for rows.Next() {
 		var item ServiceOption
@@ -602,6 +623,7 @@ func (r *Repository) ListBookableServices(ctx context.Context, salonID string) (
 			}
 			item.ConsultationProfile = profile
 		}
+		item.BookingReady = bookingReady
 		items = append(items, item)
 	}
 	return items, rows.Err()
@@ -766,13 +788,6 @@ func (r *Repository) ListActiveServiceAliases(ctx context.Context, salonID strin
 		FROM service_aliases sa
 		JOIN services svc ON svc.id = sa.service_id
 		JOIN salons salon ON salon.id = svc.salon_id
-		JOIN pos_connections connection
-		  ON connection.salon_id = svc.salon_id
-		 AND connection.provider = salon.active_pos_provider
-		 AND connection.status = 'active'
-		 AND NULLIF(BTRIM(connection.location_id), '') IS NOT NULL
-		 AND connection.snapshot_generation > 0
-		 AND connection.last_sync_at IS NOT NULL
 		JOIN pos_entity_links link
 		  ON link.salon_id = svc.salon_id
 		 AND link.entity_type = 'service'
@@ -819,15 +834,28 @@ func (r *Repository) ListActiveServiceCategoryAliases(ctx context.Context, salon
 		                           AND cat.salon_id = alias.salon_id
 		                           AND cat.status = 'active'
 		JOIN salons salon ON salon.id = alias.salon_id
-		JOIN pos_connections connection
-		  ON connection.salon_id = alias.salon_id
-		 AND connection.provider = salon.active_pos_provider
-		 AND connection.status = 'active'
-		 AND NULLIF(BTRIM(connection.location_id), '') IS NOT NULL
-		 AND connection.snapshot_generation > 0
-		 AND connection.last_sync_at IS NOT NULL
 		WHERE alias.salon_id = $1
 		  AND alias.status = 'active'
+		  AND EXISTS (
+			SELECT 1
+			FROM services svc
+			JOIN pos_entity_links link
+			  ON link.salon_id = svc.salon_id
+			 AND link.entity_type = 'service'
+			 AND link.entity_id = svc.id
+			 AND link.provider = salon.active_pos_provider
+			 AND link.sync_status = 'synced'
+			 AND NULLIF(BTRIM(link.provider_entity_id), '') IS NOT NULL
+			WHERE svc.salon_id = alias.salon_id
+			  AND svc.service_category_id = alias.category_id
+			  AND svc.pos_provider = salon.active_pos_provider
+			  AND svc.active = true
+			  AND svc.ai_bookable = true
+			  AND svc.archived_at IS NULL
+			  AND svc.sync_status = 'synced'
+			  AND svc.duration_minutes > 0
+			  AND COALESCE(link.provider_version, svc.pos_service_version, 0) > 0
+		  )
 		ORDER BY alias.updated_at DESC
 		LIMIT 200
 	`, salonID)

@@ -62,6 +62,7 @@ type DirectRunOptions struct {
 	RequestTimeout   time.Duration
 	TransientRetries int
 	Now              func() time.Time
+	RuntimePreflight *RuntimePreflightEvidence
 }
 
 func DirectRunKey(corpus Corpus, salonID string, modelIdentity string) (string, error) {
@@ -98,6 +99,9 @@ func RunDirect(ctx context.Context, corpus Corpus, model DirectModel, backend Ba
 	if opts.Now == nil {
 		opts.Now = func() time.Time { return time.Now().UTC() }
 	}
+	if opts.RuntimePreflight != nil && !opts.RuntimePreflight.Passed {
+		return EvaluationReport{}, fmt.Errorf("runtime guidance preflight did not pass")
+	}
 	identity, err := model.Identity(ctx, opts.SalonID)
 	if err != nil {
 		return EvaluationReport{}, fmt.Errorf("resolve direct model identity: %w", err)
@@ -121,21 +125,27 @@ func RunDirect(ctx context.Context, corpus Corpus, model DirectModel, backend Ba
 		if report.InFlightModelCall != nil {
 			return report, fmt.Errorf("%w: stage=%s scenario=%s attempt=%d", ErrUncertainModelCall, report.InFlightModelCall.Stage, report.InFlightModelCall.ScenarioID, report.InFlightModelCall.Attempt)
 		}
+		report.ContextSource = "isolated_fixture"
+		report.RuntimeReadinessVerified = false
+		report.RuntimePreflight = opts.RuntimePreflight
 		if opts.ModelCallBudget < report.ModelCallCount {
 			return report, fmt.Errorf("model-call budget %d is below already-used count %d", opts.ModelCallBudget, report.ModelCallCount)
 		}
 		report.ModelCallBudget = opts.ModelCallBudget
 	} else {
 		report = EvaluationReport{
-			SchemaVersion:          SchemaVersion,
-			EvaluationContract:     DirectEvaluationContractVersion,
-			ReviewContract:         DirectReviewContractVersion,
-			Mode:                   "direct_model_database_config_no_side_effects",
-			RunKey:                 runKey,
-			ScenarioCount:          len(corpus.Scenarios),
-			ContractValidatedCount: len(corpus.Scenarios),
-			ModelCallBudget:        opts.ModelCallBudget,
-			StartedAt:              opts.Now().Format(time.RFC3339Nano),
+			SchemaVersion:            SchemaVersion,
+			EvaluationContract:       DirectEvaluationContractVersion,
+			ReviewContract:           DirectReviewContractVersion,
+			Mode:                     "direct_model_database_config_no_side_effects",
+			ContextSource:            "isolated_fixture",
+			RuntimeReadinessVerified: false,
+			RuntimePreflight:         opts.RuntimePreflight,
+			RunKey:                   runKey,
+			ScenarioCount:            len(corpus.Scenarios),
+			ContractValidatedCount:   len(corpus.Scenarios),
+			ModelCallBudget:          opts.ModelCallBudget,
+			StartedAt:                opts.Now().Format(time.RFC3339Nano),
 		}
 	}
 	executor := directCallExecutor{model: model, checkpoint: checkpoint, report: &report, opts: opts}

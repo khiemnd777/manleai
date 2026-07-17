@@ -162,13 +162,6 @@ func (r *Repository) CountConsultationReadyServices(ctx context.Context, salonID
 		SELECT (
 			SELECT COUNT(DISTINCT svc.id)::int
 			FROM services svc
-			JOIN pos_connections connection
-			  ON connection.salon_id = svc.salon_id
-			 AND connection.provider = salon.active_pos_provider
-			 AND connection.status = 'active'
-			 AND NULLIF(BTRIM(connection.location_id), '') IS NOT NULL
-			 AND connection.snapshot_generation > 0
-			 AND connection.last_sync_at IS NOT NULL
 			JOIN pos_entity_links link
 			  ON link.salon_id = svc.salon_id
 			 AND link.entity_type = 'service'

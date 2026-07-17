@@ -144,7 +144,7 @@ func (s *Service) loadAnswerContext(ctx context.Context, salonID string) (*AIAns
 			continue
 		}
 		if !verifiedFence.Ready {
-			failClosedStructuredAnswerContext(answerCtx)
+			failClosedProviderBookingContext(answerCtx)
 		}
 		s.answerContextCache.set(salonID, verifiedFence, *answerCtx)
 		return cloneAIAnswerContext(answerCtx), nil
@@ -152,23 +152,26 @@ func (s *Service) loadAnswerContext(ctx context.Context, salonID string) (*AIAns
 	return nil, errors.New("conversation answer context readiness changed while loading")
 }
 
-func failClosedStructuredAnswerContext(answerCtx *AIAnswerContext) {
+func failClosedProviderBookingContext(answerCtx *AIAnswerContext) {
 	if answerCtx == nil {
 		return
 	}
-	answerCtx.Services = nil
-	answerCtx.ServiceAliases = nil
-	answerCtx.CategoryAliases = nil
+	clearBookingReadyFlags(answerCtx.Services)
 	answerCtx.Staff = nil
 	answerCtx.ActiveStaff = nil
 	answerCtx.BusinessHours = nil
 }
 
 func (s *Service) loadFreshAnswerContext(ctx context.Context, salonID string) (*AIAnswerContext, error) {
-	services, err := s.store.ListBookableServices(ctx, salonID)
+	services, err := s.store.ListGuidanceServices(ctx, salonID)
 	if err != nil {
 		return nil, err
 	}
+	bookableServices, err := s.store.ListBookableServices(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	markBookableServices(services, bookableServices)
 	serviceAliases, err := s.store.ListActiveServiceAliases(ctx, salonID)
 	if err != nil {
 		return nil, err
@@ -203,6 +206,24 @@ func (s *Service) loadFreshAnswerContext(ctx context.Context, salonID string) (*
 		BusinessHours:   hours,
 	}
 	return &answerCtx, nil
+}
+
+func markBookableServices(guidanceServices []ServiceOption, bookableServices []ServiceOption) {
+	bookableIDs := make(map[string]struct{}, len(bookableServices))
+	for _, service := range bookableServices {
+		if id := strings.TrimSpace(service.ID); id != "" {
+			bookableIDs[id] = struct{}{}
+		}
+	}
+	for index := range guidanceServices {
+		_, guidanceServices[index].BookingReady = bookableIDs[strings.TrimSpace(guidanceServices[index].ID)]
+	}
+}
+
+func clearBookingReadyFlags(services []ServiceOption) {
+	for index := range services {
+		services[index].BookingReady = false
+	}
 }
 
 func (s *Service) InvalidateAnswerContext(salonID string) {

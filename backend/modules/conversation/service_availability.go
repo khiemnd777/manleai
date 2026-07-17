@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -11,9 +12,14 @@ import (
 	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
+var errBookingCatalogNotReady = errors.New("selected services are not ready for provider-backed booking")
+
 func (s *Service) applyAvailabilityForRequestedTime(ctx context.Context, ownerUserID string, turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (bool, error) {
 	if session == nil || session.RequestedStartTime == nil {
 		return false, nil
+	}
+	if !bookingSelectionReady(*session, services) {
+		return false, errBookingCatalogNotReady
 	}
 	preferredDate := preferredDateFromMessage("", session.RequestedStartTime, timezoneLocation(cfg.Timezone), s.now)
 	if preferredDate == "" {
@@ -161,6 +167,9 @@ func (s *Service) refreshSelectedAvailabilityProof(ctx context.Context, ownerUse
 	if session == nil || session.RequestedStartTime == nil {
 		return nil, false, nil
 	}
+	if !bookingSelectionReady(*session, services) {
+		return nil, false, errBookingCatalogNotReady
+	}
 	preferredDate := preferredDateFromMessage("", session.RequestedStartTime, timezoneLocation(timezoneFromConfig(cfg)), s.now)
 	if preferredDate == "" {
 		return nil, false, nil
@@ -211,6 +220,9 @@ func expectedAvailabilityEnd(session Session, services []ServiceOption) (time.Ti
 }
 
 func (s *Service) refreshPartySplitOptionProofs(ctx context.Context, ownerUserID string, salonID string, session Session, option PartySplitOption, services []ServiceOption, cfg *RuntimeConfig) (PartySplitOption, bool, error) {
+	if !bookingSelectionReady(session, services) {
+		return PartySplitOption{}, false, errBookingCatalogNotReady
+	}
 	fresh := clonePartySplitOption(option)
 	for blockIndex := range fresh.Blocks {
 		block := &fresh.Blocks[blockIndex]
@@ -423,6 +435,9 @@ func applyAssignmentSelectionMetadata(turn *TurnRecord, selection availabilitySe
 }
 
 func (s *Service) offerAvailableSlots(ctx context.Context, ownerUserID string, turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, preferredDate string, unavailableRequestedTime bool, cfg *RuntimeConfig) error {
+	if session == nil || !bookingSelectionReady(*session, services) {
+		return errBookingCatalogNotReady
+	}
 	result, err := s.availableSlots(ctx, turn.SalonID, ownerUserID, *session, preferredDate)
 	if err != nil {
 		return err
@@ -601,6 +616,9 @@ func shouldOfferPartySplitAvailability(session Session) bool {
 }
 
 func (s *Service) planPartySplitOptions(ctx context.Context, ownerUserID string, salonID string, session Session, services []ServiceOption, preferredDate string, cfg *RuntimeConfig) ([]PartySplitOption, error) {
+	if !bookingSelectionReady(session, services) {
+		return nil, errBookingCatalogNotReady
+	}
 	segments := bookingSegmentsForCreate(session)
 	if len(segments) < 2 {
 		return nil, nil
@@ -637,6 +655,27 @@ func (s *Service) planPartySplitOptions(ctx context.Context, ownerUserID string,
 	}
 	options := rankPartySplitOptions(partySplitOptionsFromCandidates(candidateSets, session.RequestedDate, timezoneLocation(timezoneFromConfig(cfg))), splitPartyOptionLimit)
 	return options, nil
+}
+
+func bookingSelectionReady(session Session, services []ServiceOption) bool {
+	readyServiceIDs := make(map[string]struct{}, len(services))
+	for _, service := range services {
+		if service.BookingReady {
+			if id := strings.TrimSpace(service.ID); id != "" {
+				readyServiceIDs[id] = struct{}{}
+			}
+		}
+	}
+	segments := bookingSegmentsForCreate(session)
+	if len(segments) == 0 {
+		return false
+	}
+	for _, segment := range segments {
+		if _, ok := readyServiceIDs[strings.TrimSpace(segment.ServiceID)]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func partySplitCandidatesFromAvailability(segment booking.BookingSegmentRequest, result *booking.AvailabilityResult) []partySplitCandidate {

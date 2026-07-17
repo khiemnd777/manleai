@@ -11,7 +11,7 @@ import (
 	"github.com/manleai/ai-receptionist/modules/pos"
 )
 
-func TestRepositoryConsultantCatalogRequiresCompletedCurrentProviderSnapshot(t *testing.T) {
+func TestRepositorySeparatesGuidanceCatalogFromCurrentBookingSnapshot(t *testing.T) {
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
 		t.Skip("TEST_DATABASE_URL is not configured")
@@ -113,7 +113,8 @@ func TestRepositoryConsultantCatalogRequiresCompletedCurrentProviderSnapshot(t *
 	if _, err := posRepo.UpdateLocation(ctx, salonID, pos.ProviderSquare, "location-b"); err != nil {
 		t.Fatalf("switch to location B: %v", err)
 	}
-	assertConsultantCatalogNotReady(t, ctx, conversationRepo, salonID)
+	assertBookingCatalogNotReady(t, ctx, conversationRepo, salonID)
+	assertGuidanceCatalog(t, ctx, conversationRepo, salonID, "Location A Gel Manicure", "A gel mani", 1)
 
 	locationBGeneration, err := posRepo.BeginProviderSnapshot(ctx, salonID, pos.ProviderSquare, "location-b")
 	if err != nil {
@@ -144,7 +145,8 @@ func TestRepositoryConsultantCatalogRequiresCompletedCurrentProviderSnapshot(t *
 	`, salonID, locationBServiceID, "b-spa-pedi-"+suffix); err != nil {
 		t.Fatalf("insert location B service alias: %v", err)
 	}
-	assertConsultantCatalogNotReady(t, ctx, conversationRepo, salonID)
+	assertBookingCatalogNotReady(t, ctx, conversationRepo, salonID)
+	assertGuidanceCatalog(t, ctx, conversationRepo, salonID, "Location B Spa Pedicure", "B spa pedi", 1)
 
 	if err := posRepo.MarkSyncCompleteForGeneration(ctx, salonID, pos.ProviderSquare, locationBGeneration, pos.StatusActive, ""); err != nil {
 		t.Fatalf("complete location B snapshot: %v", err)
@@ -168,9 +170,26 @@ func consultantProviderEntityLocalID(t *testing.T, ctx context.Context, db *sql.
 	return entityID
 }
 
-func assertConsultantCatalogNotReady(t *testing.T, ctx context.Context, repo *Repository, salonID string) {
+func assertBookingCatalogNotReady(t *testing.T, ctx context.Context, repo *Repository, salonID string) {
 	t.Helper()
-	assertConsultantCatalog(t, ctx, repo, salonID, "", "", "", 0)
+	fence, err := repo.GetAnswerContextFence(ctx, salonID)
+	if err != nil {
+		t.Fatalf("load consultant answer-context fence: %v", err)
+	}
+	if fence.Ready {
+		t.Fatalf("answer-context fence unexpectedly ready: %#v", fence)
+	}
+	services, err := repo.ListBookableServices(ctx, salonID)
+	if err != nil {
+		t.Fatalf("list bookable services: %v", err)
+	}
+	staff, err := repo.ListBookableStaff(ctx, salonID)
+	if err != nil {
+		t.Fatalf("list bookable staff: %v", err)
+	}
+	if len(services) != 0 || len(staff) != 0 {
+		t.Fatalf("booking catalog bypassed current snapshot fence: services=%#v staff=%#v", services, staff)
+	}
 }
 
 func assertConsultantCatalog(t *testing.T, ctx context.Context, repo *Repository, salonID string, serviceName string, staffName string, serviceAlias string, wantCount int) {
@@ -182,6 +201,7 @@ func assertConsultantCatalog(t *testing.T, ctx context.Context, repo *Repository
 	if fence.Ready != (wantCount > 0) {
 		t.Fatalf("answer-context fence readiness = %#v, want ready=%t", fence, wantCount > 0)
 	}
+	assertGuidanceCatalog(t, ctx, repo, salonID, serviceName, serviceAlias, wantCount)
 	services, err := repo.ListBookableServices(ctx, salonID)
 	if err != nil {
 		t.Fatalf("list consultant services: %v", err)
@@ -203,18 +223,29 @@ func assertConsultantCatalog(t *testing.T, ctx context.Context, repo *Repository
 	if len(activeStaff) != wantCount || wantCount == 1 && activeStaff[0].Name != staffName {
 		t.Fatalf("consultant active staff = %#v, want count=%d name=%q", activeStaff, wantCount, staffName)
 	}
-	aliases, err := repo.ListActiveServiceAliases(ctx, salonID)
-	if err != nil {
-		t.Fatalf("list consultant service aliases: %v", err)
-	}
-	if len(aliases) != wantCount || wantCount == 1 && aliases[0].Alias != serviceAlias {
-		t.Fatalf("consultant service aliases = %#v, want count=%d alias=%q", aliases, wantCount, serviceAlias)
-	}
 	categoryAliases, err := repo.ListActiveServiceCategoryAliases(ctx, salonID)
 	if err != nil {
 		t.Fatalf("list consultant category aliases: %v", err)
 	}
 	if len(categoryAliases) != wantCount {
 		t.Fatalf("consultant category aliases = %#v, want count=%d", categoryAliases, wantCount)
+	}
+}
+
+func assertGuidanceCatalog(t *testing.T, ctx context.Context, repo *Repository, salonID string, serviceName string, serviceAlias string, wantCount int) {
+	t.Helper()
+	services, err := repo.ListGuidanceServices(ctx, salonID)
+	if err != nil {
+		t.Fatalf("list guidance services: %v", err)
+	}
+	if len(services) != wantCount || wantCount == 1 && services[0].Name != serviceName {
+		t.Fatalf("guidance services = %#v, want count=%d name=%q", services, wantCount, serviceName)
+	}
+	aliases, err := repo.ListActiveServiceAliases(ctx, salonID)
+	if err != nil {
+		t.Fatalf("list guidance service aliases: %v", err)
+	}
+	if len(aliases) != wantCount || wantCount == 1 && aliases[0].Alias != serviceAlias {
+		t.Fatalf("guidance service aliases = %#v, want count=%d alias=%q", aliases, wantCount, serviceAlias)
 	}
 }

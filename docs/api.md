@@ -1907,6 +1907,7 @@ Returns owner-scoped live voice, phone booking, and external AI provider readine
     "square_synced": true,
     "test_booking_cancelled": true,
     "booking_write_blocked": false,
+    "guidance_service_count": 4,
     "service_count": 4,
     "consultation_enabled": true,
     "consultation_ready_service_count": 2,
@@ -1962,15 +1963,20 @@ Returns owner-scoped live voice, phone booking, and external AI provider readine
 }
 ```
 
-`booking.service_count` and `booking.staff_count` use the same strict active
-provider, selected location, completed snapshot generation, synced entity-link,
-provider-version, active, non-archived, and AI-bookable fence as conversation
-runtime. `booking.service_guidance.status` is one of
+`booking.guidance_service_count` counts canonical active-provider, linked,
+versioned, synced, active, non-archived AI-bookable services without requiring
+the current provider connection snapshot to be complete. It is the source for
+service menus and consultation. `booking.service_count` and
+`booking.staff_count` additionally require the strict active provider,
+selected location, completed snapshot generation, and `last_sync_at` fence used
+for availability and booking. `booking.service_guidance.status` is one of
 `recommendation_ready`, `catalog_only`, `consultation_disabled`, or
 `catalog_unavailable`.
-It reports whether the runtime can show the synced catalog and whether enough
-owner-approved consultation profiles exist to make a personalized
-recommendation; it is independent of Twilio transport readiness.
+It reports whether the runtime can show the canonical guidance catalog and
+whether enough owner-approved consultation profiles exist to make a
+personalized recommendation. Guidance may be ready while
+`phone_booking_ready=false`; that state permits consultation but no availability
+or booking provider call. It is independent of Twilio transport readiness.
 
 `POST /api/salons/:id/voice/semantic-check`
 
@@ -2106,7 +2112,7 @@ profile-backed consultation question, or no output-model call. It does not
 force a universal second rewrite. Review batches contain at most five retained
 outputs; the complete 50 therefore has 10 review rounds. With no retries the
 complete-run hard ceiling remains 110, while operational/terminal turns may use
-fewer calls. Evaluation contract `production-flow-v7` rejects final replies
+fewer calls. Evaluation contract `production-flow-v8` rejects final replies
 that expose any dynamic fixture identifier, uses separate typed salon-local
 `hour` and `minute` model fields so the provider never computes minutes after
 midnight, converts those clock components before production slot filtering,
@@ -2116,14 +2122,17 @@ consultation extraction as exact, rejects invented booking/completion flags,
 and rejects positive consultation mutations not represented in the same-turn
 structured snapshot. Protocol `unknown` is normalized to field absence, and
 guidance actions remain the only initial workflow-transition authority.
-Reviewer contract `evidence-review-v7` explicitly checks
+Reviewer contract `evidence-review-v8` explicitly checks
 those consultation facts, the recorded local slot minutes and timezone, as well
 as machine-facing labels, silent service/staff/date/time mutations, and
 unnecessarily broad hours answers.
 
-Direct-model mode is a local CLI workflow, not an API endpoint. The supplied
-salon ID is used only to select the encrypted OpenAI row in
-`salon_integration_configs`. `ResolveOpenAIConfigStrict` fails closed if that
+Direct-model mode is a local CLI workflow, not an API endpoint. Before any
+model call, the supplied salon ID selects both the encrypted OpenAI row in
+`salon_integration_configs` and a zero-model-call database readiness preflight.
+The preflight requires `service_guidance.status=recommendation_ready` and
+records guidance/ready-profile counts plus the separate provider/booking state.
+`ResolveOpenAIConfigStrict` fails closed if that
 database row is absent, disabled, undecryptable, or incomplete; it never falls
 back to environment provider values. Scenario state, catalogs, aliases,
 consultation profiles, staff, and availability are isolated evaluation
@@ -2131,7 +2140,10 @@ fixtures. The runner does not use an owner token, does not create conversation
 records, does not call the internal semantic-evaluation API, and blocks every
 booking, reschedule, or cancellation write. Synthetic availability may be
 returned to exercise the caller-facing flow, but it is reported as a tool
-attempt and never reaches the POS.
+attempt and never reaches the POS. Direct reports therefore set
+`context_source=isolated_fixture` and `runtime_readiness_verified=false`; the
+separate `runtime_preflight` object is database evidence, not proof that the
+fixture scenarios executed against that salon's runtime catalog.
 
 Run the exact pilot with an explicit paid-call ceiling and report path:
 

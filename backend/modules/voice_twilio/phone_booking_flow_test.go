@@ -432,6 +432,10 @@ func (f *phoneFlowConversationStore) ListBookableServices(ctx context.Context, s
 	return f.services, nil
 }
 
+func (f *phoneFlowConversationStore) ListGuidanceServices(ctx context.Context, salonID string) ([]conversation.ServiceOption, error) {
+	return f.services, nil
+}
+
 func (f *phoneFlowConversationStore) ListActiveServiceAliases(ctx context.Context, salonID string) ([]conversation.ServiceAlias, error) {
 	return f.aliases, nil
 }

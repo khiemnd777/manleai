@@ -237,6 +237,105 @@ func TestGuidanceIntentSurvivesUnavailableCatalogAcrossPhoneAndSimulator(t *test
 	}
 }
 
+func TestGuidanceUsesCanonicalCatalogWhileBookingSnapshotIsNotReady(t *testing.T) {
+	tests := []struct {
+		name    string
+		channel string
+		message string
+	}{
+		{name: "reported simulator wording", channel: ChannelSimulator, message: "I don't know what service should I book for my nails"},
+		{name: "different phone wording", channel: ChannelPhone, message: "Could you help me figure out which nail appointment fits me?"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := newFakeConversationStore()
+			store.session.Channel = test.channel
+			store.services = nil
+			store.guidanceServices = []ServiceOption{
+				{ID: "svc_natural", Name: "Natural Nail Care", CategoryID: "cat_hands", CategoryName: "Hand Care", ConsultationProfile: readyComparisonProfile(ConsultationOutcomeMaintain, ConsultationSystemNatural)},
+				{ID: "svc_overlay", Name: "Structured Overlay", CategoryID: "cat_hands", CategoryName: "Hand Care", ConsultationProfile: readyComparisonProfile(ConsultationOutcomeAddStrength, ConsultationSystemGel)},
+			}
+			store.answerContextFence = AnswerContextFence{
+				ActiveProvider: "square", ConnectionStatus: "connected", LocationID: "location_1",
+				SnapshotGeneration: 1, Ready: false,
+			}
+			bookingTool := &fakeBookingTool{}
+			service := NewService(store, bookingTool)
+			service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: TurnUnderstanding{
+				Goal: "consultation", GuidanceAction: GuidanceActionConsultation, Confidence: 0.95,
+				Reason: "caller_requests_help_choosing_from_catalog",
+			}})
+			service.SetReplyGenerator(&fakeReplyGenerator{message: "What do you currently have on your nails?"})
+
+			session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+				Message: test.message, EventKey: "stale_booking_snapshot_" + test.channel,
+			})
+			if err != nil {
+				t.Fatalf("Message: %v", err)
+			}
+			if session.Intent != IntentConsultation || !consultationStateActive(session.DialogState.Consultation) {
+				t.Fatalf("consultation state = intent=%q dialog=%#v", session.Intent, session.DialogState)
+			}
+			if store.lastTurn.AIMessage != "What do you currently have on your nails?" {
+				t.Fatalf("guidance reply=%q metadata=%#v", store.lastTurn.AIMessage, store.lastTurn.CustomerMetadata)
+			}
+			assertGuidanceDidNotCallBookingTools(t, bookingTool)
+		})
+	}
+}
+
+func TestServiceMenuUsesCanonicalCatalogWhileBookingSnapshotIsNotReady(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = nil
+	store.guidanceServices = []ServiceOption{
+		{ID: "svc_hands", Name: "Signature Hand Care", CategoryID: "cat_hands", CategoryName: "Hand Care"},
+		{ID: "svc_feet", Name: "Cloud Foot Reset", CategoryID: "cat_feet", CategoryName: "Foot Care"},
+	}
+	store.answerContextFence = AnswerContextFence{
+		ActiveProvider: "square", ConnectionStatus: "connected", LocationID: "location_1",
+		SnapshotGeneration: 1, Ready: false,
+	}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: TurnUnderstanding{
+		Goal: "information", GuidanceAction: GuidanceActionServiceCatalog, Confidence: 0.96,
+		Reason: "caller_requested_service_catalog",
+	}})
+
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Show me your services", EventKey: "stale_snapshot_service_menu",
+	}); err != nil {
+		t.Fatalf("Message: %v", err)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Signature Hand Care") ||
+		!strings.Contains(store.lastTurn.AIMessage, "Cloud Foot Reset") ||
+		store.lastTurn.AIMetadata["answer_source"] != answerSourceServiceCatalog {
+		t.Fatalf("stale-snapshot service menu reply=%q metadata=%#v", store.lastTurn.AIMessage, store.lastTurn.AIMetadata)
+	}
+	assertGuidanceDidNotCallBookingTools(t, bookingTool)
+}
+
+func TestAvailabilityRejectsGuidanceOnlyServiceBeforeProviderCall(t *testing.T) {
+	store := newFakeConversationStore()
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	session := store.session
+	session.ServiceID = "svc_guidance_only"
+	session.ServiceName = "Guidance Only Service"
+	session.BookingSegments = bookingSegmentsFromServices([]ServiceOption{{ID: session.ServiceID, Name: session.ServiceName}}, session)
+	turn := newTurnRecord("salon_1", "owner_1", store.session, session, "Next Friday", "booking_fence_test", nil, nil, &store.cfg)
+
+	err := service.offerAvailableSlots(context.Background(), "owner_1", &turn, &session, []ServiceOption{{
+		ID: session.ServiceID, Name: session.ServiceName, BookingReady: false,
+	}}, store.staff, "2026-08-21", false, &store.cfg)
+	if !errors.Is(err, errBookingCatalogNotReady) {
+		t.Fatalf("offerAvailableSlots error = %v, want booking catalog fence", err)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("booking fence invoked provider tools: availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+}
+
 func TestGuidanceCatalogActionUsesStructuredCatalogAcrossPhoneAndSimulator(t *testing.T) {
 	for _, channel := range []string{ChannelPhone, ChannelSimulator} {
 		t.Run(channel, func(t *testing.T) {

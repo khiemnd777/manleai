@@ -548,6 +548,7 @@ type PhoneBookingReadiness struct {
 	BookingWriteBlockedCode   string                   `json:"booking_write_blocked_code,omitempty"`
 	BookingWriteBlockedReason string                   `json:"booking_write_blocked_reason,omitempty"`
 	BookingWriteBlockedAt     *time.Time               `json:"booking_write_blocked_at,omitempty"`
+	GuidanceServiceCount      int                      `json:"guidance_service_count"`
 	ServiceCount              int                      `json:"service_count"`
 	ConsultationEnabled       bool                     `json:"consultation_enabled"`
 	ConsultationReadyServices int                      `json:"consultation_ready_service_count"`

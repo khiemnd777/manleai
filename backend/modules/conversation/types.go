@@ -555,6 +555,7 @@ type Store interface {
 	ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int, offset int) ([]WebhookEventLog, error)
 	ArchiveSession(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error)
 	RedactSession(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error)
+	ListGuidanceServices(ctx context.Context, salonID string) ([]ServiceOption, error)
 	ListBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error)
 	ListBookableStaff(ctx context.Context, salonID string) ([]StaffOption, error)
 	ListActiveStaff(ctx context.Context, salonID string) ([]StaffOption, error)
@@ -708,6 +709,10 @@ type ServiceOption struct {
 	CategoryName        string                      `json:"category_name,omitempty"`
 	CategorySlug        string                      `json:"category_slug,omitempty"`
 	ConsultationProfile *ServiceConsultationProfile `json:"consultation_profile,omitempty"`
+	// BookingReady is runtime-only evidence that this service also passed the
+	// current provider snapshot fence. Guidance may use a canonical linked
+	// service while this is false; availability and booking may not.
+	BookingReady bool `json:"-"`
 }
 
 type ServiceConsultationProfile struct {

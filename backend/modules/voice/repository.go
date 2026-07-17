@@ -64,6 +64,25 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 			(
 				SELECT COUNT(DISTINCT svc.id)
 				FROM services svc
+				JOIN pos_entity_links link
+				  ON link.salon_id = svc.salon_id
+				 AND link.entity_type = 'service'
+				 AND link.entity_id = svc.id
+				 AND link.provider = s.active_pos_provider
+				 AND link.sync_status = 'synced'
+				 AND NULLIF(BTRIM(link.provider_entity_id), '') IS NOT NULL
+				WHERE svc.salon_id = s.id
+				  AND svc.pos_provider = s.active_pos_provider
+				  AND svc.active = true
+				  AND svc.ai_bookable = true
+				  AND svc.archived_at IS NULL
+				  AND svc.sync_status = 'synced'
+				  AND svc.duration_minutes > 0
+				  AND COALESCE(link.provider_version, svc.pos_service_version, 0) > 0
+			) AS guidance_service_count,
+			(
+				SELECT COUNT(DISTINCT svc.id)
+				FROM services svc
 				JOIN pos_connections pc
 				  ON pc.salon_id = svc.salon_id
 				 AND pc.provider = s.active_pos_provider
@@ -90,13 +109,6 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 			(
 				SELECT COUNT(DISTINCT svc.id)
 				FROM services svc
-				JOIN pos_connections pc
-				  ON pc.salon_id = svc.salon_id
-				 AND pc.provider = s.active_pos_provider
-				 AND pc.status = 'active'
-				 AND NULLIF(BTRIM(pc.location_id), '') IS NOT NULL
-				 AND pc.snapshot_generation > 0
-				 AND pc.last_sync_at IS NOT NULL
 				JOIN pos_entity_links link
 				  ON link.salon_id = svc.salon_id
 				 AND link.entity_type = 'service'
@@ -202,6 +214,7 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 		&readiness.ActiveProvider,
 		&readiness.ProviderConnected,
 		&readiness.ProviderSynced,
+		&readiness.GuidanceServiceCount,
 		&readiness.ServiceCount,
 		&readiness.ConsultationReadyServices,
 		&readiness.StaffCount,
@@ -224,7 +237,7 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 		readiness.BookingWriteBlockedAt = &bookingWriteBlockedAt.Time
 	}
 	readiness.ServiceGuidance = serviceGuidanceReadiness(
-		readiness.ServiceCount, readiness.ConsultationEnabled, readiness.ConsultationReadyServices,
+		readiness.GuidanceServiceCount, readiness.ConsultationEnabled, readiness.ConsultationReadyServices,
 	)
 	providerLabel := readiness.ActiveProvider
 	if providerLabel == "square" {

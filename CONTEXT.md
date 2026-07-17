@@ -25,6 +25,12 @@ A conversation lane that helps a caller clarify needs, compare eligible services
 **Service Consultation Profile**
 The structured, owner-approved child record for one canonical service, stored in `service_consultation_profiles` with a stable `(salon_id, service_id)` key and revision. Only `ready` profiles with at least one recommended outcome and one compatible current system on active-provider, POS-linked, AI-bookable services participate in recommendation ranking; draft, incomplete, and disabled profiles remain management data.
 
+**Guidance Service Catalog**
+Canonical active-provider services that remain active, AI-bookable, synced, versioned, and linked to a provider entity. This catalog owns service identity, aliases, categories, menu answers, and consultation even while the current provider connection snapshot is incomplete. It does not authorize availability or booking.
+
+**Booking-Ready Service Catalog**
+The guidance service catalog intersected with the current active provider connection, selected location, completed snapshot generation, and `last_sync_at` fence. Availability, booking, and reschedule provider calls require every selected service to be booking-ready. A guidance recommendation alone never crosses this gate.
+
 **Conversation Engine**
 The state machine and tool-calling layer behind the AI Receptionist. It must not know Square payloads, OAuth tokens, or provider-specific booking details.
 

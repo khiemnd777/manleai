@@ -1683,6 +1683,48 @@ func TestMessageConsultationRecommendationClarifiesBeforeChangingMultiServiceDra
 	}
 }
 
+func TestMessageConsultationBookingRequestHandsOffWhenOnlyGuidanceCatalogIsReady(t *testing.T) {
+	store := newFakeConversationStore()
+	recommended := consultationTestServices()[0]
+	store.services = nil
+	store.guidanceServices = []ServiceOption{recommended}
+	store.answerContextFence = AnswerContextFence{
+		ActiveProvider: "square", ConnectionStatus: "connected", LocationID: "location_1",
+		SnapshotGeneration: 1, Ready: false,
+	}
+	store.session.Intent = IntentConsultation
+	store.session.DialogState = normalizedDialogState(DialogState{
+		Phase: DialogPhaseConsultation,
+		Consultation: &ConsultationState{
+			Status:                ConsultationStatusAwaitingBooking,
+			SelectedServiceID:     recommended.ID,
+			RecommendedServiceIDs: []string{recommended.ID},
+			ProfileRevisions:      map[string]int{recommended.ID: recommended.ConsultationProfile.Revision},
+		},
+	})
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Yes, please book that recommendation.",
+	})
+	if err != nil {
+		t.Fatalf("Message: %v", err)
+	}
+	if session.Status != StatusHandoff || session.Outcome != OutcomeHandoffRequested || session.ServiceID != "" {
+		t.Fatalf("booking-unavailable handoff session = %#v", session)
+	}
+	if state := normalizedDialogState(session.DialogState).Consultation; state == nil || state.Status != ConsultationStatusHandedOff || state.ExitReason != HandoffReasonBookingUnavailable {
+		t.Fatalf("consultation booking handoff state = %#v", state)
+	}
+	if strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "confirmed") && !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "nothing is confirmed") {
+		t.Fatalf("booking-unavailable reply implied confirmation: %q", store.lastTurn.AIMessage)
+	}
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("guidance-only booking request invoked provider: availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
+}
+
 func TestMessageConsultationRecommendationPreservesPartyDraftThroughScopeClarification(t *testing.T) {
 	store := newFakeConversationStore()
 	recommended := consultationTestServices()[0]
@@ -9100,6 +9142,7 @@ type fakeConversationStore struct {
 	cfg               RuntimeConfig
 	session           Session
 	services          []ServiceOption
+	guidanceServices  []ServiceOption
 	serviceAliases    []ServiceAlias
 	categoryAliases   []ServiceCategoryAlias
 	staff             []StaffOption
@@ -9197,6 +9240,7 @@ func newFakeConversationStore() *fakeConversationStore {
 			Name:            "Classic Manicure",
 			DurationMinutes: 45,
 			PriceFrom:       35,
+			BookingReady:    true,
 		}},
 		staff: []StaffOption{{
 			ID:         "staff_1",
@@ -9286,6 +9330,13 @@ func (f *fakeConversationStore) RedactSession(ctx context.Context, salonID strin
 
 func (f *fakeConversationStore) ListBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error) {
 	f.serviceListCalls++
+	return f.services, nil
+}
+
+func (f *fakeConversationStore) ListGuidanceServices(ctx context.Context, salonID string) ([]ServiceOption, error) {
+	if f.guidanceServices != nil {
+		return f.guidanceServices, nil
+	}
 	return f.services, nil
 }
 

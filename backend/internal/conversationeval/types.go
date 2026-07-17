@@ -20,8 +20,8 @@ const (
 	// These versions are part of the checkpoint/run identity. Any material
 	// change to production-flow execution or reviewer semantics must bump the
 	// corresponding value so retained paid evidence cannot be mixed.
-	DirectEvaluationContractVersion = "production-flow-v7"
-	DirectReviewContractVersion     = "evidence-review-v7"
+	DirectEvaluationContractVersion = "production-flow-v8"
+	DirectReviewContractVersion     = "evidence-review-v8"
 )
 
 type Corpus struct {
@@ -169,30 +169,48 @@ type EvaluationFailure struct {
 }
 
 type EvaluationReport struct {
-	SchemaVersion           int                        `json:"schema_version"`
-	EvaluationContract      string                     `json:"evaluation_contract,omitempty"`
-	ReviewContract          string                     `json:"review_contract,omitempty"`
-	Mode                    string                     `json:"mode"`
-	RunKey                  string                     `json:"run_key,omitempty"`
-	ScenarioCount           int                        `json:"scenario_count"`
-	ContractValidatedCount  int                        `json:"contract_validated_count"`
-	ModelEvaluatedCount     int                        `json:"model_evaluated_count"`
-	PassedCount             int                        `json:"passed_count"`
-	FailedCount             int                        `json:"failed_count"`
-	NotRunCount             int                        `json:"not_run_count"`
-	TransientRetryCount     int                        `json:"transient_retry_count,omitempty"`
-	RecoveredTransientCount int                        `json:"recovered_transient_count,omitempty"`
-	ModelCallBudget         int                        `json:"model_call_budget,omitempty"`
-	ModelCallCount          int                        `json:"model_call_count,omitempty"`
-	ReviewPassedCount       int                        `json:"review_passed_count,omitempty"`
-	ReviewFailedCount       int                        `json:"review_failed_count,omitempty"`
-	Usage                   ModelUsage                 `json:"usage,omitempty"`
-	StartedAt               string                     `json:"started_at,omitempty"`
-	CompletedAt             string                     `json:"completed_at,omitempty"`
-	InFlightModelCall       *InFlightModelCall         `json:"in_flight_model_call,omitempty"`
-	Failures                []EvaluationFailure        `json:"failures,omitempty"`
-	Results                 []ScenarioEvaluationResult `json:"results,omitempty"`
-	ReviewRounds            []DirectReviewRound        `json:"review_rounds,omitempty"`
+	SchemaVersion            int                        `json:"schema_version"`
+	EvaluationContract       string                     `json:"evaluation_contract,omitempty"`
+	ReviewContract           string                     `json:"review_contract,omitempty"`
+	Mode                     string                     `json:"mode"`
+	ContextSource            string                     `json:"context_source"`
+	RuntimeReadinessVerified bool                       `json:"runtime_readiness_verified"`
+	RuntimePreflight         *RuntimePreflightEvidence  `json:"runtime_preflight,omitempty"`
+	RunKey                   string                     `json:"run_key,omitempty"`
+	ScenarioCount            int                        `json:"scenario_count"`
+	ContractValidatedCount   int                        `json:"contract_validated_count"`
+	ModelEvaluatedCount      int                        `json:"model_evaluated_count"`
+	PassedCount              int                        `json:"passed_count"`
+	FailedCount              int                        `json:"failed_count"`
+	NotRunCount              int                        `json:"not_run_count"`
+	TransientRetryCount      int                        `json:"transient_retry_count,omitempty"`
+	RecoveredTransientCount  int                        `json:"recovered_transient_count,omitempty"`
+	ModelCallBudget          int                        `json:"model_call_budget,omitempty"`
+	ModelCallCount           int                        `json:"model_call_count,omitempty"`
+	ReviewPassedCount        int                        `json:"review_passed_count,omitempty"`
+	ReviewFailedCount        int                        `json:"review_failed_count,omitempty"`
+	Usage                    ModelUsage                 `json:"usage,omitempty"`
+	StartedAt                string                     `json:"started_at,omitempty"`
+	CompletedAt              string                     `json:"completed_at,omitempty"`
+	InFlightModelCall        *InFlightModelCall         `json:"in_flight_model_call,omitempty"`
+	Failures                 []EvaluationFailure        `json:"failures,omitempty"`
+	Results                  []ScenarioEvaluationResult `json:"results,omitempty"`
+	ReviewRounds             []DirectReviewRound        `json:"review_rounds,omitempty"`
+}
+
+// RuntimePreflightEvidence is a zero-model-call database check recorded beside
+// direct-model fixture evidence. It proves only the selected salon's current
+// readiness fields; it does not make fixture scenario execution a runtime test.
+type RuntimePreflightEvidence struct {
+	SalonID                  string `json:"salon_id"`
+	CheckedAt                string `json:"checked_at"`
+	GuidanceServiceCount     int    `json:"guidance_service_count"`
+	RecommendationReadyCount int    `json:"recommendation_ready_service_count"`
+	ServiceGuidanceStatus    string `json:"service_guidance_status"`
+	BookingServiceCount      int    `json:"booking_service_count"`
+	ProviderSynced           bool   `json:"provider_synced"`
+	BookingReady             bool   `json:"booking_ready"`
+	Passed                   bool   `json:"passed"`
 }
 
 type ScenarioEvaluationResult struct {
