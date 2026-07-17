@@ -401,6 +401,9 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 }
 
 func serviceSelectionScopedToPending(session Session, services []ServiceOption) bool {
+	if len(pendingConsultationServices(session, services)) > 0 {
+		return true
+	}
 	if len(pendingServiceCandidateServices(session, services)) > 0 {
 		return true
 	}

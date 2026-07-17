@@ -363,6 +363,18 @@ func (idx serviceCatalogIndex) interpret(message string, pendingCandidates bool)
 		return result
 	}
 	if categoryMatch, ok := idx.categoryMatch(normalized); ok {
+		if pendingCandidates && len(categoryMatch.Services) == 1 {
+			result.Status = serviceUnderstandingStatusSelected
+			result.Reason = serviceUnderstandingCategory
+			result.Confidence = 0.9
+			result.Candidates = categoryMatch.Services
+			result.MatchedToken = categoryMatch.Phrase
+			result.MatchedCategoryID = categoryMatch.CategoryID
+			result.MatchedCategoryName = categoryMatch.CategoryName
+			item := categoryMatch.Services[0]
+			result.Selected = &item
+			return result
+		}
 		result.Status = serviceUnderstandingStatusAmbiguous
 		result.Reason = serviceUnderstandingCategory
 		result.Confidence = 0.9
@@ -373,6 +385,21 @@ func (idx serviceCatalogIndex) interpret(message string, pendingCandidates bool)
 		return result
 	}
 	if categoryAliasMatch, ok := idx.categoryAliasMatch(normalized); ok {
+		if pendingCandidates && len(categoryAliasMatch.Services) == 1 {
+			result.Status = serviceUnderstandingStatusSelected
+			result.Reason = serviceUnderstandingCategoryAlias
+			result.Confidence = categoryAliasConfidence(categoryAliasMatch.Alias)
+			result.Candidates = categoryAliasMatch.Services
+			result.MatchedToken = categoryAliasMatch.Phrase
+			result.MatchedSource = strings.TrimSpace(categoryAliasMatch.Alias.Source)
+			result.MatchedAliasID = strings.TrimSpace(categoryAliasMatch.Alias.ID)
+			result.MatchedAlias = strings.TrimSpace(categoryAliasMatch.Alias.Alias)
+			result.MatchedCategoryID = strings.TrimSpace(categoryAliasMatch.Alias.CategoryID)
+			result.MatchedCategoryName = strings.TrimSpace(categoryAliasMatch.Alias.CategoryName)
+			item := categoryAliasMatch.Services[0]
+			result.Selected = &item
+			return result
+		}
 		result.Status = serviceUnderstandingStatusAmbiguous
 		result.Reason = serviceUnderstandingCategoryAlias
 		result.Confidence = categoryAliasConfidence(categoryAliasMatch.Alias)

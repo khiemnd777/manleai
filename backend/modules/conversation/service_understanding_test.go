@@ -122,6 +122,37 @@ func TestServiceInterpreterSelectsDistinctNoisyCatalogService(t *testing.T) {
 	}
 }
 
+func TestServiceInterpreterUsesSinglePendingCategoryCandidateWithoutGuessing(t *testing.T) {
+	services := []ServiceOption{
+		{ID: "classic_mani", Name: "Classic Manicure", CategoryID: "manicure", CategoryName: "Manicure"},
+		{ID: "gel_mani", Name: "Gel Manicure", CategoryID: "manicure", CategoryName: "Manicure"},
+		{ID: "classic_pedi", Name: "Classic Pedicure", CategoryID: "pedicure", CategoryName: "Pedicure"},
+	}
+
+	singleCategoryCandidate := Session{DialogState: DialogState{
+		Version: DialogStateVersion,
+		Phase:   DialogPhaseConsultation,
+		Consultation: &ConsultationState{
+			Status:                ConsultationStatusAwaitingSelection,
+			RecommendedServiceIDs: []string{"classic_mani", "classic_pedi"},
+		},
+	}}
+	selected := interpretServiceForSession("class manicure", singleCategoryCandidate, services, nil, nil)
+	if selected.Status != serviceUnderstandingStatusSelected || selected.Selected == nil || selected.Selected.ID != "classic_mani" {
+		t.Fatalf("single pending category candidate = %#v, want Classic Manicure", selected)
+	}
+
+	multipleCategoryCandidates := singleCategoryCandidate
+	multipleCategoryCandidates.DialogState.Consultation = &ConsultationState{
+		Status:                ConsultationStatusAwaitingSelection,
+		RecommendedServiceIDs: []string{"classic_mani", "gel_mani"},
+	}
+	ambiguous := interpretServiceForSession("manicure", multipleCategoryCandidates, services, nil, nil)
+	if ambiguous.Status != serviceUnderstandingStatusAmbiguous || ambiguous.Selected != nil || len(ambiguous.Candidates) != 2 {
+		t.Fatalf("multiple pending category candidates = %#v, want unresolved manicure choice", ambiguous)
+	}
+}
+
 func TestServiceInterpreterDoesNotSelectNoisyGenericFamilyAsSpecificService(t *testing.T) {
 	result := interpretService("Child manicure.", testManicureCatalog())
 

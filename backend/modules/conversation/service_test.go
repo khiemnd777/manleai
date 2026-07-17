@@ -860,6 +860,138 @@ func TestMessageConsultationExplicitChoiceStartsBooking(t *testing.T) {
 	}
 }
 
+func TestMessageConsultationPrioritizesPendingChoiceOverCatalogQuestion(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{
+			ID: "classic", Name: "Classic Manicure", CategoryID: "manicure", CategoryName: "Manicure", BookingReady: true,
+			AIDescription: "Natural nail care with regular polish", DurationMinutes: 30,
+			ConsultationProfile: readyComparisonProfile(ConsultationOutcomeMaintain, ConsultationSystemNatural),
+		},
+		{
+			ID: "pedi", Name: "Classic Pedicure", CategoryID: "pedicure", CategoryName: "Pedicure", BookingReady: true,
+			AIDescription: "Toenail care with regular polish", DurationMinutes: 40,
+			ConsultationProfile: readyComparisonProfile(ConsultationOutcomeMaintain, ConsultationSystemNatural),
+		},
+	}
+	interpreter := &fakeConversationActInterpreter{turn: comparisonConsultationTurn("classic", "pedi")}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(interpreter)
+	service.now = fixedNow
+
+	initial, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Help me compare Classic Manicure with Classic Pedicure.",
+	})
+	if err != nil {
+		t.Fatalf("consultation Message returned error: %v", err)
+	}
+	initialConsultation := normalizedDialogState(initial.DialogState).Consultation
+	if initialConsultation == nil || initialConsultation.Status != ConsultationStatusAwaitingSelection || len(initialConsultation.RecommendedServiceIDs) != 2 {
+		t.Fatalf("initial consultation recommendation = %#v reply %q", initialConsultation, store.lastTurn.AIMessage)
+	}
+
+	interpreter.turn = testQuestionUnderstanding(ConversationQuestionCatalog, ConversationQuestionModeList)
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "class manicure",
+	})
+	if err != nil {
+		t.Fatalf("noisy choice Message returned error: %v", err)
+	}
+	if strings.Contains(store.lastTurn.AIMessage, "Bookable services include") || !strings.Contains(store.lastTurn.AIMessage, "Would you like help booking Classic Manicure") {
+		t.Fatalf("noisy pending choice should beat catalog-question classification: %s", store.lastTurn.AIMessage)
+	}
+	consultation := normalizedDialogState(session.DialogState).Consultation
+	if consultation == nil || consultation.Status != ConsultationStatusAwaitingBooking || consultation.SelectedServiceID != "classic" {
+		t.Fatalf("consultation selection state = %#v", consultation)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Please schedule the classic manicure for me.",
+	})
+	if err != nil {
+		t.Fatalf("explicit booking Message returned error: %v", err)
+	}
+	if session.Intent != IntentBooking || session.ServiceID != "classic" || len(session.BookingSegments) != 1 {
+		t.Fatalf("booking transition = intent %s service %q segments %#v", session.Intent, session.ServiceID, session.BookingSegments)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "What day") || strings.Contains(store.lastTurn.AIMessage, "Would you like help booking") || strings.Contains(store.lastTurn.AIMessage, "Bookable services include") {
+		t.Fatalf("explicit booking should continue to the missing date: %s", store.lastTurn.AIMessage)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("booking tools ran before date and review: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
+func TestMessageConsultationExactBookingChoiceOverridesClearedRecommendation(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services[0].ConsultationProfile = readyComparisonProfile(ConsultationOutcomeMaintain, ConsultationSystemNatural)
+	store.session.Intent = IntentConsultation
+	store.session.DialogState = DialogState{
+		Version: DialogStateVersion,
+		Phase:   DialogPhaseConsultation,
+		Consultation: &ConsultationState{
+			Status: ConsultationStatusCollectingNeeds,
+			Needs:  ConsultationNeedProfile{CurrentSystem: ConsultationSystemNatural},
+		},
+	}
+	interpreter := &fakeConversationActInterpreter{turn: testQuestionUnderstanding(ConversationQuestionCatalog, ConversationQuestionModeList)}
+	service := NewService(store, &fakeBookingTool{})
+	service.SetTurnInterpreter(interpreter)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Could you schedule Classic Manicure for me?",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.Intent != IntentBooking || session.ServiceID != "service_1" || len(session.BookingSegments) != 1 {
+		t.Fatalf("explicit catalog booking = intent %s service %q segments %#v reply %q customer metadata %#v", session.Intent, session.ServiceID, session.BookingSegments, store.lastTurn.AIMessage, store.lastTurn.CustomerMetadata)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "What day") || strings.Contains(store.lastTurn.AIMessage, "Bookable services include") {
+		t.Fatalf("explicit catalog booking should continue to the date: %s", store.lastTurn.AIMessage)
+	}
+	consultation := normalizedDialogState(session.DialogState).Consultation
+	if consultation == nil || consultation.Status != ConsultationStatusCompleted || consultation.ExitReason != "caller_requested_booking" {
+		t.Fatalf("consultation was not closed for explicit booking: %#v", consultation)
+	}
+}
+
+func TestMessageConsultationExplicitMultiServiceBookingDoesNotCollapseToFirstService(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services[0].ConsultationProfile = readyComparisonProfile(ConsultationOutcomeMaintain, ConsultationSystemNatural)
+	store.services = append(store.services, ServiceOption{
+		ID: "service_gel", Name: "Gel Manicure", DurationMinutes: 45, BookingReady: true,
+		ConsultationProfile: readyComparisonProfile(ConsultationOutcomeColorRefresh, ConsultationSystemGel),
+	})
+	store.session.Intent = IntentConsultation
+	store.session.DialogState = DialogState{
+		Version: DialogStateVersion,
+		Phase:   DialogPhaseConsultation,
+		Consultation: &ConsultationState{
+			Status: ConsultationStatusCollectingNeeds,
+		},
+	}
+	interpreter := &fakeConversationActInterpreter{turn: testQuestionUnderstanding(ConversationQuestionCatalog, ConversationQuestionModeList)}
+	service := NewService(store, &fakeBookingTool{})
+	service.SetTurnInterpreter(interpreter)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Please schedule Classic Manicure and Gel Manicure.",
+	})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if session.ServiceID != "" || len(session.BookingSegments) != 0 || session.Intent != IntentConsultation {
+		t.Fatalf("multi-service request collapsed into one service: intent %s service %q segments %#v", session.Intent, session.ServiceID, session.BookingSegments)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Classic Manicure") || !strings.Contains(store.lastTurn.AIMessage, "Gel Manicure") {
+		t.Fatalf("multi-service request should remain unresolved with grounded choices: %s", store.lastTurn.AIMessage)
+	}
+}
+
 func TestServiceConsultationDoesNotOverrideAppointmentActionOrPartyPlan(t *testing.T) {
 	store := newFakeConversationStore()
 	service := NewService(store, &fakeBookingTool{})
@@ -4647,6 +4779,51 @@ func TestMessageSelectsExactOfferedClockOnFastLane(t *testing.T) {
 	}
 	if !fastPath {
 		t.Fatalf("timings = %#v, want state-scoped fast path", timings)
+	}
+}
+
+func TestMessageSelectsCompactAnyoneSlotWithoutTechnicianChangeAcknowledgement(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "service_1"
+	store.session.ServiceName = "Classic Manicure"
+	store.session.RequestedDate = "2026-07-02"
+	store.session.StaffSelectionMode = booking.StaffSelectionAnyone
+	store.session.BookingSegments = []booking.BookingSegmentRequest{{
+		ServiceID: "service_1", StaffSelectionMode: booking.StaffSelectionAnyone,
+	}}
+	start := time.Date(2026, 7, 2, 17, 0, 0, 0, time.UTC)
+	store.session.OfferedSlots = []OfferedSlot{{
+		AvailabilityQuoteID: "00000000-0000-0000-0000-000000000003",
+		SlotFingerprint:     fmt.Sprintf("%064x", 7),
+		StartTime:           start,
+		EndTime:             start.Add(45 * time.Minute),
+		StaffID:             "staff_1",
+		StaffName:           "Mai Nguyen",
+		StaffSelectionMode:  booking.StaffSelectionAnyone,
+		Segments: []OfferedSlotSegment{{
+			ServiceID: "service_1", ServiceName: "Classic Manicure", StaffID: "staff_1", StaffName: "Mai Nguyen",
+			StaffSelectionMode: booking.StaffSelectionAnyone, DurationMinutes: 45,
+		}},
+	}}
+	interpreter := &immediateTimeoutTurnInterpreter{}
+	service := NewService(store, &fakeBookingTool{})
+	service.SetTurnInterpreter(interpreter)
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{Message: "12:00PM"})
+	if err != nil {
+		t.Fatalf("Message returned error: %v", err)
+	}
+	if interpreter.calls != 0 {
+		t.Fatalf("compact offered clock invoked semantic interpreter %d times", interpreter.calls)
+	}
+	if session.RequestedStartTime == nil || !session.RequestedStartTime.Equal(start) || session.StaffSelectionMode != booking.StaffSelectionAnyone {
+		t.Fatalf("selected anyone slot = time %v mode %q", session.RequestedStartTime, session.StaffSelectionMode)
+	}
+	reply := store.lastTurn.AIMessage
+	if !strings.Contains(reply, "What name") || strings.Contains(reply, "changed the technician") || strings.Contains(reply, "Mai Nguyen") {
+		t.Fatalf("anyone slot reply exposed an internal assignment: %s", reply)
 	}
 }
 

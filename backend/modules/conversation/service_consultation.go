@@ -154,7 +154,17 @@ func (s *Service) handleServiceConsultation(ctx context.Context, ownerUserID str
 		}
 		return s.saveConsultationTurn(ctx, ownerUserID, session, next, message, eventKey, "I could not verify the salon's service guidance just now. Please try once more, or I can ask the owner to help.", "consultation_interpreter_unavailable", consultation, services, staff, cfg)
 	}
-	if active && turnHasQuestionSubject(turnUnderstanding, ConversationQuestionCatalog) {
+	selected := consultationSelectedService(understanding, consultation)
+	explicitCatalogBooking := active && understanding.Status == serviceUnderstandingStatusSelected && understanding.Selected != nil && len(understanding.Candidates) == 1 &&
+		(hasBookingVerbSignal(message) || turnUnderstanding.Consultation.BookingRequested)
+	if explicitCatalogBooking {
+		// An explicit booking request for one catalog-resolved service owns the
+		// workflow transition even when an auxiliary model question or stale
+		// consultation candidate snapshot says to list the catalog again.
+		applyExtraction(&next, message, services, nil, nil, staff, timezoneLocation(timezoneFromConfig(cfg)), s.now)
+		return s.startBookingFromConsultation(ctx, ownerUserID, session, next, message, eventKey, *understanding.Selected, consultation, services, staff, cfg)
+	}
+	if active && selected == nil && turnHasQuestionSubject(turnUnderstanding, ConversationQuestionCatalog) {
 		consultation.Status = ConsultationStatusCollectingNeeds
 		consultation.CandidateServiceIDs = nil
 		consultation.RecommendedServiceIDs = nil
@@ -175,7 +185,6 @@ func (s *Service) handleServiceConsultation(ctx context.Context, ownerUserID str
 		return s.saveConsultationTurn(ctx, ownerUserID, session, next, message, eventKey, reply, "consultation_service_menu", consultation, services, staff, cfg)
 	}
 
-	selected := consultationSelectedService(understanding, consultation)
 	if active && hasOperationalBookingProgress(session) && !turnHasMutations(turnUnderstanding) &&
 		containsAnyLoosePhrase(normalizeLooseText(message), []string{"continue my booking", "back to my booking", "original booking"}) {
 		consultation.Status = ConsultationStatusCompleted

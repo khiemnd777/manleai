@@ -1991,13 +1991,18 @@ func prependConversationMutationAcknowledgement(turn *TurnRecord, result convers
 	if turn == nil || strings.TrimSpace(turn.AIMessage) == "" {
 		return
 	}
-	staffChanged := strings.TrimSpace(turn.Session.StaffID) != strings.TrimSpace(turn.Update.StaffID)
+	beforeStaffMode := staffSelectionModeForSession(turn.Session)
+	afterStaffMode := staffSelectionModeForSession(session)
+	staffPreferenceChanged := beforeStaffMode != afterStaffMode
+	specificStaffChanged := afterStaffMode == booking.StaffSelectionSpecific &&
+		strings.TrimSpace(turn.Session.StaffID) != strings.TrimSpace(turn.Update.StaffID)
+	staffChanged := staffPreferenceChanged || specificStaffChanged
 	if !result.Changed && !staffChanged {
 		return
 	}
 	acknowledgement := ""
 	if staffChanged || result.Act.Entity == ConversationEntityStaff {
-		if strings.TrimSpace(turn.Update.StaffID) == "" {
+		if afterStaffMode == booking.StaffSelectionAnyone {
 			acknowledgement = "Okay, I'll use any available technician."
 		} else if name := strings.TrimSpace(session.StaffName); name != "" {
 			acknowledgement = "Okay, I changed the technician to " + name + "."
