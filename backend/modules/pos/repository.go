@@ -1650,6 +1650,58 @@ func (r *Repository) UpdateService(ctx context.Context, salonID string, ownerUse
 	return r.getServiceForOwner(ctx, salonID, ownerUserID, serviceID)
 }
 
+func (r *Repository) UpdateServiceOwnerControls(ctx context.Context, salonID string, ownerUserID string, serviceID string, input ServiceOwnerControlsMutation) (*Service, error) {
+	current, err := r.getServiceForOwner(ctx, salonID, ownerUserID, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	if current.ArchivedAt != nil {
+		return nil, ErrValidation
+	}
+	if strings.TrimSpace(input.ServiceCategoryID) != "" {
+		if err := r.ensureActiveCategory(ctx, salonID, ownerUserID, input.ServiceCategoryID); err != nil {
+			return nil, err
+		}
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE services
+		SET ai_description = NULLIF($1, ''),
+		    service_category_id = NULLIF($2, '')::uuid,
+		    service_category_source = CASE WHEN NULLIF($2, '') IS NULL THEN 'unassigned' ELSE 'manual' END,
+		    service_category_confidence = CASE WHEN NULLIF($2, '') IS NULL THEN NULL ELSE 1.000 END,
+		    service_category_reviewed_by = CASE WHEN NULLIF($2, '') IS NULL THEN NULL ELSE $5::uuid END,
+		    service_category_reviewed_at = CASE WHEN NULLIF($2, '') IS NULL THEN NULL ELSE now() END,
+		    updated_at = now()
+		WHERE id = $3
+		  AND salon_id = $4
+		  AND archived_at IS NULL
+	`, input.AIDescription, input.ServiceCategoryID, serviceID, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if affected == 0 {
+		return nil, ErrValidation
+	}
+	if input.ConsultationProfile != nil {
+		if err := UpsertServiceConsultationProfileTx(ctx, tx, salonID, serviceID, ownerUserID, *input.ConsultationProfile); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return r.getServiceForOwner(ctx, salonID, ownerUserID, serviceID)
+}
+
 func (r *Repository) ArchiveService(ctx context.Context, salonID string, ownerUserID string, serviceID string) (*Service, error) {
 	current, err := r.getServiceForOwner(ctx, salonID, ownerUserID, serviceID)
 	if err != nil {
@@ -2338,6 +2390,10 @@ func (r *Repository) listProviderSwitchCustomerCandidates(ctx context.Context, s
 	return scanProviderSwitchCandidateRows(rows)
 }
 
+func (r *Repository) GetServiceForOwner(ctx context.Context, salonID string, ownerUserID string, serviceID string) (*Service, error) {
+	return r.getServiceForOwner(ctx, salonID, ownerUserID, serviceID)
+}
+
 func (r *Repository) getServiceForOwner(ctx context.Context, salonID string, ownerUserID string, serviceID string) (*Service, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT svc.id::text, svc.salon_id::text, svc.pos_provider, COALESCE(svc.pos_service_id, ''), COALESCE(svc.pos_service_version, 0),
@@ -2374,6 +2430,10 @@ func (r *Repository) getServiceForOwner(ctx context.Context, salonID string, own
 		  AND salon.owner_user_id = $3
 	`, serviceID, salonID, ownerUserID)
 	return scanService(row)
+}
+
+func (r *Repository) GetStaffForOwner(ctx context.Context, salonID string, ownerUserID string, staffID string) (*StaffMember, error) {
+	return r.getStaffForOwner(ctx, salonID, ownerUserID, staffID)
 }
 
 func (r *Repository) getStaffForOwner(ctx context.Context, salonID string, ownerUserID string, staffID string) (*StaffMember, error) {

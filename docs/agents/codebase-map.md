@@ -150,7 +150,7 @@ triage keyword table.
 | --- | --- | --- | --- |
 | Auth and sessions | `backend/modules/auth/*`, `backend/internal/middleware/auth.go` | Login, refresh, bootstrap owner, JWT auth, user/salon claims | `backend/modules/auth/service_test.go` |
 | Salon profile/settings | `backend/modules/salon/*` | Salon CRUD, settings, AI tone, fail-closed salon-wide consultation toggle validation, public catalog settings, imported business hours | `backend/modules/salon/service_test.go` |
-| POS provider-neutral layer | `backend/modules/pos/*` | `POSProvider` contracts, typed provider-write outcome/phase errors, monotonic location/generation-fenced full snapshots, optional appointment listing capability, POS entity links, service/staff/customer catalog, service consultation profile persistence/validation, sync jobs/logs/errors, provider switching, salon categories/aliases, and materialization from the active database-owned nail taxonomy release | `backend/modules/pos/service_test.go`, `backend/modules/pos/sync_processor_test.go`, `backend/modules/pos/repository_integration_test.go`, `backend/modules/pos/repository_taxonomy_integration_test.go` |
+| POS provider-neutral layer | `backend/modules/pos/*` | `POSProvider` contracts, typed provider-write outcome/phase errors, derived service/staff field authority and provider-managed write guards, atomic service owner-controls, monotonic location/generation-fenced full snapshots, optional appointment listing capability, POS entity links, service/staff/customer catalog, service consultation profile persistence/validation, sync jobs/logs/errors, provider switching, salon categories/aliases, and materialization from the active database-owned nail taxonomy release | `backend/modules/pos/service_test.go`, `backend/modules/pos/handler_test.go`, `backend/modules/pos/sync_processor_test.go`, `backend/modules/pos/repository_integration_test.go`, `backend/modules/pos/repository_taxonomy_integration_test.go` |
 | Square adapter | `backend/modules/pos_square/*` | Square OAuth, locations, atomic location-scoped generation-fenced sync with fail-closed freshness, Catalog `available_for_booking`/duration eligibility, active Team plus bookable Booking Profile intersection, Square payloads, salon-local availability ranges, dashboard test create/cancel safe-retry forwarding, provider-fenced booking-list pagination with cross-location rejection, token refresh, provider write outcome/error mapping, signed booking-webhook ingestion with root/nested location consistency, exact tenant routing across recoverable connection states, claim-token-fenced event processing and scheduled calendar repair | `backend/modules/pos_square/*_test.go` |
 | Booking | `backend/modules/booking/*` | Active-provider-scoped new booking/availability resolution, end-to-end location/generation provider fences, owner-scoped operation-key replay before mutable validation, origin-location-fenced historical appointment actions, durable operation claims/logical fingerprints/leases, phase-aware idempotent lease recovery (`not_started` safe versus `in_flight` unknown unless exact calendar truth converges), single-use availability quotes, bounded reference-preserving quote retention cleanup, mapping- and target-validated safe-retry lineage/supersession, confirmed appointments, fallback/provider pending, reconciliation task/candidate/resolve APIs, authoritative backend retry policy, advisory-first direct/fallback/lease convergence with exact canonical/raw provider mirror proof, provider-fenced zero-write-stale calendar imports, monotonic calendar mirror writes, raw-identity-gated equal-version mapping enrichment, reschedule, cancel, POS idempotency, POS error/outbox writes | `backend/modules/booking/service_test.go`, `backend/modules/booking/quote_cleanup_processor_test.go`, `backend/modules/booking/repository_integration_test.go` |
 | Customers | `backend/modules/customer/*` | Canonical customer CRUD, archive, search, activity read model, provider customer lookup facade | `backend/modules/customer/service_test.go` |
@@ -474,8 +474,8 @@ Conversation source-of-truth routing is mandatory:
 | `/dashboard/appointments` | `frontend/app/dashboard/appointments/page.tsx` | `frontend/features/dashboard/appointments-dashboard.tsx` | availability quotes, payload-bound operations, exact safe retries, booking attempts, paginated reconciliation tasks/exact candidates/resolve, reschedule, cancel |
 | `/dashboard/calls` | `frontend/app/dashboard/calls/page.tsx` | `frontend/features/dashboard/calls-dashboard.tsx` | sessions, typed consultation state/revisions, paginated full-call realtime events, party requests, owner corrections |
 | `/dashboard/customers` | `frontend/app/dashboard/customers/page.tsx` | `frontend/features/dashboard/customers-dashboard.tsx` | customer CRUD, archive, search |
-| `/dashboard/services` | `frontend/app/dashboard/services/page.tsx` | `frontend/features/dashboard/services-dashboard.tsx` | services, nested consultation profiles, categories, category aliases, service aliases, AI bookable |
-| `/dashboard/staff` | `frontend/app/dashboard/staff/page.tsx` | `frontend/features/dashboard/staff-dashboard.tsx` | staff CRUD, archive, AI bookable |
+| `/dashboard/services` | `frontend/app/dashboard/services/page.tsx` | `frontend/features/dashboard/services-dashboard.tsx` | services, field-authority-aware operational details, atomic ManleAI owner controls, nested consultation profiles, categories, category aliases, service aliases, AI bookable |
+| `/dashboard/staff` | `frontend/app/dashboard/staff/page.tsx` | `frontend/features/dashboard/staff-dashboard.tsx` | field-authority-aware staff details/CRUD, local archive, AI bookable |
 | `/dashboard/settings` | `frontend/app/dashboard/settings/page.tsx` | `frontend/features/dashboard/settings-dashboard.tsx` | salon profile, settings, AI tone, consultation toggle/profile coverage, business hours, public catalog, config transfer |
 | `/dashboard/training` | `frontend/app/dashboard/training/page.tsx` | `frontend/features/dashboard/training-dashboard.tsx` | knowledge items, owner corrections, evaluation |
 | `/dashboard/integrations` | `frontend/app/dashboard/integrations/page.tsx` | `frontend/features/integrations/square-integration.tsx` | Square OAuth/status/sync/quoted test booking with operation-matched safe-retry lineage, write-only webhook verifier config, provider config, provider switching |
@@ -512,6 +512,8 @@ detail rather than part of the event title.
 - Deferred loading wrapper: `frontend/components/layout/deferred-page.tsx`.
 - UI primitives: `frontend/components/ui/*`.
 - Booking display labels: `frontend/features/dashboard/booking-display.ts`.
+- Shared service/staff field-authority presentation and conservative edit gates:
+  `frontend/features/dashboard/pos-field-authority.tsx`.
 - Legacy service/staff controls still present:
   `frontend/features/dashboard/service-staff-controls.tsx`.
 
@@ -724,7 +726,10 @@ detail rather than part of the event title.
   `service_categories`, `service_category_aliases`, `service_aliases`,
   `service_taxonomy_releases`, `service_taxonomy_categories`,
   `service_taxonomy_category_aliases`, `service_taxonomy_service_concepts`,
-  `service_taxonomy_service_aliases`, and `pos_entity_links`.
+  `service_taxonomy_service_aliases`, and `pos_entity_links`; field authority is
+  derived by `backend/modules/pos/service.go` from canonical/provider identity
+  plus adapter capabilities and is consumed by
+  `frontend/features/dashboard/pos-field-authority.tsx`.
 - Tests: `backend/modules/pos/service_test.go`,
   `backend/modules/customer/service_test.go`.
 - Skill/subagent: `salon-dashboard-ui`, `salon-ops-workflow`,

@@ -37,6 +37,27 @@ owners, but it must not be used for POS availability or POS booking. `AI
 bookable` can only be enabled for an active canonical record with a valid link
 for the active POS provider.
 
+## Field-Level Operational Authority
+
+Record origin, sync state, booking eligibility, and write authority are separate
+contracts. Service/staff APIs expose derived `field_authority` metadata with:
+
+- `operational_source`: `manleai | provider`
+- `provider` and `provider_label` when an adapter participates
+- `operational_write_mode`: `local | provider_read_only | provider_sync`
+
+The provider-neutral POS service derives this metadata from the canonical
+record's provider identity/link and the adapter's declared capabilities. A
+provider-backed record is `provider_read_only` when the adapter does not support
+the corresponding upsert operation. `sync_failed` and `unmapped` remain
+provider-managed error states; they must not unlock local operational edits.
+
+For services, ManleAI-managed owner controls use a separate atomic mutation so
+category and consultation data can be saved without resubmitting stale
+provider-managed name, description, duration, price, or active values. Direct
+operational writes to a `provider_read_only` service or staff record return a
+conflict instead of silently creating local/provider drift.
+
 The booking service resolves every new-booking and availability service/staff
 reference with an explicit provider scope obtained from
 `salons.active_pos_provider`. Repository lookups enforce the same provider

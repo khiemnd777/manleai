@@ -12,13 +12,17 @@ import (
 
 const switchAdapterMissingReason = "The requested POS provider adapter is not installed in this deployment."
 
-var ErrValidation = errors.New("pos validation failed")
+var (
+	ErrValidation            = errors.New("pos validation failed")
+	ErrProviderManagedFields = errors.New("operational fields are managed by the active pos provider")
+)
 
 type Store interface {
 	EnsureSalonOwner(ctx context.Context, salonID string, ownerUserID string) error
 	GetActiveProvider(ctx context.Context, salonID string, ownerUserID string) (string, error)
 	GetConnection(ctx context.Context, salonID string, provider string) (*Connection, error)
 	ListServices(ctx context.Context, salonID string, provider string) ([]Service, error)
+	GetServiceForOwner(ctx context.Context, salonID string, ownerUserID string, serviceID string) (*Service, error)
 	ListServiceCategories(ctx context.Context, salonID string, ownerUserID string) ([]ServiceCategory, error)
 	CreateServiceCategory(ctx context.Context, salonID string, ownerUserID string, input ServiceCategoryMutation) (*ServiceCategory, error)
 	UpdateServiceCategory(ctx context.Context, salonID string, ownerUserID string, categoryID string, input ServiceCategoryMutation) (*ServiceCategory, error)
@@ -31,7 +35,9 @@ type Store interface {
 	ListStaff(ctx context.Context, salonID string, provider string) ([]StaffMember, error)
 	CreateService(ctx context.Context, salonID string, ownerUserID string, provider string, input ServiceMutation) (*Service, error)
 	UpdateService(ctx context.Context, salonID string, ownerUserID string, serviceID string, input ServiceMutation) (*Service, error)
+	UpdateServiceOwnerControls(ctx context.Context, salonID string, ownerUserID string, serviceID string, input ServiceOwnerControlsMutation) (*Service, error)
 	ArchiveService(ctx context.Context, salonID string, ownerUserID string, serviceID string) (*Service, error)
+	GetStaffForOwner(ctx context.Context, salonID string, ownerUserID string, staffID string) (*StaffMember, error)
 	CreateStaff(ctx context.Context, salonID string, ownerUserID string, provider string, input StaffMutation) (*StaffMember, error)
 	UpdateStaff(ctx context.Context, salonID string, ownerUserID string, staffID string, input StaffMutation) (*StaffMember, error)
 	ArchiveStaff(ctx context.Context, salonID string, ownerUserID string, staffID string) (*StaffMember, error)
@@ -72,7 +78,14 @@ func (s *ServiceLayer) Services(ctx context.Context, salonID string, ownerUserID
 	if err != nil {
 		return nil, err
 	}
-	return s.repo.ListServices(ctx, salonID, provider)
+	items, err := s.repo.ListServices(ctx, salonID, provider)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		s.decorateService(&items[i])
+	}
+	return items, nil
 }
 
 func (s *ServiceLayer) ServiceCategories(ctx context.Context, salonID string, ownerUserID string) ([]ServiceCategory, error) {
@@ -140,7 +153,11 @@ func (s *ServiceLayer) AssignServiceCategory(ctx context.Context, salonID string
 	if serviceID == "" {
 		return nil, ErrValidation
 	}
-	return s.repo.AssignServiceCategory(ctx, salonID, ownerUserID, serviceID, strings.TrimSpace(req.ServiceCategoryID))
+	item, err := s.repo.AssignServiceCategory(ctx, salonID, ownerUserID, serviceID, strings.TrimSpace(req.ServiceCategoryID))
+	if err != nil {
+		return nil, err
+	}
+	return s.decorateService(item), nil
 }
 
 func (s *ServiceLayer) RefreshServiceCategorySuggestions(ctx context.Context, salonID string, ownerUserID string) (*ServiceCategorySuggestionRefresh, error) {
@@ -152,7 +169,14 @@ func (s *ServiceLayer) Staff(ctx context.Context, salonID string, ownerUserID st
 	if err != nil {
 		return nil, err
 	}
-	return s.repo.ListStaff(ctx, salonID, provider)
+	items, err := s.repo.ListStaff(ctx, salonID, provider)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		s.decorateStaff(&items[i])
+	}
+	return items, nil
 }
 
 func (s *ServiceLayer) CreateService(ctx context.Context, salonID string, ownerUserID string, req ServiceWriteRequest) (*Service, error) {
@@ -174,13 +198,20 @@ func (s *ServiceLayer) CreateService(ctx context.Context, salonID string, ownerU
 		item.SyncStatus = SyncStatusSyncing
 		item.SyncError = ""
 	}
-	return item, nil
+	return s.decorateService(item), nil
 }
 
 func (s *ServiceLayer) UpdateService(ctx context.Context, salonID string, ownerUserID string, serviceID string, req ServiceWriteRequest) (*Service, error) {
 	serviceID = strings.TrimSpace(serviceID)
 	if serviceID == "" {
 		return nil, ErrValidation
+	}
+	current, err := s.repo.GetServiceForOwner(ctx, salonID, ownerUserID, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	if s.serviceFieldAuthority(current).OperationalWriteMode == OperationalWriteModeProviderReadOnly {
+		return nil, ErrProviderManagedFields
 	}
 	input, err := normalizeServiceWriteRequest(req, false)
 	if err != nil {
@@ -196,7 +227,23 @@ func (s *ServiceLayer) UpdateService(ctx context.Context, salonID string, ownerU
 		item.SyncStatus = SyncStatusSyncing
 		item.SyncError = ""
 	}
-	return item, nil
+	return s.decorateService(item), nil
+}
+
+func (s *ServiceLayer) UpdateServiceOwnerControls(ctx context.Context, salonID string, ownerUserID string, serviceID string, req ServiceOwnerControlsWriteRequest) (*Service, error) {
+	serviceID = strings.TrimSpace(serviceID)
+	if serviceID == "" {
+		return nil, ErrValidation
+	}
+	input, err := normalizeServiceOwnerControlsWriteRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	item, err := s.repo.UpdateServiceOwnerControls(ctx, salonID, ownerUserID, serviceID, input)
+	if err != nil {
+		return nil, err
+	}
+	return s.decorateService(item), nil
 }
 
 func (s *ServiceLayer) ArchiveService(ctx context.Context, salonID string, ownerUserID string, serviceID string) (*Service, error) {
@@ -214,7 +261,7 @@ func (s *ServiceLayer) ArchiveService(ctx context.Context, salonID string, owner
 		item.SyncStatus = SyncStatusSyncing
 		item.SyncError = ""
 	}
-	return item, nil
+	return s.decorateService(item), nil
 }
 
 func (s *ServiceLayer) CreateStaff(ctx context.Context, salonID string, ownerUserID string, req StaffWriteRequest) (*StaffMember, error) {
@@ -236,13 +283,20 @@ func (s *ServiceLayer) CreateStaff(ctx context.Context, salonID string, ownerUse
 		item.SyncStatus = SyncStatusSyncing
 		item.SyncError = ""
 	}
-	return item, nil
+	return s.decorateStaff(item), nil
 }
 
 func (s *ServiceLayer) UpdateStaff(ctx context.Context, salonID string, ownerUserID string, staffID string, req StaffWriteRequest) (*StaffMember, error) {
 	staffID = strings.TrimSpace(staffID)
 	if staffID == "" {
 		return nil, ErrValidation
+	}
+	current, err := s.repo.GetStaffForOwner(ctx, salonID, ownerUserID, staffID)
+	if err != nil {
+		return nil, err
+	}
+	if s.staffFieldAuthority(current).OperationalWriteMode == OperationalWriteModeProviderReadOnly {
+		return nil, ErrProviderManagedFields
 	}
 	input, err := normalizeStaffWriteRequest(req, false)
 	if err != nil {
@@ -258,7 +312,7 @@ func (s *ServiceLayer) UpdateStaff(ctx context.Context, salonID string, ownerUse
 		item.SyncStatus = SyncStatusSyncing
 		item.SyncError = ""
 	}
-	return item, nil
+	return s.decorateStaff(item), nil
 }
 
 func (s *ServiceLayer) ArchiveStaff(ctx context.Context, salonID string, ownerUserID string, staffID string) (*StaffMember, error) {
@@ -276,7 +330,7 @@ func (s *ServiceLayer) ArchiveStaff(ctx context.Context, salonID string, ownerUs
 		item.SyncStatus = SyncStatusSyncing
 		item.SyncError = ""
 	}
-	return item, nil
+	return s.decorateStaff(item), nil
 }
 
 func (s *ServiceLayer) UpdateServiceAIBookable(ctx context.Context, salonID string, ownerUserID string, serviceID string, aiBookable bool) (*Service, error) {
@@ -284,7 +338,11 @@ func (s *ServiceLayer) UpdateServiceAIBookable(ctx context.Context, salonID stri
 	if serviceID == "" {
 		return nil, ErrValidation
 	}
-	return s.repo.UpdateServiceAIBookable(ctx, salonID, ownerUserID, serviceID, aiBookable)
+	item, err := s.repo.UpdateServiceAIBookable(ctx, salonID, ownerUserID, serviceID, aiBookable)
+	if err != nil {
+		return nil, err
+	}
+	return s.decorateService(item), nil
 }
 
 func (s *ServiceLayer) UpdateStaffAIBookable(ctx context.Context, salonID string, ownerUserID string, staffID string, aiBookable bool) (*StaffMember, error) {
@@ -292,7 +350,11 @@ func (s *ServiceLayer) UpdateStaffAIBookable(ctx context.Context, salonID string
 	if staffID == "" {
 		return nil, ErrValidation
 	}
-	return s.repo.UpdateStaffAIBookable(ctx, salonID, ownerUserID, staffID, aiBookable)
+	item, err := s.repo.UpdateStaffAIBookable(ctx, salonID, ownerUserID, staffID, aiBookable)
+	if err != nil {
+		return nil, err
+	}
+	return s.decorateStaff(item), nil
 }
 
 func (s *ServiceLayer) ProviderSwitchReadiness(ctx context.Context, salonID string, ownerUserID string) (*ProviderSwitchReadiness, error) {
@@ -900,6 +962,22 @@ func normalizeServiceWriteRequest(req ServiceWriteRequest, defaultActive bool) (
 	}, nil
 }
 
+func normalizeServiceOwnerControlsWriteRequest(req ServiceOwnerControlsWriteRequest) (ServiceOwnerControlsMutation, error) {
+	aiDescription := strings.TrimSpace(req.AIDescription)
+	if len([]rune(aiDescription)) > 320 {
+		return ServiceOwnerControlsMutation{}, ErrValidation
+	}
+	consultationProfile, err := NormalizeConsultationProfileWriteRequest(req.ConsultationProfile)
+	if err != nil {
+		return ServiceOwnerControlsMutation{}, err
+	}
+	return ServiceOwnerControlsMutation{
+		AIDescription:       aiDescription,
+		ServiceCategoryID:   strings.TrimSpace(req.ServiceCategoryID),
+		ConsultationProfile: consultationProfile,
+	}, nil
+}
+
 // NormalizeConsultationProfileWriteRequest is the provider-neutral validation
 // boundary shared by direct service edits and portable configuration imports.
 func NormalizeConsultationProfileWriteRequest(req *ServiceConsultationProfileWriteRequest) (*ServiceConsultationProfileMutation, error) {
@@ -1202,6 +1280,74 @@ func providerCapabilities(provider NamedProvider) ProviderCapabilities {
 		return ProviderCapabilities{}
 	}
 	return capabilitiesProvider.Capabilities()
+}
+
+func (s *ServiceLayer) decorateService(item *Service) *Service {
+	if item != nil {
+		authority := s.serviceFieldAuthority(item)
+		item.FieldAuthority = &authority
+	}
+	return item
+}
+
+func (s *ServiceLayer) decorateStaff(item *StaffMember) *StaffMember {
+	if item != nil {
+		authority := s.staffFieldAuthority(item)
+		item.FieldAuthority = &authority
+	}
+	return item
+}
+
+func (s *ServiceLayer) serviceFieldAuthority(item *Service) EntityFieldAuthority {
+	if item == nil {
+		return EntityFieldAuthority{OperationalSource: FieldAuthoritySourceManleAI, OperationalWriteMode: OperationalWriteModeLocal}
+	}
+	provider := recordProvider(item.POSProvider)
+	providerBacked := item.Source == EntitySourceImported || strings.TrimSpace(item.POSServiceID) != "" || item.POSLinked
+	return s.entityFieldAuthority(provider, providerBacked, SyncOperationUpsertService)
+}
+
+func (s *ServiceLayer) staffFieldAuthority(item *StaffMember) EntityFieldAuthority {
+	if item == nil {
+		return EntityFieldAuthority{OperationalSource: FieldAuthoritySourceManleAI, OperationalWriteMode: OperationalWriteModeLocal}
+	}
+	provider := recordProvider(item.POSProvider)
+	providerBacked := item.Source == EntitySourceImported || strings.TrimSpace(item.POSStaffID) != "" || item.POSLinked
+	return s.entityFieldAuthority(provider, providerBacked, SyncOperationUpsertStaff)
+}
+
+func (s *ServiceLayer) entityFieldAuthority(provider string, providerBacked bool, operation string) EntityFieldAuthority {
+	writeSupported := providerSupportsOperation(s.providers[provider], operation)
+	if !providerBacked {
+		authority := EntityFieldAuthority{
+			OperationalSource:    FieldAuthoritySourceManleAI,
+			OperationalWriteMode: OperationalWriteModeLocal,
+		}
+		if writeSupported {
+			authority.Provider = provider
+			authority.ProviderLabel = providerLabel(provider)
+			authority.OperationalWriteMode = OperationalWriteModeProviderSync
+		}
+		return authority
+	}
+	mode := OperationalWriteModeProviderReadOnly
+	if writeSupported {
+		mode = OperationalWriteModeProviderSync
+	}
+	return EntityFieldAuthority{
+		OperationalSource:    FieldAuthoritySourceProvider,
+		Provider:             provider,
+		ProviderLabel:        providerLabel(provider),
+		OperationalWriteMode: mode,
+	}
+}
+
+func recordProvider(provider string) string {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return ProviderSquare
+	}
+	return provider
 }
 
 func providerLabel(provider string) string {

@@ -8,6 +8,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  authorityLabel,
+  FieldAuthorityBadge,
+  FieldAuthorityPanel,
+  operationalFieldsEditable,
+  providerManagedReadOnly
+} from "@/features/dashboard/pos-field-authority";
 import { apiRequest } from "@/lib/api/client";
 import type {
   POSConnection,
@@ -218,18 +225,29 @@ export function ServicesDashboard() {
     setError("");
     setSuccess("");
     try {
-      const body = JSON.stringify(servicePayload(form));
+      const ownerControlsOnly = Boolean(editingService && !operationalFieldsEditable(editingService.field_authority));
       const response = editingService?.id
-        ? await apiRequest<ServiceResponse>(`/api/salons/${salon.id}/services/${editingService.id}`, {
-            method: "PUT",
-            body
-          })
+        ? await apiRequest<ServiceResponse>(
+            ownerControlsOnly
+              ? `/api/salons/${salon.id}/services/${editingService.id}/owner-controls`
+              : `/api/salons/${salon.id}/services/${editingService.id}`,
+            {
+              method: ownerControlsOnly ? "PATCH" : "PUT",
+              body: JSON.stringify(ownerControlsOnly ? serviceOwnerControlsPayload(form) : servicePayload(form))
+            }
+          )
         : await apiRequest<ServiceResponse>(`/api/salons/${salon.id}/services`, {
             method: "POST",
-            body
+            body: JSON.stringify(servicePayload(form))
           });
       setServices((current) => upsertService(current, response.service));
-      setSuccess(editingService ? "Service saved." : "Service created. Local-only services are not booking-ready until linked to Square Appointments.");
+      setSuccess(
+        editingService
+          ? ownerControlsOnly
+            ? "ManleAI controls saved. Provider-managed details were unchanged."
+            : "Service saved."
+          : "Service created. Local-only services are not booking-ready until linked to Square Appointments."
+      );
       setEditingService(response.service);
       setForm(serviceToForm(response.service));
       await load({ silent: true });
@@ -439,7 +457,7 @@ export function ServicesDashboard() {
 
   async function archiveService(service: POSService) {
     if (!salon || !service.id || service.archived_at) return;
-    if (!window.confirm(`Archive ${service.name}? This will disable AI booking for this service.`)) return;
+    if (!window.confirm(`Archive ${service.name} in ManleAI? This disables AI booking and keeps the service visible for history. It does not remove the service from the POS provider.`)) return;
     setBusy(`archive-${service.id}`);
     setError("");
     setSuccess("");
@@ -452,7 +470,7 @@ export function ServicesDashboard() {
         setEditingService(response.service);
         setForm(serviceToForm(response.service));
       }
-      setSuccess("Service archived. It will not be used for new availability checks or bookings.");
+      setSuccess("Service archived in ManleAI. It will not be used for new availability checks or bookings; the POS provider was not changed.");
       await load({ silent: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not archive service.");
@@ -952,13 +970,16 @@ function ServiceForm({
   onSave: () => void;
 }) {
   const archived = Boolean(service?.archived_at);
+  const providerReadOnly = Boolean(service && providerManagedReadOnly(service.field_authority));
+  const operationalEditable = !service || operationalFieldsEditable(service.field_authority);
+  const ownerControlsOnly = Boolean(service && !operationalEditable);
   const consultationGated = archived || !service?.pos_linked;
   const consultationReadyIncomplete = form.consultationStatus === "ready" && !consultationProfileHasStructuredValue(form);
   return (
     <Card>
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
         <div>
-          <CardTitle>{service ? "Edit service" : "New service"}</CardTitle>
+          <CardTitle>{service ? (ownerControlsOnly ? "Manage service" : "Edit service") : "New local service"}</CardTitle>
           <CardDescription>
             {service ? serviceGateReason(service) : "New services start as ManleAI local records and are not booking-ready until linked to Square Appointments."}
           </CardDescription>
@@ -969,10 +990,25 @@ function ServiceForm({
         </div>
       </div>
 
-      <div className="mt-5 rounded-md border border-line bg-slate-50 p-4">
+      {service ? (
+        <FieldAuthorityPanel
+          authority={service.field_authority}
+          recordKind="service"
+          syncStatus={service.sync_status}
+          lastSyncedAt={service.last_synced_at}
+          syncError={service.sync_error}
+        />
+      ) : (
+        <div className="mt-5 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-xs leading-5 text-blue-900">
+          Managed in ManleAI. Square Appointments is not updated, and this local service cannot be booked until it has a valid active-provider link.
+        </div>
+      )}
+
+      <div className="flex flex-col">
+      <div className="order-2 mt-5 rounded-md border border-line bg-slate-50 p-4">
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
           <div>
-            <div className="text-sm font-semibold text-ink">AI consultation profile</div>
+            <div className="text-sm font-semibold text-ink">ManleAI controls · AI consultation profile</div>
             <p className="mt-1 text-xs leading-5 text-muted">
               Structured, owner-approved facts used for service recommendations. This profile never confirms or creates an appointment.
             </p>
@@ -988,6 +1024,49 @@ function ServiceForm({
             <option value="ready">Ready for consultation</option>
             <option value="disabled">Disabled</option>
           </select>
+        </div>
+
+        <div className="mt-4 grid gap-4 lg:grid-cols-2">
+          <Field label="Category">
+            <select
+              className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-100 disabled:text-slate-400"
+              value={form.serviceCategoryID}
+              onChange={(event) => onChange({ ...form, serviceCategoryID: event.target.value })}
+              disabled={busy || archived}
+            >
+              <option value="">Unassigned</option>
+              {categories.map((category) => (
+                <option key={category.id} value={category.id}>
+                  {category.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="AI receptionist consultation summary">
+            <div className="space-y-2">
+              <textarea
+                className="min-h-24 w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-100 disabled:text-slate-400"
+                value={form.aiDescription}
+                maxLength={320}
+                aria-describedby="ai-consultation-summary-help"
+                onChange={(event) => onChange({ ...form, aiDescription: event.target.value })}
+                disabled={busy || archived}
+              />
+              <div id="ai-consultation-summary-help" className="flex flex-wrap items-start justify-between gap-2 text-xs text-muted">
+                <span>Approved facts the receptionist may use when helping callers compare services. Avoid medical advice or unverified claims.</span>
+                <span className="shrink-0 tabular-nums" aria-live="polite">
+                  {form.aiDescription.length}/320
+                </span>
+              </div>
+              <p className="text-xs font-medium text-ink">
+                {form.aiDescription.trim()
+                  ? "Consultation facts ready"
+                  : form.description.trim()
+                    ? "Using the provider standard description until a consultation summary is added"
+                    : "No consultation description; the AI will use only name, category, duration, and price"}
+              </p>
+            </div>
+          </Field>
         </div>
 
         {consultationGated ? (
@@ -1050,95 +1129,62 @@ function ServiceForm({
         </div>
       </div>
 
-      <div className="mt-5 grid gap-4 md:grid-cols-2">
-        <Field label="Name">
-          <input
-            className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink outline-none focus:border-brand"
-            value={form.name}
-            onChange={(event) => onChange({ ...form, name: event.target.value })}
-            disabled={busy || archived}
-          />
-        </Field>
-        <Field label="Duration minutes">
-          <input
-            className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink outline-none focus:border-brand"
-            type="number"
-            min="1"
-            value={form.durationMinutes}
-            onChange={(event) => onChange({ ...form, durationMinutes: event.target.value })}
-            disabled={busy || archived}
-          />
-        </Field>
-        <Field label="Price from">
-          <input
-            className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink outline-none focus:border-brand"
-            type="number"
-            min="0"
-            step="0.01"
-            value={form.priceFrom}
-            onChange={(event) => onChange({ ...form, priceFrom: event.target.value })}
-            disabled={busy || archived}
-          />
-        </Field>
-        <Field label="Category">
-          <select
-            className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand"
-            value={form.serviceCategoryID}
-            onChange={(event) => onChange({ ...form, serviceCategoryID: event.target.value })}
-            disabled={busy || archived}
-          >
-            <option value="">Unassigned</option>
-            {categories.map((category) => (
-              <option key={category.id} value={category.id}>
-                {category.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <label className="flex items-center gap-3 rounded-md border border-line px-3 py-2 text-sm font-medium text-ink">
-          <input
-            type="checkbox"
-            checked={form.active}
-            onChange={(event) => onChange({ ...form, active: event.target.checked })}
-            disabled={busy || archived}
-          />
-          Active
-        </label>
-        <Field label="Description">
-          <textarea
-            className="min-h-24 w-full rounded-md border border-line px-3 py-2 text-sm text-ink outline-none focus:border-brand"
-            value={form.description}
-            onChange={(event) => onChange({ ...form, description: event.target.value })}
-            disabled={busy || archived}
-          />
-        </Field>
-        <Field label="AI receptionist consultation summary">
-          <div className="space-y-2">
-            <textarea
-              className="min-h-24 w-full rounded-md border border-line px-3 py-2 text-sm text-ink outline-none focus:border-brand disabled:bg-surface-subtle"
-              value={form.aiDescription}
-              maxLength={320}
-              aria-describedby="ai-consultation-summary-help"
-              onChange={(event) => onChange({ ...form, aiDescription: event.target.value })}
-              disabled={busy || archived}
-            />
-            <div id="ai-consultation-summary-help" className="flex flex-wrap items-start justify-between gap-2 text-xs text-ink-muted">
-              <span>
-                Approved facts the receptionist may use when helping callers compare services. Avoid medical advice or unverified claims.
-              </span>
-              <span className="shrink-0 tabular-nums" aria-live="polite">
-                {form.aiDescription.length}/320
-              </span>
-            </div>
-            <p className="text-xs font-medium text-ink">
-              {form.aiDescription.trim()
-                ? "Consultation facts ready"
-                : form.description.trim()
-                  ? "Using the standard description until a consultation summary is added"
-                  : "No consultation description; the AI will use only name, category, duration, and price"}
-            </p>
+        <div className="order-1 mt-5 rounded-md border border-line p-4">
+          <div className="text-sm font-semibold text-ink">Operational details</div>
+          <p className="mt-1 text-xs leading-5 text-muted">
+            {providerReadOnly
+              ? `Read-only values imported from ${authorityLabel(service?.field_authority)}.`
+              : "Values managed in ManleAI. Provider synchronization runs only when the active adapter supports these writes."}
+          </p>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <Field label="Name">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-100 disabled:text-slate-500"
+                value={form.name}
+                onChange={(event) => onChange({ ...form, name: event.target.value })}
+                disabled={busy || archived || !operationalEditable}
+              />
+            </Field>
+            <Field label="Duration minutes">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-100 disabled:text-slate-500"
+                type="number"
+                min="1"
+                value={form.durationMinutes}
+                onChange={(event) => onChange({ ...form, durationMinutes: event.target.value })}
+                disabled={busy || archived || !operationalEditable}
+              />
+            </Field>
+            <Field label="Price from">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-100 disabled:text-slate-500"
+                type="number"
+                min="0"
+                step="0.01"
+                value={form.priceFrom}
+                onChange={(event) => onChange({ ...form, priceFrom: event.target.value })}
+                disabled={busy || archived || !operationalEditable}
+              />
+            </Field>
+            <label className="flex items-center gap-3 rounded-md border border-line px-3 py-2 text-sm font-medium text-ink">
+              <input
+                type="checkbox"
+                checked={form.active}
+                onChange={(event) => onChange({ ...form, active: event.target.checked })}
+                disabled={busy || archived || !operationalEditable}
+              />
+              Active
+            </label>
+            <Field label="Standard description">
+              <textarea
+                className="min-h-24 w-full rounded-md border border-line px-3 py-2 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-100 disabled:text-slate-500"
+                value={form.description}
+                onChange={(event) => onChange({ ...form, description: event.target.value })}
+                disabled={busy || archived || !operationalEditable}
+              />
+            </Field>
           </div>
-        </Field>
+        </div>
       </div>
 
       <div className="mt-5 flex flex-wrap justify-end gap-3">
@@ -1146,7 +1192,7 @@ function ServiceForm({
           Cancel
         </Button>
         <Button type="button" onClick={onSave} disabled={busy || archived || consultationReadyIncomplete}>
-          {busy ? "Saving..." : "Save service"}
+          {busy ? "Saving..." : ownerControlsOnly ? "Save ManleAI controls" : service ? "Save service" : "Save local service"}
         </Button>
       </div>
     </Card>
@@ -1193,7 +1239,7 @@ function ServicesTable({
               <th className="px-4 py-3">Service</th>
               <th className="px-4 py-3">Duration</th>
               <th className="px-4 py-3">Price</th>
-              <th className="px-4 py-3">Source</th>
+              <th className="px-4 py-3">Managed in</th>
               <th className="px-4 py-3">Category</th>
               <th className="px-4 py-3">Aliases</th>
               <th className="px-4 py-3">Sync status</th>
@@ -1211,7 +1257,7 @@ function ServicesTable({
                 <td className="px-4 py-3 text-muted">{service.duration_minutes > 0 ? `${service.duration_minutes} min` : "Not set"}</td>
                 <td className="px-4 py-3 text-muted">{service.price_display || formatPrice(service.price_from)}</td>
                 <td className="px-4 py-3">
-                  <Badge value={service.source || "local"} />
+                  <FieldAuthorityBadge authority={service.field_authority} />
                 </td>
                 <td className="px-4 py-3">
                   <CategoryCell service={service} categories={categories} busy={busy} onAssignCategory={onAssignCategory} />
@@ -1315,7 +1361,7 @@ function ServiceCard({
         items={[
           ["Duration", service.duration_minutes > 0 ? `${service.duration_minutes} min` : "Not set"],
           ["Price", service.price_display || formatPrice(service.price_from)],
-          ["Source", service.source || "local"],
+          ["Managed in", authorityLabel(service.field_authority)],
           ["Category", service.category_name || "Unassigned"],
           ["POS link", service.pos_linked ? "Linked" : "Not linked"]
         ]}
@@ -1568,11 +1614,12 @@ function ServiceActions({
   const archived = Boolean(service.archived_at);
   const canEnable = canEnableAI(service);
   const nextAI = !service.ai_bookable;
+  const readOnlyProvider = providerManagedReadOnly(service.field_authority);
   return (
     <div className="flex flex-wrap gap-2">
       <Button type="button" variant="secondary" onClick={() => onEdit(service)} disabled={busy !== ""}>
         <Pencil className="h-4 w-4" />
-        Edit
+        {readOnlyProvider ? "Manage" : "Edit"}
       </Button>
       <Button
         type="button"
@@ -1584,7 +1631,7 @@ function ServiceActions({
       </Button>
       <Button type="button" variant="danger" onClick={() => onArchive(service)} disabled={busy !== "" || archived || !service.id}>
         <Archive className="h-4 w-4" />
-        {archiveBusy ? "Archiving..." : "Archive"}
+        {archiveBusy ? "Archiving..." : "Archive in ManleAI"}
       </Button>
     </div>
   );
@@ -1761,6 +1808,23 @@ function servicePayload(form: ServiceFormState) {
     price_from: Number.isFinite(price) ? price : null,
     service_category_id: form.serviceCategoryID,
     active: form.active,
+    consultation_profile: {
+      status: form.consultationStatus,
+      recommended_outcomes: form.recommendedOutcomes,
+      compatible_current_systems: form.compatibleCurrentSystems,
+      length_capabilities: form.lengthCapabilities,
+      priority_tags: form.priorityTags,
+      finish_options: form.finishOptions,
+      maintenance_note: form.maintenanceNote,
+      owner_approved_summary: form.aiDescription
+    }
+  };
+}
+
+function serviceOwnerControlsPayload(form: ServiceFormState) {
+  return {
+    ai_description: form.aiDescription,
+    service_category_id: form.serviceCategoryID,
     consultation_profile: {
       status: form.consultationStatus,
       recommended_outcomes: form.recommendedOutcomes,

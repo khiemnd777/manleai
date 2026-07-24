@@ -505,6 +505,23 @@ Phase 7E Integrations readiness/state polish completed:
       native POS adapter in the current production release, so import, dry-run, and activation stay
       disabled.
 
+Phase 7F field-level source-of-truth UI completed:
+
+- [x] Add provider-neutral `field_authority` metadata to service and staff API
+      responses instead of making the frontend infer write ownership from
+      `source` or `sync_status`.
+- [x] Keep Square-imported operational fields read-only while Square declares
+      no service/staff upsert capabilities.
+- [x] Keep local-only operational fields editable but visibly not bookable.
+- [x] Add an atomic service owner-controls mutation for category and
+      consultation enrichment that never resubmits provider-managed fields.
+- [x] Reject direct operational updates to provider-read-only services/staff
+      with a typed conflict.
+- [x] Replace ambiguous `Source` presentation with `Managed in`, explicit
+      provider/ManleAI guidance, sync blockers, and local archive wording.
+- [x] Keep failed and unmapped provider records provider-managed instead of
+      unlocking unsafe local edits.
+
 Tasks:
 
 - [x] Review Appointments and Customers copy for POS-boundary language.

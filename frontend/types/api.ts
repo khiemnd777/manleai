@@ -349,6 +349,13 @@ export type POSConnection = {
   error_message?: string;
 };
 
+export type POSFieldAuthority = {
+  operational_source: "manleai" | "provider" | string;
+  provider?: string;
+  provider_label?: string;
+  operational_write_mode: "local" | "provider_read_only" | "provider_sync" | string;
+};
+
 export type POSService = {
   id?: string;
   salon_id?: string;
@@ -376,6 +383,7 @@ export type POSService = {
   category_confidence?: number;
   category_reviewed_at?: string;
   consultation_profile?: ServiceConsultationProfile;
+  field_authority?: POSFieldAuthority;
 };
 
 export type ServiceConsultationProfile = {
@@ -452,6 +460,7 @@ export type POSStaffMember = {
   sync_error?: string;
   source: string;
   pos_linked: boolean;
+  field_authority?: POSFieldAuthority;
 };
 
 export type POSCustomer = {

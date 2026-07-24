@@ -263,13 +263,62 @@ func TestRepositoryProviderEligibilityRevokesAIBookableWithoutReenablingOwnerFla
 		t.Fatalf("initial eligible import: %v", err)
 	}
 	assertImportedServiceAIBookable(t, ctx, db, salonID, service.POSServiceID, true)
+	var canonicalServiceID string
+	if err := db.QueryRowContext(ctx, `
+		SELECT id::text
+		FROM services
+		WHERE salon_id = $1 AND pos_provider = 'square' AND pos_service_id = $2
+	`, salonID, service.POSServiceID).Scan(&canonicalServiceID); err != nil {
+		t.Fatalf("load canonical service ID: %v", err)
+	}
+	if _, err := repo.UpdateServiceOwnerControls(ctx, salonID, ownerID, canonicalServiceID, ServiceOwnerControlsMutation{
+		AIDescription: "Owner-approved comparison guidance.",
+		ConsultationProfile: &ServiceConsultationProfileMutation{
+			Status: ConsultationProfileStatusDraft,
+		},
+	}); err != nil {
+		t.Fatalf("update provider-managed owner controls: %v", err)
+	}
+	if _, err := repo.UpdateServiceOwnerControls(ctx, salonID, ownerID, canonicalServiceID, ServiceOwnerControlsMutation{
+		AIDescription: "Owner-approved comparison guidance.",
+		ConsultationProfile: &ServiceConsultationProfileMutation{
+			Status: ConsultationProfileStatusDraft,
+		},
+	}); err != nil {
+		t.Fatalf("repeat idempotent owner controls update: %v", err)
+	}
+	var profileCount int
+	var profileRevision int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*), max(revision)
+		FROM service_consultation_profiles
+		WHERE salon_id = $1 AND service_id = $2
+	`, salonID, canonicalServiceID).Scan(&profileCount, &profileRevision); err != nil {
+		t.Fatalf("load owner controls profile: %v", err)
+	}
+	if profileCount != 1 || profileRevision != 1 {
+		t.Fatalf("profile count/revision = %d/%d, want stable 1/1", profileCount, profileRevision)
+	}
 
 	service.AIBookable = false
+	service.Name = "Eligibility Service From Provider"
 	service.POSServiceVersion++
 	if err := repo.UpsertServices(ctx, salonID, []Service{service}); err != nil {
 		t.Fatalf("provider eligibility revocation import: %v", err)
 	}
 	assertImportedServiceAIBookable(t, ctx, db, salonID, service.POSServiceID, false)
+	var importedName string
+	var retainedAIDescription string
+	if err := db.QueryRowContext(ctx, `
+		SELECT name, COALESCE(ai_description, '')
+		FROM services
+		WHERE salon_id = $1 AND id = $2
+	`, salonID, canonicalServiceID).Scan(&importedName, &retainedAIDescription); err != nil {
+		t.Fatalf("load provider fields and owner controls after sync: %v", err)
+	}
+	if importedName != "Eligibility Service From Provider" || retainedAIDescription != "Owner-approved comparison guidance." {
+		t.Fatalf("service after sync = %q / %q, want provider name plus retained owner guidance", importedName, retainedAIDescription)
+	}
 
 	service.AIBookable = true
 	service.POSServiceVersion++

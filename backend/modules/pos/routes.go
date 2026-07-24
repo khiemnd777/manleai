@@ -10,6 +10,7 @@ func RegisterRoutes(api fiber.Router, handler *Handler, jwtSecret string) {
 	group.Get("/:id/services", handler.Services)
 	group.Post("/:id/services", handler.CreateService)
 	group.Put("/:id/services/:service_id", handler.UpdateService)
+	group.Patch("/:id/services/:service_id/owner-controls", handler.UpdateServiceOwnerControls)
 	group.Post("/:id/services/:service_id/archive", handler.ArchiveService)
 	group.Patch("/:id/services/:service_id/ai-bookable", handler.UpdateServiceAIBookable)
 	group.Patch("/:id/services/:service_id/category", handler.AssignServiceCategory)

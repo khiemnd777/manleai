@@ -802,6 +802,12 @@ is manageable by the owner but not eligible for availability or booking.
       "category_source": "manual",
       "category_confidence": 1,
       "category_reviewed_at": "2026-06-25T14:30:00Z",
+      "field_authority": {
+        "operational_source": "provider",
+        "provider": "square",
+        "provider_label": "Square Appointments",
+        "operational_write_mode": "provider_read_only"
+      },
       "consultation_profile": {
         "status": "ready",
         "recommended_outcomes": ["maintain", "color_refresh"],
@@ -817,6 +823,11 @@ is manageable by the owner but not eligible for availability or booking.
   ]
 }
 ```
+
+`field_authority` is the backend-owned field-level write contract. Clients must
+not infer editability from `source`, `sync_status`, or `pos_linked`. Current
+Square-imported services return `provider_read_only`; local-only services return
+`operational_source=manleai` and `operational_write_mode=local`.
 
 `POST /api/salons/:id/services`
 
@@ -908,9 +919,12 @@ Returns `201`:
 
 `PUT /api/salons/:id/services/:service_id`
 
-Updates a non-archived service's canonical ManleAI fields. This does not edit
-Square Appointments records or push changes to a POS provider. If `active=false`
-is saved, `ai_bookable` is also disabled.
+Updates a non-archived service's operational fields only when
+`field_authority.operational_write_mode` is `local` or `provider_sync`. A
+`provider_read_only` service returns `409 PROVIDER_MANAGED_FIELDS`; the API does
+not create a local override that would be overwritten by the next provider
+import. If `active=false` is saved on an editable record, `ai_bookable` is also
+disabled.
 
 ```json
 {
@@ -930,6 +944,29 @@ is saved, `ai_bookable` is also disabled.
     "finish_options": ["regular_polish"],
     "maintenance_note": "Owner-approved upkeep guidance.",
     "owner_approved_summary": "Includes nail shaping, cuticle care, and regular polish."
+  }
+}
+```
+
+`PATCH /api/salons/:id/services/:service_id/owner-controls`
+
+Atomically updates ManleAI-owned service enrichment without mutating
+provider-managed operational fields. Repeating the same consultation profile is
+idempotent and does not create another profile row or increment its revision.
+
+```json
+{
+  "ai_description": "Owner-approved comparison guidance.",
+  "service_category_id": "category-manicure-id",
+  "consultation_profile": {
+    "status": "ready",
+    "recommended_outcomes": ["maintain"],
+    "compatible_current_systems": ["natural"],
+    "length_capabilities": ["keep"],
+    "priority_tags": [],
+    "finish_options": ["regular_polish"],
+    "maintenance_note": "Owner-approved upkeep guidance.",
+    "owner_approved_summary": "Owner-approved comparison guidance."
   }
 }
 ```
@@ -1098,7 +1135,13 @@ availability or booking.
       "last_synced_at": "2026-06-10T15:00:00Z",
       "sync_error": "",
       "source": "imported",
-      "pos_linked": true
+      "pos_linked": true,
+      "field_authority": {
+        "operational_source": "provider",
+        "provider": "square",
+        "provider_label": "Square Appointments",
+        "operational_write_mode": "provider_read_only"
+      }
     }
   ]
 }
@@ -1144,9 +1187,11 @@ Returns `201`:
 
 `PUT /api/salons/:id/staff/:staff_id`
 
-Updates a non-archived staff member's canonical ManleAI fields. This does not
-edit Square Appointments records or push changes to a POS provider. If
-`active=false` is saved, `ai_bookable` is also disabled.
+Updates a non-archived staff member's operational fields only when
+`field_authority.operational_write_mode` is `local` or `provider_sync`. A
+`provider_read_only` staff member returns `409 PROVIDER_MANAGED_FIELDS`; current
+Square Appointments records must be edited in Square and imported through sync.
+If `active=false` is saved on an editable record, `ai_bookable` is also disabled.
 
 ```json
 {

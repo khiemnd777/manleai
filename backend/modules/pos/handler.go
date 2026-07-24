@@ -187,6 +187,9 @@ func (h *Handler) UpdateService(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body must include a valid service.")
 	}
 	item, err := h.service.UpdateService(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("service_id"), *req)
+	if errors.Is(err, ErrProviderManagedFields) {
+		return respond.Error(c, fiber.StatusConflict, "PROVIDER_MANAGED_FIELDS", "Service operational fields are managed by the active POS provider. Edit them there, then sync.")
+	}
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Service name, duration, price, and archive state must be valid.")
 	}
@@ -195,6 +198,24 @@ func (h *Handler) UpdateService(c *fiber.Ctx) error {
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_UPDATE_FAILED", "Could not update service.")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service": item})
+}
+
+func (h *Handler) UpdateServiceOwnerControls(c *fiber.Ctx) error {
+	req, err := parseServiceOwnerControlsWriteRequest(c)
+	if err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body must include valid ManleAI service controls.")
+	}
+	item, err := h.service.UpdateServiceOwnerControls(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("service_id"), *req)
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Service category and consultation controls must be valid for a non-archived service.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SERVICE_NOT_FOUND", "Service was not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_OWNER_CONTROLS_UPDATE_FAILED", "Could not update ManleAI service controls.")
 	}
 	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service": item})
 }
@@ -352,6 +373,9 @@ func (h *Handler) UpdateStaff(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body must include a valid staff member.")
 	}
 	item, err := h.service.UpdateStaff(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("staff_id"), *req)
+	if errors.Is(err, ErrProviderManagedFields) {
+		return respond.Error(c, fiber.StatusConflict, "PROVIDER_MANAGED_FIELDS", "Staff operational fields are managed by the active POS provider. Edit them there, then sync.")
+	}
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Staff name, contact fields, active state, and archive state must be valid.")
 	}
@@ -402,6 +426,14 @@ type updateAIBookableRequest struct {
 
 func parseServiceWriteRequest(c *fiber.Ctx) (*ServiceWriteRequest, error) {
 	var req ServiceWriteRequest
+	if err := c.BodyParser(&req); err != nil {
+		return nil, err
+	}
+	return &req, nil
+}
+
+func parseServiceOwnerControlsWriteRequest(c *fiber.Ctx) (*ServiceOwnerControlsWriteRequest, error) {
+	var req ServiceOwnerControlsWriteRequest
 	if err := c.BodyParser(&req); err != nil {
 		return nil, err
 	}

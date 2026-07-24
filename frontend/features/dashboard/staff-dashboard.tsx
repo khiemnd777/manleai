@@ -8,6 +8,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  authorityLabel,
+  FieldAuthorityBadge,
+  FieldAuthorityPanel,
+  operationalFieldsEditable,
+  providerManagedReadOnly
+} from "@/features/dashboard/pos-field-authority";
 import { apiRequest } from "@/lib/api/client";
 import type { POSConnection, POSStaffMember, Salon, SquareReadiness, SyncLog } from "@/types/api";
 
@@ -130,7 +137,7 @@ export function StaffDashboard() {
 
   async function archiveStaff(member: POSStaffMember) {
     if (!salon || !member.id || member.archived_at) return;
-    if (!window.confirm(`Archive ${member.name}? This will disable AI booking for this staff member.`)) return;
+    if (!window.confirm(`Archive ${member.name} in ManleAI? This disables AI booking and keeps the staff member visible for history. It does not remove them from the POS provider.`)) return;
     setBusy(`archive-${member.id}`);
     setError("");
     setSuccess("");
@@ -143,7 +150,7 @@ export function StaffDashboard() {
         setEditingStaff(response.staff_member);
         setForm(staffToForm(response.staff_member));
       }
-      setSuccess("Staff member archived. They will not be used for new availability checks or bookings.");
+      setSuccess("Staff member archived in ManleAI. They will not be used for new availability checks or bookings; the POS provider was not changed.");
       await load({ silent: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not archive staff member.");
@@ -375,11 +382,14 @@ function StaffForm({
   onSave: () => void;
 }) {
   const archived = Boolean(member?.archived_at);
+  const providerReadOnly = Boolean(member && providerManagedReadOnly(member.field_authority));
+  const operationalEditable = !member || operationalFieldsEditable(member.field_authority);
+  const operationalLocked = Boolean(member && !operationalEditable);
   return (
     <Card>
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
         <div>
-          <CardTitle>{member ? "Edit staff member" : "New staff member"}</CardTitle>
+          <CardTitle>{member ? (operationalLocked ? "Staff details" : "Edit staff member") : "New local staff member"}</CardTitle>
           <CardDescription>
             {member ? staffGateReason(member) : "New staff start as ManleAI local records and are not booking-ready until linked to Square Appointments."}
           </CardDescription>
@@ -387,30 +397,51 @@ function StaffForm({
         {member ? <Badge value={member.sync_status || "local_only"} /> : <Badge value="local_only" />}
       </div>
 
-      <div className="mt-5 grid gap-4 md:grid-cols-2">
+      {member ? (
+        <FieldAuthorityPanel
+          authority={member.field_authority}
+          recordKind="staff"
+          syncStatus={member.sync_status}
+          lastSyncedAt={member.last_synced_at}
+          syncError={member.sync_error}
+        />
+      ) : (
+        <div className="mt-5 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-xs leading-5 text-blue-900">
+          Managed in ManleAI. Square Appointments is not updated, and this local staff member cannot be booked until they have a valid active-provider link.
+        </div>
+      )}
+
+      <div className="mt-5 rounded-md border border-line p-4">
+        <div className="text-sm font-semibold text-ink">Operational details</div>
+        <p className="mt-1 text-xs leading-5 text-muted">
+          {providerReadOnly
+            ? `Read-only values imported from ${authorityLabel(member?.field_authority)}.`
+            : "Values managed in ManleAI. Provider synchronization runs only when the active adapter supports these writes."}
+        </p>
+      <div className="mt-4 grid gap-4 md:grid-cols-2">
         <Field label="Name">
           <input
-            className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink outline-none focus:border-brand"
+            className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-100 disabled:text-slate-500"
             value={form.name}
             onChange={(event) => onChange({ ...form, name: event.target.value })}
-            disabled={busy || archived}
+            disabled={busy || archived || !operationalEditable}
           />
         </Field>
         <Field label="Phone">
           <input
-            className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink outline-none focus:border-brand"
+            className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-100 disabled:text-slate-500"
             value={form.phone}
             onChange={(event) => onChange({ ...form, phone: event.target.value })}
-            disabled={busy || archived}
+            disabled={busy || archived || !operationalEditable}
           />
         </Field>
         <Field label="Email">
           <input
-            className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink outline-none focus:border-brand"
+            className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-100 disabled:text-slate-500"
             type="email"
             value={form.email}
             onChange={(event) => onChange({ ...form, email: event.target.value })}
-            disabled={busy || archived}
+            disabled={busy || archived || !operationalEditable}
           />
         </Field>
         <label className="flex items-center gap-3 rounded-md border border-line px-3 py-2 text-sm font-medium text-ink">
@@ -418,19 +449,22 @@ function StaffForm({
             type="checkbox"
             checked={form.active}
             onChange={(event) => onChange({ ...form, active: event.target.checked })}
-            disabled={busy || archived}
+            disabled={busy || archived || !operationalEditable}
           />
           Active
         </label>
       </div>
+      </div>
 
       <div className="mt-5 flex flex-wrap justify-end gap-3">
         <Button type="button" variant="secondary" onClick={onCancel} disabled={busy}>
-          Cancel
+          {operationalLocked ? "Close" : "Cancel"}
         </Button>
-        <Button type="button" onClick={onSave} disabled={busy || archived}>
-          {busy ? "Saving..." : "Save staff member"}
-        </Button>
+        {operationalEditable ? (
+          <Button type="button" onClick={onSave} disabled={busy || archived}>
+            {busy ? "Saving..." : member ? "Save staff member" : "Save local staff member"}
+          </Button>
+        ) : null}
       </div>
     </Card>
   );
@@ -457,7 +491,7 @@ function StaffTable({
             <tr>
               <th className="px-4 py-3">Staff</th>
               <th className="px-4 py-3">Contact</th>
-              <th className="px-4 py-3">Source</th>
+              <th className="px-4 py-3">Managed in</th>
               <th className="px-4 py-3">Sync status</th>
               <th className="px-4 py-3">Booking readiness</th>
               <th className="w-56 px-4 py-3">Actions</th>
@@ -472,7 +506,7 @@ function StaffTable({
                   <div className="mt-1 text-xs">{member.email || "No email"}</div>
                 </td>
                 <td className="px-4 py-3">
-                  <Badge value={member.source || "local"} />
+                  <FieldAuthorityBadge authority={member.field_authority} />
                 </td>
                 <td className="px-4 py-3">
                   <div className="space-y-1">
@@ -533,7 +567,7 @@ function StaffCard({
         items={[
           ["Phone", member.phone || "-"],
           ["Email", member.email || "-"],
-          ["Source", member.source || "local"],
+          ["Managed in", authorityLabel(member.field_authority)],
           ["POS link", member.pos_linked ? "Linked" : "Not linked"]
         ]}
       />
@@ -565,6 +599,7 @@ function StaffActions({
   const archived = Boolean(member.archived_at);
   const canEnable = canEnableAI(member);
   const nextAI = !member.ai_bookable;
+  const readOnlyProvider = providerManagedReadOnly(member.field_authority);
   return (
     <div className="grid w-full gap-2">
       <Button
@@ -576,10 +611,10 @@ function StaffActions({
       >
         {aiBusy ? "Saving..." : member.ai_bookable ? "Block AI booking" : canEnable ? "Allow AI booking" : "AI booking gated"}
       </Button>
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid gap-2">
         <Button type="button" variant="secondary" className="h-9 px-3 text-xs" onClick={() => onEdit(member)} disabled={busy !== ""}>
           <Pencil className="h-4 w-4" />
-          Edit
+          {readOnlyProvider ? "Details" : "Edit"}
         </Button>
         <Button
           type="button"
@@ -589,7 +624,7 @@ function StaffActions({
           disabled={busy !== "" || archived || !member.id}
         >
           {archiveBusy ? null : <Archive className="h-4 w-4" />}
-          {archiveBusy ? "Archiving" : "Archive"}
+          {archiveBusy ? "Archiving" : "Archive in ManleAI"}
         </Button>
       </div>
     </div>

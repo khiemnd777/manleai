@@ -48,6 +48,13 @@ const (
 	EntitySourceLocal    = "local"
 	EntitySourceImported = "imported"
 
+	FieldAuthoritySourceManleAI  = "manleai"
+	FieldAuthoritySourceProvider = "provider"
+
+	OperationalWriteModeLocal            = "local"
+	OperationalWriteModeProviderReadOnly = "provider_read_only"
+	OperationalWriteModeProviderSync     = "provider_sync"
+
 	ServiceCategoryStatusActive   = "active"
 	ServiceCategoryStatusArchived = "archived"
 
@@ -264,6 +271,15 @@ type ProviderCapabilities struct {
 	StaffUpsert    bool `json:"staff_upsert"`
 	StaffArchive   bool `json:"staff_archive"`
 	CustomerUpsert bool `json:"customer_upsert"`
+}
+
+// EntityFieldAuthority is derived runtime metadata. It keeps field-level write
+// ownership separate from record origin and sync/booking eligibility.
+type EntityFieldAuthority struct {
+	OperationalSource    string `json:"operational_source"`
+	Provider             string `json:"provider,omitempty"`
+	ProviderLabel        string `json:"provider_label,omitempty"`
+	OperationalWriteMode string `json:"operational_write_mode"`
 }
 
 type ProviderOption struct {
@@ -522,6 +538,7 @@ type Service struct {
 	CategoryConfidence  float64                     `json:"category_confidence,omitempty"`
 	CategoryReviewedAt  *time.Time                  `json:"category_reviewed_at,omitempty"`
 	ConsultationProfile *ServiceConsultationProfile `json:"consultation_profile,omitempty"`
+	FieldAuthority      *EntityFieldAuthority       `json:"field_authority,omitempty"`
 }
 
 type ServiceConsultationProfile struct {
@@ -582,6 +599,18 @@ type ServiceMutation struct {
 	DurationMinutes     int
 	PriceFrom           *float64
 	Active              bool
+	ServiceCategoryID   string
+	ConsultationProfile *ServiceConsultationProfileMutation
+}
+
+type ServiceOwnerControlsWriteRequest struct {
+	AIDescription       string                                  `json:"ai_description"`
+	ServiceCategoryID   string                                  `json:"service_category_id"`
+	ConsultationProfile *ServiceConsultationProfileWriteRequest `json:"consultation_profile,omitempty"`
+}
+
+type ServiceOwnerControlsMutation struct {
+	AIDescription       string
 	ServiceCategoryID   string
 	ConsultationProfile *ServiceConsultationProfileMutation
 }
@@ -662,21 +691,22 @@ type ServiceCategoryAssignRequest struct {
 }
 
 type StaffMember struct {
-	ID           string     `json:"id,omitempty"`
-	SalonID      string     `json:"salon_id,omitempty"`
-	POSProvider  string     `json:"pos_provider"`
-	POSStaffID   string     `json:"pos_staff_id"`
-	Name         string     `json:"name"`
-	Phone        string     `json:"phone,omitempty"`
-	Email        string     `json:"email,omitempty"`
-	AIBookable   bool       `json:"ai_bookable"`
-	Active       bool       `json:"active"`
-	SyncStatus   string     `json:"sync_status"`
-	ArchivedAt   *time.Time `json:"archived_at,omitempty"`
-	LastSyncedAt *time.Time `json:"last_synced_at,omitempty"`
-	SyncError    string     `json:"sync_error,omitempty"`
-	Source       string     `json:"source"`
-	POSLinked    bool       `json:"pos_linked"`
+	ID             string                `json:"id,omitempty"`
+	SalonID        string                `json:"salon_id,omitempty"`
+	POSProvider    string                `json:"pos_provider"`
+	POSStaffID     string                `json:"pos_staff_id"`
+	Name           string                `json:"name"`
+	Phone          string                `json:"phone,omitempty"`
+	Email          string                `json:"email,omitempty"`
+	AIBookable     bool                  `json:"ai_bookable"`
+	Active         bool                  `json:"active"`
+	SyncStatus     string                `json:"sync_status"`
+	ArchivedAt     *time.Time            `json:"archived_at,omitempty"`
+	LastSyncedAt   *time.Time            `json:"last_synced_at,omitempty"`
+	SyncError      string                `json:"sync_error,omitempty"`
+	Source         string                `json:"source"`
+	POSLinked      bool                  `json:"pos_linked"`
+	FieldAuthority *EntityFieldAuthority `json:"field_authority,omitempty"`
 }
 
 type StaffWriteRequest struct {

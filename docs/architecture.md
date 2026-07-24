@@ -77,6 +77,28 @@ logs, and training data. POS providers are external projections and booking
 execution layers. The active POS provider owns real availability and provider
 booking execution.
 
+Canonical identity does not imply that every imported field is writable from
+ManleAI. Field-level operational authority is derived from the canonical
+record, its provider identity/link, the active adapter, and declared provider
+write capabilities:
+
+- For a provider-backed service without service-upsert capability, name,
+  standard description, duration, price, and active status are provider-managed
+  and read-only in ManleAI.
+- For provider-backed staff without staff-upsert capability, name, phone,
+  email, and active status are provider-managed and read-only in ManleAI.
+- Categories, aliases, AI consultation data, `ai_bookable`, and local archive
+  state remain ManleAI-managed controls.
+- Local-only records remain editable in ManleAI but are not booking-ready until
+  they have a valid link for the active provider.
+- A failed, stale, or unmapped provider link does not transfer operational-field
+  authority back to ManleAI. The dashboard must surface the sync blocker and
+  keep provider-managed fields read-only.
+
+Service and staff API responses expose this derived contract as
+`field_authority`; clients must not reconstruct it from `source`,
+`sync_status`, or provider-specific UI branches.
+
 For the current Square Appointments production release, operating hours are owned in Square Appointments. ManleAI
 imports the selected Square location's business hour periods into
 `salon_business_hour_periods` and uses them as a local safety filter before

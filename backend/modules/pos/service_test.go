@@ -316,6 +316,103 @@ func TestUpdateServiceDelegatesNormalizedInput(t *testing.T) {
 	}
 }
 
+func TestServicesExposeProviderNeutralFieldAuthority(t *testing.T) {
+	store := &fakePOSStore{services: []Service{
+		{ID: "service_imported", POSProvider: ProviderSquare, POSServiceID: "sq_service_1", Source: EntitySourceImported, SyncStatus: SyncStatusSyncFailed},
+		{ID: "service_local", POSProvider: ProviderSquare, Source: EntitySourceLocal, SyncStatus: SyncStatusLocalOnly},
+	}}
+	service := NewService(store, fakeCapabilityProvider{name: ProviderSquare})
+
+	items, err := service.Services(context.Background(), "salon_1", "owner_1")
+	if err != nil {
+		t.Fatalf("Services returned error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("services = %#v, want two records", items)
+	}
+	imported := items[0].FieldAuthority
+	if imported == nil || imported.OperationalSource != FieldAuthoritySourceProvider || imported.OperationalWriteMode != OperationalWriteModeProviderReadOnly || imported.ProviderLabel != "Square Appointments" {
+		t.Fatalf("imported authority = %#v, want provider-managed read-only", imported)
+	}
+	local := items[1].FieldAuthority
+	if local == nil || local.OperationalSource != FieldAuthoritySourceManleAI || local.OperationalWriteMode != OperationalWriteModeLocal || local.Provider != "" {
+		t.Fatalf("local authority = %#v, want ManleAI local", local)
+	}
+}
+
+func TestProviderWriteCapabilityChangesAuthorityWithoutProviderSpecificBranch(t *testing.T) {
+	store := &fakePOSStore{staff: []StaffMember{{
+		ID: "staff_imported", POSProvider: "future_pos", POSStaffID: "provider_staff_1", Source: EntitySourceImported,
+	}}}
+	service := NewService(store, fakeCapabilityProvider{name: "future_pos", capabilities: ProviderCapabilities{StaffUpsert: true}})
+	store.activeProvider = "future_pos"
+
+	items, err := service.Staff(context.Background(), "salon_1", "owner_1")
+	if err != nil {
+		t.Fatalf("Staff returned error: %v", err)
+	}
+	authority := items[0].FieldAuthority
+	if authority == nil || authority.OperationalSource != FieldAuthoritySourceProvider || authority.OperationalWriteMode != OperationalWriteModeProviderSync || authority.Provider != "future_pos" {
+		t.Fatalf("authority = %#v, want capability-driven provider sync", authority)
+	}
+}
+
+func TestUpdateProviderManagedServiceRejectsOperationalWrite(t *testing.T) {
+	store := &fakePOSStore{currentService: &Service{
+		ID: "service_1", POSProvider: ProviderSquare, POSServiceID: "sq_service_1", Source: EntitySourceImported,
+	}}
+	service := NewService(store, fakeCapabilityProvider{name: ProviderSquare})
+
+	_, err := service.UpdateService(context.Background(), "salon_1", "owner_1", "service_1", ServiceWriteRequest{
+		Name: "Changed locally", DurationMinutes: 60,
+	})
+	if !errors.Is(err, ErrProviderManagedFields) {
+		t.Fatalf("UpdateService error = %v, want ErrProviderManagedFields", err)
+	}
+	if store.serviceUpdateDetails.serviceID != "" {
+		t.Fatalf("provider-managed update reached repository: %#v", store.serviceUpdateDetails)
+	}
+}
+
+func TestUpdateProviderManagedStaffRejectsOperationalWrite(t *testing.T) {
+	store := &fakePOSStore{currentStaff: &StaffMember{
+		ID: "staff_1", POSProvider: ProviderSquare, POSStaffID: "sq_staff_1", Source: EntitySourceImported,
+	}}
+	service := NewService(store, fakeCapabilityProvider{name: ProviderSquare})
+
+	_, err := service.UpdateStaff(context.Background(), "salon_1", "owner_1", "staff_1", StaffWriteRequest{Name: "Changed locally"})
+	if !errors.Is(err, ErrProviderManagedFields) {
+		t.Fatalf("UpdateStaff error = %v, want ErrProviderManagedFields", err)
+	}
+	if store.staffUpdateDetails.staffID != "" {
+		t.Fatalf("provider-managed update reached repository: %#v", store.staffUpdateDetails)
+	}
+}
+
+func TestUpdateServiceOwnerControlsAllowsProviderManagedRecord(t *testing.T) {
+	store := &fakePOSStore{currentService: &Service{
+		ID: "service_1", POSProvider: ProviderSquare, POSServiceID: "sq_service_1", Source: EntitySourceImported,
+	}}
+	service := NewService(store, fakeCapabilityProvider{name: ProviderSquare})
+
+	item, err := service.UpdateServiceOwnerControls(context.Background(), "salon_1", "owner_1", "service_1", ServiceOwnerControlsWriteRequest{
+		AIDescription:     " Owner-approved comparison guidance. ",
+		ServiceCategoryID: " category_1 ",
+		ConsultationProfile: &ServiceConsultationProfileWriteRequest{
+			Status: ConsultationProfileStatusDraft,
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpdateServiceOwnerControls returned error: %v", err)
+	}
+	if store.serviceOwnerControls.input.AIDescription != "Owner-approved comparison guidance." || store.serviceOwnerControls.input.ServiceCategoryID != "category_1" {
+		t.Fatalf("owner controls = %#v, want normalized fields", store.serviceOwnerControls.input)
+	}
+	if item.FieldAuthority == nil || item.FieldAuthority.OperationalWriteMode != OperationalWriteModeProviderReadOnly {
+		t.Fatalf("updated service authority = %#v, want provider read-only", item.FieldAuthority)
+	}
+}
+
 func TestArchiveServiceRejectsMissingID(t *testing.T) {
 	store := &fakePOSStore{}
 	service := NewService(store)
@@ -1083,6 +1180,10 @@ type fakePOSStore struct {
 	listStaffProvider    string
 	connection           *Connection
 	summary              ProviderMappingSummary
+	services             []Service
+	staff                []StaffMember
+	currentService       *Service
+	currentStaff         *StaffMember
 	categories           []ServiceCategory
 	categoryAliases      []ServiceCategoryAlias
 	categoryCreate       struct {
@@ -1138,6 +1239,12 @@ type fakePOSStore struct {
 		ownerUserID string
 		serviceID   string
 		input       ServiceMutation
+	}
+	serviceOwnerControls struct {
+		salonID     string
+		ownerUserID string
+		serviceID   string
+		input       ServiceOwnerControlsMutation
 	}
 	serviceArchive struct {
 		salonID     string
@@ -1211,7 +1318,15 @@ func (f *fakePOSStore) GetConnection(ctx context.Context, salonID string, provid
 
 func (f *fakePOSStore) ListServices(ctx context.Context, salonID string, provider string) ([]Service, error) {
 	f.listServicesProvider = provider
-	return nil, nil
+	return append([]Service(nil), f.services...), nil
+}
+
+func (f *fakePOSStore) GetServiceForOwner(ctx context.Context, salonID string, ownerUserID string, serviceID string) (*Service, error) {
+	if f.currentService != nil {
+		item := *f.currentService
+		return &item, nil
+	}
+	return &Service{ID: serviceID, SalonID: salonID, POSProvider: ProviderSquare, Source: EntitySourceLocal}, nil
 }
 
 func (f *fakePOSStore) ListServiceCategories(ctx context.Context, salonID string, ownerUserID string) ([]ServiceCategory, error) {
@@ -1310,7 +1425,15 @@ func (f *fakePOSStore) RefreshServiceCategorySuggestions(ctx context.Context, sa
 
 func (f *fakePOSStore) ListStaff(ctx context.Context, salonID string, provider string) ([]StaffMember, error) {
 	f.listStaffProvider = provider
-	return nil, nil
+	return append([]StaffMember(nil), f.staff...), nil
+}
+
+func (f *fakePOSStore) GetStaffForOwner(ctx context.Context, salonID string, ownerUserID string, staffID string) (*StaffMember, error) {
+	if f.currentStaff != nil {
+		item := *f.currentStaff
+		return &item, nil
+	}
+	return &StaffMember{ID: staffID, SalonID: salonID, POSProvider: ProviderSquare, Source: EntitySourceLocal}, nil
 }
 
 func (f *fakePOSStore) CreateService(ctx context.Context, salonID string, ownerUserID string, provider string, input ServiceMutation) (*Service, error) {
@@ -1327,6 +1450,18 @@ func (f *fakePOSStore) UpdateService(ctx context.Context, salonID string, ownerU
 	f.serviceUpdateDetails.serviceID = serviceID
 	f.serviceUpdateDetails.input = input
 	return &Service{ID: serviceID, SalonID: salonID, Name: input.Name, DurationMinutes: input.DurationMinutes, Active: input.Active}, nil
+}
+
+func (f *fakePOSStore) UpdateServiceOwnerControls(ctx context.Context, salonID string, ownerUserID string, serviceID string, input ServiceOwnerControlsMutation) (*Service, error) {
+	f.serviceOwnerControls.salonID = salonID
+	f.serviceOwnerControls.ownerUserID = ownerUserID
+	f.serviceOwnerControls.serviceID = serviceID
+	f.serviceOwnerControls.input = input
+	return &Service{
+		ID: serviceID, SalonID: salonID, POSProvider: ProviderSquare, POSServiceID: "sq_service_1",
+		Name: "Gel Manicure", DurationMinutes: 45, Active: true, Source: EntitySourceImported,
+		AIDescription: input.AIDescription, ServiceCategoryID: input.ServiceCategoryID,
+	}, nil
 }
 
 func (f *fakePOSStore) ArchiveService(ctx context.Context, salonID string, ownerUserID string, serviceID string) (*Service, error) {
