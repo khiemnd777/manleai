@@ -157,19 +157,20 @@ func TestNormalizeCreateDefaultsOwnerManualAndTrimsOperationContract(t *testing.
 	}
 }
 
-func TestValidSchedulingAuthorityAcceptsOnlyProtocolTokens(t *testing.T) {
+func TestValidSchedulingAuthorityAllowsOnlySafeTenantOnboardingAuthority(t *testing.T) {
+	if !validSchedulingAuthority(booking.SchedulingAuthorityOwnerManual) {
+		t.Fatal("owner_manual must remain the safe onboarding authority")
+	}
 	for _, authority := range []string{
-		booking.SchedulingAuthorityOwnerManual,
+		"",
 		booking.SchedulingAuthorityManleAICalendar,
 		booking.SchedulingAuthorityExternalProvider,
+		"square",
+		"manual",
+		"OWNER_MANUAL",
 	} {
-		if !validSchedulingAuthority(authority) {
-			t.Fatalf("valid authority %q was rejected", authority)
-		}
-	}
-	for _, authority := range []string{"", "square", "manual", "OWNER_MANUAL"} {
 		if validSchedulingAuthority(authority) {
-			t.Fatalf("unsupported authority %q was accepted", authority)
+			t.Fatalf("tenant onboarding authority %q was accepted", authority)
 		}
 	}
 }

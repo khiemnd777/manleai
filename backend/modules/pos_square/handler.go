@@ -90,16 +90,16 @@ func NewHandler(service *Service, cfg config.Config) *Handler {
 }
 
 func (h *Handler) ConnectURL(c *fiber.Ctx) error {
-	salonID := c.Query("salon_id")
+	salonID := strings.TrimSpace(c.Query("salon_id"))
 	if salonID == "" {
-		salonID = middleware.SalonID(c)
+		return explicitSquareSalonIDError(c)
 	}
 	res, err := h.service.ConnectURL(c.UserContext(), salonID, middleware.UserID(c))
 	if errors.Is(err, pos.ErrNotFound) {
 		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
 	}
 	if err != nil {
-		return respond.Error(c, fiber.StatusBadRequest, "SQUARE_CONNECT_URL_FAILED", err.Error())
+		return respond.Error(c, fiber.StatusBadRequest, "SQUARE_CONNECT_URL_FAILED", "Square connection could not be prepared.")
 	}
 	return respond.JSON(c, fiber.StatusOK, res)
 }
@@ -112,12 +112,12 @@ func (h *Handler) Callback(c *fiber.Ctx) error {
 	}
 	connection, err := h.service.HandleCallback(c.UserContext(), code, state, h.cfg.Square.RedirectURL)
 	if err != nil {
-		return respond.Error(c, fiber.StatusBadRequest, "SQUARE_CALLBACK_FAILED", err.Error())
+		return respond.Error(c, fiber.StatusBadRequest, "SQUARE_CALLBACK_FAILED", "Square connection could not be completed.")
 	}
 	if c.Query("format") == "json" {
 		return respond.JSON(c, fiber.StatusOK, connection)
 	}
-	redirect := h.cfg.FrontendURL + "/dashboard/integrations?square=connected&salon_id=" + connection.SalonID
+	redirect := h.cfg.FrontendURL + "/platform/tenants/" + connection.SalonID + "/technical?square=connected"
 	return c.Redirect(redirect, fiber.StatusFound)
 }
 
@@ -143,9 +143,9 @@ func (h *Handler) Webhook(c *fiber.Ctx) error {
 }
 
 func (h *Handler) Status(c *fiber.Ctx) error {
-	salonID := c.Query("salon_id")
+	salonID := strings.TrimSpace(c.Query("salon_id"))
 	if salonID == "" {
-		salonID = middleware.SalonID(c)
+		return explicitSquareSalonIDError(c)
 	}
 	res, err := h.service.Status(c.UserContext(), salonID, middleware.UserID(c))
 	if errors.Is(err, pos.ErrNotFound) {
@@ -157,10 +157,21 @@ func (h *Handler) Status(c *fiber.Ctx) error {
 	return respond.JSON(c, fiber.StatusOK, res)
 }
 
+func (h *Handler) BusinessReadiness(c *fiber.Ctx) error {
+	readiness, err := h.service.Readiness(c.UserContext(), c.Params("id"), middleware.UserID(c))
+	if errors.Is(err, pos.ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusServiceUnavailable, "SCHEDULING_READINESS_UNAVAILABLE", "Scheduling readiness is temporarily unavailable.")
+	}
+	return respond.JSON(c, fiber.StatusOK, businessReadinessResponse(readiness))
+}
+
 func (h *Handler) Locations(c *fiber.Ctx) error {
-	salonID := c.Query("salon_id")
+	salonID := strings.TrimSpace(c.Query("salon_id"))
 	if salonID == "" {
-		salonID = middleware.SalonID(c)
+		return explicitSquareSalonIDError(c)
 	}
 	locations, err := h.service.Locations(c.UserContext(), salonID, middleware.UserID(c))
 	if errors.Is(err, pos.ErrNotFound) {
@@ -170,7 +181,7 @@ func (h *Handler) Locations(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusConflict, "SQUARE_NOT_CONNECTED", "Square is not connected.")
 	}
 	if err != nil {
-		return respond.Error(c, fiber.StatusBadGateway, "SQUARE_LOCATIONS_FAILED", err.Error())
+		return respond.Error(c, fiber.StatusBadGateway, "SQUARE_LOCATIONS_FAILED", "Square locations could not be loaded.")
 	}
 	return respond.JSON(c, fiber.StatusOK, fiber.Map{"locations": locations})
 }
@@ -185,15 +196,16 @@ func (h *Handler) SelectLocation(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
 	}
+	req.SalonID = strings.TrimSpace(req.SalonID)
 	if req.SalonID == "" {
-		req.SalonID = middleware.SalonID(c)
+		return explicitSquareSalonIDError(c)
 	}
 	connection, err := h.service.SelectLocation(c.UserContext(), req.SalonID, middleware.UserID(c), req.LocationID)
 	if errors.Is(err, pos.ErrNotFound) {
 		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
 	}
 	if err != nil {
-		return respond.Error(c, fiber.StatusBadRequest, "SQUARE_LOCATION_FAILED", err.Error())
+		return respond.Error(c, fiber.StatusBadRequest, "SQUARE_LOCATION_FAILED", "The Square location could not be selected.")
 	}
 	return respond.JSON(c, fiber.StatusOK, connection)
 }
@@ -204,9 +216,12 @@ type syncRequest struct {
 
 func (h *Handler) Sync(c *fiber.Ctx) error {
 	var req syncRequest
-	_ = c.BodyParser(&req)
+	if err := c.BodyParser(&req); err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
+	}
+	req.SalonID = strings.TrimSpace(req.SalonID)
 	if req.SalonID == "" {
-		req.SalonID = middleware.SalonID(c)
+		return explicitSquareSalonIDError(c)
 	}
 	summary, err := h.service.Sync(c.UserContext(), req.SalonID, middleware.UserID(c))
 	if err != nil {
@@ -219,7 +234,7 @@ func (h *Handler) Sync(c *fiber.Ctx) error {
 		if errors.Is(err, pos.ErrStaleProviderSnapshot) {
 			return respond.Error(c, fiber.StatusConflict, "SQUARE_SYNC_STALE", "The Square location or sync generation changed while this sync was running. Run Sync again for the selected location.")
 		}
-		return respond.Error(c, fiber.StatusBadGateway, "SQUARE_SYNC_FAILED", err.Error())
+		return respond.Error(c, fiber.StatusBadGateway, "SQUARE_SYNC_FAILED", "Square sync could not be completed.")
 	}
 	return respond.JSON(c, fiber.StatusOK, fiber.Map{"ok": true, "summary": summary})
 }
@@ -232,8 +247,9 @@ func (h *Handler) TestBooking(c *fiber.Ctx) error {
 	if strings.TrimSpace(req.OperationKey) == "" {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "operation_key is required for a retry-safe test booking request.")
 	}
+	req.SalonID = strings.TrimSpace(req.SalonID)
 	if req.SalonID == "" {
-		req.SalonID = middleware.SalonID(c)
+		return explicitSquareSalonIDError(c)
 	}
 	res, err := h.service.CreateTestBooking(c.UserContext(), req.SalonID, middleware.UserID(c), req)
 	if handled, handleErr := h.handleGateError(c, err, "SQUARE_TEST_BOOKING_FAILED"); handled {
@@ -257,8 +273,9 @@ func (h *Handler) CancelTestBooking(c *fiber.Ctx) error {
 	if strings.TrimSpace(req.OperationKey) == "" {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "operation_key is required for a retry-safe test cancellation request.")
 	}
+	req.SalonID = strings.TrimSpace(req.SalonID)
 	if req.SalonID == "" {
-		req.SalonID = middleware.SalonID(c)
+		return explicitSquareSalonIDError(c)
 	}
 	res, err := h.service.CancelTestBooking(c.UserContext(), req.SalonID, middleware.UserID(c), req)
 	if handled, handleErr := h.handleGateError(c, err, "SQUARE_CANCEL_TEST_BOOKING_FAILED"); handled {
@@ -276,9 +293,12 @@ func (h *Handler) CancelTestBooking(c *fiber.Ctx) error {
 
 func (h *Handler) EnableAIBooking(c *fiber.Ctx) error {
 	var req GateRequest
-	_ = c.BodyParser(&req)
+	if err := c.BodyParser(&req); err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
+	}
+	req.SalonID = strings.TrimSpace(req.SalonID)
 	if req.SalonID == "" {
-		req.SalonID = middleware.SalonID(c)
+		return explicitSquareSalonIDError(c)
 	}
 	res, err := h.service.EnableAIBooking(c.UserContext(), req.SalonID, middleware.UserID(c))
 	if handled, handleErr := h.handleGateError(c, err, "ENABLE_AI_BOOKING_FAILED"); handled {
@@ -289,15 +309,22 @@ func (h *Handler) EnableAIBooking(c *fiber.Ctx) error {
 
 func (h *Handler) DisableAIBooking(c *fiber.Ctx) error {
 	var req GateRequest
-	_ = c.BodyParser(&req)
+	if err := c.BodyParser(&req); err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
+	}
+	req.SalonID = strings.TrimSpace(req.SalonID)
 	if req.SalonID == "" {
-		req.SalonID = middleware.SalonID(c)
+		return explicitSquareSalonIDError(c)
 	}
 	res, err := h.service.DisableAIBooking(c.UserContext(), req.SalonID, middleware.UserID(c))
 	if handled, handleErr := h.handleGateError(c, err, "DISABLE_AI_BOOKING_FAILED"); handled {
 		return handleErr
 	}
 	return respond.JSON(c, fiber.StatusOK, res)
+}
+
+func explicitSquareSalonIDError(c *fiber.Ctx) error {
+	return respond.Error(c, fiber.StatusBadRequest, "SALON_ID_REQUIRED", "An explicit salon_id is required for this Square operation.")
 }
 
 func (h *Handler) handleGateError(c *fiber.Ctx, err error, internalCode string) (bool, error) {

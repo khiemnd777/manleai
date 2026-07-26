@@ -1,5 +1,6 @@
-import { apiBaseUrl } from "@/lib/config/env";
-import { browserSession } from "@/lib/api/browser-session";
+import { apiBaseUrl } from "../config/env";
+import { browserSession } from "./browser-session";
+import { storedActiveTenantSalonID } from "./tenant-context";
 
 export type ApiError = {
   code: string;
@@ -79,6 +80,10 @@ async function sendRequest(path: string, init: RequestInit, accessToken = getAcc
     headers.set("Authorization", `Bearer ${accessToken}`);
   } else {
     headers.delete("Authorization");
+  }
+  const activeTenantSalonID = storedActiveTenantSalonID();
+  if (activeTenantSalonID && !path.startsWith("/api/platform/")) {
+    headers.set("X-Tenant-Salon-ID", activeTenantSalonID);
   }
 
   return fetch(`${apiBaseUrl}${path}`, {

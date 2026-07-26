@@ -27,6 +27,24 @@ func TestRateLimitDefaultsFailClosedInProductionAndRemainOptInLocally(t *testing
 	}
 }
 
+func TestDatabaseRLSDefaultsFailClosedInProductionAndRemainOptInLocally(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("DATABASE_RLS_ENFORCED", "false")
+	if !Load().DatabaseRLSEnforced {
+		t.Fatal("production RLS enforcement must not be disabled by environment override")
+	}
+
+	t.Setenv("APP_ENV", "local")
+	t.Setenv("DATABASE_RLS_ENFORCED", "")
+	if Load().DatabaseRLSEnforced {
+		t.Fatal("local RLS enforcement must remain opt-in")
+	}
+	t.Setenv("DATABASE_RLS_ENFORCED", "true")
+	if !Load().DatabaseRLSEnforced {
+		t.Fatal("explicit local RLS enforcement was ignored")
+	}
+}
+
 func TestNormalizeOpenAIRealtimeModelDefaultsAndMigratesLegacyPreview(t *testing.T) {
 	if got := NormalizeOpenAIRealtimeModel(""); got != DefaultOpenAIRealtimeModel {
 		t.Fatalf("blank model = %q, want %q", got, DefaultOpenAIRealtimeModel)

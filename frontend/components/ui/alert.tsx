@@ -1,13 +1,16 @@
 import { AlertCircle, CheckCircle2 } from "lucide-react";
+import type { ReactNode } from "react";
 
 export function Alert({
   type = "error",
   title,
-  message
+  message,
+  children
 }: {
   type?: "error" | "success";
   title: string;
   message: string;
+  children?: ReactNode;
 }) {
   const Icon = type === "success" ? CheckCircle2 : AlertCircle;
   const classes =
@@ -20,8 +23,8 @@ export function Alert({
       <div>
         <div className="font-semibold">{title}</div>
         <div className="mt-1 leading-6">{message}</div>
+        {children}
       </div>
     </div>
   );
 }
-

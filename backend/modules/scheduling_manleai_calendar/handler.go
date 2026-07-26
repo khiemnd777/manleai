@@ -16,8 +16,15 @@ func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
 }
 
+func salonIDFromRequest(c *fiber.Ctx) string {
+	if value := c.Params("tenant_id"); value != "" {
+		return value
+	}
+	return c.Params("id")
+}
+
 func (h *Handler) GetAggregate(c *fiber.Ctx) error {
-	result, err := h.service.GetAggregate(c.UserContext(), c.Params("id"), middleware.UserID(c))
+	result, err := h.service.GetAggregate(c.UserContext(), salonIDFromRequest(c), middleware.UserID(c))
 	return respondCalendar(c, fiber.StatusOK, result, err)
 }
 
@@ -26,7 +33,7 @@ func (h *Handler) PutConfig(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return invalidBody(c)
 	}
-	result, err := h.service.PutConfig(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
+	result, err := h.service.PutConfig(c.UserContext(), salonIDFromRequest(c), middleware.UserID(c), req)
 	return respondCalendar(c, fiber.StatusOK, result, err)
 }
 
@@ -35,12 +42,12 @@ func (h *Handler) PutHours(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return invalidBody(c)
 	}
-	result, err := h.service.PutHours(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
+	result, err := h.service.PutHours(c.UserContext(), salonIDFromRequest(c), middleware.UserID(c), req)
 	return respondCalendar(c, fiber.StatusOK, result, err)
 }
 
 func (h *Handler) GetStaff(c *fiber.Ctx) error {
-	result, err := h.service.GetStaffProfile(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("staff_id"))
+	result, err := h.service.GetStaffProfile(c.UserContext(), salonIDFromRequest(c), middleware.UserID(c), c.Params("staff_id"))
 	return respondCalendar(c, fiber.StatusOK, result, err)
 }
 
@@ -49,12 +56,12 @@ func (h *Handler) PutStaff(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return invalidBody(c)
 	}
-	result, err := h.service.PutStaffProfile(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("staff_id"), req)
+	result, err := h.service.PutStaffProfile(c.UserContext(), salonIDFromRequest(c), middleware.UserID(c), c.Params("staff_id"), req)
 	return respondCalendar(c, fiber.StatusOK, result, err)
 }
 
 func (h *Handler) GetService(c *fiber.Ctx) error {
-	result, err := h.service.GetServicePolicy(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("service_id"))
+	result, err := h.service.GetServicePolicy(c.UserContext(), salonIDFromRequest(c), middleware.UserID(c), c.Params("service_id"))
 	return respondCalendar(c, fiber.StatusOK, result, err)
 }
 
@@ -63,12 +70,12 @@ func (h *Handler) PutService(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return invalidBody(c)
 	}
-	result, err := h.service.PutServicePolicy(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("service_id"), req)
+	result, err := h.service.PutServicePolicy(c.UserContext(), salonIDFromRequest(c), middleware.UserID(c), c.Params("service_id"), req)
 	return respondCalendar(c, fiber.StatusOK, result, err)
 }
 
 func (h *Handler) ListResources(c *fiber.Ctx) error {
-	result, err := h.service.ListResources(c.UserContext(), c.Params("id"), middleware.UserID(c))
+	result, err := h.service.ListResources(c.UserContext(), salonIDFromRequest(c), middleware.UserID(c))
 	return respondCalendar(c, fiber.StatusOK, result, err)
 }
 
@@ -77,7 +84,7 @@ func (h *Handler) CreateResource(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return invalidBody(c)
 	}
-	result, err := h.service.CreateResource(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
+	result, err := h.service.CreateResource(c.UserContext(), salonIDFromRequest(c), middleware.UserID(c), req)
 	return respondCalendar(c, fiber.StatusCreated, result, err)
 }
 
@@ -86,7 +93,7 @@ func (h *Handler) UpdateResource(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return invalidBody(c)
 	}
-	result, err := h.service.UpdateResource(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("resource_id"), req)
+	result, err := h.service.UpdateResource(c.UserContext(), salonIDFromRequest(c), middleware.UserID(c), c.Params("resource_id"), req)
 	return respondCalendar(c, fiber.StatusOK, result, err)
 }
 
@@ -95,7 +102,7 @@ func (h *Handler) ArchiveResource(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return invalidBody(c)
 	}
-	result, err := h.service.ArchiveResource(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("resource_id"), req)
+	result, err := h.service.ArchiveResource(c.UserContext(), salonIDFromRequest(c), middleware.UserID(c), c.Params("resource_id"), req)
 	return respondCalendar(c, fiber.StatusOK, result, err)
 }
 
@@ -104,7 +111,7 @@ func (h *Handler) CreateException(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return invalidBody(c)
 	}
-	result, err := h.service.CreateException(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
+	result, err := h.service.CreateException(c.UserContext(), salonIDFromRequest(c), middleware.UserID(c), req)
 	return respondCalendar(c, fiber.StatusCreated, result, err)
 }
 
@@ -113,7 +120,7 @@ func (h *Handler) CancelException(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return invalidBody(c)
 	}
-	result, err := h.service.CancelException(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("exception_id"), req)
+	result, err := h.service.CancelException(c.UserContext(), salonIDFromRequest(c), middleware.UserID(c), c.Params("exception_id"), req)
 	return respondCalendar(c, fiber.StatusOK, result, err)
 }
 
@@ -122,7 +129,7 @@ func (h *Handler) Activate(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return invalidBody(c)
 	}
-	result, err := h.service.Activate(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
+	result, err := h.service.Activate(c.UserContext(), salonIDFromRequest(c), middleware.UserID(c), req)
 	return respondCalendar(c, fiber.StatusOK, result, err)
 }
 

@@ -20,7 +20,8 @@ import {
   replaceManleAICalendarHours,
   salonLocalDateTimeToISO,
   updateManleAICalendarConfig,
-  updateManleAICalendarResource
+  updateManleAICalendarResource,
+  type InternalCalendarSurface
 } from "@/lib/api/internal-calendar";
 import type {
   ManleAICalendarAggregate,
@@ -68,11 +69,12 @@ type ExceptionForm = {
 type InternalCalendarSetupProps = {
   salonID: string;
   timezone: string;
+  surface?: InternalCalendarSurface;
 };
 
 const dayLabels = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
-export function InternalCalendarSetup({ salonID, timezone }: InternalCalendarSetupProps) {
+export function InternalCalendarSetup({ salonID, timezone, surface = "tenant" }: InternalCalendarSetupProps) {
   const actionKeysRef = useRef(new Map<string, string>());
   const [calendar, setCalendar] = useState<ManleAICalendarAggregate | null>(null);
   const [loading, setLoading] = useState(true);
@@ -97,14 +99,14 @@ export function InternalCalendarSetup({ salonID, timezone }: InternalCalendarSet
     if (!silent) setLoading(true);
     setLoadError("");
     try {
-      const response = await getManleAICalendar(salonID);
+      const response = await getManleAICalendar(salonID, surface);
       applyCalendar(response.manleai_calendar);
     } catch (loadFailure) {
       setLoadError(loadFailure instanceof Error ? loadFailure.message : "Could not load ManleAI Calendar setup.");
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [applyCalendar, salonID]);
+  }, [applyCalendar, salonID, surface]);
 
   useEffect(() => {
     void load();
@@ -181,7 +183,7 @@ export function InternalCalendarSetup({ salonID, timezone }: InternalCalendarSet
         max_party_size: Number(configForm.maxPartySize),
         default_buffer_before_minutes: Number(configForm.defaultBufferBeforeMinutes),
         default_buffer_after_minutes: Number(configForm.defaultBufferAfterMinutes)
-      })
+      }, surface)
     );
   }
 
@@ -220,7 +222,7 @@ export function InternalCalendarSetup({ salonID, timezone }: InternalCalendarSet
         action_key: key,
         expected_config_version: expectedVersion,
         periods
-      })
+      }, surface)
     );
   }
 
@@ -256,8 +258,8 @@ export function InternalCalendarSetup({ salonID, timezone }: InternalCalendarSet
           capacity: Number(resourceForm.capacity)
         };
         return existingID
-          ? updateManleAICalendarResource(salonID, existingID, input)
-          : createManleAICalendarResource(salonID, input);
+          ? updateManleAICalendarResource(salonID, existingID, input, surface)
+          : createManleAICalendarResource(salonID, input, surface);
       }
     );
   }
@@ -267,7 +269,7 @@ export function InternalCalendarSetup({ salonID, timezone }: InternalCalendarSet
       archiveManleAICalendarResource(salonID, resource.id, {
         action_key: key,
         expected_config_version: expectedVersion
-      })
+      }, surface)
     );
   }
 
@@ -307,7 +309,7 @@ export function InternalCalendarSetup({ salonID, timezone }: InternalCalendarSet
         capacity_override:
           exceptionForm.effect === "capacity_override" ? nullableNumber(exceptionForm.capacityOverride) : null,
         reason: exceptionForm.reason.trim() || undefined
-      })
+      }, surface)
     );
   }
 
@@ -316,7 +318,7 @@ export function InternalCalendarSetup({ salonID, timezone }: InternalCalendarSet
       cancelManleAICalendarException(salonID, exceptionID, {
         action_key: key,
         expected_config_version: expectedVersion
-      })
+      }, surface)
     );
   }
 
@@ -325,7 +327,7 @@ export function InternalCalendarSetup({ salonID, timezone }: InternalCalendarSet
       activateManleAICalendar(salonID, {
         action_key: key,
         expected_config_version: expectedVersion
-      })
+      }, surface)
     );
   }
 

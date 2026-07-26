@@ -36,10 +36,15 @@ func TestRequireAuthUsesCurrentServerOwnedPrincipal(t *testing.T) {
 	app := fiber.New()
 	api := app.Group("/api", WithAccessPrincipalResolver(resolver))
 	api.Get("/protected", RequireAuth(secret), func(c *fiber.Ctx) error {
+		actor := Actor(c)
 		return c.JSON(fiber.Map{
-			"user_id":  UserID(c),
-			"salon_id": SalonID(c),
-			"roles":    c.Locals(LocalRoles),
+			"user_id":         UserID(c),
+			"salon_id":        SalonID(c),
+			"roles":           Roles(c),
+			"actor_user_id":   actor.UserID,
+			"actor_salon_id":  actor.PrimarySalonID,
+			"actor_has_staff": actor.HasRole("staff"),
+			"actor_has_owner": actor.HasRole("salon_owner"),
 		})
 	})
 
@@ -54,6 +59,8 @@ func TestRequireAuthUsesCurrentServerOwnedPrincipal(t *testing.T) {
 	})
 	request := httptest.NewRequest("GET", "/api/protected", nil)
 	request.Header.Set("Authorization", "Bearer "+signed)
+	request.Header.Set("X-Salon-ID", "caller-selected-salon")
+	request.Header.Set("X-Platform-Role", "platform_admin")
 	response, err := app.Test(request)
 	if err != nil {
 		t.Fatalf("protected request: %v", err)
@@ -63,15 +70,22 @@ func TestRequireAuthUsesCurrentServerOwnedPrincipal(t *testing.T) {
 		t.Fatalf("status=%d, want %d", response.StatusCode, fiber.StatusOK)
 	}
 	var body struct {
-		UserID  string   `json:"user_id"`
-		SalonID string   `json:"salon_id"`
-		Roles   []string `json:"roles"`
+		UserID        string   `json:"user_id"`
+		SalonID       string   `json:"salon_id"`
+		Roles         []string `json:"roles"`
+		ActorUserID   string   `json:"actor_user_id"`
+		ActorSalonID  string   `json:"actor_salon_id"`
+		ActorHasStaff bool     `json:"actor_has_staff"`
+		ActorHasOwner bool     `json:"actor_has_owner"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if body.UserID != "user-1" || body.SalonID != "current-salon" || len(body.Roles) != 1 || body.Roles[0] != "staff" {
 		t.Fatalf("resolved principal=%#v, want current database-owned tenant and roles", body)
+	}
+	if body.ActorUserID != body.UserID || body.ActorSalonID != body.SalonID || !body.ActorHasStaff || body.ActorHasOwner {
+		t.Fatalf("actor context=%#v, want server-owned principal projection", body)
 	}
 	if resolver.calls != 1 {
 		t.Fatalf("resolver calls=%d, want 1", resolver.calls)

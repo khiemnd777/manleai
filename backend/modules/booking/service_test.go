@@ -679,7 +679,7 @@ func TestCreateDoesNotConfirmAcceptedProviderResponseWithoutBookingID(t *testing
 	if attempt.POSBookingID != "" || attempt.Appointment != nil || store.confirmed != nil {
 		t.Fatalf("accepted-looking response without booking ID must remain unconfirmed: %#v", attempt)
 	}
-	if store.fallback == nil || store.fallback.ErrorMessage != "pos booking id was not returned" {
+	if store.fallback == nil || store.fallback.ErrorMessage != pos.SafeErrorMessage(pos.ErrorBookingFailed) {
 		t.Fatalf("fallback = %#v, want missing booking ID evidence", store.fallback)
 	}
 }
@@ -739,7 +739,7 @@ func TestCreateStoresFallbackWhenPOSBookingVersionMissing(t *testing.T) {
 	if store.confirmed != nil {
 		t.Fatalf("confirmed booking should not be persisted without POS version")
 	}
-	if store.fallback == nil || store.fallback.ErrorMessage != "pos booking version was not returned" {
+	if store.fallback == nil || store.fallback.ErrorMessage != pos.SafeErrorMessage(pos.ErrorBookingFailed) {
 		t.Fatalf("fallback = %#v, want missing version", store.fallback)
 	}
 }
@@ -1953,6 +1953,9 @@ func TestCancelStoresFallbackWhenPOSFails(t *testing.T) {
 	}
 	if store.actionFallback.ErrorCode != pos.ErrorPermissionDenied {
 		t.Fatalf("error code = %s, want %s", store.actionFallback.ErrorCode, pos.ErrorPermissionDenied)
+	}
+	if store.actionFallback.ErrorMessage != pos.SafeErrorMessage(pos.ErrorPermissionDenied) || strings.Contains(store.actionFallback.ErrorMessage, "square permission denied") {
+		t.Fatalf("error message = %q, want sanitized stable copy", store.actionFallback.ErrorMessage)
 	}
 	if fallback.RetryPolicy != RetryPolicySafe || !fallback.CanRetry || fallback.Reconciliation != ReconciliationNotRequired {
 		t.Fatalf("cancel fallback policy = %#v, want retry-safe without reconciliation", fallback)

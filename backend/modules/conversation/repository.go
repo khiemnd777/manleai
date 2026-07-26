@@ -137,7 +137,7 @@ func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, owner
 		FROM salons s
 		LEFT JOIN salon_settings ss ON ss.salon_id = s.id
 		WHERE s.id = $1
-		  AND s.owner_user_id = $2
+		  AND public.has_active_tenant_membership(s.id, $2::uuid)
 	`, salonID, ownerUserID).Scan(
 		&cfg.SalonName,
 		&cfg.Timezone,
@@ -302,7 +302,7 @@ func (r *Repository) GetSessionForOwner(ctx context.Context, salonID string, own
 	session, err := r.getSession(ctx, `
 		WHERE cs.id = $1
 		  AND cs.salon_id = $2
-		  AND salon.owner_user_id = $3
+		  AND public.has_active_tenant_membership(salon.id, $3::uuid)
 	`, sessionID, salonID, ownerUserID)
 	if err != nil {
 		return nil, err
@@ -324,7 +324,7 @@ func (r *Repository) GetSessionByTurnEventKey(ctx context.Context, salonID strin
 	session, err := r.getSession(ctx, `
 		WHERE cs.id = $1
 		  AND cs.salon_id = $2
-		  AND salon.owner_user_id = $3
+		  AND public.has_active_tenant_membership(salon.id, $3::uuid)
 		  AND EXISTS (
 		    SELECT 1
 		    FROM call_transcript_messages ctm
@@ -403,7 +403,7 @@ func (r *Repository) turnReplayAIMessage(ctx context.Context, salonID string, se
 func (r *Repository) ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int, offset int) ([]Session, error) {
 	rows, err := r.db.QueryContext(ctx, sessionSelect()+`
 		WHERE cs.salon_id = $1
-		  AND salon.owner_user_id = $2
+		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 		  AND cs.lifecycle_status = $3
 		ORDER BY cs.updated_at DESC, cs.id DESC
 		LIMIT $4
@@ -456,7 +456,7 @@ func (r *Repository) ListWebhookEvents(ctx context.Context, salonID string, owne
 			)
 			WHERE cs.id = $1
 			  AND cs.salon_id = $2
-			  AND salon.owner_user_id = $3
+			  AND public.has_active_tenant_membership(salon.id, $3::uuid)
 			  AND v.event_type IN ('realtime_connected', 'realtime_timing', 'realtime_failed', 'realtime_stopped')
 			ORDER BY v.created_at DESC, v.id DESC
 			LIMIT $4
@@ -503,7 +503,7 @@ func (r *Repository) ArchiveSession(ctx context.Context, salonID string, ownerUs
 		WHERE cs.id = $2
 		  AND cs.salon_id = $3
 		  AND salon.id = cs.salon_id
-		  AND salon.owner_user_id = $4
+		  AND public.has_active_tenant_membership(salon.id, $4::uuid)
 		  AND cs.lifecycle_status <> $5
 	`, LifecycleArchived, sessionID, salonID, ownerUserID, LifecycleRedacted)
 	if err != nil {
@@ -536,7 +536,7 @@ func (r *Repository) RedactSession(ctx context.Context, salonID string, ownerUse
 	session, err := scanSession(tx.QueryRowContext(ctx, sessionSelect()+`
 		WHERE cs.id = $1
 		  AND cs.salon_id = $2
-		  AND salon.owner_user_id = $3
+		  AND public.has_active_tenant_membership(salon.id, $3::uuid)
 		FOR UPDATE OF cs
 	`, sessionID, salonID, ownerUserID))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1219,7 +1219,7 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (session *
 		JOIN salons s ON s.id = cs.salon_id
 		WHERE cs.id = $1
 		  AND cs.salon_id = $2
-		  AND s.owner_user_id = $3
+			  AND public.has_active_tenant_membership(s.id, $3::uuid)
 		  AND cs.lifecycle_status <> $4
 		FOR UPDATE
 		`, record.Session.ID, record.SalonID, record.OwnerUserID, LifecycleRedacted).Scan(&lockedStateRevision); err != nil {
@@ -1590,7 +1590,7 @@ func (r *Repository) ListPartyBookingRequests(ctx context.Context, salonID strin
 		FROM party_booking_requests req
 		JOIN salons salon ON salon.id = req.salon_id
 		WHERE req.salon_id = $1
-		  AND salon.owner_user_id = $2
+		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 			`+statusFilter+`
 			ORDER BY req.created_at DESC
 			LIMIT $3
@@ -1623,7 +1623,7 @@ func (r *Repository) UpdatePartyBookingRequestStatus(ctx context.Context, salonI
 		WHERE req.id = $3
 		  AND req.salon_id = $4
 		  AND salon.id = req.salon_id
-		  AND salon.owner_user_id = $2
+		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 		RETURNING req.id::text, req.salon_id::text, req.call_session_id::text, req.event_key, req.status,
 		          COALESCE(req.party_size, 0), COALESCE(req.representative_name, ''), COALESCE(req.representative_phone, ''),
 		          COALESCE(req.requested_date::text, ''), COALESCE(req.requested_time_window, ''),

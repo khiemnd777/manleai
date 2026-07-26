@@ -28,12 +28,14 @@ type SquareWebhookOperationsProps = {
   salonID: string;
   enabled: boolean;
   webhookConfigured: boolean;
+  surface?: "tenant" | "platform";
 };
 
 export function SquareWebhookOperations({
   salonID,
   enabled,
-  webhookConfigured
+  webhookConfigured,
+  surface = "tenant"
 }: SquareWebhookOperationsProps) {
   const listRequestRef = useRef(0);
   const detailRequestRef = useRef(0);
@@ -64,7 +66,7 @@ export function SquareWebhookOperations({
     setLoading(true);
     setError("");
     try {
-      const response = await listSquareWebhookEvents(salonID, status, pageSize, offset);
+      const response = await listSquareWebhookEvents(salonID, status, pageSize, offset, surface);
       if (requestID !== listRequestRef.current) return;
       setRows(response.events);
       setMetrics(response.metrics);
@@ -76,7 +78,7 @@ export function SquareWebhookOperations({
     } finally {
       if (requestID === listRequestRef.current) setLoading(false);
     }
-  }, [enabled, offset, salonID, status, webhookConfigured]);
+  }, [enabled, offset, salonID, status, surface, webhookConfigured]);
 
   useEffect(() => {
     listRequestRef.current += 1;
@@ -118,7 +120,7 @@ export function SquareWebhookOperations({
     setRequeueError("");
     const requestID = ++detailRequestRef.current;
     try {
-      const response = await getSquareWebhookEvent(salonID, row.id);
+      const response = await getSquareWebhookEvent(salonID, row.id, surface);
       if (requestID === detailRequestRef.current) setSelected(response.event);
     } catch (err) {
       if (requestID === detailRequestRef.current) {
@@ -151,7 +153,7 @@ export function SquareWebhookOperations({
     setRequeueing(true);
     setRequeueError("");
     try {
-      const result = await requeueSquareWebhookEvent(salonID, selected.id, intent.actionKey);
+      const result = await requeueSquareWebhookEvent(salonID, selected.id, intent.actionKey, surface);
       setSelected(result.event);
       setRequeueUnknown(false);
       requeueIntentRef.current = null;

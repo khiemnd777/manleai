@@ -33,7 +33,7 @@ func (r *Repository) ResolveAvailabilityQuoteSchedulingAuthority(ctx context.Con
 		FROM availability_quotes quote
 		JOIN salons salon ON salon.id = quote.salon_id
 		WHERE quote.salon_id = $1
-		  AND salon.owner_user_id = $2
+		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 		  AND quote.id::text = $3
 	`, salonID, ownerUserID, strings.TrimSpace(quoteID)).Scan(&authority)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -60,14 +60,14 @@ func (r *Repository) FindOperationSchedulingOrigin(ctx context.Context, salonID 
 			FROM booking_attempts attempt
 			JOIN salons salon ON salon.id = attempt.salon_id
 			WHERE attempt.salon_id = $1
-			  AND salon.owner_user_id = $2
+			  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 			  AND attempt.operation_key = $3
 			UNION ALL
 			SELECT 'scheduling_request', request.scheduling_authority, request.target_scheduling_authority
 			FROM scheduling_requests request
 			JOIN salons salon ON salon.id = request.salon_id
 			WHERE request.salon_id = $1
-			  AND salon.owner_user_id = $2
+			  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 			  AND request.operation_key = $3
 	`, salonID, ownerUserID, operationKey)
 	if err != nil {
@@ -112,7 +112,7 @@ func (r *Repository) ResolveAttemptSchedulingAuthority(ctx context.Context, salo
 		FROM booking_attempts attempt
 		JOIN salons salon ON salon.id = attempt.salon_id
 		WHERE attempt.salon_id = $1
-		  AND salon.owner_user_id = $2
+		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 		  AND attempt.id::text = $3
 	`, salonID, ownerUserID, strings.TrimSpace(attemptID)).Scan(&authority)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -131,7 +131,7 @@ func (r *Repository) ResolveAvailabilityRetrySchedulingAuthority(ctx context.Con
 		FROM booking_attempts attempt
 		JOIN salons salon ON salon.id = attempt.salon_id
 		WHERE attempt.salon_id = $1
-		  AND salon.owner_user_id = $2
+		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 		  AND attempt.id::text = $3
 		  AND attempt.scheduling_authority = 'external_provider'
 		  AND COALESCE(attempt.operation_type, 'book') = 'book'
@@ -152,7 +152,7 @@ func (r *Repository) ResolveAppointmentSchedulingAuthority(ctx context.Context, 
 		FROM appointments appointment
 		JOIN salons salon ON salon.id = appointment.salon_id
 		WHERE appointment.salon_id = $1
-		  AND salon.owner_user_id = $2
+		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 		  AND appointment.id::text = $3
 	`, salonID, ownerUserID, strings.TrimSpace(appointmentID)).Scan(&authority)
 	if errors.Is(err, sql.ErrNoRows) {

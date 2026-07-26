@@ -1562,7 +1562,7 @@ func (s *Service) applyReplyGenerator(ctx context.Context, turn *TurnRecord, ses
 		turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{
 			"safe_reply":          safeReply,
 			"llm_guardrail":       "fallback_to_safe_reply",
-			"llm_error":           err.Error(),
+			"llm_error":           "reply generation failed",
 			"reply_source":        "safe_reply",
 			"next_required_field": nextRequired,
 		})

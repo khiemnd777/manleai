@@ -328,7 +328,7 @@ func (r *Repository) mutate(ctx context.Context, salonID string, ownerUserID str
 	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, reconciliationLockPrefix+salonID); err != nil {
 		return nil, false, err
 	}
-	if err = requireOwner(ctx, tx, salonID, ownerUserID); err != nil {
+	if err = requireCalendarActor(ctx, tx, salonID, ownerUserID); err != nil {
 		return nil, false, err
 	}
 	var storedFingerprint string
@@ -427,7 +427,11 @@ func loadAggregate(ctx context.Context, q dbReader, salonID string, ownerUserID 
 		SELECT salon.timezone, settings.scheduling_authority, settings.scheduling_authority_version
 		FROM salons salon
 		JOIN salon_settings settings ON settings.salon_id = salon.id
-		WHERE salon.id = $1 AND salon.owner_user_id = $2
+		WHERE salon.id = $1
+		  AND (
+		      public.has_active_tenant_membership(salon.id, $2::uuid)
+		      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'technical.read')
+		  )
 	`, salonID, ownerUserID).Scan(&aggregate.Timezone, &aggregate.SchedulingAuthority, &aggregate.AuthorityVersion); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -759,9 +763,19 @@ func loadExceptions(ctx context.Context, q dbReader, salonID string) ([]Calendar
 	return result, rows.Err()
 }
 
-func requireOwner(ctx context.Context, q dbReader, salonID string, ownerUserID string) error {
+func requireCalendarActor(ctx context.Context, q dbReader, salonID string, actorUserID string) error {
 	var exists bool
-	if err := q.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM salons WHERE id = $1 AND owner_user_id = $2)`, salonID, ownerUserID).Scan(&exists); err != nil {
+	if err := q.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM salons salon
+			WHERE salon.id = $1
+			  AND (
+			      public.has_active_tenant_membership(salon.id, $2::uuid)
+			      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'technical.write')
+			  )
+		)
+	`, salonID, actorUserID).Scan(&exists); err != nil {
 		return err
 	}
 	if !exists {

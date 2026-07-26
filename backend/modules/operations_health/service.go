@@ -11,6 +11,10 @@ type Store interface {
 	LoadStatus(ctx context.Context, salonID, ownerUserID string) ([]jobRecord, []queueRecord, error)
 }
 
+type platformStore interface {
+	LoadStatusForSalon(ctx context.Context, salonID string) ([]jobRecord, []queueRecord, string, error)
+}
+
 type Service struct {
 	store         Store
 	metricSources []TenantMetricSource
@@ -50,6 +54,25 @@ func (s *Service) Get(ctx context.Context, salonID, ownerUserID string) (*Status
 	if err != nil {
 		return nil, err
 	}
+	return s.buildStatus(ctx, salonID, ownerUserID, jobs, queues, false)
+}
+
+func (s *Service) GetForPlatform(ctx context.Context, salonID string) (*StatusResponse, error) {
+	if s == nil || s.store == nil || strings.TrimSpace(salonID) == "" {
+		return nil, ErrValidation
+	}
+	store, ok := s.store.(platformStore)
+	if !ok {
+		return nil, ErrValidation
+	}
+	jobs, queues, ownerUserID, err := store.LoadStatusForSalon(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	return s.buildStatus(ctx, salonID, ownerUserID, jobs, queues, true)
+}
+
+func (s *Service) buildStatus(ctx context.Context, salonID, ownerUserID string, jobs []jobRecord, queues []queueRecord, platform bool) (*StatusResponse, error) {
 	providerRelevant := false
 	for _, source := range s.metricSources {
 		if source == nil {
@@ -128,6 +151,19 @@ func (s *Service) Get(ctx context.Context, salonID, ownerUserID string) (*Status
 		}
 		response.Queues = append(response.Queues, queue)
 		response.Status = combineHealth(response.Status, queue.Status)
+	}
+	if platform {
+		operationsHref := "/platform/tenants/" + salonID + "/operations"
+		for i := range response.Jobs {
+			for j := range response.Jobs[i].Links {
+				response.Jobs[i].Links[j].Href = operationsHref
+			}
+		}
+		for i := range response.Queues {
+			for j := range response.Queues[i].Links {
+				response.Queues[i].Links[j].Href = operationsHref
+			}
+		}
 	}
 	return response, nil
 }

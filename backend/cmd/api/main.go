@@ -17,9 +17,10 @@ import (
 	"github.com/manleai/ai-receptionist/internal/middleware"
 	"github.com/manleai/ai-receptionist/internal/ratelimit"
 	"github.com/manleai/ai-receptionist/internal/respond"
+	"github.com/manleai/ai-receptionist/modules/access"
 	"github.com/manleai/ai-receptionist/modules/auth"
 	"github.com/manleai/ai-receptionist/modules/booking"
-	configtransfer "github.com/manleai/ai-receptionist/modules/config_transfer"
+	"github.com/manleai/ai-receptionist/modules/business"
 	"github.com/manleai/ai-receptionist/modules/conversation"
 	"github.com/manleai/ai-receptionist/modules/customer"
 	customernotification "github.com/manleai/ai-receptionist/modules/customer_notification"
@@ -36,6 +37,7 @@ import (
 	"github.com/manleai/ai-receptionist/modules/scheduling_external_provider"
 	manleaicalendar "github.com/manleai/ai-receptionist/modules/scheduling_manleai_calendar"
 	"github.com/manleai/ai-receptionist/modules/scheduling_owner_manual"
+	tenantruntime "github.com/manleai/ai-receptionist/modules/tenant_runtime"
 	"github.com/manleai/ai-receptionist/modules/training"
 	"github.com/manleai/ai-receptionist/modules/voice"
 	"github.com/manleai/ai-receptionist/modules/voice_openai"
@@ -47,18 +49,19 @@ func main() {
 	cfg := config.Load()
 	logg := logger.New(cfg.AppEnv)
 
-	db, err := database.Open(ctx, cfg.DatabaseURL)
+	db, err := database.OpenApplication(
+		ctx,
+		cfg.DatabaseURL,
+		cfg.MigrationDatabaseURL,
+		cfg.DatabaseRuntimeRole,
+		cfg.AutoMigrate,
+		cfg.DatabaseRLSEnforced,
+	)
 	if err != nil {
-		log.Fatalf("open database: %v", err)
+		log.Fatalf("prepare application database: %v", err)
 	}
 	defer db.Close()
-
-	if cfg.AutoMigrate {
-		if err := database.Migrate(ctx, db); err != nil {
-			log.Fatalf("run database migrations: %v", err)
-		}
-		logg.Info("database migrations ready")
-	}
+	logg.Info("database ready", "rls_enforced", cfg.DatabaseRLSEnforced)
 
 	cipher, err := encryption.NewTokenCipher(cfg.EncryptionKey)
 	if err != nil {
@@ -107,6 +110,16 @@ func main() {
 	authService := auth.NewService(authRepo, cfg)
 	api := app.Group("/api", middleware.WithAccessPrincipalResolver(authRepo))
 	auth.RegisterRoutes(api, auth.NewHandler(authService), cfg.JWTSecret)
+	accessRepo := access.NewRepository(db)
+	accessService := access.NewService(accessRepo)
+	access.RegisterRoutes(api, access.NewHandler(accessService), cfg.JWTSecret)
+	tenantRuntimeRepo := tenantruntime.NewRepository(db)
+	tenantRuntimeService := tenantruntime.NewService(tenantRuntimeRepo, accessService)
+	tenantruntime.RegisterPlatformRoutes(api, tenantruntime.NewHandler(tenantRuntimeService), cfg.JWTSecret)
+	businessRepo := business.NewRepository(db)
+	businessService := business.NewService(businessRepo, accessService)
+	business.RegisterTenantRoutes(api, business.NewHandler(businessService, access.SurfaceTenant), cfg.JWTSecret)
+	business.RegisterPlatformRoutes(api, business.NewHandler(businessService, access.SurfacePlatform), cfg.JWTSecret)
 
 	salonRepo := salon.NewRepository(db)
 	salonService := salon.NewService(salonRepo)
@@ -118,20 +131,21 @@ func main() {
 
 	integrationConfigRepo := integrationconfig.NewRepository(db)
 	integrationConfigService := integrationconfig.NewService(integrationConfigRepo, cipher, cfg)
-	integrationconfig.RegisterRoutes(api, integrationconfig.NewHandler(integrationConfigService), cfg.JWTSecret)
+	integrationconfig.RegisterPlatformRoutes(api, integrationconfig.NewPlatformHandler(integrationConfigService, accessService), cfg.JWTSecret)
 	notificationDeliveryRepo := notificationdelivery.NewRepository(db)
 	notificationDeliveryService := notificationdelivery.NewService(notificationDeliveryRepo)
-	notificationdelivery.RegisterRoutes(api, notificationdelivery.NewHandler(notificationDeliveryService), cfg.JWTSecret)
+	notificationdelivery.RegisterPlatformRoutes(api, notificationdelivery.NewPlatformHandler(notificationDeliveryService, accessService), cfg.JWTSecret)
 	customerNotificationRepo := customernotification.NewRepository(db)
 	customerNotificationService := customernotification.NewService(customerNotificationRepo)
 	customernotification.RegisterRoutes(api, customernotification.NewHandler(customerNotificationService), cfg.JWTSecret)
+	customernotification.RegisterPlatformRoutes(api, customernotification.NewPlatformHandler(customerNotificationService, accessService), cfg.JWTSecret)
 	callbackService := customernotification.NewCallbackMultiplexer(notificationDeliveryService, customerNotificationService)
 	notificationtwilio.RegisterRoutes(api, notificationtwilio.NewHandler(callbackService, integrationConfigService, customerNotificationService))
 
 	squareWebhookRepo := pos_square.NewWebhookRepository(db)
 	operationsHealthRepo := operationshealth.NewRepository(db)
 	operationsHealthService := operationshealth.NewService(operationsHealthRepo, squareWebhookRepo)
-	operationshealth.RegisterRoutes(api, operationshealth.NewHandler(operationsHealthService), cfg.JWTSecret)
+	operationshealth.RegisterPlatformRoutes(api, operationshealth.NewPlatformHandler(operationsHealthService, accessService), cfg.JWTSecret)
 
 	posRepo := pos.NewRepository(db)
 
@@ -151,9 +165,9 @@ func main() {
 	manleaiCalendarExecutor := manleaicalendar.NewExecutor(manleaiCalendarRepo, nil)
 	schedulingService := scheduling.NewService(schedulingRepo, bookingService, externalSchedulingAdapter, ownerManualSchedulingExecutor, manleaiCalendarExecutor)
 	booking.RegisterRoutes(api, booking.NewHandler(schedulingService), cfg.JWTSecret)
-	scheduling.RegisterRoutes(api, scheduling.NewHandler(schedulingService, ownerManualSchedulingService), cfg.JWTSecret)
+	scheduling.RegisterRoutes(api, scheduling.NewHandler(schedulingService, ownerManualSchedulingService).SetTenantRuntimeLimiter(tenantRuntimeService), cfg.JWTSecret)
 	manleaiCalendarService := manleaicalendar.NewService(manleaiCalendarRepo)
-	manleaicalendar.RegisterRoutes(api, manleaicalendar.NewHandler(manleaiCalendarService), cfg.JWTSecret)
+	manleaicalendar.RegisterPlatformRoutes(api, manleaicalendar.NewPlatformHandler(manleaiCalendarService, accessService), cfg.JWTSecret)
 
 	customerRepo := customer.NewRepository(db)
 	customerService := customer.NewService(customerRepo, []pos.POSProvider{squareAdapter})
@@ -166,11 +180,7 @@ func main() {
 
 	trainingRepo := training.NewRepository(db)
 	trainingService := training.NewService(trainingRepo, schedulingService)
-	training.RegisterRoutes(api, training.NewHandler(trainingService), cfg.JWTSecret)
-
-	configTransferRepo := configtransfer.NewRepository(db)
-	configTransferService := configtransfer.NewService(salonService, integrationConfigService, posRepo, trainingService, configTransferRepo)
-	configtransfer.RegisterRoutes(api, configtransfer.NewHandler(configTransferService), cfg.JWTSecret)
+	training.RegisterRoutes(api, training.NewHandler(trainingService).SetTenantRuntimeLimiter(tenantRuntimeService), cfg.JWTSecret)
 
 	voiceRepo := voice.NewRepository(db)
 	openAIVoiceAdapter := voice_openai.NewAdapter(cfg.Voice.AI.OpenAI)
@@ -187,6 +197,7 @@ func main() {
 	conversationService.SetTurnInterpreter(voice.NewGuardedTurnInterpreter(openAIVoiceAdapter))
 	voiceService := voice.NewService(voiceRepo, conversationService, cfg.Voice, aiProviders)
 	voiceService.SetConfigResolver(integrationConfigService)
+	voiceService.SetTenantRuntimeLimiter(tenantRuntimeService)
 	voice.RegisterRoutes(api, voice.NewHandler(voiceService), cfg.JWTSecret)
 	twilioVoiceAdapter := voice_twilio.NewAdapter(cfg.Voice.Twilio, cfg.Voice.PublicBaseURL)
 	voice_twilio.RegisterRoutes(api, voice_twilio.NewHandler(twilioVoiceAdapter, voiceService))
@@ -195,9 +206,10 @@ func main() {
 	squareService.SetWebhookRepository(squareWebhookRepo)
 	voiceService.SetSchedulingReadinessProviders(ownerManualSchedulingService, manleaiCalendarService, squareService)
 	pos_square.RegisterRoutes(api, pos_square.NewHandler(squareService, cfg), cfg.JWTSecret)
+	pos_square.RegisterPlatformRoutes(api, pos_square.NewPlatformHandler(squareService, accessService, tenantRuntimeService), cfg.JWTSecret)
 	authoritySwitchRepo := authorityswitch.NewRepository(db)
 	authoritySwitchService := authorityswitch.NewService(authoritySwitchRepo, manleaiCalendarService, squareService, ownerManualSchedulingExecutor != nil)
-	authorityswitch.RegisterRoutes(api, authorityswitch.NewHandler(authoritySwitchService), cfg.JWTSecret)
+	authorityswitch.RegisterPlatformRoutes(api, authorityswitch.NewPlatformHandler(authoritySwitchService, accessService), cfg.JWTSecret)
 
 	logg.Info("api listening", "port", cfg.ServerPort, "env", cfg.AppEnv)
 	if err := app.Listen(":" + cfg.ServerPort); err != nil {
@@ -208,9 +220,9 @@ func main() {
 func apiCORSConfig(cfg config.Config) cors.Config {
 	return cors.Config{
 		AllowOrigins:     strings.Join(cfg.CORSOrigins, ","),
-		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
+		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Tenant-Salon-ID",
 		AllowMethods:     "GET,POST,PUT,PATCH,DELETE,OPTIONS",
-		ExposeHeaders:    "X-Idempotent-Replay, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After",
+		ExposeHeaders:    "X-Idempotent-Replay, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, TenantLimit-Limit, TenantLimit-Remaining, Retry-After",
 		AllowCredentials: true,
 	}
 }

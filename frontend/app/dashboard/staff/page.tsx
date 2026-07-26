@@ -1,5 +1,5 @@
-import { StaffDashboard } from "@/features/dashboard/staff-dashboard";
+import { TenantBusinessPage } from "@/features/business/tenant-business-page";
 
 export default function StaffPage() {
-  return <StaffDashboard />;
+  return <TenantBusinessPage section="staff" />;
 }

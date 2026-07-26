@@ -19,34 +19,42 @@ export function listSquareWebhookEvents(
   salonID: string,
   status: SquareWebhookListStatus,
   limit = 25,
-  offset = 0
+  offset = 0,
+  surface: "tenant" | "platform" = "tenant"
 ) {
   const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
   if (status) query.set("status", status);
   return apiRequest<SquareWebhookEventsResponse>(
-    `/api/salons/${encodeURIComponent(salonID)}/square-webhook-events?${query.toString()}`
+    `${squareWebhookBase(salonID, surface)}?${query.toString()}`
   );
 }
 
-export function getSquareWebhookEvent(salonID: string, webhookEventID: string) {
+export function getSquareWebhookEvent(salonID: string, webhookEventID: string, surface: "tenant" | "platform" = "tenant") {
   return apiRequest<SquareWebhookEventDetailResponse>(
-    `/api/salons/${encodeURIComponent(salonID)}/square-webhook-events/${encodeURIComponent(webhookEventID)}`
+    `${squareWebhookBase(salonID, surface)}/${encodeURIComponent(webhookEventID)}`
   );
 }
 
 export async function requeueSquareWebhookEvent(
   salonID: string,
   webhookEventID: string,
-  actionKey: string
+  actionKey: string,
+  surface: "tenant" | "platform" = "tenant"
 ) {
   const result = await apiRequestWithResponse<SquareWebhookEventDetailResponse>(
-    `/api/salons/${encodeURIComponent(salonID)}/square-webhook-events/${encodeURIComponent(webhookEventID)}/requeue`,
+    `${squareWebhookBase(salonID, surface)}/${encodeURIComponent(webhookEventID)}/requeue`,
     { method: "POST", body: JSON.stringify({ action_key: actionKey }) }
   );
   return {
     event: result.data.event,
     replayed: result.response.headers.get("X-Idempotent-Replay") === "true"
   };
+}
+
+function squareWebhookBase(salonID: string, surface: "tenant" | "platform") {
+  return surface === "platform"
+    ? `/api/platform/tenants/${encodeURIComponent(salonID)}/operations/square-webhooks`
+    : `/api/salons/${encodeURIComponent(salonID)}/square-webhook-events`;
 }
 
 export function newSquareWebhookActionKey() {

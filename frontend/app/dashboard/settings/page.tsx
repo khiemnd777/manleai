@@ -1,5 +1,5 @@
-import { SettingsDashboard } from "@/features/dashboard/settings-dashboard";
+import { TenantBusinessPage } from "@/features/business/tenant-business-page";
 
 export default function SettingsPage() {
-  return <SettingsDashboard />;
+  return <TenantBusinessPage section="settings" />;
 }

@@ -17,6 +17,8 @@ func (Permission) Fields() []ent.Field {
 		field.UUID("id", uuid.UUID{}).Default(uuid.New),
 		field.String("name").NotEmpty().Unique(),
 		field.String("display_name").NotEmpty(),
+		field.String("scope").Default("legacy"),
+		field.String("delegation_scope").Default("none"),
 		field.Time("created_at").Default(time.Now),
 		field.Time("updated_at").Default(time.Now).UpdateDefault(time.Now),
 	}

@@ -234,10 +234,29 @@ openssl rand -base64 48
 openssl rand -base64 32
 ```
 
-Use the hex value for `POSTGRES_PASSWORD`, the 48-byte base64 value for
-`JWT_SECRET`, and the 32-byte base64 value for `TOKEN_ENCRYPTION_KEY_BASE64`.
-If the PostgreSQL password contains non URL-safe characters, URL-encode it in
-`DATABASE_URL`; using the hex value avoids that issue.
+Use separate URL-safe random values for `POSTGRES_PASSWORD` and
+`DATABASE_RUNTIME_PASSWORD`, the 48-byte base64 value for `JWT_SECRET`, and the
+32-byte base64 value for `TOKEN_ENCRYPTION_KEY_BASE64`. `DATABASE_URL` must use
+the non-owner `DATABASE_RUNTIME_ROLE`; `MIGRATION_DATABASE_URL` must use the
+migration/table owner. Never make the runtime role a member of the migration
+role and never grant it `SUPERUSER` or `BYPASSRLS`.
+
+On a new PostgreSQL volume, `deploy/postgres-init-runtime-role.sh` creates the
+runtime login with `NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS`.
+For an existing volume, create or rotate that role once through an approved DBA
+change before deploying this release. The exact statement is equivalent to:
+
+```sql
+CREATE ROLE manleai_runtime LOGIN PASSWORD '<separate-secret>'
+  NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+```
+
+Do not put the password in shell history. The candidate API uses the migration
+connection to apply V63-V72 and grant table/sequence/function privileges to the
+already-existing runtime role, then closes that connection. API requests and
+the worker use only the runtime connection. The worker does not receive
+`MIGRATION_DATABASE_URL`; production startup fails if the connected role name,
+ownership, `SUPERUSER`, `BYPASSRLS`, or RLS policy checks are unsafe.
 
 Production forces rate limiting on (the template records
 `RATE_LIMIT_ENABLED=true`), uses `REDIS_URL` as a required request-protection
@@ -288,16 +307,44 @@ Existing project Caddy routes are not modified by this deployment. Do not
 install another Caddy container, restart Caddy manually, or bind application
 containers to ports `80` or `443`.
 
+## First Platform Administrator Bootstrap
+
+V64 intentionally does not add an unauthenticated Platform-admin HTTP
+bootstrap. After the migration is applied, an operator may promote one exact
+existing active user only while no active Platform Admin exists:
+
+```bash
+cd backend
+go run ./cmd/platform-access bootstrap-admin \
+  --email operator@example.com \
+  --action-key initial-platform-admin-2026-07-26 \
+  --reason approved-change-reference
+```
+
+The command prefers the migration-owner `MIGRATION_DATABASE_URL` (and uses
+`DATABASE_URL` only in non-RLS legacy/local setups), takes an advisory
+lock, verifies the target account is active, creates the assignment plus
+immutable action/event evidence atomically, and prints only the bounded
+assignment result. Exact action replay returns the same result. Changed action
+reuse conflicts, and the command closes permanently as soon as any active
+Platform Admin exists. All later Platform role, tenant membership, salon
+assignment, capability, and PII-grant changes use the authenticated
+`/api/platform/access/*` APIs. Do not use direct SQL or the legacy
+`super_admin` role as an authorization substitute.
+
+`--reason` is an opaque operator change reference, not a note. It must match
+`[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}` and must not contain customer data.
+
 ## Dashboard-Managed Provider Configuration
 
 Square Appointments, Twilio, and OpenAI credentials are configured in the
-Integrations dashboard and stored encrypted per salon in
+Platform tenant detail's Technical tab and stored encrypted per salon in
 `salon_integration_configs`. Repository env files and env templates contain
 infrastructure settings only; do not add provider credentials, provider model
 settings, webhook paths, transports, or provider URLs to them.
 
-For active-runtime diagnosis, use `/dashboard/integrations`,
-`GET /api/salons/:id/integration-configs`, the relevant readiness/debug endpoint
+For active-runtime diagnosis, use `/platform/tenants/:tenant_id/technical`,
+`GET /api/platform/tenants/:tenant_id/technical/integration-configs`, the relevant readiness/debug endpoint
 such as `GET /api/salons/:id/voice/status`, persisted provider records, and the
 runtime resolver code. Never use `project.env`, `.env`, Compose defaults,
 GitHub secrets, or process environment values as evidence of the active
@@ -324,6 +371,8 @@ When no stored row exists it may label an available bootstrap secret source as
 `environment`. When a stored row exists but its secret is empty or unreadable,
 the response reports source `none` and configured `false`; it never relabels an
 environment secret as active, and it never returns the secret value.
+Whole-response contract tests also prohibit write-only credential, SID,
+destination, and `clear_*` request fields from appearing in serialized reads.
 
 The owner-notification Twilio Messaging resolver is an explicit exception to
 that legacy behavior: it resolves only the salon's stored encrypted record and
@@ -346,8 +395,8 @@ audio URL and the phone response falls back to safe TwiML speech. Token rotation
 immediately invalidates any previously generated audio capabilities.
 
 Square booking-webhook verification is also salon-scoped dashboard data. Store
-the exact public HTTPS notification URL and write-only signature key in
-`/dashboard/integrations`; do not add either value to repository env templates.
+the exact public HTTPS notification URL and write-only signature key in the
+Platform tenant Technical tab; do not add either value to repository env templates.
 `webhook_configured` means verifier credentials are present, not that the
 Square subscription or deliveries are healthy. Configuration transfer
 preserves the destination deployment URL and requires secret re-entry. The API
@@ -366,6 +415,19 @@ data, or raw errors. A requeue is allowed only when the backend returns
 the same action key and uses `X-Idempotent-Replay` only to label exact recovery.
 For a separately hosted dashboard/API deployment, CORS must expose that response
 header. Header absence must not be interpreted as replay or as failure.
+V63 removes historical provider-controlled POS/Square diagnostic text and
+payloads and narrows legacy Twilio/OpenAI Realtime failure audit payloads to the
+same fixed-message/allowlisted contract enforced by the current runtime.
+V64 is an expand-only SaaS access-control migration. It retains
+`salons.owner_user_id`, legacy roles, and every previous owner query while
+adding owner-membership backfill/synchronization, Platform role and per-salon
+delegation tables, maximum-24-hour Platform PII grants, and immutable access
+actions/events. The previous image remains schema-compatible, but the V64
+backfill and access integration tests must pass. V65-V72 complete the shared
+Business contract, Platform technical plane, runtime membership boundary, RLS,
+tenant quotas/fairness, audited AI-runtime control, public safe projection, and
+exact Platform PII-scope enforcement. All V63-V72 entries must appear exactly
+once in `app_schema_migrations` before the candidate is healthy.
 Migration V43 adds the monotonic location-scoped provider snapshot generation
 used to reject stale and out-of-order full imports. On first deployment it
 preserves Square credentials and terminal connection states, but changes every
@@ -442,8 +504,8 @@ revisions.
   attempts whose provider dispatch cannot be proven not started. Reconcile
   those POS outcomes before retrying the migration; do not force the unique
   fingerprint index by deleting or auto-closing unknown attempts.
-- Configure the Square redirect URL in the Integrations dashboard to the deployed API callback.
-- Configure the exact Square booking-webhook HTTPS notification URL and signature key in the Integrations dashboard, then verify subscription/delivery health separately in Square; the local configured badge is not a delivery-health check.
+- Configure the Square redirect URL in the Platform tenant Technical tab to the deployed API callback.
+- Configure the exact Square booking-webhook HTTPS notification URL and signature key in the Platform tenant Technical tab, then verify subscription/delivery health separately in Square; the local configured badge is not a delivery-health check.
 - Monitor the connected Square card's webhook backlog, failed/dead-letter
   counts, recent success window, and calendar-repair state. Treat
   `processing`, repeated failures, dead letters, a degraded repair backstop, or
@@ -452,14 +514,14 @@ revisions.
   never direct appointment-confirmation evidence.
 - Run the worker for POS sync, booking lease expiry, bounded availability-quote cleanup, Square webhook processing, scheduled calendar repair, owner/customer-notification delivery, call retention, and V61 scheduling-PII retention. The generic scheduler persists start/heartbeat/finish evidence in V57, uses a distributed job lease across worker replicas, and stores only safe class/code diagnostics. Each job still has an independent synchronous recurring loop, so a slow webhook/repair batch cannot starve lease recovery. Quote cleanup runs every five minutes, drains at most eight batches of 250 quotes per run, keeps a 24-hour post-expiry grace for unconsumed quotes and a 30-day audit window for orphaned consumed quotes, and preserves every quote still linked to a booking attempt. `scheduling_pii_retention` runs every five minutes with a default maximum of 100 retention work items, uses bounded `SKIP LOCKED` claims and one-row transactions, and makes no provider calls. Its baseline 90-day expiry applies only after terminal business and delivery state; pending/contacted requests, live leases, queued/retrying/unknown outcomes, open reconciliation, and active customer consent/STOP routing keys remain intact. See `operations/operations-health.md`; deployed code is not configured proactive monitoring until the worker is running and an external monitor/on-call process evaluates the owner status endpoint.
 - Treat the V61 90-day duration as a technical baseline, not legal approval. Before production rollout, obtain the applicable privacy/legal decision for scheduling, notification, audio, backup, litigation-hold, and deletion/DSAR obligations; document any approved policy-version change and keep the worker batch/cadence capacity-monitored.
-- Configure the dashboard Twilio public base URL to the deployed API origin used in Twilio webhook settings.
-- Keep the dashboard Twilio auth token present for signed buffered-TTS playback.
+- Configure the Platform tenant Technical Twilio public base URL to the deployed API origin used in Twilio webhook settings.
+- Keep the Platform-managed Twilio auth token present for signed buffered-TTS playback.
   Audio URLs are database-expiry-bounded HMAC capabilities; do not rewrite,
   log, or persist their query strings. Rotating the token revokes outstanding
   playback URLs and new phone turns generate capabilities with the new token.
 - For owner-operational SMS, configure explicit owner consent/destination,
   Account SID/Auth Token, Messaging Service SID or sender, and the displayed
-  status/inbound callback URLs in the Integrations dashboard. Preserve the
+  status/inbound callback URLs in the Platform tenant Technical tab. Preserve the
   exact public URL/form parameters for `X-Twilio-Signature` verification,
   configure Messaging Service Advanced Opt-Out, and monitor the
   `notification_delivery` job/backlog/dead-letter evidence. `queued`,
@@ -467,7 +529,7 @@ revisions.
   `operations/owner-notification-delivery.md` for retry and unknown-outcome
   handling.
 - For customer appointment SMS, configure the same salon-scoped Twilio
-  transport in `/dashboard/integrations`, then separately enable the
+  transport in `/platform/tenants/:tenant_id/technical`, then separately enable the
   default-off customer policy and quiet hours in `/dashboard/settings`.
   Configure Twilio Messaging Advanced Opt-Out and the displayed salon-scoped
   inbound URL. The inbound/status callbacks require exact signatures plus the
@@ -479,9 +541,9 @@ revisions.
   states, not delivery proof. Unknown post-dispatch outcomes and stale
   request/appointment copy are fail-closed; requeue only when the owner API
   returns `can_requeue=true`.
-- Configure realtime phone mode from the Integrations dashboard: Twilio `voice_transport=realtime_stream`; OpenAI realtime model/voice and the location-neutral background-noise handling policy (`automatic` is the default); and `speech_output_mode=streaming_tts` for low-latency backend-approved output. `buffered_realtime` is a legacy rollback mode.
+- Configure realtime phone mode from the Platform tenant Technical tab: Twilio `voice_transport=realtime_stream`; OpenAI realtime model/voice and the location-neutral background-noise handling policy (`automatic` is the default); and `speech_output_mode=streaming_tts` for low-latency backend-approved output. `buffered_realtime` is a legacy rollback mode.
 - Keep Twilio and OpenAI secrets out of logs and docs; dashboard responses expose only configured/source metadata.
-- Enable OpenAI voice AI in the Integrations dashboard only when external AI voice turns should be enabled.
+- Enable OpenAI voice AI in the Platform tenant Technical tab only when external AI voice turns should be enabled.
 - Keep OpenAI model and voice settings configurable through the dashboard so model changes do not require code changes.
 - Restrict CORS to the deployed admin, landing, and POS calendar origins.
 

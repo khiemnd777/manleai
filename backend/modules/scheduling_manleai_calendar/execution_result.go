@@ -87,7 +87,7 @@ func loadAuthoritativeInternalResultTx(
 		  ON appointment.salon_id = event.salon_id
 		 AND appointment.id = event.appointment_id
 		WHERE attempt.salon_id = $1
-		  AND salon.owner_user_id = $2
+		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 		  AND appointment.id::text = $3
 		  AND attempt.id::text = $4
 		  AND attempt.scheduling_authority = 'manleai_calendar'

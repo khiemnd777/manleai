@@ -50,6 +50,7 @@ var (
 	ErrAudioUnavailable       = errors.New("voice audio is unavailable")
 	ErrProviderDisabled       = errors.New("voice provider is not configured")
 	ErrRouteNotFound          = errors.New("voice route not found")
+	ErrTenantQuotaExceeded    = errors.New("tenant voice quota exceeded")
 	ErrTurnModelEmptyOutput   = errors.New("turn model returned no structured output")
 	ErrTurnModelInvalidOutput = errors.New("turn model returned invalid structured output")
 )
@@ -74,13 +75,14 @@ func (e *ProviderRequestError) Error() string {
 	if e == nil {
 		return "provider request failed"
 	}
-	if e.Err != nil {
-		return e.Err.Error()
+	provider := safeProviderDiagnosticValue(e.Provider)
+	if provider == "" {
+		provider = "provider"
 	}
 	if e.StatusCode > 0 {
-		return fmt.Sprintf("%s request failed with status %d", strings.TrimSpace(e.Provider), e.StatusCode)
+		return fmt.Sprintf("%s request failed with status %d", provider, e.StatusCode)
 	}
-	return strings.TrimSpace(e.Provider) + " request failed"
+	return provider + " request failed"
 }
 
 func (e *ProviderRequestError) Unwrap() error {

@@ -78,10 +78,10 @@ func TestSyncProcessorFailsUnsupportedOperationWithoutProviderWrite(t *testing.T
 	if provider.upsertedStaff != nil {
 		t.Fatalf("provider write should not be called: %#v", provider.upsertedStaff)
 	}
-	if store.failedJob.ID != "job_2" || !strings.Contains(store.failedMessage, "unsupported") {
+	if store.failedJob.ID != "job_2" || store.failedMessage != SafeErrorMessage(ErrorWriteUnsupported) {
 		t.Fatalf("unexpected failure: %#v %q", store.failedJob, store.failedMessage)
 	}
-	if store.loggedError.Operation != SyncOperationUpsertStaff {
+	if store.loggedError.Operation != SyncOperationUpsertStaff || store.loggedError.ErrorCode != ErrorWriteUnsupported {
 		t.Fatalf("unexpected logged error: %#v", store.loggedError)
 	}
 	if store.completedLogStatus != SyncJobStatusFailed {
@@ -279,7 +279,7 @@ func TestSyncProcessorMarksProviderWriteErrorsFailed(t *testing.T) {
 	provider := &fakeWriteProvider{
 		name:         "fake",
 		capabilities: ProviderCapabilities{ServiceUpsert: true},
-		writeErr:     errors.New("provider catalog write failed"),
+		writeErr:     errors.New("provider catalog write failed: secret customer payload"),
 	}
 	processor := NewSyncProcessor(store, []POSProvider{provider})
 
@@ -290,10 +290,10 @@ func TestSyncProcessorMarksProviderWriteErrorsFailed(t *testing.T) {
 	if processed != 1 {
 		t.Fatalf("processed = %d, want 1", processed)
 	}
-	if store.failedJob.ID != "job_3" || store.failedMessage != "provider catalog write failed" {
+	if store.failedJob.ID != "job_3" || store.failedMessage != SafeErrorMessage(ErrorUnknown) {
 		t.Fatalf("unexpected failed job: %#v %q", store.failedJob, store.failedMessage)
 	}
-	if store.loggedError.ErrorMessage != "provider catalog write failed" {
+	if store.loggedError.ErrorMessage != SafeErrorMessage(ErrorUnknown) || strings.Contains(store.completedLogMsg, "secret customer payload") {
 		t.Fatalf("unexpected logged error: %#v", store.loggedError)
 	}
 }

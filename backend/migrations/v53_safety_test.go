@@ -251,6 +251,34 @@ func TestV53LegacyUnknownQuoteFailsClosedBeforeProviderDispatchAfterABA(t *testi
 		t.Fatalf("commit pre-V53 chain: %v", err)
 	}
 
+	// Current runtime authorization is membership-based in the public SaaS
+	// access schema, while this test deliberately keeps the operational fixture
+	// in an isolated pre-V53 schema. Mirror only the actor/salon identity into
+	// the current access owner so the test continues to exercise the legacy
+	// quote fence rather than failing earlier at the V67 membership boundary.
+	if _, err := db.ExecContext(ctx, "SET search_path TO public"); err != nil {
+		t.Fatalf("select current runtime access schema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO public.users (id,email,password_hash,full_name)
+		VALUES ($1,$2,'hash','V53 Runtime Access Owner')
+	`, ownerID, "v53-runtime-access-"+uuid.NewString()+"@example.com"); err != nil {
+		t.Fatalf("seed current runtime access owner: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO public.salons (id,name,phone,owner_user_id)
+		VALUES ($1,'V53 Runtime Access Salon','5555302',$2)
+	`, salonID, ownerID); err != nil {
+		t.Fatalf("seed current runtime access salon: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "SET search_path TO "+quotedSchema+", public"); err != nil {
+		t.Fatalf("restore V53 service search path: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM public.salons WHERE id=$1`, salonID)
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM public.users WHERE id=$1`, ownerID)
+	})
+
 	if _, err := db.ExecContext(ctx, readV53(t)); err != nil {
 		t.Fatalf("apply V53 service migration: %v", err)
 	}

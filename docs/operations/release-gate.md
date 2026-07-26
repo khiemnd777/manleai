@@ -24,7 +24,7 @@ web applications, package manifests, or lockfiles fail the gate.
 
 The backend job runs the complete `go test ./...` and `go vet ./...` suites,
 followed by a bounded `-race` run over the high-risk authentication,
-scheduling, booking, POS, worker, notification, operations-health,
+SaaS access-control, scheduling, booking, POS, worker, notification, operations-health,
 conversation, and training packages declared in the manifest.
 
 The web matrix independently installs, typechecks, and builds `frontend`,
@@ -49,7 +49,8 @@ The fresh database contract:
    and migrate-twice safety;
 2. verifies every SQL migration from V46 through the latest repository
    migration appears exactly once in `app_schema_migrations`;
-3. runs the declared scheduling authority, owner-manual, internal-calendar,
+3. runs the declared SaaS access-control, Business, Technical/Operations,
+   runtime-role/RLS, tenant-quota/fairness, public-projection, scheduling authority, owner-manual, internal-calendar,
    authority-switch, booking/POS/Square, configuration-transfer, public
    catalog, owner/customer notification, Square webhook operations,
    scheduling-PII retention, operations-health, and V58 cross-table alias
@@ -77,15 +78,32 @@ coverage includes:
 - nonce-bound production CSP contracts for all three web apps, including POS
   scheduler placement without inline style attributes;
 - authenticated owner routes and cross-salon ownership rejection;
+- server-owned ActorContext replacement of stale caller/JWT tenant and role
+  state; tenant-membership isolation; exact Platform Ops salon/capability
+  delegation; Platform Admin/Ops PII default deny with bounded grant,
+  expiry/revocation, optimistic-version, action replay/conflict, immutable
+  audit, opaque change-reference validation, role-bound delegation revocation,
+  owner-membership, and concurrent last-admin guards;
+- separate non-owner/non-superuser/non-`BYPASSRLS` runtime role verification;
+  per-operation DB actor/scope reset; cross-tenant RLS; public zero base-table
+  visibility through V71 safe projection; V72 exact Platform PII scope across
+  customer, call, appointment, and notification tables;
+- tenant quota/usage accounting, provider-write rejection, and fair worker
+  claim limits without cross-tenant starvation;
 - authority-aware Training evaluation with tenant-first and unknown-authority
   fail-closed behavior;
-- integration token and secret DTO redaction;
+- integration token and secret whole-response redaction plus stable POS/Square
+  and Twilio/OpenAI provider-diagnostic masking, including V63 historical data
+  cleanup;
 - zero POS/provider/reconciliation evidence for `owner_manual` and internal
   calendar work;
-- public catalog responses without customer PII or provider identifiers;
+- public catalog responses without customer PII or provider identifiers and
+  without direct public base-table access;
 - masked owner/customer notification destinations, scheduling-PII retention,
   and callback-signature enforcement;
 - authenticated Square webhook backlog/dead-letter/replay ownership;
+- explicit salon context on authenticated Square control/write routes, with no
+  primary-salon middleware fallback;
 - Square and Twilio webhook signature contracts;
 - scheduling authority, target-origin, and tenant fences.
 

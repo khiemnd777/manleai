@@ -23,7 +23,7 @@ func (r *Repository) GetPolicyForOwner(ctx context.Context, salonID, ownerUserID
 		       salon.timezone, settings.customer_sms_policy_version
 		FROM salon_settings settings
 		JOIN salons salon ON salon.id=settings.salon_id
-		WHERE settings.salon_id=$1 AND salon.owner_user_id=$2
+		WHERE settings.salon_id=$1 AND public.has_active_tenant_membership(salon.id, $2::uuid)
 	`, salonID, ownerUserID).Scan(&policy.Enabled, &policy.QuietStart, &policy.QuietEnd, &policy.Timezone, &policy.Version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -42,7 +42,7 @@ func (r *Repository) UpdatePolicyForOwner(ctx context.Context, salonID, ownerUse
 	}
 	defer tx.Rollback()
 	var timezone string
-	if err := tx.QueryRowContext(ctx, `SELECT timezone FROM salons WHERE id=$1 AND owner_user_id=$2 FOR UPDATE`, salonID, ownerUserID).Scan(&timezone); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT timezone FROM salons WHERE id=$1 AND public.has_active_tenant_membership(id, $2::uuid) FOR UPDATE`, salonID, ownerUserID).Scan(&timezone); errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	} else if err != nil {
 		return nil, err
@@ -132,7 +132,7 @@ func (r *Repository) mutateConsent(ctx context.Context, mutation consentMutation
 	defer tx.Rollback()
 	if mutation.RequireOwner {
 		var owner bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM salons WHERE id=$1 AND owner_user_id=$2)`, mutation.SalonID, mutation.ActorUserID).Scan(&owner); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM salons WHERE id=$1 AND public.has_active_tenant_membership(id, $2::uuid))`, mutation.SalonID, mutation.ActorUserID).Scan(&owner); err != nil {
 			return nil, false, err
 		}
 		if !owner {

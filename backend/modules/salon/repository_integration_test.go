@@ -95,17 +95,14 @@ func TestPostgresOwnerFirstSalonCreationReplayConcurrencyAndSettingsFence(t *tes
 		booking.SchedulingAuthorityManleAICalendar,
 		booking.SchedulingAuthorityExternalProvider,
 	} {
-		item, err := service.Create(ctx, ownerID, CreateSalonRequest{
+		item := createSalonWithTestAuthority(t, ctx, db, service, ownerID, CreateSalonRequest{
 			OperationKey:        "explicit-" + authority + "-" + uuid.NewString(),
 			SchedulingAuthority: authority,
 			Name:                "Explicit " + authority,
 			Phone:               "+13125555402",
 		})
-		if err != nil {
-			t.Fatalf("create explicit %s salon: %v", authority, err)
-		}
-		if item.SchedulingAuthority != authority || item.SchedulingAuthorityVersion != 1 {
-			t.Fatalf("explicit %s response authority/version=%q/%d", authority, item.SchedulingAuthority, item.SchedulingAuthorityVersion)
+		if item.SchedulingAuthority != authority || item.SchedulingAuthorityVersion != 2 {
+			t.Fatalf("test-switched %s response authority/version=%q/%d", authority, item.SchedulingAuthority, item.SchedulingAuthorityVersion)
 		}
 		explicitByAuthority[authority] = item
 	}
@@ -168,6 +165,8 @@ func TestPostgresOwnerFirstSalonCreationReplayConcurrencyAndSettingsFence(t *tes
 		{Name: "Missing Key", Phone: "+13125555404"},
 		{OperationKey: strings.Repeat("x", 257), Name: "Long Key", Phone: "+13125555405"},
 		{OperationKey: "bad-authority-" + uuid.NewString(), SchedulingAuthority: "square", Name: "Bad Authority", Phone: "+13125555406"},
+		{OperationKey: "direct-internal-" + uuid.NewString(), SchedulingAuthority: booking.SchedulingAuthorityManleAICalendar, Name: "Direct Internal", Phone: "+13125555408"},
+		{OperationKey: "direct-external-" + uuid.NewString(), SchedulingAuthority: booking.SchedulingAuthorityExternalProvider, Name: "Direct External", Phone: "+13125555409"},
 	} {
 		if _, err := service.Create(ctx, ownerID, invalid); !errors.Is(err, ErrValidation) {
 			t.Fatalf("invalid create %#v error=%v, want ErrValidation", invalid, err)
@@ -247,6 +246,27 @@ func TestPostgresOwnerFirstSalonCreationReplayConcurrencyAndSettingsFence(t *tes
 	if err != nil || settings.SchedulingAuthority != booking.SchedulingAuthorityOwnerManual || settings.BookingMode != "pending_approval" {
 		t.Fatalf("settings race final state=%#v err=%v, want owner_manual/pending_approval", settings, err)
 	}
+}
+
+func createSalonWithTestAuthority(t *testing.T, ctx context.Context, db *sql.DB, service *Service, ownerID string, req CreateSalonRequest) *Salon {
+	t.Helper()
+	target := req.SchedulingAuthority
+	req.SchedulingAuthority = booking.SchedulingAuthorityOwnerManual
+	item, err := service.Create(ctx, ownerID, req)
+	if err != nil {
+		t.Fatalf("create owner-manual test salon before %s switch: %v", target, err)
+	}
+	if target == "" || target == booking.SchedulingAuthorityOwnerManual {
+		return item
+	}
+	if _, err := db.ExecContext(ctx, `
+		UPDATE salon_settings SET scheduling_authority=$2,updated_at=now() WHERE salon_id=$1
+	`, item.ID, target); err != nil {
+		t.Fatalf("switch test salon %s to %s: %v", item.ID, target, err)
+	}
+	item.SchedulingAuthority = target
+	item.SchedulingAuthorityVersion++
+	return item
 }
 
 func insertSalonTestOwner(t *testing.T, ctx context.Context, db *sql.DB, prefix string) string {

@@ -1,6 +1,7 @@
 package pos_square
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,56 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/manleai/ai-receptionist/modules/booking"
 )
+
+func TestProtectedSquareOperationsRequireExplicitSalonID(t *testing.T) {
+	handler := &Handler{}
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		fn     fiber.Handler
+	}{
+		{name: "connect URL", method: http.MethodGet, path: "/connect", fn: handler.ConnectURL},
+		{name: "status", method: http.MethodGet, path: "/status", fn: handler.Status},
+		{name: "locations", method: http.MethodGet, path: "/locations", fn: handler.Locations},
+		{name: "select location", method: http.MethodPost, path: "/select", body: `{"location_id":"location"}`, fn: handler.SelectLocation},
+		{name: "sync", method: http.MethodPost, path: "/sync", body: `{}`, fn: handler.Sync},
+		{name: "test booking", method: http.MethodPost, path: "/test", body: `{"operation_key":"test-create"}`, fn: handler.TestBooking},
+		{name: "cancel test booking", method: http.MethodPost, path: "/cancel", body: `{"operation_key":"test-cancel"}`, fn: handler.CancelTestBooking},
+		{name: "enable AI booking", method: http.MethodPost, path: "/enable", body: `{}`, fn: handler.EnableAIBooking},
+		{name: "disable AI booking", method: http.MethodPost, path: "/disable", body: `{}`, fn: handler.DisableAIBooking},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			app := fiber.New()
+			app.Add(test.method, test.path, test.fn)
+			request := httptest.NewRequest(test.method, test.path, bytes.NewBufferString(test.body))
+			if test.body != "" {
+				request.Header.Set("Content-Type", "application/json")
+			}
+			response, err := app.Test(request)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != fiber.StatusBadRequest {
+				t.Fatalf("status=%d, want %d", response.StatusCode, fiber.StatusBadRequest)
+			}
+			var body struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if body.Error.Code != "SALON_ID_REQUIRED" {
+				t.Fatalf("code=%q, want SALON_ID_REQUIRED", body.Error.Code)
+			}
+		})
+	}
+}
 
 func TestHandleGateErrorMarksErrorAsHandledWhenResponseWriteSucceeds(t *testing.T) {
 	app := fiber.New()

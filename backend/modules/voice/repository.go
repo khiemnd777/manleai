@@ -27,7 +27,7 @@ func (r *Repository) GetSalonVoiceStatus(ctx context.Context, salonID string, ow
 		FROM salons salon
 		JOIN salon_settings settings ON settings.salon_id = salon.id
 		WHERE salon.id = $1
-		  AND salon.owner_user_id = $2
+		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 	`, salonID, ownerUserID).Scan(
 		&status.SalonID, &status.Phone, &status.AIEnabled,
 		&status.SchedulingAuthority, &status.SchedulingAuthorityVersion, &status.BookingMode,
@@ -213,7 +213,7 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 			) booking_write_blocker ON true
 			LEFT JOIN salon_settings settings ON settings.salon_id = s.id
 			WHERE s.id = $1
-			  AND s.owner_user_id = $2
+			  AND public.has_active_tenant_membership(s.id, $2::uuid)
 	`, salonID, ownerUserID).Scan(
 		&readiness.AIEnabled,
 		&readiness.ConsultationEnabled,

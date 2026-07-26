@@ -206,6 +206,17 @@ actions, and Square status reads expire only stale external-provider processing
 leases before exposing the latest test state. This temporary test-action gate
 does not make the optional smoke test a prerequisite for enabling AI booking.
 
+SaaS Refactor Phases 4-6 expose Square connection, status, location, sync, and
+AI-runtime controls only below
+`/api/platform/tenants/:tenant_id/technical/square`. The route fixes the tenant;
+Platform authorization requires the exact Technical capability, and service
+methods operate directly on that tenant without resolving or impersonating a
+salon owner. Tenant POS Calendar reads only
+`/api/salons/:id/business/external-scheduling-readiness`, whose projection
+omits connection IDs, merchant/location IDs, scopes, sync logs, diagnostics,
+tokens, and test-booking evidence. The legacy authenticated owner Square
+technical route group is not registered.
+
 Square gate handlers map scheduling-authority failures to sanitized
 `409 SCHEDULING_AUTHORITY_NOT_READY` and map other gate failures to bounded
 public messages. Wrapped executor or provider diagnostic text is not returned
@@ -349,8 +360,8 @@ Do not use the production Square dashboard for sandbox OAuth setup:
 https://app.squareup.com/dashboard/
 ```
 
-After the sandbox dashboard loads, return to the ManleAI Integrations dashboard
-and retry `Connect Square`. For dashboard-managed sandbox credentials, keep the
+After the sandbox dashboard loads, return to the ManleAI Platform tenant
+Technical tab and retry `Connect Square`. For Platform-managed sandbox credentials, keep the
 Square environment set to `Sandbox` and use the sandbox application ID and
 secret. The optional Square API base URL may be blank or set to:
 
@@ -371,4 +382,9 @@ Square API failures are normalized and written to `pos_errors` with:
 - `operation`
 - `error_code`
 - `error_message`
-- optional JSON payload
+
+`error_message` is selected from a fixed internal mapping. Square response
+details, bodies, credentials, and customer data are never copied into error
+strings or payloads returned/stored by this path. `pos_errors.payload` is not
+used for provider diagnostics, and V63 clears any value retained by older
+versions while rewriting related historical POS/Square error fields.

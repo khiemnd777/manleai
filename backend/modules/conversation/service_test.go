@@ -3714,6 +3714,36 @@ func TestApplyReplyGeneratorIncludesAITone(t *testing.T) {
 	}
 }
 
+func TestApplyReplyGeneratorDoesNotPersistProviderErrorDetail(t *testing.T) {
+	store := newFakeConversationStore()
+	service := NewService(store, &fakeBookingTool{})
+	privateDetail := "openai secret-token customer@example.com provider response"
+	replyGenerator := &fakeReplyGenerator{err: errors.New(privateDetail)}
+	service.SetReplyGenerator(replyGenerator)
+	turn := TurnRecord{
+		SalonID:         "salon_1",
+		OwnerUserID:     "owner_1",
+		Session:         store.session,
+		CustomerMessage: "Can you make that warmer?",
+		AIMessage:       "What time works for that day?",
+		ReplyPolicy:     ReplyPolicyStyleOnly,
+		Update: SessionUpdate{
+			Status:  StatusActive,
+			Intent:  IntentBooking,
+			Outcome: OutcomeCollecting,
+		},
+	}
+
+	service.applyReplyGenerator(context.Background(), &turn, store.session, store.services, &store.cfg, "requested_time", "requested_time", nil)
+
+	if turn.AIMetadata["llm_error"] != "reply generation failed" {
+		t.Fatalf("llm error metadata = %#v", turn.AIMetadata)
+	}
+	if strings.Contains(fmt.Sprint(turn.AIMetadata), privateDetail) {
+		t.Fatalf("AI metadata leaked provider detail: %#v", turn.AIMetadata)
+	}
+}
+
 func TestApplyReplyGeneratorSkipsLLMForRealtimePhoneTurn(t *testing.T) {
 	store := newFakeConversationStore()
 	service := NewService(store, &fakeBookingTool{})

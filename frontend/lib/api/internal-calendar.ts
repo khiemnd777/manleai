@@ -15,85 +15,91 @@ import type {
 } from "@/types/api";
 
 const versionConflictCode = "MANLEAI_CALENDAR_CONFIG_VERSION_CONFLICT";
+export type InternalCalendarSurface = "tenant" | "platform";
 
-export function getManleAICalendar(salonID: string) {
-  return apiRequest<ManleAICalendarAggregateResponse>(calendarPath(salonID));
+export function getManleAICalendar(salonID: string, surface: InternalCalendarSurface = "tenant") {
+  return apiRequest<ManleAICalendarAggregateResponse>(calendarPath(salonID, surface));
 }
 
-export function updateManleAICalendarConfig(salonID: string, input: ManleAICalendarConfigInput) {
-  return mutate(salonID, "/config", "PUT", input);
+export function updateManleAICalendarConfig(salonID: string, input: ManleAICalendarConfigInput, surface: InternalCalendarSurface = "tenant") {
+  return mutate(salonID, "/config", "PUT", input, surface);
 }
 
-export function replaceManleAICalendarHours(salonID: string, input: ManleAICalendarHoursInput) {
-  return mutate(salonID, "/hours", "PUT", input);
+export function replaceManleAICalendarHours(salonID: string, input: ManleAICalendarHoursInput, surface: InternalCalendarSurface = "tenant") {
+  return mutate(salonID, "/hours", "PUT", input, surface);
 }
 
-export function getManleAICalendarStaffProfile(salonID: string, staffID: string) {
+export function getManleAICalendarStaffProfile(salonID: string, staffID: string, surface: InternalCalendarSurface = "tenant") {
   return apiRequest<ManleAICalendarStaffProfileResponse>(
-    `${calendarPath(salonID)}/staff/${encodeURIComponent(staffID)}`
+    `${calendarPath(salonID, surface)}/staff/${encodeURIComponent(staffID)}`
   );
 }
 
 export function updateManleAICalendarStaffProfile(
   salonID: string,
   staffID: string,
-  input: ManleAICalendarStaffProfileInput
+  input: ManleAICalendarStaffProfileInput,
+  surface: InternalCalendarSurface = "tenant"
 ) {
-  return mutate(salonID, `/staff/${encodeURIComponent(staffID)}`, "PUT", input);
+  return mutate(salonID, `/staff/${encodeURIComponent(staffID)}`, "PUT", input, surface);
 }
 
-export function getManleAICalendarServicePolicy(salonID: string, serviceID: string) {
+export function getManleAICalendarServicePolicy(salonID: string, serviceID: string, surface: InternalCalendarSurface = "tenant") {
   return apiRequest<ManleAICalendarServicePolicyResponse>(
-    `${calendarPath(salonID)}/services/${encodeURIComponent(serviceID)}`
+    `${calendarPath(salonID, surface)}/services/${encodeURIComponent(serviceID)}`
   );
 }
 
 export function updateManleAICalendarServicePolicy(
   salonID: string,
   serviceID: string,
-  input: ManleAICalendarServicePolicyInput
+  input: ManleAICalendarServicePolicyInput,
+  surface: InternalCalendarSurface = "tenant"
 ) {
-  return mutate(salonID, `/services/${encodeURIComponent(serviceID)}`, "PUT", input);
+  return mutate(salonID, `/services/${encodeURIComponent(serviceID)}`, "PUT", input, surface);
 }
 
-export function listManleAICalendarResources(salonID: string) {
-  return apiRequest<ManleAICalendarResourceListResponse>(`${calendarPath(salonID)}/resources`);
+export function listManleAICalendarResources(salonID: string, surface: InternalCalendarSurface = "tenant") {
+  return apiRequest<ManleAICalendarResourceListResponse>(`${calendarPath(salonID, surface)}/resources`);
 }
 
-export function createManleAICalendarResource(salonID: string, input: ManleAICalendarResourceInput) {
-  return mutate(salonID, "/resources", "POST", input);
+export function createManleAICalendarResource(salonID: string, input: ManleAICalendarResourceInput, surface: InternalCalendarSurface = "tenant") {
+  return mutate(salonID, "/resources", "POST", input, surface);
 }
 
 export function updateManleAICalendarResource(
   salonID: string,
   resourceID: string,
-  input: ManleAICalendarResourceInput
+  input: ManleAICalendarResourceInput,
+  surface: InternalCalendarSurface = "tenant"
 ) {
-  return mutate(salonID, `/resources/${encodeURIComponent(resourceID)}`, "PUT", input);
+  return mutate(salonID, `/resources/${encodeURIComponent(resourceID)}`, "PUT", input, surface);
 }
 
 export function archiveManleAICalendarResource(
   salonID: string,
   resourceID: string,
-  input: ManleAICalendarMutationMeta
+  input: ManleAICalendarMutationMeta,
+  surface: InternalCalendarSurface = "tenant"
 ) {
-  return mutate(salonID, `/resources/${encodeURIComponent(resourceID)}/archive`, "POST", input);
+  return mutate(salonID, `/resources/${encodeURIComponent(resourceID)}/archive`, "POST", input, surface);
 }
 
-export function createManleAICalendarException(salonID: string, input: ManleAICalendarExceptionInput) {
-  return mutate(salonID, "/exceptions", "POST", input);
+export function createManleAICalendarException(salonID: string, input: ManleAICalendarExceptionInput, surface: InternalCalendarSurface = "tenant") {
+  return mutate(salonID, "/exceptions", "POST", input, surface);
 }
 
 export function cancelManleAICalendarException(
   salonID: string,
   exceptionID: string,
-  input: ManleAICalendarMutationMeta
+  input: ManleAICalendarMutationMeta,
+  surface: InternalCalendarSurface = "tenant"
 ) {
-  return mutate(salonID, `/exceptions/${encodeURIComponent(exceptionID)}/cancel`, "POST", input);
+  return mutate(salonID, `/exceptions/${encodeURIComponent(exceptionID)}/cancel`, "POST", input, surface);
 }
 
-export function activateManleAICalendar(salonID: string, input: ManleAICalendarMutationMeta) {
-  return mutate(salonID, "/activate", "POST", input);
+export function activateManleAICalendar(salonID: string, input: ManleAICalendarMutationMeta, surface: InternalCalendarSurface = "tenant") {
+  return mutate(salonID, "/activate", "POST", input, surface);
 }
 
 export function newManleAICalendarActionKey() {
@@ -141,17 +147,20 @@ export function salonLocalDateTimeToISO(value: string, timezone: string) {
   return new Date([...matches][0]).toISOString();
 }
 
-function calendarPath(salonID: string) {
-  return `/api/salons/${encodeURIComponent(salonID)}/manleai-calendar`;
+function calendarPath(salonID: string, surface: InternalCalendarSurface) {
+  return surface === "platform"
+    ? `/api/platform/tenants/${encodeURIComponent(salonID)}/technical/manleai-calendar`
+    : `/api/salons/${encodeURIComponent(salonID)}/manleai-calendar`;
 }
 
 function mutate(
   salonID: string,
   suffix: string,
   method: "POST" | "PUT",
-  input: object
+  input: object,
+  surface: InternalCalendarSurface
 ) {
-  return apiRequest<ManleAICalendarMutationResponse>(`${calendarPath(salonID)}${suffix}`, {
+  return apiRequest<ManleAICalendarMutationResponse>(`${calendarPath(salonID, surface)}${suffix}`, {
     method,
     body: JSON.stringify(input)
   });

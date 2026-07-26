@@ -1,5 +1,5 @@
-import { AppointmentsDashboard } from "@/features/dashboard/appointments-dashboard";
+import { TenantAppointmentsConsole } from "@/features/business/tenant-appointments-console";
 
 export default function AppointmentsPage() {
-  return <AppointmentsDashboard />;
+  return <TenantAppointmentsConsole />;
 }

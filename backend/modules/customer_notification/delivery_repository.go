@@ -93,11 +93,25 @@ func (r *Repository) ClaimBatch(ctx context.Context, limit int, lease time.Durat
 	}
 	defer tx.Rollback()
 	rows, err := tx.QueryContext(ctx, `
-		WITH candidates AS (
-			SELECT id FROM customer_notification_deliveries
-			WHERE delivery_status IN ('queued','quiet_hours','failed') AND next_delivery_at<=now()
-			  AND delivery_attempts::bigint < (requeue_count::bigint+1)*$1
-			ORDER BY next_delivery_at,created_at,id FOR UPDATE SKIP LOCKED LIMIT $2
+		WITH ranked AS (
+			SELECT delivery.id,delivery.next_delivery_at,delivery.created_at,
+			       row_number() OVER (
+			           PARTITION BY delivery.salon_id
+			           ORDER BY delivery.next_delivery_at,delivery.created_at,delivery.id
+			       ) AS tenant_rank,
+			       COALESCE(limits.worker_claims_per_batch,2) AS tenant_limit
+			FROM customer_notification_deliveries delivery
+			LEFT JOIN tenant_runtime_limits limits ON limits.salon_id=delivery.salon_id
+			WHERE delivery.delivery_status IN ('queued','quiet_hours','failed')
+			  AND delivery.next_delivery_at<=now()
+			  AND delivery.delivery_attempts::bigint < (delivery.requeue_count::bigint+1)*$1
+		), candidates AS (
+			SELECT delivery.id
+			FROM customer_notification_deliveries delivery
+			JOIN ranked ON ranked.id=delivery.id
+			WHERE ranked.tenant_rank<=ranked.tenant_limit
+			ORDER BY ranked.next_delivery_at,ranked.created_at,delivery.id
+			FOR UPDATE OF delivery SKIP LOCKED LIMIT $2
 		), claimed AS (
 			UPDATE customer_notification_deliveries delivery
 			SET delivery_status='delivering',delivery_provider='twilio',delivery_claim_token=gen_random_uuid(),
@@ -508,7 +522,9 @@ func (r *Repository) DetailForAppointment(ctx context.Context, salonID, ownerUse
 		SELECT COALESCE(normalize_customer_sms_destination(appointment.customer_phone),'')
 		FROM appointments appointment
 		JOIN salons salon ON salon.id=appointment.salon_id
-		WHERE appointment.salon_id=$1 AND appointment.id=$2 AND salon.owner_user_id=$3
+		WHERE appointment.salon_id=$1 AND appointment.id=$2
+		  AND (public.has_active_tenant_membership(salon.id, $3::uuid)
+		       OR public.has_platform_salon_capability(salon.id, $3::uuid, 'operations.read'))
 	`, salonID, appointmentID, ownerUserID).Scan(&destination)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -525,7 +541,9 @@ func (r *Repository) DetailForRequest(ctx context.Context, salonID, ownerUserID,
 		SELECT COALESCE(normalize_customer_sms_destination(request.customer_phone),'')
 		FROM scheduling_requests request
 		JOIN salons salon ON salon.id=request.salon_id
-		WHERE request.salon_id=$1 AND request.id=$2 AND salon.owner_user_id=$3
+		WHERE request.salon_id=$1 AND request.id=$2
+		  AND (public.has_active_tenant_membership(salon.id, $3::uuid)
+		       OR public.has_platform_salon_capability(salon.id, $3::uuid, 'operations.read'))
 	`, salonID, requestID, ownerUserID).Scan(&destination)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -689,7 +707,9 @@ func (r *Repository) requeueForOwner(ctx context.Context, salonID, ownerUserID, 
 		       delivery.destination_e164,consent.version,delivery.consent_version,
 		       settings.customer_sms_policy_version,delivery.policy_version,
 		       settings.customer_sms_enabled,
-		       salon.owner_user_id=$4,delivery.redacted_at,delivery.requeue_count,
+		       (public.has_active_tenant_membership(salon.id, $4::uuid)
+		        OR public.has_platform_salon_capability(salon.id, $4::uuid, 'operations.write')),
+		       delivery.redacted_at,delivery.requeue_count,
 		       EXISTS(SELECT 1 FROM customer_notification_delivery_attempts attempt
 		              WHERE attempt.customer_notification_delivery_id=delivery.id
 		                AND attempt.outcome='outcome_unknown'),

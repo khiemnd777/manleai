@@ -11,6 +11,7 @@ import (
 	"github.com/manleai/ai-receptionist/internal/respond"
 	"github.com/manleai/ai-receptionist/modules/booking"
 	"github.com/manleai/ai-receptionist/modules/pos"
+	tenantruntime "github.com/manleai/ai-receptionist/modules/tenant_runtime"
 )
 
 type SchedulingActionService interface {
@@ -27,16 +28,29 @@ type SchedulingRequestService interface {
 type Handler struct {
 	actions  SchedulingActionService
 	requests SchedulingRequestService
+	limiter  tenantRuntimeLimiter
+}
+
+type tenantRuntimeLimiter interface {
+	AllowTenant(context.Context, middleware.ActorContext, string, string, int) (tenantruntime.Decision, error)
 }
 
 func NewHandler(actions SchedulingActionService, requests SchedulingRequestService) *Handler {
 	return &Handler{actions: actions, requests: requests}
 }
 
+func (h *Handler) SetTenantRuntimeLimiter(limiter tenantRuntimeLimiter) *Handler {
+	h.limiter = limiter
+	return h
+}
+
 func (h *Handler) Availability(c *fiber.Ctx) error {
 	var req booking.AvailabilityRequest
 	if err := c.BodyParser(&req); err != nil {
 		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
+	}
+	if allowed, err := h.allowTenantRequest(c, tenantruntime.MetricExpensiveRequest); !allowed || err != nil {
+		return err
 	}
 	result, err := h.actions.CheckAvailability(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
 	if errors.Is(err, booking.ErrSchedulingAuthorityNotReady) {
@@ -64,6 +78,9 @@ func (h *Handler) ExecuteAction(c *fiber.Ctx) error {
 	var req ActionRequest
 	if err := c.BodyParser(&req); err != nil {
 		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
+	}
+	if allowed, err := h.allowTenantRequest(c, tenantruntime.MetricSchedulingWrite); !allowed || err != nil {
+		return err
 	}
 	req.Source = booking.SourceOwnerDashboard
 	result, err := h.actions.ExecuteAction(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
@@ -102,6 +119,26 @@ func (h *Handler) ExecuteAction(c *fiber.Ctx) error {
 		status = fiber.StatusAccepted
 	}
 	return respond.JSON(c, status, result)
+}
+
+func (h *Handler) allowTenantRequest(c *fiber.Ctx, metric string) (bool, error) {
+	if h == nil || h.limiter == nil {
+		return true, nil
+	}
+	decision, err := h.limiter.AllowTenant(c.UserContext(), middleware.Actor(c), c.Params("id"), metric, 1)
+	if errors.Is(err, tenantruntime.ErrQuotaExceeded) {
+		c.Set(fiber.HeaderRetryAfter, strconv.Itoa(decision.RetryAfterSec))
+		c.Set("TenantLimit-Limit", strconv.Itoa(decision.Limit))
+		c.Set("TenantLimit-Remaining", strconv.FormatInt(decision.Remaining, 10))
+		return false, respond.Error(c, fiber.StatusTooManyRequests, "TENANT_QUOTA_EXCEEDED", "This salon has reached its current scheduling request limit. Retry later.")
+	}
+	if errors.Is(err, tenantruntime.ErrForbidden) {
+		return false, respond.Error(c, fiber.StatusForbidden, "TENANT_ACCESS_FORBIDDEN", "This salon is not available to the current tenant account.")
+	}
+	if err != nil {
+		return false, respond.Error(c, fiber.StatusServiceUnavailable, "TENANT_QUOTA_UNAVAILABLE", "Tenant request protection is temporarily unavailable.")
+	}
+	return true, nil
 }
 
 func (h *Handler) ListRequests(c *fiber.Ctx) error {

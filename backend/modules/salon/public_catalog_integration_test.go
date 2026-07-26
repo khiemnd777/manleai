@@ -155,15 +155,12 @@ func TestPostgresOwnerManualPublicCatalogAuthorityFenceTenantAndFailClosedRead(t
 		t.Fatalf("final publish/authority state=%v/%q/%d", enabled, authority, version)
 	}
 
-	internalSalon, err := service.Create(ctx, ownerID, CreateSalonRequest{
+	internalSalon := createSalonWithTestAuthority(t, ctx, db, service, ownerID, CreateSalonRequest{
 		OperationKey:        "public-internal-" + uuid.NewString(),
 		SchedulingAuthority: booking.SchedulingAuthorityManleAICalendar,
 		Name:                "Internal Catalog Salon",
 		Phone:               "+13125551011",
 	})
-	if err != nil {
-		t.Fatalf("create internal salon: %v", err)
-	}
 	var internalServiceID, internalStaffID string
 	if err := db.QueryRowContext(ctx, `
 		INSERT INTO services (salon_id,pos_provider,pos_service_id,name,duration_minutes,ai_bookable,active,source,sync_status)
@@ -216,7 +213,7 @@ func TestPostgresOwnerManualPublicCatalogAuthorityFenceTenantAndFailClosedRead(t
 	}
 	internalSlug := "internal-catalog-" + strings.ToLower(uuid.NewString()[:8])
 	internalSettings, err := service.UpdatePublicCatalogSettings(ctx, internalSalon.ID, ownerID, UpdatePublicCatalogRequest{
-		PublicSlug: internalSlug, PublicCatalogEnabled: true, ExpectedSchedulingAuthorityVersion: 1,
+		PublicSlug: internalSlug, PublicCatalogEnabled: true, ExpectedSchedulingAuthorityVersion: internalSalon.SchedulingAuthorityVersion,
 	})
 	if err != nil {
 		t.Fatalf("publish internal catalog: %v", err)
@@ -229,15 +226,12 @@ func TestPostgresOwnerManualPublicCatalogAuthorityFenceTenantAndFailClosedRead(t
 		t.Fatalf("internal public catalog=%#v err=%v", internalCatalog, err)
 	}
 
-	externalSalon, err := service.Create(ctx, ownerID, CreateSalonRequest{
+	externalSalon := createSalonWithTestAuthority(t, ctx, db, service, ownerID, CreateSalonRequest{
 		OperationKey:        "public-external-" + uuid.NewString(),
 		SchedulingAuthority: booking.SchedulingAuthorityExternalProvider,
 		Name:                "Connected Catalog Salon",
 		Phone:               "+13125551012",
 	})
-	if err != nil {
-		t.Fatalf("create external salon: %v", err)
-	}
 	var externalServiceID, externalStaffID string
 	if err := db.QueryRowContext(ctx, `
 		INSERT INTO services (
@@ -280,7 +274,7 @@ func TestPostgresOwnerManualPublicCatalogAuthorityFenceTenantAndFailClosedRead(t
 	}
 	externalSlug := "external-catalog-" + strings.ToLower(uuid.NewString()[:8])
 	externalSettings, err := service.UpdatePublicCatalogSettings(ctx, externalSalon.ID, ownerID, UpdatePublicCatalogRequest{
-		PublicSlug: externalSlug, PublicCatalogEnabled: true, ExpectedSchedulingAuthorityVersion: 1,
+		PublicSlug: externalSlug, PublicCatalogEnabled: true, ExpectedSchedulingAuthorityVersion: externalSalon.SchedulingAuthorityVersion,
 	})
 	if err != nil {
 		t.Fatalf("publish external catalog: %v", err)

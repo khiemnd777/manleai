@@ -139,6 +139,30 @@ func TestSchedulingPIIRetentionHasStableOwnerFacingHealthPolicy(t *testing.T) {
 	}
 }
 
+func TestPlatformStatusLinksStayInsidePlatformOperationsSurface(t *testing.T) {
+	service := NewService(fakeStatusStore{})
+	result, err := service.buildStatus(context.Background(), "salon-123", "owner", nil, []queueRecord{{
+		Key: "notification_delivery", Available: true,
+	}}, true)
+	if err != nil {
+		t.Fatalf("buildStatus: %v", err)
+	}
+	for _, item := range result.Jobs {
+		for _, link := range item.Links {
+			if link.Href != "/platform/tenants/salon-123/operations" {
+				t.Fatalf("Platform job link=%q", link.Href)
+			}
+		}
+	}
+	for _, item := range result.Queues {
+		for _, link := range item.Links {
+			if link.Href != "/platform/tenants/salon-123/operations" {
+				t.Fatalf("Platform queue link=%q", link.Href)
+			}
+		}
+	}
+}
+
 func contains(text, fragment string) bool {
 	for i := 0; i+len(fragment) <= len(text); i++ {
 		if text[i:i+len(fragment)] == fragment {

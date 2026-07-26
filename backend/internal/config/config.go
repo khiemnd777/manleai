@@ -11,6 +11,9 @@ type Config struct {
 	AppEnv                  string
 	ServerPort              string
 	DatabaseURL             string
+	MigrationDatabaseURL    string
+	DatabaseRuntimeRole     string
+	DatabaseRLSEnforced     bool
 	RedisURL                string
 	RateLimitEnabled        bool
 	RateLimitClientIPHeader string
@@ -122,6 +125,9 @@ func Load() Config {
 		AppEnv:                  appEnv,
 		ServerPort:              env("SERVER_PORT", "8080"),
 		DatabaseURL:             env("DATABASE_URL", "postgres://ai_receptionist:ai_receptionist@localhost:55432/ai_receptionist?sslmode=disable"),
+		MigrationDatabaseURL:    env("MIGRATION_DATABASE_URL", ""),
+		DatabaseRuntimeRole:     env("DATABASE_RUNTIME_ROLE", ""),
+		DatabaseRLSEnforced:     appEnv == "production" || envBool("DATABASE_RLS_ENFORCED", false),
 		RedisURL:                env("REDIS_URL", "redis://localhost:56379/0"),
 		RateLimitEnabled:        appEnv == "production" || envBool("RATE_LIMIT_ENABLED", false),
 		RateLimitClientIPHeader: env("RATE_LIMIT_CLIENT_IP_HEADER", "X-ManleAI-Client-IP"),

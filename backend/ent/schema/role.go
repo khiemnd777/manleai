@@ -17,6 +17,7 @@ func (Role) Fields() []ent.Field {
 		field.UUID("id", uuid.UUID{}).Default(uuid.New),
 		field.String("name").NotEmpty().Unique(),
 		field.String("display_name").NotEmpty(),
+		field.String("scope").Default("legacy"),
 		field.Time("created_at").Default(time.Now),
 		field.Time("updated_at").Default(time.Now).UpdateDefault(time.Now),
 	}

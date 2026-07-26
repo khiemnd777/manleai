@@ -14,6 +14,7 @@ import {
   newOwnerNotificationDeliveryActionKey,
   requeueOwnerNotificationDelivery
 } from "@/lib/api/owner-notification-deliveries";
+import type { OwnerNotificationSurface } from "@/lib/api/owner-notification-deliveries";
 import type {
   OwnerNotificationDelivery,
   OwnerNotificationDeliveryMetrics
@@ -21,7 +22,7 @@ import type {
 
 const pageSize = 25;
 
-export function OwnerNotificationDeliveries({ salonID }: { salonID: string }) {
+export function OwnerNotificationDeliveries({ salonID, surface = "tenant" }: { salonID: string; surface?: OwnerNotificationSurface }) {
   const listRequestRef = useRef(0);
   const detailRequestRef = useRef(0);
   const requeueKeyRef = useRef("");
@@ -43,7 +44,7 @@ export function OwnerNotificationDeliveries({ salonID }: { salonID: string }) {
     setLoading(true);
     setError("");
     try {
-      const response = await listOwnerNotificationDeliveries(salonID, pageSize, offset);
+      const response = await listOwnerNotificationDeliveries(salonID, pageSize, offset, surface);
       if (requestID !== listRequestRef.current) return;
       setRows(response.deliveries);
       setMetrics(response.metrics);
@@ -54,7 +55,7 @@ export function OwnerNotificationDeliveries({ salonID }: { salonID: string }) {
     } finally {
       if (requestID === listRequestRef.current) setLoading(false);
     }
-  }, [offset, salonID]);
+  }, [offset, salonID, surface]);
 
   useEffect(() => { setOffset(0); }, [salonID]);
   useEffect(() => { void load(); }, [load]);
@@ -68,7 +69,7 @@ export function OwnerNotificationDeliveries({ salonID }: { salonID: string }) {
     requeueKeyRef.current = "";
     const requestID = ++detailRequestRef.current;
     try {
-      const response = await getOwnerNotificationDelivery(salonID, row.id);
+      const response = await getOwnerNotificationDelivery(salonID, row.id, surface);
       if (requestID === detailRequestRef.current) setSelected(response.delivery);
     } catch (err) {
       if (requestID === detailRequestRef.current) {
@@ -94,7 +95,7 @@ export function OwnerNotificationDeliveries({ salonID }: { salonID: string }) {
     setRequeueing(true);
     setRequeueError("");
     try {
-      const response = await requeueOwnerNotificationDelivery(salonID, selected.id, requeueKeyRef.current);
+      const response = await requeueOwnerNotificationDelivery(salonID, selected.id, requeueKeyRef.current, surface);
       setSelected(response.delivery);
       setSuccess("Delivery was safely requeued. Queued means waiting for the delivery worker, not delivered.");
       requeueKeyRef.current = "";

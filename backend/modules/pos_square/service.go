@@ -74,6 +74,7 @@ type StatusResponse struct {
 
 type ReadinessStatus struct {
 	AIEnabled                           bool                       `json:"ai_enabled"`
+	AIRuntimeVersion                    int64                      `json:"ai_runtime_version"`
 	SchedulingAuthority                 string                     `json:"scheduling_authority"`
 	CanTestBooking                      bool                       `json:"can_test_booking"`
 	CanCancelTestBooking                bool                       `json:"can_cancel_test_booking"`
@@ -99,6 +100,31 @@ type ReadinessCheck struct {
 	Label    string `json:"label"`
 	Complete bool   `json:"complete"`
 	Message  string `json:"message,omitempty"`
+}
+
+// BusinessReadinessResponse is the tenant-safe scheduling projection. It
+// intentionally omits connection IDs, merchant/location IDs, scopes, sync
+// logs, provider diagnostics, and test-booking evidence.
+type BusinessReadinessResponse struct {
+	SchedulingAuthority     string `json:"scheduling_authority"`
+	ReadyForExternalNewWork bool   `json:"ready_for_external_new_work"`
+	ServiceCount            int    `json:"service_count"`
+	StaffCount              int    `json:"staff_count"`
+	BusinessHourPeriodCount int    `json:"business_hour_period_count"`
+	BookingWriteBlocked     bool   `json:"booking_write_blocked"`
+}
+
+func businessReadinessResponse(readiness *ReadinessStatus) BusinessReadinessResponse {
+	if readiness == nil {
+		return BusinessReadinessResponse{}
+	}
+	return BusinessReadinessResponse{
+		SchedulingAuthority:     readiness.SchedulingAuthority,
+		ReadyForExternalNewWork: readiness.SchedulingAuthority == booking.SchedulingAuthorityExternalProvider && readiness.CanEnableAIBooking,
+		ServiceCount:            readiness.ServiceCount, StaffCount: readiness.StaffCount,
+		BusinessHourPeriodCount: readiness.BusinessHourCount,
+		BookingWriteBlocked:     readiness.BookingWriteBlocked,
+	}
 }
 
 type TestBookingRequest struct {
@@ -136,13 +162,25 @@ type GateRequest struct {
 }
 
 type GateResponse struct {
-	Readiness *ReadinessStatus `json:"readiness"`
+	AIRuntime pos.AIRuntimeState `json:"ai_runtime"`
+	Readiness *ReadinessStatus   `json:"readiness"`
 }
 
 func (s *Service) ConnectURL(ctx context.Context, salonID string, ownerUserID string) (*ConnectURLResponse, error) {
 	if err := s.repo.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
 	}
+	return s.connectURLForSalon(ctx, salonID)
+}
+
+func (s *Service) ConnectURLForPlatform(ctx context.Context, salonID string) (*ConnectURLResponse, error) {
+	if err := s.repo.EnsureSalonExists(ctx, salonID); err != nil {
+		return nil, err
+	}
+	return s.connectURLForSalon(ctx, salonID)
+}
+
+func (s *Service) connectURLForSalon(ctx context.Context, salonID string) (*ConnectURLResponse, error) {
 	state, nonceHash, expiresAt, err := encodeState(salonID, s.stateSecret, time.Now().UTC())
 	if err != nil {
 		return nil, err
@@ -161,6 +199,99 @@ func (s *Service) ConnectURL(ctx context.Context, salonID string, ownerUserID st
 		return nil, err
 	}
 	return &ConnectURLResponse{URL: url, State: state}, nil
+}
+
+func (s *Service) StatusForPlatform(ctx context.Context, salonID string) (*StatusResponse, error) {
+	if err := s.repo.EnsureSalonExists(ctx, salonID); err != nil {
+		return nil, err
+	}
+	connection, err := s.repo.GetConnection(ctx, salonID, pos.ProviderSquare)
+	if errors.Is(err, pos.ErrNotFound) {
+		connection = &pos.Connection{SalonID: salonID, Provider: pos.ProviderSquare, Status: pos.StatusNotConnected, Scopes: []string{}}
+	} else if err != nil {
+		return nil, err
+	}
+	logs, err := s.repo.RecentSyncLogs(ctx, salonID, pos.ProviderSquare, 10)
+	if err != nil {
+		return nil, err
+	}
+	readiness, err := s.ReadinessForPlatform(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	return &StatusResponse{Connection: connection, SyncLogs: logs, Readiness: readiness}, nil
+}
+
+func (s *Service) ReadinessForPlatform(ctx context.Context, salonID string) (*ReadinessStatus, error) {
+	aiRuntime, err := s.repo.GetSalonAIRuntimeForPlatform(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	authority, err := s.repo.GetSchedulingAuthorityForPlatform(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	connection, err := s.repo.GetConnection(ctx, salonID, pos.ProviderSquare)
+	if errors.Is(err, pos.ErrNotFound) {
+		connection = &pos.Connection{SalonID: salonID, Provider: pos.ProviderSquare, Status: pos.StatusNotConnected, Scopes: []string{}}
+	} else if err != nil {
+		return nil, err
+	}
+	services, err := s.repo.ListServices(ctx, salonID, pos.ProviderSquare)
+	if err != nil {
+		return nil, err
+	}
+	staff, err := s.repo.ListStaff(ctx, salonID, pos.ProviderSquare)
+	if err != nil {
+		return nil, err
+	}
+	periods, err := s.repo.ListBusinessHourPeriods(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	bookingWriteError, err := s.repo.LatestErrorForOperations(ctx, salonID, pos.ProviderSquare, []string{"create_booking"})
+	if errors.Is(err, pos.ErrNotFound) {
+		bookingWriteError = nil
+	} else if err != nil {
+		return nil, err
+	}
+	appointmentChangeError, err := s.repo.LatestErrorForOperations(ctx, salonID, pos.ProviderSquare, []string{"reschedule_booking", "cancel_booking"})
+	if errors.Is(err, pos.ErrNotFound) {
+		appointmentChangeError = nil
+	} else if err != nil {
+		return nil, err
+	}
+	readiness := buildReadiness(aiRuntime.Enabled, authority, connection, services, staff, periods, nil, bookingWriteError, appointmentChangeError)
+	readiness.AIRuntimeVersion = aiRuntime.Version
+	return readiness, nil
+}
+
+func (s *Service) SetAIBookingForPlatform(ctx context.Context, salonID, actorUserID string, enabled bool, actionKey string, expectedVersion int64) (*GateResponse, bool, error) {
+	salonID = strings.TrimSpace(salonID)
+	actorUserID = strings.TrimSpace(actorUserID)
+	actionKey = strings.TrimSpace(actionKey)
+	if salonID == "" || actorUserID == "" || actionKey == "" || len(actionKey) > 256 || expectedVersion < 0 {
+		return nil, false, ErrValidation
+	}
+	payload, err := json.Marshal(struct {
+		Enabled bool `json:"enabled"`
+	}{Enabled: enabled})
+	if err != nil {
+		return nil, false, err
+	}
+	fingerprint := sha256.Sum256(payload)
+	state, replayed, err := s.repo.SetSalonAIRuntimeForPlatform(ctx, pos.AIRuntimeMutation{
+		SalonID: salonID, ActorUserID: actorUserID, ActionKey: actionKey,
+		RequestFingerprint: hex.EncodeToString(fingerprint[:]), ExpectedVersion: expectedVersion, Enabled: enabled,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	readiness, err := s.ReadinessForPlatform(ctx, salonID)
+	if err != nil {
+		return nil, false, err
+	}
+	return &GateResponse{AIRuntime: state, Readiness: readiness}, replayed, nil
 }
 
 func (s *Service) HandleCallback(ctx context.Context, code string, state string, _ string) (*pos.Connection, error) {
@@ -211,6 +342,13 @@ func (s *Service) Locations(ctx context.Context, salonID string, ownerUserID str
 	return s.adapter.ListLocations(ctx, salonID)
 }
 
+func (s *Service) LocationsForPlatform(ctx context.Context, salonID string) ([]pos.Location, error) {
+	if err := s.repo.EnsureSalonExists(ctx, salonID); err != nil {
+		return nil, err
+	}
+	return s.adapter.ListLocations(ctx, salonID)
+}
+
 func (s *Service) SelectLocation(ctx context.Context, salonID string, ownerUserID string, locationID string) (*pos.Connection, error) {
 	if err := s.repo.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
@@ -221,26 +359,42 @@ func (s *Service) SelectLocation(ctx context.Context, salonID string, ownerUserI
 	return s.repo.UpdateLocation(ctx, salonID, pos.ProviderSquare, locationID)
 }
 
+func (s *Service) SelectLocationForPlatform(ctx context.Context, salonID, locationID string) (*pos.Connection, error) {
+	if err := s.repo.EnsureSalonExists(ctx, salonID); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(locationID) == "" {
+		return nil, ErrValidation
+	}
+	return s.repo.UpdateLocation(ctx, salonID, pos.ProviderSquare, locationID)
+}
+
 func (s *Service) Sync(ctx context.Context, salonID string, ownerUserID string) (*pos.SyncSummary, error) {
 	if err := s.repo.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
 	}
+	return s.syncForSalon(ctx, salonID)
+}
+
+func (s *Service) syncForSalon(ctx context.Context, salonID string) (*pos.SyncSummary, error) {
 	logID, err := s.repo.CreateSyncLog(ctx, salonID, pos.ProviderSquare, "full_import")
 	if err != nil {
 		return nil, err
 	}
 	summary, err := s.adapter.SyncWithSummary(ctx, salonID)
 	if err != nil {
+		errorCode := normalizeSquareError(err)
+		safeMessage := pos.SafeErrorMessage(errorCode)
 		_ = s.repo.LogError(ctx, pos.POSError{
 			SalonID:      salonID,
 			Provider:     pos.ProviderSquare,
 			Operation:    "sync",
-			ErrorCode:    pos.ErrorUnknown,
-			ErrorMessage: err.Error(),
+			ErrorCode:    errorCode,
+			ErrorMessage: safeMessage,
 		})
-		_ = s.repo.CompleteSyncLog(ctx, logID, "failed", err.Error())
+		_ = s.repo.CompleteSyncLog(ctx, logID, "failed", safeMessage)
 		if generation, ok := providerSnapshotGenerationFromError(err); ok {
-			_ = s.repo.MarkSyncCompleteForGeneration(ctx, salonID, pos.ProviderSquare, generation, pos.StatusError, err.Error())
+			_ = s.repo.MarkSyncCompleteForGeneration(ctx, salonID, pos.ProviderSquare, generation, pos.StatusError, safeMessage)
 		}
 		return nil, err
 	}
@@ -248,6 +402,13 @@ func (s *Service) Sync(ctx context.Context, salonID string, ownerUserID string) 
 		return nil, err
 	}
 	return summary, s.repo.MarkSyncCompleteForGeneration(ctx, salonID, pos.ProviderSquare, summary.SnapshotGeneration, pos.StatusActive, "")
+}
+
+func (s *Service) SyncForPlatform(ctx context.Context, salonID string) (*pos.SyncSummary, error) {
+	if err := s.repo.EnsureSalonExists(ctx, salonID); err != nil {
+		return nil, err
+	}
+	return s.syncForSalon(ctx, salonID)
 }
 
 func (s *Service) Readiness(ctx context.Context, salonID string, ownerUserID string) (*ReadinessStatus, error) {
@@ -478,15 +639,19 @@ func (e squareSchedulingTargetEvidence) bookingWriteBlocked() bool {
 	return testErr != nil || errorErr != nil || !testAt.After(errorAt)
 }
 
-func loadSquareSchedulingTargetEvidenceTx(ctx context.Context, tx *sql.Tx, salonID string, ownerUserID string) (squareSchedulingTargetEvidence, error) {
+func loadSquareSchedulingTargetEvidenceTx(ctx context.Context, tx *sql.Tx, salonID string, actorUserID string) (squareSchedulingTargetEvidence, error) {
 	evidence := squareSchedulingTargetEvidence{Services: []squareSchedulingServiceEvidence{}, Staff: []squareSchedulingStaffEvidence{}, BusinessHours: []squareSchedulingHourEvidence{}}
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE(BTRIM(salon.active_pos_provider), ''), settings.scheduling_authority_version
 		FROM salons salon
 		JOIN salon_settings settings ON settings.salon_id = salon.id
-		WHERE salon.id::text = $1 AND salon.owner_user_id::text = $2
+		WHERE salon.id::text = $1
+		  AND (
+		      public.has_active_tenant_membership(salon.id, $2::uuid)
+		      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'technical.read')
+		  )
 		FOR SHARE OF salon, settings
-	`, salonID, ownerUserID).Scan(&evidence.ActiveProvider, &evidence.AuthorityVersion); err != nil {
+	`, salonID, actorUserID).Scan(&evidence.ActiveProvider, &evidence.AuthorityVersion); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return evidence, pos.ErrNotFound
 		}
@@ -1005,7 +1170,7 @@ func (b bookingWriteBlocker) Message() string {
 }
 
 func bookingWriteBlockerFromError(item *pos.POSErrorRecord, latest *booking.TestBookingRecord) bookingWriteBlocker {
-	if item == nil || item.ErrorCode != pos.ErrorPermissionDenied {
+	if item == nil || (item.ErrorCode != pos.ErrorPermissionDenied && item.ErrorCode != pos.ErrorWriteUnsupported) {
 		return bookingWriteBlocker{}
 	}
 	if latest != nil &&
@@ -1014,12 +1179,11 @@ func bookingWriteBlockerFromError(item *pos.POSErrorRecord, latest *booking.Test
 		latest.CreatedAt.After(item.CreatedAt) {
 		return bookingWriteBlocker{}
 	}
-	message := strings.TrimSpace(item.ErrorMessage)
 	createdAt := item.CreatedAt
 	return bookingWriteBlocker{
 		Blocked:    true,
 		ErrorCode:  item.ErrorCode,
-		Reason:     message,
+		Reason:     pos.SafeErrorMessage(item.ErrorCode),
 		LastSeenAt: &createdAt,
 	}
 }
@@ -1032,19 +1196,19 @@ type appointmentChangeWriteBlocker struct {
 }
 
 func appointmentChangeWriteBlockerFromError(item *pos.POSErrorRecord) appointmentChangeWriteBlocker {
-	if item == nil || item.ErrorCode != pos.ErrorPermissionDenied {
+	if item == nil {
 		return appointmentChangeWriteBlocker{}
 	}
-	message := strings.TrimSpace(item.ErrorMessage)
-	normalized := strings.ToLower(message)
-	if !strings.Contains(normalized, "merchant subscription does not support write operations") {
+	legacyUnsupported := item.ErrorCode == pos.ErrorPermissionDenied &&
+		strings.Contains(strings.ToLower(item.ErrorMessage), "merchant subscription does not support write operations")
+	if item.ErrorCode != pos.ErrorWriteUnsupported && !legacyUnsupported {
 		return appointmentChangeWriteBlocker{}
 	}
 	createdAt := item.CreatedAt
 	return appointmentChangeWriteBlocker{
 		Blocked:    true,
-		ErrorCode:  item.ErrorCode,
-		Reason:     message,
+		ErrorCode:  pos.ErrorWriteUnsupported,
+		Reason:     pos.SafeErrorMessage(pos.ErrorWriteUnsupported),
 		LastSeenAt: &createdAt,
 	}
 }

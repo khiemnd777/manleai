@@ -94,6 +94,12 @@ type SquareWebhookOperationsStore interface {
 	RequeueBookingWebhookForOwner(context.Context, string, string, string, string, string) (*WebhookEventRecord, bool, error)
 }
 
+type PlatformSquareWebhookOperationsStore interface {
+	ListBookingWebhooksForSalon(context.Context, string, string, int, int) ([]WebhookEventRecord, WebhookMetrics, CalendarRepairHealth, error)
+	GetBookingWebhookForSalon(context.Context, string, string) (*WebhookEventRecord, error)
+	RequeueBookingWebhookForSalon(context.Context, string, string, string, string, string) (*WebhookEventRecord, bool, error)
+}
+
 func (s *Service) ListWebhookEvents(ctx context.Context, salonID, ownerUserID, status string, limit, offset int) (*WebhookEventListResponse, error) {
 	salonID, ownerUserID, status = strings.TrimSpace(salonID), strings.TrimSpace(ownerUserID), strings.TrimSpace(status)
 	if s == nil || s.webhookOperationsRepo == nil || !validWebhookOperationUUID(salonID) || !validWebhookOperationUUID(ownerUserID) || !validWebhookStatusFilter(status) || limit < 1 || limit > 100 || offset < 0 {
@@ -136,6 +142,55 @@ func (s *Service) RequeueWebhookEvent(ctx context.Context, salonID, ownerUserID,
 		return nil, false, ErrWebhookOperationsValidation
 	}
 	event, replayed, err := s.webhookOperationsRepo.RequeueBookingWebhookForOwner(ctx, salonID, ownerUserID, eventID, actionKey, webhookRequeueFingerprint(eventID))
+	if err != nil {
+		return nil, false, err
+	}
+	setWebhookRequeueState(event)
+	return &WebhookEventDetailResponse{Event: *event}, replayed, nil
+}
+
+func (s *Service) ListWebhookEventsForPlatform(ctx context.Context, salonID, status string, limit, offset int) (*WebhookEventListResponse, error) {
+	salonID, status = strings.TrimSpace(salonID), strings.TrimSpace(status)
+	store, ok := s.webhookOperationsRepo.(PlatformSquareWebhookOperationsStore)
+	if s == nil || !ok || !validWebhookOperationUUID(salonID) || !validWebhookStatusFilter(status) || limit < 1 || limit > 100 || offset < 0 {
+		return nil, ErrWebhookOperationsValidation
+	}
+	events, metrics, repair, err := store.ListBookingWebhooksForSalon(ctx, salonID, status, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	for index := range events {
+		setWebhookRequeueState(&events[index])
+	}
+	hasMore := len(events) > limit
+	if hasMore {
+		events = events[:limit]
+	}
+	return &WebhookEventListResponse{Events: events, Metrics: metrics, CalendarRepair: repair, Limit: limit, Offset: offset, HasMore: hasMore}, nil
+}
+
+func (s *Service) GetWebhookEventForPlatform(ctx context.Context, salonID, eventID string) (*WebhookEventDetailResponse, error) {
+	salonID, eventID = strings.TrimSpace(salonID), strings.TrimSpace(eventID)
+	store, ok := s.webhookOperationsRepo.(PlatformSquareWebhookOperationsStore)
+	if s == nil || !ok || !validWebhookOperationUUID(salonID) || !validWebhookOperationUUID(eventID) {
+		return nil, ErrWebhookOperationsValidation
+	}
+	event, err := store.GetBookingWebhookForSalon(ctx, salonID, eventID)
+	if err != nil {
+		return nil, err
+	}
+	setWebhookRequeueState(event)
+	return &WebhookEventDetailResponse{Event: *event}, nil
+}
+
+func (s *Service) RequeueWebhookEventForPlatform(ctx context.Context, salonID, actorUserID, eventID string, req WebhookRequeueRequest) (*WebhookEventDetailResponse, bool, error) {
+	salonID, actorUserID, eventID = strings.TrimSpace(salonID), strings.TrimSpace(actorUserID), strings.TrimSpace(eventID)
+	actionKey := strings.TrimSpace(req.ActionKey)
+	store, ok := s.webhookOperationsRepo.(PlatformSquareWebhookOperationsStore)
+	if s == nil || !ok || !validWebhookOperationUUID(salonID) || !validWebhookOperationUUID(actorUserID) || !validWebhookOperationUUID(eventID) || actionKey == "" || len(actionKey) > 256 {
+		return nil, false, ErrWebhookOperationsValidation
+	}
+	event, replayed, err := store.RequeueBookingWebhookForSalon(ctx, salonID, actorUserID, eventID, actionKey, webhookRequeueFingerprint(eventID))
 	if err != nil {
 		return nil, false, err
 	}

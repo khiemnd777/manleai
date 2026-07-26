@@ -45,6 +45,43 @@ func TestSquareWriteErrorClassifiesOnlyDefinitiveClientRejectionsAsRetrySafe(t *
 	}
 }
 
+func TestSquareProviderErrorsExposeOnlyStableDiagnostics(t *testing.T) {
+	detail := "customer@example.com secret-token private provider payload"
+	err := &squareHTTPError{
+		StatusCode: http.StatusForbidden,
+		Code:       "FORBIDDEN",
+		Detail:     detail,
+	}
+	if strings.Contains(err.Error(), detail) || strings.Contains(err.Error(), "customer@example.com") {
+		t.Fatalf("Square HTTP error leaked provider detail: %q", err.Error())
+	}
+	if got := normalizeSquareError(err); got != pos.ErrorPermissionDenied {
+		t.Fatalf("normalizeSquareError = %q, want %q", got, pos.ErrorPermissionDenied)
+	}
+	if got := squareSafeErrorMessage(err); got != pos.SafeErrorMessage(pos.ErrorPermissionDenied) {
+		t.Fatalf("squareSafeErrorMessage = %q", got)
+	}
+
+	decodeErr := &squareResponseError{Err: errors.New(detail)}
+	if strings.Contains(decodeErr.Error(), detail) {
+		t.Fatalf("Square response error leaked decode detail: %q", decodeErr.Error())
+	}
+}
+
+func TestNormalizeSquareErrorClassifiesUnsupportedAppointmentWritesWithoutPersistingDetail(t *testing.T) {
+	err := &squareHTTPError{
+		StatusCode: http.StatusForbidden,
+		Code:       "FORBIDDEN",
+		Detail:     "Merchant subscription does not support write operations. private merchant payload",
+	}
+	if got := normalizeSquareError(err); got != pos.ErrorWriteUnsupported {
+		t.Fatalf("normalizeSquareError = %q, want %q", got, pos.ErrorWriteUnsupported)
+	}
+	if message := squareSafeErrorMessage(err); message != pos.SafeErrorMessage(pos.ErrorWriteUnsupported) || strings.Contains(message, "private merchant payload") {
+		t.Fatalf("safe message = %q", message)
+	}
+}
+
 func TestDoJSONSendsSquareVersionHeader(t *testing.T) {
 	transport := &capturingTransport{}
 	adapter := &SquareAdapter{

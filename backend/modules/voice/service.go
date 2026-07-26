@@ -16,6 +16,7 @@ import (
 	"github.com/manleai/ai-receptionist/modules/booking"
 	"github.com/manleai/ai-receptionist/modules/conversation"
 	"github.com/manleai/ai-receptionist/modules/scheduling"
+	tenantruntime "github.com/manleai/ai-receptionist/modules/tenant_runtime"
 )
 
 const (
@@ -32,6 +33,11 @@ type Service struct {
 	configResolver      ConfigResolver
 	schedulingReadiness map[string]SchedulingReadinessProvider
 	now                 func() time.Time
+	runtimeLimiter      voiceRuntimeLimiter
+}
+
+type voiceRuntimeLimiter interface {
+	AllowSystem(context.Context, string, string, int) (tenantruntime.Decision, error)
 }
 
 type answerContextPrewarmer interface {
@@ -50,6 +56,10 @@ func NewService(repo Store, conversation ConversationEngine, cfg config.VoiceCon
 
 func (s *Service) SetConfigResolver(resolver ConfigResolver) {
 	s.configResolver = resolver
+}
+
+func (s *Service) SetTenantRuntimeLimiter(limiter voiceRuntimeLimiter) {
+	s.runtimeLimiter = limiter
 }
 
 func (s *Service) SetSchedulingReadinessProviders(ownerManual SchedulingReadinessProvider, internalCalendar SchedulingReadinessProvider, externalProvider SchedulingReadinessProvider) {
@@ -570,6 +580,14 @@ func (s *Service) HandleIncomingCall(ctx context.Context, req IncomingCallReques
 	}
 	if !s.configured(voiceCfg) {
 		return nil, ErrProviderDisabled
+	}
+	if s.runtimeLimiter != nil {
+		if _, err := s.runtimeLimiter.AllowSystem(ctx, salon.SalonID, tenantruntime.MetricVoiceStart, 1); err != nil {
+			if errors.Is(err, tenantruntime.ErrQuotaExceeded) {
+				return nil, ErrTenantQuotaExceeded
+			}
+			return nil, err
+		}
 	}
 
 	session, err := s.getOrStartPhoneSession(ctx, salon.SalonID, salon.OwnerUserID, req.Provider, req.ProviderCallID, req.FromPhone, req.ToPhone)

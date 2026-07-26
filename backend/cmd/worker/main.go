@@ -10,6 +10,7 @@ import (
 
 	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/internal/database"
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/internal/encryption"
 	"github.com/manleai/ai-receptionist/internal/logger"
 	"github.com/manleai/ai-receptionist/modules/booking"
@@ -46,24 +47,25 @@ const (
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(databasecontext.WithScope(context.Background(), databasecontext.ScopeWorker), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	cfg := config.Load()
 	logg := logger.New(cfg.AppEnv)
 
-	db, err := database.Open(ctx, cfg.DatabaseURL)
+	db, err := database.OpenApplication(
+		ctx,
+		cfg.DatabaseURL,
+		cfg.MigrationDatabaseURL,
+		cfg.DatabaseRuntimeRole,
+		cfg.AutoMigrate,
+		cfg.DatabaseRLSEnforced,
+	)
 	if err != nil {
-		log.Fatalf("open database: %v", err)
+		log.Fatalf("prepare application database: %v", err)
 	}
 	defer db.Close()
-
-	if cfg.AutoMigrate {
-		if err := database.Migrate(ctx, db); err != nil {
-			log.Fatalf("run database migrations: %v", err)
-		}
-		logg.Info("database migrations ready")
-	}
+	logg.Info("database ready", "rls_enforced", cfg.DatabaseRLSEnforced)
 
 	cipher, err := encryption.NewTokenCipher(cfg.EncryptionKey)
 	if err != nil {

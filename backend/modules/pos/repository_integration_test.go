@@ -827,6 +827,40 @@ func TestRepositoryReadinessMutationsSerializeOnGlobalSchedulingFence(t *testing
 	}
 }
 
+func TestRepositoryLogErrorDiscardsProviderControlledDiagnostics(t *testing.T) {
+	fixture := newAIBookablePGFixture(t, schedulingAuthorityExternalProvider)
+	repo := NewRepository(fixture.db)
+	privateDetail := "secret-token customer@example.com provider response"
+	if err := repo.LogError(context.Background(), POSError{
+		SalonID:      fixture.salonID,
+		Provider:     "provider-a",
+		Operation:    "create_booking",
+		ErrorCode:    ErrorPermissionDenied,
+		ErrorMessage: privateDetail,
+		Payload:      []byte(`{"raw_error":"` + privateDetail + `"}`),
+	}); err != nil {
+		t.Fatalf("log POS error: %v", err)
+	}
+
+	var message string
+	var payload sql.NullString
+	if err := fixture.db.QueryRow(`
+		SELECT error_message, payload::text
+		FROM pos_errors
+		WHERE salon_id = $1 AND provider = 'provider-a' AND operation = 'create_booking'
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, fixture.salonID).Scan(&message, &payload); err != nil {
+		t.Fatalf("load POS error: %v", err)
+	}
+	if message != SafeErrorMessage(ErrorPermissionDenied) {
+		t.Fatalf("error message = %q", message)
+	}
+	if payload.Valid {
+		t.Fatalf("provider payload persisted: %q", payload.String)
+	}
+}
+
 func newAIBookablePGFixture(t *testing.T, authority string) *aiBookablePGFixture {
 	t.Helper()
 	databaseURL := os.Getenv("TEST_DATABASE_URL")

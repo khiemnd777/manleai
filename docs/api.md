@@ -607,11 +607,12 @@ appointment status is changed by SMS delivery.
 
 ### Owner Notification Delivery API
 
-The authenticated delivery routes require the current user to own `:id`. They
-return masked/safe operational evidence only: no message body, full phone
+The authenticated delivery routes require Platform Operations access to the
+fixed `:tenant_id` and an active `notifications` PII grant. They return
+masked/safe operational evidence only: no message body, full phone
 number, provider message ID, provider response, secret, or raw internal error.
 
-`GET /api/salons/:id/owner-notification-deliveries?status=<status>&limit=25&offset=0`
+`GET /api/platform/tenants/:tenant_id/operations/owner-notification-deliveries?status=<status>&limit=25&offset=0`
 
 Returns `deliveries`, bounded delivery `metrics`, `limit`, `offset`, and
 `has_more`. `limit` defaults to 25 and is capped at 100. Statuses are `queued`,
@@ -629,11 +630,11 @@ V61-retained rows add `redacted`, nullable `redacted_at`, and
 message body or raw error, and always has `can_requeue=false`; safe provider,
 status, attempt, audit ID, and timestamp evidence remains available.
 
-`GET /api/salons/:id/owner-notification-deliveries/:notification_id`
+`GET /api/platform/tenants/:tenant_id/operations/owner-notification-deliveries/:notification_id`
 
 Returns `{ "delivery": { ... } }` for one salon-owned row.
 
-`POST /api/salons/:id/owner-notification-deliveries/:notification_id/requeue`
+`POST /api/platform/tenants/:tenant_id/operations/owner-notification-deliveries/:notification_id/requeue`
 
 ```json
 {
@@ -701,20 +702,14 @@ Implemented routes:
 
 | Method and path | Purpose | Successful response |
 | --- | --- | --- |
-| `GET /api/salons/:id/manleai-calendar` | Read the full owner-scoped aggregate | `200 { "manleai_calendar": { ... } }` |
-| `PUT /api/salons/:id/manleai-calendar/config` | Create or replace the root policy | `200 { "manleai_calendar": { ... }, "replayed": false }` |
-| `PUT /api/salons/:id/manleai-calendar/hours` | Replace all `local_override` weekly salon periods | uniform mutation response |
-| `GET /api/salons/:id/manleai-calendar/staff/:staff_id` | Read one canonical staff member's periods and eligible services | `200 { "staff_profile": { ... }, "config_version": 4, "readiness": { ... } }` |
-| `PUT /api/salons/:id/manleai-calendar/staff/:staff_id` | Replace that staff member's periods and eligible-service links | uniform mutation response |
-| `GET /api/salons/:id/manleai-calendar/services/:service_id` | Read one canonical service's policy, eligible staff, and resource requirements | `200 { "service_policy": { ... }, "config_version": 4, "readiness": { ... } }` |
-| `PUT /api/salons/:id/manleai-calendar/services/:service_id` | Upsert that service policy and replace its staff/resource links | uniform mutation response |
-| `GET /api/salons/:id/manleai-calendar/resources` | List owner-scoped resource pools | `200 { "resources": [], "config_version": 4, "readiness": { ... } }` |
-| `POST /api/salons/:id/manleai-calendar/resources` | Create a resource pool | `201` uniform mutation response |
-| `PUT /api/salons/:id/manleai-calendar/resources/:resource_id` | Update a resource pool | uniform mutation response |
-| `POST /api/salons/:id/manleai-calendar/resources/:resource_id/archive` | Archive a resource pool without deleting its identity | uniform mutation response |
-| `POST /api/salons/:id/manleai-calendar/exceptions` | Create a salon, staff, or resource exception | `201` uniform mutation response |
-| `POST /api/salons/:id/manleai-calendar/exceptions/:exception_id/cancel` | Cancel an exception without deleting its history | uniform mutation response |
-| `POST /api/salons/:id/manleai-calendar/activate` | Record owner activation for the exact resulting config version | uniform mutation response |
+| `GET /api/platform/tenants/:tenant_id/technical/manleai-calendar` | Read the full Platform-authorized aggregate | `200 { "manleai_calendar": { ... } }` |
+| `PUT /api/platform/tenants/:tenant_id/technical/manleai-calendar/config` | Create or replace the root policy | `200 { "manleai_calendar": { ... }, "replayed": false }` |
+| `PUT /api/platform/tenants/:tenant_id/technical/manleai-calendar/hours` | Replace all `local_override` weekly salon periods | uniform mutation response |
+| `GET|PUT /api/platform/tenants/:tenant_id/technical/manleai-calendar/staff/:staff_id` | Read or replace one canonical staff member's periods and eligible services | typed aggregate response |
+| `GET|PUT /api/platform/tenants/:tenant_id/technical/manleai-calendar/services/:service_id` | Read or replace one service policy, eligible staff, and resource requirements | typed aggregate response |
+| `/api/platform/tenants/:tenant_id/technical/manleai-calendar/resources/*` | List/create/update/archive resource pools | uniform mutation response |
+| `/api/platform/tenants/:tenant_id/technical/manleai-calendar/exceptions/*` | Create/cancel salon, staff, or resource exceptions | uniform mutation response |
+| `POST /api/platform/tenants/:tenant_id/technical/manleai-calendar/activate` | Record Platform-actor activation for the exact resulting config version | uniform mutation response |
 
 Every mutation includes these top-level fields:
 
@@ -980,13 +975,238 @@ reload through the cookie, and remove the legacy `access_token` and
 
 `GET /api/auth/me`
 
+Returns the current user, current database-owned role names, and the primary
+active salon membership. V64 unions an active `platform_admin` or
+`platform_ops` assignment into the role names and chooses the primary salon
+from active memberships, preferring an owner membership. The signed token's
+salon and role claims are not returned as current authorization state.
+
+## SaaS Access-Control Foundation
+
+V64 adds authenticated Platform access-management APIs. Every route below is
+owned by the Platform surface and requires a current active `platform_admin`
+assignment with `platform.access.manage`. A legacy `super_admin` role, a Tenant
+membership, a caller-supplied header, or a JWT role claim does not satisfy that
+check. Platform Ops cannot manage access.
+
+`GET /api/platform/access/capabilities`
+
+Returns the database-owned capability catalog with `name`, `display_name`,
+`scope`, and `delegation_scope`. Only capabilities with
+`delegation_scope=salon` may be attached to a Platform Ops salon assignment.
+
+`GET /api/platform/access/roles`
+
+Returns current `platform_admin` and `platform_ops` assignments, including
+status and optimistic version.
+
+`PUT /api/platform/access/users/:user_id/platform-role`
+
+```json
+{
+  "action_key": "platform-role-change-uuid",
+  "role": "platform_ops",
+  "status": "active",
+  "expected_version": 0
+}
+```
+
+The target must be an existing active user. `expected_version=0` creates the
+first assignment; later changes require the exact current version. One user
+has at most one Platform role assignment. The last active Platform Admin cannot
+be revoked or converted, including by concurrent requests. Any Platform role
+or status transition revokes the target user's active salon assignments and PII
+grants atomically and records a bounded immutable child event for each affected
+object; reactivating the role requires fresh explicit delegation and does not
+restore stale access.
+
+`GET /api/platform/access/salons/:salon_id/memberships`
+
+`PUT /api/platform/access/salons/:salon_id/memberships/:user_id`
+
+```json
+{
+  "action_key": "tenant-membership-change-uuid",
+  "role": "tenant_business_manager",
+  "status": "active",
+  "expected_version": 0
+}
+```
+
+V64 backfills `salons.owner_user_id` as the exact active `tenant_owner`
+membership. That owner membership is database-synchronized and cannot be
+revoked, demoted, or assigned to a different user through this API. Additional
+members use `tenant_business_manager`. Active exact-salon memberships authorize
+the fixed Tenant Business routes below; they never authorize Platform,
+Technical, Operations, or Audit routes.
+
+`GET /api/platform/access/salons/:salon_id/assignments`
+
+`PUT /api/platform/access/salons/:salon_id/assignments/:user_id`
+
+```json
+{
+  "action_key": "ops-salon-assignment-uuid",
+  "status": "active",
+  "permissions": ["business.read", "business.write"],
+  "expected_version": 0
+}
+```
+
+The target requires an active `platform_ops` role. Permissions are resolved
+from the database capability catalog. A write capability requires its matching
+read capability. Assignment to one salon grants nothing on another salon.
+Platform Admin does not need an assignment for non-PII Platform actions.
+
+`GET /api/platform/access/salons/:salon_id/pii-grants`
+
+`POST /api/platform/access/salons/:salon_id/pii-grants`
+
+```json
+{
+  "action_key": "pii-grant-uuid",
+  "user_id": "platform-user-uuid",
+  "scope": "customers",
+  "reason": "support-change-reference",
+  "expires_at": "2026-07-26T12:00:00Z"
+}
+```
+
+PII scopes are `customers`, `calls`, `appointments`, and `notifications`.
+Expiry must be in the future and no more than 24 hours from creation. The
+target Platform user must already have the underlying salon capability;
+Platform Admin is not exempt from the grant requirement.
+`reason` is an opaque change reference, not free text. It must match
+`[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}`; arbitrary prose or customer data is
+rejected.
+
+`POST /api/platform/access/salons/:salon_id/pii-grants/:grant_id/revoke`
+
+```json
+{
+  "action_key": "pii-revoke-uuid",
+  "expected_version": 1
+}
+```
+
+Revocation is version-fenced and immediately removes eligibility. Expiry and
+revocation are checked on every policy evaluation rather than copied into the
+JWT.
+
+`GET /api/platform/access/audit?salon_id=<optional>&limit=50&offset=0`
+
+Returns immutable bounded access events. Event details contain stable access
+tokens, versions, status, capability names, and expiry evidence, not the
+PII-grant change reference or customer/provider payloads.
+
+Every mutation requires a stable `action_key`. Exact reuse with the same
+canonical payload returns the stored response and
+`X-Idempotent-Replay: true`; changed reuse returns
+`409 ACCESS_ACTION_CONFLICT`. Stale optimistic versions return
+`409 ACCESS_VERSION_CONFLICT`. Other stable errors are `400 ACCESS_INVALID`,
+`403 ACCESS_FORBIDDEN`, `404 ACCESS_RECORD_NOT_FOUND`,
+`409 LAST_PLATFORM_ADMIN`, and sanitized `500 ACCESS_OPERATION_FAILED`.
+
+The policy service distinguishes the route-owned Tenant and Platform surfaces.
+Tenant access requires an active membership for the exact salon. Platform Ops
+requires an active role, exact salon assignment, and exact delegated
+capability. Platform PII access additionally requires a non-revoked,
+non-expired grant for the actor, salon, and PII scope. Provider, scheduling,
+conversation, and compatibility APIs retain their separately documented
+authorization boundaries.
+
+## SaaS Shared Business APIs
+
+V65 exposes one Business contract through two route-owned surfaces. Tenant
+routes require an active membership for the exact salon. Platform routes
+require Platform Admin or exact-salon Platform Ops `business.read` or
+`business.write`. The caller cannot choose a surface or impersonate a salon
+owner through a header or request body.
+
+Tenant directory and resource prefix:
+
+- `GET /api/salons/`
+- `/api/salons/:id/business`
+
+Platform directory and resource prefix:
+
+- `GET /api/platform/tenants/`
+- `/api/platform/tenants/:tenant_id/business`
+
+Both prefixes expose the same canonical resources:
+
+- `GET|PATCH /profile`
+- `GET|POST /services`, `PATCH /services/:service_id`, and
+  `POST /services/:service_id/archive`
+- `GET|POST /service-categories`, `PATCH` and `archive` by category ID
+- `GET|POST /staff`, `PATCH` and `archive` by staff ID, and
+  `PUT /staff/:staff_id/services`
+- `GET|PUT /business-hours`
+- `GET|PATCH /public-catalog`
+- `GET|POST /customers`, `PATCH` and `archive` by customer ID
+
+Every mutation includes `action_key` and `expected_version`. A create requires
+version `0`; an update requires the exact returned resource version. Exact
+replay returns the stored resource ID/version and sets
+`X-Idempotent-Replay: true`. Reusing an action key with changed input or using
+a stale version fails without a partial write. Business actions and events
+record the actual Tenant or Platform actor and contain only an allowlisted
+resource/version/change-field shape.
+
+Business DTOs exclude provider credentials, provider IDs, diagnostics,
+scheduling-authority controls, and technical readiness. Platform staff
+responses omit phone and email and Platform writes cannot modify those fields.
+Platform customer reads or writes additionally require an active exact-salon
+`customers` PII grant, including for Platform Admin. Tenant customer access is
+covered by its exact membership.
+
+Provider-linked service, staff, and customer operational fields are read-only.
+Owner-controlled service AI description, category, consultation profile, and
+AI-bookable controls retain their canonical POS/scheduling validation.
+Connected external business hours are imported read-only; local/internal hours
+write only `source=local_override`. Business-relevant mutations share the
+scheduling advisory fence, and public page publishing reuses the canonical
+selected-authority readiness policy.
+
+## SaaS Platform Technical And Operations APIs
+
+Technical configuration is Platform-only. Platform Admin has the capability;
+Platform Ops needs an active exact-salon assignment with the matching
+`technical.read` or `technical.write` delegation. Tenant memberships do not
+satisfy these routes, and the tenant ID comes only from the fixed route.
+
+- `GET|PUT /api/platform/tenants/:tenant_id/technical/integration-configs[/square|/twilio|/openai]`
+- `GET /api/platform/tenants/:tenant_id/technical/square/status`
+- `GET /api/platform/tenants/:tenant_id/technical/square/connect-url`
+- `GET /api/platform/tenants/:tenant_id/technical/square/locations`
+- `POST /api/platform/tenants/:tenant_id/technical/square/select-location`
+- `POST /api/platform/tenants/:tenant_id/technical/square/sync`
+- `POST /api/platform/tenants/:tenant_id/technical/square/ai-booking/enable`
+- `POST /api/platform/tenants/:tenant_id/technical/square/ai-booking/disable`
+- `/api/platform/tenants/:tenant_id/technical/manleai-calendar/*`
+- `/api/platform/tenants/:tenant_id/technical/scheduling-authority-switches/*`
+
+AI runtime enable/disable requires `action_key` and
+`expected_version`. Exact replay returns the same versioned state; changed-key
+reuse and stale versions fail without changing runtime state. The persisted
+technical action/event records contain the actual Platform actor, never an
+impersonated salon owner.
+
+Tenant-safe POS Calendar readiness is separate:
+`GET /api/salons/:id/business/external-scheduling-readiness`. It returns only
+the selected authority, aggregate service/staff/hour counts, external-new-work
+readiness, and the bounded booking-write blocker boolean. It omits connection,
+merchant/location, token, scope, sync-log, diagnostic, and test-booking fields.
+
+Platform Operations endpoints are rooted at
+`/api/platform/tenants/:tenant_id/operations`. They cover status, masked owner
+and customer notification recovery, Square webhook operations, and
+`/runtime` tenant quota/usage controls. Platform Ops needs exact delegated
+`operations.read` or `operations.write`. V72 additionally requires an active,
+unexpired exact PII grant for any underlying calls, appointments, customers,
+or notifications data; Platform Admin is not exempt.
+
 ## Public Catalog
-
-`GET /api/public/salon`
-
-Public unauthenticated endpoint for the landing root. Returns the first
-published salon catalog by `salons.created_at ASC, salons.id ASC`, so
-`http://localhost:3090` can redirect to its canonical `/s/:slug` page.
 
 `GET /api/public/salons/:slug`
 
@@ -996,6 +1216,9 @@ selected scheduling authority still passes public-page readiness. A stale
 published flag fails closed after an authority/configuration/provider change.
 The response is public-safe: no provider identifiers, POS IDs, provider tokens,
 owner IDs, staff phone/email, sync errors, or raw provider payloads are returned.
+Public database context cannot select any tenant base-table row; the repository
+consumes only the V71 authority-aware `read_public_catalog` JSON projection.
+The former `GET /api/public/salon` first-tenant endpoint is not registered.
 
 Eligibility follows the persisted authority: `owner_manual` needs at least one
 active canonical AI-bookable service and does not require staff or POS;
@@ -1193,7 +1416,8 @@ these periods and can trigger Square sync.
 `PUT /api/salons/:id/business-hours`
 
 Returns `409 BUSINESS_HOURS_POS_MANAGED`. Business hours are managed in Square
-and imported through `POST /api/integrations/square/sync`.
+and imported through
+`POST /api/platform/tenants/:tenant_id/technical/square/sync`.
 
 ## Configuration Transfer
 
@@ -1567,7 +1791,8 @@ AI-bookable services. None of these steps require a Square connection.
 
 ## Integration Configuration
 
-Provider credentials and runtime settings are salon-scoped and owner-scoped.
+Provider credentials and runtime settings are salon-scoped and Platform-
+Technical-scoped. Tenant memberships alone cannot read or write them.
 Secret values are write-only: responses only expose whether a secret is
 configured and whether it came from dashboard storage or the exact-missing
 legacy bootstrap fallback. `salon_integration_configs` is authoritative whenever
@@ -1585,7 +1810,13 @@ and environment credentials are not reported as active. Invalid persisted
 settings make this authenticated read fail safely instead of returning an empty
 settings map.
 
-`GET /api/salons/:id/integration-configs`
+The complete serialized response omits every write-only credential and control
+field, including Square client/webhook secrets, Twilio auth/Account/Messaging
+Service/sender/destination values, OpenAI API keys, and their `clear_*` request
+controls. Configured/source booleans and the explicitly masked owner SMS
+destination are the only secret-state evidence returned.
+
+`GET /api/platform/tenants/:tenant_id/technical/integration-configs`
 
 ```json
 {
@@ -1651,7 +1882,7 @@ settings map.
 }
 ```
 
-`PUT /api/salons/:id/integration-configs/square`
+`PUT /api/platform/tenants/:tenant_id/technical/integration-configs/square`
 
 ```json
 {
@@ -1675,7 +1906,7 @@ encryption failures abort the update and preserve previously stored secrets.
 Configuration transfer preserves the target salon's deployment URL and never
 exports a webhook signature key; that key must be re-entered at the target.
 
-`PUT /api/salons/:id/integration-configs/twilio`
+`PUT /api/platform/tenants/:tenant_id/technical/integration-configs/twilio`
 
 ```json
 {
@@ -1712,7 +1943,7 @@ the masked destination, configured booleans, and callback URLs. The owner-SMS
 runtime resolver uses only the salon's database record and never takes the
 legacy environment fallback used by some voice/bootstrap paths.
 
-`PUT /api/salons/:id/integration-configs/openai`
+`PUT /api/platform/tenants/:tenant_id/technical/integration-configs/openai`
 
 ```json
 {
@@ -2476,6 +2707,8 @@ Soft-archives a customer by setting `active=false`, `sync_status=archived`, and
 `GET /api/salons/:id/customers/search?phone=<phone>&provider=square`
 
 Searches the active provider by phone through `POSProvider.SearchCustomerByPhone` and returns only the normalized provider-neutral customer DTO. It does not create customers, sync the Square directory, or expose Square payloads/tokens.
+Provider failures return bounded `POS_CUSTOMER_LOOKUP_FAILED` copy and never
+include the provider response or wrapped error text.
 
 ```json
 {
@@ -3668,7 +3901,11 @@ chronologically. The response intentionally exposes only debug-safe fields
 extracted from provider payloads, including transcript admission decisions,
 configured/effective audio handling, confidence/VAD measurements, response correlation IDs, and
 salted canonical-output hashes. Raw transcript, audio, and provider payloads
-are not returned.
+are not returned. Twilio stream callbacks are persisted from an explicit
+allowlist (`stage`, stream identity/event, terminal state, and stable error
+code), not by copying the callback form. Provider/transport failures use a
+fixed message and bounded typed diagnostic fields; raw OpenAI/Twilio messages
+are neither persisted nor returned.
 
 Example response:
 
@@ -3682,7 +3919,7 @@ Example response:
       "event_type": "realtime_failed",
       "stage": "openai_spoken_fact_mismatch",
       "stream_sid": "MZ...",
-      "error": "realtime audio transcript did not match backend reply",
+      "error": "Realtime operation failed.",
       "diagnostics": {
         "request_id": "manleai-reply-2",
         "response_id": "resp_...",
@@ -3972,9 +4209,9 @@ matching, and reconciliation explicitly require
 rows; webhook processing therefore cannot manufacture an internal-authority
 appointment mutation.
 
-`GET /api/salons/:id/square-webhook-events?status=&limit=25&offset=0`
+`GET /api/platform/tenants/:tenant_id/operations/square-webhooks?status=&limit=25&offset=0`
 
-Returns authenticated, owner-scoped Square webhook operations evidence. The
+Returns authenticated, Platform-Operations-scoped Square webhook evidence. The
 optional `status` filter accepts `pending`, `processing`, `failed`,
 `dead_letter`, or `succeeded`; an empty filter returns every persisted event,
 including read-only `ignored` events. `ignored` is intentionally not a filter
@@ -4032,13 +4269,13 @@ the current page and `succeeded_recent` uses the returned
 `recent_window_hours`. Calendar-repair health is a separate backstop and is not
 OAuth, catalog-sync, scheduling-authority, or appointment-confirmation state.
 
-`GET /api/salons/:id/square-webhook-events/:webhook_event_id`
+`GET /api/platform/tenants/:tenant_id/operations/square-webhooks/:webhook_event_id`
 
 Returns `{"event": {...}}` with the same safe event fields for one tenant-owned
 record. The dashboard derives its timestamp timeline only from those returned
 fields; this endpoint does not expose the raw delivery or provider payload.
 
-`POST /api/salons/:id/square-webhook-events/:webhook_event_id/requeue`
+`POST /api/platform/tenants/:tenant_id/operations/square-webhooks/:webhook_event_id/requeue`
 
 ```json
 {
@@ -4061,42 +4298,52 @@ Errors are `400 SQUARE_WEBHOOK_OPERATIONS_INVALID`,
 `409 SQUARE_WEBHOOK_REQUEUE_BLOCKED`, or sanitized
 `500 SQUARE_WEBHOOK_OPERATIONS_FAILED`.
 
-`GET /api/integrations/square/connect-url?salon_id=<id>`
+`GET /api/platform/tenants/:tenant_id/technical/square/connect-url`
 
 Returns a Square OAuth URL and state.
+
+All authenticated Square technical operations take the tenant only from the
+fixed Platform route and require `technical.read` or `technical.write`. They do
+not accept a salon selector in query or JSON and never impersonate the owner.
 
 `GET /api/integrations/square/callback?code=<code>&state=<state>`
 
 Exchanges the Square OAuth code and stores encrypted tokens.
 
-`GET /api/integrations/square/status?salon_id=<id>`
+`GET /api/platform/tenants/:tenant_id/technical/square/status`
 
 Returns the Square connection, recent sync logs, and AI booking readiness checks,
 including `business_hour_period_count` for the selected Square location import.
-Readiness includes the owner-scoped current `scheduling_authority`.
+Readiness includes the Platform-authorized tenant's current
+`scheduling_authority`.
 `can_test_booking` and `can_enable_ai_booking` require
 `scheduling_authority=external_provider` in addition to their existing Square
 gates. `can_cancel_test_booking` remains based on the persisted latest external
 test appointment so cleanup is not orphaned after a later authority switch.
 Readiness also includes `booking_write_blocked`, `booking_write_blocked_code`,
 `booking_write_blocked_reason`, and `booking_write_blocked_at` when the latest
-Square create-booking permission error still has not been cleared by a later
-successful Square test booking.
+Square create-booking permission or write-unsupported error still has not been
+cleared by a later successful Square test booking.
 
-`GET /api/integrations/square/locations?salon_id=<id>`
+Connection, location, sync, test-booking, and cancel responses never include a
+Square response body or error detail. Provider errors are classified to stable
+POS codes and fixed safe messages before persistence and before the handler
+builds an authenticated response. Migration V63 applies the same contract to
+legacy POS/Square error text and payloads.
+
+`GET /api/platform/tenants/:tenant_id/technical/square/locations`
 
 Lists Square locations through the Square adapter.
 
-`POST /api/integrations/square/select-location`
+`POST /api/platform/tenants/:tenant_id/technical/square/select-location`
 
 ```json
 {
-  "salon_id": "...",
   "location_id": "..."
 }
 ```
 
-`POST /api/integrations/square/sync`
+`POST /api/platform/tenants/:tenant_id/technical/square/sync`
 
 Imports Square services, staff, selected-location business hour periods, and
 customers into local canonical tables. The button label is `Sync` in the owner
@@ -4111,11 +4358,8 @@ Profiles. The provider snapshot is applied transactionally; missing previously
 imported rows are disabled/unmapped, and sync never automatically re-enables an
 owner-disabled `ai_bookable` flag.
 
-```json
-{
-  "salon_id": "..."
-}
-```
+The request body is empty. Provider-write tenant quota is consumed before the
+Square call; exhaustion returns `429 TENANT_QUOTA_EXCEEDED` with `Retry-After`.
 
 ```json
 {
@@ -4130,7 +4374,7 @@ owner-disabled `ai_bookable` flag.
 }
 ```
 
-`POST /api/integrations/square/test-booking`
+`POST /api/integrations/square/test-booking` (retired; not registered)
 
 Safe-retry example; an initial write omits `retry_of_attempt_id`:
 
@@ -4193,7 +4437,7 @@ Scheduling-authority failure returns the sanitized
 salon.” Readiness and unknown Square gate failures likewise use bounded public
 messages; the handler does not expose wrapped internal diagnostic text.
 
-`POST /api/integrations/square/cancel-test-booking`
+`POST /api/integrations/square/cancel-test-booking` (retired; not registered)
 
 Safe-retry example; an initial cancellation omits `retry_of_attempt_id`:
 
@@ -4218,30 +4462,34 @@ fails. As with create, the optional `retry_of_attempt_id` is sent only for an
 explicit safe retry and must identify the matching prior `cancel` attempt; the
 retry uses a new operation key.
 
-`POST /api/integrations/square/enable-ai-booking`
+`POST /api/platform/tenants/:tenant_id/technical/square/ai-booking/enable`
 
 ```json
 {
-  "salon_id": "..."
+  "action_key": "platform-ai-runtime-enable-uuid",
+  "expected_version": 3
 }
 ```
 
-Sets `salons.ai_enabled=true` only when the owner-scoped current
+Sets `salons.ai_enabled=true` only when the tenant's current
 `scheduling_authority` is `external_provider`, Square is connected, a location
 is selected, services/staff/business hours are synced, and at least one service
 and staff member are AI-bookable. A current internal authority returns
 `409 SCHEDULING_AUTHORITY_NOT_READY`. Square test booking create/cancel remains
 an optional POS write smoke test and is not an AI enablement gate.
 
-`POST /api/integrations/square/disable-ai-booking`
+`POST /api/platform/tenants/:tenant_id/technical/square/ai-booking/disable`
 
 ```json
 {
-  "salon_id": "..."
+  "action_key": "platform-ai-runtime-disable-uuid",
+  "expected_version": 4
 }
 ```
 
-Sets `salons.ai_enabled=false`.
+Sets `salons.ai_enabled=false`. Both actions use V70 technical resource
+versioning, exact replay, changed-request conflict detection, and actual
+Platform actor audit.
 
 ## Customer Appointment SMS
 
@@ -4290,9 +4538,9 @@ binds `AccountSid` before a monotonic delivery mutation.
 
 ## Operations Health
 
-`GET /api/salons/:id/operations/status`
+`GET /api/platform/tenants/:tenant_id/operations/status`
 
-Returns authenticated, owner-scoped recurring-worker health plus safe queue
+Returns authenticated, Platform-Operations-scoped recurring-worker health plus safe queue
 aggregates for the requested salon. The response never includes worker
 instance/run IDs, raw errors, payloads, provider entity IDs, secrets, customer
 data, or cross-salon counts. Provider-specific Square rows are omitted when no
@@ -4312,7 +4560,7 @@ relevant Square connection exists.
       "last_duration_ms": 82,
       "last_processed_count": 3,
       "stale_after_seconds": 120,
-      "links": [{"label": "Open", "href": "/dashboard/appointments"}]
+      "links": [{"label": "Open", "href": "/platform/tenants/tenant-uuid/operations"}]
     }
   ],
   "queues": [
@@ -4323,7 +4571,7 @@ relevant Square connection exists.
       "backlog_count": 2,
       "oldest_at": "2026-07-24T09:30:00Z",
       "dead_letter_count": 1,
-      "links": [{"label": "Open", "href": "/dashboard/appointments"}]
+      "links": [{"label": "Open", "href": "/platform/tenants/tenant-uuid/operations"}]
     }
   ]
 }

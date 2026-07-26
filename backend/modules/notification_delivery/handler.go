@@ -20,6 +20,13 @@ type Handler struct{ service handlerService }
 
 func NewHandler(service handlerService) *Handler { return &Handler{service: service} }
 
+func deliverySalonID(c *fiber.Ctx) string {
+	if value := c.Params("tenant_id"); value != "" {
+		return value
+	}
+	return c.Params("id")
+}
+
 func (h *Handler) List(c *fiber.Ctx) error {
 	limit, err := strconv.Atoi(defaultQuery(c.Query("limit"), "25"))
 	if err != nil {
@@ -29,12 +36,12 @@ func (h *Handler) List(c *fiber.Ctx) error {
 	if err != nil {
 		return invalid(c)
 	}
-	res, serviceErr := h.service.List(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Query("status"), limit, offset)
+	res, serviceErr := h.service.List(c.UserContext(), deliverySalonID(c), middleware.UserID(c), c.Query("status"), limit, offset)
 	return respondResult(c, res, serviceErr)
 }
 
 func (h *Handler) Get(c *fiber.Ctx) error {
-	res, err := h.service.Get(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("notification_id"))
+	res, err := h.service.Get(c.UserContext(), deliverySalonID(c), middleware.UserID(c), c.Params("notification_id"))
 	return respondResult(c, res, err)
 }
 
@@ -43,7 +50,7 @@ func (h *Handler) Requeue(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return invalid(c)
 	}
-	res, replayed, err := h.service.Requeue(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("notification_id"), req)
+	res, replayed, err := h.service.Requeue(c.UserContext(), deliverySalonID(c), middleware.UserID(c), c.Params("notification_id"), req)
 	if err != nil {
 		return respondResult(c, nil, err)
 	}

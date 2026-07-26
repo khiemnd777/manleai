@@ -52,7 +52,13 @@ func NewRepository(db *sql.DB) *Repository {
 
 func (r *Repository) EnsureSalonOwner(ctx context.Context, salonID string, ownerUserID string) error {
 	var exists bool
-	err := r.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM salons WHERE id = $1 AND owner_user_id = $2)`, salonID, ownerUserID).Scan(&exists)
+	err := r.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM salons salon
+			WHERE salon.id = $1
+			  AND public.has_active_tenant_membership(salon.id, $2::uuid)
+		)
+	`, salonID, ownerUserID).Scan(&exists)
 	if err != nil {
 		return err
 	}
@@ -66,9 +72,9 @@ func (r *Repository) GetActiveProvider(ctx context.Context, salonID string, owne
 	var provider string
 	err := r.db.QueryRowContext(ctx, `
 		SELECT active_pos_provider
-		FROM salons
-		WHERE id = $1
-		  AND owner_user_id = $2
+		FROM salons salon
+		WHERE salon.id = $1
+		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 	`, salonID, ownerUserID).Scan(&provider)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", pos.ErrNotFound
@@ -99,7 +105,7 @@ func (r *Repository) GetActiveProviderFence(ctx context.Context, salonID string,
 		  ON connection.salon_id = salon.id
 		 AND connection.provider = COALESCE(NULLIF(BTRIM(salon.active_pos_provider), ''), 'square')
 		WHERE salon.id = $1
-		  AND salon.owner_user_id = $2
+		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 	`, salonID, ownerUserID).Scan(
 		&provider,
 		&status,
@@ -1985,7 +1991,7 @@ func (r *Repository) GetBookingOperation(ctx context.Context, salonID string, ow
 		      SELECT 1
 		      FROM salons salon
 		      WHERE salon.id = ba.salon_id
-		        AND salon.owner_user_id = $3
+			        AND public.has_active_tenant_membership(salon.id, $3::uuid)
 		  )
 		LIMIT 1
 	`, strings.TrimSpace(salonID), strings.TrimSpace(operationKey), strings.TrimSpace(ownerUserID)))
@@ -2012,7 +2018,7 @@ func (r *Repository) GetSafeRetryAvailabilityOrigin(ctx context.Context, salonID
 		  AND ba.superseded_at IS NULL
 		  AND EXISTS (
 		      SELECT 1 FROM salons salon
-		      WHERE salon.id = ba.salon_id AND salon.owner_user_id = $3
+			      WHERE salon.id = ba.salon_id AND public.has_active_tenant_membership(salon.id, $3::uuid)
 		  )
 		LIMIT 1
 	`, strings.TrimSpace(salonID), strings.TrimSpace(attemptID), strings.TrimSpace(ownerUserID)))
@@ -3134,7 +3140,7 @@ func (r *Repository) GetAppointmentForOwner(ctx context.Context, salonID string,
 		FROM appointments appointment
 		JOIN salons salon
 		  ON salon.id = appointment.salon_id
-		 AND salon.owner_user_id = $3
+			 AND public.has_active_tenant_membership(salon.id, $3::uuid)
 		WHERE appointment.id = $1
 		  AND appointment.salon_id = $2
 	`, appointmentID, salonID, ownerUserID).Scan(&authority)
@@ -3203,7 +3209,7 @@ func (r *Repository) getExternalAppointmentForOwner(ctx context.Context, salonID
 	 AND staff_link.provider_entity_id <> ''
 		WHERE a.id = $1
 		  AND a.salon_id = $2
-		  AND salon.owner_user_id = $3
+		  AND public.has_active_tenant_membership(salon.id, $3::uuid)
 		  AND salon.active_pos_provider = a.pos_provider
 		`, appointmentID, salonID, ownerUserID)
 
@@ -3275,7 +3281,7 @@ func (r *Repository) getInternalAppointmentForOwner(ctx context.Context, salonID
 		FROM appointments appointment
 		JOIN salons salon
 		  ON salon.id = appointment.salon_id
-		 AND salon.owner_user_id = $3
+			 AND public.has_active_tenant_membership(salon.id, $3::uuid)
 		WHERE appointment.id = $1
 		  AND appointment.salon_id = $2
 		  AND appointment.scheduling_authority = 'manleai_calendar'
@@ -3335,7 +3341,7 @@ func (r *Repository) ListRescheduleCandidates(ctx context.Context, salonID strin
 		    FROM appointments appointment
 		    JOIN salons salon
 		      ON salon.id = appointment.salon_id
-		     AND salon.owner_user_id = $2
+			     AND public.has_active_tenant_membership(salon.id, $2::uuid)
 		    WHERE appointment.salon_id = $1
 		      AND appointment.scheduling_authority = 'manleai_calendar'
 		      AND right(regexp_replace(appointment.customer_phone, '[^0-9]', '', 'g'), 10) =
@@ -3356,7 +3362,7 @@ func (r *Repository) ListRescheduleCandidates(ctx context.Context, salonID strin
 		    FROM appointments appointment
 		    JOIN salons salon
 		      ON salon.id = appointment.salon_id
-		     AND salon.owner_user_id = $2
+			     AND public.has_active_tenant_membership(salon.id, $2::uuid)
 		    JOIN booking_attempts origin
 		      ON origin.id = appointment.booking_attempt_id
 		     AND origin.salon_id = appointment.salon_id
@@ -4335,7 +4341,7 @@ func (r *Repository) LatestTestBooking(ctx context.Context, salonID string, owne
 		FROM booking_attempts ba
 		JOIN salons s ON s.id = ba.salon_id
 		WHERE ba.salon_id = $1
-		  AND s.owner_user_id = $2
+		  AND public.has_active_tenant_membership(s.id, $2::uuid)
 		  AND ba.source = $3
 		ORDER BY ba.created_at DESC
 		LIMIT 1
@@ -4645,7 +4651,7 @@ func (r *Repository) ListReconciliationTasks(ctx context.Context, salonID string
 			JOIN booking_attempts attempt ON attempt.id = task.booking_attempt_id
 			JOIN salons salon ON salon.id = task.salon_id
 			WHERE task.salon_id = $1
-			  AND salon.owner_user_id = $2
+			  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 			  AND task.status = $3
 			  AND attempt.superseded_at IS NULL
 			ORDER BY task.created_at ASC, task.id ASC
@@ -4727,7 +4733,7 @@ func (r *Repository) getReconciliationTaskForOwner(ctx context.Context, salonID 
 		JOIN salons salon ON salon.id = task.salon_id
 		WHERE task.salon_id = $1
 		  AND task.booking_attempt_id = $2
-		  AND salon.owner_user_id = $3
+		  AND public.has_active_tenant_membership(salon.id, $3::uuid)
 	`, salonID, attemptID, ownerUserID), salonID)
 	if err != nil {
 		return nil, err
@@ -4778,7 +4784,7 @@ func (r *Repository) ListReconciliationCandidates(ctx context.Context, salonID s
 		JOIN salons salon ON salon.id = task.salon_id
 		WHERE task.salon_id = $1
 		  AND task.booking_attempt_id = $2
-		  AND salon.owner_user_id = $3
+		  AND public.has_active_tenant_membership(salon.id, $3::uuid)
 	`, salonID, attemptID, ownerUserID).Scan(
 		&attempt.BookingAttemptID, &attempt.TaskStatus, &attempt.AttemptStatus, &attempt.Reconciliation,
 		&attempt.OperationType, &attempt.Provider, &attempt.POSBookingID, &attempt.TargetAppointmentID,
@@ -5003,7 +5009,7 @@ func (r *Repository) ResolveReconciliationTask(ctx context.Context, salonID stri
 		JOIN salons salon ON salon.id = attempt.salon_id
 		WHERE attempt.salon_id = $1
 		  AND attempt.id = $2
-		  AND salon.owner_user_id = $3
+		  AND public.has_active_tenant_membership(salon.id, $3::uuid)
 		FOR UPDATE OF attempt
 	`, salonID, attemptID, ownerUserID).Scan(
 		&item.AttemptStatus, &item.OperationType, &item.Provider, &item.POSBookingID,
@@ -6638,10 +6644,11 @@ func (r *Repository) LogPOSError(ctx context.Context, salonID string, provider s
 	if providerErr == nil {
 		return nil
 	}
+	errorCode := posErrorCode(providerErr)
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO pos_errors (salon_id, provider, operation, error_code, error_message)
 		VALUES ($1, $2, $3, $4, $5)
-	`, salonID, provider, operation, posErrorCode(providerErr), providerErr.Error())
+	`, salonID, provider, operation, errorCode, pos.SafeErrorMessage(errorCode))
 	return err
 }
 

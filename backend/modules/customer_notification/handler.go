@@ -21,7 +21,7 @@ type handlerService interface {
 }
 
 func (h *Handler) RequestDetail(c *fiber.Ctx) error {
-	result, err := h.service.DetailForRequest(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("request_id"))
+	result, err := h.service.DetailForRequest(c.UserContext(), notificationSalonID(c), middleware.UserID(c), c.Params("request_id"))
 	return respondCustomer(c, result, err)
 }
 
@@ -29,8 +29,15 @@ type Handler struct{ service handlerService }
 
 func NewHandler(service handlerService) *Handler { return &Handler{service: service} }
 
+func notificationSalonID(c *fiber.Ctx) string {
+	if tenantID := c.Params("tenant_id"); tenantID != "" {
+		return tenantID
+	}
+	return c.Params("id")
+}
+
 func (h *Handler) GetPolicy(c *fiber.Ctx) error {
-	result, err := h.service.GetPolicy(c.UserContext(), c.Params("id"), middleware.UserID(c))
+	result, err := h.service.GetPolicy(c.UserContext(), notificationSalonID(c), middleware.UserID(c))
 	return respondCustomer(c, result, err)
 }
 
@@ -39,7 +46,7 @@ func (h *Handler) RequeueRequest(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return customerInvalid(c)
 	}
-	result, replayed, err := h.service.RequeueRequest(c.UserContext(), c.Params("id"), middleware.UserID(c),
+	result, replayed, err := h.service.RequeueRequest(c.UserContext(), notificationSalonID(c), middleware.UserID(c),
 		c.Params("request_id"), c.Params("delivery_id"), req)
 	if err == nil {
 		c.Set("X-Idempotent-Replay", strconv.FormatBool(replayed))
@@ -52,7 +59,7 @@ func (h *Handler) UpdatePolicy(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return customerInvalid(c)
 	}
-	result, err := h.service.UpdatePolicy(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
+	result, err := h.service.UpdatePolicy(c.UserContext(), notificationSalonID(c), middleware.UserID(c), req)
 	return respondCustomer(c, result, err)
 }
 
@@ -61,7 +68,7 @@ func (h *Handler) AttestConsent(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return customerInvalid(c)
 	}
-	result, replayed, err := h.service.AttestConsent(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
+	result, replayed, err := h.service.AttestConsent(c.UserContext(), notificationSalonID(c), middleware.UserID(c), req)
 	if err == nil {
 		c.Set("X-Idempotent-Replay", strconv.FormatBool(replayed))
 	}
@@ -69,7 +76,7 @@ func (h *Handler) AttestConsent(c *fiber.Ctx) error {
 }
 
 func (h *Handler) AppointmentDetail(c *fiber.Ctx) error {
-	result, err := h.service.DetailForAppointment(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("appointment_id"))
+	result, err := h.service.DetailForAppointment(c.UserContext(), notificationSalonID(c), middleware.UserID(c), c.Params("appointment_id"))
 	return respondCustomer(c, result, err)
 }
 
@@ -78,7 +85,7 @@ func (h *Handler) Requeue(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return customerInvalid(c)
 	}
-	result, replayed, err := h.service.Requeue(c.UserContext(), c.Params("id"), middleware.UserID(c),
+	result, replayed, err := h.service.Requeue(c.UserContext(), notificationSalonID(c), middleware.UserID(c),
 		c.Params("appointment_id"), c.Params("delivery_id"), req)
 	if err == nil {
 		c.Set("X-Idempotent-Replay", strconv.FormatBool(replayed))

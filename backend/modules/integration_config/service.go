@@ -2,6 +2,8 @@ package integrationconfig
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/url"
@@ -18,8 +20,13 @@ var ErrValidation = errors.New("integration config validation failed")
 type configStore interface {
 	EnsureSalonOwner(ctx context.Context, salonID string, ownerUserID string) error
 	ListForOwner(ctx context.Context, salonID string, ownerUserID string) ([]StoredConfig, error)
+	ListForSalon(ctx context.Context, salonID string) ([]StoredConfig, error)
 	Get(ctx context.Context, salonID string, provider string) (*StoredConfig, error)
 	Upsert(ctx context.Context, cfg StoredConfig) (*StoredConfig, error)
+}
+
+type controlledConfigStore interface {
+	UpsertControlled(context.Context, StoredConfig, TechnicalMutationCommand) (*StoredConfig, bool, error)
 }
 
 type secretCipher interface {
@@ -47,6 +54,19 @@ func (s *Service) GetAll(ctx context.Context, salonID string, ownerUserID string
 		return nil, err
 	}
 	items, err := s.repo.ListForOwner(ctx, salonID, ownerUserID)
+	return s.integrationConfigsResponse(items, err)
+}
+
+func (s *Service) getAllForSalon(ctx context.Context, salonID string) (*IntegrationConfigsResponse, error) {
+	salonID = strings.TrimSpace(salonID)
+	if salonID == "" {
+		return nil, ErrValidation
+	}
+	items, err := s.repo.ListForSalon(ctx, salonID)
+	return s.integrationConfigsResponse(items, err)
+}
+
+func (s *Service) integrationConfigsResponse(items []StoredConfig, err error) (*IntegrationConfigsResponse, error) {
 	if err != nil {
 		return nil, err
 	}
@@ -70,6 +90,19 @@ func (s *Service) UpdateSquare(ctx context.Context, salonID string, ownerUserID 
 	if err := s.repo.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
 	}
+	return s.updateSquareForSalon(ctx, salonID, req, nil)
+}
+
+func (s *Service) UpdateSquareForPlatform(ctx context.Context, salonID, actorUserID string, req UpdateSquareSettingsRequest) (*SquareSettingsResponse, error) {
+	command, err := technicalMutationCommand(actorUserID, ProviderSquare, "integration_config.square.updated", req.TechnicalMutationControl, req,
+		[]string{"environment", "client_id", "client_secret", "redirect_url", "api_version", "api_base_url", "webhook_notification_url", "webhook_signature_key"})
+	if err != nil {
+		return nil, err
+	}
+	return s.updateSquareForSalon(ctx, strings.TrimSpace(salonID), req, &command)
+}
+
+func (s *Service) updateSquareForSalon(ctx context.Context, salonID string, req UpdateSquareSettingsRequest, command *TechnicalMutationCommand) (*SquareSettingsResponse, error) {
 	existing, secrets, err := s.existingConfigAndSecrets(ctx, salonID, ProviderSquare)
 	if err != nil {
 		return nil, err
@@ -121,17 +154,18 @@ func (s *Service) UpdateSquare(ctx context.Context, salonID string, ownerUserID 
 			return nil, err
 		}
 	}
-	updated, err := s.repo.Upsert(ctx, StoredConfig{
+	updated, replayed, err := s.persistConfig(ctx, StoredConfig{
 		SalonID:          salonID,
 		Provider:         ProviderSquare,
 		Enabled:          true,
 		Settings:         settings,
 		SecretsEncrypted: encryptedSecrets,
-	})
+	}, command)
 	if err != nil {
 		return nil, err
 	}
 	returnPtr := s.squareResponse(updated)
+	returnPtr.Replayed = replayed
 	return &returnPtr, nil
 }
 
@@ -143,6 +177,19 @@ func (s *Service) UpdateTwilio(ctx context.Context, salonID string, ownerUserID 
 	if err := s.repo.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
 	}
+	return s.updateTwilioForSalon(ctx, salonID, req, nil)
+}
+
+func (s *Service) UpdateTwilioForPlatform(ctx context.Context, salonID, actorUserID string, req UpdateTwilioSettingsRequest) (*TwilioSettingsResponse, error) {
+	command, err := technicalMutationCommand(actorUserID, ProviderTwilio, "integration_config.twilio.updated", req.TechnicalMutationControl, req,
+		[]string{"public_base_url", "auth_token", "voice_paths", "voice_transport", "owner_sms_policy", "account_sid", "messaging_transport", "notification_paths"})
+	if err != nil {
+		return nil, err
+	}
+	return s.updateTwilioForSalon(ctx, strings.TrimSpace(salonID), req, &command)
+}
+
+func (s *Service) updateTwilioForSalon(ctx context.Context, salonID string, req UpdateTwilioSettingsRequest, command *TechnicalMutationCommand) (*TwilioSettingsResponse, error) {
 	existing, secrets, err := s.existingConfigAndSecrets(ctx, salonID, ProviderTwilio)
 	if err != nil {
 		return nil, err
@@ -225,17 +272,18 @@ func (s *Service) UpdateTwilio(ctx context.Context, salonID string, ownerUserID 
 			return nil, err
 		}
 	}
-	updated, err := s.repo.Upsert(ctx, StoredConfig{
+	updated, replayed, err := s.persistConfig(ctx, StoredConfig{
 		SalonID:          salonID,
 		Provider:         ProviderTwilio,
 		Enabled:          true,
 		Settings:         settings,
 		SecretsEncrypted: encryptedSecrets,
-	})
+	}, command)
 	if err != nil {
 		return nil, err
 	}
 	returnPtr := s.twilioResponse(updated)
+	returnPtr.Replayed = replayed
 	return &returnPtr, nil
 }
 
@@ -336,6 +384,19 @@ func (s *Service) UpdateOpenAI(ctx context.Context, salonID string, ownerUserID 
 	if err := s.repo.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
 	}
+	return s.updateOpenAIForSalon(ctx, salonID, req, nil)
+}
+
+func (s *Service) UpdateOpenAIForPlatform(ctx context.Context, salonID, actorUserID string, req UpdateOpenAISettingsRequest) (*OpenAISettingsResponse, error) {
+	command, err := technicalMutationCommand(actorUserID, ProviderOpenAI, "integration_config.openai.updated", req.TechnicalMutationControl, req,
+		[]string{"enabled", "api_key", "base_url", "transcription_model", "reply_model", "speech_model", "speech_voice", "speech_output_mode", "realtime"})
+	if err != nil {
+		return nil, err
+	}
+	return s.updateOpenAIForSalon(ctx, strings.TrimSpace(salonID), req, &command)
+}
+
+func (s *Service) updateOpenAIForSalon(ctx context.Context, salonID string, req UpdateOpenAISettingsRequest, command *TechnicalMutationCommand) (*OpenAISettingsResponse, error) {
 	settings := map[string]string{
 		"base_url":               strings.TrimRight(strings.TrimSpace(req.BaseURL), "/"),
 		"transcription_model":    strings.TrimSpace(req.TranscriptionModel),
@@ -376,18 +437,49 @@ func (s *Service) UpdateOpenAI(ctx context.Context, salonID string, ownerUserID 
 			return nil, err
 		}
 	}
-	updated, err := s.repo.Upsert(ctx, StoredConfig{
+	updated, replayed, err := s.persistConfig(ctx, StoredConfig{
 		SalonID:          salonID,
 		Provider:         ProviderOpenAI,
 		Enabled:          req.Enabled,
 		Settings:         settings,
 		SecretsEncrypted: encryptedSecrets,
-	})
+	}, command)
 	if err != nil {
 		return nil, err
 	}
 	returnPtr := s.openAIResponse(updated)
+	returnPtr.Replayed = replayed
 	return &returnPtr, nil
+}
+
+func (s *Service) persistConfig(ctx context.Context, cfg StoredConfig, command *TechnicalMutationCommand) (*StoredConfig, bool, error) {
+	if command == nil {
+		item, err := s.repo.Upsert(ctx, cfg)
+		return item, false, err
+	}
+	store, ok := s.repo.(controlledConfigStore)
+	if !ok {
+		return nil, false, errors.New("controlled integration config store is unavailable")
+	}
+	return store.UpsertControlled(ctx, cfg, *command)
+}
+
+func technicalMutationCommand(actorUserID, provider, actionType string, control TechnicalMutationControl, payload any, changedFields []string) (TechnicalMutationCommand, error) {
+	actorUserID = strings.TrimSpace(actorUserID)
+	control.ActionKey = strings.TrimSpace(control.ActionKey)
+	if actorUserID == "" || control.ActionKey == "" || len(control.ActionKey) > 256 || control.ExpectedVersion < 0 {
+		return TechnicalMutationCommand{}, ErrValidation
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return TechnicalMutationCommand{}, err
+	}
+	digest := sha256.Sum256(raw)
+	return TechnicalMutationCommand{
+		ActorUserID: actorUserID, ActionKey: control.ActionKey, ActionType: actionType,
+		RequestFingerprint: hex.EncodeToString(digest[:]), ExpectedVersion: control.ExpectedVersion,
+		ChangedFields: changedFields,
+	}, nil
 }
 
 func (s *Service) ResolveSquareConfig(ctx context.Context, salonID string) (config.SquareConfig, error) {
@@ -646,6 +738,7 @@ func (s *Service) squareResponse(item *StoredConfig) SquareSettingsResponse {
 		WebhookSignatureKeyConfigured: webhookSecretSource == SecretSourceDatabase,
 		WebhookSignatureKeySource:     webhookSecretSource,
 		UpdatedAt:                     updatedAt,
+		Version:                       storedVersion(item),
 	}
 }
 
@@ -713,6 +806,7 @@ func (s *Service) twilioResponse(item *StoredConfig) TwilioSettingsResponse {
 		NotificationStatusURL:      urlForPath(publicBaseURL, statusPath),
 		NotificationInboundURL:     urlForPath(publicBaseURL, inboundPath),
 		UpdatedAt:                  updatedAt,
+		Version:                    storedVersion(item),
 	}
 }
 
@@ -832,7 +926,15 @@ func (s *Service) openAIResponse(item *StoredConfig) OpenAISettingsResponse {
 		APIKeyConfigured:     secretSource != SecretSourceNone,
 		APIKeySource:         secretSource,
 		UpdatedAt:            updatedAt,
+		Version:              storedVersion(item),
 	}
+}
+
+func storedVersion(item *StoredConfig) int64 {
+	if item == nil {
+		return 0
+	}
+	return item.Version
 }
 
 func (s *Service) decryptSecrets(encrypted string) (map[string]string, error) {

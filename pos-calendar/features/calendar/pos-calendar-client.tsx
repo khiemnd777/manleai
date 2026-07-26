@@ -40,14 +40,11 @@ import type {
   CalendarRangeResponse,
   CalendarSyncResponse,
   CalendarView,
-  POSConnection,
   POSService,
   POSStaffMember,
   Salon,
   SchedulingAuthority,
-  StaffSelectionMode,
-  SquareReadiness,
-  SyncLog
+  StaffSelectionMode
 } from "@/types/api";
 
 type SalonListResponse = {
@@ -55,9 +52,12 @@ type SalonListResponse = {
 };
 
 type StatusResponse = {
-  connection: POSConnection | null;
-  sync_logs: SyncLog[];
-  readiness: SquareReadiness;
+  scheduling_authority: SchedulingAuthority;
+  ready_for_external_new_work: boolean;
+  service_count: number;
+  staff_count: number;
+  business_hour_period_count: number;
+  booking_write_blocked: boolean;
 };
 
 type ServicesResponse = {
@@ -396,7 +396,7 @@ export function POSCalendarClient({ nonce }: { nonce: string }) {
 
       const [statusResult, serviceResponse, staffResponse] = await Promise.all([
         firstSalon.scheduling_authority === "external_provider"
-          ? apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`)
+          ? apiRequest<StatusResponse>(`/api/salons/${firstSalon.id}/business/external-scheduling-readiness`)
               .then((value) => ({ value, error: "" }))
               .catch((statusLoadError: unknown) => ({
                 value: null,
@@ -419,7 +419,7 @@ export function POSCalendarClient({ nonce }: { nonce: string }) {
   }
 
   async function loadStatus(salonID: string) {
-    const statusResponse = await apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${salonID}`);
+    const statusResponse = await apiRequest<StatusResponse>(`/api/salons/${salonID}/business/external-scheduling-readiness`);
     setStatus(statusResponse);
     setStatusError("");
   }
@@ -896,7 +896,7 @@ export function POSCalendarClient({ nonce }: { nonce: string }) {
           <SchedulingAuthorityNotice
             authority={selectedAuthority}
             version={selectedAuthorityVersion}
-            provider={status?.connection?.provider || salon.active_pos_provider}
+            provider={salon.active_pos_provider}
             readyForNewExternalBooking={readyForNewExternalBooking}
           />
           {error ? <Alert title="Calendar error" message={error} /> : null}
@@ -2608,16 +2608,11 @@ function staffIsBookable(member: POSStaffMember) {
 }
 
 function bookingPathReady(status: StatusResponse | null) {
-  const connection = status?.connection;
-  const readiness = status?.readiness;
-  const connected = Boolean(connection?.id) && connection?.status === "active" && Boolean(connection?.last_sync_at);
-  const locationSelected = Boolean(connection?.location_id);
-  return readiness?.scheduling_authority === "external_provider"
-    && connected
-    && locationSelected
-    && (readiness?.service_count ?? 0) > 0
-    && (readiness?.staff_count ?? 0) > 0
-    && !readiness?.booking_write_blocked;
+  return status?.scheduling_authority === "external_provider"
+    && status.ready_for_external_new_work
+    && status.service_count > 0
+    && status.staff_count > 0
+    && !status.booking_write_blocked;
 }
 
 function emptyActionForm(preferredDate: string): ActionForm {

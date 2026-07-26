@@ -14,13 +14,13 @@
 
 ## Milestone 2
 
-- Verify `GET /api/integrations/square/connect-url` returns a Square OAuth URL when Square is configured through the Integrations dashboard, and still supports env fallback only for local bootstrap.
+- Verify `GET /api/platform/tenants/:tenant_id/technical/square/connect-url` returns a Square OAuth URL only for an authorized Platform Technical actor, and still supports env fallback only for local bootstrap.
 - Verify Square callback stores encrypted tokens in `pos_connections`.
 - Verify token values are not returned by status endpoints.
-- Verify `GET /api/integrations/square/status` returns connection state and sync logs.
-- Verify `GET /api/integrations/square/locations` calls Square through `SquareAdapter`.
-- Verify `POST /api/integrations/square/select-location` stores `location_id`.
-- Verify `POST /api/integrations/square/sync` writes normalized `services`, `staff`, business hour periods, and customers.
+- Verify `GET /api/platform/tenants/:tenant_id/technical/square/status` returns connection state and sync logs without owner impersonation.
+- Verify `GET /api/platform/tenants/:tenant_id/technical/square/locations` calls Square through `SquareAdapter`.
+- Verify `POST /api/platform/tenants/:tenant_id/technical/square/select-location` stores `location_id` and consumes the tenant provider-write quota.
+- Verify `POST /api/platform/tenants/:tenant_id/technical/square/sync` writes normalized `services`, `staff`, business hour periods, and customers.
 - Verify Square errors create `pos_errors` rows and failed sync logs.
 
 ## Milestone 3 Backend Foundation
@@ -210,7 +210,7 @@
 - Verify requeue queues the existing durable event and clears only bounded
   processing failure state; it does not create or confirm an appointment and
   cannot mutate an internal-origin appointment through downstream repair.
-- Verify `/dashboard/integrations` renders webhook operations only inside the
+- Verify `/platform/tenants/:tenant_id/operations` renders webhook operations only inside the
   active connected Square card, gates missing verifier configuration, and
   covers loading, empty, list/detail error, success, disabled, filtering,
   pagination, submitting, exact-replay, read-only ignored, desktop table, and
@@ -222,7 +222,7 @@
 ## Public Catalog And Landing App
 
 - Verify public catalog settings are owner-scoped and slug uniqueness is enforced.
-- Verify `GET /api/public/salon` and `GET /api/public/salons/:slug` return only published, public-safe data.
+- Verify `GET /api/public/salons/:slug` returns only published, public-safe data through V71 while public DB scope sees zero base-table rows; verify the former first-tenant endpoint is not registered.
 - Verify public responses exclude staff contact details, POS IDs, provider tokens, sync errors, and owner identifiers.
 - Verify the landing app renders loading, not-found, unpublished, and published states without creating booking attempts.
 - Verify public copy stays call-to-request and never claims a web appointment is confirmed.

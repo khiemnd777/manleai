@@ -233,6 +233,23 @@ func (r *Repository) LoadStatus(ctx context.Context, salonID, ownerUserID string
 	return jobs, r.loadQueues(ctx, salonID), nil
 }
 
+func (r *Repository) LoadStatusForSalon(ctx context.Context, salonID string) ([]jobRecord, []queueRecord, string, error) {
+	if !validUUID(strings.TrimSpace(salonID)) || r == nil || r.db == nil {
+		return nil, nil, "", ErrValidation
+	}
+	var ownerUserID string
+	if err := r.db.QueryRowContext(ctx, `SELECT owner_user_id::text FROM salons WHERE id=$1`, salonID).Scan(&ownerUserID); errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, "", ErrNotFound
+	} else if err != nil {
+		return nil, nil, "", err
+	}
+	jobs, err := r.loadJobs(ctx)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return jobs, r.loadQueues(ctx, salonID), ownerUserID, nil
+}
+
 func (r *Repository) loadJobs(ctx context.Context) ([]jobRecord, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT job_name, last_status, stale_after_seconds, last_started_at,

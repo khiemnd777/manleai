@@ -16,22 +16,29 @@ func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
 }
 
+func switchSalonID(c *fiber.Ctx) string {
+	if value := c.Params("tenant_id"); value != "" {
+		return value
+	}
+	return c.Params("id")
+}
+
 func (h *Handler) Preview(c *fiber.Ctx) error {
 	var req PreviewRequest
 	if err := c.BodyParser(&req); err != nil {
 		return respond.Error(c, fiber.StatusBadRequest, "SCHEDULING_AUTHORITY_SWITCH_VALIDATION_ERROR", "Scheduling authority switch preview input is invalid.")
 	}
-	result, err := h.service.Preview(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
+	result, err := h.service.Preview(c.UserContext(), switchSalonID(c), middleware.UserID(c), req)
 	return respondSwitch(c, result, err)
 }
 
 func (h *Handler) Latest(c *fiber.Ctx) error {
-	result, err := h.service.Latest(c.UserContext(), c.Params("id"), middleware.UserID(c))
+	result, err := h.service.Latest(c.UserContext(), switchSalonID(c), middleware.UserID(c))
 	return respondSwitch(c, result, err)
 }
 
 func (h *Handler) Get(c *fiber.Ctx) error {
-	result, err := h.service.Get(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("run_id"))
+	result, err := h.service.Get(c.UserContext(), switchSalonID(c), middleware.UserID(c), c.Params("run_id"))
 	return respondSwitch(c, result, err)
 }
 
@@ -40,7 +47,7 @@ func (h *Handler) Commit(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return respond.Error(c, fiber.StatusBadRequest, "SCHEDULING_AUTHORITY_SWITCH_VALIDATION_ERROR", "Scheduling authority switch commit input is invalid.")
 	}
-	result, err := h.service.Commit(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("run_id"), req)
+	result, err := h.service.Commit(c.UserContext(), switchSalonID(c), middleware.UserID(c), c.Params("run_id"), req)
 	return respondSwitch(c, result, err)
 }
 

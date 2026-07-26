@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -137,6 +138,51 @@ func TestRepositoryPostgresClaimCallbackReplayTenantAndLeaseSafety(t *testing.T)
 	}
 	if _, _, err := repo.RequeueForOwner(ctx, salonID, ownerID, unknownID, "unsafe-"+uuid.NewString(), RequeueFingerprint(unknownID)); !errors.Is(err, ErrRequeueBlocked) {
 		t.Fatalf("unknown requeue error=%v", err)
+	}
+}
+
+func TestClaimBatchAppliesPerTenantFairnessBeforeGlobalLimit(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	ownerA := seedDeliveryUser(t, ctx, db, "fair-owner-a")
+	ownerB := seedDeliveryUser(t, ctx, db, "fair-owner-b")
+	var salonA, salonB string
+	if err := db.QueryRowContext(ctx, `INSERT INTO salons(name,phone,owner_user_id) VALUES('Fair Salon A',$1,$2) RETURNING id::text`, "+1"+time.Now().UTC().Format("150405001"), ownerA).Scan(&salonA); err != nil {
+		t.Fatalf("insert salon A: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `INSERT INTO salons(name,phone,owner_user_id) VALUES('Fair Salon B',$1,$2) RETURNING id::text`, "+1"+time.Now().UTC().Format("150405002"), ownerB).Scan(&salonB); err != nil {
+		t.Fatalf("insert salon B: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM salons WHERE id IN ($1,$2)`, salonA, salonB)
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM users WHERE id IN ($1,$2)`, ownerA, ownerB)
+	})
+	if _, err := db.ExecContext(ctx, `UPDATE tenant_runtime_limits SET worker_claims_per_batch=1 WHERE salon_id IN ($1,$2)`, salonA, salonB); err != nil {
+		t.Fatalf("set fair claim limits: %v", err)
+	}
+	for index := range 3 {
+		seedQueuedDelivery(t, ctx, db, salonA, "fair-a-"+strconv.Itoa(index))
+	}
+	seedQueuedDelivery(t, ctx, db, salonB, "fair-b")
+
+	items, err := NewRepository(db).ClaimBatch(ctx, 4, DeliveryLeaseDuration)
+	if err != nil {
+		t.Fatalf("claim fair batch: %v", err)
+	}
+	counts := map[string]int{}
+	for _, item := range items {
+		counts[item.SalonID]++
+	}
+	if len(items) != 2 || counts[salonA] != 1 || counts[salonB] != 1 {
+		t.Fatalf("fair claims=%#v counts=%#v, want one per salon", items, counts)
 	}
 }
 

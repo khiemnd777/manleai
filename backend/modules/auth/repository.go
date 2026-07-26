@@ -108,11 +108,22 @@ func (r *Repository) FindUserByID(ctx context.Context, id string) (*User, error)
 
 func (r *Repository) RolesForUser(ctx context.Context, userID string) ([]string, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT roles.name
-		FROM roles
-		JOIN user_roles ON user_roles.role_id = roles.id
-		WHERE user_roles.user_id = $1
-		ORDER BY roles.name
+		SELECT assignment.name
+		FROM (
+			SELECT role.name
+			FROM roles AS role
+			JOIN user_roles ON user_roles.role_id = role.id
+			WHERE user_roles.user_id = $1
+
+			UNION
+
+			SELECT role.name
+			FROM platform_role_assignments AS platform_assignment
+			JOIN roles AS role ON role.id = platform_assignment.role_id
+			WHERE platform_assignment.user_id = $1
+			  AND platform_assignment.status = 'active'
+		) AS assignment
+		ORDER BY assignment.name
 	`, userID)
 	if err != nil {
 		return nil, err
@@ -133,10 +144,12 @@ func (r *Repository) RolesForUser(ctx context.Context, userID string) ([]string,
 func (r *Repository) PrimarySalonIDForUser(ctx context.Context, userID string) (string, error) {
 	var salonID string
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id::text
-		FROM salons
-		WHERE owner_user_id = $1
-		ORDER BY created_at
+		SELECT membership.salon_id::text
+		FROM salon_memberships AS membership
+		JOIN salons AS salon ON salon.id = membership.salon_id
+		WHERE membership.user_id = $1
+		  AND membership.status = 'active'
+		ORDER BY membership.is_owner DESC, salon.created_at, salon.id
 		LIMIT 1
 	`, userID).Scan(&salonID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -155,18 +168,31 @@ func (r *Repository) ResolveAccessPrincipal(ctx context.Context, userID string) 
 	err := r.db.QueryRowContext(ctx, `
 		SELECT account.id::text,
 		       COALESCE((
-		           SELECT salon.id::text
-		           FROM salons AS salon
-		           WHERE salon.owner_user_id = account.id
-		           ORDER BY salon.created_at, salon.id
+		           SELECT membership.salon_id::text
+		           FROM salon_memberships AS membership
+		           JOIN salons AS salon ON salon.id = membership.salon_id
+		           WHERE membership.user_id = account.id
+		             AND membership.status = 'active'
+		           ORDER BY membership.is_owner DESC, salon.created_at, salon.id
 		           LIMIT 1
 		       ), ''),
 		       ARRAY(
-		           SELECT role.name
-		           FROM user_roles AS assignment
-		           JOIN roles AS role ON role.id = assignment.role_id
-		           WHERE assignment.user_id = account.id
-		           ORDER BY role.name
+		           SELECT resolved_role.name
+		           FROM (
+		               SELECT role.name
+		               FROM user_roles AS assignment
+		               JOIN roles AS role ON role.id = assignment.role_id
+		               WHERE assignment.user_id = account.id
+
+		               UNION
+
+		               SELECT role.name
+		               FROM platform_role_assignments AS platform_assignment
+		               JOIN roles AS role ON role.id = platform_assignment.role_id
+		               WHERE platform_assignment.user_id = account.id
+		                 AND platform_assignment.status = 'active'
+		           ) AS resolved_role
+		           ORDER BY resolved_role.name
 		       )
 		FROM users AS account
 		WHERE account.id = $1

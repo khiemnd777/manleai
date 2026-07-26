@@ -15,7 +15,8 @@ still pending owner review even when its owner notification is delivered.
 - The worker runs the stable `notification_delivery` job every 15 seconds with
   a maximum claim batch of 20. V57 records only safe job health evidence.
 - Active Twilio messaging configuration is salon-scoped data in
-  `salon_integration_configs`, managed at `/dashboard/integrations`. The strict
+  `salon_integration_configs`, managed in
+  `/platform/tenants/:tenant_id/technical`. The strict
   messaging resolver does not use environment fallback.
 
 Enabling owner SMS requires all of the following dashboard-managed evidence:

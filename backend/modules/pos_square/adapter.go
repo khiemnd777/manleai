@@ -100,7 +100,7 @@ func (a *SquareAdapter) Connect(ctx context.Context, input pos.ConnectInput) (*p
 			Provider:     pos.ProviderSquare,
 			Operation:    "oauth_token_exchange",
 			ErrorCode:    normalizeSquareError(err),
-			ErrorMessage: err.Error(),
+			ErrorMessage: squareSafeErrorMessage(err),
 		})
 		return nil, err
 	}
@@ -146,7 +146,7 @@ func (a *SquareAdapter) ListLocations(ctx context.Context, salonID string) ([]po
 			Provider:     pos.ProviderSquare,
 			Operation:    "list_locations",
 			ErrorCode:    normalizeSquareError(err),
-			ErrorMessage: err.Error(),
+			ErrorMessage: squareSafeErrorMessage(err),
 		})
 		return nil, err
 	}
@@ -179,7 +179,7 @@ func (a *SquareAdapter) ListServices(ctx context.Context, salonID string) ([]pos
 			Provider:     pos.ProviderSquare,
 			Operation:    "list_services",
 			ErrorCode:    normalizeSquareError(err),
-			ErrorMessage: err.Error(),
+			ErrorMessage: squareSafeErrorMessage(err),
 		})
 		return nil, err
 	}
@@ -311,7 +311,7 @@ func (a *SquareAdapter) ListStaff(ctx context.Context, salonID string) ([]pos.St
 			Provider:     pos.ProviderSquare,
 			Operation:    "list_staff",
 			ErrorCode:    normalizeSquareError(err),
-			ErrorMessage: err.Error(),
+			ErrorMessage: squareSafeErrorMessage(err),
 		})
 		return nil, err
 	}
@@ -455,7 +455,7 @@ func (a *SquareAdapter) ListBusinessHourPeriods(ctx context.Context, salonID str
 			Provider:     pos.ProviderSquare,
 			Operation:    "retrieve_location",
 			ErrorCode:    normalizeSquareError(err),
-			ErrorMessage: err.Error(),
+			ErrorMessage: squareSafeErrorMessage(err),
 		})
 		return nil, err
 	}
@@ -487,7 +487,7 @@ func (a *SquareAdapter) ListCustomers(ctx context.Context, salonID string) ([]po
 			Provider:     pos.ProviderSquare,
 			Operation:    "list_customers",
 			ErrorCode:    normalizeSquareError(err),
-			ErrorMessage: err.Error(),
+			ErrorMessage: squareSafeErrorMessage(err),
 		})
 		return nil, err
 	}
@@ -546,7 +546,7 @@ func (a *SquareAdapter) SearchCustomerByPhone(ctx context.Context, salonID strin
 			Provider:     pos.ProviderSquare,
 			Operation:    "search_customer",
 			ErrorCode:    normalizeSquareError(err),
-			ErrorMessage: err.Error(),
+			ErrorMessage: squareSafeErrorMessage(err),
 		})
 		return nil, err
 	}
@@ -577,7 +577,7 @@ func (a *SquareAdapter) CreateCustomer(ctx context.Context, salonID string, inpu
 			Provider:     pos.ProviderSquare,
 			Operation:    "create_customer",
 			ErrorCode:    normalizeSquareError(err),
-			ErrorMessage: err.Error(),
+			ErrorMessage: squareSafeErrorMessage(err),
 		})
 		return nil, err
 	}
@@ -608,7 +608,7 @@ func (a *SquareAdapter) CheckAvailability(ctx context.Context, salonID string, i
 			Provider:     pos.ProviderSquare,
 			Operation:    "check_availability",
 			ErrorCode:    normalizeSquareError(err),
-			ErrorMessage: err.Error(),
+			ErrorMessage: squareSafeErrorMessage(err),
 		})
 		return nil, err
 	}
@@ -635,7 +635,7 @@ func (a *SquareAdapter) CreateAppointment(ctx context.Context, salonID string, i
 			Provider:     pos.ProviderSquare,
 			Operation:    "create_booking",
 			ErrorCode:    normalizeSquareError(err),
-			ErrorMessage: err.Error(),
+			ErrorMessage: squareSafeErrorMessage(err),
 		})
 		return nil, squareWriteError(err, pos.WritePhaseDispatch)
 	}
@@ -647,7 +647,7 @@ func (a *SquareAdapter) CreateAppointment(ctx context.Context, salonID string, i
 				Provider:     pos.ProviderSquare,
 				Operation:    "retrieve_created_booking",
 				ErrorCode:    normalizeSquareError(err),
-				ErrorMessage: err.Error(),
+				ErrorMessage: squareSafeErrorMessage(err),
 			})
 			return nil, pos.NewWriteError(pos.WriteOutcomeUnknown, pos.WritePhasePostWriteRead, err)
 		}
@@ -679,7 +679,7 @@ func (a *SquareAdapter) RescheduleAppointment(ctx context.Context, salonID strin
 			Provider:     pos.ProviderSquare,
 			Operation:    "reschedule_booking",
 			ErrorCode:    normalizeSquareError(err),
-			ErrorMessage: err.Error(),
+			ErrorMessage: squareSafeErrorMessage(err),
 		})
 		return nil, squareWriteError(err, pos.WritePhaseDispatch)
 	}
@@ -710,7 +710,7 @@ func (a *SquareAdapter) CancelAppointment(ctx context.Context, salonID string, a
 			Provider:     pos.ProviderSquare,
 			Operation:    "cancel_booking",
 			ErrorCode:    normalizeSquareError(err),
-			ErrorMessage: err.Error(),
+			ErrorMessage: squareSafeErrorMessage(err),
 		})
 		return nil, squareWriteError(err, pos.WritePhaseDispatch)
 	}
@@ -729,7 +729,7 @@ func (a *SquareAdapter) ListAppointments(ctx context.Context, salonID string, in
 			Provider:     pos.ProviderSquare,
 			Operation:    "list_bookings",
 			ErrorCode:    normalizeSquareError(err),
-			ErrorMessage: err.Error(),
+			ErrorMessage: squareSafeErrorMessage(err),
 		})
 		return nil, err
 	}
@@ -760,7 +760,7 @@ func (a *SquareAdapter) ListAppointments(ctx context.Context, salonID string, in
 			Provider:     pos.ProviderSquare,
 			Operation:    "list_bookings",
 			ErrorCode:    normalizeSquareError(err),
-			ErrorMessage: err.Error(),
+			ErrorMessage: squareSafeErrorMessage(err),
 		})
 		return nil, err
 	}
@@ -770,7 +770,7 @@ func (a *SquareAdapter) ListAppointments(ctx context.Context, salonID string, in
 			Provider:     pos.ProviderSquare,
 			Operation:    "list_bookings",
 			ErrorCode:    normalizeSquareError(err),
-			ErrorMessage: err.Error(),
+			ErrorMessage: squareSafeErrorMessage(err),
 		})
 		return nil, err
 	}
@@ -1001,10 +1001,7 @@ type squareResponseError struct {
 }
 
 func (e *squareResponseError) Error() string {
-	if e == nil || e.Err == nil {
-		return "square response could not be decoded"
-	}
-	return e.Err.Error()
+	return "square response could not be decoded"
 }
 
 func (e *squareResponseError) Unwrap() error {
@@ -1024,10 +1021,10 @@ func (e *squareHTTPError) Error() string {
 	if e == nil {
 		return "square request failed"
 	}
-	if strings.TrimSpace(e.Code) != "" {
-		return fmt.Sprintf("square %s: %s", e.Code, e.Detail)
+	if e.StatusCode >= 100 && e.StatusCode <= 599 {
+		return fmt.Sprintf("square request failed with status %d", e.StatusCode)
 	}
-	return fmt.Sprintf("square returned status %d", e.StatusCode)
+	return "square request failed"
 }
 
 func squareWriteError(err error, phase string) error {
@@ -1117,6 +1114,34 @@ func normalizeSquareError(err error) string {
 	if errors.Is(err, ErrLocationNotSelected) {
 		return pos.ErrorLocationNotSelected
 	}
+	var httpErr *squareHTTPError
+	if errors.As(err, &httpErr) {
+		if squareAppointmentWritesUnsupported(httpErr) {
+			return pos.ErrorWriteUnsupported
+		}
+		switch httpErr.StatusCode {
+		case http.StatusUnauthorized:
+			return pos.ErrorTokenExpired
+		case http.StatusForbidden:
+			return pos.ErrorPermissionDenied
+		case http.StatusConflict:
+			return pos.ErrorBookingConflict
+		case http.StatusRequestTimeout, http.StatusGatewayTimeout:
+			return pos.ErrorTimeout
+		case http.StatusTooManyRequests:
+			return pos.ErrorRateLimited
+		}
+		switch strings.ToUpper(strings.TrimSpace(httpErr.Code)) {
+		case "UNAUTHORIZED", "ACCESS_TOKEN_EXPIRED":
+			return pos.ErrorTokenExpired
+		case "FORBIDDEN", "INSUFFICIENT_SCOPES":
+			return pos.ErrorPermissionDenied
+		case "RATE_LIMITED":
+			return pos.ErrorRateLimited
+		case "CONFLICT", "VERSION_MISMATCH":
+			return pos.ErrorBookingConflict
+		}
+	}
 	msg := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(msg, "unauthorized"), strings.Contains(msg, "expired"):
@@ -1136,6 +1161,16 @@ func normalizeSquareError(err error) string {
 	default:
 		return pos.ErrorUnknown
 	}
+}
+
+func squareAppointmentWritesUnsupported(err *squareHTTPError) bool {
+	return err != nil &&
+		strings.EqualFold(strings.TrimSpace(err.Code), "FORBIDDEN") &&
+		strings.Contains(strings.ToLower(err.Detail), "merchant subscription does not support write operations")
+}
+
+func squareSafeErrorMessage(err error) string {
+	return pos.SafeErrorMessage(normalizeSquareError(err))
 }
 
 func buildSquareCustomerSearchRequest(phone string) (squareCustomerSearchRequest, error) {

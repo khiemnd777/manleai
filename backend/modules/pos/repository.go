@@ -14,9 +14,11 @@ import (
 )
 
 var (
-	ErrNotFound              = errors.New("pos record not found")
-	ErrStaleProviderSnapshot = errors.New("provider snapshot is stale")
-	ErrStaleProviderFence    = errors.New("provider catalog fence is stale")
+	ErrNotFound                 = errors.New("pos record not found")
+	ErrStaleProviderSnapshot    = errors.New("provider snapshot is stale")
+	ErrStaleProviderFence       = errors.New("provider catalog fence is stale")
+	ErrTechnicalVersionConflict = errors.New("technical resource version conflict")
+	ErrTechnicalActionConflict  = errors.New("technical action conflict")
 )
 
 const (
@@ -102,7 +104,13 @@ func (r *Repository) WithSchedulingFenceTx(ctx context.Context, salonID string, 
 
 func (r *Repository) EnsureSalonOwner(ctx context.Context, salonID string, ownerUserID string) error {
 	var exists bool
-	err := r.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM salons WHERE id = $1 AND owner_user_id = $2)`, salonID, ownerUserID).Scan(&exists)
+	err := r.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM salons salon
+			WHERE salon.id = $1
+			  AND public.has_active_tenant_membership(salon.id, $2::uuid)
+		)
+	`, salonID, ownerUserID).Scan(&exists)
 	if err != nil {
 		return err
 	}
@@ -110,6 +118,27 @@ func (r *Repository) EnsureSalonOwner(ctx context.Context, salonID string, owner
 		return ErrNotFound
 	}
 	return nil
+}
+
+func (r *Repository) EnsureSalonExists(ctx context.Context, salonID string) error {
+	var exists bool
+	err := r.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM salons WHERE id = $1)`, salonID).Scan(&exists)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *Repository) SalonOwnerUserID(ctx context.Context, salonID string) (string, error) {
+	var ownerUserID string
+	err := r.db.QueryRowContext(ctx, `SELECT owner_user_id::text FROM salons WHERE id=$1`, salonID).Scan(&ownerUserID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return ownerUserID, err
 }
 
 func (r *Repository) GetActiveProvider(ctx context.Context, salonID string, ownerUserID string) (string, error) {
@@ -158,6 +187,141 @@ func (r *Repository) GetSalonAIEnabled(ctx context.Context, salonID string, owne
 		return false, ErrNotFound
 	}
 	return enabled, err
+}
+
+// GetSalonAIRuntimeForPlatform is intentionally owner-independent. It is used
+// only after the fixed Platform route has authorized the actual actor; the
+// request-scoped database actor and RLS remain a second boundary.
+func (r *Repository) GetSalonAIRuntimeForPlatform(ctx context.Context, salonID string) (AIRuntimeState, error) {
+	var state AIRuntimeState
+	err := r.db.QueryRowContext(ctx, `
+		SELECT salon.ai_enabled, COALESCE(version.version, 0)
+		FROM salons salon
+		LEFT JOIN technical_resource_versions version
+		  ON version.salon_id=salon.id
+		 AND version.resource_type='ai_runtime'
+		 AND version.resource_id='ai_booking'
+		WHERE salon.id=$1
+	`, salonID).Scan(&state.Enabled, &state.Version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AIRuntimeState{}, ErrNotFound
+	}
+	return state, err
+}
+
+// GetSchedulingAuthorityForPlatform reads the current technical selection
+// without resolving or substituting the salon owner's user ID.
+func (r *Repository) GetSchedulingAuthorityForPlatform(ctx context.Context, salonID string) (string, error) {
+	var authority string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT settings.scheduling_authority
+		FROM salon_settings settings
+		WHERE settings.salon_id=$1
+	`, salonID).Scan(&authority)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return authority, err
+}
+
+func (r *Repository) SetSalonAIRuntimeForPlatform(ctx context.Context, input AIRuntimeMutation) (AIRuntimeState, bool, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AIRuntimeState{}, false, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO technical_resource_versions (salon_id,resource_type,resource_id,version)
+		SELECT id,'ai_runtime','ai_booking',0 FROM salons WHERE id=$1
+		ON CONFLICT DO NOTHING
+	`, input.SalonID); err != nil {
+		return AIRuntimeState{}, false, err
+	}
+
+	var existingFingerprint, existingActionType, existingResourceType, existingResourceID string
+	var existingVersion int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT request_fingerprint,action_type,resource_type,resource_id,result_version
+		FROM technical_actions
+		WHERE salon_id=$1 AND actor_user_id=$2 AND action_key=$3
+	`, input.SalonID, input.ActorUserID, input.ActionKey).Scan(
+		&existingFingerprint, &existingActionType, &existingResourceType, &existingResourceID, &existingVersion,
+	)
+	if err == nil {
+		if existingFingerprint != input.RequestFingerprint || existingResourceType != "ai_runtime" || existingResourceID != "ai_booking" {
+			return AIRuntimeState{}, false, ErrTechnicalActionConflict
+		}
+		state := AIRuntimeState{Enabled: existingActionType == "ai_booking.enable", Version: existingVersion}
+		if err := tx.Commit(); err != nil {
+			return AIRuntimeState{}, false, err
+		}
+		return state, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return AIRuntimeState{}, false, err
+	}
+
+	var currentVersion int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT version
+		FROM technical_resource_versions
+		WHERE salon_id=$1 AND resource_type='ai_runtime' AND resource_id='ai_booking'
+		FOR UPDATE
+	`, input.SalonID).Scan(&currentVersion); errors.Is(err, sql.ErrNoRows) {
+		return AIRuntimeState{}, false, ErrNotFound
+	} else if err != nil {
+		return AIRuntimeState{}, false, err
+	}
+	if currentVersion != input.ExpectedVersion {
+		return AIRuntimeState{}, false, ErrTechnicalVersionConflict
+	}
+
+	result, err := tx.ExecContext(ctx, `UPDATE salons SET ai_enabled=$1,updated_at=now() WHERE id=$2`, input.Enabled, input.SalonID)
+	if err != nil {
+		return AIRuntimeState{}, false, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return AIRuntimeState{}, false, err
+	} else if affected != 1 {
+		return AIRuntimeState{}, false, ErrNotFound
+	}
+	resultVersion := currentVersion + 1
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE technical_resource_versions
+		SET version=$2,updated_by_user_id=$3,updated_at=now()
+		WHERE salon_id=$1 AND resource_type='ai_runtime' AND resource_id='ai_booking'
+	`, input.SalonID, resultVersion, input.ActorUserID); err != nil {
+		return AIRuntimeState{}, false, err
+	}
+	actionType := "ai_booking.disable"
+	if input.Enabled {
+		actionType = "ai_booking.enable"
+	}
+	details := `{"changed_fields":["ai_enabled"]}`
+	var actionID string
+	if err := tx.QueryRowContext(ctx, `
+		INSERT INTO technical_actions (
+			salon_id,actor_user_id,action_key,action_type,request_fingerprint,
+			resource_type,resource_id,previous_version,result_version,details
+		) VALUES ($1,$2,$3,$4,$5,'ai_runtime','ai_booking',$6,$7,$8::jsonb)
+		RETURNING id::text
+	`, input.SalonID, input.ActorUserID, input.ActionKey, actionType, input.RequestFingerprint,
+		currentVersion, resultVersion, details).Scan(&actionID); err != nil {
+		return AIRuntimeState{}, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO technical_events (
+			action_id,salon_id,actor_user_id,event_type,resource_type,resource_id,
+			previous_version,result_version,details
+		) VALUES ($1,$2,$3,$4,'ai_runtime','ai_booking',$5,$6,$7::jsonb)
+	`, actionID, input.SalonID, input.ActorUserID, actionType, currentVersion, resultVersion, details); err != nil {
+		return AIRuntimeState{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return AIRuntimeState{}, false, err
+	}
+	return AIRuntimeState{Enabled: input.Enabled, Version: resultVersion}, false, nil
 }
 
 func (r *Repository) SetSalonAIEnabled(ctx context.Context, salonID string, ownerUserID string, enabled bool) error {
@@ -467,14 +631,25 @@ func (r *Repository) ClaimPOSSyncJobs(ctx context.Context, limit int) ([]SyncJob
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		WITH candidates AS (
-			SELECT id
-			FROM pos_sync_jobs
-			WHERE status IN ('queued', 'failed')
-			  AND attempt_count < max_attempts
-			  AND next_attempt_at <= now()
-			ORDER BY next_attempt_at ASC, created_at ASC
-			FOR UPDATE SKIP LOCKED
+		WITH ranked AS (
+			SELECT job.id,job.next_attempt_at,job.created_at,
+			       row_number() OVER (
+			           PARTITION BY job.salon_id
+			           ORDER BY job.next_attempt_at,job.created_at,job.id
+			       ) AS tenant_rank,
+			       COALESCE(limits.worker_claims_per_batch,2) AS tenant_limit
+			FROM pos_sync_jobs job
+			LEFT JOIN tenant_runtime_limits limits ON limits.salon_id=job.salon_id
+			WHERE job.status IN ('queued', 'failed')
+			  AND job.attempt_count < job.max_attempts
+			  AND job.next_attempt_at <= now()
+		), candidates AS (
+			SELECT job.id
+			FROM pos_sync_jobs job
+			JOIN ranked ON ranked.id=job.id
+			WHERE ranked.tenant_rank<=ranked.tenant_limit
+			ORDER BY ranked.next_attempt_at,ranked.created_at,job.id
+			FOR UPDATE OF job SKIP LOCKED
 			LIMIT $1
 		)
 		UPDATE pos_sync_jobs job
@@ -571,6 +746,8 @@ func (r *Repository) MarkPOSSyncJobFailed(ctx context.Context, job SyncJob, mess
 }
 
 func (r *Repository) LogError(ctx context.Context, item POSError) error {
+	item.ErrorMessage = SafeErrorMessage(item.ErrorCode)
+	item.Payload = nil
 	return r.withSchedulingFenceMutation(ctx, item.SalonID, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO pos_errors (salon_id, provider, operation, error_code, error_message, payload)

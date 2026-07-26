@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -97,24 +98,26 @@ func TestWebhookOperationsRequeueUsesStableFingerprintAndValidatesInput(t *testi
 	}
 }
 
-func TestSquareWebhookOperationsRoutesRequireAuthentication(t *testing.T) {
+func TestPlatformSquareTechnicalRoutesRequireAuthentication(t *testing.T) {
 	app := fiber.New()
 	RegisterRoutes(app.Group("/api"), NewHandler(&Service{}, config.Config{}), "test-secret")
-	for _, path := range []string{
-		"/api/salons/" + webhookTestSalonID + "/square-webhook-events",
-		"/api/salons/" + webhookTestSalonID + "/square-webhook-events/" + webhookTestEventID,
-		"/api/salons/" + webhookTestSalonID + "/square-webhook-events/" + webhookTestEventID + "/requeue",
+	RegisterPlatformRoutes(app.Group("/api"), NewPlatformHandler(&Service{}, nil), "test-secret")
+	for _, test := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/api/platform/tenants/" + webhookTestSalonID + "/technical/square/connect-url"},
+		{method: http.MethodGet, path: "/api/platform/tenants/" + webhookTestSalonID + "/technical/square/status"},
+		{method: http.MethodGet, path: "/api/platform/tenants/" + webhookTestSalonID + "/technical/square/locations"},
+		{method: http.MethodPost, path: "/api/platform/tenants/" + webhookTestSalonID + "/technical/square/select-location"},
+		{method: http.MethodPost, path: "/api/platform/tenants/" + webhookTestSalonID + "/technical/square/sync"},
 	} {
-		method := "GET"
-		if strings.HasSuffix(path, "/requeue") {
-			method = "POST"
-		}
-		response, err := app.Test(httptest.NewRequest(method, path, nil))
+		response, err := app.Test(httptest.NewRequest(test.method, test.path, nil))
 		if err != nil {
-			t.Fatalf("%s %s: %v", method, path, err)
+			t.Fatalf("%s %s: %v", test.method, test.path, err)
 		}
 		if response.StatusCode != fiber.StatusUnauthorized {
-			t.Fatalf("%s %s status=%d, want 401", method, path, response.StatusCode)
+			t.Fatalf("%s %s status=%d, want 401", test.method, test.path, response.StatusCode)
 		}
 	}
 }

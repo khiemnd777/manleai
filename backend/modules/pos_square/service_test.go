@@ -2,7 +2,9 @@ package pos_square
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,6 +135,28 @@ func TestBuildReadinessAllowsEnableWhenSquareIsBookingReady(t *testing.T) {
 	}
 	if !pending.CanEnableAIBooking {
 		t.Fatalf("an optional in-flight test must not redefine the independent AI enablement gate")
+	}
+}
+
+func TestBusinessReadinessProjectionOmitsTechnicalConnectionEvidence(t *testing.T) {
+	response := businessReadinessResponse(&ReadinessStatus{
+		SchedulingAuthority: booking.SchedulingAuthorityExternalProvider,
+		CanEnableAIBooking:  true,
+		ServiceCount:        2,
+		StaffCount:          3,
+		BusinessHourCount:   4,
+	})
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("marshal business readiness: %v", err)
+	}
+	for _, forbidden := range []string{"connection", "merchant", "location", "scope", "sync_logs", "latest_test_booking", "error_message"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("tenant-safe readiness leaked %q: %s", forbidden, encoded)
+		}
+	}
+	if !response.ReadyForExternalNewWork || response.ServiceCount != 2 || response.StaffCount != 3 {
+		t.Fatalf("unexpected projection: %+v", response)
 	}
 }
 
@@ -610,6 +634,9 @@ func TestBuildReadinessBlocksEnableWhenCreateBookingPermissionDenied(t *testing.
 	if readiness.BookingWriteBlockedCode != pos.ErrorPermissionDenied {
 		t.Fatalf("blocker code = %s, want %s", readiness.BookingWriteBlockedCode, pos.ErrorPermissionDenied)
 	}
+	if readiness.BookingWriteBlockedReason != pos.SafeErrorMessage(pos.ErrorPermissionDenied) {
+		t.Fatalf("blocker reason = %q, want sanitized stable copy", readiness.BookingWriteBlockedReason)
+	}
 	if readiness.BookingWriteBlockedAt == nil || !readiness.BookingWriteBlockedAt.Equal(now) {
 		t.Fatalf("blocker timestamp = %#v, want %s", readiness.BookingWriteBlockedAt, now)
 	}
@@ -629,8 +656,8 @@ func TestBuildReadinessClearsCreateBookingBlockerAfterLaterSuccessfulTest(t *tes
 		POSBookingID:      "booking_1",
 		CreatedAt:         now.Add(time.Hour),
 	}, &pos.POSErrorRecord{
-		ErrorCode:    pos.ErrorPermissionDenied,
-		ErrorMessage: "square FORBIDDEN: Merchant subscription does not support write operations.",
+		ErrorCode:    pos.ErrorWriteUnsupported,
+		ErrorMessage: "untrusted provider detail must not be exposed",
 		CreatedAt:    now,
 	}, nil)
 
@@ -653,8 +680,11 @@ func TestBuildReadinessSurfacesSquareAppointmentChangeSubscriptionBlocker(t *tes
 	if !readiness.AppointmentChangeWriteBlocked {
 		t.Fatalf("appointment change blocker was not surfaced")
 	}
-	if readiness.AppointmentChangeWriteBlockedCode != pos.ErrorPermissionDenied {
-		t.Fatalf("blocker code = %s, want %s", readiness.AppointmentChangeWriteBlockedCode, pos.ErrorPermissionDenied)
+	if readiness.AppointmentChangeWriteBlockedCode != pos.ErrorWriteUnsupported {
+		t.Fatalf("blocker code = %s, want %s", readiness.AppointmentChangeWriteBlockedCode, pos.ErrorWriteUnsupported)
+	}
+	if readiness.AppointmentChangeWriteBlockedReason != pos.SafeErrorMessage(pos.ErrorWriteUnsupported) {
+		t.Fatalf("blocker reason = %q, want sanitized stable copy", readiness.AppointmentChangeWriteBlockedReason)
 	}
 	if readiness.AppointmentChangeWriteBlockedAt == nil || !readiness.AppointmentChangeWriteBlockedAt.Equal(now) {
 		t.Fatalf("blocker timestamp = %#v, want %s", readiness.AppointmentChangeWriteBlockedAt, now)

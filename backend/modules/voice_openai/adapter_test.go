@@ -784,8 +784,13 @@ func TestParseRealtimeEvents(t *testing.T) {
 	}
 
 	apiErr := parseRealtimeEvent([]byte(`{"type":"error","error":{"type":"invalid_request_error","code":"invalid_value","param":"session.audio.input.format","message":"Unsupported audio format."}}`))
-	if apiErr.Type != voice.RealtimeEventError || apiErr.ErrorCode != "invalid_value" || apiErr.ErrorParam != "session.audio.input.format" || !strings.Contains(apiErr.Error, "invalid_request_error") || !strings.Contains(apiErr.Error, "Unsupported audio format.") {
+	if apiErr.Type != voice.RealtimeEventError || apiErr.ErrorCode != "invalid_value" || apiErr.ErrorParam != "session.audio.input.format" || !strings.Contains(apiErr.Error, "invalid_request_error") || strings.Contains(apiErr.Error, "Unsupported audio format.") {
 		t.Fatalf("api error event = %#v", apiErr)
+	}
+
+	unsafeErr := parseRealtimeEvent([]byte(`{"type":"error","error":{"type":"invalid request","code":"customer@example.com","param":"caller name","message":"private caller payload"}}`))
+	if unsafeErr.ErrorCode != "" || unsafeErr.ErrorParam != "" || strings.Contains(unsafeErr.Error, "customer@example.com") || strings.Contains(unsafeErr.Error, "private caller payload") {
+		t.Fatalf("unsafe provider diagnostics leaked: %#v", unsafeErr)
 	}
 }
 

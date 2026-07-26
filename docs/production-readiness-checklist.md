@@ -42,6 +42,36 @@ RPO/RTO evidence.
   reload and immediate access/refresh revocation after disablement. The release
   security manifest owns both tests and fresh PostgreSQL execution passes under
   the final database gate.
+- [x] Add the V64 expand-only SaaS authorization foundation without changing
+  legacy Business-route ownership: backfill/synchronize exact salon-owner
+  memberships; add Tenant Business Manager, Platform Admin/Ops, per-salon Ops
+  capabilities, bounded 24-hour PII grants, optimistic versions, stable action
+  fingerprints/replay, and immutable audit; retain `salons.owner_user_id` and
+  scheduling owner triggers as the owner source of truth.
+- [x] Build a server-owned `ActorContext` from the current active database
+  principal on every protected request; union current Platform role state and
+  choose the primary active membership while ignoring stale JWT/header tenant
+  or role claims. Keep Tenant and Platform access surfaces route-owned and fail
+  invalid surface/capability/PII combinations closed.
+- [x] Add authenticated Platform access-management APIs and the one-time
+  operator-only first-Platform-Admin command. Prevent owner membership
+  revocation, last-admin removal, cross-salon Ops capability use, Platform PII
+  access without an exact active grant, and arbitrary prose/customer data in
+  the grant's bounded opaque change reference or immutable event details.
+  Serialize Platform role changes and atomically revoke active salon/PII
+  delegation so concurrent demotions cannot remove the last admin and role
+  reactivation cannot revive stale access.
+- [x] Require explicit `salon_id` on authenticated Square control/write routes
+  and remove primary-salon middleware fallback before enabling multi-salon
+  Platform actors.
+- [x] Cut over the complete shared Business route set and `/api/salons` in one
+  coherent SaaS Phase 3 slice with capability-aware Tenant/Platform DTO
+  projections. V65 owns optimistic resource versions, exact action replay,
+  actual-actor safe audit, provider/compatible-image insert coverage, and the
+  salon-rooted staff/service eligibility relationship. Provider fields and
+  external hours are read-only, Platform staff contacts are omitted, Platform
+  customers require an exact PII grant, and canonical public-readiness and
+  consultation validation owners are reused rather than copied.
 - [x] Dashboard shell
 - [x] Salon profile creation UI
 - [x] Square integration page
@@ -251,6 +281,11 @@ RPO/RTO evidence.
   integration card. A configured verifier or received webhook still is not
   appointment-confirmation or live-subscription proof.
 - [x] Fail runtime Square/Twilio/OpenAI configuration resolution closed on repository, malformed persisted settings, or decryption errors; keep stored enabled state and credentials authoritative, prevent dashboard secret-source fallback for stored rows, and permit legacy bootstrap fallback only for an exact missing stored salon configuration.
+- [x] Enforce Phase 1 provider-diagnostic isolation: serialize integration
+  secrets/SIDs/destinations as write-only state, normalize Square/POS failures
+  to stable codes and fixed messages before persistence/API response, allowlist
+  Twilio/OpenAI Realtime diagnostics, and apply V63 to redact historical raw
+  provider text and payloads.
 
 ## Backup, Restore, And Migration Rollback
 
@@ -401,7 +436,7 @@ RPO/RTO evidence.
 - [x] Add a versioned package/test-file manifest and fail-closed orchestration script; do not select coverage by grepping Go test names or output.
 - [x] Start the PostgreSQL contract from an empty dedicated database/role whose database name carries the `release_gate` marker, reject missing/unsafe identity and pre-existing public state, construct test URLs without logging them, prove migrate-twice/checksum behavior, and verify every repository migration from V46 through latest was applied exactly once.
 - [x] Clone the verified migration-only baseline into a disposable database per package, then run the scheduling authority, owner-manual, internal-calendar, switch, booking/POS/Square and webhook operations, configuration/public, owner/customer notification, scheduling-PII retention, operations-health, and V58 alias integration packages serially with bounded timeouts and no live provider, paid API, or network dependency.
-- [x] Run an explicit tenant/security contract covering route authentication, cross-salon rejection, token/secret redaction, zero POS evidence for manual/internal work, public PII/provider-ID absence, notification masking, and callback signature enforcement.
+- [x] Run an explicit tenant/security contract covering route authentication, cross-salon rejection, whole-response integration token/secret redaction, provider-error/audit redaction, zero POS evidence for manual/internal work, public PII/provider-ID absence, notification masking, and callback signature enforcement.
 - [x] Keep `build-images` and `deploy` dependent on the release gate and preserve the existing tag-only, pre-deploy backup, forward-migration compatibility, healthcheck, and rollback gates.
 - [ ] Treat a passing gate as code-ready only; separately verify dashboard-managed provider configuration, live callback/delivery behavior, production backup storage/retention/capacity, witnessed restore/RPO/RTO evidence, alert routing, and on-call readiness before claiming operational production readiness.
 - [x] Replace browser local-storage tokens with memory-only access tokens and a
@@ -415,6 +450,39 @@ RPO/RTO evidence.
   production origins, confirm Redis capacity/latency/alerting and tune the
   documented abuse thresholds from representative traffic before treating the
   release gate as a complete operational security approval.
+
+## SaaS Tenant Refactor Phases 3-10
+
+- [x] Phase 3: expose one canonical Business contract on fixed Tenant and
+  Platform routes for salon profile, services, staff, staff-service
+  eligibility, prices, hours, public settings, and customers; enforce exact
+  membership/capability and actual-actor versioned audit.
+- [x] Phase 4: split `/dashboard/*` Tenant UI from `/platform/*` Platform UI;
+  add tenant directory/detail Business, Technical, Operations, and Audit tabs;
+  remove technical provider configuration from Tenant navigation.
+- [x] Phase 5: move Square, Twilio, OpenAI, ManleAI Calendar technical config,
+  and scheduling-authority controls to fixed Platform tenant routes with exact
+  delegated capabilities and no owner impersonation.
+- [x] Phase 6: add Platform Operations recovery, masked delivery/Square webhook
+  evidence, immutable audit, and V70 versioned/idempotent AI-runtime control.
+- [x] Phase 7: require active tenant membership at runtime; keep POS Calendar
+  tenant-scoped through safe Business/readiness projections; serve independent
+  `/s/[slug]` landing pages.
+- [x] Phase 8: run API/worker with a separate non-owner/non-`BYPASSRLS` role;
+  apply/reset actor context per DB operation; enforce tenant RLS; give public
+  scope zero base-table visibility; enforce exact Platform PII scope on all
+  customer/call/appointment/notification tables.
+- [x] Phase 9: persist per-tenant quotas/usage and fair worker claim caps;
+  return bounded `429`/`Retry-After` for exhausted provider/voice/scheduling
+  work without affecting other tenants.
+- [x] Phase 10: add V63-V72 migration/replay/security ownership to the release
+  gate, update Compose runtime/migration credential separation, runtime-role
+  initialization, deployment/runbook docs, and codebase routing map.
+- [ ] Before production cutover, provision/rotate the existing database runtime
+  role, validate API/worker startup with RLS enforced, run the tag release gate,
+  witness per-tenant Square/Twilio/OpenAI readiness and callbacks, and complete
+  the existing backup/restore/load/on-call approvals. Code readiness does not
+  establish those external operational facts.
 
 ## Owner-First Scheduling Authority Milestone
 

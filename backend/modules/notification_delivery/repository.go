@@ -116,14 +116,26 @@ func (r *Repository) ClaimBatch(ctx context.Context, limit int, lease time.Durat
 	}
 	defer tx.Rollback()
 	rows, err := tx.QueryContext(ctx, `
-		WITH candidates AS (
-			SELECT id
-			FROM owner_notifications
-			WHERE delivery_status IN ('queued','failed')
-			  AND next_delivery_at <= now()
-			  AND delivery_attempts::bigint < (requeue_count::bigint + 1) * $1
-			ORDER BY next_delivery_at, created_at, id
-			FOR UPDATE SKIP LOCKED
+		WITH ranked AS (
+			SELECT notification.id,notification.salon_id,notification.next_delivery_at,
+			       notification.created_at,
+			       row_number() OVER (
+			           PARTITION BY notification.salon_id
+			           ORDER BY notification.next_delivery_at,notification.created_at,notification.id
+			       ) AS tenant_rank,
+			       COALESCE(limits.worker_claims_per_batch,2) AS tenant_limit
+			FROM owner_notifications notification
+			LEFT JOIN tenant_runtime_limits limits ON limits.salon_id=notification.salon_id
+			WHERE notification.delivery_status IN ('queued','failed')
+			  AND notification.next_delivery_at <= now()
+			  AND notification.delivery_attempts::bigint < (notification.requeue_count::bigint + 1) * $1
+		), candidates AS (
+			SELECT notification.id
+			FROM owner_notifications notification
+			JOIN ranked ON ranked.id=notification.id
+			WHERE ranked.tenant_rank<=ranked.tenant_limit
+			ORDER BY ranked.next_delivery_at,ranked.created_at,notification.id
+			FOR UPDATE OF notification SKIP LOCKED
 			LIMIT $2
 		), claimed AS (
 			UPDATE owner_notifications notification
@@ -499,7 +511,16 @@ func (r *Repository) RequeueForOwner(ctx context.Context, salonID, ownerUserID, 
 	}
 	defer tx.Rollback()
 	var ownerOK bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM salons WHERE id=$1 AND owner_user_id=$2)`, salonID, ownerUserID).Scan(&ownerOK); err != nil {
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM salons salon
+			WHERE salon.id=$1
+			  AND (
+			      public.has_active_tenant_membership(salon.id, $2::uuid)
+			      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'operations.write')
+			  )
+		)
+	`, salonID, ownerUserID).Scan(&ownerOK); err != nil {
 		return nil, false, err
 	}
 	if !ownerOK {
@@ -569,7 +590,16 @@ func (r *Repository) RequeueForOwner(ctx context.Context, salonID, ownerUserID, 
 
 func (r *Repository) ensureOwner(ctx context.Context, salonID, ownerUserID string) error {
 	var exists bool
-	if err := r.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM salons WHERE id=$1 AND owner_user_id=$2)`, salonID, ownerUserID).Scan(&exists); err != nil {
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM salons salon
+			WHERE salon.id=$1
+			  AND (
+			      public.has_active_tenant_membership(salon.id, $2::uuid)
+			      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'operations.read')
+			  )
+		)
+	`, salonID, ownerUserID).Scan(&exists); err != nil {
 		return err
 	}
 	if !exists {

@@ -71,6 +71,9 @@ func (h *Handler) Incoming(c *fiber.Ctx) error {
 	if errors.Is(err, voice.ErrRouteNotFound) {
 		return h.twiml(c, adapter.FinalResponse("We could not route this call to a salon. Please call the salon directly.", ""))
 	}
+	if errors.Is(err, voice.ErrTenantQuotaExceeded) {
+		return h.twiml(c, adapter.FinalResponse("The salon's automated phone line is busy right now. Please call the salon directly or try again shortly.", ""))
+	}
 	if errors.Is(err, voice.ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "TWILIO_WEBHOOK_INVALID", "Twilio webhook request is invalid.")
 	}
@@ -101,12 +104,16 @@ func (h *Handler) StreamStatus(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusForbidden, "TWILIO_SIGNATURE_INVALID", "Twilio webhook signature is invalid.")
 	}
 	eventType := realtimeStatusEventType(params["StreamEvent"])
-	payload := copyStringMap(params)
-	if payload["stage"] == "" {
-		payload["stage"] = "twilio_stream_status"
+	payload := map[string]string{"stage": "twilio_stream_status"}
+	if value := safeRealtimeDiagnosticValue(params["StreamSid"]); value != "" {
+		payload["stream_sid"] = value
+	}
+	if value := safeRealtimeDiagnosticValue(params["StreamEvent"]); value != "" {
+		payload["stream_event"] = value
 	}
 	if eventType == voice.EventRealtimeFailed && strings.EqualFold(strings.TrimSpace(params["StreamEvent"]), "stream-error") {
 		payload["terminal"] = "true"
+		payload["error_code"] = "TWILIO_STREAM_ERROR"
 	}
 	if err := h.service.RecordRealtimeEvent(c.UserContext(), voice.ProviderTwilio, params["CallSid"], "", eventType, payload); err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "TWILIO_STREAM_STATUS_FAILED", "Could not record stream status.")
@@ -1546,12 +1553,13 @@ func (h *Handler) forwardRealtimeEventsWithRealtimePolicyAndInitialReply(
 				if strings.TrimSpace(event.Error) == "" {
 					continue
 				}
+				diagnostics := realtimeProviderErrorDiagnostics(event)
 				if isActiveRealtimeResponseConflict(event) {
-					_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_response_conflict", errors.New(event.Error))
+					_ = h.recordRealtimeTerminalFailureWithExtra(ctx, providerCallID, sessionID, streamSID, "openai_response_conflict", errors.New("openai realtime request failed"), diagnostics)
 					closeStream("openai_response_conflict")
 					return
 				}
-				_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "openai_event", errors.New(event.Error))
+				_ = h.recordRealtimeTerminalFailureWithExtra(ctx, providerCallID, sessionID, streamSID, "openai_event", errors.New("openai realtime request failed"), diagnostics)
 				closeStream("openai_event_error")
 				return
 			}
@@ -1653,6 +1661,17 @@ type streamingSpeechEvent struct {
 func isActiveRealtimeResponseConflict(event voice.RealtimeEvent) bool {
 	return strings.EqualFold(strings.TrimSpace(event.ErrorCode), "conversation_already_has_active_response") ||
 		strings.Contains(strings.ToLower(event.Error), "conversation_already_has_active_response")
+}
+
+func realtimeProviderErrorDiagnostics(event voice.RealtimeEvent) map[string]string {
+	diagnostics := map[string]string{}
+	if value := safeRealtimeDiagnosticValue(event.ErrorCode); value != "" {
+		diagnostics["error_code"] = value
+	}
+	if value := safeRealtimeDiagnosticValue(event.ErrorParam); value != "" {
+		diagnostics["error_param"] = value
+	}
+	return diagnostics
 }
 
 func sameSpokenReply(expected string, actual string) bool {
@@ -2009,7 +2028,8 @@ func (h *Handler) recordRealtimeTerminalFailureWithExtra(ctx context.Context, pr
 		"terminal":   "true",
 	}
 	if err != nil {
-		payload["error"] = err.Error()
+		payload["error"] = "Realtime operation failed."
+		appendSafeProviderDiagnostics(payload, err)
 	}
 	for key, value := range extra {
 		key = strings.TrimSpace(key)
@@ -2030,9 +2050,44 @@ func (h *Handler) recordRealtimeFailureWithTerminal(ctx context.Context, provide
 		payload["terminal"] = "true"
 	}
 	if err != nil {
-		payload["error"] = err.Error()
+		payload["error"] = "Realtime operation failed."
+		appendSafeProviderDiagnostics(payload, err)
 	}
 	return h.service.RecordRealtimeEvent(ctx, voice.ProviderTwilio, providerCallID, sessionID, voice.EventRealtimeFailed, payload)
+}
+
+func appendSafeProviderDiagnostics(payload map[string]string, err error) {
+	if err == nil {
+		return
+	}
+	var diagnosticErr interface {
+		SafeDiagnostics() map[string]string
+	}
+	if !errors.As(err, &diagnosticErr) {
+		return
+	}
+	for key, value := range diagnosticErr.SafeDiagnostics() {
+		switch key {
+		case "provider", "failure_stage", "http_status", "http_status_class", "request_id", "error_type", "error_code", "error_param", "schema_fingerprint", "circuit_open":
+			if value = safeRealtimeDiagnosticValue(value); value != "" {
+				payload[key] = value
+			}
+		}
+	}
+}
+
+func safeRealtimeDiagnosticValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 128 {
+		return ""
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("._:-", r) {
+			continue
+		}
+		return ""
+	}
+	return value
 }
 
 func (h *Handler) streamAdapter(ctx context.Context, providerCallID string) (*Adapter, error) {

@@ -310,7 +310,7 @@ func (s *realtimeSession) readLoop() {
 		if err != nil {
 			if !errors.Is(err, websocket.ErrCloseSent) {
 				s.markReady(err)
-				s.emit(voice.RealtimeEvent{Type: voice.RealtimeEventError, Error: err.Error()})
+				s.emit(voice.RealtimeEvent{Type: voice.RealtimeEventError, Error: "openai realtime transport failed"})
 			}
 			return
 		}
@@ -414,7 +414,7 @@ func parseRealtimeEvent(raw []byte) voice.RealtimeEvent {
 	case "session.updated":
 		return voice.RealtimeEvent{Type: voice.RealtimeEventSessionUpdated}
 	case "error":
-		return voice.RealtimeEvent{Type: voice.RealtimeEventError, ErrorCode: strings.TrimSpace(event.Error.Code), ErrorParam: strings.TrimSpace(event.Error.Param), Error: realtimeErrorMessage(event.Error.Type, event.Error.Code, event.Error.Param, event.Error.Message)}
+		return voice.RealtimeEvent{Type: voice.RealtimeEventError, ErrorCode: safeRealtimeDiagnosticValue(event.Error.Code), ErrorParam: safeRealtimeDiagnosticValue(event.Error.Param), Error: realtimeErrorMessage(event.Error.Type, event.Error.Code, event.Error.Param, event.Error.Message)}
 	default:
 		return voice.RealtimeEvent{}
 	}
@@ -429,14 +429,27 @@ func realtimeRequestID(metadata map[string]any) string {
 }
 
 func realtimeErrorMessage(errorType string, code string, param string, message string) string {
-	parts := []string{}
-	for _, part := range []string{errorType, code, param, message} {
-		part = strings.TrimSpace(part)
-		if part != "" {
+	parts := []string{"openai realtime request failed"}
+	for _, part := range []string{errorType, code, param} {
+		if part = safeRealtimeDiagnosticValue(part); part != "" {
 			parts = append(parts, part)
 		}
 	}
 	return strings.Join(parts, ": ")
+}
+
+func safeRealtimeDiagnosticValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 128 {
+		return ""
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("._:-", r) {
+			continue
+		}
+		return ""
+	}
+	return value
 }
 
 func realtimeHeaders(cfg config.OpenAIVoiceConfig) http.Header {

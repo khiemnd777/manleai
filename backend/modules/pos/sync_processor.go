@@ -55,12 +55,16 @@ func (p *SyncProcessor) processOne(ctx context.Context, job SyncJob) error {
 	}
 	err = p.runProviderWrite(ctx, job)
 	if err != nil {
-		message := err.Error()
+		code := ErrorUnknown
+		if errors.Is(err, ErrPOSSyncUnsupported) {
+			code = ErrorWriteUnsupported
+		}
+		message := SafeErrorMessage(code)
 		_ = p.store.LogError(ctx, POSError{
 			SalonID:      job.SalonID,
 			Provider:     job.Provider,
 			Operation:    job.Operation,
-			ErrorCode:    ErrorUnknown,
+			ErrorCode:    code,
 			ErrorMessage: message,
 		})
 		if completeErr := p.store.CompleteSyncLog(ctx, logID, SyncJobStatusFailed, message); completeErr != nil {

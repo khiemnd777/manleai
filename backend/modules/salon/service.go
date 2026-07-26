@@ -156,14 +156,9 @@ func validCreateOperationKey(value string) bool {
 }
 
 func validSchedulingAuthority(value string) bool {
-	switch value {
-	case booking.SchedulingAuthorityOwnerManual,
-		booking.SchedulingAuthorityManleAICalendar,
-		booking.SchedulingAuthorityExternalProvider:
-		return true
-	default:
-		return false
-	}
+	// Tenant onboarding creates only the safe request-only authority. Platform
+	// Operations owns every later authority preview and commit.
+	return value == booking.SchedulingAuthorityOwnerManual
 }
 
 func createSalonPayloadFingerprint(req CreateSalonRequest) (string, error) {

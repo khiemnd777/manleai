@@ -24,7 +24,10 @@ func NewRepository(db *sql.DB) *Repository {
 func (r *Repository) FindByOperationKey(ctx context.Context, salonID string, ownerUserID string, operationKey string) (*SwitchRun, error) {
 	return scanSwitchRun(r.db.QueryRowContext(ctx, switchRunSelect+`
 		WHERE run.salon_id::text = $1
-		  AND salon.owner_user_id::text = $2
+		  AND (
+		      public.has_active_tenant_membership(salon.id, $2::uuid)
+		      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'technical.write')
+		  )
 		  AND run.operation_key = $3
 	`, salonID, ownerUserID, operationKey))
 }
@@ -36,7 +39,10 @@ func (r *Repository) CurrentAuthority(ctx context.Context, salonID string, owner
 		FROM salon_settings settings
 		JOIN salons salon ON salon.id = settings.salon_id
 		WHERE settings.salon_id::text = $1
-		  AND salon.owner_user_id::text = $2
+		  AND (
+		      public.has_active_tenant_membership(salon.id, $2::uuid)
+		      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'technical.write')
+		  )
 	`, salonID, ownerUserID).Scan(&state.Authority, &state.Version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return state, ErrNotFound
@@ -51,7 +57,10 @@ func (r *Repository) EligibleServiceCount(ctx context.Context, salonID string, o
 		FROM services service
 		JOIN salons salon ON salon.id = service.salon_id
 		WHERE service.salon_id::text = $1
-		  AND salon.owner_user_id::text = $2
+		  AND (
+		      public.has_active_tenant_membership(salon.id, $2::uuid)
+		      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'technical.write')
+		  )
 		  AND service.active
 		  AND service.ai_bookable
 		  AND service.archived_at IS NULL
@@ -62,7 +71,16 @@ func (r *Repository) EligibleServiceCount(ctx context.Context, salonID string, o
 
 func (r *Repository) BookingMode(ctx context.Context, salonID string, ownerUserID string) (string, error) {
 	var mode string
-	err := r.db.QueryRowContext(ctx, `SELECT settings.booking_mode FROM salon_settings settings JOIN salons salon ON salon.id=settings.salon_id WHERE settings.salon_id::text=$1 AND salon.owner_user_id::text=$2`, salonID, ownerUserID).Scan(&mode)
+	err := r.db.QueryRowContext(ctx, `
+		SELECT settings.booking_mode
+		FROM salon_settings settings
+		JOIN salons salon ON salon.id=settings.salon_id
+		WHERE settings.salon_id::text=$1
+		  AND (
+		      public.has_active_tenant_membership(salon.id, $2::uuid)
+		      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'technical.write')
+		  )
+	`, salonID, ownerUserID).Scan(&mode)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
@@ -81,7 +99,10 @@ func (r *Repository) CreateOrReplayPreview(ctx context.Context, input persistPre
 	}
 	existing, err := scanSwitchRun(tx.QueryRowContext(ctx, switchRunSelect+`
 		WHERE run.salon_id::text = $1
-		  AND salon.owner_user_id::text = $2
+		  AND (
+		      public.has_active_tenant_membership(salon.id, $2::uuid)
+		      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'technical.write')
+		  )
 		  AND run.operation_key = $3
 		FOR UPDATE OF run
 	`, input.SalonID, input.OwnerUserID, input.OperationKey))
@@ -104,7 +125,10 @@ func (r *Repository) CreateOrReplayPreview(ctx context.Context, input persistPre
 		FROM salon_settings settings
 		JOIN salons salon ON salon.id = settings.salon_id
 		WHERE settings.salon_id::text = $1
-		  AND salon.owner_user_id::text = $2
+		  AND (
+		      public.has_active_tenant_membership(salon.id, $2::uuid)
+		      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'technical.write')
+		  )
 		FOR SHARE OF settings, salon
 	`, input.SalonID, input.OwnerUserID).Scan(&current.Authority, &current.Version)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -172,7 +196,10 @@ func (r *Repository) CreateOrReplayPreview(ctx context.Context, input persistPre
 func (r *Repository) Latest(ctx context.Context, salonID string, ownerUserID string) (*SwitchRun, error) {
 	return scanSwitchRun(r.db.QueryRowContext(ctx, switchRunSelect+`
 		WHERE run.salon_id::text = $1
-		  AND salon.owner_user_id::text = $2
+		  AND (
+		      public.has_active_tenant_membership(salon.id, $2::uuid)
+		      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'technical.read')
+		  )
 		ORDER BY run.created_at DESC, run.id DESC
 		LIMIT 1
 	`, salonID, ownerUserID))
@@ -181,7 +208,10 @@ func (r *Repository) Latest(ctx context.Context, salonID string, ownerUserID str
 func (r *Repository) Get(ctx context.Context, salonID string, ownerUserID string, runID string) (*SwitchRun, error) {
 	return scanSwitchRun(r.db.QueryRowContext(ctx, switchRunSelect+`
 		WHERE run.salon_id::text = $1
-		  AND salon.owner_user_id::text = $2
+		  AND (
+		      public.has_active_tenant_membership(salon.id, $2::uuid)
+		      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'technical.read')
+		  )
 		  AND run.id::text = $3
 	`, salonID, ownerUserID, runID))
 }
@@ -193,7 +223,11 @@ func (r *Repository) ReplayCommit(ctx context.Context, salonID string, ownerUser
 		FROM scheduling_authority_switch_events event
 		JOIN scheduling_authority_switch_runs run ON run.id = event.switch_run_id AND run.salon_id = event.salon_id
 		JOIN salons salon ON salon.id = run.salon_id
-		WHERE run.id::text = $1 AND run.salon_id::text = $2 AND salon.owner_user_id::text = $3
+		WHERE run.id::text = $1 AND run.salon_id::text = $2
+		  AND (
+		      public.has_active_tenant_membership(salon.id, $3::uuid)
+		      OR public.has_platform_salon_capability(salon.id, $3::uuid, 'technical.write')
+		  )
 		  AND event.action_key = $4 AND event.event_type = 'commit'
 	`, runID, salonID, ownerUserID, actionKey).Scan(&storedFingerprint)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -219,7 +253,11 @@ func (r *Repository) Commit(ctx context.Context, input commitInput) (*SwitchRun,
 		return nil, false, err
 	}
 	run, err := scanSwitchRun(tx.QueryRowContext(ctx, switchRunSelect+`
-		WHERE run.id::text = $1 AND run.salon_id::text = $2 AND salon.owner_user_id::text = $3
+		WHERE run.id::text = $1 AND run.salon_id::text = $2
+		  AND (
+		      public.has_active_tenant_membership(salon.id, $3::uuid)
+		      OR public.has_platform_salon_capability(salon.id, $3::uuid, 'technical.write')
+		  )
 		FOR UPDATE OF run
 	`, input.RunID, input.SalonID, input.OwnerUserID))
 	if err != nil {
@@ -246,7 +284,11 @@ func (r *Repository) Commit(ctx context.Context, input commitInput) (*SwitchRun,
 	err = tx.QueryRowContext(ctx, `
 		SELECT settings.scheduling_authority, settings.scheduling_authority_version
 		FROM salon_settings settings JOIN salons salon ON salon.id = settings.salon_id
-		WHERE settings.salon_id::text = $1 AND salon.owner_user_id::text = $2
+		WHERE settings.salon_id::text = $1
+		  AND (
+		      public.has_active_tenant_membership(salon.id, $2::uuid)
+		      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'technical.write')
+		  )
 		FOR UPDATE OF settings, salon
 	`, input.SalonID, input.OwnerUserID).Scan(&current.Authority, &current.Version)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -353,7 +395,10 @@ func classifySwitchConstraint(err error) error {
 func getSwitchRunTx(ctx context.Context, tx *sql.Tx, salonID string, ownerUserID string, runID string) (*SwitchRun, error) {
 	return scanSwitchRun(tx.QueryRowContext(ctx, switchRunSelect+`
 		WHERE run.salon_id::text = $1
-		  AND salon.owner_user_id::text = $2
+		  AND (
+		      public.has_active_tenant_membership(salon.id, $2::uuid)
+		      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'technical.write')
+		  )
 		  AND run.id::text = $3
 	`, salonID, ownerUserID, runID))
 }

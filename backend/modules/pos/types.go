@@ -26,6 +26,7 @@ const (
 	ErrorBookingConflict      = "POS_BOOKING_CONFLICT"
 	ErrorRateLimited          = "POS_RATE_LIMITED"
 	ErrorTimeout              = "POS_TIMEOUT"
+	ErrorWriteUnsupported     = "POS_WRITE_UNSUPPORTED"
 	ErrorUnknown              = "POS_UNKNOWN_ERROR"
 	ErrorCustomerCreateFailed = "POS_CUSTOMER_CREATE_FAILED"
 
@@ -131,6 +132,37 @@ const (
 	SwitchMatchStatusConfirmed = "confirmed"
 	SwitchMatchStatusSkipped   = "skipped"
 )
+
+// SafeErrorMessage maps a stable POS error code to text that is safe to
+// persist and return from authenticated operational APIs. Provider response
+// bodies and error details are deliberately excluded because they may contain
+// credentials, customer data, or other untrusted content.
+func SafeErrorMessage(code string) string {
+	switch strings.TrimSpace(code) {
+	case ErrorTokenExpired:
+		return "The POS access token is expired or unauthorized. Reconnect the POS account."
+	case ErrorPermissionDenied:
+		return "The POS provider rejected the operation because required permissions are missing."
+	case ErrorLocationNotSelected:
+		return "A POS location has not been selected for this salon."
+	case ErrorAvailabilityFailed:
+		return "The POS provider could not check appointment availability."
+	case ErrorBookingFailed:
+		return "The POS provider could not complete the appointment operation."
+	case ErrorBookingConflict:
+		return "The POS provider rejected the operation because the appointment conflicts with current provider state."
+	case ErrorRateLimited:
+		return "The POS provider rate-limited the operation. Try again later."
+	case ErrorTimeout:
+		return "The POS provider operation timed out."
+	case ErrorWriteUnsupported:
+		return "The connected POS integration does not support this write operation."
+	case ErrorCustomerCreateFailed:
+		return "The POS provider could not create the customer record."
+	default:
+		return "The POS provider operation failed."
+	}
+}
 
 type WriteOutcome string
 
@@ -912,6 +944,20 @@ type SyncJobMutation struct {
 	EntityID    string
 	Operation   string
 	MaxAttempts int
+}
+
+type AIRuntimeState struct {
+	Enabled bool  `json:"enabled"`
+	Version int64 `json:"version"`
+}
+
+type AIRuntimeMutation struct {
+	SalonID            string
+	ActorUserID        string
+	ActionKey          string
+	RequestFingerprint string
+	ExpectedVersion    int64
+	Enabled            bool
 }
 
 type OAuthState struct {

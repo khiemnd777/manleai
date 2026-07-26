@@ -81,10 +81,10 @@ Salon:
 - `POST /api/salons/:id/owner-corrections/:correction_id/apply`
 - `POST /api/salons/:id/owner-corrections/:correction_id/dismiss`
 - `POST /api/salons/:id/training/evaluate`
-- `GET /api/salons/:id/integration-configs`
-- `PUT /api/salons/:id/integration-configs/square`
-- `PUT /api/salons/:id/integration-configs/twilio`
-- `PUT /api/salons/:id/integration-configs/openai`
+- `GET /api/platform/tenants/:tenant_id/technical/integration-configs`
+- `PUT /api/platform/tenants/:tenant_id/technical/integration-configs/square`
+- `PUT /api/platform/tenants/:tenant_id/technical/integration-configs/twilio`
+- `PUT /api/platform/tenants/:tenant_id/technical/integration-configs/openai`
 - `GET /api/salons/:id/configuration-export`
 - `POST /api/salons/:id/configuration-import/preview`
 - `POST /api/salons/:id/configuration-import`
@@ -97,22 +97,21 @@ Salon:
 
 Public:
 
-- `GET /api/public/salon`
 - `GET /api/public/salons/:slug`
 - `GET /api/voice/audio/:id`
 
 Square integration:
 
-- `GET /api/integrations/square/connect-url`
 - `GET /api/integrations/square/callback`
-- `GET /api/integrations/square/status`
-- `GET /api/integrations/square/locations`
-- `POST /api/integrations/square/select-location`
-- `POST /api/integrations/square/sync`
-- `POST /api/integrations/square/test-booking`
-- `POST /api/integrations/square/cancel-test-booking`
-- `POST /api/integrations/square/enable-ai-booking`
-- `POST /api/integrations/square/disable-ai-booking`
+- `POST /api/integrations/square/webhook`
+- `GET /api/platform/tenants/:tenant_id/technical/square/connect-url`
+- `GET /api/platform/tenants/:tenant_id/technical/square/status`
+- `GET /api/platform/tenants/:tenant_id/technical/square/locations`
+- `POST /api/platform/tenants/:tenant_id/technical/square/select-location`
+- `POST /api/platform/tenants/:tenant_id/technical/square/sync`
+- `POST /api/platform/tenants/:tenant_id/technical/square/ai-booking/enable`
+- `POST /api/platform/tenants/:tenant_id/technical/square/ai-booking/disable`
+- `GET /api/salons/:id/business/external-scheduling-readiness`
 
 Twilio voice:
 

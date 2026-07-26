@@ -4,7 +4,6 @@ import {
   CalendarDays,
   GraduationCap,
   Home,
-  Link2,
   LogOut,
   Menu,
   PhoneCall,
@@ -20,6 +19,7 @@ import { useEffect, useState } from "react";
 import { logoutSession } from "@/lib/api/client";
 import { cn } from "@/lib/utils/cn";
 import { Button } from "@/components/ui/button";
+import { useTenantSalon } from "@/components/layout/tenant-salon-context";
 
 const navItems = [
   { label: "Dashboard", href: "/dashboard", icon: Home },
@@ -29,8 +29,7 @@ const navItems = [
   { label: "Services", href: "/dashboard/services", icon: Sparkles },
   { label: "Staff", href: "/dashboard/staff", icon: Users },
   { label: "AI Training", href: "/dashboard/training", icon: GraduationCap },
-  { label: "Integrations", href: "/dashboard/integrations", icon: Link2 },
-  { label: "Settings", href: "/dashboard/settings", icon: Settings },
+  { label: "Business settings", href: "/dashboard/settings", icon: Settings },
   { label: "Billing", href: "/dashboard/billing", icon: WalletCards }
 ];
 
@@ -68,6 +67,7 @@ function NavigationLinks({
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
+  const tenant = useTenantSalon();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   function logout() {
@@ -112,7 +112,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
             <div>
               <div className="text-sm font-bold text-ink">Salon Receptionist</div>
-              <div className="text-xs text-muted">Owner-first production</div>
+              <div className="text-xs text-muted">Tenant Business workspace</div>
             </div>
           </Link>
 
@@ -157,7 +157,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 </div>
                 <div className="min-w-0">
                   <div className="truncate text-sm font-bold text-ink">Salon Receptionist</div>
-                  <div className="truncate text-xs text-muted">Owner-first production</div>
+                  <div className="truncate text-xs text-muted">Tenant Business workspace</div>
                 </div>
               </Link>
               <Button
@@ -172,18 +172,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </Button>
             </div>
 
-            <Link
-              href="/dashboard/integrations"
-              className="mt-6"
-              onClick={() => setMobileMenuOpen(false)}
-            >
-              <Button type="button" variant="secondary" className="w-full">
-                <Link2 className="h-4 w-4" />
-                Square setup
-              </Button>
-            </Link>
-
-            <nav className="mt-6 space-y-1">
+            <nav className="mt-8 space-y-1">
               <NavigationLinks pathname={pathname} onNavigate={() => setMobileMenuOpen(false)} />
             </nav>
 
@@ -221,16 +210,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <Menu className="h-4 w-4" />
               </Button>
               <div className="min-w-0">
-                <div className="truncate text-sm font-semibold text-ink">AI Phone Receptionist</div>
-                <div className="truncate text-xs text-muted">Nail salon owner dashboard</div>
+                <div className="truncate text-sm font-semibold text-ink">{tenant.activeSalon?.name || "Tenant Business workspace"}</div>
+                <div className="truncate text-xs text-muted">Business operations only</div>
               </div>
             </div>
-            <Link href="/dashboard/integrations" className="w-full sm:w-auto">
-              <Button type="button" variant="secondary" className="w-full sm:w-auto">
-                <Link2 className="h-4 w-4" />
-                Square setup
-              </Button>
-            </Link>
+            {tenant.salons.length > 1 ? <label className="w-full sm:w-auto"><span className="sr-only">Active salon</span><select className="field min-w-56" value={tenant.activeSalonID} onChange={(event) => tenant.setActiveSalonID(event.target.value)}>{tenant.salons.map((salon) => <option key={salon.id} value={salon.id}>{salon.name}</option>)}</select></label> : null}
           </div>
         </header>
         <main className="mx-auto max-w-7xl px-5 py-6">{children}</main>

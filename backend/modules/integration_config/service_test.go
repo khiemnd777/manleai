@@ -2,6 +2,7 @@ package integrationconfig
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -10,6 +11,56 @@ import (
 	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/internal/encryption"
 )
+
+func TestIntegrationConfigResponseJSONNeverSerializesProviderSecrets(t *testing.T) {
+	service := &Service{
+		cipher: &fakeSecretCipher{decryptPlaintext: `{"client_secret":"square-secret-value","webhook_signature_key":"square-webhook-secret-value","auth_token":"twilio-auth-secret","account_sid":"AC00000000000000000000000000000000","api_key":"openai-secret-value"}`},
+		cfg:    config.Config{},
+	}
+	response := IntegrationConfigsResponse{
+		Square: service.squareResponse(&StoredConfig{
+			Provider: ProviderSquare, Enabled: true, SecretsEncrypted: "ciphertext",
+			Settings: map[string]string{"client_id": "square-client-id", "redirect_url": "https://api.example.com/square/callback"},
+		}),
+		Twilio: service.twilioResponse(&StoredConfig{
+			Provider: ProviderTwilio, Enabled: true, SecretsEncrypted: "ciphertext",
+			Settings: map[string]string{
+				"public_base_url": "https://api.example.com", "owner_sms_destination": "+15555550123",
+				"messaging_service_sid": "MG11111111111111111111111111111111", "sender_phone": "+15555550456",
+			},
+		}),
+		OpenAI: service.openAIResponse(&StoredConfig{
+			Provider: ProviderOpenAI, Enabled: true, SecretsEncrypted: "ciphertext",
+			Settings: map[string]string{"base_url": "https://api.openai.com/v1", "reply_model": "gpt-safe"},
+		}),
+	}
+
+	raw, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("Marshal response: %v", err)
+	}
+	serialized := string(raw)
+	for _, secret := range []string{
+		"square-secret-value", "square-webhook-secret-value", "twilio-auth-secret",
+		"AC00000000000000000000000000000000", "openai-secret-value",
+		"+15555550123", "MG11111111111111111111111111111111", "+15555550456",
+	} {
+		if strings.Contains(serialized, secret) {
+			t.Fatalf("serialized response leaked %q: %s", secret, serialized)
+		}
+	}
+	for _, secretField := range []string{
+		`"client_secret":`, `"webhook_signature_key":`, `"auth_token":`, `"account_sid":`,
+		`"api_key":`, `"owner_sms_destination":`, `"messaging_service_sid":`, `"sender_phone":`,
+		`"clear_client_secret":`, `"clear_webhook_signature_key":`, `"clear_auth_token":`,
+		`"clear_account_sid":`, `"clear_api_key":`, `"clear_owner_sms_destination":`,
+		`"clear_messaging_service_sid":`, `"clear_sender_phone":`,
+	} {
+		if strings.Contains(serialized, secretField) {
+			t.Fatalf("serialized response exposed write-only field %s: %s", secretField, serialized)
+		}
+	}
+}
 
 func TestSquareResponseMasksEncryptedClientSecret(t *testing.T) {
 	cipher, err := encryption.NewTokenCipher("test-secret")
@@ -119,6 +170,36 @@ func TestUpdateSquarePreservesCiphertextWhenSecretsAreUnchanged(t *testing.T) {
 	}
 	if store.upsertCalls != 1 || store.upserted.SecretsEncrypted != "existing-ciphertext" {
 		t.Fatalf("persisted config = %#v calls=%d, want preserved ciphertext", store.upserted, store.upsertCalls)
+	}
+}
+
+func TestPlatformTechnicalMutationPreservesActualActorAndVersionFence(t *testing.T) {
+	store := &fakeIntegrationConfigStore{}
+	service := &Service{repo: store, cipher: &fakeSecretCipher{}, cfg: config.Config{Square: config.SquareConfig{Environment: "sandbox"}}}
+
+	response, err := service.UpdateSquareForPlatform(context.Background(), "salon_1", "platform_ops_1", UpdateSquareSettingsRequest{
+		TechnicalMutationControl: TechnicalMutationControl{ActionKey: "square-settings-1", ExpectedVersion: 4},
+		Environment:              "sandbox",
+		ClientID:                 "application-id",
+		RedirectURL:              "https://api.example.com/api/integrations/square/callback",
+		APIVersion:               "2026-05-20",
+	})
+	if err != nil {
+		t.Fatalf("UpdateSquareForPlatform: %v", err)
+	}
+	if store.controlledCalls != 1 || store.command.ActorUserID != "platform_ops_1" || store.command.ActionKey != "square-settings-1" || store.command.ExpectedVersion != 4 {
+		t.Fatalf("controlled command/calls = %#v/%d", store.command, store.controlledCalls)
+	}
+	if response.Version != 5 || response.Replayed {
+		t.Fatalf("response = %#v, want version 5 non-replay", response)
+	}
+}
+
+func TestPlatformTechnicalMutationRequiresActionIdentity(t *testing.T) {
+	service := &Service{repo: &fakeIntegrationConfigStore{}, cipher: &fakeSecretCipher{}}
+	_, err := service.UpdateOpenAIForPlatform(context.Background(), "salon_1", "platform_ops_1", UpdateOpenAISettingsRequest{})
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("error = %v, want validation", err)
 	}
 }
 
@@ -571,10 +652,22 @@ func TestResolveStoredTwilioAuthTokenDoesNotFallBackWhenStoredConfigMissing(t *t
 }
 
 type fakeIntegrationConfigStore struct {
-	existing    *StoredConfig
-	getErr      error
-	upserted    StoredConfig
-	upsertCalls int
+	existing         *StoredConfig
+	getErr           error
+	upserted         StoredConfig
+	upsertCalls      int
+	controlledCalls  int
+	command          TechnicalMutationCommand
+	controlledReplay bool
+}
+
+func (f *fakeIntegrationConfigStore) UpsertControlled(_ context.Context, cfg StoredConfig, command TechnicalMutationCommand) (*StoredConfig, bool, error) {
+	f.controlledCalls++
+	f.upserted = cfg
+	f.command = command
+	copyValue := cfg
+	copyValue.Version = command.ExpectedVersion + 1
+	return &copyValue, f.controlledReplay, nil
 }
 
 func (f *fakeIntegrationConfigStore) EnsureSalonOwner(context.Context, string, string) error {
@@ -582,6 +675,10 @@ func (f *fakeIntegrationConfigStore) EnsureSalonOwner(context.Context, string, s
 }
 
 func (f *fakeIntegrationConfigStore) ListForOwner(context.Context, string, string) ([]StoredConfig, error) {
+	return nil, nil
+}
+
+func (f *fakeIntegrationConfigStore) ListForSalon(context.Context, string) ([]StoredConfig, error) {
 	return nil, nil
 }
 

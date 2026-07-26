@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -175,8 +176,11 @@ func TestStreamStatusWebhookRecordsRealtimeFailure(t *testing.T) {
 	if event.EventType != voice.EventRealtimeFailed {
 		t.Fatalf("event type = %q, want %q", event.EventType, voice.EventRealtimeFailed)
 	}
-	if event.Payload["StreamError"] != "Connection reset without closing handshake" || event.Payload["stage"] != "twilio_stream_status" || event.Payload["terminal"] != "true" {
+	if event.Payload["stream_event"] != "stream-error" || event.Payload["stream_sid"] != "MZ123" || event.Payload["stage"] != "twilio_stream_status" || event.Payload["terminal"] != "true" || event.Payload["error_code"] != "TWILIO_STREAM_ERROR" {
 		t.Fatalf("payload = %#v", event.Payload)
+	}
+	if event.Payload["StreamError"] != "" || strings.Contains(fmt.Sprint(event.Payload), "Connection reset") {
+		t.Fatalf("payload leaked untrusted Twilio error detail: %#v", event.Payload)
 	}
 }
 
@@ -1613,7 +1617,10 @@ func TestForwardRealtimeEventsFallsBackForActiveResponseConflict(t *testing.T) {
 
 	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventTranscriptDone, ItemID: "item_1", Transcript: "one p.m."}
 	_ = waitForSpeak(t, realtime)
-	realtime.events <- voice.RealtimeEvent{Type: voice.RealtimeEventError, Error: "invalid_request_error: conversation_already_has_active_response: Conversation already has an active response in progress: resp_123."}
+	realtime.events <- voice.RealtimeEvent{
+		Type: voice.RealtimeEventError, ErrorCode: "conversation_already_has_active_response",
+		ErrorParam: "response", Error: "private caller wording and provider response body",
+	}
 
 	if got := waitForClose(t, closed); got != "openai_response_conflict" {
 		t.Fatalf("close reason = %q", got)
@@ -1623,8 +1630,11 @@ func TestForwardRealtimeEventsFallsBackForActiveResponseConflict(t *testing.T) {
 		t.Fatalf("expected recoverable active-response conflict to be recorded")
 	}
 	event := events[len(events)-1]
-	if event.EventType != voice.EventRealtimeFailed || event.Payload["stage"] != "openai_response_conflict" || event.Payload["terminal"] != "true" || !strings.Contains(event.Payload["error"], "conversation_already_has_active_response") {
+	if event.EventType != voice.EventRealtimeFailed || event.Payload["stage"] != "openai_response_conflict" || event.Payload["terminal"] != "true" || event.Payload["error_code"] != "conversation_already_has_active_response" || event.Payload["error"] != "Realtime operation failed." {
 		t.Fatalf("event = %#v", event)
+	}
+	if strings.Contains(fmt.Sprint(event.Payload), "private caller wording") {
+		t.Fatalf("event leaked OpenAI response detail: %#v", event)
 	}
 }
 

@@ -3,10 +3,12 @@ package voice_twilio
 import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
+	"github.com/manleai/ai-receptionist/internal/middleware"
 )
 
 func RegisterRoutes(api fiber.Router, handler *Handler) {
-	group := api.Group("/voice/twilio")
+	group := api.Group("/voice/twilio", middleware.DatabaseScope(databasecontext.ScopeProvider))
 	group.Post("/incoming", handler.Incoming)
 	group.Post("/turn", handler.Turn)
 	group.Post("/recording", handler.Recording)

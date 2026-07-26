@@ -1,19 +1,32 @@
 package training
 
 import (
+	"context"
 	"errors"
+	"strconv"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/manleai/ai-receptionist/internal/middleware"
 	"github.com/manleai/ai-receptionist/internal/respond"
+	tenantruntime "github.com/manleai/ai-receptionist/modules/tenant_runtime"
 )
 
 type Handler struct {
 	service *Service
+	limiter tenantRuntimeLimiter
+}
+
+type tenantRuntimeLimiter interface {
+	AllowTenant(context.Context, middleware.ActorContext, string, string, int) (tenantruntime.Decision, error)
 }
 
 func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
+}
+
+func (h *Handler) SetTenantRuntimeLimiter(limiter tenantRuntimeLimiter) *Handler {
+	h.limiter = limiter
+	return h
 }
 
 func (h *Handler) ListKnowledge(c *fiber.Ctx) error {
@@ -112,6 +125,19 @@ func (h *Handler) Evaluate(c *fiber.Ctx) error {
 	var req EvaluateRequest
 	if err := c.BodyParser(&req); err != nil {
 		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
+	}
+	if h.limiter != nil {
+		decision, limitErr := h.limiter.AllowTenant(c.UserContext(), middleware.Actor(c), c.Params("id"), tenantruntime.MetricExpensiveRequest, 1)
+		if errors.Is(limitErr, tenantruntime.ErrQuotaExceeded) {
+			c.Set(fiber.HeaderRetryAfter, strconv.Itoa(decision.RetryAfterSec))
+			return respond.Error(c, fiber.StatusTooManyRequests, "TENANT_QUOTA_EXCEEDED", "This salon has reached its current training evaluation limit. Retry later.")
+		}
+		if errors.Is(limitErr, tenantruntime.ErrForbidden) {
+			return respond.Error(c, fiber.StatusForbidden, "TENANT_ACCESS_FORBIDDEN", "This salon is not available to the current tenant account.")
+		}
+		if limitErr != nil {
+			return respond.Error(c, fiber.StatusServiceUnavailable, "TENANT_QUOTA_UNAVAILABLE", "Tenant request protection is temporarily unavailable.")
+		}
 	}
 	result, err := h.service.Evaluate(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
 	if errors.Is(err, ErrValidation) {

@@ -14,6 +14,7 @@ import {
   newSchedulingAuthorityActionKey,
   previewSchedulingAuthoritySwitch
 } from "@/lib/api/scheduling-authority-switches";
+import type { SchedulingAuthoritySurface } from "@/lib/api/scheduling-authority-switches";
 import type { SchedulingAuthority, SchedulingAuthoritySwitchRun } from "@/types/api";
 
 const authorityOptions: Array<{ value: SchedulingAuthority; label: string; description: string }> = [
@@ -33,12 +34,14 @@ export function SchedulingAuthoritySwitch({
   salonID,
   currentAuthority,
   currentVersion,
-  onReload
+  onReload,
+  surface = "tenant"
 }: {
   salonID: string;
   currentAuthority: SchedulingAuthority;
   currentVersion: number;
   onReload: () => Promise<void>;
+  surface?: SchedulingAuthoritySurface;
 }) {
   const [selected, setSelected] = useState<SchedulingAuthority>(currentAuthority);
   const [latest, setLatest] = useState<SchedulingAuthoritySwitchRun | null>(null);
@@ -60,7 +63,7 @@ export function SchedulingAuthoritySwitch({
   useEffect(() => {
     let active = true;
     setLoading(true);
-    latestSchedulingAuthoritySwitch(salonID)
+    latestSchedulingAuthoritySwitch(salonID, surface)
       .then((response) => {
         if (active) setLatest(response.scheduling_authority_switch);
       })
@@ -73,7 +76,7 @@ export function SchedulingAuthoritySwitch({
         if (active) setLoading(false);
       });
     return () => { active = false; };
-  }, [salonID]);
+  }, [salonID, surface]);
 
   const rollbackOf = useMemo(() => {
     if (!latest || latest.status !== "committed") return "";
@@ -94,7 +97,7 @@ export function SchedulingAuthoritySwitch({
         target_scheduling_authority: selected,
         expected_source_authority_version: currentVersion,
         ...(rollbackOf ? { rollback_of_switch_run_id: rollbackOf } : {})
-      });
+      }, surface);
       setPreview(response.scheduling_authority_switch);
       setLatest(response.scheduling_authority_switch);
       setCommitKey(newSchedulingAuthorityActionKey("commit"));
@@ -112,7 +115,7 @@ export function SchedulingAuthoritySwitch({
     setBusy("commit");
     setError("");
     try {
-      const response = await commitSchedulingAuthoritySwitch(salonID, preview.id, actionKey);
+      const response = await commitSchedulingAuthoritySwitch(salonID, preview.id, actionKey, surface);
       const committed = response.scheduling_authority_switch;
       if (committed.status !== "committed") {
         setError("The backend did not return committed authority-switch evidence. Reload before taking another action.");
@@ -149,7 +152,7 @@ export function SchedulingAuthoritySwitch({
     setCommitKey("");
     try {
       await onReload();
-      const response = await latestSchedulingAuthoritySwitch(salonID).catch((caught: unknown) => {
+      const response = await latestSchedulingAuthoritySwitch(salonID, surface).catch((caught: unknown) => {
         if (caught instanceof RequestError && caught.status === 404) return null;
         throw caught;
       });

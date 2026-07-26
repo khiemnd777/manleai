@@ -2,6 +2,12 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer components {
+  .field {
+    @apply h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none transition focus:border-brand disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500;
+  }
+}
+
 :root {
   color-scheme: light;
   background: #f5f7fb;
@@ -38,4 +44,3 @@ textarea {
   outline: 3px solid rgba(15, 118, 110, 0.28);
   outline-offset: 2px;
 }
-

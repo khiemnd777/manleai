@@ -17,8 +17,8 @@ confirming executors are Square-backed `external_provider` and Phase 4C
 `manleai_calendar` for structured multi-guest, multi-service staff-only and
 pooled create plus whole-root internal reschedule/cancel. Phase 2 also
 implements `owner_manual` as a request-only, pending-owner-review executor with
-no appointment or provider side effect. V52-V55 and the Settings UI implement
-explicit owner-reviewed authority preview/commit, immutable audit history, and
+no appointment or provider side effect. V52-V55 and the Platform tenant
+Technical UI implement explicit reviewed authority preview/commit, immutable audit history, and
 an explicit inverse-run reference; integrations never switch authority
 implicitly.
 
@@ -60,9 +60,9 @@ the same approved documentation scope.
 
 - Active Square, Twilio, and OpenAI configuration is salon-scoped operational
   data stored in `salon_integration_configs` and managed through
-  `/dashboard/integrations`.
-- For active-runtime claims or diagnosis, inspect the dashboard-backed API
-  state (`GET /api/salons/:id/integration-configs`), the relevant readiness or
+  `/platform/tenants/:tenant_id/technical`.
+- For active-runtime claims or diagnosis, inspect the Platform-backed API
+  state (`GET /api/platform/tenants/:tenant_id/technical/integration-configs`), the relevant readiness or
   debug endpoint such as `GET /api/salons/:id/voice/status`, persisted provider
   state, and the runtime resolver code as applicable.
 - Never inspect, quote, or infer active provider configuration from `.env`,
@@ -133,13 +133,12 @@ the same approved documentation scope.
 - Owner review statuses are `pending`, `contacted`, `resolved`, and `dismissed`.
   Status changes are optimistic-versioned, action-key idempotent, event-audited,
   and never appointment confirmation.
-- The Appointments page contains the owner-review queue, masked owner-
-  notification delivery operations, scheduling-readiness summary, Phase 4B
+- The Tenant Appointments page contains the owner-review queue, scheduling-readiness summary, Phase 4B
   structured multi-guest, multi-service internal create, and Phase 4C whole-
-  root internal reschedule/cancel workflows. Explicit authority selection,
-  preview, review, commit, conflict/recovery, and inverse-run context live in
-  Settings; internal configuration management lives in Settings, Staff, and
-  Services as described below.
+  root internal reschedule/cancel workflows. Masked notification recovery is a
+  Platform Operations workflow. Explicit authority selection, preview, review,
+  commit, conflict/recovery, inverse-run context, and internal technical
+  configuration live in the Platform tenant Technical tab.
 - `manleai_calendar` has a registered executor for verified aggregate
   availability and atomic create across structured guests, ordered service
   units, concrete staff assignments, and pooled resource allocations. Phase 4C
@@ -177,12 +176,13 @@ the same approved documentation scope.
 - Staff-to-service eligibility is a canonical tenant-fenced relationship that
   can be managed from the Staff parent before a service-policy row exists; do
   not introduce setup-order dependency between Staff-first and Service-first UI.
-- ManleAI Calendar UI follows the owner object: salon-wide policy, local hours,
-  shared resources, exceptions, and activation live in Settings; one staff
-  member's weekly schedule lives inside that Staff edit flow; one service's
-  enablement, capacity mode, eligible staff, buffers, and resources live inside
-  that Service edit flow; Appointments shows readiness and owns structured
-  internal create plus whole-root lifecycle workflows.
+- ManleAI Calendar technical UI lives in the Platform tenant Technical tab:
+  salon-wide policy, local hours, staff weekly schedules, service execution
+  policies, shared resources, exceptions, activation, and authority switching.
+  Tenant and Platform Business surfaces still share canonical service, staff,
+  staff-service eligibility, price, and business-hour management. Tenant
+  Appointments shows business scheduling work and owns structured internal
+  create plus whole-root lifecycle workflows.
 - V49 owns authority/config-fenced availability quotes, internal booking and
   appointment evidence, immutable execution events, normalized slot/resource
   evidence, and the active internal staff-overlap exclusion. Internal rows have

@@ -1,0 +1,60 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { RefreshCcw } from "lucide-react";
+import { Alert } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardDescription, CardTitle } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { apiRequest, RequestError } from "@/lib/api/client";
+import { SquareWebhookOperations } from "@/features/integrations/square-webhook-operations";
+import { OwnerNotificationDeliveries } from "@/features/dashboard/owner-notification-deliveries";
+import { TenantRuntimeControls } from "@/features/platform/tenant-runtime-controls";
+import type { OperationsHealthResponse } from "@/types/api";
+
+export function PlatformOperationsConsole({ tenantID }: { tenantID: string }) {
+  const [status, setStatus] = useState<OperationsHealthResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [blocked, setBlocked] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    setBlocked(false);
+    try {
+      setStatus(await apiRequest<OperationsHealthResponse>(`/api/platform/tenants/${tenantID}/operations/status`));
+    } catch (failure) {
+      if (failure instanceof RequestError && failure.status === 403) setBlocked(true);
+      else setError(failure instanceof Error ? failure.message : "Could not load tenant operations health.");
+    } finally {
+      setLoading(false);
+    }
+  }, [tenantID]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  if (loading) return <div className="space-y-4"><Skeleton className="h-24"/><Skeleton className="h-72"/></div>;
+  if (blocked) return <div className="space-y-5"><TenantRuntimeControls tenantID={tenantID}/><Alert title="Queue health grants required" message="Queue health needs operations.read plus active calls, appointments, and notifications grants for this salon. Runtime limits and non-PII provider operations remain separate."/><Card><SquareWebhookOperations salonID={tenantID} enabled webhookConfigured surface="platform"/></Card><OwnerNotificationDeliveries salonID={tenantID} surface="platform"/></div>;
+  if (error) return <div className="space-y-5"><TenantRuntimeControls tenantID={tenantID}/><Alert title="Operations health unavailable" message={error}/></div>;
+  if (!status) return <TenantRuntimeControls tenantID={tenantID}/>;
+
+  return <div className="space-y-5">
+    <Card>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div><CardTitle>Tenant operations health</CardTitle><CardDescription>Safe per-salon worker and queue evidence. Raw provider payloads and customer PII are excluded.</CardDescription></div>
+        <div className="flex items-center gap-2"><Badge value={status.status}/><Button type="button" variant="secondary" onClick={() => void load()}><RefreshCcw className="h-4 w-4"/>Refresh</Button></div>
+      </div>
+      <p className="mt-3 text-xs text-muted">Evaluated {new Date(status.evaluated_at).toLocaleString()}</p>
+    </Card>
+    <TenantRuntimeControls tenantID={tenantID} />
+    <section><h2 className="mb-3 text-sm font-bold uppercase tracking-wide text-muted">Recurring workers</h2><div className="grid gap-3 lg:grid-cols-2">{status.jobs.map(job => <Card key={job.key}><div className="flex items-start justify-between gap-3"><div><CardTitle>{job.label}</CardTitle><CardDescription>{job.error_code || `Stale after ${job.stale_after_seconds}s`}</CardDescription></div><Badge value={job.status}/></div><dl className="mt-4 grid grid-cols-2 gap-3 text-sm"><Metric label="Last success" value={formatDate(job.last_success_at)}/><Metric label="Processed" value={job.last_processed_count?.toString() || "—"}/></dl></Card>)}</div></section>
+    <section><h2 className="mb-3 text-sm font-bold uppercase tracking-wide text-muted">Tenant queues</h2><div className="grid gap-3 lg:grid-cols-2">{status.queues.map(queue => <Card key={queue.key}><div className="flex items-start justify-between gap-3"><div><CardTitle>{queue.label}</CardTitle><CardDescription>{queue.error_code || "Tenant-scoped aggregate"}</CardDescription></div><Badge value={queue.status}/></div><dl className="mt-4 grid grid-cols-3 gap-3 text-sm"><Metric label="Backlog" value={String(queue.backlog_count)}/><Metric label="Dead letter" value={String(queue.dead_letter_count)}/><Metric label="Oldest" value={formatDate(queue.oldest_at)}/></dl></Card>)}</div></section>
+    <Card><SquareWebhookOperations salonID={tenantID} enabled webhookConfigured surface="platform"/></Card>
+    <OwnerNotificationDeliveries salonID={tenantID} surface="platform" />
+  </div>;
+}
+
+function Metric({ label, value }: { label: string; value: string }) { return <div><dt className="text-xs font-semibold text-muted">{label}</dt><dd className="mt-1 font-semibold text-ink">{value}</dd></div>; }
+function formatDate(value?: string) { return value ? new Date(value).toLocaleString() : "—"; }

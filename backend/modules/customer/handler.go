@@ -66,7 +66,7 @@ func (h *Handler) SearchPOS(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusConflict, "POS_PROVIDER_UNAVAILABLE", "The requested POS provider is unavailable.")
 	}
 	if err != nil {
-		return respond.Error(c, fiber.StatusBadGateway, "POS_CUSTOMER_LOOKUP_FAILED", err.Error())
+		return respond.Error(c, fiber.StatusBadGateway, "POS_CUSTOMER_LOOKUP_FAILED", "The POS customer lookup could not be completed.")
 	}
 	return respond.JSON(c, fiber.StatusOK, res)
 }

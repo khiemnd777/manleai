@@ -10,7 +10,7 @@ Customer calls -> AI answers through Twilio -> customer asks for a booking -> AI
 
 - Guide one configuration step at a time. Do not dump every step unless the user asks for the full checklist.
 - After each step, ask the user to confirm what is done before moving on.
-- Never ask the user to paste secrets into chat. Tell them which Integrations dashboard field or provider console field needs the secret. Do not inspect or use env files to configure or diagnose active provider behavior.
+- Never ask the user to paste secrets into chat. Tell them which Platform tenant Technical field or provider console field needs the secret. Do not inspect or use env files to configure or diagnose active provider behavior.
 - Never say this external-provider confirmation demo is ready until `GET /api/salons/:id/voice/status` returns `scheduling_authority: "external_provider"`, `booking_mode: "confirmed_booking"`, and all three readiness dimensions true: `phone_answering_ready`, `request_capture_ready`, and `automated_booking_ready`. `phone_booking_ready` is only the compatibility alias for the last dimension.
 - Keep Square as the first real POS provider. Do not claim generic POS support for this demo.
 - Keep the Square-backed `external_provider` confirmation invariant explicit:
@@ -21,7 +21,7 @@ Customer calls -> AI answers through Twilio -> customer asks for a booking -> AI
 ## Source Of Truth
 
 - Backend env files: infrastructure only; they do not contain provider configuration.
-- Dashboard provider config: `/dashboard/integrations` and `GET /api/salons/:id/integration-configs` are the source of truth.
+- Platform provider config: `/platform/tenants/:tenant_id/technical` and `GET /api/platform/tenants/:tenant_id/technical/integration-configs` are the source of truth.
 - Runtime readiness/debug evidence: `GET /api/salons/:id/voice/status` and the owner-scoped Calls realtime timeline.
 - Local commands: `docs/local-development.md`
 - Deployment secrets: `docs/deployment.md`
@@ -101,7 +101,7 @@ Use the salon inbound phone as Twilio `To` / simulator `-to`.
 For live Twilio or Square OAuth callback, the backend must have a public HTTPS origin.
 
 For ngrok/local demo, tell the user to expose the backend API port and then set
-the public origin in the Integrations dashboard:
+the public origin in the Platform tenant Technical tab:
 
 - Square tab: `Redirect URL`
 - Twilio tab: `Public API base URL`
@@ -116,7 +116,7 @@ Square redirect URL: https://<public-api-url>/api/integrations/square/callback
 If deployed, use the deployed API origin for both values.
 
 Do not use the frontend URL for these two dashboard fields and do not copy the
-values into env files. Save them in the Integrations dashboard.
+values into env files. Save them in the Platform tenant Technical tab.
 
 ## Step 3 - Core Backend Env
 
@@ -135,7 +135,7 @@ AUTO_MIGRATE=true
 
 For deployed/staging, replace `CORS_ALLOWED_ORIGINS` and `FRONTEND_URL` with the deployed frontend origin.
 Do not put Square, Twilio, or OpenAI provider settings or secrets in env files.
-Save them through the Integrations dashboard.
+Save them through the Platform tenant Technical tab.
 
 ## Step 4 - Square Configuration
 
@@ -148,7 +148,7 @@ In Square Developer:
 https://<public-api-url>/api/integrations/square/callback
 ```
 
-In the ManleAI Integrations dashboard, Square tab:
+In the ManleAI Platform tenant Technical tab, Square section:
 
 - `Environment`: `Sandbox`
 - `Square client ID`: sandbox application ID
@@ -184,7 +184,7 @@ https://app.squareupsandbox.com/dashboard/
 
 Dashboard flow:
 
-1. Open `/dashboard/integrations`.
+1. Open `/platform/tenants/:tenant_id/technical` for the target salon.
 2. Connect Square.
 3. Select location.
 4. Sync services, staff, business hour periods, and customers.
@@ -271,7 +271,7 @@ Recovery checklist:
 
 ## Step 5 - Twilio Configuration
 
-In the ManleAI Integrations dashboard, Twilio tab:
+In the ManleAI Platform tenant Technical tab, Twilio section:
 
 - `Public API base URL`: `https://<public-api-url>`
 - `Twilio auth token`: Twilio Auth Token
@@ -308,7 +308,7 @@ The salon phone in the dashboard/database must match the Twilio number receiving
 
 ## Step 6 - OpenAI Voice AI Configuration
 
-The local app can run Twilio speech `<Gather>` without OpenAI STT/TTS. For a full voice demo with recording-mode turns, transcription, safer AI reply rewriting, and generated audio playback, configure OpenAI in the ManleAI Integrations dashboard, OpenAI tab:
+The local app can run Twilio speech `<Gather>` without OpenAI STT/TTS. For a full voice demo with recording-mode turns, transcription, safer AI reply rewriting, and generated audio playback, configure OpenAI in the ManleAI Platform tenant Technical tab, OpenAI section:
 
 - Enable OpenAI voice AI
 - `OpenAI API key`: OpenAI API key

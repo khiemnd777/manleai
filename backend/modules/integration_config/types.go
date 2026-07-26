@@ -21,6 +21,12 @@ type StoredConfig struct {
 	SecretsEncrypted string
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+	Version          int64
+}
+
+type TechnicalMutationControl struct {
+	ActionKey       string `json:"action_key"`
+	ExpectedVersion int64  `json:"expected_version"`
 }
 
 type IntegrationConfigsResponse struct {
@@ -44,6 +50,8 @@ type SquareSettingsResponse struct {
 	WebhookSignatureKeyConfigured bool       `json:"webhook_signature_key_configured"`
 	WebhookSignatureKeySource     string     `json:"webhook_signature_key_source"`
 	UpdatedAt                     *time.Time `json:"updated_at,omitempty"`
+	Version                       int64      `json:"version"`
+	Replayed                      bool       `json:"replayed,omitempty"`
 }
 
 type TwilioSettingsResponse struct {
@@ -73,6 +81,8 @@ type TwilioSettingsResponse struct {
 	NotificationStatusURL      string     `json:"notification_status_url"`
 	NotificationInboundURL     string     `json:"notification_inbound_url"`
 	UpdatedAt                  *time.Time `json:"updated_at,omitempty"`
+	Version                    int64      `json:"version"`
+	Replayed                   bool       `json:"replayed,omitempty"`
 }
 
 // TwilioMessagingConfig is the strict database-backed runtime contract used by
@@ -110,9 +120,12 @@ type OpenAISettingsResponse struct {
 	APIKeyConfigured     bool       `json:"api_key_configured"`
 	APIKeySource         string     `json:"api_key_source"`
 	UpdatedAt            *time.Time `json:"updated_at,omitempty"`
+	Version              int64      `json:"version"`
+	Replayed             bool       `json:"replayed,omitempty"`
 }
 
 type UpdateSquareSettingsRequest struct {
+	TechnicalMutationControl
 	Environment              string  `json:"environment"`
 	ClientID                 string  `json:"client_id"`
 	ClientSecret             string  `json:"client_secret"`
@@ -126,6 +139,7 @@ type UpdateSquareSettingsRequest struct {
 }
 
 type UpdateTwilioSettingsRequest struct {
+	TechnicalMutationControl
 	PublicBaseURL            string  `json:"public_base_url"`
 	AuthToken                string  `json:"auth_token"`
 	ClearAuthToken           bool    `json:"clear_auth_token"`
@@ -149,6 +163,7 @@ type UpdateTwilioSettingsRequest struct {
 }
 
 type UpdateOpenAISettingsRequest struct {
+	TechnicalMutationControl
 	Enabled              bool   `json:"enabled"`
 	APIKey               string `json:"api_key"`
 	ClearAPIKey          bool   `json:"clear_api_key"`

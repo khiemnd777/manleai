@@ -445,6 +445,8 @@ export type SquareIntegrationConfig = {
   webhook_signature_key_configured: boolean;
   webhook_signature_key_source: string;
   updated_at?: string;
+  version?: number;
+  replayed?: boolean;
 };
 
 export type TwilioIntegrationConfig = {
@@ -474,6 +476,8 @@ export type TwilioIntegrationConfig = {
   notification_status_url: string;
   notification_inbound_url: string;
   updated_at?: string;
+  version?: number;
+  replayed?: boolean;
 };
 
 export type OpenAIIntegrationConfig = {
@@ -494,6 +498,8 @@ export type OpenAIIntegrationConfig = {
   api_key_configured: boolean;
   api_key_source: string;
   updated_at?: string;
+  version?: number;
+  replayed?: boolean;
 };
 
 export type IntegrationConfigs = {
@@ -1470,6 +1476,7 @@ export type TestBookingRecord = {
 
 export type SquareReadiness = {
   ai_enabled: boolean;
+  ai_runtime_version: number;
   scheduling_authority: SchedulingAuthority;
   can_test_booking: boolean;
   can_cancel_test_booking: boolean;

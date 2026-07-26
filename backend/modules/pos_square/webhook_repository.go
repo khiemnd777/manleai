@@ -138,16 +138,27 @@ func (r *WebhookRepository) ClaimBookingWebhooks(ctx context.Context, limit int)
 			      OR (event.processing_status = 'processing' AND event.processing_lease_expires_at < now())
 			  )
 			RETURNING event.id
-		), candidates AS (
-			SELECT id
-			FROM square_booking_webhook_events
-			WHERE processing_attempts < (requeue_count + 1) * $2
+		), ranked AS (
+			SELECT event.id,event.next_attempt_at,event.created_at,
+			       row_number() OVER (
+			           PARTITION BY event.salon_id
+			           ORDER BY event.next_attempt_at,event.created_at,event.id
+			       ) AS tenant_rank,
+			       COALESCE(limits.worker_claims_per_batch,2) AS tenant_limit
+			FROM square_booking_webhook_events event
+			LEFT JOIN tenant_runtime_limits limits ON limits.salon_id=event.salon_id
+			WHERE event.processing_attempts < (event.requeue_count + 1) * $2
 			  AND (
-			      (processing_status IN ('pending', 'failed') AND next_attempt_at <= now())
-			      OR (processing_status = 'processing' AND processing_lease_expires_at < now())
+			      (event.processing_status IN ('pending', 'failed') AND event.next_attempt_at <= now())
+			      OR (event.processing_status = 'processing' AND event.processing_lease_expires_at < now())
 			  )
-			ORDER BY next_attempt_at, created_at, id
-			FOR UPDATE SKIP LOCKED
+		), candidates AS (
+			SELECT event.id
+			FROM square_booking_webhook_events event
+			JOIN ranked ON ranked.id=event.id
+			WHERE ranked.tenant_rank<=ranked.tenant_limit
+			ORDER BY ranked.next_attempt_at,ranked.created_at,event.id
+			FOR UPDATE OF event SKIP LOCKED
 			LIMIT $1
 		), claimed AS (
 			UPDATE square_booking_webhook_events event

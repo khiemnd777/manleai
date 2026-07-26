@@ -1007,7 +1007,7 @@ func (s *Service) SyncCalendar(ctx context.Context, salonID string, ownerUserID 
 		if err != nil {
 			failureCtx, cancelFailure := postPOSPersistenceContext(ctx)
 			_ = s.store.LogPOSError(failureCtx, salonID, providerName, "calendar_sync", err)
-			_ = s.store.CompleteCalendarSyncLog(failureCtx, logID, "failed", err.Error())
+			_ = s.store.CompleteCalendarSyncLog(failureCtx, logID, "failed", pos.SafeErrorMessage(posErrorCode(err)))
 			cancelFailure()
 			return nil, err
 		}
@@ -1040,7 +1040,7 @@ func (s *Service) SyncCalendar(ctx context.Context, salonID string, ownerUserID 
 	defer cancelPersist()
 	summary, err := s.store.UpsertCalendarAppointments(persistCtx, salonID, providerName, providerFence, imported)
 	if err != nil {
-		_ = s.store.CompleteCalendarSyncLog(persistCtx, logID, "failed", err.Error())
+		_ = s.store.CompleteCalendarSyncLog(persistCtx, logID, "failed", pos.SafeErrorMessage(posErrorCode(err)))
 		return nil, err
 	}
 	summary.Skipped += skipped
@@ -1078,7 +1078,7 @@ func (s *Service) saveFallback(ctx context.Context, pending BookingAttempt, segm
 		EndTime:            endTime,
 		Notes:              req.Notes,
 		ErrorCode:          posErrorCode(providerErr),
-		ErrorMessage:       providerErr.Error(),
+		ErrorMessage:       pos.SafeErrorMessage(posErrorCode(providerErr)),
 		ProcessingToken:    pending.ProcessingToken,
 		ProviderOutcome:    outcome,
 		RetryPolicy:        retryPolicy,
@@ -1135,7 +1135,7 @@ func (s *Service) saveActionFallback(ctx context.Context, attemptID string, salo
 		RequestedEndTime:   endTime,
 		Notes:              notes,
 		ErrorCode:          posErrorCode(providerErr),
-		ErrorMessage:       providerErr.Error(),
+		ErrorMessage:       pos.SafeErrorMessage(posErrorCode(providerErr)),
 		ProcessingToken:    processingToken,
 		ProviderOutcome:    outcome,
 		RetryPolicy:        retryPolicy,

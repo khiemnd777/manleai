@@ -10,6 +10,8 @@ import { apiRequest, setSession } from "@/lib/api/client";
 
 type LoginResponse = {
   access_token: string;
+  roles: string[];
+  salon_id?: string;
 };
 
 type BootstrapStatus = {
@@ -52,7 +54,8 @@ export function LoginForm() {
         body: JSON.stringify({ email, password })
       });
       setSession(response.access_token);
-      router.push("/dashboard");
+      const platform = response.roles.includes("platform_admin") || response.roles.includes("platform_ops");
+      router.push(platform ? "/platform/tenants" : response.salon_id ? "/dashboard" : "/onboarding");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed.");
     } finally {

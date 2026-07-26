@@ -4,15 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"time"
-
-	_ "github.com/lib/pq"
 )
 
 func Open(ctx context.Context, databaseURL string) (*sql.DB, error) {
-	db, err := sql.Open("postgres", databaseURL)
+	connector, err := newContextConnector(databaseURL)
 	if err != nil {
 		return nil, err
 	}
+	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(20)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(30 * time.Minute)

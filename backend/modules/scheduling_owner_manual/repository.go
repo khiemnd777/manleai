@@ -41,7 +41,7 @@ func (r *Repository) SchedulingTargetReadinessFacts(ctx context.Context, salonID
 		FROM salons salon
 		JOIN salon_settings settings ON settings.salon_id = salon.id
 		WHERE salon.id::text = $1
-		  AND salon.owner_user_id::text = $2
+		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 	`, salonID, ownerUserID).Scan(&authorityVersion, &eligibleServiceCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, 0, pos.ErrNotFound
@@ -66,7 +66,7 @@ func (r *Repository) CreateOrReplay(ctx context.Context, salonID string, ownerUs
 		FROM scheduling_requests request
 		JOIN salons salon ON salon.id = request.salon_id
 		WHERE request.salon_id::text = $1
-		  AND salon.owner_user_id::text = $2
+		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 		  AND request.scheduling_authority = $3
 		  AND request.operation_key = $4
 		FOR UPDATE OF request
@@ -89,7 +89,7 @@ func (r *Repository) CreateOrReplay(ctx context.Context, salonID string, ownerUs
 	}
 	var currentAuthority string
 	var bookingMode string
-	if err := tx.QueryRowContext(ctx, `SELECT settings.scheduling_authority, settings.booking_mode FROM salon_settings settings JOIN salons salon ON salon.id=settings.salon_id WHERE settings.salon_id::text=$1 AND salon.owner_user_id::text=$2 FOR SHARE OF settings, salon`, salonID, ownerUserID).Scan(&currentAuthority, &bookingMode); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT settings.scheduling_authority, settings.booking_mode FROM salon_settings settings JOIN salons salon ON salon.id=settings.salon_id WHERE settings.salon_id::text=$1 AND public.has_active_tenant_membership(salon.id, $2::uuid) FOR SHARE OF settings, salon`, salonID, ownerUserID).Scan(&currentAuthority, &bookingMode); errors.Is(err, sql.ErrNoRows) {
 		return nil, false, pos.ErrNotFound
 	} else if err != nil {
 		return nil, false, err
@@ -117,9 +117,9 @@ func (r *Repository) CreateOrReplay(ctx context.Context, salonID string, ownerUs
 	var salonTimezone string
 	if err := tx.QueryRowContext(ctx, `
 		SELECT timezone
-		FROM salons
-		WHERE id::text = $1
-		  AND owner_user_id::text = $2
+		FROM salons salon
+		WHERE salon.id::text = $1
+		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 		FOR SHARE
 	`, salonID, ownerUserID).Scan(&salonTimezone); errors.Is(err, sql.ErrNoRows) {
 		return nil, false, pos.ErrNotFound
@@ -285,7 +285,7 @@ func (r *Repository) List(ctx context.Context, salonID string, ownerUserID strin
 		FROM scheduling_requests request
 		JOIN salons salon ON salon.id = request.salon_id
 		WHERE request.salon_id::text = $1
-		  AND salon.owner_user_id::text = $2
+		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
 		  AND ($3 = '' OR request.status = $3)
 		ORDER BY request.created_at DESC, request.id DESC
 		LIMIT $4 OFFSET $5
@@ -307,7 +307,7 @@ func (r *Repository) List(ctx context.Context, salonID string, ownerUserID strin
 	}
 	if len(ids) == 0 {
 		var exists bool
-		if err := r.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM salons WHERE id::text = $1 AND owner_user_id::text = $2)`, salonID, ownerUserID).Scan(&exists); err != nil {
+		if err := r.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM salons WHERE id::text = $1 AND public.has_active_tenant_membership(id, $2::uuid))`, salonID, ownerUserID).Scan(&exists); err != nil {
 			return nil, err
 		}
 		if !exists {
@@ -507,7 +507,7 @@ func getRequest(ctx context.Context, queryer requestQuerier, salonID string, own
 	request, err := scanRequest(queryer.QueryRowContext(ctx, requestSelect+`
 		WHERE request.id::text = $1
 		  AND request.salon_id::text = $2
-		  AND salon.owner_user_id::text = $3
+		  AND public.has_active_tenant_membership(salon.id, $3::uuid)
 	`, requestID, salonID, ownerUserID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, pos.ErrNotFound
@@ -529,7 +529,7 @@ func lockRequestTx(ctx context.Context, tx *sql.Tx, salonID string, ownerUserID 
 	request, err := scanRequest(tx.QueryRowContext(ctx, requestSelect+`
 		WHERE request.id::text = $1
 		  AND request.salon_id::text = $2
-		  AND salon.owner_user_id::text = $3
+		  AND public.has_active_tenant_membership(salon.id, $3::uuid)
 		FOR UPDATE OF request
 	`, requestID, salonID, ownerUserID))
 	if errors.Is(err, sql.ErrNoRows) {

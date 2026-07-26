@@ -77,6 +77,17 @@ configure_database_urls() {
   : "${MIGRATION_TEST_DATABASE_URL:?MIGRATION_TEST_DATABASE_URL is required}"
 }
 
+build_clone_database_name() {
+  local base_database="$1"
+  local suite="$2"
+  local index="$3"
+  local process_id="$4"
+  local clone_database="${base_database:0:18}_release_gate_rg_${suite}_${index}_${process_id}"
+  [[ "$clone_database" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]] || fail "generated test database name is unsafe"
+  [[ "$clone_database" == *release_gate* ]] || fail "generated test database lost the release_gate marker"
+  printf '%s\n' "$clone_database"
+}
+
 require_redis_test_url() {
   : "${TEST_REDIS_URL:?TEST_REDIS_URL is required}"
   case "$TEST_REDIS_URL" in
@@ -119,8 +130,7 @@ run_go_packages_isolated() {
   local package clone_database package_status index=0
   for package in "$@"; do
     index=$((index + 1))
-    clone_database="${base_database:0:24}_rg_${suite}_${index}_$$"
-    [[ "$clone_database" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]] || fail "generated test database name is unsafe"
+    clone_database="$(build_clone_database_name "$base_database" "$suite" "$index" "$$")"
     printf 'release-gate: creating isolated database for package %s\n' "$package"
     createdb \
       --host="$PGHOST" \
@@ -219,9 +229,12 @@ run_security_contract() {
 }
 
 run_self_test() {
+  local clone_database
   validate_manifest_paths
   bash -n "$script_dir/owner-first-release-gate.sh"
   bash -n "$manifest"
+  clone_database="$(build_clone_database_name "manleai_phase10_release_gate_database_with_a_long_name" "integration" "19" "12345")"
+  [[ "$clone_database" == *release_gate* ]] || fail "clone database self-test lost the release_gate marker"
   if (
     unset PGHOST PGPORT PGUSER PGDATABASE
     require_database_identity >/dev/null 2>&1

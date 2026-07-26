@@ -9,8 +9,10 @@ BACKEND_RACE_PACKAGES=(
   ./cmd/worker
   ./internal/middleware
   ./internal/ratelimit
+  ./modules/access
   ./modules/auth
   ./modules/booking
+  ./modules/business
   ./modules/conversation
   ./modules/customer_notification
   ./modules/notification_delivery
@@ -23,6 +25,7 @@ BACKEND_RACE_PACKAGES=(
   ./modules/scheduling_owner_manual
   ./modules/scheduling_retention
   ./modules/training
+  ./modules/tenant_runtime
 )
 
 POSTGRES_MIGRATION_PACKAGES=(
@@ -31,6 +34,8 @@ POSTGRES_MIGRATION_PACKAGES=(
 )
 
 POSTGRES_INTEGRATION_PACKAGES=(
+  ./modules/access
+  ./modules/business
   ./modules/scheduling
   ./modules/scheduling_owner_manual
   ./modules/scheduling_manleai_calendar
@@ -47,12 +52,15 @@ POSTGRES_INTEGRATION_PACKAGES=(
   ./modules/notification_twilio
   ./modules/operations_health
   ./modules/scheduling_retention
+  ./modules/tenant_runtime
 )
 
 SECURITY_CONTRACT_PACKAGES=(
   ./internal/middleware
   ./internal/ratelimit
+  ./modules/access
   ./modules/auth
+  ./modules/business
   ./modules/booking
   ./modules/config_transfer
   ./modules/conversation
@@ -70,23 +78,37 @@ SECURITY_CONTRACT_PACKAGES=(
   ./modules/scheduling_owner_manual
   ./modules/scheduling_retention
   ./modules/training
+  ./modules/tenant_runtime
+  ./modules/voice
+  ./modules/voice_openai
   ./modules/voice_twilio
 )
 
 SECURITY_CONTRACT_TEST_FILES=(
   backend/cmd/worker/retention_registration_test.go
+  backend/internal/databasecontext/context_test.go
+  backend/internal/database/context_connector_integration_test.go
+  backend/internal/database/rls_integration_test.go
+  backend/internal/database/runtime_role_test.go
   backend/internal/middleware/auth_test.go
   backend/internal/middleware/rate_limit_test.go
   backend/internal/ratelimit/redis_store_integration_test.go
+  frontend/lib/api/business.test.ts
   frontend/lib/api/browser-session.test.ts
   frontend/lib/security/content-security-policy.test.ts
   landing/lib/security/content-security-policy.test.ts
   pos-calendar/lib/api/browser-session.test.ts
   pos-calendar/lib/security/content-security-policy.test.ts
   pos-calendar/lib/security/scheduler-style.test.ts
+  backend/modules/access/repository_integration_test.go
+  backend/modules/access/routes_test.go
+  backend/modules/access/service_test.go
   backend/modules/auth/handler_test.go
   backend/modules/auth/repository_integration_test.go
   backend/modules/auth/service_test.go
+  backend/modules/business/routes_test.go
+  backend/modules/business/repository_integration_test.go
+  backend/modules/business/service_test.go
   backend/modules/booking/handler_test.go
   backend/modules/booking/repository_integration_test.go
   backend/modules/booking/service_test.go
@@ -99,6 +121,8 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/customer_notification/quiet_hours_test.go
   backend/modules/customer_notification/repository_integration_test.go
   backend/modules/integration_config/repository_test.go
+  backend/modules/integration_config/platform_routes_test.go
+  backend/modules/integration_config/routes_test.go
   backend/modules/integration_config/service_test.go
   backend/modules/integration_config/twilio_inbound_path_test.go
   backend/modules/notification_delivery/handler_test.go
@@ -107,8 +131,14 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/notification_twilio/signature_test.go
   backend/modules/operations_health/routes_test.go
   backend/modules/operations_health/repository_integration_test.go
+  backend/modules/pos/sync_processor_test.go
+  backend/modules/pos/types_test.go
+  backend/modules/pos/repository_integration_test.go
   backend/modules/pos/repository_alias_ownership_integration_test.go
+  backend/modules/pos/platform_ai_runtime_integration_test.go
+  backend/modules/pos_square/adapter_test.go
   backend/modules/pos_square/handler_test.go
+  backend/modules/pos_square/platform_routes_test.go
   backend/modules/pos_square/webhook_operations_repository_integration_test.go
   backend/modules/pos_square/webhook_operations_test.go
   backend/modules/pos_square/webhook_test.go
@@ -124,12 +154,28 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/scheduling_retention/repository_integration_test.go
   backend/modules/training/handler_test.go
   backend/modules/training/service_test.go
+  backend/modules/tenant_runtime/repository_integration_test.go
+  backend/modules/tenant_runtime/service_test.go
+  backend/modules/voice/types_test.go
+  backend/modules/voice/routes_test.go
+  backend/modules/voice_openai/adapter_test.go
   backend/modules/voice_twilio/adapter_test.go
+  backend/modules/voice_twilio/handler_test.go
   backend/migrations/v59_safety_test.go
   backend/migrations/v60_safety_test.go
   backend/migrations/v61_safety_test.go
   backend/migrations/v62_integration_test.go
   backend/migrations/v62_safety_test.go
+  backend/migrations/v63_safety_test.go
+  backend/migrations/v64_safety_test.go
+  backend/migrations/v65_safety_test.go
+  backend/migrations/v66_safety_test.go
+  backend/migrations/v67_safety_test.go
+  backend/migrations/v68_safety_test.go
+  backend/migrations/v69_safety_test.go
+  backend/migrations/v70_safety_test.go
+  backend/migrations/v71_safety_test.go
+  backend/migrations/v72_safety_test.go
 )
 
 WEB_APPLICATIONS=(

@@ -1,6 +1,5 @@
-import { SquareIntegration } from "@/features/integrations/square-integration";
+import { redirect } from "next/navigation";
 
 export default function IntegrationsPage() {
-  return <SquareIntegration />;
+  redirect("/dashboard/settings");
 }
-

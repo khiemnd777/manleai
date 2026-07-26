@@ -25,20 +25,31 @@ and notification records while retaining authority, provider, status, version,
 timestamp, tenant, and audit evidence. V62 fail-closes any historical
 party-request/session tenant mismatch and replaces the legacy session-only
 foreign key with `(salon_id, call_session_id)` ownership.
+V63 removes historical provider-controlled diagnostics. SaaS Refactor Phases
+1-10 add V64-V72: tenant memberships; Platform Admin/Ops roles and exact-salon
+delegation; bounded Platform PII grants; shared Business APIs; the Platform
+technical control plane; runtime membership enforcement; PostgreSQL RLS with a
+separate non-owner runtime role; tenant quotas and fair worker claims; audited
+Platform AI-runtime control; a database-owned public catalog projection; and
+complete Platform PII-scope enforcement. Tenant and Platform UIs are separate
+route trees over the same canonical tenant data.
 
 The backend is organized as:
 
 ```txt
 cmd/api              Fiber HTTP server
 cmd/worker           Independently scheduled POS sync, booking lease, quote cleanup, Square webhook/repair, notification delivery, call retention, and scheduling-PII retention worker entrypoint
+cmd/platform-access  One-time first-Platform-Admin bootstrap for an exact existing active user; closes after an active Platform Admin exists
 cmd/scheduling-load-harness Bounded isolated scheduling replay/CAS/atomicity verification; never a production runtime
 internal/config      environment config
-internal/database    PostgreSQL connection bootstrap and startup migrations
+internal/database    PostgreSQL context-aware runtime connection, runtime-role/RLS verification, and startup migrations through a separate migration connection
 internal/schedulingload Synthetic Owner-first concurrency workloads, target guards, invariant gate, and schema-versioned report
 internal/encryption  AES-GCM token encryption
 internal/middleware  current-principal JWT auth plus distributed route-class rate-limit enforcement
 internal/ratelimit   atomic Redis token bucket and typed allow/deny/dependency decisions
 modules/auth         login, HttpOnly refresh-cookie rotation, roles
+modules/access       SaaS ActorContext policy, tenant memberships, Platform roles/delegation, bounded PII grants, idempotent access actions, and immutable audit
+modules/business     shared Tenant/Platform Business contract for profile, services, staff, eligibility, hours, public settings, and customers
 modules/salon        salon profile, settings, synced business hour periods
 modules/pos          provider-neutral POS contracts and persistence
 modules/pos_square   Square adapter and Square integration routes
@@ -60,6 +71,7 @@ modules/training     salon-authored knowledge base, owner corrections, and servi
 modules/voice        provider-neutral live voice runtime, authority-aware three-dimension readiness/status, semantic-contract verification, routing, and webhook event audit
 modules/voice_openai OpenAI STT, strict structured turns, guarded LLM reply, TTS, and Realtime adapters
 modules/voice_twilio Twilio signature verification, form parsing, TwiML responses, and Media Streams bridge
+modules/tenant_runtime tenant quota configuration, minute-bucket accounting, and fair per-tenant worker limits
 ```
 
 The frontend is organized as:
@@ -67,11 +79,12 @@ The frontend is organized as:
 ```txt
 app/                 Next.js routes
 components/ui        reusable UI primitives
-components/layout    dashboard shell
+components/layout    independent Tenant and Platform shells plus route-surface gates
 features/auth        login flow
 features/configuration-transfer export/import preview helpers and onboarding import UI
-features/dashboard   dashboard home, appointments, calls, customers, services/staff controls, settings, billing gate, AI training
-features/integrations Square integration page
+features/business    shared Tenant/Platform Business editors and Tenant appointments/calls consoles
+features/platform    tenant directory/detail, Technical, Operations, Audit, access, and runtime-limit controls
+features/public      slug-scoped public salon landing projection
 features/onboarding salon profile creation
 lib/api              typed API client
 types                API response types
@@ -92,14 +105,16 @@ The Caddy project route overwrites the trusted client-IP header. Redis failure
 is a request-protection dependency failure, not a reason to bypass limiting,
 and `/healthz` reports the dependency unavailable.
 
-The public customer-facing web surface lives in `landing/`, separate from the
-owner admin dashboard in `frontend/`. The landing app reads only public-safe
-catalog data through unauthenticated `/api/public/*` endpoints and does not
-create booking attempts or confirmed appointments.
+The canonical tenant customer-facing route is `/s/[slug]` in `frontend/`. It
+reads only the database-owned safe projection through
+`GET /api/public/salons/:slug`; public database scope has zero direct base-table
+row visibility. The legacy `landing/` application remains deployable during
+cutover but cannot create booking attempts or confirmed appointments.
 
-The POS calendar operator surface lives in `pos-calendar/`, separate from the
-owner admin dashboard shell. It uses the same authenticated owner API and admin
-session tokens, but does not include the dashboard sidebar. Its first workflow
+The POS calendar operator surface lives in `pos-calendar/`, separate from both
+Tenant and Platform shells. It uses the authenticated Tenant Business summary
+and the tenant-safe external scheduling-readiness projection; it does not call
+Platform technical status/configuration endpoints. Its first workflow
 is `/calendar`, with day/week/month/agenda views, `Today` and `Tomorrow`
 shortcuts, active-provider calendar sync, and POS-backed add, edit, and delete
 actions. Add still creates a booking attempt through the booking service; edit
@@ -116,6 +131,73 @@ different location, and revalidates the fence inside the mirror transaction
 before any write. A location switch, resync, or provider change therefore makes
 the import stale with zero appointment, attempt, notification, or
 reconciliation writes instead of mixing provider locations.
+
+## SaaS Multi-Tenant Access Foundation
+
+V64 is an additive authorization foundation for a shared PostgreSQL/Redis/API
+deployment. `salons.owner_user_id` remains the owner source of truth and is
+backfilled into an active `tenant_owner` membership. A salon insert or explicit
+owner change synchronizes that membership in the same transaction, including
+when the previous compatible image performs the salon write. Existing
+`user_roles`, owner predicates, and scheduling-owner database triggers retain
+their original meaning during the expand/migrate window.
+
+`RequireAuth` treats the JWT as identity proof only. On every protected request
+it reloads the active account, active platform-role assignment, and primary
+active salon membership, then attaches a server-owned `ActorContext`. Request
+headers, request bodies, JWT salon claims, and JWT role claims cannot select a
+tenant, Platform role, or access surface. Routes own the surface:
+
+- Tenant surface requires an active membership for the exact salon and
+  currently exposes only the stable Business capabilities.
+- Platform Admin has global non-PII platform, Business, Technical, Operations,
+  and Audit capabilities.
+- Platform Ops requires an active Platform role, an active assignment for the
+  exact salon, and a database-owned delegated capability on that assignment.
+- Platform access to customer, call, appointment, or notification PII requires
+  a separate non-revoked grant for the exact user, salon, and PII scope whose
+  expiry is no more than 24 hours. Platform Admin is not exempt.
+
+Access mutations use a stable action key, canonical request fingerprint,
+optimistic expected version, exact stored replay response, and immutable event.
+Owner membership cannot be revoked or converted through the Platform API. The
+last active Platform Admin cannot be removed, including concurrent demotion
+attempts. Platform role changes are serialized; every role/status transition
+revokes that user's active salon assignments and PII grants in the same
+transaction, records one bounded immutable child event per affected object, and
+prevents later role reactivation from reviving stale access. A PII grant stores
+only a bounded opaque change reference matching
+`[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}`; arbitrary prose or customer data is
+rejected and the reference is not copied into bounded event details.
+
+SaaS Phase 3 adds `modules/business` and V65 above that foundation. Fixed
+Tenant and Platform route groups share canonical Business records and rules,
+while authorization evaluates the exact route surface, salon, capability, and
+PII scope before repository access. V65 adds resource versions, exact replay,
+actual-actor immutable audit, and database triggers that cover provider sync
+and compatible-image inserts. Provider-linked operational fields and external
+hours remain read-only; local hours remain `local_override`. Public publishing
+reuses the existing selected-authority readiness owner and service
+consultation writes reuse the POS validation/persistence owner.
+
+Phases 4-10 complete the split. `/dashboard/*` is the Tenant Business surface;
+`/platform/*` is the Platform Admin/Ops surface with tenant detail tabs for
+Business, Technical, Operations, and Audit. Provider configuration, Square
+connection/sync/test controls, scheduling-authority changes, ManleAI Calendar
+technical configuration, AI runtime enablement, and tenant runtime limits are
+Platform-only. Tenant users manage only their salon's Business objects. The
+same Business service lets an authorized Platform operator manage those
+objects on the tenant's behalf while recording the actual Platform actor.
+
+V67 rejects authenticated tenant runtime access without an active exact-salon
+membership. V68 installs tenant-row RLS; the API and worker use a non-owner,
+non-`BYPASSRLS` runtime role and the API alone receives the separate migration
+credential. V71 removes all public direct base-table visibility and exposes a
+safe authority-aware JSON projection. V72 maps PII-bearing operational tables
+to `customers`, `calls`, `appointments`, or `notifications`, so Platform Admin
+and Ops need an active exact-scope grant even when querying through PostgreSQL.
+V69 adds database-owned per-tenant quotas, usage buckets, and fair worker claim
+limits. No caller-selected impersonation or tenant header is introduced.
 
 ## Scheduling Authority Contract
 
@@ -835,7 +917,7 @@ the runtime creates a handoff or fallback pending flow and avoids confirmed
 wording. Later authority modes must replace only the scheduling execution and
 evidence gate, not these conversation-state and review safeguards.
 
-The live voice layer is split into `modules/voice`, `modules/voice_twilio`, and provider-specific AI adapter modules such as `modules/voice_openai`. `modules/voice` owns provider-neutral DTOs and runtime interfaces, including whole-response TTS for recording mode, chunked streaming speech for realtime mode, the owner-scoped semantic-contract check, and the bounded read-only semantic-evaluation route. `modules/voice_twilio` owns Twilio request verification, TwiML, Media Streams framing, typed reply scheduling, bounded/paced PCMU playout, playback marks, barge-in clear/cancel, caller-input gating, and stale-generation rejection. `modules/voice_openai` owns OpenAI payloads, strict full and guidance structured-turn schema validation, per-schema salon/config nonretryable contract circuits, Realtime input sessions, dedicated Speech streaming, raw PCM 24 kHz ingestion, stateful anti-aliased resampling, and PCMU encoding. The adapter validates each schema recursively before dispatch, surfaces only bounded type/code/parameter/request/fingerprint diagnostics, suppresses repeated live invalid requests while that schema circuit is open, and lets the synthetic `POST /api/salons/:id/voice/semantic-check` probe validate both contracts and close their matching circuits after successful requests. The separate `POST /api/salons/:id/voice/semantic-evaluate` path accepts catalog-bound scenarios for repeatable scoring without conversation, availability, or POS mutation.
+The live voice layer is split into `modules/voice`, `modules/voice_twilio`, and provider-specific AI adapter modules such as `modules/voice_openai`. `modules/voice` owns provider-neutral DTOs and runtime interfaces, including whole-response TTS for recording mode, chunked streaming speech for realtime mode, the owner-scoped semantic-contract check, and the bounded read-only semantic-evaluation route. `modules/voice_twilio` owns Twilio request verification, TwiML, Media Streams framing, typed reply scheduling, bounded/paced PCMU playout, playback marks, barge-in clear/cancel, caller-input gating, stale-generation rejection, and an allowlisted stream-status audit shape instead of copying the provider form. `modules/voice_openai` owns OpenAI payloads, strict full and guidance structured-turn schema validation, per-schema salon/config nonretryable contract circuits, Realtime input sessions, dedicated Speech streaming, raw PCM 24 kHz ingestion, stateful anti-aliased resampling, and PCMU encoding. Provider request and Realtime failures expose only fixed messages plus bounded type/code/parameter/request/fingerprint diagnostics; wrapped transport errors and provider message bodies do not cross the voice boundary. The adapter validates each schema recursively before dispatch, suppresses repeated live invalid requests while that schema circuit is open, and lets the synthetic `POST /api/salons/:id/voice/semantic-check` probe validate both contracts and close their matching circuits after successful requests. The separate `POST /api/salons/:id/voice/semantic-evaluate` path accepts catalog-bound scenarios for repeatable scoring without conversation, availability, or POS mutation.
 
 The local `conversation-eval -mode direct-model` path is deliberately separate
 from both runtime and the authenticated semantic-evaluation endpoint. It runs a
@@ -920,6 +1002,15 @@ uses only the encrypted salon record and never falls back to environment
 configuration. Explicit owner-SMS enablement, exact-destination consent,
 Account SID/Auth Token, sender or Messaging Service, and public HTTPS callback
 URLs form its configuration fence.
+
+Provider failures follow the same boundary. POS and Square paths persist and
+return stable internal error codes with fixed safe messages, never provider
+response details. Integration-config responses expose only configured/source
+booleans and explicitly masked values; write-only secret, SID, destination, and
+clear-control fields are absent from the serialized response. Voice audit rows
+retain only bounded operational fields. V63 redacts older POS/Square diagnostic
+text, clears historical POS error payloads, and replaces legacy Twilio/OpenAI
+Realtime failure payloads before those records can be read by the application.
 
 The Milestone 7 training layer stores owner-authored salon knowledge,
 corrections, and service aliases as salon-scoped data. Conversation runtime may
@@ -1137,10 +1228,14 @@ Phase 2 owner-manual workflow, Phase 3 configuration/readiness, Phase 4A-4C
 internal create and whole-root lifecycle execution, the V52-V55 owner-reviewed
 authority-switch workflow, V56 owner-notification delivery, V57 operations
 health, V58 cross-table alias ownership, V59 customer appointment SMS consent
-and delivery, V60 Square webhook operations, V61 scheduling PII retention, and
-V62 party-request tenant integrity. The next release work is operational
-validation and external readiness, not an unimplemented application milestone
-after Phase 6.
+and delivery, V60 Square webhook operations, V61 scheduling PII retention,
+V62 party-request tenant integrity, V63 provider-diagnostic redaction, and the
+V64-V72 SaaS tenant stack. The repository now contains the Phase 3-10 Business
+cutover, Tenant/Platform UI separation, Platform technical/operations/audit
+control plane, membership-only tenant runtime, slug-scoped landing, tenant-safe
+POS calendar readiness, database RLS/runtime-role boundary, public safe
+projection, exact Platform PII scopes, quotas/fair worker claims, and release
+contract updates.
 
 This is code-ready evidence only. Operational production readiness still
 requires dashboard-managed live provider configuration and credentials, real

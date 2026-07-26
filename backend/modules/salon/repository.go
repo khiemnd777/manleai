@@ -103,6 +103,47 @@ func (r *Repository) Create(ctx context.Context, ownerUserID string, req CreateS
 		return nil, classifySalonConstraint(err)
 	}
 
+	// V64 also installs a trigger so salon creation by the previous compatible
+	// image receives the same membership. Keep the insert explicit here because
+	// membership is part of the new application's onboarding transaction, while
+	// ON CONFLICT makes the trigger and repository paths converge safely.
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO salon_memberships (
+			salon_id, user_id, role_id, status, is_owner,
+			created_by_user_id, updated_by_user_id
+		)
+		SELECT $1, $2, role.id, 'active', true, $2, $2
+		FROM roles AS role
+		WHERE role.name = 'tenant_owner'
+		  AND role.scope = 'tenant'
+		ON CONFLICT (salon_id, user_id) DO NOTHING
+	`, salonID, ownerUserID)
+	if err != nil {
+		return nil, classifySalonConstraint(err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return nil, err
+	} else if affected == 0 {
+		var ownerMembershipReady bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM salon_memberships AS membership
+				JOIN roles AS role ON role.id = membership.role_id
+				WHERE membership.salon_id = $1
+				  AND membership.user_id = $2
+				  AND membership.status = 'active'
+				  AND membership.is_owner
+				  AND role.name = 'tenant_owner'
+			)
+		`, salonID, ownerUserID).Scan(&ownerMembershipReady); err != nil {
+			return nil, err
+		}
+		if !ownerMembershipReady {
+			return nil, ErrNotFound
+		}
+	}
+
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO salon_settings (salon_id, booking_mode, scheduling_authority)
 		VALUES ($1, 'pending_approval', $2)
@@ -156,7 +197,7 @@ func (r *Repository) Update(ctx context.Context, id string, ownerUserID string, 
 
 func (r *Repository) GetSettings(ctx context.Context, salonID string, ownerUserID string) (*Settings, error) {
 	row := r.db.QueryRowContext(ctx, settingsSelect+`
-		WHERE ss.salon_id = $1 AND s.owner_user_id = $2
+		WHERE ss.salon_id = $1 AND public.has_active_tenant_membership(s.id, $2::uuid)
 	`, salonID, ownerUserID)
 	return scanSettings(row)
 }
@@ -175,7 +216,7 @@ func (r *Repository) UpdateSettings(ctx context.Context, salonID string, ownerUs
 		SELECT ss.scheduling_authority
 		FROM salon_settings ss
 		JOIN salons s ON s.id = ss.salon_id
-		WHERE ss.salon_id = $1 AND s.owner_user_id = $2
+		WHERE ss.salon_id = $1 AND public.has_active_tenant_membership(s.id, $2::uuid)
 		FOR UPDATE OF ss, s
 	`, salonID, ownerUserID).Scan(&schedulingAuthority)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -211,7 +252,7 @@ func (r *Repository) UpdateSettings(ctx context.Context, salonID string, ownerUs
 		return nil, ErrNotFound
 	}
 	settings, err := scanSettings(tx.QueryRowContext(ctx, settingsSelect+`
-		WHERE ss.salon_id = $1 AND s.owner_user_id = $2
+		WHERE ss.salon_id = $1 AND public.has_active_tenant_membership(s.id, $2::uuid)
 	`, salonID, ownerUserID))
 	if err != nil {
 		return nil, err
@@ -261,8 +302,27 @@ func (r *Repository) CountConsultationReadyServices(ctx context.Context, salonID
 }
 
 func (r *Repository) GetPublicCatalogSettings(ctx context.Context, salonID string, ownerUserID string) (*PublicCatalogSettings, error) {
-	row := r.db.QueryRowContext(ctx, publicCatalogSettingsQuery(), salonID, ownerUserID)
+	row := r.db.QueryRowContext(ctx, publicCatalogSettingsQuery(true), salonID, ownerUserID)
 	return scanPublicCatalogSettings(row)
+}
+
+// GetPublicCatalogSettingsForSalon is the owner-neutral domain read used by
+// already-authorized internal callers such as the shared SaaS Business module.
+// HTTP handlers must authorize the Tenant or Platform surface before calling
+// it; keeping readiness calculation here prevents a second authority policy.
+func (r *Repository) GetPublicCatalogSettingsForSalon(ctx context.Context, salonID string) (*PublicCatalogSettings, error) {
+	return PublicCatalogSettingsForSalon(ctx, r.db, salonID)
+}
+
+type publicCatalogQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// PublicCatalogSettingsForSalon exposes the canonical selected-authority
+// readiness calculation to an already-authorized caller, including callers
+// operating inside a transaction that holds the shared scheduling fence.
+func PublicCatalogSettingsForSalon(ctx context.Context, queryer publicCatalogQueryer, salonID string) (*PublicCatalogSettings, error) {
+	return scanPublicCatalogSettings(queryer.QueryRowContext(ctx, publicCatalogSettingsQuery(false), salonID))
 }
 
 func (r *Repository) UpdatePublicCatalogSettings(ctx context.Context, salonID string, ownerUserID string, req UpdatePublicCatalogRequest) (*PublicCatalogSettings, error) {
@@ -279,7 +339,7 @@ func (r *Repository) UpdatePublicCatalogSettings(ctx context.Context, salonID st
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, fence.AdvisoryKey(salonID)); err != nil {
 		return nil, err
 	}
-	current, err := scanPublicCatalogSettings(tx.QueryRowContext(ctx, publicCatalogSettingsQuery(), salonID, ownerUserID))
+	current, err := scanPublicCatalogSettings(tx.QueryRowContext(ctx, publicCatalogSettingsQuery(true), salonID, ownerUserID))
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +387,7 @@ func (r *Repository) UpdatePublicCatalogSettings(ctx context.Context, salonID st
 	if affected, _ := result.RowsAffected(); affected == 0 {
 		return nil, ErrNotFound
 	}
-	updated, err := scanPublicCatalogSettings(tx.QueryRowContext(ctx, publicCatalogSettingsQuery(), salonID, ownerUserID))
+	updated, err := scanPublicCatalogSettings(tx.QueryRowContext(ctx, publicCatalogSettingsQuery(true), salonID, ownerUserID))
 	if err != nil {
 		return nil, err
 	}
@@ -556,7 +616,11 @@ func scanSettings(row rowScanner) (*Settings, error) {
 	return &settings, nil
 }
 
-func publicCatalogSettingsQuery() string {
+func publicCatalogSettingsQuery(ownerScoped bool) string {
+	ownerPredicate := ""
+	if ownerScoped {
+		ownerPredicate = " AND salon.owner_user_id = $2"
+	}
 	return `
 		WITH owned_salon AS (
 			SELECT salon.id, salon.active_pos_provider, salon.public_slug,
@@ -564,7 +628,7 @@ func publicCatalogSettingsQuery() string {
 			       settings.scheduling_authority, settings.scheduling_authority_version
 			FROM salons salon
 			JOIN salon_settings settings ON settings.salon_id = salon.id
-			WHERE salon.id = $1 AND salon.owner_user_id = $2
+			WHERE salon.id = $1` + ownerPredicate + `
 		),
 		canonical_services AS (
 			SELECT svc.id

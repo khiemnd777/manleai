@@ -13,6 +13,17 @@ func (r *WebhookRepository) ListBookingWebhooksForOwner(ctx context.Context, sal
 	if err := r.ensureWebhookOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, WebhookMetrics{}, CalendarRepairHealth{}, err
 	}
+	return r.listBookingWebhooksForSalon(ctx, salonID, status, limit, offset)
+}
+
+func (r *WebhookRepository) ListBookingWebhooksForSalon(ctx context.Context, salonID, status string, limit, offset int) ([]WebhookEventRecord, WebhookMetrics, CalendarRepairHealth, error) {
+	if err := r.ensureWebhookSalon(ctx, salonID); err != nil {
+		return nil, WebhookMetrics{}, CalendarRepairHealth{}, err
+	}
+	return r.listBookingWebhooksForSalon(ctx, salonID, status, limit, offset)
+}
+
+func (r *WebhookRepository) listBookingWebhooksForSalon(ctx context.Context, salonID, status string, limit, offset int) ([]WebhookEventRecord, WebhookMetrics, CalendarRepairHealth, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id::text, event_type, processing_status, processing_attempts,
 		       requeue_count, COALESCE(last_error_class,''), COALESCE(last_error_code,''),
@@ -51,6 +62,17 @@ func (r *WebhookRepository) GetBookingWebhookForOwner(ctx context.Context, salon
 	if err := r.ensureWebhookOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
 	}
+	return r.getBookingWebhookForSalon(ctx, salonID, eventID)
+}
+
+func (r *WebhookRepository) GetBookingWebhookForSalon(ctx context.Context, salonID, eventID string) (*WebhookEventRecord, error) {
+	if err := r.ensureWebhookSalon(ctx, salonID); err != nil {
+		return nil, err
+	}
+	return r.getBookingWebhookForSalon(ctx, salonID, eventID)
+}
+
+func (r *WebhookRepository) getBookingWebhookForSalon(ctx context.Context, salonID, eventID string) (*WebhookEventRecord, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id::text, event_type, processing_status, processing_attempts,
 		       requeue_count, COALESCE(last_error_class,''), COALESCE(last_error_code,''),
@@ -70,12 +92,26 @@ func (r *WebhookRepository) GetBookingWebhookForOwner(ctx context.Context, salon
 }
 
 func (r *WebhookRepository) RequeueBookingWebhookForOwner(ctx context.Context, salonID, ownerUserID, eventID, actionKey, fingerprint string) (*WebhookEventRecord, bool, error) {
+	if err := r.ensureWebhookOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, false, err
+	}
+	return r.requeueBookingWebhookForSalon(ctx, salonID, ownerUserID, eventID, actionKey, fingerprint)
+}
+
+func (r *WebhookRepository) RequeueBookingWebhookForSalon(ctx context.Context, salonID, actorUserID, eventID, actionKey, fingerprint string) (*WebhookEventRecord, bool, error) {
+	if err := r.ensureWebhookSalon(ctx, salonID); err != nil {
+		return nil, false, err
+	}
+	return r.requeueBookingWebhookForSalon(ctx, salonID, actorUserID, eventID, actionKey, fingerprint)
+}
+
+func (r *WebhookRepository) requeueBookingWebhookForSalon(ctx context.Context, salonID, actorUserID, eventID, actionKey, fingerprint string) (*WebhookEventRecord, bool, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, false, err
 	}
 	defer tx.Rollback()
-	if err := ensureWebhookOwnerTx(ctx, tx, salonID, ownerUserID); err != nil {
+	if err := ensureWebhookSalonTx(ctx, tx, salonID); err != nil {
 		return nil, false, err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -97,7 +133,7 @@ func (r *WebhookRepository) RequeueBookingWebhookForOwner(ctx context.Context, s
 		if err := tx.Commit(); err != nil {
 			return nil, false, err
 		}
-		event, getErr := r.GetBookingWebhookForOwner(ctx, salonID, ownerUserID, eventID)
+		event, getErr := r.GetBookingWebhookForSalon(ctx, salonID, eventID)
 		return event, true, getErr
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -146,14 +182,28 @@ func (r *WebhookRepository) RequeueBookingWebhookForOwner(ctx context.Context, s
 			action_type, actor_user_id, result_processing_status,
 			result_processing_attempts, result_requeue_count
 		) VALUES ($1,$2,$3,$4,'requeue',$5,'pending',$6,$7)
-	`, salonID, eventID, actionKey, fingerprint, ownerUserID, processingAttempts, newRequeueCount); err != nil {
+	`, salonID, eventID, actionKey, fingerprint, actorUserID, processingAttempts, newRequeueCount); err != nil {
 		return nil, false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, false, err
 	}
-	event, err := r.GetBookingWebhookForOwner(ctx, salonID, ownerUserID, eventID)
+	event, err := r.GetBookingWebhookForSalon(ctx, salonID, eventID)
 	return event, false, err
+}
+
+func (r *WebhookRepository) ensureWebhookSalon(ctx context.Context, salonID string) error {
+	if r == nil || r.db == nil {
+		return ErrWebhookOperationsValidation
+	}
+	var exists bool
+	if err := r.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM salons WHERE id=$1)`, salonID).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return pos.ErrNotFound
+	}
+	return nil
 }
 
 func (r *WebhookRepository) ensureWebhookOwner(ctx context.Context, salonID, ownerUserID string) error {
@@ -176,6 +226,17 @@ func ensureWebhookOwnerTx(ctx context.Context, tx *sql.Tx, salonID, ownerUserID 
 		return err
 	}
 	if !owned {
+		return pos.ErrNotFound
+	}
+	return nil
+}
+
+func ensureWebhookSalonTx(ctx context.Context, tx *sql.Tx, salonID string) error {
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM salons WHERE id=$1)`, salonID).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
 		return pos.ErrNotFound
 	}
 	return nil

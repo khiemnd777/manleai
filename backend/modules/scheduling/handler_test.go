@@ -11,7 +11,14 @@ import (
 	"github.com/manleai/ai-receptionist/internal/middleware"
 	"github.com/manleai/ai-receptionist/internal/respond"
 	"github.com/manleai/ai-receptionist/modules/booking"
+	tenantruntime "github.com/manleai/ai-receptionist/modules/tenant_runtime"
 )
+
+type rejectingTenantLimiter struct{}
+
+func (rejectingTenantLimiter) AllowTenant(context.Context, middleware.ActorContext, string, string, int) (tenantruntime.Decision, error) {
+	return tenantruntime.Decision{Limit: 1, Remaining: 0, RetryAfterSec: 12}, tenantruntime.ErrQuotaExceeded
+}
 
 type fakeHandlerActions struct {
 	result  *ActionResult
@@ -105,6 +112,26 @@ func TestHandlerAvailabilityMapsFailClosedConflictToStale409(t *testing.T) {
 	}
 	if payload.Error.Code != "AVAILABILITY_QUOTE_STALE" {
 		t.Fatalf("error code = %q", payload.Error.Code)
+	}
+}
+
+func TestHandlerRejectsOverQuotaBeforeSchedulingExecution(t *testing.T) {
+	actions := &fakeHandlerActions{}
+	handler := NewHandler(actions, &fakeHandlerRequests{}).SetTenantRuntimeLimiter(rejectingTenantLimiter{})
+	app := fiber.New()
+	app.Use(func(c *fiber.Ctx) error {
+		c.Locals(middleware.LocalUserID, "owner-1")
+		c.Locals(middleware.LocalActorContext, middleware.ActorContext{UserID: "owner-1"})
+		return c.Next()
+	})
+	app.Post("/salons/:id/scheduling-actions", handler.ExecuteAction)
+	response := executeSchedulingRequest(t, app, http.MethodPost, "/salons/salon-1/scheduling-actions", `{"operation_type":"book","operation_key":"over-limit"}`)
+	defer response.Body.Close()
+	if response.StatusCode != fiber.StatusTooManyRequests || response.Header.Get("Retry-After") != "12" {
+		t.Fatalf("status=%d retry-after=%q", response.StatusCode, response.Header.Get("Retry-After"))
+	}
+	if actions.request.OperationType != "" {
+		t.Fatalf("scheduling action executed after quota rejection: %#v", actions.request)
 	}
 }
 

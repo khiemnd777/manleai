@@ -6,6 +6,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/internal/respond"
 )
 
@@ -13,8 +14,30 @@ const (
 	LocalUserID                  = "user_id"
 	LocalSalonID                 = "salon_id"
 	LocalRoles                   = "roles"
+	LocalActorContext            = "actor_context"
 	localAccessPrincipalResolver = "access_principal_resolver"
 )
+
+// ActorContext is the server-owned identity and coarse access context attached
+// to every authenticated request. A signed token proves identity only; these
+// values are always rebuilt from current PostgreSQL state. Route handlers own
+// the access surface (tenant or platform) and must never accept it from a
+// request header or body.
+type ActorContext struct {
+	UserID         string   `json:"user_id"`
+	PrimarySalonID string   `json:"primary_salon_id,omitempty"`
+	Roles          []string `json:"roles"`
+}
+
+func (a ActorContext) HasRole(role string) bool {
+	role = strings.TrimSpace(role)
+	for _, candidate := range a.Roles {
+		if candidate == role {
+			return true
+		}
+	}
+	return false
+}
 
 // AccessPrincipalResolver loads the current server-owned authentication
 // principal for an already signature-verified access token. Implementations
@@ -63,7 +86,8 @@ func RequireAuth(jwtSecret string) fiber.Handler {
 		if !ok || resolver == nil {
 			return respond.Error(c, fiber.StatusUnauthorized, "UNAUTHENTICATED", "Invalid or expired access token.")
 		}
-		resolvedUserID, salonID, roles, err := resolver.ResolveAccessPrincipal(c.UserContext(), userID)
+		actorContext := databasecontext.WithActor(c.UserContext(), userID)
+		resolvedUserID, salonID, roles, err := resolver.ResolveAccessPrincipal(actorContext, userID)
 		if err != nil || resolvedUserID == "" || resolvedUserID != userID {
 			return respond.Error(c, fiber.StatusUnauthorized, "UNAUTHENTICATED", "Invalid or expired access token.")
 		}
@@ -71,6 +95,19 @@ func RequireAuth(jwtSecret string) fiber.Handler {
 		c.Locals(LocalUserID, resolvedUserID)
 		c.Locals(LocalSalonID, salonID)
 		c.Locals(LocalRoles, roles)
+		c.Locals(LocalActorContext, ActorContext{
+			UserID:         resolvedUserID,
+			PrimarySalonID: salonID,
+			Roles:          append([]string(nil), roles...),
+		})
+		c.SetUserContext(databasecontext.WithActor(c.UserContext(), resolvedUserID))
+		return c.Next()
+	}
+}
+
+func DatabaseScope(scope string) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		c.SetUserContext(databasecontext.WithScope(c.UserContext(), scope))
 		return c.Next()
 	}
 }
@@ -82,5 +119,16 @@ func UserID(c *fiber.Ctx) string {
 
 func SalonID(c *fiber.Ctx) string {
 	value, _ := c.Locals(LocalSalonID).(string)
+	return value
+}
+
+func Roles(c *fiber.Ctx) []string {
+	value, _ := c.Locals(LocalRoles).([]string)
+	return append([]string(nil), value...)
+}
+
+func Actor(c *fiber.Ctx) ActorContext {
+	value, _ := c.Locals(LocalActorContext).(ActorContext)
+	value.Roles = append([]string(nil), value.Roles...)
 	return value
 }

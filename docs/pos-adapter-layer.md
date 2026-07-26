@@ -211,7 +211,10 @@ claims queued or retryable failed jobs, checks provider capabilities, calls
 `POSWriteProvider` only for supported operations, updates `pos_entity_links`,
 and writes `pos_sync_logs`. Provider failures are logged to `pos_errors` and
 reflected on canonical sync fields when the operation owns a durable canonical
-projection.
+projection. Those records use stable internal error codes and fixed safe
+messages; provider bodies, wrapped error strings, credentials, and customer
+payloads are not persisted. V63 rewrites historical provider diagnostic text
+and clears historical `pos_errors.payload` values.
 
 ## First Provider
 
@@ -258,6 +261,10 @@ switch. The non-replay test-create gate uses the facade's read-only
 `ResolveCreateSchedulingAuthority`: persisted operation/retry origins must
 agree, and only origin-free work falls back to the current mode. Gate errors
 expose bounded public messages rather than wrapped internal diagnostics.
+Authenticated Square control/write handlers require an explicit `salon_id` and
+never fall back to middleware primary-salon context; the provider-neutral
+service/repository authorization still validates that exact tenant before any
+adapter call.
 `CreateAppointmentInput`, `RescheduleInput`, and `AvailabilityInput` expose
 segment arrays so providers can map multi-service booking payloads without
 leaking provider-specific shapes into booking services. The legacy
@@ -366,6 +373,8 @@ The provider must:
 - Implement `pos.POSProvider`.
 - Keep provider-specific auth and payload mapping inside the adapter package.
 - Return provider-neutral DTOs.
-- Normalize provider errors into the internal POS error codes.
+- Normalize provider errors into internal POS error codes and fixed safe
+  messages before persistence or API response; never expose provider response
+  bodies or wrapped error details.
 - Store secrets only through encrypted `pos_connections` fields.
 - Add only provider-specific docs and tests; do not change booking service logic unless the provider-neutral contract needs to evolve.
