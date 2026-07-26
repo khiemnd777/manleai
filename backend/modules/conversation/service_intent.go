@@ -173,6 +173,11 @@ func clearNewRescheduleSlot(session *Session) {
 	session.RequestedStartTime = nil
 	session.OfferedSlots = nil
 	session.BookingSegments = nil
+	session.PartyPlan = nil
+	session.DialogState.ManualTarget = nil
+	if session.DialogState.Pending != nil && session.DialogState.Pending.PromptKey == PendingManualAppointmentTarget {
+		session.DialogState.Pending = nil
+	}
 }
 
 func clearCancelSelection(session *Session) {
@@ -189,6 +194,14 @@ func clearCancelSelection(session *Session) {
 	session.RequestedStartTime = nil
 	session.OfferedSlots = nil
 	session.BookingSegments = nil
+	session.PartyPlan = nil
+	session.DialogState.ManualTarget = nil
+	if session.DialogState.Pending != nil {
+		switch session.DialogState.Pending.PromptKey {
+		case PendingManualAppointmentTarget, PendingInternalCancelReason, PendingInternalCancelConfirmation:
+			session.DialogState.Pending = nil
+		}
+	}
 }
 
 func rescheduleCandidatesFromAppointments(items []booking.AppointmentActionRef) []RescheduleCandidate {
@@ -196,15 +209,23 @@ func rescheduleCandidatesFromAppointments(items []booking.AppointmentActionRef) 
 	for _, item := range items {
 		segments := rescheduleCandidateSegments(item)
 		candidate := RescheduleCandidate{
-			AppointmentID:      strings.TrimSpace(item.ID),
-			ServiceLabel:       rescheduleServiceLabel(item),
-			StaffLabel:         rescheduleStaffLabel(item),
-			ServiceID:          strings.TrimSpace(item.Service.ID),
-			StaffID:            strings.TrimSpace(item.Staff.ID),
-			StaffSelectionMode: normalizeRescheduleStaffSelectionMode(item.StaffSelectionMode, item.Staff.ID),
-			Segments:           segments,
-			StartTime:          item.StartTime,
-			EndTime:            item.EndTime,
+			AppointmentID:               strings.TrimSpace(item.ID),
+			SchedulingAuthority:         strings.TrimSpace(item.SchedulingAuthority),
+			AuthorityAppointmentVersion: item.AuthorityAppointmentVersion,
+			PartySize:                   item.PartySize,
+			Status:                      strings.TrimSpace(item.Status),
+			ActiveChildCount:            len(segments),
+			ServiceLabel:                rescheduleServiceLabel(item),
+			StaffLabel:                  rescheduleStaffLabel(item),
+			ServiceID:                   strings.TrimSpace(item.Service.ID),
+			StaffID:                     strings.TrimSpace(item.Staff.ID),
+			StaffSelectionMode:          normalizeRescheduleStaffSelectionMode(item.StaffSelectionMode, item.Staff.ID),
+			Segments:                    segments,
+			StartTime:                   item.StartTime,
+			EndTime:                     item.EndTime,
+		}
+		if candidate.PartySize <= 0 && len(segments) > 0 {
+			candidate.PartySize = 1
 		}
 		if len(segments) > 0 {
 			candidate.ServiceID = strings.TrimSpace(segments[0].ServiceID)
@@ -230,6 +251,8 @@ func rescheduleCandidateSegments(item booking.AppointmentActionRef) []booking.Bo
 			ServiceID:          serviceID,
 			StaffID:            staffID,
 			StaffSelectionMode: normalizeRescheduleStaffSelectionMode(segment.StaffSelectionMode, staffID),
+			GuestReference:     strings.TrimSpace(segment.GuestReference),
+			Quantity:           segment.Quantity,
 		})
 	}
 	if len(segments) > 0 {
@@ -499,6 +522,9 @@ func applyRescheduleCandidate(session *Session, candidate RescheduleCandidate) {
 	session.RequestedStartTime = nil
 	session.OfferedSlots = nil
 	session.BookingSegments = append([]booking.BookingSegmentRequest(nil), candidate.Segments...)
+	if validInternalLifecycleCandidate(candidate) {
+		session.PartyPlan = &PartyPlan{PartySize: candidate.PartySize}
+	}
 	if len(session.BookingSegments) == 0 && session.ServiceID != "" {
 		session.BookingSegments = []booking.BookingSegmentRequest{{
 			ServiceID:          session.ServiceID,
@@ -524,6 +550,9 @@ func applyCancelCandidate(session *Session, candidate RescheduleCandidate, loc *
 }
 
 func rescheduleTargetAutoSafe(session Session) bool {
+	if candidate, ok := selectedInternalLifecycleCandidate(session); ok {
+		return candidate.AppointmentID == strings.TrimSpace(session.TargetAppointmentID)
+	}
 	if strings.TrimSpace(session.TargetAppointmentID) == "" ||
 		strings.TrimSpace(session.ServiceID) == "" ||
 		strings.TrimSpace(session.StaffID) == "" ||

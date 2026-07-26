@@ -9,6 +9,7 @@ import (
 
 	"github.com/manleai/ai-receptionist/internal/validation"
 	"github.com/manleai/ai-receptionist/modules/booking"
+	"github.com/manleai/ai-receptionist/modules/scheduling"
 )
 
 const (
@@ -79,10 +80,18 @@ var (
 type Service struct {
 	store              Store
 	bookingTool        BookingTool
+	schedulingTool     NeutralSchedulingTool
 	replyGenerator     ReplyGenerator
 	turnInterpreter    TurnInterpreter
 	answerContextCache *answerContextCache
 	now                func() time.Time
+	customerSMS        CustomerSMSConsentTool
+}
+
+func (s *Service) SetCustomerSMSConsentTool(tool CustomerSMSConsentTool) {
+	if s != nil {
+		s.customerSMS = tool
+	}
 }
 
 type sessionTurnSerializer interface {
@@ -165,12 +174,16 @@ type staffChangeRequest struct {
 }
 
 func NewService(store Store, bookingTool BookingTool) *Service {
-	return &Service{
+	service := &Service{
 		store:              store,
 		bookingTool:        bookingTool,
 		answerContextCache: newAnswerContextCache(defaultAnswerContextTTL),
 		now:                func() time.Time { return time.Now().UTC() },
 	}
+	if tool, ok := bookingTool.(NeutralSchedulingTool); ok {
+		service.schedulingTool = tool
+	}
+	return service
 }
 
 func (s *Service) SetReplyGenerator(generator ReplyGenerator) {
@@ -338,6 +351,9 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 	staff := answerCtx.Staff
 	activeStaff := answerCtx.ActiveStaff
 	knowledge := answerCtx.Knowledge
+	if handled, updated, err := s.handlePendingCustomerSMSConsent(ctx, ownerUserID, *session, message, eventKey, services, staff, cfg, knowledge); handled {
+		return updated, err
+	}
 	if isConsultationSafetyConcern(message) {
 		return s.saveConsultationSafetyHandoff(ctx, ownerUserID, *session, message, eventKey, services, staff, cfg, "deterministic", SafetyAssessment{
 			Concern: true, Category: deterministicSafetyCategory(message), Confidence: 1, Reason: "deterministic_health_suitability_signal",
@@ -359,10 +375,28 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 			}
 		}
 	}
+	pendingNameCandidate := turnPlan.PendingNameCandidate
 	newPlannedTurn := func(before Session, after Session) TurnRecord {
 		turn := newTurnRecord(salonID, ownerUserID, before, after, message, eventKey, services, staff, cfg)
 		applyTurnPlanMetadata(&turn, turnPlan)
 		return turn
+	}
+	storeManualTargetPhoneNameConfirmation := func(next Session) (bool, *Session, error) {
+		if pendingNameCandidate == "" || !sessionHasManualAppointmentTarget(*session) || !sessionExpectsCustomerName(*session) {
+			return false, nil, nil
+		}
+		next.CustomerName = ""
+		setPendingCustomerName(&next, pendingNameCandidate)
+		turn := newPlannedTurn(*session, next)
+		turn.AIMessage = customerNameConfirmationPrompt(pendingNameCandidate)
+		setPendingCustomerNameMetadata(&turn, pendingNameCandidate, "voice_short_bare_name")
+		s.applyReplyGenerator(ctx, &turn, next, services, cfg, "customer_name", "customer_name", knowledge)
+		finalizeTurnMetadata(&turn, *session, next, "customer_name", "customer_name", "customer_name_confirmation")
+		updated, saveErr := s.store.SaveTurn(ctx, turn)
+		return true, updated, saveErr
+	}
+	if handled, updated, err := s.handlePendingFuzzyServiceConfirmation(ctx, salonID, ownerUserID, *session, message, eventKey, turnPlan.ServiceUnderstanding, services, serviceAliases, categoryAliases, staff, cfg, knowledge); handled {
+		return updated, err
 	}
 
 	if handled, updated, err := s.handlePendingOfferedSlotDateTimeCorrection(ctx, salonID, ownerUserID, *session, message, eventKey, services, staff, cfg, knowledge); handled {
@@ -371,6 +405,13 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 
 	if handled, updated, err := s.handlePendingCustomerNameConfirmation(ctx, salonID, ownerUserID, *session, message, eventKey, turnUnderstanding, services, staff, cfg, knowledge); handled {
 		return updated, err
+	}
+	if !consultationStateActive(normalizedDialogState(session.DialogState).Consultation) &&
+		!turnGoalIs(turnUnderstanding, "consultation") &&
+		strings.TrimSpace(turnPlan.PartySignal.ClarifyReason) == "" {
+		if handled, updated, err := s.startFuzzyServiceConfirmation(ctx, salonID, ownerUserID, *session, message, eventKey, turnPlan.ServiceUnderstanding, turnUnderstanding, turnPlan.PartySignal, services, serviceAliases, categoryAliases, staff, cfg); handled {
+			return updated, err
+		}
 	}
 
 	if reply := salonIdentityReplyForMessage(message, *session, cfg); reply != "" {
@@ -461,7 +502,6 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 	if handled, updated, err := s.guardOfferedSlotDateTimeCorrection(ctx, salonID, ownerUserID, *session, message, eventKey, services, serviceAliases, categoryAliases, staff, cfg); handled {
 		return updated, err
 	}
-	pendingNameCandidate := turnPlan.PendingNameCandidate
 	serviceUnderstanding := turnPlan.ServiceUnderstanding
 	if turnPlan.Route != TurnRouteSemanticLane {
 		path := turnPlan.Route
@@ -533,6 +573,9 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 	}
 	if shouldRouteCancel(*session, message) || turnGoalIs(turnUnderstanding, "cancel_appointment") {
 		applyExtraction(&next, message, services, serviceAliases, categoryAliases, staff, loc, s.now)
+		if handled, updated, saveErr := storeManualTargetPhoneNameConfirmation(next); handled {
+			return updated, saveErr
+		}
 		closeConsultationForWorkflow(&next, "cancel_requested", false)
 		return s.handleCancelMessage(ctx, ownerUserID, *session, next, message, eventKey, services, serviceAliases, categoryAliases, staff, cfg, knowledge)
 	}
@@ -549,6 +592,10 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 	}
 	if !extractionApplied {
 		applyExtraction(&next, message, services, serviceAliases, categoryAliases, staff, loc, s.now)
+	}
+	applyManualAppointmentTargetServiceSelection(&next, serviceUnderstanding)
+	if handled, updated, saveErr := storeManualTargetPhoneNameConfirmation(next); handled {
+		return updated, saveErr
 	}
 	if shouldRouteReschedule(*session, message) || turnGoalIs(turnUnderstanding, "reschedule_appointment") {
 		closeConsultationForWorkflow(&next, "reschedule_requested", false)
@@ -752,6 +799,9 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 	if !cfg.AIEnabled {
 		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonAIBookingDisabled, "AI booking is not enabled yet. I can take the request for the owner, but this is not a confirmed appointment.", services, staff, cfg)
 	}
+	if configuredConversationBookingMode(cfg) == scheduling.BookingModeDisabled {
+		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonAIBookingDisabled, "The AI receptionist is not accepting scheduling actions right now. The owner can help with this request, and no appointment is confirmed.", services, staff, cfg)
+	}
 
 	state := normalizedDialogState(next.DialogState)
 	if state.Pending != nil && isPartyServiceCorrectionPrompt(state.Pending.PromptKey) {
@@ -810,7 +860,7 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 	}
 
 	if shouldCheckAvailabilityForRequestedTime(*session, next, selectedOfferedSlot) {
-		available, err := s.applyAvailabilityForRequestedTime(ctx, ownerUserID, &turn, &next, services, staff, cfg)
+		available, requestOnly, err := s.applyAvailabilityForRequestedTime(ctx, ownerUserID, &turn, &next, services, staff, cfg)
 		if err != nil {
 			return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check appointment availability, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
 		}
@@ -820,11 +870,11 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 			finalizeTurnMetadata(&turn, *session, next, "requested_time", "requested_time", "availability_alternative")
 			return s.store.SaveTurn(ctx, turn)
 		}
-		exactRequestedTimeSelected = true
+		exactRequestedTimeSelected = !requestOnly
 		prependConversationMutationAcknowledgement(&turn, conversationResult, next, services)
 	}
 
-	nextAction := planNextConversationAction(next, missingBookingField(next))
+	nextAction := planNextConversationAction(next, missingBookingField(next), cfg)
 	if nextAction.Kind == AssistantActionAskMissingField {
 		missing := nextAction.MissingField
 		if missing == "requested_time" || missing == "requested_start_time" {
@@ -934,7 +984,10 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 	turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{"booking_action": BookingActionReschedule})
 
 	if !cfg.AIEnabled {
-		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonAIBookingDisabled, "AI booking is not enabled yet. I can send this reschedule request to the owner, but the appointment is not rescheduled yet.", services, staff, cfg)
+		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonAIBookingDisabled, "AI booking is not enabled yet. The owner needs to review this reschedule request, and the appointment is not rescheduled yet.", services, staff, cfg)
+	}
+	if configuredConversationBookingMode(cfg) == scheduling.BookingModeDisabled {
+		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonAIBookingDisabled, "The AI receptionist is not accepting scheduling actions right now. The owner can help with this reschedule request, and the appointment has not changed.", services, staff, cfg)
 	}
 	if s.bookingTool == nil {
 		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, rescheduleErrorReply(), services, staff, cfg)
@@ -946,7 +999,43 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 		return s.store.SaveTurn(ctx, turn)
 	}
 
-	if strings.TrimSpace(next.TargetAppointmentID) == "" {
+	if strings.TrimSpace(next.TargetAppointmentID) == "" && manualAppointmentTargetPending(before) {
+		description := normalizeManualAppointmentTarget(message)
+		if description == "" {
+			turn.AIMessage = manualAppointmentTargetPrompt(BookingActionReschedule)
+			s.applyReplyGenerator(ctx, &turn, next, services, cfg, "target_appointment", "target_appointment", knowledge)
+			finalizeTurnMetadata(&turn, before, next, "target_appointment", "target_appointment", "reschedule_manual_target_repeated")
+			return s.store.SaveTurn(ctx, turn)
+		}
+		applyManualAppointmentTarget(&next, description)
+		clearSchedulingFieldsCapturedFromManualTarget(&next)
+		syncTurnUpdate(&turn, next, services, staff, cfg)
+	}
+	if internalLifecyclePending(before, PendingInternalRescheduleConfirmation) {
+		// The pending act is the authorization boundary. General caller intent
+		// parsing cannot execute or alter the reviewed whole-root replacement.
+		next = cloneSessionForTurn(before)
+		if isNegativeOnly(message) || hasCancelNegation(message) {
+			clearInternalLifecyclePending(&next)
+			if next.PartyPlan != nil {
+				next.PartyPlan.SelectedSplitOptionID = ""
+			}
+			next.RequestedStartTime = nil
+			clearSelectedAvailabilityQuote(&next)
+			syncTurnUpdate(&turn, next, services, staff, cfg)
+			turn.AIMessage = "Okay, I did not change the appointment. Which complete replacement option would you prefer?"
+			finalizeTurnMetadata(&turn, before, next, ExpectedInputOfferedSlot, ExpectedInputOfferedSlot, "internal_reschedule_confirmation_rejected")
+			return s.store.SaveTurn(ctx, turn)
+		}
+		if !isAffirmativeOnly(message) {
+			turn.AIMessage = internalLifecycleConfirmationPrompt(next, services, staff, cfg)
+			finalizeTurnMetadata(&turn, before, next, ExpectedInputLifecycleConfirmation, ExpectedInputLifecycleConfirmation, "internal_reschedule_confirmation_repeated")
+			return s.store.SaveTurn(ctx, turn)
+		}
+		return s.tryReschedule(ctx, ownerUserID, turn, next, services, staff, cfg)
+	}
+
+	if strings.TrimSpace(next.TargetAppointmentID) == "" && !sessionHasSchedulingTarget(next) {
 		clearNewRescheduleSlot(&next)
 		if selected := selectRescheduleCandidate(message, next.RescheduleCandidates, services, serviceAliases, categoryAliases, loc, s.now); selected != nil {
 			applyRescheduleCandidate(&next, *selected)
@@ -961,14 +1050,23 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 				})
 				recordTurnTiming(ctx, TurnTimingStageAvailabilityPOS, startedAt, turnTimingResult(err))
 				if err != nil {
-					return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not look up the appointment safely, so I will send this reschedule request to the owner. The appointment is not rescheduled yet.", services, staff, cfg)
+					return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not look up the appointment safely. The owner needs to review this reschedule request, and the appointment is not rescheduled yet.", services, staff, cfg)
 				}
 				next.RescheduleCandidates = rescheduleCandidatesFromAppointments(candidates)
 				syncTurnUpdate(&turn, next, services, staff, cfg)
 			}
 			switch len(next.RescheduleCandidates) {
 			case 0:
-				return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not find an upcoming appointment for this phone number, so I will send this reschedule request to the owner. The appointment is not rescheduled yet.", services, staff, cfg)
+				manualTargetAllowed, policyErr := s.conversationAllowsManualTarget(ctx, before.SalonID, ownerUserID, cfg)
+				if policyErr != nil || !manualTargetAllowed {
+					return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not find an upcoming appointment for this phone number, so the owner needs to review the reschedule request. The appointment is not rescheduled yet.", services, staff, cfg)
+				}
+				setManualAppointmentTargetPending(&next)
+				syncTurnUpdate(&turn, next, services, staff, cfg)
+				turn.AIMessage = manualAppointmentTargetPrompt(BookingActionReschedule)
+				s.applyReplyGenerator(ctx, &turn, next, services, cfg, "target_appointment", "target_appointment", knowledge)
+				finalizeTurnMetadata(&turn, before, next, "target_appointment", "target_appointment", "reschedule_manual_target_prompt")
+				return s.store.SaveTurn(ctx, turn)
 			case 1:
 				turn.AIMessage = rescheduleSingleCandidatePrompt(next.RescheduleCandidates[0], loc)
 			default:
@@ -984,8 +1082,38 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 		}
 	}
 
-	if !rescheduleTargetAutoSafe(next) {
+	if strings.TrimSpace(next.TargetAppointmentID) != "" && !rescheduleTargetAutoSafe(next) {
 		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "This reschedule needs owner review because I cannot safely update that appointment automatically. The appointment is not rescheduled yet.", services, staff, cfg)
+	}
+	if _, internalLifecycle := selectedInternalLifecycleCandidate(next); internalLifecycle {
+		option, selected := selectedPartySplitOption(next.PartyPlan)
+		if !selected && before.PartyPlan != nil {
+			if choice, ok := selectPartySplitOption(message, before.PartyPlan, loc); ok {
+				option, selected = choice.Option, true
+			}
+		}
+		if selected {
+			if !prepareSelectedInternalLifecycleOption(&next, option) {
+				return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not verify the complete replacement, so I did not change the appointment. The owner needs to review it.", services, staff, cfg)
+			}
+			setInternalLifecyclePending(&next, PendingInternalRescheduleConfirmation, option.ID)
+			syncTurnUpdate(&turn, next, services, staff, cfg)
+			turn.AIMessage = internalLifecycleConfirmationPrompt(next, services, staff, cfg)
+			finalizeTurnMetadata(&turn, before, next, ExpectedInputLifecycleConfirmation, ExpectedInputLifecycleConfirmation, "internal_reschedule_confirmation_required")
+			return s.store.SaveTurn(ctx, turn)
+		}
+	}
+	if sessionHasManualAppointmentTarget(next) && strings.TrimSpace(next.ServiceID) == "" {
+		turn.AIMessage = "Which service is on the appointment you want to reschedule?"
+		s.applyReplyGenerator(ctx, &turn, next, services, cfg, "service", "service", knowledge)
+		finalizeTurnMetadata(&turn, before, next, "service", "service", "reschedule_manual_target_missing_service")
+		return s.store.SaveTurn(ctx, turn)
+	}
+	if sessionHasManualAppointmentTarget(next) && strings.TrimSpace(next.CustomerName) == "" {
+		turn.AIMessage = "What name is on that appointment?"
+		s.applyReplyGenerator(ctx, &turn, next, services, cfg, "customer_name", "customer_name", knowledge)
+		finalizeTurnMetadata(&turn, before, next, "customer_name", "customer_name", "reschedule_manual_target_missing_name")
+		return s.store.SaveTurn(ctx, turn)
 	}
 
 	if next.RequestedStartTime == nil {
@@ -1000,7 +1128,10 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 		}
 		if strings.TrimSpace(next.RequestedDate) != "" {
 			if err := s.offerAvailableSlots(ctx, ownerUserID, &turn, &next, services, staff, next.RequestedDate, false, cfg); err != nil {
-				return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check new appointment times, so I will send this reschedule request to the owner. The appointment is not rescheduled yet.", services, staff, cfg)
+				if _, internalLifecycle := selectedInternalLifecycleCandidate(next); internalLifecycle && errors.Is(err, booking.ErrOperationConflict) {
+					return s.reofferInternalLifecycleAfterConflict(ctx, ownerUserID, turn, next, services, staff, cfg, scheduling.OperationKindReschedule)
+				}
+				return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check new appointment times. The owner needs to review this reschedule request, and the appointment is not rescheduled yet.", services, staff, cfg)
 			}
 			if len(next.OfferedSlots) > 0 {
 				turn.AIMessage = formatRescheduleSlotOfferForSession(next.OfferedSlots, loc, false, next, services)
@@ -1010,7 +1141,7 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 			return s.store.SaveTurn(ctx, turn)
 		}
 		if shouldHandoffRepeatedRescheduleNewTime(before, message) {
-			return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I'm having trouble catching the new date and time, so I will send this reschedule request to the owner. The appointment is not rescheduled yet.", services, staff, cfg)
+			return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I'm having trouble catching the new date and time. The owner needs to review this reschedule request, and the appointment is not rescheduled yet.", services, staff, cfg)
 		}
 		turn.AIMessage = "What new day and time would you like?"
 		s.applyReplyGenerator(ctx, &turn, next, services, cfg, "requested_start_time", "requested_start_time", knowledge)
@@ -1022,9 +1153,12 @@ func (s *Service) handleRescheduleMessage(ctx context.Context, ownerUserID strin
 		syncTurnUpdate(&turn, next, services, staff, cfg)
 	}
 	if shouldCheckAvailabilityForRequestedTime(before, next, selectedOfferedSlot) {
-		available, err := s.applyAvailabilityForRequestedTime(ctx, ownerUserID, &turn, &next, services, staff, cfg)
+		available, _, err := s.applyAvailabilityForRequestedTime(ctx, ownerUserID, &turn, &next, services, staff, cfg)
 		if err != nil {
-			return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check new appointment times, so I will send this reschedule request to the owner. The appointment is not rescheduled yet.", services, staff, cfg)
+			if _, internalLifecycle := selectedInternalLifecycleCandidate(next); internalLifecycle && errors.Is(err, booking.ErrOperationConflict) {
+				return s.reofferInternalLifecycleAfterConflict(ctx, ownerUserID, turn, next, services, staff, cfg, scheduling.OperationKindReschedule)
+			}
+			return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check new appointment times. The owner needs to review this reschedule request, and the appointment is not rescheduled yet.", services, staff, cfg)
 		}
 		if !available {
 			s.applyReplyGenerator(ctx, &turn, next, services, cfg, "requested_time", "requested_time", knowledge)
@@ -1048,7 +1182,10 @@ func (s *Service) handleCancelMessage(ctx context.Context, ownerUserID string, b
 	turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{"booking_action": BookingActionCancel})
 
 	if !cfg.AIEnabled {
-		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonAIBookingDisabled, "AI booking is not enabled yet. I can send this cancellation request to the owner, but the appointment is not cancelled yet.", services, staff, cfg)
+		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonAIBookingDisabled, "AI booking is not enabled yet. The owner needs to review this cancellation request, and the appointment is not cancelled yet.", services, staff, cfg)
+	}
+	if configuredConversationBookingMode(cfg) == scheduling.BookingModeDisabled {
+		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonAIBookingDisabled, "The AI receptionist is not accepting scheduling actions right now. The owner can help with this cancellation request, and the appointment is not cancelled.", services, staff, cfg)
 	}
 	if s.bookingTool == nil {
 		return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, cancelErrorReply(), services, staff, cfg)
@@ -1060,10 +1197,93 @@ func (s *Service) handleCancelMessage(ctx context.Context, ownerUserID string, b
 		return s.store.SaveTurn(ctx, turn)
 	}
 
+	if strings.TrimSpace(next.TargetAppointmentID) == "" && manualAppointmentTargetPending(before) {
+		description := normalizeManualAppointmentTarget(message)
+		if description == "" {
+			turn.AIMessage = manualAppointmentTargetPrompt(BookingActionCancel)
+			s.applyReplyGenerator(ctx, &turn, next, services, cfg, "target_appointment", "target_appointment", knowledge)
+			finalizeTurnMetadata(&turn, before, next, "target_appointment", "target_appointment", "cancel_manual_target_repeated")
+			return s.store.SaveTurn(ctx, turn)
+		}
+		applyManualAppointmentTarget(&next, description)
+		clearSchedulingFieldsCapturedFromManualTarget(&next)
+		syncTurnUpdate(&turn, next, services, staff, cfg)
+	}
+	if internalLifecyclePending(before, PendingInternalCancelReason) {
+		next = cloneSessionForTurn(before)
+		candidate, ok := selectedInternalLifecycleCandidate(next)
+		if !ok {
+			return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, cancelErrorReply(), services, staff, cfg)
+		}
+		if isNegativeOnly(message) {
+			clearCancelSelection(&next)
+			clearInternalLifecyclePending(&next)
+			syncTurnUpdate(&turn, next, services, staff, cfg)
+			turn.AIMessage = "Okay, I did not cancel the appointment. What would you like help with instead?"
+			finalizeTurnMetadata(&turn, before, next, ExpectedInputCallerGoal, ExpectedInputCallerGoal, "internal_cancel_reason_aborted")
+			return s.store.SaveTurn(ctx, turn)
+		}
+		reason := strings.TrimSpace(message)
+		if reason == "" {
+			turn.AIMessage = internalLifecycleCancelReasonPrompt(candidate, loc)
+			finalizeTurnMetadata(&turn, before, next, ExpectedInputCancellationReason, ExpectedInputCancellationReason, "internal_cancel_reason_repeated")
+			return s.store.SaveTurn(ctx, turn)
+		}
+		setInternalLifecyclePending(&next, PendingInternalCancelConfirmation, reason)
+		syncTurnUpdate(&turn, next, services, staff, cfg)
+		turn.AIMessage = internalLifecycleCancelConfirmationPrompt(candidate, reason, loc)
+		finalizeTurnMetadata(&turn, before, next, ExpectedInputLifecycleConfirmation, ExpectedInputLifecycleConfirmation, "internal_cancel_confirmation_required")
+		return s.store.SaveTurn(ctx, turn)
+	}
+	if internalLifecyclePending(before, PendingInternalCancelConfirmation) {
+		next = cloneSessionForTurn(before)
+		if isNegativeOnly(message) || hasCancelNegation(message) {
+			clearInternalLifecyclePending(&next)
+			syncTurnUpdate(&turn, next, services, staff, cfg)
+			turn.AIMessage = "Okay, I did not cancel the appointment. What would you like help with instead?"
+			finalizeTurnMetadata(&turn, before, next, ExpectedInputCallerGoal, ExpectedInputCallerGoal, "internal_cancel_confirmation_rejected")
+			return s.store.SaveTurn(ctx, turn)
+		}
+		if !isAffirmativeOnly(message) {
+			candidate, ok := selectedInternalLifecycleCandidate(next)
+			if !ok {
+				return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, cancelErrorReply(), services, staff, cfg)
+			}
+			turn.AIMessage = internalLifecycleCancelConfirmationPrompt(candidate, selectedInternalLifecycleCancelReason(next), loc)
+			finalizeTurnMetadata(&turn, before, next, ExpectedInputLifecycleConfirmation, ExpectedInputLifecycleConfirmation, "internal_cancel_confirmation_repeated")
+			return s.store.SaveTurn(ctx, turn)
+		}
+		return s.tryCancel(ctx, ownerUserID, turn, next, services, staff, cfg)
+	}
+	if sessionHasManualAppointmentTarget(next) {
+		if isNegativeOnly(message) || hasCancelNegation(message) {
+			clearCancelSelection(&next)
+			syncTurnUpdate(&turn, next, services, staff, cfg)
+			turn.AIMessage = "Okay, I will not record a cancellation request. What would you like help with instead?"
+			s.applyReplyGenerator(ctx, &turn, next, services, cfg, "caller_goal", "caller_goal", knowledge)
+			finalizeTurnMetadata(&turn, before, next, "caller_goal", "caller_goal", "cancel_manual_target_rejected")
+			return s.store.SaveTurn(ctx, turn)
+		}
+		if strings.TrimSpace(next.CustomerName) == "" {
+			turn.AIMessage = "What name is on that appointment?"
+			s.applyReplyGenerator(ctx, &turn, next, services, cfg, "customer_name", "customer_name", knowledge)
+			finalizeTurnMetadata(&turn, before, next, "customer_name", "customer_name", "cancel_manual_target_missing_name")
+			return s.store.SaveTurn(ctx, turn)
+		}
+		return s.tryCancel(ctx, ownerUserID, turn, next, services, staff, cfg)
+	}
+
 	if strings.TrimSpace(next.TargetAppointmentID) == "" {
 		if selected := selectRescheduleCandidate(message, next.RescheduleCandidates, services, serviceAliases, categoryAliases, loc, s.now); selected != nil {
 			applyCancelCandidate(&next, *selected, loc)
 			syncTurnUpdate(&turn, next, services, staff, cfg)
+			if _, internalLifecycle := selectedInternalLifecycleCandidate(next); internalLifecycle {
+				setInternalLifecyclePending(&next, PendingInternalCancelReason, "")
+				syncTurnUpdate(&turn, next, services, staff, cfg)
+				turn.AIMessage = internalLifecycleCancelReasonPrompt(*selected, loc)
+				finalizeTurnMetadata(&turn, before, next, ExpectedInputCancellationReason, ExpectedInputCancellationReason, "internal_cancel_reason_required")
+				return s.store.SaveTurn(ctx, turn)
+			}
 			turn.AIMessage = cancelSingleCandidatePrompt(*selected, loc)
 			s.applyReplyGenerator(ctx, &turn, next, services, cfg, "target_appointment", "target_appointment", knowledge)
 			finalizeTurnMetadata(&turn, before, next, "target_appointment", "target_appointment", "cancel_target_confirmation")
@@ -1078,7 +1298,7 @@ func (s *Service) handleCancelMessage(ctx context.Context, ownerUserID string, b
 			})
 			recordTurnTiming(ctx, TurnTimingStageAvailabilityPOS, startedAt, turnTimingResult(err))
 			if err != nil {
-				return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not look up the appointment safely, so I will send this cancellation request to the owner. The appointment is not cancelled yet.", services, staff, cfg)
+				return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not look up the appointment safely. The owner needs to review this cancellation request, and the appointment is not cancelled yet.", services, staff, cfg)
 			}
 			next.RescheduleCandidates = rescheduleCandidatesFromAppointments(candidates)
 			syncTurnUpdate(&turn, next, services, staff, cfg)
@@ -1086,6 +1306,13 @@ func (s *Service) handleCancelMessage(ctx context.Context, ownerUserID string, b
 		if selected := selectRescheduleCandidate(message, next.RescheduleCandidates, services, serviceAliases, categoryAliases, loc, s.now); selected != nil {
 			applyCancelCandidate(&next, *selected, loc)
 			syncTurnUpdate(&turn, next, services, staff, cfg)
+			if _, internalLifecycle := selectedInternalLifecycleCandidate(next); internalLifecycle {
+				setInternalLifecyclePending(&next, PendingInternalCancelReason, "")
+				syncTurnUpdate(&turn, next, services, staff, cfg)
+				turn.AIMessage = internalLifecycleCancelReasonPrompt(*selected, loc)
+				finalizeTurnMetadata(&turn, before, next, ExpectedInputCancellationReason, ExpectedInputCancellationReason, "internal_cancel_reason_required")
+				return s.store.SaveTurn(ctx, turn)
+			}
 			turn.AIMessage = cancelSingleCandidatePrompt(*selected, loc)
 			s.applyReplyGenerator(ctx, &turn, next, services, cfg, "target_appointment", "target_appointment", knowledge)
 			finalizeTurnMetadata(&turn, before, next, "target_appointment", "target_appointment", "cancel_target_confirmation")
@@ -1093,11 +1320,26 @@ func (s *Service) handleCancelMessage(ctx context.Context, ownerUserID string, b
 		}
 		switch len(next.RescheduleCandidates) {
 		case 0:
-			return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not find an upcoming appointment for this phone number, so I will send this cancellation request to the owner. The appointment is not cancelled yet.", services, staff, cfg)
+			manualTargetAllowed, policyErr := s.conversationAllowsManualTarget(ctx, before.SalonID, ownerUserID, cfg)
+			if policyErr != nil || !manualTargetAllowed {
+				return s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not find an upcoming appointment for this phone number, so the owner needs to review the cancellation request. The appointment is not cancelled yet.", services, staff, cfg)
+			}
+			setManualAppointmentTargetPending(&next)
+			syncTurnUpdate(&turn, next, services, staff, cfg)
+			turn.AIMessage = manualAppointmentTargetPrompt(BookingActionCancel)
+			s.applyReplyGenerator(ctx, &turn, next, services, cfg, "target_appointment", "target_appointment", knowledge)
+			finalizeTurnMetadata(&turn, before, next, "target_appointment", "target_appointment", "cancel_manual_target_prompt")
+			return s.store.SaveTurn(ctx, turn)
 		case 1:
 			applyCancelCandidate(&next, next.RescheduleCandidates[0], loc)
 			syncTurnUpdate(&turn, next, services, staff, cfg)
-			turn.AIMessage = cancelSingleCandidatePrompt(next.RescheduleCandidates[0], loc)
+			if _, internalLifecycle := selectedInternalLifecycleCandidate(next); internalLifecycle {
+				setInternalLifecyclePending(&next, PendingInternalCancelReason, "")
+				syncTurnUpdate(&turn, next, services, staff, cfg)
+				turn.AIMessage = internalLifecycleCancelReasonPrompt(next.RescheduleCandidates[0], loc)
+			} else {
+				turn.AIMessage = cancelSingleCandidatePrompt(next.RescheduleCandidates[0], loc)
+			}
 		default:
 			if isCancelTargetFiller(message) && len(before.RescheduleCandidates) > 0 {
 				turn.AIMessage = cancelConciseTargetPrompt(next.RescheduleCandidates, loc)
@@ -1107,6 +1349,13 @@ func (s *Service) handleCancelMessage(ctx context.Context, ownerUserID string, b
 		}
 		s.applyReplyGenerator(ctx, &turn, next, services, cfg, "target_appointment", "target_appointment", knowledge)
 		finalizeTurnMetadata(&turn, before, next, "target_appointment", "target_appointment", "cancel_target_lookup")
+		return s.store.SaveTurn(ctx, turn)
+	}
+	if candidate, internalLifecycle := selectedInternalLifecycleCandidate(next); internalLifecycle {
+		setInternalLifecyclePending(&next, PendingInternalCancelReason, "")
+		syncTurnUpdate(&turn, next, services, staff, cfg)
+		turn.AIMessage = internalLifecycleCancelReasonPrompt(candidate, loc)
+		finalizeTurnMetadata(&turn, before, next, ExpectedInputCancellationReason, ExpectedInputCancellationReason, "internal_cancel_reason_required")
 		return s.store.SaveTurn(ctx, turn)
 	}
 
@@ -1134,6 +1383,119 @@ func (s *Service) handleCancelMessage(ctx context.Context, ownerUserID string, b
 	}
 
 	return s.tryCancel(ctx, ownerUserID, turn, next, services, staff, cfg)
+}
+
+func manualAppointmentTargetPending(session Session) bool {
+	return session.DialogState.Pending != nil && session.DialogState.Pending.PromptKey == PendingManualAppointmentTarget
+}
+
+func (s *Service) conversationAllowsManualTarget(ctx context.Context, salonID string, ownerUserID string, cfg *RuntimeConfig) (bool, error) {
+	if cfg != nil && cfg.BookingMode != "" {
+		return cfg.BookingMode == scheduling.BookingModePendingApproval, nil
+	}
+	if s.schedulingTool == nil {
+		return false, nil
+	}
+	authority, err := s.schedulingTool.CurrentSchedulingAuthority(ctx, salonID, ownerUserID)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(authority) == booking.SchedulingAuthorityOwnerManual, nil
+}
+
+func sessionHasManualAppointmentTarget(session Session) bool {
+	return strings.TrimSpace(session.TargetAppointmentID) == "" &&
+		session.DialogState.ManualTarget != nil &&
+		strings.TrimSpace(session.DialogState.ManualTarget.Description) != ""
+}
+
+func manualAppointmentTargetExpectedInput(session Session) string {
+	if !sessionHasManualAppointmentTarget(session) {
+		return ""
+	}
+	switch bookingActionForSession(session) {
+	case BookingActionCancel:
+		if strings.TrimSpace(session.CustomerName) == "" {
+			return ExpectedInputCustomerName
+		}
+		return ExpectedInputBookingContinuation
+	case BookingActionReschedule:
+		if strings.TrimSpace(session.ServiceID) == "" {
+			return ExpectedInputService
+		}
+		if strings.TrimSpace(session.CustomerName) == "" {
+			return ExpectedInputCustomerName
+		}
+		if session.RequestedStartTime == nil {
+			if strings.TrimSpace(session.RequestedDate) == "" {
+				return ExpectedInputRequestedDate
+			}
+			return ExpectedInputRequestedTime
+		}
+		return ExpectedInputBookingContinuation
+	default:
+		return ""
+	}
+}
+
+func applyManualAppointmentTargetServiceSelection(session *Session, understanding serviceUnderstandingResult) bool {
+	if session == nil || manualAppointmentTargetExpectedInput(*session) != ExpectedInputService ||
+		understanding.Status != serviceUnderstandingStatusSelected || len(understanding.Candidates) != 1 {
+		return false
+	}
+	return applyServiceSelection(session, understanding.Candidates)
+}
+
+func setManualAppointmentTargetPending(session *Session) {
+	if session == nil {
+		return
+	}
+	state := normalizedDialogState(session.DialogState)
+	state.ManualTarget = nil
+	state.Pending = &PendingConversationAct{
+		Kind:      "collect_appointment_target",
+		Entity:    "appointment_target",
+		PromptKey: PendingManualAppointmentTarget,
+	}
+	session.DialogState = state
+}
+
+func applyManualAppointmentTarget(session *Session, description string) {
+	if session == nil || strings.TrimSpace(session.TargetAppointmentID) != "" {
+		return
+	}
+	state := normalizedDialogState(session.DialogState)
+	state.Pending = nil
+	state.ManualTarget = &ManualAppointmentTarget{Description: normalizeManualAppointmentTarget(description)}
+	session.DialogState = state
+}
+
+func clearSchedulingFieldsCapturedFromManualTarget(session *Session) {
+	if session == nil {
+		return
+	}
+	session.RequestedDate = ""
+	session.RequestedStartTime = nil
+	session.OfferedSlots = nil
+	clearSelectedAvailabilityQuote(session)
+	session.DialogState.SchedulingRequestOnly = false
+}
+
+func normalizeManualAppointmentTarget(description string) string {
+	description = strings.Join(strings.Fields(strings.TrimSpace(description)), " ")
+	const maxTargetRunes = 2000
+	runes := []rune(description)
+	if len(runes) > maxTargetRunes {
+		description = string(runes[:maxTargetRunes])
+	}
+	return strings.TrimSpace(description)
+}
+
+func manualAppointmentTargetPrompt(action string) string {
+	if action == BookingActionCancel {
+		return "Please describe the appointment's day, time, and service so the owner can identify the cancellation request."
+	}
+	return "Please describe the current appointment's day, time, and service so the owner can identify the reschedule request."
 }
 
 func (s *Service) List(ctx context.Context, salonID string, ownerUserID string, limit int, offset int, lifecycleStatus string) (*ListSessionsResponse, error) {

@@ -3,19 +3,875 @@
 Base URL: `http://localhost:18089`
 
 All endpoints except login, bootstrap owner setup, refresh, logout, health,
-public catalog endpoints, the Square OAuth callback, and Twilio voice webhooks
-require:
+public catalog endpoints, the Square OAuth callback, Twilio voice webhooks, and
+the signed Twilio Messaging callbacks require:
 
 ```txt
 Authorization: Bearer <access_token>
 ```
 
+Production API requests pass through an atomic Redis token bucket before route
+dispatch. The limiter applies both a global client bucket and a route-class
+bucket, derives Redis identities with HMAC instead of storing raw client IPs or
+bearer tokens, and returns `RateLimit-Limit`, `RateLimit-Remaining`, and
+`RateLimit-Reset`. A rejected request returns generic `429 RATE_LIMITED` plus
+`Retry-After`; a required Redis failure returns generic
+`503 RATE_LIMIT_UNAVAILABLE` and never falls through to the protected route.
+The edge overwrites `X-ManleAI-Client-IP`; caller-supplied values are not trusted.
+
+## Scheduling Authority Status And API Honesty
+
+`docs/scheduling-authority.md` is the normative confirmation contract. The
+exact authority tokens are `owner_manual`, `manleai_calendar`, and
+`external_provider`.
+
+Unless a section is explicitly labeled as planned, this document describes the
+current API. Phase 2 routes authority-neutral availability plus book,
+reschedule, and cancel actions through `backend/modules/scheduling.Service`.
+Availability without a target and an origin-free new action resolve the owner-
+scoped persisted `salon_settings.scheduling_authority`. Existing operation
+keys resolve their origin across `booking_attempts` and
+`scheduling_requests`; retry attempts resolve their booking-attempt origin;
+target-aware availability and appointment mutations resolve their target-
+appointment origin. Reschedule/cancel require every operation, retry, and
+target origin present to agree before dispatch.
+
+Reschedule-candidate lookup, `ReplayCreate`, and `ReplayCancel` are provider-free
+history delegation and do not select an executor or call a provider. Existing
+appointment/calendar history and reconciliation reads continue through the
+established booking service. External lease recovery and provider-calendar
+persistence/matching/reconciliation are explicitly fenced to
+`external_provider`. Square webhook target and repair selection remains Square
+provider/connection-scoped so historical external mirrors can converge after a
+later authority switch; downstream calendar writes cannot mutate internal-
+origin rows.
+
+`external_provider` has the only provider-backed confirming executor, implemented by
+`backend/modules/scheduling_external_provider.Adapter` delegating to the
+unchanged booking service. `owner_manual` has a ready, non-confirming executor
+in `backend/modules/scheduling_owner_manual`: availability returns
+`request_only`, and book/reschedule/cancel actions create or replay durable
+pending owner-review requests. It does not call a POS provider or fabricate an
+appointment, provider ID, POS error, or reconciliation record. Phase 4C
+registers `manleai_calendar` for verified aggregate availability and atomic
+`book` plus whole-root `reschedule`/`cancel` across structured multi-guest,
+multi-service staff-only and pooled plans. It confirms only with durable
+internal root appointment/attempt IDs, exact target/result versions, status,
+active-child count, and the operation's complete child snapshot, and it returns
+no provider/POS evidence. V52-V55 expose explicit owner-reviewed authority
+preview/commit, readiness/version/concurrency fences, immutable audit history,
+and an explicit inverse-run reference; the switch controls live in Settings,
+not Appointments or Integrations. The Appointments page contains the owner-
+review queue, owner-notification delivery operations, scheduling readiness,
+structured internal create, and target-origin lifecycle dialogs.
+
+`scheduling.Service.CurrentSchedulingAuthority` provides a validated,
+owner-scoped current-token read. Square readiness exposes that value as
+`scheduling_authority` and sets `can_test_booking` and
+`can_enable_ai_booking` false unless it is `external_provider`. This is a gate
+for new work, not a rule that hides or strands persisted external-origin work.
+The read-only `scheduling.Service.ResolveCreateSchedulingAuthority` resolves a
+create operation/retry lineage first and falls back to the current token only
+when no persisted origin exists. Square test create calls it after
+provider-free replay; it does not dispatch an executor or provider.
+
+Runtime confirmation remains unchanged: a Square/external-provider operation
+is confirmed, rescheduled, or cancelled only after provider success returns the
+required provider booking metadata and the backend persists it. An
+`owner_manual` result is always `pending_owner_review`, and the owner-review UI
+cannot turn it into an appointment or mutate a target appointment. A
+`manleai_calendar` result is confirmed only after the V49 atomic commit passes
+the applicable V50 capacity/concurrency/exact-graph/guest-party and V51
+lifecycle guards and returns durable internal root/version/child evidence.
+Current `pos_*`, Square, and
+`active_pos_provider` fields remain external-provider compatibility fields and
+are null in persisted internal rows.
+
+Generic clients must branch on `scheduling_authority` and the authority-native
+IDs, status, versions, and backend capabilities before reading a legacy POS or
+provider field. A non-empty `pos_booking_id`, `pos_appointment_id`, Square
+connection/readiness result, or `active_pos_provider` never selects an
+authority. `authority_appointment_version` remains present even when an
+external provider's valid baseline version is zero. Unknown authority fails
+closed. The field-by-field compatibility
+inventory, public/config-transfer exclusions, and removal gates are maintained
+in `docs/operations/owner-first-compatibility.md`.
+
+### Implemented Authority-Not-Ready Error
+
+The authenticated neutral scheduling handlers map
+`booking.ErrSchedulingAuthorityNotReady` to:
+
+```json
+{
+  "error": {
+    "code": "SCHEDULING_AUTHORITY_NOT_READY",
+    "message": "The salon's scheduling authority is not ready for scheduling actions."
+  }
+}
+```
+
+The HTTP status is `409 Conflict`. This generic message does not reveal the
+selected token, unavailable capability, provider state, or wrapped internal
+error. It is the implemented fail-closed behavior when the resolved origin or
+current selection cannot execute the requested action; it is not a fallback
+booking request, does not authorize provider dispatch, and must not be
+presented as confirmed. Reschedule-candidate lookup and create/cancel replay do not return
+this error merely because the current setting is unready: they are persisted
+history reads with no provider dispatch.
+
+### Implemented Authority-Neutral Scheduling API
+
+These authenticated routes are additive. Existing `/availability`,
+`/booking-attempts`, and appointment mutation routes remain the external-
+provider compatibility API; `owner_manual` callers use the neutral routes.
+
+`POST /api/salons/:id/scheduling-availability`
+
+Accepts the provider-neutral availability body documented for
+`POST /api/salons/:id/availability`, including the mutually exclusive
+`target_appointment_id` and `retry_of_attempt_id` origin selectors described
+there. The response is a discriminated union:
+
+```json
+{
+  "service_id": "manicure-service-uuid",
+  "staff_selection_mode": "anyone",
+  "segments": [
+    {
+      "service_id": "manicure-service-uuid",
+      "staff_selection_mode": "anyone",
+      "guest_reference": "guest-1",
+      "quantity": 1
+    },
+    {
+      "service_id": "pedicure-service-uuid",
+      "staff_selection_mode": "specific",
+      "staff_id": "staff-lan-uuid",
+      "guest_reference": "guest-2",
+      "quantity": 1
+    }
+  ],
+  "party_size": 2,
+  "preferred_date": "2026-07-28",
+  "limit": 20
+}
+```
+
+```json
+{
+  "kind": "request_only",
+  "scheduling_authority": "owner_manual"
+}
+```
+
+For `external_provider` and ready Phase 4C `manleai_calendar`, `kind` is
+`verified_slots` and `verified_slots` contains the authority-native quote/slot
+response. `owner_manual` returns no synthetic openings, quote, or slot
+fingerprint. Internal availability accepts ordered segments with
+`staff_selection_mode` `specific` or `anyone`, `guest_reference`, and
+quantity. Quantities are expanded into ordered quantity-one units; multi-guest
+requests require a non-empty guest reference on every unit and the distinct
+guest-reference count must equal `party_size`. Every returned slot contains
+the exact concrete staff/resource plan:
+
+```json
+{
+  "kind": "verified_slots",
+  "scheduling_authority": "manleai_calendar",
+  "verified_slots": {
+    "quote_id": "availability-quote-uuid",
+    "request_fingerprint": "sha256-hex",
+    "expires_at": "2026-07-28T12:02:00Z",
+    "service_id": "manicure-service-uuid",
+    "service_name": "Gel manicure",
+    "staff_selection_mode": "anyone",
+    "preferred_date": "2026-07-28",
+    "duration_minutes": 45,
+    "timezone": "America/Chicago",
+    "slots": [
+      {
+        "fingerprint": "sha256-hex",
+        "start_time": "2026-07-28T15:00:00Z",
+        "end_time": "2026-07-28T15:45:00Z",
+        "staff_selection_mode": "anyone",
+        "segments": [
+          {
+            "service_id": "manicure-service-uuid",
+            "service_name": "Gel manicure",
+            "staff_id": "staff-mai-uuid",
+            "staff_name": "Mai",
+            "staff_selection_mode": "anyone",
+            "guest_reference": "guest-1",
+            "quantity": 1,
+            "duration_minutes": 45,
+            "scheduled_start_time": "2026-07-28T15:00:00Z",
+            "scheduled_end_time": "2026-07-28T15:45:00Z",
+            "occupied_start_time": "2026-07-28T14:55:00Z",
+            "occupied_end_time": "2026-07-28T15:50:00Z",
+            "buffer_before_minutes": 5,
+            "buffer_after_minutes": 5,
+            "resource_allocations": []
+          },
+          {
+            "service_id": "pedicure-service-uuid",
+            "service_name": "Spa pedicure",
+            "staff_id": "staff-lan-uuid",
+            "staff_name": "Lan",
+            "staff_selection_mode": "anyone",
+            "guest_reference": "guest-2",
+            "quantity": 1,
+            "duration_minutes": 45,
+            "scheduled_start_time": "2026-07-28T15:00:00Z",
+            "scheduled_end_time": "2026-07-28T15:45:00Z",
+            "occupied_start_time": "2026-07-28T15:00:00Z",
+            "occupied_end_time": "2026-07-28T15:45:00Z",
+            "buffer_before_minutes": 0,
+            "buffer_after_minutes": 0,
+            "resource_allocations": [
+              {
+                "resource_pool_id": "pedicure-chair-pool-uuid",
+                "resource_name": "Pedicure chairs",
+                "units_allocated": 1
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The internal quote expires after two minutes. Services for one guest are
+scheduled sequentially; different guests may overlap only when staff and
+resource capacity permit. Availability rejects ambiguous or nonexistent
+salon-local DST wall times and fails closed with `AVAILABILITY_QUOTE_STALE`
+when staff/resource conflict evidence cannot be verified safely.
+
+For a whole-root internal reschedule, the request additionally includes
+`target_appointment_id` and copies the target's current `party_size` plus exact
+ordered service/guest shape into `segments`. The neutral service resolves the
+target's persisted `manleai_calendar` origin even if the salon's current
+authority differs. The target must be active and expose exactly one unreleased
+plan at `authority_appointment_version`; target-aware planning excludes that
+old plan from conflict checks but still requires the current internal config
+and activation fence and an open reschedule cutoff. The response binds both
+the outer and nested availability result to the same target version:
+
+```json
+{
+  "kind": "verified_slots",
+  "scheduling_authority": "manleai_calendar",
+  "target_authority_appointment_version": 2,
+  "verified_slots": {
+    "quote_id": "target-versioned-quote-uuid",
+    "target_authority_appointment_version": 2,
+    "slots": []
+  }
+}
+```
+
+The replacement quote preserves party size, service order, quantity-one units,
+and guest references; it may contain newly assigned staff, times, buffers, and
+resources. A changed target version, closed cutoff, stale activation/config, or
+incomplete active plan produces a fail-closed error and no lifecycle mutation.
+
+Availability errors are `400 INVALID_REQUEST` for malformed JSON,
+`400 VALIDATION_ERROR`,
+`409 SCHEDULING_AUTHORITY_NOT_READY`,
+`409 AVAILABILITY_QUOTE_STALE`,
+`404 SCHEDULING_RESOURCE_NOT_FOUND`,
+`409 SCHEDULING_PROVIDER_UNAVAILABLE`, or
+`502 SCHEDULING_AVAILABILITY_FAILED`.
+
+`POST /api/salons/:id/scheduling-actions`
+
+Accepts `operation_type` (`book`, `reschedule`, or `cancel`), a stable
+`operation_key`, customer details, timezone, requested time, ordered segments,
+party size, notes, call-session linkage, and target evidence when applicable.
+The authenticated HTTP handler owns the source and records it as
+`owner_dashboard`; clients cannot override it. A target is forbidden for book.
+Reschedule/cancel require either a tenant-owned target appointment with its
+authority or a durable `target_description`. `owner_manual` rejects retry IDs,
+availability quote IDs, and slot fingerprints because it neither dispatches a
+provider nor claims verified availability.
+
+```json
+{
+  "operation_type": "book",
+  "operation_key": "owner-request-uuid",
+  "call_session_id": "optional-session-uuid",
+  "customer_name": "Linh Tran",
+  "customer_phone": "+13125550101",
+  "customer_email": "linh@example.com",
+  "requested_start_time": "2026-07-28T20:00:00Z",
+  "requested_timezone": "America/Chicago",
+  "party_size": 1,
+  "segments": [
+    {
+      "service_id": "service-uuid",
+      "staff_selection_mode": "anyone",
+      "quantity": 1
+    }
+  ],
+  "notes": "Afternoon is also acceptable"
+}
+```
+
+An accepted owner-manual action returns `202 Accepted`:
+
+```json
+{
+  "kind": "pending_owner_review",
+  "operation_type": "book",
+  "scheduling_authority": "owner_manual",
+  "pending_owner_review": {
+    "scheduling_request_id": "request-uuid",
+    "status": "pending",
+    "version": 1,
+    "request": {}
+  }
+}
+```
+
+A Phase 4B internal create requires `operation_type=book`, the exact
+`party_size`, exact ordered quantity-one segments copied from the verified slot
+(including guest reference, concrete service/staff, selection mode, and
+scheduled start/end), `availability_quote_id`, and `slot_fingerprint`.
+`retry_of_attempt_id` and targets are forbidden. The action's root requested
+range must equal the earliest child start and latest child end. A successful
+all-or-none commit returns `201 Created`:
+
+```json
+{
+  "kind": "confirmed_appointment",
+  "operation_type": "book",
+  "scheduling_authority": "manleai_calendar",
+  "confirmed_appointment": {
+    "appointment_id": "internal-appointment-uuid",
+    "booking_attempt_id": "internal-attempt-uuid",
+    "appointment_status": "confirmed",
+    "active_child_count": 1,
+    "children": [
+      {
+        "appointment_service_id": "appointment-service-uuid",
+        "guest_reference": "guest-1",
+        "service_id": "manicure-service-uuid",
+        "staff_id": "staff-mai-uuid",
+        "staff_selection_mode": "anyone",
+        "quantity": 1,
+        "scheduled_start_time": "2026-07-28T15:00:00Z",
+        "scheduled_end_time": "2026-07-28T15:45:00Z",
+        "occupied_start_time": "2026-07-28T14:55:00Z",
+        "occupied_end_time": "2026-07-28T15:50:00Z",
+        "buffer_before_minutes": 5,
+        "buffer_after_minutes": 5,
+        "resource_allocations": []
+      }
+    ]
+  }
+}
+```
+
+The internal result never includes `external_attempt_id`, `appointment`, or
+`external_attempt`. Confirmation requires both non-empty internal root IDs and
+a child list that exactly matches the quoted guest/service/staff/timing/buffer/
+resource graph. The database also verifies that graph bidirectionally and
+enforces effective pooled capacity under sorted locks before commit. If the
+commit response is lost, repeat the exact operation key, payload, quote, and
+slot proof; an exact committed replay returns the same IDs and children with
+`"replayed": true`. Reusing the operation key with changed normalized data
+returns `SCHEDULING_OPERATION_CONFLICT`. A stale/consumed/drifted quote,
+capacity conflict, or invalid execution graph returns
+`AVAILABILITY_QUOTE_STALE` and authorizes no confirmed wording.
+
+A Phase 4C internal reschedule replaces the whole active root plan. It requires
+the target/version-bound quote above, the target's exact immutable party/
+service/guest shape, the complete selected replacement assignment, and the
+target evidence:
+
+```json
+{
+  "operation_type": "reschedule",
+  "operation_key": "internal-reschedule-operation-uuid",
+  "availability_quote_id": "target-versioned-quote-uuid",
+  "slot_fingerprint": "sha256-hex",
+  "customer_name": "Linh Tran",
+  "customer_phone": "+13125550101",
+  "party_size": 1,
+  "segments": [
+    {
+      "service_id": "manicure-service-uuid",
+      "staff_id": "staff-mai-uuid",
+      "staff_selection_mode": "specific",
+      "guest_reference": "guest-1",
+      "quantity": 1,
+      "requested_start_time": "2026-07-29T15:00:00Z",
+      "requested_end_time": "2026-07-29T15:45:00Z"
+    }
+  ],
+  "requested_start_time": "2026-07-29T15:00:00Z",
+  "requested_end_time": "2026-07-29T15:45:00Z",
+  "requested_timezone": "America/Chicago",
+  "target_appointment_id": "internal-appointment-uuid",
+  "target_scheduling_authority": "manleai_calendar",
+  "expected_target_authority_appointment_version": 2
+}
+```
+
+The repository replays an exact committed operation before validating current
+state. A new execution then requires the exact active target version, open
+reschedule cutoff, current internal config/activation, unexpired unconsumed
+quote, and revalidated complete replacement graph. One transaction releases
+the old plan/resources through the new lifecycle attempt, advances the same
+root by one version, installs the exact new plan, consumes the quote, and
+appends the matching event. A successful response is:
+
+```json
+{
+  "kind": "confirmed_appointment",
+  "operation_type": "reschedule",
+  "scheduling_authority": "manleai_calendar",
+  "target_authority_appointment_version": 2,
+  "authority_appointment_version": 3,
+  "confirmed_appointment": {
+    "appointment_id": "internal-appointment-uuid",
+    "booking_attempt_id": "internal-reschedule-attempt-uuid",
+    "appointment_status": "rescheduled",
+    "active_child_count": 1,
+    "children": [
+      {
+        "appointment_service_id": "replacement-service-row-uuid",
+        "guest_reference": "guest-1",
+        "service_id": "manicure-service-uuid",
+        "staff_id": "staff-mai-uuid",
+        "staff_selection_mode": "specific",
+        "quantity": 1,
+        "scheduled_start_time": "2026-07-29T15:00:00Z",
+        "scheduled_end_time": "2026-07-29T15:45:00Z",
+        "occupied_start_time": "2026-07-29T15:00:00Z",
+        "occupied_end_time": "2026-07-29T15:45:00Z",
+        "buffer_before_minutes": 0,
+        "buffer_after_minutes": 0,
+        "resource_allocations": []
+      }
+    ]
+  }
+}
+```
+
+A Phase 4C internal cancel carries no availability quote, slot fingerprint,
+party size, segments, requested range, or timezone:
+
+```json
+{
+  "operation_type": "cancel",
+  "operation_key": "internal-cancel-operation-uuid",
+  "target_appointment_id": "internal-appointment-uuid",
+  "target_scheduling_authority": "manleai_calendar",
+  "expected_target_authority_appointment_version": 3,
+  "notes": "Customer requested cancellation"
+}
+```
+
+Cancel resolves the persisted internal target origin and exact version, checks
+the cancellation cutoff, snapshots and releases the exact active plan, advances
+the same root to terminal `cancelled`, and leaves zero active children in one
+transaction. It does not require the current salon authority, an availability
+quote, or current config activation. A successful response is:
+
+```json
+{
+  "kind": "confirmed_appointment",
+  "operation_type": "cancel",
+  "scheduling_authority": "manleai_calendar",
+  "target_authority_appointment_version": 3,
+  "authority_appointment_version": 4,
+  "confirmed_appointment": {
+    "appointment_id": "internal-appointment-uuid",
+    "booking_attempt_id": "internal-cancel-attempt-uuid",
+    "appointment_status": "cancelled",
+    "active_child_count": 0,
+    "children": [
+      {
+        "appointment_service_id": "replacement-service-row-uuid",
+        "guest_reference": "guest-1",
+        "service_id": "manicure-service-uuid",
+        "staff_id": "staff-mai-uuid",
+        "staff_selection_mode": "specific",
+        "quantity": 1,
+        "scheduled_start_time": "2026-07-29T15:00:00Z",
+        "scheduled_end_time": "2026-07-29T15:45:00Z",
+        "occupied_start_time": "2026-07-29T15:00:00Z",
+        "occupied_end_time": "2026-07-29T15:45:00Z",
+        "buffer_before_minutes": 0,
+        "buffer_after_minutes": 0,
+        "resource_allocations": []
+      }
+    ]
+  }
+}
+```
+
+The real cancel result's `children` preserve the exact released-plan attempt
+snapshot for audit/replay even though `active_child_count` is zero. Current
+appointment and candidate reads hydrate only the current version's unreleased
+plan, so the cancelled root itself exposes no active segments. Exact lifecycle
+replay returns the historical event's target/result versions, status, attempt
+ID, and child snapshot after later root mutations; changed operation-key data
+conflicts instead of being reinterpreted against the latest root.
+
+An external create confirmed by the provider returns
+`201 confirmed_appointment`; confirmed reschedule/cancel returns `200`; a
+provider fallback returns `202 external_fallback_pending`. Confirmation is
+valid only when the corresponding evidence object contains the required
+persisted appointment/provider result.
+
+Action errors are `400 INVALID_REQUEST` for malformed JSON,
+`400 VALIDATION_ERROR`,
+`409 SCHEDULING_OPERATION_CONFLICT`,
+`409 SCHEDULING_AUTHORITY_NOT_READY`,
+`409 AVAILABILITY_QUOTE_REQUIRED`, `409 AVAILABILITY_QUOTE_STALE`,
+`404 SCHEDULING_RESOURCE_NOT_FOUND`,
+`409 SCHEDULING_PROVIDER_UNAVAILABLE`, or
+`500 SCHEDULING_ACTION_FAILED`.
+
+`GET /api/salons/:id/scheduling-requests?status=<pending|contacted|resolved|dismissed>&limit=50&offset=0`
+
+Returns the owner-scoped queue directly as
+`scheduling_requests`, `limit`, `offset`, and `has_more`. `limit` defaults to
+50 and is capped at 100. Each request contains its immutable authority,
+operation and customer/request snapshots, ordered `segments`, lifecycle
+timestamps, current `version`, and append-only `events`.
+
+V61-retained terminal rows remain readable audit records and add `redacted`,
+nullable `redacted_at`, and `redaction_version` fields on the request, segments,
+and events. When `redacted=true`, customer/request PII and guest references are
+removed and event payloads contain only the explicit safe audit allowlist plus
+the redaction marker. Authority, operation/audit IDs, versions, statuses,
+timestamps, tenant ownership, and provider evidence remain intact. Pending and
+`contacted` requests are never retention-redacted.
+
+`GET /api/salons/:id/scheduling-requests/:request_id`
+
+Returns `{ "scheduling_request": { ... } }` for one owner-scoped request.
+`scheduling_authority` is always the request executor origin `owner_manual`.
+The optional `target_scheduling_authority` separately records the authority
+whose availability or existing appointment the request targeted. It does not
+prove that the requested time was reserved. Legacy requests may omit the
+target, and exact replay preserves that absence rather than manufacturing a
+current target.
+List errors are `400 VALIDATION_ERROR`, `404 SALON_NOT_FOUND`, or
+`500 SCHEDULING_REQUESTS_FAILED`; detail errors are `400 VALIDATION_ERROR`,
+`404 SCHEDULING_REQUEST_NOT_FOUND`, or `500 SCHEDULING_REQUEST_FAILED`.
+
+`PATCH /api/salons/:id/scheduling-requests/:request_id`
+
+```json
+{
+  "action_key": "owner-dashboard-action-uuid",
+  "expected_version": 1,
+  "status": "contacted",
+  "resolution_reason": "",
+  "note": "Left a voicemail"
+}
+```
+
+Valid transitions are `pending -> contacted|resolved|dismissed` and
+`contacted -> resolved|dismissed`. `resolved` and `dismissed` require a
+resolution reason; terminal rows cannot transition again. The repository locks
+the request row, checks `expected_version`, applies a version compare-and-swap,
+and appends the status event in the same database transaction. Replaying the
+same action key and payload is idempotent; reusing it for different transition
+data is a conflict. The response wrapper is
+`{ "scheduling_request": { ... } }`.
+Retained redacted rows are already terminal and cannot be changed or restored.
+
+Transition errors are `400 INVALID_REQUEST` for malformed JSON,
+`400 VALIDATION_ERROR`,
+`409 SCHEDULING_REQUEST_VERSION_CONFLICT`,
+`409 SCHEDULING_REQUEST_ACTION_CONFLICT`,
+`409 SCHEDULING_REQUEST_TERMINAL`,
+`409 SCHEDULING_REQUEST_TRANSITION_CONFLICT`,
+`404 SCHEDULING_REQUEST_NOT_FOUND`, or
+`500 SCHEDULING_REQUEST_UPDATE_FAILED`.
+
+Request creation persists the request, immutable ordered segment snapshots,
+initial event, reciprocal call-session link when supplied, and one deduplicated
+queued `owner_notifications` outbox row in one database transaction. Operation
+uniqueness plus row locks and fingerprint comparison make exact replay safe and
+reject changed payloads. V56 delivery processing is separate from scheduling:
+request creation still proves only that work was queued, and no request or
+appointment status is changed by SMS delivery.
+
+### Owner Notification Delivery API
+
+The authenticated delivery routes require the current user to own `:id`. They
+return masked/safe operational evidence only: no message body, full phone
+number, provider message ID, provider response, secret, or raw internal error.
+
+`GET /api/salons/:id/owner-notification-deliveries?status=<status>&limit=25&offset=0`
+
+Returns `deliveries`, bounded delivery `metrics`, `limit`, `offset`, and
+`has_more`. `limit` defaults to 25 and is capped at 100. Statuses are `queued`,
+`delivering`, `provider_accepted`, `sent`, `delivered`, `failed`,
+`undelivered`, `dead_letter`, and `disabled`. `provider_accepted` means Twilio
+accepted/queued the API request; it is not delivery proof.
+
+Each row includes its notification type, in-product status, delivery status,
+provider name, masked destination, attempt count, safe provider status/error
+code, timestamps, and backend-owned `can_requeue` decision. Detail additionally
+includes immutable safe delivery events.
+
+V61-retained rows add `redacted`, nullable `redacted_at`, and
+`redaction_version`. A redacted row omits destination content, returns no
+message body or raw error, and always has `can_requeue=false`; safe provider,
+status, attempt, audit ID, and timestamp evidence remains available.
+
+`GET /api/salons/:id/owner-notification-deliveries/:notification_id`
+
+Returns `{ "delivery": { ... } }` for one salon-owned row.
+
+`POST /api/salons/:id/owner-notification-deliveries/:notification_id/requeue`
+
+```json
+{
+  "action_key": "owner-notification-requeue-uuid"
+}
+```
+
+Requeue is action-key idempotent and allowed only for a definitive safe
+dead-letter state. A post-dispatch unknown outcome cannot be requeued because a
+second send could duplicate the SMS. Exact replay returns the same result and
+sets `X-Idempotent-Replay: true`; changed key reuse conflicts. Retention-
+redacted rows cannot be requeued.
+
+Errors are `400 OWNER_NOTIFICATION_DELIVERY_INVALID`,
+`404 OWNER_NOTIFICATION_DELIVERY_NOT_FOUND`,
+`409 OWNER_NOTIFICATION_DELIVERY_CONFLICT`,
+`409 OWNER_NOTIFICATION_REQUEUE_BLOCKED`, or
+`500 OWNER_NOTIFICATION_DELIVERY_FAILED`.
+
+`POST /api/notifications/twilio/status`
+
+Public Twilio Messaging status callback. It requires a valid
+`X-Twilio-Signature` calculated from the exact configured HTTPS callback URL
+and every received form parameter. `MessageSid`/`SmsSid` resolves the owning
+salon before the salon's database-backed Auth Token is used for verification.
+Accepted signed events are deduplicated and applied monotonically, then return
+`204`. A later lower-rank callback cannot downgrade `delivered` or another
+terminal outcome. The route never returns the provider message ID in a JSON
+response.
+
+`POST /api/notifications/twilio/inbound/:salon_id`
+
+Public signed Twilio Messaging inbound callback. It verifies the exact URL and
+all form parameters and returns `204`, but deliberately does not parse message
+keywords or mutate product state. Twilio Messaging Service opt-out handling is
+an operational provider configuration; customer SMS and customer consent are
+outside this owner-operational delivery slice. See
+`docs/operations/owner-notification-delivery.md`.
+
+### Implemented ManleAI Calendar Configuration API
+
+These routes manage structured `manleai_calendar` configuration and readiness.
+Phase 4C execution still uses the neutral scheduling routes above. Every route
+is authenticated,
+and the repository requires the authenticated user to own `:id`. A salon,
+staff member, service, resource, or exception outside that tenant is returned
+as the tenant-safe not-found error rather than exposing cross-salon existence.
+
+The aggregate source of truth is the V48 root configuration and its children:
+the DB-managed config-version fence; `salons.timezone`; only
+`salon_business_hour_periods` rows whose source is `local_override`; canonical
+services and staff; independent service-to-staff eligibility; staff weekly
+periods; service policy, capacity mode, buffers, and resource requirements;
+resource pools; active and cancelled exceptions; version-fenced activation;
+and immutable configuration events. Imported or legacy-migrated hours do not
+satisfy internal-calendar readiness, and no provider hours are copied into the
+internal configuration. V49 separately owns execution quotes, appointment/
+attempt/service/resource evidence, and immutable execution events; V50 adds
+aggregate quote, guest-party, capacity/concurrency, exact committed graph, and
+history guards; V51 adds lifecycle release ownership, event-version uniqueness,
+terminal cancellation, and exact old/new plan graph guards. The configuration
+read aggregate does not expose either immutable event ledger.
+
+Implemented routes:
+
+| Method and path | Purpose | Successful response |
+| --- | --- | --- |
+| `GET /api/salons/:id/manleai-calendar` | Read the full owner-scoped aggregate | `200 { "manleai_calendar": { ... } }` |
+| `PUT /api/salons/:id/manleai-calendar/config` | Create or replace the root policy | `200 { "manleai_calendar": { ... }, "replayed": false }` |
+| `PUT /api/salons/:id/manleai-calendar/hours` | Replace all `local_override` weekly salon periods | uniform mutation response |
+| `GET /api/salons/:id/manleai-calendar/staff/:staff_id` | Read one canonical staff member's periods and eligible services | `200 { "staff_profile": { ... }, "config_version": 4, "readiness": { ... } }` |
+| `PUT /api/salons/:id/manleai-calendar/staff/:staff_id` | Replace that staff member's periods and eligible-service links | uniform mutation response |
+| `GET /api/salons/:id/manleai-calendar/services/:service_id` | Read one canonical service's policy, eligible staff, and resource requirements | `200 { "service_policy": { ... }, "config_version": 4, "readiness": { ... } }` |
+| `PUT /api/salons/:id/manleai-calendar/services/:service_id` | Upsert that service policy and replace its staff/resource links | uniform mutation response |
+| `GET /api/salons/:id/manleai-calendar/resources` | List owner-scoped resource pools | `200 { "resources": [], "config_version": 4, "readiness": { ... } }` |
+| `POST /api/salons/:id/manleai-calendar/resources` | Create a resource pool | `201` uniform mutation response |
+| `PUT /api/salons/:id/manleai-calendar/resources/:resource_id` | Update a resource pool | uniform mutation response |
+| `POST /api/salons/:id/manleai-calendar/resources/:resource_id/archive` | Archive a resource pool without deleting its identity | uniform mutation response |
+| `POST /api/salons/:id/manleai-calendar/exceptions` | Create a salon, staff, or resource exception | `201` uniform mutation response |
+| `POST /api/salons/:id/manleai-calendar/exceptions/:exception_id/cancel` | Cancel an exception without deleting its history | uniform mutation response |
+| `POST /api/salons/:id/manleai-calendar/activate` | Record owner activation for the exact resulting config version | uniform mutation response |
+
+Every mutation includes these top-level fields:
+
+```json
+{
+  "action_key": "stable-owner-action-key",
+  "expected_config_version": 4
+}
+```
+
+Creating the root config requires `expected_config_version: 0`. Every later
+write uses the latest returned `config_version`. An exact replay is checked by
+salon-unique `action_key` plus the normalized request fingerprint before the
+version compare-and-swap and returns:
+
+```json
+{
+  "manleai_calendar": {},
+  "replayed": true
+}
+```
+
+Reusing the key for different normalized input conflicts. A new action key
+with a stale expected version also conflicts. The version is a monotonic
+concurrency fence, not a count of user actions: a replace operation may advance
+it more than once because V48 fences every scheduling-relevant child change.
+Timezone, canonical service eligibility fields, canonical staff eligibility
+fields, root policy, local hours, and all scheduling-relevant children can make
+an earlier activation stale.
+
+Mutation-specific bodies add these fields to the mutation metadata:
+
+- Config: `slot_step_minutes`, `minimum_booking_notice_minutes`,
+  `booking_horizon_days`, nullable `reschedule_cutoff_minutes` and
+  `cancellation_cutoff_minutes`, `max_party_size`, and default before/after
+  buffers.
+- Hours: `periods[{day_of_week,start_minute,end_minute}]`; the range is
+  half-open in local wall-clock minutes and `end_minute=1440` explicitly means
+  midnight at the end of the day.
+- Staff: `weekly_periods[...]` plus `eligible_service_ids`. These eligibility
+  links do not require a pre-existing service-policy row, so the Staff-first
+  workflow has no ordering dependency.
+- Service: `enabled`, nullable `capacity_mode` (`staff_only` or `pooled`),
+  nullable before/after buffer overrides, `eligible_staff_ids`, and
+  `resource_requirements[{resource_pool_id,units_required}]`.
+- Resource create/update: `name` and `capacity`.
+- Exception create: `scope_type`, the matching optional `staff_id` or
+  `resource_pool_id`, `effect`, `starts_at`, `ends_at`, optional
+  `capacity_override`, and optional `reason`. Salon/staff exceptions use
+  `available` or `unavailable`; resource exceptions use
+  `capacity_override`.
+- Resource archive, exception cancel, and activation use only the mutation
+  metadata.
+
+The full aggregate contains `salon_id`, `timezone`, selected
+`scheduling_authority`, `authority_version`, `config_version`, nullable
+`config`, `hours`, `staff_profiles`, `service_policies`, `resources`,
+`exceptions`, `readiness`, and server-owned `constraints`. The constraints
+object is the API source for numeric bounds and supported capacity/exception
+tokens; clients must not duplicate those choices as a second product taxonomy.
+
+Readiness is returned as:
+
+```json
+{
+  "configuration_ready": true,
+  "execution_ready": true,
+  "authority_version": 1,
+  "config_version": 9,
+  "capabilities": {
+    "staff_only_availability": true,
+    "staff_only_create": true,
+    "pooled_capacity": true,
+    "party_create": true,
+    "reschedule": true,
+    "cancel": true
+  },
+  "blockers": []
+}
+```
+
+Configuration blocker codes are `CONFIG_REQUIRED`, `LOCAL_HOURS_REQUIRED`,
+`ELIGIBLE_SERVICES_REQUIRED`, `SERVICE_POLICY_REQUIRED`,
+`ENABLED_SERVICE_REQUIRED`, `SERVICE_INELIGIBLE`,
+`SERVICE_CAPACITY_MODE_REQUIRED`, `SERVICE_STAFF_REQUIRED`,
+`STAFF_INELIGIBLE`, `STAFF_SCHEDULE_REQUIRED`, `POOLED_RESOURCE_REQUIRED`,
+`STAFF_ONLY_RESOURCE_NOT_ALLOWED`, `RESOURCE_ARCHIVED`, and
+`RESOURCE_CAPACITY_EXCEEDED`. Execution blocker codes are
+`CONFIG_NOT_ACTIVATED` in the Phase 4C runtime. Older lifecycle/pooled/party
+unavailable tokens are retained as stable constants but are not emitted for a
+ready Phase 4C aggregate.
+
+`configuration_ready` covers only persisted configuration rules. Activation
+requires that dimension to pass; it advances the config fence and sets
+`activated_version` to the exact result version. Later scheduling-relevant
+changes retain the prior audit evidence but make it stale until a new
+activation records the current version. Activation is repeatable and never
+switches `salon_settings.scheduling_authority`. In Phase 4C,
+`staff_only_availability` and `staff_only_create` become true only when
+configuration is ready, activation is current, the selected authority is
+`manleai_calendar`, and a valid staff-only policy exists. `pooled_capacity`
+also requires an enabled pooled policy; `party_create` requires an enabled
+service and `max_party_size > 1`. Reschedule and cancel use the same engine
+fence and require at least one enabled service. Aggregate `execution_ready` is
+true only when all six capability fields are true. Clients must use
+`readiness.capabilities` for current new-work action gating; persisted internal
+targets remain routed by origin and version after a later selected-authority
+change. The legacy
+`constraints.execution_engine_available` only means at least one execution
+slice exists and is not an operation gate.
+
+All routes use the standard error envelope. Stable errors are:
+
+- `400 MANLEAI_CALENDAR_VALIDATION_ERROR`;
+- `404 MANLEAI_CALENDAR_NOT_FOUND`;
+- `409 MANLEAI_CALENDAR_CONFIG_REQUIRED`;
+- `409 MANLEAI_CALENDAR_CONFIG_VERSION_CONFLICT`;
+- `409 MANLEAI_CALENDAR_ACTION_CONFLICT`;
+- `409 MANLEAI_CALENDAR_NOT_READY`; and
+- `500 MANLEAI_CALENDAR_FAILED`.
+
+### Remaining Planned Authority-Aware Contract
+
+Remaining APIs must complete authority state across every mode without
+overloading provider fields:
+
+- complete versioned authority-switch state, rollback state, and cross-
+  authority failure/reconciliation classification beyond the implemented
+  request, external-provider, and Phase 4C internal lifecycle contracts;
+- explicit authority-switch review, dry-run, conflict, and completion state.
+
+The execution rules are fixed: `owner_manual` creates pending owner-review work
+and never confirms automatically; Phase 4C `manleai_calendar` confirms
+aggregate create or whole-root lifecycle only after an all-or-none internal
+commit returns durable root/version/status and exact child evidence;
+`external_provider` confirms only after provider success returns the required
+booking ID and metadata. Connecting or syncing an integration must not switch
+authority implicitly, and historical actions keep their originating authority.
+
+Do not populate internal modes with fake provider IDs, provider versions, POS
+errors, or Square readiness keys. Remaining endpoint paths and complete
+payloads belong in this file only after the corresponding implementation
+exists.
+
 ## Canonical Entity Semantics
 
-Services, staff, and customers are ManleAI-owned canonical records.
-The active POS provider remains the authority for real availability and booking
-execution. API clients should treat ManleAI `id` values as product identity and
-provider IDs as mappings used behind the provider-neutral booking contract.
+Services, staff, and customers are ManleAI-owned canonical records. Under
+`external_provider`, the active POS provider owns real availability and booking
+execution. Under `owner_manual`, eligible services and staff come directly
+from active, non-archived, AI-bookable canonical records; services must have a
+positive duration, and no POS link is required. API clients should treat
+ManleAI `id` values as product identity and provider IDs as mappings used only
+behind the external-provider-neutral booking contract. Current
+`manleai_calendar` configuration derives eligibility from canonical records
+without fake provider mappings; Phase 4B staff-only/pooled aggregate
+availability/create and Phase 4C lifecycle execution use that authority-owned
+source and persist no fake provider mappings.
 
 Some endpoints still expose legacy Square provider fields alongside canonical
 IDs because Square Appointments is the first real POS integration. API
@@ -41,10 +897,11 @@ Sync status meanings:
 - `archived`: record is retained for history but unavailable for new booking.
 
 Local-only, unmapped, sync-failed, or archived services/staff may be visible in
-management views after the canonical migration, but they must not be used for
-availability checks or booking attempts. Confirmed, rescheduled, or cancelled
-appointment responses still require active POS provider success and required
-provider booking metadata.
+management views after the canonical migration, but the current
+external-provider runtime must not use them for availability checks or booking
+attempts. Current confirmed, rescheduled, or cancelled appointment responses
+still require active POS provider success and required provider booking
+metadata.
 
 ## Auth
 
@@ -57,7 +914,16 @@ provider booking metadata.
 }
 ```
 
-Returns access token, refresh token, user, roles, and primary salon ID.
+Returns an access token, its expiry, user, roles, and primary salon ID. The
+refresh token is not present in JSON. It is delivered as the host-only
+`manleai_refresh` cookie with `HttpOnly`, `SameSite=Strict`, path `/api/auth`,
+the configured refresh lifetime, and `Secure` in production.
+
+Invalid email/password and disabled-account login return the same generic
+`401 INVALID_CREDENTIALS` response. For a found disabled account, bcrypt
+comparison occurs before the status check, so the response does not reveal
+whether its supplied password was correct. The endpoint does not expose whether
+an account exists or is disabled.
 
 `GET /api/auth/bootstrap/status`
 
@@ -84,25 +950,33 @@ available only while the `users` table is empty. The backend assigns the
 }
 ```
 
-Returns access token, refresh token, user, roles, and an empty primary salon ID
-until onboarding creates the first salon. After any user exists, this endpoint
-returns `409 BOOTSTRAP_CLOSED`.
+Returns an access token, its expiry, user, roles, and an empty primary salon ID
+until onboarding creates the first salon. The refresh token uses the same
+cookie-only contract as login and is omitted from JSON. After any user exists,
+this endpoint returns `409 BOOTSTRAP_CLOSED`.
 
 `POST /api/auth/refresh-token`
 
-```json
-{
-  "refresh_token": "..."
-}
-```
+The request body is empty. The browser supplies `manleai_refresh` as a
+credentialed cookie; refresh tokens in JSON are not accepted.
+
+Refresh is an atomic, active-user-only, one-time rotation. The submitted token
+is consumed in the same transaction that conditionally creates one hashed
+successor. Exact concurrent response-loss replay within the bounded five-second
+rotation grace returns that same successor, so parallel browser refreshes do
+not create multiple live tokens. Changed-successor reuse and later reuse are
+invalid. A disabled user's old token is consumed without creating a successor,
+and the API returns the same generic `401 INVALID_REFRESH_TOKEN` used for an
+invalid or expired refresh token. The response JSON contains only the access
+session fields and replaces the HttpOnly refresh cookie.
 
 `POST /api/auth/logout`
 
-```json
-{
-  "refresh_token": "..."
-}
-```
+The request body is empty. The server revokes the cookie token and expires the
+same host-only `/api/auth` cookie. Dashboard and POS browser clients keep access
+tokens only in JavaScript memory, send `credentials: include`, refresh after a
+reload through the cookie, and remove the legacy `access_token` and
+`refresh_token` local-storage keys without copying their values.
 
 `GET /api/auth/me`
 
@@ -117,13 +991,19 @@ published salon catalog by `salons.created_at ASC, salons.id ASC`, so
 `GET /api/public/salons/:slug`
 
 Public unauthenticated endpoint for the customer-facing `landing/` app. Returns
-only salons whose owner has enabled the public catalog. The response is
-public-safe: no POS IDs, provider tokens, owner IDs, staff phone/email, sync
-errors, or raw provider payloads are returned.
+only salons whose owner has enabled the public catalog and whose current
+selected scheduling authority still passes public-page readiness. A stale
+published flag fails closed after an authority/configuration/provider change.
+The response is public-safe: no provider identifiers, POS IDs, provider tokens,
+owner IDs, staff phone/email, sync errors, or raw provider payloads are returned.
 
-Only active, synced, POS-linked, AI-bookable services and staff for the active
-POS provider are included. This endpoint does not check availability, create a
-booking attempt, or confirm appointments.
+Eligibility follows the persisted authority: `owner_manual` needs at least one
+active canonical AI-bookable service and does not require staff or POS;
+`manleai_calendar` uses enabled canonical services, current activation, and
+`local_override` hours; `external_provider` uses the current active connection
+and synced/linked provider projection. This endpoint does not check a requested
+time, create a booking attempt, or confirm appointments. Every public CTA is a
+phone request, not web booking.
 
 ```json
 {
@@ -137,9 +1017,10 @@ booking attempt, or confirm appointments.
     "zip_code": "60601",
     "timezone": "America/Chicago",
     "primary_language": "en",
-    "secondary_language": "vi",
-    "active_pos_provider": "square"
+    "secondary_language": "vi"
   },
+  "scheduling_authority": "owner_manual",
+  "scheduling_authority_version": 3,
   "services": [
     {
       "name": "Classic Manicure",
@@ -150,21 +1031,16 @@ booking attempt, or confirm appointments.
       "price_display": "$35.00"
     }
   ],
-  "staff": [
-    {
-      "name": "Mai Nguyen"
-    }
-  ],
+  "staff": [],
   "hours": [
     {
       "day_of_week": 1,
       "start_local_time": "09:30:00",
       "end_local_time": "19:00:00",
-      "source": "imported",
-      "provider": "square"
+      "source": "local_migrated"
     }
   ],
-  "booking_note": "Appointments are confirmed only after Square Appointments completes the booking."
+  "booking_note": "Call the salon to request an appointment. Availability and confirmation are provided by the salon."
 }
 ```
 
@@ -195,10 +1071,26 @@ Returns salons owned by the authenticated user.
 
 `PUT /api/salons/:id/settings`
 
-Returns and updates owner-scoped AI receptionist settings. `ai_tone` accepts
+The GET response includes `scheduling_authority`. Phase 2 uses that owner-scoped
+persisted value for current-authority readiness and genuinely new availability
+or scheduling actions. Historical operations resolve origin across external
+`booking_attempts` and owner-manual `scheduling_requests`; retries, target-aware
+availability, reschedule, and cancellation use their persisted origin instead.
+The current settings PUT request intentionally does not accept or switch the
+field; including an unknown JSON field does not create an authority workflow.
+Existing/backfilled rows default to `external_provider`. If an internal token
+is selected outside this API, `owner_manual` uses the request-only executor and
+`manleai_calendar` fails with `SCHEDULING_AUTHORITY_NOT_READY`; neither falls
+through to Square. Exact external replay and external-target cleanup remain
+origin-routed.
+
+Returns and updates the other owner-scoped AI receptionist settings. `ai_tone` accepts
 `professional_warm`, `natural_human`, `friendly_young`, or `concise_calm`.
-The tone controls spoken reply style only; booking guardrails and POS-first
-confirmation rules still override style. `consultation_enabled` is the salon-wide
+The tone controls spoken reply style only; booking guardrails and scheduling-
+authority confirmation rules still override style. External confirmation uses
+the Square/provider evidence gate; owner-manual wording is always pending owner
+review and explicitly not confirmation.
+`consultation_enabled` is the salon-wide
 runtime gate for AI service consultation. It does not make any service eligible by
 itself; eligibility still requires an active-provider link, AI booking eligibility,
 and a complete `ready` service consultation profile with at least one recommended
@@ -208,6 +1100,7 @@ contract.
 
 ```json
 {
+  "scheduling_authority": "external_provider",
   "ai_greeting": "Thanks for calling Lotus Nails Studio.",
   "ai_voice": "professional_female",
   "ai_tone": "natural_human",
@@ -232,9 +1125,16 @@ Returns owner-scoped public page settings and publish readiness.
   "public_slug": "lotus-nails-studio",
   "public_catalog_enabled": true,
   "public_path": "/s/lotus-nails-studio",
+  "scheduling_authority": "owner_manual",
+  "scheduling_authority_version": 3,
+  "eligible_service_count": 3,
+  "eligible_staff_count": 0,
+  "published_hours_count": 5,
   "bookable_service_count": 3,
-  "bookable_staff_count": 2,
+  "bookable_staff_count": 0,
   "can_publish": true,
+  "readiness_label": "Owner-managed appointment requests",
+  "readiness_blockers": [],
   "updated_at": "2026-06-25T14:30:00Z"
 }
 ```
@@ -244,13 +1144,18 @@ Returns owner-scoped public page settings and publish readiness.
 ```json
 {
   "public_slug": "lotus-nails-studio",
-  "public_catalog_enabled": true
+  "public_catalog_enabled": true,
+  "expected_scheduling_authority_version": 3
 }
 ```
 
-Enabling publish requires a valid unique slug plus at least one active,
-synced, POS-linked, AI-bookable service and staff member for the active POS
-provider. Disabling remains allowed so owners can take a page offline.
+The update acquires the same salon advisory fence as authority switches,
+revalidates readiness inside the transaction, and optionally compares the
+authority version supplied by the dashboard. Version drift returns
+`SCHEDULING_AUTHORITY_CHANGED`; current readiness failure returns
+`PUBLIC_CATALOG_NOT_READY`. Disabling remains allowed so owners can take a page
+offline. Readiness follows the authority-specific rules described above; staff
+and POS are not universal publishing prerequisites.
 
 `GET /api/salons/:id/business-hours`
 
@@ -307,30 +1212,35 @@ configuration only:
 - Service consultation profiles with portable target-service references
 - AI Training knowledge base
 
-Secret-bearing integrations return only configuration values and secret status
+Schema v8 is the current export contract. Secret-bearing integrations return only configuration values and secret status
 metadata such as `client_secret_configured`, `auth_token_configured`,
 `api_key_configured`, and `*_source`. It does not export services, staff,
-customers, appointments, booking attempts, fallback requests, call sessions,
-transcripts, recordings, summaries, owner corrections, POS entity links, POS
-sync jobs/logs/errors, provider switch runs/matches, synced business hour
-periods, party booking requests, voice webhook/audio records, POS OAuth tokens,
-API keys, client secrets, encrypted secrets, or POS connection token state.
-Schema v7 adds portable `service_consultation_profiles` and
-`included_sections`. A full export lists every supported configuration section;
+customers, appointments and child/resource rows, booking attempts/segments,
+availability quotes/slots, fallback requests, scheduling authority/version and
+switch history, scheduling requests/events/notification outbox rows, ManleAI
+Calendar configuration/execution evidence, call sessions/transcripts/recordings,
+POS entity links/sync jobs/logs/errors, provider switch state, synced business
+hour periods, party booking requests, voice webhook/audio records, POS OAuth
+tokens, API keys, client secrets, encrypted secrets, or POS connection state.
+Scheduling authority is operational state and is never exported, imported, or
+implicitly changed. `active_pos_provider` is retained only as portable adapter
+intent; it is reported explicitly during preview and is never authority consent.
+Schema v8 retains the portable `service_consultation_profiles` and
+`included_sections` contract introduced by v7. A full export lists every supported configuration section;
 a curated pack may list only taxonomy, service aliases, and consultation
 profiles so it cannot overwrite salon, provider, or AI runtime configuration.
-Import remains backward compatible with v1-v6 bundles. Bundles from v1-v5 do
+Import remains backward compatible with v1-v7 bundles. Bundles from v1-v5 do
 not contain the consultation toggle and therefore default it to disabled;
 schema v6 and later preserve the explicit value subject to profile readiness.
 
 ```json
 {
-  "schema_version": "manleai.salon_configuration.v7",
+  "schema_version": "manleai.salon_configuration.v8",
   "exported_at": "2026-06-26T15:00:00Z",
   "secrets_exported": false,
   "operational_data_exported": false,
   "included_sections": ["salon_profile", "ai_receptionist", "public_booking_page", "integrations", "service_categories", "service_aliases", "service_consultation_profiles", "knowledge_base"],
-  "excluded_data": ["services", "staff", "customers", "appointments", "call_sessions", "pos_entity_links", "pos_sync_jobs", "pos_sync_logs", "pos_errors", "provider_switch_runs", "provider_switch_matches", "salon_business_hour_periods", "party_booking_requests", "voice_webhook_events", "voice_audio_outputs", "pos_oauth_tokens", "api_keys", "client_secrets", "encrypted_secrets"],
+  "excluded_data": ["services", "staff", "customers", "appointments", "booking_attempts", "availability_quotes", "scheduling_authority", "scheduling_authority_version", "scheduling_authority_switch_runs", "scheduling_requests", "manleai_calendar_configs", "manleai_calendar_execution_events", "owner_notifications", "call_sessions", "pos_entity_links", "pos_sync_jobs", "pos_errors", "provider_switch_runs", "salon_business_hour_periods", "pos_oauth_tokens", "api_keys", "client_secrets", "encrypted_secrets"],
   "requires_secret_reentry": ["square", "twilio", "openai"],
   "salon_profile": {
     "name": "Lotus Nails Studio",
@@ -412,15 +1322,6 @@ schema v6 and later preserve the explicit value subject to profile readiness.
       "api_key_configured": true,
       "api_key_source": "database"
     }
-  },
-  "pos_connection": {
-    "provider": "square",
-    "status": "active",
-    "merchant_id": "merchant-id",
-    "location_id": "location-id",
-    "scopes": ["APPOINTMENTS_READ", "APPOINTMENTS_ALL_READ", "APPOINTMENTS_WRITE", "APPOINTMENTS_ALL_WRITE"],
-    "last_sync_at": "2026-06-25T14:30:00Z",
-    "updated_at": "2026-06-25T14:30:00Z"
   },
   "service_categories": {
     "count": 1,
@@ -514,13 +1415,13 @@ schema v6 and later preserve the explicit value subject to profile readiness.
 Validates a transfer bundle and returns a dry-run summary. Preview does not
 write to the database.
 
-Request shape, with a full exported bundle or scoped v7 pack in
+Request shape, with a full exported bundle or scoped v8/v7 pack in
 `configuration`:
 
 ```json
 {
   "configuration": {
-    "schema_version": "manleai.salon_configuration.v7",
+    "schema_version": "manleai.salon_configuration.v8",
     "...": "full export or scoped configuration pack"
   }
 }
@@ -533,7 +1434,16 @@ Response:
   "request_id": "import-preview-id",
   "dry_run": true,
   "status": "previewed",
-  "schema_version": "manleai.salon_configuration.v7",
+  "schema_version": "manleai.salon_configuration.v8",
+  "included_sections": ["salon_profile", "ai_receptionist", "public_booking_page", "integrations", "service_categories", "service_aliases", "service_consultation_profiles", "knowledge_base"],
+  "target_scheduling_authority": "owner_manual",
+  "target_scheduling_authority_version": 4,
+  "source_active_pos_provider": "square",
+  "target_active_pos_provider": "square",
+  "result_active_pos_provider": "square",
+  "source_booking_mode": "confirmed_booking",
+  "target_booking_mode": "pending_approval",
+  "result_booking_mode": "pending_approval",
   "can_apply": true,
   "summary": [
     {"section": "salon_profile", "created": 0, "updated": 6, "unchanged": 5, "skipped": 0, "conflicts": 0},
@@ -543,10 +1453,11 @@ Response:
     {"section": "knowledge_base", "created": 4, "updated": 2, "unchanged": 8, "skipped": 0, "conflicts": 0}
   ],
   "warnings": [
+    {"section": "ai_receptionist", "code": "confirmed_booking_incompatible_with_owner_manual", "message": "Confirmed booking mode was not imported because Owner confirmation is request-only. The final imported booking mode is pending approval.", "field": "booking_mode"},
     {"section": "integrations", "code": "secret_reentry_required", "message": "square secret values are not included in the export. Re-enter secrets or reconnect this provider after import.", "field": "square"}
   ],
   "conflicts": [],
-  "excluded_data": ["services", "staff", "customers", "appointments", "call_sessions", "pos_entity_links", "pos_sync_jobs", "pos_sync_logs", "pos_errors", "provider_switch_runs", "provider_switch_matches", "salon_business_hour_periods", "party_booking_requests", "voice_webhook_events", "voice_audio_outputs", "pos_oauth_tokens", "api_keys", "client_secrets", "encrypted_secrets"],
+  "excluded_data": ["services", "staff", "customers", "appointments", "booking_attempts", "availability_quotes", "scheduling_authority", "scheduling_authority_version", "scheduling_authority_switch_runs", "scheduling_requests", "manleai_calendar_configs", "manleai_calendar_execution_events", "owner_notifications", "call_sessions", "pos_entity_links", "pos_sync_jobs", "pos_errors", "provider_switch_runs", "salon_business_hour_periods", "pos_oauth_tokens", "api_keys", "client_secrets", "encrypted_secrets"],
   "requires_secret_reentry": ["square", "twilio", "openai"]
 }
 ```
@@ -562,7 +1473,7 @@ idempotent, while reusing it with a different payload returns a conflict.
 {
   "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
   "configuration": {
-    "schema_version": "manleai.salon_configuration.v7",
+    "schema_version": "manleai.salon_configuration.v8",
     "...": "full export or scoped configuration pack"
   }
 }
@@ -574,13 +1485,16 @@ Import idempotency:
 - Integration secrets are preserved if already present and are never imported from the transfer file.
 - Service categories upsert by stable slug; category aliases upsert by normalized alias and conflict with active service aliases.
 - Service aliases upsert by normalized alias only when their target service resolves to exactly one existing target-salon service by name and duration; missing targets are skipped with warnings, and active category-alias conflicts block apply.
-- Consultation profiles resolve by normalized service name plus duration and upsert by `(salon_id, service_id)`. Missing or ambiguous targets block apply. A `ready` profile additionally requires an active-provider, POS-linked, synced, AI-bookable target service. The transfer never creates services or POS mappings.
+- Consultation profiles resolve by normalized service name plus duration and upsert by `(salon_id, service_id)`. Missing or ambiguous targets block apply. A `ready` profile requires a canonical active AI-bookable service with duration for `owner_manual` and `manleai_calendar`; `external_provider` additionally requires active-provider link, sync, and version evidence. The transfer never creates services or POS mappings.
 - Identical consultation profile imports remain `unchanged`; they do not increment profile revision.
 - `included_sections` limits both preview and apply. Scoped consultation packs can leave salon profile, integrations, AI runtime settings, and knowledge untouched.
 - Knowledge base entries upsert by `source_key`, backed by a unique `(salon_id, import_key)` index.
 - Re-importing the same file reports `unchanged` or `updated`; it does not create duplicate knowledge rows.
-- If the bundle requests `ai_enabled=true` or `booking_mode=confirmed_booking`, those fields are skipped unless the target salon has passed Square booking readiness.
-- If the bundle requests public page publishing, the publish state is skipped unless the target salon has synced AI-bookable services and staff.
+- `ai_enabled` is portable intent and has no universal Square prerequisite. `booking_mode=confirmed_booking` is converted to `pending_approval` with a warning when the destination authority is `owner_manual`; confirming modes still rely on their own runtime readiness after import.
+- Preview and apply both report `source_booking_mode`, `target_booking_mode`, and `result_booking_mode`. The owner-manual conversion emits `confirmed_booking_incompatible_with_owner_manual`; exact request replay returns the same final mode and warning with the original import-run identity.
+- Public publishing reuses the destination salon's public-catalog readiness source of truth, including its selected-authority service, staff, hours, activation, and external-connection blockers as applicable; configuration transfer does not maintain a second Square-first readiness rule.
+- Apply acquires the shared scheduling-authority advisory fence and rechecks the exact previewed `target_scheduling_authority` and version inside the transaction. A concurrent switch returns `target_scheduling_authority_changed` and writes nothing.
+- Preview reports source, destination, and result `active_pos_provider`. A different adapter while the destination uses `external_provider` returns `active_provider_change_requires_provider_switch`; import never changes the confirming executor.
 
 `POST /api/onboarding/configuration-import/preview`
 
@@ -600,7 +1514,7 @@ returns the same `salon_id` and `import_run_id`.
 {
   "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
   "configuration": {
-    "schema_version": "manleai.salon_configuration.v7",
+    "schema_version": "manleai.salon_configuration.v8",
     "...": "full exported configuration bundle"
   }
 }
@@ -615,33 +1529,61 @@ Response includes the created salon id:
   "request_id": "2c8a6d65-b7ac-4e26-8d11-c2b37d2b8908",
   "dry_run": false,
   "status": "applied",
-  "schema_version": "manleai.salon_configuration.v7",
+  "schema_version": "manleai.salon_configuration.v8",
+  "included_sections": ["salon_profile", "ai_receptionist", "public_booking_page", "integrations", "service_categories", "service_aliases", "service_consultation_profiles", "knowledge_base"],
+  "target_scheduling_authority": "owner_manual",
+  "target_scheduling_authority_version": 1,
+  "source_active_pos_provider": "square",
+  "target_active_pos_provider": "square",
+  "result_active_pos_provider": "square",
+  "source_booking_mode": "confirmed_booking",
+  "target_booking_mode": "pending_approval",
+  "result_booking_mode": "pending_approval",
   "can_apply": true,
   "summary": [],
-  "warnings": [],
+  "warnings": [
+    {"section": "ai_receptionist", "code": "confirmed_booking_incompatible_with_owner_manual", "message": "Confirmed booking mode was not imported because Owner confirmation is request-only. The final imported booking mode is pending approval.", "field": "booking_mode"}
+  ],
   "conflicts": [],
-  "excluded_data": ["services", "staff", "customers", "appointments", "call_sessions", "pos_entity_links", "pos_sync_jobs", "pos_sync_logs", "pos_errors", "provider_switch_runs", "provider_switch_matches", "salon_business_hour_periods", "party_booking_requests", "voice_webhook_events", "voice_audio_outputs", "pos_oauth_tokens", "api_keys", "client_secrets", "encrypted_secrets"],
+  "excluded_data": ["services", "staff", "customers", "appointments", "booking_attempts", "availability_quotes", "scheduling_authority", "scheduling_authority_version", "scheduling_authority_switch_runs", "scheduling_requests", "manleai_calendar_configs", "manleai_calendar_execution_events", "owner_notifications", "call_sessions", "pos_entity_links", "pos_sync_jobs", "pos_errors", "provider_switch_runs", "salon_business_hour_periods", "pos_oauth_tokens", "api_keys", "client_secrets", "encrypted_secrets"],
   "requires_secret_reentry": ["square", "twilio", "openai"]
 }
 ```
 
-Onboarding import requires a full bundle; scoped v7 data packs are imported from
-Settings after the salon exists. Onboarding never imports services, staff,
+Onboarding import requires a full bundle; scoped v8/v7 data packs are imported from
+Settings after the salon exists. Onboarding always creates the destination with
+`owner_manual` authority and never imports scheduling authority/version,
+services, staff,
 customers, appointments, POS tokens, API keys, client secrets, or encrypted
 secrets. It can import service category taxonomy and aliases because those are
 understanding configuration, not service records or provider state. Service
 aliases and consultation profiles are deferred because target services do not
-exist before Square sync, and consultation remains disabled until a post-sync
-Settings import resolves the profile pack. If the bundle requests `ai_enabled=true`,
-`booking_mode=confirmed_booking`, or public catalog publishing, those live
-states are skipped until Square Appointments is connected, synced, and
-booking-ready.
+exist yet, and consultation remains disabled until a later Settings import
+resolves the profile pack against configured destination services. Incoming
+`ai_enabled=true` remains portable and may apply immediately. Incoming
+`confirmed_booking` is explicitly reported and converted to `pending_approval`;
+public publishing remains off until the new owner-manual salon has canonical
+AI-bookable services. None of these steps require a Square connection.
 
 ## Integration Configuration
 
 Provider credentials and runtime settings are salon-scoped and owner-scoped.
 Secret values are write-only: responses only expose whether a secret is
-configured and whether it came from dashboard storage or environment fallback.
+configured and whether it came from dashboard storage or the exact-missing
+legacy bootstrap fallback. `salon_integration_configs` is authoritative whenever
+a salon/provider row exists. The Square, Twilio, and OpenAI runtime resolvers may
+read legacy environment/bootstrap configuration only after an exact repository
+`ErrNotFound`; repository failures, malformed/non-string persisted settings, and
+secret decryption failures stop runtime resolution. A stored disabled provider
+or stored row with missing required credentials never inherits environment
+enabled state or secrets.
+
+For a provider with no stored row, a response may expose secret source
+`environment` without exposing the secret. For a stored row whose secret is
+empty or unreadable, source is `none`, the matching configured flag is false,
+and environment credentials are not reported as active. Invalid persisted
+settings make this authenticated read fail safely instead of returning an empty
+settings map.
 
 `GET /api/salons/:id/integration-configs`
 
@@ -675,7 +1617,18 @@ configured and whether it came from dashboard storage or environment fallback.
     "recording_webhook_url": "https://api.example.com/api/voice/twilio/recording",
     "stream_webhook_url": "wss://api.example.com/api/voice/twilio/stream",
     "auth_token_configured": true,
-    "auth_token_source": "database"
+    "auth_token_source": "database",
+    "owner_sms_enabled": true,
+    "owner_sms_destination_masked": "+1******0199",
+    "owner_sms_consent_attested": true,
+    "owner_sms_consent_attested_at": "2026-07-24T08:00:00Z",
+    "account_sid_configured": true,
+    "messaging_service_configured": true,
+    "sender_configured": false,
+    "notification_status_path": "/api/notifications/twilio/status",
+    "notification_inbound_path": "/api/notifications/twilio/inbound",
+    "notification_status_url": "https://api.example.com/api/notifications/twilio/status",
+    "notification_inbound_url": "https://api.example.com/api/notifications/twilio/inbound/salon-uuid"
   },
   "openai": {
     "provider": "openai",
@@ -733,9 +1686,31 @@ exports a webhook signature key; that key must be re-entered at the target.
   "turn_path": "/api/voice/twilio/turn",
   "recording_path": "/api/voice/twilio/recording",
   "stream_path": "/api/voice/twilio/stream",
-  "voice_transport": "realtime_stream"
+  "voice_transport": "realtime_stream",
+  "owner_sms_enabled": true,
+  "owner_sms_destination": "+13125550199",
+  "clear_owner_sms_destination": false,
+  "owner_sms_consent_attested": true,
+  "account_sid": "AC0123456789abcdef0123456789abcdef",
+  "clear_account_sid": false,
+  "messaging_service_sid": "MG0123456789abcdef0123456789abcdef",
+  "clear_messaging_service_sid": false,
+  "sender_phone": "",
+  "clear_sender_phone": false,
+  "notification_status_path": "/api/notifications/twilio/status",
+  "notification_inbound_path": "/api/notifications/twilio/inbound"
 }
 ```
+
+Owner operational SMS is an additive Twilio use case. Enabling it requires an
+explicit E.164 owner destination and consent attestation for that exact
+destination, encrypted Account SID/Auth Token, either Messaging Service SID or
+sender phone, and public HTTPS callback URLs. Changing the destination requires
+fresh consent attestation. Blank write-only secret/SID fields preserve their
+stored values unless the matching `clear_*` flag is true. Responses expose only
+the masked destination, configured booleans, and callback URLs. The owner-SMS
+runtime resolver uses only the salon's database record and never takes the
+legacy environment fallback used by some voice/bootstrap paths.
 
 `PUT /api/salons/:id/integration-configs/openai`
 
@@ -824,17 +1799,21 @@ is manageable by the owner but not eligible for availability or booking.
 }
 ```
 
-`field_authority` is the backend-owned field-level write contract. Clients must
+`field_authority` is the backend-owned field-level write contract. It is not
+the salon scheduling authority. Clients must
 not infer editability from `source`, `sync_status`, or `pos_linked`. Current
 Square-imported services return `provider_read_only`; local-only services return
 `operational_source=manleai` and `operational_write_mode=local`.
 
 `POST /api/salons/:id/services`
 
-Creates a local ManleAI service. Local-only services are visible in the Services
-dashboard but cannot be used for availability or booking until an active POS
-provider link exists. The API always creates local services with
-`ai_bookable=false`, `sync_status=local_only`, and `pos_linked=false`.
+Creates a local ManleAI service. The API always creates local services with
+`ai_bookable=false`, `sync_status=local_only`, and `pos_linked=false`. Under
+`owner_manual` or `manleai_calendar`, an owner may later enable an active,
+non-archived local service with a positive duration as canonical AI-bookable
+eligibility without adding a POS link. Under `external_provider`, availability
+and booking eligibility still require the active-provider sync and link evidence
+described by the AI-bookable PATCH contract below.
 If the active provider later declares service write support, the mutation can
 queue a `pos_sync_jobs` outbox job and move through `syncing`, `synced`, or
 `sync_failed`. Square Appointments service writes are not enabled in the current
@@ -985,10 +1964,23 @@ history but cannot be used for availability or booking.
 }
 ```
 
-Updates only the internal AI booking eligibility flag for a service. Square
-service records are not edited. A service cannot be enabled for AI booking when
-it is inactive, archived, local-only, unmapped, sync-failed, or missing a valid
-link for the active POS provider.
+Updates only the canonical AI booking eligibility flag for a service. The
+owner-scoped mutation locks the shared booking/calendar reconciliation fence,
+the current scheduling authority/version, the active POS provider, and the
+service in one transaction. Every authority requires the service to be active,
+non-archived, and have a positive duration. Under `owner_manual` or
+`manleai_calendar`, an eligible local canonical service may be enabled without
+POS evidence. Under `external_provider`, the service must also belong to the
+active provider, be `synced`, and have a synced active-provider
+`pos_entity_links` row with a nonblank provider ID and a positive provider
+version from `COALESCE(link.provider_version, services.pos_service_version, 0)`.
+This rule is provider-neutral; it does not branch on Square. Disabling remains owner-scoped, allowed, and
+idempotent even when the service is inactive, archived, or no longer has valid
+provider evidence.
+
+Changing `ai_bookable` invalidates any current ManleAI Calendar activation via
+the V48 configuration-version trigger. This endpoint does not append a separate
+actor-level eligibility audit event; that audit surface remains future work.
 
 `PATCH /api/salons/:id/services/:service_id/category`
 
@@ -1114,9 +2106,11 @@ maps or API request constants.
 `GET /api/salons/:id/staff`
 
 Returns ManleAI-owned staff records for dashboard tables, including
-Square-imported staff and local-only staff. A staff member without a valid
-active-provider link is manageable by the owner but not eligible for
-availability or booking.
+Square-imported staff and local-only staff. Under `owner_manual` or
+`manleai_calendar`, an active, non-archived local staff member may be enabled as
+canonical AI-bookable eligibility without a POS link. Under `external_provider`,
+availability and booking eligibility require valid active-provider sync and link
+evidence.
 
 ```json
 {
@@ -1216,14 +2210,36 @@ history but cannot be used for availability or booking.
 }
 ```
 
-Updates only the internal AI booking eligibility flag for a staff member. Square
-staff records are not edited. A staff member cannot be enabled for AI booking
-when inactive, archived, local-only, unmapped, sync-failed, or missing a valid
-link for the active POS provider.
+Updates only the canonical AI booking eligibility flag for a staff member. The
+owner-scoped mutation uses the same shared transaction fence as the service
+toggle. Every authority requires active, non-archived staff. Under
+`owner_manual` or `manleai_calendar`, an eligible local canonical staff member
+may be enabled without POS evidence. Under `external_provider`, the staff row
+must also belong to the active provider, be `synced`, and have a synced
+active-provider `pos_entity_links` row with a nonblank provider ID. Disabling
+remains owner-scoped, allowed, and idempotent even when the staff member is
+inactive, archived, or no longer has valid provider evidence.
+
+Changing `ai_bookable` invalidates any current ManleAI Calendar activation via
+the V48 configuration-version trigger. This endpoint does not append a separate
+actor-level eligibility audit event; that audit surface remains future work.
 
 `POST /api/salons/:id/availability`
 
-Returns provider-neutral available booking slots from the active POS provider
+This is the legacy external-provider compatibility route. The handler enters
+the scheduling facade before executing availability, but its response shape is
+the existing verified-slot contract. Authority-neutral clients, including
+`owner_manual`, use `/scheduling-availability` so `request_only` can be
+represented explicitly. A genuinely new availability request without
+`target_appointment_id` or `retry_of_attempt_id` resolves
+`salon_settings.scheduling_authority`; a
+reschedule availability request with `target_appointment_id` resolves the
+target appointment's persisted originating authority instead of the salon's
+current selection. A request with `retry_of_attempt_id` resolves the persisted
+retry attempt's origin before current-authority fallback. The two origin fields
+are mutually exclusive. The ready `external_provider` executor returns
+provider-neutral available booking slots
+from the active POS provider
 for one or more AI-bookable services and optional AI-bookable staff members. Use
 `segments` for multi-service booking; the legacy `service_id` and `staff_id`
 fields remain supported for single-service booking. These IDs are ManleAI
@@ -1252,14 +2268,48 @@ booking attempt or confirm an appointment.
     }
   ],
   "preferred_date": "2026-06-10",
+  "target_appointment_id": "optional-reschedule-target-uuid",
   "limit": 5
 }
 ```
+
+For a backend-eligible safe retry of an external-provider book fallback, omit
+`target_appointment_id` and send the exact non-superseded fallback attempt:
+
+```json
+{
+  "retry_of_attempt_id": "safe-external-fallback-attempt-uuid",
+  "service_id": "...",
+  "staff_id": "...",
+  "staff_selection_mode": "specific",
+  "segments": [
+    {
+      "service_id": "...",
+      "staff_id": "...",
+      "staff_selection_mode": "specific"
+    }
+  ],
+  "preferred_date": "2026-06-10",
+  "limit": 5
+}
+```
+
+This retry path is available from persisted `external_provider` origin even if
+the salon later selects another authority. It is not a general bypass: the
+attempt must still be `fallback_pending`, `retry_policy=safe`, unsuperseded,
+owner-scoped, and an exact match for the original date, ordered service/staff
+intent, provider/location fence, and requested time. The backend performs a
+fresh provider availability lookup and, only for the exact original slot,
+creates a new V53 `retry_origin` quote bound to `retry_of_attempt_id`. The prior
+quote is never reused. Unsafe, changed, cross-tenant, target-plus-retry, or
+non-book retry availability is rejected before provider dispatch.
 
 Returns:
 
 ```json
 {
+  "scheduling_authority": "external_provider",
+  "authority_provider": "square",
   "quote_id": "availability-quote-uuid",
   "request_fingerprint": "sha256-hex",
   "expires_at": "2026-06-10T14:05:00Z",
@@ -1312,6 +2362,11 @@ test-booking writes must submit the quote ID and selected slot fingerprint;
 missing evidence returns `409 AVAILABILITY_QUOTE_REQUIRED`, while expired,
 consumed, provider-snapshot-stale, or payload-mismatched evidence returns
 `409 AVAILABILITY_QUOTE_STALE`.
+
+For safe retry availability, the returned quote is likewise fresh and
+single-use. The later booking retry must submit both that quote and the same
+`retry_of_attempt_id`; a normal current-authority quote or an old quote cannot
+authorize the persisted retry lineage.
 
 Conversation callers do not accept client-supplied HTTP quote fields. They
 retain the backend quote proof attached to the selected offered slot and
@@ -1437,13 +2492,62 @@ Searches the active provider by phone through `POSProvider.SearchCustomerByPhone
 
 `GET /api/salons/:id/appointments`
 
-Returns appointments recorded after POS success, including confirmed, rescheduled, and cancelled statuses. The optional `limit` query parameter defaults to 50 and is capped at 200. The optional `offset` query parameter defaults to 0. Responses include `appointments`, `limit`, `offset`, and `has_more`; `has_more` is computed by requesting one extra row and does not require an exact total count. Each item includes `staff_selection_mode` and, when available, ordered `segments[]` from `appointment_services` with service names, assigned technician names, durations, and segment-level staff selection mode. `staff_selection_mode=anyone` means the customer did not request a named technician even though the POS-confirmed appointment stores the staff assignment used to book.
+Returns appointments recorded after authority-native success, including
+confirmed, rescheduled, and cancelled statuses. Internal rows expose
+`authority_appointment_version`, `party_size`, and only the current version's
+unreleased ordered service/resource plan. A rescheduled root therefore exposes
+the replacement plan; a cancelled root exposes zero active segments while its
+released historical plans remain in lifecycle evidence. Persisted provider
+columns are null, while legacy compatibility DTO fields may serialize empty
+strings. The optional
+`limit` query parameter defaults to 50 and is capped at 200. The optional
+`offset` query parameter defaults to 0. Responses include `appointments`,
+`limit`, `offset`, and `has_more`; `has_more` is computed by requesting one
+extra row and does not require an exact total count. Each item includes
+`scheduling_authority`, `staff_selection_mode` and, when available, ordered
+`segments[]` from `appointment_services` with service names, assigned
+technician names, durations, and segment-level staff selection mode.
+`staff_selection_mode=anyone` means the customer did not request a named
+technician even though the committed appointment stores the concrete staff
+assignment.
+
+Phase 0 appointment responses also expose additive authority snapshots while
+retaining every legacy POS field:
+
+```json
+{
+  "scheduling_authority": "external_provider",
+  "authority_provider": "square",
+  "authority_appointment_id": "square-booking-id",
+  "authority_appointment_version": 4,
+  "segments": [
+    {
+      "scheduling_authority": "external_provider",
+      "authority_provider": "square"
+    }
+  ]
+}
+```
+
+For an internal row, `scheduling_authority` is `manleai_calendar`,
+`confirmation_source` is `manleai_calendar`, and internal IDs/segments are the
+durable evidence. Clients must hide empty legacy provider fields and must not
+invent provider labels, booking IDs, versions, or POS errors.
+
+`confirmed_at` and `confirmation_source` are optional output-only confirmation
+provenance. `confirmed_by_user_id` is persisted internal audit provenance and is
+intentionally redacted from client JSON until authenticated owner-manual read
+semantics exist. V46 leaves all three values null for historical rows because
+old provider metadata does not prove the exact confirmation time or actor.
+Missing public provenance does not change current confirmed status, and future
+provenance must never replace authority-specific durable success evidence.
 
 `GET /api/salons/:id/calendar?start=<date-or-rfc3339>&end=<date-or-rfc3339>&view=<day|week|month|agenda>`
 
 Returns a range view for the standalone POS Calendar app. The response includes
-POS-confirmed `appointments`, `pending_requests` from `pos_pending` and
-`fallback_pending` booking attempts, and a `warnings` summary. Calendar
+mixed-origin authority-confirmed `appointments`, external `pending_requests`
+from `pos_pending` and `fallback_pending` booking attempts, and a `warnings`
+summary. Calendar
 appointment items include the
 normal appointment fields plus `pos_sync_status`, `last_pos_synced_at`,
 `pos_sync_error`, `sync_warning`, `can_edit`, and `can_delete`. A warning means
@@ -1488,7 +2592,7 @@ calendar `pos_pending` item must be shown as pending, not confirmed.
 Imports appointments from the active POS provider for the requested range. For
 Square Appointments, this uses the Square Bookings list path and upserts local
 appointment mirrors by `(salon_id, pos_provider, pos_appointment_id)`. The
-import does not bypass the POS-first confirmation rule; it mirrors provider
+import does not bypass the current external-provider confirmation rule; it mirrors provider
 records and records POS errors when sync fails. One owner-scoped selected
 location/snapshot-generation fence is captured before pagination and reused for
 every page. The persistence transaction revalidates that exact fence before
@@ -1520,6 +2624,12 @@ non-empty `location_id` also fails the page.
 
 `POST /api/salons/:id/appointments/:appointment_id/reschedule`
 
+The scheduling facade resolves the target appointment's persisted authority
+and requires it to equal any authority already owned by `operation_key` or
+`retry_of_attempt_id`. A mismatch returns `409 BOOKING_OPERATION_CONFLICT`
+before executor/provider dispatch; the salon's current authority setting does
+not reinterpret the target.
+
 ```json
 {
 	"operation_key": "dashboard-reschedule-7f60e4bf",
@@ -1536,6 +2646,10 @@ Returns `200` with the updated appointment only when the active `POSProvider` su
 
 `POST /api/salons/:id/appointments/:appointment_id/cancel`
 
+Cancellation uses the same origin rule: target appointment, existing operation
+key, and retry attempt must resolve to one authority. A cross-origin request
+returns `409 BOOKING_OPERATION_CONFLICT` before provider dispatch.
+
 ```json
 {
 	"operation_key": "dashboard-cancel-9aa95f18",
@@ -1551,6 +2665,13 @@ Returns `200` with the cancelled appointment only when the active `POSProvider` 
 Returns booking attempts, including transient `pos_pending` records and `fallback_pending` records that need owner review. The optional `status` query parameter filters by attempt status such as `fallback_pending`. The optional `limit` query parameter defaults to 50 and is capped at 200. The optional `offset` query parameter defaults to 0. Responses include `booking_attempts`, `limit`, `offset`, `has_more`, and `status` when a filter is applied; `has_more` is computed by requesting one extra row and does not require an exact total count.
 
 Each item includes `staff_selection_mode` and, when available, ordered `segments[]` from `booking_attempt_segments` so owner dashboards can distinguish the customer preference (`anyone` or `specific`) from the staff assignment attempted through the POS provider. Fallback action rows include backend-owned `booking_action` (`book`, `reschedule`, or `cancel`), plus `target_appointment_id` and `appointment` when a failed reschedule or cancellation has a POS-confirmed appointment target. Dashboard retry actions must still call the booking service and active POS provider; a fallback request must not be marked confirmed, rescheduled, or cancelled from the list response alone.
+
+Phase 0 attempt responses additionally include `scheduling_authority`,
+`authority_provider`, optional `authority_appointment_id`, optional
+`authority_appointment_version`, and authority/provider fields on ordered
+segments. These are compatibility snapshots of current external-provider
+evidence. Legacy POS fields still drive current routing, fingerprints, retries,
+reconciliation, provider dispatch, and confirmation.
 
 Booking attempts also expose backend-owned operation integrity state:
 
@@ -1574,6 +2695,15 @@ becomes `fallback_pending` with `provider_outcome=failed`,
 `fallback_pending` with `provider_outcome=unknown`, `retry_policy=blocked`, and
 `reconciliation_status=required`.
 
+For an exact external create mirror, canonicalization reassigns the mirror to
+the canonical attempt and records durable confirmation provenance. It
+preserves existing `confirmed_at` and `confirmation_source`, fills only missing
+values with the canonicalization transaction time and `external_provider`, and
+does not invent `confirmed_by_user_id`. A repeated recovery does not change the
+stored confirmation or update timestamps. This active evidence transition is
+separate from the V46 historical backfill, which leaves unprovable legacy
+provenance null.
+
 Owner booking-attempt/calendar reads and the background worker use the same
 atomic recovery transaction. The worker selects a bounded candidate list
 without row locks, then handles each row with calendar advisory lock first and
@@ -1587,9 +2717,17 @@ an expired `not_started` claim because provider dispatch has not begun; after
 the recovery transaction finalizes it as fallback, a new attempt must use the
 explicit safe-retry lineage.
 
-Owner notifications are currently durable in-product/outbox records with
-dedupe, payload, attempt count, and delivery metadata. This repository does not
-yet contain an external SMS/email/push delivery consumer for those records.
+Owner notifications remain durable deduplicated in-product/outbox records;
+queueing alone is not delivery proof. V56
+`backend/modules/notification_delivery` provides the provider-neutral worker
+claim, bounded retry/dead-letter policy, immutable attempt/event/action audit,
+and monotonic callback transitions. `backend/modules/notification_twilio`
+provides the Twilio Messaging transport and signed callback translation using
+strict salon-scoped integration configuration. Delivery runs only when the
+salon-owned operational SMS configuration and consent attestation are ready;
+provider acceptance is distinct from `sent` and `delivered`, and ambiguous
+post-dispatch outcomes are not retried automatically. None of these delivery
+states confirms, reschedules, or cancels an appointment.
 
 `GET /api/salons/:id/booking-reconciliations?status=<open|resolved|escalated>&limit=100&offset=0`
 
@@ -1644,6 +2782,11 @@ concurrent mirror insert from passing a `not_created` absence check.
 
 `POST /api/salons/:id/booking-attempts`
 
+This is the legacy external-provider compatibility create route. It keeps the
+existing booking-attempt response contract for persisted external operations.
+New authority-neutral callers use `/scheduling-actions`; owner-manual work is
+stored in `scheduling_requests`, never mirrored into this ledger.
+
 ```json
 {
 	"operation_key": "dashboard-booking-0dfd",
@@ -1670,13 +2813,25 @@ concurrent mirror insert from passing a `not_created` absence check.
 
 `operation_key` is required and identifies one logical booking operation. It is generated once per dashboard action or deterministically from the conversation session. The backend stores a normalized request fingerprint under a salon-scoped unique operation claim before customer or POS side effects. Replaying the same key and logical intent returns the existing attempt and reuses its POS idempotency key without a second POS writer. Ephemeral availability quote IDs and slot-proof fingerprints may be refreshed for the same logical request after response loss and are not replay-identity fields; they remain mandatory and exact for the first claim that can dispatch. Reusing the same key with different customer, retry lineage, target, time, notes, or ordered service/staff intent returns `409 BOOKING_OPERATION_CONFLICT`.
 
+The scheduling facade resolves an existing `operation_key` across persisted
+booking attempts and owner-manual scheduling requests, and requires
+`retry_of_attempt_id`, when present, to have the same originating authority.
+Only when neither origin exists does it read the current
+`salon_settings.scheduling_authority` for a genuinely new create. A key already
+owned by an owner-manual request cannot be reinterpreted as an external booking
+attempt.
+
 For this authenticated HTTP endpoint, the handler assigns
 `source=owner_dashboard`; caller-supplied source values are not trusted. Quote
 evidence is required on this HTTP surface. Provider-neutral internal callers
-use the service directly and retain their own source and conversation
-authorization gates.
+retain their own source and conversation authorization gates, but conversation
+scheduling actions enter through the same authority facade. Square-specific
+test, webhook, sync, and repair operations use the established external booking
+service where they are explicitly operating on external-provider state.
 
-Creates a backend booking attempt before calling the active `POSProvider`. For
+After authority resolution chooses `external_provider`, the unchanged booking
+service creates a backend booking attempt before calling the active
+`POSProvider`. For
 multi-service booking, each segment is resolved to provider-neutral
 service/staff records and persisted in `booking_attempt_segments`; confirmed
 appointments snapshot the same ordered segments in `appointment_services`.
@@ -1714,7 +2869,45 @@ Creates a simulator session and writes the initial AI transcript message. The in
 
 `GET /api/salons/:id/conversation-sessions/:session_id`
 
-Returns one conversation session with transcript messages and the latest handoff request when present. Booking state includes `requested_date` when the customer has provided a day but not a specific time, and `requested_start_time` only after a concrete start time or offered slot is selected. `dialog_state` is a versioned operational state object containing phase, pending typed clarification, bounded mutation history, no-progress count, `draft_revision`, `reviewed_revision`, `authorized_revision`, and optional `consultation` and `guidance` state. Consultation state includes controlled caller needs such as desired finish, candidate and recommended service IDs, selected service ID, last asked field, profile revisions, recommendation reasons, bounded no-progress count, resume phase, and exit reason. Guidance state includes `stage`, dynamically derived `offered_actions`, `awaiting_action_choice`, separate `no_progress_count` and `provider_failure_count`, `progress_fingerprint`, and `last_provider_outcome`. Existing legacy guidance prompt/counter fields are normalized into this version 5 nested object on read without a database migration. `awaiting_action_choice` enables only the bounded choices from the immediately preceding provider-failure prompt; it is not a general caller-intent classifier and is cleared on progress or terminal handoff. A bounded semantic-provider outage uses handoff reason `guidance_provider_unavailable`; caller ambiguity continues to use `service_clarification_unresolved`. Transcript messages may include PII-reduced turn-understanding diagnostics, validated acts/questions, revision transitions, slot state, event keys, guardrail outcomes, answer sources, consultation or guidance audit metadata, and next required field.
+Returns one conversation session with transcript messages and the latest handoff request when present. Booking state includes `requested_date` when the customer has provided a day but not a specific time, and `requested_start_time` only after a concrete start time or offered slot is selected. A successfully persisted owner-manual request sets `scheduling_request_id` and `outcome=owner_review_pending` while leaving `appointment_id` and `booking_attempt_id` empty. `dialog_state` is a versioned operational state object containing phase, pending typed clarification, bounded mutation history, no-progress count, `draft_revision`, `reviewed_revision`, `authorized_revision`, and optional `consultation` and `guidance` state. Consultation state includes controlled caller needs such as desired finish, candidate and recommended service IDs, selected service ID, last asked field, profile revisions, recommendation reasons, bounded no-progress count, resume phase, and exit reason. Guidance state includes `stage`, dynamically derived `offered_actions`, `awaiting_action_choice`, separate `no_progress_count` and `provider_failure_count`, `progress_fingerprint`, and `last_provider_outcome`. Existing legacy guidance prompt/counter fields are normalized into this version 5 nested object on read without a database migration. `awaiting_action_choice` enables only the bounded choices from the immediately preceding provider-failure prompt; it is not a general caller-intent classifier and is cleared on progress or terminal handoff. A bounded semantic-provider outage uses handoff reason `guidance_provider_unavailable`; caller ambiguity continues to use `service_clarification_unresolved`. Transcript messages may include PII-reduced turn-understanding diagnostics, validated acts/questions, revision transitions, slot state, event keys, guardrail outcomes, answer sources, consultation or guidance audit metadata, and next required field.
+
+Both the list and detail responses include `scheduling_result_evidence`, an
+owner-scoped backend projection whose default is `complete=false`. Clients must
+not infer confirmation from the session `outcome`, `appointment_id`, or
+`booking_attempt_id`. An `owner_manual` request can produce only
+`kind=pending_owner_review`; later request states such as `resolved` or
+`dismissed` are still not appointment confirmation. Its optional validated
+`target_scheduling_authority` preserves the selected internal/external target
+for a pending-approval request without changing the request's nonconfirming
+`scheduling_authority=owner_manual` origin. A completed
+`manleai_calendar` operation requires the exact internal attempt, execution
+event, root version/status, durable result child graph, valid current active
+child graph, and absence of provider evidence. A completed
+`external_provider` operation requires a successful provider outcome with the
+required provider booking ID/version and a matching external appointment
+mirror. A current external book/reschedule result additionally requires exact
+ordered attempt-to-appointment child-graph equality. Because the external
+appointment child table is a current, non-versioned mirror, a later valid
+lifecycle version can retain the immutable earlier result as complete
+historical evidence without requiring its old child graph to equal the newer
+current graph; it remains noncurrent. Split party evidence is complete only when every expected operation
+key, attempt, appointment root, and child result is present and valid.
+`result_status` and `authority_appointment_version` describe the exact
+historical operation; `current_status`,
+`current_authority_appointment_version`, and `is_current` describe the present
+root after later lifecycle operations. Therefore an exact historical success
+remains auditable with `complete=true` but is not a current confirmation when
+`is_current=false`. Unknown, malformed, provider-ambiguous, partially
+persisted, or legacy-incomplete evidence fails closed with `kind=incomplete`.
+
+Phase 5H also returns `dialog_state.reviewed_booking_mode` and
+`dialog_state.selected_scheduling_authority`. They bind the final review to the
+exact conversation policy and selected authority; either setting changing
+requires a new full review before origin-free execution. Under
+`pending_approval`, verified internal/provider slots are selection evidence
+only and the final result is one `owner_review_pending` request with no
+appointment or booking-attempt ID. Under `disabled`, origin-free conversation
+scheduling stops before availability, request, executor, or provider actions.
 
 Production-created sessions use `dialog_state.review_required=true`. When every booking field is complete, the runtime sets `reviewed_revision=draft_revision`, returns `phase=review`, and asks the caller to review the draft. A later explicit authorization sets `authorized_revision` only for that same revision. Booking requires `draft_revision == reviewed_revision == authorized_revision`; review acceptance is not booking confirmation.
 
@@ -1735,7 +2928,71 @@ Irreversibly redacts a completed or otherwise non-active owner-scoped conversati
 }
 ```
 
-Processes one simulated customer message through the deterministic conversation engine. `event_key` is optional for simulator callers and is used by voice adapters to dedupe provider retries. The simulator asks one question at a time, preserves already-collected booking slots, handles greeting-only or connection-check turns without replaying the full welcome or forcing booking intent, handles date-only turns such as weekdays before a time is known, can create owner handoffs for human requests or disabled AI booking, checks provider-neutral availability before selecting a booking time, offers available slots from Square Appointments, and calls the provider-neutral booking service only after the customer selects a slot and required customer details are collected. Deterministic date, time, staff, customer, and explicit availability-question evidence is applied before a model-proposed standalone summary can return, so a concrete correction or request for openings cannot be dropped or misrouted by semantic classification. If a new-booking caller proposes a different date or time after availability slots were offered, the engine preserves those slots and stores a typed pending correction until the caller confirms; rejection or a renewed availability question keeps and repeats the prior slots, while confirmation invalidates them and performs a fresh provider availability check. Service utterances are interpreted against the active salon catalog, active `service_aliases`, active `service_categories`, and active `service_category_aliases`; exact catalog service names win over aliases, alias matches can select one service, category/category-alias matches ask the caller to choose a real service in that group, and generic or fuzzy family matches ask for catalog-backed clarification instead of selecting a service. A structured semantic act cannot narrow a category/category-alias candidate set to one service without concrete service evidence. Exact family evidence takes precedence over fuzzy service guessing unless another caller token distinctly identifies one catalog service, so conversational wording such as "manicure as well" cannot be misread as "Gel Manicure." If the caller mentions a different service after a service is already selected, the engine distinguishes adding from replacing before mutating the booking; a bare concrete service switch uses confirmation before clearing slots or changing the draft. A generic request such as another service first asks whether to add or replace; an ambiguous service family then asks for one concrete catalog service; and a multi-service replacement also asks which current service to replace. While a family target is pending, short replies are interpreted against that candidate set first, with full-catalog fallback for a clearly different service. The engine preserves the selected services and offered slots until the operation and concrete target are resolved, never applies every candidate from an ambiguous family, and only then clears stale offered slots and rechecks availability when date or time context already exists. Non-booking answers are routed from structured sources before knowledge: active-provider AI-bookable services, imported business hour periods, active-provider staff, booking availability prompts, then active knowledge. Informational service menu and count questions are answered from the full matched bookable catalog without selecting a service, clearing pending candidates, or calling availability/booking tools; if a booking is already in progress, the reply then resumes the unresolved service question. Transcript metadata may include `service_understanding_status`, `service_understanding_reason`, `service_understanding_confidence`, candidate service IDs/names, selected service, alias source, alias ID, category ID, category name, `answer_source`, `answer_source_reason`, `answer_source_confidence`, `router_intent`, `source_record_ids`, and `answer_context_cache_hit` for debugging. Supported group or party booking requests resolve party size and guest service counts into ordered `booking_segments`, call availability, and can be booked through the same POS-first booking service after the caller selects a slot and provides required customer details. Party parsing distinguishes person-count phrases such as "for two guests" from service-count phrases such as "two manicures"; session `party_plan` may include optional `parse_source`, `parse_confidence`, `clarify_reason`, group `source`, and `evidence` fields for debugging and review. Ambiguous party service families and party-size/service-count mismatches ask for catalog-backed clarification before availability. Offered slots may include ordered `segments` with provider-neutral service/staff assignments. The engine can select a unique offered slot from ordinal replies, spoken times such as "one p.m.", or a "Yes" reply to a prompt that confirmed one specific offered time; unclear time fragments repeat the existing offered slots instead of rerunning availability. Once a customer selects a slot, the session stores selected `booking_segments` and `staff_selection_mode` so simulator and phone flows can create one multi-service or supported party POS-first booking request. When `staff_selection_mode=anyone`, the customer did not choose a named technician, so the conversation avoids presenting the POS staff assignment as a customer-selected technician. Reschedule and cancellation requests use `booking_action` values `reschedule` and `cancel`, look up upcoming POS-backed appointments by caller phone, ask the caller to select or confirm the target appointment, and then call the provider-neutral booking service. A simulator booking is marked `booking_confirmed` only when the booking service returns a confirmed booking attempt with a POS booking ID and appointment. Cancellation is marked `booking_cancelled` only when the booking service returns a POS-cancelled appointment. POS failures create `booking_fallback_pending` wording and do not create confirmed, rescheduled, or cancelled appointment language.
+The conversation runtime supports all three registered executors within their
+operation contracts. `owner_manual` is request-only, `external_provider`
+retains its provider behavior, and Phase 4C `manleai_calendar` supports
+structured multi-guest, multi-service staff-only/pooled availability, atomic
+create, and whole-root reschedule/cancel.
+
+Under `owner_manual`, answer context uses active, non-archived, AI-bookable
+canonical services with positive duration and active, non-archived,
+AI-bookable canonical staff without requiring a POS link. Availability is
+`request_only`: the engine asks for a preferred time and does not claim an
+opening. After final review and authorization, book, reschedule, and cancel
+persist one call-linked scheduling request and end with concise pending-owner-
+review wording. Book/party wording explicitly says the request is not a
+confirmed appointment; reschedule/cancel wording says the original appointment
+has not been changed. Persistence failure enters safe handoff and does not
+claim that the request was recorded, sent, delivered, confirmed, rescheduled,
+or cancelled. An external-origin target remains on its external executor even
+when the salon's current setting is `owner_manual`; without external history,
+a durable target description identifies the owner-manual reschedule/cancel
+request.
+
+Under `manleai_calendar`, answer context uses canonical active AI-bookable
+services/staff, activated V48 policies, weekly staff schedules,
+`local_override` hours, and resource policy. It derives readiness from backend
+`readiness.capabilities`, not an optimistic catalog query. A complete party
+plan becomes one aggregate availability request and one reviewed quote that
+preserves every guest reference, ordered service unit, concrete staff
+assignment, timing range, and resource allocation. The booking action enters
+the same neutral atomic executor used by dashboard create. Confirmation
+requires durable internal root IDs and a complete child graph matching that
+quote; partial children and provider/POS-shaped evidence are rejected. Exact
+response-loss replay keeps the same root operation identity and returns the
+same committed graph. Typed quote-stale/resource conflicts reopen the complete
+draft with explicit zero-confirmation behavior. Internal reschedule and cancel
+use the selected candidate's persisted internal origin and exact version even
+after the salon's current authority changes. Reschedule uses one target-aware
+aggregate quote and a persisted `internal_reschedule_confirmation` act before
+the action call. Cancel persists `internal_cancel_reason` followed by
+`internal_cancel_confirmation` and sends no quote/replacement plan. Only a
+state-scoped affirmative can authorize either reviewed lifecycle act. Exact
+operation replay preserves the historical lifecycle result after later root
+mutations; stale target/version refreshes candidates and reoffers without
+success wording; cutoff/not-ready, partial, or provider-shaped results never
+produce rescheduled/cancelled wording. External-provider party behavior is
+unchanged.
+
+The detailed provider mutation behavior below applies to the Square-backed
+`external_provider` path.
+
+The implemented Phase 6 fuzzy-service slice is authority-neutral conversation
+state, not a new scheduling executor. Exact catalog and alias selections keep
+their established behavior. A fuzzy result with exactly one current catalog
+candidate persists
+`dialog_state.pending.prompt_key=fuzzy_service_confirmation`, the candidate
+ID, source service IDs, fuzzy provenance/token, and add/replace/set or party
+scope; it does not mutate the draft, clear availability, or call booking. Only
+a state-scoped affirmative or new exact/alias catalog evidence accepts that
+identity. Negative input rejects it, unclear input repeats the prompt, and a
+stale catalog candidate, changed source selection, or wrong-state input fails
+safely. Event-key replay returns the persisted turn without applying the
+confirmation twice. The bounded affirmative grammar is valid only while that
+one pending catalog candidate owns the expected input; it is not a general
+caller-intent classifier. No other Phase 6 scope is implied here.
+
+Processes one simulated customer message through the deterministic conversation engine. `event_key` is optional for simulator callers and is used by voice adapters to dedupe provider retries. The simulator asks one question at a time, preserves already-collected booking slots, handles greeting-only or connection-check turns without replaying the full welcome or forcing booking intent, handles date-only turns such as weekdays before a time is known, can create owner handoffs for human requests or disabled AI booking, and resolves provider-neutral availability before selecting a booking time. The selected authority returns either request-only behavior or verified slots; execution starts only after the caller selects a slot when one is required and the required customer details are collected. Deterministic date, time, staff, customer, and explicit availability-question evidence is applied before a model-proposed standalone summary can return, so a concrete correction or request for openings cannot be dropped or misrouted by semantic classification. If a new-booking caller proposes a different date or time after availability slots were offered, the engine preserves those slots and stores a typed pending correction until the caller confirms; rejection or a renewed availability question keeps and repeats the prior slots, while confirmation invalidates them and performs a fresh authority-neutral availability check. Service utterances are interpreted against the active salon catalog, active `service_aliases`, active `service_categories`, and active `service_category_aliases`; exact catalog service names win over aliases, alias matches can select one service, category/category-alias matches ask the caller to choose a real service in that group, and generic or fuzzy family matches ask for catalog-backed clarification instead of selecting a service. A structured semantic act cannot narrow a category/category-alias candidate set to one service without concrete service evidence. Exact family evidence takes precedence over fuzzy service guessing unless another caller token distinctly identifies one catalog service, so conversational wording such as "manicure as well" cannot be misread as "Gel Manicure." If the caller mentions a different service after a service is already selected, the engine distinguishes adding from replacing before mutating the booking; a bare concrete service switch uses confirmation before clearing slots or changing the draft. A generic request such as another service first asks whether to add or replace; an ambiguous service family then asks for one concrete catalog service; and a multi-service replacement also asks which current service to replace. While a family target is pending, short replies are interpreted against that candidate set first, with full-catalog fallback for a clearly different service. The engine preserves the selected services and offered slots until the operation and concrete target are resolved, never applies every candidate from an ambiguous family, and only then clears stale offered slots and rechecks availability when date or time context already exists. Non-booking answers are routed from structured sources before knowledge: authority-eligible AI-bookable services, authority-eligible business hours, authority-eligible staff, booking availability prompts, then active knowledge. Informational service menu and count questions are answered from the full matched bookable catalog without selecting a service, clearing pending candidates, or calling availability/booking tools; if a booking is already in progress, the reply then resumes the unresolved service question. Transcript metadata may include `service_understanding_status`, `service_understanding_reason`, `service_understanding_confidence`, candidate service IDs/names, selected service, alias source, alias ID, category ID, category name, `answer_source`, `answer_source_reason`, `answer_source_confidence`, `router_intent`, `source_record_ids`, and `answer_context_cache_hit` for debugging. Supported group or party booking requests resolve party size and guest service counts into ordered `booking_segments`, call authority-neutral availability, and execute through the same scheduling boundary after the caller selects a required slot and provides required customer details. Party parsing distinguishes person-count phrases such as "for two guests" from service-count phrases such as "two manicures"; session `party_plan` may include optional `parse_source`, `parse_confidence`, `clarify_reason`, group `source`, and `evidence` fields for debugging and review. Ambiguous party service families and party-size/service-count mismatches ask for catalog-backed clarification before availability. Offered slots may include ordered `segments` with provider-neutral service/staff assignments. The engine can select a unique offered slot from ordinal replies, spoken times such as "one p.m.", or a "Yes" reply to a prompt that confirmed one specific offered time; unclear time fragments repeat the existing offered slots instead of rerunning availability. Once a customer selects a slot, the session stores selected `booking_segments` and `staff_selection_mode` so simulator and phone flows can submit one multi-service or supported all-or-none party scheduling operation. When `staff_selection_mode=anyone`, the customer did not choose a named technician, so the conversation avoids presenting an assigned technician as customer-selected. Reschedule and cancellation requests use `booking_action` values `reschedule` and `cancel`, resolve upcoming appointments by captured origin and caller phone, ask the caller to select or confirm the target appointment, and then enter the provider-neutral scheduling boundary. `owner_manual` returns one durable pending owner-review request and never appointment-confirmed wording. `manleai_calendar` returns confirmed/rescheduled/cancelled wording only after its atomic internal commit returns the required durable root, attempt, version, and child evidence. Square-backed `external_provider` returns that wording only after provider success with the required provider booking ID/version and matching appointment evidence. External provider failures create `booking_fallback_pending` wording and do not create confirmed, rescheduled, or cancelled appointment language.
 
 Session responses include a persisted `state_revision`. Production message and
 typed voice-recovery execution acquire one session-scoped database lock before
@@ -1759,7 +3016,19 @@ Configured production turns first enter the state-driven Turn Kernel. The kernel
 
 The configured OpenAI reply model interprets only `semantic_lane` turns selected from state and deterministic coverage, never from a keyword-only gate. Input contains `expected_input`, `semantic_contract`, a PII-reduced utterance, selected or context-relevant service and staff identities, current party guest references/counts, pending act, booking action/stage, boolean customer-field presence, and current revision. Existing per-guest service assignments are not model input; they remain backend state so the model cannot manufacture replacement sources from draft layout. Initial guidance carries the full stable recognition vocabulary, while capability stays backend-owned. The accepted guidance action deterministically derives its general goal and protocol-owned companion fields: catalog questions own `catalog` subject, salon questions own their operational subject, and other actions cannot retain irrelevant catalog mode/subject decoration. Consultation profiles are never sent to the semantic model; owner-approved ready profiles remain backend-only inputs to consultation question planning and recommendation ranking. During an active consultation, model-authored booking/service acts are discarded before validation. Party service mutations must name an existing guest reference, and replacement sources must be grounded in the caller's current utterance; an initial multi-act party request may construct counted groups without flattening repeated services. A structured time preference is normalized to availability when the state is awaiting date/time, regardless of a model-authored staff or current-booking subject. Both structured contracts carry extraction-only consultation mutations and a global safety assessment; neither has side-effect authority. The backend rejects low-confidence goals/questions/acts, invalid guidance actions, invalid mutation semantics, malformed party counts, safety categories outside the controlled contract, and IDs outside the salon's active catalog. The interpreter inherits the simulator or phone request context and no longer installs a private 2.5-second deadline; the OpenAI adapter retains a 30-second HTTP transport ceiling. A caller-context timeout, provider failure, empty output, invalid schema, low-confidence result, or rejected catalog reference preserves the draft and may fall back to independently validated catalog and already-captured field evidence before asking the next missing-field question. Without such evidence, the runtime safely clarifies or hands off. Guidance provider-failure wording is selected only from typed `dialog_state.guidance.offered_actions`; the immediately following bounded choice can resolve one of those still-active actions without another provider call. It may offer profile-backed consultation only when consultation is enabled and at least one eligible profile is ready, and it never offers a service menu when the runtime catalog is empty. The model cannot call tools, mutate session state, or create confirmed wording.
 
-New booking execution requires revision-bound final review. Service, staff, date/time, guest/party, or customer changes advance the draft revision; dependency-bearing changes also invalidate offered availability. The active POS provider still owns booking execution, and confirmed wording still requires POS success plus a booking ID.
+New scheduling execution requires revision-bound final review. Service, staff,
+date/time, guest/party, or customer changes advance the draft revision;
+dependency-bearing changes also invalidate offered availability. Under
+`external_provider`, confirmed wording requires provider success plus the
+required booking evidence. Under `owner_manual`, the result remains pending
+owner review and never uses confirmed wording. Under Phase 4C
+`manleai_calendar`, create and reschedule require current exact quote proof;
+reschedule additionally requires the persisted reviewed whole-root target/
+version, while cancel requires the persisted target/version, reason, and
+explicit lifecycle confirmation with no quote. Confirmed lifecycle wording
+requires durable internal root/attempt IDs, exact target/result versions,
+authoritative status/active-child evidence, and the complete operation-native
+child snapshot from the atomic commit.
 
 Primary act/question/guidance validation is isolated from auxiliary consultation extraction. `unknown` is treated as absent, while malformed, low-confidence, catalog-invalid, and state-no-op consultation snapshots or mutations are dropped with `turn_consultation_profile_dropped` / `turn_consultation_mutations_dropped` diagnostics instead of rejecting valid primary meaning. Consultation mutation schema values come from the controlled protocol vocabulary plus current request catalog service IDs; runtime field/state validation remains authoritative. A syntactic question containing an expected-field value is partial coverage rather than an automatic fast-lane completion, so semantic constraints such as date plus time window are retained. Once guidance resolves to booking, the reply asks for the next missing booking field; a resolved salon question returns the structured answer without appending the generic caller-goal menu.
 
@@ -1906,7 +3175,12 @@ Marks the correction as `dismissed`.
 }
 ```
 
-Returns a read-only preview that uses active salon knowledge without creating a call session, writing transcript rows, calling voice providers, or calling the booking service.
+Returns a read-only preview that uses active salon knowledge without creating a
+call session, writing transcript rows, calling voice providers, calling a
+scheduling executor, or calling the booking service. The endpoint resolves the
+owner-scoped selected `salon_settings.scheduling_authority` through
+`scheduling.Service.CurrentSchedulingAuthority` and returns the confirmation
+contract for that exact authority.
 
 ```json
 {
@@ -1919,15 +3193,59 @@ Returns a read-only preview that uses active salon knowledge without creating a 
   },
   "outcome": "knowledge_answer",
   "booking_action": "none",
-  "pos_confirmation_required": true
+  "scheduling_authority": "owner_manual",
+  "confirmation_requirement": "pending_owner_review",
+  "confirmation_guardrail": "This preview never reserves or confirms an appointment. Owner manual scheduling is non-reserving, and every request remains pending for owner review.",
+  "pos_confirmation_required": false
 }
 ```
+
+`confirmation_requirement` is one of:
+
+- `pending_owner_review` for `owner_manual`; evaluation is non-reserving and
+  cannot turn a request into an appointment.
+- `atomic_internal_commit` for `manleai_calendar`; confirmation requires an
+  atomic internal commit with durable root appointment and attempt IDs, an
+  authoritative appointment version, and complete child service/resource
+  evidence.
+- `provider_booking_success` for `external_provider`; the current Square-backed
+  executor requires a successful provider booking ID and status plus persisted
+  booking evidence.
+
+`confirmation_guardrail` is backend-owned authority-aware presentation copy.
+Clients must render it instead of inferring confirmation rules from provider
+fields. `pos_confirmation_required` remains for backward compatibility and is
+true only for the currently Square-backed `external_provider` path; it is false
+for `owner_manual` and `manleai_calendar`. Unknown authority values and
+authority-read failures fail closed as generic `TRAINING_EVALUATION_FAILED`
+responses. A salon outside the authenticated owner's scope remains
+`404 SALON_NOT_FOUND`.
 
 ## Voice
 
 `GET /api/salons/:id/voice/status`
 
-Returns owner-scoped live voice, phone booking, and external AI provider readiness without exposing Twilio, OpenAI, or POS token secrets. `ready` means Twilio can route live phone webhooks; `phone_booking_ready` means the phone path also has the booking prerequisites needed to offer available slots from the active POS provider and attempt POS-first confirmation. For Square Appointments, a current create-booking permission blocker returns `booking.booking_write_blocked=true` and keeps `phone_booking_ready=false`.
+Returns owner-scoped live voice, scheduling, and external AI-provider readiness
+without exposing Twilio, OpenAI, or scheduling-provider token secrets. The
+response separates three dimensions:
+
+- `phone_answering_ready`: the configured telephony path can accept an inbound
+  call for the salon. Legacy `ready` mirrors this dimension.
+- `request_capture_ready`: phone answering, salon AI enablement, booking mode,
+  authority/version fence, and the selected authority's availability or
+  request-capture path are ready.
+- `automated_booking_ready`: request capture is ready, `booking_mode` is
+  `confirmed_booking`, and the selected authority can produce its required
+  durable confirmation evidence. Legacy `phone_booking_ready` mirrors this
+  dimension.
+
+`scheduling_authority`, `scheduling_authority_version`, and `booking_mode`
+identify the exact decision fence. Each dimension includes safe typed
+`blockers`. `owner_manual` may make request capture ready but never automatic
+booking ready. `manleai_calendar` uses current internal activation and
+capability evidence. `external_provider` uses the selected adapter's provider
+readiness, including write safety for automatic confirmation. Square setup is
+not a prerequisite for `owner_manual` or `manleai_calendar`.
 
 ```json
 {
@@ -1940,7 +3258,25 @@ Returns owner-scoped live voice, phone booking, and external AI provider readine
   "stream_webhook_url": "wss://api.example.com/api/voice/twilio/stream",
   "salon_phone": "+16292536211",
   "ready": true,
+  "phone_answering_ready": true,
+  "request_capture_ready": true,
+  "automated_booking_ready": true,
   "phone_booking_ready": true,
+  "scheduling_authority": "external_provider",
+  "scheduling_authority_version": 3,
+  "booking_mode": "confirmed_booking",
+  "phone_answering": {
+    "ready": true,
+    "blockers": []
+  },
+  "request_capture": {
+    "ready": true,
+    "blockers": []
+  },
+  "automated_booking": {
+    "ready": true,
+    "blockers": []
+  },
   "input_mode": "recording",
   "booking": {
     "ready": true,
@@ -2020,8 +3356,12 @@ for availability and booking. `booking.service_guidance.status` is one of
 It reports whether the runtime can show the canonical guidance catalog and
 whether enough owner-approved consultation profiles exist to make a
 personalized recommendation. Guidance may be ready while
-`phone_booking_ready=false`; that state permits consultation but no availability
-or booking provider call. It is independent of Twilio transport readiness.
+`request_capture_ready=false` or `automated_booking_ready=false`; that state
+permits consultation but no scheduling call beyond the capability proved by
+the selected authority. The legacy `booking` object remains external-provider
+guidance and Square diagnostic evidence. It does not gate owner-managed or
+internal-calendar readiness. Guidance is independent of Twilio transport
+readiness.
 
 `POST /api/salons/:id/voice/semantic-check`
 
@@ -2385,9 +3725,29 @@ PII-free stages include `speech_stopped`, `transcript_admitted`, `backend_turn_s
 
 `GET /api/voice/audio/:id`
 
-Public short-lived audio output endpoint for Twilio `<Play>` responses. IDs are unguessable runtime UUIDs, expire quickly, and never expose POS tokens or provider secrets.
+Public short-lived audio output endpoint for Twilio `<Play>` responses. Access
+requires both `expires=<unix-seconds>` and `signature=<base64url-hmac>` query
+parameters. The HMAC-SHA256 capability is signed with the salon's current,
+database-backed Twilio auth token and binds the exact audio ID, salon ID,
+telephony provider, provider call ID, call-session ID, and expiry. Only expiry
+and signature appear in the query; salon, call, session, phone, provider, and
+secret values are never placed in the URL.
 
-The phone path never confirms an appointment unless the booking service returns a POS-confirmed booking attempt with a POS booking ID and appointment.
+The persisted `voice_audio_outputs.expires_at` value is authoritative and the
+capability may never exceed either that value or 15 minutes from verification.
+The handler loads non-media metadata first, verifies the database expiry and
+capability, then loads audio bytes. Valid capabilities may be fetched more than
+once during their TTL. Rotating the stored Twilio auth token invalidates
+outstanding URLs. Missing stored signing configuration produces no unsigned
+audio URL, so TwiML retains the safe text-speech fallback. Missing, unknown,
+tampered, expired, repository-failed, and signing-config-failed requests all
+return the same non-enumerating `404 VOICE_AUDIO_UNAVAILABLE` response.
+
+The current phone path never confirms an appointment from conversation state
+alone. `owner_manual` remains pending owner review;
+`manleai_calendar` requires the atomic durable internal root/attempt/child
+evidence; and Square-backed `external_provider` requires provider success plus
+the required booking ID/version and matching appointment evidence.
 
 ## POS Provider Switch Readiness
 
@@ -2603,6 +3963,104 @@ connection states (`connected`, `syncing`, `active`, `error`, and
 `expired_token`) may enqueue a valid signed event; `not_connected` and
 `disabled` connections cannot.
 
+Webhook target and scheduled-repair selection intentionally does not read the
+salon's current scheduling-authority setting. It remains Square
+provider/connection-scoped so historical external-provider appointments can
+continue to converge after a later switch. Booking-calendar persistence,
+matching, and reconciliation explicitly require
+`scheduling_authority=external_provider` and skip or protect internal-origin
+rows; webhook processing therefore cannot manufacture an internal-authority
+appointment mutation.
+
+`GET /api/salons/:id/square-webhook-events?status=&limit=25&offset=0`
+
+Returns authenticated, owner-scoped Square webhook operations evidence. The
+optional `status` filter accepts `pending`, `processing`, `failed`,
+`dead_letter`, or `succeeded`; an empty filter returns every persisted event,
+including read-only `ignored` events. `ignored` is intentionally not a filter
+value and never authorizes requeue. `limit` defaults to 25, is capped at 100,
+and `has_more` is derived from one extra row.
+
+```json
+{
+  "events": [
+    {
+      "id": "webhook-record-uuid",
+      "event_type": "booking.updated",
+      "processing_status": "dead_letter",
+      "processing_attempts": 10,
+      "requeue_count": 0,
+      "last_error_class": "dependency",
+      "last_error_code": "SQUARE_WEBHOOK_ATTEMPTS_EXHAUSTED",
+      "can_requeue": true,
+      "next_attempt_at": "2026-07-24T10:00:00Z",
+      "delivered_at": "2026-07-24T09:50:00Z",
+      "dead_lettered_at": "2026-07-24T10:00:00Z",
+      "created_at": "2026-07-24T09:50:00Z",
+      "updated_at": "2026-07-24T10:00:00Z"
+    }
+  ],
+  "metrics": {
+    "pending": 0,
+    "processing": 0,
+    "failed": 0,
+    "dead_letter": 1,
+    "succeeded_recent": 12,
+    "recent_window_hours": 168,
+    "last_delivered_at": "2026-07-24T09:50:00Z",
+    "last_succeeded_at": "2026-07-24T09:45:00Z"
+  },
+  "calendar_repair": {
+    "relevant": true,
+    "status": "degraded",
+    "repair_attempts": 2,
+    "last_error_class": "dependency",
+    "last_error_code": "SQUARE_CALENDAR_REPAIR_FAILED",
+    "next_repair_at": "2026-07-24T10:05:00Z",
+    "updated_at": "2026-07-24T10:00:00Z"
+  },
+  "limit": 25,
+  "offset": 0,
+  "has_more": false
+}
+```
+
+The response is operationally safe: it omits Square merchant/location/booking
+identifiers, raw webhook payloads, signature material, processing claim tokens,
+provider responses, customer data, and raw errors. Metrics are independent of
+the current page and `succeeded_recent` uses the returned
+`recent_window_hours`. Calendar-repair health is a separate backstop and is not
+OAuth, catalog-sync, scheduling-authority, or appointment-confirmation state.
+
+`GET /api/salons/:id/square-webhook-events/:webhook_event_id`
+
+Returns `{"event": {...}}` with the same safe event fields for one tenant-owned
+record. The dashboard derives its timestamp timeline only from those returned
+fields; this endpoint does not expose the raw delivery or provider payload.
+
+`POST /api/salons/:id/square-webhook-events/:webhook_event_id/requeue`
+
+```json
+{
+  "action_key": "stable-owner-action-uuid"
+}
+```
+
+Requeues only when the backend event response has `can_requeue=true`. The
+action key is stable for one owner intent. Exact reuse for the same event
+returns the current safe event and response header
+`X-Idempotent-Replay: true`; changed reuse returns
+`409 SQUARE_WEBHOOK_ACTION_CONFLICT`. A new accepted action returns the header
+as `false`. Requeue clears only the bounded processing failure state and queues
+the existing durable event; it does not create an appointment or claim that a
+webhook, repair, or booking succeeded.
+
+Errors are `400 SQUARE_WEBHOOK_OPERATIONS_INVALID`,
+`404 SALON_NOT_FOUND`, `404 SQUARE_WEBHOOK_EVENT_NOT_FOUND`,
+`409 SQUARE_WEBHOOK_ACTION_CONFLICT`,
+`409 SQUARE_WEBHOOK_REQUEUE_BLOCKED`, or sanitized
+`500 SQUARE_WEBHOOK_OPERATIONS_FAILED`.
+
 `GET /api/integrations/square/connect-url?salon_id=<id>`
 
 Returns a Square OAuth URL and state.
@@ -2615,6 +4073,11 @@ Exchanges the Square OAuth code and stores encrypted tokens.
 
 Returns the Square connection, recent sync logs, and AI booking readiness checks,
 including `business_hour_period_count` for the selected Square location import.
+Readiness includes the owner-scoped current `scheduling_authority`.
+`can_test_booking` and `can_enable_ai_booking` require
+`scheduling_authority=external_provider` in addition to their existing Square
+gates. `can_cancel_test_booking` remains based on the persisted latest external
+test appointment so cleanup is not orphaned after a later authority switch.
 Readiness also includes `booking_write_blocked`, `booking_write_blocked_code`,
 `booking_write_blocked_reason`, and `booking_write_blocked_at` when the latest
 Square create-booking permission error still has not been cleared by a later
@@ -2688,8 +4151,20 @@ Safe-retry example; an initial write omits `retry_of_attempt_id`:
 }
 ```
 
-Creates a real Square booking through the provider-neutral booking service.
-The selected slot must come from the availability endpoint and include current
+Creates a real Square booking through the authority-neutral scheduling facade,
+which reaches the provider-neutral booking service only after resolving the
+operation origin. A response-loss replay is read through provider-free
+`ReplayCreate`. If no replay exists, the read-only
+`ResolveCreateSchedulingAuthority` resolves the operation key and optional
+retry attempt with the same origin-equality and tenant checks used by create
+dispatch; only origin-free work falls back to the current salon mode. A valid
+persisted external safe retry can therefore continue after a later switch,
+subject to the underlying Square provider-readiness gates, even though the
+public readiness response keeps `can_test_booking=false` for the internal
+current mode. A current internal authority rejects an origin-free new Square
+test creation with
+`409 SCHEDULING_AUTHORITY_NOT_READY` before readiness/provider dispatch. The
+selected slot must come from the availability endpoint and include current
 quote evidence. Returns `201` only when Square returns an accepted booking ID;
 returns `202` for unconfirmed `pos_pending`, `provider_pending`, or
 `fallback_pending` outcomes.
@@ -2710,8 +4185,13 @@ The test-booking response and `latest_test_booking` include `operation_type`,
 fallback with the matching operation type (`book` for create and `cancel` for
 cancel), including after a page reload. It disables another test write while
 the previous operation is `pos_pending`, in-flight, or requires
-reconciliation. Square status reads recover stale test-operation leases before
-returning `latest_test_booking`.
+reconciliation. Square status reads recover only stale external-provider test
+operation leases before returning `latest_test_booking`.
+
+Scheduling-authority failure returns the sanitized
+`409 SCHEDULING_AUTHORITY_NOT_READY` message “Scheduling is not ready for this
+salon.” Readiness and unknown Square gate failures likewise use bounded public
+messages; the handler does not expose wrapped internal diagnostic text.
 
 `POST /api/integrations/square/cancel-test-booking`
 
@@ -2727,11 +4207,16 @@ Safe-retry example; an initial cancellation omits `retry_of_attempt_id`:
 }
 ```
 
-Cancels the latest Square test booking through the provider-neutral booking
-service. Returns `200` when Square cancels the booking, or `202` with
-`fallback_pending` when POS cancellation fails. As with create, the optional
-`retry_of_attempt_id` is sent only for an explicit safe retry and must identify
-the matching prior `cancel` attempt; the retry uses a new operation key.
+Cancels the latest Square test booking through the authority-neutral scheduling
+facade. `ReplayCancel` is a provider-free persisted-history lookup; an actual
+cancellation write resolves and validates the operation/retry/target origins
+before reaching the provider-neutral booking service. An external-origin test
+appointment can therefore be replayed or cancelled after the salon's current
+authority changes. Returns `200` when Square
+cancels the booking, or `202` with `fallback_pending` when POS cancellation
+fails. As with create, the optional `retry_of_attempt_id` is sent only for an
+explicit safe retry and must identify the matching prior `cancel` attempt; the
+retry uses a new operation key.
 
 `POST /api/integrations/square/enable-ai-booking`
 
@@ -2741,7 +4226,12 @@ the matching prior `cancel` attempt; the retry uses a new operation key.
 }
 ```
 
-Sets `salons.ai_enabled=true` only after Square is connected, a location is selected, services/staff/business hours are synced, and at least one service and staff member are AI-bookable. Square test booking create/cancel remains an optional POS write smoke test and is not an AI enablement gate.
+Sets `salons.ai_enabled=true` only when the owner-scoped current
+`scheduling_authority` is `external_provider`, Square is connected, a location
+is selected, services/staff/business hours are synced, and at least one service
+and staff member are AI-bookable. A current internal authority returns
+`409 SCHEDULING_AUTHORITY_NOT_READY`. Square test booking create/cancel remains
+an optional POS write smoke test and is not an AI enablement gate.
 
 `POST /api/integrations/square/disable-ai-booking`
 
@@ -2752,3 +4242,102 @@ Sets `salons.ai_enabled=true` only after Square is connected, a location is sele
 ```
 
 Sets `salons.ai_enabled=false`.
+
+## Customer Appointment SMS
+
+Customer SMS is a separate, default-disabled owner policy and consent/delivery
+ledger. A stored caller phone is not consent. `owner_manual` request messages
+state that the request is pending owner review; confirmed/rescheduled/cancelled
+copy is created only from the matching durable appointment lifecycle commit.
+Every message includes STOP instructions.
+
+- `GET /api/salons/:id/customer-sms-policy` and
+  `PUT /api/salons/:id/customer-sms-policy` read/update the owner-scoped enable,
+  quiet-hours, salon-timezone, and optimistic policy-version contract.
+- `POST /api/salons/:id/customer-sms-consents/attest` requires
+  `{"destination":"...","attested":true,"action_key":"..."}`. An unchecked
+  or false attestation is invalid. Local conversation/owner evidence cannot
+  lift `opted_out`; only a signed Twilio `OptOutType=START` callback can do so.
+- `GET /api/salons/:id/appointments/:appointment_id/customer-notifications`
+  and the corresponding
+  `POST .../:delivery_id/requeue` expose the appointment child ledger.
+- `GET /api/salons/:id/scheduling-requests/:request_id/customer-notifications`
+  and the corresponding
+  `POST .../:delivery_id/requeue` expose `request_received` evidence inside the
+  owner-review request workflow.
+
+Reads expose only masked destination, consent state/source/timestamps, safe
+delivery status/error codes, attempt count, and event history. They never
+return message body, full destination, destination hash, provider message ID,
+or credentials. `can_requeue=true` requires a definitive dead letter, current
+consent and policy snapshots, the exact current request/appointment source
+version and status, no unknown send outcome, unredacted content, and remaining
+bounded owner-requeue allowance. Requeue is action-key idempotent. Provider
+accepted or sent is not handset delivery; only `delivered` is delivery proof.
+
+After V61 retention, delivery DTOs include `redacted`, `redacted_at`, and
+`redaction_version`. Redaction clears destination/body data and forces
+`can_requeue=false` while preserving safe status/version/attempt/event/time
+evidence. Consent and STOP routing keys remain outside delivery-content
+redaction.
+
+`POST /api/notifications/twilio/inbound/:salon_id` consumes only signed Twilio
+Advanced Opt-Out `OptOutType` values (`STOP`, `START`, `HELP`); it never parses
+`Body` or emits a duplicate reply. In addition to exact-URL/all-form signature
+verification, it binds `AccountSid` and the configured Messaging Service SID,
+or exact sender `To`, to the route salon. The shared status callback similarly
+binds `AccountSid` before a monotonic delivery mutation.
+
+## Operations Health
+
+`GET /api/salons/:id/operations/status`
+
+Returns authenticated, owner-scoped recurring-worker health plus safe queue
+aggregates for the requested salon. The response never includes worker
+instance/run IDs, raw errors, payloads, provider entity IDs, secrets, customer
+data, or cross-salon counts. Provider-specific Square rows are omitted when no
+relevant Square connection exists.
+
+```json
+{
+  "status": "degraded",
+  "evaluated_at": "2026-07-24T10:00:00Z",
+  "jobs": [
+    {
+      "key": "notification_delivery",
+      "label": "Owner notification delivery",
+      "status": "healthy",
+      "last_success_at": "2026-07-24T09:59:45Z",
+      "last_heartbeat_at": "2026-07-24T09:59:45Z",
+      "last_duration_ms": 82,
+      "last_processed_count": 3,
+      "stale_after_seconds": 120,
+      "links": [{"label": "Open", "href": "/dashboard/appointments"}]
+    }
+  ],
+  "queues": [
+    {
+      "key": "notification_delivery",
+      "label": "Owner notification delivery",
+      "status": "degraded",
+      "backlog_count": 2,
+      "oldest_at": "2026-07-24T09:30:00Z",
+      "dead_letter_count": 1,
+      "links": [{"label": "Open", "href": "/dashboard/appointments"}]
+    }
+  ]
+}
+```
+
+Job and queue status values are `healthy`, `running`, `degraded`, `stale`, and
+`unknown`. Missing evidence is `unknown`; an expired live lease or old heartbeat
+is `stale`. Safe `error_class` and `error_code` may be present. Missing optional
+V56 notification metrics return an unknown queue with
+`NOTIFICATION_METRICS_UNAVAILABLE`; other aggregate failures use
+`QUEUE_METRICS_UNAVAILABLE`. This read does not replay or mutate any job.
+
+The stable job set includes `scheduling_pii_retention`. Its queue row reports
+only the requested salon's due-record count and oldest due timestamp across the
+V61 retention classes; it never returns content, destinations, audio, provider
+identifiers, or raw errors. These metrics are technical execution evidence, not
+proof that a production legal/compliance retention policy has been approved.

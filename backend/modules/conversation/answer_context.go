@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
 const (
@@ -22,6 +24,20 @@ type AIAnswerContext struct {
 	Knowledge       []KnowledgeSnippet
 	BusinessHours   []BusinessHourPeriod
 	CacheHit        bool
+}
+
+// ownerFirstAnswerContextStore keeps canonical and internal-calendar catalog
+// reads separate from provider-backed reads. Provider mappings remain the
+// source of truth for external_provider and are deliberately not consulted by
+// either owner-first authority.
+type ownerFirstAnswerContextStore interface {
+	ListCanonicalGuidanceServices(ctx context.Context, salonID string) ([]ServiceOption, error)
+	ListCanonicalActiveStaff(ctx context.Context, salonID string) ([]StaffOption, error)
+	ListCanonicalServiceAliases(ctx context.Context, salonID string) ([]ServiceAlias, error)
+	ListCanonicalServiceCategoryAliases(ctx context.Context, salonID string) ([]ServiceCategoryAlias, error)
+	ListManleAICalendarBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error)
+	ListManleAICalendarBookableStaff(ctx context.Context, salonID string) ([]StaffOption, error)
+	ListManleAICalendarBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error)
 }
 
 type answerContextCache struct {
@@ -131,7 +147,7 @@ func (s *Service) loadAnswerContext(ctx context.Context, salonID string) (*AIAns
 			return cached, nil
 		}
 
-		answerCtx, err := s.loadFreshAnswerContext(ctx, salonID)
+		answerCtx, err := s.loadFreshAnswerContext(ctx, salonID, fence)
 		if err != nil {
 			return nil, err
 		}
@@ -144,7 +160,7 @@ func (s *Service) loadAnswerContext(ctx context.Context, salonID string) (*AIAns
 			continue
 		}
 		if !verifiedFence.Ready {
-			failClosedProviderBookingContext(answerCtx)
+			failClosedSchedulingContext(answerCtx)
 		}
 		s.answerContextCache.set(salonID, verifiedFence, *answerCtx)
 		return cloneAIAnswerContext(answerCtx), nil
@@ -152,7 +168,7 @@ func (s *Service) loadAnswerContext(ctx context.Context, salonID string) (*AIAns
 	return nil, errors.New("conversation answer context readiness changed while loading")
 }
 
-func failClosedProviderBookingContext(answerCtx *AIAnswerContext) {
+func failClosedSchedulingContext(answerCtx *AIAnswerContext) {
 	if answerCtx == nil {
 		return
 	}
@@ -162,29 +178,86 @@ func failClosedProviderBookingContext(answerCtx *AIAnswerContext) {
 	answerCtx.BusinessHours = nil
 }
 
-func (s *Service) loadFreshAnswerContext(ctx context.Context, salonID string) (*AIAnswerContext, error) {
-	services, err := s.store.ListGuidanceServices(ctx, salonID)
+func (s *Service) loadFreshAnswerContext(ctx context.Context, salonID string, fence AnswerContextFence) (*AIAnswerContext, error) {
+	authority := strings.TrimSpace(fence.SchedulingAuthority)
+	if authority == "" {
+		// Legacy test stores predate the persisted authority fence. Production
+		// repository reads always return the protocol token.
+		authority = booking.SchedulingAuthorityExternalProvider
+	}
+	var ownerFirstStore ownerFirstAnswerContextStore
+	if authority == booking.SchedulingAuthorityOwnerManual || authority == booking.SchedulingAuthorityManleAICalendar {
+		var ok bool
+		ownerFirstStore, ok = s.store.(ownerFirstAnswerContextStore)
+		if !ok {
+			return nil, errors.New("owner-first answer-context store is unavailable")
+		}
+	}
+
+	var services []ServiceOption
+	var err error
+	if ownerFirstStore != nil {
+		services, err = ownerFirstStore.ListCanonicalGuidanceServices(ctx, salonID)
+	} else {
+		services, err = s.store.ListGuidanceServices(ctx, salonID)
+	}
 	if err != nil {
 		return nil, err
 	}
-	bookableServices, err := s.store.ListBookableServices(ctx, salonID)
+
+	var bookableServices []ServiceOption
+	switch authority {
+	case booking.SchedulingAuthorityExternalProvider:
+		bookableServices, err = s.store.ListBookableServices(ctx, salonID)
+	case booking.SchedulingAuthorityManleAICalendar:
+		bookableServices, err = ownerFirstStore.ListManleAICalendarBookableServices(ctx, salonID)
+	case booking.SchedulingAuthorityOwnerManual:
+		markOwnerRequestableServices(services)
+	default:
+		clearBookingReadyFlags(services)
+	}
 	if err != nil {
 		return nil, err
 	}
-	markBookableServices(services, bookableServices)
-	serviceAliases, err := s.store.ListActiveServiceAliases(ctx, salonID)
+	if authority != booking.SchedulingAuthorityOwnerManual {
+		markBookableServices(services, bookableServices)
+	}
+	var serviceAliases []ServiceAlias
+	if ownerFirstStore != nil {
+		serviceAliases, err = ownerFirstStore.ListCanonicalServiceAliases(ctx, salonID)
+	} else {
+		serviceAliases, err = s.store.ListActiveServiceAliases(ctx, salonID)
+	}
 	if err != nil {
 		return nil, err
 	}
-	categoryAliases, err := s.store.ListActiveServiceCategoryAliases(ctx, salonID)
+	var categoryAliases []ServiceCategoryAlias
+	if ownerFirstStore != nil {
+		categoryAliases, err = ownerFirstStore.ListCanonicalServiceCategoryAliases(ctx, salonID)
+	} else {
+		categoryAliases, err = s.store.ListActiveServiceCategoryAliases(ctx, salonID)
+	}
 	if err != nil {
 		return nil, err
 	}
-	staff, err := s.store.ListBookableStaff(ctx, salonID)
+	var activeStaff []StaffOption
+	if ownerFirstStore != nil {
+		activeStaff, err = ownerFirstStore.ListCanonicalActiveStaff(ctx, salonID)
+	} else {
+		activeStaff, err = s.store.ListActiveStaff(ctx, salonID)
+	}
 	if err != nil {
 		return nil, err
 	}
-	activeStaff, err := s.store.ListActiveStaff(ctx, salonID)
+	var staff []StaffOption
+	switch authority {
+	case booking.SchedulingAuthorityExternalProvider:
+		staff, err = s.store.ListBookableStaff(ctx, salonID)
+	case booking.SchedulingAuthorityManleAICalendar:
+		staff, err = ownerFirstStore.ListManleAICalendarBookableStaff(ctx, salonID)
+	case booking.SchedulingAuthorityOwnerManual:
+		staff = ownerRequestableStaff(activeStaff)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +265,13 @@ func (s *Service) loadFreshAnswerContext(ctx context.Context, salonID string) (*
 	if err != nil {
 		return nil, err
 	}
-	hours, err := s.store.ListBusinessHourPeriods(ctx, salonID)
+	var hours []BusinessHourPeriod
+	switch authority {
+	case booking.SchedulingAuthorityManleAICalendar:
+		hours, err = ownerFirstStore.ListManleAICalendarBusinessHourPeriods(ctx, salonID)
+	default:
+		hours, err = s.store.ListBusinessHourPeriods(ctx, salonID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -206,6 +285,22 @@ func (s *Service) loadFreshAnswerContext(ctx context.Context, salonID string) (*
 		BusinessHours:   hours,
 	}
 	return &answerCtx, nil
+}
+
+func markOwnerRequestableServices(services []ServiceOption) {
+	for index := range services {
+		services[index].BookingReady = strings.TrimSpace(services[index].ID) != "" && services[index].DurationMinutes > 0
+	}
+}
+
+func ownerRequestableStaff(active []StaffOption) []StaffOption {
+	items := make([]StaffOption, 0, len(active))
+	for _, item := range active {
+		if strings.TrimSpace(item.ID) != "" && item.AIBookable {
+			items = append(items, item)
+		}
+	}
+	return items
 }
 
 func markBookableServices(guidanceServices []ServiceOption, bookableServices []ServiceOption) {

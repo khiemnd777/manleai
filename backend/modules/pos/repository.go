@@ -10,12 +10,21 @@ import (
 
 	"github.com/lib/pq"
 	"github.com/manleai/ai-receptionist/internal/validation"
+	"github.com/manleai/ai-receptionist/modules/scheduling/fence"
 )
 
 var (
 	ErrNotFound              = errors.New("pos record not found")
 	ErrStaleProviderSnapshot = errors.New("provider snapshot is stale")
 	ErrStaleProviderFence    = errors.New("provider catalog fence is stale")
+)
+
+const (
+	bookingCalendarReconciliationLockPrefix = fence.AdvisoryKeyPrefix
+	serviceAliasOwnershipConstraint         = "service_alias_cross_table_active_unique"
+	schedulingAuthorityOwnerManual          = "owner_manual"
+	schedulingAuthorityManleAICalendar      = "manleai_calendar"
+	schedulingAuthorityExternalProvider     = "external_provider"
 )
 
 type Repository struct {
@@ -56,6 +65,41 @@ func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
 }
 
+func lockSchedulingMutationFenceTx(ctx context.Context, tx *sql.Tx, salonID string) error {
+	_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, fence.AdvisoryKey(salonID))
+	return err
+}
+
+func lockServiceAliasOwnershipTx(ctx context.Context, tx *sql.Tx, salonID string, normalizedAlias string) error {
+	_, err := tx.ExecContext(ctx, `SELECT public.lock_service_alias_ownership($1::uuid, $2)`, salonID, normalizedAlias)
+	return err
+}
+
+func isServiceAliasOwnershipConflict(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Constraint == serviceAliasOwnershipConstraint
+}
+
+// WithSchedulingFenceTx gives a provider-owned readiness evaluator a coherent
+// database snapshot under the same salon fence used by authority-switch commit.
+func (r *Repository) WithSchedulingFenceTx(ctx context.Context, salonID string, evaluate func(*sql.Tx) error) error {
+	if strings.TrimSpace(salonID) == "" || evaluate == nil {
+		return ErrValidation
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, salonID); err != nil {
+		return err
+	}
+	if err := evaluate(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (r *Repository) EnsureSalonOwner(ctx context.Context, salonID string, ownerUserID string) error {
 	var exists bool
 	err := r.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM salons WHERE id = $1 AND owner_user_id = $2)`, salonID, ownerUserID).Scan(&exists)
@@ -86,6 +130,21 @@ func (r *Repository) GetActiveProvider(ctx context.Context, salonID string, owne
 		return ProviderSquare, nil
 	}
 	return provider, nil
+}
+
+func (r *Repository) GetSchedulingAuthorityVersion(ctx context.Context, salonID string, ownerUserID string) (int64, error) {
+	var version int64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT settings.scheduling_authority_version
+		FROM salon_settings settings
+		JOIN salons salon ON salon.id = settings.salon_id
+		WHERE settings.salon_id = $1
+		  AND salon.owner_user_id = $2
+	`, salonID, ownerUserID).Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return version, err
 }
 
 func (r *Repository) GetSalonAIEnabled(ctx context.Context, salonID string, ownerUserID string) (bool, error) {
@@ -129,7 +188,15 @@ func (r *Repository) GetConnection(ctx context.Context, salonID string, provider
 }
 
 func (r *Repository) UpsertConnection(ctx context.Context, connection Connection) (*Connection, error) {
-	row := r.db.QueryRowContext(ctx, `
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, connection.SalonID); err != nil {
+		return nil, err
+	}
+	item, err := scanConnection(tx.QueryRowContext(ctx, `
 		INSERT INTO pos_connections (
 			salon_id, provider, status, access_token_encrypted, refresh_token_encrypted, merchant_id, location_id, scopes, error_message
 		)
@@ -145,12 +212,26 @@ func (r *Repository) UpsertConnection(ctx context.Context, connection Connection
 		RETURNING id::text, salon_id::text, provider, status, COALESCE(access_token_encrypted, ''),
 		          COALESCE(refresh_token_encrypted, ''), COALESCE(merchant_id, ''), COALESCE(location_id, ''),
 		          snapshot_generation, scopes, last_sync_at, COALESCE(error_message, ''), created_at, updated_at
-	`, connection.SalonID, connection.Provider, connection.Status, connection.AccessTokenEncrypted, connection.RefreshTokenEncrypted, connection.MerchantID, connection.LocationID, pq.Array(connection.Scopes), connection.ErrorMessage)
-	return scanConnection(row)
+	`, connection.SalonID, connection.Provider, connection.Status, connection.AccessTokenEncrypted, connection.RefreshTokenEncrypted, connection.MerchantID, connection.LocationID, pq.Array(connection.Scopes), connection.ErrorMessage))
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return item, nil
 }
 
 func (r *Repository) UpdateLocation(ctx context.Context, salonID string, provider string, locationID string) (*Connection, error) {
-	row := r.db.QueryRowContext(ctx, `
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, salonID); err != nil {
+		return nil, err
+	}
+	item, err := scanConnection(tx.QueryRowContext(ctx, `
 		UPDATE pos_connections
 		SET location_id = $1,
 		    snapshot_generation = CASE
@@ -176,8 +257,14 @@ func (r *Repository) UpdateLocation(ctx context.Context, salonID string, provide
 		RETURNING id::text, salon_id::text, provider, status, COALESCE(access_token_encrypted, ''),
 		          COALESCE(refresh_token_encrypted, ''), COALESCE(merchant_id, ''), COALESCE(location_id, ''),
 		          snapshot_generation, scopes, last_sync_at, COALESCE(error_message, ''), created_at, updated_at
-	`, locationID, salonID, provider)
-	return scanConnection(row)
+	`, locationID, salonID, provider))
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return item, nil
 }
 
 func (r *Repository) BeginProviderSnapshot(ctx context.Context, salonID string, provider string, locationID string) (int64, error) {
@@ -187,8 +274,16 @@ func (r *Repository) BeginProviderSnapshot(ctx context.Context, salonID string, 
 	if salonID == "" || provider == "" || locationID == "" {
 		return 0, ErrValidation
 	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, salonID); err != nil {
+		return 0, err
+	}
 	var generation int64
-	err := r.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		UPDATE pos_connections
 		SET snapshot_generation = snapshot_generation + 1,
 		    status = 'syncing',
@@ -203,35 +298,46 @@ func (r *Repository) BeginProviderSnapshot(ctx context.Context, salonID string, 
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrStaleProviderSnapshot
 	}
-	return generation, err
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return generation, nil
 }
 
 func (r *Repository) MarkSyncing(ctx context.Context, salonID string, provider string) error {
-	_, err := r.db.ExecContext(ctx, `
+	return r.withSchedulingFenceMutation(ctx, salonID, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
 		UPDATE pos_connections
 		SET status = 'syncing', last_sync_at = NULL, updated_at = now()
 		WHERE salon_id = $1 AND provider = $2
-	`, salonID, provider)
-	return err
+		`, salonID, provider)
+		return err
+	})
 }
 
 func (r *Repository) MarkSyncComplete(ctx context.Context, salonID string, provider string, status string, message string) error {
-	_, err := r.db.ExecContext(ctx, `
+	return r.withSchedulingFenceMutation(ctx, salonID, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
 		UPDATE pos_connections
 		SET status = $3,
 		    last_sync_at = CASE WHEN $3 = 'active' THEN now() ELSE NULL END,
 		    error_message = NULLIF($4, ''),
 		    updated_at = now()
 		WHERE salon_id = $1 AND provider = $2
-	`, salonID, provider, status, message)
-	return err
+		`, salonID, provider, status, message)
+		return err
+	})
 }
 
 func (r *Repository) MarkSyncCompleteForGeneration(ctx context.Context, salonID string, provider string, generation int64, status string, message string) error {
 	if generation <= 0 {
 		return ErrValidation
 	}
-	result, err := r.db.ExecContext(ctx, `
+	return r.withSchedulingFenceMutation(ctx, salonID, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
 		UPDATE pos_connections
 		SET status = $4,
 		    last_sync_at = CASE WHEN $4 = 'active' THEN now() ELSE NULL END,
@@ -240,18 +346,23 @@ func (r *Repository) MarkSyncCompleteForGeneration(ctx context.Context, salonID 
 		WHERE salon_id = $1
 		  AND provider = $2
 		  AND snapshot_generation = $3
-	`, salonID, provider, generation, status, message)
-	if err != nil {
-		return err
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected != 1 {
-		return ErrStaleProviderSnapshot
-	}
-	return nil
+		`, salonID, provider, generation, status, message)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return ErrStaleProviderSnapshot
+		}
+		return nil
+	})
+}
+
+func (r *Repository) withSchedulingFenceMutation(ctx context.Context, salonID string, mutate func(*sql.Tx) error) error {
+	return r.WithSchedulingFenceTx(ctx, salonID, mutate)
 }
 
 func (r *Repository) CreateSyncLog(ctx context.Context, salonID string, provider string, syncType string) (string, error) {
@@ -307,6 +418,9 @@ func (r *Repository) EnqueuePOSSyncJob(ctx context.Context, input SyncJobMutatio
 		return nil, err
 	}
 	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, input.SalonID); err != nil {
+		return nil, err
+	}
 
 	row := tx.QueryRowContext(ctx, `
 		INSERT INTO pos_sync_jobs (
@@ -403,6 +517,9 @@ func (r *Repository) MarkPOSSyncJobSucceeded(ctx context.Context, job SyncJob, r
 		return err
 	}
 	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, job.SalonID); err != nil {
+		return err
+	}
 
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE pos_sync_jobs
@@ -426,6 +543,9 @@ func (r *Repository) MarkPOSSyncJobFailed(ctx context.Context, job SyncJob, mess
 		return err
 	}
 	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, job.SalonID); err != nil {
+		return err
+	}
 
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE pos_sync_jobs
@@ -451,11 +571,13 @@ func (r *Repository) MarkPOSSyncJobFailed(ctx context.Context, job SyncJob, mess
 }
 
 func (r *Repository) LogError(ctx context.Context, item POSError) error {
-	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO pos_errors (salon_id, provider, operation, error_code, error_message, payload)
-		VALUES ($1, $2, $3, $4, $5, NULLIF($6, '')::jsonb)
-	`, item.SalonID, item.Provider, item.Operation, item.ErrorCode, item.ErrorMessage, string(item.Payload))
-	return err
+	return r.withSchedulingFenceMutation(ctx, item.SalonID, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO pos_errors (salon_id, provider, operation, error_code, error_message, payload)
+			VALUES ($1, $2, $3, $4, $5, NULLIF($6, '')::jsonb)
+		`, item.SalonID, item.Provider, item.Operation, item.ErrorCode, item.ErrorMessage, string(item.Payload))
+		return err
+	})
 }
 
 func (r *Repository) LatestErrorForOperations(ctx context.Context, salonID string, provider string, operations []string) (*POSErrorRecord, error) {
@@ -514,6 +636,9 @@ func (r *Repository) UpsertServices(ctx context.Context, salonID string, service
 		return err
 	}
 	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, salonID); err != nil {
+		return err
+	}
 	if err := upsertServicesTx(ctx, tx, salonID, services); err != nil {
 		return err
 	}
@@ -586,6 +711,9 @@ func (r *Repository) UpsertStaff(ctx context.Context, salonID string, staff []St
 		return err
 	}
 	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, salonID); err != nil {
+		return err
+	}
 	if err := upsertStaffTx(ctx, tx, salonID, staff); err != nil {
 		return err
 	}
@@ -662,6 +790,9 @@ func (r *Repository) UpsertBusinessHourPeriods(ctx context.Context, salonID stri
 		return 0, err
 	}
 	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, salonID); err != nil {
+		return 0, err
+	}
 	count, err := upsertBusinessHourPeriodsTx(ctx, tx, salonID, provider, locationID, periods)
 	if err != nil {
 		return 0, err
@@ -913,6 +1044,9 @@ func (r *Repository) ApplyProviderSnapshot(ctx context.Context, salonID string, 
 		return nil, err
 	}
 	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, salonID); err != nil {
+		return nil, err
+	}
 	if _, err := tx.ExecContext(
 		ctx,
 		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
@@ -1276,8 +1410,16 @@ func (r *Repository) UpsertServiceCategoryAlias(ctx context.Context, salonID str
 	if err := r.ensureActiveCategory(ctx, salonID, ownerUserID, input.CategoryID); err != nil {
 		return nil, err
 	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err := lockServiceAliasOwnershipTx(ctx, tx, salonID, input.NormalizedAlias); err != nil {
+		return nil, err
+	}
 	var conflictingServiceAlias bool
-	if err := r.db.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1
 			FROM service_aliases
@@ -1291,7 +1433,7 @@ func (r *Repository) UpsertServiceCategoryAlias(ctx context.Context, salonID str
 	if conflictingServiceAlias {
 		return nil, ErrValidation
 	}
-	row := r.db.QueryRowContext(ctx, `
+	row := tx.QueryRowContext(ctx, `
 		INSERT INTO service_category_aliases (
 			salon_id, category_id, alias, normalized_alias, source, status, confidence
 		)
@@ -1307,7 +1449,17 @@ func (r *Repository) UpsertServiceCategoryAlias(ctx context.Context, salonID str
 		          (SELECT name FROM service_categories WHERE id = service_category_aliases.category_id),
 		          alias, normalized_alias, source, status, confidence, created_at, updated_at
 	`, salonID, input.CategoryID, input.Alias, input.NormalizedAlias, input.Confidence)
-	return scanServiceCategoryAlias(row)
+	alias, err := scanServiceCategoryAlias(row)
+	if err != nil {
+		if isServiceAliasOwnershipConflict(err) {
+			return nil, ErrValidation
+		}
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return alias, nil
 }
 
 func (r *Repository) ArchiveServiceCategoryAlias(ctx context.Context, salonID string, ownerUserID string, aliasID string) (*ServiceCategoryAlias, error) {
@@ -1553,6 +1705,9 @@ func (r *Repository) CreateService(ctx context.Context, salonID string, ownerUse
 		return nil, err
 	}
 	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, salonID); err != nil {
+		return nil, err
+	}
 
 	var serviceID string
 	if err := tx.QueryRowContext(ctx, `
@@ -1618,6 +1773,9 @@ func (r *Repository) UpdateService(ctx context.Context, salonID string, ownerUse
 		return nil, err
 	}
 	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, salonID); err != nil {
+		return nil, err
+	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE services
 		SET name = $1,
@@ -1715,6 +1873,9 @@ func (r *Repository) ArchiveService(ctx context.Context, salonID string, ownerUs
 		return nil, err
 	}
 	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, salonID); err != nil {
+		return nil, err
+	}
 
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE services
@@ -1792,6 +1953,9 @@ func (r *Repository) CreateStaff(ctx context.Context, salonID string, ownerUserI
 		return nil, err
 	}
 	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, salonID); err != nil {
+		return nil, err
+	}
 
 	var staffID string
 	if err := tx.QueryRowContext(ctx, `
@@ -1833,7 +1997,15 @@ func (r *Repository) UpdateStaff(ctx context.Context, salonID string, ownerUserI
 	if current.ArchivedAt != nil {
 		return nil, ErrValidation
 	}
-	if _, err := r.db.ExecContext(ctx, `
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, salonID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE staff
 		SET name = $1,
 		    phone = NULLIF($2, ''),
@@ -1844,6 +2016,9 @@ func (r *Repository) UpdateStaff(ctx context.Context, salonID string, ownerUserI
 		WHERE id = $5
 		  AND salon_id = $6
 	`, input.Name, input.Phone, input.Email, input.Active, staffID, salonID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return r.getStaffForOwner(ctx, salonID, ownerUserID, staffID)
@@ -1862,6 +2037,9 @@ func (r *Repository) ArchiveStaff(ctx context.Context, salonID string, ownerUser
 		return nil, err
 	}
 	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, salonID); err != nil {
+		return nil, err
+	}
 
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE staff
@@ -1950,14 +2128,29 @@ func (r *Repository) GetStaffForSync(ctx context.Context, salonID string, staffI
 }
 
 func (r *Repository) UpdateServiceAIBookable(ctx context.Context, salonID string, ownerUserID string, serviceID string, aiBookable bool) (*Service, error) {
-	current, err := r.getServiceForOwner(ctx, salonID, ownerUserID, serviceID)
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	if aiBookable && !serviceCanEnableAIBooking(current) {
-		return nil, ErrValidation
+	defer tx.Rollback()
+	fence, err := lockAIBookableMutationFenceTx(ctx, tx, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
 	}
-	if _, err := r.db.ExecContext(ctx, `
+	target, err := lockServiceAIBookableTargetTx(ctx, tx, salonID, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	if aiBookable {
+		canEnable, err := serviceCanEnableAIBookingTx(ctx, tx, salonID, fence, target)
+		if err != nil {
+			return nil, err
+		}
+		if !canEnable {
+			return nil, ErrValidation
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE services
 		SET ai_bookable = $1,
 		    updated_at = now()
@@ -1966,24 +2159,45 @@ func (r *Repository) UpdateServiceAIBookable(ctx context.Context, salonID string
 	`, aiBookable, serviceID, salonID); err != nil {
 		return nil, err
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	return r.getServiceForOwner(ctx, salonID, ownerUserID, serviceID)
 }
 
 func (r *Repository) UpdateStaffAIBookable(ctx context.Context, salonID string, ownerUserID string, staffID string, aiBookable bool) (*StaffMember, error) {
-	current, err := r.getStaffForOwner(ctx, salonID, ownerUserID, staffID)
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	if aiBookable && !staffCanEnableAIBooking(current) {
-		return nil, ErrValidation
+	defer tx.Rollback()
+	fence, err := lockAIBookableMutationFenceTx(ctx, tx, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
 	}
-	if _, err := r.db.ExecContext(ctx, `
+	target, err := lockStaffAIBookableTargetTx(ctx, tx, salonID, staffID)
+	if err != nil {
+		return nil, err
+	}
+	if aiBookable {
+		canEnable, err := staffCanEnableAIBookingTx(ctx, tx, salonID, fence, target)
+		if err != nil {
+			return nil, err
+		}
+		if !canEnable {
+			return nil, ErrValidation
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE staff
 		SET ai_bookable = $1,
 		    updated_at = now()
 		WHERE id = $2
 		  AND salon_id = $3
 	`, aiBookable, staffID, salonID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return r.getStaffForOwner(ctx, salonID, ownerUserID, staffID)
@@ -2609,23 +2823,191 @@ func markEntitySyncFailed(ctx context.Context, tx *sql.Tx, job SyncJob, message 
 	return err
 }
 
-func serviceCanEnableAIBooking(item *Service) bool {
-	return item != nil &&
-		item.Active &&
-		item.ArchivedAt == nil &&
-		item.SyncStatus == SyncStatusSynced &&
-		item.POSLinked &&
-		strings.TrimSpace(item.POSServiceID) != "" &&
-		item.POSServiceVersion > 0
+type aiBookableMutationFence struct {
+	ActiveProvider             string
+	SchedulingAuthority        string
+	SchedulingAuthorityVersion int64
+	HasSchedulingSettings      bool
 }
 
-func staffCanEnableAIBooking(item *StaffMember) bool {
-	return item != nil &&
-		item.Active &&
-		item.ArchivedAt == nil &&
-		item.SyncStatus == SyncStatusSynced &&
-		item.POSLinked &&
-		strings.TrimSpace(item.POSStaffID) != ""
+type serviceAIBookableTarget struct {
+	ID              string
+	Provider        string
+	ProviderVersion int64
+	SyncStatus      string
+	Active          bool
+	Archived        bool
+	DurationMinutes int
+}
+
+type staffAIBookableTarget struct {
+	ID         string
+	Provider   string
+	SyncStatus string
+	Active     bool
+	Archived   bool
+}
+
+type providerLinkEvidence struct {
+	ProviderEntityID   string
+	ProviderVersion    int64
+	HasProviderVersion bool
+	SyncStatus         string
+}
+
+func lockAIBookableMutationFenceTx(ctx context.Context, tx *sql.Tx, salonID string, ownerUserID string) (aiBookableMutationFence, error) {
+	var fence aiBookableMutationFence
+	if _, err := tx.ExecContext(
+		ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		bookingCalendarReconciliationLockPrefix+salonID,
+	); err != nil {
+		return fence, err
+	}
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(BTRIM(active_pos_provider), '')
+		FROM salons
+		WHERE id = $1 AND owner_user_id = $2
+		FOR UPDATE
+	`, salonID, ownerUserID).Scan(&fence.ActiveProvider); errors.Is(err, sql.ErrNoRows) {
+		return fence, ErrNotFound
+	} else if err != nil {
+		return fence, err
+	}
+	err := tx.QueryRowContext(ctx, `
+		SELECT BTRIM(scheduling_authority), scheduling_authority_version
+		FROM salon_settings
+		WHERE salon_id = $1
+		FOR UPDATE
+	`, salonID).Scan(&fence.SchedulingAuthority, &fence.SchedulingAuthorityVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fence, nil
+	}
+	if err != nil {
+		return fence, err
+	}
+	fence.HasSchedulingSettings = true
+	return fence, nil
+}
+
+func lockServiceAIBookableTargetTx(ctx context.Context, tx *sql.Tx, salonID string, serviceID string) (serviceAIBookableTarget, error) {
+	var target serviceAIBookableTarget
+	err := tx.QueryRowContext(ctx, `
+		SELECT id::text, BTRIM(pos_provider), COALESCE(pos_service_version, 0), sync_status, active,
+		       archived_at IS NOT NULL, duration_minutes
+		FROM services
+		WHERE salon_id = $1 AND id = $2
+		FOR UPDATE
+	`, salonID, serviceID).Scan(
+		&target.ID,
+		&target.Provider,
+		&target.ProviderVersion,
+		&target.SyncStatus,
+		&target.Active,
+		&target.Archived,
+		&target.DurationMinutes,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return target, ErrNotFound
+	}
+	return target, err
+}
+
+func lockStaffAIBookableTargetTx(ctx context.Context, tx *sql.Tx, salonID string, staffID string) (staffAIBookableTarget, error) {
+	var target staffAIBookableTarget
+	err := tx.QueryRowContext(ctx, `
+		SELECT id::text, BTRIM(pos_provider), sync_status, active, archived_at IS NOT NULL
+		FROM staff
+		WHERE salon_id = $1 AND id = $2
+		FOR UPDATE
+	`, salonID, staffID).Scan(
+		&target.ID,
+		&target.Provider,
+		&target.SyncStatus,
+		&target.Active,
+		&target.Archived,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return target, ErrNotFound
+	}
+	return target, err
+}
+
+func serviceCanEnableAIBookingTx(ctx context.Context, tx *sql.Tx, salonID string, fence aiBookableMutationFence, target serviceAIBookableTarget) (bool, error) {
+	if !fence.HasSchedulingSettings || fence.SchedulingAuthorityVersion < 1 || !target.Active || target.Archived || target.DurationMinutes <= 0 {
+		return false, nil
+	}
+	switch fence.SchedulingAuthority {
+	case schedulingAuthorityOwnerManual, schedulingAuthorityManleAICalendar:
+		return true, nil
+	case schedulingAuthorityExternalProvider:
+		if fence.ActiveProvider == "" || target.Provider == "" || target.Provider != fence.ActiveProvider ||
+			target.SyncStatus != SyncStatusSynced {
+			return false, nil
+		}
+		link, found, err := lockSyncedProviderLinkTx(ctx, tx, salonID, EntityTypeService, target.ID, fence.ActiveProvider)
+		if err != nil || !found {
+			return false, err
+		}
+		providerVersion := target.ProviderVersion
+		if link.HasProviderVersion {
+			providerVersion = link.ProviderVersion
+		}
+		return link.SyncStatus == SyncStatusSynced && link.ProviderEntityID != "" && providerVersion > 0, nil
+	default:
+		return false, nil
+	}
+}
+
+func staffCanEnableAIBookingTx(ctx context.Context, tx *sql.Tx, salonID string, fence aiBookableMutationFence, target staffAIBookableTarget) (bool, error) {
+	if !fence.HasSchedulingSettings || fence.SchedulingAuthorityVersion < 1 || !target.Active || target.Archived {
+		return false, nil
+	}
+	switch fence.SchedulingAuthority {
+	case schedulingAuthorityOwnerManual, schedulingAuthorityManleAICalendar:
+		return true, nil
+	case schedulingAuthorityExternalProvider:
+		if fence.ActiveProvider == "" || target.Provider == "" || target.Provider != fence.ActiveProvider ||
+			target.SyncStatus != SyncStatusSynced {
+			return false, nil
+		}
+		link, found, err := lockSyncedProviderLinkTx(ctx, tx, salonID, EntityTypeStaff, target.ID, fence.ActiveProvider)
+		if err != nil || !found {
+			return false, err
+		}
+		return link.SyncStatus == SyncStatusSynced && link.ProviderEntityID != "", nil
+	default:
+		return false, nil
+	}
+}
+
+func lockSyncedProviderLinkTx(ctx context.Context, tx *sql.Tx, salonID string, entityType string, entityID string, provider string) (providerLinkEvidence, bool, error) {
+	var evidence providerLinkEvidence
+	var providerEntityID sql.NullString
+	var providerVersion sql.NullInt64
+	err := tx.QueryRowContext(ctx, `
+		SELECT provider_entity_id, provider_version, sync_status
+		FROM pos_entity_links
+		WHERE salon_id = $1
+		  AND entity_type = $2
+		  AND entity_id = $3
+		  AND provider = $4
+		FOR UPDATE
+	`, salonID, entityType, entityID, provider).Scan(&providerEntityID, &providerVersion, &evidence.SyncStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return evidence, false, nil
+	}
+	if err != nil {
+		return evidence, false, err
+	}
+	if providerEntityID.Valid {
+		evidence.ProviderEntityID = strings.TrimSpace(providerEntityID.String)
+	}
+	if providerVersion.Valid {
+		evidence.ProviderVersion = providerVersion.Int64
+		evidence.HasProviderVersion = true
+	}
+	return evidence, true, nil
 }
 
 func servicePriceValue(price *float64) any {
@@ -2914,6 +3296,9 @@ func upsertSystemServiceCategoryAlias(ctx context.Context, tx *sql.Tx, salonID s
 	if alias == "" || normalized == "" {
 		return false, false, false, nil
 	}
+	if err := lockServiceAliasOwnershipTx(ctx, tx, salonID, normalized); err != nil {
+		return false, false, false, err
+	}
 	var serviceAliasConflict bool
 	if err := tx.QueryRowContext(ctx, `
 		SELECT EXISTS (
@@ -2945,6 +3330,9 @@ func upsertSystemServiceCategoryAlias(ctx context.Context, tx *sql.Tx, salonID s
 			)
 			VALUES ($1, $2, $3, $4, 'system', 'active', $5)
 		`, salonID, categoryID, alias, normalized, record.Confidence); err != nil {
+			if isServiceAliasOwnershipConflict(err) {
+				return false, false, false, ErrValidation
+			}
 			return false, false, false, err
 		}
 		return true, false, false, nil
@@ -2972,6 +3360,9 @@ func upsertSystemServiceCategoryAlias(ctx context.Context, tx *sql.Tx, salonID s
 		WHERE id = $4
 		  AND salon_id = $5
 	`, categoryID, alias, record.Confidence, existingID, salonID); err != nil {
+		if isServiceAliasOwnershipConflict(err) {
+			return false, false, false, ErrValidation
+		}
 		return false, false, false, err
 	}
 	return false, true, false, nil
@@ -3071,6 +3462,9 @@ func upsertSystemServiceAlias(ctx context.Context, tx *sql.Tx, salonID string, s
 	if alias == "" || normalized == "" || strings.TrimSpace(serviceID) == "" {
 		return false, false, false, nil
 	}
+	if err := lockServiceAliasOwnershipTx(ctx, tx, salonID, normalized); err != nil {
+		return false, false, false, err
+	}
 	var categoryAliasConflict bool
 	if err := tx.QueryRowContext(ctx, `
 		SELECT EXISTS (
@@ -3100,6 +3494,9 @@ func upsertSystemServiceAlias(ctx context.Context, tx *sql.Tx, salonID string, s
 			)
 			VALUES ($1, $2, $3, $4, 'system', 'active', $5)
 		`, salonID, serviceID, alias, normalized, record.Confidence)
+		if isServiceAliasOwnershipConflict(err) {
+			return false, false, false, ErrValidation
+		}
 		return err == nil, false, false, err
 	}
 	if err != nil {
@@ -3120,6 +3517,9 @@ func upsertSystemServiceAlias(ctx context.Context, tx *sql.Tx, salonID string, s
 		    updated_at = now()
 		WHERE id = $4 AND salon_id = $5 AND source = 'system'
 	`, serviceID, alias, record.Confidence, existingID, salonID)
+	if isServiceAliasOwnershipConflict(err) {
+		return false, false, false, ErrValidation
+	}
 	return false, err == nil, false, err
 }
 

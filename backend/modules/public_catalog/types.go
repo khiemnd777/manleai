@@ -1,11 +1,13 @@
 package public_catalog
 
 type Catalog struct {
-	Salon       PublicSalon                `json:"salon"`
-	Services    []PublicService            `json:"services"`
-	Staff       []PublicStaffMember        `json:"staff"`
-	Hours       []PublicBusinessHourPeriod `json:"hours"`
-	BookingNote string                     `json:"booking_note"`
+	Salon                      PublicSalon                `json:"salon"`
+	SchedulingAuthority        string                     `json:"scheduling_authority"`
+	SchedulingAuthorityVersion int64                      `json:"scheduling_authority_version"`
+	Services                   []PublicService            `json:"services"`
+	Staff                      []PublicStaffMember        `json:"staff"`
+	Hours                      []PublicBusinessHourPeriod `json:"hours"`
+	BookingNote                string                     `json:"booking_note"`
 }
 
 type PublicSalon struct {
@@ -19,7 +21,6 @@ type PublicSalon struct {
 	Timezone          string `json:"timezone"`
 	PrimaryLanguage   string `json:"primary_language"`
 	SecondaryLanguage string `json:"secondary_language,omitempty"`
-	ActivePOSProvider string `json:"active_pos_provider"`
 }
 
 type PublicService struct {
@@ -40,5 +41,4 @@ type PublicBusinessHourPeriod struct {
 	StartLocalTime string `json:"start_local_time"`
 	EndLocalTime   string `json:"end_local_time"`
 	Source         string `json:"source"`
-	Provider       string `json:"provider,omitempty"`
 }

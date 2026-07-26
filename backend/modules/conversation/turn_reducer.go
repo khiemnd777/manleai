@@ -204,6 +204,8 @@ func semanticServiceEditFallback(session *Session, message string, turn TurnUnde
 	state.ReviewAccepted = false
 	state.ReviewedRevision = 0
 	state.AuthorizedRevision = 0
+	state.ReviewedBookingMode = ""
+	state.SelectedSchedulingAuthority = ""
 	state.LastPromptKey = promptKey
 	state.Pending = &PendingConversationAct{TargetServiceIDs: serviceOptionIDs(candidates), PromptKey: promptKey}
 	session.DialogState = state

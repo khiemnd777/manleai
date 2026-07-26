@@ -2,23 +2,36 @@ package voice
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/internal/validation"
+	"github.com/manleai/ai-receptionist/modules/booking"
 	"github.com/manleai/ai-receptionist/modules/conversation"
+	"github.com/manleai/ai-receptionist/modules/scheduling"
 )
 
-const defaultRecordingConsentMessage = "This call may be recorded to help us manage appointments and improve service."
+const (
+	defaultRecordingConsentMessage = "This call may be recorded to help us manage appointments and improve service."
+	audioCapabilityMaxTTL          = 15 * time.Minute
+	audioCapabilityDomain          = "manleai:voice-audio:v1"
+)
 
 type Service struct {
-	repo           Store
-	conversation   ConversationEngine
-	cfg            config.VoiceConfig
-	providers      AIProviders
-	configResolver ConfigResolver
+	repo                Store
+	conversation        ConversationEngine
+	cfg                 config.VoiceConfig
+	providers           AIProviders
+	configResolver      ConfigResolver
+	schedulingReadiness map[string]SchedulingReadinessProvider
+	now                 func() time.Time
 }
 
 type answerContextPrewarmer interface {
@@ -31,11 +44,20 @@ func NewService(repo Store, conversation ConversationEngine, cfg config.VoiceCon
 		conversation: conversation,
 		cfg:          cfg,
 		providers:    providers,
+		now:          time.Now,
 	}
 }
 
 func (s *Service) SetConfigResolver(resolver ConfigResolver) {
 	s.configResolver = resolver
+}
+
+func (s *Service) SetSchedulingReadinessProviders(ownerManual SchedulingReadinessProvider, internalCalendar SchedulingReadinessProvider, externalProvider SchedulingReadinessProvider) {
+	s.schedulingReadiness = map[string]SchedulingReadinessProvider{
+		booking.SchedulingAuthorityOwnerManual:      ownerManual,
+		booking.SchedulingAuthorityManleAICalendar:  internalCalendar,
+		booking.SchedulingAuthorityExternalProvider: externalProvider,
+	}
 }
 
 func (s *Service) Status(ctx context.Context, salonID string, ownerUserID string) (*Status, error) {
@@ -66,20 +88,148 @@ func (s *Service) Status(ctx context.Context, salonID string, ownerUserID string
 		RecordingWebhookURL:   s.webhookURL(voiceCfg, voiceCfg.Twilio.RecordingPath),
 		StreamWebhookURL:      s.streamWebhookURL(voiceCfg, voiceCfg.Twilio.StreamPath),
 		SalonPhone:            salon.Phone,
+		SchedulingAuthority:   salon.SchedulingAuthority,
+		AuthorityVersion:      salon.SchedulingAuthorityVersion,
+		BookingMode:           salon.BookingMode,
 		AI:                    s.aiStatus(ctx, salonID, voiceCfg),
 		Booking:               *bookingReadiness,
 		InputMode:             s.inputMode(ctx, salonID),
 	}
-	switch {
-	case !status.Configured:
-		status.BlockedReason = "Twilio voice provider is not configured."
-	case strings.TrimSpace(salon.Phone) == "":
-		status.BlockedReason = "Salon phone is not configured."
-	default:
-		status.Ready = true
+	status.PhoneAnswering = phoneAnsweringDimension(status.Configured, salon.Phone)
+	status.PhoneAnsweringReady = status.PhoneAnswering.Ready
+	status.Ready = status.PhoneAnsweringReady
+	if len(status.PhoneAnswering.Blockers) > 0 {
+		status.BlockedReason = status.PhoneAnswering.Blockers[0].Message
 	}
-	status.PhoneBookingReady = status.Ready && bookingReadiness.Ready
+	authorityReadiness := s.schedulingTargetReadiness(ctx, salonID, ownerUserID, salon.SchedulingAuthority)
+	status.RequestCapture = composeRequestCaptureReadiness(status.PhoneAnswering, *salon, authorityReadiness)
+	status.RequestCaptureReady = status.RequestCapture.Ready
+	status.AutomatedBooking = composeAutomatedBookingReadiness(status.RequestCapture, *salon, authorityReadiness)
+	status.AutomatedBookingReady = status.AutomatedBooking.Ready
+	status.PhoneBookingReady = status.AutomatedBookingReady
 	return status, nil
+}
+
+func (s *Service) schedulingTargetReadiness(ctx context.Context, salonID string, ownerUserID string, authority string) scheduling.TargetReadiness {
+	result := scheduling.TargetReadiness{TargetSchedulingAuthority: authority}
+	provider := s.schedulingReadiness[authority]
+	if provider == nil {
+		blocker := scheduling.TargetReadinessBlocker{
+			Code: "SCHEDULING_READINESS_UNAVAILABLE", Scope: "scheduling",
+			Message: "Scheduling readiness is unavailable for the selected authority.",
+		}
+		result.AvailabilityBlockers = []scheduling.TargetReadinessBlocker{blocker}
+		result.ExecutionBlockers = []scheduling.TargetReadinessBlocker{blocker}
+		return result
+	}
+	loaded, err := provider.SchedulingTargetReadiness(ctx, salonID, ownerUserID)
+	if err != nil {
+		blocker := scheduling.TargetReadinessBlocker{
+			Code: "SCHEDULING_READINESS_LOAD_FAILED", Scope: "scheduling",
+			Message: "Scheduling readiness could not be verified.",
+		}
+		result.AvailabilityBlockers = []scheduling.TargetReadinessBlocker{blocker}
+		result.ExecutionBlockers = []scheduling.TargetReadinessBlocker{blocker}
+		return result
+	}
+	return loaded
+}
+
+func phoneAnsweringDimension(configured bool, phone string) VoiceReadinessDimension {
+	result := VoiceReadinessDimension{Ready: true, Blockers: make([]VoiceReadinessBlocker, 0)}
+	if !configured {
+		result.Blockers = append(result.Blockers, VoiceReadinessBlocker{
+			Code: "VOICE_PROVIDER_NOT_CONFIGURED", Scope: "voice",
+			Message: "Twilio voice provider is not configured.",
+		})
+	}
+	if strings.TrimSpace(phone) == "" {
+		result.Blockers = append(result.Blockers, VoiceReadinessBlocker{
+			Code: "SALON_PHONE_NOT_CONFIGURED", Scope: "salon",
+			Message: "Salon phone is not configured.",
+		})
+	}
+	result.Ready = len(result.Blockers) == 0
+	return result
+}
+
+func composeRequestCaptureReadiness(phone VoiceReadinessDimension, salon SalonVoiceStatus, target scheduling.TargetReadiness) VoiceReadinessDimension {
+	result := VoiceReadinessDimension{Blockers: append([]VoiceReadinessBlocker(nil), phone.Blockers...)}
+	if !salon.AIEnabled {
+		result.Blockers = appendVoiceBlocker(result.Blockers, VoiceReadinessBlocker{
+			Code: "AI_RECEPTIONIST_DISABLED", Scope: "salon",
+			Message: "Enable the AI receptionist for this salon.",
+		})
+	}
+	switch salon.BookingMode {
+	case "pending_approval", "confirmed_booking":
+	case "disabled":
+		result.Blockers = appendVoiceBlocker(result.Blockers, VoiceReadinessBlocker{
+			Code: "SCHEDULING_DISABLED", Scope: "settings",
+			Message: "Scheduling is disabled in salon settings.",
+		})
+	default:
+		result.Blockers = appendVoiceBlocker(result.Blockers, VoiceReadinessBlocker{
+			Code: "BOOKING_MODE_UNSUPPORTED", Scope: "settings",
+			Message: "The selected booking mode is not supported.",
+		})
+	}
+	if !knownSchedulingAuthority(salon.SchedulingAuthority) {
+		result.Blockers = appendVoiceBlocker(result.Blockers, VoiceReadinessBlocker{
+			Code: "SCHEDULING_AUTHORITY_UNSUPPORTED", Scope: "scheduling",
+			Message: "The selected scheduling authority is not supported.",
+		})
+	}
+	if salon.SchedulingAuthorityVersion < 1 || target.AuthorityVersion != salon.SchedulingAuthorityVersion || target.TargetSchedulingAuthority != salon.SchedulingAuthority {
+		result.Blockers = appendVoiceBlocker(result.Blockers, VoiceReadinessBlocker{
+			Code: "SCHEDULING_AUTHORITY_FENCE_STALE", Scope: "scheduling",
+			Message: "Scheduling authority changed while readiness was being checked. Refresh status.",
+		})
+	}
+	for _, blocker := range target.AvailabilityBlockers {
+		result.Blockers = appendVoiceBlocker(result.Blockers, voiceBlocker(blocker))
+	}
+	result.Ready = phone.Ready && salon.AIEnabled && salon.BookingMode != "disabled" &&
+		(salon.BookingMode == "pending_approval" || salon.BookingMode == "confirmed_booking") &&
+		knownSchedulingAuthority(salon.SchedulingAuthority) && salon.SchedulingAuthorityVersion > 0 &&
+		target.TargetSchedulingAuthority == salon.SchedulingAuthority && target.AuthorityVersion == salon.SchedulingAuthorityVersion &&
+		target.AvailabilityReady && len(result.Blockers) == 0
+	return result
+}
+
+func composeAutomatedBookingReadiness(request VoiceReadinessDimension, salon SalonVoiceStatus, target scheduling.TargetReadiness) VoiceReadinessDimension {
+	result := VoiceReadinessDimension{Blockers: append([]VoiceReadinessBlocker(nil), request.Blockers...)}
+	if salon.BookingMode != "confirmed_booking" {
+		if salon.BookingMode == "pending_approval" {
+			result.Blockers = appendVoiceBlocker(result.Blockers, VoiceReadinessBlocker{
+				Code: "OWNER_REVIEW_MODE_SELECTED", Scope: "settings",
+				Message: "Booking mode requires owner review and does not confirm appointments automatically.",
+			})
+		}
+	} else {
+		for _, blocker := range target.ExecutionBlockers {
+			result.Blockers = appendVoiceBlocker(result.Blockers, voiceBlocker(blocker))
+		}
+	}
+	result.Ready = request.Ready && salon.BookingMode == "confirmed_booking" && target.ExecutionReady && len(result.Blockers) == 0
+	return result
+}
+
+func knownSchedulingAuthority(authority string) bool {
+	return authority == booking.SchedulingAuthorityOwnerManual || authority == booking.SchedulingAuthorityManleAICalendar || authority == booking.SchedulingAuthorityExternalProvider
+}
+
+func voiceBlocker(item scheduling.TargetReadinessBlocker) VoiceReadinessBlocker {
+	return VoiceReadinessBlocker{Code: item.Code, Scope: item.Scope, EntityID: item.EntityID, Message: item.Message}
+}
+
+func appendVoiceBlocker(items []VoiceReadinessBlocker, candidate VoiceReadinessBlocker) []VoiceReadinessBlocker {
+	for _, item := range items {
+		if item.Code == candidate.Code && item.Scope == candidate.Scope && item.EntityID == candidate.EntityID {
+			return items
+		}
+	}
+	return append(items, candidate)
 }
 
 func (s *Service) SemanticCheck(ctx context.Context, salonID string, ownerUserID string) (*SemanticCheckStatus, error) {
@@ -367,12 +517,33 @@ func boundedSemanticValue(value string, max int) bool {
 	return trimmed != "" && len(trimmed) <= max
 }
 
-func (s *Service) Audio(ctx context.Context, id string) (*AudioOutput, error) {
+func (s *Service) Audio(ctx context.Context, id string, expires string, signature string) (*AudioOutput, error) {
 	id = strings.TrimSpace(id)
-	if id == "" {
-		return nil, ErrValidation
+	expires = strings.TrimSpace(expires)
+	signature = strings.TrimSpace(signature)
+	store, ok := s.repo.(AudioCapabilityStore)
+	if !ok || id == "" || expires == "" || signature == "" {
+		return nil, ErrAudioUnavailable
 	}
-	return s.repo.GetAudioOutput(ctx, id)
+	metadata, err := store.GetAudioOutputMetadata(ctx, id)
+	if err != nil || metadata == nil || metadata.ID != id || !validAudioCapabilityMetadata(*metadata) {
+		return nil, ErrAudioUnavailable
+	}
+	expiresAt, err := strconv.ParseInt(expires, 10, 64)
+	now := s.nowUTC()
+	if err != nil || strconv.FormatInt(expiresAt, 10) != expires || expiresAt <= now.Unix() ||
+		expiresAt > metadata.ExpiresAt.UTC().Unix() || expiresAt > now.Add(audioCapabilityMaxTTL).Unix() {
+		return nil, ErrAudioUnavailable
+	}
+	token, err := s.storedTwilioAuthToken(ctx, metadata.SalonID)
+	if err != nil || !verifyAudioCapability(*metadata, expiresAt, token, signature) {
+		return nil, ErrAudioUnavailable
+	}
+	output, err := store.GetAudioOutputContent(ctx, id)
+	if err != nil || output == nil || output.ID != id {
+		return nil, ErrAudioUnavailable
+	}
+	return output, nil
 }
 
 func (s *Service) HandleIncomingCall(ctx context.Context, req IncomingCallRequest) (*CallReply, error) {
@@ -615,7 +786,7 @@ func (s *Service) buildReplyWithInputMode(ctx context.Context, reply CallReply, 
 	output, err := s.repo.SaveAudioOutput(ctx, AudioOutputRecord{
 		SalonID:        session.SalonID,
 		CallSessionID:  session.ID,
-		Provider:       s.providers.TTS.Name(),
+		Provider:       defaultProvider(provider),
 		ProviderCallID: providerCallID,
 		ContentType:    s.providers.TTS.ContentType(),
 		Audio:          audio,
@@ -631,16 +802,100 @@ func (s *Service) buildReplyWithInputMode(ctx context.Context, reply CallReply, 
 		})
 		return &reply
 	}
-	reply.AudioURL = s.audioURL(ctx, session.SalonID, output.ID)
+	reply.AudioURL = s.audioURL(ctx, output)
 	return &reply
 }
 
-func (s *Service) audioURL(ctx context.Context, salonID string, id string) string {
-	if strings.TrimSpace(id) == "" {
+func (s *Service) audioURL(ctx context.Context, output *AudioOutput) string {
+	if output == nil || !validAudioCapabilityMetadata(*output) {
 		return ""
 	}
-	cfg, _ := s.voiceConfig(ctx, salonID)
-	return s.webhookURL(cfg, "/api/voice/audio/"+strings.TrimSpace(id))
+	now := s.nowUTC()
+	expiresAt := output.ExpiresAt.UTC().Unix()
+	if expiresAt <= now.Unix() || expiresAt > now.Add(audioCapabilityMaxTTL).Unix() || s.configResolver == nil {
+		return ""
+	}
+	token, err := s.storedTwilioAuthToken(ctx, output.SalonID)
+	if err != nil {
+		return ""
+	}
+	_, publicBaseURL, err := s.configResolver.ResolveTwilioConfig(ctx, output.SalonID)
+	if err != nil {
+		return ""
+	}
+	signature := signAudioCapability(*output, expiresAt, token)
+	if signature == "" {
+		return ""
+	}
+	query := url.Values{}
+	query.Set("expires", strconv.FormatInt(expiresAt, 10))
+	query.Set("signature", signature)
+	cfg := config.VoiceConfig{PublicBaseURL: strings.TrimRight(strings.TrimSpace(publicBaseURL), "/")}
+	return s.webhookURL(cfg, "/api/voice/audio/"+strings.TrimSpace(output.ID)) + "?" + query.Encode()
+}
+
+func (s *Service) storedTwilioAuthToken(ctx context.Context, salonID string) (string, error) {
+	if s.configResolver == nil || strings.TrimSpace(salonID) == "" {
+		return "", ErrAudioUnavailable
+	}
+	token, err := s.configResolver.ResolveStoredTwilioAuthToken(ctx, strings.TrimSpace(salonID))
+	if err != nil || strings.TrimSpace(token) == "" {
+		return "", ErrAudioUnavailable
+	}
+	return strings.TrimSpace(token), nil
+}
+
+func (s *Service) nowUTC() time.Time {
+	if s != nil && s.now != nil {
+		return s.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func validAudioCapabilityMetadata(output AudioOutput) bool {
+	return strings.TrimSpace(output.ID) != "" && strings.TrimSpace(output.SalonID) != "" &&
+		strings.TrimSpace(output.CallSessionID) != "" && strings.TrimSpace(output.Provider) != "" &&
+		strings.TrimSpace(output.ProviderCallID) != "" && !output.ExpiresAt.IsZero()
+}
+
+func signAudioCapability(output AudioOutput, expiresAt int64, token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" || !validAudioCapabilityMetadata(output) || expiresAt <= 0 {
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte(token))
+	_, _ = mac.Write(audioCapabilityPayload(output, expiresAt))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func verifyAudioCapability(output AudioOutput, expiresAt int64, token string, signature string) bool {
+	expected := signAudioCapability(output, expiresAt, token)
+	provided, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(signature))
+	if err != nil || len(provided) != sha256.Size || expected == "" {
+		return false
+	}
+	expectedBytes, err := base64.RawURLEncoding.DecodeString(expected)
+	return err == nil && hmac.Equal(expectedBytes, provided)
+}
+
+func audioCapabilityPayload(output AudioOutput, expiresAt int64) []byte {
+	fields := []string{
+		audioCapabilityDomain,
+		strings.TrimSpace(output.ID),
+		strings.TrimSpace(output.SalonID),
+		strings.TrimSpace(output.Provider),
+		strings.TrimSpace(output.ProviderCallID),
+		strings.TrimSpace(output.CallSessionID),
+		strconv.FormatInt(expiresAt, 10),
+	}
+	var payload strings.Builder
+	for _, field := range fields {
+		payload.WriteString(strconv.Itoa(len(field)))
+		payload.WriteByte(':')
+		payload.WriteString(field)
+		payload.WriteByte('\n')
+	}
+	return []byte(payload.String())
 }
 
 func (s *Service) inputMode(ctx context.Context, salonID string) string {

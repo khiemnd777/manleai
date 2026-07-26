@@ -47,6 +47,9 @@ func TestRepositoryBookableCatalogRequiresCompletedCurrentProviderSnapshot(t *te
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM users WHERE id = $1`, ownerID)
 		t.Fatalf("insert salon: %v", err)
 	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO salon_settings (salon_id,scheduling_authority) VALUES ($1,'external_provider')`, salonID); err != nil {
+		t.Fatalf("insert booking catalog salon settings: %v", err)
+	}
 	defer func() {
 		if _, err := db.ExecContext(context.Background(), `DELETE FROM salons WHERE id = $1`, salonID); err != nil {
 			t.Errorf("cleanup test salon: %v", err)
@@ -182,6 +185,9 @@ func TestRepositoryRetryEligibilityUsesCurrentCatalogLocationAndTargetVersion(t 
 	`, ownerID).Scan(&salonID); err != nil {
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM users WHERE id = $1`, ownerID)
 		t.Fatalf("insert salon: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO salon_settings (salon_id,scheduling_authority) VALUES ($1,'external_provider')`, salonID); err != nil {
+		t.Fatalf("insert retry eligibility salon settings: %v", err)
 	}
 	defer func() {
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM salons WHERE id = $1`, salonID)

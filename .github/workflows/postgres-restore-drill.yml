@@ -1,0 +1,262 @@
+name: PostgreSQL restore drill
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_database:
+        description: Explicit non-production source database name
+        required: true
+        type: string
+      target_database:
+        description: New isolated target name beginning with manleai_restore_drill_
+        required: true
+        type: string
+      artifact_id:
+        description: Unique non-sensitive artifact identifier
+        required: true
+        type: string
+      approval_reference:
+        description: Approved change or drill reference without secrets or PII
+        required: true
+        type: string
+      rpo_target_seconds:
+        description: Maximum acceptable backup age at restore start
+        required: true
+        default: "3600"
+        type: string
+      rto_target_seconds:
+        description: Maximum acceptable restore and validation duration
+        required: true
+        default: "1800"
+        type: string
+
+concurrency:
+  group: manleai-postgres-restore-drill
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DRILL_PATH: /opt/manleai-restore-drill
+  DRILL_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  restore-drill:
+    name: Isolated non-production restore
+    runs-on: ubuntu-latest
+    environment: postgres-restore-drill
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate drill inputs and secrets
+        env:
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+          DRILL_REMOTE_USER: ${{ secrets.DRILL_REMOTE_USER }}
+          DRILL_SERVER_IP: ${{ secrets.DRILL_SERVER_IP }}
+          DRILL_SSH_PRIVATE_KEY: ${{ secrets.DRILL_SSH_PRIVATE_KEY }}
+          DRILL_BACKUP_STORAGE_APPROVAL: ${{ vars.DRILL_BACKUP_STORAGE_APPROVAL }}
+          RPO_TARGET_SECONDS: ${{ inputs.rpo_target_seconds }}
+          RTO_TARGET_SECONDS: ${{ inputs.rto_target_seconds }}
+          SOURCE_DATABASE: ${{ inputs.source_database }}
+          TARGET_DATABASE: ${{ inputs.target_database }}
+        run: |
+          set -euo pipefail
+          for key in DRILL_REMOTE_USER DRILL_SERVER_IP DRILL_SSH_PRIVATE_KEY; do
+            if [ -z "${!key:-}" ]; then
+              echo "::error::Missing protected non-production drill secret: ${key}"
+              exit 1
+            fi
+          done
+          identifier='^[A-Za-z_][A-Za-z0-9_]{0,62}$'
+          report_value='^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,159}$'
+          artifact_value='^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$'
+          [[ "$SOURCE_DATABASE" =~ $identifier ]] || { echo "::error::Invalid source database identifier."; exit 1; }
+          [[ "$TARGET_DATABASE" =~ $identifier ]] || { echo "::error::Invalid target database identifier."; exit 1; }
+          [[ "$SOURCE_DATABASE" != "$TARGET_DATABASE" ]] || { echo "::error::Source and target databases must differ."; exit 1; }
+          [[ "$TARGET_DATABASE" == manleai_restore_drill_* ]] || { echo "::error::Target must use the isolated drill prefix."; exit 1; }
+          [[ "$ARTIFACT_ID" =~ $artifact_value ]] || { echo "::error::Invalid artifact ID."; exit 1; }
+          [[ "$APPROVAL_REFERENCE" =~ $report_value ]] || { echo "::error::Invalid approval reference."; exit 1; }
+          [[ "$RPO_TARGET_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "::error::RPO target must be a positive integer."; exit 1; }
+          [[ "$RTO_TARGET_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "::error::RTO target must be a positive integer."; exit 1; }
+          [[ "$DRILL_BACKUP_STORAGE_APPROVAL" = "encrypted-private:/opt/manleai-restore-drill/backups" ]] || { echo "::error::The exact encrypted private drill backup path is not approved."; exit 1; }
+
+      - name: Configure drill SSH key
+        env:
+          DRILL_SSH_PRIVATE_KEY: ${{ secrets.DRILL_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DRILL_SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+
+      - name: Create bounded drill bundle
+        run: |
+          set -euo pipefail
+          drill_archive="$RUNNER_TEMP/manleai-postgres-restore-drill.tgz"
+          tar -czf "$drill_archive" \
+            docker-compose.prod.yml \
+            deploy/postgres-backup.sh \
+            deploy/postgres-restore-drill.sh \
+            deploy/postgres-verify-restore.sh \
+            backend/migrations
+          echo "DRILL_ARCHIVE=$drill_archive" >> "$GITHUB_ENV"
+
+      - name: Upload drill bundle
+        env:
+          DRILL_REMOTE_USER: ${{ secrets.DRILL_REMOTE_USER }}
+          DRILL_SERVER_IP: ${{ secrets.DRILL_SERVER_IP }}
+        run: |
+          set -euo pipefail
+          scp \
+            -i "$HOME/.ssh/id_ed25519" \
+            -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=15 \
+            "$DRILL_ARCHIVE" \
+            "$DRILL_REMOTE_USER@$DRILL_SERVER_IP:/tmp/manleai-postgres-restore-drill-$DRILL_RUN_ID.tgz"
+
+      - name: Run isolated restore drill
+        env:
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          DRILL_BACKUP_STORAGE_APPROVAL: ${{ vars.DRILL_BACKUP_STORAGE_APPROVAL }}
+          DRILL_REMOTE_USER: ${{ secrets.DRILL_REMOTE_USER }}
+          DRILL_SERVER_IP: ${{ secrets.DRILL_SERVER_IP }}
+          RPO_TARGET_SECONDS: ${{ inputs.rpo_target_seconds }}
+          RTO_TARGET_SECONDS: ${{ inputs.rto_target_seconds }}
+          SOURCE_DATABASE: ${{ inputs.source_database }}
+          TARGET_DATABASE: ${{ inputs.target_database }}
+        run: |
+          set -euo pipefail
+          report_remote="$DRILL_PATH/reports/${ARTIFACT_ID}.report"
+          echo "DRILL_REPORT_REMOTE=$report_remote" >> "$GITHUB_ENV"
+          drill_start_epoch="$(date +%s)"
+
+          ssh \
+            -i "$HOME/.ssh/id_ed25519" \
+            -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=15 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 \
+            "$DRILL_REMOTE_USER@$DRILL_SERVER_IP" \
+            "DRILL_PATH='$DRILL_PATH' DRILL_RUN_ID='$DRILL_RUN_ID' DRILL_BACKUP_STORAGE_APPROVAL='$DRILL_BACKUP_STORAGE_APPROVAL' SOURCE_DATABASE='$SOURCE_DATABASE' TARGET_DATABASE='$TARGET_DATABASE' ARTIFACT_ID='$ARTIFACT_ID' APPROVAL_REFERENCE='$APPROVAL_REFERENCE' APPROVER='${{ github.actor }}' RELEASE_REF='${{ github.sha }}' RPO_TARGET_SECONDS='$RPO_TARGET_SECONDS' RTO_TARGET_SECONDS='$RTO_TARGET_SECONDS' DRILL_START_EPOCH='$drill_start_epoch' bash -s" <<'REMOTE'
+          set -euo pipefail
+          umask 077
+
+          archive="/tmp/manleai-postgres-restore-drill-$DRILL_RUN_ID.tgz"
+          run_dir="$DRILL_PATH/runs/$DRILL_RUN_ID"
+          backup_dir="$DRILL_PATH/backups"
+          report_dir="$DRILL_PATH/reports"
+          env_file="/opt/manleai/project.env"
+          environment_attestation="$DRILL_PATH/NON_PRODUCTION_RESTORE_DRILL"
+
+          [[ -f "$env_file" ]] || { echo "Non-production project.env is missing." >&2; exit 1; }
+          [[ "$DRILL_BACKUP_STORAGE_APPROVAL" = "encrypted-private:$backup_dir" ]] || { echo "The exact encrypted private drill backup path is not approved." >&2; exit 1; }
+          [[ -f "$environment_attestation" && ! -L "$environment_attestation" ]] || { echo "Non-production drill host attestation is missing." >&2; exit 1; }
+          [[ "$(<"$environment_attestation")" = "manleai-non-production-restore-drill-v1" ]] || { echo "Non-production drill host attestation is invalid." >&2; exit 1; }
+          install -d -m 700 "$run_dir" "$backup_dir" "$report_dir"
+          tar -xzf "$archive" -C "$run_dir"
+          chmod +x "$run_dir/deploy/postgres-"*.sh
+
+          set -a
+          . "$env_file"
+          set +a
+          : "${POSTGRES_USER:?POSTGRES_USER is required in the non-production project env}"
+
+          artifact="$backup_dir/${ARTIFACT_ID}.dump"
+          checksum_file="${artifact}.sha256"
+          report_file="$report_dir/${ARTIFACT_ID}.report"
+          wrapper_status="failed"
+          write_wrapper_failure_report() {
+            if [ "$wrapper_status" = "passed" ] || [ -e "$report_file" ]; then
+              return
+            fi
+            {
+              printf 'status=failed\n'
+              printf 'failure_stage=backup_or_restore_wrapper\n'
+              printf 'drill_timestamp_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              printf 'artifact_id=%s\n' "$ARTIFACT_ID"
+              printf 'artifact_sha256=unavailable\n'
+              printf 'release_ref=%s\n' "$RELEASE_REF"
+              printf 'approval_reference=%s\n' "$APPROVAL_REFERENCE"
+              printf 'approver=%s\n' "$APPROVER"
+              printf 'rpo_target_seconds=%s\n' "$RPO_TARGET_SECONDS"
+              printf 'observed_artifact_age_seconds=unavailable\n'
+              printf 'rto_target_seconds=%s\n' "$RTO_TARGET_SECONDS"
+              printf 'restore_validation_duration_seconds=unavailable\n'
+              printf 'drill_duration_seconds=%s\n' "$(($(date +%s) - DRILL_START_EPOCH))"
+              printf 'api_startup_handoff=not_ready\n'
+            } > "$report_file"
+            chmod 600 "$report_file"
+          }
+          trap write_wrapper_failure_report EXIT
+
+          "$run_dir/deploy/postgres-backup.sh" \
+            --env-file "$env_file" \
+            --compose-file "$run_dir/docker-compose.prod.yml" \
+            --project manleai \
+            --source-db "$SOURCE_DATABASE" \
+            --db-user "$POSTGRES_USER" \
+            --output-dir "$backup_dir" \
+            --artifact-id "$ARTIFACT_ID" \
+            --storage-class encrypted-private
+
+          "$run_dir/deploy/postgres-restore-drill.sh" \
+            --env-file "$env_file" \
+            --compose-file "$run_dir/docker-compose.prod.yml" \
+            --project manleai \
+            --source-db "$SOURCE_DATABASE" \
+            --target-db "$TARGET_DATABASE" \
+            --db-user "$POSTGRES_USER" \
+            --artifact "$artifact" \
+            --checksum-file "$checksum_file" \
+            --artifact-id "$ARTIFACT_ID" \
+            --migrations-dir "$run_dir/backend/migrations" \
+            --report-file "$report_file" \
+            --approver "$APPROVER" \
+            --approval-reference "$APPROVAL_REFERENCE" \
+            --release-ref "$RELEASE_REF" \
+            --rpo-target-seconds "$RPO_TARGET_SECONDS" \
+            --rto-target-seconds "$RTO_TARGET_SECONDS" \
+            --drill-start-epoch "$DRILL_START_EPOCH" \
+            --storage-class encrypted-private
+
+          wrapper_status="passed"
+          rm -f "$archive"
+          REMOTE
+
+      - name: Download sanitized drill report
+        if: ${{ always() }}
+        env:
+          DRILL_REMOTE_USER: ${{ secrets.DRILL_REMOTE_USER }}
+          DRILL_SERVER_IP: ${{ secrets.DRILL_SERVER_IP }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DRILL_REPORT_REMOTE:-}" ]; then
+            echo "No remote drill report path was registered."
+            exit 0
+          fi
+          report_local="$RUNNER_TEMP/postgres-restore-drill.report"
+          scp \
+            -i "$HOME/.ssh/id_ed25519" \
+            -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=15 \
+            "$DRILL_REMOTE_USER@$DRILL_SERVER_IP:$DRILL_REPORT_REMOTE" \
+            "$report_local"
+          chmod 600 "$report_local"
+          echo "DRILL_REPORT_LOCAL=$report_local" >> "$GITHUB_ENV"
+
+      - name: Upload sanitized drill report
+        if: ${{ always() && env.DRILL_REPORT_LOCAL != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-restore-drill-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.DRILL_REPORT_LOCAL }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove drill SSH key
+        if: ${{ always() }}
+        run: rm -f "$HOME/.ssh/id_ed25519"

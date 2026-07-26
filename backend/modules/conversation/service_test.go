@@ -860,7 +860,7 @@ func TestMessageConsultationExplicitChoiceStartsBooking(t *testing.T) {
 	}
 }
 
-func TestMessageConsultationPrioritizesPendingChoiceOverCatalogQuestion(t *testing.T) {
+func TestMessageConsultationKeepsCategoryPhraseAsClarification(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = []ServiceOption{
 		{
@@ -898,12 +898,12 @@ func TestMessageConsultationPrioritizesPendingChoiceOverCatalogQuestion(t *testi
 	if err != nil {
 		t.Fatalf("noisy choice Message returned error: %v", err)
 	}
-	if strings.Contains(store.lastTurn.AIMessage, "Bookable services include") || !strings.Contains(store.lastTurn.AIMessage, "Would you like help booking Classic Manicure") {
-		t.Fatalf("noisy pending choice should beat catalog-question classification: %s", store.lastTurn.AIMessage)
+	if !strings.Contains(store.lastTurn.AIMessage, "Bookable services include") || strings.Contains(store.lastTurn.AIMessage, "Would you like help booking Classic Manicure") {
+		t.Fatalf("category phrase should remain a clarification instead of selecting one service: %s", store.lastTurn.AIMessage)
 	}
 	consultation := normalizedDialogState(session.DialogState).Consultation
-	if consultation == nil || consultation.Status != ConsultationStatusAwaitingBooking || consultation.SelectedServiceID != "classic" {
-		t.Fatalf("consultation selection state = %#v", consultation)
+	if consultation == nil || consultation.Status != ConsultationStatusCollectingNeeds || consultation.SelectedServiceID != "" {
+		t.Fatalf("category clarification state = %#v", consultation)
 	}
 
 	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -3401,17 +3401,37 @@ func TestMessageHandlesNoisyVinglishServiceAfterDateTurnAndShortNameConfirmation
 	if err != nil {
 		t.Fatalf("service Message returned error: %v", err)
 	}
-	if session.ServiceID != "service_classic" {
-		t.Fatalf("service = %s, want Classic Manicure from noisy pending candidate reply", session.ServiceID)
+	if session.ServiceID != "" || len(session.BookingSegments) != 0 {
+		t.Fatalf("service = %s segments=%#v, want fuzzy candidate awaiting caller confirmation", session.ServiceID, session.BookingSegments)
 	}
-	if bookingTool.availabilityCalls != 1 || bookingTool.calls != 0 {
-		t.Fatalf("tool calls after service = availability %d booking %d, want availability only", bookingTool.availabilityCalls, bookingTool.calls)
+	if bookingTool.availabilityCalls != 0 || bookingTool.calls != 0 {
+		t.Fatalf("fuzzy candidate reached a tool before confirmation: availability=%d booking=%d", bookingTool.availabilityCalls, bookingTool.calls)
 	}
 	if store.lastTurn.CustomerMetadata["service_understanding_reason"] != serviceUnderstandingFuzzyService {
 		t.Fatalf("service understanding metadata = %#v", store.lastTurn.CustomerMetadata)
 	}
+	if session.DialogState.Pending == nil || session.DialogState.Pending.PromptKey != "fuzzy_service_confirmation" ||
+		!sameStrings(session.DialogState.Pending.TargetServiceIDs, []string{"service_classic"}) || session.DialogState.Pending.Subject != serviceUnderstandingFuzzyService {
+		t.Fatalf("fuzzy provenance was not persisted in dialog state: %#v", session.DialogState.Pending)
+	}
+	if store.lastTurn.AIMessage != "Did you mean Classic Manicure?" {
+		t.Fatalf("fuzzy confirmation prompt = %q", store.lastTurn.AIMessage)
+	}
+
+	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Yes, correct.",
+	})
+	if err != nil {
+		t.Fatalf("service confirmation Message returned error: %v", err)
+	}
+	if session.ServiceID != "service_classic" || session.DialogState.Pending != nil {
+		t.Fatalf("explicit confirmation did not commit the catalog service: service=%q pending=%#v", session.ServiceID, session.DialogState.Pending)
+	}
+	if bookingTool.availabilityCalls != 1 || bookingTool.calls != 0 {
+		t.Fatalf("tool calls after explicit service confirmation = availability %d booking %d", bookingTool.availabilityCalls, bookingTool.calls)
+	}
 	if !strings.Contains(store.lastTurn.AIMessage, "1:00 PM") {
-		t.Fatalf("AI should offer the available slot after service selection: %s", store.lastTurn.AIMessage)
+		t.Fatalf("AI should offer availability only after service confirmation: %s", store.lastTurn.AIMessage)
 	}
 
 	session, err = service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
@@ -9324,6 +9344,9 @@ type fakeConversationStore struct {
 	categoryAliases   []ServiceCategoryAlias
 	staff             []StaffOption
 	activeStaff       []StaffOption
+	internalServices  []ServiceOption
+	internalStaff     []StaffOption
+	internalHours     []BusinessHourPeriod
 	knowledge         []KnowledgeSnippet
 	businessHours     []BusinessHourPeriod
 	partyRequests     []PartyBookingRequest
@@ -9425,7 +9448,8 @@ func newFakeConversationStore() *fakeConversationStore {
 			AIBookable: true,
 		}},
 		answerContextFence: AnswerContextFence{
-			ActiveProvider: "square", ConnectionStatus: "active", LocationID: "location_1",
+			SchedulingAuthority: booking.SchedulingAuthorityExternalProvider,
+			ActiveProvider:      "square", ConnectionStatus: "active", LocationID: "location_1",
 			SnapshotGeneration: 1, LastSyncAtRFC3339: "2026-06-01T12:00:00Z", Ready: true,
 		},
 		processedEventKeys:   map[string]bool{},
@@ -9434,7 +9458,18 @@ func newFakeConversationStore() *fakeConversationStore {
 }
 
 func (f *fakeConversationStore) GetRuntimeConfig(ctx context.Context, salonID string, ownerUserID string) (*RuntimeConfig, error) {
-	return &f.cfg, nil
+	cfg := f.cfg
+	if cfg.SchedulingAuthority == "" {
+		cfg.SchedulingAuthority = f.answerContextFence.SchedulingAuthority
+	}
+	if cfg.BookingMode == "" {
+		if cfg.SchedulingAuthority == booking.SchedulingAuthorityOwnerManual {
+			cfg.BookingMode = "pending_approval"
+		} else {
+			cfg.BookingMode = "confirmed_booking"
+		}
+	}
+	return &cfg, nil
 }
 
 func (f *fakeConversationStore) GetAnswerContextFence(ctx context.Context, salonID string) (AnswerContextFence, error) {
@@ -9517,16 +9552,40 @@ func (f *fakeConversationStore) ListGuidanceServices(ctx context.Context, salonI
 	return f.services, nil
 }
 
+func (f *fakeConversationStore) ListCanonicalGuidanceServices(ctx context.Context, salonID string) ([]ServiceOption, error) {
+	return f.ListGuidanceServices(ctx, salonID)
+}
+
 func (f *fakeConversationStore) ListActiveServiceAliases(ctx context.Context, salonID string) ([]ServiceAlias, error) {
 	return f.serviceAliases, nil
+}
+
+func (f *fakeConversationStore) ListCanonicalServiceAliases(ctx context.Context, salonID string) ([]ServiceAlias, error) {
+	return append([]ServiceAlias(nil), f.serviceAliases...), nil
 }
 
 func (f *fakeConversationStore) ListActiveServiceCategoryAliases(ctx context.Context, salonID string) ([]ServiceCategoryAlias, error) {
 	return f.categoryAliases, nil
 }
 
+func (f *fakeConversationStore) ListCanonicalServiceCategoryAliases(ctx context.Context, salonID string) ([]ServiceCategoryAlias, error) {
+	return append([]ServiceCategoryAlias(nil), f.categoryAliases...), nil
+}
+
 func (f *fakeConversationStore) ListBookableStaff(ctx context.Context, salonID string) ([]StaffOption, error) {
 	return f.staff, nil
+}
+
+func (f *fakeConversationStore) ListManleAICalendarBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error) {
+	return append([]ServiceOption(nil), f.internalServices...), nil
+}
+
+func (f *fakeConversationStore) ListManleAICalendarBookableStaff(ctx context.Context, salonID string) ([]StaffOption, error) {
+	return append([]StaffOption(nil), f.internalStaff...), nil
+}
+
+func (f *fakeConversationStore) ListManleAICalendarBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error) {
+	return append([]BusinessHourPeriod(nil), f.internalHours...), nil
 }
 
 func (f *fakeConversationStore) ListActiveStaff(ctx context.Context, salonID string) ([]StaffOption, error) {
@@ -9538,6 +9597,10 @@ func (f *fakeConversationStore) ListActiveStaff(ctx context.Context, salonID str
 		staff[i].AIBookable = true
 	}
 	return staff, nil
+}
+
+func (f *fakeConversationStore) ListCanonicalActiveStaff(ctx context.Context, salonID string) ([]StaffOption, error) {
+	return f.ListActiveStaff(ctx, salonID)
 }
 
 func (f *fakeConversationStore) ListStaffAssignmentStats(ctx context.Context, salonID string, staffIDs []string, from time.Time, to time.Time) (map[string]StaffAssignmentStat, error) {
@@ -9627,6 +9690,7 @@ func (f *fakeConversationStore) SaveTurn(ctx context.Context, record TurnRecord)
 	session.DialogState = cloneDialogState(record.Update.DialogState)
 	session.BookingAttemptID = record.Update.BookingAttemptID
 	session.AppointmentID = record.Update.AppointmentID
+	session.SchedulingRequestID = record.Update.SchedulingRequestID
 	session.Summary = record.Update.Summary
 	if record.Handoff != nil {
 		session.Handoff = &HandoffRequest{

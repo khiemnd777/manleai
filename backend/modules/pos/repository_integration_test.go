@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
@@ -271,19 +272,23 @@ func TestRepositoryProviderEligibilityRevokesAIBookableWithoutReenablingOwnerFla
 	`, salonID, service.POSServiceID).Scan(&canonicalServiceID); err != nil {
 		t.Fatalf("load canonical service ID: %v", err)
 	}
+	draftProfile := &ServiceConsultationProfileMutation{
+		Status:                   ConsultationProfileStatusDraft,
+		RecommendedOutcomes:      []string{},
+		CompatibleCurrentSystems: []string{},
+		LengthCapabilities:       []string{},
+		PriorityTags:             []string{},
+		FinishOptions:            []string{},
+	}
 	if _, err := repo.UpdateServiceOwnerControls(ctx, salonID, ownerID, canonicalServiceID, ServiceOwnerControlsMutation{
-		AIDescription: "Owner-approved comparison guidance.",
-		ConsultationProfile: &ServiceConsultationProfileMutation{
-			Status: ConsultationProfileStatusDraft,
-		},
+		AIDescription:       "Owner-approved comparison guidance.",
+		ConsultationProfile: draftProfile,
 	}); err != nil {
 		t.Fatalf("update provider-managed owner controls: %v", err)
 	}
 	if _, err := repo.UpdateServiceOwnerControls(ctx, salonID, ownerID, canonicalServiceID, ServiceOwnerControlsMutation{
-		AIDescription: "Owner-approved comparison guidance.",
-		ConsultationProfile: &ServiceConsultationProfileMutation{
-			Status: ConsultationProfileStatusDraft,
-		},
+		AIDescription:       "Owner-approved comparison guidance.",
+		ConsultationProfile: draftProfile,
 	}); err != nil {
 		t.Fatalf("repeat idempotent owner controls update: %v", err)
 	}
@@ -383,5 +388,549 @@ func assertImportedStaffAIBookable(t *testing.T, ctx context.Context, db *sql.DB
 	}
 	if got != want {
 		t.Fatalf("staff ai_bookable = %t, want %t", got, want)
+	}
+}
+
+type aiBookablePGFixture struct {
+	db           *sql.DB
+	ownerID      string
+	otherOwnerID string
+	salonID      string
+}
+
+type aiBookableServiceSpec struct {
+	provider        string
+	providerID      string
+	providerVersion int64
+	syncStatus      string
+	active          bool
+	archived        bool
+	durationMinutes int
+}
+
+type aiBookableStaffSpec struct {
+	provider   string
+	providerID string
+	syncStatus string
+	active     bool
+	archived   bool
+}
+
+func TestRepositoryAIBookableInternalAuthoritiesAllowLocalCanonicalEntities(t *testing.T) {
+	for _, authority := range []string{schedulingAuthorityOwnerManual, schedulingAuthorityManleAICalendar} {
+		t.Run(authority, func(t *testing.T) {
+			fixture := newAIBookablePGFixture(t, authority)
+			repo := NewRepository(fixture.db)
+			serviceID := insertAIBookableService(t, fixture, aiBookableServiceSpec{
+				provider: "provider-a", syncStatus: SyncStatusLocalOnly, active: true, durationMinutes: 45,
+			})
+			staffID := insertAIBookableStaff(t, fixture, aiBookableStaffSpec{
+				provider: "provider-a", syncStatus: SyncStatusLocalOnly, active: true,
+			})
+
+			for attempt := 0; attempt < 2; attempt++ {
+				service, err := repo.UpdateServiceAIBookable(context.Background(), fixture.salonID, fixture.ownerID, serviceID, true)
+				if err != nil || service == nil || !service.AIBookable {
+					t.Fatalf("enable local service attempt %d = %#v/%v", attempt+1, service, err)
+				}
+				staff, err := repo.UpdateStaffAIBookable(context.Background(), fixture.salonID, fixture.ownerID, staffID, true)
+				if err != nil || staff == nil || !staff.AIBookable {
+					t.Fatalf("enable local staff attempt %d = %#v/%v", attempt+1, staff, err)
+				}
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				service, err := repo.UpdateServiceAIBookable(context.Background(), fixture.salonID, fixture.ownerID, serviceID, false)
+				if err != nil || service == nil || service.AIBookable {
+					t.Fatalf("disable local service attempt %d = %#v/%v", attempt+1, service, err)
+				}
+				staff, err := repo.UpdateStaffAIBookable(context.Background(), fixture.salonID, fixture.ownerID, staffID, false)
+				if err != nil || staff == nil || staff.AIBookable {
+					t.Fatalf("disable local staff attempt %d = %#v/%v", attempt+1, staff, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRepositoryAIBookableInternalAuthoritiesRejectIneligibleCanonicalEntities(t *testing.T) {
+	serviceCases := []struct {
+		name string
+		spec aiBookableServiceSpec
+	}{
+		{name: "inactive", spec: aiBookableServiceSpec{provider: "provider-a", syncStatus: SyncStatusLocalOnly, durationMinutes: 30}},
+		{name: "archived", spec: aiBookableServiceSpec{provider: "provider-a", syncStatus: SyncStatusLocalOnly, active: true, archived: true, durationMinutes: 30}},
+		{name: "zero duration", spec: aiBookableServiceSpec{provider: "provider-a", syncStatus: SyncStatusLocalOnly, active: true}},
+	}
+	staffCases := []struct {
+		name string
+		spec aiBookableStaffSpec
+	}{
+		{name: "inactive", spec: aiBookableStaffSpec{provider: "provider-a", syncStatus: SyncStatusLocalOnly}},
+		{name: "archived", spec: aiBookableStaffSpec{provider: "provider-a", syncStatus: SyncStatusLocalOnly, active: true, archived: true}},
+	}
+
+	for _, authority := range []string{schedulingAuthorityOwnerManual, schedulingAuthorityManleAICalendar} {
+		for _, test := range serviceCases {
+			t.Run(authority+" service "+test.name, func(t *testing.T) {
+				fixture := newAIBookablePGFixture(t, authority)
+				serviceID := insertAIBookableService(t, fixture, test.spec)
+				if _, err := NewRepository(fixture.db).UpdateServiceAIBookable(context.Background(), fixture.salonID, fixture.ownerID, serviceID, true); !errors.Is(err, ErrValidation) {
+					t.Fatalf("enable error = %v, want ErrValidation", err)
+				}
+				assertCanonicalAIBookable(t, fixture.db, "services", serviceID, false)
+			})
+		}
+		for _, test := range staffCases {
+			t.Run(authority+" staff "+test.name, func(t *testing.T) {
+				fixture := newAIBookablePGFixture(t, authority)
+				staffID := insertAIBookableStaff(t, fixture, test.spec)
+				if _, err := NewRepository(fixture.db).UpdateStaffAIBookable(context.Background(), fixture.salonID, fixture.ownerID, staffID, true); !errors.Is(err, ErrValidation) {
+					t.Fatalf("enable error = %v, want ErrValidation", err)
+				}
+				assertCanonicalAIBookable(t, fixture.db, "staff", staffID, false)
+			})
+		}
+	}
+}
+
+func TestRepositoryAIBookableExternalAuthorityRequiresActiveProviderEvidence(t *testing.T) {
+	fixture := newAIBookablePGFixture(t, schedulingAuthorityExternalProvider)
+	repo := NewRepository(fixture.db)
+	serviceID := insertAIBookableService(t, fixture, aiBookableServiceSpec{
+		provider: "provider-a", providerID: "service-valid", providerVersion: 7,
+		syncStatus: SyncStatusSynced, active: true, durationMinutes: 60,
+	})
+	staffID := insertAIBookableStaff(t, fixture, aiBookableStaffSpec{
+		provider: "provider-a", providerID: "staff-valid", syncStatus: SyncStatusSynced, active: true,
+	})
+	insertAIBookableLink(t, fixture, EntityTypeService, serviceID, "provider-a", "service-active-link", SyncStatusSynced)
+	insertAIBookableLink(t, fixture, EntityTypeStaff, staffID, "provider-a", "staff-active-link", SyncStatusSynced)
+
+	for attempt := 0; attempt < 2; attempt++ {
+		service, err := repo.UpdateServiceAIBookable(context.Background(), fixture.salonID, fixture.ownerID, serviceID, true)
+		if err != nil || service == nil || !service.AIBookable {
+			t.Fatalf("enable external service attempt %d = %#v/%v", attempt+1, service, err)
+		}
+		staff, err := repo.UpdateStaffAIBookable(context.Background(), fixture.salonID, fixture.ownerID, staffID, true)
+		if err != nil || staff == nil || !staff.AIBookable {
+			t.Fatalf("enable external staff attempt %d = %#v/%v", attempt+1, staff, err)
+		}
+	}
+	linkVersionServiceID := insertAIBookableService(t, fixture, aiBookableServiceSpec{
+		provider: "provider-a", providerID: "service-legacy-without-version", syncStatus: SyncStatusSynced, active: true, durationMinutes: 30,
+	})
+	insertAIBookableLink(t, fixture, EntityTypeService, linkVersionServiceID, "provider-a", "service-versioned-link", SyncStatusSynced, 11)
+	service, err := repo.UpdateServiceAIBookable(context.Background(), fixture.salonID, fixture.ownerID, linkVersionServiceID, true)
+	if err != nil || service == nil || !service.AIBookable {
+		t.Fatalf("enable service from authoritative link version = %#v/%v", service, err)
+	}
+}
+
+func TestRepositoryAIBookableExternalAuthorityRejectsIncompleteEvidence(t *testing.T) {
+	serviceCases := []struct {
+		name         string
+		spec         aiBookableServiceSpec
+		link         bool
+		linkID       string
+		linkStatus   string
+		linkVersions []int64
+	}{
+		{name: "old provider", spec: aiBookableServiceSpec{provider: "provider-b", providerID: "service-old", providerVersion: 1, syncStatus: SyncStatusSynced, active: true, durationMinutes: 30}, link: true, linkID: "service-old", linkStatus: SyncStatusSynced},
+		{name: "local only", spec: aiBookableServiceSpec{provider: "provider-a", syncStatus: SyncStatusLocalOnly, active: true, durationMinutes: 30}},
+		{name: "unmapped", spec: aiBookableServiceSpec{provider: "provider-a", providerID: "service-unmapped", providerVersion: 1, syncStatus: SyncStatusSynced, active: true, durationMinutes: 30}},
+		{name: "sync failed", spec: aiBookableServiceSpec{provider: "provider-a", providerID: "service-failed", providerVersion: 1, syncStatus: SyncStatusSyncFailed, active: true, durationMinutes: 30}, link: true, linkID: "service-failed", linkStatus: SyncStatusSyncFailed},
+		{name: "empty provider id", spec: aiBookableServiceSpec{provider: "provider-a", providerVersion: 1, syncStatus: SyncStatusSynced, active: true, durationMinutes: 30}, link: true, linkStatus: SyncStatusSynced},
+		{name: "zero provider version", spec: aiBookableServiceSpec{provider: "provider-a", providerID: "service-zero-version", syncStatus: SyncStatusSynced, active: true, durationMinutes: 30}, link: true, linkID: "service-zero-version", linkStatus: SyncStatusSynced},
+		{name: "explicit zero link version", spec: aiBookableServiceSpec{provider: "provider-a", providerID: "service-positive-legacy-version", providerVersion: 9, syncStatus: SyncStatusSynced, active: true, durationMinutes: 30}, link: true, linkID: "service-zero-link-version", linkStatus: SyncStatusSynced, linkVersions: []int64{0}},
+		{name: "inactive", spec: aiBookableServiceSpec{provider: "provider-a", providerID: "service-inactive", providerVersion: 1, syncStatus: SyncStatusSynced, durationMinutes: 30}, link: true, linkID: "service-inactive", linkStatus: SyncStatusSynced},
+		{name: "archived", spec: aiBookableServiceSpec{provider: "provider-a", providerID: "service-archived", providerVersion: 1, syncStatus: SyncStatusSynced, active: true, archived: true, durationMinutes: 30}, link: true, linkID: "service-archived", linkStatus: SyncStatusSynced},
+		{name: "zero duration", spec: aiBookableServiceSpec{provider: "provider-a", providerID: "service-zero-duration", providerVersion: 1, syncStatus: SyncStatusSynced, active: true}, link: true, linkID: "service-zero-duration", linkStatus: SyncStatusSynced},
+	}
+	for _, test := range serviceCases {
+		t.Run("service "+test.name, func(t *testing.T) {
+			fixture := newAIBookablePGFixture(t, schedulingAuthorityExternalProvider)
+			serviceID := insertAIBookableService(t, fixture, test.spec)
+			if test.link {
+				insertAIBookableLink(t, fixture, EntityTypeService, serviceID, test.spec.provider, test.linkID, test.linkStatus, test.linkVersions...)
+			}
+			if _, err := NewRepository(fixture.db).UpdateServiceAIBookable(context.Background(), fixture.salonID, fixture.ownerID, serviceID, true); !errors.Is(err, ErrValidation) {
+				t.Fatalf("enable error = %v, want ErrValidation", err)
+			}
+			assertCanonicalAIBookable(t, fixture.db, "services", serviceID, false)
+		})
+	}
+
+	staffCases := []struct {
+		name       string
+		spec       aiBookableStaffSpec
+		link       bool
+		linkID     string
+		linkStatus string
+	}{
+		{name: "old provider", spec: aiBookableStaffSpec{provider: "provider-b", providerID: "staff-old", syncStatus: SyncStatusSynced, active: true}, link: true, linkID: "staff-old", linkStatus: SyncStatusSynced},
+		{name: "local only", spec: aiBookableStaffSpec{provider: "provider-a", syncStatus: SyncStatusLocalOnly, active: true}},
+		{name: "unmapped", spec: aiBookableStaffSpec{provider: "provider-a", providerID: "staff-unmapped", syncStatus: SyncStatusSynced, active: true}},
+		{name: "sync failed", spec: aiBookableStaffSpec{provider: "provider-a", providerID: "staff-failed", syncStatus: SyncStatusSyncFailed, active: true}, link: true, linkID: "staff-failed", linkStatus: SyncStatusSyncFailed},
+		{name: "empty provider id", spec: aiBookableStaffSpec{provider: "provider-a", syncStatus: SyncStatusSynced, active: true}, link: true, linkStatus: SyncStatusSynced},
+		{name: "inactive", spec: aiBookableStaffSpec{provider: "provider-a", providerID: "staff-inactive", syncStatus: SyncStatusSynced}, link: true, linkID: "staff-inactive", linkStatus: SyncStatusSynced},
+		{name: "archived", spec: aiBookableStaffSpec{provider: "provider-a", providerID: "staff-archived", syncStatus: SyncStatusSynced, active: true, archived: true}, link: true, linkID: "staff-archived", linkStatus: SyncStatusSynced},
+	}
+	for _, test := range staffCases {
+		t.Run("staff "+test.name, func(t *testing.T) {
+			fixture := newAIBookablePGFixture(t, schedulingAuthorityExternalProvider)
+			staffID := insertAIBookableStaff(t, fixture, test.spec)
+			if test.link {
+				insertAIBookableLink(t, fixture, EntityTypeStaff, staffID, test.spec.provider, test.linkID, test.linkStatus)
+			}
+			if _, err := NewRepository(fixture.db).UpdateStaffAIBookable(context.Background(), fixture.salonID, fixture.ownerID, staffID, true); !errors.Is(err, ErrValidation) {
+				t.Fatalf("enable error = %v, want ErrValidation", err)
+			}
+			assertCanonicalAIBookable(t, fixture.db, "staff", staffID, false)
+		})
+	}
+}
+
+func TestRepositoryAIBookableMutationsAreTenantScoped(t *testing.T) {
+	fixture := newAIBookablePGFixture(t, schedulingAuthorityOwnerManual)
+	serviceID := insertAIBookableService(t, fixture, aiBookableServiceSpec{provider: "provider-a", syncStatus: SyncStatusLocalOnly, active: true, durationMinutes: 30})
+	staffID := insertAIBookableStaff(t, fixture, aiBookableStaffSpec{provider: "provider-a", syncStatus: SyncStatusLocalOnly, active: true})
+	repo := NewRepository(fixture.db)
+	if _, err := repo.UpdateServiceAIBookable(context.Background(), fixture.salonID, fixture.otherOwnerID, serviceID, true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-tenant service error = %v, want ErrNotFound", err)
+	}
+	if _, err := repo.UpdateStaffAIBookable(context.Background(), fixture.salonID, fixture.otherOwnerID, staffID, true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-tenant staff error = %v, want ErrNotFound", err)
+	}
+	assertCanonicalAIBookable(t, fixture.db, "services", serviceID, false)
+	assertCanonicalAIBookable(t, fixture.db, "staff", staffID, false)
+}
+
+func TestRepositoryAIBookableMissingSettingsFailsEnableButAllowsDisable(t *testing.T) {
+	fixture := newAIBookablePGFixture(t, schedulingAuthorityOwnerManual)
+	serviceID := insertAIBookableService(t, fixture, aiBookableServiceSpec{provider: "provider-a", syncStatus: SyncStatusLocalOnly, active: true, durationMinutes: 30})
+	staffID := insertAIBookableStaff(t, fixture, aiBookableStaffSpec{provider: "provider-a", syncStatus: SyncStatusLocalOnly, active: true})
+	if _, err := fixture.db.Exec(`UPDATE services SET ai_bookable = true WHERE id = $1`, serviceID); err != nil {
+		t.Fatalf("seed enabled service: %v", err)
+	}
+	if _, err := fixture.db.Exec(`UPDATE staff SET ai_bookable = true WHERE id = $1`, staffID); err != nil {
+		t.Fatalf("seed enabled staff: %v", err)
+	}
+	if _, err := fixture.db.Exec(`DELETE FROM salon_settings WHERE salon_id = $1`, fixture.salonID); err != nil {
+		t.Fatalf("delete scheduling settings: %v", err)
+	}
+	repo := NewRepository(fixture.db)
+	if _, err := repo.UpdateServiceAIBookable(context.Background(), fixture.salonID, fixture.ownerID, serviceID, true); !errors.Is(err, ErrValidation) {
+		t.Fatalf("service enable without settings error = %v, want ErrValidation", err)
+	}
+	if _, err := repo.UpdateStaffAIBookable(context.Background(), fixture.salonID, fixture.ownerID, staffID, true); !errors.Is(err, ErrValidation) {
+		t.Fatalf("staff enable without settings error = %v, want ErrValidation", err)
+	}
+	if _, err := repo.UpdateServiceAIBookable(context.Background(), fixture.salonID, fixture.ownerID, serviceID, false); err != nil {
+		t.Fatalf("service disable without settings: %v", err)
+	}
+	if _, err := repo.UpdateStaffAIBookable(context.Background(), fixture.salonID, fixture.ownerID, staffID, false); err != nil {
+		t.Fatalf("staff disable without settings: %v", err)
+	}
+}
+
+func TestRepositoryAIBookableDisableIsIdempotentForInactiveArchivedEntities(t *testing.T) {
+	fixture := newAIBookablePGFixture(t, schedulingAuthorityExternalProvider)
+	serviceID := insertAIBookableService(t, fixture, aiBookableServiceSpec{
+		provider: "provider-b", syncStatus: SyncStatusSyncFailed, archived: true, durationMinutes: 0,
+	})
+	staffID := insertAIBookableStaff(t, fixture, aiBookableStaffSpec{
+		provider: "provider-b", syncStatus: SyncStatusSyncFailed, archived: true,
+	})
+	if _, err := fixture.db.Exec(`UPDATE services SET ai_bookable = true WHERE id = $1`, serviceID); err != nil {
+		t.Fatalf("seed archived service enabled: %v", err)
+	}
+	if _, err := fixture.db.Exec(`UPDATE staff SET ai_bookable = true WHERE id = $1`, staffID); err != nil {
+		t.Fatalf("seed archived staff enabled: %v", err)
+	}
+	repo := NewRepository(fixture.db)
+	for attempt := 0; attempt < 2; attempt++ {
+		service, err := repo.UpdateServiceAIBookable(context.Background(), fixture.salonID, fixture.ownerID, serviceID, false)
+		if err != nil || service == nil || service.AIBookable {
+			t.Fatalf("disable archived service attempt %d = %#v/%v", attempt+1, service, err)
+		}
+		staff, err := repo.UpdateStaffAIBookable(context.Background(), fixture.salonID, fixture.ownerID, staffID, false)
+		if err != nil || staff == nil || staff.AIBookable {
+			t.Fatalf("disable archived staff attempt %d = %#v/%v", attempt+1, staff, err)
+		}
+	}
+}
+
+func TestRepositoryAIBookableEnableUsesSharedFenceAgainstConcurrentChanges(t *testing.T) {
+	tests := []struct {
+		name      string
+		authority string
+		spec      aiBookableServiceSpec
+		link      bool
+		mutate    func(*testing.T, *sql.Tx, *aiBookablePGFixture, string)
+	}{
+		{
+			name:      "authority switches from internal to external",
+			authority: schedulingAuthorityOwnerManual,
+			spec:      aiBookableServiceSpec{provider: "provider-a", syncStatus: SyncStatusLocalOnly, active: true, durationMinutes: 30},
+			mutate: func(t *testing.T, tx *sql.Tx, fixture *aiBookablePGFixture, _ string) {
+				if _, err := tx.Exec(`UPDATE salon_settings SET scheduling_authority = $2 WHERE salon_id = $1`, fixture.salonID, schedulingAuthorityExternalProvider); err != nil {
+					t.Fatalf("switch authority: %v", err)
+				}
+			},
+		},
+		{
+			name:      "active provider changes",
+			authority: schedulingAuthorityExternalProvider,
+			spec:      aiBookableServiceSpec{provider: "provider-a", providerID: "service-provider", providerVersion: 1, syncStatus: SyncStatusSynced, active: true, durationMinutes: 30},
+			link:      true,
+			mutate: func(t *testing.T, tx *sql.Tx, fixture *aiBookablePGFixture, _ string) {
+				if _, err := tx.Exec(`UPDATE salons SET active_pos_provider = 'provider-b' WHERE id = $1`, fixture.salonID); err != nil {
+					t.Fatalf("switch active provider: %v", err)
+				}
+			},
+		},
+		{
+			name:      "sync becomes failed",
+			authority: schedulingAuthorityExternalProvider,
+			spec:      aiBookableServiceSpec{provider: "provider-a", providerID: "service-sync", providerVersion: 1, syncStatus: SyncStatusSynced, active: true, durationMinutes: 30},
+			link:      true,
+			mutate: func(t *testing.T, tx *sql.Tx, fixture *aiBookablePGFixture, serviceID string) {
+				if _, err := tx.Exec(`UPDATE services SET sync_status = 'sync_failed' WHERE salon_id = $1 AND id = $2`, fixture.salonID, serviceID); err != nil {
+					t.Fatalf("fail service sync: %v", err)
+				}
+			},
+		},
+		{
+			name:      "service becomes archived",
+			authority: schedulingAuthorityExternalProvider,
+			spec:      aiBookableServiceSpec{provider: "provider-a", providerID: "service-archive", providerVersion: 1, syncStatus: SyncStatusSynced, active: true, durationMinutes: 30},
+			link:      true,
+			mutate: func(t *testing.T, tx *sql.Tx, fixture *aiBookablePGFixture, serviceID string) {
+				if _, err := tx.Exec(`UPDATE services SET active = false, archived_at = now() WHERE salon_id = $1 AND id = $2`, fixture.salonID, serviceID); err != nil {
+					t.Fatalf("archive service: %v", err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newAIBookablePGFixture(t, test.authority)
+			serviceID := insertAIBookableService(t, fixture, test.spec)
+			if test.link {
+				insertAIBookableLink(t, fixture, EntityTypeService, serviceID, test.spec.provider, test.spec.providerID, SyncStatusSynced)
+			}
+			tx, err := fixture.db.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatalf("begin concurrent fence tx: %v", err)
+			}
+			defer tx.Rollback()
+			if _, err := tx.Exec(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, bookingCalendarReconciliationLockPrefix+fixture.salonID); err != nil {
+				t.Fatalf("lock shared reconciliation key: %v", err)
+			}
+			test.mutate(t, tx, fixture, serviceID)
+			result := make(chan error, 1)
+			go func() {
+				_, callErr := NewRepository(fixture.db).UpdateServiceAIBookable(context.Background(), fixture.salonID, fixture.ownerID, serviceID, true)
+				result <- callErr
+			}()
+			select {
+			case early := <-result:
+				t.Fatalf("enable returned before concurrent fence committed: %v", early)
+			case <-time.After(75 * time.Millisecond):
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatalf("commit concurrent mutation: %v", err)
+			}
+			select {
+			case callErr := <-result:
+				if !errors.Is(callErr, ErrValidation) {
+					t.Fatalf("post-fence enable error = %v, want ErrValidation", callErr)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("enable did not resume after concurrent fence committed")
+			}
+			assertCanonicalAIBookable(t, fixture.db, "services", serviceID, false)
+		})
+	}
+}
+
+func TestRepositoryReadinessMutationsSerializeOnGlobalSchedulingFence(t *testing.T) {
+	tests := []struct {
+		name   string
+		invoke func(context.Context, *Repository, *aiBookablePGFixture) error
+	}{
+		{
+			name: "selected location",
+			invoke: func(ctx context.Context, repo *Repository, fixture *aiBookablePGFixture) error {
+				_, err := repo.UpdateLocation(ctx, fixture.salonID, "provider-a", "location-b")
+				return err
+			},
+		},
+		{
+			name: "snapshot generation",
+			invoke: func(ctx context.Context, repo *Repository, fixture *aiBookablePGFixture) error {
+				_, err := repo.BeginProviderSnapshot(ctx, fixture.salonID, "provider-a", "location-a")
+				return err
+			},
+		},
+		{
+			name: "sync state",
+			invoke: func(ctx context.Context, repo *Repository, fixture *aiBookablePGFixture) error {
+				return repo.MarkSyncing(ctx, fixture.salonID, "provider-a")
+			},
+		},
+		{
+			name: "booking write permission evidence",
+			invoke: func(ctx context.Context, repo *Repository, fixture *aiBookablePGFixture) error {
+				return repo.LogError(ctx, POSError{SalonID: fixture.salonID, Provider: "provider-a", Operation: "create_booking", ErrorCode: ErrorPermissionDenied, ErrorMessage: "permission denied"})
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newAIBookablePGFixture(t, schedulingAuthorityOwnerManual)
+			if _, err := fixture.db.Exec(`
+				INSERT INTO pos_connections (salon_id,provider,status,location_id,snapshot_generation,last_sync_at)
+				VALUES ($1,'provider-a','active','location-a',1,now())
+			`, fixture.salonID); err != nil {
+				t.Fatalf("insert mutation connection: %v", err)
+			}
+			fenceTx, err := fixture.db.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatalf("begin global fence transaction: %v", err)
+			}
+			defer fenceTx.Rollback()
+			if _, err := fenceTx.Exec(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, bookingCalendarReconciliationLockPrefix+fixture.salonID); err != nil {
+				t.Fatalf("acquire global scheduling fence: %v", err)
+			}
+			result := make(chan error, 1)
+			go func() {
+				result <- test.invoke(context.Background(), NewRepository(fixture.db), fixture)
+			}()
+			select {
+			case early := <-result:
+				t.Fatalf("readiness mutation returned before global fence release: %v", early)
+			case <-time.After(75 * time.Millisecond):
+			}
+			if err := fenceTx.Commit(); err != nil {
+				t.Fatalf("release global scheduling fence: %v", err)
+			}
+			select {
+			case mutationErr := <-result:
+				if mutationErr != nil {
+					t.Fatalf("readiness mutation after fence release: %v", mutationErr)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("readiness mutation did not resume after global fence release")
+			}
+		})
+	}
+}
+
+func newAIBookablePGFixture(t *testing.T, authority string) *aiBookablePGFixture {
+	t.Helper()
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		t.Fatalf("ping database: %v", err)
+	}
+	fixture := &aiBookablePGFixture{db: db}
+	for target, name := range map[*string]string{&fixture.ownerID: "AI Bookable Owner", &fixture.otherOwnerID: "Other AI Bookable Owner"} {
+		if err := db.QueryRow(`
+			INSERT INTO users (email, password_hash, full_name)
+			VALUES ($1, 'integration-test', $2) RETURNING id::text
+		`, "ai-bookable-"+uuid.NewString()+"@example.com", name).Scan(target); err != nil {
+			db.Close()
+			t.Fatalf("insert owner: %v", err)
+		}
+	}
+	if err := db.QueryRow(`
+		INSERT INTO salons (name, phone, owner_user_id, active_pos_provider)
+		VALUES ('AI Bookable Test Salon', '+13125550666', $1, 'provider-a') RETURNING id::text
+	`, fixture.ownerID).Scan(&fixture.salonID); err != nil {
+		t.Fatalf("insert salon: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO salon_settings (salon_id, scheduling_authority) VALUES ($1,$2)`, fixture.salonID, authority); err != nil {
+		t.Fatalf("insert salon settings: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM salons WHERE id = $1`, fixture.salonID)
+		_, _ = db.Exec(`DELETE FROM users WHERE id IN ($1,$2)`, fixture.ownerID, fixture.otherOwnerID)
+		db.Close()
+	})
+	return fixture
+}
+
+func insertAIBookableService(t *testing.T, fixture *aiBookablePGFixture, spec aiBookableServiceSpec) string {
+	t.Helper()
+	var serviceID string
+	var archivedAt any
+	if spec.archived {
+		archivedAt = time.Now().UTC()
+	}
+	if err := fixture.db.QueryRow(`
+		INSERT INTO services (
+			salon_id, pos_provider, pos_service_id, pos_service_version, name,
+			duration_minutes, ai_bookable, active, sync_status, archived_at, source
+		) VALUES ($1,$2,NULLIF($3,''),$4,$5,$6,false,$7,$8,$9,'local')
+		RETURNING id::text
+	`, fixture.salonID, spec.provider, spec.providerID, spec.providerVersion, "Service "+uuid.NewString(), spec.durationMinutes, spec.active, spec.syncStatus, archivedAt).Scan(&serviceID); err != nil {
+		t.Fatalf("insert service: %v", err)
+	}
+	return serviceID
+}
+
+func insertAIBookableStaff(t *testing.T, fixture *aiBookablePGFixture, spec aiBookableStaffSpec) string {
+	t.Helper()
+	var staffID string
+	var archivedAt any
+	if spec.archived {
+		archivedAt = time.Now().UTC()
+	}
+	if err := fixture.db.QueryRow(`
+		INSERT INTO staff (
+			salon_id, pos_provider, pos_staff_id, name, ai_bookable, active, sync_status, archived_at, source
+		) VALUES ($1,$2,NULLIF($3,''),$4,false,$5,$6,$7,'local')
+		RETURNING id::text
+	`, fixture.salonID, spec.provider, spec.providerID, "Staff "+uuid.NewString(), spec.active, spec.syncStatus, archivedAt).Scan(&staffID); err != nil {
+		t.Fatalf("insert staff: %v", err)
+	}
+	return staffID
+}
+
+func insertAIBookableLink(t *testing.T, fixture *aiBookablePGFixture, entityType string, entityID string, provider string, providerEntityID string, syncStatus string, versions ...int64) {
+	t.Helper()
+	var providerVersion any
+	if len(versions) > 0 {
+		providerVersion = versions[0]
+	}
+	if _, err := fixture.db.Exec(`
+		INSERT INTO pos_entity_links (
+			salon_id, entity_type, entity_id, provider, provider_entity_id, provider_version, sync_status
+		) VALUES ($1,$2,$3,$4,NULLIF($5,''),$6,$7)
+	`, fixture.salonID, entityType, entityID, provider, providerEntityID, providerVersion, syncStatus); err != nil {
+		t.Fatalf("insert provider link: %v", err)
+	}
+}
+
+func assertCanonicalAIBookable(t *testing.T, db *sql.DB, table string, entityID string, want bool) {
+	t.Helper()
+	if table != "services" && table != "staff" {
+		t.Fatalf("unsupported canonical table %q", table)
+	}
+	var got bool
+	query := `SELECT ai_bookable FROM ` + table + ` WHERE id = $1`
+	if err := db.QueryRow(query, entityID).Scan(&got); err != nil {
+		t.Fatalf("load canonical eligibility: %v", err)
+	}
+	if got != want {
+		t.Fatalf("%s ai_bookable = %t, want %t", table, got, want)
 	}
 }

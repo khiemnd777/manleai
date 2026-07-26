@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
 import "./globals.css";
 
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: "AI Receptionist for Nail Salons",
-  description: "POS-first AI phone receptionist for nail salons using Square Appointments."
+  description: "Owner-first AI phone receptionist for nail salons with optional Square Appointments."
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -13,4 +15,3 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     </html>
   );
 }
-

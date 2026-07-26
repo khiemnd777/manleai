@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/manleai/ai-receptionist/internal/config"
+	"github.com/manleai/ai-receptionist/modules/booking"
 	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/salon"
@@ -114,6 +115,9 @@ func TestGetBuildsSanitizedConfigurationExportWithKnowledgeBase(t *testing.T) {
 	if result.SecretsExported || result.OperationalDataExported {
 		t.Fatalf("export should not include secrets or operational data: %#v", result)
 	}
+	if result.POSConnection != nil {
+		t.Fatalf("schema v8 export must omit destination-scoped POS connection state: %#v", result.POSConnection)
+	}
 	if result.KnowledgeBase.Count != 1 || result.KnowledgeBase.Items[0].SourceKey == "" {
 		t.Fatalf("knowledge base was not exported with stable source key: %#v", result.KnowledgeBase)
 	}
@@ -159,16 +163,38 @@ func TestGetBuildsSanitizedConfigurationExportWithKnowledgeBase(t *testing.T) {
 		"profile_1",
 		"owner_1",
 		"do not export operational sync errors",
+		`"pos_connection"`,
 	} {
 		if strings.Contains(rawJSON, forbidden) {
 			t.Fatalf("export leaked forbidden value %q in %s", forbidden, rawJSON)
 		}
 	}
+	var topLevel map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &topLevel); err != nil {
+		t.Fatalf("decode export: %v", err)
+	}
+	for _, excludedField := range []string{"scheduling_authority", "scheduling_authority_version"} {
+		if _, exists := topLevel[excludedField]; exists {
+			t.Fatalf("export included forbidden top-level field %q", excludedField)
+		}
+	}
+	for _, excludedRecord := range []string{
+		"pos_connections",
+		"scheduling_requests",
+		"owner_notifications",
+		"manleai_calendar_staff_weekly_periods",
+		"manleai_calendar_appointment_resource_allocations",
+		"availability_quote_slot_resource_allocations",
+	} {
+		if !containsStringValue(result.ExcludedData, excludedRecord) {
+			t.Fatalf("export did not explicitly report excluded record %q: %#v", excludedRecord, result.ExcludedData)
+		}
+	}
 }
 
-func TestPreviewImportSkipsUnsafeAIBookingEnablement(t *testing.T) {
+func TestPreviewImportPreservesPortableAIEnablementButRejectsOwnerManualConfirmedMode(t *testing.T) {
 	updatedAt := time.Date(2026, 6, 26, 10, 30, 0, 0, time.UTC)
-	store := &fakeImportStore{publicCanPublish: true, canEnableAI: false}
+	store := &fakeImportStore{publicCanPublish: true, schedulingAuthority: "owner_manual", schedulingAuthorityVersion: 7}
 	service := newTestService(updatedAt)
 	service.imports = store
 	bundle := testImportBundle(updatedAt)
@@ -185,14 +211,38 @@ func TestPreviewImportSkipsUnsafeAIBookingEnablement(t *testing.T) {
 	if !result.CanApply {
 		t.Fatalf("preview should still be applyable with skipped unsafe fields: %#v", result)
 	}
-	if sectionSummary(result.Summary, SectionSalon).Skipped == 0 {
-		t.Fatalf("salon summary should skip ai_enabled: %#v", result.Summary)
+	if sectionSummary(result.Summary, SectionSalon).Skipped != 0 || sectionSummary(result.Summary, SectionSalon).Updated == 0 {
+		t.Fatalf("portable ai_enabled should be preserved without a POS readiness gate: %#v", result.Summary)
 	}
 	if sectionSummary(result.Summary, SectionAI).Skipped == 0 {
 		t.Fatalf("AI summary should skip confirmed booking mode: %#v", result.Summary)
 	}
-	if len(result.Warnings) < 2 {
-		t.Fatalf("warnings = %#v, want AI gating warnings", result.Warnings)
+	if !hasIssueCode(result.Warnings, "confirmed_booking_incompatible_with_owner_manual") {
+		t.Fatalf("warnings = %#v, want owner-manual booking-mode warning", result.Warnings)
+	}
+	if result.TargetAuthority != "owner_manual" || result.TargetAuthorityVersion != 7 {
+		t.Fatalf("target authority fence = %q/%d", result.TargetAuthority, result.TargetAuthorityVersion)
+	}
+	if result.SourceBookingMode != "confirmed_booking" || result.TargetBookingMode != "pending_approval" || result.ResultBookingMode != "pending_approval" {
+		t.Fatalf("preview booking-mode decision = source %q target %q result %q", result.SourceBookingMode, result.TargetBookingMode, result.ResultBookingMode)
+	}
+
+	request := ImportRequest{RequestID: "req-ai-owner-manual-apply", Configuration: bundle}
+	firstApply, err := service.ApplyImport(context.Background(), "salon_1", "owner_1", request)
+	if err != nil {
+		t.Fatalf("first ApplyImport returned error: %v", err)
+	}
+	secondApply, err := service.ApplyImport(context.Background(), "salon_1", "owner_1", request)
+	if err != nil {
+		t.Fatalf("replayed ApplyImport returned error: %v", err)
+	}
+	for label, applied := range map[string]*ImportResponse{"first": firstApply, "replayed": secondApply} {
+		if applied.ResultBookingMode != "pending_approval" || !hasIssueCode(applied.Warnings, "confirmed_booking_incompatible_with_owner_manual") {
+			t.Fatalf("%s apply hid owner-manual booking decision: %#v", label, applied)
+		}
+	}
+	if firstApply.ImportRunID == "" || secondApply.ImportRunID != firstApply.ImportRunID {
+		t.Fatalf("exact replay run ids = first %q replayed %q", firstApply.ImportRunID, secondApply.ImportRunID)
 	}
 }
 
@@ -269,6 +319,28 @@ func TestApplyImportIsIdempotentForKnowledgeSourceKeys(t *testing.T) {
 	}
 	if len(knowledge.items) != 1 {
 		t.Fatalf("knowledge count after repeated import = %d, want no duplicate", len(knowledge.items))
+	}
+}
+
+func TestApplyImportReturnsReviewableConflictWhenAuthorityFenceChanges(t *testing.T) {
+	updatedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	service := newTestService(updatedAt)
+	service.imports = &fakeImportStore{
+		publicCanPublish:           true,
+		schedulingAuthority:        "owner_manual",
+		schedulingAuthorityVersion: 8,
+		applyErr:                   ErrAuthorityChanged,
+	}
+
+	result, err := service.ApplyImport(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "authority-fence-changed",
+		Configuration: testImportBundle(updatedAt),
+	})
+	if !errors.Is(err, ErrImportConflict) {
+		t.Fatalf("apply error = %v, want reviewable import conflict", err)
+	}
+	if result == nil || result.CanApply || result.Status != StatusFailed || !hasIssueCode(result.Conflicts, "target_scheduling_authority_changed") {
+		t.Fatalf("authority conflict response = %#v", result)
 	}
 }
 
@@ -710,6 +782,108 @@ func TestNormalizeV6BundlePreservesExplicitConsultationToggle(t *testing.T) {
 	}
 }
 
+func TestNormalizeV7BundleKeepsScopedPortableProfilesAndDropsNoLegacySections(t *testing.T) {
+	updatedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	bundle := testImportBundle(updatedAt)
+	bundle.SchemaVersion = LegacySchemaV7
+	bundle.IncludedSections = []string{SectionCategories, SectionConsultation}
+	bundle.ConsultationProfiles = testConsultationProfileBundle(ServiceAliasTargetExport{Name: "Portable Builder", DurationMinutes: 55}, updatedAt)
+	bundle.POSConnection = &POSConnectionExport{Provider: pos.ProviderSquare, Status: pos.StatusActive, MerchantID: "legacy-reference"}
+
+	normalized, err := normalizeImportBundle(bundle)
+	if err != nil {
+		t.Fatalf("normalize v7: %v", err)
+	}
+	if !equalStringSlices(normalized.IncludedSections, []string{SectionCategories, SectionConsultation}) {
+		t.Fatalf("v7 included sections = %#v", normalized.IncludedSections)
+	}
+	if normalized.ConsultationProfiles.Count != 1 || normalized.POSConnection == nil {
+		t.Fatalf("v7 compatibility data was not retained for safe legacy parsing: %#v", normalized)
+	}
+	plan := newImportPlan(normalized, "v7-fingerprint", "v7-request", "salon_1", &importTargetState{SchedulingAuthority: "owner_manual", SchedulingAuthorityVersion: 3})
+	if hasIssueCode(plan.Warnings, "legacy_schema_missing_service_consultation_profiles") {
+		t.Fatalf("v7 was incorrectly treated as pre-profile legacy: %#v", plan.Warnings)
+	}
+}
+
+func TestPlanConfirmedBookingModeUsesDestinationAuthorityNotSquareReadiness(t *testing.T) {
+	updatedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	for _, authority := range []string{"manleai_calendar", "external_provider"} {
+		t.Run(authority, func(t *testing.T) {
+			service := newTestService(updatedAt)
+			service.imports = &fakeImportStore{publicCanPublish: true, canEnableAI: false, schedulingAuthority: authority, schedulingAuthorityVersion: 4}
+			bundle := testImportBundle(updatedAt)
+			bundle.SalonProfile.AIEnabled = true
+			bundle.AIReceptionist.BookingMode = "confirmed_booking"
+
+			plan, err := service.buildImportPlan(context.Background(), "salon_1", "owner_1", ImportRequest{RequestID: "authority-mode-" + authority, Configuration: bundle})
+			if err != nil {
+				t.Fatalf("build plan: %v", err)
+			}
+			if plan.BookingMode != "confirmed_booking" || !plan.AIEnabled || hasIssueCode(plan.Warnings, "confirmed_booking_incompatible_with_owner_manual") {
+				t.Fatalf("authority-aware portable settings plan = %#v", plan)
+			}
+		})
+	}
+}
+
+func TestPlanSalonProfileReportsAdapterIntentWithoutSwitchingExternalExecution(t *testing.T) {
+	updatedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	service := newTestService(updatedAt)
+	service.imports = &fakeImportStore{
+		publicCanPublish:           true,
+		schedulingAuthority:        booking.SchedulingAuthorityExternalProvider,
+		schedulingAuthorityVersion: 6,
+	}
+	bundle := testImportBundle(updatedAt)
+	bundle.IncludedSections = []string{SectionSalon}
+	bundle.SalonProfile.ActivePOSProvider = "another_provider"
+
+	result, err := service.PreviewImport(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "external-provider-intent-review",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("PreviewImport returned error: %v", err)
+	}
+	if result.CanApply || !hasIssueCode(result.Conflicts, "active_provider_change_requires_provider_switch") {
+		t.Fatalf("external adapter change preview = %#v, want review blocker", result)
+	}
+	if result.SourceActivePOSProvider != "another_provider" || result.TargetActivePOSProvider != pos.ProviderSquare || result.ResultActivePOSProvider != pos.ProviderSquare {
+		t.Fatalf("adapter report = source %q target %q result %q", result.SourceActivePOSProvider, result.TargetActivePOSProvider, result.ResultActivePOSProvider)
+	}
+	if result.TargetAuthority != booking.SchedulingAuthorityExternalProvider || result.TargetAuthorityVersion != 6 {
+		t.Fatalf("authority report = %q version %d", result.TargetAuthority, result.TargetAuthorityVersion)
+	}
+}
+
+func TestPlanSalonProfileSkipsUnsupportedAdapterIntentForOwnerManual(t *testing.T) {
+	updatedAt := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	service := newTestService(updatedAt)
+	service.imports = &fakeImportStore{
+		publicCanPublish:           true,
+		schedulingAuthority:        booking.SchedulingAuthorityOwnerManual,
+		schedulingAuthorityVersion: 2,
+	}
+	bundle := testImportBundle(updatedAt)
+	bundle.IncludedSections = []string{SectionSalon}
+	bundle.SalonProfile.ActivePOSProvider = "another_provider"
+
+	result, err := service.PreviewImport(context.Background(), "salon_1", "owner_1", ImportRequest{
+		RequestID:     "owner-manual-provider-intent",
+		Configuration: bundle,
+	})
+	if err != nil {
+		t.Fatalf("PreviewImport returned error: %v", err)
+	}
+	if !result.CanApply || !hasIssueCode(result.Warnings, "active_provider_skipped") || len(result.Conflicts) != 0 {
+		t.Fatalf("owner-manual unsupported adapter preview = %#v", result)
+	}
+	if result.ResultActivePOSProvider != pos.ProviderSquare {
+		t.Fatalf("owner-manual adapter result = %q, want destination adapter preserved", result.ResultActivePOSProvider)
+	}
+}
+
 func TestPlanV6ConsultationEnablementRequiresExistingCompleteReadyProfile(t *testing.T) {
 	targetKey := serviceAliasTargetKey(ServiceAliasTargetExport{Name: "Structured Gel Manicure", DurationMinutes: 60})
 	newPlan := func(target *importTargetState) *importPlan {
@@ -1017,8 +1191,8 @@ func TestApplyOnboardingImportCreatesSalonAndSkipsUnsafeLiveStates(t *testing.T)
 	if store.lastOnboardingPlan == nil {
 		t.Fatalf("store did not receive onboarding plan")
 	}
-	if store.lastOnboardingPlan.AIEnabled {
-		t.Fatalf("AI booking should be skipped for a newly imported salon without Square readiness")
+	if !store.lastOnboardingPlan.AIEnabled {
+		t.Fatalf("portable AI runtime enablement should not require Square readiness")
 	}
 	if store.lastOnboardingPlan.BookingMode == "confirmed_booking" {
 		t.Fatalf("confirmed booking mode should be skipped for a newly imported salon without Square readiness")
@@ -1026,7 +1200,7 @@ func TestApplyOnboardingImportCreatesSalonAndSkipsUnsafeLiveStates(t *testing.T)
 	if store.lastOnboardingPlan.PublicCatalogEnabled {
 		t.Fatalf("public catalog should be skipped for a newly imported salon without service/staff readiness")
 	}
-	if len(result.Warnings) < 3 {
+	if len(result.Warnings) < 2 {
 		t.Fatalf("warnings = %#v, want skipped live-state warnings", result.Warnings)
 	}
 }
@@ -1266,6 +1440,15 @@ func hasIssueCode(items []ImportIssue, code string) bool {
 	return false
 }
 
+func containsStringValue(items []string, target string) bool {
+	for _, item := range items {
+		if item == target {
+			return true
+		}
+	}
+	return false
+}
+
 func testConsultationProfileBundle(target ServiceAliasTargetExport, updatedAt time.Time) ServiceConsultationProfileBundleExport {
 	return ServiceConsultationProfileBundleExport{
 		Items: []ServiceConsultationProfileExport{
@@ -1399,6 +1582,8 @@ func (f *fakeKnowledgeReader) ListServiceAliases(ctx context.Context, salonID st
 type fakeImportStore struct {
 	publicCanPublish             bool
 	canEnableAI                  bool
+	schedulingAuthority          string
+	schedulingAuthorityVersion   int64
 	slugTaken                    bool
 	slugErr                      error
 	lastSlugSalonID              string
@@ -1413,6 +1598,7 @@ type fakeImportStore struct {
 	onboardingRuns               map[string]fakeOnboardingRun
 	onboardingCreates            int
 	lastOnboardingPlan           *importPlan
+	applyErr                     error
 }
 
 type fakeOnboardingRun struct {
@@ -1455,12 +1641,21 @@ func (f *fakeImportStore) TargetImportState(ctx context.Context, salonID string,
 			ambiguousConsultationTargets[key] = true
 		}
 	}
+	authority := f.schedulingAuthority
+	if authority == "" {
+		authority = "owner_manual"
+	}
+	version := f.schedulingAuthorityVersion
+	if version == 0 {
+		version = 1
+	}
 	return &importTargetState{
 		SalonProfile:                 current.SalonProfile,
 		AIReceptionist:               current.AIReceptionist,
 		PublicBookingPage:            current.PublicBookingPage,
 		PublicCanPublish:             f.publicCanPublish,
-		CanEnableAIBooking:           f.canEnableAI,
+		SchedulingAuthority:          authority,
+		SchedulingAuthorityVersion:   version,
 		Integrations:                 current.Integrations,
 		ServiceCategoryBySlug:        categoryBySlug,
 		CategoryAliasByKey:           categoryAliasByKey,
@@ -1498,6 +1693,9 @@ func (f *fakeImportStore) ExistingOnboardingImport(ctx context.Context, ownerUse
 }
 
 func (f *fakeImportStore) ApplyImport(ctx context.Context, salonID string, ownerUserID string, plan *importPlan) (string, bool, error) {
+	if f.applyErr != nil {
+		return "", false, f.applyErr
+	}
 	if f.appliedRuns == nil {
 		f.appliedRuns = map[string]string{}
 	}

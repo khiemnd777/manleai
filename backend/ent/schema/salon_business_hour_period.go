@@ -19,6 +19,7 @@ func (SalonBusinessHourPeriod) Fields() []ent.Field {
 		field.Int("day_of_week"),
 		field.String("start_local_time"),
 		field.String("end_local_time"),
+		field.Bool("end_at_midnight").Default(false),
 		field.String("source").Default("imported"),
 		field.String("provider").Default(""),
 		field.String("provider_location_id").Default(""),

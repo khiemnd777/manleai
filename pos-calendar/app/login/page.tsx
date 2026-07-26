@@ -7,7 +7,7 @@ export default function LoginPage() {
       <section className="hidden flex-1 items-center justify-center bg-ink px-10 text-white lg:flex">
         <div className="max-w-lg">
           <div className="mb-8 inline-flex rounded-full border border-white/20 px-3 py-1 text-sm text-white/80">
-            POS-first calendar for Square Appointments
+            Authority-aware scheduling calendar
           </div>
           <h1 className="text-5xl font-bold leading-tight">POS Calendar</h1>
           <p className="mt-5 text-lg leading-8 text-white/72">

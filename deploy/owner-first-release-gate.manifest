@@ -1,0 +1,139 @@
+# Sourced by owner-first-release-gate.sh. Keep this file declarative: package
+# and test-file ownership is the stable release contract; test names and test
+# output text are deliberately not matched.
+
+RELEASE_GATE_MANIFEST_VERSION=1
+OWNER_FIRST_MIGRATION_MIN_VERSION=46
+
+BACKEND_RACE_PACKAGES=(
+  ./cmd/worker
+  ./internal/middleware
+  ./internal/ratelimit
+  ./modules/auth
+  ./modules/booking
+  ./modules/conversation
+  ./modules/customer_notification
+  ./modules/notification_delivery
+  ./modules/operations_health
+  ./modules/pos
+  ./modules/pos_square
+  ./modules/scheduling
+  ./modules/scheduling_authority_switch
+  ./modules/scheduling_manleai_calendar
+  ./modules/scheduling_owner_manual
+  ./modules/scheduling_retention
+  ./modules/training
+)
+
+POSTGRES_MIGRATION_PACKAGES=(
+  ./internal/database
+  ./migrations
+)
+
+POSTGRES_INTEGRATION_PACKAGES=(
+  ./modules/scheduling
+  ./modules/scheduling_owner_manual
+  ./modules/scheduling_manleai_calendar
+  ./modules/scheduling_authority_switch
+  ./modules/booking
+  ./modules/conversation
+  ./modules/pos
+  ./modules/pos_square
+  ./modules/config_transfer
+  ./modules/customer_notification
+  ./modules/public_catalog
+  ./modules/salon
+  ./modules/notification_delivery
+  ./modules/notification_twilio
+  ./modules/operations_health
+  ./modules/scheduling_retention
+)
+
+SECURITY_CONTRACT_PACKAGES=(
+  ./internal/middleware
+  ./internal/ratelimit
+  ./modules/auth
+  ./modules/booking
+  ./modules/config_transfer
+  ./modules/conversation
+  ./modules/customer_notification
+  ./modules/integration_config
+  ./modules/notification_delivery
+  ./modules/notification_twilio
+  ./modules/operations_health
+  ./modules/pos
+  ./modules/pos_square
+  ./modules/public_catalog
+  ./modules/salon
+  ./modules/scheduling
+  ./modules/scheduling_manleai_calendar
+  ./modules/scheduling_owner_manual
+  ./modules/scheduling_retention
+  ./modules/training
+  ./modules/voice_twilio
+)
+
+SECURITY_CONTRACT_TEST_FILES=(
+  backend/cmd/worker/retention_registration_test.go
+  backend/internal/middleware/auth_test.go
+  backend/internal/middleware/rate_limit_test.go
+  backend/internal/ratelimit/redis_store_integration_test.go
+  frontend/lib/api/browser-session.test.ts
+  frontend/lib/security/content-security-policy.test.ts
+  landing/lib/security/content-security-policy.test.ts
+  pos-calendar/lib/api/browser-session.test.ts
+  pos-calendar/lib/security/content-security-policy.test.ts
+  pos-calendar/lib/security/scheduler-style.test.ts
+  backend/modules/auth/handler_test.go
+  backend/modules/auth/repository_integration_test.go
+  backend/modules/auth/service_test.go
+  backend/modules/booking/handler_test.go
+  backend/modules/booking/repository_integration_test.go
+  backend/modules/booking/service_test.go
+  backend/modules/config_transfer/repository_integration_test.go
+  backend/modules/conversation/manleai_calendar_party_scheduling_test.go
+  backend/modules/conversation/retention_integration_test.go
+  backend/modules/conversation/scheduling_result_evidence_integration_test.go
+  backend/modules/conversation/scheduling_result_evidence_test.go
+  backend/modules/customer_notification/processor_test.go
+  backend/modules/customer_notification/quiet_hours_test.go
+  backend/modules/customer_notification/repository_integration_test.go
+  backend/modules/integration_config/repository_test.go
+  backend/modules/integration_config/service_test.go
+  backend/modules/integration_config/twilio_inbound_path_test.go
+  backend/modules/notification_delivery/handler_test.go
+  backend/modules/notification_delivery/repository_integration_test.go
+  backend/modules/notification_twilio/handler_test.go
+  backend/modules/notification_twilio/signature_test.go
+  backend/modules/operations_health/routes_test.go
+  backend/modules/operations_health/repository_integration_test.go
+  backend/modules/pos/repository_alias_ownership_integration_test.go
+  backend/modules/pos_square/handler_test.go
+  backend/modules/pos_square/webhook_operations_repository_integration_test.go
+  backend/modules/pos_square/webhook_operations_test.go
+  backend/modules/pos_square/webhook_test.go
+  backend/modules/public_catalog/service_test.go
+  backend/modules/salon/public_catalog_integration_test.go
+  backend/modules/scheduling/handler_test.go
+  backend/modules/scheduling/service_test.go
+  backend/modules/scheduling_manleai_calendar/execution_repository_integration_test.go
+  backend/modules/scheduling_manleai_calendar/executor_test.go
+  backend/modules/scheduling_owner_manual/repository_integration_test.go
+  backend/modules/scheduling_retention/processor_test.go
+  backend/modules/scheduling_retention/repository_contract_test.go
+  backend/modules/scheduling_retention/repository_integration_test.go
+  backend/modules/training/handler_test.go
+  backend/modules/training/service_test.go
+  backend/modules/voice_twilio/adapter_test.go
+  backend/migrations/v59_safety_test.go
+  backend/migrations/v60_safety_test.go
+  backend/migrations/v61_safety_test.go
+  backend/migrations/v62_integration_test.go
+  backend/migrations/v62_safety_test.go
+)
+
+WEB_APPLICATIONS=(
+  frontend
+  landing
+  pos-calendar
+)

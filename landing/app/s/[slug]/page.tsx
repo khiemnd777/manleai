@@ -35,7 +35,7 @@ export default async function PublicSalonPage({ params }: { params: Promise<{ sl
   return (
     <main className="min-h-screen bg-shell pb-20 text-ink md:pb-0">
       <SiteHeader salon={catalog.salon} phoneHref={phoneHref} />
-      <Hero salon={catalog.salon} address={address} phoneHref={phoneHref} mapHref={mapHref} />
+      <Hero salon={catalog.salon} address={address} phoneHref={phoneHref} mapHref={mapHref} bookingNote={catalog.booking_note} />
 
       <div className="mx-auto max-w-7xl space-y-7 px-5 py-7">
         <ServicesSection services={catalog.services} />
@@ -58,7 +58,7 @@ export default async function PublicSalonPage({ params }: { params: Promise<{ sl
         className="fixed inset-x-4 bottom-4 z-20 inline-flex h-12 items-center justify-center gap-2 rounded-md bg-brand px-4 text-sm font-semibold text-white shadow-soft hover:bg-teal-800 md:hidden"
       >
         <Phone className="h-4 w-4" />
-        Call to book
+        Call to request
       </a>
     </main>
   );
@@ -93,7 +93,7 @@ function SiteHeader({ salon, phoneHref }: { salon: PublicSalon; phoneHref: strin
           className="inline-flex h-10 flex-none items-center justify-center gap-2 rounded-md bg-brand px-4 text-sm font-semibold text-white hover:bg-teal-800"
         >
           <Phone className="h-4 w-4" />
-          Call to book
+          Call to request
         </a>
       </div>
     </header>
@@ -104,12 +104,14 @@ function Hero({
   salon,
   address,
   phoneHref,
-  mapHref
+  mapHref,
+  bookingNote
 }: {
   salon: PublicSalon;
   address: string;
   phoneHref: string;
   mapHref: string;
+  bookingNote: string;
 }) {
   return (
     <section id="top" className="relative min-h-[31rem] overflow-hidden bg-white">
@@ -133,7 +135,7 @@ function Hero({
               className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-brand px-5 text-sm font-semibold text-white hover:bg-teal-800"
             >
               <Phone className="h-4 w-4" />
-              Call to book
+              Call to request
             </a>
             {mapHref ? (
               <a
@@ -145,7 +147,7 @@ function Hero({
               </a>
             ) : null}
           </div>
-          <p className="mt-5 max-w-xl text-sm leading-6 text-slate-700">Please call the salon to request an appointment.</p>
+          <p className="mt-5 max-w-xl text-sm leading-6 text-slate-700">{bookingNote}</p>
         </div>
       </div>
     </section>
@@ -234,7 +236,7 @@ function HoursSection({ hours, phoneHref, timezone }: { hours: PublicBusinessHou
               className="mt-5 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-brand px-4 text-sm font-semibold text-white hover:bg-teal-800"
             >
               <Phone className="h-4 w-4" />
-              Call to book
+              Call to request
             </a>
           </div>
 

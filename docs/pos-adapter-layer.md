@@ -1,18 +1,36 @@
-# POS Adapter Layer
+# External Provider Adapter Layer
 
-The project is POS-first, but ManleAI owns canonical salon operational data.
-POS providers are external projections and booking execution layers. Internal
-booking behavior must never depend directly on Square, Vagaro, GlossGenius,
-Fresha, Booksy, Mindbody, Boulevard, Zenoti, or any other provider payload. POS
-adapters are outbound writers/readers behind the provider-neutral contract.
+This document is the normative adapter and booking-safety contract only for
+operations whose captured scheduling authority is `external_provider`. Read
+`docs/scheduling-authority.md` first.
+
+ManleAI owns canonical salon operational data. External providers are
+projections and, when selected as scheduling authority, availability and
+booking execution layers. Scheduling behavior must never depend directly on
+Square, Vagaro, GlossGenius, Fresha, Booksy, Mindbody, Boulevard, Zenoti, or any
+other provider payload. POS adapters are outbound writers/readers behind the
+external-provider-neutral contract.
+
+The current confirming runtime uses this path with Square Appointments.
+Phase 2 also has a ready `owner_manual` executor outside this adapter layer: it
+uses canonical ManleAI catalog data, returns request-only availability, and
+persists pending owner-review scheduling requests without calling a POS.
+`owner_manual` and `manleai_calendar` are not POS adapters and must not be
+implemented by fabricating provider IDs, POS errors, reconciliation records, or
+fake provider success. All confirmation, idempotency, unknown-outcome, token,
+tenant, retry, and reconciliation safeguards below remain mandatory for
+`external_provider`.
 
 ## Ownership Model
 
 ManleAI-owned canonical records include services, staff, customers, AI controls,
 owner workflow state, fallback pending requests, logs, and training data. The
-active POS provider owns real-time availability and booking execution.
-`salons.active_pos_provider` is the backend source of truth for which provider
-is evaluated by management lists, booking readiness, and future switch flows.
+active POS provider owns real-time provider availability and provider booking
+execution only when scheduling authority is `external_provider`.
+`salons.active_pos_provider` is the backend source of truth for which external
+adapter is evaluated by management lists, booking readiness, and provider
+switch flows. It is not the scheduling-authority selector, and connecting or
+syncing a provider never changes scheduling authority implicitly.
 
 Provider IDs are mappings, not primary product identity. The target model stores
 those mappings in `pos_entity_links` with:
@@ -31,11 +49,13 @@ Customer links are stored in `pos_entity_links`. New provider-facing work
 should converge on separate link records rather than treating provider IDs as
 the service, staff, or customer identity.
 
-Booking eligibility depends on both canonical state and the active-provider
-link. A local-only, unmapped, archived, or sync-failed record may be visible to
-owners, but it must not be used for POS availability or POS booking. `AI
-bookable` can only be enabled for an active canonical record with a valid link
-for the active POS provider.
+External-provider booking eligibility depends on both canonical state and the
+active-provider link. A local-only, unmapped, archived, or sync-failed record
+may be visible to owners, but it must not be used for provider availability or
+provider booking. In this mode, `AI bookable` can only be enabled for an active
+canonical record with a valid link for the active POS provider. Internal modes
+derive eligibility from their own authority contract and must not add fake
+links.
 
 ## Field-Level Operational Authority
 
@@ -58,12 +78,17 @@ provider-managed name, description, duration, price, or active values. Direct
 operational writes to a `provider_read_only` service or staff record return a
 conflict instead of silently creating local/provider drift.
 
-The booking service resolves every new-booking and availability service/staff
+The current external-provider booking service resolves every new-booking and availability service/staff
 reference with an explicit provider scope obtained from
 `salons.active_pos_provider`. Repository lookups enforce the same provider
 scope. Reschedule and cancellation of an existing appointment intentionally use
-the provider recorded on that appointment so a provider switch does not orphan
-historical POS bookings.
+the provider and originating authority recorded on that appointment so a
+provider or authority switch does not orphan or reinterpret historical
+provider bookings. The scheduling layer selects this external path from the
+current salon setting only for genuinely new availability/create work. An
+existing operation key, retry attempt, target-aware availability request, or
+appointment mutation uses persisted origin, and all origins present must agree
+before provider dispatch.
 
 Provider switch activation must be a gated workflow, not a status toggle. A new
 provider cannot become active until its adapter exists, provider data has been
@@ -80,6 +105,14 @@ adapter is installed. Activation remains unavailable until a real import, full
 conflict resolution, and executable alternate-provider dry-run path exists.
 
 ## Interface
+
+This interface is the `external_provider` execution boundary. The implemented
+authority-neutral `backend/modules/scheduling` service sits above it and
+delegates here only for external-provider operations. It delegates
+`owner_manual` to `backend/modules/scheduling_owner_manual`, whose durable
+request ledger is separate from `booking_attempts` and external reconciliation.
+Candidate lookup and response-loss replay remain provider-free history reads
+in the scheduling service rather than POS adapter calls.
 
 `backend/modules/pos/types.go` defines:
 
@@ -146,7 +179,12 @@ full catalog sync. The booking service captures one owner-scoped active
 provider/location/generation fence, the adapter revalidates it on every page,
 and the booking repository revalidates it again in the mirror transaction
 before any row mutation. Stale imports fail atomically and cannot mix bookings
-or customer data from two provider locations.
+or customer data from two provider locations. Lease recovery and provider-
+calendar persistence, matching, and reconciliation also explicitly require
+`scheduling_authority=external_provider`; they cannot mutate internal-origin
+rows. Provider/connection-scoped webhook repair may continue converging a
+historical external mirror after a salon authority switch without becoming
+current-setting dispatch.
 
 Provider-neutral availability input carries the salon timezone. Date-only
 queries represent one salon-local calendar day; adapters convert local midnight
@@ -202,7 +240,8 @@ listed here, but service/staff/customer writes from ManleAI remain
 capability-gated until real Square payloads are verified against a Square
 Appointments sandbox account.
 
-The provider-neutral booking service creates backend `booking_attempts` before
+The current external-provider booking service creates backend
+`booking_attempts` before
 outbound POS writes, passes backend-owned idempotency keys into the adapter, and
 finalizes the same attempts as confirmed/rescheduled/cancelled or fallback
 pending. Before appointment creation, booking resolves the canonical customer
@@ -211,6 +250,14 @@ customer and then stores the `pos_entity_links` mapping. Failure while
 searching, creating, or linking the provider customer produces fallback pending
 state instead of confirmed wording. Booking attempts and confirmed appointments
 also snapshot one or more service/staff segments using provider-neutral fields.
+Square test create/cancel writes receive the scheduling facade at composition;
+new test creation and AI-booking enablement require current
+`external_provider`, while exact external replay, a persisted external safe
+retry, and target-origin cleanup cancellation remain available after a later
+switch. The non-replay test-create gate uses the facade's read-only
+`ResolveCreateSchedulingAuthority`: persisted operation/retry origins must
+agree, and only origin-free work falls back to the current mode. Gate errors
+expose bounded public messages rather than wrapped internal diagnostics.
 `CreateAppointmentInput`, `RescheduleInput`, and `AvailabilityInput` expose
 segment arrays so providers can map multi-service booking payloads without
 leaking provider-specific shapes into booking services. The legacy
@@ -233,7 +280,12 @@ already exists. Without that proof, `provider_outcome=not_started` records a
 definitive failed, retry-safe fallback without reconciliation, while
 `provider_outcome=in_flight` records an unknown, retry-blocked fallback and
 opens reconciliation. Owner reads and the background sweep use the same
-idempotent transaction and deduplicated notification/outbox keys.
+idempotent transaction and deduplicated notification/outbox keys. Exact
+external create-mirror canonicalization also preserves any stored confirmation
+provenance, fills only missing `confirmed_at` and `confirmation_source` with
+the canonicalization time and `external_provider`, and leaves
+`confirmed_by_user_id` unset when there is no real actor. Repeated recovery
+does not rewrite those timestamps.
 
 Historical fingerprint dedupe follows the same phase boundary. V39 may
 auto-supersede only a duplicate with `provider_outcome=not_started`; it aborts
@@ -291,13 +343,23 @@ Booking webhooks remain provider-specific inbound adapters. Their raw signature
 validation, tenant routing, event dedupe, claim fencing, provider retrieval,
 and error mapping stay inside `modules/pos_square`; the normalized calendar
 mirror write remains in `modules/booking`. A webhook body is never direct
-confirmation evidence.
+confirmation evidence. Authenticated owner operations may expose only bounded
+safe event/repair state and a backend-gated, action-key-idempotent requeue;
+provider identifiers, payloads, signatures, claim tokens, provider responses,
+customer data, and raw errors remain inside the adapter boundary. Requeueing an
+existing durable event does not select scheduling authority or prove a booking
+outcome.
 
 ## Adding Future Providers
 
 Add a new package such as `modules/pos_vagaro` only when that provider is a real
 implementation. Future provider names in docs are architecture targets, not
 shipped support.
+
+Adding or connecting an adapter does not select `external_provider` scheduling
+authority and does not migrate appointments from another authority. Authority
+switching is a separate explicit owner workflow that preserves originating
+authority.
 
 The provider must:
 

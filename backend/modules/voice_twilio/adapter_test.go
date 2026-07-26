@@ -58,6 +58,19 @@ func TestRecordResponseUsesPlayWhenAudioURLPresent(t *testing.T) {
 	}
 }
 
+func TestFinalResponsePreservesSignedAudioCapabilityAsEscapedTwiML(t *testing.T) {
+	adapter := NewAdapter(config.TwilioVoiceConfig{AuthToken: "secret"}, "https://voice.example.com")
+	audioURL := "https://voice.example.com/api/voice/audio/audio_1?expires=1784895000&signature=abc_def-123"
+
+	body := adapter.FinalResponse("Fallback text", audioURL)
+	if !strings.Contains(body, "<Play>https://voice.example.com/api/voice/audio/audio_1?expires=1784895000&amp;signature=abc_def-123</Play>") {
+		t.Fatalf("FinalResponse did not preserve an XML-safe signed capability: %s", body)
+	}
+	if strings.Contains(body, "<Say>Fallback text</Say>") {
+		t.Fatalf("FinalResponse should use signed audio instead of duplicate fallback speech: %s", body)
+	}
+}
+
 func TestStreamResponseUsesSignedParametersAndWebSocketURL(t *testing.T) {
 	adapter := NewAdapter(config.TwilioVoiceConfig{
 		AuthToken:  "secret",

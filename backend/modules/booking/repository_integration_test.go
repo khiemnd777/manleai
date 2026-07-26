@@ -3,6 +3,7 @@ package booking
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,9 +13,82 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 	"github.com/manleai/ai-receptionist/modules/pos"
 )
+
+func TestAuthorityDTOJSONKeepsLegacyCompatibilityAndControlEvidencePrivate(t *testing.T) {
+	confirmedAt := time.Date(2026, time.July, 24, 10, 0, 0, 0, time.UTC)
+	attempt := BookingAttempt{
+		SchedulingAuthority:         SchedulingAuthorityExternalProvider,
+		AuthorityProvider:           "provider_fixture",
+		AuthorityAppointmentID:      "authority-booking-1",
+		AuthorityAppointmentVersion: 7,
+		AuthorityIdempotencyKey:     "private-idempotency-key",
+		AuthorityLocationID:         "private-location",
+		AuthoritySnapshotGeneration: 11,
+		POSProvider:                 "provider_fixture",
+		POSBookingID:                "legacy-booking-1",
+		POSBookingVersion:           7,
+	}
+	appointment := Appointment{
+		SchedulingAuthority:         SchedulingAuthorityExternalProvider,
+		AuthorityProvider:           "provider_fixture",
+		AuthorityAppointmentID:      "authority-booking-1",
+		AuthorityAppointmentVersion: 7,
+		AuthorityCustomerID:         "private-customer",
+		POSProvider:                 "provider_fixture",
+		POSAppointmentID:            "legacy-booking-1",
+		POSAppointmentVersion:       7,
+		ConfirmedAt:                 &confirmedAt,
+		ConfirmedByUserID:           "00000000-0000-4000-8000-000000000001",
+		ConfirmationSource:          SchedulingAuthorityExternalProvider,
+	}
+
+	encoded, err := json.Marshal(struct {
+		Attempt     BookingAttempt `json:"attempt"`
+		Appointment Appointment    `json:"appointment"`
+	}{Attempt: attempt, Appointment: appointment})
+	if err != nil {
+		t.Fatalf("marshal authority DTOs: %v", err)
+	}
+	var payload map[string]map[string]any
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatalf("unmarshal authority DTO JSON: %v", err)
+	}
+	for _, key := range []string{"pos_provider", "pos_booking_id", "pos_booking_version", "scheduling_authority", "authority_provider", "authority_appointment_id", "authority_appointment_version"} {
+		if _, ok := payload["attempt"][key]; !ok {
+			t.Fatalf("attempt JSON missing compatibility field %q: %s", key, encoded)
+		}
+	}
+	for _, key := range []string{"authority_idempotency_key", "authority_location_id", "authority_snapshot_generation"} {
+		if _, ok := payload["attempt"][key]; ok {
+			t.Fatalf("attempt JSON exposed private control field %q: %s", key, encoded)
+		}
+	}
+	for _, key := range []string{"pos_provider", "pos_appointment_id", "scheduling_authority", "authority_provider", "authority_appointment_id", "confirmed_at", "confirmation_source"} {
+		if _, ok := payload["appointment"][key]; !ok {
+			t.Fatalf("appointment JSON missing compatibility field %q: %s", key, encoded)
+		}
+	}
+	for _, key := range []string{"authority_customer_id", "confirmed_by_user_id"} {
+		if _, ok := payload["appointment"][key]; ok {
+			t.Fatalf("appointment JSON exposed private field %q: %s", key, encoded)
+		}
+	}
+
+	var req CreateBookingRequest
+	if err := json.Unmarshal([]byte(`{"operation_key":"op-1","scheduling_authority":"owner_manual","authority_provider":"untrusted"}`), &req); err != nil {
+		t.Fatalf("unmarshal create request: %v", err)
+	}
+	requestJSON, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal create request: %v", err)
+	}
+	if strings.Contains(string(requestJSON), "scheduling_authority") || strings.Contains(string(requestJSON), "authority_provider") {
+		t.Fatalf("create request unexpectedly accepts authority fields: %s", requestJSON)
+	}
+}
 
 func TestReconciliationCandidateMatchesRescheduleExactRequestedRange(t *testing.T) {
 	requestedStart := time.Date(2026, time.July, 20, 15, 0, 0, 0, time.UTC)
@@ -245,6 +319,7 @@ func TestRepositorySweepExpiredNotStartedLeaseCreatesOneRetrySafeFallback(t *tes
 			t.Errorf("cleanup test owner: %v", err)
 		}
 	}()
+	fence := seedReadyCalendarProviderFence(t, ctx, db, salonID)
 
 	repo := NewRepository(db)
 	startTime := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
@@ -255,6 +330,7 @@ func TestRepositorySweepExpiredNotStartedLeaseCreatesOneRetrySafeFallback(t *tes
 		POSIdempotencyKey:  uuid.NewString(),
 		OperationKey:       "integration-pre-dispatch-crash",
 		RequestFingerprint: "integration-pre-dispatch-crash-fingerprint",
+		ProviderFence:      fence,
 		ProcessingToken:    uuid.NewString(),
 		LeaseExpiresAt:     time.Now().UTC().Add(-time.Minute),
 		CustomerName:       "Integration Caller",
@@ -389,6 +465,300 @@ func TestRepositorySweepExpiredNotStartedLeaseCreatesOneRetrySafeFallback(t *tes
 	}
 }
 
+func TestRepositoryV49RejectsInternalLeasedProviderShapedAttempt(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		t.Fatalf("ping database: %v", err)
+	}
+
+	ctx := context.Background()
+	ownerID, salonID, serviceID, staffID := seedBookingOperationTestData(t, ctx, db)
+	defer func() {
+		if _, err := db.ExecContext(context.Background(), `DELETE FROM salons WHERE id = $1`, salonID); err != nil {
+			t.Errorf("cleanup test salon: %v", err)
+		}
+		if _, err := db.ExecContext(context.Background(), `DELETE FROM users WHERE id = $1`, ownerID); err != nil {
+			t.Errorf("cleanup test owner: %v", err)
+		}
+	}()
+
+	operationKey := "internal-lease-" + uuid.NewString()
+	requestFingerprint := strings.Repeat("a", 64)
+	processingToken := uuid.NewString()
+	start := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO booking_attempts (
+			salon_id, source, status, pos_provider, operation_key, request_fingerprint,
+			operation_type, provider_outcome, retry_policy, reconciliation_status,
+			processing_token, processing_lease_expires_at, customer_name, customer_phone,
+			service_id, staff_id, requested_start_time, requested_end_time, scheduling_authority,
+			scheduling_authority_version, authority_config_version
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now() - interval '5 minutes',
+		        'Internal Calendar Caller', '+13125550501', $12, $13, $14, $15, $16, 1, 1)
+	`, salonID, SourceOwnerDashboard, StatusPOSPending, pos.ProviderSquare, operationKey, requestFingerprint,
+		BookingActionBook, ProviderOutcomeNotStarted, RetryPolicyNone, ReconciliationNotRequired,
+		processingToken, serviceID, staffID, start, start.Add(45*time.Minute), SchedulingAuthorityManleAICalendar); err == nil {
+		t.Fatal("provider-shaped leased ManleAI Calendar attempt was accepted")
+	} else {
+		assertPostgresCheckConstraint(t, err, "booking_attempts_manleai_calendar_shape_check")
+	}
+}
+
+func TestRepositoryLeaseRecoveryPersistsExternalConfirmationProvenanceAtomically(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		t.Fatalf("ping database: %v", err)
+	}
+
+	ctx := context.Background()
+	ownerID, salonID, serviceID, staffID := seedBookingOperationTestData(t, ctx, db)
+	defer func() {
+		if _, err := db.ExecContext(context.Background(), `DELETE FROM salons WHERE id = $1`, salonID); err != nil {
+			t.Errorf("cleanup test salon: %v", err)
+		}
+		if _, err := db.ExecContext(context.Background(), `DELETE FROM users WHERE id = $1`, ownerID); err != nil {
+			t.Errorf("cleanup test owner: %v", err)
+		}
+	}()
+
+	fence := seedReadyCalendarProviderFence(t, ctx, db, salonID)
+	providerAppointmentID := "lease-recovered-" + uuid.NewString()
+	start := time.Now().UTC().Add(36 * time.Hour).Truncate(time.Second)
+	end := start.Add(45 * time.Minute)
+	var canonicalAttemptID string
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO booking_attempts (
+			salon_id, source, status, pos_provider, pos_booking_id, pos_booking_version,
+			operation_key, request_fingerprint, operation_type, provider_outcome,
+			retry_policy, reconciliation_status, processing_token, processing_lease_expires_at,
+			customer_name, customer_phone, service_id, staff_id, staff_selection_mode,
+			requested_start_time, requested_end_time, provider_location_id,
+			provider_snapshot_generation, scheduling_authority, authority_provider,
+			authority_appointment_id, authority_appointment_version, authority_location_id,
+			authority_snapshot_generation
+		)
+		VALUES ($1, $2, $3, $4, $5, 2, $6, $7, $8, $9, $10, $11, $12,
+		        now() - interval '5 minutes', 'Recovered Caller', '+13125550504', $13, $14, $15,
+		        $16, $17, $18, $19, $20, $4, $5, 2, $18, $19)
+		RETURNING id::text
+	`, salonID, SourceAIVoiceCall, StatusPOSPending, pos.ProviderSquare, providerAppointmentID,
+		"lease-recovery-"+uuid.NewString(), strings.ReplaceAll(uuid.NewString()+uuid.NewString(), "-", ""),
+		BookingActionBook, ProviderOutcomeInFlight, RetryPolicyNone, ReconciliationNotRequired,
+		uuid.NewString(), serviceID, staffID, StaffSelectionSpecific, start, end,
+		fence.LocationID, fence.SnapshotGeneration, SchedulingAuthorityExternalProvider).Scan(&canonicalAttemptID); err != nil {
+		t.Fatalf("insert in-flight canonical attempt: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO booking_attempt_segments (
+			booking_attempt_id, service_id, staff_id, staff_selection_mode,
+			pos_service_id, pos_service_version, pos_staff_id, name,
+			duration_minutes, sort_order, scheduling_authority, authority_provider,
+			authority_service_id, authority_service_version, authority_staff_id, salon_id
+		)
+		VALUES ($1, $2, $3, $4, 'integration-service', 1, 'integration-staff',
+		        'Integration Manicure', 45, 1, $5, $6, 'integration-service', 1, 'integration-staff', $7)
+	`, canonicalAttemptID, serviceID, staffID, StaffSelectionSpecific,
+		SchedulingAuthorityExternalProvider, pos.ProviderSquare, salonID); err != nil {
+		t.Fatalf("insert canonical attempt segment: %v", err)
+	}
+
+	var importedAttemptID string
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO booking_attempts (
+			salon_id, source, status, pos_provider, pos_booking_id, pos_booking_version,
+			operation_type, provider_outcome, retry_policy, reconciliation_status,
+			customer_name, customer_phone, service_id, staff_id, staff_selection_mode,
+			requested_start_time, requested_end_time, provider_location_id,
+			provider_snapshot_generation, scheduling_authority, authority_provider,
+			authority_appointment_id, authority_appointment_version, authority_location_id,
+			authority_snapshot_generation
+		)
+		VALUES ($1, $2, $3, $4, $5, 3, $6, $7, $8, $9,
+		        'Recovered Caller', '+13125550504', $10, $11, $12, $13, $14, $15, $16,
+		        $17, $4, $5, 3, $15, $16)
+		RETURNING id::text
+	`, salonID, SourcePOSCalendarSync, StatusConfirmed, pos.ProviderSquare, providerAppointmentID,
+		BookingActionBook, ProviderOutcomeSucceeded, RetryPolicyNone, ReconciliationNotRequired,
+		serviceID, staffID, StaffSelectionSpecific, start, end, fence.LocationID,
+		fence.SnapshotGeneration, SchedulingAuthorityExternalProvider).Scan(&importedAttemptID); err != nil {
+		t.Fatalf("insert imported provider attempt: %v", err)
+	}
+	var appointmentID string
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO appointments (
+			salon_id, booking_attempt_id, pos_provider, pos_appointment_id, pos_appointment_version,
+			status, customer_name, customer_phone, service_id, staff_id, staff_selection_mode,
+			start_time, end_time, pos_sync_status, last_pos_synced_at, scheduling_authority,
+			authority_provider, authority_appointment_id, authority_appointment_version
+		)
+		VALUES ($1, $2, $3, $4, 3, $5, 'Recovered Caller', '+13125550504', $6, $7, $8,
+		        $9, $10, 'synced', now(), $11, $3, $4, 3)
+		RETURNING id::text
+	`, salonID, importedAttemptID, pos.ProviderSquare, providerAppointmentID, StatusConfirmed,
+		serviceID, staffID, StaffSelectionSpecific, start, end,
+		SchedulingAuthorityExternalProvider).Scan(&appointmentID); err != nil {
+		t.Fatalf("insert imported provider appointment: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO appointment_services (
+			appointment_id, service_id, staff_id, staff_selection_mode,
+			pos_service_id, pos_service_version, pos_staff_id, name,
+			duration_minutes, sort_order, scheduling_authority, authority_provider,
+			authority_service_id, authority_service_version, authority_staff_id, salon_id
+		)
+		VALUES ($1, $2, $3, $4, 'integration-service', 1, 'integration-staff',
+		        'Integration Manicure', 45, 1, $5, $6, 'integration-service', 1, 'integration-staff', $7)
+	`, appointmentID, serviceID, staffID, StaffSelectionSpecific,
+		SchedulingAuthorityExternalProvider, pos.ProviderSquare, salonID); err != nil {
+		t.Fatalf("insert imported appointment segment: %v", err)
+	}
+
+	repo := NewRepository(db)
+	processed, err := repo.SweepExpiredBookingOperationLeases(ctx, 50)
+	if err != nil {
+		t.Fatalf("recover exact provider mirror: %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed leases = %d, want 1", processed)
+	}
+
+	var attemptStatus, attemptOutcome, attemptRetry, attemptReconciliation, attemptAuthority, persistedProviderAppointmentID string
+	var attemptVersion int
+	var attemptUpdatedAt time.Time
+	var hasToken, hasLease bool
+	if err := db.QueryRowContext(ctx, `
+		SELECT status, provider_outcome, retry_policy, reconciliation_status,
+		       scheduling_authority, COALESCE(pos_booking_id, ''), COALESCE(pos_booking_version, 0),
+		       processing_token IS NOT NULL, processing_lease_expires_at IS NOT NULL, updated_at
+		FROM booking_attempts
+		WHERE id = $1
+	`, canonicalAttemptID).Scan(
+		&attemptStatus, &attemptOutcome, &attemptRetry, &attemptReconciliation,
+		&attemptAuthority, &persistedProviderAppointmentID, &attemptVersion,
+		&hasToken, &hasLease, &attemptUpdatedAt,
+	); err != nil {
+		t.Fatalf("load recovered canonical attempt: %v", err)
+	}
+	if attemptStatus != StatusConfirmed || attemptOutcome != ProviderOutcomeSucceeded || attemptRetry != RetryPolicyNone || attemptReconciliation != ReconciliationNotRequired || attemptAuthority != SchedulingAuthorityExternalProvider || persistedProviderAppointmentID != providerAppointmentID || attemptVersion != 3 || hasToken || hasLease {
+		t.Fatalf("recovered attempt = %s/%s/%s/%s authority=%s provider=%s/%d token=%t lease=%t",
+			attemptStatus, attemptOutcome, attemptRetry, attemptReconciliation, attemptAuthority,
+			persistedProviderAppointmentID, attemptVersion, hasToken, hasLease)
+	}
+
+	var linkedAttemptID, appointmentAuthority, confirmationSource string
+	var confirmedAt, appointmentUpdatedAt time.Time
+	var confirmedByOwner bool
+	if err := db.QueryRowContext(ctx, `
+		SELECT booking_attempt_id::text, scheduling_authority, confirmed_at,
+		       COALESCE(confirmation_source, ''), confirmed_by_user_id IS NOT NULL, updated_at
+		FROM appointments
+		WHERE id = $1
+	`, appointmentID).Scan(
+		&linkedAttemptID, &appointmentAuthority, &confirmedAt,
+		&confirmationSource, &confirmedByOwner, &appointmentUpdatedAt,
+	); err != nil {
+		t.Fatalf("load recovered appointment provenance: %v", err)
+	}
+	if linkedAttemptID != canonicalAttemptID || appointmentAuthority != SchedulingAuthorityExternalProvider || confirmedAt.IsZero() || confirmationSource != SchedulingAuthorityExternalProvider || confirmedByOwner {
+		t.Fatalf("recovered appointment = attempt %s authority=%s confirmed=%s source=%s owner_actor=%t",
+			linkedAttemptID, appointmentAuthority, confirmedAt, confirmationSource, confirmedByOwner)
+	}
+
+	var supersededBy string
+	var superseded bool
+	if err := db.QueryRowContext(ctx, `
+		SELECT COALESCE(superseded_by_attempt_id::text, ''), superseded_at IS NOT NULL
+		FROM booking_attempts
+		WHERE id = $1
+	`, importedAttemptID).Scan(&supersededBy, &superseded); err != nil {
+		t.Fatalf("load imported attempt lineage: %v", err)
+	}
+	if supersededBy != canonicalAttemptID || !superseded {
+		t.Fatalf("imported attempt lineage = %s/%t, want %s/true", supersededBy, superseded, canonicalAttemptID)
+	}
+
+	var notificationAttemptID, notificationAppointmentID, payloadStatus, payloadProviderID string
+	if err := db.QueryRowContext(ctx, `
+		SELECT booking_attempt_id::text, appointment_id::text,
+		       payload->>'booking_status', payload->>'pos_booking_id'
+		FROM owner_notifications
+		WHERE salon_id = $1
+		  AND dedupe_key = $2
+	`, salonID, "booking-confirmed:"+canonicalAttemptID).Scan(
+		&notificationAttemptID, &notificationAppointmentID, &payloadStatus, &payloadProviderID,
+	); err != nil {
+		t.Fatalf("load recovered confirmation notification: %v", err)
+	}
+	if notificationAttemptID != canonicalAttemptID || notificationAppointmentID != appointmentID || payloadStatus != attemptStatus || payloadProviderID != persistedProviderAppointmentID {
+		t.Fatalf("confirmation notification = attempt %s appointment %s status=%s provider_id=%s",
+			notificationAttemptID, notificationAppointmentID, payloadStatus, payloadProviderID)
+	}
+	var confirmationNotifications, fallbackNotifications, posErrors int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FILTER (WHERE type = $2), count(*) FILTER (WHERE type = $3)
+		FROM owner_notifications
+		WHERE salon_id = $1 AND booking_attempt_id = $4
+	`, salonID, NotificationTypeBookingConfirmed, NotificationTypeBookingFallback, canonicalAttemptID).Scan(
+		&confirmationNotifications, &fallbackNotifications,
+	); err != nil {
+		t.Fatalf("count recovered notifications: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pos_errors WHERE salon_id = $1`, salonID).Scan(&posErrors); err != nil {
+		t.Fatalf("count recovery POS errors: %v", err)
+	}
+	if confirmationNotifications != 1 || fallbackNotifications != 0 || posErrors != 0 {
+		t.Fatalf("recovery side effects = confirmed %d fallback %d pos_errors %d", confirmationNotifications, fallbackNotifications, posErrors)
+	}
+
+	processed, err = repo.SweepExpiredBookingOperationLeases(ctx, 50)
+	if err != nil {
+		t.Fatalf("repeat exact provider recovery: %v", err)
+	}
+	if processed != 0 {
+		t.Fatalf("repeat processed leases = %d, want 0", processed)
+	}
+	var repeatedConfirmedAt, repeatedAppointmentUpdatedAt, repeatedAttemptUpdatedAt time.Time
+	if err := db.QueryRowContext(ctx, `
+		SELECT appointment.confirmed_at, appointment.updated_at, attempt.updated_at
+		FROM appointments appointment
+		JOIN booking_attempts attempt ON attempt.id = appointment.booking_attempt_id
+		WHERE appointment.id = $1
+	`, appointmentID).Scan(&repeatedConfirmedAt, &repeatedAppointmentUpdatedAt, &repeatedAttemptUpdatedAt); err != nil {
+		t.Fatalf("load repeated recovery state: %v", err)
+	}
+	if !repeatedConfirmedAt.Equal(confirmedAt) || !repeatedAppointmentUpdatedAt.Equal(appointmentUpdatedAt) || !repeatedAttemptUpdatedAt.Equal(attemptUpdatedAt) {
+		t.Fatalf("repeat recovery changed timestamps: confirmed %s/%s appointment %s/%s attempt %s/%s",
+			confirmedAt, repeatedConfirmedAt, appointmentUpdatedAt, repeatedAppointmentUpdatedAt, attemptUpdatedAt, repeatedAttemptUpdatedAt)
+	}
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM owner_notifications
+		WHERE salon_id = $1 AND dedupe_key = $2
+	`, salonID, "booking-confirmed:"+canonicalAttemptID).Scan(&confirmationNotifications); err != nil {
+		t.Fatalf("count repeated confirmation notifications: %v", err)
+	}
+	if confirmationNotifications != 1 {
+		t.Fatalf("repeated confirmation notifications = %d, want 1", confirmationNotifications)
+	}
+}
+
 func TestRepositoryLeaseSweepLimitBoundsAttemptsNotSalons(t *testing.T) {
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
@@ -518,6 +888,7 @@ func TestRepositoryConcurrentOperationClaimHasOneWriter(t *testing.T) {
 			t.Errorf("cleanup test owner: %v", err)
 		}
 	}()
+	fence := seedReadyCalendarProviderFence(t, ctx, db, salonID)
 
 	repo := NewRepository(db)
 	base := PendingBookingRecord{
@@ -526,6 +897,7 @@ func TestRepositoryConcurrentOperationClaimHasOneWriter(t *testing.T) {
 		Provider:           "square",
 		OperationKey:       "integration-concurrent-operation",
 		RequestFingerprint: "same-fingerprint",
+		ProviderFence:      fence,
 		CustomerName:       "Integration Caller",
 		CustomerPhone:      "+13125550199",
 		Service: ServiceRef{
@@ -788,6 +1160,9 @@ func TestRepositoryAvailabilityQuoteRejectsPositionalSegmentMismatchAtomically(t
 	`, salonID); err != nil {
 		t.Fatalf("insert ready POS connection: %v", err)
 	}
+	if _, err := db.ExecContext(ctx, `UPDATE salon_settings SET scheduling_authority='external_provider' WHERE salon_id=$1`, salonID); err != nil {
+		t.Fatalf("select external authority for quote test: %v", err)
+	}
 
 	repo := NewRepository(db)
 	startTime := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second)
@@ -876,21 +1251,61 @@ func TestRepositoryAvailabilityQuoteRejectsPositionalSegmentMismatchAtomically(t
 	`, StatusFallbackPending, ProviderOutcomeFailed, RetryPolicySafe, ReconciliationNotRequired, claim.Attempt.ID); err != nil {
 		t.Fatalf("mark quote attempt safe to retry: %v", err)
 	}
+	if _, err := db.ExecContext(ctx, `UPDATE salon_settings SET scheduling_authority='owner_manual' WHERE salon_id=$1`, salonID); err != nil {
+		t.Fatalf("switch authority before safe retry: %v", err)
+	}
+	consumedQuoteRetry := record
+	consumedQuoteRetry.OperationKey = "integration-positional-consumed-quote-retry"
+	consumedQuoteRetry.RetryOfAttemptID = claim.Attempt.ID
+	consumedQuoteRetry.POSIdempotencyKey = uuid.NewString()
+	consumedQuoteRetry.ProcessingToken = uuid.NewString()
+	consumedQuoteRetry.LeaseExpiresAt = time.Now().UTC().Add(bookingOperationLeaseDuration)
+	if _, err := repo.ClaimPendingBookingAttempt(ctx, consumedQuoteRetry); !errors.Is(err, ErrAvailabilityQuoteStale) {
+		t.Fatalf("consumed original quote retry error = %v, want fresh-quote requirement", err)
+	}
+	var prematurelySuperseded bool
+	if err := db.QueryRowContext(ctx, `SELECT superseded_at IS NOT NULL FROM booking_attempts WHERE id=$1`, claim.Attempt.ID).Scan(&prematurelySuperseded); err != nil {
+		t.Fatalf("load consumed-quote retry origin: %v", err)
+	}
+	if prematurelySuperseded {
+		t.Fatal("consumed quote rejection superseded the retry origin")
+	}
+	retryQuote, err := repo.CreateAvailabilityQuote(ctx, AvailabilityQuoteRecord{
+		SalonID:            salonID,
+		Provider:           "square",
+		ProviderFence:      fence,
+		RequestFingerprint: "integration-retry-quote-request",
+		RetryOfAttemptID:   claim.Attempt.ID,
+		ExpiresAt:          time.Now().UTC().Add(5 * time.Minute),
+		Slots: []AvailabilitySlot{{
+			Fingerprint: slotFingerprint,
+			StartTime:   startTime,
+			EndTime:     endTime,
+			Segments: []AvailabilitySegment{
+				{ServiceID: serviceAID, StaffID: staffID, StaffSelectionMode: StaffSelectionSpecific, DurationMinutes: 45},
+				{ServiceID: serviceAID, StaffID: staffID, StaffSelectionMode: StaffSelectionSpecific, DurationMinutes: 45},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("create fresh lineage-owned retry quote after authority switch: %v", err)
+	}
 	retry := record
 	retry.OperationKey = "integration-positional-quote-retry"
 	retry.RetryOfAttemptID = claim.Attempt.ID
+	retry.AvailabilityQuoteID = retryQuote.ID
 	retry.POSIdempotencyKey = uuid.NewString()
 	retry.ProcessingToken = uuid.NewString()
 	retry.LeaseExpiresAt = time.Now().UTC().Add(bookingOperationLeaseDuration)
 	retryClaim, err := repo.ClaimPendingBookingAttempt(ctx, retry)
 	if err != nil {
-		t.Fatalf("safe retry with lineage-owned quote: %v", err)
+		t.Fatalf("safe retry with lineage-owned quote after authority switch: %v", err)
 	}
 	if retryClaim == nil || !retryClaim.Acquired || retryClaim.Attempt.RetryOfAttemptID != claim.Attempt.ID {
 		t.Fatalf("safe quote retry claim = %#v, want acquired lineage from %s", retryClaim, claim.Attempt.ID)
 	}
 	var quoteConsumer string
-	if err := db.QueryRowContext(ctx, `SELECT consumed_by_attempt_id::text FROM availability_quotes WHERE id = $1`, quote.ID).Scan(&quoteConsumer); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT consumed_by_attempt_id::text FROM availability_quotes WHERE id = $1`, retryQuote.ID).Scan(&quoteConsumer); err != nil {
 		t.Fatalf("load retried quote consumer: %v", err)
 	}
 	if quoteConsumer != retryClaim.Attempt.ID {
@@ -959,6 +1374,316 @@ func TestRepositoryAvailabilityQuoteRejectsFenceChangedBeforePersistence(t *test
 	}
 	if quoteCount != 0 {
 		t.Fatalf("stale fence quote count = %d, want 0", quoteCount)
+	}
+}
+
+func TestRepositoryTargetOriginRescheduleQuoteSurvivesAuthoritySwitch(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	ownerID, salonID, serviceID, staffID := seedBookingOperationTestData(t, ctx, db)
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM salons WHERE id=$1`, salonID)
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM users WHERE id=$1`, ownerID)
+	})
+	fence := pos.ProviderFence{LocationID: "target-origin-location", SnapshotGeneration: 4}
+	if _, err := db.ExecContext(ctx, `UPDATE services SET active=true, ai_bookable=true, sync_status='synced', archived_at=NULL WHERE id=$1`, serviceID); err != nil {
+		t.Fatalf("ready target-origin service: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE staff SET active=true, ai_bookable=true, sync_status='synced', archived_at=NULL WHERE id=$1`, staffID); err != nil {
+		t.Fatalf("ready target-origin staff: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO pos_connections (salon_id,provider,status,location_id,snapshot_generation,last_sync_at) VALUES ($1,'square','active',$2,$3,now())`, salonID, fence.LocationID, fence.SnapshotGeneration); err != nil {
+		t.Fatalf("seed target-origin connection: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO pos_entity_links (salon_id,entity_type,entity_id,provider,provider_entity_id,provider_version,sync_status,last_synced_at)
+		VALUES ($1,'service',$2,'square','integration-service',1,'synced',now()),
+		       ($1,'staff',$3,'square','integration-staff',NULL,'synced',now())
+	`, salonID, serviceID, staffID); err != nil {
+		t.Fatalf("seed target-origin provider evidence: %v", err)
+	}
+	start := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second)
+	end := start.Add(45 * time.Minute)
+	var originAttemptID string
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO booking_attempts (
+			salon_id,source,status,pos_provider,pos_booking_id,pos_booking_version,pos_idempotency_key,
+			operation_key,request_fingerprint,operation_type,provider_outcome,retry_policy,reconciliation_status,
+			customer_name,customer_phone,service_id,staff_id,staff_selection_mode,requested_start_time,requested_end_time,
+			provider_location_id,provider_snapshot_generation,scheduling_authority,authority_provider,
+			authority_appointment_id,authority_appointment_version,authority_idempotency_key,
+			authority_location_id,authority_snapshot_generation
+		) VALUES ($1,'owner_dashboard','confirmed','square','target-origin-booking',0,$2,$3,$4,'book','succeeded','none','not_required',
+		          'Target Caller','+13125550199',$5,$6,'specific',$7,$8,$9,$10,'external_provider','square',
+		          'target-origin-booking',0,$2,$9,$10)
+		RETURNING id::text
+	`, salonID, uuid.NewString(), "target-origin-create-"+uuid.NewString(), strings.Repeat("d", 64), serviceID, staffID, start, end, fence.LocationID, fence.SnapshotGeneration).Scan(&originAttemptID); err != nil {
+		t.Fatalf("insert target-origin attempt: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO booking_attempt_segments (
+			salon_id,booking_attempt_id,service_id,staff_id,staff_selection_mode,pos_service_id,pos_service_version,
+			pos_staff_id,name,duration_minutes,sort_order,scheduling_authority,authority_provider,
+			authority_service_id,authority_service_version,authority_staff_id
+		) VALUES ($1,$2,$3,$4,'specific','integration-service',1,'integration-staff','Integration Manicure',45,1,
+		          'external_provider','square','integration-service',1,'integration-staff')
+	`, salonID, originAttemptID, serviceID, staffID); err != nil {
+		t.Fatalf("insert target-origin attempt segment: %v", err)
+	}
+	var appointmentID string
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO appointments (
+			salon_id,booking_attempt_id,pos_provider,pos_appointment_id,pos_appointment_version,status,
+			customer_name,customer_phone,service_id,staff_id,staff_selection_mode,start_time,end_time,
+			pos_sync_status,last_pos_synced_at,scheduling_authority,authority_provider,
+			authority_appointment_id,authority_appointment_version
+		) VALUES ($1,$2,'square','target-origin-booking',0,'confirmed','Target Caller','+13125550199',
+		          $3,$4,'specific',$5,$6,'synced',now(),'external_provider','square','target-origin-booking',0)
+		RETURNING id::text
+	`, salonID, originAttemptID, serviceID, staffID, start, end).Scan(&appointmentID); err != nil {
+		t.Fatalf("insert target-origin appointment: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO appointment_services (
+			salon_id,appointment_id,service_id,staff_id,staff_selection_mode,pos_service_id,pos_service_version,
+			pos_staff_id,name,duration_minutes,sort_order,scheduling_authority,authority_provider,
+			authority_service_id,authority_service_version,authority_staff_id
+		) VALUES ($1,$2,$3,$4,'specific','integration-service',1,'integration-staff','Integration Manicure',45,1,
+		          'external_provider','square','integration-service',1,'integration-staff')
+	`, salonID, appointmentID, serviceID, staffID); err != nil {
+		t.Fatalf("insert target-origin appointment segment: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE salon_settings SET scheduling_authority='owner_manual' WHERE salon_id=$1`, salonID); err != nil {
+		t.Fatalf("switch away from external authority: %v", err)
+	}
+
+	repo := NewRepository(db)
+	service := ServiceRef{ID: serviceID, POSProvider: pos.ProviderSquare, POSServiceID: "integration-service", POSServiceVersion: 1, Name: "Integration Manicure", DurationMinutes: 45, ProviderFence: fence}
+	staff := StaffRef{ID: staffID, POSProvider: pos.ProviderSquare, POSStaffID: "integration-staff", Name: "Integration Staff", ProviderFence: fence}
+	slotFingerprint := strings.Repeat("e", 64)
+	quote, err := repo.CreateAvailabilityQuote(ctx, AvailabilityQuoteRecord{
+		SalonID: salonID, Provider: pos.ProviderSquare, ProviderFence: fence,
+		RequestFingerprint: strings.Repeat("f", 64), OperationType: BookingActionReschedule,
+		TargetAppointmentID: appointmentID, TargetAuthorityAppointmentVersion: 0,
+		ExpiresAt: time.Now().UTC().Add(5 * time.Minute),
+		Slots: []AvailabilitySlot{{Fingerprint: slotFingerprint, StartTime: start.Add(24 * time.Hour), EndTime: end.Add(24 * time.Hour),
+			Segments: []AvailabilitySegment{{ServiceID: serviceID, StaffID: staffID, StaffSelectionMode: StaffSelectionSpecific, DurationMinutes: 45}}}},
+	})
+	if err != nil {
+		t.Fatalf("persist target-origin reschedule quote after switch: %v", err)
+	}
+	var storedVersion sql.NullInt64
+	var operation, storedTarget string
+	var targetVersion int
+	if err := db.QueryRowContext(ctx, `SELECT scheduling_authority_version,operation_type,target_appointment_id::text,target_authority_appointment_version FROM availability_quotes WHERE id=$1`, quote.ID).Scan(&storedVersion, &operation, &storedTarget, &targetVersion); err != nil {
+		t.Fatalf("load target-origin quote: %v", err)
+	}
+	if storedVersion.Valid || operation != BookingActionReschedule || storedTarget != appointmentID || targetVersion != 0 {
+		t.Fatalf("target-origin quote fence=%v operation=%q target=%q version=%d", storedVersion, operation, storedTarget, targetVersion)
+	}
+	claim, err := repo.ClaimPendingAppointmentAction(ctx, PendingAppointmentActionRecord{
+		SalonID: salonID, Appointment: AppointmentActionRef{ID: appointmentID, SalonID: salonID,
+			SchedulingAuthority: SchedulingAuthorityExternalProvider, AuthorityAppointmentVersion: 0,
+			POSProvider: pos.ProviderSquare, ProviderLocationID: fence.LocationID, ProviderFence: fence,
+			POSAppointmentID: "target-origin-booking", POSAppointmentVersion: 0, Status: StatusConfirmed,
+			CustomerName: "Target Caller", CustomerPhone: "+13125550199", Service: service, Staff: staff,
+			StaffSelectionMode: StaffSelectionSpecific, Segments: []BookingSegmentRecord{{Service: service, Staff: staff, StaffSelectionMode: StaffSelectionSpecific, SortOrder: 1}}, StartTime: start, EndTime: end},
+		Provider: pos.ProviderSquare, Source: SourceOwnerDashboard, Segments: []BookingSegmentRecord{{Service: service, Staff: staff, StaffSelectionMode: StaffSelectionSpecific, SortOrder: 1}},
+		RequestedStartTime: start.Add(24 * time.Hour), RequestedEndTime: end.Add(24 * time.Hour),
+		POSIdempotencyKey: uuid.NewString(), OperationKey: "target-origin-reschedule-" + uuid.NewString(), RequestFingerprint: strings.Repeat("1", 64),
+		AvailabilityQuoteID: quote.ID, SlotFingerprint: slotFingerprint, ProviderFence: fence,
+		OperationType: BookingActionReschedule, ProcessingToken: uuid.NewString(), LeaseExpiresAt: time.Now().UTC().Add(bookingOperationLeaseDuration),
+	})
+	if err != nil || claim == nil || !claim.Acquired {
+		t.Fatalf("claim target-origin reschedule after switch=%#v err=%v", claim, err)
+	}
+	_, err = repo.CreateAvailabilityQuote(ctx, AvailabilityQuoteRecord{
+		SalonID: salonID, Provider: pos.ProviderSquare, ProviderFence: fence,
+		RequestFingerprint: strings.Repeat("2", 64), ExpiresAt: time.Now().UTC().Add(5 * time.Minute),
+		Slots: []AvailabilitySlot{{Fingerprint: strings.Repeat("3", 64), StartTime: start, EndTime: end}},
+	})
+	if !errors.Is(err, ErrAvailabilityQuoteStale) {
+		t.Fatalf("origin-free book quote after switch error=%v, want ErrAvailabilityQuoteStale", err)
+	}
+}
+
+func TestRepositoryNewBookRejectsQuoteAcrossAuthorityABA(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	ownerID, salonID, serviceID, staffID := seedBookingOperationTestData(t, ctx, db)
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM salons WHERE id=$1`, salonID)
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM users WHERE id=$1`, ownerID)
+	})
+	fence := pos.ProviderFence{LocationID: "aba-location", SnapshotGeneration: 1}
+	if _, err := db.ExecContext(ctx, `INSERT INTO pos_connections (salon_id,provider,status,location_id,snapshot_generation,last_sync_at) VALUES ($1,'square','active',$2,1,now())`, salonID, fence.LocationID); err != nil {
+		t.Fatalf("insert ABA provider fence: %v", err)
+	}
+	repo := NewRepository(db)
+	start := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second)
+	end := start.Add(45 * time.Minute)
+	slotFingerprint := strings.Repeat("4", 64)
+	quote, err := repo.CreateAvailabilityQuote(ctx, AvailabilityQuoteRecord{
+		SalonID: salonID, Provider: pos.ProviderSquare, ProviderFence: fence,
+		RequestFingerprint: strings.Repeat("5", 64), ExpiresAt: time.Now().UTC().Add(5 * time.Minute),
+		Slots: []AvailabilitySlot{{Fingerprint: slotFingerprint, StartTime: start, EndTime: end,
+			Segments: []AvailabilitySegment{{ServiceID: serviceID, StaffID: staffID, StaffSelectionMode: StaffSelectionSpecific, DurationMinutes: 45}}}},
+	})
+	if err != nil {
+		t.Fatalf("create pre-ABA quote: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE salon_settings SET scheduling_authority='owner_manual' WHERE salon_id=$1`, salonID); err != nil {
+		t.Fatalf("ABA switch away: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE salon_settings SET scheduling_authority='external_provider' WHERE salon_id=$1`, salonID); err != nil {
+		t.Fatalf("ABA switch back: %v", err)
+	}
+	service := ServiceRef{ID: serviceID, POSProvider: pos.ProviderSquare, POSServiceID: "integration-service", POSServiceVersion: 1, Name: "Integration Manicure", DurationMinutes: 45, ProviderFence: fence}
+	staff := StaffRef{ID: staffID, POSProvider: pos.ProviderSquare, POSStaffID: "integration-staff", Name: "Integration Staff", ProviderFence: fence}
+	_, err = repo.ClaimPendingBookingAttempt(ctx, PendingBookingRecord{
+		SalonID: salonID, Source: SourceOwnerDashboard, Provider: pos.ProviderSquare,
+		POSIdempotencyKey: uuid.NewString(), OperationKey: "aba-book-" + uuid.NewString(), RequestFingerprint: strings.Repeat("6", 64),
+		AvailabilityQuoteID: quote.ID, SlotFingerprint: slotFingerprint, ProviderFence: fence,
+		ProcessingToken: uuid.NewString(), LeaseExpiresAt: time.Now().UTC().Add(bookingOperationLeaseDuration),
+		CustomerName: "ABA Caller", CustomerPhone: "+13125550199", Service: service, Staff: staff,
+		StaffSelectionMode: StaffSelectionSpecific, StartTime: start, EndTime: end,
+		Segments: []BookingSegmentRecord{{Service: service, Staff: staff, StaffSelectionMode: StaffSelectionSpecific, SortOrder: 1}},
+	})
+	if !errors.Is(err, ErrAvailabilityQuoteStale) {
+		t.Fatalf("pre-ABA quote new-book error=%v, want ErrAvailabilityQuoteStale", err)
+	}
+	var authority string
+	var currentVersion, quoteVersion int64
+	if err := db.QueryRowContext(ctx, `
+		SELECT settings.scheduling_authority,settings.scheduling_authority_version,quote.scheduling_authority_version
+		FROM salon_settings settings JOIN availability_quotes quote ON quote.salon_id=settings.salon_id
+		WHERE settings.salon_id=$1 AND quote.id=$2
+	`, salonID, quote.ID).Scan(&authority, &currentVersion, &quoteVersion); err != nil {
+		t.Fatalf("load ABA quote fence: %v", err)
+	}
+	if authority != SchedulingAuthorityExternalProvider || currentVersion != 3 || quoteVersion != 1 {
+		t.Fatalf("ABA authority/current/quote=%s/%d/%d, want external_provider/3/1", authority, currentVersion, quoteVersion)
+	}
+}
+
+func TestRepositorySafeRetryAvailabilityQuoteBindsFreshOriginAfterAuthoritySwitch(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	ownerID, salonID, serviceID, staffID := seedBookingOperationTestData(t, ctx, db)
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM salons WHERE id=$1`, salonID)
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM users WHERE id=$1`, ownerID)
+	})
+	fence := pos.ProviderFence{LocationID: "retry-origin-location", SnapshotGeneration: 5}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO pos_connections (salon_id,provider,status,location_id,snapshot_generation,last_sync_at)
+		VALUES ($1,'square','active',$2,$3,now())
+	`, salonID, fence.LocationID, fence.SnapshotGeneration); err != nil {
+		t.Fatalf("insert retry-origin connection: %v", err)
+	}
+	start := time.Now().UTC().Add(72 * time.Hour).Truncate(time.Second)
+	end := start.Add(45 * time.Minute)
+	requestFingerprint := strings.Repeat("9", 64)
+	var originAttemptID string
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO booking_attempts (
+			salon_id,source,status,pos_provider,pos_idempotency_key,operation_key,request_fingerprint,
+			operation_type,provider_outcome,retry_policy,reconciliation_status,
+			customer_name,customer_phone,service_id,staff_id,staff_selection_mode,
+			requested_start_time,requested_end_time,provider_location_id,provider_snapshot_generation,
+			scheduling_authority,authority_provider,authority_idempotency_key,authority_location_id,authority_snapshot_generation
+		) VALUES ($1,'owner_dashboard','fallback_pending','square',$2,$3,$4,'book','failed','safe','not_required',
+		          'Retry Caller','+13125550124',$5,$6,'specific',$7,$8,$9,$10,
+		          'external_provider','square',$2,$9,$10)
+		RETURNING id::text
+	`, salonID, uuid.NewString(), "retry-origin-first-"+uuid.NewString(), requestFingerprint,
+		serviceID, staffID, start, end, fence.LocationID, fence.SnapshotGeneration).Scan(&originAttemptID); err != nil {
+		t.Fatalf("insert safe retry origin: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO booking_attempt_segments (
+			salon_id,booking_attempt_id,service_id,staff_id,staff_selection_mode,
+			pos_service_id,pos_service_version,pos_staff_id,name,duration_minutes,sort_order,
+			scheduling_authority,authority_provider,authority_service_id,authority_service_version,authority_staff_id
+		) VALUES ($1,$2,$3,$4,'specific','integration-service',1,'integration-staff','Integration Manicure',45,1,
+		          'external_provider','square','integration-service',1,'integration-staff')
+	`, salonID, originAttemptID, serviceID, staffID); err != nil {
+		t.Fatalf("insert safe retry origin segment: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE salon_settings SET scheduling_authority='owner_manual' WHERE salon_id=$1`, salonID); err != nil {
+		t.Fatalf("switch away before safe retry availability: %v", err)
+	}
+
+	repo := NewRepository(db)
+	service := ServiceRef{ID: serviceID, POSProvider: pos.ProviderSquare, POSServiceID: "integration-service", POSServiceVersion: 1, Name: "Integration Manicure", DurationMinutes: 45, ProviderFence: fence}
+	staff := StaffRef{ID: staffID, POSProvider: pos.ProviderSquare, POSStaffID: "integration-staff", Name: "Integration Staff", ProviderFence: fence}
+	slotFingerprint := strings.Repeat("a", 64)
+	quote, err := repo.CreateAvailabilityQuote(ctx, AvailabilityQuoteRecord{
+		SalonID: salonID, Provider: pos.ProviderSquare, ProviderFence: fence,
+		RequestFingerprint: strings.Repeat("b", 64), RetryOfAttemptID: originAttemptID,
+		ExpiresAt: time.Now().UTC().Add(5 * time.Minute),
+		Slots: []AvailabilitySlot{{Fingerprint: slotFingerprint, StartTime: start, EndTime: end,
+			Segments: []AvailabilitySegment{{ServiceID: serviceID, StaffID: staffID, StaffSelectionMode: StaffSelectionSpecific, DurationMinutes: 45}}}},
+	})
+	if err != nil {
+		t.Fatalf("create fresh safe-retry quote after switch: %v", err)
+	}
+	var quoteVersion sql.NullInt64
+	var provenance, storedRetryID string
+	if err := db.QueryRowContext(ctx, `
+		SELECT scheduling_authority_version,authority_fence_provenance,retry_of_attempt_id::text
+		FROM availability_quotes WHERE id=$1
+	`, quote.ID).Scan(&quoteVersion, &provenance, &storedRetryID); err != nil {
+		t.Fatalf("load safe-retry quote provenance: %v", err)
+	}
+	if quoteVersion.Valid || provenance != "retry_origin" || storedRetryID != originAttemptID {
+		t.Fatalf("safe-retry quote fence = %#v/%s/%s", quoteVersion, provenance, storedRetryID)
+	}
+	claim, err := repo.ClaimPendingBookingAttempt(ctx, PendingBookingRecord{
+		SalonID: salonID, Source: SourceOwnerDashboard, Provider: pos.ProviderSquare,
+		POSIdempotencyKey: uuid.NewString(), OperationKey: "retry-origin-second-" + uuid.NewString(), RequestFingerprint: requestFingerprint,
+		RetryOfAttemptID: originAttemptID, AvailabilityQuoteID: quote.ID, SlotFingerprint: slotFingerprint, ProviderFence: fence,
+		ProcessingToken: uuid.NewString(), LeaseExpiresAt: time.Now().UTC().Add(bookingOperationLeaseDuration),
+		CustomerName: "Retry Caller", CustomerPhone: "+13125550124", Service: service, Staff: staff,
+		StaffSelectionMode: StaffSelectionSpecific, StartTime: start, EndTime: end,
+		Segments: []BookingSegmentRecord{{Service: service, Staff: staff, StaffSelectionMode: StaffSelectionSpecific, SortOrder: 1}},
+	})
+	if err != nil || claim == nil || !claim.Acquired || claim.Attempt.RetryOfAttemptID != originAttemptID {
+		t.Fatalf("claim fresh safe-retry quote = %#v/%v", claim, err)
+	}
+	var consumedBy, supersededBy string
+	if err := db.QueryRowContext(ctx, `SELECT consumed_by_attempt_id::text FROM availability_quotes WHERE id=$1`, quote.ID).Scan(&consumedBy); err != nil {
+		t.Fatalf("load safe-retry quote consumer: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT superseded_by_attempt_id::text FROM booking_attempts WHERE id=$1`, originAttemptID).Scan(&supersededBy); err != nil {
+		t.Fatalf("load safe-retry supersession: %v", err)
+	}
+	if consumedBy != claim.Attempt.ID || supersededBy != claim.Attempt.ID {
+		t.Fatalf("safe-retry consumer/supersession = %s/%s, want %s", consumedBy, supersededBy, claim.Attempt.ID)
 	}
 }
 
@@ -1210,20 +1935,20 @@ func TestRepositoryAvailabilityQuoteCleanupIsBoundedIdempotentAndPreservesAttemp
 		var quoteID string
 		if err := db.QueryRowContext(ctx, `
 			INSERT INTO availability_quotes (
-				salon_id, provider, provider_location_id, provider_snapshot_generation,
+				salon_id, scheduling_authority_version, provider, provider_location_id, provider_snapshot_generation,
 				request_fingerprint, expires_at, consumed_at, created_at
 			)
-			VALUES ($1, 'square', 'cleanup-location', 1, $2, $3, $4, $5)
+			VALUES ($1, (SELECT scheduling_authority_version FROM salon_settings WHERE salon_id=$1), 'square', 'cleanup-location', 1, $2, $3, $4, $5)
 			RETURNING id::text
 		`, salonID, "cleanup-"+label+"-"+uuid.NewString(), expiresAt, consumedAt, createdAt).Scan(&quoteID); err != nil {
 			t.Fatalf("insert %s quote: %v", label, err)
 		}
 		if _, err := db.ExecContext(ctx, `
 			INSERT INTO availability_quote_slots (
-				quote_id, slot_fingerprint, start_time, end_time, segments
+				quote_id, slot_fingerprint, start_time, end_time, segments, salon_id
 			)
-			VALUES ($1, $2, $3, $4, '[]'::jsonb)
-		`, quoteID, strings.Repeat("a", 64), now.Add(time.Hour), now.Add(2*time.Hour)); err != nil {
+			VALUES ($1, $2, $3, $4, '[]'::jsonb, $5)
+		`, quoteID, strings.Repeat("a", 64), now.Add(time.Hour), now.Add(2*time.Hour), salonID); err != nil {
 			t.Fatalf("insert %s quote slot: %v", label, err)
 		}
 		return quoteID
@@ -1364,10 +2089,10 @@ func TestRepositoryCreateReconciliationRequiresExactMirrorAndSupersedesImportedL
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO booking_attempt_segments (
 			booking_attempt_id, service_id, staff_id, staff_selection_mode,
-			pos_service_id, pos_service_version, name, duration_minutes, sort_order
+			pos_service_id, pos_service_version, name, duration_minutes, sort_order, salon_id
 		)
-		VALUES ($1, $2, $3, $4, 'integration-service', 1, 'Integration Manicure', 45, 1)
-	`, uncertainAttemptID, serviceID, staffID, StaffSelectionSpecific); err != nil {
+		VALUES ($1, $2, $3, $4, 'integration-service', 1, 'Integration Manicure', 45, 1, $5)
+	`, uncertainAttemptID, serviceID, staffID, StaffSelectionSpecific, salonID); err != nil {
 		t.Fatalf("insert uncertain attempt segment: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, `
@@ -1444,10 +2169,10 @@ func TestRepositoryCreateReconciliationRequiresExactMirrorAndSupersedesImportedL
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO appointment_services (
 			appointment_id, service_id, staff_id, staff_selection_mode,
-			pos_service_id, pos_service_version, name, duration_minutes, sort_order
+			pos_service_id, pos_service_version, name, duration_minutes, sort_order, salon_id
 		)
-		VALUES ($1, $2, $3, $4, 'integration-service', 1, 'Integration Manicure', 45, 1)
-	`, appointmentID, serviceID, staffID, StaffSelectionSpecific); err != nil {
+		VALUES ($1, $2, $3, $4, 'integration-service', 1, 'Integration Manicure', 45, 1, $5)
+	`, appointmentID, serviceID, staffID, StaffSelectionSpecific, salonID); err != nil {
 		t.Fatalf("insert imported appointment segment: %v", err)
 	}
 	exactCandidates, err := service.ReconciliationCandidates(ctx, salonID, ownerID, uncertainAttemptID)
@@ -1589,6 +2314,7 @@ func TestRepositoryDirectAppointmentMutationIsIdempotentAtEqualVersionAndRejects
 			t.Errorf("cleanup test owner: %v", err)
 		}
 	}()
+	fence := seedReadyCalendarProviderFence(t, ctx, db, salonID)
 
 	baseStart := time.Now().UTC().Add(144 * time.Hour).Truncate(time.Second)
 	baseEnd := baseStart.Add(45 * time.Minute)
@@ -1599,14 +2325,19 @@ func TestRepositoryDirectAppointmentMutationIsIdempotentAtEqualVersionAndRejects
 			salon_id, source, status, pos_provider, pos_booking_id, pos_booking_version,
 			operation_type, provider_outcome, retry_policy, reconciliation_status,
 			customer_name, customer_phone, service_id, staff_id, staff_selection_mode,
-			requested_start_time, requested_end_time
+			requested_start_time, requested_end_time,
+			provider_location_id, provider_snapshot_generation,
+			authority_provider, authority_appointment_id, authority_appointment_version,
+			authority_location_id, authority_snapshot_generation
 		)
 		VALUES ($1, $2, $3, 'square', $4, 7, $5, $6, $7, $8,
-		        'Direct Version Caller', '+13125550444', $9, $10, $11, $12, $13)
+		        'Direct Version Caller', '+13125550444', $9, $10, $11, $12, $13,
+		        $14, $15, 'square', $4, 7, $14, $15)
 		RETURNING id::text
 	`, salonID, SourceOwnerDashboard, StatusConfirmed, providerBookingID, BookingActionBook,
 		ProviderOutcomeSucceeded, RetryPolicyNone, ReconciliationNotRequired,
-		serviceID, staffID, StaffSelectionSpecific, baseStart, baseEnd).Scan(&originalAttemptID); err != nil {
+		serviceID, staffID, StaffSelectionSpecific, baseStart, baseEnd,
+		fence.LocationID, fence.SnapshotGeneration).Scan(&originalAttemptID); err != nil {
 		t.Fatalf("insert original booking attempt: %v", err)
 	}
 	var appointmentID string
@@ -1614,10 +2345,11 @@ func TestRepositoryDirectAppointmentMutationIsIdempotentAtEqualVersionAndRejects
 		INSERT INTO appointments (
 			salon_id, booking_attempt_id, pos_provider, pos_appointment_id, pos_appointment_version,
 			status, customer_name, customer_phone, service_id, staff_id, staff_selection_mode,
-			start_time, end_time, pos_sync_status, last_pos_synced_at
+			start_time, end_time, pos_sync_status, last_pos_synced_at,
+			authority_provider, authority_appointment_id, authority_appointment_version
 		)
 		VALUES ($1, $2, 'square', $3, 7, $4, 'Direct Version Caller', '+13125550444',
-		        $5, $6, $7, $8, $9, 'synced', now())
+		        $5, $6, $7, $8, $9, 'synced', now(), 'square', $3, 7)
 		RETURNING id::text
 	`, salonID, originalAttemptID, providerBookingID, StatusConfirmed, serviceID, staffID, StaffSelectionSpecific, baseStart, baseEnd).Scan(&appointmentID); err != nil {
 		t.Fatalf("insert direct mutation appointment: %v", err)
@@ -1625,11 +2357,24 @@ func TestRepositoryDirectAppointmentMutationIsIdempotentAtEqualVersionAndRejects
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO appointment_services (
 			appointment_id, service_id, staff_id, staff_selection_mode,
-			pos_service_id, pos_service_version, name, duration_minutes, sort_order
+			pos_service_id, pos_service_version, pos_staff_id, name, duration_minutes, sort_order,
+			authority_provider, authority_service_id, authority_service_version, authority_staff_id, salon_id
 		)
-		VALUES ($1, $2, $3, $4, 'integration-service', 1, 'Integration Manicure', 45, 1)
-	`, appointmentID, serviceID, staffID, StaffSelectionSpecific); err != nil {
+		VALUES ($1, $2, $3, $4, 'integration-service', 1, 'integration-staff', 'Integration Manicure', 45, 1,
+		        'square', 'integration-service', 1, 'integration-staff', $5)
+	`, appointmentID, serviceID, staffID, StaffSelectionSpecific, salonID); err != nil {
 		t.Fatalf("insert direct mutation segment: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO pos_entity_links (
+			salon_id, entity_type, entity_id, provider, provider_entity_id,
+			provider_version, sync_status, last_synced_at
+		)
+		VALUES
+			($1, 'service', $2, 'square', 'integration-service', 1, 'synced', now()),
+			($1, 'staff', $3, 'square', 'integration-staff', NULL, 'synced', now())
+	`, salonID, serviceID, staffID); err != nil {
+		t.Fatalf("insert direct mutation provider links: %v", err)
 	}
 
 	repo := NewRepository(db)
@@ -1652,6 +2397,7 @@ func TestRepositoryDirectAppointmentMutationIsIdempotentAtEqualVersionAndRejects
 		RequestedStartTime: rescheduledStart, RequestedEndTime: rescheduledEnd,
 		POSIdempotencyKey: uuid.NewString(), OperationKey: uuid.NewString(),
 		RequestFingerprint: strings.Repeat("a", 64), OperationType: BookingActionReschedule,
+		ProviderFence:   fence,
 		ProcessingToken: rescheduleToken, LeaseExpiresAt: time.Now().UTC().Add(5 * time.Minute),
 	})
 	if err != nil || rescheduleClaim == nil || !rescheduleClaim.Acquired {
@@ -1662,9 +2408,13 @@ func TestRepositoryDirectAppointmentMutationIsIdempotentAtEqualVersionAndRejects
 	}
 	if _, err := db.ExecContext(ctx, `
 		UPDATE appointments
-		SET pos_appointment_version = 8, status = $2, start_time = $3, end_time = $4
+		SET pos_appointment_version = 8,
+		    authority_appointment_version = 8,
+		    status = $2,
+		    start_time = $3,
+		    end_time = $4
 		WHERE id = $1
-	`, appointmentID, StatusConfirmed, rescheduledStart, rescheduledEnd); err != nil {
+	`, appointmentID, StatusRescheduled, rescheduledStart, rescheduledEnd); err != nil {
 		t.Fatalf("simulate equal-version calendar save: %v", err)
 	}
 	rescheduled, err := repo.SaveRescheduledAppointment(ctx, RescheduledAppointmentRecord{
@@ -1692,6 +2442,7 @@ func TestRepositoryDirectAppointmentMutationIsIdempotentAtEqualVersionAndRejects
 		RequestedStartTime: rescheduledStart, RequestedEndTime: rescheduledEnd,
 		POSIdempotencyKey: uuid.NewString(), OperationKey: uuid.NewString(),
 		RequestFingerprint: strings.Repeat("b", 64), OperationType: BookingActionCancel,
+		ProviderFence:   fence,
 		ProcessingToken: cancelToken, LeaseExpiresAt: time.Now().UTC().Add(5 * time.Minute),
 	})
 	if err != nil || cancelClaim == nil || !cancelClaim.Acquired {
@@ -1701,8 +2452,12 @@ func TestRepositoryDirectAppointmentMutationIsIdempotentAtEqualVersionAndRejects
 		t.Fatalf("mark direct cancellation started: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, `
-		UPDATE appointments SET pos_appointment_version = 10, status = $2 WHERE id = $1
-	`, appointmentID, StatusCancelled); err != nil {
+		UPDATE appointments
+		SET pos_appointment_version = 10,
+		    authority_appointment_version = 10,
+		    status = $2
+		WHERE id = $1
+	`, appointmentID, StatusRescheduled); err != nil {
 		t.Fatalf("simulate newer calendar truth: %v", err)
 	}
 	if _, err := repo.SaveCancelledAppointment(ctx, CancelledAppointmentRecord{
@@ -1716,8 +2471,8 @@ func TestRepositoryDirectAppointmentMutationIsIdempotentAtEqualVersionAndRejects
 	if err := db.QueryRowContext(ctx, `SELECT pos_appointment_version, status FROM appointments WHERE id = $1`, appointmentID).Scan(&finalVersion, &finalStatus); err != nil {
 		t.Fatalf("load final direct mutation appointment: %v", err)
 	}
-	if finalVersion != 10 || finalStatus != StatusCancelled {
-		t.Fatalf("newer calendar truth = %d/%s, want 10/cancelled", finalVersion, finalStatus)
+	if finalVersion != 10 || finalStatus != StatusRescheduled {
+		t.Fatalf("newer calendar truth = %d/%s, want 10/rescheduled", finalVersion, finalStatus)
 	}
 }
 
@@ -1957,10 +2712,10 @@ func TestRepositoryCalendarEqualVersionConflictDoesNotEnrichOrResolvePendingActi
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO booking_attempt_segments (
 			booking_attempt_id, service_id, staff_id, staff_selection_mode,
-			pos_service_id, pos_service_version, name, duration_minutes, sort_order
+			pos_service_id, pos_service_version, name, duration_minutes, sort_order, salon_id
 		)
-		VALUES ($1, $2, $3, $4, $5, 7, 'Equal Version Service', 45, 1)
-	`, pendingAttemptID, serviceID, staffID, StaffSelectionSpecific, providerServiceID); err != nil {
+		VALUES ($1, $2, $3, $4, $5, 7, 'Equal Version Service', 45, 1, $6)
+	`, pendingAttemptID, serviceID, staffID, StaffSelectionSpecific, providerServiceID, salonID); err != nil {
 		t.Fatalf("insert pending equal-version action segment: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, `
@@ -2465,6 +3220,182 @@ func TestRepositoryCalendarImportRejectsStaleProviderFenceBeforeWrites(t *testin
 	}
 }
 
+func TestRepositoryV49RejectsProviderShapedInternalAppointment(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		t.Fatalf("ping database: %v", err)
+	}
+
+	ctx := context.Background()
+	ownerID, salonID, serviceID, staffID := seedBookingOperationTestData(t, ctx, db)
+	defer func() {
+		if _, err := db.ExecContext(context.Background(), `DELETE FROM salons WHERE id = $1`, salonID); err != nil {
+			t.Errorf("cleanup test salon: %v", err)
+		}
+		if _, err := db.ExecContext(context.Background(), `DELETE FROM users WHERE id = $1`, ownerID); err != nil {
+			t.Errorf("cleanup test owner: %v", err)
+		}
+	}()
+
+	start := time.Now().UTC().Add(168 * time.Hour).Truncate(time.Second)
+	providerAppointmentID := "provider-shaped-internal-" + uuid.NewString()
+	var externalAttemptID string
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO booking_attempts (
+			salon_id, source, status, pos_provider, pos_booking_id, pos_booking_version,
+			target_pos_booking_version, operation_type, provider_outcome, retry_policy,
+			reconciliation_status, customer_name, customer_phone, service_id, staff_id,
+			requested_start_time, requested_end_time, scheduling_authority,
+			authority_provider, authority_appointment_id, authority_appointment_version
+		)
+		VALUES ($1, $2, $3, $4, $5, 1, 0, $6, $7, $8, $9,
+		        'External Parent Caller', '+13125550502', $10, $11, $12, $13,
+		        $14, $4, $5, 1)
+		RETURNING id::text
+	`, salonID, SourcePOSCalendarSync, StatusConfirmed, pos.ProviderSquare, providerAppointmentID,
+		BookingActionBook, ProviderOutcomeSucceeded, RetryPolicyNone, ReconciliationNotRequired,
+		serviceID, staffID, start, start.Add(45*time.Minute), SchedulingAuthorityExternalProvider).Scan(&externalAttemptID); err != nil {
+		t.Fatalf("insert external parent attempt: %v", err)
+	}
+	internalAppointmentID := uuid.NewString()
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO appointments (
+			id, salon_id, booking_attempt_id, pos_provider, pos_appointment_id,
+			pos_appointment_version, pos_sync_status, status, customer_name,
+			customer_phone, service_id, staff_id, start_time, end_time,
+			scheduling_authority, scheduling_authority_version, authority_config_version,
+			authority_appointment_id, authority_appointment_version,
+			confirmed_at, confirmation_source
+		)
+		VALUES ($1::uuid, $2, $3, $4, $5, 1, 'synced', $6, 'Impossible Internal Caller',
+		        '+13125550503', $7, $8, $9, $10, $11, 1, 1, $1::uuid::text, 1, now(), $11)
+	`, internalAppointmentID, salonID, externalAttemptID, pos.ProviderSquare, providerAppointmentID,
+		StatusConfirmed, serviceID, staffID, start, start.Add(45*time.Minute), SchedulingAuthorityManleAICalendar); err == nil {
+		t.Fatal("provider-shaped ManleAI Calendar appointment was accepted")
+	} else {
+		assertPostgresCheckConstraint(t, err, "appointments_manleai_calendar_shape_check")
+	}
+}
+
+func TestRepositoryExternalCandidateAndOperationalPlanRemainCompatible(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		t.Fatalf("ping database: %v", err)
+	}
+
+	ctx := context.Background()
+	ownerID, salonID, serviceID, staffID := seedBookingOperationTestData(t, ctx, db)
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM salons WHERE id = $1`, salonID)
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM users WHERE id = $1`, ownerID)
+	})
+	fence := seedReadyCalendarProviderFence(t, ctx, db, salonID)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO pos_entity_links (
+			salon_id, entity_type, entity_id, provider, provider_entity_id,
+			provider_version, sync_status, last_synced_at
+		)
+		VALUES
+			($1, 'service', $2, 'square', 'integration-service', 1, 'synced', now()),
+			($1, 'staff', $3, 'square', 'integration-staff', NULL, 'synced', now())
+	`, salonID, serviceID, staffID); err != nil {
+		t.Fatalf("insert external mappings: %v", err)
+	}
+	startTime := time.Now().UTC().Add(7 * 24 * time.Hour).Truncate(time.Second)
+	endTime := startTime.Add(45 * time.Minute)
+	providerBookingID := "external-candidate-" + uuid.NewString()
+	var attemptID string
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO booking_attempts (
+			salon_id, source, status, pos_provider, pos_booking_id, pos_booking_version,
+			operation_type, provider_outcome, retry_policy, reconciliation_status,
+			customer_name, customer_phone, service_id, staff_id, staff_selection_mode,
+			requested_start_time, requested_end_time,
+			provider_location_id, provider_snapshot_generation,
+			authority_provider, authority_appointment_id, authority_appointment_version,
+			authority_location_id, authority_snapshot_generation
+		)
+		VALUES ($1, $2, $3, 'square', $4, 4, $5, $6, $7, $8,
+		        'External Candidate', '+13125550777', $9, $10, $11, $12, $13,
+		        $14, $15, 'square', $4, 4, $14, $15)
+		RETURNING id::text
+	`, salonID, SourceOwnerDashboard, StatusConfirmed, providerBookingID, BookingActionBook,
+		ProviderOutcomeSucceeded, RetryPolicyNone, ReconciliationNotRequired,
+		serviceID, staffID, StaffSelectionSpecific, startTime, endTime,
+		fence.LocationID, fence.SnapshotGeneration).Scan(&attemptID); err != nil {
+		t.Fatalf("insert external attempt: %v", err)
+	}
+	var appointmentID string
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO appointments (
+			salon_id, booking_attempt_id, pos_provider, pos_appointment_id, pos_appointment_version,
+			status, customer_name, customer_phone, service_id, staff_id, staff_selection_mode,
+			start_time, end_time, pos_sync_status, last_pos_synced_at,
+			authority_provider, authority_appointment_id, authority_appointment_version
+		)
+		VALUES ($1, $2, 'square', $3, 4, $4, 'External Candidate', '+13125550777',
+		        $5, $6, $7, $8, $9, 'synced', now(), 'square', $3, 4)
+		RETURNING id::text
+	`, salonID, attemptID, providerBookingID, StatusConfirmed, serviceID, staffID,
+		StaffSelectionSpecific, startTime, endTime).Scan(&appointmentID); err != nil {
+		t.Fatalf("insert external appointment: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO appointment_services (
+			appointment_id, salon_id, service_id, staff_id, staff_selection_mode,
+			pos_service_id, pos_service_version, pos_staff_id, name, duration_minutes, sort_order,
+			authority_provider, authority_service_id, authority_service_version, authority_staff_id
+		)
+		VALUES ($1, $2, $3, $4, $5, 'integration-service', 1, 'integration-staff',
+		        'Integration Manicure', 45, 1, 'square', 'integration-service', 1, 'integration-staff')
+	`, appointmentID, salonID, serviceID, staffID, StaffSelectionSpecific); err != nil {
+		t.Fatalf("insert external appointment segment: %v", err)
+	}
+
+	repository := NewRepository(db)
+	candidates, err := repository.ListRescheduleCandidates(ctx, salonID, ownerID, RescheduleLookupRequest{
+		CustomerPhone: "+1 (312) 555-0777", Limit: 5,
+	})
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("external candidates = %#v/%v", candidates, err)
+	}
+	if candidates[0].ID != appointmentID ||
+		candidates[0].SchedulingAuthority != SchedulingAuthorityExternalProvider ||
+		candidates[0].AuthorityAppointmentVersion != 4 ||
+		candidates[0].POSProvider != pos.ProviderSquare ||
+		candidates[0].POSAppointmentID != providerBookingID ||
+		len(candidates[0].Segments) != 1 {
+		t.Fatalf("external candidate compatibility = %#v", candidates[0])
+	}
+	appointments, err := repository.ListAppointments(ctx, salonID, ownerID, 10, 0)
+	if err != nil || len(appointments) != 1 || len(appointments[0].Segments) != 1 {
+		t.Fatalf("external operational appointment = %#v/%v", appointments, err)
+	}
+	segment := appointments[0].Segments[0]
+	if segment.SchedulingAuthority != SchedulingAuthorityExternalProvider ||
+		segment.POSServiceID != "integration-service" || segment.PlanVersion != 1 ||
+		segment.Quantity != 1 || segment.ScheduledStartTime != nil ||
+		len(segment.ResourceAllocations) != 0 {
+		t.Fatalf("external operational segment compatibility = %#v", segment)
+	}
+}
+
 func seedReadyCalendarProviderFence(t *testing.T, ctx context.Context, db *sql.DB, salonID string) pos.ProviderFence {
 	t.Helper()
 	fence := pos.ProviderFence{
@@ -2480,6 +3411,17 @@ func seedReadyCalendarProviderFence(t *testing.T, ctx context.Context, db *sql.D
 		t.Fatalf("insert ready calendar provider connection: %v", err)
 	}
 	return fence
+}
+
+func assertPostgresCheckConstraint(t *testing.T, err error, constraint string) {
+	t.Helper()
+	var pqErr *pq.Error
+	if !errors.As(err, &pqErr) {
+		t.Fatalf("database error = %T %v, want PostgreSQL check violation %s", err, err, constraint)
+	}
+	if string(pqErr.Code) != "23514" || pqErr.Constraint != constraint {
+		t.Fatalf("database error code/constraint = %s/%s, want 23514/%s", pqErr.Code, pqErr.Constraint, constraint)
+	}
 }
 
 func seedBookingOperationTestData(t *testing.T, ctx context.Context, db *sql.DB) (string, string, string, string) {
@@ -2500,6 +3442,9 @@ func seedBookingOperationTestData(t *testing.T, ctx context.Context, db *sql.DB)
 		RETURNING id::text
 	`, ownerID).Scan(&salonID); err != nil {
 		t.Fatalf("insert salon: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO salon_settings (salon_id,scheduling_authority) VALUES ($1,'external_provider')`, salonID); err != nil {
+		t.Fatalf("insert booking-operation salon settings: %v", err)
 	}
 	var serviceID string
 	if err := db.QueryRowContext(ctx, `

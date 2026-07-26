@@ -8,12 +8,14 @@ import (
 	"time"
 
 	"github.com/manleai/ai-receptionist/internal/config"
+	"github.com/manleai/ai-receptionist/modules/booking"
 	"github.com/manleai/ai-receptionist/modules/conversation"
+	"github.com/manleai/ai-receptionist/modules/scheduling"
 )
 
 func TestStatusReportsPhoneBookingReadiness(t *testing.T) {
 	store := newFakeVoiceStore()
-	service := NewService(store, newFakeConversationEngine(), testVoiceConfig(), AIProviders{})
+	service := newVoiceStatusService(store, testVoiceConfig(), readySchedulingTarget(booking.SchedulingAuthorityExternalProvider, 1))
 
 	status, err := service.Status(context.Background(), "salon_1", "owner_1")
 	if err != nil {
@@ -25,12 +27,64 @@ func TestStatusReportsPhoneBookingReadiness(t *testing.T) {
 	if !status.PhoneBookingReady {
 		t.Fatalf("phone booking should be ready: %#v", status.Booking)
 	}
+	if !status.PhoneAnsweringReady || !status.RequestCaptureReady || !status.AutomatedBookingReady ||
+		status.SchedulingAuthority != booking.SchedulingAuthorityExternalProvider || status.AuthorityVersion != 1 || status.BookingMode != "confirmed_booking" {
+		t.Fatalf("provider-neutral readiness = %#v", status)
+	}
 	if !status.Booking.AIEnabled || !status.Booking.SquareConnected || !status.Booking.SquareSynced {
 		t.Fatalf("booking readiness flags = %#v", status.Booking)
 	}
 	if status.Booking.ServiceCount != 1 || status.Booking.StaffCount != 1 || status.Booking.BusinessHoursCount != 6 {
 		t.Fatalf("booking readiness counts = %#v", status.Booking)
 	}
+}
+
+func TestVoiceConfigPropagatesSalonProviderConfigResolutionFailures(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		twilioErr error
+		openAIErr error
+	}{
+		{name: "Twilio repository failure", twilioErr: errors.New("Twilio config unavailable")},
+		{name: "OpenAI decryption failure", openAIErr: errors.New("OpenAI config unreadable")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			wantErr := test.twilioErr
+			if wantErr == nil {
+				wantErr = test.openAIErr
+			}
+			service := NewService(newFakeVoiceStore(), newFakeConversationEngine(), testVoiceConfig(), AIProviders{})
+			service.SetConfigResolver(failingVoiceConfigResolver{twilioErr: test.twilioErr, openAIErr: test.openAIErr})
+
+			cfg, err := service.voiceConfig(context.Background(), "salon_1")
+			if !errors.Is(err, wantErr) || cfg.Twilio.AuthToken != "" || cfg.AI.OpenAI.APIKey != "" {
+				t.Fatalf("voiceConfig = %#v, %v; want fail-closed resolver error", cfg, err)
+			}
+		})
+	}
+}
+
+type failingVoiceConfigResolver struct {
+	twilioErr error
+	openAIErr error
+}
+
+func (r failingVoiceConfigResolver) ResolveTwilioConfig(context.Context, string) (config.TwilioVoiceConfig, string, error) {
+	if r.twilioErr != nil {
+		return config.TwilioVoiceConfig{}, "", r.twilioErr
+	}
+	return config.TwilioVoiceConfig{AuthToken: "stored-token"}, "https://api.example.com", nil
+}
+
+func (r failingVoiceConfigResolver) ResolveStoredTwilioAuthToken(context.Context, string) (string, error) {
+	return "", nil
+}
+
+func (r failingVoiceConfigResolver) ResolveOpenAIConfig(context.Context, string) (config.OpenAIVoiceConfig, bool, error) {
+	if r.openAIErr != nil {
+		return config.OpenAIVoiceConfig{}, false, r.openAIErr
+	}
+	return config.OpenAIVoiceConfig{APIKey: "stored-key"}, true, nil
 }
 
 func TestServiceGuidanceReadinessSeparatesCatalogFromRecommendationCapability(t *testing.T) {
@@ -307,7 +361,8 @@ func TestStatusKeepsWebhookReadyWhenPhoneBookingIsBlocked(t *testing.T) {
 		}},
 		BlockedReason: "AI booking is disabled for this salon.",
 	}
-	service := NewService(store, newFakeConversationEngine(), testVoiceConfig(), AIProviders{})
+	store.voiceStatus.AIEnabled = false
+	service := newVoiceStatusService(store, testVoiceConfig(), readySchedulingTarget(booking.SchedulingAuthorityExternalProvider, 1))
 
 	status, err := service.Status(context.Background(), "salon_1", "owner_1")
 	if err != nil {
@@ -345,7 +400,12 @@ func TestStatusKeepsWebhookReadyWhenBookingWritesAreBlocked(t *testing.T) {
 		}},
 		BlockedReason: "square INSUFFICIENT_SCOPES: missing APPOINTMENTS_ALL_WRITE.",
 	}
-	service := NewService(store, newFakeConversationEngine(), testVoiceConfig(), AIProviders{})
+	target := readySchedulingTarget(booking.SchedulingAuthorityExternalProvider, 1)
+	target.ExecutionReady = false
+	target.ExecutionBlockers = []scheduling.TargetReadinessBlocker{{
+		Code: "EXTERNAL_PROVIDER_BOOKING_WRITES", Scope: "provider", Message: "Resolve the external booking-write readiness blocker.",
+	}}
+	service := newVoiceStatusService(store, testVoiceConfig(), target)
 
 	status, err := service.Status(context.Background(), "salon_1", "owner_1")
 	if err != nil {
@@ -362,9 +422,138 @@ func TestStatusKeepsWebhookReadyWhenBookingWritesAreBlocked(t *testing.T) {
 	}
 }
 
+func TestStatusComposesAuthorityAndBookingModeCapabilities(t *testing.T) {
+	tests := []struct {
+		name          string
+		authority     string
+		mode          string
+		target        scheduling.TargetReadiness
+		wantCapture   bool
+		wantAutomated bool
+		wantBlocker   string
+	}{
+		{
+			name:      "owner manual captures pending request without automatic confirmation",
+			authority: booking.SchedulingAuthorityOwnerManual, mode: "pending_approval",
+			target: func() scheduling.TargetReadiness {
+				value := readySchedulingTarget(booking.SchedulingAuthorityOwnerManual, 1)
+				value.ExecutionReady = false
+				value.ExecutionBlockers = []scheduling.TargetReadinessBlocker{{Code: "OWNER_MANUAL_REQUEST_ONLY", Message: "Owner review is required."}}
+				return value
+			}(),
+			wantCapture: true, wantBlocker: "OWNER_REVIEW_MODE_SELECTED",
+		},
+		{
+			name:      "owner manual confirmed mode remains request only",
+			authority: booking.SchedulingAuthorityOwnerManual, mode: "confirmed_booking",
+			target: func() scheduling.TargetReadiness {
+				value := readySchedulingTarget(booking.SchedulingAuthorityOwnerManual, 1)
+				value.ExecutionReady = false
+				value.ExecutionBlockers = []scheduling.TargetReadinessBlocker{{Code: "OWNER_MANUAL_REQUEST_ONLY", Message: "Owner review is required."}}
+				return value
+			}(),
+			wantCapture: true, wantBlocker: "OWNER_MANUAL_REQUEST_ONLY",
+		},
+		{
+			name:      "internal pending captures request when availability path is ready",
+			authority: booking.SchedulingAuthorityManleAICalendar, mode: "pending_approval",
+			target: func() scheduling.TargetReadiness {
+				value := readySchedulingTarget(booking.SchedulingAuthorityManleAICalendar, 1)
+				value.ExecutionReady = false
+				return value
+			}(),
+			wantCapture: true, wantBlocker: "OWNER_REVIEW_MODE_SELECTED",
+		},
+		{
+			name:      "internal confirmed supports both capture and atomic booking",
+			authority: booking.SchedulingAuthorityManleAICalendar, mode: "confirmed_booking",
+			target:      readySchedulingTarget(booking.SchedulingAuthorityManleAICalendar, 1),
+			wantCapture: true, wantAutomated: true,
+		},
+		{
+			name:      "external pending ignores booking write blocker for request capture",
+			authority: booking.SchedulingAuthorityExternalProvider, mode: "pending_approval",
+			target: func() scheduling.TargetReadiness {
+				value := readySchedulingTarget(booking.SchedulingAuthorityExternalProvider, 1)
+				value.ExecutionReady = false
+				value.ExecutionBlockers = []scheduling.TargetReadinessBlocker{{Code: "EXTERNAL_PROVIDER_BOOKING_WRITES", Message: "Booking writes are blocked."}}
+				return value
+			}(),
+			wantCapture: true, wantBlocker: "OWNER_REVIEW_MODE_SELECTED",
+		},
+		{
+			name:      "external confirmed fails closed when execution is blocked",
+			authority: booking.SchedulingAuthorityExternalProvider, mode: "confirmed_booking",
+			target: func() scheduling.TargetReadiness {
+				value := readySchedulingTarget(booking.SchedulingAuthorityExternalProvider, 1)
+				value.ExecutionReady = false
+				value.ExecutionBlockers = []scheduling.TargetReadinessBlocker{{Code: "EXTERNAL_PROVIDER_BOOKING_WRITES", Message: "Booking writes are blocked."}}
+				return value
+			}(),
+			wantCapture: true, wantBlocker: "EXTERNAL_PROVIDER_BOOKING_WRITES",
+		},
+		{
+			name:      "disabled mode blocks all scheduling work",
+			authority: booking.SchedulingAuthorityManleAICalendar, mode: "disabled",
+			target:      readySchedulingTarget(booking.SchedulingAuthorityManleAICalendar, 1),
+			wantBlocker: "SCHEDULING_DISABLED",
+		},
+		{
+			name:      "unknown booking mode fails closed",
+			authority: booking.SchedulingAuthorityManleAICalendar, mode: "future_mode",
+			target:      readySchedulingTarget(booking.SchedulingAuthorityManleAICalendar, 1),
+			wantBlocker: "BOOKING_MODE_UNSUPPORTED",
+		},
+		{
+			name:      "unknown scheduling authority fails closed",
+			authority: "future_authority", mode: "confirmed_booking",
+			target:      readySchedulingTarget("future_authority", 1),
+			wantBlocker: "SCHEDULING_AUTHORITY_UNSUPPORTED",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := newFakeVoiceStore()
+			store.voiceStatus.SchedulingAuthority = test.authority
+			store.voiceStatus.BookingMode = test.mode
+			status, err := newVoiceStatusService(store, testVoiceConfig(), test.target).Status(context.Background(), "salon_1", "owner_1")
+			if err != nil {
+				t.Fatalf("Status returned error: %v", err)
+			}
+			if status.RequestCaptureReady != test.wantCapture || status.AutomatedBookingReady != test.wantAutomated || status.PhoneBookingReady != test.wantAutomated {
+				t.Fatalf("readiness capture=%t automated=%t alias=%t status=%#v", status.RequestCaptureReady, status.AutomatedBookingReady, status.PhoneBookingReady, status)
+			}
+			if test.wantBlocker != "" && !hasVoiceBlocker(status.AutomatedBooking.Blockers, test.wantBlocker) {
+				t.Fatalf("automated blockers = %#v, want %s", status.AutomatedBooking.Blockers, test.wantBlocker)
+			}
+		})
+	}
+}
+
+func TestStatusFailsClosedOnAuthorityFenceDrift(t *testing.T) {
+	store := newFakeVoiceStore()
+	target := readySchedulingTarget(booking.SchedulingAuthorityExternalProvider, 2)
+	status, err := newVoiceStatusService(store, testVoiceConfig(), target).Status(context.Background(), "salon_1", "owner_1")
+	if err != nil {
+		t.Fatalf("Status returned error: %v", err)
+	}
+	if status.RequestCaptureReady || status.AutomatedBookingReady || !hasVoiceBlocker(status.RequestCapture.Blockers, "SCHEDULING_AUTHORITY_FENCE_STALE") {
+		t.Fatalf("stale-fence status = %#v", status)
+	}
+}
+
+func hasVoiceBlocker(items []VoiceReadinessBlocker, code string) bool {
+	for _, item := range items {
+		if item.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
 func TestStatusReportsRealtimeInputModeWhenRealtimeConfigured(t *testing.T) {
 	store := newFakeVoiceStore()
-	service := NewService(store, newFakeConversationEngine(), config.VoiceConfig{
+	service := newVoiceStatusService(store, config.VoiceConfig{
 		Provider:      ProviderTwilio,
 		PublicBaseURL: "https://voice.example.com",
 		Twilio: config.TwilioVoiceConfig{
@@ -384,7 +573,8 @@ func TestStatusReportsRealtimeInputModeWhenRealtimeConfigured(t *testing.T) {
 				RealtimeVoice:   "alloy",
 			},
 		},
-	}, AIProviders{Realtime: fakeRealtimeProvider{configured: true}})
+	}, readySchedulingTarget(booking.SchedulingAuthorityExternalProvider, 1))
+	service.providers = AIProviders{Realtime: fakeRealtimeProvider{configured: true}}
 
 	status, err := service.Status(context.Background(), "salon_1", "owner_1")
 	if err != nil {
@@ -786,6 +976,7 @@ type fakeVoiceStore struct {
 	audio                  *AudioOutput
 	voiceStatusSalonID     string
 	voiceStatusOwnerUserID string
+	voiceStatus            *SalonVoiceStatus
 }
 
 func newFakeVoiceStore() *fakeVoiceStore {
@@ -816,13 +1007,63 @@ func newFakeVoiceStore() *fakeVoiceStore {
 				{Key: "enable_ai_booking", Label: "Enable AI booking", Complete: true},
 			},
 		},
+		voiceStatus: &SalonVoiceStatus{
+			SalonID: "salon_1", Phone: "+13125550102", AIEnabled: true,
+			SchedulingAuthority:        booking.SchedulingAuthorityExternalProvider,
+			SchedulingAuthorityVersion: 1, BookingMode: "confirmed_booking",
+		},
 	}
 }
 
 func (f *fakeVoiceStore) GetSalonVoiceStatus(ctx context.Context, salonID string, ownerUserID string) (*SalonVoiceStatus, error) {
 	f.voiceStatusSalonID = salonID
 	f.voiceStatusOwnerUserID = ownerUserID
-	return &SalonVoiceStatus{SalonID: salonID, Phone: "+13125550102"}, nil
+	if f.voiceStatus == nil {
+		return nil, ErrNotFound
+	}
+	status := *f.voiceStatus
+	status.SalonID = salonID
+	return &status, nil
+}
+
+type fakeSchedulingReadinessProvider struct {
+	result scheduling.TargetReadiness
+	err    error
+}
+
+func (f *fakeSchedulingReadinessProvider) SchedulingTargetReadiness(context.Context, string, string) (scheduling.TargetReadiness, error) {
+	return f.result, f.err
+}
+
+func readySchedulingTarget(authority string, version int64) scheduling.TargetReadiness {
+	return scheduling.TargetReadiness{
+		TargetSchedulingAuthority: authority, AuthorityVersion: version,
+		Ready: true, AvailabilityReady: true, ExecutionReady: true,
+		Checks: []scheduling.TargetReadinessCheck{},
+	}
+}
+
+func newVoiceStatusService(store *fakeVoiceStore, cfg config.VoiceConfig, selected scheduling.TargetReadiness) *Service {
+	service := NewService(store, newFakeConversationEngine(), cfg, AIProviders{})
+	owner := readySchedulingTarget(booking.SchedulingAuthorityOwnerManual, selected.AuthorityVersion)
+	owner.ExecutionReady = false
+	owner.ExecutionBlockers = []scheduling.TargetReadinessBlocker{{Code: "OWNER_MANUAL_REQUEST_ONLY", Scope: "executor", Message: "Owner review is required."}}
+	internal := readySchedulingTarget(booking.SchedulingAuthorityManleAICalendar, selected.AuthorityVersion)
+	external := readySchedulingTarget(booking.SchedulingAuthorityExternalProvider, selected.AuthorityVersion)
+	switch selected.TargetSchedulingAuthority {
+	case booking.SchedulingAuthorityOwnerManual:
+		owner = selected
+	case booking.SchedulingAuthorityManleAICalendar:
+		internal = selected
+	case booking.SchedulingAuthorityExternalProvider:
+		external = selected
+	}
+	service.SetSchedulingReadinessProviders(
+		&fakeSchedulingReadinessProvider{result: owner},
+		&fakeSchedulingReadinessProvider{result: internal},
+		&fakeSchedulingReadinessProvider{result: external},
+	)
+	return service
 }
 
 type fakeTurnContractProvider struct {

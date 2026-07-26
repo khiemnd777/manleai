@@ -1,5 +1,38 @@
 # Square Integration
 
+## Scheduling Authority Applicability
+
+Square Appointments is the current production implementation of
+`external_provider`. The runtime uses Square for scheduling only while the
+captured scheduling authority is `external_provider` and the selected external
+adapter is `square`.
+
+All Square writes remain behind the authority-neutral scheduling facade.
+A genuinely new availability/action uses the current salon setting; persisted
+operation origin is resolved across external `booking_attempts` and owner-
+manual `scheduling_requests`, while retry/target origin owns historical
+dispatch, and all origins present must agree. `owner_manual` is now an active
+request-only executor outside Square: it creates pending owner-review work and
+never enters this adapter, creates a POS error, or starts reconciliation.
+`manleai_calendar` is also implemented outside Square: Phase 4B provides
+structured multi-guest, multi-service staff-only/pooled availability and
+all-or-none atomic create, and Phase 4C provides target-origin whole-root
+reschedule/cancel with same-root versioned events, released old-plan evidence,
+exact historical replay, and no POS/provider fields. Those internal lifecycle
+actions never enter the Square adapter. Explicit authority switching is
+implemented outside Square through the owner-scoped V52-V55 preview,
+latest/detail, and commit workflow. It uses operation/action replay, expected
+authority-version and readiness fences, a live external-execution gate, an
+immutable audit trail, and an explicit reverse-switch reference rather than an
+implicit rollback.
+
+Connecting, selecting a location, syncing, or receiving a Square webhook must
+never implicitly switch scheduling authority. Current provider-calendar
+persistence/matching/reconciliation explicitly fences writes to
+`external_provider` and protects internal-origin rows. These
+applicability rules do not weaken any Square confirmation, idempotency, fence,
+unknown-outcome, retry, or reconciliation safeguard below.
+
 ## Supported Through Current Backend Foundation
 
 - OAuth authorization URL
@@ -17,6 +50,8 @@
 - Calendar appointment list sync from Square Bookings into local appointment mirrors
 - Signed booking webhook ingestion with durable event dedupe and fenced worker claims
 - Scheduled calendar repair as a webhook backstop
+- Authenticated owner-scoped webhook event metrics/list/detail plus backend-
+  gated, action-key-idempotent safe requeue inside the connected Square card
 - Customer search/create
 - Availability checks
 - Create appointment
@@ -24,7 +59,8 @@
 - Cancel appointment
 - Create test booking
 - Cancel test booking
-- AI booking readiness checks
+- AI booking readiness checks with current `scheduling_authority` and
+  external-only new-test/AI-enable gates
 - Sync logs
 - POS error logs
 - Provider capability reporting for POS sync jobs
@@ -48,7 +84,20 @@
 - Outbox-driven Square customer writes outside the booking flow
 - Executable provider switch import, executable dry-run, and activation workflow
   for a second real POS adapter
-- External SMS/email/push delivery consumer for durable owner-notification outbox rows
+
+Owner and customer notification delivery are implemented outside the Square
+adapter. V56 registers the stable `notification_delivery` worker, whose
+provider-neutral processor consumes durable `owner_notifications` rows and
+resolves the salon-scoped Twilio transport only through
+`modules/notification_twilio`. V59 separately registers the stable
+`customer_notification_delivery` worker and keeps customer consent, policy,
+source-version fences, attempts, callbacks, and delivery state in
+`modules/customer_notification`. Both paths are provider-isolated from
+`modules/pos_square`: they do not call Square, select scheduling authority, or
+turn notification acceptance/delivery into appointment confirmation. Their
+operational readiness still depends on the required salon-scoped Twilio
+configuration, consent/policy evidence, callback reachability, worker health,
+and monitoring.
 
 Square Appointments service/staff/customer outbox writes remain disabled by
 provider capability flags until the exact catalog/team/customer payloads are
@@ -104,12 +153,23 @@ exists, or calls Square customer search/create and stores the resulting link.
 Customer search/create/link failures keep the attempt in fallback pending state
 instead of producing a confirmed appointment. Reschedule, cancel, test booking,
 test booking cancellation, and simulator booking requests leave internal
-confirmed appointment state unchanged unless Square succeeds. AI booking can be
-enabled after Square connection, location, sync, bookable service/staff, and
-business hour readiness pass and no current Square create-booking permission
-blocker is present; Square test booking create/cancel is an optional POS write
+confirmed appointment state unchanged unless Square succeeds. Square readiness
+exposes the owner-scoped current `scheduling_authority`; new test creation and AI
+booking enablement require `external_provider` in addition to connection,
+location, sync, bookable service/staff, business-hour, and write-permission
+gates. Exact external replay and external-target test cancellation remain
+available after a later authority switch, as does a persisted external safe
+retry. The public readiness fields still report new test creation as
+unavailable in an internal current mode; the persisted retry is separately
+authorized by its external operation/retry lineage and the underlying provider-
+readiness gates. Square test booking create/cancel is an optional POS write
 smoke test and the recovery path for clearing an older write-permission blocker
 after reconnecting or updating the seller account.
+
+These historical-origin safeguards support data whose current authority token
+has changed. The owner-facing authority-switch workflow exists, but it does not
+make Square integration setup an authority choice and it does not bypass the
+persisted origin of historical external or internal operations.
 
 Booking attempts and confirmed appointments snapshot service/staff segments in backend tables before or after the Square call as appropriate. Provider-neutral POS DTOs now carry segment arrays, and `SquareAdapter` maps those arrays into Square booking `appointment_segments` and availability `segment_filters`. `staff_selection_mode=anyone` is retained as internal/customer preference metadata; Square-specific appointment payload requirements remain isolated inside `SquareAdapter`.
 
@@ -131,10 +191,25 @@ mutations: <https://developer.squareup.com/reference/square/bookings-api/CreateB
 and <https://developer.squareup.com/reference/square/bookings-api/CancelBooking>.
 
 The optional dashboard smoke test preserves one operation key across response
-loss. A pending or unknown latest test write gates additional test create/cancel
-actions, and Square status reads expire stale processing leases before exposing
-the latest test state. This temporary test-action gate does not make the
-optional smoke test a prerequisite for enabling AI booking.
+loss. Its service first performs provider-free `ReplayCreate`/`ReplayCancel` so
+an exact historical external result remains recoverable after a salon switch.
+For a non-replay create, the service calls the facade's read-only
+`ResolveCreateSchedulingAuthority`, which validates persisted operation/retry
+origin equality and falls back to the current token only when neither origin
+exists; it does not dispatch an executor or provider. A valid external safe
+retry can therefore proceed through provider readiness after a current-mode
+switch, while an origin-free create is rejected as authority-not-ready when
+the current token is internal. Actual create/cancel writes still use the
+scheduling facade, and cancellation uses the persisted external target origin.
+A pending or unknown latest test write gates additional test create/cancel
+actions, and Square status reads expire only stale external-provider processing
+leases before exposing the latest test state. This temporary test-action gate
+does not make the optional smoke test a prerequisite for enabling AI booking.
+
+Square gate handlers map scheduling-authority failures to sanitized
+`409 SCHEDULING_AUTHORITY_NOT_READY` and map other gate failures to bounded
+public messages. Wrapped executor or provider diagnostic text is not returned
+to the client.
 
 For a definitive test create/cancel failure, the Square test DTO forwards the
 exact safe fallback attempt as `retry_of_attempt_id` into the provider-neutral
@@ -172,6 +247,11 @@ version newer than baseline, at least the returned response version, requested
 range, and exact segments; cancel requires a cancelled version newer than
 baseline and at least the returned response version. A conflicting mirror is
 not overwritten and the operation remains unconfirmed pending reconciliation.
+When exact external create evidence is canonicalized, the appointment preserves
+existing confirmation provenance, fills only missing `confirmed_at` and
+`confirmation_source` with the canonicalization time and
+`external_provider`, and leaves `confirmed_by_user_id` unset unless an actual
+actor was already recorded. Repeated recovery is timestamp-idempotent.
 The creating/mirror attempt stores the booking's originating Square location.
 Reschedule and cancel are allowed only while that immutable origin matches the
 currently selected synchronized location; reschedule must also use a quote from
@@ -210,6 +290,26 @@ deliveries are not discarded during a sync or recoverable outage. It excludes
 not-connected and disabled connections and still requires Square to be the
 salon's active POS provider.
 
+This target/repair predicate intentionally does not read the current scheduling
+authority so historical external-provider mirrors can converge after a later
+salon switch. Downstream booking-calendar persistence, matching, and
+reconciliation currently require the originating authority to be
+`external_provider`; they skip/protect internal-origin rows and cannot change an internal
+appointment's authoritative lifecycle state.
+
+V60 adds owner operations without broadening webhook authority. The owner-
+scoped API returns only event type, bounded processing status/attempt/requeue
+counts, backend-owned `can_requeue`, safe error class/code, timestamps,
+salon-wide backlog/recent-success metrics, and calendar-repair health. It omits
+provider entity IDs, raw payloads, signature/token/claim material, customer
+data, provider responses, and raw errors. Public filters accept `pending`,
+`processing`, `failed`, `dead_letter`, and `succeeded`; an unfiltered list may
+include a read-only `ignored` event. Requeue uses one stable owner action key,
+is limited by backend terminal-failure evidence and bounded counts, and returns
+`X-Idempotent-Replay` for exact recovery. The connected Square child panel
+never treats webhook receipt, replay, repair, or configuration as appointment
+confirmation or scheduling-authority selection.
+
 ## Configuration
 
 Square Appointments app credentials are configured in the Integrations
@@ -220,10 +320,16 @@ configuration is resolved from `salon_integration_configs`; `.env`,
 `project.env`, templates, Compose defaults, and deployment secrets are not
 evidence of a salon's active provider configuration. Configuration writes
 surface encryption/decryption failures and preserve the last valid stored
-secret. The pre-existing runtime resolver still falls back to legacy bootstrap
-configuration on repository/decryption errors instead of only exact
-not-found; that fail-open behavior is a known production-readiness gap and is
-not evidence of the active salon configuration.
+secret. The runtime resolver uses legacy bootstrap configuration only when the
+salon/provider repository returns exact `integration_config.ErrNotFound`.
+Repository access failures, decryption failures, malformed or incomplete stored
+configuration, and disabled stored configuration fail closed; they do not mix
+or replace stored values with legacy environment values. Legacy fallback is a
+bootstrap compatibility path and is not evidence of the active salon
+configuration.
+Saving these credentials, completing OAuth, or selecting a location configures
+the external adapter only. It is not scheduling-authority consent and must not
+perform an implicit authority switch.
 Configuration transfer preserves the target deployment's webhook URL and never
 exports the signature key, which must be re-entered at the target.
 

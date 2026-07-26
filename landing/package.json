@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev -p 3090",
     "build": "next build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:security": "node ../deploy/run-ts-evidence-tests.mjs lib/security/content-security-policy.test.ts"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

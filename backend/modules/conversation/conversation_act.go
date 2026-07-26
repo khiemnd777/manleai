@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/manleai/ai-receptionist/modules/booking"
+	"github.com/manleai/ai-receptionist/modules/scheduling"
 )
 
 type conversationDraftResult struct {
@@ -2075,7 +2076,23 @@ func finalBookingReviewPrompt(session Session, services []ServiceOption, staff [
 		parts = append(parts, "phone ending in "+phone[len(phone)-4:])
 	}
 	if len(parts) == 0 {
+		if cfg != nil && cfg.BookingMode == scheduling.BookingModePendingApproval {
+			return "Before I send this request to the owner, would you like me to proceed? This will not confirm an appointment."
+		}
 		return "Before I book it, would you like me to proceed with the appointment details we reviewed?"
 	}
+	if cfg != nil && cfg.BookingMode == scheduling.BookingModePendingApproval {
+		return "Let me review everything: " + strings.Join(parts, ", ") + ". Would you like me to send this request to the owner? This will not confirm an appointment."
+	}
 	return "Let me review everything: " + strings.Join(parts, ", ") + ". Would you like me to book it?"
+}
+
+func reviewAuthorizationPrompt(cfg *RuntimeConfig, concise bool) string {
+	if cfg != nil && cfg.BookingMode == scheduling.BookingModePendingApproval {
+		if concise {
+			return "Would you like me to send these details to the owner for review? This will not confirm an appointment."
+		}
+		return "Would you like me to send these details to the owner for review?"
+	}
+	return "Would you like me to book these details?"
 }

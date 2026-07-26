@@ -6,6 +6,9 @@ export type User = {
   status: string;
 };
 
+export type SchedulingAuthority = "owner_manual" | "manleai_calendar" | "external_provider";
+export type BookingMode = "confirmed_booking" | "pending_approval" | "disabled";
+
 export type Salon = {
   id: string;
   name: string;
@@ -19,9 +22,12 @@ export type Salon = {
   secondary_language: string;
   handoff_phone?: string;
   ai_enabled: boolean;
+  /** External-provider adapter intent only. Never use this field as the scheduling-authority discriminator. */
   active_pos_provider: string;
   public_slug?: string;
   public_catalog_enabled: boolean;
+  scheduling_authority?: SchedulingAuthority;
+  scheduling_authority_version?: number;
   created_at?: string;
   updated_at?: string;
 };
@@ -31,9 +37,20 @@ export type PublicCatalogSettings = {
   public_slug?: string;
   public_catalog_enabled: boolean;
   public_path?: string;
+  scheduling_authority: SchedulingAuthority;
+  scheduling_authority_version: number;
+  eligible_service_count: number;
+  eligible_staff_count: number;
+  published_hours_count: number;
   bookable_service_count: number;
   bookable_staff_count: number;
   can_publish: boolean;
+  readiness_label: string;
+  readiness_blockers: Array<{
+    code: string;
+    scope: string;
+    message: string;
+  }>;
   blocked_reason?: string;
   updated_at: string;
 };
@@ -44,7 +61,7 @@ export type SalonSettings = {
   ai_greeting: string;
   ai_voice: string;
   ai_tone: string;
-  booking_mode: string;
+  booking_mode: BookingMode;
   recording_enabled: boolean;
   recording_consent_message: string;
   sms_confirmation_enabled: boolean;
@@ -52,8 +69,61 @@ export type SalonSettings = {
   reminder_hours_before: number;
   handoff_enabled: boolean;
   consultation_enabled: boolean;
+  scheduling_authority: SchedulingAuthority;
+  scheduling_authority_version: number;
   created_at: string;
   updated_at: string;
+};
+
+export type SchedulingAuthorityReadinessCheck = {
+  code: string;
+  ready: boolean;
+  scope?: string;
+  entity_id?: string;
+};
+
+export type SchedulingAuthorityReadinessBlocker = {
+  code: string;
+  scope?: string;
+  entity_id?: string;
+  message: string;
+};
+
+export type SchedulingAuthorityReadiness = {
+  target_scheduling_authority: SchedulingAuthority;
+  ready: boolean;
+  authority_version: number;
+  config_version?: number;
+  eligible_service_count?: number;
+  service_count?: number;
+  staff_count?: number;
+  business_hour_period_count?: number;
+  checks: SchedulingAuthorityReadinessCheck[];
+};
+
+export type SchedulingAuthoritySwitchStatus = "preview_ready" | "preview_blocked" | "committed" | "failed";
+
+export type SchedulingAuthoritySwitchRun = {
+  id: string;
+  salon_id: string;
+  source_scheduling_authority: SchedulingAuthority;
+  target_scheduling_authority: SchedulingAuthority;
+  expected_source_authority_version: number;
+  operation_key: string;
+  rollback_of_switch_run_id?: string;
+  readiness_snapshot: SchedulingAuthorityReadiness;
+  blockers: SchedulingAuthorityReadinessBlocker[];
+  status: SchedulingAuthoritySwitchStatus;
+  previewed_at: string;
+  blocked_at?: string;
+  committed_at?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SchedulingAuthoritySwitchResponse = {
+  scheduling_authority_switch: SchedulingAuthoritySwitchRun;
+  replayed: boolean;
 };
 
 export type BusinessHour = {
@@ -80,6 +150,284 @@ export type BusinessHourPeriod = {
   last_synced_at?: string;
   created_at?: string;
   updated_at?: string;
+};
+
+export type ManleAICalendarIntegerConstraint = {
+  minimum: number;
+  maximum: number;
+};
+
+export type ManleAICalendarSlotStepConstraint = ManleAICalendarIntegerConstraint & {
+  must_divide_minutes: number;
+};
+
+export type ManleAICalendarConstraints = {
+  slot_step_minutes: ManleAICalendarSlotStepConstraint;
+  minimum_booking_notice_minutes: ManleAICalendarIntegerConstraint;
+  booking_horizon_days: ManleAICalendarIntegerConstraint;
+  cutoff_minutes: ManleAICalendarIntegerConstraint;
+  max_party_size: ManleAICalendarIntegerConstraint;
+  buffer_minutes: ManleAICalendarIntegerConstraint;
+  period_minutes: ManleAICalendarIntegerConstraint;
+  resource_capacity: ManleAICalendarIntegerConstraint;
+  resource_units_required: ManleAICalendarIntegerConstraint;
+  exception_capacity_override: ManleAICalendarIntegerConstraint;
+  action_key_max_bytes: number;
+  exception_reason_max_bytes: number;
+  resource_name_max_characters: number;
+  capacity_modes: ManleAICalendarCapacityMode[];
+  exception_scope_types: ManleAICalendarExceptionScope[];
+  exception_effects: ManleAICalendarExceptionEffect[];
+  execution_engine_available: boolean;
+};
+
+export type ManleAICalendarCapacityMode = "staff_only" | "pooled";
+
+export type ManleAICalendarExceptionScope = "salon" | "staff" | "resource";
+
+export type ManleAICalendarExceptionEffect = "available" | "unavailable" | "capacity_override";
+
+export type ManleAICalendarConfig = {
+  salon_id: string;
+  version: number;
+  slot_step_minutes: number;
+  minimum_booking_notice_minutes: number;
+  booking_horizon_days: number;
+  reschedule_cutoff_minutes: number | null;
+  cancellation_cutoff_minutes: number | null;
+  max_party_size: number;
+  default_buffer_before_minutes: number;
+  default_buffer_after_minutes: number;
+  activated_at: string | null;
+  activated_by_user_id?: string;
+  activated_version: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ManleAICalendarHourPeriod = {
+  id: string;
+  day_of_week: number;
+  start_minute: number;
+  end_minute: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ManleAICalendarHourPeriodInput = {
+  day_of_week: number;
+  start_minute: number;
+  end_minute: number;
+};
+
+export type ManleAICalendarStaffRef = {
+  id: string;
+  name: string;
+  active: boolean;
+  ai_bookable: boolean;
+  archived_at: string | null;
+};
+
+export type ManleAICalendarServiceRef = {
+  id: string;
+  name: string;
+  duration_minutes: number;
+  active: boolean;
+  ai_bookable: boolean;
+  archived_at: string | null;
+};
+
+export type ManleAICalendarWeeklyPeriod = {
+  id: string;
+  staff_id: string;
+  day_of_week: number;
+  start_minute: number;
+  end_minute: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ManleAICalendarWeeklyPeriodInput = {
+  day_of_week: number;
+  start_minute: number;
+  end_minute: number;
+};
+
+export type ManleAICalendarStaffProfile = {
+  staff: ManleAICalendarStaffRef;
+  weekly_periods: ManleAICalendarWeeklyPeriod[];
+  eligible_services: ManleAICalendarServiceRef[];
+};
+
+export type ManleAICalendarResourceRequirement = {
+  resource_pool_id: string;
+  resource_name: string;
+  units_required: number;
+  pool_capacity: number;
+  pool_archived_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ManleAICalendarResourceRequirementInput = {
+  resource_pool_id: string;
+  units_required: number;
+};
+
+export type ManleAICalendarServicePolicy = {
+  service: ManleAICalendarServiceRef;
+  configured: boolean;
+  enabled: boolean;
+  capacity_mode: ManleAICalendarCapacityMode | null;
+  buffer_before_minutes_override: number | null;
+  buffer_after_minutes_override: number | null;
+  eligible_staff: ManleAICalendarStaffRef[];
+  resource_requirements: ManleAICalendarResourceRequirement[];
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type ManleAICalendarResourcePool = {
+  id: string;
+  name: string;
+  capacity: number;
+  archived_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ManleAICalendarException = {
+  id: string;
+  scope_type: ManleAICalendarExceptionScope;
+  staff_id?: string;
+  resource_pool_id?: string;
+  effect: ManleAICalendarExceptionEffect;
+  starts_at: string;
+  ends_at: string;
+  capacity_override: number | null;
+  reason?: string;
+  created_by_user_id: string;
+  cancelled_at: string | null;
+  cancelled_by_user_id?: string;
+  created_at: string;
+};
+
+export type ManleAICalendarReadinessBlocker = {
+  code: string;
+  dimension: "configuration" | "execution";
+  scope: "calendar" | "service" | "staff" | "resource";
+  entity_id?: string;
+  message: string;
+};
+
+export type ManleAICalendarReadiness = {
+  configuration_ready: boolean;
+  execution_ready: boolean;
+  authority_version: number;
+  config_version: number;
+  blockers: ManleAICalendarReadinessBlocker[];
+  capabilities?: ManleAICalendarCapabilities;
+};
+
+export type ManleAICalendarCapabilities = {
+  staff_only_availability: boolean;
+  staff_only_create: boolean;
+  pooled_capacity: boolean;
+  party_create: boolean;
+  reschedule: boolean;
+  cancel: boolean;
+};
+
+export type ManleAICalendarAggregate = {
+  salon_id: string;
+  timezone: string;
+  scheduling_authority: SchedulingAuthority;
+  authority_version: number;
+  config_version: number;
+  config: ManleAICalendarConfig | null;
+  hours: ManleAICalendarHourPeriod[];
+  staff_profiles: ManleAICalendarStaffProfile[];
+  service_policies: ManleAICalendarServicePolicy[];
+  resources: ManleAICalendarResourcePool[];
+  exceptions: ManleAICalendarException[];
+  readiness: ManleAICalendarReadiness;
+  constraints: ManleAICalendarConstraints;
+};
+
+export type ManleAICalendarAggregateResponse = {
+  manleai_calendar: ManleAICalendarAggregate;
+};
+
+export type ManleAICalendarMutationResponse = ManleAICalendarAggregateResponse & {
+  replayed: boolean;
+};
+
+export type ManleAICalendarStaffProfileResponse = {
+  staff_profile: ManleAICalendarStaffProfile;
+  config_version: number;
+  readiness: ManleAICalendarReadiness;
+};
+
+export type ManleAICalendarServicePolicyResponse = {
+  service_policy: ManleAICalendarServicePolicy;
+  config_version: number;
+  readiness: ManleAICalendarReadiness;
+};
+
+export type ManleAICalendarResourceListResponse = {
+  resources: ManleAICalendarResourcePool[];
+  config_version: number;
+  readiness: ManleAICalendarReadiness;
+};
+
+export type ManleAICalendarMutationMeta = {
+  action_key: string;
+  expected_config_version: number;
+};
+
+export type ManleAICalendarConfigInput = ManleAICalendarMutationMeta & {
+  slot_step_minutes: number;
+  minimum_booking_notice_minutes: number;
+  booking_horizon_days: number;
+  reschedule_cutoff_minutes: number | null;
+  cancellation_cutoff_minutes: number | null;
+  max_party_size: number;
+  default_buffer_before_minutes: number;
+  default_buffer_after_minutes: number;
+};
+
+export type ManleAICalendarHoursInput = ManleAICalendarMutationMeta & {
+  periods: ManleAICalendarHourPeriodInput[];
+};
+
+export type ManleAICalendarStaffProfileInput = ManleAICalendarMutationMeta & {
+  weekly_periods: ManleAICalendarWeeklyPeriodInput[];
+  eligible_service_ids: string[];
+};
+
+export type ManleAICalendarServicePolicyInput = ManleAICalendarMutationMeta & {
+  enabled: boolean;
+  capacity_mode: ManleAICalendarCapacityMode | null;
+  buffer_before_minutes_override: number | null;
+  buffer_after_minutes_override: number | null;
+  eligible_staff_ids: string[];
+  resource_requirements: ManleAICalendarResourceRequirementInput[];
+};
+
+export type ManleAICalendarResourceInput = ManleAICalendarMutationMeta & {
+  name: string;
+  capacity: number;
+};
+
+export type ManleAICalendarExceptionInput = ManleAICalendarMutationMeta & {
+  scope_type: ManleAICalendarExceptionScope;
+  staff_id?: string;
+  resource_pool_id?: string;
+  effect: ManleAICalendarExceptionEffect;
+  starts_at: string;
+  ends_at: string;
+  capacity_override: number | null;
+  reason?: string;
 };
 
 export type SquareIntegrationConfig = {
@@ -114,6 +462,17 @@ export type TwilioIntegrationConfig = {
   stream_webhook_url: string;
   auth_token_configured: boolean;
   auth_token_source: string;
+  owner_sms_enabled: boolean;
+  owner_sms_destination_masked?: string;
+  owner_sms_consent_attested: boolean;
+  owner_sms_consent_attested_at?: string;
+  account_sid_configured: boolean;
+  messaging_service_configured: boolean;
+  sender_configured: boolean;
+  notification_status_path: string;
+  notification_inbound_path: string;
+  notification_status_url: string;
+  notification_inbound_url: string;
   updated_at?: string;
 };
 
@@ -312,6 +671,15 @@ export type ConfigurationImportResponse = {
   dry_run: boolean;
   status: string;
   schema_version: string;
+  included_sections: string[];
+  target_scheduling_authority: SchedulingAuthority;
+  target_scheduling_authority_version: number;
+  source_active_pos_provider: string;
+  target_active_pos_provider: string;
+  result_active_pos_provider: string;
+  source_booking_mode: string;
+  target_booking_mode: string;
+  result_booking_mode: string;
   can_apply: boolean;
   summary: ConfigurationImportSectionSummary[];
   warnings: ConfigurationImportIssue[];
@@ -347,6 +715,69 @@ export type POSConnection = {
   scopes: string[];
   last_sync_at?: string;
   error_message?: string;
+};
+
+export type SquareWebhookFilterStatus =
+  | "pending"
+  | "processing"
+  | "failed"
+  | "dead_letter"
+  | "succeeded";
+
+export type SquareWebhookProcessingStatus = SquareWebhookFilterStatus | "ignored";
+
+export type SquareWebhookEvent = {
+  id: string;
+  event_type: string;
+  processing_status: SquareWebhookProcessingStatus;
+  processing_attempts: number;
+  requeue_count: number;
+  last_error_class?: string;
+  last_error_code?: string;
+  can_requeue: boolean;
+  requeue_blocked_reason?: string;
+  next_attempt_at: string;
+  delivered_at?: string;
+  processed_at?: string;
+  dead_lettered_at?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SquareWebhookMetrics = {
+  pending: number;
+  processing: number;
+  failed: number;
+  dead_letter: number;
+  succeeded_recent: number;
+  recent_window_hours: number;
+  last_delivered_at?: string;
+  last_succeeded_at?: string;
+};
+
+export type SquareCalendarRepairHealth = {
+  relevant: boolean;
+  status: string;
+  repair_attempts: number;
+  last_error_class?: string;
+  last_error_code?: string;
+  next_repair_at?: string;
+  lease_expires_at?: string;
+  last_repaired_at?: string;
+  updated_at?: string;
+};
+
+export type SquareWebhookEventsResponse = {
+  events: SquareWebhookEvent[];
+  metrics: SquareWebhookMetrics;
+  calendar_repair: SquareCalendarRepairHealth;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+};
+
+export type SquareWebhookEventDetailResponse = {
+  event: SquareWebhookEvent;
 };
 
 export type POSFieldAuthority = {
@@ -523,12 +954,24 @@ export type AppointmentStatus =
   | string;
 
 export type BookingSegmentSnapshot = {
+  appointment_service_id?: string;
+  scheduling_authority?: SchedulingAuthority;
   service_id?: string;
   service_name: string;
   staff_id?: string;
   staff_name?: string;
   staff_selection_mode: StaffSelectionMode;
+  guest_reference?: string;
+  quantity?: number;
+  plan_version?: number;
   duration_minutes?: number;
+  scheduled_start_time?: string;
+  scheduled_end_time?: string;
+  occupied_start_time?: string;
+  occupied_end_time?: string;
+  buffer_before_minutes?: number;
+  buffer_after_minutes?: number;
+  resource_allocations?: AvailabilityResourceAllocation[];
   sort_order: number;
 };
 
@@ -536,16 +979,184 @@ export type BookingSegmentRequest = {
   service_id: string;
   staff_id?: string;
   staff_selection_mode: StaffSelectionMode;
+  guest_reference?: string;
+  quantity?: number;
+};
+
+export type SchedulingRequestStatus = "pending" | "contacted" | "resolved" | "dismissed";
+
+export type SchedulingRequestOperation = "book" | "reschedule" | "cancel";
+
+export type SchedulingRequestSegment = {
+  id: string;
+  scheduling_request_id: string;
+  service_id: string;
+  service_name: string;
+  staff_id?: string;
+  staff_name?: string;
+  staff_selection_mode: StaffSelectionMode;
+  guest_reference?: string;
+  quantity: number;
+  duration_minutes: number;
+  requested_start_time?: string;
+  requested_end_time?: string;
+  sort_order: number;
+  redacted: boolean;
+  redacted_at?: string;
+  redaction_version?: number;
+  created_at: string;
+};
+
+export type SchedulingRequestEvent = {
+  id: string;
+  scheduling_request_id: string;
+  action_key: string;
+  event_type: string;
+  request_version: number;
+  actor_user_id?: string;
+  payload: unknown;
+  redacted: boolean;
+  redacted_at?: string;
+  redaction_version?: number;
+  created_at: string;
+};
+
+export type SchedulingRequest = {
+  id: string;
+  salon_id: string;
+  scheduling_authority: "owner_manual";
+  operation_key: string;
+  operation_type: SchedulingRequestOperation;
+  source: string;
+  status: SchedulingRequestStatus;
+  version: number;
+  call_session_id?: string;
+  customer_name: string;
+  customer_phone: string;
+  customer_email?: string;
+  requested_start_time?: string;
+  requested_end_time?: string;
+  requested_timezone?: string;
+  party_size?: number;
+  notes?: string;
+  target_description?: string;
+  target_appointment_id?: string;
+  target_scheduling_authority?: SchedulingAuthority;
+  segments?: SchedulingRequestSegment[];
+  events?: SchedulingRequestEvent[];
+  resolution_reason?: string;
+  redacted: boolean;
+  redacted_at?: string;
+  redaction_version?: number;
+  contacted_at?: string;
+  resolved_at?: string;
+  dismissed_at?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SchedulingRequestsResponse = {
+  scheduling_requests: SchedulingRequest[];
+  limit?: number;
+  offset?: number;
+  has_more?: boolean;
+  total?: number;
+};
+
+export type SchedulingRequestResponse = {
+  scheduling_request: SchedulingRequest;
+};
+
+export type UpdateSchedulingRequestInput = {
+  action_key: string;
+  expected_version: number;
+  status: SchedulingRequestStatus;
+  resolution_reason?: string;
+  note?: string;
+};
+
+export type OwnerNotificationDeliveryStatus =
+  | "queued"
+  | "delivering"
+  | "provider_accepted"
+  | "sent"
+  | "delivered"
+  | "failed"
+  | "undelivered"
+  | "dead_letter"
+  | "disabled";
+
+export type OwnerNotificationDeliveryEvent = {
+  id: string;
+  event_type: string;
+  delivery_status: OwnerNotificationDeliveryStatus;
+  provider_status?: string;
+  error_code?: string;
+  created_at: string;
+};
+
+export type OwnerNotificationDelivery = {
+  id: string;
+  salon_id: string;
+  notification_type: string;
+  in_app_status: string;
+  delivery_status: OwnerNotificationDeliveryStatus;
+  delivery_provider?: string;
+  destination_masked?: string;
+  delivery_attempts: number;
+  provider_status?: string;
+  last_delivery_error_code?: string;
+  can_requeue: boolean;
+  requeue_blocked_reason?: string;
+  next_delivery_at: string;
+  delivered_at?: string;
+  dead_lettered_at?: string;
+  last_provider_event_at?: string;
+  redacted: boolean;
+  redacted_at?: string;
+  redaction_version?: number;
+  created_at: string;
+  events?: OwnerNotificationDeliveryEvent[];
+};
+
+export type OwnerNotificationDeliveryMetrics = {
+  queued: number;
+  delivering: number;
+  provider_accepted: number;
+  sent: number;
+  delivered: number;
+  dead_letter: number;
+  disabled: number;
+};
+
+export type OwnerNotificationDeliveriesResponse = {
+  deliveries: OwnerNotificationDelivery[];
+  metrics: OwnerNotificationDeliveryMetrics;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+};
+
+export type OwnerNotificationDeliveryDetailResponse = {
+  delivery: OwnerNotificationDelivery;
 };
 
 export type AppointmentRecord = {
   id: string;
   salon_id: string;
   booking_attempt_id: string;
-  pos_provider: string;
-  pos_appointment_id: string;
+  scheduling_authority: SchedulingAuthority;
+  authority_provider?: string;
+  authority_appointment_id: string;
+  authority_appointment_version?: number;
+  /** @deprecated External-provider compatibility alias. Dispatch and status use scheduling_authority plus authority_* evidence. */
+  pos_provider?: string;
+  /** @deprecated External-provider compatibility alias. */
+  pos_appointment_id?: string;
+  /** @deprecated External-provider compatibility alias. */
   pos_appointment_version?: number;
   status: AppointmentStatus;
+  party_size?: number;
   customer_name: string;
   customer_phone: string;
   customer_email?: string;
@@ -563,6 +1174,8 @@ export type AppointmentRecord = {
   can_edit?: boolean;
   can_cancel?: boolean;
   can_delete?: boolean;
+  confirmed_at?: string;
+  confirmation_source?: string;
   created_at: string;
   updated_at: string;
 };
@@ -570,10 +1183,17 @@ export type AppointmentRecord = {
 export type BookingAttempt = {
   id: string;
   salon_id: string;
+  scheduling_authority: SchedulingAuthority;
+  authority_provider?: string;
+  authority_appointment_id?: string;
+  authority_appointment_version?: number;
   source: string;
   status: string;
-  pos_provider: string;
+  /** @deprecated External-provider compatibility alias. Never infer origin from this field. */
+  pos_provider?: string;
+  /** @deprecated External-provider compatibility alias. */
   pos_booking_id?: string;
+  /** @deprecated External-provider compatibility alias. */
   pos_booking_version?: number;
   operation_type: "book" | "reschedule" | "cancel";
   provider_outcome: "not_started" | "in_flight" | "succeeded" | "failed" | "unknown";
@@ -654,13 +1274,29 @@ export type AvailabilitySegment = {
   staff_id?: string;
   staff_name?: string;
   staff_selection_mode: StaffSelectionMode;
+  guest_reference?: string;
+  quantity: number;
   duration_minutes: number;
+  scheduled_start_time: string;
+  scheduled_end_time: string;
+  occupied_start_time: string;
+  occupied_end_time: string;
+  buffer_before_minutes: number;
+  buffer_after_minutes: number;
+  resource_allocations: AvailabilityResourceAllocation[];
+};
+
+export type AvailabilityResourceAllocation = {
+  resource_pool_id: string;
+  resource_name: string;
+  units_allocated: number;
 };
 
 export type AvailabilityResult = {
   quote_id?: string;
   request_fingerprint?: string;
   expires_at?: string;
+  target_authority_appointment_version?: number;
   service_id: string;
   service_name: string;
   staff_id?: string;
@@ -672,6 +1308,114 @@ export type AvailabilityResult = {
   timezone: string;
   slots: AvailabilitySlot[];
 };
+
+export type SchedulingAvailabilityResponse =
+  | {
+      kind: "verified_slots";
+      scheduling_authority: SchedulingAuthority;
+      target_authority_appointment_version?: number;
+      verified_slots: AvailabilityResult;
+    }
+  | {
+      kind: "request_only";
+      scheduling_authority: SchedulingAuthority;
+      verified_slots?: never;
+    };
+
+export type SchedulingActionSegmentInput = {
+  service_id: string;
+  staff_id?: string;
+  staff_selection_mode: StaffSelectionMode;
+  guest_reference?: string;
+  quantity: number;
+  requested_start_time?: string;
+  requested_end_time?: string;
+};
+
+export type SchedulingActionInput = {
+  operation_type: "book" | "reschedule" | "cancel";
+  operation_key: string;
+  retry_of_attempt_id?: string;
+  availability_quote_id?: string;
+  slot_fingerprint?: string;
+  customer_name?: string;
+  customer_phone?: string;
+  customer_email?: string;
+  segments?: SchedulingActionSegmentInput[];
+  requested_start_time?: string;
+  requested_end_time?: string;
+  requested_timezone?: string;
+  party_size?: number;
+  notes?: string;
+  target_appointment_id?: string;
+  target_scheduling_authority?: SchedulingAuthority;
+  expected_target_authority_appointment_version?: number;
+  target_description?: string;
+};
+
+export type SchedulingConfirmedAppointment = {
+  appointment_id: string;
+  booking_attempt_id?: string;
+  appointment_status?: AppointmentStatus;
+  active_child_count?: number;
+  external_attempt_id?: string;
+  appointment?: AppointmentRecord;
+  external_attempt?: BookingAttempt;
+  children?: SchedulingConfirmedAppointmentSegment[];
+};
+
+export type SchedulingConfirmedAppointmentSegment = {
+  appointment_service_id: string;
+  guest_reference?: string;
+  service_id: string;
+  staff_id: string;
+  staff_selection_mode: StaffSelectionMode;
+  quantity: number;
+  scheduled_start_time: string;
+  scheduled_end_time: string;
+  occupied_start_time: string;
+  occupied_end_time: string;
+  buffer_before_minutes: number;
+  buffer_after_minutes: number;
+  resource_allocations: AvailabilityResourceAllocation[];
+};
+
+export type SchedulingActionResponse =
+  | {
+      kind: "confirmed_appointment";
+      operation_type: "book" | "reschedule" | "cancel";
+      scheduling_authority: SchedulingAuthority;
+      target_authority_appointment_version?: number;
+      authority_appointment_version?: number;
+      replayed?: boolean;
+      confirmed_appointment: SchedulingConfirmedAppointment;
+    }
+  | {
+      kind: "pending_owner_review";
+      operation_type: "book" | "reschedule" | "cancel";
+      scheduling_authority: SchedulingAuthority;
+      target_authority_appointment_version?: number;
+      authority_appointment_version?: number;
+      replayed?: boolean;
+      pending_owner_review: {
+        scheduling_request_id: string;
+        status: string;
+        version: number;
+        request?: SchedulingRequest;
+      };
+    }
+  | {
+      kind: "external_fallback_pending";
+      operation_type: "book" | "reschedule" | "cancel";
+      scheduling_authority: SchedulingAuthority;
+      target_authority_appointment_version?: number;
+      authority_appointment_version?: number;
+      replayed?: boolean;
+      external_fallback_pending: {
+        external_attempt_id: string;
+        external_attempt?: BookingAttempt;
+      };
+    };
 
 export type POSLocation = {
   id: string;
@@ -726,6 +1470,7 @@ export type TestBookingRecord = {
 
 export type SquareReadiness = {
   ai_enabled: boolean;
+  scheduling_authority: SchedulingAuthority;
   can_test_booking: boolean;
   can_cancel_test_booking: boolean;
   can_enable_ai_booking: boolean;
@@ -874,8 +1619,11 @@ export type HandoffRequest = {
 };
 
 export type PartyGuestService = {
+  guest_reference?: string;
   service_id?: string;
   service_name?: string;
+  quantity?: number;
+  sort_order?: number;
   notes?: string;
 };
 
@@ -955,6 +1703,8 @@ export type ConversationDialogState = {
   reviewed_revision: number;
   authorized_revision: number;
   last_mutation_revision?: number;
+  reviewed_booking_mode?: BookingMode;
+  selected_scheduling_authority?: SchedulingAuthority;
   consultation?: ConversationConsultationState;
 };
 
@@ -1010,6 +1760,8 @@ export type ConversationSession = {
   dialog_state: ConversationDialogState;
   booking_attempt_id?: string;
   appointment_id?: string;
+  scheduling_request_id?: string;
+  scheduling_result_evidence?: ConversationSchedulingResultEvidence;
   summary?: string;
   lifecycle_status: "active" | "archived" | "redacted";
   archived_at?: string;
@@ -1024,8 +1776,33 @@ export type ConversationSession = {
   party_request?: PartyBookingRequest;
 };
 
+export type ConversationSchedulingResultEvidence = {
+  complete: boolean;
+  kind: "incomplete" | "pending_owner_review" | "completed_operation";
+  scheduling_authority?: SchedulingAuthority;
+  target_scheduling_authority?: SchedulingAuthority;
+  operation_type?: "book" | "reschedule" | "cancel";
+  result_status: "incomplete" | "confirmed" | "rescheduled" | "cancelled" | "owner_review_pending";
+  current_status: string;
+  is_current: boolean;
+  appointment_id?: string;
+  booking_attempt_id?: string;
+  scheduling_request_id?: string;
+  authority_appointment_version?: number;
+  current_authority_appointment_version?: number;
+  root_count: number;
+  result_child_count: number;
+  current_active_child_count: number;
+  incomplete_reason?: string;
+};
+
 export type RescheduleCandidate = {
   appointment_id: string;
+  scheduling_authority?: SchedulingAuthority;
+  authority_appointment_version?: number;
+  party_size?: number;
+  status?: AppointmentStatus;
+  active_child_count?: number;
   service_label: string;
   staff_label: string;
   service_id?: string;
@@ -1061,11 +1838,32 @@ export type VoiceStatus = {
   stream_webhook_url: string;
   salon_phone?: string;
   ready: boolean;
+  phone_answering_ready: boolean;
+  request_capture_ready: boolean;
+  automated_booking_ready: boolean;
   phone_booking_ready: boolean;
+  scheduling_authority: SchedulingAuthority;
+  scheduling_authority_version: number;
+  booking_mode: "confirmed_booking" | "pending_approval" | "disabled" | string;
+  phone_answering: VoiceReadinessDimension;
+  request_capture: VoiceReadinessDimension;
+  automated_booking: VoiceReadinessDimension;
   blocked_reason?: string;
   input_mode: "gather" | "recording" | "realtime_stream" | string;
   ai: VoiceAIStatus;
   booking: VoiceBookingReadiness;
+};
+
+export type VoiceReadinessBlocker = {
+  code: string;
+  scope?: string;
+  entity_id?: string;
+  message: string;
+};
+
+export type VoiceReadinessDimension = {
+  ready: boolean;
+  blockers: VoiceReadinessBlocker[];
 };
 
 export type VoiceBookingReadiness = {
@@ -1156,4 +1954,45 @@ export type OwnerCorrection = {
   applied_service_alias_id?: string;
   created_at: string;
   updated_at: string;
+};
+
+export type OperationsHealthStatus = "healthy" | "running" | "degraded" | "stale" | "unknown";
+
+export type OperationsHealthLink = {
+  label: string;
+  href: string;
+};
+
+export type OperationsHealthJob = {
+  key: string;
+  label: string;
+  status: OperationsHealthStatus;
+  last_started_at?: string;
+  last_completed_at?: string;
+  last_success_at?: string;
+  last_heartbeat_at?: string;
+  last_duration_ms?: number;
+  last_processed_count?: number;
+  error_class?: string;
+  error_code?: string;
+  stale_after_seconds: number;
+  links: OperationsHealthLink[];
+};
+
+export type OperationsHealthQueue = {
+  key: string;
+  label: string;
+  status: OperationsHealthStatus;
+  backlog_count: number;
+  oldest_at?: string;
+  dead_letter_count: number;
+  error_code?: string;
+  links: OperationsHealthLink[];
+};
+
+export type OperationsHealthResponse = {
+  status: OperationsHealthStatus;
+  evaluated_at: string;
+  jobs: OperationsHealthJob[];
+  queues: OperationsHealthQueue[];
 };

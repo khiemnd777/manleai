@@ -1,5 +1,7 @@
 export type PublicCatalog = {
   salon: PublicSalon;
+  scheduling_authority: "owner_manual" | "manleai_calendar" | "external_provider";
+  scheduling_authority_version: number;
   services: PublicService[];
   staff: PublicStaffMember[];
   hours: PublicBusinessHourPeriod[];
@@ -17,7 +19,6 @@ export type PublicSalon = {
   timezone: string;
   primary_language: string;
   secondary_language?: string;
-  active_pos_provider: string;
 };
 
 export type PublicService = {
@@ -38,5 +39,4 @@ export type PublicBusinessHourPeriod = {
   start_local_time: string;
   end_local_time: string;
   source: string;
-  provider?: string;
 };

@@ -108,7 +108,7 @@ func (s *Service) handlePendingOfferedSlotDateTimeCorrection(
 	turn.AIMetadata = mergeMetadata(turn.AIMetadata, map[string]any{"datetime_correction_confirmed": true})
 
 	if next.RequestedStartTime != nil {
-		available, err := s.applyAvailabilityForRequestedTime(ctx, ownerUserID, &turn, &next, services, staff, cfg)
+		available, _, err := s.applyAvailabilityForRequestedTime(ctx, ownerUserID, &turn, &next, services, staff, cfg)
 		if err != nil {
 			updated, handoffErr := s.saveHandoffTurn(ctx, turn, next, HandoffReasonBookingUnavailable, "I could not check appointment availability, so this is not confirmed. The owner needs to review it.", services, staff, cfg)
 			return true, updated, handoffErr

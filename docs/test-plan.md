@@ -47,8 +47,8 @@
 - Verify cancel test booking cancels the latest Square test appointment through `booking.Service`.
 - Verify AI booking enablement is not blocked by optional Square test booking create/cancel state once Square connection, location, sync, bookable service/staff, and business hours readiness pass.
 - Verify the dashboard Integrations page handles loading, empty, error, success, disabled/gated, and mobile states for Square readiness.
-- Verify the dashboard Appointments page distinguishes POS-confirmed appointments from `fallback_pending` requests that need owner review.
-- Verify POS-confirmed appointment pagination returns stable `limit`, `offset`, and `has_more` metadata without changing calendar-day or metric data to the current page slice.
+- Verify the dashboard Appointments page distinguishes authority-native internal/external confirmation, owner-review requests, and external `fallback_pending` reconciliation work without using a POS ID as the authority discriminator.
+- Verify mixed-origin appointment pagination returns stable `limit`, `offset`, and `has_more` metadata without changing calendar-day or metric data to the current page slice.
 - Verify customer record pagination returns stable `limit`, `offset`, and `has_more` metadata without changing customer summary metrics to the current page slice.
 - Verify the dashboard Services and Staff pages let owners allow/block AI booking for active synced records without editing Square data.
 - Verify inactive synced services/staff cannot be enabled for AI booking and remain unavailable in the dashboard.
@@ -103,10 +103,10 @@
 - Verify LLM replies follow conversation rules: ask one question at a time, keep responses short, do not invent prices, and use owner handoff for low confidence or sensitive requests.
 - Verify TTS failures do not mark a call or booking as successful and produce a safe fallback path.
 - Verify AI-generated booking turns still call `booking.Service` only after required booking details are collected.
-- Verify AI-generated confirmed wording appears only after POS-confirmed booking success with POS booking ID and appointment.
+- Verify AI-generated confirmed wording appears only after the selected authority returns its exact durable success evidence; owner-manual requests never use confirmed wording.
 - Verify POS failure after an AI-generated phone turn produces pending request wording and no confirmed appointment language.
 - Verify prompt and model tests cover human requests, complaints, refunds, payment disputes, complex group bookings, missing fields, low confidence, AI-disabled state, and POS fallback.
-- Verify AI tone presets change only spoken reply style and do not weaken one-question, known-slot preservation, handoff, or POS-first confirmation guardrails.
+- Verify AI tone presets change only spoken reply style and do not weaken one-question, known-slot preservation, handoff, or authority-native confirmation guardrails.
 - Verify the Calls dashboard handles loading, empty, error, success, and gated states for external AI voice provider readiness.
 
 ## Milestone 7A Knowledge And Owner Corrections
@@ -116,8 +116,46 @@
 - Verify active knowledge can answer FAQ and policy questions without calling the booking service.
 - Verify owner corrections can be captured, applied to active knowledge, and dismissed.
 - Verify owner corrections can be applied to a structured service alias when the correction is about service recognition, and repeated applies update one `(salon_id, normalized_alias)` row rather than creating duplicates.
-- Verify knowledge context does not allow confirmed appointment wording unless the booking service returns POS-confirmed booking state.
+- Verify knowledge context does not allow confirmed appointment wording unless the neutral scheduling boundary returns authority-native durable confirmation evidence.
 - Verify the AI Training dashboard handles loading, empty, error, success, disabled/gated, and mobile states.
+
+## Customer Appointment SMS
+
+- Verify policy is disabled by default, owner/version scoped, rejects equal or
+  invalid quiet hours, and computes cross-midnight, DST-gap, and DST-overlap
+  boundaries in the salon timezone.
+- Verify a caller ID alone creates no consent. Ask only on phone after the exact
+  final-review authorization; yes records explicit consent, no/unclear/provider
+  failure does not block scheduling, and simulator/disabled policy skips the
+  prompt. Cover different wording/data across all three scheduling authorities.
+- Verify owner attestation requires an unchecked-to-checked explicit action;
+  false is invalid. Local yes/owner cannot lift STOP. Signed, policy-ready
+  Twilio START can create or transition missing/pending/declined/opted-out
+  state; HELP is event-only. Never parse webhook Body or send a second reply.
+- Verify callback signatures cover exact URL and all form parameters, and bind
+  Account SID plus Messaging Service SID or exact sender To. A correctly signed
+  shared-token callback routed to another salon must perform zero mutation.
+- Verify request_received commits with the owner-manual request and says it is
+  not confirmed. Verify internal/external confirmed, rescheduled, and cancelled
+  outbox rows commit with the matching appointment evidence; imported POS
+  calendar mirrors do not enqueue. Rollback produces zero delivery rows.
+- Verify external authority appointment version zero commits and produces one
+  delivery with `source_version=0`; do not invent version one.
+- Verify dispatch and requeue revalidate exact consent, policy, destination,
+  request/appointment status and source version. Race STOP, policy disable, and
+  lifecycle changes against final dispatch: either the dispatch marker wins
+  first or the provider is never called; stale copy suppresses.
+- Verify safe pre-dispatch retry is bounded, final lease exhaustion dead-letters,
+  ambiguous custom provider errors become durable unknown-outcome evidence,
+  and unknown outcomes cannot be requeued. Exactly one bounded owner requeue is
+  allowed; exact replay succeeds and concurrent/new over-limit actions fail.
+- Verify callbacks are monotonic: delivered followed by late sent records audit
+  without regressing delivery or attempt state.
+- Verify appointment and owner-review request child surfaces cover loading,
+  empty, error/retry, consent, opted-out, quiet-hours, accepted, sent-pending,
+  delivered, suppressed, failed, redacted, requeueable, blocked, success, and
+  responsive mobile states without full destination, body, hash, provider ID,
+  or credential exposure.
 
 ## Milestone 7B Transcript Review Corrections
 
@@ -133,7 +171,7 @@
 - Verify `POST /api/salons/:id/training/evaluate` is owner-scoped and requires a message.
 - Verify evaluation returns a preview answer for matching active knowledge.
 - Verify evaluation returns a no-match fallback when no active knowledge matches.
-- Verify unsafe confirmation knowledge returns POS-first safe wording.
+- Verify unsafe confirmation knowledge returns authority-safe wording without inventing a request, internal commit, or provider confirmation.
 - Verify evaluation never creates a call session, transcript, booking attempt, appointment, or POS call.
 - Verify the AI Training dashboard handles evaluating, no-match, matched, error, and mobile states.
 
@@ -149,13 +187,51 @@
 - Verify match review changes are owner-scoped, recompute review state, and never activate a provider.
 - Verify dry-run readiness remains false until a real target adapter and executable dry-run path exist.
 
+## Square Webhook Operations
+
+- Verify the Square webhook list, detail, and requeue routes require
+  authentication, reject cross-salon access as not found, and never expose
+  merchant/location/booking identifiers, raw payloads, signatures, tokens,
+  claim tokens, provider responses, customer data, or raw errors.
+- Verify list filters accept only `pending`, `processing`, `failed`,
+  `dead_letter`, and `succeeded`; the empty filter may return a safe read-only
+  `ignored` event, while an explicit `ignored` filter is rejected.
+- Verify list pagination returns stable `limit`, `offset`, and `has_more`, while
+  backlog/dead-letter/recent-success metrics and calendar-repair health remain
+  salon-wide rather than page-sliced.
+- Verify `can_requeue` is false for pending, processing, succeeded, ignored,
+  nonterminal failure, missing safe diagnostic evidence, and exhausted requeue
+  limits; only a backend-authorized terminal failure/dead letter can be
+  requeued.
+- Verify the same `(salon_id, action_key, event)` returns the saved action with
+  `X-Idempotent-Replay: true`, changed action-key reuse conflicts, double-click
+  cannot create a second requeue, and an uncertain browser response retries the
+  exact same action key.
+- Verify requeue queues the existing durable event and clears only bounded
+  processing failure state; it does not create or confirm an appointment and
+  cannot mutate an internal-origin appointment through downstream repair.
+- Verify `/dashboard/integrations` renders webhook operations only inside the
+  active connected Square card, gates missing verifier configuration, and
+  covers loading, empty, list/detail error, success, disabled, filtering,
+  pagination, submitting, exact-replay, read-only ignored, desktop table, and
+  mobile card states.
+- Verify the dashboard renders only backend-safe event/timestamp/error-code
+  fields, reads `X-Idempotent-Replay` when exposed, and treats a missing replay
+  header as an ordinary successful response rather than inferring replay.
+
 ## Public Catalog And Landing App
 
 - Verify public catalog settings are owner-scoped and slug uniqueness is enforced.
 - Verify `GET /api/public/salon` and `GET /api/public/salons/:slug` return only published, public-safe data.
 - Verify public responses exclude staff contact details, POS IDs, provider tokens, sync errors, and owner identifiers.
 - Verify the landing app renders loading, not-found, unpublished, and published states without creating booking attempts.
-- Verify public copy stays call-to-book and never claims a web appointment is confirmed.
+- Verify public copy stays call-to-request and never claims a web appointment is confirmed.
+- Verify `owner_manual` publishing needs a canonical eligible service but no
+  staff or POS link, `manleai_calendar` uses current activation plus local
+  hours, and `external_provider` uses current synced/linked projections.
+- Verify publish waits on the shared scheduling fence, rejects a stale expected
+  authority version, remains tenant-scoped, and public reads fail closed after
+  readiness becomes stale.
 
 ## Configuration Transfer
 

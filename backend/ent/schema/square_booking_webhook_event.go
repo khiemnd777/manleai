@@ -32,6 +32,10 @@ func (SquareBookingWebhookEvent) Fields() []ent.Field {
 		field.Time("processing_lease_expires_at").Optional().Nillable(),
 		field.Time("processed_at").Optional().Nillable(),
 		field.String("last_error").Optional(),
+		field.String("last_error_class").Optional(),
+		field.String("last_error_code").Optional(),
+		field.Time("dead_lettered_at").Optional().Nillable(),
+		field.Int("requeue_count").Default(0).NonNegative(),
 		field.Time("created_at").Default(time.Now),
 		field.Time("updated_at").Default(time.Now).UpdateDefault(time.Now),
 	}

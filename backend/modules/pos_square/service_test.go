@@ -88,7 +88,7 @@ func TestBuildReadinessAllowsEnableWhenSquareIsBookingReady(t *testing.T) {
 		{DayOfWeek: 1, StartLocalTime: "09:00:00", EndLocalTime: "17:00:00", Source: pos.BusinessHourSourceImported, Provider: pos.ProviderSquare},
 	}
 
-	confirmed := buildReadiness(false, connection, services, staff, periods, &booking.TestBookingRecord{
+	confirmed := buildReadiness(false, booking.SchedulingAuthorityExternalProvider, connection, services, staff, periods, &booking.TestBookingRecord{
 		AppointmentID:     "appointment_1",
 		Status:            booking.StatusConfirmed,
 		AppointmentStatus: booking.StatusConfirmed,
@@ -104,7 +104,7 @@ func TestBuildReadinessAllowsEnableWhenSquareIsBookingReady(t *testing.T) {
 		t.Fatalf("enable should be allowed when Square is connected, synced, and booking-ready")
 	}
 
-	cancelled := buildReadiness(false, connection, services, staff, periods, &booking.TestBookingRecord{
+	cancelled := buildReadiness(false, booking.SchedulingAuthorityExternalProvider, connection, services, staff, periods, &booking.TestBookingRecord{
 		AppointmentID:     "appointment_1",
 		Status:            booking.StatusCancelled,
 		AppointmentStatus: booking.StatusCancelled,
@@ -117,12 +117,12 @@ func TestBuildReadinessAllowsEnableWhenSquareIsBookingReady(t *testing.T) {
 		t.Fatalf("enable should remain allowed after cancelled test booking")
 	}
 
-	withoutTest := buildReadiness(false, connection, services, staff, periods, nil, nil, nil)
+	withoutTest := buildReadiness(false, booking.SchedulingAuthorityExternalProvider, connection, services, staff, periods, nil, nil, nil)
 	if !withoutTest.CanEnableAIBooking {
 		t.Fatalf("enable should not require an optional Square test booking")
 	}
 
-	pending := buildReadiness(false, connection, services, staff, periods, &booking.TestBookingRecord{
+	pending := buildReadiness(false, booking.SchedulingAuthorityExternalProvider, connection, services, staff, periods, &booking.TestBookingRecord{
 		Status:          booking.StatusPOSPending,
 		ProviderOutcome: booking.ProviderOutcomeInFlight,
 		RetryPolicy:     booking.RetryPolicyNone,
@@ -138,7 +138,7 @@ func TestBuildReadinessAllowsEnableWhenSquareIsBookingReady(t *testing.T) {
 
 func TestBuildReadinessBlocksTestBookingWithoutBookableRecords(t *testing.T) {
 	now := time.Date(2026, 6, 10, 15, 0, 0, 0, time.UTC)
-	readiness := buildReadiness(false, &pos.Connection{
+	readiness := buildReadiness(false, booking.SchedulingAuthorityExternalProvider, &pos.Connection{
 		ID:         "connection_1",
 		Status:     pos.StatusActive,
 		LocationID: "loc_1",
@@ -149,6 +149,60 @@ func TestBuildReadinessBlocksTestBookingWithoutBookableRecords(t *testing.T) {
 	}
 	if readiness.ServiceCount != 0 || readiness.StaffCount != 0 {
 		t.Fatalf("unexpected counts: services=%d staff=%d", readiness.ServiceCount, readiness.StaffCount)
+	}
+}
+
+func TestBuildReadinessReportsInternalAuthorityWithoutHidingSquareSetup(t *testing.T) {
+	now := time.Date(2026, 7, 24, 15, 0, 0, 0, time.UTC)
+	connection, services, staff, periods := squareReadyPrerequisites(now)
+
+	readiness := buildReadiness(false, booking.SchedulingAuthorityOwnerManual, connection, services, staff, periods, &booking.TestBookingRecord{
+		AppointmentID:       "appointment_external",
+		AppointmentStatus:   booking.StatusConfirmed,
+		SchedulingAuthority: booking.SchedulingAuthorityExternalProvider,
+		POSBookingID:        "square_booking_external",
+	}, nil, nil)
+
+	if readiness.SchedulingAuthority != booking.SchedulingAuthorityOwnerManual {
+		t.Fatalf("scheduling authority = %q, want %q", readiness.SchedulingAuthority, booking.SchedulingAuthorityOwnerManual)
+	}
+	if readiness.CanTestBooking || readiness.CanEnableAIBooking {
+		t.Fatalf("internal authority must block Square create/enable gates: %#v", readiness)
+	}
+	if !readiness.canTestExternalProviderBooking() {
+		t.Fatalf("provider setup is ready and must remain available for persisted external-origin retries")
+	}
+	if !readiness.CanCancelTestBooking {
+		t.Fatalf("existing external-origin test appointment must remain cancellable after an authority switch")
+	}
+	for _, key := range []string{"connect_square", "select_location", "sync_services", "sync_staff", "sync_business_hours", "booking_writes"} {
+		check := findReadinessCheck(readiness.Checks, key)
+		if check == nil || !check.Complete {
+			t.Fatalf("provider setup check %q = %#v, want complete", key, check)
+		}
+	}
+	target := buildSchedulingTargetReadiness(pos.ProviderSquare, readiness)
+	if !target.Ready || !target.AvailabilityReady || !target.ExecutionReady || len(target.Blockers) != 0 {
+		t.Fatalf("external target readiness must use provider evidence independently of current authority: %#v", target)
+	}
+	wrongAdapter := buildSchedulingTargetReadiness("another-provider", readiness)
+	if wrongAdapter.Ready || len(wrongAdapter.Blockers) == 0 || wrongAdapter.Blockers[0].Code != "EXTERNAL_PROVIDER_SELECT_POS_ADAPTER" {
+		t.Fatalf("external target readiness must require the selected adapter: %#v", wrongAdapter)
+	}
+}
+
+func TestExternalTargetReadinessSeparatesAvailabilityFromBookingExecution(t *testing.T) {
+	now := time.Date(2026, 7, 24, 15, 0, 0, 0, time.UTC)
+	connection, services, staff, periods := squareReadyPrerequisites(now)
+	readiness := buildReadiness(false, booking.SchedulingAuthorityExternalProvider, connection, services, staff, periods, nil, &pos.POSErrorRecord{
+		ErrorCode: pos.ErrorPermissionDenied, ErrorMessage: "provider write permission denied", CreatedAt: now,
+	}, nil)
+	target := buildSchedulingTargetReadiness(pos.ProviderSquare, readiness)
+	if !target.AvailabilityReady || target.ExecutionReady || target.Ready || len(target.AvailabilityBlockers) != 0 {
+		t.Fatalf("capability readiness = %#v", target)
+	}
+	if len(target.ExecutionBlockers) == 0 || target.ExecutionBlockers[0].Code != "EXTERNAL_PROVIDER_BOOKING_WRITES" {
+		t.Fatalf("execution blockers = %#v", target.ExecutionBlockers)
 	}
 }
 
@@ -195,7 +249,11 @@ func TestCreateTestBookingReplaysBeforeReadinessGate(t *testing.T) {
 		StaffID:            "staff_1",
 		RequestedStartTime: startTime,
 	}
-	operations := &fakeBookingOperationService{replayCreateAttempt: replayed, replayCreateFound: true}
+	operations := &fakeBookingOperationService{
+		currentAuthority:    booking.SchedulingAuthorityOwnerManual,
+		replayCreateAttempt: replayed,
+		replayCreateFound:   true,
+	}
 	readinessCalls := 0
 	service := &Service{
 		bookingService: operations,
@@ -221,13 +279,13 @@ func TestCreateTestBookingReplaysBeforeReadinessGate(t *testing.T) {
 	if response == nil || response.BookingAttempt != replayed || response.Appointment != replayed.Appointment {
 		t.Fatalf("CreateTestBooking response = %#v, want hydrated replay", response)
 	}
-	if operations.replayCreateCalls != 1 || operations.createCalls != 0 || readinessCalls != 1 {
-		t.Fatalf("calls replay=%d create=%d readiness=%d, want 1/0/1", operations.replayCreateCalls, operations.createCalls, readinessCalls)
+	if operations.replayCreateCalls != 1 || operations.createDispatchAuthorityCalls != 0 || operations.createCalls != 0 || readinessCalls != 1 {
+		t.Fatalf("calls replay=%d dispatch_authority=%d create=%d readiness=%d, want 1/0/0/1", operations.replayCreateCalls, operations.createDispatchAuthorityCalls, operations.createCalls, readinessCalls)
 	}
 }
 
 func TestCreateTestBookingNewOperationStillHonorsReadinessGate(t *testing.T) {
-	operations := &fakeBookingOperationService{}
+	operations := &fakeBookingOperationService{currentAuthority: booking.SchedulingAuthorityExternalProvider}
 	service := &Service{
 		bookingService: operations,
 		readinessLoader: func(context.Context, string, string) (*ReadinessStatus, error) {
@@ -246,8 +304,176 @@ func TestCreateTestBookingNewOperationStillHonorsReadinessGate(t *testing.T) {
 	if !errors.Is(err, ErrReadinessGate) || response != nil {
 		t.Fatalf("CreateTestBooking response=%#v err=%v, want readiness gate", response, err)
 	}
-	if operations.replayCreateCalls != 1 || operations.createCalls != 0 {
-		t.Fatalf("calls replay=%d create=%d, want 1/0", operations.replayCreateCalls, operations.createCalls)
+	if operations.replayCreateCalls != 1 || operations.createDispatchAuthorityCalls != 1 || operations.createCalls != 0 {
+		t.Fatalf("calls replay=%d dispatch_authority=%d create=%d, want 1/1/0", operations.replayCreateCalls, operations.createDispatchAuthorityCalls, operations.createCalls)
+	}
+}
+
+func TestCreateTestBookingRejectsNewOperationUnderInternalAuthorityBeforeReadinessOrCreate(t *testing.T) {
+	for _, authority := range []string{
+		booking.SchedulingAuthorityOwnerManual,
+		booking.SchedulingAuthorityManleAICalendar,
+	} {
+		t.Run(authority, func(t *testing.T) {
+			operations := &fakeBookingOperationService{currentAuthority: authority}
+			readinessCalls := 0
+			service := &Service{
+				bookingService: operations,
+				readinessLoader: func(context.Context, string, string) (*ReadinessStatus, error) {
+					readinessCalls++
+					return &ReadinessStatus{CanTestBooking: true}, nil
+				},
+			}
+
+			response, err := service.CreateTestBooking(context.Background(), "salon_1", "owner_1", TestBookingRequest{
+				OperationKey:        "square-test-create-internal",
+				AvailabilityQuoteID: "00000000-0000-4000-8000-000000000042",
+				SlotFingerprint:     "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+				ServiceID:           "service_3",
+				StaffID:             "staff_3",
+				StartTime:           time.Date(2026, 7, 17, 13, 0, 0, 0, time.UTC),
+			})
+			if response != nil || !errors.Is(err, booking.ErrSchedulingAuthorityNotReady) {
+				t.Fatalf("CreateTestBooking response=%#v err=%v, want authority-not-ready", response, err)
+			}
+			if operations.replayCreateCalls != 1 || operations.createDispatchAuthorityCalls != 1 || operations.createCalls != 0 || readinessCalls != 0 {
+				t.Fatalf("calls replay=%d dispatch_authority=%d create=%d readiness=%d, want 1/1/0/0", operations.replayCreateCalls, operations.createDispatchAuthorityCalls, operations.createCalls, readinessCalls)
+			}
+		})
+	}
+}
+
+func TestCreateTestBookingAllowsExternalOriginRetryAfterCurrentAuthoritySwitch(t *testing.T) {
+	const retryAttemptID = "00000000-0000-4000-8000-000000000043"
+	attempt := &booking.BookingAttempt{ID: "attempt-retry-external", Status: booking.StatusConfirmed}
+	operations := &fakeBookingOperationService{
+		currentAuthority:        booking.SchedulingAuthorityOwnerManual,
+		createDispatchAuthority: booking.SchedulingAuthorityExternalProvider,
+		createAttempt:           attempt,
+	}
+	readinessCalls := 0
+	service := &Service{
+		bookingService: operations,
+		readinessLoader: func(context.Context, string, string) (*ReadinessStatus, error) {
+			readinessCalls++
+			return &ReadinessStatus{
+				SchedulingAuthority:    booking.SchedulingAuthorityOwnerManual,
+				CanTestBooking:         false,
+				providerCanTestBooking: true,
+			}, nil
+		},
+	}
+
+	response, err := service.CreateTestBooking(context.Background(), "salon_1", "owner_1", TestBookingRequest{
+		OperationKey:        "square-test-create-safe-retry",
+		RetryOfAttemptID:    retryAttemptID,
+		AvailabilityQuoteID: "00000000-0000-4000-8000-000000000044",
+		SlotFingerprint:     "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		ServiceID:           "service_external",
+		StaffID:             "staff_external",
+		StartTime:           time.Date(2026, 7, 18, 14, 0, 0, 0, time.UTC),
+	})
+	if err != nil || response == nil || response.BookingAttempt != attempt {
+		t.Fatalf("CreateTestBooking response=%#v err=%v, want external-origin retry", response, err)
+	}
+	if operations.replayCreateCalls != 1 || operations.createDispatchAuthorityCalls != 1 || operations.createCalls != 1 || readinessCalls != 2 {
+		t.Fatalf("calls replay=%d dispatch_authority=%d create=%d readiness=%d, want 1/1/1/2", operations.replayCreateCalls, operations.createDispatchAuthorityCalls, operations.createCalls, readinessCalls)
+	}
+	if operations.createDispatchOperationKey != "square-test-create-safe-retry" || operations.createDispatchRetryAttemptID != retryAttemptID {
+		t.Fatalf("dispatch lineage operation=%q retry=%q", operations.createDispatchOperationKey, operations.createDispatchRetryAttemptID)
+	}
+	if operations.createRequest.OperationKey != "square-test-create-safe-retry" || operations.createRequest.RetryOfAttemptID != retryAttemptID {
+		t.Fatalf("create lineage = %#v", operations.createRequest)
+	}
+}
+
+func TestCreateTestBookingRejectsInvalidPersistedLineageBeforeReadinessOrCreate(t *testing.T) {
+	tests := []struct {
+		name    string
+		wantErr error
+	}{
+		{name: "conflicting operation and retry origins", wantErr: booking.ErrOperationConflict},
+		{name: "cross tenant retry", wantErr: pos.ErrNotFound},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			operations := &fakeBookingOperationService{
+				currentAuthority:           booking.SchedulingAuthorityOwnerManual,
+				createDispatchAuthorityErr: test.wantErr,
+			}
+			readinessCalls := 0
+			service := &Service{
+				bookingService: operations,
+				readinessLoader: func(context.Context, string, string) (*ReadinessStatus, error) {
+					readinessCalls++
+					return &ReadinessStatus{providerCanTestBooking: true}, nil
+				},
+			}
+
+			response, err := service.CreateTestBooking(context.Background(), "salon_1", "owner_1", TestBookingRequest{
+				OperationKey:        "square-test-create-invalid-lineage",
+				RetryOfAttemptID:    "00000000-0000-4000-8000-000000000045",
+				AvailabilityQuoteID: "00000000-0000-4000-8000-000000000046",
+				SlotFingerprint:     "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+				ServiceID:           "service_invalid",
+				StaffID:             "staff_invalid",
+				StartTime:           time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC),
+			})
+			if response != nil || !errors.Is(err, test.wantErr) {
+				t.Fatalf("CreateTestBooking response=%#v err=%v, want %v", response, err, test.wantErr)
+			}
+			if operations.replayCreateCalls != 1 || operations.createDispatchAuthorityCalls != 1 || operations.createCalls != 0 || readinessCalls != 0 {
+				t.Fatalf("calls replay=%d dispatch_authority=%d create=%d readiness=%d, want 1/1/0/0", operations.replayCreateCalls, operations.createDispatchAuthorityCalls, operations.createCalls, readinessCalls)
+			}
+		})
+	}
+}
+
+func TestNewServiceAcceptsBookingOperationFacadeAndPropagatesAuthorityError(t *testing.T) {
+	operations := &fakeBookingOperationService{
+		currentAuthority: booking.SchedulingAuthorityExternalProvider,
+		createErr:        booking.ErrSchedulingAuthorityNotReady,
+	}
+	service := NewService(nil, nil, "state-secret", operations)
+	service.readinessLoader = func(context.Context, string, string) (*ReadinessStatus, error) {
+		return &ReadinessStatus{CanTestBooking: true}, nil
+	}
+
+	response, err := service.CreateTestBooking(context.Background(), "salon_1", "owner_1", TestBookingRequest{
+		OperationKey:        "authority-facade-create",
+		AvailabilityQuoteID: "00000000-0000-4000-8000-000000000041",
+		SlotFingerprint:     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		ServiceID:           "service_2",
+		StaffID:             "staff_2",
+		StartTime:           time.Date(2026, 7, 16, 11, 0, 0, 0, time.UTC),
+	})
+	if response != nil || !errors.Is(err, booking.ErrSchedulingAuthorityNotReady) {
+		t.Fatalf("CreateTestBooking response=%#v err=%v, want authority-not-ready", response, err)
+	}
+	if operations.replayCreateCalls != 1 || operations.createDispatchAuthorityCalls != 1 || operations.createCalls != 1 {
+		t.Fatalf("calls replay=%d dispatch_authority=%d create=%d, want 1/1/1", operations.replayCreateCalls, operations.createDispatchAuthorityCalls, operations.createCalls)
+	}
+}
+
+func TestCancelTestBookingUsesBookingOperationFacade(t *testing.T) {
+	operations := &fakeBookingOperationService{
+		latest: &booking.TestBookingRecord{
+			AppointmentID:     "appointment_2",
+			AppointmentStatus: booking.StatusConfirmed,
+		},
+		cancelErr: booking.ErrSchedulingAuthorityNotReady,
+	}
+	service := NewService(nil, nil, "state-secret", operations)
+
+	response, err := service.CancelTestBooking(context.Background(), "salon_2", "owner_2", CancelTestBookingRequest{
+		OperationKey:  "authority-facade-cancel",
+		AppointmentID: "appointment_2",
+	})
+	if response != nil || !errors.Is(err, booking.ErrSchedulingAuthorityNotReady) {
+		t.Fatalf("CancelTestBooking response=%#v err=%v, want authority-not-ready", response, err)
+	}
+	if operations.replayCancelCalls != 1 || operations.latestCalls != 1 || operations.cancelCalls != 1 {
+		t.Fatalf("calls replay=%d latest=%d cancel=%d, want 1/1/1", operations.replayCancelCalls, operations.latestCalls, operations.cancelCalls)
 	}
 }
 
@@ -312,10 +538,61 @@ func TestCancelTestBookingExplicitTargetReplaysBeforeLatestRead(t *testing.T) {
 	}
 }
 
+func TestCancelTestBookingAllowsExistingExternalOriginAfterCurrentAuthoritySwitch(t *testing.T) {
+	appointment := &booking.Appointment{ID: "appointment_external", Status: booking.StatusCancelled}
+	operations := &fakeBookingOperationService{
+		currentAuthority: booking.SchedulingAuthorityOwnerManual,
+		latest: &booking.TestBookingRecord{
+			AppointmentID:     appointment.ID,
+			AppointmentStatus: booking.StatusConfirmed,
+		},
+		cancelAppointment: appointment,
+	}
+	service := &Service{
+		bookingService: operations,
+		readinessLoader: func(context.Context, string, string) (*ReadinessStatus, error) {
+			return &ReadinessStatus{SchedulingAuthority: booking.SchedulingAuthorityOwnerManual}, nil
+		},
+	}
+
+	response, err := service.CancelTestBooking(context.Background(), "salon_1", "owner_1", CancelTestBookingRequest{
+		OperationKey:  "square-test-cancel-external-origin",
+		AppointmentID: appointment.ID,
+		Reason:        "AI booking readiness test cleanup",
+	})
+	if err != nil || response == nil || response.Appointment != appointment {
+		t.Fatalf("CancelTestBooking response=%#v err=%v, want origin-routed cancellation", response, err)
+	}
+	if operations.replayCancelCalls != 1 || operations.latestCalls != 1 || operations.cancelCalls != 1 || operations.currentAuthorityCalls != 0 {
+		t.Fatalf("calls replay=%d latest=%d cancel=%d authority=%d, want 1/1/1/0", operations.replayCancelCalls, operations.latestCalls, operations.cancelCalls, operations.currentAuthorityCalls)
+	}
+}
+
+func TestEnableAIBookingRejectsInternalAuthority(t *testing.T) {
+	for _, authority := range []string{
+		booking.SchedulingAuthorityOwnerManual,
+		booking.SchedulingAuthorityManleAICalendar,
+	} {
+		t.Run(authority, func(t *testing.T) {
+			service := &Service{
+				bookingService: &fakeBookingOperationService{currentAuthority: authority},
+				readinessLoader: func(context.Context, string, string) (*ReadinessStatus, error) {
+					return &ReadinessStatus{SchedulingAuthority: authority}, nil
+				},
+			}
+
+			response, err := service.EnableAIBooking(context.Background(), "salon_1", "owner_1")
+			if response != nil || !errors.Is(err, booking.ErrSchedulingAuthorityNotReady) {
+				t.Fatalf("EnableAIBooking response=%#v err=%v, want authority-not-ready", response, err)
+			}
+		})
+	}
+}
+
 func TestBuildReadinessBlocksEnableWhenCreateBookingPermissionDenied(t *testing.T) {
 	now := time.Date(2026, 7, 6, 17, 0, 0, 0, time.UTC)
 	connection, services, staff, periods := squareReadyPrerequisites(now)
-	readiness := buildReadiness(false, connection, services, staff, periods, nil, &pos.POSErrorRecord{
+	readiness := buildReadiness(false, booking.SchedulingAuthorityExternalProvider, connection, services, staff, periods, nil, &pos.POSErrorRecord{
 		ErrorCode:    pos.ErrorPermissionDenied,
 		ErrorMessage: "square INSUFFICIENT_SCOPES: The application is not allowed to update this field once written since it does not have all the required permissions: APPOINTMENTS_ALL_READ, APPOINTMENTS_ALL_WRITE.",
 		CreatedAt:    now,
@@ -345,7 +622,7 @@ func TestBuildReadinessBlocksEnableWhenCreateBookingPermissionDenied(t *testing.
 func TestBuildReadinessClearsCreateBookingBlockerAfterLaterSuccessfulTest(t *testing.T) {
 	now := time.Date(2026, 7, 6, 17, 0, 0, 0, time.UTC)
 	connection, services, staff, periods := squareReadyPrerequisites(now)
-	readiness := buildReadiness(false, connection, services, staff, periods, &booking.TestBookingRecord{
+	readiness := buildReadiness(false, booking.SchedulingAuthorityExternalProvider, connection, services, staff, periods, &booking.TestBookingRecord{
 		AppointmentID:     "appointment_1",
 		Status:            booking.StatusConfirmed,
 		AppointmentStatus: booking.StatusConfirmed,
@@ -367,7 +644,7 @@ func TestBuildReadinessClearsCreateBookingBlockerAfterLaterSuccessfulTest(t *tes
 
 func TestBuildReadinessSurfacesSquareAppointmentChangeSubscriptionBlocker(t *testing.T) {
 	now := time.Date(2026, 7, 6, 17, 0, 0, 0, time.UTC)
-	readiness := buildReadiness(false, nil, nil, nil, nil, nil, nil, &pos.POSErrorRecord{
+	readiness := buildReadiness(false, booking.SchedulingAuthorityExternalProvider, nil, nil, nil, nil, nil, nil, &pos.POSErrorRecord{
 		ErrorCode:    pos.ErrorPermissionDenied,
 		ErrorMessage: "square FORBIDDEN: Merchant subscription does not support write operations.",
 		CreatedAt:    now,
@@ -385,7 +662,7 @@ func TestBuildReadinessSurfacesSquareAppointmentChangeSubscriptionBlocker(t *tes
 }
 
 func TestBuildReadinessDoesNotTreatInsufficientScopesAsSubscriptionBlocker(t *testing.T) {
-	readiness := buildReadiness(false, nil, nil, nil, nil, nil, nil, &pos.POSErrorRecord{
+	readiness := buildReadiness(false, booking.SchedulingAuthorityExternalProvider, nil, nil, nil, nil, nil, nil, &pos.POSErrorRecord{
 		ErrorCode:    pos.ErrorPermissionDenied,
 		ErrorMessage: "square INSUFFICIENT_SCOPES: The application is not allowed to update this field once written since it does not have all the required permissions: APPOINTMENTS_ALL_READ, APPOINTMENTS_ALL_WRITE.",
 		CreatedAt:    time.Date(2026, 7, 6, 17, 0, 0, 0, time.UTC),
@@ -433,6 +710,16 @@ func findReadinessCheck(checks []ReadinessCheck, key string) *ReadinessCheck {
 }
 
 type fakeBookingOperationService struct {
+	currentAuthority      string
+	currentAuthorityErr   error
+	currentAuthorityCalls int
+
+	createDispatchAuthority      string
+	createDispatchAuthorityErr   error
+	createDispatchAuthorityCalls int
+	createDispatchOperationKey   string
+	createDispatchRetryAttemptID string
+
 	replayCreateAttempt *booking.BookingAttempt
 	replayCreateFound   bool
 	replayCreateErr     error
@@ -440,6 +727,7 @@ type fakeBookingOperationService struct {
 	createAttempt       *booking.BookingAttempt
 	createErr           error
 	createCalls         int
+	createRequest       booking.CreateBookingRequest
 
 	latest      *booking.TestBookingRecord
 	latestErr   error
@@ -457,8 +745,32 @@ type fakeBookingOperationService struct {
 	cancelCalls             int
 }
 
-func (f *fakeBookingOperationService) Create(context.Context, string, string, booking.CreateBookingRequest) (*booking.BookingAttempt, error) {
+func (f *fakeBookingOperationService) CurrentSchedulingAuthority(context.Context, string, string) (string, error) {
+	f.currentAuthorityCalls++
+	authority := f.currentAuthority
+	if authority == "" {
+		authority = booking.SchedulingAuthorityExternalProvider
+	}
+	return authority, f.currentAuthorityErr
+}
+
+func (f *fakeBookingOperationService) ResolveCreateSchedulingAuthority(_ context.Context, _ string, _ string, operationKey string, retryOfAttemptID string) (string, error) {
+	f.createDispatchAuthorityCalls++
+	f.createDispatchOperationKey = operationKey
+	f.createDispatchRetryAttemptID = retryOfAttemptID
+	authority := f.createDispatchAuthority
+	if authority == "" {
+		authority = f.currentAuthority
+	}
+	if authority == "" {
+		authority = booking.SchedulingAuthorityExternalProvider
+	}
+	return authority, f.createDispatchAuthorityErr
+}
+
+func (f *fakeBookingOperationService) Create(_ context.Context, _ string, _ string, req booking.CreateBookingRequest) (*booking.BookingAttempt, error) {
 	f.createCalls++
+	f.createRequest = req
 	return f.createAttempt, f.createErr
 }
 

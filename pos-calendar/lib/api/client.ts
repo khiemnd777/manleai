@@ -1,4 +1,5 @@
 import { apiBaseUrl } from "@/lib/config/env";
+import { browserSession } from "@/lib/api/browser-session";
 
 export type ApiError = {
   code: string;
@@ -7,7 +8,6 @@ export type ApiError = {
 
 type TokenResponse = {
   access_token: string;
-  refresh_token: string;
 };
 
 export class RequestError extends Error {
@@ -22,23 +22,15 @@ export class RequestError extends Error {
 }
 
 export function getAccessToken() {
-  if (typeof window === "undefined") return "";
-  return window.localStorage.getItem("access_token") ?? "";
+  return browserSession.getAccessToken();
 }
 
-export function getRefreshToken() {
-  if (typeof window === "undefined") return "";
-  return window.localStorage.getItem("refresh_token") ?? "";
-}
-
-export function setSession(accessToken: string, refreshToken: string) {
-  window.localStorage.setItem("access_token", accessToken);
-  window.localStorage.setItem("refresh_token", refreshToken);
+export function setSession(accessToken: string) {
+  browserSession.setAccessToken(accessToken);
 }
 
 export function clearSession() {
-  window.localStorage.removeItem("access_token");
-  window.localStorage.removeItem("refresh_token");
+  browserSession.clear();
 }
 
 let refreshPromise: Promise<string | null> | null = null;
@@ -75,9 +67,7 @@ export async function apiStream(path: string, init: RequestInit = {}): Promise<R
 }
 
 export async function logoutSession() {
-  const refreshToken = getRefreshToken();
   clearSession();
-  if (!refreshToken) return;
 
   try {
     await fetch(`${apiBaseUrl}/api/auth/logout`, {
@@ -86,7 +76,8 @@ export async function logoutSession() {
         Accept: "application/json",
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ refresh_token: refreshToken }),
+      body: JSON.stringify({}),
+      credentials: "include",
       cache: "no-store"
     });
   } catch {
@@ -111,6 +102,7 @@ async function sendRequest(path: string, init: RequestInit, accessToken = getAcc
   return fetch(`${apiBaseUrl}${path}`, {
     ...init,
     headers,
+    credentials: "include",
     cache: "no-store"
   });
 }
@@ -167,12 +159,6 @@ function refreshAccessToken() {
 }
 
 async function requestRefreshToken() {
-  const refreshToken = getRefreshToken();
-  if (!refreshToken) {
-    clearSession();
-    return null;
-  }
-
   try {
     const response = await fetch(`${apiBaseUrl}/api/auth/refresh-token`, {
       method: "POST",
@@ -180,7 +166,8 @@ async function requestRefreshToken() {
         Accept: "application/json",
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ refresh_token: refreshToken }),
+      body: JSON.stringify({}),
+      credentials: "include",
       cache: "no-store"
     });
     if (!response.ok) {
@@ -189,12 +176,12 @@ async function requestRefreshToken() {
     }
 
     const tokens = (await response.json()) as TokenResponse;
-    if (!tokens.access_token || !tokens.refresh_token) {
+    if (!tokens.access_token) {
       clearSession();
       return null;
     }
 
-    setSession(tokens.access_token, tokens.refresh_token);
+    setSession(tokens.access_token);
     return tokens.access_token;
   } catch {
     clearSession();

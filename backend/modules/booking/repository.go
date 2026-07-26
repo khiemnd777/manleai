@@ -12,6 +12,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/manleai/ai-receptionist/internal/validation"
 	"github.com/manleai/ai-receptionist/modules/pos"
+	"github.com/manleai/ai-receptionist/modules/scheduling/fence"
 )
 
 type Repository struct {
@@ -40,7 +41,7 @@ func lockBookingCalendarReconciliationTx(ctx context.Context, tx *sql.Tx, salonI
 	_, err := tx.ExecContext(
 		ctx,
 		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
-		"booking-calendar-reconciliation:"+salonID,
+		fence.AdvisoryKey(salonID),
 	)
 	return err
 }
@@ -497,7 +498,13 @@ func (r *Repository) GetSchedule(ctx context.Context, salonID string, provider s
 }
 
 func (r *Repository) CreateAvailabilityQuote(ctx context.Context, record AvailabilityQuoteRecord) (*AvailabilityQuote, error) {
-	if strings.TrimSpace(record.SalonID) == "" || strings.TrimSpace(record.Provider) == "" || strings.TrimSpace(record.RequestFingerprint) == "" || !validProviderFence(record.ProviderFence) || !record.ExpiresAt.After(time.Now().UTC()) || len(record.Slots) == 0 {
+	targetAware := record.OperationType == BookingActionReschedule
+	retryAware := strings.TrimSpace(record.RetryOfAttemptID) != ""
+	if strings.TrimSpace(record.SalonID) == "" || strings.TrimSpace(record.Provider) == "" || strings.TrimSpace(record.RequestFingerprint) == "" || !validProviderFence(record.ProviderFence) || !record.ExpiresAt.After(time.Now().UTC()) || len(record.Slots) == 0 ||
+		(record.OperationType != "" && !targetAware) ||
+		(targetAware && (strings.TrimSpace(record.TargetAppointmentID) == "" || record.TargetAuthorityAppointmentVersion < 0)) ||
+		(!targetAware && strings.TrimSpace(record.TargetAppointmentID) != "") ||
+		(targetAware && retryAware) || !validOptionalUUID(record.RetryOfAttemptID) {
 		return nil, ErrValidation
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
@@ -505,21 +512,76 @@ func (r *Repository) CreateAvailabilityQuote(ctx context.Context, record Availab
 		return nil, err
 	}
 	defer tx.Rollback()
+	if err := lockBookingCalendarReconciliationTx(ctx, tx, record.SalonID); err != nil {
+		return nil, err
+	}
+	var authority string
+	var authorityVersion int64
+	if err := tx.QueryRowContext(ctx, `SELECT scheduling_authority, scheduling_authority_version FROM salon_settings WHERE salon_id = $1 FOR SHARE`, record.SalonID).Scan(&authority, &authorityVersion); err != nil {
+		return nil, err
+	}
+	if authority != SchedulingAuthorityExternalProvider {
+		if !targetAware && !retryAware {
+			return nil, ErrAvailabilityQuoteStale
+		}
+	}
+	if retryAware {
+		if err := validateRetryAvailabilityQuoteOriginTx(ctx, tx, record); err != nil {
+			return nil, err
+		}
+	}
+	if targetAware {
+		var targetVersion int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT authority_appointment_version
+			FROM appointments
+			WHERE id::text=$1 AND salon_id::text=$2
+			  AND scheduling_authority='external_provider'
+			  AND pos_provider=$3
+			  AND authority_appointment_version=$4
+			  AND status NOT IN ('cancelled','declined','no_show')
+			FOR SHARE
+		`, record.TargetAppointmentID, record.SalonID, record.Provider, record.TargetAuthorityAppointmentVersion).Scan(&targetVersion); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, ErrAvailabilityQuoteStale
+			}
+			return nil, err
+		}
+	}
 	quote := AvailabilityQuote{
-		SalonID:            record.SalonID,
-		Provider:           record.Provider,
-		ProviderFence:      record.ProviderFence,
-		RequestFingerprint: record.RequestFingerprint,
-		ExpiresAt:          record.ExpiresAt.UTC(),
-		Slots:              append([]AvailabilitySlot(nil), record.Slots...),
+		SalonID:                           record.SalonID,
+		SchedulingAuthority:               SchedulingAuthorityExternalProvider,
+		SchedulingAuthorityVersion:        authorityVersion,
+		AuthorityProvider:                 record.Provider,
+		AuthorityLocationID:               record.ProviderFence.LocationID,
+		AuthoritySnapshotGeneration:       record.ProviderFence.SnapshotGeneration,
+		Provider:                          record.Provider,
+		ProviderFence:                     record.ProviderFence,
+		RequestFingerprint:                record.RequestFingerprint,
+		OperationType:                     record.OperationType,
+		TargetAppointmentID:               record.TargetAppointmentID,
+		TargetAuthorityAppointmentVersion: record.TargetAuthorityAppointmentVersion,
+		ExpiresAt:                         record.ExpiresAt.UTC(),
+		Slots:                             append([]AvailabilitySlot(nil), record.Slots...),
 	}
 	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO availability_quotes (
+			scheduling_authority, scheduling_authority_version, authority_fence_provenance,
+			authority_provider, authority_location_id, authority_snapshot_generation,
 			salon_id, provider, provider_location_id, provider_snapshot_generation,
-			request_fingerprint, expires_at
+			request_fingerprint, operation_type, retry_of_attempt_id, target_appointment_id, target_authority_appointment_version, expires_at
 		)
-		SELECT salon.id, connection.provider, connection.location_id, connection.snapshot_generation, $5, $6
+		SELECT $7, CASE WHEN $9 = 'reschedule' OR $12 <> '' THEN NULL ELSE settings.scheduling_authority_version END,
+		       CASE WHEN $9 = 'reschedule' THEN 'target_origin' WHEN $12 <> '' THEN 'retry_origin' ELSE 'known' END,
+		       connection.provider, connection.location_id, connection.snapshot_generation,
+		       salon.id, connection.provider, connection.location_id, connection.snapshot_generation,
+		       $5, NULLIF($9,''), NULLIF($12,'')::uuid, NULLIF($10,'')::uuid,
+		       CASE WHEN $9 = 'reschedule' THEN $11::integer ELSE NULL END, $6
 		FROM salons salon
+		JOIN salon_settings settings
+		  ON settings.salon_id = salon.id
+		 AND settings.scheduling_authority_version = $8
+		 AND ($9 = 'reschedule' OR $12 <> '' OR settings.scheduling_authority = $7)
 		JOIN pos_connections connection
 		  ON connection.salon_id = salon.id
 		 AND connection.provider = $2
@@ -529,8 +591,24 @@ func (r *Repository) CreateAvailabilityQuote(ctx context.Context, record Availab
 		 AND connection.snapshot_generation = $4
 		WHERE salon.id = $1
 		  AND salon.active_pos_provider = $2
-		RETURNING id::text, created_at
-	`, quote.SalonID, quote.Provider, quote.ProviderFence.LocationID, quote.ProviderFence.SnapshotGeneration, quote.RequestFingerprint, quote.ExpiresAt).Scan(&quote.ID, &quote.CreatedAt); err != nil {
+		RETURNING id::text, scheduling_authority, COALESCE(scheduling_authority_version,0), authority_provider,
+		          COALESCE(authority_location_id, ''), COALESCE(authority_snapshot_generation, 0),
+		          COALESCE(operation_type,''), COALESCE(target_appointment_id::text,''),
+		          COALESCE(target_authority_appointment_version,0), created_at
+	`, quote.SalonID, quote.Provider, quote.ProviderFence.LocationID, quote.ProviderFence.SnapshotGeneration,
+		quote.RequestFingerprint, quote.ExpiresAt, SchedulingAuthorityExternalProvider, authorityVersion,
+		quote.OperationType, quote.TargetAppointmentID, quote.TargetAuthorityAppointmentVersion, record.RetryOfAttemptID).Scan(
+		&quote.ID,
+		&quote.SchedulingAuthority,
+		&quote.SchedulingAuthorityVersion,
+		&quote.AuthorityProvider,
+		&quote.AuthorityLocationID,
+		&quote.AuthoritySnapshotGeneration,
+		&quote.OperationType,
+		&quote.TargetAppointmentID,
+		&quote.TargetAuthorityAppointmentVersion,
+		&quote.CreatedAt,
+	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrAvailabilityQuoteStale
 		}
@@ -545,9 +623,9 @@ func (r *Repository) CreateAvailabilityQuote(ctx context.Context, record Availab
 			return nil, err
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO availability_quote_slots (quote_id, slot_fingerprint, start_time, end_time, segments)
-			VALUES ($1, $2, $3, $4, $5::jsonb)
-		`, quote.ID, slot.Fingerprint, slot.StartTime.UTC(), slot.EndTime.UTC(), string(segments)); err != nil {
+			INSERT INTO availability_quote_slots (salon_id, quote_id, slot_fingerprint, start_time, end_time, segments)
+			VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+		`, quote.SalonID, quote.ID, slot.Fingerprint, slot.StartTime.UTC(), slot.EndTime.UTC(), string(segments)); err != nil {
 			return nil, err
 		}
 	}
@@ -555,6 +633,70 @@ func (r *Repository) CreateAvailabilityQuote(ctx context.Context, record Availab
 		return nil, err
 	}
 	return &quote, nil
+}
+
+func validateRetryAvailabilityQuoteOriginTx(ctx context.Context, tx *sql.Tx, record AvailabilityQuoteRecord) error {
+	var provider string
+	var location sql.NullString
+	var generation sql.NullInt64
+	var requestedStart, requestedEnd time.Time
+	err := tx.QueryRowContext(ctx, `
+		SELECT attempt.pos_provider, attempt.provider_location_id, attempt.provider_snapshot_generation,
+		       attempt.requested_start_time, attempt.requested_end_time
+		FROM booking_attempts attempt
+		WHERE attempt.id::text=$1 AND attempt.salon_id::text=$2
+		  AND attempt.scheduling_authority='external_provider'
+		  AND COALESCE(attempt.operation_type,'book')='book'
+		  AND attempt.status='fallback_pending' AND attempt.retry_policy='safe'
+		  AND attempt.superseded_at IS NULL
+		FOR SHARE
+	`, record.RetryOfAttemptID, record.SalonID).Scan(&provider, &location, &generation, &requestedStart, &requestedEnd)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrOperationConflict
+	}
+	if err != nil {
+		return err
+	}
+	if provider != record.Provider || !location.Valid || strings.TrimSpace(location.String) != strings.TrimSpace(record.ProviderFence.LocationID) ||
+		!generation.Valid || record.ProviderFence.SnapshotGeneration < generation.Int64 || len(record.Slots) != 1 ||
+		!record.Slots[0].StartTime.UTC().Equal(requestedStart.UTC()) || !record.Slots[0].EndTime.UTC().Equal(requestedEnd.UTC()) {
+		return ErrOperationConflict
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT COALESCE(service_id::text,''), COALESCE(staff_id::text,''), staff_selection_mode, duration_minutes, sort_order
+		FROM booking_attempt_segments
+		WHERE salon_id::text=$1 AND booking_attempt_id::text=$2
+		ORDER BY sort_order, id
+		FOR SHARE
+	`, record.SalonID, record.RetryOfAttemptID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	index := 0
+	for rows.Next() {
+		if index >= len(record.Slots[0].Segments) {
+			return ErrOperationConflict
+		}
+		var serviceID, staffID, selectionMode string
+		var duration, sortOrder int
+		if err := rows.Scan(&serviceID, &staffID, &selectionMode, &duration, &sortOrder); err != nil {
+			return err
+		}
+		segment := record.Slots[0].Segments[index]
+		if serviceID != segment.ServiceID || staffID != segment.StaffID || selectionMode != segment.StaffSelectionMode ||
+			duration != segment.DurationMinutes || sortOrder != index+1 {
+			return ErrOperationConflict
+		}
+		index++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if index == 0 || index != len(record.Slots[0].Segments) {
+		return ErrOperationConflict
+	}
+	return nil
 }
 
 func (r *Repository) GetAvailabilityQuoteProviderFence(ctx context.Context, salonID string, provider string, quoteID string, slotFingerprint string) (pos.ProviderFence, error) {
@@ -816,6 +958,7 @@ func (r *Repository) expireBookingOperationLeases(ctx context.Context, salonID s
 		       COALESCE(attempt.pos_booking_id, '')
 		FROM booking_attempts attempt
 		WHERE (NULLIF($1, '')::uuid IS NULL OR attempt.salon_id = NULLIF($1, '')::uuid)
+		  AND attempt.scheduling_authority = 'external_provider'
 		  AND attempt.status = $2
 		  AND attempt.provider_outcome IN ($3, $4)
 		  AND attempt.superseded_at IS NULL
@@ -882,6 +1025,7 @@ func (r *Repository) expireBookingOperationLeaseCandidate(ctx context.Context, c
 			SELECT id::text
 			FROM appointments
 			WHERE salon_id = $1
+			  AND scheduling_authority = 'external_provider'
 			  AND pos_provider = $2
 			  AND pos_appointment_id = $3
 			FOR UPDATE
@@ -897,14 +1041,18 @@ func (r *Repository) expireBookingOperationLeaseCandidate(ctx context.Context, c
 		}
 	} else if candidate.TargetAppointmentID != "" {
 		appointment, loadErr := scanAppointment(tx.QueryRowContext(ctx, `
-			SELECT id::text, salon_id::text, booking_attempt_id::text, pos_provider, pos_appointment_id,
-			       COALESCE(pos_appointment_version, 0), status, customer_name, customer_phone,
+			SELECT id::text, salon_id::text, booking_attempt_id::text, COALESCE(pos_provider, ''), COALESCE(pos_appointment_id, ''),
+			       COALESCE(pos_appointment_version, 0), scheduling_authority, COALESCE(authority_provider, ''),
+			       COALESCE(authority_appointment_id, ''), COALESCE(authority_appointment_version, 0),
+			       COALESCE(authority_customer_id, ''), confirmed_at, COALESCE(confirmed_by_user_id::text, ''),
+			       COALESCE(confirmation_source, ''), status, customer_name, customer_phone,
 			       COALESCE(customer_email, ''), COALESCE(service_id::text, ''), COALESCE(staff_id::text, ''),
 			       COALESCE(staff_selection_mode, 'specific'), start_time, end_time, COALESCE(notes, ''),
 			       created_at, updated_at
 			FROM appointments
 			WHERE id = $1
 			  AND salon_id = $2
+			  AND scheduling_authority = 'external_provider'
 			  AND pos_provider = $3
 			  AND pos_appointment_id = $4
 			FOR UPDATE
@@ -929,6 +1077,7 @@ func (r *Repository) expireBookingOperationLeaseCandidate(ctx context.Context, c
 		FROM booking_attempts attempt
 		WHERE attempt.id = $1
 		  AND attempt.salon_id = $2
+		  AND attempt.scheduling_authority = 'external_provider'
 		  AND attempt.status = $3
 		  AND attempt.provider_outcome IN ($4, $5)
 		  AND attempt.superseded_at IS NULL
@@ -1028,6 +1177,8 @@ func (r *Repository) expireBookingOperationLeaseCandidate(ctx context.Context, c
 			SET status = $1,
 			    pos_booking_id = $2,
 			    pos_booking_version = $3,
+			    authority_appointment_id = $2,
+			    authority_appointment_version = $3,
 			    provider_outcome = $4,
 			    retry_policy = $5,
 			    reconciliation_status = $6,
@@ -1038,6 +1189,7 @@ func (r *Repository) expireBookingOperationLeaseCandidate(ctx context.Context, c
 			    updated_at = now()
 			WHERE id = $7
 			  AND salon_id = $8
+			  AND scheduling_authority = 'external_provider'
 			  AND status = $9
 			  AND provider_outcome = $10
 		`, terminalStatus, terminalAppointment.POSAppointmentID, terminalAppointment.POSAppointmentVersion,
@@ -1094,6 +1246,7 @@ func (r *Repository) expireBookingOperationLeaseCandidate(ctx context.Context, c
 		    updated_at = now()
 		WHERE id = $7
 		  AND salon_id = $8
+		  AND scheduling_authority = 'external_provider'
 		  AND status = $9
 	`, StatusFallbackPending, item.ProviderOutcome, item.RetryPolicy, item.Reconciliation,
 		policy.ErrorCode, item.ErrorMessage, item.AttemptID, item.SalonID, StatusPOSPending)
@@ -1343,8 +1496,29 @@ func loadAvailabilityQuoteProviderFenceTx(ctx context.Context, tx *sql.Tx, attem
 		  AND quote.provider = $3
 		  AND quote.expires_at > now()
 		  AND length($4) = 64
+		  AND (
+		      ($5 = 'book' AND $8 = '' AND quote.operation_type IS NULL
+		       AND quote.authority_fence_provenance = 'known'
+		       AND quote.scheduling_authority_version IS NOT NULL
+		       AND quote.retry_of_attempt_id IS NULL
+		       AND quote.target_appointment_id IS NULL AND quote.target_authority_appointment_version IS NULL)
+		      OR
+		      ($5 = 'book' AND $8 <> '' AND quote.operation_type IS NULL
+		       AND quote.authority_fence_provenance = 'retry_origin'
+		       AND quote.scheduling_authority_version IS NULL
+		       AND quote.retry_of_attempt_id::text = $8
+		       AND quote.target_appointment_id IS NULL AND quote.target_authority_appointment_version IS NULL)
+		      OR
+		      ($5 = 'reschedule' AND quote.operation_type = 'reschedule'
+		       AND quote.authority_fence_provenance = 'target_origin'
+		       AND quote.retry_of_attempt_id IS NULL
+		       AND quote.target_appointment_id::text = $6
+		       AND quote.target_authority_appointment_version = $7)
+		  )
 		FOR UPDATE OF quote
-	`, attempt.AvailabilityQuoteID, attempt.SalonID, attempt.POSProvider, attempt.SlotFingerprint).Scan(
+	`, attempt.AvailabilityQuoteID, attempt.SalonID, attempt.POSProvider, attempt.SlotFingerprint,
+		attempt.OperationType, attempt.TargetAppointmentID, attempt.TargetAuthorityAppointmentVersion,
+		attempt.RetryOfAttemptID).Scan(
 		&fence.LocationID,
 		&fence.SnapshotGeneration,
 	)
@@ -1372,6 +1546,9 @@ func (r *Repository) claimPendingOperation(ctx context.Context, attempt BookingA
 		return nil, err
 	}
 	defer tx.Rollback()
+	if err := lockBookingCalendarReconciliationTx(ctx, tx, attempt.SalonID); err != nil {
+		return nil, err
+	}
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, attempt.SalonID+":"+attempt.OperationType+":"+attempt.RequestFingerprint); err != nil {
 		return nil, err
 	}
@@ -1409,6 +1586,23 @@ func (r *Repository) claimPendingOperation(ctx context.Context, attempt BookingA
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
+	}
+	if attempt.OperationType == BookingActionBook && attempt.RetryOfAttemptID == "" {
+		var currentAuthority string
+		var currentVersion int64
+		if err := tx.QueryRowContext(ctx, `SELECT scheduling_authority, scheduling_authority_version FROM salon_settings WHERE salon_id = $1 FOR SHARE`, attempt.SalonID).Scan(&currentAuthority, &currentVersion); err != nil {
+			return nil, err
+		}
+		if currentAuthority != SchedulingAuthorityExternalProvider {
+			return nil, ErrAvailabilityQuoteStale
+		}
+		if attempt.AvailabilityQuoteID != "" {
+			var quoteVersion sql.NullInt64
+			var provenance string
+			if err := tx.QueryRowContext(ctx, `SELECT scheduling_authority_version, authority_fence_provenance FROM availability_quotes WHERE id::text=$1 AND salon_id::text=$2`, attempt.AvailabilityQuoteID, attempt.SalonID).Scan(&quoteVersion, &provenance); err != nil || provenance != "known" || !quoteVersion.Valid || quoteVersion.Int64 != currentVersion {
+				return nil, ErrAvailabilityQuoteStale
+			}
+		}
 	}
 	if attempt.AvailabilityQuoteID != "" {
 		quoteFence, err := loadAvailabilityQuoteProviderFenceTx(ctx, tx, attempt)
@@ -1513,7 +1707,10 @@ func (r *Repository) claimPendingOperation(ctx context.Context, attempt BookingA
 			target_pos_booking_version, processing_token, processing_lease_expires_at, provider_outcome, retry_policy, reconciliation_status,
 			customer_name, customer_phone, customer_email, service_id, staff_id, staff_selection_mode,
 			requested_start_time, requested_end_time, notes,
-			provider_location_id, provider_snapshot_generation
+			provider_location_id, provider_snapshot_generation,
+			scheduling_authority, authority_provider, authority_appointment_id,
+			authority_appointment_version, target_authority_appointment_version,
+			authority_idempotency_key, authority_location_id, authority_snapshot_generation
 		)
 		VALUES (
 			$1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''),
@@ -1522,10 +1719,15 @@ func (r *Repository) claimPendingOperation(ctx context.Context, attempt BookingA
 			$15, NULLIF($16, ''), $17, $18, $19, $20,
 			$21, $22, NULLIF($23, ''), NULLIF($24, '')::uuid, NULLIF($25, '')::uuid, $26,
 			$27, $28, NULLIF($29, ''),
-			NULLIF($30, ''), NULLIF($31, 0)
+			NULLIF($30, ''), NULLIF($31, 0),
+			$32, $4, NULLIF($5, ''), NULL, $15, NULLIF($6, ''), NULLIF($30, ''), NULLIF($31, 0)
 		)
 		ON CONFLICT DO NOTHING
-		RETURNING id::text, created_at, updated_at, processing_lease_expires_at
+		RETURNING id::text, created_at, updated_at, processing_lease_expires_at,
+		          scheduling_authority, authority_provider, COALESCE(authority_appointment_id, ''),
+		          COALESCE(authority_appointment_version, 0), COALESCE(target_authority_appointment_version, 0),
+		          COALESCE(authority_idempotency_key, ''), COALESCE(authority_location_id, ''),
+		          COALESCE(authority_snapshot_generation, 0)
 	`, attempt.SalonID, attempt.Source, attempt.Status, attempt.POSProvider, attempt.POSBookingID, attempt.POSIdempotencyKey,
 		attempt.OperationKey, attempt.RequestFingerprint, attempt.RetryOfAttemptID, attempt.RetrySequence,
 		attempt.AvailabilityQuoteID, attempt.SlotFingerprint, attempt.OperationType, attempt.TargetAppointmentID,
@@ -1533,14 +1735,20 @@ func (r *Repository) claimPendingOperation(ctx context.Context, attempt BookingA
 		attempt.CustomerName, attempt.CustomerPhone, attempt.CustomerEmail, attempt.ServiceID, attempt.StaffID, attempt.StaffSelectionMode,
 		attempt.RequestedStartTime, attempt.RequestedEndTime, attempt.Notes,
 		attempt.ProviderFence.LocationID, attempt.ProviderFence.SnapshotGeneration,
-	).Scan(&attempt.ID, &attempt.CreatedAt, &attempt.UpdatedAt, &lease)
+		SchedulingAuthorityExternalProvider,
+	).Scan(
+		&attempt.ID, &attempt.CreatedAt, &attempt.UpdatedAt, &lease,
+		&attempt.SchedulingAuthority, &attempt.AuthorityProvider, &attempt.AuthorityAppointmentID,
+		&attempt.AuthorityAppointmentVersion, &attempt.TargetAuthorityAppointmentVersion,
+		&attempt.AuthorityIdempotencyKey, &attempt.AuthorityLocationID, &attempt.AuthoritySnapshotGeneration,
+	)
 	if err == nil {
 		inserted = true
 		if lease.Valid {
 			value := lease.Time
 			attempt.ProcessingLeaseEnds = &value
 		}
-		if err := insertBookingAttemptSegments(ctx, tx, attempt.ID, segments); err != nil {
+		if err := insertBookingAttemptSegments(ctx, tx, attempt.SalonID, attempt.ID, segments); err != nil {
 			return nil, err
 		}
 		if attempt.RetryOfAttemptID != "" {
@@ -1578,6 +1786,14 @@ func (r *Repository) claimPendingOperation(ctx context.Context, attempt BookingA
 				      OR quote.consumed_by_attempt_id = NULLIF($8, '')::uuid
 				  )
 				  AND quote.expires_at > now()
+				  AND (
+				      ($11 = 'book' AND $12 = '' AND quote.authority_fence_provenance = 'known'
+				       AND quote.scheduling_authority_version IS NOT NULL AND quote.retry_of_attempt_id IS NULL)
+				      OR ($11 = 'book' AND $12 <> '' AND quote.authority_fence_provenance = 'retry_origin'
+				          AND quote.scheduling_authority_version IS NULL AND quote.retry_of_attempt_id::text = $12)
+				      OR ($11 = 'reschedule' AND quote.authority_fence_provenance = 'target_origin'
+				          AND quote.retry_of_attempt_id IS NULL)
+				  )
 				  AND EXISTS (
 				      SELECT 1
 				      FROM pos_connections connection
@@ -1619,7 +1835,7 @@ func (r *Repository) claimPendingOperation(ctx context.Context, attempt BookingA
 				        )
 				  )
 				RETURNING quote.id::text
-			`, attempt.ID, attempt.AvailabilityQuoteID, attempt.SalonID, attempt.POSProvider, attempt.SlotFingerprint, attempt.RequestedStartTime.UTC(), attempt.RequestedEndTime.UTC(), attempt.RetryOfAttemptID, attempt.ProviderFence.LocationID, attempt.ProviderFence.SnapshotGeneration).Scan(&consumedQuoteID)
+			`, attempt.ID, attempt.AvailabilityQuoteID, attempt.SalonID, attempt.POSProvider, attempt.SlotFingerprint, attempt.RequestedStartTime.UTC(), attempt.RequestedEndTime.UTC(), attempt.RetryOfAttemptID, attempt.ProviderFence.LocationID, attempt.ProviderFence.SnapshotGeneration, attempt.OperationType, attempt.RetryOfAttemptID).Scan(&consumedQuoteID)
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil, ErrAvailabilityQuoteStale
 			}
@@ -1785,9 +2001,40 @@ func (r *Repository) GetBookingOperation(ctx context.Context, salonID string, ow
 	return attempt, nil
 }
 
+func (r *Repository) GetSafeRetryAvailabilityOrigin(ctx context.Context, salonID string, ownerUserID string, attemptID string) (*BookingAttempt, error) {
+	attempt, err := scanBookingOperationAttempt(r.db.QueryRowContext(ctx, bookingOperationSelectSQL+`
+		WHERE ba.salon_id = $1
+		  AND ba.id::text = $2
+		  AND ba.scheduling_authority = 'external_provider'
+		  AND COALESCE(ba.operation_type, 'book') = 'book'
+		  AND ba.status = 'fallback_pending'
+		  AND ba.retry_policy = 'safe'
+		  AND ba.superseded_at IS NULL
+		  AND EXISTS (
+		      SELECT 1 FROM salons salon
+		      WHERE salon.id = ba.salon_id AND salon.owner_user_id = $3
+		  )
+		LIMIT 1
+	`, strings.TrimSpace(salonID), strings.TrimSpace(attemptID), strings.TrimSpace(ownerUserID)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrOperationConflict
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := r.hydrateClaimAttempt(ctx, attempt); err != nil {
+		return nil, err
+	}
+	return attempt, nil
+}
+
 const bookingOperationSelectSQL = `
-	SELECT ba.id::text, ba.salon_id::text, ba.source, ba.status, ba.pos_provider,
+	SELECT ba.id::text, ba.salon_id::text, ba.source, ba.status, COALESCE(ba.pos_provider, ''),
 	       COALESCE(ba.pos_booking_id, ''), COALESCE(ba.pos_booking_version, 0), COALESCE(ba.pos_idempotency_key, ''),
+	       ba.scheduling_authority, COALESCE(ba.authority_provider, ''), COALESCE(ba.authority_appointment_id, ''),
+	       COALESCE(ba.authority_appointment_version, 0), COALESCE(ba.target_authority_appointment_version, 0),
+	       COALESCE(ba.authority_idempotency_key, ''), COALESCE(ba.authority_location_id, ''),
+	       COALESCE(ba.authority_snapshot_generation, 0),
 	       COALESCE(ba.operation_key, ''), COALESCE(ba.request_fingerprint, ''),
 	       COALESCE(ba.retry_of_attempt_id::text, ''), COALESCE(ba.superseded_by_attempt_id::text, ''), COALESCE(ba.retry_sequence, 0), ba.superseded_at,
 	       COALESCE(ba.availability_quote_id::text, ''), COALESCE(ba.availability_slot_fingerprint, ''),
@@ -1815,7 +2062,11 @@ func scanBookingOperationAttempt(row bookingAttemptScanner) (*BookingAttempt, er
 	var reconciliationResolvedAt sql.NullTime
 	if err := row.Scan(
 		&attempt.ID, &attempt.SalonID, &attempt.Source, &attempt.Status, &attempt.POSProvider,
-		&attempt.POSBookingID, &attempt.POSBookingVersion, &attempt.POSIdempotencyKey, &attempt.OperationKey, &attempt.RequestFingerprint,
+		&attempt.POSBookingID, &attempt.POSBookingVersion, &attempt.POSIdempotencyKey,
+		&attempt.SchedulingAuthority, &attempt.AuthorityProvider, &attempt.AuthorityAppointmentID,
+		&attempt.AuthorityAppointmentVersion, &attempt.TargetAuthorityAppointmentVersion,
+		&attempt.AuthorityIdempotencyKey, &attempt.AuthorityLocationID, &attempt.AuthoritySnapshotGeneration,
+		&attempt.OperationKey, &attempt.RequestFingerprint,
 		&attempt.RetryOfAttemptID, &attempt.SupersededByAttemptID, &attempt.RetrySequence, &supersededAt, &attempt.AvailabilityQuoteID, &attempt.SlotFingerprint,
 		&attempt.ProviderFence.LocationID, &attempt.ProviderFence.SnapshotGeneration, &attempt.OperationType,
 		&attempt.TargetAppointmentID, &attempt.TargetPOSBookingVersion, &attempt.ProcessingToken, &lease, &attempt.ProviderOutcome, &attempt.RetryPolicy, &attempt.Reconciliation,
@@ -1853,8 +2104,11 @@ func (r *Repository) hydrateClaimAttempt(ctx context.Context, attempt *BookingAt
 	*attempt = items[0]
 
 	appointment, err := scanAppointment(r.db.QueryRowContext(ctx, `
-		SELECT id::text, salon_id::text, booking_attempt_id::text, pos_provider, pos_appointment_id,
-		       COALESCE(pos_appointment_version, 0), status, customer_name, customer_phone,
+		SELECT id::text, salon_id::text, booking_attempt_id::text, COALESCE(pos_provider, ''), COALESCE(pos_appointment_id, ''),
+		       COALESCE(pos_appointment_version, 0), scheduling_authority, COALESCE(authority_provider, ''),
+		       COALESCE(authority_appointment_id, ''), COALESCE(authority_appointment_version, 0),
+		       COALESCE(authority_customer_id, ''), confirmed_at, COALESCE(confirmed_by_user_id::text, ''),
+		       COALESCE(confirmation_source, ''), status, customer_name, customer_phone,
 		       COALESCE(customer_email, ''), COALESCE(service_id::text, ''), COALESCE(staff_id::text, ''), COALESCE(staff_selection_mode, 'specific'),
 		       start_time, end_time, COALESCE(notes, ''), created_at, updated_at
 		FROM appointments
@@ -2111,7 +2365,9 @@ func setBookingAttemptPOSVersionTx(ctx context.Context, tx *sql.Tx, attemptID st
 	}
 	_, err := tx.ExecContext(ctx, `
 		UPDATE booking_attempts
-		SET pos_booking_version = $1, updated_at = now()
+		SET pos_booking_version = $1,
+		    authority_appointment_version = $1,
+		    updated_at = now()
 		WHERE id = $2
 	`, version, attemptID)
 	return err
@@ -2214,24 +2470,32 @@ func confirmedBookingMirrorMatches(snapshot calendarAppointmentSnapshot, record 
 
 func appointmentFromCalendarSnapshot(snapshot calendarAppointmentSnapshot, canonicalAttemptID string) Appointment {
 	return Appointment{
-		ID:                    snapshot.AppointmentID,
-		BookingAttemptID:      canonicalAttemptID,
-		POSProvider:           snapshot.Provider,
-		POSAppointmentID:      snapshot.POSAppointmentID,
-		POSAppointmentVersion: snapshot.POSAppointmentVersion,
-		POSCustomerID:         snapshot.POSCustomerID,
-		Status:                snapshot.Status,
-		CustomerName:          snapshot.CustomerName,
-		CustomerPhone:         snapshot.CustomerPhone,
-		CustomerEmail:         snapshot.CustomerEmail,
-		ServiceID:             snapshot.ServiceID,
-		StaffID:               snapshot.StaffID,
-		StaffSelectionMode:    snapshot.StaffSelectionMode,
-		StartTime:             snapshot.StartTime,
-		EndTime:               snapshot.EndTime,
-		Notes:                 snapshot.Notes,
-		CreatedAt:             snapshot.CreatedAt,
-		UpdatedAt:             snapshot.UpdatedAt,
+		ID:                          snapshot.AppointmentID,
+		BookingAttemptID:            canonicalAttemptID,
+		SchedulingAuthority:         snapshot.SchedulingAuthority,
+		AuthorityProvider:           snapshot.AuthorityProvider,
+		AuthorityAppointmentID:      snapshot.AuthorityAppointmentID,
+		AuthorityAppointmentVersion: snapshot.AuthorityAppointmentVersion,
+		AuthorityCustomerID:         snapshot.AuthorityCustomerID,
+		POSProvider:                 snapshot.Provider,
+		POSAppointmentID:            snapshot.POSAppointmentID,
+		POSAppointmentVersion:       snapshot.POSAppointmentVersion,
+		POSCustomerID:               snapshot.POSCustomerID,
+		Status:                      snapshot.Status,
+		CustomerName:                snapshot.CustomerName,
+		CustomerPhone:               snapshot.CustomerPhone,
+		CustomerEmail:               snapshot.CustomerEmail,
+		ServiceID:                   snapshot.ServiceID,
+		StaffID:                     snapshot.StaffID,
+		StaffSelectionMode:          snapshot.StaffSelectionMode,
+		StartTime:                   snapshot.StartTime,
+		EndTime:                     snapshot.EndTime,
+		Notes:                       snapshot.Notes,
+		ConfirmedAt:                 snapshot.ConfirmedAt,
+		ConfirmedByUserID:           snapshot.ConfirmedByUserID,
+		ConfirmationSource:          snapshot.ConfirmationSource,
+		CreatedAt:                   snapshot.CreatedAt,
+		UpdatedAt:                   snapshot.UpdatedAt,
 	}
 }
 
@@ -2275,42 +2539,62 @@ func fallbackCreateMirrorMatches(snapshot calendarAppointmentSnapshot, record Fa
 func canonicalizeCalendarMirrorTx(ctx context.Context, tx *sql.Tx, salonID string, canonicalAttemptID string, mirror calendarAppointmentSnapshot) (Appointment, error) {
 	appointment := appointmentFromCalendarSnapshot(mirror, canonicalAttemptID)
 	appointment.SalonID = salonID
-	if mirror.BookingAttemptID == canonicalAttemptID {
-		return appointment, nil
-	}
-	if mirror.OriginSource != SourcePOSCalendarSync || mirror.OriginSuperseded {
+	if mirror.SchedulingAuthority != SchedulingAuthorityExternalProvider {
 		return Appointment{}, ErrOperationConflict
 	}
-	result, err := tx.ExecContext(ctx, `
-		UPDATE booking_attempts
-		SET superseded_by_attempt_id = $1,
-		    superseded_at = COALESCE(superseded_at, now()),
+	if mirror.BookingAttemptID != canonicalAttemptID {
+		if mirror.OriginSource != SourcePOSCalendarSync || mirror.OriginSuperseded {
+			return Appointment{}, ErrOperationConflict
+		}
+		result, err := tx.ExecContext(ctx, `
+			UPDATE booking_attempts
+			SET superseded_by_attempt_id = $1,
+			    superseded_at = COALESCE(superseded_at, now()),
+			    updated_at = now()
+			WHERE id = $2
+			  AND salon_id = $3
+			  AND scheduling_authority = 'external_provider'
+			  AND source = $4
+			  AND superseded_at IS NULL
+		`, canonicalAttemptID, mirror.BookingAttemptID, salonID, SourcePOSCalendarSync)
+		if err := requireExactlyOneRow(result, err); err != nil {
+			return Appointment{}, err
+		}
+		if err := closeSupersededReconciliationTaskTx(ctx, tx, salonID, mirror.BookingAttemptID, canonicalAttemptID); err != nil {
+			return Appointment{}, err
+		}
+	}
+	var confirmedAt time.Time
+	if err := tx.QueryRowContext(ctx, `
+		UPDATE appointments
+		SET booking_attempt_id = $1,
+		    confirmed_at = COALESCE(confirmed_at, now()),
+		    confirmation_source = COALESCE(confirmation_source, $5),
 		    updated_at = now()
 		WHERE id = $2
 		  AND salon_id = $3
-		  AND source = $4
-		  AND superseded_at IS NULL
-	`, canonicalAttemptID, mirror.BookingAttemptID, salonID, SourcePOSCalendarSync)
-	if err := requireExactlyOneRow(result, err); err != nil {
-		return Appointment{}, err
-	}
-	if err := closeSupersededReconciliationTaskTx(ctx, tx, salonID, mirror.BookingAttemptID, canonicalAttemptID); err != nil {
-		return Appointment{}, err
-	}
-	if err := tx.QueryRowContext(ctx, `
-		UPDATE appointments
-		SET booking_attempt_id = $1, updated_at = now()
-		WHERE id = $2
-		  AND salon_id = $3
 		  AND booking_attempt_id = $4
+		  AND scheduling_authority = 'external_provider'
 		  AND pos_sync_status = 'synced'
-		RETURNING updated_at
-	`, canonicalAttemptID, mirror.AppointmentID, salonID, mirror.BookingAttemptID).Scan(&appointment.UpdatedAt); err != nil {
+		  AND EXISTS (
+		      SELECT 1
+		      FROM booking_attempts canonical
+		      WHERE canonical.id = $1
+		        AND canonical.salon_id = $3
+		        AND canonical.scheduling_authority = 'external_provider'
+		  )
+		RETURNING confirmed_at, confirmation_source, updated_at
+	`, canonicalAttemptID, mirror.AppointmentID, salonID, mirror.BookingAttemptID, SchedulingAuthorityExternalProvider).Scan(
+		&confirmedAt,
+		&appointment.ConfirmationSource,
+		&appointment.UpdatedAt,
+	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Appointment{}, ErrOperationConflict
 		}
 		return Appointment{}, err
 	}
+	appointment.ConfirmedAt = &confirmedAt
 	return appointment, nil
 }
 
@@ -2332,27 +2616,33 @@ func (r *Repository) SaveConfirmedBooking(ctx context.Context, record ConfirmedB
 	}
 
 	attempt := BookingAttempt{
-		ID:                 record.AttemptID,
-		SalonID:            record.SalonID,
-		Source:             record.Source,
-		Status:             StatusConfirmed,
-		POSProvider:        record.Provider,
-		POSBookingID:       record.POSBookingID,
-		POSBookingVersion:  record.POSBookingVersion,
-		CustomerName:       record.CustomerName,
-		CustomerPhone:      record.CustomerPhone,
-		CustomerEmail:      record.CustomerEmail,
-		ServiceID:          record.Service.ID,
-		StaffID:            record.Staff.ID,
-		StaffSelectionMode: record.StaffSelectionMode,
-		RequestedStartTime: record.StartTime,
-		RequestedEndTime:   record.EndTime,
-		Notes:              record.Notes,
-		OperationType:      BookingActionBook,
-		ProviderOutcome:    ProviderOutcomeSucceeded,
-		RetryPolicy:        RetryPolicyNone,
-		Reconciliation:     ReconciliationNotRequired,
-		ProviderFence:      record.ProviderFence,
+		ID:                          record.AttemptID,
+		SalonID:                     record.SalonID,
+		SchedulingAuthority:         SchedulingAuthorityExternalProvider,
+		AuthorityProvider:           record.Provider,
+		AuthorityAppointmentID:      record.POSBookingID,
+		AuthorityAppointmentVersion: record.POSBookingVersion,
+		AuthorityLocationID:         record.ProviderFence.LocationID,
+		AuthoritySnapshotGeneration: record.ProviderFence.SnapshotGeneration,
+		Source:                      record.Source,
+		Status:                      StatusConfirmed,
+		POSProvider:                 record.Provider,
+		POSBookingID:                record.POSBookingID,
+		POSBookingVersion:           record.POSBookingVersion,
+		CustomerName:                record.CustomerName,
+		CustomerPhone:               record.CustomerPhone,
+		CustomerEmail:               record.CustomerEmail,
+		ServiceID:                   record.Service.ID,
+		StaffID:                     record.Staff.ID,
+		StaffSelectionMode:          record.StaffSelectionMode,
+		RequestedStartTime:          record.StartTime,
+		RequestedEndTime:            record.EndTime,
+		Notes:                       record.Notes,
+		OperationType:               BookingActionBook,
+		ProviderOutcome:             ProviderOutcomeSucceeded,
+		RetryPolicy:                 RetryPolicyNone,
+		Reconciliation:              ReconciliationNotRequired,
+		ProviderFence:               record.ProviderFence,
 	}
 
 	var mirror *calendarAppointmentSnapshot
@@ -2408,6 +2698,8 @@ func (r *Repository) SaveConfirmedBooking(ctx context.Context, record ConfirmedB
 			SET status = $1,
 			    pos_booking_id = $2,
 			    pos_booking_version = $3,
+			    authority_appointment_id = $2,
+			    authority_appointment_version = $3,
 			    staff_selection_mode = $4,
 			    requested_start_time = $5,
 			    requested_end_time = $6,
@@ -2476,6 +2768,8 @@ func (r *Repository) SaveConfirmedBooking(ctx context.Context, record ConfirmedB
 		SET status = $1,
 		    pos_booking_id = $2,
 		    pos_booking_version = $3,
+		    authority_appointment_id = $2,
+		    authority_appointment_version = $3,
 		    staff_selection_mode = $4,
 		    requested_start_time = $5,
 		    requested_end_time = $6,
@@ -2510,38 +2804,50 @@ func (r *Repository) SaveConfirmedBooking(ctx context.Context, record ConfirmedB
 	var appointment Appointment
 	if mirror == nil {
 		appointment = Appointment{
-			SalonID:               record.SalonID,
-			BookingAttemptID:      attempt.ID,
-			POSProvider:           record.Provider,
-			POSAppointmentID:      record.POSBookingID,
-			POSAppointmentVersion: record.POSBookingVersion,
-			POSCustomerID:         record.POSCustomerID,
-			Status:                StatusConfirmed,
-			CustomerName:          record.CustomerName,
-			CustomerPhone:         record.CustomerPhone,
-			CustomerEmail:         record.CustomerEmail,
-			ServiceID:             record.Service.ID,
-			StaffID:               record.Staff.ID,
-			StaffSelectionMode:    attempt.StaffSelectionMode,
-			StartTime:             record.StartTime,
-			EndTime:               record.EndTime,
-			Notes:                 record.Notes,
+			SalonID:                     record.SalonID,
+			BookingAttemptID:            attempt.ID,
+			SchedulingAuthority:         SchedulingAuthorityExternalProvider,
+			AuthorityProvider:           record.Provider,
+			AuthorityAppointmentID:      record.POSBookingID,
+			AuthorityAppointmentVersion: record.POSBookingVersion,
+			AuthorityCustomerID:         record.POSCustomerID,
+			POSProvider:                 record.Provider,
+			POSAppointmentID:            record.POSBookingID,
+			POSAppointmentVersion:       record.POSBookingVersion,
+			POSCustomerID:               record.POSCustomerID,
+			Status:                      StatusConfirmed,
+			CustomerName:                record.CustomerName,
+			CustomerPhone:               record.CustomerPhone,
+			CustomerEmail:               record.CustomerEmail,
+			ServiceID:                   record.Service.ID,
+			StaffID:                     record.Staff.ID,
+			StaffSelectionMode:          attempt.StaffSelectionMode,
+			StartTime:                   record.StartTime,
+			EndTime:                     record.EndTime,
+			Notes:                       record.Notes,
+			ConfirmationSource:          SchedulingAuthorityExternalProvider,
 		}
+		var confirmedAt time.Time
 		if err := tx.QueryRowContext(ctx, `
 			INSERT INTO appointments (
 				salon_id, booking_attempt_id, pos_provider, pos_appointment_id, pos_appointment_version, pos_customer_id,
-				status, customer_name, customer_phone, customer_email, service_id, staff_id, staff_selection_mode, start_time, end_time, notes
+				status, customer_name, customer_phone, customer_email, service_id, staff_id, staff_selection_mode, start_time, end_time, notes,
+				scheduling_authority, authority_provider, authority_appointment_id,
+				authority_appointment_version, authority_customer_id, confirmed_at, confirmation_source
 			)
-			VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, NULLIF($10, ''), $11, $12, $13, $14, $15, NULLIF($16, ''))
-			RETURNING id::text, created_at, updated_at
+			VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, NULLIF($10, ''), $11, $12, $13, $14, $15, NULLIF($16, ''),
+			        $17, $3, $4, $5, NULLIF($6, ''), now(), $17)
+			RETURNING id::text, confirmed_at, confirmation_source, created_at, updated_at
 		`, appointment.SalonID, appointment.BookingAttemptID, appointment.POSProvider, appointment.POSAppointmentID,
 			appointment.POSAppointmentVersion, appointment.POSCustomerID, appointment.Status, appointment.CustomerName,
 			appointment.CustomerPhone, appointment.CustomerEmail, appointment.ServiceID, appointment.StaffID,
 			appointment.StaffSelectionMode, appointment.StartTime, appointment.EndTime, appointment.Notes,
-		).Scan(&appointment.ID, &appointment.CreatedAt, &appointment.UpdatedAt); err != nil {
+			SchedulingAuthorityExternalProvider,
+		).Scan(&appointment.ID, &confirmedAt, &appointment.ConfirmationSource, &appointment.CreatedAt, &appointment.UpdatedAt); err != nil {
 			return nil, err
 		}
-		if err := insertAppointmentServices(ctx, tx, appointment.ID, segments); err != nil {
+		appointment.ConfirmedAt = &confirmedAt
+		if err := insertAppointmentServices(ctx, tx, appointment.SalonID, appointment.ID, segments); err != nil {
 			return nil, err
 		}
 	} else {
@@ -2605,6 +2911,7 @@ func (r *Repository) SaveFallbackBooking(ctx context.Context, record FallbackBoo
 			SELECT id::text
 			FROM appointments
 			WHERE salon_id = $1
+			  AND scheduling_authority = 'external_provider'
 			  AND pos_provider = $2
 			  AND pos_appointment_id = $3
 			FOR UPDATE
@@ -2625,28 +2932,32 @@ func (r *Repository) SaveFallbackBooking(ctx context.Context, record FallbackBoo
 		status = StatusFallbackPending
 	}
 	attempt := BookingAttempt{
-		ID:                 record.AttemptID,
-		SalonID:            record.SalonID,
-		Source:             record.Source,
-		Status:             status,
-		POSProvider:        record.Provider,
-		POSBookingID:       record.POSBookingID,
-		POSBookingVersion:  record.POSBookingVersion,
-		CustomerName:       record.CustomerName,
-		CustomerPhone:      record.CustomerPhone,
-		CustomerEmail:      record.CustomerEmail,
-		ServiceID:          record.Service.ID,
-		StaffID:            record.Staff.ID,
-		StaffSelectionMode: record.StaffSelectionMode,
-		RequestedStartTime: record.StartTime,
-		RequestedEndTime:   record.EndTime,
-		Notes:              record.Notes,
-		ErrorCode:          record.ErrorCode,
-		ErrorMessage:       record.ErrorMessage,
-		OperationType:      BookingActionBook,
-		ProviderOutcome:    record.ProviderOutcome,
-		RetryPolicy:        record.RetryPolicy,
-		Reconciliation:     record.Reconciliation,
+		ID:                          record.AttemptID,
+		SalonID:                     record.SalonID,
+		SchedulingAuthority:         SchedulingAuthorityExternalProvider,
+		AuthorityProvider:           record.Provider,
+		AuthorityAppointmentID:      record.POSBookingID,
+		AuthorityAppointmentVersion: record.POSBookingVersion,
+		Source:                      record.Source,
+		Status:                      status,
+		POSProvider:                 record.Provider,
+		POSBookingID:                record.POSBookingID,
+		POSBookingVersion:           record.POSBookingVersion,
+		CustomerName:                record.CustomerName,
+		CustomerPhone:               record.CustomerPhone,
+		CustomerEmail:               record.CustomerEmail,
+		ServiceID:                   record.Service.ID,
+		StaffID:                     record.Staff.ID,
+		StaffSelectionMode:          record.StaffSelectionMode,
+		RequestedStartTime:          record.StartTime,
+		RequestedEndTime:            record.EndTime,
+		Notes:                       record.Notes,
+		ErrorCode:                   record.ErrorCode,
+		ErrorMessage:                record.ErrorMessage,
+		OperationType:               BookingActionBook,
+		ProviderOutcome:             record.ProviderOutcome,
+		RetryPolicy:                 record.RetryPolicy,
+		Reconciliation:              record.Reconciliation,
 	}
 	if attempt.StaffSelectionMode == "" {
 		attempt.StaffSelectionMode = StaffSelectionSpecific
@@ -2672,10 +2983,13 @@ func (r *Repository) SaveFallbackBooking(ctx context.Context, record FallbackBoo
 		}
 		return nil, err
 	}
+	attempt.AuthorityLocationID = attempt.ProviderFence.LocationID
+	attempt.AuthoritySnapshotGeneration = attempt.ProviderFence.SnapshotGeneration
 
 	if mirror != nil && validProviderFence(attempt.ProviderFence) && fallbackCreateMirrorMatches(*mirror, record, attempt.ProviderFence, segments) {
 		attempt.Status = StatusConfirmed
 		attempt.POSBookingVersion = mirror.POSAppointmentVersion
+		attempt.AuthorityAppointmentVersion = mirror.POSAppointmentVersion
 		attempt.ProviderOutcome = ProviderOutcomeSucceeded
 		attempt.RetryPolicy = RetryPolicyNone
 		attempt.Reconciliation = ReconciliationNotRequired
@@ -2686,6 +3000,8 @@ func (r *Repository) SaveFallbackBooking(ctx context.Context, record FallbackBoo
 			SET status = $1,
 			    pos_booking_id = $2,
 			    pos_booking_version = $3,
+			    authority_appointment_id = $2,
+			    authority_appointment_version = $3,
 			    staff_selection_mode = $4,
 			    requested_start_time = $5,
 			    requested_end_time = $6,
@@ -2742,6 +3058,8 @@ func (r *Repository) SaveFallbackBooking(ctx context.Context, record FallbackBoo
 		SET status = $1,
 		    pos_booking_id = NULLIF($2, ''),
 		    pos_booking_version = CASE WHEN NULLIF($2, '') IS NULL THEN pos_booking_version ELSE $3 END,
+		    authority_appointment_id = NULLIF($2, ''),
+		    authority_appointment_version = CASE WHEN NULLIF($2, '') IS NULL THEN authority_appointment_version ELSE $3 END,
 		    staff_selection_mode = $4,
 		    requested_start_time = $5,
 		    requested_end_time = $6,
@@ -2810,8 +3128,33 @@ func (r *Repository) SaveFallbackBooking(ctx context.Context, record FallbackBoo
 }
 
 func (r *Repository) GetAppointmentForOwner(ctx context.Context, salonID string, ownerUserID string, appointmentID string) (*AppointmentActionRef, error) {
+	var authority string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT appointment.scheduling_authority
+		FROM appointments appointment
+		JOIN salons salon
+		  ON salon.id = appointment.salon_id
+		 AND salon.owner_user_id = $3
+		WHERE appointment.id = $1
+		  AND appointment.salon_id = $2
+	`, appointmentID, salonID, ownerUserID).Scan(&authority)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, pos.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if authority == SchedulingAuthorityManleAICalendar {
+		return r.getInternalAppointmentForOwner(ctx, salonID, ownerUserID, appointmentID)
+	}
+	return r.getExternalAppointmentForOwner(ctx, salonID, ownerUserID, appointmentID)
+}
+
+func (r *Repository) getExternalAppointmentForOwner(ctx context.Context, salonID string, ownerUserID string, appointmentID string) (*AppointmentActionRef, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT a.id::text, a.salon_id::text, a.booking_attempt_id::text, a.pos_provider,
+		SELECT a.id::text, a.salon_id::text, a.booking_attempt_id::text,
+		       a.scheduling_authority, COALESCE(a.authority_appointment_version, 0), a.party_size,
+		       a.pos_provider,
 		       origin.provider_location_id, connection.location_id, connection.snapshot_generation,
 		       a.pos_appointment_id, COALESCE(a.pos_appointment_version, 0), a.status,
 		       a.customer_name, a.customer_phone, COALESCE(a.customer_email, ''),
@@ -2869,6 +3212,9 @@ func (r *Repository) GetAppointmentForOwner(ctx context.Context, salonID string,
 		&item.ID,
 		&item.SalonID,
 		&item.BookingAttemptID,
+		&item.SchedulingAuthority,
+		&item.AuthorityAppointmentVersion,
+		&item.PartySize,
 		&item.POSProvider,
 		&item.ProviderLocationID,
 		&item.ProviderFence.LocationID,
@@ -2916,6 +3262,64 @@ func (r *Repository) GetAppointmentForOwner(ctx context.Context, salonID string,
 	return &item, nil
 }
 
+func (r *Repository) getInternalAppointmentForOwner(ctx context.Context, salonID string, ownerUserID string, appointmentID string) (*AppointmentActionRef, error) {
+	var item AppointmentActionRef
+	err := r.db.QueryRowContext(ctx, `
+		SELECT appointment.id::text, appointment.salon_id::text, appointment.booking_attempt_id::text,
+		       appointment.scheduling_authority, appointment.authority_appointment_version,
+		       appointment.party_size, appointment.status,
+		       appointment.customer_name, appointment.customer_phone, COALESCE(appointment.customer_email, ''),
+		       appointment.start_time, appointment.end_time, COALESCE(appointment.notes, ''),
+		       appointment.created_at, appointment.updated_at,
+		       COALESCE(appointment.staff_selection_mode, 'specific')
+		FROM appointments appointment
+		JOIN salons salon
+		  ON salon.id = appointment.salon_id
+		 AND salon.owner_user_id = $3
+		WHERE appointment.id = $1
+		  AND appointment.salon_id = $2
+		  AND appointment.scheduling_authority = 'manleai_calendar'
+	`, appointmentID, salonID, ownerUserID).Scan(
+		&item.ID,
+		&item.SalonID,
+		&item.BookingAttemptID,
+		&item.SchedulingAuthority,
+		&item.AuthorityAppointmentVersion,
+		&item.PartySize,
+		&item.Status,
+		&item.CustomerName,
+		&item.CustomerPhone,
+		&item.CustomerEmail,
+		&item.StartTime,
+		&item.EndTime,
+		&item.Notes,
+		&item.CreatedAt,
+		&item.UpdatedAt,
+		&item.StaffSelectionMode,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, pos.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if item.Status != StatusConfirmed && item.Status != StatusRescheduled {
+		return nil, pos.ErrNotFound
+	}
+	segments, err := r.loadInternalAppointmentActionSegments(ctx, item.SalonID, item.ID, item.AuthorityAppointmentVersion)
+	if err != nil {
+		return nil, err
+	}
+	if len(segments) == 0 {
+		return nil, pos.ErrNotFound
+	}
+	item.Segments = segments
+	item.Service = segments[0].Service
+	item.Staff = segments[0].Staff
+	item.StaffSelectionMode = segments[0].StaffSelectionMode
+	return &item, nil
+}
+
 func (r *Repository) ListRescheduleCandidates(ctx context.Context, salonID string, ownerUserID string, req RescheduleLookupRequest) ([]AppointmentActionRef, error) {
 	limit := req.Limit
 	if limit <= 0 {
@@ -2925,36 +3329,63 @@ func (r *Repository) ListRescheduleCandidates(ctx context.Context, salonID strin
 		limit = 5
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT a.id::text
-		FROM appointments a
-		JOIN salons salon ON salon.id = a.salon_id
-		JOIN booking_attempts origin
-		  ON origin.id = a.booking_attempt_id
-		 AND origin.salon_id = a.salon_id
-		 AND origin.pos_provider = a.pos_provider
-		 AND origin.operation_type = 'book'
-		 AND NULLIF(BTRIM(origin.provider_location_id), '') IS NOT NULL
-		 AND origin.provider_snapshot_generation IS NOT NULL
-		 AND origin.provider_snapshot_generation > 0
-		JOIN pos_connections connection
-		  ON connection.salon_id = a.salon_id
-		 AND connection.provider = a.pos_provider
-		 AND connection.status = 'active'
-		 AND connection.last_sync_at IS NOT NULL
-		 AND connection.location_id = origin.provider_location_id
-		 AND connection.snapshot_generation >= origin.provider_snapshot_generation
-		WHERE a.salon_id = $1
-		  AND salon.owner_user_id = $2
-		  AND salon.active_pos_provider = a.pos_provider
-		  AND right(regexp_replace(a.customer_phone, '[^0-9]', '', 'g'), 10) = right(regexp_replace($3, '[^0-9]', '', 'g'), 10)
-		  AND a.status IN ($4, $5)
-		  AND a.start_time >= now()
-		  AND a.pos_appointment_id <> ''
-		  AND a.pos_appointment_version >= 0
+		SELECT candidate.id
+		FROM (
+		    SELECT appointment.id::text AS id, appointment.customer_name, appointment.start_time
+		    FROM appointments appointment
+		    JOIN salons salon
+		      ON salon.id = appointment.salon_id
+		     AND salon.owner_user_id = $2
+		    WHERE appointment.salon_id = $1
+		      AND appointment.scheduling_authority = 'manleai_calendar'
+		      AND right(regexp_replace(appointment.customer_phone, '[^0-9]', '', 'g'), 10) =
+		          right(regexp_replace($3, '[^0-9]', '', 'g'), 10)
+		      AND appointment.status IN ($4, $5)
+		      AND appointment.start_time >= now()
+		      AND EXISTS (
+		          SELECT 1
+		          FROM appointment_services segment
+		          WHERE segment.salon_id = appointment.salon_id
+		            AND segment.appointment_id = appointment.id
+		            AND segment.scheduling_authority = 'manleai_calendar'
+		            AND segment.plan_version = appointment.authority_appointment_version
+		            AND segment.released_at IS NULL
+		      )
+		    UNION ALL
+		    SELECT appointment.id::text AS id, appointment.customer_name, appointment.start_time
+		    FROM appointments appointment
+		    JOIN salons salon
+		      ON salon.id = appointment.salon_id
+		     AND salon.owner_user_id = $2
+		    JOIN booking_attempts origin
+		      ON origin.id = appointment.booking_attempt_id
+		     AND origin.salon_id = appointment.salon_id
+		     AND origin.pos_provider = appointment.pos_provider
+		     AND origin.operation_type = 'book'
+		     AND NULLIF(BTRIM(origin.provider_location_id), '') IS NOT NULL
+		     AND origin.provider_snapshot_generation IS NOT NULL
+		     AND origin.provider_snapshot_generation > 0
+		    JOIN pos_connections connection
+		      ON connection.salon_id = appointment.salon_id
+		     AND connection.provider = appointment.pos_provider
+		     AND connection.status = 'active'
+		     AND connection.last_sync_at IS NOT NULL
+		     AND connection.location_id = origin.provider_location_id
+		     AND connection.snapshot_generation >= origin.provider_snapshot_generation
+		    WHERE appointment.salon_id = $1
+		      AND appointment.scheduling_authority = 'external_provider'
+		      AND salon.active_pos_provider = appointment.pos_provider
+		      AND right(regexp_replace(appointment.customer_phone, '[^0-9]', '', 'g'), 10) =
+		          right(regexp_replace($3, '[^0-9]', '', 'g'), 10)
+		      AND appointment.status IN ($4, $5)
+		      AND appointment.start_time >= now()
+		      AND appointment.pos_appointment_id <> ''
+		      AND appointment.pos_appointment_version >= 0
+		) candidate
 		ORDER BY
-		  CASE WHEN NULLIF($6, '') IS NOT NULL AND lower(a.customer_name) = lower($6) THEN 0 ELSE 1 END,
-		  a.start_time ASC,
-		  a.id ASC
+		  CASE WHEN NULLIF($6, '') IS NOT NULL AND lower(candidate.customer_name) = lower($6) THEN 0 ELSE 1 END,
+		  candidate.start_time ASC,
+		  candidate.id ASC
 		LIMIT $7
 	`, salonID, ownerUserID, req.CustomerPhone, StatusConfirmed, StatusRescheduled, req.CustomerName, limit)
 	if err != nil {
@@ -2987,6 +3418,109 @@ func (r *Repository) ListRescheduleCandidates(ctx context.Context, salonID strin
 		items = append(items, *item)
 	}
 	return items, nil
+}
+
+func (r *Repository) loadInternalAppointmentActionSegments(ctx context.Context, salonID string, appointmentID string, planVersion int) ([]BookingSegmentRecord, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT segment.id::text,
+		       service.id::text, segment.name, segment.duration_minutes, COALESCE(service.price_from, 0),
+		       staff_member.id::text, staff_member.name,
+		       segment.staff_selection_mode, COALESCE(segment.guest_reference, ''),
+		       segment.plan_version, segment.scheduled_start_time, segment.scheduled_end_time,
+		       segment.occupied_start_time, segment.occupied_end_time,
+		       segment.buffer_before_minutes, segment.buffer_after_minutes, segment.sort_order
+		FROM appointment_services segment
+		JOIN services service
+		  ON service.id = segment.service_id
+		 AND service.salon_id = segment.salon_id
+		JOIN staff staff_member
+		  ON staff_member.id = segment.staff_id
+		 AND staff_member.salon_id = segment.salon_id
+		WHERE segment.salon_id = $1
+		  AND segment.appointment_id = $2
+		  AND segment.scheduling_authority = 'manleai_calendar'
+		  AND segment.plan_version = $3
+		  AND segment.released_at IS NULL
+		ORDER BY segment.sort_order ASC, segment.id ASC
+	`, salonID, appointmentID, planVersion)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	segments := make([]BookingSegmentRecord, 0)
+	for rows.Next() {
+		var segment BookingSegmentRecord
+		if err := rows.Scan(
+			&segment.AppointmentServiceID,
+			&segment.Service.ID,
+			&segment.Service.Name,
+			&segment.Service.DurationMinutes,
+			&segment.Service.PriceFrom,
+			&segment.Staff.ID,
+			&segment.Staff.Name,
+			&segment.StaffSelectionMode,
+			&segment.GuestReference,
+			&segment.PlanVersion,
+			&segment.ScheduledStartTime,
+			&segment.ScheduledEndTime,
+			&segment.OccupiedStartTime,
+			&segment.OccupiedEndTime,
+			&segment.BufferBeforeMinutes,
+			&segment.BufferAfterMinutes,
+			&segment.SortOrder,
+		); err != nil {
+			return nil, err
+		}
+		segment.Quantity = 1
+		segments = append(segments, segment)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := r.attachInternalActionSegmentResources(ctx, salonID, planVersion, segments); err != nil {
+		return nil, err
+	}
+	return segments, nil
+}
+
+func (r *Repository) attachInternalActionSegmentResources(ctx context.Context, salonID string, planVersion int, segments []BookingSegmentRecord) error {
+	if len(segments) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(segments))
+	indexByID := make(map[string]int, len(segments))
+	for index := range segments {
+		ids = append(ids, segments[index].AppointmentServiceID)
+		indexByID[segments[index].AppointmentServiceID] = index
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT allocation.appointment_service_id::text, pool.id::text, pool.name, allocation.units_allocated
+		FROM manleai_calendar_appointment_resource_allocations allocation
+		JOIN manleai_calendar_resource_pools pool
+		  ON pool.id = allocation.resource_pool_id
+		 AND pool.salon_id = allocation.salon_id
+		WHERE allocation.salon_id = $1
+		  AND allocation.appointment_service_id = ANY($2::uuid[])
+		  AND allocation.plan_version = $3
+		  AND allocation.released_at IS NULL
+		ORDER BY allocation.appointment_service_id, pool.id
+	`, salonID, pq.Array(ids), planVersion)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var segmentID string
+		var allocation AvailabilityResourceAllocation
+		if err := rows.Scan(&segmentID, &allocation.ResourcePoolID, &allocation.ResourceName, &allocation.UnitsAllocated); err != nil {
+			return err
+		}
+		if index, ok := indexByID[segmentID]; ok {
+			segments[index].ResourceAllocations = append(segments[index].ResourceAllocations, allocation)
+		}
+	}
+	return rows.Err()
 }
 
 func (r *Repository) loadAppointmentActionSegments(ctx context.Context, appointmentID string, provider string, fence pos.ProviderFence) ([]BookingSegmentRecord, error) {
@@ -3070,6 +3604,8 @@ func (r *Repository) loadAppointmentActionSegments(ctx context.Context, appointm
 		}
 		segment.Service.ProviderFence = fence
 		segment.Staff.ProviderFence = fence
+		segment.Quantity = 1
+		segment.PlanVersion = 1
 		segments = append(segments, segment)
 	}
 	if err := rows.Err(); err != nil {
@@ -3089,34 +3625,35 @@ func (r *Repository) ClaimPendingAppointmentAction(ctx context.Context, record P
 	}
 	primary := segments[0]
 	attempt := BookingAttempt{
-		SalonID:                 record.SalonID,
-		Source:                  source,
-		Status:                  StatusPOSPending,
-		POSProvider:             record.Provider,
-		POSBookingID:            record.Appointment.POSAppointmentID,
-		POSIdempotencyKey:       record.POSIdempotencyKey,
-		OperationKey:            record.OperationKey,
-		RequestFingerprint:      record.RequestFingerprint,
-		RetryOfAttemptID:        record.RetryOfAttemptID,
-		AvailabilityQuoteID:     record.AvailabilityQuoteID,
-		SlotFingerprint:         record.SlotFingerprint,
-		ProviderFence:           record.ProviderFence,
-		OperationType:           record.OperationType,
-		TargetAppointmentID:     record.Appointment.ID,
-		TargetPOSBookingVersion: record.Appointment.POSAppointmentVersion,
-		ProcessingToken:         record.ProcessingToken,
-		ProviderOutcome:         ProviderOutcomeNotStarted,
-		RetryPolicy:             RetryPolicyNone,
-		Reconciliation:          ReconciliationNotRequired,
-		CustomerName:            record.Appointment.CustomerName,
-		CustomerPhone:           record.Appointment.CustomerPhone,
-		CustomerEmail:           record.Appointment.CustomerEmail,
-		ServiceID:               primary.Service.ID,
-		StaffID:                 primary.Staff.ID,
-		StaffSelectionMode:      primary.StaffSelectionMode,
-		RequestedStartTime:      record.RequestedStartTime,
-		RequestedEndTime:        record.RequestedEndTime,
-		Notes:                   record.Notes,
+		SalonID:                           record.SalonID,
+		Source:                            source,
+		Status:                            StatusPOSPending,
+		POSProvider:                       record.Provider,
+		POSBookingID:                      record.Appointment.POSAppointmentID,
+		POSIdempotencyKey:                 record.POSIdempotencyKey,
+		OperationKey:                      record.OperationKey,
+		RequestFingerprint:                record.RequestFingerprint,
+		RetryOfAttemptID:                  record.RetryOfAttemptID,
+		AvailabilityQuoteID:               record.AvailabilityQuoteID,
+		SlotFingerprint:                   record.SlotFingerprint,
+		ProviderFence:                     record.ProviderFence,
+		OperationType:                     record.OperationType,
+		TargetAppointmentID:               record.Appointment.ID,
+		TargetPOSBookingVersion:           record.Appointment.POSAppointmentVersion,
+		TargetAuthorityAppointmentVersion: record.Appointment.AuthorityAppointmentVersion,
+		ProcessingToken:                   record.ProcessingToken,
+		ProviderOutcome:                   ProviderOutcomeNotStarted,
+		RetryPolicy:                       RetryPolicyNone,
+		Reconciliation:                    ReconciliationNotRequired,
+		CustomerName:                      record.Appointment.CustomerName,
+		CustomerPhone:                     record.Appointment.CustomerPhone,
+		CustomerEmail:                     record.Appointment.CustomerEmail,
+		ServiceID:                         primary.Service.ID,
+		StaffID:                           primary.Staff.ID,
+		StaffSelectionMode:                primary.StaffSelectionMode,
+		RequestedStartTime:                record.RequestedStartTime,
+		RequestedEndTime:                  record.RequestedEndTime,
+		Notes:                             record.Notes,
 	}
 	if attempt.StaffSelectionMode == "" {
 		attempt.StaffSelectionMode = StaffSelectionSpecific
@@ -3126,8 +3663,11 @@ func (r *Repository) ClaimPendingAppointmentAction(ctx context.Context, record P
 
 func loadDirectMutationAppointmentTx(ctx context.Context, tx *sql.Tx, record AppointmentActionRef) (*Appointment, error) {
 	appointment, err := scanAppointment(tx.QueryRowContext(ctx, `
-		SELECT id::text, salon_id::text, booking_attempt_id::text, pos_provider, pos_appointment_id,
-		       COALESCE(pos_appointment_version, 0), status, customer_name, customer_phone,
+		SELECT id::text, salon_id::text, booking_attempt_id::text, COALESCE(pos_provider, ''), COALESCE(pos_appointment_id, ''),
+		       COALESCE(pos_appointment_version, 0), scheduling_authority, COALESCE(authority_provider, ''),
+		       COALESCE(authority_appointment_id, ''), COALESCE(authority_appointment_version, 0),
+		       COALESCE(authority_customer_id, ''), confirmed_at, COALESCE(confirmed_by_user_id::text, ''),
+		       COALESCE(confirmation_source, ''), status, customer_name, customer_phone,
 		       COALESCE(customer_email, ''), COALESCE(service_id::text, ''), COALESCE(staff_id::text, ''),
 		       COALESCE(staff_selection_mode, 'specific'), start_time, end_time, COALESCE(notes, ''),
 		       created_at, updated_at
@@ -3261,26 +3801,30 @@ func (r *Repository) SaveRescheduledAppointment(ctx context.Context, record Resc
 		finalPOSBookingVersion = currentAppointment.POSAppointmentVersion
 	}
 	attempt := BookingAttempt{
-		ID:                 record.AttemptID,
-		SalonID:            record.Appointment.SalonID,
-		Source:             source,
-		Status:             StatusRescheduled,
-		POSProvider:        record.Appointment.POSProvider,
-		POSBookingID:       record.Appointment.POSAppointmentID,
-		POSBookingVersion:  finalPOSBookingVersion,
-		CustomerName:       record.Appointment.CustomerName,
-		CustomerPhone:      record.Appointment.CustomerPhone,
-		CustomerEmail:      record.Appointment.CustomerEmail,
-		ServiceID:          primary.Service.ID,
-		StaffID:            primary.Staff.ID,
-		StaffSelectionMode: primary.StaffSelectionMode,
-		RequestedStartTime: record.StartTime,
-		RequestedEndTime:   record.EndTime,
-		Notes:              record.Notes,
-		OperationType:      BookingActionReschedule,
-		ProviderOutcome:    ProviderOutcomeSucceeded,
-		RetryPolicy:        RetryPolicyNone,
-		Reconciliation:     ReconciliationNotRequired,
+		ID:                          record.AttemptID,
+		SalonID:                     record.Appointment.SalonID,
+		SchedulingAuthority:         SchedulingAuthorityExternalProvider,
+		AuthorityProvider:           record.Appointment.POSProvider,
+		AuthorityAppointmentID:      record.Appointment.POSAppointmentID,
+		AuthorityAppointmentVersion: finalPOSBookingVersion,
+		Source:                      source,
+		Status:                      StatusRescheduled,
+		POSProvider:                 record.Appointment.POSProvider,
+		POSBookingID:                record.Appointment.POSAppointmentID,
+		POSBookingVersion:           finalPOSBookingVersion,
+		CustomerName:                record.Appointment.CustomerName,
+		CustomerPhone:               record.Appointment.CustomerPhone,
+		CustomerEmail:               record.Appointment.CustomerEmail,
+		ServiceID:                   primary.Service.ID,
+		StaffID:                     primary.Staff.ID,
+		StaffSelectionMode:          primary.StaffSelectionMode,
+		RequestedStartTime:          record.StartTime,
+		RequestedEndTime:            record.EndTime,
+		Notes:                       record.Notes,
+		OperationType:               BookingActionReschedule,
+		ProviderOutcome:             ProviderOutcomeSucceeded,
+		RetryPolicy:                 RetryPolicyNone,
+		Reconciliation:              ReconciliationNotRequired,
 	}
 	if attempt.StaffSelectionMode == "" {
 		attempt.StaffSelectionMode = StaffSelectionSpecific
@@ -3290,6 +3834,8 @@ func (r *Repository) SaveRescheduledAppointment(ctx context.Context, record Resc
 		SET status = $1,
 		    pos_booking_id = NULLIF($2, ''),
 		    pos_booking_version = $3,
+		    authority_appointment_id = NULLIF($2, ''),
+		    authority_appointment_version = $3,
 		    staff_id = $4,
 		    staff_selection_mode = $5,
 		    requested_start_time = $6,
@@ -3336,6 +3882,7 @@ func (r *Repository) SaveRescheduledAppointment(ctx context.Context, record Resc
 			    end_time = $6,
 			    notes = NULLIF($7, ''),
 			    pos_appointment_version = $8,
+			    authority_appointment_version = $8,
 			    updated_at = now()
 			WHERE id = $9
 			  AND salon_id = $10
@@ -3343,17 +3890,23 @@ func (r *Repository) SaveRescheduledAppointment(ctx context.Context, record Resc
 			  AND pos_appointment_id = $12
 			  AND COALESCE(pos_appointment_version, 0) < $8
 			RETURNING id::text, salon_id::text, booking_attempt_id::text, pos_provider, pos_appointment_id,
-			          COALESCE(pos_appointment_version, 0), status, customer_name, customer_phone,
+			          COALESCE(pos_appointment_version, 0), scheduling_authority, COALESCE(authority_provider, ''),
+			          COALESCE(authority_appointment_id, ''), COALESCE(authority_appointment_version, 0),
+			          COALESCE(authority_customer_id, ''), confirmed_at, COALESCE(confirmed_by_user_id::text, ''),
+			          COALESCE(confirmation_source, ''), status, customer_name, customer_phone,
 			          COALESCE(customer_email, ''), COALESCE(service_id::text, ''), COALESCE(staff_id::text, ''), COALESCE(staff_selection_mode, 'specific'),
 			          start_time, end_time, COALESCE(notes, ''), created_at, updated_at
 		`, StatusRescheduled, primary.Service.ID, primary.Staff.ID, attempt.StaffSelectionMode,
 			record.StartTime, record.EndTime, record.Notes, record.POSBookingVersion, record.Appointment.ID,
 			record.Appointment.SalonID, record.Appointment.POSProvider, record.Appointment.POSAppointmentID))
 		if err == nil {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM appointment_services WHERE appointment_id = $1`, record.Appointment.ID); err != nil {
+			if _, err := tx.ExecContext(ctx, `
+				DELETE FROM appointment_services
+				WHERE salon_id = $1 AND appointment_id = $2
+			`, record.Appointment.SalonID, record.Appointment.ID); err != nil {
 				return nil, err
 			}
-			if err := insertAppointmentServices(ctx, tx, record.Appointment.ID, segments); err != nil {
+			if err := insertAppointmentServices(ctx, tx, record.Appointment.SalonID, record.Appointment.ID, segments); err != nil {
 				return nil, err
 			}
 		}
@@ -3367,7 +3920,7 @@ func (r *Repository) SaveRescheduledAppointment(ctx context.Context, record Resc
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	appointment.Segments = bookingSegmentSnapshots(segments)
+	appointment.Segments = authorityBookingSegmentSnapshots(segments)
 	return appointment, nil
 }
 
@@ -3404,26 +3957,30 @@ func (r *Repository) SaveCancelledAppointment(ctx context.Context, record Cancel
 	segments := appointmentActionSegments(record.Appointment)
 	primary := segments[0]
 	attempt := BookingAttempt{
-		ID:                 record.AttemptID,
-		SalonID:            record.Appointment.SalonID,
-		Source:             source,
-		Status:             StatusCancelled,
-		POSProvider:        record.Appointment.POSProvider,
-		POSBookingID:       record.Appointment.POSAppointmentID,
-		POSBookingVersion:  finalPOSBookingVersion,
-		CustomerName:       record.Appointment.CustomerName,
-		CustomerPhone:      record.Appointment.CustomerPhone,
-		CustomerEmail:      record.Appointment.CustomerEmail,
-		ServiceID:          primary.Service.ID,
-		StaffID:            primary.Staff.ID,
-		StaffSelectionMode: primary.StaffSelectionMode,
-		RequestedStartTime: record.Appointment.StartTime,
-		RequestedEndTime:   record.Appointment.EndTime,
-		Notes:              record.Reason,
-		OperationType:      BookingActionCancel,
-		ProviderOutcome:    ProviderOutcomeSucceeded,
-		RetryPolicy:        RetryPolicyNone,
-		Reconciliation:     ReconciliationNotRequired,
+		ID:                          record.AttemptID,
+		SalonID:                     record.Appointment.SalonID,
+		SchedulingAuthority:         SchedulingAuthorityExternalProvider,
+		AuthorityProvider:           record.Appointment.POSProvider,
+		AuthorityAppointmentID:      record.Appointment.POSAppointmentID,
+		AuthorityAppointmentVersion: finalPOSBookingVersion,
+		Source:                      source,
+		Status:                      StatusCancelled,
+		POSProvider:                 record.Appointment.POSProvider,
+		POSBookingID:                record.Appointment.POSAppointmentID,
+		POSBookingVersion:           finalPOSBookingVersion,
+		CustomerName:                record.Appointment.CustomerName,
+		CustomerPhone:               record.Appointment.CustomerPhone,
+		CustomerEmail:               record.Appointment.CustomerEmail,
+		ServiceID:                   primary.Service.ID,
+		StaffID:                     primary.Staff.ID,
+		StaffSelectionMode:          primary.StaffSelectionMode,
+		RequestedStartTime:          record.Appointment.StartTime,
+		RequestedEndTime:            record.Appointment.EndTime,
+		Notes:                       record.Reason,
+		OperationType:               BookingActionCancel,
+		ProviderOutcome:             ProviderOutcomeSucceeded,
+		RetryPolicy:                 RetryPolicyNone,
+		Reconciliation:              ReconciliationNotRequired,
 	}
 	if attempt.StaffSelectionMode == "" {
 		attempt.StaffSelectionMode = StaffSelectionSpecific
@@ -3433,6 +3990,8 @@ func (r *Repository) SaveCancelledAppointment(ctx context.Context, record Cancel
 		SET status = $1,
 		    pos_booking_id = NULLIF($2, ''),
 		    pos_booking_version = $3,
+		    authority_appointment_id = NULLIF($2, ''),
+		    authority_appointment_version = $3,
 		    staff_selection_mode = $4,
 		    notes = NULLIF($5, ''),
 		    error_code = NULL,
@@ -3470,6 +4029,7 @@ func (r *Repository) SaveCancelledAppointment(ctx context.Context, record Cancel
 			UPDATE appointments
 			SET status = $1,
 			    pos_appointment_version = $2,
+			    authority_appointment_version = $2,
 			    updated_at = now()
 			WHERE id = $3
 			  AND salon_id = $4
@@ -3477,7 +4037,10 @@ func (r *Repository) SaveCancelledAppointment(ctx context.Context, record Cancel
 			  AND pos_appointment_id = $6
 			  AND COALESCE(pos_appointment_version, 0) < $2
 			RETURNING id::text, salon_id::text, booking_attempt_id::text, pos_provider, pos_appointment_id,
-			          COALESCE(pos_appointment_version, 0), status, customer_name, customer_phone,
+			          COALESCE(pos_appointment_version, 0), scheduling_authority, COALESCE(authority_provider, ''),
+			          COALESCE(authority_appointment_id, ''), COALESCE(authority_appointment_version, 0),
+			          COALESCE(authority_customer_id, ''), confirmed_at, COALESCE(confirmed_by_user_id::text, ''),
+			          COALESCE(confirmation_source, ''), status, customer_name, customer_phone,
 			          COALESCE(customer_email, ''), COALESCE(service_id::text, ''), COALESCE(staff_id::text, ''), COALESCE(staff_selection_mode, 'specific'),
 			          start_time, end_time, COALESCE(notes, ''), created_at, updated_at
 		`, StatusCancelled, record.POSBookingVersion, record.Appointment.ID, record.Appointment.SalonID, record.Appointment.POSProvider, record.Appointment.POSAppointmentID))
@@ -3491,7 +4054,7 @@ func (r *Repository) SaveCancelledAppointment(ctx context.Context, record Cancel
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	appointment.Segments = bookingSegmentSnapshots(segments)
+	appointment.Segments = authorityBookingSegmentSnapshots(segments)
 	return appointment, nil
 }
 
@@ -3541,28 +4104,32 @@ func (r *Repository) SaveAppointmentActionFallback(ctx context.Context, record A
 		posBookingVersion = record.Appointment.POSAppointmentVersion
 	}
 	attempt := BookingAttempt{
-		ID:                 record.AttemptID,
-		SalonID:            record.SalonID,
-		Source:             source,
-		Status:             status,
-		POSProvider:        record.Provider,
-		POSBookingID:       defaultString(record.POSBookingID, record.Appointment.POSAppointmentID),
-		POSBookingVersion:  posBookingVersion,
-		CustomerName:       record.Appointment.CustomerName,
-		CustomerPhone:      record.Appointment.CustomerPhone,
-		CustomerEmail:      record.Appointment.CustomerEmail,
-		ServiceID:          primary.Service.ID,
-		StaffID:            primary.Staff.ID,
-		StaffSelectionMode: primary.StaffSelectionMode,
-		RequestedStartTime: record.RequestedStartTime,
-		RequestedEndTime:   record.RequestedEndTime,
-		Notes:              record.Notes,
-		ErrorCode:          record.ErrorCode,
-		ErrorMessage:       record.ErrorMessage,
-		OperationType:      operationType,
-		ProviderOutcome:    record.ProviderOutcome,
-		RetryPolicy:        record.RetryPolicy,
-		Reconciliation:     record.Reconciliation,
+		ID:                          record.AttemptID,
+		SalonID:                     record.SalonID,
+		SchedulingAuthority:         SchedulingAuthorityExternalProvider,
+		AuthorityProvider:           record.Provider,
+		AuthorityAppointmentID:      defaultString(record.POSBookingID, record.Appointment.POSAppointmentID),
+		AuthorityAppointmentVersion: posBookingVersion,
+		Source:                      source,
+		Status:                      status,
+		POSProvider:                 record.Provider,
+		POSBookingID:                defaultString(record.POSBookingID, record.Appointment.POSAppointmentID),
+		POSBookingVersion:           posBookingVersion,
+		CustomerName:                record.Appointment.CustomerName,
+		CustomerPhone:               record.Appointment.CustomerPhone,
+		CustomerEmail:               record.Appointment.CustomerEmail,
+		ServiceID:                   primary.Service.ID,
+		StaffID:                     primary.Staff.ID,
+		StaffSelectionMode:          primary.StaffSelectionMode,
+		RequestedStartTime:          record.RequestedStartTime,
+		RequestedEndTime:            record.RequestedEndTime,
+		Notes:                       record.Notes,
+		ErrorCode:                   record.ErrorCode,
+		ErrorMessage:                record.ErrorMessage,
+		OperationType:               operationType,
+		ProviderOutcome:             record.ProviderOutcome,
+		RetryPolicy:                 record.RetryPolicy,
+		Reconciliation:              record.Reconciliation,
 	}
 	if attempt.StaffSelectionMode == "" {
 		attempt.StaffSelectionMode = StaffSelectionSpecific
@@ -3591,6 +4158,8 @@ func (r *Repository) SaveAppointmentActionFallback(ctx context.Context, record A
 		}
 		return nil, err
 	}
+	attempt.AuthorityLocationID = attempt.ProviderFence.LocationID
+	attempt.AuthoritySnapshotGeneration = attempt.ProviderFence.SnapshotGeneration
 
 	providerMirrorConverged := record.ProviderOutcome != ProviderOutcomeFailed &&
 		currentAppointment.POSAppointmentVersion > record.Appointment.POSAppointmentVersion &&
@@ -3614,6 +4183,7 @@ func (r *Repository) SaveAppointmentActionFallback(ctx context.Context, record A
 	}
 	if providerMirrorConverged {
 		attempt.POSBookingVersion = currentAppointment.POSAppointmentVersion
+		attempt.AuthorityAppointmentVersion = currentAppointment.POSAppointmentVersion
 		attempt.ProviderOutcome = ProviderOutcomeSucceeded
 		attempt.RetryPolicy = RetryPolicyNone
 		attempt.Reconciliation = ReconciliationNotRequired
@@ -3629,6 +4199,8 @@ func (r *Repository) SaveAppointmentActionFallback(ctx context.Context, record A
 			SET status = $1,
 			    pos_booking_id = $2,
 			    pos_booking_version = $3,
+			    authority_appointment_id = $2,
+			    authority_appointment_version = $3,
 			    staff_id = $4,
 			    staff_selection_mode = $5,
 			    requested_start_time = $6,
@@ -3660,10 +4232,11 @@ func (r *Repository) SaveAppointmentActionFallback(ctx context.Context, record A
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
-		currentAppointment.Segments = bookingSegmentSnapshots(segments)
+		currentAppointment.Segments = authorityBookingSegmentSnapshots(segments)
 		attempt.POSBookingID = currentAppointment.POSAppointmentID
+		attempt.AuthorityAppointmentID = currentAppointment.POSAppointmentID
 		attempt.Appointment = currentAppointment
-		attempt.Segments = bookingSegmentSnapshots(segments)
+		attempt.Segments = authorityBookingSegmentSnapshots(segments)
 		return &attempt, nil
 	}
 	if err := tx.QueryRowContext(ctx, `
@@ -3671,6 +4244,8 @@ func (r *Repository) SaveAppointmentActionFallback(ctx context.Context, record A
 		SET status = $1,
 		    pos_booking_id = NULLIF($2, ''),
 		    pos_booking_version = $3,
+		    authority_appointment_id = NULLIF($2, ''),
+		    authority_appointment_version = $3,
 		    staff_selection_mode = $4,
 		    requested_start_time = $5,
 		    requested_end_time = $6,
@@ -3739,7 +4314,7 @@ func (r *Repository) SaveAppointmentActionFallback(ctx context.Context, record A
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	attempt.Segments = bookingSegmentSnapshots(segments)
+	attempt.Segments = authorityBookingSegmentSnapshots(segments)
 	if err := r.annotateBookingAttemptPoliciesCurrent(ctx, &attempt); err != nil {
 		return nil, err
 	}
@@ -3749,7 +4324,9 @@ func (r *Repository) SaveAppointmentActionFallback(ctx context.Context, record A
 func (r *Repository) LatestTestBooking(ctx context.Context, salonID string, ownerUserID string) (*TestBookingRecord, error) {
 	var item TestBookingRecord
 	err := r.db.QueryRowContext(ctx, `
-		SELECT ba.id::text, COALESCE(ba.operation_type, 'book'), ba.status, COALESCE(ba.pos_booking_id, ''), COALESCE(ba.pos_booking_version, 0), ba.customer_name,
+		SELECT ba.id::text, COALESCE(ba.operation_type, 'book'), ba.status, COALESCE(ba.pos_booking_id, ''), COALESCE(ba.pos_booking_version, 0),
+		       ba.scheduling_authority, COALESCE(ba.authority_provider, ''),
+		       COALESCE(ba.authority_appointment_id, ''), COALESCE(ba.authority_appointment_version, 0), ba.customer_name,
 		       ba.customer_phone, COALESCE(ba.service_id::text, ''), COALESCE(ba.staff_id::text, ''),
 		       ba.requested_start_time, ba.requested_end_time, COALESCE(ba.error_code, ''),
 		       COALESCE(ba.error_message, ''), COALESCE(ba.provider_outcome, 'not_started'),
@@ -3768,6 +4345,10 @@ func (r *Repository) LatestTestBooking(ctx context.Context, salonID string, owne
 		&item.Status,
 		&item.POSBookingID,
 		&item.POSAppointmentVersion,
+		&item.SchedulingAuthority,
+		&item.AuthorityProvider,
+		&item.AuthorityAppointmentID,
+		&item.AuthorityAppointmentVersion,
 		&item.CustomerName,
 		&item.CustomerPhone,
 		&item.ServiceID,
@@ -3835,10 +4416,13 @@ func (r *Repository) ListAppointments(ctx context.Context, salonID string, owner
 		return nil, err
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id::text, salon_id::text, booking_attempt_id::text, pos_provider, pos_appointment_id,
-		       COALESCE(pos_appointment_version, 0), status, customer_name, customer_phone, COALESCE(customer_email, ''), COALESCE(service_id::text, ''),
+		SELECT id::text, salon_id::text, booking_attempt_id::text, COALESCE(pos_provider, ''), COALESCE(pos_appointment_id, ''),
+		       COALESCE(pos_appointment_version, 0), scheduling_authority, COALESCE(authority_provider, ''),
+		       COALESCE(authority_appointment_id, ''), COALESCE(authority_appointment_version, 0),
+		       COALESCE(authority_customer_id, ''), confirmed_at, COALESCE(confirmed_by_user_id::text, ''),
+		       COALESCE(confirmation_source, ''), status, party_size, customer_name, customer_phone, COALESCE(customer_email, ''), COALESCE(service_id::text, ''),
 		       COALESCE(staff_id::text, ''), COALESCE(staff_selection_mode, 'specific'), start_time, end_time, COALESCE(notes, ''),
-		       COALESCE(pos_sync_status, 'synced'), last_pos_synced_at, COALESCE(pos_sync_error, ''), created_at, updated_at
+		       COALESCE(pos_sync_status, ''), last_pos_synced_at, COALESCE(pos_sync_error, ''), created_at, updated_at
 		FROM appointments
 		WHERE salon_id = $1
 		ORDER BY start_time DESC, id DESC
@@ -3854,6 +4438,7 @@ func (r *Repository) ListAppointments(ctx context.Context, salonID string, owner
 	for rows.Next() {
 		var item Appointment
 		var lastPOSSyncedAt sql.NullTime
+		var confirmedAt sql.NullTime
 		if err := rows.Scan(
 			&item.ID,
 			&item.SalonID,
@@ -3861,7 +4446,16 @@ func (r *Repository) ListAppointments(ctx context.Context, salonID string, owner
 			&item.POSProvider,
 			&item.POSAppointmentID,
 			&item.POSAppointmentVersion,
+			&item.SchedulingAuthority,
+			&item.AuthorityProvider,
+			&item.AuthorityAppointmentID,
+			&item.AuthorityAppointmentVersion,
+			&item.AuthorityCustomerID,
+			&confirmedAt,
+			&item.ConfirmedByUserID,
+			&item.ConfirmationSource,
 			&item.Status,
+			&item.PartySize,
 			&item.CustomerName,
 			&item.CustomerPhone,
 			&item.CustomerEmail,
@@ -3882,6 +4476,9 @@ func (r *Repository) ListAppointments(ctx context.Context, salonID string, owner
 		if lastPOSSyncedAt.Valid {
 			item.LastPOSSyncedAt = &lastPOSSyncedAt.Time
 		}
+		if confirmedAt.Valid {
+			item.ConfirmedAt = &confirmedAt.Time
+		}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -3898,8 +4495,12 @@ func (r *Repository) ListBookingAttempts(ctx context.Context, salonID string, ow
 		return nil, err
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT ba.id::text, ba.salon_id::text, ba.source, ba.status, ba.pos_provider,
+		SELECT ba.id::text, ba.salon_id::text, ba.source, ba.status, COALESCE(ba.pos_provider, ''),
 		       COALESCE(ba.pos_booking_id, ''), COALESCE(ba.pos_booking_version, 0),
+		       ba.scheduling_authority, COALESCE(ba.authority_provider, ''), COALESCE(ba.authority_appointment_id, ''),
+		       COALESCE(ba.authority_appointment_version, 0), COALESCE(ba.target_authority_appointment_version, 0),
+		       COALESCE(ba.authority_idempotency_key, ''), COALESCE(ba.authority_location_id, ''),
+		       COALESCE(ba.authority_snapshot_generation, 0),
 		       COALESCE(ba.operation_key, ''), COALESCE(ba.retry_of_attempt_id::text, ''),
 		       COALESCE(ba.superseded_by_attempt_id::text, ''), COALESCE(ba.retry_sequence, 0),
 		       ba.superseded_at, COALESCE(ba.availability_quote_id::text, ''), COALESCE(ba.availability_slot_fingerprint, ''),
@@ -3944,6 +4545,14 @@ func (r *Repository) ListBookingAttempts(ctx context.Context, salonID string, ow
 			&item.POSProvider,
 			&item.POSBookingID,
 			&item.POSBookingVersion,
+			&item.SchedulingAuthority,
+			&item.AuthorityProvider,
+			&item.AuthorityAppointmentID,
+			&item.AuthorityAppointmentVersion,
+			&item.TargetAuthorityAppointmentVersion,
+			&item.AuthorityIdempotencyKey,
+			&item.AuthorityLocationID,
+			&item.AuthoritySnapshotGeneration,
 			&item.OperationKey,
 			&item.RetryOfAttemptID,
 			&item.SupersededByAttemptID,
@@ -4023,6 +4632,9 @@ func (r *Repository) ListReconciliationTasks(ctx context.Context, salonID string
 		       task.status, COALESCE(task.resolution, ''), COALESCE(task.resolution_note, ''),
 		       task.resolved_at, task.created_at, task.updated_at,
 		       attempt.status, attempt.pos_provider, COALESCE(attempt.pos_booking_id, ''), COALESCE(attempt.pos_booking_version, 0),
+		       attempt.scheduling_authority, COALESCE(attempt.authority_provider, ''),
+		       COALESCE(attempt.authority_appointment_id, ''), COALESCE(attempt.authority_appointment_version, 0),
+		       COALESCE(attempt.target_authority_appointment_version, 0),
 		       attempt.operation_type, attempt.provider_outcome, attempt.retry_policy,
 		       attempt.reconciliation_status, COALESCE(attempt.target_appointment_id::text, ''),
 		       attempt.customer_name, attempt.customer_phone, COALESCE(attempt.customer_email, ''),
@@ -4075,7 +4687,9 @@ func scanReconciliationTask(scanner reconciliationTaskScanner, salonID string) (
 	if err := scanner.Scan(
 		&item.ID, &item.SalonID, &item.BookingAttemptID, &item.Status, &item.Resolution,
 		&item.ResolutionNote, &resolvedAt, &item.CreatedAt, &item.UpdatedAt,
-		&attempt.Status, &attempt.POSProvider, &attempt.POSBookingID, &attempt.POSBookingVersion, &attempt.OperationType,
+		&attempt.Status, &attempt.POSProvider, &attempt.POSBookingID, &attempt.POSBookingVersion,
+		&attempt.SchedulingAuthority, &attempt.AuthorityProvider, &attempt.AuthorityAppointmentID,
+		&attempt.AuthorityAppointmentVersion, &attempt.TargetAuthorityAppointmentVersion, &attempt.OperationType,
 		&attempt.ProviderOutcome, &attempt.RetryPolicy, &attempt.Reconciliation,
 		&attempt.TargetAppointmentID, &attempt.CustomerName, &attempt.CustomerPhone, &attempt.CustomerEmail,
 		&attempt.ServiceID, &attempt.StaffID, &attempt.StaffSelectionMode, &attempt.RequestedStartTime,
@@ -4099,6 +4713,9 @@ func (r *Repository) getReconciliationTaskForOwner(ctx context.Context, salonID 
 		       task.status, COALESCE(task.resolution, ''), COALESCE(task.resolution_note, ''),
 		       task.resolved_at, task.created_at, task.updated_at,
 		       attempt.status, attempt.pos_provider, COALESCE(attempt.pos_booking_id, ''), COALESCE(attempt.pos_booking_version, 0),
+		       attempt.scheduling_authority, COALESCE(attempt.authority_provider, ''),
+		       COALESCE(attempt.authority_appointment_id, ''), COALESCE(attempt.authority_appointment_version, 0),
+		       COALESCE(attempt.target_authority_appointment_version, 0),
 		       attempt.operation_type, attempt.provider_outcome, attempt.retry_policy,
 		       attempt.reconciliation_status, COALESCE(attempt.target_appointment_id::text, ''),
 		       attempt.customer_name, attempt.customer_phone, COALESCE(attempt.customer_email, ''),
@@ -4527,11 +5144,15 @@ func (r *Repository) ResolveReconciliationTask(ctx context.Context, salonID stri
 		}
 		result, err := tx.ExecContext(ctx, `
 			UPDATE booking_attempts
-			SET status = $1, pos_booking_id = $2, pos_booking_version = $3, provider_outcome = $4,
+			SET status = $1, pos_booking_id = $2, pos_booking_version = $3,
+			    authority_appointment_id = $2, authority_appointment_version = $3,
+			    provider_outcome = $4,
 			    retry_policy = $5, reconciliation_status = $6,
 			    reconciliation_resolution = $7, reconciliation_resolved_at = now(),
 			    provider_location_id = COALESCE(provider_location_id, $8),
 			    provider_snapshot_generation = COALESCE(provider_snapshot_generation, $9),
+			    authority_location_id = COALESCE(authority_location_id, $8),
+			    authority_snapshot_generation = COALESCE(authority_snapshot_generation, $9),
 			    error_code = NULL, error_message = NULL, updated_at = now()
 			WHERE id = $10 AND salon_id = $11 AND reconciliation_status = $12
 			  AND (
@@ -4625,10 +5246,13 @@ func (r *Repository) ListCalendarAppointments(ctx context.Context, salonID strin
 		return nil, err
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id::text, salon_id::text, booking_attempt_id::text, pos_provider, pos_appointment_id,
-		       COALESCE(pos_appointment_version, 0), status, customer_name, customer_phone, COALESCE(customer_email, ''), COALESCE(service_id::text, ''),
+		SELECT id::text, salon_id::text, booking_attempt_id::text, COALESCE(pos_provider, ''), COALESCE(pos_appointment_id, ''),
+		       COALESCE(pos_appointment_version, 0), scheduling_authority, COALESCE(authority_provider, ''),
+		       COALESCE(authority_appointment_id, ''), COALESCE(authority_appointment_version, 0),
+		       COALESCE(authority_customer_id, ''), confirmed_at, COALESCE(confirmed_by_user_id::text, ''),
+		       COALESCE(confirmation_source, ''), status, customer_name, customer_phone, COALESCE(customer_email, ''), COALESCE(service_id::text, ''),
 		       COALESCE(staff_id::text, ''), COALESCE(staff_selection_mode, 'specific'), start_time, end_time, COALESCE(notes, ''),
-		       COALESCE(pos_sync_status, 'synced'), last_pos_synced_at, COALESCE(pos_sync_error, ''), created_at, updated_at
+		       COALESCE(pos_sync_status, ''), last_pos_synced_at, COALESCE(pos_sync_error, ''), created_at, updated_at
 		FROM appointments
 		WHERE salon_id = $1
 		  AND start_time < $3
@@ -4644,6 +5268,7 @@ func (r *Repository) ListCalendarAppointments(ctx context.Context, salonID strin
 	for rows.Next() {
 		var item Appointment
 		var lastPOSSyncedAt sql.NullTime
+		var confirmedAt sql.NullTime
 		if err := rows.Scan(
 			&item.ID,
 			&item.SalonID,
@@ -4651,6 +5276,14 @@ func (r *Repository) ListCalendarAppointments(ctx context.Context, salonID strin
 			&item.POSProvider,
 			&item.POSAppointmentID,
 			&item.POSAppointmentVersion,
+			&item.SchedulingAuthority,
+			&item.AuthorityProvider,
+			&item.AuthorityAppointmentID,
+			&item.AuthorityAppointmentVersion,
+			&item.AuthorityCustomerID,
+			&confirmedAt,
+			&item.ConfirmedByUserID,
+			&item.ConfirmationSource,
 			&item.Status,
 			&item.CustomerName,
 			&item.CustomerPhone,
@@ -4672,6 +5305,9 @@ func (r *Repository) ListCalendarAppointments(ctx context.Context, salonID strin
 		if lastPOSSyncedAt.Valid {
 			item.LastPOSSyncedAt = &lastPOSSyncedAt.Time
 		}
+		if confirmedAt.Valid {
+			item.ConfirmedAt = &confirmedAt.Time
+		}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -4688,7 +5324,10 @@ func (r *Repository) ListCalendarPendingRequests(ctx context.Context, salonID st
 		return nil, err
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT ba.id::text, ba.salon_id::text, ba.source, ba.status, ba.pos_provider, COALESCE(ba.pos_booking_id, ''),
+		SELECT ba.id::text, ba.salon_id::text, ba.source, ba.status, COALESCE(ba.pos_provider, ''), COALESCE(ba.pos_booking_id, ''),
+		       COALESCE(ba.pos_booking_version, 0), ba.scheduling_authority, COALESCE(ba.authority_provider, ''),
+		       COALESCE(ba.authority_appointment_id, ''), COALESCE(ba.authority_appointment_version, 0),
+		       COALESCE(ba.target_authority_appointment_version, 0),
 		       COALESCE(ba.operation_type, 'book'), COALESCE(ba.provider_outcome, 'not_started'),
 		       COALESCE(ba.retry_policy, 'none'), COALESCE(ba.reconciliation_status, 'not_required'), ba.processing_lease_expires_at,
 		       ba.customer_name, ba.customer_phone, COALESCE(ba.customer_email, ''), COALESCE(ba.service_id::text, ''),
@@ -4725,6 +5364,12 @@ func (r *Repository) ListCalendarPendingRequests(ctx context.Context, salonID st
 			&item.Status,
 			&item.POSProvider,
 			&item.POSBookingID,
+			&item.POSBookingVersion,
+			&item.SchedulingAuthority,
+			&item.AuthorityProvider,
+			&item.AuthorityAppointmentID,
+			&item.AuthorityAppointmentVersion,
+			&item.TargetAuthorityAppointmentVersion,
 			&item.OperationType,
 			&item.ProviderOutcome,
 			&item.RetryPolicy,
@@ -4875,10 +5520,30 @@ func (r *Repository) UpsertCalendarAppointments(ctx context.Context, salonID str
 			SELECT COALESCE(pos_appointment_version, 0)
 			FROM appointments
 			WHERE salon_id = $1
+			  AND scheduling_authority = 'external_provider'
 			  AND pos_provider = $2
 			  AND pos_appointment_id = $3
 			FOR UPDATE
 		`, salonID, item.Provider, item.POSAppointmentID).Scan(&currentAppointmentVersion)
+		if errors.Is(err, sql.ErrNoRows) {
+			var protectedAppointmentID string
+			collisionErr := tx.QueryRowContext(ctx, `
+				SELECT id::text
+				FROM appointments
+				WHERE salon_id = $1
+				  AND scheduling_authority <> 'external_provider'
+				  AND pos_provider = $2
+				  AND pos_appointment_id = $3
+				FOR UPDATE
+			`, salonID, item.Provider, item.POSAppointmentID).Scan(&protectedAppointmentID)
+			if collisionErr == nil {
+				summary.Skipped++
+				continue
+			}
+			if !errors.Is(collisionErr, sql.ErrNoRows) {
+				return summary, collisionErr
+			}
+		}
 		if err == nil && item.POSAppointmentVersion < currentAppointmentVersion {
 			summary.Skipped++
 			continue
@@ -4932,6 +5597,8 @@ func (r *Repository) UpsertCalendarAppointments(ctx context.Context, salonID str
 			FROM appointments appointment
 			JOIN booking_attempts origin ON origin.id = appointment.booking_attempt_id
 			WHERE appointment.salon_id = $1
+			  AND appointment.scheduling_authority = 'external_provider'
+			  AND origin.scheduling_authority = 'external_provider'
 			  AND appointment.pos_provider = $2
 			  AND appointment.pos_appointment_id = $3
 			FOR UPDATE OF appointment, origin
@@ -4942,6 +5609,7 @@ func (r *Repository) UpsertCalendarAppointments(ctx context.Context, salonID str
 				SELECT id::text, COALESCE(pos_booking_version, 0)
 				FROM booking_attempts
 				WHERE salon_id = $1
+				  AND scheduling_authority = 'external_provider'
 				  AND pos_provider = $2
 				  AND pos_booking_id = $3
 				  AND operation_type = $4
@@ -4957,13 +5625,18 @@ func (r *Repository) UpsertCalendarAppointments(ctx context.Context, salonID str
 						salon_id, source, status, pos_provider, pos_booking_id, pos_booking_version, customer_name, customer_phone,
 						customer_email, service_id, staff_id, staff_selection_mode, requested_start_time,
 						requested_end_time, notes, operation_type, provider_outcome, retry_policy,
-						reconciliation_status, provider_location_id, provider_snapshot_generation
+						reconciliation_status, provider_location_id, provider_snapshot_generation,
+						scheduling_authority, authority_provider, authority_appointment_id,
+						authority_appointment_version, target_authority_appointment_version,
+						authority_location_id, authority_snapshot_generation
 					)
 					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), $10, $11, $12, $13, $14, NULLIF($15, ''),
-					        $16, $17, $18, $19, $20, $21)
+					        $16, $17, $18, $19, $20, $21,
+					        $22, $4, $5, $6, 0, $20, $21)
 					RETURNING id::text
 				`, salonID, SourcePOSCalendarSync, item.Status, item.Provider, item.POSAppointmentID, item.POSAppointmentVersion, item.CustomerName, item.CustomerPhone, item.CustomerEmail, primary.serviceID(), primary.staffID(), primary.staffSelectionMode(), item.StartTime, item.EndTime, item.Notes,
-					BookingActionBook, providerOutcome, retryPolicy, reconciliation, fence.LocationID, fence.SnapshotGeneration).Scan(&existingAttemptID); err != nil {
+					BookingActionBook, providerOutcome, retryPolicy, reconciliation, fence.LocationID, fence.SnapshotGeneration,
+					SchedulingAuthorityExternalProvider).Scan(&existingAttemptID); err != nil {
 					return summary, err
 				}
 			} else if err != nil {
@@ -4979,11 +5652,13 @@ func (r *Repository) UpsertCalendarAppointments(ctx context.Context, salonID str
 					salon_id, booking_attempt_id, pos_provider, pos_appointment_id, pos_appointment_version,
 					pos_customer_id, status, customer_name, customer_phone, customer_email, service_id, staff_id,
 					staff_selection_mode, start_time, end_time, notes, pos_sync_status, last_pos_synced_at,
-					pos_sync_error
+					pos_sync_error, scheduling_authority, authority_provider, authority_appointment_id,
+					authority_appointment_version, authority_customer_id
 				)
-				VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, NULLIF($10, ''), $11, $12, $13, $14, $15, NULLIF($16, ''), 'synced', now(), NULL)
+				VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, NULLIF($10, ''), $11, $12, $13, $14, $15, NULLIF($16, ''), 'synced', now(), NULL,
+				        $17, $3, $4, $5, NULLIF($6, ''))
 				RETURNING id::text
-			`, salonID, existingAttemptID, item.Provider, item.POSAppointmentID, item.POSAppointmentVersion, item.POSCustomerID, item.Status, item.CustomerName, item.CustomerPhone, item.CustomerEmail, primary.serviceID(), primary.staffID(), primary.staffSelectionMode(), item.StartTime, item.EndTime, item.Notes).Scan(&existingAppointmentID); err != nil {
+			`, salonID, existingAttemptID, item.Provider, item.POSAppointmentID, item.POSAppointmentVersion, item.POSCustomerID, item.Status, item.CustomerName, item.CustomerPhone, item.CustomerEmail, primary.serviceID(), primary.staffID(), primary.staffSelectionMode(), item.StartTime, item.EndTime, item.Notes, SchedulingAuthorityExternalProvider).Scan(&existingAppointmentID); err != nil {
 				return summary, err
 			}
 			summary.Imported++
@@ -5035,8 +5710,10 @@ func (r *Repository) UpsertCalendarAppointments(ctx context.Context, salonID str
 			result, err := tx.ExecContext(ctx, `
 				UPDATE appointments
 				SET pos_appointment_version = $4,
+				    authority_appointment_version = $4,
 				    status = $5,
 				    pos_customer_id = COALESCE(NULLIF($15, ''), pos_customer_id),
+				    authority_customer_id = COALESCE(NULLIF($15, ''), authority_customer_id),
 				    customer_name = CASE WHEN $6 = 'Square customer' AND customer_name <> '' THEN customer_name ELSE $6 END,
 				    customer_phone = CASE WHEN NULLIF($7, '') IS NULL AND customer_phone <> '' THEN customer_phone ELSE $7 END,
 				    customer_email = COALESCE(NULLIF($8, ''), customer_email),
@@ -5052,6 +5729,7 @@ func (r *Repository) UpsertCalendarAppointments(ctx context.Context, salonID str
 				    updated_at = now()
 				WHERE salon_id = $1
 				  AND id = $2
+				  AND scheduling_authority = 'external_provider'
 				  AND pos_provider = $3
 			`, salonID, existingAppointmentID, item.Provider, item.POSAppointmentVersion, item.Status, item.CustomerName, item.CustomerPhone, item.CustomerEmail, primary.serviceID(), primary.staffID(), primary.staffSelectionMode(), item.StartTime, item.EndTime, item.Notes, item.POSCustomerID)
 			if err != nil {
@@ -5066,7 +5744,7 @@ func (r *Repository) UpsertCalendarAppointments(ctx context.Context, salonID str
 			}
 			summary.Updated++
 		}
-		if err := r.replaceCalendarAppointmentSegments(ctx, tx, existingAppointmentID, segments); err != nil {
+		if err := r.replaceCalendarAppointmentSegments(ctx, tx, salonID, existingAppointmentID, segments); err != nil {
 			return summary, err
 		}
 		if mirrorReconciliation == ReconciliationRequired {
@@ -5151,38 +5829,55 @@ type calendarAppointmentSegmentSnapshot struct {
 }
 
 type calendarAppointmentSnapshot struct {
-	AppointmentID         string
-	BookingAttemptID      string
-	OriginSource          string
-	OriginSuperseded      bool
-	Provider              string
-	ProviderLocationID    string
-	ProviderGeneration    int64
-	POSAppointmentID      string
-	POSAppointmentVersion int
-	POSCustomerID         string
-	Status                string
-	CustomerName          string
-	CustomerPhone         string
-	CustomerEmail         string
-	ServiceID             string
-	StaffID               string
-	StaffSelectionMode    string
-	StartTime             time.Time
-	EndTime               time.Time
-	Notes                 string
-	CreatedAt             time.Time
-	UpdatedAt             time.Time
-	Segments              []calendarAppointmentSegmentSnapshot
+	AppointmentID               string
+	BookingAttemptID            string
+	OriginSource                string
+	OriginSuperseded            bool
+	SchedulingAuthority         string
+	AuthorityProvider           string
+	AuthorityAppointmentID      string
+	AuthorityAppointmentVersion int
+	AuthorityCustomerID         string
+	ConfirmedAt                 *time.Time
+	ConfirmedByUserID           string
+	ConfirmationSource          string
+	Provider                    string
+	ProviderLocationID          string
+	ProviderGeneration          int64
+	POSAppointmentID            string
+	POSAppointmentVersion       int
+	POSCustomerID               string
+	Status                      string
+	CustomerName                string
+	CustomerPhone               string
+	CustomerEmail               string
+	ServiceID                   string
+	StaffID                     string
+	StaffSelectionMode          string
+	StartTime                   time.Time
+	EndTime                     time.Time
+	Notes                       string
+	CreatedAt                   time.Time
+	UpdatedAt                   time.Time
+	Segments                    []calendarAppointmentSegmentSnapshot
 }
 
 func loadCalendarAppointmentSnapshotTx(ctx context.Context, tx *sql.Tx, salonID string, appointmentID string, provider string, providerAppointmentID string) (calendarAppointmentSnapshot, error) {
 	var snapshot calendarAppointmentSnapshot
+	var confirmedAt sql.NullTime
 	if err := tx.QueryRowContext(ctx, `
 		SELECT appointment.id::text,
 		       appointment.booking_attempt_id::text,
 		       origin.source,
 		       origin.superseded_at IS NOT NULL,
+		       appointment.scheduling_authority,
+		       COALESCE(appointment.authority_provider, ''),
+		       COALESCE(appointment.authority_appointment_id, ''),
+		       COALESCE(appointment.authority_appointment_version, 0),
+		       COALESCE(appointment.authority_customer_id, ''),
+		       appointment.confirmed_at,
+		       COALESCE(appointment.confirmed_by_user_id::text, ''),
+		       COALESCE(appointment.confirmation_source, ''),
 		       appointment.pos_provider,
 		       COALESCE(origin.provider_location_id, ''),
 		       COALESCE(origin.provider_snapshot_generation, 0),
@@ -5205,6 +5900,8 @@ func loadCalendarAppointmentSnapshotTx(ctx context.Context, tx *sql.Tx, salonID 
 		JOIN booking_attempts origin ON origin.id = appointment.booking_attempt_id
 		WHERE appointment.salon_id = $1
 		  AND appointment.id = $2
+		  AND appointment.scheduling_authority = 'external_provider'
+		  AND origin.scheduling_authority = 'external_provider'
 		  AND appointment.pos_provider = $3
 		  AND appointment.pos_appointment_id = $4
 		FOR UPDATE OF appointment, origin
@@ -5213,6 +5910,14 @@ func loadCalendarAppointmentSnapshotTx(ctx context.Context, tx *sql.Tx, salonID 
 		&snapshot.BookingAttemptID,
 		&snapshot.OriginSource,
 		&snapshot.OriginSuperseded,
+		&snapshot.SchedulingAuthority,
+		&snapshot.AuthorityProvider,
+		&snapshot.AuthorityAppointmentID,
+		&snapshot.AuthorityAppointmentVersion,
+		&snapshot.AuthorityCustomerID,
+		&confirmedAt,
+		&snapshot.ConfirmedByUserID,
+		&snapshot.ConfirmationSource,
 		&snapshot.Provider,
 		&snapshot.ProviderLocationID,
 		&snapshot.ProviderGeneration,
@@ -5234,15 +5939,21 @@ func loadCalendarAppointmentSnapshotTx(ctx context.Context, tx *sql.Tx, salonID 
 	); err != nil {
 		return calendarAppointmentSnapshot{}, err
 	}
+	if confirmedAt.Valid {
+		value := confirmedAt.Time
+		snapshot.ConfirmedAt = &value
+	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT COALESCE(service_id::text, ''), pos_service_id, COALESCE(pos_service_version, 0),
 		       COALESCE(staff_id::text, ''), COALESCE(pos_staff_id, ''),
 		       COALESCE(staff_selection_mode, 'specific'), duration_minutes, sort_order
 		FROM appointment_services
-		WHERE appointment_id = $1
+		WHERE salon_id = $1
+		  AND appointment_id = $2
+		  AND scheduling_authority = 'external_provider'
 		ORDER BY sort_order ASC, id ASC
 		FOR UPDATE
-	`, appointmentID)
+	`, salonID, appointmentID)
 	if err != nil {
 		return calendarAppointmentSnapshot{}, err
 	}
@@ -5338,6 +6049,7 @@ func enrichEqualVersionCalendarAppointmentTx(
 		    updated_at = now()
 		WHERE salon_id = $1
 		  AND id = $2
+		  AND scheduling_authority = 'external_provider'
 		  AND pos_provider = $3
 		  AND pos_appointment_id = $4
 		  AND COALESCE(pos_appointment_version, 0) = $5
@@ -5375,9 +6087,12 @@ func enrichEqualVersionCalendarAppointmentTx(
 		    END,
 		    provider_location_id = CASE WHEN $15 THEN COALESCE(provider_location_id, NULLIF($13, '')) ELSE provider_location_id END,
 		    provider_snapshot_generation = CASE WHEN $15 THEN COALESCE(provider_snapshot_generation, NULLIF($14, 0)) ELSE provider_snapshot_generation END,
+		    authority_location_id = CASE WHEN $15 THEN COALESCE(authority_location_id, NULLIF($13, '')) ELSE authority_location_id END,
+		    authority_snapshot_generation = CASE WHEN $15 THEN COALESCE(authority_snapshot_generation, NULLIF($14, 0)) ELSE authority_snapshot_generation END,
 		    updated_at = now()
 		WHERE salon_id = $1
 		  AND id = $2
+		  AND scheduling_authority = 'external_provider'
 		  AND pos_provider = $3
 		  AND COALESCE(pos_booking_version, 0) = $4
 		  AND (
@@ -5416,14 +6131,16 @@ func enrichEqualVersionCalendarAppointmentTx(
 			        ELSE name
 			    END,
 			    price_from = COALESCE(price_from, NULLIF($6, 0))
-			WHERE appointment_id = $1
+			WHERE salon_id = $10
+			  AND appointment_id = $1
+			  AND scheduling_authority = 'external_provider'
 			  AND sort_order = $7
 			  AND pos_service_id = $8
 			  AND (
 			      (service_id IS NULL AND NULLIF($2, '') IS NOT NULL)
 			      OR ($9 AND staff_id IS NULL AND NULLIF($3, '') IS NOT NULL)
 			  )
-		`, appointmentID, segment.serviceIDString(), segment.staffIDString(), segment.staffSelectionMode(), segment.Name, segment.PriceFrom, segment.SortOrder, segment.POSServiceID, staffIdentityMatches)
+		`, appointmentID, segment.serviceIDString(), segment.staffIDString(), segment.staffSelectionMode(), segment.Name, segment.PriceFrom, segment.SortOrder, segment.POSServiceID, staffIdentityMatches, salonID)
 		if err != nil {
 			return false, err
 		}
@@ -5442,6 +6159,8 @@ func updateCalendarBookingAttemptTx(ctx context.Context, tx *sql.Tx, salonID str
 		SET status = $4,
 		    pos_booking_id = $5,
 		    pos_booking_version = $6,
+		    authority_appointment_id = $5,
+		    authority_appointment_version = $6,
 		    customer_name = CASE WHEN $7 = 'Square customer' AND customer_name <> '' THEN customer_name ELSE $7 END,
 		    customer_phone = CASE WHEN NULLIF($8, '') IS NULL AND customer_phone <> '' THEN customer_phone ELSE $8 END,
 		    customer_email = COALESCE(NULLIF($9, ''), customer_email),
@@ -5460,9 +6179,12 @@ func updateCalendarBookingAttemptTx(ctx context.Context, tx *sql.Tx, salonID str
 		    END,
 		    provider_location_id = COALESCE(provider_location_id, NULLIF($20, '')),
 		    provider_snapshot_generation = COALESCE(provider_snapshot_generation, NULLIF($21, 0)),
+		    authority_location_id = COALESCE(authority_location_id, NULLIF($20, '')),
+		    authority_snapshot_generation = COALESCE(authority_snapshot_generation, NULLIF($21, 0)),
 		    updated_at = now()
 		WHERE salon_id = $1
 		  AND id = $2
+		  AND scheduling_authority = 'external_provider'
 		  AND pos_provider = $3
 		  AND (
 		      (provider_location_id IS NULL AND provider_snapshot_generation IS NULL)
@@ -5502,6 +6224,7 @@ func hasActiveAppointmentActionReconciliationTx(ctx context.Context, tx *sql.Tx,
 			WHERE salon_id = $1
 			  AND id <> $2
 			  AND target_appointment_id = $3
+			  AND scheduling_authority = 'external_provider'
 			  AND pos_provider = $4
 			  AND pos_booking_id = $5
 			  AND operation_type IN ($6, $7)
@@ -5559,6 +6282,7 @@ func resolveCalendarAppointmentActionTx(ctx context.Context, tx *sql.Tx, salonID
 		WHERE attempt.salon_id = $1
 		  AND attempt.id <> $2
 		  AND attempt.target_appointment_id = $3
+		  AND attempt.scheduling_authority = 'external_provider'
 		  AND attempt.pos_provider = $4
 		  AND attempt.pos_booking_id = $5
 		  AND attempt.reconciliation_status = $6
@@ -5608,6 +6332,7 @@ func resolveCalendarAppointmentActionTx(ctx context.Context, tx *sql.Tx, salonID
 		UPDATE booking_attempts
 		SET status = $1,
 		    pos_booking_version = $2,
+		    authority_appointment_version = $2,
 		    provider_outcome = $3,
 		    retry_policy = $4,
 		    error_code = NULL,
@@ -5615,6 +6340,7 @@ func resolveCalendarAppointmentActionTx(ctx context.Context, tx *sql.Tx, salonID
 		    updated_at = now()
 		WHERE id = $5
 		  AND salon_id = $6
+		  AND scheduling_authority = 'external_provider'
 		  AND reconciliation_status = $7
 	`, finalStatus, snapshot.POSAppointmentVersion, ProviderOutcomeSucceeded, RetryPolicyNone, matched.AttemptID, salonID, ReconciliationRequired)
 	if err := requireExactlyOneRow(result, err); err != nil {
@@ -5628,7 +6354,9 @@ func resolveCalendarReconciliationTaskTx(ctx context.Context, tx *sql.Tx, salonI
 	if err := tx.QueryRowContext(ctx, `
 		SELECT reconciliation_status
 		FROM booking_attempts
-		WHERE id = $1 AND salon_id = $2
+		WHERE id = $1
+		  AND salon_id = $2
+		  AND scheduling_authority = 'external_provider'
 		FOR UPDATE
 	`, attemptID, salonID).Scan(&reconciliationStatus); err != nil {
 		return err
@@ -5669,6 +6397,7 @@ func resolveCalendarReconciliationTaskTx(ctx context.Context, tx *sql.Tx, salonI
 		    retry_policy = $3,
 		    updated_at = now()
 		WHERE id = $4 AND salon_id = $5 AND reconciliation_status = $6
+		  AND scheduling_authority = 'external_provider'
 	`, ReconciliationResolved, ReconciliationActionProviderAttached, RetryPolicyNone, attemptID, salonID, ReconciliationRequired)
 	if err := requireExactlyOneRow(result, err); err != nil {
 		return err
@@ -5853,8 +6582,11 @@ func (r *Repository) findCalendarStaffRef(ctx context.Context, tx *sql.Tx, salon
 	return &item, nil
 }
 
-func (r *Repository) replaceCalendarAppointmentSegments(ctx context.Context, tx *sql.Tx, appointmentID string, segments []calendarImportSegmentRef) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM appointment_services WHERE appointment_id = $1`, appointmentID); err != nil {
+func (r *Repository) replaceCalendarAppointmentSegments(ctx context.Context, tx *sql.Tx, salonID string, appointmentID string, segments []calendarImportSegmentRef) error {
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM appointment_services
+		WHERE salon_id = $1 AND appointment_id = $2
+	`, salonID, appointmentID); err != nil {
 		return err
 	}
 	for _, segment := range segments {
@@ -5864,11 +6596,19 @@ func (r *Repository) replaceCalendarAppointmentSegments(ctx context.Context, tx 
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO appointment_services (
-				appointment_id, service_id, staff_id, staff_selection_mode, pos_service_id,
-				pos_service_version, pos_staff_id, name, duration_minutes, price_from, sort_order
+				salon_id, appointment_id, service_id, staff_id, staff_selection_mode, pos_service_id,
+				pos_service_version, pos_staff_id, name, duration_minutes, price_from, sort_order,
+				scheduling_authority, authority_provider, authority_service_id,
+				authority_service_version, authority_staff_id
 			)
-			VALUES ($1, $2, $3, $4, $5, NULLIF($6::bigint, 0), NULLIF($7, ''), $8, $9, $10, $11)
-		`, appointmentID, segment.serviceID(), segment.staffID(), segment.staffSelectionMode(), segment.POSServiceID, segment.POSServiceVersion, segment.POSStaffID, segment.Name, segment.DurationMinutes, price, segment.SortOrder); err != nil {
+			SELECT appointment.salon_id, appointment.id, $3, $4, $5, $6, NULLIF($7::bigint, 0), NULLIF($8, ''), $9, $10, $11, $12,
+			       appointment.scheduling_authority, appointment.pos_provider, $6,
+			       NULLIF($7::bigint, 0), NULLIF($8, '')
+			FROM appointments appointment
+			WHERE appointment.salon_id = $1
+			  AND appointment.id = $2
+			  AND appointment.scheduling_authority = 'external_provider'
+		`, salonID, appointmentID, segment.serviceID(), segment.staffID(), segment.staffSelectionMode(), segment.POSServiceID, segment.POSServiceVersion, segment.POSStaffID, segment.Name, segment.DurationMinutes, price, segment.SortOrder); err != nil {
 			return err
 		}
 	}
@@ -5923,8 +6663,11 @@ func (r *Repository) attachAttemptTargetAppointments(ctx context.Context, salonI
 	}
 
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id::text, salon_id::text, booking_attempt_id::text, pos_provider, pos_appointment_id,
-		       COALESCE(pos_appointment_version, 0), status, customer_name, customer_phone,
+		SELECT id::text, salon_id::text, booking_attempt_id::text, COALESCE(pos_provider, ''), COALESCE(pos_appointment_id, ''),
+		       COALESCE(pos_appointment_version, 0), scheduling_authority, COALESCE(authority_provider, ''),
+		       COALESCE(authority_appointment_id, ''), COALESCE(authority_appointment_version, 0),
+		       COALESCE(authority_customer_id, ''), confirmed_at, COALESCE(confirmed_by_user_id::text, ''),
+		       COALESCE(confirmation_source, ''), status, customer_name, customer_phone,
 		       COALESCE(customer_email, ''), COALESCE(service_id::text, ''), COALESCE(staff_id::text, ''),
 		       COALESCE(staff_selection_mode, 'specific'), start_time, end_time, COALESCE(notes, ''), created_at, updated_at
 		FROM appointments
@@ -5939,6 +6682,7 @@ func (r *Repository) attachAttemptTargetAppointments(ctx context.Context, salonI
 	appointments := make([]Appointment, 0, len(ids))
 	for rows.Next() {
 		var item Appointment
+		var confirmedAt sql.NullTime
 		if err := rows.Scan(
 			&item.ID,
 			&item.SalonID,
@@ -5946,6 +6690,14 @@ func (r *Repository) attachAttemptTargetAppointments(ctx context.Context, salonI
 			&item.POSProvider,
 			&item.POSAppointmentID,
 			&item.POSAppointmentVersion,
+			&item.SchedulingAuthority,
+			&item.AuthorityProvider,
+			&item.AuthorityAppointmentID,
+			&item.AuthorityAppointmentVersion,
+			&item.AuthorityCustomerID,
+			&confirmedAt,
+			&item.ConfirmedByUserID,
+			&item.ConfirmationSource,
 			&item.Status,
 			&item.CustomerName,
 			&item.CustomerPhone,
@@ -5960,6 +6712,9 @@ func (r *Repository) attachAttemptTargetAppointments(ctx context.Context, salonI
 			&item.UpdatedAt,
 		); err != nil {
 			return err
+		}
+		if confirmedAt.Valid {
+			item.ConfirmedAt = &confirmedAt.Time
 		}
 		appointments = append(appointments, item)
 	}
@@ -6015,26 +6770,62 @@ func (r *Repository) attachAppointmentSegments(ctx context.Context, items []Appo
 		indexByID[item.ID] = index
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT aps.appointment_id::text,
-		       COALESCE(aps.service_id::text, ''), aps.pos_service_id, COALESCE(aps.pos_service_version, 0), aps.name,
+		SELECT aps.appointment_id::text, aps.id::text,
+		       aps.scheduling_authority, COALESCE(aps.authority_provider, ''),
+		       COALESCE(aps.authority_service_id, ''), COALESCE(aps.authority_service_version, 0),
+		       COALESCE(aps.authority_staff_id, ''),
+		       COALESCE(aps.service_id::text, ''), COALESCE(aps.pos_service_id, ''), COALESCE(aps.pos_service_version, 0), aps.name,
 		       COALESCE(aps.staff_id::text, ''), COALESCE(aps.pos_staff_id, ''), COALESCE(st.name, ''),
 		       COALESCE(aps.staff_selection_mode, 'specific'),
+		       COALESCE(aps.guest_reference, ''), aps.plan_version,
+		       aps.scheduled_start_time, aps.scheduled_end_time,
+		       aps.occupied_start_time, aps.occupied_end_time,
+		       aps.buffer_before_minutes, aps.buffer_after_minutes,
 		       COALESCE(aps.duration_minutes, 0), aps.sort_order
 		FROM appointment_services aps
+		JOIN appointments appointment
+		  ON appointment.id = aps.appointment_id
+		 AND appointment.salon_id = aps.salon_id
 		LEFT JOIN staff st ON st.id = aps.staff_id
 		WHERE aps.appointment_id = ANY($1::uuid[])
-		ORDER BY aps.appointment_id, aps.sort_order ASC
+		  AND (
+		      aps.scheduling_authority <> 'manleai_calendar'
+		      OR (
+		          appointment.scheduling_authority = 'manleai_calendar'
+		          AND aps.plan_version = appointment.authority_appointment_version
+		          AND aps.released_at IS NULL
+		      )
+		  )
+		ORDER BY aps.appointment_id, aps.sort_order ASC, aps.id ASC
 	`, pq.Array(ids))
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
+	type segmentLocation struct {
+		appointmentIndex int
+		segmentIndex     int
+	}
+	internalSegmentLocations := make(map[string]segmentLocation)
+	internalSegmentIDs := make([]string, 0)
 	for rows.Next() {
 		var appointmentID string
 		var segment BookingSegmentSnapshot
+		var scheduledStart sql.NullTime
+		var scheduledEnd sql.NullTime
+		var occupiedStart sql.NullTime
+		var occupiedEnd sql.NullTime
+		var bufferBefore sql.NullInt64
+		var bufferAfter sql.NullInt64
 		if err := rows.Scan(
 			&appointmentID,
+			&segment.AppointmentServiceID,
+			&segment.SchedulingAuthority,
+			&segment.AuthorityProvider,
+			&segment.AuthorityServiceID,
+			&segment.AuthorityServiceVersion,
+			&segment.AuthorityStaffID,
 			&segment.ServiceID,
 			&segment.POSServiceID,
 			&segment.POSServiceVersion,
@@ -6043,16 +6834,95 @@ func (r *Repository) attachAppointmentSegments(ctx context.Context, items []Appo
 			&segment.POSStaffID,
 			&segment.StaffName,
 			&segment.StaffSelectionMode,
+			&segment.GuestReference,
+			&segment.PlanVersion,
+			&scheduledStart,
+			&scheduledEnd,
+			&occupiedStart,
+			&occupiedEnd,
+			&bufferBefore,
+			&bufferAfter,
 			&segment.DurationMinutes,
 			&segment.SortOrder,
 		); err != nil {
 			return err
 		}
+		segment.Quantity = 1
+		if scheduledStart.Valid {
+			value := scheduledStart.Time
+			segment.ScheduledStartTime = &value
+		}
+		if scheduledEnd.Valid {
+			value := scheduledEnd.Time
+			segment.ScheduledEndTime = &value
+		}
+		if occupiedStart.Valid {
+			value := occupiedStart.Time
+			segment.OccupiedStartTime = &value
+		}
+		if occupiedEnd.Valid {
+			value := occupiedEnd.Time
+			segment.OccupiedEndTime = &value
+		}
+		if bufferBefore.Valid {
+			value := int(bufferBefore.Int64)
+			segment.BufferBeforeMinutes = &value
+		}
+		if bufferAfter.Valid {
+			value := int(bufferAfter.Int64)
+			segment.BufferAfterMinutes = &value
+		}
 		if index, ok := indexByID[appointmentID]; ok {
 			items[index].Segments = append(items[index].Segments, segment)
+			if segment.SchedulingAuthority == SchedulingAuthorityManleAICalendar {
+				internalSegmentIDs = append(internalSegmentIDs, segment.AppointmentServiceID)
+				internalSegmentLocations[segment.AppointmentServiceID] = segmentLocation{
+					appointmentIndex: index,
+					segmentIndex:     len(items[index].Segments) - 1,
+				}
+			}
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(internalSegmentIDs) == 0 {
+		return nil
+	}
+	resourceRows, err := r.db.QueryContext(ctx, `
+		SELECT allocation.appointment_service_id::text,
+		       pool.id::text, pool.name, allocation.units_allocated
+		FROM manleai_calendar_appointment_resource_allocations allocation
+		JOIN manleai_calendar_resource_pools pool
+		  ON pool.id = allocation.resource_pool_id
+		 AND pool.salon_id = allocation.salon_id
+		WHERE allocation.appointment_service_id = ANY($1::uuid[])
+		  AND allocation.released_at IS NULL
+		ORDER BY allocation.appointment_service_id, pool.id
+	`, pq.Array(internalSegmentIDs))
+	if err != nil {
+		return err
+	}
+	defer resourceRows.Close()
+	for resourceRows.Next() {
+		var segmentID string
+		var allocation AvailabilityResourceAllocation
+		if err := resourceRows.Scan(
+			&segmentID,
+			&allocation.ResourcePoolID,
+			&allocation.ResourceName,
+			&allocation.UnitsAllocated,
+		); err != nil {
+			return err
+		}
+		location, ok := internalSegmentLocations[segmentID]
+		if !ok {
+			continue
+		}
+		segment := &items[location.appointmentIndex].Segments[location.segmentIndex]
+		segment.ResourceAllocations = append(segment.ResourceAllocations, allocation)
+	}
+	return resourceRows.Err()
 }
 
 func (r *Repository) attachBookingAttemptSegments(ctx context.Context, items []BookingAttempt) error {
@@ -6067,7 +6937,10 @@ func (r *Repository) attachBookingAttemptSegments(ctx context.Context, items []B
 	}
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT bas.booking_attempt_id::text,
-		       COALESCE(bas.service_id::text, ''), bas.pos_service_id, COALESCE(bas.pos_service_version, 0), bas.name,
+		       bas.scheduling_authority, COALESCE(bas.authority_provider, ''),
+		       COALESCE(bas.authority_service_id, ''), COALESCE(bas.authority_service_version, 0),
+		       COALESCE(bas.authority_staff_id, ''),
+		       COALESCE(bas.service_id::text, ''), COALESCE(bas.pos_service_id, ''), COALESCE(bas.pos_service_version, 0), bas.name,
 		       COALESCE(bas.staff_id::text, ''), COALESCE(bas.pos_staff_id, ''), COALESCE(st.name, ''),
 		       COALESCE(bas.staff_selection_mode, 'specific'),
 		       COALESCE(bas.duration_minutes, 0), bas.sort_order
@@ -6086,6 +6959,11 @@ func (r *Repository) attachBookingAttemptSegments(ctx context.Context, items []B
 		var segment BookingSegmentSnapshot
 		if err := rows.Scan(
 			&attemptID,
+			&segment.SchedulingAuthority,
+			&segment.AuthorityProvider,
+			&segment.AuthorityServiceID,
+			&segment.AuthorityServiceVersion,
+			&segment.AuthorityStaffID,
 			&segment.ServiceID,
 			&segment.POSServiceID,
 			&segment.POSServiceVersion,
@@ -6112,6 +6990,7 @@ type appointmentScanner interface {
 
 func scanAppointment(row appointmentScanner) (*Appointment, error) {
 	var item Appointment
+	var confirmedAt sql.NullTime
 	err := row.Scan(
 		&item.ID,
 		&item.SalonID,
@@ -6119,6 +6998,14 @@ func scanAppointment(row appointmentScanner) (*Appointment, error) {
 		&item.POSProvider,
 		&item.POSAppointmentID,
 		&item.POSAppointmentVersion,
+		&item.SchedulingAuthority,
+		&item.AuthorityProvider,
+		&item.AuthorityAppointmentID,
+		&item.AuthorityAppointmentVersion,
+		&item.AuthorityCustomerID,
+		&confirmedAt,
+		&item.ConfirmedByUserID,
+		&item.ConfirmationSource,
 		&item.Status,
 		&item.CustomerName,
 		&item.CustomerPhone,
@@ -6138,10 +7025,30 @@ func scanAppointment(row appointmentScanner) (*Appointment, error) {
 	if err != nil {
 		return nil, err
 	}
+	if confirmedAt.Valid {
+		value := confirmedAt.Time
+		item.ConfirmedAt = &value
+	}
 	return &item, nil
 }
 
-func insertBookingAttemptSegments(ctx context.Context, tx *sql.Tx, attemptID string, segments []BookingSegmentRecord) error {
+func authorityBookingSegmentSnapshots(segments []BookingSegmentRecord) []BookingSegmentSnapshot {
+	snapshots := bookingSegmentSnapshots(segments)
+	for index := range snapshots {
+		provider := strings.TrimSpace(segments[index].Service.POSProvider)
+		if provider == "" {
+			provider = strings.TrimSpace(segments[index].Staff.POSProvider)
+		}
+		snapshots[index].SchedulingAuthority = SchedulingAuthorityExternalProvider
+		snapshots[index].AuthorityProvider = provider
+		snapshots[index].AuthorityServiceID = segments[index].Service.POSServiceID
+		snapshots[index].AuthorityServiceVersion = segments[index].Service.POSServiceVersion
+		snapshots[index].AuthorityStaffID = segments[index].Staff.POSStaffID
+	}
+	return snapshots
+}
+
+func insertBookingAttemptSegments(ctx context.Context, tx *sql.Tx, salonID string, attemptID string, segments []BookingSegmentRecord) error {
 	for index, segment := range segments {
 		sortOrder := segment.SortOrder
 		if sortOrder <= 0 {
@@ -6153,18 +7060,27 @@ func insertBookingAttemptSegments(ctx context.Context, tx *sql.Tx, attemptID str
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO booking_attempt_segments (
-				booking_attempt_id, service_id, staff_id, staff_selection_mode, pos_service_id,
-				pos_service_version, pos_staff_id, name, duration_minutes, price_from, sort_order
+				salon_id, booking_attempt_id, service_id, staff_id, staff_selection_mode, pos_service_id,
+				pos_service_version, pos_staff_id, name, duration_minutes, price_from, sort_order,
+				scheduling_authority, authority_provider, authority_service_id,
+				authority_service_version, authority_staff_id
 			)
-			VALUES ($1, NULLIF($2, '')::uuid, NULLIF($3, '')::uuid, $4, $5, NULLIF($6::bigint, 0), NULLIF($7, ''), $8, $9, NULLIF($10, 0), $11)
-		`, attemptID, segment.Service.ID, segment.Staff.ID, mode, segment.Service.POSServiceID, segment.Service.POSServiceVersion, segment.Staff.POSStaffID, segment.Service.Name, segment.Service.DurationMinutes, segment.Service.PriceFrom, sortOrder); err != nil {
+			SELECT attempt.salon_id, attempt.id, NULLIF($3, '')::uuid, NULLIF($4, '')::uuid, $5, $6,
+			       NULLIF($7::bigint, 0), NULLIF($8, ''), $9, $10, NULLIF($11, 0), $12,
+			       attempt.scheduling_authority, attempt.pos_provider, $6,
+			       NULLIF($7::bigint, 0), NULLIF($8, '')
+			FROM booking_attempts attempt
+			WHERE attempt.salon_id = $1
+			  AND attempt.id = $2
+			  AND attempt.scheduling_authority = 'external_provider'
+		`, salonID, attemptID, segment.Service.ID, segment.Staff.ID, mode, segment.Service.POSServiceID, segment.Service.POSServiceVersion, segment.Staff.POSStaffID, segment.Service.Name, segment.Service.DurationMinutes, segment.Service.PriceFrom, sortOrder); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func insertAppointmentServices(ctx context.Context, tx *sql.Tx, appointmentID string, segments []BookingSegmentRecord) error {
+func insertAppointmentServices(ctx context.Context, tx *sql.Tx, salonID string, appointmentID string, segments []BookingSegmentRecord) error {
 	for index, segment := range segments {
 		sortOrder := segment.SortOrder
 		if sortOrder <= 0 {
@@ -6176,11 +7092,20 @@ func insertAppointmentServices(ctx context.Context, tx *sql.Tx, appointmentID st
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO appointment_services (
-				appointment_id, service_id, staff_id, staff_selection_mode, pos_service_id,
-				pos_service_version, pos_staff_id, name, duration_minutes, price_from, sort_order
+				salon_id, appointment_id, service_id, staff_id, staff_selection_mode, pos_service_id,
+				pos_service_version, pos_staff_id, name, duration_minutes, price_from, sort_order,
+				scheduling_authority, authority_provider, authority_service_id,
+				authority_service_version, authority_staff_id
 			)
-			VALUES ($1, NULLIF($2, '')::uuid, NULLIF($3, '')::uuid, $4, $5, NULLIF($6::bigint, 0), NULLIF($7, ''), $8, $9, NULLIF($10, 0), $11)
-		`, appointmentID, segment.Service.ID, segment.Staff.ID, mode, segment.Service.POSServiceID, segment.Service.POSServiceVersion, segment.Staff.POSStaffID, segment.Service.Name, segment.Service.DurationMinutes, segment.Service.PriceFrom, sortOrder); err != nil {
+			SELECT appointment.salon_id, appointment.id, NULLIF($3, '')::uuid, NULLIF($4, '')::uuid, $5, $6,
+			       NULLIF($7::bigint, 0), NULLIF($8, ''), $9, $10, NULLIF($11, 0), $12,
+			       appointment.scheduling_authority, appointment.pos_provider, $6,
+			       NULLIF($7::bigint, 0), NULLIF($8, '')
+			FROM appointments appointment
+			WHERE appointment.salon_id = $1
+			  AND appointment.id = $2
+			  AND appointment.scheduling_authority = 'external_provider'
+		`, salonID, appointmentID, segment.Service.ID, segment.Staff.ID, mode, segment.Service.POSServiceID, segment.Service.POSServiceVersion, segment.Staff.POSStaffID, segment.Service.Name, segment.Service.DurationMinutes, segment.Service.PriceFrom, sortOrder); err != nil {
 			return err
 		}
 	}

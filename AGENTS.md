@@ -2,9 +2,25 @@
 
 ## Project Mission
 
-This repository builds a POS-first AI phone receptionist for US nail salons, starting with Vietnamese-owned salons using Square Appointments.
+This repository builds an Owner-first AI phone receptionist for US nail salons,
+starting with Vietnamese-owned salons and optional Square Appointments
+integration.
 
-The product rule is strict: never confirm an appointment unless the active POS provider returns a successful booking ID. If Square or another POS fails, create a fallback pending request, notify the owner, log the POS error, and do not mark the appointment as confirmed.
+The product rule is strict and scheduling-authority-specific. `owner_manual`
+creates a pending owner-review request and never confirms automatically.
+`manleai_calendar` confirms only after an atomic internal commit returns a
+durable appointment ID. `external_provider` confirms only after the selected
+provider succeeds and returns the required booking ID and metadata. Party
+operations are all-or-none, and authority switches are explicit while every
+historical operation preserves its originating authority. The currently
+confirming executors are Square-backed `external_provider` and Phase 4C
+`manleai_calendar` for structured multi-guest, multi-service staff-only and
+pooled create plus whole-root internal reschedule/cancel. Phase 2 also
+implements `owner_manual` as a request-only, pending-owner-review executor with
+no appointment or provider side effect. V52-V55 and the Settings UI implement
+explicit owner-reviewed authority preview/commit, immutable audit history, and
+an explicit inverse-run reference; integrations never switch authority
+implicitly.
 
 ## Mandatory Doc Routing
 
@@ -15,10 +31,21 @@ treat them as binding:
 - Architecture/current module ownership: `docs/architecture.md`
 - Mandatory agent mapping, feature/function/UI routing, and triage keywords:
   `docs/agents/codebase-map.md`
+- Scheduling authority, confirmation evidence, party atomicity, and authority
+  switching: `docs/scheduling-authority.md`
 - POS booking, Square, and confirmation safety: `docs/pos-adapter-layer.md`, `docs/square-integration.md`
 - API surface and authenticated status/debug endpoints: `docs/api.md`
 - Production, deployment, provider runtime config, and dashboard-managed provider settings: `docs/deployment.md`
 - Production readiness scope: `docs/production-readiness-checklist.md`
+- Legacy POS/provider compatibility inventory, response interpretation, and
+  removal gates: `docs/operations/owner-first-compatibility.md`
+- Tagged Owner-first code, PostgreSQL, tenant, and security release gate plus
+  operational limitations: `docs/operations/release-gate.md`
+- Worker heartbeat ledger, owner-scoped queue health, status classification,
+  and deployment/incident use: `docs/operations/operations-health.md`
+- Owner-operational SMS delivery, strict Twilio messaging configuration,
+  callback verification, retry/dead-letter policy, and incident handling:
+  `docs/operations/owner-notification-delivery.md`
 - Voice, Twilio, OpenAI, realtime phone behavior, and live phone demo setup: `docs/api.md`, `docs/agents/phone-booking-demo-config-memo.md`
 - Design/UI/UX contract: `DESIGN.md`
 - Domain language and product scope: `CONTEXT.md`
@@ -48,6 +75,179 @@ the same approved documentation scope.
   that path as legacy fallback, never as current UI-managed behavior.
 - Repository env files and env templates are infrastructure-only. Do not add
   Square, Twilio, or OpenAI provider settings back to them.
+
+## Scheduling Authority Source Of Truth
+
+- Read `docs/scheduling-authority.md` before planning or changing availability,
+  booking, reschedule, cancellation, party booking, calendar, confirmation,
+  readiness, provider integration, or scheduling settings behavior.
+- The exact protocol tokens are `owner_manual`, `manleai_calendar`, and
+  `external_provider`. They are stable contract values, not caller-intent
+  keywords or presentation copy.
+- The persisted salon scheduling-authority setting owns the selected mode.
+  `active_pos_provider` selects an adapter only inside `external_provider`; a
+  connected integration never implicitly changes scheduling authority.
+- The authority-neutral resolver/boundary is implemented in
+  `backend/modules/scheduling`. A genuinely new availability/create operation
+  resolves `salon_settings.scheduling_authority` with an owner check. Existing
+  operation keys resolve across persisted `booking_attempts` and
+  `scheduling_requests`; retry attempts resolve the booking-attempt origin;
+  target-aware availability and appointment mutations resolve the persisted
+  target-appointment origin. Every origin present for one operation must agree
+  or fail before dispatch. Authority-sensitive booking HTTP, neutral scheduling
+  API, conversation actions, and Square test writes must enter this boundary.
+- `RescheduleCandidates`, `ReplayCreate`, and `ReplayCancel` are provider-free
+  history delegation. They do not select an executor or call a provider.
+- `scheduling.Service.CurrentSchedulingAuthority` is the owner-scoped read for
+  new-work readiness. Square readiness exposes this token and gates new Square
+  test creation plus AI-booking enablement to `external_provider`.
+  `ResolveCreateSchedulingAuthority` is the read-only operation/retry-lineage
+  resolver used before non-replay Square test creation; it falls back to the
+  current token only when no persisted origin exists and never dispatches a
+  provider. Exact external replay, a persisted external safe retry, and target-
+  origin cancellation remain available after a later switch so historical work
+  is not orphaned.
+- Current provider-backed confirming behavior remains the Square-backed
+  `external_provider` executor in
+  `backend/modules/scheduling_external_provider`, which delegates to the exact
+  existing booking/POS path. The boundary must not weaken provider safety.
+- `owner_manual` is implemented by
+  `backend/modules/scheduling_owner_manual` through the neutral
+  `CheckAvailability`/`ExecuteAction` contract. Availability returns
+  `request_only`; book/reschedule/cancel create or exactly replay one durable
+  pending owner-review request. It must not create an appointment, booking
+  attempt, POS error, reconciliation task, or automatic confirmed,
+  rescheduled, or cancelled wording.
+- `scheduling_requests`, immutable `scheduling_request_segments`, and immutable
+  `scheduling_request_events` own the Phase 2 request aggregate. Creation,
+  initial event, call-session link, and deduplicated queued
+  `owner_notifications` outbox row commit together. A queued row is not proof
+  that any SMS, email, or push was delivered.
+- V56 and `backend/modules/notification_delivery` own provider-neutral owner-
+  notification claims, attempts, immutable events/actions, monotonic callbacks,
+  and bounded retry/dead-letter policy. `backend/modules/notification_twilio`
+  owns Twilio Messaging REST/signature translation. Provider acceptance is not
+  delivery proof; ambiguous post-dispatch outcomes cannot retry. Owner SMS uses
+  only strict salon-scoped database configuration and does not enable customer
+  SMS or customer consent management.
+- Owner review statuses are `pending`, `contacted`, `resolved`, and `dismissed`.
+  Status changes are optimistic-versioned, action-key idempotent, event-audited,
+  and never appointment confirmation.
+- The Appointments page contains the owner-review queue, masked owner-
+  notification delivery operations, scheduling-readiness summary, Phase 4B
+  structured multi-guest, multi-service internal create, and Phase 4C whole-
+  root internal reschedule/cancel workflows. Explicit authority selection,
+  preview, review, commit, conflict/recovery, and inverse-run context live in
+  Settings; internal configuration management lives in Settings, Staff, and
+  Services as described below.
+- `manleai_calendar` has a registered executor for verified aggregate
+  availability and atomic create across structured guests, ordered service
+  units, concrete staff assignments, and pooled resource allocations. Phase 4C
+  adds target-origin, version-fenced whole-root reschedule/cancel with exact
+  lifecycle replay and no POS/provider evidence.
+- Phase 3 `manleai_calendar` configuration is owned by
+  `backend/modules/scheduling_manleai_calendar` and V48. The aggregate combines
+  the root policy/config fence, ManleAI-owned local hours, canonical staff and
+  service policy children, optional resource pools, exceptions, immutable
+  configuration events, backend constraints, and typed readiness blockers.
+- `configuration_ready` proves only that the persisted configuration passes
+  the configuration rules. Phase 4C exposes operation capabilities:
+  `staff_only_availability` and `staff_only_create` become true only when the
+  selected authority, current activation/config fence, and staff-only policy
+  are ready. `pooled_capacity` becomes true when the same engine fence is ready
+  and at least one enabled pooled policy exists; `party_create` becomes true
+  when that fence is ready, at least one service is enabled, and the configured
+  maximum party size exceeds one. `reschedule` and `cancel` become true under
+  the same selected-authority/current-activation engine fence when at least one
+  service is enabled. Aggregate `execution_ready` is true only when all six
+  declared capabilities are true. These readiness flags describe new work;
+  persisted internal targets still resolve by originating authority after a
+  later authority change. Activation records owner
+  audit for one exact config version; any later scheduling-relevant change
+  makes it stale and requires re-activation. Activation does not switch
+  authority.
+- Every configuration mutation requires a stable `action_key` and
+  `expected_config_version`. Exact action replay returns the current aggregate;
+  changed payload reuse conflicts; stale versions fail. The config version is
+  a monotonic fence that may advance more than once for a multi-child mutation,
+  not a mutation counter.
+- `salon_business_hour_periods` rows with `source=local_override` are the only
+  hours eligible for internal-calendar readiness. Provider-imported and legacy
+  migrated hours remain separate and must not be copied or reinterpreted.
+- Staff-to-service eligibility is a canonical tenant-fenced relationship that
+  can be managed from the Staff parent before a service-policy row exists; do
+  not introduce setup-order dependency between Staff-first and Service-first UI.
+- ManleAI Calendar UI follows the owner object: salon-wide policy, local hours,
+  shared resources, exceptions, and activation live in Settings; one staff
+  member's weekly schedule lives inside that Staff edit flow; one service's
+  enablement, capacity mode, eligible staff, buffers, and resources live inside
+  that Service edit flow; Appointments shows readiness and owns structured
+  internal create plus whole-root lifecycle workflows.
+- V49 owns authority/config-fenced availability quotes, internal booking and
+  appointment evidence, immutable execution events, normalized slot/resource
+  evidence, and the active internal staff-overlap exclusion. Internal rows have
+  no persisted POS/provider evidence.
+- V50 adds database-enforced aggregate quote integrity, exact committed book
+  graph and guest-party invariants, sorted pool locking, capacity/override
+  validation, concurrent over-capacity prevention, and immutable consumed quote
+  and execution history without creating a second reservation ledger.
+- V51 adds lifecycle release ownership and event-version uniqueness, permits
+  exactly one owned release of an active internal plan, makes cancelled roots
+  terminal, and validates a contiguous one-event-per-version lifecycle graph.
+  Reschedule must release the exact old plan and atomically install the exact
+  current quote/attempt/new-plan graph. Cancel must release the exact old plan,
+  persist that old plan as attempt history, and leave no active child plan.
+- Internal availability uses canonical services/staff, V48 policies,
+  `local_override` hours, weekly schedules, buffers, exceptions, resource
+  requirements, resource-pool capacity and overrides, notice and horizon rules.
+  It assigns every quantity-one segment deterministically, schedules services
+  for the same guest sequentially, allows different guests to overlap only when
+  staff/resource capacity permits, rejects ambiguous or nonexistent DST wall
+  times, and treats intervals as half-open `[start,end)`.
+- Internal create revalidates the exact ordered guest/service/staff/resource
+  graph under current authority, config, activation, catalog, schedule,
+  conflict, and capacity fences. It commits one root appointment plus every
+  child service and resource allocation atomically. Exact committed replay
+  after response loss returns the same durable root appointment and attempt IDs
+  and child graph; changed operation-key reuse conflicts.
+- Internal reschedule is a whole-root replacement. Target-aware availability
+  is bound to the persisted internal target and its exact appointment version;
+  it preserves party size, service order, and guest mapping while returning a
+  newly assigned complete plan. Execution requires the current internal config
+  and activation fence, revalidates the exact quote and replacement graph,
+  releases the prior active plan, advances the root by one version, and commits
+  the new plan atomically.
+- Internal cancel requires no availability quote and does not require the
+  current salon authority or a current config activation. It still requires
+  the persisted internal target origin, exact expected target version, and an
+  open cancellation cutoff. It releases the exact active plan atomically,
+  records that prior plan as immutable attempt evidence, advances the root by
+  one version, and leaves zero active children. A missing cutoff is treated as
+  no backend cutoff; dashboard clients fail closed when cutoff evidence is
+  missing or invalid.
+- Exact lifecycle replay returns the historical event's attempt snapshot,
+  target version, result version, status, and child plan even after later
+  lifecycle mutations. Candidate and appointment hydration expose only the
+  current version's unreleased active plan, so cancelled roots have no active
+  children and historical released plans are not presented as current state.
+- `manleai_calendar` requires an atomic conflict-safe internal transaction and
+  a durable appointment ID before confirmation.
+- `external_provider` retains every provider ID, version, fence, idempotency,
+  fallback, error, and reconciliation safeguard in the POS and Square docs.
+- Every appointment mutation, retry, and reconciliation path must preserve and
+  use the operation's originating authority. Party operations are all-or-none.
+- External lease recovery and provider-calendar persistence/matching/
+  reconciliation explicitly fence mutations to `external_provider`. Square
+  webhook target/repair selection remains provider/connection-scoped so it can
+  preserve historical external mirrors after a later salon switch; downstream
+  calendar writes cannot mutate internal-origin rows. Do not describe this
+  maintenance as current-setting dispatch.
+- Exact external create-mirror canonicalization fills only missing
+  `confirmed_at` and `confirmation_source`, preserves existing provenance, and
+  does not invent `confirmed_by_user_id`; repeated recovery must be timestamp-
+  idempotent.
+- Authority-not-ready HTTP responses are generic sanitized `409` errors.
+  Square gate handlers must not expose wrapped internal error details.
 
 ## Mandatory Mapping Load And Drift Guard
 
@@ -290,14 +490,19 @@ applies even when a narrow hardcoded patch would be faster to write.
 - Treat the AI receptionist as a real phone receptionist for an operating nail salon, not a generic chatbot or a backend state machine with spoken output attached.
 - The assistant owns the salon-operations reasoning burden. The user is not expected to provide nail-salon domain control language. When domain evidence is incomplete, state assumptions, reason from real salon operations, repository evidence, and provided transcripts, then propose how to validate.
 - Do not fix booking conversations by patching only the latest transcript phrase. Derive the general conversation rule that prevents the class of failure across booking, reschedule, cancellation, party booking, availability, fallback, and confirmation flows.
-- Before proposing or implementing any conversation change, map the real call flow: caller goal, known fields, missing fields, service/category ambiguity, staff preference, date/time constraints, POS availability gate, POS booking gate, and owner handoff gate.
+- Before proposing or implementing any conversation change, map the real call flow: caller goal, known fields, missing fields, service/category ambiguity, staff preference, date/time constraints, scheduling-authority availability gate, authority-specific booking gate, confirmation-evidence gate, and owner handoff gate.
 - Every AI reply must be concise, natural, context-aware, operationally useful, and easy for a caller to answer verbally. Do not expose internal state, parser state, stored-field reminders, or mechanical scaffolding such as repeated "noted" wording.
 - Preserve known information silently. Use captured date, service, staff preference, party size, or customer details for logic without repeating them unless it helps the caller choose or confirm.
 - Ask one useful question at a time. If the caller asks for a menu while a required field is missing, answer from catalog-backed services/categories, then return to the unresolved question. Do not treat a bare affirmative after an open menu as a service selection.
 - Use human grouping in availability replies: same day once, same staff/team phrase once, repeated services by count. Use ordinal labels only when options differ enough that ordinals help.
 - For party bookings, ask group-specific clarifications and distinguish service categories from concrete services.
-- If no common time fits, prefer safe provider-backed split/staggered options before saying unavailable or handing off.
-- Never confirm unless POS returns a successful booking ID. For split/multi-child booking, every child appointment must succeed; partial failure must rollback when possible and avoid confirmed wording.
+- If no common time fits, prefer safe authority-backed split/staggered options before saying unavailable or handing off. `owner_manual` must keep the request pending instead of inventing availability.
+- Never confirm without the selected authority's durable evidence:
+  `owner_manual` never auto-confirms; `manleai_calendar` requires an atomic
+  internal commit and durable appointment ID; `external_provider` requires
+  provider success and the required booking ID. For split/multi-child booking,
+  every child must succeed under one all-or-none operation; partial or unknown
+  outcomes must rollback when supported and avoid confirmed wording.
 - Conversation changes must include golden transcript tests, not only state assertions.
 - Before calling a conversation slice complete, read or simulate the full transcript as a caller would hear it. If it sounds robotic, repetitive, misleading, or hard to answer by phone, the slice is not done even when backend tests pass.
 
@@ -316,12 +521,24 @@ For UI-changing requests, the Mockup as Text must include:
 ## Backend Rules
 
 - Keep HTTP handlers thin. Put business rules in services and persistence in repositories.
-- Booking and AI modules must depend on `modules/pos.POSProvider`, not `modules/pos_square`.
+- Booking API and conversation scheduling callers must depend on the
+  authority-neutral `modules/scheduling` boundary. Only
+  `modules/scheduling_external_provider` delegates to the existing booking
+  service and `modules/pos.POSProvider`;
+  `modules/scheduling_owner_manual` owns pending-request persistence without a
+  POS dependency, and `modules/scheduling_manleai_calendar` owns internal
+  availability and atomic appointment persistence. No authority-neutral or
+  conversation code may import `modules/pos_square`. Do not model internal
+  scheduling as a fake POS adapter.
 - Keep Square-specific auth, payloads, API URLs, error mapping, and token handling inside `backend/modules/pos_square`.
 - Store POS tokens encrypted only. Never expose raw or encrypted POS tokens to the frontend.
 - Enforce tenant ownership by `salon_id` before returning or mutating salon-scoped data.
 - Add SQL migrations under `backend/migrations` for schema changes and keep Ent schemas aligned.
-- Use transactions for booking, appointment, POS attempt, notification, and audit-log writes.
+- Use transactions for authority-native booking, appointment, attempt,
+  notification, and audit-log writes. `manleai_calendar` must commit every
+  required appointment segment atomically. `external_provider` retains the POS
+  attempt/error/reconciliation transaction. `owner_manual` persists one
+  deduplicated pending owner-review operation without a confirmed appointment.
 
 ## Frontend Rules
 
@@ -331,7 +548,11 @@ For UI-changing requests, the Mockup as Text must include:
 - Every production page must handle loading, empty, error, and success states.
 - Keep API calls in `frontend/lib/api` or feature-local data helpers; do not scatter raw fetch logic across components.
 - Preserve the SaaS dashboard visual language already established in `frontend/components/ui` and `frontend/components/layout`.
-- Do not claim broad POS support. Use wording such as "POS-first, starting with Square Appointments."
+- Use Owner-first, authority-aware wording. Square Appointments is the only
+  current external-provider integration; do not present it as a prerequisite
+  for implemented `owner_manual` request collection or future
+  `manleai_calendar` operation, and do not claim broad external-provider
+  support.
 
 ## Validation Commands
 

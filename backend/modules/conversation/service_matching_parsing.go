@@ -1291,6 +1291,8 @@ func availabilitySegmentsForSession(session Session, staffSelectionMode string) 
 				ServiceID:          serviceID,
 				StaffID:            staffID,
 				StaffSelectionMode: mode,
+				GuestReference:     strings.TrimSpace(segment.GuestReference),
+				Quantity:           segment.Quantity,
 			})
 		}
 		if len(out) > 0 {
@@ -1328,6 +1330,8 @@ func bookingSegmentsForCreate(session Session) []booking.BookingSegmentRequest {
 				ServiceID:          serviceID,
 				StaffID:            staffID,
 				StaffSelectionMode: mode,
+				GuestReference:     strings.TrimSpace(segment.GuestReference),
+				Quantity:           segment.Quantity,
 			})
 		}
 		if len(out) > 0 {
@@ -1438,6 +1442,9 @@ func sessionUsesAnyone(session Session) bool {
 }
 
 func hasStaffAssignment(session Session) bool {
+	if session.DialogState.SchedulingRequestOnly && normalizeConversationStaffSelectionMode(session.StaffSelectionMode) == booking.StaffSelectionAnyone {
+		return true
+	}
 	if strings.TrimSpace(session.StaffID) != "" {
 		return true
 	}

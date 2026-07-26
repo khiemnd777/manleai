@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest } from "@/lib/api/client";
-import type { KnowledgeItem, OwnerCorrection, Salon } from "@/types/api";
+import type { KnowledgeItem, OwnerCorrection, POSService, Salon, SchedulingAuthority, ServiceAlias } from "@/types/api";
 
 type SalonListResponse = {
   salons: Salon[];
@@ -22,6 +22,10 @@ type CorrectionsResponse = {
   owner_corrections: OwnerCorrection[];
 };
 
+type ServicesResponse = {
+  services: POSService[];
+};
+
 type EvaluationResult = {
   message: string;
   reply: string;
@@ -32,6 +36,9 @@ type EvaluationResult = {
   };
   outcome: string;
   booking_action: string;
+  scheduling_authority: SchedulingAuthority;
+  confirmation_requirement: "pending_owner_review" | "atomic_internal_commit" | "provider_booking_success";
+  confirmation_guardrail: string;
   pos_confirmation_required: boolean;
 };
 
@@ -44,11 +51,23 @@ type FormState = {
   status: string;
 };
 
+type ServiceAliasDraft = {
+  correctionId: string;
+  serviceId: string;
+  alias: string;
+};
+
 const emptyForm: FormState = {
   title: "",
   category: "faq",
   body: "",
   status: "draft"
+};
+
+const emptyServiceAliasDraft: ServiceAliasDraft = {
+  correctionId: "",
+  serviceId: "",
+  alias: ""
 };
 
 const categories = ["faq", "policy", "services", "hours", "handoff", "operations"];
@@ -58,7 +77,9 @@ export function TrainingDashboard() {
   const [salon, setSalon] = useState<Salon | null>(null);
   const [knowledge, setKnowledge] = useState<KnowledgeItem[]>([]);
   const [corrections, setCorrections] = useState<OwnerCorrection[]>([]);
+  const [services, setServices] = useState<POSService[]>([]);
   const [form, setForm] = useState<FormState>(emptyForm);
+  const [serviceAliasDraft, setServiceAliasDraft] = useState<ServiceAliasDraft>(emptyServiceAliasDraft);
   const [correctionText, setCorrectionText] = useState("");
   const [evaluationMessage, setEvaluationMessage] = useState("");
   const [evaluation, setEvaluation] = useState<EvaluationResult | null>(null);
@@ -66,8 +87,12 @@ export function TrainingDashboard() {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [serviceCatalogLoading, setServiceCatalogLoading] = useState(false);
+  const [serviceAliasSaving, setServiceAliasSaving] = useState(false);
   const [evaluating, setEvaluating] = useState(false);
   const [error, setError] = useState("");
+  const [serviceCatalogError, setServiceCatalogError] = useState("");
+  const [serviceAliasError, setServiceAliasError] = useState("");
   const [actionError, setActionError] = useState("");
   const [success, setSuccess] = useState("");
 
@@ -81,11 +106,14 @@ export function TrainingDashboard() {
       if (!firstSalon) {
         setKnowledge([]);
         setCorrections([]);
+        setServices([]);
+        setServiceCatalogError("");
         return;
       }
       const [knowledgeResponse, correctionsResponse] = await Promise.all([
         apiRequest<KnowledgeResponse>(`/api/salons/${firstSalon.id}/knowledge-items`),
-        apiRequest<CorrectionsResponse>(`/api/salons/${firstSalon.id}/owner-corrections`)
+        apiRequest<CorrectionsResponse>(`/api/salons/${firstSalon.id}/owner-corrections`),
+        loadServiceCatalog(firstSalon.id)
       ]);
       setKnowledge(knowledgeResponse.knowledge_items);
       setCorrections(correctionsResponse.owner_corrections);
@@ -115,10 +143,34 @@ export function TrainingDashboard() {
   const activeCount = knowledge.filter((item) => item.status === "active").length;
   const pendingCorrections = corrections.filter((item) => item.status === "pending").length;
   const canSave = Boolean(form.title.trim() && form.body.trim() && salon);
+  const aliasTargetServices = useMemo(
+    () =>
+      services.filter(
+        (service) =>
+          Boolean(service.id) &&
+          service.active &&
+          service.ai_bookable &&
+          !service.archived_at &&
+          service.sync_status !== "archived"
+      ),
+    [services]
+  );
+  const selectedAliasService = aliasTargetServices.find((service) => service.id === serviceAliasDraft.serviceId);
+  const actionBusy = saving || serviceAliasSaving;
+  const canApplyServiceAlias = Boolean(
+    salon &&
+      form.correctionId &&
+      serviceAliasDraft.correctionId === form.correctionId &&
+      selectedAliasService?.id &&
+      serviceAliasDraft.alias.trim() &&
+      !serviceCatalogLoading &&
+      !serviceCatalogError &&
+      !actionBusy
+  );
 
   async function saveKnowledge(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!salon || !canSave) return;
+    if (!salon || !canSave || serviceAliasSaving) return;
     setSaving(true);
     setActionError("");
     setSuccess("");
@@ -149,6 +201,8 @@ export function TrainingDashboard() {
         setSuccess("Knowledge item created.");
       }
       setForm(emptyForm);
+      setServiceAliasDraft(emptyServiceAliasDraft);
+      setServiceAliasError("");
       await reloadTraining(salon.id);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Could not save knowledge item.");
@@ -158,7 +212,7 @@ export function TrainingDashboard() {
   }
 
   async function deleteKnowledge(item: KnowledgeItem) {
-    if (!salon) return;
+    if (!salon || serviceAliasSaving) return;
     setSaving(true);
     setActionError("");
     setSuccess("");
@@ -176,7 +230,7 @@ export function TrainingDashboard() {
 
   async function createCorrection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!salon || !correctionText.trim()) return;
+    if (!salon || !correctionText.trim() || serviceAliasSaving) return;
     setSaving(true);
     setActionError("");
     setSuccess("");
@@ -222,12 +276,47 @@ export function TrainingDashboard() {
       body: correction.correction,
       status: "active"
     });
+    setServiceAliasDraft({ correctionId: correction.id, serviceId: "", alias: "" });
+    setServiceAliasError("");
     setActionError("");
     setSuccess("");
   }
 
+  async function applyCorrectionAsServiceAlias(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!salon || !form.correctionId || !selectedAliasService?.id || !canApplyServiceAlias) return;
+    setServiceAliasSaving(true);
+    setServiceAliasError("");
+    setActionError("");
+    setSuccess("");
+    try {
+      const alias = await apiRequest<ServiceAlias>(
+        `/api/salons/${salon.id}/owner-corrections/${form.correctionId}/apply-service-alias`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            service_id: selectedAliasService.id,
+            alias: serviceAliasDraft.alias.trim()
+          })
+        }
+      );
+      setForm(emptyForm);
+      setServiceAliasDraft(emptyServiceAliasDraft);
+      setSuccess(`Service alias "${alias.alias}" applied to ${alias.service_name}.`);
+      try {
+        await reloadTraining(salon.id);
+      } catch {
+        setActionError("The service alias was applied, but the correction list could not refresh. Refresh the page to load the saved result.");
+      }
+    } catch (err) {
+      setServiceAliasError(err instanceof Error ? err.message : "Could not apply correction as a service alias.");
+    } finally {
+      setServiceAliasSaving(false);
+    }
+  }
+
   async function dismissCorrection(correction: OwnerCorrection) {
-    if (!salon) return;
+    if (!salon || serviceAliasSaving) return;
     setSaving(true);
     setActionError("");
     setSuccess("");
@@ -236,6 +325,9 @@ export function TrainingDashboard() {
         method: "POST"
       });
       setSuccess("Correction dismissed.");
+      if (form.correctionId === correction.id) {
+        resetEditor();
+      }
       await reloadTraining(salon.id);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Could not dismiss owner correction.");
@@ -253,6 +345,20 @@ export function TrainingDashboard() {
     setCorrections(correctionsResponse.owner_corrections);
   }
 
+  async function loadServiceCatalog(salonID: string) {
+    setServiceCatalogLoading(true);
+    setServiceCatalogError("");
+    try {
+      const response = await apiRequest<ServicesResponse>(`/api/salons/${salonID}/services`);
+      setServices(response.services);
+    } catch (err) {
+      setServices([]);
+      setServiceCatalogError(err instanceof Error ? err.message : "Could not load the salon service catalog.");
+    } finally {
+      setServiceCatalogLoading(false);
+    }
+  }
+
   function editKnowledge(item: KnowledgeItem) {
     setForm({
       id: item.id,
@@ -261,8 +367,16 @@ export function TrainingDashboard() {
       body: item.body,
       status: item.status
     });
+    setServiceAliasDraft(emptyServiceAliasDraft);
+    setServiceAliasError("");
     setActionError("");
     setSuccess("");
+  }
+
+  function resetEditor() {
+    setForm(emptyForm);
+    setServiceAliasDraft(emptyServiceAliasDraft);
+    setServiceAliasError("");
   }
 
   if (loading) {
@@ -302,7 +416,7 @@ export function TrainingDashboard() {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <Badge value="active" />
-          <Button type="button" variant="secondary" onClick={() => void load()} disabled={saving}>
+          <Button type="button" variant="secondary" onClick={() => void load()} disabled={actionBusy}>
             <RefreshCcw className="h-4 w-4" />
             Refresh
           </Button>
@@ -323,10 +437,9 @@ export function TrainingDashboard() {
         <div className="flex gap-3">
           <ShieldCheck className="mt-0.5 h-5 w-5 flex-none text-emerald-700" />
           <div>
-            <CardTitle>POS-first boundary</CardTitle>
+            <CardTitle>Scheduling authority boundary</CardTitle>
             <CardDescription className="text-emerald-800">
-              Knowledge can answer salon questions, but confirmed appointments still require Square Appointments
-              success through the booking service.
+              Knowledge can answer salon questions, but confirmation still requires the selected authority&apos;s durable evidence and cannot be inferred from knowledge text.
             </CardDescription>
           </div>
         </div>
@@ -387,12 +500,10 @@ export function TrainingDashboard() {
               <div className="flex flex-wrap items-center gap-2">
                 <Badge value={evaluation.outcome} />
                 <Badge value={evaluation.booking_action === "none" ? "no_booking_action" : evaluation.booking_action} />
+                <Badge value={evaluation.scheduling_authority} />
+                <Badge value={evaluation.confirmation_requirement} />
               </div>
-              {evaluation.pos_confirmation_required ? (
-                <div className="text-xs leading-5 text-muted">
-                  This preview never confirms appointments. Confirmed bookings still require Square Appointments success.
-                </div>
-              ) : null}
+              <div className="text-xs leading-5 text-muted">{evaluation.confirmation_guardrail}</div>
             </div>
           ) : (
             <div className="text-sm text-muted">Run a sample question to preview active knowledge.</div>
@@ -407,7 +518,7 @@ export function TrainingDashboard() {
               <CardTitle>Knowledge base</CardTitle>
               <CardDescription>Active entries can guide FAQ, policy, hours, and operations replies.</CardDescription>
             </div>
-            <Button type="button" variant="secondary" onClick={() => setForm(emptyForm)}>
+            <Button type="button" variant="secondary" onClick={resetEditor} disabled={actionBusy}>
               <FilePlus2 className="h-4 w-4" />
               Add knowledge
             </Button>
@@ -474,10 +585,10 @@ export function TrainingDashboard() {
                         <td className="px-4 py-3 text-muted">{formatDate(item.updated_at)}</td>
                         <td className="px-4 py-3">
                           <div className="flex gap-2">
-                            <Button type="button" variant="secondary" onClick={() => editKnowledge(item)}>
+                            <Button type="button" variant="secondary" onClick={() => editKnowledge(item)} disabled={actionBusy}>
                               Edit
                             </Button>
-                            <Button type="button" variant="ghost" onClick={() => void deleteKnowledge(item)} disabled={saving}>
+                            <Button type="button" variant="ghost" onClick={() => void deleteKnowledge(item)} disabled={actionBusy}>
                               Delete
                             </Button>
                           </div>
@@ -489,7 +600,7 @@ export function TrainingDashboard() {
               </div>
               <div className="mt-5 space-y-3 lg:hidden">
                 {filteredKnowledge.map((item) => (
-                  <KnowledgeCard key={item.id} item={item} onEdit={() => editKnowledge(item)} onDelete={() => void deleteKnowledge(item)} saving={saving} />
+                  <KnowledgeCard key={item.id} item={item} onEdit={() => editKnowledge(item)} onDelete={() => void deleteKnowledge(item)} saving={actionBusy} />
                 ))}
               </div>
             </>
@@ -500,16 +611,19 @@ export function TrainingDashboard() {
           <CardTitle>{form.correctionId ? "Review correction" : form.id ? "Edit knowledge" : "Add knowledge"}</CardTitle>
           <CardDescription>
             {form.correctionId
-              ? "Edit the correction into reusable salon knowledge before applying it."
+              ? "Choose whether this correction becomes reusable knowledge or a structured alias for one explicit service."
               : "Keep entries short, factual, and limited to salon operating knowledge."}
           </CardDescription>
+          {form.correctionId ? (
+            <div className="mt-5 text-sm font-semibold text-ink">Apply as knowledge</div>
+          ) : null}
           <form className="mt-5 space-y-4" onSubmit={saveKnowledge}>
             <Field label="Title">
               <input
                 className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand"
                 value={form.title}
                 onChange={(event) => setForm({ ...form, title: event.target.value })}
-                disabled={saving}
+                disabled={actionBusy}
               />
             </Field>
             <div className="grid gap-3 sm:grid-cols-2">
@@ -518,7 +632,7 @@ export function TrainingDashboard() {
                   className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand"
                   value={form.category}
                   onChange={(event) => setForm({ ...form, category: event.target.value })}
-                  disabled={saving}
+                  disabled={actionBusy}
                 >
                   {categories.map((category) => (
                     <option key={category} value={category}>
@@ -532,7 +646,7 @@ export function TrainingDashboard() {
                   className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand"
                   value={form.status}
                   onChange={(event) => setForm({ ...form, status: event.target.value })}
-                  disabled={saving}
+                  disabled={actionBusy}
                 >
                   {statuses.map((status) => (
                     <option key={status} value={status}>
@@ -547,19 +661,92 @@ export function TrainingDashboard() {
                 className="min-h-32 w-full rounded-md border border-line bg-white px-3 py-2 text-sm leading-6 text-ink outline-none focus:border-brand"
                 value={form.body}
                 onChange={(event) => setForm({ ...form, body: event.target.value })}
-                disabled={saving}
+                disabled={actionBusy}
               />
             </Field>
             <div className="flex flex-wrap gap-3">
-              <Button type="submit" disabled={!canSave || saving}>
-                {form.correctionId ? "Apply correction as knowledge" : "Save knowledge"}
+              <Button type="submit" disabled={!canSave || actionBusy}>
+                {saving && form.correctionId ? "Applying knowledge..." : form.correctionId ? "Apply correction as knowledge" : "Save knowledge"}
               </Button>
-              <Button type="button" variant="secondary" onClick={() => setForm(emptyForm)} disabled={saving}>
+              <Button type="button" variant="secondary" onClick={resetEditor} disabled={actionBusy}>
                 <X className="h-4 w-4" />
                 Cancel
               </Button>
             </div>
           </form>
+          {form.correctionId ? (
+            <form className="mt-6 space-y-4 border-t border-line pt-5" onSubmit={applyCorrectionAsServiceAlias}>
+              <div>
+                <div className="text-sm font-semibold text-ink">Apply as service alias</div>
+                <div className="mt-1 text-xs leading-5 text-muted">
+                  Choose the real service and enter only the caller phrase that should identify it. No target or phrase is inferred from the correction.
+                </div>
+              </div>
+
+              {serviceCatalogError ? (
+                <div className="space-y-3">
+                  <Alert title="Service catalog unavailable" message={serviceCatalogError} />
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() => void loadServiceCatalog(salon.id)}
+                    disabled={serviceCatalogLoading || actionBusy}
+                  >
+                    <RefreshCcw className="h-4 w-4" />
+                    Retry service catalog
+                  </Button>
+                </div>
+              ) : null}
+
+              {serviceAliasError ? <Alert title="Service alias not applied" message={serviceAliasError} /> : null}
+
+              <Field label="Target service">
+                <select
+                  className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-50 disabled:text-muted"
+                  value={serviceAliasDraft.serviceId}
+                  onChange={(event) => {
+                    setServiceAliasDraft({ ...serviceAliasDraft, serviceId: event.target.value });
+                    setServiceAliasError("");
+                  }}
+                  disabled={serviceCatalogLoading || Boolean(serviceCatalogError) || aliasTargetServices.length === 0 || actionBusy}
+                  required
+                >
+                  <option value="">
+                    {serviceCatalogLoading ? "Loading services..." : "Choose a service"}
+                  </option>
+                  {aliasTargetServices.map((service) => (
+                    <option key={service.id} value={service.id}>
+                      {serviceOptionLabel(service)}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+
+              {!serviceCatalogLoading && !serviceCatalogError && aliasTargetServices.length === 0 ? (
+                <div className="rounded-md border border-line bg-slate-50 p-3 text-xs leading-5 text-muted">
+                  No active AI-bookable services are available. Enable an eligible service on the Services page before applying an alias.
+                </div>
+              ) : null}
+
+              <Field label="Alias phrase">
+                <input
+                  className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-50 disabled:text-muted"
+                  value={serviceAliasDraft.alias}
+                  onChange={(event) => {
+                    setServiceAliasDraft({ ...serviceAliasDraft, alias: event.target.value });
+                    setServiceAliasError("");
+                  }}
+                  placeholder="Enter the caller phrase"
+                  disabled={serviceCatalogLoading || Boolean(serviceCatalogError) || aliasTargetServices.length === 0 || actionBusy}
+                  required
+                />
+              </Field>
+
+              <Button type="submit" disabled={!canApplyServiceAlias}>
+                {serviceAliasSaving ? "Applying service alias..." : "Apply correction as service alias"}
+              </Button>
+            </form>
+          ) : null}
         </Card>
       </div>
 
@@ -567,7 +754,7 @@ export function TrainingDashboard() {
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
           <div>
             <CardTitle>Owner corrections</CardTitle>
-            <CardDescription>Capture corrections from reviewed calls and apply them to active knowledge.</CardDescription>
+            <CardDescription>Capture corrections from reviewed calls, then apply each one as knowledge or a structured service alias.</CardDescription>
           </div>
           <Badge value={pendingCorrections > 0 ? "active" : "disabled"} />
         </div>
@@ -578,9 +765,9 @@ export function TrainingDashboard() {
             value={correctionText}
             onChange={(event) => setCorrectionText(event.target.value)}
             placeholder="Add owner correction"
-            disabled={saving}
+            disabled={actionBusy}
           />
-          <Button type="submit" disabled={saving || !correctionText.trim()}>
+          <Button type="submit" disabled={actionBusy || !correctionText.trim()}>
             Capture correction
           </Button>
         </form>
@@ -604,10 +791,10 @@ export function TrainingDashboard() {
                     <Badge value={correction.status} />
                     {correction.status === "pending" ? (
                       <>
-                        <Button type="button" variant="secondary" onClick={() => reviewCorrection(correction)} disabled={saving}>
-                          Review apply
+                        <Button type="button" variant="secondary" onClick={() => reviewCorrection(correction)} disabled={actionBusy}>
+                          Review correction
                         </Button>
-                        <Button type="button" variant="ghost" onClick={() => void dismissCorrection(correction)} disabled={saving}>
+                        <Button type="button" variant="ghost" onClick={() => void dismissCorrection(correction)} disabled={actionBusy}>
                           Dismiss
                         </Button>
                       </>
@@ -661,7 +848,7 @@ function KnowledgeCard({
       <div className="mt-3 text-sm font-medium text-ink">{item.title}</div>
       <div className="mt-1 text-sm leading-6 text-muted">{item.body}</div>
       <div className="mt-3 flex gap-2">
-        <Button type="button" variant="secondary" onClick={onEdit}>
+        <Button type="button" variant="secondary" onClick={onEdit} disabled={saving}>
           Edit
         </Button>
         <Button type="button" variant="ghost" onClick={onDelete} disabled={saving}>
@@ -686,6 +873,11 @@ function correctionSource(correction: OwnerCorrection) {
     return "Call session";
   }
   return "Manual correction";
+}
+
+function serviceOptionLabel(service: POSService) {
+  const details = [service.category_name, service.duration_minutes > 0 ? `${service.duration_minutes} min` : ""].filter(Boolean);
+  return details.length > 0 ? `${service.name} · ${details.join(" · ")}` : service.name;
 }
 
 function formatDate(value: string) {

@@ -122,10 +122,26 @@ func (r *WebhookRepository) ClaimBookingWebhooks(ctx context.Context, limit int)
 		limit = 20
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		WITH candidates AS (
+		WITH exhausted AS (
+			UPDATE square_booking_webhook_events event
+			SET processing_status = 'dead_letter',
+			    processing_token = NULL,
+			    processing_lease_expires_at = NULL,
+			    dead_lettered_at = COALESCE(event.dead_lettered_at, now()),
+			    last_error = NULL,
+			    last_error_class = 'processing',
+			    last_error_code = 'SQUARE_WEBHOOK_ATTEMPTS_EXHAUSTED',
+			    updated_at = now()
+			WHERE event.processing_attempts >= (event.requeue_count + 1) * $2
+			  AND (
+			      event.processing_status IN ('pending', 'failed')
+			      OR (event.processing_status = 'processing' AND event.processing_lease_expires_at < now())
+			  )
+			RETURNING event.id
+		), candidates AS (
 			SELECT id
 			FROM square_booking_webhook_events
-			WHERE processing_attempts < 10
+			WHERE processing_attempts < (requeue_count + 1) * $2
 			  AND (
 			      (processing_status IN ('pending', 'failed') AND next_attempt_at <= now())
 			      OR (processing_status = 'processing' AND processing_lease_expires_at < now())
@@ -139,6 +155,10 @@ func (r *WebhookRepository) ClaimBookingWebhooks(ctx context.Context, limit int)
 			    processing_attempts = event.processing_attempts + 1,
 			    processing_token = gen_random_uuid()::text,
 			    processing_lease_expires_at = now() + interval '4 minutes',
+			    dead_lettered_at = NULL,
+			    last_error = NULL,
+			    last_error_class = NULL,
+			    last_error_code = NULL,
 			    updated_at = now()
 			FROM candidates
 			WHERE event.id = candidates.id
@@ -152,7 +172,7 @@ func (r *WebhookRepository) ClaimBookingWebhooks(ctx context.Context, limit int)
 		FROM claimed
 		JOIN salons salon ON salon.id::text = claimed.salon_id
 		ORDER BY claimed.event_id
-	`, limit)
+	`, limit, MaxWebhookAttemptsPerCycle)
 	if err != nil {
 		return nil, err
 	}
@@ -188,25 +208,43 @@ func (r *WebhookRepository) CompleteBookingWebhook(ctx context.Context, id strin
 			UPDATE square_booking_webhook_events
 			SET processing_status = 'succeeded', processed_at = now(),
 			    processing_token = NULL, processing_lease_expires_at = NULL,
-			    last_error = NULL, updated_at = now()
+			    dead_lettered_at = NULL,
+			    last_error = NULL, last_error_class = NULL, last_error_code = NULL,
+			    updated_at = now()
 			WHERE id = $1
 			  AND processing_status = 'processing'
 			  AND processing_token = $2
 		`, id, processingToken)
 	} else {
-		delay := webhookRetryDelay(processingAttempts)
+		delay := webhookRetryDelay(webhookAttemptInCycle(processingAttempts))
+		errorClass, errorCode := webhookOperationalError(processingErr, "webhook")
 		result, err = r.db.ExecContext(ctx, `
 			UPDATE square_booking_webhook_events
-			SET processing_status = 'failed',
+			SET processing_status = CASE
+			        WHEN processing_attempts >= (requeue_count + 1) * $6 THEN 'dead_letter'
+			        ELSE 'failed'
+			    END,
 			    next_attempt_at = now() + $3::interval,
 			    processing_token = NULL,
 			    processing_lease_expires_at = NULL,
-			    last_error = $4,
+			    dead_lettered_at = CASE
+			        WHEN processing_attempts >= (requeue_count + 1) * $6 THEN COALESCE(dead_lettered_at, now())
+			        ELSE NULL
+			    END,
+			    last_error = NULL,
+			    last_error_class = CASE
+			        WHEN processing_attempts >= (requeue_count + 1) * $6 THEN 'processing'
+			        ELSE $4
+			    END,
+			    last_error_code = CASE
+			        WHEN processing_attempts >= (requeue_count + 1) * $6 THEN 'SQUARE_WEBHOOK_ATTEMPTS_EXHAUSTED'
+			        ELSE $5
+			    END,
 			    updated_at = now()
 			WHERE id = $1
 			  AND processing_status = 'processing'
 			  AND processing_token = $2
-		`, id, processingToken, pqInterval(delay), processingErr.Error())
+		`, id, processingToken, pqInterval(delay), errorClass, errorCode, MaxWebhookAttemptsPerCycle)
 	}
 	return webhookClaimUpdateResult(result, err)
 }
@@ -251,6 +289,13 @@ func webhookRetryDelay(attempt int) time.Duration {
 		return 15 * time.Minute
 	}
 	return delay
+}
+
+func webhookAttemptInCycle(attempt int) int {
+	if attempt < 1 {
+		return 1
+	}
+	return ((attempt - 1) % MaxWebhookAttemptsPerCycle) + 1
 }
 
 func pqInterval(value time.Duration) string {
@@ -347,22 +392,25 @@ func (r *WebhookRepository) CompleteCalendarRepair(ctx context.Context, salonID 
 			    lease_expires_at = NULL,
 			    lease_token = NULL,
 			    last_repaired_at = now(),
-			    last_error = NULL,
+			    last_error = NULL, last_error_class = NULL, last_error_code = NULL,
 			    updated_at = now()
 			WHERE salon_id = $1
 			  AND lease_token = $2
 		`, salonID, leaseToken)
 	} else {
+		errorClass, errorCode := webhookOperationalError(repairErr, "calendar_repair")
 		result, err = r.db.ExecContext(ctx, `
 			UPDATE square_calendar_repair_state
 			SET next_repair_at = now() + interval '15 minutes',
 			    lease_expires_at = NULL,
 			    lease_token = NULL,
-			    last_error = $3,
+			    last_error = NULL,
+			    last_error_class = $3,
+			    last_error_code = $4,
 			    updated_at = now()
 			WHERE salon_id = $1
 			  AND lease_token = $2
-		`, salonID, leaseToken, repairErr.Error())
+		`, salonID, leaseToken, errorClass, errorCode)
 	}
 	return webhookClaimUpdateResult(result, err)
 }

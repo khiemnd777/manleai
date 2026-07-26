@@ -335,6 +335,8 @@ func applyGuidanceRecoveryState(session *Session, state *GuidanceRecoveryState) 
 	dialog.ReviewAccepted = false
 	dialog.ReviewedRevision = 0
 	dialog.AuthorizedRevision = 0
+	dialog.ReviewedBookingMode = ""
+	dialog.SelectedSchedulingAuthority = ""
 	dialog.LastPromptKey = ""
 	dialog.NoProgressCount = 0
 	dialog.ProviderFailureCount = 0

@@ -47,21 +47,49 @@ type SquareSettingsResponse struct {
 }
 
 type TwilioSettingsResponse struct {
-	Provider            string     `json:"provider"`
-	Configured          bool       `json:"configured"`
-	PublicBaseURL       string     `json:"public_base_url"`
-	IncomingPath        string     `json:"incoming_path"`
-	TurnPath            string     `json:"turn_path"`
-	RecordingPath       string     `json:"recording_path"`
-	StreamPath          string     `json:"stream_path"`
-	VoiceTransport      string     `json:"voice_transport"`
-	InboundWebhookURL   string     `json:"inbound_webhook_url"`
-	TurnWebhookURL      string     `json:"turn_webhook_url"`
-	RecordingWebhookURL string     `json:"recording_webhook_url"`
-	StreamWebhookURL    string     `json:"stream_webhook_url"`
-	AuthTokenConfigured bool       `json:"auth_token_configured"`
-	AuthTokenSource     string     `json:"auth_token_source"`
-	UpdatedAt           *time.Time `json:"updated_at,omitempty"`
+	Provider                   string     `json:"provider"`
+	Configured                 bool       `json:"configured"`
+	PublicBaseURL              string     `json:"public_base_url"`
+	IncomingPath               string     `json:"incoming_path"`
+	TurnPath                   string     `json:"turn_path"`
+	RecordingPath              string     `json:"recording_path"`
+	StreamPath                 string     `json:"stream_path"`
+	VoiceTransport             string     `json:"voice_transport"`
+	InboundWebhookURL          string     `json:"inbound_webhook_url"`
+	TurnWebhookURL             string     `json:"turn_webhook_url"`
+	RecordingWebhookURL        string     `json:"recording_webhook_url"`
+	StreamWebhookURL           string     `json:"stream_webhook_url"`
+	AuthTokenConfigured        bool       `json:"auth_token_configured"`
+	AuthTokenSource            string     `json:"auth_token_source"`
+	OwnerSMSEnabled            bool       `json:"owner_sms_enabled"`
+	OwnerSMSDestinationMasked  string     `json:"owner_sms_destination_masked,omitempty"`
+	OwnerSMSConsentAttested    bool       `json:"owner_sms_consent_attested"`
+	OwnerSMSConsentAttestedAt  *time.Time `json:"owner_sms_consent_attested_at,omitempty"`
+	AccountSIDConfigured       bool       `json:"account_sid_configured"`
+	MessagingServiceConfigured bool       `json:"messaging_service_configured"`
+	SenderConfigured           bool       `json:"sender_configured"`
+	NotificationStatusPath     string     `json:"notification_status_path"`
+	NotificationInboundPath    string     `json:"notification_inbound_path"`
+	NotificationStatusURL      string     `json:"notification_status_url"`
+	NotificationInboundURL     string     `json:"notification_inbound_url"`
+	UpdatedAt                  *time.Time `json:"updated_at,omitempty"`
+}
+
+// TwilioMessagingConfig is the strict database-backed runtime contract used by
+// notification delivery. Owner delivery additionally requires the owner SMS
+// destination/attestation fields; customer delivery resolves only the shared
+// transport fields. It is never serialized by an API response.
+type TwilioMessagingConfig struct {
+	Enabled                 bool
+	OwnerSMSConsentAttested bool
+	OwnerSMSDestination     string
+	OwnerSMSConsentAt       *time.Time
+	AccountSID              string
+	AuthToken               string
+	MessagingServiceSID     string
+	SenderPhone             string
+	StatusCallbackURL       string
+	InboundCallbackURL      string
 }
 
 type OpenAISettingsResponse struct {
@@ -98,14 +126,26 @@ type UpdateSquareSettingsRequest struct {
 }
 
 type UpdateTwilioSettingsRequest struct {
-	PublicBaseURL  string `json:"public_base_url"`
-	AuthToken      string `json:"auth_token"`
-	ClearAuthToken bool   `json:"clear_auth_token"`
-	IncomingPath   string `json:"incoming_path"`
-	TurnPath       string `json:"turn_path"`
-	RecordingPath  string `json:"recording_path"`
-	StreamPath     string `json:"stream_path"`
-	VoiceTransport string `json:"voice_transport"`
+	PublicBaseURL            string  `json:"public_base_url"`
+	AuthToken                string  `json:"auth_token"`
+	ClearAuthToken           bool    `json:"clear_auth_token"`
+	IncomingPath             string  `json:"incoming_path"`
+	TurnPath                 string  `json:"turn_path"`
+	RecordingPath            string  `json:"recording_path"`
+	StreamPath               string  `json:"stream_path"`
+	VoiceTransport           string  `json:"voice_transport"`
+	OwnerSMSEnabled          *bool   `json:"owner_sms_enabled,omitempty"`
+	OwnerSMSDestination      *string `json:"owner_sms_destination,omitempty"`
+	ClearOwnerSMSDestination bool    `json:"clear_owner_sms_destination"`
+	OwnerSMSConsentAttested  *bool   `json:"owner_sms_consent_attested,omitempty"`
+	AccountSID               string  `json:"account_sid"`
+	ClearAccountSID          bool    `json:"clear_account_sid"`
+	MessagingServiceSID      *string `json:"messaging_service_sid,omitempty"`
+	ClearMessagingServiceSID bool    `json:"clear_messaging_service_sid"`
+	SenderPhone              *string `json:"sender_phone,omitempty"`
+	ClearSenderPhone         bool    `json:"clear_sender_phone"`
+	NotificationStatusPath   *string `json:"notification_status_path,omitempty"`
+	NotificationInboundPath  *string `json:"notification_inbound_path,omitempty"`
 }
 
 type UpdateOpenAISettingsRequest struct {

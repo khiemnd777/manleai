@@ -7,7 +7,7 @@ import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
-import { ImportIssueList, ImportSummaryTable, listOrNone } from "@/features/configuration-transfer/import-preview";
+import { ImportIssueList, ImportScopePreview, ImportSummaryTable, listOrNone } from "@/features/configuration-transfer/import-preview";
 import { apiRequest } from "@/lib/api/client";
 import {
   applyOnboardingConfigurationImport,
@@ -15,13 +15,15 @@ import {
   previewOnboardingConfigurationImport,
   readConfigurationBundle
 } from "@/lib/api/configuration-transfer";
-import type { ConfigurationBundle, ConfigurationImportResponse, Salon } from "@/types/api";
+import type { ConfigurationBundle, ConfigurationImportResponse, Salon, SchedulingAuthority } from "@/types/api";
 
 type OnboardingMode = "manual" | "import";
 
 export function SalonProfileForm() {
   const router = useRouter();
   const [mode, setMode] = useState<OnboardingMode>("manual");
+  const [schedulingAuthority, setSchedulingAuthority] = useState<SchedulingAuthority>("owner_manual");
+  const [createOperationKey, setCreateOperationKey] = useState("");
   const [form, setForm] = useState({
     name: "",
     phone: "",
@@ -46,6 +48,7 @@ export function SalonProfileForm() {
 
   function setField(field: keyof typeof form, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
+    setCreateOperationKey("");
   }
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
@@ -53,13 +56,20 @@ export function SalonProfileForm() {
     setError("");
     setSuccess("");
     setLoading(true);
+    const operationKey = createOperationKey || newSalonCreateOperationKey();
+    setCreateOperationKey(operationKey);
     try {
       const salon = await apiRequest<Salon>("/api/salons", {
         method: "POST",
-        body: JSON.stringify(form)
+        body: JSON.stringify({ ...form, scheduling_authority: schedulingAuthority, operation_key: operationKey })
       });
-      setSuccess(`${salon.name} was created.`);
-      setTimeout(() => router.push("/dashboard/integrations"), 500);
+      if (salon.scheduling_authority === schedulingAuthority) {
+        setSuccess(`${salon.name} was created with ${authorityLabel(schedulingAuthority)}.`);
+        setTimeout(() => router.push(schedulingAuthority === "external_provider" ? "/dashboard/integrations" : "/dashboard/settings"), 600);
+        return;
+      }
+      setSuccess(`${salon.name} was created, but the create response did not confirm ${authorityLabel(schedulingAuthority)}. The salon was preserved; review scheduling authority in Settings before enabling scheduling.`);
+      setTimeout(() => router.push("/dashboard/settings"), 1100);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not create salon.");
     } finally {
@@ -98,8 +108,8 @@ export function SalonProfileForm() {
       const applied = await applyOnboardingConfigurationImport(importBundle, requestID);
       setImportPreview(applied);
       setImportRequestID(applied.request_id);
-      setSuccess("Configuration imported. Re-enter provider secrets and connect Square before live booking.");
-      setTimeout(() => router.push("/dashboard/integrations"), 700);
+      setSuccess("Configuration imported with Owner confirmation as the safe default. Review scheduling authority and re-enter provider secrets in Settings.");
+      setTimeout(() => router.push("/dashboard/settings"), 700);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not apply configuration import.");
     } finally {
@@ -125,7 +135,7 @@ export function SalonProfileForm() {
       </div>
 
       <div className="grid min-w-0 gap-4 md:grid-cols-3">
-        {["Salon Profile", "Square Connect", "AI Booking Readiness"].map((step, index) => (
+        {["Salon Profile", "Scheduling Authority", "Setup & Readiness"].map((step, index) => (
           <Card key={step} className="min-w-0 p-4">
             <div className="flex items-center gap-3">
               <CheckCircle2 className={index === 0 ? "h-5 w-5 text-brand" : "h-5 w-5 text-slate-300"} />
@@ -142,13 +152,13 @@ export function SalonProfileForm() {
         <ModeButton
           active={mode === "manual"}
           title="Create manually"
-          description="Enter salon profile fields now, then connect Square Appointments."
+          description="Enter salon details and explicitly choose the initial scheduling authority."
           onClick={() => setMode("manual")}
         />
         <ModeButton
           active={mode === "import"}
           title="Import JSON"
-          description="Preview and apply a ManleAI configuration export before Square setup."
+          description="Preview and apply a configuration export with Owner confirmation as the safe authority default."
           onClick={() => setMode("import")}
         />
       </div>
@@ -163,6 +173,24 @@ export function SalonProfileForm() {
                 Defaults are tuned for a US nail salon with English primary and Vietnamese secondary
                 conversation support.
               </CardDescription>
+            </div>
+          </div>
+          <div className="mb-6">
+            <div className="text-sm font-semibold text-ink">Initial scheduling authority</div>
+            <div className="mt-1 text-sm leading-6 text-muted">Owner confirmation is the safe default. ManleAI Calendar and Square Appointments still require readiness setup after creation.</div>
+            <div className="mt-3 grid gap-3 lg:grid-cols-3">
+              {onboardingAuthorities.map((authority) => (
+                <button
+                  key={authority.value}
+                  type="button"
+                  disabled={busy}
+                  onClick={() => { setSchedulingAuthority(authority.value); setCreateOperationKey(""); }}
+                  className={`rounded-lg border p-4 text-left disabled:cursor-not-allowed disabled:opacity-60 ${schedulingAuthority === authority.value ? "border-brand bg-teal-50" : "border-line bg-white hover:bg-slate-50"}`}
+                >
+                  <div className="flex items-start justify-between gap-2"><span className="text-sm font-semibold text-ink">{authority.label}</span>{schedulingAuthority === authority.value ? <Badge value="selected" /> : null}</div>
+                  <div className="mt-2 text-sm leading-6 text-muted">{authority.description}</div>
+                </button>
+              ))}
             </div>
           </div>
           <form onSubmit={submit} className="grid min-w-0 gap-4 md:grid-cols-2">
@@ -201,6 +229,23 @@ export function SalonProfileForm() {
       )}
     </div>
   );
+}
+
+const onboardingAuthorities: Array<{ value: SchedulingAuthority; label: string; description: string }> = [
+  { value: "owner_manual", label: "Owner confirmation", description: "New requests wait for owner review and are never auto-confirmed." },
+  { value: "manleai_calendar", label: "ManleAI Calendar", description: "Set up and activate internal hours, staff, services, and capacity next." },
+  { value: "external_provider", label: "Square Appointments", description: "Configure and verify a Square Appointments connection next." }
+];
+
+function authorityLabel(value: SchedulingAuthority) {
+  return onboardingAuthorities.find((authority) => authority.value === value)?.label ?? value;
+}
+
+function newSalonCreateOperationKey() {
+  const suffix = typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `onboarding-salon-create-${suffix}`;
 }
 
 function ModeButton({
@@ -295,19 +340,20 @@ function ImportConfigurationPanel({
           </div>
           <div className="mt-5 text-sm font-semibold text-ink">Excluded</div>
           <div className="mt-2 text-sm leading-6 text-muted">
-            Services, staff, customers, appointments, fallback requests, call data, POS connection state, business-hour sync periods, POS tokens, API keys, and client secrets.
+            Scheduling authority and switch history, services, staff, customers, appointments, pending scheduling requests, internal execution records, call data, POS connection state, provider tokens, API keys, and client secrets.
           </div>
         </div>
 
         <div className="min-w-0 rounded-md border border-line p-4">
           <div className="text-sm font-semibold text-ink">Preview before import</div>
           <div className="mt-1 text-sm leading-6 text-muted">
-            Preview validates schema, conflicts, skipped live-booking fields, and repeated-import behavior before any write.
+            Preview validates schema, destination authority compatibility, conflicts, and repeated-import behavior before any write.
           </div>
           {fileName ? <div className="mt-3 break-all text-xs text-muted">Selected file: {fileName}</div> : null}
 
           {preview ? (
             <div className="mt-5 space-y-4">
+              <ImportScopePreview preview={preview} />
               <ImportSummaryTable summary={preview.summary} />
               <ImportIssueList title="Conflicts" issues={preview.conflicts} tone="danger" />
               <ImportIssueList title="Warnings" issues={preview.warnings} tone="warning" />

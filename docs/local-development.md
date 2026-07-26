@@ -29,6 +29,11 @@ cd backend
 make run-api
 ```
 
+Local rate limiting is opt-in. Set `RATE_LIMIT_ENABLED=true` to exercise the
+same Redis-backed middleware against `REDIS_URL`; production defaults it on.
+The local refresh cookie remains HttpOnly and SameSite-Strict but omits Secure
+so `http://localhost` development can authenticate.
+
 ## Run Frontend
 
 ```bash
@@ -72,7 +77,17 @@ go run ./cmd/twilio-sim \
   -turn "The first one works. My name is Linh Tran and my phone is 312-555-0199."
 ```
 
-The simulator posts to `/api/voice/twilio/incoming`, then posts each customer utterance to `/api/voice/twilio/turn` with a valid `X-Twilio-Signature`. This exercises the same flow as a live call: AI greeting, availability lookup inside valid booking hours, slot negotiation, and POS-first confirmation. A booking is confirmed only if Square Appointments returns a successful booking ID; otherwise the call path must fall back to a pending owner request. For the seeded salon, `+16292536211` is the inbound salon phone; `+13125550102` is only the owner handoff phone.
+The simulator posts to `/api/voice/twilio/incoming`, then posts each customer
+utterance to `/api/voice/twilio/turn` with a valid `X-Twilio-Signature`. The
+seeded exercise is a Square-backed `external_provider` call: AI greeting,
+availability lookup inside valid booking hours, slot negotiation, and Square-
+backed external confirmation. It confirms only after Square Appointments
+returns the required successful booking ID and metadata; otherwise the
+external-provider path remains unconfirmed and follows pending/retry/
+reconciliation handling. This describes the seeded Square exercise, not a
+universal POS prerequisite for `owner_manual` or `manleai_calendar`. For the
+seeded salon, `+16292536211` is the inbound salon phone; `+13125550102` is only
+the owner handoff phone.
 
 ## Notes
 

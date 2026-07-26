@@ -1,6 +1,9 @@
 package conversation
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 const (
 	AssistantActionAnswerQuestion    = "answer_question"
@@ -21,7 +24,7 @@ type AssistantAction struct {
 	Reason       string
 }
 
-func planNextConversationAction(session Session, missing string) AssistantAction {
+func planNextConversationAction(session Session, missing string, cfg *RuntimeConfig) AssistantAction {
 	if missing != "" {
 		return AssistantAction{Kind: AssistantActionAskMissingField, MissingField: missing, Reason: "required_field_missing"}
 	}
@@ -32,10 +35,12 @@ func planNextConversationAction(session Session, missing string) AssistantAction
 	if !state.ReviewRequired {
 		return AssistantAction{Kind: AssistantActionExecuteBooking, Reason: "review_not_required"}
 	}
-	if reviewAuthorizationCurrent(state) {
+	expectedAuthority := selectedSchedulingAuthorityForReview(session, cfg)
+	if reviewAuthorizationCurrentForPolicy(state, cfg, expectedAuthority) {
 		return AssistantAction{Kind: AssistantActionExecuteBooking, Reason: "current_revision_authorized"}
 	}
-	if state.Phase == DialogPhaseReview && state.ReviewedRevision == state.DraftRevision {
+	if state.Phase == DialogPhaseReview && state.ReviewedRevision == state.DraftRevision && cfg != nil &&
+		state.ReviewedBookingMode == cfg.BookingMode && strings.TrimSpace(state.SelectedSchedulingAuthority) == strings.TrimSpace(expectedAuthority) {
 		return AssistantAction{Kind: AssistantActionAskReview, Reason: "current_revision_reviewed_authorization_missing"}
 	}
 	return AssistantAction{Kind: AssistantActionReadReview, Reason: "review_missing_or_stale"}
@@ -46,7 +51,7 @@ func resumeAfterInformationPrompt(session *Session, services []ServiceOption, st
 		return "", "", false
 	}
 	missing := missingBookingField(*session)
-	action := planNextConversationAction(*session, missing)
+	action := planNextConversationAction(*session, missing, cfg)
 	switch action.Kind {
 	case AssistantActionReadReview:
 		state := normalizedDialogState(session.DialogState)
@@ -58,6 +63,7 @@ func resumeAfterInformationPrompt(session *Session, services []ServiceOption, st
 		state.NoProgressCount = 0
 		state.LastPromptKey = "final_review"
 		session.DialogState = state
+		stampSchedulingReviewFence(session, cfg)
 		return finalBookingReviewPrompt(*session, services, staff, cfg), "booking_review", true
 	case AssistantActionAskReview:
 		state := normalizedDialogState(session.DialogState)
@@ -67,14 +73,14 @@ func resumeAfterInformationPrompt(session *Session, services []ServiceOption, st
 		state.AuthorizedRevision = 0
 		state.LastPromptKey = "final_review_retry"
 		session.DialogState = state
-		return "Would you like me to book these details?", "booking_review", true
+		return reviewAuthorizationPrompt(cfg, false), "booking_review", true
 	default:
 		return resumeBookingPrompt(*session, services, cfg), missing, false
 	}
 }
 
 func (s *Service) continueAfterDraftReady(ctx context.Context, ownerUserID string, turn TurnRecord, before Session, next Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
-	nextAction := planNextConversationAction(next, missingBookingField(next))
+	nextAction := planNextConversationAction(next, missingBookingField(next), cfg)
 	if nextAction.Kind == AssistantActionAskMissingField {
 		missing := nextAction.MissingField
 		turn.AIMessage = promptForMissingField(missing)
@@ -90,8 +96,9 @@ func (s *Service) continueAfterDraftReady(ctx context.Context, ownerUserID strin
 		state.AuthorizedRevision = 0
 		state.LastPromptKey = "final_review_retry"
 		next.DialogState = state
+		stampSchedulingReviewFence(&next, cfg)
 		syncTurnUpdate(&turn, next, services, staff, cfg)
-		turn.AIMessage = "I didn't catch that. Would you like me to book these details?"
+		turn.AIMessage = "I didn't catch that. " + reviewAuthorizationPrompt(cfg, true)
 		turn.ReplyPolicy = ReplyPolicyOperationalFact
 		finalizeTurnMetadata(&turn, before, next, "booking_review", "booking_review", "final_booking_review_retry")
 		return s.store.SaveTurn(ctx, turn)
@@ -106,11 +113,15 @@ func (s *Service) continueAfterDraftReady(ctx context.Context, ownerUserID strin
 		state.NoProgressCount = 0
 		state.LastPromptKey = "final_review"
 		next.DialogState = state
+		stampSchedulingReviewFence(&next, cfg)
 		syncTurnUpdate(&turn, next, services, staff, cfg)
 		turn.AIMessage = finalBookingReviewPrompt(next, services, staff, cfg)
 		turn.ReplyPolicy = ReplyPolicyOperationalFact
 		finalizeTurnMetadata(&turn, before, next, "booking_review", "booking_review", "final_booking_review")
 		return s.store.SaveTurn(ctx, turn)
+	}
+	if handled, updated, err := s.maybeAskCustomerSMSConsent(ctx, ownerUserID, turn, before, next, services, staff, cfg, knowledge); handled {
+		return updated, err
 	}
 	return s.tryBooking(ctx, ownerUserID, turn, next, services, staff, cfg, knowledge)
 }

@@ -21,11 +21,17 @@ func NewRepository(db *sql.DB) *Repository {
 func (r *Repository) GetSalonVoiceStatus(ctx context.Context, salonID string, ownerUserID string) (*SalonVoiceStatus, error) {
 	var status SalonVoiceStatus
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id::text, COALESCE(phone, '')
-		FROM salons
-		WHERE id = $1
-		  AND owner_user_id = $2
-	`, salonID, ownerUserID).Scan(&status.SalonID, &status.Phone)
+		SELECT salon.id::text, COALESCE(salon.phone, ''), salon.ai_enabled,
+		       settings.scheduling_authority, settings.scheduling_authority_version,
+		       settings.booking_mode
+		FROM salons salon
+		JOIN salon_settings settings ON settings.salon_id = salon.id
+		WHERE salon.id = $1
+		  AND salon.owner_user_id = $2
+	`, salonID, ownerUserID).Scan(
+		&status.SalonID, &status.Phone, &status.AIEnabled,
+		&status.SchedulingAuthority, &status.SchedulingAuthorityVersion, &status.BookingMode,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -400,11 +406,17 @@ func (r *Repository) SaveAudioOutput(ctx context.Context, record AudioOutputReco
 		VALUES (
 			NULLIF($1, '')::uuid, NULLIF($2, '')::uuid, $3, NULLIF($4, ''), $5, $6, $7
 		)
-		RETURNING id::text, content_type, audio_data
+		RETURNING id::text, COALESCE(salon_id::text, ''), COALESCE(call_session_id::text, ''),
+		          provider, COALESCE(provider_call_id, ''), content_type, audio_data, expires_at
 	`, record.SalonID, record.CallSessionID, record.Provider, record.ProviderCallID, contentType, record.Audio, expiresAt).Scan(
 		&output.ID,
+		&output.SalonID,
+		&output.CallSessionID,
+		&output.Provider,
+		&output.ProviderCallID,
 		&output.ContentType,
 		&output.Audio,
+		&output.ExpiresAt,
 	)
 	if err != nil {
 		return nil, err
@@ -412,7 +424,32 @@ func (r *Repository) SaveAudioOutput(ctx context.Context, record AudioOutputReco
 	return &output, nil
 }
 
-func (r *Repository) GetAudioOutput(ctx context.Context, id string) (*AudioOutput, error) {
+func (r *Repository) GetAudioOutputMetadata(ctx context.Context, id string) (*AudioOutput, error) {
+	var output AudioOutput
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id::text, COALESCE(salon_id::text, ''), COALESCE(call_session_id::text, ''),
+		       provider, COALESCE(provider_call_id, ''), content_type, expires_at
+		FROM voice_audio_outputs
+		WHERE id = $1
+	`, id).Scan(
+		&output.ID,
+		&output.SalonID,
+		&output.CallSessionID,
+		&output.Provider,
+		&output.ProviderCallID,
+		&output.ContentType,
+		&output.ExpiresAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &output, nil
+}
+
+func (r *Repository) GetAudioOutputContent(ctx context.Context, id string) (*AudioOutput, error) {
 	var output AudioOutput
 	err := r.db.QueryRowContext(ctx, `
 		SELECT id::text, content_type, audio_data

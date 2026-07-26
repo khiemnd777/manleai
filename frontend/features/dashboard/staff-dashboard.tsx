@@ -8,6 +8,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SchedulingReadinessCard } from "@/features/dashboard/scheduling-readiness-card";
+import { StaffCalendarProfile } from "@/features/dashboard/staff-calendar-profile";
 import {
   authorityLabel,
   FieldAuthorityBadge,
@@ -16,7 +18,8 @@ import {
   providerManagedReadOnly
 } from "@/features/dashboard/pos-field-authority";
 import { apiRequest } from "@/lib/api/client";
-import type { POSConnection, POSStaffMember, Salon, SquareReadiness, SyncLog } from "@/types/api";
+import { getManleAICalendar } from "@/lib/api/internal-calendar";
+import type { ManleAICalendarAggregate, POSConnection, POSStaffMember, Salon, SchedulingAuthority, SquareReadiness, SyncLog } from "@/types/api";
 
 type SalonListResponse = {
   salons: Salon[];
@@ -46,6 +49,10 @@ type StaffFormState = {
 export function StaffDashboard() {
   const [salon, setSalon] = useState<Salon | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [squareStatusError, setSquareStatusError] = useState("");
+  const [calendar, setCalendar] = useState<ManleAICalendarAggregate | null>(null);
+  const [calendarLoading, setCalendarLoading] = useState(true);
+  const [calendarError, setCalendarError] = useState("");
   const [staff, setStaff] = useState<POSStaffMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
@@ -66,18 +73,33 @@ export function StaffDashboard() {
       setSalon(firstSalon);
       if (!firstSalon) {
         setStatus(null);
+        setSquareStatusError("");
+        setCalendar(null);
+        setCalendarError("");
+        setCalendarLoading(false);
         setStaff([]);
         return;
       }
-      const [statusResponse, staffResponse] = await Promise.all([
-        apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
-        apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`)
+      setCalendarLoading(true);
+      const [statusResult, staffResponse, calendarResult] = await Promise.all([
+        apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`)
+          .then((value) => ({ value, error: "" }))
+          .catch((statusError: unknown) => ({ value: null, error: errorMessage(statusError, "Could not load Square status.") })),
+        apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`),
+        getManleAICalendar(firstSalon.id)
+          .then((response) => ({ value: response.manleai_calendar, error: "" }))
+          .catch((calendarFailure: unknown) => ({ value: null, error: errorMessage(calendarFailure, "Could not load internal calendar readiness.") }))
       ]);
-      setStatus(statusResponse);
+      setStatus(statusResult.value);
+      setSquareStatusError(statusResult.error);
+      setCalendar(calendarResult.value);
+      setCalendarError(calendarResult.error);
+      setCalendarLoading(false);
       setStaff(staffResponse.staff);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load staff.");
     } finally {
+      setCalendarLoading(false);
       if (!silent) {
         setLoading(false);
       }
@@ -88,7 +110,23 @@ export function StaffDashboard() {
     void load();
   }, []);
 
-  const metrics = useMemo(() => staffMetrics(staff), [staff]);
+  async function reloadCalendar() {
+    if (!salon?.id) return;
+    setCalendarLoading(true);
+    setCalendarError("");
+    try {
+      const response = await getManleAICalendar(salon.id);
+      setCalendar(response.manleai_calendar);
+    } catch (calendarFailure) {
+      setCalendarError(errorMessage(calendarFailure, "Could not load internal calendar readiness."));
+    } finally {
+      setCalendarLoading(false);
+    }
+  }
+
+  const schedulingAuthority = calendar?.scheduling_authority;
+  const activeProvider = salon?.active_pos_provider;
+  const metrics = useMemo(() => staffMetrics(staff, schedulingAuthority, activeProvider), [staff, schedulingAuthority, activeProvider]);
   const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
 
   function openCreateForm() {
@@ -124,7 +162,7 @@ export function StaffDashboard() {
             body
           });
       setStaff((current) => upsertStaff(current, response.staff_member));
-      setSuccess(editingStaff ? "Staff member saved." : "Staff member created. Local-only staff are not booking-ready until linked to Square Appointments.");
+      setSuccess(editingStaff ? "Staff member saved." : "Staff member created. Scheduling eligibility follows the selected authority and its backend readiness checks.");
       setEditingStaff(response.staff_member);
       setForm(staffToForm(response.staff_member));
       await load({ silent: true });
@@ -213,7 +251,7 @@ export function StaffDashboard() {
         <div>
           <h1 className="text-2xl font-bold text-ink">Staff</h1>
           <p className="mt-1 text-sm text-muted">
-            Manage ManleAI-owned staff records. Square Appointments executes availability and booking.
+            Manage staff records, internal schedules, service eligibility, and optional Square Appointments sync.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -231,21 +269,33 @@ export function StaffDashboard() {
 
       {error ? <Alert title="Staff unavailable" message={error} /> : null}
       {success ? <Alert type="success" title="Staff updated" message={success} /> : null}
+      {squareStatusError ? <Alert title="Square status unavailable" message={`${squareStatusError} Internal staff and calendar setup remain available.`} /> : null}
 
-      <StaffGate status={status} />
-      <BookingEligibilityPanel />
+      <SchedulingReadinessCard calendar={calendar} loading={calendarLoading} error={calendarError} onRetry={() => void reloadCalendar()} />
+      {calendar?.scheduling_authority === "external_provider" ? (
+        <>
+          <StaffGate status={status} />
+          <BookingEligibilityPanel />
+        </>
+      ) : null}
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <Metric label="Total staff" value={String(metrics.total)} />
         <Metric label="Synced" value={String(metrics.synced)} />
         <Metric label="Local only" value={String(metrics.localOnly)} />
-        <Metric label="Booking-ready" value={String(metrics.aiBookable)} />
+        <Metric label="Authority eligible" value={String(metrics.aiBookable)} />
       </div>
 
       {formOpen ? (
         <StaffForm
           form={form}
           member={editingStaff}
+          salonID={salon.id}
+          timezone={salon.timezone}
+          calendar={calendar}
+          calendarLoading={calendarLoading}
+          calendarError={calendarError}
+          activeProvider={activeProvider}
           busy={busy === "save-staff"}
           onChange={setForm}
           onCancel={() => {
@@ -254,6 +304,8 @@ export function StaffDashboard() {
             setForm(emptyStaffForm());
           }}
           onSave={() => void saveStaff()}
+          onReloadCalendar={reloadCalendar}
+          onCalendarChange={setCalendar}
         />
       ) : null}
 
@@ -262,7 +314,7 @@ export function StaffDashboard() {
           <div>
             <CardTitle>Staff directory</CardTitle>
             <CardDescription>
-              Only active, synced, POS-linked, AI-bookable staff are used for availability and booking.
+              {staffCatalogDescription(schedulingAuthority)}
             </CardDescription>
           </div>
           <Badge value={staff.length > 0 ? "active" : "disabled"} />
@@ -273,6 +325,8 @@ export function StaffDashboard() {
         ) : (
           <StaffTable
             staff={staff}
+            schedulingAuthority={schedulingAuthority}
+            activeProvider={activeProvider}
             busy={busy}
             onEdit={openEditForm}
             onArchive={(member) => void archiveStaff(member)}
@@ -369,17 +423,33 @@ function EligibilityItem({ label, value }: { label: string; value: string }) {
 function StaffForm({
   form,
   member,
+  salonID,
+  timezone,
+  calendar,
+  calendarLoading,
+  calendarError,
+  activeProvider,
   busy,
   onChange,
   onCancel,
-  onSave
+  onSave,
+  onReloadCalendar,
+  onCalendarChange
 }: {
   form: StaffFormState;
   member: POSStaffMember | null;
+  salonID: string;
+  timezone: string;
+  calendar: ManleAICalendarAggregate | null;
+  calendarLoading: boolean;
+  calendarError: string;
+  activeProvider?: string;
   busy: boolean;
   onChange: (next: StaffFormState) => void;
   onCancel: () => void;
   onSave: () => void;
+  onReloadCalendar: () => Promise<void>;
+  onCalendarChange: (calendar: ManleAICalendarAggregate) => void;
 }) {
   const archived = Boolean(member?.archived_at);
   const providerReadOnly = Boolean(member && providerManagedReadOnly(member.field_authority));
@@ -391,7 +461,7 @@ function StaffForm({
         <div>
           <CardTitle>{member ? (operationalLocked ? "Staff details" : "Edit staff member") : "New local staff member"}</CardTitle>
           <CardDescription>
-            {member ? staffGateReason(member) : "New staff start as ManleAI local records and are not booking-ready until linked to Square Appointments."}
+            {member ? staffGateReason(member, calendar?.scheduling_authority, activeProvider) : "New staff start as canonical ManleAI records. Eligibility follows the selected scheduling authority."}
           </CardDescription>
         </div>
         {member ? <Badge value={member.sync_status || "local_only"} /> : <Badge value="local_only" />}
@@ -407,7 +477,7 @@ function StaffForm({
         />
       ) : (
         <div className="mt-5 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-xs leading-5 text-blue-900">
-          Managed in ManleAI. Square Appointments is not updated, and this local staff member cannot be booked until they have a valid active-provider link.
+          {localStaffRecordDescription(calendar?.scheduling_authority)}
         </div>
       )}
 
@@ -456,6 +526,17 @@ function StaffForm({
       </div>
       </div>
 
+      <StaffCalendarProfile
+        salonID={salonID}
+        timezone={timezone}
+        member={member}
+        calendar={calendar}
+        loading={calendarLoading}
+        error={calendarError}
+        onReload={onReloadCalendar}
+        onCalendarChange={onCalendarChange}
+      />
+
       <div className="mt-5 flex flex-wrap justify-end gap-3">
         <Button type="button" variant="secondary" onClick={onCancel} disabled={busy}>
           {operationalLocked ? "Close" : "Cancel"}
@@ -472,12 +553,16 @@ function StaffForm({
 
 function StaffTable({
   staff,
+  schedulingAuthority,
+  activeProvider,
   busy,
   onEdit,
   onArchive,
   onUpdateAI
 }: {
   staff: POSStaffMember[];
+  schedulingAuthority?: SchedulingAuthority;
+  activeProvider?: string;
   busy: string;
   onEdit: (member: POSStaffMember) => void;
   onArchive: (member: POSStaffMember) => void;
@@ -515,10 +600,10 @@ function StaffTable({
                   </div>
                 </td>
                 <td className="px-4 py-3">
-                  <AIStatus member={member} />
+                  <AIStatus member={member} schedulingAuthority={schedulingAuthority} activeProvider={activeProvider} />
                 </td>
                 <td className="w-56 px-4 py-3 align-top">
-                  <StaffActions member={member} busy={busy} onEdit={onEdit} onArchive={onArchive} onUpdateAI={onUpdateAI} />
+                  <StaffActions member={member} schedulingAuthority={schedulingAuthority} activeProvider={activeProvider} busy={busy} onEdit={onEdit} onArchive={onArchive} onUpdateAI={onUpdateAI} />
                 </td>
               </tr>
             ))}
@@ -530,6 +615,8 @@ function StaffTable({
           <StaffCard
             key={member.id || member.pos_staff_id || member.name}
             member={member}
+            schedulingAuthority={schedulingAuthority}
+            activeProvider={activeProvider}
             busy={busy}
             onEdit={onEdit}
             onArchive={onArchive}
@@ -543,12 +630,16 @@ function StaffTable({
 
 function StaffCard({
   member,
+  schedulingAuthority,
+  activeProvider,
   busy,
   onEdit,
   onArchive,
   onUpdateAI
 }: {
   member: POSStaffMember;
+  schedulingAuthority?: SchedulingAuthority;
+  activeProvider?: string;
   busy: string;
   onEdit: (member: POSStaffMember) => void;
   onArchive: (member: POSStaffMember) => void;
@@ -572,10 +663,10 @@ function StaffCard({
         ]}
       />
       <div className="mt-4">
-        <AIStatus member={member} />
+        <AIStatus member={member} schedulingAuthority={schedulingAuthority} activeProvider={activeProvider} />
       </div>
       <div className="mt-4">
-        <StaffActions member={member} busy={busy} onEdit={onEdit} onArchive={onArchive} onUpdateAI={onUpdateAI} />
+        <StaffActions member={member} schedulingAuthority={schedulingAuthority} activeProvider={activeProvider} busy={busy} onEdit={onEdit} onArchive={onArchive} onUpdateAI={onUpdateAI} />
       </div>
     </div>
   );
@@ -583,12 +674,16 @@ function StaffCard({
 
 function StaffActions({
   member,
+  schedulingAuthority,
+  activeProvider,
   busy,
   onEdit,
   onArchive,
   onUpdateAI
 }: {
   member: POSStaffMember;
+  schedulingAuthority?: SchedulingAuthority;
+  activeProvider?: string;
   busy: string;
   onEdit: (member: POSStaffMember) => void;
   onArchive: (member: POSStaffMember) => void;
@@ -597,7 +692,7 @@ function StaffActions({
   const aiBusy = busy === `ai-${member.id}`;
   const archiveBusy = busy === `archive-${member.id}`;
   const archived = Boolean(member.archived_at);
-  const canEnable = canEnableAI(member);
+  const canEnable = canEnableAI(member, schedulingAuthority, activeProvider);
   const nextAI = !member.ai_bookable;
   const readOnlyProvider = providerManagedReadOnly(member.field_authority);
   return (
@@ -631,11 +726,11 @@ function StaffActions({
   );
 }
 
-function AIStatus({ member }: { member: POSStaffMember }) {
+function AIStatus({ member, schedulingAuthority, activeProvider }: { member: POSStaffMember; schedulingAuthority?: SchedulingAuthority; activeProvider?: string }) {
   return (
     <div className="space-y-1">
-      <Badge value={member.ai_bookable && canEnableAI(member) ? "allowed" : "blocked"} />
-      <div className="max-w-56 text-xs leading-5 text-muted">{staffGateReason(member)}</div>
+      <Badge value={member.ai_bookable && canEnableAI(member, schedulingAuthority, activeProvider) ? "allowed" : "blocked"} />
+      <div className="max-w-56 text-xs leading-5 text-muted">{staffGateReason(member, schedulingAuthority, activeProvider)}</div>
     </div>
   );
 }
@@ -657,7 +752,7 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
       </div>
       <div className="mt-3 text-sm font-semibold text-ink">No staff yet</div>
       <div className="mt-1 text-sm leading-6 text-muted">
-        Create a local staff member or sync Square Appointments staff. Local records are not bookable until linked.
+        Create a canonical staff member, then configure eligibility for the selected scheduling authority.
       </div>
       <div className="mt-4 flex flex-wrap justify-center gap-3">
         <Button type="button" onClick={onCreate}>
@@ -697,12 +792,12 @@ function InfoGrid({ items }: { items: [string, string][] }) {
   );
 }
 
-function staffMetrics(staff: POSStaffMember[]) {
+function staffMetrics(staff: POSStaffMember[], schedulingAuthority?: SchedulingAuthority, activeProvider?: string) {
   return {
     total: staff.length,
     synced: staff.filter((member) => member.sync_status === "synced" && member.pos_linked).length,
     localOnly: staff.filter((member) => member.sync_status === "local_only").length,
-    aiBookable: staff.filter((member) => member.ai_bookable && canEnableAI(member)).length
+    aiBookable: staff.filter((member) => member.ai_bookable && canEnableAI(member, schedulingAuthority, activeProvider)).length
   };
 }
 
@@ -747,22 +842,50 @@ function compareStaff(a: POSStaffMember, b: POSStaffMember) {
   return a.name.localeCompare(b.name);
 }
 
-function canEnableAI(member: POSStaffMember) {
-  return (
-    member.active &&
-    !member.archived_at &&
-    member.sync_status === "synced" &&
-    member.pos_linked &&
-    Boolean(member.pos_staff_id)
-  );
+function staffCatalogDescription(schedulingAuthority?: SchedulingAuthority) {
+  if (schedulingAuthority === "external_provider") {
+    return "External-provider eligibility requires the active provider's synced identity and AI permission.";
+  }
+  if (schedulingAuthority === "owner_manual" || schedulingAuthority === "manleai_calendar") {
+    return "Internal authorities use active canonical staff with AI permission; profile readiness remains backend-owned.";
+  }
+  return "Scheduling authority is unavailable; eligibility fails closed until backend state loads.";
 }
 
-function staffGateReason(member: POSStaffMember) {
+function localStaffRecordDescription(schedulingAuthority?: SchedulingAuthority) {
+  if (schedulingAuthority === "external_provider") {
+    return "Managed in ManleAI. The external provider is not updated; external booking requires a valid identity from the active provider.";
+  }
+  if (schedulingAuthority === "owner_manual" || schedulingAuthority === "manleai_calendar") {
+    return "Managed in ManleAI. A POS link is optional; scheduling eligibility still requires an active canonical record, AI permission, and backend readiness.";
+  }
+  return "Managed in ManleAI. Scheduling eligibility stays disabled until backend authority state is available.";
+}
+
+function canEnableAI(member: POSStaffMember, schedulingAuthority?: SchedulingAuthority, activeProvider?: string) {
+  if (!member.active || member.archived_at) return false;
+  if (schedulingAuthority === "owner_manual" || schedulingAuthority === "manleai_calendar") return true;
+  if (schedulingAuthority !== "external_provider") return false;
+  return Boolean(activeProvider) && member.pos_provider === activeProvider && member.sync_status === "synced" && member.pos_linked;
+}
+
+function staffGateReason(member: POSStaffMember, schedulingAuthority?: SchedulingAuthority, activeProvider?: string) {
   if (member.archived_at || member.sync_status === "archived") return "Archived staff stay visible for history and are not bookable.";
   if (!member.active) return "Inactive staff are not bookable by the AI receptionist.";
+  if (schedulingAuthority === "owner_manual" || schedulingAuthority === "manleai_calendar") {
+    return member.ai_bookable
+      ? "Allowed by the canonical catalog. Authority-specific readiness is shown separately."
+      : "This active canonical staff member can be allowed without a POS link.";
+  }
+  if (schedulingAuthority !== "external_provider") return "Scheduling authority is unavailable, so eligibility fails closed.";
+  if (!activeProvider || member.pos_provider !== activeProvider) return "Staff identity does not belong to the salon's active external provider.";
   if (!member.pos_linked || member.sync_status === "local_only") return "Local-only staff need a Square Appointments link before they are booking-ready.";
   if (member.sync_status === "sync_failed") return member.sync_error || "Latest POS sync failed; staff member is not bookable.";
   if (member.sync_status === "unmapped") return "Staff member needs an active-provider mapping before they are bookable.";
-  if (member.ai_bookable) return "Booking-ready: synced, POS linked, and allowed for AI booking.";
-  return "Synced staff member can be allowed for AI booking.";
+  if (member.ai_bookable) return "Presentation checks pass. The API verifies the authoritative provider link before booking.";
+  return "Synced linked staff can be allowed for AI booking; the API remains authoritative.";
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
 }

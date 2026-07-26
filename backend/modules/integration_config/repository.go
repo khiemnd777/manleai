@@ -5,9 +5,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 )
 
-var ErrNotFound = errors.New("integration config not found")
+var (
+	ErrNotFound        = errors.New("integration config not found")
+	ErrInvalidSettings = errors.New("integration config settings are invalid")
+)
 
 type Repository struct {
 	db *sql.DB
@@ -114,10 +119,30 @@ func scanConfig(row rowScanner) (*StoredConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	item.Settings = map[string]string{}
-	if settingsRaw != "" {
-		_ = json.Unmarshal([]byte(settingsRaw), &item.Settings)
+	settingsRaw = strings.TrimSpace(settingsRaw)
+	if settingsRaw == "" {
+		return nil, ErrInvalidSettings
 	}
+	var rawSettings map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(settingsRaw), &rawSettings); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidSettings, err)
+	}
+	if rawSettings == nil {
+		return nil, ErrInvalidSettings
+	}
+	settings := make(map[string]string, len(rawSettings))
+	for key, rawValue := range rawSettings {
+		var value any
+		if err := json.Unmarshal(rawValue, &value); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidSettings, err)
+		}
+		stringValue, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("%w: setting %q must be a string", ErrInvalidSettings, key)
+		}
+		settings[key] = stringValue
+	}
+	item.Settings = settings
 	item.Settings = normalizeMap(item.Settings)
 	return &item, nil
 }

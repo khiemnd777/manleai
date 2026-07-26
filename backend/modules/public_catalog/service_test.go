@@ -2,8 +2,12 @@ package public_catalog
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
+
+	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
 func TestGetBySlugNormalizesAndDelegates(t *testing.T) {
@@ -48,6 +52,32 @@ func TestGetFirstPublishedDelegates(t *testing.T) {
 	}
 	if !store.firstPublishedCalled {
 		t.Fatal("store GetFirstPublished was not called")
+	}
+}
+
+func TestPublicCatalogJSONIsAuthorityAwareAndProviderSafe(t *testing.T) {
+	encoded, err := json.Marshal(Catalog{
+		Salon:                      PublicSalon{Slug: "lotus-nails", Name: "Lotus Nails", Phone: "555-0100"},
+		SchedulingAuthority:        booking.SchedulingAuthorityOwnerManual,
+		SchedulingAuthorityVersion: 3,
+		Services:                   []PublicService{{Name: "Signature Manicure", DurationMinutes: 45}},
+		Staff:                      []PublicStaffMember{},
+		Hours:                      []PublicBusinessHourPeriod{},
+		BookingNote:                "Call the salon to request an appointment.",
+	})
+	if err != nil {
+		t.Fatalf("marshal catalog: %v", err)
+	}
+	value := string(encoded)
+	for _, required := range []string{`"scheduling_authority":"owner_manual"`, `"scheduling_authority_version":3`, `"staff":[]`, `"hours":[]`} {
+		if !strings.Contains(value, required) {
+			t.Fatalf("public catalog JSON missing %s: %s", required, value)
+		}
+	}
+	for _, forbidden := range []string{"active_pos_provider", "provider_entity_id", "owner_user_id", "pos_service_id"} {
+		if strings.Contains(value, forbidden) {
+			t.Fatalf("public catalog JSON exposed %q: %s", forbidden, value)
+		}
 	}
 }
 

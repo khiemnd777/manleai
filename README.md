@@ -1,12 +1,27 @@
 # AI Receptionist for Nail Salons
 
-POS-first commercial production foundation for an AI phone receptionist serving US nail salons, starting with Vietnamese-owned salons that use Square Appointments.
+Owner-first, authority-aware application foundation for an AI phone receptionist
+serving US nail salons, starting with Vietnamese-owned salons. Square
+Appointments is optional and is the first real external-provider adapter.
 
-This repository currently implements Milestone 1, Milestone 2, Milestone 3 booking safety, the Milestone 4 deterministic conversation simulator, the Milestone 5 live telephony webhook foundation, the Milestone 6 external AI voice provider layer, the Milestone 7A-7C salon knowledge/training slices, canonical POS ownership/provider-switch gates, configuration transfer, public catalog publishing, and call lifecycle retention:
+This repository contains the code-ready Owner-first Phase 0-6 scheduling scope,
+the Milestone 1-7 voice/conversation/knowledge foundation, canonical external-
+provider ownership and switching gates, configuration transfer, public catalog
+publishing, notification delivery, operations health, and retention. Code
+readiness does not by itself prove live-provider, monitoring, backup/restore,
+capacity, security, compliance, or on-call operational readiness.
 
 - Go/Fiber API scaffold with PostgreSQL, Redis, startup SQL migrations, and Docker Compose.
-- Auth, JWT access tokens, persisted refresh tokens, owner-scoped salon APIs.
+- Auth with memory-only JWT access tokens, host-only HttpOnly refresh cookies,
+  persisted hashed rotation state, and owner-scoped salon APIs.
 - POS adapter boundary with provider-neutral DTOs.
+- Authority-neutral scheduling boundary with persisted `owner_manual`,
+  `manleai_calendar`, and `external_provider` origin/evidence.
+- Durable nonconfirming owner-review requests for `owner_manual`.
+- Atomic staff-only/pooled party create and whole-root lifecycle execution for
+  `manleai_calendar`.
+- Explicit owner-reviewed authority preview/commit with immutable audit history
+  and an inverse-run reference; provider integration never switches authority.
 - Square OAuth/connect/status/location/sync foundation.
 - Encrypted POS token storage.
 - Persisted Square OAuth state nonce and pinned Square API version.
@@ -29,9 +44,28 @@ This repository currently implements Milestone 1, Milestone 2, Milestone 3 booki
 - POS calendar app in `pos-calendar/` with standalone login, day/week/month/agenda views, Square calendar sync, and POS-backed add/edit/delete actions.
 - Repo-local Codex guidance through `AGENTS.md`, `.agents/skills`, and `.codex/agents`.
 
-Square Appointments create, reschedule, cancel, and dashboard test-booking operations are implemented through `POSProvider`. AI booking can only be enabled after Square is connected, a location is selected, services/staff/business hour periods are synced, and at least one service and staff member are booking-ready for the active provider. Square test booking create/cancel is an optional POS write smoke test, not an AI enablement gate. Until Square returns a successful POS booking ID and booking version, failed provider calls create fallback pending requests instead of confirmed appointments or internal appointment state changes.
+Confirmation is scheduling-authority-specific:
 
-The Milestone 4 simulator and Milestone 5 phone webhook path are provider-neutral at the conversation layer. They record sessions and transcripts, call the booking service only after required booking details are collected, and never confirm an appointment unless the booking service returns a POS-confirmed attempt and appointment.
+- `owner_manual` creates a durable pending owner-review request and never
+  confirms automatically.
+- `manleai_calendar` confirms only after one atomic internal commit returns a
+  durable appointment ID and the complete authority-native result.
+- `external_provider` confirms only after the selected provider succeeds and
+  returns the required booking ID and metadata. Square Appointments is the
+  currently implemented real adapter for this mode.
+
+For Square-backed `external_provider`, automated booking requires a connected
+Square account, selected location, current synced services/staff/business-hour
+evidence, and booking-ready provider mappings. Square test create/cancel is an
+optional provider-write smoke test, not a universal AI enablement gate. A
+failed or ambiguous Square write remains unconfirmed and follows the external
+fallback/retry/reconciliation contract. Connecting or syncing Square never
+selects scheduling authority.
+
+The simulator and phone webhook paths are provider-neutral at the conversation
+and scheduling boundaries. They record sessions and transcripts, dispatch only
+after the required details and policy gates are satisfied, and use the captured
+authority's durable evidence above before producing confirmed wording.
 
 ## Local Start
 
@@ -132,11 +166,16 @@ The Twilio incoming, turn, recording, stream status, stream fallback, and Media 
 
 ## Scope Boundary
 
-Fully implemented now:
+Implemented in the repository as code-ready application behavior; operational
+production readiness remains a separate evidence gate:
 
 - Monorepo structure
 - Auth and salon foundation
 - POSProvider interface and provider-neutral DTOs
+- Three-authority scheduling resolver and immutable origin handling
+- `owner_manual` durable request/review workflow without automatic confirmation
+- `manleai_calendar` atomic aggregate create and whole-root lifecycle execution
+- Explicit owner-reviewed scheduling-authority switching
 - Square OAuth skeleton and connect flow
 - Square location listing
 - Square service/staff sync foundation
@@ -167,11 +206,12 @@ Fully implemented now:
 - POS sync and error logs
 - Admin shell, login, create-account, dashboard, onboarding profile creation/import, integrations page, appointments, calls, customers, services, staff, settings, billing gate, and training pages
 
-Still stubbed until later milestones:
+Not implemented in the current repository scope:
 
 - Additional owner approval loops beyond transcript correction review
 - Executable alternate POS provider import, dry-run, and activation
-- SMS and reminders
+- Additional notification channels and reminder automation beyond the
+  implemented owner-operational SMS and consented customer appointment SMS
 - Stripe billing
 
 ## Agent Setup

@@ -12,6 +12,7 @@ import (
 
 	"github.com/lib/pq"
 	"github.com/manleai/ai-receptionist/modules/booking"
+	calendar "github.com/manleai/ai-receptionist/modules/scheduling_manleai_calendar"
 )
 
 const (
@@ -127,7 +128,12 @@ func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, owner
 	err := r.db.QueryRowContext(ctx, `
 			SELECT s.name, s.timezone, COALESCE(s.handoff_phone, ''), s.ai_enabled,
 			       COALESCE(ss.handoff_enabled, true), COALESCE(ss.consultation_enabled, false), COALESCE(ss.ai_greeting, ''), COALESCE(ss.ai_tone, 'professional_warm'),
-			       COALESCE(ss.recording_enabled, true), COALESCE(ss.recording_consent_message, '')
+			       COALESCE(ss.recording_enabled, true), COALESCE(ss.recording_consent_message, ''),
+			       COALESCE(ss.booking_mode, 'pending_approval'), COALESCE(ss.scheduling_authority, 'owner_manual'),
+			       COALESCE(ss.customer_sms_enabled,false),
+			       COALESCE(to_char(ss.customer_sms_quiet_start,'HH24:MI'),''),
+			       COALESCE(to_char(ss.customer_sms_quiet_end,'HH24:MI'),''),
+			       COALESCE(ss.customer_sms_policy_version,1)
 		FROM salons s
 		LEFT JOIN salon_settings ss ON ss.salon_id = s.id
 		WHERE s.id = $1
@@ -143,6 +149,12 @@ func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, owner
 		&cfg.AITone,
 		&cfg.RecordingEnabled,
 		&cfg.RecordingConsentMessage,
+		&cfg.BookingMode,
+		&cfg.SchedulingAuthority,
+		&cfg.CustomerSMSEnabled,
+		&cfg.CustomerSMSQuietStart,
+		&cfg.CustomerSMSQuietEnd,
+		&cfg.CustomerSMSPolicyVersion,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -157,18 +169,26 @@ func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, owner
 func (r *Repository) GetAnswerContextFence(ctx context.Context, salonID string) (AnswerContextFence, error) {
 	var fence AnswerContextFence
 	var lastSyncAt sql.NullTime
+	var ownerUserID string
 	err := r.db.QueryRowContext(ctx, `
-		SELECT COALESCE(NULLIF(BTRIM(s.active_pos_provider), ''), 'square'),
+		SELECT s.owner_user_id::text,
+		       COALESCE(settings.scheduling_authority, 'external_provider'),
+		       COALESCE(settings.scheduling_authority_version, 0),
+		       COALESCE(NULLIF(BTRIM(s.active_pos_provider), ''), 'square'),
 		       COALESCE(connection.status, ''),
 		       COALESCE(BTRIM(connection.location_id), ''),
 		       COALESCE(connection.snapshot_generation, 0),
 		       connection.last_sync_at
 		FROM salons s
+		LEFT JOIN salon_settings settings ON settings.salon_id = s.id
 		LEFT JOIN pos_connections connection
 		  ON connection.salon_id = s.id
 		 AND connection.provider = COALESCE(NULLIF(BTRIM(s.active_pos_provider), ''), 'square')
 		WHERE s.id = $1
 	`, strings.TrimSpace(salonID)).Scan(
+		&ownerUserID,
+		&fence.SchedulingAuthority,
+		&fence.SchedulingAuthorityVersion,
 		&fence.ActiveProvider,
 		&fence.ConnectionStatus,
 		&fence.LocationID,
@@ -184,12 +204,63 @@ func (r *Repository) GetAnswerContextFence(ctx context.Context, salonID string) 
 	if lastSyncAt.Valid {
 		fence.LastSyncAtRFC3339 = lastSyncAt.Time.UTC().Format(time.RFC3339Nano)
 	}
-	fence.Ready = strings.TrimSpace(fence.ActiveProvider) != "" &&
-		fence.ConnectionStatus == "active" &&
-		strings.TrimSpace(fence.LocationID) != "" &&
-		fence.SnapshotGeneration > 0 &&
-		lastSyncAt.Valid
+	switch fence.SchedulingAuthority {
+	case booking.SchedulingAuthorityOwnerManual:
+		fence.Ready = true
+	case booking.SchedulingAuthorityManleAICalendar:
+		aggregate, aggregateErr := calendar.NewRepository(r.db).GetAggregate(ctx, strings.TrimSpace(salonID), ownerUserID)
+		if aggregateErr != nil {
+			return AnswerContextFence{}, aggregateErr
+		}
+		applyManleAICalendarCapabilityFence(&fence, aggregate)
+	case booking.SchedulingAuthorityExternalProvider:
+		fence.Ready = strings.TrimSpace(fence.ActiveProvider) != "" &&
+			fence.ConnectionStatus == "active" &&
+			strings.TrimSpace(fence.LocationID) != "" &&
+			fence.SnapshotGeneration > 0 &&
+			lastSyncAt.Valid
+	default:
+		fence.Ready = false
+	}
 	return fence, nil
+}
+
+func applyManleAICalendarCapabilityFence(fence *AnswerContextFence, aggregate *calendar.Aggregate) {
+	if fence == nil || aggregate == nil {
+		return
+	}
+	// EvaluateReadiness is the sole owner of operation capabilities. Do not
+	// approximate it with a weaker EXISTS predicate in conversation.
+	readiness := calendar.EvaluateReadiness(aggregate)
+	fence.SchedulingAuthority = aggregate.SchedulingAuthority
+	fence.SchedulingAuthorityVersion = aggregate.AuthorityVersion
+	fence.CalendarConfigVersion = aggregate.ConfigVersion
+	fence.CalendarActivatedVersion = 0
+	if aggregate.Config != nil && aggregate.Config.ActivatedVersion != nil {
+		fence.CalendarActivatedVersion = *aggregate.Config.ActivatedVersion
+	}
+	fence.Ready = readiness.Capabilities.StaffOnlyAvailability && readiness.Capabilities.StaffOnlyCreate
+}
+
+func (r *Repository) ListManleAICalendarBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error) {
+	rows, err := r.db.QueryContext(ctx, internalCalendarServiceOptionsQuery(), salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanServiceOptions(rows, true)
+}
+
+func internalCalendarServiceOptionsQuery() string {
+	return serviceOptionsQueryWithGuards(`
+		JOIN manleai_calendar_configs calendar
+		  ON calendar.salon_id = svc.salon_id
+		 AND calendar.activated_version = calendar.version
+		JOIN manleai_calendar_service_policies policy
+		  ON policy.salon_id = svc.salon_id
+		 AND policy.service_id = svc.id
+		 AND policy.enabled = true
+		 AND policy.capacity_mode = 'staff_only'`, ``)
 }
 
 func (r *Repository) CreateSession(ctx context.Context, record NewSessionRecord) (*Session, error) {
@@ -239,6 +310,9 @@ func (r *Repository) GetSessionForOwner(ctx context.Context, salonID string, own
 	if err := r.loadSessionDetails(ctx, session); err != nil {
 		return nil, err
 	}
+	if err := r.hydrateSchedulingResultEvidence(ctx, salonID, ownerUserID, []*Session{session}); err != nil {
+		return nil, err
+	}
 	return session, nil
 }
 
@@ -265,6 +339,9 @@ func (r *Repository) GetSessionByTurnEventKey(ctx context.Context, salonID strin
 		return nil, false, err
 	}
 	if err := r.loadSessionDetails(ctx, session); err != nil {
+		return nil, false, err
+	}
+	if err := r.hydrateSchedulingResultEvidence(ctx, salonID, ownerUserID, []*Session{session}); err != nil {
 		return nil, false, err
 	}
 	reply, err := r.turnReplayAIMessage(ctx, salonID, sessionID, eventKey)
@@ -345,7 +422,20 @@ func (r *Repository) ListSessions(ctx context.Context, salonID string, ownerUser
 		}
 		items = append(items, *item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	pointers := make([]*Session, 0, len(items))
+	for index := range items {
+		pointers = append(pointers, &items[index])
+	}
+	if err := r.hydrateSchedulingResultEvidence(ctx, salonID, ownerUserID, pointers); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 func (r *Repository) ListWebhookEvents(ctx context.Context, salonID string, ownerUserID string, sessionID string, limit int, offset int) ([]WebhookEventLog, error) {
@@ -455,13 +545,11 @@ func (r *Repository) RedactSession(ctx context.Context, salonID string, ownerUse
 	if err != nil {
 		return nil, err
 	}
-	if session.LifecycleStatus == LifecycleRedacted {
-		if err := tx.Commit(); err != nil {
-			return nil, err
-		}
-		return r.GetSessionForOwner(ctx, salonID, ownerUserID, sessionID)
-	}
-	if session.Status == StatusActive {
+	// A previously redacted row may predate the complete JSONB redaction
+	// contract. Re-running the same repository-owned redaction is the repair
+	// path for those historical rows; only a non-redacted active session is
+	// protected by the lifecycle conflict gate.
+	if session.LifecycleStatus != LifecycleRedacted && session.Status == StatusActive {
 		return nil, ErrLifecycle
 	}
 	if err := redactSessionInTx(ctx, tx, sessionID, salonID); err != nil {
@@ -530,6 +618,15 @@ func (r *Repository) ListGuidanceServices(ctx context.Context, salonID string) (
 	return scanServiceOptions(rows, false)
 }
 
+func (r *Repository) ListCanonicalGuidanceServices(ctx context.Context, salonID string) ([]ServiceOption, error) {
+	rows, err := r.db.QueryContext(ctx, serviceOptionsQueryWithGuards("", ""), salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanServiceOptions(rows, false)
+}
+
 func (r *Repository) ListBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error) {
 	rows, err := r.db.QueryContext(ctx, serviceOptionsQuery(true), salonID)
 	if err != nil {
@@ -551,6 +648,22 @@ func serviceOptionsQuery(requireCurrentSnapshot bool) string {
 		 AND connection.snapshot_generation > 0
 		 AND connection.last_sync_at IS NOT NULL`
 	}
+	providerJoins := connectionJoin + `
+		JOIN pos_entity_links link
+		  ON link.salon_id = svc.salon_id
+		 AND link.entity_type = 'service'
+		 AND link.entity_id = svc.id
+		 AND link.provider = salon.active_pos_provider
+		 AND link.sync_status = 'synced'
+		 AND NULLIF(BTRIM(link.provider_entity_id), '') IS NOT NULL`
+	providerPredicates := `
+		  AND svc.pos_provider = salon.active_pos_provider
+		  AND svc.sync_status = 'synced'
+		  AND COALESCE(link.provider_version, svc.pos_service_version, 0) > 0`
+	return serviceOptionsQueryWithGuards(providerJoins, providerPredicates)
+}
+
+func serviceOptionsQueryWithGuards(joins string, predicates string) string {
 	return `
 		SELECT svc.id::text, svc.name, COALESCE(svc.description, ''), COALESCE(svc.ai_description, ''),
 		       svc.duration_minutes, COALESCE(svc.price_from, 0), COALESCE(svc.price_display, ''),
@@ -561,30 +674,63 @@ func serviceOptionsQuery(requireCurrentSnapshot bool) string {
 		       COALESCE(profile.maintenance_note, ''), COALESCE(profile.owner_approved_summary, ''), COALESCE(profile.revision, 0)
 		FROM services svc
 		JOIN salons salon ON salon.id = svc.salon_id
-		` + connectionJoin + `
-		JOIN pos_entity_links link
-		  ON link.salon_id = svc.salon_id
-		 AND link.entity_type = 'service'
-		 AND link.entity_id = svc.id
-		 AND link.provider = salon.active_pos_provider
-		 AND link.sync_status = 'synced'
-		 AND link.provider_entity_id IS NOT NULL
-		 AND link.provider_entity_id <> ''
+		` + joins + `
 		LEFT JOIN service_categories cat ON cat.id = svc.service_category_id
 		                                AND cat.salon_id = svc.salon_id
 		                                AND cat.status = 'active'
 		LEFT JOIN service_consultation_profiles profile ON profile.salon_id = svc.salon_id
 		                                                  AND profile.service_id = svc.id
 		WHERE svc.salon_id = $1
-		  AND svc.pos_provider = salon.active_pos_provider
 		  AND svc.active = true
 		  AND svc.ai_bookable = true
 		  AND svc.archived_at IS NULL
-		  AND svc.sync_status = 'synced'
 		  AND svc.duration_minutes > 0
-		  AND COALESCE(link.provider_version, svc.pos_service_version, 0) > 0
+		` + predicates + `
 		ORDER BY COALESCE(cat.sort_order, 9999), COALESCE(cat.name, ''), svc.name ASC
 	`
+}
+
+func (r *Repository) ListManleAICalendarBookableStaff(ctx context.Context, salonID string) ([]StaffOption, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT DISTINCT st.id::text, st.name, st.ai_bookable
+		FROM staff st
+		JOIN manleai_calendar_configs calendar
+		  ON calendar.salon_id = st.salon_id
+		 AND calendar.activated_version = calendar.version
+		JOIN manleai_calendar_service_staff service_staff
+		  ON service_staff.salon_id = st.salon_id
+		 AND service_staff.staff_id = st.id
+		JOIN manleai_calendar_service_policies policy
+		  ON policy.salon_id = service_staff.salon_id
+		 AND policy.service_id = service_staff.service_id
+		 AND policy.enabled = true
+		 AND policy.capacity_mode = 'staff_only'
+		WHERE st.salon_id = $1
+		  AND st.active = true
+		  AND st.ai_bookable = true
+		  AND st.archived_at IS NULL
+		  AND EXISTS (
+		      SELECT 1
+		      FROM manleai_calendar_staff_weekly_periods weekly
+		      WHERE weekly.salon_id = st.salon_id
+		        AND weekly.staff_id = st.id
+		  )
+		ORDER BY st.name ASC
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]StaffOption, 0)
+	for rows.Next() {
+		var item StaffOption
+		if err := rows.Scan(&item.ID, &item.Name, &item.AIBookable); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func scanServiceOptions(rows *sql.Rows, bookingReady bool) ([]ServiceOption, error) {
@@ -691,8 +837,7 @@ func (r *Repository) ListActiveStaff(ctx context.Context, salonID string) ([]Sta
 		 AND link.entity_id = st.id
 		 AND link.provider = salon.active_pos_provider
 		 AND link.sync_status = 'synced'
-		 AND link.provider_entity_id IS NOT NULL
-		 AND link.provider_entity_id <> ''
+		 AND NULLIF(BTRIM(link.provider_entity_id), '') IS NOT NULL
 		WHERE st.salon_id = $1
 		  AND st.pos_provider = salon.active_pos_provider
 		  AND st.active = true
@@ -705,6 +850,30 @@ func (r *Repository) ListActiveStaff(ctx context.Context, salonID string) ([]Sta
 	}
 	defer rows.Close()
 
+	items := make([]StaffOption, 0)
+	for rows.Next() {
+		var item StaffOption
+		if err := rows.Scan(&item.ID, &item.Name, &item.AIBookable); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *Repository) ListCanonicalActiveStaff(ctx context.Context, salonID string) ([]StaffOption, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT st.id::text, st.name, st.ai_bookable
+		FROM staff st
+		WHERE st.salon_id = $1
+		  AND st.active = true
+		  AND st.archived_at IS NULL
+		ORDER BY st.ai_bookable DESC, st.name ASC
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	items := make([]StaffOption, 0)
 	for rows.Next() {
 		var item StaffOption
@@ -794,8 +963,7 @@ func (r *Repository) ListActiveServiceAliases(ctx context.Context, salonID strin
 		 AND link.entity_id = svc.id
 		 AND link.provider = salon.active_pos_provider
 		 AND link.sync_status = 'synced'
-		 AND link.provider_entity_id IS NOT NULL
-		 AND link.provider_entity_id <> ''
+		 AND NULLIF(BTRIM(link.provider_entity_id), '') IS NOT NULL
 		WHERE sa.salon_id = $1
 		  AND sa.status = 'active'
 		  AND svc.salon_id = sa.salon_id
@@ -814,6 +982,37 @@ func (r *Repository) ListActiveServiceAliases(ctx context.Context, salonID strin
 	}
 	defer rows.Close()
 
+	items := make([]ServiceAlias, 0)
+	for rows.Next() {
+		var item ServiceAlias
+		if err := rows.Scan(&item.ID, &item.ServiceID, &item.ServiceName, &item.Alias, &item.NormalizedAlias, &item.Source, &item.Confidence); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *Repository) ListCanonicalServiceAliases(ctx context.Context, salonID string) ([]ServiceAlias, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT sa.id::text, sa.service_id::text, svc.name, sa.alias, sa.normalized_alias,
+		       sa.source, sa.confidence
+		FROM service_aliases sa
+		JOIN services svc ON svc.id = sa.service_id
+		WHERE sa.salon_id = $1
+		  AND sa.status = 'active'
+		  AND svc.salon_id = sa.salon_id
+		  AND svc.active = true
+		  AND svc.ai_bookable = true
+		  AND svc.archived_at IS NULL
+		  AND svc.duration_minutes > 0
+		ORDER BY sa.updated_at DESC
+		LIMIT 200
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	items := make([]ServiceAlias, 0)
 	for rows.Next() {
 		var item ServiceAlias
@@ -875,6 +1074,44 @@ func (r *Repository) ListActiveServiceCategoryAliases(ctx context.Context, salon
 	return items, rows.Err()
 }
 
+func (r *Repository) ListCanonicalServiceCategoryAliases(ctx context.Context, salonID string) ([]ServiceCategoryAlias, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT alias.id::text, alias.category_id::text, cat.name, alias.alias,
+		       alias.normalized_alias, alias.source, alias.confidence
+		FROM service_category_aliases alias
+		JOIN service_categories cat ON cat.id = alias.category_id
+		                           AND cat.salon_id = alias.salon_id
+		                           AND cat.status = 'active'
+		WHERE alias.salon_id = $1
+		  AND alias.status = 'active'
+		  AND EXISTS (
+			SELECT 1
+			FROM services svc
+			WHERE svc.salon_id = alias.salon_id
+			  AND svc.service_category_id = alias.category_id
+			  AND svc.active = true
+			  AND svc.ai_bookable = true
+			  AND svc.archived_at IS NULL
+			  AND svc.duration_minutes > 0
+		  )
+		ORDER BY alias.updated_at DESC
+		LIMIT 200
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]ServiceCategoryAlias, 0)
+	for rows.Next() {
+		var item ServiceCategoryAlias
+		if err := rows.Scan(&item.ID, &item.CategoryID, &item.CategoryName, &item.Alias, &item.NormalizedAlias, &item.Source, &item.Confidence); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (r *Repository) ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id::text, title, category, body
@@ -918,6 +1155,35 @@ func (r *Repository) ListBusinessHourPeriods(ctx context.Context, salonID string
 		  AND bhp.provider = salon.active_pos_provider
 		  AND bhp.provider_location_id = connection.location_id
 		ORDER BY bhp.day_of_week ASC, bhp.start_local_time ASC, bhp.provider_period_index ASC
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]BusinessHourPeriod, 0)
+	for rows.Next() {
+		var item BusinessHourPeriod
+		if err := rows.Scan(&item.ID, &item.DayOfWeek, &item.StartLocalTime, &item.EndLocalTime, &item.Source, &item.Provider); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *Repository) ListManleAICalendarBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT bhp.id::text, bhp.day_of_week, bhp.start_local_time::text,
+		       CASE WHEN bhp.end_at_midnight THEN '24:00:00' ELSE bhp.end_local_time::text END,
+		       bhp.source, ''
+		FROM salon_business_hour_periods bhp
+		JOIN manleai_calendar_configs calendar
+		  ON calendar.salon_id = bhp.salon_id
+		 AND calendar.activated_version = calendar.version
+		WHERE bhp.salon_id = $1
+		  AND bhp.source = 'local_override'
+		ORDER BY bhp.day_of_week ASC, bhp.start_local_time ASC, bhp.id ASC
 	`, salonID)
 	if err != nil {
 		return nil, err
@@ -1159,13 +1425,14 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (session *
 		    dialog_state = $20::jsonb,
 		    booking_attempt_id = NULLIF($21, '')::uuid,
 		    appointment_id = NULLIF($22, '')::uuid,
-		    summary = NULLIF($23, ''),
-		    ended_at = CASE WHEN $24 THEN now() ELSE ended_at END,
+		    scheduling_request_id = NULLIF($23, '')::uuid,
+		    summary = NULLIF($24, ''),
+		    ended_at = CASE WHEN $25 THEN now() ELSE ended_at END,
 		    updated_at = now()
-		WHERE id = $25
-		  AND salon_id = $26
-		  AND state_revision = $27
-		`, record.Update.Status, record.Update.Intent, record.Update.Outcome, bookingAction, record.Update.TargetAppointmentID, string(rescheduleCandidatesJSON), record.Update.CustomerName, record.Update.CustomerPhone, record.Update.CustomerEmail, record.Update.ServiceID, record.Update.StaffID, staffSelectionMode, record.Update.RequestedDate, record.Update.RequestedStartTime, record.Update.AvailabilityQuoteID, record.Update.SlotFingerprint, string(offeredSlotsJSON), string(bookingSegmentsJSON), partyPlanJSON, string(dialogStateJSON), record.Update.BookingAttemptID, record.Update.AppointmentID, record.Update.Summary, record.Update.EndSession, record.Session.ID, record.SalonID, record.ExpectedStateRevision)
+		WHERE id = $26
+		  AND salon_id = $27
+		  AND state_revision = $28
+		`, record.Update.Status, record.Update.Intent, record.Update.Outcome, bookingAction, record.Update.TargetAppointmentID, string(rescheduleCandidatesJSON), record.Update.CustomerName, record.Update.CustomerPhone, record.Update.CustomerEmail, record.Update.ServiceID, record.Update.StaffID, staffSelectionMode, record.Update.RequestedDate, record.Update.RequestedStartTime, record.Update.AvailabilityQuoteID, record.Update.SlotFingerprint, string(offeredSlotsJSON), string(bookingSegmentsJSON), partyPlanJSON, string(dialogStateJSON), record.Update.BookingAttemptID, record.Update.AppointmentID, record.Update.SchedulingRequestID, record.Update.Summary, record.Update.EndSession, record.Session.ID, record.SalonID, record.ExpectedStateRevision)
 	if err != nil {
 		return nil, err
 	}
@@ -1206,7 +1473,7 @@ func (r *Repository) loadSessionDetails(ctx context.Context, session *Session) e
 		return err
 	}
 	session.Handoff = handoff
-	partyRequest, err := r.latestPartyRequest(ctx, session.ID)
+	partyRequest, err := r.latestPartyRequest(ctx, session.SalonID, session.ID)
 	if err != nil {
 		return err
 	}
@@ -1277,7 +1544,7 @@ func (r *Repository) latestHandoff(ctx context.Context, sessionID string) (*Hand
 	return &item, nil
 }
 
-func (r *Repository) latestPartyRequest(ctx context.Context, sessionID string) (*PartyBookingRequest, error) {
+func (r *Repository) latestPartyRequest(ctx context.Context, salonID string, sessionID string) (*PartyBookingRequest, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id::text, salon_id::text, call_session_id::text, event_key, status,
 		       COALESCE(party_size, 0), COALESCE(representative_name, ''), COALESCE(representative_phone, ''),
@@ -1285,10 +1552,11 @@ func (r *Repository) latestPartyRequest(ctx context.Context, sessionID string) (
 		       guest_service_requests, COALESCE(flexibility_notes, ''), summary,
 		       created_at, updated_at, resolved_at, COALESCE(resolved_by::text, '')
 		FROM party_booking_requests
-		WHERE call_session_id = $1
+			WHERE salon_id = $1
+			  AND call_session_id = $2
 		ORDER BY created_at DESC
 		LIMIT 1
-	`, sessionID)
+		`, salonID, sessionID)
 	item, err := scanPartyBookingRequest(row)
 	if errors.Is(err, ErrNotFound) {
 		return nil, nil
@@ -1394,6 +1662,10 @@ func redactSessionInTx(ctx context.Context, execer sqlExecer, sessionID string, 
 		    availability_quote_id = NULL,
 		    availability_slot_fingerprint = NULL,
 		    offered_slots = '[]'::jsonb,
+		    booking_segments = '[]'::jsonb,
+		    party_plan = '{}'::jsonb,
+		    reschedule_candidates = '[]'::jsonb,
+		    dialog_state = '{}'::jsonb,
 		    updated_at = now()
 		WHERE id = $3
 		  AND salon_id = $4
@@ -1440,7 +1712,10 @@ func redactSessionInTx(ctx context.Context, execer sqlExecer, sessionID string, 
 		return err
 	}
 	if _, err := execer.ExecContext(ctx, `
-		DELETE FROM voice_audio_outputs
+		UPDATE voice_audio_outputs
+		SET audio_data = ''::bytea,
+		    redacted_at = COALESCE(redacted_at, now()),
+		    redaction_version = COALESCE(redaction_version, 1)
 		WHERE call_session_id = $1
 	`, sessionID); err != nil {
 		return err
@@ -1606,7 +1881,7 @@ func sessionSelect() string {
 		       COALESCE(cs.party_plan, '{}'::jsonb),
 		       COALESCE(cs.dialog_state, '{"version":2,"phase":"open","review_required":true,"review_accepted":false,"no_progress_count":0,"draft_revision":1,"reviewed_revision":0,"authorized_revision":0}'::jsonb),
 		       COALESCE(cs.booking_attempt_id::text, ''),
-		       COALESCE(cs.appointment_id::text, ''), COALESCE(cs.summary, ''),
+		       COALESCE(cs.appointment_id::text, ''), COALESCE(cs.scheduling_request_id::text, ''), COALESCE(cs.summary, ''),
 		       cs.lifecycle_status, cs.archived_at, cs.redacted_at, cs.retention_expires_at,
 		       cs.started_at, cs.ended_at, cs.created_at, cs.updated_at
 		FROM call_sessions cs
@@ -1664,6 +1939,7 @@ func scanSession(scanner sessionScanner) (*Session, error) {
 		&dialogState,
 		&item.BookingAttemptID,
 		&item.AppointmentID,
+		&item.SchedulingRequestID,
 		&item.Summary,
 		&item.LifecycleStatus,
 		&archivedAt,

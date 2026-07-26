@@ -28,6 +28,8 @@ func (SquareCalendarRepairState) Fields() []ent.Field {
 		field.Int("repair_attempts").Default(0).NonNegative(),
 		field.Time("last_repaired_at").Optional().Nillable(),
 		field.String("last_error").Optional(),
+		field.String("last_error_class").Optional(),
+		field.String("last_error_code").Optional(),
 		field.Time("created_at").Default(time.Now),
 		field.Time("updated_at").Default(time.Now).UpdateDefault(time.Now),
 	}

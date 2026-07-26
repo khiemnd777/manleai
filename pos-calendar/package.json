@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev -p 3091",
     "build": "next build",
+    "test:evidence": "node ../deploy/run-ts-evidence-tests.mjs lib/scheduling-evidence.test.ts lib/api/browser-session.test.ts lib/security/content-security-policy.test.ts lib/security/scheduler-style.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

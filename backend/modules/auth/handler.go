@@ -2,6 +2,7 @@ package auth
 
 import (
 	"errors"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/manleai/ai-receptionist/internal/middleware"
@@ -11,6 +12,8 @@ import (
 type Handler struct {
 	service *Service
 }
+
+const refreshCookieName = "manleai_refresh"
 
 func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
@@ -28,12 +31,10 @@ func (h *Handler) Login(c *fiber.Ctx) error {
 	if errors.Is(err, ErrInvalidCredentials) {
 		return respond.Error(c, fiber.StatusUnauthorized, "INVALID_CREDENTIALS", "Email or password is incorrect.")
 	}
-	if errors.Is(err, ErrDisabledUser) {
-		return respond.Error(c, fiber.StatusForbidden, "USER_DISABLED", "This user is disabled.")
-	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "LOGIN_FAILED", "Could not complete login.")
 	}
+	h.setRefreshCookie(c, res.RefreshToken)
 	return respond.JSON(c, fiber.StatusOK, res)
 }
 
@@ -60,28 +61,56 @@ func (h *Handler) BootstrapOwner(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "BOOTSTRAP_OWNER_FAILED", "Could not create owner account.")
 	}
+	h.setRefreshCookie(c, res.RefreshToken)
 	return respond.JSON(c, fiber.StatusCreated, res)
 }
 
 func (h *Handler) Refresh(c *fiber.Ctx) error {
-	var req RefreshRequest
-	if err := c.BodyParser(&req); err != nil {
-		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
-	}
-	res, err := h.service.Refresh(c.UserContext(), req.RefreshToken)
+	res, err := h.service.Refresh(c.UserContext(), c.Cookies(refreshCookieName))
 	if err != nil {
 		return respond.Error(c, fiber.StatusUnauthorized, "INVALID_REFRESH_TOKEN", "Refresh token is invalid or expired.")
 	}
+	h.setRefreshCookie(c, res.RefreshToken)
 	return respond.JSON(c, fiber.StatusOK, res)
 }
 
 func (h *Handler) Logout(c *fiber.Ctx) error {
-	var req LogoutRequest
-	_ = c.BodyParser(&req)
-	if err := h.service.Logout(c.UserContext(), req.RefreshToken); err != nil {
+	refreshToken := c.Cookies(refreshCookieName)
+	h.clearRefreshCookie(c)
+	if err := h.service.Logout(c.UserContext(), refreshToken); err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "LOGOUT_FAILED", "Could not complete logout.")
 	}
 	return respond.JSON(c, fiber.StatusOK, fiber.Map{"ok": true})
+}
+
+func (h *Handler) setRefreshCookie(c *fiber.Ctx, refreshToken string) {
+	if h == nil || h.service == nil || refreshToken == "" {
+		return
+	}
+	c.Cookie(&fiber.Cookie{
+		Name:     refreshCookieName,
+		Value:    refreshToken,
+		Path:     "/api/auth",
+		MaxAge:   int(h.service.cfg.RefreshTokenTTL / time.Second),
+		Expires:  time.Now().UTC().Add(h.service.cfg.RefreshTokenTTL),
+		HTTPOnly: true,
+		Secure:   h.service.cfg.AppEnv == "production",
+		SameSite: fiber.CookieSameSiteStrictMode,
+	})
+}
+
+func (h *Handler) clearRefreshCookie(c *fiber.Ctx) {
+	secure := h != nil && h.service != nil && h.service.cfg.AppEnv == "production"
+	c.Cookie(&fiber.Cookie{
+		Name:     refreshCookieName,
+		Value:    "",
+		Path:     "/api/auth",
+		MaxAge:   -1,
+		Expires:  time.Unix(1, 0).UTC(),
+		HTTPOnly: true,
+		Secure:   secure,
+		SameSite: fiber.CookieSameSiteStrictMode,
+	})
 }
 
 func (h *Handler) Me(c *fiber.Ctx) error {

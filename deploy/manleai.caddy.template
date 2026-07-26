@@ -7,11 +7,15 @@
 	}
 
 	handle /api/* {
-		reverse_proxy 127.0.0.1:{{API_PORT}}
+		reverse_proxy 127.0.0.1:{{API_PORT}} {
+			header_up X-ManleAI-Client-IP {remote_host}
+		}
 	}
 
 	handle /healthz {
-		reverse_proxy 127.0.0.1:{{API_PORT}}
+		reverse_proxy 127.0.0.1:{{API_PORT}} {
+			header_up X-ManleAI-Client-IP {remote_host}
+		}
 	}
 
 	handle {

@@ -17,10 +17,26 @@ import (
 )
 
 type Handler struct {
-	service *Service
+	service HandlerService
 }
 
-func NewHandler(service *Service) *Handler {
+type HandlerService interface {
+	AvailableSlots(ctx context.Context, salonID string, ownerUserID string, req AvailabilityRequest) (*AvailabilityResult, error)
+	Create(ctx context.Context, salonID string, ownerUserID string, req CreateBookingRequest) (*BookingAttempt, error)
+	Reschedule(ctx context.Context, salonID string, ownerUserID string, appointmentID string, req RescheduleRequest) (*Appointment, *BookingAttempt, error)
+	Cancel(ctx context.Context, salonID string, ownerUserID string, appointmentID string, req CancelRequest) (*Appointment, *BookingAttempt, error)
+	Calendar(ctx context.Context, salonID string, ownerUserID string, req CalendarRangeRequest) (*CalendarRangeResponse, error)
+	EnsureCalendarEventAccess(ctx context.Context, salonID string, ownerUserID string) error
+	CalendarEvents(ctx context.Context, salonID string, ownerUserID string, cursor CalendarEventCursor, limit int) ([]CalendarEvent, error)
+	SyncCalendar(ctx context.Context, salonID string, ownerUserID string, req CalendarSyncRequest) (*CalendarSyncResponse, error)
+	Appointments(ctx context.Context, salonID string, ownerUserID string, limit int, offset int) (*ListAppointmentsResponse, error)
+	Attempts(ctx context.Context, salonID string, ownerUserID string, status string, limit int, offset int) (*ListBookingAttemptsResponse, error)
+	ReconciliationTasks(ctx context.Context, salonID string, ownerUserID string, status string, limit int, offset int) (*ListReconciliationTasksResponse, error)
+	ReconciliationCandidates(ctx context.Context, salonID string, ownerUserID string, attemptID string) (*ListReconciliationCandidatesResponse, error)
+	ResolveReconciliation(ctx context.Context, salonID string, ownerUserID string, attemptID string, req ResolveReconciliationRequest) (*ReconciliationTask, error)
+}
+
+func NewHandler(service HandlerService) *Handler {
 	return &Handler{service: service}
 }
 
@@ -32,11 +48,11 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 	if strings.TrimSpace(req.OperationKey) == "" {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "operation_key is required for a retry-safe booking request.")
 	}
-	if strings.TrimSpace(req.AvailabilityQuoteID) == "" || strings.TrimSpace(req.SlotFingerprint) == "" {
-		return respond.Error(c, fiber.StatusConflict, "AVAILABILITY_QUOTE_REQUIRED", "Check current provider availability and choose a returned slot before booking.")
-	}
 	req.Source = SourceOwnerDashboard
 	attempt, err := h.service.Create(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
+	if errors.Is(err, ErrSchedulingAuthorityNotReady) {
+		return schedulingAuthorityNotReadyResponse(c)
+	}
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Booking request is missing required customer, service, staff, or start time data.")
 	}
@@ -71,6 +87,9 @@ func (h *Handler) Availability(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Request body is invalid.")
 	}
 	result, err := h.service.AvailableSlots(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
+	if errors.Is(err, ErrSchedulingAuthorityNotReady) {
+		return schedulingAuthorityNotReadyResponse(c)
+	}
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Availability request is missing required service, date, staff, or salon schedule data.")
 	}
@@ -181,11 +200,11 @@ func (h *Handler) Reschedule(c *fiber.Ctx) error {
 	if strings.TrimSpace(req.OperationKey) == "" {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "operation_key is required for a retry-safe reschedule request.")
 	}
-	if strings.TrimSpace(req.AvailabilityQuoteID) == "" || strings.TrimSpace(req.SlotFingerprint) == "" {
-		return respond.Error(c, fiber.StatusConflict, "AVAILABILITY_QUOTE_REQUIRED", "Check current provider availability and choose a returned slot before rescheduling.")
-	}
 	req.Source = SourceOwnerDashboard
 	appointment, fallback, err := h.service.Reschedule(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("appointment_id"), req)
+	if errors.Is(err, ErrSchedulingAuthorityNotReady) {
+		return schedulingAuthorityNotReadyResponse(c)
+	}
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Reschedule request is missing required appointment, POS version, staff, service, or start time data.")
 	}
@@ -225,6 +244,9 @@ func (h *Handler) Cancel(c *fiber.Ctx) error {
 	}
 	req.Source = SourceOwnerDashboard
 	appointment, fallback, err := h.service.Cancel(c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("appointment_id"), req)
+	if errors.Is(err, ErrSchedulingAuthorityNotReady) {
+		return schedulingAuthorityNotReadyResponse(c)
+	}
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Cancel request is missing required appointment or POS version data.")
 	}
@@ -312,7 +334,11 @@ func (h *Handler) ResolveReconciliation(c *fiber.Ctx) error {
 	return respond.JSON(c, fiber.StatusOK, task)
 }
 
-func streamCalendarEvents(w *bufio.Writer, service *Service, salonID string, ownerUserID string, cursor CalendarEventCursor) {
+func schedulingAuthorityNotReadyResponse(c *fiber.Ctx) error {
+	return respond.Error(c, fiber.StatusConflict, "SCHEDULING_AUTHORITY_NOT_READY", "The salon's scheduling authority is not ready for booking actions.")
+}
+
+func streamCalendarEvents(w *bufio.Writer, service HandlerService, salonID string, ownerUserID string, cursor CalendarEventCursor) {
 	pollTicker := time.NewTicker(2 * time.Second)
 	heartbeatTicker := time.NewTicker(15 * time.Second)
 	defer pollTicker.Stop()

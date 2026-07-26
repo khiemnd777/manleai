@@ -34,7 +34,7 @@ func extractName(message string) string {
 }
 
 func (s *Service) handlePendingCustomerNameConfirmation(ctx context.Context, salonID string, ownerUserID string, session Session, message string, eventKey string, turnUnderstanding TurnUnderstanding, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (bool, *Session, error) {
-	if missingBookingField(session) != "customer_name" {
+	if !sessionExpectsCustomerName(session) {
 		return false, nil, nil
 	}
 	pendingName := pendingCustomerName(session)
@@ -90,6 +90,14 @@ func (s *Service) handlePendingCustomerNameConfirmation(ctx context.Context, sal
 }
 
 func (s *Service) continueAfterCustomerName(ctx context.Context, ownerUserID string, turn TurnRecord, next Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
+	if sessionHasManualAppointmentTarget(next) {
+		switch bookingActionForSession(next) {
+		case BookingActionCancel:
+			return s.handleCancelMessage(ctx, ownerUserID, turn.Session, next, turn.CustomerMessage, turn.EventKey, services, nil, nil, staff, cfg, knowledge)
+		case BookingActionReschedule:
+			return s.handleRescheduleMessage(ctx, ownerUserID, turn.Session, next, turn.CustomerMessage, turn.EventKey, services, nil, nil, staff, cfg, knowledge)
+		}
+	}
 	if missing := missingBookingField(next); missing != "" {
 		turn.AIMessage = promptForMissingField(missing)
 		s.applyReplyGenerator(ctx, &turn, next, services, cfg, missing, missing, knowledge)
@@ -100,7 +108,7 @@ func (s *Service) continueAfterCustomerName(ctx context.Context, ownerUserID str
 }
 
 func voiceCustomerNamePendingConfirmationCandidate(message string, session Session) string {
-	if session.Channel != ChannelPhone || missingBookingField(session) != "customer_name" {
+	if session.Channel != ChannelPhone || !sessionExpectsCustomerName(session) {
 		return ""
 	}
 	if spelled := spelledCustomerName(message); spelled != "" {
@@ -629,7 +637,7 @@ func metadataInt(metadata map[string]any, key string) (int, bool) {
 }
 
 func customerNameSlotRepairReply(message string, session Session, services []ServiceOption, aliases []ServiceAlias, categoryAliases []ServiceCategoryAlias, cfg *RuntimeConfig) (string, bool) {
-	if missingBookingField(session) != "customer_name" {
+	if !sessionExpectsCustomerName(session) {
 		return "", false
 	}
 	if isGoodbyeUtterance(message) {
@@ -725,7 +733,7 @@ func isCustomerNameNonAnswer(message string, services []ServiceOption, aliases [
 }
 
 func voiceCustomerNameNeedsRepair(message string, session Session) bool {
-	if session.Channel != ChannelPhone || missingBookingField(session) != "customer_name" {
+	if session.Channel != ChannelPhone || !sessionExpectsCustomerName(session) {
 		return false
 	}
 	if spelledCustomerName(message) != "" {
@@ -900,12 +908,19 @@ func bareCustomerNameForSession(message string, session Session) string {
 	if session.Intent != IntentBooking || strings.TrimSpace(session.CustomerName) != "" {
 		return ""
 	}
-	if missingBookingField(session) != "customer_name" {
+	if !sessionExpectsCustomerName(session) {
 		if session.ServiceID != "" || session.StaffID != "" || session.RequestedDate != "" || session.RequestedStartTime != nil || session.CustomerPhone != "" {
 			return ""
 		}
 	}
 	return cleanBareCustomerName(message)
+}
+
+func sessionExpectsCustomerName(session Session) bool {
+	if expected := manualAppointmentTargetExpectedInput(session); expected != "" {
+		return expected == ExpectedInputCustomerName
+	}
+	return missingBookingField(session) == "customer_name"
 }
 
 func cleanBareCustomerName(raw string) string {

@@ -6,8 +6,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -16,9 +18,11 @@ import (
 
 	"github.com/manleai/ai-receptionist/modules/booking"
 	"github.com/manleai/ai-receptionist/modules/pos"
+	"github.com/manleai/ai-receptionist/modules/scheduling"
 )
 
 const squareOAuthStateTTL = 10 * time.Minute
+const squareSchedulingReadinessEvidenceVersion = 1
 
 var (
 	ErrValidation                = errors.New("square request validation failed")
@@ -27,15 +31,18 @@ var (
 )
 
 type Service struct {
-	repo            *pos.Repository
-	adapter         *SquareAdapter
-	stateSecret     string
-	bookingService  bookingOperationService
-	webhookRepo     SquareWebhookStore
-	readinessLoader func(context.Context, string, string) (*ReadinessStatus, error)
+	repo                  *pos.Repository
+	adapter               *SquareAdapter
+	stateSecret           string
+	bookingService        bookingOperationService
+	webhookRepo           SquareWebhookStore
+	webhookOperationsRepo SquareWebhookOperationsStore
+	readinessLoader       func(context.Context, string, string) (*ReadinessStatus, error)
 }
 
 type bookingOperationService interface {
+	CurrentSchedulingAuthority(ctx context.Context, salonID string, ownerUserID string) (string, error)
+	ResolveCreateSchedulingAuthority(ctx context.Context, salonID string, ownerUserID string, operationKey string, retryOfAttemptID string) (string, error)
 	Create(ctx context.Context, salonID string, ownerUserID string, req booking.CreateBookingRequest) (*booking.BookingAttempt, error)
 	ReplayCreate(ctx context.Context, salonID string, ownerUserID string, req booking.CreateBookingRequest) (*booking.BookingAttempt, bool, error)
 	Cancel(ctx context.Context, salonID string, ownerUserID string, appointmentID string, req booking.CancelRequest) (*booking.Appointment, *booking.BookingAttempt, error)
@@ -43,12 +50,15 @@ type bookingOperationService interface {
 	LatestTestBooking(ctx context.Context, salonID string, ownerUserID string) (*booking.TestBookingRecord, error)
 }
 
-func NewService(repo *pos.Repository, adapter *SquareAdapter, stateSecret string, bookingService *booking.Service) *Service {
+func NewService(repo *pos.Repository, adapter *SquareAdapter, stateSecret string, bookingService bookingOperationService) *Service {
 	return &Service{repo: repo, adapter: adapter, stateSecret: stateSecret, bookingService: bookingService}
 }
 
 func (s *Service) SetWebhookRepository(repo SquareWebhookStore) {
 	s.webhookRepo = repo
+	if operationsRepo, ok := repo.(SquareWebhookOperationsStore); ok {
+		s.webhookOperationsRepo = operationsRepo
+	}
 }
 
 type ConnectURLResponse struct {
@@ -64,6 +74,7 @@ type StatusResponse struct {
 
 type ReadinessStatus struct {
 	AIEnabled                           bool                       `json:"ai_enabled"`
+	SchedulingAuthority                 string                     `json:"scheduling_authority"`
 	CanTestBooking                      bool                       `json:"can_test_booking"`
 	CanCancelTestBooking                bool                       `json:"can_cancel_test_booking"`
 	CanEnableAIBooking                  bool                       `json:"can_enable_ai_booking"`
@@ -80,6 +91,7 @@ type ReadinessStatus struct {
 	BusinessHourCount                   int                        `json:"business_hour_period_count"`
 	LatestTestBooking                   *booking.TestBookingRecord `json:"latest_test_booking,omitempty"`
 	Checks                              []ReadinessCheck           `json:"checks"`
+	providerCanTestBooking              bool
 }
 
 type ReadinessCheck struct {
@@ -239,6 +251,10 @@ func (s *Service) Sync(ctx context.Context, salonID string, ownerUserID string) 
 }
 
 func (s *Service) Readiness(ctx context.Context, salonID string, ownerUserID string) (*ReadinessStatus, error) {
+	schedulingAuthority, err := s.currentSchedulingAuthority(ctx, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
 	aiEnabled, err := s.repo.GetSalonAIEnabled(ctx, salonID, ownerUserID)
 	if err != nil {
 		return nil, err
@@ -282,7 +298,409 @@ func (s *Service) Readiness(ctx context.Context, salonID string, ownerUserID str
 	} else if err != nil {
 		return nil, err
 	}
-	return buildReadiness(aiEnabled, connection, services, staff, periods, latest, bookingWriteError, appointmentChangeError), nil
+	return buildReadiness(aiEnabled, schedulingAuthority, connection, services, staff, periods, latest, bookingWriteError, appointmentChangeError), nil
+}
+
+// SchedulingTargetReadiness evaluates the existing Square connection,
+// location, snapshot, and booking-write gates without requiring the salon's
+// current scheduling authority to already be external_provider.
+func (s *Service) SchedulingTargetReadiness(ctx context.Context, salonID string, ownerUserID string) (scheduling.TargetReadiness, error) {
+	var result scheduling.TargetReadiness
+	err := s.repo.WithSchedulingFenceTx(ctx, salonID, func(tx *sql.Tx) error {
+		var err error
+		result, err = s.SchedulingTargetReadinessTx(ctx, tx, salonID, ownerUserID)
+		return err
+	})
+	return result, err
+}
+
+// SchedulingTargetReadinessTx recomputes the provider-owned target proof in
+// the caller's transaction. Authority-switch commit calls this only after it
+// owns the shared scheduling fence, so the proof and authority write are one
+// atomic decision.
+func (s *Service) SchedulingTargetReadinessTx(ctx context.Context, tx *sql.Tx, salonID string, ownerUserID string) (scheduling.TargetReadiness, error) {
+	evidence, err := loadSquareSchedulingTargetEvidenceTx(ctx, tx, salonID, ownerUserID)
+	if err != nil {
+		return scheduling.TargetReadiness{}, err
+	}
+	readiness := evidence.readinessStatus()
+	result := buildSchedulingTargetReadiness(evidence.ActiveProvider, readiness)
+	result.AuthorityVersion = evidence.AuthorityVersion
+	result.ReadinessEvidenceVersion = squareSchedulingReadinessEvidenceVersion
+	result.ReadinessEvidenceFingerprint, err = evidence.fingerprint()
+	if err != nil {
+		return scheduling.TargetReadiness{}, err
+	}
+	return result, nil
+}
+
+type squareSchedulingTargetEvidence struct {
+	ActiveProvider   string                              `json:"active_provider"`
+	AuthorityVersion int64                               `json:"authority_version"`
+	Connection       squareSchedulingConnectionEvidence  `json:"connection"`
+	Services         []squareSchedulingServiceEvidence   `json:"services"`
+	Staff            []squareSchedulingStaffEvidence     `json:"staff"`
+	BusinessHours    []squareSchedulingHourEvidence      `json:"business_hours"`
+	LatestTest       *squareSchedulingTestEvidence       `json:"latest_test,omitempty"`
+	LatestWriteError *squareSchedulingWriteErrorEvidence `json:"latest_write_error,omitempty"`
+}
+
+type squareSchedulingConnectionEvidence struct {
+	Present            bool   `json:"present"`
+	Status             string `json:"status"`
+	LocationID         string `json:"location_id"`
+	SnapshotGeneration int64  `json:"snapshot_generation"`
+	LastSyncAt         string `json:"last_sync_at"`
+}
+
+type squareSchedulingServiceEvidence struct {
+	ID                  string `json:"id"`
+	ProviderEntityID    string `json:"provider_entity_id"`
+	ProviderVersion     int64  `json:"provider_version"`
+	LinkProviderVersion int64  `json:"link_provider_version"`
+	Active              bool   `json:"active"`
+	AIBookable          bool   `json:"ai_bookable"`
+	Archived            bool   `json:"archived"`
+	DurationMinutes     int    `json:"duration_minutes"`
+	SyncStatus          string `json:"sync_status"`
+	LinkSyncStatus      string `json:"link_sync_status"`
+}
+
+func (e squareSchedulingServiceEvidence) eligible() bool {
+	return e.Active && e.AIBookable && !e.Archived && e.DurationMinutes > 0 &&
+		e.SyncStatus == pos.SyncStatusSynced && e.LinkSyncStatus == pos.SyncStatusSynced &&
+		strings.TrimSpace(e.ProviderEntityID) != "" && e.ProviderVersion > 0
+}
+
+type squareSchedulingStaffEvidence struct {
+	ID               string `json:"id"`
+	ProviderEntityID string `json:"provider_entity_id"`
+	Active           bool   `json:"active"`
+	AIBookable       bool   `json:"ai_bookable"`
+	Archived         bool   `json:"archived"`
+	SyncStatus       string `json:"sync_status"`
+	LinkSyncStatus   string `json:"link_sync_status"`
+}
+
+func (e squareSchedulingStaffEvidence) eligible() bool {
+	return e.Active && e.AIBookable && !e.Archived && e.SyncStatus == pos.SyncStatusSynced &&
+		e.LinkSyncStatus == pos.SyncStatusSynced && strings.TrimSpace(e.ProviderEntityID) != ""
+}
+
+type squareSchedulingHourEvidence struct {
+	ID                 string `json:"id"`
+	ProviderLocationID string `json:"provider_location_id"`
+	DayOfWeek          int    `json:"day_of_week"`
+	StartLocalTime     string `json:"start_local_time"`
+	EndLocalTime       string `json:"end_local_time"`
+}
+
+type squareSchedulingTestEvidence struct {
+	Status          string `json:"status"`
+	ProviderOutcome string `json:"provider_outcome"`
+	RetryPolicy     string `json:"retry_policy"`
+	Reconciliation  string `json:"reconciliation"`
+	POSBookingID    string `json:"pos_booking_id"`
+	ErrorCode       string `json:"error_code"`
+	CreatedAt       string `json:"created_at"`
+}
+
+func (e squareSchedulingTestEvidence) blocked() bool {
+	return e.Status == booking.StatusPOSPending || e.ProviderOutcome == booking.ProviderOutcomeInFlight ||
+		e.ProviderOutcome == booking.ProviderOutcomeUnknown || e.RetryPolicy == booking.RetryPolicyBlocked ||
+		e.Reconciliation == booking.ReconciliationRequired
+}
+
+type squareSchedulingWriteErrorEvidence struct {
+	ErrorCode string `json:"error_code"`
+	CreatedAt string `json:"created_at"`
+}
+
+func (e squareSchedulingTargetEvidence) fingerprint() (string, error) {
+	payload, err := json.Marshal(e)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func (e squareSchedulingTargetEvidence) readinessStatus() *ReadinessStatus {
+	connected := e.Connection.Present && e.Connection.Status != pos.StatusNotConnected &&
+		e.Connection.Status != pos.StatusError && e.Connection.Status != pos.StatusExpiredToken &&
+		e.Connection.Status != pos.StatusDisabled
+	locationSelected := connected && strings.TrimSpace(e.Connection.LocationID) != ""
+	synced := connected && e.Connection.LastSyncAt != ""
+	serviceCount := 0
+	for _, item := range e.Services {
+		if item.eligible() {
+			serviceCount++
+		}
+	}
+	staffCount := 0
+	for _, item := range e.Staff {
+		if item.eligible() {
+			staffCount++
+		}
+	}
+	hourCount := len(e.BusinessHours)
+	servicesReady := synced && serviceCount > 0
+	staffReady := synced && staffCount > 0
+	hoursReady := synced && hourCount > 0
+	testBlocked := e.LatestTest != nil && e.LatestTest.blocked()
+	writeBlocked := e.bookingWriteBlocked()
+	bookingReady := connected && locationSelected && servicesReady && staffReady && hoursReady
+	return &ReadinessStatus{
+		ServiceCount:      serviceCount,
+		StaffCount:        staffCount,
+		BusinessHourCount: hourCount,
+		Checks: []ReadinessCheck{
+			{Key: "connect_square", Complete: connected},
+			{Key: "select_location", Complete: locationSelected},
+			{Key: "sync_services", Complete: servicesReady},
+			{Key: "sync_staff", Complete: staffReady},
+			{Key: "sync_business_hours", Complete: hoursReady},
+			{Key: "booking_writes", Complete: !writeBlocked},
+		},
+		providerCanTestBooking: bookingReady && !testBlocked,
+	}
+}
+
+func (e squareSchedulingTargetEvidence) bookingWriteBlocked() bool {
+	if e.LatestWriteError == nil || e.LatestWriteError.ErrorCode != pos.ErrorPermissionDenied {
+		return false
+	}
+	if e.LatestTest == nil || strings.TrimSpace(e.LatestTest.POSBookingID) == "" || strings.TrimSpace(e.LatestTest.ErrorCode) != "" {
+		return true
+	}
+	testAt, testErr := time.Parse(time.RFC3339Nano, e.LatestTest.CreatedAt)
+	errorAt, errorErr := time.Parse(time.RFC3339Nano, e.LatestWriteError.CreatedAt)
+	return testErr != nil || errorErr != nil || !testAt.After(errorAt)
+}
+
+func loadSquareSchedulingTargetEvidenceTx(ctx context.Context, tx *sql.Tx, salonID string, ownerUserID string) (squareSchedulingTargetEvidence, error) {
+	evidence := squareSchedulingTargetEvidence{Services: []squareSchedulingServiceEvidence{}, Staff: []squareSchedulingStaffEvidence{}, BusinessHours: []squareSchedulingHourEvidence{}}
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(BTRIM(salon.active_pos_provider), ''), settings.scheduling_authority_version
+		FROM salons salon
+		JOIN salon_settings settings ON settings.salon_id = salon.id
+		WHERE salon.id::text = $1 AND salon.owner_user_id::text = $2
+		FOR SHARE OF salon, settings
+	`, salonID, ownerUserID).Scan(&evidence.ActiveProvider, &evidence.AuthorityVersion); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return evidence, pos.ErrNotFound
+		}
+		return evidence, err
+	}
+	var lastSync sql.NullTime
+	err := tx.QueryRowContext(ctx, `
+		SELECT status, COALESCE(location_id, ''), snapshot_generation, last_sync_at
+		FROM pos_connections
+		WHERE salon_id::text = $1 AND provider = $2
+		FOR SHARE
+	`, salonID, pos.ProviderSquare).Scan(&evidence.Connection.Status, &evidence.Connection.LocationID, &evidence.Connection.SnapshotGeneration, &lastSync)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return evidence, err
+	}
+	if err == nil {
+		evidence.Connection.Present = true
+		if lastSync.Valid {
+			evidence.Connection.LastSyncAt = lastSync.Time.UTC().Format(time.RFC3339Nano)
+		}
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT service.id::text, COALESCE(link.provider_entity_id, ''), COALESCE(service.pos_service_version, 0),
+		       COALESCE(link.provider_version, 0), service.active, service.ai_bookable,
+		       service.archived_at IS NOT NULL, service.duration_minutes, service.sync_status,
+		       COALESCE(link.sync_status, '')
+		FROM services service
+		LEFT JOIN pos_entity_links link
+		  ON link.salon_id=service.salon_id AND link.entity_type='service' AND link.entity_id=service.id AND link.provider=$2
+		WHERE service.salon_id::text=$1 AND service.pos_provider=$2
+		ORDER BY service.id
+		FOR SHARE OF service
+	`, salonID, pos.ProviderSquare)
+	if err != nil {
+		return evidence, err
+	}
+	for rows.Next() {
+		var item squareSchedulingServiceEvidence
+		if err := rows.Scan(&item.ID, &item.ProviderEntityID, &item.ProviderVersion, &item.LinkProviderVersion, &item.Active, &item.AIBookable, &item.Archived, &item.DurationMinutes, &item.SyncStatus, &item.LinkSyncStatus); err != nil {
+			rows.Close()
+			return evidence, err
+		}
+		evidence.Services = append(evidence.Services, item)
+	}
+	if err := rows.Close(); err != nil {
+		return evidence, err
+	}
+	if err := rows.Err(); err != nil {
+		return evidence, err
+	}
+
+	rows, err = tx.QueryContext(ctx, `
+		SELECT member.id::text, COALESCE(link.provider_entity_id, ''), member.active, member.ai_bookable,
+		       member.archived_at IS NOT NULL, member.sync_status, COALESCE(link.sync_status, '')
+		FROM staff member
+		LEFT JOIN pos_entity_links link
+		  ON link.salon_id=member.salon_id AND link.entity_type='staff' AND link.entity_id=member.id AND link.provider=$2
+		WHERE member.salon_id::text=$1 AND member.pos_provider=$2
+		ORDER BY member.id
+		FOR SHARE OF member
+	`, salonID, pos.ProviderSquare)
+	if err != nil {
+		return evidence, err
+	}
+	for rows.Next() {
+		var item squareSchedulingStaffEvidence
+		if err := rows.Scan(&item.ID, &item.ProviderEntityID, &item.Active, &item.AIBookable, &item.Archived, &item.SyncStatus, &item.LinkSyncStatus); err != nil {
+			rows.Close()
+			return evidence, err
+		}
+		evidence.Staff = append(evidence.Staff, item)
+	}
+	if err := rows.Close(); err != nil {
+		return evidence, err
+	}
+	if err := rows.Err(); err != nil {
+		return evidence, err
+	}
+
+	rows, err = tx.QueryContext(ctx, `
+		SELECT id::text, COALESCE(provider_location_id, ''), day_of_week,
+		       start_local_time::text, end_local_time::text
+		FROM salon_business_hour_periods
+		WHERE salon_id::text=$1 AND source='imported' AND provider=$2
+		ORDER BY id
+		FOR SHARE
+	`, salonID, pos.ProviderSquare)
+	if err != nil {
+		return evidence, err
+	}
+	for rows.Next() {
+		var item squareSchedulingHourEvidence
+		if err := rows.Scan(&item.ID, &item.ProviderLocationID, &item.DayOfWeek, &item.StartLocalTime, &item.EndLocalTime); err != nil {
+			rows.Close()
+			return evidence, err
+		}
+		evidence.BusinessHours = append(evidence.BusinessHours, item)
+	}
+	if err := rows.Close(); err != nil {
+		return evidence, err
+	}
+	if err := rows.Err(); err != nil {
+		return evidence, err
+	}
+
+	var test squareSchedulingTestEvidence
+	var posBookingID, errorCode sql.NullString
+	var testCreatedAt time.Time
+	err = tx.QueryRowContext(ctx, `
+		SELECT status, provider_outcome, retry_policy, reconciliation_status,
+		       pos_booking_id, error_code, created_at
+		FROM booking_attempts
+		WHERE salon_id::text=$1 AND source='square_test_booking'
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1
+		FOR SHARE
+	`, salonID).Scan(&test.Status, &test.ProviderOutcome, &test.RetryPolicy, &test.Reconciliation, &posBookingID, &errorCode, &testCreatedAt)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return evidence, err
+	}
+	if err == nil {
+		test.POSBookingID = strings.TrimSpace(posBookingID.String)
+		test.ErrorCode = strings.TrimSpace(errorCode.String)
+		test.CreatedAt = testCreatedAt.UTC().Format(time.RFC3339Nano)
+		evidence.LatestTest = &test
+	}
+
+	var writeError squareSchedulingWriteErrorEvidence
+	var writeErrorCreatedAt time.Time
+	err = tx.QueryRowContext(ctx, `
+		SELECT error_code, created_at
+		FROM pos_errors
+		WHERE salon_id::text=$1 AND provider=$2 AND operation='create_booking'
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1
+		FOR SHARE
+	`, salonID, pos.ProviderSquare).Scan(&writeError.ErrorCode, &writeErrorCreatedAt)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return evidence, err
+	}
+	if err == nil {
+		writeError.CreatedAt = writeErrorCreatedAt.UTC().Format(time.RFC3339Nano)
+		evidence.LatestWriteError = &writeError
+	}
+	return evidence, nil
+}
+
+func buildSchedulingTargetReadiness(activeProvider string, readiness *ReadinessStatus) scheduling.TargetReadiness {
+	result := scheduling.TargetReadiness{
+		TargetSchedulingAuthority: booking.SchedulingAuthorityExternalProvider,
+		ServiceCount:              readiness.ServiceCount,
+		StaffCount:                readiness.StaffCount,
+		BusinessHourPeriodCount:   readiness.BusinessHourCount,
+		Checks:                    make([]scheduling.TargetReadinessCheck, 0, len(readiness.Checks)+2),
+		Blockers:                  make([]scheduling.TargetReadinessBlocker, 0),
+		AvailabilityBlockers:      make([]scheduling.TargetReadinessBlocker, 0),
+		ExecutionBlockers:         make([]scheduling.TargetReadinessBlocker, 0),
+	}
+	add := func(key string, ready bool, message string, requiredForAvailability bool, requiredForExecution bool) {
+		code := "EXTERNAL_PROVIDER_" + strings.ToUpper(key)
+		result.Checks = append(result.Checks, scheduling.TargetReadinessCheck{Code: code, Ready: ready, Scope: "provider"})
+		if !ready {
+			blocker := scheduling.TargetReadinessBlocker{Code: code, Scope: "provider", Message: message}
+			result.Blockers = append(result.Blockers, blocker)
+			if requiredForAvailability {
+				result.AvailabilityBlockers = append(result.AvailabilityBlockers, blocker)
+			}
+			if requiredForExecution {
+				result.ExecutionBlockers = append(result.ExecutionBlockers, blocker)
+			}
+		}
+	}
+	selectedAdapter := activeProvider == pos.ProviderSquare
+	add("select_pos_adapter", selectedAdapter, "Select the Square adapter for this salon.", true, true)
+	for _, check := range readiness.Checks {
+		if check.Key == "enable_ai_booking" {
+			continue
+		}
+		availabilityCheck := check.Key != "booking_writes"
+		add(check.Key, check.Complete, externalTargetBlockerMessage(check.Key), availabilityCheck, true)
+	}
+	testSafetyReady := readiness.canTestExternalProviderBooking()
+	add("booking_test_safety", testSafetyReady, "Resolve the current Square booking test before switching scheduling authority.", false, true)
+	result.AvailabilityReady = len(result.AvailabilityBlockers) == 0
+	result.ExecutionReady = len(result.ExecutionBlockers) == 0
+	result.Ready = len(result.Blockers) == 0
+	return result
+}
+
+func externalTargetBlockerMessage(key string) string {
+	switch key {
+	case "connect_square":
+		return "Connect Square Appointments."
+	case "select_location":
+		return "Select a Square location."
+	case "sync_services":
+		return "Sync at least one active, AI-bookable service."
+	case "sync_staff":
+		return "Sync at least one active, AI-bookable staff member."
+	case "sync_business_hours":
+		return "Sync at least one Square business-hours period."
+	case "booking_writes":
+		return "Resolve the Square booking-write readiness blocker."
+	default:
+		return "Resolve the external provider readiness blocker."
+	}
+}
+
+func (s *Service) currentSchedulingAuthority(ctx context.Context, salonID string, ownerUserID string) (string, error) {
+	if s.bookingService == nil {
+		return "", ErrBookingServiceUnavailable
+	}
+	return s.bookingService.CurrentSchedulingAuthority(ctx, salonID, ownerUserID)
 }
 
 func (s *Service) loadReadiness(ctx context.Context, salonID string, ownerUserID string) (*ReadinessStatus, error) {
@@ -320,6 +738,13 @@ func (s *Service) CreateTestBooking(ctx context.Context, salonID string, ownerUs
 			Readiness:         readiness,
 		}, nil
 	}
+	schedulingAuthority, err := s.bookingService.ResolveCreateSchedulingAuthority(ctx, req.SalonID, ownerUserID, req.OperationKey, req.RetryOfAttemptID)
+	if err != nil {
+		return nil, err
+	}
+	if schedulingAuthority != booking.SchedulingAuthorityExternalProvider {
+		return nil, booking.ErrSchedulingAuthorityNotReady
+	}
 	if req.SalonID == "" || req.ServiceID == "" || req.StaffID == "" || req.StartTime.IsZero() {
 		return nil, ErrValidation
 	}
@@ -330,7 +755,7 @@ func (s *Service) CreateTestBooking(ctx context.Context, salonID string, ownerUs
 	if err != nil {
 		return nil, err
 	}
-	if !readiness.CanTestBooking {
+	if !readiness.canTestExternalProviderBooking() {
 		return nil, ErrReadinessGate
 	}
 	attempt, err := s.bookingService.Create(ctx, req.SalonID, ownerUserID, createRequest)
@@ -446,9 +871,12 @@ func testBookingCancelRequest(req CancelTestBookingRequest) booking.CancelReques
 }
 
 func (s *Service) EnableAIBooking(ctx context.Context, salonID string, ownerUserID string) (*GateResponse, error) {
-	readiness, err := s.Readiness(ctx, salonID, ownerUserID)
+	readiness, err := s.loadReadiness(ctx, salonID, ownerUserID)
 	if err != nil {
 		return nil, err
+	}
+	if readiness.SchedulingAuthority != booking.SchedulingAuthorityExternalProvider {
+		return nil, booking.ErrSchedulingAuthorityNotReady
 	}
 	if !readiness.CanEnableAIBooking {
 		return nil, ErrReadinessGate
@@ -485,7 +913,7 @@ func (s *Service) latestTestBooking(ctx context.Context, salonID string, ownerUs
 	return latest, err
 }
 
-func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.Service, staff []pos.StaffMember, periods []pos.BusinessHourPeriod, latest *booking.TestBookingRecord, bookingWriteError *pos.POSErrorRecord, appointmentChangeError *pos.POSErrorRecord) *ReadinessStatus {
+func buildReadiness(aiEnabled bool, schedulingAuthority string, connection *pos.Connection, services []pos.Service, staff []pos.StaffMember, periods []pos.BusinessHourPeriod, latest *booking.TestBookingRecord, bookingWriteError *pos.POSErrorRecord, appointmentChangeError *pos.POSErrorRecord) *ReadinessStatus {
 	connected := connection != nil &&
 		connection.ID != "" &&
 		connection.Status != pos.StatusNotConnected &&
@@ -502,14 +930,16 @@ func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.S
 	businessHoursReady := synced && businessHourCount > 0
 	testWriteBlocked := testBookingWriteBlocked(latest)
 	bookingReady := connected && locationSelected && synced && servicesReady && staffReady && businessHoursReady
-	canTest := bookingReady && !testWriteBlocked
+	externalProviderSelected := schedulingAuthority == booking.SchedulingAuthorityExternalProvider
+	providerCanTestBooking := bookingReady && !testWriteBlocked
+	canTest := externalProviderSelected && providerCanTestBooking
 	canCancel := latest != nil &&
 		latest.AppointmentID != "" &&
 		latest.POSBookingID != "" &&
 		latest.AppointmentStatus != booking.StatusCancelled &&
 		!testWriteBlocked
 	bookingWriteBlocker := bookingWriteBlockerFromError(bookingWriteError, latest)
-	canEnable := bookingReady && !bookingWriteBlocker.Blocked
+	canEnable := externalProviderSelected && bookingReady && !bookingWriteBlocker.Blocked
 
 	checks := []ReadinessCheck{
 		{Key: "connect_square", Label: "Connect Square", Complete: connected, Message: incompleteMessage(connected, "Square Appointments is not connected.")},
@@ -524,6 +954,7 @@ func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.S
 
 	return &ReadinessStatus{
 		AIEnabled:                           aiEnabled,
+		SchedulingAuthority:                 schedulingAuthority,
 		CanTestBooking:                      canTest,
 		CanCancelTestBooking:                canCancel,
 		CanEnableAIBooking:                  canEnable,
@@ -540,7 +971,12 @@ func buildReadiness(aiEnabled bool, connection *pos.Connection, services []pos.S
 		BusinessHourCount:                   businessHourCount,
 		LatestTestBooking:                   latest,
 		Checks:                              checks,
+		providerCanTestBooking:              providerCanTestBooking,
 	}
+}
+
+func (r *ReadinessStatus) canTestExternalProviderBooking() bool {
+	return r != nil && (r.providerCanTestBooking || r.CanTestBooking)
 }
 
 func testBookingWriteBlocked(latest *booking.TestBookingRecord) bool {

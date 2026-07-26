@@ -3,6 +3,7 @@ package voice
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"testing"
 
@@ -109,6 +110,16 @@ func TestPhoneReadinessSeparatesGuidanceFromBookingSnapshotFence(t *testing.T) {
 	}
 
 	repository := NewRepository(db)
+	voiceStatus, err := repository.GetSalonVoiceStatus(ctx, salonID, ownerID)
+	if err != nil {
+		t.Fatalf("voice scheduling status: %v", err)
+	}
+	if !voiceStatus.AIEnabled || voiceStatus.SchedulingAuthority != "external_provider" || voiceStatus.SchedulingAuthorityVersion != 1 || voiceStatus.BookingMode != "pending_approval" {
+		t.Fatalf("voice scheduling status = %#v", voiceStatus)
+	}
+	if _, err := repository.GetSalonVoiceStatus(ctx, salonID, uuid.NewString()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-owner voice status error = %v, want ErrNotFound", err)
+	}
 	ready, err := repository.GetPhoneBookingReadiness(ctx, salonID, ownerID)
 	if err != nil {
 		t.Fatalf("ready status: %v", err)

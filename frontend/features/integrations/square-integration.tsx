@@ -23,6 +23,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SquareWebhookOperations } from "@/features/integrations/square-webhook-operations";
 import { apiRequest } from "@/lib/api/client";
 import type {
   AvailabilityResult,
@@ -123,6 +124,18 @@ type TwilioConfigForm = {
   recording_path: string;
   stream_path: string;
   voice_transport: string;
+  owner_sms_enabled: boolean;
+  owner_sms_destination: string;
+  clear_owner_sms_destination: boolean;
+  owner_sms_consent_attested: boolean;
+  account_sid: string;
+  clear_account_sid: boolean;
+  messaging_service_sid: string;
+  clear_messaging_service_sid: boolean;
+  sender_phone: string;
+  clear_sender_phone: boolean;
+  notification_status_path: string;
+  notification_inbound_path: string;
 };
 
 type OpenAIConfigForm = {
@@ -173,7 +186,19 @@ const defaultTwilioConfigForm: TwilioConfigForm = {
   turn_path: "/api/voice/twilio/turn",
   recording_path: "/api/voice/twilio/recording",
   stream_path: "/api/voice/twilio/stream",
-  voice_transport: "recording"
+  voice_transport: "recording",
+  owner_sms_enabled: false,
+  owner_sms_destination: "",
+  clear_owner_sms_destination: false,
+  owner_sms_consent_attested: false,
+  account_sid: "",
+  clear_account_sid: false,
+  messaging_service_sid: "",
+  clear_messaging_service_sid: false,
+  sender_phone: "",
+  clear_sender_phone: false,
+  notification_status_path: "/api/notifications/twilio/status",
+  notification_inbound_path: "/api/notifications/twilio/inbound"
 };
 
 const defaultOpenAIConfigForm: OpenAIConfigForm = {
@@ -659,13 +684,32 @@ export function SquareIntegration() {
     setError("");
     setSuccess("");
     try {
+      const messagingPayload = {
+        ...twilioConfigForm,
+        ...(twilioConfigForm.owner_sms_destination
+          ? { owner_sms_destination: twilioConfigForm.owner_sms_destination }
+          : {}),
+        ...(twilioConfigForm.messaging_service_sid
+          ? { messaging_service_sid: twilioConfigForm.messaging_service_sid }
+          : {}),
+        ...(twilioConfigForm.sender_phone ? { sender_phone: twilioConfigForm.sender_phone } : {})
+      };
+      if (!twilioConfigForm.owner_sms_destination) {
+        delete (messagingPayload as Partial<TwilioConfigForm>).owner_sms_destination;
+      }
+      if (!twilioConfigForm.messaging_service_sid) {
+        delete (messagingPayload as Partial<TwilioConfigForm>).messaging_service_sid;
+      }
+      if (!twilioConfigForm.sender_phone) {
+        delete (messagingPayload as Partial<TwilioConfigForm>).sender_phone;
+      }
       const updated = await apiRequest<TwilioIntegrationConfig>(`/api/salons/${salon.id}/integration-configs/twilio`, {
         method: "PUT",
-        body: JSON.stringify(twilioConfigForm)
+        body: JSON.stringify(messagingPayload)
       });
       setIntegrationConfigs((current) => ({ ...(current ?? emptyIntegrationConfigs()), twilio: updated }));
       setTwilioConfigForm(twilioConfigToForm(updated));
-      setSuccess("Twilio voice configuration saved.");
+      setSuccess("Twilio voice and owner notification configuration saved.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save Twilio configuration.");
     } finally {
@@ -796,6 +840,8 @@ export function SquareIntegration() {
   const canEnable = Boolean(readiness?.can_enable_ai_booking) && busy === "";
   const aiEnabled = Boolean(readiness?.ai_enabled ?? salon.ai_enabled);
   const squareConfigConfigured = Boolean(integrationConfigs?.square.configured);
+  const squareWebhookOperationsEnabled =
+    salon.active_pos_provider === "square" && squareConnectionSupportsOperations(connection);
   const canCheckAvailability =
     Boolean(form.service_id) && Boolean(form.staff_id) && Boolean(bookingDate) && busy === "" && !checkingAvailability;
 
@@ -919,6 +965,12 @@ export function SquareIntegration() {
             {busy === "sync" ? "Syncing..." : "Sync"}
           </Button>
         </div>
+
+        <SquareWebhookOperations
+          salonID={salon.id}
+          enabled={squareWebhookOperationsEnabled}
+          webhookConfigured={Boolean(integrationConfigs?.square.webhook_configured)}
+        />
       </Card>
 
       <ProviderSwitchReadinessPanel
@@ -1478,12 +1530,53 @@ function ProviderConfigurationPanel({
                 disabled={busy !== ""}
               />
             </Field>
+            <div className="md:col-span-2 border-t border-line pt-4">
+              <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start">
+                <div>
+                  <div className="text-sm font-semibold text-ink">Owner SMS delivery</div>
+                  <div className="mt-1 text-xs leading-5 text-muted">Enable only for an owner-controlled destination with explicit consent. This does not enable customer SMS.</div>
+                </div>
+                <Badge value={twilio?.owner_sms_enabled ? "configured" : "disabled"} />
+              </div>
+            </div>
+            <label className="flex items-center gap-3 rounded-md border border-line p-3 text-sm font-medium text-ink">
+              <input type="checkbox" checked={twilioForm.owner_sms_enabled} onChange={(event) => setTwilioForm((current) => ({ ...current, owner_sms_enabled: event.target.checked }))} disabled={busy !== ""} />
+              Deliver durable owner notifications by SMS
+            </label>
+            <label className="flex items-center gap-3 rounded-md border border-line p-3 text-sm font-medium text-ink">
+              <input type="checkbox" checked={twilioForm.owner_sms_consent_attested} onChange={(event) => setTwilioForm((current) => ({ ...current, owner_sms_consent_attested: event.target.checked }))} disabled={busy !== ""} />
+              I attest this owner destination consented to operational SMS
+            </label>
+            <Field label="Owner SMS destination">
+              <input className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink" value={twilioForm.owner_sms_destination} placeholder={twilio?.owner_sms_destination_masked ? `Stored ${twilio.owner_sms_destination_masked} — leave blank to keep` : "+13125550123"} onChange={(event) => setTwilioForm((current) => ({ ...current, owner_sms_destination: event.target.value, clear_owner_sms_destination: false, owner_sms_consent_attested: false }))} disabled={busy !== "" || twilioForm.clear_owner_sms_destination} />
+            </Field>
+            <SecretControl checked={twilioForm.clear_owner_sms_destination} configured={Boolean(twilio?.owner_sms_destination_masked)} source={twilio?.owner_sms_destination_masked ? "database" : "none"} label="Clear stored owner SMS destination" onChange={(checked) => setTwilioForm((current) => ({ ...current, clear_owner_sms_destination: checked, owner_sms_destination: "", owner_sms_enabled: checked ? false : current.owner_sms_enabled, owner_sms_consent_attested: checked ? false : current.owner_sms_consent_attested }))} />
+            <Field label="Twilio account SID">
+              <input className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink" type="password" value={twilioForm.account_sid} placeholder={twilio?.account_sid_configured ? "Stored — leave blank to keep" : "AC…"} onChange={(event) => setTwilioForm((current) => ({ ...current, account_sid: event.target.value, clear_account_sid: false }))} disabled={busy !== "" || twilioForm.clear_account_sid} />
+            </Field>
+            <SecretControl checked={twilioForm.clear_account_sid} configured={Boolean(twilio?.account_sid_configured)} source={twilio?.account_sid_configured ? "database" : "none"} label="Clear stored Twilio account SID" onChange={(checked) => setTwilioForm((current) => ({ ...current, clear_account_sid: checked, account_sid: checked ? "" : current.account_sid }))} />
+            <Field label="Messaging Service SID">
+              <input className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink" type="password" value={twilioForm.messaging_service_sid} placeholder={twilio?.messaging_service_configured ? "Stored — leave blank to keep" : "MG… (recommended)"} onChange={(event) => setTwilioForm((current) => ({ ...current, messaging_service_sid: event.target.value, clear_messaging_service_sid: false }))} disabled={busy !== "" || twilioForm.clear_messaging_service_sid} />
+            </Field>
+            <SecretControl checked={twilioForm.clear_messaging_service_sid} configured={Boolean(twilio?.messaging_service_configured)} source={twilio?.messaging_service_configured ? "database" : "none"} label="Clear stored Messaging Service SID" onChange={(checked) => setTwilioForm((current) => ({ ...current, clear_messaging_service_sid: checked, messaging_service_sid: checked ? "" : current.messaging_service_sid }))} />
+            <Field label="Sender phone (when no Messaging Service SID)">
+              <input className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink" value={twilioForm.sender_phone} placeholder={twilio?.sender_configured ? "Stored — leave blank to keep" : "+13125550000"} onChange={(event) => setTwilioForm((current) => ({ ...current, sender_phone: event.target.value, clear_sender_phone: false }))} disabled={busy !== "" || twilioForm.clear_sender_phone} />
+            </Field>
+            <SecretControl checked={twilioForm.clear_sender_phone} configured={Boolean(twilio?.sender_configured)} source={twilio?.sender_configured ? "database" : "none"} label="Clear stored sender phone" onChange={(checked) => setTwilioForm((current) => ({ ...current, clear_sender_phone: checked, sender_phone: checked ? "" : current.sender_phone }))} />
+            <Field label="Message status callback path">
+              <input className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink" value={twilioForm.notification_status_path} onChange={(event) => setTwilioForm((current) => ({ ...current, notification_status_path: event.target.value }))} disabled={busy !== ""} />
+            </Field>
+            <Field label="Inbound callback path">
+              <input className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink" value={twilioForm.notification_inbound_path} onChange={(event) => setTwilioForm((current) => ({ ...current, notification_inbound_path: event.target.value }))} disabled={busy !== ""} />
+            </Field>
           </div>
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
             <ReadOnlyValue label="Incoming webhook" value={twilio?.inbound_webhook_url || twilioForm.incoming_path} />
             <ReadOnlyValue label="Turn webhook" value={twilio?.turn_webhook_url || twilioForm.turn_path} />
             <ReadOnlyValue label="Recording webhook" value={twilio?.recording_webhook_url || twilioForm.recording_path} />
             <ReadOnlyValue label="Realtime stream" value={twilio?.stream_webhook_url || twilioForm.stream_path} />
+            <ReadOnlyValue label="Message status callback" value={twilio?.notification_status_url || twilioForm.notification_status_path} />
+            <ReadOnlyValue label="Signed inbound callback" value={twilio?.notification_inbound_url || twilioForm.notification_inbound_path} />
           </div>
           <ConfigActions
             busy={busy === "save-twilio-config"}
@@ -1787,7 +1880,19 @@ function twilioConfigToForm(config?: TwilioIntegrationConfig): TwilioConfigForm 
     turn_path: config.turn_path || defaultTwilioConfigForm.turn_path,
     recording_path: config.recording_path || defaultTwilioConfigForm.recording_path,
     stream_path: config.stream_path || defaultTwilioConfigForm.stream_path,
-    voice_transport: config.voice_transport || defaultTwilioConfigForm.voice_transport
+    voice_transport: config.voice_transport || defaultTwilioConfigForm.voice_transport,
+    owner_sms_enabled: config.owner_sms_enabled,
+    owner_sms_destination: "",
+    clear_owner_sms_destination: false,
+    owner_sms_consent_attested: config.owner_sms_consent_attested,
+    account_sid: "",
+    clear_account_sid: false,
+    messaging_service_sid: "",
+    clear_messaging_service_sid: false,
+    sender_phone: "",
+    clear_sender_phone: false,
+    notification_status_path: config.notification_status_path || defaultTwilioConfigForm.notification_status_path,
+    notification_inbound_path: config.notification_inbound_path || defaultTwilioConfigForm.notification_inbound_path
   };
 }
 
@@ -1855,7 +1960,16 @@ function emptyIntegrationConfigs(): IntegrationConfigs {
       recording_webhook_url: defaultTwilioConfigForm.recording_path,
       stream_webhook_url: defaultTwilioConfigForm.stream_path,
       auth_token_configured: false,
-      auth_token_source: "none"
+      auth_token_source: "none",
+      owner_sms_enabled: false,
+      owner_sms_consent_attested: false,
+      account_sid_configured: false,
+      messaging_service_configured: false,
+      sender_configured: false,
+      notification_status_path: defaultTwilioConfigForm.notification_status_path,
+      notification_inbound_path: defaultTwilioConfigForm.notification_inbound_path,
+      notification_status_url: defaultTwilioConfigForm.notification_status_path,
+      notification_inbound_url: defaultTwilioConfigForm.notification_inbound_path
     },
     openai: {
       provider: "openai",
@@ -2757,6 +2871,15 @@ function squareOverviewMessage(connection: POSConnection | undefined, syncLogCou
     return "Run Sync to import current Square Appointments records.";
   }
   return `Latest sync ${formatOptionalDateTime(connection.last_sync_at)}. Confirmed bookings still require Square success.`;
+}
+
+function squareConnectionSupportsOperations(connection: POSConnection | undefined) {
+  return Boolean(
+    connection?.id &&
+      connection.provider === "square" &&
+      connection.status !== "not_connected" &&
+      connection.status !== "disabled"
+  );
 }
 
 function bookingDataOverviewMessage(

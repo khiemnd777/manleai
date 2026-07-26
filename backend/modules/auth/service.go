@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"net/mail"
@@ -28,7 +30,7 @@ type Store interface {
 	RolesForUser(ctx context.Context, userID string) ([]string, error)
 	PrimarySalonIDForUser(ctx context.Context, userID string) (string, error)
 	StoreRefreshToken(ctx context.Context, userID string, token string, expiresAt time.Time) error
-	FindRefreshTokenUser(ctx context.Context, token string) (string, error)
+	RotateRefreshToken(ctx context.Context, currentToken string, replacementToken string, replacementExpiresAt time.Time) (*User, error)
 	RevokeRefreshToken(ctx context.Context, token string) error
 	BootstrapAvailable(ctx context.Context) (bool, error)
 	CreateFirstOwner(ctx context.Context, params CreateFirstOwnerParams) (*User, error)
@@ -48,10 +50,10 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*LoginResponse, 
 	if err != nil {
 		return nil, ErrInvalidCredentials
 	}
-	if user.Status != "active" {
-		return nil, ErrDisabledUser
-	}
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
+		return nil, ErrInvalidCredentials
+	}
+	if user.Status != "active" {
 		return nil, ErrInvalidCredentials
 	}
 	return s.issueTokens(ctx, *user)
@@ -99,18 +101,35 @@ func (s *Service) BootstrapOwner(ctx context.Context, req BootstrapOwnerRequest)
 }
 
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (*LoginResponse, error) {
-	userID, err := s.repo.FindRefreshTokenUser(ctx, refreshToken)
-	if err != nil {
+	replacementToken := s.rotatedRefreshToken(refreshToken)
+	if replacementToken == "" {
 		return nil, ErrInvalidCredentials
 	}
-	if err := s.repo.RevokeRefreshToken(ctx, refreshToken); err != nil {
-		return nil, err
+	now := time.Now().UTC()
+	user, err := s.repo.RotateRefreshToken(ctx, refreshToken, replacementToken, now.Add(s.cfg.RefreshTokenTTL))
+	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrDisabledUser) {
+		return nil, ErrInvalidCredentials
 	}
-	user, err := s.repo.FindUserByID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	return s.issueTokens(ctx, *user)
+	return s.buildLoginResponse(ctx, *user, replacementToken, now)
+}
+
+// rotatedRefreshToken derives one successor for one refresh token. Exact
+// concurrent rotations therefore ask the repository to persist or replay the
+// same successor instead of creating multiple live sessions. The domain label
+// separates this HMAC from JWT signing while reusing the required high-entropy
+// deployment secret.
+func (s *Service) rotatedRefreshToken(currentToken string) string {
+	currentToken = strings.TrimSpace(currentToken)
+	if currentToken == "" || strings.TrimSpace(s.cfg.JWTSecret) == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte(s.cfg.JWTSecret))
+	_, _ = mac.Write([]byte("manleai-refresh-rotation-v1\x00"))
+	_, _ = mac.Write([]byte(currentToken))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 func (s *Service) Logout(ctx context.Context, refreshToken string) error {
@@ -137,6 +156,22 @@ func (s *Service) Me(ctx context.Context, userID string) (*MeResponse, error) {
 }
 
 func (s *Service) issueTokens(ctx context.Context, user User) (*LoginResponse, error) {
+	now := time.Now().UTC()
+	refreshToken, err := randomToken()
+	if err != nil {
+		return nil, err
+	}
+	response, err := s.buildLoginResponse(ctx, user, refreshToken, now)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repo.StoreRefreshToken(ctx, user.ID, refreshToken, now.Add(s.cfg.RefreshTokenTTL)); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+func (s *Service) buildLoginResponse(ctx context.Context, user User, refreshToken string, now time.Time) (*LoginResponse, error) {
 	roles, err := s.repo.RolesForUser(ctx, user.ID)
 	if err != nil {
 		return nil, err
@@ -146,7 +181,6 @@ func (s *Service) issueTokens(ctx context.Context, user User) (*LoginResponse, e
 		return nil, err
 	}
 
-	now := time.Now().UTC()
 	expiresAt := now.Add(s.cfg.AccessTokenTTL)
 	claims := middleware.Claims{
 		UserID:  user.ID,
@@ -160,14 +194,6 @@ func (s *Service) issueTokens(ctx context.Context, user User) (*LoginResponse, e
 	}
 	accessToken, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(s.cfg.JWTSecret))
 	if err != nil {
-		return nil, err
-	}
-
-	refreshToken, err := randomToken()
-	if err != nil {
-		return nil, err
-	}
-	if err := s.repo.StoreRefreshToken(ctx, user.ID, refreshToken, now.Add(s.cfg.RefreshTokenTTL)); err != nil {
 		return nil, err
 	}
 

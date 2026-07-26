@@ -5,14 +5,35 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+
+	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
-type Service struct {
-	repo *Repository
+type EvaluationSchedulingAuthorityReader interface {
+	CurrentSchedulingAuthority(ctx context.Context, salonID string, ownerUserID string) (string, error)
 }
 
-func NewService(repo *Repository) *Service {
-	return &Service{repo: repo}
+type evaluationRepository interface {
+	ensureSalonOwner(ctx context.Context, salonID string, ownerUserID string) error
+	ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error)
+}
+
+type Service struct {
+	repo                      *Repository
+	evaluationRepo            evaluationRepository
+	schedulingAuthorityReader EvaluationSchedulingAuthorityReader
+}
+
+func NewService(repo *Repository, authorityReaders ...EvaluationSchedulingAuthorityReader) *Service {
+	var authorityReader EvaluationSchedulingAuthorityReader
+	if len(authorityReaders) > 0 {
+		authorityReader = authorityReaders[0]
+	}
+	return &Service{
+		repo:                      repo,
+		evaluationRepo:            repo,
+		schedulingAuthorityReader: authorityReader,
+	}
 }
 
 func (s *Service) ListKnowledge(ctx context.Context, salonID string, ownerUserID string) ([]KnowledgeItem, error) {
@@ -105,17 +126,61 @@ func (s *Service) Evaluate(ctx context.Context, salonID string, ownerUserID stri
 	if salonID == "" || ownerUserID == "" || message == "" {
 		return nil, ErrValidation
 	}
-	if err := s.repo.ensureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+	if s.evaluationRepo == nil || s.schedulingAuthorityReader == nil {
+		return nil, ErrSchedulingAuthorityUnavailable
+	}
+	if err := s.evaluationRepo.ensureSalonOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
 	}
-	knowledge, err := s.repo.ListActiveKnowledge(ctx, salonID)
+	authority, err := s.schedulingAuthorityReader.CurrentSchedulingAuthority(ctx, salonID, ownerUserID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve training evaluation scheduling authority: %w", err)
+	}
+	confirmation, err := evaluationConfirmationForAuthority(authority)
 	if err != nil {
 		return nil, err
 	}
-	return evaluateKnowledge(message, knowledge), nil
+	knowledge, err := s.evaluationRepo.ListActiveKnowledge(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	return evaluateKnowledge(message, knowledge, confirmation), nil
 }
 
-func evaluateKnowledge(message string, knowledge []KnowledgeSnippet) *EvaluateResponse {
+type evaluationConfirmation struct {
+	schedulingAuthority     string
+	requirement             string
+	guardrail               string
+	posConfirmationRequired bool
+}
+
+func evaluationConfirmationForAuthority(authority string) (evaluationConfirmation, error) {
+	switch strings.TrimSpace(authority) {
+	case booking.SchedulingAuthorityOwnerManual:
+		return evaluationConfirmation{
+			schedulingAuthority: booking.SchedulingAuthorityOwnerManual,
+			requirement:         ConfirmationRequirementPendingOwnerReview,
+			guardrail:           "This preview never reserves or confirms an appointment. Owner manual scheduling is non-reserving, and every request remains pending for owner review.",
+		}, nil
+	case booking.SchedulingAuthorityManleAICalendar:
+		return evaluationConfirmation{
+			schedulingAuthority: booking.SchedulingAuthorityManleAICalendar,
+			requirement:         ConfirmationRequirementAtomicInternalCommit,
+			guardrail:           "This preview never confirms an appointment. ManleAI Calendar confirmation requires an atomic internal commit with durable root appointment and attempt IDs, an authoritative appointment version, and complete child service and resource evidence.",
+		}, nil
+	case booking.SchedulingAuthorityExternalProvider:
+		return evaluationConfirmation{
+			schedulingAuthority:     booking.SchedulingAuthorityExternalProvider,
+			requirement:             ConfirmationRequirementProviderBookingSuccess,
+			guardrail:               "This preview never confirms an appointment. The current Square-backed external path requires a successful provider booking ID and status plus persisted booking evidence.",
+			posConfirmationRequired: true,
+		}, nil
+	default:
+		return evaluationConfirmation{}, ErrSchedulingAuthorityUnavailable
+	}
+}
+
+func evaluateKnowledge(message string, knowledge []KnowledgeSnippet, confirmation evaluationConfirmation) *EvaluateResponse {
 	match := bestKnowledgeMatch(message, knowledge)
 	if match == nil || strings.TrimSpace(match.Body) == "" {
 		return &EvaluateResponse{
@@ -123,12 +188,15 @@ func evaluateKnowledge(message string, knowledge []KnowledgeSnippet) *EvaluateRe
 			Reply:                   "I do not have active salon knowledge for that yet. The owner can add a knowledge item or review this after a call.",
 			Outcome:                 "no_match",
 			BookingAction:           "none",
-			POSConfirmationRequired: true,
+			SchedulingAuthority:     confirmation.schedulingAuthority,
+			ConfirmationRequirement: confirmation.requirement,
+			ConfirmationGuardrail:   confirmation.guardrail,
+			POSConfirmationRequired: confirmation.posConfirmationRequired,
 		}
 	}
 	reply := truncateWords(match.Body, 34) + " Would you like help with an appointment?"
 	if hasUnsafeKnowledgeConfirmation(match.Body) {
-		reply = "I can share salon policies, but I cannot confirm appointments unless Square Appointments confirms the booking. Would you like help with an appointment?"
+		reply = "I can share salon policies, but this preview cannot reserve or confirm an appointment. Would you like help with an appointment?"
 	}
 	return &EvaluateResponse{
 		Message:                 message,
@@ -136,7 +204,10 @@ func evaluateKnowledge(message string, knowledge []KnowledgeSnippet) *EvaluateRe
 		MatchedKnowledge:        match,
 		Outcome:                 "knowledge_answer",
 		BookingAction:           "none",
-		POSConfirmationRequired: true,
+		SchedulingAuthority:     confirmation.schedulingAuthority,
+		ConfirmationRequirement: confirmation.requirement,
+		ConfirmationGuardrail:   confirmation.guardrail,
+		POSConfirmationRequired: confirmation.posConfirmationRequired,
 	}
 }
 

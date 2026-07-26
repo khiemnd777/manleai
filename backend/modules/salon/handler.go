@@ -31,7 +31,10 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 	}
 	item, err := h.service.Create(c.UserContext(), middleware.UserID(c), req)
 	if errors.Is(err, ErrValidation) {
-		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Salon name and phone are required.")
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Salon setup contains invalid values.")
+	}
+	if errors.Is(err, ErrCreateOperationConflict) {
+		return respond.Error(c, fiber.StatusConflict, "SALON_CREATE_OPERATION_CONFLICT", "This operation key is already assigned to different salon setup data.")
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SALON_CREATE_FAILED", "Could not create salon.")
@@ -115,7 +118,13 @@ func (h *Handler) UpdatePublicCatalogSettings(c *fiber.Ctx) error {
 	}
 	settings, err := h.service.UpdatePublicCatalogSettings(c.UserContext(), c.Params("id"), middleware.UserID(c), req)
 	if errors.Is(err, ErrValidation) {
-		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Public catalog requires a slug, one synced AI-bookable service, and one synced AI-bookable staff member.")
+		return respond.Error(c, fiber.StatusBadRequest, "VALIDATION_ERROR", "Public page settings contain invalid values.")
+	}
+	if errors.Is(err, ErrSchedulingAuthorityChanged) {
+		return respond.Error(c, fiber.StatusConflict, "SCHEDULING_AUTHORITY_CHANGED", "Scheduling method changed. Reload public page readiness before publishing.")
+	}
+	if errors.Is(err, ErrPublicCatalogNotReady) {
+		return respond.Error(c, fiber.StatusConflict, "PUBLIC_CATALOG_NOT_READY", "Resolve the public page readiness blockers before publishing.")
 	}
 	if errors.Is(err, ErrSlugUnavailable) {
 		return respond.Error(c, fiber.StatusConflict, "PUBLIC_SLUG_UNAVAILABLE", "Public page slug is already in use.")

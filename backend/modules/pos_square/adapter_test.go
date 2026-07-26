@@ -201,6 +201,24 @@ func TestOAuthURLSendsSessionFalseInProduction(t *testing.T) {
 	}
 }
 
+func TestOAuthURLPropagatesSalonConfigResolutionFailure(t *testing.T) {
+	configErr := errors.New("stored Square config unavailable")
+	adapter := &SquareAdapter{configResolver: failingSquareConfigResolver{err: configErr}}
+
+	url, err := adapter.OAuthURL(context.Background(), "salon_1", "state_1")
+	if url != "" || !errors.Is(err, configErr) {
+		t.Fatalf("OAuthURL = %q, %v; want config resolution failure", url, err)
+	}
+}
+
+type failingSquareConfigResolver struct {
+	err error
+}
+
+func (r failingSquareConfigResolver) ResolveSquareConfig(context.Context, string) (config.SquareConfig, error) {
+	return config.SquareConfig{}, r.err
+}
+
 func TestMapCatalogServicesKeepsVariationVersion(t *testing.T) {
 	var response squareCatalogResponse
 	if err := json.Unmarshal([]byte(`{"objects":[{"id":"ITEM_1","type":"ITEM","version":100,"item_data":{"name":"Classic Manicure","description":"Manicure service","variations":[{"id":"VAR_1","type":"ITEM_VARIATION","version":1781282541083,"item_variation_data":{"name":"Regular","service_duration":1800000,"available_for_booking":true,"price_money":{"amount":3000,"currency":"USD"}}}]}}]}`), &response); err != nil {

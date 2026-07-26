@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/manleai/ai-receptionist/modules/booking"
+	"github.com/manleai/ai-receptionist/modules/scheduling"
 )
 
 const (
@@ -27,7 +28,7 @@ const (
 	ReplyPolicyStyleOnly            = "style_only"
 	ReplyPolicyConsultationQuestion = "consultation_question"
 
-	DialogStateVersion = 5
+	DialogStateVersion = 6
 
 	DialogPhaseOpen         = "open"
 	DialogPhaseDrafting     = "drafting"
@@ -143,18 +144,24 @@ const (
 	ConversationGuestCaller  = "caller"
 	ConversationGuestAnother = "another_guest"
 
-	PendingPartyServiceTarget       = "party_service_target"
-	PendingPartyServiceGuest        = "party_service_guest"
-	PendingPartyServiceOperation    = "party_service_operation"
-	PendingPartyServiceSource       = "party_service_source"
-	PendingCustomerNameConfirmation = "customer_name_confirmation"
-	PendingStaffAlternative         = "staff_alternative"
+	PendingPartyServiceTarget             = "party_service_target"
+	PendingPartyServiceGuest              = "party_service_guest"
+	PendingPartyServiceOperation          = "party_service_operation"
+	PendingPartyServiceSource             = "party_service_source"
+	PendingCustomerNameConfirmation       = "customer_name_confirmation"
+	PendingStaffAlternative               = "staff_alternative"
+	PendingManualAppointmentTarget        = "manual_appointment_target"
+	PendingFuzzyServiceConfirmation       = "fuzzy_service_confirmation"
+	PendingInternalRescheduleConfirmation = "internal_reschedule_confirmation"
+	PendingInternalCancelReason           = "internal_cancel_reason"
+	PendingInternalCancelConfirmation     = "internal_cancel_confirmation"
 
 	OutcomeCollecting             = "collecting"
 	OutcomeBookingConfirmed       = "booking_confirmed"
 	OutcomeBookingRescheduled     = "booking_rescheduled"
 	OutcomeBookingCancelled       = "booking_cancelled"
 	OutcomeBookingFallbackPending = "booking_fallback_pending"
+	OutcomeOwnerReviewPending     = "owner_review_pending"
 	OutcomeHandoffRequested       = "handoff_requested"
 	OutcomeConsultationCompleted  = "consultation_completed"
 	OutcomeAIDisabled             = "ai_disabled"
@@ -274,6 +281,18 @@ type BookingTool interface {
 	Cancel(ctx context.Context, salonID string, ownerUserID string, appointmentID string, req booking.CancelRequest) (*booking.Appointment, *booking.BookingAttempt, error)
 	RescheduleCandidates(ctx context.Context, salonID string, ownerUserID string, req booking.RescheduleLookupRequest) ([]booking.AppointmentActionRef, error)
 	Reschedule(ctx context.Context, salonID string, ownerUserID string, appointmentID string, req booking.RescheduleRequest) (*booking.Appointment, *booking.BookingAttempt, error)
+}
+
+// NeutralSchedulingTool is the authority-aware production scheduling
+// boundary. BookingTool remains temporarily available for provider-history
+// reads and legacy tests while scheduling writes use this contract whenever it
+// is implemented by the configured tool.
+type NeutralSchedulingTool interface {
+	CheckAvailability(ctx context.Context, salonID string, ownerUserID string, req booking.AvailabilityRequest) (*scheduling.AvailabilityResult, error)
+	CheckConversationAvailability(ctx context.Context, salonID string, ownerUserID string, reviewedMode scheduling.BookingMode, req booking.AvailabilityRequest) (*scheduling.AvailabilityResult, error)
+	ExecuteAction(ctx context.Context, salonID string, ownerUserID string, req scheduling.ActionRequest) (*scheduling.ActionResult, error)
+	ExecuteConversationAction(ctx context.Context, salonID string, ownerUserID string, reviewed scheduling.ConversationPolicyFence, req scheduling.ActionRequest) (*scheduling.ActionResult, error)
+	CurrentSchedulingAuthority(ctx context.Context, salonID string, ownerUserID string) (string, error)
 }
 
 type ReplyGenerator interface {
@@ -524,25 +543,47 @@ type GuidanceRecoveryState struct {
 }
 
 type DialogState struct {
-	Version              int                     `json:"version"`
-	Phase                string                  `json:"phase"`
-	Pending              *PendingConversationAct `json:"pending,omitempty"`
-	LastMutation         *DraftMutation          `json:"last_mutation,omitempty"`
-	MutationHistory      []DraftMutation         `json:"mutation_history,omitempty"`
-	ReviewRequired       bool                    `json:"review_required"`
-	ReviewAccepted       bool                    `json:"review_accepted"`
-	NoProgressCount      int                     `json:"no_progress_count"`
-	ProviderFailureCount int                     `json:"provider_failure_count"`
-	ProgressFingerprint  string                  `json:"progress_fingerprint,omitempty"`
-	LastPromptKey        string                  `json:"last_prompt_key,omitempty"`
-	LastActKind          string                  `json:"last_act_kind,omitempty"`
-	DraftRevision        int                     `json:"draft_revision"`
-	ReviewedRevision     int                     `json:"reviewed_revision"`
-	AuthorizedRevision   int                     `json:"authorized_revision"`
-	LastMutationRevision int                     `json:"last_mutation_revision,omitempty"`
-	TimePreference       *TimePreference         `json:"time_preference,omitempty"`
-	Consultation         *ConsultationState      `json:"consultation,omitempty"`
-	Guidance             *GuidanceRecoveryState  `json:"guidance,omitempty"`
+	Version                     int                      `json:"version"`
+	Phase                       string                   `json:"phase"`
+	Pending                     *PendingConversationAct  `json:"pending,omitempty"`
+	LastMutation                *DraftMutation           `json:"last_mutation,omitempty"`
+	MutationHistory             []DraftMutation          `json:"mutation_history,omitempty"`
+	ReviewRequired              bool                     `json:"review_required"`
+	ReviewAccepted              bool                     `json:"review_accepted"`
+	NoProgressCount             int                      `json:"no_progress_count"`
+	ProviderFailureCount        int                      `json:"provider_failure_count"`
+	ProgressFingerprint         string                   `json:"progress_fingerprint,omitempty"`
+	LastPromptKey               string                   `json:"last_prompt_key,omitempty"`
+	LastActKind                 string                   `json:"last_act_kind,omitempty"`
+	DraftRevision               int                      `json:"draft_revision"`
+	ReviewedRevision            int                      `json:"reviewed_revision"`
+	AuthorizedRevision          int                      `json:"authorized_revision"`
+	LastMutationRevision        int                      `json:"last_mutation_revision,omitempty"`
+	TimePreference              *TimePreference          `json:"time_preference,omitempty"`
+	Consultation                *ConsultationState       `json:"consultation,omitempty"`
+	Guidance                    *GuidanceRecoveryState   `json:"guidance,omitempty"`
+	ManualTarget                *ManualAppointmentTarget `json:"manual_appointment_target,omitempty"`
+	SchedulingRequestOnly       bool                     `json:"scheduling_request_only,omitempty"`
+	ReviewedBookingMode         scheduling.BookingMode   `json:"reviewed_booking_mode,omitempty"`
+	SelectedSchedulingAuthority string                   `json:"selected_scheduling_authority,omitempty"`
+	CustomerSMSConsent          *CustomerSMSConsentState `json:"customer_sms_consent,omitempty"`
+}
+
+type CustomerSMSConsentState struct {
+	Status               string `json:"status"`
+	DestinationHash      string `json:"destination_hash"`
+	DestinationMasked    string `json:"destination_masked"`
+	DraftRevision        int    `json:"draft_revision"`
+	ConsentVersion       int    `json:"consent_version,omitempty"`
+	RequestEventKey      string `json:"request_event_key,omitempty"`
+	LastResponseEventKey string `json:"last_response_event_key,omitempty"`
+}
+
+// ManualAppointmentTarget is caller-supplied identification context used only
+// when owner_manual has no durable appointment target. It cannot override a
+// persisted appointment ID or its originating scheduling authority.
+type ManualAppointmentTarget struct {
+	Description string `json:"description"`
 }
 
 type Store interface {
@@ -569,17 +610,22 @@ type Store interface {
 	SaveTurn(ctx context.Context, record TurnRecord) (*Session, error)
 }
 
-// AnswerContextFence identifies the active provider snapshot that owns
-// structured conversation context. It is read from PostgreSQL on every turn so
-// each API replica can reject a locally cached snapshot after provider,
-// location, generation, or readiness changes.
+// AnswerContextFence identifies the authority-scoped evidence that owns
+// structured conversation context. External mode uses the current provider
+// snapshot; ManleAI Calendar uses its authoritative config capability/version.
+// It is read on every turn so replicas reject stale cached context after any
+// scheduling source-of-truth change.
 type AnswerContextFence struct {
-	ActiveProvider     string
-	ConnectionStatus   string
-	LocationID         string
-	SnapshotGeneration int64
-	LastSyncAtRFC3339  string
-	Ready              bool
+	SchedulingAuthority        string
+	SchedulingAuthorityVersion int64
+	CalendarConfigVersion      int64
+	CalendarActivatedVersion   int64
+	ActiveProvider             string
+	ConnectionStatus           string
+	LocationID                 string
+	SnapshotGeneration         int64
+	LastSyncAtRFC3339          string
+	Ready                      bool
 }
 
 type StartSessionRequest struct {
@@ -685,16 +731,22 @@ type TranscriptionContext struct {
 }
 
 type RuntimeConfig struct {
-	SalonName               string
-	Timezone                string
-	AIEnabled               bool
-	HandoffPhone            string
-	HandoffEnabled          bool
-	ConsultationEnabled     bool
-	AIGreeting              string
-	AITone                  string
-	RecordingEnabled        bool
-	RecordingConsentMessage string
+	SalonName                string
+	Timezone                 string
+	AIEnabled                bool
+	HandoffPhone             string
+	HandoffEnabled           bool
+	ConsultationEnabled      bool
+	AIGreeting               string
+	AITone                   string
+	RecordingEnabled         bool
+	RecordingConsentMessage  string
+	BookingMode              scheduling.BookingMode
+	SchedulingAuthority      string
+	CustomerSMSEnabled       bool
+	CustomerSMSQuietStart    string
+	CustomerSMSQuietEnd      string
+	CustomerSMSPolicyVersion int64
 }
 
 type ServiceOption struct {
@@ -776,55 +828,92 @@ type BusinessHourPeriod struct {
 }
 
 type Session struct {
-	ID                   string                          `json:"id"`
-	SalonID              string                          `json:"salon_id"`
-	Channel              string                          `json:"channel"`
-	Provider             string                          `json:"provider,omitempty"`
-	ProviderCallID       string                          `json:"provider_call_id,omitempty"`
-	InboundPhone         string                          `json:"inbound_phone,omitempty"`
-	OutboundPhone        string                          `json:"outbound_phone,omitempty"`
-	Status               string                          `json:"status"`
-	Intent               string                          `json:"intent"`
-	Outcome              string                          `json:"outcome"`
-	StateRevision        int64                           `json:"state_revision"`
-	BookingAction        string                          `json:"booking_action"`
-	TargetAppointmentID  string                          `json:"target_appointment_id,omitempty"`
-	RescheduleCandidates []RescheduleCandidate           `json:"reschedule_candidates,omitempty"`
-	CustomerName         string                          `json:"customer_name,omitempty"`
-	CustomerPhone        string                          `json:"customer_phone,omitempty"`
-	CustomerEmail        string                          `json:"customer_email,omitempty"`
-	ServiceID            string                          `json:"service_id,omitempty"`
-	ServiceName          string                          `json:"service_name,omitempty"`
-	StaffID              string                          `json:"staff_id,omitempty"`
-	StaffName            string                          `json:"staff_name,omitempty"`
-	StaffSelectionMode   string                          `json:"staff_selection_mode,omitempty"`
-	RequestedDate        string                          `json:"requested_date,omitempty"`
-	RequestedStartTime   *time.Time                      `json:"requested_start_time,omitempty"`
-	AvailabilityQuoteID  string                          `json:"availability_quote_id,omitempty"`
-	SlotFingerprint      string                          `json:"availability_slot_fingerprint,omitempty"`
-	OfferedSlots         []OfferedSlot                   `json:"offered_slots,omitempty"`
-	BookingSegments      []booking.BookingSegmentRequest `json:"booking_segments,omitempty"`
-	PartyPlan            *PartyPlan                      `json:"party_plan,omitempty"`
-	DialogState          DialogState                     `json:"dialog_state"`
-	BookingAttemptID     string                          `json:"booking_attempt_id,omitempty"`
-	AppointmentID        string                          `json:"appointment_id,omitempty"`
-	Summary              string                          `json:"summary,omitempty"`
-	LifecycleStatus      string                          `json:"lifecycle_status"`
-	ArchivedAt           *time.Time                      `json:"archived_at,omitempty"`
-	RedactedAt           *time.Time                      `json:"redacted_at,omitempty"`
-	RetentionExpiresAt   time.Time                       `json:"retention_expires_at"`
-	StartedAt            time.Time                       `json:"started_at"`
-	EndedAt              *time.Time                      `json:"ended_at,omitempty"`
-	CreatedAt            time.Time                       `json:"created_at"`
-	UpdatedAt            time.Time                       `json:"updated_at"`
-	Transcript           []TranscriptMessage             `json:"transcript,omitempty"`
-	Handoff              *HandoffRequest                 `json:"handoff,omitempty"`
-	PartyRequest         *PartyBookingRequest            `json:"party_request,omitempty"`
+	ID                       string                          `json:"id"`
+	SalonID                  string                          `json:"salon_id"`
+	Channel                  string                          `json:"channel"`
+	Provider                 string                          `json:"provider,omitempty"`
+	ProviderCallID           string                          `json:"provider_call_id,omitempty"`
+	InboundPhone             string                          `json:"inbound_phone,omitempty"`
+	OutboundPhone            string                          `json:"outbound_phone,omitempty"`
+	Status                   string                          `json:"status"`
+	Intent                   string                          `json:"intent"`
+	Outcome                  string                          `json:"outcome"`
+	StateRevision            int64                           `json:"state_revision"`
+	BookingAction            string                          `json:"booking_action"`
+	TargetAppointmentID      string                          `json:"target_appointment_id,omitempty"`
+	RescheduleCandidates     []RescheduleCandidate           `json:"reschedule_candidates,omitempty"`
+	CustomerName             string                          `json:"customer_name,omitempty"`
+	CustomerPhone            string                          `json:"customer_phone,omitempty"`
+	CustomerEmail            string                          `json:"customer_email,omitempty"`
+	ServiceID                string                          `json:"service_id,omitempty"`
+	ServiceName              string                          `json:"service_name,omitempty"`
+	StaffID                  string                          `json:"staff_id,omitempty"`
+	StaffName                string                          `json:"staff_name,omitempty"`
+	StaffSelectionMode       string                          `json:"staff_selection_mode,omitempty"`
+	RequestedDate            string                          `json:"requested_date,omitempty"`
+	RequestedStartTime       *time.Time                      `json:"requested_start_time,omitempty"`
+	AvailabilityQuoteID      string                          `json:"availability_quote_id,omitempty"`
+	SlotFingerprint          string                          `json:"availability_slot_fingerprint,omitempty"`
+	OfferedSlots             []OfferedSlot                   `json:"offered_slots,omitempty"`
+	BookingSegments          []booking.BookingSegmentRequest `json:"booking_segments,omitempty"`
+	PartyPlan                *PartyPlan                      `json:"party_plan,omitempty"`
+	DialogState              DialogState                     `json:"dialog_state"`
+	BookingAttemptID         string                          `json:"booking_attempt_id,omitempty"`
+	AppointmentID            string                          `json:"appointment_id,omitempty"`
+	SchedulingRequestID      string                          `json:"scheduling_request_id,omitempty"`
+	SchedulingResultEvidence *SchedulingResultEvidence       `json:"scheduling_result_evidence,omitempty"`
+	Summary                  string                          `json:"summary,omitempty"`
+	LifecycleStatus          string                          `json:"lifecycle_status"`
+	ArchivedAt               *time.Time                      `json:"archived_at,omitempty"`
+	RedactedAt               *time.Time                      `json:"redacted_at,omitempty"`
+	RetentionExpiresAt       time.Time                       `json:"retention_expires_at"`
+	StartedAt                time.Time                       `json:"started_at"`
+	EndedAt                  *time.Time                      `json:"ended_at,omitempty"`
+	CreatedAt                time.Time                       `json:"created_at"`
+	UpdatedAt                time.Time                       `json:"updated_at"`
+	Transcript               []TranscriptMessage             `json:"transcript,omitempty"`
+	Handoff                  *HandoffRequest                 `json:"handoff,omitempty"`
+	PartyRequest             *PartyBookingRequest            `json:"party_request,omitempty"`
 	// ReplayAIMessage is an internal response override for a deduplicated
 	// provider event. The persisted session and transcript remain at their
 	// newest state while the voice layer replays the exact historical reply.
 	ReplayEventKey  string `json:"-"`
 	ReplayAIMessage string `json:"-"`
+}
+
+const (
+	SchedulingEvidenceKindIncomplete         = "incomplete"
+	SchedulingEvidenceKindPendingOwnerReview = "pending_owner_review"
+	SchedulingEvidenceKindCompletedOperation = "completed_operation"
+
+	SchedulingEvidenceStatusIncomplete = "incomplete"
+	SchedulingEvidenceStatusMixed      = "mixed"
+)
+
+// SchedulingResultEvidence is an owner-scoped, backend-validated projection of
+// authority-native scheduling evidence. Call/session clients must not infer a
+// completed operation from the session's local appointment or attempt IDs.
+// ResultStatus describes the exact historical operation. CurrentStatus and
+// IsCurrent describe the present durable appointment state after any later
+// lifecycle mutation.
+type SchedulingResultEvidence struct {
+	Complete                           bool   `json:"complete"`
+	Kind                               string `json:"kind"`
+	SchedulingAuthority                string `json:"scheduling_authority,omitempty"`
+	TargetSchedulingAuthority          string `json:"target_scheduling_authority,omitempty"`
+	OperationType                      string `json:"operation_type,omitempty"`
+	ResultStatus                       string `json:"result_status"`
+	CurrentStatus                      string `json:"current_status"`
+	IsCurrent                          bool   `json:"is_current"`
+	AppointmentID                      string `json:"appointment_id,omitempty"`
+	BookingAttemptID                   string `json:"booking_attempt_id,omitempty"`
+	SchedulingRequestID                string `json:"scheduling_request_id,omitempty"`
+	AuthorityAppointmentVersion        int    `json:"authority_appointment_version,omitempty"`
+	CurrentAuthorityAppointmentVersion int    `json:"current_authority_appointment_version,omitempty"`
+	RootCount                          int    `json:"root_count"`
+	ResultChildCount                   int    `json:"result_child_count"`
+	CurrentActiveChildCount            int    `json:"current_active_child_count"`
+	IncompleteReason                   string `json:"incomplete_reason,omitempty"`
 }
 
 type OfferedSlot struct {
@@ -848,15 +937,20 @@ type OfferedSlotSegment struct {
 }
 
 type RescheduleCandidate struct {
-	AppointmentID      string                          `json:"appointment_id"`
-	ServiceLabel       string                          `json:"service_label"`
-	StaffLabel         string                          `json:"staff_label"`
-	ServiceID          string                          `json:"service_id,omitempty"`
-	StaffID            string                          `json:"staff_id,omitempty"`
-	StaffSelectionMode string                          `json:"staff_selection_mode,omitempty"`
-	Segments           []booking.BookingSegmentRequest `json:"segments,omitempty"`
-	StartTime          time.Time                       `json:"start_time"`
-	EndTime            time.Time                       `json:"end_time"`
+	AppointmentID               string                          `json:"appointment_id"`
+	SchedulingAuthority         string                          `json:"scheduling_authority,omitempty"`
+	AuthorityAppointmentVersion int                             `json:"authority_appointment_version,omitempty"`
+	PartySize                   int                             `json:"party_size,omitempty"`
+	Status                      string                          `json:"status,omitempty"`
+	ActiveChildCount            int                             `json:"active_child_count,omitempty"`
+	ServiceLabel                string                          `json:"service_label"`
+	StaffLabel                  string                          `json:"staff_label"`
+	ServiceID                   string                          `json:"service_id,omitempty"`
+	StaffID                     string                          `json:"staff_id,omitempty"`
+	StaffSelectionMode          string                          `json:"staff_selection_mode,omitempty"`
+	Segments                    []booking.BookingSegmentRequest `json:"segments,omitempty"`
+	StartTime                   time.Time                       `json:"start_time"`
+	EndTime                     time.Time                       `json:"end_time"`
 }
 
 type TranscriptMessage struct {
@@ -904,9 +998,12 @@ type PartyBookingRequest struct {
 }
 
 type PartyGuestService struct {
-	ServiceID   string `json:"service_id,omitempty"`
-	ServiceName string `json:"service_name,omitempty"`
-	Notes       string `json:"notes,omitempty"`
+	GuestReference string `json:"guest_reference,omitempty"`
+	ServiceID      string `json:"service_id,omitempty"`
+	ServiceName    string `json:"service_name,omitempty"`
+	Quantity       int    `json:"quantity,omitempty"`
+	SortOrder      int    `json:"sort_order,omitempty"`
+	Notes          string `json:"notes,omitempty"`
 }
 
 type PartyPlan struct {
@@ -960,9 +1057,13 @@ type PartySplitBlock struct {
 }
 
 type PartySplitQuoteRef struct {
-	ServiceID           string `json:"service_id"`
-	AvailabilityQuoteID string `json:"availability_quote_id"`
-	SlotFingerprint     string `json:"availability_slot_fingerprint"`
+	ServiceID           string    `json:"service_id"`
+	GuestReference      string    `json:"guest_reference,omitempty"`
+	Quantity            int       `json:"quantity,omitempty"`
+	RequestedStartTime  time.Time `json:"requested_start_time,omitempty"`
+	RequestedEndTime    time.Time `json:"requested_end_time,omitempty"`
+	AvailabilityQuoteID string    `json:"availability_quote_id"`
+	SlotFingerprint     string    `json:"availability_slot_fingerprint"`
 }
 
 type WebhookEventLog struct {
@@ -1035,6 +1136,7 @@ type SessionUpdate struct {
 	DialogState          DialogState
 	BookingAttemptID     string
 	AppointmentID        string
+	SchedulingRequestID  string
 	Summary              string
 	EndSession           bool
 }

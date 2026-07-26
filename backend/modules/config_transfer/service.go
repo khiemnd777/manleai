@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	"github.com/manleai/ai-receptionist/internal/config"
+	"github.com/manleai/ai-receptionist/modules/booking"
 	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/salon"
@@ -25,6 +26,7 @@ var (
 	ErrValidation            = errors.New("configuration transfer validation failed")
 	ErrUnsupportedSchema     = errors.New("configuration transfer schema is unsupported")
 	ErrImportConflict        = errors.New("configuration import has conflicts")
+	ErrAuthorityChanged      = errors.New("destination scheduling authority changed during configuration import")
 	ErrOnboardingSalonExists = errors.New("onboarding import requires an owner without a salon")
 )
 
@@ -163,10 +165,6 @@ func (s *Service) Get(ctx context.Context, salonID string, ownerUserID string) (
 		return nil, err
 	}
 
-	connection, err := s.posConnection(ctx, salonID, activeProvider)
-	if err != nil {
-		return nil, err
-	}
 	profile := salonProfileExport(item)
 	profile.ActivePOSProvider = activeProvider
 
@@ -182,7 +180,7 @@ func (s *Service) Get(ctx context.Context, salonID string, ownerUserID string) (
 		AIReceptionist:          aiReceptionistExport(settings),
 		PublicBookingPage:       publicBookingPageExport(publicPage),
 		Integrations:            *integrations,
-		POSConnection:           posConnectionExport(activeProvider, connection),
+		POSConnection:           nil,
 		ServiceCategories:       serviceCategoriesExport(categories),
 		ServiceAliases:          serviceAliasesExport(serviceAliases, services),
 		ConsultationProfiles:    serviceConsultationProfilesExport(services),
@@ -211,6 +209,16 @@ func (s *Service) ApplyImport(ctx context.Context, salonID string, ownerUserID s
 	}
 	runID, _, err := s.imports.ApplyImport(ctx, strings.TrimSpace(salonID), strings.TrimSpace(ownerUserID), plan)
 	if err != nil {
+		if errors.Is(err, ErrAuthorityChanged) {
+			plan.Conflicts = append(plan.Conflicts, ImportIssue{
+				Section: SectionAI,
+				Code:    "target_scheduling_authority_changed",
+				Message: "The destination scheduling authority changed before apply. Preview the configuration again; import never switches authority.",
+				Field:   "target_scheduling_authority",
+			})
+			plan.CanApply = false
+			return importResponse(plan, false, runID), ErrImportConflict
+		}
 		if errors.Is(err, ErrImportConflict) {
 			plan.Conflicts = append(plan.Conflicts, ImportIssue{
 				Section: SectionSalon,
@@ -410,20 +418,23 @@ func (s *Service) buildOnboardingImportPlan(ctx context.Context, ownerUserID str
 
 func newImportPlan(bundle ConfigurationBundle, fingerprint string, requestID string, salonID string, target *importTargetState) *importPlan {
 	plan := &importPlan{
-		Bundle:                bundle,
-		PayloadFingerprint:    fingerprint,
-		SchemaVersion:         bundle.SchemaVersion,
-		SalonID:               salonID,
-		RequestID:             requestID,
-		Summary:               newSummaryMap(bundle.IncludedSections),
-		RequiresSecretReentry: secretReentryProviders(bundle.Integrations),
-		CanApply:              true,
-		Target:                target,
-		PublicCatalogEnabled:  target.PublicBookingPage.PublicCatalogEnabled,
-		AIEnabled:             target.SalonProfile.AIEnabled,
-		BookingMode:           target.AIReceptionist.BookingMode,
-		ConsultationEnabled:   target.AIReceptionist.ConsultationEnabled,
-		IncludedSections:      sectionSet(bundle.IncludedSections),
+		Bundle:                  bundle,
+		PayloadFingerprint:      fingerprint,
+		SchemaVersion:           bundle.SchemaVersion,
+		SalonID:                 salonID,
+		RequestID:               requestID,
+		Summary:                 newSummaryMap(bundle.IncludedSections),
+		RequiresSecretReentry:   secretReentryProviders(bundle.Integrations),
+		CanApply:                true,
+		Target:                  target,
+		PublicCatalogEnabled:    target.PublicBookingPage.PublicCatalogEnabled,
+		AIEnabled:               target.SalonProfile.AIEnabled,
+		BookingMode:             target.AIReceptionist.BookingMode,
+		ConsultationEnabled:     target.AIReceptionist.ConsultationEnabled,
+		IncludedSections:        sectionSet(bundle.IncludedSections),
+		TargetAuthority:         target.SchedulingAuthority,
+		TargetAuthorityVersion:  target.SchedulingAuthorityVersion,
+		SourceActivePOSProvider: bundle.SalonProfile.ActivePOSProvider,
 	}
 	if bundle.SchemaVersion == LegacySchemaV1 {
 		plan.Warnings = append(plan.Warnings, ImportIssue{
@@ -446,14 +457,14 @@ func newImportPlan(bundle ConfigurationBundle, fingerprint string, requestID str
 			Message: "This export did not include service aliases.",
 		})
 	}
-	if bundle.SchemaVersion != SchemaVersion {
+	if !schemaHasPortableConsultationProfiles(bundle.SchemaVersion) {
 		plan.Warnings = append(plan.Warnings, ImportIssue{
 			Section: SectionConsultation,
 			Code:    "legacy_schema_missing_service_consultation_profiles",
 			Message: "This legacy export did not include portable service consultation profiles.",
 		})
 	}
-	if plan.includes(SectionIntegrations) && plan.Bundle.POSConnection.Status != "" {
+	if plan.includes(SectionIntegrations) && plan.Bundle.POSConnection != nil && plan.Bundle.POSConnection.Status != "" {
 		plan.Warnings = append(plan.Warnings, ImportIssue{
 			Section: SectionIntegrations,
 			Code:    "pos_connection_metadata_not_imported",
@@ -495,7 +506,8 @@ func onboardingImportTargetState() *importTargetState {
 			ConsultationEnabled:     false,
 		},
 		PublicCanPublish:             false,
-		CanEnableAIBooking:           false,
+		SchedulingAuthority:          booking.SchedulingAuthorityOwnerManual,
+		SchedulingAuthorityVersion:   1,
 		ServiceCategoryBySlug:        map[string]ServiceCategoryExport{},
 		CategoryAliasByKey:           map[string]ServiceCategoryAliasExport{},
 		ActiveServiceAliasKeys:       map[string]bool{},
@@ -525,20 +537,24 @@ func planSalonProfile(ctx context.Context, store ImportStore, plan *importPlan) 
 	fieldChange(plan, SectionSalon, "secondary_language", target.SecondaryLanguage, incoming.SecondaryLanguage)
 	fieldChange(plan, SectionSalon, "handoff_phone", target.HandoffPhone, incoming.HandoffPhone)
 
-	if incoming.AIEnabled && !plan.Target.CanEnableAIBooking {
-		summary(plan, SectionSalon).Skipped++
-		plan.Warnings = append(plan.Warnings, ImportIssue{
-			Section: SectionSalon,
-			Code:    "ai_enabled_skipped_readiness",
-			Message: "AI booking was not enabled because the target salon has not passed Square booking readiness checks.",
-			Field:   "ai_enabled",
-		})
-	} else {
-		plan.AIEnabled = incoming.AIEnabled
-		fieldChange(plan, SectionSalon, "ai_enabled", boolString(target.AIEnabled), boolString(incoming.AIEnabled))
-	}
+	// AI runtime enablement is portable intent. Scheduling writes remain gated
+	// independently by booking_mode and the destination's current authority.
+	plan.AIEnabled = incoming.AIEnabled
+	fieldChange(plan, SectionSalon, "ai_enabled", boolString(target.AIEnabled), boolString(incoming.AIEnabled))
 
-	if incoming.ActivePOSProvider != "" && incoming.ActivePOSProvider != pos.ProviderSquare {
+	if incoming.ActivePOSProvider == "" {
+		plan.Bundle.SalonProfile.ActivePOSProvider = target.ActivePOSProvider
+		fieldChange(plan, SectionSalon, "active_pos_provider", target.ActivePOSProvider, target.ActivePOSProvider)
+	} else if plan.Target.SchedulingAuthority == booking.SchedulingAuthorityExternalProvider && target.ActivePOSProvider != "" && incoming.ActivePOSProvider != target.ActivePOSProvider {
+		summary(plan, SectionSalon).Conflicts++
+		plan.Bundle.SalonProfile.ActivePOSProvider = target.ActivePOSProvider
+		plan.Conflicts = append(plan.Conflicts, ImportIssue{
+			Section: SectionSalon,
+			Code:    "active_provider_change_requires_provider_switch",
+			Message: "The destination currently schedules through its external provider. Change the active adapter through the explicit provider-switch workflow; configuration import will not change it.",
+			Field:   "active_pos_provider",
+		})
+	} else if incoming.ActivePOSProvider != pos.ProviderSquare {
 		summary(plan, SectionSalon).Skipped++
 		plan.Bundle.SalonProfile.ActivePOSProvider = target.ActivePOSProvider
 		plan.Warnings = append(plan.Warnings, ImportIssue{
@@ -548,9 +564,6 @@ func planSalonProfile(ctx context.Context, store ImportStore, plan *importPlan) 
 			Field:   "active_pos_provider",
 		})
 	} else {
-		if incoming.ActivePOSProvider == "" {
-			plan.Bundle.SalonProfile.ActivePOSProvider = pos.ProviderSquare
-		}
 		fieldChange(plan, SectionSalon, "active_pos_provider", target.ActivePOSProvider, plan.Bundle.SalonProfile.ActivePOSProvider)
 	}
 	_ = ctx
@@ -577,23 +590,23 @@ func planAIReceptionist(plan *importPlan) {
 			plan.Warnings = append(plan.Warnings, ImportIssue{
 				Section: SectionAI,
 				Code:    "consultation_enablement_deferred_until_service_sync",
-				Message: "AI consultation remains disabled until Square services are synced and the consultation profile pack is imported into the existing salon.",
+				Message: "AI consultation remains disabled until destination services exist and the consultation profile pack is imported into the existing salon.",
 				Field:   "consultation_enabled",
 			})
-		case plan.Bundle.SchemaVersion == SchemaVersion && (!plan.includes(SectionConsultation) || !plan.ConsultationReady):
+		case schemaHasPortableConsultationProfiles(plan.Bundle.SchemaVersion) && (!plan.includes(SectionConsultation) || !plan.ConsultationReady):
 			summary(plan, SectionAI).Conflicts++
 			plan.Conflicts = append(plan.Conflicts, ImportIssue{
 				Section: SectionAI,
 				Code:    "consultation_profiles_required",
-				Message: "AI consultation cannot be enabled because the v7 bundle does not resolve at least one ready profile to an eligible Square service.",
+				Message: "AI consultation cannot be enabled because the bundle does not resolve at least one ready profile to a service eligible for the destination's current scheduling authority.",
 				Field:   "consultation_enabled",
 			})
-		case plan.Bundle.SchemaVersion != SchemaVersion && !targetHasCompleteReadyConsultationProfile(plan.Target):
+		case !schemaHasPortableConsultationProfiles(plan.Bundle.SchemaVersion) && !targetHasCompleteReadyConsultationProfile(plan.Target):
 			summary(plan, SectionAI).Conflicts++
 			plan.Conflicts = append(plan.Conflicts, ImportIssue{
 				Section: SectionAI,
 				Code:    "consultation_ready_profile_required",
-				Message: "AI consultation cannot be enabled because the target salon does not have a complete ready profile on an eligible Square service.",
+				Message: "AI consultation cannot be enabled because the target salon does not have a complete ready profile on a service eligible for its current scheduling authority.",
 				Field:   "consultation_enabled",
 			})
 		default:
@@ -605,14 +618,15 @@ func planAIReceptionist(plan *importPlan) {
 		fieldChange(plan, SectionAI, "consultation_enabled", boolString(target.ConsultationEnabled), boolString(incoming.ConsultationEnabled))
 	}
 
-	if incoming.BookingMode == "confirmed_booking" && !plan.Target.CanEnableAIBooking {
+	if incoming.BookingMode == "confirmed_booking" && plan.Target.SchedulingAuthority == booking.SchedulingAuthorityOwnerManual {
 		summary(plan, SectionAI).Skipped++
 		plan.Warnings = append(plan.Warnings, ImportIssue{
 			Section: SectionAI,
-			Code:    "confirmed_booking_skipped_readiness",
-			Message: "POS-confirmed booking mode was skipped because the target salon has not passed Square booking readiness checks.",
+			Code:    "confirmed_booking_incompatible_with_owner_manual",
+			Message: "Confirmed booking mode was not imported because Owner confirmation is request-only. The final imported booking mode is pending approval.",
 			Field:   "booking_mode",
 		})
+		plan.BookingMode = "pending_approval"
 		return
 	}
 	plan.BookingMode = incoming.BookingMode
@@ -667,7 +681,7 @@ func planPublicBookingPage(ctx context.Context, store ImportStore, salonID strin
 		plan.Warnings = append(plan.Warnings, ImportIssue{
 			Section: SectionPublic,
 			Code:    "public_catalog_enabled_skipped_readiness",
-			Message: "Public booking page publish state was not enabled because the target salon does not have synced AI-bookable services and staff.",
+			Message: "Public booking page publish state was not enabled because the destination does not meet the structural catalog requirements for its current scheduling authority.",
 			Field:   "public_catalog_enabled",
 		})
 		return
@@ -955,11 +969,11 @@ func planServiceConsultationProfiles(plan *importPlan) {
 			resolvedAll = false
 			summary(plan, SectionConsultation).Conflicts++
 			code := "consultation_profile_target_not_found"
-			message := "A consultation profile target was not found. Sync the matching Square service before applying this pack."
+			message := "A consultation profile target was not found in the destination salon's canonical service catalog."
 			if item.Status == pos.ConsultationProfileStatusReady {
 				if _, exists := plan.Target.ServiceTargetsByKey[targetKey]; exists || plan.Target.AmbiguousServiceTargets[targetKey] {
 					code = "consultation_profile_target_ineligible"
-					message = "A ready consultation profile can only target an active-provider, POS-linked, synced, AI-bookable Square service."
+					message = "A ready consultation profile can only target a service eligible for the destination's current scheduling authority."
 				}
 			}
 			plan.Conflicts = append(plan.Conflicts, ImportIssue{
@@ -1005,7 +1019,7 @@ func planOnboardingServiceConsultationProfiles(plan *importPlan) {
 	plan.Warnings = append(plan.Warnings, ImportIssue{
 		Section: SectionConsultation,
 		Code:    "consultation_profiles_deferred_until_service_sync",
-		Message: "Consultation profiles were deferred because onboarding has no synced Square services yet. Import the same pack from Settings after Square sync.",
+		Message: "Consultation profiles were deferred because onboarding has no destination services to resolve yet. Import the same pack from Settings after services are configured.",
 	})
 }
 
@@ -1056,7 +1070,7 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 	if bundle.SchemaVersion == "" {
 		return bundle, ErrValidation
 	}
-	if bundle.SchemaVersion != SchemaVersion && bundle.SchemaVersion != LegacySchemaV6 && bundle.SchemaVersion != LegacySchemaV5 && bundle.SchemaVersion != LegacySchemaV4 && bundle.SchemaVersion != LegacySchemaV3 && bundle.SchemaVersion != LegacySchemaV2 && bundle.SchemaVersion != LegacySchemaV1 {
+	if bundle.SchemaVersion != SchemaVersion && bundle.SchemaVersion != LegacySchemaV7 && bundle.SchemaVersion != LegacySchemaV6 && bundle.SchemaVersion != LegacySchemaV5 && bundle.SchemaVersion != LegacySchemaV4 && bundle.SchemaVersion != LegacySchemaV3 && bundle.SchemaVersion != LegacySchemaV2 && bundle.SchemaVersion != LegacySchemaV1 {
 		return bundle, ErrUnsupportedSchema
 	}
 	if bundle.SecretsExported || bundle.OperationalDataExported {
@@ -1068,13 +1082,18 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 	}
 	bundle.IncludedSections = sections
 	bundle.ExcludedData = copyStrings(excludedData)
+	if bundle.SchemaVersion == SchemaVersion {
+		// Provider connection state was present as reference-only metadata in v7.
+		// It is not portable intent and is omitted/ignored by the v8 contract.
+		bundle.POSConnection = nil
+	}
 	if bundleIncludes(bundle, SectionIntegrations) {
 		bundle.RequiresSecretReentry = secretReentryProviders(bundle.Integrations)
 	} else {
 		bundle.RequiresSecretReentry = []string{}
 	}
 	if bundleIncludes(bundle, SectionSalon) {
-		bundle.SalonProfile = normalizeSalonProfile(bundle.SalonProfile)
+		bundle.SalonProfile = normalizeSalonProfile(bundle.SalonProfile, bundle.SchemaVersion)
 		if bundle.SalonProfile.Name == "" || bundle.SalonProfile.Phone == "" {
 			return bundle, ErrValidation
 		}
@@ -1172,7 +1191,7 @@ func normalizedImportRequest(req ImportRequest) (ConfigurationBundle, string, st
 	return bundle, fingerprint, requestID, nil
 }
 
-func normalizeSalonProfile(profile SalonProfileExport) SalonProfileExport {
+func normalizeSalonProfile(profile SalonProfileExport, schemaVersion string) SalonProfileExport {
 	profile.Name = strings.TrimSpace(profile.Name)
 	profile.Phone = strings.TrimSpace(profile.Phone)
 	profile.Address = strings.TrimSpace(profile.Address)
@@ -1183,7 +1202,10 @@ func normalizeSalonProfile(profile SalonProfileExport) SalonProfileExport {
 	profile.PrimaryLanguage = defaultString(strings.TrimSpace(profile.PrimaryLanguage), "en")
 	profile.SecondaryLanguage = defaultString(strings.TrimSpace(profile.SecondaryLanguage), "vi")
 	profile.HandoffPhone = strings.TrimSpace(profile.HandoffPhone)
-	profile.ActivePOSProvider = defaultString(strings.TrimSpace(profile.ActivePOSProvider), pos.ProviderSquare)
+	profile.ActivePOSProvider = strings.TrimSpace(profile.ActivePOSProvider)
+	if schemaVersion != SchemaVersion {
+		profile.ActivePOSProvider = defaultString(profile.ActivePOSProvider, pos.ProviderSquare)
+	}
 	return profile
 }
 
@@ -1342,17 +1364,6 @@ func validateIntegrationURLs(configs integrationconfig.IntegrationConfigsRespons
 	return nil
 }
 
-func (s *Service) posConnection(ctx context.Context, salonID string, provider string) (*pos.Connection, error) {
-	if s.pos == nil {
-		return nil, nil
-	}
-	connection, err := s.pos.GetConnection(ctx, salonID, provider)
-	if errors.Is(err, pos.ErrNotFound) {
-		return nil, nil
-	}
-	return connection, err
-}
-
 func (s *Service) serviceCategories(ctx context.Context, salonID string, ownerUserID string) ([]pos.ServiceCategory, error) {
 	if s.categories == nil {
 		return []pos.ServiceCategory{}, nil
@@ -1428,26 +1439,6 @@ func publicBookingPageExport(settings *salon.PublicCatalogSettings) PublicBookin
 		PublicCatalogEnabled: settings.PublicCatalogEnabled,
 		PublicPath:           settings.PublicPath,
 		UpdatedAt:            settings.UpdatedAt,
-	}
-}
-
-func posConnectionExport(provider string, connection *pos.Connection) POSConnectionExport {
-	if connection == nil {
-		return POSConnectionExport{
-			Provider: provider,
-			Status:   pos.StatusNotConnected,
-			Scopes:   []string{},
-		}
-	}
-	updatedAt := connection.UpdatedAt
-	return POSConnectionExport{
-		Provider:   connection.Provider,
-		Status:     connection.Status,
-		MerchantID: connection.MerchantID,
-		LocationID: connection.LocationID,
-		Scopes:     append([]string{}, connection.Scopes...),
-		LastSyncAt: connection.LastSyncAt,
-		UpdatedAt:  &updatedAt,
 	}
 }
 
@@ -1669,19 +1660,62 @@ func importResponse(plan *importPlan, dryRun bool, runID string) *ImportResponse
 		}
 	}
 	return &ImportResponse{
-		ImportRunID:           runID,
-		SalonID:               plan.SalonID,
-		RequestID:             plan.RequestID,
-		DryRun:                dryRun,
-		Status:                status,
-		SchemaVersion:         plan.SchemaVersion,
-		CanApply:              plan.CanApply,
-		Summary:               summaryValues(plan.Summary),
-		Warnings:              issueValues(plan.Warnings),
-		Conflicts:             issueValues(plan.Conflicts),
-		ExcludedData:          copyStrings(excludedData),
-		RequiresSecretReentry: copyStrings(plan.RequiresSecretReentry),
+		ImportRunID:             runID,
+		SalonID:                 plan.SalonID,
+		RequestID:               plan.RequestID,
+		DryRun:                  dryRun,
+		Status:                  status,
+		SchemaVersion:           plan.SchemaVersion,
+		IncludedSections:        copyStringsPreserveOrder(plan.Bundle.IncludedSections),
+		TargetAuthority:         plan.TargetAuthority,
+		TargetAuthorityVersion:  plan.TargetAuthorityVersion,
+		SourceActivePOSProvider: sourceActivePOSProvider(plan),
+		TargetActivePOSProvider: plan.Target.SalonProfile.ActivePOSProvider,
+		ResultActivePOSProvider: resultActivePOSProvider(plan),
+		SourceBookingMode:       sourceBookingMode(plan),
+		TargetBookingMode:       plan.Target.AIReceptionist.BookingMode,
+		ResultBookingMode:       resultBookingMode(plan),
+		CanApply:                plan.CanApply,
+		Summary:                 summaryValues(plan.Summary),
+		Warnings:                issueValues(plan.Warnings),
+		Conflicts:               issueValues(plan.Conflicts),
+		ExcludedData:            copyStrings(excludedData),
+		RequiresSecretReentry:   copyStrings(plan.RequiresSecretReentry),
 	}
+}
+
+func sourceActivePOSProvider(plan *importPlan) string {
+	if plan == nil || !plan.includes(SectionSalon) {
+		return ""
+	}
+	return plan.SourceActivePOSProvider
+}
+
+func resultActivePOSProvider(plan *importPlan) string {
+	if plan == nil || plan.Target == nil {
+		return ""
+	}
+	if !plan.includes(SectionSalon) {
+		return plan.Target.SalonProfile.ActivePOSProvider
+	}
+	return plan.Bundle.SalonProfile.ActivePOSProvider
+}
+
+func sourceBookingMode(plan *importPlan) string {
+	if plan == nil || !plan.includes(SectionAI) {
+		return ""
+	}
+	return plan.Bundle.AIReceptionist.BookingMode
+}
+
+func resultBookingMode(plan *importPlan) string {
+	if plan == nil || plan.Target == nil {
+		return ""
+	}
+	if !plan.includes(SectionAI) {
+		return plan.Target.AIReceptionist.BookingMode
+	}
+	return plan.BookingMode
 }
 
 func newSummaryMap(sections []string) map[string]*ImportSectionSummary {
@@ -1789,7 +1823,7 @@ func bundleIncludes(bundle ConfigurationBundle, section string) bool {
 }
 
 func normalizeIncludedSections(schemaVersion string, sections []string) ([]string, error) {
-	if schemaVersion != SchemaVersion || len(sections) == 0 {
+	if (schemaVersion != SchemaVersion && schemaVersion != LegacySchemaV7) || len(sections) == 0 {
 		return append([]string{}, fullConfigurationSections...), nil
 	}
 	requested := map[string]bool{}
@@ -1808,6 +1842,10 @@ func normalizeIncludedSections(schemaVersion string, sections []string) ([]strin
 		}
 	}
 	return out, nil
+}
+
+func schemaHasPortableConsultationProfiles(schemaVersion string) bool {
+	return schemaVersion == SchemaVersion || schemaVersion == LegacySchemaV7
 }
 
 func legacySchemaMissingConsultationSetting(schemaVersion string) bool {

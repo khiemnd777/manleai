@@ -20,4 +20,9 @@ func RegisterRoutes(api fiber.Router, handler *Handler, jwtSecret string) {
 	protected.Post("/cancel-test-booking", handler.CancelTestBooking)
 	protected.Post("/enable-ai-booking", handler.EnableAIBooking)
 	protected.Post("/disable-ai-booking", handler.DisableAIBooking)
+
+	salonProtected := api.Group("/salons", middleware.RequireAuth(jwtSecret))
+	salonProtected.Get("/:id/square-webhook-events", handler.ListWebhookEvents)
+	salonProtected.Get("/:id/square-webhook-events/:webhook_event_id", handler.GetWebhookEvent)
+	salonProtected.Post("/:id/square-webhook-events/:webhook_event_id/requeue", handler.RequeueWebhookEvent)
 }

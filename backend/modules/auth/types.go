@@ -28,17 +28,9 @@ type BootstrapStatusResponse struct {
 	Available bool `json:"available"`
 }
 
-type RefreshRequest struct {
-	RefreshToken string `json:"refresh_token"`
-}
-
-type LogoutRequest struct {
-	RefreshToken string `json:"refresh_token"`
-}
-
 type LoginResponse struct {
 	AccessToken  string    `json:"access_token"`
-	RefreshToken string    `json:"refresh_token"`
+	RefreshToken string    `json:"-"`
 	ExpiresAt    time.Time `json:"expires_at"`
 	User         User      `json:"user"`
 	Roles        []string  `json:"roles"`

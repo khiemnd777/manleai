@@ -2,19 +2,31 @@ package salon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
 	"unicode"
+	"unicode/utf8"
+
+	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
-var ErrValidation = errors.New("validation failed")
+var (
+	ErrValidation                 = errors.New("validation failed")
+	ErrCreateOperationConflict    = errors.New("salon create operation conflicts with existing payload")
+	ErrPublicCatalogNotReady      = errors.New("public catalog is not ready for the selected scheduling authority")
+	ErrSchedulingAuthorityChanged = errors.New("scheduling authority changed while updating public catalog")
+)
 
 const (
-	DefaultAITone          = "professional_warm"
-	AIToneProfessionalWarm = "professional_warm"
-	AIToneNaturalHuman     = "natural_human"
-	AIToneFriendlyYoung    = "friendly_young"
-	AIToneConciseCalm      = "concise_calm"
+	DefaultAITone               = "professional_warm"
+	AIToneProfessionalWarm      = "professional_warm"
+	AIToneNaturalHuman          = "natural_human"
+	AIToneFriendlyYoung         = "friendly_young"
+	AIToneConciseCalm           = "concise_calm"
+	maxCreateOperationKeyLength = 256
 )
 
 type Service struct {
@@ -35,10 +47,14 @@ func (s *Service) Get(ctx context.Context, id string, ownerUserID string) (*Salo
 
 func (s *Service) Create(ctx context.Context, ownerUserID string, req CreateSalonRequest) (*Salon, error) {
 	req = normalizeCreate(req)
-	if req.Name == "" || req.Phone == "" {
+	if req.Name == "" || req.Phone == "" || !validCreateOperationKey(req.OperationKey) || !validSchedulingAuthority(req.SchedulingAuthority) {
 		return nil, ErrValidation
 	}
-	return s.repo.Create(ctx, ownerUserID, req)
+	fingerprint, err := createSalonPayloadFingerprint(req)
+	if err != nil {
+		return nil, err
+	}
+	return s.repo.Create(ctx, ownerUserID, req, fingerprint)
 }
 
 func (s *Service) Update(ctx context.Context, id string, ownerUserID string, req UpdateSalonRequest) (*Salon, error) {
@@ -90,17 +106,11 @@ func (s *Service) GetPublicCatalogSettings(ctx context.Context, salonID string, 
 
 func (s *Service) UpdatePublicCatalogSettings(ctx context.Context, salonID string, ownerUserID string, req UpdatePublicCatalogRequest) (*PublicCatalogSettings, error) {
 	req.PublicSlug = normalizePublicSlug(req.PublicSlug)
-	if req.PublicCatalogEnabled {
-		if req.PublicSlug == "" {
-			return nil, ErrValidation
-		}
-		current, err := s.repo.GetPublicCatalogSettings(ctx, salonID, ownerUserID)
-		if err != nil {
-			return nil, err
-		}
-		if current.BookableServiceCount == 0 || current.BookableStaffCount == 0 {
-			return nil, ErrValidation
-		}
+	if req.PublicCatalogEnabled && req.PublicSlug == "" {
+		return nil, ErrValidation
+	}
+	if req.ExpectedSchedulingAuthorityVersion < 0 {
+		return nil, ErrValidation
 	}
 	return s.repo.UpdatePublicCatalogSettings(ctx, salonID, ownerUserID, req)
 }
@@ -125,6 +135,8 @@ func (s *Service) UpdateBusinessHours(ctx context.Context, salonID string, owner
 }
 
 func normalizeCreate(req CreateSalonRequest) CreateSalonRequest {
+	req.OperationKey = strings.TrimSpace(req.OperationKey)
+	req.SchedulingAuthority = defaultString(strings.TrimSpace(req.SchedulingAuthority), booking.SchedulingAuthorityOwnerManual)
 	req.Name = strings.TrimSpace(req.Name)
 	req.Phone = strings.TrimSpace(req.Phone)
 	req.Address = strings.TrimSpace(req.Address)
@@ -136,6 +148,55 @@ func normalizeCreate(req CreateSalonRequest) CreateSalonRequest {
 	req.SecondaryLanguage = defaultString(strings.TrimSpace(req.SecondaryLanguage), "vi")
 	req.HandoffPhone = strings.TrimSpace(req.HandoffPhone)
 	return req
+}
+
+func validCreateOperationKey(value string) bool {
+	length := utf8.RuneCountInString(value)
+	return value == strings.TrimSpace(value) && length >= 1 && length <= maxCreateOperationKeyLength
+}
+
+func validSchedulingAuthority(value string) bool {
+	switch value {
+	case booking.SchedulingAuthorityOwnerManual,
+		booking.SchedulingAuthorityManleAICalendar,
+		booking.SchedulingAuthorityExternalProvider:
+		return true
+	default:
+		return false
+	}
+}
+
+func createSalonPayloadFingerprint(req CreateSalonRequest) (string, error) {
+	payload, err := json.Marshal(struct {
+		SchedulingAuthority string `json:"scheduling_authority"`
+		Name                string `json:"name"`
+		Phone               string `json:"phone"`
+		Address             string `json:"address"`
+		City                string `json:"city"`
+		State               string `json:"state"`
+		ZipCode             string `json:"zip_code"`
+		Timezone            string `json:"timezone"`
+		PrimaryLanguage     string `json:"primary_language"`
+		SecondaryLanguage   string `json:"secondary_language"`
+		HandoffPhone        string `json:"handoff_phone"`
+	}{
+		SchedulingAuthority: req.SchedulingAuthority,
+		Name:                req.Name,
+		Phone:               req.Phone,
+		Address:             req.Address,
+		City:                req.City,
+		State:               req.State,
+		ZipCode:             req.ZipCode,
+		Timezone:            req.Timezone,
+		PrimaryLanguage:     req.PrimaryLanguage,
+		SecondaryLanguage:   req.SecondaryLanguage,
+		HandoffPhone:        req.HandoffPhone,
+	})
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func normalizeUpdate(req UpdateSalonRequest) UpdateSalonRequest {

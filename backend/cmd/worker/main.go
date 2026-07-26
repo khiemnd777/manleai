@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"log"
-	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,9 +14,14 @@ import (
 	"github.com/manleai/ai-receptionist/internal/logger"
 	"github.com/manleai/ai-receptionist/modules/booking"
 	"github.com/manleai/ai-receptionist/modules/conversation"
+	customernotification "github.com/manleai/ai-receptionist/modules/customer_notification"
 	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
+	notificationdelivery "github.com/manleai/ai-receptionist/modules/notification_delivery"
+	notificationtwilio "github.com/manleai/ai-receptionist/modules/notification_twilio"
+	operationshealth "github.com/manleai/ai-receptionist/modules/operations_health"
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/pos_square"
+	schedulingretention "github.com/manleai/ai-receptionist/modules/scheduling_retention"
 )
 
 const (
@@ -33,6 +37,12 @@ const (
 	squareCalendarRepairBatchLimit       = 2
 	conversationRetentionPollInterval    = time.Hour
 	conversationRetentionRedactionLimit  = 50
+	notificationDeliveryPollInterval     = 15 * time.Second
+	notificationDeliveryBatchLimit       = notificationdelivery.DefaultProcessBatch
+	customerNotificationPollInterval     = 15 * time.Second
+	customerNotificationBatchLimit       = customernotification.DefaultProcessBatch
+	schedulingPIIRetentionPollInterval   = 5 * time.Minute
+	schedulingPIIRetentionBatchLimit     = schedulingretention.DefaultProcessBatch
 )
 
 func main() {
@@ -71,81 +81,82 @@ func main() {
 	availabilityQuoteCleanup := booking.NewAvailabilityQuoteCleanupProcessor(bookingRepo)
 	squareWebhookProcessor := pos_square.NewWebhookProcessor(pos_square.NewWebhookRepository(db), bookingService)
 	conversationRetention := conversation.NewRetentionProcessor(conversation.NewRepository(db))
+	notificationDeliveryRepo := notificationdelivery.NewRepository(db)
+	notificationDeliveryProcessor := notificationdelivery.NewProcessor(
+		notificationDeliveryRepo,
+		notificationtwilio.NewResolver(integrationConfigService),
+	)
+	customerNotificationRepo := customernotification.NewRepository(db)
+	customerNotificationProcessor := customernotification.NewProcessor(
+		customerNotificationRepo,
+		customernotification.NewTwilioSenderResolver(integrationConfigService),
+	)
+	schedulingPIIRetention := schedulingretention.NewProcessor(schedulingretention.NewRepository(db))
 
-	logg.Info("worker started", "scope", "pos_sync_jobs,booking_lease_recovery,availability_quote_cleanup,square_booking_webhooks,square_calendar_repair,conversation_retention", "interval", posSyncPollInterval.String(), "batch_limit", posSyncBatchLimit)
+	logg.Info("worker started", "scope", "pos_sync_jobs,booking_lease_recovery,availability_quote_cleanup,square_booking_webhooks,square_calendar_repair,conversation_retention,notification_delivery,customer_notification_delivery,scheduling_pii_retention", "interval", posSyncPollInterval.String(), "batch_limit", posSyncBatchLimit)
 
-	scheduler := newRecurringJobScheduler()
+	operationsHealthRepo := operationshealth.NewRepository(db)
+	scheduler := newRecurringJobScheduler(operationsHealthRepo)
 	scheduler.Run(ctx,
 		recurringJob{
 			name:     "pos_sync_jobs",
 			interval: posSyncPollInterval,
-			run: func(ctx context.Context) {
-				processed, err := processor.ProcessOnce(ctx, posSyncBatchLimit)
-				if err != nil {
-					logg.Error("process POS sync jobs", slog.String("error", err.Error()))
-				} else if processed > 0 {
-					logg.Info("processed POS sync jobs", "count", processed)
-				}
-			},
+			run:      func(ctx context.Context) (int, error) { return processor.ProcessOnce(ctx, posSyncBatchLimit) },
 		},
 		recurringJob{
 			name:     "booking_lease_recovery",
 			interval: bookingLeaseSweepPollInterval,
-			run: func(ctx context.Context) {
-				expiredLeaseAttempts, err := bookingRepo.SweepExpiredBookingOperationLeases(ctx, bookingLeaseSweepBatchLimit)
-				if err != nil {
-					logg.Error("sweep expired booking operation leases", slog.String("error", err.Error()))
-				} else if expiredLeaseAttempts > 0 {
-					logg.Info("recovered expired booking lease attempts", "count", expiredLeaseAttempts)
-				}
+			run: func(ctx context.Context) (int, error) {
+				return bookingRepo.SweepExpiredBookingOperationLeases(ctx, bookingLeaseSweepBatchLimit)
 			},
 		},
 		recurringJob{
 			name:     "availability_quote_cleanup",
 			interval: availabilityQuoteCleanupPollInterval,
-			run: func(ctx context.Context) {
-				deletedQuotes, err := availabilityQuoteCleanup.ProcessOnce(ctx, availabilityQuoteCleanupBatchLimit)
-				if err != nil {
-					logg.Error("clean up retained availability quotes", slog.String("error", err.Error()))
-				} else if deletedQuotes > 0 {
-					logg.Info("cleaned up retained availability quotes", "count", deletedQuotes)
-				}
+			run: func(ctx context.Context) (int, error) {
+				return availabilityQuoteCleanup.ProcessOnce(ctx, availabilityQuoteCleanupBatchLimit)
 			},
 		},
 		recurringJob{
 			name:     "square_booking_webhooks",
 			interval: squareWebhookPollInterval,
-			run: func(ctx context.Context) {
-				webhookEvents, err := squareWebhookProcessor.ProcessWebhookEvents(ctx, squareWebhookBatchLimit)
-				if err != nil {
-					logg.Error("process Square booking webhooks", slog.String("error", err.Error()))
-				} else if webhookEvents > 0 {
-					logg.Info("processed Square booking webhooks", "count", webhookEvents)
-				}
+			run: func(ctx context.Context) (int, error) {
+				return squareWebhookProcessor.ProcessWebhookEvents(ctx, squareWebhookBatchLimit)
 			},
 		},
 		recurringJob{
 			name:     "square_calendar_repair",
 			interval: squareCalendarRepairPollInterval,
-			run: func(ctx context.Context) {
-				repairedCalendars, err := squareWebhookProcessor.ProcessScheduledRepairs(ctx, squareCalendarRepairBatchLimit)
-				if err != nil {
-					logg.Error("repair Square calendars", slog.String("error", err.Error()))
-				} else if repairedCalendars > 0 {
-					logg.Info("repaired Square calendars", "count", repairedCalendars)
-				}
+			run: func(ctx context.Context) (int, error) {
+				return squareWebhookProcessor.ProcessScheduledRepairs(ctx, squareCalendarRepairBatchLimit)
+			},
+		},
+		recurringJob{
+			name:     "notification_delivery",
+			interval: notificationDeliveryPollInterval,
+			run: func(ctx context.Context) (int, error) {
+				return notificationDeliveryProcessor.ProcessOnce(ctx, notificationDeliveryBatchLimit)
+			},
+		},
+		recurringJob{
+			name:     "customer_notification_delivery",
+			interval: customerNotificationPollInterval,
+			run: func(ctx context.Context) (int, error) {
+				return customerNotificationProcessor.ProcessOnce(ctx, customerNotificationBatchLimit)
 			},
 		},
 		recurringJob{
 			name:     "conversation_retention",
 			interval: conversationRetentionPollInterval,
-			run: func(ctx context.Context) {
-				redacted, err := conversationRetention.ProcessOnce(ctx, conversationRetentionRedactionLimit)
-				if err != nil {
-					logg.Error("process conversation retention", slog.String("error", err.Error()))
-				} else if redacted > 0 {
-					logg.Info("redacted expired conversation sessions", "count", redacted)
-				}
+			run: func(ctx context.Context) (int, error) {
+				return conversationRetention.ProcessOnce(ctx, conversationRetentionRedactionLimit)
+			},
+		},
+		recurringJob{
+			name:     "scheduling_pii_retention",
+			interval: schedulingPIIRetentionPollInterval,
+			run: func(ctx context.Context) (int, error) {
+				return schedulingPIIRetention.ProcessOnce(ctx, schedulingPIIRetentionBatchLimit)
 			},
 		},
 	)

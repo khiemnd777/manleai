@@ -6,6 +6,8 @@ export type User = {
   status: string;
 };
 
+export type SchedulingAuthority = "owner_manual" | "manleai_calendar" | "external_provider";
+
 export type Salon = {
   id: string;
   name: string;
@@ -19,9 +21,12 @@ export type Salon = {
   secondary_language: string;
   handoff_phone?: string;
   ai_enabled: boolean;
+  /** External-provider adapter intent only. Never use this field as the scheduling-authority discriminator. */
   active_pos_provider: string;
   public_slug?: string;
   public_catalog_enabled: boolean;
+  scheduling_authority?: SchedulingAuthority;
+  scheduling_authority_version?: number;
   created_at?: string;
   updated_at?: string;
 };
@@ -87,12 +92,19 @@ export type AppointmentStatus =
   | string;
 
 export type BookingSegmentSnapshot = {
+  appointment_service_id?: string;
+  scheduling_authority?: SchedulingAuthority;
   service_id?: string;
   service_name: string;
   staff_id?: string;
   staff_name?: string;
   staff_selection_mode: StaffSelectionMode;
+  guest_reference?: string;
+  quantity?: number;
+  plan_version?: number;
   duration_minutes?: number;
+  scheduled_start_time?: string;
+  scheduled_end_time?: string;
   sort_order: number;
 };
 
@@ -106,8 +118,14 @@ export type AppointmentRecord = {
   id: string;
   salon_id: string;
   booking_attempt_id: string;
-  pos_provider: string;
-  pos_appointment_id: string;
+  scheduling_authority?: SchedulingAuthority;
+  authority_provider?: string;
+  authority_appointment_id?: string;
+  authority_appointment_version?: number;
+  /** @deprecated External-provider compatibility alias. Never infer appointment origin from this field. */
+  pos_provider?: string;
+  /** @deprecated External-provider compatibility alias. */
+  pos_appointment_id?: string;
   pos_appointment_version?: number;
   status: AppointmentStatus;
   customer_name: string;
@@ -136,7 +154,13 @@ export type BookingAttempt = {
   salon_id: string;
   source: string;
   status: string;
-  pos_provider: string;
+  scheduling_authority?: SchedulingAuthority;
+  authority_provider?: string;
+  authority_appointment_id?: string;
+  authority_appointment_version?: number;
+  /** @deprecated External-provider compatibility alias. Never infer attempt origin from this field. */
+  pos_provider?: string;
+  /** @deprecated External-provider compatibility alias. */
   pos_booking_id?: string;
   pos_booking_version?: number;
   operation_type: "book" | "reschedule" | "cancel";
@@ -210,6 +234,7 @@ export type AvailabilityResult = {
   quote_id?: string;
   request_fingerprint?: string;
   expires_at?: string;
+  target_authority_appointment_version?: number;
   service_id: string;
   service_name: string;
   staff_id?: string;
@@ -252,6 +277,7 @@ export type SquareReadiness = {
   bookable_service_count: number;
   bookable_staff_count: number;
   ai_enabled: boolean;
+  scheduling_authority: SchedulingAuthority;
   booking_write_blocked?: boolean;
   can_run_test_booking?: boolean;
   can_cancel_test_booking?: boolean;

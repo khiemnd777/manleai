@@ -58,7 +58,12 @@ OpenAI's subagent docs say project-scoped custom agents live under `.codex/agent
 - API and persistence: `GET/PUT /api/salons/:id/settings` reads and writes `salon_settings.ai_tone`.
 - Config transfer: `manleai.salon_configuration.v4` includes `ai_receptionist.ai_tone` and the service category taxonomy; legacy v1-v3 imports default missing tone to `professional_warm`.
 - Runtime path: `conversation.RuntimeConfig` -> `voice.ModelRequest` -> provider-specific reply adapters.
-- Guardrail: tone changes spoken style only. Slot collection, handoff routing, service understanding, availability, and POS-first confirmation remain backend-owned.
+- Guardrail: tone changes spoken style only. Slot collection, handoff routing,
+  service understanding, availability, and authority-native confirmation remain
+  backend-owned: `owner_manual` never auto-confirms, `manleai_calendar` requires
+  an atomic internal commit with a durable appointment ID, and
+  `external_provider` requires provider success with the required booking
+  evidence.
 
 ## Service Understanding Inventory
 
@@ -72,7 +77,11 @@ OpenAI's subagent docs say project-scoped custom agents live under `.codex/agent
 - Owner UI: `/dashboard/calls` exposes `Party booking requests` with `pending`, `contacted`, `resolved`, and `dismissed` workflow states.
 - API and persistence: `party_booking_requests` are owned by `backend/modules/conversation` and keyed by salon, call session, and turn event key for owner-review exception records.
 - Runtime path: supported group or party booking detection converts clear party size and guest-service counts into catalog-backed booking segments, then uses provider-neutral availability and booking tools.
-- Guardrail: party bookings are confirmed only after POS success. `party_booking_requests` and owner workflow status changes are not confirmed appointments and do not create POS appointments.
+- Guardrail: party operations are all-or-none under their captured authority:
+  `owner_manual` creates pending owner review, `manleai_calendar` requires one
+  atomic complete root/child commit, and `external_provider` requires complete
+  provider success or safe rollback/reconciliation. `party_booking_requests`
+  and owner workflow status changes are not confirmed appointments.
 
 ## Suggested Subagent Use
 
@@ -87,7 +96,10 @@ Ask Codex to spawn:
 
 For service-understanding or AI Training correction work, ask `repo_mapper` to map `modules/conversation`, `modules/training`, `service_aliases`, `service_categories`, `service_category_aliases`, transcript metadata, answer-context caching, and golden tests before planning implementation.
 
-For party booking work, ask `repo_mapper` to map group detection, party segment planning, availability/booking tool routing, POS confirmation boundaries, owner-review exception records, Calls dashboard workflow, and redaction before planning implementation.
+For party booking work, ask `repo_mapper` to map group detection, party segment
+planning, availability/booking tool routing, authority-native confirmation
+boundaries, owner-review exception records, Calls dashboard workflow, and
+redaction before planning implementation.
 
 For AI tone work, ask `repo_mapper` to map the settings/API/config-transfer/runtime path, `frontend_product_reviewer` to review the Settings UI contract, and `pos_backend_reviewer` to verify no booking guardrail changed.
 

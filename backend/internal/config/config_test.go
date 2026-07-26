@@ -2,6 +2,31 @@ package config
 
 import "testing"
 
+func TestRateLimitDefaultsFailClosedInProductionAndRemainOptInLocally(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("RATE_LIMIT_ENABLED", "")
+	production := Load()
+	if !production.RateLimitEnabled || production.RateLimitClientIPHeader != "X-ManleAI-Client-IP" {
+		t.Fatalf("production rate-limit config=%#v", production)
+	}
+	t.Setenv("RATE_LIMIT_ENABLED", "false")
+	if !Load().RateLimitEnabled {
+		t.Fatal("production rate limiting must not be disabled by environment override")
+	}
+
+	t.Setenv("APP_ENV", "local")
+	t.Setenv("RATE_LIMIT_ENABLED", "")
+	local := Load()
+	if local.RateLimitEnabled {
+		t.Fatalf("local rate-limit config=%#v", local)
+	}
+
+	t.Setenv("RATE_LIMIT_ENABLED", "true")
+	if !Load().RateLimitEnabled {
+		t.Fatal("explicit local rate limiting was ignored")
+	}
+}
+
 func TestNormalizeOpenAIRealtimeModelDefaultsAndMigratesLegacyPreview(t *testing.T) {
 	if got := NormalizeOpenAIRealtimeModel(""); got != DefaultOpenAIRealtimeModel {
 		t.Fatalf("blank model = %q, want %q", got, DefaultOpenAIRealtimeModel)

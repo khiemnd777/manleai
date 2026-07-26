@@ -22,6 +22,8 @@ func (VoiceAudioOutput) Fields() []ent.Field {
 		field.String("content_type").NotEmpty(),
 		field.Bytes("audio_data"),
 		field.Time("expires_at"),
+		field.Time("redacted_at").Optional().Nillable(),
+		field.Int("redaction_version").Optional().Nillable(),
 		field.Time("created_at").Default(time.Now),
 	}
 }

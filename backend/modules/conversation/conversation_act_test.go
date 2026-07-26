@@ -450,13 +450,15 @@ func TestFinalReviewSemanticTimeoutUsesConciseRetryWithoutBooking(t *testing.T) 
 	store.session.CustomerName = "Jordan"
 	store.session.CustomerPhone = "+13125550199"
 	store.session.DialogState = DialogState{
-		Version:            DialogStateVersion,
-		Phase:              DialogPhaseReview,
-		ReviewRequired:     true,
-		LastPromptKey:      "final_review",
-		DraftRevision:      5,
-		ReviewedRevision:   5,
-		AuthorizedRevision: 0,
+		Version:                     DialogStateVersion,
+		Phase:                       DialogPhaseReview,
+		ReviewRequired:              true,
+		LastPromptKey:               "final_review",
+		DraftRevision:               5,
+		ReviewedRevision:            5,
+		AuthorizedRevision:          0,
+		ReviewedBookingMode:         "confirmed_booking",
+		SelectedSchedulingAuthority: booking.SchedulingAuthorityExternalProvider,
 	}
 	bookingTool := &fakeBookingTool{}
 	interpreter := &immediateTimeoutTurnInterpreter{}
@@ -1093,7 +1095,7 @@ func TestMultiActCorrectionInvalidatesReviewAuthorizationForOldRevision(t *testi
 	if after.DialogState.DraftRevision != 8 || after.DialogState.ReviewAccepted || after.DialogState.AuthorizedRevision != 0 {
 		t.Fatalf("stale review remained authorized: %#v", after.DialogState)
 	}
-	if action := planNextConversationAction(after, ""); action.Kind != AssistantActionReadReview {
+	if action := planNextConversationAction(after, "", &RuntimeConfig{BookingMode: "pending_approval", SchedulingAuthority: booking.SchedulingAuthorityExternalProvider}); action.Kind != AssistantActionReadReview {
 		t.Fatalf("next action = %#v, want fresh review", action)
 	}
 }

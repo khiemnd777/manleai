@@ -112,7 +112,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
             <div>
               <div className="text-sm font-bold text-ink">Salon Receptionist</div>
-              <div className="text-xs text-muted">POS-first production</div>
+              <div className="text-xs text-muted">Owner-first production</div>
             </div>
           </Link>
 
@@ -157,7 +157,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 </div>
                 <div className="min-w-0">
                   <div className="truncate text-sm font-bold text-ink">Salon Receptionist</div>
-                  <div className="truncate text-xs text-muted">POS-first production</div>
+                  <div className="truncate text-xs text-muted">Owner-first production</div>
                 </div>
               </Link>
               <Button

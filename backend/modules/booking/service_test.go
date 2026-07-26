@@ -656,6 +656,34 @@ func TestCreateAcceptsPOSBookingVersionZero(t *testing.T) {
 	}
 }
 
+func TestCreateDoesNotConfirmAcceptedProviderResponseWithoutBookingID(t *testing.T) {
+	store := newFakeStore()
+	provider := &fakeProvider{
+		customer: &pos.Customer{POSCustomerID: "cust_1", Name: "Linh Tran", Phone: "+13125550101"},
+		appointment: &pos.Appointment{
+			POSAppointmentVersion: 7,
+			StartTime:             testStartTime(),
+			EndTime:               testStartTime().Add(45 * time.Minute),
+			Status:                string(pos.AppointmentStatusAccepted),
+		},
+	}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	attempt, err := service.Create(context.Background(), "salon_1", "owner_1", validCreateRequest())
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if attempt.Status != StatusFallbackPending || attempt.ProviderOutcome != ProviderOutcomeUnknown {
+		t.Fatalf("attempt = %#v, want fallback_pending/unknown", attempt)
+	}
+	if attempt.POSBookingID != "" || attempt.Appointment != nil || store.confirmed != nil {
+		t.Fatalf("accepted-looking response without booking ID must remain unconfirmed: %#v", attempt)
+	}
+	if store.fallback == nil || store.fallback.ErrorMessage != "pos booking id was not returned" {
+		t.Fatalf("fallback = %#v, want missing booking ID evidence", store.fallback)
+	}
+}
+
 func TestCreateFinalizesConfirmedBookingAfterRequestContextCancelledPostPOSSuccess(t *testing.T) {
 	store := newFakeStore()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2108,6 +2136,169 @@ func TestAvailableSlotsFiltersBusinessHoursAndMapsStaff(t *testing.T) {
 	}
 }
 
+func TestAvailableSlotsPersistsExternalTargetOriginForRescheduleVersionZero(t *testing.T) {
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	store := newFakeStore()
+	store.appointment.ID = "00000000-0000-4000-8000-000000000041"
+	store.appointment.AuthorityAppointmentVersion = 0
+	store.appointment.POSAppointmentVersion = 0
+	provider := &fakeProvider{availabilitySlots: []pos.TimeSlot{{
+		StartTime: time.Date(2026, 6, 15, 10, 0, 0, 0, loc).UTC(),
+		EndTime:   time.Date(2026, 6, 15, 10, 45, 0, 0, loc).UTC(),
+		StaffID:   "square_staff_1",
+	}}}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	result, err := service.AvailableSlots(context.Background(), "salon_1", "owner_1", AvailabilityRequest{
+		TargetAppointmentID: store.appointment.ID,
+		ServiceID:           "service_1",
+		StaffID:             "staff_1",
+		PreferredDate:       "2026-06-15",
+	})
+	if err != nil {
+		t.Fatalf("target-origin availability: %v", err)
+	}
+	if result.QuoteID == "" || result.TargetAuthorityAppointmentVersion != 0 {
+		t.Fatalf("target-origin result=%#v", result)
+	}
+	if store.availabilityQuote == nil || store.availabilityQuote.OperationType != BookingActionReschedule || store.availabilityQuote.TargetAppointmentID != store.appointment.ID || store.availabilityQuote.TargetAuthorityAppointmentVersion != 0 {
+		t.Fatalf("target-origin quote=%#v", store.availabilityQuote)
+	}
+	if provider.availabilityCalls != 1 {
+		t.Fatalf("provider availability calls=%d, want 1", provider.availabilityCalls)
+	}
+}
+
+func TestAvailableSlotsCreatesFreshRetryOriginQuoteForExactSafeFallback(t *testing.T) {
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	store := newFakeStore()
+	retryAttemptID := "00000000-0000-4000-8000-000000000051"
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, loc).UTC()
+	store.operations["original-safe-fallback"] = &BookingAttempt{
+		ID:                  retryAttemptID,
+		SalonID:             "salon_1",
+		SchedulingAuthority: SchedulingAuthorityExternalProvider,
+		POSProvider:         pos.ProviderSquare,
+		ProviderFence:       store.service.ProviderFence,
+		OperationType:       BookingActionBook,
+		Status:              StatusFallbackPending,
+		RetryPolicy:         RetryPolicySafe,
+		RequestedStartTime:  start,
+		RequestedEndTime:    start.Add(45 * time.Minute),
+		Segments: []BookingSegmentSnapshot{{
+			ServiceID:          store.service.ID,
+			POSServiceID:       store.service.POSServiceID,
+			POSServiceVersion:  store.service.POSServiceVersion,
+			StaffID:            store.staff.ID,
+			POSStaffID:         store.staff.POSStaffID,
+			StaffSelectionMode: StaffSelectionSpecific,
+			DurationMinutes:    store.service.DurationMinutes,
+			SortOrder:          1,
+		}},
+	}
+	provider := &fakeProvider{availabilitySlots: []pos.TimeSlot{
+		{StartTime: start.Add(-time.Hour), EndTime: start.Add(-15 * time.Minute), StaffID: store.staff.POSStaffID},
+		{StartTime: start, EndTime: start.Add(45 * time.Minute), StaffID: store.staff.POSStaffID},
+	}}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	result, err := service.AvailableSlots(context.Background(), "salon_1", "owner_1", AvailabilityRequest{
+		RetryOfAttemptID: retryAttemptID,
+		ServiceID:        store.service.ID,
+		StaffID:          store.staff.ID,
+		PreferredDate:    "2026-06-15",
+	})
+	if err != nil {
+		t.Fatalf("retry availability: %v", err)
+	}
+	if result.QuoteID == "" || len(result.Slots) != 1 || !result.Slots[0].StartTime.Equal(start) {
+		t.Fatalf("retry availability result = %#v, want one exact original slot and a fresh quote", result)
+	}
+	if store.availabilityQuote == nil || store.availabilityQuote.RetryOfAttemptID != retryAttemptID ||
+		store.availabilityQuote.OperationType != "" || len(store.availabilityQuote.Slots) != 1 {
+		t.Fatalf("retry quote = %#v, want fresh retry-origin quote", store.availabilityQuote)
+	}
+	if provider.availabilityCalls != 1 {
+		t.Fatalf("provider availability calls = %d, want one fresh lookup", provider.availabilityCalls)
+	}
+}
+
+func TestAvailableSlotsRejectsChangedOrUnsafeRetryBeforeProviderLookup(t *testing.T) {
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, loc).UTC()
+	tests := []struct {
+		name   string
+		mutate func(*fakeStore, *BookingAttempt)
+	}{
+		{
+			name: "unsafe retry policy",
+			mutate: func(_ *fakeStore, attempt *BookingAttempt) {
+				attempt.RetryPolicy = RetryPolicyBlocked
+			},
+		},
+		{
+			name: "changed provider service version",
+			mutate: func(store *fakeStore, _ *BookingAttempt) {
+				store.service.POSServiceVersion++
+				store.services[0] = store.service
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := newFakeStore()
+			origin := &BookingAttempt{
+				ID:                  "00000000-0000-4000-8000-000000000052",
+				SalonID:             "salon_1",
+				SchedulingAuthority: SchedulingAuthorityExternalProvider,
+				POSProvider:         pos.ProviderSquare,
+				ProviderFence:       store.service.ProviderFence,
+				OperationType:       BookingActionBook,
+				Status:              StatusFallbackPending,
+				RetryPolicy:         RetryPolicySafe,
+				RequestedStartTime:  start,
+				RequestedEndTime:    start.Add(45 * time.Minute),
+				Segments: []BookingSegmentSnapshot{{
+					ServiceID:          store.service.ID,
+					POSServiceID:       store.service.POSServiceID,
+					POSServiceVersion:  store.service.POSServiceVersion,
+					StaffID:            store.staff.ID,
+					POSStaffID:         store.staff.POSStaffID,
+					StaffSelectionMode: StaffSelectionSpecific,
+					DurationMinutes:    store.service.DurationMinutes,
+					SortOrder:          1,
+				}},
+			}
+			store.operations["unsafe-or-changed"] = origin
+			test.mutate(store, origin)
+			provider := &fakeProvider{availabilitySlots: []pos.TimeSlot{{StartTime: start, EndTime: start.Add(45 * time.Minute), StaffID: store.staff.POSStaffID}}}
+			service := NewService(store, []pos.POSProvider{provider})
+
+			_, err := service.AvailableSlots(context.Background(), "salon_1", "owner_1", AvailabilityRequest{
+				RetryOfAttemptID: origin.ID,
+				ServiceID:        store.service.ID,
+				StaffID:          store.staff.ID,
+				PreferredDate:    "2026-06-15",
+			})
+			if !errors.Is(err, ErrOperationConflict) {
+				t.Fatalf("error = %v, want operation conflict", err)
+			}
+			if provider.availabilityCalls != 0 || store.availabilityQuote != nil {
+				t.Fatalf("provider calls/quote = %d/%#v, want no new provider or quote side effect", provider.availabilityCalls, store.availabilityQuote)
+			}
+		})
+	}
+}
+
 func TestCreateAndAvailabilityRejectStaleNonActiveProviderMappings(t *testing.T) {
 	store := newFakeStore()
 	store.activeProvider = "future_pos"
@@ -2523,23 +2714,25 @@ func newFakeStore() *fakeStore {
 	store.services = []ServiceRef{store.service}
 	store.staffRefs = []StaffRef{store.staff}
 	store.appointment = AppointmentActionRef{
-		ID:                    "appointment_1",
-		SalonID:               "salon_1",
-		POSProvider:           pos.ProviderSquare,
-		ProviderLocationID:    fence.LocationID,
-		ProviderFence:         fence,
-		POSAppointmentID:      "booking_1",
-		POSAppointmentVersion: 7,
-		Status:                StatusConfirmed,
-		CustomerName:          "Linh Tran",
-		CustomerPhone:         "+13125550101",
-		CustomerEmail:         "linh@example.com",
-		Service:               store.service,
-		Staff:                 store.staff,
-		StaffSelectionMode:    StaffSelectionSpecific,
-		StartTime:             testStartTime(),
-		EndTime:               testStartTime().Add(45 * time.Minute),
-		Notes:                 "First visit",
+		ID:                          "appointment_1",
+		SalonID:                     "salon_1",
+		SchedulingAuthority:         SchedulingAuthorityExternalProvider,
+		AuthorityAppointmentVersion: 7,
+		POSProvider:                 pos.ProviderSquare,
+		ProviderLocationID:          fence.LocationID,
+		ProviderFence:               fence,
+		POSAppointmentID:            "booking_1",
+		POSAppointmentVersion:       7,
+		Status:                      StatusConfirmed,
+		CustomerName:                "Linh Tran",
+		CustomerPhone:               "+13125550101",
+		CustomerEmail:               "linh@example.com",
+		Service:                     store.service,
+		Staff:                       store.staff,
+		StaffSelectionMode:          StaffSelectionSpecific,
+		StartTime:                   testStartTime(),
+		EndTime:                     testStartTime().Add(45 * time.Minute),
+		Notes:                       "First visit",
 	}
 	store.appointment.Segments = singleBookingSegment(store.service, store.staff, StaffSelectionSpecific)
 	return store
@@ -2707,17 +2900,38 @@ func (f *fakeStore) GetSchedule(ctx context.Context, salonID string, provider st
 	return &f.schedule, nil
 }
 
+func (f *fakeStore) GetSafeRetryAvailabilityOrigin(ctx context.Context, salonID string, ownerUserID string, attemptID string) (*BookingAttempt, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if salonID != "salon_1" || ownerUserID != "owner_1" {
+		return nil, ErrOperationConflict
+	}
+	for _, attempt := range f.operations {
+		if attempt.ID == attemptID && attempt.SchedulingAuthority == SchedulingAuthorityExternalProvider &&
+			attempt.OperationType == BookingActionBook && attempt.Status == StatusFallbackPending &&
+			attempt.RetryPolicy == RetryPolicySafe && attempt.SupersededAt == nil {
+			copy := *attempt
+			copy.Segments = append([]BookingSegmentSnapshot(nil), attempt.Segments...)
+			return &copy, nil
+		}
+	}
+	return nil, ErrOperationConflict
+}
+
 func (f *fakeStore) CreateAvailabilityQuote(ctx context.Context, record AvailabilityQuoteRecord) (*AvailabilityQuote, error) {
 	f.availabilityQuote = &record
 	return &AvailabilityQuote{
-		ID:                 "00000000-0000-4000-8000-000000000039",
-		SalonID:            record.SalonID,
-		Provider:           record.Provider,
-		ProviderFence:      record.ProviderFence,
-		RequestFingerprint: record.RequestFingerprint,
-		ExpiresAt:          record.ExpiresAt,
-		CreatedAt:          time.Now().UTC(),
-		Slots:              append([]AvailabilitySlot(nil), record.Slots...),
+		ID:                                "00000000-0000-4000-8000-000000000039",
+		SalonID:                           record.SalonID,
+		Provider:                          record.Provider,
+		ProviderFence:                     record.ProviderFence,
+		RequestFingerprint:                record.RequestFingerprint,
+		OperationType:                     record.OperationType,
+		TargetAppointmentID:               record.TargetAppointmentID,
+		TargetAuthorityAppointmentVersion: record.TargetAuthorityAppointmentVersion,
+		ExpiresAt:                         record.ExpiresAt,
+		CreatedAt:                         time.Now().UTC(),
+		Slots:                             append([]AvailabilitySlot(nil), record.Slots...),
 	}, nil
 }
 

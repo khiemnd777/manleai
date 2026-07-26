@@ -466,6 +466,9 @@ func formatBusinessHourRanges(periods []BusinessHourPeriod) string {
 
 func formatLocalClock(value string) string {
 	value = strings.TrimSpace(value)
+	if value == "24:00" || value == "24:00:00" {
+		return "12:00 AM"
+	}
 	for _, layout := range []string{"15:04:05", "15:04"} {
 		if parsed, err := time.Parse(layout, value); err == nil {
 			return parsed.Format("3:04 PM")

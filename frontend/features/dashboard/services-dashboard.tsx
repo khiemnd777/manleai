@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { AlertTriangle, Archive, Check, Pencil, Plus, RefreshCcw, RotateCcw, Settings2, Tags, XCircle } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SchedulingReadinessCard } from "@/features/dashboard/scheduling-readiness-card";
 import {
   authorityLabel,
   FieldAuthorityBadge,
@@ -16,12 +17,24 @@ import {
   providerManagedReadOnly
 } from "@/features/dashboard/pos-field-authority";
 import { apiRequest } from "@/lib/api/client";
+import {
+  getManleAICalendar,
+  isManleAICalendarVersionConflict,
+  newManleAICalendarActionKey,
+  updateManleAICalendarServicePolicy
+} from "@/lib/api/internal-calendar";
 import type {
+  ManleAICalendarAggregate,
+  ManleAICalendarCapacityMode,
+  ManleAICalendarMutationResponse,
+  ManleAICalendarResourceRequirementInput,
+  ManleAICalendarServicePolicy,
   POSConnection,
   POSService,
   POSServiceCategory,
   POSServiceCategoryAlias,
   Salon,
+  SchedulingAuthority,
   ServiceAlias,
   ServiceCategorySuggestionRefresh,
   SquareReadiness,
@@ -89,9 +102,9 @@ type ServiceCategoryFormState = {
   sortOrder: string;
 };
 
-type CategoryReviewFilter = "all" | "unassigned" | "suggested" | "manual" | "imported";
+type CategoryReviewFilter = "all" | "unassigned" | "suggested" | "manual";
 
-const categoryReviewFilters: CategoryReviewFilter[] = ["all", "unassigned", "suggested", "manual", "imported"];
+const categoryReviewFilters: CategoryReviewFilter[] = ["all", "unassigned", "suggested", "manual"];
 
 const consultationOptionGroups = {
   recommendedOutcomes: [
@@ -116,6 +129,10 @@ const consultationOptionGroups = {
 export function ServicesDashboard() {
   const [salon, setSalon] = useState<Salon | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [squareStatusError, setSquareStatusError] = useState("");
+  const [calendar, setCalendar] = useState<ManleAICalendarAggregate | null>(null);
+  const [calendarLoading, setCalendarLoading] = useState(true);
+  const [calendarError, setCalendarError] = useState("");
   const [services, setServices] = useState<POSService[]>([]);
   const [categories, setCategories] = useState<POSServiceCategory[]>([]);
   const [serviceAliases, setServiceAliases] = useState<ServiceAlias[]>([]);
@@ -147,24 +164,39 @@ export function ServicesDashboard() {
       setSalon(firstSalon);
       if (!firstSalon) {
         setStatus(null);
+        setSquareStatusError("");
+        setCalendar(null);
+        setCalendarError("");
+        setCalendarLoading(false);
         setServices([]);
         setCategories([]);
         setServiceAliases([]);
         return;
       }
-      const [statusResponse, serviceResponse, categoryResponse, aliasResponse] = await Promise.all([
-        apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
+      setCalendarLoading(true);
+      const [statusResult, serviceResponse, categoryResponse, aliasResponse, calendarResult] = await Promise.all([
+        apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`)
+          .then((value) => ({ value, error: "" }))
+          .catch((statusError: unknown) => ({ value: null, error: errorMessage(statusError, "Could not load Square status.") })),
         apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
         apiRequest<ServiceCategoriesResponse>(`/api/salons/${firstSalon.id}/service-categories`),
-        apiRequest<ServiceAliasesResponse>(`/api/salons/${firstSalon.id}/service-aliases`)
+        apiRequest<ServiceAliasesResponse>(`/api/salons/${firstSalon.id}/service-aliases`),
+        getManleAICalendar(firstSalon.id)
+          .then((response) => ({ value: response.manleai_calendar, error: "" }))
+          .catch((calendarFailure: unknown) => ({ value: null, error: errorMessage(calendarFailure, "Could not load internal calendar readiness.") }))
       ]);
-      setStatus(statusResponse);
+      setStatus(statusResult.value);
+      setSquareStatusError(statusResult.error);
+      setCalendar(calendarResult.value);
+      setCalendarError(calendarResult.error);
+      setCalendarLoading(false);
       setServices(serviceResponse.services);
       setCategories(sortCategories(categoryResponse.service_categories));
       setServiceAliases(aliasResponse.service_aliases);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load services.");
     } finally {
+      setCalendarLoading(false);
       if (!silent) {
         setLoading(false);
       }
@@ -175,7 +207,23 @@ export function ServicesDashboard() {
     void load();
   }, []);
 
-  const metrics = useMemo(() => serviceMetrics(services), [services]);
+  async function reloadCalendar() {
+    if (!salon?.id) return;
+    setCalendarLoading(true);
+    setCalendarError("");
+    try {
+      const response = await getManleAICalendar(salon.id);
+      setCalendar(response.manleai_calendar);
+    } catch (calendarFailure) {
+      setCalendarError(errorMessage(calendarFailure, "Could not load internal calendar readiness."));
+    } finally {
+      setCalendarLoading(false);
+    }
+  }
+
+  const schedulingAuthority = calendar?.scheduling_authority;
+  const activeProvider = salon?.active_pos_provider;
+  const metrics = useMemo(() => serviceMetrics(services, schedulingAuthority, activeProvider), [services, schedulingAuthority, activeProvider]);
   const activeCategories = useMemo(() => categories.filter((category) => category.status === "active"), [categories]);
   const filteredServices = useMemo(
     () => filterServices(services, categoryFilter, reviewFilter),
@@ -246,7 +294,7 @@ export function ServicesDashboard() {
           ? ownerControlsOnly
             ? "ManleAI controls saved. Provider-managed details were unchanged."
             : "Service saved."
-          : "Service created. Local-only services are not booking-ready until linked to Square Appointments."
+          : "Service created. Scheduling eligibility follows the selected authority and its backend readiness checks."
       );
       setEditingService(response.service);
       setForm(serviceToForm(response.service));
@@ -533,7 +581,7 @@ export function ServicesDashboard() {
         <div>
           <h1 className="text-2xl font-bold text-ink">Services</h1>
           <p className="mt-1 text-sm text-muted">
-            Manage ManleAI-owned service records. Square Appointments executes availability and booking.
+            Manage services, internal scheduling policy, shared capacity, and optional Square Appointments sync.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -555,15 +603,21 @@ export function ServicesDashboard() {
 
       {error ? <Alert title="Services unavailable" message={error} /> : null}
       {success ? <Alert type="success" title="Services updated" message={success} /> : null}
+      {squareStatusError ? <Alert title="Square status unavailable" message={`${squareStatusError} Internal services and calendar setup remain available.`} /> : null}
 
-      <ServicesGate status={status} />
-      <BookingEligibilityPanel />
+      <SchedulingReadinessCard calendar={calendar} loading={calendarLoading} error={calendarError} onRetry={() => void reloadCalendar()} />
+      {calendar?.scheduling_authority === "external_provider" ? (
+        <>
+          <ServicesGate status={status} />
+          <BookingEligibilityPanel />
+        </>
+      ) : null}
 
       <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
         <Metric label="Total services" value={String(metrics.total)} />
         <Metric label="Synced" value={String(metrics.synced)} />
         <Metric label="Local only" value={String(metrics.localOnly)} />
-        <Metric label="Booking-ready" value={String(metrics.aiBookable)} />
+        <Metric label="Authority eligible" value={String(metrics.aiBookable)} />
         <Metric label="Categorized" value={String(metrics.categorized)} />
         <Metric label="Suggested" value={String(metrics.suggested)} />
       </div>
@@ -594,6 +648,11 @@ export function ServicesDashboard() {
           form={form}
           service={editingService}
           categories={activeCategories}
+          salonID={salon.id}
+          calendar={calendar}
+          calendarLoading={calendarLoading}
+          calendarError={calendarError}
+          activeProvider={activeProvider}
           busy={busy === "save-service"}
           onChange={setForm}
           onCancel={() => {
@@ -602,6 +661,8 @@ export function ServicesDashboard() {
             setForm(emptyServiceForm());
           }}
           onSave={() => void saveService()}
+          onReloadCalendar={reloadCalendar}
+          onCalendarChange={setCalendar}
         />
       ) : null}
 
@@ -610,7 +671,7 @@ export function ServicesDashboard() {
           <div>
             <CardTitle>Service catalog</CardTitle>
             <CardDescription>
-              Only active, synced, POS-linked, AI-bookable services are used for availability and booking.
+              {serviceCatalogDescription(schedulingAuthority)}
             </CardDescription>
           </div>
           <Badge value={services.length > 0 ? "active" : "disabled"} />
@@ -631,6 +692,8 @@ export function ServicesDashboard() {
         ) : (
           <ServicesTable
             services={filteredServices}
+            schedulingAuthority={schedulingAuthority}
+            activeProvider={activeProvider}
             categories={activeCategories}
             serviceAliasesByServiceID={serviceAliasesByServiceID}
             busy={busy}
@@ -956,18 +1019,32 @@ function ServiceForm({
   form,
   service,
   categories,
+  salonID,
+  calendar,
+  calendarLoading,
+  calendarError,
+  activeProvider,
   busy,
   onChange,
   onCancel,
-  onSave
+  onSave,
+  onReloadCalendar,
+  onCalendarChange
 }: {
   form: ServiceFormState;
   service: POSService | null;
   categories: POSServiceCategory[];
+  salonID: string;
+  calendar: ManleAICalendarAggregate | null;
+  calendarLoading: boolean;
+  calendarError: string;
+  activeProvider?: string;
   busy: boolean;
   onChange: (next: ServiceFormState) => void;
   onCancel: () => void;
   onSave: () => void;
+  onReloadCalendar: () => Promise<void>;
+  onCalendarChange: (calendar: ManleAICalendarAggregate) => void;
 }) {
   const archived = Boolean(service?.archived_at);
   const providerReadOnly = Boolean(service && providerManagedReadOnly(service.field_authority));
@@ -981,7 +1058,7 @@ function ServiceForm({
         <div>
           <CardTitle>{service ? (ownerControlsOnly ? "Manage service" : "Edit service") : "New local service"}</CardTitle>
           <CardDescription>
-            {service ? serviceGateReason(service) : "New services start as ManleAI local records and are not booking-ready until linked to Square Appointments."}
+            {service ? serviceGateReason(service, calendar?.scheduling_authority, activeProvider) : "New services start as canonical ManleAI records. Eligibility follows the selected scheduling authority."}
           </CardDescription>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -1000,7 +1077,7 @@ function ServiceForm({
         />
       ) : (
         <div className="mt-5 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-xs leading-5 text-blue-900">
-          Managed in ManleAI. Square Appointments is not updated, and this local service cannot be booked until it has a valid active-provider link.
+          {localServiceRecordDescription(calendar?.scheduling_authority)}
         </div>
       )}
 
@@ -1187,6 +1264,16 @@ function ServiceForm({
         </div>
       </div>
 
+      <ServiceCalendarPolicyEditor
+        salonID={salonID}
+        service={service}
+        calendar={calendar}
+        loading={calendarLoading}
+        error={calendarError}
+        onReload={onReloadCalendar}
+        onCalendarChange={onCalendarChange}
+      />
+
       <div className="mt-5 flex flex-wrap justify-end gap-3">
         <Button type="button" variant="secondary" onClick={onCancel} disabled={busy}>
           Cancel
@@ -1199,8 +1286,292 @@ function ServiceForm({
   );
 }
 
+type ServicePolicyFormState = {
+  enabled: boolean;
+  capacityMode: "" | ManleAICalendarCapacityMode;
+  bufferBefore: string;
+  bufferAfter: string;
+  requirements: Array<{ key: string; resourcePoolID: string; unitsRequired: string }>;
+};
+
+function ServiceCalendarPolicyEditor({
+  salonID,
+  service,
+  calendar,
+  loading,
+  error: loadError,
+  onReload,
+  onCalendarChange
+}: {
+  salonID: string;
+  service: POSService | null;
+  calendar: ManleAICalendarAggregate | null;
+  loading: boolean;
+  error: string;
+  onReload: () => Promise<void>;
+  onCalendarChange: (calendar: ManleAICalendarAggregate) => void;
+}) {
+  const actionKeyRef = useRef("");
+  const [form, setForm] = useState<ServicePolicyFormState>(emptyServicePolicyForm());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const policy = service?.id
+    ? calendar?.service_policies.find((item) => item.service.id === service.id) ?? null
+    : null;
+
+  useEffect(() => {
+    setForm(servicePolicyToForm(policy));
+    setError("");
+    setSuccess("");
+    actionKeyRef.current = "";
+  }, [calendar?.config_version, policy, service?.id]);
+
+  if (!service?.id) {
+    return (
+      <div className="mt-5 rounded-md border border-blue-200 bg-blue-50 p-4 text-sm leading-6 text-blue-900">
+        Save this service first. Internal capacity, buffers, and resource requirements belong to the saved service record.
+      </div>
+    );
+  }
+
+  if (loading) {
+    return <Skeleton className="mt-5 h-64" />;
+  }
+
+  if (loadError || !calendar) {
+    return (
+      <div className="mt-5 rounded-md border border-line p-4">
+        <Alert title="Internal service policy unavailable" message={loadError || "Could not load this service's internal scheduling policy."} />
+        <Button type="button" variant="secondary" className="mt-3" onClick={() => void onReload()}>
+          Retry service policy
+        </Button>
+      </div>
+    );
+  }
+
+  const calendarData = calendar;
+  const serviceID = service.id;
+  const baseDisabled = busy || !calendar.config;
+  const serviceUnavailable = Boolean(service.archived_at) || !service.active;
+  const editDisabled = baseDisabled || serviceUnavailable;
+  const blockers = calendar.readiness.blockers.filter(
+    (blocker) => blocker.scope === "service" && blocker.entity_id === serviceID
+  );
+
+  function updateForm(next: ServicePolicyFormState) {
+    actionKeyRef.current = "";
+    setForm(next);
+  }
+
+  function addRequirement() {
+    updateForm({
+      ...form,
+      requirements: [
+        ...form.requirements,
+        { key: newManleAICalendarActionKey(), resourcePoolID: "", unitsRequired: "" }
+      ]
+    });
+  }
+
+  function updateRequirement(key: string, patch: Partial<ServicePolicyFormState["requirements"][number]>) {
+    updateForm({
+      ...form,
+      requirements: form.requirements.map((requirement) =>
+        requirement.key === key ? { ...requirement, ...patch } : requirement
+      )
+    });
+  }
+
+  function removeRequirement(key: string) {
+    updateForm({ ...form, requirements: form.requirements.filter((requirement) => requirement.key !== key) });
+  }
+
+  async function savePolicy() {
+    const requirements: ManleAICalendarResourceRequirementInput[] = [];
+    if (form.capacityMode === "pooled") {
+      for (const requirement of form.requirements) {
+        if (!requirement.resourcePoolID || !requirement.unitsRequired.trim()) {
+          setError("Choose a resource and units required for every pooled-capacity requirement.");
+          return;
+        }
+        requirements.push({
+          resource_pool_id: requirement.resourcePoolID,
+          units_required: Number(requirement.unitsRequired)
+        });
+      }
+    }
+
+    setBusy(true);
+    setError("");
+    setSuccess("");
+    if (!actionKeyRef.current) actionKeyRef.current = newManleAICalendarActionKey();
+    try {
+      const response = await updateManleAICalendarServicePolicy(salonID, serviceID, {
+        action_key: actionKeyRef.current,
+        expected_config_version: calendarData.config_version,
+        enabled: form.enabled,
+        capacity_mode: form.capacityMode || null,
+        buffer_before_minutes_override: nullableNumber(form.bufferBefore),
+        buffer_after_minutes_override: nullableNumber(form.bufferAfter),
+        eligible_staff_ids: policy?.eligible_staff.map((staff) => staff.id) ?? [],
+        resource_requirements: requirements
+      });
+      actionKeyRef.current = "";
+      onCalendarChange(response.manleai_calendar);
+      setSuccess(response.replayed ? "Service policy saved by replaying the previous safe retry." : "Internal service policy saved.");
+    } catch (mutationFailure) {
+      if (isManleAICalendarVersionConflict(mutationFailure)) {
+        actionKeyRef.current = "";
+        await onReload();
+        setError("Calendar configuration changed in another session. The latest service policy was loaded; review it before saving again.");
+      } else {
+        setError(mutationFailure instanceof Error ? mutationFailure.message : "Could not save the internal service policy.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-5 rounded-md border border-line bg-slate-50 p-4">
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div>
+          <div className="text-sm font-semibold text-ink">ManleAI controls · internal scheduling policy</div>
+          <p className="mt-1 text-xs leading-5 text-muted">
+            Enable internal scheduling, choose capacity ownership, override buffers, and attach shared resources for this service.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Badge value={policy?.configured ? "configured" : "required"} />
+          {blockers.length > 0 ? <Badge value="blocked" /> : null}
+        </div>
+      </div>
+
+      {!calendar.config ? (
+        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-900">
+          Save the salon's ManleAI Calendar policy in Settings before configuring this service.
+        </div>
+      ) : null}
+      {service.archived_at || !service.active ? (
+        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-900">
+          This service is inactive or archived. Cleanup is still allowed: disable the internal policy or remove existing resource requirements. Re-enabling the policy and adding new requirements are blocked.
+        </div>
+      ) : null}
+      {blockers.length > 0 ? (
+        <div className="mt-4 rounded-md border border-line bg-white p-3 text-sm leading-6 text-muted">
+          {blockers.map((blocker) => <div key={`${blocker.code}-${blocker.entity_id}`}>{blocker.message}</div>)}
+        </div>
+      ) : null}
+      {error ? <div className="mt-4"><Alert title="Service policy not updated" message={error} /></div> : null}
+      {success ? <div className="mt-4"><Alert type="success" title="Service policy updated" message={success} /></div> : null}
+
+      <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <label className="flex items-center gap-3 rounded-md border border-line bg-white px-3 py-2 text-sm font-medium text-ink">
+          <input type="checkbox" checked={form.enabled} onChange={(event) => updateForm({ ...form, enabled: event.target.checked })} disabled={baseDisabled || (serviceUnavailable && !form.enabled)} />
+          Enabled for internal scheduling
+        </label>
+        <Field label="Capacity mode">
+          <select value={form.capacityMode} onChange={(event) => updateForm({ ...form, capacityMode: event.target.value as ServicePolicyFormState["capacityMode"] })} disabled={editDisabled} className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-100">
+            <option value="">Choose capacity mode</option>
+            {calendar.constraints.capacity_modes.map((mode) => <option key={mode} value={mode}>{mode.replaceAll("_", " ")}</option>)}
+          </select>
+        </Field>
+        <PolicyNumberField label="Buffer before override" value={form.bufferBefore} constraint={calendar.constraints.buffer_minutes} disabled={editDisabled} onChange={(value) => updateForm({ ...form, bufferBefore: value })} />
+        <PolicyNumberField label="Buffer after override" value={form.bufferAfter} constraint={calendar.constraints.buffer_minutes} disabled={editDisabled} onChange={(value) => updateForm({ ...form, bufferAfter: value })} />
+      </div>
+
+      <div className="mt-5 rounded-md border border-line bg-white p-4">
+        <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+          <div>
+            <div className="text-sm font-semibold text-ink">Shared resource requirements</div>
+            <div className="mt-1 text-xs leading-5 text-muted">
+              Required only for pooled capacity. Staff eligibility remains managed inside each Staff record.
+            </div>
+          </div>
+          <Button type="button" variant="secondary" onClick={addRequirement} disabled={editDisabled || form.capacityMode !== "pooled"}>
+            <Plus className="h-4 w-4" /> Add resource
+          </Button>
+        </div>
+        {form.capacityMode === "pooled" && calendar.readiness.capabilities?.pooled_capacity !== true ? (
+          <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-900">
+            Pooled policy can be configured now, but backend execution readiness remains blocked until the pooled-capacity engine is available.
+          </div>
+        ) : null}
+        {form.requirements.length === 0 ? (
+          <div className="mt-3 text-sm text-muted">No shared resource requirements.</div>
+        ) : (
+          <div className="mt-3 space-y-3">
+            {form.requirements.map((requirement) => (
+              <div key={requirement.key} className="grid gap-3 sm:grid-cols-[1fr_12rem_auto] sm:items-end">
+                <Field label="Resource pool">
+                  <select value={requirement.resourcePoolID} onChange={(event) => updateRequirement(requirement.key, { resourcePoolID: event.target.value })} disabled={editDisabled || form.capacityMode !== "pooled"} className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-100">
+                    <option value="">Choose resource</option>
+                    {calendar.resources.map((resource) => <option key={resource.id} value={resource.id} disabled={Boolean(resource.archived_at) && requirement.resourcePoolID !== resource.id}>{resource.name} · capacity {resource.capacity}{resource.archived_at ? " · archived" : ""}</option>)}
+                  </select>
+                </Field>
+                <PolicyNumberField label="Units required" value={requirement.unitsRequired} constraint={calendar.constraints.resource_units_required} disabled={editDisabled || form.capacityMode !== "pooled"} onChange={(value) => updateRequirement(requirement.key, { unitsRequired: value })} />
+                <Button type="button" variant="danger" onClick={() => removeRequirement(requirement.key)} disabled={baseDisabled}>
+                  <XCircle className="h-4 w-4" /> Remove
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-5 flex justify-end">
+        <Button type="button" onClick={() => void savePolicy()} disabled={baseDisabled || (serviceUnavailable && form.enabled)}>
+          {busy ? "Saving..." : "Save internal policy"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function PolicyNumberField({ label, value, constraint, disabled, onChange }: {
+  label: string;
+  value: string;
+  constraint: { minimum: number; maximum: number };
+  disabled: boolean;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="block">
+      <span className="text-sm font-medium text-ink">{label}</span>
+      <input type="number" min={constraint.minimum} max={constraint.maximum} value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled} className="mt-2 h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-100" />
+      <span className="mt-1 block text-xs text-muted">Optional · {constraint.minimum}–{constraint.maximum} minutes</span>
+    </label>
+  );
+}
+
+function emptyServicePolicyForm(): ServicePolicyFormState {
+  return { enabled: false, capacityMode: "", bufferBefore: "", bufferAfter: "", requirements: [] };
+}
+
+function servicePolicyToForm(policy: ManleAICalendarServicePolicy | null): ServicePolicyFormState {
+  if (!policy) return emptyServicePolicyForm();
+  return {
+    enabled: policy.enabled,
+    capacityMode: policy.capacity_mode ?? "",
+    bufferBefore: policy.buffer_before_minutes_override === null ? "" : String(policy.buffer_before_minutes_override),
+    bufferAfter: policy.buffer_after_minutes_override === null ? "" : String(policy.buffer_after_minutes_override),
+    requirements: policy.resource_requirements.map((requirement) => ({
+      key: requirement.resource_pool_id,
+      resourcePoolID: requirement.resource_pool_id,
+      unitsRequired: String(requirement.units_required)
+    }))
+  };
+}
+
+function nullableNumber(value: string) {
+  return value.trim() === "" ? null : Number(value);
+}
+
 function ServicesTable({
   services,
+  schedulingAuthority,
+  activeProvider,
   categories,
   serviceAliasesByServiceID,
   busy,
@@ -1216,6 +1587,8 @@ function ServicesTable({
   onArchiveServiceAlias
 }: {
   services: POSService[];
+  schedulingAuthority?: SchedulingAuthority;
+  activeProvider?: string;
   categories: POSServiceCategory[];
   serviceAliasesByServiceID: Map<string, ServiceAlias[]>;
   busy: string;
@@ -1265,6 +1638,8 @@ function ServicesTable({
                 <td className="px-4 py-3">
                   <ServiceAliasesCell
                     service={service}
+                    schedulingAuthority={schedulingAuthority}
+                    activeProvider={activeProvider}
                     aliases={service.id ? serviceAliasesByServiceID.get(service.id) ?? [] : []}
                     busy={busy}
                     draftServiceID={serviceAliasDraftServiceID}
@@ -1282,10 +1657,10 @@ function ServicesTable({
                   </div>
                 </td>
                 <td className="px-4 py-3">
-                  <AIStatus service={service} />
+                  <AIStatus service={service} schedulingAuthority={schedulingAuthority} activeProvider={activeProvider} />
                 </td>
                 <td className="px-4 py-3">
-                  <ServiceActions service={service} busy={busy} onEdit={onEdit} onArchive={onArchive} onUpdateAI={onUpdateAI} />
+                  <ServiceActions service={service} schedulingAuthority={schedulingAuthority} activeProvider={activeProvider} busy={busy} onEdit={onEdit} onArchive={onArchive} onUpdateAI={onUpdateAI} />
                 </td>
               </tr>
             ))}
@@ -1297,6 +1672,8 @@ function ServicesTable({
           <ServiceCard
             key={service.id || service.pos_service_id || service.name}
             service={service}
+            schedulingAuthority={schedulingAuthority}
+            activeProvider={activeProvider}
             categories={categories}
             aliases={service.id ? serviceAliasesByServiceID.get(service.id) ?? [] : []}
             busy={busy}
@@ -1319,6 +1696,8 @@ function ServicesTable({
 
 function ServiceCard({
   service,
+  schedulingAuthority,
+  activeProvider,
   categories,
   aliases,
   busy,
@@ -1334,6 +1713,8 @@ function ServiceCard({
   onArchiveServiceAlias
 }: {
   service: POSService;
+  schedulingAuthority?: SchedulingAuthority;
+  activeProvider?: string;
   categories: POSServiceCategory[];
   aliases: ServiceAlias[];
   busy: string;
@@ -1372,6 +1753,8 @@ function ServiceCard({
       <div className="mt-4">
         <ServiceAliasesCell
           service={service}
+          schedulingAuthority={schedulingAuthority}
+          activeProvider={activeProvider}
           aliases={aliases}
           busy={busy}
           draftServiceID={serviceAliasDraftServiceID}
@@ -1383,10 +1766,10 @@ function ServiceCard({
         />
       </div>
       <div className="mt-4">
-        <AIStatus service={service} />
+        <AIStatus service={service} schedulingAuthority={schedulingAuthority} activeProvider={activeProvider} />
       </div>
       <div className="mt-4">
-        <ServiceActions service={service} busy={busy} onEdit={onEdit} onArchive={onArchive} onUpdateAI={onUpdateAI} />
+        <ServiceActions service={service} schedulingAuthority={schedulingAuthority} activeProvider={activeProvider} busy={busy} onEdit={onEdit} onArchive={onArchive} onUpdateAI={onUpdateAI} />
       </div>
     </div>
   );
@@ -1498,6 +1881,8 @@ function CategoryCell({
 
 function ServiceAliasesCell({
   service,
+  schedulingAuthority,
+  activeProvider,
   aliases,
   busy,
   draftServiceID,
@@ -1508,6 +1893,8 @@ function ServiceAliasesCell({
   onArchiveAlias
 }: {
   service: POSService;
+  schedulingAuthority?: SchedulingAuthority;
+  activeProvider?: string;
   aliases: ServiceAlias[];
   busy: string;
   draftServiceID: string;
@@ -1522,7 +1909,7 @@ function ServiceAliasesCell({
   const aliasBusy = busy === `service-alias-${serviceID}`;
   const draftOpen = serviceID !== "" && draftServiceID === serviceID;
   const archived = Boolean(service.archived_at);
-  const usedByAI = service.ai_bookable && canEnableAI(service);
+  const usedByAI = service.ai_bookable && canEnableAI(service, schedulingAuthority, activeProvider);
 
   return (
     <div className="min-w-56">
@@ -1548,7 +1935,7 @@ function ServiceAliasesCell({
       )}
 
       {activeAliases.length > 0 && !usedByAI ? (
-        <div className="mt-2 text-xs leading-5 text-muted">Not used by AI: {serviceAliasGateReason(service)}</div>
+        <div className="mt-2 text-xs leading-5 text-muted">Not used by AI: {serviceAliasGateReason(service, schedulingAuthority, activeProvider)}</div>
       ) : null}
 
       {draftOpen ? (
@@ -1598,12 +1985,16 @@ function ServiceAliasesCell({
 
 function ServiceActions({
   service,
+  schedulingAuthority,
+  activeProvider,
   busy,
   onEdit,
   onArchive,
   onUpdateAI
 }: {
   service: POSService;
+  schedulingAuthority?: SchedulingAuthority;
+  activeProvider?: string;
   busy: string;
   onEdit: (service: POSService) => void;
   onArchive: (service: POSService) => void;
@@ -1612,7 +2003,7 @@ function ServiceActions({
   const aiBusy = busy === `ai-${service.id}`;
   const archiveBusy = busy === `archive-${service.id}`;
   const archived = Boolean(service.archived_at);
-  const canEnable = canEnableAI(service);
+  const canEnable = canEnableAI(service, schedulingAuthority, activeProvider);
   const nextAI = !service.ai_bookable;
   const readOnlyProvider = providerManagedReadOnly(service.field_authority);
   return (
@@ -1637,12 +2028,12 @@ function ServiceActions({
   );
 }
 
-function AIStatus({ service }: { service: POSService }) {
+function AIStatus({ service, schedulingAuthority, activeProvider }: { service: POSService; schedulingAuthority?: SchedulingAuthority; activeProvider?: string }) {
   return (
     <div className="space-y-1">
-      <Badge value={service.ai_bookable && canEnableAI(service) ? "allowed" : "blocked"} />
+      <Badge value={service.ai_bookable && canEnableAI(service, schedulingAuthority, activeProvider) ? "allowed" : "blocked"} />
       <div><Badge value={service.consultation_profile?.status || "consultation_draft"} /></div>
-      <div className="max-w-56 text-xs leading-5 text-muted">{serviceGateReason(service)}</div>
+      <div className="max-w-56 text-xs leading-5 text-muted">{serviceGateReason(service, schedulingAuthority, activeProvider)}</div>
     </div>
   );
 }
@@ -1664,7 +2055,7 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
       </div>
       <div className="mt-3 text-sm font-semibold text-ink">No services yet</div>
       <div className="mt-1 text-sm leading-6 text-muted">
-        Create a local service or sync Square Appointments services. Local records are not bookable until linked.
+        Create a canonical service, then configure its eligibility for the selected scheduling authority.
       </div>
       <div className="mt-4 flex flex-wrap justify-center gap-3">
         <Button type="button" onClick={onCreate}>
@@ -1748,12 +2139,12 @@ function InfoGrid({ items }: { items: [string, string][] }) {
   );
 }
 
-function serviceMetrics(services: POSService[]) {
+function serviceMetrics(services: POSService[], schedulingAuthority?: SchedulingAuthority, activeProvider?: string) {
   return {
     total: services.length,
     synced: services.filter((service) => service.sync_status === "synced" && service.pos_linked).length,
     localOnly: services.filter((service) => service.sync_status === "local_only").length,
-    aiBookable: services.filter((service) => service.ai_bookable && canEnableAI(service)).length,
+    aiBookable: services.filter((service) => service.ai_bookable && canEnableAI(service, schedulingAuthority, activeProvider)).length,
     categorized: services.filter((service) => Boolean(service.service_category_id)).length,
     suggested: services.filter((service) => service.category_source === "suggested").length
   };
@@ -1933,32 +2324,58 @@ function compareServiceAliases(a: ServiceAlias, b: ServiceAlias) {
   return a.alias.localeCompare(b.alias);
 }
 
-function canEnableAI(service: POSService) {
-  return (
-    service.active &&
-    !service.archived_at &&
-    service.sync_status === "synced" &&
-    service.pos_linked &&
-    Boolean(service.pos_service_id) &&
-    Boolean(service.pos_service_version) &&
-    service.duration_minutes > 0
-  );
+function serviceCatalogDescription(schedulingAuthority?: SchedulingAuthority) {
+  if (schedulingAuthority === "external_provider") {
+    return "External-provider eligibility requires the active provider's synced identity and AI permission.";
+  }
+  if (schedulingAuthority === "owner_manual" || schedulingAuthority === "manleai_calendar") {
+    return "Internal authorities use active canonical services with positive duration and AI permission; detailed readiness remains backend-owned.";
+  }
+  return "Scheduling authority is unavailable; eligibility fails closed until backend state loads.";
 }
 
-function serviceAliasGateReason(service: POSService) {
+function localServiceRecordDescription(schedulingAuthority?: SchedulingAuthority) {
+  if (schedulingAuthority === "external_provider") {
+    return "Managed in ManleAI. The external provider is not updated; external booking requires a valid identity from the active provider.";
+  }
+  if (schedulingAuthority === "owner_manual" || schedulingAuthority === "manleai_calendar") {
+    return "Managed in ManleAI. A POS link is optional; scheduling eligibility still requires an active canonical service, positive duration, AI permission, and backend readiness.";
+  }
+  return "Managed in ManleAI. Scheduling eligibility stays disabled until backend authority state is available.";
+}
+
+function canEnableAI(service: POSService, schedulingAuthority?: SchedulingAuthority, activeProvider?: string) {
+  if (!service.active || service.archived_at || service.duration_minutes <= 0) return false;
+  if (schedulingAuthority === "owner_manual" || schedulingAuthority === "manleai_calendar") return true;
+  if (schedulingAuthority !== "external_provider") return false;
+  return Boolean(activeProvider) && service.pos_provider === activeProvider && service.sync_status === "synced" && service.pos_linked;
+}
+
+function serviceAliasGateReason(service: POSService, schedulingAuthority?: SchedulingAuthority, activeProvider?: string) {
   if (!service.ai_bookable) return "AI booking is not allowed for this service.";
-  return serviceGateReason(service);
+  return serviceGateReason(service, schedulingAuthority, activeProvider);
 }
 
-function serviceGateReason(service: POSService) {
+function serviceGateReason(service: POSService, schedulingAuthority?: SchedulingAuthority, activeProvider?: string) {
   if (service.archived_at || service.sync_status === "archived") return "Archived services stay visible for history and are not bookable.";
   if (!service.active) return "Inactive services are not bookable by the AI receptionist.";
+  if (service.duration_minutes <= 0) return "A positive duration is required before this service can be allowed for scheduling.";
+  if (schedulingAuthority === "owner_manual" || schedulingAuthority === "manleai_calendar") {
+    return service.ai_bookable
+      ? "Allowed by the canonical catalog. Authority-specific readiness is shown separately."
+      : "This active canonical service can be allowed without a POS link.";
+  }
+  if (schedulingAuthority !== "external_provider") return "Scheduling authority is unavailable, so eligibility fails closed.";
+  if (!activeProvider || service.pos_provider !== activeProvider) return "Service identity does not belong to the salon's active external provider.";
   if (!service.pos_linked || service.sync_status === "local_only") return "Local-only services need a Square Appointments link before they are booking-ready.";
   if (service.sync_status === "sync_failed") return service.sync_error || "Latest POS sync failed; service is not bookable.";
   if (service.sync_status === "unmapped") return "Service needs an active-provider mapping before it is bookable.";
-  if (!service.pos_service_version) return "Square booking metadata is incomplete.";
-  if (service.ai_bookable) return "Booking-ready: synced, POS linked, and allowed for AI booking.";
-  return "Synced service can be allowed for AI booking.";
+  if (service.ai_bookable) return "Presentation checks pass. The API verifies the authoritative provider link before booking.";
+  return "Synced linked service can be allowed for AI booking; the API remains authoritative.";
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
 }
 
 function formatPrice(value?: number) {

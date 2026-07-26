@@ -7,12 +7,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 var (
 	ErrNotFound             = errors.New("auth record not found")
 	ErrBootstrapRoleMissing = errors.New("salon owner role not found")
 )
+
+const refreshRotationReplayGrace = 5 * time.Second
 
 type CreateFirstOwnerParams struct {
 	Email        string
@@ -141,6 +145,42 @@ func (r *Repository) PrimarySalonIDForUser(ctx context.Context, userID string) (
 	return salonID, err
 }
 
+// ResolveAccessPrincipal returns the current server-owned principal for an
+// active user. The signed access token proves identity only; tenant and role
+// assignments are reloaded from PostgreSQL for every protected request.
+func (r *Repository) ResolveAccessPrincipal(ctx context.Context, userID string) (string, string, []string, error) {
+	var resolvedUserID string
+	var salonID string
+	var roles []string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT account.id::text,
+		       COALESCE((
+		           SELECT salon.id::text
+		           FROM salons AS salon
+		           WHERE salon.owner_user_id = account.id
+		           ORDER BY salon.created_at, salon.id
+		           LIMIT 1
+		       ), ''),
+		       ARRAY(
+		           SELECT role.name
+		           FROM user_roles AS assignment
+		           JOIN roles AS role ON role.id = assignment.role_id
+		           WHERE assignment.user_id = account.id
+		           ORDER BY role.name
+		       )
+		FROM users AS account
+		WHERE account.id = $1
+		  AND account.status = 'active'
+	`, userID).Scan(&resolvedUserID, &salonID, pq.Array(&roles))
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", nil, ErrNotFound
+	}
+	if err != nil {
+		return "", "", nil, err
+	}
+	return resolvedUserID, salonID, roles, nil
+}
+
 func (r *Repository) StoreRefreshToken(ctx context.Context, userID string, token string, expiresAt time.Time) error {
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
@@ -149,19 +189,110 @@ func (r *Repository) StoreRefreshToken(ctx context.Context, userID string, token
 	return err
 }
 
-func (r *Repository) FindRefreshTokenUser(ctx context.Context, token string) (string, error) {
-	var userID string
-	err := r.db.QueryRowContext(ctx, `
-		SELECT user_id::text
-		FROM refresh_tokens
-		WHERE token_hash = $1
+func (r *Repository) RotateRefreshToken(ctx context.Context, currentToken string, replacementToken string, replacementExpiresAt time.Time) (*User, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var tokenID string
+	var revokedAt sql.NullTime
+	var replayEligible bool
+	var user User
+	err = tx.QueryRowContext(ctx, `
+		SELECT token.id::text,
+		       account.id::text, account.email, account.password_hash, account.full_name,
+		       COALESCE(account.phone, ''), account.status, account.created_at, account.updated_at,
+		       token.revoked_at,
+		       token.revoked_at IS NOT NULL
+		         AND token.revoked_at >= now() - make_interval(secs => $2)
+		FROM refresh_tokens AS token
+		JOIN users AS account ON account.id = token.user_id
+		WHERE token.token_hash = $1
+		  AND token.expires_at > now()
+		FOR UPDATE OF token, account
+	`, hashToken(currentToken), int(refreshRotationReplayGrace/time.Second)).Scan(
+		&tokenID,
+		&user.ID,
+		&user.Email,
+		&user.PasswordHash,
+		&user.FullName,
+		&user.Phone,
+		&user.Status,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+		&revokedAt,
+		&replayEligible,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if revokedAt.Valid {
+		if !replayEligible || user.Status != "active" {
+			return nil, ErrNotFound
+		}
+		var successorExists bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM refresh_tokens AS successor
+				WHERE successor.user_id = $1
+				  AND successor.token_hash = $2
+				  AND successor.revoked_at IS NULL
+				  AND successor.expires_at > now()
+			)
+		`, user.ID, hashToken(replacementToken)).Scan(&successorExists); err != nil {
+			return nil, err
+		}
+		if !successorExists {
+			return nil, ErrNotFound
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return &user, nil
+	}
+
+	result, err := tx.ExecContext(ctx, `
+		UPDATE refresh_tokens
+		SET revoked_at = now()
+		WHERE id = $1
 		  AND revoked_at IS NULL
 		  AND expires_at > now()
-	`, hashToken(token)).Scan(&userID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrNotFound
+	`, tokenID)
+	if err != nil {
+		return nil, err
 	}
-	return userID, err
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if affected != 1 {
+		return nil, ErrNotFound
+	}
+
+	if user.Status != "active" {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return nil, ErrDisabledUser
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+		VALUES ($1, $2, $3)
+	`, user.ID, hashToken(replacementToken), replacementExpiresAt); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &user, nil
 }
 
 func (r *Repository) RevokeRefreshToken(ctx context.Context, token string) error {

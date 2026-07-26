@@ -4,10 +4,14 @@
 
 This file is the design, UI, and UX contract for ManleAI agents. Use it before proposing, implementing, or reviewing any user-facing frontend work.
 
-The product is an operational SaaS dashboard for nail salon owners, not a marketing site. The UI should help an owner configure the salon, connect Square Appointments, monitor phone receptionist readiness, and understand failures quickly.
+The product is an operational SaaS dashboard for nail salon owners, not a
+marketing site. The UI should help an owner configure the salon, understand the
+selected scheduling authority and its readiness, optionally connect Square
+Appointments for `external_provider`, monitor phone receptionist readiness,
+and understand failures quickly.
 
 The public customer-facing catalog in `landing/` is a separate surface. It can
-use a simpler customer-facing layout, but it must stay public-safe: call-to-book
+use a simpler customer-facing layout, but it must stay public-safe: call-to-request
 only, no confirmed web booking claims, no staff contact details, no POS IDs, no
 sync errors, no owner identifiers, and no provider tokens.
 
@@ -16,9 +20,389 @@ sync errors, no owner identifiers, and no provider tokens.
 - Keep the interface quiet, dense, professional, and fast to scan.
 - Prioritize operational clarity over decorative visuals.
 - Show real workflow status, next actions, and blockers. Do not fill production pages with fake activity.
-- Keep all product claims POS-first and scope-honest: "Square Appointments" is the current integration; other POS providers are future adapter targets.
-- Never imply an appointment is confirmed unless the active POS provider returned a successful booking ID.
+- Keep product claims Owner-first and scope-honest. The current UI includes the
+  Phase 2 `owner_manual` review queue and the existing Square-backed
+  `external_provider` workflows. Phase 4B includes owner-managed
+  `manleai_calendar` configuration/readiness plus structured multi-guest,
+  multi-service staff-only and pooled internal availability/create and
+  whole-root lifecycle actions. V52-V55 implement explicit owner-reviewed
+  authority preview and commit, immutable audit history, and inverse-run
+  context in Settings. Provider integrations never switch authority implicitly.
+- Derive confirmation copy from scheduling-authority evidence:
+  `owner_manual` remains pending, `manleai_calendar` requires an atomic internal
+  commit and durable appointment ID, and `external_provider` requires provider
+  success with the required booking ID and metadata.
 - When a workflow is not available yet, show a disabled or gated state with the real dependency, not a pretend success path.
+
+## Scheduling Authority Experience
+
+Authority-aware scheduling surfaces must show the selected authority,
+readiness, blockers, and the exact owner action that resolves a blocker when
+those controls exist.
+Connecting, syncing, or testing Square must never look like an implicit
+authority switch.
+
+- `owner_manual`: focus on pending request review and notification state. Do
+  not show provider setup as a booking prerequisite or promise automatic
+  availability.
+- `manleai_calendar`: focus on internal hours, staff schedule, conflicts, and
+  capacity policy, resources, exceptions, and operation-specific capabilities.
+  Never present activation as authority switching. Enable staff-only, pooled,
+  party, and new-work lifecycle controls only from their exact backend
+  capabilities. A historical internal row remains routed by its persisted
+  origin/version after a later selected-authority change.
+- `external_provider`: focus on provider connection, selected location, sync,
+  mappings, write permission, and reconciliation without weakening provider
+  confirmation safety.
+
+Appointment and request views must retain the originating authority so owners
+can understand why historical reschedule, cancellation, retry, or
+reconciliation actions follow a different path after an explicit switch.
+
+## Calls Readiness
+
+The Calls page presents three equal readiness cards in this order: **Phone
+answering**, **Request capture**, and **Automated booking**. They stack on
+mobile and use backend-returned readiness and blockers; the frontend must not
+infer scheduling capability from Square connection state, provider names, or
+copy.
+
+- Phone answering shows telephony configuration, salon phone, signature/input
+  mode, webhook endpoints, and voice-AI adapter diagnostics.
+- Request capture shows the selected scheduling authority, exact authority
+  version, booking mode, and the blockers that prevent collecting a structured
+  scheduling request or verified availability.
+- Automated booking shows whether the selected authority can return its
+  required durable confirmation evidence. `owner_manual` remains visibly
+  owner-review only; `manleai_calendar` reflects atomic internal execution;
+  provider setup appears here only for `external_provider`.
+
+Each card has loading, ready, and blocked states. Blocked states show the safe
+backend message and stable blocker code. A page-level load failure retains a
+retry action and never guesses readiness. Legacy `phone_booking_ready` may be
+identified as a compatibility alias, but the visible label remains Automated
+booking.
+
+## ManleAI Calendar Configuration
+
+The implemented Phase 3 workflow manages structured configuration beside the
+operational object it belongs to. It must not create a separate catch-all page
+that makes owners reselect the salon, staff member, or service already in
+context.
+
+- **Settings** owns the salon-wide setup through the ManleAI Calendar section:
+  readiness summary, slot step, minimum notice, booking horizon, reschedule and
+  cancellation cutoffs, party limit, default buffers, `local_override` weekly
+  salon hours, shared resource pools, salon/resource exceptions, and the
+  version-fenced **Activate configuration** audit action. A changed
+  configuration is visibly stale and can be activated again after blockers are
+  resolved.
+- **Staff** owns one staff member's weekly periods, service assignments, and
+  staff-scoped exceptions inside that staff member's existing detail/edit
+  workflow. The parent staff identity is implied and must not be selected again.
+- **Services** owns one service's internal-calendar enablement, `staff_only` or
+  `pooled` capacity mode, buffer overrides, eligible staff, and resource
+  requirements inside that service's existing detail/edit workflow. The parent
+  service identity is implied.
+- **Appointments** shows scheduling-authority readiness, links to Settings,
+  Staff, and Services setup, and owns the Phase 4B structured internal
+  appointment-create flow plus Phase 4C whole-root reschedule/cancel. It does
+  not expose an authority switch.
+
+Every surface uses backend-returned constraints and readiness blockers rather
+than duplicating ranges, allowed modes, or eligibility logic. Mutations preserve
+one action key across safe retry, send the latest `expected_config_version`, and
+replace it only when the logical form changes. A version conflict reloads the
+latest aggregate and asks the owner to review before saving again.
+
+The readiness UI must show the aggregate and operation dimensions:
+
+- **Configuration** is Ready or Needs attention from
+  `configuration_ready` and configuration-dimension blockers.
+- **Scheduling execution** comes from aggregate `execution_ready`. It is Ready
+  only when all six declared operation capabilities are true; otherwise the UI
+  must still expose each true operation capability independently.
+- **Available now** comes from backend `readiness.capabilities`. Staff-only
+  availability/create, pooled capacity, and party create may each be Ready
+  when their backend predicates pass. Reschedule and cancel become Ready for
+  new work only under the selected-authority/current-activation engine fence;
+  row-origin lifecycle controls remain target-driven rather than current-mode
+  driven.
+
+Loading uses content-shaped skeletons. Aggregate/detail failures expose retry;
+empty policy, hours, schedules, resource, and exception states identify the
+next setup action; saves disable conflicting controls; success uses the returned
+aggregate and `replayed` flag. Desktop uses compact grids and rows, while mobile
+stacks fields and uses full-width save/archive/cancel actions without horizontal
+scrolling. Activation copy must say that it records readiness for the current
+config version, can become stale after a later change, and does not switch
+scheduling authority. It may enable a capability only after the backend returns
+that capability as ready.
+
+## Phase 4B Internal Appointment Create
+
+The implemented child workflow lives on `/dashboard/appointments`. It uses the
+selected `manleai_calendar` authority, canonical service/staff configuration,
+and neutral scheduling APIs. It never displays provider evidence for an
+internal appointment.
+
+Mockup as Text:
+
+```text
+Appointments                                      [Create appointment]
+Scheduling readiness: ManleAI Calendar
+Available now: Staff-only availability · Staff-only create · Pooled capacity · Party create · Reschedule · Cancel
+
+Create appointment
+1 Guests & services -> 2 Date -> 3 Verified openings -> 4 Customer -> 5 Review
+
+Guest 1 label: [Guest 1]
+  Service 1: [Enabled service] [Specific staff | Anyone] [Staff]
+  [+ Add service]
+[+ Add guest] (up to backend max_party_size)
+Date: [YYYY-MM-DD]
+Verified opening:
+  Guest 1 · Service 1 · time · concrete staff · occupied range
+  Pooled segment · resource pool · units (when required)
+Customer: [Name] [Phone] [Email optional]
+Review: party size · ordered guest/service/staff/resource plan
+                                      [Back] [Confirm appointment]
+
+Submitting: Creating appointment…
+Unknown response: Result unknown. [Retry exact operation]
+Conflict: Opening changed. [Check availability again]
+Success: Confirmed atomically · Root internal appointment ID {durable ID}
+```
+
+- The primary user is the owner building one aggregate internal appointment
+  from structured guests and ordered service units. The parent scheduling
+  authority and salon are implied; the owner does not reselect either.
+- Service choices come from enabled policies whose exact create capability is
+  ready. Adding a guest or another service row requires `party_create`; pooled
+  policies require `pooled_capacity`. The maximum guest count comes from the
+  backend aggregate constraint.
+- Every guest label is preserved as `guest_reference`; every normalized service
+  unit has quantity one. `Anyone` is a search preference, while every offered
+  segment and final review shows its concrete assigned staff member. Services
+  for the same guest remain ordered/sequential in the verified plan.
+- Verified opening selection carries one backend quote ID, slot fingerprint,
+  and complete ordered segment/resource graph. Confirmation is shown only
+  after the action response returns a non-empty durable root appointment ID and
+  booking-attempt ID and its child graph exactly matches the quote.
+- A typed quote/conflict `409` clears stale proof and returns the owner to
+  availability. A network/response-loss state retains the same logical payload
+  and operation key and offers **Retry exact operation** so committed replay can
+  return the same IDs.
+- Capability, loading, empty, validation, error, submitting, uncertain, replay,
+  conflict, and success states are explicit. An incomplete child result,
+  resource conflict, or guest/party mismatch is a non-confirmation state for
+  the complete operation.
+- Desktop uses the compact step grid and side-by-side fields. Mobile stacks the
+  steps, fields, slot buttons, and full-width Back/Confirm/Retry actions without
+  horizontal scrolling.
+- Data dependencies are the ManleAI Calendar aggregate/capabilities plus
+  `POST /api/salons/:id/scheduling-availability` and
+  `POST /api/salons/:id/scheduling-actions`.
+
+## Phase 4C Internal Appointment Lifecycle
+
+The implemented lifecycle workflow remains inside
+`/dashboard/appointments`, next to the internal appointment row it changes.
+It does not belong in Settings or Integrations because the operational parent
+is the persisted appointment root. The target salon and appointment are
+already implied; no redundant selector is shown.
+
+Mockup as Text:
+
+```text
+Appointment row · ManleAI Calendar · Confirmed · Version 2
+                                      [View] [Reschedule] [Cancel]
+
+Reschedule internal appointment
+Current whole root: party size · ordered guests/services · staff/resources · version 2
+Cutoff: Open until {verified cutoff timestamp}
+1 Preferred date: [YYYY-MM-DD] [Check exact availability]
+2 Complete replacement plans
+  Option: ordered guests/services · concrete staff · time · resources
+3 Current -> New
+                                      [Close] [Confirm whole-party reschedule]
+
+Unknown response: Outcome unknown; fields and proof are locked.
+                                      [Retry exact reschedule]
+Stale target/quote: Reloaded; no appointment change was inferred.
+Success: Same durable root · Rescheduled · Version 3 · exact active children
+
+Cancel internal appointment
+Current whole root: party size · ordered guests/services · version 3
+Cutoff: Open until {verified cutoff timestamp}
+Cancellation reason (optional): [................................]
+This releases every active child together and retains lifecycle history.
+                                      [Close] [Cancel whole appointment]
+
+Unknown response: Outcome unknown; reason, version, and key are locked.
+                                      [Retry exact cancellation]
+Success: Same durable root · Cancelled · Version 4 · zero active children
+```
+
+- A row uses the internal lifecycle dialog only when its persisted
+  `scheduling_authority` is `manleai_calendar`, status is `confirmed` or
+  `rescheduled`, the root authority ID/version is complete, and every current
+  child belongs to that exact version. The salon's current authority does not
+  reroute that historical target.
+- Reschedule availability carries `target_appointment_id`, exact target
+  version, party size, and the immutable ordered service/guest shape. The owner
+  selects one complete backend-assigned replacement plan; the browser never
+  invents staff, times, or resource allocations.
+- Cancel submits the exact target ID/version and optional reason without a
+  quote, replacement segments, or time range. Copy must say that the whole root
+  is cancelled and history is retained; it must not imply deletion.
+- Cutoff presentation is fail closed. Missing (`null`/`undefined`), invalid,
+  unparsable, closed, or equality-at-cutoff evidence disables a new action and
+  explains why. Only `now < start - cutoff` is visibly open. An already unknown
+  submission may retain its locked exact-retry action so response-loss recovery
+  does not create a new operation.
+- A typed target/version/quote conflict clears local proof, reloads the
+  appointment, and shows no-success copy. An untyped response loss locks the
+  exact logical payload and operation key until committed replay proves the
+  outcome.
+- Reschedule success requires the same root ID, non-empty internal attempt ID,
+  target version, exactly next result version, `appointment_status=rescheduled`,
+  active-child count, and exact replacement child graph. Cancel success
+  requires the same root/attempt/version evidence,
+  `appointment_status=cancelled`, and `active_child_count=0`. Provider-shaped
+  evidence is invalid for both.
+- Desktop uses side-by-side current/new comparison; mobile stacks the current
+  plan, options, reason, warning, and full-width actions without horizontal
+  scrolling.
+
+## Owner Review Requests
+
+The implemented `owner_manual` management surface is a child workflow on
+`/dashboard/appointments`, because each row is scheduling work requiring an
+owner decision. It is not provider setup, free-text training, or confirmed
+appointment history.
+
+- The card title is **Owner review requests** and must state that requests are
+  recorded for review, not confirmed, and that the screen does not prove an
+  owner notification was sent.
+- Filters are **All**, **Pending**, **Contacted**, **Resolved**, and
+  **Dismissed**, with bounded counts and a manual **Refresh** action.
+- Desktop uses a table with Requested time, Customer, Type, Services, Status,
+  and Action columns. Mobile replaces the table with stacked customer/status,
+  requested-time, type, service, and full-width **Review request** cards.
+- Loading uses row-shaped skeletons. Empty state names the selected status.
+  List/detail failures show an actionable retry. Pagination disables while a
+  page or transition is active.
+- **Review owner request** shows customer contacts, requested time, party size,
+  source, ordered service/staff/guest snapshots, optional target, notes,
+  resolution reason, and lifecycle timestamps.
+- A pending request may be marked **Contacted**, **Resolved**, or
+  **Dismissed**. Contacted may then move only to Resolved or Dismissed.
+  Resolve/Dismiss require a resolution reason; the review note is optional.
+  Terminal requests are read-only.
+- Version-conflict state reloads the latest request and asks the owner to review
+  it again. Success and terminal copy must repeat that no appointment was
+  confirmed, rescheduled, or cancelled by the review status update.
+
+This surface consumes the scheduling-request list/detail/transition APIs
+through `frontend/lib/api/scheduling-requests.ts`. It does not manage authority
+selection, send notifications, create appointments, call POS, or resolve
+external-provider reconciliation.
+
+## Owner Notification Delivery
+
+Owner-operational SMS is a separate sibling card on
+`/dashboard/appointments`, immediately after **Owner review requests**. The
+operational object is the durable notification row, not the request status or
+provider setup, so delivery inspection belongs beside owner work while sender,
+consent, and callback configuration remain in Integrations.
+
+- The card title is **Owner notification delivery** and explicitly says that
+  provider acceptance is not proof of delivery and SMS status never confirms
+  or changes an appointment.
+- Summary metrics show queued, in progress/provider accepted, delivered, dead
+  letter, and disabled states from backend counts. The UI does not infer status
+  from timestamps or provider names.
+- Desktop rows show created time, notification type, masked destination,
+  delivery status, safe attempt count, and **View delivery**. Mobile uses
+  stacked cards with the same evidence and full-width action. Bounded
+  Previous/Next pagination keeps older operational evidence reachable.
+- Detail shows only masked destination, safe provider/status/error fields,
+  timestamps, and immutable safe events. It never shows message body, full
+  phone number, provider message ID, raw response, internal error, or secret.
+- **Retry delivery** appears only when backend `can_requeue=true`. It preserves
+  one action key for uncertain client response and is never offered for
+  `DELIVERY_OUTCOME_UNKNOWN`, because duplicate delivery is possible.
+- Loading uses row-shaped skeletons; empty state says no delivery records;
+  errors retain refresh/retry; success refreshes metrics/detail without
+  implying the related scheduling request was resolved.
+
+The Twilio card in `/dashboard/integrations` owns owner-SMS setup: explicit
+enablement, E.164 owner destination, fresh consent attestation, write-only
+Account SID/Auth Token, write-only Messaging Service SID or sender, callback
+paths, and read-only computed HTTPS callback URLs. Changing the destination
+requires a new attestation. The screen must label this **owner operational
+SMS** and state that customer SMS/consent is not enabled. Blank write-only
+values preserve existing secrets unless the owner explicitly selects the
+matching clear action.
+
+## Square Webhook Operations
+
+The implemented Square webhook operations surface is a child section inside
+the existing **Square Appointments** card on `/dashboard/integrations`. It is
+shown only when Square is the active external adapter and a recoverable Square
+connection exists. It is not a standalone page, Appointments workflow, or
+scheduling-authority selector: the parent object is the connected Square
+integration, and historical external-provider repair remains provider/origin
+scoped after an authority switch.
+
+Mockup as Text:
+
+```text
+Square Appointments                                      [connection status]
+Connect OAuth · Location · Sync
+
+Webhook operations                                      [Configured]
+Monitor booking-event processing; delivery is not appointment confirmation.
+[Pending] [Processing] [Failed] [Dead letter] [Succeeded · 168h]
+Calendar repair backstop                                 [Healthy | Degraded]
+
+Processing status [All statuses v]                       [Refresh operations]
+Received             Event                Status          Attempts       Action
+Jul 24, 9:50 AM      booking · updated    dead letter     10 · 0         [View event]
+                                                        [Previous] [Next]
+
+Square webhook event
+Event type · status · processing attempts · owner requeues
+Safe diagnostic · next attempt
+Available timeline evidence
+                                      [Requeue failed event]
+
+Unknown response: Result unknown.                        [Retry exact requeue]
+Replay success: Exact saved action recovered; no second requeue was created.
+```
+
+- The filters are the public contract values `pending`, `processing`, `failed`,
+  `dead_letter`, and `succeeded`. An unfiltered response may include backend
+  `ignored` records; they are visible read-only and never offered for requeue.
+- Metrics and calendar-repair health come directly from the authenticated
+  owner-scoped API. The UI does not infer health from local timestamps or
+  Square configuration badges.
+- Detail and timeline show only event type, bounded status/attempt counts, safe
+  error class/code, and returned timestamps. Provider identifiers, raw payload,
+  signature/token material, provider responses, customer data, and raw errors
+  are never rendered.
+- A new requeue button appears only when `can_requeue=true`. One action key is
+  retained for that intent; a lost response keeps the same key and presents
+  **Retry exact requeue**. `X-Idempotent-Replay=true` produces recovered-action
+  copy without implying another event was queued.
+- Loading uses row-shaped skeletons. Configuration-missing, empty, list/detail
+  error, success, disabled, pagination, submitting, and uncertain-response
+  states are explicit. Desktop uses a compact table; mobile uses stacked event
+  cards and full-width actions without horizontal scrolling.
+- A configured verifier means only that the HTTPS notification URL and
+  write-only signature key exist. It does not prove a Square subscription,
+  delivery, repair, booking, or appointment confirmation.
 
 ## Visual System
 
@@ -78,7 +462,9 @@ Every production dashboard page should have:
 3. Error state using `Alert` with a clear retry or next action when available.
 4. Empty state that explains what is missing and provides the next setup step.
 5. Success/data state with real data, timestamps, statuses, and owner actions.
-6. Disabled/gated state for workflows blocked by onboarding, Square connection, booking safety checks, or milestone scope.
+6. Disabled/gated state for workflows blocked by onboarding, selected-authority
+   readiness, external-provider setup when applicable, booking safety checks,
+   switch conflict, or milestone scope.
 
 Do not ship a page that only says a feature will come later unless it is explicitly a gated placeholder for a milestone, and even then it must tell the owner what dependency unlocks it.
 
@@ -86,17 +472,22 @@ Do not ship a page that only says a feature will come later unless it is explici
 
 Use concise operational copy:
 
-- Prefer "Connect Square", "Sync services", "Review pending request", and "Open fallback requests" over vague marketing language.
+- Prefer "Review pending request", "Set up ManleAI calendar", "Connect Square",
+  "Sync services", and "Open fallback requests" only when those actions match
+  the selected authority.
 - Say "Square Appointments" for the current POS integration.
-- Say "POS-first, starting with Square Appointments" for broader positioning.
-- Say "adapter architecture" when describing future POS provider support.
+- Say "Owner-first scheduling, with optional Square Appointments integration"
+  for broader positioning.
+- Say "external-provider adapter architecture" when describing future provider
+  support.
 - Use "AI phone receptionist" or "AI receptionist" consistently.
 - For booking failures, distinguish "pending request" from "confirmed appointment".
 
 Avoid:
 
 - Claims of broad POS support before providers exist.
-- Claims that AI booking is live before backend gates pass.
+- Claims that an authority mode or AI booking is live before its backend gates
+  pass.
 - Decorative feature explanations inside the app UI.
 - Placeholder operational metrics that look real.
 
@@ -121,7 +512,8 @@ Tables and lists:
 Frontend state must reflect backend truth:
 
 - Read API calls from `frontend/lib/api` or feature-local data helpers.
-- Keep frontend types aligned with backend DTOs.
+- Keep frontend types aligned with backend DTOs. Do not overload
+  `active_pos_provider` as a scheduling-authority field.
 - Do not expose raw or encrypted POS tokens.
 - Tenant-scoped UI must assume backend ownership checks by `salon_id` and must not cache cross-salon data casually.
 - When API support is missing, gate the UI instead of fabricating production behavior.
@@ -144,9 +536,19 @@ Use this checklist before finishing UI work:
 
 - The page looks like an operational dashboard, not a landing page.
 - The layout matches the existing app shell, spacing, cards, buttons, badges, and typography.
-- The copy is scope-honest about Square Appointments and AI booking readiness.
+- The copy is scope-honest about the selected scheduling authority, current
+  operation capabilities, Square-backed external path, and AI booking
+  readiness.
 - Every production page state is represented.
 - Buttons and links have clear outcomes and disabled states where needed.
 - Mobile layout has no overlap or horizontal overflow except intentional table scrolling.
 - API data, DTOs, and frontend types agree.
-- No fake confirmed appointment path exists without POS booking success.
+- No fake confirmation path exists: pending owner review, failed internal
+  commits, and incomplete/failed provider writes remain unconfirmed.
+- AI Settings presents `booking_mode` as caller-facing scheduling behavior,
+  separate from the selected scheduling authority. Pending approval copy says
+  that the selected time is not reserved; disabled copy says availability and
+  request actions do not run; owner-manual automatic confirmation is disabled.
+- Owner review rows and details show the request's target scheduling authority
+  separately from the `owner_manual` request origin and repeat that review
+  status changes do not reserve, confirm, reschedule, or cancel an appointment.

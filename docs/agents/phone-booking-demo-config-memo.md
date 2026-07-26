@@ -4,16 +4,18 @@ This memo tells future agents how to guide the owner through configuring the liv
 
 The target use case is strict:
 
-Customer calls -> AI answers through Twilio -> customer asks for a booking -> AI checks Booking Calendar / Square Appointments availability -> AI offers only available slots inside valid salon business hours -> customer chooses a slot -> AI confirms only after Square returns a successful booking ID -> appointment is stored and synced through the POS-first booking path.
+Customer calls -> AI answers through Twilio -> customer asks for a booking -> AI checks Booking Calendar / Square Appointments availability -> AI offers only available slots inside valid salon business hours -> customer chooses a slot -> AI confirms only after Square returns a successful booking ID -> appointment is stored and synced through the Square-backed `external_provider` booking path.
 
 ## Agent Rules
 
 - Guide one configuration step at a time. Do not dump every step unless the user asks for the full checklist.
 - After each step, ask the user to confirm what is done before moving on.
 - Never ask the user to paste secrets into chat. Tell them which Integrations dashboard field or provider console field needs the secret. Do not inspect or use env files to configure or diagnose active provider behavior.
-- Never say the demo is ready until `GET /api/salons/:id/voice/status` returns both `ready: true` and `phone_booking_ready: true`.
+- Never say this external-provider confirmation demo is ready until `GET /api/salons/:id/voice/status` returns `scheduling_authority: "external_provider"`, `booking_mode: "confirmed_booking"`, and all three readiness dimensions true: `phone_answering_ready`, `request_capture_ready`, and `automated_booking_ready`. `phone_booking_ready` is only the compatibility alias for the last dimension.
 - Keep Square as the first real POS provider. Do not claim generic POS support for this demo.
-- Keep the POS-first invariant explicit: no confirmed appointment unless Square returns a POS booking ID.
+- Keep the Square-backed `external_provider` confirmation invariant explicit:
+  no confirmed appointment unless Square returns the required booking ID and
+  metadata.
 - If Square fails, the expected behavior is fallback pending owner review, not confirmation.
 
 ## Source Of Truth
@@ -279,6 +281,13 @@ In the ManleAI Integrations dashboard, Twilio tab:
 - `Stream path`: `/api/voice/twilio/stream`
 - `Voice transport`: `recording` for the legacy recording loop, or `realtime_stream` for Twilio Media Streams + OpenAI Realtime.
 
+When buffered TTS is used, the backend generates a short-lived signed
+`/api/voice/audio/:id` URL for Twilio `<Play>`. The URL query contains only an
+expiry and HMAC signature; the signature is bound to the exact salon, call,
+session, provider, audio row, and database expiry. A missing stored auth token
+keeps the text fallback and never emits an unsigned URL. Rotating the dashboard
+Twilio auth token invalidates playback URLs generated with the prior token.
+
 In Twilio phone number voice settings:
 
 ```txt
@@ -319,7 +328,8 @@ The local app can run Twilio speech `<Gather>` without OpenAI STT/TTS. For a ful
 Readiness meaning:
 
 - STT ready enables recording mode.
-- LLM ready allows safe reply rewriting, but it must not override POS-first confirmation safety.
+- LLM ready allows safe reply rewriting, but it must not override Square-backed
+  `external_provider` confirmation safety.
 - Before testing freeform semantic turns, run the owner-authenticated
   `POST /api/salons/:id/voice/semantic-check`. Require `configured=true` and
   `verified=true`; a failed check returns only safe provider/status/schema
@@ -331,7 +341,7 @@ AI receptionist speaking style is configured in Settings, not in the OpenAI tab.
 Use `/dashboard/settings` -> `AI receptionist` -> `Speaking style` to set
 `ai_tone`. Tone is passed into LLM reply requests when available, but it is
 style-only: it must not change required booking slots, handoff decisions,
-availability checks, or POS-first confirmation wording. Realtime should speak
+availability checks, or Square-backed `external_provider` confirmation wording. Realtime should speak
 backend-approved replies and should not rely on independent realtime
 instructions for tone changes.
 Realtime reply order is backend-owned: each queued reply has an application
@@ -362,21 +372,27 @@ Use the Calls dashboard or the API:
 GET /api/salons/:id/voice/status
 ```
 
-Required for live phone booking:
+Required for this Square-backed live confirmation demo:
 
 ```json
 {
-  "ready": true,
-  "phone_booking_ready": true
+  "scheduling_authority": "external_provider",
+  "booking_mode": "confirmed_booking",
+  "phone_answering_ready": true,
+  "request_capture_ready": true,
+  "automated_booking_ready": true
 }
 ```
 
 Interpretation:
 
-- `ready: true` means Twilio can route calls into the voice webhook.
-- `phone_booking_ready: true` means the call path has enough Square booking setup to check availability and attempt POS-first booking.
+- `phone_answering_ready: true` means the configured Twilio path can accept the salon's inbound call.
+- `request_capture_ready: true` means the selected external authority can collect a structured request and offer provider-backed availability.
+- `automated_booking_ready: true` means confirmed mode is selected and the external authority passes every execution/write-safety gate required for Square confirmation. `phone_booking_ready` mirrors this value for compatibility.
 
-If `phone_booking_ready` is false, inspect `booking.checks`:
+If a dimension is false, inspect that dimension's typed `blockers` first. For
+`external_provider`, the legacy `booking.checks` remain useful Square-specific
+diagnostics:
 
 - `enable_ai_booking`
 - `connect_square`
@@ -453,14 +469,13 @@ When simulator passes:
 - Twilio `To` phone does not match `salons.phone`.
 - Dashboard salon phone is missing or wrong.
 
-`phone_booking_ready: false`
+`request_capture_ready: false` or `automated_booking_ready: false`
 
-- Square not connected.
-- Square location not selected.
-- Services/staff not synced.
-- No active AI-bookable service/staff.
-- Business hours missing.
-- AI booking not enabled.
+- The dimension's `blockers` identify the exact authority, mode, fence, catalog,
+  availability, or execution prerequisite.
+- For this external-provider demo, Square-specific causes include no connection,
+  no selected location, stale/incomplete sync, missing AI-bookable service or
+  staff, missing imported business hours, and blocked booking writes.
 
 AI offers no slots
 

@@ -102,6 +102,101 @@ func TestBootstrapStatusReturnsAvailability(t *testing.T) {
 	}
 }
 
+func TestLoginDisabledUserAlwaysReturnsInvalidCredentials(t *testing.T) {
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte("correct-password"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	store := &fakeAuthStore{user: &User{
+		ID:           "disabled-user",
+		Email:        "disabled@example.com",
+		PasswordHash: string(passwordHash),
+		FullName:     "Disabled User",
+		Status:       "disabled",
+	}}
+	service := NewService(store, testAuthConfig())
+
+	for _, password := range []string{"wrong-password", "correct-password"} {
+		_, err := service.Login(context.Background(), LoginRequest{
+			Email:    store.user.Email,
+			Password: password,
+		})
+		if !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("Login password %q error = %v, want ErrInvalidCredentials", password, err)
+		}
+	}
+	if store.storeRefreshCalls != 0 {
+		t.Fatalf("stored refresh tokens = %d, want 0", store.storeRefreshCalls)
+	}
+}
+
+func TestRefreshUsesAtomicRotationAndReturnsItsReplacement(t *testing.T) {
+	store := &fakeAuthStore{
+		user: &User{
+			ID:       "active-user",
+			Email:    "active@example.com",
+			FullName: "Active User",
+			Status:   "active",
+		},
+		roles:   []string{"salon_owner"},
+		salonID: "salon-1",
+	}
+	service := NewService(store, testAuthConfig())
+
+	res, err := service.Refresh(context.Background(), "current-refresh-token")
+	if err != nil {
+		t.Fatalf("Refresh returned error: %v", err)
+	}
+	if store.rotateCurrentToken != "current-refresh-token" {
+		t.Fatalf("rotation current token = %q", store.rotateCurrentToken)
+	}
+	if store.rotateReplacementToken == "" || store.rotateReplacementToken == store.rotateCurrentToken {
+		t.Fatalf("rotation replacement token = %q", store.rotateReplacementToken)
+	}
+	if res.RefreshToken != store.rotateReplacementToken {
+		t.Fatalf("response refresh token = %q, want atomic replacement", res.RefreshToken)
+	}
+	if store.rotateExpiresAt.Before(time.Now().Add(55 * time.Minute)) {
+		t.Fatalf("replacement expiry = %s, want about an hour from now", store.rotateExpiresAt)
+	}
+	if store.storeRefreshCalls != 0 {
+		t.Fatalf("non-atomic refresh stores = %d, want 0", store.storeRefreshCalls)
+	}
+}
+
+func TestRefreshDerivesOneExactSuccessorForConcurrentReplay(t *testing.T) {
+	store := &fakeAuthStore{
+		user: &User{ID: "active-user", Email: "active@example.com", FullName: "Active User", Status: "active"},
+	}
+	service := NewService(store, testAuthConfig())
+
+	first, err := service.Refresh(context.Background(), "shared-current-token")
+	if err != nil {
+		t.Fatalf("first refresh: %v", err)
+	}
+	firstReplacement := first.RefreshToken
+	second, err := service.Refresh(context.Background(), "shared-current-token")
+	if err != nil {
+		t.Fatalf("replayed refresh: %v", err)
+	}
+	if firstReplacement == "" || second.RefreshToken != firstReplacement {
+		t.Fatalf("successors first=%q second=%q, want one exact successor", firstReplacement, second.RefreshToken)
+	}
+	if firstReplacement == "shared-current-token" {
+		t.Fatal("refresh rotation reused the current token")
+	}
+}
+
+func TestRefreshMapsConsumedDisabledTokenToInvalidCredentials(t *testing.T) {
+	store := &fakeAuthStore{rotateErr: ErrDisabledUser}
+	service := NewService(store, testAuthConfig())
+
+	_, err := service.Refresh(context.Background(), "disabled-user-token")
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("Refresh error = %v, want ErrInvalidCredentials", err)
+	}
+}
+
 func testAuthConfig() config.Config {
 	return config.Config{
 		JWTSecret:       "test-secret",
@@ -111,20 +206,30 @@ func testAuthConfig() config.Config {
 }
 
 type fakeAuthStore struct {
-	bootstrapAvailable bool
-	bootstrapErr       error
-	createCalled       bool
-	createdParams      CreateFirstOwnerParams
-	createErr          error
-	user               *User
-	roles              []string
-	salonID            string
-	refreshToken       string
-	refreshExpiresAt   time.Time
+	bootstrapAvailable     bool
+	bootstrapErr           error
+	createCalled           bool
+	createdParams          CreateFirstOwnerParams
+	createErr              error
+	user                   *User
+	roles                  []string
+	salonID                string
+	refreshToken           string
+	refreshExpiresAt       time.Time
+	storeRefreshCalls      int
+	rotateCurrentToken     string
+	rotateReplacementToken string
+	rotateExpiresAt        time.Time
+	rotateErr              error
+	revokedToken           string
+	revokeErr              error
 }
 
 func (f *fakeAuthStore) FindUserByEmail(ctx context.Context, email string) (*User, error) {
-	return nil, ErrNotFound
+	if f.user == nil {
+		return nil, ErrNotFound
+	}
+	return f.user, nil
 }
 
 func (f *fakeAuthStore) FindUserByID(ctx context.Context, id string) (*User, error) {
@@ -146,17 +251,28 @@ func (f *fakeAuthStore) PrimarySalonIDForUser(ctx context.Context, userID string
 }
 
 func (f *fakeAuthStore) StoreRefreshToken(ctx context.Context, userID string, token string, expiresAt time.Time) error {
+	f.storeRefreshCalls++
 	f.refreshToken = token
 	f.refreshExpiresAt = expiresAt
 	return nil
 }
 
-func (f *fakeAuthStore) FindRefreshTokenUser(ctx context.Context, token string) (string, error) {
-	return "", ErrNotFound
+func (f *fakeAuthStore) RotateRefreshToken(ctx context.Context, currentToken string, replacementToken string, replacementExpiresAt time.Time) (*User, error) {
+	f.rotateCurrentToken = currentToken
+	f.rotateReplacementToken = replacementToken
+	f.rotateExpiresAt = replacementExpiresAt
+	if f.rotateErr != nil {
+		return nil, f.rotateErr
+	}
+	if f.user == nil {
+		return nil, ErrNotFound
+	}
+	return f.user, nil
 }
 
 func (f *fakeAuthStore) RevokeRefreshToken(ctx context.Context, token string) error {
-	return nil
+	f.revokedToken = token
+	return f.revokeErr
 }
 
 func (f *fakeAuthStore) BootstrapAvailable(ctx context.Context) (bool, error) {

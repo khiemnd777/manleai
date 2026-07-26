@@ -34,8 +34,15 @@ const (
 )
 
 var (
-	ErrValidation = errors.New("training validation failed")
-	ErrNotFound   = errors.New("training record not found")
+	ErrValidation                     = errors.New("training validation failed")
+	ErrNotFound                       = errors.New("training record not found")
+	ErrSchedulingAuthorityUnavailable = errors.New("training scheduling authority unavailable")
+)
+
+const (
+	ConfirmationRequirementPendingOwnerReview     = "pending_owner_review"
+	ConfirmationRequirementAtomicInternalCommit   = "atomic_internal_commit"
+	ConfirmationRequirementProviderBookingSuccess = "provider_booking_success"
 )
 
 type KnowledgeReader interface {
@@ -120,5 +127,10 @@ type EvaluateResponse struct {
 	MatchedKnowledge        *KnowledgeSnippet `json:"matched_knowledge,omitempty"`
 	Outcome                 string            `json:"outcome"`
 	BookingAction           string            `json:"booking_action"`
-	POSConfirmationRequired bool              `json:"pos_confirmation_required"`
+	SchedulingAuthority     string            `json:"scheduling_authority"`
+	ConfirmationRequirement string            `json:"confirmation_requirement"`
+	ConfirmationGuardrail   string            `json:"confirmation_guardrail"`
+	// POSConfirmationRequired is retained for older clients. It is true only
+	// when the selected authority is the currently Square-backed external path.
+	POSConfirmationRequired bool `json:"pos_confirmation_required"`
 }

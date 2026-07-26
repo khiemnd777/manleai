@@ -29,12 +29,16 @@ const (
 	ExpectedInputOfferedSlot                = "offered_slot"
 	ExpectedInputCustomerName               = "customer_name"
 	ExpectedInputCustomerNameConfirmation   = "customer_name_confirmation"
+	ExpectedInputServiceConfirmation        = "service_confirmation"
 	ExpectedInputCustomerPhone              = "customer_phone"
+	ExpectedInputCustomerSMSConsent         = "customer_sms_consent"
 	ExpectedInputStaff                      = "staff"
 	ExpectedInputPartySplitDateConsent      = "party_split_date_consent"
 	ExpectedInputPendingServiceOperation    = "pending_service_operation"
 	ExpectedInputDateTimeConfirmation       = "date_time_confirmation"
 	ExpectedInputAppointmentTarget          = "appointment_target"
+	ExpectedInputLifecycleConfirmation      = "lifecycle_confirmation"
+	ExpectedInputCancellationReason         = "cancellation_reason"
 	ExpectedInputBookingReview              = "booking_review"
 	ExpectedInputBookingContinuation        = "booking_continuation"
 	ExpectedInputConsultationCurrentSystem  = "consultation_current_system"
@@ -47,9 +51,10 @@ func IsExpectedInput(value string) bool {
 	switch strings.TrimSpace(value) {
 	case ExpectedInputCallerGoal, ExpectedInputService, ExpectedInputRequestedDate,
 		ExpectedInputRequestedTime, ExpectedInputOfferedSlot, ExpectedInputCustomerName,
-		ExpectedInputCustomerNameConfirmation, ExpectedInputCustomerPhone, ExpectedInputStaff,
+		ExpectedInputCustomerNameConfirmation, ExpectedInputServiceConfirmation, ExpectedInputCustomerPhone, ExpectedInputCustomerSMSConsent, ExpectedInputStaff,
 		ExpectedInputPartySplitDateConsent, ExpectedInputPendingServiceOperation,
 		ExpectedInputDateTimeConfirmation, ExpectedInputAppointmentTarget, ExpectedInputBookingReview,
+		ExpectedInputLifecycleConfirmation, ExpectedInputCancellationReason,
 		ExpectedInputBookingContinuation, ExpectedInputConsultationCurrentSystem,
 		ExpectedInputConsultationDesiredOutcome, ExpectedInputConsultationSelection,
 		ExpectedInputConsultationBooking:
@@ -130,6 +135,9 @@ func applyTurnPlanMetadata(turn *TurnRecord, plan TurnPlan) {
 
 func expectedInputForSession(session Session) string {
 	state := normalizedDialogState(session.DialogState)
+	if state.CustomerSMSConsent != nil && state.CustomerSMSConsent.Status == "awaiting_response" {
+		return ExpectedInputCustomerSMSConsent
+	}
 	if guidanceRecoveryStateActive(state.Guidance) {
 		return guidanceRecoveryExpectedInput(state.Guidance)
 	}
@@ -153,8 +161,16 @@ func expectedInputForSession(session Session) string {
 		switch state.Pending.PromptKey {
 		case pendingOfferedSlotDateTimeCorrection:
 			return ExpectedInputDateTimeConfirmation
+		case PendingManualAppointmentTarget:
+			return ExpectedInputAppointmentTarget
 		case PendingCustomerNameConfirmation:
 			return ExpectedInputCustomerNameConfirmation
+		case PendingFuzzyServiceConfirmation:
+			return ExpectedInputServiceConfirmation
+		case PendingInternalRescheduleConfirmation, PendingInternalCancelConfirmation:
+			return ExpectedInputLifecycleConfirmation
+		case PendingInternalCancelReason:
+			return ExpectedInputCancellationReason
 		case PendingStaffAlternative:
 			return ExpectedInputStaff
 		default:
@@ -172,8 +188,11 @@ func expectedInputForSession(session Session) string {
 		if strings.TrimSpace(session.CustomerPhone) == "" {
 			return ExpectedInputCustomerPhone
 		}
-		if strings.TrimSpace(session.TargetAppointmentID) == "" {
+		if !sessionHasSchedulingTarget(session) {
 			return ExpectedInputAppointmentTarget
+		}
+		if expected := manualAppointmentTargetExpectedInput(session); expected != "" {
+			return expected
 		}
 	}
 	if !hasOperationalBookingProgress(session) && strings.TrimSpace(session.Intent) != IntentBooking {
@@ -226,6 +245,9 @@ func (s *Service) planTurn(message string, session Session, answerCtx *AIAnswerC
 	}
 
 	state := normalizedDialogState(session.DialogState)
+	if state.Pending != nil && state.Pending.PromptKey == PendingFuzzyServiceConfirmation {
+		return finalizeTurnPlan(plan, TurnRouteFastLane, "pending_fuzzy_service_confirmation", TurnCoverageComplete, session, services, staff)
+	}
 	guidanceStage := GuidanceRecoveryStageCallerGoal
 	if envelope.ExpectedInput == ExpectedInputService {
 		guidanceStage = GuidanceRecoveryStageService

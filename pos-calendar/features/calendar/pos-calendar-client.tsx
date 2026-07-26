@@ -22,7 +22,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Dialog } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { apiRequest, apiStream, getAccessToken, logoutSession } from "@/lib/api/client";
+import { apiRequest, apiStream, logoutSession } from "@/lib/api/client";
+import { schedulerEventPositionRule } from "@/lib/security/scheduler-style";
+import {
+  hasExternalAppointmentConfirmation,
+  hasExternalAttemptConfirmation,
+  normalizeSchedulingAuthority as normalizedSchedulingAuthority
+} from "@/lib/scheduling-evidence";
 import { cn } from "@/lib/utils/cn";
 import type {
   AvailabilityResult,
@@ -38,6 +44,7 @@ import type {
   POSService,
   POSStaffMember,
   Salon,
+  SchedulingAuthority,
   StaffSelectionMode,
   SquareReadiness,
   SyncLog
@@ -48,7 +55,7 @@ type SalonListResponse = {
 };
 
 type StatusResponse = {
-  connection: POSConnection;
+  connection: POSConnection | null;
   sync_logs: SyncLog[];
   readiness: SquareReadiness;
 };
@@ -96,6 +103,7 @@ type CalendarItem = {
   start: string;
   end: string;
   status: string;
+  authority: SchedulingAuthority | "unknown";
   customerName: string;
   serviceLabel: string;
   technicians: CalendarTechnician[];
@@ -147,7 +155,7 @@ const inputClassName =
 const textareaClassName =
   "mt-2 min-h-24 w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-50 disabled:text-slate-400";
 
-export function POSCalendarClient() {
+export function POSCalendarClient({ nonce }: { nonce: string }) {
   const router = useRouter();
   const [salon, setSalon] = useState<Salon | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
@@ -160,6 +168,7 @@ export function POSCalendarClient() {
   const [loadingCalendar, setLoadingCalendar] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [statusError, setStatusError] = useState("");
   const [notice, setNotice] = useState<Notice | null>(null);
   const [calendarToasts, setCalendarToasts] = useState<CalendarToast[]>([]);
   const [actionMode, setActionMode] = useState<ActionMode | null>(null);
@@ -184,10 +193,6 @@ export function POSCalendarClient() {
   const availabilityExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (!getAccessToken()) {
-      router.replace("/login");
-      return;
-    }
     void loadShell();
   }, [router]);
 
@@ -206,7 +211,20 @@ export function POSCalendarClient() {
   );
   const bookableServices = useMemo(() => services.filter(serviceIsBookable), [services]);
   const bookableStaff = useMemo(() => staff.filter(staffIsBookable), [staff]);
-  const readyForBooking = bookingPathReady(status) && bookableServices.length > 0 && bookableStaff.length > 0;
+  const selectedAuthority = salon?.scheduling_authority;
+  const selectedAuthorityVersion = salon?.scheduling_authority_version;
+  const externalNewWorkSelected = selectedAuthority === "external_provider";
+  const readyForNewExternalBooking = externalNewWorkSelected
+    && bookingPathReady(status)
+    && bookableServices.length > 0
+    && bookableStaff.length > 0;
+  const readyForSelectedAction = actionMode === "create"
+    ? readyForNewExternalBooking
+    : actionMode === "edit" && selectedAppointment
+      ? externalAppointmentCanEdit(selectedAppointment)
+      : actionMode === "cancel" && selectedAppointment
+        ? externalAppointmentCanCancel(selectedAppointment)
+        : false;
   const range = useMemo(() => rangeForView(view, anchorDate), [anchorDate, view]);
   const items = useMemo(
     () => buildCalendarItems(calendar, serviceNames, staffNames, salon?.timezone),
@@ -370,17 +388,26 @@ export function POSCalendarClient() {
       setSalon(firstSalon);
       if (!firstSalon) {
         setStatus(null);
+        setStatusError("");
         setServices([]);
         setStaff([]);
         return;
       }
 
-      const [statusResponse, serviceResponse, staffResponse] = await Promise.all([
-        apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
+      const [statusResult, serviceResponse, staffResponse] = await Promise.all([
+        firstSalon.scheduling_authority === "external_provider"
+          ? apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`)
+              .then((value) => ({ value, error: "" }))
+              .catch((statusLoadError: unknown) => ({
+                value: null,
+                error: errorMessage(statusLoadError, "Could not load Square Appointments status.")
+              }))
+          : Promise.resolve({ value: null, error: "" }),
         apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
         apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`)
       ]);
-      setStatus(statusResponse);
+      setStatus(statusResult.value);
+      setStatusError(statusResult.error);
       setServices(serviceResponse.services);
       setStaff(staffResponse.staff);
       setAnchorDate(formatDateInput(new Date(), firstSalon.timezone));
@@ -394,6 +421,7 @@ export function POSCalendarClient() {
   async function loadStatus(salonID: string) {
     const statusResponse = await apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${salonID}`);
     setStatus(statusResponse);
+    setStatusError("");
   }
 
   async function loadCalendarRange(salonID: string, nextView: CalendarView, date: string) {
@@ -423,7 +451,14 @@ export function POSCalendarClient() {
   }
 
   async function syncCalendar() {
-    if (!salon) return;
+    if (!salon || salon.scheduling_authority !== "external_provider") {
+      setNotice({
+        type: "warning",
+        title: "Square Appointments sync unavailable",
+        message: "Square Appointments calendar import is available only while Square Appointments is selected for scheduling. Historical rows remain visible by their persisted origin."
+      });
+      return;
+    }
     setBusy("sync");
     setNotice(null);
     setError("");
@@ -438,7 +473,7 @@ export function POSCalendarClient() {
       });
       setNotice({
         type: "success",
-        title: "Square calendar synced",
+        title: `${providerDisplayLabel(response.provider)} calendar synced`,
         message: `Imported ${response.summary.imported}, updated ${response.summary.updated}, skipped ${response.summary.skipped}.`
       });
       await Promise.all([loadCalendarRange(salon.id, view, anchorDate), loadStatus(salon.id)]);
@@ -446,7 +481,7 @@ export function POSCalendarClient() {
       setNotice({
         type: "error",
         title: "Calendar sync failed",
-        message: err instanceof Error ? err.message : "Could not sync calendar from the active POS provider."
+        message: err instanceof Error ? err.message : "Could not sync the calendar from Square Appointments."
       });
     } finally {
       setBusy("");
@@ -485,6 +520,7 @@ export function POSCalendarClient() {
   }
 
   function openCreate() {
+    if (!readyForNewExternalBooking) return;
     actionOperationKeyRef.current = null;
     setActionMode("create");
     setSelectedAppointment(null);
@@ -497,6 +533,7 @@ export function POSCalendarClient() {
   }
 
   function openEdit(appointment: AppointmentRecord) {
+    if (!externalAppointmentCanEdit(appointment)) return;
     actionOperationKeyRef.current = null;
     setActionMode("edit");
     setSelectedAppointment(appointment);
@@ -514,6 +551,7 @@ export function POSCalendarClient() {
   }
 
   function openCancel(appointment: AppointmentRecord) {
+    if (!externalAppointmentCanCancel(appointment)) return;
     actionOperationKeyRef.current = null;
     setActionMode("cancel");
     setSelectedAppointment(appointment);
@@ -538,7 +576,7 @@ export function POSCalendarClient() {
   }
 
   async function checkAvailability() {
-    if (!salon || !actionMode || actionMode === "cancel" || !actionForm.preferredDate || !readyForBooking) return;
+    if (!salon || !actionMode || actionMode === "cancel" || !actionForm.preferredDate || !readyForSelectedAction) return;
     const requestID = ++availabilityRequestIDRef.current;
     clearAvailabilityExpiryTimer(availabilityExpiryTimerRef);
     setAvailabilityError("");
@@ -554,6 +592,7 @@ export function POSCalendarClient() {
       const result = await apiRequest<AvailabilityResult>(`/api/salons/${salon.id}/availability`, {
         method: "POST",
         body: JSON.stringify({
+          target_appointment_id: actionMode === "edit" ? selectedAppointment?.id : undefined,
           service_id: segments[0].service_id,
           staff_id: actionMode === "create" ? actionForm.staffID : "",
           staff_selection_mode: staffSelectionMode,
@@ -573,7 +612,7 @@ export function POSCalendarClient() {
           setAvailabilityResult(null);
           setAvailabilityChecked(false);
           setActionForm((current) => ({ ...current, selectedSlotKey: "" }));
-          setAvailabilityError("This availability quote expired. Check Square Appointments again before submitting.");
+          setAvailabilityError("This availability quote expired. Check Square Appointments availability again before submitting.");
         }
       );
     } catch (err) {
@@ -588,7 +627,7 @@ export function POSCalendarClient() {
   }
 
   async function submitCreate() {
-    if (!salon || !selectedActionSlot || !availabilityResult) return;
+    if (!salon || !selectedActionSlot || !availabilityResult || !readyForNewExternalBooking) return;
     setSavingAction(true);
     setActionError("");
     try {
@@ -596,7 +635,7 @@ export function POSCalendarClient() {
 	  const requestedSegments = actionAvailabilitySegments("create", actionForm, null);
 	  const segments = slotBookingSegments(selectedActionSlot, requestedSegments);
       if (segments.length === 0 || segments.some((segment) => !segment.staff_id)) {
-        throw new Error("Select a returned Square slot before creating the booking.");
+        throw new Error("Select a returned Square Appointments slot before creating the booking.");
       }
       const staffSelectionMode = aggregateStaffSelectionMode(segments);
       const payload = {
@@ -617,11 +656,11 @@ export function POSCalendarClient() {
         method: "POST",
         body: JSON.stringify({ ...payload, operation_key: operationKeyForPayload(actionOperationKeyRef, payload) })
       });
-      if (attempt.status !== "confirmed" || !attempt.pos_booking_id) {
+      if (!hasExternalAttemptConfirmation(attempt)) {
         setNotice({
           type: "warning",
           title: "Booking needs owner review",
-          message: "Square Appointments did not confirm this booking. A pending request was created instead."
+          message: "Square Appointments did not return confirmation evidence. The request remains pending for owner review."
         });
       } else {
         setNotice({
@@ -640,18 +679,18 @@ export function POSCalendarClient() {
   }
 
   async function submitEdit() {
-    if (!salon || !selectedAppointment || !selectedActionSlot) return;
+    if (!salon || !selectedAppointment || !selectedActionSlot || !externalAppointmentCanEdit(selectedAppointment)) return;
     setSavingAction(true);
     setActionError("");
     try {
       if (!availabilityResult) {
-        throw new Error("Check Square Appointments availability again before updating this appointment.");
+        throw new Error("Check the appointment's external-provider availability again before updating this appointment.");
       }
       assertAvailabilityQuoteUsable(availabilityResult, selectedActionSlot);
 	  const requestedSegments = actionAvailabilitySegments("edit", actionForm, selectedAppointment);
 	  const segments = slotBookingSegments(selectedActionSlot, requestedSegments);
 	  if (segments.length === 0) {
-		throw new Error("Square availability did not preserve every requested service. Check availability again.");
+		throw new Error("External-provider availability did not preserve every requested service. Check availability again.");
 	  }
       const payload = {
         availability_quote_id: availabilityResult.quote_id,
@@ -672,13 +711,13 @@ export function POSCalendarClient() {
         setNotice({
           type: "warning",
           title: "Edit needs owner review",
-          message: "Square Appointments did not reschedule this booking. The original appointment was left unchanged."
+          message: "The appointment's external provider did not confirm this reschedule. The original appointment was left unchanged."
         });
       } else {
         setNotice({
           type: "success",
           title: "Appointment updated",
-          message: "Square Appointments confirmed the new time before the calendar updated."
+          message: "The appointment's external provider confirmed the new time before the calendar updated."
         });
       }
       closeActionDialog();
@@ -691,7 +730,7 @@ export function POSCalendarClient() {
   }
 
   async function submitCancel() {
-    if (!salon || !selectedAppointment) return;
+    if (!salon || !selectedAppointment || !externalAppointmentCanCancel(selectedAppointment)) return;
     setSavingAction(true);
     setActionError("");
     try {
@@ -707,13 +746,13 @@ export function POSCalendarClient() {
         setNotice({
           type: "warning",
           title: "Cancellation needs owner review",
-          message: "Square Appointments did not cancel this booking. The appointment remains unchanged."
+          message: "The appointment's external provider did not confirm cancellation. The appointment remains unchanged."
         });
       } else {
         setNotice({
           type: "success",
           title: "Appointment cancelled",
-          message: "Square Appointments confirmed cancellation before the calendar updated."
+          message: "The appointment's external provider confirmed cancellation before the calendar updated."
         });
       }
       closeActionDialog();
@@ -778,7 +817,13 @@ export function POSCalendarClient() {
           <div className="grid gap-2 lg:grid-cols-[auto_1fr_auto] lg:items-center">
             <div className="flex min-w-0 items-center gap-2">
               <CalendarDays className="h-4 w-4 flex-none text-brand" />
-              <h1 className="whitespace-nowrap text-base font-bold text-ink">POS Calendar</h1>
+              <div className="min-w-0">
+                <h1 className="whitespace-nowrap text-base font-bold text-ink">Scheduling Calendar</h1>
+                <div className="truncate text-[10px] font-semibold uppercase tracking-wide text-muted">
+                  {selectedAuthority ? schedulingAuthorityLabel(selectedAuthority) : "Authority unavailable"}
+                  {selectedAuthorityVersion ? ` · v${selectedAuthorityVersion}` : ""}
+                </div>
+              </div>
             </div>
 
             <div className="flex min-w-0 flex-wrap items-center justify-center gap-1.5 lg:flex-nowrap">
@@ -821,14 +866,18 @@ export function POSCalendarClient() {
             </div>
 
             <div className="flex flex-wrap items-center justify-start gap-1.5 lg:justify-end">
-              <Button type="button" variant="secondary" className="h-8 px-2 text-xs" onClick={syncCalendar} disabled={busy === "sync"}>
-                <RefreshCcw className={cn("h-3.5 w-3.5", busy === "sync" ? "animate-spin" : "")} />
-                {busy === "sync" ? "Syncing..." : "Sync Square"}
-              </Button>
-              <Button type="button" className="h-8 px-2 text-xs" onClick={openCreate} disabled={!readyForBooking}>
-                <Plus className="h-3.5 w-3.5" />
-                Add Appointment
-              </Button>
+              {externalNewWorkSelected ? (
+                <>
+                  <Button type="button" variant="secondary" className="h-8 px-2 text-xs" onClick={syncCalendar} disabled={busy === "sync" || Boolean(statusError)}>
+                    <RefreshCcw className={cn("h-3.5 w-3.5", busy === "sync" ? "animate-spin" : "")} />
+                    {busy === "sync" ? "Syncing..." : "Sync Square Appointments"}
+                  </Button>
+                  <Button type="button" className="h-8 px-2 text-xs" onClick={openCreate} disabled={!readyForNewExternalBooking}>
+                    <Plus className="h-3.5 w-3.5" />
+                    Add via Square Appointments
+                  </Button>
+                </>
+              ) : null}
               <Button type="button" variant="ghost" className="h-8 px-2 text-xs" onClick={signOut} disabled={busy === "logout"}>
                 <LogOut className="h-3.5 w-3.5" />
                 Sign out
@@ -844,7 +893,14 @@ export function POSCalendarClient() {
             onDismiss={dismissCalendarToast}
           />
 
+          <SchedulingAuthorityNotice
+            authority={selectedAuthority}
+            version={selectedAuthorityVersion}
+            provider={status?.connection?.provider || salon.active_pos_provider}
+            readyForNewExternalBooking={readyForNewExternalBooking}
+          />
           {error ? <Alert title="Calendar error" message={error} /> : null}
+          {externalNewWorkSelected && statusError ? <Alert title="Square Appointments status unavailable" message={statusError} /> : null}
           {notice ? <Alert type={notice.type} title={notice.title} message={notice.message} /> : null}
 
         <section className="min-h-0 flex-1">
@@ -863,11 +919,13 @@ export function POSCalendarClient() {
                       items={visibleCalendarItems}
                       bookableStaffCount={bookableStaff.length}
                       bookableServiceCount={bookableServices.length}
+                      authority={selectedAuthority}
+                      authorityVersion={selectedAuthorityVersion}
                     />
                     {view === "agenda" && visibleCalendarItems.length === 0 ? (
                       <EmptyState
                         title="No calendar items"
-                        message="POS-confirmed appointments and pending booking requests for this range will appear here."
+                        message="Appointments and pending requests for this range will appear here with their persisted scheduling origin."
                       />
                   ) : view === "day" ? (
                     <DayScheduler
@@ -877,6 +935,7 @@ export function POSCalendarClient() {
                       timezone={salon.timezone}
                       selectedItemID={selectedCalendarItem?.id ?? ""}
                       onSelect={selectCalendarItem}
+                      nonce={nonce}
                     />
                   ) : view === "agenda" ? (
                     <AgendaList
@@ -894,6 +953,7 @@ export function POSCalendarClient() {
                       timezone={salon.timezone}
                       selectedItemID={selectedCalendarItem?.id ?? ""}
                       onSelect={selectCalendarItem}
+                      nonce={nonce}
                     />
                   ) : (
                     <MonthGrid
@@ -914,7 +974,7 @@ export function POSCalendarClient() {
         <AppointmentDetailDrawer
           open={detailOpen}
           selectedItem={selectedCalendarItem}
-          readyForBooking={readyForBooking}
+          currentAuthority={selectedAuthority}
           timezone={salon.timezone}
           onClose={() => setDetailOpen(false)}
           onEdit={openEdit}
@@ -938,7 +998,7 @@ export function POSCalendarClient() {
           staff={bookableStaff}
           serviceNames={serviceNames}
           staffNames={staffNames}
-          readyForBooking={readyForBooking}
+          readyForBooking={readyForSelectedAction}
           availabilityResult={availabilityResult}
           availabilityChecked={availabilityChecked}
           checkingAvailability={checkingAvailability}
@@ -1052,7 +1112,8 @@ function DayScheduler({
   anchorDate,
   timezone,
   selectedItemID,
-  onSelect
+  onSelect,
+  nonce
 }: {
   items: CalendarItem[];
   staff: POSStaffMember[];
@@ -1060,6 +1121,7 @@ function DayScheduler({
   timezone?: string;
   selectedItemID: string;
   onSelect: (itemID: string) => void;
+  nonce: string;
 }) {
   const dayItems = items
     .filter((item) => dateKey(item.start, timezone) === anchorDate)
@@ -1067,21 +1129,15 @@ function DayScheduler({
   const schedulerItems = buildDaySchedulerItems(dayItems);
   const lanes = buildTechnicianLanes(staff, schedulerItems);
   const hours = schedulerHours(schedulerItems, timezone);
-  const gridHeight = hours.length * schedulerRowHeight;
-  const gridTemplateColumns = `3.5rem repeat(${lanes.length}, minmax(11rem, 1fr))`;
-  const minGridWidth = 56 + lanes.length * 176;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-line bg-white shadow-sm">
       <div className="min-h-0 flex-1 overflow-auto">
-        <div className="relative min-h-full" style={{ minWidth: minGridWidth }}>
-          <div
-            className="sticky top-0 z-30 grid border-b border-line bg-slate-50 shadow-sm"
-            style={{ gridTemplateColumns }}
-          >
+        <div className="relative min-h-full w-max min-w-full">
+          <div className="sticky top-0 z-30 flex min-w-full border-b border-line bg-slate-50 shadow-sm">
             <div
               className={cn(
-                "sticky left-0 z-40 flex min-h-14 flex-col justify-center border-r border-line bg-slate-50 px-2 text-center",
+                "sticky left-0 z-40 flex min-h-14 w-14 flex-none flex-col justify-center border-r border-line bg-slate-50 px-2 text-center",
                 isTodayInput(anchorDate, timezone) ? "text-brand" : "text-ink"
               )}
             >
@@ -1089,7 +1145,7 @@ function DayScheduler({
               <div className="text-sm font-bold">{dayNumberLabel(anchorDate)}</div>
             </div>
             {lanes.map((lane) => (
-              <div key={lane.key} className="min-w-0 border-r border-line px-3 py-3 text-center last:border-r-0">
+              <div key={lane.key} className="w-44 min-w-0 flex-1 border-r border-line px-3 py-3 text-center last:border-r-0">
                 <div className="truncate text-xs font-bold text-ink" title={lane.name}>
                   {lane.name}
                 </div>
@@ -1097,13 +1153,12 @@ function DayScheduler({
               </div>
             ))}
           </div>
-          <div className="grid" style={{ gridTemplateColumns }}>
-            <div className="sticky left-0 z-20 bg-slate-50">
+          <div className="flex min-w-full">
+            <div className="sticky left-0 z-20 w-14 flex-none bg-slate-50">
               {hours.map((hour) => (
                 <div
                   key={hour}
-                  className="border-r border-line px-2 pt-2 text-right text-[11px] font-semibold text-muted"
-                  style={{ height: schedulerRowHeight }}
+                  className="h-[62px] border-r border-line px-2 pt-2 text-right text-[11px] font-semibold text-muted"
                 >
                   {hourLabel(hour)}
                 </div>
@@ -1115,14 +1170,12 @@ function DayScheduler({
               return (
                 <div
                   key={lane.key}
-                  className="relative min-w-0 border-r border-line bg-white last:border-r-0"
-                  style={{ height: gridHeight }}
+                  className="relative w-44 min-w-0 flex-1 border-r border-line bg-white last:border-r-0"
                 >
                   {hours.map((hour) => (
                     <div
                       key={hour}
-                      className="border-b border-dashed border-line last:border-b-0"
-                      style={{ height: schedulerRowHeight }}
+                      className="h-[62px] border-b border-dashed border-line last:border-b-0"
                     />
                   ))}
                   {schedulerItems.length === 0 && laneIndex === 0 ? (
@@ -1131,13 +1184,15 @@ function DayScheduler({
                     </div>
                   ) : null}
                   <div className="absolute inset-x-1 top-0 bottom-0">
-                    {positionedItems.map((positioned) => (
+                    {positionedItems.map((positioned, eventIndex) => (
                       <SchedulerEventBlock
                         key={positioned.item.id}
                         positioned={positioned}
                         timezone={timezone}
                         selected={calendarItemSelectionID(positioned.item) === selectedItemID}
                         onSelect={onSelect}
+                        nonce={nonce}
+                        positionClass={`scheduler-event-day-${laneIndex}-${eventIndex}`}
                       />
                     ))}
                   </div>
@@ -1156,19 +1211,20 @@ function WeekScheduler({
   anchorDate,
   timezone,
   selectedItemID,
-  onSelect
+  onSelect,
+  nonce
 }: {
   items: CalendarItem[];
   anchorDate: string;
   timezone?: string;
   selectedItemID: string;
   onSelect: (itemID: string) => void;
+  nonce: string;
 }) {
   const weekStart = startOfWeekInput(anchorDate);
   const days = Array.from({ length: 7 }, (_, index) => addDaysInput(weekStart, index));
   const weekItems = items.filter((item) => days.includes(dateKey(item.start, timezone)));
   const hours = schedulerHours(weekItems, timezone);
-  const gridHeight = hours.length * schedulerRowHeight;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-line bg-white shadow-sm">
@@ -1205,8 +1261,7 @@ function WeekScheduler({
           {hours.map((hour) => (
             <div
               key={hour}
-              className="border-r border-line bg-slate-50 px-2 pt-2 text-right text-[11px] font-semibold text-muted"
-              style={{ height: schedulerRowHeight }}
+              className="h-[62px] border-r border-line bg-slate-50 px-2 pt-2 text-right text-[11px] font-semibold text-muted"
             >
               {hourLabel(hour)}
             </div>
@@ -1222,17 +1277,15 @@ function WeekScheduler({
                 "relative min-w-0 border-r border-line bg-white last:border-r-0",
                 isTodayInput(day, timezone) ? "bg-teal-50/25" : ""
               )}
-              style={{ height: gridHeight }}
             >
               {hours.map((hour) => (
                 <div
                   key={hour}
-                  className="border-b border-dashed border-line last:border-b-0"
-                  style={{ height: schedulerRowHeight }}
+                  className="h-[62px] border-b border-dashed border-line last:border-b-0"
                 />
               ))}
               <div className="absolute inset-x-1 top-0 bottom-0">
-                {positionedItems.map((positioned) => (
+                {positionedItems.map((positioned, eventIndex) => (
                   <SchedulerEventBlock
                     key={positioned.item.id}
                     positioned={positioned}
@@ -1240,6 +1293,8 @@ function WeekScheduler({
                     compact
                     selected={positioned.item.id === selectedItemID}
                     onSelect={onSelect}
+                    nonce={nonce}
+                    positionClass={`scheduler-event-week-${days.indexOf(day)}-${eventIndex}`}
                   />
                 ))}
               </div>
@@ -1370,18 +1425,73 @@ function MonthGrid({
   );
 }
 
+function SchedulingAuthorityNotice({
+  authority,
+  version,
+  provider,
+  readyForNewExternalBooking
+}: {
+  authority?: SchedulingAuthority;
+  version?: number;
+  provider?: string;
+  readyForNewExternalBooking: boolean;
+}) {
+  if (!authority || !version) {
+    return (
+      <Alert
+        type="warning"
+        title="Scheduling authority unavailable"
+        message="The current authority and version are required before this calendar can expose new scheduling actions. Existing rows remain visible, but any row without persisted origin evidence stays read-only."
+      />
+    );
+  }
+  if (authority === "owner_manual") {
+    return (
+      <Alert
+        type="success"
+        title={`Owner request authority · v${version}`}
+        message="New scheduling work creates requests for owner review and never confirms automatically. Review and resolve those requests in the main Appointments workspace."
+      />
+    );
+  }
+  if (authority === "manleai_calendar") {
+    return (
+      <Alert
+        type="success"
+        title={`ManleAI Calendar authority · v${version}`}
+        message="New work uses the internal calendar. This standalone view shows mixed-origin history; use the main Appointments workspace for safe internal create, reschedule, and cancel actions."
+      />
+    );
+  }
+  return (
+    <Alert
+      type={readyForNewExternalBooking ? "success" : "warning"}
+      title={`${providerDisplayLabel(provider)} authority · v${version}`}
+      message={
+        readyForNewExternalBooking
+          ? "New bookings use Square Appointments. Historical lifecycle actions continue to follow each appointment's persisted origin."
+          : "New Square Appointments bookings are blocked until connection, location, services, and staff are ready. Historical rows remain visible and actions are resolved from persisted origin."
+      }
+    />
+  );
+}
+
 function CalendarViewSummary({
   label,
   title,
   items,
   bookableStaffCount,
-  bookableServiceCount
+  bookableServiceCount,
+  authority,
+  authorityVersion
 }: {
   label: string;
   title: string;
   items: CalendarItem[];
   bookableStaffCount: number;
   bookableServiceCount: number;
+  authority?: SchedulingAuthority;
+  authorityVersion?: number;
 }) {
   const appointments = items.filter((item) => item.kind === "appointment").length;
   const pending = items.filter((item) => item.kind === "pending").length;
@@ -1395,8 +1505,17 @@ function CalendarViewSummary({
           <SummaryStatCard label="Appointments" value={String(appointments)} />
           <SummaryStatCard label="Pending" value={String(pending)} tone={pending > 0 ? "warning" : "normal"} />
           <SummaryStatCard label="Warnings" value={String(warnings)} tone={warnings > 0 ? "warning" : "normal"} />
-          <SummaryStatCard label="Staff" value={String(bookableStaffCount)} />
-          <SummaryStatCard label="Services" value={String(bookableServiceCount)} />
+          {authority === "external_provider" ? (
+            <>
+              <SummaryStatCard label="Square staff" value={String(bookableStaffCount)} />
+              <SummaryStatCard label="Square services" value={String(bookableServiceCount)} />
+            </>
+          ) : (
+            <>
+              <SummaryStatCard label="Authority" value={authority ? schedulingAuthorityShortLabel(authority) : "Missing"} />
+              <SummaryStatCard label="Version" value={authorityVersion ? String(authorityVersion) : "Missing"} />
+            </>
+          )}
         </div>
         <div className="flex-none lg:justify-self-end">
           <CalendarLegend />
@@ -1447,62 +1566,65 @@ function SchedulerEventBlock({
   timezone,
   compact = false,
   selected,
-  onSelect
+  onSelect,
+  nonce,
+  positionClass
 }: {
   positioned: PositionedCalendarItem;
   timezone?: string;
   compact?: boolean;
   selected: boolean;
   onSelect: (itemID: string) => void;
+  nonce: string;
+  positionClass: string;
 }) {
   const item = positioned.item;
   const showStatusBadge = compact || positioned.height >= 54;
 
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      className={cn(
-        "absolute cursor-pointer overflow-hidden rounded-md border p-2 text-left shadow-sm outline-none transition hover:shadow-md focus:ring-2 focus:ring-brand",
-        item.warning ? "border-amber-300 bg-amber-50" : item.kind === "pending" ? "border-amber-200 bg-amber-50" : "border-emerald-200 bg-emerald-50",
-        selected ? "ring-2 ring-brand ring-offset-1" : ""
-      )}
-      style={{
-        top: positioned.top,
-        height: positioned.height,
-        left: `calc(${(positioned.lane / positioned.laneCount) * 100}% + 2px)`,
-        width: `calc(${100 / positioned.laneCount}% - 4px)`
-      }}
-      onClick={() => onSelect(calendarItemSelectionID(item))}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onSelect(calendarItemSelectionID(item));
-        }
-      }}
-    >
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0 flex-1">
-          {compact ? (
-            <>
-              <div className="truncate text-xs font-bold text-ink">{calendarItemTitle(item, timezone)}</div>
-              <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{compactServiceLabel(item)}</div>
-            </>
-          ) : (
-            <>
-              <div className="truncate text-xs font-bold text-ink">{calendarItemTitle(item, timezone)}</div>
-              <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{compactServiceLabel(item)}</div>
-            </>
-          )}
-        </div>
-        {item.warning ? <AlertTriangle className="h-4 w-4 flex-none text-amber-600" /> : null}
+    <>
+      <style nonce={nonce}>{schedulerEventPositionRule(positionClass, positioned)}</style>
+      <div
+	        role="button"
+	        tabIndex={0}
+	        className={cn(
+	          "absolute cursor-pointer overflow-hidden rounded-md border p-2 text-left shadow-sm outline-none transition hover:shadow-md focus:ring-2 focus:ring-brand",
+	          item.warning ? "border-amber-300 bg-amber-50" : item.kind === "pending" ? "border-amber-200 bg-amber-50" : "border-emerald-200 bg-emerald-50",
+	          selected ? "ring-2 ring-brand ring-offset-1" : "",
+	          positionClass
+	        )}
+	        onClick={() => onSelect(calendarItemSelectionID(item))}
+	        onKeyDown={(event) => {
+	          if (event.key === "Enter" || event.key === " ") {
+	            event.preventDefault();
+	            onSelect(calendarItemSelectionID(item));
+	          }
+	        }}
+      >
+	        <div className="flex items-start justify-between gap-2">
+	          <div className="min-w-0 flex-1">
+	            {compact ? (
+	              <>
+	                <div className="truncate text-xs font-bold text-ink">{calendarItemTitle(item, timezone)}</div>
+	                <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{compactServiceLabel(item)}</div>
+	              </>
+	            ) : (
+	              <>
+	                <div className="truncate text-xs font-bold text-ink">{calendarItemTitle(item, timezone)}</div>
+	                <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{compactServiceLabel(item)}</div>
+	              </>
+	            )}
+	          </div>
+	          {item.warning ? <AlertTriangle className="h-4 w-4 flex-none text-amber-600" /> : null}
+	        </div>
+	        {showStatusBadge ? (
+	          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+	            <Badge value={item.status} className="px-2 py-0.5" />
+	            <Badge value={schedulingAuthorityBadge(item.authority)} className="px-2 py-0.5" />
+	          </div>
+	        ) : null}
       </div>
-      {showStatusBadge ? (
-        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          <Badge value={item.status} className="px-2 py-0.5" />
-        </div>
-      ) : null}
-    </div>
+    </>
   );
 }
 
@@ -1538,6 +1660,9 @@ function MonthEventChip({
         <span className="block truncate leading-4 text-muted">{compactServiceLabel(item)}</span>
       </span>
       <span className="flex flex-none items-center gap-1">
+        <span className="rounded bg-slate-100 px-1 text-[9px] font-semibold text-slate-700">
+          {schedulingAuthorityShortLabel(item.authority)}
+        </span>
         {item.kind === "pending" ? <span className="rounded bg-amber-100 px-1 text-[9px] font-semibold text-amber-700">pending</span> : null}
         {item.warning ? <AlertTriangle className="mt-0.5 h-3 w-3 flex-none text-amber-600" /> : null}
       </span>
@@ -1625,6 +1750,7 @@ function DayAppointmentsDrawer({
                   </div>
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     <Badge value={item.status} />
+                    <Badge value={schedulingAuthorityBadge(item.authority)} />
                     {item.warning ? <Badge value="warning" /> : null}
                   </div>
                 </button>
@@ -1640,7 +1766,7 @@ function DayAppointmentsDrawer({
 function AppointmentDetailDrawer({
   open,
   selectedItem,
-  readyForBooking,
+  currentAuthority,
   timezone,
   onClose,
   onEdit,
@@ -1648,7 +1774,7 @@ function AppointmentDetailDrawer({
 }: {
   open: boolean;
   selectedItem: CalendarItem | null;
-  readyForBooking: boolean;
+  currentAuthority?: SchedulingAuthority;
   timezone?: string;
   onClose: () => void;
   onEdit: (appointment: AppointmentRecord) => void;
@@ -1674,15 +1800,15 @@ function AppointmentDetailDrawer({
           <div className="flex items-start justify-between gap-3">
             <div>
               <CardTitle>Appointment Detail</CardTitle>
-              <CardDescription>Selected booking and sync health.</CardDescription>
+              <CardDescription>Persisted origin, status, and lifecycle evidence.</CardDescription>
             </div>
             <Button type="button" variant="ghost" className="h-9 px-2" onClick={onClose} aria-label="Close appointment detail">
               <X className="h-4 w-4" />
             </Button>
           </div>
-          {!readyForBooking ? (
+          {currentAuthority === "external_provider" && !selectedItem?.appointment ? (
             <div className="mt-3 rounded-md border border-line bg-slate-50 p-3 text-xs leading-5 text-muted">
-              Booking disabled: connect Square Appointments and sync bookable staff/services.
+              New Square Appointments booking controls require current provider readiness. Historical rows remain readable by origin.
             </div>
           ) : null}
         </div>
@@ -1692,6 +1818,7 @@ function AppointmentDetailDrawer({
             <div className="rounded-md border border-line bg-white p-3">
               <div className="flex flex-wrap items-center gap-2">
                 <Badge value={selectedItem.status} />
+                <Badge value={schedulingAuthorityBadge(selectedItem.authority)} />
                 {selectedItem.warning ? <Badge value="warning" /> : null}
               </div>
               <div className="mt-3 text-lg font-bold text-ink">{selectedItem.customerName || "Unknown customer"}</div>
@@ -1707,7 +1834,17 @@ function AppointmentDetailDrawer({
               ) : null}
               {!appointment ? (
                 <div className="mt-3 rounded-md border border-line bg-slate-50 p-3 text-xs leading-5 text-muted">
-                  Needs owner review. This request is not a confirmed POS appointment, so edit and cancel actions are disabled.
+                  Needs owner review. This request is not a confirmed appointment, so lifecycle actions are disabled.
+                </div>
+              ) : null}
+              {appointment?.scheduling_authority === "manleai_calendar" ? (
+                <div className="mt-3 rounded-md border border-blue-200 bg-blue-50 p-3 text-xs leading-5 text-blue-900">
+                  This standalone calendar response does not expose the safe internal lifecycle action contract. Manage this ManleAI Calendar row from the main Appointments workspace.
+                </div>
+              ) : null}
+              {appointment && !appointment.scheduling_authority ? (
+                <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">
+                  Scheduling origin is missing from the backend response. Edit and cancel remain disabled until the contract is complete.
                 </div>
               ) : null}
               <div className="mt-4 grid grid-cols-2 gap-2">
@@ -1719,7 +1856,7 @@ function AppointmentDetailDrawer({
                     onEdit(appointment);
                     onClose();
                   }}
-                  disabled={!appointment || !canEditAppointment(appointment)}
+                  disabled={!appointment || !externalAppointmentCanEdit(appointment)}
                 >
                   <Pencil className="h-4 w-4" />
                   Edit
@@ -1732,7 +1869,7 @@ function AppointmentDetailDrawer({
                     onCancel(appointment);
                     onClose();
                   }}
-                  disabled={!appointment || !canCancelAppointment(appointment)}
+                  disabled={!appointment || !externalAppointmentCanCancel(appointment)}
                 >
                   <Ban className="h-4 w-4" />
                   Cancel
@@ -1783,9 +1920,10 @@ function CalendarItemRow({
         <div className="mt-1 text-xs text-muted">{formatDate(item.start, timezone)}</div>
       </div>
       <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="text-sm font-semibold text-ink">{calendarItemTitle(item, timezone)}</div>
-          <Badge value={item.status} />
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="text-sm font-semibold text-ink">{calendarItemTitle(item, timezone)}</div>
+            <Badge value={item.status} />
+            <Badge value={schedulingAuthorityBadge(item.authority)} />
         </div>
         <div className="mt-1 text-sm leading-6 text-muted">{item.subtitle}</div>
         <div className="mt-1 text-xs leading-5 text-muted">{item.detail}</div>
@@ -1807,7 +1945,7 @@ function CalendarItemRow({
                 event.stopPropagation();
                 onEdit(appointment);
               }}
-              disabled={!canEditAppointment(appointment)}
+              disabled={!externalAppointmentCanEdit(appointment)}
             >
               <Pencil className="h-4 w-4" />
               Edit
@@ -1820,7 +1958,7 @@ function CalendarItemRow({
                 event.stopPropagation();
                 onCancel(appointment);
               }}
-              disabled={!canCancelAppointment(appointment)}
+              disabled={!externalAppointmentCanCancel(appointment)}
             >
               <Ban className="h-4 w-4" />
               Cancel
@@ -1915,8 +2053,8 @@ function ActionDialog({
           </label>
           <Alert
             type="warning"
-            title="POS cancel required"
-            message="The appointment history is kept. The calendar marks it cancelled only after Square Appointments confirms the cancellation."
+            title="External-provider confirmation required"
+            message="The appointment history is kept. The calendar marks this external-origin row cancelled only after its provider confirms the cancellation."
           />
           <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
             <Button type="button" variant="ghost" onClick={onClose} disabled={saving}>
@@ -1933,7 +2071,7 @@ function ActionDialog({
             <Alert
               type="warning"
               title="Limited edit mode"
-              message="This slice supports POS-backed time, staff, and note changes. Customer or service changes stay gated until the POS update contract is verified."
+              message="This external-origin action supports provider-backed time, staff, and note changes. Customer or service changes stay gated until that provider update contract is verified."
             />
           ) : null}
           <div className="grid gap-4 md:grid-cols-3">
@@ -2029,7 +2167,7 @@ function ActionDialog({
           </label>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-sm leading-6 text-muted">
-              Availability is returned by Square Appointments before any booking action is submitted.
+              Availability is returned by Square Appointments before any external booking action is submitted.
             </div>
             <Button type="button" variant="secondary" onClick={onCheckAvailability} disabled={!readyForBooking || checkingAvailability || saving}>
               <Clock className="h-4 w-4" />
@@ -2094,7 +2232,7 @@ function AvailabilitySlots({
     );
   }
   if (!result || result.slots.length === 0) {
-    return <EmptyState title="No available slots returned" message="Try another date, service, or technician before submitting this POS action." />;
+    return <EmptyState title="No available slots returned" message="Try another date, service, or technician before submitting this Square Appointments action." />;
   }
   return (
     <div className="space-y-3">
@@ -2193,37 +2331,41 @@ function buildCalendarItems(
   if (!calendar) return [];
   const appointments: CalendarItem[] = calendar.appointments.map((item) => {
     const technicians = assignedTechnicians(item, staffNames);
+    const authority = normalizedSchedulingAuthority(item.scheduling_authority);
     return {
       id: `appointment-${item.id}`,
       kind: "appointment",
       start: item.start_time,
       end: item.end_time,
       status: item.status,
+      authority,
       customerName: item.customer_name,
       serviceLabel: serviceNamesLabel(item, serviceNames),
       technicians,
       technicianLabel: calendarTechnicianLabel(technicians),
       subtitle: bookingSummaryLabel(item, serviceNames, staffNames),
-      detail: item.pos_appointment_id ? `${item.pos_provider}: ${item.pos_appointment_id}` : "POS booking ID missing",
+      detail: appointmentAuthorityDetail(item),
       warning: appointmentWarning(item),
       appointment: item
     };
   });
   const pending: CalendarItem[] = calendar.pending_requests.map((item) => {
     const technicians = assignedTechnicians(item, staffNames);
+    const authority = normalizedSchedulingAuthority(item.scheduling_authority);
     return {
       id: `pending-${item.id}`,
       kind: "pending",
       start: item.requested_start_time,
       end: item.requested_end_time,
       status: item.status,
+      authority,
       customerName: item.customer_name,
       serviceLabel: serviceNamesLabel(item, serviceNames),
       technicians,
       technicianLabel: calendarTechnicianLabel(technicians),
       subtitle: bookingSummaryLabel(item, serviceNames, staffNames),
       detail: item.error_code || formatDate(item.requested_start_time, timezone),
-      warning: item.sync_warning || item.error_message || "This request is not confirmed in POS and needs owner review.",
+      warning: pendingRequestWarning(item),
       request: item
     };
   });
@@ -2287,10 +2429,10 @@ function calendarToastFromEvent(event: CalendarEvent): CalendarToast {
   return {
     id: event.id,
     type: confirmed ? "success" : "warning",
-    title: confirmed ? "New POS-confirmed appointment" : "New pending booking request",
+    title: confirmed ? "New confirmed appointment" : "New pending booking request",
     message: confirmed
-      ? "The active POS returned a booking ID before the calendar updated."
-      : "Square Appointments has not confirmed this booking yet.",
+      ? "Open the calendar row to review its persisted scheduling authority and confirmation evidence."
+      : "This scheduling action is still pending and must not be treated as confirmed.",
     event
   };
 }
@@ -2315,38 +2457,116 @@ function calendarEventIntersectsRange(
   return start < rangeEnd && end > rangeStart;
 }
 
-function appointmentWarning(item: AppointmentRecord) {
-  if (item.sync_warning) return item.sync_warning;
-  if (item.status === "provider_pending") {
-    return "Square Appointments still reports this booking as pending. Do not treat it as confirmed.";
+function schedulingAuthorityLabel(authority: SchedulingAuthority) {
+  if (authority === "owner_manual") return "Owner request";
+  if (authority === "manleai_calendar") return "ManleAI Calendar";
+  return "External provider";
+}
+
+function schedulingAuthorityShortLabel(authority: SchedulingAuthority | "unknown") {
+  if (authority === "owner_manual") return "Owner";
+  if (authority === "manleai_calendar") return "ManleAI";
+  if (authority === "external_provider") return "Provider";
+  return "Unknown";
+}
+
+function schedulingAuthorityBadge(authority: SchedulingAuthority | "unknown") {
+  if (authority === "owner_manual") return "owner_request";
+  if (authority === "manleai_calendar") return "manleai_calendar";
+  if (authority === "external_provider") return "external_provider";
+  return "origin_missing";
+}
+
+function providerDisplayLabel(provider: string | undefined) {
+  const normalized = provider?.trim();
+  if (!normalized) return "External provider";
+  if (normalized.toLowerCase() === "square") return "Square Appointments";
+  return normalized;
+}
+
+function appointmentAuthorityDetail(item: AppointmentRecord) {
+  const authority = normalizedSchedulingAuthority(item.scheduling_authority);
+  if (authority === "owner_manual") {
+    return "Owner request origin; a confirmed appointment at this origin violates the request-only contract.";
   }
-  if (item.status === "declined") return "Square Appointments declined this booking.";
-  if (item.status === "no_show") return "Square Appointments marked this booking as a no-show.";
+  if (authority === "manleai_calendar") {
+    const appointmentID = item.authority_appointment_id || item.id;
+    const version = item.authority_appointment_version ? ` · version ${item.authority_appointment_version}` : "";
+    return `ManleAI Calendar appointment ${appointmentID}${version}`;
+  }
+  if (authority === "external_provider") {
+    const provider = providerDisplayLabel(item.authority_provider || item.pos_provider);
+    const bookingID = item.authority_appointment_id || item.pos_appointment_id;
+    return bookingID ? `${provider} booking ${bookingID}` : `${provider} booking evidence is incomplete`;
+  }
+  return "Persisted scheduling origin is missing";
+}
+
+function pendingRequestWarning(item: BookingAttempt) {
+  const authority = normalizedSchedulingAuthority(item.scheduling_authority);
+  if (authority === "unknown") {
+    return "Scheduling authority is missing. This request cannot be interpreted as confirmed or safely retried.";
+  }
+  if (authority === "owner_manual") {
+    return "Owner request is pending review and is not a confirmed appointment.";
+  }
+  if (authority === "manleai_calendar") {
+    return "This internal operation is pending and must not be treated as confirmed without a durable ManleAI appointment ID.";
+  }
+  if (item.sync_warning) return item.sync_warning;
+  if (item.error_message) return item.error_message;
+  const provider = providerDisplayLabel(item.authority_provider || item.pos_provider);
+  return `${provider} has not returned complete confirmation evidence. Keep this request pending for owner review.`;
+}
+
+function appointmentWarning(item: AppointmentRecord) {
+  const authority = normalizedSchedulingAuthority(item.scheduling_authority);
+  if (authority === "unknown") {
+    return "Scheduling authority is missing. Lifecycle actions are disabled until the backend returns the appointment origin.";
+  }
+  if (authority === "owner_manual") {
+    return "Owner-managed scheduling must remain a request, not a confirmed appointment row. Review this record before acting.";
+  }
+  if (authority === "manleai_calendar") {
+    if (!item.authority_appointment_id || !item.authority_appointment_version) {
+      return "Internal appointment evidence is incomplete. Manage this row from Appointments after the lifecycle contract is repaired.";
+    }
+    return "";
+  }
+  if (item.sync_warning) return item.sync_warning;
+  const provider = providerDisplayLabel(item.authority_provider || item.pos_provider);
+  if (item.status === "provider_pending") {
+    return `${provider} still reports this booking as pending. Do not treat it as confirmed.`;
+  }
+  if (item.status === "declined") return `${provider} declined this booking.`;
+  if (item.status === "no_show") return `${provider} marked this booking as a no-show.`;
   if (item.status === "unknown") return "The provider booking status is unknown and needs verification.";
   if (item.pos_sync_status === "sync_failed") {
-    return item.pos_sync_error || "Latest POS calendar sync failed for this appointment.";
+    return item.pos_sync_error || "Latest provider calendar sync failed for this appointment.";
   }
   if (item.pos_sync_status === "not_synced") {
-    return "This appointment has not been synced from the active POS calendar yet.";
+    return "This appointment has not been synced from its external-provider calendar yet.";
   }
   if (item.pos_sync_status === "pending") {
-    return "This appointment is waiting for POS sync verification.";
+    return "This appointment is waiting for provider sync verification.";
   }
-  if (!item.pos_appointment_id) {
-    return "POS booking ID is missing, so this appointment is not treated as confirmed.";
+  if (!hasExternalAppointmentConfirmation(item)) {
+    return "Authority-native provider confirmation evidence is incomplete, so this appointment is not treated as confirmed.";
   }
   return "";
 }
 
-function canEditAppointment(appointment: AppointmentRecord) {
+function externalAppointmentCanEdit(appointment: AppointmentRecord) {
+  if (appointment.scheduling_authority !== "external_provider") return false;
   if (appointment.can_edit === false) return false;
-  return isPOSConfirmedStatus(appointment.status) && Boolean(appointment.pos_appointment_id);
+  return hasExternalAppointmentConfirmation(appointment);
 }
 
-function canCancelAppointment(appointment: AppointmentRecord) {
+function externalAppointmentCanCancel(appointment: AppointmentRecord) {
+  if (appointment.scheduling_authority !== "external_provider") return false;
   if (appointment.can_cancel === false) return false;
   if (appointment.can_delete === false) return false;
-  return isPOSConfirmedStatus(appointment.status) && Boolean(appointment.pos_appointment_id);
+  return hasExternalAppointmentConfirmation(appointment);
 }
 
 function isPOSConfirmedStatus(status: string) {
@@ -2355,12 +2575,12 @@ function isPOSConfirmedStatus(status: string) {
 
 function actionDescription(mode: ActionMode) {
   if (mode === "create") {
-    return "Check Square availability, select a returned slot, then submit the booking.";
+    return "Check Square Appointments availability, select a returned slot, then submit the booking.";
   }
   if (mode === "edit") {
-    return "Change time, technician, or notes through the POS-backed reschedule flow.";
+    return "Change time, technician, or notes through this appointment's persisted external-provider origin.";
   }
-  return "Cancel through the active POS provider; local history is preserved.";
+  return "Cancel through this appointment's persisted external-provider origin; local history is preserved.";
 }
 
 function serviceIsBookable(service: POSService) {
@@ -2392,7 +2612,12 @@ function bookingPathReady(status: StatusResponse | null) {
   const readiness = status?.readiness;
   const connected = Boolean(connection?.id) && connection?.status === "active" && Boolean(connection?.last_sync_at);
   const locationSelected = Boolean(connection?.location_id);
-  return connected && locationSelected && (readiness?.service_count ?? 0) > 0 && (readiness?.staff_count ?? 0) > 0 && !readiness?.booking_write_blocked;
+  return readiness?.scheduling_authority === "external_provider"
+    && connected
+    && locationSelected
+    && (readiness?.service_count ?? 0) > 0
+    && (readiness?.staff_count ?? 0) > 0
+    && !readiness?.booking_write_blocked;
 }
 
 function emptyActionForm(preferredDate: string): ActionForm {
@@ -3074,8 +3299,12 @@ function availabilityQuoteIsUsable(result: AvailabilityResult | null) {
 
 function assertAvailabilityQuoteUsable(result: AvailabilityResult, slot: AvailabilitySlot) {
   if (!availabilityQuoteIsUsable(result) || !slot.fingerprint) {
-    throw new Error("This availability quote is missing, invalid, or expired. Check Square Appointments again.");
+    throw new Error("This availability quote is missing, invalid, or expired. Check Square Appointments availability again.");
   }
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message ? error.message : fallback;
 }
 
 function operationKeyForPayload(

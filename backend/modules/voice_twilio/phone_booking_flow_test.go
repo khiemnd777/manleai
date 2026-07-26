@@ -12,6 +12,7 @@ import (
 	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/modules/booking"
 	"github.com/manleai/ai-receptionist/modules/conversation"
+	"github.com/manleai/ai-receptionist/modules/scheduling"
 	"github.com/manleai/ai-receptionist/modules/voice"
 )
 
@@ -146,6 +147,52 @@ func TestSignedTwilioWebhookDrivesPhoneBookingFlowThroughConversation(t *testing
 	}
 	if len(voiceStore.events) != 4 {
 		t.Fatalf("webhook events = %#v, want incoming plus three speech turns", voiceStore.events)
+	}
+}
+
+func TestGoldenPhoneFlowPendingExternalSendsOwnerRequestWithoutProviderCreate(t *testing.T) {
+	adapter := NewAdapter(config.TwilioVoiceConfig{AuthToken: "secret", IncomingPath: "/api/voice/twilio/incoming", TurnPath: "/api/voice/twilio/turn", RecordingPath: "/api/voice/twilio/recording"}, "")
+	conversationStore := newPhoneFlowConversationStore()
+	conversationStore.cfg.BookingMode = scheduling.BookingModePendingApproval
+	conversationStore.cfg.SchedulingAuthority = booking.SchedulingAuthorityExternalProvider
+	tool := &phoneFlowPendingSchedulingTool{phoneFlowBookingTool: &phoneFlowBookingTool{}}
+	conversationService := conversation.NewService(conversationStore, tool)
+	voiceStore := newPhoneFlowVoiceStore(conversationStore)
+	voiceService := voice.NewService(voiceStore, conversationService, config.VoiceConfig{Provider: voice.ProviderTwilio, Twilio: config.TwilioVoiceConfig{AuthToken: "secret", IncomingPath: "/api/voice/twilio/incoming", TurnPath: "/api/voice/twilio/turn", RecordingPath: "/api/voice/twilio/recording"}}, voice.AIProviders{})
+	app := testTwilioApp(adapter, voiceService)
+	base := url.Values{"CallSid": {"CA_PENDING_EXTERNAL"}, "From": {"+13125550199"}, "To": {"+13125550101"}}
+
+	if res := signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/incoming", base); res.StatusCode != fiber.StatusOK {
+		t.Fatalf("incoming status = %d", res.StatusCode)
+	}
+	request := cloneURLValues(base)
+	request.Set("SpeechResult", "Set me up for a classic manicure on 2026-06-10.")
+	requestBody := readBody(t, signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", request))
+	if !strings.Contains(requestBody, "I have openings") || strings.Contains(strings.ToLower(requestBody), "confirmed") {
+		t.Fatalf("pending external availability response = %s", requestBody)
+	}
+
+	selectSlot := cloneURLValues(base)
+	selectSlot.Set("SpeechResult", "10:00 AM works. My name is Linh Tran and my phone is 312-555-0101.")
+	reviewBody := readBody(t, signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", selectSlot))
+	if !strings.Contains(reviewBody, "send this request to the owner") || !strings.Contains(reviewBody, "will not confirm an appointment") || tool.actionCalls != 0 {
+		t.Fatalf("pending external review response/action calls = %s / %d", reviewBody, tool.actionCalls)
+	}
+
+	authorize := cloneURLValues(base)
+	authorize.Set("SpeechResult", "Yes.")
+	finalBody := readBody(t, signedTwilioRequest(t, app, adapter, http.MethodPost, "/api/voice/twilio/turn", authorize))
+	if strings.Contains(finalBody, "<Gather") || !strings.Contains(finalBody, "recorded your appointment request") || !strings.Contains(finalBody, "not a confirmed appointment") || !strings.Contains(finalBody, "<Hangup/>") {
+		t.Fatalf("pending external final TwiML = %s", finalBody)
+	}
+	if tool.calls != 0 || tool.actionCalls != 1 {
+		t.Fatalf("provider create/action calls = %d/%d, want 0/1", tool.calls, tool.actionCalls)
+	}
+	if tool.actionRequest.TargetAuthority != booking.SchedulingAuthorityExternalProvider || tool.actionRequest.AvailabilityQuoteID != "" || tool.actionRequest.SlotFingerprint != "" {
+		t.Fatalf("pending owner request target/proof = %#v", tool.actionRequest)
+	}
+	if conversationStore.session.Outcome != conversation.OutcomeOwnerReviewPending || conversationStore.session.SchedulingRequestID != "request-phone-pending" || conversationStore.session.AppointmentID != "" || conversationStore.session.BookingAttemptID != "" {
+		t.Fatalf("pending phone session = %#v", conversationStore.session)
 	}
 }
 
@@ -515,6 +562,7 @@ func (f *phoneFlowConversationStore) SaveTurn(ctx context.Context, record conver
 	session.DialogState = record.Update.DialogState
 	session.BookingAttemptID = record.Update.BookingAttemptID
 	session.AppointmentID = record.Update.AppointmentID
+	session.SchedulingRequestID = record.Update.SchedulingRequestID
 	session.Summary = record.Update.Summary
 	if record.Update.EndSession {
 		session.Status = record.Update.Status
@@ -574,6 +622,53 @@ type phoneFlowBookingTool struct {
 	request             booking.CreateBookingRequest
 	availabilityRequest booking.AvailabilityRequest
 	attempt             *booking.BookingAttempt
+}
+
+type phoneFlowPendingSchedulingTool struct {
+	*phoneFlowBookingTool
+	actionCalls   int
+	actionRequest scheduling.ActionRequest
+}
+
+func (f *phoneFlowPendingSchedulingTool) CheckAvailability(ctx context.Context, salonID string, ownerUserID string, req booking.AvailabilityRequest) (*scheduling.AvailabilityResult, error) {
+	result, err := f.AvailableSlots(ctx, salonID, ownerUserID, req)
+	if err != nil {
+		return nil, err
+	}
+	return &scheduling.AvailabilityResult{Kind: scheduling.AvailabilityKindVerifiedSlots, SchedulingAuthority: booking.SchedulingAuthorityExternalProvider, VerifiedSlots: result}, nil
+}
+
+func (f *phoneFlowPendingSchedulingTool) CheckConversationAvailability(ctx context.Context, salonID string, ownerUserID string, mode scheduling.BookingMode, req booking.AvailabilityRequest) (*scheduling.AvailabilityResult, error) {
+	if mode != scheduling.BookingModePendingApproval {
+		return nil, booking.ErrOperationConflict
+	}
+	return f.CheckAvailability(ctx, salonID, ownerUserID, req)
+}
+
+func (f *phoneFlowPendingSchedulingTool) ExecuteAction(ctx context.Context, salonID string, ownerUserID string, req scheduling.ActionRequest) (*scheduling.ActionResult, error) {
+	return f.ExecuteConversationAction(ctx, salonID, ownerUserID, scheduling.ConversationPolicyFence{BookingMode: scheduling.BookingModePendingApproval, SchedulingAuthority: booking.SchedulingAuthorityExternalProvider}, req)
+}
+
+func (f *phoneFlowPendingSchedulingTool) ExecuteConversationAction(_ context.Context, _ string, _ string, fence scheduling.ConversationPolicyFence, req scheduling.ActionRequest) (*scheduling.ActionResult, error) {
+	if fence.BookingMode != scheduling.BookingModePendingApproval || fence.SchedulingAuthority != booking.SchedulingAuthorityExternalProvider {
+		return nil, booking.ErrOperationConflict
+	}
+	req.RetryOfAttemptID = ""
+	req.AvailabilityQuoteID = ""
+	req.SlotFingerprint = ""
+	req.ExpectedTargetAuthorityAppointmentVersion = 0
+	req.TargetAuthority = fence.SchedulingAuthority
+	f.actionCalls++
+	f.actionRequest = req
+	return &scheduling.ActionResult{
+		Kind: scheduling.ActionKindPendingOwnerReview, OperationType: req.OperationType,
+		SchedulingAuthority: booking.SchedulingAuthorityOwnerManual,
+		PendingOwnerReview:  &scheduling.PendingOwnerReviewResult{SchedulingRequestID: "request-phone-pending", Status: string(scheduling.SchedulingRequestStatusPending), Version: 1},
+	}, nil
+}
+
+func (f *phoneFlowPendingSchedulingTool) CurrentSchedulingAuthority(context.Context, string, string) (string, error) {
+	return booking.SchedulingAuthorityExternalProvider, nil
 }
 
 func (f *phoneFlowBookingTool) AvailableSlots(ctx context.Context, salonID string, ownerUserID string, req booking.AvailabilityRequest) (*booking.AvailabilityResult, error) {

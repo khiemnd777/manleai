@@ -1,6 +1,10 @@
 package conversation
 
-import "github.com/manleai/ai-receptionist/modules/booking"
+import (
+	"strings"
+
+	"github.com/manleai/ai-receptionist/modules/booking"
+)
 
 func normalizedDialogState(state DialogState) DialogState {
 	// Dialog state is persisted as JSONB. Promote the legacy guidance prompt
@@ -67,6 +71,14 @@ func normalizedDialogState(state DialogState) DialogState {
 		guidance.OfferedActions = append([]string(nil), state.Guidance.OfferedActions...)
 		state.Guidance = &guidance
 	}
+	if state.ManualTarget != nil {
+		target := *state.ManualTarget
+		state.ManualTarget = &target
+	}
+	if state.CustomerSMSConsent != nil {
+		consent := *state.CustomerSMSConsent
+		state.CustomerSMSConsent = &consent
+	}
 	return state
 }
 
@@ -128,5 +140,29 @@ func resetDialogProgress(state DialogState, phase string) DialogState {
 	state.ReviewAccepted = false
 	state.ReviewedRevision = 0
 	state.AuthorizedRevision = 0
+	state.ReviewedBookingMode = ""
+	state.SelectedSchedulingAuthority = ""
 	return state
+}
+
+func selectedSchedulingAuthorityForReview(session Session, cfg *RuntimeConfig) string {
+	if candidate := selectedRescheduleCandidate(session); candidate != nil && strings.TrimSpace(candidate.SchedulingAuthority) != "" {
+		return strings.TrimSpace(candidate.SchedulingAuthority)
+	}
+	if cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.SchedulingAuthority)
+}
+
+func stampSchedulingReviewFence(session *Session, cfg *RuntimeConfig) {
+	if session == nil || cfg == nil {
+		return
+	}
+	state := normalizedDialogState(session.DialogState)
+	state.ReviewedBookingMode = cfg.BookingMode
+	if strings.TrimSpace(state.SelectedSchedulingAuthority) == "" {
+		state.SelectedSchedulingAuthority = selectedSchedulingAuthorityForReview(*session, cfg)
+	}
+	session.DialogState = state
 }

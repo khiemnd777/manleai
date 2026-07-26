@@ -9,8 +9,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ImportIssueList, ImportSummaryTable, listOrNone } from "@/features/configuration-transfer/import-preview";
-import { apiRequest } from "@/lib/api/client";
+import { ImportIssueList, ImportScopePreview, ImportSummaryTable, listOrNone } from "@/features/configuration-transfer/import-preview";
+import { InternalCalendarSetup } from "@/features/dashboard/internal-calendar-setup";
+import { CustomerSMSPolicyCard } from "@/features/dashboard/customer-sms-policy";
+import { OperationsHealth } from "@/features/dashboard/operations-health";
+import { SchedulingAuthoritySwitch } from "@/features/dashboard/scheduling-authority-switch";
+import { apiRequest, RequestError } from "@/lib/api/client";
 import {
   applyConfigurationImport,
   downloadConfigurationExport,
@@ -19,8 +23,10 @@ import {
   readConfigurationBundle
 } from "@/lib/api/configuration-transfer";
 import { landingBaseUrl } from "@/lib/config/env";
+import { serviceEligibleForAuthority } from "@/lib/api/scheduling-evidence";
 import type {
   BusinessHourPeriod,
+  BookingMode,
   ConfigurationBundle,
   ConfigurationImportResponse,
   POSConnection,
@@ -29,6 +35,7 @@ import type {
   Salon,
   SalonSettings,
   SquareReadiness,
+  SchedulingAuthority,
   SyncLog
 } from "@/types/api";
 
@@ -66,6 +73,7 @@ type SalonFormState = {
 type SettingsFormState = {
   aiGreeting: string;
   aiTone: string;
+  bookingMode: BookingMode;
   recordingEnabled: boolean;
   recordingConsentMessage: string;
   smsConfirmationEnabled: boolean;
@@ -105,10 +113,17 @@ const aiToneOptions = [
   }
 ];
 
+const bookingModeOptions: Array<{ value: BookingMode; label: string }> = [
+  { value: "pending_approval", label: "Owner approval required" },
+  { value: "confirmed_booking", label: "Confirm automatically" },
+  { value: "disabled", label: "Scheduling disabled" }
+];
+
 export function SettingsDashboard() {
   const [salon, setSalon] = useState<Salon | null>(null);
   const [settings, setSettings] = useState<SalonSettings | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [squareStatusError, setSquareStatusError] = useState("");
   const [periods, setPeriods] = useState<BusinessHourPeriod[]>([]);
   const [services, setServices] = useState<POSService[]>([]);
   const [salonForm, setSalonForm] = useState<SalonFormState>(emptySalonForm());
@@ -136,6 +151,7 @@ export function SettingsDashboard() {
       if (!firstSalon) {
         setSettings(null);
         setStatus(null);
+        setSquareStatusError("");
         setPeriods([]);
         setServices([]);
         setSalonForm(emptySalonForm());
@@ -146,15 +162,18 @@ export function SettingsDashboard() {
         return;
       }
 
-      const [statusResponse, settingsResponse, businessHoursResponse, publicCatalogResponse, servicesResponse] = await Promise.all([
-        apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
+      const [statusResult, settingsResponse, businessHoursResponse, publicCatalogResponse, servicesResponse] = await Promise.all([
+        apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`)
+          .then((value) => ({ value, error: "" }))
+          .catch((statusError: unknown) => ({ value: null, error: errorMessage(statusError, "Could not load Square status.") })),
         apiRequest<SalonSettings>(`/api/salons/${firstSalon.id}/settings`),
         apiRequest<BusinessHoursResponse>(`/api/salons/${firstSalon.id}/business-hours`),
         apiRequest<PublicCatalogSettings>(`/api/salons/${firstSalon.id}/public-catalog`),
         apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`)
       ]);
 
-      setStatus(statusResponse);
+      setStatus(statusResult.value);
+      setSquareStatusError(statusResult.error);
       setSettings(settingsResponse);
       setPeriods(businessHoursResponse.periods ?? []);
       setServices(servicesResponse.services ?? []);
@@ -176,9 +195,10 @@ export function SettingsDashboard() {
   }, []);
 
   const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
+  const activeProvider = salon?.active_pos_provider || "square";
   const consultationEligibleServices = useMemo(
-    () => services.filter((service) => service.active && service.pos_linked && service.ai_bookable && !service.archived_at),
-    [services]
+    () => services.filter((service) => serviceEligibleForAuthority(service, salon?.scheduling_authority, activeProvider)),
+    [activeProvider, salon?.scheduling_authority, services]
   );
   const consultationReadyCount = useMemo(
     () =>
@@ -190,7 +210,6 @@ export function SettingsDashboard() {
       ).length,
     [consultationEligibleServices]
   );
-  const activeProvider = salon?.active_pos_provider || "square";
   const activeProviderLabel = activeProvider === "square" ? "Square" : activeProvider;
   const importedProviderPeriods = useMemo(() => periods.filter((period) => isImportedProviderPeriod(period, activeProvider)), [activeProvider, periods]);
   const hasBusinessHourPeriods = importedProviderPeriods.length > 0;
@@ -253,6 +272,10 @@ export function SettingsDashboard() {
       setError("Complete and mark at least one eligible service consultation profile as ready before enabling AI service consultation.");
       return;
     }
+    if (settingsForm.bookingMode === "confirmed_booking" && settings?.scheduling_authority === "owner_manual") {
+      setError("Owner-managed scheduling can record requests for review, but it cannot confirm appointments automatically.");
+      return;
+    }
 
     setBusy("save-settings");
     setError("");
@@ -264,7 +287,7 @@ export function SettingsDashboard() {
           ai_greeting: settingsForm.aiGreeting,
           ai_voice: settings?.ai_voice || "professional_female",
           ai_tone: settingsForm.aiTone,
-          booking_mode: settings?.booking_mode || "pending_approval",
+          booking_mode: settingsForm.bookingMode,
           recording_enabled: settingsForm.recordingEnabled,
           recording_consent_message: settingsForm.recordingConsentMessage,
           sms_confirmation_enabled: settingsForm.smsConfirmationEnabled,
@@ -313,7 +336,8 @@ export function SettingsDashboard() {
         method: "PUT",
         body: JSON.stringify({
           public_slug: publicCatalogForm.publicSlug,
-          public_catalog_enabled: publicCatalogForm.enabled
+          public_catalog_enabled: publicCatalogForm.enabled,
+          expected_scheduling_authority_version: publicCatalog?.scheduling_authority_version
         })
       });
       setPublicCatalog(updated);
@@ -330,6 +354,15 @@ export function SettingsDashboard() {
       );
       setSuccess(updated.public_catalog_enabled ? "Public salon page published." : "Public salon page settings saved.");
     } catch (err) {
+      if (err instanceof RequestError && (err.code === "SCHEDULING_AUTHORITY_CHANGED" || err.code === "PUBLIC_CATALOG_NOT_READY")) {
+        try {
+          const current = await apiRequest<PublicCatalogSettings>(`/api/salons/${salon.id}/public-catalog`);
+          setPublicCatalog(current);
+          setPublicCatalogForm(publicCatalogToForm(current));
+        } catch {
+          // Keep the typed conflict as the primary actionable error.
+        }
+      }
       setError(err instanceof Error ? err.message : "Could not save public page settings.");
     } finally {
       setBusy("");
@@ -448,7 +481,7 @@ export function SettingsDashboard() {
         <div>
           <h1 className="text-2xl font-bold text-ink">Settings</h1>
           <p className="mt-1 text-sm text-muted">
-            Configure salon profile, AI receptionist behavior, handoff, SMS, and synced Square hours.
+            Configure salon profile, ManleAI Calendar, AI receptionist behavior, and optional provider settings.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -462,14 +495,37 @@ export function SettingsDashboard() {
 
       {error ? <Alert title="Settings update failed" message={error} /> : null}
       {success ? <Alert type="success" title="Settings updated" message={success} /> : null}
+      {squareStatusError ? <Alert title="Square status unavailable" message={`${squareStatusError} Internal calendar settings remain available.`} /> : null}
 
-      <ReadinessGate aiEnabled={aiEnabled} activeProvider={activeProvider} status={status} />
+      {settings && Number.isInteger(settings.scheduling_authority_version) && settings.scheduling_authority_version > 0 ? (
+        <SchedulingAuthoritySwitch
+          salonID={salon.id}
+          currentAuthority={settings.scheduling_authority}
+          currentVersion={settings.scheduling_authority_version}
+          onReload={() => load({ silent: true })}
+        />
+      ) : (
+        <Card>
+          <CardTitle>Scheduling authority unavailable</CardTitle>
+          <CardDescription>The settings response did not include current authority state. Reload before selecting or switching authority.</CardDescription>
+        </Card>
+      )}
+
+      <InternalCalendarSetup salonID={salon.id} timezone={salon.timezone} />
+
+      <CustomerSMSPolicyCard salonID={salon.id} />
+
+      {settings?.scheduling_authority === "external_provider" ? (
+        <ReadinessGate aiEnabled={aiEnabled} activeProvider={activeProvider} status={status} />
+      ) : null}
 
       <div className="grid gap-4 md:grid-cols-3">
         <StatusMetric label="Active provider" value={activeProvider === "square" ? "Square Appointments" : activeProvider} badge="booking" />
         <StatusMetric label="Business hours" value={hasBusinessHourPeriods ? "Synced" : "Missing"} badge={hasBusinessHourPeriods ? "ready" : "blocked"} />
         <StatusMetric label="Last saved" value={latestUpdate ? formatDateTime(latestUpdate) : "Not available"} badge={latestUpdate ? "synced" : "not_configured"} />
       </div>
+
+      <OperationsHealth salonID={salon.id} />
 
       <ConfigurationTransferCard
         busy={busy}
@@ -493,6 +549,7 @@ export function SettingsDashboard() {
 
       <AISettingsForm
         form={settingsForm}
+        schedulingAuthority={settings?.scheduling_authority ?? "owner_manual"}
         aiEnabled={aiEnabled}
         consultationReadyCount={consultationReadyCount}
         consultationEligibleCount={consultationEligibleServices.length}
@@ -606,7 +663,7 @@ function ConfigurationTransferCard({
           <div>
             <CardTitle>Configuration transfer</CardTitle>
             <CardDescription>
-              Export full salon configuration or import a scoped data pack after Square services are synced.
+              Export portable salon intent or import a scoped data pack without changing scheduling authority.
             </CardDescription>
           </div>
         </div>
@@ -629,7 +686,7 @@ function ConfigurationTransferCard({
           </div>
           <div className="mt-5 text-sm font-semibold text-ink">Excluded</div>
           <div className="mt-2 text-sm leading-6 text-muted">
-            Services, staff, customers, appointments, fallback requests, call data, POS connection state, business-hour sync periods, POS tokens, API keys, and client secrets.
+            Scheduling authority and switch history, services, staff, customers, appointments, pending scheduling requests, internal execution records, call data, POS connection state, provider tokens, API keys, and client secrets.
           </div>
         </div>
 
@@ -638,7 +695,7 @@ function ConfigurationTransferCard({
             <div>
               <div className="text-sm font-semibold text-ink">Import configuration</div>
               <div className="mt-1 text-sm leading-6 text-muted">
-                Preview validates schema, conflicts, skipped fields, and repeated-import behavior before any write.
+                Preview validates schema, destination authority compatibility, conflicts, and repeated-import behavior before any write.
               </div>
             </div>
             <label
@@ -666,6 +723,7 @@ function ConfigurationTransferCard({
 
           {preview ? (
             <div className="mt-5 space-y-4">
+              <ImportScopePreview preview={preview} />
               <ImportSummaryTable summary={preview.summary} />
               <ImportIssueList title="Conflicts" issues={preview.conflicts} tone="danger" />
               <ImportIssueList title="Warnings" issues={preview.warnings} tone="warning" />
@@ -708,20 +766,20 @@ function PublicCatalogCard({
   onChange: (next: PublicCatalogFormState) => void;
   onSave: () => void;
 }) {
-  const serviceCount = settings?.bookable_service_count ?? 0;
-  const staffCount = settings?.bookable_staff_count ?? 0;
+  const serviceCount = settings?.eligible_service_count ?? settings?.bookable_service_count ?? 0;
+  const staffCount = settings?.eligible_staff_count ?? settings?.bookable_staff_count ?? 0;
+  const hoursCount = settings?.published_hours_count ?? 0;
   const publicPath = settings?.public_path || (form.publicSlug ? `/s/${form.publicSlug}` : "");
   const publicUrl = publicPath ? `${landingBaseUrl}${publicPath}` : "";
-  const canPublishWithForm = form.publicSlug.trim().length >= 3 && serviceCount > 0 && staffCount > 0;
-  const blockedReason =
-    settings?.blocked_reason ||
-    (!form.publicSlug.trim()
-      ? "Add a public page slug before publishing."
-      : serviceCount === 0
-        ? "At least one synced AI-bookable service is required."
-        : staffCount === 0
-          ? "At least one synced AI-bookable staff member is required."
-          : "");
+  const backendBlockers = settings?.readiness_blockers ?? [];
+  const nonSlugBlockers = backendBlockers.filter((blocker) => blocker.code !== "PUBLIC_SLUG_REQUIRED");
+  const canPublishWithForm = form.publicSlug.trim().length >= 3 && nonSlugBlockers.length === 0;
+  const visibleBlockers = form.publicSlug.trim().length >= 3
+    ? nonSlugBlockers
+    : [
+        { code: "PUBLIC_SLUG_REQUIRED", scope: "public_page", message: "Add a public page slug before publishing." },
+        ...nonSlugBlockers
+      ];
 
   return (
     <Card>
@@ -731,9 +789,9 @@ function PublicCatalogCard({
             <Globe2 className="h-5 w-5" />
           </div>
           <div>
-            <CardTitle>Public booking page</CardTitle>
+            <CardTitle>Public salon page</CardTitle>
             <CardDescription>
-              Publish a customer-facing page for services, staff, hours, and phone booking requests.
+              Publish services, staff, and authority-safe hours. Customers call the salon to request an appointment.
             </CardDescription>
           </div>
         </div>
@@ -765,17 +823,24 @@ function PublicCatalogCard({
           </div>
         </Field>
         <div className="rounded-md border border-line p-3">
-          <div className="text-xs font-semibold uppercase text-muted">Public-ready catalog</div>
-          <div className="mt-3 grid grid-cols-2 gap-3">
+          <div className="text-xs font-semibold uppercase text-muted">{settings?.readiness_label || "Public page readiness"}</div>
+          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
             <MiniMetric label="Services" value={String(serviceCount)} />
             <MiniMetric label="Staff" value={String(staffCount)} />
+            <MiniMetric label="Hour periods" value={String(hoursCount)} />
+          </div>
+          <div className="mt-3 text-xs leading-5 text-muted">
+            {settings ? `${publicAuthorityLabel(settings.scheduling_authority)} · authority version ${settings.scheduling_authority_version}` : "Loading scheduling method..."}
           </div>
         </div>
       </div>
 
       {form.enabled && !canPublishWithForm ? (
-        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-          {blockedReason}
+        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900" role="alert">
+          <div className="font-semibold">Resolve before publishing</div>
+          <ul className="mt-2 list-disc space-y-1 pl-5">
+            {visibleBlockers.map((blocker) => <li key={`${blocker.scope}:${blocker.code}`}>{blocker.message}</li>)}
+          </ul>
         </div>
       ) : null}
 
@@ -793,6 +858,17 @@ function PublicCatalogCard({
       </div>
     </Card>
   );
+}
+
+function publicAuthorityLabel(authority: PublicCatalogSettings["scheduling_authority"]) {
+  switch (authority) {
+    case "owner_manual":
+      return "Owner-managed requests";
+    case "manleai_calendar":
+      return "ManleAI Calendar";
+    case "external_provider":
+      return "Connected scheduling";
+  }
 }
 
 function MiniMetric({ label, value }: { label: string; value: string }) {
@@ -866,6 +942,7 @@ function SalonProfileForm({
 
 function AISettingsForm({
   form,
+  schedulingAuthority,
   aiEnabled,
   consultationReadyCount,
   consultationEligibleCount,
@@ -874,6 +951,7 @@ function AISettingsForm({
   onSave
 }: {
   form: SettingsFormState;
+  schedulingAuthority: SchedulingAuthority;
   aiEnabled: boolean;
   consultationReadyCount: number;
   consultationEligibleCount: number;
@@ -923,6 +1001,27 @@ function AISettingsForm({
           </select>
           <div className="mt-3 rounded-md border border-line bg-slate-50 px-3 py-2 text-xs leading-5 text-muted">
             <span className="font-semibold text-ink">Style preview:</span> {tonePreview(form.aiTone)}
+          </div>
+        </Field>
+        <Field label="AI scheduling behavior">
+          <select
+            className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-50 disabled:text-slate-400"
+            value={form.bookingMode}
+            onChange={(event) => onChange({ ...form, bookingMode: event.target.value as BookingMode })}
+            disabled={busy}
+          >
+            {bookingModeOptions.map((option) => (
+              <option
+                key={option.value}
+                value={option.value}
+                disabled={option.value === "confirmed_booking" && schedulingAuthority === "owner_manual"}
+              >
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <div className="mt-3 rounded-md border border-line bg-slate-50 px-3 py-2 text-xs leading-5 text-muted">
+            {bookingModeDescription(form.bookingMode, schedulingAuthority)}
           </div>
         </Field>
         <Field label="Reminder hours before">
@@ -1203,6 +1302,7 @@ function emptySettingsForm(): SettingsFormState {
   return {
     aiGreeting: "",
     aiTone: "professional_warm",
+    bookingMode: "pending_approval",
     recordingEnabled: true,
     recordingConsentMessage: "",
     smsConfirmationEnabled: true,
@@ -1224,6 +1324,7 @@ function settingsToForm(settings: SalonSettings): SettingsFormState {
   return {
     aiGreeting: settings.ai_greeting || "",
     aiTone: settings.ai_tone || "professional_warm",
+    bookingMode: normalizeBookingMode(settings.booking_mode),
     recordingEnabled: settings.recording_enabled,
     recordingConsentMessage: settings.recording_consent_message || "",
     smsConfirmationEnabled: settings.sms_confirmation_enabled,
@@ -1236,6 +1337,24 @@ function settingsToForm(settings: SalonSettings): SettingsFormState {
 
 function tonePreview(value: string) {
   return aiToneOptions.find((option) => option.value === value)?.preview ?? aiToneOptions[0].preview;
+}
+
+function normalizeBookingMode(value: string): BookingMode {
+  if (value === "confirmed_booking" || value === "disabled") return value;
+  return "pending_approval";
+}
+
+function bookingModeDescription(mode: BookingMode, authority: SchedulingAuthority) {
+  if (mode === "disabled") {
+    return "The AI receptionist will not check availability, create a request, or change an appointment; it will hand the caller to the owner workflow.";
+  }
+  if (mode === "pending_approval") {
+    if (authority === "owner_manual") {
+      return "The AI receptionist records the requested time for owner review. It does not reserve or confirm that time.";
+    }
+    return `The AI receptionist checks ${publicAuthorityLabel(authority)} for openings, then records the selected time for owner review. The time is not reserved or confirmed.`;
+  }
+  return `The AI receptionist confirms only after ${publicAuthorityLabel(authority)} completes the booking and returns durable appointment evidence.`;
 }
 
 function publicCatalogToForm(settings: PublicCatalogSettings): PublicCatalogFormState {
@@ -1260,4 +1379,8 @@ function formatDateTime(value: string) {
 
 function formatOptionalDate(value?: string) {
   return value ? new Date(value).toLocaleString() : "not synced";
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
 }

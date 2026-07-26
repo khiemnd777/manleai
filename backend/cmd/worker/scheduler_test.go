@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+	operationshealth "github.com/manleai/ai-receptionist/modules/operations_health"
 )
 
 type manualRecurringJobTicker struct {
@@ -59,17 +63,19 @@ func TestRecurringJobSchedulerBlockedWebhookDoesNotStarveLeaseSweep(t *testing.T
 			recurringJob{
 				name:     "square_webhooks",
 				interval: webhookInterval,
-				run: func(ctx context.Context) {
+				run: func(ctx context.Context) (int, error) {
 					webhookRunCount.Add(1)
 					webhookStartedOnce.Do(func() { close(webhookStarted) })
 					<-ctx.Done()
+					return 0, ctx.Err()
 				},
 			},
 			recurringJob{
 				name:     "booking_lease_sweep",
 				interval: leaseInterval,
-				run: func(context.Context) {
+				run: func(context.Context) (int, error) {
 					leaseRuns <- struct{}{}
+					return 1, nil
 				},
 			},
 		)
@@ -118,7 +124,7 @@ func TestRecurringJobSchedulerDoesNotOverlapSameJob(t *testing.T) {
 		scheduler.Run(ctx, recurringJob{
 			name:     "booking_lease_sweep",
 			interval: interval,
-			run: func(ctx context.Context) {
+			run: func(ctx context.Context) (int, error) {
 				current := active.Add(1)
 				for {
 					maximum := maxActive.Load()
@@ -135,6 +141,7 @@ func TestRecurringJobSchedulerDoesNotOverlapSameJob(t *testing.T) {
 					}
 				}
 				active.Add(-1)
+				return 1, nil
 			},
 		})
 		close(done)
@@ -165,5 +172,117 @@ func waitForSignal(t *testing.T, signal <-chan struct{}, description string) {
 	case <-signal:
 	case <-time.After(time.Second):
 		t.Fatalf("timed out waiting for %s", description)
+	}
+}
+
+type recordingJobRecorder struct {
+	mu       sync.Mutex
+	starts   []operationshealth.StartRunInput
+	finishes []operationshealth.FinishRunInput
+	startErr error
+}
+
+func (r *recordingJobRecorder) StartRun(_ context.Context, input operationshealth.StartRunInput) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.starts = append(r.starts, input)
+	if r.startErr != nil {
+		return "", r.startErr
+	}
+	return uuid.NewString(), nil
+}
+
+func (r *recordingJobRecorder) HeartbeatRun(context.Context, string, string, string, time.Duration) error {
+	return nil
+}
+
+func (r *recordingJobRecorder) FinishRun(_ context.Context, input operationshealth.FinishRunInput) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.finishes = append(r.finishes, input)
+	return nil
+}
+
+func TestRecurringJobSchedulerRecordsPanicAndContinues(t *testing.T) {
+	recorder := &recordingJobRecorder{}
+	scheduler := newRecurringJobScheduler(recorder)
+	scheduler.executeRun(context.Background(), recurringJob{
+		name: "panic_job", interval: 30 * time.Second,
+		run: func(context.Context) (int, error) { panic("sensitive panic detail") },
+	})
+	scheduler.executeRun(context.Background(), recurringJob{
+		name: "panic_job", interval: 30 * time.Second,
+		run: func(context.Context) (int, error) { return 2, nil },
+	})
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if len(recorder.finishes) != 2 {
+		t.Fatalf("finishes=%d, want 2", len(recorder.finishes))
+	}
+	if got := recorder.finishes[0]; got.Status != operationshealth.RunStatusPanicked || got.ErrorCode != "JOB_PANIC" || got.ErrorClass != "worker" {
+		t.Fatalf("panic finish=%#v", got)
+	}
+	if got := recorder.finishes[1]; got.Status != operationshealth.RunStatusSucceeded || got.ProcessedCount != 2 {
+		t.Fatalf("recovery finish=%#v", got)
+	}
+}
+
+func TestRecurringJobSchedulerRecordsCancellationAfterContextStops(t *testing.T) {
+	recorder := &recordingJobRecorder{}
+	scheduler := newRecurringJobScheduler(recorder)
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		scheduler.executeRun(ctx, recurringJob{
+			name: "cancel_job", interval: time.Minute,
+			run: func(jobCtx context.Context) (int, error) {
+				close(started)
+				<-jobCtx.Done()
+				return 3, jobCtx.Err()
+			},
+		})
+		close(done)
+	}()
+	waitForSignal(t, started, "cancel job start")
+	cancel()
+	waitForSignal(t, done, "cancel job finish")
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if len(recorder.finishes) != 1 {
+		t.Fatalf("finishes=%d, want 1", len(recorder.finishes))
+	}
+	finish := recorder.finishes[0]
+	if finish.Status != operationshealth.RunStatusCancelled || finish.ErrorClass != "cancellation" || finish.ErrorCode != "JOB_CANCELLED" || finish.ProcessedCount != 3 {
+		t.Fatalf("cancel finish=%#v", finish)
+	}
+}
+
+func TestRecurringJobSchedulerSkipsExecutionWhenAnotherWorkerOwnsLease(t *testing.T) {
+	recorder := &recordingJobRecorder{startErr: operationshealth.ErrJobLeaseHeld}
+	scheduler := newRecurringJobScheduler(recorder)
+	var runs atomic.Int32
+	scheduler.executeRun(context.Background(), recurringJob{
+		name: "leased_job", interval: time.Minute,
+		run: func(context.Context) (int, error) { runs.Add(1); return 1, errors.New("must not run") },
+	})
+	if runs.Load() != 0 {
+		t.Fatal("leased job executed")
+	}
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if len(recorder.finishes) != 0 {
+		t.Fatal("leased job recorded a finish")
+	}
+}
+
+func TestClassifyRunResultKeepsDeadlineSeparateFromCancellation(t *testing.T) {
+	status, class, code := classifyRunResult(context.DeadlineExceeded, false, false)
+	if status != operationshealth.RunStatusFailed || class != "timeout" || code != "JOB_DEADLINE_EXCEEDED" {
+		t.Fatalf("deadline classification=%q/%q/%q", status, class, code)
+	}
+	status, class, code = classifyRunResult(context.Canceled, false, true)
+	if status != operationshealth.RunStatusCancelled || class != "cancellation" || code != "JOB_CANCELLED" {
+		t.Fatalf("cancellation classification=%q/%q/%q", status, class, code)
 	}
 }

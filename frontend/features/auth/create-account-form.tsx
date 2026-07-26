@@ -15,7 +15,6 @@ type BootstrapStatus = {
 
 type BootstrapOwnerResponse = {
   access_token: string;
-  refresh_token: string;
 };
 
 type AccountForm = {
@@ -99,7 +98,7 @@ export function CreateAccountForm() {
           password: form.password
         })
       });
-      setSession(response.access_token, response.refresh_token);
+      setSession(response.access_token);
       setSuccess("Owner account created. Continue with salon setup.");
       router.push("/onboarding");
     } catch (err) {

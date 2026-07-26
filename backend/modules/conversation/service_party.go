@@ -3,6 +3,7 @@ package conversation
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/manleai/ai-receptionist/modules/booking"
@@ -746,6 +747,55 @@ func partyPlanSegments(plan *PartyPlan, session Session) []booking.BookingSegmen
 		}
 	}
 	return segments
+}
+
+// partyPlanSegmentGuestReferences converts the reviewed structured party plan
+// into stable guest references aligned with its ordered service segments. A
+// multi-service group with one person keeps one reference across its services;
+// a multi-person group is accepted only when the plan has one concrete service
+// per person. Ambiguous ownership fails closed instead of guessing.
+func partyPlanSegmentGuestReferences(plan *PartyPlan, segments []booking.BookingSegmentRequest) ([]string, bool) {
+	if !partyPlanComplete(plan) || len(segments) == 0 {
+		return nil, false
+	}
+	type assignment struct {
+		serviceID string
+		guestRef  string
+	}
+	assignments := make([]assignment, 0, len(segments))
+	for groupIndex, group := range plan.Groups {
+		serviceIDs := nonEmptyStrings(group.ResolvedServiceIDs)
+		if group.Count <= 0 || len(serviceIDs) < group.Count {
+			return nil, false
+		}
+		switch {
+		case group.Count == 1:
+			guestRef := "group-" + strconv.Itoa(groupIndex+1) + "-guest-1"
+			for _, serviceID := range serviceIDs {
+				assignments = append(assignments, assignment{serviceID: serviceID, guestRef: guestRef})
+			}
+		case len(serviceIDs) == group.Count:
+			for guestIndex, serviceID := range serviceIDs {
+				assignments = append(assignments, assignment{
+					serviceID: serviceID,
+					guestRef:  "group-" + strconv.Itoa(groupIndex+1) + "-guest-" + strconv.Itoa(guestIndex+1),
+				})
+			}
+		default:
+			return nil, false
+		}
+	}
+	if len(assignments) != len(segments) {
+		return nil, false
+	}
+	refs := make([]string, len(segments))
+	for index, segment := range segments {
+		if strings.TrimSpace(segment.ServiceID) != assignments[index].serviceID {
+			return nil, false
+		}
+		refs[index] = assignments[index].guestRef
+	}
+	return refs, true
 }
 
 func partyPlanClarificationPrompt(session Session, plan *PartyPlan, services []ServiceOption, cfg *RuntimeConfig) string {

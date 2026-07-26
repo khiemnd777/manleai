@@ -31,30 +31,29 @@ import {
   technicianPreferenceValue
 } from "@/features/dashboard/booking-display";
 import { apiRequest } from "@/lib/api/client";
+import {
+  currentSchedulingCompletion,
+  hasCurrentSessionConfirmation as hasDurableSessionConfirmation,
+  isHistoricalCompletedEvidence
+} from "@/lib/api/conversation-scheduling-evidence";
 import type {
+  BookingMode,
   ConversationSession,
   OfferedSlot,
   OwnerCorrection,
   PartyBookingRequest,
-  POSConnection,
+  PartyGuestService,
   POSService,
   POSStaffMember,
   RealtimeEventLog,
   Salon,
-  SquareReadiness,
-  SyncLog,
+  SchedulingAuthority,
   TranscriptMessage,
   VoiceStatus
 } from "@/types/api";
 
 type SalonListResponse = {
   salons: Salon[];
-};
-
-type StatusResponse = {
-  connection: POSConnection;
-  sync_logs: SyncLog[];
-  readiness: SquareReadiness;
 };
 
 type SessionsResponse = {
@@ -110,7 +109,6 @@ type CorrectionTarget = {
 export function CallsDashboard() {
   const realtimeEventsRequestID = useRef(0);
   const [salon, setSalon] = useState<Salon | null>(null);
-  const [status, setStatus] = useState<StatusResponse | null>(null);
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
   const [sessions, setSessions] = useState<ConversationSession[]>([]);
   const [readinessSessions, setReadinessSessions] = useState<ConversationSession[]>([]);
@@ -225,7 +223,6 @@ export function CallsDashboard() {
       const firstSalon = salonResponse.salons[0] ?? null;
       setSalon(firstSalon);
       if (!firstSalon) {
-        setStatus(null);
         setVoiceStatus(null);
         setSessions([]);
         setReadinessSessions([]);
@@ -240,8 +237,7 @@ export function CallsDashboard() {
         return;
       }
 
-      const [statusResponse, voiceResponse, sessionsResponse, readinessResponse, partyResponse, serviceResponse, staffResponse] = await Promise.all([
-        apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
+      const [voiceResponse, sessionsResponse, readinessResponse, partyResponse, serviceResponse, staffResponse] = await Promise.all([
         apiRequest<VoiceStatus>(`/api/salons/${firstSalon.id}/voice/status`),
         fetchSessionPageWithFallback(firstSalon.id, filter, limit, offset),
         fetchSessionPage(firstSalon.id, "active", readinessMetricLimit, 0),
@@ -249,7 +245,6 @@ export function CallsDashboard() {
         apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
         apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`)
       ]);
-      setStatus(statusResponse);
       setVoiceStatus(voiceResponse);
       applySessionPage(sessionsResponse, limit, offset);
       setReadinessSessions(readinessResponse.sessions);
@@ -593,7 +588,7 @@ export function CallsDashboard() {
     setPartyOffset((current) => current + partyLimit);
   }
 
-  const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
+  const aiEnabled = Boolean(salon?.ai_enabled);
   const phoneCount = useMemo(
     () => countLabel(readinessSessions.filter((item) => item.channel === "phone").length, readinessSessionsHasMore),
     [readinessSessions, readinessSessionsHasMore]
@@ -611,13 +606,15 @@ export function CallsDashboard() {
     [readinessSessions, readinessSessionsHasMore]
   );
   const confirmedCount = useMemo(
-    () => countLabel(readinessSessions.filter((item) => item.outcome === "booking_confirmed").length, readinessSessionsHasMore),
+    () => countLabel(readinessSessions.filter(hasDurableSessionConfirmation).length, readinessSessionsHasMore),
     [readinessSessions, readinessSessionsHasMore]
   );
-  const fallbackCount = useMemo(
+  const ownerFollowupCount = useMemo(
     () =>
       countLabel(
-        readinessSessions.filter((item) => item.outcome === "booking_fallback_pending" || item.outcome === "ai_disabled").length,
+        readinessSessions.filter(
+          (item) => item.scheduling_result_evidence?.kind === "pending_owner_review" || item.outcome === "booking_fallback_pending" || item.outcome === "ai_disabled"
+        ).length,
         readinessSessionsHasMore
       ),
     [readinessSessions, readinessSessionsHasMore]
@@ -639,6 +636,11 @@ export function CallsDashboard() {
     return (
       <div className="space-y-6">
         <Skeleton className="h-9 w-72" />
+        <div className="grid gap-4 lg:grid-cols-3">
+          <Skeleton className="h-72" />
+          <Skeleton className="h-72" />
+          <Skeleton className="h-72" />
+        </div>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
           <Skeleton className="h-28" />
           <Skeleton className="h-28" />
@@ -676,7 +678,7 @@ export function CallsDashboard() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <Badge value={voiceStatus?.ready ? "ready" : "not_configured"} />
+          <Badge value={voiceStatus?.phone_answering_ready ? "ready" : "not_configured"} />
           <Badge value={aiEnabled ? "active" : "disabled"} />
           <Button type="button" variant="secondary" onClick={() => void load(lifecycleFilter, false, sessionOffset, sessionLimit)}>
             <RefreshCcw className="h-4 w-4" />
@@ -689,14 +691,14 @@ export function CallsDashboard() {
       {actionError ? <Alert title="Call action failed" message={actionError} /> : null}
       {success ? <Alert type="success" title="Call review updated" message={success} /> : null}
 
-      <ReadinessPanel aiEnabled={aiEnabled} voiceStatus={voiceStatus} />
+      <ReadinessPanel voiceStatus={voiceStatus} />
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
         <Metric label="Live phone calls" value={phoneCount} />
         <Metric label="Simulator sessions" value={simulatorCount} />
         <Metric label="Owner handoffs" value={handoffCount} />
         <Metric label="Confirmed bookings" value={confirmedCount} />
-        <Metric label="Fallback requests" value={fallbackCount} />
+        <Metric label="Owner follow-up" value={ownerFollowupCount} />
         <Metric label={`${partyStatusFilter} parties`} value={partyRequestCount} />
       </div>
 
@@ -802,7 +804,9 @@ export function CallsDashboard() {
               <Info label="Lifecycle" value={<Badge value={selectedSession.lifecycle_status} />} />
               <Info label="Intent" value={<Badge value={selectedSession.intent} />} />
               <Info label="Action" value={<Badge value={bookingActionValue(selectedSession)} />} />
-              <Info label="Outcome" value={<Badge value={selectedSession.outcome} />} />
+              <Info label="Recorded outcome" value={<Badge value={selectedSession.outcome} />} />
+              <Info label="Scheduling path" value={sessionSchedulingPathLabel(selectedSession)} />
+              <Info label="Reviewed booking mode" value={bookingModeLabel(selectedSession.dialog_state.reviewed_booking_mode)} />
               <Info label="Customer" value={selectedSession.customer_name || "Not collected"} />
               <Info label="Phone" value={selectedSession.customer_phone || "Not collected"} />
               <Info
@@ -821,7 +825,29 @@ export function CallsDashboard() {
                 label="Requested time"
                 value={selectedSession.requested_start_time ? formatDateTime(selectedSession.requested_start_time) : "Not collected"}
               />
-              <Info label="Booking attempt" value={selectedSession.booking_attempt_id || "None"} />
+              <Info label="Scheduling result" value={schedulingResultLabel(selectedSession)} />
+              <Info
+                label="Validated booking or lifecycle attempt"
+                value={selectedSession.scheduling_result_evidence?.complete
+                  ? selectedSession.scheduling_result_evidence.booking_attempt_id || "Not applicable"
+                  : "No validated evidence"}
+              />
+              <Info
+                label="Validated result appointment"
+                value={selectedSession.scheduling_result_evidence?.complete
+                  ? selectedSession.scheduling_result_evidence.appointment_id || "Not applicable"
+                  : "No validated evidence"}
+              />
+              <Info
+                label="Owner review request"
+                value={
+                  selectedSession.scheduling_result_evidence?.complete && selectedSession.scheduling_result_evidence.scheduling_request_id ? (
+                    <SchedulingRequestIdentifier requestID={selectedSession.scheduling_result_evidence.scheduling_request_id} />
+                  ) : (
+                    "None"
+                  )
+                }
+              />
               <Info label="Target appointment" value={selectedSession.target_appointment_id || "None"} />
               {consultationTrace ? (
                 <>
@@ -935,7 +961,7 @@ export function CallsDashboard() {
               onLimitChange={updateSessionPageSize}
             />
             <div className="mt-3 hidden overflow-x-auto rounded-md border border-line lg:block">
-              <table className="w-full min-w-[1260px] text-left text-sm">
+              <table className="w-full min-w-[1380px] text-left text-sm">
                 <thead className="bg-slate-50 text-xs uppercase text-muted">
                   <tr>
                     <th className="px-4 py-3">Updated</th>
@@ -943,8 +969,9 @@ export function CallsDashboard() {
                     <th className="px-4 py-3">Customer</th>
                     <th className="px-4 py-3">Intent</th>
                     <th className="px-4 py-3">Action</th>
-                    <th className="px-4 py-3">Outcome</th>
-                    <th className="px-4 py-3">Booking</th>
+                    <th className="px-4 py-3">Scheduling path</th>
+                    <th className="px-4 py-3">Result</th>
+                    <th className="px-4 py-3">Evidence</th>
                     <th className="px-4 py-3">Retention</th>
                     <th className="px-4 py-3">Actions</th>
                   </tr>
@@ -966,10 +993,11 @@ export function CallsDashboard() {
                       <td className="px-4 py-3">
                         <Badge value={bookingActionValue(item)} />
                       </td>
+                      <td className="px-4 py-3 text-muted">{sessionSchedulingPathLabel(item)}</td>
                       <td className="px-4 py-3">
-                        <Badge value={item.outcome} />
+                        <Badge value={bookingNegotiationStatus(item)} />
                       </td>
-                      <td className="px-4 py-3 text-muted">{item.booking_attempt_id || "None"}</td>
+                      <td className="px-4 py-3 text-muted">{sessionEvidenceIdentifier(item)}</td>
                       <td className="px-4 py-3 text-muted">{retentionLabel(item)}</td>
                       <td className="px-4 py-3">
                         <div className="flex flex-wrap gap-2">
@@ -1032,23 +1060,24 @@ export function CallsDashboard() {
   );
 }
 
-function ReadinessPanel({ aiEnabled, voiceStatus }: { aiEnabled: boolean; voiceStatus: VoiceStatus | null }) {
+function ReadinessPanel({ voiceStatus }: { voiceStatus: VoiceStatus | null }) {
   const aiReady = Boolean(voiceStatus?.ai?.ready);
   return (
     <div className="grid gap-4 lg:grid-cols-3">
-      <Card className={voiceStatus?.ready ? "border-emerald-200 bg-emerald-50 shadow-none" : "border-amber-200 bg-amber-50 shadow-none"}>
+      <Card className={readinessCardClass(voiceStatus?.phone_answering_ready)}>
         <div className="flex gap-3">
-          {!voiceStatus?.ready ? <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" /> : null}
+          {!voiceStatus?.phone_answering_ready ? <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" /> : null}
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <CardTitle>Live phone webhook</CardTitle>
-              <Badge value={voiceStatus?.ready ? "ready" : "not_configured"} />
+              <CardTitle>Phone answering</CardTitle>
+              <Badge value={voiceStatus?.phone_answering_ready ? "ready" : "blocked"} />
             </div>
-            <CardDescription className={voiceStatus?.ready ? "text-emerald-800" : "text-amber-900"}>
-              {voiceStatus?.ready
-                ? "Twilio webhooks can create phone call sessions and transcripts."
-                : voiceStatus?.blocked_reason || "Voice provider readiness could not be verified."}
+            <CardDescription className={readinessDescriptionClass(voiceStatus?.phone_answering_ready)}>
+              {voiceStatus?.phone_answering_ready
+                ? "Inbound calls can create phone sessions and transcripts."
+                : firstReadinessMessage(voiceStatus?.phone_answering, "Phone answering readiness could not be verified.")}
             </CardDescription>
+            <ReadinessBlockers blockers={voiceStatus?.phone_answering?.blockers} />
             <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
               <Info label="Provider" value={voiceStatus?.provider || "twilio"} />
               <Info label="Signature" value={<Badge value={voiceStatus?.signature_verification ? "active" : "disabled"} />} />
@@ -1058,59 +1087,130 @@ function ReadinessPanel({ aiEnabled, voiceStatus }: { aiEnabled: boolean; voiceS
               <Info label="Recording webhook" value={<span className="break-all font-mono text-xs">{voiceStatus?.recording_webhook_url || "Not configured"}</span>} />
               <Info label="Realtime stream" value={<span className="break-all font-mono text-xs">{voiceStatus?.stream_webhook_url || "Not configured"}</span>} />
             </dl>
+            <div className="mt-4 border-t border-line/80 pt-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wide text-muted">Voice AI adapters</span>
+                <Badge value={aiReady ? "ready" : "not_configured"} />
+              </div>
+              <div className="mt-3 space-y-2">
+                <CapabilityRow label="STT" capability={voiceStatus?.ai?.stt} />
+                <CapabilityRow label="LLM" capability={voiceStatus?.ai?.llm} />
+                <CapabilityRow label="TTS" capability={voiceStatus?.ai?.tts} />
+                <CapabilityRow label="Realtime" capability={voiceStatus?.ai?.realtime} />
+              </div>
+            </div>
           </div>
         </div>
       </Card>
 
-      <Card className={aiReady ? "border-emerald-200 bg-emerald-50 shadow-none" : "border-amber-200 bg-amber-50 shadow-none"}>
+      <Card className={readinessCardClass(voiceStatus?.request_capture_ready)}>
         <div className="flex gap-3">
-          {!aiReady ? <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" /> : null}
+          {!voiceStatus?.request_capture_ready ? <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" /> : null}
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <CardTitle>External AI providers</CardTitle>
-              <Badge value={aiReady ? "ready" : "not_configured"} />
+              <CardTitle>Request capture</CardTitle>
+              <Badge value={voiceStatus?.request_capture_ready ? "ready" : "blocked"} />
             </div>
-            <CardDescription className={aiReady ? "text-emerald-800" : "text-amber-900"}>
-              {aiReady
-                ? "External STT, LLM, TTS, and realtime audio settings are configured behind the voice runtime."
-                : "Configure OpenAI voice settings before external AI voice turns are ready."}
+            <CardDescription className={readinessDescriptionClass(voiceStatus?.request_capture_ready)}>
+              {voiceStatus?.request_capture_ready
+                ? "Calls can collect structured scheduling details through the selected authority path."
+                : firstReadinessMessage(voiceStatus?.request_capture, "Request capture readiness could not be verified.")}
             </CardDescription>
-            <div className="mt-4 space-y-3 text-sm">
-              <CapabilityRow label="STT" capability={voiceStatus?.ai?.stt} />
-              <CapabilityRow label="LLM" capability={voiceStatus?.ai?.llm} />
-              <CapabilityRow label="TTS" capability={voiceStatus?.ai?.tts} />
-              <CapabilityRow label="Realtime" capability={voiceStatus?.ai?.realtime} />
-            </div>
+            <ReadinessBlockers blockers={voiceStatus?.request_capture?.blockers} />
+            <dl className="mt-4 grid gap-3 text-sm">
+              <Info label="Scheduling" value={schedulingAuthorityLabel(voiceStatus?.scheduling_authority)} />
+              <Info label="Authority version" value={voiceStatus?.scheduling_authority_version ? `v${voiceStatus.scheduling_authority_version}` : "Unavailable"} />
+              <Info label="Booking mode" value={bookingModeLabel(voiceStatus?.booking_mode)} />
+            </dl>
           </div>
         </div>
       </Card>
 
-      <Card className={aiEnabled ? "border-emerald-200 bg-emerald-50 shadow-none" : "border-amber-200 bg-amber-50 shadow-none"}>
+      <Card className={readinessCardClass(voiceStatus?.automated_booking_ready)}>
         <div className="flex gap-3">
-          {!aiEnabled ? <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" /> : null}
-          <div>
+          {!voiceStatus?.automated_booking_ready ? <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" /> : null}
+          <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <CardTitle>AI booking readiness</CardTitle>
-              <Badge value={aiEnabled ? "active" : "disabled"} />
+              <CardTitle>Automated booking</CardTitle>
+              <Badge value={voiceStatus?.automated_booking_ready ? "ready" : "blocked"} />
             </div>
-            <CardDescription className={aiEnabled ? "text-emerald-800" : "text-amber-900"}>
-              {aiEnabled
-                ? "Confirmed bookings still require Square Appointments success through the booking service."
-                : "Booking requests will be routed to owner review until Square readiness checks pass."}
+            <CardDescription className={readinessDescriptionClass(voiceStatus?.automated_booking_ready)}>
+              {voiceStatus?.automated_booking_ready
+                ? automatedBookingReadyCopy(voiceStatus?.scheduling_authority)
+                : firstReadinessMessage(voiceStatus?.automated_booking, "Automatic confirmation is not ready.")}
             </CardDescription>
-            {!aiEnabled ? (
-              <a
-                className="mt-3 inline-flex h-10 items-center justify-center rounded-md border border-line bg-white px-4 text-sm font-semibold text-ink hover:bg-slate-50"
-                href="/dashboard/integrations"
-              >
-                Open Square integration
-              </a>
-            ) : null}
+            <ReadinessBlockers blockers={voiceStatus?.automated_booking?.blockers} />
+            <p className="mt-4 text-xs leading-5 text-muted">
+              <span className="font-semibold text-ink">Compatibility:</span> phone_booking_ready mirrors this automated-booking result.
+            </p>
           </div>
         </div>
       </Card>
     </div>
   );
+}
+
+function ReadinessBlockers({ blockers }: { blockers?: VoiceStatus["phone_answering"]["blockers"] }) {
+  if (!blockers?.length) return null;
+  return (
+    <ul className="mt-4 space-y-2 text-xs leading-5 text-amber-950">
+      {blockers.map((blocker) => (
+        <li key={`${blocker.code}:${blocker.scope || ""}:${blocker.entity_id || ""}`} className="rounded-md border border-amber-200 bg-white/70 px-3 py-2">
+          <div>{blocker.message}</div>
+          <div className="mt-1 font-mono text-[11px] text-amber-800">{blocker.code}</div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function firstReadinessMessage(dimension: VoiceStatus["phone_answering"] | undefined, fallback: string) {
+  return dimension?.blockers?.[0]?.message || fallback;
+}
+
+function readinessCardClass(ready: boolean | undefined) {
+  return ready ? "border-emerald-200 bg-emerald-50 shadow-none" : "border-amber-200 bg-amber-50 shadow-none";
+}
+
+function readinessDescriptionClass(ready: boolean | undefined) {
+  return ready ? "text-emerald-800" : "text-amber-900";
+}
+
+function schedulingAuthorityLabel(authority: SchedulingAuthority | undefined) {
+  switch (authority) {
+    case "owner_manual":
+      return "Owner review request";
+    case "manleai_calendar":
+      return "ManleAI Calendar";
+    case "external_provider":
+      return "Square Appointments";
+    default:
+      return "Unavailable";
+  }
+}
+
+function bookingModeLabel(mode: BookingMode | VoiceStatus["booking_mode"] | undefined) {
+  switch (mode) {
+    case "pending_approval":
+      return "Owner review";
+    case "confirmed_booking":
+      return "Automatic confirmation";
+    case "disabled":
+      return "Scheduling disabled";
+    default:
+      return "Unavailable";
+  }
+}
+
+function automatedBookingReadyCopy(authority: VoiceStatus["scheduling_authority"] | undefined) {
+  switch (authority) {
+    case "manleai_calendar":
+      return "The internal calendar can confirm only after an atomic commit returns a durable appointment ID.";
+    case "external_provider":
+      return "Square Appointments can confirm only after a successful external booking returns the required booking evidence.";
+    default:
+      return "The selected scheduling authority can return durable confirmation evidence.";
+  }
 }
 
 function CapabilityRow({ label, capability }: { label: string; capability?: VoiceStatus["ai"]["stt"] }) {
@@ -1180,7 +1280,7 @@ function PartyRequestsPanel({
           <div>
             <CardTitle>Party booking requests</CardTitle>
             <CardDescription>
-              Group requests are owner-review handoffs. They are not confirmed appointments until staff handles them in the POS.
+              Group requests are owner-review handoffs. Resolving one here does not reserve or confirm an appointment.
             </CardDescription>
           </div>
         </div>
@@ -1254,7 +1354,9 @@ function PartyRequestsPanel({
                     </td>
                     <td className="px-4 py-3 text-muted">{request.party_size ? `${request.party_size} guests` : "Size not collected"}</td>
                     <td className="px-4 py-3 text-muted">{partyTimeLabel(request)}</td>
-                    <td className="px-4 py-3 text-muted">{partyServicesLabel(request)}</td>
+                    <td className="px-4 py-3 text-muted">
+                      <PartyGuestServices request={request} />
+                    </td>
                     <td className="px-4 py-3">
                       <Badge value={request.status} />
                     </td>
@@ -1325,7 +1427,7 @@ function PartyRequestCard({
         <Info label="Phone" value={request.representative_phone || "No phone"} />
         <Info label="Party size" value={request.party_size ? `${request.party_size} guests` : "Not collected"} />
         <Info label="Requested time" value={partyTimeLabel(request)} />
-        <Info label="Services" value={partyServicesLabel(request)} />
+        <Info label="Services" value={<PartyGuestServices request={request} />} />
       </dl>
       <div className="mt-3 rounded-md border border-line bg-slate-50 p-3 text-sm leading-6 text-muted">
         {request.summary || "No summary recorded."}
@@ -1397,7 +1499,7 @@ function BookingNegotiationPanel({
         <div>
           <div className="text-sm font-semibold text-ink">Booking negotiation</div>
           <div className="mt-1 text-xs leading-5 text-muted">
-            Slot offers, selected time, and Square Appointments confirmation state.
+            {bookingNegotiationDescription(session)}
           </div>
         </div>
         <Badge value={status} />
@@ -1411,7 +1513,7 @@ function BookingNegotiationPanel({
         <div className="mt-4 space-y-4">
           {slots.length > 0 ? (
             <div>
-              <div className="text-xs font-semibold uppercase tracking-wide text-muted">Offered Square slots</div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-muted">{offeredSlotsHeading(session)}</div>
               <div className="mt-2 space-y-2">
                 {slots.map((slot) => (
                   <OfferedSlotRow
@@ -1430,11 +1532,20 @@ function BookingNegotiationPanel({
           )}
 
           <dl className="space-y-4">
+            <Info label="Persisted scheduling path" value={sessionSchedulingPathLabel(session)} />
+            <Info label="Reviewed booking mode" value={bookingModeLabel(session.dialog_state.reviewed_booking_mode)} />
             <Info
-              label="Selected slot"
+              label="Selected time"
               value={session.requested_start_time ? selectedSlotLabel(session, serviceNames, staffNames) : "Not selected"}
             />
-            <Info label="Square confirmation" value={squareConfirmationLabel(session)} />
+            <Info label="Scheduling result" value={schedulingResultLabel(session)} />
+            {session.scheduling_result_evidence?.complete && session.scheduling_result_evidence.scheduling_request_id ? (
+              <Info
+                label="Owner review request"
+                value={<SchedulingRequestIdentifier requestID={session.scheduling_result_evidence.scheduling_request_id} />}
+              />
+            ) : null}
+            <LifecycleTargetEvidence session={session} />
           </dl>
 
           {session.requested_start_time ? (
@@ -1449,7 +1560,7 @@ function BookingNegotiationPanel({
           ) : null}
 
           <div className="rounded-md border border-line bg-white p-3 text-xs leading-5 text-muted">
-            Confirmed only after Square Appointments returns a booking ID through the booking service.
+            {schedulingEvidenceRequirement(session)}
           </div>
         </div>
       )}
@@ -1780,7 +1891,7 @@ function SessionCard({
         </div>
         <div className="flex flex-wrap justify-end gap-2">
           <Badge value={item.channel} />
-          <Badge value={item.outcome} />
+          <Badge value={bookingNegotiationStatus(item)} />
         </div>
       </div>
       <div className="mt-4 grid gap-3 text-sm">
@@ -1793,8 +1904,12 @@ function SessionCard({
           <Badge value={bookingActionValue(item)} />
         </div>
         <div className="flex items-center justify-between gap-3">
-          <span className="text-muted">Booking</span>
-          <span className="font-medium text-ink">{item.booking_attempt_id || "None"}</span>
+          <span className="text-muted">Scheduling path</span>
+          <span className="text-right font-medium text-ink">{sessionSchedulingPathLabel(item)}</span>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-muted">Evidence</span>
+          <span className="text-right font-medium text-ink">{sessionEvidenceIdentifier(item)}</span>
         </div>
         <div className="flex items-center justify-between gap-3">
           <span className="text-muted">Retention</span>
@@ -2005,14 +2120,57 @@ function partyTimeLabel(request: PartyBookingRequest) {
   return request.requested_time_window ? `${date}, ${request.requested_time_window}` : date;
 }
 
-function partyServicesLabel(request: PartyBookingRequest) {
-  const services = request.guest_service_requests ?? [];
+function PartyGuestServices({ request }: { request: PartyBookingRequest }) {
+  const services = orderedPartyGuestServices(request.guest_service_requests ?? []);
   if (services.length === 0) {
-    return "Services not collected";
+    return <span>Services not collected</span>;
   }
+  return (
+    <div className="space-y-2">
+      {services.map(({ service, originalIndex }) => {
+        const quantity = positiveInteger(service.quantity) ?? 1;
+        return (
+          <div
+            key={`${service.sort_order ?? originalIndex}-${service.guest_reference ?? "legacy"}-${service.service_id ?? "unknown"}-${originalIndex}`}
+            className="min-w-[12rem] rounded-md border border-line bg-slate-50 px-2.5 py-2"
+          >
+            <div className="text-xs font-semibold text-muted">{partyGuestLabel(service)}</div>
+            <div className="mt-0.5 text-sm font-medium text-ink">
+              {service.service_name || "Unknown service"}
+              {quantity > 1 ? ` × ${quantity}` : ""}
+            </div>
+            {service.notes ? <div className="mt-0.5 text-xs font-normal text-muted">{service.notes}</div> : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function orderedPartyGuestServices(services: PartyGuestService[]) {
   return services
-    .map((service) => [service.service_name || "Unknown service", service.notes].filter(Boolean).join(" - "))
-    .join(", ");
+    .map((service, originalIndex) => ({ service, originalIndex }))
+    .sort((left, right) => {
+      const leftOrder = positiveInteger(left.service.sort_order) ?? left.originalIndex + 1;
+      const rightOrder = positiveInteger(right.service.sort_order) ?? right.originalIndex + 1;
+      return leftOrder - rightOrder || left.originalIndex - right.originalIndex;
+    });
+}
+
+function partyGuestLabel(service: PartyGuestService) {
+  const reference = service.guest_reference?.trim();
+  if (!reference) {
+    return "Guest not recorded";
+  }
+  return reference
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function positiveInteger(value: number | undefined) {
+  return Number.isInteger(value) && Number(value) > 0 ? Number(value) : undefined;
 }
 
 function retentionLabel(session: ConversationSession) {
@@ -2143,46 +2301,25 @@ function bookingActionValue(session: ConversationSession) {
   return "book";
 }
 
-function squareConfirmationLabel(session: ConversationSession) {
-  if (session.outcome === "booking_cancelled" && session.appointment_id) {
-    return `Cancelled by Square Appointments (${session.appointment_id})`;
-  }
-  if (session.outcome === "booking_rescheduled" && session.appointment_id) {
-    return `Rescheduled by Square Appointments (${session.appointment_id})`;
-  }
-  if (session.outcome === "booking_confirmed" && session.booking_attempt_id && session.appointment_id) {
-    return `Confirmed by Square Appointments (${session.booking_attempt_id})`;
-  }
-  if (session.outcome === "booking_fallback_pending") {
-    if (bookingActionValue(session) === "cancel") {
-      return session.booking_attempt_id
-        ? `Cancellation pending owner review (${session.booking_attempt_id})`
-        : "Cancellation pending owner review";
-    }
-    if (bookingActionValue(session) === "reschedule") {
-      return session.booking_attempt_id
-        ? `Reschedule pending owner review (${session.booking_attempt_id})`
-        : "Reschedule pending owner review";
-    }
-    return session.booking_attempt_id
-      ? `Pending owner review (${session.booking_attempt_id})`
-      : "Pending owner review";
-  }
-  return "Not confirmed";
-}
-
 function bookingNegotiationStatus(session: ConversationSession | null) {
   if (!session) return "not_started";
-  if (session.outcome === "booking_cancelled" && session.appointment_id) {
+  if (session.scheduling_result_evidence?.complete && session.scheduling_result_evidence.kind === "pending_owner_review") {
+    return "pending_request";
+  }
+  const completion = currentSchedulingCompletion(session);
+  if (completion === "cancelled") {
     return "cancelled";
   }
-  if (session.outcome === "booking_rescheduled" && session.appointment_id) {
+  if (completion === "rescheduled") {
     return "rescheduled";
   }
-  if (session.outcome === "booking_confirmed" && session.booking_attempt_id && session.appointment_id) {
+  if (hasDurableSessionConfirmation(session)) {
     return "confirmed";
   }
-  if (session.outcome === "booking_fallback_pending") {
+  if (isHistoricalCompletedEvidence(session.scheduling_result_evidence)) {
+    return "historical_result";
+  }
+  if (session.outcome === "booking_fallback_pending" && selectedSchedulingAuthority(session) === "external_provider") {
     return "pending_request";
   }
   if ((session.offered_slots ?? []).length > 0) {
@@ -2192,4 +2329,168 @@ function bookingNegotiationStatus(session: ConversationSession | null) {
     return "slot_selected";
   }
   return "not_started";
+}
+
+function isSchedulingAuthority(value: unknown): value is SchedulingAuthority {
+  return value === "owner_manual" || value === "manleai_calendar" || value === "external_provider";
+}
+
+function selectedLifecycleCandidate(session: ConversationSession) {
+  const targetID = session.target_appointment_id?.trim();
+  if (!targetID) return undefined;
+  return session.reschedule_candidates?.find((candidate) => candidate.appointment_id === targetID);
+}
+
+function selectedSchedulingAuthority(session: ConversationSession): SchedulingAuthority | undefined {
+  const requestTargetAuthority = session.scheduling_result_evidence?.complete &&
+    session.scheduling_result_evidence.kind === "pending_owner_review"
+    ? session.scheduling_result_evidence.target_scheduling_authority
+    : undefined;
+  if (isSchedulingAuthority(requestTargetAuthority)) return requestTargetAuthority;
+  const evidenceAuthority = session.scheduling_result_evidence?.complete
+    ? session.scheduling_result_evidence.scheduling_authority
+    : undefined;
+  if (isSchedulingAuthority(evidenceAuthority)) return evidenceAuthority;
+  const candidateAuthority = selectedLifecycleCandidate(session)?.scheduling_authority;
+  if (isSchedulingAuthority(candidateAuthority)) return candidateAuthority;
+  const reviewedAuthority = session.dialog_state.selected_scheduling_authority;
+  return isSchedulingAuthority(reviewedAuthority) ? reviewedAuthority : undefined;
+}
+
+function sessionSchedulingPathLabel(session: ConversationSession) {
+  const selectedAuthority = selectedSchedulingAuthority(session);
+  if (session.scheduling_result_evidence?.complete && session.scheduling_result_evidence.kind === "pending_owner_review") {
+    if (selectedAuthority && selectedAuthority !== "owner_manual") {
+      return `Owner review request · selected ${schedulingAuthorityLabel(selectedAuthority)}`;
+    }
+    return "Owner review request";
+  }
+  return selectedAuthority ? schedulingAuthorityLabel(selectedAuthority) : "Authority evidence unavailable";
+}
+
+function sessionEvidenceIdentifier(session: ConversationSession) {
+  const evidence = session.scheduling_result_evidence;
+  if (!evidence?.complete) return "Incomplete";
+  if (evidence.scheduling_request_id) return `Request ${evidence.scheduling_request_id}`;
+  if (evidence.appointment_id && evidence.booking_attempt_id) {
+    const roots = evidence.root_count > 1 ? ` · ${evidence.root_count} roots` : "";
+    return `Appointment ${evidence.appointment_id} · Attempt ${evidence.booking_attempt_id}${roots}`;
+  }
+  return "Validated non-appointment result";
+}
+
+function schedulingResultLabel(session: ConversationSession) {
+  const action = bookingActionValue(session);
+  const evidence = session.scheduling_result_evidence;
+  const authority = evidence?.complete ? evidence.scheduling_authority : selectedSchedulingAuthority(session);
+  if (evidence?.complete && evidence.kind === "pending_owner_review" && evidence.scheduling_request_id) {
+    return `Owner review ${action} request ${evidence.scheduling_request_id} is ${evidence.current_status}. The selected time is not reserved, and no appointment change is confirmed.`;
+  }
+  if (authority === "owner_manual") {
+    return "No durable owner-review request ID is recorded. No time is reserved and no appointment change is confirmed.";
+  }
+  const completion = currentSchedulingCompletion(session);
+  if (completion && evidence?.complete) {
+    const verb = completion === "cancelled" ? "Cancelled" : completion === "rescheduled" ? "Rescheduled" : "Confirmed";
+    const roots = evidence.root_count > 1 ? ` · ${evidence.root_count} all-or-none roots` : "";
+    return `${verb} ${authority === "manleai_calendar" ? "in ManleAI Calendar" : "by Square Appointments"} · Appointment ${evidence.appointment_id} · Attempt ${evidence.booking_attempt_id}${roots}`;
+  }
+  if (isHistoricalCompletedEvidence(evidence)) {
+    return `The ${evidence.result_status} operation has durable historical evidence. Current appointment status: ${evidence.current_status}; it is not presented as a current confirmation.`;
+  }
+  if (session.outcome === "booking_fallback_pending" && authority === "external_provider") {
+    return `Square Appointments did not confirm the ${action}. Owner follow-up is required.`;
+  }
+  if ((session.offered_slots ?? []).length > 0 && authority) {
+    return `Verified ${schedulingAuthorityLabel(authority)} openings were recorded. No time is reserved.`;
+  }
+  if (session.requested_start_time) {
+    return "A time was selected, but no durable scheduling completion evidence is recorded.";
+  }
+  if (session.outcome === "booking_confirmed" || session.outcome === "booking_rescheduled" || session.outcome === "booking_cancelled") {
+    return "The recorded outcome lacks complete backend-validated authority evidence, so it is not presented as confirmed.";
+  }
+  return "No durable scheduling result is recorded.";
+}
+
+function bookingNegotiationDescription(session: ConversationSession | null) {
+  if (!session) return "Persisted scheduling authority, selected time, and durable result evidence.";
+  if (session.scheduling_result_evidence?.complete && session.scheduling_result_evidence.kind === "pending_owner_review") {
+    return "Selected-time evidence and the durable owner-review request. The request does not reserve an appointment.";
+  }
+  switch (selectedSchedulingAuthority(session)) {
+    case "owner_manual":
+      return "Requested timing and owner-review evidence. Owner-managed requests do not promise availability or confirm changes.";
+    case "manleai_calendar":
+      return "Verified internal openings, selected time, and durable ManleAI Calendar result evidence.";
+    case "external_provider":
+      return "Verified external openings, selected time, and Square Appointments result evidence.";
+    default:
+      return "Persisted scheduling authority, selected time, and durable result evidence. Missing authority evidence fails closed.";
+  }
+}
+
+function offeredSlotsHeading(session: ConversationSession) {
+  switch (selectedSchedulingAuthority(session)) {
+    case "manleai_calendar":
+      return "Verified ManleAI Calendar openings";
+    case "external_provider":
+      return "Verified Square Appointments openings";
+    case "owner_manual":
+      return "Requested times for owner review";
+    default:
+      return "Offered scheduling times";
+  }
+}
+
+function schedulingEvidenceRequirement(session: ConversationSession) {
+  if (session.scheduling_result_evidence?.kind === "pending_owner_review" || selectedSchedulingAuthority(session) === "owner_manual") {
+    return "Owner review requests are non-reserving. A durable request ID proves only that owner follow-up was recorded; it never confirms, reschedules, or cancels an appointment.";
+  }
+  switch (selectedSchedulingAuthority(session)) {
+    case "manleai_calendar":
+      return "ManleAI Calendar is current only when the backend validates the persisted attempt, execution event, root version, and complete active child graph.";
+    case "external_provider":
+      return "Square Appointments is current only when the backend validates provider success, booking metadata, the matching appointment mirror, and complete party evidence.";
+    default:
+      return "A scheduling result is not confirmed without persisted authority and that authority's required durable evidence.";
+  }
+}
+
+function SchedulingRequestIdentifier({ requestID }: { requestID: string }) {
+  return (
+    <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1">
+      <span className="break-all font-mono text-xs">{requestID}</span>
+      <a className="text-xs font-semibold text-brand hover:underline" href="/dashboard/appointments">
+        Open owner review queue
+      </a>
+    </span>
+  );
+}
+
+function LifecycleTargetEvidence({ session }: { session: ConversationSession }) {
+  const candidate = selectedLifecycleCandidate(session);
+  if (!candidate) return null;
+  return (
+    <>
+      <Info
+        label="Target originating authority"
+        value={
+          isSchedulingAuthority(candidate.scheduling_authority)
+            ? schedulingAuthorityLabel(candidate.scheduling_authority)
+            : "Authority evidence unavailable"
+        }
+      />
+      <Info
+        label="Target authority version"
+        value={candidate.authority_appointment_version && candidate.authority_appointment_version > 0 ? `v${candidate.authority_appointment_version}` : "Unavailable"}
+      />
+      <Info label="Target status" value={candidate.status ? <Badge value={candidate.status} /> : "Unavailable"} />
+      <Info label="Target party size" value={candidate.party_size && candidate.party_size > 0 ? `${candidate.party_size} guests` : "Unavailable"} />
+      <Info
+        label="Target active children"
+        value={typeof candidate.active_child_count === "number" ? String(candidate.active_child_count) : "Unavailable"}
+      />
+    </>
+  );
 }

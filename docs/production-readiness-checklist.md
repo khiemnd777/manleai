@@ -1,5 +1,19 @@
 # Production Readiness Checklist
 
+Completed historical items below describe the current Square-backed
+`external_provider` runtime unless they explicitly say otherwise. They remain
+valid implementation evidence but do not imply parity across scheduling
+authorities. The Owner-first milestone at the end separately records the
+implemented Phase 2 `owner_manual` request workflow and Phase 3
+`manleai_calendar` configuration/readiness foundation plus Phase 4A staff-only
+and Phase 4B structured multi-guest/multi-service pooled all-or-none
+availability/atomic create, plus Phase 4C whole-root internal
+reschedule/cancel and V51 lifecycle integrity. V52-V55 and the Settings UI add
+the explicit owner-reviewed, readiness/version-fenced authority switch and
+audited inverse-run workflow. This code readiness does not complete live
+external-provider configuration, witnessed load/restore drills, or approved
+RPO/RTO evidence.
+
 ## Milestone 1 and 2 Checklist
 
 - [x] Monorepo structure
@@ -16,6 +30,18 @@
 - [x] Encrypted POS token storage
 - [x] POS connection, sync log, and error tables
 - [x] Admin login
+- [x] Harden auth code so invalid and disabled login attempts share generic `401 INVALID_CREDENTIALS`, with found disabled-account status checked only after bcrypt comparison; refresh tokens rotate atomically once for active users, consume disabled-user tokens without a successor, and persist only hashed successors. Handler/unit tests and PostgreSQL repository integration tests pass under the fresh release gate; this remains code evidence, not deployed-runtime evidence.
+- [x] Make shared `RequireAuth` use signed JWT identity only as the lookup key,
+  then resolve the current active principal through `auth.Repository` for every
+  protected request. Server-owned `users.status`, current salon ownership, and
+  current roles replace stale JWT salon/role claims; disabled/deleted users,
+  missing resolver, mismatched identity, and repository errors return generic
+  `401 UNAUTHENTICATED`. `backend/internal/middleware/auth_test.go` covers claim
+  replacement and fail-closed unit cases, while
+  `backend/modules/auth/repository_integration_test.go` covers current role
+  reload and immediate access/refresh revocation after disablement. The release
+  security manifest owns both tests and fresh PostgreSQL execution passes under
+  the final database gate.
 - [x] Dashboard shell
 - [x] Salon profile creation UI
 - [x] Square integration page
@@ -68,6 +94,12 @@
 - [x] Add salon-scoped AI receptionist tone presets that flow from Settings through phone/LLM reply generation without changing booking guardrails.
 - [x] Keep confirmed wording impossible unless `booking.Service` returns a POS-confirmed booking attempt, POS booking ID, and appointment.
 - [x] Add fallback and owner-handoff behavior when STT, LLM, TTS, or POS calls fail.
+- [x] Replace UUID-only buffered-TTS audio access with a database-expiry-bounded
+  HMAC-SHA256 capability bound to audio/salon/provider/call/session identity;
+  resolve only the stored salon Twilio token, fail closed without an unsigned
+  URL, return uniform non-enumerating failures, and preserve repeated Twilio
+  fetches within the maximum 15-minute TTL while token rotation revokes old
+  URLs.
 - [x] Keep semantic validation failures in auxiliary consultation extraction from erasing a valid primary act, question, or guidance action; retain bounded drop diagnostics.
 - [x] Validate direct-model conversation quality through the production Conversation Service output-call decision, versioned checkpoints, backend transition facts, bounded selected canaries, delimiter-safe dynamic-identifier leak rejection, separate typed local-hour/minute input with backend-owned minute conversion, offered-slot-versus-time-constraint validation, exact consultation extraction checks, same-turn mutation/snapshot consistency, protocol-unknown normalization, operational-mutation ownership over bare consultation goals, structured consultation-question fallback after unsafe model copy, and evidence-grounded review batches that penalize invented consultation state, silent mutations, and over-broad operational answers instead of a forced universal reply rewrite.
 - [x] Add Calls dashboard readiness for external STT, LLM, and TTS provider configuration.
@@ -105,6 +137,7 @@
 - [x] Keep category and category-alias matches as clarification candidates, not directly bookable services.
 - [x] Store versioned common US nail categories, service concepts, and category/service aliases in database-owned taxonomy tables; materialize them idempotently without creating services/POS links or overriding owner/imported classifications.
 - [x] Treat generic and fuzzy service-family matches as clarification candidates, not selected services.
+- [x] Keep exact and owner-defined alias selection behavior unchanged; when one fuzzy catalog candidate is proposed, persist a scoped `fuzzy_service_confirmation` pending state and require explicit state-bound confirmation before draft mutation, availability invalidation, or booking. Reject stale catalog/source provenance and replay duplicate events idempotently without turning bounded confirmation words into a general intent classifier.
 - [x] Persist salon-scoped service aliases from owner corrections with stable `(salon_id, normalized_alias)` upsert semantics.
 - [x] Prevent one normalized phrase from being both an active service alias and an active category alias.
 - [x] Feed active service aliases into simulator and phone conversation runtime.
@@ -201,37 +234,148 @@
 - [x] Clear completed-sync freshness when a snapshot begins or fails, and restore `last_sync_at` only after an active successful generation completes.
 - [x] Verify Square webhook signatures against dashboard-stored salon configuration, reject conflicting root/nested location IDs, dedupe event IDs, claim-token fence event and repair completion, and prevent stale provider versions from overwriting newer calendar truth.
 - [x] Keep scheduled calendar repair health separate from OAuth/catalog connection readiness.
-- [ ] Add a production external delivery consumer and operations policy for durable owner-notification outbox rows.
-- [ ] Add authenticated webhook backlog/dead-letter/replay and recent-delivery/repair health observability before claiming end-to-end webhook operations readiness.
-- [ ] Fail runtime Square/Twilio/OpenAI configuration resolution closed on repository or decryption errors; permit legacy bootstrap fallback only for an exact missing stored salon configuration.
+- [x] Add a production owner-notification delivery consumer and operations policy: V56 provider-neutral claims/leases/dispatch markers, immutable attempt/event/action ledgers, strict salon-scoped Twilio Messaging configuration, signed monotonic callbacks, bounded pre-dispatch retry, unknown-outcome dead-letter protection, owner-scoped masked delivery/requeue operations, the Appointments delivery surface, and worker/operations-health evidence documented in `operations/owner-notification-delivery.md`.
+- [x] Add default-off customer appointment SMS with V59 policy, explicit
+  per-destination consent and immutable evidence, signed STOP/START/HELP
+  handling without body parsing or duplicate replies, transactional
+  request/appointment outbox hooks, quiet-hours scheduling, exact
+  consent/policy/source-version pre-dispatch fencing, canonical unknown-outcome
+  dead letters, one bounded owner requeue, masked appointment/request child
+  surfaces, and separate worker/operations-health evidence. Preserve external
+  authority version zero and never treat provider acceptance/sent as delivered.
+- [x] Add authenticated owner-scoped Square webhook operations: safe bounded
+  event list/detail, status filters and pagination, backlog/dead-letter/recent-
+  success metrics, calendar-repair health, backend-owned `can_requeue`, bounded
+  action-key-idempotent requeue with exact replay header, raw/provider/PII
+  redaction guards, and a responsive child panel inside the connected Square
+  integration card. A configured verifier or received webhook still is not
+  appointment-confirmation or live-subscription proof.
+- [x] Fail runtime Square/Twilio/OpenAI configuration resolution closed on repository, malformed persisted settings, or decryption errors; keep stored enabled state and credentials authoritative, prevent dashboard secret-source fallback for stored rows, and permit legacy bootstrap fallback only for an exact missing stored salon configuration.
+
+## Backup, Restore, And Migration Rollback
+
+- [x] Add a bounded pre-deploy PostgreSQL backup script that requires an explicit source database and encrypted-private storage attestation, writes a custom-format `pg_dump` with private permissions, validates its catalog through `pg_restore --list`, creates an SHA-256 sidecar, and refuses artifact overwrite.
+- [x] Require every tagged deploy to carry an exact release-tag previous-image/database compatibility declaration and approver; fail before database mutation when it is missing, stale, malformed, or false.
+- [x] Take the pre-deploy backup before the candidate API startup migrator can run; require protected approval of the exact encrypted-private backup path, fail closed when the existing PostgreSQL container/source is ambiguous, and permit a no-backup record only for a truly empty initial deployment with neither container nor project volume.
+- [x] Keep image rollback distinct from database recovery: automated failure handling may restart prior images only after forward-schema compatibility was declared, never rewinds PostgreSQL, and records that no database restore occurred.
+- [x] Add an isolated restore drill that refuses the same source/target, reserved databases, non-prefixed targets, existing targets, checksum mismatch, malformed archives, migration name/checksum drift, missing required schema objects, or tenant-smoke violations; it never drops, truncates, renames, or overwrites a database.
+- [x] Validate exact `app_schema_migrations` parity against the release SQL set, critical scheduling/integration/conversation/internal-calendar tables, tenant/staff/lifecycle constraints, and bounded cross-salon/orphan smoke queries before producing the API startup handoff.
+- [x] Add a protected manual non-production GitHub drill workflow with explicit source/target/artifact/approval/RPO/RTO inputs; keep the dump, checksum, restored target, and private env on the drill host and upload only the sanitized 30-day report.
+- [x] Record drill timestamp, artifact ID/checksum, release and approval references, approver, RPO target/observed age, RTO target/restore-validation duration, total duration, bounded failure stage, and API startup handoff without secrets, PII, row contents, or provider configuration.
+- [x] Document forward-only expand/migrate/contract releases, previous-image compatibility review, preflight/backup/abort/restore decisions, post-snapshot write/provider reconciliation, and separate DBA approval before any production recovery/cutover.
+- [ ] Configure the production backup path on an approved encrypted private volume, set a retention/key-rotation policy, and verify its capacity/monitoring before claiming production backup readiness.
+- [ ] Configure the protected `postgres-restore-drill` environment on a dedicated non-production host, approve the exact encrypted-private backup path, install its exact non-production attestation file, and complete a witnessed drill; retain the sanitized report plus isolated API `/healthz` and bounded read-handoff evidence before claiming restore readiness.
+- [ ] Define and approve business RPO/RTO objectives and run the drill on the required recurring cadence; the repository provides the manual workflow but does not claim a scheduled drill or an automatic production restore.
+
+## Scheduling Load And Concurrency Verification
+
+- [x] Add a reproducible bounded synthetic harness for `owner_manual` request replay/changed-payload conflict/transition CAS, `manleai_calendar` aggregate party replay and pooled-resource conflict, and authority-switch preview/commit replay plus concurrent commit fencing.
+- [x] Refuse execution without the exact isolated non-production attestation, dedicated database name/user/prefix, release-migration checksum parity, a unique run UUID, and compiled concurrency/operation/duration bounds; keep the harness free of drop/truncate/delete cleanup and real POS/Twilio/OpenAI runtimes.
+- [x] Emit a PII-free schema-versioned report with release/run/seed/database/migration evidence, p50/p95/p99/max latency, throughput, expected conflicts, unexpected errors, duplicate/orphan/provider-evidence/provider-call/tenant/idempotency/safety violations, and SQL pool statistics; pass only with zero unexpected errors and zero invariant violations.
+- [x] Cover guardrails, report gates, destructive-SQL/provider-import exclusions, race detection, and opt-in fresh-PostgreSQL repeated-run/collision behavior. The fresh local integration verifies implementation only and does not claim production capacity.
+- [ ] Complete an approved witnessed run in a representative isolated environment, retain the sanitized report and checksum with release approval evidence, and define workload-specific latency/throughput acceptance targets before making any production capacity claim.
 
 ## Public Catalog And Landing App
 
 - [x] Add owner-managed public catalog settings and publish readiness.
 - [x] Add unauthenticated public-safe catalog APIs for first published salon and slug lookup.
 - [x] Add separate `landing/` Next.js app for public salon pages.
-- [x] Keep public pages call-to-book only; no web booking attempt is presented as confirmed.
+- [x] Keep public pages call-to-request only; no web booking attempt is presented as confirmed.
 - [x] Avoid exposing staff contact details, POS IDs, sync errors, owner identifiers, or provider tokens.
+- [x] Make publish/read eligibility selected-authority-aware: canonical services
+  without POS/staff for `owner_manual`, current activated local hours/catalog
+  for `manleai_calendar`, and current synced/linked projection for
+  `external_provider`.
+- [x] Fence publishing with the scheduling-authority advisory lock/version,
+  fail stale public pages closed, and use call-to-request copy only.
 
 ## Configuration Transfer
 
 - [x] Add sanitized owner-scoped configuration export with stable schema version.
 - [x] Exclude services, staff, customers, appointments, call sessions, transcripts, POS OAuth tokens, API keys, client secrets, encrypted secrets, and operational records.
-- [x] Include service category taxonomy, service category aliases, and service aliases in schema v5, add the salon consultation runtime toggle in schema v6, then add portable service consultation profiles and scoped `included_sections` data packs in schema v7 while continuing to exclude service records and provider state.
+- [x] Include service category taxonomy, service category aliases, and service aliases in schema v5, add the salon consultation runtime toggle in schema v6, add portable service consultation profiles and scoped `included_sections` data packs in schema v7, and make schema v8 Owner-first while retaining v7 compatibility and excluding provider connection state.
 - [x] Resolve v7 consultation profiles only against existing target services by normalized name plus duration; block missing, ambiguous, or ineligible ready targets without creating services or POS mappings.
 - [x] Keep consultation profile import idempotent by `(salon_id, service_id)` and leave profile revision unchanged when imported data is identical.
 - [x] Use stable category slugs and normalized alias keys so repeated imports update existing taxonomy instead of duplicating it.
 - [x] Resolve imported service aliases only against existing target-salon services and skip unresolved alias targets without creating services.
 - [x] Add import preview and apply flows for existing salons and onboarding.
 - [x] Use request IDs for repeated import applies so retries do not create duplicate import runs.
-- [x] Gate live `ai_enabled`, confirmed booking mode, and public catalog publishing until Square Appointments readiness passes on the target salon.
+- [x] Import `ai_enabled` as portable intent without a universal Square gate; evaluate confirmed booking, consultation eligibility, and public publishing against the destination scheduling authority, with `owner_manual` forced to pending approval and source/target/result booking mode plus a structured warning exposed on preview/apply and exact replay.
+- [x] Exclude scheduling authority/version and switch history, scheduling requests/outbox state, internal-calendar configuration/execution evidence, provider secrets, and operational records; never move historical operations.
+- [x] Fence apply with the shared scheduling-authority advisory lock and an exact authority/version recheck; concurrent authority changes fail before any import mutation.
+- [x] Report source/destination/result `active_pos_provider`; preserve it as adapter intent only, and block external-executor adapter changes for explicit provider-switch review.
+- [x] Cover schema v7 compatibility, repeated and concurrent request replay, changed-payload conflict, tenant isolation, and concurrent authority-switch fencing in config-transfer unit and PostgreSQL integration tests.
+
+## Operations Health And Worker Heartbeats
+
+- [x] Add V57 current-job and per-run ledgers with bounded technical fields,
+  terminal history immutability, live lease claims, and exact
+  job/run/worker-instance fencing.
+- [x] Wrap every recurring worker job with start, heartbeat, cancellation,
+  panic, and finish recording; keep job loops independent and non-overlapping.
+- [x] Expose authenticated `GET /api/salons/:id/operations/status` with only
+  tenant-scoped backlog/oldest/dead-letter aggregates and safe class/code data.
+- [x] Omit irrelevant provider rows, fail closed for missing/stale evidence,
+  and keep internal scheduling health separate from POS errors.
+- [x] Add responsive Settings loading/error/healthy/degraded/stale/unknown states
+  with refresh and owner-workflow links but no replay mutation.
+- [x] Cover V57 ordering/constraints, scheduler cancellation/panic/lease-held
+  behavior, stable classification, route authentication, and optional
+  PostgreSQL tenant/fencing integration.
+- [ ] Configure external polling/paging and an on-call response policy in each
+  production environment. The in-product card is diagnostic evidence, not
+  automatic alert delivery.
+
+## Scheduling And Notification PII Retention
+
+- [x] Add V61 policy-versioned, irreversible redaction fields and database
+  guards for terminal scheduling requests/segments/events, owner/customer
+  notification content and destinations, and expired voice-audio bytes.
+- [x] Keep the baseline at 90 days and require both terminal business state and
+  terminal delivery state before notification redaction. Preserve
+  pending/contacted owner work, live leases, queued/retrying/unknown delivery,
+  open reconciliation work, active consent/STOP routing keys, provider and
+  operation IDs, versions, statuses, timestamps, and tenant/audit ownership.
+- [x] Use explicit JSON audit-field allowlists instead of broad text matching,
+  delete no audit row, and expose redaction markers through owner-scoped API/UI
+  surfaces without permitting requeue or restoration.
+- [x] Run `scheduling_pii_retention` every five minutes with a bounded default
+  batch of 100, `FOR UPDATE SKIP LOCKED`, one-row transactions, idempotent
+  concurrent processing, PII-free errors, and no provider calls.
+- [x] Record prior fresh V1-through-V61 migrate-twice and V61 PostgreSQL
+  retention evidence for exact 90-day boundaries, nonterminal/live-lease/
+  consent/reconciliation fences, aggregate rollback, concurrency, tenant/API
+  DTO behavior, irreversible redaction, and early manual audio redaction.
+- [x] Rerun fresh V1-through-V62 migrate-twice plus V61/V62 PostgreSQL suites
+  after the final bounded-expiry and composite-tenant-fence changes. The final
+  isolated PostgreSQL release gate passed on 2026-07-26.
+- [x] Add V62 fail-closed preflight plus a composite
+  `(salon_id, call_session_id)` foreign key for party requests, tenant-filtered
+  hydration, and PostgreSQL cross-salon insert/hydration/redaction regression
+  coverage. Existing mismatches are never auto-repaired or reassigned.
+- [ ] Obtain and record privacy/legal approval for production retention
+  durations, jurisdictions, litigation holds, DSAR/deletion handling, backup
+  expiry, and policy-version changes. Passing retention tests is code-readiness only,
+  not compliance certification.
 
 ## Call Lifecycle Retention And Realtime Streams
 
 - [x] Add call session lifecycle filters for active, archived, and redacted sessions.
 - [x] Add idempotent archive and irreversible redaction actions with active-session conflict gates.
 - [x] Add worker-driven 90-day retention redaction for expired active sessions.
-- [x] Clear customer PII, transcript bodies, handoff summaries, webhook payloads, and temporary voice audio while preserving booking/handoff/provider-call audit links.
+- [x] Clear customer/contact PII, transcripts, handoff/party summaries and guest
+  details, webhook payloads, temporary voice audio, quote/offered-slot proof,
+  and every PII-capable conversation state container: `dialog_state`,
+  `party_plan`, `booking_segments`, and `reschedule_candidates`, while
+  preserving bounded booking/handoff/provider-call audit links.
+- [x] Make re-redaction idempotent and capable of repairing residual JSONB on
+  historically redacted sessions without changing the original `redacted_at`;
+  clear future-dated audio immediately and keep later expiry-worker processing
+  idempotent. `backend/modules/conversation/retention_integration_test.go`
+  covers complete row/API clearing, cross-owner non-mutation, historical
+  repair, repeated redaction, audio cleanup, and expiry processing. Its final
+  fresh V1-through-V62 PostgreSQL execution passes under the checked rerun gate
+  above.
 - [x] Add Twilio Media Streams and OpenAI Realtime adapter path with completed transcripts routed back through the same conversation engine and booking service.
 - [x] Correlate realtime response creation, audio, cancellation, and completion by application request ID and provider response ID; schedule typed replies by input generation/workflow priority, suppress superseded output, and reject stale audio.
 - [x] Fail closed on missing GA transcription confidence, apply profile-aware mean/low-tail/VAD-coherence admission, and keep rejected noise out of conversation state.
@@ -250,3 +394,111 @@
 - [x] Support consultation-only completion with `consultation_completed`, bounded unresolved handoff, and global deterministic plus structured safety handoff before any mutation or tool action, without medical advice.
 - [x] Keep cancel, reschedule, handoff, and active party-plan actions ahead of consultation routing.
 - [x] Expose per-service consultation profile controls in Services, the salon-wide toggle and coverage in Settings, and typed consultation audit state in Calls.
+
+## Owner-First Production Release Gate
+
+- [x] Require every `v*` image build and deploy to pass complete backend `go test ./...` and `go vet ./...`, a bounded high-risk race suite, and typecheck/build for `frontend`, `landing`, and `pos-calendar`.
+- [x] Add a versioned package/test-file manifest and fail-closed orchestration script; do not select coverage by grepping Go test names or output.
+- [x] Start the PostgreSQL contract from an empty dedicated database/role whose database name carries the `release_gate` marker, reject missing/unsafe identity and pre-existing public state, construct test URLs without logging them, prove migrate-twice/checksum behavior, and verify every repository migration from V46 through latest was applied exactly once.
+- [x] Clone the verified migration-only baseline into a disposable database per package, then run the scheduling authority, owner-manual, internal-calendar, switch, booking/POS/Square and webhook operations, configuration/public, owner/customer notification, scheduling-PII retention, operations-health, and V58 alias integration packages serially with bounded timeouts and no live provider, paid API, or network dependency.
+- [x] Run an explicit tenant/security contract covering route authentication, cross-salon rejection, token/secret redaction, zero POS evidence for manual/internal work, public PII/provider-ID absence, notification masking, and callback signature enforcement.
+- [x] Keep `build-images` and `deploy` dependent on the release gate and preserve the existing tag-only, pre-deploy backup, forward-migration compatibility, healthcheck, and rollback gates.
+- [ ] Treat a passing gate as code-ready only; separately verify dashboard-managed provider configuration, live callback/delivery behavior, production backup storage/retention/capacity, witnessed restore/RPO/RTO evidence, alert routing, and on-call readiness before claiming operational production readiness.
+- [x] Replace browser local-storage tokens with memory-only access tokens and a
+  host-only HttpOnly/Secure-production/SameSite-Strict refresh cookie; preserve
+  one exact concurrent rotation successor; add nonce CSP with no production
+  wildcard/`unsafe-inline`/`unsafe-eval` across all three web apps; remove POS
+  inline scheduler styles; and enforce HMAC-pseudonymous atomic Redis global
+  plus route-class buckets with typed `429`/`503`, edge-owned client IP, health,
+  live Redis integration, race, web policy, typecheck, and build coverage.
+- [ ] Independently verify the emitted CSP/auth-cookie behavior at the deployed
+  production origins, confirm Redis capacity/latency/alerting and tune the
+  documented abuse thresholds from representative traffic before treating the
+  release gate as a complete operational security approval.
+
+## Owner-First Scheduling Authority Milestone
+
+Phase 0 documentation/additive V46 compatibility fields, the Phase 1 dispatch
+boundary, the Phase 2 `owner_manual` request workflow, and the Phase 3
+`manleai_calendar` configuration/readiness foundation are implemented. Phase
+4A adds verified staff-only availability and atomic single-guest create, and
+Phase 4B adds structured multi-guest/multi-service pooled all-or-none
+availability/create, and Phase 4C adds target-origin whole-root internal
+reschedule/cancel with V51 lifecycle guards and durable replay evidence.
+Phase 2 adds request-only availability, durable owner-review book/reschedule/
+cancel requests, additive neutral APIs, conversation linkage and safe wording,
+and the Appointments owner-review queue. Phase 3 then implements the separate
+`manleai_calendar` configuration/readiness foundation. Phase 4C keeps
+capabilities operation-specific: all six may be true only when their exact
+selected-authority, current activation/config, and service-policy predicates
+pass, and aggregate `execution_ready` is true only when every capability is
+true. That new-work readiness view is distinct from historical target-origin
+dispatch after a later authority change. Authority switching is a separate
+workflow. Owner-notification delivery is implemented as owner-operational SMS
+with V56 migration compatibility, provider-neutral processing, Twilio
+isolation, API/UI states, safe retry/unknown-outcome policy, and focused
+validation. Customer appointment SMS is implemented separately by V59 and
+`modules/customer_notification`: it remains disabled by default, requires
+explicit per-destination consent, and uses its own source-fenced delivery
+ledger rather than reusing owner-notification consent or state.
+
+- [x] Resolve owner-scoped current and originating scheduling authority: use `salon_settings.scheduling_authority` only for genuinely new availability/create, use persisted operation/retry/target origins for historical work, require cross-source equality for appointment mutations, dispatch availability/create/reschedule/cancel through `scheduling.Service`/`Executor`, and keep candidates plus create/cancel replay as provider-free history delegation.
+- [x] Keep exact protocol support limited to `owner_manual`, `manleai_calendar`, and `external_provider`, with tenant-scoped validation and no inference from integrations, provider fields, UI copy, or caller wording.
+- [x] Implement `owner_manual` as a deduplicated pending owner-review request workflow for book, reschedule, and cancel: persist the request/ordered segment/event aggregate, call-session link, and deduplicated queued owner-notification outbox row in one database transaction; make exact operation and transition replay idempotent through unique keys, row locks, fingerprint checks, expected-version compare-and-swap, and append-only events; expose request-only availability, neutral action/list/detail/transition APIs, safe conversation wording, and the responsive Appointments queue; never automatically confirm or mutate an appointment, invent provider/POS/reconciliation evidence, or claim external notification delivery.
+- [x] Implement Phase 5H conversation booking modes independently of scheduling authority: `pending_approval` verifies selected internal/external availability but creates one non-reserving owner-review request; `confirmed_booking` retains the authority-native confirming executor; `disabled` performs zero origin-free scheduling calls; `owner_manual + confirmed_booking` remains invalid; exact persisted operations replay through their original authority before current-policy gating.
+- [x] Fence final conversation review to both `booking_mode` and selected scheduling authority; require a new full review after either changes; preserve ordered party/service/staff/requested-time data for pending requests while stripping execution proof; persist the optional target authority through V55 without backfilling legacy NULL requests; expose booking mode in AI Settings and target/non-reservation evidence in Appointments owner review.
+- [x] Implement the Phase 3 `manleai_calendar` configuration/readiness foundation: persist V48 root policy and monotonic fence, `local_override` hours, independent service/staff eligibility, staff schedules, service capacity policies, optional resource pools/requirements, scoped exceptions, version-fenced activation audit, and immutable events; enforce owner/tenant scope, action-key replay, expected-version conflict handling, and overlap constraints; expose owner-scoped aggregate/child APIs plus Settings/Staff/Services management and Appointments readiness UI; keep configuration/activation distinct from execution and authority switching.
+- [x] Implement Phase 4A staff-only availability and atomic create: register the executor; expose granular staff-only capabilities while aggregate `execution_ready=false`; use canonical services/staff, V48 policy, local hours, schedules, buffers, exceptions, strict DST and half-open conflict planning; fail closed on incomplete external conflict evidence; persist V49 authority/config-fenced quote, internal attempt/appointment/service/event evidence with null POS fields; revalidate under the shared salon lock; require durable appointment and attempt IDs; and return exact committed replay after response loss.
+- [x] Integrate Phase 4A with conversation and Appointments: use authoritative capability/readiness context, keep internal party/multi-segment/lifecycle actions gated, refresh only typed stale quote evidence without false confirmation, reject provider-shaped internal results, preserve external guidance behavior, and expose a responsive staff-only create flow with exact-operation retry and durable-ID confirmation.
+- [x] Implement Phase 4B pooled-capacity evaluation and all-or-none party create: normalize ordered quantity-one guest/service units; plan same-guest services sequentially and different guests concurrently only when staff/resources fit; assign `anyone` deterministically; return one exact aggregate quote; revalidate authority/config/activation/catalog/schedule/staff/resource/capacity fences; and commit one root appointment plus every child service/resource row or nothing, without changing external-provider behavior.
+- [x] Add V50 database guards over the V49 ledger: quote resource integrity, exact guest-reference/party-size invariant, sorted pool locks, base/override capacity probes, concurrent over-capacity prevention, exact bidirectional quote/attempt/appointment/event graph equality, and immutable consumed quote/committed-book history without a second reservation ledger.
+- [x] Integrate Phase 4B with conversation and Appointments: use one aggregate party availability/action proof, reject partial confirmed children, reopen the complete draft after a typed resource/quote conflict with zero confirmation, preserve exact root replay, retain the external-provider per-child contract, and expose capability-gated structured guest/service/pooled-resource review in the responsive create flow.
+- [x] Implement Phase 4C internal reschedule/cancel with target-origin routing after a current-authority change; exact target/version and open-cutoff validation; quote-backed whole-root replan that preserves party/service/guest shape; quote-free cancel with exact old-plan snapshot; atomic release and one-version same-root transition; immutable historical event replay; current-plan-only hydration; zero-active-child terminal cancel; durable status/version/active-child result validation; and no provider/POS evidence.
+- [x] Add V51 database guards for release ownership, immutable root provenance and party identity, exact one-version transitions, unique contiguous versioned events, cancelled-terminal state, exact reschedule quote/attempt/new-plan equality, exact cancel old-plan snapshot, and zero active children after cancellation.
+- [x] Integrate Phase 4C with conversation and Appointments: require explicit state-scoped lifecycle authorization, an exact reviewed reschedule quote or a cancellation reason with no quote, stale-target refresh/re-offer without success wording, cutoff-safe handoff, exact event replay after later mutations, complete internal-origin row evidence, fail-closed client cutoff handling, locked exact retries for uncertain submissions, and durable response graph/status/version checks before success copy.
+- [x] Preserve the existing Square `external_provider` booking ID/version, quote, fence, idempotency, unknown-outcome, retry, reconciliation, webhook, and token-security safeguards unchanged behind the authority-neutral boundary; route Square test writes through the facade, expose/gate readiness by current authority, sanitize gate errors, and fence external lease/calendar mutation while retaining provider/connection-scoped webhook repair for historical external mirrors.
+- [x] Keep party and multi-segment operations all-or-none: pending only for `owner_manual`, one atomic root/child commit for `manleai_calendar`, and complete provider success or safe rollback/reconciliation for `external_provider`.
+- [x] Add the V52-V55 explicit owner-reviewed authority switch workflow with readiness preview, dry-run blockers, authority-version and concurrency fences, exact replay/conflict handling, immutable run/event audit, and an explicit inverse-run reference; integration connect/sync/import/webhook actions do not switch authority implicitly.
+- [x] Preserve immutable originating authority and authority-native evidence for appointments, attempts, quotes, and segments so historical retry, reschedule, cancellation, reconciliation, and webhook work cannot cross authorities.
+- [x] Add Phase 4A/V50/V51 internal execution evidence without overloading `active_pos_provider` or populating fake `pos_*` fields: authority/config-fenced normalized quotes, internal attempt/appointment/segment/resource/event ownership, staff overlap and resource-capacity guards, exact graph equality, released-child ownership, versioned lifecycle events, and exact historical replay identity.
+- [x] Keep cross-authority non-success state authority-native: `owner_manual` persists versioned pending owner review without execution side effects; `manleai_calendar` fails or atomically rolls back with typed quote/capability/target conflicts and no provider evidence; `external_provider` retains fallback, unknown-outcome, safe-retry, rollback and reconciliation evidence; V52 switch runs persist preview-ready/blocked and committed state with immutable events and explicit inverse-run references instead of overloading any scheduling outcome.
+- [x] Complete the Owner-first dashboard authority workflow in Settings with explicit target selection, readiness preview/review, blocked and stale-conflict handling, commit progress, exact replay, latest-run recovery, and explicit inverse-switch context; preserve the request queue, configuration surfaces, readiness, internal create, and Phase 4C lifecycle controls in their owning workflows.
+- [x] Update conversation answer context and internal create/lifecycle flows to use selected-authority or target-origin canonical data and backend capability evaluation without broadening the external-provider catalog path.
+- [x] Make voice readiness Owner-first: expose separate phone-answering, request-capture, and automated-booking dimensions; fence them to the current scheduling authority/version and booking mode; source capability blockers from the authority owner; keep `owner_manual` request-only; and treat `phone_booking_ready` as a compatibility alias without making Square a prerequisite for owner/internal authorities.
+- [x] Update public catalog publishing and public reads to use selected-authority
+  data without making Square or staff a universal prerequisite; fence publish
+  against authority changes and fail stale pages closed.
+- [x] Complete the AI-bookable consumer audit: conversation answer context,
+  configuration transfer/onboarding, consultation eligibility, voice readiness,
+  public catalog, Services/Staff controls, Settings consultation counts,
+  dashboard summaries, Appointments, and POS Calendar now use the selected
+  authority, persisted origin, authority-owned catalog/configuration, or an
+  explicitly external-only workflow; canonical owner/internal records do not
+  require fake POS links, while unknown authority fails closed.
+- [x] Add the owner-scoped Calls `scheduling_result_evidence` projection:
+  `owner_manual` exposes reviewed request/target provenance as nonconfirming;
+  `manleai_calendar` requires its complete durable appointment/attempt/status/
+  version/active-child graph; `external_provider` requires a succeeded attempt
+  plus exact mirror/current graph; split results require every root; historical
+  exact results remain noncurrent; and raw session IDs or outcome text never
+  infer confirmation. Unit coverage exists, and
+  `backend/modules/conversation/scheduling_result_evidence_integration_test.go`
+  covers valid owner-scoped GET/list, partial-graph fail-closed behavior, and
+  cross-owner non-leak. The integration test code exists, but its final fresh
+  V1-through-V62 PostgreSQL execution remains pending under the already-
+  unchecked rerun gate above.
+- [x] Make frontend authority-evidence validation executable rather than
+  typecheck-only: `frontend` runs appointment and Calls evidence helper tests,
+  `pos-calendar` runs its scheduling-evidence helper tests, both expose
+  `npm run test:evidence` through the shared
+  `deploy/run-ts-evidence-tests.mjs` runner, and CI executes those suites for
+  the two applicable web apps before typecheck/build.
+- [x] Cover Phase 4A with V49 safety tests, real-PostgreSQL repository concurrency/replay/fence/conflict tests, executor/planner/handler/service tests, conversation golden/counterexample/replay/no-partial-write tests, frontend deterministic helper checks, typecheck/build, and Go race checks.
+- [x] Cover Phase 4B with `backend/migrations/v50_safety_test.go`, aggregate planner/executor tests, the real-PostgreSQL aggregate party/pooled replay/conflict and guest-invariant cases in `execution_repository_integration_test.go`, and `backend/modules/conversation/manleai_calendar_party_scheduling_test.go` for aggregate allocation, partial-child rejection, resource-conflict zero confirmation, counterexamples, and exact replay; validate frontend aggregate payload/evidence helpers with typecheck/build.
+- [x] Keep named Phase 4B regression anchors: `TestV50CapacityOverridesExactGraphRollbackAndHistory`, `TestV50ConcurrentReversePoolOrdersSerializeWithoutOvercapacity`, `TestPlanAggregateAvailabilityExpandsPartyUnitsAndAssignsAnyoneDeterministically`, `TestPlanAggregateAvailabilityPreservesSequentialServicesPerGuest`, `TestExecutionRepositoryPostgresAggregatePartyPooledEvidenceReplayAndAtomicConflict`, `TestManleAICalendarPartyRejectsPartialConfirmedChildren`, `TestManleAICalendarPartyResourceConflictReopensDraftWithZeroConfirmation`, and `TestManleAICalendarPartyExactReplayUsesSameRootOperation`.
+- [x] Cover Phase 4C with V51 migration shape/application/atomic-history tests, lifecycle planner and cutoff unit tests, real-PostgreSQL whole-root switched-authority replay tests, conversation request/candidate/golden/reason/replay/stale/cutoff/no-provider-evidence tests, and frontend typecheck/build validation.
+- [x] Cover Phase 5H with the six-row scheduling matrix, replay-after-mode-change and legacy-NULL counterexamples, disabled pre-planner zero-call coverage, structured pending-party fidelity, V55 migration/order safety, real-PostgreSQL request target/event/notification/replay evidence, Twilio pending-external golden flow, frontend typecheck/build, and focused Go race checks.
+- [x] Keep named Phase 4C regression anchors: `TestV51DefinesTenantFencedLifecycleGraphWithoutProductHardcoding`, `TestV51AppliesAfterV50`, `TestV51LifecycleAtomicHistoryAndAuthoritySwitch`, `TestLifecycleCutoffNullDisabledAndEqualityClosed`, `TestReplacementPreservesPartyServiceUnitAndGuestMapping`, `TestHistoricalTargetPlannerDoesNotRequireCurrentAuthority`, `TestExecutionRepositoryPostgresWholeRootLifecycleSwitchedAuthorityHistoricalReplay`, `TestInternalLifecycleSchedulingActionRequestPreservesWholeRootVersionAndShape`, `TestInternalLifecycleCandidateMappingPreservesBackendSourceOfTruth`, `TestInternalLifecyclePhoneGoldenRescheduleAfterCurrentAuthoritySwitch`, `TestInternalLifecyclePhoneGoldenCancelReasonAndMinimalAction`, `TestInternalLifecycleCancellationReasonPassesFullTurnKernelWithoutPhraseMatching`, `TestInternalLifecycleExactRescheduleReplaySkipsAvailabilityRefreshAfterLaterCancel`, `TestInternalLifecycleStaleTargetReoffersAndCutoffNeverConfirms`, and `TestInternalLifecycleRejectsProviderOrPartialConfirmationEvidence`.
+- [x] Keep named persisted fuzzy-confirmation regression anchors: `TestFuzzyServiceGoldenRequiresExplicitConfirmationAcrossSchedulingAuthorities`, `TestFuzzyServiceConfirmationWrongStateInputsNeverBook`, and `TestFuzzyServiceConfirmationEventReplayIsIdempotent`.
+- [x] Prove the V52-V55 authority-switch slices with operation/action replay and changed-reuse conflicts, unique durable run/event evidence, owner/tenant fencing, stale source/readiness/CAS fences, dependency/readiness failure, concurrent commit and live-external-lease conflicts, explicit inverse-run audit, historical target/retry dispatch after a switch, and conversation/UI contracts that do not turn preview, blocked, conflict, or commit state into confirmed/rescheduled/cancelled appointment wording.
+- [x] Complete provider-neutral recurring-job/queue observability and owner-notification delivery without labeling internal scheduling failures as POS errors or exposing provider secrets, message IDs, full destinations, message bodies, or raw errors in owner-facing records.

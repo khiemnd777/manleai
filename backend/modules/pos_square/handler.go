@@ -2,6 +2,7 @@ package pos_square
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -15,6 +16,73 @@ import (
 type Handler struct {
 	service *Service
 	cfg     config.Config
+}
+
+func (h *Handler) ListWebhookEvents(c *fiber.Ctx) error {
+	limit, err := strconv.Atoi(squareWebhookQueryDefault(c.Query("limit"), "25"))
+	if err != nil {
+		return h.webhookOperationsError(c, ErrWebhookOperationsValidation)
+	}
+	offset, err := strconv.Atoi(squareWebhookQueryDefault(c.Query("offset"), "0"))
+	if err != nil {
+		return h.webhookOperationsError(c, ErrWebhookOperationsValidation)
+	}
+	result, err := h.service.ListWebhookEvents(
+		c.UserContext(), c.Params("id"), middleware.UserID(c), c.Query("status"), limit, offset,
+	)
+	if err != nil {
+		return h.webhookOperationsError(c, err)
+	}
+	return respond.JSON(c, fiber.StatusOK, result)
+}
+
+func (h *Handler) GetWebhookEvent(c *fiber.Ctx) error {
+	result, err := h.service.GetWebhookEvent(
+		c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("webhook_event_id"),
+	)
+	if err != nil {
+		return h.webhookOperationsError(c, err)
+	}
+	return respond.JSON(c, fiber.StatusOK, result)
+}
+
+func (h *Handler) RequeueWebhookEvent(c *fiber.Ctx) error {
+	var req WebhookRequeueRequest
+	if err := c.BodyParser(&req); err != nil {
+		return h.webhookOperationsError(c, ErrWebhookOperationsValidation)
+	}
+	result, replayed, err := h.service.RequeueWebhookEvent(
+		c.UserContext(), c.Params("id"), middleware.UserID(c), c.Params("webhook_event_id"), req,
+	)
+	if err != nil {
+		return h.webhookOperationsError(c, err)
+	}
+	c.Set("X-Idempotent-Replay", strconv.FormatBool(replayed))
+	return respond.JSON(c, fiber.StatusOK, result)
+}
+
+func (h *Handler) webhookOperationsError(c *fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, ErrWebhookOperationsValidation):
+		return respond.Error(c, fiber.StatusBadRequest, "SQUARE_WEBHOOK_OPERATIONS_INVALID", "Square webhook operations request is invalid.")
+	case errors.Is(err, pos.ErrNotFound):
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	case errors.Is(err, ErrWebhookEventNotFound):
+		return respond.Error(c, fiber.StatusNotFound, "SQUARE_WEBHOOK_EVENT_NOT_FOUND", "Square webhook event was not found.")
+	case errors.Is(err, ErrWebhookActionConflict):
+		return respond.Error(c, fiber.StatusConflict, "SQUARE_WEBHOOK_ACTION_CONFLICT", "The webhook action conflicts with an existing action.")
+	case errors.Is(err, ErrWebhookRequeueBlocked):
+		return respond.Error(c, fiber.StatusConflict, "SQUARE_WEBHOOK_REQUEUE_BLOCKED", "This webhook event cannot be safely requeued.")
+	default:
+		return respond.Error(c, fiber.StatusInternalServerError, "SQUARE_WEBHOOK_OPERATIONS_FAILED", "Could not process Square webhook operations.")
+	}
+}
+
+func squareWebhookQueryDefault(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func NewHandler(service *Service, cfg config.Config) *Handler {
@@ -248,6 +316,9 @@ func (h *Handler) handleGateError(c *fiber.Ctx, err error, internalCode string) 
 	if errors.Is(err, booking.ErrAvailabilityQuoteStale) {
 		return true, respond.Error(c, fiber.StatusConflict, "AVAILABILITY_QUOTE_STALE", "Availability changed or expired. Check availability again before creating a test booking.")
 	}
+	if errors.Is(err, booking.ErrSchedulingAuthorityNotReady) {
+		return true, respond.Error(c, fiber.StatusConflict, "SCHEDULING_AUTHORITY_NOT_READY", "Scheduling is not ready for this salon.")
+	}
 	if errors.Is(err, ErrReadinessGate) {
 		message := "Square readiness checks have not passed."
 		if internalCode == "ENABLE_AI_BOOKING_FAILED" {
@@ -258,5 +329,5 @@ func (h *Handler) handleGateError(c *fiber.Ctx, err error, internalCode string) 
 	if errors.Is(err, booking.ErrProviderUnavailable) || errors.Is(err, ErrBookingServiceUnavailable) {
 		return true, respond.Error(c, fiber.StatusConflict, "POS_PROVIDER_UNAVAILABLE", "The active POS provider is unavailable.")
 	}
-	return true, respond.Error(c, fiber.StatusBadGateway, internalCode, err.Error())
+	return true, respond.Error(c, fiber.StatusBadGateway, internalCode, "The request could not be completed.")
 }

@@ -73,16 +73,12 @@ func (h *Handler) SemanticEvaluate(c *fiber.Ctx) error {
 }
 
 func (h *Handler) Audio(c *fiber.Ctx) error {
-	output, err := h.service.Audio(c.UserContext(), c.Params("id"))
-	if errors.Is(err, ErrNotFound) {
-		return respond.Error(c, fiber.StatusNotFound, "VOICE_AUDIO_NOT_FOUND", "Voice audio was not found.")
-	}
-	if errors.Is(err, ErrValidation) {
-		return respond.Error(c, fiber.StatusBadRequest, "VOICE_AUDIO_INVALID", "Voice audio request is invalid.")
-	}
+	output, err := h.service.Audio(c.UserContext(), c.Params("id"), c.Query("expires"), c.Query("signature"))
 	if err != nil {
-		return respond.Error(c, fiber.StatusInternalServerError, "VOICE_AUDIO_FAILED", "Could not load voice audio.")
+		return respond.Error(c, fiber.StatusNotFound, "VOICE_AUDIO_UNAVAILABLE", "Voice audio is unavailable.")
 	}
 	c.Set(fiber.HeaderContentType, output.ContentType)
+	c.Set(fiber.HeaderCacheControl, "private, no-store")
+	c.Set(fiber.HeaderXContentTypeOptions, "nosniff")
 	return c.Status(fiber.StatusOK).Send(output.Audio)
 }

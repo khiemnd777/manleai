@@ -8,19 +8,21 @@ import (
 )
 
 type Config struct {
-	AppEnv          string
-	ServerPort      string
-	DatabaseURL     string
-	RedisURL        string
-	JWTSecret       string
-	AccessTokenTTL  time.Duration
-	RefreshTokenTTL time.Duration
-	EncryptionKey   string
-	CORSOrigins     []string
-	FrontendURL     string
-	AutoMigrate     bool
-	Square          SquareConfig
-	Voice           VoiceConfig
+	AppEnv                  string
+	ServerPort              string
+	DatabaseURL             string
+	RedisURL                string
+	RateLimitEnabled        bool
+	RateLimitClientIPHeader string
+	JWTSecret               string
+	AccessTokenTTL          time.Duration
+	RefreshTokenTTL         time.Duration
+	EncryptionKey           string
+	CORSOrigins             []string
+	FrontendURL             string
+	AutoMigrate             bool
+	Square                  SquareConfig
+	Voice                   VoiceConfig
 }
 
 type SquareConfig struct {
@@ -115,18 +117,21 @@ func NormalizeOpenAIRealtimeNoiseProfile(profile string) string {
 }
 
 func Load() Config {
+	appEnv := env("APP_ENV", "local")
 	return Config{
-		AppEnv:          env("APP_ENV", "local"),
-		ServerPort:      env("SERVER_PORT", "8080"),
-		DatabaseURL:     env("DATABASE_URL", "postgres://ai_receptionist:ai_receptionist@localhost:55432/ai_receptionist?sslmode=disable"),
-		RedisURL:        env("REDIS_URL", "redis://localhost:56379/0"),
-		JWTSecret:       env("JWT_SECRET", "local-development-secret-change-me"),
-		AccessTokenTTL:  time.Duration(envInt("ACCESS_TOKEN_TTL_MINUTES", 30)) * time.Minute,
-		RefreshTokenTTL: time.Duration(envInt("REFRESH_TOKEN_TTL_HOURS", 720)) * time.Hour,
-		EncryptionKey:   env("TOKEN_ENCRYPTION_KEY_BASE64", "local-development-token-encryption-key"),
-		CORSOrigins:     splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:3088")),
-		FrontendURL:     env("FRONTEND_URL", "http://localhost:3088"),
-		AutoMigrate:     envBool("AUTO_MIGRATE", true),
+		AppEnv:                  appEnv,
+		ServerPort:              env("SERVER_PORT", "8080"),
+		DatabaseURL:             env("DATABASE_URL", "postgres://ai_receptionist:ai_receptionist@localhost:55432/ai_receptionist?sslmode=disable"),
+		RedisURL:                env("REDIS_URL", "redis://localhost:56379/0"),
+		RateLimitEnabled:        appEnv == "production" || envBool("RATE_LIMIT_ENABLED", false),
+		RateLimitClientIPHeader: env("RATE_LIMIT_CLIENT_IP_HEADER", "X-ManleAI-Client-IP"),
+		JWTSecret:               env("JWT_SECRET", "local-development-secret-change-me"),
+		AccessTokenTTL:          time.Duration(envInt("ACCESS_TOKEN_TTL_MINUTES", 30)) * time.Minute,
+		RefreshTokenTTL:         time.Duration(envInt("REFRESH_TOKEN_TTL_HOURS", 720)) * time.Hour,
+		EncryptionKey:           env("TOKEN_ENCRYPTION_KEY_BASE64", "local-development-token-encryption-key"),
+		CORSOrigins:             splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:3088")),
+		FrontendURL:             env("FRONTEND_URL", "http://localhost:3088"),
+		AutoMigrate:             envBool("AUTO_MIGRATE", true),
 		Square: SquareConfig{
 			Environment:  env("SQUARE_ENVIRONMENT", "sandbox"),
 			ClientID:     env("SQUARE_CLIENT_ID", ""),

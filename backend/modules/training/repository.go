@@ -4,7 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+
+	"github.com/lib/pq"
 )
+
+const serviceAliasOwnershipConstraint = "service_alias_cross_table_active_unique"
 
 type Repository struct {
 	db *sql.DB
@@ -168,8 +172,16 @@ func (r *Repository) UpsertServiceAlias(ctx context.Context, salonID string, own
 		return nil, err
 	}
 	normalizedAlias := normalizeAliasText(req.Alias)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err := lockServiceAliasOwnershipTx(ctx, tx, salonID, normalizedAlias); err != nil {
+		return nil, err
+	}
 	if req.Status == AliasStatusActive {
-		if conflict, err := r.hasActiveCategoryAliasConflict(ctx, salonID, normalizedAlias); err != nil {
+		if conflict, err := hasActiveCategoryAliasConflictTx(ctx, tx, salonID, normalizedAlias); err != nil {
 			return nil, err
 		} else if conflict {
 			return nil, ErrValidation
@@ -177,7 +189,7 @@ func (r *Repository) UpsertServiceAlias(ctx context.Context, salonID string, own
 	}
 
 	var id string
-	err := r.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO service_aliases (salon_id, service_id, alias, normalized_alias, source, status, confidence, correction_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, '')::uuid)
 		ON CONFLICT (salon_id, normalized_alias)
@@ -191,6 +203,12 @@ func (r *Repository) UpsertServiceAlias(ctx context.Context, salonID string, own
 		RETURNING id::text
 	`, salonID, req.ServiceID, req.Alias, normalizedAlias, req.Source, req.Status, req.Confidence, correctionID).Scan(&id)
 	if err != nil {
+		if isServiceAliasOwnershipConflict(err) {
+			return nil, ErrValidation
+		}
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return r.getServiceAlias(ctx, salonID, ownerUserID, id)
@@ -312,17 +330,12 @@ func (r *Repository) ApplyServiceAliasCorrection(ctx context.Context, salonID st
 	}
 
 	normalizedAlias := normalizeAliasText(req.Alias)
+	if err := lockServiceAliasOwnershipTx(ctx, tx, salonID, normalizedAlias); err != nil {
+		return nil, err
+	}
 	if req.Status == AliasStatusActive {
-		var categoryAliasConflict bool
-		if err := tx.QueryRowContext(ctx, `
-			SELECT EXISTS (
-				SELECT 1
-				FROM service_category_aliases
-				WHERE salon_id = $1
-				  AND normalized_alias = $2
-				  AND status = 'active'
-			)
-		`, salonID, normalizedAlias).Scan(&categoryAliasConflict); err != nil {
+		categoryAliasConflict, err := hasActiveCategoryAliasConflictTx(ctx, tx, salonID, normalizedAlias)
+		if err != nil {
 			return nil, err
 		}
 		if categoryAliasConflict {
@@ -344,6 +357,9 @@ func (r *Repository) ApplyServiceAliasCorrection(ctx context.Context, salonID st
 		RETURNING id::text
 	`, salonID, req.ServiceID, req.Alias, normalizedAlias, req.Source, req.Status, req.Confidence, correctionID).Scan(&aliasID)
 	if err != nil {
+		if isServiceAliasOwnershipConflict(err) {
+			return nil, ErrValidation
+		}
 		return nil, err
 	}
 
@@ -363,18 +379,28 @@ func (r *Repository) ApplyServiceAliasCorrection(ctx context.Context, salonID st
 	return r.getServiceAlias(ctx, salonID, ownerUserID, aliasID)
 }
 
-func (r *Repository) hasActiveCategoryAliasConflict(ctx context.Context, salonID string, normalizedAlias string) (bool, error) {
+func lockServiceAliasOwnershipTx(ctx context.Context, tx *sql.Tx, salonID string, normalizedAlias string) error {
+	_, err := tx.ExecContext(ctx, `SELECT public.lock_service_alias_ownership($1::uuid, $2)`, salonID, normalizedAlias)
+	return err
+}
+
+func hasActiveCategoryAliasConflictTx(ctx context.Context, tx *sql.Tx, salonID string, normalizedAlias string) (bool, error) {
 	var exists bool
-	err := r.db.QueryRowContext(ctx, `
+	err := tx.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1
-			FROM service_category_aliases
+			FROM public.service_category_aliases
 			WHERE salon_id = $1
 			  AND normalized_alias = $2
 			  AND status = 'active'
 		)
 	`, salonID, normalizedAlias).Scan(&exists)
 	return exists, err
+}
+
+func isServiceAliasOwnershipConflict(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Constraint == serviceAliasOwnershipConstraint
 }
 
 func (r *Repository) UpdateCorrectionStatus(ctx context.Context, salonID string, ownerUserID string, correctionID string, status string) (*OwnerCorrection, error) {

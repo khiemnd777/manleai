@@ -5,6 +5,12 @@ owner admin dashboard, the public salon landing app, and the POS calendar app.
 Public HTTP and HTTPS are owned by the shared VPS edge gateway, not by the
 ManleAI Docker Compose project.
 
+Scheduling load and concurrency verification is a separate non-production
+release operation. It must not run in the deployment stack or against its
+database. Provision an explicitly attested isolated database and follow
+`docs/operations/scheduling-load-harness.md`; a passing harness report is not a
+production capacity claim without an approved witnessed representative run.
+
 ## Production Domains
 
 - Admin dashboard: `https://ai.knasoftware.com`
@@ -37,6 +43,11 @@ ManleAI exposes:
 127.0.0.1:13091 -> pos-calendar:3000
 ```
 
+For `/api/*`, the rendered Caddy route overwrites
+`X-ManleAI-Client-IP` with `{remote_host}` before proxying. The API uses only
+that edge-owned header (or the direct socket IP outside Caddy), HMACs the value,
+and never accepts a caller-selected rate-limit identity.
+
 The CI/CD deploy job renders `deploy/manleai.caddy.template` and
 `deploy/manleai.edge-manifest.template`, then runs:
 
@@ -60,21 +71,40 @@ make release TAG=v2026.06.25.1
 ```
 
 That command requires a clean `main` worktree, creates an annotated git tag, and
-pushes the tag to `origin`. The tag push runs backend tests, typechecks and
-builds the web apps, then builds and publishes the five application images to
-GitHub Container Registry (GHCR) with that immutable release tag. The VPS
-receives only the Compose/Caddy deployment bundle, `project.env`, and the image
-tag metadata. It logs into GHCR with the job's ephemeral `GITHUB_TOKEN`, pulls
-the tagged images, logs out, and starts the stack without compiling application
+pushes the tag to `origin`. The tag push runs the complete backend test/vet
+contract, a bounded high-risk race suite, all three web-app typecheck/build
+jobs, and the isolated PostgreSQL Owner-first release gate documented in
+`docs/operations/release-gate.md`. The PostgreSQL gate starts from an empty
+dedicated database, proves migrate-twice/checksum behavior, verifies every V46
+through latest migration ledger entry, runs the declared integration packages
+serially in isolated per-package database clones, and executes the explicit
+tenant/security contract. Image publication and deployment require all of those
+jobs to pass and remain tag-only.
+
+The workflow then builds and publishes the five application images to GitHub
+Container Registry (GHCR) with that immutable release tag. The VPS receives
+only the Compose/Caddy deployment bundle, `project.env`, and the image tag
+metadata. It logs into GHCR with the job's ephemeral `GITHUB_TOKEN`, pulls the
+tagged images, logs out, and starts the stack without compiling application
 source code. Each image carries the `org.opencontainers.image.source` label for
 this repository, so the GHCR package inherits repository access permissions.
 
+A passing release gate is code-readiness evidence only. It does not prove live
+salon-scoped provider configuration, credentials, callback reachability,
+provider delivery, production backup capacity/retention, a witnessed restore,
+alert routing, or on-call readiness. Those remain separate dashboard-backed
+runtime checks and operational approvals.
+
 Every deploy SSH/SCP connection has a 15-second connection timeout and sends
-keepalives during long-running work. Before replacing containers, the VPS tags
-the currently running application images locally. If the API healthcheck or
-edge-gateway validation/reload fails, it restores those images and keeps the
-previous `/opt/manleai/current` release active. Only after both checks succeed
-does it move `/opt/manleai/current` to the new release:
+keepalives during long-running work. Before replacing containers, the release
+requires an exact tag-specific declaration that the previous image is
+compatible with the candidate forward schema, takes and validates a private
+pre-deploy PostgreSQL backup, and tags the currently running application images
+locally. If the API healthcheck or edge-gateway validation/reload fails, it may
+restore those images only under that compatibility declaration and keeps the
+previous `/opt/manleai/current` release active. Image rollback does not restore
+the database; PostgreSQL remains at its forward schema. Only after both checks
+succeed does the workflow move `/opt/manleai/current` to the new release:
 
 ```bash
 docker login ghcr.io
@@ -126,6 +156,68 @@ Use the VPS host and dedicated deploy identity for `SERVER_IP` and
 `REMOTE_USER`. `SSH_PRIVATE_KEY` must be the matching private key. Do not
 commit the private key or production environment file.
 
+Required variables in the protected `production` GitHub environment:
+
+```txt
+MIGRATION_COMPATIBILITY_RELEASE_TAG
+PREVIOUS_IMAGE_DB_COMPATIBLE
+MIGRATION_COMPATIBILITY_APPROVER
+POSTGRES_BACKUP_STORAGE_APPROVAL
+```
+
+The compatibility tag, decision, and approver are release-specific. The release
+tag must match exactly, compatibility must be the literal `true`, and the
+approver must be a bounded reviewer identity. A prior compatibility declaration
+does not authorize a later tag. Storage approval must be the exact value
+`encrypted-private:/opt/manleai/backups` and remains valid only while the path,
+access controls, encryption, retention, and key ownership remain approved. The
+deploy fails before database mutation when the declaration or storage approval
+is missing, stale, malformed, or false. The storage value is an operator
+attestation; it does not encrypt the path.
+
+## Database Backup, Restore Drill, And Rollback
+
+The release bundle includes `backend/migrations` for checksum validation plus
+the bounded database scripts in `deploy/`:
+
+- `postgres-backup.sh` creates a custom-format `pg_dump`, checks its catalog
+  with `pg_restore --list`, and writes an SHA-256 sidecar;
+- `postgres-restore-drill.sh` restores only into one new explicit
+  `manleai_restore_drill_...` database and never drops or overwrites a target;
+- `postgres-verify-restore.sh` checks exact `app_schema_migrations` file/name/
+  checksum parity, required tables/constraints, and bounded tenant smoke
+  queries.
+
+Before a non-initial deployment starts the candidate API/migrator, the workflow
+backs up the explicit `POSTGRES_DB` on the existing Compose PostgreSQL service
+to `/opt/manleai/backups/predeploy-<release-id>.dump`. The artifact, checksum,
+compatibility declaration, and backup record use private permissions and must
+live on an approved encrypted volume. If an existing container is stopped, or
+the project volume exists without a Compose container, the source is ambiguous
+and deployment stops. Only a truly empty initial deployment with no database
+container and no project volume may record backup as not applicable.
+
+Database restore is never part of automatic deploy failure handling. Use the
+manual `.github/workflows/postgres-restore-drill.yml` only with its protected
+non-production environment and dedicated `DRILL_SERVER_IP`,
+`DRILL_REMOTE_USER`, and `DRILL_SSH_PRIVATE_KEY` secrets. It takes explicit
+source/target names and RPO/RTO targets, leaves the private dump and isolated
+target on the non-production host, and uploads only a sanitized drill report.
+Never configure those secrets to the production VPS.
+
+Complete procedures and evidence requirements are binding in:
+
+- [PostgreSQL Backup And Isolated Restore Drills](operations/postgres-backup-restore.md)
+- [Migration Release And Rollback](operations/migration-rollback.md)
+
+Migrations are forward-only expand/contract changes. The previous image must be
+proven compatible with the expanded schema before automated image rollback is
+available. A database recovery first restores and validates a selected artifact
+in an isolated database, then requires a separate DBA-approved production
+recovery/cutover plan that accounts for writes after the snapshot and provider-
+side reconciliation. No repository script automatically deletes or replaces a
+production database.
+
 ## Project Env
 
 Create the production env file from the template:
@@ -146,6 +238,24 @@ Use the hex value for `POSTGRES_PASSWORD`, the 48-byte base64 value for
 `JWT_SECRET`, and the 32-byte base64 value for `TOKEN_ENCRYPTION_KEY_BASE64`.
 If the PostgreSQL password contains non URL-safe characters, URL-encode it in
 `DATABASE_URL`; using the hex value avoids that issue.
+
+Production forces rate limiting on (the template records
+`RATE_LIMIT_ENABLED=true`), uses `REDIS_URL` as a required request-protection
+dependency, and keeps
+`RATE_LIMIT_CLIENT_IP_HEADER=X-ManleAI-Client-IP` aligned with the Caddy route.
+API startup fails if the configured Redis endpoint cannot be reached, runtime
+Redis failures return generic `503 RATE_LIMIT_UNAVAILABLE`, and `/healthz`
+fails until Redis recovers. Local Compose leaves the limiter off by default;
+set `RATE_LIMIT_ENABLED=true` to exercise it against the local Redis service.
+
+The dashboard and POS apps use credentialed requests with an HttpOnly refresh
+cookie and memory-only access tokens. Production CORS therefore allows
+credentials only for the configured exact origins. The three web apps install
+a per-request nonce CSP and force dynamic rendering so Next.js scripts and
+styles receive the matching nonce. Production policy has no wildcard,
+`unsafe-inline`, or `unsafe-eval`; validate the emitted
+`Content-Security-Policy` header after deployment rather than inferring it from
+the template alone.
 
 After editing `project.env`, store it as a single-line base64 GitHub Secret:
 
@@ -197,9 +307,43 @@ The backend retains legacy environment fallback code for compatibility. That
 path is not the normal production configuration workflow and is intentionally
 absent from repository env templates. Inspect it only for an explicitly scoped
 bootstrap/legacy task after proving that the salon has no stored provider
-configuration. The current runtime resolver does not yet distinguish exact
-not-found from repository/decryption failure before taking that fallback; treat
-this as a release blocker for strict fail-closed provider configuration.
+configuration. `ResolveSquareConfig`, `ResolveTwilioConfig`, and
+`ResolveOpenAIConfig` enter that legacy bootstrap path only when the repository
+returns the exact integration-config `ErrNotFound`. A repository failure,
+malformed/non-string persisted settings object, or stored-secret decryption
+failure propagates and stops provider runtime. Once a salon/provider row exists,
+that row owns enabled state, settings, and credentials: missing stored
+credentials never inherit environment secrets, and a disabled stored provider
+cannot be re-enabled by process configuration. Stable protocol defaults such as
+Twilio webhook paths, Square API version/host selection, and the OpenAI provider
+URL may still be applied by code where their owning contract defines them; they
+are not salon credentials.
+
+The authenticated integration response follows the same ownership boundary.
+When no stored row exists it may label an available bootstrap secret source as
+`environment`. When a stored row exists but its secret is empty or unreadable,
+the response reports source `none` and configured `false`; it never relabels an
+environment secret as active, and it never returns the secret value.
+
+The owner-notification Twilio Messaging resolver is an explicit exception to
+that legacy behavior: it resolves only the salon's stored encrypted record and
+fails closed on missing, disabled, invalid, repository, or decryption state. It
+never reads provider configuration from environment variables. Its dashboard
+contract includes explicit owner-SMS enablement, the exact E.164 owner
+destination and fresh consent attestation, Account SID/Auth Token, one
+Messaging Service SID or sender number, and public HTTPS status/inbound callback
+URLs. The response exposes only configured flags, a masked destination, and the
+computed callback URLs.
+
+Public buffered-TTS playback uses a separate narrow exception:
+`ResolveStoredTwilioAuthToken` reads only the salon's encrypted Twilio auth
+token from `salon_integration_configs`. It never uses legacy environment
+fallback and does not require Account SID, Messaging Service, sender,
+owner-SMS enablement, or owner-SMS consent. Voice-only salons can therefore
+sign `/api/voice/audio/:id` capabilities without enabling messaging. If the
+stored token is missing or cannot be decrypted, the backend emits no unsigned
+audio URL and the phone response falls back to safe TwiML speech. Token rotation
+immediately invalidates any previously generated audio capabilities.
 
 Square booking-webhook verification is also salon-scoped dashboard data. Store
 the exact public HTTPS notification URL and write-only signature key in
@@ -212,6 +356,16 @@ claims and runs scheduled calendar repair. Migrations V39-V42 add booking
 integrity/reconciliation/quotes, fail-closed consultation defaults, Square
 webhook/repair persistence, and conversation state revision. They remain under
 the existing startup migrator and must not be run manually during source review.
+V60 adds bounded dead-letter/requeue state, action-key-idempotent owner actions,
+safe diagnostic class/code fields, and calendar-repair health evidence. The
+connected Square card reads that state through the authenticated
+`/api/salons/:id/square-webhook-events` operations API. It never receives raw
+payloads, signatures, claim tokens, provider identifiers/responses, customer
+data, or raw errors. A requeue is allowed only when the backend returns
+`can_requeue=true`; after an uncertain browser response the dashboard repeats
+the same action key and uses `X-Idempotent-Replay` only to label exact recovery.
+For a separately hosted dashboard/API deployment, CORS must expose that response
+header. Header absence must not be interpreted as replay or as failure.
 Migration V43 adds the monotonic location-scoped provider snapshot generation
 used to reject stale and out-of-order full imports. On first deployment it
 preserves Square credentials and terminal connection states, but changes every
@@ -290,8 +444,41 @@ revisions.
   fingerprint index by deleting or auto-closing unknown attempts.
 - Configure the Square redirect URL in the Integrations dashboard to the deployed API callback.
 - Configure the exact Square booking-webhook HTTPS notification URL and signature key in the Integrations dashboard, then verify subscription/delivery health separately in Square; the local configured badge is not a delivery-health check.
-- Run the worker for booking lease expiry, bounded availability-quote cleanup, Square webhook processing, scheduled calendar repair, and retention; monitor failures without exposing event bodies or secrets. Each job has an independent synchronous recurring loop, preventing overlap within one job while ensuring a slow webhook/repair batch cannot starve lease recovery. Quote cleanup runs every five minutes, drains at most eight batches of 250 quotes per run, keeps a 24-hour post-expiry grace for unconsumed quotes and a 30-day audit window for orphaned consumed quotes, and preserves every quote still linked to a booking attempt.
+- Monitor the connected Square card's webhook backlog, failed/dead-letter
+  counts, recent success window, and calendar-repair state. Treat
+  `processing`, repeated failures, dead letters, a degraded repair backstop, or
+  stale worker evidence as incident inputs. Requeue only records with backend
+  `can_requeue=true`; an `ignored` event is read-only, and webhook processing is
+  never direct appointment-confirmation evidence.
+- Run the worker for POS sync, booking lease expiry, bounded availability-quote cleanup, Square webhook processing, scheduled calendar repair, owner/customer-notification delivery, call retention, and V61 scheduling-PII retention. The generic scheduler persists start/heartbeat/finish evidence in V57, uses a distributed job lease across worker replicas, and stores only safe class/code diagnostics. Each job still has an independent synchronous recurring loop, so a slow webhook/repair batch cannot starve lease recovery. Quote cleanup runs every five minutes, drains at most eight batches of 250 quotes per run, keeps a 24-hour post-expiry grace for unconsumed quotes and a 30-day audit window for orphaned consumed quotes, and preserves every quote still linked to a booking attempt. `scheduling_pii_retention` runs every five minutes with a default maximum of 100 retention work items, uses bounded `SKIP LOCKED` claims and one-row transactions, and makes no provider calls. Its baseline 90-day expiry applies only after terminal business and delivery state; pending/contacted requests, live leases, queued/retrying/unknown outcomes, open reconciliation, and active customer consent/STOP routing keys remain intact. See `operations/operations-health.md`; deployed code is not configured proactive monitoring until the worker is running and an external monitor/on-call process evaluates the owner status endpoint.
+- Treat the V61 90-day duration as a technical baseline, not legal approval. Before production rollout, obtain the applicable privacy/legal decision for scheduling, notification, audio, backup, litigation-hold, and deletion/DSAR obligations; document any approved policy-version change and keep the worker batch/cadence capacity-monitored.
 - Configure the dashboard Twilio public base URL to the deployed API origin used in Twilio webhook settings.
+- Keep the dashboard Twilio auth token present for signed buffered-TTS playback.
+  Audio URLs are database-expiry-bounded HMAC capabilities; do not rewrite,
+  log, or persist their query strings. Rotating the token revokes outstanding
+  playback URLs and new phone turns generate capabilities with the new token.
+- For owner-operational SMS, configure explicit owner consent/destination,
+  Account SID/Auth Token, Messaging Service SID or sender, and the displayed
+  status/inbound callback URLs in the Integrations dashboard. Preserve the
+  exact public URL/form parameters for `X-Twilio-Signature` verification,
+  configure Messaging Service Advanced Opt-Out, and monitor the
+  `notification_delivery` job/backlog/dead-letter evidence. `queued`,
+  `provider_accepted`, and `sent` are not delivery proof. Follow
+  `operations/owner-notification-delivery.md` for retry and unknown-outcome
+  handling.
+- For customer appointment SMS, configure the same salon-scoped Twilio
+  transport in `/dashboard/integrations`, then separately enable the
+  default-off customer policy and quiet hours in `/dashboard/settings`.
+  Configure Twilio Messaging Advanced Opt-Out and the displayed salon-scoped
+  inbound URL. The inbound/status callbacks require exact signatures plus the
+  stored Account SID and Messaging Service SID (or exact sender `To`) binding;
+  shared auth tokens do not authorize cross-salon routing. Do not infer consent
+  from caller ID or webhook `Body`.
+- Run and monitor the separate `customer_notification_delivery` worker job and
+  `customer_notifications` queue. Treat queued, accepted, and sent as pending
+  states, not delivery proof. Unknown post-dispatch outcomes and stale
+  request/appointment copy are fail-closed; requeue only when the owner API
+  returns `can_requeue=true`.
 - Configure realtime phone mode from the Integrations dashboard: Twilio `voice_transport=realtime_stream`; OpenAI realtime model/voice and the location-neutral background-noise handling policy (`automatic` is the default); and `speech_output_mode=streaming_tts` for low-latency backend-approved output. `buffered_realtime` is a legacy rollback mode.
 - Keep Twilio and OpenAI secrets out of logs and docs; dashboard responses expose only configured/source metadata.
 - Enable OpenAI voice AI in the Integrations dashboard only when external AI voice turns should be enabled.

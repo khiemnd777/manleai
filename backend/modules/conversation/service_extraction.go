@@ -417,7 +417,7 @@ func applyExtraction(session *Session, message string, services []ServiceOption,
 		applySpecificStaffToBookingSegments(session, *matchedStaff)
 	}
 	if session.CustomerName == "" {
-		if name := spelledCustomerName(message); name != "" && missingBookingField(*session) == "customer_name" {
+		if name := spelledCustomerName(message); name != "" && sessionExpectsCustomerName(*session) {
 			session.CustomerName = name
 		} else if name := extractName(message); name != "" {
 			session.CustomerName = name

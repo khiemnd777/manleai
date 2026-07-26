@@ -9,7 +9,6 @@ import { apiRequest, setSession } from "@/lib/api/client";
 
 type LoginResponse = {
   access_token: string;
-  refresh_token: string;
 };
 
 type BootstrapStatus = {
@@ -51,7 +50,7 @@ export function LoginForm() {
         method: "POST",
         body: JSON.stringify({ email, password })
       });
-      setSession(response.access_token, response.refresh_token);
+      setSession(response.access_token);
       router.push("/calendar");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed.");

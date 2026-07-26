@@ -40,6 +40,8 @@ services:
       SERVER_PORT: ${SERVER_PORT:-8080}
       DATABASE_URL: ${DATABASE_URL:-postgres://ai_receptionist:ai_receptionist@postgres:5432/ai_receptionist?sslmode=disable}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-false}
+      RATE_LIMIT_CLIENT_IP_HEADER: ${RATE_LIMIT_CLIENT_IP_HEADER:-X-ManleAI-Client-IP}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       ACCESS_TOKEN_TTL_MINUTES: ${ACCESS_TOKEN_TTL_MINUTES:-30}
       REFRESH_TOKEN_TTL_HOURS: ${REFRESH_TOKEN_TTL_HOURS:-720}

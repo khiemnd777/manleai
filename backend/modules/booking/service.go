@@ -42,6 +42,7 @@ type Store interface {
 	ResolveBookingCustomer(ctx context.Context, salonID string, provider string, name string, phone string, email string) (*CustomerRef, error)
 	LinkBookingCustomer(ctx context.Context, salonID string, provider string, customerID string, customer pos.Customer) (*CustomerRef, error)
 	GetSchedule(ctx context.Context, salonID string, provider string, fence pos.ProviderFence) (*Schedule, error)
+	GetSafeRetryAvailabilityOrigin(ctx context.Context, salonID string, ownerUserID string, attemptID string) (*BookingAttempt, error)
 	CreateAvailabilityQuote(ctx context.Context, record AvailabilityQuoteRecord) (*AvailabilityQuote, error)
 	GetAvailabilityQuoteProviderFence(ctx context.Context, salonID string, provider string, quoteID string, slotFingerprint string) (pos.ProviderFence, error)
 	GetBookingOperation(ctx context.Context, salonID string, ownerUserID string, operationKey string) (*BookingAttempt, error)
@@ -502,6 +503,24 @@ func (s *Service) AvailableSlots(ctx context.Context, salonID string, ownerUserI
 	if err != nil {
 		return nil, err
 	}
+	var targetAppointment *AppointmentActionRef
+	var retryOrigin *BookingAttempt
+	if req.TargetAppointmentID != "" {
+		targetAppointment, err = s.store.GetAppointmentForOwner(ctx, salonID, ownerUserID, req.TargetAppointmentID)
+		if err != nil {
+			return nil, err
+		}
+		if targetAppointment.SchedulingAuthority != SchedulingAuthorityExternalProvider || targetAppointment.AuthorityAppointmentVersion < 0 || strings.TrimSpace(targetAppointment.POSProvider) == "" {
+			return nil, ErrAvailabilityQuoteStale
+		}
+		activeProvider = targetAppointment.POSProvider
+	} else if req.RetryOfAttemptID != "" {
+		retryOrigin, err = s.store.GetSafeRetryAvailabilityOrigin(ctx, salonID, ownerUserID, req.RetryOfAttemptID)
+		if err != nil {
+			return nil, err
+		}
+		activeProvider = retryOrigin.POSProvider
+	}
 	resolvedSegments, err := s.resolveAvailabilitySegments(ctx, salonID, activeProvider, req)
 	if err != nil {
 		return nil, err
@@ -517,7 +536,15 @@ func (s *Service) AvailableSlots(ctx context.Context, salonID string, ownerUserI
 	if err != nil {
 		return nil, err
 	}
+	if retryOrigin != nil {
+		if err := validateSafeRetryAvailabilityOrigin(req, resolvedSegments, schedule, retryOrigin); err != nil {
+			return nil, err
+		}
+	}
 	result := availabilityResult(req, resolvedSegments, schedule, nil)
+	if targetAppointment != nil {
+		result.TargetAuthorityAppointmentVersion = targetAppointment.AuthorityAppointmentVersion
+	}
 	businessHourPeriods := scheduleBusinessHourPeriods(schedule)
 	if len(businessHourPeriods) == 0 {
 		return result, nil
@@ -564,8 +591,14 @@ func (s *Service) AvailableSlots(ctx context.Context, salonID string, ownerUserI
 		if startTime.IsZero() || !endTime.After(startTime) {
 			continue
 		}
+		if retryOrigin != nil && (!startTime.Equal(retryOrigin.RequestedStartTime.UTC()) || !endTime.Equal(retryOrigin.RequestedEndTime.UTC())) {
+			continue
+		}
 		slotSegments, ok := availabilitySlotSegments(slot, resolvedSegments, staffByPOSID)
 		if !ok {
+			continue
+		}
+		if retryOrigin != nil && !availabilitySlotMatchesRetryOrigin(slotSegments, retryOrigin.Segments) {
 			continue
 		}
 		if !withinBusinessHourPeriods(startTime, endTime, businessHourPeriods, loc) {
@@ -586,14 +619,21 @@ func (s *Service) AvailableSlots(ctx context.Context, salonID string, ownerUserI
 		for idx := range result.Slots {
 			result.Slots[idx].Fingerprint = availabilitySlotFingerprint(quoteFingerprint, result.Slots[idx])
 		}
-		quote, err := s.store.CreateAvailabilityQuote(ctx, AvailabilityQuoteRecord{
+		quoteRecord := AvailabilityQuoteRecord{
 			SalonID:            salonID,
 			Provider:           activeProvider,
 			ProviderFence:      primary.Service.ProviderFence,
 			RequestFingerprint: quoteFingerprint,
+			RetryOfAttemptID:   req.RetryOfAttemptID,
 			ExpiresAt:          time.Now().UTC().Add(availabilityQuoteTTL),
 			Slots:              result.Slots,
-		})
+		}
+		if targetAppointment != nil {
+			quoteRecord.OperationType = BookingActionReschedule
+			quoteRecord.TargetAppointmentID = req.TargetAppointmentID
+			quoteRecord.TargetAuthorityAppointmentVersion = targetAppointment.AuthorityAppointmentVersion
+		}
+		quote, err := s.store.CreateAvailabilityQuote(ctx, quoteRecord)
 		if err != nil {
 			return nil, err
 		}
@@ -1262,6 +1302,7 @@ func bookingAttemptSegmentRecords(attempt BookingAttempt) []BookingSegmentRecord
 			sortOrder = index + 1
 		}
 		records = append(records, BookingSegmentRecord{
+			AppointmentServiceID: snapshot.AppointmentServiceID,
 			Service: ServiceRef{
 				ID:                snapshot.ServiceID,
 				POSProvider:       attempt.POSProvider,
@@ -1278,8 +1319,18 @@ func bookingAttemptSegmentRecords(attempt BookingAttempt) []BookingSegmentRecord
 				Name:          snapshot.StaffName,
 				ProviderFence: attempt.ProviderFence,
 			},
-			StaffSelectionMode: snapshot.StaffSelectionMode,
-			SortOrder:          sortOrder,
+			StaffSelectionMode:  snapshot.StaffSelectionMode,
+			GuestReference:      snapshot.GuestReference,
+			Quantity:            snapshot.Quantity,
+			PlanVersion:         snapshot.PlanVersion,
+			ScheduledStartTime:  timeValue(snapshot.ScheduledStartTime),
+			ScheduledEndTime:    timeValue(snapshot.ScheduledEndTime),
+			OccupiedStartTime:   timeValue(snapshot.OccupiedStartTime),
+			OccupiedEndTime:     timeValue(snapshot.OccupiedEndTime),
+			BufferBeforeMinutes: intValue(snapshot.BufferBeforeMinutes),
+			BufferAfterMinutes:  intValue(snapshot.BufferAfterMinutes),
+			ResourceAllocations: append([]AvailabilityResourceAllocation(nil), snapshot.ResourceAllocations...),
+			SortOrder:           sortOrder,
 		})
 	}
 	return records
@@ -1404,15 +1455,19 @@ func availabilityRequestFingerprint(provider string, req AvailabilityRequest, se
 		StaffSelectionMode string `json:"staff_selection_mode"`
 	}
 	payload := struct {
-		Provider      string               `json:"provider"`
-		PreferredDate string               `json:"preferred_date"`
-		Segments      []fingerprintSegment `json:"segments"`
-		LocationID    string               `json:"provider_location_id"`
-		Generation    int64                `json:"provider_snapshot_generation"`
+		Provider            string               `json:"provider"`
+		TargetAppointmentID string               `json:"target_appointment_id,omitempty"`
+		RetryOfAttemptID    string               `json:"retry_of_attempt_id,omitempty"`
+		PreferredDate       string               `json:"preferred_date"`
+		Segments            []fingerprintSegment `json:"segments"`
+		LocationID          string               `json:"provider_location_id"`
+		Generation          int64                `json:"provider_snapshot_generation"`
 	}{
-		Provider:      strings.TrimSpace(provider),
-		PreferredDate: strings.TrimSpace(req.PreferredDate),
-		Segments:      make([]fingerprintSegment, 0, len(segments)),
+		Provider:            strings.TrimSpace(provider),
+		TargetAppointmentID: strings.TrimSpace(req.TargetAppointmentID),
+		RetryOfAttemptID:    strings.TrimSpace(req.RetryOfAttemptID),
+		PreferredDate:       strings.TrimSpace(req.PreferredDate),
+		Segments:            make([]fingerprintSegment, 0, len(segments)),
 	}
 	if len(segments) > 0 {
 		payload.LocationID = strings.TrimSpace(segments[0].Service.ProviderFence.LocationID)
@@ -1794,6 +1849,8 @@ func normalizeCancelRequest(req CancelRequest) CancelRequest {
 }
 
 func normalizeAvailabilityRequest(req AvailabilityRequest) AvailabilityRequest {
+	req.TargetAppointmentID = strings.TrimSpace(req.TargetAppointmentID)
+	req.RetryOfAttemptID = strings.TrimSpace(req.RetryOfAttemptID)
 	req.ServiceID = strings.TrimSpace(req.ServiceID)
 	req.StaffID = strings.TrimSpace(req.StaffID)
 	staffIDForMode := req.StaffID
@@ -1838,6 +1895,10 @@ func validOptionalUUID(value string) bool {
 }
 
 func validateAvailabilityRequest(req AvailabilityRequest) error {
+	if !validOptionalUUID(req.TargetAppointmentID) || !validOptionalUUID(req.RetryOfAttemptID) ||
+		(req.TargetAppointmentID != "" && req.RetryOfAttemptID != "") {
+		return ErrValidation
+	}
 	if req.PreferredDate == "" {
 		return ErrValidation
 	}
@@ -1860,6 +1921,51 @@ func validateAvailabilityRequest(req AvailabilityRequest) error {
 		}
 	}
 	return nil
+}
+
+func validateSafeRetryAvailabilityOrigin(req AvailabilityRequest, segments []resolvedAvailabilitySegment, schedule *Schedule, origin *BookingAttempt) error {
+	if origin == nil || origin.SchedulingAuthority != SchedulingAuthorityExternalProvider ||
+		origin.OperationType != BookingActionBook || origin.Status != StatusFallbackPending ||
+		origin.RetryPolicy != RetryPolicySafe || origin.SupersededAt != nil ||
+		strings.TrimSpace(origin.POSProvider) == "" || len(origin.Segments) != len(segments) ||
+		schedule == nil || strings.TrimSpace(schedule.Timezone) == "" {
+		return ErrOperationConflict
+	}
+	location, err := time.LoadLocation(strings.TrimSpace(schedule.Timezone))
+	if err != nil || origin.RequestedStartTime.In(location).Format("2006-01-02") != req.PreferredDate {
+		return ErrOperationConflict
+	}
+	for index, segment := range segments {
+		prior := origin.Segments[index]
+		if prior.SortOrder != index+1 || prior.ServiceID != segment.Service.ID ||
+			prior.POSServiceID != segment.Service.POSServiceID || prior.POSServiceVersion != segment.Service.POSServiceVersion ||
+			prior.DurationMinutes != segment.Service.DurationMinutes || prior.StaffSelectionMode != segment.StaffSelectionMode ||
+			origin.POSProvider != segment.Service.POSProvider ||
+			strings.TrimSpace(origin.ProviderFence.LocationID) != strings.TrimSpace(segment.Service.ProviderFence.LocationID) ||
+			segment.Service.ProviderFence.SnapshotGeneration < origin.ProviderFence.SnapshotGeneration {
+			return ErrOperationConflict
+		}
+		if segment.StaffSelectionMode == StaffSelectionSpecific {
+			if segment.Staff == nil || prior.StaffID != segment.Staff.ID || prior.POSStaffID != segment.Staff.POSStaffID {
+				return ErrOperationConflict
+			}
+		}
+	}
+	return nil
+}
+
+func availabilitySlotMatchesRetryOrigin(available []AvailabilitySegment, prior []BookingSegmentSnapshot) bool {
+	if len(available) != len(prior) {
+		return false
+	}
+	for index := range available {
+		if available[index].ServiceID != prior[index].ServiceID || available[index].StaffID != prior[index].StaffID ||
+			available[index].StaffSelectionMode != prior[index].StaffSelectionMode ||
+			available[index].DurationMinutes != prior[index].DurationMinutes {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeBookingSegmentRequests(segments []BookingSegmentRequest, fallbackMode string) []BookingSegmentRequest {
@@ -2187,19 +2293,60 @@ func bookingSegmentSnapshots(segments []BookingSegmentRecord) []BookingSegmentSn
 			mode = StaffSelectionSpecific
 		}
 		snapshots = append(snapshots, BookingSegmentSnapshot{
-			ServiceID:          segment.Service.ID,
-			POSServiceID:       segment.Service.POSServiceID,
-			POSServiceVersion:  segment.Service.POSServiceVersion,
-			ServiceName:        segment.Service.Name,
-			StaffID:            segment.Staff.ID,
-			POSStaffID:         segment.Staff.POSStaffID,
-			StaffName:          segment.Staff.Name,
-			StaffSelectionMode: mode,
-			DurationMinutes:    segment.Service.DurationMinutes,
-			SortOrder:          sortOrder,
+			AppointmentServiceID: segment.AppointmentServiceID,
+			ServiceID:            segment.Service.ID,
+			POSServiceID:         segment.Service.POSServiceID,
+			POSServiceVersion:    segment.Service.POSServiceVersion,
+			ServiceName:          segment.Service.Name,
+			StaffID:              segment.Staff.ID,
+			POSStaffID:           segment.Staff.POSStaffID,
+			StaffName:            segment.Staff.Name,
+			StaffSelectionMode:   mode,
+			GuestReference:       segment.GuestReference,
+			Quantity:             segment.Quantity,
+			PlanVersion:          segment.PlanVersion,
+			DurationMinutes:      segment.Service.DurationMinutes,
+			ScheduledStartTime:   optionalTimePointer(segment.ScheduledStartTime),
+			ScheduledEndTime:     optionalTimePointer(segment.ScheduledEndTime),
+			OccupiedStartTime:    optionalTimePointer(segment.OccupiedStartTime),
+			OccupiedEndTime:      optionalTimePointer(segment.OccupiedEndTime),
+			BufferBeforeMinutes:  lifecycleBufferPointer(segment.ScheduledStartTime, segment.BufferBeforeMinutes),
+			BufferAfterMinutes:   lifecycleBufferPointer(segment.ScheduledStartTime, segment.BufferAfterMinutes),
+			ResourceAllocations:  append([]AvailabilityResourceAllocation(nil), segment.ResourceAllocations...),
+			SortOrder:            sortOrder,
 		})
 	}
 	return snapshots
+}
+
+func optionalTimePointer(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	copy := value
+	return &copy
+}
+
+func lifecycleBufferPointer(scheduledStart time.Time, value int) *int {
+	if scheduledStart.IsZero() {
+		return nil
+	}
+	copy := value
+	return &copy
+}
+
+func timeValue(value *time.Time) time.Time {
+	if value == nil {
+		return time.Time{}
+	}
+	return *value
+}
+
+func intValue(value *int) int {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func posAvailabilitySegments(segments []resolvedAvailabilitySegment) []pos.AvailabilitySegmentInput {

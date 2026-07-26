@@ -9,6 +9,12 @@ import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest } from "@/lib/api/client";
+import {
+  hasExternalAppointmentConfirmation,
+  hasInternalAppointmentConfirmation,
+  serviceEligibleForAuthority,
+  staffEligibleForAuthority
+} from "@/lib/api/scheduling-evidence";
 import type {
   AppointmentRecord,
   BookingAttempt,
@@ -140,13 +146,15 @@ export function DashboardHome() {
   const primarySalon = salons[0];
   const phoneCount = sessions.filter((item) => item.channel === "phone").length;
   const confirmedAppointments = appointments.filter((item) =>
-    item.status === "confirmed" || item.status === "rescheduled"
+    hasInternalAppointmentConfirmation(item) || hasExternalAppointmentConfirmation(item)
   ).length;
-  const pendingRequests = attempts.filter(
+  const externalPendingRequests = attempts.filter(
     (item) => item.status === "fallback_pending" || item.status === "provider_pending" || item.status === "pos_pending"
   ).length;
-  const bookingReadyServices = services.filter(serviceIsBookingReady).length;
-  const bookingReadyStaff = staff.filter(staffIsBookingReady).length;
+  const selectedAuthority = primarySalon?.scheduling_authority;
+  const activeProvider = primarySalon?.active_pos_provider;
+  const bookingReadyServices = services.filter((service) => serviceEligibleForAuthority(service, selectedAuthority, activeProvider)).length;
+  const bookingReadyStaff = staff.filter((member) => staffEligibleForAuthority(member, selectedAuthority, activeProvider)).length;
   const squareConnected = Boolean(status?.connection.id) && status?.connection.status !== "not_connected";
   const squareBadge = squareConnected ? status?.connection.status || "connected" : "not_connected";
   const squareDescription = squareConnected
@@ -161,7 +169,7 @@ export function DashboardHome() {
         <div>
           <h1 className="text-2xl font-bold text-ink">Dashboard</h1>
           <p className="mt-1 text-sm text-muted">
-            Monitor POS-first receptionist readiness, pending requests, and Square Appointments booking status.
+            Monitor Owner-first receptionist readiness, authority-native appointments, and provider operations.
           </p>
         </div>
         {primarySalon ? <Badge value={primarySalon.ai_enabled ? "active" : "disabled"} /> : null}
@@ -190,15 +198,15 @@ export function DashboardHome() {
             />
             <MetricCard
               icon={CalendarDays}
-              label="POS-confirmed appointments"
+              label="Confirmed appointments"
               value={String(confirmedAppointments)}
-              subtext="Square booking ID returned"
+              subtext="Durable evidence from the originating authority"
             />
             <MetricCard
               icon={Link2}
-              label="Pending requests"
-              value={String(pendingRequests)}
-              subtext="Owner review after POS failure"
+              label="External pending"
+              value={String(externalPendingRequests)}
+              subtext="Provider fallback or reconciliation work"
             />
             <MetricCard
               icon={CheckCircle2}
@@ -223,7 +231,7 @@ export function DashboardHome() {
               badge={phoneBookingReady ? "ready" : "not_configured"}
               description={
                 phoneBookingReady
-                  ? "Phone calls can offer active POS availability and attempt POS-first booking."
+                  ? "Phone calls can follow the selected scheduling authority and its confirmation contract."
                   : voiceStatus?.booking?.blocked_reason || voiceStatus?.blocked_reason || "Configure voice and booking readiness before phone booking."
               }
               href="/dashboard/calls"
@@ -257,10 +265,9 @@ export function DashboardHome() {
               <div className="flex items-start gap-3">
                 <Settings className="mt-1 h-5 w-5 text-brand" />
                 <div>
-                  <CardTitle>POS booking boundary</CardTitle>
+                  <CardTitle>Scheduling confirmation boundary</CardTitle>
                   <CardDescription>
-                    Appointments are POS-confirmed only after Square Appointments returns a booking ID.
-                    POS failures create pending requests for owner review.
+                    Owner requests remain pending, internal appointments require an atomic durable commit, and external appointments require provider confirmation evidence.
                   </CardDescription>
                 </div>
               </div>
@@ -329,29 +336,6 @@ function MetricCard({
       <div className="mt-4 text-2xl font-bold text-ink">{value}</div>
       <div className="mt-1 text-xs text-muted">{subtext}</div>
     </Card>
-  );
-}
-
-function serviceIsBookingReady(service: POSService) {
-  return (
-    service.active &&
-    !service.archived_at &&
-    service.sync_status === "synced" &&
-    service.pos_linked &&
-    service.ai_bookable &&
-    Boolean(service.pos_service_id) &&
-    Boolean(service.pos_service_version)
-  );
-}
-
-function staffIsBookingReady(member: POSStaffMember) {
-  return (
-    member.active &&
-    !member.archived_at &&
-    member.sync_status === "synced" &&
-    member.pos_linked &&
-    member.ai_bookable &&
-    Boolean(member.pos_staff_id)
   );
 }
 

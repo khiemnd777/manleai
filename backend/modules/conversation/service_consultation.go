@@ -467,6 +467,7 @@ func (s *Service) startBookingFromConsultation(ctx context.Context, ownerUserID 
 	state.AuthorizedRevision = 0
 	state.LastPromptKey = "final_review"
 	next.DialogState = state
+	stampSchedulingReviewFence(&next, cfg)
 	syncTurnUpdate(&turn, next, services, staff, cfg)
 	turn.AIMessage = finalBookingReviewPrompt(next, services, staff, cfg)
 	turn.ReplyPolicy = ReplyPolicyOperationalFact

@@ -27,7 +27,19 @@ import {
   technicianPreferenceLabel,
   technicianPreferenceValue
 } from "@/features/dashboard/booking-display";
+import { OwnerReviewRequests } from "@/features/dashboard/owner-review-requests";
+import { OwnerNotificationDeliveries } from "@/features/dashboard/owner-notification-deliveries";
+import { CustomerNotificationStatus } from "@/features/dashboard/customer-notification-status";
+import { SchedulingReadinessCard } from "@/features/dashboard/scheduling-readiness-card";
+import { InternalAppointmentCreate } from "@/features/dashboard/internal-appointment-create";
+import { InternalAppointmentLifecycle } from "@/features/dashboard/internal-appointment-lifecycle";
 import { apiRequest } from "@/lib/api/client";
+import { getManleAICalendar } from "@/lib/api/internal-calendar";
+import { hasCompleteInternalLifecyclePlan } from "@/lib/api/scheduling-actions";
+import {
+  hasExternalAppointmentConfirmation,
+  hasExternalAttemptConfirmation
+} from "@/lib/api/scheduling-evidence";
 import type {
   AvailabilityResult,
   AvailabilitySlot,
@@ -36,10 +48,12 @@ import type {
   BookingReconciliationCandidate,
   BookingReconciliationTask,
   BookingSegmentRequest,
+  ManleAICalendarAggregate,
   POSConnection,
   POSService,
   POSStaffMember,
   Salon,
+  SchedulingAuthority,
   StaffSelectionMode,
   SquareReadiness,
   SyncLog
@@ -50,7 +64,7 @@ type SalonListResponse = {
 };
 
 type StatusResponse = {
-  connection: POSConnection;
+  connection: POSConnection | null;
   sync_logs: SyncLog[];
   readiness: SquareReadiness;
 };
@@ -101,6 +115,11 @@ type StaffResponse = {
 
 type AppointmentActionMode = "create" | "reschedule" | "cancel";
 
+type InternalLifecycleState = {
+  mode: "reschedule" | "cancel";
+  appointment: AppointmentRecord;
+};
+
 type AppointmentActionForm = {
   customerName: string;
   customerPhone: string;
@@ -144,6 +163,10 @@ export function AppointmentsDashboard() {
   const actionAvailabilityExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [salon, setSalon] = useState<Salon | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [squareStatusError, setSquareStatusError] = useState("");
+  const [calendar, setCalendar] = useState<ManleAICalendarAggregate | null>(null);
+  const [calendarLoading, setCalendarLoading] = useState(true);
+  const [calendarError, setCalendarError] = useState("");
   const [appointments, setAppointments] = useState<AppointmentRecord[]>([]);
   const [appointmentRows, setAppointmentRows] = useState<AppointmentRecord[]>([]);
   const [appointmentLimit, setAppointmentLimit] = useState(defaultAppointmentPageSize);
@@ -169,6 +192,10 @@ export function AppointmentsDashboard() {
   const [appointmentListLoading, setAppointmentListLoading] = useState(false);
   const [error, setError] = useState("");
   const [actionMode, setActionMode] = useState<AppointmentActionMode | null>(null);
+  const [internalCreateOpen, setInternalCreateOpen] = useState(false);
+  const [internalCreateBusy, setInternalCreateBusy] = useState(false);
+  const [internalLifecycle, setInternalLifecycle] = useState<InternalLifecycleState | null>(null);
+  const [internalLifecycleBusy, setInternalLifecycleBusy] = useState(false);
   const [selectedAppointment, setSelectedAppointment] = useState<AppointmentRecord | null>(null);
   const [actionForm, setActionForm] = useState<AppointmentActionForm>(() =>
     emptyActionForm(formatDateInput(new Date()))
@@ -404,6 +431,10 @@ export function AppointmentsDashboard() {
         reconciliationSalonIDRef.current = "";
         salonDateContextRef.current = "";
         setStatus(null);
+        setSquareStatusError("");
+        setCalendar(null);
+        setCalendarError("");
+        setCalendarLoading(false);
         setAppointments([]);
         setAppointmentRows([]);
         setAppointmentHasMore(false);
@@ -429,18 +460,28 @@ export function AppointmentsDashboard() {
 
       // Keep queue failures inside the reconciliation card instead of rejecting the core dashboard load.
       void reloadReconciliationTasks(firstSalon.id);
-      const [statusResponse, appointmentResponse, fallbackResponse, serviceResponse, staffResponse] = await Promise.all([
-        apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`),
+      setCalendarLoading(true);
+      const [statusResult, appointmentResponse, fallbackResponse, serviceResponse, staffResponse, calendarResult] = await Promise.all([
+        apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`)
+          .then((value) => ({ value, error: "" }))
+          .catch((statusError: unknown) => ({ value: null, error: errorMessage(statusError, "Could not load Square Appointments status.") })),
         fetchAppointmentPageWithFallback(firstSalon.id, limit, offset),
         fetchFallbackPageWithFallback(firstSalon.id, fallbackPageLimit, fallbackPageOffset),
         apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
-        apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`)
+        apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`),
+        getManleAICalendar(firstSalon.id)
+          .then((response) => ({ value: response.manleai_calendar, error: "" }))
+          .catch((calendarFailure: unknown) => ({ value: null, error: errorMessage(calendarFailure, "Could not load scheduling readiness.") }))
       ]);
       const [overviewResponse, fallbackOverviewResponse] = await Promise.all([
         fetchAppointmentPage(firstSalon.id, appointmentOverviewLimit, 0),
         fetchFallbackPage(firstSalon.id, fallbackOverviewLimit, 0)
       ]);
-      setStatus(statusResponse);
+      setStatus(statusResult.value);
+      setSquareStatusError(statusResult.error);
+      setCalendar(calendarResult.value);
+      setCalendarError(calendarResult.error);
+      setCalendarLoading(false);
       applyAppointmentPage(appointmentResponse, limit, offset);
       applyFallbackPage(fallbackResponse, fallbackPageLimit, fallbackPageOffset);
       setAppointments(overviewResponse.appointments);
@@ -449,10 +490,11 @@ export function AppointmentsDashboard() {
       setFallbackOverviewHasMore(Boolean(fallbackOverviewResponse.has_more));
       setServices(serviceResponse.services);
       setStaff(staffResponse.staff);
-      setAvailabilityServiceID((current) => current || firstBookableServiceID(serviceResponse.services));
+      setAvailabilityServiceID((current) => current || firstBookableServiceID(serviceResponse.services, firstSalon.active_pos_provider));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load appointment data.");
     } finally {
+      setCalendarLoading(false);
       if (!silent) {
         setLoading(false);
       } else {
@@ -472,6 +514,20 @@ export function AppointmentsDashboard() {
     };
   }, []);
 
+  async function reloadCalendar() {
+    if (!salon?.id) return;
+    setCalendarLoading(true);
+    setCalendarError("");
+    try {
+      const response = await getManleAICalendar(salon.id);
+      setCalendar(response.manleai_calendar);
+    } catch (calendarFailure) {
+      setCalendarError(errorMessage(calendarFailure, "Could not load scheduling readiness."));
+    } finally {
+      setCalendarLoading(false);
+    }
+  }
+
   const serviceNames = useMemo(
     () => new Map(services.flatMap((item) => (item.id ? [[item.id, item.name] as const] : []))),
     [services]
@@ -481,12 +537,12 @@ export function AppointmentsDashboard() {
     [staff]
   );
   const bookableServices = useMemo(
-    () => services.filter(serviceIsBookable),
-    [services]
+    () => services.filter((service) => serviceIsBookable(service, salon?.active_pos_provider)),
+    [salon?.active_pos_provider, services]
   );
   const bookableStaff = useMemo(
-    () => staff.filter(staffIsBookable),
-    [staff]
+    () => staff.filter((member) => staffIsBookable(member, salon?.active_pos_provider)),
+    [salon?.active_pos_provider, staff]
   );
   const pendingRequests = useMemo(
     () => fallbackRequests,
@@ -512,20 +568,51 @@ export function AppointmentsDashboard() {
   const upcomingCount = useMemo(() => {
     const now = Date.now();
     return appointmentCountLabel(
-      appointments.filter((item) => isPOSConfirmedStatus(item.status) && new Date(item.start_time).getTime() >= now)
+      appointments.filter((item) => isConfirmedAppointmentStatus(item.status) && new Date(item.start_time).getTime() >= now)
         .length,
       appointmentOverviewHasMore
     );
   }, [appointments, appointmentOverviewHasMore]);
   const confirmedCount = appointmentCountLabel(
-    appointments.filter((item) => isPOSConfirmedStatus(item.status)).length,
+    appointments.filter((item) => isConfirmedAppointmentStatus(item.status)).length,
     appointmentOverviewHasMore
+  );
+  const internalAppointmentCount = appointmentCountLabel(
+    appointments.filter((item) => item.scheduling_authority === "manleai_calendar").length,
+    appointmentOverviewHasMore
+  );
+  const selectedAuthority = salon?.scheduling_authority ?? calendar?.scheduling_authority;
+  const selectedAuthorityVersion = salon?.scheduling_authority_version ?? calendar?.authority_version;
+  const authorityEvidenceConsistent = Boolean(
+    selectedAuthority
+    && selectedAuthorityVersion
+    && calendar
+    && calendar.scheduling_authority === selectedAuthority
+    && calendar.authority_version === selectedAuthorityVersion
   );
   const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
   const bookingDataReady = bookingPathReady(status);
   const bookingWriteReady = bookingDataReady && !status?.readiness?.booking_write_blocked;
-  const readyForAvailability = bookingDataReady && bookableServices.length > 0;
-  const readyForManualBooking = bookingWriteReady && bookableServices.length > 0 && bookableStaff.length > 0;
+  const externalAuthoritySelected = authorityEvidenceConsistent && selectedAuthority === "external_provider";
+  const externalStatusAuthorityConsistent = status?.readiness?.scheduling_authority === "external_provider";
+  const externalNewWorkSelected = externalAuthoritySelected && externalStatusAuthorityConsistent;
+  const internalNewWorkSelected = authorityEvidenceConsistent && selectedAuthority === "manleai_calendar";
+  const internalCreateReady = internalNewWorkSelected && Boolean(
+    calendar?.readiness.capabilities?.staff_only_create
+    || calendar?.readiness.capabilities?.pooled_capacity
+    || calendar?.readiness.capabilities?.party_create
+  );
+  const readyForAvailability = bookingDataReady && bookableServices.length > 0 && externalNewWorkSelected;
+  const readyForExternalLifecycle = bookingDataReady && bookableServices.length > 0 && bookableStaff.length > 0;
+  const readyForManualBooking = bookingWriteReady && readyForExternalLifecycle;
+  const readyForNewBooking = readyForManualBooking && externalNewWorkSelected;
+  const retryCreateRequest = actionForm.retryOfAttemptID
+    ? fallbackRequests.find((request) => request.id === actionForm.retryOfAttemptID) ?? null
+    : null;
+  const readyForExternalCreateAction = retryCreateRequest
+    ? readyForManualBooking && isEligibleSafeExternalCreateRetry(retryCreateRequest)
+    : readyForNewBooking;
+  const readyForNewAppointment = readyForNewBooking || internalCreateReady;
   const selectedActionSlot = useMemo(
     () => (actionAvailabilityResult?.slots ?? []).find((slot) => slotKey(slot) === actionForm.selectedSlotKey) ?? null,
     [actionAvailabilityResult, actionForm.selectedSlotKey]
@@ -571,7 +658,7 @@ export function AppointmentsDashboard() {
         () => {
           setAvailabilityResult(null);
           setAvailabilityChecked(false);
-          setAvailabilityError("These availability results expired. Check Square Appointments again for current slots.");
+          setAvailabilityError("These availability results expired. Check Square Appointments availability again for current slots.");
         }
       );
     } catch (err) {
@@ -689,13 +776,31 @@ export function AppointmentsDashboard() {
     setAppointmentReviewAppointment(null);
   }
 
+  function openCreateAppointment() {
+    setActionNotice(null);
+    if (internalCreateReady) {
+      setInternalCreateOpen(true);
+      return;
+    }
+    if (readyForNewBooking) openCreateBooking();
+  }
+
+  async function handleInternalAppointmentConfirmed(appointmentID: string) {
+    setActionNotice({
+      tone: "success",
+      title: "Appointment confirmed",
+      message: `ManleAI Calendar returned durable appointment ID ${appointmentID} after the atomic commit.`
+    });
+    await load({ silent: true });
+  }
+
   function openCreateBooking() {
     actionOperationKeyRef.current = null;
     setActionMode("create");
     setSelectedAppointment(null);
     setActionForm({
       ...emptyActionForm(selectedDate),
-      serviceID: firstBookableServiceID(services)
+      serviceID: firstBookableServiceID(services, salon?.active_pos_provider)
     });
     setActionError("");
     setActionNotice(null);
@@ -729,6 +834,29 @@ export function AppointmentsDashboard() {
   }
 
   function openReschedule(appointment: AppointmentRecord, preferredDate?: string, retryRequest?: BookingAttempt) {
+    if (!canRescheduleAppointment(appointment)) {
+      setActionNotice({
+        tone: "warning",
+        title: "Reschedule unavailable",
+        message: "This appointment's persisted origin or backend capability does not allow rescheduling. Review the row evidence before taking another action."
+      });
+      return;
+    }
+    if (appointment.scheduling_authority === "manleai_calendar") {
+      setInternalLifecycle({ mode: "reschedule", appointment });
+      setAppointmentReviewAppointment(null);
+      setFallbackReviewRequest(null);
+      setActionNotice(null);
+      return;
+    }
+    if (appointment.scheduling_authority !== "external_provider") {
+      setActionNotice({
+        tone: "warning",
+        title: "Appointment action unavailable",
+        message: "This row does not have a supported confirming appointment authority. Review its origin before taking a lifecycle action."
+      });
+      return;
+    }
     actionOperationKeyRef.current = null;
     setActionMode("reschedule");
     setSelectedAppointment(appointment);
@@ -753,6 +881,29 @@ export function AppointmentsDashboard() {
   }
 
   function openCancel(appointment: AppointmentRecord, reason = "", retryRequest?: BookingAttempt) {
+    if (!canCancelAppointment(appointment)) {
+      setActionNotice({
+        tone: "warning",
+        title: "Cancellation unavailable",
+        message: "This appointment's persisted origin or backend capability does not allow cancellation. Review the row evidence before taking another action."
+      });
+      return;
+    }
+    if (appointment.scheduling_authority === "manleai_calendar") {
+      setInternalLifecycle({ mode: "cancel", appointment });
+      setAppointmentReviewAppointment(null);
+      setFallbackReviewRequest(null);
+      setActionNotice(null);
+      return;
+    }
+    if (appointment.scheduling_authority !== "external_provider") {
+      setActionNotice({
+        tone: "warning",
+        title: "Appointment action unavailable",
+        message: "This row does not have a supported confirming appointment authority. Review its origin before taking a lifecycle action."
+      });
+      return;
+    }
     actionOperationKeyRef.current = null;
     setActionMode("cancel");
     setSelectedAppointment(appointment);
@@ -775,6 +926,30 @@ export function AppointmentsDashboard() {
     setActionError("");
     setActionNotice(null);
 	resetActionAvailability();
+  }
+
+  function closeInternalLifecycle() {
+    setInternalLifecycle(null);
+  }
+
+  async function handleInternalLifecycleConfirmed(
+    appointmentID: string,
+    mode: "reschedule" | "cancel",
+    version: number
+  ) {
+    setActionNotice({
+      tone: "success",
+      title: mode === "reschedule" ? "Appointment rescheduled" : "Appointment cancelled",
+      message: mode === "reschedule"
+        ? `ManleAI Calendar advanced durable root ${appointmentID} to version ${version} with the exact selected child plan.`
+        : `ManleAI Calendar advanced durable root ${appointmentID} to version ${version} and proved zero active children.`
+    });
+    await load({ silent: true });
+  }
+
+  async function handleInternalLifecycleConflict(message: string) {
+    setActionNotice({ tone: "warning", title: "Appointment changed", message });
+    await load({ silent: true });
   }
 
   function openFallbackReview(request: BookingAttempt) {
@@ -817,6 +992,14 @@ export function AppointmentsDashboard() {
   }
 
   function openReconciliationForRequest(request: BookingAttempt) {
+    if (request.scheduling_authority !== "external_provider") {
+      setActionNotice({
+        tone: "warning",
+        title: "Provider reconciliation unavailable",
+        message: "Reconciliation applies only to persisted external-provider operations. This request must be reviewed through its own scheduling authority."
+      });
+      return;
+    }
     const task = reconciliationTasks.find((item) => item.booking_attempt_id === request.id);
     if (!task) {
       setActionNotice({
@@ -844,13 +1027,17 @@ export function AppointmentsDashboard() {
 
   async function resolveReconciliation(action: "provider_attached" | "not_created" | "escalated") {
     if (!salon || !reconciliationTask || !selectedReconciliationAttempt) return;
+    if (selectedReconciliationAttempt.scheduling_authority !== "external_provider") {
+      setReconciliationError("This operation does not have an external-provider origin, so provider reconciliation is disabled.");
+      return;
+    }
     const candidate = reconciliationCandidates.find((item) => item.appointment_id === reconciliationCandidateID);
     if (action === "provider_attached" && !candidate) {
       setReconciliationError("Select a provider-synced appointment that matches this request.");
       return;
     }
     if (action === "not_created" && !reconciliationNotCreatedConfirmed) {
-      setReconciliationError("Confirm that Square Appointments was checked and the requested booking action was not applied.");
+      setReconciliationError("Confirm that the persisted external provider was checked and the requested booking action was not applied.");
       return;
     }
     const payload = {
@@ -878,7 +1065,7 @@ export function AppointmentsDashboard() {
           action === "provider_attached"
             ? "The request was linked only after a matching provider-synced appointment was verified."
             : action === "not_created"
-              ? "The request is marked safe to retry because the owner verified that the requested Square action was not applied."
+              ? "The request is marked safe to retry because the owner verified that the requested provider action was not applied."
               : "Retry remains blocked until the provider result is resolved."
       });
       setReconciliationTask(null);
@@ -893,6 +1080,14 @@ export function AppointmentsDashboard() {
   }
 
   function retryFallbackRequest(request: BookingAttempt) {
+    if (!canRetryFallbackRequest(request)) {
+      setActionNotice({
+        tone: "warning",
+        title: "Retry unavailable",
+        message: fallbackRetryDisabledReason(request)
+      });
+      return;
+    }
     const action = fallbackBookingAction(request);
     if (action === "book") {
       openCreateBookingFromFallback(request);
@@ -923,7 +1118,8 @@ export function AppointmentsDashboard() {
   }
 
   async function checkActionAvailability() {
-    if (!salon || !actionMode || actionMode === "cancel" || !actionForm.preferredDate || !readyForManualBooking) {
+    const actionPathReady = actionMode === "create" ? readyForExternalCreateAction : readyForExternalLifecycle;
+    if (!salon || !actionMode || actionMode === "cancel" || !actionForm.preferredDate || !actionPathReady) {
       return;
     }
     const requestID = ++actionAvailabilityRequestIDRef.current;
@@ -931,6 +1127,7 @@ export function AppointmentsDashboard() {
     setActionAvailabilityError("");
     setActionAvailabilityChecked(true);
     setCheckingActionAvailability(true);
+    setActionAvailabilityResult(null);
     setActionForm((current) => ({ ...current, selectedSlotKey: "" }));
     try {
       const segments = actionAvailabilitySegments(actionMode, actionForm, selectedAppointment);
@@ -938,9 +1135,12 @@ export function AppointmentsDashboard() {
         throw new Error("This appointment is missing service details needed to check availability.");
       }
       const staffSelectionMode = aggregateStaffSelectionMode(segments);
+      const retryOfAttemptID = actionMode === "create" ? actionForm.retryOfAttemptID : "";
       const result = await apiRequest<AvailabilityResult>(`/api/salons/${salon.id}/availability`, {
         method: "POST",
         body: JSON.stringify({
+          target_appointment_id: actionMode === "reschedule" ? selectedAppointment?.id : undefined,
+          retry_of_attempt_id: retryOfAttemptID || undefined,
           service_id: segments[0].service_id,
           staff_id: actionMode === "create" ? actionForm.staffID : "",
           staff_selection_mode: staffSelectionMode,
@@ -969,7 +1169,7 @@ export function AppointmentsDashboard() {
           setActionAvailabilityResult(null);
           setActionAvailabilityChecked(false);
           setActionForm((current) => ({ ...current, selectedSlotKey: "" }));
-          setActionAvailabilityError("This availability quote expired. Check Square Appointments again before submitting.");
+          setActionAvailabilityError("This availability quote expired. Check Square Appointments availability again before submitting.");
         }
       );
     } catch (err) {
@@ -986,7 +1186,7 @@ export function AppointmentsDashboard() {
   }
 
   async function submitCreateBooking() {
-    if (!salon || !selectedActionSlot || !actionAvailabilityResult) return;
+    if (!salon || !selectedActionSlot || !actionAvailabilityResult || !readyForExternalCreateAction) return;
     setSavingAction(true);
     setActionError("");
     setActionNotice(null);
@@ -995,7 +1195,7 @@ export function AppointmentsDashboard() {
 	  const requestedSegments = actionAvailabilitySegments("create", actionForm, null);
 	  const segments = slotBookingSegments(selectedActionSlot, requestedSegments);
       if (segments.length === 0 || segments.some((segment) => !segment.staff_id)) {
-        throw new Error("Select a returned Square slot before creating the booking.");
+        throw new Error("Select a returned Square Appointments slot before creating the booking.");
       }
       const staffSelectionMode = aggregateStaffSelectionMode(segments);
       const payload = {
@@ -1017,11 +1217,11 @@ export function AppointmentsDashboard() {
         method: "POST",
         body: JSON.stringify({ ...payload, operation_key: operationKeyForPayload(actionOperationKeyRef, payload) })
       });
-      if (attempt.status !== "confirmed" || !attempt.pos_booking_id) {
+      if (!hasExternalAttemptConfirmation(attempt)) {
         setActionNotice({
           tone: "warning",
           title: "Booking needs owner review",
-          message: "Square Appointments did not confirm this booking. A pending request was created instead."
+          message: "Square Appointments did not return confirmation evidence. The request remains pending for owner review."
         });
       } else {
         setActionNotice({
@@ -1040,19 +1240,19 @@ export function AppointmentsDashboard() {
   }
 
   async function submitReschedule() {
-    if (!salon || !selectedAppointment || !selectedActionSlot) return;
+    if (!salon || !selectedAppointment || !selectedActionSlot || !canRescheduleAppointment(selectedAppointment)) return;
     setSavingAction(true);
     setActionError("");
     setActionNotice(null);
     try {
       if (!actionAvailabilityResult) {
-        throw new Error("Check Square Appointments availability again before rescheduling.");
+        throw new Error("Check the appointment's external-provider availability again before rescheduling.");
       }
       assertAvailabilityQuoteUsable(actionAvailabilityResult, selectedActionSlot);
 	  const requestedSegments = actionAvailabilitySegments("reschedule", actionForm, selectedAppointment);
 	  const segments = slotBookingSegments(selectedActionSlot, requestedSegments);
 	  if (segments.length === 0) {
-		throw new Error("Square availability did not preserve every requested service. Check availability again.");
+		throw new Error("External-provider availability did not preserve every requested service. Check availability again.");
 	  }
       const payload = {
         retry_of_attempt_id: actionForm.retryOfAttemptID || undefined,
@@ -1074,13 +1274,13 @@ export function AppointmentsDashboard() {
         setActionNotice({
           tone: "warning",
           title: "Reschedule needs owner review",
-          message: "Square Appointments did not reschedule this booking. The original appointment was left unchanged."
+          message: "The appointment's external provider did not confirm this reschedule. The original appointment was left unchanged."
         });
       } else {
         setActionNotice({
           tone: "success",
           title: "Appointment rescheduled",
-          message: "Square Appointments confirmed the new time before the dashboard updated this appointment."
+          message: "The appointment's external provider confirmed the new time before the dashboard updated this appointment."
         });
       }
       closeActionPanel();
@@ -1093,7 +1293,7 @@ export function AppointmentsDashboard() {
   }
 
   async function submitCancel() {
-    if (!salon || !selectedAppointment) return;
+    if (!salon || !selectedAppointment || !canCancelAppointment(selectedAppointment)) return;
     setSavingAction(true);
     setActionError("");
     setActionNotice(null);
@@ -1117,13 +1317,13 @@ export function AppointmentsDashboard() {
         setActionNotice({
           tone: "warning",
           title: "Cancellation needs owner review",
-          message: "Square Appointments did not cancel this booking. The original appointment was left unchanged."
+          message: "The appointment's external provider did not confirm cancellation. The original appointment was left unchanged."
         });
       } else {
         setActionNotice({
           tone: "success",
           title: "Appointment cancelled",
-          message: "Square Appointments confirmed the cancellation before the dashboard updated this appointment."
+          message: "The appointment's external provider confirmed the cancellation before the dashboard updated this appointment."
         });
       }
       closeActionPanel();
@@ -1170,20 +1370,20 @@ export function AppointmentsDashboard() {
     <div className="space-y-6">
       <div className="flex flex-col justify-between gap-3 md:flex-row md:items-end">
         <div>
-          <h1 className="text-2xl font-bold text-ink">Booking Calendar</h1>
+            <h1 className="text-2xl font-bold text-ink">Appointments</h1>
           <p className="mt-1 text-sm text-muted">
-            POS-confirmed bookings, pending requests, and Square Appointments availability used by the AI receptionist.
+            Review scheduling work by its originating authority without treating a POS connection as a universal prerequisite.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <Badge value={aiEnabled ? "active" : "disabled"} />
+          <Badge value={aiEnabled ? "AI calls active" : "AI calls paused"} />
           <Button
             type="button"
-            onClick={openCreateBooking}
-            disabled={!readyForManualBooking || savingAction}
+            onClick={openCreateAppointment}
+            disabled={!readyForNewAppointment || savingAction}
           >
             <CalendarPlus className="h-4 w-4" />
-            New booking
+            Create appointment
           </Button>
           <Button type="button" variant="secondary" onClick={() => void load({ silent: true })}>
             <RefreshCcw className="h-4 w-4" />
@@ -1194,9 +1394,88 @@ export function AppointmentsDashboard() {
 
       {error ? <Alert title="Appointments unavailable" message={error} /> : null}
       {actionNotice ? <ActionNoticePanel notice={actionNotice} /> : null}
+      {selectedAuthority === "external_provider" && squareStatusError ? (
+        <Alert
+          title="Square Appointments status unavailable"
+          message={`${squareStatusError} Appointment history and owner-review requests remain available.`}
+        />
+      ) : null}
+      {externalAuthoritySelected && status && !externalStatusAuthorityConsistent ? (
+        <Alert
+          title="Square Appointments authority changed"
+          message="The provider-readiness response does not identify Square Appointments as the current scheduling path. New Square Appointments work is disabled until the authority evidence agrees; historical rows remain available by origin."
+        />
+      ) : null}
 
-      <ReadinessPanel status={status} />
-      <BookingBoundaryPanel />
+      <SchedulingAuthorityBanner
+        authority={selectedAuthority}
+        version={selectedAuthorityVersion}
+        evidenceConsistent={authorityEvidenceConsistent}
+        activeProvider={salon.active_pos_provider}
+      />
+
+      <SchedulingReadinessCard calendar={calendar} loading={calendarLoading} error={calendarError} onRetry={() => void reloadCalendar()} />
+      {calendar?.scheduling_authority === "external_provider" ? (
+        <>
+          <ReadinessPanel status={status} />
+          <BookingBoundaryPanel />
+        </>
+      ) : null}
+
+      <Dialog
+        open={internalCreateOpen}
+        title="Create appointment"
+        description="Create one atomic ManleAI Calendar appointment from a backend-verified staff, time, guest, and resource plan."
+        onClose={() => setInternalCreateOpen(false)}
+        closeDisabled={internalCreateBusy}
+        className="max-w-4xl"
+      >
+        {calendar ? (
+          <InternalAppointmentCreate
+            salonID={salon.id}
+            timezone={salon.timezone}
+            calendar={calendar}
+            capabilityReady={Boolean(
+              calendar.readiness.capabilities?.staff_only_create
+              || calendar.readiness.capabilities?.pooled_capacity
+              || calendar.readiness.capabilities?.party_create
+            )}
+            capabilityBlockers={calendar.readiness.blockers.map((blocker) => blocker.message)}
+            onClose={() => setInternalCreateOpen(false)}
+            onConfirmed={handleInternalAppointmentConfirmed}
+            onReadinessInvalidated={reloadCalendar}
+            onBusyChange={setInternalCreateBusy}
+          />
+        ) : (
+          <Alert title="Internal scheduling unavailable" message="Scheduling readiness could not be loaded." />
+        )}
+      </Dialog>
+
+      <Dialog
+        open={Boolean(internalLifecycle)}
+        title={internalLifecycle?.mode === "cancel" ? "Cancel internal appointment" : "Reschedule internal appointment"}
+        description="This lifecycle action follows the appointment's persisted ManleAI Calendar origin and version, even when the salon's current authority differs."
+        onClose={closeInternalLifecycle}
+        closeDisabled={internalLifecycleBusy}
+        className={internalLifecycle?.mode === "cancel" ? "max-w-2xl" : "max-w-5xl"}
+      >
+        {internalLifecycle ? (
+          <InternalAppointmentLifecycle
+            key={`${internalLifecycle.mode}:${internalLifecycle.appointment.id}:${internalLifecycle.appointment.authority_appointment_version ?? 0}`}
+            salonID={salon.id}
+            timezone={salon.timezone}
+            appointment={internalLifecycle.appointment}
+            mode={internalLifecycle.mode}
+            cutoffMinutes={internalLifecycle.mode === "reschedule"
+              ? calendar?.config?.reschedule_cutoff_minutes
+              : calendar?.config?.cancellation_cutoff_minutes}
+            onClose={closeInternalLifecycle}
+            onConfirmed={handleInternalLifecycleConfirmed}
+            onConflict={handleInternalLifecycleConflict}
+            onBusyChange={setInternalLifecycleBusy}
+          />
+        ) : null}
+      </Dialog>
 
       <Dialog
         open={Boolean(actionMode)}
@@ -1213,7 +1492,7 @@ export function AppointmentsDashboard() {
             selectedAppointment={selectedAppointment}
             bookableServices={bookableServices}
             bookableStaff={bookableStaff}
-            readyForManualBooking={readyForManualBooking}
+            readyForManualBooking={actionMode === "create" ? readyForExternalCreateAction : readyForExternalLifecycle}
             timezone={salon.timezone}
             availabilityChecked={actionAvailabilityChecked}
             availabilityLoading={checkingActionAvailability}
@@ -1236,17 +1515,18 @@ export function AppointmentsDashboard() {
 
       <Dialog
         open={Boolean(appointmentReviewAppointment)}
-        title="Edit appointment"
-        description="Review the POS-confirmed appointment and choose a safe appointment action."
+        title="View appointment"
+        description="Review confirmation evidence and authority-specific lifecycle capabilities."
         onClose={closeAppointmentReview}
         closeDisabled={savingAction}
         className="max-w-2xl"
       >
         {appointmentReviewAppointment ? (
           <AppointmentReviewDialog
+            salonID={salon.id}
             appointment={appointmentReviewAppointment}
             timezone={salon.timezone}
-            disabled={savingAction || !canChangeAppointment(appointmentReviewAppointment)}
+            disabled={savingAction}
             onReschedule={openReschedule}
             onCancel={openCancel}
           />
@@ -1256,7 +1536,7 @@ export function AppointmentsDashboard() {
       <Dialog
         open={Boolean(fallbackReviewRequest)}
         title="Review pending request"
-        description="This request is not POS-confirmed. Retry actions must still pass through Square Appointments."
+        description="This external-provider request is not confirmed. Retry actions must still pass through its persisted external-provider origin."
         onClose={closeFallbackReview}
         closeDisabled={savingAction}
         className="max-w-2xl"
@@ -1301,19 +1581,30 @@ export function AppointmentsDashboard() {
       </Dialog>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <Metric label="POS-confirmed appointments" value={confirmedCount} />
+        <Metric label="Confirmed appointments" value={confirmedCount} />
         <Metric label="Upcoming" value={upcomingCount} />
         <Metric label="Pending requests" value={appointmentCountLabel(pendingRequests.length, fallbackOverviewHasMore)} />
-        <Metric label="Last Square sync" value={formatOptionalDate(status?.connection.last_sync_at)} />
+        <Metric
+          label={selectedAuthority === "manleai_calendar"
+            ? "ManleAI-origin appointments"
+            : selectedAuthority === "owner_manual"
+              ? "Owner requests"
+              : "Last Square Appointments sync"}
+          value={selectedAuthority === "manleai_calendar"
+            ? internalAppointmentCount
+            : selectedAuthority === "owner_manual"
+              ? appointmentCountLabel(pendingRequests.length, fallbackOverviewHasMore)
+              : formatOptionalDate(status?.connection?.last_sync_at)}
+        />
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[1.25fr_0.75fr]">
+      <div className={`grid gap-4 ${externalAuthoritySelected ? "xl:grid-cols-[1.25fr_0.75fr]" : ""}`}>
         <Card>
           <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
             <div>
               <CardTitle>Calendar view</CardTitle>
               <CardDescription>
-                POS-confirmed bookings and pending requests for the selected day.
+                Confirmed appointments and pending requests for the selected day, preserving each originating authority.
               </CardDescription>
             </div>
             <Badge value={dayAppointments.length + dayPendingRequests.length > 0 ? "active" : "disabled"} />
@@ -1342,13 +1633,13 @@ export function AppointmentsDashboard() {
           />
         </Card>
 
-        <Card>
+        {externalAuthoritySelected ? <Card>
           <div className="flex items-start gap-3">
             <CalendarSearch className="mt-1 h-5 w-5 text-brand" />
             <div>
               <CardTitle>Find available slots</CardTitle>
               <CardDescription>
-                Check Square Appointments availability before the AI offers times to a caller.
+                Check Square Appointments availability before offering times or creating an owner-entered booking.
               </CardDescription>
             </div>
           </div>
@@ -1356,7 +1647,7 @@ export function AppointmentsDashboard() {
           <div className="mt-5 grid gap-4">
             {!readyForAvailability ? (
               <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
-                Connect Square Appointments, select a location, and sync AI-bookable services, staff, and business hours before checking availability.
+                Connect Square Appointments, choose a location, and sync bookable services, staff, and business hours before checking availability.
               </div>
             ) : null}
 
@@ -1419,15 +1710,15 @@ export function AppointmentsDashboard() {
               timezone={availabilityResult?.timezone ?? salon.timezone}
             />
           </div>
-        </Card>
+        </Card> : null}
       </div>
 
       <Card>
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
           <div>
-            <CardTitle>Provider appointment records</CardTitle>
+            <CardTitle>Appointment records</CardTitle>
             <CardDescription>
-              Accepted and rescheduled rows are POS-confirmed. Other provider states remain visibly distinct.
+              Confirmation evidence and available actions follow each row's originating scheduling authority.
             </CardDescription>
           </div>
           <Badge value={appointments.length > 0 ? "active" : "disabled"} />
@@ -1435,7 +1726,7 @@ export function AppointmentsDashboard() {
 
         {appointmentListLoading ? (
           <div className="mt-4 rounded-md border border-line bg-slate-50 px-3 py-2 text-sm text-muted">
-            Loading provider appointment records...
+            Loading appointment records...
           </div>
         ) : null}
 
@@ -1443,16 +1734,16 @@ export function AppointmentsDashboard() {
           <EmptyState
             icon={<CalendarClock className="h-5 w-5 text-muted" />}
             title="No appointments yet"
-            message="Square Appointments records will appear here with their normalized operational status."
+            message="Confirmed internal or external appointments will appear here with their originating authority."
           >
             <Button
               type="button"
               className="mt-4"
-              onClick={openCreateBooking}
-              disabled={!readyForManualBooking || savingAction}
+              onClick={openCreateAppointment}
+              disabled={!readyForNewAppointment || savingAction}
             >
               <CalendarPlus className="h-4 w-4" />
-              New booking
+              Create appointment
             </Button>
           </EmptyState>
         ) : (
@@ -1464,7 +1755,7 @@ export function AppointmentsDashboard() {
               offset={appointmentOffset}
               hasMore={appointmentHasMore}
               busy={appointmentListLoading || savingAction}
-              itemLabel="provider appointment records"
+              itemLabel="appointment records"
               onPrevious={goToPreviousAppointmentPage}
               onNext={goToNextAppointmentPage}
               onLimitChange={updateAppointmentPageSize}
@@ -1479,7 +1770,7 @@ export function AppointmentsDashboard() {
                     <th className="px-4 py-3">Technician preference</th>
                     <th className="px-4 py-3">Assigned technicians</th>
                     <th className="px-4 py-3">Status</th>
-                    <th className="px-4 py-3">POS booking</th>
+                    <th className="px-4 py-3">Origin</th>
                     <th className="px-4 py-3">Action</th>
                   </tr>
                 </thead>
@@ -1502,12 +1793,19 @@ export function AppointmentsDashboard() {
                       <td className="px-4 py-3 text-muted">{assignedTechniciansLabel(item, staffNames)}</td>
                       <td className="px-4 py-3">
                         <Badge value={item.status} />
+                        {item.scheduling_authority === "manleai_calendar" ? (
+                          <div className="mt-1 text-xs text-muted">Version {item.authority_appointment_version ?? "-"}</div>
+                        ) : null}
                       </td>
-                      <td className="px-4 py-3 text-muted">{item.pos_appointment_id || "Not returned"}</td>
+                      <td className="px-4 py-3">
+                        <Badge value={appointmentOriginBadge(item.scheduling_authority)} />
+                        <div className="mt-1 text-xs text-muted">{appointmentOriginLabel(item)}</div>
+                      </td>
                       <td className="px-4 py-3">
                         <AppointmentActions
                           appointment={item}
-                          disabled={savingAction || !canChangeAppointment(item)}
+                          disabled={savingAction}
+                          onReview={openAppointmentReview}
                           onReschedule={openReschedule}
                           onCancel={openCancel}
                         />
@@ -1526,7 +1824,8 @@ export function AppointmentsDashboard() {
                   staffName={assignedTechniciansLabel(item, staffNames)}
                   technicianPreference={technicianPreferenceLabel(item)}
                   timezone={salon.timezone}
-                  disabled={savingAction || !canChangeAppointment(item)}
+                  disabled={savingAction}
+                  onReview={openAppointmentReview}
                   onReschedule={openReschedule}
                   onCancel={openCancel}
                 />
@@ -1539,7 +1838,7 @@ export function AppointmentsDashboard() {
               offset={appointmentOffset}
               hasMore={appointmentHasMore}
               busy={appointmentListLoading || savingAction}
-              itemLabel="provider appointment records"
+              itemLabel="appointment records"
               onPrevious={goToPreviousAppointmentPage}
               onNext={goToNextAppointmentPage}
               onLimitChange={updateAppointmentPageSize}
@@ -1547,6 +1846,9 @@ export function AppointmentsDashboard() {
           </>
         )}
       </Card>
+
+      <OwnerReviewRequests key={salon.id} salonID={salon.id} timezone={salon.timezone} />
+      <OwnerNotificationDeliveries salonID={salon.id} />
 
       <Card>
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
@@ -1636,7 +1938,7 @@ export function AppointmentsDashboard() {
           <div>
             <CardTitle>Fallback requests</CardTitle>
             <CardDescription>
-              These requests are not POS-confirmed appointments. Review them when the POS path fails.
+              These external-provider requests are not confirmed appointments. Review them when the external-provider path fails.
             </CardDescription>
           </div>
           <Badge value={pendingRequests.length > 0 ? "fallback_pending" : "disabled"} />
@@ -1652,7 +1954,7 @@ export function AppointmentsDashboard() {
           <EmptyState
             icon={<ClipboardList className="h-5 w-5 text-muted" />}
             title="No pending requests"
-            message="POS failures will create pending requests here for owner review."
+            message="External-provider failures will create pending requests here for owner review."
           />
         ) : (
           <>
@@ -1803,6 +2105,51 @@ function mergeReconciliationTasks(...groups: BookingReconciliationTask[][]) {
   });
 }
 
+function SchedulingAuthorityBanner({
+  authority,
+  version,
+  evidenceConsistent,
+  activeProvider
+}: {
+  authority?: SchedulingAuthority;
+  version?: number;
+  evidenceConsistent: boolean;
+  activeProvider?: string;
+}) {
+  if (!authority || !version) {
+    return (
+      <Alert
+        title="Scheduling authority unavailable"
+        message="The salon response did not include a scheduling authority and version. New appointment actions are disabled until that backend contract is available."
+      />
+    );
+  }
+  if (!evidenceConsistent) {
+    return (
+      <Alert
+        title="Scheduling authority changed"
+        message="The salon and scheduling-readiness responses do not describe the same authority version. Refresh before starting new work. Historical rows remain visible by their persisted origin."
+      />
+    );
+  }
+  return (
+    <Card className="border-blue-200 bg-blue-50 shadow-none">
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <CardTitle>Current scheduling authority</CardTitle>
+            <Badge value={appointmentOriginBadge(authority)} />
+          </div>
+          <CardDescription className="text-blue-900">
+            {authorityWorkflowDescription(authority, activeProvider)}
+          </CardDescription>
+        </div>
+        <div className="text-sm font-semibold text-blue-900">Version {version}</div>
+      </div>
+    </Card>
+  );
+}
+
 function ReadinessPanel({ status }: { status: StatusResponse | null }) {
   const connection = status?.connection;
   const readiness = status?.readiness;
@@ -1820,14 +2167,14 @@ function ReadinessPanel({ status }: { status: StatusResponse | null }) {
           <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-accent" />
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <CardTitle>Square booking writes are blocked</CardTitle>
+            <CardTitle>Square Appointments booking writes are blocked</CardTitle>
               <Badge value="fallback_pending" />
             </div>
             <CardDescription className="text-red-900">
-              The AI can check Square availability, but new bookings cannot be POS-confirmed until Square accepts booking writes.
+              Availability may remain readable, but new bookings cannot be confirmed until Square Appointments accepts booking writes.
             </CardDescription>
             <div className="mt-3 rounded-md border border-red-200 bg-white p-3 text-sm leading-6 text-red-900">
-              <div className="font-semibold">{readiness?.booking_write_blocked_code || "Square booking write blocked"}</div>
+              <div className="font-semibold">{readiness?.booking_write_blocked_code || "Square Appointments booking write blocked"}</div>
               <div className="mt-1">{readiness?.booking_write_blocked_reason || "Square Appointments rejected booking writes."}</div>
               <div className="mt-1 text-xs text-muted">
                 Last seen: {formatOptionalDate(readiness?.booking_write_blocked_at)}
@@ -1837,7 +2184,7 @@ function ReadinessPanel({ status }: { status: StatusResponse | null }) {
               className="mt-3 inline-flex h-10 items-center justify-center rounded-md border border-line bg-white px-4 text-sm font-semibold text-ink hover:bg-slate-50"
               href="/dashboard/integrations"
             >
-              Open Square integration
+              Open Square Appointments integration
             </a>
           </div>
         </div>
@@ -1852,14 +2199,14 @@ function ReadinessPanel({ status }: { status: StatusResponse | null }) {
           <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" />
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <CardTitle>Square appointment changes need owner review</CardTitle>
+              <CardTitle>Square Appointments changes need owner review</CardTitle>
               <Badge value="fallback_pending" />
             </div>
             <CardDescription className="text-amber-900">
-              New bookings can still be POS-confirmed, but Square rejected automatic reschedule or cancellation for this seller account.
+              New bookings can still be provider-confirmed, but Square Appointments rejected automatic reschedule or cancellation.
             </CardDescription>
             <div className="mt-3 rounded-md border border-amber-200 bg-white p-3 text-sm leading-6 text-amber-900">
-              <div className="font-semibold">{readiness?.appointment_change_write_blocked_code || "Square write blocked"}</div>
+              <div className="font-semibold">{readiness?.appointment_change_write_blocked_code || "Square Appointments write blocked"}</div>
               <div className="mt-1">{readiness?.appointment_change_write_blocked_reason || "Square Appointments rejected appointment-change writes."}</div>
               <div className="mt-1 text-xs text-muted">
                 Last seen: {formatOptionalDate(readiness?.appointment_change_write_blocked_at)}
@@ -1869,7 +2216,7 @@ function ReadinessPanel({ status }: { status: StatusResponse | null }) {
               className="mt-3 inline-flex h-10 items-center justify-center rounded-md border border-line bg-white px-4 text-sm font-semibold text-ink hover:bg-slate-50"
               href="/dashboard/integrations"
             >
-              Open Square integration
+              Open Square Appointments integration
             </a>
           </div>
         </div>
@@ -1882,12 +2229,12 @@ function ReadinessPanel({ status }: { status: StatusResponse | null }) {
       <Card className="border-emerald-200 bg-emerald-50 shadow-none">
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
           <div>
-            <CardTitle>Square booking path is configured</CardTitle>
+            <CardTitle>Square Appointments booking path is configured</CardTitle>
             <CardDescription className="text-emerald-800">
-              POS-confirmed appointments require a successful Square Appointments booking ID.
+              Provider-confirmed appointments require a successful Square Appointments booking ID. Owner-entered actions remain independent of AI-call enablement.
             </CardDescription>
           </div>
-          <Badge value={readiness?.ai_enabled ? "active" : "disabled"} />
+          <Badge value={readiness?.ai_enabled ? "AI calls active" : "AI calls paused"} />
         </div>
       </Card>
     );
@@ -1900,13 +2247,13 @@ function ReadinessPanel({ status }: { status: StatusResponse | null }) {
         <div>
           <CardTitle>Booking workflow is gated</CardTitle>
           <CardDescription className="text-amber-900">
-            Connect Square Appointments, select a location, and sync services, staff, and business hours before AI booking can operate.
+            Connect Square Appointments, choose a location, and sync services, staff, and business hours before external booking can operate.
           </CardDescription>
           <a
             className="mt-3 inline-flex h-10 items-center justify-center rounded-md border border-line bg-white px-4 text-sm font-semibold text-ink hover:bg-slate-50"
             href="/dashboard/integrations"
           >
-            Open Square integration
+            Open Square Appointments integration
           </a>
         </div>
       </div>
@@ -1921,19 +2268,19 @@ function BookingBoundaryPanel() {
         <div>
           <CardTitle>Booking boundary</CardTitle>
           <CardDescription>
-            The dashboard separates POS-confirmed appointments from requests that still need owner review.
+            The dashboard separates provider-confirmed appointments from requests that still need owner review.
           </CardDescription>
         </div>
         <Badge value="pos_pending" />
       </div>
       <div className="mt-4 grid gap-3 md:grid-cols-3">
         <BoundaryItem
-          label="POS-confirmed appointment"
-          value="The active POS provider returned a booking ID before the appointment was recorded as confirmed."
+          label="Provider-confirmed appointment"
+          value="The selected provider returned a booking ID before the appointment was recorded as confirmed."
         />
         <BoundaryItem
           label="Pending request"
-          value="The POS path did not confirm. Owner review is required and no appointment is marked confirmed."
+          value="The provider path did not confirm. Owner review is required and no appointment is marked confirmed."
         />
         <BoundaryItem
           label="Not bookable"
@@ -2057,7 +2404,9 @@ function BookingActionPanel({
     <div>
       {!readyForManualBooking && mode !== "cancel" ? (
         <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
-          Connect Square Appointments, select a location, and keep at least one AI-bookable service and staff member before creating or rescheduling bookings.
+          {retrying && mode === "create"
+            ? "This stored request cannot obtain a fresh retry quote until its external-provider lineage, provider setup, and safe-retry evidence are all ready. The current scheduling authority does not reinterpret that persisted origin."
+            : "Connect Square Appointments, choose a location, and keep at least one bookable service and staff member before creating or rescheduling external bookings."}
         </div>
       ) : null}
 
@@ -2080,7 +2429,7 @@ function BookingActionPanel({
         <div className="mt-5 grid gap-5">
           {retrying ? (
             <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-              <div className="font-semibold">Retrying a stored POS request</div>
+              <div className="font-semibold">Retrying a stored external-provider request</div>
               <div className="mt-1 leading-6">
                 The original customer, time, notes, ordered service segments, technician assignments, and retry lineage are locked. Availability must return that exact request before it can be retried.
               </div>
@@ -2170,7 +2519,7 @@ function BookingActionPanel({
             <div className="text-sm leading-6 text-muted">
               {selectedSlot
                 ? `Selected ${formatTimeRange(selectedSlot.start_time, selectedSlot.end_time, timezone)}`
-                : "Select a returned Square slot before submitting."}
+                : "Select a returned Square Appointments slot before submitting."}
             </div>
           </div>
 
@@ -2272,12 +2621,7 @@ function AppointmentActionSummary({
         <Badge value={appointment.status} />
       </div>
       <InfoGrid
-        items={[
-          ["Services", serviceNamesLabel(appointment)],
-          ["Assigned technicians", assignedTechniciansLabel(appointment)],
-          ["POS booking", appointment.pos_appointment_id || "Not returned"],
-          ["Technician preference", technicianPreferenceLabel(appointment)]
-        ]}
+        items={appointmentDetailItems(appointment)}
       />
     </div>
   );
@@ -2317,7 +2661,7 @@ function CancelAppointmentForm({
         />
       </label>
       <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
-        This does not delete appointment history. The dashboard marks it cancelled only after Square Appointments confirms the cancellation.
+        This does not delete appointment history. The dashboard marks this external-origin appointment cancelled only after its provider confirms the cancellation.
       </div>
       <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
         <Button type="button" variant="danger" onClick={onSubmit} disabled={!appointment || saving}>
@@ -2379,7 +2723,7 @@ function ActionAvailabilitySlots({
         message={
           retrying
             ? "The original requested time and technician assignments are unavailable. Close this retry and create a new request if the booking details must change."
-            : "Try another day, service, or technician before submitting this POS action."
+            : "Try another day, service, or technician before submitting this Square Appointments action."
         }
       />
     );
@@ -2421,20 +2765,27 @@ function ActionAvailabilitySlots({
 function AppointmentActions({
   appointment,
   disabled,
+  onReview,
   onReschedule,
   onCancel
 }: {
   appointment: AppointmentRecord;
   disabled: boolean;
+  onReview: (appointment: AppointmentRecord) => void;
   onReschedule: (appointment: AppointmentRecord) => void;
   onCancel: (appointment: AppointmentRecord) => void;
 }) {
+  const rescheduleDisabled = disabled || !canRescheduleAppointment(appointment);
+  const cancelDisabled = disabled || !canCancelAppointment(appointment);
   return (
     <div className="flex flex-col gap-2 sm:flex-row">
-      <Button type="button" variant="secondary" onClick={() => onReschedule(appointment)} disabled={disabled}>
+      <Button type="button" variant="secondary" onClick={() => onReview(appointment)} disabled={disabled}>
+        View
+      </Button>
+      <Button type="button" variant="secondary" onClick={() => onReschedule(appointment)} disabled={rescheduleDisabled}>
         Reschedule
       </Button>
-      <Button type="button" variant="danger" onClick={() => onCancel(appointment)} disabled={disabled}>
+      <Button type="button" variant="danger" onClick={() => onCancel(appointment)} disabled={cancelDisabled}>
         Cancel
       </Button>
     </div>
@@ -2454,16 +2805,18 @@ function CalendarAppointmentActions({
   onReschedule: (appointment: AppointmentRecord) => void;
   onCancel: (appointment: AppointmentRecord) => void;
 }) {
+  const rescheduleDisabled = disabled || !canRescheduleAppointment(appointment);
+  const cancelDisabled = disabled || !canCancelAppointment(appointment);
   return (
     <div className="flex flex-wrap gap-2 sm:justify-end">
       <Button type="button" variant="secondary" className="h-9 px-3" onClick={() => onEdit(appointment)} disabled={disabled}>
         <Pencil className="h-4 w-4" />
-        Edit
+        View
       </Button>
-      <Button type="button" variant="secondary" className="h-9 px-3" onClick={() => onReschedule(appointment)} disabled={disabled}>
+      <Button type="button" variant="secondary" className="h-9 px-3" onClick={() => onReschedule(appointment)} disabled={rescheduleDisabled}>
         Reschedule
       </Button>
-      <Button type="button" variant="danger" className="h-9 px-3" onClick={() => onCancel(appointment)} disabled={disabled}>
+      <Button type="button" variant="danger" className="h-9 px-3" onClick={() => onCancel(appointment)} disabled={cancelDisabled}>
         Cancel
       </Button>
     </div>
@@ -2477,7 +2830,7 @@ function AppointmentPaginationControls({
   offset,
   hasMore,
   busy,
-  itemLabel = "POS-confirmed appointments",
+  itemLabel = "appointment records",
   onPrevious,
   onNext,
   onLimitChange
@@ -2532,7 +2885,7 @@ function AppointmentPaginationControls({
   );
 }
 
-function appointmentRangeLabel(count: number, offset: number, hasMore: boolean, itemLabel = "POS-confirmed appointments") {
+function appointmentRangeLabel(count: number, offset: number, hasMore: boolean, itemLabel = "appointment records") {
   if (count === 0) {
     return `No ${itemLabel}`;
   }
@@ -2611,6 +2964,7 @@ function DaySchedule({
       title: item.customer_name,
       subtitle: bookingSummaryLabel(item, serviceNames, staffNames),
       status: item.status,
+      authority: item.scheduling_authority,
       detail: appointmentOperationalDetail(item)
     })),
     ...pendingRequests.map((item) => ({
@@ -2622,6 +2976,7 @@ function DaySchedule({
       title: item.customer_name,
       subtitle: bookingSummaryLabel(item, serviceNames, staffNames),
       status: item.status,
+      authority: item.scheduling_authority,
       detail: item.error_code || "Pending owner review"
     }))
   ].sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
@@ -2631,7 +2986,7 @@ function DaySchedule({
       <EmptyState
         icon={<CalendarClock className="h-5 w-5 text-muted" />}
         title="No calendar items for this day"
-        message="POS-confirmed bookings and pending requests for the selected date will appear here."
+        message="Confirmed appointments and pending requests for the selected date will appear here with their originating authority."
       />
     );
   }
@@ -2655,10 +3010,11 @@ function DaySchedule({
           </div>
           <div className="flex flex-col gap-2 sm:items-end">
             <Badge value={item.status} />
+            <Badge value={appointmentOriginBadge(item.authority)} />
             {item.appointment ? (
               <CalendarAppointmentActions
                 appointment={item.appointment}
-                disabled={!canChangeAppointment(item.appointment)}
+                disabled={false}
                 onEdit={onEdit}
                 onReschedule={onReschedule}
                 onCancel={onCancel}
@@ -2719,9 +3075,9 @@ function AvailabilitySlotsPanel({
   return (
     <div className="space-y-3">
       <div>
-        <div className="text-sm font-semibold text-ink">Available Square slots</div>
+        <div className="text-sm font-semibold text-ink">Available Square Appointments slots</div>
         <div className="mt-1 text-xs leading-5 text-muted">
-          AI can offer these slots, but booking still requires Square Appointments confirmation
+          These slots can be offered or owner-selected, but booking still requires provider confirmation
           {result.timezone ? ` (${result.timezone})` : ""}.
         </div>
         <div className="mt-1 text-xs leading-5 text-muted">
@@ -2797,6 +3153,7 @@ function AppointmentCard({
   technicianPreference,
   timezone,
   disabled,
+  onReview,
   onReschedule,
   onCancel
 }: {
@@ -2806,6 +3163,7 @@ function AppointmentCard({
   technicianPreference: string;
   timezone?: string;
   disabled: boolean;
+  onReview: (appointment: AppointmentRecord) => void;
   onReschedule: (appointment: AppointmentRecord) => void;
   onCancel: (appointment: AppointmentRecord) => void;
 }) {
@@ -2824,7 +3182,10 @@ function AppointmentCard({
           ["Services", serviceName],
           ["Technician preference", technicianPreference],
           ["Assigned technicians", staffName],
-          ["POS booking", item.pos_appointment_id || "Not returned"]
+          ["Origin", appointmentOriginLabel(item)],
+          ...(item.scheduling_authority === "manleai_calendar"
+            ? [["Lifecycle version", String(item.authority_appointment_version ?? "-")] as [string, string]]
+            : [])
         ]}
       />
       <SegmentAssignmentList record={item} />
@@ -2832,6 +3193,7 @@ function AppointmentCard({
         <AppointmentActions
           appointment={item}
           disabled={disabled}
+          onReview={onReview}
           onReschedule={onReschedule}
           onCancel={onCancel}
         />
@@ -2875,6 +3237,7 @@ function FallbackCard({
           ["Services", serviceName],
           ["Technician preference", technicianPreference],
           ["Assigned technicians", staffName],
+          ["Origin", bookingAttemptOriginLabel(item)],
           ["Failure", item.error_code || "POS error"]
         ]}
       />
@@ -2890,32 +3253,41 @@ function FallbackCard({
 }
 
 function AppointmentReviewDialog({
+  salonID,
   appointment,
   timezone,
   disabled,
   onReschedule,
   onCancel
 }: {
+  salonID: string;
   appointment: AppointmentRecord;
   timezone?: string;
   disabled: boolean;
   onReschedule: (appointment: AppointmentRecord) => void;
   onCancel: (appointment: AppointmentRecord) => void;
 }) {
+  const internalOrigin = appointment.scheduling_authority === "manleai_calendar";
+  const rescheduleDisabled = disabled || !canRescheduleAppointment(appointment);
+  const cancelDisabled = disabled || !canCancelAppointment(appointment);
   return (
     <div>
       <AppointmentActionSummary appointment={appointment} timezone={timezone} />
       <div className="mt-5 rounded-md border border-line bg-slate-50 p-4 text-sm leading-6 text-muted">
-        Customer details and service history stay tied to the POS-confirmed appointment. Time changes and cancellations are applied only after Square Appointments confirms the update.
+        {internalOrigin
+          ? "Reschedule and cancellation follow this appointment's persisted ManleAI Calendar origin and version. Reschedule replaces the whole active party plan atomically; cancellation releases every active child together."
+          : "Customer details and service history stay tied to the provider-confirmed appointment. Time changes and cancellations are applied only after its persisted provider confirms the update."}
       </div>
+      <CustomerNotificationStatus salonID={salonID} appointmentID={appointment.id} customerPhone={appointment.customer_phone} />
       <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:justify-end">
-        <Button type="button" variant="secondary" onClick={() => onReschedule(appointment)} disabled={disabled}>
+        <Button type="button" variant="secondary" onClick={() => onReschedule(appointment)} disabled={rescheduleDisabled}>
           Reschedule appointment
         </Button>
-        <Button type="button" variant="danger" onClick={() => onCancel(appointment)} disabled={disabled}>
+        <Button type="button" variant="danger" onClick={() => onCancel(appointment)} disabled={cancelDisabled}>
           Cancel appointment
         </Button>
       </div>
+      {internalOrigin ? <div className="mt-3 text-xs leading-5 text-muted">The current salon authority does not reroute this historical lifecycle target.</div> : null}
     </div>
   );
 }
@@ -2965,12 +3337,12 @@ function FallbackReviewDialog({
       </div>
 
       <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
-        {request.error_message || "Square Appointments did not confirm this request. Owner review is required."}
+        {request.error_message || "The external provider did not confirm this request. Owner review is required."}
       </div>
 
       {request.appointment && action !== "book" ? (
         <div className="mt-5">
-          <div className="text-sm font-semibold text-ink">Current POS-confirmed appointment</div>
+          <div className="text-sm font-semibold text-ink">Current provider-confirmed appointment</div>
           <div className="mt-3">
             <AppointmentActionSummary appointment={request.appointment} timezone={timezone} />
           </div>
@@ -3096,7 +3468,7 @@ function ReconciliationDialog({
             ["Customer", attempt.customer_name || "Unknown customer"],
             ["Phone", attempt.customer_phone || "Unavailable"],
             ["Requested", `${formatDate(attempt.requested_start_time, timezone)} ${formatTimeRange(attempt.requested_start_time, attempt.requested_end_time, timezone)}`],
-            ["Provider", attempt.pos_provider],
+            ["Provider", attempt.pos_provider || attempt.authority_provider || "External provider"],
             ["Provider booking ID", attempt.pos_booking_id || "Not returned"],
             ["Retry policy", retryPolicyLabel(attempt)]
           ]}
@@ -3104,7 +3476,7 @@ function ReconciliationDialog({
       </div>
 
       <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
-        Check Square Appointments first. A request is confirmed only by linking the exact appointment already imported by provider calendar sync.
+        Check the persisted provider first. A request is confirmed only by linking the exact appointment already imported by provider calendar sync.
       </div>
 
       <label className="mt-4 block text-sm font-medium text-ink">
@@ -3115,7 +3487,7 @@ function ReconciliationDialog({
           onChange={(event) => onCandidateChange(event.target.value)}
           disabled={saving || candidatesLoading || candidates.length === 0}
         >
-          <option value="">Select a verified Square appointment</option>
+          <option value="">Select a verified provider appointment</option>
           {candidates.map((candidate) => (
             <option key={candidate.appointment_id} value={candidate.appointment_id}>
               {formatDate(candidate.start_time, timezone)} {formatTimeRange(candidate.start_time, candidate.end_time, timezone)} · {candidate.customer_name} · {candidate.provider_appointment_id}
@@ -3127,7 +3499,7 @@ function ReconciliationDialog({
         <div className="mt-2 text-xs leading-5 text-muted">Loading exact provider-synced matches...</div>
       ) : candidates.length === 0 ? (
         <div className="mt-2 text-xs leading-5 text-muted">
-          No exact provider-synced match is loaded. Sync the Square calendar and refresh before attaching a booking.
+          No exact provider-synced match is loaded. Sync the persisted external-provider calendar and refresh before attaching a booking.
         </div>
       ) : null}
 
@@ -3138,7 +3510,7 @@ function ReconciliationDialog({
           value={note}
           maxLength={2000}
           onChange={(event) => onNoteChange(event.target.value)}
-          placeholder="What was verified in Square Appointments?"
+          placeholder="What was verified with the provider?"
           disabled={saving}
         />
       </label>
@@ -3152,7 +3524,7 @@ function ReconciliationDialog({
           disabled={saving || candidatesLoading || notCreatedBlocked}
         />
         <span>
-          I checked Square Appointments and verified that this action did not create or change a booking.
+          I checked the persisted provider and verified that this action did not create or change a booking.
           {notCreatedBlockedReason}
         </span>
       </label>
@@ -3304,11 +3676,11 @@ function scheduleAvailabilityExpiry(
 
 function assertAvailabilityQuoteUsable(result: AvailabilityResult, slot: AvailabilitySlot) {
   if (!result.quote_id || !result.request_fingerprint || !result.expires_at || !slot.fingerprint) {
-    throw new Error("Square availability did not return a verifiable quote. Check availability again.");
+    throw new Error("Square Appointments availability did not return a verifiable quote. Check availability again.");
   }
   const expiresAt = new Date(result.expires_at).getTime();
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
-    throw new Error("This availability quote expired. Check Square Appointments again before submitting.");
+    throw new Error("This availability quote expired. Check Square Appointments availability again before submitting.");
   }
 }
 
@@ -3333,31 +3705,34 @@ function formatInputDateLabel(value: string) {
   });
 }
 
-function firstBookableServiceID(services: POSService[]) {
-  return services.find(serviceIsBookable)?.id ?? "";
+function firstBookableServiceID(services: POSService[], activeProvider?: string) {
+  return services.find((service) => serviceIsBookable(service, activeProvider))?.id ?? "";
 }
 
-function serviceIsBookable(service: POSService) {
+function serviceIsBookable(service: POSService, activeProvider?: string) {
   return (
     Boolean(service.id) &&
     service.active &&
+    !service.archived_at &&
     service.ai_bookable &&
+    Boolean(activeProvider) &&
+    service.pos_provider === activeProvider &&
     service.sync_status === "synced" &&
     service.pos_linked &&
-    Boolean(service.pos_service_id) &&
-    Boolean(service.pos_service_version) &&
     service.duration_minutes > 0
   );
 }
 
-function staffIsBookable(member: POSStaffMember) {
+function staffIsBookable(member: POSStaffMember, activeProvider?: string) {
   return (
     Boolean(member.id) &&
     member.active &&
+    !member.archived_at &&
     member.ai_bookable &&
+    Boolean(activeProvider) &&
+    member.pos_provider === activeProvider &&
     member.sync_status === "synced" &&
-    member.pos_linked &&
-    Boolean(member.pos_staff_id)
+    member.pos_linked
   );
 }
 
@@ -3512,18 +3887,43 @@ function bookingAttemptRetrySegments(request: BookingAttempt): BookingSegmentReq
   ];
 }
 
-function canChangeAppointment(appointment: AppointmentRecord) {
-  if (appointment.can_edit === false && appointment.can_cancel === false) return false;
-  return isPOSConfirmedStatus(appointment.status) && Boolean(appointment.pos_appointment_id);
+function canRescheduleAppointment(appointment: AppointmentRecord) {
+  if (appointment.scheduling_authority === "manleai_calendar") {
+    return hasCompleteInternalLifecyclePlan(appointment);
+  }
+  if (appointment.scheduling_authority !== "external_provider") return false;
+  if (appointment.can_edit === false) return false;
+  return hasExternalAppointmentConfirmation(appointment);
 }
 
-function isPOSConfirmedStatus(status: string) {
+function canCancelAppointment(appointment: AppointmentRecord) {
+  if (appointment.scheduling_authority === "manleai_calendar") {
+    return hasCompleteInternalLifecyclePlan(appointment);
+  }
+  if (appointment.scheduling_authority !== "external_provider") return false;
+  if (appointment.can_cancel === false || appointment.can_delete === false) return false;
+  return hasExternalAppointmentConfirmation(appointment);
+}
+
+function isConfirmedAppointmentStatus(status: string) {
   return status === "confirmed" || status === "rescheduled";
 }
 
 function appointmentOperationalDetail(appointment: AppointmentRecord) {
-  if (isPOSConfirmedStatus(appointment.status) && appointment.pos_appointment_id) {
-    return "POS-confirmed: the provider returned a booking ID.";
+  if (appointment.scheduling_authority === "manleai_calendar" && isConfirmedAppointmentStatus(appointment.status)) {
+    return "Internally confirmed: the atomic calendar commit returned a durable appointment ID.";
+  }
+  if (appointment.scheduling_authority === "manleai_calendar" && appointment.status === "cancelled") {
+    return "Internally cancelled: the durable root advanced version and has no active child plan.";
+  }
+  if (hasExternalAppointmentConfirmation(appointment)) {
+    return "Provider-confirmed: the provider returned a booking ID.";
+  }
+  if (appointment.scheduling_authority === "owner_manual") {
+    return "Owner request origin is request-only and must not be represented as a confirmed appointment.";
+  }
+  if (!appointment.scheduling_authority) {
+    return "Scheduling origin is missing; lifecycle actions remain disabled.";
   }
   if (appointment.status === "provider_pending") {
     return "Provider pending: this is not a confirmed appointment yet.";
@@ -3532,6 +3932,58 @@ function appointmentOperationalDetail(appointment: AppointmentRecord) {
   if (appointment.status === "no_show") return "Provider marked this appointment as no-show.";
   if (appointment.status === "cancelled") return "Provider marked this appointment as cancelled.";
   return "Provider status is unknown; verify this appointment before acting.";
+}
+
+function appointmentOriginLabel(appointment: AppointmentRecord) {
+  if (appointment.scheduling_authority === "manleai_calendar") return "ManleAI Calendar";
+  if (appointment.scheduling_authority === "owner_manual") return "Owner request";
+  if (appointment.scheduling_authority !== "external_provider") return "Origin missing";
+  if (appointment.authority_provider === "square" || appointment.pos_provider === "square") return "Square Appointments";
+  return appointment.authority_provider || appointment.pos_provider || "External provider";
+}
+
+function bookingAttemptOriginLabel(attempt: BookingAttempt) {
+  if (attempt.scheduling_authority === "owner_manual") return "Owner request";
+  if (attempt.scheduling_authority === "manleai_calendar") return "ManleAI Calendar";
+  if (attempt.scheduling_authority !== "external_provider") return "Origin missing";
+  if (attempt.authority_provider === "square" || attempt.pos_provider === "square") return "Square Appointments";
+  return attempt.authority_provider || attempt.pos_provider || "External provider";
+}
+
+function appointmentOriginBadge(authority: SchedulingAuthority | undefined) {
+  if (authority === "owner_manual") return "Owner request";
+  if (authority === "manleai_calendar") return "ManleAI Calendar";
+  if (authority === "external_provider") return "External provider";
+  return "Origin missing";
+}
+
+function authorityWorkflowDescription(authority: SchedulingAuthority, activeProvider?: string) {
+  if (authority === "owner_manual") {
+    return "New scheduling work becomes a pending owner-review request. It is never confirmed automatically.";
+  }
+  if (authority === "manleai_calendar") {
+    return "New scheduling work uses ManleAI Calendar and confirms only after an atomic internal commit returns a durable appointment ID.";
+  }
+  const provider = activeProvider === "square" ? "Square Appointments" : "the selected external-provider adapter";
+  return `New scheduling work uses ${provider} and confirms only after the provider returns the required booking evidence.`;
+}
+
+function appointmentDetailItems(appointment: AppointmentRecord): [string, string][] {
+  const items: [string, string][] = [
+    ["Origin", appointmentOriginLabel(appointment)],
+    ["Services", serviceNamesLabel(appointment)],
+    ["Assigned technicians", assignedTechniciansLabel(appointment)],
+    ["Technician preference", technicianPreferenceLabel(appointment)]
+  ];
+  if (appointment.scheduling_authority === "manleai_calendar") {
+    items.push(["Internal appointment ID", appointment.authority_appointment_id || appointment.id]);
+    items.push(["Version", String(appointment.authority_appointment_version ?? 1)]);
+    return items;
+  }
+  if (appointment.scheduling_authority === "external_provider") {
+    items.push(["Provider booking", appointment.authority_appointment_id || appointment.pos_appointment_id || "Not returned"]);
+  }
+  return items;
 }
 
 function isBookingAttempt(response: AppointmentRecord | BookingAttempt): response is BookingAttempt {
@@ -3546,9 +3998,11 @@ function actionDialogTitle(mode: AppointmentActionMode) {
 
 function actionDialogDescription(mode: AppointmentActionMode) {
   if (mode === "cancel") {
-    return "Cancellation is applied only after Square Appointments confirms it.";
+    return "Cancellation is applied only after the appointment's persisted provider confirms it.";
   }
-  return "Check Square Appointments availability, choose a returned slot, then submit the POS action.";
+  return mode === "create"
+    ? "Check Square Appointments availability, choose a returned slot, then submit the booking."
+    : "Check availability through this appointment's persisted external-provider origin, then submit the change.";
 }
 
 function fallbackBookingAction(request: BookingAttempt): "book" | "reschedule" | "cancel" {
@@ -3576,7 +4030,8 @@ function fallbackRetryLabel(request: BookingAttempt) {
 }
 
 function canRetryFallbackRequest(request: BookingAttempt) {
-  if (!request.can_retry) {
+  if (request.scheduling_authority !== "external_provider" || request.status !== "fallback_pending" ||
+      request.retry_policy !== "safe" || !request.can_retry || request.superseded_at || request.superseded_by_attempt_id) {
     return false;
   }
   const action = fallbackBookingAction(request);
@@ -3587,24 +4042,40 @@ function canRetryFallbackRequest(request: BookingAttempt) {
 	  : Boolean(request.service_id);
 	return hasEveryService && Boolean(request.customer_name.trim() && request.customer_phone.trim());
   }
-  return Boolean(request.appointment && canChangeAppointment(request.appointment));
+  if (!request.appointment) return false;
+  return action === "reschedule"
+    ? canRescheduleAppointment(request.appointment)
+    : canCancelAppointment(request.appointment);
+}
+
+function isEligibleSafeExternalCreateRetry(request: BookingAttempt) {
+  return fallbackBookingAction(request) === "book" && canRetryFallbackRequest(request);
 }
 
 function fallbackRetryDisabledReason(request: BookingAttempt) {
+  if (request.scheduling_authority !== "external_provider") {
+    return "Provider retry is disabled because this request does not have an external-provider origin.";
+  }
+  if (request.status !== "fallback_pending" || request.retry_policy !== "safe" || !request.can_retry) {
+    return request.retry_blocked_reason || "This request does not have backend safe-retry evidence.";
+  }
+  if (request.superseded_at || request.superseded_by_attempt_id) {
+    return "This request was superseded by a later attempt and cannot own another retry.";
+  }
   if (request.retry_blocked_reason) {
     return request.retry_blocked_reason;
   }
   if (request.reconciliation_status === "required") {
-    return "Square may have completed this action. Reconcile it with Square Appointments before retrying.";
+    return "The provider may have completed this action. Reconcile it with provider-synced evidence before retrying.";
   }
   if (canRetryFallbackRequest(request)) {
     return "";
   }
   const action = fallbackBookingAction(request);
   if (action === "book") {
-    return "This pending booking is missing customer or service details needed to retry through Square Appointments.";
+    return "This pending booking is missing customer or service details needed to retry through its external-provider origin.";
   }
-  return "This pending appointment action is missing the target POS-confirmed appointment, so retry is gated until the appointment context is available.";
+  return "This pending appointment action is missing the target provider-confirmed appointment, so retry is gated until the appointment context is available.";
 }
 
 function retryPolicyLabel(request: BookingAttempt) {
@@ -3624,7 +4095,8 @@ function reconciliationAttemptForTask(
   fallbackRequests: BookingAttempt[]
 ) {
   if (!task) return null;
-  return fallbackRequests.find((item) => item.id === task.booking_attempt_id) ?? task.booking_attempt ?? null;
+  const attempt = fallbackRequests.find((item) => item.id === task.booking_attempt_id) ?? task.booking_attempt ?? null;
+  return attempt?.scheduling_authority === "external_provider" ? attempt : null;
 }
 
 function retrySlotMatchesStoredRequest(form: AppointmentActionForm, slot: AvailabilitySlot) {
@@ -3680,3 +4152,7 @@ const selectClassName =
 
 const textareaClassName =
   "mt-2 min-h-24 w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-teal-100 disabled:bg-slate-100 disabled:text-slate-500";
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}

@@ -7,7 +7,8 @@ import (
 )
 
 const (
-	SchemaVersion         = "manleai.salon_configuration.v7"
+	SchemaVersion         = "manleai.salon_configuration.v8"
+	LegacySchemaV7        = "manleai.salon_configuration.v7"
 	LegacySchemaV6        = "manleai.salon_configuration.v6"
 	LegacySchemaV5        = "manleai.salon_configuration.v5"
 	LegacySchemaV4        = "manleai.salon_configuration.v4"
@@ -32,13 +33,40 @@ var excludedData = []string{
 	"staff",
 	"customers",
 	"appointments",
+	"appointment_services",
+	"appointment_resources",
 	"booking_attempts",
+	"booking_attempt_segments",
+	"booking_attempt_segment_resource_allocations",
+	"availability_quotes",
+	"availability_quote_slots",
+	"availability_quote_slot_segments",
+	"availability_quote_slot_resource_allocations",
 	"fallback_requests",
+	"scheduling_authority",
+	"scheduling_authority_version",
+	"scheduling_authority_switch_runs",
+	"scheduling_authority_switch_events",
+	"scheduling_requests",
+	"scheduling_request_segments",
+	"scheduling_request_events",
+	"manleai_calendar_configs",
+	"manleai_calendar_staff_weekly_periods",
+	"manleai_calendar_service_policies",
+	"manleai_calendar_service_staff",
+	"manleai_calendar_resource_pools",
+	"manleai_calendar_service_resources",
+	"manleai_calendar_exceptions",
+	"manleai_calendar_config_events",
+	"manleai_calendar_appointment_resource_allocations",
+	"manleai_calendar_execution_events",
+	"owner_notifications",
 	"call_sessions",
 	"transcripts",
 	"recordings",
 	"summaries",
 	"owner_corrections",
+	"pos_connections",
 	"pos_entity_links",
 	"pos_sync_jobs",
 	"pos_sync_logs",
@@ -67,11 +95,14 @@ type ConfigurationBundle struct {
 	AIReceptionist          AIReceptionistExport                         `json:"ai_receptionist"`
 	PublicBookingPage       PublicBookingPageExport                      `json:"public_booking_page"`
 	Integrations            integrationconfig.IntegrationConfigsResponse `json:"integrations"`
-	POSConnection           POSConnectionExport                          `json:"pos_connection"`
-	ServiceCategories       ServiceCategoryBundleExport                  `json:"service_categories"`
-	ServiceAliases          ServiceAliasBundleExport                     `json:"service_aliases"`
-	ConsultationProfiles    ServiceConsultationProfileBundleExport       `json:"service_consultation_profiles"`
-	KnowledgeBase           KnowledgeBaseExport                          `json:"knowledge_base"`
+	// POSConnection is accepted only for schema-v7-and-earlier compatibility.
+	// Schema v8 exports omit provider connection state because it is operational,
+	// destination-scoped evidence rather than portable configuration intent.
+	POSConnection        *POSConnectionExport                   `json:"pos_connection,omitempty"`
+	ServiceCategories    ServiceCategoryBundleExport            `json:"service_categories"`
+	ServiceAliases       ServiceAliasBundleExport               `json:"service_aliases"`
+	ConsultationProfiles ServiceConsultationProfileBundleExport `json:"service_consultation_profiles"`
+	KnowledgeBase        KnowledgeBaseExport                    `json:"knowledge_base"`
 }
 
 type SalonProfileExport struct {
@@ -216,18 +247,27 @@ type ImportRequest struct {
 }
 
 type ImportResponse struct {
-	ImportRunID           string                 `json:"import_run_id,omitempty"`
-	SalonID               string                 `json:"salon_id,omitempty"`
-	RequestID             string                 `json:"request_id"`
-	DryRun                bool                   `json:"dry_run"`
-	Status                string                 `json:"status"`
-	SchemaVersion         string                 `json:"schema_version"`
-	CanApply              bool                   `json:"can_apply"`
-	Summary               []ImportSectionSummary `json:"summary"`
-	Warnings              []ImportIssue          `json:"warnings"`
-	Conflicts             []ImportIssue          `json:"conflicts"`
-	ExcludedData          []string               `json:"excluded_data"`
-	RequiresSecretReentry []string               `json:"requires_secret_reentry"`
+	ImportRunID             string                 `json:"import_run_id,omitempty"`
+	SalonID                 string                 `json:"salon_id,omitempty"`
+	RequestID               string                 `json:"request_id"`
+	DryRun                  bool                   `json:"dry_run"`
+	Status                  string                 `json:"status"`
+	SchemaVersion           string                 `json:"schema_version"`
+	IncludedSections        []string               `json:"included_sections"`
+	TargetAuthority         string                 `json:"target_scheduling_authority"`
+	TargetAuthorityVersion  int64                  `json:"target_scheduling_authority_version"`
+	SourceActivePOSProvider string                 `json:"source_active_pos_provider"`
+	TargetActivePOSProvider string                 `json:"target_active_pos_provider"`
+	ResultActivePOSProvider string                 `json:"result_active_pos_provider"`
+	SourceBookingMode       string                 `json:"source_booking_mode"`
+	TargetBookingMode       string                 `json:"target_booking_mode"`
+	ResultBookingMode       string                 `json:"result_booking_mode"`
+	CanApply                bool                   `json:"can_apply"`
+	Summary                 []ImportSectionSummary `json:"summary"`
+	Warnings                []ImportIssue          `json:"warnings"`
+	Conflicts               []ImportIssue          `json:"conflicts"`
+	ExcludedData            []string               `json:"excluded_data"`
+	RequiresSecretReentry   []string               `json:"requires_secret_reentry"`
 }
 
 type ImportSectionSummary struct {
@@ -248,28 +288,31 @@ type ImportIssue struct {
 }
 
 type importPlan struct {
-	Bundle                ConfigurationBundle
-	PayloadFingerprint    string
-	SchemaVersion         string
-	SalonID               string
-	RequestID             string
-	Summary               map[string]*ImportSectionSummary
-	Warnings              []ImportIssue
-	Conflicts             []ImportIssue
-	RequiresSecretReentry []string
-	CanApply              bool
-	Target                *importTargetState
-	Knowledge             []plannedKnowledgeItem
-	PublicCatalogEnabled  bool
-	AIEnabled             bool
-	BookingMode           string
-	ConsultationEnabled   bool
-	ServiceCategories     []plannedServiceCategory
-	ServiceAliases        []plannedServiceAlias
-	ConsultationProfiles  []plannedServiceConsultationProfile
-	ConsultationReady     bool
-	Onboarding            bool
-	IncludedSections      map[string]bool
+	Bundle                  ConfigurationBundle
+	PayloadFingerprint      string
+	SchemaVersion           string
+	SalonID                 string
+	RequestID               string
+	Summary                 map[string]*ImportSectionSummary
+	Warnings                []ImportIssue
+	Conflicts               []ImportIssue
+	RequiresSecretReentry   []string
+	CanApply                bool
+	Target                  *importTargetState
+	Knowledge               []plannedKnowledgeItem
+	PublicCatalogEnabled    bool
+	AIEnabled               bool
+	BookingMode             string
+	ConsultationEnabled     bool
+	ServiceCategories       []plannedServiceCategory
+	ServiceAliases          []plannedServiceAlias
+	ConsultationProfiles    []plannedServiceConsultationProfile
+	ConsultationReady       bool
+	Onboarding              bool
+	IncludedSections        map[string]bool
+	TargetAuthority         string
+	TargetAuthorityVersion  int64
+	SourceActivePOSProvider string
 }
 
 type plannedKnowledgeItem struct {
@@ -314,7 +357,8 @@ type importTargetState struct {
 	AIReceptionist               AIReceptionistExport
 	PublicBookingPage            PublicBookingPageExport
 	PublicCanPublish             bool
-	CanEnableAIBooking           bool
+	SchedulingAuthority          string
+	SchedulingAuthorityVersion   int64
 	Integrations                 integrationconfig.IntegrationConfigsResponse
 	ServiceCategoryBySlug        map[string]ServiceCategoryExport
 	CategoryAliasByKey           map[string]ServiceCategoryAliasExport

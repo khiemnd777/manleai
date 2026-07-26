@@ -16,6 +16,7 @@ type AvailabilityQuoteSlot struct {
 func (AvailabilityQuoteSlot) Fields() []ent.Field {
 	return []ent.Field{
 		field.UUID("id", uuid.UUID{}).Default(uuid.New),
+		field.UUID("salon_id", uuid.UUID{}),
 		field.UUID("quote_id", uuid.UUID{}),
 		field.String("slot_fingerprint").NotEmpty(),
 		field.Time("start_time"),

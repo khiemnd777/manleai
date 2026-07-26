@@ -5,6 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+
+	"github.com/lib/pq"
+	"github.com/manleai/ai-receptionist/modules/booking"
+	"github.com/manleai/ai-receptionist/modules/scheduling/fence"
 )
 
 var (
@@ -16,18 +20,16 @@ type Repository struct {
 	db *sql.DB
 }
 
+const onboardingOperationLockPrefix = "salon-onboarding:"
+
 func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
 }
 
 func (r *Repository) ListForOwner(ctx context.Context, ownerUserID string) ([]Salon, error) {
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT id::text, name, phone, COALESCE(address, ''), COALESCE(city, ''), COALESCE(state, ''), COALESCE(zip_code, ''),
-		       timezone, owner_user_id::text, primary_language, secondary_language, COALESCE(handoff_phone, ''),
-		       ai_enabled, active_pos_provider, COALESCE(public_slug, ''), public_catalog_enabled, created_at, updated_at
-		FROM salons
-		WHERE owner_user_id = $1
-		ORDER BY created_at DESC
+	rows, err := r.db.QueryContext(ctx, salonSelect+`
+		WHERE salon.owner_user_id = $1
+		ORDER BY salon.created_at DESC
 	`, ownerUserID)
 	if err != nil {
 		return nil, err
@@ -46,35 +48,66 @@ func (r *Repository) ListForOwner(ctx context.Context, ownerUserID string) ([]Sa
 }
 
 func (r *Repository) GetForOwner(ctx context.Context, id string, ownerUserID string) (*Salon, error) {
-	row := r.db.QueryRowContext(ctx, `
-		SELECT id::text, name, phone, COALESCE(address, ''), COALESCE(city, ''), COALESCE(state, ''), COALESCE(zip_code, ''),
-		       timezone, owner_user_id::text, primary_language, secondary_language, COALESCE(handoff_phone, ''),
-		       ai_enabled, active_pos_provider, COALESCE(public_slug, ''), public_catalog_enabled, created_at, updated_at
-		FROM salons
-		WHERE id = $1 AND owner_user_id = $2
+	row := r.db.QueryRowContext(ctx, salonSelect+`
+		WHERE salon.id = $1 AND salon.owner_user_id = $2
 	`, id, ownerUserID)
 	return scanSalon(row)
 }
 
-func (r *Repository) Create(ctx context.Context, ownerUserID string, req CreateSalonRequest) (*Salon, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
+func (r *Repository) Create(ctx context.Context, ownerUserID string, req CreateSalonRequest, payloadFingerprint string) (*Salon, error) {
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-
-	var salonID string
-	row := tx.QueryRowContext(ctx, `
-		INSERT INTO salons (name, phone, address, city, state, zip_code, timezone, owner_user_id, primary_language, secondary_language, handoff_phone)
-		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''), $7, $8, $9, $10, NULLIF($11, ''))
-		RETURNING id::text
-	`, req.Name, req.Phone, req.Address, req.City, req.State, req.ZipCode, req.Timezone, ownerUserID, req.PrimaryLanguage, req.SecondaryLanguage, req.HandoffPhone)
-	if err := row.Scan(&salonID); err != nil {
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, onboardingOperationLockPrefix+ownerUserID+":"+req.OperationKey); err != nil {
 		return nil, err
 	}
 
-	if _, err := tx.ExecContext(ctx, `INSERT INTO salon_settings (salon_id) VALUES ($1)`, salonID); err != nil {
-		return nil, err
+	var existingSalonID string
+	var existingFingerprint string
+	err = tx.QueryRowContext(ctx, `
+		SELECT id::text, creation_payload_fingerprint
+		FROM salons
+		WHERE owner_user_id = $1 AND creation_operation_key = $2
+		FOR UPDATE
+	`, ownerUserID, req.OperationKey).Scan(&existingSalonID, &existingFingerprint)
+	if err == nil {
+		if existingFingerprint != payloadFingerprint {
+			return nil, ErrCreateOperationConflict
+		}
+		item, err := getSalonForOwnerTx(ctx, tx, existingSalonID, ownerUserID)
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return item, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, classifySalonConstraint(err)
+	}
+
+	var salonID string
+	row := tx.QueryRowContext(ctx, `
+		INSERT INTO salons (
+			name, phone, address, city, state, zip_code, timezone, owner_user_id,
+			primary_language, secondary_language, handoff_phone,
+			creation_operation_key, creation_payload_fingerprint
+		)
+		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''), $7, $8, $9, $10, NULLIF($11, ''), $12, $13)
+		RETURNING id::text
+	`, req.Name, req.Phone, req.Address, req.City, req.State, req.ZipCode, req.Timezone, ownerUserID, req.PrimaryLanguage, req.SecondaryLanguage, req.HandoffPhone, req.OperationKey, payloadFingerprint)
+	if err := row.Scan(&salonID); err != nil {
+		return nil, classifySalonConstraint(err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO salon_settings (salon_id, booking_mode, scheduling_authority)
+		VALUES ($1, 'pending_approval', $2)
+	`, salonID, req.SchedulingAuthority); err != nil {
+		return nil, classifySalonConstraint(err)
 	}
 	for day := 0; day <= 6; day++ {
 		isClosed := day == 0
@@ -82,13 +115,17 @@ func (r *Repository) Create(ctx context.Context, ownerUserID string, req CreateS
 			INSERT INTO salon_business_hours (salon_id, day_of_week, open_time, close_time, is_closed)
 			VALUES ($1, $2, '09:30', '19:00', $3)
 		`, salonID, day, isClosed); err != nil {
-			return nil, err
+			return nil, classifySalonConstraint(err)
 		}
+	}
+	item, err := getSalonForOwnerTx(ctx, tx, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return r.GetForOwner(ctx, salonID, ownerUserID)
+	return item, nil
 }
 
 func (r *Repository) Update(ctx context.Context, id string, ownerUserID string, req UpdateSalonRequest) (*Salon, error) {
@@ -118,19 +155,40 @@ func (r *Repository) Update(ctx context.Context, id string, ownerUserID string, 
 }
 
 func (r *Repository) GetSettings(ctx context.Context, salonID string, ownerUserID string) (*Settings, error) {
-	row := r.db.QueryRowContext(ctx, `
-		SELECT ss.id::text, ss.salon_id::text, ss.ai_greeting, ss.ai_voice, COALESCE(ss.ai_tone, 'professional_warm'), ss.booking_mode, ss.recording_enabled,
-		       ss.recording_consent_message, ss.sms_confirmation_enabled, ss.sms_reminder_enabled,
-		       ss.reminder_hours_before, ss.handoff_enabled, ss.consultation_enabled, ss.created_at, ss.updated_at
-		FROM salon_settings ss
-		JOIN salons s ON s.id = ss.salon_id
+	row := r.db.QueryRowContext(ctx, settingsSelect+`
 		WHERE ss.salon_id = $1 AND s.owner_user_id = $2
 	`, salonID, ownerUserID)
 	return scanSettings(row)
 }
 
 func (r *Repository) UpdateSettings(ctx context.Context, salonID string, ownerUserID string, req UpdateSettingsRequest) (*Settings, error) {
-	result, err := r.db.ExecContext(ctx, `
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, fence.AdvisoryKey(salonID)); err != nil {
+		return nil, err
+	}
+	var schedulingAuthority string
+	err = tx.QueryRowContext(ctx, `
+		SELECT ss.scheduling_authority
+		FROM salon_settings ss
+		JOIN salons s ON s.id = ss.salon_id
+		WHERE ss.salon_id = $1 AND s.owner_user_id = $2
+		FOR UPDATE OF ss, s
+	`, salonID, ownerUserID).Scan(&schedulingAuthority)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if schedulingAuthority == "owner_manual" && req.BookingMode == "confirmed_booking" {
+		return nil, ErrValidation
+	}
+
+	result, err := tx.ExecContext(ctx, `
 		UPDATE salon_settings
 		SET ai_greeting = $1,
 		    ai_voice = $2,
@@ -145,15 +203,23 @@ func (r *Repository) UpdateSettings(ctx context.Context, salonID string, ownerUs
 		    consultation_enabled = $11,
 		    updated_at = now()
 		WHERE salon_id = $12
-		  AND EXISTS (SELECT 1 FROM salons WHERE salons.id = salon_settings.salon_id AND salons.owner_user_id = $13)
-	`, req.AIGreeting, req.AIVoice, req.AITone, req.BookingMode, req.RecordingEnabled, req.RecordingConsentMessage, req.SMSConfirmationEnabled, req.SMSReminderEnabled, req.ReminderHoursBefore, req.HandoffEnabled, req.ConsultationEnabled, salonID, ownerUserID)
+	`, req.AIGreeting, req.AIVoice, req.AITone, req.BookingMode, req.RecordingEnabled, req.RecordingConsentMessage, req.SMSConfirmationEnabled, req.SMSReminderEnabled, req.ReminderHoursBefore, req.HandoffEnabled, req.ConsultationEnabled, salonID)
 	if err != nil {
-		return nil, err
+		return nil, classifySalonConstraint(err)
 	}
 	if affected, _ := result.RowsAffected(); affected == 0 {
 		return nil, ErrNotFound
 	}
-	return r.GetSettings(ctx, salonID, ownerUserID)
+	settings, err := scanSettings(tx.QueryRowContext(ctx, settingsSelect+`
+		WHERE ss.salon_id = $1 AND s.owner_user_id = $2
+	`, salonID, ownerUserID))
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, classifySalonConstraint(err)
+	}
+	return settings, nil
 }
 
 func (r *Repository) CountConsultationReadyServices(ctx context.Context, salonID string, ownerUserID string) (int, error) {
@@ -201,9 +267,34 @@ func (r *Repository) GetPublicCatalogSettings(ctx context.Context, salonID strin
 
 func (r *Repository) UpdatePublicCatalogSettings(ctx context.Context, salonID string, ownerUserID string, req UpdatePublicCatalogRequest) (*PublicCatalogSettings, error) {
 	slug := strings.TrimSpace(req.PublicSlug)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	// Authority switches, provider snapshot writes, calendar configuration, and
+	// publishing all share this salon fence. Readiness is reloaded under the
+	// lock so a switch cannot create an ABA window between validation and write.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, fence.AdvisoryKey(salonID)); err != nil {
+		return nil, err
+	}
+	current, err := scanPublicCatalogSettings(tx.QueryRowContext(ctx, publicCatalogSettingsQuery(), salonID, ownerUserID))
+	if err != nil {
+		return nil, err
+	}
+	if req.ExpectedSchedulingAuthorityVersion > 0 && req.ExpectedSchedulingAuthorityVersion != current.SchedulingAuthorityVersion {
+		return nil, ErrSchedulingAuthorityChanged
+	}
+	if req.PublicCatalogEnabled {
+		if slug == "" || hasPublicCatalogBlockerOtherThanSlug(current.ReadinessBlockers) {
+			return nil, ErrPublicCatalogNotReady
+		}
+	}
+
 	if slug != "" {
 		var taken bool
-		if err := r.db.QueryRowContext(ctx, `
+		if err := tx.QueryRowContext(ctx, `
 			SELECT EXISTS (
 				SELECT 1
 				FROM salons
@@ -218,7 +309,7 @@ func (r *Repository) UpdatePublicCatalogSettings(ctx context.Context, salonID st
 		}
 	}
 
-	result, err := r.db.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		UPDATE salons
 		SET public_slug = NULLIF($1, ''),
 		    public_catalog_enabled = $2,
@@ -227,12 +318,23 @@ func (r *Repository) UpdatePublicCatalogSettings(ctx context.Context, salonID st
 		  AND owner_user_id = $4
 	`, slug, req.PublicCatalogEnabled, salonID, ownerUserID)
 	if err != nil {
+		var pgErr *pq.Error
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.Constraint == "idx_salons_public_slug_unique" {
+			return nil, ErrSlugUnavailable
+		}
 		return nil, err
 	}
 	if affected, _ := result.RowsAffected(); affected == 0 {
 		return nil, ErrNotFound
 	}
-	return r.GetPublicCatalogSettings(ctx, salonID, ownerUserID)
+	updated, err := scanPublicCatalogSettings(tx.QueryRowContext(ctx, publicCatalogSettingsQuery(), salonID, ownerUserID))
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 func (r *Repository) GetBusinessHours(ctx context.Context, salonID string, ownerUserID string) ([]BusinessHour, error) {
@@ -363,6 +465,8 @@ func scanSalon(row rowScanner) (*Salon, error) {
 		&item.ActivePOSProvider,
 		&item.PublicSlug,
 		&item.PublicCatalogEnabled,
+		&item.SchedulingAuthority,
+		&item.SchedulingAuthorityVersion,
 		&item.CreatedAt,
 		&item.UpdatedAt,
 	)
@@ -375,11 +479,60 @@ func scanSalon(row rowScanner) (*Salon, error) {
 	return &item, nil
 }
 
+func getSalonForOwnerTx(ctx context.Context, tx *sql.Tx, salonID string, ownerUserID string) (*Salon, error) {
+	return scanSalon(tx.QueryRowContext(ctx, salonSelect+`
+		WHERE salon.id = $1 AND salon.owner_user_id = $2
+	`, salonID, ownerUserID))
+}
+
+func classifySalonConstraint(err error) error {
+	var pqErr *pq.Error
+	if !errors.As(err, &pqErr) {
+		return err
+	}
+	switch pqErr.Constraint {
+	case "salons_owner_creation_operation_key":
+		return ErrCreateOperationConflict
+	case "salon_settings_owner_manual_booking_mode_guard":
+		return ErrValidation
+	default:
+		return err
+	}
+}
+
+const salonSelect = `
+	SELECT salon.id::text, salon.name, salon.phone,
+	       COALESCE(salon.address, ''), COALESCE(salon.city, ''),
+	       COALESCE(salon.state, ''), COALESCE(salon.zip_code, ''),
+	       salon.timezone, salon.owner_user_id::text,
+	       salon.primary_language, salon.secondary_language,
+	       COALESCE(salon.handoff_phone, ''), salon.ai_enabled,
+	       salon.active_pos_provider, COALESCE(salon.public_slug, ''),
+	       salon.public_catalog_enabled, settings.scheduling_authority,
+	       settings.scheduling_authority_version, salon.created_at, salon.updated_at
+	FROM salons salon
+	JOIN salon_settings settings ON settings.salon_id = salon.id
+`
+
+const settingsSelect = `
+	SELECT ss.id::text, ss.salon_id::text, ss.scheduling_authority,
+	       ss.scheduling_authority_version, ss.ai_greeting, ss.ai_voice,
+	       COALESCE(ss.ai_tone, 'professional_warm'), ss.booking_mode,
+	       ss.recording_enabled, ss.recording_consent_message,
+	       ss.sms_confirmation_enabled, ss.sms_reminder_enabled,
+	       ss.reminder_hours_before, ss.handoff_enabled,
+	       ss.consultation_enabled, ss.created_at, ss.updated_at
+	FROM salon_settings ss
+	JOIN salons s ON s.id = ss.salon_id
+`
+
 func scanSettings(row rowScanner) (*Settings, error) {
 	var settings Settings
 	err := row.Scan(
 		&settings.ID,
 		&settings.SalonID,
+		&settings.SchedulingAuthority,
+		&settings.SchedulingAuthorityVersion,
 		&settings.AIGreeting,
 		&settings.AIVoice,
 		&settings.AITone,
@@ -406,70 +559,149 @@ func scanSettings(row rowScanner) (*Settings, error) {
 func publicCatalogSettingsQuery() string {
 	return `
 		WITH owned_salon AS (
-			SELECT id, owner_user_id, active_pos_provider, public_slug, public_catalog_enabled, updated_at
-			FROM salons
-			WHERE id = $1 AND owner_user_id = $2
+			SELECT salon.id, salon.active_pos_provider, salon.public_slug,
+			       salon.public_catalog_enabled, salon.updated_at,
+			       settings.scheduling_authority, settings.scheduling_authority_version
+			FROM salons salon
+			JOIN salon_settings settings ON settings.salon_id = salon.id
+			WHERE salon.id = $1 AND salon.owner_user_id = $2
 		),
-		service_rows AS (
-			SELECT svc.id,
-			       EXISTS (
-			           SELECT 1
-			           FROM pos_entity_links link
-			           WHERE link.salon_id = svc.salon_id
-			             AND link.entity_type = 'service'
-			             AND link.entity_id = svc.id
-			             AND link.provider = (SELECT active_pos_provider FROM owned_salon)
-			             AND link.sync_status = 'synced'
-			             AND link.provider_entity_id IS NOT NULL
-			             AND link.provider_entity_id <> ''
-			       ) AS linked
+		canonical_services AS (
+			SELECT svc.id
 			FROM services svc
 			WHERE svc.salon_id = (SELECT id FROM owned_salon)
-			  AND svc.pos_provider = (SELECT active_pos_provider FROM owned_salon)
 			  AND svc.active = true
 			  AND svc.ai_bookable = true
 			  AND svc.archived_at IS NULL
-			  AND svc.sync_status = 'synced'
 			  AND svc.duration_minutes > 0
-			  AND COALESCE(svc.pos_service_version, 0) > 0
 		),
-		staff_rows AS (
-			SELECT st.id,
-			       EXISTS (
-			           SELECT 1
-			           FROM pos_entity_links link
-			           WHERE link.salon_id = st.salon_id
-			             AND link.entity_type = 'staff'
-			             AND link.entity_id = st.id
-			             AND link.provider = (SELECT active_pos_provider FROM owned_salon)
-			             AND link.sync_status = 'synced'
-			             AND link.provider_entity_id IS NOT NULL
-			             AND link.provider_entity_id <> ''
-			       ) AS linked
+		canonical_staff AS (
+			SELECT st.id
 			FROM staff st
 			WHERE st.salon_id = (SELECT id FROM owned_salon)
-			  AND st.pos_provider = (SELECT active_pos_provider FROM owned_salon)
 			  AND st.active = true
 			  AND st.ai_bookable = true
 			  AND st.archived_at IS NULL
+		),
+		external_services AS (
+			SELECT svc.id
+			FROM services svc
+			JOIN pos_entity_links link
+			  ON link.salon_id = svc.salon_id
+			 AND link.entity_type = 'service'
+			 AND link.entity_id = svc.id
+			 AND link.provider = (SELECT active_pos_provider FROM owned_salon)
+			 AND link.sync_status = 'synced'
+			 AND NULLIF(link.provider_entity_id, '') IS NOT NULL
+			WHERE svc.id IN (SELECT id FROM canonical_services)
+			  AND svc.pos_provider = (SELECT active_pos_provider FROM owned_salon)
+			  AND svc.sync_status = 'synced'
+			  AND COALESCE(svc.pos_service_version, 0) > 0
+		),
+		external_staff AS (
+			SELECT st.id
+			FROM staff st
+			JOIN pos_entity_links link
+			  ON link.salon_id = st.salon_id
+			 AND link.entity_type = 'staff'
+			 AND link.entity_id = st.id
+			 AND link.provider = (SELECT active_pos_provider FROM owned_salon)
+			 AND link.sync_status = 'synced'
+			 AND NULLIF(link.provider_entity_id, '') IS NOT NULL
+			WHERE st.id IN (SELECT id FROM canonical_staff)
+			  AND st.pos_provider = (SELECT active_pos_provider FROM owned_salon)
 			  AND st.sync_status = 'synced'
+		),
+		internal_services AS (
+			SELECT service.id
+			FROM canonical_services service
+			JOIN manleai_calendar_service_policies policy
+			  ON policy.salon_id = (SELECT id FROM owned_salon)
+			 AND policy.service_id = service.id
+			 AND policy.enabled = true
+		),
+		internal_staff AS (
+			SELECT DISTINCT staff.id
+			FROM canonical_staff staff
+			JOIN manleai_calendar_service_staff eligible
+			  ON eligible.salon_id = (SELECT id FROM owned_salon)
+			 AND eligible.staff_id = staff.id
+			JOIN internal_services service ON service.id = eligible.service_id
+			WHERE EXISTS (
+				SELECT 1 FROM manleai_calendar_staff_weekly_periods weekly
+				WHERE weekly.salon_id = eligible.salon_id AND weekly.staff_id = staff.id
+			)
+		),
+		authority_facts AS (
+			SELECT
+				EXISTS (
+					SELECT 1 FROM pos_connections connection
+					WHERE connection.salon_id = (SELECT id FROM owned_salon)
+					  AND connection.provider = (SELECT active_pos_provider FROM owned_salon)
+					  AND connection.status = 'active'
+					  AND NULLIF(connection.location_id, '') IS NOT NULL
+					  AND connection.last_sync_at IS NOT NULL
+					  AND connection.snapshot_generation > 0
+				) AS external_connection_ready,
+				EXISTS (
+					SELECT 1 FROM manleai_calendar_configs config
+					WHERE config.salon_id = (SELECT id FROM owned_salon)
+					  AND config.activated_at IS NOT NULL
+					  AND config.activated_version = config.version
+				) AS internal_activation_current,
+				(SELECT count(*)::int FROM salon_business_hour_periods period
+				 WHERE period.salon_id = (SELECT id FROM owned_salon)
+				   AND period.source = 'local_override') AS local_hour_count,
+				(SELECT count(*)::int FROM salon_business_hour_periods period
+				 WHERE period.salon_id = (SELECT id FROM owned_salon)
+				   AND period.source = 'imported'
+				   AND period.provider = (SELECT active_pos_provider FROM owned_salon)) AS external_hour_count,
+				(SELECT count(*)::int FROM salon_business_hour_periods period
+				 WHERE period.salon_id = (SELECT id FROM owned_salon)
+				   AND period.source IN ('local_override', 'local_migrated')) AS owner_hour_count
 		)
-		SELECT id::text, COALESCE(public_slug, ''), public_catalog_enabled,
-		       (SELECT count(*)::int FROM service_rows WHERE linked = true),
-		       (SELECT count(*)::int FROM staff_rows WHERE linked = true),
-		       updated_at
-		FROM owned_salon
+		SELECT salon.id::text, COALESCE(salon.public_slug, ''), salon.public_catalog_enabled,
+		       salon.scheduling_authority, salon.scheduling_authority_version,
+		       CASE salon.scheduling_authority
+		         WHEN 'owner_manual' THEN (SELECT count(*)::int FROM canonical_services)
+		         WHEN 'manleai_calendar' THEN (SELECT count(*)::int FROM internal_services)
+		         WHEN 'external_provider' THEN (SELECT count(*)::int FROM external_services)
+		         ELSE 0
+		       END,
+		       CASE salon.scheduling_authority
+		         WHEN 'owner_manual' THEN (SELECT count(*)::int FROM canonical_staff)
+		         WHEN 'manleai_calendar' THEN (SELECT count(*)::int FROM internal_staff)
+		         WHEN 'external_provider' THEN (SELECT count(*)::int FROM external_staff)
+		         ELSE 0
+		       END,
+		       CASE salon.scheduling_authority
+		         WHEN 'owner_manual' THEN facts.owner_hour_count
+		         WHEN 'manleai_calendar' THEN facts.local_hour_count
+		         WHEN 'external_provider' THEN facts.external_hour_count
+		         ELSE 0
+		       END,
+		       facts.internal_activation_current, facts.external_connection_ready,
+		       salon.updated_at
+		FROM owned_salon salon
+		CROSS JOIN authority_facts facts
 	`
 }
 
 func scanPublicCatalogSettings(row rowScanner) (*PublicCatalogSettings, error) {
 	var settings PublicCatalogSettings
+	var internalActivationCurrent bool
+	var externalConnectionReady bool
 	err := row.Scan(
 		&settings.SalonID,
 		&settings.PublicSlug,
 		&settings.PublicCatalogEnabled,
-		&settings.BookableServiceCount,
-		&settings.BookableStaffCount,
+		&settings.SchedulingAuthority,
+		&settings.SchedulingAuthorityVersion,
+		&settings.EligibleServiceCount,
+		&settings.EligibleStaffCount,
+		&settings.PublishedHoursCount,
+		&internalActivationCurrent,
+		&externalConnectionReady,
 		&settings.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -478,16 +710,61 @@ func scanPublicCatalogSettings(row rowScanner) (*PublicCatalogSettings, error) {
 	if err != nil {
 		return nil, err
 	}
+	settings.BookableServiceCount = settings.EligibleServiceCount
+	settings.BookableStaffCount = settings.EligibleStaffCount
 	settings.PublicPath = publicPath(settings.PublicSlug)
-	settings.CanPublish = settings.PublicSlug != "" && settings.BookableServiceCount > 0 && settings.BookableStaffCount > 0
-	if settings.PublicSlug == "" {
-		settings.BlockedReason = "Add a public page slug before publishing."
-	} else if settings.BookableServiceCount == 0 {
-		settings.BlockedReason = "At least one active AI-bookable service must be synced and linked to the active POS provider."
-	} else if settings.BookableStaffCount == 0 {
-		settings.BlockedReason = "At least one active AI-bookable staff member must be synced and linked to the active POS provider."
-	}
+	applyPublicCatalogReadinessWithFacts(&settings, internalActivationCurrent, externalConnectionReady)
 	return &settings, nil
+}
+
+func hasPublicCatalogBlockerOtherThanSlug(blockers []PublicCatalogReadinessBlocker) bool {
+	for _, blocker := range blockers {
+		if blocker.Code != "PUBLIC_SLUG_REQUIRED" {
+			return true
+		}
+	}
+	return false
+}
+
+func applyPublicCatalogReadinessWithFacts(settings *PublicCatalogSettings, internalActivationCurrent bool, externalConnectionReady bool) {
+	settings.ReadinessBlockers = make([]PublicCatalogReadinessBlocker, 0)
+	add := func(code string, scope string, message string) {
+		settings.ReadinessBlockers = append(settings.ReadinessBlockers, PublicCatalogReadinessBlocker{Code: code, Scope: scope, Message: message})
+	}
+	if settings.PublicSlug == "" {
+		add("PUBLIC_SLUG_REQUIRED", "public_page", "Add a public page slug before publishing.")
+	}
+	if settings.EligibleServiceCount == 0 {
+		add("PUBLIC_SERVICE_REQUIRED", "services", "Add at least one active service that is eligible for the selected scheduling method.")
+	}
+	switch settings.SchedulingAuthority {
+	case booking.SchedulingAuthorityOwnerManual:
+		settings.ReadinessLabel = "Owner-managed appointment requests"
+	case booking.SchedulingAuthorityManleAICalendar:
+		settings.ReadinessLabel = "ManleAI Calendar catalog and hours"
+		if settings.PublishedHoursCount == 0 {
+			add("PUBLIC_LOCAL_HOURS_REQUIRED", "hours", "Add local business hours before publishing the ManleAI Calendar page.")
+		}
+		if !internalActivationCurrent {
+			add("PUBLIC_CALENDAR_ACTIVATION_REQUIRED", "calendar", "Activate the current ManleAI Calendar configuration before publishing.")
+		}
+	case booking.SchedulingAuthorityExternalProvider:
+		settings.ReadinessLabel = "Connected scheduling catalog"
+		if !externalConnectionReady {
+			add("PUBLIC_EXTERNAL_CATALOG_NOT_READY", "integration", "Complete the connected scheduling catalog sync before publishing.")
+		}
+		if settings.EligibleStaffCount == 0 {
+			add("PUBLIC_EXTERNAL_STAFF_REQUIRED", "staff", "Sync at least one eligible staff member for connected scheduling.")
+		}
+	default:
+		settings.ReadinessLabel = "Scheduling method unavailable"
+		add("PUBLIC_AUTHORITY_UNSUPPORTED", "scheduling", "Select a supported scheduling method before publishing.")
+	}
+	settings.CanPublish = len(settings.ReadinessBlockers) == 0
+	settings.BlockedReason = ""
+	if len(settings.ReadinessBlockers) > 0 {
+		settings.BlockedReason = settings.ReadinessBlockers[0].Message
+	}
 }
 
 func publicPath(slug string) string {

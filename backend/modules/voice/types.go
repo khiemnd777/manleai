@@ -10,6 +10,7 @@ import (
 
 	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/modules/conversation"
+	"github.com/manleai/ai-receptionist/modules/scheduling"
 )
 
 const (
@@ -46,6 +47,7 @@ const (
 var (
 	ErrValidation             = errors.New("voice validation failed")
 	ErrNotFound               = errors.New("voice record not found")
+	ErrAudioUnavailable       = errors.New("voice audio is unavailable")
 	ErrProviderDisabled       = errors.New("voice provider is not configured")
 	ErrRouteNotFound          = errors.New("voice route not found")
 	ErrTurnModelEmptyOutput   = errors.New("turn model returned no structured output")
@@ -157,7 +159,17 @@ type Store interface {
 	RecordWebhookEvent(ctx context.Context, event WebhookEvent) error
 	HasTerminalRealtimeFailure(ctx context.Context, provider string, providerCallID string, sessionID string) (bool, error)
 	SaveAudioOutput(ctx context.Context, record AudioOutputRecord) (*AudioOutput, error)
-	GetAudioOutput(ctx context.Context, id string) (*AudioOutput, error)
+}
+
+// AudioCapabilityStore keeps public capability verification metadata separate
+// from audio bytes so the service can authorize a request before loading media.
+type AudioCapabilityStore interface {
+	GetAudioOutputMetadata(ctx context.Context, id string) (*AudioOutput, error)
+	GetAudioOutputContent(ctx context.Context, id string) (*AudioOutput, error)
+}
+
+type SchedulingReadinessProvider interface {
+	SchedulingTargetReadiness(ctx context.Context, salonID string, ownerUserID string) (scheduling.TargetReadiness, error)
 }
 
 type TelephonyProvider interface {
@@ -431,6 +443,7 @@ type RealtimeEvent struct {
 
 type ConfigResolver interface {
 	ResolveTwilioConfig(ctx context.Context, salonID string) (config.TwilioVoiceConfig, string, error)
+	ResolveStoredTwilioAuthToken(ctx context.Context, salonID string) (string, error)
 	ResolveOpenAIConfig(ctx context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error)
 }
 
@@ -524,8 +537,12 @@ type WebhookEvent struct {
 }
 
 type SalonVoiceStatus struct {
-	SalonID string
-	Phone   string
+	SalonID                    string
+	Phone                      string
+	AIEnabled                  bool
+	SchedulingAuthority        string
+	SchedulingAuthorityVersion int64
+	BookingMode                string
 }
 
 type ReadinessCheck struct {
@@ -596,21 +613,42 @@ type SemanticCheckStatus struct {
 	Diagnostics       map[string]string `json:"diagnostics,omitempty"`
 }
 
+type VoiceReadinessBlocker struct {
+	Code     string `json:"code"`
+	Scope    string `json:"scope,omitempty"`
+	EntityID string `json:"entity_id,omitempty"`
+	Message  string `json:"message"`
+}
+
+type VoiceReadinessDimension struct {
+	Ready    bool                    `json:"ready"`
+	Blockers []VoiceReadinessBlocker `json:"blockers"`
+}
+
 type Status struct {
-	Provider              string                `json:"provider"`
-	Configured            bool                  `json:"configured"`
-	SignatureVerification bool                  `json:"signature_verification"`
-	InboundWebhookURL     string                `json:"inbound_webhook_url"`
-	TurnWebhookURL        string                `json:"turn_webhook_url"`
-	RecordingWebhookURL   string                `json:"recording_webhook_url"`
-	StreamWebhookURL      string                `json:"stream_webhook_url"`
-	SalonPhone            string                `json:"salon_phone,omitempty"`
-	Ready                 bool                  `json:"ready"`
-	PhoneBookingReady     bool                  `json:"phone_booking_ready"`
-	BlockedReason         string                `json:"blocked_reason,omitempty"`
-	AI                    VoiceAIStatus         `json:"ai"`
-	Booking               PhoneBookingReadiness `json:"booking"`
-	InputMode             string                `json:"input_mode"`
+	Provider              string                  `json:"provider"`
+	Configured            bool                    `json:"configured"`
+	SignatureVerification bool                    `json:"signature_verification"`
+	InboundWebhookURL     string                  `json:"inbound_webhook_url"`
+	TurnWebhookURL        string                  `json:"turn_webhook_url"`
+	RecordingWebhookURL   string                  `json:"recording_webhook_url"`
+	StreamWebhookURL      string                  `json:"stream_webhook_url"`
+	SalonPhone            string                  `json:"salon_phone,omitempty"`
+	Ready                 bool                    `json:"ready"`
+	PhoneAnsweringReady   bool                    `json:"phone_answering_ready"`
+	RequestCaptureReady   bool                    `json:"request_capture_ready"`
+	AutomatedBookingReady bool                    `json:"automated_booking_ready"`
+	PhoneBookingReady     bool                    `json:"phone_booking_ready"`
+	SchedulingAuthority   string                  `json:"scheduling_authority"`
+	AuthorityVersion      int64                   `json:"scheduling_authority_version"`
+	BookingMode           string                  `json:"booking_mode"`
+	PhoneAnswering        VoiceReadinessDimension `json:"phone_answering"`
+	RequestCapture        VoiceReadinessDimension `json:"request_capture"`
+	AutomatedBooking      VoiceReadinessDimension `json:"automated_booking"`
+	BlockedReason         string                  `json:"blocked_reason,omitempty"`
+	AI                    VoiceAIStatus           `json:"ai"`
+	Booking               PhoneBookingReadiness   `json:"booking"`
+	InputMode             string                  `json:"input_mode"`
 }
 
 type AIProviders struct {
@@ -632,7 +670,12 @@ type AudioOutputRecord struct {
 }
 
 type AudioOutput struct {
-	ID          string
-	ContentType string
-	Audio       []byte
+	ID             string
+	SalonID        string
+	CallSessionID  string
+	Provider       string
+	ProviderCallID string
+	ContentType    string
+	Audio          []byte
+	ExpiresAt      time.Time
 }

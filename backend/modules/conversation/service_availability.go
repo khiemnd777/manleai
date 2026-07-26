@@ -10,24 +10,59 @@ import (
 	"time"
 
 	"github.com/manleai/ai-receptionist/modules/booking"
+	"github.com/manleai/ai-receptionist/modules/scheduling"
 )
 
 var errBookingCatalogNotReady = errors.New("selected services are not ready for provider-backed booking")
 
-func (s *Service) applyAvailabilityForRequestedTime(ctx context.Context, ownerUserID string, turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (bool, error) {
+func (s *Service) applyAvailabilityForRequestedTime(ctx context.Context, ownerUserID string, turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig) (bool, bool, error) {
 	if session == nil || session.RequestedStartTime == nil {
-		return false, nil
+		return false, false, nil
 	}
-	if !bookingSelectionReady(*session, services) {
-		return false, errBookingCatalogNotReady
+	_, internalLifecycle := selectedInternalLifecycleCandidate(*session)
+	if !internalLifecycle && !bookingSelectionReady(*session, services) {
+		return false, false, errBookingCatalogNotReady
 	}
 	preferredDate := preferredDateFromMessage("", session.RequestedStartTime, timezoneLocation(cfg.Timezone), s.now)
 	if preferredDate == "" {
-		return false, nil
+		return false, false, nil
 	}
-	result, err := s.availableSlotsWithLimit(ctx, turn.SalonID, ownerUserID, *session, preferredDate, exactAvailabilityLimit)
+	checked, err := s.checkAvailabilityWithLimit(ctx, turn.SalonID, ownerUserID, *session, preferredDate, exactAvailabilityLimit, cfg)
 	if err != nil {
-		return false, err
+		return false, false, err
+	}
+	recordAvailabilityAuthority(session, checked)
+	if checked.Kind == scheduling.AvailabilityKindRequestOnly {
+		session.DialogState.SchedulingRequestOnly = true
+		clearSelectedAvailabilityQuote(session)
+		session.OfferedSlots = nil
+		turn.ToolMessage = "Scheduling authority recorded a requested time without promising availability."
+		turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{
+			"availability_kind":    scheduling.AvailabilityKindRequestOnly,
+			"scheduling_authority": checked.SchedulingAuthority,
+		})
+		syncTurnUpdate(turn, *session, services, staff, cfg)
+		return true, true, nil
+	}
+	session.DialogState.SchedulingRequestOnly = false
+	result := checked.VerifiedSlots
+	if internalLifecycle {
+		options := internalLifecycleOptionsFromAvailability(result, *session, preferredDate, timezoneLocation(timezoneFromConfig(cfg)))
+		if len(options) > 0 {
+			applyInternalLifecycleOffer(turn, session, services, staff, cfg, options, false)
+			return false, false, nil
+		}
+		applyInternalLifecycleOffer(turn, session, services, staff, cfg, nil, true)
+		return false, false, nil
+	}
+	if checked.SchedulingAuthority == booking.SchedulingAuthorityManleAICalendar && activePartyPlan(session.PartyPlan) {
+		options := partySplitOptionsFromAggregateAvailability(result, *session, preferredDate, timezoneLocation(timezoneFromConfig(cfg)))
+		if len(options) > 0 {
+			applyPartySplitOffer(turn, session, services, staff, cfg, options, false)
+			return false, false, nil
+		}
+		applyAvailabilityOffer(turn, session, services, staff, cfg, nil, true)
+		return false, false, nil
 	}
 	slots := []booking.AvailabilitySlot{}
 	if result != nil {
@@ -37,31 +72,31 @@ func (s *Service) applyAvailabilityForRequestedTime(ctx context.Context, ownerUs
 	if len(matches) > 0 {
 		selection, err := s.selectAvailabilitySlot(ctx, turn.SalonID, *session, matches, cfg)
 		if err != nil {
-			return false, err
+			return false, false, err
 		}
 		turn.ToolMessage = availabilityToolMessage(len(slots))
 		applyAssignmentSelectionMetadata(turn, selection)
 		applySelectedOfferedSlot(session, offeredSlotFromAvailability(result, selection.Slot))
 		syncTurnUpdate(turn, *session, services, staff, cfg)
-		return true, nil
+		return true, false, nil
 	}
 	if handled, err := s.applySpecificStaffUnavailableOffer(ctx, ownerUserID, turn, session, services, staff, cfg, preferredDate, result); err != nil {
-		return false, err
+		return false, false, err
 	} else if handled {
-		return false, nil
+		return false, false, nil
 	}
-	if shouldOfferPartySplitAvailability(*session) {
+	if checked.SchedulingAuthority != booking.SchedulingAuthorityManleAICalendar && shouldOfferPartySplitAvailability(*session) {
 		options, err := s.planPartySplitOptions(ctx, ownerUserID, turn.SalonID, *session, services, preferredDate, cfg)
 		if err != nil {
-			return false, err
+			return false, false, err
 		}
 		if len(options) > 0 {
 			applyPartySplitOffer(turn, session, services, staff, cfg, options, true)
-			return false, nil
+			return false, false, nil
 		}
 	}
 	applyAvailabilityOffer(turn, session, services, staff, cfg, result, true)
-	return false, nil
+	return false, false, nil
 }
 
 func shouldCheckAvailabilityForRequestedTime(before Session, after Session, selectedOfferedSlot bool) bool {
@@ -90,7 +125,9 @@ func sameAvailabilityRequest(left Session, right Session) bool {
 	for index := range leftSegments {
 		if strings.TrimSpace(leftSegments[index].ServiceID) != strings.TrimSpace(rightSegments[index].ServiceID) ||
 			strings.TrimSpace(leftSegments[index].StaffID) != strings.TrimSpace(rightSegments[index].StaffID) ||
-			normalizeConversationStaffSelectionMode(leftSegments[index].StaffSelectionMode) != normalizeConversationStaffSelectionMode(rightSegments[index].StaffSelectionMode) {
+			normalizeConversationStaffSelectionMode(leftSegments[index].StaffSelectionMode) != normalizeConversationStaffSelectionMode(rightSegments[index].StaffSelectionMode) ||
+			strings.TrimSpace(leftSegments[index].GuestReference) != strings.TrimSpace(rightSegments[index].GuestReference) ||
+			leftSegments[index].Quantity != rightSegments[index].Quantity {
 			return false
 		}
 	}
@@ -167,17 +204,26 @@ func (s *Service) refreshSelectedAvailabilityProof(ctx context.Context, ownerUse
 	if session == nil || session.RequestedStartTime == nil {
 		return nil, false, nil
 	}
-	if !bookingSelectionReady(*session, services) {
+	if _, internalLifecycle := selectedInternalLifecycleCandidate(*session); !internalLifecycle && !bookingSelectionReady(*session, services) {
 		return nil, false, errBookingCatalogNotReady
 	}
 	preferredDate := preferredDateFromMessage("", session.RequestedStartTime, timezoneLocation(timezoneFromConfig(cfg)), s.now)
 	if preferredDate == "" {
 		return nil, false, nil
 	}
-	result, err := s.availableSlotsWithLimit(ctx, salonID, ownerUserID, *session, preferredDate, exactAvailabilityLimit)
+	checked, err := s.checkAvailabilityWithLimit(ctx, salonID, ownerUserID, *session, preferredDate, exactAvailabilityLimit, cfg)
 	if err != nil {
 		return nil, false, err
 	}
+	recordAvailabilityAuthority(session, checked)
+	if checked.Kind == scheduling.AvailabilityKindRequestOnly {
+		session.DialogState.SchedulingRequestOnly = true
+		clearSelectedAvailabilityQuote(session)
+		session.OfferedSlots = nil
+		return nil, true, nil
+	}
+	session.DialogState.SchedulingRequestOnly = false
+	result := checked.VerifiedSlots
 	expectedEnd, hasExpectedEnd := expectedAvailabilityEnd(*session, services)
 	for _, rawSlot := range availabilitySlots(result) {
 		if !rawSlot.StartTime.Equal(*session.RequestedStartTime) {
@@ -226,6 +272,7 @@ func (s *Service) refreshPartySplitOptionProofs(ctx context.Context, ownerUserID
 	fresh := clonePartySplitOption(option)
 	for blockIndex := range fresh.Blocks {
 		block := &fresh.Blocks[blockIndex]
+		previousRefs := append([]PartySplitQuoteRef(nil), block.QuoteRefs...)
 		block.QuoteRefs = make([]PartySplitQuoteRef, len(block.Segments))
 		for segmentIndex, segment := range block.Segments {
 			start := block.StartTime
@@ -251,11 +298,18 @@ func (s *Service) refreshPartySplitOptionProofs(ctx context.Context, ownerUserID
 			if !matched || result == nil || strings.TrimSpace(segmentSession.AvailabilityQuoteID) == "" || len(strings.TrimSpace(segmentSession.SlotFingerprint)) != 64 {
 				return fresh, false, nil
 			}
-			block.QuoteRefs[segmentIndex] = PartySplitQuoteRef{
+			ref := PartySplitQuoteRef{
 				ServiceID:           segmentSession.ServiceID,
 				AvailabilityQuoteID: strings.TrimSpace(segmentSession.AvailabilityQuoteID),
 				SlotFingerprint:     strings.TrimSpace(segmentSession.SlotFingerprint),
 			}
+			if segmentIndex < len(previousRefs) {
+				ref.GuestReference = strings.TrimSpace(previousRefs[segmentIndex].GuestReference)
+				ref.Quantity = previousRefs[segmentIndex].Quantity
+				ref.RequestedStartTime = previousRefs[segmentIndex].RequestedStartTime
+				ref.RequestedEndTime = previousRefs[segmentIndex].RequestedEndTime
+			}
+			block.QuoteRefs[segmentIndex] = ref
 		}
 	}
 	return fresh, true, nil
@@ -435,15 +489,58 @@ func applyAssignmentSelectionMetadata(turn *TurnRecord, selection availabilitySe
 }
 
 func (s *Service) offerAvailableSlots(ctx context.Context, ownerUserID string, turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, preferredDate string, unavailableRequestedTime bool, cfg *RuntimeConfig) error {
-	if session == nil || !bookingSelectionReady(*session, services) {
+	if session == nil {
 		return errBookingCatalogNotReady
 	}
-	result, err := s.availableSlots(ctx, turn.SalonID, ownerUserID, *session, preferredDate)
+	_, internalLifecycle := selectedInternalLifecycleCandidate(*session)
+	if !internalLifecycle && !bookingSelectionReady(*session, services) {
+		return errBookingCatalogNotReady
+	}
+	limit := availabilityOfferLimit
+	if _, ok := activeSlotTimePreference(*session); ok {
+		limit = exactAvailabilityLimit
+	}
+	checked, err := s.checkAvailabilityWithLimit(ctx, turn.SalonID, ownerUserID, *session, preferredDate, limit, cfg)
 	if err != nil {
 		return err
 	}
+	recordAvailabilityAuthority(session, checked)
+	if checked.Kind == scheduling.AvailabilityKindRequestOnly {
+		session.DialogState.SchedulingRequestOnly = true
+		session.RequestedStartTime = nil
+		clearSelectedAvailabilityQuote(session)
+		session.OfferedSlots = nil
+		turn.ToolMessage = "Scheduling authority accepts a requested time for owner review; availability was not checked."
+		turn.AIMessage = "What time would you prefer for that day?"
+		turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{
+			"availability_kind":    scheduling.AvailabilityKindRequestOnly,
+			"scheduling_authority": checked.SchedulingAuthority,
+		})
+		syncTurnUpdate(turn, *session, services, staff, cfg)
+		return nil
+	}
+	session.DialogState.SchedulingRequestOnly = false
+	result := checked.VerifiedSlots
+	if internalLifecycle {
+		options := internalLifecycleOptionsFromAvailability(result, *session, preferredDate, timezoneLocation(timezoneFromConfig(cfg)))
+		if len(options) > 0 {
+			applyInternalLifecycleOffer(turn, session, services, staff, cfg, options, unavailableRequestedTime)
+			return nil
+		}
+		applyInternalLifecycleOffer(turn, session, services, staff, cfg, nil, true)
+		return nil
+	}
+	if checked.SchedulingAuthority == booking.SchedulingAuthorityManleAICalendar && activePartyPlan(session.PartyPlan) {
+		options := partySplitOptionsFromAggregateAvailability(result, *session, preferredDate, timezoneLocation(timezoneFromConfig(cfg)))
+		if len(options) > 0 {
+			applyPartySplitOffer(turn, session, services, staff, cfg, options, unavailableRequestedTime)
+			return nil
+		}
+		applyAvailabilityOffer(turn, session, services, staff, cfg, nil, true)
+		return nil
+	}
 	offered := offeredSlotsFromAvailabilityForSession(result, *session, timezoneLocation(timezoneFromConfig(cfg)))
-	if len(offered) == 0 && shouldOfferPartySplitAvailability(*session) {
+	if checked.SchedulingAuthority != booking.SchedulingAuthorityManleAICalendar && len(offered) == 0 && shouldOfferPartySplitAvailability(*session) {
 		options, err := s.planPartySplitOptions(ctx, ownerUserID, turn.SalonID, *session, services, preferredDate, cfg)
 		if err != nil {
 			return err
@@ -457,36 +554,108 @@ func (s *Service) offerAvailableSlots(ctx context.Context, ownerUserID string, t
 	return nil
 }
 
-func (s *Service) availableSlots(ctx context.Context, salonID string, ownerUserID string, session Session, preferredDate string) (*booking.AvailabilityResult, error) {
+func (s *Service) availableSlots(ctx context.Context, salonID string, ownerUserID string, session Session, preferredDate string, cfg *RuntimeConfig) (*booking.AvailabilityResult, error) {
 	limit := availabilityOfferLimit
 	if _, ok := activeSlotTimePreference(session); ok {
 		limit = exactAvailabilityLimit
 	}
-	return s.availableSlotsWithLimit(ctx, salonID, ownerUserID, session, preferredDate, limit)
+	return s.availableSlotsWithLimit(ctx, salonID, ownerUserID, session, preferredDate, limit, cfg)
 }
 
-func (s *Service) availableSlotsWithLimit(ctx context.Context, salonID string, ownerUserID string, session Session, preferredDate string, limit int) (*booking.AvailabilityResult, error) {
+func (s *Service) availableSlotsWithLimit(ctx context.Context, salonID string, ownerUserID string, session Session, preferredDate string, limit int, cfg *RuntimeConfig) (*booking.AvailabilityResult, error) {
+	checked, err := s.checkAvailabilityWithLimit(ctx, salonID, ownerUserID, session, preferredDate, limit, cfg)
+	if err != nil || checked == nil || checked.Kind == scheduling.AvailabilityKindRequestOnly {
+		return nil, err
+	}
+	return checked.VerifiedSlots, nil
+}
+
+func (s *Service) checkAvailabilityWithLimit(ctx context.Context, salonID string, ownerUserID string, session Session, preferredDate string, limit int, cfg *RuntimeConfig) (*scheduling.AvailabilityResult, error) {
 	if s.bookingTool == nil {
 		return nil, fmt.Errorf("booking tool is unavailable")
+	}
+	if cfg == nil || cfg.BookingMode == scheduling.BookingModeDisabled {
+		return nil, scheduling.ErrConversationSchedulingDisabled
 	}
 	staffSelectionMode := staffSelectionModeForAvailability(session)
 	if limit <= 0 {
 		limit = availabilityOfferLimit
 	}
+	authority := ""
+	lifecycleTarget, internalLifecycle := selectedInternalLifecycleCandidate(session)
+	if s.schedulingTool != nil && !internalLifecycle {
+		var authorityErr error
+		authority, authorityErr = s.schedulingTool.CurrentSchedulingAuthority(ctx, salonID, ownerUserID)
+		if authorityErr != nil {
+			return nil, authorityErr
+		}
+	}
+	segments := availabilitySegmentsForSession(session, staffSelectionMode)
+	partySize := 0
+	if internalLifecycle {
+		authority = lifecycleTarget.SchedulingAuthority
+		segments = append([]booking.BookingSegmentRequest(nil), lifecycleTarget.Segments...)
+		partySize = lifecycleTarget.PartySize
+	} else if authority == booking.SchedulingAuthorityManleAICalendar {
+		if aggregateSegments, ok := manleAIPartyAvailabilitySegments(session, staffSelectionMode); ok {
+			segments = aggregateSegments
+			partySize = session.PartyPlan.PartySize
+		}
+	} else {
+		for index := range segments {
+			segments[index].GuestReference = ""
+			segments[index].Quantity = 0
+		}
+	}
 	req := booking.AvailabilityRequest{
-		ServiceID:          session.ServiceID,
-		StaffID:            staffIDForAvailability(session),
-		StaffSelectionMode: staffSelectionMode,
-		Segments:           availabilitySegmentsForSession(session, staffSelectionMode),
-		PreferredDate:      preferredDate,
-		Limit:              limit,
+		TargetAppointmentID: targetAppointmentIDForAvailability(session),
+		ServiceID:           session.ServiceID,
+		StaffID:             staffIDForAvailability(session),
+		StaffSelectionMode:  staffSelectionMode,
+		Segments:            segments,
+		PartySize:           partySize,
+		PreferredDate:       preferredDate,
+		Limit:               limit,
 	}
 	startedAt := time.Now()
-	result, err := s.bookingTool.AvailableSlots(ctx, salonID, ownerUserID, req)
-	recordTurnTiming(ctx, TurnTimingStageAvailabilityPOS, startedAt, turnTimingResult(err))
-	if err != nil || result == nil {
-		return result, err
+	var checked *scheduling.AvailabilityResult
+	var err error
+	if s.schedulingTool != nil {
+		checked, err = s.schedulingTool.CheckConversationAvailability(ctx, salonID, ownerUserID, cfg.BookingMode, req)
+	} else {
+		var legacy *booking.AvailabilityResult
+		legacy, err = s.bookingTool.AvailableSlots(ctx, salonID, ownerUserID, req)
+		if err == nil {
+			checked = &scheduling.AvailabilityResult{
+				Kind:                scheduling.AvailabilityKindVerifiedSlots,
+				SchedulingAuthority: booking.SchedulingAuthorityExternalProvider,
+				VerifiedSlots:       legacy,
+			}
+		}
 	}
+	recordTurnTiming(ctx, TurnTimingStageAvailabilityPOS, startedAt, turnTimingResult(err))
+	if err != nil {
+		return checked, err
+	}
+	if checked == nil {
+		return nil, scheduling.ErrInvalidSchedulingResult
+	}
+	if checked.Kind == scheduling.AvailabilityKindRequestOnly {
+		if checked.VerifiedSlots != nil {
+			return nil, scheduling.ErrInvalidSchedulingResult
+		}
+		return checked, nil
+	}
+	if checked.Kind != scheduling.AvailabilityKindVerifiedSlots || checked.VerifiedSlots == nil {
+		return nil, scheduling.ErrInvalidSchedulingResult
+	}
+	if internalLifecycle && checked.SchedulingAuthority != booking.SchedulingAuthorityManleAICalendar {
+		return nil, scheduling.ErrInvalidSchedulingResult
+	}
+	if internalLifecycle && checked.TargetAuthorityAppointmentVersion != lifecycleTarget.AuthorityAppointmentVersion {
+		return nil, booking.ErrOperationConflict
+	}
+	result := checked.VerifiedSlots
 	if strings.TrimSpace(result.StaffSelectionMode) == "" {
 		result.StaffSelectionMode = req.StaffSelectionMode
 	}
@@ -500,7 +669,45 @@ func (s *Service) availableSlotsWithLimit(ctx context.Context, salonID string, o
 			}
 		}
 	}
-	return result, nil
+	return checked, nil
+}
+
+func recordAvailabilityAuthority(session *Session, checked *scheduling.AvailabilityResult) {
+	if session == nil || checked == nil {
+		return
+	}
+	state := normalizedDialogState(session.DialogState)
+	state.SelectedSchedulingAuthority = strings.TrimSpace(checked.SchedulingAuthority)
+	session.DialogState = state
+}
+
+func manleAIPartyAvailabilitySegments(session Session, staffSelectionMode string) ([]booking.BookingSegmentRequest, bool) {
+	if !partyPlanComplete(session.PartyPlan) || session.PartyPlan.PartySize < 2 {
+		return nil, false
+	}
+	segments := availabilitySegmentsForSession(session, staffSelectionMode)
+	guestReferences, ok := partyPlanSegmentGuestReferences(session.PartyPlan, segments)
+	if !ok {
+		segments = partyPlanSegments(session.PartyPlan, session)
+		guestReferences, ok = partyPlanSegmentGuestReferences(session.PartyPlan, segments)
+	}
+	if !ok || len(segments) != len(guestReferences) {
+		return nil, false
+	}
+	result := make([]booking.BookingSegmentRequest, len(segments))
+	for index, segment := range segments {
+		result[index] = segment
+		result[index].GuestReference = guestReferences[index]
+		result[index].Quantity = 1
+	}
+	return result, true
+}
+
+func targetAppointmentIDForAvailability(session Session) string {
+	if bookingActionForSession(session) != BookingActionReschedule {
+		return ""
+	}
+	return strings.TrimSpace(session.TargetAppointmentID)
 }
 
 func (s *Service) applySpecificStaffUnavailableOffer(ctx context.Context, ownerUserID string, turn *TurnRecord, session *Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, preferredDate string, requestedStaffResult *booking.AvailabilityResult) (bool, error) {
@@ -513,7 +720,7 @@ func (s *Service) applySpecificStaffUnavailableOffer(ctx context.Context, ownerU
 	anyoneSession.StaffName = ""
 	anyoneSession.StaffSelectionMode = booking.StaffSelectionAnyone
 	clearBookingSegmentsStaffSelection(&anyoneSession)
-	anyoneResult, err := s.availableSlotsWithLimit(ctx, turn.SalonID, ownerUserID, anyoneSession, preferredDate, exactAvailabilityLimit)
+	anyoneResult, err := s.availableSlotsWithLimit(ctx, turn.SalonID, ownerUserID, anyoneSession, preferredDate, exactAvailabilityLimit, cfg)
 	if err != nil {
 		return false, err
 	}
@@ -594,6 +801,8 @@ func applyAvailabilityOffer(turn *TurnRecord, session *Session, services []Servi
 
 type partySplitCandidate struct {
 	Segment             booking.BookingSegmentRequest
+	GuestReference      string
+	Quantity            int
 	AvailabilityQuoteID string
 	SlotFingerprint     string
 	StartTime           time.Time
@@ -619,12 +828,31 @@ func (s *Service) planPartySplitOptions(ctx context.Context, ownerUserID string,
 	if !bookingSelectionReady(session, services) {
 		return nil, errBookingCatalogNotReady
 	}
+	if s.schedulingTool != nil {
+		authority, err := s.schedulingTool.CurrentSchedulingAuthority(ctx, salonID, ownerUserID)
+		if err != nil {
+			return nil, err
+		}
+		if authority == booking.SchedulingAuthorityManleAICalendar {
+			// Internal party planning is one aggregate verified quote. If that
+			// response is empty or malformed, fail closed instead of creating
+			// independent child quotes that cannot be committed atomically.
+			return nil, nil
+		}
+	}
 	segments := bookingSegmentsForCreate(session)
+	if activePartyPlan(session.PartyPlan) {
+		segments = partyPlanSegments(session.PartyPlan, session)
+	}
 	if len(segments) < 2 {
 		return nil, nil
 	}
+	guestReferences, ok := partyPlanSegmentGuestReferences(session.PartyPlan, segments)
+	if !ok {
+		return nil, nil
+	}
 	candidateSets := make([][]partySplitCandidate, 0, len(segments))
-	for _, segment := range segments {
+	for segmentIndex, segment := range segments {
 		serviceID := strings.TrimSpace(segment.ServiceID)
 		if serviceID == "" {
 			return nil, nil
@@ -643,11 +871,11 @@ func (s *Service) planPartySplitOptions(ctx context.Context, ownerUserID string,
 		segmentSession.OfferedSlots = nil
 		segmentSession.PartyPlan = nil
 
-		result, err := s.availableSlotsWithLimit(ctx, salonID, ownerUserID, segmentSession, preferredDate, splitAvailabilityLimit)
+		result, err := s.availableSlotsWithLimit(ctx, salonID, ownerUserID, segmentSession, preferredDate, splitAvailabilityLimit, cfg)
 		if err != nil {
 			return nil, err
 		}
-		candidates := partySplitCandidatesFromAvailability(segmentSession.BookingSegments[0], result)
+		candidates := partySplitCandidatesFromAvailability(segmentSession.BookingSegments[0], guestReferences[segmentIndex], result)
 		if len(candidates) == 0 {
 			return nil, nil
 		}
@@ -678,7 +906,7 @@ func bookingSelectionReady(session Session, services []ServiceOption) bool {
 	return true
 }
 
-func partySplitCandidatesFromAvailability(segment booking.BookingSegmentRequest, result *booking.AvailabilityResult) []partySplitCandidate {
+func partySplitCandidatesFromAvailability(segment booking.BookingSegmentRequest, guestReference string, result *booking.AvailabilityResult) []partySplitCandidate {
 	if result == nil || len(result.Slots) == 0 {
 		return nil
 	}
@@ -724,6 +952,8 @@ func partySplitCandidatesFromAvailability(segment booking.BookingSegmentRequest,
 				StaffID:            staffID,
 				StaffSelectionMode: mode,
 			},
+			GuestReference:      strings.TrimSpace(guestReference),
+			Quantity:            1,
 			AvailabilityQuoteID: slot.AvailabilityQuoteID,
 			SlotFingerprint:     slot.SlotFingerprint,
 			StartTime:           slot.StartTime,
@@ -822,6 +1052,10 @@ func partySplitOptionFromCandidates(candidates []partySplitCandidate, requestedD
 		blocks[index].Segments = append(blocks[index].Segments, candidate.Segment)
 		blocks[index].QuoteRefs = append(blocks[index].QuoteRefs, PartySplitQuoteRef{
 			ServiceID:           strings.TrimSpace(candidate.Segment.ServiceID),
+			GuestReference:      strings.TrimSpace(candidate.GuestReference),
+			Quantity:            candidate.Quantity,
+			RequestedStartTime:  candidate.StartTime,
+			RequestedEndTime:    candidate.EndTime,
 			AvailabilityQuoteID: strings.TrimSpace(candidate.AvailabilityQuoteID),
 			SlotFingerprint:     strings.TrimSpace(candidate.SlotFingerprint),
 		})
@@ -837,6 +1071,119 @@ func partySplitOptionFromCandidates(candidates []partySplitCandidate, requestedD
 	}
 	option = applyPartySplitDatePolicy(option, requestedDate, loc)
 	return option
+}
+
+func partySplitOptionsFromAggregateAvailability(result *booking.AvailabilityResult, session Session, requestedDate string, loc *time.Location) []PartySplitOption {
+	if result == nil || strings.TrimSpace(result.QuoteID) == "" || !partyPlanComplete(session.PartyPlan) || session.PartyPlan.PartySize < 2 {
+		return nil
+	}
+	planSegments := partyPlanSegments(session.PartyPlan, session)
+	guestReferences, ok := partyPlanSegmentGuestReferences(session.PartyPlan, planSegments)
+	if !ok {
+		return nil
+	}
+	expected := make(map[string]int, len(planSegments))
+	for index, segment := range planSegments {
+		expected[guestReferences[index]+"\x00"+strings.TrimSpace(segment.ServiceID)]++
+	}
+	options := make([]PartySplitOption, 0, len(result.Slots))
+	for _, slot := range result.Slots {
+		fingerprint := strings.TrimSpace(slot.Fingerprint)
+		if len(fingerprint) != 64 || slot.StartTime.IsZero() || slot.EndTime.IsZero() || !slot.EndTime.After(slot.StartTime) || len(slot.Segments) != len(planSegments) {
+			continue
+		}
+		remaining := make(map[string]int, len(expected))
+		for key, count := range expected {
+			remaining[key] = count
+		}
+		blocks := make([]PartySplitBlock, 0, len(slot.Segments))
+		var firstStart time.Time
+		var lastStart time.Time
+		var lastEnd time.Time
+		valid := true
+		for _, segment := range slot.Segments {
+			serviceID := strings.TrimSpace(segment.ServiceID)
+			staffID := strings.TrimSpace(segment.StaffID)
+			guestReference := strings.TrimSpace(segment.GuestReference)
+			mode := normalizeConversationStaffSelectionMode(segment.StaffSelectionMode)
+			if serviceID == "" || staffID == "" || guestReference == "" || segment.Quantity != 1 || mode != booking.StaffSelectionSpecific || segment.DurationMinutes <= 0 || segment.ScheduledStartTime.IsZero() || segment.ScheduledEndTime.IsZero() || !segment.ScheduledEndTime.After(segment.ScheduledStartTime) || int(segment.ScheduledEndTime.Sub(segment.ScheduledStartTime).Minutes()) != segment.DurationMinutes || segment.OccupiedStartTime.IsZero() || segment.OccupiedEndTime.IsZero() || segment.OccupiedStartTime.After(segment.ScheduledStartTime) || segment.OccupiedEndTime.Before(segment.ScheduledEndTime) {
+				valid = false
+				break
+			}
+			for _, allocation := range segment.ResourceAllocations {
+				if strings.TrimSpace(allocation.ResourcePoolID) == "" || allocation.UnitsAllocated <= 0 {
+					valid = false
+					break
+				}
+			}
+			if !valid {
+				break
+			}
+			key := guestReference + "\x00" + serviceID
+			if remaining[key] <= 0 {
+				valid = false
+				break
+			}
+			remaining[key]--
+			if !lastStart.IsZero() && segment.ScheduledStartTime.Before(lastStart) {
+				valid = false
+				break
+			}
+			if firstStart.IsZero() {
+				firstStart = segment.ScheduledStartTime
+			}
+			lastStart = segment.ScheduledStartTime
+			if lastEnd.IsZero() || segment.ScheduledEndTime.After(lastEnd) {
+				lastEnd = segment.ScheduledEndTime
+			}
+			blockIndex := len(blocks) - 1
+			if blockIndex < 0 || !blocks[blockIndex].StartTime.Equal(segment.ScheduledStartTime) {
+				blocks = append(blocks, PartySplitBlock{StartTime: segment.ScheduledStartTime, EndTime: segment.ScheduledEndTime})
+				blockIndex = len(blocks) - 1
+			} else if segment.ScheduledEndTime.After(blocks[blockIndex].EndTime) {
+				blocks[blockIndex].EndTime = segment.ScheduledEndTime
+			}
+			blocks[blockIndex].Segments = append(blocks[blockIndex].Segments, booking.BookingSegmentRequest{
+				ServiceID:          serviceID,
+				StaffID:            staffID,
+				StaffSelectionMode: mode,
+				GuestReference:     guestReference,
+				Quantity:           segment.Quantity,
+			})
+			blocks[blockIndex].QuoteRefs = append(blocks[blockIndex].QuoteRefs, PartySplitQuoteRef{
+				ServiceID:           serviceID,
+				GuestReference:      guestReference,
+				Quantity:            segment.Quantity,
+				RequestedStartTime:  segment.ScheduledStartTime,
+				RequestedEndTime:    segment.ScheduledEndTime,
+				AvailabilityQuoteID: strings.TrimSpace(result.QuoteID),
+				SlotFingerprint:     fingerprint,
+			})
+		}
+		if valid {
+			for _, count := range remaining {
+				if count != 0 {
+					valid = false
+					break
+				}
+			}
+		}
+		if !valid || len(blocks) == 0 || !slot.StartTime.Equal(firstStart) || !slot.EndTime.Equal(lastEnd) {
+			continue
+		}
+		option := PartySplitOption{
+			ID:                  partySplitOptionID(blocks),
+			Blocks:              blocks,
+			SpanMinutes:         int(lastEnd.Sub(firstStart).Minutes()),
+			FinishSpreadMinutes: int(lastEnd.Sub(lastStart).Minutes()),
+		}
+		option = applyPartySplitDatePolicy(option, requestedDate, loc)
+		if _, _, aggregate := partySplitAggregateProof(option); !aggregate {
+			continue
+		}
+		options = append(options, option)
+	}
+	return rankPartySplitOptions(dedupePartySplitOptions(options), splitPartyOptionLimit)
 }
 
 func applyPartySplitDatePolicy(option PartySplitOption, requestedDate string, loc *time.Location) PartySplitOption {
@@ -1152,6 +1499,10 @@ func applySelectedPartySplitOption(session *Session, option PartySplitOption, da
 	session.PartyPlan = plan
 	session.RequestedStartTime = nil
 	clearSelectedAvailabilityQuote(session)
+	if quoteID, fingerprint, ok := partySplitAggregateProof(option); ok {
+		session.AvailabilityQuoteID = quoteID
+		session.SlotFingerprint = fingerprint
+	}
 	session.OfferedSlots = nil
 	session.BookingSegments = partySplitOptionSegments(option)
 	if strings.TrimSpace(session.ServiceID) == "" && len(session.BookingSegments) > 0 {
@@ -1167,6 +1518,33 @@ func applySelectedPartySplitOption(session *Session, option PartySplitOption, da
 		session.StaffName = ""
 		session.StaffSelectionMode = booking.StaffSelectionSpecific
 	}
+}
+
+func partySplitAggregateProof(option PartySplitOption) (string, string, bool) {
+	quoteID := ""
+	fingerprint := ""
+	segmentCount := 0
+	for _, block := range option.Blocks {
+		if len(block.Segments) == 0 || len(block.QuoteRefs) != len(block.Segments) {
+			return "", "", false
+		}
+		for index, segment := range block.Segments {
+			ref := block.QuoteRefs[index]
+			currentQuoteID := strings.TrimSpace(ref.AvailabilityQuoteID)
+			currentFingerprint := strings.TrimSpace(ref.SlotFingerprint)
+			if strings.TrimSpace(segment.ServiceID) == "" || strings.TrimSpace(ref.ServiceID) != strings.TrimSpace(segment.ServiceID) || strings.TrimSpace(ref.GuestReference) == "" || ref.Quantity != 1 || ref.RequestedStartTime.IsZero() || ref.RequestedEndTime.IsZero() || !ref.RequestedEndTime.After(ref.RequestedStartTime) || !ref.RequestedStartTime.Equal(block.StartTime) || ref.RequestedEndTime.After(block.EndTime) || currentQuoteID == "" || len(currentFingerprint) != 64 {
+				return "", "", false
+			}
+			if quoteID == "" {
+				quoteID = currentQuoteID
+				fingerprint = currentFingerprint
+			} else if quoteID != currentQuoteID || fingerprint != currentFingerprint {
+				return "", "", false
+			}
+			segmentCount++
+		}
+	}
+	return quoteID, fingerprint, segmentCount > 1
 }
 
 func partySplitOptionSegments(option PartySplitOption) []booking.BookingSegmentRequest {
@@ -1790,6 +2168,7 @@ func syncTurnUpdate(turn *TurnRecord, session Session, services []ServiceOption,
 	turn.Update.BookingSegments = session.BookingSegments
 	turn.Update.PartyPlan = clonePartyPlan(session.PartyPlan)
 	turn.Update.DialogState = cloneDialogState(session.DialogState)
+	turn.Update.SchedulingRequestID = session.SchedulingRequestID
 	turn.Update.Summary = summaryFor(session, services, staff, cfg)
 }
 
@@ -1797,6 +2176,9 @@ func cloneSessionForTurn(session Session) Session {
 	cloned := session
 	cloned.BookingSegments = append([]booking.BookingSegmentRequest(nil), session.BookingSegments...)
 	cloned.RescheduleCandidates = append([]RescheduleCandidate(nil), session.RescheduleCandidates...)
+	for index := range cloned.RescheduleCandidates {
+		cloned.RescheduleCandidates[index].Segments = append([]booking.BookingSegmentRequest(nil), session.RescheduleCandidates[index].Segments...)
+	}
 	cloned.PartyPlan = clonePartyPlan(session.PartyPlan)
 	cloned.DialogState = cloneDialogState(session.DialogState)
 	if session.OfferedSlots != nil {
@@ -1839,6 +2221,7 @@ func newTurnRecord(salonID string, ownerUserID string, before Session, after Ses
 			BookingSegments:      after.BookingSegments,
 			PartyPlan:            clonePartyPlan(after.PartyPlan),
 			DialogState:          cloneDialogState(after.DialogState),
+			SchedulingRequestID:  after.SchedulingRequestID,
 			Summary:              summaryFor(after, services, staff, cfg),
 		},
 	}
