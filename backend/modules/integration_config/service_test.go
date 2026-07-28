@@ -493,6 +493,36 @@ func TestStoredConfigsNeverInheritLegacySecretsOrEnabledState(t *testing.T) {
 	}
 }
 
+func TestPlatformPersistedConfigurationNeverExportsLegacyFallback(t *testing.T) {
+	service := &Service{
+		repo: &fakeIntegrationConfigStore{items: []StoredConfig{{
+			SalonID: "salon_1", Provider: ProviderOpenAI, Enabled: true,
+			Settings: map[string]string{"base_url": "https://stored.example.com/v1", "reply_model": "stored-model"},
+		}}},
+		cipher: &fakeSecretCipher{},
+		cfg: config.Config{
+			Square: config.SquareConfig{ClientID: "legacy-client", ClientSecret: "legacy-secret", RedirectURL: "https://legacy.example.com/callback"},
+			Voice: config.VoiceConfig{
+				Twilio: config.TwilioVoiceConfig{AuthToken: "legacy-token"},
+				AI:     config.VoiceAIConfig{OpenAI: config.OpenAIVoiceConfig{APIKey: "legacy-key"}},
+			},
+		},
+	}
+	response, providers, err := service.GetAllPersistedForPlatform(context.Background(), "salon_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(providers) != 1 || providers[0] != ProviderOpenAI {
+		t.Fatalf("providers=%v, want only persisted OpenAI", providers)
+	}
+	if response.Square.ClientID != "" || response.Square.ClientSecretConfigured || response.Twilio.AuthTokenConfigured {
+		t.Fatalf("strict Platform response inherited legacy fallback: %#v", response)
+	}
+	if response.OpenAI.BaseURL != "https://stored.example.com/v1" || response.OpenAI.ReplyModel != "stored-model" {
+		t.Fatalf("strict Platform response lost persisted settings: %#v", response.OpenAI)
+	}
+}
+
 func TestDashboardResponsesNeverReportEnvironmentForUnreadableStoredSecrets(t *testing.T) {
 	service := &Service{
 		cipher: &fakeSecretCipher{decryptErr: errors.New("stored secret unreadable")},
@@ -685,6 +715,7 @@ func TestResolveStoredTwilioAuthTokenDoesNotFallBackWhenStoredConfigMissing(t *t
 
 type fakeIntegrationConfigStore struct {
 	existing         *StoredConfig
+	items            []StoredConfig
 	getErr           error
 	upserted         StoredConfig
 	upsertCalls      int
@@ -711,7 +742,7 @@ func (f *fakeIntegrationConfigStore) ListForOwner(context.Context, string, strin
 }
 
 func (f *fakeIntegrationConfigStore) ListForSalon(context.Context, string) ([]StoredConfig, error) {
-	return nil, nil
+	return append([]StoredConfig{}, f.items...), nil
 }
 
 func (f *fakeIntegrationConfigStore) Get(context.Context, string, string) (*StoredConfig, error) {

@@ -7,6 +7,7 @@ import (
 )
 
 const (
+	PlatformSchemaVersion = "manleai.salon_configuration.v9"
 	SchemaVersion         = "manleai.salon_configuration.v8"
 	LegacySchemaV7        = "manleai.salon_configuration.v7"
 	LegacySchemaV6        = "manleai.salon_configuration.v6"
@@ -26,6 +27,7 @@ const (
 	SectionCategories     = "service_categories"
 	SectionServiceAliases = "service_aliases"
 	SectionConsultation   = "service_consultation_profiles"
+	SectionLocalHours     = "local_business_hours"
 )
 
 var excludedData = []string{
@@ -95,6 +97,7 @@ type ConfigurationBundle struct {
 	AIReceptionist          AIReceptionistExport                         `json:"ai_receptionist"`
 	PublicBookingPage       PublicBookingPageExport                      `json:"public_booking_page"`
 	Integrations            integrationconfig.IntegrationConfigsResponse `json:"integrations"`
+	IntegrationProviders    []string                                     `json:"integration_providers,omitempty"`
 	// POSConnection is accepted only for schema-v7-and-earlier compatibility.
 	// Schema v8 exports omit provider connection state because it is operational,
 	// destination-scoped evidence rather than portable configuration intent.
@@ -103,6 +106,19 @@ type ConfigurationBundle struct {
 	ServiceAliases       ServiceAliasBundleExport               `json:"service_aliases"`
 	ConsultationProfiles ServiceConsultationProfileBundleExport `json:"service_consultation_profiles"`
 	KnowledgeBase        KnowledgeBaseExport                    `json:"knowledge_base"`
+	LocalBusinessHours   LocalBusinessHoursExport               `json:"local_business_hours,omitempty"`
+}
+
+type LocalBusinessHoursExport struct {
+	ManagementMode string                          `json:"management_mode"`
+	Periods        []LocalBusinessHourPeriodExport `json:"periods"`
+}
+
+type LocalBusinessHourPeriodExport struct {
+	DayOfWeek      int    `json:"day_of_week"`
+	StartLocalTime string `json:"start_local_time"`
+	EndLocalTime   string `json:"end_local_time"`
+	EndAtMidnight  bool   `json:"end_at_midnight"`
 }
 
 type SalonProfileExport struct {
@@ -285,6 +301,46 @@ type ImportIssue struct {
 	Message   string `json:"message"`
 	Field     string `json:"field,omitempty"`
 	SourceKey string `json:"source_key,omitempty"`
+}
+
+type PlatformTransferRequest struct {
+	SourceType       string               `json:"source_type"`
+	SourceSalonID    string               `json:"source_tenant_id,omitempty"`
+	IncludedSections []string             `json:"included_sections"`
+	Configuration    *ConfigurationBundle `json:"configuration,omitempty"`
+}
+
+type PlatformTransferApplyRequest struct {
+	PlatformTransferRequest
+	PreviewID string `json:"preview_id"`
+	ActionKey string `json:"action_key"`
+}
+
+type PlatformTransferResponse struct {
+	RunID                   string                 `json:"run_id"`
+	TargetSalonID           string                 `json:"target_tenant_id"`
+	SourceType              string                 `json:"source_type"`
+	SourceSalonID           string                 `json:"source_tenant_id,omitempty"`
+	SchemaVersion           string                 `json:"schema_version"`
+	IncludedSections        []string               `json:"included_sections"`
+	Status                  string                 `json:"status"`
+	CanApply                bool                   `json:"can_apply"`
+	Replayed                bool                   `json:"replayed,omitempty"`
+	TargetAuthority         string                 `json:"target_scheduling_authority"`
+	TargetAuthorityVersion  int64                  `json:"target_scheduling_authority_version"`
+	SourceActivePOSProvider string                 `json:"source_active_pos_provider,omitempty"`
+	TargetActivePOSProvider string                 `json:"target_active_pos_provider,omitempty"`
+	Summary                 []ImportSectionSummary `json:"summary"`
+	Warnings                []ImportIssue          `json:"warnings"`
+	Conflicts               []ImportIssue          `json:"conflicts"`
+	ExcludedData            []string               `json:"excluded_data"`
+	RequiresSecretReentry   []string               `json:"requires_secret_reentry"`
+	CreatedAt               time.Time              `json:"created_at"`
+	AppliedAt               *time.Time             `json:"applied_at,omitempty"`
+}
+
+type PlatformTransferRunsResponse struct {
+	Runs []PlatformTransferResponse `json:"runs"`
 }
 
 type importPlan struct {

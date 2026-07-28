@@ -41,6 +41,8 @@ var fullConfigurationSections = []string{
 	SectionKnowledge,
 }
 
+var platformConfigurationSections = append(append([]string{}, fullConfigurationSections...), SectionLocalHours)
+
 type SalonReader interface {
 	Get(ctx context.Context, salonID string, ownerUserID string) (*salon.Salon, error)
 	GetSettings(ctx context.Context, salonID string, ownerUserID string) (*salon.Settings, error)
@@ -126,6 +128,19 @@ func (s *Service) Get(ctx context.Context, salonID string, ownerUserID string) (
 	if salonID == "" || ownerUserID == "" || s.salons == nil || s.integrations == nil || s.knowledge == nil {
 		return nil, ErrValidation
 	}
+	integrations, err := s.integrations.GetAll(ctx, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	return s.getWithIntegrations(ctx, salonID, ownerUserID, integrations)
+}
+
+func (s *Service) getWithIntegrations(ctx context.Context, salonID string, ownerUserID string, integrations *integrationconfig.IntegrationConfigsResponse) (*ConfigurationBundle, error) {
+	salonID = strings.TrimSpace(salonID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	if salonID == "" || ownerUserID == "" || s.salons == nil || s.knowledge == nil || integrations == nil {
+		return nil, ErrValidation
+	}
 
 	item, err := s.salons.Get(ctx, salonID, ownerUserID)
 	if err != nil {
@@ -136,10 +151,6 @@ func (s *Service) Get(ctx context.Context, salonID string, ownerUserID string) (
 		return nil, err
 	}
 	publicPage, err := s.salons.GetPublicCatalogSettings(ctx, salonID, ownerUserID)
-	if err != nil {
-		return nil, err
-	}
-	integrations, err := s.integrations.GetAll(ctx, salonID, ownerUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -316,11 +327,20 @@ func (s *Service) buildImportPlan(ctx context.Context, salonID string, ownerUser
 	if salonID == "" || ownerUserID == "" || s.imports == nil {
 		return nil, ErrValidation
 	}
-	bundle, fingerprint, requestID, err := normalizedImportRequest(req)
+	current, err := s.Get(ctx, salonID, ownerUserID)
 	if err != nil {
 		return nil, err
 	}
-	current, err := s.Get(ctx, salonID, ownerUserID)
+	return s.buildImportPlanWithCurrent(ctx, salonID, ownerUserID, req, current)
+}
+
+func (s *Service) buildImportPlanWithCurrent(ctx context.Context, salonID string, ownerUserID string, req ImportRequest, current *ConfigurationBundle) (*importPlan, error) {
+	salonID = strings.TrimSpace(salonID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	if salonID == "" || ownerUserID == "" || s.imports == nil || current == nil {
+		return nil, ErrValidation
+	}
+	bundle, fingerprint, requestID, err := normalizedImportRequest(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1070,7 +1090,7 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 	if bundle.SchemaVersion == "" {
 		return bundle, ErrValidation
 	}
-	if bundle.SchemaVersion != SchemaVersion && bundle.SchemaVersion != LegacySchemaV7 && bundle.SchemaVersion != LegacySchemaV6 && bundle.SchemaVersion != LegacySchemaV5 && bundle.SchemaVersion != LegacySchemaV4 && bundle.SchemaVersion != LegacySchemaV3 && bundle.SchemaVersion != LegacySchemaV2 && bundle.SchemaVersion != LegacySchemaV1 {
+	if bundle.SchemaVersion != PlatformSchemaVersion && bundle.SchemaVersion != SchemaVersion && bundle.SchemaVersion != LegacySchemaV7 && bundle.SchemaVersion != LegacySchemaV6 && bundle.SchemaVersion != LegacySchemaV5 && bundle.SchemaVersion != LegacySchemaV4 && bundle.SchemaVersion != LegacySchemaV3 && bundle.SchemaVersion != LegacySchemaV2 && bundle.SchemaVersion != LegacySchemaV1 {
 		return bundle, ErrUnsupportedSchema
 	}
 	if bundle.SecretsExported || bundle.OperationalDataExported {
@@ -1082,7 +1102,11 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 	}
 	bundle.IncludedSections = sections
 	bundle.ExcludedData = copyStrings(excludedData)
-	if bundle.SchemaVersion == SchemaVersion {
+	bundle.SalonProfile.ActivePOSProvider = strings.TrimSpace(bundle.SalonProfile.ActivePOSProvider)
+	if len(bundle.SalonProfile.ActivePOSProvider) > 64 || strings.ContainsAny(bundle.SalonProfile.ActivePOSProvider, "\r\n\t") {
+		return bundle, ErrValidation
+	}
+	if bundle.SchemaVersion == PlatformSchemaVersion || bundle.SchemaVersion == SchemaVersion {
 		// Provider connection state was present as reference-only metadata in v7.
 		// It is not portable intent and is omitted/ignored by the v8 contract.
 		bundle.POSConnection = nil
@@ -1119,9 +1143,15 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 	}
 	if bundleIncludes(bundle, SectionIntegrations) {
 		bundle.Integrations = normalizeIntegrationConfigs(bundle.Integrations)
+		bundle.IntegrationProviders, err = normalizeIntegrationProviders(bundle.SchemaVersion, bundle.IntegrationProviders)
+		if err != nil {
+			return bundle, err
+		}
 		if err := validateIntegrationURLs(bundle.Integrations); err != nil {
 			return bundle, err
 		}
+	} else {
+		bundle.IntegrationProviders = []string{}
 	}
 	if bundleIncludes(bundle, SectionCategories) {
 		for i := range bundle.ServiceCategories.Items {
@@ -1172,6 +1202,14 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 		}
 		bundle.KnowledgeBase.Count = len(bundle.KnowledgeBase.Items)
 	}
+	if bundleIncludes(bundle, SectionLocalHours) {
+		if bundle.SchemaVersion != PlatformSchemaVersion {
+			return bundle, ErrValidation
+		}
+		if err := normalizeLocalBusinessHours(&bundle.LocalBusinessHours); err != nil {
+			return bundle, err
+		}
+	}
 	return bundle, nil
 }
 
@@ -1203,7 +1241,7 @@ func normalizeSalonProfile(profile SalonProfileExport, schemaVersion string) Sal
 	profile.SecondaryLanguage = defaultString(strings.TrimSpace(profile.SecondaryLanguage), "vi")
 	profile.HandoffPhone = strings.TrimSpace(profile.HandoffPhone)
 	profile.ActivePOSProvider = strings.TrimSpace(profile.ActivePOSProvider)
-	if schemaVersion != SchemaVersion {
+	if schemaVersion != SchemaVersion && schemaVersion != PlatformSchemaVersion {
 		profile.ActivePOSProvider = defaultString(profile.ActivePOSProvider, pos.ProviderSquare)
 	}
 	return profile
@@ -1245,6 +1283,27 @@ func normalizeIntegrationConfigs(configs integrationconfig.IntegrationConfigsRes
 	configs.OpenAI.RealtimeNoiseProfile = config.NormalizeOpenAIRealtimeNoiseProfile(configs.OpenAI.RealtimeNoiseProfile)
 	configs.OpenAI.RealtimeInstructions = strings.TrimSpace(configs.OpenAI.RealtimeInstructions)
 	return configs
+}
+
+func normalizeIntegrationProviders(schemaVersion string, providers []string) ([]string, error) {
+	if schemaVersion != PlatformSchemaVersion && len(providers) == 0 {
+		return []string{integrationconfig.ProviderSquare, integrationconfig.ProviderTwilio, integrationconfig.ProviderOpenAI}, nil
+	}
+	requested := map[string]bool{}
+	for _, provider := range providers {
+		provider = strings.TrimSpace(provider)
+		if provider == "" || requested[provider] || (provider != integrationconfig.ProviderSquare && provider != integrationconfig.ProviderTwilio && provider != integrationconfig.ProviderOpenAI) {
+			return nil, ErrValidation
+		}
+		requested[provider] = true
+	}
+	result := []string{}
+	for _, provider := range []string{integrationconfig.ProviderSquare, integrationconfig.ProviderTwilio, integrationconfig.ProviderOpenAI} {
+		if requested[provider] {
+			result = append(result, provider)
+		}
+	}
+	return result, nil
 }
 
 func normalizeKnowledgeItem(item KnowledgeItemExport) KnowledgeItemExport {
@@ -1736,7 +1795,7 @@ func summary(plan *importPlan, section string) *ImportSectionSummary {
 }
 
 func summaryValues(items map[string]*ImportSectionSummary) []ImportSectionSummary {
-	order := []string{SectionSalon, SectionAI, SectionPublic, SectionIntegrations, SectionCategories, SectionServiceAliases, SectionConsultation, SectionKnowledge}
+	order := []string{SectionSalon, SectionAI, SectionPublic, SectionLocalHours, SectionIntegrations, SectionCategories, SectionServiceAliases, SectionConsultation, SectionKnowledge}
 	out := make([]ImportSectionSummary, 0, len(order))
 	for _, section := range order {
 		if item := items[section]; item != nil {
@@ -1823,11 +1882,21 @@ func bundleIncludes(bundle ConfigurationBundle, section string) bool {
 }
 
 func normalizeIncludedSections(schemaVersion string, sections []string) ([]string, error) {
+	if schemaVersion == PlatformSchemaVersion {
+		if len(sections) == 0 {
+			return nil, ErrValidation
+		}
+		return normalizeSectionSelection(sections, platformConfigurationSections)
+	}
 	if (schemaVersion != SchemaVersion && schemaVersion != LegacySchemaV7) || len(sections) == 0 {
 		return append([]string{}, fullConfigurationSections...), nil
 	}
+	return normalizeSectionSelection(sections, fullConfigurationSections)
+}
+
+func normalizeSectionSelection(sections []string, orderedAllowed []string) ([]string, error) {
 	requested := map[string]bool{}
-	allowed := sectionSet(fullConfigurationSections)
+	allowed := sectionSet(orderedAllowed)
 	for _, section := range sections {
 		section = strings.TrimSpace(section)
 		if section == "" || !allowed[section] || requested[section] {
@@ -1836,7 +1905,7 @@ func normalizeIncludedSections(schemaVersion string, sections []string) ([]strin
 		requested[section] = true
 	}
 	out := make([]string, 0, len(requested))
-	for _, section := range fullConfigurationSections {
+	for _, section := range orderedAllowed {
 		if requested[section] {
 			out = append(out, section)
 		}
@@ -1845,7 +1914,68 @@ func normalizeIncludedSections(schemaVersion string, sections []string) ([]strin
 }
 
 func schemaHasPortableConsultationProfiles(schemaVersion string) bool {
-	return schemaVersion == SchemaVersion || schemaVersion == LegacySchemaV7
+	return schemaVersion == PlatformSchemaVersion || schemaVersion == SchemaVersion || schemaVersion == LegacySchemaV7
+}
+
+func normalizeLocalBusinessHours(hours *LocalBusinessHoursExport) error {
+	if hours == nil {
+		return ErrValidation
+	}
+	hours.ManagementMode = strings.TrimSpace(hours.ManagementMode)
+	if hours.ManagementMode != "local" {
+		return ErrValidation
+	}
+	type interval struct{ start, end int }
+	byDay := map[int][]interval{}
+	for i := range hours.Periods {
+		period := &hours.Periods[i]
+		period.StartLocalTime = strings.TrimSpace(period.StartLocalTime)
+		period.EndLocalTime = strings.TrimSpace(period.EndLocalTime)
+		if period.DayOfWeek < 0 || period.DayOfWeek > 6 {
+			return ErrValidation
+		}
+		start, ok := localClockMinutes(period.StartLocalTime)
+		if !ok {
+			return ErrValidation
+		}
+		end, ok := localClockMinutes(period.EndLocalTime)
+		if !ok {
+			return ErrValidation
+		}
+		if period.EndAtMidnight {
+			if end != 0 {
+				return ErrValidation
+			}
+			end = 24 * 60
+		}
+		if start >= end {
+			return ErrValidation
+		}
+		byDay[period.DayOfWeek] = append(byDay[period.DayOfWeek], interval{start: start, end: end})
+	}
+	for _, intervals := range byDay {
+		sort.Slice(intervals, func(i, j int) bool { return intervals[i].start < intervals[j].start })
+		for i := 1; i < len(intervals); i++ {
+			if intervals[i].start < intervals[i-1].end {
+				return ErrValidation
+			}
+		}
+	}
+	sort.Slice(hours.Periods, func(i, j int) bool {
+		if hours.Periods[i].DayOfWeek == hours.Periods[j].DayOfWeek {
+			return hours.Periods[i].StartLocalTime < hours.Periods[j].StartLocalTime
+		}
+		return hours.Periods[i].DayOfWeek < hours.Periods[j].DayOfWeek
+	})
+	return nil
+}
+
+func localClockMinutes(value string) (int, bool) {
+	parsed, err := time.Parse("15:04", value)
+	if err != nil || parsed.Format("15:04") != value {
+		return 0, false
+	}
+	return parsed.Hour()*60 + parsed.Minute(), true
 }
 
 func legacySchemaMissingConsultationSetting(schemaVersion string) bool {

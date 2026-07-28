@@ -95,7 +95,7 @@ Current Platform roles
   Account · role · status · version                  [Revoke]
 
 Nail salon detail
-Business | Services | AI Training | Calls | Technical settings | Operations | Access | Audit
+Business | Services | AI Training | Calls | Technical settings | Transfer | Operations | Access | Audit
 
 Access                                              [Refresh]
 Salon team
@@ -116,7 +116,37 @@ Temporary sensitive data access
   [Platform account] [Data scope] [Change reference] [1–24 hours]
                                                      [Grant temporarily]
   Account · exact scope · expiry · reference         [Revoke now]
+
+Transfer                                            [Export selected JSON]
+1. Choose a source
+  [Another tenant] [JSON upload]
+  Find source salon: [Search] [Authorized source tenant]
+  Legacy v7 content pack detected · reviewed as canonical v8
+2. Select portable sections
+  [Safe setup] [Training pack] [All portable]
+  [x] Salon profile  [x] AI receptionist  [x] Local hours
+  [x] Categories     [x] Aliases          [ ] Provider non-secret settings
+  Sections absent from an uploaded file are disabled automatically.
+  Always excluded: authority, active-provider changes, connections, secrets,
+  provider-imported hours, scheduling/call/appointment operational history.
+3. Preview and apply                                [Preview changes]
+  Destination authority/version · source adapter · destination adapter
+  Section · create · update · unchanged · skipped · conflicts
+  Warnings / conflicts                              [Apply reviewed transfer]
+Recent transfer runs                               [Refresh]
 ```
+
+Transfer is Platform-only. The destination is implied by the current tenant
+detail route and is never reselected inside the form. Preview visibly writes
+no salon configuration while recording safe review evidence; apply is disabled
+until a current conflict-free preview exists.
+Changing source, upload, or section scope invalidates the preview. Stale apply
+requires a new preview. Run history shows safe metadata only and explains when
+`audit.read` is missing.
+JSON upload derives its available controls from the declared file scope. A
+content-only v7 pack must show a pre-preview adaptation notice, keep the source
+file unchanged, and be reviewed under canonical v8. Full/runtime/provider v7
+files remain blocked instead of exposing misleading partial controls.
 
 ## Scheduling Authority Experience
 

@@ -1,0 +1,230 @@
+{
+  "schema_version": "manleai.salon_configuration.v8",
+  "exported_at": "2026-07-14T00:00:00Z",
+  "secrets_exported": false,
+  "operational_data_exported": false,
+  "included_sections": [
+    "service_categories",
+    "service_aliases",
+    "service_consultation_profiles"
+  ],
+  "excluded_data": [
+    "services",
+    "staff",
+    "customers",
+    "appointments",
+    "booking_attempts",
+    "fallback_requests",
+    "call_sessions",
+    "transcripts",
+    "recordings",
+    "summaries",
+    "owner_corrections",
+    "pos_entity_links",
+    "pos_sync_jobs",
+    "pos_sync_logs",
+    "pos_errors",
+    "provider_switch_runs",
+    "provider_switch_matches",
+    "salon_business_hour_periods",
+    "party_booking_requests",
+    "voice_webhook_events",
+    "voice_audio_outputs",
+    "pos_oauth_tokens",
+    "api_keys",
+    "client_secrets",
+    "encrypted_secrets"
+  ],
+  "requires_secret_reentry": [],
+  "service_categories": {
+    "count": 5,
+    "items": [
+      {
+        "source_key": "service_category:manicure",
+        "name": "Manicure",
+        "slug": "manicure",
+        "description": "Hand nail services such as classic and gel manicure appointments.",
+        "status": "active",
+        "source": "imported",
+        "sort_order": 10,
+        "aliases": [
+          {"source_key": "service_category_alias:classic manicure", "alias": "classic manicure", "normalized_alias": "classic manicure", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+          {"source_key": "service_category_alias:gel manicure", "alias": "gel manicure", "normalized_alias": "gel manicure", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+          {"source_key": "service_category_alias:mani", "alias": "mani", "normalized_alias": "mani", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+          {"source_key": "service_category_alias:manicure", "alias": "manicure", "normalized_alias": "manicure", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"}
+        ],
+        "created_at": "2026-07-14T00:00:00Z",
+        "updated_at": "2026-07-14T00:00:00Z"
+      },
+      {
+        "source_key": "service_category:pedicure",
+        "name": "Pedicure",
+        "slug": "pedicure",
+        "description": "Foot nail services such as classic and spa pedicure appointments.",
+        "status": "active",
+        "source": "imported",
+        "sort_order": 20,
+        "aliases": [
+          {"source_key": "service_category_alias:classic pedicure", "alias": "classic pedicure", "normalized_alias": "classic pedicure", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+          {"source_key": "service_category_alias:pedi", "alias": "pedi", "normalized_alias": "pedi", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+          {"source_key": "service_category_alias:pedicure", "alias": "pedicure", "normalized_alias": "pedicure", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+          {"source_key": "service_category_alias:spa pedicure", "alias": "spa pedicure", "normalized_alias": "spa pedicure", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"}
+        ],
+        "created_at": "2026-07-14T00:00:00Z",
+        "updated_at": "2026-07-14T00:00:00Z"
+      },
+      {
+        "source_key": "service_category:acrylic",
+        "name": "Acrylic",
+        "slug": "acrylic",
+        "description": "Acrylic full sets and related extension services.",
+        "status": "active",
+        "source": "imported",
+        "sort_order": 30,
+        "aliases": [
+          {"source_key": "service_category_alias:acrylic", "alias": "acrylic", "normalized_alias": "acrylic", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+          {"source_key": "service_category_alias:acrylic full set", "alias": "acrylic full set", "normalized_alias": "acrylic full set", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+          {"source_key": "service_category_alias:full set", "alias": "full set", "normalized_alias": "full set", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"}
+        ],
+        "created_at": "2026-07-14T00:00:00Z",
+        "updated_at": "2026-07-14T00:00:00Z"
+      },
+      {
+        "source_key": "service_category:dip-powder",
+        "name": "Dip Powder",
+        "slug": "dip-powder",
+        "description": "Dip powder and SNS-style nail services.",
+        "status": "active",
+        "source": "imported",
+        "sort_order": 40,
+        "aliases": [
+          {"source_key": "service_category_alias:dip", "alias": "dip", "normalized_alias": "dip", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+          {"source_key": "service_category_alias:dip powder", "alias": "dip powder", "normalized_alias": "dip powder", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+          {"source_key": "service_category_alias:powder manicure", "alias": "powder manicure", "normalized_alias": "powder manicure", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+          {"source_key": "service_category_alias:sns", "alias": "sns", "normalized_alias": "sns", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"}
+        ],
+        "created_at": "2026-07-14T00:00:00Z",
+        "updated_at": "2026-07-14T00:00:00Z"
+      },
+      {
+        "source_key": "service_category:removal",
+        "name": "Removal",
+        "slug": "removal",
+        "description": "Professional gel polish removal services.",
+        "status": "active",
+        "source": "imported",
+        "sort_order": 50,
+        "aliases": [
+          {"source_key": "service_category_alias:gel removal", "alias": "gel removal", "normalized_alias": "gel removal", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+          {"source_key": "service_category_alias:removal", "alias": "removal", "normalized_alias": "removal", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+          {"source_key": "service_category_alias:remove", "alias": "remove", "normalized_alias": "remove", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+          {"source_key": "service_category_alias:soak off", "alias": "soak off", "normalized_alias": "soak off", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+          {"source_key": "service_category_alias:take off", "alias": "take off", "normalized_alias": "take off", "source": "imported", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"}
+        ],
+        "created_at": "2026-07-14T00:00:00Z",
+        "updated_at": "2026-07-14T00:00:00Z"
+      }
+    ]
+  },
+  "service_aliases": {
+    "count": 7,
+    "items": [
+      {"source_key": "service_alias:acrylic set", "alias": "acrylic set", "normalized_alias": "acrylic set", "target_service": {"name": "Acrylic Full Set", "duration_minutes": 75, "price_display": "starting at $65.00"}, "source": "import", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+      {"source_key": "service_alias:deluxe pedicure", "alias": "deluxe pedicure", "normalized_alias": "deluxe pedicure", "target_service": {"name": "Spa Pedicure", "duration_minutes": 60, "price_display": "starting at $55.00"}, "source": "import", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+      {"source_key": "service_alias:dip manicure", "alias": "dip manicure", "normalized_alias": "dip manicure", "target_service": {"name": "Dip Powder Manicure", "duration_minutes": 60, "price_display": "starting at $50.00"}, "source": "import", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+      {"source_key": "service_alias:gel mani", "alias": "gel mani", "normalized_alias": "gel mani", "target_service": {"name": "Gel Manicure", "duration_minutes": 45, "price_display": "starting at $38.00"}, "source": "import", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+      {"source_key": "service_alias:gel takeoff", "alias": "gel takeoff", "normalized_alias": "gel takeoff", "target_service": {"name": "Gel Removal", "duration_minutes": 20, "price_display": "starting at $15.00"}, "source": "import", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+      {"source_key": "service_alias:regular manicure", "alias": "regular manicure", "normalized_alias": "regular manicure", "target_service": {"name": "Classic Manicure", "duration_minutes": 30, "price_display": "starting at $25.00"}, "source": "import", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"},
+      {"source_key": "service_alias:regular pedicure", "alias": "regular pedicure", "normalized_alias": "regular pedicure", "target_service": {"name": "Classic Pedicure", "duration_minutes": 45, "price_display": "starting at $40.00"}, "source": "import", "status": "active", "confidence": 0.94, "created_at": "2026-07-14T00:00:00Z", "updated_at": "2026-07-14T00:00:00Z"}
+    ]
+  },
+  "service_consultation_profiles": {
+    "count": 7,
+    "items": [
+      {
+        "source_key": "service_consultation_profile:acrylic full set|75",
+        "target_service": {"name": "Acrylic Full Set", "duration_minutes": 75, "price_display": "starting at $65.00"},
+        "status": "ready",
+        "recommended_outcomes": ["add_length", "add_strength"],
+        "compatible_current_systems": ["natural", "regular_polish"],
+        "length_capabilities": ["add_length"],
+        "priority_tags": ["durability"],
+        "finish_options": ["regular_polish", "glossy"],
+        "maintenance_note": "As the natural nail grows, acrylic extensions commonly need a salon fill or professional removal; do not pry them off.",
+        "owner_approved_summary": "A full acrylic extension set with shaping and regular polish for clients who want added length and strength."
+      },
+      {
+        "source_key": "service_consultation_profile:classic manicure|30",
+        "target_service": {"name": "Classic Manicure", "duration_minutes": 30, "price_display": "starting at $25.00"},
+        "status": "ready",
+        "recommended_outcomes": ["maintain", "shorten", "color_refresh"],
+        "compatible_current_systems": ["natural", "regular_polish"],
+        "length_capabilities": ["keep", "shorten"],
+        "priority_tags": ["lower_cost", "shorter_visit"],
+        "finish_options": ["natural", "regular_polish", "glossy"],
+        "maintenance_note": "Regular polish is easy to remove at home, but it may chip sooner than gel or dip.",
+        "owner_approved_summary": "A simple natural-nail service with shaping, cuticle care, lotion, and regular polish; a good fit for a lower-cost, shorter visit."
+      },
+      {
+        "source_key": "service_consultation_profile:classic pedicure|45",
+        "target_service": {"name": "Classic Pedicure", "duration_minutes": 45, "price_display": "starting at $40.00"},
+        "status": "ready",
+        "recommended_outcomes": ["maintain", "shorten", "color_refresh"],
+        "compatible_current_systems": ["natural", "regular_polish"],
+        "length_capabilities": ["keep", "shorten"],
+        "priority_tags": ["lower_cost", "shorter_visit"],
+        "finish_options": ["natural", "regular_polish", "glossy"],
+        "maintenance_note": "Regular polish may chip sooner than gel; allow it to dry fully and refresh as needed.",
+        "owner_approved_summary": "Essential foot and toenail care with soak, shaping, cuticle care, light callus care, massage, and regular polish."
+      },
+      {
+        "source_key": "service_consultation_profile:dip powder manicure|60",
+        "target_service": {"name": "Dip Powder Manicure", "duration_minutes": 60, "price_display": "starting at $50.00"},
+        "status": "ready",
+        "recommended_outcomes": ["maintain", "shorten", "add_strength", "color_refresh"],
+        "compatible_current_systems": ["natural", "regular_polish", "dip"],
+        "length_capabilities": ["keep", "shorten"],
+        "priority_tags": ["durability", "lower_maintenance"],
+        "finish_options": ["glossy"],
+        "maintenance_note": "Dip powder grows out with the natural nail and should be soaked off or refreshed instead of peeled.",
+        "owner_approved_summary": "A dip powder color service for clients who want added strength and longer wear on natural nails without adding extension length."
+      },
+      {
+        "source_key": "service_consultation_profile:gel manicure|45",
+        "target_service": {"name": "Gel Manicure", "duration_minutes": 45, "price_display": "starting at $38.00"},
+        "status": "ready",
+        "recommended_outcomes": ["maintain", "shorten", "color_refresh"],
+        "compatible_current_systems": ["natural", "regular_polish", "gel"],
+        "length_capabilities": ["keep", "shorten"],
+        "priority_tags": ["durability", "lower_maintenance"],
+        "finish_options": ["gel_polish", "glossy"],
+        "maintenance_note": "Refresh or professionally remove the gel as nail growth becomes visible; do not peel it off.",
+        "owner_approved_summary": "A natural-nail manicure finished with long-wear gel polish for a durable, glossy result; it does not add extension length."
+      },
+      {
+        "source_key": "service_consultation_profile:gel removal|20",
+        "target_service": {"name": "Gel Removal", "duration_minutes": 20, "price_display": "starting at $15.00"},
+        "status": "ready",
+        "recommended_outcomes": ["removal"],
+        "compatible_current_systems": ["gel"],
+        "length_capabilities": ["keep"],
+        "priority_tags": ["lower_cost", "shorter_visit"],
+        "finish_options": ["natural"],
+        "maintenance_note": "Professional soak-off helps avoid damage from peeling; light cleanup is included, but a new color service is separate.",
+        "owner_approved_summary": "Professional gel polish removal with light nail cleanup for clients who want a safe take-off before leaving nails natural or choosing another service."
+      },
+      {
+        "source_key": "service_consultation_profile:spa pedicure|60",
+        "target_service": {"name": "Spa Pedicure", "duration_minutes": 60, "price_display": "starting at $55.00"},
+        "status": "ready",
+        "recommended_outcomes": ["maintain", "shorten", "color_refresh"],
+        "compatible_current_systems": ["natural", "regular_polish"],
+        "length_capabilities": ["keep", "shorten"],
+        "priority_tags": [],
+        "finish_options": ["natural", "regular_polish", "glossy"],
+        "maintenance_note": "Regular polish may chip sooner than gel; allow it to dry fully and refresh as needed.",
+        "owner_approved_summary": "An extended pedicure with exfoliation, mask, warm towel, massage, and regular polish for clients who want more relaxation and skin care."
+      }
+    ]
+  }
+}

@@ -327,6 +327,36 @@ RPO/RTO evidence.
 
 ## Configuration Transfer
 
+- [x] Mount configuration transfer only under the Platform tenant detail
+  `Transfer` tab; do not restore Tenant Settings or onboarding transfer routes.
+- [x] Support direct tenant-to-tenant sources and schema-v9 JSON upload with
+  schema-v8 upload compatibility and explicit section scope.
+- [x] Accept only explicitly scoped content-only v7 packs, canonicalize them to
+  v8 before fingerprint/audit/apply, and reject v7 runtime/provider scope plus
+  all v1-v6 uploads on the mounted Platform surface.
+- [x] Derive JSON-upload section controls from the file's
+  `included_sections`, disable absent sections, and visibly explain v7
+  canonicalization before preview.
+- [x] Require every selected source read and destination write capability for
+  the actual Platform actor; do not add a broad transfer bypass capability.
+- [x] Persist only safe reviewed-run fingerprints, fences, summaries, and
+  immutable events; never persist the raw bundle or secrets.
+- [x] Recheck source fingerprint, Business/Technical versions, and scheduling
+  authority/version under one transaction; stale apply writes no destination
+  domain data.
+- [x] Preserve scheduling authority, active provider selection, provider
+  connection state, provider-imported hours, credentials, and operational
+  history. Transfer only `local_override` hours when both source and
+  destination are locally managed.
+- [x] Read provider settings only from salon-scoped persisted Platform state;
+  missing source providers are no-ops and never inherit legacy environment
+  fallback.
+- [x] Write canonical domain rows and existing Business/Technical version and
+  actual-actor audit ledgers atomically; include transfer events in Platform
+  Audit.
+- [x] Provide exact action replay, changed-action conflict, preview conflicts,
+  responsive UI states, selected-scope JSON export, and recent safe run history.
+
 - [x] Add sanitized owner-scoped configuration export with stable schema version.
 - [x] Exclude services, staff, customers, appointments, call sessions, transcripts, POS OAuth tokens, API keys, client secrets, encrypted secrets, and operational records.
 - [x] Include service category taxonomy, service category aliases, and service aliases in schema v5, add the salon consultation runtime toggle in schema v6, add portable service consultation profiles and scoped `included_sections` data packs in schema v7, and make schema v8 Owner-first while retaining v7 compatibility and excluding provider connection state.
@@ -334,7 +364,8 @@ RPO/RTO evidence.
 - [x] Keep consultation profile import idempotent by `(salon_id, service_id)` and leave profile revision unchanged when imported data is identical.
 - [x] Use stable category slugs and normalized alias keys so repeated imports update existing taxonomy instead of duplicating it.
 - [x] Resolve imported service aliases only against existing target-salon services and skip unresolved alias targets without creating services.
-- [x] Add import preview and apply flows for existing salons and onboarding.
+- [x] Retain the earlier import preview/apply implementation for compatibility;
+  after SaaS cutover its Tenant/onboarding routes are not registered.
 - [x] Use request IDs for repeated import applies so retries do not create duplicate import runs.
 - [x] Import `ai_enabled` as portable intent without a universal Square gate; evaluate confirmed booking, consultation eligibility, and public publishing against the destination scheduling authority, with `owner_manual` forced to pending approval and source/target/result booking mode plus a structured warning exposed on preview/apply and exact replay.
 - [x] Exclude scheduling authority/version and switch history, scheduling requests/outbox state, internal-calendar configuration/execution evidence, provider secrets, and operational records; never move historical operations.

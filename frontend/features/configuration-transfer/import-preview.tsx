@@ -127,6 +127,8 @@ export function ImportIssueList({
 
 export function sectionLabel(section: string) {
   switch (section) {
+    case "configuration":
+      return "Configuration";
     case "salon_profile":
       return "Salon profile";
     case "ai_receptionist":
@@ -143,6 +145,8 @@ export function sectionLabel(section: string) {
       return "Service aliases";
     case "service_consultation_profiles":
       return "Service consultation profiles";
+    case "local_business_hours":
+      return "Local business hours";
     default:
       return section;
   }

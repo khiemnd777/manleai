@@ -1566,6 +1566,105 @@ and imported through
 
 ## Configuration Transfer
 
+The mounted SaaS surface is Platform-only and target-scoped:
+
+- `GET /api/platform/tenants/:tenant_id/configuration-transfer/export?sections=<comma-separated>`
+- `POST /api/platform/tenants/:tenant_id/configuration-transfer/preview`
+- `POST /api/platform/tenants/:tenant_id/configuration-transfer/apply`
+- `GET /api/platform/tenants/:tenant_id/configuration-transfer/runs?limit=25`
+
+The destination is always `:tenant_id`; clients do not send a second target
+selector. A tenant source requires `source_type=tenant` and
+`source_tenant_id`. A file source requires `source_type=json_upload` and a
+`configuration` bundle. Both require an explicit `included_sections` list.
+Platform v9 export supports `local_business_hours`; v8 JSON remains accepted
+without that section. A v7 JSON file is accepted only when it declares an
+explicit content-only scope limited to `service_categories`,
+`service_aliases`, `service_consultation_profiles`, and `knowledge_base`.
+The server canonicalizes an accepted v7 pack to v8 before fingerprinting,
+preview, run audit, and apply, and returns the
+`legacy_v7_content_pack_adapted_to_v8` warning. Full/runtime/provider v7
+bundles and v1-v6 bundles remain unsupported on Platform routes.
+JSON export/upload is capped at 3 MB; larger same-platform sources use direct
+tenant-to-tenant transfer instead of materializing a file.
+For `integrations`, v9 exports use `integration_providers`; only providers with
+a salon-scoped persisted source record are listed and eligible to apply (the
+field may be omitted when none exists).
+Missing source records are no-ops, and legacy environment fallback is never
+exported as tenant configuration. Compatibility v8 uploads treat their three
+provider blocks as explicit file input.
+
+```json
+{
+  "source_type": "tenant",
+  "source_tenant_id": "source-salon-id",
+  "included_sections": [
+    "salon_profile",
+    "ai_receptionist",
+    "public_booking_page",
+    "local_business_hours",
+    "service_categories",
+    "service_aliases",
+    "service_consultation_profiles",
+    "knowledge_base"
+  ]
+}
+```
+
+Preview is write-free for canonical salon configuration, but creates a safe
+review run and immutable preview event. The run stores source/target identity,
+schema, section list, source fingerprint, Business/Technical version fences,
+scheduling-authority version, safe summary/warnings/conflicts, and the actual
+Platform actor. It never stores the raw bundle or secret values.
+If the selected changes would invalidate internal activation or external
+provider readiness while the same transfer requests an enabled public page,
+preview returns a conflict. Apply configuration first, complete the existing
+readiness workflow, then publish explicitly.
+
+Apply repeats the exact request and adds the preview/action identity:
+
+```json
+{
+  "preview_id": "reviewed-run-id",
+  "action_key": "platform-transfer-client-stable-key",
+  "source_type": "tenant",
+  "source_tenant_id": "source-salon-id",
+  "included_sections": ["salon_profile", "knowledge_base"]
+}
+```
+
+Every selected section maps to its existing capability owner. Salon profile,
+public page, and local hours require `business.read|write`; categories,
+aliases, and consultation profiles require `services.read|write`; knowledge
+requires `training.read|write`; AI receptionist and provider non-secret
+settings require `technical.read|write`. Tenant-to-tenant preview/apply checks
+the selected read capabilities on the source and target; apply checks the
+selected write capabilities on the target. Recent runs require `audit.read`.
+Allowed support actions are recorded before domain work.
+
+Apply acquires the scheduling fence, locks the reviewed run and every selected
+source/target version fence, rechecks the source fingerprint and destination
+authority/version, then updates canonical rows and Business/Technical ledgers
+in one transaction. Any stale source, target, or authority returns
+`409 CONFIGURATION_TRANSFER_STALE` with zero destination domain writes. Exact
+action replay returns the original applied run; changed reuse returns
+`409 CONFIGURATION_TRANSFER_ACTION_CONFLICT`.
+
+`active_pos_provider` is report-only and is never imported. Scheduling
+authority and switch history, provider connections/tokens, credentials,
+services, staff, customers, appointments, scheduling requests, calls,
+recordings, provider-imported hours, and operational history are always
+excluded. Integration transfer changes only portable non-secret settings and
+preserves destination secrets. Local hours transfer only
+`source=local_override`; provider-managed source or destination hours produce
+a preview conflict.
+
+### Retained legacy compatibility code (not mounted after SaaS cutover)
+
+The module still contains the earlier owner/onboarding v8-v1 import logic for
+code and data compatibility, but `cmd/api` does not register the following
+Tenant/onboarding routes. They are not part of the current HTTP surface.
+
 `GET /api/salons/:id/configuration-export`
 
 Returns a sanitized, owner-scoped JSON snapshot for moving setup information to
@@ -1581,7 +1680,7 @@ configuration only:
 - Service consultation profiles with portable target-service references
 - AI Training knowledge base
 
-Schema v8 is the current export contract. Secret-bearing integrations return only configuration values and secret status
+Schema v8 is the retained legacy export contract. Secret-bearing integrations return only configuration values and secret status
 metadata such as `client_secret_configured`, `auth_token_configured`,
 `api_key_configured`, and `*_source`. It does not export services, staff,
 customers, appointments and child/resource rows, booking attempts/segments,

@@ -18,6 +18,7 @@ const tabs = [
   { key: "training", label: "AI Training" },
   { key: "calls", label: "Calls" },
   { key: "technical", label: "Technical settings" },
+  { key: "transfer", label: "Transfer" },
   { key: "operations", label: "Operations" },
   { key: "access", label: "Access", adminOnly: true },
   { key: "audit", label: "Audit" }

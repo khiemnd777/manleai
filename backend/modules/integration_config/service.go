@@ -58,12 +58,60 @@ func (s *Service) GetAll(ctx context.Context, salonID string, ownerUserID string
 }
 
 func (s *Service) getAllForSalon(ctx context.Context, salonID string) (*IntegrationConfigsResponse, error) {
+	response, _, err := s.GetAllPersistedForPlatform(ctx, salonID)
+	return response, err
+}
+
+// GetAllPersistedForPlatform returns only salon-scoped database configuration.
+// It deliberately does not surface legacy environment fallback as portable
+// tenant configuration.
+func (s *Service) GetAllPersistedForPlatform(ctx context.Context, salonID string) (*IntegrationConfigsResponse, []string, error) {
 	salonID = strings.TrimSpace(salonID)
 	if salonID == "" {
-		return nil, ErrValidation
+		return nil, nil, ErrValidation
 	}
 	items, err := s.repo.ListForSalon(ctx, salonID)
-	return s.integrationConfigsResponse(items, err)
+	if err != nil {
+		return nil, nil, err
+	}
+	byProvider := map[string]*StoredConfig{}
+	for i := range items {
+		item := items[i]
+		byProvider[item.Provider] = &item
+	}
+	providers := []string{}
+	for _, provider := range []string{ProviderSquare, ProviderTwilio, ProviderOpenAI} {
+		if byProvider[provider] != nil {
+			providers = append(providers, provider)
+		}
+	}
+	response := &IntegrationConfigsResponse{
+		Square: strictSquareResponse(s, byProvider[ProviderSquare]),
+		Twilio: strictTwilioResponse(s, byProvider[ProviderTwilio]),
+		OpenAI: strictOpenAIResponse(s, byProvider[ProviderOpenAI]),
+	}
+	return response, providers, nil
+}
+
+func strictSquareResponse(s *Service, item *StoredConfig) SquareSettingsResponse {
+	if item == nil {
+		return SquareSettingsResponse{Provider: ProviderSquare, ClientSecretSource: SecretSourceNone, WebhookSignatureKeySource: SecretSourceNone}
+	}
+	return s.squareResponse(item)
+}
+
+func strictTwilioResponse(s *Service, item *StoredConfig) TwilioSettingsResponse {
+	if item == nil {
+		return TwilioSettingsResponse{Provider: ProviderTwilio, AuthTokenSource: SecretSourceNone}
+	}
+	return s.twilioResponse(item)
+}
+
+func strictOpenAIResponse(s *Service, item *StoredConfig) OpenAISettingsResponse {
+	if item == nil {
+		return OpenAISettingsResponse{Provider: ProviderOpenAI, APIKeySource: SecretSourceNone}
+	}
+	return s.openAIResponse(item)
 }
 
 func (s *Service) integrationConfigsResponse(items []StoredConfig, err error) (*IntegrationConfigsResponse, error) {

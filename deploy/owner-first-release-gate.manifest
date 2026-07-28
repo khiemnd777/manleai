@@ -13,6 +13,7 @@ BACKEND_RACE_PACKAGES=(
   ./modules/auth
   ./modules/booking
   ./modules/business
+  ./modules/config_transfer
   ./modules/conversation
   ./modules/customer_notification
   ./modules/notification_delivery
@@ -89,6 +90,8 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/migrations/v73_safety_test.go
   backend/migrations/v74_safety_test.go
   backend/migrations/v75_safety_test.go
+  backend/migrations/v76_safety_test.go
+  backend/migrations/v77_safety_test.go
   backend/sampledata/runner_test.go
   backend/sampledata/runner_integration_test.go
   backend/cmd/worker/retention_registration_test.go
@@ -100,6 +103,7 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/internal/middleware/rate_limit_test.go
   backend/internal/ratelimit/redis_store_integration_test.go
   frontend/lib/api/business.test.ts
+  frontend/lib/api/platform-configuration-transfer.test.ts
   frontend/lib/api/access.test.ts
   frontend/lib/api/session.test.ts
   frontend/lib/api/browser-session.test.ts
@@ -121,6 +125,8 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/booking/repository_integration_test.go
   backend/modules/booking/service_test.go
   backend/modules/config_transfer/repository_integration_test.go
+  backend/modules/config_transfer/platform_routes_test.go
+  backend/modules/config_transfer/platform_service_test.go
   backend/modules/conversation/manleai_calendar_party_scheduling_test.go
   backend/modules/conversation/platform_support_routes_test.go
   backend/modules/conversation/retention_integration_test.go

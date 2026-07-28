@@ -392,6 +392,16 @@ A normalized, salon-scoped record of provider failures. Use codes such as `POS_T
 - Authority switching is explicit and preserves originating authority. A
   provider connection, sync, webhook, import, or configuration transfer must
   not switch authority implicitly or move historical appointments.
+- After SaaS cutover, configuration transfer is a Platform tenant-detail
+  workflow. It requires reviewed source/target scope and actual-actor
+  capability checks, transfers only portable canonical configuration, and
+  never transfers active-provider selection, provider connection state,
+  credentials, provider-imported hours, calls, customers, appointments, or
+  operational history.
+- Platform JSON input uses v9 or compatibility v8. Legacy v7 is accepted only
+  as an explicitly scoped content pack containing categories, aliases,
+  consultation profiles, or knowledge; it is canonicalized to v8 before
+  review. Runtime/provider v7 and v1-v6 remain unsupported.
 - Historical reads, reconciliation, provider sync, Square webhooks, and worker
   repair preserve their existing external-provider behavior. External lease
   recovery and provider-calendar mutation are explicitly fenced to external

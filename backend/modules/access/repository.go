@@ -476,6 +476,9 @@ func (r *Repository) ListAuditEvents(ctx context.Context, actorUserID, salonID s
 			UNION ALL
 			SELECT id,actor_user_id,salon_id,NULL::uuid,event_type,resource_type,resource_id,details,created_at
 			FROM technical_events
+			UNION ALL
+			SELECT id,actor_user_id,salon_id,NULL::uuid,event_type,'configuration_transfer'::text,run_id::text,details,created_at
+			FROM configuration_transfer_events
 		) AS event
 		%s
 		ORDER BY event.created_at DESC, event.id DESC

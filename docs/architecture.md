@@ -33,6 +33,11 @@ separate non-owner runtime role; tenant quotas and fair worker claims; audited
 Platform AI-runtime control; a database-owned public catalog projection; and
 complete Platform PII-scope enforcement. Tenant and Platform UIs are separate
 route trees over the same canonical tenant data.
+V77 adds the Platform-only reviewed configuration-transfer control plane:
+tenant-to-tenant and schema-v9 JSON sources, v8 upload compatibility, guarded
+content-only v7-to-v8 adaptation, source/target/domain/authority fences,
+actual-actor audit, and atomic apply without transferring authority, active
+provider selection, connections, secrets, or operational history.
 
 The backend is organized as:
 
@@ -67,7 +72,7 @@ modules/customer     canonical customer CRUD, activity read model, and POS looku
 modules/notification_delivery provider-neutral owner-message delivery claims, attempts, events, replay, and dead-letter policy
 modules/notification_twilio Twilio Messaging REST dispatch plus signed status and inbound callbacks
 modules/integration_config encrypted salon-scoped provider app credentials and runtime settings
-modules/config_transfer safe salon configuration export/import previews and applies
+modules/config_transfer Platform-only reviewed v9/v8 transfer orchestration, guarded scoped-v7 content adaptation, plus retained unregistered legacy compatibility code
 modules/conversation state-driven simulator/phone sessions, semantic turn reduction, service consultation, transcripts, summaries, and handoffs
 modules/training     salon-authored knowledge base, owner corrections, and service aliases
 modules/voice        provider-neutral live voice runtime, authority-aware three-dimension readiness/status, semantic-contract verification, routing, and webhook event audit
@@ -83,9 +88,9 @@ app/                 Next.js routes
 components/ui        reusable UI primitives
 components/layout    independent Tenant and Platform shells plus route-surface gates
 features/auth        login flow
-features/configuration-transfer export/import preview helpers and onboarding import UI
+features/configuration-transfer shared transfer preview presentation helpers
 features/business    shared Tenant/Platform Business editors and Tenant appointments/calls consoles
-features/platform    tenant directory/detail, global Platform roles, tenant Access, Technical, Operations, Audit, and runtime-limit controls
+features/platform    tenant directory/detail, global Platform roles, tenant Access, Technical, Transfer, Operations, Audit, and runtime-limit controls
 features/public      slug-scoped public salon landing projection
 features/onboarding salon profile creation
 lib/api              typed API client
@@ -204,10 +209,11 @@ hours remain read-only; local hours remain `local_override`. Public publishing
 reuses the existing selected-authority readiness owner and service
 consultation writes reuse the POS validation/persistence owner.
 
-Phases 4-10 complete the split. `/dashboard/*` is the Tenant Business surface;
+Phases 4-10 complete the split. V77 adds the reviewed Transfer workflow.
+`/dashboard/*` is the Tenant Business surface;
 `/platform/*` is the Platform Admin/Ops surface with tenant detail tabs for
-Business, Services, AI Training, Calls, Technical, Operations, Access, and
-Audit. Services, Calls, Settings, and AI Training use the original rich
+Business, Services, AI Training, Calls, Technical, Transfer, Operations,
+Access, and Audit. Services, Calls, Settings, and AI Training use the original rich
 dashboard components through explicit Tenant/Platform data adapters; the
 Owner-first cutover does not replace those workflows with reduced dashboards.
 Platform Business therefore does not render its former reduced Services
@@ -216,6 +222,15 @@ for services, categories, category aliases, and service aliases. Legacy
 Platform Business service/category API paths remain compatibility routes but
 also require exact V75 Owner-authorized Services access and successful support
 action audit.
+The Transfer tab is the only mounted configuration-transfer surface after the
+SaaS cutover. Its target is implied by the tenant detail route. Platform Admin
+has direct capability evaluation; Platform Ops must hold every selected source
+read and destination write capability. Preview stores only safe fingerprints,
+version fences, summaries, and the actual actor. Apply rechecks source data,
+Business/Technical resource versions, and scheduling-authority version in one
+transaction before writing canonical domain rows and their existing ledgers.
+The retained Tenant/onboarding v8 handlers are compatibility code and are not
+registered by `cmd/api`.
 Global Platform role
 governance stays at `/platform/access`; salon membership, exact-salon Platform
 Ops capabilities, Owner-support requests, and temporary non-Calls PII grants are managed at
@@ -1163,44 +1178,36 @@ closed. Public DTOs never expose staff contact details, provider/POS IDs,
 provider tokens, sync errors, or owner identifiers, and every CTA remains a
 call-to-request action rather than web confirmation.
 
-Configuration transfer schema v8 exports sanitized portable setup intent only, including salon
-profile, AI settings, public catalog settings, integration runtime settings,
-service category taxonomy, service category aliases, service aliases that can
-be matched to existing target services, portable service consultation profiles,
-and owner-authored knowledge. Schema v8 retains the v7 `included_sections`
-contract and accepts v7 bundles for backward compatibility, so
-curated data packs can import taxonomy, aliases, and consultation profiles
-without overwriting salon profile, provider configuration, or AI runtime
-settings. Import
-previews and applies use stable request IDs, skip secrets and operational
-records, and must not change scheduling authority/version, scheduling switch
-history, owner-review requests/outbox rows, internal-calendar configuration or
-execution evidence, or recreate services, staff, customers, appointments, POS
-tokens, call sessions, transcripts, provider connections, synced business hour
-periods, provider switch runs, party booking requests, voice webhook events, or
-provider-side state. Apply acquires the same salon advisory fence used by an
-authority switch and rechecks the exact previewed authority/version inside the
-transaction; a concurrent change fails reviewably before any import write.
-Service category imports use stable slug and
-normalized-alias keys and reject category aliases that conflict with active
-service aliases. Service alias imports use stable normalized-alias keys and
-skip aliases whose target service cannot be resolved on the target salon.
-Consultation profile imports resolve an existing target service by normalized
-name plus duration, block missing or ambiguous targets, and derive eligibility
-from the destination authority: canonical active AI-bookable services are
-eligible for `owner_manual` and `manleai_calendar`, while `external_provider`
-also requires the active-provider link/sync/version evidence. Profiles
-upsert by stable `(salon_id, service_id)` without changing revisions for
-identical data. Services and provider mappings are never created by transfer.
-The exported `active_pos_provider` remains portable external-adapter intent and
-is reported as source, destination, and result in preview. It never selects or
-switches scheduling authority. If changing it while `external_provider` is the
-destination authority would change the confirming executor, import blocks and
-requires the explicit provider-switch workflow.
-Booking mode is likewise reported as source, destination, and result. Incoming
-`confirmed_booking` under `owner_manual` is never applied silently: preview and
-apply emit a structured warning and report `pending_approval` as the result;
-exact replay preserves that decision and import-run identity.
+The current configuration-transfer contract is Platform schema v9 on the
+tenant-detail Transfer tab. It supports an authorized tenant source or JSON
+upload, explicit section scope, `local_override` hours, selected-scope export,
+v8 upload compatibility, and server-owned adaptation of explicitly scoped v7
+content packs containing only categories, aliases, consultation profiles, and
+knowledge. Accepted v7 input is canonicalized to v8 before fingerprint and
+audit; v7 runtime/provider scope and v1-v6 remain rejected. The older v8-v1
+Tenant/onboarding handlers remain compatibility code but are not registered or
+rendered after SaaS cutover.
+
+Preview creates only a safe reviewed run/event; it stores fingerprints,
+Business/Technical/authority fences, safe summaries, and the actual Platform
+actor, never the raw bundle. Apply uses a stable action key, acquires the
+scheduling advisory fence, locks and rechecks exact source/target evidence,
+and writes canonical data plus existing domain ledgers atomically. Category
+and alias keys remain stable, and service aliases/consultation profiles resolve
+only against existing destination services. Services and provider mappings are
+never created by transfer.
+
+Scheduling authority, active-provider selection, provider connections,
+credentials, provider-imported hours, and operational records remain on the
+destination. `active_pos_provider` is report-only. Provider non-secret settings
+come only from persisted salon-scoped source rows; missing providers are no-ops
+and never inherit environment fallback. Square/Twilio transfer preserves the
+destination enabled state and non-portable webhook/owner-SMS settings. Booking
+mode is still validated against the destination authority, so
+`confirmed_booking` under `owner_manual` is reduced to `pending_approval` with
+reviewable warning evidence. A transfer that also requests public publishing
+while invalidating its readiness is blocked until the existing activation or
+provider-readiness workflow is completed.
 
 ## Operations Health And Worker Run Fencing
 

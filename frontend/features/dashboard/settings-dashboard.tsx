@@ -3,33 +3,23 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { AlertTriangle, Download, ExternalLink, FileJson, Globe2, RefreshCcw, Save, ShieldCheck, Upload } from "lucide-react";
+import { AlertTriangle, ExternalLink, Globe2, RefreshCcw, Save, ShieldCheck } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useTenantSalon } from "@/components/layout/tenant-salon-context";
-import { ImportIssueList, ImportScopePreview, ImportSummaryTable, listOrNone } from "@/features/configuration-transfer/import-preview";
 import { InternalCalendarSetup } from "@/features/dashboard/internal-calendar-setup";
 import { CustomerSMSPolicyCard } from "@/features/dashboard/customer-sms-policy";
 import { OperationsHealth } from "@/features/dashboard/operations-health";
 import { SchedulingAuthoritySwitch } from "@/features/dashboard/scheduling-authority-switch";
 import { apiRequest, RequestError } from "@/lib/api/client";
-import {
-  applyConfigurationImport,
-  downloadConfigurationExport,
-  newConfigurationImportRequestID,
-  previewConfigurationImport,
-  readConfigurationBundle
-} from "@/lib/api/configuration-transfer";
 import { landingBaseUrl } from "@/lib/config/env";
 import { serviceEligibleForAuthority } from "@/lib/api/scheduling-evidence";
 import type {
   BusinessHourPeriod,
   BookingMode,
-  ConfigurationBundle,
-  ConfigurationImportResponse,
   POSService,
   PublicCatalogSettings,
   Salon,
@@ -132,10 +122,6 @@ export function SettingsDashboard() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-  const [importBundle, setImportBundle] = useState<ConfigurationBundle | null>(null);
-  const [importPreview, setImportPreview] = useState<ConfigurationImportResponse | null>(null);
-  const [importFileName, setImportFileName] = useState("");
-  const [importRequestID, setImportRequestID] = useState("");
 
   async function load({ silent = false }: { silent?: boolean } = {}) {
     setError("");
@@ -157,7 +143,6 @@ export function SettingsDashboard() {
         setSettingsForm(emptySettingsForm());
         setPublicCatalog(null);
         setPublicCatalogForm(emptyPublicCatalogForm());
-        clearImportState();
         return;
       }
 
@@ -349,68 +334,6 @@ export function SettingsDashboard() {
     }
   }
 
-  async function exportConfiguration() {
-    if (!salon) return;
-    setBusy("export-config");
-    setError("");
-    setSuccess("");
-    try {
-      await downloadConfigurationExport(salon);
-      setSuccess("Configuration export downloaded.");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not export configuration.");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function previewImportFile(file: File | null) {
-    if (!salon || !file) return;
-    setBusy("preview-config-import");
-    setError("");
-    setSuccess("");
-    try {
-      const bundle = await readConfigurationBundle(file);
-      const preview = await previewConfigurationImport(salon, bundle);
-      setImportBundle(bundle);
-      setImportPreview(preview);
-      setImportFileName(file.name);
-      setImportRequestID(newConfigurationImportRequestID());
-      setSuccess(preview.can_apply ? "Configuration import preview is ready." : "Configuration import preview has conflicts.");
-    } catch (err) {
-      clearImportState();
-      setError(err instanceof Error ? err.message : "Could not preview configuration import.");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function applyImportPreview() {
-    if (!salon || !importBundle || !importPreview?.can_apply) return;
-    const requestID = importRequestID || newConfigurationImportRequestID();
-    setBusy("apply-config-import");
-    setError("");
-    setSuccess("");
-    try {
-      const applied = await applyConfigurationImport(salon, importBundle, requestID);
-      setImportPreview(applied);
-      setImportRequestID(applied.request_id);
-      setSuccess("Configuration import applied.");
-      await load({ silent: true });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not apply configuration import.");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  function clearImportState() {
-    setImportBundle(null);
-    setImportPreview(null);
-    setImportFileName("");
-    setImportRequestID("");
-  }
-
   if (loading || tenant.loading) {
     return (
       <div className="space-y-6">
@@ -507,16 +430,6 @@ export function SettingsDashboard() {
 
       <OperationsHealth salonID={salon.id} />
 
-      <ConfigurationTransferCard
-        busy={busy}
-        fileName={importFileName}
-        preview={importPreview}
-        onApply={() => void applyImportPreview()}
-        onClear={clearImportState}
-        onExport={() => void exportConfiguration()}
-        onPreviewFile={(file) => void previewImportFile(file)}
-      />
-
       <PublicCatalogCard
         settings={publicCatalog}
         form={publicCatalogForm}
@@ -597,128 +510,6 @@ function StatusMetric({ label, value, badge }: { label: string; value: string; b
           <div className="mt-2 text-base font-semibold text-ink">{value}</div>
         </div>
         <Badge value={badge} />
-      </div>
-    </Card>
-  );
-}
-
-function ConfigurationTransferCard({
-  busy,
-  fileName,
-  preview,
-  onApply,
-  onClear,
-  onExport,
-  onPreviewFile
-}: {
-  busy: string;
-  fileName: string;
-  preview: ConfigurationImportResponse | null;
-  onApply: () => void;
-  onClear: () => void;
-  onExport: () => void;
-  onPreviewFile: (file: File | null) => void;
-}) {
-  const exportBusy = busy === "export-config";
-  const previewBusy = busy === "preview-config-import";
-  const applyBusy = busy === "apply-config-import";
-  const disabled = busy !== "";
-
-  return (
-    <Card>
-      <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
-        <div className="flex gap-3">
-          <div className="flex h-10 w-10 flex-none items-center justify-center rounded-md bg-teal-50 text-brand">
-            <FileJson className="h-5 w-5" />
-          </div>
-          <div>
-            <CardTitle>Configuration transfer</CardTitle>
-            <CardDescription>
-              Export portable salon intent or import a scoped data pack without changing scheduling authority.
-            </CardDescription>
-          </div>
-        </div>
-        <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center">
-          <Badge value={preview?.can_apply === false ? "conflict" : "ready"} />
-          <Button type="button" onClick={onExport} disabled={disabled}>
-            <Download className="h-4 w-4" />
-            {exportBusy ? "Exporting..." : "Export JSON"}
-          </Button>
-        </div>
-      </div>
-
-      <div className="mt-5 grid gap-4 lg:grid-cols-[0.8fr_1.2fr]">
-        <div className="rounded-md border border-line p-4">
-          <div className="text-sm font-semibold text-ink">Full export includes</div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {["Salon profile", "AI receptionist", "Public booking page", "Integrations", "Service categories", "Service aliases", "Consultation profiles", "Knowledge base"].map((item) => (
-              <Badge key={item} value={item.toLowerCase().replaceAll(" ", "_")} />
-            ))}
-          </div>
-          <div className="mt-5 text-sm font-semibold text-ink">Excluded</div>
-          <div className="mt-2 text-sm leading-6 text-muted">
-            Scheduling authority and switch history, services, staff, customers, appointments, pending scheduling requests, internal execution records, call data, POS connection state, provider tokens, API keys, and client secrets.
-          </div>
-        </div>
-
-        <div className="rounded-md border border-line p-4">
-          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
-            <div>
-              <div className="text-sm font-semibold text-ink">Import configuration</div>
-              <div className="mt-1 text-sm leading-6 text-muted">
-                Preview validates schema, destination authority compatibility, conflicts, and repeated-import behavior before any write.
-              </div>
-            </div>
-            <label
-              className={`inline-flex h-10 cursor-pointer items-center justify-center gap-2 rounded-md border border-line bg-white px-4 text-sm font-semibold text-ink hover:bg-slate-50 ${
-                disabled ? "pointer-events-none opacity-50" : ""
-              }`}
-            >
-              <Upload className="h-4 w-4" />
-              {previewBusy ? "Previewing..." : "Choose JSON"}
-              <input
-                type="file"
-                accept="application/json,.json"
-                className="hidden"
-                disabled={disabled}
-                onChange={(event) => {
-                  const file = event.target.files?.[0] ?? null;
-                  event.target.value = "";
-                  onPreviewFile(file);
-                }}
-              />
-            </label>
-          </div>
-
-          {fileName ? <div className="mt-3 break-all text-xs text-muted">Selected file: {fileName}</div> : null}
-
-          {preview ? (
-            <div className="mt-5 space-y-4">
-              <ImportScopePreview preview={preview} />
-              <ImportSummaryTable summary={preview.summary} />
-              <ImportIssueList title="Conflicts" issues={preview.conflicts} tone="danger" />
-              <ImportIssueList title="Warnings" issues={preview.warnings} tone="warning" />
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div className="text-xs leading-5 text-muted">
-                  Schema {preview.schema_version}. Secrets must be re-entered for: {listOrNone(preview.requires_secret_reentry)}.
-                </div>
-                <div className="flex gap-2">
-                  <Button type="button" variant="secondary" onClick={onClear} disabled={disabled}>
-                    Clear
-                  </Button>
-                  <Button type="button" onClick={onApply} disabled={disabled || !preview.can_apply}>
-                    <Upload className="h-4 w-4" />
-                    {applyBusy ? "Applying..." : "Apply import"}
-                  </Button>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="mt-5 rounded-md border border-dashed border-line p-5 text-sm leading-6 text-muted">
-              Choose a ManleAI configuration JSON file to preview changes. Preview does not write to the salon.
-            </div>
-          )}
-        </div>
       </div>
     </Card>
   );

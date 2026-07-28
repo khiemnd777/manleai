@@ -21,6 +21,7 @@ import (
 	"github.com/manleai/ai-receptionist/modules/auth"
 	"github.com/manleai/ai-receptionist/modules/booking"
 	"github.com/manleai/ai-receptionist/modules/business"
+	configtransfer "github.com/manleai/ai-receptionist/modules/config_transfer"
 	"github.com/manleai/ai-receptionist/modules/conversation"
 	"github.com/manleai/ai-receptionist/modules/customer"
 	customernotification "github.com/manleai/ai-receptionist/modules/customer_notification"
@@ -187,6 +188,11 @@ func main() {
 	training.RegisterPlatformRoutes(api, training.NewHandler(trainingService), accessService, cfg.JWTSecret)
 	training.RegisterPlatformServiceAliasRoutes(api, training.NewHandler(trainingService), accessService, cfg.JWTSecret)
 	training.RegisterPlatformCallsCorrectionRoute(api, training.NewHandler(trainingService), accessService, cfg.JWTSecret)
+	configurationTransferRepo := configtransfer.NewRepository(db)
+	configurationTransferService := configtransfer.NewService(salonService, integrationConfigService, posRepo, trainingService, configurationTransferRepo, posRepo)
+	platformConfigurationTransferRepo := configtransfer.NewPlatformRepository(db)
+	platformConfigurationTransferService := configtransfer.NewPlatformService(configurationTransferService, platformConfigurationTransferRepo, integrationConfigService)
+	configtransfer.RegisterPlatformRoutes(api, configtransfer.NewPlatformHandler(platformConfigurationTransferService, accessService), cfg.JWTSecret)
 
 	voiceRepo := voice.NewRepository(db)
 	openAIVoiceAdapter := voice_openai.NewAdapter(cfg.Voice.AI.OpenAI)

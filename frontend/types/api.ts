@@ -521,11 +521,23 @@ export type ConfigurationBundle = {
   ai_receptionist?: ConfigurationAIReceptionist;
   public_booking_page?: ConfigurationPublicBookingPage;
   integrations?: IntegrationConfigs;
+  integration_providers?: Array<"square" | "twilio" | "openai" | string>;
   pos_connection?: ConfigurationPOSConnection;
   service_categories?: ConfigurationServiceCategoryBundle;
   service_aliases?: ConfigurationServiceAliasBundle;
   service_consultation_profiles?: ConfigurationServiceConsultationProfileBundle;
   knowledge_base?: ConfigurationKnowledgeBase;
+  local_business_hours?: ConfigurationLocalBusinessHours;
+};
+
+export type ConfigurationLocalBusinessHours = {
+  management_mode: "local" | "provider_read_only" | string;
+  periods: Array<{
+    day_of_week: number;
+    start_local_time: string;
+    end_local_time: string;
+    end_at_midnight: boolean;
+  }>;
 };
 
 export type ConfigurationExport = ConfigurationBundle;
