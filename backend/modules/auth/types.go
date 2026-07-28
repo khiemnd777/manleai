@@ -3,14 +3,15 @@ package auth
 import "time"
 
 type User struct {
-	ID           string    `json:"id"`
-	Email        string    `json:"email"`
-	PasswordHash string    `json:"-"`
-	FullName     string    `json:"full_name"`
-	Phone        string    `json:"phone,omitempty"`
-	Status       string    `json:"status"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID             string    `json:"id"`
+	Email          string    `json:"email"`
+	PasswordHash   string    `json:"-"`
+	FullName       string    `json:"full_name"`
+	Phone          string    `json:"phone,omitempty"`
+	Status         string    `json:"status"`
+	PrincipalScope string    `json:"principal_scope"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type LoginRequest struct {
@@ -29,16 +30,18 @@ type BootstrapStatusResponse struct {
 }
 
 type LoginResponse struct {
-	AccessToken  string    `json:"access_token"`
-	RefreshToken string    `json:"-"`
-	ExpiresAt    time.Time `json:"expires_at"`
-	User         User      `json:"user"`
-	Roles        []string  `json:"roles"`
-	SalonID      string    `json:"salon_id,omitempty"`
+	AccessToken    string    `json:"access_token"`
+	RefreshToken   string    `json:"-"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	User           User      `json:"user"`
+	Roles          []string  `json:"roles"`
+	SalonID        string    `json:"salon_id,omitempty"`
+	PrincipalScope string    `json:"principal_scope"`
 }
 
 type MeResponse struct {
-	User    User     `json:"user"`
-	Roles   []string `json:"roles"`
-	SalonID string   `json:"salon_id,omitempty"`
+	User           User     `json:"user"`
+	Roles          []string `json:"roles"`
+	SalonID        string   `json:"salon_id,omitempty"`
+	PrincipalScope string   `json:"principal_scope"`
 }

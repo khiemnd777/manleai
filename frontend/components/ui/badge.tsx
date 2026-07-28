@@ -14,6 +14,7 @@ const statusClass: Record<string, string> = {
   unmapped: "bg-amber-50 text-amber-700 ring-amber-200",
   synced: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   imported: "bg-teal-50 text-teal-700 ring-teal-200",
+  sample_test: "bg-purple-50 text-purple-700 ring-purple-200",
   manual: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   system: "bg-blue-50 text-blue-700 ring-blue-200",
   owner: "bg-blue-50 text-blue-700 ring-blue-200",

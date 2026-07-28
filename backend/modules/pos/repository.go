@@ -108,7 +108,12 @@ func (r *Repository) EnsureSalonOwner(ctx context.Context, salonID string, owner
 		SELECT EXISTS (
 			SELECT 1 FROM salons salon
 			WHERE salon.id = $1
-			  AND public.has_active_tenant_membership(salon.id, $2::uuid)
+			  AND (
+			      public.has_active_tenant_membership(salon.id, $2::uuid)
+			      OR public.app_active_support_authorization($2::uuid, salon.id, 'services.read')
+			      OR public.app_active_support_authorization($2::uuid, salon.id, 'training.read')
+			      OR public.app_active_support_authorization($2::uuid, salon.id, 'calls.read')
+			  )
 		)
 	`, salonID, ownerUserID).Scan(&exists)
 	if err != nil {
@@ -142,13 +147,15 @@ func (r *Repository) SalonOwnerUserID(ctx context.Context, salonID string) (stri
 }
 
 func (r *Repository) GetActiveProvider(ctx context.Context, salonID string, ownerUserID string) (string, error) {
+	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return "", err
+	}
 	var provider string
 	err := r.db.QueryRowContext(ctx, `
 		SELECT active_pos_provider
 		FROM salons
 		WHERE id = $1
-		  AND owner_user_id = $2
-	`, salonID, ownerUserID).Scan(&provider)
+	`, salonID).Scan(&provider)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
@@ -2786,6 +2793,9 @@ func (r *Repository) GetServiceForOwner(ctx context.Context, salonID string, own
 }
 
 func (r *Repository) getServiceForOwner(ctx context.Context, salonID string, ownerUserID string, serviceID string) (*Service, error) {
+	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return nil, err
+	}
 	row := r.db.QueryRowContext(ctx, `
 		SELECT svc.id::text, svc.salon_id::text, svc.pos_provider, COALESCE(svc.pos_service_id, ''), COALESCE(svc.pos_service_version, 0),
 		       svc.name, COALESCE(svc.description, ''), COALESCE(svc.ai_description, ''), svc.duration_minutes,
@@ -2815,11 +2825,9 @@ func (r *Repository) getServiceForOwner(ctx context.Context, salonID string, own
 		                                AND cat.status = 'active'
 		LEFT JOIN service_consultation_profiles profile ON profile.salon_id = svc.salon_id
 		                                                  AND profile.service_id = svc.id
-		JOIN salons salon ON salon.id = svc.salon_id
 		WHERE svc.id = $1
 		  AND svc.salon_id = $2
-		  AND salon.owner_user_id = $3
-	`, serviceID, salonID, ownerUserID)
+	`, serviceID, salonID)
 	return scanService(row)
 }
 
@@ -3044,7 +3052,11 @@ func lockAIBookableMutationFenceTx(ctx context.Context, tx *sql.Tx, salonID stri
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE(BTRIM(active_pos_provider), '')
 		FROM salons
-		WHERE id = $1 AND owner_user_id = $2
+		WHERE id = $1
+		  AND (
+		      public.has_active_tenant_membership(id, $2::uuid)
+		      OR public.app_active_support_authorization($2::uuid, id, 'services.write')
+		  )
 		FOR UPDATE
 	`, salonID, ownerUserID).Scan(&fence.ActiveProvider); errors.Is(err, sql.ErrNoRows) {
 		return fence, ErrNotFound
@@ -3728,18 +3740,19 @@ func (r *Repository) listServiceCategoryAliases(ctx context.Context, salonID str
 }
 
 func (r *Repository) ensureActiveCategory(ctx context.Context, salonID string, ownerUserID string, categoryID string) error {
+	if err := r.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
+		return err
+	}
 	var exists bool
 	err := r.db.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1
 			FROM service_categories cat
-			JOIN salons salon ON salon.id = cat.salon_id
 			WHERE cat.id = $1
 			  AND cat.salon_id = $2
-			  AND salon.owner_user_id = $3
 			  AND cat.status = 'active'
 		)
-	`, categoryID, salonID, ownerUserID).Scan(&exists)
+	`, categoryID, salonID).Scan(&exists)
 	if err != nil {
 		return err
 	}

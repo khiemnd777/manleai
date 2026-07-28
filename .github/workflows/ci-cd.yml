@@ -207,12 +207,15 @@ jobs:
 
       - name: Validate deployment secrets
         env:
+          DEPLOY_DATA_PROFILE: ${{ vars.DEPLOY_DATA_PROFILE }}
           IMAGE_TAG: ${{ env.IMAGE_TAG }}
           MIGRATION_COMPATIBILITY_APPROVER: ${{ vars.MIGRATION_COMPATIBILITY_APPROVER }}
           MIGRATION_COMPATIBILITY_RELEASE_TAG: ${{ vars.MIGRATION_COMPATIBILITY_RELEASE_TAG }}
           POSTGRES_BACKUP_STORAGE_APPROVAL: ${{ vars.POSTGRES_BACKUP_STORAGE_APPROVAL }}
           PREVIOUS_IMAGE_DB_COMPATIBLE: ${{ vars.PREVIOUS_IMAGE_DB_COMPATIBLE }}
           PROJECT_ENV_B64: ${{ secrets.PROJECT_ENV_B64 }}
+          SAMPLE_DATA_ENV_B64: ${{ secrets.SAMPLE_DATA_ENV_B64 }}
+          SAMPLE_TEST_RESET_RELEASE_TAG: ${{ vars.SAMPLE_TEST_RESET_RELEASE_TAG }}
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
           SERVER_IP: ${{ secrets.SERVER_IP }}
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
@@ -225,6 +228,45 @@ jobs:
             fi
           done
           printf '%s' "$PROJECT_ENV_B64" | base64 -d >/dev/null
+          case "$DEPLOY_DATA_PROFILE" in
+            live) ;;
+            sample_test)
+              if [ -z "${SAMPLE_DATA_ENV_B64:-}" ]; then
+                echo "::error::SAMPLE_DATA_ENV_B64 is required for the sample_test deployment profile."
+                exit 1
+              fi
+              sample_env="$RUNNER_TEMP/sample-data.env"
+              trap 'rm -f "$sample_env"' EXIT
+              printf '%s' "$SAMPLE_DATA_ENV_B64" | base64 -d > "$sample_env"
+              chmod 600 "$sample_env"
+              set -a
+              . "$sample_env"
+              set +a
+              for key in \
+                SAMPLE_PLATFORM_ADMIN_EMAIL SAMPLE_PLATFORM_ADMIN_NAME SAMPLE_PLATFORM_ADMIN_PASSWORD \
+                SAMPLE_PLATFORM_OPS_EMAIL SAMPLE_PLATFORM_OPS_NAME SAMPLE_PLATFORM_OPS_PASSWORD \
+                SAMPLE_TENANT_OWNER_PASSWORD; do
+                if [ -z "${!key:-}" ]; then
+                  echo "::error::${key} is missing from SAMPLE_DATA_ENV_B64."
+                  exit 1
+                fi
+              done
+              if [ "${#SAMPLE_PLATFORM_ADMIN_PASSWORD}" -lt 12 ] || \
+                 [ "${#SAMPLE_PLATFORM_OPS_PASSWORD}" -lt 12 ] || \
+                 [ "${#SAMPLE_TENANT_OWNER_PASSWORD}" -lt 12 ]; then
+                echo "::error::Every sample password must contain at least 12 characters."
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::DEPLOY_DATA_PROFILE must be exactly live or sample_test."
+              exit 1
+              ;;
+          esac
+          if [ -n "${SAMPLE_TEST_RESET_RELEASE_TAG:-}" ] && [[ ! "$SAMPLE_TEST_RESET_RELEASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$ ]]; then
+            echo "::error::SAMPLE_TEST_RESET_RELEASE_TAG has an unsafe shape."
+            exit 1
+          fi
           if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$ ]]; then
             echo "::error::Release tags must use only bounded artifact-safe characters."
             exit 1
@@ -290,11 +332,13 @@ jobs:
 
       - name: Upload deployment bundle and env
         env:
+          DEPLOY_DATA_PROFILE: ${{ vars.DEPLOY_DATA_PROFILE }}
           DEPLOY_PATH: ${{ env.DEPLOY_PATH }}
           IMAGE_REPOSITORY: ${{ env.IMAGE_REPOSITORY }}
           IMAGE_TAG: ${{ env.IMAGE_TAG }}
           RELEASE_ID: ${{ env.RELEASE_ID }}
           PROJECT_ENV_B64: ${{ secrets.PROJECT_ENV_B64 }}
+          SAMPLE_DATA_ENV_B64: ${{ secrets.SAMPLE_DATA_ENV_B64 }}
           GHCR_TOKEN: ${{ github.token }}
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
           SERVER_IP: ${{ secrets.SERVER_IP }}
@@ -304,14 +348,16 @@ jobs:
           images_file="$RUNNER_TEMP/manleai-images.env"
           ghcr_token_file="$RUNNER_TEMP/manleai-ghcr-token"
           ghcr_token_remote="/tmp/manleai-ghcr-token-$RELEASE_ID"
-          remote_token_uploaded=false
-          cleanup_remote_token() {
-            if [ "$remote_token_uploaded" = true ]; then
-              ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 "$REMOTE_USER@$SERVER_IP" "rm -f '$ghcr_token_remote'" || true
+          sample_env_file="$RUNNER_TEMP/manleai-sample-data.env"
+          sample_env_remote="/tmp/manleai-sample-data-$RELEASE_ID.env"
+          remote_credentials_uploaded=false
+          cleanup_remote_credentials() {
+            if [ "$remote_credentials_uploaded" = true ]; then
+              ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 "$REMOTE_USER@$SERVER_IP" "rm -f '$ghcr_token_remote' '$sample_env_remote'" || true
             fi
           }
-          trap 'rm -f "$env_file" "$images_file" "$ghcr_token_file"' EXIT
-          trap cleanup_remote_token ERR
+          trap 'rm -f "$env_file" "$images_file" "$ghcr_token_file" "$sample_env_file"' EXIT
+          trap cleanup_remote_credentials ERR
           printf '%s' "$PROJECT_ENV_B64" | base64 -d > "$env_file"
           chmod 600 "$env_file"
           {
@@ -321,14 +367,21 @@ jobs:
           chmod 600 "$images_file"
           printf '%s' "$GHCR_TOKEN" > "$ghcr_token_file"
           chmod 600 "$ghcr_token_file"
+          if [ "$DEPLOY_DATA_PROFILE" = "sample_test" ]; then
+            printf '%s' "$SAMPLE_DATA_ENV_B64" | base64 -d > "$sample_env_file"
+            chmod 600 "$sample_env_file"
+          fi
 
           scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$RELEASE_ARCHIVE" "$REMOTE_USER@$SERVER_IP:/tmp/$RELEASE_NAME"
           scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$env_file" "$REMOTE_USER@$SERVER_IP:/tmp/manleai-project.env"
           scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$images_file" "$REMOTE_USER@$SERVER_IP:/tmp/manleai-images.env"
           scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$ghcr_token_file" "$REMOTE_USER@$SERVER_IP:$ghcr_token_remote"
-          remote_token_uploaded=true
+          remote_credentials_uploaded=true
+          if [ "$DEPLOY_DATA_PROFILE" = "sample_test" ]; then
+            scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$sample_env_file" "$REMOTE_USER@$SERVER_IP:$sample_env_remote"
+          fi
 
-          ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' GHCR_TOKEN_FILE='$ghcr_token_remote' bash -s" <<'REMOTE'
+          ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' DEPLOY_DATA_PROFILE='$DEPLOY_DATA_PROFILE' GHCR_TOKEN_FILE='$ghcr_token_remote' SAMPLE_DATA_ENV_FILE='$sample_env_remote' bash -s" <<'REMOTE'
           set -euo pipefail
           mkdir -p "$DEPLOY_PATH"
           mv /tmp/manleai-project.env "$DEPLOY_PATH/project.env.tmp"
@@ -338,11 +391,18 @@ jobs:
           chmod 600 "$DEPLOY_PATH/images.env.tmp"
           test -s "$GHCR_TOKEN_FILE"
           chmod 600 "$GHCR_TOKEN_FILE"
+          if [ "$DEPLOY_DATA_PROFILE" = "sample_test" ]; then
+            test -s "$SAMPLE_DATA_ENV_FILE"
+            chmod 600 "$SAMPLE_DATA_ENV_FILE"
+          else
+            rm -f "$SAMPLE_DATA_ENV_FILE"
+          fi
           REMOTE
           trap - ERR
 
       - name: Deploy release
         env:
+          DEPLOY_DATA_PROFILE: ${{ vars.DEPLOY_DATA_PROFILE }}
           DEPLOY_PATH: ${{ env.DEPLOY_PATH }}
           RELEASE_ID: ${{ env.RELEASE_ID }}
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
@@ -352,9 +412,11 @@ jobs:
           MIGRATION_COMPATIBILITY_RELEASE_TAG: ${{ vars.MIGRATION_COMPATIBILITY_RELEASE_TAG }}
           POSTGRES_BACKUP_STORAGE_APPROVAL: ${{ vars.POSTGRES_BACKUP_STORAGE_APPROVAL }}
           PREVIOUS_IMAGE_DB_COMPATIBLE: ${{ vars.PREVIOUS_IMAGE_DB_COMPATIBLE }}
+          SAMPLE_TEST_RESET_RELEASE_TAG: ${{ vars.SAMPLE_TEST_RESET_RELEASE_TAG }}
         run: |
           set -euo pipefail
           ghcr_token_remote="/tmp/manleai-ghcr-token-$RELEASE_ID"
+          sample_env_remote="/tmp/manleai-sample-data-$RELEASE_ID.env"
 
           collect_deploy_diagnostics() {
             status=$?
@@ -366,7 +428,7 @@ jobs:
               -o ConnectTimeout=15 \
               -o ServerAliveInterval=30 \
               -o ServerAliveCountMax=2 \
-              "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' RELEASE_ID='$RELEASE_ID' GHCR_TOKEN_FILE='$ghcr_token_remote' bash -s" <<'REMOTE'
+              "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' RELEASE_ID='$RELEASE_ID' GHCR_TOKEN_FILE='$ghcr_token_remote' SAMPLE_DATA_ENV_FILE='$sample_env_remote' bash -s" <<'REMOTE'
             set +e
             release_dir="$DEPLOY_PATH/releases/$RELEASE_ID"
 
@@ -384,14 +446,14 @@ jobs:
               echo "== Application logs =="
               docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai logs --tail=120 api worker frontend landing pos-calendar || true
             fi
-            rm -f "$GHCR_TOKEN_FILE" || true
+            rm -f "$GHCR_TOKEN_FILE" "$SAMPLE_DATA_ENV_FILE" || true
           REMOTE
             echo "::endgroup::"
             exit "$status"
           }
 
           trap collect_deploy_diagnostics ERR
-          ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' RELEASE_ID='$RELEASE_ID' RELEASE_NAME='$RELEASE_NAME' RELEASE_TAG='$IMAGE_TAG' GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN_FILE='$ghcr_token_remote' MIGRATION_COMPATIBILITY_APPROVER='$MIGRATION_COMPATIBILITY_APPROVER' MIGRATION_COMPATIBILITY_RELEASE_TAG='$MIGRATION_COMPATIBILITY_RELEASE_TAG' POSTGRES_BACKUP_STORAGE_APPROVAL='$POSTGRES_BACKUP_STORAGE_APPROVAL' PREVIOUS_IMAGE_DB_COMPATIBLE='$PREVIOUS_IMAGE_DB_COMPATIBLE' bash -s" <<'REMOTE'
+          ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' DEPLOY_DATA_PROFILE='$DEPLOY_DATA_PROFILE' RELEASE_ID='$RELEASE_ID' RELEASE_NAME='$RELEASE_NAME' RELEASE_TAG='$IMAGE_TAG' GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN_FILE='$ghcr_token_remote' SAMPLE_DATA_ENV_FILE='$sample_env_remote' SAMPLE_TEST_RESET_RELEASE_TAG='$SAMPLE_TEST_RESET_RELEASE_TAG' MIGRATION_COMPATIBILITY_APPROVER='$MIGRATION_COMPATIBILITY_APPROVER' MIGRATION_COMPATIBILITY_RELEASE_TAG='$MIGRATION_COMPATIBILITY_RELEASE_TAG' POSTGRES_BACKUP_STORAGE_APPROVAL='$POSTGRES_BACKUP_STORAGE_APPROVAL' PREVIOUS_IMAGE_DB_COMPATIBLE='$PREVIOUS_IMAGE_DB_COMPATIBLE' bash -s" <<'REMOTE'
           set -euo pipefail
 
           release_dir="$DEPLOY_PATH/releases/$RELEASE_ID"
@@ -400,7 +462,7 @@ jobs:
           tmp_manifest=""
           cleanup_release_credentials() {
             docker logout ghcr.io >/dev/null 2>&1 || true
-            rm -f "$GHCR_TOKEN_FILE" "$tmp_caddy" "$tmp_manifest"
+            rm -f "$GHCR_TOKEN_FILE" "$SAMPLE_DATA_ENV_FILE" "$tmp_caddy" "$tmp_manifest"
           }
           trap cleanup_release_credentials EXIT
           mkdir -p "$release_dir"
@@ -417,6 +479,19 @@ jobs:
             echo "::error::The exact encrypted private backup path was not approved."
             exit 1
           fi
+          case "$DEPLOY_DATA_PROFILE" in
+            live) ;;
+            sample_test)
+              if [ ! -s "$SAMPLE_DATA_ENV_FILE" ]; then
+                echo "::error::Sample-test credentials are missing from the protected deployment handoff."
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::The deployment data profile is invalid."
+              exit 1
+              ;;
+          esac
           if [ ! -f "$DEPLOY_PATH/images.env.tmp" ]; then
             echo "::error::Release image metadata is missing."
             exit 1
@@ -442,6 +517,8 @@ jobs:
             printf 'previous_image_db_compatible=%s\n' "$PREVIOUS_IMAGE_DB_COMPATIBLE"
             printf 'approved_by=%s\n' "$MIGRATION_COMPATIBILITY_APPROVER"
             printf 'backup_storage_approval=%s\n' "$POSTGRES_BACKUP_STORAGE_APPROVAL"
+            printf 'data_profile=%s\n' "$DEPLOY_DATA_PROFILE"
+            printf 'sample_reset_release_tag=%s\n' "${SAMPLE_TEST_RESET_RELEASE_TAG:-none}"
           } > "$compatibility_record"
           chmod 600 "$compatibility_record"
 
@@ -460,6 +537,55 @@ jobs:
           if [ -z "$postgres_container_any" ] && docker volume inspect manleai_postgres_data >/dev/null 2>&1; then
             echo "::error::The PostgreSQL volume exists without a Compose container; refusing to treat this as an empty initial deploy."
             exit 1
+          fi
+
+          reset_sample_database=false
+          migration_preflight_status=0
+          if [ -n "$postgres_container_running" ]; then
+            set +e
+            migration_preflight_output="$(bash "$release_dir/deploy/postgres-migration-preflight.sh" \
+              --env-file "$DEPLOY_PATH/project.env" \
+              --compose-file "$release_dir/docker-compose.prod.yml" \
+              --project manleai \
+              --migrations-dir "$release_dir/backend/migrations" 2>&1)"
+            migration_preflight_status=$?
+            set -e
+            printf '%s\n' "$migration_preflight_output"
+            if [ "$migration_preflight_status" -eq 42 ]; then
+              if [ "$DEPLOY_DATA_PROFILE" != "sample_test" ]; then
+                echo "::error::Migration history is incompatible and the live profile forbids automatic database reset."
+                exit 1
+              fi
+              if [ "$SAMPLE_TEST_RESET_RELEASE_TAG" != "$RELEASE_TAG" ]; then
+                echo "::error::Migration history is incompatible. SAMPLE_TEST_RESET_RELEASE_TAG must exactly approve this release before the pre-live database can be reset."
+                exit 1
+              fi
+              reset_sample_database=true
+            elif [ "$migration_preflight_status" -ne 0 ]; then
+              echo "::error::Migration checksum preflight failed operationally."
+              exit "$migration_preflight_status"
+            fi
+
+            if [ "$DEPLOY_DATA_PROFILE" = "sample_test" ]; then
+              set +e
+              sample_target_output="$(bash "$release_dir/deploy/postgres-sample-target-preflight.sh" \
+                --env-file "$DEPLOY_PATH/project.env" \
+                --compose-file "$release_dir/docker-compose.prod.yml" \
+                --project manleai 2>&1)"
+              sample_target_status=$?
+              set -e
+              printf '%s\n' "$sample_target_output"
+              if [ "$sample_target_status" -eq 43 ]; then
+                if [ "$SAMPLE_TEST_RESET_RELEASE_TAG" != "$RELEASE_TAG" ]; then
+                  echo "::error::The existing database is not a compatible sample target. SAMPLE_TEST_RESET_RELEASE_TAG must exactly approve this release before reset."
+                  exit 1
+                fi
+                reset_sample_database=true
+              elif [ "$sample_target_status" -ne 0 ]; then
+                echo "::error::Sample-target preflight failed operationally."
+                exit "$sample_target_status"
+              fi
+            fi
           fi
 
           backup_record="$release_dir/predeploy-backup.record"
@@ -531,6 +657,28 @@ jobs:
 
           pull_release_images
           capture_rollback_images
+          if [ "$reset_sample_database" = true ]; then
+            compose down --remove-orphans
+            postgres_volumes=()
+            while IFS= read -r volume_name; do
+              [ -n "$volume_name" ] && postgres_volumes+=("$volume_name")
+            done < <(docker volume ls --quiet \
+              --filter 'label=com.docker.compose.project=manleai' \
+              --filter 'label=com.docker.compose.volume=postgres_data')
+            if [ "${#postgres_volumes[@]}" -ne 1 ]; then
+              echo "::error::Expected exactly one Compose-owned PostgreSQL volume for the approved pre-live reset."
+              exit 1
+            fi
+            docker volume rm "${postgres_volumes[0]}"
+            reset_record="$release_dir/prelive-database-reset.record"
+            {
+              printf 'release_tag=%s\n' "$RELEASE_TAG"
+              printf 'data_profile=sample_test\n'
+              printf 'backup_record=%s\n' "$backup_record"
+              printf 'reset_volume=%s\n' "${postgres_volumes[0]}"
+            } > "$reset_record"
+            chmod 600 "$reset_record"
+          fi
           compose up -d --no-build --remove-orphans
           compose ps
 
@@ -564,6 +712,38 @@ jobs:
             fi
             sleep 2
           done
+
+          if [ "$DEPLOY_DATA_PROFILE" = "sample_test" ]; then
+            set -a
+            . "$SAMPLE_DATA_ENV_FILE"
+            set +a
+            if ! compose run --rm --no-deps \
+              -e SAMPLE_PLATFORM_ADMIN_PASSWORD \
+              -e SAMPLE_PLATFORM_OPS_PASSWORD \
+              -e SAMPLE_TENANT_OWNER_PASSWORD \
+              api /bin/sample-data apply \
+              --profile sample_test \
+              --confirm APPLY_SAMPLE_TEST_DATA \
+              --admin-email "$SAMPLE_PLATFORM_ADMIN_EMAIL" \
+              --admin-name "$SAMPLE_PLATFORM_ADMIN_NAME" \
+              --ops-email "$SAMPLE_PLATFORM_OPS_EMAIL" \
+              --ops-name "$SAMPLE_PLATFORM_OPS_NAME"; then
+              echo "::error::Sample-test provisioning failed."
+              rollback_release
+              exit 1
+            fi
+            unset SAMPLE_PLATFORM_ADMIN_PASSWORD SAMPLE_PLATFORM_OPS_PASSWORD SAMPLE_TENANT_OWNER_PASSWORD
+          fi
+
+          if ! bash "$release_dir/deploy/postgres-data-profile-guard.sh" \
+              --profile "$DEPLOY_DATA_PROFILE" \
+              --env-file "$DEPLOY_PATH/project.env" \
+              --compose-file "$release_dir/docker-compose.prod.yml" \
+              --project manleai; then
+            echo "::error::The deployed database does not satisfy the selected data profile."
+            rollback_release
+            exit 1
+          fi
 
           tmp_caddy="$(mktemp)"
           tmp_manifest="$(mktemp)"

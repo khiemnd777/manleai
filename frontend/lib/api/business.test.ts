@@ -1,4 +1,4 @@
-import { BusinessMutationKeyManager, businessBasePath, businessDirectoryPath } from "./business";
+import { BusinessMutationKeyManager, businessBasePath, businessDirectoryPath, isSampleData } from "./business";
 
 function assert(condition: unknown, message: string) {
   if (!condition) throw new Error(message);
@@ -10,6 +10,8 @@ assert(tenant === "/api/salons/salon-a/business", `unexpected tenant path ${tena
 assert(platform === "/api/platform/tenants/salon-a/business", `unexpected platform path ${platform}`);
 assert(businessDirectoryPath("tenant") === "/api/salons/", "tenant directory path must be fixed");
 assert(businessDirectoryPath("platform") === "/api/platform/tenants/", "platform directory path must be fixed");
+assert(isSampleData({ data_classification: "sample_test" }), "sample_test must be visibly classifiable");
+assert(!isSampleData({ data_classification: "live" }), "live data must not be marked as sample");
 
 const keys = new BusinessMutationKeyManager();
 const first = keys.forPayload("service-save", { name: "Gel manicure", duration: 45 });

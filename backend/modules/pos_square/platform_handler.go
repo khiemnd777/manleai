@@ -16,6 +16,7 @@ import (
 
 type platformAuthorizer interface {
 	Authorize(context.Context, middleware.ActorContext, access.AccessCheck) error
+	RecordPlatformSupportAction(context.Context, middleware.ActorContext, string, access.Capability, access.PIIScope, string, string) error
 }
 
 type PlatformHandler struct {
@@ -59,6 +60,28 @@ func (h *PlatformHandler) Status(c *fiber.Ctx) error {
 	}
 	result, err := h.service.StatusForPlatform(c.UserContext(), c.Params("tenant_id"))
 	return h.respond(c, result, err, "SQUARE_STATUS_FAILED")
+}
+
+// BusinessReadiness exposes only the provider-neutral readiness projection used
+// by the shared Services dashboard. Provider setup and diagnostics remain in
+// the separately authorized Technical surface.
+func (h *PlatformHandler) BusinessReadiness(c *fiber.Ctx) error {
+	if err := h.authorize(c, access.CapabilityServicesRead); err != nil {
+		return respond.Error(c, fiber.StatusForbidden, "SERVICES_FORBIDDEN", "This Platform account is not authorized for this salon's Services.")
+	}
+	if h.access.RecordPlatformSupportAction(
+		c.UserContext(), middleware.Actor(c), c.Params("tenant_id"), access.CapabilityServicesRead, "", c.Method(), c.Path(),
+	) != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SUPPORT_AUDIT_FAILED", "Could not record this authorized support action.")
+	}
+	readiness, err := h.service.ReadinessForPlatform(c.UserContext(), c.Params("tenant_id"))
+	if errors.Is(err, pos.ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusServiceUnavailable, "SCHEDULING_READINESS_UNAVAILABLE", "Scheduling readiness is temporarily unavailable.")
+	}
+	return respond.JSON(c, fiber.StatusOK, businessReadinessResponse(readiness))
 }
 
 func (h *PlatformHandler) Locations(c *fiber.Ctx) error {

@@ -10,11 +10,13 @@ func RegisterRoutes(api fiber.Router, handler *Handler, jwtSecret string) {
 	group := api.Group("/integrations/square", middleware.DatabaseScope(databasecontext.ScopeProvider))
 	group.Get("/callback", handler.Callback)
 	group.Post("/webhook", handler.Webhook)
-	business := api.Group("/salons/:id/business", middleware.RequireAuth(jwtSecret))
+	business := api.Group("/salons/:id/business", middleware.RequireAuth(jwtSecret), middleware.RequireTenantSalonAccess())
 	business.Get("/external-scheduling-readiness", handler.BusinessReadiness)
 }
 
 func RegisterPlatformRoutes(api fiber.Router, handler *PlatformHandler, jwtSecret string) {
+	business := api.Group("/platform/tenants/:tenant_id/services", middleware.RequireAuth(jwtSecret))
+	business.Get("/external-scheduling-readiness", handler.BusinessReadiness)
 	group := api.Group("/platform/tenants/:tenant_id/technical/square", middleware.RequireAuth(jwtSecret))
 	group.Get("/connect-url", handler.ConnectURL)
 	group.Get("/status", handler.Status)

@@ -30,12 +30,15 @@ import {
   technicianPreferenceLabel,
   technicianPreferenceValue
 } from "@/features/dashboard/booking-display";
+import { businessGet, listBusinessSalons, type BusinessSalonProfile } from "@/lib/api/business";
+import { getEffectiveSupportAccess } from "@/lib/api/access";
 import { apiRequest } from "@/lib/api/client";
 import {
   currentSchedulingCompletion,
   hasCurrentSessionConfirmation as hasDurableSessionConfirmation,
   isHistoricalCompletedEvidence
 } from "@/lib/api/conversation-scheduling-evidence";
+import { storedActiveTenantSalonID } from "@/lib/api/tenant-context";
 import type {
   BookingMode,
   ConversationSession,
@@ -106,7 +109,9 @@ type CorrectionTarget = {
   item: TranscriptMessage;
 };
 
-export function CallsDashboard() {
+type CallsSurface = "tenant" | "platform";
+
+export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" }: { surface?: CallsSurface; salonID?: string } = {}) {
   const realtimeEventsRequestID = useRef(0);
   const [salon, setSalon] = useState<Salon | null>(null);
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
@@ -141,6 +146,7 @@ export function CallsDashboard() {
   const [actionError, setActionError] = useState("");
   const [realtimeEventsError, setRealtimeEventsError] = useState("");
   const [success, setSuccess] = useState("");
+  const [effectiveCapabilities, setEffectiveCapabilities] = useState<string[]>([]);
 
   function sessionListPath(salonID: string, filter: LifecycleFilter, limit: number, offset: number) {
     const params = new URLSearchParams({
@@ -148,7 +154,7 @@ export function CallsDashboard() {
       offset: String(offset),
       lifecycle_status: filter
     });
-    return `/api/salons/${salonID}/conversation-sessions?${params.toString()}`;
+    return `${callsResourcePath(surface, salonID, "/conversation-sessions")}?${params.toString()}`;
   }
 
   async function fetchSessionPage(salonID: string, filter: LifecycleFilter, limit: number, offset: number) {
@@ -170,7 +176,7 @@ export function CallsDashboard() {
       limit: String(limit),
       offset: String(offset)
     });
-    return `/api/salons/${salonID}/party-booking-requests?${params.toString()}`;
+    return `${callsResourcePath(surface, salonID, "/party-booking-requests")}?${params.toString()}`;
   }
 
   async function fetchPartyRequests(salonID: string, status: PartyStatusFilter, limit: number, offset: number) {
@@ -219,10 +225,11 @@ export function CallsDashboard() {
       setSessionListLoading(true);
     }
     try {
-      const salonResponse = await apiRequest<SalonListResponse>("/api/salons");
-      const firstSalon = salonResponse.salons[0] ?? null;
-      setSalon(firstSalon);
-      if (!firstSalon) {
+      const activeSalon = surface === "platform"
+        ? await loadPlatformCallsSalon(fixedSalonID)
+        : await loadTenantCallsSalon();
+      setSalon(activeSalon);
+      if (!activeSalon) {
         setVoiceStatus(null);
         setSessions([]);
         setReadinessSessions([]);
@@ -236,14 +243,20 @@ export function CallsDashboard() {
         setStaff([]);
         return;
       }
+      if (surface === "platform") {
+        const effective = await getEffectiveSupportAccess(activeSalon.id);
+        setEffectiveCapabilities(effective.capabilities);
+      } else {
+        setEffectiveCapabilities(["calls.read", "calls.manage", "calls.simulate", "calls.redact"]);
+      }
 
       const [voiceResponse, sessionsResponse, readinessResponse, partyResponse, serviceResponse, staffResponse] = await Promise.all([
-        apiRequest<VoiceStatus>(`/api/salons/${firstSalon.id}/voice/status`),
-        fetchSessionPageWithFallback(firstSalon.id, filter, limit, offset),
-        fetchSessionPage(firstSalon.id, "active", readinessMetricLimit, 0),
-        fetchPartyRequestsWithFallback(firstSalon.id, partyStatusFilter, partyLimit, partyOffset),
-        apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
-        apiRequest<StaffResponse>(`/api/salons/${firstSalon.id}/staff`)
+        apiRequest<VoiceStatus>(callsResourcePath(surface, activeSalon.id, "/voice/status")),
+        fetchSessionPageWithFallback(activeSalon.id, filter, limit, offset),
+        fetchSessionPage(activeSalon.id, "active", readinessMetricLimit, 0),
+        fetchPartyRequestsWithFallback(activeSalon.id, partyStatusFilter, partyLimit, partyOffset),
+        apiRequest<ServicesResponse>(callsResourcePath(surface, activeSalon.id, "/services")),
+        apiRequest<StaffResponse>(callsResourcePath(surface, activeSalon.id, "/staff"))
       ]);
       setVoiceStatus(voiceResponse);
       applySessionPage(sessionsResponse, limit, offset);
@@ -258,10 +271,10 @@ export function CallsDashboard() {
         sessionsResponse.sessions.find((item) => item.id === currentID) ?? sessionsResponse.sessions[0] ?? null;
       if (nextSummary) {
         const detail = await apiRequest<ConversationSession>(
-          `/api/salons/${firstSalon.id}/conversation-sessions/${nextSummary.id}`
+          callsResourcePath(surface, activeSalon.id, `/conversation-sessions/${nextSummary.id}`)
         );
         setSelectedSession(detail);
-        await loadRealtimeEventsForSession(firstSalon.id, detail);
+        await loadRealtimeEventsForSession(activeSalon.id, detail);
       } else {
         setSelectedSession(null);
         setRealtimeEvents([]);
@@ -281,7 +294,7 @@ export function CallsDashboard() {
   useEffect(() => {
     void load(lifecycleFilter, initialLoading, sessionOffset, sessionLimit);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lifecycleFilter, sessionOffset, sessionLimit]);
+  }, [fixedSalonID, lifecycleFilter, sessionOffset, sessionLimit, surface]);
 
   useEffect(() => {
     if (!salon) return;
@@ -310,7 +323,7 @@ export function CallsDashboard() {
       let hasMore = true;
       while (hasMore) {
         const response = await apiRequest<RealtimeEventsResponse>(
-          `/api/salons/${salonID}/conversation-sessions/${sessionID}/realtime-events?limit=${realtimeEventPageSize}&offset=${offset}`
+          `${callsResourcePath(surface, salonID, `/conversation-sessions/${sessionID}/realtime-events`)}?limit=${realtimeEventPageSize}&offset=${offset}`
         );
         if (requestID !== realtimeEventsRequestID.current) return;
         for (const event of response.events) eventsByID.set(event.id, event);
@@ -363,7 +376,7 @@ export function CallsDashboard() {
     setSuccess("");
     setSending(true);
     try {
-      const session = await apiRequest<ConversationSession>(`/api/salons/${salon.id}/conversation-sessions`, {
+      const session = await apiRequest<ConversationSession>(callsResourcePath(surface, salon.id, "/conversation-sessions"), {
         method: "POST",
         body: JSON.stringify({ channel: "simulator" })
       });
@@ -393,13 +406,13 @@ export function CallsDashboard() {
     try {
       let session = selectedSession;
       if (!session || session.status !== "active" || session.channel !== "simulator") {
-        session = await apiRequest<ConversationSession>(`/api/salons/${salon.id}/conversation-sessions`, {
+        session = await apiRequest<ConversationSession>(callsResourcePath(surface, salon.id, "/conversation-sessions"), {
           method: "POST",
           body: JSON.stringify({ channel: "simulator" })
         });
       }
       const updated = await apiRequest<ConversationSession>(
-        `/api/salons/${salon.id}/conversation-sessions/${session.id}/messages`,
+        callsResourcePath(surface, salon.id, `/conversation-sessions/${session.id}/messages`),
         {
           method: "POST",
           body: JSON.stringify({ message })
@@ -422,7 +435,7 @@ export function CallsDashboard() {
     setSuccess("");
     try {
       const detail = await apiRequest<ConversationSession>(
-        `/api/salons/${salon.id}/conversation-sessions/${sessionID}`
+        callsResourcePath(surface, salon.id, `/conversation-sessions/${sessionID}`)
       );
       setSelectedSession(detail);
       await loadRealtimeEventsForSession(salon.id, detail);
@@ -446,7 +459,7 @@ export function CallsDashboard() {
     setSessionActionID(`${item.id}:archive`);
     try {
       const updated = await apiRequest<ConversationSession>(
-        `/api/salons/${salon.id}/conversation-sessions/${item.id}/archive`,
+        callsResourcePath(surface, salon.id, `/conversation-sessions/${item.id}/archive`),
         { method: "POST" }
       );
       if (selectedSession?.id === item.id) {
@@ -469,7 +482,7 @@ export function CallsDashboard() {
     setSessionActionID(`${item.id}:redact`);
     try {
       const updated = await apiRequest<ConversationSession>(
-        `/api/salons/${salon.id}/conversation-sessions/${item.id}/redact`,
+        callsResourcePath(surface, salon.id, `/conversation-sessions/${item.id}/redact`),
         { method: "POST" }
       );
       if (selectedSession?.id === item.id) {
@@ -492,7 +505,7 @@ export function CallsDashboard() {
     setPartyActionID(`${item.id}:${status}`);
     try {
       const response = await apiRequest<PartyRequestResponse>(
-        `/api/salons/${salon.id}/party-booking-requests/${item.id}/status`,
+        callsResourcePath(surface, salon.id, `/party-booking-requests/${item.id}/status`),
         {
           method: "PATCH",
           body: JSON.stringify({ status })
@@ -520,7 +533,7 @@ export function CallsDashboard() {
     setSuccess("");
     setSavingCorrection(true);
     try {
-      await apiRequest<OwnerCorrection>(`/api/salons/${salon.id}/owner-corrections`, {
+      await apiRequest<OwnerCorrection>(callsResourcePath(surface, salon.id, "/owner-corrections"), {
         method: "POST",
         body: JSON.stringify({
           call_session_id: correctionTarget.sessionID,
@@ -631,6 +644,9 @@ export function CallsDashboard() {
   const selectedBookingRecord = selectedSession ? conversationBookingRecord(selectedSession) : null;
   const consultationTrace = selectedSession ? consultationTraceForSession(selectedSession, services) : null;
   const lastRealtimeEvent = realtimeEvents.length > 0 ? realtimeEvents[realtimeEvents.length - 1] : null;
+  const canManage = surface === "tenant" || effectiveCapabilities.includes("calls.manage");
+  const canSimulate = surface === "tenant" || effectiveCapabilities.includes("calls.simulate");
+  const canRedact = surface === "tenant" || effectiveCapabilities.includes("calls.redact");
 
   if (initialLoading) {
     return (
@@ -655,6 +671,10 @@ export function CallsDashboard() {
         </div>
       </div>
     );
+  }
+
+  if (error) {
+    return <Alert title="Calls unavailable" message={error}><Button type="button" variant="secondary" className="mt-4" onClick={() => void load(lifecycleFilter, false, sessionOffset, sessionLimit)}><RefreshCcw className="h-4 w-4" />Retry</Button></Alert>;
   }
 
   if (!salon) {
@@ -687,11 +707,10 @@ export function CallsDashboard() {
         </div>
       </div>
 
-      {error ? <Alert title="Calls unavailable" message={error} /> : null}
       {actionError ? <Alert title="Call action failed" message={actionError} /> : null}
       {success ? <Alert type="success" title="Call review updated" message={success} /> : null}
 
-      <ReadinessPanel voiceStatus={voiceStatus} />
+      <ReadinessPanel voiceStatus={voiceStatus} surface={surface} />
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
         <Metric label="Live phone calls" value={phoneCount} />
@@ -711,10 +730,12 @@ export function CallsDashboard() {
                 Simulator input stays separate from live phone transcripts.
               </CardDescription>
             </div>
-            <Button type="button" variant="secondary" onClick={() => void startSession()} disabled={sending}>
-              <Plus className="h-4 w-4" />
-              New session
-            </Button>
+            {canSimulate ? (
+              <Button type="button" variant="secondary" onClick={() => void startSession()} disabled={sending}>
+                <Plus className="h-4 w-4" />
+                New session
+              </Button>
+            ) : null}
           </div>
 
           <div className="mt-5 min-h-[360px] flex-1 overflow-y-auto rounded-md border border-line bg-slate-50 p-4">
@@ -724,7 +745,7 @@ export function CallsDashboard() {
                   <TranscriptBubble
                     key={item.id}
                     item={item}
-                    canAddCorrection={selectedSession.lifecycle_status !== "redacted"}
+                    canAddCorrection={canManage && selectedSession.lifecycle_status !== "redacted"}
                     onAddCorrection={() => startCorrection(item)}
                   />
                 ))}
@@ -770,7 +791,7 @@ export function CallsDashboard() {
             </form>
           ) : null}
 
-          <form className="mt-4 flex flex-col gap-3 sm:flex-row" onSubmit={sendMessage}>
+          {canSimulate ? <form className="mt-4 flex flex-col gap-3 sm:flex-row" onSubmit={sendMessage}>
             <label className="sr-only" htmlFor="customer-message">
               Customer message
             </label>
@@ -786,7 +807,7 @@ export function CallsDashboard() {
               <Send className="h-4 w-4" />
               Send
             </Button>
-          </form>
+          </form> : null}
         </Card>
 
         <Card>
@@ -901,6 +922,7 @@ export function CallsDashboard() {
         offset={partyOffset}
         hasMore={partyHasMore}
         busy={partyActionID}
+        canManage={canManage}
         onStatusFilterChange={updatePartyStatusFilter}
         onPrevious={goToPreviousPartyPage}
         onNext={goToNextPartyPage}
@@ -1004,7 +1026,7 @@ export function CallsDashboard() {
                           <Button type="button" variant="secondary" onClick={() => void selectSession(item.id)}>
                             Open
                           </Button>
-                          <Button
+                          {canManage ? <Button
                             type="button"
                             variant="secondary"
                             onClick={() => void archiveSession(item)}
@@ -1012,8 +1034,8 @@ export function CallsDashboard() {
                           >
                             <Archive className="h-4 w-4" />
                             Archive
-                          </Button>
-                          <Button
+                          </Button> : null}
+                          {canRedact ? <Button
                             type="button"
                             variant="danger"
                             onClick={() => void redactSession(item)}
@@ -1021,7 +1043,7 @@ export function CallsDashboard() {
                           >
                             <Eraser className="h-4 w-4" />
                             Redact
-                          </Button>
+                          </Button> : null}
                         </div>
                       </td>
                     </tr>
@@ -1035,6 +1057,8 @@ export function CallsDashboard() {
                   key={item.id}
                   item={item}
                   busy={sessionActionID !== ""}
+                  canManage={canManage}
+                  canRedact={canRedact}
                   onOpen={() => void selectSession(item.id)}
                   onArchive={() => void archiveSession(item)}
                   onRedact={() => void redactSession(item)}
@@ -1060,7 +1084,53 @@ export function CallsDashboard() {
   );
 }
 
-function ReadinessPanel({ voiceStatus }: { voiceStatus: VoiceStatus | null }) {
+async function loadTenantCallsSalon() {
+  const activeSalonID = storedActiveTenantSalonID();
+  return activeSalonID
+    ? apiRequest<Salon>(`/api/salons/${activeSalonID}`)
+    : (await apiRequest<SalonListResponse>("/api/salons")).salons[0] ?? null;
+}
+
+async function loadPlatformCallsSalon(salonID: string): Promise<Salon | null> {
+  if (!salonID) return null;
+  const surface = { kind: "platform" as const, salonID };
+  const [profile, directory] = await Promise.all([
+    businessGet<BusinessSalonProfile>(surface, "profile"),
+    listBusinessSalons("platform")
+  ]);
+  const summary = directory.salons.find((item) => item.id === salonID);
+  if (!summary) return null;
+  return {
+    id: profile.id,
+    name: profile.name,
+    phone: profile.phone,
+    address: profile.address,
+    city: profile.city,
+    state: profile.state,
+    zip_code: profile.zip_code,
+    timezone: profile.timezone,
+    primary_language: profile.primary_language,
+    secondary_language: profile.secondary_language,
+    handoff_phone: profile.handoff_phone,
+    ai_enabled: summary.ai_enabled,
+    active_pos_provider: summary.active_pos_provider,
+    public_slug: profile.public_slug,
+    public_catalog_enabled: profile.public_catalog_enabled,
+    scheduling_authority: summary.scheduling_authority,
+    scheduling_authority_version: summary.scheduling_authority_version,
+    updated_at: profile.updated_at
+  };
+}
+
+function callsResourcePath(surface: CallsSurface, salonID: string, resource: string) {
+  const encodedSalonID = encodeURIComponent(salonID);
+  if (surface === "tenant") return `/api/salons/${encodedSalonID}${resource}`;
+  const callsScopedResource = resource === "/services" || resource === "/staff" || resource === "/owner-corrections";
+  const prefix = `/api/platform/tenants/${encodedSalonID}${callsScopedResource ? "/calls" : ""}`;
+  return `${prefix}${resource}`;
+}
+
+function ReadinessPanel({ voiceStatus, surface }: { voiceStatus: VoiceStatus | null; surface: CallsSurface }) {
   const aiReady = Boolean(voiceStatus?.ai?.ready);
   return (
     <div className="grid gap-4 lg:grid-cols-3">
@@ -1079,13 +1149,13 @@ function ReadinessPanel({ voiceStatus }: { voiceStatus: VoiceStatus | null }) {
             </CardDescription>
             <ReadinessBlockers blockers={voiceStatus?.phone_answering?.blockers} />
             <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
-              <Info label="Provider" value={voiceStatus?.provider || "twilio"} />
+              <Info label="Provider" value={surface === "platform" ? "Managed in Technical settings" : voiceStatus?.provider || "twilio"} />
               <Info label="Signature" value={<Badge value={voiceStatus?.signature_verification ? "active" : "disabled"} />} />
               <Info label="Input mode" value={<Badge value={voiceStatus?.input_mode || "gather"} />} />
               <Info label="Salon phone" value={voiceStatus?.salon_phone || "Not configured"} />
-              <Info label="Inbound webhook" value={<span className="break-all font-mono text-xs">{voiceStatus?.inbound_webhook_url || "Not configured"}</span>} />
-              <Info label="Recording webhook" value={<span className="break-all font-mono text-xs">{voiceStatus?.recording_webhook_url || "Not configured"}</span>} />
-              <Info label="Realtime stream" value={<span className="break-all font-mono text-xs">{voiceStatus?.stream_webhook_url || "Not configured"}</span>} />
+              <Info label="Inbound webhook" value={<span className="break-all font-mono text-xs">{surface === "platform" ? "Managed in Technical settings" : voiceStatus?.inbound_webhook_url || "Not configured"}</span>} />
+              <Info label="Recording webhook" value={<span className="break-all font-mono text-xs">{surface === "platform" ? "Managed in Technical settings" : voiceStatus?.recording_webhook_url || "Not configured"}</span>} />
+              <Info label="Realtime stream" value={<span className="break-all font-mono text-xs">{surface === "platform" ? "Managed in Technical settings" : voiceStatus?.stream_webhook_url || "Not configured"}</span>} />
             </dl>
             <div className="mt-4 border-t border-line/80 pt-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1249,6 +1319,7 @@ function PartyRequestsPanel({
   offset,
   hasMore,
   busy,
+  canManage,
   onStatusFilterChange,
   onPrevious,
   onNext,
@@ -1263,6 +1334,7 @@ function PartyRequestsPanel({
   offset: number;
   hasMore: boolean;
   busy: string;
+  canManage: boolean;
   onStatusFilterChange: (status: PartyStatusFilter) => void;
   onPrevious: () => void;
   onNext: () => void;
@@ -1364,6 +1436,7 @@ function PartyRequestsPanel({
                       <PartyRequestActions
                         request={request}
                         busy={actionBusy}
+                        canManage={canManage}
                         onUpdateStatus={onUpdateStatus}
                         onOpenSession={onOpenSession}
                       />
@@ -1380,6 +1453,7 @@ function PartyRequestsPanel({
                 key={request.id}
                 request={request}
                 busy={actionBusy}
+                canManage={canManage}
                 onUpdateStatus={onUpdateStatus}
                 onOpenSession={onOpenSession}
               />
@@ -1406,11 +1480,13 @@ function PartyRequestsPanel({
 function PartyRequestCard({
   request,
   busy,
+  canManage,
   onUpdateStatus,
   onOpenSession
 }: {
   request: PartyBookingRequest;
   busy: string;
+  canManage: boolean;
   onUpdateStatus: (request: PartyBookingRequest, status: PartyStatusFilter) => void;
   onOpenSession: (sessionID: string) => void;
 }) {
@@ -1432,7 +1508,7 @@ function PartyRequestCard({
       <div className="mt-3 rounded-md border border-line bg-slate-50 p-3 text-sm leading-6 text-muted">
         {request.summary || "No summary recorded."}
       </div>
-      <PartyRequestActions request={request} busy={busy} onUpdateStatus={onUpdateStatus} onOpenSession={onOpenSession} />
+      <PartyRequestActions request={request} busy={busy} canManage={canManage} onUpdateStatus={onUpdateStatus} onOpenSession={onOpenSession} />
     </div>
   );
 }
@@ -1440,11 +1516,13 @@ function PartyRequestCard({
 function PartyRequestActions({
   request,
   busy,
+  canManage,
   onUpdateStatus,
   onOpenSession
 }: {
   request: PartyBookingRequest;
   busy: string;
+  canManage: boolean;
   onUpdateStatus: (request: PartyBookingRequest, status: PartyStatusFilter) => void;
   onOpenSession: (sessionID: string) => void;
 }) {
@@ -1454,13 +1532,13 @@ function PartyRequestActions({
       <Button type="button" variant="secondary" onClick={() => onOpenSession(request.call_session_id)} disabled={disabled}>
         Open transcript
       </Button>
-      {request.status === "pending" ? (
+      {canManage && request.status === "pending" ? (
         <Button type="button" variant="secondary" onClick={() => onUpdateStatus(request, "contacted")} disabled={disabled}>
           <PhoneCall className="h-4 w-4" />
           {busy === `${request.id}:contacted` ? "Saving..." : "Mark contacted"}
         </Button>
       ) : null}
-      {request.status === "pending" || request.status === "contacted" ? (
+      {canManage && (request.status === "pending" || request.status === "contacted") ? (
         <>
           <Button type="button" onClick={() => onUpdateStatus(request, "resolved")} disabled={disabled}>
             <CheckCircle2 className="h-4 w-4" />
@@ -1472,7 +1550,7 @@ function PartyRequestActions({
           </Button>
         </>
       ) : null}
-      {request.status === "dismissed" ? (
+      {canManage && request.status === "dismissed" ? (
         <Button type="button" variant="secondary" onClick={() => onUpdateStatus(request, "pending")} disabled={disabled}>
           Reopen
         </Button>
@@ -1872,12 +1950,16 @@ function Info({ label, value }: { label: string; value: React.ReactNode }) {
 function SessionCard({
   item,
   busy,
+  canManage,
+  canRedact,
   onOpen,
   onArchive,
   onRedact
 }: {
   item: ConversationSession;
   busy: boolean;
+  canManage: boolean;
+  canRedact: boolean;
   onOpen: () => void;
   onArchive: () => void;
   onRedact: () => void;
@@ -1920,14 +2002,14 @@ function SessionCard({
         <Button type="button" variant="secondary" onClick={onOpen}>
           Open
         </Button>
-        <Button type="button" variant="secondary" onClick={onArchive} disabled={busy || item.lifecycle_status !== "active"}>
+        {canManage ? <Button type="button" variant="secondary" onClick={onArchive} disabled={busy || item.lifecycle_status !== "active"}>
           <Archive className="h-4 w-4" />
           Archive
-        </Button>
-        <Button type="button" variant="danger" onClick={onRedact} disabled={busy || item.status === "active" || item.lifecycle_status === "redacted"}>
+        </Button> : null}
+        {canRedact ? <Button type="button" variant="danger" onClick={onRedact} disabled={busy || item.status === "active" || item.lifecycle_status === "redacted"}>
           <Eraser className="h-4 w-4" />
           Redact
-        </Button>
+        </Button> : null}
       </div>
     </div>
   );

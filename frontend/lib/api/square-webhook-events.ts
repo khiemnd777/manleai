@@ -14,6 +14,9 @@ export const SQUARE_WEBHOOK_STATUS_FILTERS = [
 ] as const satisfies readonly SquareWebhookFilterStatus[];
 
 export type SquareWebhookListStatus = "" | SquareWebhookFilterStatus;
+export type SquareWebhookOperationsResponse = SquareWebhookEventsResponse & {
+  webhook_configured?: boolean;
+};
 
 export function listSquareWebhookEvents(
   salonID: string,
@@ -24,7 +27,7 @@ export function listSquareWebhookEvents(
 ) {
   const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
   if (status) query.set("status", status);
-  return apiRequest<SquareWebhookEventsResponse>(
+  return apiRequest<SquareWebhookOperationsResponse>(
     `${squareWebhookBase(salonID, surface)}?${query.toString()}`
   );
 }

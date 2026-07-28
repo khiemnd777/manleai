@@ -27,7 +27,7 @@ const pageSize = 25;
 type SquareWebhookOperationsProps = {
   salonID: string;
   enabled: boolean;
-  webhookConfigured: boolean;
+  webhookConfigured?: boolean;
   surface?: "tenant" | "platform";
 };
 
@@ -47,7 +47,7 @@ export function SquareWebhookOperations({
   const [status, setStatus] = useState<SquareWebhookListStatus>("");
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
-  const [loading, setLoading] = useState(webhookConfigured);
+  const [loading, setLoading] = useState(enabled && webhookConfigured !== false);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<SquareWebhookEvent | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -56,9 +56,15 @@ export function SquareWebhookOperations({
   const [requeueError, setRequeueError] = useState("");
   const [requeueUnknown, setRequeueUnknown] = useState(false);
   const [success, setSuccess] = useState("");
+  const [resolvedWebhookConfigured, setResolvedWebhookConfigured] = useState<boolean | null>(
+    webhookConfigured ?? null
+  );
+  const isWebhookConfigured = resolvedWebhookConfigured ?? webhookConfigured ?? false;
+  const webhookReadinessKnown = resolvedWebhookConfigured !== null || webhookConfigured !== undefined;
 
   const load = useCallback(async () => {
-    if (!enabled || !webhookConfigured) {
+    if (!enabled || webhookConfigured === false) {
+      setResolvedWebhookConfigured(false);
       setLoading(false);
       return;
     }
@@ -72,6 +78,9 @@ export function SquareWebhookOperations({
       setMetrics(response.metrics);
       setCalendarRepair(response.calendar_repair);
       setHasMore(response.has_more);
+      if (typeof response.webhook_configured === "boolean") {
+        setResolvedWebhookConfigured(response.webhook_configured);
+      }
     } catch (err) {
       if (requestID !== listRequestRef.current) return;
       setError(err instanceof Error ? err.message : "Could not load Square webhook operations.");
@@ -93,7 +102,8 @@ export function SquareWebhookOperations({
     setSelected(null);
     setRequeueUnknown(false);
     setSuccess("");
-  }, [salonID]);
+    setResolvedWebhookConfigured(webhookConfigured ?? null);
+  }, [salonID, webhookConfigured]);
 
   useEffect(() => {
     void load();
@@ -188,20 +198,20 @@ export function SquareWebhookOperations({
             <h3 id="square-webhook-operations-title" className="text-sm font-semibold text-ink">
               Webhook operations
             </h3>
-            <Badge value={webhookConfigured ? "configured" : "disabled"} />
+            <Badge value={webhookReadinessKnown ? (isWebhookConfigured ? "configured" : "disabled") : "checking"} />
           </div>
           <p className="mt-1 max-w-3xl text-sm leading-6 text-muted">
             Monitor safe Square booking-event processing and calendar repair evidence. Webhook delivery alone never confirms an appointment.
           </p>
         </div>
-        {webhookConfigured ? (
+        {isWebhookConfigured ? (
           <Button type="button" variant="secondary" disabled={loading} onClick={() => void load()}>
             <RefreshCcw className="h-4 w-4" /> Refresh operations
           </Button>
         ) : null}
       </div>
 
-      {!webhookConfigured ? (
+      {webhookReadinessKnown && !isWebhookConfigured ? (
         <div className="mt-4">
           <Alert
             title="Webhook operations unavailable"
@@ -210,15 +220,15 @@ export function SquareWebhookOperations({
         </div>
       ) : null}
 
-      {webhookConfigured && metrics ? <WebhookMetrics metrics={metrics} /> : null}
-      {webhookConfigured && calendarRepair?.relevant ? <CalendarRepair health={calendarRepair} /> : null}
-      {webhookConfigured && success ? (
+      {isWebhookConfigured && metrics ? <WebhookMetrics metrics={metrics} /> : null}
+      {isWebhookConfigured && calendarRepair?.relevant ? <CalendarRepair health={calendarRepair} /> : null}
+      {isWebhookConfigured && success ? (
         <div className="mt-4">
           <Alert type="success" title="Webhook action saved" message={success} />
         </div>
       ) : null}
 
-      {webhookConfigured ? (
+      {isWebhookConfigured ? (
         <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <label className="block text-sm font-medium text-ink">
             Processing status
@@ -246,13 +256,13 @@ export function SquareWebhookOperations({
         </div>
       ) : null}
 
-      {webhookConfigured && loading && rows.length === 0 ? (
+      {enabled && loading && rows.length === 0 ? (
         <div className="mt-4 space-y-3">
           <Skeleton className="h-16" />
           <Skeleton className="h-16" />
         </div>
       ) : null}
-      {webhookConfigured && error ? (
+      {enabled && error ? (
         <div className="mt-4 space-y-3" role="alert">
           <Alert title="Webhook operations unavailable" message={error} />
           <Button type="button" variant="secondary" onClick={() => void load()}>
@@ -260,7 +270,7 @@ export function SquareWebhookOperations({
           </Button>
         </div>
       ) : null}
-      {webhookConfigured && !loading && !error && rows.length === 0 ? (
+      {isWebhookConfigured && !loading && !error && rows.length === 0 ? (
         <div className="mt-4 rounded-md border border-dashed border-line bg-slate-50 p-8 text-center">
           <Activity className="mx-auto h-6 w-6 text-muted" />
           <div className="mt-3 text-sm font-semibold text-ink">No webhook events in this view</div>
@@ -270,7 +280,7 @@ export function SquareWebhookOperations({
         </div>
       ) : null}
 
-      {webhookConfigured && rows.length > 0 ? (
+      {isWebhookConfigured && rows.length > 0 ? (
         <>
           <WebhookEventTable rows={rows} onOpen={openDetail} />
           <div className="mt-4 flex flex-col-reverse justify-between gap-3 border-t border-line pt-4 sm:flex-row sm:items-center">

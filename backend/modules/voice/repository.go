@@ -18,6 +18,24 @@ func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
 }
 
+func (r *Repository) ResolveSalonOwnerForPlatform(ctx context.Context, salonID string, platformUserID string) (string, error) {
+	var ownerUserID string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT salon.owner_user_id::text
+		FROM salons salon
+		WHERE salon.id = $1
+		  AND public.app_active_support_authorization($2::uuid, salon.id, 'calls.read')
+		  AND public.app_active_support_pii_grant($2::uuid, salon.id, 'calls.read', 'calls')
+	`, salonID, platformUserID).Scan(&ownerUserID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return ownerUserID, nil
+}
+
 func (r *Repository) GetSalonVoiceStatus(ctx context.Context, salonID string, ownerUserID string) (*SalonVoiceStatus, error) {
 	var status SalonVoiceStatus
 	err := r.db.QueryRowContext(ctx, `

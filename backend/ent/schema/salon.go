@@ -42,6 +42,7 @@ func (Salon) Fields() []ent.Field {
 		field.String("active_pos_provider").Default("square").NotEmpty(),
 		field.String("public_slug").Optional(),
 		field.Bool("public_catalog_enabled").Default(false),
+		field.Enum("data_classification").Values("live", "sample_test").Default("live"),
 		field.String("creation_operation_key").Optional().Nillable().NotEmpty(),
 		field.String("creation_payload_fingerprint").Optional().Nillable().Match(regexp.MustCompile(`^[0-9a-f]{64}$`)),
 		field.Time("created_at").Default(time.Now),

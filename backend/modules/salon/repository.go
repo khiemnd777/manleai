@@ -197,7 +197,11 @@ func (r *Repository) Update(ctx context.Context, id string, ownerUserID string, 
 
 func (r *Repository) GetSettings(ctx context.Context, salonID string, ownerUserID string) (*Settings, error) {
 	row := r.db.QueryRowContext(ctx, settingsSelect+`
-		WHERE ss.salon_id = $1 AND public.has_active_tenant_membership(s.id, $2::uuid)
+		WHERE ss.salon_id = $1
+		  AND (
+		      public.has_active_tenant_membership(s.id, $2::uuid)
+		      OR public.app_active_support_authorization($2::uuid, s.id, 'training.read')
+		  )
 	`, salonID, ownerUserID)
 	return scanSettings(row)
 }

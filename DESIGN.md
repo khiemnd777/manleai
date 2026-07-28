@@ -34,6 +34,90 @@ sync errors, no owner identifiers, and no provider tokens.
   success with the required booking ID and metadata.
 - When a workflow is not available yet, show a disabled or gated state with the real dependency, not a pretend success path.
 
+## Platform Access Experience
+
+Access controls follow the object they govern. Global Platform roles live at
+`/platform/access`; salon membership, salon-specific Platform support
+capabilities, and temporary sensitive-data grants live in the selected salon's
+`Access` tab. The salon detail route implies the salon, so the page must not ask
+the administrator to select it again.
+
+One login identity belongs to exactly one immutable authorization realm:
+`tenant` or `platform`. A human who works in both realms uses two distinct
+login identities. Role labels, salon membership, and frontend filtering must
+never be used to convert or infer that realm.
+
+- **Platform roles** embeds a Platform-only identity lookup inside the
+  assign-role workflow. Tenant identities never appear and cannot be targeted
+  by direct mutation. It is not a standalone user directory and must explain
+  that Platform Ops receives salon capabilities separately.
+- **Salon team** uses the selected salon's Tenant-only identity lookup, manages
+  Tenant Business Managers beside that salon, and keeps the owner membership
+  visibly protected. Platform identities never appear.
+- **Platform support access** selects an active Platform Ops account and renders
+  salon-delegable capabilities, display names, and dependencies from the
+  backend capability catalog. The frontend must not maintain a parallel list or
+  infer read/write dependencies.
+- **Owner-authorized support** is a second, separate control for Services, AI
+  Training, and Calls. Platform Admin requests an exact Platform identity,
+  capability set, opaque support reference, and expiry; the salon Owner reviews,
+  approves/rejects, and may revoke it from the existing Settings workflow. Base
+  Platform role/assignment access remains required. The UI must never imply that
+  Platform Admin bypasses Owner approval. Calls approval includes its linked
+  Calls PII scope and limits the whole request to 24 hours; non-PII support is
+  limited to 30 days.
+- **Temporary sensitive data access** explains that PII means customer, call,
+  appointment, or notification records. A Platform role or salon capability
+  alone does not reveal PII. The control requires an exact scope, opaque
+  approved change reference, and duration of at most 24 hours; it shows expiry,
+  revocation, and audit behavior before the administrator acts.
+- The general temporary-sensitive-data control does not grant Calls. Calls PII
+  is created only by Owner approval of the linked support request.
+- Platform role and salon Access navigation is visible only to current Platform
+  Administrators. Direct routes remain backend-authorized and fail closed.
+- Existing access rows use the API's nested user summary and never display a raw
+  user UUID because a search result page did not contain that account.
+
+Loading uses content-shaped skeletons. Load and mutation failures retain a
+clear retry path; empty sections explain what has not been assigned; mutations
+disable conflicting controls; exact replay is reported as recovered rather
+than duplicated. Desktop uses compact grids and rows. Mobile stacks fields and
+uses full-width primary actions without horizontal page scrolling.
+
+Mockup as Text:
+
+```text
+Platform roles                                      [Refresh]
+Assign a Platform role
+  Find a Platform identity: [Name or email] [Search]
+  [Platform identity only] [Platform Ops | Platform Admin] [Assign role]
+Current Platform roles
+  Account · role · status · version                  [Revoke]
+
+Nail salon detail
+Business | Services | AI Training | Calls | Technical settings | Operations | Access | Audit
+
+Access                                              [Refresh]
+Salon team
+  [Find Tenant identity for this salon]             [Add manager]
+  Owner · protected
+  Business Manager · status                         [Revoke]
+
+Platform support access
+  [Active Platform Ops]
+  [Backend capability checkboxes and dependencies]  [Assign access]
+
+Request Owner authorization
+  [Platform account] [Services / AI Training / Calls capabilities]
+  [Support reference] [Expiry] [Calls PII when required] [Request approval]
+  Pending Owner review · exact capabilities · expiry    [Cancel request]
+
+Temporary sensitive data access
+  [Platform account] [Data scope] [Change reference] [1–24 hours]
+                                                     [Grant temporarily]
+  Account · exact scope · expiry · reference         [Revoke now]
+```
+
 ## Scheduling Authority Experience
 
 Authority-aware scheduling surfaces must show the selected authority,
@@ -82,6 +166,12 @@ backend message and stable blocker code. A page-level load failure retains a
 retry action and never guesses readiness. Legacy `phone_booking_ready` may be
 identified as a compatibility alias, but the visible label remains Automated
 booking.
+
+The Tenant Calls view may show Owner-operational readiness fields already
+available to that workflow. The Owner-authorized Platform Calls view reuses the
+same component but receives a business-safe projection: provider URLs, model,
+voice, credentials, and diagnostics are represented only as managed in
+Technical settings.
 
 ## ManleAI Calendar Configuration
 
@@ -452,6 +542,40 @@ Reuse primitives from `frontend/components/ui` before adding new styling:
 Use lucide-react icons for navigation, buttons, and status affordances when an icon adds scan value. Icons should be `h-4 w-4` in buttons/nav and `h-5 w-5` in panel headers unless a local pattern requires otherwise.
 
 If a new reusable primitive is needed, put it in `frontend/components/ui` and match the existing token, radius, typography, disabled, and focus-visible behavior.
+
+### Preserve Mature Operational Workflows
+
+Route or authorization restructuring must preserve a mature workflow component
+when its operational object and interaction model have not changed. Do not
+replace a full page with a newly invented reduced dashboard merely because the
+route, actor, or API prefix changed.
+
+- `ServicesDashboard` remains the parent UI for service categories, category
+  aliases, service aliases, service catalog controls, consultation, and
+  service-grain calendar policy.
+- `CallsDashboard` remains the parent UI for sessions, transcripts, detected
+  details, corrections, party review, simulator, archive, and redaction.
+- `SettingsDashboard` remains the parent UI for Owner Business settings and
+  Owner support-authorization decisions.
+- `TrainingDashboard` remains the parent UI for knowledge, corrections, and
+  evaluation.
+
+The Platform Business workspace must not render a second reduced Services
+editor. The Platform tenant detail's Services tab leads to the shared full
+`ServicesDashboard`, which remains the only Platform parent workflow for
+services, categories, and their aliases.
+
+Tenant/Platform differences belong in explicit surface-aware data adapters,
+safe DTO projections, and capability-gated actions inside those components.
+Provider configuration remains under Platform Technical. A separate component
+is justified only when the actor workflow or operational parent is genuinely
+different, and that decision must be documented before implementation.
+
+Service aliases are structured children of a service and category aliases are
+structured children of a service category. Manage both inside the Services
+parent workflow. AI Training may offer an explicit correction-to-service-alias
+action, but it must persist the canonical structured alias and must not convert
+either alias type into free-text knowledge.
 
 ## Standard Page Anatomy
 

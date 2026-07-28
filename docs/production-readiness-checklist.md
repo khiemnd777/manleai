@@ -49,10 +49,11 @@ RPO/RTO evidence.
   fingerprints/replay, and immutable audit; retain `salons.owner_user_id` and
   scheduling owner triggers as the owner source of truth.
 - [x] Build a server-owned `ActorContext` from the current active database
-  principal on every protected request; union current Platform role state and
-  choose the primary active membership while ignoring stale JWT/header tenant
-  or role claims. Keep Tenant and Platform access surfaces route-owned and fail
-  invalid surface/capability/PII combinations closed.
+  principal on every protected request; V74 reloads immutable scope-compatible
+  role state and permits a primary active membership only for Tenant identities
+  while ignoring stale JWT/header scope, tenant, or role claims. Keep Tenant and
+  Platform access surfaces route-owned and fail invalid
+  surface/capability/PII combinations closed.
 - [x] Add authenticated Platform access-management APIs and the one-time
   operator-only first-Platform-Admin command. Prevent owner membership
   revocation, last-admin removal, cross-salon Ops capability use, Platform PII
@@ -478,6 +479,58 @@ RPO/RTO evidence.
 - [x] Phase 10: add V63-V72 migration/replay/security ownership to the release
   gate, update Compose runtime/migration credential separation, runtime-role
   initialization, deployment/runbook docs, and codebase routing map.
+- [x] Phase 11: add V73 schema-only `live|sample_test` classification, a
+  separate checksum-ledger Lotus fixture runner, three marked sample accounts,
+  one marked sample tenant, fail-closed live-data collision checks, visible
+  dashboard labels/filters, and release-gate integration ownership. Normal
+  startup migration remains fixture-free.
+- [x] Phase 12: add V74 immutable `tenant|platform` principal scope; fail the
+  migration on historical mixed identities; enforce Tenant ownership,
+  memberships, and legacy roles versus Platform roles, delegation, and PII
+  grants with database foreign keys; split Platform/Tenant account-search APIs;
+  make auth/session routing scope-owned; and bootstrap a dedicated Platform
+  identity without promoting a Tenant login.
+- [x] Phase 13: add V75 Owner-reviewed Platform support authorization for exact
+  Services, AI Training, and Calls capabilities. Require current base Platform
+  Admin permission or exact-salon Ops assignment plus the active Owner approval;
+  require request-linked Calls PII; enforce 30-day non-PII and 24-hour Calls
+  bounds, immediate revoke/expiry/role-assignment invalidation, per-action
+  actual-actor audit, feature RLS, and select-only call-linked scheduling
+  evidence without general Appointments access or writes.
+- [x] Phase 14: add V76 control-plane authority correction. Platform Admin now
+  has direct role-capability access to every salon Platform tab including PII;
+  Admin grants/revokes time-bounded feature/PII access to assigned Platform Ops;
+  Tenant Owner approval endpoints/UI are removed; Admin can suspend/reactivate
+  the Owner membership without changing `salons.owner_user_id`; every Tenant
+  salon route checks current exact membership; Platform users support direct
+  create/edit/password/role/status with session revocation, idempotency, audit,
+  and last-active-Admin protection.
+- [x] Restore and reuse the full existing `ServicesDashboard`, `CallsDashboard`,
+  `SettingsDashboard`, and `TrainingDashboard` on their Tenant routes; reuse the
+  same Services/Calls/Training components through explicit Platform surface
+  adapters. Preserve category management, category aliases, service aliases,
+  corrections, lifecycle actions, and rich page states instead of replacing
+  them with reduced restructuring dashboards.
+- [x] Keep service aliases and category aliases as canonical structured children
+  managed inside Services. An explicitly reviewed Training correction may write
+  a canonical service alias, but neither alias type becomes free-text knowledge.
+- [x] Remove the reduced duplicate Services editor from Platform Business and
+  make the full reused Services tab the canonical Platform workflow. Keep the
+  legacy Business service/category API paths compatibility-safe behind the same
+  Services gate and fail-closed per-action audit. Admin access is direct; Ops
+  access is exact-salon and Admin-granted.
+- [x] Make legacy POS service/category repository reads accept the authorized
+  actual Platform actor without substituting the salon Owner ID; require exact
+  Services write authorization at the AI-bookable mutation fence and preserve
+  actual-actor attribution.
+- [x] Keep provider configuration, provider identifiers, sync/webhook/model
+  diagnostics, and test controls in Platform Technical. Reused Business
+  dashboards consume only bounded business-safe readiness projections.
+- [ ] Before production-live cutover, replace/reset the pre-live fixture
+  database, set the protected deploy profile to `live`, remove the sample
+  secret/reset approval, run only normal migrations, and require the CI/CD live
+  guard to prove zero sample rows and no `sample_data_migrations` table; then
+  verify owner bootstrap is available.
 - [ ] Before production cutover, provision/rotate the existing database runtime
   role, validate API/worker startup with RLS enforced, run the tag release gate,
   witness per-tenant Square/Twilio/OpenAI readiness and callbacks, and complete

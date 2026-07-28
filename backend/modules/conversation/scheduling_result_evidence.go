@@ -153,7 +153,10 @@ func (r *Repository) hydrateOwnerRequestEvidence(
 		 AND request.call_session_id = cs.id
 		 AND request.id = cs.scheduling_request_id
 		WHERE cs.salon_id = $1
-		  AND salon.owner_user_id = $2
+		  AND (
+		      public.app_actor_feature_access($2::uuid, salon.id, 'calls.read', 'calls')
+		      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls')
+		  )
 		  AND cs.id = ANY($3::uuid[])
 	`, salonID, ownerUserID, pq.Array(sessionIDs))
 	if err != nil {
@@ -321,7 +324,10 @@ func (r *Repository) hydrateInternalResultEvidence(
 		 AND appointment.id = event.appointment_id
 		 AND appointment.id = cs.appointment_id
 		WHERE cs.salon_id = $1
-		  AND salon.owner_user_id = $2
+		  AND (
+		      public.app_actor_feature_access($2::uuid, salon.id, 'calls.read', 'calls')
+		      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls')
+		  )
 		  AND cs.id = ANY($3::uuid[])
 		  AND attempt.scheduling_authority = 'manleai_calendar'
 		  AND appointment.scheduling_authority = 'manleai_calendar'
@@ -744,7 +750,11 @@ func externalEvidenceQuery(split bool) string {
 		JOIN call_sessions cs ON cs.id = input.session_id
 		JOIN salons salon ON salon.id = cs.salon_id
 		` + join + `
-		WHERE cs.salon_id = $1 AND salon.owner_user_id = $2
+		WHERE cs.salon_id = $1
+		  AND (
+		      public.app_actor_feature_access($2::uuid, salon.id, 'calls.read', 'calls')
+		      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls')
+		  )
 		  AND attempt.scheduling_authority = 'external_provider'
 		  AND appointment.scheduling_authority = 'external_provider'
 		ORDER BY cs.id, input.operation_key

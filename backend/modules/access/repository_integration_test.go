@@ -31,13 +31,16 @@ func TestAccessRepositoryTenantPlatformAndPIIBoundaries(t *testing.T) {
 	}
 
 	suffix := uuid.NewString()
-	adminID := insertAccessTestUser(t, db, "admin-"+suffix+"@example.test")
-	opsID := insertAccessTestUser(t, db, "ops-"+suffix+"@example.test")
-	ownerAID := insertAccessTestUser(t, db, "owner-a-"+suffix+"@example.test")
-	ownerBID := insertAccessTestUser(t, db, "owner-b-"+suffix+"@example.test")
-	managerID := insertAccessTestUser(t, db, "manager-"+suffix+"@example.test")
+	adminID := insertAccessTestUser(t, db, "admin-"+suffix+"@example.test", PrincipalScopePlatform)
+	opsID := insertAccessTestUser(t, db, "ops-"+suffix+"@example.test", PrincipalScopePlatform)
+	ownerAID := insertAccessTestUser(t, db, "owner-a-"+suffix+"@example.test", PrincipalScopeTenant)
+	ownerBID := insertAccessTestUser(t, db, "owner-b-"+suffix+"@example.test", PrincipalScopeTenant)
+	managerID := insertAccessTestUser(t, db, "manager-"+suffix+"@example.test", PrincipalScopeTenant)
 	salonAID := insertAccessTestSalon(t, db, ownerAID, "Access A "+suffix)
 	salonBID := insertAccessTestSalon(t, db, ownerBID, "Access B "+suffix)
+	if _, err := db.ExecContext(ctx, `UPDATE users SET principal_scope='platform' WHERE id=$1`, ownerAID); err == nil {
+		t.Fatal("database allowed an existing Tenant identity to change principal scope")
+	}
 
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO platform_role_assignments (
@@ -53,15 +56,27 @@ func TestAccessRepositoryTenantPlatformAndPIIBoundaries(t *testing.T) {
 	repository := NewRepository(db)
 	service := NewService(repository)
 	adminActor := middleware.ActorContext{UserID: adminID, Roles: []string{RolePlatformAdmin}}
-	users, err := service.ListUsers(ctx, adminActor, "owner-a-"+suffix, 25)
-	if err != nil || len(users.Users) != 1 || users.Users[0].ID != ownerAID || users.Users[0].Email == "" {
-		t.Fatalf("list access users=%#v err=%v", users, err)
+	platformUsers, err := service.ListPlatformUsers(ctx, adminActor, "owner-a-"+suffix, 25)
+	if err != nil || len(platformUsers.Users) != 0 {
+		t.Fatalf("Platform directory leaked Tenant principal: users=%#v err=%v", platformUsers, err)
+	}
+	tenantUsers, err := service.ListTenantUsers(ctx, adminActor, salonAID, "owner-a-"+suffix, 25)
+	if err != nil || len(tenantUsers.Users) != 1 || tenantUsers.Users[0].ID != ownerAID || tenantUsers.Users[0].PrincipalScope != PrincipalScopeTenant {
+		t.Fatalf("list Tenant users=%#v err=%v", tenantUsers, err)
+	}
+	platformUsers, err = service.ListPlatformUsers(ctx, adminActor, "ops-"+suffix, 25)
+	if err != nil || len(platformUsers.Users) != 1 || platformUsers.Users[0].ID != opsID || platformUsers.Users[0].PrincipalScope != PrincipalScopePlatform {
+		t.Fatalf("list Platform users=%#v err=%v", platformUsers, err)
+	}
+	tenantUsers, err = service.ListTenantUsers(ctx, adminActor, salonAID, "ops-"+suffix, 25)
+	if err != nil || len(tenantUsers.Users) != 0 {
+		t.Fatalf("Tenant directory leaked Platform principal: users=%#v err=%v", tenantUsers, err)
 	}
 
 	assertAccessDecision(t, repository, ownerAID, AccessCheck{Surface: SurfaceTenant, SalonID: salonAID, Capability: CapabilityBusinessRead}, true)
 	assertAccessDecision(t, repository, ownerAID, AccessCheck{Surface: SurfaceTenant, SalonID: salonBID, Capability: CapabilityBusinessRead}, false)
 	assertAccessDecision(t, repository, adminID, AccessCheck{Surface: SurfacePlatform, SalonID: salonBID, Capability: CapabilityBusinessRead}, true)
-	assertAccessDecision(t, repository, adminID, AccessCheck{Surface: SurfacePlatform, SalonID: salonBID, Capability: CapabilityBusinessRead, PIIScope: PIIScopeCustomers}, false)
+	assertAccessDecision(t, repository, adminID, AccessCheck{Surface: SurfacePlatform, SalonID: salonBID, Capability: CapabilityBusinessRead, PIIScope: PIIScopeCustomers}, true)
 
 	roleRequest := PlatformRoleMutationRequest{
 		ActionKey:       "access-test-role-" + suffix,
@@ -69,8 +84,11 @@ func TestAccessRepositoryTenantPlatformAndPIIBoundaries(t *testing.T) {
 		Status:          "active",
 		ExpectedVersion: 0,
 	}
+	if _, _, err := service.MutatePlatformRole(ctx, adminActor, ownerAID, roleRequest); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Tenant principal Platform role mutation error=%v, want not found", err)
+	}
 	roleAssignment, replayed, err := service.MutatePlatformRole(ctx, adminActor, opsID, roleRequest)
-	if err != nil || replayed || roleAssignment.Role != RolePlatformOps {
+	if err != nil || replayed || roleAssignment.Role != RolePlatformOps || roleAssignment.User.ID != opsID || roleAssignment.User.Email == "" {
 		t.Fatalf("create ops role assignment=%#v replayed=%t err=%v", roleAssignment, replayed, err)
 	}
 	roleReplay, replayed, err := service.MutatePlatformRole(ctx, adminActor, opsID, roleRequest)
@@ -90,7 +108,7 @@ func TestAccessRepositoryTenantPlatformAndPIIBoundaries(t *testing.T) {
 		Permissions:     []string{string(CapabilityBusinessRead), string(CapabilityBusinessWrite)},
 	}
 	assignment, replayed, err := service.MutateSalonAssignment(ctx, adminActor, salonAID, opsID, assignmentRequest)
-	if err != nil || replayed || assignment.SalonID != salonAID {
+	if err != nil || replayed || assignment.SalonID != salonAID || assignment.User.ID != opsID || assignment.User.Email == "" {
 		t.Fatalf("create salon assignment=%#v replayed=%t err=%v", assignment, replayed, err)
 	}
 	assertAccessDecision(t, repository, opsID, AccessCheck{Surface: SurfacePlatform, SalonID: salonAID, Capability: CapabilityBusinessRead}, true)
@@ -103,8 +121,11 @@ func TestAccessRepositoryTenantPlatformAndPIIBoundaries(t *testing.T) {
 		Status:          "active",
 		ExpectedVersion: 0,
 	}
+	if _, _, err := service.MutateMembership(ctx, adminActor, salonAID, opsID, membershipRequest); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Platform principal membership mutation error=%v, want not found", err)
+	}
 	membership, replayed, err := service.MutateMembership(ctx, adminActor, salonAID, managerID, membershipRequest)
-	if err != nil || replayed || membership.IsOwner {
+	if err != nil || replayed || membership.IsOwner || membership.User.ID != managerID || membership.User.Email == "" {
 		t.Fatalf("create membership=%#v replayed=%t err=%v", membership, replayed, err)
 	}
 	assertAccessDecision(t, repository, managerID, AccessCheck{Surface: SurfaceTenant, SalonID: salonAID, Capability: CapabilityBusinessWrite}, true)
@@ -131,13 +152,24 @@ func TestAccessRepositoryTenantPlatformAndPIIBoundaries(t *testing.T) {
 	if !ownerMembership.IsOwner || ownerMembership.Role != RoleTenantOwner {
 		t.Fatalf("owner membership=%#v, want trigger-backed active tenant owner", ownerMembership)
 	}
-	if _, _, err := service.MutateMembership(ctx, adminActor, salonAID, ownerAID, MembershipMutationRequest{
+	revokedOwner, replayed, err := service.MutateMembership(ctx, adminActor, salonAID, ownerAID, MembershipMutationRequest{
 		ActionKey:       "access-test-owner-revoke-" + suffix,
 		Role:            RoleTenantOwner,
 		Status:          "revoked",
 		ExpectedVersion: ownerMembership.Version,
-	}); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("owner revoke error=%v, want forbidden", err)
+	})
+	if err != nil || replayed || revokedOwner.Status != "revoked" || !revokedOwner.IsOwner {
+		t.Fatalf("owner revoke=%#v replayed=%t err=%v", revokedOwner, replayed, err)
+	}
+	assertAccessDecision(t, repository, ownerAID, AccessCheck{Surface: SurfaceTenant, SalonID: salonAID, Capability: CapabilityBusinessRead}, false)
+	reactivatedOwner, replayed, err := service.MutateMembership(ctx, adminActor, salonAID, ownerAID, MembershipMutationRequest{
+		ActionKey:       "access-test-owner-reactivate-" + suffix,
+		Role:            RoleTenantOwner,
+		Status:          "active",
+		ExpectedVersion: revokedOwner.Version,
+	})
+	if err != nil || replayed || reactivatedOwner.Status != "active" || !reactivatedOwner.IsOwner {
+		t.Fatalf("owner reactivate=%#v replayed=%t err=%v", reactivatedOwner, replayed, err)
 	}
 
 	service.now = func() time.Time { return time.Now().UTC() }
@@ -149,7 +181,7 @@ func TestAccessRepositoryTenantPlatformAndPIIBoundaries(t *testing.T) {
 		ExpiresAt: service.now().Add(time.Hour),
 	}
 	grant, replayed, err := service.GrantPIIAccess(ctx, adminActor, salonAID, grantRequest)
-	if err != nil || replayed {
+	if err != nil || replayed || grant.User.ID != opsID || grant.User.Email == "" {
 		t.Fatalf("grant PII=%#v replayed=%t err=%v", grant, replayed, err)
 	}
 	assertAccessDecision(t, repository, opsID, AccessCheck{Surface: SurfacePlatform, SalonID: salonAID, Capability: CapabilityBusinessRead, PIIScope: PIIScopeCustomers}, true)
@@ -257,8 +289,8 @@ func TestConcurrentPlatformAdminDemotionsPreserveOneActiveAdmin(t *testing.T) {
 	}
 
 	suffix := uuid.NewString()
-	adminAID := insertAccessTestUser(t, db, "concurrent-admin-a-"+suffix+"@example.test")
-	adminBID := insertAccessTestUser(t, db, "concurrent-admin-b-"+suffix+"@example.test")
+	adminAID := insertAccessTestUser(t, db, "concurrent-admin-a-"+suffix+"@example.test", PrincipalScopePlatform)
+	adminBID := insertAccessTestUser(t, db, "concurrent-admin-b-"+suffix+"@example.test", PrincipalScopePlatform)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO platform_role_assignments (
 			user_id, role_id, status, created_by_user_id, updated_by_user_id
@@ -371,14 +403,14 @@ func TestConcurrentPlatformAdminDemotionsPreserveOneActiveAdmin(t *testing.T) {
 	}
 }
 
-func insertAccessTestUser(t *testing.T, db *sql.DB, email string) string {
+func insertAccessTestUser(t *testing.T, db *sql.DB, email string, scope PrincipalScope) string {
 	t.Helper()
 	var id string
 	if err := db.QueryRow(`
-		INSERT INTO users (email, password_hash, full_name, status)
-		VALUES ($1, 'integration-test-only', 'Access Test', 'active')
+		INSERT INTO users (email, password_hash, full_name, status, principal_scope)
+		VALUES ($1, 'integration-test-only', 'Access Test', 'active', $2)
 		RETURNING id::text
-	`, email).Scan(&id); err != nil {
+	`, email, string(scope)).Scan(&id); err != nil {
 		t.Fatalf("insert user %s: %v", email, err)
 	}
 	return id

@@ -43,20 +43,22 @@ Before pushing a release tag, a migration reviewer must compare:
 - repository/service queries used by the previous image; and
 - any backfill, constraint-validation, or data-ownership transition.
 
-The protected `production` GitHub environment must then set all four
-environment variables:
+The protected `production` GitHub environment must set the four release
+declarations plus the data profile:
 
 ```txt
 MIGRATION_COMPATIBILITY_RELEASE_TAG=<exact release tag>
 PREVIOUS_IMAGE_DB_COMPATIBLE=true
 MIGRATION_COMPATIBILITY_APPROVER=<bounded reviewer identity>
 POSTGRES_BACKUP_STORAGE_APPROVAL=encrypted-private:/opt/manleai/backups
+DEPLOY_DATA_PROFILE=<live-or-sample_test>
 ```
 
 The tag must match the release exactly. The deploy job rejects a missing,
 stale, malformed, or false declaration. The remote release directory retains a
 mode-`600` declaration record containing only the release tag, compatibility
-decision, approver, and exact storage approval. The storage value attests an
+decision, approver, exact storage approval, selected data profile, and optional
+sample-reset release tag. The storage value attests an
 operator-verified encrypted private path but does not encrypt it. These values
 are release evidence, not database or provider configuration.
 
@@ -64,12 +66,30 @@ After a release completes, treat the declaration as consumed. A later tag must
 receive a new review and exact tag value; compatibility approval never carries
 forward implicitly.
 
+### V74 principal-scope preflight and rollback note
+
+Before applying V74, query for identities that have both Tenant evidence
+(`salons.owner_user_id`, `salon_memberships`, or `user_roles`) and Platform
+evidence (`platform_role_assignments`, `platform_salon_assignments`, or
+`platform_pii_access_grants`). Any result is a migration blocker. Provision
+separate login identities and move the reviewed assignments to the correct
+identity before retrying; do not make V74 choose a side automatically.
+
+V74 is additive for normal reads/writes and gives previous images defaults for
+new Tenant and Platform reference columns. A previous image cannot promote a
+Tenant identity through the old Platform bootstrap path after V74; the database
+rejects that write. Treat this as intended fail-closed rollback behavior, and
+retain at least one valid active Platform Administrator before image rollback.
+
 ## Release Procedure
 
 ### 1. Preflight
 
 - Review the candidate migration set and current
   `app_schema_migrations` history/checksums.
+- Require the deploy checksum preflight to match every persisted migration to
+  exactly one candidate file before API startup. Exit `42` is an incompatible
+  ledger, not a retryable API health failure.
 - Run migration tests and any migration-specific read-only preflight, such as
   the V39 ambiguous-attempt query in `docs/deployment.md`.
 - Confirm the expand/contract phase and the exact prior image being retained.
@@ -100,6 +120,11 @@ container is not considered empty and fails closed.
 - Capture the currently running image IDs.
 - Start the candidate stack; the API owns migrations and the worker waits for
   API health with `AUTO_MIGRATE=false`.
+- Under the protected `sample_test` profile only, an incompatible ledger or
+  non-sample target may be replaced after backup when
+  `SAMPLE_TEST_RESET_RELEASE_TAG` exactly matches the candidate tag. The reset
+  removes only the Compose-owned PostgreSQL volume and writes a release record.
+  The `live` profile always fails before deletion.
 - Require API health and edge-route validation before moving the `current`
   release symlink.
 - Preserve the backup, checksum, compatibility declaration, prior image tags,

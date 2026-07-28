@@ -5,21 +5,24 @@
 - Go 1.23+
 - Node 20+
 - Docker
-- PostgreSQL client tools for `make seed-local`
 
 ## Start Services
 
 ```bash
-cp .env.example .env
-docker compose up -d --build
+make restart
 ```
 
-## Seed Local Owner
+`make restart` is the only local stack command. It creates `.env` with private
+local infrastructure secrets when missing, builds all images, starts
+PostgreSQL/Redis, checks migration checksums, starts the API, applies the
+guarded `sample_test` fixture, and waits for every service to become healthy.
 
-```bash
-cd backend
-DATABASE_URL=postgres://ai_receptionist:ai_receptionist@localhost:55432/ai_receptionist?sslmode=disable make seed-local
-```
+The first incompatible legacy sample volume is removed automatically after the
+checksum preflight identifies it. A compatible volume is never reset. Repeated
+restarts return `sample_migration_replayed=true` and preserve the exact one
+`Lotus Nails Studio` tenant. Login values are stored in the ignored mode-`600`
+file `.local/sample-data.env`; the fixed tenant-owner email is
+`owner@lotusnails.example`.
 
 ## Run API
 
@@ -91,4 +94,5 @@ the owner handoff phone.
 
 ## Notes
 
-Mock data is not the production path. The local seed creates a demo owner and salon only so the dashboard can be exercised without manual SQL.
+Sample data is not the production-live path. It is visibly classified,
+fixture-only, and never runs in the normal startup migration chain.

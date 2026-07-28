@@ -19,6 +19,10 @@ The manifest deliberately identifies packages and contract test files. The
 gate does not grep test names or test output, so renaming a test function cannot
 silently remove an entire contract area. Missing declared packages, test files,
 web applications, package manifests, or lockfiles fail the gate.
+The self-test also parses the local restart, migration checksum preflight,
+pre-live sample-target preflight, and post-migration data-profile guard scripts;
+missing or syntactically invalid deployment guards fail before tests or image
+build.
 
 ## Required Checks
 
@@ -90,6 +94,16 @@ coverage includes:
   customer, call, appointment, and notification tables;
 - tenant quota/usage accounting, provider-write rejection, and fair worker
   claim limits without cross-tenant starvation;
+- immutable V74 Tenant/Platform principal scope, fail-closed mixed-identity
+  migration, realm-specific account directories, and database-enforced
+  assignment targets;
+- V75 Owner-authorized Platform Services/AI Training/Calls access with no Admin
+  bypass: current base role/assignment capability plus exact active Owner
+  authorization, request-linked Calls PII, bounded expiry/revocation, per-action
+  actual-actor audit, feature RLS, and select-only call-linked scheduling
+  evidence without general Appointments access; compatibility Platform Business
+  Services routes cannot bypass that gate, and support never substitutes the
+  salon Owner identity;
 - authority-aware Training evaluation with tenant-first and unknown-authority
   fail-closed behavior;
 - integration token and secret whole-response redaction plus stable POS/Square

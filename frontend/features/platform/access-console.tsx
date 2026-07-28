@@ -1,30 +1,176 @@
 "use client";
 
-import { useEffect,useMemo,useRef,useState } from "react";
-import {KeyRound,RefreshCcw,Search,ShieldAlert,UserCog,Users} from "lucide-react";
-import {Alert} from "@/components/ui/alert";import{Badge}from"@/components/ui/badge";import{Button}from"@/components/ui/button";import{Card,CardDescription,CardTitle}from"@/components/ui/card";import{Skeleton}from"@/components/ui/skeleton";import{BusinessMutationKeyManager,listBusinessSalons,type BusinessSalonSummary}from"@/lib/api/business";import{RequestError}from"@/lib/api/client";import{grantPII,listAccessUsers,listMemberships,listPIIGrants,listPlatformRoles,listSalonAssignments,mutateMembership,mutatePlatformRole,mutateSalonAssignment,revokePII,type AccessUser,type PIIGrant,type PlatformRoleAssignment,type SalonAssignment,type TenantMembership}from"@/lib/api/access";
+import { useEffect, useRef, useState } from "react";
+import { Pencil, RefreshCcw, ShieldAlert, UserCog, UserPlus } from "lucide-react";
+import { Alert } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Card, CardDescription, CardTitle } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { AccessRows, errorMessage } from "@/features/platform/access-ui";
+import { createPlatformUser, listPlatformRoles, mutatePlatformRole, type PlatformRoleAssignment, updatePlatformUser } from "@/lib/api/access";
+import { BusinessMutationKeyManager } from "@/lib/api/business";
+import { RequestError } from "@/lib/api/client";
 
-const delegatedPermissions=["business.read","business.write","technical.read","technical.write","operations.read","operations.write","audit.read"];
-export function PlatformAccessConsole(){const[usersList,setUsersList]=useState<AccessUser[]>([]);const[roles,setRoles]=useState<PlatformRoleAssignment[]>([]);const[salons,setSalons]=useState<BusinessSalonSummary[]>([]);const[selectedSalon,setSelectedSalon]=useState("");const[memberships,setMemberships]=useState<TenantMembership[]>([]);const[assignments,setAssignments]=useState<SalonAssignment[]>([]);const[grants,setGrants]=useState<PIIGrant[]>([]);const[query,setQuery]=useState("");const[loading,setLoading]=useState(true);const[detailLoading,setDetailLoading]=useState(false);const[adminBlocked,setAdminBlocked]=useState(false);const[error,setError]=useState("");const[success,setSuccess]=useState("");const[busy,setBusy]=useState("");const[targetUserID,setTargetUserID]=useState("");const[platformRole,setPlatformRole]=useState("platform_ops");const[membershipUserID,setMembershipUserID]=useState("");const[assignmentUserID,setAssignmentUserID]=useState("");const[assignmentPermissions,setAssignmentPermissions]=useState<string[]>(["business.read","business.write"]);const[grantUserID,setGrantUserID]=useState("");const[grantScope,setGrantScope]=useState("customers");const[grantReference,setGrantReference]=useState("");const[grantHours,setGrantHours]=useState("1");const attempt=useRef(new BusinessMutationKeyManager());
-  async function load(){setLoading(true);setError("");setAdminBlocked(false);try{const[u,r,s]=await Promise.all([listAccessUsers(query),listPlatformRoles(),listBusinessSalons("platform")]);setUsersList(u.users);setRoles(r.assignments);setSalons(s.salons);setSelectedSalon((current)=>current||s.salons[0]?.id||"")}catch(failure){if(failure instanceof RequestError&&failure.status===403)setAdminBlocked(true);else setError(message(failure,"Could not load access control."))}finally{setLoading(false)}}
-  async function loadSalon(salonID:string){if(!salonID)return;setDetailLoading(true);setError("");try{const[m,a,g]=await Promise.all([listMemberships(salonID),listSalonAssignments(salonID),listPIIGrants(salonID)]);setMemberships(m.memberships);setAssignments(a.assignments);setGrants(g.grants)}catch(failure){setError(message(failure,"Could not load salon access."))}finally{setDetailLoading(false)}}
-  useEffect(()=>{void load()},[]);useEffect(()=>{if(selectedSalon&&!adminBlocked)void loadSalon(selectedSalon)},[selectedSalon,adminBlocked]);
-  const userMap=useMemo(()=>new Map(usersList.map((user)=>[user.id,user])),[usersList]);
-  async function search(){await load()}
-  async function savePlatformRole(existing?:PlatformRoleAssignment){const userID=existing?.user_id||targetUserID;if(!userID)return;const payload={userID,role:existing?.role||platformRole,status:existing?.status||"active",version:existing?.version||0};const key=attempt.current.forPayload("platform-role",payload);setBusy(`role-${userID}`);setError("");setSuccess("");try{const response=await mutatePlatformRole(userID,payload.role,payload.status,payload.version,key);setRoles((items)=>upsertByUser(items,response.data));attempt.current.clear();setSuccess(response.replayed?"The exact Platform role change was recovered safely.":"Platform role saved. Role transitions revoke old salon assignments and PII grants.")}catch(failure){setError(message(failure,"Could not save the Platform role."))}finally{setBusy("")}}
-  async function toggleRole(item:PlatformRoleAssignment){const key=new BusinessMutationKeyManager().forPayload("platform-role-status",{id:item.id,status:item.status==="active"?"revoked":"active",version:item.version});setBusy(`role-${item.user_id}`);setError("");try{const response=await mutatePlatformRole(item.user_id,item.role,item.status==="active"?"revoked":"active",item.version,key);setRoles((items)=>upsertByUser(items,response.data));setSuccess("Platform role status saved.")}catch(failure){setError(message(failure,"Could not change Platform role status."))}finally{setBusy("")}}
-  async function addMembership(){if(!selectedSalon||!membershipUserID)return;const key=attempt.current.forPayload("membership",{selectedSalon,membershipUserID});setBusy("membership");setError("");try{const response=await mutateMembership(selectedSalon,membershipUserID,"tenant_business_manager","active",0,key);setMemberships((items)=>upsertByUser(items,response.data));attempt.current.clear();setSuccess("Tenant Business Manager membership saved.")}catch(failure){setError(message(failure,"Could not save the tenant membership."))}finally{setBusy("")}}
-  async function toggleMembership(item:TenantMembership){if(item.is_owner)return;const key=new BusinessMutationKeyManager().forPayload("membership-status",{id:item.id,status:item.status==="active"?"revoked":"active",version:item.version});setBusy(`membership-${item.user_id}`);try{const response=await mutateMembership(selectedSalon,item.user_id,item.role,item.status==="active"?"revoked":"active",item.version,key);setMemberships((items)=>upsertByUser(items,response.data));setSuccess("Tenant membership status saved.")}catch(failure){setError(message(failure,"Could not change tenant membership."))}finally{setBusy("")}}
-  async function addAssignment(){if(!selectedSalon||!assignmentUserID)return;const permissions=normalizedPermissions(assignmentPermissions);const key=attempt.current.forPayload("assignment",{selectedSalon,assignmentUserID,permissions});setBusy("assignment");setError("");try{const response=await mutateSalonAssignment(selectedSalon,assignmentUserID,"active",permissions,0,key);setAssignments((items)=>upsertByUser(items,response.data));attempt.current.clear();setSuccess("Platform Ops salon assignment saved.")}catch(failure){setError(message(failure,"Could not save the salon assignment. The user must have an active Platform Ops role."))}finally{setBusy("")}}
-  async function toggleAssignment(item:SalonAssignment){const key=new BusinessMutationKeyManager().forPayload("assignment-status",{id:item.id,status:item.status==="active"?"revoked":"active",version:item.version});setBusy(`assignment-${item.user_id}`);try{const response=await mutateSalonAssignment(selectedSalon,item.user_id,item.status==="active"?"revoked":"active",item.permissions,item.version,key);setAssignments((items)=>upsertByUser(items,response.data));setSuccess("Salon assignment status saved.")}catch(failure){setError(message(failure,"Could not change the salon assignment."))}finally{setBusy("")}}
-  async function addGrant(){const hours=Number(grantHours);if(!selectedSalon||!grantUserID||!grantReference||!Number.isFinite(hours)||hours<=0||hours>24)return;const expiresAt=new Date(Date.now()+hours*3600000).toISOString();const key=attempt.current.forPayload("pii-grant",{selectedSalon,grantUserID,grantScope,grantReference,hours});setBusy("grant");setError("");try{const response=await grantPII(selectedSalon,grantUserID,grantScope,grantReference,expiresAt,key);setGrants((items)=>[response.data,...items]);attempt.current.clear();setGrantReference("");setSuccess("Time-bounded PII grant created.")}catch(failure){setError(message(failure,"Could not create the PII grant. The change reference must be opaque and the user needs the underlying salon capability."))}finally{setBusy("")}}
-  async function revoke(grant:PIIGrant){const key=new BusinessMutationKeyManager().forPayload("pii-revoke",{id:grant.id,version:grant.version});setBusy(`grant-${grant.id}`);try{const response=await revokePII(selectedSalon,grant.id,grant.version,key);setGrants((items)=>items.map((item)=>item.id===response.data.id?response.data:item));setSuccess("PII grant revoked immediately.")}catch(failure){setError(message(failure,"Could not revoke the PII grant."))}finally{setBusy("")}}
-  if(loading)return <div className="space-y-4"><Skeleton className="h-12 w-72"/><Skeleton className="h-72 w-full"/></div>;if(adminBlocked)return <Card className="border-amber-200 bg-amber-50"><div className="flex gap-3"><ShieldAlert className="h-5 w-5 text-amber-700"/><div><CardTitle>Platform Administrator only</CardTitle><CardDescription>Platform Ops can work only inside assigned salon capabilities. Platform role, membership, assignment, and PII-grant governance requires platform.access.manage.</CardDescription></div></div></Card>;
-  return <div className="space-y-5"><div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"><div><h1 className="text-2xl font-bold text-ink">Access control</h1><p className="mt-1 text-sm text-muted">Manage system administrators, Platform Ops delegation, Tenant Business Managers, and time-bounded PII grants.</p></div><Button type="button" variant="secondary" onClick={()=>void load()}><RefreshCcw className="h-4 w-4"/>Refresh</Button></div>{error?<Alert title="Access action needs attention" message={error}/>:null}{success?<Alert type="success" title="Saved" message={success}/>:null}<Card><CardTitle>User directory</CardTitle><CardDescription>Search existing active or disabled application users before assigning access. This directory is available only to Platform Admin.</CardDescription><div className="mt-4 flex gap-2"><div className="flex h-10 flex-1 items-center gap-2 rounded-md border border-line px-3"><Search className="h-4 w-4 text-muted"/><input className="w-full bg-transparent text-sm outline-none" value={query} onChange={(event)=>setQuery(event.target.value)} placeholder="Name or email"/></div><Button type="button" variant="secondary" onClick={()=>void search()}>Search</Button></div><div className="mt-3 text-xs text-muted">{usersList.length} user(s) loaded. User IDs are never accepted as proof of authorization; all mutations recheck current database roles.</div></Card><Card><div className="flex items-center gap-3"><UserCog className="h-5 w-5 text-brand"/><div><CardTitle>Platform roles</CardTitle><CardDescription>The last active Platform Admin cannot be removed. Any role transition revokes stale salon assignments and PII grants.</CardDescription></div></div><div className="mt-4 grid gap-2 sm:grid-cols-[minmax(0,1fr)_180px_auto]"><UserSelect users={usersList} value={targetUserID} onChange={setTargetUserID}/><select className="field" value={platformRole} onChange={(event)=>{setPlatformRole(event.target.value);attempt.current.clear()}}><option value="platform_ops">Platform Ops</option><option value="platform_admin">Platform Admin</option></select><Button type="button" disabled={!targetUserID||busy.startsWith("role-")} onClick={()=>void savePlatformRole()}><KeyRound className="h-4 w-4"/>Assign role</Button></div><Rows empty="No Platform role assignments." items={roles.map((item)=>({id:item.id,title:userLabel(userMap,item.user_id),badges:[item.role,item.status],detail:`Version ${item.version}`,action:<Button type="button" variant="secondary" disabled={busy===`role-${item.user_id}`} onClick={()=>void toggleRole(item)}>{item.status==="active"?"Revoke":"Reactivate"}</Button>}))}/></Card><Card><CardTitle>Salon delegation</CardTitle><CardDescription>Select one salon. Tenant membership and Platform Ops assignment are separate; neither grants Platform customer PII.</CardDescription><select className="field mt-4" value={selectedSalon} onChange={(event)=>setSelectedSalon(event.target.value)}>{salons.map((salon)=><option key={salon.id} value={salon.id}>{salon.name}</option>)}</select>{detailLoading?<Skeleton className="mt-4 h-48 w-full"/>:<div className="mt-5 grid gap-5 xl:grid-cols-2"><section><h3 className="text-sm font-bold text-ink">Tenant Business Managers</h3><div className="mt-3 flex gap-2"><UserSelect users={usersList} value={membershipUserID} onChange={setMembershipUserID}/><Button type="button" variant="secondary" disabled={!membershipUserID||busy==="membership"} onClick={()=>void addMembership()}>Add</Button></div><Rows empty="No tenant memberships beyond the owner." items={memberships.map((item)=>({id:item.id,title:userLabel(userMap,item.user_id),badges:[item.role,item.status],detail:item.is_owner?"Protected owner membership":`Version ${item.version}`,action:item.is_owner?null:<Button type="button" variant="secondary" disabled={busy===`membership-${item.user_id}`} onClick={()=>void toggleMembership(item)}>{item.status==="active"?"Revoke":"Reactivate"}</Button>}))}/></section><section><h3 className="text-sm font-bold text-ink">Platform Ops assignment</h3><div className="mt-3 space-y-3"><UserSelect users={usersList.filter((user)=>roles.some((role)=>role.user_id===user.id&&role.role==="platform_ops"&&role.status==="active"))} value={assignmentUserID} onChange={setAssignmentUserID}/><div className="grid grid-cols-2 gap-2">{delegatedPermissions.map((permission)=><label key={permission} className="flex items-center gap-2 text-xs text-slate-700"><input type="checkbox" checked={assignmentPermissions.includes(permission)} onChange={(event)=>{setAssignmentPermissions(event.target.checked?[...assignmentPermissions,permission]:assignmentPermissions.filter((item)=>item!==permission));attempt.current.clear()}}/>{permission}</label>)}</div><Button type="button" variant="secondary" disabled={!assignmentUserID||busy==="assignment"} onClick={()=>void addAssignment()}>Assign Ops</Button></div><Rows empty="No Platform Ops assignment." items={assignments.map((item)=>({id:item.id,title:userLabel(userMap,item.user_id),badges:[item.status],detail:item.permissions.join(", "),action:<Button type="button" variant="secondary" disabled={busy===`assignment-${item.user_id}`} onClick={()=>void toggleAssignment(item)}>{item.status==="active"?"Revoke":"Reactivate"}</Button>}))}/></section></div>}</Card><Card><div className="flex gap-3"><ShieldAlert className="h-5 w-5 text-amber-700"/><div><CardTitle>Time-bounded PII grants</CardTitle><CardDescription>Platform Admin is not exempt. Grant only the exact salon, user, scope, and approved change reference for no more than 24 hours.</CardDescription></div></div><div className="mt-4 grid gap-2 md:grid-cols-[1fr_160px_1fr_100px_auto]"><UserSelect users={usersList.filter((user)=>roles.some((role)=>role.user_id===user.id&&role.status==="active"))} value={grantUserID} onChange={setGrantUserID}/><select className="field" value={grantScope} onChange={(event)=>{setGrantScope(event.target.value);attempt.current.clear()}}><option value="customers">Customers</option><option value="calls">Calls</option><option value="appointments">Appointments</option><option value="notifications">Notifications</option></select><input className="field" value={grantReference} onChange={(event)=>{setGrantReference(event.target.value);attempt.current.clear()}} placeholder="Approved change reference"/><input className="field" type="number" min="1" max="24" value={grantHours} onChange={(event)=>{setGrantHours(event.target.value);attempt.current.clear()}}/><Button type="button" disabled={!grantUserID||!grantReference||busy==="grant"} onClick={()=>void addGrant()}>Grant</Button></div><Rows empty="No PII grants for this salon." items={grants.map((grant)=>({id:grant.id,title:`${userLabel(userMap,grant.user_id)} · ${grant.scope}`,badges:[grant.revoked_at?"revoked":new Date(grant.expires_at)>new Date()?"active":"expired"],detail:`Expires ${new Date(grant.expires_at).toLocaleString()} · ${grant.reason}`,action:!grant.revoked_at&&new Date(grant.expires_at)>new Date()?<Button type="button" variant="secondary" disabled={busy===`grant-${grant.id}`} onClick={()=>void revoke(grant)}>Revoke</Button>:null}))}/></Card></div>}
+export function PlatformAccessConsole() {
+  const [roles, setRoles] = useState<PlatformRoleAssignment[]>([]);
+  const [editingUserID, setEditingUserID] = useState("");
+  const [email, setEmail] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [password, setPassword] = useState("");
+  const [role, setRole] = useState<PlatformRoleAssignment["role"]>("platform_ops");
+  const [status, setStatus] = useState<PlatformRoleAssignment["status"]>("active");
+  const [loading, setLoading] = useState(true);
+  const [adminBlocked, setAdminBlocked] = useState(false);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const mutationKey = useRef(new BusinessMutationKeyManager());
 
-function UserSelect({users,value,onChange}:{users:AccessUser[];value:string;onChange:(value:string)=>void}){return <select className="field min-w-0" value={value} onChange={(event)=>onChange(event.target.value)}><option value="">Select user</option>{users.map((user)=><option key={user.id} value={user.id}>{user.full_name} · {user.email} · {user.status}</option>)}</select>}
-function Rows({items,empty}:{items:Array<{id:string;title:string;badges:string[];detail:string;action:React.ReactNode}>;empty:string}){return <div className="mt-4 divide-y divide-line rounded-md border border-line">{items.length?items.map((item)=><div key={item.id} className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="truncate text-sm font-semibold text-ink">{item.title}</span>{item.badges.map((badge)=><Badge key={badge} value={badge}/>)}</div><p className="mt-1 break-words text-xs text-muted">{item.detail}</p></div>{item.action}</div>):<p className="p-4 text-sm text-muted">{empty}</p>}</div>}
-function normalizedPermissions(items:string[]){const result=new Set(items);if(result.has("business.write"))result.add("business.read");if(result.has("technical.write"))result.add("technical.read");if(result.has("operations.write"))result.add("operations.read");return[...result].sort()}
-function upsertByUser<T extends{user_id:string}>(items:T[],item:T){return[...items.filter((current)=>current.user_id!==item.user_id),item].sort((a,b)=>a.user_id.localeCompare(b.user_id))}
-function userLabel(users:Map<string,AccessUser>,id:string){const user=users.get(id);return user?`${user.full_name} · ${user.email}`:id}
-function message(error:unknown,fallback:string){return error instanceof Error&&error.message?error.message:fallback}
+  async function load() {
+    setLoading(true);
+    setError("");
+    setSuccess("");
+    setAdminBlocked(false);
+    try {
+      const result = await listPlatformRoles();
+      setRoles(result.assignments);
+    } catch (failure) {
+      if (failure instanceof RequestError && failure.status === 403) setAdminBlocked(true);
+      else setError(errorMessage(failure, "Could not load Platform roles."));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  function editUser(item?: PlatformRoleAssignment) {
+    setEditingUserID(item?.user_id ?? "");
+    setEmail(item?.user.email ?? "");
+    setFullName(item?.user.full_name ?? "");
+    setPassword("");
+    setRole(item?.role ?? "platform_ops");
+    setStatus(item?.status ?? "active");
+    mutationKey.current.clear();
+  }
+
+  async function saveUser() {
+    const existing = roles.find((assignment) => assignment.user_id === editingUserID);
+    if (!email.trim() || !fullName.trim() || (!existing && password.length < 8)) return;
+    const payload = { userID: editingUserID, email: email.trim(), fullName: fullName.trim(), password, role, status, version: existing?.version ?? 0 };
+    const actionKey = mutationKey.current.forPayload(existing ? "platform-user-update" : "platform-user-create", payload);
+    setBusy("save-user");
+    setError("");
+    setSuccess("");
+    try {
+      const response = existing
+        ? await updatePlatformUser(existing.user_id, payload.email, payload.fullName, password, role, status, existing.version, actionKey)
+        : await createPlatformUser(payload.email, payload.fullName, password, role, status, actionKey);
+      setRoles((items) => upsertRole(items, response.data));
+      mutationKey.current.clear();
+      editUser();
+      setSuccess(response.replayed ? "The exact Platform user change was recovered safely." : existing ? "Platform user updated." : "Platform user created.");
+    } catch (failure) {
+      setError(errorMessage(failure, "Could not save the Platform user."));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function toggleRole(item: PlatformRoleAssignment) {
+    const status = item.status === "active" ? "revoked" : "active";
+    const actionKey = mutationKey.current.forPayload("platform-role-status", { id: item.id, status, version: item.version });
+    setBusy(`role-${item.user_id}`);
+    setError("");
+    setSuccess("");
+    try {
+      const response = await mutatePlatformRole(item.user_id, item.role, status, item.version, actionKey);
+      setRoles((items) => upsertRole(items, response.data));
+      mutationKey.current.clear();
+      setSuccess(response.replayed ? "The exact Platform role change was recovered safely." : "Platform role status saved.");
+    } catch (failure) {
+      setError(errorMessage(failure, "Could not change the Platform role status."));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  if (loading) {
+    return <div className="space-y-4"><Skeleton className="h-12 w-72" /><Skeleton className="h-72 w-full" /></div>;
+  }
+
+  if (adminBlocked) {
+    return (
+      <Card className="border-amber-200 bg-amber-50">
+        <div className="flex gap-3">
+          <ShieldAlert className="h-5 w-5 flex-none text-amber-700" />
+          <div><CardTitle>Platform Administrator only</CardTitle><CardDescription>Only a Platform Administrator can manage global Platform roles.</CardDescription></div>
+        </div>
+      </Card>
+    );
+  }
+
+  const existing = roles.find((assignment) => assignment.user_id === editingUserID);
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-ink">Platform roles</h1>
+          <p className="mt-1 max-w-3xl text-sm leading-6 text-muted">Create and maintain dedicated Platform identities. Salon-specific Ops access is managed from each nail salon’s Access tab.</p>
+        </div>
+        <div className="flex gap-2"><Button type="button" variant="secondary" onClick={() => editUser()}><UserPlus className="h-4 w-4" />Create Platform user</Button><Button type="button" variant="secondary" onClick={() => void load()}><RefreshCcw className="h-4 w-4" />Refresh</Button></div>
+      </div>
+
+      {error ? <Alert title="Access action needs attention" message={error} /> : null}
+      {success ? <Alert type="success" title="Saved" message={success} /> : null}
+
+      <Card>
+        <div className="flex items-start gap-3">
+          {existing ? <Pencil className="mt-0.5 h-5 w-5 flex-none text-brand" /> : <UserPlus className="mt-0.5 h-5 w-5 flex-none text-brand" />}
+          <div>
+            <CardTitle>{existing ? "Edit Platform user" : "Create Platform user"}</CardTitle>
+            <CardDescription>Platform identities are separate from Tenant salon accounts. Password changes revoke existing refresh sessions.</CardDescription>
+          </div>
+        </div>
+        <div className="mt-5 grid gap-4 sm:grid-cols-2">
+          <label className="block space-y-2"><span className="block text-sm font-semibold text-ink">Full name</span><input className="field" value={fullName} onChange={(event) => { setFullName(event.target.value); mutationKey.current.clear(); }} /></label>
+          <label className="block space-y-2"><span className="block text-sm font-semibold text-ink">Email</span><input className="field" type="email" value={email} onChange={(event) => { setEmail(event.target.value); mutationKey.current.clear(); }} /></label>
+          <label className="block space-y-2"><span className="block text-sm font-semibold text-ink">{existing ? "New password (optional)" : "Password"}</span><input className="field" type="password" minLength={8} value={password} onChange={(event) => { setPassword(event.target.value); mutationKey.current.clear(); }} /><span className="block text-xs text-muted">Minimum 8 characters. Passwords are never displayed after saving.</span></label>
+          <label className="block space-y-2">
+            <span className="block text-sm font-semibold text-ink">Platform role</span>
+            <select className="field" value={role} onChange={(event) => { setRole(event.target.value as PlatformRoleAssignment["role"]); mutationKey.current.clear(); }}>
+              <option value="platform_ops">Platform Ops</option>
+              <option value="platform_admin">Platform Admin</option>
+            </select>
+            <span className="block text-xs leading-5 text-muted">Platform Ops receives salon capabilities separately.</span>
+          </label>
+          {existing ? <label className="block space-y-2"><span className="block text-sm font-semibold text-ink">Status</span><select className="field" value={status} onChange={(event) => { setStatus(event.target.value as PlatformRoleAssignment["status"]); mutationKey.current.clear(); }}><option value="active">Active</option><option value="revoked">Revoked</option></select></label> : null}
+        </div>
+        <div className="mt-5 flex gap-2"><Button type="button" disabled={!email.trim() || !fullName.trim() || (!existing && password.length < 8) || busy === "save-user"} onClick={() => void saveUser()}><UserCog className="h-4 w-4" />{existing ? "Save changes" : "Create user"}</Button>{existing ? <Button type="button" variant="secondary" onClick={() => editUser()}>Cancel edit</Button> : null}</div>
+      </Card>
+
+      <Card>
+        <CardTitle>Current Platform roles</CardTitle>
+        <CardDescription>The last active Platform Administrator cannot be removed. Changing a Platform role revokes stale salon assignments and temporary sensitive-data grants.</CardDescription>
+        <AccessRows
+          empty="No Platform role assignments."
+          items={roles.map((item) => ({
+            id: item.id,
+            user: item.user,
+            badges: [item.role, item.status],
+            detail: `Version ${item.version}`,
+            action: <div className="flex gap-2"><Button type="button" variant="secondary" onClick={() => editUser(item)}><Pencil className="h-4 w-4" />Edit</Button><Button type="button" variant="secondary" disabled={busy === `role-${item.user_id}`} onClick={() => void toggleRole(item)}>{item.status === "active" ? "Revoke" : "Reactivate"}</Button></div>
+          }))}
+        />
+      </Card>
+    </div>
+  );
+}
+
+function upsertRole(items: PlatformRoleAssignment[], item: PlatformRoleAssignment) {
+  return [...items.filter((current) => current.user_id !== item.user_id), item]
+    .sort((left, right) => left.user.full_name.localeCompare(right.user.full_name));
+}

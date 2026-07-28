@@ -39,6 +39,32 @@ func TestStatusReportsPhoneBookingReadiness(t *testing.T) {
 	}
 }
 
+func TestPlatformStatusPreservesBusinessReadinessAndHidesTechnicalProviderDetails(t *testing.T) {
+	store := newFakeVoiceStore()
+	service := newVoiceStatusService(store, testVoiceConfig(), readySchedulingTarget(booking.SchedulingAuthorityExternalProvider, 1))
+
+	status, err := service.StatusForPlatform(context.Background(), " salon_1 ", " platform_ops_1 ")
+	if err != nil {
+		t.Fatalf("StatusForPlatform returned error: %v", err)
+	}
+	if !status.PhoneAnsweringReady || !status.RequestCaptureReady || !status.AutomatedBookingReady {
+		t.Fatalf("business readiness was lost: %#v", status)
+	}
+	if status.Provider != "managed" || status.InboundWebhookURL != "" || status.TurnWebhookURL != "" || status.RecordingWebhookURL != "" || status.StreamWebhookURL != "" {
+		t.Fatalf("technical voice details leaked: %#v", status)
+	}
+	for name, capability := range map[string]ProviderCapabilityStatus{
+		"stt": status.AI.STT, "llm": status.AI.LLM, "tts": status.AI.TTS, "realtime": status.AI.Realtime,
+	} {
+		if capability.Provider != "managed" || capability.Model != "" || capability.Voice != "" {
+			t.Fatalf("%s capability leaked technical config: %#v", name, capability)
+		}
+	}
+	if store.voiceStatusOwnerUserID != "owner_1" || store.platformResolverSalonID != "salon_1" || store.platformResolverUserID != "platform_ops_1" {
+		t.Fatalf("platform owner resolution = %#v", store)
+	}
+}
+
 func TestVoiceConfigPropagatesSalonProviderConfigResolutionFailures(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -67,6 +93,32 @@ func TestVoiceConfigPropagatesSalonProviderConfigResolutionFailures(t *testing.T
 type failingVoiceConfigResolver struct {
 	twilioErr error
 	openAIErr error
+}
+
+type recordingVoiceConfigResolver struct {
+	twilioSalonIDs []string
+	openAISalonIDs []string
+}
+
+func (r *recordingVoiceConfigResolver) ResolveTwilioConfig(_ context.Context, salonID string) (config.TwilioVoiceConfig, string, error) {
+	r.twilioSalonIDs = append(r.twilioSalonIDs, salonID)
+	return config.TwilioVoiceConfig{
+		AuthToken: "salon-scoped-token", IncomingPath: "/api/voice/twilio/incoming",
+		TurnPath: "/api/voice/twilio/turn", RecordingPath: "/api/voice/twilio/recording",
+	}, "https://voice.example.com", nil
+}
+
+func (r *recordingVoiceConfigResolver) ResolveStoredTwilioAuthToken(context.Context, string) (string, error) {
+	return "salon-scoped-token", nil
+}
+
+func (r *recordingVoiceConfigResolver) ResolveOpenAIConfig(_ context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error) {
+	r.openAISalonIDs = append(r.openAISalonIDs, salonID)
+	return config.OpenAIVoiceConfig{
+		APIKey: "salon-scoped-key", BaseURL: "https://api.openai.com/v1",
+		TranscriptionModel: "gpt-4o-mini-transcribe", ReplyModel: "gpt-4.1-mini",
+		SpeechModel: "tts-1", SpeechVoice: "alloy",
+	}, true, nil
 }
 
 func (r failingVoiceConfigResolver) ResolveTwilioConfig(context.Context, string) (config.TwilioVoiceConfig, string, error) {
@@ -628,6 +680,38 @@ func TestIncomingCallStartsPhoneSessionAndReturnsGreeting(t *testing.T) {
 	}
 }
 
+func TestIncomingCallUsesOnlyTheSalonResolvedFromTheDialedNumber(t *testing.T) {
+	store := newFakeVoiceStore()
+	store.salon = &InboundSalon{
+		SalonID: "salon_a", OwnerUserID: "owner_a", SalonName: "Salon A",
+		Phone: "+13125550111", RecordingEnabled: true,
+	}
+	engine := newFakeConversationEngine()
+	engine.startSession.SalonID = "salon_a"
+	engine.startSession.ProviderCallID = "CA-SALON-A"
+	resolver := &recordingVoiceConfigResolver{}
+	service := NewService(store, engine, testVoiceConfig(), AIProviders{})
+	service.SetConfigResolver(resolver)
+
+	_, err := service.HandleIncomingCall(context.Background(), IncomingCallRequest{
+		Provider: ProviderTwilio, ProviderCallID: "CA-SALON-A",
+		FromPhone: "+13125550999", ToPhone: "+13125550111",
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingCall returned error: %v", err)
+	}
+	if engine.startSalonID != "salon_a" || engine.startOwnerUserID != "owner_a" {
+		t.Fatalf("conversation scope = salon %q owner %q, want salon_a/owner_a", engine.startSalonID, engine.startOwnerUserID)
+	}
+	if len(resolver.twilioSalonIDs) != 1 || resolver.twilioSalonIDs[0] != "salon_a" ||
+		len(resolver.openAISalonIDs) != 1 || resolver.openAISalonIDs[0] != "salon_a" {
+		t.Fatalf("provider config scopes = Twilio %#v OpenAI %#v, want only salon_a", resolver.twilioSalonIDs, resolver.openAISalonIDs)
+	}
+	if len(store.events) != 1 || store.events[0].SalonID != "salon_a" {
+		t.Fatalf("webhook events = %#v, want only salon_a", store.events)
+	}
+}
+
 func TestIncomingCallPrewarmsAnswerContextInBackground(t *testing.T) {
 	store := newFakeVoiceStore()
 	engine := newFakeConversationEngine()
@@ -969,14 +1053,22 @@ func phoneSessionWithAIReply(reply string, status string, outcome string) *conve
 }
 
 type fakeVoiceStore struct {
-	salon                  *InboundSalon
-	route                  *CallRoute
-	bookingReadiness       *PhoneBookingReadiness
-	events                 []WebhookEvent
-	audio                  *AudioOutput
-	voiceStatusSalonID     string
-	voiceStatusOwnerUserID string
-	voiceStatus            *SalonVoiceStatus
+	salon                   *InboundSalon
+	route                   *CallRoute
+	bookingReadiness        *PhoneBookingReadiness
+	events                  []WebhookEvent
+	audio                   *AudioOutput
+	voiceStatusSalonID      string
+	voiceStatusOwnerUserID  string
+	voiceStatus             *SalonVoiceStatus
+	platformResolverSalonID string
+	platformResolverUserID  string
+}
+
+func (f *fakeVoiceStore) ResolveSalonOwnerForPlatform(_ context.Context, salonID string, platformUserID string) (string, error) {
+	f.platformResolverSalonID = salonID
+	f.platformResolverUserID = platformUserID
+	return "owner_1", nil
 }
 
 func newFakeVoiceStore() *fakeVoiceStore {
@@ -1153,6 +1245,8 @@ type fakeConversationEngine struct {
 	voiceInputCalls      int
 	prewarmCalls         int
 	startRequest         conversation.StartPhoneCallRequest
+	startSalonID         string
+	startOwnerUserID     string
 	lastMessage          string
 	lastVoiceInputEvent  string
 	prewarmSalonID       string
@@ -1209,6 +1303,8 @@ func newFakeConversationEngine() *fakeConversationEngine {
 
 func (f *fakeConversationEngine) StartPhoneCall(ctx context.Context, salonID string, ownerUserID string, req conversation.StartPhoneCallRequest) (*conversation.Session, error) {
 	f.startCalls++
+	f.startSalonID = salonID
+	f.startOwnerUserID = ownerUserID
 	f.startRequest = req
 	return f.startSession, nil
 }

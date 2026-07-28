@@ -56,6 +56,9 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*LoginResponse, 
 	if user.Status != "active" {
 		return nil, ErrInvalidCredentials
 	}
+	if user.PrincipalScope != string(middleware.PrincipalScopeTenant) && user.PrincipalScope != string(middleware.PrincipalScopePlatform) {
+		return nil, ErrInvalidCredentials
+	}
 	return s.issueTokens(ctx, *user)
 }
 
@@ -152,7 +155,7 @@ func (s *Service) Me(ctx context.Context, userID string) (*MeResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &MeResponse{User: *user, Roles: roles, SalonID: salonID}, nil
+	return &MeResponse{User: *user, Roles: roles, SalonID: salonID, PrincipalScope: user.PrincipalScope}, nil
 }
 
 func (s *Service) issueTokens(ctx context.Context, user User) (*LoginResponse, error) {
@@ -172,6 +175,9 @@ func (s *Service) issueTokens(ctx context.Context, user User) (*LoginResponse, e
 }
 
 func (s *Service) buildLoginResponse(ctx context.Context, user User, refreshToken string, now time.Time) (*LoginResponse, error) {
+	if user.PrincipalScope != string(middleware.PrincipalScopeTenant) && user.PrincipalScope != string(middleware.PrincipalScopePlatform) {
+		return nil, ErrInvalidCredentials
+	}
 	roles, err := s.repo.RolesForUser(ctx, user.ID)
 	if err != nil {
 		return nil, err
@@ -183,9 +189,10 @@ func (s *Service) buildLoginResponse(ctx context.Context, user User, refreshToke
 
 	expiresAt := now.Add(s.cfg.AccessTokenTTL)
 	claims := middleware.Claims{
-		UserID:  user.ID,
-		SalonID: salonID,
-		Roles:   roles,
+		UserID:         user.ID,
+		SalonID:        salonID,
+		PrincipalScope: middleware.PrincipalScope(user.PrincipalScope),
+		Roles:          roles,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   user.ID,
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
@@ -198,12 +205,13 @@ func (s *Service) buildLoginResponse(ctx context.Context, user User, refreshToke
 	}
 
 	return &LoginResponse{
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-		ExpiresAt:    expiresAt,
-		User:         user,
-		Roles:        roles,
-		SalonID:      salonID,
+		AccessToken:    accessToken,
+		RefreshToken:   refreshToken,
+		ExpiresAt:      expiresAt,
+		User:           user,
+		Roles:          roles,
+		SalonID:        salonID,
+		PrincipalScope: user.PrincipalScope,
 	}, nil
 }
 

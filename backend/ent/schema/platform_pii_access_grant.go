@@ -22,6 +22,7 @@ func (PlatformPIIAccessGrant) Fields() []ent.Field {
 		field.UUID("revoked_by_user_id", uuid.UUID{}).Optional().Nillable(),
 		field.Int64("version").Default(1),
 		field.UUID("created_by_user_id", uuid.UUID{}),
+		field.UUID("support_access_request_id", uuid.UUID{}).Optional().Nillable(),
 		field.Time("created_at").Default(time.Now),
 		field.Time("updated_at").Default(time.Now).UpdateDefault(time.Now),
 	}

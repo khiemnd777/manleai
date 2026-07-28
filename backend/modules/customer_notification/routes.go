@@ -7,7 +7,7 @@ import (
 )
 
 func RegisterRoutes(api fiber.Router, handler *Handler, jwtSecret string) {
-	group := api.Group("/salons", middleware.RequireAuth(jwtSecret))
+	group := api.Group("/salons", middleware.RequireAuth(jwtSecret), middleware.RequireTenantSalonAccess())
 	group.Get("/:id/customer-sms-policy", handler.GetPolicy)
 	group.Put("/:id/customer-sms-policy", handler.UpdatePolicy)
 	group.Post("/:id/customer-sms-consents/attest", handler.AttestConsent)

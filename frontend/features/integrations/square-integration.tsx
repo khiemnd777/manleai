@@ -25,6 +25,23 @@ import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SquareWebhookOperations } from "@/features/integrations/square-webhook-operations";
 import { apiRequest } from "@/lib/api/client";
+import {
+  defaultOpenAIConfigForm,
+  defaultSquareConfigForm,
+  defaultTwilioConfigForm,
+  openAIConfigPayload,
+  openAIConfigToForm,
+  squareConfigPayload,
+  squareConfigToForm,
+  twilioConfigPayload,
+  twilioConfigToForm
+} from "@/lib/api/integration-config-contract";
+import type {
+  IntegrationConfigProvider as ConfigTab,
+  OpenAIConfigForm,
+  SquareConfigForm,
+  TwilioConfigForm
+} from "@/lib/api/integration-config-contract";
 import type {
   AvailabilityResult,
   AvailabilitySlot,
@@ -100,61 +117,6 @@ type TestBookingForm = {
   notes: string;
 };
 
-type ConfigTab = "square" | "twilio" | "openai";
-
-type SquareConfigForm = {
-  environment: string;
-  client_id: string;
-  client_secret: string;
-  clear_client_secret: boolean;
-  redirect_url: string;
-  api_version: string;
-  api_base_url: string;
-  webhook_notification_url: string;
-  webhook_signature_key: string;
-  clear_webhook_signature_key: boolean;
-};
-
-type TwilioConfigForm = {
-  public_base_url: string;
-  auth_token: string;
-  clear_auth_token: boolean;
-  incoming_path: string;
-  turn_path: string;
-  recording_path: string;
-  stream_path: string;
-  voice_transport: string;
-  owner_sms_enabled: boolean;
-  owner_sms_destination: string;
-  clear_owner_sms_destination: boolean;
-  owner_sms_consent_attested: boolean;
-  account_sid: string;
-  clear_account_sid: boolean;
-  messaging_service_sid: string;
-  clear_messaging_service_sid: boolean;
-  sender_phone: string;
-  clear_sender_phone: boolean;
-  notification_status_path: string;
-  notification_inbound_path: string;
-};
-
-type OpenAIConfigForm = {
-  enabled: boolean;
-  api_key: string;
-  clear_api_key: boolean;
-  base_url: string;
-  transcription_model: string;
-  reply_model: string;
-  speech_model: string;
-  speech_voice: string;
-  speech_output_mode: "streaming_tts" | "buffered_realtime";
-  realtime_enabled: boolean;
-  realtime_model: string;
-  realtime_voice: string;
-  realtime_noise_profile: string;
-  realtime_instructions: string;
-};
-
 const defaultForm: TestBookingForm = {
   service_id: "",
   staff_id: "",
@@ -163,59 +125,6 @@ const defaultForm: TestBookingForm = {
   customer_phone: "+13125550199",
   customer_email: "",
   notes: "AI booking readiness test. Cancel after verifying Square booking creation."
-};
-
-const defaultSquareConfigForm: SquareConfigForm = {
-  environment: "sandbox",
-  client_id: "",
-  client_secret: "",
-  clear_client_secret: false,
-  redirect_url: "http://localhost:18089/api/integrations/square/callback",
-  api_version: "2026-05-20",
-  api_base_url: "",
-  webhook_notification_url: "",
-  webhook_signature_key: "",
-  clear_webhook_signature_key: false
-};
-
-const defaultTwilioConfigForm: TwilioConfigForm = {
-  public_base_url: "",
-  auth_token: "",
-  clear_auth_token: false,
-  incoming_path: "/api/voice/twilio/incoming",
-  turn_path: "/api/voice/twilio/turn",
-  recording_path: "/api/voice/twilio/recording",
-  stream_path: "/api/voice/twilio/stream",
-  voice_transport: "recording",
-  owner_sms_enabled: false,
-  owner_sms_destination: "",
-  clear_owner_sms_destination: false,
-  owner_sms_consent_attested: false,
-  account_sid: "",
-  clear_account_sid: false,
-  messaging_service_sid: "",
-  clear_messaging_service_sid: false,
-  sender_phone: "",
-  clear_sender_phone: false,
-  notification_status_path: "/api/notifications/twilio/status",
-  notification_inbound_path: "/api/notifications/twilio/inbound"
-};
-
-const defaultOpenAIConfigForm: OpenAIConfigForm = {
-  enabled: false,
-  api_key: "",
-  clear_api_key: false,
-  base_url: "https://api.openai.com/v1",
-  transcription_model: "gpt-4o-mini-transcribe",
-  reply_model: "gpt-4.1-mini",
-  speech_model: "tts-1",
-  speech_voice: "alloy",
-  speech_output_mode: "streaming_tts",
-  realtime_enabled: false,
-  realtime_model: "gpt-realtime-2",
-  realtime_voice: "alloy",
-  realtime_noise_profile: "automatic",
-  realtime_instructions: ""
 };
 
 function operationKeyForPayload(
@@ -666,7 +575,7 @@ export function SquareIntegration() {
     try {
       const updated = await apiRequest<SquareIntegrationConfig>(`/api/salons/${salon.id}/integration-configs/square`, {
         method: "PUT",
-        body: JSON.stringify(squareConfigForm)
+        body: JSON.stringify(squareConfigPayload(squareConfigForm))
       });
       setIntegrationConfigs((current) => ({ ...(current ?? emptyIntegrationConfigs()), square: updated }));
       setSquareConfigForm(squareConfigToForm(updated));
@@ -684,25 +593,7 @@ export function SquareIntegration() {
     setError("");
     setSuccess("");
     try {
-      const messagingPayload = {
-        ...twilioConfigForm,
-        ...(twilioConfigForm.owner_sms_destination
-          ? { owner_sms_destination: twilioConfigForm.owner_sms_destination }
-          : {}),
-        ...(twilioConfigForm.messaging_service_sid
-          ? { messaging_service_sid: twilioConfigForm.messaging_service_sid }
-          : {}),
-        ...(twilioConfigForm.sender_phone ? { sender_phone: twilioConfigForm.sender_phone } : {})
-      };
-      if (!twilioConfigForm.owner_sms_destination) {
-        delete (messagingPayload as Partial<TwilioConfigForm>).owner_sms_destination;
-      }
-      if (!twilioConfigForm.messaging_service_sid) {
-        delete (messagingPayload as Partial<TwilioConfigForm>).messaging_service_sid;
-      }
-      if (!twilioConfigForm.sender_phone) {
-        delete (messagingPayload as Partial<TwilioConfigForm>).sender_phone;
-      }
+      const messagingPayload = twilioConfigPayload(twilioConfigForm);
       const updated = await apiRequest<TwilioIntegrationConfig>(`/api/salons/${salon.id}/integration-configs/twilio`, {
         method: "PUT",
         body: JSON.stringify(messagingPayload)
@@ -725,7 +616,7 @@ export function SquareIntegration() {
     try {
       const updated = await apiRequest<OpenAIIntegrationConfig>(`/api/salons/${salon.id}/integration-configs/openai`, {
         method: "PUT",
-        body: JSON.stringify(openAIConfigForm)
+        body: JSON.stringify(openAIConfigPayload(openAIConfigForm))
       });
       setIntegrationConfigs((current) => ({ ...(current ?? emptyIntegrationConfigs()), openai: updated }));
       setOpenAIConfigForm(openAIConfigToForm(updated));
@@ -1255,7 +1146,7 @@ export function SquareIntegration() {
   );
 }
 
-function ProviderConfigurationPanel({
+export function ProviderConfigurationPanel({
   activeTab,
   busy,
   configs,
@@ -1491,7 +1382,10 @@ function ProviderConfigurationPanel({
               <select
                 className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink"
                 value={twilioForm.voice_transport}
-                onChange={(event) => setTwilioForm((current) => ({ ...current, voice_transport: event.target.value }))}
+                onChange={(event) => setTwilioForm((current) => ({
+                  ...current,
+                  voice_transport: event.target.value as TwilioConfigForm["voice_transport"]
+                }))}
                 disabled={busy !== ""}
               >
                 <option value="recording">Recording fallback</option>
@@ -1713,7 +1607,10 @@ function ProviderConfigurationPanel({
                 <select
                   className="h-10 w-full rounded-md border border-line bg-panel px-3 text-sm text-ink"
                   value={openAIForm.realtime_noise_profile}
-                  onChange={(event) => setOpenAIForm((current) => ({ ...current, realtime_noise_profile: event.target.value }))}
+                  onChange={(event) => setOpenAIForm((current) => ({
+                    ...current,
+                    realtime_noise_profile: event.target.value as OpenAIConfigForm["realtime_noise_profile"]
+                  }))}
                   disabled={busy !== "" || !openAIForm.enabled || !openAIForm.realtime_enabled}
                 >
                   <option value="automatic">Automatic (recommended)</option>
@@ -1852,68 +1749,6 @@ function ConfigActions({
       </Button>
     </div>
   );
-}
-
-function squareConfigToForm(config?: SquareIntegrationConfig): SquareConfigForm {
-  if (!config) return defaultSquareConfigForm;
-  return {
-    environment: config.environment || "sandbox",
-    client_id: config.client_id || "",
-    client_secret: "",
-    clear_client_secret: false,
-    redirect_url: config.redirect_url || defaultSquareConfigForm.redirect_url,
-    api_version: config.api_version || defaultSquareConfigForm.api_version,
-    api_base_url: config.api_base_url || "",
-    webhook_notification_url: config.webhook_notification_url || "",
-    webhook_signature_key: "",
-    clear_webhook_signature_key: false
-  };
-}
-
-function twilioConfigToForm(config?: TwilioIntegrationConfig): TwilioConfigForm {
-  if (!config) return defaultTwilioConfigForm;
-  return {
-    public_base_url: config.public_base_url || "",
-    auth_token: "",
-    clear_auth_token: false,
-    incoming_path: config.incoming_path || defaultTwilioConfigForm.incoming_path,
-    turn_path: config.turn_path || defaultTwilioConfigForm.turn_path,
-    recording_path: config.recording_path || defaultTwilioConfigForm.recording_path,
-    stream_path: config.stream_path || defaultTwilioConfigForm.stream_path,
-    voice_transport: config.voice_transport || defaultTwilioConfigForm.voice_transport,
-    owner_sms_enabled: config.owner_sms_enabled,
-    owner_sms_destination: "",
-    clear_owner_sms_destination: false,
-    owner_sms_consent_attested: config.owner_sms_consent_attested,
-    account_sid: "",
-    clear_account_sid: false,
-    messaging_service_sid: "",
-    clear_messaging_service_sid: false,
-    sender_phone: "",
-    clear_sender_phone: false,
-    notification_status_path: config.notification_status_path || defaultTwilioConfigForm.notification_status_path,
-    notification_inbound_path: config.notification_inbound_path || defaultTwilioConfigForm.notification_inbound_path
-  };
-}
-
-function openAIConfigToForm(config?: OpenAIIntegrationConfig): OpenAIConfigForm {
-  if (!config) return defaultOpenAIConfigForm;
-  return {
-    enabled: config.enabled,
-    api_key: "",
-    clear_api_key: false,
-    base_url: config.base_url || defaultOpenAIConfigForm.base_url,
-    transcription_model: config.transcription_model || defaultOpenAIConfigForm.transcription_model,
-    reply_model: config.reply_model || defaultOpenAIConfigForm.reply_model,
-    speech_model: config.speech_model || defaultOpenAIConfigForm.speech_model,
-    speech_voice: config.speech_voice || defaultOpenAIConfigForm.speech_voice,
-    speech_output_mode: config.speech_output_mode === "buffered_realtime" ? "buffered_realtime" : "streaming_tts",
-    realtime_enabled: config.realtime_enabled,
-    realtime_model: config.realtime_model || defaultOpenAIConfigForm.realtime_model,
-    realtime_voice: config.realtime_voice || defaultOpenAIConfigForm.realtime_voice,
-    realtime_noise_profile: config.realtime_noise_profile || defaultOpenAIConfigForm.realtime_noise_profile,
-    realtime_instructions: config.realtime_instructions || ""
-  };
 }
 
 function backgroundNoiseHandlingDescription(value: string) {

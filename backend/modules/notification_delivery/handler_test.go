@@ -15,8 +15,12 @@ import (
 
 type fakeHandlerService struct{ ownerUserID string }
 
-func (*fakeHandlerService) ResolveAccessPrincipal(context.Context, string) (string, string, []string, error) {
-	return "owner-1", "salon-1", []string{"salon_owner"}, nil
+func (*fakeHandlerService) ResolveAccessPrincipal(context.Context, string) (string, string, middleware.PrincipalScope, []string, error) {
+	return "owner-1", "salon-1", middleware.PrincipalScopeTenant, []string{"salon_owner"}, nil
+}
+
+func (*fakeHandlerService) HasActiveTenantSalonMembership(context.Context, string, string) (bool, error) {
+	return true, nil
 }
 
 func (f *fakeHandlerService) List(_ context.Context, _, ownerUserID, _ string, limit, offset int) (*ListResponse, error) {

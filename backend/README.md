@@ -19,8 +19,11 @@ Go/Fiber API for the AI Receptionist commercial production foundation.
 make run-api
 make run-worker
 make test
-make seed-local
 ```
+
+Sample data remains a separate guarded binary rather than a schema migration.
+Local and pre-live orchestration invoke it automatically; see
+`docs/deployment.md`. There is no separate local sample Make command.
 
 ## Implemented Endpoints
 

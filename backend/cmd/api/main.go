@@ -119,7 +119,7 @@ func main() {
 	businessRepo := business.NewRepository(db)
 	businessService := business.NewService(businessRepo, accessService)
 	business.RegisterTenantRoutes(api, business.NewHandler(businessService, access.SurfaceTenant), cfg.JWTSecret)
-	business.RegisterPlatformRoutes(api, business.NewHandler(businessService, access.SurfacePlatform), cfg.JWTSecret)
+	business.RegisterPlatformRoutes(api, business.NewHandler(businessService, access.SurfacePlatform), accessService, cfg.JWTSecret)
 
 	salonRepo := salon.NewRepository(db)
 	salonService := salon.NewService(salonRepo)
@@ -153,6 +153,8 @@ func main() {
 	squareAdapter.SetConfigResolver(integrationConfigService)
 	posService := pos.NewService(posRepo, squareAdapter)
 	pos.RegisterRoutes(api, pos.NewHandler(posService), cfg.JWTSecret)
+	pos.RegisterPlatformRoutes(api, pos.NewHandler(posService), accessService, cfg.JWTSecret)
+	pos.RegisterPlatformCallsCatalogRoutes(api, pos.NewHandler(posService), accessService, cfg.JWTSecret)
 
 	bookingRepo := booking.NewRepository(db)
 	bookingService := booking.NewService(bookingRepo, []pos.POSProvider{squareAdapter})
@@ -177,10 +179,14 @@ func main() {
 	conversationService := conversation.NewService(conversationRepo, schedulingService)
 	conversationService.SetCustomerSMSConsentTool(customerNotificationService)
 	conversation.RegisterRoutes(api, conversation.NewHandler(conversationService), cfg.JWTSecret)
+	conversation.RegisterPlatformRoutes(api, conversation.NewPlatformHandler(conversationService, accessService), cfg.JWTSecret)
 
 	trainingRepo := training.NewRepository(db)
 	trainingService := training.NewService(trainingRepo, schedulingService)
 	training.RegisterRoutes(api, training.NewHandler(trainingService).SetTenantRuntimeLimiter(tenantRuntimeService), cfg.JWTSecret)
+	training.RegisterPlatformRoutes(api, training.NewHandler(trainingService), accessService, cfg.JWTSecret)
+	training.RegisterPlatformServiceAliasRoutes(api, training.NewHandler(trainingService), accessService, cfg.JWTSecret)
+	training.RegisterPlatformCallsCorrectionRoute(api, training.NewHandler(trainingService), accessService, cfg.JWTSecret)
 
 	voiceRepo := voice.NewRepository(db)
 	openAIVoiceAdapter := voice_openai.NewAdapter(cfg.Voice.AI.OpenAI)
@@ -199,11 +205,13 @@ func main() {
 	voiceService.SetConfigResolver(integrationConfigService)
 	voiceService.SetTenantRuntimeLimiter(tenantRuntimeService)
 	voice.RegisterRoutes(api, voice.NewHandler(voiceService), cfg.JWTSecret)
+	voice.RegisterPlatformRoutes(api, voice.NewPlatformHandler(voiceService, accessService), cfg.JWTSecret)
 	twilioVoiceAdapter := voice_twilio.NewAdapter(cfg.Voice.Twilio, cfg.Voice.PublicBaseURL)
 	voice_twilio.RegisterRoutes(api, voice_twilio.NewHandler(twilioVoiceAdapter, voiceService))
 
 	squareService := pos_square.NewService(posRepo, squareAdapter, cfg.JWTSecret, schedulingService)
 	squareService.SetWebhookRepository(squareWebhookRepo)
+	squareService.SetWebhookConfigurationStatusResolver(integrationConfigService)
 	voiceService.SetSchedulingReadinessProviders(ownerManualSchedulingService, manleaiCalendarService, squareService)
 	pos_square.RegisterRoutes(api, pos_square.NewHandler(squareService, cfg), cfg.JWTSecret)
 	pos_square.RegisterPlatformRoutes(api, pos_square.NewPlatformHandler(squareService, accessService, tenantRuntimeService), cfg.JWTSecret)

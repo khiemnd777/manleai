@@ -20,7 +20,7 @@ func NewRepository(db *sql.DB) *Repository { return &Repository{db: db} }
 func (r *Repository) ListTenantSalons(ctx context.Context, actorUserID string) ([]SalonSummary, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT salon.id::text, salon.name, COALESCE(salon.city, ''), COALESCE(salon.state, ''),
-		       salon.timezone, COALESCE(salon.public_slug, ''), salon.public_catalog_enabled, role.name,
+		       salon.timezone, salon.data_classification, COALESCE(salon.public_slug, ''), salon.public_catalog_enabled, salon.ai_enabled, role.name,
 		       settings.scheduling_authority, settings.scheduling_authority_version,
 		       COALESCE(NULLIF(BTRIM(salon.active_pos_provider), ''), 'square')
 		FROM salon_memberships membership
@@ -41,7 +41,7 @@ func (r *Repository) ListTenantSalons(ctx context.Context, actorUserID string) (
 func (r *Repository) ListPlatformSalons(ctx context.Context, actorUserID string) ([]SalonSummary, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT salon.id::text, salon.name, COALESCE(salon.city, ''), COALESCE(salon.state, ''),
-		       salon.timezone, COALESCE(salon.public_slug, ''), salon.public_catalog_enabled,
+		       salon.timezone, salon.data_classification, COALESCE(salon.public_slug, ''), salon.public_catalog_enabled, salon.ai_enabled,
 		       CASE role.name WHEN 'platform_admin' THEN 'global' ELSE 'assigned' END,
 		       settings.scheduling_authority, settings.scheduling_authority_version,
 		       COALESCE(NULLIF(BTRIM(salon.active_pos_provider), ''), 'square')
@@ -68,8 +68,8 @@ func scanSalonSummaries(rows *sql.Rows) ([]SalonSummary, error) {
 	for rows.Next() {
 		var item SalonSummary
 		if err := rows.Scan(
-			&item.ID, &item.Name, &item.City, &item.State, &item.Timezone,
-			&item.PublicSlug, &item.PublicCatalogEnabled, &item.BusinessAccess,
+			&item.ID, &item.Name, &item.City, &item.State, &item.Timezone, &item.DataClassification,
+			&item.PublicSlug, &item.PublicCatalogEnabled, &item.AIEnabled, &item.BusinessAccess,
 			&item.SchedulingAuthority, &item.SchedulingAuthorityVersion, &item.ActivePOSProvider,
 		); err != nil {
 			return nil, err
@@ -84,7 +84,7 @@ func (r *Repository) GetSalonProfile(ctx context.Context, salonID string) (*Salo
 	err := r.db.QueryRowContext(ctx, `
 		SELECT salon.id::text, salon.name, salon.phone, COALESCE(salon.address, ''),
 		       COALESCE(salon.city, ''), COALESCE(salon.state, ''), COALESCE(salon.zip_code, ''),
-		       salon.timezone, salon.primary_language, salon.secondary_language,
+		       salon.timezone, salon.data_classification, salon.primary_language, salon.secondary_language,
 		       COALESCE(salon.handoff_phone, ''), COALESCE(salon.public_slug, ''),
 		       salon.public_catalog_enabled, version.version, salon.updated_at
 		FROM salons salon
@@ -93,7 +93,7 @@ func (r *Repository) GetSalonProfile(ctx context.Context, salonID string) (*Salo
 		 AND version.resource_id = salon.id::text
 		WHERE salon.id = $1
 	`, salonID).Scan(&item.ID, &item.Name, &item.Phone, &item.Address, &item.City, &item.State, &item.ZipCode,
-		&item.Timezone, &item.PrimaryLanguage, &item.SecondaryLanguage, &item.HandoffPhone, &item.PublicSlug,
+		&item.Timezone, &item.DataClassification, &item.PrimaryLanguage, &item.SecondaryLanguage, &item.HandoffPhone, &item.PublicSlug,
 		&item.PublicCatalogEnabled, &item.Version, &item.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound

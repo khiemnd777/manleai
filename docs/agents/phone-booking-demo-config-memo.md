@@ -54,16 +54,13 @@ Do not proceed to provider setup before backend and public URL are clear.
 Expected local startup:
 
 ```bash
-cp .env.example .env
-docker compose up -d --build
+make restart
 ```
 
-Seed local owner only for local development:
-
-```bash
-cd backend
-DATABASE_URL=postgres://ai_receptionist:ai_receptionist@localhost:55432/ai_receptionist?sslmode=disable make seed-local
-```
+The command automatically migrates and provisions the marked local sample
+profile. Credentials are generated into the ignored mode-`600` file
+`.local/sample-data.env`; there is no repository password or second Make
+command.
 
 Run API:
 
@@ -84,17 +81,23 @@ npm run dev
 Local login:
 
 ```txt
-owner@lotusnails.example / password123
+owner@lotusnails.example / <SAMPLE_TENANT_OWNER_PASSWORD>
 ```
 
-Seeded local phones:
+Sample salon phone state:
 
 ```txt
-Salon inbound phone: +16292536211
-Owner handoff phone: +13125550102
+Salon phone: +13125550100
+Owner handoff phone: not configured
 ```
 
-Use the salon inbound phone as Twilio `To` / simulator `-to`.
+The sample fixture deliberately selects `owner_manual` pending review and
+creates no Square, Twilio, or OpenAI configuration. Before a phone/provider
+demo, configure those providers in the Platform tenant Technical tab, set the
+intended inbound/handoff numbers in canonical salon data, verify the persisted
+readiness endpoints, and switch authority explicitly only if the demo requires
+another executor. Use the configured salon phone as Twilio `To` / simulator
+`-to`.
 
 ## Step 2 - Public API URL
 

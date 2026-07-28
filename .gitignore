@@ -15,12 +15,14 @@ pos-calendar/node_modules/
 pos-calendar/tsconfig.tsbuildinfo
 
 # Environment files
+.local/
 .env
 .env.*
 !.env.example
 !pos-calendar/.env.example
 project.env
 deploy/project.env
+deploy/sample-data.env
 sync_github_secret.env
 backend/.env
 frontend/.env.local

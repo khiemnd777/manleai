@@ -14,16 +14,25 @@ import (
 )
 
 type fakeAccessPrincipalResolver struct {
-	userID  string
-	salonID string
-	roles   []string
-	err     error
-	calls   int
+	userID            string
+	salonID           string
+	scope             PrincipalScope
+	roles             []string
+	err               error
+	calls             int
+	membershipAllowed bool
+	membershipErr     error
+	membershipSalonID string
 }
 
-func (f *fakeAccessPrincipalResolver) ResolveAccessPrincipal(context.Context, string) (string, string, []string, error) {
+func (f *fakeAccessPrincipalResolver) HasActiveTenantSalonMembership(_ context.Context, _ string, salonID string) (bool, error) {
+	f.membershipSalonID = salonID
+	return f.membershipAllowed, f.membershipErr
+}
+
+func (f *fakeAccessPrincipalResolver) ResolveAccessPrincipal(context.Context, string) (string, string, PrincipalScope, []string, error) {
 	f.calls++
-	return f.userID, f.salonID, f.roles, f.err
+	return f.userID, f.salonID, f.scope, f.roles, f.err
 }
 
 func TestRequireAuthUsesCurrentServerOwnedPrincipal(t *testing.T) {
@@ -31,6 +40,7 @@ func TestRequireAuthUsesCurrentServerOwnedPrincipal(t *testing.T) {
 	resolver := &fakeAccessPrincipalResolver{
 		userID:  "user-1",
 		salonID: "current-salon",
+		scope:   PrincipalScopeTenant,
 		roles:   []string{"staff"},
 	}
 	app := fiber.New()
@@ -43,6 +53,7 @@ func TestRequireAuthUsesCurrentServerOwnedPrincipal(t *testing.T) {
 			"roles":           Roles(c),
 			"actor_user_id":   actor.UserID,
 			"actor_salon_id":  actor.PrimarySalonID,
+			"principal_scope": actor.PrincipalScope,
 			"actor_has_staff": actor.HasRole("staff"),
 			"actor_has_owner": actor.HasRole("salon_owner"),
 		})
@@ -70,13 +81,14 @@ func TestRequireAuthUsesCurrentServerOwnedPrincipal(t *testing.T) {
 		t.Fatalf("status=%d, want %d", response.StatusCode, fiber.StatusOK)
 	}
 	var body struct {
-		UserID        string   `json:"user_id"`
-		SalonID       string   `json:"salon_id"`
-		Roles         []string `json:"roles"`
-		ActorUserID   string   `json:"actor_user_id"`
-		ActorSalonID  string   `json:"actor_salon_id"`
-		ActorHasStaff bool     `json:"actor_has_staff"`
-		ActorHasOwner bool     `json:"actor_has_owner"`
+		UserID         string   `json:"user_id"`
+		SalonID        string   `json:"salon_id"`
+		Roles          []string `json:"roles"`
+		ActorUserID    string   `json:"actor_user_id"`
+		ActorSalonID   string   `json:"actor_salon_id"`
+		PrincipalScope string   `json:"principal_scope"`
+		ActorHasStaff  bool     `json:"actor_has_staff"`
+		ActorHasOwner  bool     `json:"actor_has_owner"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -84,7 +96,7 @@ func TestRequireAuthUsesCurrentServerOwnedPrincipal(t *testing.T) {
 	if body.UserID != "user-1" || body.SalonID != "current-salon" || len(body.Roles) != 1 || body.Roles[0] != "staff" {
 		t.Fatalf("resolved principal=%#v, want current database-owned tenant and roles", body)
 	}
-	if body.ActorUserID != body.UserID || body.ActorSalonID != body.SalonID || !body.ActorHasStaff || body.ActorHasOwner {
+	if body.ActorUserID != body.UserID || body.ActorSalonID != body.SalonID || body.PrincipalScope != string(PrincipalScopeTenant) || !body.ActorHasStaff || body.ActorHasOwner {
 		t.Fatalf("actor context=%#v, want server-owned principal projection", body)
 	}
 	if resolver.calls != 1 {
@@ -109,7 +121,8 @@ func TestRequireAuthRejectsSignedTokenWhenPrincipalIsInactiveOrUnavailable(t *te
 		{name: "disabled or deleted user", resolver: &fakeAccessPrincipalResolver{err: errors.New("principal is inactive")}},
 		{name: "repository failure", resolver: &fakeAccessPrincipalResolver{err: errors.New("database unavailable")}},
 		{name: "missing resolver"},
-		{name: "mismatched resolved identity", resolver: &fakeAccessPrincipalResolver{userID: "user-2"}},
+		{name: "mismatched resolved identity", resolver: &fakeAccessPrincipalResolver{userID: "user-2", scope: PrincipalScopeTenant}},
+		{name: "invalid principal scope", resolver: &fakeAccessPrincipalResolver{userID: "user-1", scope: PrincipalScope("mixed")}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -144,7 +157,7 @@ func TestRequireAuthRejectsSignedTokenWhenPrincipalIsInactiveOrUnavailable(t *te
 
 func TestRequireAuthRejectsMismatchedSubjectBeforePrincipalLookup(t *testing.T) {
 	const secret = "subject-secret"
-	resolver := &fakeAccessPrincipalResolver{userID: "user-1"}
+	resolver := &fakeAccessPrincipalResolver{userID: "user-1", scope: PrincipalScopeTenant}
 	app := fiber.New()
 	api := app.Group("/api", WithAccessPrincipalResolver(resolver))
 	api.Get("/protected", RequireAuth(secret), func(c *fiber.Ctx) error {
@@ -169,6 +182,40 @@ func TestRequireAuthRejectsMismatchedSubjectBeforePrincipalLookup(t *testing.T) 
 	}
 	if resolver.calls != 0 {
 		t.Fatalf("resolver calls=%d, want 0 for conflicting signed identity", resolver.calls)
+	}
+}
+
+func TestRequireTenantSalonAccessUsesExactRouteSalonAndCurrentMembership(t *testing.T) {
+	const secret = "tenant-membership-secret"
+	signed := signAccessToken(t, secret, Claims{UserID: "owner-1", RegisteredClaims: jwt.RegisteredClaims{Subject: "owner-1", ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}})
+	for _, test := range []struct {
+		name    string
+		allowed bool
+		status  int
+	}{
+		{name: "active membership", allowed: true, status: fiber.StatusOK},
+		{name: "revoked membership", allowed: false, status: fiber.StatusForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resolver := &fakeAccessPrincipalResolver{userID: "owner-1", salonID: "salon-primary", scope: PrincipalScopeTenant, membershipAllowed: test.allowed}
+			app := fiber.New()
+			api := app.Group("/api", WithAccessPrincipalResolver(resolver))
+			group := api.Group("/salons", RequireAuth(secret), RequireTenantSalonAccess())
+			group.Get("/:id/services", func(c *fiber.Ctx) error { return c.SendStatus(fiber.StatusOK) })
+			request := httptest.NewRequest("GET", "/api/salons/salon-target/services", nil)
+			request.Header.Set("Authorization", "Bearer "+signed)
+			response, err := app.Test(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != test.status {
+				t.Fatalf("status=%d, want %d", response.StatusCode, test.status)
+			}
+			if resolver.membershipSalonID != "salon-target" {
+				t.Fatalf("membership salon=%q, want exact route target", resolver.membershipSalonID)
+			}
+		})
 	}
 }
 

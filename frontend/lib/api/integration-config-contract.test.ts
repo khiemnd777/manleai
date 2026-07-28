@@ -1,0 +1,122 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  openAIConfigPayload,
+  openAIConfigToForm,
+  platformIntegrationConfigBasePath,
+  squareConfigToForm,
+  twilioConfigPayload,
+  twilioConfigToForm
+} from "./integration-config-contract";
+import type {
+  OpenAIIntegrationConfig,
+  SquareIntegrationConfig,
+  TwilioIntegrationConfig
+} from "../../types/api";
+
+test("Twilio preserves the canonical realtime transport and every salon-scoped callback field", () => {
+  const config: TwilioIntegrationConfig = {
+    provider: "twilio",
+    configured: true,
+    public_base_url: "https://salon-a.example.com",
+    incoming_path: "/voice/a/incoming",
+    turn_path: "/voice/a/turn",
+    recording_path: "/voice/a/recording",
+    stream_path: "/voice/a/stream",
+    voice_transport: "realtime_stream",
+    inbound_webhook_url: "https://salon-a.example.com/voice/a/incoming",
+    turn_webhook_url: "https://salon-a.example.com/voice/a/turn",
+    recording_webhook_url: "https://salon-a.example.com/voice/a/recording",
+    stream_webhook_url: "wss://salon-a.example.com/voice/a/stream",
+    auth_token_configured: true,
+    auth_token_source: "database",
+    owner_sms_enabled: true,
+    owner_sms_destination_masked: "+1******0101",
+    owner_sms_consent_attested: true,
+    account_sid_configured: true,
+    messaging_service_configured: true,
+    sender_configured: false,
+    notification_status_path: "/notifications/a/status",
+    notification_inbound_path: "/notifications/a/inbound",
+    notification_status_url: "https://salon-a.example.com/notifications/a/status",
+    notification_inbound_url: "https://salon-a.example.com/notifications/a/inbound"
+  };
+
+  const form = twilioConfigToForm(config);
+  const payload = twilioConfigPayload(form);
+
+  assert.equal(form.voice_transport, "realtime_stream");
+  assert.equal(payload.voice_transport, "realtime_stream");
+  assert.equal(payload.incoming_path, "/voice/a/incoming");
+  assert.equal(payload.stream_path, "/voice/a/stream");
+  assert.equal(payload.notification_status_path, "/notifications/a/status");
+  assert.equal(payload.notification_inbound_path, "/notifications/a/inbound");
+  assert.equal(payload.auth_token, "");
+  assert.equal(payload.clear_auth_token, false);
+  assert.equal("owner_sms_destination" in payload, false);
+  assert.equal("messaging_service_sid" in payload, false);
+  assert.equal("sender_phone" in payload, false);
+});
+
+test("OpenAI round-trips speech output, noise handling, and realtime instructions", () => {
+  const config: OpenAIIntegrationConfig = {
+    provider: "openai",
+    enabled: true,
+    configured: true,
+    base_url: "https://api.openai.com/v1",
+    transcription_model: "gpt-4o-transcribe",
+    reply_model: "gpt-4.1-mini",
+    speech_model: "gpt-4o-mini-tts",
+    speech_voice: "marin",
+    speech_output_mode: "buffered_realtime",
+    realtime_enabled: true,
+    realtime_model: "gpt-realtime-2",
+    realtime_voice: "marin",
+    realtime_noise_profile: "strong_noise_rejection",
+    realtime_instructions: "Use only backend-approved responses.",
+    api_key_configured: true,
+    api_key_source: "database"
+  };
+
+  const form = openAIConfigToForm(config);
+  const payload = openAIConfigPayload(form);
+
+  assert.equal(payload.speech_output_mode, "buffered_realtime");
+  assert.equal(payload.realtime_noise_profile, "strong_noise_rejection");
+  assert.equal(payload.realtime_instructions, "Use only backend-approved responses.");
+  assert.equal(payload.api_key, "");
+  assert.equal(payload.clear_api_key, false);
+});
+
+test("Square keeps visible settings while leaving write-only secrets blank", () => {
+  const config: SquareIntegrationConfig = {
+    provider: "square",
+    configured: true,
+    environment: "production",
+    client_id: "sq-client-a",
+    redirect_url: "https://salon-a.example.com/square/callback",
+    api_version: "2026-05-20",
+    api_base_url: "https://connect.squareup.com",
+    client_secret_configured: true,
+    client_secret_source: "database",
+    webhook_notification_url: "https://salon-a.example.com/square/webhook",
+    webhook_configured: true,
+    webhook_signature_key_configured: true,
+    webhook_signature_key_source: "database"
+  };
+
+  const form = squareConfigToForm(config);
+
+  assert.equal(form.environment, "production");
+  assert.equal(form.client_id, "sq-client-a");
+  assert.equal(form.webhook_notification_url, "https://salon-a.example.com/square/webhook");
+  assert.equal(form.client_secret, "");
+  assert.equal(form.webhook_signature_key, "");
+});
+
+test("Platform configuration path encodes one exact tenant identifier", () => {
+  assert.equal(
+    platformIntegrationConfigBasePath("salon/a"),
+    "/api/platform/tenants/salon%2Fa/technical/integration-configs"
+  );
+});

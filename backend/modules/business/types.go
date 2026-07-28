@@ -25,8 +25,10 @@ type SalonSummary struct {
 	City                       string `json:"city,omitempty"`
 	State                      string `json:"state,omitempty"`
 	Timezone                   string `json:"timezone"`
+	DataClassification         string `json:"data_classification"`
 	PublicSlug                 string `json:"public_slug,omitempty"`
 	PublicCatalogEnabled       bool   `json:"public_catalog_enabled"`
+	AIEnabled                  bool   `json:"ai_enabled"`
 	BusinessAccess             string `json:"business_access"`
 	SchedulingAuthority        string `json:"scheduling_authority"`
 	SchedulingAuthorityVersion int64  `json:"scheduling_authority_version"`
@@ -46,6 +48,7 @@ type SalonProfile struct {
 	State                string    `json:"state,omitempty"`
 	ZipCode              string    `json:"zip_code,omitempty"`
 	Timezone             string    `json:"timezone"`
+	DataClassification   string    `json:"data_classification"`
 	PrimaryLanguage      string    `json:"primary_language"`
 	SecondaryLanguage    string    `json:"secondary_language"`
 	HandoffPhone         string    `json:"handoff_phone,omitempty"`

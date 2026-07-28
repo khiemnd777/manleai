@@ -3,7 +3,22 @@
 ## Milestone 1
 
 - Verify API startup migrations create the local PostgreSQL schema.
-- Seed local owner and salon with `backend/seed/local.sql`.
+- Run `make restart`; verify it migrates and applies the explicit `sample_test`
+  profile automatically, then run it again and verify the volume is preserved
+  with `sample_migration_replayed=true`.
+- Verify the profile creates one Lotus tenant, seven services, four staff, 28
+  eligibility links, one Platform Admin, one exact-salon Platform Ops with
+  seven non-PII capabilities, one tenant owner, zero PII grants, and zero
+  provider configs.
+- Verify normal migrations alone leave `users=0`, `salons=0`, do not create
+  `sample_data_migrations`, and leave owner bootstrap available.
+- Verify deploy preflight accepts an exact migration ledger and returns the
+  dedicated incompatible status for any persisted name/checksum mismatch.
+- Verify only `sample_test` plus an exact release-tag reset approval can replace
+  an incompatible pre-live PostgreSQL volume after backup; `live` fails before
+  deletion.
+- Verify the post-migration `live` guard rejects sample users, salons, or the
+  sample fixture ledger, while a clean normal-migration database passes.
 - Verify login succeeds and returns access and refresh tokens.
 - Verify `GET /api/auth/me` returns the owner and primary salon ID.
 - Verify owner can create, read, and update salons.

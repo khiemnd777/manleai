@@ -1,4 +1,4 @@
-.PHONY: run-api run-worker test tidy seed-local
+.PHONY: run-api run-worker test tidy
 
 run-api:
 	go run ./cmd/api
@@ -11,7 +11,3 @@ test:
 
 tidy:
 	go mod tidy
-
-seed-local:
-	psql "$$DATABASE_URL" -f seed/local.sql
-

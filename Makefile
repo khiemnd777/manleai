@@ -13,9 +13,7 @@ up:
 	$(MAKE) run
 
 restart:
-	$(MAKE) down
-	$(MAKE) build
-	$(MAKE) run
+	bash deploy/local-restart.sh
 
 down:
 	$(COMPOSE) down --remove-orphans

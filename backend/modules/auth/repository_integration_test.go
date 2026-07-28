@@ -56,9 +56,10 @@ func TestRepositoryPostgresIssuedAccessTokenStopsAuthorizingAfterUserIsDisabled(
 	api := app.Group("/api", middleware.WithAccessPrincipalResolver(repository))
 	api.Get("/protected", middleware.RequireAuth(testAuthConfig().JWTSecret), func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
-			"user_id":  middleware.UserID(c),
-			"salon_id": middleware.SalonID(c),
-			"roles":    c.Locals(middleware.LocalRoles),
+			"user_id":         middleware.UserID(c),
+			"salon_id":        middleware.SalonID(c),
+			"principal_scope": middleware.Actor(c).PrincipalScope,
+			"roles":           c.Locals(middleware.LocalRoles),
 		})
 	})
 
@@ -68,16 +69,17 @@ func TestRepositoryPostgresIssuedAccessTokenStopsAuthorizingAfterUserIsDisabled(
 		t.Fatalf("active user status=%d, want %d", response.StatusCode, fiber.StatusOK)
 	}
 	var activePrincipal struct {
-		UserID  string   `json:"user_id"`
-		SalonID string   `json:"salon_id"`
-		Roles   []string `json:"roles"`
+		UserID         string   `json:"user_id"`
+		SalonID        string   `json:"salon_id"`
+		Roles          []string `json:"roles"`
+		PrincipalScope string   `json:"principal_scope"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&activePrincipal); err != nil {
 		response.Body.Close()
 		t.Fatalf("decode active principal: %v", err)
 	}
 	response.Body.Close()
-	if activePrincipal.UserID != userID || activePrincipal.SalonID != salonID || len(activePrincipal.Roles) != 1 || activePrincipal.Roles[0] != "salon_owner" {
+	if activePrincipal.UserID != userID || activePrincipal.SalonID != salonID || activePrincipal.PrincipalScope != "tenant" || len(activePrincipal.Roles) != 1 || activePrincipal.Roles[0] != "salon_owner" {
 		t.Fatalf("active principal=%#v, want current owner tenant and role", activePrincipal)
 	}
 
@@ -112,47 +114,8 @@ func TestRepositoryPostgresIssuedAccessTokenStopsAuthorizingAfterUserIsDisabled(
 		SELECT $1, id, 'active', $1, $1
 		FROM roles
 		WHERE name = 'platform_ops'
-	`, userID); err != nil {
-		t.Fatalf("assign current platform role: %v", err)
-	}
-	response = executeProtectedAuthRequest(t, app, tokens.AccessToken)
-	if response.StatusCode != fiber.StatusOK {
-		response.Body.Close()
-		t.Fatalf("platform-role-updated user status=%d, want %d", response.StatusCode, fiber.StatusOK)
-	}
-	var platformRolePrincipal struct {
-		Roles []string `json:"roles"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&platformRolePrincipal); err != nil {
-		response.Body.Close()
-		t.Fatalf("decode platform-role-updated principal: %v", err)
-	}
-	response.Body.Close()
-	if len(platformRolePrincipal.Roles) != 2 || platformRolePrincipal.Roles[0] != "platform_ops" || platformRolePrincipal.Roles[1] != "staff" {
-		t.Fatalf("roles=%v, want current database-owned [platform_ops staff]", platformRolePrincipal.Roles)
-	}
-	if _, err := db.ExecContext(ctx, `
-		UPDATE platform_role_assignments
-		SET status = 'revoked', version = version + 1, updated_at = now()
-		WHERE user_id = $1
-	`, userID); err != nil {
-		t.Fatalf("revoke current platform role: %v", err)
-	}
-	response = executeProtectedAuthRequest(t, app, tokens.AccessToken)
-	if response.StatusCode != fiber.StatusOK {
-		response.Body.Close()
-		t.Fatalf("platform-role-revoked user status=%d, want %d", response.StatusCode, fiber.StatusOK)
-	}
-	var platformRoleRevokedPrincipal struct {
-		Roles []string `json:"roles"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&platformRoleRevokedPrincipal); err != nil {
-		response.Body.Close()
-		t.Fatalf("decode platform-role-revoked principal: %v", err)
-	}
-	response.Body.Close()
-	if len(platformRoleRevokedPrincipal.Roles) != 1 || platformRoleRevokedPrincipal.Roles[0] != "staff" {
-		t.Fatalf("roles=%v, want revoked platform role omitted without token refresh", platformRoleRevokedPrincipal.Roles)
+	`, userID); err == nil {
+		t.Fatal("database allowed one Tenant identity to receive a Platform role")
 	}
 
 	if _, err := db.ExecContext(ctx, `UPDATE users SET status = 'disabled', updated_at = now() WHERE id = $1`, userID); err != nil {

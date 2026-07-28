@@ -37,6 +37,20 @@ func NewRepository(db *sql.DB) *Repository {
 	}
 }
 
+func (r *Repository) ResolveSalonOwnerForPlatform(ctx context.Context, salonID string, platformUserID string) (string, error) {
+	var ownerUserID string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT salon.owner_user_id::text
+		FROM salons salon
+		WHERE salon.id = $1
+		  AND public.app_active_support_pii_grant($2::uuid, salon.id, 'calls.simulate', 'calls')
+	`, strings.TrimSpace(salonID), strings.TrimSpace(platformUserID)).Scan(&ownerUserID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return ownerUserID, err
+}
+
 func sessionTurnSlotLimit(db *sql.DB) int {
 	if db == nil {
 		return 1
@@ -137,7 +151,7 @@ func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, owner
 		FROM salons s
 		LEFT JOIN salon_settings ss ON ss.salon_id = s.id
 		WHERE s.id = $1
-		  AND public.has_active_tenant_membership(s.id, $2::uuid)
+		  AND public.app_actor_feature_access($2::uuid, s.id, 'calls.simulate', 'calls')
 	`, salonID, ownerUserID).Scan(
 		&cfg.SalonName,
 		&cfg.Timezone,
@@ -302,7 +316,10 @@ func (r *Repository) GetSessionForOwner(ctx context.Context, salonID string, own
 	session, err := r.getSession(ctx, `
 		WHERE cs.id = $1
 		  AND cs.salon_id = $2
-		  AND public.has_active_tenant_membership(salon.id, $3::uuid)
+		  AND (
+		      public.app_actor_feature_access($3::uuid, salon.id, 'calls.read', 'calls')
+		      OR public.app_actor_feature_access($3::uuid, salon.id, 'calls.simulate', 'calls')
+		  )
 	`, sessionID, salonID, ownerUserID)
 	if err != nil {
 		return nil, err
@@ -324,7 +341,10 @@ func (r *Repository) GetSessionByTurnEventKey(ctx context.Context, salonID strin
 	session, err := r.getSession(ctx, `
 		WHERE cs.id = $1
 		  AND cs.salon_id = $2
-		  AND public.has_active_tenant_membership(salon.id, $3::uuid)
+		  AND (
+		      public.app_actor_feature_access($3::uuid, salon.id, 'calls.read', 'calls')
+		      OR public.app_actor_feature_access($3::uuid, salon.id, 'calls.simulate', 'calls')
+		  )
 		  AND EXISTS (
 		    SELECT 1
 		    FROM call_transcript_messages ctm
@@ -403,7 +423,7 @@ func (r *Repository) turnReplayAIMessage(ctx context.Context, salonID string, se
 func (r *Repository) ListSessions(ctx context.Context, salonID string, ownerUserID string, lifecycleStatus string, limit int, offset int) ([]Session, error) {
 	rows, err := r.db.QueryContext(ctx, sessionSelect()+`
 		WHERE cs.salon_id = $1
-		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
+		  AND public.app_actor_feature_access($2::uuid, salon.id, 'calls.read', 'calls')
 		  AND cs.lifecycle_status = $3
 		ORDER BY cs.updated_at DESC, cs.id DESC
 		LIMIT $4
@@ -456,7 +476,7 @@ func (r *Repository) ListWebhookEvents(ctx context.Context, salonID string, owne
 			)
 			WHERE cs.id = $1
 			  AND cs.salon_id = $2
-			  AND public.has_active_tenant_membership(salon.id, $3::uuid)
+			  AND public.app_actor_feature_access($3::uuid, salon.id, 'calls.read', 'calls')
 			  AND v.event_type IN ('realtime_connected', 'realtime_timing', 'realtime_failed', 'realtime_stopped')
 			ORDER BY v.created_at DESC, v.id DESC
 			LIMIT $4
@@ -503,7 +523,7 @@ func (r *Repository) ArchiveSession(ctx context.Context, salonID string, ownerUs
 		WHERE cs.id = $2
 		  AND cs.salon_id = $3
 		  AND salon.id = cs.salon_id
-		  AND public.has_active_tenant_membership(salon.id, $4::uuid)
+		  AND public.app_actor_feature_access($4::uuid, salon.id, 'calls.manage', 'calls')
 		  AND cs.lifecycle_status <> $5
 	`, LifecycleArchived, sessionID, salonID, ownerUserID, LifecycleRedacted)
 	if err != nil {
@@ -536,7 +556,7 @@ func (r *Repository) RedactSession(ctx context.Context, salonID string, ownerUse
 	session, err := scanSession(tx.QueryRowContext(ctx, sessionSelect()+`
 		WHERE cs.id = $1
 		  AND cs.salon_id = $2
-		  AND public.has_active_tenant_membership(salon.id, $3::uuid)
+		  AND public.app_actor_feature_access($3::uuid, salon.id, 'calls.redact', 'calls')
 		FOR UPDATE OF cs
 	`, sessionID, salonID, ownerUserID))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1219,7 +1239,7 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (session *
 		JOIN salons s ON s.id = cs.salon_id
 		WHERE cs.id = $1
 		  AND cs.salon_id = $2
-			  AND public.has_active_tenant_membership(s.id, $3::uuid)
+			  AND public.app_actor_feature_access($3::uuid, s.id, 'calls.simulate', 'calls')
 		  AND cs.lifecycle_status <> $4
 		FOR UPDATE
 		`, record.Session.ID, record.SalonID, record.OwnerUserID, LifecycleRedacted).Scan(&lockedStateRevision); err != nil {
@@ -1590,7 +1610,7 @@ func (r *Repository) ListPartyBookingRequests(ctx context.Context, salonID strin
 		FROM party_booking_requests req
 		JOIN salons salon ON salon.id = req.salon_id
 		WHERE req.salon_id = $1
-		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
+		  AND public.app_actor_feature_access($2::uuid, salon.id, 'calls.read', 'calls')
 			`+statusFilter+`
 			ORDER BY req.created_at DESC
 			LIMIT $3
@@ -1623,7 +1643,7 @@ func (r *Repository) UpdatePartyBookingRequestStatus(ctx context.Context, salonI
 		WHERE req.id = $3
 		  AND req.salon_id = $4
 		  AND salon.id = req.salon_id
-		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
+		  AND public.app_actor_feature_access($2::uuid, salon.id, 'calls.manage', 'calls')
 		RETURNING req.id::text, req.salon_id::text, req.call_session_id::text, req.event_key, req.status,
 		          COALESCE(req.party_size, 0), COALESCE(req.representative_name, ''), COALESCE(req.representative_phone, ''),
 		          COALESCE(req.requested_date::text, ''), COALESCE(req.requested_time_window, ''),

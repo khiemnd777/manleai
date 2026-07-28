@@ -6,7 +6,7 @@ import (
 )
 
 func RegisterRoutes(api fiber.Router, handler *Handler, jwtSecret string) {
-	group := api.Group("/salons", middleware.RequireAuth(jwtSecret))
+	group := api.Group("/salons", middleware.RequireAuth(jwtSecret), middleware.RequireTenantSalonAccess())
 	group.Get("/:id/configuration-export", handler.Get)
 	group.Post("/:id/configuration-import/preview", handler.PreviewImport)
 	group.Post("/:id/configuration-import", handler.ApplyImport)

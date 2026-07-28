@@ -7,7 +7,7 @@ import (
 )
 
 func RegisterRoutes(api fiber.Router, handler *Handler, jwtSecret string) {
-	group := api.Group("/salons/:id/manleai-calendar", middleware.RequireAuth(jwtSecret))
+	group := api.Group("/salons/:id/manleai-calendar", middleware.RequireAuth(jwtSecret), middleware.RequireTenantSalonAccess())
 	group.Get("/", handler.GetAggregate)
 	group.Put("/config", handler.PutConfig)
 	group.Put("/hours", handler.PutHours)

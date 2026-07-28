@@ -70,17 +70,17 @@ authority's durable evidence above before producing confirmed wording.
 ## Local Start
 
 ```bash
-cp .env.example .env
-docker compose up -d --build
+make restart
 ```
 
-The API applies database migrations automatically on startup. To seed the local demo owner and salon:
-
-```bash
-cd backend
-DATABASE_URL=postgres://ai_receptionist:ai_receptionist@localhost:55432/ai_receptionist?sslmode=disable \
-make seed-local
-```
+This is the only local stack command. It creates a private `.env` when missing,
+builds the stack, checks the persisted migration ledger, starts the API, and
+idempotently provisions one marked Lotus salon plus marked Admin, Ops, and
+tenant-owner accounts. Generated local credentials are stored in the ignored
+mode-`600` file `.local/sample-data.env`. An incompatible legacy local sample
+volume is reset once; compatible restarts preserve the database and replay the
+fixture without duplicates. See `docs/deployment.md` for the pre-live and
+production-live boundary.
 
 For non-Docker frontend development:
 
@@ -111,12 +111,14 @@ npm install
 npm run dev
 ```
 
-Local seed login:
+The fixed sample tenant owner identity is:
 
 ```txt
 owner@lotusnails.example
-password123
 ```
+
+Its password is the runtime value supplied in
+`SAMPLE_TENANT_OWNER_PASSWORD`; no default password is stored in the repo.
 
 ## Square Setup
 

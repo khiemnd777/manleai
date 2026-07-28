@@ -72,8 +72,8 @@ func TestV72RuntimeRoleEnforcesTenantPublicAndPlatformPIIBoundaries(t *testing.T
 		t.Fatalf("insert owner B: %v", err)
 	}
 	if err := adminDB.QueryRowContext(context.Background(), `
-		INSERT INTO users (email,password_hash,full_name)
-		VALUES ($1,'test-hash','RLS Platform Admin') RETURNING id::text
+		INSERT INTO users (email,password_hash,full_name,principal_scope)
+		VALUES ($1,'test-hash','RLS Platform Admin','platform') RETURNING id::text
 	`, fixturePrefix+"-platform@example.test").Scan(&platformAdmin); err != nil {
 		t.Fatalf("insert platform admin: %v", err)
 	}

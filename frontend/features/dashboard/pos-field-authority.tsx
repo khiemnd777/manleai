@@ -25,13 +25,15 @@ export function FieldAuthorityPanel({
   recordKind,
   syncStatus,
   lastSyncedAt,
-  syncError
+  syncError,
+  showProviderSetupAction = true
 }: {
   authority?: POSFieldAuthority;
   recordKind: "service" | "staff";
   syncStatus: string;
   lastSyncedAt?: string;
   syncError?: string;
+  showProviderSetupAction?: boolean;
 }) {
   const providerManaged = authority?.operational_source === "provider";
   const providerReadOnly = authority?.operational_write_mode === "provider_read_only";
@@ -69,7 +71,7 @@ export function FieldAuthorityPanel({
           {lastSyncedAt ? <p className="mt-1 text-xs text-muted">Last synced {formatTimestamp(lastSyncedAt)}</p> : null}
           {syncError ? <p className="mt-2 text-xs font-medium leading-5 text-red-700">{syncError}</p> : null}
         </div>
-        {providerManaged || !authority || syncStatus === "sync_failed" ? (
+        {showProviderSetupAction && (providerManaged || !authority || syncStatus === "sync_failed") ? (
           <Link
             className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md border border-line bg-white px-3 text-xs font-semibold text-ink hover:bg-slate-50"
             href="/dashboard/integrations"

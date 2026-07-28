@@ -117,6 +117,38 @@ func TestSquareResponseMasksEncryptedClientSecret(t *testing.T) {
 	}
 }
 
+func TestSquareWebhookConfiguredUsesOnlyCompleteStoredSalonConfiguration(t *testing.T) {
+	store := &fakeIntegrationConfigStore{existing: &StoredConfig{
+		SalonID: "salon_1", Provider: ProviderSquare, Enabled: true, SecretsEncrypted: "ciphertext",
+		Settings: map[string]string{
+			"webhook_notification_url": "https://api.example.com/api/integrations/square/webhook",
+		},
+	}}
+	service := &Service{
+		repo: store,
+		cipher: &fakeSecretCipher{
+			decryptPlaintext: `{"webhook_signature_key":"square-webhook-secret-value"}`,
+		},
+	}
+
+	configured, err := service.SquareWebhookConfigured(context.Background(), "salon_1")
+	if err != nil || !configured {
+		t.Fatalf("configured/error = %t/%v, want true/nil", configured, err)
+	}
+
+	store.existing.Settings["webhook_notification_url"] = ""
+	configured, err = service.SquareWebhookConfigured(context.Background(), "salon_1")
+	if err != nil || configured {
+		t.Fatalf("incomplete configured/error = %t/%v, want false/nil", configured, err)
+	}
+
+	store.existing = nil
+	configured, err = service.SquareWebhookConfigured(context.Background(), "salon_1")
+	if err != nil || configured {
+		t.Fatalf("missing configured/error = %t/%v, want false/nil", configured, err)
+	}
+}
+
 func TestUpdateSquareAbortsBeforePersistenceWhenSecretEncryptionFails(t *testing.T) {
 	encryptionErr := errors.New("injected encryption failure")
 	store := &fakeIntegrationConfigStore{}

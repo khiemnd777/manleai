@@ -1,5 +1,5 @@
-import { TenantCallsConsole } from "@/features/business/tenant-calls-console";
+import { CallsDashboard } from "@/features/dashboard/calls-dashboard";
 
 export default function CallsPage() {
-  return <TenantCallsConsole />;
+  return <CallsDashboard />;
 }

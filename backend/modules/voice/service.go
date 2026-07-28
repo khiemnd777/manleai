@@ -44,6 +44,10 @@ type answerContextPrewarmer interface {
 	PrewarmAnswerContext(ctx context.Context, salonID string) error
 }
 
+type platformSalonOwnerResolver interface {
+	ResolveSalonOwnerForPlatform(ctx context.Context, salonID string, platformUserID string) (string, error)
+}
+
 func NewService(repo Store, conversation ConversationEngine, cfg config.VoiceConfig, providers AIProviders) *Service {
 	return &Service{
 		repo:         repo,
@@ -117,6 +121,41 @@ func (s *Service) Status(ctx context.Context, salonID string, ownerUserID string
 	status.AutomatedBooking = composeAutomatedBookingReadiness(status.RequestCapture, *salon, authorityReadiness)
 	status.AutomatedBookingReady = status.AutomatedBooking.Ready
 	status.PhoneBookingReady = status.AutomatedBookingReady
+	return status, nil
+}
+
+// StatusForPlatform preserves the existing owner-scoped readiness calculation,
+// while returning only business-operational evidence on the Calls surface.
+// Provider configuration remains owned by the Platform Technical surface.
+func (s *Service) StatusForPlatform(ctx context.Context, salonID string, platformUserID string) (*Status, error) {
+	resolver, ok := s.repo.(platformSalonOwnerResolver)
+	if !ok {
+		return nil, ErrNotFound
+	}
+	ownerUserID, err := resolver.ResolveSalonOwnerForPlatform(ctx, strings.TrimSpace(salonID), strings.TrimSpace(platformUserID))
+	if err != nil {
+		return nil, err
+	}
+	status, err := s.Status(ctx, salonID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	status.Provider = "managed"
+	status.InboundWebhookURL = ""
+	status.TurnWebhookURL = ""
+	status.RecordingWebhookURL = ""
+	status.StreamWebhookURL = ""
+	status.AI.Provider = "managed"
+	status.AI.STT.Provider = "managed"
+	status.AI.STT.Model = ""
+	status.AI.LLM.Provider = "managed"
+	status.AI.LLM.Model = ""
+	status.AI.TTS.Provider = "managed"
+	status.AI.TTS.Model = ""
+	status.AI.TTS.Voice = ""
+	status.AI.Realtime.Provider = "managed"
+	status.AI.Realtime.Model = ""
+	status.AI.Realtime.Voice = ""
 	return status, nil
 }
 
@@ -603,12 +642,12 @@ func (s *Service) HandleIncomingCall(ctx context.Context, req IncomingCallReques
 		EventType:      EventIncomingCall,
 		Payload:        req.Payload,
 	})
-	return s.buildReply(ctx, CallReply{
+	return s.buildReplyWithInputMode(ctx, CallReply{
 		Message:       lastAIMessage(session),
 		OpeningNotice: recordingNotice(salon),
 		Continue:      session.Status == conversation.StatusActive,
 		Session:       session,
-	}, session, req.Provider, req.ProviderCallID), nil
+	}, session, req.Provider, req.ProviderCallID, s.inputModeFromConfig(ctx, salon.SalonID, voiceCfg)), nil
 }
 
 func (s *Service) prewarmAnswerContext(ctx context.Context, salonID string) {
@@ -779,8 +818,11 @@ func (s *Service) buildReplyWithInputMode(ctx context.Context, reply CallReply, 
 	if session != nil {
 		salonID = session.SalonID
 	}
-	reply.InputMode = s.inputMode(ctx, salonID)
-	if strings.TrimSpace(inputModeOverride) != "" {
+	if strings.TrimSpace(inputModeOverride) == "" {
+		reply.InputMode = s.inputMode(ctx, salonID)
+	} else if strings.TrimSpace(inputModeOverride) == InputModeGather {
+		reply.InputMode = InputModeGather
+	} else {
 		reply.InputMode = normalizeVoiceTransport(inputModeOverride)
 	}
 	if reply.InputMode == InputModeRealtimeStream {
@@ -918,7 +960,14 @@ func audioCapabilityPayload(output AudioOutput, expiresAt int64) []byte {
 
 func (s *Service) inputMode(ctx context.Context, salonID string) string {
 	cfg, err := s.voiceConfig(ctx, salonID)
-	if err == nil && normalizeVoiceTransport(cfg.Twilio.VoiceTransport) == InputModeRealtimeStream && s.realtimeReady(ctx, salonID, cfg) {
+	if err != nil {
+		return InputModeGather
+	}
+	return s.inputModeFromConfig(ctx, salonID, cfg)
+}
+
+func (s *Service) inputModeFromConfig(ctx context.Context, salonID string, cfg config.VoiceConfig) string {
+	if normalizeVoiceTransport(cfg.Twilio.VoiceTransport) == InputModeRealtimeStream && s.realtimeReady(ctx, salonID, cfg) {
 		return InputModeRealtimeStream
 	}
 	if s.providers.STT != nil && s.providers.STT.Configured(ctx, salonID) {

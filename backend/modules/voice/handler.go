@@ -7,6 +7,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/manleai/ai-receptionist/internal/middleware"
 	"github.com/manleai/ai-receptionist/internal/respond"
+	"github.com/manleai/ai-receptionist/modules/access"
 )
 
 type Handler struct {
@@ -15,6 +16,42 @@ type Handler struct {
 
 func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
+}
+
+type platformAuthorizer interface {
+	Authorize(context.Context, middleware.ActorContext, access.AccessCheck) error
+	RecordPlatformSupportAction(context.Context, middleware.ActorContext, string, access.Capability, access.PIIScope, string, string) error
+}
+
+type PlatformHandler struct {
+	service *Service
+	access  platformAuthorizer
+}
+
+func NewPlatformHandler(service *Service, authorizer platformAuthorizer) *PlatformHandler {
+	return &PlatformHandler{service: service, access: authorizer}
+}
+
+func (h *PlatformHandler) Status(c *fiber.Ctx) error {
+	if h == nil || h.access == nil || h.access.Authorize(c.UserContext(), middleware.Actor(c), access.AccessCheck{
+		Surface: access.SurfacePlatform, SalonID: c.Params("id"), Capability: access.CapabilityCallsRead, PIIScope: access.PIIScopeCalls,
+	}) != nil {
+		return respond.Error(c, fiber.StatusForbidden, "CALLS_ACCESS_FORBIDDEN", "This Platform account is not authorized for the salon Calls view.")
+	}
+	if h.access.RecordPlatformSupportAction(c.UserContext(), middleware.Actor(c), c.Params("id"), access.CapabilityCallsRead, access.PIIScopeCalls, c.Method(), c.Path()) != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SUPPORT_AUDIT_FAILED", "Could not record this authorized support action.")
+	}
+	status, err := h.service.StatusForPlatform(c.UserContext(), c.Params("id"), middleware.UserID(c))
+	if errors.Is(err, ErrValidation) {
+		return respond.Error(c, fiber.StatusBadRequest, "VOICE_STATUS_INVALID", "Voice status request is invalid.")
+	}
+	if errors.Is(err, ErrNotFound) {
+		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "VOICE_STATUS_FAILED", "Could not load voice status.")
+	}
+	return respond.JSON(c, fiber.StatusOK, status)
 }
 
 func (h *Handler) Status(c *fiber.Ctx) error {

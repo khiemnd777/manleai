@@ -37,7 +37,12 @@ type Service struct {
 	bookingService        bookingOperationService
 	webhookRepo           SquareWebhookStore
 	webhookOperationsRepo SquareWebhookOperationsStore
+	webhookConfigStatus   squareWebhookConfigurationStatusResolver
 	readinessLoader       func(context.Context, string, string) (*ReadinessStatus, error)
+}
+
+type squareWebhookConfigurationStatusResolver interface {
+	SquareWebhookConfigured(context.Context, string) (bool, error)
 }
 
 type bookingOperationService interface {
@@ -59,6 +64,10 @@ func (s *Service) SetWebhookRepository(repo SquareWebhookStore) {
 	if operationsRepo, ok := repo.(SquareWebhookOperationsStore); ok {
 		s.webhookOperationsRepo = operationsRepo
 	}
+}
+
+func (s *Service) SetWebhookConfigurationStatusResolver(resolver squareWebhookConfigurationStatusResolver) {
+	s.webhookConfigStatus = resolver
 }
 
 type ConnectURLResponse struct {

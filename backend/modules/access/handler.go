@@ -17,12 +17,50 @@ func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
 }
 
-func (h *Handler) ListUsers(c *fiber.Ctx) error {
+func (h *Handler) ListPlatformUsers(c *fiber.Ctx) error {
 	limit, err := strconv.Atoi(defaultQuery(c.Query("limit"), "25"))
 	if err != nil {
 		return h.handleError(c, ErrValidation)
 	}
-	result, err := h.service.ListUsers(c.UserContext(), middleware.Actor(c), c.Query("query"), limit)
+	result, err := h.service.ListPlatformUsers(c.UserContext(), middleware.Actor(c), c.Query("query"), limit)
+	if err != nil {
+		return h.handleError(c, err)
+	}
+	return respond.JSON(c, fiber.StatusOK, result)
+}
+
+func (h *Handler) CreatePlatformUser(c *fiber.Ctx) error {
+	var req PlatformUserCreateRequest
+	if err := c.BodyParser(&req); err != nil {
+		return h.handleError(c, ErrValidation)
+	}
+	result, replayed, err := h.service.CreatePlatformUser(c.UserContext(), middleware.Actor(c), req)
+	if err != nil {
+		return h.handleError(c, err)
+	}
+	c.Set("X-Idempotent-Replay", strconv.FormatBool(replayed))
+	return respond.JSON(c, fiber.StatusCreated, result)
+}
+
+func (h *Handler) UpdatePlatformUser(c *fiber.Ctx) error {
+	var req PlatformUserUpdateRequest
+	if err := c.BodyParser(&req); err != nil {
+		return h.handleError(c, ErrValidation)
+	}
+	result, replayed, err := h.service.UpdatePlatformUser(c.UserContext(), middleware.Actor(c), c.Params("user_id"), req)
+	if err != nil {
+		return h.handleError(c, err)
+	}
+	c.Set("X-Idempotent-Replay", strconv.FormatBool(replayed))
+	return respond.JSON(c, fiber.StatusOK, result)
+}
+
+func (h *Handler) ListTenantUsers(c *fiber.Ctx) error {
+	limit, err := strconv.Atoi(defaultQuery(c.Query("limit"), "25"))
+	if err != nil {
+		return h.handleError(c, ErrValidation)
+	}
+	result, err := h.service.ListTenantUsers(c.UserContext(), middleware.Actor(c), c.Params("salon_id"), c.Query("query"), limit)
 	if err != nil {
 		return h.handleError(c, err)
 	}
@@ -147,6 +185,61 @@ func (h *Handler) ListAuditEvents(c *fiber.Ctx) error {
 	if err != nil {
 		return h.handleError(c, err)
 	}
+	return respond.JSON(c, fiber.StatusOK, result)
+}
+
+func (h *Handler) ListPlatformSupportAccessRequests(c *fiber.Ctx) error {
+	result, err := h.service.ListPlatformSupportAccessRequests(c.UserContext(), middleware.Actor(c), c.Params("salon_id"))
+	if err != nil {
+		return h.handleError(c, err)
+	}
+	return respond.JSON(c, fiber.StatusOK, result)
+}
+
+func (h *Handler) GetEffectiveSupportAccess(c *fiber.Ctx) error {
+	result, err := h.service.GetEffectiveSupportAccess(c.UserContext(), middleware.Actor(c), c.Params("id"))
+	if err != nil {
+		return h.handleError(c, err)
+	}
+	return respond.JSON(c, fiber.StatusOK, result)
+}
+
+func (h *Handler) CreateSupportAccessRequest(c *fiber.Ctx) error {
+	var req SupportAccessRequestCreate
+	if err := c.BodyParser(&req); err != nil {
+		return h.handleError(c, ErrValidation)
+	}
+	result, replayed, err := h.service.CreateSupportAccessRequest(c.UserContext(), middleware.Actor(c), c.Params("salon_id"), req)
+	if err != nil {
+		return h.handleError(c, err)
+	}
+	c.Set("X-Idempotent-Replay", strconv.FormatBool(replayed))
+	return respond.JSON(c, fiber.StatusCreated, result)
+}
+
+func (h *Handler) CancelSupportAccessRequest(c *fiber.Ctx) error {
+	var req SupportAccessDecisionRequest
+	if err := c.BodyParser(&req); err != nil {
+		return h.handleError(c, ErrValidation)
+	}
+	result, replayed, err := h.service.CancelSupportAccessRequest(c.UserContext(), middleware.Actor(c), c.Params("salon_id"), c.Params("request_id"), req)
+	if err != nil {
+		return h.handleError(c, err)
+	}
+	c.Set("X-Idempotent-Replay", strconv.FormatBool(replayed))
+	return respond.JSON(c, fiber.StatusOK, result)
+}
+
+func (h *Handler) RevokeSupportAccessRequest(c *fiber.Ctx) error {
+	var req SupportAccessDecisionRequest
+	if err := c.BodyParser(&req); err != nil {
+		return h.handleError(c, ErrValidation)
+	}
+	result, replayed, err := h.service.RevokeSupportAccessRequest(c.UserContext(), middleware.Actor(c), c.Params("salon_id"), c.Params("request_id"), req)
+	if err != nil {
+		return h.handleError(c, err)
+	}
+	c.Set("X-Idempotent-Replay", strconv.FormatBool(replayed))
 	return respond.JSON(c, fiber.StatusOK, result)
 }
 

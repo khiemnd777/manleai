@@ -17,6 +17,8 @@ import {
   providerManagedReadOnly
 } from "@/features/dashboard/pos-field-authority";
 import { apiRequest } from "@/lib/api/client";
+import { storedActiveTenantSalonID } from "@/lib/api/tenant-context";
+import { businessGet, listBusinessSalons, type BusinessSalonProfile, type BusinessSalonSummary } from "@/lib/api/business";
 import {
   getManleAICalendar,
   isManleAICalendarVersionConflict,
@@ -29,26 +31,26 @@ import type {
   ManleAICalendarMutationResponse,
   ManleAICalendarResourceRequirementInput,
   ManleAICalendarServicePolicy,
-  POSConnection,
   POSService,
   POSServiceCategory,
   POSServiceCategoryAlias,
   Salon,
   SchedulingAuthority,
   ServiceAlias,
-  ServiceCategorySuggestionRefresh,
-  SquareReadiness,
-  SyncLog
+  ServiceCategorySuggestionRefresh
 } from "@/types/api";
 
 type SalonListResponse = {
   salons: Salon[];
 };
 
-type StatusResponse = {
-  connection: POSConnection;
-  sync_logs: SyncLog[];
-  readiness: SquareReadiness;
+type ExternalSchedulingReadiness = {
+  scheduling_authority: SchedulingAuthority;
+  ready_for_external_new_work: boolean;
+  service_count: number;
+  staff_count: number;
+  business_hour_period_count: number;
+  booking_write_blocked: boolean;
 };
 
 type ServicesResponse = {
@@ -126,10 +128,12 @@ const consultationOptionGroups = {
   ]
 } satisfies Record<string, Array<[string, string]>>;
 
-export function ServicesDashboard() {
+type ServicesSurface = "tenant" | "platform";
+
+export function ServicesDashboard({ surface = "tenant", salonID: fixedSalonID = "" }: { surface?: ServicesSurface; salonID?: string } = {}) {
   const [salon, setSalon] = useState<Salon | null>(null);
-  const [status, setStatus] = useState<StatusResponse | null>(null);
-  const [squareStatusError, setSquareStatusError] = useState("");
+  const [externalReadiness, setExternalReadiness] = useState<ExternalSchedulingReadiness | null>(null);
+  const [externalReadinessError, setExternalReadinessError] = useState("");
   const [calendar, setCalendar] = useState<ManleAICalendarAggregate | null>(null);
   const [calendarLoading, setCalendarLoading] = useState(true);
   const [calendarError, setCalendarError] = useState("");
@@ -139,6 +143,7 @@ export function ServicesDashboard() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
   const [success, setSuccess] = useState("");
   const [formOpen, setFormOpen] = useState(false);
   const [editingService, setEditingService] = useState<POSService | null>(null);
@@ -154,17 +159,19 @@ export function ServicesDashboard() {
   const [reviewFilter, setReviewFilter] = useState<CategoryReviewFilter>("all");
 
   async function load({ silent = false }: { silent?: boolean } = {}) {
+    setLoadError("");
     setError("");
     if (!silent) {
       setLoading(true);
     }
     try {
-      const salonResponse = await apiRequest<SalonListResponse>("/api/salons");
-      const firstSalon = salonResponse.salons[0] ?? null;
-      setSalon(firstSalon);
-      if (!firstSalon) {
-        setStatus(null);
-        setSquareStatusError("");
+      const activeSalon = surface === "platform"
+        ? await loadPlatformSalon(fixedSalonID)
+        : await loadTenantSalon();
+      setSalon(activeSalon);
+      if (!activeSalon) {
+        setExternalReadiness(null);
+        setExternalReadinessError("");
         setCalendar(null);
         setCalendarError("");
         setCalendarLoading(false);
@@ -174,19 +181,19 @@ export function ServicesDashboard() {
         return;
       }
       setCalendarLoading(true);
-      const [statusResult, serviceResponse, categoryResponse, aliasResponse, calendarResult] = await Promise.all([
-        apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`)
+      const [readinessResult, serviceResponse, categoryResponse, aliasResponse, calendarResult] = await Promise.all([
+        apiRequest<ExternalSchedulingReadiness>(externalSchedulingReadinessPath(surface, activeSalon.id))
           .then((value) => ({ value, error: "" }))
-          .catch((statusError: unknown) => ({ value: null, error: errorMessage(statusError, "Could not load Square status.") })),
-        apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`),
-        apiRequest<ServiceCategoriesResponse>(`/api/salons/${firstSalon.id}/service-categories`),
-        apiRequest<ServiceAliasesResponse>(`/api/salons/${firstSalon.id}/service-aliases`),
-        getManleAICalendar(firstSalon.id)
+          .catch((readinessError: unknown) => ({ value: null, error: errorMessage(readinessError, "Could not load external scheduling readiness.") })),
+        apiRequest<ServicesResponse>(serviceResourcePath(surface, activeSalon.id, "/services")),
+        apiRequest<ServiceCategoriesResponse>(serviceResourcePath(surface, activeSalon.id, "/service-categories")),
+        apiRequest<ServiceAliasesResponse>(serviceResourcePath(surface, activeSalon.id, "/service-aliases")),
+        getManleAICalendar(activeSalon.id, surface)
           .then((response) => ({ value: response.manleai_calendar, error: "" }))
           .catch((calendarFailure: unknown) => ({ value: null, error: errorMessage(calendarFailure, "Could not load internal calendar readiness.") }))
       ]);
-      setStatus(statusResult.value);
-      setSquareStatusError(statusResult.error);
+      setExternalReadiness(readinessResult.value);
+      setExternalReadinessError(readinessResult.error);
       setCalendar(calendarResult.value);
       setCalendarError(calendarResult.error);
       setCalendarLoading(false);
@@ -194,7 +201,7 @@ export function ServicesDashboard() {
       setCategories(sortCategories(categoryResponse.service_categories));
       setServiceAliases(aliasResponse.service_aliases);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load services.");
+      setLoadError(err instanceof Error ? err.message : "Could not load services.");
     } finally {
       setCalendarLoading(false);
       if (!silent) {
@@ -205,14 +212,14 @@ export function ServicesDashboard() {
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [fixedSalonID, surface]);
 
   async function reloadCalendar() {
     if (!salon?.id) return;
     setCalendarLoading(true);
     setCalendarError("");
     try {
-      const response = await getManleAICalendar(salon.id);
+      const response = await getManleAICalendar(salon.id, surface);
       setCalendar(response.manleai_calendar);
     } catch (calendarFailure) {
       setCalendarError(errorMessage(calendarFailure, "Could not load internal calendar readiness."));
@@ -230,7 +237,7 @@ export function ServicesDashboard() {
     [services, categoryFilter, reviewFilter]
   );
   const serviceAliasesByServiceID = useMemo(() => groupServiceAliasesByServiceID(serviceAliases), [serviceAliases]);
-  const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
+  const aiEnabled = Boolean(salon?.ai_enabled);
 
   function openCreateForm() {
     setEditingService(null);
@@ -277,14 +284,14 @@ export function ServicesDashboard() {
       const response = editingService?.id
         ? await apiRequest<ServiceResponse>(
             ownerControlsOnly
-              ? `/api/salons/${salon.id}/services/${editingService.id}/owner-controls`
-              : `/api/salons/${salon.id}/services/${editingService.id}`,
+              ? serviceResourcePath(surface, salon.id, `/services/${editingService.id}/owner-controls`)
+              : serviceResourcePath(surface, salon.id, `/services/${editingService.id}`),
             {
               method: ownerControlsOnly ? "PATCH" : "PUT",
               body: JSON.stringify(ownerControlsOnly ? serviceOwnerControlsPayload(form) : servicePayload(form))
             }
           )
-        : await apiRequest<ServiceResponse>(`/api/salons/${salon.id}/services`, {
+        : await apiRequest<ServiceResponse>(serviceResourcePath(surface, salon.id, "/services"), {
             method: "POST",
             body: JSON.stringify(servicePayload(form))
           });
@@ -314,11 +321,11 @@ export function ServicesDashboard() {
     try {
       const body = JSON.stringify(categoryPayload(categoryForm));
       const response = editingCategory
-        ? await apiRequest<ServiceCategoryResponse>(`/api/salons/${salon.id}/service-categories/${editingCategory.id}`, {
+        ? await apiRequest<ServiceCategoryResponse>(serviceResourcePath(surface, salon.id, `/service-categories/${editingCategory.id}`), {
             method: "PUT",
             body
           })
-        : await apiRequest<ServiceCategoryResponse>(`/api/salons/${salon.id}/service-categories`, {
+        : await apiRequest<ServiceCategoryResponse>(serviceResourcePath(surface, salon.id, "/service-categories"), {
             method: "POST",
             body
           });
@@ -341,7 +348,7 @@ export function ServicesDashboard() {
     setError("");
     setSuccess("");
     try {
-      const response = await apiRequest<ServiceCategoryResponse>(`/api/salons/${salon.id}/service-categories/${category.id}/archive`, {
+      const response = await apiRequest<ServiceCategoryResponse>(serviceResourcePath(surface, salon.id, `/service-categories/${category.id}/archive`), {
         method: "POST"
       });
       setCategories((current) => upsertCategory(current, response.service_category));
@@ -360,7 +367,7 @@ export function ServicesDashboard() {
     setError("");
     setSuccess("");
     try {
-      const response = await apiRequest<ServiceCategoryResponse>(`/api/salons/${salon.id}/service-categories/${category.id}/restore`, {
+      const response = await apiRequest<ServiceCategoryResponse>(serviceResourcePath(surface, salon.id, `/service-categories/${category.id}/restore`), {
         method: "POST"
       });
       setCategories((current) => upsertCategory(current, response.service_category));
@@ -379,7 +386,7 @@ export function ServicesDashboard() {
     setError("");
     setSuccess("");
     try {
-      await apiRequest<ServiceCategoryAliasResponse>(`/api/salons/${salon.id}/service-categories/${category.id}/aliases`, {
+      await apiRequest<ServiceCategoryAliasResponse>(serviceResourcePath(surface, salon.id, `/service-categories/${category.id}/aliases`), {
         method: "POST",
         body: JSON.stringify({ alias: aliasDraft, confidence: 1 })
       });
@@ -400,7 +407,7 @@ export function ServicesDashboard() {
     setError("");
     setSuccess("");
     try {
-      await apiRequest<ServiceCategoryAliasResponse>(`/api/salons/${salon.id}/service-category-aliases/${alias.id}/archive`, {
+      await apiRequest<ServiceCategoryAliasResponse>(serviceResourcePath(surface, salon.id, `/service-category-aliases/${alias.id}/archive`), {
         method: "POST"
       });
       setSuccess("Category alias archived.");
@@ -418,7 +425,7 @@ export function ServicesDashboard() {
     setError("");
     setSuccess("");
     try {
-      await apiRequest<ServiceAlias>(`/api/salons/${salon.id}/service-aliases`, {
+      await apiRequest<ServiceAlias>(serviceResourcePath(surface, salon.id, "/service-aliases"), {
         method: "POST",
         body: JSON.stringify({
           service_id: service.id,
@@ -442,7 +449,7 @@ export function ServicesDashboard() {
     setError("");
     setSuccess("");
     try {
-      await apiRequest<ServiceAlias>(`/api/salons/${salon.id}/service-aliases`, {
+      await apiRequest<ServiceAlias>(serviceResourcePath(surface, salon.id, "/service-aliases"), {
         method: "POST",
         body: JSON.stringify({
           service_id: alias.service_id,
@@ -467,7 +474,7 @@ export function ServicesDashboard() {
     setError("");
     setSuccess("");
     try {
-      const response = await apiRequest<RefreshCategoriesResponse>(`/api/salons/${salon.id}/service-categories/suggestions/refresh`, {
+      const response = await apiRequest<RefreshCategoriesResponse>(serviceResourcePath(surface, salon.id, "/service-categories/suggestions/refresh"), {
         method: "POST"
       });
       setSuccess(refreshSummary(response.refresh));
@@ -485,7 +492,7 @@ export function ServicesDashboard() {
     setError("");
     setSuccess("");
     try {
-      const response = await apiRequest<ServiceResponse>(`/api/salons/${salon.id}/services/${service.id}/category`, {
+      const response = await apiRequest<ServiceResponse>(serviceResourcePath(surface, salon.id, `/services/${service.id}/category`), {
         method: "PATCH",
         body: JSON.stringify({ service_category_id: categoryID })
       });
@@ -510,7 +517,7 @@ export function ServicesDashboard() {
     setError("");
     setSuccess("");
     try {
-      const response = await apiRequest<ServiceResponse>(`/api/salons/${salon.id}/services/${service.id}/archive`, {
+      const response = await apiRequest<ServiceResponse>(serviceResourcePath(surface, salon.id, `/services/${service.id}/archive`), {
         method: "POST"
       });
       setServices((current) => upsertService(current, response.service));
@@ -533,7 +540,7 @@ export function ServicesDashboard() {
     setError("");
     setSuccess("");
     try {
-      const response = await apiRequest<ServiceResponse>(`/api/salons/${salon.id}/services/${service.id}/ai-bookable`, {
+      const response = await apiRequest<ServiceResponse>(serviceResourcePath(surface, salon.id, `/services/${service.id}/ai-bookable`), {
         method: "PATCH",
         body: JSON.stringify({ ai_bookable: nextValue })
       });
@@ -564,6 +571,10 @@ export function ServicesDashboard() {
         <Skeleton className="h-[34rem]" />
       </div>
     );
+  }
+
+  if (loadError) {
+    return <Alert title="Services unavailable" message={loadError}><Button type="button" variant="secondary" className="mt-4" onClick={() => void load()}><RefreshCcw className="h-4 w-4" />Retry</Button></Alert>;
   }
 
   if (!salon) {
@@ -601,14 +612,14 @@ export function ServicesDashboard() {
         </div>
       </div>
 
-      {error ? <Alert title="Services unavailable" message={error} /> : null}
+      {error ? <Alert title="Services action failed" message={error} /> : null}
       {success ? <Alert type="success" title="Services updated" message={success} /> : null}
-      {squareStatusError ? <Alert title="Square status unavailable" message={`${squareStatusError} Internal services and calendar setup remain available.`} /> : null}
+      {externalReadinessError ? <Alert title="External scheduling readiness unavailable" message={`${externalReadinessError} Internal services and calendar setup remain available.`} /> : null}
 
       <SchedulingReadinessCard calendar={calendar} loading={calendarLoading} error={calendarError} onRetry={() => void reloadCalendar()} />
       {calendar?.scheduling_authority === "external_provider" ? (
         <>
-          <ServicesGate status={status} />
+          <ServicesGate readiness={externalReadiness} />
           <BookingEligibilityPanel />
         </>
       ) : null}
@@ -649,6 +660,7 @@ export function ServicesDashboard() {
           service={editingService}
           categories={activeCategories}
           salonID={salon.id}
+          surface={surface}
           calendar={calendar}
           calendarLoading={calendarLoading}
           calendarError={calendarError}
@@ -714,20 +726,15 @@ export function ServicesDashboard() {
   );
 }
 
-function ServicesGate({ status }: { status: StatusResponse | null }) {
-  const connection = status?.connection;
-  const connected = Boolean(connection?.id) && connection?.status !== "not_connected";
-  const locationSelected = Boolean(connection?.location_id);
-  const lastSync = connection?.last_sync_at;
-
-  if (connected && locationSelected && lastSync) {
+function ServicesGate({ readiness }: { readiness: ExternalSchedulingReadiness | null }) {
+  if (readiness?.ready_for_external_new_work) {
     return (
       <Card className="border-emerald-200 bg-emerald-50 shadow-none">
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
           <div>
-            <CardTitle>Square sync is ready</CardTitle>
+            <CardTitle>External scheduling is ready</CardTitle>
             <CardDescription className="text-emerald-800">
-              Last synced {new Date(lastSync).toLocaleString()}. Synced services can become booking-ready after AI booking is allowed.
+              {readiness.service_count} services, {readiness.staff_count} staff, and {readiness.business_hour_period_count} business-hour periods are ready for new external booking work.
             </CardDescription>
           </div>
           <Badge value="active" />
@@ -741,16 +748,10 @@ function ServicesGate({ status }: { status: StatusResponse | null }) {
       <div className="flex gap-3">
         <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" />
         <div>
-          <CardTitle>Square sync required for AI booking</CardTitle>
+          <CardTitle>External scheduling is not ready</CardTitle>
           <CardDescription className="text-amber-900">
-            Local services can be managed now. Booking remains gated until Square Appointments is connected, a location is selected, and services are synced.
+            Local services can be managed now. Booking stays gated until provider setup and the business catalog are ready. Provider setup remains in Platform Technical settings.
           </CardDescription>
-          <a
-            className="mt-3 inline-flex h-10 items-center justify-center rounded-md border border-line bg-white px-4 text-sm font-semibold text-ink hover:bg-slate-50"
-            href="/dashboard/integrations"
-          >
-            Open Square integration
-          </a>
         </div>
       </div>
     </Card>
@@ -1020,6 +1021,7 @@ function ServiceForm({
   service,
   categories,
   salonID,
+  surface,
   calendar,
   calendarLoading,
   calendarError,
@@ -1035,6 +1037,7 @@ function ServiceForm({
   service: POSService | null;
   categories: POSServiceCategory[];
   salonID: string;
+  surface: ServicesSurface;
   calendar: ManleAICalendarAggregate | null;
   calendarLoading: boolean;
   calendarError: string;
@@ -1074,6 +1077,7 @@ function ServiceForm({
           syncStatus={service.sync_status}
           lastSyncedAt={service.last_synced_at}
           syncError={service.sync_error}
+          showProviderSetupAction={false}
         />
       ) : (
         <div className="mt-5 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-xs leading-5 text-blue-900">
@@ -1266,6 +1270,7 @@ function ServiceForm({
 
       <ServiceCalendarPolicyEditor
         salonID={salonID}
+        surface={surface}
         service={service}
         calendar={calendar}
         loading={calendarLoading}
@@ -1296,6 +1301,7 @@ type ServicePolicyFormState = {
 
 function ServiceCalendarPolicyEditor({
   salonID,
+  surface,
   service,
   calendar,
   loading,
@@ -1304,6 +1310,7 @@ function ServiceCalendarPolicyEditor({
   onCalendarChange
 }: {
   salonID: string;
+  surface: ServicesSurface;
   service: POSService | null;
   calendar: ManleAICalendarAggregate | null;
   loading: boolean;
@@ -1416,7 +1423,7 @@ function ServiceCalendarPolicyEditor({
         buffer_after_minutes_override: nullableNumber(form.bufferAfter),
         eligible_staff_ids: policy?.eligible_staff.map((staff) => staff.id) ?? [],
         resource_requirements: requirements
-      });
+      }, surface);
       actionKeyRef.current = "";
       onCalendarChange(response.manleai_calendar);
       setSuccess(response.replayed ? "Service policy saved by replaying the previous safe retry." : "Internal service policy saved.");
@@ -2062,12 +2069,6 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
           <Plus className="h-4 w-4" />
           New service
         </Button>
-        <a
-          className="inline-flex h-10 items-center justify-center rounded-md border border-line bg-white px-4 text-sm font-semibold text-ink hover:bg-slate-50"
-          href="/dashboard/integrations"
-        >
-          Open Square integration
-        </a>
       </div>
     </div>
   );
@@ -2376,6 +2377,57 @@ function serviceGateReason(service: POSService, schedulingAuthority?: Scheduling
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
+}
+
+async function loadTenantSalon() {
+  const activeSalonID = storedActiveTenantSalonID();
+  return activeSalonID
+    ? apiRequest<Salon>(`/api/salons/${activeSalonID}`)
+    : (await apiRequest<SalonListResponse>("/api/salons")).salons[0] ?? null;
+}
+
+async function loadPlatformSalon(salonID: string): Promise<Salon | null> {
+  if (!salonID) return null;
+  const surface = { kind: "platform" as const, salonID };
+  const [profile, directory] = await Promise.all([
+    businessGet<BusinessSalonProfile>(surface, "profile"),
+    listBusinessSalons("platform")
+  ]);
+  const summary: BusinessSalonSummary | undefined = directory.salons.find((item) => item.id === salonID);
+  if (!summary) return null;
+  return {
+    id: profile.id,
+    name: profile.name,
+    phone: profile.phone,
+    address: profile.address,
+    city: profile.city,
+    state: profile.state,
+    zip_code: profile.zip_code,
+    timezone: profile.timezone,
+    primary_language: profile.primary_language,
+    secondary_language: profile.secondary_language,
+    handoff_phone: profile.handoff_phone,
+    ai_enabled: summary.ai_enabled,
+    active_pos_provider: summary.active_pos_provider,
+    public_slug: profile.public_slug,
+    public_catalog_enabled: profile.public_catalog_enabled,
+    scheduling_authority: summary.scheduling_authority,
+    scheduling_authority_version: summary.scheduling_authority_version,
+    updated_at: profile.updated_at
+  };
+}
+
+function serviceResourcePath(surface: ServicesSurface, salonID: string, resource: string) {
+  const prefix = surface === "platform"
+    ? `/api/platform/tenants/${encodeURIComponent(salonID)}`
+    : `/api/salons/${encodeURIComponent(salonID)}`;
+  return `${prefix}${resource}`;
+}
+
+function externalSchedulingReadinessPath(surface: ServicesSurface, salonID: string) {
+  return surface === "platform"
+    ? `/api/platform/tenants/${encodeURIComponent(salonID)}/services/external-scheduling-readiness`
+    : `/api/salons/${encodeURIComponent(salonID)}/business/external-scheduling-readiness`;
 }
 
 function formatPrice(value?: number) {

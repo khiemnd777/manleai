@@ -31,6 +31,17 @@ type fakeWebhookOperationsStore struct {
 	fingerprint string
 }
 
+type fakeWebhookConfigurationStatusResolver struct {
+	configured bool
+	salonID    string
+	err        error
+}
+
+func (f *fakeWebhookConfigurationStatusResolver) SquareWebhookConfigured(_ context.Context, salonID string) (bool, error) {
+	f.salonID = salonID
+	return f.configured, f.err
+}
+
 func (f *fakeWebhookOperationsStore) ListBookingWebhooksForOwner(context.Context, string, string, string, int, int) ([]WebhookEventRecord, WebhookMetrics, CalendarRepairHealth, error) {
 	return f.events, f.metrics, f.repair, f.err
 }
@@ -40,6 +51,19 @@ func (f *fakeWebhookOperationsStore) GetBookingWebhookForOwner(context.Context, 
 }
 
 func (f *fakeWebhookOperationsStore) RequeueBookingWebhookForOwner(_ context.Context, _, _, _ string, actionKey, fingerprint string) (*WebhookEventRecord, bool, error) {
+	f.actionKey, f.fingerprint = actionKey, fingerprint
+	return f.event, f.replayed, f.err
+}
+
+func (f *fakeWebhookOperationsStore) ListBookingWebhooksForSalon(_ context.Context, _, _ string, _, _ int) ([]WebhookEventRecord, WebhookMetrics, CalendarRepairHealth, error) {
+	return f.events, f.metrics, f.repair, f.err
+}
+
+func (f *fakeWebhookOperationsStore) GetBookingWebhookForSalon(context.Context, string, string) (*WebhookEventRecord, error) {
+	return f.event, f.err
+}
+
+func (f *fakeWebhookOperationsStore) RequeueBookingWebhookForSalon(_ context.Context, _, _, _ string, actionKey, fingerprint string) (*WebhookEventRecord, bool, error) {
 	f.actionKey, f.fingerprint = actionKey, fingerprint
 	return f.event, f.replayed, f.err
 }
@@ -95,6 +119,25 @@ func TestWebhookOperationsRequeueUsesStableFingerprintAndValidatesInput(t *testi
 	}
 	if _, err := service.ListWebhookEvents(context.Background(), webhookTestSalonID, webhookTestOwnerID, "ignored", 25, 0); !errors.Is(err, ErrWebhookOperationsValidation) {
 		t.Fatalf("unsupported status error = %v", err)
+	}
+}
+
+func TestPlatformWebhookOperationsReportsStoredConfigurationForExactSalon(t *testing.T) {
+	store := &fakeWebhookOperationsStore{metrics: WebhookMetrics{RecentWindowHours: 168}}
+	resolver := &fakeWebhookConfigurationStatusResolver{configured: true}
+	service := &Service{webhookOperationsRepo: store, webhookConfigStatus: resolver}
+
+	result, err := service.ListWebhookEventsForPlatform(
+		context.Background(), webhookTestSalonID, "", 25, 0,
+	)
+	if err != nil {
+		t.Fatalf("ListWebhookEventsForPlatform: %v", err)
+	}
+	if result.WebhookConfigured == nil || !*result.WebhookConfigured {
+		t.Fatalf("webhook configured = %#v, want true", result.WebhookConfigured)
+	}
+	if resolver.salonID != webhookTestSalonID {
+		t.Fatalf("resolver salon = %q, want %q", resolver.salonID, webhookTestSalonID)
 	}
 }
 

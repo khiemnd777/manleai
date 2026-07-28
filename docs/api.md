@@ -909,7 +909,8 @@ metadata.
 }
 ```
 
-Returns an access token, its expiry, user, roles, and primary salon ID. The
+Returns an access token, its expiry, user, immutable `principal_scope`, roles,
+and a primary salon ID only for a Tenant principal. The
 refresh token is not present in JSON. It is delivered as the host-only
 `manleai_refresh` cookie with `HttpOnly`, `SameSite=Strict`, path `/api/auth`,
 the configured refresh lifetime, and `Secure` in production.
@@ -935,7 +936,8 @@ owner setup is still open.
 
 Unauthenticated one-time endpoint for creating the first dashboard owner. It is
 available only while the `users` table is empty. The backend assigns the
-`salon_owner` role; clients do not send a role.
+`salon_owner` role and immutable `principal_scope=tenant`; clients do not send
+a role or scope.
 
 ```json
 {
@@ -975,11 +977,11 @@ reload through the cookie, and remove the legacy `access_token` and
 
 `GET /api/auth/me`
 
-Returns the current user, current database-owned role names, and the primary
-active salon membership. V64 unions an active `platform_admin` or
-`platform_ops` assignment into the role names and chooses the primary salon
-from active memberships, preferring an owner membership. The signed token's
-salon and role claims are not returned as current authorization state.
+Returns the current user, immutable top-level `principal_scope`, current
+database-owned role names from that realm, and a primary active salon only for
+a Tenant principal. Platform principals never receive a salon membership in
+their session. The signed token's scope, salon, and role claims are not returned
+as current authorization state; current PostgreSQL state owns the response.
 
 ## SaaS Access-Control Foundation
 
@@ -989,18 +991,50 @@ assignment with `platform.access.manage`. A legacy `super_admin` role, a Tenant
 membership, a caller-supplied header, or a JWT role claim does not satisfy that
 check. Platform Ops cannot manage access.
 
+`GET /api/platform/access/platform-users?query=<name-or-email>&limit=50`
+
+`POST /api/platform/access/platform-users`
+
+`PUT /api/platform/access/platform-users/:user_id`
+
+Platform Admin can create and edit dedicated Platform identities with
+`email`, `full_name`, a direct password, `platform_admin|platform_ops` role,
+and `active|revoked` role status. Create requires a password of at least eight
+characters; edit accepts an optional replacement password. Passwords are
+bcrypt-hashed before persistence, never returned, and password/role changes
+revoke refresh sessions. Updates are action-key idempotent and
+expected-version fenced; the last-active-Admin guard applies to edits and
+revocation.
+
+Returns only bounded active or disabled `platform` principal summaries for the
+global role workflow.
+
+`GET /api/platform/access/salons/:salon_id/tenant-users?query=<name-or-email>&limit=50`
+
+Returns only bounded active or disabled `tenant` principal summaries for the
+selected salon's team workflow. The salon path is required even though the
+directory realm is global, so the endpoint cannot be reused as an ambiguous
+cross-surface user directory. User IDs identify mutation targets but never
+prove authorization; every mutation reloads current database-owned state.
+
 `GET /api/platform/access/capabilities`
 
 Returns the database-owned capability catalog with `name`, `display_name`,
-`scope`, and `delegation_scope`. Only capabilities with
+`scope`, `delegation_scope`, and `requires`. Only capabilities with
 `delegation_scope=salon` may be attached to a Platform Ops salon assignment.
+`requires` publishes capability dependencies used by both backend validation
+and the Platform UI; for example, selecting a write capability includes its
+declared read capability.
 
 `GET /api/platform/access/roles`
 
 Returns current `platform_admin` and `platform_ops` assignments, including
-status and optimistic version.
+status, optimistic version, and a nested `user` summary (`id`, `email`,
+`full_name`, `status`, `principal_scope`, and `data_classification`). Membership, salon-assignment,
+and PII-grant list and mutation responses below expose the same nested user
+summary so existing rows do not depend on a separate bounded user search.
 
-`PUT /api/platform/access/users/:user_id/platform-role`
+`PUT /api/platform/access/platform-users/:user_id/role`
 
 ```json
 {
@@ -1011,8 +1045,10 @@ status and optimistic version.
 }
 ```
 
-The target must be an existing active user. `expected_version=0` creates the
-first assignment; later changes require the exact current version. One user
+The target must be an existing active Platform principal. Tenant principals
+return the same not-found outcome as an unavailable target and are also
+rejected by database constraints. `expected_version=0` creates the first
+assignment; later changes require the exact current version. One user
 has at most one Platform role assignment. The last active Platform Admin cannot
 be revoked or converted, including by concurrent requests. Any Platform role
 or status transition revokes the target user's active salon assignments and PII
@@ -1033,12 +1069,15 @@ restore stale access.
 }
 ```
 
-V64 backfills `salons.owner_user_id` as the exact active `tenant_owner`
-membership. That owner membership is database-synchronized and cannot be
-revoked, demoted, or assigned to a different user through this API. Additional
-members use `tenant_business_manager`. Active exact-salon memberships authorize
+V64 backfills `salons.owner_user_id` as the exact `tenant_owner` membership.
+Platform Admin may revoke or reactivate that membership without changing
+`salons.owner_user_id`; the Owner remains visible in Access and ownership
+history is preserved. The Owner role cannot be demoted or reassigned through
+this API. Additional members use `tenant_business_manager`. Active exact-salon memberships authorize
 the fixed Tenant Business routes below; they never authorize Platform,
 Technical, Operations, or Audit routes.
+Membership targets must be active Tenant principals; Platform principals are
+not eligible and are rejected before mutation and by database constraints.
 
 `GET /api/platform/access/salons/:salon_id/assignments`
 
@@ -1056,7 +1095,52 @@ Technical, Operations, or Audit routes.
 The target requires an active `platform_ops` role. Permissions are resolved
 from the database capability catalog. A write capability requires its matching
 read capability. Assignment to one salon grants nothing on another salon.
-Platform Admin does not need an assignment for non-PII Platform actions.
+Platform Admin never needs a salon assignment, support authorization, or PII
+grant. Platform Ops needs the exact active salon assignment and base capability;
+Services, AI Training, and Calls additionally require the temporary Admin grant
+described below.
+
+`GET /api/platform/access/salons/:salon_id/support-requests`
+
+`POST /api/platform/access/salons/:salon_id/support-requests`
+
+```json
+{
+  "action_key": "support-request-uuid",
+  "user_id": "platform-user-uuid",
+  "capabilities": ["services.read", "services.write"],
+  "pii_scopes": [],
+  "reason": "SUPPORT-2048",
+  "expires_at": "2026-08-20T12:00:00Z"
+}
+```
+
+Only Platform Admin can list, create, revoke, or cancel legacy pending rows.
+Creation grants access immediately; there is no Tenant Owner approval step.
+The target must be an active Platform Ops identity that already holds every
+requested capability through its exact-salon assignment. Supported capabilities are
+`services.read`, `services.write`, `training.read`, `training.write`,
+`calls.read`, `calls.manage`, `calls.simulate`, and `calls.redact`. Dependencies
+are expanded and validated by the backend. Non-PII authorization may last at
+most 30 days. Any `calls.*` capability requires `pii_scopes:["calls"]`, which
+reduces the entire request maximum to 24 hours.
+
+`POST /api/platform/access/salons/:salon_id/support-requests/:request_id/cancel`
+
+`POST /api/platform/access/salons/:salon_id/support-requests/:request_id/revoke`
+
+Decision bodies require `action_key` and exact `expected_version`. Revocation
+is immediate. Expiry, role/status
+change, or Platform Ops assignment/capability change also removes effective
+access and never revives on later reactivation.
+
+`GET /api/platform/tenants/:id/support-access/effective`
+
+Returns only the current Platform caller's effective capabilities, PII scopes,
+and earliest temporary expiry for UI gating. Platform Admin receives its
+role-derived feature capabilities and direct PII scope without an expiry. It does not
+return or confer another actor's access. Authorization is re-evaluated on every
+feature request; this response is not an authorization token.
 
 `GET /api/platform/access/salons/:salon_id/pii-grants`
 
@@ -1072,10 +1156,12 @@ Platform Admin does not need an assignment for non-PII Platform actions.
 }
 ```
 
-PII scopes are `customers`, `calls`, `appointments`, and `notifications`.
+This general Ops grant endpoint accepts `customers`, `appointments`, and
+`notifications`. Calls grants cannot be created here; Calls PII is created only
+as the child of a temporary Admin-granted Calls authorization.
 Expiry must be in the future and no more than 24 hours from creation. The
-target Platform user must already have the underlying salon capability;
-Platform Admin is not exempt from the grant requirement.
+target Platform Ops user must already have the underlying salon capability.
+Platform Admin is exempt because its control-plane access is direct.
 `reason` is an opaque change reference, not free text. It must match
 `[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}`; arbitrary prose or customer data is
 rejected.
@@ -1108,12 +1194,71 @@ canonical payload returns the stored response and
 `409 LAST_PLATFORM_ADMIN`, and sanitized `500 ACCESS_OPERATION_FAILED`.
 
 The policy service distinguishes the route-owned Tenant and Platform surfaces.
-Tenant access requires an active membership for the exact salon. Platform Ops
+Tenant access requires an active membership for the exact salon on every
+Tenant workspace route. Platform Ops
 requires an active role, exact salon assignment, and exact delegated
 capability. Platform PII access additionally requires a non-revoked,
-non-expired grant for the actor, salon, and PII scope. Provider, scheduling,
+non-expired grant for the actor, salon, and PII scope. Services, Training, and
+Calls additionally require a current Admin-granted temporary authorization for
+Ops. Platform Admin bypasses assignments, temporary authorizations, and PII grants
+while still requiring its active role capability. Every
+successful Platform support route records the actual actor, salon, capability,
+PII scope, HTTP method, and route in immutable access audit before domain work.
+Provider, scheduling,
 conversation, and compatibility APIs retain their separately documented
 authorization boundaries.
+
+## Platform Services, AI Training, And Calls APIs
+
+These V75 routes reuse the same canonical domain services and rich dashboard
+components as the Tenant surface. They do not copy records into a Platform
+store and do not impersonate the Owner.
+
+- Services: `/api/platform/tenants/:id/services*`,
+  `/service-categories*`, `/service-category-aliases*`, and
+  `/service-aliases*` require exact `services.read|write`. Service aliases and
+  category aliases remain structured children of their canonical service or
+  category; they are not free-text knowledge.
+- The older compatibility endpoints under
+  `/api/platform/tenants/:tenant_id/business/services*` and
+  `/business/service-categories*` remain callable for existing clients, but
+  now require both their existing Business authorization and the exact
+  `services.read|write` capability. Platform Admin satisfies that directly;
+  Platform Ops additionally requires its current Admin-granted authorization. Their support-action audit
+  must succeed before domain work. The Platform Business UI no longer renders
+  the reduced editor; the full shared Services tab is the canonical management
+  surface.
+- Business-safe external readiness:
+  `GET /api/platform/tenants/:tenant_id/services/external-scheduling-readiness`
+  requires `services.read` and returns the same bounded provider-neutral
+  projection as the Tenant Business readiness endpoint. Provider identifiers,
+  configuration, sync logs, webhook state, diagnostics, and test controls stay
+  under Platform Technical.
+- AI Training: `/api/platform/tenants/:id/knowledge-items*` and
+  `/training/evaluate` require exact `training.read|write`. Owner corrections
+  additionally require Calls PII for Platform Ops; Platform Admin is direct. Applying an explicit
+  correction as a service alias persists the canonical `service_aliases` row;
+  it never turns that alias into knowledge text.
+- Calls sessions and lifecycle:
+  `/api/platform/tenants/:id/conversation-sessions*` and
+  `/party-booking-requests*` use `calls.read`, `calls.manage`,
+  `calls.simulate`, or `calls.redact` by action, always with Calls PII.
+  `/api/platform/tenants/:id/calls/services`, `/staff`, and
+  `/owner-corrections` provide the Calls-scoped catalogs/correction action.
+  `GET /api/platform/tenants/:id/voice/status` returns a business-safe status
+  projection and omits provider URLs, credentials, model/voice settings, and
+  diagnostics.
+
+Calls authorization may select only scheduling evidence durably linked to an
+authorized call session. It grants no general Appointments access, no booking,
+reschedule, or cancellation API, and no provider write. The simulator remains
+inside the existing conversation/scheduling safety boundaries and cannot infer
+confirmation from local transcript or knowledge state.
+
+Calls-scoped service and consultation metadata reads are permitted only for the
+authorized Calls renderer and require the same request-linked Calls PII grant.
+They do not grant `services.read`, expose the Services management endpoints, or
+permit any service/category/profile mutation.
 
 ## SaaS Shared Business APIs
 
@@ -4220,6 +4365,7 @@ and `has_more` is derived from one extra row.
 
 ```json
 {
+  "webhook_configured": true,
   "events": [
     {
       "id": "webhook-record-uuid",
@@ -4261,6 +4407,11 @@ and `has_more` is derived from one extra row.
   "has_more": false
 }
 ```
+
+`webhook_configured` is a non-secret, salon-scoped readiness boolean derived
+only from the stored notification URL and encrypted signature-key presence. It
+does not use environment fallback and does not prove that Square has created a
+subscription or delivered an event.
 
 The response is operationally safe: it omits Square merchant/location/booking
 identifiers, raw webhook payloads, signature material, processing claim tokens,

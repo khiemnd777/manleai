@@ -108,11 +108,12 @@ func TestLoginDisabledUserAlwaysReturnsInvalidCredentials(t *testing.T) {
 		t.Fatalf("hash password: %v", err)
 	}
 	store := &fakeAuthStore{user: &User{
-		ID:           "disabled-user",
-		Email:        "disabled@example.com",
-		PasswordHash: string(passwordHash),
-		FullName:     "Disabled User",
-		Status:       "disabled",
+		ID:             "disabled-user",
+		Email:          "disabled@example.com",
+		PasswordHash:   string(passwordHash),
+		FullName:       "Disabled User",
+		Status:         "disabled",
+		PrincipalScope: "tenant",
 	}}
 	service := NewService(store, testAuthConfig())
 
@@ -133,10 +134,11 @@ func TestLoginDisabledUserAlwaysReturnsInvalidCredentials(t *testing.T) {
 func TestRefreshUsesAtomicRotationAndReturnsItsReplacement(t *testing.T) {
 	store := &fakeAuthStore{
 		user: &User{
-			ID:       "active-user",
-			Email:    "active@example.com",
-			FullName: "Active User",
-			Status:   "active",
+			ID:             "active-user",
+			Email:          "active@example.com",
+			FullName:       "Active User",
+			Status:         "active",
+			PrincipalScope: "tenant",
 		},
 		roles:   []string{"salon_owner"},
 		salonID: "salon-1",
@@ -166,7 +168,7 @@ func TestRefreshUsesAtomicRotationAndReturnsItsReplacement(t *testing.T) {
 
 func TestRefreshDerivesOneExactSuccessorForConcurrentReplay(t *testing.T) {
 	store := &fakeAuthStore{
-		user: &User{ID: "active-user", Email: "active@example.com", FullName: "Active User", Status: "active"},
+		user: &User{ID: "active-user", Email: "active@example.com", FullName: "Active User", Status: "active", PrincipalScope: "tenant"},
 	}
 	service := NewService(store, testAuthConfig())
 
@@ -293,12 +295,13 @@ func (f *fakeAuthStore) CreateFirstOwner(ctx context.Context, params CreateFirst
 	}
 	now := time.Now().UTC()
 	return &User{
-		ID:           "user-1",
-		Email:        params.Email,
-		PasswordHash: params.PasswordHash,
-		FullName:     params.FullName,
-		Status:       "active",
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:             "user-1",
+		Email:          params.Email,
+		PasswordHash:   params.PasswordHash,
+		FullName:       params.FullName,
+		Status:         "active",
+		PrincipalScope: "tenant",
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}, nil
 }

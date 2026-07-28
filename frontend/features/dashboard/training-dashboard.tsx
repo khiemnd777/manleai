@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest } from "@/lib/api/client";
+import { businessGet, listBusinessSalons, type BusinessSalonProfile } from "@/lib/api/business";
+import { storedActiveTenantSalonID } from "@/lib/api/tenant-context";
 import type { KnowledgeItem, OwnerCorrection, POSService, Salon, SchedulingAuthority, ServiceAlias } from "@/types/api";
 
 type SalonListResponse = {
@@ -73,7 +75,9 @@ const emptyServiceAliasDraft: ServiceAliasDraft = {
 const categories = ["faq", "policy", "services", "hours", "handoff", "operations"];
 const statuses = ["draft", "active", "archived"];
 
-export function TrainingDashboard() {
+type TrainingSurface = "tenant" | "platform";
+
+export function TrainingDashboard({ surface = "tenant", salonID: fixedSalonID = "" }: { surface?: TrainingSurface; salonID?: string } = {}) {
   const [salon, setSalon] = useState<Salon | null>(null);
   const [knowledge, setKnowledge] = useState<KnowledgeItem[]>([]);
   const [corrections, setCorrections] = useState<OwnerCorrection[]>([]);
@@ -92,6 +96,7 @@ export function TrainingDashboard() {
   const [evaluating, setEvaluating] = useState(false);
   const [error, setError] = useState("");
   const [serviceCatalogError, setServiceCatalogError] = useState("");
+  const [correctionAccessError, setCorrectionAccessError] = useState("");
   const [serviceAliasError, setServiceAliasError] = useState("");
   const [actionError, setActionError] = useState("");
   const [success, setSuccess] = useState("");
@@ -100,23 +105,23 @@ export function TrainingDashboard() {
     setError("");
     setLoading(true);
     try {
-      const salonResponse = await apiRequest<SalonListResponse>("/api/salons");
-      const firstSalon = salonResponse.salons[0] ?? null;
-      setSalon(firstSalon);
-      if (!firstSalon) {
+      const activeSalon = surface === "platform"
+        ? await loadPlatformTrainingSalon(fixedSalonID)
+        : await loadTenantTrainingSalon();
+      setSalon(activeSalon);
+      if (!activeSalon) {
         setKnowledge([]);
         setCorrections([]);
         setServices([]);
         setServiceCatalogError("");
         return;
       }
-      const [knowledgeResponse, correctionsResponse] = await Promise.all([
-        apiRequest<KnowledgeResponse>(`/api/salons/${firstSalon.id}/knowledge-items`),
-        apiRequest<CorrectionsResponse>(`/api/salons/${firstSalon.id}/owner-corrections`),
-        loadServiceCatalog(firstSalon.id)
+      const [knowledgeResponse] = await Promise.all([
+        apiRequest<KnowledgeResponse>(trainingResourcePath(surface, activeSalon.id, "/knowledge-items")),
+        loadCorrections(activeSalon.id),
+        loadServiceCatalog(activeSalon.id)
       ]);
       setKnowledge(knowledgeResponse.knowledge_items);
-      setCorrections(correctionsResponse.owner_corrections);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load AI training data.");
     } finally {
@@ -126,7 +131,7 @@ export function TrainingDashboard() {
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [fixedSalonID, surface]);
 
   const filteredKnowledge = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -182,19 +187,19 @@ export function TrainingDashboard() {
         status: form.status
       };
       if (form.correctionId) {
-        await apiRequest<KnowledgeItem>(`/api/salons/${salon.id}/owner-corrections/${form.correctionId}/apply`, {
+        await apiRequest<KnowledgeItem>(trainingResourcePath(surface, salon.id, `/owner-corrections/${form.correctionId}/apply`), {
           method: "POST",
           body: JSON.stringify(payload)
         });
         setSuccess("Correction applied to active knowledge.");
       } else if (form.id) {
-        await apiRequest<KnowledgeItem>(`/api/salons/${salon.id}/knowledge-items/${form.id}`, {
+        await apiRequest<KnowledgeItem>(trainingResourcePath(surface, salon.id, `/knowledge-items/${form.id}`), {
           method: "PUT",
           body: JSON.stringify(payload)
         });
         setSuccess("Knowledge item updated.");
       } else {
-        await apiRequest<KnowledgeItem>(`/api/salons/${salon.id}/knowledge-items`, {
+        await apiRequest<KnowledgeItem>(trainingResourcePath(surface, salon.id, "/knowledge-items"), {
           method: "POST",
           body: JSON.stringify(payload)
         });
@@ -217,7 +222,7 @@ export function TrainingDashboard() {
     setActionError("");
     setSuccess("");
     try {
-      await apiRequest<void>(`/api/salons/${salon.id}/knowledge-items/${item.id}`, { method: "DELETE" });
+      await apiRequest<void>(trainingResourcePath(surface, salon.id, `/knowledge-items/${item.id}`), { method: "DELETE" });
       if (form.id === item.id) setForm(emptyForm);
       setSuccess("Knowledge item deleted.");
       await reloadTraining(salon.id);
@@ -235,7 +240,7 @@ export function TrainingDashboard() {
     setActionError("");
     setSuccess("");
     try {
-      await apiRequest<OwnerCorrection>(`/api/salons/${salon.id}/owner-corrections`, {
+      await apiRequest<OwnerCorrection>(trainingResourcePath(surface, salon.id, "/owner-corrections"), {
         method: "POST",
         body: JSON.stringify({ correction: correctionText })
       });
@@ -256,7 +261,7 @@ export function TrainingDashboard() {
     setActionError("");
     setSuccess("");
     try {
-      const result = await apiRequest<EvaluationResult>(`/api/salons/${salon.id}/training/evaluate`, {
+      const result = await apiRequest<EvaluationResult>(trainingResourcePath(surface, salon.id, "/training/evaluate"), {
         method: "POST",
         body: JSON.stringify({ message: evaluationMessage })
       });
@@ -291,7 +296,7 @@ export function TrainingDashboard() {
     setSuccess("");
     try {
       const alias = await apiRequest<ServiceAlias>(
-        `/api/salons/${salon.id}/owner-corrections/${form.correctionId}/apply-service-alias`,
+        trainingResourcePath(surface, salon.id, `/owner-corrections/${form.correctionId}/apply-service-alias`),
         {
           method: "POST",
           body: JSON.stringify({
@@ -321,7 +326,7 @@ export function TrainingDashboard() {
     setActionError("");
     setSuccess("");
     try {
-      await apiRequest<OwnerCorrection>(`/api/salons/${salon.id}/owner-corrections/${correction.id}/dismiss`, {
+      await apiRequest<OwnerCorrection>(trainingResourcePath(surface, salon.id, `/owner-corrections/${correction.id}/dismiss`), {
         method: "POST"
       });
       setSuccess("Correction dismissed.");
@@ -337,19 +342,29 @@ export function TrainingDashboard() {
   }
 
   async function reloadTraining(salonID: string) {
-    const [knowledgeResponse, correctionsResponse] = await Promise.all([
-      apiRequest<KnowledgeResponse>(`/api/salons/${salonID}/knowledge-items`),
-      apiRequest<CorrectionsResponse>(`/api/salons/${salonID}/owner-corrections`)
+    const [knowledgeResponse] = await Promise.all([
+      apiRequest<KnowledgeResponse>(trainingResourcePath(surface, salonID, "/knowledge-items")),
+      loadCorrections(salonID)
     ]);
     setKnowledge(knowledgeResponse.knowledge_items);
-    setCorrections(correctionsResponse.owner_corrections);
+  }
+
+  async function loadCorrections(salonID: string) {
+    setCorrectionAccessError("");
+    try {
+      const response = await apiRequest<CorrectionsResponse>(trainingResourcePath(surface, salonID, "/owner-corrections"));
+      setCorrections(response.owner_corrections);
+    } catch (err) {
+      setCorrections([]);
+      setCorrectionAccessError(err instanceof Error ? err.message : "Could not load Owner corrections.");
+    }
   }
 
   async function loadServiceCatalog(salonID: string) {
     setServiceCatalogLoading(true);
     setServiceCatalogError("");
     try {
-      const response = await apiRequest<ServicesResponse>(`/api/salons/${salonID}/services`);
+      const response = await apiRequest<ServicesResponse>(trainingResourcePath(surface, salonID, "/services"));
       setServices(response.services);
     } catch (err) {
       setServices([]);
@@ -396,6 +411,10 @@ export function TrainingDashboard() {
     );
   }
 
+  if (error) {
+    return <Alert title="Training unavailable" message={error}><Button type="button" variant="secondary" className="mt-4" onClick={() => void load()}><RefreshCcw className="h-4 w-4" />Retry</Button></Alert>;
+  }
+
   if (!salon) {
     return (
       <Card>
@@ -423,7 +442,6 @@ export function TrainingDashboard() {
         </div>
       </div>
 
-      {error ? <Alert title="Training unavailable" message={error} /> : null}
       {actionError ? <Alert title="Training action failed" message={actionError} /> : null}
       {success ? <Alert type="success" title="Training updated" message={success} /> : null}
 
@@ -759,6 +777,8 @@ export function TrainingDashboard() {
           <Badge value={pendingCorrections > 0 ? "active" : "disabled"} />
         </div>
 
+        {correctionAccessError ? <div className="mt-4"><Alert title="Owner corrections unavailable" message={`${correctionAccessError} Knowledge management remains available; transcript-linked corrections require active Calls PII authorization.`} /></div> : null}
+
         <form className="mt-5 flex flex-col gap-3 md:flex-row" onSubmit={createCorrection}>
           <input
             className="h-10 min-w-0 flex-1 rounded-md border border-line bg-white px-3 text-sm text-ink outline-none focus:border-brand"
@@ -878,6 +898,51 @@ function correctionSource(correction: OwnerCorrection) {
 function serviceOptionLabel(service: POSService) {
   const details = [service.category_name, service.duration_minutes > 0 ? `${service.duration_minutes} min` : ""].filter(Boolean);
   return details.length > 0 ? `${service.name} · ${details.join(" · ")}` : service.name;
+}
+
+async function loadTenantTrainingSalon() {
+  const activeSalonID = storedActiveTenantSalonID();
+  return activeSalonID
+    ? apiRequest<Salon>(`/api/salons/${activeSalonID}`)
+    : (await apiRequest<SalonListResponse>("/api/salons")).salons[0] ?? null;
+}
+
+async function loadPlatformTrainingSalon(salonID: string): Promise<Salon | null> {
+  if (!salonID) return null;
+  const surface = { kind: "platform" as const, salonID };
+  const [profile, directory] = await Promise.all([
+    businessGet<BusinessSalonProfile>(surface, "profile"),
+    listBusinessSalons("platform")
+  ]);
+  const summary = directory.salons.find((item) => item.id === salonID);
+  if (!summary) return null;
+  return {
+    id: profile.id,
+    name: profile.name,
+    phone: profile.phone,
+    address: profile.address,
+    city: profile.city,
+    state: profile.state,
+    zip_code: profile.zip_code,
+    timezone: profile.timezone,
+    primary_language: profile.primary_language,
+    secondary_language: profile.secondary_language,
+    handoff_phone: profile.handoff_phone,
+    ai_enabled: summary.ai_enabled,
+    active_pos_provider: summary.active_pos_provider,
+    public_slug: profile.public_slug,
+    public_catalog_enabled: profile.public_catalog_enabled,
+    scheduling_authority: summary.scheduling_authority,
+    scheduling_authority_version: summary.scheduling_authority_version,
+    updated_at: profile.updated_at
+  };
+}
+
+function trainingResourcePath(surface: TrainingSurface, salonID: string, resource: string) {
+  const prefix = surface === "platform"
+    ? `/api/platform/tenants/${encodeURIComponent(salonID)}`
+    : `/api/salons/${encodeURIComponent(salonID)}`;
+  return `${prefix}${resource}`;
 }
 
 function formatDate(value: string) {

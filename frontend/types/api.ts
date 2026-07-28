@@ -4,6 +4,7 @@ export type User = {
   full_name: string;
   phone?: string;
   status: string;
+  principal_scope: "tenant" | "platform";
 };
 
 export type SchedulingAuthority = "owner_manual" | "manleai_calendar" | "external_provider";

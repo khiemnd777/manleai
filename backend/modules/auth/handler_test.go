@@ -19,11 +19,12 @@ func TestLoginHandlerDoesNotRevealDisabledAccountPasswordValidity(t *testing.T) 
 		t.Fatalf("hash password: %v", err)
 	}
 	store := &fakeAuthStore{user: &User{
-		ID:           "disabled-user",
-		Email:        "disabled@example.com",
-		PasswordHash: string(passwordHash),
-		FullName:     "Disabled User",
-		Status:       "disabled",
+		ID:             "disabled-user",
+		Email:          "disabled@example.com",
+		PasswordHash:   string(passwordHash),
+		FullName:       "Disabled User",
+		Status:         "disabled",
+		PrincipalScope: "tenant",
 	}}
 	app := fiber.New()
 	handler := NewHandler(NewService(store, testAuthConfig()))
@@ -69,7 +70,7 @@ func TestBrowserSessionHandlersKeepRefreshTokenInSecureHttpOnlyCookie(t *testing
 		t.Fatalf("hash password: %v", err)
 	}
 	store := &fakeAuthStore{user: &User{
-		ID: "active-user", Email: "owner@example.com", PasswordHash: string(passwordHash), FullName: "Owner", Status: "active",
+		ID: "active-user", Email: "owner@example.com", PasswordHash: string(passwordHash), FullName: "Owner", Status: "active", PrincipalScope: "tenant",
 	}}
 	cfg := testAuthConfig()
 	cfg.AppEnv = "production"

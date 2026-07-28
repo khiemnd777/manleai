@@ -72,12 +72,13 @@ type CalendarRepairHealth struct {
 }
 
 type WebhookEventListResponse struct {
-	Events         []WebhookEventRecord `json:"events"`
-	Metrics        WebhookMetrics       `json:"metrics"`
-	CalendarRepair CalendarRepairHealth `json:"calendar_repair"`
-	Limit          int                  `json:"limit"`
-	Offset         int                  `json:"offset"`
-	HasMore        bool                 `json:"has_more"`
+	Events            []WebhookEventRecord `json:"events"`
+	Metrics           WebhookMetrics       `json:"metrics"`
+	CalendarRepair    CalendarRepairHealth `json:"calendar_repair"`
+	WebhookConfigured *bool                `json:"webhook_configured,omitempty"`
+	Limit             int                  `json:"limit"`
+	Offset            int                  `json:"offset"`
+	HasMore           bool                 `json:"has_more"`
 }
 
 type WebhookEventDetailResponse struct {
@@ -159,6 +160,13 @@ func (s *Service) ListWebhookEventsForPlatform(ctx context.Context, salonID, sta
 	if err != nil {
 		return nil, err
 	}
+	webhookConfigured := false
+	if s.webhookConfigStatus != nil {
+		webhookConfigured, err = s.webhookConfigStatus.SquareWebhookConfigured(ctx, salonID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	for index := range events {
 		setWebhookRequeueState(&events[index])
 	}
@@ -166,7 +174,10 @@ func (s *Service) ListWebhookEventsForPlatform(ctx context.Context, salonID, sta
 	if hasMore {
 		events = events[:limit]
 	}
-	return &WebhookEventListResponse{Events: events, Metrics: metrics, CalendarRepair: repair, Limit: limit, Offset: offset, HasMore: hasMore}, nil
+	return &WebhookEventListResponse{
+		Events: events, Metrics: metrics, CalendarRepair: repair, WebhookConfigured: &webhookConfigured,
+		Limit: limit, Offset: offset, HasMore: hasMore,
+	}, nil
 }
 
 func (s *Service) GetWebhookEventForPlatform(ctx context.Context, salonID, eventID string) (*WebhookEventDetailResponse, error) {

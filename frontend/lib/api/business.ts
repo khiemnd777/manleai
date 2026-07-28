@@ -5,14 +5,18 @@ export type BusinessSurface = {
   salonID: string;
 };
 
+export type DataClassification = "live" | "sample_test";
+
 export type BusinessSalonSummary = {
   id: string;
   name: string;
   city?: string;
   state?: string;
   timezone: string;
+  data_classification: DataClassification;
   public_slug?: string;
   public_catalog_enabled: boolean;
+  ai_enabled: boolean;
   business_access: "tenant_owner" | "tenant_business_manager" | "global" | "assigned" | string;
   scheduling_authority: "owner_manual" | "manleai_calendar" | "external_provider";
   scheduling_authority_version: number;
@@ -28,6 +32,7 @@ export type BusinessSalonProfile = {
   state?: string;
   zip_code?: string;
   timezone: string;
+  data_classification: DataClassification;
   primary_language: string;
   secondary_language: string;
   handoff_phone?: string;
@@ -130,6 +135,10 @@ export type MutationControl = { action_key: string; expected_version: number };
 
 export function businessDirectoryPath(kind: BusinessSurface["kind"]) {
   return kind === "platform" ? "/api/platform/tenants/" : "/api/salons/";
+}
+
+export function isSampleData(value: { data_classification: DataClassification }) {
+  return value.data_classification === "sample_test";
 }
 
 export function businessBasePath(surface: BusinessSurface) {

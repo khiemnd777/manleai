@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useTenantSalon } from "@/components/layout/tenant-salon-context";
 import { ImportIssueList, ImportScopePreview, ImportSummaryTable, listOrNone } from "@/features/configuration-transfer/import-preview";
 import { InternalCalendarSetup } from "@/features/dashboard/internal-calendar-setup";
 import { CustomerSMSPolicyCard } from "@/features/dashboard/customer-sms-policy";
@@ -29,24 +30,20 @@ import type {
   BookingMode,
   ConfigurationBundle,
   ConfigurationImportResponse,
-  POSConnection,
   POSService,
   PublicCatalogSettings,
   Salon,
   SalonSettings,
-  SquareReadiness,
-  SchedulingAuthority,
-  SyncLog
+  SchedulingAuthority
 } from "@/types/api";
 
-type SalonListResponse = {
-  salons: Salon[];
-};
-
-type StatusResponse = {
-  connection: POSConnection;
-  sync_logs: SyncLog[];
-  readiness: SquareReadiness;
+type ExternalSchedulingReadiness = {
+  scheduling_authority: SchedulingAuthority;
+  ready_for_external_new_work: boolean;
+  service_count: number;
+  staff_count: number;
+  business_hour_period_count: number;
+  booking_write_blocked: boolean;
 };
 
 type BusinessHoursResponse = {
@@ -120,10 +117,11 @@ const bookingModeOptions: Array<{ value: BookingMode; label: string }> = [
 ];
 
 export function SettingsDashboard() {
+  const tenant = useTenantSalon();
   const [salon, setSalon] = useState<Salon | null>(null);
   const [settings, setSettings] = useState<SalonSettings | null>(null);
-  const [status, setStatus] = useState<StatusResponse | null>(null);
-  const [squareStatusError, setSquareStatusError] = useState("");
+  const [externalReadiness, setExternalReadiness] = useState<ExternalSchedulingReadiness | null>(null);
+  const [externalReadinessError, setExternalReadinessError] = useState("");
   const [periods, setPeriods] = useState<BusinessHourPeriod[]>([]);
   const [services, setServices] = useState<POSService[]>([]);
   const [salonForm, setSalonForm] = useState<SalonFormState>(emptySalonForm());
@@ -145,13 +143,14 @@ export function SettingsDashboard() {
       setLoading(true);
     }
     try {
-      const salonResponse = await apiRequest<SalonListResponse>("/api/salons");
-      const firstSalon = salonResponse.salons[0] ?? null;
-      setSalon(firstSalon);
-      if (!firstSalon) {
+      const activeSalon = tenant.activeSalonID
+        ? await apiRequest<Salon>(`/api/salons/${tenant.activeSalonID}`)
+        : null;
+      setSalon(activeSalon);
+      if (!activeSalon) {
         setSettings(null);
-        setStatus(null);
-        setSquareStatusError("");
+        setExternalReadiness(null);
+        setExternalReadinessError("");
         setPeriods([]);
         setServices([]);
         setSalonForm(emptySalonForm());
@@ -162,23 +161,23 @@ export function SettingsDashboard() {
         return;
       }
 
-      const [statusResult, settingsResponse, businessHoursResponse, publicCatalogResponse, servicesResponse] = await Promise.all([
-        apiRequest<StatusResponse>(`/api/integrations/square/status?salon_id=${firstSalon.id}`)
+      const [readinessResult, settingsResponse, businessHoursResponse, publicCatalogResponse, servicesResponse] = await Promise.all([
+        apiRequest<ExternalSchedulingReadiness>(`/api/salons/${activeSalon.id}/business/external-scheduling-readiness`)
           .then((value) => ({ value, error: "" }))
-          .catch((statusError: unknown) => ({ value: null, error: errorMessage(statusError, "Could not load Square status.") })),
-        apiRequest<SalonSettings>(`/api/salons/${firstSalon.id}/settings`),
-        apiRequest<BusinessHoursResponse>(`/api/salons/${firstSalon.id}/business-hours`),
-        apiRequest<PublicCatalogSettings>(`/api/salons/${firstSalon.id}/public-catalog`),
-        apiRequest<ServicesResponse>(`/api/salons/${firstSalon.id}/services`)
+          .catch((readinessError: unknown) => ({ value: null, error: errorMessage(readinessError, "Could not load external scheduling readiness.") })),
+        apiRequest<SalonSettings>(`/api/salons/${activeSalon.id}/settings`),
+        apiRequest<BusinessHoursResponse>(`/api/salons/${activeSalon.id}/business-hours`),
+        apiRequest<PublicCatalogSettings>(`/api/salons/${activeSalon.id}/public-catalog`),
+        apiRequest<ServicesResponse>(`/api/salons/${activeSalon.id}/services`)
       ]);
 
-      setStatus(statusResult.value);
-      setSquareStatusError(statusResult.error);
+      setExternalReadiness(readinessResult.value);
+      setExternalReadinessError(readinessResult.error);
       setSettings(settingsResponse);
       setPeriods(businessHoursResponse.periods ?? []);
       setServices(servicesResponse.services ?? []);
       setPublicCatalog(publicCatalogResponse);
-      setSalonForm(salonToForm(firstSalon));
+      setSalonForm(salonToForm(activeSalon));
       setSettingsForm(settingsToForm(settingsResponse));
       setPublicCatalogForm(publicCatalogToForm(publicCatalogResponse));
     } catch (err) {
@@ -191,10 +190,10 @@ export function SettingsDashboard() {
   }
 
   useEffect(() => {
-    void load();
-  }, []);
+    if (!tenant.loading) void load();
+  }, [tenant.activeSalonID, tenant.loading]);
 
-  const aiEnabled = Boolean(status?.readiness?.ai_enabled ?? salon?.ai_enabled);
+  const aiEnabled = Boolean(salon?.ai_enabled);
   const activeProvider = salon?.active_pos_provider || "square";
   const consultationEligibleServices = useMemo(
     () => services.filter((service) => serviceEligibleForAuthority(service, salon?.scheduling_authority, activeProvider)),
@@ -307,25 +306,6 @@ export function SettingsDashboard() {
     }
   }
 
-  async function syncSquareRecords() {
-    if (!salon) return;
-    setBusy("sync-square");
-    setError("");
-    setSuccess("");
-    try {
-      await apiRequest<{ ok: boolean }>("/api/integrations/square/sync", {
-        method: "POST",
-        body: JSON.stringify({ salon_id: salon.id })
-      });
-      setSuccess("Square sync completed.");
-      await load({ silent: true });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not sync Square records.");
-    } finally {
-      setBusy("");
-    }
-  }
-
   async function savePublicCatalog() {
     if (!salon) return;
     setBusy("save-public-catalog");
@@ -431,7 +411,7 @@ export function SettingsDashboard() {
     setImportRequestID("");
   }
 
-  if (loading) {
+  if (loading || tenant.loading) {
     return (
       <div className="space-y-6">
         <Skeleton className="h-9 w-80" />
@@ -495,7 +475,7 @@ export function SettingsDashboard() {
 
       {error ? <Alert title="Settings update failed" message={error} /> : null}
       {success ? <Alert type="success" title="Settings updated" message={success} /> : null}
-      {squareStatusError ? <Alert title="Square status unavailable" message={`${squareStatusError} Internal calendar settings remain available.`} /> : null}
+      {externalReadinessError ? <Alert title="External scheduling readiness unavailable" message={`${externalReadinessError} Internal calendar settings remain available.`} /> : null}
 
       {settings && Number.isInteger(settings.scheduling_authority_version) && settings.scheduling_authority_version > 0 ? (
         <SchedulingAuthoritySwitch
@@ -516,7 +496,7 @@ export function SettingsDashboard() {
       <CustomerSMSPolicyCard salonID={salon.id} />
 
       {settings?.scheduling_authority === "external_provider" ? (
-        <ReadinessGate aiEnabled={aiEnabled} activeProvider={activeProvider} status={status} />
+        <ReadinessGate aiEnabled={aiEnabled} activeProvider={activeProvider} readiness={externalReadiness} />
       ) : null}
 
       <div className="grid gap-4 md:grid-cols-3">
@@ -562,9 +542,7 @@ export function SettingsDashboard() {
         periods={importedProviderPeriods}
         sourceLabel={activeProviderLabel}
         hasSyncedSquarePeriods={hasBusinessHourPeriods}
-        busy={busy === "sync-square"}
         lastSyncedAt={latestBusinessHourSync}
-        onSync={() => void syncSquareRecords()}
       />
     </div>
   );
@@ -573,45 +551,38 @@ export function SettingsDashboard() {
 function ReadinessGate({
   aiEnabled,
   activeProvider,
-  status
+  readiness
 }: {
   aiEnabled: boolean;
   activeProvider: string;
-  status: StatusResponse | null;
+  readiness: ExternalSchedulingReadiness | null;
 }) {
-  const squareConnected = Boolean(status?.connection?.id) && status?.connection?.status !== "not_connected";
-  const lastSync = status?.connection?.last_sync_at;
-  const readyDescription = aiEnabled
-    ? "AI booking is enabled through Square setup. The receptionist can only confirm appointments after Square Appointments returns a booking ID."
-    : status?.readiness?.checks?.find((item) => !item.complete)?.message ||
-      "Enable AI booking from Square setup after Square Appointments is connected, synced, tested, and cancelled successfully.";
+  const readyForExternalNewWork = Boolean(readiness?.ready_for_external_new_work);
+  const readyDescription = readyForExternalNewWork
+    ? "External scheduling is ready for new work. The receptionist still confirms only after the selected provider returns the required durable booking evidence."
+    : "External scheduling is not ready for new work. Provider setup and diagnostics remain in Platform Technical settings.";
 
   return (
-    <Card className={aiEnabled ? "border-emerald-200 bg-emerald-50 shadow-none" : "border-amber-200 bg-amber-50 shadow-none"}>
+    <Card className={readyForExternalNewWork ? "border-emerald-200 bg-emerald-50 shadow-none" : "border-amber-200 bg-amber-50 shadow-none"}>
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
         <div className="flex gap-3">
-          {aiEnabled ? (
+          {readyForExternalNewWork ? (
             <ShieldCheck className="mt-0.5 h-5 w-5 flex-none text-emerald-700" />
           ) : (
             <AlertTriangle className="mt-0.5 h-5 w-5 flex-none text-amber-700" />
           )}
           <div>
             <CardTitle>AI booking is controlled from Square setup</CardTitle>
-            <CardDescription className={aiEnabled ? "text-emerald-800" : "text-amber-900"}>
+            <CardDescription className={readyForExternalNewWork ? "text-emerald-800" : "text-amber-900"}>
               {readyDescription}
             </CardDescription>
             <div className="mt-2 text-xs leading-5 text-muted">
               Provider: {activeProvider === "square" ? "Square Appointments" : activeProvider}.{" "}
-              {squareConnected ? `Last sync: ${formatOptionalDate(lastSync)}.` : "Square Appointments is not fully connected."}
+              {readiness ? `${readiness.service_count} services · ${readiness.staff_count} staff · ${readiness.business_hour_period_count} hour periods.` : "Readiness evidence is unavailable."}
             </div>
           </div>
         </div>
-        <Link
-          href="/dashboard/integrations"
-          className="inline-flex h-10 flex-none items-center justify-center rounded-md border border-line bg-white px-4 text-sm font-semibold text-ink hover:bg-slate-50"
-        >
-          Open Square setup
-        </Link>
+        <Badge value={aiEnabled ? "active" : "disabled"} className="self-start" />
       </div>
     </Card>
   );
@@ -1087,16 +1058,12 @@ function BusinessHoursCard({
   periods,
   sourceLabel,
   hasSyncedSquarePeriods,
-  busy,
-  lastSyncedAt,
-  onSync
+  lastSyncedAt
 }: {
   periods: BusinessHourPeriod[];
   sourceLabel: string;
   hasSyncedSquarePeriods: boolean;
-  busy: boolean;
   lastSyncedAt: string;
-  onSync: () => void;
 }) {
   const periodsByDay = groupPeriodsByDay(periods);
 
@@ -1109,7 +1076,7 @@ function BusinessHoursCard({
             Synced from Square Appointments. Availability checks reject requested times outside these periods.
           </CardDescription>
           <div className="mt-2 text-xs leading-5 text-muted">
-            Edit operating hours in Square, then sync here. Last sync: {lastSyncedAt ? formatDateTime(lastSyncedAt) : "not synced"}.
+            Provider sync is managed in Platform Technical settings. Last sync: {lastSyncedAt ? formatDateTime(lastSyncedAt) : "not synced"}.
           </div>
         </div>
         <Badge value={hasSyncedSquarePeriods ? "ready" : "blocked"} className="self-start" />
@@ -1117,7 +1084,7 @@ function BusinessHoursCard({
 
       {!hasSyncedSquarePeriods ? (
         <div className="mt-5 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-          No Square business hour periods are synced yet. Run Sync after selecting the correct Square location.
+          No Square business hour periods are synced yet. Ask an authorized Platform administrator to review the provider setup and sync in Technical settings.
         </div>
       ) : null}
 
@@ -1167,19 +1134,6 @@ function BusinessHoursCard({
             </div>
           );
         })}
-      </div>
-
-      <div className="mt-5 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
-        <Link
-          href="/dashboard/integrations"
-          className="inline-flex h-10 items-center justify-center rounded-md border border-line px-4 text-sm font-semibold text-ink hover:bg-slate-50"
-        >
-          Open Square setup
-        </Link>
-        <Button type="button" onClick={onSync} disabled={busy}>
-          <RefreshCcw className="h-4 w-4" />
-          {busy ? "Syncing..." : "Sync"}
-        </Button>
       </div>
     </Card>
   );
@@ -1375,10 +1329,6 @@ function latestUpdatedAt(...values: Array<string | undefined>) {
 
 function formatDateTime(value: string) {
   return new Date(value).toLocaleString();
-}
-
-function formatOptionalDate(value?: string) {
-  return value ? new Date(value).toLocaleString() : "not synced";
 }
 
 function errorMessage(error: unknown, fallback: string) {

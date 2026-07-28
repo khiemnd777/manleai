@@ -119,7 +119,7 @@ func TestBusinessRepositoryReplayTenantFenceAndProviderOwnership(t *testing.T) {
 
 	// Prove the second tenant is a real independent tenant, rather than merely
 	// an unknown ID rejected by the repository.
-	if response, err := service.ListSalons(ctx, ownerB, access.SurfaceTenant); err != nil || !containsSalon(response.Salons, salonBID) || containsSalon(response.Salons, salonAID) {
+	if response, err := service.ListSalons(ctx, ownerB, access.SurfaceTenant); err != nil || !containsSalon(response.Salons, salonBID) || containsSalon(response.Salons, salonAID) || salonClassification(response.Salons, salonBID) != "live" {
 		t.Fatalf("tenant B directory=%#v err=%v", response, err)
 	}
 }
@@ -152,4 +152,13 @@ func containsSalon(items []SalonSummary, salonID string) bool {
 		}
 	}
 	return false
+}
+
+func salonClassification(items []SalonSummary, salonID string) string {
+	for _, item := range items {
+		if item.ID == salonID {
+			return item.DataClassification
+		}
+	}
+	return ""
 }

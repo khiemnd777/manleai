@@ -34,6 +34,7 @@ POSTGRES_MIGRATION_PACKAGES=(
 )
 
 POSTGRES_INTEGRATION_PACKAGES=(
+  ./sampledata
   ./modules/access
   ./modules/business
   ./modules/scheduling
@@ -85,6 +86,11 @@ SECURITY_CONTRACT_PACKAGES=(
 )
 
 SECURITY_CONTRACT_TEST_FILES=(
+  backend/migrations/v73_safety_test.go
+  backend/migrations/v74_safety_test.go
+  backend/migrations/v75_safety_test.go
+  backend/sampledata/runner_test.go
+  backend/sampledata/runner_integration_test.go
   backend/cmd/worker/retention_registration_test.go
   backend/internal/databasecontext/context_test.go
   backend/internal/database/context_connector_integration_test.go
@@ -94,6 +100,8 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/internal/middleware/rate_limit_test.go
   backend/internal/ratelimit/redis_store_integration_test.go
   frontend/lib/api/business.test.ts
+  frontend/lib/api/access.test.ts
+  frontend/lib/api/session.test.ts
   frontend/lib/api/browser-session.test.ts
   frontend/lib/security/content-security-policy.test.ts
   landing/lib/security/content-security-policy.test.ts
@@ -114,6 +122,7 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/booking/service_test.go
   backend/modules/config_transfer/repository_integration_test.go
   backend/modules/conversation/manleai_calendar_party_scheduling_test.go
+  backend/modules/conversation/platform_support_routes_test.go
   backend/modules/conversation/retention_integration_test.go
   backend/modules/conversation/scheduling_result_evidence_integration_test.go
   backend/modules/conversation/scheduling_result_evidence_test.go
@@ -132,6 +141,7 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/operations_health/routes_test.go
   backend/modules/operations_health/repository_integration_test.go
   backend/modules/pos/sync_processor_test.go
+  backend/modules/pos/platform_support_routes_test.go
   backend/modules/pos/types_test.go
   backend/modules/pos/repository_integration_test.go
   backend/modules/pos/repository_alias_ownership_integration_test.go
@@ -153,6 +163,7 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/scheduling_retention/repository_contract_test.go
   backend/modules/scheduling_retention/repository_integration_test.go
   backend/modules/training/handler_test.go
+  backend/modules/training/platform_support_routes_test.go
   backend/modules/training/service_test.go
   backend/modules/tenant_runtime/repository_integration_test.go
   backend/modules/tenant_runtime/service_test.go

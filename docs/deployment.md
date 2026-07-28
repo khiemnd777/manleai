@@ -83,11 +83,13 @@ jobs to pass and remain tag-only.
 
 The workflow then builds and publishes the five application images to GitHub
 Container Registry (GHCR) with that immutable release tag. The VPS receives
-only the Compose/Caddy deployment bundle, `project.env`, and the image tag
-metadata. It logs into GHCR with the job's ephemeral `GITHUB_TOKEN`, pulls the
-tagged images, logs out, and starts the stack without compiling application
-source code. Each image carries the `org.opencontainers.image.source` label for
-this repository, so the GHCR package inherits repository access permissions.
+the Compose/Caddy deployment bundle, `project.env`, image tag metadata, and—
+only for the protected `sample_test` profile—a temporary mode-`600` sample
+credential file. It logs into GHCR with the job's ephemeral `GITHUB_TOKEN`,
+pulls the tagged images, logs out, and starts the stack without compiling
+application source code. Each image carries the `org.opencontainers.image.source`
+label for this repository, so the GHCR package inherits repository access
+permissions.
 
 A passing release gate is code-readiness evidence only. It does not prove live
 salon-scoped provider configuration, credentials, callback reachability,
@@ -152,6 +154,12 @@ SSH_PRIVATE_KEY
 PROJECT_ENV_B64
 ```
 
+The current pre-live `sample_test` profile additionally requires:
+
+```txt
+SAMPLE_DATA_ENV_B64
+```
+
 Use the VPS host and dedicated deploy identity for `SERVER_IP` and
 `REMOTE_USER`. `SSH_PRIVATE_KEY` must be the matching private key. Do not
 commit the private key or production environment file.
@@ -163,7 +171,19 @@ MIGRATION_COMPATIBILITY_RELEASE_TAG
 PREVIOUS_IMAGE_DB_COMPATIBLE
 MIGRATION_COMPATIBILITY_APPROVER
 POSTGRES_BACKUP_STORAGE_APPROVAL
+DEPLOY_DATA_PROFILE
 ```
+
+`DEPLOY_DATA_PROFILE` must be exactly `sample_test` for the current pre-live
+deployment or `live` after production-live cutover. When an incompatible
+pre-live migration ledger or non-sample database must be replaced, set the
+additional protected variable `SAMPLE_TEST_RESET_RELEASE_TAG` to the exact
+candidate tag. The workflow backs up the current database, removes only the
+Compose-owned `manleai_postgres_data` volume, records the reset, migrates from
+empty, and provisions the fixture. Clear that reset variable after the
+successful release. A mismatched or missing reset tag fails before deletion.
+The `live` profile ignores sample credentials and always refuses automatic
+database reset.
 
 The compatibility tag, decision, and approver are release-specific. The release
 tag must match exactly, compatibility must be the literal `true`, and the
@@ -252,7 +272,8 @@ CREATE ROLE manleai_runtime LOGIN PASSWORD '<separate-secret>'
 ```
 
 Do not put the password in shell history. The candidate API uses the migration
-connection to apply V63-V72 and grant table/sequence/function privileges to the
+connection to apply all pending release migrations through V74 and grant
+table/sequence/function privileges to the
 already-existing runtime role, then closes that connection. API requests and
 the worker use only the runtime connection. The worker does not receive
 `MIGRATION_DATABASE_URL`; production startup fails if the connected role name,
@@ -290,6 +311,29 @@ base64 -i project.env | tr -d '\n'
 
 `project.env` is ignored by git.
 
+For the pre-live profile, copy `deploy/sample-data.env.example` to the ignored
+`deploy/sample-data.env`, replace every placeholder, and store it separately:
+
+```bash
+gh secret set SAMPLE_DATA_ENV_B64 --env production \
+  --body "$(base64 -i deploy/sample-data.env | tr -d '\n')"
+gh variable set DEPLOY_DATA_PROFILE --env production --body sample_test
+```
+
+Only for the first release that is authorized to replace an incompatible
+pre-live database, also set the exact candidate tag, then remove the variable
+after that release succeeds:
+
+```bash
+gh variable set SAMPLE_TEST_RESET_RELEASE_TAG --env production --body '<release-tag>'
+gh variable delete SAMPLE_TEST_RESET_RELEASE_TAG --env production
+```
+
+The sample credential file is never added to `project.env`. CI validates it,
+uploads it only for a `sample_test` deployment, supplies passwords to the
+one-off fixture container through process environment, and removes the remote
+file on both success and diagnostic failure paths.
+
 ## VPS Requirements
 
 - Docker Engine with Docker Compose v2.
@@ -309,21 +353,25 @@ containers to ports `80` or `443`.
 
 ## First Platform Administrator Bootstrap
 
-V64 intentionally does not add an unauthenticated Platform-admin HTTP
-bootstrap. After the migration is applied, an operator may promote one exact
-existing active user only while no active Platform Admin exists:
+V64/V74 intentionally do not add an unauthenticated Platform-admin HTTP
+bootstrap. After the migrations are applied, an operator creates one dedicated
+Platform identity only while no active Platform Admin exists. Never reuse a
+Tenant owner, manager, or staff login. Put the initial password in a regular
+owner-readable-only file (`chmod 600`) and do not pass it on the command line:
 
 ```bash
 cd backend
 go run ./cmd/platform-access bootstrap-admin \
   --email operator@example.com \
+  --full-name "Platform Administrator" \
+  --password-file /run/secrets/manleai-platform-admin-password \
   --action-key initial-platform-admin-2026-07-26 \
   --reason approved-change-reference
 ```
 
 The command prefers the migration-owner `MIGRATION_DATABASE_URL` (and uses
 `DATABASE_URL` only in non-RLS legacy/local setups), takes an advisory
-lock, verifies the target account is active, creates the assignment plus
+lock, creates an immutable `principal_scope=platform` identity and assignment plus
 immutable action/event evidence atomically, and prints only the bounded
 assignment result. Exact action replay returns the same result. Changed action
 reuse conflicts, and the command closes permanently as soon as any active
@@ -332,8 +380,67 @@ assignment, capability, and PII-grant changes use the authenticated
 `/api/platform/access/*` APIs. Do not use direct SQL or the legacy
 `super_admin` role as an authorization substitute.
 
+If the email already belongs to a Tenant identity, the command returns a
+not-found outcome and never converts it. A person needing access to both realms
+must have two distinct login emails/identities.
+
 `--reason` is an opaque operator change reference, not a note. It must match
 `[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}` and must not contain customer data.
+
+## Opt-In Sample Test Data
+
+V73 adds only the `live|sample_test` classification contract to `users` and
+`salons`; the normal API startup migration chain never inserts a user, salon,
+or fixture. Sample data is a separate, explicit profile owned by
+`backend/sampledata`. It is allowed on local and on the current pre-live
+production deployment, but it refuses any database that already contains a
+`live` user or salon.
+
+V74 separately classifies the two sample operations identities as `platform`
+and the Lotus owner as `tenant`. Sample/live classification never grants a
+principal realm.
+
+The fixture creates exactly three `sample_test` accounts: one Platform Admin,
+one Platform Ops, and the fixed Lotus tenant owner
+`owner@lotusnails.example`. The Admin and Ops email/name values are supplied at
+execution time. The Ops account receives all seven non-PII capabilities for
+the one sample salon and receives no PII grant. The salon is `Lotus Nails
+Studio`, with seven canonical services, four technicians, full staff/service
+eligibility, local Monday-Saturday hours, `owner_manual` pending-review
+scheduling, and all provider, AI, public-catalog, recording, and SMS execution
+disabled.
+
+Passwords are required through process environment variables, must contain at
+least 12 characters, and are never command arguments, migration SQL, or
+repository defaults. Local setup is fully orchestrated by the root command:
+
+```bash
+make restart
+```
+
+That command creates missing private local config and credentials, builds the
+stack, runs migration checksum preflight, starts the API, applies the fixture,
+and waits for health. It stores logins in `.local/sample-data.env`. Repeating
+the command preserves compatible PostgreSQL data and is checksum-validated
+through `sample_data_migrations`.
+
+For the current pre-live production stack, CI/CD performs the same guarded
+fixture invocation after API migrations and before edge activation. A
+compatible sample deployment replays without duplicates. An incompatible
+ledger, legacy live rows, or partial sample fixture can be reset only after the
+exact tag is approved through `SAMPLE_TEST_RESET_RELEASE_TAG` and after the
+pre-deploy backup succeeds. No additional VPS command is required.
+
+Before production-live cutover, replace/reset the pre-live database through the
+approved database recovery procedure, set `DEPLOY_DATA_PROFILE=live`, clear
+`SAMPLE_TEST_RESET_RELEASE_TAG`, remove `SAMPLE_DATA_ENV_B64`, and deploy only
+the normal migration chain. The live post-migration guard requires zero
+`sample_test` users/salons and no `sample_data_migrations` table before edge
+activation. At that point `/api/auth/bootstrap/status` remains available
+because normal migrations created no account. Create the first owner through
+normal bootstrap, then use the documented first-Platform-Admin bootstrap
+against the approved existing account. CI/CD never invokes `/bin/sample-data`
+under `live`.
 
 ## Dashboard-Managed Provider Configuration
 
@@ -427,7 +534,9 @@ backfill and access integration tests must pass. V65-V72 complete the shared
 Business contract, Platform technical plane, runtime membership boundary, RLS,
 tenant quotas/fairness, audited AI-runtime control, public safe projection, and
 exact Platform PII-scope enforcement. All V63-V72 entries must appear exactly
-once in `app_schema_migrations` before the candidate is healthy.
+once in `app_schema_migrations` before the candidate is healthy. V73 adds
+fixture-free data classification; V74 adds immutable Tenant/Platform principal
+isolation and must also appear exactly once.
 Migration V43 adds the monotonic location-scoped provider snapshot generation
 used to reject stale and out-of-order full imports. On first deployment it
 preserves Square credentials and terminal connection states, but changes every
@@ -495,7 +604,9 @@ revisions.
 
 ## Production Rules
 
-- Do not run `backend/seed/local.sql` in production.
+- Do not invoke `/bin/sample-data` on a production-live database. Normal
+  migrations never apply its embedded fixture; CI/CD enforces the exact `live`
+  profile and fails if sample rows or the sample fixture ledger remain.
 - Do not log Square access or refresh tokens.
 - Keep `AUTO_MIGRATE=true` for the API unless another release process applies
   the same SQL migrations. The worker runs with `AUTO_MIGRATE=false` and starts

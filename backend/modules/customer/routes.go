@@ -6,7 +6,7 @@ import (
 )
 
 func RegisterRoutes(api fiber.Router, handler *Handler, jwtSecret string) {
-	group := api.Group("/salons", middleware.RequireAuth(jwtSecret))
+	group := api.Group("/salons", middleware.RequireAuth(jwtSecret), middleware.RequireTenantSalonAccess())
 	group.Get("/:id/customers", handler.List)
 	group.Post("/:id/customers", handler.Create)
 	group.Put("/:id/customers/:customer_id", handler.Update)

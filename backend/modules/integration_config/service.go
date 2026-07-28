@@ -482,6 +482,22 @@ func technicalMutationCommand(actorUserID, provider, actionType string, control 
 	}, nil
 }
 
+// SquareWebhookConfigured reports only whether this salon has a complete,
+// stored Square booking-webhook verification pair. It never falls back to
+// process configuration and never exposes either write-only value.
+func (s *Service) SquareWebhookConfigured(ctx context.Context, salonID string) (bool, error) {
+	item, secrets, err := s.resolveStored(ctx, strings.TrimSpace(salonID), ProviderSquare)
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	cfg := squareConfigFromStored(item, secrets)
+	return item.Enabled && validSquareWebhookNotificationURL(cfg.WebhookNotificationURL) &&
+		strings.TrimSpace(cfg.WebhookSignatureKey) != "", nil
+}
+
 func (s *Service) ResolveSquareConfig(ctx context.Context, salonID string) (config.SquareConfig, error) {
 	item, secrets, err := s.resolveStored(ctx, salonID, ProviderSquare)
 	if errors.Is(err, ErrNotFound) {

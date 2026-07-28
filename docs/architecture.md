@@ -40,6 +40,7 @@ The backend is organized as:
 cmd/api              Fiber HTTP server
 cmd/worker           Independently scheduled POS sync, booking lease, quote cleanup, Square webhook/repair, notification delivery, call retention, and scheduling-PII retention worker entrypoint
 cmd/platform-access  One-time first-Platform-Admin bootstrap for an exact existing active user; closes after an active Platform Admin exists
+cmd/sample-data      Guarded sample_test fixture runner; invoked by local/pre-live orchestration after startup migration, never by the migration chain itself
 cmd/scheduling-load-harness Bounded isolated scheduling replay/CAS/atomicity verification; never a production runtime
 internal/config      environment config
 internal/database    PostgreSQL context-aware runtime connection, runtime-role/RLS verification, and startup migrations through a separate migration connection
@@ -47,6 +48,7 @@ internal/schedulingload Synthetic Owner-first concurrency workloads, target guar
 internal/encryption  AES-GCM token encryption
 internal/middleware  current-principal JWT auth plus distributed route-class rate-limit enforcement
 internal/ratelimit   atomic Redis token bucket and typed allow/deny/dependency decisions
+sampledata           Separate checksum-ledger fixture migrations for one marked Lotus test tenant and three marked test identities
 modules/auth         login, HttpOnly refresh-cookie rotation, roles
 modules/access       SaaS ActorContext policy, tenant memberships, Platform roles/delegation, bounded PII grants, idempotent access actions, and immutable audit
 modules/business     shared Tenant/Platform Business contract for profile, services, staff, eligibility, hours, public settings, and customers
@@ -83,7 +85,7 @@ components/layout    independent Tenant and Platform shells plus route-surface g
 features/auth        login flow
 features/configuration-transfer export/import preview helpers and onboarding import UI
 features/business    shared Tenant/Platform Business editors and Tenant appointments/calls consoles
-features/platform    tenant directory/detail, Technical, Operations, Audit, access, and runtime-limit controls
+features/platform    tenant directory/detail, global Platform roles, tenant Access, Technical, Operations, Audit, and runtime-limit controls
 features/public      slug-scoped public salon landing projection
 features/onboarding salon profile creation
 lib/api              typed API client
@@ -142,9 +144,19 @@ when the previous compatible image performs the salon write. Existing
 `user_roles`, owner predicates, and scheduling-owner database triggers retain
 their original meaning during the expand/migrate window.
 
+V74 makes the identity boundary explicit. `users.principal_scope` is an
+immutable `tenant|platform` realm, independent from `data_classification`.
+Composite foreign keys require salon ownership, memberships, and legacy tenant
+roles to target Tenant identities, while Platform role, salon-delegation, and
+PII-grant rows target Platform identities. The migration aborts before
+backfill if any historical identity has evidence in both realms; it never
+chooses a realm by deleting or reinterpreting access. One human needing both
+surfaces must use two login identities.
+
 `RequireAuth` treats the JWT as identity proof only. On every protected request
-it reloads the active account, active platform-role assignment, and primary
-active salon membership, then attaches a server-owned `ActorContext`. Request
+it reloads the active account's immutable principal scope, scope-compatible
+current roles, and Tenant-only primary active salon membership, then attaches
+a server-owned `ActorContext`. Request
 headers, request bodies, JWT salon claims, and JWT role claims cannot select a
 tenant, Platform role, or access surface. Routes own the surface:
 
@@ -157,6 +169,18 @@ tenant, Platform role, or access surface. Routes own the surface:
 - Platform access to customer, call, appointment, or notification PII requires
   a separate non-revoked grant for the exact user, salon, and PII scope whose
   expiry is no more than 24 hours. Platform Admin is not exempt.
+
+V75 adds Owner-authorized Platform support for Services, AI Training, and
+Calls. It is a second gate, never a replacement for Platform RBAC: Platform
+Admin must retain the exact role permission and Platform Ops must retain the
+exact active salon assignment permission. The salon Owner approves one exact
+Platform identity, capability set, and expiry; non-PII access lasts at most 30
+days, while any Calls capability requires a request-linked Calls PII child and
+limits the full authorization to 24 hours. Reject, cancel, revoke, expiry,
+account/role change, or Ops assignment/capability change fails access closed.
+There is no Platform Admin bypass. Every allowed support route records the
+actual Platform actor, salon, capability, PII scope, method, and route in the
+immutable access event ledger before domain work.
 
 Access mutations use a stable action key, canonical request fingerprint,
 optimistic expected version, exact stored replay response, and immutable event.
@@ -182,7 +206,21 @@ consultation writes reuse the POS validation/persistence owner.
 
 Phases 4-10 complete the split. `/dashboard/*` is the Tenant Business surface;
 `/platform/*` is the Platform Admin/Ops surface with tenant detail tabs for
-Business, Technical, Operations, and Audit. Provider configuration, Square
+Business, Services, AI Training, Calls, Technical, Operations, Access, and
+Audit. Services, Calls, Settings, and AI Training use the original rich
+dashboard components through explicit Tenant/Platform data adapters; the
+Owner-first cutover does not replace those workflows with reduced dashboards.
+Platform Business therefore does not render its former reduced Services
+editor: the full shared Services tab is the sole Platform management surface
+for services, categories, category aliases, and service aliases. Legacy
+Platform Business service/category API paths remain compatibility routes but
+also require exact V75 Owner-authorized Services access and successful support
+action audit.
+Global Platform role
+governance stays at `/platform/access`; salon membership, exact-salon Platform
+Ops capabilities, Owner-support requests, and temporary non-Calls PII grants are managed at
+`/platform/tenants/:tenant_id/access` without a redundant salon selector.
+Provider configuration, Square
 connection/sync/test controls, scheduling-authority changes, ManleAI Calendar
 technical configuration, AI runtime enablement, and tenant runtime limits are
 Platform-only. Tenant users manage only their salon's Business objects. The
@@ -197,7 +235,15 @@ safe authority-aware JSON projection. V72 maps PII-bearing operational tables
 to `customers`, `calls`, `appointments`, or `notifications`, so Platform Admin
 and Ops need an active exact-scope grant even when querying through PostgreSQL.
 V69 adds database-owned per-tenant quotas, usage buckets, and fair worker claim
-limits. No caller-selected impersonation or tenant header is introduced.
+limits. V75 replaces direct feature-row access with exact
+base-capability-plus-Owner-authorization RLS for Services/Training/Calls. Calls
+may read only scheduling rows durably linked to the authorized call session;
+this is select-only evidence projection, not general Appointments access or
+scheduling authority. Its service/category/consultation reads are limited to
+the Calls renderer and still require linked Calls PII; no Services write is
+granted. Platform support repositories authorize the actual actor and preserve
+that actor in mutation/audit fields rather than substituting the Owner identity.
+No caller-selected impersonation or tenant header is introduced.
 
 ## Scheduling Authority Contract
 
@@ -1022,6 +1068,13 @@ structured authority-owned answers, the scheduling/booking service, or
 authority-specific confirmation checks. Current provider-owned structured
 answers remain part of the Square external-provider runtime.
 
+Service aliases and category aliases are not Training knowledge. They are
+canonical structured children of `services` and `service_categories`, managed
+from the reused full Services dashboard and consumed by catalog-backed service
+understanding. AI Training exposes only an explicit reviewed
+correction-to-service-alias action; that action writes `service_aliases` and
+does not duplicate the phrase into `knowledge_items`.
+
 AI receptionist tone is salon-scoped runtime configuration on
 `salon_settings`. Tone presets guide spoken reply style, but backend
 conversation guardrails still own slot collection, handoff routing, and
@@ -1252,6 +1305,11 @@ SQL files under `backend/migrations` are the current database source of truth.
 The API startup migrator applies them once and records checksums in
 `app_schema_migrations`. Ent schema files mirror the table structure so
 generated clients can be introduced without changing the domain boundaries.
+V73 classifies users and salons as `live` or `sample_test`, defaulting every
+normal write to `live`. Sample fixture SQL is embedded under
+`backend/sampledata/migrations`, uses its own `sample_data_migrations` ledger,
+and is unreachable from the startup migrator. Its command is an explicit
+pre-live/local operation that fails when live identities or tenants exist.
 
 Domain ownership is separate from scheduling execution. ManleAI owns canonical
 salon records and owner workflow state. The captured scheduling authority owns

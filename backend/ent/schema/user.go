@@ -20,6 +20,8 @@ func (User) Fields() []ent.Field {
 		field.String("full_name").NotEmpty(),
 		field.String("phone").Optional(),
 		field.String("status").Default("active"),
+		field.Enum("principal_scope").Values("tenant", "platform").Default("tenant").Immutable(),
+		field.Enum("data_classification").Values("live", "sample_test").Default("live"),
 		field.Time("created_at").Default(time.Now),
 		field.Time("updated_at").Default(time.Now).UpdateDefault(time.Now),
 	}

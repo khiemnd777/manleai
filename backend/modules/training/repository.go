@@ -21,7 +21,10 @@ func NewRepository(db *sql.DB) *Repository {
 func (r *Repository) ListKnowledge(ctx context.Context, salonID string, ownerUserID string) ([]KnowledgeItem, error) {
 	rows, err := r.db.QueryContext(ctx, knowledgeSelect()+`
 		WHERE ki.salon_id = $1
-		  AND public.has_active_tenant_membership(s.id, $2::uuid)
+		  AND (
+		      public.has_active_tenant_membership(s.id, $2::uuid)
+		      OR public.app_active_support_authorization($2::uuid, s.id, 'training.read')
+		  )
 		ORDER BY ki.updated_at DESC
 	`, salonID, ownerUserID)
 	if err != nil {
@@ -91,7 +94,14 @@ func (r *Repository) UpdateKnowledge(ctx context.Context, salonID string, ownerU
 		    updated_at = now()
 		WHERE id = $5
 		  AND salon_id = $6
-		  AND EXISTS (SELECT 1 FROM salons WHERE salons.id = knowledge_items.salon_id AND public.has_active_tenant_membership(salons.id, $7::uuid))
+		  AND EXISTS (
+		      SELECT 1 FROM salons
+		      WHERE salons.id = knowledge_items.salon_id
+		        AND (
+		            public.has_active_tenant_membership(salons.id, $7::uuid)
+		            OR public.app_active_support_authorization($7::uuid, salons.id, 'training.write')
+		        )
+		  )
 	`, req.Title, req.Category, req.Body, req.Status, itemID, salonID, ownerUserID)
 	if err != nil {
 		return nil, err
@@ -107,7 +117,14 @@ func (r *Repository) DeleteKnowledge(ctx context.Context, salonID string, ownerU
 		DELETE FROM knowledge_items
 		WHERE id = $1
 		  AND salon_id = $2
-		  AND EXISTS (SELECT 1 FROM salons WHERE salons.id = knowledge_items.salon_id AND public.has_active_tenant_membership(salons.id, $3::uuid))
+		  AND EXISTS (
+		      SELECT 1 FROM salons
+		      WHERE salons.id = knowledge_items.salon_id
+		        AND (
+		            public.has_active_tenant_membership(salons.id, $3::uuid)
+		            OR public.app_active_support_authorization($3::uuid, salons.id, 'training.write')
+		        )
+		  )
 	`, itemID, salonID, ownerUserID)
 	if err != nil {
 		return err
@@ -121,7 +138,10 @@ func (r *Repository) DeleteKnowledge(ctx context.Context, salonID string, ownerU
 func (r *Repository) ListCorrections(ctx context.Context, salonID string, ownerUserID string) ([]OwnerCorrection, error) {
 	rows, err := r.db.QueryContext(ctx, correctionSelect()+`
 		WHERE oc.salon_id = $1
-		  AND public.has_active_tenant_membership(s.id, $2::uuid)
+		  AND (
+		      public.has_active_tenant_membership(s.id, $2::uuid)
+		      OR public.app_active_support_pii_grant($2::uuid, s.id, 'training.read', 'calls')
+		  )
 		ORDER BY oc.created_at DESC
 		LIMIT 50
 	`, salonID, ownerUserID)
@@ -144,7 +164,10 @@ func (r *Repository) ListCorrections(ctx context.Context, salonID string, ownerU
 func (r *Repository) ListServiceAliases(ctx context.Context, salonID string, ownerUserID string) ([]ServiceAlias, error) {
 	rows, err := r.db.QueryContext(ctx, serviceAliasSelect()+`
 		WHERE sa.salon_id = $1
-		  AND public.has_active_tenant_membership(s.id, $2::uuid)
+		  AND (
+		      public.has_active_tenant_membership(s.id, $2::uuid)
+		      OR public.app_active_support_authorization($2::uuid, s.id, 'services.read')
+		  )
 		ORDER BY sa.updated_at DESC
 		LIMIT 200
 	`, salonID, ownerUserID)
@@ -255,7 +278,10 @@ func (r *Repository) ApplyCorrection(ctx context.Context, salonID string, ownerU
 		JOIN salons s ON s.id = oc.salon_id
 		WHERE oc.id = $1
 		  AND oc.salon_id = $2
-		  AND public.has_active_tenant_membership(s.id, $3::uuid)
+		  AND (
+		      public.has_active_tenant_membership(s.id, $3::uuid)
+		      OR public.app_active_support_pii_grant($3::uuid, s.id, 'training.write', 'calls')
+		  )
 		FOR UPDATE
 	`, correctionID, salonID, ownerUserID).Scan(&lockedID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -304,7 +330,10 @@ func (r *Repository) ApplyServiceAliasCorrection(ctx context.Context, salonID st
 		JOIN salons s ON s.id = oc.salon_id
 		WHERE oc.id = $1
 		  AND oc.salon_id = $2
-		  AND public.has_active_tenant_membership(s.id, $3::uuid)
+		  AND (
+		      public.has_active_tenant_membership(s.id, $3::uuid)
+		      OR public.app_active_support_pii_grant($3::uuid, s.id, 'training.write', 'calls')
+		  )
 		FOR UPDATE
 	`, correctionID, salonID, ownerUserID).Scan(&lockedID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -410,7 +439,14 @@ func (r *Repository) UpdateCorrectionStatus(ctx context.Context, salonID string,
 		    updated_at = now()
 		WHERE id = $2
 		  AND salon_id = $3
-		  AND EXISTS (SELECT 1 FROM salons WHERE salons.id = owner_corrections.salon_id AND public.has_active_tenant_membership(salons.id, $4::uuid))
+		  AND EXISTS (
+		      SELECT 1 FROM salons
+		      WHERE salons.id = owner_corrections.salon_id
+		        AND (
+		            public.has_active_tenant_membership(salons.id, $4::uuid)
+		            OR public.app_active_support_pii_grant($4::uuid, salons.id, 'training.write', 'calls')
+		        )
+		  )
 	`, status, correctionID, salonID, ownerUserID)
 	if err != nil {
 		return nil, err
@@ -425,7 +461,10 @@ func (r *Repository) getKnowledge(ctx context.Context, salonID string, ownerUser
 	item, err := scanKnowledgeItem(r.db.QueryRowContext(ctx, knowledgeSelect()+`
 		WHERE ki.id = $1
 		  AND ki.salon_id = $2
-		  AND public.has_active_tenant_membership(s.id, $3::uuid)
+		  AND (
+		      public.has_active_tenant_membership(s.id, $3::uuid)
+		      OR public.app_active_support_authorization($3::uuid, s.id, 'training.read')
+		  )
 	`, itemID, salonID, ownerUserID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -437,7 +476,10 @@ func (r *Repository) getCorrection(ctx context.Context, salonID string, ownerUse
 	item, err := scanOwnerCorrection(r.db.QueryRowContext(ctx, correctionSelect()+`
 		WHERE oc.id = $1
 		  AND oc.salon_id = $2
-		  AND public.has_active_tenant_membership(s.id, $3::uuid)
+		  AND (
+		      public.has_active_tenant_membership(s.id, $3::uuid)
+		      OR public.app_active_support_pii_grant($3::uuid, s.id, 'training.read', 'calls')
+		  )
 	`, correctionID, salonID, ownerUserID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -449,7 +491,11 @@ func (r *Repository) getServiceAlias(ctx context.Context, salonID string, ownerU
 	item, err := scanServiceAlias(r.db.QueryRowContext(ctx, serviceAliasSelect()+`
 		WHERE sa.id = $1
 		  AND sa.salon_id = $2
-		  AND public.has_active_tenant_membership(s.id, $3::uuid)
+		  AND (
+		      public.has_active_tenant_membership(s.id, $3::uuid)
+		      OR public.app_active_support_authorization($3::uuid, s.id, 'services.read')
+		      OR public.app_active_support_authorization($3::uuid, s.id, 'training.read')
+		  )
 	`, aliasID, salonID, ownerUserID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -460,7 +506,16 @@ func (r *Repository) getServiceAlias(ctx context.Context, salonID string, ownerU
 func (r *Repository) ensureSalonOwner(ctx context.Context, salonID string, ownerUserID string) error {
 	var exists bool
 	if err := r.db.QueryRowContext(ctx, `
-			SELECT EXISTS (SELECT 1 FROM salons WHERE id = $1 AND public.has_active_tenant_membership(id, $2::uuid))
+			SELECT EXISTS (
+				SELECT 1 FROM salons
+				WHERE id = $1
+				  AND (
+				      public.has_active_tenant_membership(id, $2::uuid)
+				      OR public.app_active_support_authorization($2::uuid, id, 'services.write')
+				      OR public.app_active_support_authorization($2::uuid, id, 'training.write')
+				      OR public.app_active_support_authorization($2::uuid, id, 'calls.manage')
+				  )
+			)
 	`, salonID, ownerUserID).Scan(&exists); err != nil {
 		return err
 	}
@@ -492,7 +547,11 @@ func (r *Repository) ensureSessionOwner(ctx context.Context, salonID string, own
 			JOIN salons s ON s.id = cs.salon_id
 			WHERE cs.id = $1
 			  AND cs.salon_id = $2
-				  AND public.has_active_tenant_membership(s.id, $3::uuid)
+			  AND (
+			      public.has_active_tenant_membership(s.id, $3::uuid)
+			      OR public.app_active_support_pii_grant($3::uuid, s.id, 'training.write', 'calls')
+			      OR public.app_active_support_pii_grant($3::uuid, s.id, 'calls.manage', 'calls')
+			  )
 		)
 	`, sessionID, salonID, ownerUserID).Scan(&exists); err != nil {
 		return err
