@@ -283,6 +283,18 @@ image and is not the strict RLS contract release. The later contract migration
 is permitted only after runtime observation proves no unbound provider/worker
 base-table path remains.
 
+V80 is that strict contract release. `app_rls_system_salon_allowed` requires
+`app.system_salon_id` to equal the row's `salon_id` for every ordinary
+`provider` or `worker` base-table read and write; missing, malformed, unbound,
+or cross-tenant context fails closed. V80 also rewrites the Calls, voice,
+Services/Training support, and Platform-support policies that V75-V76 installed
+with direct system-scope branches, then audits `pg_policies` and aborts if any
+such branch remains outside the exact matcher. Only the bounded V78 provider
+locators and V79 worker discovery/claim functions may operate unbound under
+`SECURITY DEFINER`; every returned item is tenant-bound before ordinary
+repository work. V80 is code-ready evidence only until the V79-aware image and
+all provider/worker paths have been observed in the target environment.
+
 ## Scheduling Authority Contract
 
 `docs/scheduling-authority.md` is the normative boundary for availability,

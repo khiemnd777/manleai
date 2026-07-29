@@ -14,7 +14,7 @@ import (
 	"github.com/manleai/ai-receptionist/internal/databasecontext"
 )
 
-func TestV72RuntimeRoleEnforcesTenantPublicAndPlatformPIIBoundaries(t *testing.T) {
+func TestV80RuntimeRoleEnforcesActorPublicAndSystemTenantBoundaries(t *testing.T) {
 	adminURL := os.Getenv("MIGRATION_TEST_DATABASE_URL")
 	if adminURL == "" {
 		t.Skip("MIGRATION_TEST_DATABASE_URL is not set")
@@ -120,8 +120,9 @@ func TestV72RuntimeRoleEnforcesTenantPublicAndPlatformPIIBoundaries(t *testing.T
 	}
 	if _, err := adminDB.ExecContext(context.Background(), `
 		INSERT INTO call_sessions (salon_id,customer_name,customer_phone)
-		VALUES ($1,'RLS Caller','555-6804')
-	`, salonA); err != nil {
+		VALUES ($1,'RLS Caller A','555-6804'),
+		       ($2,'RLS Caller B','555-6806')
+	`, salonA, salonB); err != nil {
 		t.Fatalf("insert call fixture: %v", err)
 	}
 	if _, err := adminDB.ExecContext(context.Background(), `
@@ -186,7 +187,60 @@ func TestV72RuntimeRoleEnforcesTenantPublicAndPlatformPIIBoundaries(t *testing.T
 	assertServiceNames(databasecontext.WithActor(context.Background(), ownerA), "Tenant A Service")
 	assertServiceNames(databasecontext.WithActor(context.Background(), ownerB), "Tenant B Service")
 	assertServiceNames(databasecontext.WithScope(context.Background(), databasecontext.ScopePublic), "")
-	assertServiceNames(databasecontext.WithScope(context.Background(), databasecontext.ScopeWorker), "Tenant A Service,Tenant B Service")
+	assertServiceNames(databasecontext.WithScope(context.Background(), databasecontext.ScopeWorker), "")
+	assertServiceNames(databasecontext.WithScope(context.Background(), databasecontext.ScopeProvider), "")
+	assertServiceNames(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeWorker, salonA), "Tenant A Service")
+	assertServiceNames(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeWorker, salonB), "Tenant B Service")
+	assertServiceNames(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeProvider, salonA), "Tenant A Service")
+	assertServiceNames(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeProvider, salonB), "Tenant B Service")
+
+	assertSystemRowCount := func(ctx context.Context, table string, want int) {
+		t.Helper()
+		var got int
+		query := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE salon_id IN ($1,$2)", pq.QuoteIdentifier(table))
+		if err := runtimeDB.QueryRowContext(ctx, query, salonA, salonB).Scan(&got); err != nil {
+			t.Fatalf("query %s system visibility: %v", table, err)
+		}
+		if got != want {
+			t.Fatalf("%s system visibility=%d, want %d", table, got, want)
+		}
+	}
+	assertSystemRowCount(databasecontext.WithScope(context.Background(), databasecontext.ScopeWorker), "call_sessions", 0)
+	assertSystemRowCount(databasecontext.WithScope(context.Background(), databasecontext.ScopeProvider), "call_sessions", 0)
+	assertSystemRowCount(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeWorker, salonA), "call_sessions", 1)
+	assertSystemRowCount(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeProvider, salonB), "call_sessions", 1)
+
+	assertServiceUpdates := func(ctx context.Context, targetSalonID string, want int64) {
+		t.Helper()
+		result, err := runtimeDB.ExecContext(ctx, `UPDATE services SET name=name WHERE salon_id=$1`, targetSalonID)
+		if err != nil {
+			t.Fatalf("update runtime service: %v", err)
+		}
+		got, err := result.RowsAffected()
+		if err != nil {
+			t.Fatalf("read updated service count: %v", err)
+		}
+		if got != want {
+			t.Fatalf("updated services=%d, want %d", got, want)
+		}
+	}
+	assertServiceUpdates(databasecontext.WithScope(context.Background(), databasecontext.ScopeWorker), salonA, 0)
+	assertServiceUpdates(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeWorker, salonA), salonA, 1)
+	assertServiceUpdates(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeWorker, salonA), salonB, 0)
+	assertServiceUpdates(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeProvider, salonB), salonB, 1)
+	assertServiceUpdates(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeProvider, salonB), salonA, 0)
+
+	var locatedSalonID string
+	if err := runtimeDB.QueryRowContext(
+		databasecontext.WithScope(context.Background(), databasecontext.ScopeProvider),
+		`SELECT public.app_provider_voice_phone_salon($1)::text`,
+		"555-6801",
+	).Scan(&locatedSalonID); err != nil {
+		t.Fatalf("locate provider voice salon: %v", err)
+	}
+	if locatedSalonID != salonA {
+		t.Fatalf("located provider salon=%q, want %q", locatedSalonID, salonA)
+	}
 
 	if _, err := adminDB.ExecContext(context.Background(), `
 		INSERT INTO pos_sync_jobs(salon_id,provider,entity_type,entity_id,operation)

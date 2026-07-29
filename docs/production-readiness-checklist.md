@@ -546,11 +546,16 @@ RPO/RTO evidence.
   functions, binds selected items to one salon before ordinary repository work,
   and enforces composite salon/session ownership for call children. V79 leaves
   provider/worker base RLS unchanged for rollback compatibility.
-- [ ] Phase 15 contract release: after the V79-aware image is deployed and all
-  provider/worker paths are observed, require matching `app.system_salon_id` in
-  provider/worker base RLS and run runtime-role negative tests for unbound and
-  cross-tenant base-table access. Do not mark tenant-system isolation complete
-  or co-ship this policy tightening with V79.
+- [x] Phase 15 contract release implementation: V80 requires matching
+  `app.system_salon_id` in provider/worker base RLS, rewrites the direct
+  Calls/Support system branches, audits the final PostgreSQL policy catalog,
+  and adds runtime-role negative tests for unbound and cross-tenant base-table
+  access. V80 remains blocked from production cutover until the V79-aware image
+  is deployed on every replica and all provider/worker paths are observed.
+- [ ] Phase 15 contract production cutover: record the exact V79-aware image,
+  drain every older API/worker replica, observe all provider callbacks and
+  worker classes, then apply V80 and verify post-migration negative tests plus
+  operations health. Rollback may use only a declared V79-aware image.
 - [x] Restore and reuse the full existing `ServicesDashboard`, `CallsDashboard`,
   `SettingsDashboard`, and `TrainingDashboard` on their Tenant routes; reuse the
   same Services/Calls/Training components through explicit Platform surface

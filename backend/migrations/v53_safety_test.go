@@ -157,7 +157,7 @@ func TestV53LegacyUnknownQuoteFailsClosedBeforeProviderDispatchAfterABA(t *testi
 		t.Fatalf("open V53 service database: %v", err)
 	}
 	db.SetMaxOpenConns(1)
-	defer db.Close()
+	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
 	schemaName := "v53_service_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	quotedSchema := pq.QuoteIdentifier(schemaName)
