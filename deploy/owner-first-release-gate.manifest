@@ -95,6 +95,8 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/migrations/v78_safety_test.go
   backend/migrations/v79_safety_test.go
   backend/migrations/v79_integration_test.go
+  backend/migrations/v80_safety_test.go
+  backend/migrations/v80_integration_test.go
   backend/sampledata/runner_test.go
   backend/sampledata/runner_integration_test.go
   backend/cmd/worker/retention_registration_test.go

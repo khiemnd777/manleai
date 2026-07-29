@@ -272,14 +272,14 @@ CREATE ROLE manleai_runtime LOGIN PASSWORD '<separate-secret>'
 ```
 
 Do not put the password in shell history. The candidate API uses the migration
-connection to apply all pending release migrations through V79 and grant
+connection to apply all pending release migrations through V80 and grant
 table/sequence/function privileges to the
 already-existing runtime role, then closes that connection. API requests and
 the worker use only the runtime connection. The worker does not receive
 `MIGRATION_DATABASE_URL`; production startup fails if the connected role name,
 ownership, `SUPERUSER`, `BYPASSRLS`, or RLS policy checks are unsafe.
 
-### V78-V79 system-tenant context rollout
+### V78-V80 system-tenant context rollout
 
 `V78__system_tenant_context_expand.sql` is intentionally the expand release of
 a two-release database change. It adds `app.system_salon_id` support and narrow
@@ -300,6 +300,24 @@ still does not tighten provider/worker base RLS, so it must not be described as
 the contract release. Deploy and observe V79 worker/provider paths first; only a
 later separately reviewed migration may require matching
 `app.system_salon_id` in base RLS.
+
+`V80__strict_system_tenant_rls_contract.sql` is that separate contract
+migration. Do not allow the candidate API to apply V80 while any pre-V79 API or
+worker replica can still use the database. Before migration, record the exact
+V79-aware image revision, prove all old replicas are drained, and record
+successful observation of Twilio inbound/stream/callback, Square OAuth/webhook,
+POS sync, booking lease recovery, Square repair, owner/customer notification,
+call expiry, and scheduling-retention paths. V80 requires exact
+`app.system_salon_id` matching for provider/worker base-table policies,
+including the direct Calls/Support policies introduced by V75-V76, while the
+bounded V78-V79 locator/discovery functions remain the only unbound paths.
+
+After V80 applies, run runtime-role negative checks for unbound and cross-tenant
+base-table reads/writes, exercise one provider callback and one claimed item per
+worker class, and inspect operations-health for failures. Image rollback is
+limited to a V79-aware image that carries system tenant context and uses V79
+discovery functions. A pre-V79 image is database-incompatible after V80; never
+restore the production database merely to remove the contract migration.
 
 Before deploying the strict voice resolver in this image, inspect the Platform
 technical integration-config API or persisted configuration records and confirm

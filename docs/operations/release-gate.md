@@ -100,6 +100,10 @@ coverage includes:
   functions, exact per-item worker binding, fail-closed call-child mismatch
   preflight, and composite salon/session foreign-key enforcement, with a static
   guard proving base RLS is still unchanged;
+- V80 strict system-tenant RLS matching for every ordinary provider/worker
+  base-table policy, runtime-role negative coverage for unbound and cross-tenant
+  reads/writes, and a PostgreSQL policy-catalog audit that rejects remaining
+  direct broad system-scope branches;
 - tenant quota/usage accounting, provider-write rejection, and fair worker
   claim limits without cross-tenant starvation;
 - immutable V74 Tenant/Platform principal scope, fail-closed mixed-identity
@@ -132,9 +136,10 @@ coverage includes:
 This is a repository contract gate. A passing run is evidence for code
 readiness at the tagged revision, not evidence about the current state of any
 salon's dashboard-managed provider configuration.
-For the V78-V79 preparation releases it also is not evidence that provider/worker base
-RLS has reached the later tenant-bound contract; that remains an explicit
-unchecked production-readiness item until the separate contract release.
+For V80 it also is not evidence that the required V79-aware image observation
+has occurred in the target environment. The gate proves the strict contract at
+the tagged revision; production cutover still requires all old replicas to be
+drained and provider/worker paths to be observed before migration.
 
 ## Release Dependency
 

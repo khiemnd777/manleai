@@ -191,7 +191,7 @@ managed through the dashboard-backed integration configuration. Do not inspect
 or copy repository environment values to diagnose their active state, and do
 not place provider secrets or customer data in release/rollback evidence.
 
-## V78-V79 Expand/Contract Rollback Note
+## V78-V80 Expand/Contract Rollback Note
 
 V78 adds the optional `app.system_salon_id` session context and provider locator
 functions but does not alter provider/worker base RLS. V79 adds bounded worker
@@ -204,4 +204,13 @@ V79-aware image has been deployed and provider callbacks, OAuth/webhooks, POS
 sync, Square repair, notification, conversation-expiry, and scheduling-retention
 workers have been observed. If that later contract release fails, roll back
 only to an image that supplies the V78 context and V79 safe global discovery
-functions; never restore the database merely to remove V78 or V79.
+functions; never restore the database merely to remove V78, V79, or V80.
+
+V80 is the later strict contract release. It changes provider/worker ordinary
+base-table policies from broad system-scope access to exact
+`app.system_salon_id = salon_id` access and audits the final PostgreSQL policy
+catalog. Once V80 is applied, a pre-V79 image is not a valid rollback target:
+its unbound direct worker queries will fail closed. Roll back only to the exact
+declared V79-aware compatible image, keep V80 in place, and diagnose the
+provider/worker path under that image. Database restore remains a separate DBA-
+approved recovery decision for data recovery, not a policy rollback mechanism.
