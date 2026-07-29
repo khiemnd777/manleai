@@ -297,6 +297,13 @@ Conversation source-of-truth routing is mandatory:
   categories, consultation profiles, and knowledge; only the selected
   authority's hours/provider/config evidence participates. Scheduling writes
   remain independently fenced by the neutral scheduling boundary.
+- Full-chain informational acceptance evidence is owned by
+  `backend/modules/conversation/authority_informational_contract_integration_test.go`.
+  It enters `Service.Message` with PostgreSQL-backed tenants and covers
+  per-turn greeting/tone, common resource mutations, authority-specific
+  service/staff/hours projections, two process-local caches, double-read retry,
+  simulator/phone parity, transcript source metadata, exact replay, tenant
+  isolation, and zero availability/booking/POS calls.
 - `service_consultation_profiles` owns salon-managed consultation facts and
   required consultation fields for a service. Runtime consultation planning
   must consume the ready profile instead of recreating its meaning in prompt
@@ -494,7 +501,7 @@ Conversation source-of-truth routing is mandatory:
   fail-closed profile/toggle constraints in
   `backend/migrations/V40__consultation_fail_closed_defaults.sql` and session
   revision in `backend/migrations/V42__conversation_state_revision.sql`. `dialog_state`
-  version 5 persists pending clarification, active consultation and guidance
+  version 6 persists pending clarification, active consultation and guidance
   state, bounded mutation history, no-progress count, and
   draft/review/authorization revisions. `normalizedDialogState` promotes legacy
   version 3 guidance prompt/counter fields into the nested guidance object on
