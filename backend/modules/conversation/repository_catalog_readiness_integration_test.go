@@ -176,7 +176,7 @@ func assertBookingCatalogNotReady(t *testing.T, ctx context.Context, repo *Repos
 	if err != nil {
 		t.Fatalf("load consultant answer-context fence: %v", err)
 	}
-	if fence.Ready {
+	if externalProviderAnswerContextReady(fence) {
 		t.Fatalf("answer-context fence unexpectedly ready: %#v", fence)
 	}
 	services, err := repo.ListBookableServices(ctx, salonID)
@@ -198,7 +198,7 @@ func assertConsultantCatalog(t *testing.T, ctx context.Context, repo *Repository
 	if err != nil {
 		t.Fatalf("load consultant answer-context fence: %v", err)
 	}
-	if fence.Ready != (wantCount > 0) {
+	if externalProviderAnswerContextReady(fence) != (wantCount > 0) {
 		t.Fatalf("answer-context fence readiness = %#v, want ready=%t", fence, wantCount > 0)
 	}
 	assertGuidanceCatalog(t, ctx, repo, salonID, serviceName, serviceAlias, wantCount)

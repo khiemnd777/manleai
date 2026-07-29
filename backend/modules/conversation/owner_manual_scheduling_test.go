@@ -178,7 +178,7 @@ func TestOwnerManualAvailabilityCollectsPreferenceWithoutAvailabilityClaim(t *te
 
 func TestOwnerManualAnswerContextUsesCanonicalCatalogWithoutProviderSnapshot(t *testing.T) {
 	base := newFakeConversationStore()
-	base.answerContextFence = AnswerContextFence{SchedulingAuthority: booking.SchedulingAuthorityOwnerManual, Ready: true}
+	base.answerContextFence = AnswerContextFence{SchedulingAuthority: booking.SchedulingAuthorityOwnerManual}
 	base.services[0].BookingReady = false
 	base.activeStaff = []StaffOption{{ID: "canonical-staff-1", Name: "Anh", AIBookable: true}}
 	store := &ownerCanonicalConversationStore{fakeConversationStore: base}
@@ -199,7 +199,6 @@ func TestOwnerManualInformationalHoursUseLocalDataWithoutSchedulingOrPOS(t *test
 		SchedulingAuthority:        booking.SchedulingAuthorityOwnerManual,
 		SchedulingAuthorityVersion: 4,
 		LocalBusinessHoursVersion:  9,
-		Ready:                      true,
 	}
 	store.ownerHours = []BusinessHourPeriod{
 		{ID: "owner_thu_morning", DayOfWeek: 4, StartLocalTime: "09:00:00", EndLocalTime: "12:00:00", Source: "local_override"},
@@ -237,13 +236,60 @@ func TestOwnerManualInformationalHoursUseLocalDataWithoutSchedulingOrPOS(t *test
 	}
 }
 
+func TestManleAICalendarInformationalHoursUseCachedContextWithoutSchedulingOrPOS(t *testing.T) {
+	store := newFakeConversationStore()
+	store.answerContextFence = AnswerContextFence{
+		SchedulingAuthority:        booking.SchedulingAuthorityManleAICalendar,
+		SchedulingAuthorityVersion: 6,
+		CalendarConfigVersion:      14,
+		CalendarActivatedVersion:   14,
+	}
+	store.guidanceServices = []ServiceOption{{ID: "service_soft_gel", Name: "Soft Gel Extensions", DurationMinutes: 80}}
+	store.internalServices = append([]ServiceOption(nil), store.guidanceServices...)
+	store.activeStaff = []StaffOption{{ID: "staff_ngoc", Name: "Ngoc", AIBookable: true}}
+	store.internalStaff = append([]StaffOption(nil), store.activeStaff...)
+	store.internalHours = []BusinessHourPeriod{
+		{ID: "calendar_sat_morning", DayOfWeek: 6, StartLocalTime: "10:00:00", EndLocalTime: "13:00:00", Source: "local_override"},
+		{ID: "calendar_sat_afternoon", DayOfWeek: 6, StartLocalTime: "14:00:00", EndLocalTime: "19:30:00", Source: "local_override"},
+	}
+	tool := newOwnerManualSchedulingTool("unused")
+	service := NewService(store, tool)
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal:       "information",
+		Confidence: 0.99,
+		Questions:  []ConversationQuestion{{Subject: ConversationQuestionHours, Confidence: 0.99}},
+	}})
+	service.now = fixedNow
+
+	if err := service.PrewarmAnswerContext(context.Background(), store.session.SalonID); err != nil {
+		t.Fatalf("prewarm calendar answer context: %v", err)
+	}
+	session, err := service.Message(context.Background(), store.session.SalonID, "owner_1", store.session.ID, MessageRequest{
+		Message: "Does the studio stay open late on Saturday?",
+	})
+	if err != nil {
+		t.Fatalf("calendar informational hours: %v", err)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Hours for Saturday are 10:00 AM to 1:00 PM and 2:00 PM to 7:30 PM") {
+		t.Fatalf("calendar informational hours reply = %q", store.lastTurn.AIMessage)
+	}
+	if store.calendarEvidenceCalls != 1 || store.internalHoursCalls != 1 {
+		t.Fatalf("calendar evidence/hours loads = %d/%d, cache hit should not rehydrate", store.calendarEvidenceCalls, store.internalHoursCalls)
+	}
+	if tool.authorityChecks != 0 || tool.availabilityChecks != 0 || tool.actionCalls != 0 || tool.fakeBookingTool.availabilityCalls != 0 || tool.fakeBookingTool.calls != 0 {
+		t.Fatalf("calendar informational hours called scheduling/POS: authority=%d availability=%d action=%d provider_availability=%d provider_booking=%d", tool.authorityChecks, tool.availabilityChecks, tool.actionCalls, tool.fakeBookingTool.availabilityCalls, tool.fakeBookingTool.calls)
+	}
+	if session.AppointmentID != "" || session.BookingAttemptID != "" || session.Outcome == OutcomeBookingConfirmed {
+		t.Fatalf("calendar informational hours changed booking evidence: %#v", session)
+	}
+}
+
 func TestOwnerManualMissingHoursSayNotConfiguredWithoutPOSClaim(t *testing.T) {
 	store := newFakeConversationStore()
 	store.answerContextFence = AnswerContextFence{
 		SchedulingAuthority:        booking.SchedulingAuthorityOwnerManual,
 		SchedulingAuthorityVersion: 2,
 		LocalBusinessHoursVersion:  3,
-		Ready:                      true,
 	}
 	tool := newOwnerManualSchedulingTool("unused")
 	service := NewService(store, tool)

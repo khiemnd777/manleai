@@ -396,7 +396,6 @@ func (f *phoneFlowConversationStore) GetAnswerContextFence(ctx context.Context, 
 		LocationID:         "location-phone-flow",
 		SnapshotGeneration: 1,
 		LastSyncAtRFC3339:  "2026-06-10T14:00:00Z",
-		Ready:              true,
 	}, nil
 }
 

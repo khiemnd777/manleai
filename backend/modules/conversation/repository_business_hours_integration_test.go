@@ -42,7 +42,7 @@ func TestPostgresAuthoritySpecificBusinessHoursSourcesAndOwnerCacheFence(t *test
 	if err != nil {
 		t.Fatalf("load initial owner answer-context fence: %v", err)
 	}
-	if initialFence.SchedulingAuthority != booking.SchedulingAuthorityOwnerManual || !initialFence.Ready || initialFence.LocalBusinessHoursVersion < 1 {
+	if initialFence.SchedulingAuthority != booking.SchedulingAuthorityOwnerManual || initialFence.LocalBusinessHoursVersion < 1 {
 		t.Fatalf("initial owner answer-context fence = %#v", initialFence)
 	}
 

@@ -257,7 +257,7 @@ func TestGuidanceUsesCanonicalCatalogWhileBookingSnapshotIsNotReady(t *testing.T
 			}
 			store.answerContextFence = AnswerContextFence{
 				ActiveProvider: "square", ConnectionStatus: "connected", LocationID: "location_1",
-				SnapshotGeneration: 1, Ready: false,
+				SnapshotGeneration: 1,
 			}
 			bookingTool := &fakeBookingTool{}
 			service := NewService(store, bookingTool)
@@ -293,7 +293,7 @@ func TestServiceMenuUsesCanonicalCatalogWhileBookingSnapshotIsNotReady(t *testin
 	}
 	store.answerContextFence = AnswerContextFence{
 		ActiveProvider: "square", ConnectionStatus: "connected", LocationID: "location_1",
-		SnapshotGeneration: 1, Ready: false,
+		SnapshotGeneration: 1,
 	}
 	bookingTool := &fakeBookingTool{}
 	service := NewService(store, bookingTool)

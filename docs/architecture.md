@@ -989,15 +989,22 @@ collection revisions cover the common service and staff catalogs, service
 aliases, service categories/category aliases, consultation profiles, and active
 knowledge consumed by every authority. `owner_manual` additionally includes the
 salon-wide `business_resource_versions` `business_hours` revision;
-`manleai_calendar` uses its config/activation/capability versions; and
+`manleai_calendar` uses its persisted config and activated versions; and
 `external_provider` uses active provider/location/snapshot generation/sync
 readiness. Authority-irrelevant provider evidence is normalized out of both
 owner-first modes, and the local-hours revision is normalized out when it is not
-the exact hours owner. Cache misses load structured records and then re-read the
-complete fence; a concurrent common-resource, authority, local-hours,
-internal-config, or provider-snapshot change retries the load. V81 seeds and
-maintains the service/staff collection revisions; the established V77 triggers
-own alias/category/profile/knowledge revisions. In external mode, canonical
+the exact hours owner. The per-turn lightweight fence does not load the
+`manleai_calendar` aggregate or recompute capability readiness. On a
+`manleai_calendar` cache miss, conversation loads the authoritative aggregate,
+uses `EvaluateReadiness` as the sole capability owner, and accepts that evidence
+only when its authority/config/activation versions match the lightweight fence.
+Cache misses load structured records and then re-read the complete fence; a
+concurrent common-resource, authority, local-hours, internal-config, activation,
+or provider-snapshot change retries the load. V81 seeds and maintains the
+service/staff collection revisions; V82 preserves those bumps for explicit
+child mutations but skips resource-version recreation after the owning salon
+has already been removed by a parent cascade; the established V77 triggers own
+alias/category/profile/knowledge revisions. In external mode, canonical
 active-provider linked services, service aliases, and category aliases remain
 available for menu answers and consultation when the snapshot is incomplete,
 but every service is marked not booking-ready. Provider-owned staff and imported

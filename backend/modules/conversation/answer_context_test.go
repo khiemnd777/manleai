@@ -31,7 +31,7 @@ func TestLoadAnswerContextValidatesDatabaseReadinessFenceOnEveryTurn(t *testing.
 	// availability data and booking eligibility must fail closed.
 	store.answerContextFence = AnswerContextFence{
 		ActiveProvider: "square", ConnectionStatus: "syncing", LocationID: "location_2",
-		SnapshotGeneration: 2, Ready: false,
+		SnapshotGeneration: 2,
 	}
 	notReady, err := service.loadAnswerContext(context.Background(), "salon_1")
 	if err != nil {
@@ -62,7 +62,7 @@ func TestLoadAnswerContextValidatesDatabaseReadinessFenceOnEveryTurn(t *testing.
 	store.businessHours = []BusinessHourPeriod{{ID: "hours_b", DayOfWeek: 2, StartLocalTime: "10:00:00", EndLocalTime: "18:00:00"}}
 	store.answerContextFence = AnswerContextFence{
 		ActiveProvider: "square", ConnectionStatus: "active", LocationID: "location_2",
-		SnapshotGeneration: 2, LastSyncAtRFC3339: "2026-06-02T12:00:00Z", Ready: true,
+		SnapshotGeneration: 2, LastSyncAtRFC3339: "2026-06-02T12:00:00Z",
 	}
 	locationB, err := service.loadAnswerContext(context.Background(), "salon_1")
 	if err != nil {
@@ -88,7 +88,6 @@ func TestLoadAnswerContextUsesOwnerManagedHoursWithoutProviderHours(t *testing.T
 		SchedulingAuthority:        booking.SchedulingAuthorityOwnerManual,
 		SchedulingAuthorityVersion: 3,
 		LocalBusinessHoursVersion:  8,
-		Ready:                      true,
 	}
 	store.ownerHours = []BusinessHourPeriod{{
 		ID: "owner_hours", DayOfWeek: 4, StartLocalTime: "09:15:00", EndLocalTime: "18:45:00", Source: "local_override",
@@ -134,7 +133,6 @@ func TestLoadAnswerContextInvalidatesOwnerHoursCacheOnResourceVersionChange(t *t
 		SchedulingAuthority:        booking.SchedulingAuthorityOwnerManual,
 		SchedulingAuthorityVersion: 2,
 		LocalBusinessHoursVersion:  4,
-		Ready:                      true,
 	}
 	store.ownerHours = []BusinessHourPeriod{{ID: "hours_v4", Source: "local_override"}}
 	service := NewService(store, &fakeBookingTool{})
@@ -263,7 +261,6 @@ func TestLoadAnswerContextInvalidatesCachedCommonResourcesOnCollectionVersionCha
 				StaffCatalogVersion:         1,
 				KnowledgeBaseVersion:        1,
 				LocalBusinessHoursVersion:   1,
-				Ready:                       true,
 			}
 			store.guidanceServices = []ServiceOption{{ID: "service_1", Name: "Classic Manicure", DurationMinutes: 45}}
 			store.serviceAliases = []ServiceAlias{{ID: "alias_old", ServiceID: "service_1", Alias: "Regular manicure"}}
@@ -334,7 +331,7 @@ func TestLoadAnswerContextRetriesWhenCollectionChangesBetweenFenceReads(t *testi
 	versionOne := AnswerContextFence{
 		SchedulingAuthority:   booking.SchedulingAuthorityOwnerManual,
 		ServiceCatalogVersion: 1, StaffCatalogVersion: 1, KnowledgeBaseVersion: 1,
-		LocalBusinessHoursVersion: 1, Ready: true,
+		LocalBusinessHoursVersion: 1,
 	}
 	versionTwo := versionOne
 	versionTwo.ServiceCatalogVersion = 2
@@ -381,7 +378,6 @@ func TestLoadAnswerContextSwitchesHoursSourceWithSchedulingAuthority(t *testing.
 		SchedulingAuthority:        booking.SchedulingAuthorityOwnerManual,
 		SchedulingAuthorityVersion: 2,
 		LocalBusinessHoursVersion:  6,
-		Ready:                      true,
 	}
 	owner, err := service.loadAnswerContext(context.Background(), store.session.SalonID)
 	if err != nil {
@@ -402,7 +398,6 @@ func TestLoadAnswerContextUsesActivatedInternalPoliciesAndLocalOverrides(t *test
 		SchedulingAuthorityVersion: 7,
 		CalendarConfigVersion:      12,
 		CalendarActivatedVersion:   12,
-		Ready:                      true,
 	}
 	store.services = nil
 	store.guidanceServices = []ServiceOption{
@@ -445,7 +440,6 @@ func TestLoadAnswerContextInvalidatesInternalCacheOnConfigVersionChange(t *testi
 		SchedulingAuthorityVersion: 2,
 		CalendarConfigVersion:      4,
 		CalendarActivatedVersion:   4,
-		Ready:                      true,
 	}
 	store.internalServices = append([]ServiceOption(nil), store.services...)
 	store.internalStaff = append([]StaffOption(nil), store.staff...)
@@ -469,6 +463,126 @@ func TestLoadAnswerContextInvalidatesInternalCacheOnConfigVersionChange(t *testi
 	}
 	if second.CacheHit || len(second.BusinessHours) != 1 || second.BusinessHours[0].ID != "hours_v5" {
 		t.Fatalf("version 5 context did not replace cache: %#v", second)
+	}
+}
+
+func TestLoadAnswerContextStableManleAICalendarCacheHitSkipsAggregateEvidenceLoad(t *testing.T) {
+	store := newFakeConversationStore()
+	store.answerContextFence = AnswerContextFence{
+		SchedulingAuthority:        booking.SchedulingAuthorityManleAICalendar,
+		SchedulingAuthorityVersion: 9,
+		ServiceCatalogVersion:      3,
+		StaffCatalogVersion:        4,
+		CalendarConfigVersion:      17,
+		CalendarActivatedVersion:   17,
+	}
+	store.guidanceServices = []ServiceOption{{ID: "service_shellac", Name: "Shellac Manicure", DurationMinutes: 50}}
+	store.internalServices = append([]ServiceOption(nil), store.guidanceServices...)
+	store.activeStaff = []StaffOption{{ID: "staff_linh", Name: "Linh", AIBookable: true}}
+	store.internalStaff = append([]StaffOption(nil), store.activeStaff...)
+	store.internalHours = []BusinessHourPeriod{{ID: "hours_saturday", DayOfWeek: 6, StartLocalTime: "10:00:00", EndLocalTime: "19:00:00", Source: "local_override"}}
+	service := NewService(store, &fakeBookingTool{})
+
+	first, err := service.loadAnswerContext(context.Background(), store.session.SalonID)
+	if err != nil {
+		t.Fatalf("load initial calendar answer context: %v", err)
+	}
+	second, err := service.loadAnswerContext(context.Background(), store.session.SalonID)
+	if err != nil {
+		t.Fatalf("load cached calendar answer context: %v", err)
+	}
+	if first.CacheHit || !second.CacheHit {
+		t.Fatalf("calendar cache states first/second = %t/%t", first.CacheHit, second.CacheHit)
+	}
+	if store.calendarEvidenceCalls != 1 {
+		t.Fatalf("calendar aggregate evidence loads = %d, want one cache-miss load", store.calendarEvidenceCalls)
+	}
+	if store.answerFenceCalls != 3 {
+		t.Fatalf("database fence loads = %d, want two for miss and one for hit", store.answerFenceCalls)
+	}
+	if store.internalHoursCalls != 1 || store.knowledgeListCalls != 1 {
+		t.Fatalf("fresh calendar context loads hours/knowledge = %d/%d, want one each", store.internalHoursCalls, store.knowledgeListCalls)
+	}
+}
+
+type changingManleAICalendarEvidenceStore struct {
+	*fakeConversationStore
+	firstEvidenceVersion int64
+}
+
+func (s *changingManleAICalendarEvidenceStore) GetManleAICalendarAnswerContextEvidence(ctx context.Context, salonID string) (manleAICalendarAnswerContextEvidence, error) {
+	s.calendarEvidenceCalls++
+	if s.calendarEvidenceCalls == 1 {
+		updated := s.answerContextFence
+		updated.CalendarConfigVersion = s.firstEvidenceVersion
+		updated.CalendarActivatedVersion = s.firstEvidenceVersion
+		s.answerContextFence = updated
+	}
+	return manleAICalendarAnswerContextEvidence{
+		SchedulingAuthority:        s.answerContextFence.SchedulingAuthority,
+		SchedulingAuthorityVersion: s.answerContextFence.SchedulingAuthorityVersion,
+		CalendarConfigVersion:      s.answerContextFence.CalendarConfigVersion,
+		CalendarActivatedVersion:   s.answerContextFence.CalendarActivatedVersion,
+		Ready:                      true,
+	}, nil
+}
+
+func TestLoadAnswerContextRetriesBeforeFreshLoadWhenCalendarEvidenceVersionChanged(t *testing.T) {
+	base := newFakeConversationStore()
+	base.answerContextFence = AnswerContextFence{
+		SchedulingAuthority:        booking.SchedulingAuthorityManleAICalendar,
+		SchedulingAuthorityVersion: 2,
+		CalendarConfigVersion:      10,
+		CalendarActivatedVersion:   10,
+	}
+	base.guidanceServices = []ServiceOption{{ID: "service_old", Name: "Express Pedicure", DurationMinutes: 35}}
+	base.internalServices = append([]ServiceOption(nil), base.guidanceServices...)
+	base.internalStaff = []StaffOption{{ID: "staff_mai", Name: "Mai", AIBookable: true}}
+	base.internalHours = []BusinessHourPeriod{{ID: "hours_v11", Source: "local_override"}}
+	store := &changingManleAICalendarEvidenceStore{fakeConversationStore: base, firstEvidenceVersion: 11}
+	service := NewService(store, &fakeBookingTool{})
+
+	answer, err := service.loadAnswerContext(context.Background(), base.session.SalonID)
+	if err != nil {
+		t.Fatalf("load calendar context across evidence change: %v", err)
+	}
+	if answer.CacheHit || len(answer.BusinessHours) != 1 || answer.BusinessHours[0].ID != "hours_v11" {
+		t.Fatalf("calendar retry result = %#v", answer)
+	}
+	if store.calendarEvidenceCalls != 2 {
+		t.Fatalf("calendar evidence loads = %d, want changed attempt plus stable attempt", store.calendarEvidenceCalls)
+	}
+	if store.knowledgeListCalls != 1 {
+		t.Fatalf("fresh context loads = %d, stale evidence attempt should stop before hydration", store.knowledgeListCalls)
+	}
+}
+
+func TestLoadAnswerContextInvalidatesCalendarCacheWhenActivationBecomesStale(t *testing.T) {
+	store := newFakeConversationStore()
+	store.answerContextFence = AnswerContextFence{
+		SchedulingAuthority:        booking.SchedulingAuthorityManleAICalendar,
+		SchedulingAuthorityVersion: 3,
+		CalendarConfigVersion:      21,
+		CalendarActivatedVersion:   21,
+	}
+	store.guidanceServices = []ServiceOption{{ID: "service_builder", Name: "Builder Gel Balance", DurationMinutes: 75}}
+	store.internalServices = append([]ServiceOption(nil), store.guidanceServices...)
+	store.activeStaff = []StaffOption{{ID: "staff_thao", Name: "Thao", AIBookable: true}}
+	store.internalStaff = append([]StaffOption(nil), store.activeStaff...)
+	store.internalHours = []BusinessHourPeriod{{ID: "hours_current", Source: "local_override"}}
+	service := NewService(store, &fakeBookingTool{})
+
+	if _, err := service.loadAnswerContext(context.Background(), store.session.SalonID); err != nil {
+		t.Fatalf("prewarm activated calendar context: %v", err)
+	}
+	store.answerContextFence.CalendarConfigVersion = 22
+	store.calendarReady = false
+	stale, err := service.loadAnswerContext(context.Background(), store.session.SalonID)
+	if err != nil {
+		t.Fatalf("reload stale activation context: %v", err)
+	}
+	if stale.CacheHit || len(stale.Staff) != 0 || len(stale.ActiveStaff) != 0 || len(stale.BusinessHours) != 0 || stale.Services[0].BookingReady {
+		t.Fatalf("stale activation context did not fail closed: %#v", stale)
 	}
 }
 
@@ -501,16 +615,15 @@ func TestManleAICalendarAnswerFenceUsesAuthoritativeCapability(t *testing.T) {
 		},
 	}
 
-	fence := AnswerContextFence{Ready: true}
-	applyManleAICalendarCapabilityFence(&fence, aggregate)
-	if fence.Ready {
+	evidence := projectManleAICalendarAnswerContextEvidence(aggregate)
+	if evidence.Ready {
 		t.Fatal("answer-context fence became ready while authoritative configuration readiness is false")
 	}
 
 	aggregate.ServicePolicies = aggregate.ServicePolicies[:1]
 	aggregate.StaffProfiles[0].EligibleServices = []calendar.ServiceRef{readyService}
-	applyManleAICalendarCapabilityFence(&fence, aggregate)
-	if !fence.Ready || fence.CalendarConfigVersion != version || fence.CalendarActivatedVersion != version || fence.SchedulingAuthorityVersion != aggregate.AuthorityVersion {
-		t.Fatalf("authoritative staff-only capability was not projected: %#v", fence)
+	evidence = projectManleAICalendarAnswerContextEvidence(aggregate)
+	if !evidence.Ready || evidence.CalendarConfigVersion != version || evidence.CalendarActivatedVersion != version || evidence.SchedulingAuthorityVersion != aggregate.AuthorityVersion {
+		t.Fatalf("authoritative staff-only capability was not projected: %#v", evidence)
 	}
 }

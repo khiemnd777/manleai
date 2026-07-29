@@ -32,6 +32,7 @@ type AIAnswerContext struct {
 // source of truth for external_provider and are deliberately not consulted by
 // either owner-first authority.
 type ownerFirstAnswerContextStore interface {
+	GetManleAICalendarAnswerContextEvidence(ctx context.Context, salonID string) (manleAICalendarAnswerContextEvidence, error)
 	ListCanonicalGuidanceServices(ctx context.Context, salonID string) ([]ServiceOption, error)
 	ListCanonicalActiveStaff(ctx context.Context, salonID string) ([]StaffOption, error)
 	ListCanonicalServiceAliases(ctx context.Context, salonID string) ([]ServiceAlias, error)
@@ -149,6 +150,14 @@ func (s *Service) loadAnswerContext(ctx context.Context, salonID string) (*AIAns
 		if cached, ok := s.answerContextCache.get(salonID, fence); ok {
 			return cached, nil
 		}
+		ready, evidenceMatches, err := s.loadAnswerContextReadiness(ctx, salonID, fence)
+		if err != nil {
+			return nil, err
+		}
+		if !evidenceMatches {
+			s.answerContextCache.clear(salonID)
+			continue
+		}
 
 		answerCtx, err := s.loadFreshAnswerContext(ctx, salonID, fence)
 		if err != nil {
@@ -162,13 +171,55 @@ func (s *Service) loadAnswerContext(ctx context.Context, salonID string) (*AIAns
 			s.answerContextCache.clear(salonID)
 			continue
 		}
-		if !verifiedFence.Ready {
+		if !ready {
 			failClosedSchedulingContext(answerCtx)
 		}
 		s.answerContextCache.set(salonID, verifiedFence, *answerCtx)
 		return cloneAIAnswerContext(answerCtx), nil
 	}
 	return nil, errors.New("conversation answer context readiness changed while loading")
+}
+
+func (s *Service) loadAnswerContextReadiness(ctx context.Context, salonID string, fence AnswerContextFence) (bool, bool, error) {
+	authority := strings.TrimSpace(fence.SchedulingAuthority)
+	if authority == "" {
+		// Legacy test stores predate the persisted authority fence. Production
+		// repository reads always return the protocol token.
+		authority = booking.SchedulingAuthorityExternalProvider
+	}
+	switch authority {
+	case booking.SchedulingAuthorityOwnerManual:
+		return true, true, nil
+	case booking.SchedulingAuthorityExternalProvider:
+		return externalProviderAnswerContextReady(fence), true, nil
+	case booking.SchedulingAuthorityManleAICalendar:
+		store, ok := s.store.(ownerFirstAnswerContextStore)
+		if !ok {
+			return false, false, errors.New("owner-first answer-context store is unavailable")
+		}
+		evidence, err := store.GetManleAICalendarAnswerContextEvidence(ctx, salonID)
+		if err != nil {
+			return false, false, err
+		}
+		return evidence.Ready, manleAICalendarEvidenceMatchesFence(evidence, fence), nil
+	default:
+		return false, true, nil
+	}
+}
+
+func externalProviderAnswerContextReady(fence AnswerContextFence) bool {
+	return strings.TrimSpace(fence.ActiveProvider) != "" &&
+		fence.ConnectionStatus == "active" &&
+		strings.TrimSpace(fence.LocationID) != "" &&
+		fence.SnapshotGeneration > 0 &&
+		strings.TrimSpace(fence.LastSyncAtRFC3339) != ""
+}
+
+func manleAICalendarEvidenceMatchesFence(evidence manleAICalendarAnswerContextEvidence, fence AnswerContextFence) bool {
+	return evidence.SchedulingAuthority == fence.SchedulingAuthority &&
+		evidence.SchedulingAuthorityVersion == fence.SchedulingAuthorityVersion &&
+		evidence.CalendarConfigVersion == fence.CalendarConfigVersion &&
+		evidence.CalendarActivatedVersion == fence.CalendarActivatedVersion
 }
 
 func failClosedSchedulingContext(answerCtx *AIAnswerContext) {

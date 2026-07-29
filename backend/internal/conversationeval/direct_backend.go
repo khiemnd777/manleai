@@ -231,7 +231,7 @@ func (s *fixtureConversationStore) GetRuntimeConfig(context.Context, string, str
 }
 
 func (s *fixtureConversationStore) GetAnswerContextFence(context.Context, string) (conversation.AnswerContextFence, error) {
-	return conversation.AnswerContextFence{ActiveProvider: "evaluation_fixture", ConnectionStatus: "active", LocationID: "fixture", SnapshotGeneration: 1, LastSyncAtRFC3339: "2026-07-17T00:00:00Z", Ready: true}, nil
+	return conversation.AnswerContextFence{ActiveProvider: "evaluation_fixture", ConnectionStatus: "active", LocationID: "fixture", SnapshotGeneration: 1, LastSyncAtRFC3339: "2026-07-17T00:00:00Z"}, nil
 }
 
 func (s *fixtureConversationStore) CreateSession(context.Context, conversation.NewSessionRecord) (*conversation.Session, error) {

@@ -170,10 +170,8 @@ func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, owner
 func (r *Repository) GetAnswerContextFence(ctx context.Context, salonID string) (AnswerContextFence, error) {
 	var fence AnswerContextFence
 	var lastSyncAt sql.NullTime
-	var ownerUserID string
 	err := r.db.QueryRowContext(ctx, `
-		SELECT s.owner_user_id::text,
-		       COALESCE(settings.scheduling_authority, 'external_provider'),
+		SELECT COALESCE(settings.scheduling_authority, 'external_provider'),
 		       COALESCE(settings.scheduling_authority_version, 0),
 		       COALESCE(service_version.version, 0),
 		       COALESCE(service_aliases_version.version, 0),
@@ -182,6 +180,8 @@ func (r *Repository) GetAnswerContextFence(ctx context.Context, salonID string) 
 		       COALESCE(staff_version.version, 0),
 		       COALESCE(knowledge_version.version, 0),
 		       COALESCE(hours_version.version, 0),
+		       COALESCE(calendar_config.version, 0),
+		       COALESCE(calendar_config.activated_version, 0),
 		       COALESCE(NULLIF(BTRIM(s.active_pos_provider), ''), 'square'),
 		       COALESCE(connection.status, ''),
 		       COALESCE(BTRIM(connection.location_id), ''),
@@ -217,12 +217,13 @@ func (r *Repository) GetAnswerContextFence(ctx context.Context, salonID string) 
 		  ON hours_version.salon_id = s.id
 		 AND hours_version.resource_type = 'business_hours'
 		 AND hours_version.resource_id = s.id::text
+		LEFT JOIN manleai_calendar_configs calendar_config
+		  ON calendar_config.salon_id = s.id
 		LEFT JOIN pos_connections connection
 		  ON connection.salon_id = s.id
 		 AND connection.provider = COALESCE(NULLIF(BTRIM(s.active_pos_provider), ''), 'square')
 		WHERE s.id = $1
 	`, strings.TrimSpace(salonID)).Scan(
-		&ownerUserID,
 		&fence.SchedulingAuthority,
 		&fence.SchedulingAuthorityVersion,
 		&fence.ServiceCatalogVersion,
@@ -232,6 +233,8 @@ func (r *Repository) GetAnswerContextFence(ctx context.Context, salonID string) 
 		&fence.StaffCatalogVersion,
 		&fence.KnowledgeBaseVersion,
 		&fence.LocalBusinessHoursVersion,
+		&fence.CalendarConfigVersion,
+		&fence.CalendarActivatedVersion,
 		&fence.ActiveProvider,
 		&fence.ConnectionStatus,
 		&fence.LocationID,
@@ -249,28 +252,35 @@ func (r *Repository) GetAnswerContextFence(ctx context.Context, salonID string) 
 	}
 	switch fence.SchedulingAuthority {
 	case booking.SchedulingAuthorityOwnerManual:
+		clearAnswerContextCalendarFence(&fence)
 		clearAnswerContextProviderFence(&fence)
-		fence.Ready = true
 	case booking.SchedulingAuthorityManleAICalendar:
 		fence.LocalBusinessHoursVersion = 0
 		clearAnswerContextProviderFence(&fence)
-		aggregate, aggregateErr := calendar.NewRepository(r.db).GetAggregate(ctx, strings.TrimSpace(salonID), ownerUserID)
-		if aggregateErr != nil {
-			return AnswerContextFence{}, aggregateErr
-		}
-		applyManleAICalendarCapabilityFence(&fence, aggregate)
 	case booking.SchedulingAuthorityExternalProvider:
 		fence.LocalBusinessHoursVersion = 0
-		fence.Ready = strings.TrimSpace(fence.ActiveProvider) != "" &&
-			fence.ConnectionStatus == "active" &&
-			strings.TrimSpace(fence.LocationID) != "" &&
-			fence.SnapshotGeneration > 0 &&
-			lastSyncAt.Valid
+		clearAnswerContextCalendarFence(&fence)
 	default:
 		fence.LocalBusinessHoursVersion = 0
-		fence.Ready = false
+		clearAnswerContextCalendarFence(&fence)
+		clearAnswerContextProviderFence(&fence)
 	}
 	return fence, nil
+}
+
+func (r *Repository) GetManleAICalendarAnswerContextEvidence(ctx context.Context, salonID string) (manleAICalendarAnswerContextEvidence, error) {
+	salonID = strings.TrimSpace(salonID)
+	var ownerUserID string
+	if err := r.db.QueryRowContext(ctx, `SELECT owner_user_id::text FROM salons WHERE id = $1`, salonID).Scan(&ownerUserID); errors.Is(err, sql.ErrNoRows) {
+		return manleAICalendarAnswerContextEvidence{}, ErrNotFound
+	} else if err != nil {
+		return manleAICalendarAnswerContextEvidence{}, err
+	}
+	aggregate, err := calendar.NewRepository(r.db).GetAggregate(ctx, salonID, ownerUserID)
+	if err != nil {
+		return manleAICalendarAnswerContextEvidence{}, err
+	}
+	return projectManleAICalendarAnswerContextEvidence(aggregate), nil
 }
 
 func clearAnswerContextProviderFence(fence *AnswerContextFence) {
@@ -284,21 +294,32 @@ func clearAnswerContextProviderFence(fence *AnswerContextFence) {
 	fence.LastSyncAtRFC3339 = ""
 }
 
-func applyManleAICalendarCapabilityFence(fence *AnswerContextFence, aggregate *calendar.Aggregate) {
-	if fence == nil || aggregate == nil {
+func clearAnswerContextCalendarFence(fence *AnswerContextFence) {
+	if fence == nil {
 		return
+	}
+	fence.CalendarConfigVersion = 0
+	fence.CalendarActivatedVersion = 0
+}
+
+func projectManleAICalendarAnswerContextEvidence(aggregate *calendar.Aggregate) manleAICalendarAnswerContextEvidence {
+	if aggregate == nil {
+		return manleAICalendarAnswerContextEvidence{}
 	}
 	// EvaluateReadiness is the sole owner of operation capabilities. Do not
 	// approximate it with a weaker EXISTS predicate in conversation.
 	readiness := calendar.EvaluateReadiness(aggregate)
-	fence.SchedulingAuthority = aggregate.SchedulingAuthority
-	fence.SchedulingAuthorityVersion = aggregate.AuthorityVersion
-	fence.CalendarConfigVersion = aggregate.ConfigVersion
-	fence.CalendarActivatedVersion = 0
-	if aggregate.Config != nil && aggregate.Config.ActivatedVersion != nil {
-		fence.CalendarActivatedVersion = *aggregate.Config.ActivatedVersion
+	evidence := manleAICalendarAnswerContextEvidence{
+		SchedulingAuthority:        aggregate.SchedulingAuthority,
+		SchedulingAuthorityVersion: aggregate.AuthorityVersion,
+		CalendarConfigVersion:      aggregate.ConfigVersion,
+		Ready: readiness.Capabilities.StaffOnlyAvailability &&
+			readiness.Capabilities.StaffOnlyCreate,
 	}
-	fence.Ready = readiness.Capabilities.StaffOnlyAvailability && readiness.Capabilities.StaffOnlyCreate
+	if aggregate.Config != nil && aggregate.Config.ActivatedVersion != nil {
+		evidence.CalendarActivatedVersion = *aggregate.Config.ActivatedVersion
+	}
+	return evidence
 }
 
 func (r *Repository) ListManleAICalendarBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error) {

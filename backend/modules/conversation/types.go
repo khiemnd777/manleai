@@ -611,13 +611,15 @@ type Store interface {
 }
 
 // AnswerContextFence identifies the persisted common-resource and authority-
-// scoped evidence that owns structured conversation context. Common catalog,
+// scoped versions that own structured conversation context. Common catalog,
 // alias, category, consultation, staff, and knowledge versions apply wherever
 // those projections are consumed. Owner Manual additionally uses the owner-
 // managed local-hours version; External Provider uses the current provider
-// snapshot; ManleAI Calendar uses its authoritative config capability/version.
+// snapshot; ManleAI Calendar uses its root config and activation versions.
 // It is read on every turn so replicas reject stale cached context after any
-// relevant source-of-truth change.
+// relevant source-of-truth change. Runtime readiness is deliberately not part
+// of this comparable value: it is authoritatively evaluated on cache misses and
+// remains reusable only while this complete persisted fence is unchanged.
 type AnswerContextFence struct {
 	SchedulingAuthority         string
 	SchedulingAuthorityVersion  int64
@@ -635,7 +637,18 @@ type AnswerContextFence struct {
 	LocationID                  string
 	SnapshotGeneration          int64
 	LastSyncAtRFC3339           string
-	Ready                       bool
+}
+
+// manleAICalendarAnswerContextEvidence is an ephemeral projection of the exact
+// aggregate version on which EvaluateReadiness ran. It is not persisted and is
+// accepted only when its versions match the database-owned answer-context
+// fence read around the fresh context load.
+type manleAICalendarAnswerContextEvidence struct {
+	SchedulingAuthority        string
+	SchedulingAuthorityVersion int64
+	CalendarConfigVersion      int64
+	CalendarActivatedVersion   int64
+	Ready                      bool
 }
 
 type StartSessionRequest struct {

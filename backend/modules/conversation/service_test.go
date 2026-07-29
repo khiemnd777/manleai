@@ -538,7 +538,6 @@ func TestMessageRefreshesOwnerServiceMenuWhenCatalogCollectionVersionChanges(t *
 		SchedulingAuthority:        booking.SchedulingAuthorityOwnerManual,
 		SchedulingAuthorityVersion: 5,
 		ServiceCatalogVersion:      12,
-		Ready:                      true,
 	}
 	store.guidanceServices = []ServiceOption{{ID: "service_soft_gel", Name: "Soft Gel Extensions", DurationMinutes: 80}}
 	store.activeStaff = []StaffOption{{ID: "staff_anh", Name: "Anh Le", AIBookable: true}}
@@ -1885,7 +1884,7 @@ func TestMessageConsultationBookingRequestHandsOffWhenOnlyGuidanceCatalogIsReady
 	store.guidanceServices = []ServiceOption{recommended}
 	store.answerContextFence = AnswerContextFence{
 		ActiveProvider: "square", ConnectionStatus: "connected", LocationID: "location_1",
-		SnapshotGeneration: 1, Ready: false,
+		SnapshotGeneration: 1,
 	}
 	store.session.Intent = IntentConsultation
 	store.session.DialogState = normalizedDialogState(DialogState{
@@ -9451,32 +9450,35 @@ type fakeConversationStore struct {
 		requestID string
 		status    string
 	}
-	assignmentStats      map[string]StaffAssignmentStat
-	assignmentFrom       time.Time
-	assignmentTo         time.Time
-	assignmentStaffIDs   []string
-	answerContextFence   AnswerContextFence
-	answerFenceCalls     int
-	serviceListCalls     int
-	knowledgeListCalls   int
-	hoursListCalls       int
-	ownerHoursListCalls  int
-	internalHoursCalls   int
-	lastTurn             TurnRecord
-	processedEventKeys   map[string]bool
-	processedTurnReplies map[string]string
-	runtimeConfigActor   string
-	createdSessionActor  string
-	listLifecycleStatus  string
-	listLimit            int
-	listOffset           int
-	listSessions         []Session
-	webhookSessionID     string
-	webhookLimit         int
-	webhookOffset        int
-	webhookEvents        []WebhookEventLog
-	archivedSessionID    string
-	redactedSessionID    string
+	assignmentStats       map[string]StaffAssignmentStat
+	assignmentFrom        time.Time
+	assignmentTo          time.Time
+	assignmentStaffIDs    []string
+	answerContextFence    AnswerContextFence
+	calendarReady         bool
+	calendarEvidence      *manleAICalendarAnswerContextEvidence
+	calendarEvidenceCalls int
+	answerFenceCalls      int
+	serviceListCalls      int
+	knowledgeListCalls    int
+	hoursListCalls        int
+	ownerHoursListCalls   int
+	internalHoursCalls    int
+	lastTurn              TurnRecord
+	processedEventKeys    map[string]bool
+	processedTurnReplies  map[string]string
+	runtimeConfigActor    string
+	createdSessionActor   string
+	listLifecycleStatus   string
+	listLimit             int
+	listOffset            int
+	listSessions          []Session
+	webhookSessionID      string
+	webhookLimit          int
+	webhookOffset         int
+	webhookEvents         []WebhookEventLog
+	archivedSessionID     string
+	redactedSessionID     string
 }
 
 type fakeReplyGenerator struct {
@@ -9548,8 +9550,9 @@ func newFakeConversationStore() *fakeConversationStore {
 		answerContextFence: AnswerContextFence{
 			SchedulingAuthority: booking.SchedulingAuthorityExternalProvider,
 			ActiveProvider:      "square", ConnectionStatus: "active", LocationID: "location_1",
-			SnapshotGeneration: 1, LastSyncAtRFC3339: "2026-06-01T12:00:00Z", Ready: true,
+			SnapshotGeneration: 1, LastSyncAtRFC3339: "2026-06-01T12:00:00Z",
 		},
+		calendarReady:        true,
 		processedEventKeys:   map[string]bool{},
 		processedTurnReplies: map[string]string{},
 	}
@@ -9574,6 +9577,20 @@ func (f *fakeConversationStore) GetRuntimeConfig(ctx context.Context, salonID st
 func (f *fakeConversationStore) GetAnswerContextFence(ctx context.Context, salonID string) (AnswerContextFence, error) {
 	f.answerFenceCalls++
 	return f.answerContextFence, nil
+}
+
+func (f *fakeConversationStore) GetManleAICalendarAnswerContextEvidence(ctx context.Context, salonID string) (manleAICalendarAnswerContextEvidence, error) {
+	f.calendarEvidenceCalls++
+	if f.calendarEvidence != nil {
+		return *f.calendarEvidence, nil
+	}
+	return manleAICalendarAnswerContextEvidence{
+		SchedulingAuthority:        f.answerContextFence.SchedulingAuthority,
+		SchedulingAuthorityVersion: f.answerContextFence.SchedulingAuthorityVersion,
+		CalendarConfigVersion:      f.answerContextFence.CalendarConfigVersion,
+		CalendarActivatedVersion:   f.answerContextFence.CalendarActivatedVersion,
+		Ready:                      f.calendarReady,
+	}, nil
 }
 
 func (f *fakeConversationStore) CreateSession(ctx context.Context, record NewSessionRecord) (*Session, error) {

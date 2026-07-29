@@ -41,8 +41,8 @@ func TestFuzzyServiceGoldenRequiresExplicitConfirmationAcrossSchedulingAuthoriti
 	t.Run("manleai calendar neutral flow", func(t *testing.T) {
 		store := fuzzyConfirmationReadyStore(otherServices, staffOption, start)
 		store.answerContextFence = AnswerContextFence{
-			SchedulingAuthority: booking.SchedulingAuthorityManleAICalendar,
-			Ready:               true, SchedulingAuthorityVersion: 3, CalendarConfigVersion: 8, CalendarActivatedVersion: 8,
+			SchedulingAuthority:        booking.SchedulingAuthorityManleAICalendar,
+			SchedulingAuthorityVersion: 3, CalendarConfigVersion: 8, CalendarActivatedVersion: 8,
 		}
 		store.internalServices = append([]ServiceOption(nil), otherServices...)
 		store.internalStaff = []StaffOption{staffOption}
