@@ -3,6 +3,8 @@ package conversation
 import (
 	"strings"
 	"time"
+
+	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
 const (
@@ -90,7 +92,7 @@ func routeStructuredQuestionAnswer(message string, question ConversationQuestion
 	case ConversationQuestionPrice:
 		return routeStructuredPriceQuestion(question, result, answerCtx)
 	case ConversationQuestionHours:
-		reply, ids, confidence := businessHoursAnswer(message, answerBusinessHours(answerCtx), cfg, now)
+		reply, ids, confidence := businessHoursAnswer(message, answerBusinessHours(answerCtx), answerSchedulingAuthority(answerCtx), cfg, now)
 		return answerRoute{Handled: true, Reply: reply, Source: answerSourceBusinessHours, Reason: "business_hours", Intent: "hours_question", Confidence: confidence, SourceRecordIDs: ids}
 	case ConversationQuestionStaff:
 		reply, ids, confidence := staffAnswer(message, answerStaff(answerCtx), answerActiveStaff(answerCtx))
@@ -145,7 +147,7 @@ func routeNonBookingAnswer(message string, session Session, answerCtx *AIAnswerC
 	hours := answerBusinessHours(answerCtx)
 
 	if asksBusinessHours(message) {
-		reply, ids, confidence := businessHoursAnswer(message, hours, cfg, now)
+		reply, ids, confidence := businessHoursAnswer(message, hours, answerSchedulingAuthority(answerCtx), cfg, now)
 		return answerRoute{
 			Handled:         true,
 			Reply:           reply,
@@ -359,9 +361,18 @@ func asksStaffQuestion(message string, staff []StaffOption, activeStaff []StaffO
 	return false
 }
 
-func businessHoursAnswer(message string, periods []BusinessHourPeriod, cfg *RuntimeConfig, now func() time.Time) (string, []string, float64) {
+func businessHoursAnswer(message string, periods []BusinessHourPeriod, authority string, cfg *RuntimeConfig, now func() time.Time) (string, []string, float64) {
 	if len(periods) == 0 {
-		return "I do not have synced business hours from the POS yet. The owner needs to review hours before I can answer that. Would you like help with an appointment?", nil, 0.52
+		switch strings.TrimSpace(authority) {
+		case booking.SchedulingAuthorityOwnerManual:
+			return "Business hours have not been configured for this salon yet. The owner can help with that. Would you like help with something else?", nil, 0.52
+		case booking.SchedulingAuthorityExternalProvider:
+			return "I do not have synced business hours from the POS yet. The owner needs to review hours before I can answer that. Would you like help with an appointment?", nil, 0.52
+		case booking.SchedulingAuthorityManleAICalendar:
+			return "Current internal business hours are not available yet. The owner needs to review the internal calendar setup. Would you like help with something else?", nil, 0.52
+		default:
+			return "Verified business hours are not available yet. The owner can help with that. Would you like help with something else?", nil, 0.52
+		}
 	}
 	loc := timezoneLocation(timezoneFromConfig(cfg))
 	if now == nil {
@@ -379,6 +390,13 @@ func businessHoursAnswer(message string, periods []BusinessHourPeriod, cfg *Runt
 		return "The salon is closed today. Which day would you like our hours for?", nil, 0.9
 	}
 	return "Today's hours are " + formatBusinessHourRanges(today) + ". Would you like hours for another day?", answerBusinessHourIDs(today), 0.92
+}
+
+func answerSchedulingAuthority(answerCtx *AIAnswerContext) string {
+	if answerCtx == nil {
+		return ""
+	}
+	return strings.TrimSpace(answerCtx.SchedulingAuthority)
 }
 
 func requestedBusinessHourDay(message string, loc *time.Location, now func() time.Time) (int, string, bool) {

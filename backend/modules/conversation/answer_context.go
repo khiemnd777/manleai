@@ -16,14 +16,15 @@ const (
 )
 
 type AIAnswerContext struct {
-	Services        []ServiceOption
-	ServiceAliases  []ServiceAlias
-	CategoryAliases []ServiceCategoryAlias
-	Staff           []StaffOption
-	ActiveStaff     []StaffOption
-	Knowledge       []KnowledgeSnippet
-	BusinessHours   []BusinessHourPeriod
-	CacheHit        bool
+	SchedulingAuthority string
+	Services            []ServiceOption
+	ServiceAliases      []ServiceAlias
+	CategoryAliases     []ServiceCategoryAlias
+	Staff               []StaffOption
+	ActiveStaff         []StaffOption
+	Knowledge           []KnowledgeSnippet
+	BusinessHours       []BusinessHourPeriod
+	CacheHit            bool
 }
 
 // ownerFirstAnswerContextStore keeps canonical and internal-calendar catalog
@@ -37,6 +38,7 @@ type ownerFirstAnswerContextStore interface {
 	ListCanonicalServiceCategoryAliases(ctx context.Context, salonID string) ([]ServiceCategoryAlias, error)
 	ListManleAICalendarBookableServices(ctx context.Context, salonID string) ([]ServiceOption, error)
 	ListManleAICalendarBookableStaff(ctx context.Context, salonID string) ([]StaffOption, error)
+	ListOwnerManagedBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error)
 	ListManleAICalendarBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error)
 }
 
@@ -126,14 +128,15 @@ func cloneAIAnswerContext(ctx *AIAnswerContext) *AIAnswerContext {
 		return &AIAnswerContext{}
 	}
 	return &AIAnswerContext{
-		Services:        append([]ServiceOption(nil), ctx.Services...),
-		ServiceAliases:  append([]ServiceAlias(nil), ctx.ServiceAliases...),
-		CategoryAliases: append([]ServiceCategoryAlias(nil), ctx.CategoryAliases...),
-		Staff:           append([]StaffOption(nil), ctx.Staff...),
-		ActiveStaff:     append([]StaffOption(nil), ctx.ActiveStaff...),
-		Knowledge:       append([]KnowledgeSnippet(nil), ctx.Knowledge...),
-		BusinessHours:   append([]BusinessHourPeriod(nil), ctx.BusinessHours...),
-		CacheHit:        ctx.CacheHit,
+		SchedulingAuthority: ctx.SchedulingAuthority,
+		Services:            append([]ServiceOption(nil), ctx.Services...),
+		ServiceAliases:      append([]ServiceAlias(nil), ctx.ServiceAliases...),
+		CategoryAliases:     append([]ServiceCategoryAlias(nil), ctx.CategoryAliases...),
+		Staff:               append([]StaffOption(nil), ctx.Staff...),
+		ActiveStaff:         append([]StaffOption(nil), ctx.ActiveStaff...),
+		Knowledge:           append([]KnowledgeSnippet(nil), ctx.Knowledge...),
+		BusinessHours:       append([]BusinessHourPeriod(nil), ctx.BusinessHours...),
+		CacheHit:            ctx.CacheHit,
 	}
 }
 
@@ -267,22 +270,25 @@ func (s *Service) loadFreshAnswerContext(ctx context.Context, salonID string, fe
 	}
 	var hours []BusinessHourPeriod
 	switch authority {
+	case booking.SchedulingAuthorityOwnerManual:
+		hours, err = ownerFirstStore.ListOwnerManagedBusinessHourPeriods(ctx, salonID)
 	case booking.SchedulingAuthorityManleAICalendar:
 		hours, err = ownerFirstStore.ListManleAICalendarBusinessHourPeriods(ctx, salonID)
-	default:
-		hours, err = s.store.ListBusinessHourPeriods(ctx, salonID)
+	case booking.SchedulingAuthorityExternalProvider:
+		hours, err = s.store.ListExternalProviderBusinessHourPeriods(ctx, salonID)
 	}
 	if err != nil {
 		return nil, err
 	}
 	answerCtx := AIAnswerContext{
-		Services:        services,
-		ServiceAliases:  serviceAliases,
-		CategoryAliases: categoryAliases,
-		Staff:           staff,
-		ActiveStaff:     activeStaff,
-		Knowledge:       knowledge,
-		BusinessHours:   hours,
+		SchedulingAuthority: authority,
+		Services:            services,
+		ServiceAliases:      serviceAliases,
+		CategoryAliases:     categoryAliases,
+		Staff:               staff,
+		ActiveStaff:         activeStaff,
+		Knowledge:           knowledge,
+		BusinessHours:       hours,
 	}
 	return &answerCtx, nil
 }

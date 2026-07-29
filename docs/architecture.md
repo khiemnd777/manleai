@@ -634,8 +634,13 @@ not replace those compatibility/history routes.
 
 Under `owner_manual`, conversation answer context marks active, non-archived,
 AI-bookable canonical services with positive duration as requestable and uses
-active canonical staff without requiring a provider snapshot/link. Availability
-collects the caller's preferred time under `request_only` and creates no quote.
+active canonical staff without requiring a provider snapshot/link.
+Informational business-hours questions read only owner-managed
+`salon_business_hour_periods.source=local_override`; missing rows are reported
+as unconfigured owner hours without a POS-sync claim. These informational hours
+do not prove availability, create a slot, or authorize a scheduling action.
+Availability collects the caller's preferred time under `request_only` and
+creates no quote.
 After unchanged-draft review, book/reschedule/cancel use `ExecuteAction`; a
 committed request returns `pending_owner_review`, stores
 `call_sessions.scheduling_request_id`, ends with explicit non-confirmation copy,
@@ -978,15 +983,25 @@ AI Consultation is a state-owned lane inside the same Conversation Supervisor, n
 
 Primary acts, questions, and guidance actions are validated separately from auxiliary consultation extraction. `unknown` is absence rather than a persisted mutation value; malformed, low-confidence, or state-no-op consultation fields are dropped with bounded diagnostics without erasing valid primary meaning. A question containing a deterministically extractable expected field remains partial coverage when it can carry another semantic constraint, so a date plus a requested time window is interpreted as one complete turn. Once a guidance action is accepted, the runtime continues that workflow: booking asks for its next missing field and salon questions return their structured answer; the generic guidance menu remains recovery copy for genuine no-progress or provider failure.
 
-Structured answer context is cacheable only behind a database-owned active
-provider/location/generation/readiness fence. Every turn reads that fence from
-PostgreSQL even on a local cache hit. Cache misses load structured records and
-then re-read the fence; a concurrent switch or sync retries the load. Canonical
+Structured answer context is cacheable only behind a database-owned fence.
+Every turn reads that fence from PostgreSQL even on a local cache hit. Persisted
+collection revisions cover the common service and staff catalogs, service
+aliases, service categories/category aliases, consultation profiles, and active
+knowledge consumed by every authority. `owner_manual` additionally includes the
+salon-wide `business_resource_versions` `business_hours` revision;
+`manleai_calendar` uses its config/activation/capability versions; and
+`external_provider` uses active provider/location/snapshot generation/sync
+readiness. Authority-irrelevant provider evidence is normalized out of both
+owner-first modes, and the local-hours revision is normalized out when it is not
+the exact hours owner. Cache misses load structured records and then re-read the
+complete fence; a concurrent common-resource, authority, local-hours,
+internal-config, or provider-snapshot change retries the load. V81 seeds and
+maintains the service/staff collection revisions; the established V77 triggers
+own alias/category/profile/knowledge revisions. In external mode, canonical
 active-provider linked services, service aliases, and category aliases remain
 available for menu answers and consultation when the snapshot is incomplete,
-but every service is marked not booking-ready. Staff, imported business hours,
-availability, and booking remain fail-closed; salon-authored knowledge remains
-available.
+but every service is marked not booking-ready. Provider-owned staff and imported
+hours remain fail-closed; salon-authored knowledge remains available.
 
 The Phase 5H conversation boundary reads `booking_mode` separately from
 scheduling authority. Final review stores both values; a later change to
@@ -1132,23 +1147,21 @@ authority-specific confirmation wording.
 
 Service understanding is a backend domain layer, not prompt-only behavior. The conversation runtime interprets customer service utterances against the active salon service catalog, salon-scoped `service_aliases`, active `service_categories`, and active `service_category_aliases`. Exact catalog service names win over aliases; aliases keep their established direct catalog-selection behavior; category names and category aliases create catalog-backed clarification candidates. The implemented Phase 6 fuzzy-confirmation slice treats one fuzzy-selected catalog candidate as proposed identity only: it persists `dialog_state.pending.prompt_key=fuzzy_service_confirmation`, leaves the draft and availability proof unchanged, and asks the caller to confirm that exact current catalog service. Only a state-scoped affirmative or exact/alias catalog evidence resolves that pending identity; rejection, unclear input, wrong state, changed source selection, or a stale catalog candidate cannot book or guess a service. Its bounded affirmative grammar is active only for that persisted prompt and is not a general caller-intent classifier. Catalog ambiguity is authoritative over the structured semantic interpreter: a model-proposed add or replacement cannot narrow a category candidate set to one concrete service unless the caller supplied concrete service evidence. A bare concrete service utterance that would switch an in-progress draft uses the catalog-backed confirmation flow before mutation. Owner corrections can be applied into service aliases with a stable `(salon_id, normalized_alias)` key, while category aliases use their own stable `(salon_id, normalized_alias)` key and conflict with active service aliases so one phrase cannot mean both a single service and a category. Common US nail concepts are versioned in `service_taxonomy_releases` and its category/concept/alias child tables. Refresh materializes active taxonomy data into salon system categories and exact, unique-target service aliases; it never owns or creates local service/POS records and never overwrites owner/imported classifications. The forward-only V45 fill attaches taxonomy category aliases and exact-name suggestions to the active category record with the matching slug, including owner/imported category records, while preserving owner/import aliases and reviewed/manual assignments. Service-understanding decisions and fuzzy-confirmation provenance/results are written to transcript metadata so call reviews can explain why a service was selected or why the AI asked for confirmation.
 
-The current external-provider conversation runtime uses an `AIAnswerContext`
-loaded from the active provider scope and cached briefly per salon. The answer
-router chooses structured sources before owner-authored knowledge:
-active-provider POS-linked AI-bookable services for service/menu answers,
-imported `salon_business_hour_periods` for open/close questions,
-active-provider staff records for staff questions, booking availability prompts
-for incomplete availability questions, and active knowledge only after those
-structured sources do not answer the request. A business-hours question without
-a requested day answers from the salon-local current day instead of reciting
-the full weekly schedule; an explicit day remains authoritative. Transcript
-metadata records `answer_source`, `answer_source_reason`,
+The conversation runtime uses an authority-scoped `AIAnswerContext` cached
+briefly per salon. The answer router chooses structured sources before owner-
+authored knowledge. Under `owner_manual`, informational hours come from owner-
+managed `local_override` rows. Under `manleai_calendar`, they come from
+`local_override` rows only when the internal config/activation capability fence
+is ready. Under `external_provider`, they come only from imported periods for
+the current active provider/location snapshot; local hours cannot override that
+source. Services and staff follow their separately documented authority-
+specific projections. A business-hours question without a requested day
+answers from the salon-local current day instead of reciting the full weekly
+schedule; an explicit day remains authoritative. Informational hours are never
+scheduling availability and do not call availability, booking, or POS actions.
+Transcript metadata records `answer_source`, `answer_source_reason`,
 `answer_source_confidence`, `router_intent`, source record IDs when available,
-and whether the context came from cache. This keeps current answers explainable
-while preventing stale knowledge from overriding synced services, staff,
-business hours, or external-provider booking rules. Later internal modes must
-replace the provider-scoped eligibility/context source with authority-owned
-data rather than fake provider links.
+and whether the context came from cache.
 
 Service consultation is part of the conversation runtime, not free-text
 knowledge. The current external-provider path may compare only active-provider,

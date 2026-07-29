@@ -3418,7 +3418,11 @@ create, and whole-root reschedule/cancel.
 
 Under `owner_manual`, answer context uses active, non-archived, AI-bookable
 canonical services with positive duration and active, non-archived,
-AI-bookable canonical staff without requiring a POS link. Availability is
+AI-bookable canonical staff without requiring a POS link. Informational
+business-hours questions use only owner-managed `local_override` periods; if
+none exist, the response says business hours have not been configured and does
+not claim that POS sync is missing. Informational hours are not availability
+and do not call availability, booking, or POS actions. Availability is
 `request_only`: the engine asks for a preferred time and does not claim an
 opening. After final review and authorization, book, reschedule, and cancel
 persist one call-linked scheduling request and end with concise pending-owner-
@@ -3487,12 +3491,20 @@ bounded retry, an unresolved stale write returns
 
 When `consultation_enabled=true`, a caller may enter AI Consultation without a booking request. The semantic lane extracts controlled consultation needs but does not choose a service. Field-level `set`, `replace`, `add`, `remove`, and `clear` mutations are validated against controlled values and are the sole persistence authority for consultation need fields, so a free-standing semantic snapshot cannot overwrite scalar or list state and corrections do not accumulate stale preferences. Backend ranking uses only complete `ready` profiles from the eligible active-provider service catalog, stores the profile revisions and reasons in dialog state, and asks one useful question per turn. Consultation never calls availability or booking tools. A recommendation with one result asks whether the caller wants booking help; multiple results ask for a concrete service choice, and that choice still requires a separate booking-intent confirmation. Deterministic health signals are checked before normal turn routing; a validated structured safety assessment is also handled before any draft, availability, consultation, or POS action. A caller may end with `outcome=consultation_completed`, return to an unchanged booking draft, or enter owner handoff for safety or repeated unresolved input.
 
-Structured service, alias, staff, and business-hour answer context is guarded by
-a database-owned active-provider/location/generation/readiness fence on every
-turn. A local cache hit is accepted only when that current fence matches. Cache
-misses double-read the fence around context loading; a concurrent switch/sync
-retries, and a non-ready snapshot fails closed by hiding provider-owned
-structured data while retaining eligible salon-authored knowledge.
+Structured service, alias, category, consultation-profile, staff, knowledge,
+and business-hour answer context is guarded by a database-owned fence on every
+turn. Persisted collection versions cover the common structured sources.
+`owner_manual` additionally includes the salon-wide
+`business_resource_versions` `business_hours` version; `manleai_calendar` uses
+current config/activation/capability versions; and `external_provider` uses
+active provider/location/snapshot generation/sync readiness. Provider evidence
+does not participate in either owner-first fence, and local-hours versions do
+not participate where those rows are not the selected authority's informational
+hours source. A local cache hit is accepted only when the complete relevant
+fence matches. Cache misses double-read the fence around context loading;
+concurrent source-of-truth changes retry. A non-ready external snapshot fails
+closed by hiding provider-owned structured data while retaining eligible salon-
+authored knowledge. This is internal freshness behavior and adds no API field.
 
 Configured production turns first enter the state-driven Turn Kernel. The kernel derives `expected_input`, measures deterministic coverage, and selects one explicit route: `fast_lane`, `answer_lane`, `action_lane`, `recovery_lane`, or `semantic_lane`. Unambiguous expected-field evidence, offered-slot choices, state-scoped confirmations, structured questions, and operational actions avoid a reply-model round trip. For a new booking with no selected service, an exact catalog service advances directly to the next missing field and a category asks for one concrete catalog option; neither path asks whether to add or replace. An add-or-replace operation choice is valid only after a service has been selected. The semantic lane selects one of two strict contracts from operational state, not caller wording. `guidance_turn` is limited to initial caller-goal or service-guidance state with no booking progress and returns a typed `guidance_action`, bounded explicit `guidance_party_size`, extraction-only consultation needs, confidence, reason, and safety without a separately model-authored goal, acts, or questions. The model always receives the complete stable `recognizable_guidance_actions` protocol (`book`, `service_catalog`, `consultation`, `salon_question`, `name_service`, `reschedule`, `cancel`, and `human_handoff`), so recognition of a caller's request is not disabled when a catalog or recommendation profile is unavailable. The backend separately derives `turn_available_guidance_actions` and the runtime service-guidance capability from the current catalog, salon consultation toggle, and ready owner-approved profiles. It validates the recognized action, derives the general goal, rejects party sizes outside 2-20 or attached to a non-book action, and then resolves whether that action can be fulfilled. A valid initial party size is translated into the same guest-count act consumed by the reducer. A recognized consultation request remains consultation even when personalized recommendation is disabled or unavailable: the reply truthfully offers catalog-backed grouping when possible, otherwise explains the technical service-guide limitation and offers owner help without guessing a service or blaming the caller. The shorter `dialog_state.guidance.offered_actions` remains the state-owned choice set used only during bounded dependency recovery. A semantic `service_catalog` action always renders from the active bookable service catalog; active knowledge text cannot become the service-menu source. `full_turn` is required for corrections, multi-signal or partial-coverage turns, pending/review/party state, and any existing booking progress; it may return zero or more ordered acts and questions. Full-contract acts cover add/replace/remove/undo plus set/clear corrections for service, staff, date/time, customer, and guest state. One utterance may contain both a correction and a question; the reducer applies validated correction semantics first, answers the question from structured sources, then resumes one useful pending question. Replacement source and target remain separate. Pending candidates are context rather than a closed vocabulary, current-draft questions do not become catalog-count questions, and repeated unresolved clarification is bounded. For a completed `party_plan`, service correction pending state uses `party_service_target`, `party_service_guest`, `party_service_operation`, and `party_service_source` with exact `guest_ref`; short replies resolve deterministically, redundant `guest_scope` is cleared, only the selected party group may change, and offered slots/review authorization are invalidated only after the correction resolves. Unresolved party-correction pending state blocks availability and booking even when semantic interpretation is unavailable.
 

@@ -518,7 +518,7 @@ func (f *phoneFlowConversationStore) ListActiveKnowledge(ctx context.Context, sa
 	return f.knowledge, nil
 }
 
-func (f *phoneFlowConversationStore) ListBusinessHourPeriods(ctx context.Context, salonID string) ([]conversation.BusinessHourPeriod, error) {
+func (f *phoneFlowConversationStore) ListExternalProviderBusinessHourPeriods(ctx context.Context, salonID string) ([]conversation.BusinessHourPeriod, error) {
 	return []conversation.BusinessHourPeriod{}, nil
 }
 

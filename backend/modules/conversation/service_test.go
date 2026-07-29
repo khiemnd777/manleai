@@ -532,6 +532,45 @@ func TestMessageAnswersServiceMenuWithBookableServices(t *testing.T) {
 	}
 }
 
+func TestMessageRefreshesOwnerServiceMenuWhenCatalogCollectionVersionChanges(t *testing.T) {
+	store := newFakeConversationStore()
+	store.answerContextFence = AnswerContextFence{
+		SchedulingAuthority:        booking.SchedulingAuthorityOwnerManual,
+		SchedulingAuthorityVersion: 5,
+		ServiceCatalogVersion:      12,
+		Ready:                      true,
+	}
+	store.guidanceServices = []ServiceOption{{ID: "service_soft_gel", Name: "Soft Gel Extensions", DurationMinutes: 80}}
+	store.activeStaff = []StaffOption{{ID: "staff_anh", Name: "Anh Le", AIBookable: true}}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: testGuidanceUnderstanding(GuidanceActionServiceCatalog, ConversationQuestionModeList, ConversationQuestionCatalog)})
+	service.now = fixedNow
+
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Could you walk me through the treatments on your menu?", EventKey: "owner_menu_before_catalog_change",
+	}); err != nil {
+		t.Fatalf("initial service-menu message: %v", err)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Soft Gel Extensions") {
+		t.Fatalf("initial owner service menu = %q", store.lastTurn.AIMessage)
+	}
+
+	store.guidanceServices = []ServiceOption{{ID: "service_biab", Name: "BIAB Natural Nail Overlay", DurationMinutes: 70}}
+	store.answerContextFence.ServiceCatalogVersion++
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "What choices are available for natural nails now?", EventKey: "owner_menu_after_catalog_change",
+	}); err != nil {
+		t.Fatalf("refreshed service-menu message: %v", err)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "BIAB Natural Nail Overlay") || strings.Contains(store.lastTurn.AIMessage, "Soft Gel Extensions") {
+		t.Fatalf("refreshed owner service menu reused stale catalog: %q", store.lastTurn.AIMessage)
+	}
+	if bookingTool.calls != 0 || bookingTool.availabilityCalls != 0 {
+		t.Fatalf("informational service-menu turns called scheduling tools: booking=%d availability=%d", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+}
+
 func TestMessageAnswersServiceCountDuringPendingClarificationAndResumesBooking(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = testManicureCatalog()
@@ -8773,7 +8812,7 @@ func TestBusinessHoursWithoutRequestedDayAnswersTodayConcise(t *testing.T) {
 		{ID: "hours_mon", DayOfWeek: 1, StartLocalTime: "09:00:00", EndLocalTime: "19:00:00"},
 		{ID: "hours_tue", DayOfWeek: 2, StartLocalTime: "10:00:00", EndLocalTime: "18:00:00"},
 	}
-	reply, ids, confidence := businessHoursAnswer("When does the salon close?", periods, &RuntimeConfig{Timezone: "UTC"}, fixedNow)
+	reply, ids, confidence := businessHoursAnswer("When does the salon close?", periods, booking.SchedulingAuthorityExternalProvider, &RuntimeConfig{Timezone: "UTC"}, fixedNow)
 	if !strings.Contains(reply, "Today's hours are 10:00 AM to 6:00 PM") || strings.Contains(reply, "Monday") || strings.Count(reply, "?") != 1 {
 		t.Fatalf("unspecified-day hours reply = %q", reply)
 	}
@@ -8781,7 +8820,7 @@ func TestBusinessHoursWithoutRequestedDayAnswersTodayConcise(t *testing.T) {
 		t.Fatalf("unspecified-day hours evidence = ids:%#v confidence:%f", ids, confidence)
 	}
 
-	explicit, explicitIDs, _ := businessHoursAnswer("What time do you close on Monday?", periods, &RuntimeConfig{Timezone: "UTC"}, fixedNow)
+	explicit, explicitIDs, _ := businessHoursAnswer("What time do you close on Monday?", periods, booking.SchedulingAuthorityExternalProvider, &RuntimeConfig{Timezone: "UTC"}, fixedNow)
 	if !strings.Contains(explicit, "Hours for Monday are 9:00 AM to 7:00 PM") || !sameStrings(explicitIDs, []string{"hours_mon"}) {
 		t.Fatalf("explicit-day hours reply = %q ids=%#v", explicit, explicitIDs)
 	}
@@ -9401,6 +9440,7 @@ type fakeConversationStore struct {
 	internalServices  []ServiceOption
 	internalStaff     []StaffOption
 	internalHours     []BusinessHourPeriod
+	ownerHours        []BusinessHourPeriod
 	knowledge         []KnowledgeSnippet
 	businessHours     []BusinessHourPeriod
 	partyRequests     []PartyBookingRequest
@@ -9420,6 +9460,8 @@ type fakeConversationStore struct {
 	serviceListCalls     int
 	knowledgeListCalls   int
 	hoursListCalls       int
+	ownerHoursListCalls  int
+	internalHoursCalls   int
 	lastTurn             TurnRecord
 	processedEventKeys   map[string]bool
 	processedTurnReplies map[string]string
@@ -9643,7 +9685,13 @@ func (f *fakeConversationStore) ListManleAICalendarBookableStaff(ctx context.Con
 }
 
 func (f *fakeConversationStore) ListManleAICalendarBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error) {
+	f.internalHoursCalls++
 	return append([]BusinessHourPeriod(nil), f.internalHours...), nil
+}
+
+func (f *fakeConversationStore) ListOwnerManagedBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error) {
+	f.ownerHoursListCalls++
+	return append([]BusinessHourPeriod(nil), f.ownerHours...), nil
 }
 
 func (f *fakeConversationStore) ListActiveStaff(ctx context.Context, salonID string) ([]StaffOption, error) {
@@ -9681,7 +9729,7 @@ func (f *fakeConversationStore) ListActiveKnowledge(ctx context.Context, salonID
 	return f.knowledge, nil
 }
 
-func (f *fakeConversationStore) ListBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error) {
+func (f *fakeConversationStore) ListExternalProviderBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error) {
 	f.hoursListCalls++
 	return f.businessHours, nil
 }

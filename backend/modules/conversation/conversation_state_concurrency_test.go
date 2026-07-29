@@ -347,10 +347,10 @@ func (s *concurrentCASConversationStore) ListActiveKnowledge(ctx context.Context
 	return s.fakeConversationStore.ListActiveKnowledge(ctx, salonID)
 }
 
-func (s *concurrentCASConversationStore) ListBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error) {
+func (s *concurrentCASConversationStore) ListExternalProviderBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.fakeConversationStore.ListBusinessHourPeriods(ctx, salonID)
+	return s.fakeConversationStore.ListExternalProviderBusinessHourPeriods(ctx, salonID)
 }
 
 func (s *concurrentCASConversationStore) GetSessionForOwner(_ context.Context, _ string, _ string, _ string) (*Session, error) {

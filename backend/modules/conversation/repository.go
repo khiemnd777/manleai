@@ -175,6 +175,13 @@ func (r *Repository) GetAnswerContextFence(ctx context.Context, salonID string) 
 		SELECT s.owner_user_id::text,
 		       COALESCE(settings.scheduling_authority, 'external_provider'),
 		       COALESCE(settings.scheduling_authority_version, 0),
+		       COALESCE(service_version.version, 0),
+		       COALESCE(service_aliases_version.version, 0),
+		       COALESCE(service_categories_version.version, 0),
+		       COALESCE(consultation_profiles_version.version, 0),
+		       COALESCE(staff_version.version, 0),
+		       COALESCE(knowledge_version.version, 0),
+		       COALESCE(hours_version.version, 0),
 		       COALESCE(NULLIF(BTRIM(s.active_pos_provider), ''), 'square'),
 		       COALESCE(connection.status, ''),
 		       COALESCE(BTRIM(connection.location_id), ''),
@@ -182,6 +189,34 @@ func (r *Repository) GetAnswerContextFence(ctx context.Context, salonID string) 
 		       connection.last_sync_at
 		FROM salons s
 		LEFT JOIN salon_settings settings ON settings.salon_id = s.id
+		LEFT JOIN business_resource_versions service_version
+		  ON service_version.salon_id = s.id
+		 AND service_version.resource_type = 'service'
+		 AND service_version.resource_id = 'collection'
+		LEFT JOIN business_resource_versions service_aliases_version
+		  ON service_aliases_version.salon_id = s.id
+		 AND service_aliases_version.resource_type = 'service_aliases'
+		 AND service_aliases_version.resource_id = 'collection'
+		LEFT JOIN business_resource_versions service_categories_version
+		  ON service_categories_version.salon_id = s.id
+		 AND service_categories_version.resource_type = 'service_categories'
+		 AND service_categories_version.resource_id = 'collection'
+		LEFT JOIN business_resource_versions consultation_profiles_version
+		  ON consultation_profiles_version.salon_id = s.id
+		 AND consultation_profiles_version.resource_type = 'consultation_profiles'
+		 AND consultation_profiles_version.resource_id = 'collection'
+		LEFT JOIN business_resource_versions staff_version
+		  ON staff_version.salon_id = s.id
+		 AND staff_version.resource_type = 'staff'
+		 AND staff_version.resource_id = 'collection'
+		LEFT JOIN business_resource_versions knowledge_version
+		  ON knowledge_version.salon_id = s.id
+		 AND knowledge_version.resource_type = 'knowledge_base'
+		 AND knowledge_version.resource_id = 'collection'
+		LEFT JOIN business_resource_versions hours_version
+		  ON hours_version.salon_id = s.id
+		 AND hours_version.resource_type = 'business_hours'
+		 AND hours_version.resource_id = s.id::text
 		LEFT JOIN pos_connections connection
 		  ON connection.salon_id = s.id
 		 AND connection.provider = COALESCE(NULLIF(BTRIM(s.active_pos_provider), ''), 'square')
@@ -190,6 +225,13 @@ func (r *Repository) GetAnswerContextFence(ctx context.Context, salonID string) 
 		&ownerUserID,
 		&fence.SchedulingAuthority,
 		&fence.SchedulingAuthorityVersion,
+		&fence.ServiceCatalogVersion,
+		&fence.ServiceAliasesVersion,
+		&fence.ServiceCategoriesVersion,
+		&fence.ConsultationProfilesVersion,
+		&fence.StaffCatalogVersion,
+		&fence.KnowledgeBaseVersion,
+		&fence.LocalBusinessHoursVersion,
 		&fence.ActiveProvider,
 		&fence.ConnectionStatus,
 		&fence.LocationID,
@@ -207,23 +249,39 @@ func (r *Repository) GetAnswerContextFence(ctx context.Context, salonID string) 
 	}
 	switch fence.SchedulingAuthority {
 	case booking.SchedulingAuthorityOwnerManual:
+		clearAnswerContextProviderFence(&fence)
 		fence.Ready = true
 	case booking.SchedulingAuthorityManleAICalendar:
+		fence.LocalBusinessHoursVersion = 0
+		clearAnswerContextProviderFence(&fence)
 		aggregate, aggregateErr := calendar.NewRepository(r.db).GetAggregate(ctx, strings.TrimSpace(salonID), ownerUserID)
 		if aggregateErr != nil {
 			return AnswerContextFence{}, aggregateErr
 		}
 		applyManleAICalendarCapabilityFence(&fence, aggregate)
 	case booking.SchedulingAuthorityExternalProvider:
+		fence.LocalBusinessHoursVersion = 0
 		fence.Ready = strings.TrimSpace(fence.ActiveProvider) != "" &&
 			fence.ConnectionStatus == "active" &&
 			strings.TrimSpace(fence.LocationID) != "" &&
 			fence.SnapshotGeneration > 0 &&
 			lastSyncAt.Valid
 	default:
+		fence.LocalBusinessHoursVersion = 0
 		fence.Ready = false
 	}
 	return fence, nil
+}
+
+func clearAnswerContextProviderFence(fence *AnswerContextFence) {
+	if fence == nil {
+		return
+	}
+	fence.ActiveProvider = ""
+	fence.ConnectionStatus = ""
+	fence.LocationID = ""
+	fence.SnapshotGeneration = 0
+	fence.LastSyncAtRFC3339 = ""
 }
 
 func applyManleAICalendarCapabilityFence(fence *AnswerContextFence, aggregate *calendar.Aggregate) {
@@ -1168,7 +1226,7 @@ func (r *Repository) ListActiveKnowledge(ctx context.Context, salonID string) ([
 	return items, rows.Err()
 }
 
-func (r *Repository) ListBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error) {
+func (r *Repository) ListExternalProviderBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT bhp.id::text, bhp.day_of_week, bhp.start_local_time::text,
 		       bhp.end_local_time::text, bhp.source, bhp.provider
@@ -1186,6 +1244,32 @@ func (r *Repository) ListBusinessHourPeriods(ctx context.Context, salonID string
 		  AND bhp.provider = salon.active_pos_provider
 		  AND bhp.provider_location_id = connection.location_id
 		ORDER BY bhp.day_of_week ASC, bhp.start_local_time ASC, bhp.provider_period_index ASC
+	`, salonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]BusinessHourPeriod, 0)
+	for rows.Next() {
+		var item BusinessHourPeriod
+		if err := rows.Scan(&item.ID, &item.DayOfWeek, &item.StartLocalTime, &item.EndLocalTime, &item.Source, &item.Provider); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *Repository) ListOwnerManagedBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT bhp.id::text, bhp.day_of_week, bhp.start_local_time::text,
+		       CASE WHEN bhp.end_at_midnight THEN '24:00:00' ELSE bhp.end_local_time::text END,
+		       bhp.source, ''
+		FROM salon_business_hour_periods bhp
+		WHERE bhp.salon_id = $1
+		  AND bhp.source = 'local_override'
+		ORDER BY bhp.day_of_week ASC, bhp.start_local_time ASC, bhp.id ASC
 	`, salonID)
 	if err != nil {
 		return nil, err

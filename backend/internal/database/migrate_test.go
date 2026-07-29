@@ -106,7 +106,7 @@ func TestMigrationFilesOrderV58AfterV57(t *testing.T) {
 	}
 }
 
-func TestMigrationFilesOrderV80AfterV79(t *testing.T) {
+func TestMigrationFilesOrderV81AfterV80(t *testing.T) {
 	files, err := loadMigrationFiles()
 	if err != nil {
 		t.Fatalf("load migration files: %v", err)
@@ -133,8 +133,9 @@ func TestMigrationFilesOrderV80AfterV79(t *testing.T) {
 	v78Index, hasV78 := indexByVersion["78"]
 	v79Index, hasV79 := indexByVersion["79"]
 	v80Index, hasV80 := indexByVersion["80"]
-	if !hasV63 || !hasV64 || !hasV65 || !hasV66 || !hasV67 || !hasV68 || !hasV69 || !hasV70 || !hasV71 || !hasV72 || !hasV73 || !hasV74 || !hasV75 || !hasV76 || !hasV77 || !hasV78 || !hasV79 || !hasV80 {
-		t.Fatalf("migration versions include V63=%t V64=%t V65=%t V66=%t V67=%t V68=%t V69=%t V70=%t V71=%t V72=%t V73=%t V74=%t V75=%t V76=%t V77=%t V78=%t V79=%t V80=%t", hasV63, hasV64, hasV65, hasV66, hasV67, hasV68, hasV69, hasV70, hasV71, hasV72, hasV73, hasV74, hasV75, hasV76, hasV77, hasV78, hasV79, hasV80)
+	v81Index, hasV81 := indexByVersion["81"]
+	if !hasV63 || !hasV64 || !hasV65 || !hasV66 || !hasV67 || !hasV68 || !hasV69 || !hasV70 || !hasV71 || !hasV72 || !hasV73 || !hasV74 || !hasV75 || !hasV76 || !hasV77 || !hasV78 || !hasV79 || !hasV80 || !hasV81 {
+		t.Fatalf("migration versions include V63=%t V64=%t V65=%t V66=%t V67=%t V68=%t V69=%t V70=%t V71=%t V72=%t V73=%t V74=%t V75=%t V76=%t V77=%t V78=%t V79=%t V80=%t V81=%t", hasV63, hasV64, hasV65, hasV66, hasV67, hasV68, hasV69, hasV70, hasV71, hasV72, hasV73, hasV74, hasV75, hasV76, hasV77, hasV78, hasV79, hasV80, hasV81)
 	}
 	if v64Index != v63Index+1 {
 		t.Fatalf("V64 index=%d, want immediately after V63 index=%d", v64Index, v63Index)
@@ -186,6 +187,9 @@ func TestMigrationFilesOrderV80AfterV79(t *testing.T) {
 	}
 	if v80Index != v79Index+1 {
 		t.Fatalf("V80 index=%d, want immediately after V79 index=%d", v80Index, v79Index)
+	}
+	if v81Index != v80Index+1 {
+		t.Fatalf("V81 index=%d, want immediately after V80 index=%d", v81Index, v80Index)
 	}
 }
 
@@ -353,5 +357,11 @@ func TestMigrateAppliesForwardMigrationOnceWithoutChangingAppliedChecksums(t *te
 	}
 	if count != 1 {
 		t.Fatalf("V80 migration records=%d, want 1", count)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM app_schema_migrations WHERE version = '81'`).Scan(&count); err != nil {
+		t.Fatalf("load V81 record: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("V81 migration records=%d, want 1", count)
 	}
 }

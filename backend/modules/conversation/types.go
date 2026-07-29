@@ -604,28 +604,38 @@ type Store interface {
 	ListActiveServiceAliases(ctx context.Context, salonID string) ([]ServiceAlias, error)
 	ListActiveServiceCategoryAliases(ctx context.Context, salonID string) ([]ServiceCategoryAlias, error)
 	ListActiveKnowledge(ctx context.Context, salonID string) ([]KnowledgeSnippet, error)
-	ListBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error)
+	ListExternalProviderBusinessHourPeriods(ctx context.Context, salonID string) ([]BusinessHourPeriod, error)
 	ListPartyBookingRequests(ctx context.Context, salonID string, ownerUserID string, status string, limit int, offset int) ([]PartyBookingRequest, error)
 	UpdatePartyBookingRequestStatus(ctx context.Context, salonID string, ownerUserID string, requestID string, status string) (*PartyBookingRequest, error)
 	SaveTurn(ctx context.Context, record TurnRecord) (*Session, error)
 }
 
-// AnswerContextFence identifies the authority-scoped evidence that owns
-// structured conversation context. External mode uses the current provider
+// AnswerContextFence identifies the persisted common-resource and authority-
+// scoped evidence that owns structured conversation context. Common catalog,
+// alias, category, consultation, staff, and knowledge versions apply wherever
+// those projections are consumed. Owner Manual additionally uses the owner-
+// managed local-hours version; External Provider uses the current provider
 // snapshot; ManleAI Calendar uses its authoritative config capability/version.
 // It is read on every turn so replicas reject stale cached context after any
-// scheduling source-of-truth change.
+// relevant source-of-truth change.
 type AnswerContextFence struct {
-	SchedulingAuthority        string
-	SchedulingAuthorityVersion int64
-	CalendarConfigVersion      int64
-	CalendarActivatedVersion   int64
-	ActiveProvider             string
-	ConnectionStatus           string
-	LocationID                 string
-	SnapshotGeneration         int64
-	LastSyncAtRFC3339          string
-	Ready                      bool
+	SchedulingAuthority         string
+	SchedulingAuthorityVersion  int64
+	ServiceCatalogVersion       int64
+	ServiceAliasesVersion       int64
+	ServiceCategoriesVersion    int64
+	ConsultationProfilesVersion int64
+	StaffCatalogVersion         int64
+	KnowledgeBaseVersion        int64
+	LocalBusinessHoursVersion   int64
+	CalendarConfigVersion       int64
+	CalendarActivatedVersion    int64
+	ActiveProvider              string
+	ConnectionStatus            string
+	LocationID                  string
+	SnapshotGeneration          int64
+	LastSyncAtRFC3339           string
+	Ready                       bool
 }
 
 type StartSessionRequest struct {

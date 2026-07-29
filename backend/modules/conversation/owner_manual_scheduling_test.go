@@ -193,6 +193,121 @@ func TestOwnerManualAnswerContextUsesCanonicalCatalogWithoutProviderSnapshot(t *
 	}
 }
 
+func TestOwnerManualInformationalHoursUseLocalDataWithoutSchedulingOrPOS(t *testing.T) {
+	store := newFakeConversationStore()
+	store.answerContextFence = AnswerContextFence{
+		SchedulingAuthority:        booking.SchedulingAuthorityOwnerManual,
+		SchedulingAuthorityVersion: 4,
+		LocalBusinessHoursVersion:  9,
+		Ready:                      true,
+	}
+	store.ownerHours = []BusinessHourPeriod{
+		{ID: "owner_thu_morning", DayOfWeek: 4, StartLocalTime: "09:00:00", EndLocalTime: "12:00:00", Source: "local_override"},
+		{ID: "owner_thu_afternoon", DayOfWeek: 4, StartLocalTime: "13:30:00", EndLocalTime: "18:00:00", Source: "local_override"},
+	}
+	store.businessHours = []BusinessHourPeriod{{
+		ID: "provider_thu", DayOfWeek: 4, StartLocalTime: "08:00:00", EndLocalTime: "20:00:00", Source: "imported", Provider: "square",
+	}}
+	tool := newOwnerManualSchedulingTool("unused")
+	service := NewService(store, tool)
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal:       "information",
+		Confidence: 0.98,
+		Questions:  []ConversationQuestion{{Subject: ConversationQuestionHours, Confidence: 0.98}},
+	}})
+	service.now = fixedNow
+
+	session, err := service.Message(context.Background(), store.session.SalonID, "owner_1", store.session.ID, MessageRequest{
+		Message: "Could you share Thursday's operating schedule?",
+	})
+	if err != nil {
+		t.Fatalf("owner informational hours: %v", err)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "Hours for Thursday are 9:00 AM to 12:00 PM and 1:30 PM to 6:00 PM") {
+		t.Fatalf("owner informational hours reply = %q", store.lastTurn.AIMessage)
+	}
+	if store.ownerHoursListCalls != 1 || store.hoursListCalls != 0 {
+		t.Fatalf("hours source calls owner/external = %d/%d", store.ownerHoursListCalls, store.hoursListCalls)
+	}
+	if tool.authorityChecks != 0 || tool.availabilityChecks != 0 || tool.actionCalls != 0 || tool.fakeBookingTool.availabilityCalls != 0 || tool.fakeBookingTool.calls != 0 {
+		t.Fatalf("informational hours called scheduling/POS: authority=%d availability=%d action=%d provider_availability=%d provider_booking=%d", tool.authorityChecks, tool.availabilityChecks, tool.actionCalls, tool.fakeBookingTool.availabilityCalls, tool.fakeBookingTool.calls)
+	}
+	if session.AppointmentID != "" || session.BookingAttemptID != "" || session.Outcome == OutcomeBookingConfirmed {
+		t.Fatalf("informational hours changed booking evidence: %#v", session)
+	}
+}
+
+func TestOwnerManualMissingHoursSayNotConfiguredWithoutPOSClaim(t *testing.T) {
+	store := newFakeConversationStore()
+	store.answerContextFence = AnswerContextFence{
+		SchedulingAuthority:        booking.SchedulingAuthorityOwnerManual,
+		SchedulingAuthorityVersion: 2,
+		LocalBusinessHoursVersion:  3,
+		Ready:                      true,
+	}
+	tool := newOwnerManualSchedulingTool("unused")
+	service := NewService(store, tool)
+	service.SetTurnInterpreter(&fakeConversationActInterpreter{turn: TurnUnderstanding{
+		Goal:       "information",
+		Confidence: 0.97,
+		Questions:  []ConversationQuestion{{Subject: ConversationQuestionHours, Confidence: 0.97}},
+	}})
+	service.now = fixedNow
+
+	if _, err := service.Message(context.Background(), store.session.SalonID, "owner_1", store.session.ID, MessageRequest{
+		Message: "On which days does the studio operate?",
+	}); err != nil {
+		t.Fatalf("owner missing informational hours: %v", err)
+	}
+	lower := strings.ToLower(store.lastTurn.AIMessage)
+	if !strings.Contains(lower, "business hours have not been configured") || strings.Contains(lower, "pos") || strings.Contains(lower, "sync") {
+		t.Fatalf("owner missing-hours copy = %q", store.lastTurn.AIMessage)
+	}
+	if tool.authorityChecks != 0 || tool.availabilityChecks != 0 || tool.actionCalls != 0 || tool.fakeBookingTool.availabilityCalls != 0 || tool.fakeBookingTool.calls != 0 {
+		t.Fatalf("missing informational hours called scheduling/POS: authority=%d availability=%d action=%d provider_availability=%d provider_booking=%d", tool.authorityChecks, tool.availabilityChecks, tool.actionCalls, tool.fakeBookingTool.availabilityCalls, tool.fakeBookingTool.calls)
+	}
+}
+
+func TestOwnerManualBusinessHoursRenderingCoversClosedSplitAndMidnightPeriods(t *testing.T) {
+	tests := []struct {
+		name     string
+		message  string
+		periods  []BusinessHourPeriod
+		contains string
+	}{
+		{
+			name:     "closed day",
+			message:  "Please share Friday's schedule.",
+			periods:  []BusinessHourPeriod{{ID: "thu", DayOfWeek: 4, StartLocalTime: "09:00:00", EndLocalTime: "17:00:00"}},
+			contains: "do not see open business hours for Friday",
+		},
+		{
+			name:    "multiple periods",
+			message: "Please share Thursday's schedule.",
+			periods: []BusinessHourPeriod{
+				{ID: "thu_am", DayOfWeek: 4, StartLocalTime: "09:00:00", EndLocalTime: "12:00:00"},
+				{ID: "thu_pm", DayOfWeek: 4, StartLocalTime: "13:00:00", EndLocalTime: "17:30:00"},
+			},
+			contains: "9:00 AM to 12:00 PM and 1:00 PM to 5:30 PM",
+		},
+		{
+			name:     "midnight ending period",
+			message:  "Please share Thursday's schedule.",
+			periods:  []BusinessHourPeriod{{ID: "thu_late", DayOfWeek: 4, StartLocalTime: "18:00:00", EndLocalTime: "24:00:00"}},
+			contains: "6:00 PM to 12:00 AM",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reply, _, _ := businessHoursAnswer(test.message, test.periods, booking.SchedulingAuthorityOwnerManual, &RuntimeConfig{Timezone: "UTC"}, fixedNow)
+			if !strings.Contains(reply, test.contains) {
+				t.Fatalf("business-hours reply = %q, want %q", reply, test.contains)
+			}
+		})
+	}
+}
+
 func TestOwnerManualPartyCreatesOneOrderedRequest(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = append(store.services, ServiceOption{ID: "service_2", Name: "Spa Pedicure", DurationMinutes: 60, BookingReady: true})

@@ -178,14 +178,14 @@ RPO/RTO evidence.
 
 ## Production Answer Routing
 
-- [x] Load service, alias, category, staff, knowledge, and business-hour answer context once per salon turn window, but validate a database-owned provider/location/generation/readiness fence on every turn and double-read it around cache misses.
+- [x] Load service, alias, category, consultation-profile, staff, knowledge, and business-hour answer context once per salon turn window, but validate a database-owned fence on every turn and double-read it around cache misses; persisted common collection revisions invalidate service/staff/alias/category/profile/knowledge changes before the 45-second TTL, owner-managed local hours use the existing `business_hours` resource version, internal hours use config/activation capability versions, external hours use provider/location/generation/sync readiness, and authority-irrelevant provider/local-hours fields are normalized out.
 - [x] Answer service/menu questions from active-provider, POS-linked, synced, AI-bookable services only.
-- [x] Answer open/close questions from imported business hour periods before owner-authored knowledge.
+- [x] Answer open/close questions from the selected authority's source before owner-authored knowledge: owner-managed `local_override` for `owner_manual`, activated/capability-ready `local_override` for `manleai_calendar`, and current provider/location imported periods for `external_provider`; never treat informational hours as availability.
 - [x] Answer staff questions from active-provider staff records without exposing inactive or non-bookable staff as confirmed booking options.
 - [x] Route incomplete availability questions into booking-detail prompts instead of guessing availability or creating bookings.
 - [x] Use owner-authored knowledge only after structured service, hours, staff, and availability sources do not answer the request.
 - [x] Record answer source, reason, confidence, source record IDs, router intent, and answer-context cache state in transcript metadata.
-- [x] Separate canonical active-provider guidance services/aliases/categories from current-snapshot booking eligibility; during provider switching/syncing keep catalog-backed menu and consultation available while clearing booking-ready flags, staff, imported hours, availability, and booking access.
+- [x] Separate canonical active-provider guidance services/aliases/categories from current-snapshot booking eligibility; during provider switching/syncing keep catalog-backed menu and consultation available while clearing booking-ready flags, staff, imported hours, availability, and booking access. Local hours never override the external-provider hours source.
 
 ## Product-Grade Semantic Turns And Final Review
 

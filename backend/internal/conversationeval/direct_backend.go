@@ -305,7 +305,7 @@ func (s *fixtureConversationStore) ListActiveKnowledge(context.Context, string) 
 	return nil, nil
 }
 
-func (s *fixtureConversationStore) ListBusinessHourPeriods(context.Context, string) ([]conversation.BusinessHourPeriod, error) {
+func (s *fixtureConversationStore) ListExternalProviderBusinessHourPeriods(context.Context, string) ([]conversation.BusinessHourPeriod, error) {
 	return append([]conversation.BusinessHourPeriod(nil), s.businessHours...), nil
 }
 
