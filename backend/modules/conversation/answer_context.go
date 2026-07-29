@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,32 @@ import (
 const (
 	defaultAnswerContextTTL        = 45 * time.Second
 	answerContextFenceLoadAttempts = 3
+
+	answerContextCacheStatusHit  = "hit"
+	answerContextCacheStatusMiss = "miss"
+
+	answerContextRefreshReasonNone          = "none"
+	answerContextRefreshReasonCold          = "cold"
+	answerContextRefreshReasonTTLExpired    = "ttl_expired"
+	answerContextRefreshReasonFenceMismatch = "fence_mismatch"
+
+	answerContextRetryReasonNone              = "none"
+	answerContextRetryReasonReadinessMismatch = "readiness_mismatch"
+	answerContextRetryReasonFenceChanged      = "fence_changed_during_load"
+
+	answerContextLoadOutcomeCacheHit       = "cache_hit"
+	answerContextLoadOutcomeRefreshed      = "refreshed"
+	answerContextLoadOutcomeFailClosed     = "refreshed_fail_closed"
+	answerContextLoadOutcomeError          = "load_error"
+	answerContextLoadOutcomeRetryExhausted = "retry_exhausted"
+
+	answerContextTimingAuthority     = "answer_context_authority"
+	answerContextTimingCacheStatus   = "answer_context_cache_status"
+	answerContextTimingRefreshReason = "answer_context_refresh_reason"
+	answerContextTimingRetryReason   = "answer_context_retry_reason"
+	answerContextTimingAttempts      = "answer_context_attempts"
+	answerContextTimingOutcome       = "answer_context_outcome"
+	answerContextTimingReady         = "answer_context_ready"
 )
 
 type AIAnswerContext struct {
@@ -55,6 +82,45 @@ type answerContextCacheEntry struct {
 	expiresAt time.Time
 }
 
+type answerContextLoadDiagnostics struct {
+	authority          string
+	cacheStatus        string
+	refreshReason      string
+	retryReason        string
+	attempts           int
+	outcome            string
+	ready              bool
+	readinessEvaluated bool
+}
+
+func (d answerContextLoadDiagnostics) timingAttributes() map[string]string {
+	attributes := map[string]string{
+		answerContextTimingCacheStatus:   d.cacheStatus,
+		answerContextTimingRefreshReason: d.refreshReason,
+		answerContextTimingRetryReason:   d.retryReason,
+		answerContextTimingAttempts:      strconv.Itoa(d.attempts),
+		answerContextTimingOutcome:       d.outcome,
+	}
+	if authority := answerContextDiagnosticAuthority(d.authority); authority != "" {
+		attributes[answerContextTimingAuthority] = authority
+	}
+	if d.readinessEvaluated {
+		attributes[answerContextTimingReady] = strconv.FormatBool(d.ready)
+	}
+	return attributes
+}
+
+func answerContextDiagnosticAuthority(authority string) string {
+	switch strings.TrimSpace(authority) {
+	case booking.SchedulingAuthorityOwnerManual,
+		booking.SchedulingAuthorityManleAICalendar,
+		booking.SchedulingAuthorityExternalProvider:
+		return strings.TrimSpace(authority)
+	default:
+		return ""
+	}
+}
+
 func newAnswerContextCache(ttl time.Duration) *answerContextCache {
 	if ttl <= 0 {
 		ttl = defaultAnswerContextTTL
@@ -66,30 +132,35 @@ func newAnswerContextCache(ttl time.Duration) *answerContextCache {
 }
 
 func (c *answerContextCache) get(salonID string, fence AnswerContextFence) (*AIAnswerContext, bool) {
+	ctx, status := c.lookup(salonID, fence)
+	return ctx, status == answerContextCacheStatusHit
+}
+
+func (c *answerContextCache) lookup(salonID string, fence AnswerContextFence) (*AIAnswerContext, string) {
 	if c == nil {
-		return nil, false
+		return nil, answerContextRefreshReasonCold
 	}
 	key := strings.TrimSpace(salonID)
 	if key == "" {
-		return nil, false
+		return nil, answerContextRefreshReasonCold
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry, ok := c.entries[key]
 	if !ok {
-		return nil, false
+		return nil, answerContextRefreshReasonCold
 	}
 	if time.Now().After(entry.expiresAt) {
 		delete(c.entries, key)
-		return nil, false
+		return nil, answerContextRefreshReasonTTLExpired
 	}
 	if entry.fence != fence {
 		delete(c.entries, key)
-		return nil, false
+		return nil, answerContextRefreshReasonFenceMismatch
 	}
 	ctx := cloneAIAnswerContext(&entry.context)
 	ctx.CacheHit = true
-	return ctx, true
+	return ctx, answerContextCacheStatusHit
 }
 
 func (c *answerContextCache) set(salonID string, fence AnswerContextFence, ctx AIAnswerContext) {
@@ -142,42 +213,74 @@ func cloneAIAnswerContext(ctx *AIAnswerContext) *AIAnswerContext {
 }
 
 func (s *Service) loadAnswerContext(ctx context.Context, salonID string) (*AIAnswerContext, error) {
+	answerCtx, _, err := s.loadAnswerContextWithDiagnostics(ctx, salonID)
+	return answerCtx, err
+}
+
+func (s *Service) loadAnswerContextWithDiagnostics(ctx context.Context, salonID string) (*AIAnswerContext, answerContextLoadDiagnostics, error) {
+	diagnostics := answerContextLoadDiagnostics{
+		cacheStatus:   answerContextCacheStatusMiss,
+		refreshReason: answerContextRefreshReasonCold,
+		retryReason:   answerContextRetryReasonNone,
+	}
 	for attempt := 0; attempt < answerContextFenceLoadAttempts; attempt++ {
+		diagnostics.attempts = attempt + 1
 		fence, err := s.store.GetAnswerContextFence(ctx, salonID)
 		if err != nil {
-			return nil, err
+			diagnostics.outcome = answerContextLoadOutcomeError
+			return nil, diagnostics, err
 		}
-		if cached, ok := s.answerContextCache.get(salonID, fence); ok {
-			return cached, nil
+		diagnostics.authority = fence.SchedulingAuthority
+		cached, cacheLookup := s.answerContextCache.lookup(salonID, fence)
+		if cacheLookup == answerContextCacheStatusHit {
+			diagnostics.cacheStatus = answerContextCacheStatusHit
+			diagnostics.refreshReason = answerContextRefreshReasonNone
+			diagnostics.outcome = answerContextLoadOutcomeCacheHit
+			diagnostics.readinessEvaluated = false
+			return cached, diagnostics, nil
+		}
+		if attempt == 0 || diagnostics.refreshReason == answerContextRefreshReasonCold {
+			diagnostics.refreshReason = cacheLookup
 		}
 		ready, evidenceMatches, err := s.loadAnswerContextReadiness(ctx, salonID, fence)
 		if err != nil {
-			return nil, err
+			diagnostics.outcome = answerContextLoadOutcomeError
+			return nil, diagnostics, err
 		}
+		diagnostics.readinessEvaluated = true
+		diagnostics.ready = ready
 		if !evidenceMatches {
+			diagnostics.retryReason = answerContextRetryReasonReadinessMismatch
 			s.answerContextCache.clear(salonID)
 			continue
 		}
 
 		answerCtx, err := s.loadFreshAnswerContext(ctx, salonID, fence)
 		if err != nil {
-			return nil, err
+			diagnostics.outcome = answerContextLoadOutcomeError
+			return nil, diagnostics, err
 		}
 		verifiedFence, err := s.store.GetAnswerContextFence(ctx, salonID)
 		if err != nil {
-			return nil, err
+			diagnostics.outcome = answerContextLoadOutcomeError
+			return nil, diagnostics, err
 		}
 		if fence != verifiedFence {
+			diagnostics.retryReason = answerContextRetryReasonFenceChanged
 			s.answerContextCache.clear(salonID)
 			continue
 		}
 		if !ready {
 			failClosedSchedulingContext(answerCtx)
+			diagnostics.outcome = answerContextLoadOutcomeFailClosed
+		} else {
+			diagnostics.outcome = answerContextLoadOutcomeRefreshed
 		}
 		s.answerContextCache.set(salonID, verifiedFence, *answerCtx)
-		return cloneAIAnswerContext(answerCtx), nil
+		return cloneAIAnswerContext(answerCtx), diagnostics, nil
 	}
-	return nil, errors.New("conversation answer context readiness changed while loading")
+	diagnostics.outcome = answerContextLoadOutcomeRetryExhausted
+	return nil, diagnostics, errors.New("conversation answer context readiness changed while loading")
 }
 
 func (s *Service) loadAnswerContextReadiness(ctx context.Context, salonID string, fence AnswerContextFence) (bool, bool, error) {

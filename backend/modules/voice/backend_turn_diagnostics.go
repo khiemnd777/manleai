@@ -86,6 +86,8 @@ func (d *backendTurnDiagnostics) Snapshot() map[string]string {
 		diagnostics[conversation.TurnTimingStageTurnInterpreter+"_path"] = path
 	}
 	for _, key := range []string{
+		"answer_context_authority", "answer_context_cache_status", "answer_context_refresh_reason",
+		"answer_context_retry_reason", "answer_context_attempts", "answer_context_outcome", "answer_context_ready",
 		"turn_route", "turn_expected_input", "turn_route_reason", "turn_deterministic_coverage",
 		"turn_interpreter_outcome", "turn_semantic_contract", "turn_model_service_count", "turn_model_staff_count",
 		"turn_interpreter_provider", "turn_interpreter_failure_stage", "turn_interpreter_http_status",

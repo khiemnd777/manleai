@@ -348,8 +348,14 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 	}
 	recordSessionLoad(TurnTimingResultOK)
 	answerContextStartedAt := time.Now()
-	answerCtx, err := s.loadAnswerContext(ctx, salonID)
-	recordTurnTiming(ctx, TurnTimingStageAnswerContext, answerContextStartedAt, turnTimingResult(err))
+	answerCtx, answerContextDiagnostics, err := s.loadAnswerContextWithDiagnostics(ctx, salonID)
+	recordTurnTimingWithAttributes(
+		ctx,
+		TurnTimingStageAnswerContext,
+		answerContextStartedAt,
+		turnTimingResult(err),
+		answerContextDiagnostics.timingAttributes(),
+	)
 	if err != nil {
 		return nil, err
 	}

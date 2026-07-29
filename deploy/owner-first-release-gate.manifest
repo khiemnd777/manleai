@@ -133,6 +133,8 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/config_transfer/platform_routes_test.go
   backend/modules/config_transfer/platform_service_test.go
   backend/modules/conversation/manleai_calendar_party_scheduling_test.go
+  backend/modules/conversation/answer_context_performance_test.go
+  backend/modules/conversation/answer_context_performance_integration_test.go
   backend/modules/conversation/platform_support_routes_test.go
   backend/modules/conversation/service_test.go
   backend/modules/conversation/retention_integration_test.go

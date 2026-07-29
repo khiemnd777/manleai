@@ -167,10 +167,7 @@ func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, owner
 	return &cfg, nil
 }
 
-func (r *Repository) GetAnswerContextFence(ctx context.Context, salonID string) (AnswerContextFence, error) {
-	var fence AnswerContextFence
-	var lastSyncAt sql.NullTime
-	err := r.db.QueryRowContext(ctx, `
+const answerContextFenceQuery = `
 		SELECT COALESCE(settings.scheduling_authority, 'external_provider'),
 		       COALESCE(settings.scheduling_authority_version, 0),
 		       COALESCE(service_version.version, 0),
@@ -223,7 +220,12 @@ func (r *Repository) GetAnswerContextFence(ctx context.Context, salonID string) 
 		  ON connection.salon_id = s.id
 		 AND connection.provider = COALESCE(NULLIF(BTRIM(s.active_pos_provider), ''), 'square')
 		WHERE s.id = $1
-	`, strings.TrimSpace(salonID)).Scan(
+`
+
+func (r *Repository) GetAnswerContextFence(ctx context.Context, salonID string) (AnswerContextFence, error) {
+	var fence AnswerContextFence
+	var lastSyncAt sql.NullTime
+	err := r.db.QueryRowContext(ctx, answerContextFenceQuery, strings.TrimSpace(salonID)).Scan(
 		&fence.SchedulingAuthority,
 		&fence.SchedulingAuthorityVersion,
 		&fence.ServiceCatalogVersion,
@@ -1953,6 +1955,7 @@ func safeRealtimeDiagnostics(payload map[string]any) map[string]string {
 		"status", "progress_spoken", "queued_remaining", "queued_ms", "terminal", "rejection_streak", "recovery_action",
 		"input_generation", "reply_kind", "reply_suppressed",
 		"route_config_ms", "session_load_ms", "answer_context_ms", "turn_router_ms", "turn_interpreter_ms", "turn_interpreter_path", "availability_pos_ms", "save_turn_ms",
+		"answer_context_authority", "answer_context_cache_status", "answer_context_refresh_reason", "answer_context_retry_reason", "answer_context_attempts", "answer_context_outcome", "answer_context_ready",
 		"turn_route", "turn_expected_input", "turn_route_reason", "turn_deterministic_coverage", "turn_interpreter_outcome", "turn_semantic_contract", "turn_model_service_count", "turn_model_staff_count",
 		"turn_interpreter_provider", "turn_interpreter_failure_stage", "turn_interpreter_http_status", "turn_interpreter_http_status_class", "turn_interpreter_request_id",
 		"turn_interpreter_error_type", "turn_interpreter_error_code", "turn_interpreter_error_param", "turn_interpreter_schema_fingerprint", "turn_interpreter_circuit_open",

@@ -36,3 +36,42 @@ func TestBackendTurnDiagnosticsWhitelistsSafeInterpreterFailureFields(t *testing
 		t.Fatalf("snapshot leaked non-whitelisted field: %#v", snapshot)
 	}
 }
+
+func TestBackendTurnDiagnosticsWhitelistsOnlyBoundedAnswerContextFields(t *testing.T) {
+	diagnostics := newBackendTurnDiagnostics()
+	diagnostics.Record(conversation.TurnTiming{
+		Stage: conversation.TurnTimingStageAnswerContext, Result: conversation.TurnTimingResultOK,
+		Attributes: map[string]string{
+			"answer_context_authority":      "manleai_calendar",
+			"answer_context_cache_status":   "miss",
+			"answer_context_refresh_reason": "fence_mismatch",
+			"answer_context_retry_reason":   "readiness_mismatch",
+			"answer_context_attempts":       "2",
+			"answer_context_outcome":        "refreshed",
+			"answer_context_ready":          "true",
+			"salon_id":                      "must-not-escape",
+			"transcript":                    "private caller content",
+		},
+	})
+
+	snapshot := diagnostics.Snapshot()
+	want := map[string]string{
+		"answer_context_authority":      "manleai_calendar",
+		"answer_context_cache_status":   "miss",
+		"answer_context_refresh_reason": "fence_mismatch",
+		"answer_context_retry_reason":   "readiness_mismatch",
+		"answer_context_attempts":       "2",
+		"answer_context_outcome":        "refreshed",
+		"answer_context_ready":          "true",
+	}
+	for key, value := range want {
+		if snapshot[key] != value {
+			t.Fatalf("snapshot %s = %q, want %q; all=%#v", key, snapshot[key], value, snapshot)
+		}
+	}
+	for _, key := range []string{"salon_id", "transcript"} {
+		if _, exists := snapshot[key]; exists {
+			t.Fatalf("snapshot leaked %s: %#v", key, snapshot)
+		}
+	}
+}

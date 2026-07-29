@@ -37,6 +37,9 @@ treat them as binding:
 - API surface and authenticated status/debug endpoints: `docs/api.md`
 - Production, deployment, provider runtime config, and dashboard-managed provider settings: `docs/deployment.md`
 - Production readiness scope: `docs/production-readiness-checklist.md`
+- Conversation AnswerContext query-count, multi-replica freshness,
+  observability, bounded EXPLAIN, and local performance evidence:
+  `docs/operations/conversation-answer-context-performance.md`
 - Legacy POS/provider compatibility inventory, response interpretation, and
   removal gates: `docs/operations/owner-first-compatibility.md`
 - Tagged Owner-first code, PostgreSQL, tenant, and security release gate plus
