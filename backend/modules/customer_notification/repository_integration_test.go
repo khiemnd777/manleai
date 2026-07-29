@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+	appdatabase "github.com/manleai/ai-receptionist/internal/database"
 	notificationdelivery "github.com/manleai/ai-receptionist/modules/notification_delivery"
 )
 
@@ -20,7 +21,7 @@ func TestRepositoryPostgresConsentTransitionsReplayAndStopRace(t *testing.T) {
 	if databaseURL == "" {
 		t.Skip("TEST_DATABASE_URL is not configured")
 	}
-	db, err := sql.Open("postgres", databaseURL)
+	db, err := appdatabase.Open(context.Background(), databaseURL)
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
@@ -94,7 +95,7 @@ func TestRepositoryPostgresExternalVersionZeroUnknownOutcomeAndBoundedRequeue(t 
 	if databaseURL == "" {
 		t.Skip("TEST_DATABASE_URL is not configured")
 	}
-	db, err := sql.Open("postgres", databaseURL)
+	db, err := appdatabase.Open(context.Background(), databaseURL)
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}

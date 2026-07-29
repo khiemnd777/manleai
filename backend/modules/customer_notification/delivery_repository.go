@@ -9,36 +9,32 @@ import (
 	"strings"
 	"time"
 
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	notificationdelivery "github.com/manleai/ai-receptionist/modules/notification_delivery"
 )
+
+type expiredCustomerNotificationLease struct {
+	id, salonID, token string
+	dispatched         bool
+	attempts, requeues int
+}
 
 func (r *Repository) RecoverExpiredLeases(ctx context.Context, limit int) (int, error) {
 	if limit <= 0 {
 		return 0, nil
 	}
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `
-		SELECT id::text,salon_id::text,delivery_claim_token::text,
-		       delivery_dispatch_started_at IS NOT NULL,delivery_attempts,requeue_count
-		FROM customer_notification_deliveries
-		WHERE delivery_status='delivering' AND delivery_lease_expires_at<=now()
-		ORDER BY delivery_lease_expires_at,id FOR UPDATE SKIP LOCKED LIMIT $1
+	discoveryCtx := databasecontext.WithScope(ctx, databasecontext.ScopeWorker)
+	rows, err := r.db.QueryContext(discoveryCtx, `
+		SELECT delivery_id::text, salon_id::text, claim_token::text,
+		       dispatch_started, attempt_number, requeue_count
+		FROM public.app_worker_expired_customer_notification_leases($1)
 	`, limit)
 	if err != nil {
 		return 0, err
 	}
-	type expired struct {
-		id, salonID, token string
-		dispatched         bool
-		attempts, requeues int
-	}
-	items := make([]expired, 0, limit)
+	items := make([]expiredCustomerNotificationLease, 0, limit)
 	for rows.Next() {
-		var item expired
+		var item expiredCustomerNotificationLease
 		if err := rows.Scan(&item.id, &item.salonID, &item.token, &item.dispatched, &item.attempts, &item.requeues); err != nil {
 			rows.Close()
 			return 0, err
@@ -48,85 +44,82 @@ func (r *Repository) RecoverExpiredLeases(ctx context.Context, limit int) (int, 
 	if err := rows.Close(); err != nil {
 		return 0, err
 	}
+	recovered := 0
 	for _, item := range items {
-		status, outcome, code, eventType := StatusFailed, "safe_retry", "DELIVERY_LEASE_EXPIRED", "safe_retry_scheduled"
-		if item.dispatched {
-			status, outcome, code, eventType = StatusDeadLetter, "outcome_unknown", "DELIVERY_OUTCOME_UNKNOWN", "dead_lettered"
-		} else if item.attempts-item.requeues*MaxSafeDeliveryAttempts >= MaxSafeDeliveryAttempts {
-			status, outcome, code, eventType = StatusDeadLetter, "dead_letter", "DELIVERY_LEASE_EXHAUSTED", "dead_lettered"
+		itemCtx := databasecontext.WithSystemSalon(ctx, databasecontext.ScopeWorker, item.salonID)
+		changed, err := r.recoverExpiredLease(itemCtx, item)
+		if err != nil {
+			return recovered, err
 		}
-		_, err := tx.ExecContext(ctx, `
+		if changed {
+			recovered++
+		}
+	}
+	return recovered, nil
+}
+
+func (r *Repository) recoverExpiredLease(ctx context.Context, item expiredCustomerNotificationLease) (bool, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	err = tx.QueryRowContext(ctx, `
+		SELECT delivery_dispatch_started_at IS NOT NULL, delivery_attempts, requeue_count
+		FROM customer_notification_deliveries
+		WHERE id=$1 AND salon_id=$2 AND delivery_status='delivering'
+		  AND delivery_claim_token=$3::uuid AND delivery_lease_expires_at<=now()
+		FOR UPDATE
+	`, item.id, item.salonID, item.token).Scan(&item.dispatched, &item.attempts, &item.requeues)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	status, outcome, code, eventType := StatusFailed, "safe_retry", "DELIVERY_LEASE_EXPIRED", "safe_retry_scheduled"
+	if item.dispatched {
+		status, outcome, code, eventType = StatusDeadLetter, "outcome_unknown", "DELIVERY_OUTCOME_UNKNOWN", "dead_lettered"
+	} else if item.attempts-item.requeues*MaxSafeDeliveryAttempts >= MaxSafeDeliveryAttempts {
+		status, outcome, code, eventType = StatusDeadLetter, "dead_letter", "DELIVERY_LEASE_EXHAUSTED", "dead_lettered"
+	}
+	_, err = tx.ExecContext(ctx, `
 			UPDATE customer_notification_deliveries
 			SET delivery_status=$3,next_delivery_at=CASE WHEN $3='failed' THEN now() ELSE next_delivery_at END,
 			    dead_lettered_at=CASE WHEN $3='dead_letter' THEN now() ELSE NULL END,
 			    last_delivery_error_code=$4,delivery_claim_token=NULL,delivery_claimed_at=NULL,
 			    delivery_lease_expires_at=NULL,delivery_dispatch_started_at=NULL,updated_at=now()
 			WHERE id=$1 AND salon_id=$2 AND delivery_claim_token=$5::uuid
-		`, item.id, item.salonID, status, code, item.token)
-		if err != nil {
-			return 0, err
-		}
-		if _, err := tx.ExecContext(ctx, `
+	`, item.id, item.salonID, status, code, item.token)
+	if err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `
 			UPDATE customer_notification_delivery_attempts
 			SET outcome=$2,error_code=$3,finished_at=now()
-			WHERE claim_token=$1::uuid AND outcome='leased'
-		`, item.token, outcome, code); err != nil {
-			return 0, err
-		}
-		if err := insertDeliveryEvent(ctx, tx, item.salonID, item.id, "expired:"+item.token, eventType, status, "", code); err != nil {
-			return 0, err
-		}
+			WHERE claim_token=$1::uuid AND salon_id=$4 AND outcome='leased'
+	`, item.token, outcome, code, item.salonID); err != nil {
+		return false, err
+	}
+	if err := insertDeliveryEvent(ctx, tx, item.salonID, item.id, "expired:"+item.token, eventType, status, "", code); err != nil {
+		return false, err
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return false, err
 	}
-	return len(items), nil
+	return true, nil
 }
 
 func (r *Repository) ClaimBatch(ctx context.Context, limit int, lease time.Duration) ([]ClaimedDelivery, error) {
 	if limit <= 0 || lease <= 0 {
 		return nil, ErrValidation
 	}
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `
-		WITH ranked AS (
-			SELECT delivery.id,delivery.next_delivery_at,delivery.created_at,
-			       row_number() OVER (
-			           PARTITION BY delivery.salon_id
-			           ORDER BY delivery.next_delivery_at,delivery.created_at,delivery.id
-			       ) AS tenant_rank,
-			       COALESCE(limits.worker_claims_per_batch,2) AS tenant_limit
-			FROM customer_notification_deliveries delivery
-			LEFT JOIN tenant_runtime_limits limits ON limits.salon_id=delivery.salon_id
-			WHERE delivery.delivery_status IN ('queued','quiet_hours','failed')
-			  AND delivery.next_delivery_at<=now()
-			  AND delivery.delivery_attempts::bigint < (delivery.requeue_count::bigint+1)*$1
-		), candidates AS (
-			SELECT delivery.id
-			FROM customer_notification_deliveries delivery
-			JOIN ranked ON ranked.id=delivery.id
-			WHERE ranked.tenant_rank<=ranked.tenant_limit
-			ORDER BY ranked.next_delivery_at,ranked.created_at,delivery.id
-			FOR UPDATE OF delivery SKIP LOCKED LIMIT $2
-		), claimed AS (
-			UPDATE customer_notification_deliveries delivery
-			SET delivery_status='delivering',delivery_provider='twilio',delivery_claim_token=gen_random_uuid(),
-			    delivery_claimed_at=now(),delivery_lease_expires_at=now()+($3*interval '1 millisecond'),
-			    delivery_dispatch_started_at=NULL,delivery_attempts=delivery.delivery_attempts+1,
-			    dead_lettered_at=NULL,suppressed_at=NULL,last_delivery_error_code=NULL,updated_at=now()
-			FROM candidates WHERE delivery.id=candidates.id
-			RETURNING delivery.id,delivery.salon_id,delivery.customer_sms_consent_id,
-			          delivery.notification_type,delivery.message_body,delivery.destination_e164,
-			          delivery.destination_masked,delivery.consent_version,delivery.policy_version,
-			          delivery.delivery_claim_token,delivery.delivery_attempts,delivery.requeue_count
-		)
-		SELECT id::text,salon_id::text,customer_sms_consent_id::text,notification_type,message_body,
-		       destination_e164,destination_masked,consent_version,policy_version,
-		       delivery_claim_token::text,delivery_attempts,requeue_count FROM claimed
+	discoveryCtx := databasecontext.WithScope(ctx, databasecontext.ScopeWorker)
+	rows, err := r.db.QueryContext(discoveryCtx, `
+		SELECT delivery_id::text, salon_id::text, consent_id::text, notification_type,
+		       message_body, destination_e164, destination_masked, consent_version,
+		       policy_version, claim_token::text, attempt_number, requeue_count
+		FROM public.app_worker_claim_customer_notifications($1, $2, $3)
 	`, MaxSafeDeliveryAttempts, limit, lease.Milliseconds())
 	if err != nil {
 		return nil, err
@@ -143,21 +136,6 @@ func (r *Repository) ClaimBatch(ctx context.Context, limit int, lease time.Durat
 		items = append(items, item)
 	}
 	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	for _, item := range items {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO customer_notification_delivery_attempts (
-				salon_id,customer_notification_delivery_id,attempt_number,claim_token,provider,outcome
-			) VALUES ($1,$2,$3,$4::uuid,'twilio','leased')
-		`, item.SalonID, item.ID, item.AttemptNumber, item.ClaimToken); err != nil {
-			return nil, err
-		}
-		if err := insertDeliveryEvent(ctx, tx, item.SalonID, item.ID, "claim:"+item.ClaimToken, "claimed", StatusDelivering, "", ""); err != nil {
-			return nil, err
-		}
-	}
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return items, nil

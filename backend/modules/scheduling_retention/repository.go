@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"time"
+
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 )
 
 type Repository struct {
@@ -15,26 +17,66 @@ func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
 }
 
+type retentionCandidate struct {
+	salonID    string
+	itemID     string
+	terminalAt time.Time
+}
+
 func (r *Repository) ProcessNext(ctx context.Context, kind string) (bool, error) {
 	if r == nil || r.db == nil {
 		return false, errors.New("scheduling retention repository is unavailable")
 	}
 	switch kind {
-	case KindOwnerRetentionExpiry:
-		return r.prepareNextRetentionExpiry(ctx, prepareOwnerNotificationRetentionSQL, "owner_notifications")
-	case KindCustomerRetentionExpiry:
-		return r.prepareNextRetentionExpiry(ctx, prepareCustomerNotificationRetentionSQL, "customer_notification_deliveries")
-	case KindSchedulingRequest:
-		return r.redactNextSchedulingRequest(ctx)
-	case KindOwnerNotification:
-		return r.redactNextOwnerNotification(ctx)
-	case KindCustomerNotification:
-		return r.redactNextCustomerNotification(ctx)
-	case KindVoiceAudio:
-		return r.redactNextVoiceAudio(ctx)
+	case KindOwnerRetentionExpiry, KindCustomerRetentionExpiry, KindSchedulingRequest,
+		KindOwnerNotification, KindCustomerNotification, KindVoiceAudio:
 	default:
 		return false, errors.New("scheduling retention kind is invalid")
 	}
+	discoveryCtx := databasecontext.WithScope(ctx, databasecontext.ScopeWorker)
+	candidate, found, err := r.locateCandidate(discoveryCtx, kind)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		if kind == KindVoiceAudio {
+			var changed bool
+			err := r.db.QueryRowContext(discoveryCtx, `SELECT public.app_worker_redact_unowned_voice_audio($1)`, PolicyVersion).Scan(&changed)
+			return changed, err
+		}
+		return false, nil
+	}
+	itemCtx := databasecontext.WithSystemSalon(ctx, databasecontext.ScopeWorker, candidate.salonID)
+	switch kind {
+	case KindOwnerRetentionExpiry:
+		return r.prepareNextRetentionExpiry(itemCtx, candidate, "owner_notifications")
+	case KindCustomerRetentionExpiry:
+		return r.prepareNextRetentionExpiry(itemCtx, candidate, "customer_notification_deliveries")
+	case KindSchedulingRequest:
+		return r.redactNextSchedulingRequest(itemCtx, candidate)
+	case KindOwnerNotification:
+		return r.redactNextOwnerNotification(itemCtx, candidate)
+	case KindCustomerNotification:
+		return r.redactNextCustomerNotification(itemCtx, candidate)
+	case KindVoiceAudio:
+		return r.redactNextVoiceAudio(itemCtx, candidate)
+	}
+	return false, errors.New("scheduling retention kind is invalid")
+}
+
+func (r *Repository) locateCandidate(ctx context.Context, kind string) (retentionCandidate, bool, error) {
+	var candidate retentionCandidate
+	err := r.db.QueryRowContext(ctx, `
+		SELECT salon_id::text, item_id::text, terminal_at
+		FROM public.app_worker_scheduling_retention_candidate($1)
+	`, kind).Scan(&candidate.salonID, &candidate.itemID, &candidate.terminalAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return retentionCandidate{}, false, nil
+	}
+	if err != nil {
+		return retentionCandidate{}, false, err
+	}
+	return candidate, true, nil
 }
 
 func (r *Repository) RedactNext(ctx context.Context, kind string) (bool, error) {
@@ -44,15 +86,23 @@ func (r *Repository) RedactNext(ctx context.Context, kind string) (bool, error) 
 	return r.ProcessNext(ctx, kind)
 }
 
-func (r *Repository) prepareNextRetentionExpiry(ctx context.Context, candidateSQL, table string) (bool, error) {
+func (r *Repository) prepareNextRetentionExpiry(ctx context.Context, candidate retentionCandidate, table string) (bool, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
-	var id string
 	var terminalAt time.Time
-	if err := tx.QueryRowContext(ctx, candidateSQL).Scan(&id, &terminalAt); errors.Is(err, sql.ErrNoRows) {
+	var candidateSQL string
+	switch table {
+	case "owner_notifications":
+		candidateSQL = prepareOwnerNotificationRetentionCandidateSQL
+	case "customer_notification_deliveries":
+		candidateSQL = prepareCustomerNotificationRetentionCandidateSQL
+	default:
+		return false, errors.New("scheduling retention expiry owner is invalid")
+	}
+	if err := tx.QueryRowContext(ctx, candidateSQL, candidate.itemID, candidate.salonID).Scan(&terminalAt); errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	} else if err != nil {
 		return false, err
@@ -60,13 +110,11 @@ func (r *Repository) prepareNextRetentionExpiry(ctx context.Context, candidateSQ
 	var updateSQL string
 	switch table {
 	case "owner_notifications":
-		updateSQL = `UPDATE owner_notifications SET retention_expires_at=$2::timestamptz + interval '90 days' WHERE id=$1 AND retention_expires_at IS NULL`
+		updateSQL = `UPDATE owner_notifications SET retention_expires_at=$3::timestamptz + interval '90 days' WHERE id=$1 AND salon_id=$2 AND retention_expires_at IS NULL`
 	case "customer_notification_deliveries":
-		updateSQL = `UPDATE customer_notification_deliveries SET retention_expires_at=$2::timestamptz + interval '90 days' WHERE id=$1 AND retention_expires_at IS NULL`
-	default:
-		return false, errors.New("scheduling retention expiry owner is invalid")
+		updateSQL = `UPDATE customer_notification_deliveries SET retention_expires_at=$3::timestamptz + interval '90 days' WHERE id=$1 AND salon_id=$2 AND retention_expires_at IS NULL`
 	}
-	result, err := tx.ExecContext(ctx, updateSQL, id, terminalAt)
+	result, err := tx.ExecContext(ctx, updateSQL, candidate.itemID, candidate.salonID, terminalAt)
 	if err != nil {
 		return false, err
 	}
@@ -79,17 +127,18 @@ func (r *Repository) prepareNextRetentionExpiry(ctx context.Context, candidateSQ
 	return true, nil
 }
 
-func (r *Repository) redactNextSchedulingRequest(ctx context.Context) (bool, error) {
+func (r *Repository) redactNextSchedulingRequest(ctx context.Context, candidate retentionCandidate) (bool, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
-	var requestID, salonID string
+	var requestID string
 	err = tx.QueryRowContext(ctx, `
-		SELECT request.id::text, request.salon_id::text
+		SELECT request.id::text
 		FROM scheduling_requests request
-		WHERE request.status IN ('resolved','dismissed')
+		WHERE request.id=$1 AND request.salon_id=$2
+		  AND request.status IN ('resolved','dismissed')
 		  AND request.redacted_at IS NULL
 		  AND request.retention_expires_at <= now()
 		  AND NOT EXISTS (
@@ -108,10 +157,8 @@ func (r *Repository) redactNextSchedulingRequest(ctx context.Context) (bool, err
 		             OR delivery.delivery_claim_token IS NOT NULL
 		             OR delivery.delivery_lease_expires_at IS NOT NULL)
 		  )
-		ORDER BY request.retention_expires_at, request.id
-		LIMIT 1
 		FOR UPDATE OF request SKIP LOCKED
-	`).Scan(&requestID, &salonID)
+	`, candidate.itemID, candidate.salonID).Scan(&requestID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -126,14 +173,14 @@ func (r *Repository) redactNextSchedulingRequest(ctx context.Context) (bool, err
 		UPDATE scheduling_request_segments
 		SET guest_reference=NULL, redacted_at=$3, redaction_version=$4
 		WHERE scheduling_request_id=$1 AND salon_id=$2 AND redacted_at IS NULL
-	`, requestID, salonID, redactedAt.Time, PolicyVersion); err != nil {
+	`, requestID, candidate.salonID, redactedAt.Time, PolicyVersion); err != nil {
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE scheduling_request_events
 		SET payload=retention_safe_audit_payload(payload), redacted_at=$3, redaction_version=$4
 		WHERE scheduling_request_id=$1 AND salon_id=$2 AND redacted_at IS NULL
-	`, requestID, salonID, redactedAt.Time, PolicyVersion); err != nil {
+	`, requestID, candidate.salonID, redactedAt.Time, PolicyVersion); err != nil {
 		return false, err
 	}
 	result, err := tx.ExecContext(ctx, `
@@ -147,7 +194,7 @@ func (r *Repository) redactNextSchedulingRequest(ctx context.Context) (bool, err
 		    END,
 		    redacted_at=$3, redaction_version=$4
 		WHERE id=$1 AND salon_id=$2 AND redacted_at IS NULL
-	`, requestID, salonID, redactedAt.Time, PolicyVersion)
+	`, requestID, candidate.salonID, redactedAt.Time, PolicyVersion)
 	if err != nil {
 		return false, err
 	}
@@ -160,14 +207,14 @@ func (r *Repository) redactNextSchedulingRequest(ctx context.Context) (bool, err
 	return true, nil
 }
 
-func (r *Repository) redactNextOwnerNotification(ctx context.Context) (bool, error) {
+func (r *Repository) redactNextOwnerNotification(ctx context.Context, candidate retentionCandidate) (bool, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
 	var notificationID string
-	err = tx.QueryRowContext(ctx, ownerNotificationCandidateSQL).Scan(&notificationID)
+	err = tx.QueryRowContext(ctx, ownerNotificationCandidateSQL, candidate.itemID, candidate.salonID).Scan(&notificationID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -178,9 +225,9 @@ func (r *Repository) redactNextOwnerNotification(ctx context.Context) (bool, err
 		UPDATE owner_notifications
 		SET message='[redacted]', payload=retention_safe_audit_payload(payload),
 		    delivery_destination_masked=NULL, last_delivery_error=NULL,
-		    redacted_at=now(), redaction_version=$2
-		WHERE id=$1 AND redacted_at IS NULL
-	`, notificationID, PolicyVersion)
+		    redacted_at=now(), redaction_version=$3
+		WHERE id=$1 AND salon_id=$2 AND redacted_at IS NULL
+	`, notificationID, candidate.salonID, PolicyVersion)
 	if err != nil {
 		return false, err
 	}
@@ -193,14 +240,14 @@ func (r *Repository) redactNextOwnerNotification(ctx context.Context) (bool, err
 	return true, nil
 }
 
-func (r *Repository) redactNextCustomerNotification(ctx context.Context) (bool, error) {
+func (r *Repository) redactNextCustomerNotification(ctx context.Context, candidate retentionCandidate) (bool, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
 	var deliveryID string
-	err = tx.QueryRowContext(ctx, customerNotificationCandidateSQL).Scan(&deliveryID)
+	err = tx.QueryRowContext(ctx, customerNotificationCandidateSQL, candidate.itemID, candidate.salonID).Scan(&deliveryID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -210,9 +257,9 @@ func (r *Repository) redactNextCustomerNotification(ctx context.Context) (bool, 
 	result, err := tx.ExecContext(ctx, `
 		UPDATE customer_notification_deliveries
 		SET message_body='[redacted]', destination_e164=NULL, destination_masked=NULL, destination_hash=NULL,
-		    redacted_at=now(), redaction_version=$2, updated_at=now()
-		WHERE id=$1 AND redacted_at IS NULL
-	`, deliveryID, PolicyVersion)
+		    redacted_at=now(), redaction_version=$3, updated_at=now()
+		WHERE id=$1 AND salon_id=$2 AND redacted_at IS NULL
+	`, deliveryID, candidate.salonID, PolicyVersion)
 	if err != nil {
 		return false, err
 	}
@@ -225,7 +272,7 @@ func (r *Repository) redactNextCustomerNotification(ctx context.Context) (bool, 
 	return true, nil
 }
 
-func (r *Repository) redactNextVoiceAudio(ctx context.Context) (bool, error) {
+func (r *Repository) redactNextVoiceAudio(ctx context.Context, candidate retentionCandidate) (bool, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -235,11 +282,10 @@ func (r *Repository) redactNextVoiceAudio(ctx context.Context) (bool, error) {
 	err = tx.QueryRowContext(ctx, `
 		SELECT id::text
 		FROM voice_audio_outputs
-		WHERE redacted_at IS NULL AND expires_at <= now()
-		ORDER BY expires_at, id
-		LIMIT 1
+		WHERE id=$1 AND salon_id=$2
+		  AND redacted_at IS NULL AND expires_at <= now()
 		FOR UPDATE SKIP LOCKED
-	`).Scan(&audioID)
+	`, candidate.itemID, candidate.salonID).Scan(&audioID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -248,9 +294,9 @@ func (r *Repository) redactNextVoiceAudio(ctx context.Context) (bool, error) {
 	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE voice_audio_outputs
-		SET audio_data=''::bytea, redacted_at=now(), redaction_version=$2
-		WHERE id=$1 AND redacted_at IS NULL
-	`, audioID, PolicyVersion)
+		SET audio_data=''::bytea, redacted_at=now(), redaction_version=$3
+		WHERE id=$1 AND salon_id=$2 AND redacted_at IS NULL
+	`, audioID, candidate.salonID, PolicyVersion)
 	if err != nil {
 		return false, err
 	}
@@ -268,9 +314,8 @@ func oneRow(result sql.Result) bool {
 	return err == nil && count == 1
 }
 
-const prepareOwnerNotificationRetentionSQL = `
-    SELECT notification.id::text,
-           GREATEST(
+const prepareOwnerNotificationRetentionCandidateSQL = `
+    SELECT GREATEST(
                CASE
                    WHEN request.id IS NOT NULL THEN COALESCE(request.resolved_at, request.dismissed_at, request.updated_at)
                    WHEN attempt.id IS NOT NULL THEN GREATEST(attempt.updated_at, COALESCE(task.resolved_at, attempt.updated_at))
@@ -285,7 +330,8 @@ const prepareOwnerNotificationRetentionSQL = `
       ON attempt.salon_id=notification.salon_id AND attempt.id=notification.booking_attempt_id
     LEFT JOIN booking_reconciliation_tasks task
       ON task.salon_id=notification.salon_id AND task.booking_attempt_id=attempt.id
-    WHERE notification.retention_expires_at IS NULL
+    WHERE notification.id=$1 AND notification.salon_id=$2
+      AND notification.retention_expires_at IS NULL
       AND notification.redacted_at IS NULL
       AND notification.delivery_status IN ('delivered','undelivered','dead_letter','disabled')
       AND notification.delivery_claim_token IS NULL
@@ -299,13 +345,10 @@ const prepareOwnerNotificationRetentionSQL = `
               AND attempt.reconciliation_status IN ('not_required','resolved')
               AND (task.id IS NULL OR task.status='resolved'))
       )
-    ORDER BY terminal_at, notification.id
-    LIMIT 1
     FOR UPDATE OF notification SKIP LOCKED`
 
-const prepareCustomerNotificationRetentionSQL = `
-    SELECT delivery.id::text,
-           GREATEST(
+const prepareCustomerNotificationRetentionCandidateSQL = `
+    SELECT GREATEST(
                CASE
                    WHEN request.id IS NOT NULL THEN COALESCE(request.resolved_at, request.dismissed_at, request.updated_at)
                    WHEN attempt.id IS NOT NULL THEN GREATEST(attempt.updated_at, COALESCE(task.resolved_at, attempt.updated_at))
@@ -320,7 +363,8 @@ const prepareCustomerNotificationRetentionSQL = `
       ON attempt.salon_id=delivery.salon_id AND attempt.id=delivery.booking_attempt_id
     LEFT JOIN booking_reconciliation_tasks task
       ON task.salon_id=delivery.salon_id AND task.booking_attempt_id=attempt.id
-    WHERE delivery.retention_expires_at IS NULL
+    WHERE delivery.id=$1 AND delivery.salon_id=$2
+      AND delivery.retention_expires_at IS NULL
       AND delivery.redacted_at IS NULL
       AND delivery.delivery_status IN ('delivered','undelivered','dead_letter','suppressed')
       AND delivery.delivery_claim_token IS NULL
@@ -334,8 +378,6 @@ const prepareCustomerNotificationRetentionSQL = `
               AND attempt.reconciliation_status IN ('not_required','resolved')
               AND (task.id IS NULL OR task.status='resolved'))
       )
-    ORDER BY terminal_at, delivery.id
-    LIMIT 1
     FOR UPDATE OF delivery SKIP LOCKED`
 
 const ownerNotificationCandidateSQL = `
@@ -347,7 +389,8 @@ LEFT JOIN booking_attempts attempt
   ON attempt.salon_id=notification.salon_id AND attempt.id=notification.booking_attempt_id
 LEFT JOIN booking_reconciliation_tasks task
   ON task.salon_id=notification.salon_id AND task.booking_attempt_id=attempt.id
-WHERE notification.redacted_at IS NULL
+WHERE notification.id=$1 AND notification.salon_id=$2
+  AND notification.redacted_at IS NULL
   AND notification.retention_expires_at <= now()
   AND notification.delivery_status IN ('delivered','undelivered','dead_letter','disabled')
   AND notification.delivery_claim_token IS NULL AND notification.delivery_lease_expires_at IS NULL
@@ -360,8 +403,6 @@ WHERE notification.redacted_at IS NULL
           AND attempt.reconciliation_status IN ('not_required','resolved')
           AND (task.id IS NULL OR task.status='resolved'))
   )
-ORDER BY notification.retention_expires_at, notification.id
-LIMIT 1
 FOR UPDATE OF notification SKIP LOCKED`
 
 const customerNotificationCandidateSQL = `
@@ -373,7 +414,8 @@ LEFT JOIN booking_attempts attempt
   ON attempt.salon_id=delivery.salon_id AND attempt.id=delivery.booking_attempt_id
 LEFT JOIN booking_reconciliation_tasks task
   ON task.salon_id=delivery.salon_id AND task.booking_attempt_id=attempt.id
-WHERE delivery.redacted_at IS NULL
+WHERE delivery.id=$1 AND delivery.salon_id=$2
+  AND delivery.redacted_at IS NULL
   AND delivery.retention_expires_at <= now()
   AND delivery.delivery_status IN ('delivered','undelivered','dead_letter','suppressed')
   AND delivery.delivery_claim_token IS NULL AND delivery.delivery_lease_expires_at IS NULL
@@ -386,6 +428,4 @@ WHERE delivery.redacted_at IS NULL
           AND attempt.reconciliation_status IN ('not_required','resolved')
           AND (task.id IS NULL OR task.status='resolved'))
   )
-ORDER BY delivery.retention_expires_at, delivery.id
-LIMIT 1
 FOR UPDATE OF delivery SKIP LOCKED`

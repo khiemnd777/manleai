@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/modules/booking"
 	calendar "github.com/manleai/ai-receptionist/modules/scheduling_manleai_calendar"
 )
@@ -568,26 +569,14 @@ func (r *Repository) RedactSession(ctx context.Context, salonID string, ownerUse
 }
 
 func (r *Repository) RedactExpiredSessions(ctx context.Context, limit int) (int, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
+	discoveryCtx := databasecontext.WithScope(ctx, databasecontext.ScopeWorker)
+	rows, err := r.db.QueryContext(discoveryCtx, `
+		SELECT session_id::text, salon_id::text
+		FROM public.app_worker_expired_call_sessions($1)
+	`, clampRetentionLimit(limit))
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
-
-	rows, err := tx.QueryContext(ctx, `
-		SELECT id::text, salon_id::text
-		FROM call_sessions
-		WHERE lifecycle_status <> $1
-		  AND retention_expires_at <= now()
-		ORDER BY retention_expires_at ASC
-		LIMIT $2
-		FOR UPDATE SKIP LOCKED
-	`, LifecycleRedacted, clampRetentionLimit(limit))
-	if err != nil {
-		return 0, err
-	}
-	defer rows.Close()
-
 	type expiredSession struct {
 		id      string
 		salonID string
@@ -601,18 +590,54 @@ func (r *Repository) RedactExpiredSessions(ctx context.Context, limit int) (int,
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return 0, err
 	}
-
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	redacted := 0
 	for _, item := range items {
-		if err := redactSessionInTx(ctx, tx, item.id, item.salonID); err != nil {
-			return 0, err
+		itemCtx := databasecontext.WithSystemSalon(ctx, databasecontext.ScopeWorker, item.salonID)
+		changed, err := r.redactExpiredSession(itemCtx, item.id, item.salonID)
+		if err != nil {
+			return redacted, err
+		}
+		if changed {
+			redacted++
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
+	return redacted, nil
+}
+
+func (r *Repository) redactExpiredSession(ctx context.Context, sessionID string, salonID string) (bool, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
 	}
-	return len(items), nil
+	defer tx.Rollback()
+	var exists bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT true
+		FROM call_sessions
+		WHERE id=$1 AND salon_id=$2
+		  AND lifecycle_status<>$3
+		  AND retention_expires_at<=now()
+		FOR UPDATE
+	`, sessionID, salonID, LifecycleRedacted).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := redactSessionInTx(ctx, tx, sessionID, salonID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 func (r *Repository) ListGuidanceServices(ctx context.Context, salonID string) ([]ServiceOption, error) {
@@ -1468,13 +1493,13 @@ func (r *Repository) getSession(ctx context.Context, where string, args ...any) 
 }
 
 func (r *Repository) loadSessionDetails(ctx context.Context, session *Session) error {
-	messages, err := r.listTranscript(ctx, session.ID)
+	messages, err := r.listTranscript(ctx, session.SalonID, session.ID)
 	if err != nil {
 		return err
 	}
 	session.Transcript = messages
 
-	handoff, err := r.latestHandoff(ctx, session.ID)
+	handoff, err := r.latestHandoff(ctx, session.SalonID, session.ID)
 	if err != nil {
 		return err
 	}
@@ -1487,13 +1512,14 @@ func (r *Repository) loadSessionDetails(ctx context.Context, session *Session) e
 	return nil
 }
 
-func (r *Repository) listTranscript(ctx context.Context, sessionID string) ([]TranscriptMessage, error) {
+func (r *Repository) listTranscript(ctx context.Context, salonID string, sessionID string) ([]TranscriptMessage, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id::text, session_id::text, salon_id::text, speaker, body, COALESCE(metadata, '{}'::jsonb), sequence, created_at
 		FROM call_transcript_messages
-		WHERE session_id = $1
+		WHERE salon_id = $1
+		  AND session_id = $2
 		ORDER BY sequence ASC
-	`, sessionID)
+	`, salonID, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -1516,17 +1542,18 @@ func (r *Repository) listTranscript(ctx context.Context, sessionID string) ([]Tr
 	return items, rows.Err()
 }
 
-func (r *Repository) latestHandoff(ctx context.Context, sessionID string) (*HandoffRequest, error) {
+func (r *Repository) latestHandoff(ctx context.Context, salonID string, sessionID string) (*HandoffRequest, error) {
 	var item HandoffRequest
 	var resolvedAt sql.NullTime
 	err := r.db.QueryRowContext(ctx, `
 		SELECT id::text, salon_id::text, call_session_id::text, status, reason,
 		       COALESCE(customer_name, ''), COALESCE(customer_phone, ''), summary, created_at, resolved_at
 		FROM handoff_requests
-		WHERE call_session_id = $1
+		WHERE salon_id = $1
+		  AND call_session_id = $2
 		ORDER BY created_at DESC
 		LIMIT 1
-	`, sessionID).Scan(
+	`, salonID, sessionID).Scan(
 		&item.ID,
 		&item.SalonID,
 		&item.CallSessionID,
@@ -1714,7 +1741,8 @@ func redactSessionInTx(ctx context.Context, execer sqlExecer, sessionID string, 
 		UPDATE voice_webhook_events
 		SET payload = jsonb_build_object('redacted', true)
 		WHERE call_session_id = $1
-	`, sessionID); err != nil {
+		  AND salon_id = $2
+	`, sessionID, salonID); err != nil {
 		return err
 	}
 	if _, err := execer.ExecContext(ctx, `
@@ -1723,7 +1751,8 @@ func redactSessionInTx(ctx context.Context, execer sqlExecer, sessionID string, 
 		    redacted_at = COALESCE(redacted_at, now()),
 		    redaction_version = COALESCE(redaction_version, 1)
 		WHERE call_session_id = $1
-	`, sessionID); err != nil {
+		  AND salon_id = $2
+	`, sessionID, salonID); err != nil {
 		return err
 	}
 	return nil

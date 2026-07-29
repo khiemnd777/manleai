@@ -125,68 +125,13 @@ func (r *WebhookRepository) ClaimBookingWebhooks(ctx context.Context, limit int)
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	rows, err := r.db.QueryContext(ctx, `
-		WITH exhausted AS (
-			UPDATE square_booking_webhook_events event
-			SET processing_status = 'dead_letter',
-			    processing_token = NULL,
-			    processing_lease_expires_at = NULL,
-			    dead_lettered_at = COALESCE(event.dead_lettered_at, now()),
-			    last_error = NULL,
-			    last_error_class = 'processing',
-			    last_error_code = 'SQUARE_WEBHOOK_ATTEMPTS_EXHAUSTED',
-			    updated_at = now()
-			WHERE event.processing_attempts >= (event.requeue_count + 1) * $2
-			  AND (
-			      event.processing_status IN ('pending', 'failed')
-			      OR (event.processing_status = 'processing' AND event.processing_lease_expires_at < now())
-			  )
-			RETURNING event.id
-		), ranked AS (
-			SELECT event.id,event.next_attempt_at,event.created_at,
-			       row_number() OVER (
-			           PARTITION BY event.salon_id
-			           ORDER BY event.next_attempt_at,event.created_at,event.id
-			       ) AS tenant_rank,
-			       COALESCE(limits.worker_claims_per_batch,2) AS tenant_limit
-			FROM square_booking_webhook_events event
-			LEFT JOIN tenant_runtime_limits limits ON limits.salon_id=event.salon_id
-			WHERE event.processing_attempts < (event.requeue_count + 1) * $2
-			  AND (
-			      (event.processing_status IN ('pending', 'failed') AND event.next_attempt_at <= now())
-			      OR (event.processing_status = 'processing' AND event.processing_lease_expires_at < now())
-			  )
-		), candidates AS (
-			SELECT event.id
-			FROM square_booking_webhook_events event
-			JOIN ranked ON ranked.id=event.id
-			WHERE ranked.tenant_rank<=ranked.tenant_limit
-			ORDER BY ranked.next_attempt_at,ranked.created_at,event.id
-			FOR UPDATE OF event SKIP LOCKED
-			LIMIT $1
-		), claimed AS (
-			UPDATE square_booking_webhook_events event
-			SET processing_status = 'processing',
-			    processing_attempts = event.processing_attempts + 1,
-			    processing_token = gen_random_uuid()::text,
-			    processing_lease_expires_at = now() + interval '4 minutes',
-			    dead_lettered_at = NULL,
-			    last_error = NULL,
-			    last_error_class = NULL,
-			    last_error_code = NULL,
-			    updated_at = now()
-			FROM candidates
-			WHERE event.id = candidates.id
-			RETURNING event.id::text, event.salon_id::text, event.event_id, event.event_type,
-			          event.merchant_id, event.location_id, event.pos_booking_id,
-			          COALESCE(event.pos_booking_version, 0), COALESCE(event.booking_status, ''),
-			          event.booking_start_at, event.delivered_at, event.processing_attempts,
-			          event.processing_token
-		)
-		SELECT claimed.*, salon.owner_user_id::text
-		FROM claimed
-		JOIN salons salon ON salon.id::text = claimed.salon_id
-		ORDER BY claimed.event_id
+	discoveryCtx := databasecontext.WithScope(ctx, databasecontext.ScopeWorker)
+	rows, err := r.db.QueryContext(discoveryCtx, `
+		SELECT webhook_id::text, salon_id::text, event_id, event_type,
+		       merchant_id, location_id, pos_booking_id, pos_booking_version,
+		       booking_status, booking_start_at, delivered_at, processing_attempts,
+		       processing_token, owner_user_id::text
+		FROM public.app_worker_claim_square_booking_webhooks($1, $2)
 	`, limit, MaxWebhookAttemptsPerCycle)
 	if err != nil {
 		return nil, err
@@ -321,53 +266,10 @@ func (r *WebhookRepository) ClaimCalendarRepairTargets(ctx context.Context, limi
 	if limit <= 0 || limit > 20 {
 		limit = 2
 	}
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO square_calendar_repair_state (salon_id)
-		SELECT connection.salon_id
-		FROM pos_connections connection
-		JOIN salons salon ON salon.id = connection.salon_id
-		WHERE connection.provider = $1
-		  AND salon.active_pos_provider = $1
-		  AND connection.status = 'active'
-		  AND COALESCE(connection.merchant_id, '') <> ''
-		  AND COALESCE(connection.location_id, '') <> ''
-		ON CONFLICT (salon_id) DO NOTHING
-	`, pos.ProviderSquare); err != nil {
-		return nil, err
-	}
-	rows, err := tx.QueryContext(ctx, `
-		WITH candidates AS (
-			SELECT state.salon_id
-			FROM square_calendar_repair_state state
-			JOIN pos_connections connection
-			  ON connection.salon_id = state.salon_id AND connection.provider = $1
-			JOIN salons salon ON salon.id = connection.salon_id AND salon.active_pos_provider = $1
-			WHERE state.next_repair_at <= now()
-			  AND (state.lease_expires_at IS NULL OR state.lease_expires_at < now())
-			  AND connection.status = 'active'
-			ORDER BY state.next_repair_at, state.salon_id
-			FOR UPDATE OF state SKIP LOCKED
-			LIMIT $2
-		), claimed AS (
-			UPDATE square_calendar_repair_state state
-			SET lease_expires_at = now() + interval '5 minutes',
-			    lease_token = gen_random_uuid()::text,
-			    next_repair_at = now() + interval '5 minutes',
-			    repair_attempts = state.repair_attempts + 1,
-			    updated_at = now()
-			FROM candidates
-			WHERE state.salon_id = candidates.salon_id
-			RETURNING state.salon_id, state.lease_token
-		)
-		SELECT claimed.salon_id::text, salon.owner_user_id::text, claimed.lease_token
-		FROM claimed
-		JOIN salons salon ON salon.id = claimed.salon_id
-		ORDER BY claimed.salon_id
+	discoveryCtx := databasecontext.WithScope(ctx, databasecontext.ScopeWorker)
+	rows, err := r.db.QueryContext(discoveryCtx, `
+		SELECT salon_id::text, owner_user_id::text, lease_token
+		FROM public.app_worker_claim_square_calendar_repairs($1, $2)
 	`, pos.ProviderSquare, limit)
 	if err != nil {
 		return nil, err
@@ -382,9 +284,6 @@ func (r *WebhookRepository) ClaimCalendarRepairTargets(ctx context.Context, limi
 		items = append(items, item)
 	}
 	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return items, nil

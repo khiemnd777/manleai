@@ -190,8 +190,7 @@ func TestCalendarRepairClaimAndCompletionAreLeaseTokenFenced(t *testing.T) {
 	}
 	repositorySource := string(repositoryBytes)
 	for _, fragment := range []string{
-		"lease_token = gen_random_uuid()::text",
-		"RETURNING state.salon_id, state.lease_token",
+		"app_worker_claim_square_calendar_repairs",
 		"AND lease_token = $2",
 		"return webhookClaimUpdateResult(result, err)",
 	} {
@@ -205,6 +204,19 @@ func TestCalendarRepairClaimAndCompletionAreLeaseTokenFenced(t *testing.T) {
 	}
 	if !strings.Contains(string(migrationBytes), "lease_token TEXT") {
 		t.Fatal("V41 migration must persist the calendar repair lease token")
+	}
+	contractBytes, err := os.ReadFile("../../migrations/V79__system_tenant_contract_preparation.sql")
+	if err != nil {
+		t.Fatalf("read V79 migration: %v", err)
+	}
+	for _, fragment := range []string{
+		"lease_token = gen_random_uuid()::TEXT",
+		"RETURNING state.salon_id, state.lease_token",
+		"app_worker_discovery_allowed()",
+	} {
+		if !strings.Contains(string(contractBytes), fragment) {
+			t.Fatalf("V79 calendar repair claim is missing %q", fragment)
+		}
 	}
 }
 

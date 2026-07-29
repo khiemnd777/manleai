@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/internal/validation"
 	"github.com/manleai/ai-receptionist/modules/scheduling/fence"
 )
@@ -631,45 +632,12 @@ func (r *Repository) ClaimPOSSyncJobs(ctx context.Context, limit int) ([]SyncJob
 	if limit <= 0 {
 		limit = 10
 	}
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	rows, err := tx.QueryContext(ctx, `
-		WITH ranked AS (
-			SELECT job.id,job.next_attempt_at,job.created_at,
-			       row_number() OVER (
-			           PARTITION BY job.salon_id
-			           ORDER BY job.next_attempt_at,job.created_at,job.id
-			       ) AS tenant_rank,
-			       COALESCE(limits.worker_claims_per_batch,2) AS tenant_limit
-			FROM pos_sync_jobs job
-			LEFT JOIN tenant_runtime_limits limits ON limits.salon_id=job.salon_id
-			WHERE job.status IN ('queued', 'failed')
-			  AND job.attempt_count < job.max_attempts
-			  AND job.next_attempt_at <= now()
-		), candidates AS (
-			SELECT job.id
-			FROM pos_sync_jobs job
-			JOIN ranked ON ranked.id=job.id
-			WHERE ranked.tenant_rank<=ranked.tenant_limit
-			ORDER BY ranked.next_attempt_at,ranked.created_at,job.id
-			FOR UPDATE OF job SKIP LOCKED
-			LIMIT $1
-		)
-		UPDATE pos_sync_jobs job
-		SET status = 'running',
-		    attempt_count = attempt_count + 1,
-		    locked_at = now(),
-		    completed_at = NULL,
-		    updated_at = now()
-		FROM candidates
-		WHERE job.id = candidates.id
-		RETURNING job.id::text, job.salon_id::text, job.provider, job.entity_type, job.entity_id::text,
-		          job.operation, job.status, job.attempt_count, job.max_attempts, job.next_attempt_at,
-		          job.locked_at, job.completed_at, COALESCE(job.last_error, ''), job.created_at, job.updated_at
+	discoveryCtx := databasecontext.WithScope(ctx, databasecontext.ScopeWorker)
+	rows, err := r.db.QueryContext(discoveryCtx, `
+		SELECT job_id::text, salon_id::text, provider, entity_type, entity_id::text,
+		       operation, status, attempt_count, max_attempts, next_attempt_at,
+		       locked_at, completed_at, last_error, created_at, updated_at
+		FROM public.app_worker_claim_pos_sync_jobs($1)
 	`, limit)
 	if err != nil {
 		return nil, err
@@ -685,9 +653,6 @@ func (r *Repository) ClaimPOSSyncJobs(ctx context.Context, limit int) ([]SyncJob
 		jobs = append(jobs, *job)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return jobs, nil

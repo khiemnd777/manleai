@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+	appdatabase "github.com/manleai/ai-receptionist/internal/database"
 	"github.com/manleai/ai-receptionist/modules/pos"
 )
 
@@ -300,7 +301,7 @@ func TestRepositorySweepExpiredNotStartedLeaseCreatesOneRetrySafeFallback(t *tes
 	if databaseURL == "" {
 		t.Skip("TEST_DATABASE_URL is not configured")
 	}
-	db, err := sql.Open("postgres", databaseURL)
+	db, err := appdatabase.Open(context.Background(), databaseURL)
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
@@ -518,7 +519,7 @@ func TestRepositoryLeaseRecoveryPersistsExternalConfirmationProvenanceAtomically
 	if databaseURL == "" {
 		t.Skip("TEST_DATABASE_URL is not configured")
 	}
-	db, err := sql.Open("postgres", databaseURL)
+	db, err := appdatabase.Open(context.Background(), databaseURL)
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
@@ -764,7 +765,7 @@ func TestRepositoryLeaseSweepLimitBoundsAttemptsNotSalons(t *testing.T) {
 	if databaseURL == "" {
 		t.Skip("TEST_DATABASE_URL is not configured")
 	}
-	db, err := sql.Open("postgres", databaseURL)
+	db, err := appdatabase.Open(context.Background(), databaseURL)
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
@@ -1909,7 +1910,7 @@ func TestRepositoryAvailabilityQuoteCleanupIsBoundedIdempotentAndPreservesAttemp
 	if databaseURL == "" {
 		t.Skip("TEST_DATABASE_URL is not configured")
 	}
-	db, err := sql.Open("postgres", databaseURL)
+	db, err := appdatabase.Open(context.Background(), databaseURL)
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+	appdatabase "github.com/manleai/ai-receptionist/internal/database"
 	"github.com/manleai/ai-receptionist/internal/middleware"
 	schedulingretention "github.com/manleai/ai-receptionist/modules/scheduling_retention"
 )
@@ -333,7 +334,7 @@ func TestPostgresManualSessionRedactionClearsFutureAudioAndExpiryWorkerIsIdempot
 	if databaseURL == "" {
 		t.Skip("TEST_DATABASE_URL is not configured")
 	}
-	db, err := sql.Open("postgres", databaseURL)
+	db, err := appdatabase.Open(context.Background(), databaseURL)
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
