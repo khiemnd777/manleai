@@ -431,6 +431,8 @@ func loadAggregate(ctx context.Context, q dbReader, salonID string, ownerUserID 
 		  AND (
 		      public.has_active_tenant_membership(salon.id, $2::uuid)
 		      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'technical.read')
+		      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.read', 'calls')
+		      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls')
 		  )
 	`, salonID, ownerUserID).Scan(&aggregate.Timezone, &aggregate.SchedulingAuthority, &aggregate.AuthorityVersion); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

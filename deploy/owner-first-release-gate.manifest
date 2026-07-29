@@ -92,6 +92,7 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/migrations/v75_safety_test.go
   backend/migrations/v76_safety_test.go
   backend/migrations/v77_safety_test.go
+  backend/migrations/v78_safety_test.go
   backend/sampledata/runner_test.go
   backend/sampledata/runner_integration_test.go
   backend/cmd/worker/retention_registration_test.go
@@ -129,6 +130,7 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/config_transfer/platform_service_test.go
   backend/modules/conversation/manleai_calendar_party_scheduling_test.go
   backend/modules/conversation/platform_support_routes_test.go
+  backend/modules/conversation/service_test.go
   backend/modules/conversation/retention_integration_test.go
   backend/modules/conversation/scheduling_result_evidence_integration_test.go
   backend/modules/conversation/scheduling_result_evidence_test.go
@@ -157,6 +159,7 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/pos_square/platform_routes_test.go
   backend/modules/pos_square/webhook_operations_repository_integration_test.go
   backend/modules/pos_square/webhook_operations_test.go
+  backend/modules/pos_square/webhook_processor_test.go
   backend/modules/pos_square/webhook_test.go
   backend/modules/public_catalog/service_test.go
   backend/modules/salon/public_catalog_integration_test.go
@@ -175,6 +178,7 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/tenant_runtime/service_test.go
   backend/modules/voice/types_test.go
   backend/modules/voice/routes_test.go
+  backend/modules/voice/service_test.go
   backend/modules/voice_openai/adapter_test.go
   backend/modules/voice_twilio/adapter_test.go
   backend/modules/voice_twilio/handler_test.go

@@ -350,7 +350,7 @@ func TestResolveOpenAIConfigStrictFailsClosedWithoutStoredRecord(t *testing.T) {
 	}
 }
 
-func TestRuntimeResolversUseLegacyBootstrapOnlyWhenStoredConfigIsExactlyMissing(t *testing.T) {
+func TestRuntimeResolversKeepSquareBootstrapButFailClosedForMissingVoiceConfigs(t *testing.T) {
 	service := &Service{
 		repo:   &fakeIntegrationConfigStore{},
 		cipher: &fakeSecretCipher{},
@@ -374,12 +374,20 @@ func TestRuntimeResolversUseLegacyBootstrapOnlyWhenStoredConfigIsExactlyMissing(
 		t.Fatalf("legacy Square config/error = %#v/%v", squareCfg, err)
 	}
 	twilioCfg, publicBaseURL, err := service.ResolveTwilioConfig(context.Background(), "salon_1")
-	if err != nil || twilioCfg.AuthToken != "legacy-twilio-token" || publicBaseURL != "https://legacy.example.com" {
-		t.Fatalf("legacy Twilio config/base/error = %#v/%q/%v", twilioCfg, publicBaseURL, err)
+	if !errors.Is(err, ErrNotFound) || twilioCfg.AuthToken != "" || publicBaseURL != "" {
+		t.Fatalf("Twilio config/base/error = %#v/%q/%v, want missing stored config", twilioCfg, publicBaseURL, err)
 	}
 	openAICfg, enabled, err := service.ResolveOpenAIConfig(context.Background(), "salon_1")
-	if err != nil || !enabled || openAICfg.APIKey != "legacy-openai-key" || openAICfg.ReplyModel != "legacy-reply" {
-		t.Fatalf("legacy OpenAI config/enabled/error = %#v/%t/%v", openAICfg, enabled, err)
+	if !errors.Is(err, ErrNotFound) || enabled || openAICfg.APIKey != "" || openAICfg.ReplyModel != "" {
+		t.Fatalf("OpenAI config/enabled/error = %#v/%t/%v, want missing stored config", openAICfg, enabled, err)
+	}
+	twilioResponse := service.twilioResponse(nil)
+	if twilioResponse.Configured || twilioResponse.PublicBaseURL != "" || twilioResponse.IncomingPath != "" || twilioResponse.AuthTokenSource != SecretSourceNone {
+		t.Fatalf("missing Twilio response leaked legacy environment config: %#v", twilioResponse)
+	}
+	openAIResponse := service.openAIResponse(nil)
+	if openAIResponse.Enabled || openAIResponse.Configured || openAIResponse.BaseURL != "" || openAIResponse.ReplyModel != "" || openAIResponse.APIKeySource != SecretSourceNone {
+		t.Fatalf("missing OpenAI response leaked legacy environment config: %#v", openAIResponse)
 	}
 }
 

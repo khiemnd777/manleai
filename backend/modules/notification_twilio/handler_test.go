@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
 	notificationdelivery "github.com/manleai/ai-receptionist/modules/notification_delivery"
 )
@@ -15,14 +16,16 @@ import (
 type fakeCallbackService struct {
 	callback notificationdelivery.ProviderCallback
 	calls    int
+	access   databasecontext.AccessContext
 }
 
 func (*fakeCallbackService) SalonIDForProviderMessage(context.Context, string, string) (string, error) {
 	return "salon-1", nil
 }
-func (f *fakeCallbackService) ApplyProviderCallback(_ context.Context, callback notificationdelivery.ProviderCallback) error {
+func (f *fakeCallbackService) ApplyProviderCallback(ctx context.Context, callback notificationdelivery.ProviderCallback) error {
 	f.calls++
 	f.callback = callback
+	f.access = databasecontext.FromContext(ctx)
 	return nil
 }
 
@@ -67,6 +70,9 @@ func TestStatusCallbackVerifiesAllEvolvingParamsAndMapsDelivered(t *testing.T) {
 	}
 	if service.calls != 1 || service.callback.DeliveryStatus != notificationdelivery.StatusDelivered || service.callback.StatusRank != 50 {
 		t.Fatalf("callback=%#v calls=%d", service.callback, service.calls)
+	}
+	if service.access.Scope != databasecontext.ScopeProvider || service.access.SystemSalonID != "salon-1" || service.access.ActorUserID != "" {
+		t.Fatalf("callback access context = %#v", service.access)
 	}
 }
 

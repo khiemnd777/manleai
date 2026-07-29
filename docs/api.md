@@ -1247,7 +1247,11 @@ store and do not impersonate the Owner.
   `/owner-corrections` provide the Calls-scoped catalogs/correction action.
   `GET /api/platform/tenants/:id/voice/status` returns a business-safe status
   projection and omits provider URLs, credentials, model/voice settings, and
-  diagnostics.
+  diagnostics. Platform Calls services pass the authenticated Platform identity
+  through runtime, scheduling, and persistence authorization; they never replace
+  it with `salons.owner_user_id`. Platform Admin is authorized directly by its
+  role capability. Platform Ops still requires the exact active salon assignment,
+  delegated capability, and Calls PII grant.
 
 Calls authorization may select only scheduling evidence durably linked to an
 authorized call session. It grants no general Appointments access, no booking,
@@ -2185,7 +2189,8 @@ fresh consent attestation. Blank write-only secret/SID fields preserve their
 stored values unless the matching `clear_*` flag is true. Responses expose only
 the masked destination, configured booleans, and callback URLs. The owner-SMS
 runtime resolver uses only the salon's database record and never takes the
-legacy environment fallback used by some voice/bootstrap paths.
+legacy environment fallback. Voice Twilio/OpenAI resolution is also
+database-only; only the exact-missing Square compatibility bootstrap remains.
 
 `PUT /api/platform/tenants/:tenant_id/technical/integration-configs/openai`
 

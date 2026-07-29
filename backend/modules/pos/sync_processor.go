@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 )
 
 var ErrPOSSyncUnsupported = errors.New("pos sync operation is unsupported")
@@ -49,6 +51,7 @@ func (p *SyncProcessor) ProcessOnce(ctx context.Context, limit int) (int, error)
 }
 
 func (p *SyncProcessor) processOne(ctx context.Context, job SyncJob) error {
+	ctx = databasecontext.WithSystemSalon(ctx, databasecontext.ScopeWorker, job.SalonID)
 	logID, err := p.store.CreateSyncLog(ctx, job.SalonID, job.Provider, job.Operation)
 	if err != nil {
 		return err

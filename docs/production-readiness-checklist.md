@@ -281,7 +281,7 @@ RPO/RTO evidence.
   redaction guards, and a responsive child panel inside the connected Square
   integration card. A configured verifier or received webhook still is not
   appointment-confirmation or live-subscription proof.
-- [x] Fail runtime Square/Twilio/OpenAI configuration resolution closed on repository, malformed persisted settings, or decryption errors; keep stored enabled state and credentials authoritative, prevent dashboard secret-source fallback for stored rows, and permit legacy bootstrap fallback only for an exact missing stored salon configuration.
+- [x] Fail runtime Square/Twilio/OpenAI configuration resolution closed on repository, malformed persisted settings, or decryption errors; keep stored enabled state and credentials authoritative; make Twilio/OpenAI runtime and reads database-only; prevent dashboard secret-source fallback for stored rows; and permit the legacy bootstrap fallback only for an exact missing Square salon configuration.
 - [x] Enforce Phase 1 provider-diagnostic isolation: serialize integration
   secrets/SIDs/destinations as write-only state, normalize Square/POS failures
   to stable codes and fixed messages before persistence/API response, allowlist
@@ -536,6 +536,16 @@ RPO/RTO evidence.
   salon route checks current exact membership; Platform users support direct
   create/edit/password/role/status with session revocation, idempotency, audit,
   and last-active-Admin protection.
+- [x] Phase 15 expand release: preserve the authenticated Platform identity
+  throughout Calls status/simulator/scheduling access; make Twilio/OpenAI live
+  runtime and technical reads strictly salon-database-backed; add V78
+  `app.system_salon_id`, provider-only salon-ID locators, and bind resolved
+  provider plus claimed worker item operations to one salon.
+- [ ] Phase 15 contract release: after the V78-aware image is deployed and
+  observed, move every remaining global worker claim/recovery/cleanup/retention
+  operation behind narrow worker-only database functions, then require matching
+  `app.system_salon_id` in provider/worker base RLS. Do not mark tenant-system
+  isolation complete or co-ship this policy tightening with V78.
 - [x] Restore and reuse the full existing `ServicesDashboard`, `CallsDashboard`,
   `SettingsDashboard`, and `TrainingDashboard` on their Tenant routes; reuse the
   same Services/Calls/Training components through explicit Platform surface

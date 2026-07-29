@@ -43,6 +43,30 @@ func TestListDefaultsToActiveLifecycle(t *testing.T) {
 	}
 }
 
+func TestStartForPlatformPreservesActualActor(t *testing.T) {
+	store := newFakeConversationStore()
+	service := NewService(store, &fakeBookingTool{})
+
+	if _, err := service.StartForPlatform(context.Background(), " salon_1 ", " platform_admin_1 ", StartSessionRequest{Channel: ChannelSimulator}); err != nil {
+		t.Fatalf("StartForPlatform returned error: %v", err)
+	}
+	if store.runtimeConfigActor != "platform_admin_1" || store.createdSessionActor != "platform_admin_1" {
+		t.Fatalf("Platform actor was replaced: runtime=%q create=%q", store.runtimeConfigActor, store.createdSessionActor)
+	}
+}
+
+func TestMessageForPlatformPreservesActualActor(t *testing.T) {
+	store := newFakeConversationStore()
+	service := NewService(store, &fakeBookingTool{})
+
+	if _, err := service.MessageForPlatform(context.Background(), " salon_1 ", " platform_ops_1 ", store.session.ID, MessageRequest{Message: "Please check tomorrow afternoon."}); err != nil {
+		t.Fatalf("MessageForPlatform returned error: %v", err)
+	}
+	if store.runtimeConfigActor != "platform_ops_1" {
+		t.Fatalf("Platform actor was replaced: runtime=%q", store.runtimeConfigActor)
+	}
+}
+
 func TestListReturnsPaginationMetadata(t *testing.T) {
 	store := newFakeConversationStore()
 	store.listSessions = make([]Session, maxSessionListLimit+1)
@@ -9399,6 +9423,8 @@ type fakeConversationStore struct {
 	lastTurn             TurnRecord
 	processedEventKeys   map[string]bool
 	processedTurnReplies map[string]string
+	runtimeConfigActor   string
+	createdSessionActor  string
 	listLifecycleStatus  string
 	listLimit            int
 	listOffset           int
@@ -9488,6 +9514,7 @@ func newFakeConversationStore() *fakeConversationStore {
 }
 
 func (f *fakeConversationStore) GetRuntimeConfig(ctx context.Context, salonID string, ownerUserID string) (*RuntimeConfig, error) {
+	f.runtimeConfigActor = ownerUserID
 	cfg := f.cfg
 	if cfg.SchedulingAuthority == "" {
 		cfg.SchedulingAuthority = f.answerContextFence.SchedulingAuthority
@@ -9508,6 +9535,7 @@ func (f *fakeConversationStore) GetAnswerContextFence(ctx context.Context, salon
 }
 
 func (f *fakeConversationStore) CreateSession(ctx context.Context, record NewSessionRecord) (*Session, error) {
+	f.createdSessionActor = record.OwnerUserID
 	return &f.session, nil
 }
 

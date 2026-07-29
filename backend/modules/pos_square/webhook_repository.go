@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/modules/pos"
 )
 
@@ -70,16 +71,8 @@ func (r *WebhookRepository) FindWebhookTarget(ctx context.Context, merchantID st
 		return nil, ErrWebhookTargetNotFound
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT connection.salon_id::text, salon.owner_user_id::text
-		FROM pos_connections connection
-		JOIN salons salon ON salon.id = connection.salon_id
-		WHERE connection.provider = $1
-		  AND connection.merchant_id = $2
-		  AND connection.location_id = $3
-		  AND salon.active_pos_provider = $1
-		  AND connection.status = ANY($4::text[])
-		ORDER BY connection.salon_id
-		LIMIT 2
+		SELECT salon_id::text
+		FROM public.app_provider_square_webhook_targets($1,$2,$3,$4::text[])
 	`, pos.ProviderSquare, merchantID, locationID, pq.Array(squareWebhookTargetConnectionStatuses()))
 	if err != nil {
 		return nil, err
@@ -89,7 +82,7 @@ func (r *WebhookRepository) FindWebhookTarget(ctx context.Context, merchantID st
 	targets := make([]SquareWebhookTarget, 0, 2)
 	for rows.Next() {
 		var target SquareWebhookTarget
-		if err := rows.Scan(&target.SalonID, &target.OwnerUserID); err != nil {
+		if err := rows.Scan(&target.SalonID); err != nil {
 			return nil, err
 		}
 		targets = append(targets, target)
@@ -97,7 +90,18 @@ func (r *WebhookRepository) FindWebhookTarget(ctx context.Context, merchantID st
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return uniqueWebhookTarget(targets)
+	target, err := uniqueWebhookTarget(targets)
+	if err != nil {
+		return nil, err
+	}
+	boundCtx := databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, target.SalonID)
+	if err := r.db.QueryRowContext(boundCtx, `SELECT owner_user_id::text FROM salons WHERE id=$1`, target.SalonID).Scan(&target.OwnerUserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrWebhookTargetNotFound
+		}
+		return nil, err
+	}
+	return target, nil
 }
 
 func (r *WebhookRepository) EnqueueBookingWebhook(ctx context.Context, event SquareBookingWebhookEvent) (bool, error) {

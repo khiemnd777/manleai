@@ -37,20 +37,6 @@ func NewRepository(db *sql.DB) *Repository {
 	}
 }
 
-func (r *Repository) ResolveSalonOwnerForPlatform(ctx context.Context, salonID string, platformUserID string) (string, error) {
-	var ownerUserID string
-	err := r.db.QueryRowContext(ctx, `
-		SELECT salon.owner_user_id::text
-		FROM salons salon
-		WHERE salon.id = $1
-		  AND public.app_active_support_pii_grant($2::uuid, salon.id, 'calls.simulate', 'calls')
-	`, strings.TrimSpace(salonID), strings.TrimSpace(platformUserID)).Scan(&ownerUserID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrNotFound
-	}
-	return ownerUserID, err
-}
-
 func sessionTurnSlotLimit(db *sql.DB) int {
 	if db == nil {
 		return 1

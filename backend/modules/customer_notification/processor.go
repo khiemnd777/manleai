@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	notificationdelivery "github.com/manleai/ai-receptionist/modules/notification_delivery"
 )
 
@@ -47,12 +48,13 @@ func (p *Processor) ProcessOnce(ctx context.Context, limit int) (int, error) {
 		if ctx.Err() != nil {
 			return processed, ctx.Err()
 		}
-		readiness, err := p.repo.ResolveDispatchReadiness(ctx, item)
+		itemCtx := databasecontext.WithSystemSalon(ctx, databasecontext.ScopeWorker, item.SalonID)
+		readiness, err := p.repo.ResolveDispatchReadiness(itemCtx, item)
 		if err != nil {
 			return processed, err
 		}
 		if !readiness.Eligible {
-			if err := p.repo.RecordSuppressed(ctx, item, readiness.ReasonCode); err != nil {
+			if err := p.repo.RecordSuppressed(itemCtx, item, readiness.ReasonCode); err != nil {
 				return processed, err
 			}
 			processed++
@@ -60,34 +62,34 @@ func (p *Processor) ProcessOnce(ctx context.Context, limit int) (int, error) {
 		}
 		quietEnd, quiet, err := quietHoursEnd(readiness.Now, readiness.Timezone, readiness.QuietStart, readiness.QuietEnd)
 		if err != nil {
-			if err := p.repo.RecordSafeFailure(ctx, item, "CUSTOMER_SMS_POLICY_NOT_READY", p.now().Add(retryDelay(attemptInCycle(item)))); err != nil {
+			if err := p.repo.RecordSafeFailure(itemCtx, item, "CUSTOMER_SMS_POLICY_NOT_READY", p.now().Add(retryDelay(attemptInCycle(item)))); err != nil {
 				return processed, err
 			}
 			processed++
 			continue
 		}
 		if quiet {
-			if err := p.repo.RecordQuietHours(ctx, item, quietEnd); err != nil {
+			if err := p.repo.RecordQuietHours(itemCtx, item, quietEnd); err != nil {
 				return processed, err
 			}
 			processed++
 			continue
 		}
-		sender, resolveErr := p.resolver.ResolveCustomerSender(ctx, item.SalonID)
+		sender, resolveErr := p.resolver.ResolveCustomerSender(itemCtx, item.SalonID)
 		if resolveErr != nil || sender == nil {
 			code := "DELIVERY_CONFIG_NOT_READY"
 			if errors.Is(resolveErr, notificationdelivery.ErrConfigDisabled) {
 				code = "TWILIO_TRANSPORT_DISABLED"
 			}
-			if err := p.repo.RecordSafeFailure(ctx, item, code, p.now().Add(retryDelay(attemptInCycle(item)))); err != nil {
+			if err := p.repo.RecordSafeFailure(itemCtx, item, code, p.now().Add(retryDelay(attemptInCycle(item)))); err != nil {
 				return processed, err
 			}
 			processed++
 			continue
 		}
-		if err := p.repo.MarkDispatchStarted(ctx, item); err != nil {
+		if err := p.repo.MarkDispatchStarted(itemCtx, item); err != nil {
 			if errors.Is(err, ErrDispatchBlocked) {
-				if suppressErr := p.repo.RecordSuppressed(ctx, item, "CUSTOMER_SMS_PRE_DISPATCH_REVALIDATION_FAILED"); suppressErr != nil {
+				if suppressErr := p.repo.RecordSuppressed(itemCtx, item, "CUSTOMER_SMS_PRE_DISPATCH_REVALIDATION_FAILED"); suppressErr != nil {
 					return processed, suppressErr
 				}
 				processed++
@@ -95,20 +97,20 @@ func (p *Processor) ProcessOnce(ctx context.Context, limit int) (int, error) {
 			}
 			return processed, err
 		}
-		result, sendErr := sender.Send(ctx, notificationdelivery.OutboundMessage{
+		result, sendErr := sender.Send(itemCtx, notificationdelivery.OutboundMessage{
 			NotificationID: item.ID, SalonID: item.SalonID, Destination: item.Destination, Body: item.Body,
 		})
 		if sendErr != nil {
 			var classified *notificationdelivery.SendError
 			if !errors.As(sendErr, &classified) || classified.Ambiguous {
-				err = p.repo.RecordOutcomeUnknown(ctx, item, "DELIVERY_OUTCOME_UNKNOWN")
+				err = p.repo.RecordOutcomeUnknown(itemCtx, item, "DELIVERY_OUTCOME_UNKNOWN")
 			} else if classified.Retryable {
-				err = p.repo.RecordSafeFailure(ctx, item, classified.Code, p.now().Add(retryDelay(attemptInCycle(item))))
+				err = p.repo.RecordSafeFailure(itemCtx, item, classified.Code, p.now().Add(retryDelay(attemptInCycle(item))))
 			} else {
-				err = p.repo.RecordDefinitiveFailure(ctx, item, classified.Code)
+				err = p.repo.RecordDefinitiveFailure(itemCtx, item, classified.Code)
 			}
 		} else {
-			err = p.repo.RecordProviderResult(ctx, item, result)
+			err = p.repo.RecordProviderResult(itemCtx, item, result)
 		}
 		if err != nil {
 			return processed, err

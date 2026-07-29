@@ -415,15 +415,15 @@ func (r *Repository) ApplyProviderCallback(ctx context.Context, callback Provide
 }
 
 func (r *Repository) SalonIDForProviderMessage(ctx context.Context, provider, providerMessageID string) (string, error) {
-	var salonID string
-	err := r.db.QueryRowContext(ctx, `
-		SELECT salon_id::text FROM owner_notifications
-		WHERE delivery_provider=$1 AND provider_message_id=$2
-	`, provider, providerMessageID).Scan(&salonID)
+	var located sql.NullString
+	err := r.db.QueryRowContext(ctx, `SELECT public.app_provider_owner_message_salon($1,$2)::text`, provider, providerMessageID).Scan(&located)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
-	return salonID, err
+	if err == nil && (!located.Valid || located.String == "") {
+		return "", ErrNotFound
+	}
+	return located.String, err
 }
 
 func (r *Repository) ListForOwner(ctx context.Context, salonID, ownerUserID, status string, limit, offset int) ([]DeliveryRecord, DeliveryMetrics, error) {

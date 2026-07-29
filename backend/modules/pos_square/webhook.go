@@ -9,6 +9,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 )
 
 const maxSquareWebhookBodyBytes = 1 << 20
@@ -72,6 +74,7 @@ func (s *Service) ReceiveBookingWebhook(ctx context.Context, rawBody []byte, sig
 		}
 		return nil, err
 	}
+	ctx = databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, target.SalonID)
 	cfg, err := s.adapter.configFor(ctx, target.SalonID)
 	if err != nil {
 		return nil, err

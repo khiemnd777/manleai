@@ -412,7 +412,9 @@ func lockExecutionFence(ctx context.Context, tx *sql.Tx, salonID string, ownerUs
 		SELECT salon.timezone, settings.scheduling_authority, settings.scheduling_authority_version
 		FROM salons salon
 		JOIN salon_settings settings ON settings.salon_id = salon.id
-		WHERE salon.id = $1 AND public.has_active_tenant_membership(salon.id, $2::uuid)
+		WHERE salon.id = $1
+		  AND (public.has_active_tenant_membership(salon.id, $2::uuid)
+		       OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls'))
 		FOR UPDATE OF salon, settings
 	`, salonID, ownerUserID).Scan(&fence.Timezone, &fence.Authority, &fence.AuthorityVersion)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -603,7 +605,10 @@ func replayInternalCreateTx(ctx context.Context, tx *sql.Tx, salonID string, own
 		 AND event.event_type = 'appointment_confirmed'
 		LEFT JOIN appointments appointment
 		  ON appointment.salon_id = event.salon_id AND appointment.id = event.appointment_id
-		WHERE attempt.salon_id = $1 AND public.has_active_tenant_membership(salon.id, $2::uuid) AND attempt.operation_key = $3
+		WHERE attempt.salon_id = $1
+		  AND (public.has_active_tenant_membership(salon.id, $2::uuid)
+		       OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls'))
+		  AND attempt.operation_key = $3
 	`, salonID, ownerUserID, req.OperationKey).Scan(&authority, &fingerprint, &status, &attemptID, &appointmentID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil

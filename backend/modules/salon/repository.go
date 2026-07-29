@@ -200,7 +200,8 @@ func (r *Repository) GetSettings(ctx context.Context, salonID string, ownerUserI
 		WHERE ss.salon_id = $1
 		  AND (
 		      public.has_active_tenant_membership(s.id, $2::uuid)
-		      OR public.app_active_support_authorization($2::uuid, s.id, 'training.read')
+		      OR public.app_actor_feature_access($2::uuid, s.id, 'training.read')
+		      OR public.app_actor_feature_access($2::uuid, s.id, 'calls.simulate', 'calls')
 		  )
 	`, salonID, ownerUserID)
 	return scanSettings(row)

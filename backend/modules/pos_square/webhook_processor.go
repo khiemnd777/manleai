@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
@@ -53,14 +54,15 @@ func (p *WebhookProcessor) ProcessWebhookEvents(ctx context.Context, limit int) 
 		}
 		event := events[0]
 		processed++
+		itemCtx := databasecontext.WithSystemSalon(ctx, databasecontext.ScopeWorker, event.SalonID)
 		startTime, endTime := webhookCalendarRepairRange(p.now().UTC(), event.BookingStartAt)
-		repairCtx, cancel := context.WithTimeout(ctx, squareCalendarRepairTimeout)
+		repairCtx, cancel := context.WithTimeout(itemCtx, squareCalendarRepairTimeout)
 		_, repairErr := p.syncer.SyncCalendar(repairCtx, event.SalonID, event.OwnerUserID, booking.CalendarSyncRequest{
 			StartTime: startTime,
 			EndTime:   endTime,
 		})
 		cancel()
-		completeCtx, completeCancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		completeCtx, completeCancel := context.WithTimeout(context.WithoutCancel(itemCtx), 15*time.Second)
 		completeErr := p.store.CompleteBookingWebhook(completeCtx, event.ID, event.ProcessingToken, event.ProcessingAttempts, repairErr)
 		completeCancel()
 		joinedErr = errors.Join(joinedErr, repairErr, completeErr)
@@ -78,14 +80,15 @@ func (p *WebhookProcessor) ProcessScheduledRepairs(ctx context.Context, limit in
 	}
 	var joinedErr error
 	for _, target := range targets {
+		itemCtx := databasecontext.WithSystemSalon(ctx, databasecontext.ScopeWorker, target.SalonID)
 		startTime, endTime := scheduledCalendarRepairRange(p.now().UTC())
-		repairCtx, cancel := context.WithTimeout(ctx, squareCalendarRepairTimeout)
+		repairCtx, cancel := context.WithTimeout(itemCtx, squareCalendarRepairTimeout)
 		_, repairErr := p.syncer.SyncCalendar(repairCtx, target.SalonID, target.OwnerUserID, booking.CalendarSyncRequest{
 			StartTime: startTime,
 			EndTime:   endTime,
 		})
 		cancel()
-		completeCtx, completeCancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		completeCtx, completeCancel := context.WithTimeout(context.WithoutCancel(itemCtx), 15*time.Second)
 		completeErr := p.store.CompleteCalendarRepair(completeCtx, target.SalonID, target.LeaseToken, repairErr)
 		completeCancel()
 		joinedErr = errors.Join(joinedErr, repairErr, completeErr)

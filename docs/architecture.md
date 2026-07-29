@@ -260,6 +260,18 @@ granted. Platform support repositories authorize the actual actor and preserve
 that actor in mutation/audit fields rather than substituting the Owner identity.
 No caller-selected impersonation or tenant header is introduced.
 
+V78 is an expand-only system-runtime isolation step. The context-aware database
+connector now applies and resets `app.system_salon_id` alongside actor and scope.
+Provider entrypoints use narrow `SECURITY DEFINER` locator functions that return
+only a salon ID, or an already verified signed tenant state, then bind all
+tenant reads/writes to that salon. Worker
+processors bind each claimed item before configuration, provider dispatch, and
+completion. V78 deliberately leaves the existing broad `provider`/`worker` base
+RLS branches unchanged so the pre-V78 image remains compatible if the migration
+runs before deployment. A later contract release must move every remaining
+unbound worker discovery/recovery/retention operation behind narrow database
+functions before base RLS can require an exact `app.system_salon_id`.
+
 ## Scheduling Authority Contract
 
 `docs/scheduling-authority.md` is the normative boundary for availability,

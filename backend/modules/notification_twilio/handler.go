@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/internal/respond"
 	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
 	notificationdelivery "github.com/manleai/ai-receptionist/modules/notification_delivery"
@@ -63,7 +64,8 @@ func (h *Handler) Status(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusForbidden, "TWILIO_SIGNATURE_INVALID", "Twilio callback could not be authenticated.")
 	}
-	cfg, err := h.resolveCallbackConfig(c.UserContext(), salonID)
+	ctx := databasecontext.WithSystemSalon(c.UserContext(), databasecontext.ScopeProvider, salonID)
+	cfg, err := h.resolveCallbackConfig(ctx, salonID)
 	if err != nil || !verifySignature(cfg.AuthToken, cfg.StatusCallbackURL, params, c.Get("X-Twilio-Signature")) ||
 		!twilioAccountMatches(cfg, params) {
 		return respond.Error(c, fiber.StatusForbidden, "TWILIO_SIGNATURE_INVALID", "Twilio callback signature is invalid.")
@@ -82,7 +84,7 @@ func (h *Handler) Status(c *fiber.Ctx) error {
 	if eventIdentity == "" {
 		eventIdentity = messageSID + ":" + providerStatus + ":" + fingerprint
 	}
-	err = h.service.ApplyProviderCallback(c.UserContext(), notificationdelivery.ProviderCallback{
+	err = h.service.ApplyProviderCallback(ctx, notificationdelivery.ProviderCallback{
 		Provider: notificationdelivery.ProviderTwilio, ProviderMessageID: messageSID,
 		ProviderStatus: providerStatus, StatusRank: rank, DeliveryStatus: deliveryStatus,
 		EventKey: "twilio-status:" + eventIdentity, EventFingerprint: fingerprint,
@@ -100,7 +102,8 @@ func (h *Handler) Status(c *fiber.Ctx) error {
 func (h *Handler) Inbound(c *fiber.Ctx) error {
 	params := formParams(c)
 	salonID := strings.TrimSpace(c.Params("salon_id"))
-	cfg, err := h.resolveCallbackConfig(c.UserContext(), salonID)
+	ctx := databasecontext.WithSystemSalon(c.UserContext(), databasecontext.ScopeProvider, salonID)
+	cfg, err := h.resolveCallbackConfig(ctx, salonID)
 	if err != nil || !verifySignature(cfg.AuthToken, cfg.InboundCallbackURL, params, c.Get("X-Twilio-Signature")) ||
 		!twilioAccountMatches(cfg, params) || !twilioInboundTransportMatches(cfg, params) {
 		return respond.Error(c, fiber.StatusForbidden, "TWILIO_SIGNATURE_INVALID", "Twilio callback signature is invalid.")
@@ -120,7 +123,7 @@ func (h *Handler) Inbound(c *fiber.Ctx) error {
 		return invalidCallback(c)
 	}
 	if err := h.inbound.ApplyInboundOptOut(
-		c.UserContext(), salonID, from, to, strings.TrimSpace(cfg.SenderPhone),
+		ctx, salonID, from, to, strings.TrimSpace(cfg.SenderPhone),
 		optOutType, messageSID, paramsFingerprint(params),
 	); err != nil {
 		if errors.Is(err, notificationdelivery.ErrConflict) {

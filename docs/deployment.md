@@ -272,12 +272,31 @@ CREATE ROLE manleai_runtime LOGIN PASSWORD '<separate-secret>'
 ```
 
 Do not put the password in shell history. The candidate API uses the migration
-connection to apply all pending release migrations through V74 and grant
+connection to apply all pending release migrations through V78 and grant
 table/sequence/function privileges to the
 already-existing runtime role, then closes that connection. API requests and
 the worker use only the runtime connection. The worker does not receive
 `MIGRATION_DATABASE_URL`; production startup fails if the connected role name,
 ownership, `SUPERUSER`, `BYPASSRLS`, or RLS policy checks are unsafe.
+
+### V78 system-tenant context rollout
+
+`V78__system_tenant_context_expand.sql` is intentionally the expand release of
+a two-release database change. It adds `app.system_salon_id` support and narrow
+provider salon-ID locator functions without changing the existing provider or
+worker base RLS branches. This keeps migration-first deployment and image
+rollback compatible. Deploy the V78-aware API/worker image and verify provider
+callbacks plus worker item processing before scheduling the later contract
+migration. Do not add that contract migration to the same release: startup
+migrations run before the new image can prove every runtime path supplies the
+new context.
+
+Before deploying the strict voice resolver in this image, inspect the Platform
+technical integration-config API or persisted configuration records and confirm
+that every salon expected to receive live calls has enabled, complete Twilio and
+OpenAI rows. A process environment value is not a substitute and must not be
+used as readiness evidence. A missing record now fails that salon's provider
+runtime closed.
 
 Production forces rate limiting on (the template records
 `RATE_LIMIT_ENABLED=true`), uses `REDIS_URL` as a required request-protection
@@ -457,27 +476,26 @@ runtime resolver code. Never use `project.env`, `.env`, Compose defaults,
 GitHub secrets, or process environment values as evidence of the active
 salon-scoped provider configuration.
 
-The backend retains legacy environment fallback code for compatibility. That
-path is not the normal production configuration workflow and is intentionally
-absent from repository env templates. Inspect it only for an explicitly scoped
-bootstrap/legacy task after proving that the salon has no stored provider
-configuration. `ResolveSquareConfig`, `ResolveTwilioConfig`, and
-`ResolveOpenAIConfig` enter that legacy bootstrap path only when the repository
-returns the exact integration-config `ErrNotFound`. A repository failure,
-malformed/non-string persisted settings object, or stored-secret decryption
-failure propagates and stops provider runtime. Once a salon/provider row exists,
-that row owns enabled state, settings, and credentials: missing stored
-credentials never inherit environment secrets, and a disabled stored provider
-cannot be re-enabled by process configuration. Stable protocol defaults such as
-Twilio webhook paths, Square API version/host selection, and the OpenAI provider
-URL may still be applied by code where their owning contract defines them; they
-are not salon credentials.
+The backend retains legacy environment fallback only for Square compatibility.
+That path is not the normal production configuration workflow and is
+intentionally absent from repository env templates. Inspect it only for an
+explicitly scoped Square bootstrap/legacy task after proving that the salon has
+no stored Square record. `ResolveSquareConfig` enters that path only when the
+repository returns the exact integration-config `ErrNotFound`.
+`ResolveTwilioConfig` and `ResolveOpenAIConfig` are database-only and fail closed
+when their salon record is missing. Repository failures, malformed/non-string
+persisted settings, and stored-secret decryption failures propagate and stop
+provider runtime. A stored row owns enabled state, settings, and credentials:
+missing credentials never inherit environment secrets, and a disabled provider
+cannot be re-enabled by process configuration.
 
 The authenticated integration response follows the same ownership boundary.
-When no stored row exists it may label an available bootstrap secret source as
-`environment`. When a stored row exists but its secret is empty or unreadable,
-the response reports source `none` and configured `false`; it never relabels an
-environment secret as active, and it never returns the secret value.
+Only the Square compatibility response may label an exact-missing bootstrap
+secret source as `environment`. Missing Twilio/OpenAI rows return unconfigured,
+database-owned empty state and never surface environment-derived URLs, paths,
+models, enabled state, or secret-source metadata. When a stored row exists but
+its secret is empty or unreadable, the response reports source `none` and
+configured `false`; it never returns the secret value.
 Whole-response contract tests also prohibit write-only credential, SID,
 destination, and `clear_*` request fields from appearing in serialized reads.
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/manleai/ai-receptionist/internal/config"
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/internal/validation"
 	"github.com/manleai/ai-receptionist/modules/booking"
 	"github.com/manleai/ai-receptionist/modules/conversation"
@@ -42,10 +43,6 @@ type voiceRuntimeLimiter interface {
 
 type answerContextPrewarmer interface {
 	PrewarmAnswerContext(ctx context.Context, salonID string) error
-}
-
-type platformSalonOwnerResolver interface {
-	ResolveSalonOwnerForPlatform(ctx context.Context, salonID string, platformUserID string) (string, error)
 }
 
 func NewService(repo Store, conversation ConversationEngine, cfg config.VoiceConfig, providers AIProviders) *Service {
@@ -124,19 +121,11 @@ func (s *Service) Status(ctx context.Context, salonID string, ownerUserID string
 	return status, nil
 }
 
-// StatusForPlatform preserves the existing owner-scoped readiness calculation,
-// while returning only business-operational evidence on the Calls surface.
+// StatusForPlatform preserves the actual Platform actor throughout readiness
+// evaluation while returning only business-operational evidence on Calls.
 // Provider configuration remains owned by the Platform Technical surface.
 func (s *Service) StatusForPlatform(ctx context.Context, salonID string, platformUserID string) (*Status, error) {
-	resolver, ok := s.repo.(platformSalonOwnerResolver)
-	if !ok {
-		return nil, ErrNotFound
-	}
-	ownerUserID, err := resolver.ResolveSalonOwnerForPlatform(ctx, strings.TrimSpace(salonID), strings.TrimSpace(platformUserID))
-	if err != nil {
-		return nil, err
-	}
-	status, err := s.Status(ctx, salonID, ownerUserID)
+	status, err := s.Status(ctx, salonID, platformUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -613,6 +602,7 @@ func (s *Service) HandleIncomingCall(ctx context.Context, req IncomingCallReques
 	if err != nil {
 		return nil, err
 	}
+	ctx = databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, salon.SalonID)
 	voiceCfg, err := s.voiceConfig(ctx, salon.SalonID)
 	if err != nil {
 		return nil, err
@@ -679,6 +669,7 @@ func (s *Service) HandleSpeechTurn(ctx context.Context, req SpeechTurnRequest) (
 		if routeErr != nil {
 			err = routeErr
 		} else {
+			ctx = databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, salon.SalonID)
 			session, startErr := s.getOrStartPhoneSession(ctx, salon.SalonID, salon.OwnerUserID, req.Provider, req.ProviderCallID, req.FromPhone, req.ToPhone)
 			if startErr != nil {
 				return nil, startErr
@@ -699,6 +690,7 @@ func (s *Service) HandleSpeechTurn(ctx context.Context, req SpeechTurnRequest) (
 	if err != nil {
 		return nil, err
 	}
+	ctx = databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, route.SalonID)
 	voiceCfg, err := s.voiceConfig(ctx, route.SalonID)
 	if err != nil {
 		return nil, err
@@ -988,6 +980,7 @@ func (s *Service) ConnectRealtime(ctx context.Context, salonID string, sessionID
 	if strings.TrimSpace(salonID) == "" || strings.TrimSpace(sessionID) == "" || strings.TrimSpace(providerCallID) == "" {
 		return nil, ErrValidation
 	}
+	ctx = databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, salonID)
 	cfg, err := s.voiceConfig(ctx, salonID)
 	if err != nil {
 		return nil, err
@@ -1029,8 +1022,11 @@ func (s *Service) RecordRealtimeEvent(ctx context.Context, provider string, prov
 		}
 		event.SalonID = route.SalonID
 		event.CallSessionID = route.SessionID
+		ctx = databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, route.SalonID)
 	} else if !errors.Is(err, ErrNotFound) {
 		return err
+	} else if strings.TrimSpace(event.SalonID) != "" {
+		ctx = databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, event.SalonID)
 	}
 	return s.repo.RecordWebhookEvent(ctx, event)
 }
@@ -1053,6 +1049,7 @@ func (s *Service) HandleUnintelligibleRealtimeInput(ctx context.Context, provide
 	if route.SessionID != sessionID {
 		return nil, ErrRouteNotFound
 	}
+	ctx = databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, route.SalonID)
 	session, err := s.conversation.HandleUnintelligibleVoiceInput(ctx, route.SalonID, route.OwnerUserID, route.SessionID, conversation.VoiceInputHandoffRequest{
 		EventKey: "voice-input-unintelligible:" + route.SessionID,
 	})
@@ -1080,6 +1077,7 @@ func (s *Service) RealtimeFallbackMessage(ctx context.Context, provider string, 
 		}
 		return "", err
 	}
+	ctx = databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, route.SalonID)
 	hasFailure, err := s.repo.HasTerminalRealtimeFailure(ctx, provider, providerCallID, route.SessionID)
 	if err != nil {
 		return "", err
@@ -1230,6 +1228,10 @@ func (s *Service) TwilioWebhookConfig(ctx context.Context, providerCallID string
 			return config.TwilioVoiceConfig{}, "", err
 		}
 	}
+	if salonID == "" {
+		return config.TwilioVoiceConfig{}, "", ErrRouteNotFound
+	}
+	ctx = databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, salonID)
 	voiceCfg, err := s.voiceConfig(ctx, salonID)
 	if err != nil {
 		return config.TwilioVoiceConfig{}, "", err
@@ -1326,7 +1328,8 @@ func (s *Service) StreamSpeech(ctx context.Context, salonID string, requestID st
 func (s *Service) getOrStartPhoneSession(ctx context.Context, salonID string, ownerUserID string, provider string, providerCallID string, fromPhone string, toPhone string) (*conversation.Session, error) {
 	route, err := s.repo.FindCallRoute(ctx, provider, providerCallID)
 	if err == nil {
-		return s.conversation.Get(ctx, route.SalonID, route.OwnerUserID, route.SessionID)
+		boundCtx := databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, route.SalonID)
+		return s.conversation.Get(boundCtx, route.SalonID, route.OwnerUserID, route.SessionID)
 	}
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return nil, err

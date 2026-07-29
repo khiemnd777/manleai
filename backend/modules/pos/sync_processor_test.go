@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 )
 
 func TestSyncProcessorProcessesSupportedServiceUpsert(t *testing.T) {
@@ -47,6 +49,9 @@ func TestSyncProcessorProcessesSupportedServiceUpsert(t *testing.T) {
 	}
 	if store.completedLogStatus != SyncJobStatusSucceeded {
 		t.Fatalf("completed log status = %s, want succeeded", store.completedLogStatus)
+	}
+	if store.itemAccess.Scope != databasecontext.ScopeWorker || store.itemAccess.SystemSalonID != "salon_1" || store.itemAccess.ActorUserID != "" {
+		t.Fatalf("sync item access context = %#v", store.itemAccess)
 	}
 }
 
@@ -104,6 +109,7 @@ type fakeSyncProcessorStore struct {
 	completedLogStatus string
 	completedLogMsg    string
 	loggedError        POSError
+	itemAccess         databasecontext.AccessContext
 }
 
 func (f *fakeSyncProcessorStore) ClaimPOSSyncJobs(ctx context.Context, limit int) ([]SyncJob, error) {
@@ -137,6 +143,7 @@ func (f *fakeSyncProcessorStore) MarkPOSSyncJobFailed(ctx context.Context, job S
 }
 
 func (f *fakeSyncProcessorStore) CreateSyncLog(ctx context.Context, salonID string, provider string, syncType string) (string, error) {
+	f.itemAccess = databasecontext.FromContext(ctx)
 	return "sync_log_1", nil
 }
 

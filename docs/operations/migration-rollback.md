@@ -190,3 +190,14 @@ Provider credentials and runtime provider settings remain salon-scoped records
 managed through the dashboard-backed integration configuration. Do not inspect
 or copy repository environment values to diagnose their active state, and do
 not place provider secrets or customer data in release/rollback evidence.
+
+## V78 Expand/Contract Rollback Note
+
+V78 adds the optional `app.system_salon_id` session context and provider locator
+functions but does not alter provider/worker base RLS. The previous image can
+therefore run after an image rollback while V78 remains applied. Keep the later
+RLS contract in a separate release only after the V78-aware image has been
+deployed and provider callbacks, OAuth/webhooks, POS sync, Square repair, and
+notification workers have been observed. If that later contract release fails,
+roll back only to an image that still supplies the V78 context and safe global
+discovery functions; never restore the database merely to remove V78.

@@ -570,10 +570,6 @@ func (s *Service) ResolveSquareConfig(ctx context.Context, salonID string) (conf
 
 func (s *Service) ResolveTwilioConfig(ctx context.Context, salonID string) (config.TwilioVoiceConfig, string, error) {
 	item, secrets, err := s.resolveStored(ctx, salonID, ProviderTwilio)
-	if errors.Is(err, ErrNotFound) {
-		cfg, publicBaseURL := s.legacyTwilioConfig()
-		return cfg, publicBaseURL, nil
-	}
 	if err != nil {
 		return config.TwilioVoiceConfig{}, "", err
 	}
@@ -589,10 +585,6 @@ func (s *Service) ResolveTwilioConfig(ctx context.Context, salonID string) (conf
 
 func (s *Service) ResolveOpenAIConfig(ctx context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error) {
 	item, secrets, err := s.resolveStored(ctx, salonID, ProviderOpenAI)
-	if errors.Is(err, ErrNotFound) {
-		cfg, enabled := s.legacyOpenAIConfig()
-		return cfg, enabled, nil
-	}
 	if err != nil {
 		return config.OpenAIVoiceConfig{}, false, err
 	}
@@ -613,31 +605,11 @@ func (s *Service) ResolveOpenAIConfig(ctx context.Context, salonID string) (conf
 // paid evaluation workflows that must fail closed on missing, unreadable, or
 // incomplete stored configuration.
 func (s *Service) ResolveOpenAIConfigStrict(ctx context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error) {
-	if s == nil || s.repo == nil || s.cipher == nil || strings.TrimSpace(salonID) == "" {
-		return config.OpenAIVoiceConfig{}, false, ErrValidation
-	}
-	item, err := s.repo.Get(ctx, strings.TrimSpace(salonID), ProviderOpenAI)
+	item, secrets, err := s.resolveStored(ctx, salonID, ProviderOpenAI)
 	if err != nil {
 		return config.OpenAIVoiceConfig{}, false, err
 	}
-	secrets, err := s.decryptSecrets(item.SecretsEncrypted)
-	if err != nil {
-		return config.OpenAIVoiceConfig{}, false, err
-	}
-	cfg := config.OpenAIVoiceConfig{
-		APIKey:               strings.TrimSpace(secrets["api_key"]),
-		BaseURL:              strings.TrimRight(strings.TrimSpace(item.Settings["base_url"]), "/"),
-		TranscriptionModel:   strings.TrimSpace(item.Settings["transcription_model"]),
-		ReplyModel:           strings.TrimSpace(item.Settings["reply_model"]),
-		SpeechModel:          strings.TrimSpace(item.Settings["speech_model"]),
-		SpeechVoice:          strings.TrimSpace(item.Settings["speech_voice"]),
-		SpeechOutputMode:     config.NormalizeOpenAISpeechOutputMode(item.Settings["speech_output_mode"]),
-		RealtimeEnabled:      boolSetting(item.Settings["realtime_enabled"]),
-		RealtimeModel:        config.NormalizeOpenAIRealtimeModel(item.Settings["realtime_model"]),
-		RealtimeVoice:        strings.TrimSpace(item.Settings["realtime_voice"]),
-		RealtimeNoiseProfile: config.NormalizeOpenAIRealtimeNoiseProfile(item.Settings["realtime_noise_profile"]),
-		RealtimeInstructions: strings.TrimSpace(item.Settings["realtime_instructions"]),
-	}
+	cfg := openAIConfigFromStored(item, secrets)
 	if !item.Enabled {
 		return cfg, false, nil
 	}
@@ -704,16 +676,6 @@ func squareConfigFromStored(item *StoredConfig, secrets map[string]string) confi
 	}
 }
 
-func (s *Service) legacyTwilioConfig() (config.TwilioVoiceConfig, string) {
-	cfg := s.cfg.Voice.Twilio
-	cfg.IncomingPath = defaultString(strings.TrimSpace(cfg.IncomingPath), "/api/voice/twilio/incoming")
-	cfg.TurnPath = defaultString(strings.TrimSpace(cfg.TurnPath), "/api/voice/twilio/turn")
-	cfg.RecordingPath = defaultString(strings.TrimSpace(cfg.RecordingPath), "/api/voice/twilio/recording")
-	cfg.StreamPath = defaultString(strings.TrimSpace(cfg.StreamPath), "/api/voice/twilio/stream")
-	cfg.VoiceTransport = normalizeVoiceTransport(defaultString(cfg.VoiceTransport, "recording"))
-	return cfg, strings.TrimRight(strings.TrimSpace(s.cfg.Voice.PublicBaseURL), "/")
-}
-
 func twilioConfigFromStored(item *StoredConfig, secrets map[string]string) (config.TwilioVoiceConfig, string) {
 	if item == nil {
 		return config.TwilioVoiceConfig{}, ""
@@ -727,21 +689,6 @@ func twilioConfigFromStored(item *StoredConfig, secrets map[string]string) (conf
 		VoiceTransport: normalizeVoiceTransport(defaultString(item.Settings["voice_transport"], "recording")),
 	}
 	return cfg, strings.TrimRight(strings.TrimSpace(item.Settings["public_base_url"]), "/")
-}
-
-func (s *Service) legacyOpenAIConfig() (config.OpenAIVoiceConfig, bool) {
-	cfg := s.cfg.Voice.AI.OpenAI
-	cfg.BaseURL = defaultString(strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"), "https://api.openai.com/v1")
-	cfg.TranscriptionModel = defaultString(strings.TrimSpace(cfg.TranscriptionModel), "gpt-4o-mini-transcribe")
-	cfg.ReplyModel = defaultString(strings.TrimSpace(cfg.ReplyModel), "gpt-4.1-mini")
-	cfg.SpeechModel = defaultString(strings.TrimSpace(cfg.SpeechModel), "tts-1")
-	cfg.SpeechVoice = defaultString(strings.TrimSpace(cfg.SpeechVoice), "alloy")
-	cfg.SpeechOutputMode = config.NormalizeOpenAISpeechOutputMode(cfg.SpeechOutputMode)
-	cfg.RealtimeModel = config.NormalizeOpenAIRealtimeModel(cfg.RealtimeModel)
-	cfg.RealtimeVoice = defaultString(strings.TrimSpace(cfg.RealtimeVoice), cfg.SpeechVoice)
-	cfg.RealtimeNoiseProfile = config.NormalizeOpenAIRealtimeNoiseProfile(cfg.RealtimeNoiseProfile)
-	cfg.RealtimeInstructions = strings.TrimSpace(cfg.RealtimeInstructions)
-	return cfg, strings.TrimSpace(s.cfg.Voice.AI.Provider) == ProviderOpenAI
 }
 
 func openAIConfigFromStored(item *StoredConfig, secrets map[string]string) config.OpenAIVoiceConfig {
@@ -807,10 +754,9 @@ func (s *Service) squareResponse(item *StoredConfig) SquareSettingsResponse {
 }
 
 func (s *Service) twilioResponse(item *StoredConfig) TwilioSettingsResponse {
-	cfg, publicBaseURL := s.legacyTwilioConfig()
-	enabled := true
+	cfg, publicBaseURL := twilioConfigFromStored(item, nil)
+	enabled := false
 	if item != nil {
-		cfg, publicBaseURL = twilioConfigFromStored(item, nil)
 		enabled = item.Enabled
 	}
 	secretSource := SecretSourceNone
@@ -822,9 +768,6 @@ func (s *Service) twilioResponse(item *StoredConfig) TwilioSettingsResponse {
 			}
 			accountSIDConfigured = strings.TrimSpace(secrets["account_sid"]) != ""
 		}
-	}
-	if item == nil && strings.TrimSpace(s.cfg.Voice.Twilio.AuthToken) != "" {
-		secretSource = SecretSourceEnvironment
 	}
 	updatedAt := updatedAt(item)
 	ownerSMSEnabled := item != nil && boolSetting(item.Settings["owner_sms_enabled"])
@@ -957,9 +900,9 @@ func validHTTPSURL(value string) bool {
 }
 
 func (s *Service) openAIResponse(item *StoredConfig) OpenAISettingsResponse {
-	cfg, enabled := s.legacyOpenAIConfig()
+	cfg := openAIConfigFromStored(item, nil)
+	enabled := false
 	if item != nil {
-		cfg = openAIConfigFromStored(item, nil)
 		enabled = item.Enabled
 	}
 	secretSource := SecretSourceNone
@@ -967,9 +910,6 @@ func (s *Service) openAIResponse(item *StoredConfig) OpenAISettingsResponse {
 		if secrets, err := s.decryptSecrets(item.SecretsEncrypted); err == nil && strings.TrimSpace(secrets["api_key"]) != "" {
 			secretSource = SecretSourceDatabase
 		}
-	}
-	if item == nil && strings.TrimSpace(s.cfg.Voice.AI.OpenAI.APIKey) != "" {
-		secretSource = SecretSourceEnvironment
 	}
 	updatedAt := updatedAt(item)
 	return OpenAISettingsResponse{

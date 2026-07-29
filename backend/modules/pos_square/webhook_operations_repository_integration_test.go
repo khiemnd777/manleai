@@ -15,6 +15,8 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+	appdatabase "github.com/manleai/ai-receptionist/internal/database"
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	operationshealth "github.com/manleai/ai-receptionist/modules/operations_health"
 	"github.com/manleai/ai-receptionist/modules/pos"
 )
@@ -24,7 +26,7 @@ func TestWebhookRepositoryPostgresOperationsSafety(t *testing.T) {
 	if databaseURL == "" {
 		t.Skip("TEST_DATABASE_URL is not configured")
 	}
-	db, err := sql.Open("postgres", databaseURL)
+	db, err := appdatabase.Open(context.Background(), databaseURL)
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
@@ -192,7 +194,7 @@ func TestWebhookRepositoryPostgresOperationsSafety(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `UPDATE salon_settings SET scheduling_authority='owner_manual' WHERE salon_id=$1`, salonOne); err != nil {
 		t.Fatalf("switch current scheduling authority for historical webhook test: %v", err)
 	}
-	target, err := repo.FindWebhookTarget(ctx, merchantID, locationID)
+	target, err := repo.FindWebhookTarget(databasecontext.WithScope(ctx, databasecontext.ScopeProvider), merchantID, locationID)
 	if err != nil || target == nil || target.SalonID != salonOne {
 		t.Fatalf("historical Square target after authority switch = %#v/%v", target, err)
 	}

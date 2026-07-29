@@ -100,21 +100,22 @@ func (c *contextConn) QueryContext(ctx context.Context, query string, args []dri
 
 func (c *contextConn) applyAccessContext(ctx context.Context) error {
 	access := databasecontext.FromContext(ctx)
-	return c.setAccessContext(ctx, access.ActorUserID, access.Scope)
+	return c.setAccessContext(ctx, access.ActorUserID, access.Scope, access.SystemSalonID)
 }
 
 func (c *contextConn) resetAccessContext(ctx context.Context) error {
-	return c.setAccessContext(ctx, "", "")
+	return c.setAccessContext(ctx, "", "", "")
 }
 
-func (c *contextConn) setAccessContext(ctx context.Context, actorUserID, scope string) error {
+func (c *contextConn) setAccessContext(ctx context.Context, actorUserID, scope, systemSalonID string) error {
 	execer, ok := c.Conn.(driver.ExecerContext)
 	if !ok {
 		return driver.ErrBadConn
 	}
-	_, err := execer.ExecContext(ctx, `SELECT set_config('app.actor_user_id',$1,false), set_config('app.database_scope',$2,false)`, []driver.NamedValue{
+	_, err := execer.ExecContext(ctx, `SELECT set_config('app.actor_user_id',$1,false), set_config('app.database_scope',$2,false), set_config('app.system_salon_id',$3,false)`, []driver.NamedValue{
 		{Ordinal: 1, Value: actorUserID},
 		{Ordinal: 2, Value: scope},
+		{Ordinal: 3, Value: systemSalonID},
 	})
 	return err
 }

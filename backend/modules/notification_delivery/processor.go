@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 )
 
 type Processor struct {
@@ -44,25 +46,26 @@ func (p *Processor) ProcessOnce(ctx context.Context, limit int) (int, error) {
 		if ctx.Err() != nil {
 			return processed, ctx.Err()
 		}
-		channel, resolveErr := p.resolver.ResolveDeliveryChannel(ctx, item.SalonID)
+		itemCtx := databasecontext.WithSystemSalon(ctx, databasecontext.ScopeWorker, item.SalonID)
+		channel, resolveErr := p.resolver.ResolveDeliveryChannel(itemCtx, item.SalonID)
 		if errors.Is(resolveErr, ErrConfigDisabled) || (resolveErr == nil && !channel.Enabled) {
-			if err := p.repo.RecordDisabled(ctx, item); err != nil {
+			if err := p.repo.RecordDisabled(itemCtx, item); err != nil {
 				return processed, err
 			}
 			processed++
 			continue
 		}
 		if resolveErr != nil || channel.Sender == nil || strings.TrimSpace(channel.Destination) == "" {
-			if err := p.repo.RecordSafeFailure(ctx, item, "DELIVERY_CONFIG_NOT_READY", p.now().Add(SafeRetryDelay(DeliveryAttemptInCycle(item)))); err != nil {
+			if err := p.repo.RecordSafeFailure(itemCtx, item, "DELIVERY_CONFIG_NOT_READY", p.now().Add(SafeRetryDelay(DeliveryAttemptInCycle(item)))); err != nil {
 				return processed, err
 			}
 			processed++
 			continue
 		}
-		if err := p.repo.MarkDispatchStarted(ctx, item, channel.DestinationMasked); err != nil {
+		if err := p.repo.MarkDispatchStarted(itemCtx, item, channel.DestinationMasked); err != nil {
 			return processed, err
 		}
-		result, sendErr := channel.Sender.Send(ctx, OutboundMessage{
+		result, sendErr := channel.Sender.Send(itemCtx, OutboundMessage{
 			NotificationID: item.ID,
 			SalonID:        item.SalonID,
 			Destination:    channel.Destination,
@@ -75,22 +78,22 @@ func (p *Processor) ProcessOnce(ctx context.Context, limit int) (int, error) {
 				if classified != nil && strings.TrimSpace(classified.Code) != "" {
 					code = classified.Code
 				}
-				if err := p.repo.RecordOutcomeUnknown(ctx, item, code); err != nil {
+				if err := p.repo.RecordOutcomeUnknown(itemCtx, item, code); err != nil {
 					return processed, err
 				}
 			} else if classified.Retryable {
-				if err := p.repo.RecordSafeFailure(ctx, item, classified.Code, p.now().Add(SafeRetryDelay(DeliveryAttemptInCycle(item)))); err != nil {
+				if err := p.repo.RecordSafeFailure(itemCtx, item, classified.Code, p.now().Add(SafeRetryDelay(DeliveryAttemptInCycle(item)))); err != nil {
 					return processed, err
 				}
 			} else {
-				if err := p.repo.RecordDefinitiveFailure(ctx, item, classified.Code); err != nil {
+				if err := p.repo.RecordDefinitiveFailure(itemCtx, item, classified.Code); err != nil {
 					return processed, err
 				}
 			}
 			processed++
 			continue
 		}
-		if err := p.repo.RecordProviderResult(ctx, item, result); err != nil {
+		if err := p.repo.RecordProviderResult(itemCtx, item, result); err != nil {
 			return processed, err
 		}
 		processed++

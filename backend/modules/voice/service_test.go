@@ -60,8 +60,8 @@ func TestPlatformStatusPreservesBusinessReadinessAndHidesTechnicalProviderDetail
 			t.Fatalf("%s capability leaked technical config: %#v", name, capability)
 		}
 	}
-	if store.voiceStatusOwnerUserID != "owner_1" || store.platformResolverSalonID != "salon_1" || store.platformResolverUserID != "platform_ops_1" {
-		t.Fatalf("platform owner resolution = %#v", store)
+	if store.voiceStatusSalonID != "salon_1" || store.voiceStatusOwnerUserID != "platform_ops_1" {
+		t.Fatalf("Platform status did not preserve the actual actor: %#v", store)
 	}
 }
 
@@ -1053,22 +1053,14 @@ func phoneSessionWithAIReply(reply string, status string, outcome string) *conve
 }
 
 type fakeVoiceStore struct {
-	salon                   *InboundSalon
-	route                   *CallRoute
-	bookingReadiness        *PhoneBookingReadiness
-	events                  []WebhookEvent
-	audio                   *AudioOutput
-	voiceStatusSalonID      string
-	voiceStatusOwnerUserID  string
-	voiceStatus             *SalonVoiceStatus
-	platformResolverSalonID string
-	platformResolverUserID  string
-}
-
-func (f *fakeVoiceStore) ResolveSalonOwnerForPlatform(_ context.Context, salonID string, platformUserID string) (string, error) {
-	f.platformResolverSalonID = salonID
-	f.platformResolverUserID = platformUserID
-	return "owner_1", nil
+	salon                  *InboundSalon
+	route                  *CallRoute
+	bookingReadiness       *PhoneBookingReadiness
+	events                 []WebhookEvent
+	audio                  *AudioOutput
+	voiceStatusSalonID     string
+	voiceStatusOwnerUserID string
+	voiceStatus            *SalonVoiceStatus
 }
 
 func newFakeVoiceStore() *fakeVoiceStore {

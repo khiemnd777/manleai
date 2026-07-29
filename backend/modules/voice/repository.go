@@ -7,6 +7,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/modules/conversation"
 )
 
@@ -18,24 +19,6 @@ func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
 }
 
-func (r *Repository) ResolveSalonOwnerForPlatform(ctx context.Context, salonID string, platformUserID string) (string, error) {
-	var ownerUserID string
-	err := r.db.QueryRowContext(ctx, `
-		SELECT salon.owner_user_id::text
-		FROM salons salon
-		WHERE salon.id = $1
-		  AND public.app_active_support_authorization($2::uuid, salon.id, 'calls.read')
-		  AND public.app_active_support_pii_grant($2::uuid, salon.id, 'calls.read', 'calls')
-	`, salonID, platformUserID).Scan(&ownerUserID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrNotFound
-	}
-	if err != nil {
-		return "", err
-	}
-	return ownerUserID, nil
-}
-
 func (r *Repository) GetSalonVoiceStatus(ctx context.Context, salonID string, ownerUserID string) (*SalonVoiceStatus, error) {
 	var status SalonVoiceStatus
 	err := r.db.QueryRowContext(ctx, `
@@ -45,7 +28,10 @@ func (r *Repository) GetSalonVoiceStatus(ctx context.Context, salonID string, ow
 		FROM salons salon
 		JOIN salon_settings settings ON settings.salon_id = salon.id
 		WHERE salon.id = $1
-		  AND public.has_active_tenant_membership(salon.id, $2::uuid)
+		  AND (
+		      public.has_active_tenant_membership(salon.id, $2::uuid)
+		      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.read', 'calls')
+		  )
 	`, salonID, ownerUserID).Scan(
 		&status.SalonID, &status.Phone, &status.AIEnabled,
 		&status.SchedulingAuthority, &status.SchedulingAuthorityVersion, &status.BookingMode,
@@ -231,7 +217,10 @@ func (r *Repository) GetPhoneBookingReadiness(ctx context.Context, salonID strin
 			) booking_write_blocker ON true
 			LEFT JOIN salon_settings settings ON settings.salon_id = s.id
 			WHERE s.id = $1
-			  AND public.has_active_tenant_membership(s.id, $2::uuid)
+			  AND (
+			      public.has_active_tenant_membership(s.id, $2::uuid)
+			      OR public.app_actor_feature_access($2::uuid, s.id, 'calls.read', 'calls')
+			  )
 	`, salonID, ownerUserID).Scan(
 		&readiness.AIEnabled,
 		&readiness.ConsultationEnabled,
@@ -317,17 +306,26 @@ func serviceGuidanceReadiness(serviceCount int, consultationEnabled bool, readyS
 }
 
 func (r *Repository) FindSalonByPhone(ctx context.Context, phone string) (*InboundSalon, error) {
+	var locatedSalonID sql.NullString
+	if err := r.db.QueryRowContext(ctx, `SELECT public.app_provider_voice_phone_salon($1)::text`, phone).Scan(&locatedSalonID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if !locatedSalonID.Valid || locatedSalonID.String == "" {
+		return nil, ErrNotFound
+	}
+	salonID := locatedSalonID.String
+	boundCtx := databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, salonID)
 	var salon InboundSalon
-	err := r.db.QueryRowContext(ctx, `
+	err := r.db.QueryRowContext(boundCtx, `
 		SELECT s.id::text, s.owner_user_id::text, s.name, COALESCE(s.phone, ''),
 		       COALESCE(ss.recording_enabled, true), COALESCE(ss.recording_consent_message, '')
 		FROM salons s
 		LEFT JOIN salon_settings ss ON ss.salon_id = s.id
-		WHERE regexp_replace(COALESCE(s.phone, ''), '[^0-9]', '', 'g') = regexp_replace($1, '[^0-9]', '', 'g')
-		  AND COALESCE(s.phone, '') <> ''
-		ORDER BY s.created_at ASC
-		LIMIT 1
-	`, phone).Scan(&salon.SalonID, &salon.OwnerUserID, &salon.SalonName, &salon.Phone, &salon.RecordingEnabled, &salon.RecordingConsentMessage)
+		WHERE s.id = $1
+	`, salonID).Scan(&salon.SalonID, &salon.OwnerUserID, &salon.SalonName, &salon.Phone, &salon.RecordingEnabled, &salon.RecordingConsentMessage)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -345,15 +343,28 @@ func incompleteReadinessMessage(complete bool, message string) string {
 }
 
 func (r *Repository) FindCallRoute(ctx context.Context, provider string, providerCallID string) (*CallRoute, error) {
+	var locatedSalonID sql.NullString
+	if err := r.db.QueryRowContext(ctx, `SELECT public.app_provider_voice_route_salon($1, $2)::text`, provider, providerCallID).Scan(&locatedSalonID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if !locatedSalonID.Valid || locatedSalonID.String == "" {
+		return nil, ErrNotFound
+	}
+	salonID := locatedSalonID.String
+	boundCtx := databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, salonID)
 	var route CallRoute
-	err := r.db.QueryRowContext(ctx, `
+	err := r.db.QueryRowContext(boundCtx, `
 		SELECT cs.salon_id::text, s.owner_user_id::text, cs.id::text
 		FROM call_sessions cs
 		JOIN salons s ON s.id = cs.salon_id
-		WHERE cs.provider = $1
-		  AND cs.provider_call_id = $2
+		WHERE cs.salon_id = $1
+		  AND cs.provider = $2
+		  AND cs.provider_call_id = $3
 		LIMIT 1
-	`, provider, providerCallID).Scan(&route.SalonID, &route.OwnerUserID, &route.SessionID)
+	`, salonID, provider, providerCallID).Scan(&route.SalonID, &route.OwnerUserID, &route.SessionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

@@ -1829,7 +1829,7 @@ function emptyIntegrationConfigs(): IntegrationConfigs {
 
 function secretSourceLabel(source?: string) {
   if (source === "database") return "dashboard storage";
-  if (source === "environment") return "environment fallback";
+  if (source === "environment") return "legacy bootstrap source";
   return "no source";
 }
 

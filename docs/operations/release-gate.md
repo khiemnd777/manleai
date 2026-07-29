@@ -92,6 +92,10 @@ coverage includes:
   per-operation DB actor/scope reset; cross-tenant RLS; public zero base-table
   visibility through V71 safe projection; V72 exact Platform PII scope across
   customer, call, appointment, and notification tables;
+- V78 expand-phase `app.system_salon_id` application/reset, provider-only
+  salon-ID locators, per-item provider/worker binding tests, and a static guard
+  proving V78 does not prematurely tighten base RLS before the compatible image
+  is deployed;
 - tenant quota/usage accounting, provider-write rejection, and fair worker
   claim limits without cross-tenant starvation;
 - immutable V74 Tenant/Platform principal scope, fail-closed mixed-identity
@@ -124,6 +128,9 @@ coverage includes:
 This is a repository contract gate. A passing run is evidence for code
 readiness at the tagged revision, not evidence about the current state of any
 salon's dashboard-managed provider configuration.
+For the V78 expand release it also is not evidence that provider/worker base
+RLS has reached the later tenant-bound contract; that remains an explicit
+unchecked production-readiness item until the separate contract release.
 
 ## Release Dependency
 

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/modules/booking"
 )
 
@@ -27,6 +28,9 @@ func TestWebhookProcessorRepairsBookingWindowAndCompletesEvent(t *testing.T) {
 	}
 	if syncer.salonID != "salon_1" || syncer.ownerUserID != "owner_1" {
 		t.Fatalf("sync scope = %s/%s", syncer.salonID, syncer.ownerUserID)
+	}
+	if syncer.access.Scope != databasecontext.ScopeWorker || syncer.access.SystemSalonID != "salon_1" || syncer.access.ActorUserID != "" {
+		t.Fatalf("webhook sync access context = %#v", syncer.access)
 	}
 	if got := syncer.request.StartTime; !got.Equal(bookingStart.Add(-24 * time.Hour)) {
 		t.Fatalf("start = %s, want booking window", got)
@@ -179,14 +183,16 @@ type fakeSquareCalendarSyncer struct {
 	salonID     string
 	ownerUserID string
 	request     booking.CalendarSyncRequest
+	access      databasecontext.AccessContext
 	err         error
 }
 
-func (f *fakeSquareCalendarSyncer) SyncCalendar(_ context.Context, salonID string, ownerUserID string, req booking.CalendarSyncRequest) (*booking.CalendarSyncResponse, error) {
+func (f *fakeSquareCalendarSyncer) SyncCalendar(ctx context.Context, salonID string, ownerUserID string, req booking.CalendarSyncRequest) (*booking.CalendarSyncResponse, error) {
 	f.calls++
 	f.salonID = salonID
 	f.ownerUserID = ownerUserID
 	f.request = req
+	f.access = databasecontext.FromContext(ctx)
 	if f.err != nil {
 		return nil, f.err
 	}

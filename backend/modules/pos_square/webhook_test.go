@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/manleai/ai-receptionist/internal/config"
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 )
 
 func TestVerifySquareWebhookSignatureUsesURLAndRawBody(t *testing.T) {
@@ -70,6 +71,9 @@ func TestReceiveBookingWebhookVerifiesAndEnqueuesMinimalEvent(t *testing.T) {
 	}
 	if store.event.POSBookingVersion != 7 || store.event.BookingStatus != "ACCEPTED" || store.event.BookingStartAt == nil {
 		t.Fatalf("event booking metadata = %#v", store.event)
+	}
+	if store.enqueueAccess.Scope != databasecontext.ScopeProvider || store.enqueueAccess.SystemSalonID != "salon_1" || store.enqueueAccess.ActorUserID != "" {
+		t.Fatalf("webhook enqueue access context = %#v", store.enqueueAccess)
 	}
 }
 
@@ -205,13 +209,14 @@ func TestCalendarRepairClaimAndCompletionAreLeaseTokenFenced(t *testing.T) {
 }
 
 type fakeSquareWebhookStore struct {
-	target       *SquareWebhookTarget
-	findErr      error
-	findCalls    int
-	inserted     bool
-	enqueueErr   error
-	enqueueCalls int
-	event        SquareBookingWebhookEvent
+	target        *SquareWebhookTarget
+	findErr       error
+	findCalls     int
+	inserted      bool
+	enqueueErr    error
+	enqueueCalls  int
+	event         SquareBookingWebhookEvent
+	enqueueAccess databasecontext.AccessContext
 }
 
 func (f *fakeSquareWebhookStore) FindWebhookTarget(context.Context, string, string) (*SquareWebhookTarget, error) {
@@ -219,9 +224,10 @@ func (f *fakeSquareWebhookStore) FindWebhookTarget(context.Context, string, stri
 	return f.target, f.findErr
 }
 
-func (f *fakeSquareWebhookStore) EnqueueBookingWebhook(_ context.Context, event SquareBookingWebhookEvent) (bool, error) {
+func (f *fakeSquareWebhookStore) EnqueueBookingWebhook(ctx context.Context, event SquareBookingWebhookEvent) (bool, error) {
 	f.enqueueCalls++
 	f.event = event
+	f.enqueueAccess = databasecontext.FromContext(ctx)
 	return f.inserted, f.enqueueErr
 }
 

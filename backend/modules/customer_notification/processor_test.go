@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	notificationdelivery "github.com/manleai/ai-receptionist/modules/notification_delivery"
 )
 
@@ -21,6 +22,7 @@ type fakeCustomerProcessorRepository struct {
 	unknownCode    string
 	definitive     int
 	providerResult int
+	providerAccess databasecontext.AccessContext
 }
 
 func (f *fakeCustomerProcessorRepository) RecoverExpiredLeases(context.Context, int) (int, error) {
@@ -57,8 +59,9 @@ func (f *fakeCustomerProcessorRepository) RecordDefinitiveFailure(context.Contex
 	f.definitive++
 	return nil
 }
-func (f *fakeCustomerProcessorRepository) RecordProviderResult(context.Context, ClaimedDelivery, notificationdelivery.SendResult) error {
+func (f *fakeCustomerProcessorRepository) RecordProviderResult(ctx context.Context, _ ClaimedDelivery, _ notificationdelivery.SendResult) error {
 	f.providerResult++
+	f.providerAccess = databasecontext.FromContext(ctx)
 	return nil
 }
 
@@ -119,5 +122,8 @@ func TestProcessorPersistsAcceptanceWithoutCallingItDelivered(t *testing.T) {
 	processed, err := NewProcessor(repo, fakeCustomerSenderResolver{sender: sender}).ProcessOnce(context.Background(), 20)
 	if err != nil || processed != 1 || repo.providerResult != 1 || repo.unknown != 0 {
 		t.Fatalf("processed=%d err=%v provider=%d unknown=%d", processed, err, repo.providerResult, repo.unknown)
+	}
+	if repo.providerAccess.Scope != databasecontext.ScopeWorker || repo.providerAccess.SystemSalonID != "salon-1" || repo.providerAccess.ActorUserID != "" {
+		t.Fatalf("provider result access context = %#v", repo.providerAccess)
 	}
 }

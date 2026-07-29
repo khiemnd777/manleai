@@ -225,32 +225,12 @@ func (s *Service) Start(ctx context.Context, salonID string, ownerUserID string,
 	})
 }
 
-type platformSalonOwnerResolver interface {
-	ResolveSalonOwnerForPlatform(ctx context.Context, salonID string, platformUserID string) (string, error)
-}
-
 func (s *Service) StartForPlatform(ctx context.Context, salonID string, platformUserID string, req StartSessionRequest) (*Session, error) {
-	resolver, ok := s.store.(platformSalonOwnerResolver)
-	if !ok {
-		return nil, ErrNotFound
-	}
-	ownerUserID, err := resolver.ResolveSalonOwnerForPlatform(ctx, strings.TrimSpace(salonID), strings.TrimSpace(platformUserID))
-	if err != nil {
-		return nil, err
-	}
-	return s.Start(ctx, salonID, ownerUserID, req)
+	return s.Start(ctx, salonID, platformUserID, req)
 }
 
 func (s *Service) MessageForPlatform(ctx context.Context, salonID string, platformUserID string, sessionID string, req MessageRequest) (*Session, error) {
-	resolver, ok := s.store.(platformSalonOwnerResolver)
-	if !ok {
-		return nil, ErrNotFound
-	}
-	ownerUserID, err := resolver.ResolveSalonOwnerForPlatform(ctx, strings.TrimSpace(salonID), strings.TrimSpace(platformUserID))
-	if err != nil {
-		return nil, err
-	}
-	return s.Message(ctx, salonID, ownerUserID, sessionID, req)
+	return s.Message(ctx, salonID, platformUserID, sessionID, req)
 }
 
 func (s *Service) StartPhoneCall(ctx context.Context, salonID string, ownerUserID string, req StartPhoneCallRequest) (*Session, error) {

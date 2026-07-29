@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/modules/booking"
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/scheduling"
@@ -308,6 +309,7 @@ func (s *Service) HandleCallback(ctx context.Context, code string, state string,
 	if err != nil {
 		return nil, err
 	}
+	ctx = databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, salonID)
 	if err := s.repo.ConsumeOAuthState(ctx, pos.ProviderSquare, salonID, hashValue(state), nonceHash); err != nil {
 		return nil, fmt.Errorf("invalid or expired square state")
 	}
@@ -658,6 +660,8 @@ func loadSquareSchedulingTargetEvidenceTx(ctx context.Context, tx *sql.Tx, salon
 		  AND (
 		      public.has_active_tenant_membership(salon.id, $2::uuid)
 		      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'technical.read')
+		      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.read', 'calls')
+		      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls')
 		  )
 		FOR SHARE OF salon, settings
 	`, salonID, actorUserID).Scan(&evidence.ActiveProvider, &evidence.AuthorityVersion); err != nil {

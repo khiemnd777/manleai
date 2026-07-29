@@ -19,6 +19,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/internal/respond"
 	"github.com/manleai/ai-receptionist/modules/voice"
 )
@@ -234,7 +235,7 @@ func (h *Handler) responseForReply(c *fiber.Ctx, adapter *Adapter, reply *voice.
 }
 
 func (h *Handler) Stream(c *websocket.Conn) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(databasecontext.WithScope(context.Background(), databasecontext.ScopeProvider))
 	defer cancel()
 
 	var writeMu sync.Mutex
@@ -315,6 +316,7 @@ func (h *Handler) Stream(c *websocket.Conn) {
 				closeStream("stream_route_failed")
 				return
 			}
+			ctx = databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, route.SalonID)
 			_ = h.recordRealtimeTiming(ctx, providerCallID, sessionID, streamSID, "stream_start", streamStartAt, nil)
 			openAIConnectAt := time.Now()
 			realtime, err = h.service.ConnectRealtime(ctx, route.SalonID, route.SessionID, providerCallID)
