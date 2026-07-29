@@ -191,13 +191,17 @@ managed through the dashboard-backed integration configuration. Do not inspect
 or copy repository environment values to diagnose their active state, and do
 not place provider secrets or customer data in release/rollback evidence.
 
-## V78 Expand/Contract Rollback Note
+## V78-V79 Expand/Contract Rollback Note
 
 V78 adds the optional `app.system_salon_id` session context and provider locator
-functions but does not alter provider/worker base RLS. The previous image can
-therefore run after an image rollback while V78 remains applied. Keep the later
-RLS contract in a separate release only after the V78-aware image has been
-deployed and provider callbacks, OAuth/webhooks, POS sync, Square repair, and
-notification workers have been observed. If that later contract release fails,
-roll back only to an image that still supplies the V78 context and safe global
-discovery functions; never restore the database merely to remove V78.
+functions but does not alter provider/worker base RLS. V79 adds bounded worker
+discovery functions plus validated composite call-child tenant constraints; it
+also leaves base RLS unchanged. The previous V78-aware image remains compatible
+with V79 because its direct worker queries are still admitted during this
+preparation window, although it does not benefit from V79's item-bound worker
+path. Keep the later RLS contract in a separate release only after the
+V79-aware image has been deployed and provider callbacks, OAuth/webhooks, POS
+sync, Square repair, notification, conversation-expiry, and scheduling-retention
+workers have been observed. If that later contract release fails, roll back
+only to an image that supplies the V78 context and V79 safe global discovery
+functions; never restore the database merely to remove V78 or V79.

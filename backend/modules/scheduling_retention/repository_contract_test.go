@@ -12,6 +12,11 @@ func TestRepositoryUsesBoundedSkipLockedRedactionWithoutProviderCalls(t *testing
 		t.Fatalf("read repository: %v", err)
 	}
 	source := string(raw)
+	contractRaw, err := os.ReadFile("../../migrations/V79__system_tenant_contract_preparation.sql")
+	if err != nil {
+		t.Fatalf("read V79 migration: %v", err)
+	}
+	contractSource := string(contractRaw)
 	if got := strings.Count(source, "FOR UPDATE"); got < 6 {
 		t.Fatalf("FOR UPDATE count=%d, want all expiry and redaction work items locked", got)
 	}
@@ -19,7 +24,8 @@ func TestRepositoryUsesBoundedSkipLockedRedactionWithoutProviderCalls(t *testing
 		t.Fatalf("SKIP LOCKED count=%d, want all expiry and redaction work items concurrent-safe", got)
 	}
 	for _, fragment := range []string{
-		"LIMIT 1",
+		"app_worker_scheduling_retention_candidate",
+		"databasecontext.WithSystemSalon",
 		"retention_expires_at <= now()",
 		"expires_at <= now()",
 		"delivery_claim_token IS NULL",
@@ -29,6 +35,15 @@ func TestRepositoryUsesBoundedSkipLockedRedactionWithoutProviderCalls(t *testing
 	} {
 		if !strings.Contains(source, fragment) {
 			t.Fatalf("retention repository missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"LIMIT 1",
+		"app_worker_discovery_allowed()",
+		"SECURITY DEFINER",
+	} {
+		if !strings.Contains(contractSource, fragment) {
+			t.Fatalf("V79 retention locator missing %q", fragment)
 		}
 	}
 	for _, forbidden := range []string{"fallback_pending", "DELETE FROM", "UPDATE owner_notifications notification", "UPDATE customer_notification_deliveries delivery", "http.", "twilio", "square"} {

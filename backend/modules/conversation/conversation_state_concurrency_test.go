@@ -293,6 +293,12 @@ func newConcurrentCASConversationStore(base *fakeConversationStore, initialLoadT
 	}
 }
 
+func (s *concurrentCASConversationStore) GetRuntimeConfig(ctx context.Context, salonID string, ownerUserID string) (*RuntimeConfig, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeConversationStore.GetRuntimeConfig(ctx, salonID, ownerUserID)
+}
+
 func (s *concurrentCASConversationStore) GetAnswerContextFence(ctx context.Context, salonID string) (AnswerContextFence, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

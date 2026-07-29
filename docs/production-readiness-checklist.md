@@ -541,11 +541,16 @@ RPO/RTO evidence.
   runtime and technical reads strictly salon-database-backed; add V78
   `app.system_salon_id`, provider-only salon-ID locators, and bind resolved
   provider plus claimed worker item operations to one salon.
-- [ ] Phase 15 contract release: after the V78-aware image is deployed and
-  observed, move every remaining global worker claim/recovery/cleanup/retention
-  operation behind narrow worker-only database functions, then require matching
-  `app.system_salon_id` in provider/worker base RLS. Do not mark tenant-system
-  isolation complete or co-ship this policy tightening with V78.
+- [x] Phase 15 contract preparation: V79 moves global worker
+  claim/recovery/cleanup/retention discovery behind narrow worker-only database
+  functions, binds selected items to one salon before ordinary repository work,
+  and enforces composite salon/session ownership for call children. V79 leaves
+  provider/worker base RLS unchanged for rollback compatibility.
+- [ ] Phase 15 contract release: after the V79-aware image is deployed and all
+  provider/worker paths are observed, require matching `app.system_salon_id` in
+  provider/worker base RLS and run runtime-role negative tests for unbound and
+  cross-tenant base-table access. Do not mark tenant-system isolation complete
+  or co-ship this policy tightening with V79.
 - [x] Restore and reuse the full existing `ServicesDashboard`, `CallsDashboard`,
   `SettingsDashboard`, and `TrainingDashboard` on their Tenant routes; reuse the
   same Services/Calls/Training components through explicit Platform surface

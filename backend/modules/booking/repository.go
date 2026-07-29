@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/internal/validation"
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/scheduling/fence"
@@ -756,32 +757,9 @@ func (r *Repository) CleanupAvailabilityQuotes(ctx context.Context, unconsumedEx
 		return 0, ErrValidation
 	}
 	var deleted int
-	err := r.db.QueryRowContext(ctx, `
-		WITH candidates AS MATERIALIZED (
-			SELECT quote.id
-			FROM availability_quotes quote
-			WHERE quote.consumed_by_attempt_id IS NULL
-			  AND NOT EXISTS (
-			      SELECT 1
-			      FROM booking_attempts attempt
-			      WHERE attempt.availability_quote_id = quote.id
-			  )
-			  AND (
-			      (quote.consumed_at IS NULL AND quote.expires_at <= $1)
-			      OR
-			      (quote.consumed_at IS NOT NULL AND quote.consumed_at <= $2)
-			  )
-			ORDER BY COALESCE(quote.consumed_at, quote.expires_at) ASC, quote.id ASC
-			LIMIT $3
-			FOR UPDATE OF quote SKIP LOCKED
-		), deleted AS (
-			DELETE FROM availability_quotes quote
-			USING candidates
-			WHERE quote.id = candidates.id
-			RETURNING quote.id
-		)
-		SELECT count(*)
-		FROM deleted
+	discoveryCtx := databasecontext.WithScope(ctx, databasecontext.ScopeWorker)
+	err := r.db.QueryRowContext(discoveryCtx, `
+		SELECT public.app_worker_cleanup_availability_quotes($1, $2, $3)
 	`, unconsumedExpiredBefore.UTC(), consumedBefore.UTC(), clampAvailabilityQuoteCleanupLimit(limit)).Scan(&deleted)
 	if err != nil {
 		return 0, err
@@ -967,21 +945,32 @@ func bookingAttemptSegmentsMatchAppointmentTx(ctx context.Context, tx *sql.Tx, a
 func (r *Repository) expireBookingOperationLeases(ctx context.Context, salonID string, limit int) (int, error) {
 	preDispatchPolicy := bookingLeaseExpiryPolicyFor(ProviderOutcomeNotStarted)
 	inFlightPolicy := bookingLeaseExpiryPolicyFor(ProviderOutcomeInFlight)
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT attempt.id::text, attempt.salon_id::text, attempt.pos_provider,
-		       attempt.operation_type, COALESCE(attempt.target_appointment_id::text, ''),
-		       COALESCE(attempt.pos_booking_id, '')
-		FROM booking_attempts attempt
-		WHERE (NULLIF($1, '')::uuid IS NULL OR attempt.salon_id = NULLIF($1, '')::uuid)
-		  AND attempt.scheduling_authority = 'external_provider'
-		  AND attempt.status = $2
-		  AND attempt.provider_outcome IN ($3, $4)
-		  AND attempt.superseded_at IS NULL
-		  AND attempt.processing_lease_expires_at IS NOT NULL
-		  AND attempt.processing_lease_expires_at <= now()
-		ORDER BY attempt.processing_lease_expires_at ASC, attempt.id ASC
-		LIMIT $5
-	`, salonID, StatusPOSPending, ProviderOutcomeNotStarted, ProviderOutcomeInFlight, clampBookingLeaseSweepLimit(limit))
+	var rows *sql.Rows
+	var err error
+	if strings.TrimSpace(salonID) == "" {
+		discoveryCtx := databasecontext.WithScope(ctx, databasecontext.ScopeWorker)
+		rows, err = r.db.QueryContext(discoveryCtx, `
+			SELECT attempt_id::text, salon_id::text, provider, operation_type,
+			       COALESCE(target_appointment_id::text, ''), COALESCE(pos_booking_id, '')
+			FROM public.app_worker_expired_booking_leases($1)
+		`, clampBookingLeaseSweepLimit(limit))
+	} else {
+		rows, err = r.db.QueryContext(ctx, `
+			SELECT attempt.id::text, attempt.salon_id::text, attempt.pos_provider,
+			       attempt.operation_type, COALESCE(attempt.target_appointment_id::text, ''),
+			       COALESCE(attempt.pos_booking_id, '')
+			FROM booking_attempts attempt
+			WHERE attempt.salon_id = $1
+			  AND attempt.scheduling_authority = 'external_provider'
+			  AND attempt.status = $2
+			  AND attempt.provider_outcome IN ($3, $4)
+			  AND attempt.superseded_at IS NULL
+			  AND attempt.processing_lease_expires_at IS NOT NULL
+			  AND attempt.processing_lease_expires_at <= now()
+			ORDER BY attempt.processing_lease_expires_at ASC, attempt.id ASC
+			LIMIT $5
+		`, salonID, StatusPOSPending, ProviderOutcomeNotStarted, ProviderOutcomeInFlight, clampBookingLeaseSweepLimit(limit))
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -1011,7 +1000,11 @@ func (r *Repository) expireBookingOperationLeases(ctx context.Context, salonID s
 
 	expiredCount := 0
 	for _, candidate := range candidates {
-		changed, err := r.expireBookingOperationLeaseCandidate(ctx, candidate, preDispatchPolicy, inFlightPolicy)
+		itemCtx := ctx
+		if strings.TrimSpace(salonID) == "" {
+			itemCtx = databasecontext.WithSystemSalon(ctx, databasecontext.ScopeWorker, candidate.SalonID)
+		}
+		changed, err := r.expireBookingOperationLeaseCandidate(itemCtx, candidate, preDispatchPolicy, inFlightPolicy)
 		if err != nil {
 			return expiredCount, err
 		}

@@ -272,14 +272,14 @@ CREATE ROLE manleai_runtime LOGIN PASSWORD '<separate-secret>'
 ```
 
 Do not put the password in shell history. The candidate API uses the migration
-connection to apply all pending release migrations through V78 and grant
+connection to apply all pending release migrations through V79 and grant
 table/sequence/function privileges to the
 already-existing runtime role, then closes that connection. API requests and
 the worker use only the runtime connection. The worker does not receive
 `MIGRATION_DATABASE_URL`; production startup fails if the connected role name,
 ownership, `SUPERUSER`, `BYPASSRLS`, or RLS policy checks are unsafe.
 
-### V78 system-tenant context rollout
+### V78-V79 system-tenant context rollout
 
 `V78__system_tenant_context_expand.sql` is intentionally the expand release of
 a two-release database change. It adds `app.system_salon_id` support and narrow
@@ -290,6 +290,16 @@ callbacks plus worker item processing before scheduling the later contract
 migration. Do not add that contract migration to the same release: startup
 migrations run before the new image can prove every runtime path supplies the
 new context.
+
+`V79__system_tenant_contract_preparation.sql` is the next additive release. It
+moves remaining global worker claim/recovery/cleanup/retention discovery behind
+bounded worker-only database functions, binds each selected item to its salon
+before ordinary repository work, and installs validated composite
+salon/session constraints for call children after a fail-closed preflight. It
+still does not tighten provider/worker base RLS, so it must not be described as
+the contract release. Deploy and observe V79 worker/provider paths first; only a
+later separately reviewed migration may require matching
+`app.system_salon_id` in base RLS.
 
 Before deploying the strict voice resolver in this image, inspect the Platform
 technical integration-config API or persisted configuration records and confirm

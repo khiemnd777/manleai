@@ -272,6 +272,17 @@ runs before deployment. A later contract release must move every remaining
 unbound worker discovery/recovery/retention operation behind narrow database
 functions before base RLS can require an exact `app.system_salon_id`.
 
+V79 completes that application-side contract preparation without tightening
+the base RLS policies. Global worker claim, recovery, cleanup, and retention
+discovery now enter bounded worker-only database functions; each returned item
+is then processed under its exact `app.system_salon_id`. Call transcript,
+handoff, webhook, and audio children are protected by composite salon/session
+foreign keys after a fail-closed mismatch preflight, and their repository reads
+and redaction writes carry both keys. V79 remains compatible with the V78-aware
+image and is not the strict RLS contract release. The later contract migration
+is permitted only after runtime observation proves no unbound provider/worker
+base-table path remains.
+
 ## Scheduling Authority Contract
 
 `docs/scheduling-authority.md` is the normative boundary for availability,

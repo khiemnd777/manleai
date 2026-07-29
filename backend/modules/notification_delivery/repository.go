@@ -9,41 +9,34 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 )
 
 type Repository struct{ db *sql.DB }
 
 func NewRepository(db *sql.DB) *Repository { return &Repository{db: db} }
 
+type expiredOwnerNotificationLease struct {
+	id, salonID, token string
+	dispatched         bool
+}
+
 func (r *Repository) RecoverExpiredLeases(ctx context.Context, limit int) (int, error) {
 	if limit <= 0 {
 		return 0, nil
 	}
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `
-		SELECT id::text, salon_id::text, delivery_claim_token::text,
-		       delivery_dispatch_started_at IS NOT NULL
-		FROM owner_notifications
-		WHERE delivery_status = 'delivering'
-		  AND delivery_lease_expires_at <= now()
-		ORDER BY delivery_lease_expires_at, id
-		FOR UPDATE SKIP LOCKED
-		LIMIT $1
+	discoveryCtx := databasecontext.WithScope(ctx, databasecontext.ScopeWorker)
+	rows, err := r.db.QueryContext(discoveryCtx, `
+		SELECT notification_id::text, salon_id::text, claim_token::text, dispatch_started
+		FROM public.app_worker_expired_owner_notification_leases($1)
 	`, limit)
 	if err != nil {
 		return 0, err
 	}
-	type expired struct {
-		id, salonID, token string
-		dispatched         bool
-	}
-	items := make([]expired, 0, limit)
+	items := make([]expiredOwnerNotificationLease, 0, limit)
 	for rows.Next() {
-		var item expired
+		var item expiredOwnerNotificationLease
 		if err := rows.Scan(&item.id, &item.salonID, &item.token, &item.dispatched); err != nil {
 			rows.Close()
 			return 0, err
@@ -53,109 +46,103 @@ func (r *Repository) RecoverExpiredLeases(ctx context.Context, limit int) (int, 
 	if err := rows.Close(); err != nil {
 		return 0, err
 	}
+	recovered := 0
 	for _, item := range items {
-		if item.dispatched {
-			if _, err := tx.ExecContext(ctx, `
+		itemCtx := databasecontext.WithSystemSalon(ctx, databasecontext.ScopeWorker, item.salonID)
+		changed, err := r.recoverExpiredLease(itemCtx, item)
+		if err != nil {
+			return recovered, err
+		}
+		if changed {
+			recovered++
+		}
+	}
+	return recovered, nil
+}
+
+func (r *Repository) recoverExpiredLease(ctx context.Context, item expiredOwnerNotificationLease) (bool, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var dispatched bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT delivery_dispatch_started_at IS NOT NULL
+		FROM owner_notifications
+		WHERE id=$1 AND salon_id=$2 AND delivery_status='delivering'
+		  AND delivery_claim_token=$3::uuid AND delivery_lease_expires_at<=now()
+		FOR UPDATE
+	`, item.id, item.salonID, item.token).Scan(&dispatched)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if dispatched != item.dispatched {
+		item.dispatched = dispatched
+	}
+	if item.dispatched {
+		if _, err := tx.ExecContext(ctx, `
 				UPDATE owner_notifications
 				SET delivery_status='dead_letter', dead_lettered_at=now(),
 				    last_delivery_error_code='DELIVERY_OUTCOME_UNKNOWN',
 				    last_delivery_error='Delivery outcome requires manual review.',
 				    delivery_claim_token=NULL, delivery_claimed_at=NULL,
 				    delivery_lease_expires_at=NULL, delivery_dispatch_started_at=NULL
-				WHERE id=$1 AND delivery_claim_token=$2::uuid
-			`, item.id, item.token); err != nil {
-				return 0, err
-			}
-			if _, err := tx.ExecContext(ctx, `
+				WHERE id=$1 AND salon_id=$2 AND delivery_claim_token=$3::uuid
+		`, item.id, item.salonID, item.token); err != nil {
+			return false, err
+		}
+		if _, err := tx.ExecContext(ctx, `
 				UPDATE owner_notification_delivery_attempts
 				SET outcome='outcome_unknown', error_code='DELIVERY_OUTCOME_UNKNOWN', finished_at=now()
-				WHERE claim_token=$1::uuid AND outcome='leased'
-			`, item.token); err != nil {
-				return 0, err
-			}
-			if err := insertEvent(ctx, tx, item.salonID, item.id, "expired-dispatch:"+item.token, "dead_lettered", StatusDeadLetter, "", "DELIVERY_OUTCOME_UNKNOWN"); err != nil {
-				return 0, err
-			}
-		} else {
-			if _, err := tx.ExecContext(ctx, `
+				WHERE claim_token=$1::uuid AND salon_id=$2 AND outcome='leased'
+		`, item.token, item.salonID); err != nil {
+			return false, err
+		}
+		if err := insertEvent(ctx, tx, item.salonID, item.id, "expired-dispatch:"+item.token, "dead_lettered", StatusDeadLetter, "", "DELIVERY_OUTCOME_UNKNOWN"); err != nil {
+			return false, err
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `
 				UPDATE owner_notifications
 				SET delivery_status='failed', next_delivery_at=now(),
 				    last_delivery_error_code='DELIVERY_LEASE_EXPIRED',
 				    last_delivery_error='Delivery lease expired before dispatch.',
 				    delivery_claim_token=NULL, delivery_claimed_at=NULL,
 				    delivery_lease_expires_at=NULL, delivery_dispatch_started_at=NULL
-				WHERE id=$1 AND delivery_claim_token=$2::uuid
-			`, item.id, item.token); err != nil {
-				return 0, err
-			}
-			if _, err := tx.ExecContext(ctx, `
+				WHERE id=$1 AND salon_id=$2 AND delivery_claim_token=$3::uuid
+		`, item.id, item.salonID, item.token); err != nil {
+			return false, err
+		}
+		if _, err := tx.ExecContext(ctx, `
 				UPDATE owner_notification_delivery_attempts
 				SET outcome='safe_retry', error_code='DELIVERY_LEASE_EXPIRED', finished_at=now()
-				WHERE claim_token=$1::uuid AND outcome='leased'
-			`, item.token); err != nil {
-				return 0, err
-			}
-			if err := insertEvent(ctx, tx, item.salonID, item.id, "expired-before-dispatch:"+item.token, "safe_retry_scheduled", StatusFailed, "", "DELIVERY_LEASE_EXPIRED"); err != nil {
-				return 0, err
-			}
+				WHERE claim_token=$1::uuid AND salon_id=$2 AND outcome='leased'
+		`, item.token, item.salonID); err != nil {
+			return false, err
+		}
+		if err := insertEvent(ctx, tx, item.salonID, item.id, "expired-before-dispatch:"+item.token, "safe_retry_scheduled", StatusFailed, "", "DELIVERY_LEASE_EXPIRED"); err != nil {
+			return false, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return false, err
 	}
-	return len(items), nil
+	return true, nil
 }
 
 func (r *Repository) ClaimBatch(ctx context.Context, limit int, lease time.Duration) ([]ClaimedNotification, error) {
 	if limit <= 0 || lease <= 0 {
 		return nil, ErrValidation
 	}
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `
-		WITH ranked AS (
-			SELECT notification.id,notification.salon_id,notification.next_delivery_at,
-			       notification.created_at,
-			       row_number() OVER (
-			           PARTITION BY notification.salon_id
-			           ORDER BY notification.next_delivery_at,notification.created_at,notification.id
-			       ) AS tenant_rank,
-			       COALESCE(limits.worker_claims_per_batch,2) AS tenant_limit
-			FROM owner_notifications notification
-			LEFT JOIN tenant_runtime_limits limits ON limits.salon_id=notification.salon_id
-			WHERE notification.delivery_status IN ('queued','failed')
-			  AND notification.next_delivery_at <= now()
-			  AND notification.delivery_attempts::bigint < (notification.requeue_count::bigint + 1) * $1
-		), candidates AS (
-			SELECT notification.id
-			FROM owner_notifications notification
-			JOIN ranked ON ranked.id=notification.id
-			WHERE ranked.tenant_rank<=ranked.tenant_limit
-			ORDER BY ranked.next_delivery_at,ranked.created_at,notification.id
-			FOR UPDATE OF notification SKIP LOCKED
-			LIMIT $2
-		), claimed AS (
-			UPDATE owner_notifications notification
-			SET delivery_status='delivering', delivery_provider='twilio',
-			    delivery_claim_token=gen_random_uuid(), delivery_claimed_at=now(),
-			    delivery_lease_expires_at=now()+($3 * interval '1 millisecond'),
-			    delivery_dispatch_started_at=NULL,
-			    delivery_attempts=notification.delivery_attempts+1,
-			    dead_lettered_at=NULL, last_delivery_error=NULL,
-			    last_delivery_error_code=NULL
-			FROM candidates
-			WHERE notification.id=candidates.id
-			RETURNING notification.id, notification.salon_id, notification.type,
-			          notification.message, notification.delivery_claim_token,
-			          notification.delivery_attempts, notification.requeue_count,
-			          notification.created_at
-		)
-		SELECT id::text, salon_id::text, type, message, delivery_claim_token::text,
-		       delivery_attempts, requeue_count, created_at
-		FROM claimed
+	discoveryCtx := databasecontext.WithScope(ctx, databasecontext.ScopeWorker)
+	rows, err := r.db.QueryContext(discoveryCtx, `
+		SELECT notification_id::text, salon_id::text, notification_type, message,
+		       claim_token::text, attempt_number, requeue_count, created_at
+		FROM public.app_worker_claim_owner_notifications($1, $2, $3)
 	`, MaxSafeDeliveryAttempts, limit, lease.Milliseconds())
 	if err != nil {
 		return nil, err
@@ -170,21 +157,6 @@ func (r *Repository) ClaimBatch(ctx context.Context, limit int, lease time.Durat
 		items = append(items, item)
 	}
 	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	for _, item := range items {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO owner_notification_delivery_attempts (
-				salon_id, owner_notification_id, attempt_number, claim_token, provider, outcome
-			) VALUES ($1,$2,$3,$4::uuid,'twilio','leased')
-		`, item.SalonID, item.ID, item.AttemptNumber, item.ClaimToken); err != nil {
-			return nil, err
-		}
-		if err := insertEvent(ctx, tx, item.SalonID, item.ID, "claim:"+item.ClaimToken, "claimed", StatusDelivering, "", ""); err != nil {
-			return nil, err
-		}
-	}
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return items, nil

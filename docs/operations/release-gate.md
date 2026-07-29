@@ -96,6 +96,10 @@ coverage includes:
   salon-ID locators, per-item provider/worker binding tests, and a static guard
   proving V78 does not prematurely tighten base RLS before the compatible image
   is deployed;
+- V79 contract-preparation worker-only claim/recovery/cleanup/retention
+  functions, exact per-item worker binding, fail-closed call-child mismatch
+  preflight, and composite salon/session foreign-key enforcement, with a static
+  guard proving base RLS is still unchanged;
 - tenant quota/usage accounting, provider-write rejection, and fair worker
   claim limits without cross-tenant starvation;
 - immutable V74 Tenant/Platform principal scope, fail-closed mixed-identity
@@ -128,7 +132,7 @@ coverage includes:
 This is a repository contract gate. A passing run is evidence for code
 readiness at the tagged revision, not evidence about the current state of any
 salon's dashboard-managed provider configuration.
-For the V78 expand release it also is not evidence that provider/worker base
+For the V78-V79 preparation releases it also is not evidence that provider/worker base
 RLS has reached the later tenant-bound contract; that remains an explicit
 unchecked production-readiness item until the separate contract release.
 

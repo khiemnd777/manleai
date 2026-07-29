@@ -188,6 +188,39 @@ func TestV72RuntimeRoleEnforcesTenantPublicAndPlatformPIIBoundaries(t *testing.T
 	assertServiceNames(databasecontext.WithScope(context.Background(), databasecontext.ScopePublic), "")
 	assertServiceNames(databasecontext.WithScope(context.Background(), databasecontext.ScopeWorker), "Tenant A Service,Tenant B Service")
 
+	if _, err := adminDB.ExecContext(context.Background(), `
+		INSERT INTO pos_sync_jobs(salon_id,provider,entity_type,entity_id,operation)
+		VALUES ($1,'square','service',gen_random_uuid(),'upsert_service'),
+		       ($2,'square','service',gen_random_uuid(),'upsert_service')
+	`, salonA, salonB); err != nil {
+		t.Fatalf("insert worker discovery fixtures: %v", err)
+	}
+	claimWorkerJobs := func(ctx context.Context) int {
+		t.Helper()
+		rows, err := runtimeDB.QueryContext(ctx, `SELECT job_id FROM public.app_worker_claim_pos_sync_jobs(10)`)
+		if err != nil {
+			t.Fatalf("claim worker jobs: %v", err)
+		}
+		defer rows.Close()
+		count := 0
+		for rows.Next() {
+			count++
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterate worker claims: %v", err)
+		}
+		return count
+	}
+	if got := claimWorkerJobs(context.Background()); got != 0 {
+		t.Fatalf("unscoped runtime worker claims=%d, want 0", got)
+	}
+	if got := claimWorkerJobs(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeWorker, salonA)); got != 0 {
+		t.Fatalf("tenant-bound worker discovery claims=%d, want 0", got)
+	}
+	if got := claimWorkerJobs(databasecontext.WithScope(context.Background(), databasecontext.ScopeWorker)); got != 2 {
+		t.Fatalf("unbound worker discovery claims=%d, want 2", got)
+	}
+
 	publicContext := databasecontext.WithScope(context.Background(), databasecontext.ScopePublic)
 	var publicRaw string
 	if err := runtimeDB.QueryRowContext(publicContext, `SELECT public.read_public_catalog($1)::text`, "rls-a-"+suffix).Scan(&publicRaw); err != nil {
@@ -218,8 +251,10 @@ func TestV72RuntimeRoleEnforcesTenantPublicAndPlatformPIIBoundaries(t *testing.T
 			t.Fatalf("%s visibility=%d, want %d", table, got, want)
 		}
 	}
+	// V76 gives Platform Admin direct capability-backed control-plane access,
+	// including the corresponding PII scope. Platform Ops remains grant-bound.
 	for _, table := range []string{"customers", "call_sessions", "appointments", "owner_notifications"} {
-		assertCount(platformContext, table, 0)
+		assertCount(platformContext, table, 1)
 	}
 
 	for _, scope := range []string{"customers", "calls", "appointments", "notifications"} {
