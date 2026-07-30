@@ -73,6 +73,45 @@ func TestUpsertSquareConfigPreservesTargetWebhookURLAndDoesNotImportSourceURL(t 
 	}
 }
 
+func TestUpsertTwilioConfigWritesOnlyPortableVoiceTransport(t *testing.T) {
+	db, err := sql.Open(slugCheckTestDriverName, "")
+	if err != nil {
+		t.Fatalf("sql.Open returned error: %v", err)
+	}
+	defer db.Close()
+	slugCheckDriverState.Lock()
+	slugCheckDriverState.execQuery = ""
+	slugCheckDriverState.execArgs = nil
+	slugCheckDriverState.err = nil
+	slugCheckDriverState.Unlock()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx returned error: %v", err)
+	}
+	defer tx.Rollback()
+	if err := upsertTwilioConfig(context.Background(), tx, "salon_1", integrationconfig.TwilioSettingsResponse{
+		VoiceRouteID: "source-route", VoiceInboundNumber: "+13125550101", PublicBaseURL: "https://source.example.com",
+		IncomingPath: "/api/voice/twilio/source-route/incoming", VoiceTransport: "realtime_stream",
+	}); err != nil {
+		t.Fatalf("upsertTwilioConfig returned error: %v", err)
+	}
+	slugCheckDriverState.Lock()
+	query := slugCheckDriverState.execQuery
+	args := append([]driver.Value(nil), slugCheckDriverState.execArgs...)
+	slugCheckDriverState.Unlock()
+	if len(args) != 2 {
+		t.Fatalf("exec args=%#v", args)
+	}
+	settingsJSON, _ := args[1].(string)
+	if settingsJSON != `{"voice_transport":"realtime_stream"}` {
+		t.Fatalf("Twilio portable settings=%s", settingsJSON)
+	}
+	if !strings.Contains(query, "salon_integration_configs.settings || EXCLUDED.settings") ||
+		strings.Contains(query, "enabled = EXCLUDED.enabled") || strings.Contains(query, "secrets_encrypted = EXCLUDED.secrets_encrypted") {
+		t.Fatalf("Twilio transfer does not preserve target route/enabled/secrets: %s", query)
+	}
+}
+
 func TestPublicSlugTakenSupportsEmptyOnboardingSalonID(t *testing.T) {
 	db, err := sql.Open(slugCheckTestDriverName, "")
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/manleai/ai-receptionist/internal/config"
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/internal/encryption"
 )
 
@@ -642,6 +643,66 @@ func TestTwilioMessagingResponseMasksDestinationAndSecrets(t *testing.T) {
 	}
 }
 
+func TestUpdateTwilioBuildsImmutableTenantRouteURLsAndValidatesIdentity(t *testing.T) {
+	routeID := "11111111-1111-4111-8111-111111111111"
+	store := &fakeIntegrationConfigStore{existing: &StoredConfig{
+		ID: routeID, SalonID: "salon-1", Provider: ProviderTwilio, Enabled: true,
+		Settings: map[string]string{}, SecretsEncrypted: "ciphertext",
+	}}
+	service := &Service{repo: store, cipher: &fakeSecretCipher{decryptPlaintext: `{"auth_token":"route-auth-token","account_sid":"AC11111111111111111111111111111111"}`}}
+	number := "+13125550123"
+	enabled := true
+	response, err := service.UpdateTwilio(context.Background(), "salon-1", "owner-1", UpdateTwilioSettingsRequest{
+		PublicBaseURL: "https://api.example.com", VoiceInboundNumber: &number, VoiceRoutingEnabled: &enabled,
+		AccountSID: "AC11111111111111111111111111111111", AuthToken: "route-auth-token",
+		VoiceTransport: "recording",
+	})
+	if err != nil {
+		t.Fatalf("UpdateTwilio returned error: %v", err)
+	}
+	if store.upsertCalls != 1 || store.upserted.Settings["voice_inbound_number"] != number || store.upserted.Settings["voice_routing_enabled"] != "true" {
+		t.Fatalf("persisted route settings=%#v calls=%d", store.upserted.Settings, store.upsertCalls)
+	}
+	wantIncoming := "https://api.example.com/api/voice/twilio/" + routeID + "/incoming"
+	if response.VoiceRouteID != routeID || !response.VoiceRoutingConfigured || response.InboundWebhookURL != wantIncoming || response.AccountSIDHint != "AC••••1111" {
+		t.Fatalf("route response=%#v", response)
+	}
+
+	invalidNumber := "312-555-0123"
+	store.upsertCalls = 0
+	if _, err := service.UpdateTwilio(context.Background(), "salon-1", "owner-1", UpdateTwilioSettingsRequest{
+		PublicBaseURL: "https://api.example.com", VoiceInboundNumber: &invalidNumber, VoiceRoutingEnabled: &enabled,
+	}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("invalid inbound number error=%v", err)
+	}
+	if store.upsertCalls != 0 {
+		t.Fatalf("invalid route wrote %d configs", store.upsertCalls)
+	}
+}
+
+func TestResolveTwilioVoiceRouteBindsLocatedTenantBeforeSecretUse(t *testing.T) {
+	routeID := "11111111-1111-4111-8111-111111111111"
+	store := &fakeIntegrationConfigStore{
+		locatedSalonID: "salon-1",
+		route: &StoredConfig{
+			ID: routeID, SalonID: "salon-1", Provider: ProviderTwilio, Enabled: true,
+			Settings: map[string]string{
+				"voice_inbound_number": "+13125550123", "voice_routing_enabled": "true", "public_base_url": "https://api.example.com",
+			},
+			SecretsEncrypted: "ciphertext",
+		},
+	}
+	service := &Service{repo: store, cipher: &fakeSecretCipher{decryptPlaintext: `{"auth_token":"route-auth-token","account_sid":"AC11111111111111111111111111111111"}`}}
+
+	resolved, err := service.ResolveTwilioVoiceRoute(context.Background(), routeID)
+	if err != nil {
+		t.Fatalf("ResolveTwilioVoiceRoute returned error: %v", err)
+	}
+	if resolved.SalonID != "salon-1" || resolved.RouteID != routeID || store.routeContext.Scope != databasecontext.ScopeProvider || store.routeContext.SystemSalonID != "salon-1" {
+		t.Fatalf("resolved route=%#v context=%#v", resolved, store.routeContext)
+	}
+}
+
 func TestUpdateTwilioRequiresFreshConsentWhenDestinationChanges(t *testing.T) {
 	store := &fakeIntegrationConfigStore{existing: &StoredConfig{
 		SalonID: "salon-1", Provider: ProviderTwilio, Enabled: true,
@@ -730,6 +791,9 @@ type fakeIntegrationConfigStore struct {
 	controlledCalls  int
 	command          TechnicalMutationCommand
 	controlledReplay bool
+	locatedSalonID   string
+	route            *StoredConfig
+	routeContext     databasecontext.AccessContext
 }
 
 func (f *fakeIntegrationConfigStore) UpsertControlled(_ context.Context, cfg StoredConfig, command TechnicalMutationCommand) (*StoredConfig, bool, error) {
@@ -768,6 +832,25 @@ func (f *fakeIntegrationConfigStore) Upsert(_ context.Context, cfg StoredConfig)
 	f.upsertCalls++
 	f.upserted = cfg
 	copyValue := cfg
+	if copyValue.ID == "" && f.existing != nil {
+		copyValue.ID = f.existing.ID
+	}
+	return &copyValue, nil
+}
+
+func (f *fakeIntegrationConfigStore) LocateTwilioVoiceRouteTenant(context.Context, string) (string, error) {
+	if f.locatedSalonID == "" {
+		return "", ErrNotFound
+	}
+	return f.locatedSalonID, nil
+}
+
+func (f *fakeIntegrationConfigStore) GetTwilioVoiceRoute(ctx context.Context, _, _ string) (*StoredConfig, error) {
+	f.routeContext = databasecontext.FromContext(ctx)
+	if f.route == nil {
+		return nil, ErrNotFound
+	}
+	copyValue := *f.route
 	return &copyValue, nil
 }
 

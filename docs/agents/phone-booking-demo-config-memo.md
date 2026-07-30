@@ -277,12 +277,14 @@ Recovery checklist:
 In the ManleAI Platform tenant Technical tab, Twilio section:
 
 - `Public API base URL`: `https://<public-api-url>`
+- `Voice inbound number`: the exact Twilio number in canonical E.164
+- `Twilio Account SID`: the account that owns that number
 - `Twilio auth token`: Twilio Auth Token
-- `Incoming path`: `/api/voice/twilio/incoming`
-- `Turn path`: `/api/voice/twilio/turn`
-- `Recording path`: `/api/voice/twilio/recording`
-- `Stream path`: `/api/voice/twilio/stream`
+- Enable `Tenant-bound Twilio Voice routing`
 - `Voice transport`: `recording` for the legacy recording loop, or `realtime_stream` for Twilio Media Streams + OpenAI Realtime.
+
+The route UUID and all Voice URLs are server-computed and read-only. Do not
+copy a route URL from another tenant or reconstruct it from a salon phone.
 
 When buffered TTS is used, the backend generates a short-lived signed
 `/api/voice/audio/:id` URL for Twilio `<Play>`. The URL query contains only an
@@ -295,19 +297,28 @@ In Twilio phone number voice settings:
 
 ```txt
 When a call comes in:
-POST https://<public-api-url>/api/voice/twilio/incoming
+POST https://<public-api-url>/api/voice/twilio/<voice-route-uuid>/incoming
 ```
+
+The old shared `/api/voice/twilio/incoming` URL is retained solely as an
+expand-release rollback reference and does not satisfy production routing
+acceptance.
 
 Do not paste the realtime stream URL into the Twilio phone number settings. The
 backend returns `<Connect><Stream>` from the incoming webhook with signed
 call-session parameters when `Voice transport` is `realtime_stream` and OpenAI
 Realtime is ready.
 
-Twilio webhook signature verification uses the dashboard-saved Twilio auth
-token. If the token is wrong, Twilio webhooks return
-`TWILIO_SIGNATURE_INVALID`.
+Twilio webhook signature verification uses the exact computed callback URL,
+all received form parameters, and the dashboard-saved tenant Auth Token.
+Route, inbound `To`, Account SID, existing CallSid ownership, disabled config,
+decrypt failure, and signature mismatches all return the same non-enumerating
+rejection before tenant-scoped mutation.
 
-The salon phone in the dashboard/database must match the Twilio number receiving the call. The backend routes inbound calls by matching Twilio `To` to `salons.phone`.
+`salons.phone` is not a Twilio routing source. The configured
+`voice_inbound_number` must match the Twilio `To` value. After a real call,
+Platform Technical must show `Live verified`; `Routing configured` alone is not
+live-call evidence.
 
 ## Step 6 - OpenAI Voice AI Configuration
 
@@ -456,21 +467,23 @@ When simulator passes:
 
 ## Common Failure Map
 
-`TWILIO_SIGNATURE_INVALID`
+`TWILIO_WEBHOOK_REJECTED`
 
-- Wrong Twilio auth token.
-- Public URL mismatch between Twilio request URL and backend verification URL.
-- Webhook path differs from the dashboard Twilio path.
+- Route ID, inbound `To`, Account SID, or existing CallSid belongs to a
+  different tenant.
+- Wrong tenant Auth Token or invalid signature.
+- Public scheme, host, path, or query differs from the computed callback URL.
+- Tenant route is disabled, missing, invalid, or cannot decrypt its stored
+  credential.
 
 `VOICE_PROVIDER_NOT_CONFIGURED`
 
 - Dashboard Twilio config is missing, disabled, or incomplete.
 - Dashboard Twilio auth token is empty.
 
-`We could not route this call to a salon`
-
-- Twilio `To` phone does not match `salons.phone`.
-- Dashboard salon phone is missing or wrong.
+The legacy shared route may still emit its older route/signature errors during
+the expand rollback window. Those errors and `salons.phone` checks do not apply
+to the tenant-bound production acceptance flow.
 
 `request_capture_ready: false` or `automated_booking_ready: false`
 

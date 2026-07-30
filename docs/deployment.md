@@ -527,6 +527,59 @@ configured `false`; it never returns the secret value.
 Whole-response contract tests also prohibit write-only credential, SID,
 destination, and `clear_*` request fields from appearing in serialized reads.
 
+### Twilio Voice tenant-bound expand and migration
+
+V83 is an additive expand migration. Before applying it, inspect stored Twilio
+rows without reading or printing encrypted secrets:
+
+```sql
+SELECT salon_id, id AS route_id,
+       settings->>'voice_inbound_number' AS voice_inbound_number,
+       settings->>'voice_routing_enabled' AS voice_routing_enabled
+FROM salon_integration_configs
+WHERE provider = 'twilio'
+ORDER BY salon_id;
+
+SELECT settings->>'voice_inbound_number' AS voice_inbound_number,
+       count(*) AS active_routes
+FROM salon_integration_configs
+WHERE provider = 'twilio'
+  AND enabled = true
+  AND settings->>'voice_routing_enabled' = 'true'
+GROUP BY settings->>'voice_inbound_number'
+HAVING count(*) > 1;
+```
+
+The second query must return zero rows. Invalid non-empty numbers must be fixed
+to canonical E.164 before V83; never copy `salons.phone` automatically and
+never move a number between tenants implicitly. V83 adds the active-number
+unique index, the provider-only route locator, and bounded live-verification
+indexes. Provider-wide route and legacy `CallSid` discovery is available only
+before tenant binding; once bound, callback lookup is restricted to that exact
+tenant and cannot rebind through a locator. V83 does not remove shared routes.
+
+For each tenant during operational migration:
+
+1. In Platform tenant Technical > Twilio, store the exact inbound E.164 number,
+   Account SID, Auth Token, host-only public HTTPS base, and enable tenant-bound
+   routing.
+2. Copy that tenant's computed incoming URL to the matching Twilio number.
+3. Place a real call and confirm the resulting `call_sessions.salon_id` equals
+   the intended tenant.
+4. Confirm `GET /api/platform/tenants/:tenant_id/technical/voice-routing-status`
+   reports `routing_configured=true`, `live_verified=true`, and a matching
+   `last_verified_inbound_at` for the current fingerprint.
+5. Record operator evidence before moving to the next number. `Routing
+   configured` alone is not completion evidence.
+
+If a tenant call fails during expand, restore that number's prior shared URL;
+do not change route IDs, transfer numbers, disable another tenant, or copy
+credentials. The additive schema can remain in place. A contract release may
+unmount shared routes and remove phone fallback only after every production
+tenant has current live evidence and the incident rollback window is closed.
+Until then, release notes must describe tenant-bound routing as opt-in expanded
+behavior, not a fleet-wide guarantee.
+
 The owner-notification Twilio Messaging resolver is an explicit exception to
 that legacy behavior: it resolves only the salon's stored encrypted record and
 fails closed on missing, disabled, invalid, repository, or decryption state. It

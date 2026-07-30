@@ -8,6 +8,7 @@ import {
   Bot,
   CalendarCheck,
   CheckCircle2,
+  Copy,
   ExternalLink,
   KeyRound,
   PhoneCall,
@@ -34,7 +35,8 @@ import {
   squareConfigPayload,
   squareConfigToForm,
   twilioConfigPayload,
-  twilioConfigToForm
+  twilioConfigToForm,
+  twilioVoiceRoutingState
 } from "@/lib/api/integration-config-contract";
 import type {
   IntegrationConfigProvider as ConfigTab,
@@ -61,6 +63,7 @@ import type {
   SquareReadiness,
   SyncLog,
   TwilioIntegrationConfig,
+  TwilioVoiceRoutingStatus,
   TestBookingRecord
 } from "@/types/api";
 
@@ -1157,6 +1160,8 @@ export function ProviderConfigurationPanel({
   setTwilioForm,
   squareForm,
   twilioForm,
+  voiceRoutingStatus,
+  voiceRoutingStatusError,
   onSaveOpenAI,
   onSaveSquare,
   onSaveTwilio
@@ -1171,6 +1176,8 @@ export function ProviderConfigurationPanel({
   setTwilioForm: Dispatch<SetStateAction<TwilioConfigForm>>;
   squareForm: SquareConfigForm;
   twilioForm: TwilioConfigForm;
+  voiceRoutingStatus?: TwilioVoiceRoutingStatus | null;
+  voiceRoutingStatusError?: string;
   onSaveOpenAI: () => void;
   onSaveSquare: () => void;
   onSaveTwilio: () => void;
@@ -1178,6 +1185,7 @@ export function ProviderConfigurationPanel({
   const square = configs?.square;
   const twilio = configs?.twilio;
   const openAI = configs?.openai;
+  const twilioRoutingState = twilioVoiceRoutingState(twilio, voiceRoutingStatus);
 
   return (
     <Card>
@@ -1203,8 +1211,10 @@ export function ProviderConfigurationPanel({
         />
         <ConfigStatusBlock
           label="Twilio Voice"
-          status={twilio?.configured ? "configured" : "needs_config"}
-          detail={twilio?.configured ? `Webhook signatures can be verified. Transport: ${twilio.voice_transport || "recording"}.` : "Auth token is required."}
+          status={twilioRoutingState}
+          detail={twilio?.voice_routing_configured
+            ? `Tenant-bound route is configured. Transport: ${twilio.voice_transport || "recording"}.`
+            : "Inbound number, Account SID, auth token, public HTTPS base, and routing enablement are required."}
         />
         <ConfigStatusBlock
           label="OpenAI Voice AI"
@@ -1352,6 +1362,42 @@ export function ProviderConfigurationPanel({
       {activeTab === "twilio" ? (
         <div className="mt-6 space-y-5">
           <div className="grid gap-4 md:grid-cols-2">
+            <div className="md:col-span-2 rounded-md border border-line bg-slate-50 p-4">
+              <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+                <div>
+                  <div className="text-sm font-semibold text-ink">Tenant-bound Voice routing</div>
+                  <div className="mt-1 text-xs leading-5 text-muted">
+                    Twilio reaches this salon through one immutable route ID. A signed inbound call must match this salon&apos;s Account SID and inbound number before a call session can be created.
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Badge value={twilioRoutingState} />
+                </div>
+              </div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <ReadOnlyValue label="Immutable Voice route ID" value={twilio?.voice_route_id || "Created when these settings are first saved"} />
+                <ReadOnlyValue label="Account SID hint" value={twilio?.account_sid_hint || "Not configured"} />
+                <ReadOnlyValue label="Last matching inbound webhook" value={voiceRoutingStatus?.last_verified_inbound_at ? new Date(voiceRoutingStatus.last_verified_inbound_at).toLocaleString() : "Not verified yet"} />
+                <ReadOnlyValue label="Last observed route event" value={voiceRoutingStatus?.last_observed_inbound_at ? new Date(voiceRoutingStatus.last_observed_inbound_at).toLocaleString() : "No event recorded"} />
+              </div>
+              {voiceRoutingStatus?.blockers.length ? (
+                <div className="mt-3 text-xs leading-5 text-amber-800">
+                  {voiceRoutingStatus.blockers.join(" · ")}
+                </div>
+              ) : null}
+              {voiceRoutingStatusError ? (
+                <div className="mt-3 text-xs leading-5 text-amber-800">{voiceRoutingStatusError}</div>
+              ) : null}
+            </div>
+            <label className="md:col-span-2 flex items-center gap-3 rounded-md border border-line p-3 text-sm font-medium text-ink">
+              <input
+                type="checkbox"
+                checked={twilioForm.voice_routing_enabled}
+                onChange={(event) => setTwilioForm((current) => ({ ...current, voice_routing_enabled: event.target.checked }))}
+                disabled={busy !== ""}
+              />
+              Enable tenant-bound Twilio Voice routing
+            </label>
             <Field label="Public API base URL">
               <input
                 className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
@@ -1361,6 +1407,19 @@ export function ProviderConfigurationPanel({
                 disabled={busy !== ""}
               />
             </Field>
+            <Field label="Twilio inbound number">
+              <input
+                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
+                value={twilioForm.voice_inbound_number}
+                placeholder="+13125550123"
+                onChange={(event) => setTwilioForm((current) => ({ ...current, voice_inbound_number: event.target.value }))}
+                disabled={busy !== ""}
+              />
+            </Field>
+            <Field label="Twilio account SID">
+              <input className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink" type="password" value={twilioForm.account_sid} placeholder={twilio?.account_sid_configured ? "Stored — leave blank to keep" : "AC…"} onChange={(event) => setTwilioForm((current) => ({ ...current, account_sid: event.target.value, clear_account_sid: false }))} disabled={busy !== "" || twilioForm.clear_account_sid} />
+            </Field>
+            <SecretControl checked={twilioForm.clear_account_sid} configured={Boolean(twilio?.account_sid_configured)} source={twilio?.account_sid_configured ? "database" : "none"} label="Clear stored Twilio account SID" onChange={(checked) => setTwilioForm((current) => ({ ...current, clear_account_sid: checked, account_sid: checked ? "" : current.account_sid, voice_routing_enabled: checked ? false : current.voice_routing_enabled }))} />
             <Field label="Twilio auth token">
               <input
                 className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
@@ -1376,7 +1435,7 @@ export function ProviderConfigurationPanel({
               configured={Boolean(twilio?.auth_token_configured)}
               source={twilio?.auth_token_source}
               label="Clear stored Twilio auth token"
-              onChange={(checked) => setTwilioForm((current) => ({ ...current, clear_auth_token: checked, auth_token: checked ? "" : current.auth_token }))}
+              onChange={(checked) => setTwilioForm((current) => ({ ...current, clear_auth_token: checked, auth_token: checked ? "" : current.auth_token, voice_routing_enabled: checked ? false : current.voice_routing_enabled }))}
             />
             <Field label="Voice transport">
               <select
@@ -1391,38 +1450,6 @@ export function ProviderConfigurationPanel({
                 <option value="recording">Recording fallback</option>
                 <option value="realtime_stream">Realtime stream</option>
               </select>
-            </Field>
-            <Field label="Incoming path">
-              <input
-                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
-                value={twilioForm.incoming_path}
-                onChange={(event) => setTwilioForm((current) => ({ ...current, incoming_path: event.target.value }))}
-                disabled={busy !== ""}
-              />
-            </Field>
-            <Field label="Turn path">
-              <input
-                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
-                value={twilioForm.turn_path}
-                onChange={(event) => setTwilioForm((current) => ({ ...current, turn_path: event.target.value }))}
-                disabled={busy !== ""}
-              />
-            </Field>
-            <Field label="Recording path">
-              <input
-                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
-                value={twilioForm.recording_path}
-                onChange={(event) => setTwilioForm((current) => ({ ...current, recording_path: event.target.value }))}
-                disabled={busy !== ""}
-              />
-            </Field>
-            <Field label="Stream path">
-              <input
-                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
-                value={twilioForm.stream_path}
-                onChange={(event) => setTwilioForm((current) => ({ ...current, stream_path: event.target.value }))}
-                disabled={busy !== ""}
-              />
             </Field>
             <div className="md:col-span-2 border-t border-line pt-4">
               <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start">
@@ -1445,10 +1472,6 @@ export function ProviderConfigurationPanel({
               <input className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink" value={twilioForm.owner_sms_destination} placeholder={twilio?.owner_sms_destination_masked ? `Stored ${twilio.owner_sms_destination_masked} — leave blank to keep` : "+13125550123"} onChange={(event) => setTwilioForm((current) => ({ ...current, owner_sms_destination: event.target.value, clear_owner_sms_destination: false, owner_sms_consent_attested: false }))} disabled={busy !== "" || twilioForm.clear_owner_sms_destination} />
             </Field>
             <SecretControl checked={twilioForm.clear_owner_sms_destination} configured={Boolean(twilio?.owner_sms_destination_masked)} source={twilio?.owner_sms_destination_masked ? "database" : "none"} label="Clear stored owner SMS destination" onChange={(checked) => setTwilioForm((current) => ({ ...current, clear_owner_sms_destination: checked, owner_sms_destination: "", owner_sms_enabled: checked ? false : current.owner_sms_enabled, owner_sms_consent_attested: checked ? false : current.owner_sms_consent_attested }))} />
-            <Field label="Twilio account SID">
-              <input className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink" type="password" value={twilioForm.account_sid} placeholder={twilio?.account_sid_configured ? "Stored — leave blank to keep" : "AC…"} onChange={(event) => setTwilioForm((current) => ({ ...current, account_sid: event.target.value, clear_account_sid: false }))} disabled={busy !== "" || twilioForm.clear_account_sid} />
-            </Field>
-            <SecretControl checked={twilioForm.clear_account_sid} configured={Boolean(twilio?.account_sid_configured)} source={twilio?.account_sid_configured ? "database" : "none"} label="Clear stored Twilio account SID" onChange={(checked) => setTwilioForm((current) => ({ ...current, clear_account_sid: checked, account_sid: checked ? "" : current.account_sid }))} />
             <Field label="Messaging Service SID">
               <input className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink" type="password" value={twilioForm.messaging_service_sid} placeholder={twilio?.messaging_service_configured ? "Stored — leave blank to keep" : "MG… (recommended)"} onChange={(event) => setTwilioForm((current) => ({ ...current, messaging_service_sid: event.target.value, clear_messaging_service_sid: false }))} disabled={busy !== "" || twilioForm.clear_messaging_service_sid} />
             </Field>
@@ -1465,16 +1488,16 @@ export function ProviderConfigurationPanel({
             </Field>
           </div>
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <ReadOnlyValue label="Incoming webhook" value={twilio?.inbound_webhook_url || twilioForm.incoming_path} />
-            <ReadOnlyValue label="Turn webhook" value={twilio?.turn_webhook_url || twilioForm.turn_path} />
-            <ReadOnlyValue label="Recording webhook" value={twilio?.recording_webhook_url || twilioForm.recording_path} />
-            <ReadOnlyValue label="Realtime stream" value={twilio?.stream_webhook_url || twilioForm.stream_path} />
+            <ReadOnlyValue copyable label="Incoming webhook" value={twilio?.inbound_webhook_url || twilioForm.incoming_path} />
+            <ReadOnlyValue copyable label="Turn webhook" value={twilio?.turn_webhook_url || twilioForm.turn_path} />
+            <ReadOnlyValue copyable label="Recording webhook" value={twilio?.recording_webhook_url || twilioForm.recording_path} />
+            <ReadOnlyValue copyable label="Realtime stream" value={twilio?.stream_webhook_url || twilioForm.stream_path} />
             <ReadOnlyValue label="Message status callback" value={twilio?.notification_status_url || twilioForm.notification_status_path} />
             <ReadOnlyValue label="Signed inbound callback" value={twilio?.notification_inbound_url || twilioForm.notification_inbound_path} />
           </div>
           <ConfigActions
             busy={busy === "save-twilio-config"}
-            configured={Boolean(twilio?.configured)}
+            configured={Boolean(twilio?.voice_routing_configured)}
             label="Save Twilio settings"
             onSave={onSaveTwilio}
           />
@@ -1718,10 +1741,22 @@ function SecretControl({
   );
 }
 
-function ReadOnlyValue({ label, value }: { label: string; value: string }) {
+function ReadOnlyValue({ label, value, copyable = false }: { label: string; value: string; copyable?: boolean }) {
   return (
     <div className="min-w-0 rounded-md border border-line p-3">
-      <div className="text-xs font-semibold uppercase text-muted">{label}</div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold uppercase text-muted">{label}</div>
+        {copyable && value ? (
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50"
+            onClick={() => void navigator.clipboard.writeText(value)}
+            aria-label={`Copy ${label}`}
+          >
+            <Copy className="h-3 w-3" /> Copy
+          </button>
+        ) : null}
+      </div>
       <div className="mt-2 break-all text-sm font-medium text-ink">{value || "-"}</div>
     </div>
   );
@@ -1784,6 +1819,11 @@ function emptyIntegrationConfigs(): IntegrationConfigs {
     twilio: {
       provider: "twilio",
       configured: false,
+      voice_route_id: "",
+      voice_routing_enabled: false,
+      voice_inbound_number: "",
+      voice_routing_configured: false,
+      voice_routing_blockers: ["TWILIO_VOICE_ROUTING_DISABLED"],
       public_base_url: defaultTwilioConfigForm.public_base_url,
       incoming_path: defaultTwilioConfigForm.incoming_path,
       turn_path: defaultTwilioConfigForm.turn_path,

@@ -801,12 +801,19 @@ func (f *phoneFlowVoiceStore) FindSalonByPhone(ctx context.Context, phone string
 	return f.salon, nil
 }
 
+func (f *phoneFlowVoiceStore) FindInboundSalonByID(ctx context.Context, salonID string) (*voice.InboundSalon, error) {
+	if f.salon == nil || f.salon.SalonID != salonID {
+		return nil, voice.ErrNotFound
+	}
+	return f.salon, nil
+}
+
 func (f *phoneFlowVoiceStore) FindCallRoute(ctx context.Context, provider string, providerCallID string) (*voice.CallRoute, error) {
 	session := f.conversationStore.session
 	if session.ID == "" || session.Provider != provider || session.ProviderCallID != providerCallID {
 		return nil, voice.ErrNotFound
 	}
-	return &voice.CallRoute{SalonID: session.SalonID, OwnerUserID: "owner_1", SessionID: session.ID}, nil
+	return &voice.CallRoute{SalonID: session.SalonID, OwnerUserID: "owner_1", SessionID: session.ID, FromPhone: session.InboundPhone, ToPhone: session.OutboundPhone}, nil
 }
 
 func (f *phoneFlowVoiceStore) RecordWebhookEvent(ctx context.Context, event voice.WebhookEvent) error {

@@ -6,7 +6,8 @@ import {
   platformIntegrationConfigBasePath,
   squareConfigToForm,
   twilioConfigPayload,
-  twilioConfigToForm
+  twilioConfigToForm,
+  twilioVoiceRoutingState
 } from "./integration-config-contract";
 import type {
   OpenAIIntegrationConfig,
@@ -18,6 +19,12 @@ test("Twilio preserves the canonical realtime transport and every salon-scoped c
   const config: TwilioIntegrationConfig = {
     provider: "twilio",
     configured: true,
+    voice_route_id: "11111111-1111-4111-8111-111111111111",
+    voice_routing_enabled: true,
+    voice_inbound_number: "+13125550101",
+    voice_routing_configured: true,
+    voice_routing_blockers: [],
+    account_sid_hint: "AC••••1111",
     public_base_url: "https://salon-a.example.com",
     incoming_path: "/voice/a/incoming",
     turn_path: "/voice/a/turn",
@@ -46,6 +53,9 @@ test("Twilio preserves the canonical realtime transport and every salon-scoped c
   const payload = twilioConfigPayload(form);
 
   assert.equal(form.voice_transport, "realtime_stream");
+  assert.equal(form.voice_routing_enabled, true);
+  assert.equal(payload.voice_inbound_number, "+13125550101");
+  assert.equal(payload.voice_routing_enabled, true);
   assert.equal(payload.voice_transport, "realtime_stream");
   assert.equal(payload.incoming_path, "/voice/a/incoming");
   assert.equal(payload.stream_path, "/voice/a/stream");
@@ -119,4 +129,19 @@ test("Platform configuration path encodes one exact tenant identifier", () => {
     platformIntegrationConfigBasePath("salon/a"),
     "/api/platform/tenants/salon%2Fa/technical/integration-configs"
   );
+});
+
+test("Twilio routing state does not call saved configuration live verified", () => {
+  const config = {
+    voice_routing_configured: true
+  } as TwilioIntegrationConfig;
+  assert.equal(
+    twilioVoiceRoutingState(config, { routing_configured: true, live_verified: false, verification_stale: false, blockers: [] }),
+    "routing_configured"
+  );
+  assert.equal(
+    twilioVoiceRoutingState(config, { routing_configured: true, live_verified: true, verification_stale: false, blockers: [] }),
+    "live_verified"
+  );
+  assert.equal(twilioVoiceRoutingState(config, null), "routing_configured");
 });

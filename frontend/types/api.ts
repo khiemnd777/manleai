@@ -453,6 +453,12 @@ export type SquareIntegrationConfig = {
 export type TwilioIntegrationConfig = {
   provider: "twilio" | string;
   configured: boolean;
+  voice_route_id: string;
+  voice_routing_enabled: boolean;
+  voice_inbound_number: string;
+  voice_routing_configured: boolean;
+  voice_routing_blockers: string[];
+  account_sid_hint?: string;
   public_base_url: string;
   incoming_path: string;
   turn_path: string;
@@ -479,6 +485,15 @@ export type TwilioIntegrationConfig = {
   updated_at?: string;
   version?: number;
   replayed?: boolean;
+};
+
+export type TwilioVoiceRoutingStatus = {
+  routing_configured: boolean;
+  live_verified: boolean;
+  last_verified_inbound_at?: string;
+  last_observed_inbound_at?: string;
+  verification_stale: boolean;
+  blockers: string[];
 };
 
 export type OpenAIIntegrationConfig = {

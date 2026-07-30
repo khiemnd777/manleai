@@ -248,15 +248,17 @@ func (s *Service) StartPhoneCall(ctx context.Context, salonID string, ownerUserI
 		return nil, err
 	}
 	return s.store.CreateSession(ctx, NewSessionRecord{
-		SalonID:        salonID,
-		OwnerUserID:    ownerUserID,
-		Channel:        ChannelPhone,
-		Provider:       req.Provider,
-		ProviderCallID: req.ProviderCallID,
-		InboundPhone:   req.FromPhone,
-		OutboundPhone:  req.ToPhone,
-		CustomerPhone:  req.FromPhone,
-		InitialReply:   initialPhoneReply(cfg),
+		SalonID:             salonID,
+		OwnerUserID:         ownerUserID,
+		Channel:             ChannelPhone,
+		Provider:            req.Provider,
+		ProviderCallID:      req.ProviderCallID,
+		InboundPhone:        req.FromPhone,
+		OutboundPhone:       req.ToPhone,
+		CustomerPhone:       req.FromPhone,
+		InitialReply:        initialPhoneReply(cfg),
+		VoiceRouteID:        strings.TrimSpace(req.VoiceRouteID),
+		VoiceRouteUpdatedAt: req.VoiceRouteUpdatedAt,
 	})
 }
 

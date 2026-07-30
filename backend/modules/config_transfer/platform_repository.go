@@ -586,9 +586,7 @@ func upsertPlatformSquareConfig(ctx context.Context, tx *sql.Tx, salonID string,
 
 func upsertPlatformTwilioConfig(ctx context.Context, tx *sql.Tx, salonID string, cfg integrationconfig.TwilioSettingsResponse) error {
 	settings, err := json.Marshal(map[string]string{
-		"public_base_url": cfg.PublicBaseURL, "incoming_path": cfg.IncomingPath,
-		"turn_path": cfg.TurnPath, "recording_path": cfg.RecordingPath,
-		"stream_path": cfg.StreamPath, "voice_transport": cfg.VoiceTransport,
+		"voice_transport": cfg.VoiceTransport,
 	})
 	if err != nil {
 		return err

@@ -718,14 +718,20 @@ func upsertSquareConfig(ctx context.Context, tx *sql.Tx, salonID string, cfg int
 
 func upsertTwilioConfig(ctx context.Context, tx *sql.Tx, salonID string, cfg integrationconfig.TwilioSettingsResponse) error {
 	settings := map[string]string{
-		"public_base_url": cfg.PublicBaseURL,
-		"incoming_path":   cfg.IncomingPath,
-		"turn_path":       cfg.TurnPath,
-		"recording_path":  cfg.RecordingPath,
-		"stream_path":     cfg.StreamPath,
 		"voice_transport": cfg.VoiceTransport,
 	}
-	return upsertConfigSettings(ctx, tx, salonID, "twilio", true, settings)
+	settingsJSON, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO salon_integration_configs (salon_id, provider, enabled, settings, secrets_encrypted)
+		VALUES ($1, 'twilio', false, $2::jsonb, NULL)
+		ON CONFLICT (salon_id, provider)
+		DO UPDATE SET settings = salon_integration_configs.settings || EXCLUDED.settings,
+		              updated_at = now()
+	`, salonID, string(settingsJSON))
+	return err
 }
 
 func upsertOpenAIConfig(ctx context.Context, tx *sql.Tx, salonID string, cfg integrationconfig.OpenAISettingsResponse) error {

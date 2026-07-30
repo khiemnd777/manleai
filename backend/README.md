@@ -87,6 +87,7 @@ Salon:
 - `GET /api/platform/tenants/:tenant_id/technical/integration-configs`
 - `PUT /api/platform/tenants/:tenant_id/technical/integration-configs/square`
 - `PUT /api/platform/tenants/:tenant_id/technical/integration-configs/twilio`
+- `GET /api/platform/tenants/:tenant_id/technical/voice-routing-status`
 - `PUT /api/platform/tenants/:tenant_id/technical/integration-configs/openai`
 - `GET /api/salons/:id/configuration-export`
 - `POST /api/salons/:id/configuration-import/preview`
@@ -118,12 +119,26 @@ Square integration:
 
 Twilio voice:
 
+- `POST /api/voice/twilio/:route_id/incoming`
+- `POST /api/voice/twilio/:route_id/turn`
+- `POST /api/voice/twilio/:route_id/recording`
+- `POST /api/voice/twilio/:route_id/stream/status`
+- `POST /api/voice/twilio/:route_id/stream/fallback`
+- `GET /api/voice/twilio/:route_id/stream`
+
+Expand-release rollback compatibility only:
+
 - `POST /api/voice/twilio/incoming`
 - `POST /api/voice/twilio/turn`
 - `POST /api/voice/twilio/recording`
 - `POST /api/voice/twilio/stream/status`
 - `POST /api/voice/twilio/stream/fallback`
 - `GET /api/voice/twilio/stream`
+
+New Twilio number configuration must use the tenant-bound URLs computed by the
+Platform tenant Technical tab. The shared routes remain mounted only through
+the operational migration window and do not satisfy the tenant-bound routing
+guarantee.
 
 Onboarding configuration transfer:
 

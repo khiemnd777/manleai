@@ -727,12 +727,14 @@ func planIntegrations(plan *importPlan) {
 			Field:   "square.webhook_notification_url",
 		})
 	}
-	fieldChange(plan, SectionIntegrations, "twilio.public_base_url", target.Twilio.PublicBaseURL, incoming.Twilio.PublicBaseURL)
-	fieldChange(plan, SectionIntegrations, "twilio.incoming_path", target.Twilio.IncomingPath, incoming.Twilio.IncomingPath)
-	fieldChange(plan, SectionIntegrations, "twilio.turn_path", target.Twilio.TurnPath, incoming.Twilio.TurnPath)
-	fieldChange(plan, SectionIntegrations, "twilio.recording_path", target.Twilio.RecordingPath, incoming.Twilio.RecordingPath)
-	fieldChange(plan, SectionIntegrations, "twilio.stream_path", target.Twilio.StreamPath, incoming.Twilio.StreamPath)
 	fieldChange(plan, SectionIntegrations, "twilio.voice_transport", target.Twilio.VoiceTransport, incoming.Twilio.VoiceTransport)
+	summary(plan, SectionIntegrations).Skipped++
+	plan.Warnings = append(plan.Warnings, ImportIssue{
+		Section: SectionIntegrations,
+		Code:    "twilio_voice_route_preserved",
+		Message: "Twilio Voice route identity, inbound number, public callback base, credentials, and live verification are tenant-specific and remain unchanged on the destination.",
+		Field:   "twilio.voice_route_id",
+	})
 	fieldChange(plan, SectionIntegrations, "openai.enabled", boolString(target.OpenAI.Enabled), boolString(incoming.OpenAI.Enabled))
 	fieldChange(plan, SectionIntegrations, "openai.base_url", target.OpenAI.BaseURL, incoming.OpenAI.BaseURL)
 	fieldChange(plan, SectionIntegrations, "openai.transcription_model", target.OpenAI.TranscriptionModel, incoming.OpenAI.TranscriptionModel)
@@ -1265,12 +1267,22 @@ func normalizeIntegrationConfigs(configs integrationconfig.IntegrationConfigsRes
 	configs.Square.APIBaseURL = strings.TrimRight(strings.TrimSpace(configs.Square.APIBaseURL), "/")
 	configs.Square.WebhookNotificationURL = strings.TrimSpace(configs.Square.WebhookNotificationURL)
 	configs.Twilio.Provider = integrationconfig.ProviderTwilio
-	configs.Twilio.PublicBaseURL = strings.TrimRight(strings.TrimSpace(configs.Twilio.PublicBaseURL), "/")
-	configs.Twilio.IncomingPath = defaultString(strings.TrimSpace(configs.Twilio.IncomingPath), "/api/voice/twilio/incoming")
-	configs.Twilio.TurnPath = defaultString(strings.TrimSpace(configs.Twilio.TurnPath), "/api/voice/twilio/turn")
-	configs.Twilio.RecordingPath = defaultString(strings.TrimSpace(configs.Twilio.RecordingPath), "/api/voice/twilio/recording")
-	configs.Twilio.StreamPath = defaultString(strings.TrimSpace(configs.Twilio.StreamPath), "/api/voice/twilio/stream")
 	configs.Twilio.VoiceTransport = normalizeVoiceTransport(configs.Twilio.VoiceTransport)
+	configs.Twilio.VoiceRouteID = ""
+	configs.Twilio.VoiceRoutingEnabled = false
+	configs.Twilio.VoiceInboundNumber = ""
+	configs.Twilio.VoiceRoutingConfigured = false
+	configs.Twilio.VoiceRoutingBlockers = nil
+	configs.Twilio.AccountSIDHint = ""
+	configs.Twilio.PublicBaseURL = ""
+	configs.Twilio.IncomingPath = ""
+	configs.Twilio.TurnPath = ""
+	configs.Twilio.RecordingPath = ""
+	configs.Twilio.StreamPath = ""
+	configs.Twilio.InboundWebhookURL = ""
+	configs.Twilio.TurnWebhookURL = ""
+	configs.Twilio.RecordingWebhookURL = ""
+	configs.Twilio.StreamWebhookURL = ""
 	configs.OpenAI.Provider = integrationconfig.ProviderOpenAI
 	configs.OpenAI.BaseURL = defaultString(strings.TrimRight(strings.TrimSpace(configs.OpenAI.BaseURL), "/"), "https://api.openai.com/v1")
 	configs.OpenAI.TranscriptionModel = defaultString(strings.TrimSpace(configs.OpenAI.TranscriptionModel), "gpt-4o-mini-transcribe")

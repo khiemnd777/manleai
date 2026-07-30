@@ -19,9 +19,160 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/manleai/ai-receptionist/internal/config"
+	"github.com/manleai/ai-receptionist/internal/twiliovoice"
 	"github.com/manleai/ai-receptionist/modules/conversation"
 	"github.com/manleai/ai-receptionist/modules/voice"
 )
+
+func TestTenantIncomingBindsRouteIdentityBeforeCreatingSession(t *testing.T) {
+	const routeID = "3f17f690-7de4-4b26-91b8-2763ca15489d"
+	adapter, service, store, engine := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Welcome", conversation.StatusActive, conversation.OutcomeCollecting))
+	store.route = nil
+	service.SetConfigResolver(&fakeTenantTwilioRouteResolver{route: tenantRouteConfig(routeID)})
+	app := fiber.New()
+	app.Post("/api/voice/twilio/:route_id/incoming", NewHandler(adapter, service).TenantIncoming)
+	form := url.Values{
+		"AccountSid":  {"AC00000000000000000000000000000000"},
+		"CallSid":     {"CA00000000000000000000000000000000"},
+		"From":        {"+13125550101"},
+		"To":          {"+13125550102"},
+		"FutureField": {"covered-by-signature"},
+	}
+	path := "/api/voice/twilio/" + routeID + "/incoming"
+	tenantAdapter := adapter.WithConfig(tenantRouteConfig(routeID).TwilioVoiceConfig, "https://voice.example.com")
+	res := signedTwilioRequestWithBase(t, app, tenantAdapter, http.MethodPost, "https://voice.example.com", path, form)
+	if res.StatusCode != fiber.StatusOK {
+		t.Fatalf("status=%d body=%s", res.StatusCode, readBody(t, res))
+	}
+	if engine.startCalls != 1 || engine.startRequest.VoiceRouteID != routeID ||
+		!engine.startRequest.VoiceRouteUpdatedAt.Equal(tenantRouteConfig(routeID).ConfigUpdatedAt) {
+		t.Fatalf("start request did not preserve route fence: calls=%d request=%#v", engine.startCalls, engine.startRequest)
+	}
+	events := store.eventsSnapshot()
+	if len(events) != 2 || events[1].EventType != voice.EventTwilioInboundRouteVerified {
+		t.Fatalf("events=%#v", events)
+	}
+	for _, event := range events {
+		if _, leaked := event.Payload["AccountSid"]; leaked {
+			t.Fatalf("event persisted full provider payload: %#v", event.Payload)
+		}
+	}
+}
+
+func TestTenantIncomingRejectsCrossTenantIdentityWithoutSideEffects(t *testing.T) {
+	const routeID = "3f17f690-7de4-4b26-91b8-2763ca15489d"
+	for _, test := range []struct {
+		name       string
+		accountSID string
+		to         string
+	}{
+		{name: "To belongs to another tenant", accountSID: "AC00000000000000000000000000000000", to: "+13125550999"},
+		{name: "AccountSid belongs to another tenant", accountSID: "AC11111111111111111111111111111111", to: "+13125550102"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			adapter, service, store, _ := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Welcome", conversation.StatusActive, conversation.OutcomeCollecting))
+			service.SetConfigResolver(&fakeTenantTwilioRouteResolver{route: tenantRouteConfig(routeID)})
+			app := fiber.New()
+			app.Post("/api/voice/twilio/:route_id/incoming", NewHandler(adapter, service).TenantIncoming)
+			form := url.Values{
+				"AccountSid": {test.accountSID}, "CallSid": {"CA00000000000000000000000000000000"},
+				"From": {"+13125550101"}, "To": {test.to},
+			}
+			path := "/api/voice/twilio/" + routeID + "/incoming"
+			tenantAdapter := adapter.WithConfig(tenantRouteConfig(routeID).TwilioVoiceConfig, "https://voice.example.com")
+			res := signedTwilioRequestWithBase(t, app, tenantAdapter, http.MethodPost, "https://voice.example.com", path, form)
+			if res.StatusCode != fiber.StatusForbidden {
+				t.Fatalf("status=%d body=%s", res.StatusCode, readBody(t, res))
+			}
+			if events := store.eventsSnapshot(); len(events) != 0 {
+				t.Fatalf("rejected request created events: %#v", events)
+			}
+		})
+	}
+}
+
+func TestTenantIncomingRejectsCallSidAlreadyOwnedByAnotherTenant(t *testing.T) {
+	const routeID = "3f17f690-7de4-4b26-91b8-2763ca15489d"
+	adapter, service, store, _ := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Welcome", conversation.StatusActive, conversation.OutcomeCollecting))
+	store.route.SalonID = "salon_2"
+	service.SetConfigResolver(&fakeTenantTwilioRouteResolver{route: tenantRouteConfig(routeID)})
+	app := fiber.New()
+	app.Post("/api/voice/twilio/:route_id/incoming", NewHandler(adapter, service).TenantIncoming)
+	form := url.Values{
+		"AccountSid": {"AC00000000000000000000000000000000"}, "CallSid": {"CA00000000000000000000000000000000"},
+		"From": {"+13125550101"}, "To": {"+13125550102"},
+	}
+	path := "/api/voice/twilio/" + routeID + "/incoming"
+	tenantAdapter := adapter.WithConfig(tenantRouteConfig(routeID).TwilioVoiceConfig, "https://voice.example.com")
+	res := signedTwilioRequestWithBase(t, app, tenantAdapter, http.MethodPost, "https://voice.example.com", path, form)
+	if res.StatusCode != fiber.StatusForbidden || len(store.eventsSnapshot()) != 0 {
+		t.Fatalf("status=%d events=%#v", res.StatusCode, store.eventsSnapshot())
+	}
+}
+
+func TestTenantWebhookSignatureBindsStoredHostPathAndQuery(t *testing.T) {
+	const routeID = "3f17f690-7de4-4b26-91b8-2763ca15489d"
+	for _, test := range []struct {
+		name        string
+		requestPath string
+		signingBase string
+		wantStatus  int
+	}{
+		{name: "exact query", requestPath: "/api/voice/twilio/" + routeID + "/turn?input_mode=recording", signingBase: "https://voice.example.com", wantStatus: fiber.StatusOK},
+		{name: "wrong host", requestPath: "/api/voice/twilio/" + routeID + "/turn", signingBase: "https://wrong.example.com", wantStatus: fiber.StatusForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			adapter, service, _, _ := testTwilioRuntimeWithStore(phoneSessionWithAIReply("What time works?", conversation.StatusActive, conversation.OutcomeCollecting))
+			service.SetConfigResolver(&fakeTenantTwilioRouteResolver{route: tenantRouteConfig(routeID)})
+			app := fiber.New()
+			app.Post("/api/voice/twilio/:route_id/turn", NewHandler(adapter, service).TenantTurn)
+			form := url.Values{
+				"AccountSid": {"AC00000000000000000000000000000000"}, "CallSid": {"CA123"},
+				"From": {"+13125550101"}, "To": {"+13125550102"}, "SpeechResult": {"Tomorrow afternoon."},
+			}
+			tenantAdapter := adapter.WithConfig(tenantRouteConfig(routeID).TwilioVoiceConfig, "https://voice.example.com")
+			res := signedTwilioRequestWithBase(t, app, tenantAdapter, http.MethodPost, test.signingBase, test.requestPath, form)
+			if res.StatusCode != test.wantStatus {
+				t.Fatalf("status=%d body=%s", res.StatusCode, readBody(t, res))
+			}
+		})
+	}
+}
+
+func TestTenantIncomingFailsClosedForUnknownDisabledOrUnreadableRoute(t *testing.T) {
+	const routeID = "3f17f690-7de4-4b26-91b8-2763ca15489d"
+	for _, test := range []struct {
+		name   string
+		pathID string
+		mutate func(*fakeTenantTwilioRouteResolver)
+	}{
+		{name: "malformed route id", pathID: "not-a-route"},
+		{name: "disabled route", pathID: routeID, mutate: func(resolver *fakeTenantTwilioRouteResolver) { resolver.route.RoutingEnabled = false }},
+		{name: "missing auth token", pathID: routeID, mutate: func(resolver *fakeTenantTwilioRouteResolver) { resolver.route.AuthToken = "" }},
+		{name: "decrypt failure", pathID: routeID, mutate: func(resolver *fakeTenantTwilioRouteResolver) { resolver.err = errors.New("decrypt failed") }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			adapter, service, store, _ := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Welcome", conversation.StatusActive, conversation.OutcomeCollecting))
+			resolver := &fakeTenantTwilioRouteResolver{route: tenantRouteConfig(routeID)}
+			if test.mutate != nil {
+				test.mutate(resolver)
+			}
+			service.SetConfigResolver(resolver)
+			app := fiber.New()
+			app.Post("/api/voice/twilio/:route_id/incoming", NewHandler(adapter, service).TenantIncoming)
+			form := url.Values{
+				"AccountSid": {"AC00000000000000000000000000000000"}, "CallSid": {"CA00000000000000000000000000000000"},
+				"From": {"+13125550101"}, "To": {"+13125550102"},
+			}
+			path := "/api/voice/twilio/" + test.pathID + "/incoming"
+			tenantAdapter := adapter.WithConfig(tenantRouteConfig(routeID).TwilioVoiceConfig, "https://voice.example.com")
+			res := signedTwilioRequestWithBase(t, app, tenantAdapter, http.MethodPost, "https://voice.example.com", path, form)
+			if res.StatusCode != fiber.StatusForbidden || len(store.eventsSnapshot()) != 0 {
+				t.Fatalf("status=%d events=%#v", res.StatusCode, store.eventsSnapshot())
+			}
+		})
+	}
+}
 
 func TestIncomingWebhookReturnsGatherGreeting(t *testing.T) {
 	adapter, service, _ := testTwilioRuntime(phoneSessionWithAIReply("Thank you for calling. How can I help you today?", conversation.StatusActive, conversation.OutcomeCollecting))
@@ -181,6 +332,28 @@ func TestStreamStatusWebhookRecordsRealtimeFailure(t *testing.T) {
 	}
 	if event.Payload["StreamError"] != "" || strings.Contains(fmt.Sprint(event.Payload), "Connection reset") {
 		t.Fatalf("payload leaked untrusted Twilio error detail: %#v", event.Payload)
+	}
+}
+
+func TestTenantStreamStatusUsesVerifiedCallOwnershipWhenTwilioOmitsTo(t *testing.T) {
+	const routeID = "3f17f690-7de4-4b26-91b8-2763ca15489d"
+	adapter, service, store, _ := testTwilioRuntimeWithStore(phoneSessionWithAIReply("Thank you for calling.", conversation.StatusActive, conversation.OutcomeCollecting))
+	service.SetConfigResolver(&fakeTenantTwilioRouteResolver{route: tenantRouteConfig(routeID)})
+	app := fiber.New()
+	app.Post("/api/voice/twilio/:route_id/stream/status", NewHandler(adapter, service).TenantStreamStatus)
+	form := url.Values{
+		"AccountSid": {"AC00000000000000000000000000000000"},
+		"CallSid":    {"CA123"}, "StreamSid": {"MZ123"}, "StreamEvent": {"stream-error"},
+	}
+	path := "/api/voice/twilio/" + routeID + "/stream/status"
+	tenantAdapter := adapter.WithConfig(tenantRouteConfig(routeID).TwilioVoiceConfig, "https://voice.example.com")
+	res := signedTwilioRequestWithBase(t, app, tenantAdapter, http.MethodPost, "https://voice.example.com", path, form)
+	if res.StatusCode != fiber.StatusNoContent {
+		t.Fatalf("status=%d body=%s", res.StatusCode, readBody(t, res))
+	}
+	events := store.eventsSnapshot()
+	if len(events) == 0 || events[len(events)-1].EventType != voice.EventRealtimeFailed || events[len(events)-1].SalonID != "salon_1" {
+		t.Fatalf("tenant-bound stream status events=%#v", events)
 	}
 }
 
@@ -1902,7 +2075,10 @@ func testTwilioRuntimeWithStore(messageSession *conversation.Session) (*Adapter,
 			RecordingEnabled:        true,
 			RecordingConsentMessage: "This call may be recorded to help us manage appointments and improve service.",
 		},
-		route: &voice.CallRoute{SalonID: "salon_1", OwnerUserID: "owner_1", SessionID: "session_phone"},
+		route: &voice.CallRoute{
+			SalonID: "salon_1", OwnerUserID: "owner_1", SessionID: "session_phone",
+			FromPhone: "+13125550101", ToPhone: "+13125550102",
+		},
 	}
 	engine := &fakeTwilioConversationEngine{
 		startSession:   phoneSessionWithAIReply("Thank you for calling. How can I help you today?", conversation.StatusActive, conversation.OutcomeCollecting),
@@ -1932,10 +2108,14 @@ func testTwilioApp(adapter *Adapter, service *voice.Service) *fiber.App {
 }
 
 func signedTwilioRequest(t *testing.T, app *fiber.App, adapter *Adapter, method string, path string, form url.Values) *http.Response {
+	return signedTwilioRequestWithBase(t, app, adapter, method, "http://voice.example.com", path, form)
+}
+
+func signedTwilioRequestWithBase(t *testing.T, app *fiber.App, adapter *Adapter, method, baseURL, path string, form url.Values) *http.Response {
 	t.Helper()
-	req := httptest.NewRequest(method, "http://voice.example.com"+path, strings.NewReader(form.Encode()))
+	req := httptest.NewRequest(method, baseURL+path, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("X-Twilio-Signature", adapter.ExpectedSignature("http://voice.example.com"+path, formParamsFromValues(form)))
+	req.Header.Set("X-Twilio-Signature", adapter.ExpectedSignature(baseURL+path, formParamsFromValues(form)))
 	res, err := app.Test(req, -1)
 	if err != nil {
 		t.Fatalf("app.Test: %v", err)
@@ -1983,6 +2163,41 @@ func phoneSessionWithAIReply(reply string, status string, outcome string) *conve
 	}
 }
 
+type fakeTenantTwilioRouteResolver struct {
+	route config.TwilioVoiceRouteConfig
+	err   error
+}
+
+func (f *fakeTenantTwilioRouteResolver) ResolveTwilioVoiceRoute(context.Context, string) (config.TwilioVoiceRouteConfig, error) {
+	return f.route, f.err
+}
+
+func (f *fakeTenantTwilioRouteResolver) ResolveTwilioConfig(context.Context, string) (config.TwilioVoiceConfig, string, error) {
+	return f.route.TwilioVoiceConfig, f.route.PublicBaseURL, f.err
+}
+
+func (f *fakeTenantTwilioRouteResolver) ResolveStoredTwilioAuthToken(context.Context, string) (string, error) {
+	return f.route.AuthToken, f.err
+}
+
+func (f *fakeTenantTwilioRouteResolver) ResolveOpenAIConfig(context.Context, string) (config.OpenAIVoiceConfig, bool, error) {
+	return config.OpenAIVoiceConfig{}, false, nil
+}
+
+func tenantRouteConfig(routeID string) config.TwilioVoiceRouteConfig {
+	paths := twiliovoice.CanonicalPaths(routeID)
+	return config.TwilioVoiceRouteConfig{
+		SalonID: "salon_1", PublicBaseURL: "https://voice.example.com",
+		ConfigUpdatedAt: time.Date(2026, 7, 30, 3, 4, 5, 0, time.UTC),
+		TwilioVoiceConfig: config.TwilioVoiceConfig{
+			AuthToken: "secret", AccountSID: "AC00000000000000000000000000000000",
+			RouteID: routeID, InboundNumber: "+13125550102", RoutingEnabled: true,
+			IncomingPath: paths.Incoming, TurnPath: paths.Turn, RecordingPath: paths.Recording,
+			StreamPath: paths.Stream, VoiceTransport: "recording",
+		},
+	}
+}
+
 type fakeTwilioVoiceStore struct {
 	mu     sync.Mutex
 	salon  *voice.InboundSalon
@@ -2008,6 +2223,13 @@ func (f *fakeTwilioVoiceStore) GetPhoneBookingReadiness(ctx context.Context, sal
 
 func (f *fakeTwilioVoiceStore) FindSalonByPhone(ctx context.Context, phone string) (*voice.InboundSalon, error) {
 	if f.salon == nil {
+		return nil, voice.ErrNotFound
+	}
+	return f.salon, nil
+}
+
+func (f *fakeTwilioVoiceStore) FindInboundSalonByID(ctx context.Context, salonID string) (*voice.InboundSalon, error) {
+	if f.salon == nil || f.salon.SalonID != salonID {
 		return nil, voice.ErrNotFound
 	}
 	return f.salon, nil
@@ -2058,6 +2280,8 @@ func (f *fakeTwilioVoiceStore) GetAudioOutput(ctx context.Context, id string) (*
 
 type fakeTwilioConversationEngine struct {
 	startSession     *conversation.Session
+	startRequest     conversation.StartPhoneCallRequest
+	startCalls       int
 	messageSession   *conversation.Session
 	lastMessage      string
 	messageDelay     time.Duration
@@ -2071,6 +2295,8 @@ type fakeTwilioConversationEngine struct {
 }
 
 func (f *fakeTwilioConversationEngine) StartPhoneCall(ctx context.Context, salonID string, ownerUserID string, req conversation.StartPhoneCallRequest) (*conversation.Session, error) {
+	f.startCalls++
+	f.startRequest = req
 	return f.startSession, nil
 }
 

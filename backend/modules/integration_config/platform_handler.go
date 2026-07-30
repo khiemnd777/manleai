@@ -92,6 +92,9 @@ func (h *PlatformHandler) respond(c *fiber.Ctx, value any, err error, code strin
 	if errors.Is(err, ErrActionConflict) {
 		return respond.Error(c, fiber.StatusConflict, "TECHNICAL_ACTION_CONFLICT", "This technical action key was already used for a different request.")
 	}
+	if errors.Is(err, ErrTwilioVoiceNumberConflict) {
+		return respond.Error(c, fiber.StatusConflict, "TWILIO_VOICE_NUMBER_CONFLICT", "This Voice inbound number is already assigned to another active route.")
+	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, code, "Could not complete integration configuration.")
 	}

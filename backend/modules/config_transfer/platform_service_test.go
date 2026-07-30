@@ -199,6 +199,27 @@ func TestIntegrationTransferOnlyWritesPersistedProvidersWhosePortableSettingsCha
 	}
 }
 
+func TestTwilioTransferTreatsTenantRouteIdentityAsNonPortable(t *testing.T) {
+	source := integrationconfig.IntegrationConfigsResponse{Twilio: integrationconfig.TwilioSettingsResponse{
+		VoiceRouteID: "source-route", VoiceRoutingEnabled: true, VoiceInboundNumber: "+13125550101",
+		PublicBaseURL: "https://source.example.com", IncomingPath: "/api/voice/twilio/source-route/incoming",
+		VoiceTransport: "recording",
+	}}
+	target := integrationconfig.IntegrationConfigsResponse{Twilio: integrationconfig.TwilioSettingsResponse{
+		VoiceRouteID: "target-route", VoiceRoutingEnabled: true, VoiceInboundNumber: "+13125550102",
+		PublicBaseURL: "https://target.example.com", IncomingPath: "/api/voice/twilio/target-route/incoming",
+		VoiceTransport: "recording",
+	}}
+	providers := changedIntegrationProviders(source, target, []string{integrationconfig.ProviderTwilio})
+	if len(providers) != 0 {
+		t.Fatalf("route-only changes selected providers=%v, want no portable Twilio write", providers)
+	}
+	normalized := normalizeIntegrationConfigs(source)
+	if normalized.Twilio.VoiceRouteID != "" || normalized.Twilio.VoiceInboundNumber != "" || normalized.Twilio.PublicBaseURL != "" || normalized.Twilio.IncomingPath != "" || normalized.Twilio.VoiceRoutingEnabled {
+		t.Fatalf("normalized transfer exposed tenant route identity: %#v", normalized.Twilio)
+	}
+}
+
 func TestIntegrationProviderScopeKeepsV9AbsenceAsNoOpAndV8AsCompatibilityInput(t *testing.T) {
 	v9, err := normalizeIntegrationProviders(PlatformSchemaVersion, nil)
 	if err != nil || len(v9) != 0 {

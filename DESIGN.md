@@ -457,7 +457,7 @@ consent, and callback configuration remain in Integrations.
   errors retain refresh/retry; success refreshes metrics/detail without
   implying the related scheduling request was resolved.
 
-The Twilio card in `/dashboard/integrations` owns owner-SMS setup: explicit
+The Twilio card in Platform tenant **Technical settings** owns owner-SMS setup: explicit
 enablement, E.164 owner destination, fresh consent attestation, write-only
 Account SID/Auth Token, write-only Messaging Service SID or sender, callback
 paths, and read-only computed HTTPS callback URLs. Changing the destination
@@ -465,6 +465,20 @@ requires a new attestation. The screen must label this **owner operational
 SMS** and state that customer SMS/consent is not enabled. Blank write-only
 values preserve existing secrets unless the owner explicitly selects the
 matching clear action.
+
+The same Twilio card owns **Voice routing** as a child of the provider
+integration; do not create a standalone routing page. It shows one editable
+canonical E.164 inbound number, write-only Account SID and Auth Token,
+host-only public HTTPS base, explicit routing enablement, the immutable route
+UUID, and server-computed read-only incoming/turn/recording/stream URLs. Remove
+editable Voice path controls from the primary workflow while the API retains
+them only for expand-release rollback compatibility. Status copy must keep
+`Needs setup`, `Routing configured`, and `Live verified` distinct. The live
+state includes the last current-fingerprint inbound timestamp; saving settings
+must never display connected/live language. Number conflicts, stale evidence,
+authorization errors, loading, disabled save, version conflict, and refresh
+states stay inside this card on desktop and mobile. Full tokens, signatures,
+provider bodies, and cross-tenant details are never rendered.
 
 ## Square Webhook Operations
 

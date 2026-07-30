@@ -64,6 +64,9 @@ func (h *Handler) respondMutation(c *fiber.Ctx, res any, err error, code string)
 	if errors.Is(err, ErrNotFound) {
 		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
 	}
+	if errors.Is(err, ErrTwilioVoiceNumberConflict) {
+		return respond.Error(c, fiber.StatusConflict, "TWILIO_VOICE_NUMBER_CONFLICT", "This Voice inbound number is already assigned to another active route.")
+	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, code, "Could not update integration configuration.")
 	}

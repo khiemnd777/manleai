@@ -14,18 +14,24 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/manleai/ai-receptionist/internal/twiliovoice"
 )
 
 type config struct {
-	baseURL          string
-	signatureBaseURL string
-	authToken        string
-	fromPhone        string
-	toPhone          string
-	callSID          string
-	incomingPath     string
-	turnPath         string
-	turns            []string
+	baseURL           string
+	signatureBaseURL  string
+	authToken         string
+	accountSID        string
+	routeID           string
+	legacySharedRoute bool
+	fromPhone         string
+	toPhone           string
+	callSID           string
+	incomingPath      string
+	turnPath          string
+	turns             []string
 }
 
 func main() {
@@ -37,9 +43,10 @@ func main() {
 
 	client := &http.Client{Timeout: 20 * time.Second}
 	callParams := url.Values{
-		"CallSid": {cfg.callSID},
-		"From":    {cfg.fromPhone},
-		"To":      {cfg.toPhone},
+		"AccountSid": {cfg.accountSID},
+		"CallSid":    {cfg.callSID},
+		"From":       {cfg.fromPhone},
+		"To":         {cfg.toPhone},
 	}
 	if err := postTwilioWebhook(client, cfg, "incoming call", cfg.incomingPath, callParams); err != nil {
 		fmt.Fprintf(os.Stderr, "twilio-sim: %v\n", err)
@@ -48,6 +55,7 @@ func main() {
 
 	for i, turn := range cfg.turns {
 		turnParams := url.Values{
+			"AccountSid":   {cfg.accountSID},
 			"CallSid":      {cfg.callSID},
 			"From":         {cfg.fromPhone},
 			"To":           {cfg.toPhone},
@@ -62,34 +70,50 @@ func main() {
 }
 
 func parseConfig() config {
-	defaultBaseURL := env("TWILIO_SIM_BASE_URL", env("VOICE_PUBLIC_BASE_URL", "http://localhost:18089"))
-	defaultSignatureBaseURL := env("TWILIO_SIM_SIGNATURE_BASE_URL", env("VOICE_PUBLIC_BASE_URL", defaultBaseURL))
+	defaultBaseURL := env("TWILIO_SIM_BASE_URL", "http://localhost:18089")
+	defaultSignatureBaseURL := env("TWILIO_SIM_SIGNATURE_BASE_URL", defaultBaseURL)
 	var rawTurns string
 	var repeatedTurns stringList
 
 	cfg := config{}
 	flag.StringVar(&cfg.baseURL, "base-url", defaultBaseURL, "API base URL to POST webhooks to")
 	flag.StringVar(&cfg.signatureBaseURL, "signature-base-url", defaultSignatureBaseURL, "public base URL the backend uses when verifying Twilio signatures")
-	flag.StringVar(&cfg.authToken, "auth-token", env("VOICE_TWILIO_AUTH_TOKEN", ""), "Twilio auth token used to sign webhooks")
+	flag.StringVar(&cfg.authToken, "auth-token", env("TWILIO_SIM_AUTH_TOKEN", ""), "Twilio auth token used to sign webhooks")
+	flag.StringVar(&cfg.accountSID, "account-sid", env("TWILIO_SIM_ACCOUNT_SID", ""), "tenant Twilio Account SID included in signed payloads")
+	flag.StringVar(&cfg.routeID, "route-id", env("TWILIO_SIM_ROUTE_ID", ""), "immutable tenant Voice route ID from Platform Technical")
+	flag.BoolVar(&cfg.legacySharedRoute, "legacy-shared-route", false, "explicitly exercise rollback-only shared webhook paths")
 	flag.StringVar(&cfg.fromPhone, "from", env("TWILIO_SIM_FROM", "+13125550101"), "customer caller phone number")
 	flag.StringVar(&cfg.toPhone, "to", env("TWILIO_SIM_TO", ""), "salon/Twilio phone number routed by the backend")
 	flag.StringVar(&cfg.callSID, "call-sid", env("TWILIO_SIM_CALL_SID", fmt.Sprintf("CA_LOCAL_%d", time.Now().Unix())), "Twilio CallSid for the simulated call")
-	flag.StringVar(&cfg.incomingPath, "incoming-path", env("VOICE_TWILIO_INCOMING_PATH", "/api/voice/twilio/incoming"), "incoming-call webhook path")
-	flag.StringVar(&cfg.turnPath, "turn-path", env("VOICE_TWILIO_TURN_PATH", "/api/voice/twilio/turn"), "speech-turn webhook path")
+	flag.StringVar(&cfg.incomingPath, "incoming-path", "/api/voice/twilio/incoming", "rollback-only shared incoming-call path")
+	flag.StringVar(&cfg.turnPath, "turn-path", "/api/voice/twilio/turn", "rollback-only shared speech-turn path")
 	flag.StringVar(&rawTurns, "turns", env("TWILIO_SIM_TURNS", ""), "semicolon-separated customer speech turns")
 	flag.Var(&repeatedTurns, "turn", "customer speech turn; may be repeated")
 	flag.Parse()
 
+	if !cfg.legacySharedRoute && strings.TrimSpace(cfg.routeID) != "" {
+		paths := twiliovoice.CanonicalPaths(cfg.routeID)
+		cfg.incomingPath = paths.Incoming
+		cfg.turnPath = paths.Turn
+	}
 	cfg.turns = append(splitTurns(rawTurns), repeatedTurns...)
 	return cfg
 }
 
 func (c config) validate() error {
 	if strings.TrimSpace(c.authToken) == "" {
-		return errors.New("-auth-token or VOICE_TWILIO_AUTH_TOKEN is required")
+		return errors.New("-auth-token or TWILIO_SIM_AUTH_TOKEN is required")
+	}
+	if !c.legacySharedRoute {
+		if _, err := uuid.Parse(strings.TrimSpace(c.routeID)); err != nil {
+			return errors.New("-route-id or TWILIO_SIM_ROUTE_ID must be a valid tenant Voice route UUID")
+		}
+		if !twiliovoice.ValidAccountSID(c.accountSID) {
+			return errors.New("-account-sid or TWILIO_SIM_ACCOUNT_SID must be a valid Twilio Account SID")
+		}
 	}
 	if strings.TrimSpace(c.toPhone) == "" {
-		return errors.New("-to or TWILIO_SIM_TO is required and must match the salon phone Twilio sends as To")
+		return errors.New("-to or TWILIO_SIM_TO is required and must match the tenant-bound Twilio inbound number")
 	}
 	if strings.TrimSpace(c.fromPhone) == "" {
 		return errors.New("-from or TWILIO_SIM_FROM is required")

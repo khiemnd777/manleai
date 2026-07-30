@@ -16,6 +16,7 @@ BACKEND_RACE_PACKAGES=(
   ./modules/config_transfer
   ./modules/conversation
   ./modules/customer_notification
+  ./modules/integration_config
   ./modules/notification_delivery
   ./modules/operations_health
   ./modules/pos
@@ -27,6 +28,8 @@ BACKEND_RACE_PACKAGES=(
   ./modules/scheduling_retention
   ./modules/training
   ./modules/tenant_runtime
+  ./modules/voice
+  ./modules/voice_twilio
 )
 
 POSTGRES_MIGRATION_PACKAGES=(
@@ -58,6 +61,8 @@ POSTGRES_INTEGRATION_PACKAGES=(
 )
 
 SECURITY_CONTRACT_PACKAGES=(
+  ./internal/twiliovoice
+  ./internal/twiliowebhook
   ./internal/middleware
   ./internal/ratelimit
   ./modules/access
@@ -97,6 +102,8 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/migrations/v79_integration_test.go
   backend/migrations/v80_safety_test.go
   backend/migrations/v80_integration_test.go
+  backend/migrations/v83_safety_test.go
+  backend/migrations/v83_integration_test.go
   backend/sampledata/runner_test.go
   backend/sampledata/runner_integration_test.go
   backend/cmd/worker/retention_registration_test.go
@@ -104,6 +111,8 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/internal/database/context_connector_integration_test.go
   backend/internal/database/rls_integration_test.go
   backend/internal/database/runtime_role_test.go
+  backend/internal/twiliovoice/contract_test.go
+  backend/internal/twiliowebhook/validator_test.go
   backend/internal/middleware/auth_test.go
   backend/internal/middleware/rate_limit_test.go
   backend/internal/ratelimit/redis_store_integration_test.go
@@ -131,12 +140,14 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/booking/service_test.go
   backend/modules/config_transfer/repository_integration_test.go
   backend/modules/config_transfer/platform_routes_test.go
+  backend/modules/config_transfer/repository_test.go
   backend/modules/config_transfer/platform_service_test.go
   backend/modules/conversation/manleai_calendar_party_scheduling_test.go
   backend/modules/conversation/answer_context_performance_test.go
   backend/modules/conversation/answer_context_performance_integration_test.go
   backend/modules/conversation/platform_support_routes_test.go
   backend/modules/conversation/service_test.go
+  backend/modules/conversation/repository_concurrency_integration_test.go
   backend/modules/conversation/retention_integration_test.go
   backend/modules/conversation/scheduling_result_evidence_integration_test.go
   backend/modules/conversation/scheduling_result_evidence_test.go
@@ -185,6 +196,8 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/voice/types_test.go
   backend/modules/voice/routes_test.go
   backend/modules/voice/service_test.go
+  backend/modules/voice/technical_handler_test.go
+  backend/modules/voice/twilio_route_test.go
   backend/modules/voice_openai/adapter_test.go
   backend/modules/voice_twilio/adapter_test.go
   backend/modules/voice_twilio/handler_test.go

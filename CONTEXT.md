@@ -149,6 +149,15 @@ identity for this data.
 **AI Receptionist**
 The voice agent that answers inbound calls, collects booking details, answers FAQs, and routes work to booking and handoff tools.
 
+**Tenant-bound Twilio Voice Route**
+The salon's Twilio `salon_integration_configs` UUID plus its unique active E.164
+inbound number, Account SID, stored Auth Token, and public HTTPS base. The route
+binds provider database context to exactly one tenant before any call session,
+conversation, event, or other tenant mutation. The UUID is routing identity,
+not a secret. Saved configuration is not live-call proof; `live_verified`
+requires a signed incoming webhook matching the current route fingerprint.
+`salons.phone` is business profile data and is not Voice routing authority.
+
 **AI Receptionist Tone**
 A salon-scoped speaking-style preset stored on `salon_settings.ai_tone`. It can make backend-approved replies sound warmer, more natural, younger, or more concise, but it is not a booking rule, provider credential, or free-form prompt override.
 

@@ -268,11 +268,13 @@ func IsDialogPhase(value string) bool {
 }
 
 var (
-	ErrValidation           = errors.New("conversation validation failed")
-	ErrNotFound             = errors.New("conversation record not found")
-	ErrSessionClosed        = errors.New("conversation session is closed")
-	ErrSessionStateConflict = errors.New("conversation session state changed")
-	ErrLifecycle            = errors.New("conversation lifecycle action is not allowed")
+	ErrValidation                = errors.New("conversation validation failed")
+	ErrNotFound                  = errors.New("conversation record not found")
+	ErrSessionClosed             = errors.New("conversation session is closed")
+	ErrSessionStateConflict      = errors.New("conversation session state changed")
+	ErrSessionIdentityConflict   = errors.New("conversation provider call identity conflict")
+	ErrSessionRouteFenceConflict = errors.New("conversation provider route changed")
+	ErrLifecycle                 = errors.New("conversation lifecycle action is not allowed")
 )
 
 type BookingTool interface {
@@ -680,10 +682,12 @@ type ListWebhookEventsResponse struct {
 }
 
 type StartPhoneCallRequest struct {
-	Provider       string
-	ProviderCallID string
-	FromPhone      string
-	ToPhone        string
+	Provider            string
+	ProviderCallID      string
+	FromPhone           string
+	ToPhone             string
+	VoiceRouteID        string
+	VoiceRouteUpdatedAt time.Time
 }
 
 type MessageRequest struct {
@@ -1105,17 +1109,19 @@ type WebhookEventLog struct {
 }
 
 type NewSessionRecord struct {
-	SalonID        string
-	OwnerUserID    string
-	Channel        string
-	Provider       string
-	ProviderCallID string
-	InboundPhone   string
-	OutboundPhone  string
-	CustomerName   string
-	CustomerPhone  string
-	CustomerEmail  string
-	InitialReply   string
+	SalonID             string
+	OwnerUserID         string
+	Channel             string
+	Provider            string
+	ProviderCallID      string
+	InboundPhone        string
+	OutboundPhone       string
+	CustomerName        string
+	CustomerPhone       string
+	CustomerEmail       string
+	InitialReply        string
+	VoiceRouteID        string
+	VoiceRouteUpdatedAt time.Time
 }
 
 type TurnRecord struct {

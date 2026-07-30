@@ -39,6 +39,35 @@ func TestStatusReportsPhoneBookingReadiness(t *testing.T) {
 	}
 }
 
+func TestStatusUsesTenantBoundTwilioNumberInsteadOfSalonProfilePhone(t *testing.T) {
+	store := newFakeVoiceStore()
+	store.voiceStatus.Phone = ""
+	service := newVoiceStatusService(store, testVoiceConfig(), readySchedulingTarget(booking.SchedulingAuthorityExternalProvider, 1))
+
+	status, err := service.Status(context.Background(), "salon_1", "owner_1")
+	if err != nil {
+		t.Fatalf("Status returned error: %v", err)
+	}
+	if !status.PhoneAnsweringReady || hasVoiceBlocker(status.PhoneAnswering.Blockers, "SALON_PHONE_NOT_CONFIGURED") {
+		t.Fatalf("phone answering still depends on salon profile phone: %#v", status.PhoneAnswering)
+	}
+}
+
+func TestStatusRequiresImmutableTenantVoiceRouteIdentity(t *testing.T) {
+	store := newFakeVoiceStore()
+	cfg := testVoiceConfig()
+	cfg.Twilio.RouteID = ""
+	service := newVoiceStatusService(store, cfg, readySchedulingTarget(booking.SchedulingAuthorityExternalProvider, 1))
+
+	status, err := service.Status(context.Background(), "salon_1", "owner_1")
+	if err != nil {
+		t.Fatalf("Status returned error: %v", err)
+	}
+	if status.PhoneAnsweringReady || !hasVoiceBlocker(status.PhoneAnswering.Blockers, "TWILIO_VOICE_ROUTE_ID_NOT_CONFIGURED") {
+		t.Fatalf("phone answering accepted missing tenant route: %#v", status.PhoneAnswering)
+	}
+}
+
 func TestPlatformStatusPreservesBusinessReadinessAndHidesTechnicalProviderDetails(t *testing.T) {
 	store := newFakeVoiceStore()
 	service := newVoiceStatusService(store, testVoiceConfig(), readySchedulingTarget(booking.SchedulingAuthorityExternalProvider, 1))
@@ -62,6 +91,41 @@ func TestPlatformStatusPreservesBusinessReadinessAndHidesTechnicalProviderDetail
 	}
 	if store.voiceStatusSalonID != "salon_1" || store.voiceStatusOwnerUserID != "platform_ops_1" {
 		t.Fatalf("Platform status did not preserve the actual actor: %#v", store)
+	}
+}
+
+func TestTwilioVoiceRoutingStatusSeparatesConfigurationFromLiveEvidence(t *testing.T) {
+	store := newFakeVoiceStore()
+	verifiedAt := time.Date(2026, 7, 30, 8, 15, 0, 0, time.UTC)
+	store.twilioVoiceMatchingAt = &verifiedAt
+	store.twilioVoiceObservedAt = &verifiedAt
+	service := NewService(store, newFakeConversationEngine(), testVoiceConfig(), AIProviders{})
+	service.SetConfigResolver(&recordingVoiceConfigResolver{})
+
+	status, err := service.TwilioVoiceRoutingStatus(context.Background(), "salon_1")
+	if err != nil {
+		t.Fatalf("TwilioVoiceRoutingStatus returned error: %v", err)
+	}
+	if !status.RoutingConfigured || !status.LiveVerified || status.VerificationStale || status.LastVerifiedInboundAt == nil || len(status.Blockers) != 0 {
+		t.Fatalf("routing status = %#v", status)
+	}
+}
+
+func TestTwilioVoiceRoutingStatusKeepsHistoricalObservationWhenCurrentConfigIsUnavailable(t *testing.T) {
+	store := newFakeVoiceStore()
+	observedAt := time.Date(2026, 7, 29, 8, 15, 0, 0, time.UTC)
+	store.twilioVoiceObservedAt = &observedAt
+	service := NewService(store, newFakeConversationEngine(), testVoiceConfig(), AIProviders{})
+	service.SetConfigResolver(failingVoiceConfigResolver{twilioErr: errors.New("unreadable config")})
+
+	status, err := service.TwilioVoiceRoutingStatus(context.Background(), "salon_1")
+	if err != nil {
+		t.Fatalf("TwilioVoiceRoutingStatus returned error: %v", err)
+	}
+	if status.RoutingConfigured || status.LiveVerified || status.LastVerifiedInboundAt != nil ||
+		status.LastObservedInboundAt == nil || !status.LastObservedInboundAt.Equal(observedAt) ||
+		len(status.Blockers) != 1 || status.Blockers[0] != "TWILIO_VOICE_ROUTING_NOT_CONFIGURED" {
+		t.Fatalf("unavailable routing status=%#v", status)
 	}
 }
 
@@ -103,9 +167,23 @@ type recordingVoiceConfigResolver struct {
 func (r *recordingVoiceConfigResolver) ResolveTwilioConfig(_ context.Context, salonID string) (config.TwilioVoiceConfig, string, error) {
 	r.twilioSalonIDs = append(r.twilioSalonIDs, salonID)
 	return config.TwilioVoiceConfig{
-		AuthToken: "salon-scoped-token", IncomingPath: "/api/voice/twilio/incoming",
-		TurnPath: "/api/voice/twilio/turn", RecordingPath: "/api/voice/twilio/recording",
+		AccountSID: "AC11111111111111111111111111111111", AuthToken: "salon-scoped-token",
+		RouteID: "11111111-1111-4111-8111-111111111111", InboundNumber: "+13125550102", RoutingEnabled: true,
+		IncomingPath:  "/api/voice/twilio/11111111-1111-4111-8111-111111111111/incoming",
+		TurnPath:      "/api/voice/twilio/11111111-1111-4111-8111-111111111111/turn",
+		RecordingPath: "/api/voice/twilio/11111111-1111-4111-8111-111111111111/recording",
 	}, "https://voice.example.com", nil
+}
+
+func (r *recordingVoiceConfigResolver) ResolveTwilioVoiceRoute(_ context.Context, routeID string) (config.TwilioVoiceRouteConfig, error) {
+	cfg, publicBaseURL, err := r.ResolveTwilioConfig(context.Background(), "salon_1")
+	if err != nil {
+		return config.TwilioVoiceRouteConfig{}, err
+	}
+	cfg.RouteID = routeID
+	cfg.InboundNumber = "+13125550102"
+	cfg.RoutingEnabled = true
+	return config.TwilioVoiceRouteConfig{SalonID: "salon_1", PublicBaseURL: publicBaseURL, TwilioVoiceConfig: cfg}, nil
 }
 
 func (r *recordingVoiceConfigResolver) ResolveStoredTwilioAuthToken(context.Context, string) (string, error) {
@@ -1025,10 +1103,14 @@ func testVoiceConfig() config.VoiceConfig {
 		Provider:      ProviderTwilio,
 		PublicBaseURL: "https://voice.example.com",
 		Twilio: config.TwilioVoiceConfig{
-			AuthToken:     "secret",
-			IncomingPath:  "/api/voice/twilio/incoming",
-			TurnPath:      "/api/voice/twilio/turn",
-			RecordingPath: "/api/voice/twilio/recording",
+			AccountSID:     "AC11111111111111111111111111111111",
+			AuthToken:      "secret",
+			RouteID:        "11111111-1111-4111-8111-111111111111",
+			InboundNumber:  "+13125550102",
+			RoutingEnabled: true,
+			IncomingPath:   "/api/voice/twilio/11111111-1111-4111-8111-111111111111/incoming",
+			TurnPath:       "/api/voice/twilio/11111111-1111-4111-8111-111111111111/turn",
+			RecordingPath:  "/api/voice/twilio/11111111-1111-4111-8111-111111111111/recording",
 		},
 	}
 }
@@ -1061,6 +1143,13 @@ type fakeVoiceStore struct {
 	voiceStatusSalonID     string
 	voiceStatusOwnerUserID string
 	voiceStatus            *SalonVoiceStatus
+	twilioVoiceMatchingAt  *time.Time
+	twilioVoiceObservedAt  *time.Time
+	twilioVoiceEvidenceErr error
+}
+
+func (f *fakeVoiceStore) GetTwilioVoiceVerificationEvidence(context.Context, string, string) (*time.Time, *time.Time, error) {
+	return f.twilioVoiceMatchingAt, f.twilioVoiceObservedAt, f.twilioVoiceEvidenceErr
 }
 
 func newFakeVoiceStore() *fakeVoiceStore {
@@ -1187,6 +1276,13 @@ func (f *fakeVoiceStore) GetPhoneBookingReadiness(ctx context.Context, salonID s
 
 func (f *fakeVoiceStore) FindSalonByPhone(ctx context.Context, phone string) (*InboundSalon, error) {
 	if f.salon == nil {
+		return nil, ErrNotFound
+	}
+	return f.salon, nil
+}
+
+func (f *fakeVoiceStore) FindInboundSalonByID(ctx context.Context, salonID string) (*InboundSalon, error) {
+	if f.salon == nil || f.salon.SalonID != salonID {
 		return nil, ErrNotFound
 	}
 	return f.salon, nil

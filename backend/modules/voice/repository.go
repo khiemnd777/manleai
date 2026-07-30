@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/manleai/ai-receptionist/internal/databasecontext"
@@ -335,6 +336,24 @@ func (r *Repository) FindSalonByPhone(ctx context.Context, phone string) (*Inbou
 	return &salon, nil
 }
 
+func (r *Repository) FindInboundSalonByID(ctx context.Context, salonID string) (*InboundSalon, error) {
+	var salon InboundSalon
+	err := r.db.QueryRowContext(ctx, `
+		SELECT s.id::text, s.owner_user_id::text, s.name, COALESCE(s.phone, ''),
+		       COALESCE(ss.recording_enabled, true), COALESCE(ss.recording_consent_message, '')
+		FROM salons s
+		LEFT JOIN salon_settings ss ON ss.salon_id = s.id
+		WHERE s.id = $1
+	`, strings.TrimSpace(salonID)).Scan(&salon.SalonID, &salon.OwnerUserID, &salon.SalonName, &salon.Phone, &salon.RecordingEnabled, &salon.RecordingConsentMessage)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &salon, nil
+}
+
 func incompleteReadinessMessage(complete bool, message string) string {
 	if complete {
 		return ""
@@ -343,6 +362,10 @@ func incompleteReadinessMessage(complete bool, message string) string {
 }
 
 func (r *Repository) FindCallRoute(ctx context.Context, provider string, providerCallID string) (*CallRoute, error) {
+	access := databasecontext.FromContext(ctx)
+	if access.Scope == databasecontext.ScopeProvider && strings.TrimSpace(access.SystemSalonID) != "" {
+		return r.findCallRouteForSalon(ctx, access.SystemSalonID, provider, providerCallID)
+	}
 	var locatedSalonID sql.NullString
 	if err := r.db.QueryRowContext(ctx, `SELECT public.app_provider_voice_route_salon($1, $2)::text`, provider, providerCallID).Scan(&locatedSalonID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -355,16 +378,21 @@ func (r *Repository) FindCallRoute(ctx context.Context, provider string, provide
 	}
 	salonID := locatedSalonID.String
 	boundCtx := databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, salonID)
+	return r.findCallRouteForSalon(boundCtx, salonID, provider, providerCallID)
+}
+
+func (r *Repository) findCallRouteForSalon(ctx context.Context, salonID, provider, providerCallID string) (*CallRoute, error) {
 	var route CallRoute
-	err := r.db.QueryRowContext(boundCtx, `
-		SELECT cs.salon_id::text, s.owner_user_id::text, cs.id::text
+	err := r.db.QueryRowContext(ctx, `
+		SELECT cs.salon_id::text, s.owner_user_id::text, cs.id::text,
+		       COALESCE(cs.inbound_phone, ''), COALESCE(cs.outbound_phone, '')
 		FROM call_sessions cs
 		JOIN salons s ON s.id = cs.salon_id
 		WHERE cs.salon_id = $1
 		  AND cs.provider = $2
 		  AND cs.provider_call_id = $3
 		LIMIT 1
-	`, salonID, provider, providerCallID).Scan(&route.SalonID, &route.OwnerUserID, &route.SessionID)
+	`, strings.TrimSpace(salonID), provider, providerCallID).Scan(&route.SalonID, &route.OwnerUserID, &route.SessionID, &route.FromPhone, &route.ToPhone)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -387,11 +415,38 @@ func (r *Repository) RecordWebhookEvent(ctx context.Context, event WebhookEvent)
 		INSERT INTO voice_webhook_events (
 			salon_id, call_session_id, provider, provider_call_id, event_type, payload
 		)
-		VALUES (
-			NULLIF($1, '')::uuid, NULLIF($2, '')::uuid, $3, NULLIF($4, ''), $5, $6::jsonb
-		)
+			VALUES (
+				NULLIF($1, '')::uuid, NULLIF($2, '')::uuid, $3, NULLIF($4, ''), $5, $6::jsonb
+			)
+			ON CONFLICT DO NOTHING
 	`, event.SalonID, event.CallSessionID, event.Provider, event.ProviderCallID, event.EventType, string(raw))
 	return err
+}
+
+func (r *Repository) GetTwilioVoiceVerificationEvidence(ctx context.Context, salonID, routingFingerprint string) (*time.Time, *time.Time, error) {
+	var matching, any sql.NullTime
+	err := r.db.QueryRowContext(ctx, `
+		SELECT
+			MAX(created_at) FILTER (WHERE payload->>'routing_fingerprint' = $2),
+			MAX(created_at)
+		FROM voice_webhook_events
+		WHERE salon_id = $1
+		  AND provider = 'twilio'
+		  AND event_type = 'twilio_inbound_route_verified'
+	`, strings.TrimSpace(salonID), strings.TrimSpace(routingFingerprint)).Scan(&matching, &any)
+	if err != nil {
+		return nil, nil, err
+	}
+	var matchingAt, anyAt *time.Time
+	if matching.Valid {
+		value := matching.Time.UTC()
+		matchingAt = &value
+	}
+	if any.Valid {
+		value := any.Time.UTC()
+		anyAt = &value
+	}
+	return matchingAt, anyAt, nil
 }
 
 func (r *Repository) HasTerminalRealtimeFailure(ctx context.Context, provider string, providerCallID string, sessionID string) (bool, error) {

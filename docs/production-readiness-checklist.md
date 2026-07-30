@@ -674,3 +674,31 @@ ledger rather than reusing owner-notification consent or state.
 - [x] Keep named persisted fuzzy-confirmation regression anchors: `TestFuzzyServiceGoldenRequiresExplicitConfirmationAcrossSchedulingAuthorities`, `TestFuzzyServiceConfirmationWrongStateInputsNeverBook`, and `TestFuzzyServiceConfirmationEventReplayIsIdempotent`.
 - [x] Prove the V52-V55 authority-switch slices with operation/action replay and changed-reuse conflicts, unique durable run/event evidence, owner/tenant fencing, stale source/readiness/CAS fences, dependency/readiness failure, concurrent commit and live-external-lease conflicts, explicit inverse-run audit, historical target/retry dispatch after a switch, and conversation/UI contracts that do not turn preview, blocked, conflict, or commit state into confirmed/rescheduled/cancelled appointment wording.
 - [x] Complete provider-neutral recurring-job/queue observability and owner-notification delivery without labeling internal scheduling failures as POS errors or exposing provider secrets, message IDs, full destinations, message bodies, or raw errors in owner-facing records.
+
+## Twilio Voice tenant-bound rollout
+
+- [x] Add V83 expand-only route identity, canonical active inbound-number
+  uniqueness, provider-only tenant locator, verified-route audit/fingerprint
+  indexes, and safety plus PostgreSQL integration coverage.
+- [x] Add tenant-bound incoming/turn/recording/stream/status/fallback routes;
+  bind provider tenant context before config decryption or tenant mutation;
+  require route, inbound number, Account SID, durable CallSid ownership where
+  present, and official exact-URL/all-form signature verification; return one
+  non-enumerating rejection for every mismatch.
+- [x] Make exact first-webhook retry return one durable call session and one
+  initial transcript, reject changed/cross-tenant CallSid reuse, and retain
+  only bounded routing evidence without token, signature, or provider body.
+- [x] Add Platform Technical child controls, computed read-only URLs, distinct
+  `routing_configured` and current-fingerprint `live_verified` status, route
+  blockers/conflict handling, and destination-preserving configuration
+  transfer behavior.
+- [ ] Run the documented preflight against the production migration target and
+  resolve every invalid or duplicate active E.164 value without inferring from
+  `salons.phone`.
+- [ ] Configure every production Twilio number with its exact tenant-bound URL,
+  place a live call, verify `call_sessions.salon_id`, and retain matching
+  `last_verified_inbound_at` operator evidence for every tenant.
+- [ ] After the operational migration and rollback window, ship the contract
+  release that unmounts shared Twilio Voice routes and removes Voice ingress
+  phone fallback. Do not claim the fleet-wide tenant-routing guarantee before
+  both this item and the per-tenant live-evidence item are complete.

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -140,6 +141,134 @@ func TestRepositorySessionTurnSerializationBlocksAnotherRepository(t *testing.T)
 	}
 	if err := receiveRepositorySerializationError(t, ctx, secondDone); err != nil {
 		t.Fatalf("second serializer: %v", err)
+	}
+}
+
+func TestRepositoryConcurrentPhoneSessionCreateIsIdempotentAndTenantBound(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ownerA, salonA := seedConversationConcurrencyTestData(t, ctx, db)
+	defer cleanupConversationConcurrencyTestData(t, db, ownerA, salonA)
+	ownerB, salonB := seedConversationConcurrencyTestData(t, ctx, db)
+	defer cleanupConversationConcurrencyTestData(t, db, ownerB, salonB)
+	record := NewSessionRecord{
+		SalonID: salonA, OwnerUserID: ownerA, Channel: ChannelPhone, Provider: "twilio",
+		ProviderCallID: "CA" + strings.ReplaceAll(uuid.NewString(), "-", ""),
+		InboundPhone:   "+13125550991", OutboundPhone: "+13125550199", InitialReply: "Welcome to this salon.",
+	}
+
+	results := make([]*Session, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for index := range results {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			results[index], errs[index] = NewRepository(db).CreateSession(ctx, record)
+		}(index)
+	}
+	wg.Wait()
+	for index, createErr := range errs {
+		if createErr != nil {
+			t.Fatalf("concurrent create %d: %v", index, createErr)
+		}
+	}
+	if results[0] == nil || results[1] == nil || results[0].ID != results[1].ID {
+		t.Fatalf("concurrent sessions=%#v/%#v, want one durable identity", results[0], results[1])
+	}
+	var sessionCount, greetingCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM call_sessions WHERE provider='twilio' AND provider_call_id=$1`, record.ProviderCallID).Scan(&sessionCount); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM call_transcript_messages WHERE session_id=$1 AND speaker='ai'`, results[0].ID).Scan(&greetingCount); err != nil {
+		t.Fatalf("count initial transcript: %v", err)
+	}
+	if sessionCount != 1 || greetingCount != 1 {
+		t.Fatalf("durable session/greeting counts=%d/%d, want 1/1", sessionCount, greetingCount)
+	}
+	changedIdentity := record
+	changedIdentity.InboundPhone = "+13125550992"
+	if _, err := NewRepository(db).CreateSession(ctx, changedIdentity); !errors.Is(err, ErrSessionIdentityConflict) {
+		t.Fatalf("changed-payload CallSid reuse error=%v, want identity conflict", err)
+	}
+
+	conflicting := record
+	conflicting.SalonID = salonB
+	conflicting.OwnerUserID = ownerB
+	conflicting.OutboundPhone = "+13125550198"
+	if _, err := NewRepository(db).CreateSession(ctx, conflicting); !errors.Is(err, ErrSessionIdentityConflict) {
+		t.Fatalf("cross-tenant CallSid reuse error=%v, want identity conflict", err)
+	}
+	var crossTenantCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM call_sessions WHERE salon_id=$1 AND provider_call_id=$2`, salonB, record.ProviderCallID).Scan(&crossTenantCount); err != nil {
+		t.Fatalf("count cross-tenant sessions: %v", err)
+	}
+	if crossTenantCount != 0 {
+		t.Fatalf("cross-tenant session side effects=%d, want 0", crossTenantCount)
+	}
+}
+
+func TestRepositoryPhoneSessionInsertFailsClosedWhenTwilioRouteFenceChanges(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ownerID, salonID := seedConversationConcurrencyTestData(t, ctx, db)
+	defer cleanupConversationConcurrencyTestData(t, db, ownerID, salonID)
+
+	routeID := uuid.NewString()
+	var routeUpdatedAt time.Time
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO salon_integration_configs(id,salon_id,provider,enabled,settings)
+		VALUES($1,$2,'twilio',true,'{"voice_routing_enabled":"true","voice_inbound_number":"+13125550199"}'::jsonb)
+		RETURNING updated_at
+	`, routeID, salonID).Scan(&routeUpdatedAt); err != nil {
+		t.Fatalf("insert Twilio route: %v", err)
+	}
+	record := NewSessionRecord{
+		SalonID: salonID, OwnerUserID: ownerID, Channel: ChannelPhone, Provider: "twilio",
+		ProviderCallID: "CA" + strings.ReplaceAll(uuid.NewString(), "-", ""),
+		InboundPhone:   "+13125550991", OutboundPhone: "+13125550199", InitialReply: "Welcome.",
+		VoiceRouteID: routeID, VoiceRouteUpdatedAt: routeUpdatedAt,
+	}
+	if _, err := NewRepository(db).CreateSession(ctx, record); err != nil {
+		t.Fatalf("create session with current route fence: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		UPDATE salon_integration_configs
+		SET settings=jsonb_set(settings,'{voice_routing_enabled}','"false"'::jsonb),updated_at=now()
+		WHERE id=$1
+	`, routeID); err != nil {
+		t.Fatalf("disable Twilio route: %v", err)
+	}
+	stale := record
+	stale.ProviderCallID = "CA" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err := NewRepository(db).CreateSession(ctx, stale); !errors.Is(err, ErrSessionRouteFenceConflict) {
+		t.Fatalf("stale route fence error=%v", err)
+	}
+	var staleCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM call_sessions WHERE provider_call_id=$1`, stale.ProviderCallID).Scan(&staleCount); err != nil {
+		t.Fatalf("count stale sessions: %v", err)
+	}
+	if staleCount != 0 {
+		t.Fatalf("stale route created %d sessions", staleCount)
 	}
 }
 

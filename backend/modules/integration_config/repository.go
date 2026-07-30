@@ -7,13 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/lib/pq"
 )
 
 var (
-	ErrNotFound        = errors.New("integration config not found")
-	ErrInvalidSettings = errors.New("integration config settings are invalid")
-	ErrVersionConflict = errors.New("integration config version conflict")
-	ErrActionConflict  = errors.New("integration config action conflict")
+	ErrNotFound                  = errors.New("integration config not found")
+	ErrInvalidSettings           = errors.New("integration config settings are invalid")
+	ErrVersionConflict           = errors.New("integration config version conflict")
+	ErrActionConflict            = errors.New("integration config action conflict")
+	ErrTwilioVoiceNumberConflict = errors.New("Twilio Voice inbound number conflict")
 )
 
 type TechnicalMutationCommand struct {
@@ -130,6 +133,42 @@ func (r *Repository) Get(ctx context.Context, salonID string, provider string) (
 	return scanConfig(row)
 }
 
+func (r *Repository) LocateTwilioVoiceRouteTenant(ctx context.Context, routeID string) (string, error) {
+	var salonID string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT located.salon_id::text
+		FROM (
+			SELECT public.app_provider_twilio_voice_route_salon($1::uuid) AS salon_id
+		) located
+		WHERE located.salon_id IS NOT NULL
+	`, strings.TrimSpace(routeID)).Scan(&salonID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(salonID), nil
+}
+
+func (r *Repository) GetTwilioVoiceRoute(ctx context.Context, salonID, routeID string) (*StoredConfig, error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT config.id::text, config.salon_id::text, config.provider, config.enabled, config.settings::text,
+		       COALESCE(config.secrets_encrypted, ''), config.created_at, config.updated_at,
+		       COALESCE(version.version, 0)
+		FROM salon_integration_configs config
+		LEFT JOIN technical_resource_versions version
+		  ON version.salon_id=config.salon_id AND version.resource_type='integration_config'
+		 AND version.resource_id=config.provider
+		WHERE config.id = $1
+		  AND config.salon_id = $2
+		  AND config.provider = 'twilio'
+		  AND config.enabled = true
+		  AND config.settings->>'voice_routing_enabled' = 'true'
+	`, strings.TrimSpace(routeID), strings.TrimSpace(salonID))
+	return scanConfig(row)
+}
+
 func (r *Repository) Upsert(ctx context.Context, cfg StoredConfig) (*StoredConfig, error) {
 	settingsJSON, err := json.Marshal(normalizeMap(cfg.Settings))
 	if err != nil {
@@ -146,17 +185,18 @@ func (r *Repository) Upsert(ctx context.Context, cfg StoredConfig) (*StoredConfi
 		RETURNING id::text, salon_id::text, provider, enabled, settings::text,
 		          COALESCE(secrets_encrypted, ''), created_at, updated_at, 0::bigint
 	`, cfg.SalonID, cfg.Provider, cfg.Enabled, string(settingsJSON), cfg.SecretsEncrypted)
-	return scanConfig(row)
+	item, err := scanConfig(row)
+	return item, integrationConfigPersistenceError(err)
 }
 
 func (r *Repository) UpsertControlled(ctx context.Context, cfg StoredConfig, command TechnicalMutationCommand) (*StoredConfig, bool, error) {
 	settingsJSON, err := json.Marshal(normalizeMap(cfg.Settings))
 	if err != nil {
-		return nil, false, err
+		return nil, false, integrationConfigPersistenceError(err)
 	}
 	detailsJSON, err := json.Marshal(map[string]any{"provider": cfg.Provider, "changed_fields": command.ChangedFields})
 	if err != nil {
-		return nil, false, err
+		return nil, false, integrationConfigPersistenceError(err)
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -226,7 +266,7 @@ func (r *Repository) UpsertControlled(ctx context.Context, cfg StoredConfig, com
 		          COALESCE(secrets_encrypted,''),created_at,updated_at,($6 + 1)::bigint
 	`, cfg.SalonID, cfg.Provider, cfg.Enabled, string(settingsJSON), cfg.SecretsEncrypted, currentVersion))
 	if err != nil {
-		return nil, false, err
+		return nil, false, integrationConfigPersistenceError(err)
 	}
 	item.Version = currentVersion + 1
 	if _, err := tx.ExecContext(ctx, `
@@ -260,6 +300,17 @@ func (r *Repository) UpsertControlled(ctx context.Context, cfg StoredConfig, com
 		return nil, false, err
 	}
 	return item, false, nil
+}
+
+func integrationConfigPersistenceError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var postgresError *pq.Error
+	if errors.As(err, &postgresError) && postgresError.Code == "23505" && postgresError.Constraint == "idx_twilio_voice_active_inbound_number" {
+		return ErrTwilioVoiceNumberConflict
+	}
+	return err
 }
 
 func getConfigTx(ctx context.Context, tx *sql.Tx, salonID, provider string) (*StoredConfig, error) {

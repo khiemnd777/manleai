@@ -481,12 +481,7 @@ func changedIntegrationProviders(source, target integrationconfig.IntegrationCon
 				source.Square.APIVersion != target.Square.APIVersion ||
 				source.Square.APIBaseURL != target.Square.APIBaseURL
 		case integrationconfig.ProviderTwilio:
-			changed = source.Twilio.PublicBaseURL != target.Twilio.PublicBaseURL ||
-				source.Twilio.IncomingPath != target.Twilio.IncomingPath ||
-				source.Twilio.TurnPath != target.Twilio.TurnPath ||
-				source.Twilio.RecordingPath != target.Twilio.RecordingPath ||
-				source.Twilio.StreamPath != target.Twilio.StreamPath ||
-				source.Twilio.VoiceTransport != target.Twilio.VoiceTransport
+			changed = source.Twilio.VoiceTransport != target.Twilio.VoiceTransport
 		case integrationconfig.ProviderOpenAI:
 			changed = source.OpenAI.Enabled != target.OpenAI.Enabled ||
 				source.OpenAI.BaseURL != target.OpenAI.BaseURL ||

@@ -353,25 +353,63 @@ func (r *Repository) CreateSession(ctx context.Context, record NewSessionRecord)
 	defer tx.Rollback()
 
 	var sessionID string
+	inserted := true
 	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO call_sessions (
+			INSERT INTO call_sessions (
 			salon_id, channel, provider, provider_call_id, inbound_phone, outbound_phone,
 			status, intent, outcome, customer_name, customer_phone, customer_email
 		)
-		VALUES (
-			$1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''),
-			$7, $8, $9, NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, '')
-		)
-		RETURNING id::text
-	`, record.SalonID, record.Channel, record.Provider, record.ProviderCallID, record.InboundPhone, record.OutboundPhone, StatusActive, IntentUnknown, OutcomeCollecting, record.CustomerName, record.CustomerPhone, record.CustomerEmail).Scan(&sessionID); err != nil {
-		return nil, err
+			SELECT
+				$1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), NULLIF($6, ''),
+				$7, $8, $9, NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, '')
+			WHERE NULLIF($13, '') IS NULL OR EXISTS (
+				SELECT 1
+				FROM salon_integration_configs route
+				WHERE route.id = $13::uuid
+				  AND route.salon_id = $1::uuid
+				  AND route.provider = 'twilio'
+				  AND route.enabled = true
+				  AND route.settings->>'voice_routing_enabled' = 'true'
+				  AND route.updated_at = $14
+				FOR SHARE
+			)
+			ON CONFLICT (provider, provider_call_id)
+			WHERE provider IS NOT NULL AND provider_call_id IS NOT NULL
+			DO NOTHING
+			RETURNING id::text
+		`, record.SalonID, record.Channel, record.Provider, record.ProviderCallID, record.InboundPhone, record.OutboundPhone, StatusActive, IntentUnknown, OutcomeCollecting, record.CustomerName, record.CustomerPhone, record.CustomerEmail, strings.TrimSpace(record.VoiceRouteID), record.VoiceRouteUpdatedAt).Scan(&sessionID); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) || record.Provider == "" || record.ProviderCallID == "" {
+			return nil, err
+		}
+		inserted = false
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO call_transcript_messages (session_id, salon_id, speaker, body, metadata, sequence)
-		VALUES ($1, $2, $3, $4, '{}'::jsonb, 1)
-	`, sessionID, record.SalonID, SpeakerAI, record.InitialReply); err != nil {
-		return nil, err
+	if inserted {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO call_transcript_messages (session_id, salon_id, speaker, body, metadata, sequence)
+			VALUES ($1, $2, $3, $4, '{}'::jsonb, 1)
+		`, sessionID, record.SalonID, SpeakerAI, record.InitialReply); err != nil {
+			return nil, err
+		}
+	} else {
+		var existingSalonID, inboundPhone, outboundPhone string
+		if err := tx.QueryRowContext(ctx, `
+			SELECT id::text, salon_id::text, COALESCE(inbound_phone, ''), COALESCE(outbound_phone, '')
+			FROM call_sessions
+			WHERE provider = $1 AND provider_call_id = $2
+			LIMIT 1
+		`, record.Provider, record.ProviderCallID).Scan(&sessionID, &existingSalonID, &inboundPhone, &outboundPhone); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				if strings.TrimSpace(record.VoiceRouteID) != "" {
+					return nil, ErrSessionRouteFenceConflict
+				}
+				return nil, ErrSessionIdentityConflict
+			}
+			return nil, err
+		}
+		if existingSalonID != record.SalonID || inboundPhone != record.InboundPhone || outboundPhone != record.OutboundPhone {
+			return nil, ErrSessionIdentityConflict
+		}
 	}
 
 	if err := tx.Commit(); err != nil {

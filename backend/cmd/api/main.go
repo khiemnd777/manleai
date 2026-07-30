@@ -212,6 +212,7 @@ func main() {
 	voiceService.SetTenantRuntimeLimiter(tenantRuntimeService)
 	voice.RegisterRoutes(api, voice.NewHandler(voiceService), cfg.JWTSecret)
 	voice.RegisterPlatformRoutes(api, voice.NewPlatformHandler(voiceService, accessService), cfg.JWTSecret)
+	voice.RegisterTechnicalRoutes(api, voice.NewTechnicalHandler(voiceService, accessService), cfg.JWTSecret)
 	twilioVoiceAdapter := voice_twilio.NewAdapter(cfg.Voice.Twilio, cfg.Voice.PublicBaseURL)
 	voice_twilio.RegisterRoutes(api, voice_twilio.NewHandler(twilioVoiceAdapter, voiceService))
 

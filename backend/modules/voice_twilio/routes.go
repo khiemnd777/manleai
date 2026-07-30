@@ -20,4 +20,17 @@ func RegisterRoutes(api fiber.Router, handler *Handler) {
 		}
 		return fiber.ErrUpgradeRequired
 	}, websocket.New(handler.Stream))
+
+	tenant := group.Group("/:route_id")
+	tenant.Post("/incoming", handler.TenantIncoming)
+	tenant.Post("/turn", handler.TenantTurn)
+	tenant.Post("/recording", handler.TenantRecording)
+	tenant.Post("/stream/status", handler.TenantStreamStatus)
+	tenant.Post("/stream/fallback", handler.TenantStreamFallback)
+	tenant.Get("/stream", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	}, websocket.New(handler.Stream))
 }

@@ -48,11 +48,22 @@ type VoiceConfig struct {
 
 type TwilioVoiceConfig struct {
 	AuthToken      string
+	AccountSID     string
+	RouteID        string
+	InboundNumber  string
+	RoutingEnabled bool
 	IncomingPath   string
 	TurnPath       string
 	RecordingPath  string
 	StreamPath     string
 	VoiceTransport string
+}
+
+type TwilioVoiceRouteConfig struct {
+	SalonID         string
+	PublicBaseURL   string
+	ConfigUpdatedAt time.Time
+	TwilioVoiceConfig
 }
 
 type VoiceAIConfig struct {

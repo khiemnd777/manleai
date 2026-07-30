@@ -33,13 +33,16 @@ import type {
   SquareIntegrationConfig,
   SquareReadiness,
   SyncLog,
-  TwilioIntegrationConfig
+  TwilioIntegrationConfig,
+  TwilioVoiceRoutingStatus
 } from "@/types/api";
 
 type ProviderAction = { signature: string; key: string };
 
 export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string }) {
   const [configs, setConfigs] = useState<IntegrationConfigs | null>(null);
+  const [voiceRoutingStatus, setVoiceRoutingStatus] = useState<TwilioVoiceRoutingStatus | null>(null);
+  const [voiceRoutingStatusError, setVoiceRoutingStatusError] = useState("");
   const [activeTab, setActiveTab] = useState<IntegrationConfigProvider>("square");
   const [squareForm, setSquareForm] = useState<SquareConfigForm>(() => squareConfigToForm());
   const [twilioForm, setTwilioForm] = useState<TwilioConfigForm>(() => twilioConfigToForm());
@@ -58,10 +61,23 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
     setLoading(true);
     setError("");
     setBlocked(false);
+    setVoiceRoutingStatusError("");
     try {
+      const routingStatusPromise = apiRequest<TwilioVoiceRoutingStatus>(
+          `/api/platform/tenants/${encodeURIComponent(tenantID)}/technical/voice-routing-status`
+        ).then(
+          (status) => ({ status, error: "" }),
+          (failure) => ({
+            status: null,
+            error: errorMessage(failure, "Live Twilio routing evidence is temporarily unavailable.")
+          })
+        );
       const value = await apiRequest<IntegrationConfigs>(base);
+      const routingResult = await routingStatusPromise;
       if (requestID !== loadRequestRef.current) return;
       setConfigs(value);
+      setVoiceRoutingStatus(routingResult.status);
+      setVoiceRoutingStatusError(routingResult.error);
       setSquareForm(squareConfigToForm(value.square));
       setTwilioForm(twilioConfigToForm(value.twilio));
       setOpenAIForm(openAIConfigToForm(value.openai));
@@ -73,11 +89,13 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
     } finally {
       if (requestID === loadRequestRef.current) setLoading(false);
     }
-  }, [base]);
+  }, [base, tenantID]);
 
   useEffect(() => {
     setActiveTab("square");
     setConfigs(null);
+    setVoiceRoutingStatus(null);
+    setVoiceRoutingStatusError("");
     setSquareForm(squareConfigToForm());
     setTwilioForm(twilioConfigToForm());
     setOpenAIForm(openAIConfigToForm());
@@ -136,6 +154,16 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
     if (!updated) return;
     setConfigs((current) => (current ? { ...current, twilio: updated } : current));
     setTwilioForm(twilioConfigToForm(updated));
+    try {
+      const routingStatus = await apiRequest<TwilioVoiceRoutingStatus>(
+        `/api/platform/tenants/${encodeURIComponent(tenantID)}/technical/voice-routing-status`
+      );
+      setVoiceRoutingStatus(routingStatus);
+      setVoiceRoutingStatusError("");
+    } catch (failure) {
+      setVoiceRoutingStatus(null);
+      setVoiceRoutingStatusError(errorMessage(failure, "Twilio settings were saved, but live routing evidence could not be refreshed."));
+    }
     setSuccess("Twilio voice and owner notification configuration saved. Secret values remain write-only.");
   }
 
@@ -192,6 +220,8 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
         setTwilioForm={setTwilioForm}
         squareForm={squareForm}
         twilioForm={twilioForm}
+        voiceRoutingStatus={voiceRoutingStatus}
+        voiceRoutingStatusError={voiceRoutingStatusError}
         onSaveOpenAI={() => void saveOpenAI()}
         onSaveSquare={() => void saveSquare()}
         onSaveTwilio={() => void saveTwilio()}

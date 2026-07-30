@@ -50,6 +50,8 @@ var (
 	ErrAudioUnavailable       = errors.New("voice audio is unavailable")
 	ErrProviderDisabled       = errors.New("voice provider is not configured")
 	ErrRouteNotFound          = errors.New("voice route not found")
+	ErrTwilioWebhookRejected  = errors.New("Twilio webhook rejected")
+	ErrCallIdentityConflict   = errors.New("voice call identity conflict")
 	ErrTenantQuotaExceeded    = errors.New("tenant voice quota exceeded")
 	ErrTurnModelEmptyOutput   = errors.New("turn model returned no structured output")
 	ErrTurnModelInvalidOutput = errors.New("turn model returned invalid structured output")
@@ -157,6 +159,7 @@ type Store interface {
 	GetSalonVoiceStatus(ctx context.Context, salonID string, ownerUserID string) (*SalonVoiceStatus, error)
 	GetPhoneBookingReadiness(ctx context.Context, salonID string, ownerUserID string) (*PhoneBookingReadiness, error)
 	FindSalonByPhone(ctx context.Context, phone string) (*InboundSalon, error)
+	FindInboundSalonByID(ctx context.Context, salonID string) (*InboundSalon, error)
 	FindCallRoute(ctx context.Context, provider string, providerCallID string) (*CallRoute, error)
 	RecordWebhookEvent(ctx context.Context, event WebhookEvent) error
 	HasTerminalRealtimeFailure(ctx context.Context, provider string, providerCallID string, sessionID string) (bool, error)
@@ -449,6 +452,10 @@ type ConfigResolver interface {
 	ResolveOpenAIConfig(ctx context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error)
 }
 
+type TwilioVoiceRouteConfigResolver interface {
+	ResolveTwilioVoiceRoute(ctx context.Context, routeID string) (config.TwilioVoiceRouteConfig, error)
+}
+
 type ModelRequest struct {
 	SalonID              string
 	SessionID            string
@@ -491,6 +498,8 @@ type CallRoute struct {
 	SalonID     string
 	OwnerUserID string
 	SessionID   string
+	FromPhone   string
+	ToPhone     string
 }
 
 type IncomingCallRequest struct {
@@ -499,6 +508,7 @@ type IncomingCallRequest struct {
 	FromPhone      string
 	ToPhone        string
 	Payload        map[string]string
+	verifiedRoute  *VerifiedTwilioVoiceRoute
 }
 
 type SpeechTurnRequest struct {
@@ -511,6 +521,7 @@ type SpeechTurnRequest struct {
 	AudioContentType  string
 	InputModeOverride string
 	Payload           map[string]string
+	verifiedRoute     *VerifiedTwilioVoiceRoute
 }
 
 type SpeechToTextRequest struct {
@@ -651,6 +662,15 @@ type Status struct {
 	AI                    VoiceAIStatus           `json:"ai"`
 	Booking               PhoneBookingReadiness   `json:"booking"`
 	InputMode             string                  `json:"input_mode"`
+}
+
+type TwilioVoiceRoutingStatus struct {
+	RoutingConfigured     bool       `json:"routing_configured"`
+	LiveVerified          bool       `json:"live_verified"`
+	LastVerifiedInboundAt *time.Time `json:"last_verified_inbound_at,omitempty"`
+	LastObservedInboundAt *time.Time `json:"last_observed_inbound_at,omitempty"`
+	VerificationStale     bool       `json:"verification_stale"`
+	Blockers              []string   `json:"blockers"`
 }
 
 type AIProviders struct {

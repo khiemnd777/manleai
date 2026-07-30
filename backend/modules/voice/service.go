@@ -13,6 +13,7 @@ import (
 
 	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/internal/databasecontext"
+	"github.com/manleai/ai-receptionist/internal/twiliovoice"
 	"github.com/manleai/ai-receptionist/internal/validation"
 	"github.com/manleai/ai-receptionist/modules/booking"
 	"github.com/manleai/ai-receptionist/modules/conversation"
@@ -106,7 +107,7 @@ func (s *Service) Status(ctx context.Context, salonID string, ownerUserID string
 		Booking:               *bookingReadiness,
 		InputMode:             s.inputMode(ctx, salonID),
 	}
-	status.PhoneAnswering = phoneAnsweringDimension(status.Configured, salon.Phone)
+	status.PhoneAnswering = phoneAnsweringDimension(voiceCfg)
 	status.PhoneAnsweringReady = status.PhoneAnswering.Ready
 	status.Ready = status.PhoneAnsweringReady
 	if len(status.PhoneAnswering.Blockers) > 0 {
@@ -173,18 +174,42 @@ func (s *Service) schedulingTargetReadiness(ctx context.Context, salonID string,
 	return loaded
 }
 
-func phoneAnsweringDimension(configured bool, phone string) VoiceReadinessDimension {
+func phoneAnsweringDimension(cfg config.VoiceConfig) VoiceReadinessDimension {
 	result := VoiceReadinessDimension{Ready: true, Blockers: make([]VoiceReadinessBlocker, 0)}
-	if !configured {
+	if defaultProvider(cfg.Provider) != ProviderTwilio || strings.TrimSpace(cfg.Twilio.AuthToken) == "" {
 		result.Blockers = append(result.Blockers, VoiceReadinessBlocker{
 			Code: "VOICE_PROVIDER_NOT_CONFIGURED", Scope: "voice",
 			Message: "Twilio voice provider is not configured.",
 		})
 	}
-	if strings.TrimSpace(phone) == "" {
+	if !cfg.Twilio.RoutingEnabled {
 		result.Blockers = append(result.Blockers, VoiceReadinessBlocker{
-			Code: "SALON_PHONE_NOT_CONFIGURED", Scope: "salon",
-			Message: "Salon phone is not configured.",
+			Code: "TWILIO_VOICE_ROUTING_DISABLED", Scope: "voice",
+			Message: "Enable tenant-bound Twilio voice routing.",
+		})
+	}
+	if strings.TrimSpace(cfg.Twilio.RouteID) == "" {
+		result.Blockers = append(result.Blockers, VoiceReadinessBlocker{
+			Code: "TWILIO_VOICE_ROUTE_ID_NOT_CONFIGURED", Scope: "voice",
+			Message: "Save the Twilio integration to create its immutable tenant route.",
+		})
+	}
+	if !twiliovoice.ValidE164(cfg.Twilio.InboundNumber) {
+		result.Blockers = append(result.Blockers, VoiceReadinessBlocker{
+			Code: "TWILIO_VOICE_INBOUND_NUMBER_INVALID", Scope: "voice",
+			Message: "Configure one valid tenant-bound Twilio inbound number.",
+		})
+	}
+	if !twiliovoice.ValidAccountSID(cfg.Twilio.AccountSID) {
+		result.Blockers = append(result.Blockers, VoiceReadinessBlocker{
+			Code: "TWILIO_ACCOUNT_SID_NOT_CONFIGURED", Scope: "voice",
+			Message: "Configure the Twilio account SID for this tenant route.",
+		})
+	}
+	if !twiliovoice.ValidPublicHTTPSBase(cfg.PublicBaseURL) {
+		result.Blockers = append(result.Blockers, VoiceReadinessBlocker{
+			Code: "TWILIO_PUBLIC_HTTPS_BASE_INVALID", Scope: "voice",
+			Message: "Configure a public HTTPS base URL for Twilio callbacks.",
 		})
 	}
 	result.Ready = len(result.Blockers) == 0
@@ -589,18 +614,28 @@ func (s *Service) HandleIncomingCall(ctx context.Context, req IncomingCallReques
 	if req.Provider == "" || req.ProviderCallID == "" || req.ToPhone == "" {
 		return nil, ErrValidation
 	}
-	salon, err := s.repo.FindSalonByPhone(ctx, req.ToPhone)
-	if errors.Is(err, ErrNotFound) {
-		_ = s.repo.RecordWebhookEvent(ctx, WebhookEvent{
-			Provider:       req.Provider,
-			ProviderCallID: req.ProviderCallID,
-			EventType:      EventIncomingCall,
-			Payload:        req.Payload,
-		})
-		return nil, ErrRouteNotFound
-	}
-	if err != nil {
-		return nil, err
+	var salon *InboundSalon
+	if req.verifiedRoute != nil {
+		if !validVerifiedRoute(req.verifiedRoute, TwilioEndpointIncoming, req.ProviderCallID, req.ToPhone) {
+			return nil, ErrTwilioWebhookRejected
+		}
+		verifiedSalon := req.verifiedRoute.resolved.salon
+		salon = &verifiedSalon
+	} else {
+		var err error
+		salon, err = s.repo.FindSalonByPhone(ctx, req.ToPhone)
+		if errors.Is(err, ErrNotFound) {
+			_ = s.repo.RecordWebhookEvent(ctx, WebhookEvent{
+				Provider:       req.Provider,
+				ProviderCallID: req.ProviderCallID,
+				EventType:      EventIncomingCall,
+				Payload:        req.Payload,
+			})
+			return nil, ErrRouteNotFound
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	ctx = databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, salon.SalonID)
 	voiceCfg, err := s.voiceConfig(ctx, salon.SalonID)
@@ -619,7 +654,7 @@ func (s *Service) HandleIncomingCall(ctx context.Context, req IncomingCallReques
 		}
 	}
 
-	session, err := s.getOrStartPhoneSession(ctx, salon.SalonID, salon.OwnerUserID, req.Provider, req.ProviderCallID, req.FromPhone, req.ToPhone)
+	session, err := s.getOrStartPhoneSession(ctx, salon.SalonID, salon.OwnerUserID, req.Provider, req.ProviderCallID, req.FromPhone, req.ToPhone, req.verifiedRoute)
 	if err != nil {
 		return nil, err
 	}
@@ -663,14 +698,23 @@ func (s *Service) HandleSpeechTurn(ctx context.Context, req SpeechTurnRequest) (
 	if req.Provider == "" || req.ProviderCallID == "" {
 		return nil, ErrValidation
 	}
-	route, err := s.repo.FindCallRoute(ctx, req.Provider, req.ProviderCallID)
-	if errors.Is(err, ErrNotFound) && req.ToPhone != "" {
+	var route *CallRoute
+	var err error
+	if req.verifiedRoute != nil {
+		if req.verifiedRoute.resolved == nil || req.verifiedRoute.resolved.callRoute == nil {
+			return nil, ErrTwilioWebhookRejected
+		}
+		route = req.verifiedRoute.resolved.callRoute
+	} else {
+		route, err = s.repo.FindCallRoute(ctx, req.Provider, req.ProviderCallID)
+	}
+	if req.verifiedRoute == nil && errors.Is(err, ErrNotFound) && req.ToPhone != "" {
 		salon, routeErr := s.repo.FindSalonByPhone(ctx, req.ToPhone)
 		if routeErr != nil {
 			err = routeErr
 		} else {
 			ctx = databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, salon.SalonID)
-			session, startErr := s.getOrStartPhoneSession(ctx, salon.SalonID, salon.OwnerUserID, req.Provider, req.ProviderCallID, req.FromPhone, req.ToPhone)
+			session, startErr := s.getOrStartPhoneSession(ctx, salon.SalonID, salon.OwnerUserID, req.Provider, req.ProviderCallID, req.FromPhone, req.ToPhone, nil)
 			if startErr != nil {
 				return nil, startErr
 			}
@@ -1325,21 +1369,35 @@ func (s *Service) StreamSpeech(ctx context.Context, salonID string, requestID st
 	}, onChunk)
 }
 
-func (s *Service) getOrStartPhoneSession(ctx context.Context, salonID string, ownerUserID string, provider string, providerCallID string, fromPhone string, toPhone string) (*conversation.Session, error) {
+func (s *Service) getOrStartPhoneSession(ctx context.Context, salonID string, ownerUserID string, provider string, providerCallID string, fromPhone string, toPhone string, proof *VerifiedTwilioVoiceRoute) (*conversation.Session, error) {
 	route, err := s.repo.FindCallRoute(ctx, provider, providerCallID)
 	if err == nil {
+		if route.SalonID != strings.TrimSpace(salonID) ||
+			(strings.TrimSpace(route.FromPhone) != "" && route.FromPhone != validation.NormalizePhone(fromPhone)) ||
+			(strings.TrimSpace(route.ToPhone) != "" && route.ToPhone != validation.NormalizePhone(toPhone)) {
+			return nil, ErrCallIdentityConflict
+		}
 		boundCtx := databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, route.SalonID)
 		return s.conversation.Get(boundCtx, route.SalonID, route.OwnerUserID, route.SessionID)
 	}
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return nil, err
 	}
-	return s.conversation.StartPhoneCall(ctx, salonID, ownerUserID, conversation.StartPhoneCallRequest{
+	startRequest := conversation.StartPhoneCallRequest{
 		Provider:       provider,
 		ProviderCallID: providerCallID,
 		FromPhone:      fromPhone,
 		ToPhone:        toPhone,
-	})
+	}
+	if proof != nil && proof.resolved != nil {
+		startRequest.VoiceRouteID = proof.resolved.config.RouteID
+		startRequest.VoiceRouteUpdatedAt = proof.resolved.config.ConfigUpdatedAt
+	}
+	session, err := s.conversation.StartPhoneCall(ctx, salonID, ownerUserID, startRequest)
+	if errors.Is(err, conversation.ErrSessionIdentityConflict) || errors.Is(err, conversation.ErrSessionRouteFenceConflict) {
+		return nil, ErrCallIdentityConflict
+	}
+	return session, err
 }
 
 func normalizeIncomingCall(req IncomingCallRequest) IncomingCallRequest {

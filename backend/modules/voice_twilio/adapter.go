@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/manleai/ai-receptionist/internal/config"
+	"github.com/manleai/ai-receptionist/internal/twiliowebhook"
 )
 
 type Adapter struct {
@@ -46,12 +47,7 @@ func (a *Adapter) Configured() bool {
 }
 
 func (a *Adapter) VerifyWebhook(url string, params map[string]string, signature string) bool {
-	signature = strings.TrimSpace(signature)
-	if !a.Configured() || signature == "" {
-		return false
-	}
-	expected := a.ExpectedSignature(url, params)
-	return subtle.ConstantTimeCompare([]byte(expected), []byte(signature)) == 1
+	return twiliowebhook.VerifyForm(a.cfg.AuthToken, url, params, signature)
 }
 
 func (a *Adapter) ExpectedSignature(url string, params map[string]string) string {

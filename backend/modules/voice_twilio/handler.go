@@ -19,6 +19,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
+	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/internal/respond"
 	"github.com/manleai/ai-receptionist/modules/voice"
@@ -84,25 +85,70 @@ func (h *Handler) Incoming(c *fiber.Ctx) error {
 	return h.twiml(c, h.responseForReply(c, adapter, reply))
 }
 
+func (h *Handler) TenantIncoming(c *fiber.Ctx) error {
+	params := formParams(c)
+	proof, adapter, err := h.tenantRouteProof(c, voice.TwilioEndpointIncoming, params)
+	if err != nil {
+		return h.twilioWebhookRejected(c)
+	}
+	reply, err := h.service.HandleVerifiedIncomingCall(c.UserContext(), proof, voice.IncomingCallRequest{
+		Provider: voice.ProviderTwilio, ProviderCallID: params["CallSid"],
+		FromPhone: params["From"], ToPhone: params["To"],
+	})
+	if errors.Is(err, voice.ErrTenantQuotaExceeded) {
+		return h.twiml(c, adapter.FinalResponse("The salon's automated phone line is busy right now. Please call the salon directly or try again shortly.", ""))
+	}
+	if errors.Is(err, voice.ErrTwilioWebhookRejected) || errors.Is(err, voice.ErrCallIdentityConflict) {
+		return h.twilioWebhookRejected(c)
+	}
+	if err != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "TWILIO_INCOMING_FAILED", "Could not process incoming call.")
+	}
+	return h.twiml(c, h.responseForReply(c, adapter, reply))
+}
+
 func (h *Handler) Turn(c *fiber.Ctx) error {
-	return h.handleTurn(c)
+	return h.handleTurn(c, "")
 }
 
 func (h *Handler) Recording(c *fiber.Ctx) error {
-	return h.handleTurn(c)
+	return h.handleTurn(c, "")
+}
+
+func (h *Handler) TenantTurn(c *fiber.Ctx) error {
+	return h.handleTurn(c, voice.TwilioEndpointTurn)
+}
+
+func (h *Handler) TenantRecording(c *fiber.Ctx) error {
+	return h.handleTurn(c, voice.TwilioEndpointRecording)
 }
 
 func (h *Handler) StreamStatus(c *fiber.Ctx) error {
+	return h.handleStreamStatus(c, "")
+}
+
+func (h *Handler) TenantStreamStatus(c *fiber.Ctx) error {
+	return h.handleStreamStatus(c, voice.TwilioEndpointStreamStatus)
+}
+
+func (h *Handler) handleStreamStatus(c *fiber.Ctx, endpoint string) error {
 	params := formParams(c)
-	adapter, err := h.requestAdapter(c, params)
-	if err != nil {
-		return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_PROVIDER_NOT_CONFIGURED", "Voice provider is not configured.")
-	}
-	if !adapter.Configured() {
-		return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_PROVIDER_NOT_CONFIGURED", "Voice provider is not configured.")
-	}
-	if !h.verify(c, adapter, params) {
-		return respond.Error(c, fiber.StatusForbidden, "TWILIO_SIGNATURE_INVALID", "Twilio webhook signature is invalid.")
+	var proof *voice.VerifiedTwilioVoiceRoute
+	var adapter *Adapter
+	var err error
+	if endpoint != "" {
+		proof, adapter, err = h.tenantRouteProof(c, endpoint, params)
+		if err != nil {
+			return h.twilioWebhookRejected(c)
+		}
+	} else {
+		adapter, err = h.requestAdapter(c, params)
+		if err != nil || !adapter.Configured() {
+			return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_PROVIDER_NOT_CONFIGURED", "Voice provider is not configured.")
+		}
+		if !h.verify(c, adapter, params) {
+			return respond.Error(c, fiber.StatusForbidden, "TWILIO_SIGNATURE_INVALID", "Twilio webhook signature is invalid.")
+		}
 	}
 	eventType := realtimeStatusEventType(params["StreamEvent"])
 	payload := map[string]string{"stage": "twilio_stream_status"}
@@ -116,25 +162,50 @@ func (h *Handler) StreamStatus(c *fiber.Ctx) error {
 		payload["terminal"] = "true"
 		payload["error_code"] = "TWILIO_STREAM_ERROR"
 	}
-	if err := h.service.RecordRealtimeEvent(c.UserContext(), voice.ProviderTwilio, params["CallSid"], "", eventType, payload); err != nil {
+	if proof != nil {
+		err = h.service.RecordVerifiedRealtimeEvent(c.UserContext(), proof, "", eventType, payload)
+	} else {
+		err = h.service.RecordRealtimeEvent(c.UserContext(), voice.ProviderTwilio, params["CallSid"], "", eventType, payload)
+	}
+	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "TWILIO_STREAM_STATUS_FAILED", "Could not record stream status.")
 	}
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
 func (h *Handler) StreamFallback(c *fiber.Ctx) error {
+	return h.handleStreamFallback(c, "")
+}
+
+func (h *Handler) TenantStreamFallback(c *fiber.Ctx) error {
+	return h.handleStreamFallback(c, voice.TwilioEndpointStreamFallback)
+}
+
+func (h *Handler) handleStreamFallback(c *fiber.Ctx, endpoint string) error {
 	params := formParams(c)
-	adapter, err := h.requestAdapter(c, params)
-	if err != nil {
-		return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_PROVIDER_NOT_CONFIGURED", "Voice provider is not configured.")
+	var proof *voice.VerifiedTwilioVoiceRoute
+	var adapter *Adapter
+	var err error
+	if endpoint != "" {
+		proof, adapter, err = h.tenantRouteProof(c, endpoint, params)
+		if err != nil {
+			return h.twilioWebhookRejected(c)
+		}
+	} else {
+		adapter, err = h.requestAdapter(c, params)
+		if err != nil || !adapter.Configured() {
+			return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_PROVIDER_NOT_CONFIGURED", "Voice provider is not configured.")
+		}
+		if !h.verify(c, adapter, params) {
+			return respond.Error(c, fiber.StatusForbidden, "TWILIO_SIGNATURE_INVALID", "Twilio webhook signature is invalid.")
+		}
 	}
-	if !adapter.Configured() {
-		return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_PROVIDER_NOT_CONFIGURED", "Voice provider is not configured.")
+	var message string
+	if proof != nil {
+		message, err = h.service.VerifiedRealtimeFallbackMessage(c.UserContext(), proof)
+	} else {
+		message, err = h.service.RealtimeFallbackMessage(c.UserContext(), voice.ProviderTwilio, params["CallSid"])
 	}
-	if !h.verify(c, adapter, params) {
-		return respond.Error(c, fiber.StatusForbidden, "TWILIO_SIGNATURE_INVALID", "Twilio webhook signature is invalid.")
-	}
-	message, err := h.service.RealtimeFallbackMessage(c.UserContext(), voice.ProviderTwilio, params["CallSid"])
 	if errors.Is(err, voice.ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "TWILIO_WEBHOOK_INVALID", "Twilio webhook request is invalid.")
 	}
@@ -151,17 +222,24 @@ func (h *Handler) StreamFallback(c *fiber.Ctx) error {
 	return h.twiml(c, adapter.GatherResponse(message, adapter.TurnURL(requestBaseURL(c)), ""))
 }
 
-func (h *Handler) handleTurn(c *fiber.Ctx) error {
+func (h *Handler) handleTurn(c *fiber.Ctx, endpoint string) error {
 	params := formParams(c)
-	adapter, err := h.requestAdapter(c, params)
-	if err != nil {
-		return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_PROVIDER_NOT_CONFIGURED", "Voice provider is not configured.")
-	}
-	if !adapter.Configured() {
-		return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_PROVIDER_NOT_CONFIGURED", "Voice provider is not configured.")
-	}
-	if !h.verify(c, adapter, params) {
-		return respond.Error(c, fiber.StatusForbidden, "TWILIO_SIGNATURE_INVALID", "Twilio webhook signature is invalid.")
+	var proof *voice.VerifiedTwilioVoiceRoute
+	var adapter *Adapter
+	var err error
+	if endpoint != "" {
+		proof, adapter, err = h.tenantRouteProof(c, endpoint, params)
+		if err != nil {
+			return h.twilioWebhookRejected(c)
+		}
+	} else {
+		adapter, err = h.requestAdapter(c, params)
+		if err != nil || !adapter.Configured() {
+			return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_PROVIDER_NOT_CONFIGURED", "Voice provider is not configured.")
+		}
+		if !h.verify(c, adapter, params) {
+			return respond.Error(c, fiber.StatusForbidden, "TWILIO_SIGNATURE_INVALID", "Twilio webhook signature is invalid.")
+		}
 	}
 
 	audio, audioContentType, fetchErr := h.recordingAudio(c, adapter, params)
@@ -179,7 +257,7 @@ func (h *Handler) handleTurn(c *fiber.Ctx) error {
 		runtimeParams["TwilioIdempotencyToken"] = token
 	}
 
-	reply, err := h.service.HandleSpeechTurn(c.UserContext(), voice.SpeechTurnRequest{
+	request := voice.SpeechTurnRequest{
 		Provider:          voice.ProviderTwilio,
 		ProviderCallID:    params["CallSid"],
 		FromPhone:         params["From"],
@@ -189,7 +267,13 @@ func (h *Handler) handleTurn(c *fiber.Ctx) error {
 		AudioContentType:  audioContentType,
 		InputModeOverride: inputModeOverride,
 		Payload:           runtimeParams,
-	})
+	}
+	var reply *voice.CallReply
+	if proof != nil {
+		reply, err = h.service.HandleVerifiedSpeechTurn(c.UserContext(), proof, request)
+	} else {
+		reply, err = h.service.HandleSpeechTurn(c.UserContext(), request)
+	}
 	if errors.Is(err, voice.ErrProviderDisabled) {
 		return respond.Error(c, fiber.StatusServiceUnavailable, "VOICE_PROVIDER_NOT_CONFIGURED", "Voice provider is not configured.")
 	}
@@ -203,6 +287,28 @@ func (h *Handler) handleTurn(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusInternalServerError, "TWILIO_TURN_FAILED", "Could not process voice turn.")
 	}
 	return h.twiml(c, h.responseForReply(c, adapter, reply))
+}
+
+func (h *Handler) tenantRouteProof(c *fiber.Ctx, endpoint string, params map[string]string) (*voice.VerifiedTwilioVoiceRoute, *Adapter, error) {
+	resolved, err := h.service.ResolveTwilioVoiceRoute(c.UserContext(), c.Params("route_id"), endpoint, voice.TwilioWebhookEnvelope{
+		ProviderCallID: params["CallSid"], AccountSID: params["AccountSid"],
+		FromPhone: params["From"], ToPhone: params["To"],
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	adapter := h.adapter.WithConfig(resolved.AdapterConfig(), resolved.PublicBaseURL())
+	proof, err := h.service.VerifyTwilioVoiceRoute(resolved, c.OriginalURL(), params, c.Get("X-Twilio-Signature"), func(cfg config.TwilioVoiceConfig, callbackURL string, values map[string]string, signature string) bool {
+		return h.adapter.WithConfig(cfg, resolved.PublicBaseURL()).VerifyWebhook(callbackURL, values, signature)
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return proof, adapter, nil
+}
+
+func (h *Handler) twilioWebhookRejected(c *fiber.Ctx) error {
+	return respond.Error(c, fiber.StatusForbidden, "TWILIO_WEBHOOK_REJECTED", "Twilio webhook was rejected.")
 }
 
 func (h *Handler) responseForReply(c *fiber.Ctx, adapter *Adapter, reply *voice.CallReply) string {
@@ -237,6 +343,7 @@ func (h *Handler) responseForReply(c *fiber.Ctx, adapter *Adapter, reply *voice.
 func (h *Handler) Stream(c *websocket.Conn) {
 	ctx, cancel := context.WithCancel(databasecontext.WithScope(context.Background(), databasecontext.ScopeProvider))
 	defer cancel()
+	routeID := strings.TrimSpace(c.Params("route_id"))
 
 	var writeMu sync.Mutex
 	writeJSON := func(v any) error {
@@ -304,13 +411,36 @@ func (h *Handler) Stream(c *websocket.Conn) {
 				return
 			}
 
-			adapter, err := h.streamAdapter(ctx, providerCallID)
+			var adapter *Adapter
+			var tenantResolved *voice.ResolvedTwilioVoiceRoute
+			if routeID != "" {
+				resolved, routeErr := h.service.ResolveTwilioVoiceRoute(ctx, routeID, voice.TwilioEndpointStream, voice.TwilioWebhookEnvelope{
+					ProviderCallID: providerCallID,
+					AccountSID:     msg.Start.AccountSid,
+					FromPhone:      fromPhone,
+					ToPhone:        toPhone,
+				})
+				if routeErr != nil {
+					_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "tenant_route", routeErr)
+					closeStream("stream_route_failed")
+					return
+				}
+				tenantResolved = resolved
+				adapter = h.adapter.WithConfig(resolved.AdapterConfig(), resolved.PublicBaseURL())
+			} else {
+				adapter, err = h.streamAdapter(ctx, providerCallID)
+			}
 			if err != nil || !adapter.VerifyStreamToken(providerCallID, sessionID, token) {
 				_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "stream_token", err)
 				closeStream("stream_auth_failed")
 				return
 			}
-			route, err := h.service.StreamRoute(ctx, voice.ProviderTwilio, providerCallID, sessionID)
+			var route *voice.CallRoute
+			if tenantResolved != nil {
+				route, err = h.service.StreamRouteForResolvedTwilioVoiceRoute(tenantResolved, sessionID)
+			} else {
+				route, err = h.service.StreamRoute(ctx, voice.ProviderTwilio, providerCallID, sessionID)
+			}
 			if err != nil {
 				_ = h.recordRealtimeTerminalFailure(ctx, providerCallID, sessionID, streamSID, "stream_route", err)
 				closeStream("stream_route_failed")

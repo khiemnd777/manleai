@@ -65,23 +65,36 @@ does not require an owner login for public catalog reads.
 
 The local app can run without external AI providers. To exercise voice provider readiness and recording-mode turns, configure OpenAI in the Integrations dashboard. Provider models, voices, output mode, and secrets are dashboard/database configuration and must not be placed in env files.
 
-When external STT is configured, Twilio can use `/api/voice/twilio/recording`; otherwise the existing `/api/voice/twilio/turn` speech gather path remains available. For lower latency, configure Twilio `voice_transport=realtime_stream`, OpenAI Realtime input, and `Low-latency streaming TTS` output in the Integrations dashboard.
+When external STT is configured, Twilio uses the computed tenant-bound
+`/api/voice/twilio/:route_id/recording` URL; otherwise the computed
+`/api/voice/twilio/:route_id/turn` speech gather URL remains available. For
+lower latency, configure Twilio `voice_transport=realtime_stream`, OpenAI
+Realtime input, and `Low-latency streaming TTS` output in Platform Technical.
 
 ## Simulate Twilio Phone Booking Webhooks
 
-Use the local Twilio simulator to exercise the real phone webhook path without hand-writing signed requests. The API must be running, `-auth-token` must match the salon's configured Twilio auth token, and `-to` must be the salon phone number stored for routing inbound calls.
+Use the local Twilio simulator to exercise the tenant-bound webhook path without
+hand-writing signed requests. Copy `route_id`, Account SID, inbound number, and
+the write-only Auth Token from the same salon's Platform Technical setup. The
+simulator values are explicit test inputs; it does not inspect provider env
+configuration.
 
 ```bash
 cd backend
 go run ./cmd/twilio-sim \
-  -auth-token "$VOICE_TWILIO_AUTH_TOKEN" \
+  -route-id "<voice-route-uuid>" \
+  -account-sid "AC0123456789abcdef0123456789abcdef" \
+  -auth-token "<tenant-auth-token>" \
+  -signature-base-url "https://<configured-public-api-host>" \
   -to "+16292536211" \
   -turn "I need a classic manicure tomorrow." \
   -turn "The first one works. My name is Linh Tran and my phone is 312-555-0199."
 ```
 
-The simulator posts to `/api/voice/twilio/incoming`, then posts each customer
-utterance to `/api/voice/twilio/turn` with a valid `X-Twilio-Signature`. The
+The simulator derives `/api/voice/twilio/:route_id/incoming` and
+`/api/voice/twilio/:route_id/turn`, includes `AccountSid`, and signs the exact
+configured public URL plus all form values. `-legacy-shared-route` is an
+explicit expand-release rollback check only. The
 seeded exercise is a Square-backed `external_provider` call: AI greeting,
 availability lookup inside valid booking hours, slot negotiation, and Square-
 backed external confirmation. It confirms only after Square Appointments

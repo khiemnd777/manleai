@@ -1763,16 +1763,20 @@ schema v6 and later preserve the explicit value subject to profile readiness.
     "twilio": {
       "provider": "twilio",
       "configured": true,
-      "public_base_url": "https://api.example.com",
-      "incoming_path": "/api/voice/twilio/incoming",
-      "turn_path": "/api/voice/twilio/turn",
-      "recording_path": "/api/voice/twilio/recording",
-      "stream_path": "/api/voice/twilio/stream",
+      "voice_routing_enabled": false,
+      "voice_inbound_number": "",
+      "voice_routing_configured": false,
+      "voice_routing_blockers": [],
+      "public_base_url": "",
+      "incoming_path": "",
+      "turn_path": "",
+      "recording_path": "",
+      "stream_path": "",
       "voice_transport": "realtime_stream",
-      "inbound_webhook_url": "https://api.example.com/api/voice/twilio/incoming",
-      "turn_webhook_url": "https://api.example.com/api/voice/twilio/turn",
-      "recording_webhook_url": "https://api.example.com/api/voice/twilio/recording",
-      "stream_webhook_url": "wss://api.example.com/api/voice/twilio/stream",
+      "inbound_webhook_url": "",
+      "turn_webhook_url": "",
+      "recording_webhook_url": "",
+      "stream_webhook_url": "",
       "auth_token_configured": true,
       "auth_token_source": "database"
     },
@@ -2044,25 +2048,28 @@ Technical-scoped. Tenant memberships alone cannot read or write them.
 Secret values are write-only: responses only expose whether a secret is
 configured and whether it came from dashboard storage or the exact-missing
 legacy bootstrap fallback. `salon_integration_configs` is authoritative whenever
-a salon/provider row exists. The Square, Twilio, and OpenAI runtime resolvers may
-read legacy environment/bootstrap configuration only after an exact repository
-`ErrNotFound`; repository failures, malformed/non-string persisted settings, and
-secret decryption failures stop runtime resolution. A stored disabled provider
-or stored row with missing required credentials never inherits environment
-enabled state or secrets.
+a salon/provider row exists. Only Square retains that exact-missing compatibility
+bootstrap after an exact repository `ErrNotFound`; repository failures,
+malformed/non-string persisted settings, and secret decryption failures stop
+runtime resolution. A stored disabled provider or stored row with missing
+required credentials never inherits environment enabled state or secrets. Twilio and
+OpenAI runtime resolution and authenticated reads are database-only and never
+inherit provider settings or secrets from environment configuration.
 
-For a provider with no stored row, a response may expose secret source
-`environment` without exposing the secret. For a stored row whose secret is
-empty or unreadable, source is `none`, the matching configured flag is false,
-and environment credentials are not reported as active. Invalid persisted
-settings make this authenticated read fail safely instead of returning an empty
-settings map.
+For Square with no stored row, a response may expose secret source
+`environment` without exposing the secret. Missing Twilio/OpenAI rows return
+database-owned unconfigured state. For a stored row whose secret is empty or
+unreadable, source is `none`, the matching configured flag is false, and
+environment credentials are not reported as active. Invalid persisted settings
+make this authenticated read fail safely instead of returning an empty settings
+map.
 
 The complete serialized response omits every write-only credential and control
-field, including Square client/webhook secrets, Twilio auth/Account/Messaging
-Service/sender/destination values, OpenAI API keys, and their `clear_*` request
-controls. Configured/source booleans and the explicitly masked owner SMS
-destination are the only secret-state evidence returned.
+field, including Square client/webhook secrets, Twilio Auth Token, full
+Account/Messaging Service/sender/destination values, OpenAI API keys, and their
+`clear_*` request controls. Configured/source booleans, the masked Account SID
+hint, and the explicitly masked owner SMS destination are the only bounded
+secret-state evidence returned.
 
 `GET /api/platform/tenants/:tenant_id/technical/integration-configs`
 
@@ -2085,16 +2092,22 @@ destination are the only secret-state evidence returned.
   "twilio": {
     "provider": "twilio",
     "configured": true,
+    "voice_route_id": "3f17f690-7de4-4b26-91b8-2763ca15489d",
+    "voice_routing_enabled": true,
+    "voice_inbound_number": "+13125550123",
+    "voice_routing_configured": true,
+    "voice_routing_blockers": [],
+    "account_sid_hint": "AC••••cdef",
     "public_base_url": "https://api.example.com",
-    "incoming_path": "/api/voice/twilio/incoming",
-    "turn_path": "/api/voice/twilio/turn",
-    "recording_path": "/api/voice/twilio/recording",
-    "stream_path": "/api/voice/twilio/stream",
+    "incoming_path": "/api/voice/twilio/3f17f690-7de4-4b26-91b8-2763ca15489d/incoming",
+    "turn_path": "/api/voice/twilio/3f17f690-7de4-4b26-91b8-2763ca15489d/turn",
+    "recording_path": "/api/voice/twilio/3f17f690-7de4-4b26-91b8-2763ca15489d/recording",
+    "stream_path": "/api/voice/twilio/3f17f690-7de4-4b26-91b8-2763ca15489d/stream",
     "voice_transport": "realtime_stream",
-    "inbound_webhook_url": "https://api.example.com/api/voice/twilio/incoming",
-    "turn_webhook_url": "https://api.example.com/api/voice/twilio/turn",
-    "recording_webhook_url": "https://api.example.com/api/voice/twilio/recording",
-    "stream_webhook_url": "wss://api.example.com/api/voice/twilio/stream",
+    "inbound_webhook_url": "https://api.example.com/api/voice/twilio/3f17f690-7de4-4b26-91b8-2763ca15489d/incoming",
+    "turn_webhook_url": "https://api.example.com/api/voice/twilio/3f17f690-7de4-4b26-91b8-2763ca15489d/turn",
+    "recording_webhook_url": "https://api.example.com/api/voice/twilio/3f17f690-7de4-4b26-91b8-2763ca15489d/recording",
+    "stream_webhook_url": "wss://api.example.com/api/voice/twilio/3f17f690-7de4-4b26-91b8-2763ca15489d/stream",
     "auth_token_configured": true,
     "auth_token_source": "database",
     "owner_sms_enabled": true,
@@ -2159,6 +2172,8 @@ exports a webhook signature key; that key must be re-entered at the target.
 ```json
 {
   "public_base_url": "https://api.example.com",
+  "voice_inbound_number": "+13125550123",
+  "voice_routing_enabled": true,
   "auth_token": "new-token-or-empty-to-keep-existing",
   "clear_auth_token": false,
   "incoming_path": "/api/voice/twilio/incoming",
@@ -2180,6 +2195,35 @@ exports a webhook signature key; that key must be re-entered at the target.
   "notification_inbound_path": "/api/notifications/twilio/inbound"
 }
 ```
+
+The four legacy path fields remain accepted during the expand-release rollback
+window, but the tenant-bound URLs returned by the API are computed from the
+immutable Twilio integration-row UUID and cannot be edited. Enabling Voice
+routing requires a canonical E.164 inbound number, valid Account SID, stored
+Auth Token, and host-only public HTTPS base. A database partial unique index
+prevents the same active inbound number from being enabled for two tenants.
+Configuration transfer excludes route ID, inbound number, public callback
+base, routing enablement, computed URLs, credentials, and live verification;
+only `voice_transport` is portable.
+
+`GET /api/platform/tenants/:tenant_id/technical/voice-routing-status`
+
+Requires Platform `technical.read` for the exact tenant and returns separate
+configuration and live-call evidence:
+
+```json
+{
+  "routing_configured": true,
+  "live_verified": true,
+  "last_verified_inbound_at": "2026-07-30T08:15:00Z",
+  "last_observed_inbound_at": "2026-07-30T08:15:00Z",
+  "verification_stale": false,
+  "blockers": []
+}
+```
+
+`live_verified=true` means an incoming tenant-bound webhook was accepted with
+the current route fingerprint. It is not inferred from saved configuration.
 
 Owner operational SMS is an additive Twilio use case. Enabling it requires an
 explicit E.164 owner destination and consent attestation for that exact
@@ -3751,10 +3795,10 @@ not a prerequisite for `owner_manual` or `manleai_calendar`.
   "provider": "twilio",
   "configured": true,
   "signature_verification": true,
-  "inbound_webhook_url": "https://api.example.com/api/voice/twilio/incoming",
-  "turn_webhook_url": "https://api.example.com/api/voice/twilio/turn",
-  "recording_webhook_url": "https://api.example.com/api/voice/twilio/recording",
-  "stream_webhook_url": "wss://api.example.com/api/voice/twilio/stream",
+  "inbound_webhook_url": "https://api.example.com/api/voice/twilio/3f17f690-7de4-4b26-91b8-2763ca15489d/incoming",
+  "turn_webhook_url": "https://api.example.com/api/voice/twilio/3f17f690-7de4-4b26-91b8-2763ca15489d/turn",
+  "recording_webhook_url": "https://api.example.com/api/voice/twilio/3f17f690-7de4-4b26-91b8-2763ca15489d/recording",
+  "stream_webhook_url": "wss://api.example.com/api/voice/twilio/3f17f690-7de4-4b26-91b8-2763ca15489d/stream",
   "salon_phone": "+16292536211",
   "ready": true,
   "phone_answering_ready": true,
@@ -4141,19 +4185,34 @@ No live canary is run by repository tests or corpus generation. Failure
 ownership and the prompt-change gate are documented in
 `docs/operations/conversation-semantic-quality.md`.
 
-`POST /api/voice/twilio/incoming`
+`POST /api/voice/twilio/:route_id/incoming`
 
-Public Twilio Programmable Voice webhook for a new inbound call. Requires a valid `X-Twilio-Signature` generated with the salon's configured Twilio auth token. The webhook matches Twilio `To` to the salon phone, creates or reuses a `phone` conversation session, records a `voice_webhook_events` audit row, and returns TwiML for the configured input mode: speech `<Gather>`, recording mode, or `<Connect><Stream>` when realtime streaming is enabled and ready.
+Public tenant-bound webhook for a new inbound call. The opaque `route_id`
+locates only an enabled Twilio integration row and returns only its tenant ID;
+the request then binds provider database context to that tenant, reloads the
+exact row under RLS, and verifies `To`, `AccountSid`, existing CallSid identity,
+and the official Twilio signature over the exact stored public URL and every
+form parameter. Only the resulting server-owned verified route proof may create
+or exactly reuse a phone session. All lookup, identity, config, decrypt, and
+signature failures return the same `403 TWILIO_WEBHOOK_REJECTED` with no
+tenant-scoped side effect.
 
 Expected Twilio form fields include:
 
 ```txt
 CallSid
+AccountSid
 From
 To
 ```
 
-`POST /api/voice/twilio/turn`
+The shared `/api/voice/twilio/incoming|turn|recording|stream*` routes remain
+mounted only for expand-release migration and rollback. They still use the
+legacy phone-routing path and therefore are not evidence of the tenant-bound
+guarantee. A later contract migration removes them only after every live
+tenant has a matching verified inbound event.
+
+`POST /api/voice/twilio/:route_id/turn`
 
 Public Twilio Programmable Voice webhook for gathered speech turns. Requires a valid `X-Twilio-Signature`. The webhook finds the `phone` session by `CallSid`, appends the customer speech to the transcript, and returns TwiML. The response continues gathering only while the session remains active. Completed, fallback, and handoff outcomes return final TwiML and hang up.
 
@@ -4214,7 +4273,7 @@ Example response:
 }
 ```
 
-`POST /api/voice/twilio/recording`
+`POST /api/voice/twilio/:route_id/recording`
 
 Public Twilio Programmable Voice webhook for recording-mode turns when external STT is configured. Requires a valid `X-Twilio-Signature`. The webhook downloads the Twilio recording, sends audio through the configured STT provider behind `modules/voice`, then routes the resulting text through the same conversation engine and booking service. STT failures produce safe reprompt/fallback behavior and do not fabricate customer intent.
 
@@ -4228,7 +4287,7 @@ To
 RecordingUrl
 ```
 
-`GET /api/voice/twilio/stream`
+`GET /api/voice/twilio/:route_id/stream`
 
 Public Twilio Media Streams WebSocket endpoint for realtime audio mode. The endpoint is not configured directly in Twilio Console; the incoming webhook returns `<Connect><Stream>` with signed custom parameters for the existing call session. The stream forwards Twilio g711 audio frames to the configured OpenAI Realtime adapter for VAD and transcription, then routes accepted completed transcripts through the same backend conversation engine and booking service. GA sessions request `item.input_audio_transcription.logprobs`; `automatic`, `standard`, and `strong_noise_rejection` enable near-field input noise reduction, while `minimal_processing` does not force input noise reduction. Admission is policy-aware and fail-closed: missing/invalid confidence metadata, low mean confidence, low-tail token confidence, or transcript density inconsistent with VAD duration is audited as `transcript_rejected_low_confidence` and leaves the conversation draft unchanged. Automatic mode begins with standard admission and, after structured low-confidence or VAD-coherence evidence, switches the current call to stronger admission for later turns. It does not inspect transcript wording or infer the caller's location; missing provider metadata is not treated as noise evidence. Replayed transcript-completion events with the same provider item/transcript key are ignored before admission, recovery, or conversation mutation. Each admitted transcript advances an input generation; nonterminal backend replies from superseded generations are discarded before speech. Consecutive rejected transcripts use bounded in-stream recovery: a short retry, a one-answer retry that repeats the last backend-approved question, then background-noise coaching. Recovery output waits behind any accepted backend turn and is removed when that backend reply becomes available. A fourth consecutive rejection calls a typed conversation action instead of fabricating a customer message; it creates one `voice_input_unintelligible` owner callback handoff when the session has a callable caller number, or completes the call with a quieter-place retry instruction when it does not. The handoff uses a stable per-session event key so repeated or concurrent execution does not create duplicate owner work, and it must persist before callback wording is spoken. A successfully admitted transcript resets the rejection streak. Confidence rejection never switches the call to recording/gather; that fallback remains reserved for terminal Realtime/provider failures. Accepted and rejected transcript timing events record PII-free `item_id`, `input_generation`, decision/reason, configured `profile`, `effective_profile`, `adaptive`, `runtime_action`, `audio_quality_signal`, mean/min logprob, token count, VAD duration, `rejection_streak`, and `recovery_action` when available; timing payloads do not store transcript or audio bodies. Transcription steering uses concise salon, catalog, pending-candidate, and alias keyword lists instead of example booking sentences.
 
@@ -4237,6 +4296,14 @@ With dashboard setting `speech_output_mode=streaming_tts`, backend-approved text
 PII-free stages include `speech_stopped`, `transcript_admitted`, `backend_turn_start`, `backend_turn_done`, `tts_request_start`, `tts_first_provider_chunk`, `tts_first_byte_timeout`, `tts_startup_buffer_ready`, `twilio_first_media_sent`, `tts_stream_done`, `tts_playout_done`, and playback completion through the terminal mark. Speech diagnostics expose `input_generation`, `reply_kind`, stale-reply suppression, input/output sample rates, post-first-chunk producer wall/active/audio durations, producer rate excluding local backpressure, observed provider emit gap, producer backpressure duration/count, maximum queue depth, playout duration/frame/batch counts, underrun count, and WebSocket write latency. Backpressure metrics distinguish an upstream provider gap from time intentionally spent waiting for local queue capacity. `backend_turn_done` also exposes whitelisted substage durations for route/config resolution, session load, answer-context load, turn routing, turn interpretation, availability/POS calls, and turn persistence. Answer-context timing adds only bounded `answer_context_authority`, `answer_context_cache_status`, `answer_context_refresh_reason`, `answer_context_retry_reason`, `answer_context_attempts`, `answer_context_outcome`, and optional `answer_context_ready` fields so operators can distinguish cache hits, TTL/fence refreshes, readiness/concurrent retries, fail-closed refreshes, load failures, and retry exhaustion. Router diagnostics include `turn_route`, `turn_expected_input`, `turn_route_reason`, `turn_deterministic_coverage`, `turn_semantic_contract`, `turn_recognizable_guidance_actions`, `turn_available_guidance_actions`, `turn_guidance_action`, `service_guidance_capability`, `service_guidance_catalog_available`, `service_guidance_recommendation_ready`, `turn_model_service_count`, and `turn_model_staff_count`. `turn_interpreter_path`, `turn_interpreter_outcome`, `turn_interpreter_ms`, and `turn_interpreter_schema_fingerprint` distinguish and time a skipped model call, accepted structured interpretation, timeout, provider failure, empty or invalid output, confidence rejection, and catalog rejection. Provider failures may also expose the bounded fields `turn_interpreter_provider`, `turn_interpreter_failure_stage`, `turn_interpreter_http_status`, `turn_interpreter_http_status_class`, and `turn_interpreter_request_id`. Request and response bodies are never copied into these diagnostics. These diagnostics contain no transcript, audio, customer, salon ID, raw error, or provider-secret values. Speech output failures close through the signed recording/gather fallback without changing booking state or creating a second booking attempt.
 
 `speech_output_mode=buffered_realtime` is a legacy fallback. Only that mode uses Realtime `response.create`, response identity binding, complete output-transcript validation, and release after `response.done`. Operational facts are never allowed to bypass backend/POS ownership in either mode. If realtime configuration is missing, voice status falls back to the recording or gather path.
+
+`POST /api/voice/twilio/:route_id/stream/status` and
+`POST /api/voice/twilio/:route_id/stream/fallback` use the same tenant route,
+Account SID, exact signature, and existing CallSid ownership. Twilio Stream
+status callbacks do not include `To`; for that endpoint only, the durable
+tenant-bound call session supplies the previously verified inbound number.
+The callback still fails closed if the route, Account SID, CallSid tenant, or
+stored number does not agree.
 
 `GET /api/voice/audio/:id`
 

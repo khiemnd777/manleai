@@ -57,6 +57,12 @@ type SquareSettingsResponse struct {
 type TwilioSettingsResponse struct {
 	Provider                   string     `json:"provider"`
 	Configured                 bool       `json:"configured"`
+	VoiceRouteID               string     `json:"voice_route_id,omitempty"`
+	VoiceRoutingEnabled        bool       `json:"voice_routing_enabled"`
+	VoiceInboundNumber         string     `json:"voice_inbound_number"`
+	VoiceRoutingConfigured     bool       `json:"voice_routing_configured"`
+	VoiceRoutingBlockers       []string   `json:"voice_routing_blockers"`
+	AccountSIDHint             string     `json:"account_sid_hint,omitempty"`
 	PublicBaseURL              string     `json:"public_base_url"`
 	IncomingPath               string     `json:"incoming_path"`
 	TurnPath                   string     `json:"turn_path"`
@@ -141,6 +147,8 @@ type UpdateSquareSettingsRequest struct {
 type UpdateTwilioSettingsRequest struct {
 	TechnicalMutationControl
 	PublicBaseURL            string  `json:"public_base_url"`
+	VoiceInboundNumber       *string `json:"voice_inbound_number,omitempty"`
+	VoiceRoutingEnabled      *bool   `json:"voice_routing_enabled,omitempty"`
 	AuthToken                string  `json:"auth_token"`
 	ClearAuthToken           bool    `json:"clear_auth_token"`
 	IncomingPath             string  `json:"incoming_path"`

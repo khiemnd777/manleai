@@ -11,11 +11,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/manleai/ai-receptionist/internal/config"
+	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/internal/encryption"
+	"github.com/manleai/ai-receptionist/internal/twiliovoice"
 )
 
 var ErrValidation = errors.New("integration config validation failed")
+
+type twilioVoiceRouteStore interface {
+	LocateTwilioVoiceRouteTenant(context.Context, string) (string, error)
+	GetTwilioVoiceRoute(context.Context, string, string) (*StoredConfig, error)
+}
 
 type configStore interface {
 	EnsureSalonOwner(ctx context.Context, salonID string, ownerUserID string) error
@@ -230,7 +238,7 @@ func (s *Service) UpdateTwilio(ctx context.Context, salonID string, ownerUserID 
 
 func (s *Service) UpdateTwilioForPlatform(ctx context.Context, salonID, actorUserID string, req UpdateTwilioSettingsRequest) (*TwilioSettingsResponse, error) {
 	command, err := technicalMutationCommand(actorUserID, ProviderTwilio, "integration_config.twilio.updated", req.TechnicalMutationControl, req,
-		[]string{"public_base_url", "auth_token", "voice_paths", "voice_transport", "owner_sms_policy", "account_sid", "messaging_transport", "notification_paths"})
+		[]string{"public_base_url", "auth_token", "voice_inbound_number", "voice_routing_enabled", "voice_paths", "voice_transport", "owner_sms_policy", "account_sid", "messaging_transport", "notification_paths"})
 	if err != nil {
 		return nil, err
 	}
@@ -249,6 +257,13 @@ func (s *Service) updateTwilioForSalon(ctx context.Context, salonID string, req 
 		}
 	}
 	settings["public_base_url"] = strings.TrimRight(strings.TrimSpace(req.PublicBaseURL), "/")
+	if req.VoiceInboundNumber != nil {
+		settings["voice_inbound_number"] = strings.TrimSpace(*req.VoiceInboundNumber)
+	}
+	if req.VoiceRoutingEnabled != nil {
+		settings["voice_routing_enabled"] = strconv.FormatBool(*req.VoiceRoutingEnabled)
+	}
+	settings["voice_routing_enabled"] = defaultString(settings["voice_routing_enabled"], "false")
 	settings["incoming_path"] = defaultString(strings.TrimSpace(req.IncomingPath), "/api/voice/twilio/incoming")
 	settings["turn_path"] = defaultString(strings.TrimSpace(req.TurnPath), "/api/voice/twilio/turn")
 	settings["recording_path"] = defaultString(strings.TrimSpace(req.RecordingPath), "/api/voice/twilio/recording")
@@ -309,6 +324,9 @@ func (s *Service) updateTwilioForSalon(ctx context.Context, salonID string, req 
 	secretMutation := strings.TrimSpace(req.AuthToken) != "" || req.ClearAuthToken ||
 		strings.TrimSpace(req.AccountSID) != "" || req.ClearAccountSID
 	if err := validateTwilioMessagingSettings(settings, secrets); err != nil {
+		return nil, err
+	}
+	if err := validateTwilioVoiceRoutingSettings(settings, secrets); err != nil {
 		return nil, err
 	}
 	encryptedSecrets := ""
@@ -583,6 +601,45 @@ func (s *Service) ResolveTwilioConfig(ctx context.Context, salonID string) (conf
 	return cfg, publicBaseURL, nil
 }
 
+// ResolveTwilioVoiceRoute resolves an opaque integration-config UUID through a
+// provider-only locator, binds the returned tenant immediately, then reloads
+// the exact Twilio row under tenant RLS before decrypting any secret.
+func (s *Service) ResolveTwilioVoiceRoute(ctx context.Context, routeID string) (config.TwilioVoiceRouteConfig, error) {
+	routeID = strings.TrimSpace(routeID)
+	if _, err := uuid.Parse(routeID); err != nil {
+		return config.TwilioVoiceRouteConfig{}, ErrNotFound
+	}
+	store, ok := s.repo.(twilioVoiceRouteStore)
+	if !ok || s.cipher == nil {
+		return config.TwilioVoiceRouteConfig{}, ErrValidation
+	}
+	salonID, err := store.LocateTwilioVoiceRouteTenant(ctx, routeID)
+	if err != nil {
+		return config.TwilioVoiceRouteConfig{}, err
+	}
+	boundCtx := databasecontext.WithSystemSalon(ctx, databasecontext.ScopeProvider, salonID)
+	item, err := store.GetTwilioVoiceRoute(boundCtx, salonID, routeID)
+	if err != nil {
+		return config.TwilioVoiceRouteConfig{}, err
+	}
+	secrets, err := s.decryptSecrets(item.SecretsEncrypted)
+	if err != nil {
+		return config.TwilioVoiceRouteConfig{}, err
+	}
+	voiceConfig, publicBaseURL := twilioConfigFromStored(item, secrets)
+	if !voiceConfig.RoutingEnabled || !twiliovoice.ValidE164(voiceConfig.InboundNumber) ||
+		!twiliovoice.ValidAccountSID(voiceConfig.AccountSID) || strings.TrimSpace(voiceConfig.AuthToken) == "" ||
+		!twiliovoice.ValidPublicHTTPSBase(publicBaseURL) {
+		return config.TwilioVoiceRouteConfig{}, ErrValidation
+	}
+	return config.TwilioVoiceRouteConfig{
+		SalonID:           salonID,
+		PublicBaseURL:     publicBaseURL,
+		ConfigUpdatedAt:   item.UpdatedAt,
+		TwilioVoiceConfig: voiceConfig,
+	}, nil
+}
+
 func (s *Service) ResolveOpenAIConfig(ctx context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error) {
 	item, secrets, err := s.resolveStored(ctx, salonID, ProviderOpenAI)
 	if err != nil {
@@ -680,13 +737,25 @@ func twilioConfigFromStored(item *StoredConfig, secrets map[string]string) (conf
 	if item == nil {
 		return config.TwilioVoiceConfig{}, ""
 	}
+	paths := twiliovoice.CanonicalPaths(item.ID)
+	routingEnabled := item.Enabled && boolSetting(item.Settings["voice_routing_enabled"])
 	cfg := config.TwilioVoiceConfig{
 		AuthToken:      strings.TrimSpace(secrets["auth_token"]),
+		AccountSID:     strings.TrimSpace(secrets["account_sid"]),
+		RouteID:        strings.TrimSpace(item.ID),
+		InboundNumber:  strings.TrimSpace(item.Settings["voice_inbound_number"]),
+		RoutingEnabled: routingEnabled,
 		IncomingPath:   defaultString(strings.TrimSpace(item.Settings["incoming_path"]), "/api/voice/twilio/incoming"),
 		TurnPath:       defaultString(strings.TrimSpace(item.Settings["turn_path"]), "/api/voice/twilio/turn"),
 		RecordingPath:  defaultString(strings.TrimSpace(item.Settings["recording_path"]), "/api/voice/twilio/recording"),
 		StreamPath:     defaultString(strings.TrimSpace(item.Settings["stream_path"]), "/api/voice/twilio/stream"),
 		VoiceTransport: normalizeVoiceTransport(defaultString(item.Settings["voice_transport"], "recording")),
+	}
+	if routingEnabled {
+		cfg.IncomingPath = paths.Incoming
+		cfg.TurnPath = paths.Turn
+		cfg.RecordingPath = paths.Recording
+		cfg.StreamPath = paths.Stream
 	}
 	return cfg, strings.TrimRight(strings.TrimSpace(item.Settings["public_base_url"]), "/")
 }
@@ -761,12 +830,14 @@ func (s *Service) twilioResponse(item *StoredConfig) TwilioSettingsResponse {
 	}
 	secretSource := SecretSourceNone
 	accountSIDConfigured := false
+	accountSIDHint := ""
 	if item != nil {
 		if secrets, err := s.decryptSecrets(item.SecretsEncrypted); err == nil {
 			if strings.TrimSpace(secrets["auth_token"]) != "" {
 				secretSource = SecretSourceDatabase
 			}
 			accountSIDConfigured = strings.TrimSpace(secrets["account_sid"]) != ""
+			accountSIDHint = maskedSID(secrets["account_sid"])
 		}
 	}
 	updatedAt := updatedAt(item)
@@ -786,19 +857,34 @@ func (s *Service) twilioResponse(item *StoredConfig) TwilioSettingsResponse {
 		statusPath = defaultString(strings.TrimSpace(item.Settings["notification_status_path"]), statusPath)
 		inboundPath = twilioInboundPath(item.Settings["notification_inbound_path"], item.SalonID)
 	}
+	routingEnabled := item != nil && item.Enabled && boolSetting(item.Settings["voice_routing_enabled"])
+	voiceInboundNumber := strings.TrimSpace(setting(item, "voice_inbound_number"))
+	routingBlockers := twilioVoiceRoutingBlockers(item, publicBaseURL, voiceInboundNumber, accountSIDConfigured, secretSource != SecretSourceNone)
+	voicePaths := twiliovoice.Paths{
+		Incoming: cfg.IncomingPath, Turn: cfg.TurnPath, Recording: cfg.RecordingPath, Stream: cfg.StreamPath,
+	}
+	if item != nil {
+		voicePaths = twiliovoice.CanonicalPaths(item.ID)
+	}
 	return TwilioSettingsResponse{
 		Provider:                   ProviderTwilio,
 		Configured:                 enabled && secretSource != SecretSourceNone,
+		VoiceRouteID:               settingID(item),
+		VoiceRoutingEnabled:        routingEnabled,
+		VoiceInboundNumber:         voiceInboundNumber,
+		VoiceRoutingConfigured:     len(routingBlockers) == 0,
+		VoiceRoutingBlockers:       routingBlockers,
+		AccountSIDHint:             accountSIDHint,
 		PublicBaseURL:              publicBaseURL,
 		IncomingPath:               cfg.IncomingPath,
 		TurnPath:                   cfg.TurnPath,
 		RecordingPath:              cfg.RecordingPath,
 		StreamPath:                 cfg.StreamPath,
 		VoiceTransport:             cfg.VoiceTransport,
-		InboundWebhookURL:          urlForPath(publicBaseURL, cfg.IncomingPath),
-		TurnWebhookURL:             urlForPath(publicBaseURL, cfg.TurnPath),
-		RecordingWebhookURL:        urlForPath(publicBaseURL, cfg.RecordingPath),
-		StreamWebhookURL:           wsURLForPath(publicBaseURL, cfg.StreamPath),
+		InboundWebhookURL:          urlForPath(publicBaseURL, voicePaths.Incoming),
+		TurnWebhookURL:             urlForPath(publicBaseURL, voicePaths.Turn),
+		RecordingWebhookURL:        urlForPath(publicBaseURL, voicePaths.Recording),
+		StreamWebhookURL:           wsURLForPath(publicBaseURL, voicePaths.Stream),
 		AuthTokenConfigured:        secretSource != SecretSourceNone,
 		AuthTokenSource:            secretSource,
 		OwnerSMSEnabled:            ownerSMSEnabled,
@@ -815,6 +901,57 @@ func (s *Service) twilioResponse(item *StoredConfig) TwilioSettingsResponse {
 		UpdatedAt:                  updatedAt,
 		Version:                    storedVersion(item),
 	}
+}
+
+func settingID(item *StoredConfig) string {
+	if item == nil {
+		return ""
+	}
+	return strings.TrimSpace(item.ID)
+}
+
+func maskedSID(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) < 6 {
+		return ""
+	}
+	return value[:2] + "••••" + value[len(value)-4:]
+}
+
+func twilioVoiceRoutingBlockers(item *StoredConfig, publicBaseURL, inboundNumber string, accountSIDConfigured, authTokenConfigured bool) []string {
+	blockers := []string{}
+	if item == nil || !item.Enabled || !boolSetting(item.Settings["voice_routing_enabled"]) {
+		blockers = append(blockers, "TWILIO_VOICE_ROUTING_DISABLED")
+	}
+	if !twiliovoice.ValidE164(inboundNumber) {
+		blockers = append(blockers, "TWILIO_VOICE_INBOUND_NUMBER_INVALID")
+	}
+	if !accountSIDConfigured {
+		blockers = append(blockers, "TWILIO_ACCOUNT_SID_REQUIRED")
+	}
+	if !authTokenConfigured {
+		blockers = append(blockers, "TWILIO_AUTH_TOKEN_REQUIRED")
+	}
+	if !twiliovoice.ValidPublicHTTPSBase(publicBaseURL) {
+		blockers = append(blockers, "TWILIO_PUBLIC_HTTPS_BASE_REQUIRED")
+	}
+	return blockers
+}
+
+func validateTwilioVoiceRoutingSettings(settings map[string]string, secrets map[string]string) error {
+	enabled := boolSetting(settings["voice_routing_enabled"])
+	number := strings.TrimSpace(settings["voice_inbound_number"])
+	if number != "" && !twiliovoice.ValidE164(number) {
+		return ErrValidation
+	}
+	if !enabled {
+		return nil
+	}
+	if !twiliovoice.ValidE164(number) || !twiliovoice.ValidAccountSID(secrets["account_sid"]) ||
+		strings.TrimSpace(secrets["auth_token"]) == "" || !twiliovoice.ValidPublicHTTPSBase(settings["public_base_url"]) {
+		return ErrValidation
+	}
+	return nil
 }
 
 func setting(item *StoredConfig, key string) string {

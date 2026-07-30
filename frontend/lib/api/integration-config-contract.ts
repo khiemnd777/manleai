@@ -1,7 +1,8 @@
 import type {
   OpenAIIntegrationConfig,
   SquareIntegrationConfig,
-  TwilioIntegrationConfig
+  TwilioIntegrationConfig,
+  TwilioVoiceRoutingStatus
 } from "../../types/api";
 
 export type IntegrationConfigProvider = "square" | "twilio" | "openai";
@@ -28,6 +29,8 @@ export type SquareConfigForm = {
 
 export type TwilioConfigForm = {
   public_base_url: string;
+  voice_inbound_number: string;
+  voice_routing_enabled: boolean;
   auth_token: string;
   clear_auth_token: boolean;
   incoming_path: string;
@@ -81,6 +84,8 @@ export const defaultSquareConfigForm: SquareConfigForm = {
 
 export const defaultTwilioConfigForm: TwilioConfigForm = {
   public_base_url: "",
+  voice_inbound_number: "",
+  voice_routing_enabled: false,
   auth_token: "",
   clear_auth_token: false,
   incoming_path: "/api/voice/twilio/incoming",
@@ -139,6 +144,8 @@ export function twilioConfigToForm(config?: TwilioIntegrationConfig): TwilioConf
   if (!config) return { ...defaultTwilioConfigForm };
   return {
     public_base_url: config.public_base_url || "",
+    voice_inbound_number: config.voice_inbound_number || "",
+    voice_routing_enabled: config.voice_routing_enabled,
     auth_token: "",
     clear_auth_token: false,
     incoming_path: config.incoming_path || defaultTwilioConfigForm.incoming_path,
@@ -199,6 +206,14 @@ export function openAIConfigPayload(form: OpenAIConfigForm): Record<string, unkn
 
 export function platformIntegrationConfigBasePath(tenantID: string) {
   return `/api/platform/tenants/${encodeURIComponent(tenantID)}/technical/integration-configs`;
+}
+
+export function twilioVoiceRoutingState(
+  config?: TwilioIntegrationConfig,
+  status?: TwilioVoiceRoutingStatus | null
+): "needs_setup" | "routing_configured" | "live_verified" {
+  if (!config?.voice_routing_configured || (status && !status.routing_configured)) return "needs_setup";
+  return status?.live_verified ? "live_verified" : "routing_configured";
 }
 
 export function normalizeTwilioVoiceTransport(value: string): TwilioVoiceTransport {

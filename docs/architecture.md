@@ -1037,6 +1037,24 @@ evidence gate, not these conversation-state and review safeguards.
 
 The live voice layer is split into `modules/voice`, `modules/voice_twilio`, and provider-specific AI adapter modules such as `modules/voice_openai`. `modules/voice` owns provider-neutral DTOs and runtime interfaces, including whole-response TTS for recording mode, chunked streaming speech for realtime mode, the owner-scoped semantic-contract check, and the bounded read-only semantic-evaluation route. `modules/voice_twilio` owns Twilio request verification, TwiML, Media Streams framing, typed reply scheduling, bounded/paced PCMU playout, playback marks, barge-in clear/cancel, caller-input gating, stale-generation rejection, and an allowlisted stream-status audit shape instead of copying the provider form. `modules/voice_openai` owns OpenAI payloads, strict full and guidance structured-turn schema validation, per-schema salon/config nonretryable contract circuits, Realtime input sessions, dedicated Speech streaming, raw PCM 24 kHz ingestion, stateful anti-aliased resampling, and PCMU encoding. Provider request and Realtime failures expose only fixed messages plus bounded type/code/parameter/request/fingerprint diagnostics; wrapped transport errors and provider message bodies do not cross the voice boundary. The adapter validates each schema recursively before dispatch, suppresses repeated live invalid requests while that schema circuit is open, and lets the synthetic `POST /api/salons/:id/voice/semantic-check` probe validate both contracts and close their matching circuits after successful requests. The separate `POST /api/salons/:id/voice/semantic-evaluate` path accepts catalog-bound scenarios for repeatable scoring without conversation, availability, or POS mutation.
 
+V83 expands Twilio Voice ingress with tenant-bound URLs whose opaque
+`route_id` is the UUID of the salon's Twilio integration row. A provider-only
+SECURITY DEFINER locator returns only `salon_id`; the runtime immediately binds
+`system_salon_id`, reloads the exact row under tenant RLS, and verifies the
+stored E.164 inbound number, Account SID, any durable CallSid owner, and the
+official Twilio signature for the exact stored public callback URL. Only a
+server-owned verified route proof can enter initial session or later turn
+mutation. Provider-wide route and legacy CallSid locators work only before
+tenant binding; an already-bound call path performs direct exact-tenant lookup
+and cannot rediscover or rebind another tenant. `salons.phone` is not part of this path. The active-number partial
+unique index prevents two enabled tenant routes from owning one inbound number.
+Route verification persists only an HMAC routing fingerprint and bounded route
+metadata, allowing Platform Technical to distinguish saved configuration from
+a live webhook matching the current config without storing tokens, signatures,
+or provider bodies. Shared Voice routes remain expand-release rollback code;
+they must be removed in a later contract release after per-tenant live evidence,
+so this expand release alone is not the completed routing guarantee.
+
 The local `conversation-eval -mode direct-model` path is deliberately separate
 from both runtime and the authenticated semantic-evaluation endpoint. It runs a
 selected canary or the complete 50-execution, directly authored fixture corpus
