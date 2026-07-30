@@ -3989,14 +3989,17 @@ For the separately bounded direct-model pilot, the generated artifact is
 `backend/modules/conversation/testdata/receptionist_semantic_pilot_50.json`.
 It contains 50 directly authored executions across 45 distinct nail-salon
 situations, with five core situations represented once for phone and once for
-simulator. It contains no generated paraphrase filler. Direct-model mode calls
+simulator. It contains no generated paraphrase filler. The operational-question
+slice covers distinct hours, staff, and policy meanings rather than spending
+all three pilot positions on hours; its staff and policy cases include
+non-native/ASR-like wording. Direct-model mode calls
 the stored OpenAI model once for recognition, then lets the production
 Conversation Service decide whether that turn needs a guarded style reply, a
 profile-backed consultation question, or no output-model call. It does not
 force a universal second rewrite. Review batches contain at most five retained
 outputs; the complete 50 therefore has 10 review rounds. With no retries the
 complete-run hard ceiling remains 110, while operational/terminal turns may use
-fewer calls. Evaluation contract `production-flow-v8` rejects final replies
+fewer calls. Evaluation contract `production-flow-v9` rejects final replies
 that expose any dynamic fixture identifier, uses separate typed salon-local
 `hour` and `minute` model fields so the provider never computes minutes after
 midnight, converts those clock components before production slot filtering,
@@ -4049,7 +4052,7 @@ Run the approved ten-scenario canary before the complete pilot:
 GOCACHE=/private/tmp/manleai-go-cache go run ./cmd/conversation-eval \
   -mode direct-model \
   -salon-id CONFIG_SALON_UUID \
-  -scenario-ids pilot-003,pilot-005,pilot-007,pilot-015,pilot-019,pilot-032,pilot-038,pilot-042,pilot-047,pilot-050 \
+  -scenario-ids pilot-003,pilot-007,pilot-014,pilot-015,pilot-019,pilot-028,pilot-032,pilot-038,pilot-042,pilot-050 \
   -max-model-calls 22 \
   -transient-retries 0 \
   -output /tmp/conversation-eval-canary-10.json
@@ -4107,7 +4110,9 @@ must retain `passed=false`, `model_executed_count=0`, and
 `review_passed_count=0`. The second keeps one isolated production Conversation
 Service session across every turn, executes all 100 with retained scripted
 semantics, and retains complete transcripts, state transitions, tool attempts,
-handoff, and confirmation facts. Corpus, production-flow, and transcript-review
+handoff, confirmation facts, turn route/reason, deterministic coverage,
+interpreter outcome, answer source/reason, router intent, and reply source/policy.
+Corpus, production-flow, and transcript-review
 contract versions are part of the run key, including the shared reviewer
 contract, so an incompatible checkpoint cannot be resumed. It still cannot
 claim a model pass. A paid
@@ -4124,10 +4129,17 @@ GOCACHE=/private/tmp/manleai-go-cache go run ./cmd/conversation-eval-real \
 
 The config salon selects only the encrypted database OpenAI integration; it
 does not own the isolated fixtures. Exactly ten corpus journeys are marked as
-live canaries. The runner stops on the first journey failure, never exceeds 60
-combined recognition/reply/consultation/review calls, and cannot pass until all
-ten journeys are model-executed and both five-journey multi-turn reviews pass.
-No live canary is run by repository tests or corpus generation.
+live canaries: `advice-001`, `consult-001`, `question-003`, `question-005`,
+`question-008`, `question-010`, `booking-001`, `repair-003`, `safety-001`, and
+`failure-002`. They cover consultation, service catalog, informational
+hours/staff/policy, booking, an informational detour during booking, safety,
+and dependency failure. The runner stops on the first journey failure, never
+exceeds 60 combined recognition/reply/consultation/review calls, and cannot
+pass until all ten journeys are model-executed and both five-journey
+multi-turn reviews pass.
+No live canary is run by repository tests or corpus generation. Failure
+ownership and the prompt-change gate are documented in
+`docs/operations/conversation-semantic-quality.md`.
 
 `POST /api/voice/twilio/incoming`
 

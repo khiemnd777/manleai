@@ -20,7 +20,7 @@ const (
 	// These versions are part of the checkpoint/run identity. Any material
 	// change to production-flow execution or reviewer semantics must bump the
 	// corresponding value so retained paid evidence cannot be mixed.
-	DirectEvaluationContractVersion = "production-flow-v8"
+	DirectEvaluationContractVersion = "production-flow-v9"
 	DirectReviewContractVersion     = "evidence-review-v9"
 )
 

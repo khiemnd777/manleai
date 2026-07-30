@@ -117,7 +117,7 @@ func runRealSalonJourney(ctx context.Context, corpus RealSalonCorpus, journey Re
 		semanticInterpreterInvoked := false
 		replyGeneratorInvoked := false
 		var interpreter conversation.TurnInterpreter = &realSalonScriptedInterpreter{
-			turn: voice.TurnUnderstandingFromModelReply(turn.ModelFixture), invoked: &semanticInterpreterInvoked,
+			turn: realSalonScriptedTurnUnderstanding(turn.ModelFixture), invoked: &semanticInterpreterInvoked,
 		}
 		if live {
 			interpreter = &realSalonJourneyInterpreter{executor: executor, journeyID: journey.ID, turn: index + 1, invoked: &semanticInterpreterInvoked}
@@ -135,7 +135,16 @@ func runRealSalonJourney(ctx context.Context, corpus RealSalonCorpus, journey Re
 		}
 		turnResult := RealSalonTurnResult{
 			Turn: index + 1, CustomerMessage: turn.CustomerMessage, AIReply: lastAIMessage(after.Transcript),
-			IntentBefore: before.Intent, IntentAfter: after.Intent,
+			TurnRoute:             firstMetadataString(store.lastTurn.CustomerMetadata, "turn_route"),
+			TurnRouteReason:       firstMetadataString(store.lastTurn.CustomerMetadata, "turn_route_reason"),
+			DeterministicCoverage: firstMetadataString(store.lastTurn.CustomerMetadata, "turn_deterministic_coverage"),
+			InterpreterOutcome:    firstMetadataString(store.lastTurn.CustomerMetadata, "turn_interpreter_outcome"),
+			AnswerSource:          firstMetadataString(store.lastTurn.AIMetadata, "answer_source"),
+			AnswerSourceReason:    firstMetadataString(store.lastTurn.AIMetadata, "answer_source_reason"),
+			RouterIntent:          firstMetadataString(store.lastTurn.AIMetadata, "router_intent"),
+			ReplySource:           firstMetadataString(store.lastTurn.AIMetadata, "reply_source"),
+			ReplyPolicy:           store.lastTurn.ReplyPolicy,
+			IntentBefore:          before.Intent, IntentAfter: after.Intent,
 			PhaseBefore: before.DialogState.Phase, PhaseAfter: after.DialogState.Phase,
 			SelectedServiceIDs: fixtureSessionServiceIDs(after),
 			WouldCallTools:     append([]ToolAttempt(nil), tool.attempts[toolOffset:]...),
@@ -178,6 +187,24 @@ func runRealSalonJourney(ctx context.Context, corpus RealSalonCorpus, journey Re
 		}
 	}
 	return result
+}
+
+func realSalonScriptedTurnUnderstanding(reply voice.TurnModelReply) conversation.TurnUnderstanding {
+	// Retained JSON stores the provider-facing hour/minute fields, while Minutes
+	// is intentionally excluded from that protocol. Mirror the adapter's
+	// conversion before using an authored fixture as production semantic output.
+	for index := range reply.Questions {
+		preference := &reply.Questions[index].TimePreference
+		direction := strings.TrimSpace(preference.Direction)
+		if direction == "" {
+			preference.Minutes = -1
+			continue
+		}
+		if preference.Hour >= 0 && preference.Hour <= 23 && preference.Minute >= 0 && preference.Minute <= 59 {
+			preference.Minutes = preference.Hour*60 + preference.Minute
+		}
+	}
+	return voice.TurnUnderstandingFromModelReply(reply)
 }
 
 type realSalonJourneyInterpreter struct {

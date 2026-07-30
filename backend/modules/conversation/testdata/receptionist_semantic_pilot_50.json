@@ -2251,7 +2251,7 @@
       "description": "Operational questions about hours, price, staff, policy, and availability.",
       "evidence_level": "semantic_turn_contract",
       "provenance": {
-        "base_case_id": "guidance_salon_question-base-002",
+        "base_case_id": "guidance_salon_question-base-008",
         "utterance_variant": "direct_phone",
         "generated": false,
         "scope": "single_turn"
@@ -2260,7 +2260,7 @@
       "request": {
         "scenario_id": "",
         "channel": "phone",
-        "customer_message": "What are your weekend hours?",
+        "customer_message": "Which nail tech I can book with?",
         "expected_input": "caller_goal",
         "semantic_contract": "guidance_turn",
         "recognizable_guidance_actions": [
@@ -2291,7 +2291,7 @@
       "expected": {
         "goal": "information",
         "guidance_action": "salon_question",
-        "guidance_question_subject": "hours",
+        "guidance_question_subject": "staff",
         "consultation": {},
         "safety": {
           "checked": true,
@@ -3079,6 +3079,13 @@
         "forbidden_goals": [
           "human_handoff"
         ],
+        "required_acts": [
+          {
+            "kind": "set_field",
+            "entity": "staff",
+            "subject": "alternative"
+          }
+        ],
         "consultation": {},
         "safety": {
           "checked": true,
@@ -3277,16 +3284,16 @@
       "description": "Operational questions about hours, price, staff, policy, and availability.",
       "evidence_level": "semantic_turn_contract",
       "provenance": {
-        "base_case_id": "guidance_salon_question-base-003",
+        "base_case_id": "guidance_salon_question-base-011",
         "utterance_variant": "direct_phone",
         "generated": false,
         "scope": "single_turn"
       },
-      "catalog_fixture": "harbor",
+      "catalog_fixture": "aurora",
       "request": {
         "scenario_id": "",
         "channel": "phone",
-        "customer_message": "When does the salon close?",
+        "customer_message": "If I come late, salon policy is what?",
         "expected_input": "caller_goal",
         "semantic_contract": "guidance_turn",
         "recognizable_guidance_actions": [
@@ -3317,7 +3324,7 @@
       "expected": {
         "goal": "information",
         "guidance_action": "salon_question",
-        "guidance_question_subject": "hours",
+        "guidance_question_subject": "policy",
         "consultation": {},
         "safety": {
           "checked": true,

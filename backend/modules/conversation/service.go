@@ -618,12 +618,12 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 	if len(turnUnderstanding.Acts) == 0 {
 		if question, ok := firstDeferredInformationQuestion(turnUnderstanding); ok && question.Subject != ConversationQuestionCurrentBooking {
 			route := routeStructuredQuestionAnswer(message, question, next, serviceUnderstanding, answerCtx, cfg, s.now)
-			if route.Handled && route.Source != answerSourceBookingRedirect && strings.TrimSpace(route.Reply) != "" {
+			if route.Handled && strings.TrimSpace(route.Reply) != "" {
 				turn := newPlannedTurn(*session, next)
 				turn.AIMessage = strings.TrimSpace(route.Reply)
 				resume, expectedInput, reviewStateChanged := resumeAfterInformationPrompt(&next, services, staff, cfg)
 				if resume != "" {
-					turn.AIMessage = answerWithoutGenericBookingOffer(turn.AIMessage) + " " + resume
+					turn.AIMessage = answerWithBookingResume(turn.AIMessage, resume)
 				}
 				if reviewStateChanged {
 					syncTurnUpdate(&turn, next, services, staff, cfg)
@@ -775,8 +775,7 @@ func (s *Service) messageOnce(ctx context.Context, salonID string, ownerUserID s
 			prependConversationMutationAcknowledgement(&turn, conversationResult, next, services)
 			resume, expectedInput, reviewStateChanged := resumeAfterInformationPrompt(&next, services, staff, cfg)
 			if resume != "" {
-				turn.AIMessage = answerWithoutGenericBookingOffer(turn.AIMessage)
-				turn.AIMessage += " " + resume
+				turn.AIMessage = answerWithBookingResume(turn.AIMessage, resume)
 			}
 			if reviewStateChanged {
 				syncTurnUpdate(&turn, next, services, staff, cfg)

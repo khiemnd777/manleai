@@ -134,6 +134,17 @@ func GeneratePilotCorpus() Corpus {
 			break
 		}
 	}
+	// The paid pilot has room for only three initial salon-question cases. Keep
+	// those cases semantically distinct so it measures hours, technician
+	// information, and policy classification instead of spending all three
+	// executions on equivalent hours wording. This is evaluation selection
+	// metadata only; the base IDs never participate in runtime routing.
+	familyBases["guidance_salon_question"] = prioritizePilotBaseIDs(
+		familyBases["guidance_salon_question"],
+		"guidance_salon_question-base-001",
+		"guidance_salon_question-base-008",
+		"guidance_salon_question-base-011",
+	)
 	familyOffsets := map[string]int{}
 	for remaining > 0 {
 		progress := false
@@ -159,6 +170,28 @@ func GeneratePilotCorpus() Corpus {
 		pilot.Scenarios[index].ID = fmt.Sprintf("pilot-%03d", index+1)
 	}
 	return pilot
+}
+
+func prioritizePilotBaseIDs(baseIDs []string, priorities ...string) []string {
+	result := make([]string, 0, len(baseIDs))
+	seen := make(map[string]bool, len(baseIDs))
+	available := make(map[string]bool, len(baseIDs))
+	for _, baseID := range baseIDs {
+		available[baseID] = true
+	}
+	for _, baseID := range priorities {
+		if available[baseID] && !seen[baseID] {
+			result = append(result, baseID)
+			seen[baseID] = true
+		}
+	}
+	for _, baseID := range baseIDs {
+		if !seen[baseID] {
+			result = append(result, baseID)
+			seen[baseID] = true
+		}
+	}
+	return result
 }
 
 func appendCases(corpus *Corpus, family string, description string, cases []scenarioCase, variants []utteranceVariant, defaultContract string) {
@@ -342,8 +375,8 @@ func guidanceSalonQuestionCases() []scenarioCase {
 	questions := []questionCase{
 		{"What time do you open tomorrow?", conversation.ConversationQuestionHours}, {"What are your weekend hours?", conversation.ConversationQuestionHours}, {"When does the salon close?", conversation.ConversationQuestionHours},
 		{"How much do services cost?", conversation.ConversationQuestionPrice}, {"Can you tell me the price range?", conversation.ConversationQuestionPrice}, {"What does Luna Renewal cost?", conversation.ConversationQuestionPrice},
-		{"Who is working this afternoon?", conversation.ConversationQuestionStaff}, {"Which nail technicians can I book?", conversation.ConversationQuestionStaff}, {"Do you have someone who does nail art?", conversation.ConversationQuestionStaff},
-		{"Do you accept walk-ins?", conversation.ConversationQuestionPolicy}, {"What is your late-arrival policy?", conversation.ConversationQuestionPolicy}, {"Can I bring a child with me?", conversation.ConversationQuestionPolicy},
+		{"Who is working this afternoon?", conversation.ConversationQuestionStaff}, {"Which nail tech I can book with?", conversation.ConversationQuestionStaff}, {"Do you have someone who does nail art?", conversation.ConversationQuestionStaff},
+		{"Do you accept walk-ins?", conversation.ConversationQuestionPolicy}, {"If I come late, salon policy is what?", conversation.ConversationQuestionPolicy}, {"Can I bring a child with me?", conversation.ConversationQuestionPolicy},
 		{"Do you have any openings today?", conversation.ConversationQuestionAvailability}, {"Is anything available Friday afternoon?", conversation.ConversationQuestionAvailability}, {"Can I come in after work?", conversation.ConversationQuestionAvailability}, {"Are there appointments this weekend?", conversation.ConversationQuestionAvailability},
 	}
 	cases := make([]scenarioCase, 0, 16)
@@ -655,7 +688,15 @@ func counterexampleCases() []scenarioCase {
 		},
 		{
 			Text: "I need a different person to do the service.", Fixture: "lotus",
-			Expected: ExpectedResult{ForbiddenGoals: []string{"human_handoff"}, Safety: ExpectedSafety{Checked: true, Concern: false}},
+			Expected: ExpectedResult{
+				RequiredActs: []ExpectedAct{{
+					Kind:    conversation.ConversationActSet,
+					Entity:  conversation.ConversationEntityStaff,
+					Subject: "alternative",
+				}},
+				ForbiddenGoals: []string{"human_handoff"},
+				Safety:         ExpectedSafety{Checked: true, Concern: false},
+			},
 			Configure: func(req *voice.SemanticEvaluationRequest) {
 				req.SemanticContract = conversation.TurnSemanticContractFull
 				req.ExpectedInput = conversation.ExpectedInputStaff

@@ -324,7 +324,7 @@ func sameInts(left []int, right []int) bool {
 
 func TestFixtureBackendRunnerAnswersSalonQuestionWithoutGenericGuidanceMenu(t *testing.T) {
 	corpus := GeneratePilotCorpus()
-	scenario := directScenarioByID(t, corpus, "pilot-042")
+	scenario := directScenarioByBaseID(t, corpus, "guidance_salon_question-base-001")
 	actual := modelReplyFromExpected(scenario.Expected)
 	result, err := (FixtureBackendRunner{}).Run(context.Background(), "salon_config_owner", corpus, scenario, actual, fixtureReplyGenerator{})
 	if err != nil {
@@ -425,6 +425,17 @@ func directScenarioByID(t *testing.T, corpus Corpus, scenarioID string) Scenario
 		}
 	}
 	t.Fatalf("scenario %s not found", scenarioID)
+	return Scenario{}
+}
+
+func directScenarioByBaseID(t *testing.T, corpus Corpus, baseCaseID string) Scenario {
+	t.Helper()
+	for _, scenario := range corpus.Scenarios {
+		if scenario.Provenance.BaseCaseID == baseCaseID {
+			return scenario
+		}
+	}
+	t.Fatalf("scenario base %s not found", baseCaseID)
 	return Scenario{}
 }
 

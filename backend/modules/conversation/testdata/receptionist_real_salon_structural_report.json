@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "contract_version": "real-salon-multi-turn-v1",
-  "evaluation_contract": "real-salon-production-flow-v1",
+  "evaluation_contract": "real-salon-production-flow-v2",
   "review_contract": "real-salon-transcript-review-v1+evidence-review-v9",
   "mode": "structural_validation_without_runtime_or_model_execution",
-  "run_key": "real-salon-v1-3329de594ebbc5c90ef69b05",
+  "run_key": "real-salon-v1-916264f55a5313337f76f534",
   "overall_status": "structural_validated_model_not_run",
   "passed": false,
   "journey_count": 100,

@@ -367,6 +367,103 @@ func TestGuidanceCatalogActionUsesStructuredCatalogAcrossPhoneAndSimulator(t *te
 	}
 }
 
+func TestGuidancePolicyWithoutKnowledgeReturnsTruthfulOwnerFallback(t *testing.T) {
+	store := newFakeConversationStore()
+	store.session.Channel = ChannelPhone
+	store.knowledge = nil
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: TurnUnderstanding{
+		Goal: "information", GuidanceAction: GuidanceActionSalonQuestion,
+		GuidanceQuestionSubject: ConversationQuestionPolicy,
+		Confidence:              0.97,
+		Reason:                  "caller_asks_operational_policy",
+	}})
+
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "If I arrive behind schedule, what rule applies?", EventKey: "policy_without_knowledge",
+	}); err != nil {
+		t.Fatalf("Message: %v", err)
+	}
+	if !strings.Contains(store.lastTurn.AIMessage, "don't have a verified answer") ||
+		strings.Contains(store.lastTurn.AIMessage, "service menu") ||
+		store.lastTurn.AIMetadata["answer_source_reason"] != "structured_answer_unavailable" ||
+		store.lastTurn.AIMetadata["router_intent"] != "owner_help" {
+		t.Fatalf("policy fallback reply=%q metadata=%#v", store.lastTurn.AIMessage, store.lastTurn.AIMetadata)
+	}
+	assertGuidanceDidNotCallBookingTools(t, bookingTool)
+}
+
+func TestGuidanceCatalogComparisonAsksOnlyOneUsefulQuestion(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{
+		{ID: "svc_silk", Name: "Silk Finish", Description: "A glossy natural-nail finish.", DurationMinutes: 35},
+		{ID: "svc_stone", Name: "Stone Shield", Description: "A durable overlay for natural nails.", DurationMinutes: 50},
+	}
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: TurnUnderstanding{
+		Goal: "information", GuidanceAction: GuidanceActionServiceCatalog,
+		GuidanceCatalogMode: ConversationQuestionModeCompare,
+		Confidence:          0.98,
+		Reason:              "caller_compares_catalog_services",
+	}})
+
+	if _, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Could you contrast Silk Finish with Stone Shield?", EventKey: "comparison_single_question",
+	}); err != nil {
+		t.Fatalf("Message: %v", err)
+	}
+	if strings.Count(store.lastTurn.AIMessage, "?") != 1 ||
+		!strings.Contains(store.lastTurn.AIMessage, "Silk Finish") ||
+		!strings.Contains(store.lastTurn.AIMessage, "Stone Shield") ||
+		store.lastTurn.AIMetadata["answer_source"] != answerSourceServiceCatalog {
+		t.Fatalf("comparison reply=%q metadata=%#v", store.lastTurn.AIMessage, store.lastTurn.AIMetadata)
+	}
+	assertGuidanceDidNotCallBookingTools(t, bookingTool)
+}
+
+func TestInformationalHoursDetourPreservesDraftAndResumesWithOneQuestion(t *testing.T) {
+	store := newFakeConversationStore()
+	store.services = []ServiceOption{{ID: "svc_gel", Name: "Glass Gel Manicure", DurationMinutes: 45}}
+	store.businessHours = []BusinessHourPeriod{{
+		ID: "hours_tue", DayOfWeek: 2, StartLocalTime: "10:15:00", EndLocalTime: "18:45:00",
+		Source: "imported", Provider: "square",
+	}}
+	store.session.Intent = IntentBooking
+	store.session.ServiceID = "svc_gel"
+	store.session.ServiceName = "Glass Gel Manicure"
+	store.session.BookingSegments = bookingSegmentsFromServices(store.services, store.session)
+	store.session.RequestedDate = "2026-06-13"
+	store.session.DialogState.Phase = DialogPhaseDrafting
+	bookingTool := &fakeBookingTool{}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+	service.SetTurnInterpreter(&staticGuidanceTurnInterpreter{turn: TurnUnderstanding{
+		Goal: "book_appointment", Confidence: 0.98, Reason: "caller_asks_hours_during_booking",
+		Questions: []ConversationQuestion{{Subject: ConversationQuestionHours, Mode: ConversationQuestionModeDetails, Confidence: 0.98}},
+		Safety:    SafetyAssessment{Concern: false, Confidence: 0.99},
+	}})
+
+	session, err := service.Message(context.Background(), "salon_1", "owner_1", "session_1", MessageRequest{
+		Message: "Quick detour: how late is the studio open?", EventKey: "hours_detour_single_question",
+	})
+	if err != nil {
+		t.Fatalf("Message: %v", err)
+	}
+	if session.ServiceID != "svc_gel" || session.RequestedDate != "2026-06-13" ||
+		len(session.BookingSegments) != 1 || strings.Count(store.lastTurn.AIMessage, "?") != 1 ||
+		!strings.Contains(store.lastTurn.AIMessage, "10:15 AM to 6:45 PM") ||
+		!strings.Contains(store.lastTurn.AIMessage, "what time works") {
+		t.Fatalf("detour session=%#v reply=%q", session, store.lastTurn.AIMessage)
+	}
+	if store.lastTurn.AIMetadata["answer_source"] != answerSourceBusinessHours ||
+		store.lastTurn.AIMetadata["router_intent"] != "hours_question" {
+		t.Fatalf("detour metadata=%#v", store.lastTurn.AIMetadata)
+	}
+	assertGuidanceDidNotCallBookingTools(t, bookingTool)
+}
+
 func TestGuidanceCatalogOnlyUsesDataOwnedCategoriesWithoutInventingRecommendation(t *testing.T) {
 	store := newFakeConversationStore()
 	store.services = []ServiceOption{

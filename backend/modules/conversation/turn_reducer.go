@@ -176,6 +176,29 @@ func answerWithoutGenericBookingOffer(reply string) string {
 	return strings.TrimSpace(strings.TrimSuffix(reply, "Would you like help with an appointment?"))
 }
 
+func answerWithBookingResume(reply string, resume string) string {
+	reply = answerWithoutGenericBookingOffer(reply)
+	resume = strings.TrimSpace(resume)
+	if resume == "" {
+		return reply
+	}
+	// Structured informational answers may carry their own optional follow-up.
+	// During an active workflow, the state-owned resume question replaces that
+	// trailing question so the caller receives one clear next action.
+	if strings.HasSuffix(reply, "?") {
+		withoutQuestionMark := strings.TrimSpace(strings.TrimSuffix(reply, "?"))
+		if boundary := strings.LastIndexAny(withoutQuestionMark, ".!?"); boundary >= 0 {
+			reply = strings.TrimSpace(withoutQuestionMark[:boundary+1])
+		} else {
+			reply = ""
+		}
+	}
+	if reply == "" {
+		return resume
+	}
+	return strings.TrimSpace(reply + " " + resume)
+}
+
 func semanticServiceEditFallback(session *Session, message string, turn TurnUnderstanding, understanding serviceUnderstandingResult, services []ServiceOption) conversationDraftResult {
 	if session == nil || !turn.ModelInvoked || turn.CatalogFallback || len(turn.Acts) > 0 || len(turn.Questions) > 0 || !hasSelectedServiceDraft(*session) {
 		return conversationDraftResult{}

@@ -40,6 +40,9 @@ treat them as binding:
 - Conversation AnswerContext query-count, multi-replica freshness,
   observability, bounded EXPLAIN, and local performance evidence:
   `docs/operations/conversation-answer-context-performance.md`
+- Conversation semantic/routing/copy evidence levels, failure ownership,
+  bounded canaries, and prompt-change gate:
+  `docs/operations/conversation-semantic-quality.md`
 - Legacy POS/provider compatibility inventory, response interpretation, and
   removal gates: `docs/operations/owner-first-compatibility.md`
 - Tagged Owner-first code, PostgreSQL, tenant, and security release gate plus

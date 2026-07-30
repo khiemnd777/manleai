@@ -19389,7 +19389,7 @@
       "request": {
         "scenario_id": "",
         "channel": "phone",
-        "customer_message": "Which nail technicians can I book?",
+        "customer_message": "Which nail tech I can book with?",
         "expected_input": "caller_goal",
         "semantic_contract": "guidance_turn",
         "recognizable_guidance_actions": [
@@ -19586,7 +19586,7 @@
       "request": {
         "scenario_id": "",
         "channel": "phone",
-        "customer_message": "What is your late-arrival policy?",
+        "customer_message": "If I come late, salon policy is what?",
         "expected_input": "caller_goal",
         "semantic_contract": "guidance_turn",
         "recognizable_guidance_actions": [
@@ -20390,7 +20390,7 @@
       "request": {
         "scenario_id": "",
         "channel": "simulator",
-        "customer_message": "Which nail technicians can I book?",
+        "customer_message": "Which nail tech I can book with?",
         "expected_input": "caller_goal",
         "semantic_contract": "guidance_turn",
         "recognizable_guidance_actions": [
@@ -20587,7 +20587,7 @@
       "request": {
         "scenario_id": "",
         "channel": "simulator",
-        "customer_message": "What is your late-arrival policy?",
+        "customer_message": "If I come late, salon policy is what?",
         "expected_input": "caller_goal",
         "semantic_contract": "guidance_turn",
         "recognizable_guidance_actions": [
@@ -21391,7 +21391,7 @@
       "request": {
         "scenario_id": "",
         "channel": "phone",
-        "customer_message": "Hi, I'm calling the salon. Which nail technicians can I book?",
+        "customer_message": "Hi, I'm calling the salon. Which nail tech I can book with?",
         "expected_input": "caller_goal",
         "semantic_contract": "guidance_turn",
         "recognizable_guidance_actions": [
@@ -21588,7 +21588,7 @@
       "request": {
         "scenario_id": "",
         "channel": "phone",
-        "customer_message": "Hi, I'm calling the salon. What is your late-arrival policy?",
+        "customer_message": "Hi, I'm calling the salon. If I come late, salon policy is what?",
         "expected_input": "caller_goal",
         "semantic_contract": "guidance_turn",
         "recognizable_guidance_actions": [
@@ -22392,7 +22392,7 @@
       "request": {
         "scenario_id": "",
         "channel": "simulator",
-        "customer_message": "Sorry, let me start over. Which nail technicians can I book?",
+        "customer_message": "Sorry, let me start over. Which nail tech I can book with?",
         "expected_input": "caller_goal",
         "semantic_contract": "guidance_turn",
         "recognizable_guidance_actions": [
@@ -22589,7 +22589,7 @@
       "request": {
         "scenario_id": "",
         "channel": "simulator",
-        "customer_message": "Sorry, let me start over. What is your late-arrival policy?",
+        "customer_message": "Sorry, let me start over. If I come late, salon policy is what?",
         "expected_input": "caller_goal",
         "semantic_contract": "guidance_turn",
         "recognizable_guidance_actions": [
@@ -23393,7 +23393,7 @@
       "request": {
         "scenario_id": "",
         "channel": "phone",
-        "customer_message": "Thanks. My actual question is: Which nail technicians can I book?",
+        "customer_message": "Thanks. My actual question is: Which nail tech I can book with?",
         "expected_input": "caller_goal",
         "semantic_contract": "guidance_turn",
         "recognizable_guidance_actions": [
@@ -23590,7 +23590,7 @@
       "request": {
         "scenario_id": "",
         "channel": "phone",
-        "customer_message": "Thanks. My actual question is: What is your late-arrival policy?",
+        "customer_message": "Thanks. My actual question is: If I come late, salon policy is what?",
         "expected_input": "caller_goal",
         "semantic_contract": "guidance_turn",
         "recognizable_guidance_actions": [
@@ -71878,6 +71878,13 @@
         "forbidden_goals": [
           "human_handoff"
         ],
+        "required_acts": [
+          {
+            "kind": "set_field",
+            "entity": "staff",
+            "subject": "alternative"
+          }
+        ],
         "consultation": {},
         "safety": {
           "checked": true,
@@ -72139,6 +72146,13 @@
       "expected": {
         "forbidden_goals": [
           "human_handoff"
+        ],
+        "required_acts": [
+          {
+            "kind": "set_field",
+            "entity": "staff",
+            "subject": "alternative"
+          }
         ],
         "consultation": {},
         "safety": {
@@ -72402,6 +72416,13 @@
         "forbidden_goals": [
           "human_handoff"
         ],
+        "required_acts": [
+          {
+            "kind": "set_field",
+            "entity": "staff",
+            "subject": "alternative"
+          }
+        ],
         "consultation": {},
         "safety": {
           "checked": true,
@@ -72664,6 +72685,13 @@
         "forbidden_goals": [
           "human_handoff"
         ],
+        "required_acts": [
+          {
+            "kind": "set_field",
+            "entity": "staff",
+            "subject": "alternative"
+          }
+        ],
         "consultation": {},
         "safety": {
           "checked": true,
@@ -72925,6 +72953,13 @@
       "expected": {
         "forbidden_goals": [
           "human_handoff"
+        ],
+        "required_acts": [
+          {
+            "kind": "set_field",
+            "entity": "staff",
+            "subject": "alternative"
+          }
         ],
         "consultation": {},
         "safety": {

@@ -477,7 +477,11 @@ func (s *Service) handleGuidanceRecovery(
 			turn.AIMessage = serviceGuidanceMenuReply(services, consultationGuidanceAvailable(services, cfg))
 		} else if question.Mode != ConversationQuestionModeExistence {
 			followUp := guidanceCatalogFollowUp(session, services, cfg)
-			turn.AIMessage = strings.TrimSpace(turn.AIMessage + " " + followUp)
+			// A structured detail/comparison answer may already end with the
+			// useful next question. Do not append a second competing question.
+			if !strings.Contains(turn.AIMessage, "?") {
+				turn.AIMessage = strings.TrimSpace(turn.AIMessage + " " + followUp)
+			}
 		}
 		applyAnswerRouteMetadata(&turn, route, answerCtx)
 	case guidanceEvidenceBooking:
@@ -511,7 +515,7 @@ func (s *Service) handleGuidanceRecovery(
 	case guidanceEvidenceInformation:
 		question := ConversationQuestion{Subject: turnUnderstanding.GuidanceQuestionSubject, Mode: turnUnderstanding.GuidanceCatalogMode, Confidence: turnUnderstanding.Confidence}
 		route := routeStructuredQuestionAnswer(message, question, session, serviceUnderstanding, answerCtx, cfg, s.now)
-		if !route.Handled || route.Source == answerSourceBookingRedirect {
+		if !route.Handled {
 			return false, nil, nil
 		}
 		// Answer the operational question that was actually asked. A generic

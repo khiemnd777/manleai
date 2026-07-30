@@ -782,7 +782,7 @@
       "authored": true,
       "generated": false,
       "scope": "multi_turn_real_salon",
-      "live_canary": true,
+      "live_canary": false,
       "initial_state": {},
       "turns": [
         {
@@ -5882,7 +5882,7 @@
       "authored": true,
       "generated": false,
       "scope": "multi_turn_real_salon",
-      "live_canary": true,
+      "live_canary": false,
       "initial_state": {},
       "turns": [
         {
@@ -5895,8 +5895,8 @@
             "guidance_party_size": 0,
             "acts": null,
             "questions": null,
-            "confidence": 0.96,
-            "reason": "authored deterministic semantic fixture",
+            "confidence": 0.99,
+            "reason": "authored informational guidance fixture",
             "consultation": {
               "current_system": "",
               "desired_outcome": "",
@@ -6100,21 +6100,21 @@
       "authored": true,
       "generated": false,
       "scope": "multi_turn_real_salon",
-      "live_canary": true,
+      "live_canary": false,
       "initial_state": {},
       "turns": [
         {
           "customer_message": "How much are your manicure services?",
           "model_fixture": {
             "goal": "information",
-            "guidance_action": "service_catalog",
-            "guidance_catalog_mode": "list",
-            "guidance_question_subject": "catalog",
+            "guidance_action": "salon_question",
+            "guidance_catalog_mode": "",
+            "guidance_question_subject": "price",
             "guidance_party_size": 0,
             "acts": null,
             "questions": null,
-            "confidence": 0.96,
-            "reason": "authored deterministic semantic fixture",
+            "confidence": 0.99,
+            "reason": "authored informational guidance fixture",
             "consultation": {
               "current_system": "",
               "desired_outcome": "",
@@ -6267,21 +6267,21 @@
       "authored": true,
       "generated": false,
       "scope": "multi_turn_real_salon",
-      "live_canary": false,
+      "live_canary": true,
       "initial_state": {},
       "turns": [
         {
           "customer_message": "What time do you close on Saturday?",
           "model_fixture": {
             "goal": "information",
-            "guidance_action": "service_catalog",
-            "guidance_catalog_mode": "list",
-            "guidance_question_subject": "catalog",
+            "guidance_action": "salon_question",
+            "guidance_catalog_mode": "",
+            "guidance_question_subject": "hours",
             "guidance_party_size": 0,
             "acts": null,
             "questions": null,
-            "confidence": 0.96,
-            "reason": "authored deterministic semantic fixture",
+            "confidence": 0.99,
+            "reason": "authored informational guidance fixture",
             "consultation": {
               "current_system": "",
               "desired_outcome": "",
@@ -6453,14 +6453,14 @@
           "customer_message": "Do you take walk-ins?",
           "model_fixture": {
             "goal": "information",
-            "guidance_action": "service_catalog",
-            "guidance_catalog_mode": "list",
-            "guidance_question_subject": "catalog",
+            "guidance_action": "salon_question",
+            "guidance_catalog_mode": "",
+            "guidance_question_subject": "policy",
             "guidance_party_size": 0,
             "acts": null,
             "questions": null,
-            "confidence": 0.96,
-            "reason": "authored deterministic semantic fixture",
+            "confidence": 0.99,
+            "reason": "authored informational guidance fixture",
             "consultation": {
               "current_system": "",
               "desired_outcome": "",
@@ -6625,21 +6625,21 @@
       "authored": true,
       "generated": false,
       "scope": "multi_turn_real_salon",
-      "live_canary": false,
+      "live_canary": true,
       "initial_state": {},
       "turns": [
         {
           "customer_message": "Who can do a gel manicure?",
           "model_fixture": {
             "goal": "information",
-            "guidance_action": "service_catalog",
-            "guidance_catalog_mode": "list",
-            "guidance_question_subject": "catalog",
+            "guidance_action": "salon_question",
+            "guidance_catalog_mode": "",
+            "guidance_question_subject": "staff",
             "guidance_party_size": 0,
             "acts": null,
             "questions": null,
-            "confidence": 0.96,
-            "reason": "authored deterministic semantic fixture",
+            "confidence": 0.99,
+            "reason": "authored informational guidance fixture",
             "consultation": {
               "current_system": "",
               "desired_outcome": "",
@@ -6674,7 +6674,11 @@
               "false_booking_confirmation",
               "repeat_known_question"
             ],
-            "tool_policy": "none",
+            "tool_policy": "booking",
+            "allowed_tool_calls": [
+              "available_slots",
+              "create_booking"
+            ],
             "no_booking_side_effect": true,
             "final_reply_assertion": false
           }
@@ -6725,7 +6729,11 @@
               "false_booking_confirmation",
               "repeat_known_question"
             ],
-            "tool_policy": "none",
+            "tool_policy": "booking",
+            "allowed_tool_calls": [
+              "available_slots",
+              "create_booking"
+            ],
             "no_booking_side_effect": true,
             "final_reply_assertion": false
           }
@@ -6776,7 +6784,11 @@
               "false_booking_confirmation",
               "repeat_known_question"
             ],
-            "tool_policy": "none",
+            "tool_policy": "booking",
+            "allowed_tool_calls": [
+              "available_slots",
+              "create_booking"
+            ],
             "no_booking_side_effect": true,
             "final_reply_assertion": true
           }
@@ -6800,13 +6812,13 @@
           "model_fixture": {
             "goal": "information",
             "guidance_action": "service_catalog",
-            "guidance_catalog_mode": "list",
+            "guidance_catalog_mode": "existence",
             "guidance_question_subject": "catalog",
             "guidance_party_size": 0,
             "acts": null,
             "questions": null,
-            "confidence": 0.96,
-            "reason": "authored deterministic semantic fixture",
+            "confidence": 0.99,
+            "reason": "authored informational guidance fixture",
             "consultation": {
               "current_system": "",
               "desired_outcome": "",
@@ -6967,13 +6979,13 @@
           "model_fixture": {
             "goal": "information",
             "guidance_action": "service_catalog",
-            "guidance_catalog_mode": "list",
+            "guidance_catalog_mode": "existence",
             "guidance_question_subject": "catalog",
             "guidance_party_size": 0,
             "acts": null,
             "questions": null,
-            "confidence": 0.96,
-            "reason": "authored deterministic semantic fixture",
+            "confidence": 0.99,
+            "reason": "authored informational guidance fixture",
             "consultation": {
               "current_system": "",
               "desired_outcome": "",
@@ -7126,7 +7138,7 @@
       "authored": true,
       "generated": false,
       "scope": "multi_turn_real_salon",
-      "live_canary": false,
+      "live_canary": true,
       "initial_state": {},
       "turns": [
         {
@@ -7134,13 +7146,13 @@
           "model_fixture": {
             "goal": "information",
             "guidance_action": "service_catalog",
-            "guidance_catalog_mode": "list",
+            "guidance_catalog_mode": "compare",
             "guidance_question_subject": "catalog",
             "guidance_party_size": 0,
             "acts": null,
             "questions": null,
-            "confidence": 0.96,
-            "reason": "authored deterministic semantic fixture",
+            "confidence": 0.99,
+            "reason": "authored informational guidance fixture",
             "consultation": {
               "current_system": "",
               "desired_outcome": "",
@@ -7301,13 +7313,13 @@
           "model_fixture": {
             "goal": "information",
             "guidance_action": "service_catalog",
-            "guidance_catalog_mode": "list",
+            "guidance_catalog_mode": "count",
             "guidance_question_subject": "catalog",
             "guidance_party_size": 0,
             "acts": null,
             "questions": null,
-            "confidence": 0.96,
-            "reason": "authored deterministic semantic fixture",
+            "confidence": 0.99,
+            "reason": "authored informational guidance fixture",
             "consultation": {
               "current_system": "",
               "desired_outcome": "",
@@ -7460,21 +7472,21 @@
       "authored": true,
       "generated": false,
       "scope": "multi_turn_real_salon",
-      "live_canary": false,
+      "live_canary": true,
       "initial_state": {},
       "turns": [
         {
           "customer_message": "What is your cancellation policy?",
           "model_fixture": {
             "goal": "information",
-            "guidance_action": "service_catalog",
-            "guidance_catalog_mode": "list",
-            "guidance_question_subject": "catalog",
+            "guidance_action": "salon_question",
+            "guidance_catalog_mode": "",
+            "guidance_question_subject": "policy",
             "guidance_party_size": 0,
             "acts": null,
             "questions": null,
-            "confidence": 0.96,
-            "reason": "authored deterministic semantic fixture",
+            "confidence": 0.99,
+            "reason": "authored informational guidance fixture",
             "consultation": {
               "current_system": "",
               "desired_outcome": "",
@@ -11841,7 +11853,7 @@
       "authored": true,
       "generated": false,
       "scope": "multi_turn_real_salon",
-      "live_canary": true,
+      "live_canary": false,
       "initial_state": {},
       "turns": [
         {
@@ -15509,14 +15521,28 @@
           "customer_message": "Before I cancel, is there a cancellation fee?",
           "model_fixture": {
             "goal": "cancel_appointment",
-            "guidance_action": "cancel",
+            "guidance_action": "",
             "guidance_catalog_mode": "",
             "guidance_question_subject": "",
             "guidance_party_size": 0,
             "acts": null,
-            "questions": null,
-            "confidence": 0.96,
-            "reason": "authored deterministic semantic fixture",
+            "questions": [
+              {
+                "subject": "policy",
+                "mode": "details",
+                "service_ids": null,
+                "staff_ids": null,
+                "time_preference": {
+                  "direction": "",
+                  "hour": -1,
+                  "minute": -1
+                },
+                "confidence": 0.99,
+                "reason": ""
+              }
+            ],
+            "confidence": 0.99,
+            "reason": "authored informational full-turn fixture",
             "consultation": {
               "current_system": "",
               "desired_outcome": "",
@@ -15688,7 +15714,7 @@
       "authored": true,
       "generated": false,
       "scope": "multi_turn_real_salon",
-      "live_canary": true,
+      "live_canary": false,
       "initial_state": {},
       "turns": [
         {
@@ -16103,21 +16129,42 @@
       "authored": true,
       "generated": false,
       "scope": "multi_turn_real_salon",
-      "live_canary": false,
+      "live_canary": true,
       "initial_state": {},
       "turns": [
         {
-          "customer_message": "Start a gel manicure booking for Saturday.",
+          "customer_message": "Start a Willow Gel Manicure booking for Saturday.",
           "model_fixture": {
             "goal": "book_appointment",
-            "guidance_action": "book",
+            "guidance_action": "",
             "guidance_catalog_mode": "",
             "guidance_question_subject": "",
             "guidance_party_size": 0,
-            "acts": null,
+            "acts": [
+              {
+                "kind": "add_service",
+                "entity": "service",
+                "source_ids": null,
+                "target_ids": [
+                  "svc_willow_gel"
+                ],
+                "source_category_id": "",
+                "source_category_name": "",
+                "target_category_id": "",
+                "target_category_name": "",
+                "scope": "",
+                "guest_scope": "",
+                "guest_ref": "",
+                "subject": "",
+                "value": "",
+                "count": 0,
+                "confidence": 0.99,
+                "reason": "caller named the catalog service"
+              }
+            ],
             "questions": null,
-            "confidence": 0.96,
-            "reason": "authored deterministic semantic fixture",
+            "confidence": 0.99,
+            "reason": "authored booking selection fixture",
             "consultation": {
               "current_system": "",
               "desired_outcome": "",
@@ -16164,15 +16211,29 @@
         {
           "customer_message": "Before we continue, what time do you close?",
           "model_fixture": {
-            "goal": "unknown",
+            "goal": "book_appointment",
             "guidance_action": "",
             "guidance_catalog_mode": "",
             "guidance_question_subject": "",
             "guidance_party_size": 0,
             "acts": null,
-            "questions": null,
-            "confidence": 0.96,
-            "reason": "authored deterministic semantic fixture",
+            "questions": [
+              {
+                "subject": "hours",
+                "mode": "details",
+                "service_ids": null,
+                "staff_ids": null,
+                "time_preference": {
+                  "direction": "",
+                  "hour": -1,
+                  "minute": -1
+                },
+                "confidence": 0.99,
+                "reason": ""
+              }
+            ],
+            "confidence": 0.99,
+            "reason": "authored informational full-turn fixture",
             "consultation": {
               "current_system": "",
               "desired_outcome": "",

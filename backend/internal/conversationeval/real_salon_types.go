@@ -20,7 +20,7 @@ const (
 	RealSalonLiveCanaryJourneys = 10
 	RealSalonLiveModelCallLimit = 60
 	RealSalonCorpusContract     = "real-salon-multi-turn-v1"
-	RealSalonEvaluationContract = "real-salon-production-flow-v1"
+	RealSalonEvaluationContract = "real-salon-production-flow-v2"
 	RealSalonReviewContract     = "real-salon-transcript-review-v1"
 
 	RealSalonStatusStructuralValidated = "structural_validated"
@@ -155,6 +155,15 @@ type RealSalonTurnResult struct {
 	Turn                       int           `json:"turn"`
 	CustomerMessage            string        `json:"customer_message"`
 	AIReply                    string        `json:"ai_reply"`
+	TurnRoute                  string        `json:"turn_route,omitempty"`
+	TurnRouteReason            string        `json:"turn_route_reason,omitempty"`
+	DeterministicCoverage      string        `json:"deterministic_coverage,omitempty"`
+	InterpreterOutcome         string        `json:"interpreter_outcome,omitempty"`
+	AnswerSource               string        `json:"answer_source,omitempty"`
+	AnswerSourceReason         string        `json:"answer_source_reason,omitempty"`
+	RouterIntent               string        `json:"router_intent,omitempty"`
+	ReplySource                string        `json:"reply_source,omitempty"`
+	ReplyPolicy                string        `json:"reply_policy,omitempty"`
 	IntentBefore               string        `json:"intent_before,omitempty"`
 	IntentAfter                string        `json:"intent_after,omitempty"`
 	PhaseBefore                string        `json:"phase_before,omitempty"`

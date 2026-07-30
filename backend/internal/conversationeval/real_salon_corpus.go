@@ -12,7 +12,7 @@ func DefaultRealSalonCorpus() RealSalonCorpus {
 	journeys := []RealSalonJourney{
 		// 15 service advice and discovery journeys.
 		realJourney("advice-001", "service_advice_discovery", "Unsure what to book, then says nails are too long", conversation.ChannelSimulator, "lotus", true, RealSalonInitialState{}, "I don't know what service I should book for my nails.", "My nails are too long and I mainly want them shorter.", "They are natural nails, and I would prefer something easy to maintain.", "Which service in the salon's list best matches those needs?"),
-		realJourney("advice-002", "service_advice_discovery", "Asks broadly for a nail service", conversation.ChannelPhone, "lotus", true, RealSalonInitialState{}, "I want a service for my nails, but I am not sure which one.", "They keep breaking at the corners.", "I want to keep them short and natural for work."),
+		realJourney("advice-002", "service_advice_discovery", "Asks broadly for a nail service", conversation.ChannelPhone, "lotus", false, RealSalonInitialState{}, "I want a service for my nails, but I am not sure which one.", "They keep breaking at the corners.", "I want to keep them short and natural for work."),
 		realJourney("advice-003", "service_advice_discovery", "Wedding guest wants an appropriate service", conversation.ChannelPhone, "lotus", false, RealSalonInitialState{}, "I have a wedding to attend and need help choosing a nail service.", "I want an elegant glossy look, not extensions.", "The wedding is in two weeks, so I need it to last.", "Please recommend only a service that is actually in the salon catalog."),
 		realJourney("advice-004", "service_advice_discovery", "First salon visit for basic cleanup", conversation.ChannelSimulator, "willow", false, RealSalonInitialState{}, "This is my first nail salon visit. What should I get?", "I mostly need the shape and cuticles cleaned up.", "No color this time; I want a neat natural finish."),
 		realJourney("advice-005", "service_advice_discovery", "Nail biter wants a natural improvement", conversation.ChannelPhone, "lotus", false, RealSalonInitialState{}, "I bite my nails and do not know what appointment makes sense.", "I just want them to look healthier and more even.", "Please keep the result natural and not too long."),
@@ -45,16 +45,16 @@ func DefaultRealSalonCorpus() RealSalonCorpus {
 		realJourney("consult-015", "service_consultation_recommendation", "Customer asks about maintenance commitment", conversation.ChannelPhone, "lotus", false, RealSalonInitialState{}, "Help me choose something that does not need frequent salon maintenance.", "I want my natural nails to look polished.", "I can come back for removal, but I do not want extension fills."),
 
 		// 10 catalog and operating questions.
-		realJourney("question-001", "catalog_and_salon_questions", "Customer asks to see services before choosing", conversation.ChannelSimulator, "lotus", true, RealSalonInitialState{}, "Show me your services.", "Which of those are for natural fingernails?", "I want help picking between the natural-nail choices.", "Please compare the lower-cost and more durable choices without inventing details."),
-		realJourney("question-002", "catalog_and_salon_questions", "Price question without invented price data", conversation.ChannelPhone, "willow", true, RealSalonInitialState{}, "How much are your manicure services?", "I am asking about gel rather than regular polish.", "If the exact price is unavailable, please tell me how I can verify it."),
-		realJourney("question-003", "catalog_and_salon_questions", "Business-hours question then booking", conversation.ChannelPhone, "lotus", false, RealSalonInitialState{}, "What time do you close on Saturday?", "Great, do you offer gel manicures too?", "I would like to book one for 2027-03-13."),
+		realJourney("question-001", "catalog_and_salon_questions", "Customer asks to see services before choosing", conversation.ChannelSimulator, "lotus", false, RealSalonInitialState{}, "Show me your services.", "Which of those are for natural fingernails?", "I want help picking between the natural-nail choices.", "Please compare the lower-cost and more durable choices without inventing details."),
+		realJourney("question-002", "catalog_and_salon_questions", "Price question without invented price data", conversation.ChannelPhone, "willow", false, RealSalonInitialState{}, "How much are your manicure services?", "I am asking about gel rather than regular polish.", "If the exact price is unavailable, please tell me how I can verify it."),
+		realJourney("question-003", "catalog_and_salon_questions", "Business-hours question then booking", conversation.ChannelPhone, "lotus", true, RealSalonInitialState{}, "What time do you close on Saturday?", "Great, do you offer gel manicures too?", "I would like to book one for 2027-03-13."),
 		realJourney("question-004", "catalog_and_salon_questions", "Walk-in policy question", conversation.ChannelSimulator, "harbor", false, RealSalonInitialState{}, "Do you take walk-ins?", "If you cannot guarantee that, can I make an appointment instead?", "I need basic hand care next Tuesday."),
-		realJourney("question-005", "catalog_and_salon_questions", "Staff question remains catalog grounded", conversation.ChannelPhone, "lotus", false, RealSalonInitialState{}, "Who can do a gel manicure?", "I do not have a preferred technician.", "Can anyone available see me on 2027-03-15?"),
+		realJourney("question-005", "catalog_and_salon_questions", "Staff question remains catalog grounded", conversation.ChannelPhone, "lotus", true, RealSalonInitialState{}, "Who can do a gel manicure?", "I do not have a preferred technician.", "Can anyone available see me on 2027-03-15?"),
 		realJourney("question-006", "catalog_and_salon_questions", "Check whether a pedicure exists", conversation.ChannelSimulator, "willow", false, RealSalonInitialState{}, "Do you have a pedicure service?", "What is the foot-care option called?", "I only need something simple for my toes."),
 		realJourney("question-007", "catalog_and_salon_questions", "Ask whether removal is offered", conversation.ChannelPhone, "lotus", false, RealSalonInitialState{}, "Can you remove old gel?", "Can removal be followed by a new manicure?", "I want new gel after the old product comes off."),
-		realJourney("question-008", "catalog_and_salon_questions", "Ask for catalog-backed comparison", conversation.ChannelSimulator, "lotus", false, RealSalonInitialState{}, "What is the difference between your classic and gel manicure?", "Which one is described as more durable?", "I want the durable choice for natural nails."),
+		realJourney("question-008", "catalog_and_salon_questions", "Ask for catalog-backed comparison", conversation.ChannelSimulator, "lotus", true, RealSalonInitialState{}, "What is the difference between your classic and gel manicure?", "Which one is described as more durable?", "I want the durable choice for natural nails."),
 		realJourney("question-009", "catalog_and_salon_questions", "Ask how many manicure choices exist", conversation.ChannelPhone, "lotus", false, RealSalonInitialState{}, "How many manicure choices do you have?", "Please name the natural-nail options.", "I need help deciding after hearing the list."),
-		realJourney("question-010", "catalog_and_salon_questions", "Cancellation-policy question before booking", conversation.ChannelSimulator, "willow", false, RealSalonInitialState{}, "What is your cancellation policy?", "I understand if the exact policy needs owner confirmation.", "Can I still start a booking for a manicure?"),
+		realJourney("question-010", "catalog_and_salon_questions", "Cancellation-policy question before booking", conversation.ChannelSimulator, "willow", true, RealSalonInitialState{}, "What is your cancellation policy?", "I understand if the exact policy needs owner confirmation.", "Can I still start a booking for a manicure?"),
 
 		// 20 ordinary single-customer booking journeys. Each stops before confirmation.
 		realJourney("booking-001", "single_customer_booking", "Book gel manicure with open staff preference", conversation.ChannelPhone, "lotus", true, RealSalonInitialState{}, "I would like to book a gel manicure.", "Next Friday, 2027-03-12, works for me.", "Any technician is fine.", "The 2 PM option works.", "The appointment name is Jordan Lee.", "My callback number is 312-555-0188."),
@@ -79,7 +79,7 @@ func DefaultRealSalonCorpus() RealSalonCorpus {
 		realJourney("booking-020", "single_customer_booking", "Book after catalog list", conversation.ChannelSimulator, "lotus", false, RealSalonInitialState{}, "Tell me the manicure choices, then help me book one.", "I choose the classic manicure.", "I would like 2027-04-07 in the afternoon."),
 
 		// 10 party and group booking journeys.
-		realJourney("party-001", "party_group_booking", "Three friends need mixed services", conversation.ChannelPhone, "lotus", true, RealSalonInitialState{}, "I need appointments for three friends together.", "Two want gel manicures and one wants a spa pedicure.", "We are looking at 2027-04-09 around 2 PM.", "Staggered starts are okay if there is no common time."),
+		realJourney("party-001", "party_group_booking", "Three friends need mixed services", conversation.ChannelPhone, "lotus", false, RealSalonInitialState{}, "I need appointments for three friends together.", "Two want gel manicures and one wants a spa pedicure.", "We are looking at 2027-04-09 around 2 PM.", "Staggered starts are okay if there is no common time."),
 		realJourney("party-002", "party_group_booking", "Parent and child book different services", conversation.ChannelSimulator, "willow", false, RealSalonInitialState{}, "I want to book for me and my daughter.", "I need a gel manicure, and she needs a classic manicure.", "Saturday 2027-04-10 in the morning is best.", "We can use different technicians but would like nearby times."),
 		realJourney("party-003", "party_group_booking", "Four-person pedicure group", conversation.ChannelPhone, "lotus", false, RealSalonInitialState{}, "Can you help with a group of four for pedicures?", "All four want the spa pedicure.", "We would prefer 2027-04-12 after 3 PM."),
 		realJourney("party-004", "party_group_booking", "Bridal group asks about staggered times", conversation.ChannelSimulator, "lotus", false, RealSalonInitialState{}, "I am planning nails for a bridal group of five.", "Everyone wants gel manicures, and two also want nail art.", "Could you check 2027-04-13 even if the starts need to be staggered?"),
@@ -103,9 +103,9 @@ func DefaultRealSalonCorpus() RealSalonCorpus {
 		realJourney("change-010", "reschedule_cancel", "Customer asks policy before cancel action", conversation.ChannelSimulator, "lotus", false, RealSalonInitialState{BookingAction: conversation.BookingActionCancel}, "Before I cancel, is there a cancellation fee?", "If you cannot verify the fee, please do not invent it.", "I still want help identifying the appointment to cancel."),
 
 		// 10 corrections, interruptions, and multi-intent journeys.
-		realJourney("repair-001", "correction_interruption_multi_intent", "Correct service and date in one booking", conversation.ChannelSimulator, "lotus", true, RealSalonInitialState{}, "Book me a gel manicure for Friday.", "Actually, change the service to dip powder.", "And not Friday; please use Saturday 2027-04-30.", "Any technician is fine; please retain the corrected service and date."),
+		realJourney("repair-001", "correction_interruption_multi_intent", "Correct service and date in one booking", conversation.ChannelSimulator, "lotus", false, RealSalonInitialState{}, "Book me a gel manicure for Friday.", "Actually, change the service to dip powder.", "And not Friday; please use Saturday 2027-04-30.", "Any technician is fine; please retain the corrected service and date."),
 		realJourney("repair-002", "correction_interruption_multi_intent", "Correct staff without losing service", conversation.ChannelPhone, "lotus", false, RealSalonInitialState{}, "I need a classic manicure with Maya.", "Sorry, I meant anyone except Maya is fine.", "Keep the manicure and check 2027-05-01."),
-		realJourney("repair-003", "correction_interruption_multi_intent", "Answer hours question mid-booking", conversation.ChannelSimulator, "willow", false, RealSalonInitialState{}, "Start a gel manicure booking for Saturday.", "Before we continue, what time do you close?", "Okay, then look for an appointment before closing."),
+		realJourney("repair-003", "correction_interruption_multi_intent", "Answer hours question mid-booking", conversation.ChannelSimulator, "willow", true, RealSalonInitialState{}, "Start a Willow Gel Manicure booking for Saturday.", "Before we continue, what time do you close?", "Okay, then look for an appointment before closing."),
 		realJourney("repair-004", "correction_interruption_multi_intent", "Add second service after date is known", conversation.ChannelPhone, "lotus", false, RealSalonInitialState{}, "I want a classic manicure on 2027-05-03.", "Please add a spa pedicure for me too.", "Keep both services on the same day if possible."),
 		realJourney("repair-005", "correction_interruption_multi_intent", "Remove one service from a multi-service draft", conversation.ChannelSimulator, "lotus", false, RealSalonInitialState{}, "I need gel removal and a gel manicure.", "On second thought, remove the new manicure.", "I only want the gel removal on 2027-05-04."),
 		realJourney("repair-006", "correction_interruption_multi_intent", "Switch recommendation priority", conversation.ChannelPhone, "lotus", false, RealSalonInitialState{}, "Help me choose the longest-lasting natural nail service.", "Actually, keeping the cost lower is more important.", "I am okay with regular polish if that fits better."),
@@ -130,6 +130,7 @@ func DefaultRealSalonCorpus() RealSalonCorpus {
 	}
 	applyRealSalonToolPolicyOverrides(journeys)
 	applyRealSalonServiceExpectations(journeys)
+	applyRealSalonInformationalFixtures(journeys)
 	applyRealSalonConsultationFixtures(journeys)
 	return RealSalonCorpus{
 		SchemaVersion: RealSalonSchemaVersion, ContractVersion: RealSalonCorpusContract,
@@ -145,6 +146,7 @@ func applyRealSalonToolPolicyOverrides(journeys []RealSalonJourney) {
 	bookingJourneys := map[string]bool{
 		"question-003": true,
 		"question-004": true,
+		"question-005": true,
 		"failure-005":  true,
 	}
 	for journeyIndex := range journeys {
@@ -205,6 +207,73 @@ func applyRealSalonServiceExpectations(journeys []RealSalonJourney) {
 				Reason: "authored service-selection fixture for this journey turn",
 			}}
 		}
+	}
+}
+
+// applyRealSalonInformationalFixtures replaces the broad family default for
+// authored informational journeys with their exact structured meaning. These
+// are evaluator-owned fixtures keyed by stable journey/turn identity; they do
+// not classify caller text and never participate in production routing.
+func applyRealSalonInformationalFixtures(journeys []RealSalonJourney) {
+	fixtures := map[string]map[int]voice.TurnModelReply{
+		"question-001": {0: realSalonGuidanceQuestionFixture(conversation.GuidanceActionServiceCatalog, conversation.ConversationQuestionModeList, conversation.ConversationQuestionCatalog)},
+		"question-002": {0: realSalonGuidanceQuestionFixture(conversation.GuidanceActionSalonQuestion, "", conversation.ConversationQuestionPrice)},
+		"question-003": {0: realSalonGuidanceQuestionFixture(conversation.GuidanceActionSalonQuestion, "", conversation.ConversationQuestionHours)},
+		"question-004": {0: realSalonGuidanceQuestionFixture(conversation.GuidanceActionSalonQuestion, "", conversation.ConversationQuestionPolicy)},
+		"question-005": {0: realSalonGuidanceQuestionFixture(conversation.GuidanceActionSalonQuestion, "", conversation.ConversationQuestionStaff)},
+		"question-006": {0: realSalonGuidanceQuestionFixture(conversation.GuidanceActionServiceCatalog, conversation.ConversationQuestionModeExistence, conversation.ConversationQuestionCatalog)},
+		"question-007": {0: realSalonGuidanceQuestionFixture(conversation.GuidanceActionServiceCatalog, conversation.ConversationQuestionModeExistence, conversation.ConversationQuestionCatalog)},
+		"question-008": {0: realSalonGuidanceQuestionFixture(conversation.GuidanceActionServiceCatalog, conversation.ConversationQuestionModeCompare, conversation.ConversationQuestionCatalog)},
+		"question-009": {0: realSalonGuidanceQuestionFixture(conversation.GuidanceActionServiceCatalog, conversation.ConversationQuestionModeCount, conversation.ConversationQuestionCatalog)},
+		"question-010": {0: realSalonGuidanceQuestionFixture(conversation.GuidanceActionSalonQuestion, "", conversation.ConversationQuestionPolicy)},
+		"change-010":   {0: realSalonFullQuestionFixture("cancel_appointment", conversation.ConversationQuestionPolicy, conversation.ConversationQuestionModeDetails)},
+		"repair-003": {
+			0: realSalonFullServiceSelectionFixture("svc_willow_gel"),
+			1: realSalonFullQuestionFixture("book_appointment", conversation.ConversationQuestionHours, conversation.ConversationQuestionModeDetails),
+		},
+	}
+	for journeyIndex := range journeys {
+		turns, ok := fixtures[journeys[journeyIndex].ID]
+		if !ok {
+			continue
+		}
+		for turnIndex, fixture := range turns {
+			if turnIndex < 0 || turnIndex >= len(journeys[journeyIndex].Turns) {
+				continue
+			}
+			journeys[journeyIndex].Turns[turnIndex].ModelFixture = fixture
+		}
+	}
+}
+
+func realSalonGuidanceQuestionFixture(action string, mode string, subject string) voice.TurnModelReply {
+	return voice.TurnModelReply{
+		Goal: conversation.GuidanceGoalForAction(action), GuidanceAction: action,
+		GuidanceCatalogMode: mode, GuidanceQuestionSubject: subject,
+		Confidence: 0.99, Reason: "authored informational guidance fixture",
+		Safety: voice.SafetyModelReply{Concern: false, Confidence: 0.99, Reason: "no safety concern in authored fixture"},
+	}
+}
+
+func realSalonFullQuestionFixture(goal string, subject string, mode string) voice.TurnModelReply {
+	return voice.TurnModelReply{
+		Goal: goal, Confidence: 0.99, Reason: "authored informational full-turn fixture",
+		Questions: []voice.QuestionModelReply{{
+			Subject: subject, Mode: mode, Confidence: 0.99,
+			TimePreference: voice.TimePreferenceModelReply{Hour: -1, Minute: -1},
+		}},
+		Safety: voice.SafetyModelReply{Concern: false, Confidence: 0.99, Reason: "no safety concern in authored fixture"},
+	}
+}
+
+func realSalonFullServiceSelectionFixture(serviceID string) voice.TurnModelReply {
+	return voice.TurnModelReply{
+		Goal: "book_appointment", Confidence: 0.99, Reason: "authored booking selection fixture",
+		Acts: []voice.ActModelReply{{
+			Kind: conversation.ConversationActAdd, Entity: conversation.ConversationEntityService,
+			TargetIDs: []string{serviceID}, Confidence: 0.99, Reason: "caller named the catalog service",
+		}},
+		Safety: voice.SafetyModelReply{Concern: false, Confidence: 0.99, Reason: "no safety concern in authored fixture"},
 	}
 }
 
