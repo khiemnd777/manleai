@@ -482,9 +482,11 @@ func TestTurnContractCircuitSuppressesRepeatedInvalidRequestsAndProbeClearsIt(t 
 }
 
 func TestTurnContractCircuitResetsWhenSalonRuntimeConfigurationChanges(t *testing.T) {
-	adapter := NewAdapter(config.OpenAIVoiceConfig{
-		APIKey: "test-key", BaseURL: "https://openai.test/v1", ReplyModel: "gpt-test-v1",
-	})
+	resolver := &mutableTestResolver{resolved: testResolvedConfig("salon_runtime_change", "gpt-test-v1")}
+	adapter, err := NewTenantBoundAdapter(resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
 	requestCount := 0
 	adapter.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		requestCount++
@@ -502,7 +504,8 @@ func TestTurnContractCircuitResetsWhenSalonRuntimeConfigurationChanges(t *testin
 	if _, err := adapter.InterpretTurn(context.Background(), request); err == nil {
 		t.Fatal("first invalid contract request succeeded")
 	}
-	adapter.cfg.ReplyModel = "gpt-test-v2"
+	resolver.resolved.Config.ReplyModel = "gpt-test-v2"
+	resolver.resolved.ConfigVersion++
 	if _, err := adapter.InterpretTurn(context.Background(), request); err != nil || requestCount != 2 {
 		t.Fatalf("changed runtime config did not reset circuit: err=%v request_count=%d", err, requestCount)
 	}

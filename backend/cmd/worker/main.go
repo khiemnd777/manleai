@@ -19,10 +19,12 @@ import (
 	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
 	notificationdelivery "github.com/manleai/ai-receptionist/modules/notification_delivery"
 	notificationtwilio "github.com/manleai/ai-receptionist/modules/notification_twilio"
+	openairuntimeverification "github.com/manleai/ai-receptionist/modules/openai_runtime_verification"
 	operationshealth "github.com/manleai/ai-receptionist/modules/operations_health"
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/pos_square"
 	schedulingretention "github.com/manleai/ai-receptionist/modules/scheduling_retention"
+	"github.com/manleai/ai-receptionist/modules/voice_openai"
 )
 
 const (
@@ -44,6 +46,8 @@ const (
 	customerNotificationBatchLimit       = customernotification.DefaultProcessBatch
 	schedulingPIIRetentionPollInterval   = 5 * time.Minute
 	schedulingPIIRetentionBatchLimit     = schedulingretention.DefaultProcessBatch
+	openAIVerificationPollInterval       = 15 * time.Second
+	openAIVerificationBatchLimit         = 2
 )
 
 func main() {
@@ -75,6 +79,13 @@ func main() {
 	posRepo := pos.NewRepository(db)
 	integrationConfigRepo := integrationconfig.NewRepository(db)
 	integrationConfigService := integrationconfig.NewService(integrationConfigRepo, cipher, cfg)
+	openAIAdapter, err := voice_openai.NewTenantBoundAdapter(integrationConfigService)
+	if err != nil {
+		log.Fatalf("create tenant-bound OpenAI adapter: %v", err)
+	}
+	openAIVerificationProcessor := openairuntimeverification.NewService(
+		openairuntimeverification.NewRepository(db), integrationConfigService, openAIAdapter,
+	)
 	squareAdapter := pos_square.NewSquareAdapter(cfg.Square, posRepo, cipher)
 	squareAdapter.SetConfigResolver(integrationConfigService)
 	processor := pos.NewSyncProcessor(posRepo, []pos.POSProvider{squareAdapter})
@@ -95,7 +106,7 @@ func main() {
 	)
 	schedulingPIIRetention := schedulingretention.NewProcessor(schedulingretention.NewRepository(db))
 
-	logg.Info("worker started", "scope", "pos_sync_jobs,booking_lease_recovery,availability_quote_cleanup,square_booking_webhooks,square_calendar_repair,conversation_retention,notification_delivery,customer_notification_delivery,scheduling_pii_retention", "interval", posSyncPollInterval.String(), "batch_limit", posSyncBatchLimit)
+	logg.Info("worker started", "scope", "pos_sync_jobs,booking_lease_recovery,availability_quote_cleanup,square_booking_webhooks,square_calendar_repair,conversation_retention,notification_delivery,customer_notification_delivery,scheduling_pii_retention,openai_runtime_verification", "interval", posSyncPollInterval.String(), "batch_limit", posSyncBatchLimit)
 
 	operationsHealthRepo := operationshealth.NewRepository(db)
 	scheduler := newRecurringJobScheduler(operationsHealthRepo)
@@ -152,6 +163,13 @@ func main() {
 			interval: conversationRetentionPollInterval,
 			run: func(ctx context.Context) (int, error) {
 				return conversationRetention.ProcessOnce(ctx, conversationRetentionRedactionLimit)
+			},
+		},
+		recurringJob{
+			name:     "openai_runtime_verification",
+			interval: openAIVerificationPollInterval,
+			run: func(ctx context.Context) (int, error) {
+				return openAIVerificationProcessor.ProcessOnce(ctx, openAIVerificationBatchLimit)
 			},
 		},
 		recurringJob{

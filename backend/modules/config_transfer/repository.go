@@ -736,7 +736,6 @@ func upsertTwilioConfig(ctx context.Context, tx *sql.Tx, salonID string, cfg int
 
 func upsertOpenAIConfig(ctx context.Context, tx *sql.Tx, salonID string, cfg integrationconfig.OpenAISettingsResponse) error {
 	settings := map[string]string{
-		"base_url":               cfg.BaseURL,
 		"transcription_model":    cfg.TranscriptionModel,
 		"reply_model":            cfg.ReplyModel,
 		"speech_model":           cfg.SpeechModel,
@@ -748,7 +747,7 @@ func upsertOpenAIConfig(ctx context.Context, tx *sql.Tx, salonID string, cfg int
 		"realtime_noise_profile": cfg.RealtimeNoiseProfile,
 		"realtime_instructions":  cfg.RealtimeInstructions,
 	}
-	return upsertConfigSettings(ctx, tx, salonID, "openai", cfg.Enabled, settings)
+	return upsertConfigSettings(ctx, tx, salonID, "openai", false, settings)
 }
 
 func upsertConfigSettings(ctx context.Context, tx *sql.Tx, salonID string, provider string, enabled bool, settings map[string]string) error {
@@ -760,8 +759,7 @@ func upsertConfigSettings(ctx context.Context, tx *sql.Tx, salonID string, provi
 		INSERT INTO salon_integration_configs (salon_id, provider, enabled, settings, secrets_encrypted)
 		VALUES ($1, $2, $3, $4::jsonb, NULL)
 		ON CONFLICT (salon_id, provider)
-		DO UPDATE SET enabled = EXCLUDED.enabled,
-		              settings = EXCLUDED.settings,
+		DO UPDATE SET settings = salon_integration_configs.settings || EXCLUDED.settings,
 		              updated_at = now()
 	`, salonID, provider, enabled, string(settingsJSON))
 	return err

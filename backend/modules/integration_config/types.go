@@ -13,15 +13,18 @@ const (
 )
 
 type StoredConfig struct {
-	ID               string
-	SalonID          string
-	Provider         string
-	Enabled          bool
-	Settings         map[string]string
-	SecretsEncrypted string
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-	Version          int64
+	ID                        string
+	SalonID                   string
+	Provider                  string
+	Enabled                   bool
+	Settings                  map[string]string
+	SecretsEncrypted          string
+	CredentialFingerprintHMAC string
+	CredentialRevision        int64
+	DestinationProfile        string
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
+	Version                   int64
 }
 
 type TechnicalMutationControl struct {
@@ -112,7 +115,11 @@ type OpenAISettingsResponse struct {
 	Provider             string     `json:"provider"`
 	Enabled              bool       `json:"enabled"`
 	Configured           bool       `json:"configured"`
-	BaseURL              string     `json:"base_url"`
+	RuntimeResolvable    bool       `json:"runtime_resolvable,omitempty"`
+	RuntimeBlockers      []string   `json:"runtime_blockers,omitempty"`
+	BaseURL              string     `json:"base_url,omitempty"`
+	DestinationProfile   string     `json:"destination_profile,omitempty"`
+	DestinationManaged   bool       `json:"destination_managed,omitempty"`
 	TranscriptionModel   string     `json:"transcription_model"`
 	ReplyModel           string     `json:"reply_model"`
 	SpeechModel          string     `json:"speech_model"`
@@ -125,6 +132,8 @@ type OpenAISettingsResponse struct {
 	RealtimeInstructions string     `json:"realtime_instructions"`
 	APIKeyConfigured     bool       `json:"api_key_configured"`
 	APIKeySource         string     `json:"api_key_source"`
+	CredentialRevision   int64      `json:"credential_revision,omitempty"`
+	CredentialUnique     bool       `json:"credential_unique,omitempty"`
 	UpdatedAt            *time.Time `json:"updated_at,omitempty"`
 	Version              int64      `json:"version"`
 	Replayed             bool       `json:"replayed,omitempty"`

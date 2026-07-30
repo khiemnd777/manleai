@@ -52,7 +52,7 @@ test("review signature changes when source, scope, or uploaded bundle changes", 
     source_type: "json_upload",
     included_sections: ["knowledge_base"],
     configuration: {
-      schema_version: "manleai.salon_configuration.v9",
+      schema_version: "manleai.salon_configuration.v10",
       exported_at: "2026-07-28T00:00:00Z",
       secrets_exported: false,
       operational_data_exported: false,
@@ -66,7 +66,7 @@ test("review signature changes when source, scope, or uploaded bundle changes", 
     source_type: "json_upload",
     included_sections: ["knowledge_base"],
     configuration: {
-      schema_version: "manleai.salon_configuration.v9",
+      schema_version: "manleai.salon_configuration.v10",
       exported_at: "2026-07-28T00:00:00Z",
       secrets_exported: false,
       operational_data_exported: false,
@@ -104,8 +104,19 @@ test("v7 runtime scope and pre-v7 schemas fail closed", () => {
   );
   assert.throws(
     () => inspectPlatformConfiguration(configuration("manleai.salon_configuration.v6", ["service_categories"])),
-    /supports v9, v8, and scoped content-only v7/
+    /supports v10, v9, v8, and scoped content-only v7/
   );
+});
+
+test("v10 and compatibility v9 files require explicit section scope", () => {
+  for (const schemaVersion of ["manleai.salon_configuration.v10", "manleai.salon_configuration.v9"]) {
+    const inspected = inspectPlatformConfiguration(configuration(schemaVersion, ["integrations"]));
+    assert.deepEqual(inspected.included_sections, ["integrations"]);
+    assert.throws(
+      () => inspectPlatformConfiguration(configuration(schemaVersion)),
+      /must declare included_sections/
+    );
+  }
 });
 
 test("v8 files without an explicit scope use the legacy full portable section set", () => {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -220,10 +221,40 @@ func TestTwilioTransferTreatsTenantRouteIdentityAsNonPortable(t *testing.T) {
 	}
 }
 
-func TestIntegrationProviderScopeKeepsV9AbsenceAsNoOpAndV8AsCompatibilityInput(t *testing.T) {
-	v9, err := normalizeIntegrationProviders(PlatformSchemaVersion, nil)
-	if err != nil || len(v9) != 0 {
-		t.Fatalf("v9 providers=%v/%v, want explicit no-op", v9, err)
+func TestOpenAITransferSerializesOnlyPortableModelAndVoiceSettings(t *testing.T) {
+	source := integrationconfig.IntegrationConfigsResponse{OpenAI: integrationconfig.OpenAISettingsResponse{
+		Provider: integrationconfig.ProviderOpenAI, Enabled: true, Configured: true,
+		RuntimeResolvable: true, RuntimeBlockers: []string{}, BaseURL: "https://api.openai.com/v1",
+		DestinationProfile: "openai_public", DestinationManaged: true,
+		TranscriptionModel: "transcribe", ReplyModel: "reply", SpeechModel: "speech", SpeechVoice: "voice",
+		APIKeyConfigured: true, APIKeySource: integrationconfig.SecretSourceDatabase,
+		CredentialRevision: 9, CredentialUnique: true,
+	}}
+	normalized := normalizeIntegrationConfigs(source)
+	raw, err := json.Marshal(normalized.OpenAI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialized := string(raw)
+	for _, forbidden := range []string{
+		"runtime_resolvable", "runtime_blockers", "base_url", "destination_profile",
+		"destination_managed", "credential_revision", "credential_unique",
+	} {
+		if strings.Contains(serialized, `"`+forbidden+`"`) {
+			t.Fatalf("OpenAI transfer serialized operational field %q: %s", forbidden, serialized)
+		}
+	}
+	if normalized.OpenAI.Enabled || normalized.OpenAI.APIKeyConfigured || !strings.Contains(serialized, `"reply_model":"reply"`) {
+		t.Fatalf("normalized OpenAI transfer=%#v json=%s", normalized.OpenAI, serialized)
+	}
+}
+
+func TestIntegrationProviderScopeKeepsV10V9AbsenceAsNoOpAndV8AsCompatibilityInput(t *testing.T) {
+	for _, schemaVersion := range []string{PlatformSchemaVersion, LegacyPlatformSchemaV9} {
+		providers, err := normalizeIntegrationProviders(schemaVersion, nil)
+		if err != nil || len(providers) != 0 {
+			t.Fatalf("%s providers=%v/%v, want explicit no-op", schemaVersion, providers, err)
+		}
 	}
 	v8, err := normalizeIntegrationProviders(SchemaVersion, nil)
 	if err != nil || len(v8) != 3 {

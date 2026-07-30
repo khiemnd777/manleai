@@ -500,7 +500,11 @@ export type OpenAIIntegrationConfig = {
   provider: "openai" | string;
   enabled: boolean;
   configured: boolean;
+  runtime_resolvable?: boolean;
+  runtime_blockers?: string[];
   base_url: string;
+  destination_profile: string;
+  destination_managed: boolean;
   transcription_model: string;
   reply_model: string;
   speech_model: string;
@@ -513,9 +517,44 @@ export type OpenAIIntegrationConfig = {
   realtime_instructions: string;
   api_key_configured: boolean;
   api_key_source: string;
+  credential_revision?: number;
+  credential_unique?: boolean;
   updated_at?: string;
   version?: number;
   replayed?: boolean;
+};
+
+export type OpenAIRuntimeVerificationCapability = {
+  capability: string;
+  required: boolean;
+  status: "pending" | "running" | "verified" | "failed" | "stale" | "not_required" | string;
+  latency_ms?: number;
+  provider_request_id?: string;
+  error_code?: string;
+  verified_at?: string;
+};
+
+export type OpenAIRuntimeVerification = {
+  id: string;
+  salon_id: string;
+  status: "queued" | "claimed" | "succeeded" | "failed" | "stale" | string;
+  fresh: boolean;
+  config_version: number;
+  credential_revision: number;
+  destination_policy_version: string;
+  verification_contract_version: string;
+  attempt_count: number;
+  error_code?: string;
+  capabilities: OpenAIRuntimeVerificationCapability[];
+  started_at?: string;
+  completed_at?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type OpenAIRuntimeVerificationResponse = {
+  verification: OpenAIRuntimeVerification;
+  replayed: boolean;
 };
 
 export type IntegrationConfigs = {

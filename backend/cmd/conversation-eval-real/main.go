@@ -16,6 +16,7 @@ import (
 	"github.com/manleai/ai-receptionist/internal/conversationeval"
 	"github.com/manleai/ai-receptionist/internal/database"
 	"github.com/manleai/ai-receptionist/internal/encryption"
+	"github.com/manleai/ai-receptionist/internal/openairuntime"
 	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
 )
 
@@ -85,14 +86,14 @@ func main() {
 			fatalf("create database secret cipher: %v", err)
 		}
 		integrationService := integrationconfig.NewService(integrationconfig.NewRepository(db), cipher, cfg)
-		storedConfig, enabled, err := integrationService.ResolveOpenAIConfigStrict(context.Background(), strings.TrimSpace(configSalonID))
+		storedConfig, err := integrationService.ResolveOpenAIRuntimeConfig(context.Background(), strings.TrimSpace(configSalonID))
 		if err != nil {
 			fatalf("resolve database-backed OpenAI integration config: %v", err)
 		}
-		if !enabled {
+		if !storedConfig.Enabled {
 			fatalf("database-backed OpenAI integration is disabled for config salon")
 		}
-		model := conversationeval.NewOpenAIDirectModel(pinnedResolver{cfg: storedConfig})
+		model := conversationeval.NewOpenAIDirectModel(pinnedResolver{runtimeSalonID: "real-salon-evaluation", resolved: storedConfig})
 		report, err = conversationeval.RunRealSalonLive(
 			context.Background(), corpus, model,
 			conversationeval.JSONRealSalonCheckpointStore{Path: checkpointPath},
@@ -121,11 +122,17 @@ func main() {
 }
 
 type pinnedResolver struct {
-	cfg config.OpenAIVoiceConfig
+	runtimeSalonID string
+	resolved       openairuntime.ResolvedConfig
 }
 
-func (r pinnedResolver) ResolveOpenAIConfig(context.Context, string) (config.OpenAIVoiceConfig, bool, error) {
-	return r.cfg, true, nil
+func (r pinnedResolver) ResolveOpenAIRuntimeConfig(_ context.Context, salonID string) (openairuntime.ResolvedConfig, error) {
+	if strings.TrimSpace(salonID) == "" || strings.TrimSpace(salonID) != strings.TrimSpace(r.runtimeSalonID) {
+		return openairuntime.ResolvedConfig{}, openairuntime.ErrInvalidSalon
+	}
+	resolved := r.resolved
+	resolved.SalonID = strings.TrimSpace(r.runtimeSalonID)
+	return resolved, nil
 }
 
 func readCorpus(path string) (conversationeval.RealSalonCorpus, error) {

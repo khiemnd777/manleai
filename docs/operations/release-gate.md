@@ -104,6 +104,11 @@ coverage includes:
   base-table policy, runtime-role negative coverage for unbound and cross-tenant
   reads/writes, and a PostgreSQL policy-catalog audit that rejects remaining
   direct broad system-scope branches;
+- V84 OpenAI tenant/config/credential/destination fences, purpose-separated
+  credential uniqueness identity, official-destination-only transport,
+  durable per-capability verification evidence, bounded worker discovery, and
+  exact returned-tenant processing; release tests use fake transports and do
+  not call OpenAI;
 - tenant quota/usage accounting, provider-write rejection, and fair worker
   claim limits without cross-tenant starvation;
 - immutable V74 Tenant/Platform principal scope, fail-closed mixed-identity

@@ -52,7 +52,10 @@ treat them as binding:
 - Owner-operational SMS delivery, strict Twilio messaging configuration,
   callback verification, retry/dead-letter policy, and incident handling:
   `docs/operations/owner-notification-delivery.md`
-- Voice, Twilio, OpenAI, realtime phone behavior, and live phone demo setup: `docs/api.md`, `docs/agents/phone-booking-demo-config-memo.md`
+- Voice, Twilio, OpenAI, realtime phone behavior, tenant-bound OpenAI rollout,
+  and live phone demo setup: `docs/api.md`,
+  `docs/operations/openai-tenant-runtime.md`,
+  `docs/agents/phone-booking-demo-config-memo.md`
 - Design/UI/UX contract: `DESIGN.md`
 - Domain language and product scope: `CONTEXT.md`
 

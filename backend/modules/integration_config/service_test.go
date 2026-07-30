@@ -11,6 +11,7 @@ import (
 	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/internal/encryption"
+	"github.com/manleai/ai-receptionist/internal/openairuntime"
 )
 
 func TestIntegrationConfigResponseJSONNeverSerializesProviderSecrets(t *testing.T) {
@@ -32,7 +33,8 @@ func TestIntegrationConfigResponseJSONNeverSerializesProviderSecrets(t *testing.
 		}),
 		OpenAI: service.openAIResponse(&StoredConfig{
 			Provider: ProviderOpenAI, Enabled: true, SecretsEncrypted: "ciphertext",
-			Settings: map[string]string{"base_url": "https://api.openai.com/v1", "reply_model": "gpt-safe"},
+			CredentialFingerprintHMAC: "openai-credential-fingerprint-must-not-leak",
+			Settings:                  map[string]string{"base_url": "https://api.openai.com/v1", "reply_model": "gpt-safe"},
 		}),
 	}
 
@@ -44,6 +46,7 @@ func TestIntegrationConfigResponseJSONNeverSerializesProviderSecrets(t *testing.
 	for _, secret := range []string{
 		"square-secret-value", "square-webhook-secret-value", "twilio-auth-secret",
 		"AC00000000000000000000000000000000", "openai-secret-value",
+		"openai-credential-fingerprint-must-not-leak",
 		"+15555550123", "MG11111111111111111111111111111111", "+15555550456",
 	} {
 		if strings.Contains(serialized, secret) {
@@ -317,9 +320,10 @@ func TestOpenAIResponseCanonicalizesLegacyRealtimeNoiseProfile(t *testing.T) {
 
 func TestResolveOpenAIConfigStrictUsesOnlyEncryptedDatabaseRecord(t *testing.T) {
 	store := &fakeIntegrationConfigStore{existing: &StoredConfig{
-		SalonID: "salon_1", Provider: ProviderOpenAI, Enabled: true,
+		ID: "config_1", SalonID: "salon_1", Provider: ProviderOpenAI, Enabled: true,
+		Version: 1, CredentialRevision: 1, DestinationProfile: "openai_public", CredentialFingerprintHMAC: strings.Repeat("a", 64),
 		Settings: map[string]string{
-			"base_url": "https://stored.openai.test/v1", "reply_model": "stored-model",
+			"base_url": "https://api.openai.com/v1", "reply_model": "stored-model",
 			"transcription_model": "stored-transcribe", "speech_model": "stored-speech", "speech_voice": "alloy",
 		},
 		SecretsEncrypted: "ciphertext",
@@ -336,7 +340,7 @@ func TestResolveOpenAIConfigStrictUsesOnlyEncryptedDatabaseRecord(t *testing.T) 
 	if err != nil || !enabled {
 		t.Fatalf("strict resolve enabled=%t err=%v", enabled, err)
 	}
-	if cfg.APIKey != "database-key" || cfg.BaseURL != "https://stored.openai.test/v1" || cfg.ReplyModel != "stored-model" {
+	if cfg.APIKey != "database-key" || cfg.BaseURL != "https://api.openai.com/v1" || cfg.ReplyModel != "stored-model" {
 		t.Fatalf("strict config used fallback or wrong source: %#v", cfg)
 	}
 }
@@ -348,6 +352,86 @@ func TestResolveOpenAIConfigStrictFailsClosedWithoutStoredRecord(t *testing.T) {
 	}
 	if _, _, err := service.ResolveOpenAIConfigStrict(context.Background(), "salon_1"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("strict resolve error=%v, want ErrNotFound", err)
+	}
+}
+
+func TestUpdateOpenAIRejectsEveryTenantControlledDestinationBeforePersistence(t *testing.T) {
+	store := &fakeIntegrationConfigStore{}
+	service := &Service{repo: store, cipher: &fakeSecretCipher{}, cfg: config.Config{EncryptionKey: "identity-root"}}
+	for _, destination := range []string{
+		"http://api.openai.com/v1",
+		"https://localhost/v1",
+		"https://10.0.0.1/v1",
+		"https://169.254.169.254/v1",
+		"https://api.openai.com.evil.test/v1",
+		"https://user:password@api.openai.com/v1",
+	} {
+		request := validOpenAIUpdateRequest()
+		request.BaseURL = destination
+		if _, err := service.UpdateOpenAI(context.Background(), "salon_1", "owner_1", request); !errors.Is(err, ErrValidation) {
+			t.Fatalf("destination %q error=%v", destination, err)
+		}
+	}
+	if store.upsertCalls != 0 {
+		t.Fatalf("invalid destinations persisted %d times", store.upsertCalls)
+	}
+}
+
+func TestUpdateOpenAIBlankKeyPreservesSameDestinationCredentialIdentity(t *testing.T) {
+	existingFingerprint, err := openairuntime.CredentialFingerprint("identity-root", "existing-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeIntegrationConfigStore{existing: &StoredConfig{
+		ID: "config_1", SalonID: "salon_1", Provider: ProviderOpenAI, Enabled: true,
+		Version: 4, CredentialRevision: 5, CredentialFingerprintHMAC: existingFingerprint,
+		DestinationProfile: openairuntime.DestinationProfile, SecretsEncrypted: "existing-ciphertext",
+		Settings: map[string]string{"base_url": openairuntime.CanonicalBaseURL},
+	}}
+	cipher := &fakeSecretCipher{decryptPlaintext: `{"api_key":"existing-key"}`}
+	service := &Service{repo: store, cipher: cipher, cfg: config.Config{EncryptionKey: "identity-root"}}
+	request := validOpenAIUpdateRequest()
+	request.APIKey = ""
+	response, err := service.UpdateOpenAI(context.Background(), "salon_1", "owner_1", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cipher.encryptCalls != 0 || store.upserted.SecretsEncrypted != "existing-ciphertext" {
+		t.Fatalf("unchanged key was re-encrypted: calls=%d stored=%q", cipher.encryptCalls, store.upserted.SecretsEncrypted)
+	}
+	if store.upserted.CredentialRevision != 5 || store.upserted.CredentialFingerprintHMAC != existingFingerprint || store.upserted.DestinationProfile != openairuntime.DestinationProfile {
+		t.Fatalf("preserved identity=%#v", store.upserted)
+	}
+	if response.BaseURL != openairuntime.CanonicalBaseURL || !response.DestinationManaged || !response.RuntimeResolvable {
+		t.Fatalf("response=%#v", response)
+	}
+}
+
+func TestUpdateOpenAINewKeyRotatesCredentialIdentityAndRevision(t *testing.T) {
+	store := &fakeIntegrationConfigStore{existing: &StoredConfig{
+		ID: "config_1", SalonID: "salon_1", Provider: ProviderOpenAI, Enabled: true,
+		Version: 4, CredentialRevision: 5,
+		CredentialFingerprintHMAC: strings.Repeat("a", 64), DestinationProfile: openairuntime.DestinationProfile,
+		SecretsEncrypted: "existing-ciphertext", Settings: map[string]string{"base_url": openairuntime.CanonicalBaseURL},
+	}}
+	cipher := &fakeSecretCipher{decryptPlaintext: `{"api_key":"existing-key"}`}
+	service := &Service{repo: store, cipher: cipher, cfg: config.Config{EncryptionKey: "identity-root"}}
+	request := validOpenAIUpdateRequest()
+	request.APIKey = "rotated-key"
+	if _, err := service.UpdateOpenAI(context.Background(), "salon_1", "owner_1", request); err != nil {
+		t.Fatal(err)
+	}
+	if cipher.encryptCalls != 1 || store.upserted.CredentialRevision != 6 || len(store.upserted.CredentialFingerprintHMAC) != 64 || store.upserted.CredentialFingerprintHMAC == strings.Repeat("a", 64) || strings.Contains(store.upserted.CredentialFingerprintHMAC, "rotated-key") {
+		t.Fatalf("rotated identity=%#v encrypt_calls=%d", store.upserted, cipher.encryptCalls)
+	}
+}
+
+func validOpenAIUpdateRequest() UpdateOpenAISettingsRequest {
+	return UpdateOpenAISettingsRequest{
+		Enabled: true, APIKey: "new-key", BaseURL: openairuntime.CanonicalBaseURL,
+		TranscriptionModel: "transcribe", ReplyModel: "reply",
+		SpeechModel: "speech", SpeechVoice: "voice",
+		SpeechOutputMode: config.OpenAISpeechOutputStreamingTTS,
 	}
 }
 
@@ -387,7 +471,7 @@ func TestRuntimeResolversKeepSquareBootstrapButFailClosedForMissingVoiceConfigs(
 		t.Fatalf("missing Twilio response leaked legacy environment config: %#v", twilioResponse)
 	}
 	openAIResponse := service.openAIResponse(nil)
-	if openAIResponse.Enabled || openAIResponse.Configured || openAIResponse.BaseURL != "" || openAIResponse.ReplyModel != "" || openAIResponse.APIKeySource != SecretSourceNone {
+	if openAIResponse.Enabled || openAIResponse.Configured || openAIResponse.BaseURL != "https://api.openai.com/v1" || !openAIResponse.DestinationManaged || openAIResponse.ReplyModel != "" || openAIResponse.APIKeySource != SecretSourceNone {
 		t.Fatalf("missing OpenAI response leaked legacy environment config: %#v", openAIResponse)
 	}
 }
@@ -527,7 +611,7 @@ func TestPlatformPersistedConfigurationNeverExportsLegacyFallback(t *testing.T) 
 	if response.Square.ClientID != "" || response.Square.ClientSecretConfigured || response.Twilio.AuthTokenConfigured {
 		t.Fatalf("strict Platform response inherited legacy fallback: %#v", response)
 	}
-	if response.OpenAI.BaseURL != "https://stored.example.com/v1" || response.OpenAI.ReplyModel != "stored-model" {
+	if response.OpenAI.BaseURL != "https://api.openai.com/v1" || !response.OpenAI.DestinationManaged || response.OpenAI.ReplyModel != "stored-model" {
 		t.Fatalf("strict Platform response lost persisted settings: %#v", response.OpenAI)
 	}
 }
@@ -587,11 +671,12 @@ func TestRuntimeResolversUseCompleteStoredConfigsWithoutLegacyMixing(t *testing.
 	}
 
 	openAI := &Service{repo: &fakeIntegrationConfigStore{existing: &StoredConfig{
-		SalonID: "salon_1", Provider: ProviderOpenAI, Enabled: true, SecretsEncrypted: "ciphertext",
-		Settings: map[string]string{"base_url": "https://stored-openai.example.com/v1", "transcription_model": "stored-transcribe", "reply_model": "stored-reply", "speech_model": "stored-speech", "speech_voice": "stored-voice"},
+		ID: "config_1", SalonID: "salon_1", Provider: ProviderOpenAI, Enabled: true, SecretsEncrypted: "ciphertext",
+		Version: 1, CredentialRevision: 1, DestinationProfile: "openai_public", CredentialFingerprintHMAC: strings.Repeat("b", 64),
+		Settings: map[string]string{"base_url": "https://api.openai.com/v1", "transcription_model": "stored-transcribe", "reply_model": "stored-reply", "speech_model": "stored-speech", "speech_voice": "stored-voice"},
 	}}, cipher: &fakeSecretCipher{decryptPlaintext: `{"api_key":"stored-key"}`}, cfg: legacy}
 	openAICfg, enabled, err := openAI.ResolveOpenAIConfig(context.Background(), "salon_1")
-	if err != nil || !enabled || openAICfg.APIKey != "stored-key" || openAICfg.ReplyModel != "stored-reply" || openAICfg.BaseURL != "https://stored-openai.example.com/v1" {
+	if err != nil || !enabled || openAICfg.APIKey != "stored-key" || openAICfg.ReplyModel != "stored-reply" || openAICfg.BaseURL != "https://api.openai.com/v1" {
 		t.Fatalf("stored OpenAI config/enabled/error = %#v/%t/%v", openAICfg, enabled, err)
 	}
 }
@@ -616,7 +701,7 @@ func TestStoredDisabledProvidersStayDisabled(t *testing.T) {
 	}
 	openAI := &Service{repo: &fakeIntegrationConfigStore{existing: &StoredConfig{SalonID: "salon_1", Provider: ProviderOpenAI, Enabled: false, Settings: map[string]string{}, SecretsEncrypted: "ciphertext"}}, cipher: &fakeSecretCipher{decryptPlaintext: secrets}, cfg: legacy}
 	cfg, enabled, err := openAI.ResolveOpenAIConfig(context.Background(), "salon_1")
-	if err != nil || enabled || cfg.APIKey != "stored-openai-key" {
+	if err != nil || enabled || cfg.APIKey != "" {
 		t.Fatalf("disabled OpenAI config/enabled/error = %#v/%t/%v", cfg, enabled, err)
 	}
 }
@@ -834,6 +919,12 @@ func (f *fakeIntegrationConfigStore) Upsert(_ context.Context, cfg StoredConfig)
 	copyValue := cfg
 	if copyValue.ID == "" && f.existing != nil {
 		copyValue.ID = f.existing.ID
+	}
+	if copyValue.Version == 0 {
+		copyValue.Version = 1
+		if f.existing != nil {
+			copyValue.Version = f.existing.Version + 1
+		}
 	}
 	return &copyValue, nil
 }

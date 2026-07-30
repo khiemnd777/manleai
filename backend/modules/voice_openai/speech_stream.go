@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -22,7 +21,7 @@ const (
 )
 
 func (a *Adapter) StreamSpeech(ctx context.Context, salonID string, input voice.SpeechStreamRequest, onChunk func(voice.SpeechChunk) error) (voice.SpeechStreamResult, error) {
-	cfg, enabled, err := a.configFor(ctx, salonID)
+	cfg, enabled, _, err := a.configFor(ctx, salonID)
 	if err != nil {
 		return voice.SpeechStreamResult{}, err
 	}
@@ -60,11 +59,11 @@ func (a *Adapter) StreamSpeech(ctx context.Context, salonID string, input voice.
 
 	res, err := a.httpClient.Do(req)
 	if err != nil {
-		return voice.SpeechStreamResult{}, err
+		return voice.SpeechStreamResult{}, &voice.ProviderRequestError{Provider: voice.ProviderOpenAI, Stage: "speech_stream_response", Err: err}
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return voice.SpeechStreamResult{}, fmt.Errorf("openai speech failed with status %d", res.StatusCode)
+		return voice.SpeechStreamResult{}, providerResponseError(res, "speech_stream_response")
 	}
 
 	limited := &io.LimitedReader{R: res.Body, N: maxSpeechResponseBytes + 1}

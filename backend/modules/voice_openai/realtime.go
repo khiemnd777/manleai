@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/manleai/ai-receptionist/internal/config"
+	"github.com/manleai/ai-receptionist/internal/openairuntime"
 	"github.com/manleai/ai-receptionist/modules/voice"
 )
 
@@ -21,7 +22,7 @@ const realtimeReadyTimeout = 5 * time.Second
 const realtimeTranscriptionPromptMaxLength = 1024
 
 func (a *Adapter) ConnectRealtime(ctx context.Context, salonID string, opts voice.RealtimeSessionOptions) (voice.RealtimeSession, error) {
-	cfg, enabled, err := a.configFor(ctx, salonID)
+	cfg, enabled, _, err := a.configFor(ctx, salonID)
 	if err != nil {
 		return nil, err
 	}
@@ -29,9 +30,17 @@ func (a *Adapter) ConnectRealtime(ctx context.Context, salonID string, opts voic
 		return nil, voice.ErrProviderDisabled
 	}
 	header := realtimeHeaders(cfg)
-	conn, _, err := (&websocket.Dialer{HandshakeTimeout: 15 * time.Second}).DialContext(ctx, realtimeURL(cfg), header)
+	conn, response, err := (&websocket.Dialer{
+		HandshakeTimeout: 15 * time.Second,
+		Proxy:            nil,
+		NetDialContext:   openairuntime.SafeDialContext,
+	}).DialContext(ctx, realtimeURL(cfg), header)
 	if err != nil {
-		return nil, err
+		if response != nil {
+			defer response.Body.Close()
+			return nil, providerResponseError(response, "realtime_connect")
+		}
+		return nil, &voice.ProviderRequestError{Provider: voice.ProviderOpenAI, Stage: "realtime_connect", Err: err}
 	}
 	session := &realtimeSession{
 		conn:             conn,
@@ -467,19 +476,9 @@ func realtimeUsesLegacyProtocol(model string) bool {
 }
 
 func realtimeURL(cfg config.OpenAIVoiceConfig) string {
-	base := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
-	if base == "" {
-		base = "https://api.openai.com/v1"
-	}
-	switch {
-	case strings.HasPrefix(base, "https://"):
-		base = "wss://" + strings.TrimPrefix(base, "https://")
-	case strings.HasPrefix(base, "http://"):
-		base = "ws://" + strings.TrimPrefix(base, "http://")
-	}
 	values := url.Values{}
 	values.Set("model", strings.TrimSpace(cfg.RealtimeModel))
-	return base + "/realtime?" + values.Encode()
+	return "wss://api.openai.com/v1/realtime?" + values.Encode()
 }
 
 func realtimeInstructions(extra string) string {

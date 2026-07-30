@@ -15,6 +15,7 @@ import (
 	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/internal/databasecontext"
 	"github.com/manleai/ai-receptionist/internal/encryption"
+	"github.com/manleai/ai-receptionist/internal/openairuntime"
 	"github.com/manleai/ai-receptionist/internal/twiliovoice"
 )
 
@@ -117,7 +118,11 @@ func strictTwilioResponse(s *Service, item *StoredConfig) TwilioSettingsResponse
 
 func strictOpenAIResponse(s *Service, item *StoredConfig) OpenAISettingsResponse {
 	if item == nil {
-		return OpenAISettingsResponse{Provider: ProviderOpenAI, APIKeySource: SecretSourceNone}
+		return OpenAISettingsResponse{
+			Provider: ProviderOpenAI, APIKeySource: SecretSourceNone,
+			BaseURL: openairuntime.CanonicalBaseURL, DestinationProfile: openairuntime.DestinationProfile,
+			DestinationManaged: true, RuntimeBlockers: []string{"integration_config_missing"},
+		}
 	}
 	return s.openAIResponse(item)
 }
@@ -455,7 +460,7 @@ func (s *Service) UpdateOpenAI(ctx context.Context, salonID string, ownerUserID 
 
 func (s *Service) UpdateOpenAIForPlatform(ctx context.Context, salonID, actorUserID string, req UpdateOpenAISettingsRequest) (*OpenAISettingsResponse, error) {
 	command, err := technicalMutationCommand(actorUserID, ProviderOpenAI, "integration_config.openai.updated", req.TechnicalMutationControl, req,
-		[]string{"enabled", "api_key", "base_url", "transcription_model", "reply_model", "speech_model", "speech_voice", "speech_output_mode", "realtime"})
+		[]string{"enabled", "api_key", "destination_profile", "transcription_model", "reply_model", "speech_model", "speech_voice", "speech_output_mode", "realtime"})
 	if err != nil {
 		return nil, err
 	}
@@ -463,8 +468,12 @@ func (s *Service) UpdateOpenAIForPlatform(ctx context.Context, salonID, actorUse
 }
 
 func (s *Service) updateOpenAIForSalon(ctx context.Context, salonID string, req UpdateOpenAISettingsRequest, command *TechnicalMutationCommand) (*OpenAISettingsResponse, error) {
+	requestedBaseURL := strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
+	if requestedBaseURL != "" && requestedBaseURL != openairuntime.CanonicalBaseURL {
+		return nil, ErrValidation
+	}
 	settings := map[string]string{
-		"base_url":               strings.TrimRight(strings.TrimSpace(req.BaseURL), "/"),
+		"base_url":               openairuntime.CanonicalBaseURL,
 		"transcription_model":    strings.TrimSpace(req.TranscriptionModel),
 		"reply_model":            strings.TrimSpace(req.ReplyModel),
 		"speech_model":           strings.TrimSpace(req.SpeechModel),
@@ -476,13 +485,7 @@ func (s *Service) updateOpenAIForSalon(ctx context.Context, salonID string, req 
 		"realtime_noise_profile": config.NormalizeOpenAIRealtimeNoiseProfile(req.RealtimeNoiseProfile),
 		"realtime_instructions":  strings.TrimSpace(req.RealtimeInstructions),
 	}
-	if settings["base_url"] != "" {
-		parsed, err := url.ParseRequestURI(settings["base_url"])
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			return nil, ErrValidation
-		}
-	}
-	if req.Enabled && (settings["base_url"] == "" || settings["transcription_model"] == "" || settings["reply_model"] == "" || settings["speech_model"] == "" || settings["speech_voice"] == "") {
+	if req.Enabled && (settings["transcription_model"] == "" || settings["reply_model"] == "" || settings["speech_model"] == "" || settings["speech_voice"] == "") {
 		return nil, ErrValidation
 	}
 	if req.Enabled && req.RealtimeEnabled && (settings["realtime_model"] == "" || settings["realtime_voice"] == "") {
@@ -494,6 +497,10 @@ func (s *Service) updateOpenAIForSalon(ctx context.Context, salonID string, req 
 	}
 	secrets = updateSecret(secrets, "api_key", req.APIKey, req.ClearAPIKey)
 	secretMutation := strings.TrimSpace(req.APIKey) != "" || req.ClearAPIKey
+	apiKey := strings.TrimSpace(secrets["api_key"])
+	if req.Enabled && apiKey == "" {
+		return nil, ErrValidation
+	}
 	encryptedSecrets := ""
 	if existing != nil && !secretMutation {
 		encryptedSecrets = existing.SecretsEncrypted
@@ -503,12 +510,41 @@ func (s *Service) updateOpenAIForSalon(ctx context.Context, salonID string, req 
 			return nil, err
 		}
 	}
+	credentialFingerprint := ""
+	credentialRevision := int64(0)
+	if existing != nil {
+		credentialRevision = existing.CredentialRevision
+	}
+	if secretMutation {
+		credentialRevision++
+	}
+	if apiKey != "" {
+		credentialFingerprint, err = openairuntime.CredentialFingerprint(s.cfg.EncryptionKey, apiKey)
+		if err != nil {
+			return nil, err
+		}
+		if credentialRevision == 0 {
+			credentialRevision = 1
+		}
+	}
+	preflight := openairuntime.ResolvedConfig{
+		SalonID: salonID, IntegrationConfigID: "pending", ConfigVersion: 1,
+		CredentialRevision: credentialRevision, CredentialIdentityEstablished: credentialFingerprint != "",
+		DestinationProfile: openairuntime.DestinationProfile,
+		Enabled:            req.Enabled, Config: openAIConfigFromSettings(settings, apiKey),
+	}
+	if req.Enabled && !openairuntime.Validate(preflight).Ready {
+		return nil, ErrValidation
+	}
 	updated, replayed, err := s.persistConfig(ctx, StoredConfig{
-		SalonID:          salonID,
-		Provider:         ProviderOpenAI,
-		Enabled:          req.Enabled,
-		Settings:         settings,
-		SecretsEncrypted: encryptedSecrets,
+		SalonID:                   salonID,
+		Provider:                  ProviderOpenAI,
+		Enabled:                   req.Enabled,
+		Settings:                  settings,
+		SecretsEncrypted:          encryptedSecrets,
+		CredentialFingerprintHMAC: credentialFingerprint,
+		CredentialRevision:        credentialRevision,
+		DestinationProfile:        openairuntime.DestinationProfile,
 	}, command)
 	if err != nil {
 		return nil, err
@@ -641,20 +677,43 @@ func (s *Service) ResolveTwilioVoiceRoute(ctx context.Context, routeID string) (
 }
 
 func (s *Service) ResolveOpenAIConfig(ctx context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error) {
-	item, secrets, err := s.resolveStored(ctx, salonID, ProviderOpenAI)
+	resolved, err := s.ResolveOpenAIRuntimeConfig(ctx, salonID)
 	if err != nil {
 		return config.OpenAIVoiceConfig{}, false, err
 	}
-	cfg := openAIConfigFromStored(item, secrets)
+	return resolved.Config, resolved.Enabled, nil
+}
+
+func (s *Service) ResolveOpenAIRuntimeConfig(ctx context.Context, salonID string) (openairuntime.ResolvedConfig, error) {
+	salonID = strings.TrimSpace(salonID)
+	if salonID == "" {
+		return openairuntime.ResolvedConfig{}, openairuntime.ErrInvalidSalon
+	}
+	item, err := s.repo.Get(ctx, salonID, ProviderOpenAI)
+	if err != nil {
+		return openairuntime.ResolvedConfig{}, err
+	}
+	resolved := openairuntime.ResolvedConfig{
+		SalonID: item.SalonID, IntegrationConfigID: item.ID, ConfigVersion: item.Version,
+		CredentialRevision:            item.CredentialRevision,
+		CredentialIdentityEstablished: strings.TrimSpace(item.CredentialFingerprintHMAC) != "",
+		DestinationProfile:            item.DestinationProfile,
+		Enabled:                       item.Enabled,
+	}
 	if !item.Enabled {
-		return cfg, false, nil
+		resolved.Config = openAIConfigFromStored(item, nil)
+		return resolved, nil
 	}
-	if cfg.APIKey == "" || cfg.BaseURL == "" || cfg.TranscriptionModel == "" ||
-		cfg.ReplyModel == "" || cfg.SpeechModel == "" || cfg.SpeechVoice == "" ||
-		(cfg.RealtimeEnabled && (strings.TrimSpace(item.Settings["realtime_model"]) == "" || cfg.RealtimeVoice == "")) {
-		return config.OpenAIVoiceConfig{}, false, ErrValidation
+	secrets, err := s.decryptSecrets(item.SecretsEncrypted)
+	if err != nil {
+		return openairuntime.ResolvedConfig{}, err
 	}
-	return cfg, true, nil
+	resolved.Config = openAIConfigFromStored(item, secrets)
+	validation := openairuntime.Validate(resolved)
+	if !validation.Ready {
+		return openairuntime.ResolvedConfig{}, ErrValidation
+	}
+	return resolved, nil
 }
 
 // ResolveOpenAIConfigStrict resolves only the encrypted salon-scoped database
@@ -662,18 +721,7 @@ func (s *Service) ResolveOpenAIConfig(ctx context.Context, salonID string) (conf
 // paid evaluation workflows that must fail closed on missing, unreadable, or
 // incomplete stored configuration.
 func (s *Service) ResolveOpenAIConfigStrict(ctx context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error) {
-	item, secrets, err := s.resolveStored(ctx, salonID, ProviderOpenAI)
-	if err != nil {
-		return config.OpenAIVoiceConfig{}, false, err
-	}
-	cfg := openAIConfigFromStored(item, secrets)
-	if !item.Enabled {
-		return cfg, false, nil
-	}
-	if cfg.APIKey == "" || cfg.BaseURL == "" || cfg.ReplyModel == "" {
-		return config.OpenAIVoiceConfig{}, false, ErrValidation
-	}
-	return cfg, true, nil
+	return s.ResolveOpenAIConfig(ctx, salonID)
 }
 
 func (s *Service) existingConfigAndSecrets(ctx context.Context, salonID string, provider string) (*StoredConfig, map[string]string, error) {
@@ -778,6 +826,10 @@ func openAIConfigFromStored(item *StoredConfig, secrets map[string]string) confi
 		RealtimeNoiseProfile: config.NormalizeOpenAIRealtimeNoiseProfile(item.Settings["realtime_noise_profile"]),
 		RealtimeInstructions: strings.TrimSpace(item.Settings["realtime_instructions"]),
 	}
+}
+
+func openAIConfigFromSettings(settings map[string]string, apiKey string) config.OpenAIVoiceConfig {
+	return openAIConfigFromStored(&StoredConfig{Settings: settings}, map[string]string{"api_key": apiKey})
 }
 
 func (s *Service) squareResponse(item *StoredConfig) SquareSettingsResponse {
@@ -1043,17 +1095,33 @@ func (s *Service) openAIResponse(item *StoredConfig) OpenAISettingsResponse {
 		enabled = item.Enabled
 	}
 	secretSource := SecretSourceNone
+	apiKey := ""
 	if item != nil {
-		if secrets, err := s.decryptSecrets(item.SecretsEncrypted); err == nil && strings.TrimSpace(secrets["api_key"]) != "" {
-			secretSource = SecretSourceDatabase
+		if secrets, err := s.decryptSecrets(item.SecretsEncrypted); err == nil {
+			apiKey = strings.TrimSpace(secrets["api_key"])
+			if apiKey != "" {
+				secretSource = SecretSourceDatabase
+			}
 		}
 	}
+	resolved := openairuntime.ResolvedConfig{
+		SalonID: salonIDFromItem(item), IntegrationConfigID: storedID(item), ConfigVersion: storedVersion(item),
+		CredentialRevision:            storedCredentialRevision(item),
+		CredentialIdentityEstablished: item != nil && strings.TrimSpace(item.CredentialFingerprintHMAC) != "",
+		DestinationProfile:            storedDestinationProfile(item),
+		Enabled:                       enabled, Config: openAIConfigFromSettings(settingsFromItem(item), apiKey),
+	}
+	validation := openairuntime.Validate(resolved)
 	updatedAt := updatedAt(item)
 	return OpenAISettingsResponse{
 		Provider:             ProviderOpenAI,
 		Enabled:              enabled,
-		Configured:           enabled && secretSource != SecretSourceNone && cfg.TranscriptionModel != "" && cfg.ReplyModel != "" && cfg.SpeechModel != "" && cfg.SpeechVoice != "",
-		BaseURL:              cfg.BaseURL,
+		Configured:           validation.Ready,
+		RuntimeResolvable:    validation.Ready,
+		RuntimeBlockers:      validation.Blockers,
+		BaseURL:              openairuntime.CanonicalBaseURL,
+		DestinationProfile:   openairuntime.DestinationProfile,
+		DestinationManaged:   true,
 		TranscriptionModel:   cfg.TranscriptionModel,
 		ReplyModel:           cfg.ReplyModel,
 		SpeechModel:          cfg.SpeechModel,
@@ -1066,6 +1134,8 @@ func (s *Service) openAIResponse(item *StoredConfig) OpenAISettingsResponse {
 		RealtimeInstructions: cfg.RealtimeInstructions,
 		APIKeyConfigured:     secretSource != SecretSourceNone,
 		APIKeySource:         secretSource,
+		CredentialRevision:   storedCredentialRevision(item),
+		CredentialUnique:     item != nil && item.CredentialFingerprintHMAC != "",
 		UpdatedAt:            updatedAt,
 		Version:              storedVersion(item),
 	}
@@ -1076,6 +1146,34 @@ func storedVersion(item *StoredConfig) int64 {
 		return 0
 	}
 	return item.Version
+}
+
+func storedID(item *StoredConfig) string {
+	if item == nil {
+		return ""
+	}
+	return item.ID
+}
+
+func storedCredentialRevision(item *StoredConfig) int64 {
+	if item == nil {
+		return 0
+	}
+	return item.CredentialRevision
+}
+
+func storedDestinationProfile(item *StoredConfig) string {
+	if item == nil {
+		return ""
+	}
+	return item.DestinationProfile
+}
+
+func settingsFromItem(item *StoredConfig) map[string]string {
+	if item == nil {
+		return map[string]string{"base_url": openairuntime.CanonicalBaseURL}
+	}
+	return item.Settings
 }
 
 func (s *Service) decryptSecrets(encrypted string) (map[string]string, error) {

@@ -329,8 +329,8 @@ RPO/RTO evidence.
 
 - [x] Mount configuration transfer only under the Platform tenant detail
   `Transfer` tab; do not restore Tenant Settings or onboarding transfer routes.
-- [x] Support direct tenant-to-tenant sources and schema-v9 JSON upload with
-  schema-v8 upload compatibility and explicit section scope.
+- [x] Support direct tenant-to-tenant sources and schema-v10 JSON upload with
+  schema-v9 and schema-v8 upload compatibility and explicit section scope.
 - [x] Accept only explicitly scoped content-only v7 packs, canonicalize them to
   v8 before fingerprint/audit/apply, and reject v7 runtime/provider scope plus
   all v1-v6 uploads on the mounted Platform surface.
@@ -702,3 +702,30 @@ ledger rather than reusing owner-notification consent or state.
   release that unmounts shared Twilio Voice routes and removes Voice ingress
   phone fallback. Do not claim the fleet-wide tenant-routing guarantee before
   both this item and the per-tenant live-evidence item are complete.
+
+## OpenAI tenant-bound rollout
+
+- [x] Add V84 credential uniqueness identity/revision, fixed destination
+  profile, durable verification runs/capabilities/events, immutable safe audit,
+  exact-tenant RLS, and bounded worker claim contract.
+- [x] Require a tenant resolver for the production OpenAI adapter; reject blank
+  and cross-tenant resolution before network; remove plaintext credentials from
+  circuit identities; allow only official HTTPS/WSS destination with no
+  redirects, environment proxy, or unsafe DNS/dial target.
+- [x] Decouple Twilio ingress from OpenAI configuration so missing/unreadable
+  OpenAI falls back to recording/Gather rather than blocking the tenant-bound
+  webhook.
+- [x] Add Platform Technical managed-destination, runtime-resolvable blockers,
+  credential revision/uniqueness state, explicit async verification, and
+  truthful saved-versus-live-verified copy.
+- [x] Ship Platform Configuration Transfer schema v10 with v9 input
+  compatibility; transfer only portable OpenAI model/voice settings and
+  preserve/exclude target credential, destination, enabled state, and
+  verification evidence.
+- [ ] Apply the production preflight and save every active tenant OpenAI row so
+  it has canonical destination and credential identity/revision.
+- [ ] Resolve every `OPENAI_CREDENTIAL_TENANT_CONFLICT` by rotating one tenant
+  key; never disable the uniqueness index or copy identity fields.
+- [ ] Queue a live verification for every active tenant, retain fresh success
+  for all required capabilities, then witness a bounded real call. CI and
+  release self-tests must remain live-provider-free.

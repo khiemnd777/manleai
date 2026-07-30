@@ -28,8 +28,9 @@ safe error class/code, and owner-workflow links.
 The worker currently registers `pos_sync_jobs`, `booking_lease_recovery`,
 `availability_quote_cleanup`, `square_booking_webhooks`,
 `square_calendar_repair`, `conversation_retention`, and
-`notification_delivery`, `customer_notification_delivery`, and
-`scheduling_pii_retention`. A newly registered future job automatically gets a
+`notification_delivery`, `customer_notification_delivery`,
+`scheduling_pii_retention`, and `openai_runtime_verification`. A newly
+registered future job automatically gets a
 ledger row and appears under its stable technical name; owner copy and a safe
 workflow link should be added to the operations-health display policy when the
 job becomes a supported product operation.

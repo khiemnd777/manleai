@@ -222,6 +222,23 @@ func TestIncomingWebhookReturnsRealtimeNoticeAndDefersGreetingToOpenAI(t *testin
 			},
 		},
 	}, voice.AIProviders{Realtime: fakeTwilioRealtimeProvider{configured: true}})
+	service.SetConfigResolver(&fakeTenantTwilioRouteResolver{
+		route: config.TwilioVoiceRouteConfig{
+			SalonID: "salon_1", PublicBaseURL: "http://voice.example.com",
+			TwilioVoiceConfig: config.TwilioVoiceConfig{
+				AuthToken: "secret", RoutingEnabled: true, VoiceTransport: voice.InputModeRealtimeStream,
+				IncomingPath: "/api/voice/twilio/incoming", TurnPath: "/api/voice/twilio/turn",
+				RecordingPath: "/api/voice/twilio/recording", StreamPath: "/api/voice/twilio/stream",
+			},
+		},
+		openAI: config.OpenAIVoiceConfig{
+			APIKey: "openai-key", BaseURL: "https://api.openai.com/v1",
+			TranscriptionModel: "gpt-4o-mini-transcribe", ReplyModel: "gpt-4.1-mini",
+			SpeechModel: "tts-1", SpeechVoice: "alloy", RealtimeEnabled: true,
+			RealtimeModel: "gpt-realtime-2", RealtimeVoice: "alloy",
+		},
+		openAIEnabled: true,
+	})
 	app := testTwilioApp(adapter, service)
 	form := url.Values{
 		"CallSid": {"CA123"},
@@ -2164,8 +2181,10 @@ func phoneSessionWithAIReply(reply string, status string, outcome string) *conve
 }
 
 type fakeTenantTwilioRouteResolver struct {
-	route config.TwilioVoiceRouteConfig
-	err   error
+	route         config.TwilioVoiceRouteConfig
+	openAI        config.OpenAIVoiceConfig
+	openAIEnabled bool
+	err           error
 }
 
 func (f *fakeTenantTwilioRouteResolver) ResolveTwilioVoiceRoute(context.Context, string) (config.TwilioVoiceRouteConfig, error) {
@@ -2181,7 +2200,7 @@ func (f *fakeTenantTwilioRouteResolver) ResolveStoredTwilioAuthToken(context.Con
 }
 
 func (f *fakeTenantTwilioRouteResolver) ResolveOpenAIConfig(context.Context, string) (config.OpenAIVoiceConfig, bool, error) {
-	return config.OpenAIVoiceConfig{}, false, nil
+	return f.openAI, f.openAIEnabled, nil
 }
 
 func tenantRouteConfig(routeID string) config.TwilioVoiceRouteConfig {

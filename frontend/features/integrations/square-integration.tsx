@@ -16,6 +16,7 @@ import {
   PowerOff,
   RefreshCcw,
   Save,
+  ShieldCheck,
   Workflow,
   XCircle
 } from "lucide-react";
@@ -32,6 +33,7 @@ import {
   defaultTwilioConfigForm,
   openAIConfigPayload,
   openAIConfigToForm,
+  openAIRuntimeState,
   squareConfigPayload,
   squareConfigToForm,
   twilioConfigPayload,
@@ -50,6 +52,7 @@ import type {
   BookingAttempt,
   IntegrationConfigs,
   OpenAIIntegrationConfig,
+  OpenAIRuntimeVerification,
   POSConnection,
   POSLocation,
   ProviderSwitchMatch,
@@ -1154,6 +1157,7 @@ export function ProviderConfigurationPanel({
   busy,
   configs,
   openAIForm,
+  openAIVerification,
   setActiveTab,
   setOpenAIForm,
   setSquareForm,
@@ -1163,6 +1167,8 @@ export function ProviderConfigurationPanel({
   voiceRoutingStatus,
   voiceRoutingStatusError,
   onSaveOpenAI,
+  onVerifyOpenAI,
+  onRefreshOpenAIVerification,
   onSaveSquare,
   onSaveTwilio
 }: {
@@ -1170,6 +1176,7 @@ export function ProviderConfigurationPanel({
   busy: string;
   configs: IntegrationConfigs | null;
   openAIForm: OpenAIConfigForm;
+  openAIVerification?: OpenAIRuntimeVerification | null;
   setActiveTab: Dispatch<SetStateAction<ConfigTab>>;
   setOpenAIForm: Dispatch<SetStateAction<OpenAIConfigForm>>;
   setSquareForm: Dispatch<SetStateAction<SquareConfigForm>>;
@@ -1179,12 +1186,15 @@ export function ProviderConfigurationPanel({
   voiceRoutingStatus?: TwilioVoiceRoutingStatus | null;
   voiceRoutingStatusError?: string;
   onSaveOpenAI: () => void;
+  onVerifyOpenAI?: () => void;
+  onRefreshOpenAIVerification?: () => void;
   onSaveSquare: () => void;
   onSaveTwilio: () => void;
 }) {
   const square = configs?.square;
   const twilio = configs?.twilio;
   const openAI = configs?.openai;
+  const openAIState = openAIRuntimeState(openAI, openAIVerification);
   const twilioRoutingState = twilioVoiceRoutingState(twilio, voiceRoutingStatus);
 
   return (
@@ -1218,12 +1228,8 @@ export function ProviderConfigurationPanel({
         />
         <ConfigStatusBlock
           label="OpenAI Voice AI"
-          status={openAI?.configured ? "configured" : openAI?.enabled ? "needs_config" : "disabled"}
-          detail={openAI?.configured
-            ? openAI.realtime_enabled && openAI.speech_output_mode === "streaming_tts"
-              ? "STT and low-latency streaming speech are ready."
-              : `STT, reply, speech, and${openAI.realtime_enabled ? "" : " optional"} realtime settings are ready.`
-            : openAI?.enabled ? "API key and models are required." : "External AI voice is off."}
+          status={openAIState}
+          detail={openAIRuntimeStateDetail(openAIState)}
         />
       </div>
 
@@ -1533,14 +1539,20 @@ export function ProviderConfigurationPanel({
               label="Clear stored OpenAI API key"
               onChange={(checked) => setOpenAIForm((current) => ({ ...current, clear_api_key: checked, api_key: checked ? "" : current.api_key }))}
             />
-            <Field label="Base URL">
-              <input
-                className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
-                value={openAIForm.base_url}
-                onChange={(event) => setOpenAIForm((current) => ({ ...current, base_url: event.target.value }))}
-                disabled={busy !== "" || !openAIForm.enabled}
-              />
-            </Field>
+            <ReadOnlyValue label="Managed destination" value={openAI?.base_url || openAIForm.base_url} />
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Info label="Destination profile" value={openAI?.destination_profile || "openai_public"} />
+              <Info label="Credential revision" value={String(openAI?.credential_revision ?? 0)} />
+              <Info label="Credential isolation" value={openAI?.credential_unique ? "Unique tenant key established" : "Not established"} />
+            </div>
+            {openAI?.runtime_blockers?.length ? (
+              <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
+                <div className="text-xs font-semibold text-amber-900">Runtime blockers</div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {openAI.runtime_blockers.map((blocker) => <Badge key={blocker} value={blocker} />)}
+                </div>
+              </div>
+            ) : null}
             <Field label="Transcription model">
               <input
                 className="h-10 w-full rounded-md border border-line px-3 text-sm text-ink"
@@ -1666,10 +1678,73 @@ export function ProviderConfigurationPanel({
             label="Save OpenAI settings"
             onSave={onSaveOpenAI}
           />
+          {onVerifyOpenAI ? (
+            <div className="rounded-md border border-line p-4">
+              <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+                <div>
+                  <div className="text-sm font-semibold text-ink">Live runtime verification</div>
+                  <div className="mt-1 text-xs leading-5 text-muted">
+                    Explicitly exercises the current tenant-bound STT, semantic, reply, speech, streaming speech, and enabled Realtime paths. This may incur OpenAI usage.
+                  </div>
+                </div>
+                <Badge value={openAIVerification?.status ?? "not_run"} />
+              </div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                <Info label="Evidence freshness" value={openAIVerification?.fresh ? "Current" : openAIVerification ? "Stale" : "Not run"} />
+                <Info label="Config version" value={openAIVerification ? String(openAIVerification.config_version) : "—"} />
+                <Info label="Credential revision" value={openAIVerification ? String(openAIVerification.credential_revision) : String(openAI?.credential_revision ?? 0)} />
+                <Info label="Last completed" value={openAIVerification?.completed_at ? new Date(openAIVerification.completed_at).toLocaleString() : "—"} />
+              </div>
+              {openAIVerification?.capabilities.length ? (
+                <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {openAIVerification.capabilities.map((capability) => (
+                    <div key={capability.capability} className="rounded-md border border-line px-3 py-2 text-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium text-ink">{capability.capability.replaceAll("_", " ")}</span>
+                        <Badge value={capability.status} />
+                      </div>
+                      {capability.error_code ? <div className="mt-1 text-red-700">{capability.error_code}</div> : null}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {openAIVerification?.error_code ? <div className="mt-3 text-xs text-red-700">Safe diagnostic: {openAIVerification.error_code}</div> : null}
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={busy !== "" || !openAI?.runtime_resolvable}
+                  onClick={onVerifyOpenAI}
+                >
+                  <ShieldCheck className="h-4 w-4" />
+                  {busy === "verify-openai-runtime" ? "Queueing verification..." : "Verify current tenant runtime"}
+                </Button>
+                {onRefreshOpenAIVerification ? (
+                  <Button type="button" variant="secondary" disabled={busy !== ""} onClick={onRefreshOpenAIVerification}>
+                    <RefreshCcw className="h-4 w-4" />
+                    Refresh evidence
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
         </div>
       ) : null}
     </Card>
   );
+}
+
+function openAIRuntimeStateDetail(state: ReturnType<typeof openAIRuntimeState>): string {
+  switch (state) {
+    case "disabled": return "External AI voice is off.";
+    case "needs_configuration": return "The tenant API key or required model and voice settings are incomplete.";
+    case "verification_required": return "Configuration is saved and runtime-resolvable. Explicit live verification is still required.";
+    case "verifying": return "The bounded worker is verifying the current tenant config and required capabilities.";
+    case "verification_stale": return "Saved settings changed after this evidence. Verify the current config revision again.";
+    case "partially_verified": return "At least one required capability passed and at least one failed. Review capability diagnostics.";
+    case "verification_failed": return "The current tenant runtime verification failed without a verified required capability.";
+    case "live_verified": return "The current tenant config, credential revision, destination policy, and required capabilities are live verified.";
+  }
 }
 
 function ConfigTabButton({
@@ -1850,7 +1925,11 @@ function emptyIntegrationConfigs(): IntegrationConfigs {
       provider: "openai",
       enabled: false,
       configured: false,
+      runtime_resolvable: false,
+      runtime_blockers: ["integration_config_missing"],
       base_url: defaultOpenAIConfigForm.base_url,
+      destination_profile: "openai_public",
+      destination_managed: true,
       transcription_model: defaultOpenAIConfigForm.transcription_model,
       reply_model: defaultOpenAIConfigForm.reply_model,
       speech_model: defaultOpenAIConfigForm.speech_model,
@@ -1862,7 +1941,9 @@ function emptyIntegrationConfigs(): IntegrationConfigs {
       realtime_noise_profile: defaultOpenAIConfigForm.realtime_noise_profile,
       realtime_instructions: defaultOpenAIConfigForm.realtime_instructions,
       api_key_configured: false,
-      api_key_source: "none"
+      api_key_source: "none",
+      credential_revision: 0,
+      credential_unique: false
     }
   };
 }

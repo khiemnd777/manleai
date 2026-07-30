@@ -16,13 +16,13 @@ import (
 	"time"
 
 	"github.com/manleai/ai-receptionist/internal/config"
+	"github.com/manleai/ai-receptionist/internal/openairuntime"
 	"github.com/manleai/ai-receptionist/modules/conversation"
 	"github.com/manleai/ai-receptionist/modules/voice"
 )
 
 type Adapter struct {
-	cfg            config.OpenAIVoiceConfig
-	configResolver OpenAIConfigResolver
+	configResolver openairuntime.Resolver
 	httpClient     *http.Client
 	circuitMu      sync.Mutex
 	turnCircuits   map[string]turnContractCircuit
@@ -40,20 +40,57 @@ type turnContractCircuit struct {
 	error voice.ProviderRequestError
 }
 
-type OpenAIConfigResolver interface {
-	ResolveOpenAIConfig(ctx context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error)
-}
-
-func NewAdapter(cfg config.OpenAIVoiceConfig) *Adapter {
-	return &Adapter{
-		cfg:          cfg,
-		httpClient:   &http.Client{Timeout: 30 * time.Second},
-		turnCircuits: map[string]turnContractCircuit{},
+func NewTenantBoundAdapter(resolver openairuntime.Resolver) (*Adapter, error) {
+	if resolver == nil {
+		return nil, openairuntime.ErrInvalidConfig
 	}
+	return &Adapter{
+		configResolver: resolver,
+		httpClient:     openairuntime.NewHTTPClient(30 * time.Second),
+		turnCircuits:   map[string]turnContractCircuit{},
+	}, nil
 }
 
-func (a *Adapter) SetConfigResolver(resolver OpenAIConfigResolver) {
-	a.configResolver = resolver
+func NewPinnedAdapter(salonID string, cfg config.OpenAIVoiceConfig) (*Adapter, error) {
+	salonID = strings.TrimSpace(salonID)
+	if salonID == "" {
+		return nil, openairuntime.ErrInvalidSalon
+	}
+	resolved := openairuntime.ResolvedConfig{
+		SalonID: salonID, IntegrationConfigID: "pinned", ConfigVersion: 1,
+		CredentialRevision: 1, CredentialIdentityEstablished: true,
+		DestinationProfile: openairuntime.DestinationProfile,
+		Enabled:            true, Config: cfg,
+	}
+	resolved.Config.BaseURL = openairuntime.CanonicalBaseURL
+	if strings.TrimSpace(resolved.Config.TranscriptionModel) == "" {
+		resolved.Config.TranscriptionModel = "test-transcription"
+	}
+	if strings.TrimSpace(resolved.Config.ReplyModel) == "" {
+		resolved.Config.ReplyModel = "test-reply"
+	}
+	if strings.TrimSpace(resolved.Config.SpeechModel) == "" {
+		resolved.Config.SpeechModel = "test-speech"
+	}
+	if strings.TrimSpace(resolved.Config.SpeechVoice) == "" {
+		resolved.Config.SpeechVoice = "test-voice"
+	}
+	if resolved.Config.RealtimeEnabled && strings.TrimSpace(resolved.Config.RealtimeVoice) == "" {
+		resolved.Config.RealtimeVoice = resolved.Config.SpeechVoice
+	}
+	return NewTenantBoundAdapter(pinnedResolver{salonID: salonID, resolved: resolved})
+}
+
+type pinnedResolver struct {
+	salonID  string
+	resolved openairuntime.ResolvedConfig
+}
+
+func (r pinnedResolver) ResolveOpenAIRuntimeConfig(_ context.Context, salonID string) (openairuntime.ResolvedConfig, error) {
+	if strings.TrimSpace(salonID) == "" || strings.TrimSpace(salonID) != r.salonID {
+		return openairuntime.ResolvedConfig{}, openairuntime.ErrInvalidSalon
+	}
+	return r.resolved, nil
 }
 
 // SetUsageObserver exposes non-secret token counters for retained evaluation
@@ -84,7 +121,7 @@ func (a *Adapter) Name() string {
 }
 
 func (a *Adapter) Configured(ctx context.Context, salonID string) bool {
-	cfg, enabled, err := a.configFor(ctx, salonID)
+	cfg, enabled, _, err := a.configFor(ctx, salonID)
 	return err == nil && enabled && strings.TrimSpace(cfg.APIKey) != ""
 }
 
@@ -93,7 +130,7 @@ func (a *Adapter) ContentType() string {
 }
 
 func (a *Adapter) Transcribe(ctx context.Context, salonID string, req voice.SpeechToTextRequest) (string, error) {
-	cfg, enabled, err := a.configFor(ctx, salonID)
+	cfg, enabled, _, err := a.configFor(ctx, salonID)
 	if err != nil {
 		return "", err
 	}
@@ -140,7 +177,7 @@ func (a *Adapter) Transcribe(ctx context.Context, salonID string, req voice.Spee
 }
 
 func (a *Adapter) GenerateReply(ctx context.Context, req voice.ModelRequest) (voice.ModelReply, error) {
-	cfg, enabled, err := a.configFor(ctx, req.SalonID)
+	cfg, enabled, _, err := a.configFor(ctx, req.SalonID)
 	if err != nil {
 		return voice.ModelReply{}, err
 	}
@@ -272,7 +309,7 @@ func (a *Adapter) CheckTurnContract(ctx context.Context, salonID string) (voice.
 }
 
 func (a *Adapter) interpretTurn(ctx context.Context, req voice.TurnModelRequest, bypassCircuit bool) (voice.TurnModelReply, error) {
-	cfg, enabled, err := a.configFor(ctx, req.SalonID)
+	cfg, enabled, configIdentity, err := a.configFor(ctx, req.SalonID)
 	if err != nil {
 		return voice.TurnModelReply{}, err
 	}
@@ -288,7 +325,7 @@ func (a *Adapter) interpretTurn(ctx context.Context, req voice.TurnModelRequest,
 	if err != nil {
 		return voice.TurnModelReply{}, err
 	}
-	configFingerprint := turnContractConfigFingerprint(cfg, schemaFingerprint)
+	configFingerprint := turnContractConfigFingerprint(configIdentity, schemaFingerprint)
 	if !bypassCircuit {
 		if circuitErr := a.openTurnCircuitError(req.SalonID, configFingerprint); circuitErr != nil {
 			return voice.TurnModelReply{}, circuitErr
@@ -410,7 +447,7 @@ func normalizeTurnModelTimePreferences(reply *voice.TurnModelReply) error {
 }
 
 func (a *Adapter) Synthesize(ctx context.Context, salonID string, text string, requestedVoice string) ([]byte, error) {
-	cfg, enabled, err := a.configFor(ctx, salonID)
+	cfg, enabled, _, err := a.configFor(ctx, salonID)
 	if err != nil {
 		return nil, err
 	}
@@ -447,11 +484,11 @@ func (a *Adapter) Synthesize(ctx context.Context, salonID string, text string, r
 
 	res, err := a.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, &voice.ProviderRequestError{Provider: voice.ProviderOpenAI, Stage: "speech_response", Err: err}
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("openai speech failed with status %d", res.StatusCode)
+		return nil, providerResponseError(res, "speech_response")
 	}
 	return io.ReadAll(io.LimitReader(res.Body, 10*1024*1024))
 }
@@ -463,13 +500,7 @@ func (a *Adapter) do(req *http.Request, output any, stage string) error {
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		errorType, errorCode, errorParam := safeProviderErrorFields(res.Body)
-		return &voice.ProviderRequestError{
-			Provider: voice.ProviderOpenAI, Stage: stage, StatusCode: res.StatusCode,
-			RequestID: firstNonEmptyHeader(res.Header, "x-request-id", "request-id"),
-			ErrorType: errorType, ErrorCode: errorCode, ErrorParam: errorParam,
-			Err: fmt.Errorf("openai request failed with status %d", res.StatusCode),
-		}
+		return providerResponseError(res, stage)
 	}
 	if err := json.NewDecoder(res.Body).Decode(output); err != nil {
 		return &voice.ProviderRequestError{
@@ -478,6 +509,19 @@ func (a *Adapter) do(req *http.Request, output any, stage string) error {
 		}
 	}
 	return nil
+}
+
+func providerResponseError(response *http.Response, stage string) *voice.ProviderRequestError {
+	if response == nil {
+		return &voice.ProviderRequestError{Provider: voice.ProviderOpenAI, Stage: stage, Err: errors.New("openai request failed")}
+	}
+	errorType, errorCode, errorParam := safeProviderErrorFields(response.Body)
+	return &voice.ProviderRequestError{
+		Provider: voice.ProviderOpenAI, Stage: stage, StatusCode: response.StatusCode,
+		RequestID: firstNonEmptyHeader(response.Header, "x-request-id", "request-id"),
+		ErrorType: errorType, ErrorCode: errorCode, ErrorParam: errorParam,
+		Err: fmt.Errorf("openai request failed with status %d", response.StatusCode),
+	}
 }
 
 func safeProviderErrorFields(reader io.Reader) (string, string, string) {
@@ -518,11 +562,9 @@ func structuredOutputSchemaFingerprint(schema map[string]any) (string, error) {
 	return fmt.Sprintf("sha256:%x", sum[:12]), nil
 }
 
-func turnContractConfigFingerprint(cfg config.OpenAIVoiceConfig, schemaFingerprint string) string {
+func turnContractConfigFingerprint(configIdentity string, schemaFingerprint string) string {
 	raw := strings.Join([]string{
-		strings.TrimSpace(cfg.BaseURL),
-		strings.TrimSpace(cfg.ReplyModel),
-		strings.TrimSpace(cfg.APIKey),
+		strings.TrimSpace(configIdentity),
 		strings.TrimSpace(schemaFingerprint),
 	}, "\x00")
 	sum := sha256.Sum256([]byte(raw))
@@ -678,19 +720,29 @@ func (a *Adapter) authorize(req *http.Request, cfg config.OpenAIVoiceConfig) {
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(cfg.APIKey))
 }
 
-func (a *Adapter) url(cfg config.OpenAIVoiceConfig, path string) string {
-	base := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
-	if base == "" {
-		base = "https://api.openai.com/v1"
-	}
-	return base + path
+func (a *Adapter) url(_ config.OpenAIVoiceConfig, path string) string {
+	return openairuntime.CanonicalBaseURL + path
 }
 
-func (a *Adapter) configFor(ctx context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error) {
-	if a.configResolver == nil || strings.TrimSpace(salonID) == "" {
-		return a.cfg, true, nil
+func (a *Adapter) configFor(ctx context.Context, salonID string) (config.OpenAIVoiceConfig, bool, string, error) {
+	salonID = strings.TrimSpace(salonID)
+	if a == nil || a.configResolver == nil || salonID == "" {
+		return config.OpenAIVoiceConfig{}, false, "", openairuntime.ErrInvalidSalon
 	}
-	return a.configResolver.ResolveOpenAIConfig(ctx, salonID)
+	resolved, err := a.configResolver.ResolveOpenAIRuntimeConfig(ctx, salonID)
+	if err != nil {
+		return config.OpenAIVoiceConfig{}, false, "", err
+	}
+	if strings.TrimSpace(resolved.SalonID) != salonID {
+		return config.OpenAIVoiceConfig{}, false, "", openairuntime.ErrInvalidSalon
+	}
+	if !resolved.Enabled {
+		return config.OpenAIVoiceConfig{}, false, openairuntime.ConfigIdentity(resolved, "disabled"), nil
+	}
+	if validation := openairuntime.Validate(resolved); !validation.Ready {
+		return config.OpenAIVoiceConfig{}, false, "", openairuntime.ErrInvalidConfig
+	}
+	return resolved.Config, true, openairuntime.ConfigIdentity(resolved, "runtime"), nil
 }
 
 func modelInput(req voice.ModelRequest) string {

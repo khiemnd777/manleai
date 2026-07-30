@@ -146,6 +146,41 @@ func TestV80RuntimeRoleEnforcesActorPublicAndSystemTenantBoundaries(t *testing.T
 	`, salonA); err != nil {
 		t.Fatalf("insert notification fixture: %v", err)
 	}
+	if _, err := adminDB.ExecContext(context.Background(), `
+		WITH configs AS (
+			INSERT INTO salon_integration_configs (
+				salon_id,provider,enabled,settings,credential_fingerprint_hmac,credential_revision,destination_profile
+			) VALUES
+				($1,'openai',true,'{}'::jsonb,repeat('a',64),1,'openai_public'),
+				($2,'openai',true,'{}'::jsonb,repeat('b',64),1,'openai_public')
+			RETURNING id,salon_id
+		)
+		INSERT INTO openai_runtime_verification_runs (
+			salon_id,integration_config_id,actor_user_id,action_key,request_fingerprint,
+			config_version,credential_revision,destination_policy_version,verification_contract_version
+		)
+		SELECT config.salon_id,config.id,salon.owner_user_id,'rls-openai-' || config.salon_id::text,
+		       repeat('c',64),1,1,'openai-public-v1','openai-voice-v1'
+		FROM configs config JOIN salons salon ON salon.id=config.salon_id
+	`, salonA, salonB); err != nil {
+		t.Fatalf("insert OpenAI verification fixtures: %v", err)
+	}
+	if _, err := adminDB.ExecContext(context.Background(), `
+		INSERT INTO openai_runtime_verification_capabilities (salon_id,run_id,capability,required,status)
+		SELECT salon_id,id,'reply',true,'pending' FROM openai_runtime_verification_runs
+		WHERE salon_id IN ($1,$2)
+	`, salonA, salonB); err != nil {
+		t.Fatalf("insert OpenAI verification capability fixtures: %v", err)
+	}
+	if _, err := adminDB.ExecContext(context.Background(), `
+		INSERT INTO openai_runtime_verification_events (
+			salon_id,run_id,event_key,event_fingerprint,event_type,status
+		)
+		SELECT salon_id,id,'queued',repeat('d',64),'queued','queued'
+		FROM openai_runtime_verification_runs WHERE salon_id IN ($1,$2)
+	`, salonA, salonB); err != nil {
+		t.Fatalf("insert OpenAI verification event fixtures: %v", err)
+	}
 
 	runtimeURL, err := runtimeRoleURL(adminURL, runtimeRole, runtimePassword)
 	if err != nil {
@@ -209,6 +244,62 @@ func TestV80RuntimeRoleEnforcesActorPublicAndSystemTenantBoundaries(t *testing.T
 	assertSystemRowCount(databasecontext.WithScope(context.Background(), databasecontext.ScopeProvider), "call_sessions", 0)
 	assertSystemRowCount(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeWorker, salonA), "call_sessions", 1)
 	assertSystemRowCount(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeProvider, salonB), "call_sessions", 1)
+	for _, table := range []string{
+		"openai_runtime_verification_runs",
+		"openai_runtime_verification_capabilities",
+		"openai_runtime_verification_events",
+	} {
+		assertSystemRowCount(databasecontext.WithScope(context.Background(), databasecontext.ScopeWorker), table, 0)
+		assertSystemRowCount(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeProvider, salonA), table, 0)
+		assertSystemRowCount(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeWorker, salonA), table, 1)
+		assertSystemRowCount(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeWorker, salonB), table, 1)
+	}
+	assertVerificationRunUpdates := func(ctx context.Context, targetSalonID string, want int64) {
+		t.Helper()
+		result, err := runtimeDB.ExecContext(ctx, `
+			UPDATE openai_runtime_verification_runs SET updated_at=updated_at WHERE salon_id=$1
+		`, targetSalonID)
+		if err != nil {
+			t.Fatalf("update OpenAI verification run: %v", err)
+		}
+		got, err := result.RowsAffected()
+		if err != nil {
+			t.Fatalf("read updated OpenAI verification run count: %v", err)
+		}
+		if got != want {
+			t.Fatalf("updated OpenAI verification runs=%d, want %d", got, want)
+		}
+	}
+	assertVerificationRunUpdates(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeProvider, salonA), salonA, 0)
+	assertVerificationRunUpdates(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeWorker, salonA), salonA, 1)
+	assertVerificationRunUpdates(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeWorker, salonA), salonB, 0)
+	claimOpenAIVerifications := func(ctx context.Context) int {
+		t.Helper()
+		rows, err := runtimeDB.QueryContext(ctx, `
+			SELECT run_id FROM public.app_worker_claim_openai_runtime_verifications(10,300000)
+		`)
+		if err != nil {
+			t.Fatalf("claim OpenAI verification runs: %v", err)
+		}
+		defer rows.Close()
+		count := 0
+		for rows.Next() {
+			count++
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterate OpenAI verification claims: %v", err)
+		}
+		return count
+	}
+	if got := claimOpenAIVerifications(context.Background()); got != 0 {
+		t.Fatalf("unscoped OpenAI verification claims=%d, want 0", got)
+	}
+	if got := claimOpenAIVerifications(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeWorker, salonA)); got != 0 {
+		t.Fatalf("tenant-bound discovery OpenAI verification claims=%d, want 0", got)
+	}
+	if got := claimOpenAIVerifications(databasecontext.WithScope(context.Background(), databasecontext.ScopeWorker)); got != 2 {
+		t.Fatalf("unbound worker OpenAI verification claims=%d, want 2", got)
+	}
 
 	assertServiceUpdates := func(ctx context.Context, targetSalonID string, want int64) {
 		t.Helper()

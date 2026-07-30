@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   openAIConfigPayload,
   openAIConfigToForm,
+  openAIRuntimeState,
   platformIntegrationConfigBasePath,
   squareConfigToForm,
   twilioConfigPayload,
@@ -11,6 +12,7 @@ import {
 } from "./integration-config-contract";
 import type {
   OpenAIIntegrationConfig,
+  OpenAIRuntimeVerification,
   SquareIntegrationConfig,
   TwilioIntegrationConfig
 } from "../../types/api";
@@ -73,7 +75,11 @@ test("OpenAI round-trips speech output, noise handling, and realtime instruction
     provider: "openai",
     enabled: true,
     configured: true,
+    runtime_resolvable: true,
+    runtime_blockers: [],
     base_url: "https://api.openai.com/v1",
+    destination_profile: "openai_public",
+    destination_managed: true,
     transcription_model: "gpt-4o-transcribe",
     reply_model: "gpt-4.1-mini",
     speech_model: "gpt-4o-mini-tts",
@@ -85,7 +91,9 @@ test("OpenAI round-trips speech output, noise handling, and realtime instruction
     realtime_noise_profile: "strong_noise_rejection",
     realtime_instructions: "Use only backend-approved responses.",
     api_key_configured: true,
-    api_key_source: "database"
+    api_key_source: "database",
+    credential_revision: 3,
+    credential_unique: true
   };
 
   const form = openAIConfigToForm(config);
@@ -96,6 +104,31 @@ test("OpenAI round-trips speech output, noise handling, and realtime instruction
   assert.equal(payload.realtime_instructions, "Use only backend-approved responses.");
   assert.equal(payload.api_key, "");
   assert.equal(payload.clear_api_key, false);
+  assert.equal(payload.base_url, "https://api.openai.com/v1");
+});
+
+test("OpenAI runtime UI states keep saved configuration separate from live evidence", () => {
+  const config = {
+    enabled: true,
+    runtime_resolvable: true
+  } as OpenAIIntegrationConfig;
+  const verification = {
+    status: "failed",
+    fresh: true,
+    capabilities: [
+      { capability: "transcription", required: true, status: "verified" },
+      { capability: "speech", required: true, status: "failed" }
+    ]
+  } as OpenAIRuntimeVerification;
+
+  assert.equal(openAIRuntimeState({ ...config, enabled: false }), "disabled");
+  assert.equal(openAIRuntimeState({ ...config, runtime_resolvable: false }), "needs_configuration");
+  assert.equal(openAIRuntimeState(config, null), "verification_required");
+  assert.equal(openAIRuntimeState(config, { ...verification, status: "queued" }), "verifying");
+  assert.equal(openAIRuntimeState(config, { ...verification, fresh: false }), "verification_stale");
+  assert.equal(openAIRuntimeState(config, verification), "partially_verified");
+  assert.equal(openAIRuntimeState(config, { ...verification, capabilities: [] }), "verification_failed");
+  assert.equal(openAIRuntimeState(config, { ...verification, status: "succeeded" }), "live_verified");
 });
 
 test("Square keeps visible settings while leaving write-only secrets blank", () => {

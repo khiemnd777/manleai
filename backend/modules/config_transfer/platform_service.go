@@ -357,6 +357,9 @@ func canonicalizePlatformJSONBundle(bundle ConfigurationBundle) (ConfigurationBu
 	switch bundle.SchemaVersion {
 	case PlatformSchemaVersion, SchemaVersion:
 		return bundle, false, nil
+	case LegacyPlatformSchemaV9:
+		bundle.SchemaVersion = PlatformSchemaVersion
+		return bundle, true, nil
 	case LegacySchemaV7:
 		sections, err := normalizeSectionSelection(bundle.IncludedSections, platformLegacyV7ContentSections)
 		if err != nil || len(sections) == 0 {

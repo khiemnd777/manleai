@@ -326,7 +326,8 @@ The local app can run Twilio speech `<Gather>` without OpenAI STT/TTS. For a ful
 
 - Enable OpenAI voice AI
 - `OpenAI API key`: OpenAI API key
-- `Base URL`: `https://api.openai.com/v1`
+- Confirm the read-only managed destination is `https://api.openai.com/v1`;
+  tenant custom Base URLs are not supported
 - `Transcription model`: `gpt-4o-mini-transcribe`
 - `Reply model`: `gpt-4.1-mini`
 - `Speech model`: `tts-1`
@@ -338,6 +339,11 @@ The local app can run Twilio speech `<Gather>` without OpenAI STT/TTS. For a ful
   - `Realtime voice`: `alloy`
   - `Background-noise handling`: `Automatic (recommended)`; this adapts each call from incoming audio evidence and does not assume where the caller is
   - `Realtime instructions`: optional non-secret operating notes for the audio bridge
+
+After saving, select **Verify current tenant runtime** and refresh until the
+latest run is `succeeded`, `fresh=true`, and every required capability is
+`verified`. This explicit operation can incur OpenAI usage. Saved/configured
+state alone is not live provider evidence.
 
 Readiness meaning:
 

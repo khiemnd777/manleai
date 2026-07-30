@@ -7,27 +7,28 @@ import (
 )
 
 const (
-	PlatformSchemaVersion = "manleai.salon_configuration.v9"
-	SchemaVersion         = "manleai.salon_configuration.v8"
-	LegacySchemaV7        = "manleai.salon_configuration.v7"
-	LegacySchemaV6        = "manleai.salon_configuration.v6"
-	LegacySchemaV5        = "manleai.salon_configuration.v5"
-	LegacySchemaV4        = "manleai.salon_configuration.v4"
-	LegacySchemaV3        = "manleai.salon_configuration.v3"
-	LegacySchemaV2        = "manleai.salon_configuration.v2"
-	LegacySchemaV1        = "manleai.salon_configuration.v1"
-	StatusPreviewed       = "previewed"
-	StatusApplied         = "applied"
-	StatusFailed          = "failed"
-	SectionSalon          = "salon_profile"
-	SectionAI             = "ai_receptionist"
-	SectionPublic         = "public_booking_page"
-	SectionIntegrations   = "integrations"
-	SectionKnowledge      = "knowledge_base"
-	SectionCategories     = "service_categories"
-	SectionServiceAliases = "service_aliases"
-	SectionConsultation   = "service_consultation_profiles"
-	SectionLocalHours     = "local_business_hours"
+	PlatformSchemaVersion  = "manleai.salon_configuration.v10"
+	LegacyPlatformSchemaV9 = "manleai.salon_configuration.v9"
+	SchemaVersion          = "manleai.salon_configuration.v8"
+	LegacySchemaV7         = "manleai.salon_configuration.v7"
+	LegacySchemaV6         = "manleai.salon_configuration.v6"
+	LegacySchemaV5         = "manleai.salon_configuration.v5"
+	LegacySchemaV4         = "manleai.salon_configuration.v4"
+	LegacySchemaV3         = "manleai.salon_configuration.v3"
+	LegacySchemaV2         = "manleai.salon_configuration.v2"
+	LegacySchemaV1         = "manleai.salon_configuration.v1"
+	StatusPreviewed        = "previewed"
+	StatusApplied          = "applied"
+	StatusFailed           = "failed"
+	SectionSalon           = "salon_profile"
+	SectionAI              = "ai_receptionist"
+	SectionPublic          = "public_booking_page"
+	SectionIntegrations    = "integrations"
+	SectionKnowledge       = "knowledge_base"
+	SectionCategories      = "service_categories"
+	SectionServiceAliases  = "service_aliases"
+	SectionConsultation    = "service_consultation_profiles"
+	SectionLocalHours      = "local_business_hours"
 )
 
 var excludedData = []string{
@@ -83,6 +84,9 @@ var excludedData = []string{
 	"twilio_voice_inbound_number",
 	"twilio_voice_live_verification",
 	"twilio_public_callback_base",
+	"openai_destination_profile",
+	"openai_credential_identity",
+	"openai_runtime_verification",
 	"pos_oauth_tokens",
 	"api_keys",
 	"client_secrets",

@@ -1,5 +1,6 @@
 import type {
   OpenAIIntegrationConfig,
+  OpenAIRuntimeVerification,
   SquareIntegrationConfig,
   TwilioIntegrationConfig,
   TwilioVoiceRoutingStatus
@@ -8,6 +9,15 @@ import type {
 export type IntegrationConfigProvider = "square" | "twilio" | "openai";
 export type TwilioVoiceTransport = "recording" | "realtime_stream";
 export type OpenAISpeechOutputMode = "streaming_tts" | "buffered_realtime";
+export type OpenAIRuntimeState =
+  | "disabled"
+  | "needs_configuration"
+  | "verification_required"
+  | "verifying"
+  | "verification_stale"
+  | "partially_verified"
+  | "verification_failed"
+  | "live_verified";
 export type OpenAIRealtimeNoiseProfile =
   | "automatic"
   | "standard"
@@ -214,6 +224,24 @@ export function twilioVoiceRoutingState(
 ): "needs_setup" | "routing_configured" | "live_verified" {
   if (!config?.voice_routing_configured || (status && !status.routing_configured)) return "needs_setup";
   return status?.live_verified ? "live_verified" : "routing_configured";
+}
+
+export function openAIRuntimeState(
+  config?: OpenAIIntegrationConfig,
+  verification?: OpenAIRuntimeVerification | null
+): OpenAIRuntimeState {
+  if (!config?.enabled) return "disabled";
+  if (!config.runtime_resolvable) return "needs_configuration";
+  if (!verification) return "verification_required";
+  if (!verification.fresh || verification.status === "stale") return "verification_stale";
+  if (verification.status === "queued" || verification.status === "claimed") return "verifying";
+  if (verification.status === "succeeded") return "live_verified";
+  if (verification.status === "failed") {
+    return verification.capabilities.some((capability) => capability.required && capability.status === "verified")
+      ? "partially_verified"
+      : "verification_failed";
+  }
+  return "verification_required";
 }
 
 export function normalizeTwilioVoiceTransport(value: string): TwilioVoiceTransport {

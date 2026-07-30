@@ -17,6 +17,7 @@ var (
 	ErrVersionConflict           = errors.New("integration config version conflict")
 	ErrActionConflict            = errors.New("integration config action conflict")
 	ErrTwilioVoiceNumberConflict = errors.New("Twilio Voice inbound number conflict")
+	ErrOpenAICredentialConflict  = errors.New("OpenAI credential is already assigned to another tenant")
 )
 
 type TechnicalMutationCommand struct {
@@ -57,7 +58,8 @@ func (r *Repository) EnsureSalonOwner(ctx context.Context, salonID string, owner
 func (r *Repository) ListForOwner(ctx context.Context, salonID string, ownerUserID string) ([]StoredConfig, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT sic.id::text, sic.salon_id::text, sic.provider, sic.enabled, sic.settings::text,
-		       COALESCE(sic.secrets_encrypted, ''), sic.created_at, sic.updated_at,
+		       COALESCE(sic.secrets_encrypted, ''), COALESCE(sic.credential_fingerprint_hmac, ''),
+		       sic.credential_revision, COALESCE(sic.destination_profile, ''), sic.created_at, sic.updated_at,
 		       COALESCE(version.version, 0)
 		FROM salon_integration_configs sic
 		JOIN salons s ON s.id = sic.salon_id
@@ -94,7 +96,8 @@ func (r *Repository) ListForSalon(ctx context.Context, salonID string) ([]Stored
 	}
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT config.id::text,config.salon_id::text,config.provider,config.enabled,config.settings::text,
-		       COALESCE(config.secrets_encrypted,''),config.created_at,config.updated_at,
+		       COALESCE(config.secrets_encrypted,''),COALESCE(config.credential_fingerprint_hmac,''),
+		       config.credential_revision,COALESCE(config.destination_profile,''),config.created_at,config.updated_at,
 		       COALESCE(version.version, 0)
 		FROM salon_integration_configs config
 		LEFT JOIN technical_resource_versions version
@@ -121,7 +124,8 @@ func (r *Repository) ListForSalon(ctx context.Context, salonID string) ([]Stored
 func (r *Repository) Get(ctx context.Context, salonID string, provider string) (*StoredConfig, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT config.id::text, config.salon_id::text, config.provider, config.enabled, config.settings::text,
-		       COALESCE(config.secrets_encrypted, ''), config.created_at, config.updated_at,
+		       COALESCE(config.secrets_encrypted, ''), COALESCE(config.credential_fingerprint_hmac, ''),
+		       config.credential_revision, COALESCE(config.destination_profile, ''), config.created_at, config.updated_at,
 		       COALESCE(version.version, 0)
 		FROM salon_integration_configs config
 		LEFT JOIN technical_resource_versions version
@@ -154,7 +158,8 @@ func (r *Repository) LocateTwilioVoiceRouteTenant(ctx context.Context, routeID s
 func (r *Repository) GetTwilioVoiceRoute(ctx context.Context, salonID, routeID string) (*StoredConfig, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT config.id::text, config.salon_id::text, config.provider, config.enabled, config.settings::text,
-		       COALESCE(config.secrets_encrypted, ''), config.created_at, config.updated_at,
+		       COALESCE(config.secrets_encrypted, ''), COALESCE(config.credential_fingerprint_hmac, ''),
+		       config.credential_revision, COALESCE(config.destination_profile, ''), config.created_at, config.updated_at,
 		       COALESCE(version.version, 0)
 		FROM salon_integration_configs config
 		LEFT JOIN technical_resource_versions version
@@ -175,18 +180,31 @@ func (r *Repository) Upsert(ctx context.Context, cfg StoredConfig) (*StoredConfi
 		return nil, err
 	}
 	row := r.db.QueryRowContext(ctx, `
-		INSERT INTO salon_integration_configs (salon_id, provider, enabled, settings, secrets_encrypted)
-		VALUES ($1, $2, $3, $4::jsonb, NULLIF($5, ''))
+		INSERT INTO salon_integration_configs (
+			salon_id, provider, enabled, settings, secrets_encrypted,
+			credential_fingerprint_hmac, credential_revision, destination_profile
+		)
+		VALUES ($1, $2, $3, $4::jsonb, NULLIF($5, ''), NULLIF($6, ''), $7, NULLIF($8, ''))
 		ON CONFLICT (salon_id, provider)
 		DO UPDATE SET enabled = EXCLUDED.enabled,
 		              settings = EXCLUDED.settings,
 		              secrets_encrypted = EXCLUDED.secrets_encrypted,
+		              credential_fingerprint_hmac = EXCLUDED.credential_fingerprint_hmac,
+		              credential_revision = EXCLUDED.credential_revision,
+		              destination_profile = EXCLUDED.destination_profile,
 		              updated_at = now()
 		RETURNING id::text, salon_id::text, provider, enabled, settings::text,
-		          COALESCE(secrets_encrypted, ''), created_at, updated_at, 0::bigint
-	`, cfg.SalonID, cfg.Provider, cfg.Enabled, string(settingsJSON), cfg.SecretsEncrypted)
-	item, err := scanConfig(row)
-	return item, integrationConfigPersistenceError(err)
+		          COALESCE(secrets_encrypted, ''), COALESCE(credential_fingerprint_hmac, ''),
+		          credential_revision, COALESCE(destination_profile, ''), created_at, updated_at, 0::bigint
+	`, cfg.SalonID, cfg.Provider, cfg.Enabled, string(settingsJSON), cfg.SecretsEncrypted,
+		cfg.CredentialFingerprintHMAC, cfg.CredentialRevision, cfg.DestinationProfile)
+	if _, err := scanConfig(row); err != nil {
+		return nil, integrationConfigPersistenceError(err)
+	}
+	// The V77 trigger advances the canonical technical version after the row
+	// mutation. Reload so the response and shared runtime validator observe the
+	// committed fence instead of a synthetic version zero.
+	return r.Get(ctx, cfg.SalonID, cfg.Provider)
 }
 
 func (r *Repository) UpsertControlled(ctx context.Context, cfg StoredConfig, command TechnicalMutationCommand) (*StoredConfig, bool, error) {
@@ -257,14 +275,22 @@ func (r *Repository) UpsertControlled(ctx context.Context, cfg StoredConfig, com
 	}
 
 	item, err := scanConfig(tx.QueryRowContext(ctx, `
-		INSERT INTO salon_integration_configs (salon_id, provider, enabled, settings, secrets_encrypted)
-		VALUES ($1, $2, $3, $4::jsonb, NULLIF($5, ''))
+		INSERT INTO salon_integration_configs (
+			salon_id, provider, enabled, settings, secrets_encrypted,
+			credential_fingerprint_hmac, credential_revision, destination_profile
+		)
+		VALUES ($1, $2, $3, $4::jsonb, NULLIF($5, ''), NULLIF($6, ''), $7, NULLIF($8, ''))
 		ON CONFLICT (salon_id, provider)
 		DO UPDATE SET enabled=EXCLUDED.enabled,settings=EXCLUDED.settings,
-		              secrets_encrypted=EXCLUDED.secrets_encrypted,updated_at=now()
+		              secrets_encrypted=EXCLUDED.secrets_encrypted,
+		              credential_fingerprint_hmac=EXCLUDED.credential_fingerprint_hmac,
+		              credential_revision=EXCLUDED.credential_revision,
+		              destination_profile=EXCLUDED.destination_profile,updated_at=now()
 		RETURNING id::text,salon_id::text,provider,enabled,settings::text,
-		          COALESCE(secrets_encrypted,''),created_at,updated_at,($6 + 1)::bigint
-	`, cfg.SalonID, cfg.Provider, cfg.Enabled, string(settingsJSON), cfg.SecretsEncrypted, currentVersion))
+		          COALESCE(secrets_encrypted,''),COALESCE(credential_fingerprint_hmac,''),
+		          credential_revision,COALESCE(destination_profile,''),created_at,updated_at,($9 + 1)::bigint
+	`, cfg.SalonID, cfg.Provider, cfg.Enabled, string(settingsJSON), cfg.SecretsEncrypted,
+		cfg.CredentialFingerprintHMAC, cfg.CredentialRevision, cfg.DestinationProfile, currentVersion))
 	if err != nil {
 		return nil, false, integrationConfigPersistenceError(err)
 	}
@@ -307,8 +333,13 @@ func integrationConfigPersistenceError(err error) error {
 		return nil
 	}
 	var postgresError *pq.Error
-	if errors.As(err, &postgresError) && postgresError.Code == "23505" && postgresError.Constraint == "idx_twilio_voice_active_inbound_number" {
-		return ErrTwilioVoiceNumberConflict
+	if errors.As(err, &postgresError) && postgresError.Code == "23505" {
+		switch postgresError.Constraint {
+		case "idx_twilio_voice_active_inbound_number":
+			return ErrTwilioVoiceNumberConflict
+		case "idx_openai_unique_credential_identity":
+			return ErrOpenAICredentialConflict
+		}
 	}
 	return err
 }
@@ -316,7 +347,8 @@ func integrationConfigPersistenceError(err error) error {
 func getConfigTx(ctx context.Context, tx *sql.Tx, salonID, provider string) (*StoredConfig, error) {
 	return scanConfig(tx.QueryRowContext(ctx, `
 		SELECT config.id::text,config.salon_id::text,config.provider,config.enabled,config.settings::text,
-		       COALESCE(config.secrets_encrypted,''),config.created_at,config.updated_at,
+		       COALESCE(config.secrets_encrypted,''),COALESCE(config.credential_fingerprint_hmac,''),
+		       config.credential_revision,COALESCE(config.destination_profile,''),config.created_at,config.updated_at,
 		       version.version
 		FROM salon_integration_configs config
 		JOIN technical_resource_versions version
@@ -340,6 +372,9 @@ func scanConfig(row rowScanner) (*StoredConfig, error) {
 		&item.Enabled,
 		&settingsRaw,
 		&item.SecretsEncrypted,
+		&item.CredentialFingerprintHMAC,
+		&item.CredentialRevision,
+		&item.DestinationProfile,
 		&item.CreatedAt,
 		&item.UpdatedAt,
 		&item.Version,

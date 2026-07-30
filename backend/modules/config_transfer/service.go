@@ -735,8 +735,6 @@ func planIntegrations(plan *importPlan) {
 		Message: "Twilio Voice route identity, inbound number, public callback base, credentials, and live verification are tenant-specific and remain unchanged on the destination.",
 		Field:   "twilio.voice_route_id",
 	})
-	fieldChange(plan, SectionIntegrations, "openai.enabled", boolString(target.OpenAI.Enabled), boolString(incoming.OpenAI.Enabled))
-	fieldChange(plan, SectionIntegrations, "openai.base_url", target.OpenAI.BaseURL, incoming.OpenAI.BaseURL)
 	fieldChange(plan, SectionIntegrations, "openai.transcription_model", target.OpenAI.TranscriptionModel, incoming.OpenAI.TranscriptionModel)
 	fieldChange(plan, SectionIntegrations, "openai.reply_model", target.OpenAI.ReplyModel, incoming.OpenAI.ReplyModel)
 	fieldChange(plan, SectionIntegrations, "openai.speech_model", target.OpenAI.SpeechModel, incoming.OpenAI.SpeechModel)
@@ -747,6 +745,13 @@ func planIntegrations(plan *importPlan) {
 	fieldChange(plan, SectionIntegrations, "openai.realtime_voice", target.OpenAI.RealtimeVoice, incoming.OpenAI.RealtimeVoice)
 	fieldChange(plan, SectionIntegrations, "openai.realtime_noise_profile", target.OpenAI.RealtimeNoiseProfile, incoming.OpenAI.RealtimeNoiseProfile)
 	fieldChange(plan, SectionIntegrations, "openai.realtime_instructions", target.OpenAI.RealtimeInstructions, incoming.OpenAI.RealtimeInstructions)
+	summary(plan, SectionIntegrations).Skipped++
+	plan.Warnings = append(plan.Warnings, ImportIssue{
+		Section: SectionIntegrations,
+		Code:    "openai_tenant_identity_preserved",
+		Message: "OpenAI destination policy, enabled state, credential identity, encrypted API key, and live-verification evidence are tenant-specific and remain unchanged on the destination.",
+		Field:   "openai.credential_identity",
+	})
 }
 
 func planServiceCategories(plan *importPlan) {
@@ -1092,7 +1097,7 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 	if bundle.SchemaVersion == "" {
 		return bundle, ErrValidation
 	}
-	if bundle.SchemaVersion != PlatformSchemaVersion && bundle.SchemaVersion != SchemaVersion && bundle.SchemaVersion != LegacySchemaV7 && bundle.SchemaVersion != LegacySchemaV6 && bundle.SchemaVersion != LegacySchemaV5 && bundle.SchemaVersion != LegacySchemaV4 && bundle.SchemaVersion != LegacySchemaV3 && bundle.SchemaVersion != LegacySchemaV2 && bundle.SchemaVersion != LegacySchemaV1 {
+	if bundle.SchemaVersion != PlatformSchemaVersion && bundle.SchemaVersion != LegacyPlatformSchemaV9 && bundle.SchemaVersion != SchemaVersion && bundle.SchemaVersion != LegacySchemaV7 && bundle.SchemaVersion != LegacySchemaV6 && bundle.SchemaVersion != LegacySchemaV5 && bundle.SchemaVersion != LegacySchemaV4 && bundle.SchemaVersion != LegacySchemaV3 && bundle.SchemaVersion != LegacySchemaV2 && bundle.SchemaVersion != LegacySchemaV1 {
 		return bundle, ErrUnsupportedSchema
 	}
 	if bundle.SecretsExported || bundle.OperationalDataExported {
@@ -1108,7 +1113,7 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 	if len(bundle.SalonProfile.ActivePOSProvider) > 64 || strings.ContainsAny(bundle.SalonProfile.ActivePOSProvider, "\r\n\t") {
 		return bundle, ErrValidation
 	}
-	if bundle.SchemaVersion == PlatformSchemaVersion || bundle.SchemaVersion == SchemaVersion {
+	if bundle.SchemaVersion == PlatformSchemaVersion || bundle.SchemaVersion == LegacyPlatformSchemaV9 || bundle.SchemaVersion == SchemaVersion {
 		// Provider connection state was present as reference-only metadata in v7.
 		// It is not portable intent and is omitted/ignored by the v8 contract.
 		bundle.POSConnection = nil
@@ -1205,7 +1210,7 @@ func normalizeImportBundle(bundle ConfigurationBundle) (ConfigurationBundle, err
 		bundle.KnowledgeBase.Count = len(bundle.KnowledgeBase.Items)
 	}
 	if bundleIncludes(bundle, SectionLocalHours) {
-		if bundle.SchemaVersion != PlatformSchemaVersion {
+		if bundle.SchemaVersion != PlatformSchemaVersion && bundle.SchemaVersion != LegacyPlatformSchemaV9 {
 			return bundle, ErrValidation
 		}
 		if err := normalizeLocalBusinessHours(&bundle.LocalBusinessHours); err != nil {
@@ -1243,7 +1248,7 @@ func normalizeSalonProfile(profile SalonProfileExport, schemaVersion string) Sal
 	profile.SecondaryLanguage = defaultString(strings.TrimSpace(profile.SecondaryLanguage), "vi")
 	profile.HandoffPhone = strings.TrimSpace(profile.HandoffPhone)
 	profile.ActivePOSProvider = strings.TrimSpace(profile.ActivePOSProvider)
-	if schemaVersion != SchemaVersion && schemaVersion != PlatformSchemaVersion {
+	if schemaVersion != SchemaVersion && schemaVersion != PlatformSchemaVersion && schemaVersion != LegacyPlatformSchemaV9 {
 		profile.ActivePOSProvider = defaultString(profile.ActivePOSProvider, pos.ProviderSquare)
 	}
 	return profile
@@ -1284,7 +1289,17 @@ func normalizeIntegrationConfigs(configs integrationconfig.IntegrationConfigsRes
 	configs.Twilio.RecordingWebhookURL = ""
 	configs.Twilio.StreamWebhookURL = ""
 	configs.OpenAI.Provider = integrationconfig.ProviderOpenAI
-	configs.OpenAI.BaseURL = defaultString(strings.TrimRight(strings.TrimSpace(configs.OpenAI.BaseURL), "/"), "https://api.openai.com/v1")
+	configs.OpenAI.Enabled = false
+	configs.OpenAI.Configured = false
+	configs.OpenAI.RuntimeResolvable = false
+	configs.OpenAI.RuntimeBlockers = nil
+	configs.OpenAI.BaseURL = ""
+	configs.OpenAI.DestinationProfile = ""
+	configs.OpenAI.DestinationManaged = false
+	configs.OpenAI.APIKeyConfigured = false
+	configs.OpenAI.APIKeySource = integrationconfig.SecretSourceNone
+	configs.OpenAI.CredentialRevision = 0
+	configs.OpenAI.CredentialUnique = false
 	configs.OpenAI.TranscriptionModel = defaultString(strings.TrimSpace(configs.OpenAI.TranscriptionModel), "gpt-4o-mini-transcribe")
 	configs.OpenAI.ReplyModel = defaultString(strings.TrimSpace(configs.OpenAI.ReplyModel), "gpt-4.1-mini")
 	configs.OpenAI.SpeechModel = defaultString(strings.TrimSpace(configs.OpenAI.SpeechModel), "tts-1")
@@ -1298,7 +1313,7 @@ func normalizeIntegrationConfigs(configs integrationconfig.IntegrationConfigsRes
 }
 
 func normalizeIntegrationProviders(schemaVersion string, providers []string) ([]string, error) {
-	if schemaVersion != PlatformSchemaVersion && len(providers) == 0 {
+	if schemaVersion != PlatformSchemaVersion && schemaVersion != LegacyPlatformSchemaV9 && len(providers) == 0 {
 		return []string{integrationconfig.ProviderSquare, integrationconfig.ProviderTwilio, integrationconfig.ProviderOpenAI}, nil
 	}
 	requested := map[string]bool{}
@@ -1894,7 +1909,7 @@ func bundleIncludes(bundle ConfigurationBundle, section string) bool {
 }
 
 func normalizeIncludedSections(schemaVersion string, sections []string) ([]string, error) {
-	if schemaVersion == PlatformSchemaVersion {
+	if schemaVersion == PlatformSchemaVersion || schemaVersion == LegacyPlatformSchemaV9 {
 		if len(sections) == 0 {
 			return nil, ErrValidation
 		}
@@ -1926,7 +1941,7 @@ func normalizeSectionSelection(sections []string, orderedAllowed []string) ([]st
 }
 
 func schemaHasPortableConsultationProfiles(schemaVersion string) bool {
-	return schemaVersion == PlatformSchemaVersion || schemaVersion == SchemaVersion || schemaVersion == LegacySchemaV7
+	return schemaVersion == PlatformSchemaVersion || schemaVersion == LegacyPlatformSchemaV9 || schemaVersion == SchemaVersion || schemaVersion == LegacySchemaV7
 }
 
 func normalizeLocalBusinessHours(hours *LocalBusinessHoursExport) error {

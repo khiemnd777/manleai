@@ -20,6 +20,7 @@ import (
 	"github.com/manleai/ai-receptionist/internal/conversationeval"
 	"github.com/manleai/ai-receptionist/internal/database"
 	"github.com/manleai/ai-receptionist/internal/encryption"
+	"github.com/manleai/ai-receptionist/internal/openairuntime"
 	"github.com/manleai/ai-receptionist/modules/conversation"
 	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
 	"github.com/manleai/ai-receptionist/modules/voice"
@@ -222,15 +223,17 @@ func main() {
 		}
 		integrationService := integrationconfig.NewService(integrationconfig.NewRepository(db), cipher, cfg)
 		resolver := strictDatabaseOpenAIResolver{service: integrationService, configSalonID: strings.TrimSpace(salonID)}
-		storedOpenAIConfig, enabled, err := resolver.ResolveOpenAIConfig(context.Background(), "direct-model-evaluation")
+		storedOpenAIConfig, err := resolver.ResolveOpenAIRuntimeConfig(context.Background(), strings.TrimSpace(salonID))
 		if err != nil {
 			fatalf("resolve encrypted database OpenAI config: %v", err)
-		} else if !enabled {
+		} else if !storedOpenAIConfig.Enabled {
 			fatalf("the stored OpenAI integration is disabled")
 		}
 		// Freeze the strictly database-resolved configuration for the whole run so
 		// one report cannot mix model or credential revisions changed mid-pilot.
-		model := conversationeval.NewOpenAIDirectModel(pinnedOpenAIConfigResolver{cfg: storedOpenAIConfig})
+		model := conversationeval.NewOpenAIDirectModel(pinnedOpenAIConfigResolver{
+			runtimeSalonID: "direct-model-evaluation", resolved: storedOpenAIConfig,
+		})
 		report, err = conversationeval.RunDirect(
 			context.Background(), corpus, model, conversationeval.FixtureBackendRunner{},
 			conversationeval.JSONCheckpointStore{Path: checkpointPath},
@@ -264,18 +267,24 @@ type strictDatabaseOpenAIResolver struct {
 }
 
 type pinnedOpenAIConfigResolver struct {
-	cfg config.OpenAIVoiceConfig
+	runtimeSalonID string
+	resolved       openairuntime.ResolvedConfig
 }
 
-func (r pinnedOpenAIConfigResolver) ResolveOpenAIConfig(context.Context, string) (config.OpenAIVoiceConfig, bool, error) {
-	return r.cfg, true, nil
-}
-
-func (r strictDatabaseOpenAIResolver) ResolveOpenAIConfig(ctx context.Context, _ string) (config.OpenAIVoiceConfig, bool, error) {
-	if r.service == nil || strings.TrimSpace(r.configSalonID) == "" {
-		return config.OpenAIVoiceConfig{}, false, errors.New("integration config service is required")
+func (r pinnedOpenAIConfigResolver) ResolveOpenAIRuntimeConfig(_ context.Context, salonID string) (openairuntime.ResolvedConfig, error) {
+	if strings.TrimSpace(salonID) == "" || strings.TrimSpace(salonID) != strings.TrimSpace(r.runtimeSalonID) {
+		return openairuntime.ResolvedConfig{}, openairuntime.ErrInvalidSalon
 	}
-	return r.service.ResolveOpenAIConfigStrict(ctx, r.configSalonID)
+	resolved := r.resolved
+	resolved.SalonID = strings.TrimSpace(r.runtimeSalonID)
+	return resolved, nil
+}
+
+func (r strictDatabaseOpenAIResolver) ResolveOpenAIRuntimeConfig(ctx context.Context, salonID string) (openairuntime.ResolvedConfig, error) {
+	if r.service == nil || strings.TrimSpace(r.configSalonID) == "" || strings.TrimSpace(salonID) != strings.TrimSpace(r.configSalonID) {
+		return openairuntime.ResolvedConfig{}, errors.New("integration config service and exact tenant are required")
+	}
+	return r.service.ResolveOpenAIRuntimeConfig(ctx, r.configSalonID)
 }
 
 func offlineScenarioResults(scenarios []conversationeval.Scenario) []conversationeval.ScenarioEvaluationResult {

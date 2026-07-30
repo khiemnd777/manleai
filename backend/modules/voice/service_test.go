@@ -130,27 +130,16 @@ func TestTwilioVoiceRoutingStatusKeepsHistoricalObservationWhenCurrentConfigIsUn
 }
 
 func TestVoiceConfigPropagatesSalonProviderConfigResolutionFailures(t *testing.T) {
-	for _, test := range []struct {
-		name      string
-		twilioErr error
-		openAIErr error
-	}{
-		{name: "Twilio repository failure", twilioErr: errors.New("Twilio config unavailable")},
-		{name: "OpenAI decryption failure", openAIErr: errors.New("OpenAI config unreadable")},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			wantErr := test.twilioErr
-			if wantErr == nil {
-				wantErr = test.openAIErr
-			}
-			service := NewService(newFakeVoiceStore(), newFakeConversationEngine(), testVoiceConfig(), AIProviders{})
-			service.SetConfigResolver(failingVoiceConfigResolver{twilioErr: test.twilioErr, openAIErr: test.openAIErr})
+	twilioErr := errors.New("Twilio config unavailable")
+	service := NewService(newFakeVoiceStore(), newFakeConversationEngine(), testVoiceConfig(), AIProviders{})
+	service.SetConfigResolver(failingVoiceConfigResolver{twilioErr: twilioErr})
+	if cfg, err := service.voiceConfig(context.Background(), "salon_1"); !errors.Is(err, twilioErr) || cfg.Twilio.AuthToken != "" {
+		t.Fatalf("voiceConfig = %#v, %v; want fail-closed Twilio resolver error", cfg, err)
+	}
 
-			cfg, err := service.voiceConfig(context.Background(), "salon_1")
-			if !errors.Is(err, wantErr) || cfg.Twilio.AuthToken != "" || cfg.AI.OpenAI.APIKey != "" {
-				t.Fatalf("voiceConfig = %#v, %v; want fail-closed resolver error", cfg, err)
-			}
-		})
+	service.SetConfigResolver(failingVoiceConfigResolver{openAIErr: errors.New("OpenAI config unreadable")})
+	if cfg, err := service.voiceConfig(context.Background(), "salon_1"); err != nil || cfg.Twilio.AuthToken == "" || cfg.AI.OpenAI.APIKey != "" {
+		t.Fatalf("voiceConfig = %#v, %v; OpenAI failure must not block tenant-bound Twilio", cfg, err)
 	}
 }
 
@@ -162,10 +151,16 @@ type failingVoiceConfigResolver struct {
 type recordingVoiceConfigResolver struct {
 	twilioSalonIDs []string
 	openAISalonIDs []string
+	twilioConfig   *config.TwilioVoiceConfig
+	publicBaseURL  string
+	openAIConfig   *config.OpenAIVoiceConfig
 }
 
 func (r *recordingVoiceConfigResolver) ResolveTwilioConfig(_ context.Context, salonID string) (config.TwilioVoiceConfig, string, error) {
 	r.twilioSalonIDs = append(r.twilioSalonIDs, salonID)
+	if r.twilioConfig != nil {
+		return *r.twilioConfig, r.publicBaseURL, nil
+	}
 	return config.TwilioVoiceConfig{
 		AccountSID: "AC11111111111111111111111111111111", AuthToken: "salon-scoped-token",
 		RouteID: "11111111-1111-4111-8111-111111111111", InboundNumber: "+13125550102", RoutingEnabled: true,
@@ -192,6 +187,9 @@ func (r *recordingVoiceConfigResolver) ResolveStoredTwilioAuthToken(context.Cont
 
 func (r *recordingVoiceConfigResolver) ResolveOpenAIConfig(_ context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error) {
 	r.openAISalonIDs = append(r.openAISalonIDs, salonID)
+	if r.openAIConfig != nil {
+		return *r.openAIConfig, true, nil
+	}
 	return config.OpenAIVoiceConfig{
 		APIKey: "salon-scoped-key", BaseURL: "https://api.openai.com/v1",
 		TranscriptionModel: "gpt-4o-mini-transcribe", ReplyModel: "gpt-4.1-mini",
@@ -705,6 +703,22 @@ func TestStatusReportsRealtimeInputModeWhenRealtimeConfigured(t *testing.T) {
 		},
 	}, readySchedulingTarget(booking.SchedulingAuthorityExternalProvider, 1))
 	service.providers = AIProviders{Realtime: fakeRealtimeProvider{configured: true}}
+	resolver := &recordingVoiceConfigResolver{}
+	service.SetConfigResolver(resolver)
+	resolverTwilio := config.TwilioVoiceConfig{
+		AuthToken: "secret", IncomingPath: "/api/voice/twilio/incoming",
+		RecordingPath: "/api/voice/twilio/recording", StreamPath: "/api/voice/twilio/stream",
+		VoiceTransport: InputModeRealtimeStream,
+	}
+	resolver.twilioConfig = &resolverTwilio
+	resolver.publicBaseURL = "https://voice.example.com"
+	resolverOpenAI := config.OpenAIVoiceConfig{
+		APIKey: "openai-key", BaseURL: "https://api.openai.com/v1",
+		TranscriptionModel: "gpt-4o-mini-transcribe", ReplyModel: "gpt-4.1-mini",
+		SpeechModel: "tts-1", SpeechVoice: "alloy", RealtimeEnabled: true,
+		RealtimeModel: "gpt-realtime-2", RealtimeVoice: "alloy",
+	}
+	resolver.openAIConfig = &resolverOpenAI
 
 	status, err := service.Status(context.Background(), "salon_1", "owner_1")
 	if err != nil {
@@ -781,9 +795,8 @@ func TestIncomingCallUsesOnlyTheSalonResolvedFromTheDialedNumber(t *testing.T) {
 	if engine.startSalonID != "salon_a" || engine.startOwnerUserID != "owner_a" {
 		t.Fatalf("conversation scope = salon %q owner %q, want salon_a/owner_a", engine.startSalonID, engine.startOwnerUserID)
 	}
-	if len(resolver.twilioSalonIDs) != 1 || resolver.twilioSalonIDs[0] != "salon_a" ||
-		len(resolver.openAISalonIDs) != 1 || resolver.openAISalonIDs[0] != "salon_a" {
-		t.Fatalf("provider config scopes = Twilio %#v OpenAI %#v, want only salon_a", resolver.twilioSalonIDs, resolver.openAISalonIDs)
+	if len(resolver.twilioSalonIDs) != 1 || resolver.twilioSalonIDs[0] != "salon_a" || len(resolver.openAISalonIDs) != 0 {
+		t.Fatalf("provider config scopes = Twilio %#v OpenAI %#v; inbound must bind Twilio without eagerly resolving OpenAI", resolver.twilioSalonIDs, resolver.openAISalonIDs)
 	}
 	if len(store.events) != 1 || store.events[0].SalonID != "salon_a" {
 		t.Fatalf("webhook events = %#v, want only salon_a", store.events)

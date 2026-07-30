@@ -33,8 +33,9 @@ separate non-owner runtime role; tenant quotas and fair worker claims; audited
 Platform AI-runtime control; a database-owned public catalog projection; and
 complete Platform PII-scope enforcement. Tenant and Platform UIs are separate
 route trees over the same canonical tenant data.
-V77 adds the Platform-only reviewed configuration-transfer control plane:
-tenant-to-tenant and schema-v9 JSON sources, v8 upload compatibility, guarded
+V77 adds the Platform-only reviewed configuration-transfer control plane.
+The current schema-v10 export contract accepts tenant-to-tenant and schema-v10
+or schema-v9 JSON sources, v8 upload compatibility, guarded
 content-only v7-to-v8 adaptation, source/target/domain/authority fences,
 actual-actor audit, and atomic apply without transferring authority, active
 provider selection, connections, secrets, or operational history.
@@ -72,7 +73,7 @@ modules/customer     canonical customer CRUD, activity read model, and POS looku
 modules/notification_delivery provider-neutral owner-message delivery claims, attempts, events, replay, and dead-letter policy
 modules/notification_twilio Twilio Messaging REST dispatch plus signed status and inbound callbacks
 modules/integration_config encrypted salon-scoped provider app credentials and runtime settings
-modules/config_transfer Platform-only reviewed v9/v8 transfer orchestration, guarded scoped-v7 content adaptation, plus retained unregistered legacy compatibility code
+modules/config_transfer Platform-only reviewed v10/v9/v8 transfer orchestration, guarded scoped-v7 content adaptation, plus retained unregistered legacy compatibility code
 modules/conversation state-driven simulator/phone sessions, semantic turn reduction, service consultation, transcripts, summaries, and handoffs
 modules/training     salon-authored knowledge base, owner corrections, and service aliases
 modules/voice        provider-neutral live voice runtime, authority-aware three-dimension readiness/status, semantic-contract verification, routing, and webhook event audit
@@ -1035,7 +1036,15 @@ the runtime creates a handoff or fallback pending flow and avoids confirmed
 wording. Later authority modes must replace only the scheduling execution and
 evidence gate, not these conversation-state and review safeguards.
 
-The live voice layer is split into `modules/voice`, `modules/voice_twilio`, and provider-specific AI adapter modules such as `modules/voice_openai`. `modules/voice` owns provider-neutral DTOs and runtime interfaces, including whole-response TTS for recording mode, chunked streaming speech for realtime mode, the owner-scoped semantic-contract check, and the bounded read-only semantic-evaluation route. `modules/voice_twilio` owns Twilio request verification, TwiML, Media Streams framing, typed reply scheduling, bounded/paced PCMU playout, playback marks, barge-in clear/cancel, caller-input gating, stale-generation rejection, and an allowlisted stream-status audit shape instead of copying the provider form. `modules/voice_openai` owns OpenAI payloads, strict full and guidance structured-turn schema validation, per-schema salon/config nonretryable contract circuits, Realtime input sessions, dedicated Speech streaming, raw PCM 24 kHz ingestion, stateful anti-aliased resampling, and PCMU encoding. Provider request and Realtime failures expose only fixed messages plus bounded type/code/parameter/request/fingerprint diagnostics; wrapped transport errors and provider message bodies do not cross the voice boundary. The adapter validates each schema recursively before dispatch, suppresses repeated live invalid requests while that schema circuit is open, and lets the synthetic `POST /api/salons/:id/voice/semantic-check` probe validate both contracts and close their matching circuits after successful requests. The separate `POST /api/salons/:id/voice/semantic-evaluate` path accepts catalog-bound scenarios for repeatable scoring without conversation, availability, or POS mutation.
+The live voice layer is split into `modules/voice`, `modules/voice_twilio`, and provider-specific AI adapter modules such as `modules/voice_openai`. `modules/voice` owns provider-neutral DTOs and runtime interfaces, including whole-response TTS for recording mode, chunked streaming speech for realtime mode, the owner-scoped semantic-contract check, and the bounded read-only semantic-evaluation route. `modules/voice_twilio` owns Twilio request verification, TwiML, Media Streams framing, typed reply scheduling, bounded/paced PCMU playout, playback marks, barge-in clear/cancel, caller-input gating, stale-generation rejection, and an allowlisted stream-status audit shape instead of copying the provider form. `modules/voice_openai` owns OpenAI payloads, strict full and guidance structured-turn schema validation, per-schema salon/config nonretryable contract circuits, Realtime input sessions, dedicated Speech streaming, raw PCM 24 kHz ingestion, stateful anti-aliased resampling, and PCMU encoding. Production construction requires an `openairuntime.Resolver`; blank tenants and cross-tenant resolver results fail before network dispatch. The adapter uses only the server-owned `openai_public` destination (`https://api.openai.com/v1` and its WSS equivalent), disables redirects and environment proxies, and rejects unsafe DNS/dial targets. Provider request and Realtime failures expose only fixed messages plus bounded type/code/parameter/request/fingerprint diagnostics; wrapped transport errors and provider message bodies do not cross the voice boundary. Circuit identities use tenant/config/credential-revision/destination-policy/schema fences and never hash plaintext credentials. The adapter validates each schema recursively before dispatch, suppresses repeated live invalid requests while that schema circuit is open, and lets the synthetic `POST /api/salons/:id/voice/semantic-check` probe validate both contracts and close their matching circuits after successful requests. The separate `POST /api/salons/:id/voice/semantic-evaluate` path accepts catalog-bound scenarios for repeatable scoring without conversation, availability, or POS mutation.
+
+V84 adds tenant-bound OpenAI credential identity and durable runtime-verification evidence. `salon_integration_configs` stores a purpose-separated HMAC identity, monotonic credential revision, and fixed destination profile beside the encrypted credential. A partial unique index rejects reuse of one plaintext API key across tenants without exposing the key or its HMAC through API/audit surfaces. `modules/openai_runtime_verification` owns explicit Platform verification requests, version-fenced async execution, per-capability results, and immutable safe events. Worker discovery is bounded and unbound; each returned job is reloaded and processed only after binding the exact returned `system_salon_id`. Verification evidence is current only when config version, credential revision, destination policy, and verification contract still match. GET status performs no provider call.
+
+OpenAI credential ownership uses one credential per tenant. This intentionally
+trades shared-project convenience for tenant-attributable billing, independent
+rate limits and rotation, smaller incident blast radius, and clearer data-
+isolation evidence. Configuration Transfer therefore preserves the target
+tenant's identity and never copies the source credential or its HMAC.
 
 V83 expands Twilio Voice ingress with tenant-bound URLs whose opaque
 `route_id` is the UUID of the salon's Twilio integration row. A provider-only
@@ -1065,7 +1074,7 @@ a production consultation question, or no output-model call; the evaluator does
 not force a second rewrite over every backend reply. Review batches contain at
 most five retained outputs (ten rounds for the complete 50), use explicit
 backend transition/booking/handoff evidence, and require at least 4/5 in every
-dimension. OpenAI base URL, model, and secret resolve strictly
+dimension. OpenAI destination profile, model, and secret resolve strictly
 from the encrypted salon-scoped `salon_integration_configs` record; the salon ID
 does not become logical scenario ownership. Checkpoint reservation before each
 model request, a caller-provided hard call ceiling, versioned evaluation/review
@@ -1130,12 +1139,11 @@ Provider app credentials and runtime settings for Square Appointments, Twilio,
 and OpenAI are salon-scoped operational configuration stored through
 `modules/integration_config`. Secrets are encrypted with the same AES-GCM token
 cipher used for POS tokens, never returned to the frontend, and resolved by
-adapters at call time. Environment variables remain bootstrap and local
-fallback configuration for infrastructure, JWT, CORS, encryption, and legacy
-developer setup; dashboard-saved provider configuration takes precedence for a
-salon. Owner-notification Twilio messaging is stricter: its runtime resolver
-uses only the encrypted salon record and never falls back to environment
-configuration. Explicit owner-SMS enablement, exact-destination consent,
+adapters at call time. Environment variables remain infrastructure, JWT, CORS,
+encryption, and exact-missing legacy Square-bootstrap configuration only.
+Twilio and OpenAI runtime never inherit provider settings, URLs, models, or
+credentials from the process. Owner-notification Twilio messaging likewise
+uses only the encrypted salon record. Explicit owner-SMS enablement, exact-destination consent,
 Account SID/Auth Token, sender or Messaging Service, and public HTTPS callback
 URLs form its configuration fence.
 
@@ -1251,10 +1259,10 @@ closed. Public DTOs never expose staff contact details, provider/POS IDs,
 provider tokens, sync errors, or owner identifiers, and every CTA remains a
 call-to-request action rather than web confirmation.
 
-The current configuration-transfer contract is Platform schema v9 on the
+The current configuration-transfer contract is Platform schema v10 on the
 tenant-detail Transfer tab. It supports an authorized tenant source or JSON
 upload, explicit section scope, `local_override` hours, selected-scope export,
-v8 upload compatibility, and server-owned adaptation of explicitly scoped v7
+v9 and v8 upload compatibility, and server-owned adaptation of explicitly scoped v7
 content packs containing only categories, aliases, consultation profiles, and
 knowledge. Accepted v7 input is canonicalized to v8 before fingerprint and
 audit; v7 runtime/provider scope and v1-v6 remain rejected. The older v8-v1

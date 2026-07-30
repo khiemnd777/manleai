@@ -95,6 +95,9 @@ func (h *PlatformHandler) respond(c *fiber.Ctx, value any, err error, code strin
 	if errors.Is(err, ErrTwilioVoiceNumberConflict) {
 		return respond.Error(c, fiber.StatusConflict, "TWILIO_VOICE_NUMBER_CONFLICT", "This Voice inbound number is already assigned to another active route.")
 	}
+	if errors.Is(err, ErrOpenAICredentialConflict) {
+		return respond.Error(c, fiber.StatusConflict, "OPENAI_CREDENTIAL_TENANT_CONFLICT", "This OpenAI API key is already assigned to another tenant. Rotate one tenant credential before retrying.")
+	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, code, "Could not complete integration configuration.")
 	}

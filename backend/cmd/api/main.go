@@ -28,6 +28,7 @@ import (
 	integrationconfig "github.com/manleai/ai-receptionist/modules/integration_config"
 	notificationdelivery "github.com/manleai/ai-receptionist/modules/notification_delivery"
 	notificationtwilio "github.com/manleai/ai-receptionist/modules/notification_twilio"
+	openairuntimeverification "github.com/manleai/ai-receptionist/modules/openai_runtime_verification"
 	operationshealth "github.com/manleai/ai-receptionist/modules/operations_health"
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/pos_square"
@@ -195,8 +196,16 @@ func main() {
 	configtransfer.RegisterPlatformRoutes(api, configtransfer.NewPlatformHandler(platformConfigurationTransferService, accessService), cfg.JWTSecret)
 
 	voiceRepo := voice.NewRepository(db)
-	openAIVoiceAdapter := voice_openai.NewAdapter(cfg.Voice.AI.OpenAI)
-	openAIVoiceAdapter.SetConfigResolver(integrationConfigService)
+	openAIVoiceAdapter, err := voice_openai.NewTenantBoundAdapter(integrationConfigService)
+	if err != nil {
+		log.Fatalf("create tenant-bound OpenAI adapter: %v", err)
+	}
+	openAIVerificationService := openairuntimeverification.NewService(
+		openairuntimeverification.NewRepository(db), integrationConfigService, openAIVoiceAdapter,
+	)
+	openairuntimeverification.RegisterPlatformRoutes(
+		api, openairuntimeverification.NewPlatformHandler(openAIVerificationService, accessService), cfg.JWTSecret,
+	)
 	aiProviders := voice.AIProviders{
 		STT:          openAIVoiceAdapter,
 		LLM:          openAIVoiceAdapter,

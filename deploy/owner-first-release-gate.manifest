@@ -7,6 +7,7 @@ OWNER_FIRST_MIGRATION_MIN_VERSION=46
 
 BACKEND_RACE_PACKAGES=(
   ./cmd/worker
+  ./internal/openairuntime
   ./internal/middleware
   ./internal/ratelimit
   ./modules/access
@@ -18,6 +19,7 @@ BACKEND_RACE_PACKAGES=(
   ./modules/customer_notification
   ./modules/integration_config
   ./modules/notification_delivery
+  ./modules/openai_runtime_verification
   ./modules/operations_health
   ./modules/pos
   ./modules/pos_square
@@ -29,6 +31,7 @@ BACKEND_RACE_PACKAGES=(
   ./modules/training
   ./modules/tenant_runtime
   ./modules/voice
+  ./modules/voice_openai
   ./modules/voice_twilio
 )
 
@@ -56,11 +59,13 @@ POSTGRES_INTEGRATION_PACKAGES=(
   ./modules/notification_delivery
   ./modules/notification_twilio
   ./modules/operations_health
+  ./modules/openai_runtime_verification
   ./modules/scheduling_retention
   ./modules/tenant_runtime
 )
 
 SECURITY_CONTRACT_PACKAGES=(
+  ./internal/openairuntime
   ./internal/twiliovoice
   ./internal/twiliowebhook
   ./internal/middleware
@@ -75,6 +80,7 @@ SECURITY_CONTRACT_PACKAGES=(
   ./modules/integration_config
   ./modules/notification_delivery
   ./modules/notification_twilio
+  ./modules/openai_runtime_verification
   ./modules/operations_health
   ./modules/pos
   ./modules/pos_square
@@ -104,6 +110,8 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/migrations/v80_integration_test.go
   backend/migrations/v83_safety_test.go
   backend/migrations/v83_integration_test.go
+  backend/migrations/v84_safety_test.go
+  backend/migrations/v84_integration_test.go
   backend/sampledata/runner_test.go
   backend/sampledata/runner_integration_test.go
   backend/cmd/worker/retention_registration_test.go
@@ -113,6 +121,7 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/internal/database/runtime_role_test.go
   backend/internal/twiliovoice/contract_test.go
   backend/internal/twiliowebhook/validator_test.go
+  backend/internal/openairuntime/runtime_test.go
   backend/internal/middleware/auth_test.go
   backend/internal/middleware/rate_limit_test.go
   backend/internal/ratelimit/redis_store_integration_test.go
@@ -159,6 +168,9 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/integration_config/routes_test.go
   backend/modules/integration_config/service_test.go
   backend/modules/integration_config/twilio_inbound_path_test.go
+  backend/modules/openai_runtime_verification/service_test.go
+  backend/modules/openai_runtime_verification/platform_handler_test.go
+  backend/modules/openai_runtime_verification/repository_integration_test.go
   backend/modules/notification_delivery/handler_test.go
   backend/modules/notification_delivery/repository_integration_test.go
   backend/modules/notification_twilio/handler_test.go
@@ -199,6 +211,7 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/voice/technical_handler_test.go
   backend/modules/voice/twilio_route_test.go
   backend/modules/voice_openai/adapter_test.go
+  backend/modules/voice_openai/adapter_constructor_test.go
   backend/modules/voice_twilio/adapter_test.go
   backend/modules/voice_twilio/handler_test.go
   backend/migrations/v59_safety_test.go

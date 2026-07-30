@@ -124,10 +124,11 @@ export function inspectPlatformConfiguration(configuration: ConfigurationBundle)
   let legacyV7Adapted = false;
 
   switch (schemaVersion) {
+    case "manleai.salon_configuration.v10":
     case "manleai.salon_configuration.v9":
       allowedSections = platformTransferSectionOrder;
       if (declaredSections.length === 0) {
-        throw new Error("Platform v9 configuration files must declare included_sections.");
+        throw new Error("Platform v10/v9 configuration files must declare included_sections.");
       }
       break;
     case "manleai.salon_configuration.v8":
@@ -142,7 +143,7 @@ export function inspectPlatformConfiguration(configuration: ConfigurationBundle)
       }
       break;
     default:
-      throw new Error("Platform Transfer supports v9, v8, and scoped content-only v7 configuration files.");
+      throw new Error("Platform Transfer supports v10, v9, v8, and scoped content-only v7 configuration files.");
   }
 
   const allowed = new Set(allowedSections);

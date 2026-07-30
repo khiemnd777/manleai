@@ -40,6 +40,7 @@ var displayPolicies = map[string]displayPolicy{
 	"square_calendar_repair":         {"Square calendar repair", "/dashboard/integrations", true, 15 * time.Minute},
 	"conversation_retention":         {"Conversation retention", "/dashboard/calls", false, 6 * time.Hour},
 	"scheduling_pii_retention":       {"Scheduling PII retention", "/dashboard/appointments", false, 30 * time.Minute},
+	"openai_runtime_verification":    {"OpenAI runtime verification", "/platform/tenants", false, 15 * time.Minute},
 	"notification_delivery":          {"Owner notification delivery", "/dashboard/appointments", false, 15 * time.Minute},
 	"customer_notification_delivery": {"Customer SMS delivery", "/dashboard/appointments", false, 15 * time.Minute},
 	"customer_notifications":         {"Customer SMS queue", "/dashboard/appointments", false, 15 * time.Minute},

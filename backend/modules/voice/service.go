@@ -1015,7 +1015,7 @@ func (s *Service) inputModeFromConfig(ctx context.Context, salonID string, cfg c
 func (s *Service) ttsVoice(ctx context.Context, salonID string) string {
 	cfg, _, err := s.openAIConfig(ctx, salonID)
 	if err != nil {
-		return strings.TrimSpace(s.cfg.AI.OpenAI.SpeechVoice)
+		return ""
 	}
 	return strings.TrimSpace(cfg.SpeechVoice)
 }
@@ -1146,7 +1146,7 @@ func (s *Service) RealtimeFallbackMessage(ctx context.Context, provider string, 
 func (s *Service) realtimeVoice(ctx context.Context, salonID string) string {
 	cfg, _, err := s.openAIConfig(ctx, salonID)
 	if err != nil {
-		return strings.TrimSpace(s.cfg.AI.OpenAI.RealtimeVoice)
+		return ""
 	}
 	return strings.TrimSpace(cfg.RealtimeVoice)
 }
@@ -1154,7 +1154,7 @@ func (s *Service) realtimeVoice(ctx context.Context, salonID string) string {
 func (s *Service) realtimeInstructions(ctx context.Context, salonID string) string {
 	cfg, _, err := s.openAIConfig(ctx, salonID)
 	if err != nil {
-		return strings.TrimSpace(s.cfg.AI.OpenAI.RealtimeInstructions)
+		return ""
 	}
 	return strings.TrimSpace(cfg.RealtimeInstructions)
 }
@@ -1171,6 +1171,13 @@ func (s *Service) transcriptionContextPrompt(ctx context.Context, salonID string
 }
 
 func (s *Service) aiStatus(ctx context.Context, salonID string, cfg config.VoiceConfig) VoiceAIStatus {
+	openAICfg, enabled, err := s.openAIConfig(ctx, salonID)
+	if err != nil || !enabled {
+		blocked := ProviderCapabilityStatus{Provider: ProviderOpenAI, BlockedReason: "Tenant OpenAI configuration is not runtime-resolvable."}
+		return VoiceAIStatus{Provider: ProviderOpenAI, STT: blocked, LLM: blocked, TTS: blocked, Realtime: blocked}
+	}
+	cfg.AI.Provider = ProviderOpenAI
+	cfg.AI.OpenAI = openAICfg
 	provider := defaultAIProvider(cfg.AI.Provider)
 	status := VoiceAIStatus{
 		Provider: provider,
@@ -1309,16 +1316,11 @@ func (s *Service) voiceConfig(ctx context.Context, salonID string) (config.Voice
 	cfg.Twilio.RecordingPath = defaultString(strings.TrimSpace(cfg.Twilio.RecordingPath), "/api/voice/twilio/recording")
 	cfg.Twilio.StreamPath = defaultString(strings.TrimSpace(cfg.Twilio.StreamPath), "/api/voice/twilio/stream")
 	cfg.Twilio.VoiceTransport = normalizeVoiceTransport(defaultString(cfg.Twilio.VoiceTransport, InputModeRecording))
-	cfg.AI.OpenAI.BaseURL = defaultString(strings.TrimRight(strings.TrimSpace(cfg.AI.OpenAI.BaseURL), "/"), "https://api.openai.com/v1")
-	cfg.AI.OpenAI.TranscriptionModel = defaultString(strings.TrimSpace(cfg.AI.OpenAI.TranscriptionModel), "gpt-4o-mini-transcribe")
-	cfg.AI.OpenAI.ReplyModel = defaultString(strings.TrimSpace(cfg.AI.OpenAI.ReplyModel), "gpt-4.1-mini")
-	cfg.AI.OpenAI.SpeechModel = defaultString(strings.TrimSpace(cfg.AI.OpenAI.SpeechModel), "tts-1")
-	cfg.AI.OpenAI.SpeechVoice = defaultString(strings.TrimSpace(cfg.AI.OpenAI.SpeechVoice), "alloy")
-	cfg.AI.OpenAI.SpeechOutputMode = config.NormalizeOpenAISpeechOutputMode(cfg.AI.OpenAI.SpeechOutputMode)
-	cfg.AI.OpenAI.RealtimeModel = config.NormalizeOpenAIRealtimeModel(cfg.AI.OpenAI.RealtimeModel)
-	cfg.AI.OpenAI.RealtimeVoice = defaultString(strings.TrimSpace(cfg.AI.OpenAI.RealtimeVoice), cfg.AI.OpenAI.SpeechVoice)
-	cfg.AI.OpenAI.RealtimeNoiseProfile = config.NormalizeOpenAIRealtimeNoiseProfile(cfg.AI.OpenAI.RealtimeNoiseProfile)
-	cfg.AI.OpenAI.RealtimeInstructions = strings.TrimSpace(cfg.AI.OpenAI.RealtimeInstructions)
+	// OpenAI is resolved lazily per capability after Twilio has already bound
+	// the call to a tenant. Process/global OpenAI settings are never active
+	// runtime configuration.
+	cfg.AI.Provider = ""
+	cfg.AI.OpenAI = config.OpenAIVoiceConfig{}
 	if s.configResolver == nil || strings.TrimSpace(salonID) == "" {
 		return cfg, nil
 	}
@@ -1326,26 +1328,16 @@ func (s *Service) voiceConfig(ctx context.Context, salonID string) (config.Voice
 	if err != nil {
 		return config.VoiceConfig{}, err
 	}
-	openAICfg, openAIEnabled, err := s.configResolver.ResolveOpenAIConfig(ctx, salonID)
-	if err != nil {
-		return config.VoiceConfig{}, err
-	}
 	cfg.Twilio = twilioCfg
 	cfg.Twilio.StreamPath = defaultString(strings.TrimSpace(cfg.Twilio.StreamPath), "/api/voice/twilio/stream")
 	cfg.Twilio.VoiceTransport = normalizeVoiceTransport(defaultString(cfg.Twilio.VoiceTransport, InputModeRecording))
 	cfg.PublicBaseURL = strings.TrimRight(strings.TrimSpace(publicBaseURL), "/")
-	cfg.AI.OpenAI = openAICfg
-	if openAIEnabled {
-		cfg.AI.Provider = ProviderOpenAI
-	} else {
-		cfg.AI.Provider = ""
-	}
 	return cfg, nil
 }
 
 func (s *Service) openAIConfig(ctx context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error) {
 	if s.configResolver == nil || strings.TrimSpace(salonID) == "" {
-		return s.cfg.AI.OpenAI, strings.TrimSpace(s.cfg.AI.Provider) == ProviderOpenAI, nil
+		return config.OpenAIVoiceConfig{}, false, ErrProviderDisabled
 	}
 	return s.configResolver.ResolveOpenAIConfig(ctx, salonID)
 }
@@ -1458,10 +1450,11 @@ func normalizeVoiceTransport(value string) string {
 }
 
 func (s *Service) realtimeReady(ctx context.Context, salonID string, cfg config.VoiceConfig) bool {
-	return cfg.AI.OpenAI.RealtimeEnabled &&
-		strings.TrimSpace(cfg.AI.OpenAI.APIKey) != "" &&
-		strings.TrimSpace(cfg.AI.OpenAI.RealtimeModel) != "" &&
-		strings.TrimSpace(cfg.AI.OpenAI.RealtimeVoice) != "" &&
+	openAICfg, enabled, err := s.openAIConfig(ctx, salonID)
+	return err == nil && enabled && openAICfg.RealtimeEnabled &&
+		strings.TrimSpace(openAICfg.APIKey) != "" &&
+		strings.TrimSpace(openAICfg.RealtimeModel) != "" &&
+		strings.TrimSpace(openAICfg.RealtimeVoice) != "" &&
 		s.providers.Realtime != nil &&
 		s.providers.Realtime.Configured(ctx, salonID)
 }

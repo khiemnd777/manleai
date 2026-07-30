@@ -51,7 +51,11 @@ func (s configRowScanner) Scan(dest ...any) error {
 	*dest[3].(*bool) = true
 	*dest[4].(*string) = s.settings
 	*dest[5].(*string) = ""
-	*dest[6].(*time.Time) = now
-	*dest[7].(*time.Time) = now
+	*dest[6].(*string) = ""
+	*dest[7].(*int64) = 0
+	*dest[8].(*string) = ""
+	*dest[9].(*time.Time) = now
+	*dest[10].(*time.Time) = now
+	*dest[11].(*int64) = 0
 	return nil
 }

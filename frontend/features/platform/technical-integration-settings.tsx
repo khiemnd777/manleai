@@ -28,6 +28,8 @@ import type {
 import type {
   IntegrationConfigs,
   OpenAIIntegrationConfig,
+  OpenAIRuntimeVerification,
+  OpenAIRuntimeVerificationResponse,
   POSConnection,
   POSLocation,
   SquareIntegrationConfig,
@@ -43,6 +45,8 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
   const [configs, setConfigs] = useState<IntegrationConfigs | null>(null);
   const [voiceRoutingStatus, setVoiceRoutingStatus] = useState<TwilioVoiceRoutingStatus | null>(null);
   const [voiceRoutingStatusError, setVoiceRoutingStatusError] = useState("");
+  const [openAIVerification, setOpenAIVerification] = useState<OpenAIRuntimeVerification | null>(null);
+  const [openAIVerificationError, setOpenAIVerificationError] = useState("");
   const [activeTab, setActiveTab] = useState<IntegrationConfigProvider>("square");
   const [squareForm, setSquareForm] = useState<SquareConfigForm>(() => squareConfigToForm());
   const [twilioForm, setTwilioForm] = useState<TwilioConfigForm>(() => twilioConfigToForm());
@@ -54,7 +58,9 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
   const [success, setSuccess] = useState("");
   const loadRequestRef = useRef(0);
   const actionKeys = useRef<Partial<Record<IntegrationConfigProvider, ProviderAction>>>({});
+  const openAIVerificationAction = useRef<ProviderAction | null>(null);
   const base = platformIntegrationConfigBasePath(tenantID);
+  const openAIVerificationPath = `/api/platform/tenants/${encodeURIComponent(tenantID)}/technical/openai/runtime-verification`;
 
   const load = useCallback(async () => {
     const requestID = ++loadRequestRef.current;
@@ -62,6 +68,7 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
     setError("");
     setBlocked(false);
     setVoiceRoutingStatusError("");
+    setOpenAIVerificationError("");
     try {
       const routingStatusPromise = apiRequest<TwilioVoiceRoutingStatus>(
           `/api/platform/tenants/${encodeURIComponent(tenantID)}/technical/voice-routing-status`
@@ -72,12 +79,21 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
             error: errorMessage(failure, "Live Twilio routing evidence is temporarily unavailable.")
           })
         );
+      const verificationPromise = apiRequest<OpenAIRuntimeVerificationResponse>(openAIVerificationPath).then(
+        (response) => ({ verification: response.verification, error: "" }),
+        (failure) => failure instanceof RequestError && failure.status === 404
+          ? { verification: null, error: "" }
+          : { verification: null, error: errorMessage(failure, "OpenAI verification evidence is temporarily unavailable.") }
+      );
       const value = await apiRequest<IntegrationConfigs>(base);
       const routingResult = await routingStatusPromise;
+      const verificationResult = await verificationPromise;
       if (requestID !== loadRequestRef.current) return;
       setConfigs(value);
       setVoiceRoutingStatus(routingResult.status);
       setVoiceRoutingStatusError(routingResult.error);
+      setOpenAIVerification(verificationResult.verification);
+      setOpenAIVerificationError(verificationResult.error);
       setSquareForm(squareConfigToForm(value.square));
       setTwilioForm(twilioConfigToForm(value.twilio));
       setOpenAIForm(openAIConfigToForm(value.openai));
@@ -89,18 +105,21 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
     } finally {
       if (requestID === loadRequestRef.current) setLoading(false);
     }
-  }, [base, tenantID]);
+  }, [base, openAIVerificationPath, tenantID]);
 
   useEffect(() => {
     setActiveTab("square");
     setConfigs(null);
     setVoiceRoutingStatus(null);
     setVoiceRoutingStatusError("");
+    setOpenAIVerification(null);
+    setOpenAIVerificationError("");
     setSquareForm(squareConfigToForm());
     setTwilioForm(twilioConfigToForm());
     setOpenAIForm(openAIConfigToForm());
     setSuccess("");
     actionKeys.current = {};
+    openAIVerificationAction.current = null;
     void load();
     return () => {
       loadRequestRef.current += 1;
@@ -172,7 +191,36 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
     if (!updated) return;
     setConfigs((current) => (current ? { ...current, openai: updated } : current));
     setOpenAIForm(openAIConfigToForm(updated));
-    setSuccess("OpenAI voice AI configuration saved. Secret values remain write-only.");
+    setOpenAIVerification((current) => current ? { ...current, fresh: false, status: current.status === "succeeded" ? "stale" : current.status } : current);
+    setSuccess("OpenAI voice AI configuration saved. Live verification is required for the current config and credential revision.");
+  }
+
+  async function verifyOpenAI() {
+    const configVersion = configs?.openai.version ?? 0;
+    if (!configs?.openai.runtime_resolvable || configVersion <= 0) return;
+    const signature = String(configVersion);
+    let action = openAIVerificationAction.current;
+    if (!action || action.signature !== signature) {
+      action = { signature, key: newBusinessActionKey("verify-openai-runtime") };
+      openAIVerificationAction.current = action;
+    }
+    setBusy("verify-openai-runtime");
+    setError("");
+    setSuccess("");
+    try {
+      const response = await apiRequest<OpenAIRuntimeVerificationResponse>(openAIVerificationPath, {
+        method: "POST",
+        body: JSON.stringify({ action_key: action.key, expected_config_version: configVersion })
+      });
+      openAIVerificationAction.current = null;
+      setOpenAIVerification(response.verification);
+      setOpenAIVerificationError("");
+      setSuccess("OpenAI runtime verification queued. Refresh to inspect per-capability evidence after the worker completes.");
+    } catch (failure) {
+      setError(errorMessage(failure, "Could not queue OpenAI runtime verification."));
+    } finally {
+      setBusy("");
+    }
   }
 
   if (loading) {
@@ -208,12 +256,14 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
 
       {error ? <Alert title="Technical settings need attention" message={error} /> : null}
       {success ? <Alert type="success" title="Saved" message={success} /> : null}
+      {openAIVerificationError ? <Alert title="OpenAI verification evidence unavailable" message={openAIVerificationError} /> : null}
 
       <ProviderConfigurationPanel
         activeTab={activeTab}
         busy={busy}
         configs={configs}
         openAIForm={openAIForm}
+        openAIVerification={openAIVerification}
         setActiveTab={setActiveTab}
         setOpenAIForm={setOpenAIForm}
         setSquareForm={setSquareForm}
@@ -223,6 +273,8 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
         voiceRoutingStatus={voiceRoutingStatus}
         voiceRoutingStatusError={voiceRoutingStatusError}
         onSaveOpenAI={() => void saveOpenAI()}
+        onVerifyOpenAI={() => void verifyOpenAI()}
+        onRefreshOpenAIVerification={() => void load()}
         onSaveSquare={() => void saveSquare()}
         onSaveTwilio={() => void saveTwilio()}
       />

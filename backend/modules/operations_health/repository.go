@@ -297,6 +297,10 @@ func (r *Repository) loadQueues(ctx context.Context, salonID string) []queueReco
 		r.metric(ctx, salonID, "scheduling_requests", `
 			SELECT count(*), min(created_at), 0
 			FROM scheduling_requests WHERE salon_id=$1 AND status IN ('pending','contacted')`),
+		r.metric(ctx, salonID, "openai_runtime_verification", `
+			SELECT count(*), min(created_at), 0
+			FROM openai_runtime_verification_runs
+			WHERE salon_id=$1 AND status IN ('queued','claimed')`),
 		r.metric(ctx, salonID, "availability_quote_cleanup", `
 			SELECT count(*), min(COALESCE(consumed_at, expires_at)), 0
 			FROM availability_quotes quote

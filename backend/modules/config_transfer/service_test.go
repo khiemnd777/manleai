@@ -271,8 +271,8 @@ func TestPreviewImportExplicitlyPreservesTargetSquareWebhookConfiguration(t *tes
 	if sectionSummary(result.Summary, SectionIntegrations).Skipped == 0 {
 		t.Fatalf("integration summary = %#v, want skipped deployment-specific webhook field", result.Summary)
 	}
-	if len(result.RequiresSecretReentry) != 3 || result.RequiresSecretReentry[1] != integrationconfig.ProviderSquare {
-		t.Fatalf("secret re-entry providers = %#v, want Square included for webhook signature key", result.RequiresSecretReentry)
+	if len(result.RequiresSecretReentry) != 2 || result.RequiresSecretReentry[0] != integrationconfig.ProviderSquare || result.RequiresSecretReentry[1] != integrationconfig.ProviderTwilio {
+		t.Fatalf("secret re-entry providers = %#v, want only portable-provider secret warnings; OpenAI tenant identity is preserved", result.RequiresSecretReentry)
 	}
 }
 

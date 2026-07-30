@@ -214,3 +214,17 @@ its unbound direct worker queries will fail closed. Roll back only to the exact
 declared V79-aware compatible image, keep V80 in place, and diagnose the
 provider/worker path under that image. Database restore remains a separate DBA-
 approved recovery decision for data recovery, not a policy rollback mechanism.
+
+## V84 OpenAI Tenant Runtime Expand Rollback Note
+
+V84 is additive: it adds OpenAI credential identity/destination columns,
+verification tables/events, exact-tenant RLS, and a bounded worker claim
+function. An image rollback leaves V84 applied. Stop the new verification
+worker, disable tenant OpenAI runtime, and block OpenAI HTTP/WSS egress before
+restarting a prior image because that image lacks the V84 strict resolver and
+destination contract. Do not drop the unique credential identity index or
+delete verification history. Prior integration-config writes use explicit
+columns and do not erase V84 identity columns on an existing row. Roll forward
+to resume OpenAI, and require a new fresh run after any config or credential
+revision change. Detailed procedure and evidence rules are in
+[OpenAI Tenant-Bound Runtime Operations](openai-tenant-runtime.md).

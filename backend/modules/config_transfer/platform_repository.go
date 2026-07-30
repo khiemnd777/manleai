@@ -602,8 +602,8 @@ func upsertPlatformTwilioConfig(ctx context.Context, tx *sql.Tx, salonID string,
 
 func upsertPlatformOpenAIConfig(ctx context.Context, tx *sql.Tx, salonID string, cfg integrationconfig.OpenAISettingsResponse) error {
 	settings, err := json.Marshal(map[string]string{
-		"base_url": cfg.BaseURL, "transcription_model": cfg.TranscriptionModel,
-		"reply_model": cfg.ReplyModel, "speech_model": cfg.SpeechModel,
+		"transcription_model": cfg.TranscriptionModel,
+		"reply_model":         cfg.ReplyModel, "speech_model": cfg.SpeechModel,
 		"speech_voice": cfg.SpeechVoice, "speech_output_mode": cfg.SpeechOutputMode,
 		"realtime_enabled": boolString(cfg.RealtimeEnabled), "realtime_model": cfg.RealtimeModel,
 		"realtime_voice": cfg.RealtimeVoice, "realtime_noise_profile": cfg.RealtimeNoiseProfile,
@@ -614,10 +614,10 @@ func upsertPlatformOpenAIConfig(ctx context.Context, tx *sql.Tx, salonID string,
 	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO salon_integration_configs(salon_id,provider,enabled,settings,secrets_encrypted)
-		VALUES($1,'openai',$2,$3::jsonb,NULL)
+		VALUES($1,'openai',false,$2::jsonb,NULL)
 		ON CONFLICT(salon_id,provider) DO UPDATE
-		SET enabled=EXCLUDED.enabled,settings=salon_integration_configs.settings || EXCLUDED.settings,updated_at=now()
-	`, salonID, cfg.Enabled, string(settings))
+		SET settings=salon_integration_configs.settings || EXCLUDED.settings,updated_at=now()
+	`, salonID, string(settings))
 	return err
 }
 

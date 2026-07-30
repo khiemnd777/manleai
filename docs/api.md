@@ -1581,8 +1581,9 @@ The destination is always `:tenant_id`; clients do not send a second target
 selector. A tenant source requires `source_type=tenant` and
 `source_tenant_id`. A file source requires `source_type=json_upload` and a
 `configuration` bundle. Both require an explicit `included_sections` list.
-Platform v9 export supports `local_business_hours`; v8 JSON remains accepted
-without that section. A v7 JSON file is accepted only when it declares an
+Platform v10 export supports `local_business_hours`; v9 input remains accepted
+and is normalized to v10, while v8 JSON remains accepted without that section.
+A v7 JSON file is accepted only when it declares an
 explicit content-only scope limited to `service_categories`,
 `service_aliases`, `service_consultation_profiles`, and `knowledge_base`.
 The server canonicalizes an accepted v7 pack to v8 before fingerprinting,
@@ -1591,7 +1592,8 @@ preview, run audit, and apply, and returns the
 bundles and v1-v6 bundles remain unsupported on Platform routes.
 JSON export/upload is capped at 3 MB; larger same-platform sources use direct
 tenant-to-tenant transfer instead of materializing a file.
-For `integrations`, v9 exports use `integration_providers`; only providers with
+For `integrations`, v10 and compatibility-v9 bundles use
+`integration_providers`; only providers with
 a salon-scoped persisted source record are listed and eligible to apply (the
 field may be omitted when none exists).
 Missing source records are no-ops, and legacy environment fallback is never
@@ -2056,6 +2058,13 @@ required credentials never inherits environment enabled state or secrets. Twilio
 OpenAI runtime resolution and authenticated reads are database-only and never
 inherit provider settings or secrets from environment configuration.
 
+OpenAI additionally requires the server-owned `openai_public` destination, an
+exact tenant/config identity, a positive credential revision, and the purpose-
+separated credential HMAC identity written with the encrypted key. The API
+never returns that HMAC. `configured=true`/`runtime_resolvable=true` means only
+that the saved tenant configuration passes the shared local runtime validator;
+it is not proof of a successful provider request.
+
 For Square with no stored row, a response may expose secret source
 `environment` without exposing the secret. Missing Twilio/OpenAI rows return
 database-owned unconfigured state. For a stored row whose secret is empty or
@@ -2067,9 +2076,29 @@ map.
 The complete serialized response omits every write-only credential and control
 field, including Square client/webhook secrets, Twilio Auth Token, full
 Account/Messaging Service/sender/destination values, OpenAI API keys, and their
-`clear_*` request controls. Configured/source booleans, the masked Account SID
+`clear_*` request controls. Configured/source booleans, OpenAI's monotonic
+credential revision and uniqueness-established boolean, the masked Account SID
 hint, and the explicitly masked owner SMS destination are the only bounded
-secret-state evidence returned.
+secret-state evidence returned. The OpenAI credential HMAC is never returned.
+
+`POST /api/platform/tenants/:tenant_id/technical/openai/runtime-verification`
+
+Requires `technical.write`, `action_key`, and `expected_config_version`. The
+request performs local tenant/config preflight and queues a durable version-
+fenced verification run; it does not call OpenAI in the HTTP request. Exact
+action replay returns the same run, changed action-key reuse conflicts, and a
+stale expected version returns `409`.
+
+`GET /api/platform/tenants/:tenant_id/technical/openai/runtime-verification`
+
+Requires `technical.read` and returns the latest durable run plus each required
+capability (`transcription`, both semantic contracts, reply, speech, streaming
+speech, and enabled Realtime). This GET never calls OpenAI. Evidence becomes
+`stale` whenever the integration config version, credential revision,
+destination-policy version, or verification contract no longer matches.
+`live_verified` is presentation state, not a provider field: it is true only
+when the latest run is `succeeded`, `fresh=true`, and every required capability
+is `verified`. Provider acceptance does not prove conversation quality.
 
 `GET /api/platform/tenants/:tenant_id/technical/integration-configs`
 
@@ -2126,7 +2155,11 @@ secret-state evidence returned.
     "provider": "openai",
     "enabled": true,
     "configured": true,
+    "runtime_resolvable": true,
+    "runtime_blockers": [],
     "base_url": "https://api.openai.com/v1",
+    "destination_profile": "openai_public",
+    "destination_managed": true,
     "transcription_model": "gpt-4o-mini-transcribe",
     "reply_model": "gpt-4.1-mini",
     "speech_model": "tts-1",
@@ -2138,7 +2171,9 @@ secret-state evidence returned.
     "realtime_noise_profile": "automatic",
     "realtime_instructions": "",
     "api_key_configured": true,
-    "api_key_source": "database"
+    "api_key_source": "database",
+    "credential_revision": 2,
+    "credential_unique": true
   }
 }
 ```
@@ -2256,6 +2291,13 @@ database-only; only the exact-missing Square compatibility bootstrap remains.
   "realtime_instructions": ""
 }
 ```
+
+`base_url` is retained only for request compatibility and must be blank or the
+canonical value shown above. The server always stores and returns the managed
+`openai_public` destination; tenant-controlled hosts are rejected. A blank API
+key preserves an existing key only inside that same server-owned destination
+identity. Any key write or clear advances the credential revision and makes
+prior verification evidence stale.
 
 `realtime_noise_profile` is the compatibility field name for the location-neutral
 background-noise handling policy. Canonical values are `automatic` (default),

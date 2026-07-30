@@ -3,7 +3,6 @@ package conversationeval
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,18 +12,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/manleai/ai-receptionist/internal/config"
+	"github.com/manleai/ai-receptionist/internal/openairuntime"
 	"github.com/manleai/ai-receptionist/modules/conversation"
 	"github.com/manleai/ai-receptionist/modules/voice"
 	"github.com/manleai/ai-receptionist/modules/voice_openai"
 )
 
-type StrictOpenAIConfigResolver interface {
-	ResolveOpenAIConfig(ctx context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error)
-}
-
 type OpenAIDirectModel struct {
-	resolver StrictOpenAIConfigResolver
+	resolver openairuntime.Resolver
 	adapter  *voice_openai.Adapter
 	replies  *voice.GuardedReplyGenerator
 	client   *http.Client
@@ -33,12 +28,14 @@ type OpenAIDirectModel struct {
 	callMu   sync.Mutex
 }
 
-func NewOpenAIDirectModel(resolver StrictOpenAIConfigResolver) *OpenAIDirectModel {
-	adapter := voice_openai.NewAdapter(config.OpenAIVoiceConfig{})
-	adapter.SetConfigResolver(resolver)
+func NewOpenAIDirectModel(resolver openairuntime.Resolver) *OpenAIDirectModel {
+	adapter, err := voice_openai.NewTenantBoundAdapter(resolver)
+	if err != nil {
+		return nil
+	}
 	model := &OpenAIDirectModel{
 		resolver: resolver, adapter: adapter, replies: voice.NewGuardedReplyGenerator(adapter),
-		client: &http.Client{Timeout: 30 * time.Second},
+		client: openairuntime.NewHTTPClient(30 * time.Second),
 	}
 	adapter.SetUsageObserver(func(_ string, usage voice_openai.Usage) {
 		model.usageMu.Lock()
@@ -52,18 +49,15 @@ func (m *OpenAIDirectModel) Identity(ctx context.Context, salonID string) (strin
 	if m == nil || m.resolver == nil {
 		return "", errors.New("strict OpenAI resolver is required")
 	}
-	cfg, enabled, err := m.resolver.ResolveOpenAIConfig(ctx, salonID)
+	resolved, err := m.resolver.ResolveOpenAIRuntimeConfig(ctx, salonID)
 	if err != nil {
 		return "", err
 	}
-	if !enabled || strings.TrimSpace(cfg.APIKey) == "" || strings.TrimSpace(cfg.ReplyModel) == "" || strings.TrimSpace(cfg.BaseURL) == "" {
+	cfg := resolved.Config
+	if !resolved.Enabled || !openairuntime.Validate(resolved).Ready {
 		return "", voice.ErrProviderDisabled
 	}
-	// Include the credential only inside the one-way identity digest so resume
-	// cannot mix results produced by two different stored configurations. The
-	// key itself is never returned, logged, or persisted.
-	sum := sha256.Sum256([]byte(strings.TrimSpace(cfg.BaseURL) + "\x00" + strings.TrimSpace(cfg.ReplyModel) + "\x00" + strings.TrimSpace(cfg.APIKey)))
-	return fmt.Sprintf("%s:%x", strings.TrimSpace(cfg.ReplyModel), sum[:6]), nil
+	return strings.TrimSpace(cfg.ReplyModel) + ":" + openairuntime.ConfigIdentity(resolved, "conversation-eval"), nil
 }
 
 func (m *OpenAIDirectModel) InterpretTurn(ctx context.Context, salonID string, request voice.SemanticEvaluationRequest) (voice.TurnModelReply, ModelUsage, error) {
@@ -119,11 +113,12 @@ func (m *OpenAIDirectModel) ReviewReplies(ctx context.Context, salonID string, i
 	if m == nil || m.resolver == nil || m.client == nil {
 		return empty, ModelUsage{}, errors.New("OpenAI direct reviewer is not configured")
 	}
-	cfg, enabled, err := m.resolver.ResolveOpenAIConfig(ctx, salonID)
+	resolved, err := m.resolver.ResolveOpenAIRuntimeConfig(ctx, salonID)
 	if err != nil {
 		return empty, ModelUsage{}, err
 	}
-	if !enabled || strings.TrimSpace(cfg.APIKey) == "" || strings.TrimSpace(cfg.ReplyModel) == "" {
+	cfg := resolved.Config
+	if !resolved.Enabled || !openairuntime.Validate(resolved).Ready {
 		return empty, ModelUsage{}, voice.ErrProviderDisabled
 	}
 	reviewInput, err := json.Marshal(input)
@@ -161,7 +156,7 @@ func (m *OpenAIDirectModel) ReviewReplies(ctx context.Context, salonID string, i
 	if err != nil {
 		return empty, ModelUsage{}, err
 	}
-	endpoint := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/") + "/responses"
+	endpoint := openairuntime.CanonicalBaseURL + "/responses"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
 	if err != nil {
 		return empty, ModelUsage{}, err

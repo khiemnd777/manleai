@@ -517,6 +517,22 @@ provider runtime. A stored row owns enabled state, settings, and credentials:
 missing credentials never inherit environment secrets, and a disabled provider
 cannot be re-enabled by process configuration.
 
+OpenAI runtime uses only the fixed `openai_public` destination profile. Raw
+tenant Base URL editing is not supported. V84 adds the purpose-separated
+credential HMAC identity, credential revision, destination profile, async
+verification tables, immutable verification events, exact-tenant RLS, and the
+bounded worker claim function. Existing OpenAI rows remain unavailable to the
+strict runtime until an operator saves them through Platform Technical, which
+canonicalizes the destination and establishes the credential identity/revision.
+If two tenants currently share one plaintext key, the second save returns
+`OPENAI_CREDENTIAL_TENANT_CONFLICT`; rotate one tenant key rather than moving or
+copying identity data.
+
+Roll out and roll back V84 using
+`docs/operations/openai-tenant-runtime.md`. CI and release self-tests use fake
+OpenAI transports only; live verification is an explicit Platform operation
+after deployment and may incur provider usage.
+
 The authenticated integration response follows the same ownership boundary.
 Only the Square compatibility response may label an exact-missing bootstrap
 secret source as `environment`. Missing Twilio/OpenAI rows return unconfigured,
@@ -660,7 +676,8 @@ confirmed appointment state. When the provider is disabled or unavailable,
 ambiguous mutations preserve the current draft and enter safe
 clarification/handoff behavior.
 
-After saving salon-scoped OpenAI settings, run:
+After saving salon-scoped OpenAI settings, queue the full durable verification
+from Platform Technical. The legacy owner semantic-only diagnostic remains:
 
 ```txt
 POST /api/salons/:id/voice/semantic-check
