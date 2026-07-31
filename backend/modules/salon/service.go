@@ -3,6 +3,7 @@ package salon
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -46,15 +47,35 @@ func (s *Service) Get(ctx context.Context, id string, ownerUserID string) (*Salo
 }
 
 func (s *Service) Create(ctx context.Context, ownerUserID string, req CreateSalonRequest) (*Salon, error) {
-	req = normalizeCreate(req)
-	if req.Name == "" || req.Phone == "" || !validCreateOperationKey(req.OperationKey) || !validSchedulingAuthority(req.SchedulingAuthority) {
-		return nil, ErrValidation
-	}
-	fingerprint, err := createSalonPayloadFingerprint(req)
+	req, fingerprint, err := prepareCreate(req)
 	if err != nil {
 		return nil, err
 	}
 	return s.repo.Create(ctx, ownerUserID, req, fingerprint)
+}
+
+// CreateInTx lets an owning cross-aggregate workflow include the established
+// salon onboarding primitive in one transaction. The caller owns commit and
+// rollback; validation, idempotency, membership, settings, and defaults remain
+// salon-domain responsibilities.
+func (s *Service) CreateInTx(ctx context.Context, tx *sql.Tx, ownerUserID string, req CreateSalonRequest) (*Salon, error) {
+	req, fingerprint, err := prepareCreate(req)
+	if err != nil {
+		return nil, err
+	}
+	return s.repo.CreateInTx(ctx, tx, ownerUserID, req, fingerprint)
+}
+
+func prepareCreate(req CreateSalonRequest) (CreateSalonRequest, string, error) {
+	req = normalizeCreate(req)
+	if req.Name == "" || req.Phone == "" || !validCreateOperationKey(req.OperationKey) || !validSchedulingAuthority(req.SchedulingAuthority) {
+		return CreateSalonRequest{}, "", ErrValidation
+	}
+	fingerprint, err := createSalonPayloadFingerprint(req)
+	if err != nil {
+		return CreateSalonRequest{}, "", err
+	}
+	return req, fingerprint, nil
 }
 
 func (s *Service) Update(ctx context.Context, id string, ownerUserID string, req UpdateSalonRequest) (*Salon, error) {

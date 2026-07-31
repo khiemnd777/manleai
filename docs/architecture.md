@@ -59,6 +59,8 @@ modules/auth         login, HttpOnly refresh-cookie rotation, roles
 modules/access       SaaS ActorContext policy, tenant memberships, Platform roles/delegation, bounded PII grants, idempotent access actions, and immutable audit
 modules/business     shared Tenant/Platform Business contract for profile, services, staff, eligibility, hours, public settings, and customers
 modules/salon        salon profile, settings, synced business hour periods
+modules/tenant_registration public pre-tenant intake, Platform review queue, immutable events/actions/notes, and terminal PII retention
+modules/tenant_provisioning Admin-only atomic Tenant creation, explicit existing-identity selection, and one-time Owner invitations
 modules/pos          provider-neutral POS contracts and persistence
 modules/pos_square   Square adapter and Square integration routes
 modules/public_catalog public-safe salon catalog read API
@@ -113,11 +115,14 @@ The Caddy project route overwrites the trusted client-IP header. Redis failure
 is a request-protection dependency failure, not a reason to bypass limiting,
 and `/healthz` reports the dependency unavailable.
 
-The canonical tenant customer-facing route is `/s/[slug]` in `frontend/`. It
+The canonical tenant customer-facing route is `/s/[slug]` in `landing/`. It
 reads only the database-owned safe projection through
 `GET /api/public/salons/:slug`; public database scope has zero direct base-table
-row visibility. The legacy `landing/` application remains deployable during
-cutover but cannot create booking attempts or confirmed appointments.
+row visibility. The duplicate `frontend/app/s/[slug]` route redirects to the
+configured public-salon origin. The same `landing/` process also owns the
+host-isolated marketing routes `/`, `/vi`, `/pricing`, and `/vi/pricing` on
+`manle.knasoftware.com`; registration intake cannot create booking attempts or
+confirmed appointments.
 
 The POS calendar operator surface lives in `pos-calendar/`, separate from both
 Tenant and Platform shells. It uses the authenticated Tenant Business summary

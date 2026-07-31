@@ -1,6 +1,6 @@
 "use client";
 
-import { Building2, KeyRound, LogOut, Menu, ShieldCheck, X } from "lucide-react";
+import { Building2, ClipboardList, KeyRound, LogOut, Menu, ShieldCheck, X } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -10,6 +10,7 @@ import { getCurrentSession } from "@/lib/api/session";
 import { cn } from "@/lib/utils/cn";
 
 const platformNav = [
+  { label: "Registration requests", href: "/platform/registration-requests", icon: ClipboardList },
   { label: "Nail salons", href: "/platform/tenants", icon: Building2 },
   { label: "Platform roles", href: "/platform/access", icon: KeyRound, adminOnly: true }
 ];

@@ -60,13 +60,27 @@ func (r *Repository) Create(ctx context.Context, ownerUserID string, req CreateS
 		return nil, err
 	}
 	defer tx.Rollback()
+	item, err := r.CreateInTx(ctx, tx, ownerUserID, req, payloadFingerprint)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return item, nil
+}
+
+func (r *Repository) CreateInTx(ctx context.Context, tx *sql.Tx, ownerUserID string, req CreateSalonRequest, payloadFingerprint string) (*Salon, error) {
+	if tx == nil {
+		return nil, ErrValidation
+	}
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, onboardingOperationLockPrefix+ownerUserID+":"+req.OperationKey); err != nil {
 		return nil, err
 	}
 
 	var existingSalonID string
 	var existingFingerprint string
-	err = tx.QueryRowContext(ctx, `
+	err := tx.QueryRowContext(ctx, `
 		SELECT id::text, creation_payload_fingerprint
 		FROM salons
 		WHERE owner_user_id = $1 AND creation_operation_key = $2
@@ -78,9 +92,6 @@ func (r *Repository) Create(ctx context.Context, ownerUserID string, req CreateS
 		}
 		item, err := getSalonForOwnerTx(ctx, tx, existingSalonID, ownerUserID)
 		if err != nil {
-			return nil, err
-		}
-		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
 		return item, nil
@@ -161,9 +172,6 @@ func (r *Repository) Create(ctx context.Context, ownerUserID string, req CreateS
 	}
 	item, err := getSalonForOwnerTx(ctx, tx, salonID, ownerUserID)
 	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return item, nil

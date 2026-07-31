@@ -325,6 +325,34 @@ RPO/RTO evidence.
 - [x] Fence publishing with the scheduling-authority advisory lock/version,
   fail stale public pages closed, and use call-to-request copy only.
 
+## Marketing Registration And Tenant Provisioning
+
+- [x] Host bilingual marketing and pricing routes on
+  `manle.knasoftware.com`, while retaining canonical public salon pages only at
+  `salon.knasoftware.com/s/[slug]`.
+- [x] Keep one versioned pricing catalog (`2026-07-30`) with Starter $200,
+  Growth $450, and Custom starting at $900; do not add checkout or Stripe.
+- [x] Persist public registration requests durably with consent evidence,
+  server validation, honeypot handling, distributed rate limiting, duplicate
+  evidence, and exact submission-key replay.
+- [x] Provide the Platform Admin/Ops masked queue, authorized detail, filters,
+  assignment, state machine, immutable notes/events, optimistic versions, and
+  idempotent action keys.
+- [x] Restrict atomic Tenant provisioning and active Tenant-identity search to
+  Platform Admin. Initialize every new salon as `owner_manual`; do not infer
+  provider configuration, active provider, or AI-booking state from intake.
+- [x] Store only one-time Owner invitation hashes, return raw tokens once,
+  enforce 72-hour expiry/rotation/single use, and require a 12-character
+  password on acceptance.
+- [x] Register 180-day terminal PII redaction and preserve only safe audit and
+  funnel evidence.
+- [ ] Obtain legal approval for the exact EN/VI contact-consent copy and the
+  180-day terminal retention period before production intake is enabled.
+- [ ] Create DNS for `manle.knasoftware.com`, verify edge TLS/CORS/CSP and host
+  routing, then run the documented production smoke/rollback checklist.
+- [ ] When `manle.ai` is purchased, execute the documented reviewed domain
+  migration; do not treat future hostnames as active beforehand.
+
 ## Configuration Transfer
 
 - [x] Mount configuration transfer only under the Platform tenant detail

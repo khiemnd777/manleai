@@ -24,6 +24,7 @@ import (
 	"github.com/manleai/ai-receptionist/modules/pos"
 	"github.com/manleai/ai-receptionist/modules/pos_square"
 	schedulingretention "github.com/manleai/ai-receptionist/modules/scheduling_retention"
+	tenantregistration "github.com/manleai/ai-receptionist/modules/tenant_registration"
 	"github.com/manleai/ai-receptionist/modules/voice_openai"
 )
 
@@ -46,6 +47,8 @@ const (
 	customerNotificationBatchLimit       = customernotification.DefaultProcessBatch
 	schedulingPIIRetentionPollInterval   = 5 * time.Minute
 	schedulingPIIRetentionBatchLimit     = schedulingretention.DefaultProcessBatch
+	tenantRegistrationRetentionInterval  = 5 * time.Minute
+	tenantRegistrationRetentionLimit     = tenantregistration.DefaultRetentionBatch
 	openAIVerificationPollInterval       = 15 * time.Second
 	openAIVerificationBatchLimit         = 2
 )
@@ -105,8 +108,9 @@ func main() {
 		customernotification.NewTwilioSenderResolver(integrationConfigService),
 	)
 	schedulingPIIRetention := schedulingretention.NewProcessor(schedulingretention.NewRepository(db))
+	tenantRegistrationRetention := tenantregistration.NewRetentionProcessor(tenantregistration.NewRepository(db))
 
-	logg.Info("worker started", "scope", "pos_sync_jobs,booking_lease_recovery,availability_quote_cleanup,square_booking_webhooks,square_calendar_repair,conversation_retention,notification_delivery,customer_notification_delivery,scheduling_pii_retention,openai_runtime_verification", "interval", posSyncPollInterval.String(), "batch_limit", posSyncBatchLimit)
+	logg.Info("worker started", "scope", "pos_sync_jobs,booking_lease_recovery,availability_quote_cleanup,square_booking_webhooks,square_calendar_repair,conversation_retention,notification_delivery,customer_notification_delivery,scheduling_pii_retention,tenant_registration_retention,openai_runtime_verification", "interval", posSyncPollInterval.String(), "batch_limit", posSyncBatchLimit)
 
 	operationsHealthRepo := operationshealth.NewRepository(db)
 	scheduler := newRecurringJobScheduler(operationsHealthRepo)
@@ -177,6 +181,13 @@ func main() {
 			interval: schedulingPIIRetentionPollInterval,
 			run: func(ctx context.Context) (int, error) {
 				return schedulingPIIRetention.ProcessOnce(ctx, schedulingPIIRetentionBatchLimit)
+			},
+		},
+		recurringJob{
+			name:     "tenant_registration_retention",
+			interval: tenantRegistrationRetentionInterval,
+			run: func(ctx context.Context) (int, error) {
+				return tenantRegistrationRetention.ProcessOnce(ctx, tenantRegistrationRetentionLimit)
 			},
 		},
 	)

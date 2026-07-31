@@ -10,6 +10,18 @@ The tenant business using the AI receptionist. All operational data is scoped by
 **Owner**
 The primary salon user who configures settings, connects Square, receives handoffs, and reviews dashboard activity.
 
+**Marketing Registration Request**
+A consented, pre-tenant salon inquiry submitted from the public marketing site.
+It is an intake and review aggregate, not a Salon/Tenant, account, subscription,
+appointment, provider configuration, or proof of contact delivery. Platform
+Admin and Ops review the request; only Platform Admin may provision a Tenant.
+
+**Tenant Provisioning Review**
+The Platform workflow that turns a qualified registration request into exactly
+one tenant-fenced Salon and Owner invitation. Every newly provisioned Salon
+starts with `owner_manual`; intake text never selects a provider, enables AI
+booking, or changes scheduling authority.
+
 **Scheduling Authority**
 The salon-scoped contract that owns availability, booking execution, and the
 durable evidence required for lifecycle confirmation. The exact protocol values

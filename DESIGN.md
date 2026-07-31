@@ -10,10 +10,22 @@ selected scheduling authority and its readiness, optionally connect Square
 Appointments for `external_provider`, monitor phone receptionist readiness,
 and understand failures quickly.
 
-The public customer-facing catalog in `landing/` is a separate surface. It can
-use a simpler customer-facing layout, but it must stay public-safe: call-to-request
-only, no confirmed web booking claims, no staff contact details, no POS IDs, no
-sync errors, no owner identifiers, and no provider tokens.
+The `landing/` app contains two host-separated public surfaces. The marketing
+site at `manle.knasoftware.com` uses the approved brand-led landing-page visual
+language, bilingual content, a versioned pricing catalog, and a demo/Tenant
+setup request form. It has no checkout and must not imply that submitting the
+form creates a Tenant, account, subscription, invoice, provider connection, or
+confirmed appointment. The customer-facing salon catalog at
+`salon.knasoftware.com/s/[slug]` stays call-to-request only, with no confirmed
+web booking claims, staff contact details, POS IDs, sync errors, owner
+identifiers, or provider tokens.
+
+Marketing registration is a two-step modal: salon/contact identity first,
+operational context and explicit versioned contact consent second. Required
+field errors remain visible, submission failures preserve entered values, and
+success shows the durable request reference without claiming that email or SMS
+was delivered. Desktop and mobile layouts must keep keyboard focus trapped in
+the open modal and restore focus to its triggering CTA when closed.
 
 ## Product Experience
 

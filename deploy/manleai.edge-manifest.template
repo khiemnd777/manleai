@@ -3,6 +3,7 @@
   "compose_project": "manleai",
   "domains": [
     "{{ADMIN_DOMAIN}}",
+    "{{MARKETING_DOMAIN}}",
     "{{LANDING_DOMAIN}}",
     "{{POS_DOMAIN}}"
   ],

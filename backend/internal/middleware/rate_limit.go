@@ -16,14 +16,15 @@ import (
 )
 
 var (
-	globalClientPolicy = ratelimit.Policy{Name: "global_client", Rate: 300, Window: time.Minute, Burst: 100}
-	authLoginPolicy    = ratelimit.Policy{Name: "auth_login", Rate: 10, Window: time.Minute, Burst: 5}
-	authSessionPolicy  = ratelimit.Policy{Name: "auth_session", Rate: 60, Window: time.Minute, Burst: 15}
-	providerPolicy     = ratelimit.Policy{Name: "provider_callback", Rate: 600, Window: time.Minute, Burst: 120}
-	publicReadPolicy   = ratelimit.Policy{Name: "public_read", Rate: 180, Window: time.Minute, Burst: 45}
-	expensivePolicy    = ratelimit.Policy{Name: "expensive_operation", Rate: 30, Window: time.Minute, Burst: 8}
-	protectedRead      = ratelimit.Policy{Name: "protected_read", Rate: 300, Window: time.Minute, Burst: 75}
-	protectedWrite     = ratelimit.Policy{Name: "protected_write", Rate: 150, Window: time.Minute, Burst: 40}
+	globalClientPolicy            = ratelimit.Policy{Name: "global_client", Rate: 300, Window: time.Minute, Burst: 100}
+	authLoginPolicy               = ratelimit.Policy{Name: "auth_login", Rate: 10, Window: time.Minute, Burst: 5}
+	authSessionPolicy             = ratelimit.Policy{Name: "auth_session", Rate: 60, Window: time.Minute, Burst: 15}
+	providerPolicy                = ratelimit.Policy{Name: "provider_callback", Rate: 600, Window: time.Minute, Burst: 120}
+	publicReadPolicy              = ratelimit.Policy{Name: "public_read", Rate: 180, Window: time.Minute, Burst: 45}
+	publicRegistrationWritePolicy = ratelimit.Policy{Name: "public_registration_write", Rate: 10, Window: time.Hour, Burst: 3}
+	expensivePolicy               = ratelimit.Policy{Name: "expensive_operation", Rate: 30, Window: time.Minute, Burst: 8}
+	protectedRead                 = ratelimit.Policy{Name: "protected_read", Rate: 300, Window: time.Minute, Burst: 75}
+	protectedWrite                = ratelimit.Policy{Name: "protected_write", Rate: 150, Window: time.Minute, Burst: 40}
 )
 
 func RateLimit(store ratelimit.Taker, jwtSecret, clientIPHeader string) fiber.Handler {
@@ -58,8 +59,12 @@ func requestRateLimitPolicy(method, path string) (ratelimit.Policy, bool) {
 		return ratelimit.Policy{}, false
 	}
 	switch path {
-	case "/api/auth/login", "/api/auth/bootstrap-owner":
+	case "/api/auth/login", "/api/auth/bootstrap-owner", "/api/auth/owner-invitations/accept":
 		return authLoginPolicy, true
+	case "/api/public/tenant-registration-requests":
+		if method == fiber.MethodPost {
+			return publicRegistrationWritePolicy, true
+		}
 	case "/api/auth/refresh-token", "/api/auth/logout", "/api/auth/bootstrap/status":
 		return authSessionPolicy, true
 	case "/api/integrations/square/callback", "/api/integrations/square/webhook", "/api/notifications/twilio/status":

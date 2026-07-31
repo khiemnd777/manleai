@@ -15,12 +15,37 @@ production capacity claim without an approved witnessed representative run.
 
 - Admin dashboard: `https://ai.knasoftware.com`
 - API through the admin origin: `https://ai.knasoftware.com/api/*`
-- Public salon landing app: `https://salon.knasoftware.com`
+- Marketing website: `https://manle.knasoftware.com`
+- Public salon pages: `https://salon.knasoftware.com/s/[slug]`
 - POS calendar app: `https://pos.knasoftware.com`
 - Square redirect URL: `https://ai.knasoftware.com/api/integrations/square/callback`
 - Voice public base URL: `https://ai.knasoftware.com`
 
 All DNS `A` records must point to the VPS before Caddy can issue certificates.
+`manle.knasoftware.com` and `salon.knasoftware.com` currently share the
+`landing` process, but host routing keeps marketing content off the salon host
+and salon catalog pages off the marketing host. `ai.knasoftware.com` remains
+the only API/admin origin.
+
+### Future `manle.ai` cutover (runbook only)
+
+The repository does not activate `manle.ai`. After the domain is purchased,
+prepare `ops.manle.ai`, `salon.manle.ai`, and `pos.manle.ai` as a reviewed
+release: create DNS records, add the exact hosts to the edge manifest/Caddy
+render and CORS allowlist, update canonical/hreflang and public base URLs, then
+verify certificate issuance and `/healthz` before traffic cutover. Refresh
+cookies remain host-only and are intentionally not portable across the old and
+new admin hosts, so operators and tenants must sign in again.
+
+Before enabling provider callbacks, update the salon-scoped stored Platform
+Technical configuration and provider consoles for the new exact public URLs.
+Square OAuth redirect and Twilio voice/messaging callback URLs require explicit
+review; no migration may infer provider settings from intake text or repository
+environment files. Run smoke checks for marketing canonical/hreflang, public
+salon pages, API CORS/CSP, Platform login, owner invitation acceptance, Square
+OAuth state/callback, and Twilio signature-bound routes. Roll back by restoring
+the prior edge route/base URLs and provider callbacks; do not roll back the
+database migration or silently switch scheduling authority.
 
 ## Edge Gateway
 
@@ -385,7 +410,7 @@ file on both success and diagnostic failure paths.
 
 - Docker Engine with Docker Compose v2.
 - Ports `80` and `443` open to the internet.
-- DNS for `ai.knasoftware.com`, `salon.knasoftware.com`, and
+- DNS for `ai.knasoftware.com`, `manle.knasoftware.com`, `salon.knasoftware.com`, and
   `pos.knasoftware.com` pointing to the VPS before certificate issuance.
 - Systemd Caddy active with managed root `/etc/caddy/Caddyfile` and
   `project-edgectl` installed.
@@ -777,7 +802,8 @@ profiles or increment unchanged profile revisions.
 - Keep Twilio and OpenAI secrets out of logs and docs; dashboard responses expose only configured/source metadata.
 - Enable OpenAI voice AI in the Platform tenant Technical tab only when external AI voice turns should be enabled.
 - Keep OpenAI model and voice settings configurable through the dashboard so model changes do not require code changes.
-- Restrict CORS to the deployed admin, landing, and POS calendar origins.
+- Restrict CORS to the deployed admin/API, marketing, public salon, and POS
+  calendar origins.
 
 ### V39 booking-attempt preflight
 

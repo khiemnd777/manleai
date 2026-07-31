@@ -78,3 +78,14 @@ func TestRateLimitExemptsHealthAndClassifiesProviderCallbacks(t *testing.T) {
 		t.Fatalf("provider policy=%#v limited=%t", policy, limited)
 	}
 }
+
+func TestRateLimitClassifiesPublicRegistrationWriteSeparately(t *testing.T) {
+	policy, limited := requestRateLimitPolicy(fiber.MethodPost, "/api/public/tenant-registration-requests")
+	if !limited || policy.Name != "public_registration_write" || policy.Rate != 10 || policy.Window != time.Hour || policy.Burst != 3 {
+		t.Fatalf("registration policy=%#v limited=%t", policy, limited)
+	}
+	policy, limited = requestRateLimitPolicy(fiber.MethodGet, "/api/public/tenant-registration-requests")
+	if !limited || policy.Name != "public_read" {
+		t.Fatalf("public read policy=%#v limited=%t", policy, limited)
+	}
+}

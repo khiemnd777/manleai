@@ -1,3 +1,7 @@
-import { PublicSalonPage } from "@/features/public/public-salon-page";
+import { redirect } from "next/navigation";
+import { landingBaseUrl } from "@/lib/config/env";
 
-export default function SalonLandingPage({params}:{params:{slug:string}}){return <PublicSalonPage slug={params.slug}/>}
+export default async function PublicSalonRedirect({params}:{params:Promise<{slug:string}>}){
+  const {slug}=await params;
+  redirect(`${landingBaseUrl}/s/${encodeURIComponent(slug)}`);
+}

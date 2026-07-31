@@ -33,6 +33,16 @@
 	reverse_proxy 127.0.0.1:{{LANDING_PORT}}
 }
 
+{{MARKETING_DOMAIN}} {
+	encode gzip zstd
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "SAMEORIGIN"
+	}
+	reverse_proxy 127.0.0.1:{{LANDING_PORT}}
+}
+
 {{POS_DOMAIN}} {
 	encode gzip zstd
 	header {

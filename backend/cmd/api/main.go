@@ -39,6 +39,8 @@ import (
 	"github.com/manleai/ai-receptionist/modules/scheduling_external_provider"
 	manleaicalendar "github.com/manleai/ai-receptionist/modules/scheduling_manleai_calendar"
 	"github.com/manleai/ai-receptionist/modules/scheduling_owner_manual"
+	tenantprovisioning "github.com/manleai/ai-receptionist/modules/tenant_provisioning"
+	tenantregistration "github.com/manleai/ai-receptionist/modules/tenant_registration"
 	tenantruntime "github.com/manleai/ai-receptionist/modules/tenant_runtime"
 	"github.com/manleai/ai-receptionist/modules/training"
 	"github.com/manleai/ai-receptionist/modules/voice"
@@ -126,6 +128,11 @@ func main() {
 	salonRepo := salon.NewRepository(db)
 	salonService := salon.NewService(salonRepo)
 	salon.RegisterRoutes(api, salon.NewHandler(salonService), cfg.JWTSecret)
+	tenantRegistrationRepo := tenantregistration.NewRepository(db)
+	tenantRegistrationService := tenantregistration.NewService(tenantRegistrationRepo, accessService)
+	tenantregistration.RegisterRoutes(api, tenantregistration.NewHandler(tenantRegistrationService), cfg.JWTSecret)
+	tenantProvisioningService := tenantprovisioning.NewService(tenantprovisioning.NewRepository(db, salonService), accessService)
+	tenantprovisioning.RegisterRoutes(api, tenantprovisioning.NewHandler(tenantProvisioningService), cfg.JWTSecret)
 
 	publicCatalogRepo := publiccatalog.NewRepository(db)
 	publicCatalogService := publiccatalog.NewService(publicCatalogRepo)

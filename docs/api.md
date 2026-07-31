@@ -3,7 +3,7 @@
 Base URL: `http://localhost:18089`
 
 All endpoints except login, bootstrap owner setup, refresh, logout, health,
-public catalog endpoints, the Square OAuth callback, Twilio voice webhooks, and
+public registration and invitation acceptance, public catalog endpoints, the Square OAuth callback, Twilio voice webhooks, and
 the signed Twilio Messaging callbacks require:
 
 ```txt
@@ -1354,6 +1354,60 @@ and customer notification recovery, Square webhook operations, and
 `operations.read` or `operations.write`. V72 additionally requires an active,
 unexpired exact PII grant for any underlying calls, appointments, customers,
 or notifications data; Platform Admin is not exempt.
+
+## Tenant Registration And Provisioning
+
+`POST /api/public/tenant-registration-requests` is unauthenticated and accepts
+the bilingual marketing form. It requires a caller-generated UUID
+`submission_key`, `tenant-registration-contact-v1` consent, a supported locale
+and source page, normalized US contact data, and bounded free text. A durable
+insert returns `202 Accepted` with `request_reference`; exact retry returns the
+same reference and `X-Idempotent-Replay: true`, while changed payload reuse
+returns `409 TENANT_REGISTRATION_SUBMISSION_CONFLICT`. The honeypot path returns
+the same generic receipt shape without persistence. The public write has its
+own 10/hour, burst-3 distributed rate-limit class. No raw IP, provider
+credential, or booking/provider configuration is persisted.
+
+Platform review routes require an authenticated Platform identity:
+
+- `GET /api/platform/registration-requests` — masked paginated queue, counts,
+  search, status, assignee, and received-date filters.
+- `GET /api/platform/registration-requests/:request_id` — authorized full
+  detail, immutable timeline, immutable internal notes, and allowed transitions.
+- `PATCH /api/platform/registration-requests/:request_id` — version-fenced,
+  action-key-idempotent assignment, status transition, and validated
+  provisioning-draft update. Ops may prepare this draft; it is not a Tenant
+  creation action and retention redacts its PII.
+- `POST /api/platform/registration-requests/:request_id/notes` — immutable
+  versioned internal note.
+
+Platform Admin and Ops receive `platform.registration_requests.read|manage`.
+Only Platform Admin receives `platform.tenants.provision` and may call:
+
+- `GET /api/platform/tenant-identities?query=...` — bounded search of active
+  Tenant identities for explicit selection.
+- `POST /api/platform/registration-requests/:request_id/provision` — one atomic
+  transaction creates or selects the verified Owner identity, salon,
+  membership/settings/hours, converts the request, and records safe audit and
+  replay evidence. The new salon always starts with `owner_manual` scheduling
+  authority. Intake booking-system text never creates `salon_integration_configs`,
+  selects `active_pos_provider`, or enables AI booking.
+- `POST /api/platform/registration-requests/:request_id/owner-invitation` —
+  creates or explicitly rotates a single-use 72-hour invitation. Only the
+  SHA-256 token hash is stored; the raw token appears in the first successful
+  response only and is unavailable on replay.
+
+`POST /api/auth/owner-invitations/accept` is public, rate-limited as an auth
+attempt, and requires the raw token plus a 12–128 character password. It
+atomically activates the invited Tenant identity, consumes the invitation, and
+revokes existing refresh tokens. Responses are non-enumerating.
+
+Terminal `converted`, `declined`, and `spam` requests receive a 180-day
+retention deadline. The registered worker redacts contact, salon/location,
+operational free text, and internal-note PII after expiry while preserving safe
+status/version/timestamp/source/plan/audit evidence. Legal approval of the
+retention period and contact-consent wording remains an external release gate;
+the repository implements the stated policy but does not claim legal approval.
 
 ## Public Catalog
 

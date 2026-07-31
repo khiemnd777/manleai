@@ -46,3 +46,22 @@ func TestOpenAIRuntimeVerificationWorkerRegistrationContract(t *testing.T) {
 		}
 	}
 }
+
+func TestTenantRegistrationRetentionWorkerRegistrationContract(t *testing.T) {
+	raw, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read worker main: %v", err)
+	}
+	source := string(raw)
+	for _, fragment := range []string{
+		`tenantRegistrationRetentionInterval`, `5 * time.Minute`,
+		`tenantRegistrationRetentionLimit`,
+		`tenantregistration.NewRetentionProcessor(tenantregistration.NewRepository(db))`,
+		`name:     "tenant_registration_retention"`,
+		`return tenantRegistrationRetention.ProcessOnce(ctx, tenantRegistrationRetentionLimit)`,
+	} {
+		if !strings.Contains(source, fragment) {
+			t.Fatalf("tenant registration retention worker missing %q", fragment)
+		}
+	}
+}

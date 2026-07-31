@@ -1,18 +1,12 @@
-import { notFound, redirect } from "next/navigation";
-import { getDefaultPublicCatalog, PublicApiError } from "@/lib/api";
+import type { Metadata } from "next";
+import { MarketingSite } from "@/components/marketing/marketing-site";
+import { marketingBaseUrl } from "@/lib/config";
 
-export const dynamic = "force-dynamic";
+export const metadata: Metadata = {
+  title: "AI Receptionist for Nail Salons",
+  description: "ManleAI helps nail salons handle English calls, approved salon questions, and owner-first appointment requests.",
+  alternates: { canonical: marketingBaseUrl, languages: { "en-US": marketingBaseUrl, "vi-US": `${marketingBaseUrl}/vi`, "x-default": marketingBaseUrl } },
+  openGraph: { title: "ManleAI — AI Receptionist for Nail Salons", description: "English, salon-aware phone coverage with explicit scheduling workflows.", url: marketingBaseUrl, type: "website", images: ["/brand/manle-ai-logo.png"] }
+};
 
-export default async function LandingHomePage() {
-  let catalog;
-  try {
-    catalog = await getDefaultPublicCatalog();
-  } catch (error) {
-    if (error instanceof PublicApiError && error.status === 404) {
-      notFound();
-    }
-    throw error;
-  }
-
-  redirect(`/s/${catalog.salon.slug}`);
-}
+export default function HomePage() { return <MarketingSite locale="en" />; }

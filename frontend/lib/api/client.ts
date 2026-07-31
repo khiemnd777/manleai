@@ -132,7 +132,8 @@ function shouldAttachAccessToken(path: string) {
     !path.startsWith("/api/auth/login") &&
     !path.startsWith("/api/auth/refresh-token") &&
     !path.startsWith("/api/auth/bootstrap/") &&
-    !path.startsWith("/api/auth/bootstrap-owner")
+    !path.startsWith("/api/auth/bootstrap-owner") &&
+    !path.startsWith("/api/auth/owner-invitations/accept")
   );
 }
 

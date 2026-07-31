@@ -557,10 +557,10 @@ func validAccessCheck(check AccessCheck) bool {
 		return false
 	}
 	if check.SalonID == "" {
-		if check.Surface != SurfacePlatform || (check.Capability != CapabilityPlatformAccess && check.Capability != CapabilityPlatformTenantsRead) || check.PIIScope != "" {
+		if check.Surface != SurfacePlatform || !validGlobalPlatformCapability(check.Capability) || check.PIIScope != "" {
 			return false
 		}
-	} else if check.Surface == SurfacePlatform && (check.Capability == CapabilityPlatformAccess || check.Capability == CapabilityPlatformTenantsRead) {
+	} else if check.Surface == SurfacePlatform && validGlobalPlatformCapability(check.Capability) {
 		return false
 	}
 	if check.PIIScope != "" {
@@ -595,7 +595,16 @@ func validAccessCheck(check AccessCheck) bool {
 
 func validCapability(value Capability) bool {
 	switch value {
-	case CapabilityPlatformTenantsRead, CapabilityPlatformAccess, CapabilityBusinessRead, CapabilityBusinessWrite, CapabilityTechnicalRead, CapabilityTechnicalWrite, CapabilityOperationsRead, CapabilityOperationsWrite, CapabilityAuditRead, CapabilityServicesRead, CapabilityServicesWrite, CapabilityTrainingRead, CapabilityTrainingWrite, CapabilityCallsRead, CapabilityCallsManage, CapabilityCallsSimulate, CapabilityCallsRedact:
+	case CapabilityPlatformTenantsRead, CapabilityPlatformAccess, CapabilityRegistrationRead, CapabilityRegistrationManage, CapabilityTenantProvision, CapabilityBusinessRead, CapabilityBusinessWrite, CapabilityTechnicalRead, CapabilityTechnicalWrite, CapabilityOperationsRead, CapabilityOperationsWrite, CapabilityAuditRead, CapabilityServicesRead, CapabilityServicesWrite, CapabilityTrainingRead, CapabilityTrainingWrite, CapabilityCallsRead, CapabilityCallsManage, CapabilityCallsSimulate, CapabilityCallsRedact:
+		return true
+	default:
+		return false
+	}
+}
+
+func validGlobalPlatformCapability(value Capability) bool {
+	switch value {
+	case CapabilityPlatformTenantsRead, CapabilityPlatformAccess, CapabilityRegistrationRead, CapabilityRegistrationManage, CapabilityTenantProvision:
 		return true
 	default:
 		return false

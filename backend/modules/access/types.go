@@ -25,6 +25,9 @@ type Capability string
 const (
 	CapabilityPlatformTenantsRead Capability = "platform.tenants.read"
 	CapabilityPlatformAccess      Capability = "platform.access.manage"
+	CapabilityRegistrationRead    Capability = "platform.registration_requests.read"
+	CapabilityRegistrationManage  Capability = "platform.registration_requests.manage"
+	CapabilityTenantProvision     Capability = "platform.tenants.provision"
 	CapabilityBusinessRead        Capability = "business.read"
 	CapabilityBusinessWrite       Capability = "business.write"
 	CapabilityTechnicalRead       Capability = "technical.read"
