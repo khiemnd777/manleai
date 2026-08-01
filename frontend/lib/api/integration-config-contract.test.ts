@@ -6,6 +6,7 @@ import {
   openAIRuntimeState,
   platformIntegrationConfigBasePath,
   squareConfigToForm,
+  squareSchedulingCapabilityReevaluationPayload,
   twilioConfigPayload,
   twilioConfigToForm,
   twilioVoiceRoutingState
@@ -162,6 +163,14 @@ test("Platform configuration path encodes one exact tenant identifier", () => {
     platformIntegrationConfigBasePath("salon/a"),
     "/api/platform/tenants/salon%2Fa/technical/integration-configs"
   );
+});
+
+test("Square safety reevaluation sends fences but no caller-selected capabilities", () => {
+  assert.deepEqual(squareSchedulingCapabilityReevaluationPayload("square-safe-1", 7, 11), {
+    action_key: "square-safe-1",
+    expected_connection_capability_version: 7,
+    expected_integration_config_version: 11
+  });
 });
 
 test("Twilio routing state does not call saved configuration live verified", () => {

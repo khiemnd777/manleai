@@ -23,7 +23,7 @@ import (
 )
 
 const squareOAuthStateTTL = 10 * time.Minute
-const squareSchedulingReadinessEvidenceVersion = 1
+const squareSchedulingReadinessEvidenceVersion = 2
 
 var (
 	ErrValidation                = errors.New("square request validation failed")
@@ -89,6 +89,18 @@ type ReadinessStatus struct {
 	CanTestBooking                      bool                       `json:"can_test_booking"`
 	CanCancelTestBooking                bool                       `json:"can_cancel_test_booking"`
 	CanEnableAIBooking                  bool                       `json:"can_enable_ai_booking"`
+	AutomaticSingleCreate               bool                       `json:"automatic_single_create"`
+	AutomaticReschedule                 bool                       `json:"automatic_reschedule"`
+	AutomaticPartyCreate                bool                       `json:"automatic_party_create"`
+	ResourceCapacity                    bool                       `json:"resource_capacity"`
+	WritePermissionMode                 string                     `json:"write_permission_mode"`
+	ReconnectRequired                   bool                       `json:"reconnect_required"`
+	EvidenceCurrent                     bool                       `json:"evidence_current"`
+	EvidenceVerifiedAt                  *time.Time                 `json:"evidence_verified_at,omitempty"`
+	EvidenceExpiresAt                   *time.Time                 `json:"evidence_expires_at,omitempty"`
+	CapabilityBlockerCode               string                     `json:"blocker_code,omitempty"`
+	ConnectionCapabilityVersion         int64                      `json:"connection_capability_version"`
+	IntegrationConfigVersion            int64                      `json:"integration_config_version"`
 	BookingWriteBlocked                 bool                       `json:"booking_write_blocked"`
 	BookingWriteBlockedCode             string                     `json:"booking_write_blocked_code,omitempty"`
 	BookingWriteBlockedReason           string                     `json:"booking_write_blocked_reason,omitempty"`
@@ -174,6 +186,36 @@ type GateRequest struct {
 type GateResponse struct {
 	AIRuntime pos.AIRuntimeState `json:"ai_runtime"`
 	Readiness *ReadinessStatus   `json:"readiness"`
+}
+
+type ReevaluateSchedulingCapabilityRequest struct {
+	ActionKey                           string `json:"action_key"`
+	ExpectedConnectionCapabilityVersion int64  `json:"expected_connection_capability_version"`
+	ExpectedIntegrationConfigVersion    int64  `json:"expected_integration_config_version"`
+}
+
+func (s *Service) ReevaluateSchedulingCapabilityForPlatform(ctx context.Context, salonID, actorUserID string, req ReevaluateSchedulingCapabilityRequest) (pos.SchedulingCapabilityEvaluation, bool, error) {
+	salonID = strings.TrimSpace(salonID)
+	actorUserID = strings.TrimSpace(actorUserID)
+	req.ActionKey = strings.TrimSpace(req.ActionKey)
+	if salonID == "" || actorUserID == "" || req.ActionKey == "" || len(req.ActionKey) > 256 ||
+		req.ExpectedConnectionCapabilityVersion <= 0 || req.ExpectedIntegrationConfigVersion <= 0 {
+		return pos.SchedulingCapabilityEvaluation{}, false, ErrValidation
+	}
+	payload, err := json.Marshal(struct {
+		ExpectedConnectionCapabilityVersion int64 `json:"expected_connection_capability_version"`
+		ExpectedIntegrationConfigVersion    int64 `json:"expected_integration_config_version"`
+	}{req.ExpectedConnectionCapabilityVersion, req.ExpectedIntegrationConfigVersion})
+	if err != nil {
+		return pos.SchedulingCapabilityEvaluation{}, false, err
+	}
+	digest := sha256.Sum256(payload)
+	return s.repo.ReevaluateSquareSchedulingCapability(ctx, pos.SchedulingCapabilityEvaluationInput{
+		SalonID: salonID, ActorUserID: actorUserID, ActionKey: req.ActionKey,
+		RequestFingerprint:                  hex.EncodeToString(digest[:]),
+		ExpectedConnectionCapabilityVersion: req.ExpectedConnectionCapabilityVersion,
+		ExpectedIntegrationConfigVersion:    req.ExpectedIntegrationConfigVersion,
+	})
 }
 
 func (s *Service) ConnectURL(ctx context.Context, salonID string, ownerUserID string) (*ConnectURLResponse, error) {
@@ -271,7 +313,11 @@ func (s *Service) ReadinessForPlatform(ctx context.Context, salonID string) (*Re
 	} else if err != nil {
 		return nil, err
 	}
-	readiness := buildReadiness(aiRuntime.Enabled, authority, connection, services, staff, periods, nil, bookingWriteError, appointmentChangeError)
+	capability, err := s.currentSchedulingCapability(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	readiness := buildReadiness(aiRuntime.Enabled, authority, connection, services, staff, periods, nil, bookingWriteError, appointmentChangeError, capability)
 	readiness.AIRuntimeVersion = aiRuntime.Version
 	return readiness, nil
 }
@@ -470,7 +516,11 @@ func (s *Service) Readiness(ctx context.Context, salonID string, ownerUserID str
 	} else if err != nil {
 		return nil, err
 	}
-	return buildReadiness(aiEnabled, schedulingAuthority, connection, services, staff, periods, latest, bookingWriteError, appointmentChangeError), nil
+	capability, err := s.currentSchedulingCapability(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	return buildReadiness(aiEnabled, schedulingAuthority, connection, services, staff, periods, latest, bookingWriteError, appointmentChangeError, capability), nil
 }
 
 // SchedulingTargetReadiness evaluates the existing Square connection,
@@ -515,6 +565,7 @@ type squareSchedulingTargetEvidence struct {
 	BusinessHours    []squareSchedulingHourEvidence      `json:"business_hours"`
 	LatestTest       *squareSchedulingTestEvidence       `json:"latest_test,omitempty"`
 	LatestWriteError *squareSchedulingWriteErrorEvidence `json:"latest_write_error,omitempty"`
+	Capability       pos.SchedulingCapabilityEvaluation  `json:"capability"`
 }
 
 type squareSchedulingConnectionEvidence struct {
@@ -622,6 +673,7 @@ func (e squareSchedulingTargetEvidence) readinessStatus() *ReadinessStatus {
 	testBlocked := e.LatestTest != nil && e.LatestTest.blocked()
 	writeBlocked := e.bookingWriteBlocked()
 	bookingReady := connected && locationSelected && servicesReady && staffReady && hoursReady
+	atomicSlotCommitReady := e.Capability.EvidenceCurrent && e.Capability.AutomaticSingleCreate
 	return &ReadinessStatus{
 		ServiceCount:      serviceCount,
 		StaffCount:        staffCount,
@@ -633,8 +685,21 @@ func (e squareSchedulingTargetEvidence) readinessStatus() *ReadinessStatus {
 			{Key: "sync_staff", Complete: staffReady},
 			{Key: "sync_business_hours", Complete: hoursReady},
 			{Key: "booking_writes", Complete: !writeBlocked},
+			{Key: "atomic_slot_commit", Complete: atomicSlotCommitReady, Message: incompleteMessage(atomicSlotCommitReady, "Square single-create requires current buyer-write evidence; seller-write, reschedule, party, and resource capacity remain request-only.")},
 		},
-		providerCanTestBooking: bookingReady && !testBlocked,
+		AutomaticSingleCreate:       e.Capability.AutomaticSingleCreate,
+		AutomaticReschedule:         false,
+		AutomaticPartyCreate:        false,
+		ResourceCapacity:            false,
+		WritePermissionMode:         e.Capability.WritePermissionMode,
+		ReconnectRequired:           e.Capability.ReconnectRequired,
+		EvidenceCurrent:             e.Capability.EvidenceCurrent,
+		EvidenceVerifiedAt:          e.Capability.EvidenceVerifiedAt,
+		EvidenceExpiresAt:           e.Capability.EvidenceExpiresAt,
+		CapabilityBlockerCode:       e.Capability.BlockerCode,
+		ConnectionCapabilityVersion: e.Capability.ConnectionCapabilityVersion,
+		IntegrationConfigVersion:    e.Capability.IntegrationConfigVersion,
+		providerCanTestBooking:      bookingReady && !testBlocked && atomicSlotCommitReady,
 	}
 }
 
@@ -685,6 +750,61 @@ func loadSquareSchedulingTargetEvidenceTx(ctx context.Context, tx *sql.Tx, salon
 		if lastSync.Valid {
 			evidence.Connection.LastSyncAt = lastSync.Time.UTC().Format(time.RFC3339Nano)
 		}
+	}
+	var capabilityVerifiedAt time.Time
+	var capabilityExpiresAt time.Time
+	err = tx.QueryRowContext(ctx, `
+		SELECT capability.id::text,capability.atomic_create_no_overlap,
+		       capability.write_permission_mode,capability.reconnect_required,
+		       COALESCE(capability.blocker_code,''),capability.verified_at,capability.expires_at,
+		       connection.booking_write_capability_version,version.version
+		FROM external_provider_scheduling_capability_evidence capability
+		JOIN pos_connections connection
+		  ON connection.salon_id=capability.salon_id
+		 AND connection.provider=capability.provider
+		 AND connection.id=capability.connection_id
+		 AND connection.booking_write_capability_version=capability.connection_capability_version
+		 AND connection.status='active'
+		 AND connection.last_sync_at IS NOT NULL
+		 AND connection.location_id=capability.provider_location_id
+		JOIN salon_integration_configs config
+		  ON config.salon_id=capability.salon_id
+		 AND config.id=capability.integration_config_id
+		 AND config.provider=capability.provider
+		 AND config.enabled=true
+		 AND config.settings->>'api_version'=capability.provider_api_version
+		JOIN technical_resource_versions version
+		  ON version.salon_id=config.salon_id
+		 AND version.resource_type='integration_config'
+		 AND version.resource_id=config.provider
+		 AND version.version=capability.config_version
+		WHERE capability.salon_id::text=$1
+		  AND capability.provider=$2
+		  AND capability.verification_contract_version='square-buyer-single-create-v1'
+		  AND capability.write_permission_mode='buyer_write'
+		  AND capability.oauth_scope_fingerprint=public.square_oauth_scope_fingerprint(connection.scopes)
+		  AND capability.verified_at <= now() AND capability.expires_at > now()
+		ORDER BY capability.verified_at DESC,capability.id DESC
+		LIMIT 1
+		FOR SHARE OF capability,connection,config,version
+	`, salonID, pos.ProviderSquare).Scan(
+		&evidence.Capability.EvidenceID,
+		&evidence.Capability.AutomaticSingleCreate,
+		&evidence.Capability.WritePermissionMode,
+		&evidence.Capability.ReconnectRequired,
+		&evidence.Capability.BlockerCode,
+		&capabilityVerifiedAt,
+		&capabilityExpiresAt,
+		&evidence.Capability.ConnectionCapabilityVersion,
+		&evidence.Capability.IntegrationConfigVersion,
+	)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return evidence, err
+	}
+	if err == nil {
+		evidence.Capability.EvidenceCurrent = true
+		evidence.Capability.EvidenceVerifiedAt = &capabilityVerifiedAt
+		evidence.Capability.EvidenceExpiresAt = &capabilityExpiresAt
 	}
 
 	rows, err := tx.QueryContext(ctx, `
@@ -844,7 +964,7 @@ func buildSchedulingTargetReadiness(activeProvider string, readiness *ReadinessS
 		if check.Key == "enable_ai_booking" {
 			continue
 		}
-		availabilityCheck := check.Key != "booking_writes"
+		availabilityCheck := check.Key != "booking_writes" && check.Key != "atomic_slot_commit"
 		add(check.Key, check.Complete, externalTargetBlockerMessage(check.Key), availabilityCheck, true)
 	}
 	testSafetyReady := readiness.canTestExternalProviderBooking()
@@ -869,6 +989,8 @@ func externalTargetBlockerMessage(key string) string {
 		return "Sync at least one Square business-hours period."
 	case "booking_writes":
 		return "Resolve the Square booking-write readiness blocker."
+	case "atomic_slot_commit":
+		return "Square auto-confirmation is blocked until no-overlap semantics are verified for the exact provider write path."
 	default:
 		return "Resolve the external provider readiness blocker."
 	}
@@ -1091,7 +1213,11 @@ func (s *Service) latestTestBooking(ctx context.Context, salonID string, ownerUs
 	return latest, err
 }
 
-func buildReadiness(aiEnabled bool, schedulingAuthority string, connection *pos.Connection, services []pos.Service, staff []pos.StaffMember, periods []pos.BusinessHourPeriod, latest *booking.TestBookingRecord, bookingWriteError *pos.POSErrorRecord, appointmentChangeError *pos.POSErrorRecord) *ReadinessStatus {
+func buildReadiness(aiEnabled bool, schedulingAuthority string, connection *pos.Connection, services []pos.Service, staff []pos.StaffMember, periods []pos.BusinessHourPeriod, latest *booking.TestBookingRecord, bookingWriteError *pos.POSErrorRecord, appointmentChangeError *pos.POSErrorRecord, capabilities ...pos.SchedulingCapabilityEvaluation) *ReadinessStatus {
+	capability := pos.SchedulingCapabilityEvaluation{}
+	if len(capabilities) > 0 {
+		capability = capabilities[0]
+	}
 	connected := connection != nil &&
 		connection.ID != "" &&
 		connection.Status != pos.StatusNotConnected &&
@@ -1108,8 +1234,9 @@ func buildReadiness(aiEnabled bool, schedulingAuthority string, connection *pos.
 	businessHoursReady := synced && businessHourCount > 0
 	testWriteBlocked := testBookingWriteBlocked(latest)
 	bookingReady := connected && locationSelected && synced && servicesReady && staffReady && businessHoursReady
+	atomicSlotCommitReady := capability.EvidenceCurrent && capability.AutomaticSingleCreate
 	externalProviderSelected := schedulingAuthority == booking.SchedulingAuthorityExternalProvider
-	providerCanTestBooking := bookingReady && !testWriteBlocked
+	providerCanTestBooking := bookingReady && !testWriteBlocked && atomicSlotCommitReady
 	canTest := externalProviderSelected && providerCanTestBooking
 	canCancel := latest != nil &&
 		latest.AppointmentID != "" &&
@@ -1117,7 +1244,7 @@ func buildReadiness(aiEnabled bool, schedulingAuthority string, connection *pos.
 		latest.AppointmentStatus != booking.StatusCancelled &&
 		!testWriteBlocked
 	bookingWriteBlocker := bookingWriteBlockerFromError(bookingWriteError, latest)
-	canEnable := externalProviderSelected && bookingReady && !bookingWriteBlocker.Blocked
+	canEnable := externalProviderSelected && bookingReady && !bookingWriteBlocker.Blocked && atomicSlotCommitReady
 
 	checks := []ReadinessCheck{
 		{Key: "connect_square", Label: "Connect Square", Complete: connected, Message: incompleteMessage(connected, "Square Appointments is not connected.")},
@@ -1126,6 +1253,7 @@ func buildReadiness(aiEnabled bool, schedulingAuthority string, connection *pos.
 		{Key: "sync_staff", Label: "Sync staff", Complete: staffReady, Message: incompleteMessage(staffReady, "Sync at least one active AI-bookable staff member.")},
 		{Key: "sync_business_hours", Label: "Sync business hours", Complete: businessHoursReady, Message: incompleteMessage(businessHoursReady, "Sync at least one Square business hour period.")},
 		{Key: "booking_writes", Label: "Square booking writes", Complete: !bookingWriteBlocker.Blocked, Message: incompleteMessage(!bookingWriteBlocker.Blocked, bookingWriteBlocker.Message())},
+		{Key: "atomic_slot_commit", Label: "Atomic slot commit", Complete: atomicSlotCommitReady, Message: incompleteMessage(atomicSlotCommitReady, "Square single-create requires current buyer-write safety evidence. Seller-write, reschedule, party, and resource-capacity automation remain blocked.")},
 		{Key: "enable_ai_booking", Label: "Enable AI booking", Complete: aiEnabled, Message: incompleteMessage(aiEnabled, "AI booking is disabled until all safety checks pass.")},
 	}
 	appointmentChangeBlocker := appointmentChangeWriteBlockerFromError(appointmentChangeError)
@@ -1136,6 +1264,18 @@ func buildReadiness(aiEnabled bool, schedulingAuthority string, connection *pos.
 		CanTestBooking:                      canTest,
 		CanCancelTestBooking:                canCancel,
 		CanEnableAIBooking:                  canEnable,
+		AutomaticSingleCreate:               capability.AutomaticSingleCreate,
+		AutomaticReschedule:                 false,
+		AutomaticPartyCreate:                false,
+		ResourceCapacity:                    false,
+		WritePermissionMode:                 capability.WritePermissionMode,
+		ReconnectRequired:                   capability.ReconnectRequired,
+		EvidenceCurrent:                     capability.EvidenceCurrent,
+		EvidenceVerifiedAt:                  capability.EvidenceVerifiedAt,
+		EvidenceExpiresAt:                   capability.EvidenceExpiresAt,
+		CapabilityBlockerCode:               capability.BlockerCode,
+		ConnectionCapabilityVersion:         capability.ConnectionCapabilityVersion,
+		IntegrationConfigVersion:            capability.IntegrationConfigVersion,
 		BookingWriteBlocked:                 bookingWriteBlocker.Blocked,
 		BookingWriteBlockedCode:             bookingWriteBlocker.ErrorCode,
 		BookingWriteBlockedReason:           bookingWriteBlocker.Reason,
@@ -1151,6 +1291,14 @@ func buildReadiness(aiEnabled bool, schedulingAuthority string, connection *pos.
 		Checks:                              checks,
 		providerCanTestBooking:              providerCanTestBooking,
 	}
+}
+
+func (s *Service) currentSchedulingCapability(ctx context.Context, salonID string) (pos.SchedulingCapabilityEvaluation, error) {
+	capability, err := s.repo.GetSquareSchedulingCapabilityEvaluation(ctx, salonID)
+	if errors.Is(err, pos.ErrNotFound) {
+		return pos.SchedulingCapabilityEvaluation{WritePermissionMode: pos.SchedulingWriteModeUnsupported, ReconnectRequired: true, BlockerCode: "SQUARE_CAPABILITY_EVIDENCE_REQUIRED"}, nil
+	}
+	return capability, err
 }
 
 func (r *ReadinessStatus) canTestExternalProviderBooking() bool {

@@ -308,6 +308,11 @@ func (r *Repository) Commit(ctx context.Context, input commitInput) (*SwitchRun,
 			  AND attempt.status = 'pos_pending' AND attempt.superseded_at IS NULL
 			  AND attempt.provider_outcome IN ('not_started','in_flight')
 			  AND (NULLIF(BTRIM(attempt.processing_token), '') IS NOT NULL OR attempt.processing_lease_expires_at IS NOT NULL)
+			UNION ALL
+			SELECT 1 FROM external_slot_claims claim
+			WHERE claim.salon_id::text = $1
+			  AND claim.released_at IS NULL
+			  AND claim.state IN ('claimed_pre_dispatch','dispatch_started','dispatched_unknown','reconciliation_required')
 		)
 	`, input.SalonID).Scan(&liveExternal); err != nil {
 		return nil, false, err

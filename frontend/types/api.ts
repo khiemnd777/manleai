@@ -783,6 +783,7 @@ export type POSConnection = {
   salon_id: string;
   provider: string;
   status: string;
+  booking_write_capability_version: number;
   merchant_id?: string;
   location_id?: string;
   scopes: string[];
@@ -1548,6 +1549,18 @@ export type SquareReadiness = {
   can_test_booking: boolean;
   can_cancel_test_booking: boolean;
   can_enable_ai_booking: boolean;
+  automatic_single_create: boolean;
+  automatic_reschedule: boolean;
+  automatic_party_create: boolean;
+  resource_capacity: boolean;
+  write_permission_mode: "buyer_write" | "seller_write" | "unsupported" | "";
+  reconnect_required: boolean;
+  evidence_current: boolean;
+  evidence_verified_at?: string;
+  evidence_expires_at?: string;
+  blocker_code?: string;
+  connection_capability_version: number;
+  integration_config_version: number;
   booking_write_blocked?: boolean;
   booking_write_blocked_code?: string;
   booking_write_blocked_reason?: string;

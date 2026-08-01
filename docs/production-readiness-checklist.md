@@ -224,8 +224,11 @@ RPO/RTO evidence.
 ## Party Booking
 
 - [x] Detect supported group and party booking requests and convert clear party size/service counts into catalog-backed booking segments.
-- [x] Call provider-neutral availability and booking for supported party bookings, with confirmation allowed only after POS success.
-- [x] Preserve fallback-pending wording when POS booking fails and avoid confirmed appointment wording.
+- [x] Keep external-provider party create fail-closed unless one provider
+  operation proves whole-party atomicity and all staff/resource capacity; the
+  current conversation path performs zero sequential provider child writes.
+- [x] Preserve pending-owner-review/handoff wording for unsupported external
+  party execution and avoid confirmed appointment wording.
 - [x] Persist structured `party_booking_requests` with stable salon/session/event keys for owner-review exception records.
 - [x] Add owner status transitions for pending, contacted, resolved, and dismissed party requests.
 - [x] Redact party request representative PII and guest-service notes during call lifecycle redaction.
@@ -242,6 +245,30 @@ RPO/RTO evidence.
 
 ## Booking Integrity And Square Calendar Recovery
 
+- [x] Add V86 Atomic Slot Commit: exact salon/provider/location/config capability
+  evidence, transactional booking-attempt/quote/interval claim, half-open GiST
+  overlap exclusion, immutable lifecycle events, availability subtraction,
+  reschedule claim swap, cancellation release, and authority-switch blocker.
+- [x] Prove on real PostgreSQL that two independent operations racing for the
+  same concrete external staff/time produce exactly one committed claim and one
+  exclusion conflict; unit coverage also proves the loser makes zero provider
+  calls and conversation refreshes alternatives without confirmation wording.
+- [x] Retain dispatch-started/unknown/reconciliation-required claims; release
+  only definite failure or verified non-creation, and expose bounded pre-
+  dispatch/unknown queue evidence plus incident rules.
+- [x] Add the operation-specific `atomic_slot_commit` Square readiness blocker:
+  only current V87 buyer-write (`APPOINTMENTS_WRITE` without
+  `APPOINTMENTS_ALL_WRITE`) evidence plus concrete staff enables single create;
+  seller-write, reschedule, party, and resource capacity remain fail-closed.
+- [x] Persist immutable, expiring, tenant-fenced V87 capability evidence bound
+  to the exact connection capability version, integration config version,
+  location, API version, normalized OAuth scope fingerprint, reviewer, and
+  action key; invalidate it after reconnect or any booking-relevant fence
+  change and provide idempotent Platform Technical re-evaluation.
+- [ ] A global no-double-booking guarantee across ManleAI and direct Square
+  Dashboard/app writers is not proven and is outside the PostgreSQL claim
+  fence. Do not enable seller-write auto-confirm or make that claim; select
+  `manleai_calendar` or `owner_manual` when the global invariant is required.
 - [x] Persist booking operation fingerprints, provider idempotency keys, processing leases, provider outcomes, retry policies, retry lineage, and atomic supersession.
 - [x] Auto-supersede historical duplicate fingerprints only when provider dispatch is proven not started; fail migration closed when multiple dispatched/unknown outcomes require POS reconciliation.
 - [x] Recover exact authoritative calendar outcomes before lease fallback; otherwise treat expired pre-dispatch (`not_started`) leases as definitive retry-safe fallbacks, keep expired `in_flight` writes unknown/reconciliation-required, and dedupe repeated worker/read recovery outputs.
@@ -305,9 +332,9 @@ RPO/RTO evidence.
 
 ## Scheduling Load And Concurrency Verification
 
-- [x] Add a reproducible bounded synthetic harness for `owner_manual` request replay/changed-payload conflict/transition CAS, `manleai_calendar` aggregate party replay and pooled-resource conflict, and authority-switch preview/commit replay plus concurrent commit fencing.
+- [x] Add a reproducible bounded synthetic harness for `owner_manual` request replay/changed-payload conflict/transition CAS, `manleai_calendar` aggregate party replay and pooled-resource conflict, V86/V87 external Atomic Slot Commit races with independent replica pools/services and a fake provider, and authority-switch preview/commit replay plus concurrent commit fencing.
 - [x] Refuse execution without the exact isolated non-production attestation, dedicated database name/user/prefix, release-migration checksum parity, a unique run UUID, and compiled concurrency/operation/duration bounds; keep the harness free of drop/truncate/delete cleanup and real POS/Twilio/OpenAI runtimes.
-- [x] Emit a PII-free schema-versioned report with release/run/seed/database/migration evidence, p50/p95/p99/max latency, throughput, expected conflicts, unexpected errors, duplicate/orphan/provider-evidence/provider-call/tenant/idempotency/safety violations, and SQL pool statistics; pass only with zero unexpected errors and zero invariant violations.
+- [x] Emit a PII-free `scheduling-load-report/v2` report with release/run/seed/database/migration evidence, workload and claim p50/p95/p99/max latency, throughput, independent pool waits/stats, exact expected conflicts/fake dispatches, retained unknown claims, and unexpected release/loser-dispatch/duplicate/orphan/provider-call/tenant/idempotency/safety violations; pass only with zero unexpected errors and zero invariant violations.
 - [x] Cover guardrails, report gates, destructive-SQL/provider-import exclusions, race detection, and opt-in fresh-PostgreSQL repeated-run/collision behavior. The fresh local integration verifies implementation only and does not claim production capacity.
 - [ ] Complete an approved witnessed run in a representative isolated environment, retain the sanitized report and checksum with release approval evidence, and define workload-specific latency/throughput acceptance targets before making any production capacity claim.
 
@@ -496,6 +523,7 @@ RPO/RTO evidence.
 - [x] Add a versioned package/test-file manifest and fail-closed orchestration script; do not select coverage by grepping Go test names or output.
 - [x] Start the PostgreSQL contract from an empty dedicated database/role whose database name carries the `release_gate` marker, reject missing/unsafe identity and pre-existing public state, construct test URLs without logging them, prove migrate-twice/checksum behavior, and verify every repository migration from V46 through latest was applied exactly once.
 - [x] Clone the verified migration-only baseline into a disposable database per package, then run the scheduling authority, owner-manual, internal-calendar, switch, booking/POS/Square and webhook operations, configuration/public, owner/customer notification, scheduling-PII retention, operations-health, and V58 alias integration packages serially with bounded timeouts and no live provider, paid API, or network dependency.
+- [x] Own V86/V87 safety, scope-bound Square capability, real PostgreSQL external slot-claim concurrency, and schema-v2 scheduling-load tests in the release manifest; require their isolated PostgreSQL identity in release mode so missing database coverage fails instead of skipping.
 - [x] Run an explicit tenant/security contract covering route authentication, cross-salon rejection, whole-response integration token/secret redaction, provider-error/audit redaction, zero POS evidence for manual/internal work, public PII/provider-ID absence, notification masking, and callback signature enforcement.
 - [x] Keep `build-images` and `deploy` dependent on the release gate and preserve the existing tag-only, pre-deploy backup, forward-migration compatibility, healthcheck, and rollback gates.
 - [ ] Treat a passing gate as code-ready only; separately verify dashboard-managed provider configuration, live callback/delivery behavior, production backup storage/retention/capacity, witnessed restore/RPO/RTO evidence, alert routing, and on-call readiness before claiming operational production readiness.
@@ -652,12 +680,12 @@ ledger rather than reusing owner-notification consent or state.
 - [x] Integrate Phase 4A with conversation and Appointments: use authoritative capability/readiness context, keep internal party/multi-segment/lifecycle actions gated, refresh only typed stale quote evidence without false confirmation, reject provider-shaped internal results, preserve external guidance behavior, and expose a responsive staff-only create flow with exact-operation retry and durable-ID confirmation.
 - [x] Implement Phase 4B pooled-capacity evaluation and all-or-none party create: normalize ordered quantity-one guest/service units; plan same-guest services sequentially and different guests concurrently only when staff/resources fit; assign `anyone` deterministically; return one exact aggregate quote; revalidate authority/config/activation/catalog/schedule/staff/resource/capacity fences; and commit one root appointment plus every child service/resource row or nothing, without changing external-provider behavior.
 - [x] Add V50 database guards over the V49 ledger: quote resource integrity, exact guest-reference/party-size invariant, sorted pool locks, base/override capacity probes, concurrent over-capacity prevention, exact bidirectional quote/attempt/appointment/event graph equality, and immutable consumed quote/committed-book history without a second reservation ledger.
-- [x] Integrate Phase 4B with conversation and Appointments: use one aggregate party availability/action proof, reject partial confirmed children, reopen the complete draft after a typed resource/quote conflict with zero confirmation, preserve exact root replay, retain the external-provider per-child contract, and expose capability-gated structured guest/service/pooled-resource review in the responsive create flow.
+- [x] Integrate Phase 4B with conversation and Appointments: use one aggregate party availability/action proof, reject partial confirmed children, reopen the complete draft after a typed resource/quote conflict with zero confirmation, preserve exact root replay, keep external party execution request-only/fail-closed with zero sequential provider child writes, and expose capability-gated structured guest/service/pooled-resource review in the responsive create flow.
 - [x] Implement Phase 4C internal reschedule/cancel with target-origin routing after a current-authority change; exact target/version and open-cutoff validation; quote-backed whole-root replan that preserves party/service/guest shape; quote-free cancel with exact old-plan snapshot; atomic release and one-version same-root transition; immutable historical event replay; current-plan-only hydration; zero-active-child terminal cancel; durable status/version/active-child result validation; and no provider/POS evidence.
 - [x] Add V51 database guards for release ownership, immutable root provenance and party identity, exact one-version transitions, unique contiguous versioned events, cancelled-terminal state, exact reschedule quote/attempt/new-plan equality, exact cancel old-plan snapshot, and zero active children after cancellation.
 - [x] Integrate Phase 4C with conversation and Appointments: require explicit state-scoped lifecycle authorization, an exact reviewed reschedule quote or a cancellation reason with no quote, stale-target refresh/re-offer without success wording, cutoff-safe handoff, exact event replay after later mutations, complete internal-origin row evidence, fail-closed client cutoff handling, locked exact retries for uncertain submissions, and durable response graph/status/version checks before success copy.
 - [x] Preserve the existing Square `external_provider` booking ID/version, quote, fence, idempotency, unknown-outcome, retry, reconciliation, webhook, and token-security safeguards unchanged behind the authority-neutral boundary; route Square test writes through the facade, expose/gate readiness by current authority, sanitize gate errors, and fence external lease/calendar mutation while retaining provider/connection-scoped webhook repair for historical external mirrors.
-- [x] Keep party and multi-segment operations all-or-none: pending only for `owner_manual`, one atomic root/child commit for `manleai_calendar`, and complete provider success or safe rollback/reconciliation for `external_provider`.
+- [x] Keep party and multi-segment operations all-or-none: pending only for `owner_manual`, one atomic root/child commit for `manleai_calendar`, and fail-closed external execution until one provider operation proves whole-party atomicity and required capacity.
 - [x] Add the V52-V55 explicit owner-reviewed authority switch workflow with readiness preview, dry-run blockers, authority-version and concurrency fences, exact replay/conflict handling, immutable run/event audit, and an explicit inverse-run reference; integration connect/sync/import/webhook actions do not switch authority implicitly.
 - [x] Preserve immutable originating authority and authority-native evidence for appointments, attempts, quotes, and segments so historical retry, reschedule, cancellation, reconciliation, and webhook work cannot cross authorities.
 - [x] Add Phase 4A/V50/V51 internal execution evidence without overloading `active_pos_provider` or populating fake `pos_*` fields: authority/config-fenced normalized quotes, internal attempt/appointment/segment/resource/event ownership, staff overlap and resource-capacity guards, exact graph equality, released-child ownership, versioned lifecycle events, and exact historical replay identity.

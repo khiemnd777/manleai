@@ -2,10 +2,14 @@
 
 ## Scheduling Authority Applicability
 
-Square Appointments is the current production implementation of
-`external_provider`. The runtime uses Square for scheduling only while the
+Square Appointments is the installed implementation of `external_provider`.
+The runtime uses Square for scheduling only while the
 captured scheduling authority is `external_provider` and the selected external
-adapter is `square`.
+adapter is `square`. V86 additionally requires Atomic Slot Commit capability;
+V87 resolves it from the exact persisted Square scope/configuration fence.
+Buyer-level `APPOINTMENTS_WRITE` without `APPOINTMENTS_ALL_WRITE` enables new
+single create only. Seller-write, reschedule, party, and resource-capacity
+automation remain fail-closed.
 
 All Square writes remain behind the authority-neutral scheduling facade.
 A genuinely new availability/action uses the current salon setting; persisted
@@ -54,10 +58,10 @@ unknown-outcome, retry, or reconciliation safeguard below.
   gated, action-key-idempotent safe requeue inside the connected Square card
 - Customer search/create
 - Availability checks
-- Create appointment
-- Reschedule appointment
+- Buyer-write single-create appointment path, gated before dispatch by Atomic Slot Commit
+- Reschedule appointment code path, retained as request-only for Square
 - Cancel appointment
-- Create test booking
+- Buyer-write single create test-booking path, gated before dispatch by Atomic Slot Commit
 - Cancel test booking
 - AI booking readiness checks with current `scheduling_authority` and
   external-only new-test/AI-enable gates
@@ -80,6 +84,9 @@ unknown-outcome, retry, or reconciliation safeguard below.
 ## Not Implemented In The Current Square Slice
 
 - Real sandbox payload verification against a Square Appointments account
+- Witnessed representative-environment throughput/capacity evidence
+- Verified atomic Square reschedule no-overlap evidence
+- Atomic whole-party Square booking and external pooled-resource capacity proof
 - Outbox-driven Square service/staff writes from ManleAI canonical records
 - Outbox-driven Square customer writes outside the booking flow
 - Executable provider switch import, executable dry-run, and activation workflow
@@ -156,8 +163,11 @@ test booking cancellation, and simulator booking requests leave internal
 confirmed appointment state unchanged unless Square succeeds. Square readiness
 exposes the owner-scoped current `scheduling_authority`; new test creation and AI
 booking enablement require `external_provider` in addition to connection,
-location, sync, bookable service/staff, business-hour, and write-permission
-gates. Exact external replay and external-target test cancellation remain
+location, sync, bookable service/staff, business-hour, write-permission, and
+`atomic_slot_commit` gates. With current buyer-write evidence,
+`can_test_booking` and backward-compatible `can_enable_ai_booking` describe
+supported single create only; action-specific reschedule and party gates remain
+false. Exact external replay and external-target test cancellation remain
 available after a later authority switch, as does a persisted external safe
 retry. The public readiness fields still report new test creation as
 unavailable in an internal current mode; the persisted retry is separately
@@ -165,6 +175,21 @@ authorized by its external operation/retry lineage and the underlying provider-
 readiness gates. Square test booking create/cancel is an optional POS write
 smoke test and the recovery path for clearing an older write-permission blocker
 after reconnecting or updating the seller account.
+
+`external_provider_scheduling_capability_evidence` is immutable and bound to
+the exact connection capability version, stored salon integration config and
+version, Square location, Square API version, and normalized OAuth-scope
+fingerprint. Platform Technical exposes an idempotent persisted-state-only
+`POST /api/platform/tenants/:tenant_id/technical/square/scheduling-capability/re-evaluate`
+action. The client supplies only an action key and expected versions; it cannot
+submit capability booleans or override seller-write safety.
+
+The automated-create OAuth request uses `APPOINTMENTS_WRITE` and does not
+request `APPOINTMENTS_ALL_WRITE`. An existing seller-write connection is never
+silently downscoped: readiness reports `seller_write`,
+`reconnect_required=true`, and every automated confirmation capability false
+until an explicit reconnect establishes the buyer-write fence and safety is
+re-evaluated.
 
 These historical-origin safeguards support data whose current authority token
 has changed. The owner-facing authority-switch workflow exists, but it does not
@@ -230,11 +255,34 @@ being retried. Replaying a request whose response was lost keeps both its
 operation key and logical payload unchanged; refreshed ephemeral quote proof is
 ignored for replay identity and does not create a new retry lineage.
 
+V86 Atomic Slot Commit makes the local PostgreSQL claim the outbound
+linearization point for a capability-approved ManleAI external mutation. Quote
+consumption, attempt creation, and all concrete half-open `[start,end)` staff
+intervals commit together before any Square customer or booking request. Two
+calls that race for the same Square location/staff/time therefore produce one
+local winner and one `SLOT_COMMIT_CONFLICT`; the loser performs zero Square
+writes and must fetch fresh availability. This protects only writes that enter
+ManleAI. It does not serialize a concurrent seller Dashboard, Square app, or
+another third-party writer. The
+[official Square Bookings overview](https://developer.squareup.com/docs/bookings-api/what-it-is)
+allows seller-level writers to create double bookings; therefore seller-write is never
+auto-confirm capable and this system does not claim a global no-double-booking
+invariant against seller-side writers. Use `manleai_calendar` or
+`owner_manual` when that global constraint is required.
+
+Once dispatch starts, an ambiguous Square outcome retains the active claim and
+enters reconciliation. A worker may release an expired pre-dispatch claim only
+when the persisted outcome proves `not_started`. It must not release or retry a
+dispatch-started/unknown claim based on lease age. Verified provider
+non-creation releases it; an exact authoritative provider match confirms it.
+The operations-health API exposes bounded pre-dispatch and unknown claim queue
+counts without customer or provider payloads.
+
 Owner-facing booking, reschedule, and test-booking HTTP flows first request a
 short-lived availability quote. Conversation create/reschedule paths retain the
 backend-owned quote for the offered slot, refresh its exact assignment
-immediately before dispatch, and refresh every party child before the first
-child write. The selected quote/slot is single-use and must match salon,
+immediately before dispatch. External party create makes no sequential child
+writes while whole-party atomic capability is unavailable. The selected quote/slot is single-use and must match salon,
 provider, selected location and snapshot generation, ordered service/staff
 segments, time range, and request fingerprint. A safe fallback retry preserves
 the original normalized logical request exactly but obtains a current quote;

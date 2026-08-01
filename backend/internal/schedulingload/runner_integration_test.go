@@ -16,6 +16,9 @@ import (
 func TestRunAgainstFreshIsolatedPostgres(t *testing.T) {
 	databaseURL := os.Getenv("SCHEDULING_LOAD_FRESH_DATABASE_URL")
 	if databaseURL == "" {
+		if os.Getenv("OWNER_FIRST_RELEASE_GATE_DATABASE_REQUIRED") == "1" {
+			t.Fatal("SCHEDULING_LOAD_FRESH_DATABASE_URL is required in release-gate mode")
+		}
 		t.Skip("SCHEDULING_LOAD_FRESH_DATABASE_URL is not configured")
 	}
 	db, err := sql.Open("postgres", databaseURL)
@@ -49,7 +52,9 @@ func TestRunAgainstFreshIsolatedPostgres(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Run(%s) error = %v; report = %#v", runID, err, report)
 		}
-		if !report.Passed || violationCount(report.InvariantViolations) != 0 || report.Database.MigrationCount == 0 || report.Totals.ExpectedConflicts == 0 || report.Totals.Replayed == 0 {
+		if !report.Passed || report.SchemaVersion != "scheduling-load-report/v2" || violationCount(report.InvariantViolations) != 0 || report.Database.MigrationCount == 0 || report.Totals.ExpectedConflicts == 0 || report.Totals.Replayed == 0 ||
+			report.ExternalSlotCommit.ExpectedFakeProviderDispatches == 0 || report.ExternalSlotCommit.FakeProviderDispatches != report.ExternalSlotCommit.ExpectedFakeProviderDispatches ||
+			report.ExternalSlotCommit.ConflictLoserProviderDispatches != 0 || report.ExternalSlotCommit.DuplicateConfirmations != 0 || report.ExternalSlotCommit.UnknownClaims == 0 || len(report.Database.ReplicaPools) != baseConfig.Concurrency {
 			t.Fatalf("Run(%s) report did not prove expected gates: %#v", runID, report)
 		}
 	}

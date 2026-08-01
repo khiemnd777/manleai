@@ -65,6 +65,28 @@ const (
 	SchedulingAuthorityOwnerManual      = "owner_manual"
 	SchedulingAuthorityManleAICalendar  = "manleai_calendar"
 	SchedulingAuthorityExternalProvider = "external_provider"
+
+	ExternalSlotClaimClaimedPreDispatch     = "claimed_pre_dispatch"
+	ExternalSlotClaimDispatchStarted        = "dispatch_started"
+	ExternalSlotClaimConfirmed              = "confirmed"
+	ExternalSlotClaimDefiniteFailure        = "definite_failure"
+	ExternalSlotClaimDispatchedUnknown      = "dispatched_unknown"
+	ExternalSlotClaimReconciliationRequired = "reconciliation_required"
+	ExternalSlotClaimReleased               = "released"
+)
+
+type slotCommitConflictError struct{}
+
+func (slotCommitConflictError) Error() string {
+	return "the selected scheduling resources are no longer available"
+}
+func (slotCommitConflictError) AvailabilityRefreshRequired() bool { return true }
+
+var ErrSlotCommitConflict error = slotCommitConflictError{}
+
+var (
+	ErrSlotClaimInProgress = errors.New("the exact slot claim is still in progress")
+	ErrSlotOutcomeUnknown  = errors.New("the provider booking outcome is unknown")
 )
 
 type CreateBookingRequest struct {
@@ -471,28 +493,52 @@ type AppointmentActionRef struct {
 }
 
 type PendingBookingRecord struct {
-	SalonID             string
-	Source              string
-	Provider            string
-	POSIdempotencyKey   string
-	OperationKey        string
-	RequestFingerprint  string
-	RetryOfAttemptID    string
-	AvailabilityQuoteID string
-	SlotFingerprint     string
-	ProviderFence       pos.ProviderFence
-	ProcessingToken     string
-	LeaseExpiresAt      time.Time
-	CustomerName        string
-	CustomerPhone       string
-	CustomerEmail       string
-	Service             ServiceRef
-	Staff               StaffRef
-	StaffSelectionMode  string
-	Segments            []BookingSegmentRecord
-	StartTime           time.Time
-	EndTime             time.Time
-	Notes               string
+	SalonID                  string
+	Source                   string
+	Provider                 string
+	POSIdempotencyKey        string
+	OperationKey             string
+	RequestFingerprint       string
+	RetryOfAttemptID         string
+	AvailabilityQuoteID      string
+	SlotFingerprint          string
+	ProviderFence            pos.ProviderFence
+	ProcessingToken          string
+	LeaseExpiresAt           time.Time
+	CustomerName             string
+	CustomerPhone            string
+	CustomerEmail            string
+	Service                  ServiceRef
+	Staff                    StaffRef
+	StaffSelectionMode       string
+	Segments                 []BookingSegmentRecord
+	StartTime                time.Time
+	EndTime                  time.Time
+	Notes                    string
+	RequireExternalSlotClaim bool
+	SchedulingSafety         ExternalSchedulingSafety
+	ClaimIntervals           []ExternalSlotClaimIntervalRecord
+}
+
+type ExternalSchedulingSafety struct {
+	EvidenceID                string
+	ConfigVersion             int64
+	AtomicCreateNoOverlap     bool
+	AtomicRescheduleNoOverlap bool
+	ConcreteStaffAssignment   bool
+	ResourceCapacityEnforced  bool
+	AtomicPartyCreate         bool
+	VerifiedAt                time.Time
+	ExpiresAt                 time.Time
+}
+
+type ExternalSlotClaimIntervalRecord struct {
+	ResourceKind            string
+	ResourceID              string
+	SourceSegmentIndexes    []int
+	OccupiedStartTime       time.Time
+	OccupiedEndTime         time.Time
+	ResourceCapacityVersion int64
 }
 
 type ConfirmedBookingRecord struct {
@@ -545,24 +591,27 @@ type FallbackBookingRecord struct {
 }
 
 type PendingAppointmentActionRecord struct {
-	SalonID             string
-	Appointment         AppointmentActionRef
-	Provider            string
-	Source              string
-	Segments            []BookingSegmentRecord
-	RequestedStartTime  time.Time
-	RequestedEndTime    time.Time
-	Notes               string
-	POSIdempotencyKey   string
-	OperationKey        string
-	RequestFingerprint  string
-	RetryOfAttemptID    string
-	AvailabilityQuoteID string
-	SlotFingerprint     string
-	ProviderFence       pos.ProviderFence
-	OperationType       string
-	ProcessingToken     string
-	LeaseExpiresAt      time.Time
+	SalonID                  string
+	Appointment              AppointmentActionRef
+	Provider                 string
+	Source                   string
+	Segments                 []BookingSegmentRecord
+	RequestedStartTime       time.Time
+	RequestedEndTime         time.Time
+	Notes                    string
+	POSIdempotencyKey        string
+	OperationKey             string
+	RequestFingerprint       string
+	RetryOfAttemptID         string
+	AvailabilityQuoteID      string
+	SlotFingerprint          string
+	ProviderFence            pos.ProviderFence
+	OperationType            string
+	ProcessingToken          string
+	LeaseExpiresAt           time.Time
+	RequireExternalSlotClaim bool
+	SchedulingSafety         ExternalSchedulingSafety
+	ClaimIntervals           []ExternalSlotClaimIntervalRecord
 }
 
 type RescheduledAppointmentRecord struct {
@@ -613,6 +662,7 @@ type AppointmentActionFallbackRecord struct {
 type BookingOperationClaim struct {
 	Attempt  *BookingAttempt
 	Acquired bool
+	Conflict bool
 }
 
 type AvailabilityQuoteRecord struct {

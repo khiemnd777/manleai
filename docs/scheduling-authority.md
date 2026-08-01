@@ -18,8 +18,12 @@ V48 owner-managed `manleai_calendar` configuration/readiness aggregate, API,
 and dashboard workflow. Phase 4A registers staff-only availability and atomic
 single-guest create. Phase 4B extends `manleai_calendar` to structured
 multi-guest, multi-service staff-only and pooled availability/create with one
-all-or-none internal commit; Square-backed `external_provider` remains the
-provider-backed confirming path. Phase 4C adds target-origin, whole-root
+all-or-none internal commit; `external_provider` remains the provider-backed
+executor boundary. V86 adds Atomic Slot Commit as a mandatory outbound
+concurrency fence for external create/reschedule. V87 adds exact Square
+connection/config/location/API/scope evidence and enables buyer-write single
+create only. Seller-write, reschedule, party, and resource-capacity automation
+remain fail-closed. Phase 4C adds target-origin, whole-root
 internal reschedule/cancel and V51 lifecycle guards. Aggregate
 `execution_ready` is true only when all six declared operation capabilities are
 ready, so consumers must still use the exact operation capability.
@@ -32,7 +36,7 @@ conversation-specific scheduling entrypoints apply this exact matrix:
 | --- | --- | --- | --- |
 | `owner_manual` | request-only availability and one pending owner-review request | invalid configuration | no availability, request, or executor action |
 | `manleai_calendar` | verify internal availability, then persist one pending owner-review request without an internal commit | existing atomic internal confirmation path | no availability, request, or executor action |
-| `external_provider` | verify provider availability, then persist one pending owner-review request without a provider create | existing provider confirmation path | no availability, request, or executor action |
+| `external_provider` | verify provider availability, then persist one pending owner-review request without a provider create | provider confirmation only after operation-specific capability, Atomic Slot Commit, and provider success; Square supports buyer-write single create only | no availability, request, or executor action |
 
 Pending approval preserves ordered guest/service/staff/requested-time detail,
 but strips quote, slot-fingerprint, retry, and target-version execution proof
@@ -150,8 +154,9 @@ enter through this boundary. The resolved behavior is:
 
 - `external_provider` delegates through
   `backend/modules/scheduling_external_provider` to the exact existing booking
-  service and POS path. Provider confirmation, quote, fence, idempotency,
-  retry, reconciliation, and error behavior is unchanged.
+  service and POS path. V86 strengthens that path with the Atomic Slot Commit
+  gate described below; provider confirmation, quote, fence, idempotency,
+  retry, reconciliation, and error behavior otherwise remains authoritative.
 - `owner_manual` delegates through
   `backend/modules/scheduling_owner_manual`. Availability is `request_only`;
   book, reschedule, and cancel return `pending_owner_review` only after the
@@ -170,7 +175,10 @@ enter through this boundary. The resolved behavior is:
 handlers expose a generic, sanitized
 `409 SCHEDULING_AUTHORITY_NOT_READY`; quote/conflict drift is
 `409 AVAILABILITY_QUOTE_STALE`, and changed logical input under an existing
-operation identity is `409 SCHEDULING_OPERATION_CONFLICT`. These results are
+operation identity is `409 SCHEDULING_OPERATION_CONFLICT`. A concurrent
+external slot loser is `409 SLOT_COMMIT_CONFLICT`; an exact operation still in
+progress is `202 SLOT_CLAIM_IN_PROGRESS`; and a dispatched operation whose
+provider result cannot be proved is `202 SLOT_OUTCOME_UNKNOWN`. These results are
 not pending requests and never authorize confirmed wording. Square test
 create/cancel writes also use
 the scheduling facade, while their response-loss replay checks use the
@@ -198,6 +206,60 @@ fallback/direct convergence, mirror canonicalization preserves any existing
 canonicalization time and `external_provider`, and leaves
 `confirmed_by_user_id` unset unless an actual actor was already recorded.
 Repeated recovery is idempotent and does not rewrite those timestamps.
+
+## External Atomic Slot Commit
+
+An external availability quote is evidence for what the provider returned; it
+is not a reservation. Before a new external `book` or `reschedule` can cross
+the provider boundary, the booking service requires both:
+
+- adapter-declared `AtomicCreateNoOverlap` or
+  `AtomicRescheduleNoOverlap` plus `ConcreteStaffAssignment`; and
+- one current, unexpired
+  `external_provider_scheduling_capability_evidence` row bound to the exact
+  connection capability version, salon integration config/version, provider,
+  location, Square API version, and normalized OAuth-scope fingerprint under
+  verification contract `square-buyer-single-create-v1` for new Square work.
+
+For Square, `APPOINTMENTS_WRITE` must be present and
+`APPOINTMENTS_ALL_WRITE` absent. This makes `AtomicCreateNoOverlap` and
+`ConcreteStaffAssignment` true only for single create. All automated
+reschedule, party, and resource-capacity flags remain false. Existing V86
+evidence can preserve an already persisted historical claim/replay path, but it
+cannot authorize a new V87 Square claim.
+
+The V86 `external_slot_claims` and `external_slot_claim_intervals` ledger is an
+outbound ManleAI concurrency fence, not a second provider calendar. The
+linearization point is the PostgreSQL transaction that consumes the quote,
+creates the booking attempt, and installs all required half-open `[start,end)`
+staff/resource intervals. Sorted transaction-scoped PostgreSQL advisory locks
+stabilize multi-resource lock order, and the GiST exclusion constraint remains
+the commit-time authority that makes overlapping claims mutually exclusive across API
+replicas. If Call A commits that transaction first, Call B receives
+`SLOT_COMMIT_CONFLICT` before any provider/customer write. The conversation
+clears stale authorization and selected-slot proof, runs fresh authoritative
+availability, truthfully says that nothing was booked for the losing request,
+and offers only the refreshed alternatives.
+
+Create confirmation keeps the claim active. The provider-neutral repository can
+install a future capability-approved reschedule's new
+interval fragments while the old claim remains active, then atomically releases
+the exact old plan only after verified provider success; this prevents an
+extension outside the old range from becoming an unprotected gap. Square V87
+does not grant that reschedule capability. Cancellation
+releases the active claim only after verified provider cancellation. Definite
+pre-dispatch/provider rejection releases the new claim. Dispatch-started,
+unknown, and reconciliation-required results retain their intervals and cannot
+be blindly retried or manually released without authoritative non-creation
+evidence. Availability subtracts these active local claims in addition to the
+provider response.
+
+V86 does not backfill historical attempts into claims and does not manufacture
+external resource-capacity evidence. Current external party create is request-
+only/fail-closed and performs zero sequential provider child writes. A future
+whole-party provider contract needs separate approval and is not implied by
+V86/V87. `manleai_calendar` continues to use its V49-V51 aggregate transaction
+and resource-capacity guards independently.
 
 Phase 2 adds the owner-review queue inside `/dashboard/appointments`. It does
 not add authority selection, an authority-switch endpoint/UI, or internal
@@ -500,15 +562,14 @@ Party operations are all-or-none at the caller-facing confirmation boundary:
   a guest-reference count that differs from `party_size`, incomplete children,
   stale resource evidence, or any conflict keeps the whole operation
   unconfirmed.
-- `external_provider`: preflight every child before the first provider write.
-  Confirmation requires success evidence for every required child, or one
-  aggregate provider booking that durably covers every segment. A partial or
-  unknown result must attempt supported rollback, record reconciliation work,
-  and avoid confirmed wording unless complete all-child success is proven.
+- `external_provider`: require one provider operation proven atomic for the
+  whole party and every required staff/resource allocation. The current path
+  performs no sequential child writes and hands off for owner review while that
+  capability is unavailable.
 
-A partial success must never be flattened into a confirmed party result.
-Structured owner-review and reconciliation records must retain the affected
-children and rollback state.
+A partial or unknown result must never be flattened into a confirmed party
+result. Structured owner-review and reconciliation records retain applicable
+authority evidence.
 
 ## Phase 4B-4C Data-Driven Execution Contract
 

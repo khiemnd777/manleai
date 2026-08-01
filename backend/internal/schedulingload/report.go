@@ -6,22 +6,40 @@ import (
 )
 
 type Report struct {
-	SchemaVersion       string              `json:"schema_version"`
-	Release             string              `json:"release"`
-	RunID               string              `json:"run_id"`
-	Seed                int64               `json:"seed"`
-	StartedAt           time.Time           `json:"started_at"`
-	CompletedAt         time.Time           `json:"completed_at"`
-	ElapsedMilliseconds int64               `json:"elapsed_ms"`
-	Config              ReportConfig        `json:"config"`
-	Database            DatabaseEvidence    `json:"database"`
-	TenantIDs           []string            `json:"tenant_ids"`
-	Workloads           []WorkloadReport    `json:"workloads"`
-	Totals              Totals              `json:"totals"`
-	InvariantViolations InvariantViolations `json:"invariant_violations"`
-	Passed              bool                `json:"passed"`
-	FailureReasons      []string            `json:"failure_reasons"`
-	CapacityClaim       string              `json:"capacity_claim"`
+	SchemaVersion       string                     `json:"schema_version"`
+	Release             string                     `json:"release"`
+	RunID               string                     `json:"run_id"`
+	Seed                int64                      `json:"seed"`
+	StartedAt           time.Time                  `json:"started_at"`
+	CompletedAt         time.Time                  `json:"completed_at"`
+	ElapsedMilliseconds int64                      `json:"elapsed_ms"`
+	Config              ReportConfig               `json:"config"`
+	Database            DatabaseEvidence           `json:"database"`
+	TenantIDs           []string                   `json:"tenant_ids"`
+	Workloads           []WorkloadReport           `json:"workloads"`
+	Totals              Totals                     `json:"totals"`
+	InvariantViolations InvariantViolations        `json:"invariant_violations"`
+	Passed              bool                       `json:"passed"`
+	FailureReasons      []string                   `json:"failure_reasons"`
+	CapacityClaim       string                     `json:"capacity_claim"`
+	ExternalSlotCommit  ExternalSlotCommitEvidence `json:"external_slot_commit"`
+}
+
+type ExternalSlotCommitEvidence struct {
+	ExpectedFakeProviderDispatches  int            `json:"expected_fake_provider_dispatches"`
+	FakeProviderDispatches          int            `json:"fake_provider_dispatches"`
+	ExpectedConflictCount           int            `json:"expected_conflict_count"`
+	ObservedConflictCount           int            `json:"observed_conflict_count"`
+	ConflictLoserProviderDispatches int            `json:"conflict_loser_provider_dispatches"`
+	DuplicateConfirmations          int            `json:"duplicate_confirmations"`
+	UnexpectedClaimReleases         int            `json:"unexpected_claim_releases"`
+	OrphanClaims                    int            `json:"orphan_claims"`
+	OrphanIntervals                 int            `json:"orphan_intervals"`
+	OrphanEvents                    int            `json:"orphan_events"`
+	UnknownClaims                   int            `json:"unknown_claims"`
+	ReconciliationRequired          int            `json:"reconciliation_required"`
+	RealProviderRuntimeCalls        int            `json:"real_provider_runtime_calls"`
+	ClaimLatency                    LatencySummary `json:"claim_latency_ms"`
 }
 
 type ReportConfig struct {
@@ -39,6 +57,7 @@ type DatabaseEvidence struct {
 	MigrationChecksumFingerprint string              `json:"migration_checksum_fingerprint"`
 	Migrations                   []MigrationEvidence `json:"migrations"`
 	Pool                         PoolEvidence        `json:"pool"`
+	ReplicaPools                 []PoolEvidence      `json:"replica_pools"`
 }
 
 type MigrationEvidence struct {

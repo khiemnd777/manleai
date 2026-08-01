@@ -36,6 +36,8 @@ type Store interface {
 	EnsureSalonOwner(ctx context.Context, salonID string, ownerUserID string) error
 	GetActiveProvider(ctx context.Context, salonID string, ownerUserID string) (string, error)
 	GetActiveProviderFence(ctx context.Context, salonID string, ownerUserID string) (string, pos.ProviderFence, error)
+	GetExternalSchedulingSafety(ctx context.Context, salonID string, provider string, fence pos.ProviderFence) (*ExternalSchedulingSafety, error)
+	FilterExternalClaimedSlots(ctx context.Context, salonID string, provider string, fence pos.ProviderFence, targetAppointmentID string, slots []AvailabilitySlot) ([]AvailabilitySlot, error)
 	GetBookableService(ctx context.Context, salonID string, provider string, serviceID string) (*ServiceRef, error)
 	GetBookableStaff(ctx context.Context, salonID string, provider string, staffID string) (*StaffRef, error)
 	ListBookableStaffRefs(ctx context.Context, salonID string, provider string) ([]StaffRef, error)
@@ -136,41 +138,65 @@ func (s *Service) Create(ctx context.Context, salonID string, ownerUserID string
 	if provider == nil {
 		return nil, ErrProviderUnavailable
 	}
+	providerCapabilities, err := externalProviderCapabilities(ctx, provider, salonID, primary.Service.ProviderFence)
+	if err != nil {
+		return nil, err
+	}
+	if !providerCapabilities.AtomicCreateNoOverlap || !providerCapabilities.ConcreteStaffAssignment {
+		return nil, ErrSchedulingAuthorityNotReady
+	}
+	schedulingSafety, err := s.store.GetExternalSchedulingSafety(ctx, salonID, provider.Name(), primary.Service.ProviderFence)
+	if err != nil {
+		return nil, err
+	}
+	if schedulingSafety == nil || !schedulingSafety.AtomicCreateNoOverlap || !schedulingSafety.ConcreteStaffAssignment {
+		return nil, ErrSchedulingAuthorityNotReady
+	}
 
 	durationMinutes := bookingSegmentsDuration(resolvedSegments)
 	endTime := req.StartTime.Add(time.Duration(durationMinutes) * time.Minute)
 	segments := bookingSegmentRecords(resolvedSegments)
+	claimIntervals, err := externalStaffClaimIntervals(req.StartTime, resolvedSegments)
+	if err != nil {
+		return nil, err
+	}
 	processingToken := uuid.NewString()
 	leaseExpiresAt := time.Now().UTC().Add(bookingOperationLeaseDuration)
 	claim, err := s.store.ClaimPendingBookingAttempt(ctx, PendingBookingRecord{
-		SalonID:             salonID,
-		Source:              req.Source,
-		Provider:            provider.Name(),
-		POSIdempotencyKey:   newPOSIdempotencyKey(),
-		OperationKey:        req.OperationKey,
-		RequestFingerprint:  createRequestFingerprint(provider.Name(), req, resolvedSegments),
-		RetryOfAttemptID:    req.RetryOfAttemptID,
-		AvailabilityQuoteID: req.AvailabilityQuoteID,
-		SlotFingerprint:     req.SlotFingerprint,
-		ProviderFence:       primary.Service.ProviderFence,
-		ProcessingToken:     processingToken,
-		LeaseExpiresAt:      leaseExpiresAt,
-		CustomerName:        req.CustomerName,
-		CustomerPhone:       req.CustomerPhone,
-		CustomerEmail:       req.CustomerEmail,
-		Service:             primary.Service,
-		Staff:               primary.Staff,
-		StaffSelectionMode:  req.StaffSelectionMode,
-		Segments:            segments,
-		StartTime:           req.StartTime,
-		EndTime:             endTime,
-		Notes:               req.Notes,
+		SalonID:                  salonID,
+		Source:                   req.Source,
+		Provider:                 provider.Name(),
+		POSIdempotencyKey:        newPOSIdempotencyKey(),
+		OperationKey:             req.OperationKey,
+		RequestFingerprint:       createRequestFingerprint(provider.Name(), req, resolvedSegments),
+		RetryOfAttemptID:         req.RetryOfAttemptID,
+		AvailabilityQuoteID:      req.AvailabilityQuoteID,
+		SlotFingerprint:          req.SlotFingerprint,
+		ProviderFence:            primary.Service.ProviderFence,
+		ProcessingToken:          processingToken,
+		LeaseExpiresAt:           leaseExpiresAt,
+		CustomerName:             req.CustomerName,
+		CustomerPhone:            req.CustomerPhone,
+		CustomerEmail:            req.CustomerEmail,
+		Service:                  primary.Service,
+		Staff:                    primary.Staff,
+		StaffSelectionMode:       req.StaffSelectionMode,
+		Segments:                 segments,
+		StartTime:                req.StartTime,
+		EndTime:                  endTime,
+		Notes:                    req.Notes,
+		RequireExternalSlotClaim: true,
+		SchedulingSafety:         *schedulingSafety,
+		ClaimIntervals:           claimIntervals,
 	})
 	if err != nil {
 		return nil, err
 	}
 	if claim == nil || claim.Attempt == nil {
 		return nil, ErrOperationInProgress
+	}
+	if claim.Conflict {
+		return nil, ErrSlotCommitConflict
 	}
 	if !claim.Acquired {
 		return claim.Attempt, nil
@@ -249,6 +275,56 @@ func (s *Service) Create(ctx context.Context, salonID string, ownerUserID string
 		ProcessingToken:    processingToken,
 		ProviderFence:      pending.ProviderFence,
 	})
+}
+
+func externalProviderCapabilities(ctx context.Context, provider pos.POSProvider, salonID string, fence pos.ProviderFence) (pos.ProviderCapabilities, error) {
+	if provider == nil {
+		return pos.ProviderCapabilities{}, nil
+	}
+	if scoped, ok := provider.(pos.ScopedSchedulingCapabilityProvider); ok {
+		return scoped.SchedulingCapabilities(ctx, salonID, fence)
+	}
+	capabilityProvider, ok := provider.(pos.CapabilityProvider)
+	if !ok {
+		return pos.ProviderCapabilities{}, nil
+	}
+	return capabilityProvider.Capabilities(), nil
+}
+
+func externalStaffClaimIntervals(startTime time.Time, segments []resolvedBookingSegment) ([]ExternalSlotClaimIntervalRecord, error) {
+	if startTime.IsZero() || len(segments) == 0 {
+		return nil, ErrValidation
+	}
+	current := startTime.UTC()
+	intervals := make([]ExternalSlotClaimIntervalRecord, 0, len(segments))
+	for index, segment := range segments {
+		resourceID := strings.TrimSpace(segment.Staff.ID)
+		if resourceID == "" || segment.Service.DurationMinutes <= 0 {
+			return nil, ErrSchedulingAuthorityNotReady
+		}
+		end := current.Add(time.Duration(segment.Service.DurationMinutes) * time.Minute)
+		candidate := ExternalSlotClaimIntervalRecord{
+			ResourceKind:         "staff",
+			ResourceID:           resourceID,
+			SourceSegmentIndexes: []int{index + 1},
+			OccupiedStartTime:    current,
+			OccupiedEndTime:      end,
+		}
+		if len(intervals) > 0 {
+			previous := &intervals[len(intervals)-1]
+			if previous.ResourceKind == candidate.ResourceKind && previous.ResourceID == candidate.ResourceID && candidate.OccupiedStartTime.Before(previous.OccupiedEndTime) {
+				if candidate.OccupiedEndTime.After(previous.OccupiedEndTime) {
+					previous.OccupiedEndTime = candidate.OccupiedEndTime
+				}
+				previous.SourceSegmentIndexes = append(previous.SourceSegmentIndexes, index+1)
+				current = end
+				continue
+			}
+		}
+		intervals = append(intervals, candidate)
+		current = end
+	}
+	return intervals, nil
 }
 
 // ReplayCreate returns a previously claimed create operation without consulting
@@ -338,8 +414,22 @@ func (s *Service) Reschedule(ctx context.Context, salonID string, ownerUserID st
 	if err != nil {
 		return nil, nil, err
 	}
+	providerCapabilities, err := externalProviderCapabilities(ctx, provider, salonID, providerFence)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !providerCapabilities.AtomicRescheduleNoOverlap || !providerCapabilities.ConcreteStaffAssignment {
+		return nil, nil, ErrSchedulingAuthorityNotReady
+	}
 	if strings.TrimSpace(appointment.ProviderLocationID) == "" || strings.TrimSpace(appointment.ProviderLocationID) != strings.TrimSpace(providerFence.LocationID) {
 		return nil, nil, ErrAvailabilityQuoteStale
+	}
+	schedulingSafety, err := s.store.GetExternalSchedulingSafety(ctx, salonID, appointment.POSProvider, providerFence)
+	if err != nil {
+		return nil, nil, err
+	}
+	if schedulingSafety == nil || !schedulingSafety.AtomicRescheduleNoOverlap || !schedulingSafety.ConcreteStaffAssignment {
+		return nil, nil, ErrSchedulingAuthorityNotReady
 	}
 
 	durationMinutes := bookingSegmentRecordsDuration(segments)
@@ -351,33 +441,43 @@ func (s *Service) Reschedule(ctx context.Context, salonID string, ownerUserID st
 		notes = appointment.Notes
 	}
 	endTime := req.StartTime.Add(time.Duration(durationMinutes) * time.Minute)
+	claimIntervals, err := externalStaffClaimIntervalsFromRecords(req.StartTime, segments)
+	if err != nil {
+		return nil, nil, err
+	}
 	processingToken := uuid.NewString()
 	leaseExpiresAt := time.Now().UTC().Add(bookingOperationLeaseDuration)
 	claim, err := s.store.ClaimPendingAppointmentAction(ctx, PendingAppointmentActionRecord{
-		SalonID:             salonID,
-		Appointment:         *appointment,
-		Provider:            appointment.POSProvider,
-		Source:              req.Source,
-		OperationKey:        req.OperationKey,
-		RequestFingerprint:  appointmentActionFingerprint(BookingActionReschedule, *appointment, req.StartTime, segments, notes, providerFence, req.StaffID, req.Notes),
-		RetryOfAttemptID:    req.RetryOfAttemptID,
-		AvailabilityQuoteID: req.AvailabilityQuoteID,
-		SlotFingerprint:     req.SlotFingerprint,
-		ProviderFence:       providerFence,
-		OperationType:       BookingActionReschedule,
-		ProcessingToken:     processingToken,
-		LeaseExpiresAt:      leaseExpiresAt,
-		Segments:            segments,
-		RequestedStartTime:  req.StartTime,
-		RequestedEndTime:    endTime,
-		Notes:               notes,
-		POSIdempotencyKey:   newPOSIdempotencyKey(),
+		SalonID:                  salonID,
+		Appointment:              *appointment,
+		Provider:                 appointment.POSProvider,
+		Source:                   req.Source,
+		OperationKey:             req.OperationKey,
+		RequestFingerprint:       appointmentActionFingerprint(BookingActionReschedule, *appointment, req.StartTime, segments, notes, providerFence, req.StaffID, req.Notes),
+		RetryOfAttemptID:         req.RetryOfAttemptID,
+		AvailabilityQuoteID:      req.AvailabilityQuoteID,
+		SlotFingerprint:          req.SlotFingerprint,
+		ProviderFence:            providerFence,
+		OperationType:            BookingActionReschedule,
+		ProcessingToken:          processingToken,
+		LeaseExpiresAt:           leaseExpiresAt,
+		Segments:                 segments,
+		RequestedStartTime:       req.StartTime,
+		RequestedEndTime:         endTime,
+		Notes:                    notes,
+		POSIdempotencyKey:        newPOSIdempotencyKey(),
+		RequireExternalSlotClaim: true,
+		SchedulingSafety:         *schedulingSafety,
+		ClaimIntervals:           claimIntervals,
 	})
 	if err != nil {
 		return nil, nil, err
 	}
 	if claim == nil || claim.Attempt == nil {
 		return nil, nil, ErrOperationInProgress
+	}
+	if claim.Conflict {
+		return nil, nil, ErrSlotCommitConflict
 	}
 	if !claim.Acquired {
 		return appointmentActionClaimResult(BookingActionReschedule, claim.Attempt)
@@ -455,6 +555,28 @@ func (s *Service) Reschedule(ctx context.Context, salonID string, ownerUserID st
 		return appointmentActionFallbackResult(BookingActionReschedule, fallback, saveErr)
 	}
 	return saved, nil, err
+}
+
+func externalStaffClaimIntervalsFromRecords(startTime time.Time, segments []BookingSegmentRecord) ([]ExternalSlotClaimIntervalRecord, error) {
+	if startTime.IsZero() || len(segments) == 0 {
+		return nil, ErrValidation
+	}
+	current := startTime.UTC()
+	intervals := make([]ExternalSlotClaimIntervalRecord, 0, len(segments))
+	for index, segment := range segments {
+		resourceID := strings.TrimSpace(segment.Staff.ID)
+		if resourceID == "" || segment.Service.DurationMinutes <= 0 {
+			return nil, ErrSchedulingAuthorityNotReady
+		}
+		end := current.Add(time.Duration(segment.Service.DurationMinutes) * time.Minute)
+		intervals = append(intervals, ExternalSlotClaimIntervalRecord{
+			ResourceKind: "staff", ResourceID: resourceID,
+			SourceSegmentIndexes: []int{index + 1},
+			OccupiedStartTime:    current, OccupiedEndTime: end,
+		})
+		current = end
+	}
+	return intervals, nil
 }
 
 // ReplayReschedule returns a previously claimed reschedule operation before
@@ -578,11 +700,8 @@ func (s *Service) AvailableSlots(ctx context.Context, salonID string, ownerUserI
 		return slots[i].StartTime.Before(slots[j].StartTime)
 	})
 
-	filtered := make([]AvailabilitySlot, 0, availabilityLimit(req.Limit))
+	filtered := make([]AvailabilitySlot, 0, len(slots))
 	for _, slot := range slots {
-		if len(filtered) >= availabilityLimit(req.Limit) {
-			break
-		}
 		startTime := slot.StartTime.UTC()
 		endTime := slot.EndTime.UTC()
 		if endTime.IsZero() && !startTime.IsZero() {
@@ -612,6 +731,13 @@ func (s *Service) AvailableSlots(ctx context.Context, salonID string, ownerUserI
 			StaffSelectionMode: req.StaffSelectionMode,
 			Segments:           slotSegments,
 		})
+	}
+	filtered, err = s.store.FilterExternalClaimedSlots(ctx, salonID, activeProvider, primary.Service.ProviderFence, req.TargetAppointmentID, filtered)
+	if err != nil {
+		return nil, err
+	}
+	if limit := availabilityLimit(req.Limit); len(filtered) > limit {
+		filtered = filtered[:limit]
 	}
 	result.Slots = filtered
 	if len(filtered) > 0 {
@@ -2398,6 +2524,7 @@ func availabilitySlotSegments(slot pos.TimeSlot, requested []resolvedAvailabilit
 		return nil, false
 	}
 	items := make([]AvailabilitySegment, 0, len(requested))
+	currentStart := slot.StartTime.UTC()
 	for index, requestedSegment := range requested {
 		posSegment := pos.TimeSlotSegment{}
 		if len(slot.Segments) > 0 {
@@ -2423,6 +2550,7 @@ func availabilitySlotSegments(slot pos.TimeSlot, requested []resolvedAvailabilit
 		if durationMinutes <= 0 {
 			durationMinutes = requestedSegment.Service.DurationMinutes
 		}
+		segmentEnd := currentStart.Add(time.Duration(durationMinutes) * time.Minute)
 		items = append(items, AvailabilitySegment{
 			ServiceID:          requestedSegment.Service.ID,
 			ServiceName:        requestedSegment.Service.Name,
@@ -2430,7 +2558,12 @@ func availabilitySlotSegments(slot pos.TimeSlot, requested []resolvedAvailabilit
 			StaffName:          staff.Name,
 			StaffSelectionMode: requestedSegment.StaffSelectionMode,
 			DurationMinutes:    durationMinutes,
+			ScheduledStartTime: currentStart,
+			ScheduledEndTime:   segmentEnd,
+			OccupiedStartTime:  currentStart,
+			OccupiedEndTime:    segmentEnd,
 		})
+		currentStart = segmentEnd
 	}
 	return items, true
 }

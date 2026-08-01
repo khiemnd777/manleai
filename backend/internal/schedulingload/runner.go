@@ -69,6 +69,8 @@ func Run(ctx context.Context, rawConfig Config) (Report, error) {
 		seed.Calendar.SalonID,
 		seed.SwitchReplay.SalonID,
 		seed.SwitchRace.SalonID,
+		seed.External.SalonID,
+		seed.ExternalOther.SalonID,
 	}
 	sort.Strings(report.TenantIDs)
 
@@ -86,6 +88,13 @@ func Run(ctx context.Context, rawConfig Config) (Report, error) {
 	report.Workloads = append(report.Workloads, switchReports...)
 	if switchErr != nil {
 		return finishReport(report, db, fmt.Errorf("authority switch workload: %w", switchErr))
+	}
+	externalReports, externalEvidence, replicaPools, externalErr := runExternalSlotCommitWorkload(runContext, config, seed, &report.InvariantViolations)
+	report.Workloads = append(report.Workloads, externalReports...)
+	report.ExternalSlotCommit = externalEvidence
+	report.Database.ReplicaPools = replicaPools
+	if externalErr != nil {
+		return finishReport(report, db, fmt.Errorf("external atomic slot commit workload: %w", externalErr))
 	}
 	return finishReport(report, db, nil)
 }
@@ -113,6 +122,22 @@ func finishReport(report Report, db *sql.DB, runErr error) (Report, error) {
 	}
 	if count := violationCount(report.InvariantViolations); count > 0 {
 		report.FailureReasons = append(report.FailureReasons, fmt.Sprintf("safety invariant violations: %d", count))
+	}
+	external := report.ExternalSlotCommit
+	if external.ExpectedFakeProviderDispatches > 0 {
+		if external.FakeProviderDispatches != external.ExpectedFakeProviderDispatches {
+			report.FailureReasons = append(report.FailureReasons, fmt.Sprintf("fake provider dispatch mismatch: got %d want %d", external.FakeProviderDispatches, external.ExpectedFakeProviderDispatches))
+		}
+		if external.ObservedConflictCount != external.ExpectedConflictCount {
+			report.FailureReasons = append(report.FailureReasons, fmt.Sprintf("external conflict mismatch: got %d want %d", external.ObservedConflictCount, external.ExpectedConflictCount))
+		}
+		if external.UnknownClaims == 0 || external.ReconciliationRequired == 0 {
+			report.FailureReasons = append(report.FailureReasons, "external unknown outcome was not retained for reconciliation")
+		}
+		if external.ConflictLoserProviderDispatches+external.DuplicateConfirmations+external.UnexpectedClaimReleases+
+			external.OrphanClaims+external.OrphanIntervals+external.OrphanEvents+external.RealProviderRuntimeCalls > 0 {
+			report.FailureReasons = append(report.FailureReasons, "external atomic slot commit safety counters are non-zero")
+		}
 	}
 	report.Passed = len(report.FailureReasons) == 0
 	return report, runErr

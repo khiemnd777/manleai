@@ -14,6 +14,7 @@ import {
   openAIConfigPayload,
   openAIConfigToForm,
   platformIntegrationConfigBasePath,
+  squareSchedulingCapabilityReevaluationPayload,
   squareConfigPayload,
   squareConfigToForm,
   twilioConfigPayload,
@@ -312,6 +313,7 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
   const [error, setError] = useState("");
   const requestRef = useRef(0);
   const aiAction = useRef<{ enabled: boolean; key: string } | null>(null);
+  const capabilityAction = useRef<{ signature: string; key: string } | null>(null);
 
   const load = useCallback(async () => {
     const requestID = ++requestRef.current;
@@ -342,6 +344,7 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
     setLocationID("");
     setError("");
     aiAction.current = null;
+    capabilityAction.current = null;
     void load();
     return () => {
       requestRef.current += 1;
@@ -418,6 +421,37 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
     }
   }
 
+  async function reevaluateSchedulingCapability() {
+    if (!status) return;
+    const connectionVersion = status.readiness.connection_capability_version;
+    const configVersion = status.readiness.integration_config_version;
+    if (connectionVersion <= 0 || configVersion <= 0) return;
+    const signature = `${connectionVersion}:${configVersion}`;
+    let action = capabilityAction.current;
+    if (!action || action.signature !== signature) {
+      action = { signature, key: newBusinessActionKey("reevaluate-square-safety") };
+      capabilityAction.current = action;
+    }
+    setBusy("capability");
+    setError("");
+    try {
+      await apiRequest(`${base}/scheduling-capability/re-evaluate`, {
+        method: "POST",
+        body: JSON.stringify(squareSchedulingCapabilityReevaluationPayload(
+          action.key,
+          connectionVersion,
+          configVersion
+        ))
+      });
+      capabilityAction.current = null;
+      await load();
+    } catch (failure) {
+      setError(errorMessage(failure, "Could not re-evaluate Square scheduling safety."));
+    } finally {
+      setBusy("");
+    }
+  }
+
   const connected = Boolean(status?.connection?.id) && status?.connection?.status !== "not_connected";
   const aiEnabled = Boolean(status?.readiness?.ai_enabled);
 
@@ -433,6 +467,7 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
         </div>
         <div className="flex gap-2">
           <Badge value={connected ? status?.connection?.status || "connected" : "not_connected"} />
+          <Badge value={status?.readiness?.automatic_single_create ? "buyer_write_safe" : "request_only"} />
           <Badge value={aiEnabled ? "ai_enabled" : "ai_disabled"} />
         </div>
       </div>
@@ -448,6 +483,25 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
           value={status?.connection?.last_sync_at ? new Date(status.connection.last_sync_at).toLocaleString() : "Never"}
         />
         <Metric label="AI runtime version" value={`v${status?.readiness?.ai_runtime_version ?? 0}`} />
+      </div>
+      <div className="mt-5 rounded-xl border border-line bg-slate-50 p-4">
+        <p className="text-sm font-bold text-ink">Scheduling safety</p>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <Metric label="New single booking" value={status?.readiness?.automatic_single_create ? "Ready" : "Request-only"} />
+          <Metric label="Reschedule" value="Request-only" />
+          <Metric label="Party booking" value="Request-only" />
+          <Metric
+            label="OAuth write mode"
+            value={status?.readiness?.write_permission_mode === "buyer_write" ? "Buyer-level" : status?.readiness?.write_permission_mode === "seller_write" ? "Seller-level" : "Unsupported"}
+          />
+          <Metric
+            label="Capability evidence"
+            value={status?.readiness?.evidence_current && status.readiness.evidence_expires_at
+              ? `Valid until ${new Date(status.readiness.evidence_expires_at).toLocaleString()}`
+              : status?.readiness?.blocker_code || "Not evaluated"}
+          />
+          <Metric label="Resource capacity" value="Request-only" />
+        </div>
       </div>
       <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
         <Button type="button" variant="secondary" disabled={Boolean(busy)} onClick={() => void connect()}>
@@ -489,6 +543,15 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
           onClick={() => void setAIEnabled(!aiEnabled)}
         >
           {busy === "ai-runtime" ? "Saving…" : aiEnabled ? "Disable AI runtime" : "Enable AI runtime"}
+        </Button>
+        <Button
+          type="button"
+          variant="secondary"
+          disabled={Boolean(busy) || !connected || (status?.readiness?.connection_capability_version ?? 0) <= 0 || (status?.readiness?.integration_config_version ?? 0) <= 0}
+          onClick={() => void reevaluateSchedulingCapability()}
+        >
+          <ShieldCheck className="h-4 w-4" />
+          {busy === "capability" ? "Re-evaluating…" : "Re-evaluate safety"}
         </Button>
       </div>
     </Card>

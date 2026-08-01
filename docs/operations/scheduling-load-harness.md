@@ -11,6 +11,11 @@ exercises production repositories and services for:
 - `manleai_calendar` aggregate availability, exact party-create replay, atomic
   two-guest/two-staff pooled-resource commits, and concurrent over-capacity
   conflict handling; and
+- `external_provider` V86/V87 Atomic Slot Commit with independent database
+  pools/repositories/services per simulated replica, a capability-aware fake
+  provider, overlapping-slot races, exact replay, definite failure/release,
+  dispatch-unknown retention, fail-closed Square reschedule, cancel/rebook, and
+  cross-tenant same-resource identifiers; and
 - scheduling-authority preview and commit replay plus concurrent commit CAS.
 
 The external authority uses an in-process readiness fake at the authority
@@ -84,22 +89,30 @@ raise bounds during an incident or use the harness against a shared database.
 
 ## Report Contract And Pass Gate
 
-Reports use schema `scheduling-load-report/v1` and include:
+Reports use schema `scheduling-load-report/v2` and include:
 
 - release, run UUID, stable seed, fixed synthetic clock, configured bounds,
   elapsed time, and synthetic salon UUIDs;
 - exact database name/user, migration count, per-migration checksum, aggregate
-  migration fingerprint, and final SQL pool statistics;
+  migration fingerprint, final SQL pool statistics, and independent replica
+  pool statistics;
 - per-workload attempts, successes, exact replays, expected conflicts,
   unexpected errors, throughput, and p50/p95/p99/max latency; and
 - safety, tenant, idempotency, duplicate, orphan, provider-evidence, and
-  provider-call violation counts. Totals label latency as the worst per-
+  provider-call violation counts. The external evidence includes expected and
+  actual fake dispatches, conflict-loser dispatches, duplicate confirmations,
+  unexpected claim releases, orphan claims/intervals/events, retained unknown
+  claims, reconciliation-required count, p50/p95/p99/max claim latency, and DB
+  pool wait/stats. Totals label latency as the worst per-
   workload percentile rather than presenting it as a combined percentile.
 
 `passed=true` requires zero unexpected workload errors and zero violations in
-every invariant category. Expected CAS, stale-quote, and capacity conflicts are
-reported separately and are not failures. Any tenant escape, duplicate
-operation, incomplete graph/outbox/event, internal row with provider evidence,
+every invariant category, exact expected conflict and fake-dispatch counts,
+zero conflict-loser dispatches, retention of dispatch-unknown claims, and no
+real provider runtime call. Expected CAS, stale-quote, slot, and capacity
+conflicts are reported separately and are not failures. Any tenant escape,
+duplicate operation/confirmation, unexpected release, incomplete graph/outbox/
+event, internal row with provider evidence, orphaned external claim evidence,
 or provider runtime call fails the run regardless of latency or throughput.
 
 Synthetic names, phones, and `.invalid.example` emails are generated from the
@@ -117,12 +130,15 @@ and the migration attestation is set explicitly:
 cd backend
 SCHEDULING_LOAD_FRESH_DATABASE_URL='<fresh isolated database URL>' \
 SCHEDULING_LOAD_FRESH_DATABASE_MIGRATE=NON_PRODUCTION_ISOLATED_SCHEDULING_LOAD \
+OWNER_FIRST_RELEASE_GATE_DATABASE_REQUIRED=1 \
 go test -run TestRunAgainstFreshIsolatedPostgres -v ./internal/schedulingload
 ```
 
 This test helper does not drop or clean the database. A checksum drift fails
 closed; create a new isolated database for the current migration set instead
 of rewriting applied migration history.
+When `OWNER_FIRST_RELEASE_GATE_DATABASE_REQUIRED=1`, a missing fresh database
+URL or an unsafe database identity is a test failure rather than a skip.
 
 ## Witnessed Release Evidence
 

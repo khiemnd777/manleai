@@ -166,7 +166,6 @@ The adapter requests these Square scopes:
 APPOINTMENTS_READ
 APPOINTMENTS_ALL_READ
 APPOINTMENTS_WRITE
-APPOINTMENTS_ALL_WRITE
 APPOINTMENTS_BUSINESS_SETTINGS_READ
 CUSTOMERS_READ
 CUSTOMERS_WRITE
@@ -193,9 +192,13 @@ Dashboard flow:
 4. Sync services, staff, business hour periods, and customers.
 5. Confirm at least one active AI-bookable service.
 6. Confirm at least one active AI-bookable staff member.
-7. Enable AI booking.
-8. Optional smoke test: create a real Square test booking.
-9. Optional cleanup: cancel that test booking.
+7. Re-evaluate scheduling safety and confirm `Buyer-write safe` with current
+   evidence. A seller-write connection must reconnect; it cannot be overridden.
+8. Enable AI booking for single create only. Square reschedule, party, and
+   resource-capacity execution remain request-only.
+9. Optional smoke test: create a real Square test booking only with separately
+   approved Square sandbox-write authorization.
+10. Optional cleanup: cancel that test booking under the same authorization.
 
 Do not proceed to live phone booking until the Square readiness checks pass.
 
@@ -209,7 +212,6 @@ Salon:
 - Square location: `L3QRV6AZKFKVQ`
 - The active Square connection must include:
   `APPOINTMENTS_READ`, `APPOINTMENTS_ALL_READ`, `APPOINTMENTS_WRITE`,
-  `APPOINTMENTS_ALL_WRITE`,
   `APPOINTMENTS_BUSINESS_SETTINGS_READ`, `CUSTOMERS_READ`,
   `CUSTOMERS_WRITE`, `ITEMS_READ`, `ITEMS_WRITE`,
   `MERCHANT_PROFILE_READ`, `EMPLOYEES_READ`, `EMPLOYEES_WRITE`

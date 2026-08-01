@@ -115,6 +115,32 @@ func TestHandlerAvailabilityMapsFailClosedConflictToStale409(t *testing.T) {
 	}
 }
 
+func TestHandlerExecuteMapsSlotCommitConflictToRefreshable409(t *testing.T) {
+	handler := NewHandler(&fakeHandlerActions{err: booking.ErrSlotCommitConflict}, &fakeHandlerRequests{})
+	app := fiber.New()
+	app.Use(func(c *fiber.Ctx) error {
+		c.Locals(middleware.LocalUserID, "owner-1")
+		return c.Next()
+	})
+	app.Post("/salons/:id/scheduling-actions", handler.ExecuteAction)
+	response := executeSchedulingRequest(t, app, http.MethodPost, "/salons/salon-1/scheduling-actions", `{"operation_type":"book","operation_key":"operation-1"}`)
+	defer response.Body.Close()
+	if response.StatusCode != fiber.StatusConflict {
+		t.Fatalf("status=%d, want 409", response.StatusCode)
+	}
+	var payload struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Error.Code != "SLOT_COMMIT_CONFLICT" {
+		t.Fatalf("error code=%q", payload.Error.Code)
+	}
+}
+
 func TestHandlerRejectsOverQuotaBeforeSchedulingExecution(t *testing.T) {
 	actions := &fakeHandlerActions{}
 	handler := NewHandler(actions, &fakeHandlerRequests{}).SetTenantRuntimeLimiter(rejectingTenantLimiter{})

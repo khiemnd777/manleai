@@ -750,6 +750,40 @@ profiles or increment unchanged profile revisions.
 
 ## Production Rules
 
+### V86/V87 Square buyer-write rollout and rollback
+
+V86/V87 deployment does not itself authorize Square auto-confirmation. Use the
+following reviewed sequence only after explicit production-deploy and provider-
+write authorization:
+
+1. Pass the Owner-first release gate at the exact revision.
+2. Complete backup and forward-migration preflight.
+3. Deploy V86/V87 schema and compatible API/worker/UI images with Square AI
+   runtime still disabled.
+4. Smoke `owner_manual` request-only and `manleai_calendar` atomic behavior.
+5. Reconnect exactly one pilot tenant with buyer-level
+   `APPOINTMENTS_WRITE` and without `APPOINTMENTS_ALL_WRITE`; never silently
+   downscope an existing seller-write connection.
+6. Re-evaluate the exact tenant's persisted capability evidence from Platform
+   tenant Technical.
+7. Enable buyer-write, concrete-staff single create only.
+8. Keep Square reschedule, external party, and resource-capacity execution
+   request-only/fail-closed.
+9. Monitor `SLOT_COMMIT_CONFLICT`, pre-dispatch claim age,
+   `dispatched_unknown`, reconciliation age/backlog, DB pool wait, and claim
+   latency through the approved observation window.
+10. Expand in reviewed tenant batches only after the pilot evidence remains
+    healthy.
+
+Rollback begins by disabling the salon AI runtime. Never mass-release active
+claims: `dispatched_unknown` remains owned by reconciliation until exact
+authoritative non-creation evidence permits release. Roll back the application
+image only when the previous image is forward-compatible with V86/V87; do not
+drop or reverse either migration. Scheduling-authority changes use the explicit
+reviewed switch, and historical operations continue through their originating
+authority. A local or unwitnessed harness pass is implementation evidence, not
+production capacity proof.
+
 - Do not invoke `/bin/sample-data` on a production-live database. Normal
   migrations never apply its embedded fixture; CI/CD enforces the exact `live`
   profile and fails if sample rows or the sample fixture ledger remain.

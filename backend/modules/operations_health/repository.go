@@ -308,6 +308,15 @@ func (r *Repository) loadQueues(ctx context.Context, salonID string) []queueReco
 			  AND NOT EXISTS (SELECT 1 FROM booking_attempts attempt WHERE attempt.availability_quote_id=quote.id)
 			  AND ((quote.consumed_at IS NULL AND quote.expires_at <= now()-interval '24 hours')
 			    OR (quote.consumed_at IS NOT NULL AND quote.consumed_at <= now()-interval '30 days'))`),
+		r.metric(ctx, salonID, "external_slot_claims_pre_dispatch", `
+			SELECT count(*), min(created_at), 0
+			FROM external_slot_claims
+			WHERE salon_id=$1 AND released_at IS NULL AND state='claimed_pre_dispatch'`),
+		r.metric(ctx, salonID, "external_slot_claims_unknown", `
+			SELECT count(*), min(COALESCE(dispatch_started_at,created_at)), 0
+			FROM external_slot_claims
+			WHERE salon_id=$1 AND released_at IS NULL
+			  AND state IN ('dispatched_unknown','reconciliation_required')`),
 		r.metric(ctx, salonID, "conversation_retention", `
 			SELECT count(*), min(retention_expires_at), 0
 			FROM call_sessions WHERE salon_id=$1 AND lifecycle_status<>'redacted' AND retention_expires_at<=now()`),

@@ -71,6 +71,15 @@ func (h *Handler) Create(c *fiber.Ctx) error {
 	if errors.Is(err, ErrAvailabilityQuoteStale) {
 		return respond.Error(c, fiber.StatusConflict, "AVAILABILITY_QUOTE_STALE", "Availability changed or expired. Check availability again before booking.")
 	}
+	if errors.Is(err, ErrSlotCommitConflict) {
+		return respond.Error(c, fiber.StatusConflict, "SLOT_COMMIT_CONFLICT", "The selected time is no longer available. Check availability again before booking.")
+	}
+	if errors.Is(err, ErrSlotClaimInProgress) {
+		return respond.Error(c, fiber.StatusAccepted, "SLOT_CLAIM_IN_PROGRESS", "This exact booking operation is still in progress.")
+	}
+	if errors.Is(err, ErrSlotOutcomeUnknown) {
+		return respond.Error(c, fiber.StatusAccepted, "SLOT_OUTCOME_UNKNOWN", "The provider outcome cannot be confirmed safely yet.")
+	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "BOOKING_CREATE_FAILED", "Could not create booking request.")
 	}
@@ -222,6 +231,15 @@ func (h *Handler) Reschedule(c *fiber.Ctx) error {
 	}
 	if errors.Is(err, ErrAvailabilityQuoteStale) {
 		return respond.Error(c, fiber.StatusConflict, "AVAILABILITY_QUOTE_STALE", "Availability changed or expired. Check availability again before rescheduling.")
+	}
+	if errors.Is(err, ErrSlotCommitConflict) {
+		return respond.Error(c, fiber.StatusConflict, "SLOT_COMMIT_CONFLICT", "The selected time is no longer available. Check availability again before rescheduling.")
+	}
+	if errors.Is(err, ErrSlotClaimInProgress) {
+		return respond.Error(c, fiber.StatusAccepted, "SLOT_CLAIM_IN_PROGRESS", "This exact reschedule operation is still in progress.")
+	}
+	if errors.Is(err, ErrSlotOutcomeUnknown) {
+		return respond.Error(c, fiber.StatusAccepted, "SLOT_OUTCOME_UNKNOWN", "The provider reschedule outcome cannot be confirmed safely yet.")
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "APPOINTMENT_RESCHEDULE_FAILED", "Could not reschedule appointment.")

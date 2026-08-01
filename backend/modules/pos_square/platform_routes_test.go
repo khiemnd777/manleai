@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
@@ -30,6 +31,7 @@ func TestPlatformSquareRoutesRequireAuthentication(t *testing.T) {
 		{http.MethodGet, "/api/platform/tenants/salon-1/services/external-scheduling-readiness"},
 		{http.MethodGet, "/api/platform/tenants/salon-1/technical/square/status"},
 		{http.MethodPost, "/api/platform/tenants/salon-1/technical/square/sync"},
+		{http.MethodPost, "/api/platform/tenants/salon-1/technical/square/scheduling-capability/re-evaluate"},
 		{http.MethodPost, "/api/platform/tenants/salon-1/technical/square/ai-booking/enable"},
 		{http.MethodPost, "/api/platform/tenants/salon-1/technical/square/ai-booking/disable"},
 	} {
@@ -51,6 +53,7 @@ func TestTenantSquareRoutesDoNotExposeTechnicalControls(t *testing.T) {
 		"/api/integrations/square/sync",
 		"/api/integrations/square/enable-ai-booking",
 		"/api/integrations/square/test-booking",
+		"/api/salons/salon-1/technical/square/scheduling-capability/re-evaluate",
 	} {
 		response, err := app.Test(httptest.NewRequest(http.MethodPost, path, nil))
 		if err != nil {
@@ -68,6 +71,24 @@ func TestPlatformBusinessReadinessFailsClosedBeforeServiceWhenAuditFails(t *test
 	app.Get("/platform/tenants/:tenant_id/services/external-scheduling-readiness", handler.BusinessReadiness)
 
 	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/platform/tenants/salon-1/services/external-scheduling-readiness", nil))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if response.StatusCode != fiber.StatusInternalServerError {
+		t.Fatalf("status=%d, want 500", response.StatusCode)
+	}
+}
+
+func TestPlatformCapabilityReevaluationFailsClosedBeforeServiceWhenAuditFails(t *testing.T) {
+	app := fiber.New()
+	handler := NewPlatformHandler(&Service{}, failingReadinessSupportAudit{})
+	app.Post("/platform/tenants/:tenant_id/technical/square/scheduling-capability/re-evaluate", handler.ReevaluateSchedulingCapability)
+
+	request := httptest.NewRequest(http.MethodPost, "/platform/tenants/salon-1/technical/square/scheduling-capability/re-evaluate", strings.NewReader(`{
+		"action_key":"review-square-safety","expected_connection_capability_version":1,"expected_integration_config_version":1
+	}`))
+	request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	response, err := app.Test(request)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}

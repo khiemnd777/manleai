@@ -2339,6 +2339,61 @@ func TestTryBookingReoffersWhenFreshExactSlotDurationChanged(t *testing.T) {
 	}
 }
 
+func TestTryBookingReoffersAfterAtomicSlotCommitConflict(t *testing.T) {
+	store := newFakeConversationStore()
+	start := defaultAvailabilityStartTime()
+	session := store.session
+	session.Intent = IntentBooking
+	session.CustomerName = "Linh Tran"
+	session.CustomerPhone = "+13125550101"
+	session.ServiceID = "service_1"
+	session.ServiceName = "Classic Manicure"
+	session.StaffID = "staff_1"
+	session.StaffName = "Mai Nguyen"
+	session.StaffSelectionMode = booking.StaffSelectionSpecific
+	session.RequestedDate = "2026-06-10"
+	session.RequestedStartTime = &start
+	session.AvailabilityQuoteID = "00000000-0000-0000-0000-000000000099"
+	session.SlotFingerprint = strings.Repeat("9", 64)
+	session.BookingSegments = []booking.BookingSegmentRequest{{ServiceID: "service_1", StaffID: "staff_1", StaffSelectionMode: booking.StaffSelectionSpecific}}
+	session.DialogState = normalizedDialogState(DialogState{Phase: DialogPhaseReview, DraftRevision: 4, ReviewedRevision: 4, AuthorizedRevision: 4, ReviewRequired: true, ReviewAccepted: true})
+	store.session = session
+
+	exact := &booking.AvailabilityResult{ServiceID: "service_1", ServiceName: "Classic Manicure", StaffSelectionMode: booking.StaffSelectionSpecific, PreferredDate: "2026-06-10", DurationMinutes: 45, Timezone: "America/Chicago", Slots: []booking.AvailabilitySlot{{StartTime: start, EndTime: start.Add(45 * time.Minute), StaffID: "staff_1", StaffName: "Mai Nguyen", StaffSelectionMode: booking.StaffSelectionSpecific}}}
+	alternative := &booking.AvailabilityResult{ServiceID: "service_1", ServiceName: "Classic Manicure", StaffSelectionMode: booking.StaffSelectionSpecific, PreferredDate: "2026-06-10", DurationMinutes: 45, Timezone: "America/Chicago", Slots: []booking.AvailabilitySlot{{StartTime: start.Add(time.Hour), EndTime: start.Add(105 * time.Minute), StaffID: "staff_1", StaffName: "Mai Nguyen", StaffSelectionMode: booking.StaffSelectionSpecific}}}
+	bookingTool := &fakeBookingTool{availabilityResults: []*booking.AvailabilityResult{exact, alternative}, err: booking.ErrSlotCommitConflict}
+	service := NewService(store, bookingTool)
+	service.now = fixedNow
+	turn := newTurnRecord("salon_1", "owner_1", session, session, "Please lock in the appointment we reviewed.", "event_atomic_conflict", store.services, store.staff, &store.cfg)
+
+	updated, err := service.tryBooking(context.Background(), "owner_1", turn, session, store.services, store.staff, &store.cfg, nil)
+	if err != nil {
+		t.Fatalf("tryBooking returned error: %v", err)
+	}
+	if bookingTool.calls != 1 || bookingTool.availabilityCalls != 2 {
+		t.Fatalf("booking/availability calls=%d/%d, want 1/2", bookingTool.calls, bookingTool.availabilityCalls)
+	}
+	if updated.Outcome == OutcomeBookingConfirmed || updated.RequestedStartTime != nil || updated.DialogState.ReviewAccepted || updated.DialogState.AuthorizedRevision != 0 {
+		t.Fatalf("conflict retained confirmation or stale authorization: %#v", updated)
+	}
+	if len(updated.OfferedSlots) != 1 || !updated.OfferedSlots[0].StartTime.Equal(start.Add(time.Hour)) {
+		t.Fatalf("fresh alternatives=%#v", updated.OfferedSlots)
+	}
+	if reply := strings.ToLower(store.lastTurn.AIMessage); !strings.Contains(reply, "nothing was booked") {
+		t.Fatalf("reply=%q, want explicit non-confirmation", store.lastTurn.AIMessage)
+	}
+	if bookingTool.request.OperationKey != "conversation:session_1:book" || updated.DialogState.BookingOperationSequence != 1 {
+		t.Fatalf("initial operation key/next sequence=%q/%d, want legacy-safe initial key and next attempt 1", bookingTool.request.OperationKey, updated.DialogState.BookingOperationSequence)
+	}
+	next := *updated
+	next.DialogState.ReviewAccepted = true
+	next.DialogState.ReviewedRevision = next.DialogState.DraftRevision
+	next.DialogState.AuthorizedRevision = next.DialogState.DraftRevision
+	if key := conversationOperationKey(next, booking.BookingActionBook); key != "conversation:session_1:book:attempt:1" {
+		t.Fatalf("next operation key=%q, want conflict retry identity", key)
+	}
+}
+
 func TestTryRescheduleReoffersWhenFreshExactSlotDisappears(t *testing.T) {
 	store := newFakeConversationStore()
 	start := time.Date(2026, 6, 10, 21, 0, 0, 0, time.UTC)
@@ -7816,7 +7871,7 @@ func TestMessageOffersSplitPartyOptionsWhenExactCommonTimeUnavailable(t *testing
 	}
 }
 
-func TestMessageBooksSelectedSplitPartyOptionThroughPOS(t *testing.T) {
+func TestMessageDoesNotDispatchSplitPartyWithoutAtomicProviderPrimitive(t *testing.T) {
 	store := newSplitPartyConversationStore()
 	bookingTool := &fakeBookingTool{
 		availabilityResults: splitPartyAvailabilityResults(),
@@ -7844,39 +7899,23 @@ func TestMessageBooksSelectedSplitPartyOptionThroughPOS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("split selection Message returned error: %v", err)
 	}
-	if bookingTool.calls != 4 {
-		t.Fatalf("booking calls = %d, want one POS booking per split service", bookingTool.calls)
+	if bookingTool.calls != 0 {
+		t.Fatalf("booking calls = %d, want zero sequential provider writes", bookingTool.calls)
 	}
-	if len(bookingTool.availabilityCallsAtCreate) != 4 {
-		t.Fatalf("availability checkpoints at create = %#v, want one per split booking", bookingTool.availabilityCallsAtCreate)
+	if len(bookingTool.availabilityCallsAtCreate) != 0 {
+		t.Fatalf("availability checkpoints at create = %#v, want no child dispatch", bookingTool.availabilityCallsAtCreate)
 	}
-	for index, calls := range bookingTool.availabilityCallsAtCreate {
-		if calls != 9 {
-			t.Fatalf("split create %d started after %d availability calls, want all four fresh checks completed first", index, calls)
-		}
+	if session.Outcome == OutcomeBookingConfirmed || session.Status != StatusHandoff {
+		t.Fatalf("status/outcome = %s/%s, want handoff without confirmation", session.Status, session.Outcome)
 	}
-	if session.Outcome != OutcomeBookingConfirmed {
-		t.Fatalf("outcome = %s, want confirmed after every split child POS booking succeeds", session.Outcome)
-	}
-	if session.PartyPlan == nil || len(session.PartyPlan.SplitAppointmentIDs) != 4 || len(session.PartyPlan.SplitBookingAttemptIDs) != 4 {
-		t.Fatalf("party split booking IDs = %#v", session.PartyPlan)
-	}
-	for i, req := range bookingTool.requests {
-		if len(req.Segments) != 1 || strings.TrimSpace(req.StaffID) == "" || req.StaffSelectionMode != booking.StaffSelectionSpecific {
-			t.Fatalf("split booking request %d = %#v, want one concrete staff-assigned service", i, req)
-		}
-		if strings.TrimSpace(req.AvailabilityQuoteID) == "" || len(req.SlotFingerprint) != 64 {
-			t.Fatalf("split booking request %d = %#v, want its provider quote and slot fingerprint", i, req)
-		}
+	if session.PartyPlan == nil || len(session.PartyPlan.SplitAppointmentIDs) != 0 || len(session.PartyPlan.SplitBookingAttemptIDs) != 0 {
+		t.Fatalf("party split booking IDs = %#v, want no provider side effects", session.PartyPlan)
 	}
 	reply := strings.ToLower(store.lastTurn.AIMessage)
-	for _, want := range []string{"you're confirmed", "2 spa pedicures", "1 classic manicure", "1 dip powder manicure", "appointments are under kevin"} {
+	for _, want := range []string{"cannot confirm", "atomically", "owner needs to review", "no group appointment is confirmed"} {
 		if !strings.Contains(reply, want) {
-			t.Fatalf("confirmation missing %q: %s", want, store.lastTurn.AIMessage)
+			t.Fatalf("safe party handoff missing %q: %s", want, store.lastTurn.AIMessage)
 		}
-	}
-	if strings.Contains(reply, "not a confirmed") || strings.Contains(reply, "owner") {
-		t.Fatalf("confirmed split booking should not use fallback wording: %s", store.lastTurn.AIMessage)
 	}
 }
 
@@ -7917,8 +7956,8 @@ func TestMessageDoesNotDispatchAnySplitChildWhenFreshProofFails(t *testing.T) {
 	if session.Outcome == OutcomeBookingConfirmed {
 		t.Fatalf("outcome = %s, want replan/re-offer without confirmation", session.Outcome)
 	}
-	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "openings changed") {
-		t.Fatalf("reply = %q, want changed-availability explanation", store.lastTurn.AIMessage)
+	if !strings.Contains(strings.ToLower(store.lastTurn.AIMessage), "cannot confirm this group booking atomically") {
+		t.Fatalf("reply = %q, want atomic-provider blocker", store.lastTurn.AIMessage)
 	}
 }
 
@@ -7969,17 +8008,17 @@ func TestMessageRequiresConsentBeforeBookingMultiDaySplitPartyOption(t *testing.
 	if err != nil {
 		t.Fatalf("split consent Message returned error: %v", err)
 	}
-	if bookingTool.calls != 4 {
-		t.Fatalf("booking calls = %d, want one booking per split service after consent", bookingTool.calls)
+	if bookingTool.calls != 0 {
+		t.Fatalf("booking calls = %d, want no sequential provider writes after consent", bookingTool.calls)
 	}
-	if session.Outcome != OutcomeBookingConfirmed {
-		t.Fatalf("outcome = %s, want confirmed after every multi-day split child POS booking succeeds", session.Outcome)
+	if session.Outcome == OutcomeBookingConfirmed || session.Status != StatusHandoff {
+		t.Fatalf("status/outcome = %s/%s, want safe handoff", session.Status, session.Outcome)
 	}
 	if session.PartyPlan == nil || partyPlanSelectedSplitRequiresDateConsent(session.PartyPlan) {
 		t.Fatalf("party plan = %#v, want date consent confirmed", session.PartyPlan)
 	}
 	confirmation := strings.ToLower(store.lastTurn.AIMessage)
-	for _, want := range []string{"you're confirmed", "thursday, june 11", "friday, june 12", "appointments are under kevin"} {
+	for _, want := range []string{"cannot confirm", "atomically", "no group appointment is confirmed"} {
 		if !strings.Contains(confirmation, want) {
 			t.Fatalf("multi-day confirmation missing %q: %s", want, store.lastTurn.AIMessage)
 		}
@@ -8018,7 +8057,7 @@ func TestPartySplitOptionRankingPrefersRequestedDateAndStableMultiDayIDs(t *test
 	}
 }
 
-func TestMessageDoesNotConfirmSplitPartyWhenChildBookingFails(t *testing.T) {
+func TestMessageNeverStartsSplitPartyChildrenWhenProviderCouldFailMidGroup(t *testing.T) {
 	store := newSplitPartyConversationStore()
 	bookingTool := &fakeBookingTool{
 		availabilityResults: splitPartyAvailabilityResults(),
@@ -8049,21 +8088,18 @@ func TestMessageDoesNotConfirmSplitPartyWhenChildBookingFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("split selection Message returned error: %v", err)
 	}
-	if bookingTool.calls != 2 {
-		t.Fatalf("booking calls = %d, want stop after first failed child booking", bookingTool.calls)
+	if bookingTool.calls != 0 {
+		t.Fatalf("booking calls = %d, want no child provider booking", bookingTool.calls)
 	}
-	if bookingTool.cancelCalls != 1 || len(bookingTool.cancelAppointmentIDs) != 1 || bookingTool.cancelAppointmentIDs[0] != "appointment_split_1" {
-		t.Fatalf("cancel calls/ids = %d/%#v, want rollback of first confirmed child booking", bookingTool.cancelCalls, bookingTool.cancelAppointmentIDs)
+	if bookingTool.cancelCalls != 0 || len(bookingTool.cancelAppointmentIDs) != 0 {
+		t.Fatalf("cancel calls/ids = %d/%#v, want no compensation because no child dispatched", bookingTool.cancelCalls, bookingTool.cancelAppointmentIDs)
 	}
 	if session.Outcome == OutcomeBookingConfirmed || session.Status != StatusHandoff {
 		t.Fatalf("session status/outcome = %s/%s, want handoff without group confirmation", session.Status, session.Outcome)
 	}
-	if session.PartyRequest == nil {
-		t.Fatalf("party request = nil, want owner-visible fallback request after split failure")
-	}
 	reply := strings.ToLower(store.lastTurn.AIMessage)
-	if strings.Contains(reply, "you're confirmed") || !strings.Contains(reply, "not a confirmed group appointment") {
-		t.Fatalf("partial split failure reply must not confirm: %s", store.lastTurn.AIMessage)
+	if strings.Contains(reply, "you're confirmed") || !strings.Contains(reply, "no group appointment is confirmed") {
+		t.Fatalf("atomic provider blocker must not confirm: %s", store.lastTurn.AIMessage)
 	}
 }
 

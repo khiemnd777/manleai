@@ -218,6 +218,18 @@ export function platformIntegrationConfigBasePath(tenantID: string) {
   return `/api/platform/tenants/${encodeURIComponent(tenantID)}/technical/integration-configs`;
 }
 
+export function squareSchedulingCapabilityReevaluationPayload(
+  actionKey: string,
+  connectionCapabilityVersion: number,
+  integrationConfigVersion: number
+) {
+  return {
+    action_key: actionKey,
+    expected_connection_capability_version: connectionCapabilityVersion,
+    expected_integration_config_version: integrationConfigVersion
+  };
+}
+
 export function twilioVoiceRoutingState(
   config?: TwilioIntegrationConfig,
   status?: TwilioVoiceRoutingStatus | null

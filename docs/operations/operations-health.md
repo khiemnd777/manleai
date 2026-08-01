@@ -57,8 +57,10 @@ salon-owner match. Global worker rows are combined with only the requested
 salon's aggregate backlog, oldest timestamp, and dead-letter count for owner
 notification delivery, customer notifications, owner-review requests,
 availability-quote cleanup, conversation retention, V61 scheduling-PII
-retention, and, when Square history is relevant, POS sync, booking lease
-recovery, Square webhooks, and calendar repair. The scheduling-retention row is
+retention, and, when external-provider history is relevant, V86
+`external_slot_claims_pre_dispatch` and `external_slot_claims_unknown`; when
+Square history is relevant it also includes POS sync, booking lease recovery,
+Square webhooks, and calendar repair. The scheduling-retention row is
 only a due-record count and oldest due timestamp for that salon; it never
 contains message, destination, request, event-payload, or audio content.
 
@@ -102,8 +104,28 @@ not prove Square/Twilio delivery, appointment confirmation, or provider-console
 health.
 
 For an incident, first verify the deployed API and worker versions, migration
-record for V57, and worker process health. Then use the safe job code and the
+records for V57, V86, and V87, and worker process health. Then use the safe job code and the
 owner-scoped queue row to select the linked workflow. Inspect provider state
 only through the dashboard-backed integration configuration and relevant
 readiness/debug endpoints. Never copy raw payloads, credentials, provider IDs,
 or customer data into the health ledger or owner response.
+
+For `external_slot_claims_pre_dispatch`, correlate the claim with its booking
+attempt and persisted `provider_outcome`. Lease recovery may release the claim
+only when dispatch is proven `not_started`; age alone is not proof. For
+`external_slot_claims_unknown`, inspect the existing reconciliation workflow
+and exact authoritative provider candidate. Never blind-retry, force-release,
+or create a replacement booking while dispatch-started, unknown, or
+reconciliation-required evidence still owns the interval. A verified
+`not_created` resolution releases the claim; an exact provider attachment or
+calendar convergence confirms it. If exact evidence is unavailable, retain the
+claim and escalate rather than reopening the time.
+
+For a buyer-write Square pilot, monitor `SLOT_COMMIT_CONFLICT` volume, oldest
+pre-dispatch claim age, `dispatched_unknown` count/age, reconciliation backlog
+and age, database-pool wait, and claim commit latency. The first four are
+correctness/incident signals; pool wait and claim latency are saturation
+signals. A retained unknown claim is expected safe behavior, while blind
+release, a conflict-loser provider dispatch, or a duplicate confirmation is a
+safety incident. Local `scheduling-load-report/v2` evidence verifies only its
+isolated synthetic run and is not production capacity evidence.

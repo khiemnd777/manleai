@@ -312,8 +312,8 @@ func TestV53LegacyUnknownQuoteFailsClosedBeforeProviderDispatchAfterABA(t *testi
 		StaffSelectionMode:  booking.StaffSelectionSpecific,
 		StartTime:           start,
 	})
-	if !errors.Is(err, booking.ErrAvailabilityQuoteStale) {
-		t.Fatalf("legacy quote create error = %v, want stale quote", err)
+	if !errors.Is(err, booking.ErrSchedulingAuthorityNotReady) {
+		t.Fatalf("legacy quote create error = %v, want scheduling authority not ready", err)
 	}
 	if provider.calls != 0 {
 		t.Fatalf("legacy quote provider calls = %d, want zero", provider.calls)

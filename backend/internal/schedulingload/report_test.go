@@ -25,6 +25,35 @@ func TestFinishReportFailsEverySafetyViolationCategory(t *testing.T) {
 	}
 }
 
+func TestFinishReportFailsExternalSlotCommitCounters(t *testing.T) {
+	base := ExternalSlotCommitEvidence{
+		ExpectedFakeProviderDispatches: 3, FakeProviderDispatches: 3,
+		ExpectedConflictCount: 2, ObservedConflictCount: 2,
+		UnknownClaims: 1, ReconciliationRequired: 1,
+	}
+	tests := []struct {
+		name string
+		edit func(*ExternalSlotCommitEvidence)
+	}{
+		{name: "dispatch mismatch", edit: func(item *ExternalSlotCommitEvidence) { item.FakeProviderDispatches++ }},
+		{name: "conflict mismatch", edit: func(item *ExternalSlotCommitEvidence) { item.ObservedConflictCount-- }},
+		{name: "unknown released", edit: func(item *ExternalSlotCommitEvidence) { item.UnknownClaims = 0 }},
+		{name: "loser dispatch", edit: func(item *ExternalSlotCommitEvidence) { item.ConflictLoserProviderDispatches = 1 }},
+		{name: "duplicate", edit: func(item *ExternalSlotCommitEvidence) { item.DuplicateConfirmations = 1 }},
+		{name: "orphan event", edit: func(item *ExternalSlotCommitEvidence) { item.OrphanEvents = 1 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			evidence := base
+			test.edit(&evidence)
+			report, err := finishReport(Report{StartedAt: time.Now(), ExternalSlotCommit: evidence}, nil, nil)
+			if err != nil || report.Passed || len(report.FailureReasons) == 0 {
+				t.Fatalf("finishReport external=%#v passed=%t reasons=%#v err=%v", evidence, report.Passed, report.FailureReasons, err)
+			}
+		})
+	}
+}
+
 func TestExpectedMigrationEvidenceIsVersionSortedAndChecksummed(t *testing.T) {
 	items, err := expectedMigrationEvidence()
 	if err != nil {

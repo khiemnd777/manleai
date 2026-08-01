@@ -93,9 +93,13 @@ requires re-activation; activation does not switch authority.
 **External Provider Scheduling (`external_provider`)**
 The selected external adapter owns availability and provider-side mutation
 results. Confirmation requires provider success with the required booking ID
-and metadata. Square Appointments is the only currently implemented real
-external adapter; operational production readiness requires separate live-
-provider evidence.
+and metadata, plus a committed outbound Atomic Slot Commit claim for a supported
+operation. Square Appointments is the only currently implemented real external
+adapter. V87 permits only new single create when current persisted evidence
+proves buyer-level `APPOINTMENTS_WRITE` without seller-level
+`APPOINTMENTS_ALL_WRITE`. Square reschedule, party, resource capacity, and all
+seller-write connections remain request-only; operational production readiness
+still requires a separately approved witnessed rollout.
 The implemented external executor delegates to the exact existing booking/POS
 path. It remains the only provider-backed confirming executor; Phase 4B
 ManleAI Calendar confirmation uses separate authority-native evidence.
@@ -260,17 +264,21 @@ A structured exception-review record in the existing conversation party
 workflow. Phase 2 `owner_manual` scheduling instead persists one
 `scheduling_request` with ordered quantity/guest-aware segments for the whole
 group. Phase 4B `manleai_calendar` uses one aggregate quote and one atomic root/
-child internal commit; `external_provider` retains its established preflight,
-all-child success, rollback, and reconciliation behavior. Both are all-or-none
-and must not confirm unless every required child has authority-specific success
-evidence.
+child internal commit. Current `external_provider` party create is request-only/
+fail-closed and performs zero sequential provider child writes. Any future
+whole-party provider capability requires a separately approved contract and is
+not implied by V86/V87. Both are all-or-none and must not confirm unless every
+required child has authority-specific success evidence.
 
 **Booking Service**
 The established external-provider domain service that creates, reschedules,
 cancels, and records appointments through the active `POSProvider`. Booking API
 and conversation callers now enter through the Scheduling Resolver;
 `scheduling_external_provider` delegates to this service without changing its
-POS safety. Implemented internal modes remain outside `POSProvider` and must
+provider outcome safety. V86/V87 additionally require operation-specific
+adapter capability, exact expiring connection/config/location/API/scope
+evidence, and an atomic local occupied-interval claim before supported external
+create dispatch. Implemented internal modes remain outside `POSProvider` and must
 not be represented as fake POS adapters.
 
 **POS Provider**
@@ -329,7 +337,9 @@ A normalized, salon-scoped record of provider failures. Use codes such as `POS_T
 - Confirmation is scheduling-authority-specific: `owner_manual` never
   auto-confirms; `manleai_calendar` requires an atomic internal commit and
   durable appointment ID; `external_provider` requires provider success and the
-  required booking ID and metadata.
+  required booking ID and metadata. A supported external mutation also requires
+  one committed V86 claim; a quote alone is not a reservation. V87 currently
+  supports Square buyer-write single create only.
 - The authority-neutral resolver has three registered executors with distinct
   result classes: `owner_manual` returns request-only availability and pending
   owner review; Phase 4C `manleai_calendar` returns verified aggregate slots
@@ -400,9 +410,10 @@ A normalized, salon-scoped record of provider failures. Use codes such as `POS_T
 - Consultation safety concerns involving pain, injury, infection, allergy, bleeding, swelling, or medical suitability require owner handoff and no medical advice. Deterministic safety evidence is checked before normal routing, and validated structured safety evidence is checked before any state mutation or tool action.
 - Group or party operations are all-or-none. `owner_manual` creates pending
   owner review; `manleai_calendar` must commit every child atomically;
-  `external_provider` must prove every required provider child succeeded or one
-  aggregate provider booking covers every segment. Partial or unknown outcomes
-  remain unconfirmed and require rollback/reconciliation as applicable.
+  `external_provider` must use one proven atomic aggregate provider operation.
+  Sequential child writes and compensating rollback are not confirmation
+  safety. Partial or unknown outcomes remain unconfirmed and retain their
+  claims for reconciliation as applicable.
 - AI tone changes reply style only. It must not change required booking slots, handoff decisions, availability checks, service selection, or confirmed-booking wording.
 - Pending clarification is context, not a closed vocabulary. A caller may ask an informational question without losing the draft, or explicitly change to a different catalog-backed target without being trapped in stale candidates.
 - Final review is mandatory for persisted production dialog state before a new

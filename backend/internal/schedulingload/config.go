@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	ReportSchemaVersion      = "scheduling-load-report/v1"
+	ReportSchemaVersion      = "scheduling-load-report/v2"
 	RequiredAttestation      = "NON_PRODUCTION_ISOLATED_SCHEDULING_LOAD"
 	DefaultDatabasePrefix    = "manleai_load_"
 	MinConcurrency           = 2

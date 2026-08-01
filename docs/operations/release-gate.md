@@ -29,7 +29,10 @@ build.
 The backend job runs the complete `go test ./...` and `go vet ./...` suites,
 followed by a bounded `-race` run over the high-risk authentication,
 SaaS access-control, scheduling, booking, POS, worker, notification, operations-health,
-conversation, and training packages declared in the manifest.
+conversation, training, and scheduling-load packages declared in the manifest.
+The manifest owns the V86/V87 migration safety tests, real PostgreSQL external
+slot-claim concurrency test, scope-bound Square capability tests, and load-
+harness report/integration tests so those contracts cannot disappear silently.
 
 The web matrix independently installs, typechecks, and builds `frontend`,
 `landing`, and `pos-calendar`. Before typecheck/build, `frontend` and
@@ -60,12 +63,21 @@ The fresh database contract:
    scheduling-PII retention, operations-health, and V58 cross-table alias
    suites;
 4. clones the verified migration-only baseline into one disposable database per
-   package, then executes packages serially with bounded Go test timeouts. This
-   prevents cross-package fixture contamination as well as competing mutation.
+   migration-contract or integration package, then executes packages serially
+   with bounded Go test timeouts. This prevents test fixtures from contaminating
+   the template or any later package as well as preventing competing mutation.
+
+Release-gate database mode exports
+`OWNER_FIRST_RELEASE_GATE_DATABASE_REQUIRED=1` and the isolated load database
+URL. V86, V87, external-slot-claim, and scheduling-load PostgreSQL coverage must
+fail when required database identity/evidence is missing; it must not report a
+successful gate by skipping those tests.
 
 No release-gate mode calls a live POS, Twilio, OpenAI, paid API, or provider
 console. Provider behavior is exercised through repository integration tests,
 fixtures, local adapters, and fake transports.
+The external Atomic Slot Commit load workload uses only a capability-aware fake
+provider; any detected real provider runtime call fails its v2 report.
 
 ## Tenant And Security Contract
 

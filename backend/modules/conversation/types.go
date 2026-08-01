@@ -560,6 +560,7 @@ type DialogState struct {
 	DraftRevision               int                      `json:"draft_revision"`
 	ReviewedRevision            int                      `json:"reviewed_revision"`
 	AuthorizedRevision          int                      `json:"authorized_revision"`
+	BookingOperationSequence    int                      `json:"booking_operation_sequence,omitempty"`
 	LastMutationRevision        int                      `json:"last_mutation_revision,omitempty"`
 	TimePreference              *TimePreference          `json:"time_preference,omitempty"`
 	Consultation                *ConsultationState       `json:"consultation,omitempty"`

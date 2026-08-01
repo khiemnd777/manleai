@@ -1132,6 +1132,82 @@ func TestCreateDeduplicatesSameIntentAcrossDifferentOperationKeys(t *testing.T) 
 	}
 }
 
+func TestCreateFailsClosedWithoutAtomicProviderCapability(t *testing.T) {
+	store := newFakeStore()
+	provider := &fakeProvider{capabilities: &pos.ProviderCapabilities{ConcreteStaffAssignment: true}}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	attempt, err := service.Create(context.Background(), "salon_1", "owner_1", validCreateRequest())
+	if !errors.Is(err, ErrSchedulingAuthorityNotReady) || attempt != nil {
+		t.Fatalf("Create = attempt %#v err %v, want authority-not-ready", attempt, err)
+	}
+	if store.pending != nil || provider.createAppointmentCalls != 0 {
+		t.Fatalf("pending/provider calls = %#v/%d, want no write or dispatch", store.pending, provider.createAppointmentCalls)
+	}
+}
+
+func TestCreateSlotCommitConflictNeverDispatchesProvider(t *testing.T) {
+	store := newFakeStore()
+	store.slotClaimConflict = true
+	provider := &fakeProvider{}
+	service := NewService(store, []pos.POSProvider{provider})
+
+	attempt, err := service.Create(context.Background(), "salon_1", "owner_1", validCreateRequest())
+	if !errors.Is(err, ErrSlotCommitConflict) || attempt != nil {
+		t.Fatalf("Create = attempt %#v err %v, want slot-commit conflict", attempt, err)
+	}
+	if provider.searchCustomerCalls != 0 || provider.createCustomerCalls != 0 || provider.createAppointmentCalls != 0 {
+		t.Fatalf("provider calls = search:%d customer:%d booking:%d, want zero", provider.searchCustomerCalls, provider.createCustomerCalls, provider.createAppointmentCalls)
+	}
+}
+
+func TestExternalAvailabilityClaimOverlapUsesHalfOpenIntervals(t *testing.T) {
+	start := testStartTime()
+	claimed := []externalClaimedInterval{{ResourceKind: "staff", ResourceID: "staff_1", StartTime: start, EndTime: start.Add(time.Hour)}}
+	tests := []struct {
+		name    string
+		staffID string
+		start   time.Time
+		end     time.Time
+		want    bool
+	}{
+		{name: "ends when claim starts", staffID: "staff_1", start: start.Add(-time.Hour), end: start, want: false},
+		{name: "starts when claim ends", staffID: "staff_1", start: start.Add(time.Hour), end: start.Add(2 * time.Hour), want: false},
+		{name: "overlaps same staff", staffID: "staff_1", start: start.Add(30 * time.Minute), end: start.Add(90 * time.Minute), want: true},
+		{name: "same time different staff", staffID: "staff_2", start: start, end: start.Add(time.Hour), want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			slot := AvailabilitySlot{Segments: []AvailabilitySegment{{
+				StaffID: test.staffID, OccupiedStartTime: test.start, OccupiedEndTime: test.end,
+			}}}
+			if got := externalAvailabilitySlotOverlapsClaim(slot, claimed); got != test.want {
+				t.Fatalf("overlap=%t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestExternalRescheduleClaimProtectsExtensionsImmediately(t *testing.T) {
+	start := testStartTime()
+	fragments := externalSlotClaimFragments(start.Add(-time.Hour), start.Add(2*time.Hour), []externalOccupiedRange{{
+		StartTime: start, EndTime: start.Add(time.Hour),
+	}})
+	if len(fragments) != 3 {
+		t.Fatalf("fragments=%#v, want active/pending/active", fragments)
+	}
+	want := []externalSlotClaimIntervalFragment{
+		{StartTime: start.Add(-time.Hour), EndTime: start, ActivationPending: false},
+		{StartTime: start, EndTime: start.Add(time.Hour), ActivationPending: true},
+		{StartTime: start.Add(time.Hour), EndTime: start.Add(2 * time.Hour), ActivationPending: false},
+	}
+	for index := range want {
+		if !fragments[index].StartTime.Equal(want[index].StartTime) || !fragments[index].EndTime.Equal(want[index].EndTime) || fragments[index].ActivationPending != want[index].ActivationPending {
+			t.Fatalf("fragment %d=%#v, want %#v", index, fragments[index], want[index])
+		}
+	}
+}
+
 func TestCreateRejectsOperationKeyReuseWithDifferentPayload(t *testing.T) {
 	store := newFakeStore()
 	provider := &fakeProvider{
@@ -2670,6 +2746,7 @@ type fakeStore struct {
 	reconciliationRequest            ResolveReconciliationRequest
 	saveRescheduleErr                error
 	saveCancelErr                    error
+	slotClaimConflict                bool
 }
 
 func newFakeStore() *fakeStore {
@@ -2828,6 +2905,30 @@ func (f *fakeStore) GetActiveProviderFence(ctx context.Context, salonID string, 
 	return f.activeProvider, f.activeProviderFence, nil
 }
 
+func (f *fakeStore) GetExternalSchedulingSafety(ctx context.Context, salonID string, provider string, fence pos.ProviderFence) (*ExternalSchedulingSafety, error) {
+	if salonID != "salon_1" || strings.TrimSpace(provider) == "" || !sameProviderFence(fence, f.activeProviderFence) {
+		return nil, ErrSchedulingAuthorityNotReady
+	}
+	return &ExternalSchedulingSafety{
+		EvidenceID:                "00000000-0000-4000-8000-000000000086",
+		ConfigVersion:             1,
+		AtomicCreateNoOverlap:     true,
+		AtomicRescheduleNoOverlap: true,
+		ConcreteStaffAssignment:   true,
+		ResourceCapacityEnforced:  true,
+		AtomicPartyCreate:         true,
+		VerifiedAt:                time.Now().UTC().Add(-time.Minute),
+		ExpiresAt:                 time.Now().UTC().Add(time.Hour),
+	}, nil
+}
+
+func (f *fakeStore) FilterExternalClaimedSlots(ctx context.Context, salonID string, provider string, fence pos.ProviderFence, targetAppointmentID string, slots []AvailabilitySlot) ([]AvailabilitySlot, error) {
+	if salonID != "salon_1" || strings.TrimSpace(provider) == "" || !sameProviderFence(fence, f.activeProviderFence) {
+		return nil, ErrSchedulingAuthorityNotReady
+	}
+	return append([]AvailabilitySlot(nil), slots...), nil
+}
+
 func (f *fakeStore) GetBookableService(ctx context.Context, salonID string, provider string, serviceID string) (*ServiceRef, error) {
 	for _, service := range f.services {
 		if serviceID == service.ID && provider == service.POSProvider {
@@ -2972,6 +3073,9 @@ func (f *fakeStore) ClaimPendingBookingAttempt(ctx context.Context, record Pendi
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pending = &record
+	if f.slotClaimConflict {
+		return &BookingOperationClaim{Attempt: &BookingAttempt{ID: "conflicted_attempt", SalonID: record.SalonID, Status: "failed"}, Conflict: true}, nil
+	}
 	if existing, ok := f.operations[record.OperationKey]; ok {
 		if existing.RequestFingerprint != record.RequestFingerprint {
 			return nil, ErrOperationConflict
@@ -3176,6 +3280,9 @@ func (f *fakeStore) ClaimPendingAppointmentAction(ctx context.Context, record Pe
 	primary := segments[0]
 	record.Segments = segments
 	f.pendingAction = &record
+	if f.slotClaimConflict {
+		return &BookingOperationClaim{Attempt: &BookingAttempt{ID: "conflicted_action_attempt", SalonID: record.SalonID, Status: "failed"}, Conflict: true}, nil
+	}
 	if existing, ok := f.operations[record.OperationKey]; ok {
 		if existing.RequestFingerprint != record.RequestFingerprint {
 			return nil, ErrOperationConflict
@@ -3513,10 +3620,24 @@ type fakeProvider struct {
 	listAppointmentCalls    int
 	afterCreateAppointment  func()
 	beforeCreateAppointment func()
+	capabilities            *pos.ProviderCapabilities
 }
 
 func (f *fakeProvider) Name() string {
 	return pos.ProviderSquare
+}
+
+func (f *fakeProvider) Capabilities() pos.ProviderCapabilities {
+	if f.capabilities != nil {
+		return *f.capabilities
+	}
+	return pos.ProviderCapabilities{
+		AtomicCreateNoOverlap:     true,
+		AtomicRescheduleNoOverlap: true,
+		ConcreteStaffAssignment:   true,
+		ResourceCapacityEnforced:  true,
+		AtomicPartyCreate:         true,
+	}
 }
 
 func (f *fakeProvider) Connect(ctx context.Context, input pos.ConnectInput) (*pos.Connection, error) {

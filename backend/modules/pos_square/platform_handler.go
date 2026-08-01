@@ -133,6 +133,28 @@ func (h *PlatformHandler) Sync(c *fiber.Ctx) error {
 	return respond.JSON(c, fiber.StatusOK, fiber.Map{"ok": true, "summary": result})
 }
 
+func (h *PlatformHandler) ReevaluateSchedulingCapability(c *fiber.Ctx) error {
+	var req ReevaluateSchedulingCapabilityRequest
+	if err := c.BodyParser(&req); err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Square scheduling safety request is invalid.")
+	}
+	if err := h.authorize(c, access.CapabilityTechnicalWrite); err != nil {
+		return h.respond(c, nil, err, "SQUARE_SCHEDULING_CAPABILITY_FAILED")
+	}
+	if h.access.RecordPlatformSupportAction(
+		c.UserContext(), middleware.Actor(c), c.Params("tenant_id"), access.CapabilityTechnicalWrite, "", c.Method(), c.Path(),
+	) != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SUPPORT_AUDIT_FAILED", "Could not record this authorized technical action.")
+	}
+	result, replayed, err := h.service.ReevaluateSchedulingCapabilityForPlatform(
+		c.UserContext(), c.Params("tenant_id"), middleware.UserID(c), req,
+	)
+	if err == nil {
+		c.Set("X-Idempotent-Replay", strconv.FormatBool(replayed))
+	}
+	return h.respond(c, result, err, "SQUARE_SCHEDULING_CAPABILITY_FAILED")
+}
+
 func (h *PlatformHandler) EnableAIBooking(c *fiber.Ctx) error {
 	return h.setAIBooking(c, true)
 }
@@ -250,6 +272,8 @@ func (h *PlatformHandler) respond(c *fiber.Ctx, value any, err error, code strin
 		return respond.Error(c, fiber.StatusConflict, "TECHNICAL_VERSION_CONFLICT", "AI runtime settings changed. Reload before saving again.")
 	case errors.Is(err, pos.ErrTechnicalActionConflict):
 		return respond.Error(c, fiber.StatusConflict, "TECHNICAL_ACTION_CONFLICT", "This technical action key was already used for a different request.")
+	case errors.Is(err, pos.ErrCapabilityVersionConflict):
+		return respond.Error(c, fiber.StatusConflict, "SQUARE_CAPABILITY_VERSION_CONFLICT", "Square connection or integration configuration changed. Reload before re-evaluating safety.")
 	case err != nil:
 		return respond.Error(c, fiber.StatusBadGateway, code, "Square technical operation could not be completed.")
 	default:

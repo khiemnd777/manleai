@@ -10,11 +10,16 @@ The product rule is strict and scheduling-authority-specific. `owner_manual`
 creates a pending owner-review request and never confirms automatically.
 `manleai_calendar` confirms only after an atomic internal commit returns a
 durable appointment ID. `external_provider` confirms only after the selected
-provider succeeds and returns the required booking ID and metadata. Party
+provider passes V86 Atomic Slot Commit, succeeds, and returns the required
+booking ID and metadata. Party
 operations are all-or-none, and authority switches are explicit while every
-historical operation preserves its originating authority. The currently
-confirming executors are Square-backed `external_provider` and Phase 4C
-`manleai_calendar` for structured multi-guest, multi-service staff-only and
+historical operation preserves its originating authority. The registered
+confirming executor boundaries are `external_provider` and Phase 4C
+`manleai_calendar`. V87 permits Square auto-confirmation only for a single new
+booking when current persisted evidence proves buyer-level `APPOINTMENTS_WRITE`
+without `APPOINTMENTS_ALL_WRITE`; Square reschedule, party, resource-capacity,
+and every seller-write connection remain fail-closed. The internal executor
+supports structured multi-guest, multi-service staff-only and
 pooled create plus whole-root internal reschedule/cancel. Phase 2 also
 implements `owner_manual` as a request-only, pending-owner-review executor with
 no appointment or provider side effect. V52-V55 and the Platform tenant
@@ -114,12 +119,15 @@ the same approved documentation scope.
   resolver used before non-replay Square test creation; it falls back to the
   current token only when no persisted origin exists and never dispatches a
   provider. Exact external replay, a persisted external safe retry, and target-
-  origin cancellation remain available after a later switch so historical work
-  is not orphaned.
-- Current provider-backed confirming behavior remains the Square-backed
-  `external_provider` executor in
-  `backend/modules/scheduling_external_provider`, which delegates to the exact
-  existing booking/POS path. The boundary must not weaken provider safety.
+  origin cancellation remain resolvable after a later switch so historical work
+  is not orphaned; a new dispatch still must pass current operation safety gates.
+- The provider-backed confirming boundary remains `external_provider` in
+  `backend/modules/scheduling_external_provider`, which delegates to the booking
+  path with V86 Atomic Slot Commit plus V87 connection/config/location/API/scope
+  evidence. Current buyer-write evidence enables only new single create;
+  seller-write, reschedule, party, and resource-capacity execution fail before
+  provider dispatch. Historical replay, cancellation, calendar convergence,
+  and reconciliation remain origin-routed.
 - `owner_manual` is implemented by
   `backend/modules/scheduling_owner_manual` through the neutral
   `CheckAvailability`/`ExecuteAction` contract. Availability returns
@@ -242,9 +250,13 @@ the same approved documentation scope.
 - `manleai_calendar` requires an atomic conflict-safe internal transaction and
   a durable appointment ID before confirmation.
 - `external_provider` retains every provider ID, version, fence, idempotency,
-  fallback, error, and reconciliation safeguard in the POS and Square docs.
+  fallback, error, reconciliation, and V86 Atomic Slot Commit safeguard in the
+  POS and Square docs.
 - Every appointment mutation, retry, and reconciliation path must preserve and
   use the operation's originating authority. Party operations are all-or-none.
+  Current external party create is request-only/fail-closed and performs zero
+  sequential provider child writes. Any future whole-party provider capability
+  requires a separately approved contract and is not implied by V86/V87.
 - External lease recovery and provider-calendar persistence/matching/
   reconciliation explicitly fence mutations to `external_provider`. Square
   webhook target/repair selection remains provider/connection-scoped so it can

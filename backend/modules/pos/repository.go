@@ -15,11 +15,12 @@ import (
 )
 
 var (
-	ErrNotFound                 = errors.New("pos record not found")
-	ErrStaleProviderSnapshot    = errors.New("provider snapshot is stale")
-	ErrStaleProviderFence       = errors.New("provider catalog fence is stale")
-	ErrTechnicalVersionConflict = errors.New("technical resource version conflict")
-	ErrTechnicalActionConflict  = errors.New("technical action conflict")
+	ErrNotFound                  = errors.New("pos record not found")
+	ErrStaleProviderSnapshot     = errors.New("provider snapshot is stale")
+	ErrStaleProviderFence        = errors.New("provider catalog fence is stale")
+	ErrTechnicalVersionConflict  = errors.New("technical resource version conflict")
+	ErrTechnicalActionConflict   = errors.New("technical action conflict")
+	ErrCapabilityVersionConflict = errors.New("booking write capability version conflict")
 )
 
 const (
@@ -352,7 +353,7 @@ func (r *Repository) GetConnection(ctx context.Context, salonID string, provider
 	row := r.db.QueryRowContext(ctx, `
 		SELECT id::text, salon_id::text, provider, status, COALESCE(access_token_encrypted, ''),
 		       COALESCE(refresh_token_encrypted, ''), COALESCE(merchant_id, ''), COALESCE(location_id, ''),
-		       snapshot_generation, scopes, last_sync_at, COALESCE(error_message, ''), created_at, updated_at
+		       snapshot_generation, booking_write_capability_version, scopes, last_sync_at, COALESCE(error_message, ''), created_at, updated_at
 		FROM pos_connections
 		WHERE salon_id = $1 AND provider = $2
 	`, salonID, provider)
@@ -383,7 +384,7 @@ func (r *Repository) UpsertConnection(ctx context.Context, connection Connection
 		              updated_at = now()
 		RETURNING id::text, salon_id::text, provider, status, COALESCE(access_token_encrypted, ''),
 		          COALESCE(refresh_token_encrypted, ''), COALESCE(merchant_id, ''), COALESCE(location_id, ''),
-		          snapshot_generation, scopes, last_sync_at, COALESCE(error_message, ''), created_at, updated_at
+		          snapshot_generation, booking_write_capability_version, scopes, last_sync_at, COALESCE(error_message, ''), created_at, updated_at
 	`, connection.SalonID, connection.Provider, connection.Status, connection.AccessTokenEncrypted, connection.RefreshTokenEncrypted, connection.MerchantID, connection.LocationID, pq.Array(connection.Scopes), connection.ErrorMessage))
 	if err != nil {
 		return nil, err
@@ -428,7 +429,7 @@ func (r *Repository) UpdateLocation(ctx context.Context, salonID string, provide
 		WHERE salon_id = $2 AND provider = $3
 		RETURNING id::text, salon_id::text, provider, status, COALESCE(access_token_encrypted, ''),
 		          COALESCE(refresh_token_encrypted, ''), COALESCE(merchant_id, ''), COALESCE(location_id, ''),
-		          snapshot_generation, scopes, last_sync_at, COALESCE(error_message, ''), created_at, updated_at
+		          snapshot_generation, booking_write_capability_version, scopes, last_sync_at, COALESCE(error_message, ''), created_at, updated_at
 	`, locationID, salonID, provider))
 	if err != nil {
 		return nil, err
@@ -3813,6 +3814,7 @@ func scanConnection(row rowScanner) (*Connection, error) {
 		&item.MerchantID,
 		&item.LocationID,
 		&item.SnapshotGeneration,
+		&item.BookingWriteCapabilityVersion,
 		pq.Array(&scopes),
 		&lastSync,
 		&item.ErrorMessage,

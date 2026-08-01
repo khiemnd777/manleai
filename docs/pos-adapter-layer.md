@@ -11,7 +11,13 @@ Square, Vagaro, GlossGenius, Fresha, Booksy, Mindbody, Boulevard, Zenoti, or any
 other provider payload. POS adapters are outbound writers/readers behind the
 external-provider-neutral contract.
 
-The current confirming runtime uses this path with Square Appointments.
+Square Appointments is the installed implementation of this path, but V86
+requires verified Atomic Slot Commit capability before new external
+create/reschedule dispatch. V87 resolves Square capability from the exact
+persisted connection fence: buyer-write single create is supported, while
+seller-write, reschedule, party, and resource capacity fail closed. Historical cancellation, replay,
+calendar convergence, and reconciliation retain their originating-authority
+behavior.
 Phase 2 also has a ready `owner_manual` executor outside this adapter layer: it
 uses canonical ManleAI catalog data, returns request-only availability, and
 persists pending owner-review scheduling requests without calling a POS.
@@ -141,6 +147,10 @@ type CapabilityProvider interface {
     Capabilities() ProviderCapabilities
 }
 
+type ScopedSchedulingCapabilityProvider interface {
+    SchedulingCapabilities(ctx context.Context, salonID string, fence ProviderFence) (ProviderCapabilities, error)
+}
+
 type POSWriteProvider interface {
     UpsertService(ctx context.Context, salonID string, service Service) (*ProviderSyncResult, error)
     ArchiveService(ctx context.Context, salonID string, service Service) (*ProviderSyncResult, error)
@@ -153,6 +163,26 @@ type POSWriteProvider interface {
 Capability flags are authoritative. If a provider does not declare support for
 a write operation, the API and worker must keep that operation gated and must
 not fake a synced state.
+
+External confirmed scheduling has additional capability flags:
+
+- `AtomicCreateNoOverlap` and `AtomicRescheduleNoOverlap` mean the provider
+  contract is compatible with one local pre-dispatch claim for the concrete
+  assignment;
+- `ConcreteStaffAssignment` means every claimed staff interval names the exact
+  provider resource that will be written;
+- `ResourceCapacityEnforced` and `AtomicPartyCreate` are required before any
+  external pooled-resource or whole-party claim can be treated as atomic.
+
+Scoped adapter flags are necessary but not sufficient. Dispatch also requires
+unexpired database evidence for the exact connection capability version,
+salon integration config/version, provider, location, API version, and
+normalized OAuth-scope fingerprint. Absence, expiry, mismatch, or a false flag
+is a readiness failure with zero provider calls. Square returns create plus
+concrete-staff true only when `APPOINTMENTS_WRITE` is present and
+`APPOINTMENTS_ALL_WRITE` is absent. It always returns false for reschedule,
+party, and resource capacity. Platform Technical can re-evaluate persisted
+state idempotently, but cannot submit or override capability booleans.
 
 Provider `Sync(ctx, salonID)` is the pull/import path. For Square Appointments
 it imports services, staff, selected-location business hour periods, and
@@ -338,6 +368,29 @@ order. A newer authoritative mirror is preserved and may complete the operation
 only when the create booking ID/range/segments, reschedule range and ordered
 canonical/raw segments, or cancelled target state match exactly; mismatches
 remain unconfirmed and reconciliation-required.
+
+For V86-and-later attempts with `external_slot_claim_required=true`, quote
+consumption and booking-attempt creation also install all concrete occupied
+intervals in `external_slot_claims` in the same PostgreSQL transaction. The
+interval key is tenant, provider, provider location, resource kind, and resource
+ID; time is half-open `[start,end)`, including the occupied segment evidence
+supplied by the quote. Sorted transaction-scoped PostgreSQL advisory locks
+stabilize multi-resource ordering; the exclusion constraint remains the cross-replica
+linearization fence: one contender commits, an overlapping contender becomes a
+durable `SLOT_COMMIT_CONFLICT`, and the loser never enters customer/provider
+dispatch. Active claims are also subtracted from later provider availability
+results.
+
+Claim lifecycle follows provider-outcome safety. `claimed_pre_dispatch` may be
+released only while dispatch is proven not started. `dispatch_started`,
+`dispatched_unknown`, and `reconciliation_required` retain the intervals.
+Verified success moves create to `confirmed`, swaps an exact reschedule old/new
+claim, or releases the target claim for cancel. A definitive provider rejection
+releases the new claim. Recovery and reconciliation perform the same transitions
+under the established calendar/advisory lock order. Immutable
+`external_slot_claim_events` records acquired, dispatch, conflict outcome,
+confirmation, release, and reconciliation transitions without storing provider
+payloads or customer data.
 
 Availability quotes are bounded operational evidence. A worker cleanup keeps a
 24-hour grace after unconsumed quote expiry, retains orphaned consumed quotes

@@ -73,8 +73,11 @@ configure_database_urls() {
   export TEST_DATABASE_URL="$database_url"
   export MIGRATION_TEST_DATABASE_URL="$database_url"
   export POS_TAXONOMY_TEST_DATABASE_URL="$database_url"
+  export SCHEDULING_LOAD_FRESH_DATABASE_URL="$database_url"
+  export OWNER_FIRST_RELEASE_GATE_DATABASE_REQUIRED=1
   : "${TEST_DATABASE_URL:?TEST_DATABASE_URL is required}"
   : "${MIGRATION_TEST_DATABASE_URL:?MIGRATION_TEST_DATABASE_URL is required}"
+  : "${SCHEDULING_LOAD_FRESH_DATABASE_URL:?SCHEDULING_LOAD_FRESH_DATABASE_URL is required}"
 }
 
 build_clone_database_name() {
@@ -208,8 +211,10 @@ run_postgres_gate() {
   assert_fresh_database
   cd "$repo_root/backend"
   printf 'release-gate: applying the fresh migration chain twice and checking checksums\n'
-  run_go_packages_serially "${POSTGRES_MIGRATION_PACKAGES[@]}"
+  go test -p 1 -count=1 -timeout=20m ./internal/database -run '^TestMigrateAppliesForwardMigrationOnceWithoutChangingAppliedChecksums$'
   verify_owner_first_migrations
+  printf 'release-gate: running migration contract packages in isolated databases\n'
+  run_go_packages_isolated migration "${POSTGRES_MIGRATION_PACKAGES[@]}"
   printf 'release-gate: running PostgreSQL integration packages serially in isolated databases\n'
   run_go_packages_isolated integration "${POSTGRES_INTEGRATION_PACKAGES[@]}"
 }

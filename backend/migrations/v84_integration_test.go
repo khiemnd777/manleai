@@ -2,7 +2,9 @@ package migrations
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"os"
 	"testing"
@@ -28,7 +30,7 @@ func TestV84OpenAICredentialIdentityIsExclusiveAcrossTenants(t *testing.T) {
 	defer tx.Rollback()
 
 	salonA, salonB := insertV79Salons(t, tx)
-	fingerprint := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	fingerprint := v84UniqueFingerprint()
 	insertV84OpenAIConfig(t, tx, salonA, fingerprint)
 	_, err = tx.Exec(`
 		INSERT INTO salon_integration_configs (
@@ -58,7 +60,7 @@ func TestV84VerificationRunRejectsCrossTenantConfigIdentity(t *testing.T) {
 	defer tx.Rollback()
 
 	salonA, salonB := insertV79Salons(t, tx)
-	configB := insertV84OpenAIConfig(t, tx, salonB, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	configB := insertV84OpenAIConfig(t, tx, salonB, v84UniqueFingerprint())
 	var actorA string
 	if err := tx.QueryRow(`SELECT owner_user_id::text FROM salons WHERE id=$1`, salonA).Scan(&actorA); err != nil {
 		t.Fatalf("load tenant A actor: %v", err)
@@ -68,7 +70,7 @@ func TestV84VerificationRunRejectsCrossTenantConfigIdentity(t *testing.T) {
 			salon_id,integration_config_id,actor_user_id,action_key,request_fingerprint,
 			config_version,credential_revision,destination_policy_version,verification_contract_version
 		) VALUES ($1,$2,$3,'cross-tenant-test',$4,1,1,'openai-public-v1','openai-voice-v1')
-	`, salonA, configB, actorA, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+	`, salonA, configB, actorA, v84UniqueFingerprint())
 	var postgresError *pq.Error
 	if !errors.As(err, &postgresError) || string(postgresError.Code) != "23503" || postgresError.Constraint != "openai_verification_config_tenant_fk" {
 		t.Fatalf("cross-tenant verification config error=%v", err)
@@ -105,9 +107,7 @@ func TestV84ConfigurationTransferRunAcceptsV10WithoutRewritingHistory(t *testing
 			$1,'json_upload',$2,'manleai.salon_configuration.v10',ARRAY['integrations'],
 			$3,$4,'owner_manual',1,'previewed'
 		)
-	`, salonID, actorID,
-		"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-		"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"); err != nil {
+	`, salonID, actorID, v84UniqueFingerprint(), v84UniqueFingerprint()); err != nil {
 		t.Fatalf("insert v10 configuration transfer run: %v", err)
 	}
 	for _, historical := range []string{"manleai.salon_configuration.v8", "manleai.salon_configuration.v9"} {
@@ -117,12 +117,15 @@ func TestV84ConfigurationTransferRunAcceptsV10WithoutRewritingHistory(t *testing
 				source_fingerprint,request_fingerprint,target_scheduling_authority,
 				target_scheduling_authority_version,status
 			) VALUES ($1,'json_upload',$2,$3,ARRAY['integrations'],$4,$5,'owner_manual',1,'previewed')
-		`, salonID, actorID, historical,
-			"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-			"1111111111111111111111111111111111111111111111111111111111111111"); err != nil {
+		`, salonID, actorID, historical, v84UniqueFingerprint(), v84UniqueFingerprint()); err != nil {
 			t.Fatalf("insert historical configuration transfer run %q: %v", historical, err)
 		}
 	}
+}
+
+func v84UniqueFingerprint() string {
+	sum := sha256.Sum256([]byte(uuid.NewString()))
+	return hex.EncodeToString(sum[:])
 }
 
 func insertV84OpenAIConfig(t *testing.T, tx *sql.Tx, salonID, fingerprint string) string {

@@ -56,6 +56,10 @@ const (
 	OperationalWriteModeProviderReadOnly = "provider_read_only"
 	OperationalWriteModeProviderSync     = "provider_sync"
 
+	SchedulingWriteModeBuyer       = "buyer_write"
+	SchedulingWriteModeSeller      = "seller_write"
+	SchedulingWriteModeUnsupported = "unsupported"
+
 	ServiceCategoryStatusActive   = "active"
 	ServiceCategoryStatusArchived = "archived"
 
@@ -285,6 +289,13 @@ type CapabilityProvider interface {
 	Capabilities() ProviderCapabilities
 }
 
+// ScopedSchedulingCapabilityProvider resolves booking safety from the exact
+// salon connection fence. Static Capabilities remains available for provider
+// features that are not credential/scope dependent.
+type ScopedSchedulingCapabilityProvider interface {
+	SchedulingCapabilities(ctx context.Context, salonID string, fence ProviderFence) (ProviderCapabilities, error)
+}
+
 type POSWriteProvider interface {
 	UpsertService(ctx context.Context, salonID string, service Service) (*ProviderSyncResult, error)
 	ArchiveService(ctx context.Context, salonID string, service Service) (*ProviderSyncResult, error)
@@ -298,11 +309,16 @@ type AppointmentListProvider interface {
 }
 
 type ProviderCapabilities struct {
-	ServiceUpsert  bool `json:"service_upsert"`
-	ServiceArchive bool `json:"service_archive"`
-	StaffUpsert    bool `json:"staff_upsert"`
-	StaffArchive   bool `json:"staff_archive"`
-	CustomerUpsert bool `json:"customer_upsert"`
+	ServiceUpsert             bool `json:"service_upsert"`
+	ServiceArchive            bool `json:"service_archive"`
+	StaffUpsert               bool `json:"staff_upsert"`
+	StaffArchive              bool `json:"staff_archive"`
+	CustomerUpsert            bool `json:"customer_upsert"`
+	AtomicCreateNoOverlap     bool `json:"atomic_create_no_overlap"`
+	AtomicRescheduleNoOverlap bool `json:"atomic_reschedule_no_overlap"`
+	ConcreteStaffAssignment   bool `json:"concrete_staff_assignment"`
+	ResourceCapacityEnforced  bool `json:"resource_capacity_enforced"`
+	AtomicPartyCreate         bool `json:"atomic_party_create"`
 }
 
 // EntityFieldAuthority is derived runtime metadata. It keeps field-level write
@@ -485,20 +501,46 @@ type ConnectInput struct {
 }
 
 type Connection struct {
-	ID                    string     `json:"id"`
-	SalonID               string     `json:"salon_id"`
-	Provider              string     `json:"provider"`
-	Status                string     `json:"status"`
-	SnapshotGeneration    int64      `json:"-"`
-	AccessTokenEncrypted  string     `json:"-"`
-	RefreshTokenEncrypted string     `json:"-"`
-	MerchantID            string     `json:"merchant_id,omitempty"`
-	LocationID            string     `json:"location_id,omitempty"`
-	Scopes                []string   `json:"scopes"`
-	LastSyncAt            *time.Time `json:"last_sync_at,omitempty"`
-	ErrorMessage          string     `json:"error_message,omitempty"`
-	CreatedAt             time.Time  `json:"created_at"`
-	UpdatedAt             time.Time  `json:"updated_at"`
+	ID                            string     `json:"id"`
+	SalonID                       string     `json:"salon_id"`
+	Provider                      string     `json:"provider"`
+	Status                        string     `json:"status"`
+	SnapshotGeneration            int64      `json:"-"`
+	BookingWriteCapabilityVersion int64      `json:"booking_write_capability_version"`
+	AccessTokenEncrypted          string     `json:"-"`
+	RefreshTokenEncrypted         string     `json:"-"`
+	MerchantID                    string     `json:"merchant_id,omitempty"`
+	LocationID                    string     `json:"location_id,omitempty"`
+	Scopes                        []string   `json:"scopes"`
+	LastSyncAt                    *time.Time `json:"last_sync_at,omitempty"`
+	ErrorMessage                  string     `json:"error_message,omitempty"`
+	CreatedAt                     time.Time  `json:"created_at"`
+	UpdatedAt                     time.Time  `json:"updated_at"`
+}
+
+type SchedulingCapabilityEvaluation struct {
+	EvidenceID                  string     `json:"evidence_id,omitempty"`
+	ConnectionCapabilityVersion int64      `json:"connection_capability_version"`
+	IntegrationConfigVersion    int64      `json:"integration_config_version"`
+	AutomaticSingleCreate       bool       `json:"automatic_single_create"`
+	AutomaticReschedule         bool       `json:"automatic_reschedule"`
+	AutomaticPartyCreate        bool       `json:"automatic_party_create"`
+	ResourceCapacity            bool       `json:"resource_capacity"`
+	WritePermissionMode         string     `json:"write_permission_mode"`
+	ReconnectRequired           bool       `json:"reconnect_required"`
+	EvidenceCurrent             bool       `json:"evidence_current"`
+	EvidenceVerifiedAt          *time.Time `json:"evidence_verified_at,omitempty"`
+	EvidenceExpiresAt           *time.Time `json:"evidence_expires_at,omitempty"`
+	BlockerCode                 string     `json:"blocker_code,omitempty"`
+}
+
+type SchedulingCapabilityEvaluationInput struct {
+	SalonID                             string
+	ActorUserID                         string
+	ActionKey                           string
+	RequestFingerprint                  string
+	ExpectedConnectionCapabilityVersion int64
+	ExpectedIntegrationConfigVersion    int64
 }
 
 type Location struct {

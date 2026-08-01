@@ -58,6 +58,42 @@ func (a *SquareAdapter) Capabilities() pos.ProviderCapabilities {
 	return pos.ProviderCapabilities{}
 }
 
+// SchedulingCapabilities is intentionally connection-scoped. Square's buyer-
+// level APPOINTMENTS_WRITE permission may enable only a concrete-staff single
+// create. Seller-level APPOINTMENTS_ALL_WRITE, malformed scopes, a stale
+// location/snapshot, reschedule, party, and resource capacity all fail closed.
+func (a *SquareAdapter) SchedulingCapabilities(ctx context.Context, salonID string, fence pos.ProviderFence) (pos.ProviderCapabilities, error) {
+	if a == nil || a.repo == nil || strings.TrimSpace(salonID) == "" || strings.TrimSpace(fence.LocationID) == "" || fence.SnapshotGeneration <= 0 {
+		return pos.ProviderCapabilities{}, nil
+	}
+	connection, err := a.repo.GetConnection(ctx, salonID, pos.ProviderSquare)
+	if err != nil {
+		return pos.ProviderCapabilities{}, err
+	}
+	if connection.Status != pos.StatusActive || connection.LastSyncAt == nil ||
+		strings.TrimSpace(connection.LocationID) != strings.TrimSpace(fence.LocationID) ||
+		connection.SnapshotGeneration != fence.SnapshotGeneration {
+		return pos.ProviderCapabilities{}, nil
+	}
+	hasBuyerWrite := false
+	hasSellerWrite := false
+	for _, rawScope := range connection.Scopes {
+		switch strings.ToUpper(strings.TrimSpace(rawScope)) {
+		case "APPOINTMENTS_WRITE":
+			hasBuyerWrite = true
+		case "APPOINTMENTS_ALL_WRITE":
+			hasSellerWrite = true
+		}
+	}
+	if !hasBuyerWrite || hasSellerWrite {
+		return pos.ProviderCapabilities{}, nil
+	}
+	return pos.ProviderCapabilities{
+		AtomicCreateNoOverlap:   true,
+		ConcreteStaffAssignment: true,
+	}, nil
+}
+
 func (a *SquareAdapter) OAuthURL(ctx context.Context, salonID string, state string) (string, error) {
 	cfg, err := a.configFor(ctx, salonID)
 	if err != nil {
@@ -1092,9 +1128,6 @@ func squareScopes(cfg config.SquareConfig) []string {
 		"MERCHANT_PROFILE_READ",
 		"EMPLOYEES_READ",
 		"EMPLOYEES_WRITE",
-	}
-	if strings.EqualFold(strings.TrimSpace(cfg.Environment), "production") {
-		scopes = append(scopes[:3], append([]string{"APPOINTMENTS_ALL_WRITE"}, scopes[3:]...)...)
 	}
 	return scopes
 }

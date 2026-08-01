@@ -13,8 +13,8 @@ the Phase 2 owner-manual request workflow, the Phase 3 ManleAI Calendar
 configuration/readiness aggregate, Phase 4A staff-only execution, Phase 4B
 structured multi-guest/multi-service pooled all-or-none availability/create,
 and Phase 4C whole-root internal reschedule/cancel for
-the AI Receptionist system. Square-backed `external_provider` and aggregate
-`manleai_calendar` are confirming executors with authority-native evidence;
+the AI Receptionist system. `external_provider` and aggregate
+`manleai_calendar` are confirming executor boundaries with authority-native evidence;
 `owner_manual` persists non-confirming pending work. V52-V55 implement explicit
 owner-reviewed authority preview/commit with authority-version and readiness
 fences, immutable audit history, and an explicit inverse-run reference. The
@@ -33,6 +33,12 @@ separate non-owner runtime role; tenant quotas and fair worker claims; audited
 Platform AI-runtime control; a database-owned public catalog projection; and
 complete Platform PII-scope enforcement. Tenant and Platform UIs are separate
 route trees over the same canonical tenant data.
+V86 adds external Atomic Slot Commit. It installs a PostgreSQL exclusion-fenced
+outbound claim before provider dispatch, requires exact expiring provider
+capability evidence, and preserves unknown-outcome ownership. V87 binds that
+evidence to the exact Square connection/config/location/API/scope versions and
+enables only buyer-write single create. Seller-write, reschedule, party, and
+resource-capacity automation remain fail-closed.
 V77 adds the Platform-only reviewed configuration-transfer control plane.
 The current schema-v10 export contract accepts tenant-to-tenant and schema-v10
 or schema-v9 JSON sources, v8 upload compatibility, guarded
@@ -361,10 +367,12 @@ create uses it after replay so a valid persisted external safe retry can
 continue after a current-mode switch; only origin-free test creation is gated
 by the current mode.
 
-`external_provider` remains the only provider-backed confirming executor. The
+`external_provider` remains the only provider-backed confirming executor boundary. The
 `backend/modules/scheduling_external_provider.Adapter` delegates those methods
 to the established booking service and therefore preserves the existing
-Square-backed `POSProvider` behavior exactly. Phase 2 registers
+provider outcome and confirmation contract. V86/V87 additionally require a
+committed Atomic Slot Commit claim and current scope-bound capability evidence;
+Square buyer-write single create is the only enabled operation. Phase 2 registers
 `backend/modules/scheduling_owner_manual.Executor` as a neutral executor:
 availability is request-only and actions persist pending owner review without
 calling POS or creating appointments. Phase 4B extends the registered
@@ -392,7 +400,9 @@ is consulted only for selected `external_provider`. Legacy `ready` mirrors
 The neutral handlers expose unavailable capabilities as generic sanitized
 `409 SCHEDULING_AUTHORITY_NOT_READY`, changed operation proof as
 `409 SCHEDULING_OPERATION_CONFLICT`, and drift/conflict evidence as
-`409 AVAILABILITY_QUOTE_STALE`. Square test gate errors also use bounded public
+`409 AVAILABILITY_QUOTE_STALE`. External claim overlap is
+`409 SLOT_COMMIT_CONFLICT`; in-progress/unknown exact operations use bounded
+`202 SLOT_CLAIM_IN_PROGRESS` and `202 SLOT_OUTCOME_UNKNOWN`. Square test gate errors also use bounded public
 messages and never return wrapped internal diagnostic text.
 
 External booking lease recovery and provider-calendar persistence, matching,
@@ -752,8 +762,8 @@ state requires explicit persisted confirmation of the reviewed whole-root
 replacement, or a captured cancellation reason followed by explicit whole-root
 confirmation. Stale target/version refreshes candidates and reoffers without
 false success; cutoff rejection and provider-shaped/partial results never
-produce rescheduled/cancelled wording. Existing external-provider party
-behavior remains on its established per-child provider path.
+produce rescheduled/cancelled wording. External-provider party execution is
+request-only and performs zero sequential provider child writes.
 
 `frontend/features/dashboard/owner-review-requests.tsx` is composed inside the
 Appointments dashboard. It uses feature-local API helpers for paginated/status-
@@ -789,9 +799,12 @@ reload after version conflict.
 
 Booking workflow state belongs to the backend. In the current
 `external_provider` implementation, create-booking, reschedule, cancel, and
-dashboard test-booking requests first create a `booking_attempts` row with
-`pos_pending` and a backend-owned POS idempotency key. The POS adapter is then
-called as an outbound writer. For customer identity, booking resolves or
+dashboard test-booking requests retain the `booking_attempts` ledger with
+`pos_pending` and a backend-owned POS idempotency key. For V86 external
+create/reschedule-capable adapters, capability evidence validation, quote
+consumption, attempt creation, and the concrete occupied-interval claim commit
+before the POS adapter is called. V87 grants that capability to Square buyer-
+write single create only. For customer identity, booking resolves or
 creates the ManleAI canonical customer, reuses an active `pos_entity_links`
 customer mapping when present, or asks the active `POSProvider` to
 search/create a provider customer and then stores the mapping. If customer
@@ -812,7 +825,9 @@ paths, consumes one short-lived availability quote whose slot, ordered segment
 snapshot, start/end, provider, salon, location, and snapshot generation must
 match exactly. HTTP callers submit quote proof; conversation callers retain
 the selected backend proof and refresh the exact slot immediately before
-dispatch. Party booking refreshes all child proofs before its first POS write. A
+dispatch. Current external party create is request-only/fail-closed and makes
+zero sequential child POS writes. A future whole-party provider contract needs
+separate approval and is not implied by V86/V87. A
 safe retry reproduces the original normalized request and atomically supersedes
 one eligible fallback attempt. Lease recovery is phase-sensitive and shared by
 owner reads and the background worker. It first acquires the same salon calendar
@@ -828,6 +843,22 @@ slow Square webhook/calendar repair batch cannot delay lease-expiry recovery.
 An identical operation-key replay may safely resume an expired `not_started`
 claim before the recovery transaction wins; afterward, retry uses the normal
 explicit safe-lineage supersession contract.
+
+V86 `external_slot_claim_intervals` use tenant/provider/location/resource keys
+and half-open `[start,end)` ranges. The repository first acquires sorted
+transaction-scoped PostgreSQL advisory locks per exact resource to avoid
+multi-row lock-order deadlocks; the GiST exclusion constraint remains the
+cross-replica commit authority. Call A's transaction wins, while overlapping
+Call B persists `SLOT_COMMIT_CONFLICT` and never reaches customer/provider
+dispatch. Later availability subtracts active claims. Confirmed create keeps
+the claim; the generic repository can protect a future capability-approved
+reschedule's new-only fragments before atomically releasing the old claim, but
+V87 Square reschedule capability is false. Verified cancel releases its claim. Definite failure or
+verified reconciliation non-creation releases a new claim. Dispatch-started,
+unknown, and reconciliation-required states retain the interval until exact
+provider truth converges. These claims fence ManleAI-originated outbound writes
+only and are not an external calendar or a fence against direct seller-console
+writes.
 Before mutable catalog or appointment validation, an owner-scoped operation-key
 lookup recovers an already claimed operation. The service compares the stored
 logical intent rather than the now-mutated appointment state: an exact replay
@@ -968,7 +999,8 @@ The Milestone 4 conversation simulator and Milestone 5 live phone webhook path
 call the Phase 1 scheduling facade through a provider-neutral booking tool.
 They do not import Square packages, read POS tokens, build Square payloads, or
 use Square location IDs directly. Under `external_provider`, the facade reaches
-the unchanged booking service through its external executor; an internal token
+the booking service and its V86 Atomic Slot Commit gate through the external
+executor; an internal token
 that has no ready executor fails closed before provider dispatch. The runtime
 owns booking slot state, including date-only requests before a time is known,
 so model wording cannot erase already-collected service, date, time, customer,
@@ -1222,10 +1254,11 @@ Group and party operations use the same authority-specific confirmation boundary
 as single-customer scheduling and are all-or-none. In the current
 `external_provider` runtime, the conversation resolves party size and guest
 service counts into catalog-backed segments, calls provider-neutral
-availability, and invokes booking only after slot selection and required
-customer details. It may confirm only after every required provider child
-succeeds, or one provider result durably covers all segments. Partial or unknown
-results require supported rollback/reconciliation and remain unconfirmed.
+availability, but it does not invoke sequential provider child writes. It may
+confirm only after one provider operation proves whole-party atomicity and all
+required staff/resource capacity; no current Square capability does so.
+Partial or unknown results remain unconfirmed and require owner review or
+reconciliation as applicable.
 `owner_manual` always creates a structured pending owner-review request;
 `manleai_calendar` will require one atomic all-child commit. Ambiguous service
 families still require catalog-backed clarification before availability.

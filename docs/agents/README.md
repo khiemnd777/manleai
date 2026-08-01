@@ -79,8 +79,9 @@ OpenAI's subagent docs say project-scoped custom agents live under `.codex/agent
 - Runtime path: supported group or party booking detection converts clear party size and guest-service counts into catalog-backed booking segments, then uses provider-neutral availability and booking tools.
 - Guardrail: party operations are all-or-none under their captured authority:
   `owner_manual` creates pending owner review, `manleai_calendar` requires one
-  atomic complete root/child commit, and `external_provider` requires complete
-  provider success or safe rollback/reconciliation. `party_booking_requests`
+  atomic complete root/child commit, and `external_provider` requires one
+  proven atomic whole-party provider operation; the current external path
+  performs no sequential child writes. `party_booking_requests`
   and owner workflow status changes are not confirmed appointments.
 
 ## Suggested Subagent Use

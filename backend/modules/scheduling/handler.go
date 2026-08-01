@@ -99,6 +99,15 @@ func (h *Handler) ExecuteAction(c *fiber.Ctx) error {
 	if errors.Is(err, booking.ErrAvailabilityQuoteStale) {
 		return respond.Error(c, fiber.StatusConflict, "AVAILABILITY_QUOTE_STALE", "Availability changed or expired. Check availability again.")
 	}
+	if errors.Is(err, booking.ErrSlotCommitConflict) {
+		return respond.Error(c, fiber.StatusConflict, "SLOT_COMMIT_CONFLICT", "The selected time is no longer available. Check availability again.")
+	}
+	if errors.Is(err, booking.ErrSlotClaimInProgress) {
+		return respond.Error(c, fiber.StatusAccepted, "SLOT_CLAIM_IN_PROGRESS", "This exact scheduling operation is still in progress.")
+	}
+	if errors.Is(err, booking.ErrSlotOutcomeUnknown) {
+		return respond.Error(c, fiber.StatusAccepted, "SLOT_OUTCOME_UNKNOWN", "The provider outcome cannot be confirmed safely yet.")
+	}
 	if errors.Is(err, pos.ErrNotFound) {
 		return respond.Error(c, fiber.StatusNotFound, "SCHEDULING_RESOURCE_NOT_FOUND", "Salon, service, staff, or target was not found.")
 	}

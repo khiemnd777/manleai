@@ -48,7 +48,13 @@ origin rows.
 
 `external_provider` has the only provider-backed confirming executor, implemented by
 `backend/modules/scheduling_external_provider.Adapter` delegating to the
-unchanged booking service. `owner_manual` has a ready, non-confirming executor
+booking service with V86 Atomic Slot Commit capability and claim gates. V87
+permits only a Square buyer-level, concrete-staff, single-create operation when
+current expiring evidence matches the exact connection, integration config,
+location, API version, and normalized OAuth scopes. Square seller-level create,
+all Square reschedule, external party create, and external resource-capacity
+execution remain request-only/fail-closed before provider dispatch.
+`owner_manual` has a ready, non-confirming executor
 in `backend/modules/scheduling_owner_manual`: availability returns
 `request_only`, and book/reschedule/cancel actions create or replay durable
 pending owner-review requests. It does not call a POS provider or fabricate an
@@ -70,12 +76,19 @@ owner-scoped current-token read. Square readiness exposes that value as
 `scheduling_authority` and sets `can_test_booking` and
 `can_enable_ai_booking` false unless it is `external_provider`. This is a gate
 for new work, not a rule that hides or strands persisted external-origin work.
+V86 adds the independent `atomic_slot_commit` readiness check and V87 makes it
+operation-specific. Both values remain false unless the selected provider can
+perform the requested operation and current exact database evidence exists.
+For Square, `can_enable_ai_booking` proves only supported buyer-level single
+create; conversation and scheduling actions still apply independent
+reschedule, party, and resource-capacity gates.
 The read-only `scheduling.Service.ResolveCreateSchedulingAuthority` resolves a
 create operation/retry lineage first and falls back to the current token only
 when no persisted origin exists. Square test create calls it after
 provider-free replay; it does not dispatch an executor or provider.
 
-Runtime confirmation remains unchanged: a Square/external-provider operation
+Runtime confirmation remains strict: an external create/reschedule first
+requires a committed V86 slot claim, and a Square/external-provider operation
 is confirmed, rescheduled, or cancelled only after provider success returns the
 required provider booking metadata and the backend persists it. An
 `owner_manual` result is always `pending_owner_review`, and the owner-review UI
@@ -1330,6 +1343,7 @@ satisfy these routes, and the tenant ID comes only from the fixed route.
 - `GET /api/platform/tenants/:tenant_id/technical/square/locations`
 - `POST /api/platform/tenants/:tenant_id/technical/square/select-location`
 - `POST /api/platform/tenants/:tenant_id/technical/square/sync`
+- `POST /api/platform/tenants/:tenant_id/technical/square/scheduling-capability/re-evaluate`
 - `POST /api/platform/tenants/:tenant_id/technical/square/ai-booking/enable`
 - `POST /api/platform/tenants/:tenant_id/technical/square/ai-booking/disable`
 - `/api/platform/tenants/:tenant_id/technical/manleai-calendar/*`
@@ -2983,6 +2997,13 @@ missing evidence returns `409 AVAILABILITY_QUOTE_REQUIRED`, while expired,
 consumed, provider-snapshot-stale, or payload-mismatched evidence returns
 `409 AVAILABILITY_QUOTE_STALE`.
 
+An availability quote is not a reservation. For capability-ready external
+create/reschedule, the first dispatch-capable transaction consumes the quote
+and installs the concrete staff/resource claim. A concurrent overlap returns
+`409 SLOT_COMMIT_CONFLICT` before any provider/customer write. Active claims
+are removed from later availability results; callers must re-query instead of
+reusing the losing slot.
+
 For safe retry availability, the returned quote is likewise fresh and
 single-use. The later booking retry must submit both that quote and the same
 `retry_of_attempt_id`; a normal current-authority quote or an old quote cannot
@@ -2993,9 +3014,10 @@ retain the backend quote proof attached to the selected offered slot and
 re-query provider availability immediately before create or reschedule. The
 runtime replaces the proof only when the refreshed slot has the same start,
 end, and ordered service/staff assignment. A changed or missing slot is
-re-offered and no POS write is dispatched. Party booking refreshes every child
-slot and quote before the first child write; a failed child preflight produces
-zero child writes for that attempt.
+re-offered and no POS write is dispatched. External party booking is currently
+fail-closed before any child write because the installed provider cannot prove
+one whole-party atomic operation. Internal `manleai_calendar` party booking
+retains its aggregate all-or-none transaction.
 
 Availability quotes are ephemeral authorization evidence, not the booking
 audit source of truth. The worker deletes unconsumed quotes only after expiry
@@ -3435,6 +3457,13 @@ stored in `scheduling_requests`, never mirrored into this ledger.
 
 `operation_key` is required and identifies one logical booking operation. It is generated once per dashboard action or deterministically from the conversation session. The backend stores a normalized request fingerprint under a salon-scoped unique operation claim before customer or POS side effects. Replaying the same key and logical intent returns the existing attempt and reuses its POS idempotency key without a second POS writer. Ephemeral availability quote IDs and slot-proof fingerprints may be refreshed for the same logical request after response loss and are not replay-identity fields; they remain mandatory and exact for the first claim that can dispatch. Reusing the same key with different customer, retry lineage, target, time, notes, or ordered service/staff intent returns `409 BOOKING_OPERATION_CONFLICT`.
 
+For a V86 external claim, an overlapping different operation returns
+`409 SLOT_COMMIT_CONFLICT`. An exact operation whose claim is still processing
+returns `202 SLOT_CLAIM_IN_PROGRESS`; an outcome that may have reached the
+provider but cannot yet be proved returns `202 SLOT_OUTCOME_UNKNOWN`. None of
+these responses is confirmation evidence. The booking and neutral scheduling
+handlers use the same status/code contract.
+
 The scheduling facade resolves an existing `operation_key` across persisted
 booking attempts and owner-manual scheduling requests, and requires
 `retry_of_attempt_id`, when present, to have the same originating authority.
@@ -3451,9 +3480,10 @@ scheduling actions enter through the same authority facade. Square-specific
 test, webhook, sync, and repair operations use the established external booking
 service where they are explicitly operating on external-provider state.
 
-After authority resolution chooses `external_provider`, the unchanged booking
-service creates a backend booking attempt before calling the active
-`POSProvider`. For
+After authority resolution chooses `external_provider`, the booking service
+requires matching adapter capability and current exact persisted evidence. It
+then creates the backend booking attempt, consumes the quote, and installs the
+V86 claim in one transaction before calling the active `POSProvider`. For
 multi-service booking, each segment is resolved to provider-neutral
 service/staff records and persisted in `booking_attempt_segments`; confirmed
 appointments snapshot the same ordered segments in `appointment_services`.
@@ -4765,7 +4795,16 @@ Readiness includes the Platform-authorized tenant's current
 `scheduling_authority`.
 `can_test_booking` and `can_enable_ai_booking` require
 `scheduling_authority=external_provider` in addition to their existing Square
-gates. `can_cancel_test_booking` remains based on the persisted latest external
+gates. The readiness-check list includes `atomic_slot_commit`; V87 completes it
+only for current buyer-level single-create evidence. The response also exposes
+`automatic_single_create`, `automatic_reschedule`, `automatic_party_create`,
+`resource_capacity`, `write_permission_mode`, `reconnect_required`,
+`evidence_current`, `evidence_verified_at`, `evidence_expires_at`,
+`blocker_code`, `connection_capability_version`, and
+`integration_config_version`. Square reschedule, party, and resource-capacity
+values are always false. `can_enable_ai_booking` is a backward-compatible
+single-create readiness signal, not a lifecycle or party capability. There is
+no UI/API bypass for this capability evidence. `can_cancel_test_booking` remains based on the persisted latest external
 test appointment so cleanup is not orphaned after a later authority switch.
 Readiness also includes `booking_write_blocked`, `booking_write_blocked_code`,
 `booking_write_blocked_reason`, and `booking_write_blocked_at` when the latest
@@ -4821,6 +4860,29 @@ Square call; exhaustion returns `429 TENANT_QUOTA_EXCEEDED` with `Retry-After`.
 }
 ```
 
+`POST /api/platform/tenants/:tenant_id/technical/square/scheduling-capability/re-evaluate`
+
+```json
+{
+  "action_key": "square-scheduling-capability-review-uuid",
+  "expected_connection_capability_version": 7,
+  "expected_integration_config_version": 12
+}
+```
+
+Re-evaluates Square scheduling safety from persisted tenant-scoped connection
+and integration configuration only. It makes no Square create, update, cancel,
+or other provider request. The client cannot submit capability booleans.
+`APPOINTMENTS_WRITE` without `APPOINTMENTS_ALL_WRITE` can produce current
+buyer-write evidence for concrete-staff single create. Seller-write, missing,
+unknown, or malformed scopes fail closed; reconnect or any booking-relevant
+connection/config/location/API-version change makes prior evidence stale.
+Exact action replay returns the same result with
+`X-Idempotent-Replay: true`; changed payload reuse, stale expected versions,
+and cross-tenant access fail without replacing immutable historical evidence.
+Only Platform Admin or an exactly delegated Platform Ops principal with
+`technical.write` can call this route, and the actual Platform actor is audited.
+
 `POST /api/integrations/square/test-booking` (retired; not registered)
 
 Safe-retry example; an initial write omits `retry_of_attempt_id`:
@@ -4856,7 +4918,10 @@ current mode. A current internal authority rejects an origin-free new Square
 test creation with
 `409 SCHEDULING_AUTHORITY_NOT_READY` before readiness/provider dispatch. The
 selected slot must come from the availability endpoint and include current
-quote evidence. Returns `201` only when Square returns an accepted booking ID;
+quote evidence. Square is accepted by the `atomic_slot_commit` gate only for
+current V87 buyer-write single-create evidence and a concrete staff assignment.
+Seller-write or stale evidence is rejected before dispatch. A capability-
+verified provider endpoint returns `201` only when it returns an accepted booking ID;
 returns `202` for unconfirmed `pos_pending`, `provider_pending`, or
 `fallback_pending` outcomes.
 
@@ -4921,7 +4986,9 @@ retry uses a new operation key.
 Sets `salons.ai_enabled=true` only when the tenant's current
 `scheduling_authority` is `external_provider`, Square is connected, a location
 is selected, services/staff/business hours are synced, and at least one service
-and staff member are AI-bookable. A current internal authority returns
+and staff member are AI-bookable, and buyer-level single-create
+`atomic_slot_commit` evidence is current. This does not enable automated Square
+reschedule, party create, or resource-capacity execution. A current internal authority returns
 `409 SCHEDULING_AUTHORITY_NOT_READY`. Square test booking create/cancel remains
 an optional POS write smoke test and is not an AI enablement gate.
 
@@ -4992,6 +5059,12 @@ aggregates for the requested salon. The response never includes worker
 instance/run IDs, raw errors, payloads, provider entity IDs, secrets, customer
 data, or cross-salon counts. Provider-specific Square rows are omitted when no
 relevant Square connection exists.
+
+V86 adds queue keys `external_slot_claims_pre_dispatch` and
+`external_slot_claims_unknown`. They expose only tenant-scoped counts and the
+oldest claim timestamp. The former is releasable only when recovery proves
+provider dispatch never started; the latter must remain claimed until exact
+reconciliation confirms provider creation or verifies non-creation.
 
 ```json
 {

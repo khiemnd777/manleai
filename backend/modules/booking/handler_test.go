@@ -169,3 +169,52 @@ func TestHandlerPreservesExternalAvailabilityQuoteRequiredMapping(t *testing.T) 
 		})
 	}
 }
+
+type slotCommitConflictHandlerService struct {
+	authorityNotReadyHandlerService
+}
+
+func (slotCommitConflictHandlerService) Create(context.Context, string, string, CreateBookingRequest) (*BookingAttempt, error) {
+	return nil, ErrSlotCommitConflict
+}
+
+func (slotCommitConflictHandlerService) Reschedule(context.Context, string, string, string, RescheduleRequest) (*Appointment, *BookingAttempt, error) {
+	return nil, nil, ErrSlotCommitConflict
+}
+
+func TestHandlerMapsSlotCommitConflictToRefreshable409(t *testing.T) {
+	handler := NewHandler(slotCommitConflictHandlerService{})
+	for _, test := range []struct {
+		name string
+		path string
+		fn   fiber.Handler
+	}{
+		{name: "create", path: "/salons/salon-1/booking-attempts", fn: handler.Create},
+		{name: "reschedule", path: "/salons/salon-1/appointments/appointment-1/reschedule", fn: handler.Reschedule},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app := fiber.New()
+			app.Post(test.path, test.fn)
+			req, err := http.NewRequest(http.MethodPost, test.path, bytes.NewBufferString(`{"operation_key":"operation-1"}`))
+			if err != nil {
+				t.Fatalf("create request: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			res, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("execute request: %v", err)
+			}
+			defer res.Body.Close()
+			if res.StatusCode != fiber.StatusConflict {
+				t.Fatalf("status=%d, want 409", res.StatusCode)
+			}
+			var payload respond.ErrorResponse
+			if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if payload.Error.Code != "SLOT_COMMIT_CONFLICT" {
+				t.Fatalf("error code=%q", payload.Error.Code)
+			}
+		})
+	}
+}

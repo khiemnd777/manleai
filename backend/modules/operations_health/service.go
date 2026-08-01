@@ -33,19 +33,21 @@ type displayPolicy struct {
 }
 
 var displayPolicies = map[string]displayPolicy{
-	"pos_sync_jobs":                  {"POS catalog sync", "/dashboard/integrations", true, 15 * time.Minute},
-	"booking_lease_recovery":         {"Booking lease recovery", "/dashboard/appointments", true, 5 * time.Minute},
-	"availability_quote_cleanup":     {"Availability quote cleanup", "/dashboard/appointments", false, 30 * time.Minute},
-	"square_booking_webhooks":        {"Square booking webhooks", "/dashboard/integrations", true, 5 * time.Minute},
-	"square_calendar_repair":         {"Square calendar repair", "/dashboard/integrations", true, 15 * time.Minute},
-	"conversation_retention":         {"Conversation retention", "/dashboard/calls", false, 6 * time.Hour},
-	"scheduling_pii_retention":       {"Scheduling PII retention", "/dashboard/appointments", false, 30 * time.Minute},
-	"tenant_registration_retention":  {"Registration request retention", "/platform/registration-requests", false, 30 * time.Minute},
-	"openai_runtime_verification":    {"OpenAI runtime verification", "/platform/tenants", false, 15 * time.Minute},
-	"notification_delivery":          {"Owner notification delivery", "/dashboard/appointments", false, 15 * time.Minute},
-	"customer_notification_delivery": {"Customer SMS delivery", "/dashboard/appointments", false, 15 * time.Minute},
-	"customer_notifications":         {"Customer SMS queue", "/dashboard/appointments", false, 15 * time.Minute},
-	"scheduling_requests":            {"Owner review requests", "/dashboard/appointments", false, 30 * time.Minute},
+	"pos_sync_jobs":                     {"POS catalog sync", "/dashboard/integrations", true, 15 * time.Minute},
+	"booking_lease_recovery":            {"Booking lease recovery", "/dashboard/appointments", true, 5 * time.Minute},
+	"external_slot_claims_pre_dispatch": {"External slot claims before dispatch", "/dashboard/appointments", true, 5 * time.Minute},
+	"external_slot_claims_unknown":      {"External slot outcomes awaiting reconciliation", "/dashboard/appointments", true, 5 * time.Minute},
+	"availability_quote_cleanup":        {"Availability quote cleanup", "/dashboard/appointments", false, 30 * time.Minute},
+	"square_booking_webhooks":           {"Square booking webhooks", "/dashboard/integrations", true, 5 * time.Minute},
+	"square_calendar_repair":            {"Square calendar repair", "/dashboard/integrations", true, 15 * time.Minute},
+	"conversation_retention":            {"Conversation retention", "/dashboard/calls", false, 6 * time.Hour},
+	"scheduling_pii_retention":          {"Scheduling PII retention", "/dashboard/appointments", false, 30 * time.Minute},
+	"tenant_registration_retention":     {"Registration request retention", "/platform/registration-requests", false, 30 * time.Minute},
+	"openai_runtime_verification":       {"OpenAI runtime verification", "/platform/tenants", false, 15 * time.Minute},
+	"notification_delivery":             {"Owner notification delivery", "/dashboard/appointments", false, 15 * time.Minute},
+	"customer_notification_delivery":    {"Customer SMS delivery", "/dashboard/appointments", false, 15 * time.Minute},
+	"customer_notifications":            {"Customer SMS queue", "/dashboard/appointments", false, 15 * time.Minute},
+	"scheduling_requests":               {"Owner review requests", "/dashboard/appointments", false, 30 * time.Minute},
 }
 
 func (s *Service) Get(ctx context.Context, salonID, ownerUserID string) (*StatusResponse, error) {

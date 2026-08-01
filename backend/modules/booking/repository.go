@@ -331,7 +331,7 @@ func (r *Repository) ResolveBookingCustomer(ctx context.Context, salonID string,
 		              last_synced_at = NULL,
 		              last_error = NULL,
 		              updated_at = now()
-	`, salonID, customerID, provider); err != nil {
+		`, salonID, customerID, provider); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -798,11 +798,23 @@ func (r *Repository) ClaimPendingBookingAttempt(ctx context.Context, record Pend
 	if attempt.StaffSelectionMode == "" {
 		attempt.StaffSelectionMode = StaffSelectionSpecific
 	}
-	return r.claimPendingOperation(ctx, attempt, record.LeaseExpiresAt, record.Segments)
+	var slotClaim *externalSlotClaimRequest
+	if record.RequireExternalSlotClaim {
+		slotClaim = &externalSlotClaimRequest{Safety: record.SchedulingSafety, Intervals: record.ClaimIntervals}
+	}
+	return r.claimPendingOperation(ctx, attempt, record.LeaseExpiresAt, record.Segments, slotClaim)
 }
 
 func (r *Repository) MarkBookingOperationStarted(ctx context.Context, salonID string, attemptID string, processingToken string, leaseExpiresAt time.Time) error {
-	result, err := r.db.ExecContext(ctx, `
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := lockBookingCalendarReconciliationTx(ctx, tx, salonID); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `
 		UPDATE booking_attempts
 		SET provider_outcome = $1,
 		    processing_lease_expires_at = $2,
@@ -824,7 +836,89 @@ func (r *Repository) MarkBookingOperationStarted(ctx context.Context, salonID st
 	if rows != 1 {
 		return ErrOperationInProgress
 	}
-	return nil
+	var claimRequired bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT external_slot_claim_required
+		FROM booking_attempts
+		WHERE id=$1 AND salon_id=$2
+	`, attemptID, salonID).Scan(&claimRequired); err != nil {
+		return err
+	}
+	if !claimRequired {
+		return tx.Commit()
+	}
+	var claimID string
+	err = tx.QueryRowContext(ctx, `
+		UPDATE external_slot_claims claim
+		SET state='dispatch_started', dispatch_started_at=now(),
+		    lease_expires_at=$1, version=claim.version+1, updated_at=now()
+		FROM external_provider_scheduling_capability_evidence evidence
+		JOIN salon_integration_configs config
+		  ON config.salon_id=evidence.salon_id
+		 AND config.id=evidence.integration_config_id
+		 AND config.provider=evidence.provider
+		 AND config.enabled=true
+		JOIN technical_resource_versions version
+		  ON version.salon_id=config.salon_id
+		 AND version.resource_type='integration_config'
+		 AND version.resource_id=config.provider
+		 AND version.version=evidence.config_version
+		JOIN booking_attempts attempt ON attempt.salon_id=evidence.salon_id
+		JOIN pos_connections connection
+		  ON connection.salon_id=attempt.salon_id
+		 AND connection.provider=evidence.provider
+		 AND (
+		      evidence.verification_contract_version='external-slot-commit-v1'
+		      OR (
+		          connection.id=evidence.connection_id
+		          AND connection.booking_write_capability_version=evidence.connection_capability_version
+		      )
+		 )
+		 AND connection.status='active'
+		 AND connection.last_sync_at IS NOT NULL
+		 AND connection.location_id=evidence.provider_location_id
+		 AND connection.snapshot_generation=attempt.provider_snapshot_generation
+		JOIN salons salon
+		  ON salon.id=attempt.salon_id
+		 AND salon.active_pos_provider=evidence.provider
+		WHERE claim.salon_id=$2
+		  AND claim.booking_attempt_id=$3
+		  AND claim.state='claimed_pre_dispatch'
+		  AND claim.processing_token=$4
+		  AND claim.provider_capability_evidence_id=evidence.id
+		  AND claim.provider_config_version=evidence.config_version
+		  AND attempt.id=claim.booking_attempt_id
+		  AND attempt.provider_location_id=claim.provider_location_id
+		  AND evidence.verified_at <= now()
+		  AND evidence.expires_at > now()
+		  AND (
+		      evidence.verification_contract_version='external-slot-commit-v1'
+		      OR (
+		          evidence.verification_contract_version='square-buyer-single-create-v1'
+		          AND evidence.write_permission_mode='buyer_write'
+		          AND evidence.provider_api_version=config.settings->>'api_version'
+		          AND evidence.oauth_scope_fingerprint=public.square_oauth_scope_fingerprint(connection.scopes)
+		      )
+		  )
+		  AND evidence.concrete_staff_assignment=true
+		  AND ((claim.operation_type='book' AND evidence.atomic_create_no_overlap=true)
+		       OR (claim.operation_type='reschedule' AND evidence.atomic_reschedule_no_overlap=true))
+		RETURNING claim.id::text
+	`, leaseExpiresAt, salonID, attemptID, processingToken).Scan(&claimID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrSchedulingAuthorityNotReady
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO external_slot_claim_events (
+			salon_id,claim_id,booking_attempt_id,action_key,event_type,from_state,to_state,payload
+		) VALUES ($1,$2,$3,'dispatch_started','dispatch_started','claimed_pre_dispatch','dispatch_started','{}'::jsonb)
+	`, salonID, claimID, attemptID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 type bookingLeaseExpiryPolicy struct {
@@ -1227,6 +1321,26 @@ func (r *Repository) expireBookingOperationLeaseCandidate(ctx context.Context, c
 				return false, err
 			}
 		}
+		switch item.OperationType {
+		case BookingActionBook:
+			if err := confirmExternalSlotClaimTx(ctx, tx, item.SalonID, item.AttemptID, terminalAppointment.POSAppointmentID, terminalAppointment.POSAppointmentVersion, "reconciliation_confirmed"); err != nil {
+				return false, err
+			}
+		case BookingActionReschedule:
+			if currentAppointment == nil {
+				return false, ErrOperationConflict
+			}
+			if err := confirmExternalRescheduleSlotClaimTx(ctx, tx, item.SalonID, item.AttemptID, terminalAppointment.POSAppointmentID, terminalAppointment.POSAppointmentVersion); err != nil {
+				return false, err
+			}
+		case BookingActionCancel:
+			if currentAppointment == nil {
+				return false, ErrOperationConflict
+			}
+			if err := releaseExternalAppointmentSlotClaimTx(ctx, tx, item.SalonID, terminalAppointment.ID, currentAppointment.BookingAttemptID, ExternalSlotClaimReleased, "cancel_confirmed", "cancel_confirmed"); err != nil {
+				return false, err
+			}
+		}
 		if err := tx.Commit(); err != nil {
 			return false, err
 		}
@@ -1290,6 +1404,23 @@ func (r *Repository) expireBookingOperationLeaseCandidate(ctx context.Context, c
 	if reconciliationRequired {
 		if err := ensureReconciliationTaskTx(ctx, tx, item.SalonID, item.AttemptID, item.ErrorMessage); err != nil {
 			return false, err
+		}
+	}
+	if item.OperationType != BookingActionCancel {
+		if policy.FailurePhase == "pre_dispatch" {
+			if err := releaseExternalSlotClaimTx(ctx, tx, item.SalonID, item.AttemptID, ExternalSlotClaimReleased, "lease_expired_pre_dispatch", "claim_released"); err != nil {
+				return false, err
+			}
+		} else {
+			attempt := BookingAttempt{
+				ID: item.AttemptID, SalonID: item.SalonID, POSProvider: item.Provider,
+				POSBookingID: item.POSBookingID, POSBookingVersion: item.POSBookingVersion,
+				ProviderOutcome: item.ProviderOutcome, Reconciliation: item.Reconciliation,
+				ErrorCode: policy.ErrorCode, ErrorMessage: item.ErrorMessage,
+			}
+			if err := recordExternalSlotClaimFallbackTx(ctx, tx, attempt); err != nil {
+				return false, err
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -1547,7 +1678,7 @@ func sameRetryProviderLocation(location sql.NullString, generation sql.NullInt64
 		fence.SnapshotGeneration >= generation.Int64
 }
 
-func (r *Repository) claimPendingOperation(ctx context.Context, attempt BookingAttempt, leaseExpiresAt time.Time, segments []BookingSegmentRecord) (*BookingOperationClaim, error) {
+func (r *Repository) claimPendingOperation(ctx context.Context, attempt BookingAttempt, leaseExpiresAt time.Time, segments []BookingSegmentRecord, slotClaim *externalSlotClaimRequest) (*BookingOperationClaim, error) {
 	requestedProcessingToken := attempt.ProcessingToken
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1577,6 +1708,9 @@ func (r *Repository) claimPendingOperation(ctx context.Context, attempt BookingA
 				SET processing_token = $1, processing_lease_expires_at = $2, updated_at = now()
 				WHERE id = $3 AND provider_outcome = $4 AND status = $5 AND superseded_at IS NULL
 			`, requestedProcessingToken, leaseExpiresAt, existingByOperationKey.ID, ProviderOutcomeNotStarted, StatusPOSPending); err != nil {
+				return nil, err
+			}
+			if err := reacquireExternalSlotClaimTx(ctx, tx, attempt.SalonID, existingByOperationKey.ID, requestedProcessingToken, leaseExpiresAt); err != nil {
 				return nil, err
 			}
 			existingByOperationKey.ProcessingToken = requestedProcessingToken
@@ -1688,6 +1822,9 @@ func (r *Repository) claimPendingOperation(ctx context.Context, attempt BookingA
 			`, requestedProcessingToken, leaseExpiresAt, attempt.ID, ProviderOutcomeNotStarted, StatusPOSPending); err != nil {
 				return nil, err
 			}
+			if err := reacquireExternalSlotClaimTx(ctx, tx, attempt.SalonID, attempt.ID, requestedProcessingToken, leaseExpiresAt); err != nil {
+				return nil, err
+			}
 			attempt.ProcessingToken = requestedProcessingToken
 			value := leaseExpiresAt
 			attempt.ProcessingLeaseEnds = &value
@@ -1706,6 +1843,7 @@ func (r *Repository) claimPendingOperation(ctx context.Context, attempt BookingA
 	}
 
 	inserted := false
+	slotConflict := false
 	var lease sql.NullTime
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO booking_attempts (
@@ -1851,11 +1989,25 @@ func (r *Repository) claimPendingOperation(ctx context.Context, attempt BookingA
 				return nil, err
 			}
 		}
+		if slotClaim != nil {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE booking_attempts
+				SET external_slot_claim_required=true, updated_at=now()
+				WHERE id=$1 AND salon_id=$2
+			`, attempt.ID, attempt.SalonID); err != nil {
+				return nil, err
+			}
+			conflict, err := insertExternalSlotClaimTx(ctx, tx, &attempt, slotClaim)
+			if err != nil {
+				return nil, err
+			}
+			slotConflict = conflict
+		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
 
-	if !inserted {
+	if !inserted && !slotConflict {
 		isRetry := attempt.RetryOfAttemptID != ""
 		row := tx.QueryRowContext(ctx, bookingOperationSelectSQL+`
 			WHERE ba.salon_id = $1
@@ -1890,6 +2042,9 @@ func (r *Repository) claimPendingOperation(ctx context.Context, attempt BookingA
 			`, requestedProcessingToken, leaseExpiresAt, attempt.ID, ProviderOutcomeNotStarted, StatusPOSPending); err != nil {
 				return nil, err
 			}
+			if err := reacquireExternalSlotClaimTx(ctx, tx, attempt.SalonID, attempt.ID, requestedProcessingToken, leaseExpiresAt); err != nil {
+				return nil, err
+			}
 			attempt.ProcessingToken = requestedProcessingToken
 			value := leaseExpiresAt
 			attempt.ProcessingLeaseEnds = &value
@@ -1903,7 +2058,7 @@ func (r *Repository) claimPendingOperation(ctx context.Context, attempt BookingA
 	if err := r.hydrateClaimAttempt(ctx, &attempt); err != nil {
 		return nil, err
 	}
-	return &BookingOperationClaim{Attempt: &attempt, Acquired: inserted}, nil
+	return &BookingOperationClaim{Attempt: &attempt, Acquired: inserted && !slotConflict, Conflict: slotConflict}, nil
 }
 
 func validateAppointmentActionProviderFenceTx(ctx context.Context, tx *sql.Tx, attempt BookingAttempt) error {
@@ -2769,6 +2924,9 @@ func (r *Repository) SaveConfirmedBooking(ctx context.Context, record ConfirmedB
 		if err := ensureReconciliationTaskTx(ctx, tx, record.SalonID, attempt.ID, attempt.ErrorMessage); err != nil {
 			return nil, err
 		}
+		if err := recordExternalSlotClaimFallbackTx(ctx, tx, attempt); err != nil {
+			return nil, err
+		}
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
@@ -2870,6 +3028,9 @@ func (r *Repository) SaveConfirmedBooking(ctx context.Context, record ConfirmedB
 		if err != nil {
 			return nil, err
 		}
+	}
+	if err := confirmExternalSlotClaimTx(ctx, tx, record.SalonID, attempt.ID, record.POSBookingID, record.POSBookingVersion, "provider_confirmed"); err != nil {
+		return nil, err
 	}
 
 	payload := ownerNotificationPayload(NotificationTypeBookingConfirmed, record.SalonID, attempt.ID, appointment.ID, map[string]any{
@@ -3062,6 +3223,9 @@ func (r *Repository) SaveFallbackBooking(ctx context.Context, record FallbackBoo
 			"booking-confirmed:"+attempt.ID, payload); err != nil {
 			return nil, err
 		}
+		if err := confirmExternalSlotClaimTx(ctx, tx, record.SalonID, attempt.ID, attempt.POSBookingID, attempt.POSBookingVersion, "reconciliation_confirmed"); err != nil {
+			return nil, err
+		}
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
@@ -3131,6 +3295,9 @@ func (r *Repository) SaveFallbackBooking(ctx context.Context, record FallbackBoo
 		if err := ensureReconciliationTaskTx(ctx, tx, record.SalonID, attempt.ID, attempt.ErrorMessage); err != nil {
 			return nil, err
 		}
+	}
+	if err := recordExternalSlotClaimFallbackTx(ctx, tx, attempt); err != nil {
+		return nil, err
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -3688,7 +3855,11 @@ func (r *Repository) ClaimPendingAppointmentAction(ctx context.Context, record P
 	if attempt.StaffSelectionMode == "" {
 		attempt.StaffSelectionMode = StaffSelectionSpecific
 	}
-	return r.claimPendingOperation(ctx, attempt, record.LeaseExpiresAt, segments)
+	var slotClaim *externalSlotClaimRequest
+	if record.OperationType == BookingActionReschedule && record.RequireExternalSlotClaim {
+		slotClaim = &externalSlotClaimRequest{Safety: record.SchedulingSafety, Intervals: record.ClaimIntervals}
+	}
+	return r.claimPendingOperation(ctx, attempt, record.LeaseExpiresAt, segments, slotClaim)
 }
 
 func loadDirectMutationAppointmentTx(ctx context.Context, tx *sql.Tx, record AppointmentActionRef) (*Appointment, error) {
@@ -3947,6 +4118,9 @@ func (r *Repository) SaveRescheduledAppointment(ctx context.Context, record Resc
 	if err != nil {
 		return nil, err
 	}
+	if err := confirmExternalRescheduleSlotClaimTx(ctx, tx, record.Appointment.SalonID, attempt.ID, record.Appointment.POSAppointmentID, finalPOSBookingVersion); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -4080,6 +4254,9 @@ func (r *Repository) SaveCancelledAppointment(ctx context.Context, record Cancel
 		if err != nil {
 			return nil, err
 		}
+	}
+	if err := releaseExternalAppointmentSlotClaimTx(ctx, tx, record.Appointment.SalonID, record.Appointment.ID, record.Appointment.BookingAttemptID, ExternalSlotClaimReleased, "cancel_confirmed", "cancel_confirmed"); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -4259,6 +4436,15 @@ func (r *Repository) SaveAppointmentActionFallback(ctx context.Context, record A
 			}
 			return nil, err
 		}
+		if attempt.OperationType == BookingActionReschedule {
+			if err := confirmExternalRescheduleSlotClaimTx(ctx, tx, attempt.SalonID, attempt.ID, currentAppointment.POSAppointmentID, currentAppointment.POSAppointmentVersion); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := releaseExternalAppointmentSlotClaimTx(ctx, tx, attempt.SalonID, record.Appointment.ID, record.Appointment.BookingAttemptID, ExternalSlotClaimReleased, "cancel_confirmed", "cancel_confirmed"); err != nil {
+				return nil, err
+			}
+		}
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
@@ -4337,6 +4523,11 @@ func (r *Repository) SaveAppointmentActionFallback(ctx context.Context, record A
 	}
 	if attempt.Reconciliation == ReconciliationRequired {
 		if err := ensureReconciliationTaskTx(ctx, tx, record.SalonID, attempt.ID, attempt.ErrorMessage); err != nil {
+			return nil, err
+		}
+	}
+	if attempt.OperationType == BookingActionReschedule {
+		if err := recordExternalSlotClaimFallbackTx(ctx, tx, attempt); err != nil {
 			return nil, err
 		}
 	}
@@ -5124,6 +5315,11 @@ func (r *Repository) ResolveReconciliationTask(ctx context.Context, salonID stri
 		if err := requireExactlyOneRow(result, err); err != nil {
 			return nil, err
 		}
+		if item.OperationType != BookingActionCancel {
+			if err := releaseExternalSlotClaimTx(ctx, tx, salonID, attemptID, ExternalSlotClaimReleased, "reconciliation_not_created", "claim_released"); err != nil {
+				return nil, err
+			}
+		}
 	case ReconciliationActionEscalated:
 		taskStatus = "escalated"
 		result, err := tx.ExecContext(ctx, `
@@ -5221,6 +5417,33 @@ func (r *Repository) ResolveReconciliationTask(ctx context.Context, salonID stri
 				WHERE id = $2 AND salon_id = $3 AND pos_sync_status = 'synced'
 				`, attemptID, mirror.AppointmentID, salonID)
 			if err := requireExactlyOneRow(result, err); err != nil {
+				return nil, err
+			}
+		}
+		switch item.OperationType {
+		case BookingActionBook:
+			if err := confirmExternalSlotClaimTx(ctx, tx, salonID, attemptID, mirror.ProviderAppointmentID, mirror.ProviderAppointmentVersion, "reconciliation_confirmed"); err != nil {
+				return nil, err
+			}
+		case BookingActionReschedule, BookingActionCancel:
+			var originAttemptID string
+			if err := tx.QueryRowContext(ctx, `
+				SELECT booking_attempt_id::text
+				FROM appointments
+				WHERE salon_id=$1 AND id=$2
+				  AND scheduling_authority='external_provider'
+				FOR UPDATE
+			`, salonID, item.TargetAppointmentID).Scan(&originAttemptID); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return nil, ErrOperationConflict
+				}
+				return nil, err
+			}
+			if item.OperationType == BookingActionReschedule {
+				if err := confirmExternalRescheduleSlotClaimTx(ctx, tx, salonID, attemptID, mirror.ProviderAppointmentID, mirror.ProviderAppointmentVersion); err != nil {
+					return nil, err
+				}
+			} else if err := releaseExternalAppointmentSlotClaimTx(ctx, tx, salonID, item.TargetAppointmentID, originAttemptID, ExternalSlotClaimReleased, "cancel_confirmed", "cancel_confirmed"); err != nil {
 				return nil, err
 			}
 		}

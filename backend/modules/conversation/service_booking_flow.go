@@ -25,7 +25,7 @@ func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnR
 	if s.bookingTool == nil {
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, bookingErrorReply(), services, staff, cfg)
 	}
-	if option, ok := selectedPartySplitOption(session.PartyPlan); ok {
+	if _, ok := selectedPartySplitOption(session.PartyPlan); ok {
 		if configuredConversationBookingMode(cfg) == scheduling.BookingModePendingApproval && s.schedulingTool != nil {
 			return s.tryNeutralBooking(ctx, ownerUserID, turn, session, services, staff, cfg, knowledge)
 		}
@@ -41,7 +41,7 @@ func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnR
 				return s.tryNeutralBooking(ctx, ownerUserID, turn, session, services, staff, cfg, knowledge)
 			}
 		}
-		return s.tryPartySplitBooking(ctx, ownerUserID, turn, session, option, services, staff, cfg, knowledge)
+		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonGroupBooking, "I cannot confirm this group booking atomically with the selected provider. The owner needs to review it, and no group appointment is confirmed.", services, staff, cfg)
 	}
 	if s.schedulingTool != nil {
 		return s.tryNeutralBooking(ctx, ownerUserID, turn, session, services, staff, cfg, knowledge)
@@ -79,6 +79,9 @@ func (s *Service) tryBooking(ctx context.Context, ownerUserID string, turn TurnR
 	})
 	recordTurnTiming(ctx, TurnTimingStageAvailabilityPOS, startedAt, turnTimingResult(err))
 	if err != nil {
+		if schedulingAvailabilityRefreshRequired(err) {
+			return s.reofferBookingAfterConflict(ctx, ownerUserID, turn, session, services, staff, cfg, knowledge, booking.SchedulingAuthorityExternalProvider)
+		}
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, bookingErrorReply(), services, staff, cfg)
 	}
 
@@ -160,11 +163,11 @@ func (s *Service) tryNeutralBooking(ctx context.Context, ownerUserID string, tur
 	result, err := s.schedulingTool.ExecuteConversationAction(ctx, turn.SalonID, ownerUserID, conversationPolicyFenceForExecution(session, cfg), req)
 	recordTurnTiming(ctx, TurnTimingStageAvailabilityPOS, startedAt, turnTimingResult(err))
 	if err != nil {
-		if bookingMode == scheduling.BookingModeConfirmedBooking && authority == booking.SchedulingAuthorityManleAICalendar && schedulingAvailabilityRefreshRequired(err) {
-			if reviewedInternalParty {
+		if bookingMode == scheduling.BookingModeConfirmedBooking && schedulingAvailabilityRefreshRequired(err) {
+			if authority == booking.SchedulingAuthorityManleAICalendar && reviewedInternalParty {
 				return s.reofferInternalPartyBookingAfterConflict(ctx, ownerUserID, turn, session, services, staff, cfg, knowledge)
 			}
-			return s.reofferInternalBookingAfterConflict(ctx, ownerUserID, turn, session, services, staff, cfg, knowledge)
+			return s.reofferBookingAfterConflict(ctx, ownerUserID, turn, session, services, staff, cfg, knowledge, authority)
 		}
 		return s.saveHandoffTurn(ctx, turn, session, HandoffReasonBookingUnavailable, bookingErrorReply(), services, staff, cfg)
 	}
@@ -194,11 +197,12 @@ func schedulingAvailabilityRefreshRequired(err error) bool {
 	return errors.As(err, &typed) && typed.AvailabilityRefreshRequired()
 }
 
-func (s *Service) reofferInternalBookingAfterConflict(ctx context.Context, ownerUserID string, turn TurnRecord, session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet) (*Session, error) {
+func (s *Service) reofferBookingAfterConflict(ctx context.Context, ownerUserID string, turn TurnRecord, session Session, services []ServiceOption, staff []StaffOption, cfg *RuntimeConfig, knowledge []KnowledgeSnippet, authority string) (*Session, error) {
 	preferredDate := strings.TrimSpace(session.RequestedDate)
 	if preferredDate == "" && session.RequestedStartTime != nil {
 		preferredDate = session.RequestedStartTime.In(timezoneLocation(timezoneFromConfig(cfg))).Format("2006-01-02")
 	}
+	session.DialogState.BookingOperationSequence++
 	session.DialogState = resetDialogProgress(session.DialogState, DialogPhaseDrafting)
 	session.RequestedStartTime = nil
 	clearSelectedAvailabilityQuote(&session)
@@ -211,20 +215,20 @@ func (s *Service) reofferInternalBookingAfterConflict(ctx context.Context, owner
 
 	refreshErr := s.offerAvailableSlots(ctx, ownerUserID, &turn, &session, services, staff, preferredDate, true, cfg)
 	if refreshErr != nil {
-		turn.ToolMessage = "Internal scheduling evidence changed before commit; availability must be checked again."
+		turn.ToolMessage = "Scheduling evidence changed before commit; availability must be checked again."
 		turn.AIMessage = "I couldn't verify that opening, so I did not book it. What other day or time works?"
 		syncTurnUpdate(&turn, session, services, staff, cfg)
 	} else {
 		turn.AIMessage = "That opening changed before I could book it, so nothing was booked. " + turn.AIMessage
 	}
 	turn.ToolMetadata = mergeMetadata(turn.ToolMetadata, map[string]any{
-		"scheduling_authority": booking.SchedulingAuthorityManleAICalendar,
+		"scheduling_authority": authority,
 		"booking_result":       "availability_refresh_required",
 		"appointment_created":  false,
 	})
 	turn.ReplyPolicy = ReplyPolicyOperationalFact
 	s.applyReplyGenerator(ctx, &turn, session, services, cfg, "requested_time", "requested_time", knowledge)
-	finalizeTurnMetadata(&turn, turn.Session, session, "requested_time", "requested_time", "internal_availability_changed_before_commit")
+	finalizeTurnMetadata(&turn, turn.Session, session, "requested_time", "requested_time", "availability_changed_before_commit")
 	return s.store.SaveTurn(ctx, turn)
 }
 
@@ -1424,6 +1428,9 @@ func sessionHasSchedulingTarget(session Session) bool {
 
 func conversationOperationKey(session Session, operation string, suffixes ...string) string {
 	parts := []string{"conversation", strings.TrimSpace(session.ID), strings.TrimSpace(operation)}
+	if sequence := normalizedDialogState(session.DialogState).BookingOperationSequence; sequence > 0 {
+		parts = append(parts, "attempt", strconv.Itoa(sequence))
+	}
 	for _, suffix := range suffixes {
 		if value := strings.TrimSpace(suffix); value != "" {
 			parts = append(parts, value)

@@ -23,6 +23,7 @@ func RegisterPlatformRoutes(api fiber.Router, handler *PlatformHandler, jwtSecre
 	group.Get("/locations", handler.Locations)
 	group.Post("/select-location", handler.SelectLocation)
 	group.Post("/sync", handler.Sync)
+	group.Post("/scheduling-capability/re-evaluate", handler.ReevaluateSchedulingCapability)
 	group.Post("/ai-booking/enable", handler.EnableAIBooking)
 	group.Post("/ai-booking/disable", handler.DisableAIBooking)
 	operations := api.Group("/platform/tenants/:tenant_id/operations/square-webhooks", middleware.RequireAuth(jwtSecret))

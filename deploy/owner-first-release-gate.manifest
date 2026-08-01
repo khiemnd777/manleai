@@ -10,6 +10,7 @@ BACKEND_RACE_PACKAGES=(
   ./internal/openairuntime
   ./internal/middleware
   ./internal/ratelimit
+  ./internal/schedulingload
   ./modules/access
   ./modules/auth
   ./modules/booking
@@ -41,6 +42,7 @@ POSTGRES_MIGRATION_PACKAGES=(
 )
 
 POSTGRES_INTEGRATION_PACKAGES=(
+  ./internal/schedulingload
   ./sampledata
   ./modules/access
   ./modules/business
@@ -98,6 +100,8 @@ SECURITY_CONTRACT_PACKAGES=(
 )
 
 SECURITY_CONTRACT_TEST_FILES=(
+  backend/migrations/v86_safety_test.go
+  backend/migrations/v87_safety_test.go
   backend/migrations/v73_safety_test.go
   backend/migrations/v74_safety_test.go
   backend/migrations/v75_safety_test.go
@@ -131,6 +135,7 @@ SECURITY_CONTRACT_TEST_FILES=(
   frontend/lib/api/session.test.ts
   frontend/lib/api/browser-session.test.ts
   frontend/lib/security/content-security-policy.test.ts
+  frontend/features/platform/technical-integration-settings-contract.test.ts
   landing/lib/security/content-security-policy.test.ts
   pos-calendar/lib/api/browser-session.test.ts
   pos-calendar/lib/security/content-security-policy.test.ts
@@ -145,6 +150,7 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/business/repository_integration_test.go
   backend/modules/business/service_test.go
   backend/modules/booking/handler_test.go
+  backend/modules/booking/external_slot_claim_repository_integration_test.go
   backend/modules/booking/repository_integration_test.go
   backend/modules/booking/service_test.go
   backend/modules/config_transfer/repository_integration_test.go
@@ -181,6 +187,8 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/pos/platform_support_routes_test.go
   backend/modules/pos/types_test.go
   backend/modules/pos/repository_integration_test.go
+  backend/modules/pos/repository_scheduling_capability_integration_test.go
+  backend/modules/pos/repository_scheduling_capability_test.go
   backend/modules/pos/repository_alias_ownership_integration_test.go
   backend/modules/pos/platform_ai_runtime_integration_test.go
   backend/modules/pos_square/adapter_test.go
@@ -214,6 +222,9 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/voice_openai/adapter_constructor_test.go
   backend/modules/voice_twilio/adapter_test.go
   backend/modules/voice_twilio/handler_test.go
+  backend/internal/schedulingload/report_test.go
+  backend/internal/schedulingload/runner_integration_test.go
+  backend/internal/schedulingload/source_guard_test.go
   backend/migrations/v59_safety_test.go
   backend/migrations/v60_safety_test.go
   backend/migrations/v61_safety_test.go

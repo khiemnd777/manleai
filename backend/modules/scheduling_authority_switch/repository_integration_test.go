@@ -178,10 +178,38 @@ func TestRepositoryPostgresCommitRollbackConcurrencyReplayAndLiveLeaseFence(t *t
 		t.Fatalf("insert Phase 5B staff: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO pos_connections (salon_id,provider,status,location_id,snapshot_generation,last_sync_at)
-		VALUES ($1,'square','active','phase5b-location',6,now())
+		INSERT INTO pos_connections (salon_id,provider,status,location_id,snapshot_generation,scopes,last_sync_at)
+		VALUES ($1,'square','active','phase5b-location',6,ARRAY['APPOINTMENTS_WRITE'],now())
 	`, salonID); err != nil {
 		t.Fatalf("insert Phase 5B connection: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO salon_integration_configs(salon_id,provider,enabled,settings)
+		VALUES($1,'square',true,'{"api_version":"2026-05-20"}'::jsonb)
+	`, salonID); err != nil {
+		t.Fatalf("insert Phase 5B Square config: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO technical_resource_versions(salon_id,resource_type,resource_id,version)
+		VALUES($1,'integration_config','square',1)
+		ON CONFLICT(salon_id,resource_type,resource_id) DO UPDATE SET version=1
+	`, salonID); err != nil {
+		t.Fatalf("insert Phase 5B Square config version: %v", err)
+	}
+	var connectionCapabilityVersion int64
+	if err := db.QueryRowContext(ctx, `
+		SELECT booking_write_capability_version
+		FROM pos_connections
+		WHERE salon_id=$1 AND provider='square'
+	`, salonID).Scan(&connectionCapabilityVersion); err != nil {
+		t.Fatalf("load Phase 5B connection capability version: %v", err)
+	}
+	if capability, replayed, err := pos.NewRepository(db).ReevaluateSquareSchedulingCapability(ctx, pos.SchedulingCapabilityEvaluationInput{
+		SalonID: salonID, ActorUserID: ownerID, ActionKey: "phase5b-square-capability",
+		RequestFingerprint: strings.Repeat("9", 64), ExpectedConnectionCapabilityVersion: connectionCapabilityVersion,
+		ExpectedIntegrationConfigVersion: 1,
+	}); err != nil || replayed || !capability.AutomaticSingleCreate || !capability.EvidenceCurrent {
+		t.Fatalf("seed Phase 5B Square capability result/replay/error=%#v/%t/%v", capability, replayed, err)
 	}
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO pos_entity_links (salon_id,entity_type,entity_id,provider,provider_entity_id,provider_version,sync_status,last_synced_at)

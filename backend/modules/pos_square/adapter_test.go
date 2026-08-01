@@ -102,15 +102,18 @@ func TestDoJSONSendsSquareVersionHeader(t *testing.T) {
 	}
 }
 
-func TestSquareScopesIncludeProductionDemoSetupWritePermissions(t *testing.T) {
+func TestSquareScopesUseBuyerBookingWritesInProduction(t *testing.T) {
 	scopes := map[string]bool{}
 	for _, scope := range squareScopes(config.SquareConfig{Environment: "production"}) {
 		scopes[scope] = true
 	}
-	for _, required := range []string{"APPOINTMENTS_READ", "APPOINTMENTS_ALL_READ", "APPOINTMENTS_WRITE", "APPOINTMENTS_ALL_WRITE", "ITEMS_WRITE", "EMPLOYEES_WRITE"} {
+	for _, required := range []string{"APPOINTMENTS_READ", "APPOINTMENTS_ALL_READ", "APPOINTMENTS_WRITE", "ITEMS_WRITE", "EMPLOYEES_WRITE"} {
 		if !scopes[required] {
 			t.Fatalf("squareScopes missing %s", required)
 		}
+	}
+	if scopes["APPOINTMENTS_ALL_WRITE"] {
+		t.Fatalf("production scope list must not request seller-level APPOINTMENTS_ALL_WRITE")
 	}
 }
 
@@ -233,8 +236,8 @@ func TestOAuthURLSendsSessionFalseInProduction(t *testing.T) {
 	for _, scope := range scopeValues {
 		scopes[scope] = true
 	}
-	if !scopes["APPOINTMENTS_ALL_WRITE"] {
-		t.Fatalf("production OAuth scope should include APPOINTMENTS_ALL_WRITE: %v", scopeValues)
+	if !scopes["APPOINTMENTS_WRITE"] || scopes["APPOINTMENTS_ALL_WRITE"] {
+		t.Fatalf("production OAuth scope must request buyer write without seller write: %v", scopeValues)
 	}
 }
 

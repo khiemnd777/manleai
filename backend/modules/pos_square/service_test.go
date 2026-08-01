@@ -96,14 +96,17 @@ func TestBuildReadinessAllowsEnableWhenSquareIsBookingReady(t *testing.T) {
 		AppointmentStatus: booking.StatusConfirmed,
 		POSBookingID:      "booking_1",
 	}, nil, nil)
-	if !confirmed.CanTestBooking {
-		t.Fatalf("expected test booking to be allowed")
+	if confirmed.CanTestBooking {
+		t.Fatalf("test booking must fail closed without verified atomic no-overlap capability")
 	}
 	if !confirmed.CanCancelTestBooking {
 		t.Fatalf("expected cancel test booking to be allowed")
 	}
-	if !confirmed.CanEnableAIBooking {
-		t.Fatalf("enable should be allowed when Square is connected, synced, and booking-ready")
+	if confirmed.CanEnableAIBooking {
+		t.Fatalf("enable must remain blocked without verified atomic no-overlap capability")
+	}
+	if check := findReadinessCheck(confirmed.Checks, "atomic_slot_commit"); check == nil || check.Complete {
+		t.Fatalf("atomic slot commit check=%#v, want incomplete", check)
 	}
 
 	cancelled := buildReadiness(false, booking.SchedulingAuthorityExternalProvider, connection, services, staff, periods, &booking.TestBookingRecord{
@@ -115,13 +118,13 @@ func TestBuildReadinessAllowsEnableWhenSquareIsBookingReady(t *testing.T) {
 	if cancelled.CanCancelTestBooking {
 		t.Fatalf("cancel should not be allowed after test booking is cancelled")
 	}
-	if !cancelled.CanEnableAIBooking {
-		t.Fatalf("enable should remain allowed after cancelled test booking")
+	if cancelled.CanEnableAIBooking {
+		t.Fatalf("cancelled test booking must not bypass atomic slot safety")
 	}
 
 	withoutTest := buildReadiness(false, booking.SchedulingAuthorityExternalProvider, connection, services, staff, periods, nil, nil, nil)
-	if !withoutTest.CanEnableAIBooking {
-		t.Fatalf("enable should not require an optional Square test booking")
+	if withoutTest.CanEnableAIBooking {
+		t.Fatalf("enable must remain blocked without atomic slot safety")
 	}
 
 	pending := buildReadiness(false, booking.SchedulingAuthorityExternalProvider, connection, services, staff, periods, &booking.TestBookingRecord{
@@ -133,8 +136,35 @@ func TestBuildReadinessAllowsEnableWhenSquareIsBookingReady(t *testing.T) {
 	if pending.CanTestBooking || pending.CanCancelTestBooking {
 		t.Fatalf("another test write must be blocked while the prior operation is in flight")
 	}
-	if !pending.CanEnableAIBooking {
-		t.Fatalf("an optional in-flight test must not redefine the independent AI enablement gate")
+	if pending.CanEnableAIBooking {
+		t.Fatalf("an in-flight test must not bypass atomic slot safety")
+	}
+}
+
+func TestBuildReadinessBuyerEvidenceEnablesOnlySingleCreate(t *testing.T) {
+	now := time.Now().UTC()
+	connection := &pos.Connection{ID: "connection-1", Status: pos.StatusActive, LocationID: "location-1", LastSyncAt: &now}
+	services := []pos.Service{{Active: true, AIBookable: true, DurationMinutes: 45, SyncStatus: pos.SyncStatusSynced, POSServiceID: "service-1", POSServiceVersion: 1, POSLinked: true}}
+	staff := []pos.StaffMember{{Active: true, AIBookable: true, SyncStatus: pos.SyncStatusSynced, POSStaffID: "staff-1", POSLinked: true}}
+	periods := []pos.BusinessHourPeriod{{Provider: pos.ProviderSquare, Source: pos.BusinessHourSourceImported}}
+	capability := pos.SchedulingCapabilityEvaluation{
+		AutomaticSingleCreate: true, WritePermissionMode: pos.SchedulingWriteModeBuyer,
+		EvidenceCurrent: true, ConnectionCapabilityVersion: 4, IntegrationConfigVersion: 6,
+	}
+	readiness := buildReadiness(false, booking.SchedulingAuthorityExternalProvider, connection, services, staff, periods, nil, nil, nil, capability)
+	if !readiness.CanEnableAIBooking || !readiness.CanTestBooking || !readiness.AutomaticSingleCreate {
+		t.Fatalf("buyer single-create readiness=%#v", readiness)
+	}
+	if readiness.AutomaticReschedule || readiness.AutomaticPartyCreate || readiness.ResourceCapacity {
+		t.Fatalf("unsupported capabilities became ready: %#v", readiness)
+	}
+
+	capability.WritePermissionMode = pos.SchedulingWriteModeSeller
+	capability.AutomaticSingleCreate = false
+	capability.ReconnectRequired = true
+	readiness = buildReadiness(false, booking.SchedulingAuthorityExternalProvider, connection, services, staff, periods, nil, nil, nil, capability)
+	if readiness.CanEnableAIBooking || readiness.CanTestBooking || readiness.AutomaticSingleCreate || !readiness.ReconnectRequired {
+		t.Fatalf("seller-write readiness did not fail closed: %#v", readiness)
 	}
 }
 
@@ -193,8 +223,8 @@ func TestBuildReadinessReportsInternalAuthorityWithoutHidingSquareSetup(t *testi
 	if readiness.CanTestBooking || readiness.CanEnableAIBooking {
 		t.Fatalf("internal authority must block Square create/enable gates: %#v", readiness)
 	}
-	if !readiness.canTestExternalProviderBooking() {
-		t.Fatalf("provider setup is ready and must remain available for persisted external-origin retries")
+	if readiness.canTestExternalProviderBooking() {
+		t.Fatalf("new provider writes must fail closed without verified atomic no-overlap capability")
 	}
 	if !readiness.CanCancelTestBooking {
 		t.Fatalf("existing external-origin test appointment must remain cancellable after an authority switch")
@@ -206,8 +236,8 @@ func TestBuildReadinessReportsInternalAuthorityWithoutHidingSquareSetup(t *testi
 		}
 	}
 	target := buildSchedulingTargetReadiness(pos.ProviderSquare, readiness)
-	if !target.Ready || !target.AvailabilityReady || !target.ExecutionReady || len(target.Blockers) != 0 {
-		t.Fatalf("external target readiness must use provider evidence independently of current authority: %#v", target)
+	if target.Ready || !target.AvailabilityReady || target.ExecutionReady || len(target.ExecutionBlockers) == 0 {
+		t.Fatalf("external availability may remain ready while unsafe execution is blocked: %#v", target)
 	}
 	wrongAdapter := buildSchedulingTargetReadiness("another-provider", readiness)
 	if wrongAdapter.Ready || len(wrongAdapter.Blockers) == 0 || wrongAdapter.Blockers[0].Code != "EXTERNAL_PROVIDER_SELECT_POS_ADAPTER" {
@@ -622,8 +652,8 @@ func TestBuildReadinessBlocksEnableWhenCreateBookingPermissionDenied(t *testing.
 		CreatedAt:    now,
 	}, nil)
 
-	if !readiness.CanTestBooking {
-		t.Fatalf("test booking should remain available so the owner can verify recovery")
+	if readiness.CanTestBooking {
+		t.Fatalf("test booking must remain blocked by atomic slot safety")
 	}
 	if readiness.CanEnableAIBooking {
 		t.Fatalf("enable should be blocked while Square create-booking writes are rejected")
@@ -664,8 +694,11 @@ func TestBuildReadinessClearsCreateBookingBlockerAfterLaterSuccessfulTest(t *tes
 	if readiness.BookingWriteBlocked {
 		t.Fatalf("later successful test booking should clear stale create-booking blocker")
 	}
-	if !readiness.CanEnableAIBooking {
-		t.Fatalf("enable should be allowed after a later successful Square test booking")
+	if readiness.CanEnableAIBooking {
+		t.Fatalf("successful permission test must not bypass atomic slot safety")
+	}
+	if check := findReadinessCheck(readiness.Checks, "atomic_slot_commit"); check == nil || check.Complete {
+		t.Fatalf("atomic slot commit check=%#v, want incomplete", check)
 	}
 }
 
