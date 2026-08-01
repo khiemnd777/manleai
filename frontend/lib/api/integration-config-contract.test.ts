@@ -6,6 +6,7 @@ import {
   openAIRuntimeState,
   platformIntegrationConfigBasePath,
   squareConfigToForm,
+  squareInitialProviderActivationPayload,
   squareSchedulingCapabilityReevaluationPayload,
   twilioConfigPayload,
   twilioConfigToForm,
@@ -168,6 +169,15 @@ test("Platform configuration path encodes one exact tenant identifier", () => {
 test("Square safety reevaluation sends fences but no caller-selected capabilities", () => {
   assert.deepEqual(squareSchedulingCapabilityReevaluationPayload("square-safe-1", 7, 11), {
     action_key: "square-safe-1",
+    expected_connection_capability_version: 7,
+    expected_integration_config_version: 11
+  });
+});
+
+test("Square initial activation sends every tenant evidence fence", () => {
+  assert.deepEqual(squareInitialProviderActivationPayload("square-activate-1", 2, 7, 11), {
+    action_key: "square-activate-1",
+    expected_version: 2,
     expected_connection_capability_version: 7,
     expected_integration_config_version: 11
   });

@@ -518,6 +518,37 @@ type Connection struct {
 	UpdatedAt                     time.Time  `json:"updated_at"`
 }
 
+type InitialProviderActivationEvidence struct {
+	ActiveProvider              string
+	ActiveProviderVersion       int64
+	IntegrationConfigPresent    bool
+	IntegrationConfigEnabled    bool
+	IntegrationConfigVersion    int64
+	ConnectionPresent           bool
+	ConnectionStatus            string
+	MerchantID                  string
+	LocationID                  string
+	SnapshotGeneration          int64
+	ConnectionCapabilityVersion int64
+	LastSyncAt                  *time.Time
+}
+
+type InitialProviderActivationMutation struct {
+	SalonID                             string
+	ActorUserID                         string
+	Provider                            string
+	ActionKey                           string
+	RequestFingerprint                  string
+	ExpectedVersion                     int64
+	ExpectedIntegrationConfigVersion    int64
+	ExpectedConnectionCapabilityVersion int64
+}
+
+type ActiveProviderState struct {
+	Provider string `json:"provider"`
+	Version  int64  `json:"version"`
+}
+
 type SchedulingCapabilityEvaluation struct {
 	EvidenceID                  string     `json:"evidence_id,omitempty"`
 	ConnectionCapabilityVersion int64      `json:"connection_capability_version"`

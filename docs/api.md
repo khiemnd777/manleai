@@ -1344,6 +1344,7 @@ satisfy these routes, and the tenant ID comes only from the fixed route.
 - `POST /api/platform/tenants/:tenant_id/technical/square/select-location`
 - `POST /api/platform/tenants/:tenant_id/technical/square/sync`
 - `POST /api/platform/tenants/:tenant_id/technical/square/scheduling-capability/re-evaluate`
+- `POST /api/platform/tenants/:tenant_id/technical/square/active-provider/activate`
 - `POST /api/platform/tenants/:tenant_id/technical/square/ai-booking/enable`
 - `POST /api/platform/tenants/:tenant_id/technical/square/ai-booking/disable`
 - `/api/platform/tenants/:tenant_id/technical/manleai-calendar/*`
@@ -2115,16 +2116,21 @@ AI-bookable services. None of these steps require a Square connection.
 
 Provider credentials and runtime settings are salon-scoped and Platform-
 Technical-scoped. Tenant memberships alone cannot read or write them.
-Secret values are write-only: responses only expose whether a secret is
-configured and whether it came from dashboard storage or the exact-missing
-legacy bootstrap fallback. `salon_integration_configs` is authoritative whenever
-a salon/provider row exists. Only Square retains that exact-missing compatibility
-bootstrap after an exact repository `ErrNotFound`; repository failures,
-malformed/non-string persisted settings, and secret decryption failures stop
-runtime resolution. A stored disabled provider or stored row with missing
-required credentials never inherits environment enabled state or secrets. Twilio and
-OpenAI runtime resolution and authenticated reads are database-only and never
-inherit provider settings or secrets from environment configuration.
+Secret values are write-only: responses expose only safe configured/source
+metadata. `salon_integration_configs` is the sole runtime source for Square,
+Twilio, and OpenAI. An exact missing row, repository failure, malformed settings,
+disabled row, missing required credential, or decryption failure stops runtime
+resolution and never inherits process configuration.
+
+Square status includes `initial_activation`: the current active-provider value
+and version, exact config/connection fence versions, readiness checks, and
+`can_activate`. The activation request requires `action_key`,
+`expected_version`, `expected_integration_config_version`, and
+`expected_connection_capability_version`. It is allowed only when the current
+provider is explicitly blank and current tenant-bound Square config,
+merchant/location, and successful-sync evidence still match. Exact replay
+returns the same result; stale evidence or an already-selected provider returns
+sanitized `409`. OAuth, location selection, and sync do not activate a provider.
 
 OpenAI additionally requires the server-owned `openai_public` destination, an
 exact tenant/config identity, a positive credential revision, and the purpose-
@@ -2133,11 +2139,10 @@ never returns that HMAC. `configured=true`/`runtime_resolvable=true` means only
 that the saved tenant configuration passes the shared local runtime validator;
 it is not proof of a successful provider request.
 
-For Square with no stored row, a response may expose secret source
-`environment` without exposing the secret. Missing Twilio/OpenAI rows return
-database-owned unconfigured state. For a stored row whose secret is empty or
-unreadable, source is `none`, the matching configured flag is false, and
-environment credentials are not reported as active. Invalid persisted settings
+Missing provider rows return database-owned unconfigured state. For a stored
+row whose secret is empty or unreadable, source is `none`, the matching
+configured flag is false, and no process credential is reported as active.
+Invalid persisted settings
 make this authenticated read fail safely instead of returning an empty settings
 map.
 

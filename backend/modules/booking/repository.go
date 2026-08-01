@@ -91,7 +91,7 @@ func (r *Repository) GetActiveProvider(ctx context.Context, salonID string, owne
 	}
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
-		return pos.ProviderSquare, nil
+		return "", pos.ErrActiveProviderNotConfigured
 	}
 	return provider, nil
 }
@@ -102,7 +102,7 @@ func (r *Repository) GetActiveProviderFence(ctx context.Context, salonID string,
 	var fence pos.ProviderFence
 	var lastSyncAt sql.NullTime
 	err := r.db.QueryRowContext(ctx, `
-		SELECT COALESCE(NULLIF(BTRIM(salon.active_pos_provider), ''), 'square'),
+		SELECT BTRIM(salon.active_pos_provider),
 		       COALESCE(connection.status, ''),
 		       COALESCE(connection.location_id, ''),
 		       COALESCE(connection.snapshot_generation, 0),
@@ -110,7 +110,7 @@ func (r *Repository) GetActiveProviderFence(ctx context.Context, salonID string,
 		FROM salons salon
 		LEFT JOIN pos_connections connection
 		  ON connection.salon_id = salon.id
-		 AND connection.provider = COALESCE(NULLIF(BTRIM(salon.active_pos_provider), ''), 'square')
+		 AND connection.provider = BTRIM(salon.active_pos_provider)
 		WHERE salon.id = $1
 		  AND (
 		      public.has_active_tenant_membership(salon.id, $2::uuid)
@@ -131,7 +131,10 @@ func (r *Repository) GetActiveProviderFence(ctx context.Context, salonID string,
 	}
 	provider = strings.TrimSpace(provider)
 	fence.LocationID = strings.TrimSpace(fence.LocationID)
-	if provider == "" || status != pos.StatusActive || !lastSyncAt.Valid || !validProviderFence(fence) {
+	if provider == "" {
+		return "", pos.ProviderFence{}, pos.ErrActiveProviderNotConfigured
+	}
+	if status != pos.StatusActive || !lastSyncAt.Valid || !validProviderFence(fence) {
 		return "", pos.ProviderFence{}, pos.ErrStaleProviderFence
 	}
 	return provider, fence, nil
@@ -6032,7 +6035,7 @@ func lockAndValidateCalendarProviderFenceTx(ctx context.Context, tx *sql.Tx, sal
 
 	var activeProvider string
 	err := tx.QueryRowContext(ctx, `
-		SELECT COALESCE(NULLIF(BTRIM(active_pos_provider), ''), 'square')
+		SELECT BTRIM(active_pos_provider)
 		FROM salons
 		WHERE id = $1
 		FOR SHARE
@@ -6042,6 +6045,9 @@ func lockAndValidateCalendarProviderFenceTx(ctx context.Context, tx *sql.Tx, sal
 	}
 	if err != nil {
 		return err
+	}
+	if strings.TrimSpace(activeProvider) == "" {
+		return pos.ErrActiveProviderNotConfigured
 	}
 	if strings.TrimSpace(activeProvider) != provider {
 		return pos.ErrStaleProviderFence

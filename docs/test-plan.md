@@ -29,13 +29,16 @@
 
 ## Milestone 2
 
-- Verify `GET /api/platform/tenants/:tenant_id/technical/square/connect-url` returns a Square OAuth URL only for an authorized Platform Technical actor, and still supports env fallback only for local bootstrap.
+- Verify `GET /api/platform/tenants/:tenant_id/technical/square/connect-url` returns a Square OAuth URL only for an authorized Platform Technical actor with a complete enabled config stored for that exact tenant; missing tenant config fails before network access.
 - Verify Square callback stores encrypted tokens in `pos_connections`.
 - Verify token values are not returned by status endpoints.
 - Verify `GET /api/platform/tenants/:tenant_id/technical/square/status` returns connection state and sync logs without owner impersonation.
 - Verify `GET /api/platform/tenants/:tenant_id/technical/square/locations` calls Square through `SquareAdapter`.
 - Verify `POST /api/platform/tenants/:tenant_id/technical/square/select-location` stores `location_id` and consumes the tenant provider-write quota.
+- Verify a complete Square provider/merchant/location identity cannot be selected by a second tenant, and that a changed-merchant reconnect clears prior location/sync evidence while a same-merchant reconnect preserves it.
 - Verify `POST /api/platform/tenants/:tenant_id/technical/square/sync` writes normalized `services`, `staff`, business hour periods, and customers.
+- Verify sync for tenant A does not change tenant B connection/snapshot state, and blank/missing tenant context performs zero Square network calls.
+- Verify `POST /api/platform/tenants/:tenant_id/technical/square/active-provider/activate` requires exact action/config/connection versions, an explicit blank current provider, complete tenant evidence, actual-actor audit, and exact replay; OAuth/location/sync alone never activate the provider.
 - Verify Square errors create `pos_errors` rows and failed sync logs.
 
 ## Milestone 3 Backend Foundation

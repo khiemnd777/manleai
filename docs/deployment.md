@@ -529,14 +529,8 @@ runtime resolver code. Never use `project.env`, `.env`, Compose defaults,
 GitHub secrets, or process environment values as evidence of the active
 salon-scoped provider configuration.
 
-The backend retains legacy environment fallback only for Square compatibility.
-That path is not the normal production configuration workflow and is
-intentionally absent from repository env templates. Inspect it only for an
-explicitly scoped Square bootstrap/legacy task after proving that the salon has
-no stored Square record. `ResolveSquareConfig` enters that path only when the
-repository returns the exact integration-config `ErrNotFound`.
-`ResolveTwilioConfig` and `ResolveOpenAIConfig` are database-only and fail closed
-when their salon record is missing. Repository failures, malformed/non-string
+Square, Twilio, and OpenAI resolvers are database-only and fail closed when the
+exact salon record is missing. Repository failures, malformed/non-string
 persisted settings, and stored-secret decryption failures propagate and stop
 provider runtime. A stored row owns enabled state, settings, and credentials:
 missing credentials never inherit environment secrets, and a disabled provider
@@ -559,10 +553,9 @@ OpenAI transports only; live verification is an explicit Platform operation
 after deployment and may incur provider usage.
 
 The authenticated integration response follows the same ownership boundary.
-Only the Square compatibility response may label an exact-missing bootstrap
-secret source as `environment`. Missing Twilio/OpenAI rows return unconfigured,
-database-owned empty state and never surface environment-derived URLs, paths,
-models, enabled state, or secret-source metadata. When a stored row exists but
+Missing Square/Twilio/OpenAI rows return unconfigured, database-owned empty
+state and never surface environment-derived URLs, paths, models, enabled state,
+or secret-source metadata. When a stored row exists but
 its secret is empty or unreadable, the response reports source `none` and
 configured `false`; it never returns the secret value.
 Whole-response contract tests also prohibit write-only credential, SID,
@@ -783,6 +776,25 @@ drop or reverse either migration. Scheduling-authority changes use the explicit
 reviewed switch, and historical operations continue through their originating
 authority. A local or unwitnessed harness pass is implementation evidence, not
 production capacity proof.
+
+### V88 strict Square tenant-binding rollout
+
+V88 is the expand/runtime half of a two-release contract. Before migration,
+run the normalized duplicate preflight for complete
+`(provider, merchant_id, location_id)` identities and stop if any identity is
+owned by more than one salon. Deploy V88 together with the API, worker, and UI
+that require explicit Square tenant context, database-only config resolution,
+blank-provider fail-closed behavior, reconnect invalidation, and the reviewed
+initial activation action. Verify two distinct tenants through OAuth URL
+resolution, location selection, sync, status, and a zero-network blank-tenant
+failure. Do not change the `salons.active_pos_provider` database default in this
+release.
+
+Release B may remove that default only after every older API/worker replica is
+drained, callback/worker traffic is observed on the Release A contract, and new
+tenant provisioning has an approved explicit provider-selection workflow. V88
+is forward-only; rollback uses the prior compatible application image and does
+not drop the identity index or audit/version evidence.
 
 - Do not invoke `/bin/sample-data` on a production-live database. Normal
   migrations never apply its embedded fixture; CI/CD enforces the exact `live`

@@ -149,14 +149,6 @@ func Load() Config {
 		CORSOrigins:             splitCSV(env("CORS_ALLOWED_ORIGINS", "http://localhost:3088")),
 		FrontendURL:             env("FRONTEND_URL", "http://localhost:3088"),
 		AutoMigrate:             envBool("AUTO_MIGRATE", true),
-		Square: SquareConfig{
-			Environment:  env("SQUARE_ENVIRONMENT", "sandbox"),
-			ClientID:     env("SQUARE_CLIENT_ID", ""),
-			ClientSecret: env("SQUARE_CLIENT_SECRET", ""),
-			RedirectURL:  env("SQUARE_REDIRECT_URL", "http://localhost:18089/api/integrations/square/callback"),
-			APIVersion:   env("SQUARE_API_VERSION", "2026-05-20"),
-			APIBaseURL:   env("SQUARE_API_BASE_URL", ""),
-		},
 		Voice: VoiceConfig{
 			Provider:      env("VOICE_PROVIDER", "twilio"),
 			PublicBaseURL: strings.TrimRight(env("VOICE_PUBLIC_BASE_URL", ""), "/"),

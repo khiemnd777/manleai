@@ -230,6 +230,20 @@ export function squareSchedulingCapabilityReevaluationPayload(
   };
 }
 
+export function squareInitialProviderActivationPayload(
+  actionKey: string,
+  activeProviderVersion: number,
+  connectionCapabilityVersion: number,
+  integrationConfigVersion: number
+) {
+  return {
+    action_key: actionKey,
+    expected_version: activeProviderVersion,
+    expected_connection_capability_version: connectionCapabilityVersion,
+    expected_integration_config_version: integrationConfigVersion
+  };
+}
+
 export function twilioVoiceRoutingState(
   config?: TwilioIntegrationConfig,
   status?: TwilioVoiceRoutingStatus | null

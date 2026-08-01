@@ -72,8 +72,6 @@ func (s *Service) getAllForSalon(ctx context.Context, salonID string) (*Integrat
 }
 
 // GetAllPersistedForPlatform returns only salon-scoped database configuration.
-// It deliberately does not surface legacy environment fallback as portable
-// tenant configuration.
 func (s *Service) GetAllPersistedForPlatform(ctx context.Context, salonID string) (*IntegrationConfigsResponse, []string, error) {
 	salonID = strings.TrimSpace(salonID)
 	if salonID == "" {
@@ -176,7 +174,7 @@ func (s *Service) updateSquareForSalon(ctx context.Context, salonID string, req 
 		webhookNotificationURL = strings.TrimSpace(*req.WebhookNotificationURL)
 	}
 	settings := map[string]string{
-		"environment":              defaultString(normalizeEnvironment(req.Environment), defaultString(s.cfg.Square.Environment, "sandbox")),
+		"environment":              defaultString(normalizeEnvironment(req.Environment), "sandbox"),
 		"client_id":                strings.TrimSpace(req.ClientID),
 		"redirect_url":             strings.TrimSpace(req.RedirectURL),
 		"api_version":              strings.TrimSpace(req.APIVersion),
@@ -602,9 +600,6 @@ func (s *Service) SquareWebhookConfigured(ctx context.Context, salonID string) (
 
 func (s *Service) ResolveSquareConfig(ctx context.Context, salonID string) (config.SquareConfig, error) {
 	item, secrets, err := s.resolveStored(ctx, salonID, ProviderSquare)
-	if errors.Is(err, ErrNotFound) {
-		return s.legacySquareConfig(), nil
-	}
 	if err != nil {
 		return config.SquareConfig{}, err
 	}
@@ -717,7 +712,7 @@ func (s *Service) ResolveOpenAIRuntimeConfig(ctx context.Context, salonID string
 }
 
 // ResolveOpenAIConfigStrict resolves only the encrypted salon-scoped database
-// record. It deliberately has no legacy environment fallback and is used by
+// record. It has no environment fallback and is used by
 // paid evaluation workflows that must fail closed on missing, unreadable, or
 // incomplete stored configuration.
 func (s *Service) ResolveOpenAIConfigStrict(ctx context.Context, salonID string) (config.OpenAIVoiceConfig, bool, error) {
@@ -752,17 +747,6 @@ func (s *Service) resolveStored(ctx context.Context, salonID string, provider st
 		return nil, nil, err
 	}
 	return item, secrets, nil
-}
-
-func (s *Service) legacySquareConfig() config.SquareConfig {
-	cfg := s.cfg.Square
-	cfg.WebhookNotificationURL = ""
-	cfg.WebhookSignatureKey = ""
-	cfg.Environment = defaultString(normalizeEnvironment(cfg.Environment), "sandbox")
-	cfg.RedirectURL = defaultString(strings.TrimSpace(cfg.RedirectURL), "http://localhost:18089/api/integrations/square/callback")
-	cfg.APIVersion = defaultString(strings.TrimSpace(cfg.APIVersion), "2026-05-20")
-	cfg.APIBaseURL = strings.TrimRight(strings.TrimSpace(cfg.APIBaseURL), "/")
-	return cfg
 }
 
 func squareConfigFromStored(item *StoredConfig, secrets map[string]string) config.SquareConfig {
@@ -833,8 +817,8 @@ func openAIConfigFromSettings(settings map[string]string, apiKey string) config.
 }
 
 func (s *Service) squareResponse(item *StoredConfig) SquareSettingsResponse {
-	cfg := s.legacySquareConfig()
-	enabled := true
+	cfg := config.SquareConfig{Environment: "sandbox", APIVersion: "2026-05-20"}
+	enabled := false
 	if item != nil {
 		cfg = squareConfigFromStored(item, nil)
 		enabled = item.Enabled
@@ -850,9 +834,6 @@ func (s *Service) squareResponse(item *StoredConfig) SquareSettingsResponse {
 				webhookSecretSource = SecretSourceDatabase
 			}
 		}
-	}
-	if item == nil && strings.TrimSpace(s.cfg.Square.ClientSecret) != "" {
-		secretSource = SecretSourceEnvironment
 	}
 	updatedAt := updatedAt(item)
 	return SquareSettingsResponse{

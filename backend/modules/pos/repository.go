@@ -26,6 +26,7 @@ var (
 const (
 	bookingCalendarReconciliationLockPrefix = fence.AdvisoryKeyPrefix
 	serviceAliasOwnershipConstraint         = "service_alias_cross_table_active_unique"
+	providerLocationTenantUniqueConstraint  = "pos_connections_provider_merchant_location_tenant_unique"
 	schedulingAuthorityOwnerManual          = "owner_manual"
 	schedulingAuthorityManleAICalendar      = "manleai_calendar"
 	schedulingAuthorityExternalProvider     = "external_provider"
@@ -82,6 +83,11 @@ func lockServiceAliasOwnershipTx(ctx context.Context, tx *sql.Tx, salonID string
 func isServiceAliasOwnershipConflict(err error) bool {
 	var pqErr *pq.Error
 	return errors.As(err, &pqErr) && pqErr.Constraint == serviceAliasOwnershipConstraint
+}
+
+func isProviderLocationTenantConflict(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Constraint == providerLocationTenantUniqueConstraint
 }
 
 // WithSchedulingFenceTx gives a provider-owned readiness evaluator a coherent
@@ -165,9 +171,218 @@ func (r *Repository) GetActiveProvider(ctx context.Context, salonID string, owne
 		return "", err
 	}
 	if strings.TrimSpace(provider) == "" {
-		return ProviderSquare, nil
+		return "", ErrActiveProviderNotConfigured
 	}
 	return provider, nil
+}
+
+func (r *Repository) GetInitialProviderActivationEvidence(ctx context.Context, salonID string) (InitialProviderActivationEvidence, error) {
+	salonID = strings.TrimSpace(salonID)
+	if salonID == "" {
+		return InitialProviderActivationEvidence{}, ErrValidation
+	}
+	var evidence InitialProviderActivationEvidence
+	var lastSyncAt sql.NullTime
+	err := r.db.QueryRowContext(ctx, `
+		SELECT BTRIM(salon.active_pos_provider),
+		       COALESCE(active_version.version, 0),
+		       integration.id IS NOT NULL,
+		       COALESCE(integration.enabled, false),
+		       COALESCE(integration_version.version, 0),
+		       connection.id IS NOT NULL,
+		       COALESCE(connection.status, ''),
+		       COALESCE(connection.merchant_id, ''),
+		       COALESCE(connection.location_id, ''),
+		       COALESCE(connection.snapshot_generation, 0),
+		       COALESCE(connection.booking_write_capability_version, 0),
+		       connection.last_sync_at
+		FROM salons salon
+		LEFT JOIN technical_resource_versions active_version
+		  ON active_version.salon_id=salon.id
+		 AND active_version.resource_type='pos_adapter'
+		 AND active_version.resource_id='active_provider'
+		LEFT JOIN salon_integration_configs integration
+		  ON integration.salon_id=salon.id AND integration.provider='square'
+		LEFT JOIN technical_resource_versions integration_version
+		  ON integration_version.salon_id=salon.id
+		 AND integration_version.resource_type='integration_config'
+		 AND integration_version.resource_id='square'
+		LEFT JOIN pos_connections connection
+		  ON connection.salon_id=salon.id AND connection.provider='square'
+		WHERE salon.id=$1
+	`, salonID).Scan(
+		&evidence.ActiveProvider,
+		&evidence.ActiveProviderVersion,
+		&evidence.IntegrationConfigPresent,
+		&evidence.IntegrationConfigEnabled,
+		&evidence.IntegrationConfigVersion,
+		&evidence.ConnectionPresent,
+		&evidence.ConnectionStatus,
+		&evidence.MerchantID,
+		&evidence.LocationID,
+		&evidence.SnapshotGeneration,
+		&evidence.ConnectionCapabilityVersion,
+		&lastSyncAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return InitialProviderActivationEvidence{}, ErrNotFound
+	}
+	if err != nil {
+		return InitialProviderActivationEvidence{}, err
+	}
+	if lastSyncAt.Valid {
+		evidence.LastSyncAt = &lastSyncAt.Time
+	}
+	return evidence, nil
+}
+
+func (r *Repository) ActivateInitialProviderForPlatform(ctx context.Context, input InitialProviderActivationMutation) (ActiveProviderState, bool, error) {
+	input.SalonID = strings.TrimSpace(input.SalonID)
+	input.ActorUserID = strings.TrimSpace(input.ActorUserID)
+	input.Provider = strings.TrimSpace(input.Provider)
+	input.ActionKey = strings.TrimSpace(input.ActionKey)
+	if input.SalonID == "" || input.ActorUserID == "" || input.Provider != ProviderSquare || input.ActionKey == "" ||
+		len(input.ActionKey) > 256 || input.ExpectedVersion < 0 || input.ExpectedIntegrationConfigVersion <= 0 ||
+		input.ExpectedConnectionCapabilityVersion <= 0 || len(input.RequestFingerprint) != 64 {
+		return ActiveProviderState{}, false, ErrValidation
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ActiveProviderState{}, false, err
+	}
+	defer tx.Rollback()
+	if err := lockSchedulingMutationFenceTx(ctx, tx, input.SalonID); err != nil {
+		return ActiveProviderState{}, false, err
+	}
+
+	var existingFingerprint, existingActionType, existingResourceType, existingResourceID string
+	var existingVersion int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT request_fingerprint,action_type,resource_type,resource_id,result_version
+		FROM technical_actions
+		WHERE salon_id=$1 AND actor_user_id=$2 AND action_key=$3
+	`, input.SalonID, input.ActorUserID, input.ActionKey).Scan(
+		&existingFingerprint, &existingActionType, &existingResourceType, &existingResourceID, &existingVersion,
+	)
+	if err == nil {
+		if existingFingerprint != input.RequestFingerprint || existingActionType != "active_provider.initial_activate" ||
+			existingResourceType != "pos_adapter" || existingResourceID != "active_provider" {
+			return ActiveProviderState{}, false, ErrTechnicalActionConflict
+		}
+		if err := tx.Commit(); err != nil {
+			return ActiveProviderState{}, false, err
+		}
+		return ActiveProviderState{Provider: input.Provider, Version: existingVersion}, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return ActiveProviderState{}, false, err
+	}
+
+	var currentProvider string
+	if err := tx.QueryRowContext(ctx, `SELECT BTRIM(active_pos_provider) FROM salons WHERE id=$1 FOR UPDATE`, input.SalonID).Scan(&currentProvider); errors.Is(err, sql.ErrNoRows) {
+		return ActiveProviderState{}, false, ErrNotFound
+	} else if err != nil {
+		return ActiveProviderState{}, false, err
+	}
+	if currentProvider != "" {
+		return ActiveProviderState{}, false, ErrActiveProviderAlreadyConfigured
+	}
+
+	var currentVersion int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT version FROM technical_resource_versions
+		WHERE salon_id=$1 AND resource_type='pos_adapter' AND resource_id='active_provider'
+		FOR UPDATE
+	`, input.SalonID).Scan(&currentVersion); errors.Is(err, sql.ErrNoRows) {
+		return ActiveProviderState{}, false, ErrNotFound
+	} else if err != nil {
+		return ActiveProviderState{}, false, err
+	}
+	if currentVersion != input.ExpectedVersion {
+		return ActiveProviderState{}, false, ErrTechnicalVersionConflict
+	}
+
+	var configEnabled bool
+	var configVersion int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT config.enabled, version.version
+		FROM salon_integration_configs config
+		JOIN technical_resource_versions version
+		  ON version.salon_id=config.salon_id
+		 AND version.resource_type='integration_config'
+		 AND version.resource_id=config.provider
+		WHERE config.salon_id=$1 AND config.provider=$2
+		FOR SHARE OF config
+	`, input.SalonID, input.Provider).Scan(&configEnabled, &configVersion); errors.Is(err, sql.ErrNoRows) {
+		return ActiveProviderState{}, false, ErrInitialProviderActivationNotReady
+	} else if err != nil {
+		return ActiveProviderState{}, false, err
+	}
+	if !configEnabled || configVersion != input.ExpectedIntegrationConfigVersion {
+		return ActiveProviderState{}, false, ErrInitialProviderActivationNotReady
+	}
+
+	var status, merchantID, locationID string
+	var snapshotGeneration, capabilityVersion int64
+	var lastSyncAt sql.NullTime
+	if err := tx.QueryRowContext(ctx, `
+		SELECT status,COALESCE(merchant_id,''),COALESCE(location_id,''),snapshot_generation,
+		       booking_write_capability_version,last_sync_at
+		FROM pos_connections
+		WHERE salon_id=$1 AND provider=$2
+		FOR SHARE
+	`, input.SalonID, input.Provider).Scan(
+		&status, &merchantID, &locationID, &snapshotGeneration, &capabilityVersion, &lastSyncAt,
+	); errors.Is(err, sql.ErrNoRows) {
+		return ActiveProviderState{}, false, ErrInitialProviderActivationNotReady
+	} else if err != nil {
+		return ActiveProviderState{}, false, err
+	}
+	if status != StatusActive || strings.TrimSpace(merchantID) == "" || strings.TrimSpace(locationID) == "" ||
+		snapshotGeneration <= 0 || !lastSyncAt.Valid || capabilityVersion != input.ExpectedConnectionCapabilityVersion {
+		return ActiveProviderState{}, false, ErrInitialProviderActivationNotReady
+	}
+
+	result, err := tx.ExecContext(ctx, `UPDATE salons SET active_pos_provider=$1,updated_at=now() WHERE id=$2 AND BTRIM(active_pos_provider)=''`, input.Provider, input.SalonID)
+	if err != nil {
+		return ActiveProviderState{}, false, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return ActiveProviderState{}, false, err
+	} else if affected != 1 {
+		return ActiveProviderState{}, false, ErrActiveProviderAlreadyConfigured
+	}
+	resultVersion := currentVersion + 1
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE technical_resource_versions
+		SET version=$2,updated_by_user_id=$3,updated_at=now()
+		WHERE salon_id=$1 AND resource_type='pos_adapter' AND resource_id='active_provider'
+	`, input.SalonID, resultVersion, input.ActorUserID); err != nil {
+		return ActiveProviderState{}, false, err
+	}
+	details := `{"provider":"square","changed_fields":["active_pos_provider"]}`
+	var actionID string
+	if err := tx.QueryRowContext(ctx, `
+		INSERT INTO technical_actions(
+			salon_id,actor_user_id,action_key,action_type,request_fingerprint,
+			resource_type,resource_id,previous_version,result_version,details
+		) VALUES($1,$2,$3,'active_provider.initial_activate',$4,'pos_adapter','active_provider',$5,$6,$7::jsonb)
+		RETURNING id::text
+	`, input.SalonID, input.ActorUserID, input.ActionKey, input.RequestFingerprint, currentVersion, resultVersion, details).Scan(&actionID); err != nil {
+		return ActiveProviderState{}, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO technical_events(
+			action_id,salon_id,actor_user_id,event_type,resource_type,resource_id,
+			previous_version,result_version,details
+		) VALUES($1,$2,$3,'active_provider.initial_activate','pos_adapter','active_provider',$4,$5,$6::jsonb)
+	`, actionID, input.SalonID, input.ActorUserID, currentVersion, resultVersion, details); err != nil {
+		return ActiveProviderState{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ActiveProviderState{}, false, err
+	}
+	return ActiveProviderState{Provider: input.Provider, Version: resultVersion}, false, nil
 }
 
 func (r *Repository) GetSchedulingAuthorityVersion(ctx context.Context, salonID string, ownerUserID string) (int64, error) {
@@ -361,6 +576,13 @@ func (r *Repository) GetConnection(ctx context.Context, salonID string, provider
 }
 
 func (r *Repository) UpsertConnection(ctx context.Context, connection Connection) (*Connection, error) {
+	connection.SalonID = strings.TrimSpace(connection.SalonID)
+	connection.Provider = strings.TrimSpace(connection.Provider)
+	connection.MerchantID = strings.TrimSpace(connection.MerchantID)
+	connection.LocationID = strings.TrimSpace(connection.LocationID)
+	if connection.SalonID == "" || connection.Provider == "" || connection.MerchantID == "" {
+		return nil, ErrValidation
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -379,14 +601,32 @@ func (r *Repository) UpsertConnection(ctx context.Context, connection Connection
 		              access_token_encrypted = EXCLUDED.access_token_encrypted,
 		              refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
 		              merchant_id = EXCLUDED.merchant_id,
+		              location_id = CASE
+		                  WHEN COALESCE(BTRIM(pos_connections.merchant_id), '') IS DISTINCT FROM COALESCE(BTRIM(EXCLUDED.merchant_id), '') THEN NULL
+		                  ELSE pos_connections.location_id
+		              END,
+		              snapshot_generation = CASE
+		                  WHEN COALESCE(BTRIM(pos_connections.merchant_id), '') IS DISTINCT FROM COALESCE(BTRIM(EXCLUDED.merchant_id), '') THEN pos_connections.snapshot_generation + 1
+		                  ELSE pos_connections.snapshot_generation
+		              END,
 		              scopes = EXCLUDED.scopes,
-		              error_message = EXCLUDED.error_message,
+		              last_sync_at = CASE
+		                  WHEN COALESCE(BTRIM(pos_connections.merchant_id), '') IS DISTINCT FROM COALESCE(BTRIM(EXCLUDED.merchant_id), '') THEN NULL
+		                  ELSE pos_connections.last_sync_at
+		              END,
+		              error_message = CASE
+		                  WHEN COALESCE(BTRIM(pos_connections.merchant_id), '') IS DISTINCT FROM COALESCE(BTRIM(EXCLUDED.merchant_id), '') THEN NULL
+		                  ELSE EXCLUDED.error_message
+		              END,
 		              updated_at = now()
 		RETURNING id::text, salon_id::text, provider, status, COALESCE(access_token_encrypted, ''),
 		          COALESCE(refresh_token_encrypted, ''), COALESCE(merchant_id, ''), COALESCE(location_id, ''),
 		          snapshot_generation, booking_write_capability_version, scopes, last_sync_at, COALESCE(error_message, ''), created_at, updated_at
 	`, connection.SalonID, connection.Provider, connection.Status, connection.AccessTokenEncrypted, connection.RefreshTokenEncrypted, connection.MerchantID, connection.LocationID, pq.Array(connection.Scopes), connection.ErrorMessage))
 	if err != nil {
+		if isProviderLocationTenantConflict(err) {
+			return nil, ErrProviderLocationTenantConflict
+		}
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -396,6 +636,12 @@ func (r *Repository) UpsertConnection(ctx context.Context, connection Connection
 }
 
 func (r *Repository) UpdateLocation(ctx context.Context, salonID string, provider string, locationID string) (*Connection, error) {
+	salonID = strings.TrimSpace(salonID)
+	provider = strings.TrimSpace(provider)
+	locationID = strings.TrimSpace(locationID)
+	if salonID == "" || provider == "" || locationID == "" {
+		return nil, ErrValidation
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -432,6 +678,9 @@ func (r *Repository) UpdateLocation(ctx context.Context, salonID string, provide
 		          snapshot_generation, booking_write_capability_version, scopes, last_sync_at, COALESCE(error_message, ''), created_at, updated_at
 	`, locationID, salonID, provider))
 	if err != nil {
+		if isProviderLocationTenantConflict(err) {
+			return nil, ErrProviderLocationTenantConflict
+		}
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -797,9 +1046,9 @@ func (r *Repository) UpsertServices(ctx context.Context, salonID string, service
 
 func upsertServicesTx(ctx context.Context, tx *sql.Tx, salonID string, services []Service) error {
 	for _, svc := range services {
-		provider := svc.POSProvider
+		provider := strings.TrimSpace(svc.POSProvider)
 		if provider == "" {
-			provider = ProviderSquare
+			return ErrValidation
 		}
 		var serviceID string
 		var archived bool
@@ -872,9 +1121,9 @@ func (r *Repository) UpsertStaff(ctx context.Context, salonID string, staff []St
 
 func upsertStaffTx(ctx context.Context, tx *sql.Tx, salonID string, staff []StaffMember) error {
 	for _, member := range staff {
-		provider := member.POSProvider
+		provider := strings.TrimSpace(member.POSProvider)
 		if provider == "" {
-			provider = ProviderSquare
+			return ErrValidation
 		}
 		var staffID string
 		var archived bool
@@ -928,7 +1177,7 @@ func upsertStaffTx(ctx context.Context, tx *sql.Tx, salonID string, staff []Staf
 func (r *Repository) UpsertBusinessHourPeriods(ctx context.Context, salonID string, provider string, locationID string, periods []BusinessHourPeriod) (int, error) {
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
-		provider = ProviderSquare
+		return 0, ErrValidation
 	}
 	locationID = strings.TrimSpace(locationID)
 	if locationID == "" {
@@ -1044,7 +1293,7 @@ func (r *Repository) ListBusinessHourPeriods(ctx context.Context, salonID string
 func (r *Repository) UpsertCustomers(ctx context.Context, salonID string, provider string, customers []Customer) (int, int, error) {
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
-		provider = ProviderSquare
+		return 0, 0, ErrValidation
 	}
 
 	tx, err := r.db.BeginTx(ctx, nil)
@@ -1168,7 +1417,7 @@ func upsertCustomersTx(ctx context.Context, tx *sql.Tx, salonID string, provider
 func (r *Repository) ApplyProviderSnapshot(ctx context.Context, salonID string, snapshot ProviderSnapshot) (*SyncSummary, error) {
 	provider := strings.TrimSpace(snapshot.Provider)
 	if provider == "" {
-		provider = ProviderSquare
+		return nil, ErrValidation
 	}
 	locationID := strings.TrimSpace(snapshot.LocationID)
 	if locationID == "" || snapshot.Generation <= 0 {
@@ -1848,7 +2097,7 @@ func (r *Repository) CreateService(ctx context.Context, salonID string, ownerUse
 	}
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
-		provider = ProviderSquare
+		return nil, ErrValidation
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -2096,7 +2345,7 @@ func (r *Repository) CreateStaff(ctx context.Context, salonID string, ownerUserI
 	}
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
-		provider = ProviderSquare
+		return nil, ErrValidation
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -2359,7 +2608,7 @@ func (r *Repository) ProviderMappingSummary(ctx context.Context, salonID string,
 	}
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
-		provider = ProviderSquare
+		return nil, ErrValidation
 	}
 	var summary ProviderMappingSummary
 	err := r.db.QueryRowContext(ctx, `

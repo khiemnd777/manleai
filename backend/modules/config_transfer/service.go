@@ -160,9 +160,6 @@ func (s *Service) getWithIntegrations(ctx context.Context, salonID string, owner
 	}
 
 	activeProvider := strings.TrimSpace(item.ActivePOSProvider)
-	if activeProvider == "" {
-		activeProvider = pos.ProviderSquare
-	}
 	categories, err := s.serviceCategories(ctx, salonID, ownerUserID)
 	if err != nil {
 		return nil, err

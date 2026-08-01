@@ -29,6 +29,7 @@ var (
 	ErrValidation                = errors.New("square request validation failed")
 	ErrReadinessGate             = errors.New("square booking readiness gate is not complete")
 	ErrBookingServiceUnavailable = errors.New("booking service unavailable")
+	ErrSquareConfigRequired      = errors.New("stored square configuration is required")
 )
 
 type Service struct {
@@ -77,9 +78,26 @@ type ConnectURLResponse struct {
 }
 
 type StatusResponse struct {
-	Connection *pos.Connection  `json:"connection"`
-	SyncLogs   []pos.SyncLog    `json:"sync_logs"`
-	Readiness  *ReadinessStatus `json:"readiness"`
+	Connection        *pos.Connection                 `json:"connection"`
+	SyncLogs          []pos.SyncLog                   `json:"sync_logs"`
+	Readiness         *ReadinessStatus                `json:"readiness"`
+	InitialActivation InitialProviderActivationStatus `json:"initial_activation"`
+}
+
+type InitialProviderActivationStatus struct {
+	ActiveProvider                      pos.ActiveProviderState `json:"active_provider"`
+	CanActivate                         bool                    `json:"can_activate"`
+	Checks                              []ReadinessCheck        `json:"checks"`
+	BlockedReason                       string                  `json:"blocked_reason,omitempty"`
+	ExpectedIntegrationConfigVersion    int64                   `json:"expected_integration_config_version"`
+	ExpectedConnectionCapabilityVersion int64                   `json:"expected_connection_capability_version"`
+}
+
+type InitialProviderActivationRequest struct {
+	ActionKey                           string `json:"action_key"`
+	ExpectedVersion                     int64  `json:"expected_version"`
+	ExpectedIntegrationConfigVersion    int64  `json:"expected_integration_config_version"`
+	ExpectedConnectionCapabilityVersion int64  `json:"expected_connection_capability_version"`
 }
 
 type ReadinessStatus struct {
@@ -271,7 +289,78 @@ func (s *Service) StatusForPlatform(ctx context.Context, salonID string) (*Statu
 	if err != nil {
 		return nil, err
 	}
-	return &StatusResponse{Connection: connection, SyncLogs: logs, Readiness: readiness}, nil
+	activation, err := s.initialProviderActivationStatus(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	return &StatusResponse{Connection: connection, SyncLogs: logs, Readiness: readiness, InitialActivation: activation}, nil
+}
+
+func (s *Service) initialProviderActivationStatus(ctx context.Context, salonID string) (InitialProviderActivationStatus, error) {
+	evidence, err := s.repo.GetInitialProviderActivationEvidence(ctx, salonID)
+	if err != nil {
+		return InitialProviderActivationStatus{}, err
+	}
+	configReady := false
+	if s.adapter != nil {
+		_, configErr := s.adapter.configFor(ctx, salonID)
+		configReady = configErr == nil
+	}
+	connectionReady := evidence.ConnectionPresent && evidence.ConnectionStatus == pos.StatusActive &&
+		strings.TrimSpace(evidence.MerchantID) != "" && strings.TrimSpace(evidence.LocationID) != "" &&
+		evidence.SnapshotGeneration > 0 && evidence.LastSyncAt != nil && evidence.ConnectionCapabilityVersion > 0
+	providerUnselected := strings.TrimSpace(evidence.ActiveProvider) == ""
+	status := InitialProviderActivationStatus{
+		ActiveProvider:                      pos.ActiveProviderState{Provider: strings.TrimSpace(evidence.ActiveProvider), Version: evidence.ActiveProviderVersion},
+		ExpectedIntegrationConfigVersion:    evidence.IntegrationConfigVersion,
+		ExpectedConnectionCapabilityVersion: evidence.ConnectionCapabilityVersion,
+		Checks: []ReadinessCheck{
+			{Key: "provider_unselected", Label: "No active POS provider selected", Complete: providerUnselected},
+			{Key: "tenant_config", Label: "Stored tenant Square configuration", Complete: configReady},
+			{Key: "tenant_connection", Label: "Tenant Square connection and location synced", Complete: connectionReady},
+		},
+	}
+	status.CanActivate = providerUnselected && configReady && connectionReady && evidence.IntegrationConfigVersion > 0
+	if !providerUnselected {
+		status.BlockedReason = "An active POS provider is already selected for this salon."
+	} else if !configReady {
+		status.BlockedReason = "Save a complete enabled Square configuration for this salon."
+	} else if !connectionReady {
+		status.BlockedReason = "Connect Square, select a location, and complete a successful sync for this salon."
+	}
+	return status, nil
+}
+
+func (s *Service) ActivateInitialProviderForPlatform(ctx context.Context, salonID, actorUserID string, req InitialProviderActivationRequest) (pos.ActiveProviderState, bool, error) {
+	salonID = strings.TrimSpace(salonID)
+	actorUserID = strings.TrimSpace(actorUserID)
+	req.ActionKey = strings.TrimSpace(req.ActionKey)
+	if salonID == "" || actorUserID == "" || req.ActionKey == "" || len(req.ActionKey) > 256 || req.ExpectedVersion < 0 ||
+		req.ExpectedIntegrationConfigVersion <= 0 || req.ExpectedConnectionCapabilityVersion <= 0 {
+		return pos.ActiveProviderState{}, false, ErrValidation
+	}
+	if s.adapter == nil {
+		return pos.ActiveProviderState{}, false, ErrSquareConfigRequired
+	}
+	if _, err := s.adapter.configFor(ctx, salonID); err != nil {
+		return pos.ActiveProviderState{}, false, ErrSquareConfigRequired
+	}
+	payload, err := json.Marshal(struct {
+		Provider                            string `json:"provider"`
+		ExpectedVersion                     int64  `json:"expected_version"`
+		ExpectedIntegrationConfigVersion    int64  `json:"expected_integration_config_version"`
+		ExpectedConnectionCapabilityVersion int64  `json:"expected_connection_capability_version"`
+	}{pos.ProviderSquare, req.ExpectedVersion, req.ExpectedIntegrationConfigVersion, req.ExpectedConnectionCapabilityVersion})
+	if err != nil {
+		return pos.ActiveProviderState{}, false, err
+	}
+	fingerprint := sha256.Sum256(payload)
+	return s.repo.ActivateInitialProviderForPlatform(ctx, pos.InitialProviderActivationMutation{
+		SalonID: salonID, ActorUserID: actorUserID, Provider: pos.ProviderSquare, ActionKey: req.ActionKey,
+		RequestFingerprint: hex.EncodeToString(fingerprint[:]), ExpectedVersion: req.ExpectedVersion,
+		ExpectedIntegrationConfigVersion:    req.ExpectedIntegrationConfigVersion,
+		ExpectedConnectionCapabilityVersion: req.ExpectedConnectionCapabilityVersion,
+	})
 }
 
 func (s *Service) ReadinessForPlatform(ctx context.Context, salonID string) (*ReadinessStatus, error) {
@@ -319,6 +408,11 @@ func (s *Service) ReadinessForPlatform(ctx context.Context, salonID string) (*Re
 	}
 	readiness := buildReadiness(aiRuntime.Enabled, authority, connection, services, staff, periods, nil, bookingWriteError, appointmentChangeError, capability)
 	readiness.AIRuntimeVersion = aiRuntime.Version
+	activeEvidence, err := s.repo.GetInitialProviderActivationEvidence(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	applyActiveProviderReadiness(readiness, activeEvidence.ActiveProvider)
 	return readiness, nil
 }
 
@@ -328,6 +422,15 @@ func (s *Service) SetAIBookingForPlatform(ctx context.Context, salonID, actorUse
 	actionKey = strings.TrimSpace(actionKey)
 	if salonID == "" || actorUserID == "" || actionKey == "" || len(actionKey) > 256 || expectedVersion < 0 {
 		return nil, false, ErrValidation
+	}
+	if enabled {
+		readiness, err := s.ReadinessForPlatform(ctx, salonID)
+		if err != nil {
+			return nil, false, err
+		}
+		if !readiness.CanEnableAIBooking {
+			return nil, false, ErrReadinessGate
+		}
 	}
 	payload, err := json.Marshal(struct {
 		Enabled bool `json:"enabled"`
@@ -350,7 +453,7 @@ func (s *Service) SetAIBookingForPlatform(ctx context.Context, salonID, actorUse
 	return &GateResponse{AIRuntime: state, Readiness: readiness}, replayed, nil
 }
 
-func (s *Service) HandleCallback(ctx context.Context, code string, state string, _ string) (*pos.Connection, error) {
+func (s *Service) HandleCallback(ctx context.Context, code string, state string) (*pos.Connection, error) {
 	salonID, nonceHash, err := decodeState(state, s.stateSecret, time.Now().UTC())
 	if err != nil {
 		return nil, err
@@ -389,7 +492,11 @@ func (s *Service) Status(ctx context.Context, salonID string, ownerUserID string
 	if err != nil {
 		return nil, err
 	}
-	return &StatusResponse{Connection: connection, SyncLogs: logs, Readiness: readiness}, nil
+	activation, err := s.initialProviderActivationStatus(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	return &StatusResponse{Connection: connection, SyncLogs: logs, Readiness: readiness, InitialActivation: activation}, nil
 }
 
 func (s *Service) Locations(ctx context.Context, salonID string, ownerUserID string) ([]pos.Location, error) {
@@ -520,7 +627,34 @@ func (s *Service) Readiness(ctx context.Context, salonID string, ownerUserID str
 	if err != nil {
 		return nil, err
 	}
-	return buildReadiness(aiEnabled, schedulingAuthority, connection, services, staff, periods, latest, bookingWriteError, appointmentChangeError, capability), nil
+	readiness := buildReadiness(aiEnabled, schedulingAuthority, connection, services, staff, periods, latest, bookingWriteError, appointmentChangeError, capability)
+	activeEvidence, err := s.repo.GetInitialProviderActivationEvidence(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	applyActiveProviderReadiness(readiness, activeEvidence.ActiveProvider)
+	return readiness, nil
+}
+
+func applyActiveProviderReadiness(readiness *ReadinessStatus, activeProvider string) {
+	if readiness == nil {
+		return
+	}
+	selected := strings.TrimSpace(activeProvider) == pos.ProviderSquare
+	readiness.Checks = append(readiness.Checks, ReadinessCheck{
+		Key: "active_provider", Label: "Square selected as active POS provider", Complete: selected,
+		Message: incompleteMessage(selected, "Select Square as this salon's active POS provider."),
+	})
+	if selected {
+		return
+	}
+	readiness.CanTestBooking = false
+	readiness.CanEnableAIBooking = false
+	readiness.AutomaticSingleCreate = false
+	readiness.providerCanTestBooking = false
+	readiness.BookingWriteBlocked = true
+	readiness.BookingWriteBlockedCode = "POS_ACTIVE_PROVIDER_NOT_CONFIGURED"
+	readiness.BookingWriteBlockedReason = "Square is not selected as this salon's active POS provider."
 }
 
 // SchedulingTargetReadiness evaluates the existing Square connection,

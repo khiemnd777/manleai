@@ -179,7 +179,7 @@ const answerContextFenceQuery = `
 		       COALESCE(hours_version.version, 0),
 		       COALESCE(calendar_config.version, 0),
 		       COALESCE(calendar_config.activated_version, 0),
-		       COALESCE(NULLIF(BTRIM(s.active_pos_provider), ''), 'square'),
+		       BTRIM(s.active_pos_provider),
 		       COALESCE(connection.status, ''),
 		       COALESCE(BTRIM(connection.location_id), ''),
 		       COALESCE(connection.snapshot_generation, 0),
@@ -218,7 +218,7 @@ const answerContextFenceQuery = `
 		  ON calendar_config.salon_id = s.id
 		LEFT JOIN pos_connections connection
 		  ON connection.salon_id = s.id
-		 AND connection.provider = COALESCE(NULLIF(BTRIM(s.active_pos_provider), ''), 'square')
+		 AND connection.provider = BTRIM(s.active_pos_provider)
 		WHERE s.id = $1
 `
 

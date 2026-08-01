@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -205,6 +206,95 @@ func TestRepositoryProviderSnapshotRejectsLocationSwitchAndOutOfOrderCompletion(
 	}
 	if serviceName != "Current Location Service" || serviceVersion != 2 {
 		t.Fatalf("current provider service = %q v%d, want current v2", serviceName, serviceVersion)
+	}
+}
+
+func TestRepositorySquareConnectionIdentityIsTenantBoundAndReconnectInvalidatesChangedMerchant(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")
+	var ownerID string
+	if err := db.QueryRowContext(ctx, `INSERT INTO users(email,password_hash,full_name) VALUES($1,'integration-test','POS tenant identity') RETURNING id::text`, "pos-identity-"+suffix+"@example.test").Scan(&ownerID); err != nil {
+		t.Fatal(err)
+	}
+	salonIDs := make([]string, 0, 2)
+	defer func() {
+		for _, salonID := range salonIDs {
+			_, _ = db.ExecContext(context.Background(), `DELETE FROM salons WHERE id=$1`, salonID)
+		}
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM users WHERE id=$1`, ownerID)
+	}()
+	for index := 0; index < 2; index++ {
+		var salonID string
+		if err := db.QueryRowContext(ctx, `INSERT INTO salons(name,phone,owner_user_id) VALUES($1,$2,$3) RETURNING id::text`, "POS tenant identity", "+1312"+suffix[index*7:index*7+7], ownerID).Scan(&salonID); err != nil {
+			t.Fatal(err)
+		}
+		salonIDs = append(salonIDs, salonID)
+	}
+	repo := NewRepository(db)
+	first, err := repo.UpsertConnection(ctx, Connection{
+		SalonID: salonIDs[0], Provider: ProviderSquare, Status: StatusConnected,
+		AccessTokenEncrypted: "token-a", MerchantID: "merchant-tenant-bound", LocationID: "location-tenant-bound",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE pos_connections SET status='active',snapshot_generation=4,last_sync_at=now() WHERE id=$1`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	sameMerchant, err := repo.UpsertConnection(ctx, Connection{
+		SalonID: salonIDs[0], Provider: ProviderSquare, Status: StatusConnected,
+		AccessTokenEncrypted: "token-a-rotated", MerchantID: "merchant-tenant-bound",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sameMerchant.LocationID != "location-tenant-bound" || sameMerchant.SnapshotGeneration != 4 || sameMerchant.LastSyncAt == nil {
+		t.Fatalf("same-merchant reconnect lost current tenant evidence: %#v", sameMerchant)
+	}
+	if _, err := repo.UpsertConnection(ctx, Connection{
+		SalonID: salonIDs[1], Provider: ProviderSquare, Status: StatusConnected,
+		AccessTokenEncrypted: "token-b", MerchantID: "merchant-tenant-bound",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.UpdateLocation(ctx, salonIDs[1], ProviderSquare, "location-tenant-bound"); !errors.Is(err, ErrProviderLocationTenantConflict) {
+		t.Fatalf("cross-tenant location selection error=%v, want ErrProviderLocationTenantConflict", err)
+	}
+	differentMerchant, err := repo.UpsertConnection(ctx, Connection{
+		SalonID: salonIDs[0], Provider: ProviderSquare, Status: StatusConnected,
+		AccessTokenEncrypted: "token-new", MerchantID: "merchant-changed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if differentMerchant.LocationID != "" || differentMerchant.LastSyncAt != nil || differentMerchant.SnapshotGeneration <= sameMerchant.SnapshotGeneration {
+		t.Fatalf("different-merchant reconnect retained stale evidence: %#v", differentMerchant)
+	}
+	if _, err := repo.UpdateLocation(ctx, salonIDs[0], ProviderSquare, "location-after-reconnect"); err != nil {
+		t.Fatal(err)
+	}
+	generation, err := repo.BeginProviderSnapshot(ctx, salonIDs[0], ProviderSquare, "location-after-reconnect")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.MarkSyncCompleteForGeneration(ctx, salonIDs[0], ProviderSquare, generation, StatusActive, ""); err != nil {
+		t.Fatal(err)
+	}
+	secondTenant, err := repo.GetConnection(ctx, salonIDs[1], ProviderSquare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondTenant.LocationID != "" || secondTenant.SnapshotGeneration != 0 || secondTenant.LastSyncAt != nil {
+		t.Fatalf("tenant A sync changed tenant B connection: %#v", secondTenant)
 	}
 }
 

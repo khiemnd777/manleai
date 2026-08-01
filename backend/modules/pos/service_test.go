@@ -82,6 +82,19 @@ func TestCreateServiceNormalizesInputAndDefaultsActive(t *testing.T) {
 	}
 }
 
+func TestServicesFailsClosedWhenActiveProviderIsNotConfigured(t *testing.T) {
+	store := &fakePOSStore{returnBlankActiveProvider: true}
+	service := NewService(store, fakeCapabilityProvider{name: ProviderSquare})
+
+	_, err := service.Services(context.Background(), "salon_1", "owner_1")
+	if !errors.Is(err, ErrActiveProviderNotConfigured) {
+		t.Fatalf("Services error = %v, want ErrActiveProviderNotConfigured", err)
+	}
+	if store.listServicesProvider != "" {
+		t.Fatalf("provider-scoped repository should not be called, provider=%q", store.listServicesProvider)
+	}
+}
+
 func TestNormalizeServiceWriteRequestRejectsAIConsultationSummaryOver320Runes(t *testing.T) {
 	_, err := normalizeServiceWriteRequest(ServiceWriteRequest{
 		Name:            "Classic Manicure",
@@ -1175,18 +1188,19 @@ func TestProviderSwitchDryRunReadinessGatesExecutionForReadyRun(t *testing.T) {
 }
 
 type fakePOSStore struct {
-	activeProvider       string
-	listServicesProvider string
-	listStaffProvider    string
-	connection           *Connection
-	summary              ProviderMappingSummary
-	services             []Service
-	staff                []StaffMember
-	currentService       *Service
-	currentStaff         *StaffMember
-	categories           []ServiceCategory
-	categoryAliases      []ServiceCategoryAlias
-	categoryCreate       struct {
+	activeProvider            string
+	returnBlankActiveProvider bool
+	listServicesProvider      string
+	listStaffProvider         string
+	connection                *Connection
+	summary                   ProviderMappingSummary
+	services                  []Service
+	staff                     []StaffMember
+	currentService            *Service
+	currentStaff              *StaffMember
+	categories                []ServiceCategory
+	categoryAliases           []ServiceCategoryAlias
+	categoryCreate            struct {
 		salonID     string
 		ownerUserID string
 		input       ServiceCategoryMutation
@@ -1303,6 +1317,9 @@ func (f *fakePOSStore) EnsureSalonOwner(ctx context.Context, salonID string, own
 }
 
 func (f *fakePOSStore) GetActiveProvider(ctx context.Context, salonID string, ownerUserID string) (string, error) {
+	if f.returnBlankActiveProvider {
+		return "", nil
+	}
 	if f.activeProvider == "" {
 		return ProviderSquare, nil
 	}

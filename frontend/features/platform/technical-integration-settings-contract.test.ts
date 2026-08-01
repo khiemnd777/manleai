@@ -12,7 +12,11 @@ for (const required of [
   "OAuth write mode",
   "Capability evidence",
   "Reconnect Square",
-  "Re-evaluate safety"
+  "Re-evaluate safety",
+  "Active POS provider",
+  "Activate Square for this salon",
+  "Connection and sync do not select an active POS provider",
+  "/active-provider/activate"
 ]) {
   assert.match(source, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 }

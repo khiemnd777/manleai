@@ -1177,9 +1177,14 @@ and OpenAI are salon-scoped operational configuration stored through
 `modules/integration_config`. Secrets are encrypted with the same AES-GCM token
 cipher used for POS tokens, never returned to the frontend, and resolved by
 adapters at call time. Environment variables remain infrastructure, JWT, CORS,
-encryption, and exact-missing legacy Square-bootstrap configuration only.
-Twilio and OpenAI runtime never inherit provider settings, URLs, models, or
-credentials from the process. Owner-notification Twilio messaging likewise
+and encryption configuration only. Square, Twilio, and OpenAI runtime never
+inherit provider settings, URLs, models, or credentials from the process.
+V88 additionally requires an explicit salon context for every Square adapter
+call, uniquely assigns each complete provider/merchant/location identity to one
+salon, and owns the versioned initial active-provider mutation. Release A keeps
+the legacy database default for rollback compatibility; blank-by-default
+provisioning remains a separate replica-drained contract release.
+Owner-notification Twilio messaging likewise
 uses only the encrypted salon record. Explicit owner-SMS enablement, exact-destination consent,
 Account SID/Auth Token, sender or Messaging Service, and public HTTPS callback
 URLs form its configuration fence.

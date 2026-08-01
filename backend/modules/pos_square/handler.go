@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/internal/middleware"
 	"github.com/manleai/ai-receptionist/internal/respond"
 	"github.com/manleai/ai-receptionist/modules/booking"
@@ -14,8 +13,8 @@ import (
 )
 
 type Handler struct {
-	service *Service
-	cfg     config.Config
+	service     *Service
+	frontendURL string
 }
 
 func (h *Handler) ListWebhookEvents(c *fiber.Ctx) error {
@@ -85,8 +84,8 @@ func squareWebhookQueryDefault(value, fallback string) string {
 	return value
 }
 
-func NewHandler(service *Service, cfg config.Config) *Handler {
-	return &Handler{service: service, cfg: cfg}
+func NewHandler(service *Service, frontendURL string) *Handler {
+	return &Handler{service: service, frontendURL: strings.TrimRight(frontendURL, "/")}
 }
 
 func (h *Handler) ConnectURL(c *fiber.Ctx) error {
@@ -110,14 +109,17 @@ func (h *Handler) Callback(c *fiber.Ctx) error {
 	if code == "" || state == "" {
 		return respond.Error(c, fiber.StatusBadRequest, "INVALID_SQUARE_CALLBACK", "Square callback is missing code or state.")
 	}
-	connection, err := h.service.HandleCallback(c.UserContext(), code, state, h.cfg.Square.RedirectURL)
+	connection, err := h.service.HandleCallback(c.UserContext(), code, state)
+	if errors.Is(err, pos.ErrProviderLocationTenantConflict) {
+		return respond.Error(c, fiber.StatusConflict, "SQUARE_LOCATION_TENANT_CONFLICT", "This Square merchant and location are already assigned to another salon.")
+	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusBadRequest, "SQUARE_CALLBACK_FAILED", "Square connection could not be completed.")
 	}
 	if c.Query("format") == "json" {
 		return respond.JSON(c, fiber.StatusOK, connection)
 	}
-	redirect := h.cfg.FrontendURL + "/platform/tenants/" + connection.SalonID + "/technical?square=connected"
+	redirect := h.frontendURL + "/platform/tenants/" + connection.SalonID + "/technical?square=connected"
 	return c.Redirect(redirect, fiber.StatusFound)
 }
 
@@ -203,6 +205,9 @@ func (h *Handler) SelectLocation(c *fiber.Ctx) error {
 	connection, err := h.service.SelectLocation(c.UserContext(), req.SalonID, middleware.UserID(c), req.LocationID)
 	if errors.Is(err, pos.ErrNotFound) {
 		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if errors.Is(err, pos.ErrProviderLocationTenantConflict) {
+		return respond.Error(c, fiber.StatusConflict, "SQUARE_LOCATION_TENANT_CONFLICT", "This Square merchant and location are already assigned to another salon.")
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusBadRequest, "SQUARE_LOCATION_FAILED", "The Square location could not be selected.")
@@ -345,6 +350,9 @@ func (h *Handler) handleGateError(c *fiber.Ctx, err error, internalCode string) 
 	}
 	if errors.Is(err, booking.ErrSchedulingAuthorityNotReady) {
 		return true, respond.Error(c, fiber.StatusConflict, "SCHEDULING_AUTHORITY_NOT_READY", "Scheduling is not ready for this salon.")
+	}
+	if errors.Is(err, pos.ErrActiveProviderNotConfigured) {
+		return true, respond.Error(c, fiber.StatusConflict, "POS_ACTIVE_PROVIDER_NOT_CONFIGURED", "An active POS provider has not been selected for this salon.")
 	}
 	if errors.Is(err, ErrReadinessGate) {
 		message := "Square readiness checks have not passed."

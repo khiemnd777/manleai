@@ -16,10 +16,20 @@ func NewHandler(service *ServiceLayer) *Handler {
 	return &Handler{service: service}
 }
 
+func activeProviderNotConfiguredError(c *fiber.Ctx, err error) (bool, error) {
+	if !errors.Is(err, ErrActiveProviderNotConfigured) {
+		return false, nil
+	}
+	return true, respond.Error(c, fiber.StatusConflict, "POS_ACTIVE_PROVIDER_NOT_CONFIGURED", "An active POS provider has not been selected for this salon.")
+}
+
 func (h *Handler) Services(c *fiber.Ctx) error {
 	items, err := h.service.Services(c.UserContext(), c.Params("id"), middleware.UserID(c))
 	if errors.Is(err, ErrNotFound) {
 		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if handled, responseErr := activeProviderNotConfiguredError(c, err); handled {
+		return responseErr
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICES_FAILED", "Could not load services.")
@@ -175,6 +185,9 @@ func (h *Handler) CreateService(c *fiber.Ctx) error {
 	if errors.Is(err, ErrNotFound) {
 		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
 	}
+	if handled, responseErr := activeProviderNotConfiguredError(c, err); handled {
+		return responseErr
+	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CREATE_FAILED", "Could not create service.")
 	}
@@ -257,6 +270,9 @@ func (h *Handler) Staff(c *fiber.Ctx) error {
 	if errors.Is(err, ErrNotFound) {
 		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
 	}
+	if handled, responseErr := activeProviderNotConfiguredError(c, err); handled {
+		return responseErr
+	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "STAFF_FAILED", "Could not load staff.")
 	}
@@ -267,6 +283,9 @@ func (h *Handler) ProviderSwitchReadiness(c *fiber.Ctx) error {
 	readiness, err := h.service.ProviderSwitchReadiness(c.UserContext(), c.Params("id"), middleware.UserID(c))
 	if errors.Is(err, ErrNotFound) {
 		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if handled, responseErr := activeProviderNotConfiguredError(c, err); handled {
+		return responseErr
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "PROVIDER_SWITCH_READINESS_FAILED", "Could not load provider switch readiness.")
@@ -285,6 +304,9 @@ func (h *Handler) CreateProviderSwitchRun(c *fiber.Ctx) error {
 	}
 	if errors.Is(err, ErrNotFound) {
 		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if handled, responseErr := activeProviderNotConfiguredError(c, err); handled {
+		return responseErr
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "PROVIDER_SWITCH_RUN_CREATE_FAILED", "Could not create provider switch run.")
@@ -360,6 +382,9 @@ func (h *Handler) CreateStaff(c *fiber.Ctx) error {
 	}
 	if errors.Is(err, ErrNotFound) {
 		return respond.Error(c, fiber.StatusNotFound, "SALON_NOT_FOUND", "Salon not found.")
+	}
+	if handled, responseErr := activeProviderNotConfiguredError(c, err); handled {
+		return responseErr
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "STAFF_CREATE_FAILED", "Could not create staff member.")

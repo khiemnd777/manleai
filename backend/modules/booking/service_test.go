@@ -2224,6 +2224,7 @@ func TestAvailableSlotsPersistsExternalTargetOriginForRescheduleVersionZero(t *t
 	store.appointment.ID = "00000000-0000-4000-8000-000000000041"
 	store.appointment.AuthorityAppointmentVersion = 0
 	store.appointment.POSAppointmentVersion = 0
+	store.activeProvider = ""
 	provider := &fakeProvider{availabilitySlots: []pos.TimeSlot{{
 		StartTime: time.Date(2026, 6, 15, 10, 0, 0, 0, loc).UTC(),
 		EndTime:   time.Date(2026, 6, 15, 10, 45, 0, 0, loc).UTC(),
@@ -2248,6 +2249,9 @@ func TestAvailableSlotsPersistsExternalTargetOriginForRescheduleVersionZero(t *t
 	}
 	if provider.availabilityCalls != 1 {
 		t.Fatalf("provider availability calls=%d, want 1", provider.availabilityCalls)
+	}
+	if store.activeProviderCalls != 0 {
+		t.Fatalf("target-origin availability read current active provider %d times, want 0", store.activeProviderCalls)
 	}
 }
 
@@ -2697,6 +2701,7 @@ type fakeStore struct {
 	mu                               sync.Mutex
 	operations                       map[string]*BookingAttempt
 	activeProvider                   string
+	activeProviderCalls              int
 	activeProviderFence              pos.ProviderFence
 	activeProviderFenceCalls         int
 	service                          ServiceRef
@@ -2894,6 +2899,10 @@ func (f *fakeStore) GetActiveProvider(ctx context.Context, salonID string, owner
 	if salonID != "salon_1" || ownerUserID != "owner_1" {
 		return "", pos.ErrNotFound
 	}
+	f.activeProviderCalls++
+	if strings.TrimSpace(f.activeProvider) == "" {
+		return "", pos.ErrActiveProviderNotConfigured
+	}
 	return f.activeProvider, nil
 }
 
@@ -2998,7 +3007,7 @@ func (f *fakeStore) LinkBookingCustomer(ctx context.Context, salonID string, pro
 }
 
 func (f *fakeStore) GetSchedule(ctx context.Context, salonID string, provider string, fence pos.ProviderFence) (*Schedule, error) {
-	if provider != f.activeProvider || !sameProviderFence(fence, f.service.ProviderFence) {
+	if provider != f.service.POSProvider || !sameProviderFence(fence, f.service.ProviderFence) {
 		return nil, ErrAvailabilityQuoteStale
 	}
 	return &f.schedule, nil

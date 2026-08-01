@@ -179,7 +179,7 @@ export function SettingsDashboard() {
   }, [tenant.activeSalonID, tenant.loading]);
 
   const aiEnabled = Boolean(salon?.ai_enabled);
-  const activeProvider = salon?.active_pos_provider || "square";
+  const activeProvider = salon?.active_pos_provider?.trim() ?? "";
   const consultationEligibleServices = useMemo(
     () => services.filter((service) => serviceEligibleForAuthority(service, salon?.scheduling_authority, activeProvider)),
     [activeProvider, salon?.scheduling_authority, services]
@@ -194,7 +194,7 @@ export function SettingsDashboard() {
       ).length,
     [consultationEligibleServices]
   );
-  const activeProviderLabel = activeProvider === "square" ? "Square" : activeProvider;
+  const activeProviderLabel = activeProvider === "square" ? "Square" : activeProvider || "Not configured";
   const importedProviderPeriods = useMemo(() => periods.filter((period) => isImportedProviderPeriod(period, activeProvider)), [activeProvider, periods]);
   const hasBusinessHourPeriods = importedProviderPeriods.length > 0;
   const latestBusinessHourSync = latestUpdatedAt(...importedProviderPeriods.map((item) => item.last_synced_at || item.updated_at || ""));

@@ -158,8 +158,10 @@ func main() {
 
 	posRepo := pos.NewRepository(db)
 
-	squareAdapter := pos_square.NewSquareAdapter(cfg.Square, posRepo, cipher)
-	squareAdapter.SetConfigResolver(integrationConfigService)
+	squareAdapter, err := pos_square.NewSquareAdapter(integrationConfigService, posRepo, cipher)
+	if err != nil {
+		log.Fatalf("create tenant-bound Square adapter: %v", err)
+	}
 	posService := pos.NewService(posRepo, squareAdapter)
 	pos.RegisterRoutes(api, pos.NewHandler(posService), cfg.JWTSecret)
 	pos.RegisterPlatformRoutes(api, pos.NewHandler(posService), accessService, cfg.JWTSecret)
@@ -236,7 +238,7 @@ func main() {
 	squareService.SetWebhookRepository(squareWebhookRepo)
 	squareService.SetWebhookConfigurationStatusResolver(integrationConfigService)
 	voiceService.SetSchedulingReadinessProviders(ownerManualSchedulingService, manleaiCalendarService, squareService)
-	pos_square.RegisterRoutes(api, pos_square.NewHandler(squareService, cfg), cfg.JWTSecret)
+	pos_square.RegisterRoutes(api, pos_square.NewHandler(squareService, cfg.FrontendURL), cfg.JWTSecret)
 	pos_square.RegisterPlatformRoutes(api, pos_square.NewPlatformHandler(squareService, accessService, tenantRuntimeService), cfg.JWTSecret)
 	authoritySwitchRepo := authorityswitch.NewRepository(db)
 	authoritySwitchService := authorityswitch.NewService(authoritySwitchRepo, manleaiCalendarService, squareService, ownerManualSchedulingExecutor != nil)

@@ -435,7 +435,7 @@ func validOpenAIUpdateRequest() UpdateOpenAISettingsRequest {
 	}
 }
 
-func TestRuntimeResolversKeepSquareBootstrapButFailClosedForMissingVoiceConfigs(t *testing.T) {
+func TestRuntimeResolversFailClosedForMissingTenantConfigs(t *testing.T) {
 	service := &Service{
 		repo:   &fakeIntegrationConfigStore{},
 		cipher: &fakeSecretCipher{},
@@ -455,8 +455,8 @@ func TestRuntimeResolversKeepSquareBootstrapButFailClosedForMissingVoiceConfigs(
 	}
 
 	squareCfg, err := service.ResolveSquareConfig(context.Background(), "salon_1")
-	if err != nil || squareCfg.ClientSecret != "legacy-square-secret" || squareCfg.ClientID != "legacy-square-client" {
-		t.Fatalf("legacy Square config/error = %#v/%v", squareCfg, err)
+	if !errors.Is(err, ErrNotFound) || squareCfg.ClientSecret != "" || squareCfg.ClientID != "" {
+		t.Fatalf("Square config/error = %#v/%v, want missing stored config", squareCfg, err)
 	}
 	twilioCfg, publicBaseURL, err := service.ResolveTwilioConfig(context.Background(), "salon_1")
 	if !errors.Is(err, ErrNotFound) || twilioCfg.AuthToken != "" || publicBaseURL != "" {
@@ -473,6 +473,10 @@ func TestRuntimeResolversKeepSquareBootstrapButFailClosedForMissingVoiceConfigs(
 	openAIResponse := service.openAIResponse(nil)
 	if openAIResponse.Enabled || openAIResponse.Configured || openAIResponse.BaseURL != "https://api.openai.com/v1" || !openAIResponse.DestinationManaged || openAIResponse.ReplyModel != "" || openAIResponse.APIKeySource != SecretSourceNone {
 		t.Fatalf("missing OpenAI response leaked legacy environment config: %#v", openAIResponse)
+	}
+	squareResponse := service.squareResponse(nil)
+	if squareResponse.Configured || squareResponse.ClientID != "" || squareResponse.ClientSecretConfigured || squareResponse.ClientSecretSource != SecretSourceNone {
+		t.Fatalf("missing Square response leaked process configuration: %#v", squareResponse)
 	}
 }
 

@@ -53,6 +53,23 @@ func TestUpdateStaffMapsProviderManagedFieldsToConflict(t *testing.T) {
 	assertErrorCode(t, response, "PROVIDER_MANAGED_FIELDS")
 }
 
+func TestServicesMapsUnconfiguredActiveProviderToConflict(t *testing.T) {
+	store := &fakePOSStore{returnBlankActiveProvider: true}
+	handler := NewHandler(NewService(store, fakeCapabilityProvider{name: ProviderSquare}))
+	app := fiber.New()
+	app.Get("/salons/:id/services", withOwner("owner_1"), handler.Services)
+
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/salons/salon_1/services", nil))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != fiber.StatusConflict {
+		t.Fatalf("status = %d, want %d", response.StatusCode, fiber.StatusConflict)
+	}
+	assertErrorCode(t, response, "POS_ACTIVE_PROVIDER_NOT_CONFIGURED")
+}
+
 func withOwner(ownerUserID string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		c.Locals(middleware.LocalUserID, ownerUserID)

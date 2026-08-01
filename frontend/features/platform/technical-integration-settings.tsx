@@ -15,6 +15,7 @@ import {
   openAIConfigToForm,
   platformIntegrationConfigBasePath,
   squareSchedulingCapabilityReevaluationPayload,
+  squareInitialProviderActivationPayload,
   squareConfigPayload,
   squareConfigToForm,
   twilioConfigPayload,
@@ -28,6 +29,7 @@ import type {
 } from "@/lib/api/integration-config-contract";
 import type {
   IntegrationConfigs,
+  InitialProviderActivation,
   OpenAIIntegrationConfig,
   OpenAIRuntimeVerification,
   OpenAIRuntimeVerificationResponse,
@@ -302,6 +304,7 @@ type SquareStatus = {
   connection?: POSConnection;
   sync_logs: SyncLog[];
   readiness: SquareReadiness;
+  initial_activation: InitialProviderActivation;
 };
 
 function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
@@ -314,6 +317,7 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
   const requestRef = useRef(0);
   const aiAction = useRef<{ enabled: boolean; key: string } | null>(null);
   const capabilityAction = useRef<{ signature: string; key: string } | null>(null);
+  const activationAction = useRef<{ signature: string; key: string } | null>(null);
 
   const load = useCallback(async () => {
     const requestID = ++requestRef.current;
@@ -345,6 +349,7 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
     setError("");
     aiAction.current = null;
     capabilityAction.current = null;
+    activationAction.current = null;
     void load();
     return () => {
       requestRef.current += 1;
@@ -452,8 +457,50 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
     }
   }
 
+  async function activateInitialProvider() {
+    if (!status?.initial_activation) return;
+    const activation = status.initial_activation;
+    const signature = `${activation.active_provider.version}:${activation.expected_connection_capability_version}:${activation.expected_integration_config_version}`;
+    let action = activationAction.current;
+    if (!action || action.signature !== signature) {
+      action = { signature, key: newBusinessActionKey("activate-square-provider") };
+      activationAction.current = action;
+    }
+    setBusy("activate-provider");
+    setError("");
+    try {
+      await apiRequest(`${base}/active-provider/activate`, {
+        method: "POST",
+        body: JSON.stringify(squareInitialProviderActivationPayload(
+          action.key,
+          activation.active_provider.version,
+          activation.expected_connection_capability_version,
+          activation.expected_integration_config_version
+        ))
+      });
+      activationAction.current = null;
+      await load();
+    } catch (failure) {
+      setError(errorMessage(failure, "Could not activate Square as this salon's POS provider."));
+    } finally {
+      setBusy("");
+    }
+  }
+
   const connected = Boolean(status?.connection?.id) && status?.connection?.status !== "not_connected";
   const aiEnabled = Boolean(status?.readiness?.ai_enabled);
+
+  if (!status && !error) {
+    return (
+      <Card>
+        <CardTitle>Square connection &amp; AI runtime</CardTitle>
+        <CardDescription>Loading tenant-bound Square connection and active-provider evidence.</CardDescription>
+        <div className="mt-5 grid gap-4 sm:grid-cols-4">
+          {Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-14" />)}
+        </div>
+      </Card>
+    );
+  }
 
   return (
     <Card>
@@ -467,6 +514,7 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
         </div>
         <div className="flex gap-2">
           <Badge value={connected ? status?.connection?.status || "connected" : "not_connected"} />
+          <Badge value={status?.initial_activation?.active_provider.provider ? "provider_selected" : "provider_unselected"} />
           <Badge value={status?.readiness?.automatic_single_create ? "buyer_write_safe" : "request_only"} />
           <Badge value={aiEnabled ? "ai_enabled" : "ai_disabled"} />
         </div>
@@ -476,7 +524,11 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
           <Alert title="Square operation failed" message={error} />
         </div>
       ) : null}
-      <div className="mt-5 grid gap-4 sm:grid-cols-3">
+      <div className="mt-5 grid gap-4 sm:grid-cols-4">
+        <Metric
+          label="Active POS provider"
+          value={status?.initial_activation?.active_provider.provider === "square" ? "Square" : status?.initial_activation?.active_provider.provider || "Not configured"}
+        />
         <Metric label="Scheduling authority" value={status?.readiness?.scheduling_authority || "Unavailable"} />
         <Metric
           label="Latest sync"
@@ -484,6 +536,34 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
         />
         <Metric label="AI runtime version" value={`v${status?.readiness?.ai_runtime_version ?? 0}`} />
       </div>
+      {status && !status.initial_activation.active_provider.provider ? (
+        <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-sm font-bold text-ink">Activate Square for this salon</p>
+              <p className="mt-1 text-sm text-muted">
+                Connection and sync do not select an active POS provider. Activation is tenant-scoped, version-fenced, and audit recorded.
+              </p>
+              {status.initial_activation.blocked_reason ? (
+                <p className="mt-2 text-sm font-semibold text-amber-900">{status.initial_activation.blocked_reason}</p>
+              ) : null}
+            </div>
+            <Button
+              type="button"
+              disabled={Boolean(busy) || !status.initial_activation.can_activate}
+              onClick={() => void activateInitialProvider()}
+            >
+              <ShieldCheck className="h-4 w-4" />
+              {busy === "activate-provider" ? "Activating…" : "Activate Square"}
+            </Button>
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-3">
+            {status.initial_activation.checks.map((check) => (
+              <Metric key={check.key} label={check.label} value={check.complete ? "Ready" : "Required"} />
+            ))}
+          </div>
+        </div>
+      ) : null}
       <div className="mt-5 rounded-xl border border-line bg-slate-50 p-4">
         <p className="text-sm font-bold text-ink">Scheduling safety</p>
         <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">

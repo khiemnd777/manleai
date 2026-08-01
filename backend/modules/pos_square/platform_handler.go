@@ -163,6 +163,28 @@ func (h *PlatformHandler) DisableAIBooking(c *fiber.Ctx) error {
 	return h.setAIBooking(c, false)
 }
 
+func (h *PlatformHandler) ActivateInitialProvider(c *fiber.Ctx) error {
+	var req InitialProviderActivationRequest
+	if err := c.BodyParser(&req); err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Initial POS provider activation request is invalid.")
+	}
+	if err := h.authorize(c, access.CapabilityTechnicalWrite); err != nil {
+		return h.respond(c, nil, err, "POS_INITIAL_ACTIVATION_FAILED")
+	}
+	if h.access.RecordPlatformSupportAction(
+		c.UserContext(), middleware.Actor(c), c.Params("tenant_id"), access.CapabilityTechnicalWrite, "", c.Method(), c.Path(),
+	) != nil {
+		return respond.Error(c, fiber.StatusInternalServerError, "SUPPORT_AUDIT_FAILED", "Could not record this authorized technical action.")
+	}
+	result, replayed, err := h.service.ActivateInitialProviderForPlatform(
+		c.UserContext(), c.Params("tenant_id"), middleware.UserID(c), req,
+	)
+	if err == nil {
+		c.Set("X-Idempotent-Replay", strconv.FormatBool(replayed))
+	}
+	return h.respond(c, result, err, "POS_INITIAL_ACTIVATION_FAILED")
+}
+
 func (h *PlatformHandler) setAIBooking(c *fiber.Ctx, enabled bool) error {
 	var req platformAIBookingRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -268,12 +290,24 @@ func (h *PlatformHandler) respond(c *fiber.Ctx, value any, err error, code strin
 		return respond.Error(c, fiber.StatusConflict, "SQUARE_NOT_CONNECTED", "Square is not connected.")
 	case errors.Is(err, pos.ErrStaleProviderSnapshot):
 		return respond.Error(c, fiber.StatusConflict, "SQUARE_SYNC_STALE", "Square location or sync generation changed. Run sync again.")
+	case errors.Is(err, pos.ErrProviderLocationTenantConflict):
+		return respond.Error(c, fiber.StatusConflict, "SQUARE_LOCATION_TENANT_CONFLICT", "This Square merchant and location are already assigned to another salon.")
+	case errors.Is(err, pos.ErrActiveProviderNotConfigured):
+		return respond.Error(c, fiber.StatusConflict, "POS_ACTIVE_PROVIDER_NOT_CONFIGURED", "An active POS provider has not been selected for this salon.")
 	case errors.Is(err, pos.ErrTechnicalVersionConflict):
-		return respond.Error(c, fiber.StatusConflict, "TECHNICAL_VERSION_CONFLICT", "AI runtime settings changed. Reload before saving again.")
+		return respond.Error(c, fiber.StatusConflict, "TECHNICAL_VERSION_CONFLICT", "Technical settings changed. Reload before saving again.")
 	case errors.Is(err, pos.ErrTechnicalActionConflict):
 		return respond.Error(c, fiber.StatusConflict, "TECHNICAL_ACTION_CONFLICT", "This technical action key was already used for a different request.")
 	case errors.Is(err, pos.ErrCapabilityVersionConflict):
 		return respond.Error(c, fiber.StatusConflict, "SQUARE_CAPABILITY_VERSION_CONFLICT", "Square connection or integration configuration changed. Reload before re-evaluating safety.")
+	case errors.Is(err, ErrSquareConfigRequired):
+		return respond.Error(c, fiber.StatusConflict, "SQUARE_CONFIG_REQUIRED", "A complete enabled Square configuration must be stored for this salon.")
+	case errors.Is(err, ErrReadinessGate):
+		return respond.Error(c, fiber.StatusConflict, "AI_BOOKING_NOT_READY", "AI booking cannot be enabled until Square readiness checks pass.")
+	case errors.Is(err, pos.ErrInitialProviderActivationNotReady):
+		return respond.Error(c, fiber.StatusConflict, "POS_INITIAL_ACTIVATION_NOT_READY", "Square connection evidence changed or is not ready. Reload before activating.")
+	case errors.Is(err, pos.ErrActiveProviderAlreadyConfigured):
+		return respond.Error(c, fiber.StatusConflict, "POS_ACTIVE_PROVIDER_ALREADY_CONFIGURED", "An active POS provider is already selected for this salon.")
 	case err != nil:
 		return respond.Error(c, fiber.StatusBadGateway, code, "Square technical operation could not be completed.")
 	default:

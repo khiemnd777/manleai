@@ -38,6 +38,20 @@ adapter is evaluated by management lists, booking readiness, and provider
 switch flows. It is not the scheduling-authority selector, and connecting or
 syncing a provider never changes scheduling authority implicitly.
 
+V88 makes an empty `active_pos_provider` an explicit unconfigured state. POS,
+booking, conversation, business-summary, and public-catalog paths do not map
+that state to Square. Initial selection is a reviewed Platform Technical
+mutation with action-key idempotency and exact active-provider, integration-
+config, and connection-capability version fences. Release A retains the legacy
+database default for rollback compatibility; removing that provisioning default
+is a separate replica-drained contract release.
+
+A complete normalized `(provider, merchant_id, location_id)` connection identity
+is unique across all salons. Reconnecting the same merchant preserves its
+selected location and current snapshot evidence. Reconnecting a different
+merchant clears location/sync evidence and advances its connection fences before
+any provider-scoped work can resume.
+
 Provider IDs are mappings, not primary product identity. The target model stores
 those mappings in `pos_entity_links` with:
 

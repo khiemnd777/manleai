@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/manleai/ai-receptionist/internal/config"
 	"github.com/manleai/ai-receptionist/internal/middleware"
 	"github.com/manleai/ai-receptionist/modules/access"
 )
@@ -32,6 +31,7 @@ func TestPlatformSquareRoutesRequireAuthentication(t *testing.T) {
 		{http.MethodGet, "/api/platform/tenants/salon-1/technical/square/status"},
 		{http.MethodPost, "/api/platform/tenants/salon-1/technical/square/sync"},
 		{http.MethodPost, "/api/platform/tenants/salon-1/technical/square/scheduling-capability/re-evaluate"},
+		{http.MethodPost, "/api/platform/tenants/salon-1/technical/square/active-provider/activate"},
 		{http.MethodPost, "/api/platform/tenants/salon-1/technical/square/ai-booking/enable"},
 		{http.MethodPost, "/api/platform/tenants/salon-1/technical/square/ai-booking/disable"},
 	} {
@@ -47,7 +47,7 @@ func TestPlatformSquareRoutesRequireAuthentication(t *testing.T) {
 
 func TestTenantSquareRoutesDoNotExposeTechnicalControls(t *testing.T) {
 	app := fiber.New()
-	RegisterRoutes(app.Group("/api"), NewHandler(&Service{}, config.Config{}), "test-secret")
+	RegisterRoutes(app.Group("/api"), NewHandler(&Service{}, ""), "test-secret")
 	for _, path := range []string{
 		"/api/integrations/square/status",
 		"/api/integrations/square/sync",
@@ -86,6 +86,24 @@ func TestPlatformCapabilityReevaluationFailsClosedBeforeServiceWhenAuditFails(t 
 
 	request := httptest.NewRequest(http.MethodPost, "/platform/tenants/salon-1/technical/square/scheduling-capability/re-evaluate", strings.NewReader(`{
 		"action_key":"review-square-safety","expected_connection_capability_version":1,"expected_integration_config_version":1
+	}`))
+	request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	response, err := app.Test(request)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if response.StatusCode != fiber.StatusInternalServerError {
+		t.Fatalf("status=%d, want 500", response.StatusCode)
+	}
+}
+
+func TestPlatformInitialProviderActivationFailsClosedBeforeServiceWhenAuditFails(t *testing.T) {
+	app := fiber.New()
+	handler := NewPlatformHandler(&Service{}, failingReadinessSupportAudit{})
+	app.Post("/platform/tenants/:tenant_id/technical/square/active-provider/activate", handler.ActivateInitialProvider)
+
+	request := httptest.NewRequest(http.MethodPost, "/platform/tenants/salon-1/technical/square/active-provider/activate", strings.NewReader(`{
+		"action_key":"activate-square","expected_version":0,"expected_connection_capability_version":1,"expected_integration_config_version":1
 	}`))
 	request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
 	response, err := app.Test(request)

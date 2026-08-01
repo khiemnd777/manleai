@@ -30,8 +30,9 @@ The backend job runs the complete `go test ./...` and `go vet ./...` suites,
 followed by a bounded `-race` run over the high-risk authentication,
 SaaS access-control, scheduling, booking, POS, worker, notification, operations-health,
 conversation, training, and scheduling-load packages declared in the manifest.
-The manifest owns the V86/V87 migration safety tests, real PostgreSQL external
-slot-claim concurrency test, scope-bound Square capability tests, and load-
+The manifest owns the V86/V87/V88 migration safety tests, strict Square tenant-
+identity and initial-activation PostgreSQL tests, real PostgreSQL external slot-
+claim concurrency test, scope-bound Square capability tests, and load-
 harness report/integration tests so those contracts cannot disappear silently.
 
 The web matrix independently installs, typechecks, and builds `frontend`,

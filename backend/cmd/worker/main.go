@@ -89,8 +89,10 @@ func main() {
 	openAIVerificationProcessor := openairuntimeverification.NewService(
 		openairuntimeverification.NewRepository(db), integrationConfigService, openAIAdapter,
 	)
-	squareAdapter := pos_square.NewSquareAdapter(cfg.Square, posRepo, cipher)
-	squareAdapter.SetConfigResolver(integrationConfigService)
+	squareAdapter, err := pos_square.NewSquareAdapter(integrationConfigService, posRepo, cipher)
+	if err != nil {
+		log.Fatalf("create tenant-bound Square adapter: %v", err)
+	}
 	processor := pos.NewSyncProcessor(posRepo, []pos.POSProvider{squareAdapter})
 	bookingRepo := booking.NewRepository(db)
 	bookingService := booking.NewService(bookingRepo, []pos.POSProvider{squareAdapter})

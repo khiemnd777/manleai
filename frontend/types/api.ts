@@ -1576,6 +1576,18 @@ export type SquareReadiness = {
   checks: ReadinessCheck[];
 };
 
+export type InitialProviderActivation = {
+  active_provider: {
+    provider: string;
+    version: number;
+  };
+  can_activate: boolean;
+  checks: ReadinessCheck[];
+  blocked_reason?: string;
+  expected_integration_config_version: number;
+  expected_connection_capability_version: number;
+};
+
 export type ProviderCapabilities = {
   service_upsert: boolean;
   service_archive: boolean;

@@ -524,7 +524,11 @@ Additional gates by mode:
 
 Connecting or syncing an external integration never implicitly changes the
 selected scheduling authority. `active_pos_provider` selects an adapter only
-inside `external_provider`; it must not carry scheduling-authority meaning.
+inside `external_provider`; it must not carry scheduling-authority meaning. An
+explicit blank provider is not Square: genuinely new external work fails closed
+until the reviewed tenant-bound provider activation commits. Persisted retry and
+target origins continue to select their historical executor/provider without
+consulting that current blank selection.
 
 ## Confirmation And Lifecycle Invariants
 

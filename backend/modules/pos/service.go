@@ -13,8 +13,12 @@ import (
 const switchAdapterMissingReason = "The requested POS provider adapter is not installed in this deployment."
 
 var (
-	ErrValidation            = errors.New("pos validation failed")
-	ErrProviderManagedFields = errors.New("operational fields are managed by the active pos provider")
+	ErrValidation                        = errors.New("pos validation failed")
+	ErrProviderManagedFields             = errors.New("operational fields are managed by the active pos provider")
+	ErrActiveProviderNotConfigured       = errors.New("active pos provider is not configured")
+	ErrProviderLocationTenantConflict    = errors.New("provider merchant and location already belong to another tenant")
+	ErrInitialProviderActivationNotReady = errors.New("initial pos provider activation is not ready")
+	ErrActiveProviderAlreadyConfigured   = errors.New("active pos provider is already configured")
 )
 
 type Store interface {
@@ -1153,7 +1157,7 @@ func (s *ServiceLayer) activeProvider(ctx context.Context, salonID string, owner
 	}
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
-		return ProviderSquare, nil
+		return "", ErrActiveProviderNotConfigured
 	}
 	return provider, nil
 }
@@ -1167,7 +1171,7 @@ func (s *ServiceLayer) enqueueServiceSync(ctx context.Context, item *Service, op
 	}
 	providerName := item.POSProvider
 	if providerName == "" {
-		providerName = ProviderSquare
+		return false, nil
 	}
 	if !providerSupportsOperation(s.providers[providerName], operation) {
 		return false, nil
@@ -1191,7 +1195,7 @@ func (s *ServiceLayer) enqueueStaffSync(ctx context.Context, item *StaffMember, 
 	}
 	providerName := item.POSProvider
 	if providerName == "" {
-		providerName = ProviderSquare
+		return false, nil
 	}
 	if !providerSupportsOperation(s.providers[providerName], operation) {
 		return false, nil
@@ -1343,11 +1347,7 @@ func (s *ServiceLayer) entityFieldAuthority(provider string, providerBacked bool
 }
 
 func recordProvider(provider string) string {
-	provider = strings.TrimSpace(provider)
-	if provider == "" {
-		return ProviderSquare
-	}
-	return provider
+	return strings.TrimSpace(provider)
 }
 
 func providerLabel(provider string) string {

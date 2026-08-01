@@ -22,7 +22,7 @@ func (r *Repository) ListTenantSalons(ctx context.Context, actorUserID string) (
 		SELECT salon.id::text, salon.name, COALESCE(salon.city, ''), COALESCE(salon.state, ''),
 		       salon.timezone, salon.data_classification, COALESCE(salon.public_slug, ''), salon.public_catalog_enabled, salon.ai_enabled, role.name,
 		       settings.scheduling_authority, settings.scheduling_authority_version,
-		       COALESCE(NULLIF(BTRIM(salon.active_pos_provider), ''), 'square')
+		       BTRIM(salon.active_pos_provider)
 		FROM salon_memberships membership
 		JOIN salons salon ON salon.id = membership.salon_id
 		JOIN roles role ON role.id = membership.role_id
@@ -44,7 +44,7 @@ func (r *Repository) ListPlatformSalons(ctx context.Context, actorUserID string)
 		       salon.timezone, salon.data_classification, COALESCE(salon.public_slug, ''), salon.public_catalog_enabled, salon.ai_enabled,
 		       CASE role.name WHEN 'platform_admin' THEN 'global' ELSE 'assigned' END,
 		       settings.scheduling_authority, settings.scheduling_authority_version,
-		       COALESCE(NULLIF(BTRIM(salon.active_pos_provider), ''), 'square')
+		       BTRIM(salon.active_pos_provider)
 		FROM salons salon
 		JOIN salon_settings settings ON settings.salon_id=salon.id
 		JOIN platform_role_assignments platform_role ON platform_role.user_id=$1 AND platform_role.status='active'

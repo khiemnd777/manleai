@@ -48,10 +48,10 @@ func TestReceiveBookingWebhookVerifiesAndEnqueuesMinimalEvent(t *testing.T) {
 	}`)
 	store := &fakeSquareWebhookStore{target: &SquareWebhookTarget{SalonID: "salon_1", OwnerUserID: "owner_1"}, inserted: true}
 	service := &Service{
-		adapter: &SquareAdapter{cfg: config.SquareConfig{
+		adapter: &SquareAdapter{configResolver: staticSquareConfigResolver{cfg: config.SquareConfig{
 			WebhookNotificationURL: notificationURL,
 			WebhookSignatureKey:    signatureKey,
-		}},
+		}}},
 		webhookRepo: store,
 	}
 
@@ -81,10 +81,10 @@ func TestReceiveBookingWebhookRejectsInvalidSignatureBeforeEnqueue(t *testing.T)
 	body := []byte(`{"merchant_id":"MERCHANT_1","location_id":"LOC_1","type":"booking.created","event_id":"EVENT_1","data":{"type":"booking","id":"BOOKING_1","object":{"booking":{"id":"BOOKING_1","location_id":"LOC_1"}}}}`)
 	store := &fakeSquareWebhookStore{target: &SquareWebhookTarget{SalonID: "salon_1"}, inserted: true}
 	service := &Service{
-		adapter: &SquareAdapter{cfg: config.SquareConfig{
+		adapter: &SquareAdapter{configResolver: staticSquareConfigResolver{cfg: config.SquareConfig{
 			WebhookNotificationURL: "https://api.example.com/api/integrations/square/webhook",
 			WebhookSignatureKey:    "webhook-secret",
-		}},
+		}}},
 		webhookRepo: store,
 	}
 
@@ -102,10 +102,10 @@ func TestReceiveBookingWebhookRejectsSignedMismatchedLocationsBeforeTenantRoutin
 	body := []byte(`{"merchant_id":"MERCHANT_1","location_id":"LOC_ROOT","type":"booking.updated","event_id":"EVENT_1","data":{"type":"booking","id":"BOOKING_1","object":{"booking":{"id":"BOOKING_1","location_id":"LOC_BOOKING"}}}}`)
 	store := &fakeSquareWebhookStore{target: &SquareWebhookTarget{SalonID: "salon_1"}, inserted: true}
 	service := &Service{
-		adapter: &SquareAdapter{cfg: config.SquareConfig{
+		adapter: &SquareAdapter{configResolver: staticSquareConfigResolver{cfg: config.SquareConfig{
 			WebhookNotificationURL: notificationURL,
 			WebhookSignatureKey:    signatureKey,
-		}},
+		}}},
 		webhookRepo: store,
 	}
 

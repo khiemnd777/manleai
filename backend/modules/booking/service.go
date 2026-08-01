@@ -126,6 +126,9 @@ func (s *Service) Create(ctx context.Context, salonID string, ownerUserID string
 	}
 	activeProvider, err := s.store.GetActiveProvider(ctx, salonID, ownerUserID)
 	if err != nil {
+		if errors.Is(err, pos.ErrActiveProviderNotConfigured) {
+			return nil, ErrSchedulingAuthorityNotReady
+		}
 		return nil, err
 	}
 	resolvedSegments, err := s.resolveBookingSegments(ctx, salonID, activeProvider, req)
@@ -621,10 +624,8 @@ func (s *Service) AvailableSlots(ctx context.Context, salonID string, ownerUserI
 	if err := s.store.EnsureSalonOwner(ctx, salonID, ownerUserID); err != nil {
 		return nil, err
 	}
-	activeProvider, err := s.store.GetActiveProvider(ctx, salonID, ownerUserID)
-	if err != nil {
-		return nil, err
-	}
+	activeProvider := ""
+	var err error
 	var targetAppointment *AppointmentActionRef
 	var retryOrigin *BookingAttempt
 	if req.TargetAppointmentID != "" {
@@ -642,6 +643,14 @@ func (s *Service) AvailableSlots(ctx context.Context, salonID string, ownerUserI
 			return nil, err
 		}
 		activeProvider = retryOrigin.POSProvider
+	} else {
+		activeProvider, err = s.store.GetActiveProvider(ctx, salonID, ownerUserID)
+		if errors.Is(err, pos.ErrActiveProviderNotConfigured) {
+			return nil, ErrSchedulingAuthorityNotReady
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	resolvedSegments, err := s.resolveAvailabilitySegments(ctx, salonID, activeProvider, req)
 	if err != nil {
@@ -1102,6 +1111,9 @@ func (s *Service) SyncCalendar(ctx context.Context, salonID string, ownerUserID 
 	}
 	providerName, providerFence, err := s.store.GetActiveProviderFence(ctx, salonID, ownerUserID)
 	if err != nil {
+		if errors.Is(err, pos.ErrActiveProviderNotConfigured) {
+			return nil, ErrSchedulingAuthorityNotReady
+		}
 		return nil, err
 	}
 	provider := s.providers[providerName]

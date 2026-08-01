@@ -7,9 +7,8 @@ const (
 	ProviderTwilio = "twilio"
 	ProviderOpenAI = "openai"
 
-	SecretSourceNone        = "none"
-	SecretSourceDatabase    = "database"
-	SecretSourceEnvironment = "environment"
+	SecretSourceNone     = "none"
+	SecretSourceDatabase = "database"
 )
 
 type StoredConfig struct {

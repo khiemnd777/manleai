@@ -19,12 +19,13 @@ import (
 )
 
 var (
-	ErrNotConnected        = errors.New("square is not connected")
-	ErrLocationNotSelected = errors.New("square location is not selected")
+	ErrNotConnected              = errors.New("square is not connected")
+	ErrLocationNotSelected       = errors.New("square location is not selected")
+	ErrTenantContextRequired     = errors.New("square tenant context is required")
+	ErrConfigResolverUnavailable = errors.New("square tenant config resolver is unavailable")
 )
 
 type SquareAdapter struct {
-	cfg            config.SquareConfig
 	configResolver SquareConfigResolver
 	repo           *pos.Repository
 	cipher         *encryption.TokenCipher
@@ -35,19 +36,18 @@ type SquareConfigResolver interface {
 	ResolveSquareConfig(ctx context.Context, salonID string) (config.SquareConfig, error)
 }
 
-func NewSquareAdapter(cfg config.SquareConfig, repo *pos.Repository, cipher *encryption.TokenCipher) *SquareAdapter {
+func NewSquareAdapter(resolver SquareConfigResolver, repo *pos.Repository, cipher *encryption.TokenCipher) (*SquareAdapter, error) {
+	if resolver == nil {
+		return nil, ErrConfigResolverUnavailable
+	}
 	return &SquareAdapter{
-		cfg:    cfg,
-		repo:   repo,
-		cipher: cipher,
+		configResolver: resolver,
+		repo:           repo,
+		cipher:         cipher,
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
-	}
-}
-
-func (a *SquareAdapter) SetConfigResolver(resolver SquareConfigResolver) {
-	a.configResolver = resolver
+	}, nil
 }
 
 func (a *SquareAdapter) Name() string {
@@ -63,7 +63,13 @@ func (a *SquareAdapter) Capabilities() pos.ProviderCapabilities {
 // create. Seller-level APPOINTMENTS_ALL_WRITE, malformed scopes, a stale
 // location/snapshot, reschedule, party, and resource capacity all fail closed.
 func (a *SquareAdapter) SchedulingCapabilities(ctx context.Context, salonID string, fence pos.ProviderFence) (pos.ProviderCapabilities, error) {
-	if a == nil || a.repo == nil || strings.TrimSpace(salonID) == "" || strings.TrimSpace(fence.LocationID) == "" || fence.SnapshotGeneration <= 0 {
+	if err := requireSquareTenantContext(salonID); err != nil {
+		return pos.ProviderCapabilities{}, err
+	}
+	if a == nil || a.configResolver == nil {
+		return pos.ProviderCapabilities{}, ErrConfigResolverUnavailable
+	}
+	if a.repo == nil || strings.TrimSpace(fence.LocationID) == "" || fence.SnapshotGeneration <= 0 {
 		return pos.ProviderCapabilities{}, nil
 	}
 	connection, err := a.repo.GetConnection(ctx, salonID, pos.ProviderSquare)
@@ -758,6 +764,9 @@ func (a *SquareAdapter) CancelAppointment(ctx context.Context, salonID string, a
 }
 
 func (a *SquareAdapter) ListAppointments(ctx context.Context, salonID string, input pos.AppointmentListInput) (*pos.AppointmentListResult, error) {
+	if err := requireSquareTenantContext(salonID); err != nil {
+		return nil, err
+	}
 	token, locationID, err := a.accessTokenAndProviderFence(ctx, salonID, input.ProviderFence)
 	if err != nil {
 		_ = a.repo.LogError(ctx, pos.POSError{
@@ -926,6 +935,9 @@ func (a *SquareAdapter) retrieveBooking(ctx context.Context, cfg config.SquareCo
 }
 
 func (a *SquareAdapter) accessToken(ctx context.Context, salonID string) (string, error) {
+	if err := requireSquareTenantContext(salonID); err != nil {
+		return "", err
+	}
 	connection, err := a.repo.GetConnection(ctx, salonID, pos.ProviderSquare)
 	if err != nil {
 		return "", ErrNotConnected
@@ -937,6 +949,9 @@ func (a *SquareAdapter) accessToken(ctx context.Context, salonID string) (string
 }
 
 func (a *SquareAdapter) accessTokenAndLocation(ctx context.Context, salonID string) (string, string, error) {
+	if err := requireSquareTenantContext(salonID); err != nil {
+		return "", "", err
+	}
 	connection, err := a.repo.GetConnection(ctx, salonID, pos.ProviderSquare)
 	if err != nil {
 		return "", "", ErrNotConnected
@@ -955,6 +970,9 @@ func (a *SquareAdapter) accessTokenAndLocation(ctx context.Context, salonID stri
 }
 
 func (a *SquareAdapter) accessTokenAndProviderFence(ctx context.Context, salonID string, expected pos.ProviderFence) (string, string, error) {
+	if err := requireSquareTenantContext(salonID); err != nil {
+		return "", "", err
+	}
 	connection, err := a.repo.GetConnection(ctx, salonID, pos.ProviderSquare)
 	if err != nil {
 		return "", "", ErrNotConnected
@@ -1091,14 +1109,24 @@ func definitiveSquareWriteRejection(statusCode int) bool {
 }
 
 func (a *SquareAdapter) configFor(ctx context.Context, salonID string) (config.SquareConfig, error) {
-	if a.configResolver == nil || strings.TrimSpace(salonID) == "" {
-		return a.cfg, nil
+	if err := requireSquareTenantContext(salonID); err != nil {
+		return config.SquareConfig{}, err
 	}
-	cfg, err := a.configResolver.ResolveSquareConfig(ctx, salonID)
+	if a == nil || a.configResolver == nil {
+		return config.SquareConfig{}, ErrConfigResolverUnavailable
+	}
+	cfg, err := a.configResolver.ResolveSquareConfig(ctx, strings.TrimSpace(salonID))
 	if err != nil {
 		return config.SquareConfig{}, err
 	}
 	return cfg, nil
+}
+
+func requireSquareTenantContext(salonID string) error {
+	if strings.TrimSpace(salonID) == "" {
+		return ErrTenantContextRequired
+	}
+	return nil
 }
 
 func (a *SquareAdapter) apiBaseURL(cfg config.SquareConfig) string {

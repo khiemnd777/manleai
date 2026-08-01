@@ -375,17 +375,25 @@ Square Appointments app credentials are configured in the Integrations
 dashboard per salon. The backend stores the Square client secret encrypted and
 never returns it to the frontend. The dashboard also stores an HTTPS webhook
 notification URL and encrypted write-only webhook signature key. Active runtime
-configuration is resolved from `salon_integration_configs`; `.env`,
+configuration is resolved only from the exact enabled
+`salon_integration_configs` row for the requested salon; `.env`,
 `project.env`, templates, Compose defaults, and deployment secrets are not
 evidence of a salon's active provider configuration. Configuration writes
 surface encryption/decryption failures and preserve the last valid stored
-secret. The runtime resolver uses legacy bootstrap configuration only when the
-salon/provider repository returns exact `integration_config.ErrNotFound`.
-Repository access failures, decryption failures, malformed or incomplete stored
-configuration, and disabled stored configuration fail closed; they do not mix
-or replace stored values with legacy environment values. Legacy fallback is a
-bootstrap compatibility path and is not evidence of the active salon
-configuration.
+secret. Repository misses, access failures, decryption failures, malformed or
+incomplete stored configuration, and disabled stored configuration fail closed
+before OAuth or a Square API call. They never inherit process environment
+settings or secrets.
+
+V88 also requires every Square adapter call to carry a non-empty salon ID and a
+constructor-injected tenant config resolver. A complete Square
+provider/merchant/location identity may belong to only one salon. Connecting,
+selecting a location, and syncing still do not choose `active_pos_provider`.
+When that field is explicitly blank, Platform Technical exposes a reviewed
+`active-provider/activate` action only after the stored config and current
+connection/location/sync evidence pass their exact version fences. Release A
+keeps the historical schema default of `square`; changing new-tenant
+provisioning to blank is deferred to the replica-drained Release B contract.
 Saving these credentials, completing OAuth, or selecting a location configures
 the external adapter only. It is not scheduling-authority consent and must not
 perform an implicit authority switch.

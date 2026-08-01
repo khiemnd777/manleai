@@ -84,14 +84,10 @@ func TestNormalizeSquareErrorClassifiesUnsupportedAppointmentWritesWithoutPersis
 
 func TestDoJSONSendsSquareVersionHeader(t *testing.T) {
 	transport := &capturingTransport{}
-	adapter := &SquareAdapter{
-		cfg: config.SquareConfig{
-			APIVersion: "2026-05-20",
-		},
-		httpClient: &http.Client{Transport: transport},
-	}
+	cfg := config.SquareConfig{APIVersion: "2026-05-20"}
+	adapter := &SquareAdapter{httpClient: &http.Client{Transport: transport}}
 	var out map[string]bool
-	if err := adapter.doJSON(context.Background(), adapter.cfg, http.MethodGet, "https://square.test/v2/locations", "", nil, &out); err != nil {
+	if err := adapter.doJSON(context.Background(), cfg, http.MethodGet, "https://square.test/v2/locations", "", nil, &out); err != nil {
 		t.Fatalf("doJSON failed: %v", err)
 	}
 	if got := transport.squareVersion; got != "2026-05-20" {
@@ -176,11 +172,11 @@ func TestMapSquareBusinessHourPeriodsPreservesSplitDayPeriods(t *testing.T) {
 
 func TestOAuthURLDoesNotSendSessionFalseInSandbox(t *testing.T) {
 	adapter := &SquareAdapter{
-		cfg: config.SquareConfig{
+		configResolver: staticSquareConfigResolver{cfg: config.SquareConfig{
 			Environment: "sandbox",
 			ClientID:    "sandbox-client-id",
 			RedirectURL: "https://demo.test/api/integrations/square/callback",
-		},
+		}},
 	}
 	oauthURL, err := adapter.OAuthURL(context.Background(), "salon_1", "state_1")
 	if err != nil {
@@ -211,11 +207,11 @@ func TestOAuthURLDoesNotSendSessionFalseInSandbox(t *testing.T) {
 
 func TestOAuthURLSendsSessionFalseInProduction(t *testing.T) {
 	adapter := &SquareAdapter{
-		cfg: config.SquareConfig{
+		configResolver: staticSquareConfigResolver{cfg: config.SquareConfig{
 			Environment: "production",
 			ClientID:    "production-client-id",
 			RedirectURL: "https://demo.test/api/integrations/square/callback",
-		},
+		}},
 	}
 	oauthURL, err := adapter.OAuthURL(context.Background(), "salon_1", "state_1")
 	if err != nil {
@@ -249,6 +245,100 @@ func TestOAuthURLPropagatesSalonConfigResolutionFailure(t *testing.T) {
 	if url != "" || !errors.Is(err, configErr) {
 		t.Fatalf("OAuthURL = %q, %v; want config resolution failure", url, err)
 	}
+}
+
+func TestSquareAdapterRequiresTenantContextAndResolverBeforeOAuth(t *testing.T) {
+	configured := config.SquareConfig{
+		Environment: "sandbox",
+		ClientID:    "tenant-client-id",
+		RedirectURL: "https://tenant.example.test/api/integrations/square/callback",
+	}
+	adapterWithoutResolver := &SquareAdapter{}
+	if _, err := adapterWithoutResolver.OAuthURL(context.Background(), "salon_1", "state_1"); !errors.Is(err, ErrConfigResolverUnavailable) {
+		t.Fatalf("missing resolver error = %v, want ErrConfigResolverUnavailable", err)
+	}
+
+	adapter := &SquareAdapter{configResolver: staticSquareConfigResolver{cfg: configured}}
+	if _, err := adapter.OAuthURL(context.Background(), " ", "state_1"); !errors.Is(err, ErrTenantContextRequired) {
+		t.Fatalf("blank salon error = %v, want ErrTenantContextRequired", err)
+	}
+	if _, err := adapter.OAuthURL(context.Background(), "salon_1", "state_1"); err != nil {
+		t.Fatalf("tenant-scoped OAuthURL failed: %v", err)
+	}
+}
+
+func TestSquareSchedulingCapabilitiesRejectsMissingTenantContext(t *testing.T) {
+	adapter := &SquareAdapter{configResolver: staticSquareConfigResolver{cfg: config.SquareConfig{ClientID: "tenant-client"}}}
+	_, err := adapter.SchedulingCapabilities(context.Background(), " ", pos.ProviderFence{LocationID: "location_1", SnapshotGeneration: 1})
+	if !errors.Is(err, ErrTenantContextRequired) {
+		t.Fatalf("SchedulingCapabilities error = %v, want ErrTenantContextRequired", err)
+	}
+}
+
+func TestSquareReadinessRejectsUnconfiguredActiveProviderWithoutBlockingHistoricalCancel(t *testing.T) {
+	readiness := &ReadinessStatus{
+		CanTestBooking:         true,
+		CanCancelTestBooking:   true,
+		CanEnableAIBooking:     true,
+		AutomaticSingleCreate:  true,
+		providerCanTestBooking: true,
+	}
+	applyActiveProviderReadiness(readiness, " ")
+	if readiness.CanTestBooking || readiness.CanEnableAIBooking || readiness.AutomaticSingleCreate || readiness.providerCanTestBooking {
+		t.Fatalf("blank active provider left new Square work enabled: %#v", readiness)
+	}
+	if !readiness.CanCancelTestBooking {
+		t.Fatal("current provider selection must not orphan historical target-origin cancellation")
+	}
+	if !readiness.BookingWriteBlocked || readiness.BookingWriteBlockedCode != "POS_ACTIVE_PROVIDER_NOT_CONFIGURED" {
+		t.Fatalf("blank active provider blocker=%#v", readiness)
+	}
+}
+
+func TestSquareOAuthUsesOnlyTheRequestedTenantConfiguration(t *testing.T) {
+	resolver := tenantMapSquareConfigResolver{configs: map[string]config.SquareConfig{
+		"salon_a": {Environment: "sandbox", ClientID: "client-a", RedirectURL: "https://a.example.test/square/callback"},
+		"salon_b": {Environment: "production", ClientID: "client-b", RedirectURL: "https://b.example.test/square/callback"},
+	}}
+	adapter := &SquareAdapter{configResolver: resolver}
+
+	urlA, err := adapter.OAuthURL(context.Background(), "salon_a", "state-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	urlB, err := adapter.OAuthURL(context.Background(), "salon_b", "state-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(urlA, "client_id=client-a") || strings.Contains(urlA, "client-b") || !strings.Contains(urlA, "a.example.test") {
+		t.Fatalf("tenant A OAuth URL crossed configuration: %s", urlA)
+	}
+	if !strings.Contains(urlB, "client_id=client-b") || strings.Contains(urlB, "client-a") || !strings.Contains(urlB, "b.example.test") {
+		t.Fatalf("tenant B OAuth URL crossed configuration: %s", urlB)
+	}
+	if _, err := adapter.OAuthURL(context.Background(), "salon_missing", "state-missing"); !errors.Is(err, pos.ErrNotFound) {
+		t.Fatalf("missing tenant config error=%v, want pos.ErrNotFound", err)
+	}
+}
+
+type staticSquareConfigResolver struct {
+	cfg config.SquareConfig
+}
+
+type tenantMapSquareConfigResolver struct {
+	configs map[string]config.SquareConfig
+}
+
+func (r tenantMapSquareConfigResolver) ResolveSquareConfig(_ context.Context, salonID string) (config.SquareConfig, error) {
+	cfg, ok := r.configs[salonID]
+	if !ok {
+		return config.SquareConfig{}, pos.ErrNotFound
+	}
+	return cfg, nil
+}
+
+func (r staticSquareConfigResolver) ResolveSquareConfig(context.Context, string) (config.SquareConfig, error) {
+	return r.cfg, nil
 }
 
 type failingSquareConfigResolver struct {
@@ -321,12 +411,10 @@ func TestListServicesPaginatesAndFiltersSelectedLocation(t *testing.T) {
 		`{"objects":[{"id":"ITEM_1","type":"ITEM","present_at_all_locations":false,"present_at_location_ids":["LOC_1"],"item_data":{"name":"Classic Manicure","variations":[{"id":"VAR_1","type":"ITEM_VARIATION","version":101,"present_at_all_locations":false,"present_at_location_ids":["LOC_1"],"item_variation_data":{"name":"Regular","service_duration":1800000,"available_for_booking":true,"price_money":{"amount":3000,"currency":"USD"}}}]} }],"cursor":"next-page"}`,
 		`{"objects":[{"id":"ITEM_2","type":"ITEM","absent_at_location_ids":["LOC_1"],"item_data":{"name":"Hidden Service","variations":[{"id":"VAR_2","type":"ITEM_VARIATION","version":102,"item_variation_data":{"name":"Regular","service_duration":1800000}}]}},{"id":"ITEM_3","type":"ITEM","item_data":{"name":"Gel Manicure","variations":[{"id":"VAR_3","type":"ITEM_VARIATION","version":103,"is_deleted":true,"item_variation_data":{"name":"Regular","service_duration":2700000}}]}}]}`,
 	}}
-	adapter := &SquareAdapter{
-		cfg:        config.SquareConfig{APIBaseURL: "https://square.test"},
-		httpClient: &http.Client{Transport: transport},
-	}
+	cfg := config.SquareConfig{APIBaseURL: "https://square.test"}
+	adapter := &SquareAdapter{httpClient: &http.Client{Transport: transport}}
 
-	services, err := adapter.listServices(context.Background(), adapter.cfg, "token", "LOC_1")
+	services, err := adapter.listServices(context.Background(), cfg, "token", "LOC_1")
 	if err != nil {
 		t.Fatalf("listServices failed: %v", err)
 	}
@@ -349,12 +437,10 @@ func TestListServicesRejectsRepeatedPaginationCursor(t *testing.T) {
 		`{"objects":[],"cursor":"same"}`,
 		`{"objects":[],"cursor":"same"}`,
 	}}
-	adapter := &SquareAdapter{
-		cfg:        config.SquareConfig{APIBaseURL: "https://square.test"},
-		httpClient: &http.Client{Transport: transport},
-	}
+	cfg := config.SquareConfig{APIBaseURL: "https://square.test"}
+	adapter := &SquareAdapter{httpClient: &http.Client{Transport: transport}}
 
-	_, err := adapter.listServices(context.Background(), adapter.cfg, "token", "LOC_1")
+	_, err := adapter.listServices(context.Background(), cfg, "token", "LOC_1")
 	if err == nil || !strings.Contains(err.Error(), "repeated cursor") {
 		t.Fatalf("error = %v, want repeated cursor error", err)
 	}
@@ -367,12 +453,10 @@ func TestListStaffPaginatesAndScopesSelectedLocation(t *testing.T) {
 		`{"team_member_booking_profiles":[{"team_member_id":"TEAM_1","display_name":"Profile Linh","is_bookable":true},{"team_member_id":"TEAM_2","display_name":"Not Bookable","is_bookable":false},{"team_member_id":"TEAM_INACTIVE","display_name":"Inactive","is_bookable":true},{"team_member_id":"TEAM_STATUS_MISSING","display_name":"Unknown Status","is_bookable":true}],"cursor":"next-profile-page"}`,
 		`{"team_member_booking_profiles":[{"team_member_id":"TEAM_3","display_name":"Profile Fallback","is_bookable":true}]}`,
 	}}
-	adapter := &SquareAdapter{
-		cfg:        config.SquareConfig{APIBaseURL: "https://square.test"},
-		httpClient: &http.Client{Transport: transport},
-	}
+	cfg := config.SquareConfig{APIBaseURL: "https://square.test"}
+	adapter := &SquareAdapter{httpClient: &http.Client{Transport: transport}}
 
-	staff, err := adapter.listStaff(context.Background(), adapter.cfg, "token", "LOC_1")
+	staff, err := adapter.listStaff(context.Background(), cfg, "token", "LOC_1")
 	if err != nil {
 		t.Fatalf("listStaff failed: %v", err)
 	}
@@ -471,12 +555,10 @@ func TestListStaffRejectsRepeatedTeamMemberCursor(t *testing.T) {
 		`{"team_members":[],"cursor":"same-team-cursor"}`,
 		`{"team_members":[],"cursor":"same-team-cursor"}`,
 	}}
-	adapter := &SquareAdapter{
-		cfg:        config.SquareConfig{APIBaseURL: "https://square.test"},
-		httpClient: &http.Client{Transport: transport},
-	}
+	cfg := config.SquareConfig{APIBaseURL: "https://square.test"}
+	adapter := &SquareAdapter{httpClient: &http.Client{Transport: transport}}
 
-	staff, err := adapter.listStaff(context.Background(), adapter.cfg, "token", "LOC_1")
+	staff, err := adapter.listStaff(context.Background(), cfg, "token", "LOC_1")
 	if err == nil || !strings.Contains(err.Error(), "team member pagination repeated cursor") {
 		t.Fatalf("staff/error = %#v/%v, want repeated team member cursor error", staff, err)
 	}
@@ -488,12 +570,10 @@ func TestListStaffRejectsRepeatedBookingProfileCursor(t *testing.T) {
 		`{"team_member_booking_profiles":[{"team_member_id":"TEAM_1","display_name":"Linh","is_bookable":true}],"cursor":"same-profile-cursor"}`,
 		`{"team_member_booking_profiles":[],"cursor":"same-profile-cursor"}`,
 	}}
-	adapter := &SquareAdapter{
-		cfg:        config.SquareConfig{APIBaseURL: "https://square.test"},
-		httpClient: &http.Client{Transport: transport},
-	}
+	cfg := config.SquareConfig{APIBaseURL: "https://square.test"}
+	adapter := &SquareAdapter{httpClient: &http.Client{Transport: transport}}
 
-	staff, err := adapter.listStaff(context.Background(), adapter.cfg, "token", "LOC_1")
+	staff, err := adapter.listStaff(context.Background(), cfg, "token", "LOC_1")
 	if err == nil || !strings.Contains(err.Error(), "booking profile pagination repeated cursor") {
 		t.Fatalf("staff/error = %#v/%v, want repeated booking profile cursor error", staff, err)
 	}
@@ -504,12 +584,10 @@ func TestListCustomersPaginatesAndRejectsRepeatedCursor(t *testing.T) {
 		`{"customers":[{"id":"CUSTOMER_1","given_name":"Linh","family_name":"Tran"}],"cursor":"next-customer-page"}`,
 		`{"customers":[{"id":"CUSTOMER_2","given_name":"Mai","family_name":"Nguyen"}],"cursor":"next-customer-page"}`,
 	}}
-	adapter := &SquareAdapter{
-		cfg:        config.SquareConfig{APIBaseURL: "https://square.test"},
-		httpClient: &http.Client{Transport: transport},
-	}
+	cfg := config.SquareConfig{APIBaseURL: "https://square.test"}
+	adapter := &SquareAdapter{httpClient: &http.Client{Transport: transport}}
 
-	customers, err := adapter.listCustomers(context.Background(), adapter.cfg, "token")
+	customers, err := adapter.listCustomers(context.Background(), cfg, "token")
 	if err == nil || !strings.Contains(err.Error(), "repeated cursor") {
 		t.Fatalf("customers/error = %#v/%v, want repeated cursor error", customers, err)
 	}
@@ -954,15 +1032,10 @@ func TestRetrieveBookingGetsVersion(t *testing.T) {
 	transport := &sequenceTransport{
 		responses: []string{`{"booking":{"id":"booking_1","version":12,"status":"ACCEPTED","start_at":"2026-06-17T17:00:00Z","appointment_segments":[{"duration_minutes":30}]}}`},
 	}
-	adapter := &SquareAdapter{
-		cfg: config.SquareConfig{
-			APIBaseURL: "https://square.test",
-			APIVersion: "2026-05-20",
-		},
-		httpClient: &http.Client{Transport: transport},
-	}
+	cfg := config.SquareConfig{APIBaseURL: "https://square.test", APIVersion: "2026-05-20"}
+	adapter := &SquareAdapter{httpClient: &http.Client{Transport: transport}}
 
-	booking, err := adapter.retrieveBooking(context.Background(), adapter.cfg, "token_1", "booking_1")
+	booking, err := adapter.retrieveBooking(context.Background(), cfg, "token_1", "booking_1")
 	if err != nil {
 		t.Fatalf("retrieve booking failed: %v", err)
 	}

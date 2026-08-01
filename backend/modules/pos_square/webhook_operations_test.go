@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/manleai/ai-receptionist/internal/config"
 )
 
 const (
@@ -143,7 +142,7 @@ func TestPlatformWebhookOperationsReportsStoredConfigurationForExactSalon(t *tes
 
 func TestPlatformSquareTechnicalRoutesRequireAuthentication(t *testing.T) {
 	app := fiber.New()
-	RegisterRoutes(app.Group("/api"), NewHandler(&Service{}, config.Config{}), "test-secret")
+	RegisterRoutes(app.Group("/api"), NewHandler(&Service{}, ""), "test-secret")
 	RegisterPlatformRoutes(app.Group("/api"), NewPlatformHandler(&Service{}, nil), "test-secret")
 	for _, test := range []struct {
 		method string
@@ -167,7 +166,7 @@ func TestPlatformSquareTechnicalRoutesRequireAuthentication(t *testing.T) {
 
 func TestWebhookOperationsHandlerSanitizesUnexpectedErrors(t *testing.T) {
 	app := fiber.New()
-	handler := NewHandler(&Service{}, config.Config{})
+	handler := NewHandler(&Service{}, "")
 	app.Get("/failure", func(c *fiber.Ctx) error {
 		return handler.webhookOperationsError(c, errors.New("provider booking BOOKING_SECRET failed with raw response"))
 	})

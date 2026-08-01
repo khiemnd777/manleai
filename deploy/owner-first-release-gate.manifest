@@ -102,6 +102,7 @@ SECURITY_CONTRACT_PACKAGES=(
 SECURITY_CONTRACT_TEST_FILES=(
   backend/migrations/v86_safety_test.go
   backend/migrations/v87_safety_test.go
+  backend/migrations/v88_safety_test.go
   backend/migrations/v73_safety_test.go
   backend/migrations/v74_safety_test.go
   backend/migrations/v75_safety_test.go
@@ -187,6 +188,7 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/pos/platform_support_routes_test.go
   backend/modules/pos/types_test.go
   backend/modules/pos/repository_integration_test.go
+  backend/modules/pos/initial_provider_activation_integration_test.go
   backend/modules/pos/repository_scheduling_capability_integration_test.go
   backend/modules/pos/repository_scheduling_capability_test.go
   backend/modules/pos/repository_alias_ownership_integration_test.go
@@ -194,6 +196,7 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/pos_square/adapter_test.go
   backend/modules/pos_square/handler_test.go
   backend/modules/pos_square/platform_routes_test.go
+  backend/modules/pos_square/tenant_isolation_integration_test.go
   backend/modules/pos_square/webhook_operations_repository_integration_test.go
   backend/modules/pos_square/webhook_operations_test.go
   backend/modules/pos_square/webhook_processor_test.go
