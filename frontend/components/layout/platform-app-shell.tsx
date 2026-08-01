@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { PoweredBy } from "@/components/layout/powered-by";
 import { logoutSession } from "@/lib/api/client";
 import { getCurrentSession } from "@/lib/api/session";
 import { cn } from "@/lib/utils/cn";
@@ -80,11 +81,12 @@ export function PlatformAppShell({ children }: { children: React.ReactNode }) {
           </div>
         </div>
       ) : null}
-      <div className="lg:pl-72">
+      <div className="flex min-h-screen flex-col lg:pl-72">
         <header className="sticky top-0 z-10 border-b border-line bg-white/95 px-5 py-4 backdrop-blur">
           <div className="mx-auto flex max-w-7xl items-center gap-3"><Button type="button" variant="ghost" className="h-10 w-10 px-0 lg:hidden" aria-label="Open navigation" onClick={() => setMobileOpen(true)}><Menu className="h-4 w-4" /></Button><div><div className="text-sm font-semibold text-ink">Platform control plane</div><div className="text-xs text-muted">Technical administration stays outside the tenant workspace</div></div></div>
         </header>
-        <main className="mx-auto max-w-7xl px-5 py-6">{children}</main>
+        <main className="mx-auto w-full max-w-7xl flex-1 px-5 py-6">{children}</main>
+        <PoweredBy />
       </div>
     </div>
   );

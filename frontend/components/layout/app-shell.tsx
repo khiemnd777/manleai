@@ -19,6 +19,7 @@ import { useEffect, useState } from "react";
 import { logoutSession } from "@/lib/api/client";
 import { cn } from "@/lib/utils/cn";
 import { Button } from "@/components/ui/button";
+import { PoweredBy } from "@/components/layout/powered-by";
 import { useTenantSalon } from "@/components/layout/tenant-salon-context";
 
 const navItems = [
@@ -194,7 +195,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
       )}
 
-      <div className="lg:pl-72">
+      <div className="flex min-h-screen flex-col lg:pl-72">
         <header className="sticky top-0 z-10 border-b border-line bg-white/95 px-5 py-4 backdrop-blur">
           <div className="mx-auto flex max-w-7xl flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-center gap-3">
@@ -217,7 +218,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             {tenant.salons.length > 1 ? <label className="w-full sm:w-auto"><span className="sr-only">Active salon</span><select className="field min-w-56" value={tenant.activeSalonID} onChange={(event) => tenant.setActiveSalonID(event.target.value)}>{tenant.salons.map((salon) => <option key={salon.id} value={salon.id}>{salon.name}</option>)}</select></label> : null}
           </div>
         </header>
-        <main className="mx-auto max-w-7xl px-5 py-6">{children}</main>
+        <main className="mx-auto w-full max-w-7xl flex-1 px-5 py-6">{children}</main>
+        <PoweredBy />
       </div>
     </div>
   );

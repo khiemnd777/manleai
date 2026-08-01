@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Dialog } from "@/components/ui/dialog";
+import { PoweredBy } from "@/components/layout/powered-by";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest, apiStream, logoutSession } from "@/lib/api/client";
 import { schedulerEventPositionRule } from "@/lib/security/scheduler-style";
@@ -783,36 +784,40 @@ export function POSCalendarClient({ nonce }: { nonce: string }) {
 
   if (loadingShell) {
     return (
-      <main className="h-screen overflow-hidden bg-shell p-3 sm:p-4">
-        <div className="flex h-full min-h-0 flex-col gap-3">
+      <main className="flex h-screen flex-col overflow-hidden bg-shell p-3 sm:p-4">
+        <div className="flex min-h-0 flex-1 flex-col gap-3">
           <Skeleton className="h-24" />
           <div className="flex min-h-0 flex-1">
             <Skeleton className="min-h-0 flex-1" />
           </div>
         </div>
+        <PoweredBy />
       </main>
     );
   }
 
   if (!salon) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-shell px-4">
-        <Card className="max-w-md">
-          <CardTitle>No salon workspace</CardTitle>
-          <CardDescription>
-            Create or assign an admin salon workspace in the main frontend before opening the POS calendar.
-          </CardDescription>
-          <Button type="button" className="mt-5" onClick={signOut}>
-            Sign out
-          </Button>
-        </Card>
+      <main className="flex min-h-screen flex-col bg-shell px-4">
+        <div className="flex flex-1 items-center justify-center py-4">
+          <Card className="max-w-md">
+            <CardTitle>No salon workspace</CardTitle>
+            <CardDescription>
+              Create or assign an admin salon workspace in the main frontend before opening the POS calendar.
+            </CardDescription>
+            <Button type="button" className="mt-5" onClick={signOut}>
+              Sign out
+            </Button>
+          </Card>
+        </div>
+        <PoweredBy />
       </main>
     );
   }
 
   return (
-    <main className="h-screen overflow-hidden bg-shell p-2 text-ink sm:p-3">
-      <div className="flex h-full min-h-0 flex-col gap-2">
+    <main className="flex h-screen flex-col overflow-hidden bg-shell p-2 text-ink sm:p-3">
+      <div className="flex min-h-0 flex-1 flex-col gap-2">
         <header className="shrink-0 rounded-lg border border-line bg-panel px-3 py-2 shadow-soft">
           <div className="grid gap-2 lg:grid-cols-[auto_1fr_auto] lg:items-center">
             <div className="flex min-w-0 items-center gap-2">
@@ -1016,6 +1021,7 @@ export function POSCalendarClient({ nonce }: { nonce: string }) {
           onClose={closeActionDialog}
         />
       </div>
+      <PoweredBy />
     </main>
   );
   }
