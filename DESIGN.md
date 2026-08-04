@@ -584,6 +584,14 @@ For mobile:
 - Keep primary actions reachable without horizontal scrolling.
 - Tables must degrade to cards, compact rows, or horizontally scrollable regions with visible context.
 - Text must fit inside buttons, badges, cards, and table cells without overlap.
+- In the standalone POS Calendar below 768px, calendar content owns the remaining
+  dynamic viewport. Use Agenda as the initial view, keep only authority, add,
+  overflow, range, and view controls in the fixed shell, and move secondary
+  actions into a bottom sheet. Week and Month must reveal a selected-day agenda
+  instead of shrinking desktop event grids; Day may scroll technician lanes
+  horizontally. Appointment forms are full-screen, touch targets are at least
+  44px, safe-area insets are honored, and notices or attribution must not cover
+  the calendar.
 
 ## Components
 

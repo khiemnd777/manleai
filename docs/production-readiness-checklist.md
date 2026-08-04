@@ -95,6 +95,10 @@ RPO/RTO evidence.
 - [x] Add booking test UI and AI booking enablement gate.
 - [x] Add owner appointments dashboard with confirmed POS bookings and fallback pending requests.
 - [x] Add POS calendar range/sync APIs and standalone calendar view with day/week/month/agenda modes.
+- [x] Add the dedicated sub-768px POS Calendar shell with mobile-first Agenda,
+  focused-day Week/Month lists, horizontally scrollable Day technician lanes,
+  bottom-sheet secondary actions, full-screen appointment forms, safe-area and
+  dynamic-viewport handling, while preserving authority/readiness action gates.
 - [x] Add service/staff AI booking controls for synced Square records.
 - [x] Add Customers dashboard with internal customer activity and gated Square phone lookup.
 

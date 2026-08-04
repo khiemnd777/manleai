@@ -38,3 +38,20 @@ textarea {
   outline: 3px solid rgba(15, 118, 110, 0.28);
   outline-offset: 2px;
 }
+
+.pos-calendar-mobile-viewport {
+  height: 100vh;
+  height: 100dvh;
+  padding-top: max(0.5rem, env(safe-area-inset-top));
+  padding-bottom: max(0.25rem, env(safe-area-inset-bottom));
+}
+
+@media (max-width: 767px) {
+  .pos-calendar-safe-top {
+    padding-top: max(1rem, env(safe-area-inset-top));
+  }
+
+  .pos-calendar-safe-bottom {
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  }
+}

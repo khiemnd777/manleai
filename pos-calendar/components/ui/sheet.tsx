@@ -6,7 +6,7 @@ import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils/cn";
 
-type DialogProps = {
+type SheetProps = {
   open: boolean;
   title: string;
   description?: string;
@@ -15,7 +15,6 @@ type DialogProps = {
   onClose: () => void;
   closeDisabled?: boolean;
   className?: string;
-  mobilePresentation?: "card" | "fullscreen";
 };
 
 const focusableSelector = [
@@ -27,7 +26,7 @@ const focusableSelector = [
   "[tabindex]:not([tabindex='-1'])"
 ].join(",");
 
-export function Dialog({
+export function Sheet({
   open,
   title,
   description,
@@ -35,9 +34,8 @@ export function Dialog({
   footer,
   onClose,
   closeDisabled = false,
-  className,
-  mobilePresentation = "card"
-}: DialogProps) {
+  className
+}: SheetProps) {
   const titleID = useId();
   const descriptionID = useId();
   const panelRef = useRef<HTMLElement | null>(null);
@@ -91,16 +89,11 @@ export function Dialog({
   if (!open) return null;
 
   return (
-    <div
-      className={cn(
-        "fixed inset-0 z-50 flex items-start justify-center overflow-y-auto px-4 py-6 sm:items-center",
-        mobilePresentation === "fullscreen" ? "max-md:items-stretch max-md:p-0" : ""
-      )}
-    >
+    <div className="fixed inset-0 z-[80] flex items-end justify-center">
       <button
         type="button"
-        className="fixed inset-0 bg-ink/45"
-        aria-label="Close dialog"
+        className="absolute inset-0 bg-ink/45"
+        aria-label="Close sheet"
         onClick={onClose}
         disabled={closeDisabled}
       />
@@ -112,20 +105,18 @@ export function Dialog({
         aria-describedby={description ? descriptionID : undefined}
         tabIndex={-1}
         className={cn(
-          "relative z-10 w-full max-w-3xl rounded-lg border border-line bg-panel p-5 shadow-soft",
-          mobilePresentation === "fullscreen"
-            ? "pos-calendar-safe-bottom pos-calendar-safe-top max-md:flex max-md:h-[100dvh] max-md:max-w-none max-md:flex-col max-md:overflow-hidden max-md:rounded-none max-md:border-0 max-md:p-4"
-            : "",
+          "pos-calendar-safe-bottom relative z-10 max-h-[88dvh] w-full max-w-lg overflow-hidden rounded-t-lg border border-b-0 border-line bg-panel shadow-2xl",
           className
         )}
       >
-        <div className="flex shrink-0 items-start justify-between gap-3">
+        <div className="mx-auto mt-2 h-1 w-10 rounded-full bg-slate-300" aria-hidden="true" />
+        <div className="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
           <div className="min-w-0">
             <h2 id={titleID} className="text-base font-semibold text-ink">
               {title}
             </h2>
             {description ? (
-              <p id={descriptionID} className="mt-1 text-sm leading-6 text-muted">
+              <p id={descriptionID} className="mt-1 text-sm leading-5 text-muted">
                 {description}
               </p>
             ) : null}
@@ -133,32 +124,16 @@ export function Dialog({
           <Button
             type="button"
             variant="ghost"
-            className="h-11 w-11 px-0"
+            className="h-11 w-11 flex-none px-0"
             onClick={onClose}
             disabled={closeDisabled}
-            aria-label="Close dialog"
+            aria-label="Close sheet"
           >
             <X className="h-4 w-4" />
           </Button>
         </div>
-        <div
-          className={cn(
-            "mt-5",
-            mobilePresentation === "fullscreen" ? "max-md:min-h-0 max-md:flex-1 max-md:overflow-y-auto" : ""
-          )}
-        >
-          {children}
-        </div>
-        {footer ? (
-          <div
-            className={cn(
-              "mt-5",
-              mobilePresentation === "fullscreen" ? "max-md:-mx-4 max-md:shrink-0 max-md:bg-panel max-md:px-4 max-md:pb-1 max-md:pt-3" : ""
-            )}
-          >
-            {footer}
-          </div>
-        ) : null}
+        <div className="max-h-[calc(88dvh-8rem)] overflow-y-auto px-4 py-3">{children}</div>
+        {footer ? <div className="border-t border-line px-4 py-3">{footer}</div> : null}
       </section>
     </div>
   );

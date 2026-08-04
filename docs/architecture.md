@@ -136,12 +136,22 @@ and the tenant-safe external scheduling-readiness projection; it does not call
 Platform technical status/configuration endpoints. Its first workflow
 is `/calendar`, with day/week/month/agenda views, `Today` and `Tomorrow`
 shortcuts, active-provider calendar sync, and POS-backed add, edit, and delete
-actions. Add still creates a booking attempt through the booking service; edit
+actions. At widths below 768px it uses a dedicated content-first shell: Agenda
+is the initial view, Day keeps horizontally scrollable technician lanes, Week
+uses a seven-day selector with one focused-day list, Month pairs a compact grid
+with the selected-day list, and Agenda groups rows under sticky date headers.
+The compact header exposes only authority state, the gated primary add action,
+and an overflow sheet; secondary sync/navigation/session controls do not consume
+calendar height. Forms become full-screen below that breakpoint, while dynamic
+viewport height, safe-area padding, 44px touch targets, and the non-overlay
+footer keep the calendar usable on phones. Desktop retains Week as its initial
+view and the existing dense scheduler layout. Add still creates a booking
+attempt through the booking service; edit
 currently uses the existing POS-backed reschedule contract for time/staff/notes;
 delete uses the existing POS-backed cancel contract and never hard-deletes
 appointment history. The page also opens an authenticated calendar event stream
 so new customer booking attempts can update the visible range and show a
-top-right toast without treating pending POS work as confirmed.
+non-blocking responsive toast without treating pending POS work as confirmed.
 
 Calendar sync captures one owner-scoped active-provider fence before the first
 remote page, passes that same selected location and snapshot generation through

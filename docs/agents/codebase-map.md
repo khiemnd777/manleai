@@ -716,7 +716,7 @@ gating, while its write contract remains limited to external-provider rows.
 | Route | Page file | Main component | Data/API helpers |
 | --- | --- | --- | --- |
 | `/login` | `pos-calendar/app/login/page.tsx` | `pos-calendar/features/auth/login-form.tsx` | credentialed `pos-calendar/lib/api/client.ts` plus memory-only `browser-session.ts` |
-| `/calendar` | `pos-calendar/app/calendar/page.tsx` | `pos-calendar/features/calendar/pos-calendar-client.tsx`, `pos-calendar/components/layout/powered-by.tsx` | current authority/version banner, mixed-origin appointment/request badges, stale-response-guarded calendar range and event stream/toasts, target-aware availability quotes, and payload-bound historical external-provider reschedule/cancel operations; `pos-calendar/lib/scheduling-evidence.ts` gates confirmation/actions with persisted authority-native evidence and counterexamples reject POS-ID inference; Square Appointments status/sync/new-create controls load only when `external_provider` is the selected scheduling authority, while historical-origin resolution and reconciliation remain provider-neutral; missing authority/origin contracts fail closed, internal rows remain read-only here, nonce-authorized `lib/security/scheduler-style.ts` owns dynamic event placement without CSP-blocked inline attributes, and the non-overlay footer keeps fixed KNASOFTWARE attribution linked to `https://www.knasoftware.com` in a new tab across loading, unavailable-workspace, and calendar states |
+| `/calendar` | `pos-calendar/app/calendar/page.tsx` | `pos-calendar/features/calendar/pos-calendar-client.tsx`, `mobile-pos-calendar.tsx`, `calendar-view-model.ts`, `pos-calendar/components/ui/sheet.tsx`, `pos-calendar/components/ui/dialog.tsx`, `pos-calendar/components/layout/powered-by.tsx` | current authority/version banner, mixed-origin appointment/request badges, stale-response-guarded calendar range and event stream/toasts, target-aware availability quotes, and payload-bound historical external-provider reschedule/cancel operations; the sub-768px content-first shell defaults to Agenda, keeps Day technician lanes horizontally scrollable, renders Week as a seven-day selector plus focused-day list, renders Month as compact grid plus selected-day list, groups Agenda under sticky dates, moves secondary controls into an accessible focus-trapped bottom sheet, and renders appointment forms full-screen with safe-area/dynamic-viewport handling; desktop retains Week as the initial view and its dense schedulers; `calendar-view-model.test.ts` covers responsive defaults, salon-timezone grouping, seven-day/month status projection, and action/authority presentation gates; `pos-calendar/lib/scheduling-evidence.ts` gates confirmation/actions with persisted authority-native evidence and counterexamples reject POS-ID inference; Square Appointments status/sync/new-create controls load only when `external_provider` is the selected scheduling authority, while historical-origin resolution and reconciliation remain provider-neutral; missing authority/origin contracts fail closed, internal rows remain read-only here, nonce-authorized `lib/security/scheduler-style.ts` owns dynamic event placement without CSP-blocked inline attributes, and the non-overlay footer keeps fixed KNASOFTWARE attribution linked to `https://www.knasoftware.com` in a new tab across loading, unavailable-workspace, and calendar states |
 
 The POS calendar app is a standalone authenticated Next.js app with no
 dashboard sidebar. Local runtime port is `3091`; production domain is
@@ -728,6 +728,12 @@ ordered appointment segments when one booking has multiple technician
 assignments. Calendar event titles across day, week, month, agenda, and the day
 drawer use `time · customer · technician`; service names remain supporting
 detail rather than part of the event title.
+The mobile calendar presentation is owned by
+`pos-calendar/features/calendar/mobile-pos-calendar.tsx`; pure date grouping,
+range projection, authority copy, and external-action visibility rules are
+owned by `calendar-view-model.ts`. These presentation helpers do not select a
+scheduling executor or broaden the standalone calendar's external-only write
+boundary.
 
 ## Frontend Helper And Utility Map
 

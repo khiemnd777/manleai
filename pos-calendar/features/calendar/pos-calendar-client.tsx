@@ -31,6 +31,25 @@ import {
   normalizeSchedulingAuthority as normalizedSchedulingAuthority
 } from "@/lib/scheduling-evidence";
 import { cn } from "@/lib/utils/cn";
+import { MobilePOSCalendar } from "./mobile-pos-calendar";
+import {
+  addDaysInput,
+  calendarDateKey as dateKey,
+  dayNumberLabel,
+  defaultCalendarView,
+  formatDateInput,
+  formatFullInputDateLabel,
+  formatInputDateLabel,
+  formatMonthDayLabel,
+  inputDateToLocalDate,
+  isTodayInput,
+  monthGridDays,
+  monthTitle,
+  schedulingAuthorityPresentation,
+  startOfWeekInput,
+  weekdayLabel
+} from "./calendar-view-model";
+import type { CalendarItem, CalendarTechnician } from "./calendar-view-model";
 import type {
   AvailabilityResult,
   AvailabilitySlot,
@@ -97,31 +116,6 @@ type CalendarToast = {
   event: CalendarEvent;
 };
 
-type CalendarItem = {
-  id: string;
-  sourceItemID?: string;
-  kind: "appointment" | "pending";
-  start: string;
-  end: string;
-  status: string;
-  authority: SchedulingAuthority | "unknown";
-  customerName: string;
-  serviceLabel: string;
-  technicians: CalendarTechnician[];
-  technicianLabel: string;
-  dayLaneKey?: string;
-  subtitle: string;
-  detail: string;
-  warning: string;
-  appointment?: AppointmentRecord;
-  request?: BookingAttempt;
-};
-
-type CalendarTechnician = {
-  id: string;
-  name: string;
-};
-
 type TechnicianLane = {
   key: string;
   name: string;
@@ -156,6 +150,8 @@ const inputClassName =
 const textareaClassName =
   "mt-2 min-h-24 w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none focus:border-brand disabled:bg-slate-50 disabled:text-slate-400";
 
+type ViewportMode = "pending" | "mobile" | "desktop";
+
 export function POSCalendarClient({ nonce }: { nonce: string }) {
   const router = useRouter();
   const [salon, setSalon] = useState<Salon | null>(null);
@@ -165,6 +161,8 @@ export function POSCalendarClient({ nonce }: { nonce: string }) {
   const [calendar, setCalendar] = useState<CalendarRangeResponse | null>(null);
   const [view, setView] = useState<CalendarView>("week");
   const [anchorDate, setAnchorDate] = useState(() => formatDateInput(new Date()));
+  const [focusedDate, setFocusedDate] = useState(() => formatDateInput(new Date()));
+  const [viewportMode, setViewportMode] = useState<ViewportMode>("pending");
   const [loadingShell, setLoadingShell] = useState(true);
   const [loadingCalendar, setLoadingCalendar] = useState(false);
   const [busy, setBusy] = useState("");
@@ -194,13 +192,27 @@ export function POSCalendarClient({ nonce }: { nonce: string }) {
   const availabilityExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
+    const media = window.matchMedia("(max-width: 767px)");
+    const initialMode: Exclude<ViewportMode, "pending"> = media.matches ? "mobile" : "desktop";
+    setViewportMode(initialMode);
+    setView(defaultCalendarView(initialMode));
+
+    function onViewportChange(event: MediaQueryListEvent) {
+      setViewportMode(event.matches ? "mobile" : "desktop");
+    }
+
+    media.addEventListener("change", onViewportChange);
+    return () => media.removeEventListener("change", onViewportChange);
+  }, []);
+
+  useEffect(() => {
     void loadShell();
   }, [router]);
 
   useEffect(() => {
-    if (!salon) return;
+    if (!salon || viewportMode === "pending") return;
     void loadCalendarRange(salon.id, view, anchorDate);
-  }, [anchorDate, salon, view]);
+  }, [anchorDate, salon, view, viewportMode]);
 
   const serviceNames = useMemo(
     () => new Map(services.flatMap((item) => (item.id ? [[item.id, item.name] as const] : []))),
@@ -276,6 +288,10 @@ export function POSCalendarClient({ nonce }: { nonce: string }) {
     setDayDrawerOpen(false);
     setSelectedDayKey("");
   }, [anchorDate, view]);
+
+  useEffect(() => {
+    setFocusedDate(anchorDate);
+  }, [anchorDate]);
 
   useEffect(() => {
     if (!salon) return;
@@ -411,7 +427,9 @@ export function POSCalendarClient({ nonce }: { nonce: string }) {
       setStatusError(statusResult.error);
       setServices(serviceResponse.services);
       setStaff(staffResponse.staff);
-      setAnchorDate(formatDateInput(new Date(), firstSalon.timezone));
+      const today = formatDateInput(new Date(), firstSalon.timezone);
+      setAnchorDate(today);
+      setFocusedDate(today);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load calendar workspace.");
     } finally {
@@ -782,7 +800,21 @@ export function POSCalendarClient({ nonce }: { nonce: string }) {
     setAnchorDate(addDaysInput(today, offsetDays));
   }
 
-  if (loadingShell) {
+  function changeCalendarView(nextView: CalendarView) {
+    if (viewportMode === "mobile" && focusedDate !== anchorDate) {
+      setAnchorDate(focusedDate);
+    }
+    setView(nextView);
+  }
+
+  function focusMobileDate(date: string) {
+    setFocusedDate(date);
+    if (view === "month" && date.slice(0, 7) !== anchorDate.slice(0, 7)) {
+      setAnchorDate(date);
+    }
+  }
+
+  if (loadingShell || viewportMode === "pending") {
     return (
       <main className="flex h-screen flex-col overflow-hidden bg-shell p-3 sm:p-4">
         <div className="flex min-h-0 flex-1 flex-col gap-3">
@@ -815,6 +847,120 @@ export function POSCalendarClient({ nonce }: { nonce: string }) {
     );
   }
 
+  const authorityPresentation = schedulingAuthorityPresentation(
+    selectedAuthority,
+    selectedAuthorityVersion,
+    providerDisplayLabel(salon.active_pos_provider),
+    readyForNewExternalBooking
+  );
+  const calendarOverlays = (
+    <>
+      <AppointmentDetailDrawer
+        open={detailOpen}
+        selectedItem={selectedCalendarItem}
+        currentAuthority={selectedAuthority}
+        timezone={salon.timezone}
+        onClose={() => setDetailOpen(false)}
+        onEdit={openEdit}
+        onCancel={openCancel}
+      />
+
+      <DayAppointmentsDrawer
+        open={dayDrawerOpen}
+        day={selectedDayKey}
+        items={selectedDayItems}
+        timezone={salon.timezone}
+        onClose={() => setDayDrawerOpen(false)}
+        onSelect={selectCalendarItem}
+      />
+
+      <ActionDialog
+        mode={actionMode}
+        appointment={selectedAppointment}
+        form={actionForm}
+        services={bookableServices}
+        staff={bookableStaff}
+        serviceNames={serviceNames}
+        staffNames={staffNames}
+        readyForBooking={readyForSelectedAction}
+        availabilityResult={availabilityResult}
+        availabilityChecked={availabilityChecked}
+        checkingAvailability={checkingAvailability}
+        selectedSlotKey={actionForm.selectedSlotKey}
+        availabilityError={availabilityError}
+        saving={savingAction}
+        error={actionError}
+        timezone={salon.timezone}
+        onChange={updateActionForm}
+        onCheckAvailability={checkAvailability}
+        onSlotSelect={(slot) => updateActionForm({ selectedSlotKey: slotKey(slot) })}
+        onSubmitCreate={submitCreate}
+        onSubmitEdit={submitEdit}
+        onSubmitCancel={submitCancel}
+        onClose={closeActionDialog}
+      />
+    </>
+  );
+
+  if (viewportMode === "mobile") {
+    return (
+      <main className="pos-calendar-mobile-viewport flex flex-col overflow-hidden bg-shell p-2 text-ink">
+        <div className="flex min-h-0 flex-1">
+          <MobilePOSCalendar
+            view={view}
+            anchorDate={anchorDate}
+            focusedDate={focusedDate}
+            rangeLabel={rangeLabel(view, range, salon.timezone)}
+            timezone={salon.timezone}
+            authority={selectedAuthority}
+            authorityVersion={selectedAuthorityVersion}
+            authorityPresentation={authorityPresentation}
+            readyForNewExternalBooking={readyForNewExternalBooking}
+            bookableStaffCount={bookableStaff.length}
+            bookableServiceCount={bookableServices.length}
+            items={visibleCalendarItems}
+            selectedItemID={selectedCalendarItem?.id ?? ""}
+            loadingCalendar={loadingCalendar}
+            busy={busy}
+            calendarError={error}
+            statusError={externalNewWorkSelected ? statusError : ""}
+            notice={notice}
+            dayView={(
+              <DayScheduler
+                items={items}
+                staff={staff}
+                anchorDate={anchorDate}
+                timezone={salon.timezone}
+                selectedItemID={selectedCalendarItem?.id ?? ""}
+                onSelect={selectCalendarItem}
+                nonce={nonce}
+                contentFirst
+              />
+            )}
+            onViewChange={changeCalendarView}
+            onMoveRange={moveRange}
+            onShortcut={setShortcut}
+            onFocusedDateChange={focusMobileDate}
+            onSelect={selectCalendarItem}
+            onOpenCreate={openCreate}
+            onSync={syncCalendar}
+            onSignOut={signOut}
+            onRetry={() => void loadCalendarRange(salon.id, view, anchorDate)}
+            onDismissNotice={() => setNotice(null)}
+          />
+        </div>
+        <CalendarToastStack
+          toasts={calendarToasts}
+          timezone={salon.timezone}
+          onView={focusCalendarEvent}
+          onDismiss={dismissCalendarToast}
+        />
+        {calendarOverlays}
+        <PoweredBy />
+      </main>
+    );
+  }
+
   return (
     <main className="flex h-screen flex-col overflow-hidden bg-shell p-2 text-ink sm:p-3">
       <div className="flex min-h-0 flex-1 flex-col gap-2">
@@ -839,7 +985,7 @@ export function POSCalendarClient({ nonce }: { nonce: string }) {
                     type="button"
                     variant={view === item ? "primary" : "ghost"}
                     className="h-8 px-2 text-xs"
-                    onClick={() => setView(item)}
+                    onClick={() => changeCalendarView(item)}
                   >
                     {capitalize(item)}
                   </Button>
@@ -976,55 +1122,12 @@ export function POSCalendarClient({ nonce }: { nonce: string }) {
           </Card>
         </section>
 
-        <AppointmentDetailDrawer
-          open={detailOpen}
-          selectedItem={selectedCalendarItem}
-          currentAuthority={selectedAuthority}
-          timezone={salon.timezone}
-          onClose={() => setDetailOpen(false)}
-          onEdit={openEdit}
-          onCancel={openCancel}
-        />
-
-        <DayAppointmentsDrawer
-          open={dayDrawerOpen}
-          day={selectedDayKey}
-          items={selectedDayItems}
-          timezone={salon.timezone}
-          onClose={() => setDayDrawerOpen(false)}
-          onSelect={selectCalendarItem}
-        />
-
-        <ActionDialog
-          mode={actionMode}
-          appointment={selectedAppointment}
-          form={actionForm}
-          services={bookableServices}
-          staff={bookableStaff}
-          serviceNames={serviceNames}
-          staffNames={staffNames}
-          readyForBooking={readyForSelectedAction}
-          availabilityResult={availabilityResult}
-          availabilityChecked={availabilityChecked}
-          checkingAvailability={checkingAvailability}
-          selectedSlotKey={actionForm.selectedSlotKey}
-          availabilityError={availabilityError}
-          saving={savingAction}
-          error={actionError}
-          timezone={salon.timezone}
-          onChange={updateActionForm}
-          onCheckAvailability={checkAvailability}
-          onSlotSelect={(slot) => updateActionForm({ selectedSlotKey: slotKey(slot) })}
-          onSubmitCreate={submitCreate}
-          onSubmitEdit={submitEdit}
-          onSubmitCancel={submitCancel}
-          onClose={closeActionDialog}
-        />
+        {calendarOverlays}
       </div>
       <PoweredBy />
     </main>
   );
-  }
+}
 
 function CalendarToastStack({
   toasts,
@@ -1039,7 +1142,7 @@ function CalendarToastStack({
 }) {
   if (toasts.length === 0) return null;
   return (
-    <div className="fixed right-4 top-4 z-[70] flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-2">
+    <div className="fixed inset-x-2 bottom-8 z-[70] flex flex-col gap-2 md:inset-x-auto md:bottom-auto md:right-4 md:top-4 md:w-[min(24rem,calc(100vw-2rem))]">
       {toasts.map((toast) => (
         <div
           key={toast.id}
@@ -1119,7 +1222,8 @@ function DayScheduler({
   timezone,
   selectedItemID,
   onSelect,
-  nonce
+  nonce,
+  contentFirst = false
 }: {
   items: CalendarItem[];
   staff: POSStaffMember[];
@@ -1128,12 +1232,13 @@ function DayScheduler({
   selectedItemID: string;
   onSelect: (itemID: string) => void;
   nonce: string;
+  contentFirst?: boolean;
 }) {
   const dayItems = items
     .filter((item) => dateKey(item.start, timezone) === anchorDate)
     .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
   const schedulerItems = buildDaySchedulerItems(dayItems);
-  const lanes = buildTechnicianLanes(staff, schedulerItems);
+  const lanes = buildTechnicianLanes(staff, schedulerItems, contentFirst);
   const hours = schedulerHours(schedulerItems, timezone);
 
   return (
@@ -1369,7 +1474,7 @@ function MonthGrid({
                   }}
                   aria-label={`Open appointments for ${formatFullInputDateLabel(day)}`}
                 >
-                  {monthCellDayLabel(day)}
+                  {dayNumberLabel(day)}
                 </button>
                 {warnings > 0 ? <AlertTriangle className="h-4 w-4 flex-none text-amber-600" /> : null}
               </div>
@@ -1442,42 +1547,17 @@ function SchedulingAuthorityNotice({
   provider?: string;
   readyForNewExternalBooking: boolean;
 }) {
-  if (!authority || !version) {
-    return (
-      <Alert
-        type="warning"
-        title="Scheduling authority unavailable"
-        message="The current authority and version are required before this calendar can expose new scheduling actions. Existing rows remain visible, but any row without persisted origin evidence stays read-only."
-      />
-    );
-  }
-  if (authority === "owner_manual") {
-    return (
-      <Alert
-        type="success"
-        title={`Owner request authority · v${version}`}
-        message="New scheduling work creates requests for owner review and never confirms automatically. Review and resolve those requests in the main Appointments workspace."
-      />
-    );
-  }
-  if (authority === "manleai_calendar") {
-    return (
-      <Alert
-        type="success"
-        title={`ManleAI Calendar authority · v${version}`}
-        message="New work uses the internal calendar. This standalone view shows mixed-origin history; use the main Appointments workspace for safe internal create, reschedule, and cancel actions."
-      />
-    );
-  }
+  const presentation = schedulingAuthorityPresentation(
+    authority,
+    version,
+    providerDisplayLabel(provider),
+    readyForNewExternalBooking
+  );
   return (
     <Alert
-      type={readyForNewExternalBooking ? "success" : "warning"}
-      title={`${providerDisplayLabel(provider)} authority · v${version}`}
-      message={
-        readyForNewExternalBooking
-          ? "New bookings use Square Appointments. Historical lifecycle actions continue to follow each appointment's persisted origin."
-          : "New Square Appointments bookings are blocked until connection, location, services, and staff are ready. Historical rows remain visible and actions are resolved from persisted origin."
-      }
+      type={presentation.tone}
+      title={presentation.title}
+      message={presentation.message}
     />
   );
 }
@@ -1694,25 +1774,26 @@ function DayAppointmentsDrawer({
   const pending = items.filter((item) => item.kind === "pending").length;
   const warnings = warningCount(items);
   const visible = open && Boolean(day);
+  if (!visible) return null;
 
   return (
-    <div className={cn("fixed inset-0 z-50 transition", visible ? "pointer-events-auto" : "pointer-events-none")}>
+    <div className="fixed inset-0 z-50">
       <button
         type="button"
         aria-label="Close day appointments"
-        className={cn("absolute inset-0 bg-slate-950/20 transition-opacity", visible ? "opacity-100" : "opacity-0")}
+        className="absolute inset-0 bg-slate-950/20"
         onClick={onClose}
       />
       <aside
-        className={cn(
-          "absolute right-0 top-0 flex h-full w-full max-w-md flex-col border-l border-line bg-panel shadow-2xl transition-transform duration-200",
-          visible ? "translate-x-0" : "translate-x-full"
-        )}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="calendar-day-drawer-title"
+        className="pos-calendar-safe-bottom pos-calendar-safe-top absolute right-0 top-0 flex h-full w-full max-w-md flex-col border-l border-line bg-panel shadow-2xl"
       >
         <div className="border-b border-line px-4 py-3">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <CardTitle>Day appointments</CardTitle>
+              <CardTitle id="calendar-day-drawer-title">Day appointments</CardTitle>
               <CardDescription>{day ? formatFullInputDateLabel(day) : "Selected day"}</CardDescription>
             </div>
             <Button type="button" variant="ghost" className="h-9 px-2" onClick={onClose} aria-label="Close day appointments">
@@ -1787,28 +1868,30 @@ function AppointmentDetailDrawer({
   onCancel: (appointment: AppointmentRecord) => void;
 }) {
   const appointment = selectedItem?.appointment;
+  const visible = open && Boolean(selectedItem);
+  if (!visible) return null;
 
   return (
-    <div className={cn("fixed inset-0 z-50 transition", open && selectedItem ? "pointer-events-auto" : "pointer-events-none")}>
+    <div className="fixed inset-0 z-50">
       <button
         type="button"
         aria-label="Close appointment detail"
-        className={cn("absolute inset-0 bg-slate-950/20 transition-opacity", open && selectedItem ? "opacity-100" : "opacity-0")}
+        className="absolute inset-0 bg-slate-950/20"
         onClick={onClose}
       />
       <aside
-        className={cn(
-          "absolute right-0 top-0 flex h-full w-full max-w-md flex-col border-l border-line bg-panel shadow-2xl transition-transform duration-200",
-          open && selectedItem ? "translate-x-0" : "translate-x-full"
-        )}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="calendar-appointment-drawer-title"
+        className="pos-calendar-safe-bottom pos-calendar-safe-top absolute right-0 top-0 flex h-full w-full max-w-md flex-col border-l border-line bg-panel shadow-2xl"
       >
         <div className="border-b border-line px-4 py-3">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <CardTitle>Appointment Detail</CardTitle>
+              <CardTitle id="calendar-appointment-drawer-title">Appointment Detail</CardTitle>
               <CardDescription>Persisted origin, status, and lifecycle evidence.</CardDescription>
             </div>
-            <Button type="button" variant="ghost" className="h-9 px-2" onClick={onClose} aria-label="Close appointment detail">
+            <Button type="button" variant="ghost" className="h-11 w-11 px-0" onClick={onClose} aria-label="Close appointment detail">
               <X className="h-4 w-4" />
             </Button>
           </div>
@@ -2042,6 +2125,7 @@ function ActionDialog({
       onClose={onClose}
       closeDisabled={saving}
       className={mode === "cancel" ? "max-w-2xl" : "max-w-4xl"}
+      mobilePresentation="fullscreen"
     >
       {error ? <Alert title="Action failed" message={error} /> : null}
       {mode === "cancel" ? (
@@ -2853,9 +2937,11 @@ function calendarTechnicianForSegment(segment: DisplaySegment, technicians: Cale
   return { id: segment.staff_id ?? matching?.id ?? "", name: name || "Assigned technician" };
 }
 
-function buildTechnicianLanes(staff: POSStaffMember[], items: CalendarItem[]): TechnicianLane[] {
+function buildTechnicianLanes(staff: POSStaffMember[], items: CalendarItem[], contentFirst = false): TechnicianLane[] {
   const lanes = new Map<string, TechnicianLane>();
-  lanes.set("unassigned", { key: "unassigned", name: "Unassigned" });
+  if (!contentFirst || items.some((item) => dayLaneKey(item) === "unassigned")) {
+    lanes.set("unassigned", { key: "unassigned", name: "Unassigned" });
+  }
 
   const staffByKey = new Map<string, POSStaffMember>();
   staff.forEach((member) => {
@@ -2863,9 +2949,20 @@ function buildTechnicianLanes(staff: POSStaffMember[], items: CalendarItem[]): T
     staffByKey.set(key, member);
   });
 
+  const occupiedOrder = new Map<string, number>();
+  items.forEach((item, index) => {
+    const key = dayLaneKey(item);
+    if (!occupiedOrder.has(key)) occupiedOrder.set(key, index);
+  });
+
   staff
     .filter((member) => member.active)
-    .sort((a, b) => a.name.localeCompare(b.name))
+    .sort((a, b) => {
+      if (!contentFirst) return a.name.localeCompare(b.name);
+      const aOrder = occupiedOrder.get(technicianLaneKey({ id: a.id ?? "", name: a.name })) ?? Number.MAX_SAFE_INTEGER;
+      const bOrder = occupiedOrder.get(technicianLaneKey({ id: b.id ?? "", name: b.name })) ?? Number.MAX_SAFE_INTEGER;
+      return aOrder - bOrder || a.name.localeCompare(b.name);
+    })
     .forEach((member) => {
       const key = technicianLaneKey({ id: member.id ?? "", name: member.name });
       lanes.set(key, { key, name: member.name });
@@ -2887,6 +2984,10 @@ function buildTechnicianLanes(staff: POSStaffMember[], items: CalendarItem[]): T
       });
     });
   });
+
+  if (lanes.size === 0) {
+    lanes.set("unassigned", { key: "unassigned", name: "Unassigned" });
+  }
 
   return [...lanes.values()];
 }
@@ -3001,90 +3102,6 @@ function rangeLabel(view: CalendarView, range: { start: string; end: string }, t
   return `${formatInputDateLabel(range.start)} - ${formatInputDateLabel(endInclusive)}`;
 }
 
-function startOfWeekInput(value: string) {
-  const date = inputDateToLocalDate(value);
-  const offset = date.getDay();
-  date.setDate(date.getDate() - offset);
-  return formatDateInput(date);
-}
-
-function monthGridDays(anchorDate: string) {
-  const [year, month] = anchorDate.split("-").map(Number);
-  const first = new Date(year, month - 1, 1);
-  const gridStart = new Date(first);
-  gridStart.setDate(first.getDate() - first.getDay());
-  return Array.from({ length: 42 }, (_, index) => {
-    const day = new Date(gridStart);
-    day.setDate(gridStart.getDate() + index);
-    return formatDateInput(day);
-  });
-}
-
-function addDaysInput(value: string, days: number) {
-  const date = inputDateToLocalDate(value);
-  date.setDate(date.getDate() + days);
-  return formatDateInput(date);
-}
-
-function inputDateToLocalDate(value: string) {
-  const [year, month, day] = value.split("-").map(Number);
-  return new Date(year, month - 1, day);
-}
-
-function formatDateInput(date: Date, timezone?: string) {
-  if (timezone) {
-    const parts = new Intl.DateTimeFormat("en-CA", {
-      timeZone: timezone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit"
-    }).formatToParts(date);
-    const year = parts.find((part) => part.type === "year")?.value;
-    const month = parts.find((part) => part.type === "month")?.value;
-    const day = parts.find((part) => part.type === "day")?.value;
-    if (year && month && day) return `${year}-${month}-${day}`;
-  }
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function dateKey(value: string, timezone?: string) {
-  return formatDateInput(new Date(value), timezone);
-}
-
-function formatInputDateLabel(value: string) {
-  const date = inputDateToLocalDate(value);
-  return date.toLocaleDateString(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric"
-  });
-}
-
-function formatFullInputDateLabel(value: string) {
-  const date = inputDateToLocalDate(value);
-  return date.toLocaleDateString(undefined, {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-    year: "numeric"
-  });
-}
-
-function formatMonthDayLabel(value: string) {
-  const date = inputDateToLocalDate(value);
-  return date.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric"
-  });
-}
-
-function isTodayInput(value: string, timezone?: string) {
-  return value === formatDateInput(new Date(), timezone);
-}
-
 function warningCount(items: CalendarItem[]) {
   return items.filter((item) => item.warning).length;
 }
@@ -3182,23 +3199,6 @@ function compactServiceLabel(item: CalendarItem) {
 
 function calendarItemTitle(item: CalendarItem, timezone?: string) {
   return `${formatEventTime(item.start, timezone)} · ${item.customerName || "Unknown customer"} · ${item.technicianLabel}`;
-}
-
-function weekdayLabel(value: string) {
-  return inputDateToLocalDate(value).toLocaleDateString(undefined, { weekday: "short" });
-}
-
-function dayNumberLabel(value: string) {
-  return inputDateToLocalDate(value).toLocaleDateString(undefined, { day: "numeric" });
-}
-
-function monthCellDayLabel(value: string) {
-  return inputDateToLocalDate(value).toLocaleDateString(undefined, { day: "numeric" });
-}
-
-function monthTitle(value: string) {
-  const date = inputDateToLocalDate(value);
-  return date.toLocaleDateString(undefined, { month: "long", year: "numeric" });
 }
 
 function clamp(value: number, min: number, max: number) {
