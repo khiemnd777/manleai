@@ -218,8 +218,10 @@ func TestV72RuntimeRoleEnforcesTenantPublicAndPlatformPIIBoundaries(t *testing.T
 			t.Fatalf("%s visibility=%d, want %d", table, got, want)
 		}
 	}
+	// V76 gives Platform Admin direct capability-backed control-plane access,
+	// including the corresponding PII scope. Platform Ops remains grant-bound.
 	for _, table := range []string{"customers", "call_sessions", "appointments", "owner_notifications"} {
-		assertCount(platformContext, table, 0)
+		assertCount(platformContext, table, 1)
 	}
 
 	for _, scope := range []string{"customers", "calls", "appointments", "notifications"} {
