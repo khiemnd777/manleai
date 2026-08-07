@@ -172,7 +172,11 @@ jobs:
             echo "::error::Missing GitHub secret: PROJECT_ENV_B64"
             exit 1
           fi
-          printf '%s' "$PROJECT_ENV_B64" | base64 -d >/dev/null
+          project_env="$RUNNER_TEMP/project.env"
+          trap 'rm -f "$project_env"' EXIT
+          printf '%s' "$PROJECT_ENV_B64" | base64 -d > "$project_env"
+          chmod 600 "$project_env"
+          bash deploy/validate-production-domain-contract.sh "$project_env"
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -224,13 +228,18 @@ jobs:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
+          project_env="$RUNNER_TEMP/project.env"
+          sample_env="$RUNNER_TEMP/sample-data.env"
+          trap 'rm -f "$project_env" "$sample_env"' EXIT
           for key in PROJECT_ENV_B64 REMOTE_USER SERVER_IP SSH_PRIVATE_KEY; do
             if [ -z "${!key:-}" ]; then
               echo "::error::Missing GitHub secret: ${key}"
               exit 1
             fi
           done
-          printf '%s' "$PROJECT_ENV_B64" | base64 -d >/dev/null
+          printf '%s' "$PROJECT_ENV_B64" | base64 -d > "$project_env"
+          chmod 600 "$project_env"
+          bash deploy/validate-production-domain-contract.sh "$project_env"
           case "$DEPLOY_DATA_PROFILE" in
             live) ;;
             sample_test)
@@ -238,8 +247,6 @@ jobs:
                 echo "::error::SAMPLE_DATA_ENV_B64 is required for the sample_test deployment profile."
                 exit 1
               fi
-              sample_env="$RUNNER_TEMP/sample-data.env"
-              trap 'rm -f "$sample_env"' EXIT
               printf '%s' "$SAMPLE_DATA_ENV_B64" | base64 -d > "$sample_env"
               chmod 600 "$sample_env"
               set -a
@@ -689,8 +696,8 @@ jobs:
           . "$DEPLOY_PATH/project.env"
           set +a
 
-          ADMIN_DOMAIN="${ADMIN_DOMAIN:-ai.knasoftware.com}"
-          MARKETING_DOMAIN="${MARKETING_DOMAIN:-manle.knasoftware.com}"
+          ADMIN_DOMAIN="${ADMIN_DOMAIN:-platform.knasoftware.com}"
+          MARKETING_DOMAIN="${MARKETING_DOMAIN:-ai.knasoftware.com}"
           LANDING_DOMAIN="${LANDING_DOMAIN:-salon.knasoftware.com}"
           POS_DOMAIN="${POS_DOMAIN:-pos.knasoftware.com}"
           API_PORT="${API_PORT:-18089}"

@@ -12,8 +12,8 @@ x-backend-runtime-environment: &backend_runtime_environment
   ACCESS_TOKEN_TTL_MINUTES: ${ACCESS_TOKEN_TTL_MINUTES:-30}
   REFRESH_TOKEN_TTL_HOURS: ${REFRESH_TOKEN_TTL_HOURS:-720}
   TOKEN_ENCRYPTION_KEY_BASE64: ${TOKEN_ENCRYPTION_KEY_BASE64:?TOKEN_ENCRYPTION_KEY_BASE64 is required}
-  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://ai.knasoftware.com,https://manle.knasoftware.com,https://salon.knasoftware.com,https://pos.knasoftware.com}
-  FRONTEND_URL: ${FRONTEND_URL:-https://ai.knasoftware.com}
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://platform.knasoftware.com,https://ai.knasoftware.com,https://salon.knasoftware.com,https://pos.knasoftware.com}
+  FRONTEND_URL: ${FRONTEND_URL:-https://platform.knasoftware.com}
 
 services:
   postgres:
@@ -107,7 +107,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://ai.knasoftware.com}
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://platform.knasoftware.com}
         NEXT_PUBLIC_LANDING_BASE_URL: ${NEXT_PUBLIC_LANDING_BASE_URL:-https://salon.knasoftware.com}
       labels:
         org.opencontainers.image.source: ${IMAGE_SOURCE_URL:-https://github.com/khiemnd777/manleai}
@@ -118,7 +118,7 @@ services:
     environment:
       HOSTNAME: 0.0.0.0
       PORT: 3000
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://ai.knasoftware.com}
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://platform.knasoftware.com}
       NEXT_PUBLIC_LANDING_BASE_URL: ${NEXT_PUBLIC_LANDING_BASE_URL:-https://salon.knasoftware.com}
     expose:
       - "3000"
@@ -133,8 +133,8 @@ services:
       context: ./landing
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://ai.knasoftware.com}
-        NEXT_PUBLIC_MARKETING_BASE_URL: ${NEXT_PUBLIC_MARKETING_BASE_URL:-https://manle.knasoftware.com}
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://platform.knasoftware.com}
+        NEXT_PUBLIC_MARKETING_BASE_URL: ${NEXT_PUBLIC_MARKETING_BASE_URL:-https://ai.knasoftware.com}
         NEXT_PUBLIC_LANDING_BASE_URL: ${NEXT_PUBLIC_LANDING_BASE_URL:-https://salon.knasoftware.com}
       labels:
         org.opencontainers.image.source: ${IMAGE_SOURCE_URL:-https://github.com/khiemnd777/manleai}
@@ -146,9 +146,9 @@ services:
       HOSTNAME: 0.0.0.0
       PORT: 3000
       LANDING_API_BASE_URL: ${LANDING_API_BASE_URL:-http://api:8080}
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://ai.knasoftware.com}
-      MARKETING_BASE_URL: ${MARKETING_BASE_URL:-https://manle.knasoftware.com}
-      NEXT_PUBLIC_MARKETING_BASE_URL: ${NEXT_PUBLIC_MARKETING_BASE_URL:-https://manle.knasoftware.com}
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://platform.knasoftware.com}
+      MARKETING_BASE_URL: ${MARKETING_BASE_URL:-https://ai.knasoftware.com}
+      NEXT_PUBLIC_MARKETING_BASE_URL: ${NEXT_PUBLIC_MARKETING_BASE_URL:-https://ai.knasoftware.com}
       SALON_PUBLIC_BASE_URL: ${SALON_PUBLIC_BASE_URL:-https://salon.knasoftware.com}
       NEXT_PUBLIC_LANDING_BASE_URL: ${NEXT_PUBLIC_LANDING_BASE_URL:-https://salon.knasoftware.com}
     expose:
@@ -164,7 +164,7 @@ services:
       context: ./pos-calendar
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://ai.knasoftware.com}
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://platform.knasoftware.com}
       labels:
         org.opencontainers.image.source: ${IMAGE_SOURCE_URL:-https://github.com/khiemnd777/manleai}
     restart: unless-stopped
@@ -174,7 +174,7 @@ services:
     environment:
       HOSTNAME: 0.0.0.0
       PORT: 3000
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://ai.knasoftware.com}
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://platform.knasoftware.com}
     expose:
       - "3000"
     ports:

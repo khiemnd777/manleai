@@ -127,8 +127,15 @@ reads only the database-owned safe projection through
 row visibility. The duplicate `frontend/app/s/[slug]` route redirects to the
 configured public-salon origin. The same `landing/` process also owns the
 host-isolated marketing routes `/`, `/vi`, `/pricing`, and `/vi/pricing` on
-`manle.knasoftware.com`; registration intake cannot create booking attempts or
+`ai.knasoftware.com`; registration intake cannot create booking attempts or
 confirmed appointments.
+
+The shared Platform and Tenant frontend is hosted at
+`platform.knasoftware.com`; immutable principal scope and active salon context,
+not hostname, select the Platform or Tenant workspace. The same host owns the
+primary `/api/*` origin. The marketing host retains a bounded `/api/*`
+compatibility proxy only for persisted provider callbacks during the reviewed
+tenant-by-tenant callback transition.
 
 The POS calendar operator surface lives in `pos-calendar/`, separate from both
 Tenant and Platform shells. It uses the authenticated Tenant Business summary

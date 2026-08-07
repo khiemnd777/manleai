@@ -18,6 +18,11 @@
 		}
 	}
 
+	@public_salon path /s /s/*
+	handle @public_salon {
+		redir https://{{LANDING_DOMAIN}}{uri} permanent
+	}
+
 	handle {
 		reverse_proxy 127.0.0.1:{{FRONTEND_PORT}}
 	}
@@ -40,7 +45,24 @@
 		Referrer-Policy "strict-origin-when-cross-origin"
 		X-Frame-Options "SAMEORIGIN"
 	}
-	reverse_proxy 127.0.0.1:{{LANDING_PORT}}
+
+	@legacy_admin path /login /create-account /accept-invitation /onboarding /dashboard /dashboard/* /platform /platform/*
+	handle @legacy_admin {
+		redir https://{{ADMIN_DOMAIN}}{uri} permanent
+	}
+
+	# Persisted provider callback URLs may still use the former API origin.
+	# Keep this compatibility route until every salon-scoped callback has been
+	# reviewed and changed through Platform Technical and the provider console.
+	handle /api/* {
+		reverse_proxy 127.0.0.1:{{API_PORT}} {
+			header_up X-ManleAI-Client-IP {remote_host}
+		}
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:{{LANDING_PORT}}
+	}
 }
 
 {{POS_DOMAIN}} {

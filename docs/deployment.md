@@ -13,19 +13,26 @@ production capacity claim without an approved witnessed representative run.
 
 ## Production Domains
 
-- Admin dashboard: `https://ai.knasoftware.com`
-- API through the admin origin: `https://ai.knasoftware.com/api/*`
-- Marketing website: `https://manle.knasoftware.com`
+- Platform and Tenant dashboards: `https://platform.knasoftware.com`
+- Primary API origin: `https://platform.knasoftware.com/api/*`
+- Marketing website: `https://ai.knasoftware.com`
 - Public salon pages: `https://salon.knasoftware.com/s/[slug]`
 - POS calendar app: `https://pos.knasoftware.com`
-- Square redirect URL: `https://ai.knasoftware.com/api/integrations/square/callback`
-- Voice public base URL: `https://ai.knasoftware.com`
+- Square redirect URL for newly reviewed tenant configuration:
+  `https://platform.knasoftware.com/api/integrations/square/callback`
+- Voice public base URL for newly reviewed tenant configuration:
+  `https://platform.knasoftware.com`
 
 All DNS `A` records must point to the VPS before Caddy can issue certificates.
-`manle.knasoftware.com` and `salon.knasoftware.com` currently share the
-`landing` process, but host routing keeps marketing content off the salon host
-and salon catalog pages off the marketing host. `ai.knasoftware.com` remains
-the only API/admin origin.
+`ai.knasoftware.com` and `salon.knasoftware.com` share the `landing` process,
+but host routing keeps marketing content off the salon host and salon catalog
+pages off the marketing host. `platform.knasoftware.com` serves both identity-
+routed dashboards and is the primary API origin. The marketing host retains
+`/api/*` as a compatibility proxy for existing salon-scoped Square and Twilio
+callback URLs; it is not a second configuration source of truth. Existing
+admin paths on the marketing host redirect permanently to the Platform host.
+Because refresh cookies are host-only, Platform and POS users must sign in
+again after the API-origin cutover.
 
 ### Future `manle.ai` cutover (runbook only)
 
@@ -410,8 +417,9 @@ file on both success and diagnostic failure paths.
 
 - Docker Engine with Docker Compose v2.
 - Ports `80` and `443` open to the internet.
-- DNS for `ai.knasoftware.com`, `manle.knasoftware.com`, `salon.knasoftware.com`, and
-  `pos.knasoftware.com` pointing to the VPS before certificate issuance.
+- DNS for `ai.knasoftware.com`, `platform.knasoftware.com`,
+  `salon.knasoftware.com`, and `pos.knasoftware.com` pointing to the VPS before
+  certificate issuance.
 - Systemd Caddy active with managed root `/etc/caddy/Caddyfile` and
   `project-edgectl` installed.
 - A dedicated deploy identity that can access Docker, owns `/opt/manleai`, and

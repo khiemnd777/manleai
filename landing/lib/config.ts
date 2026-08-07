@@ -7,7 +7,7 @@ export function exactHTTPOrigin(value: string, name: string) {
 }
 
 export const apiBaseUrl = exactHTTPOrigin(process.env.LANDING_API_BASE_URL || process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:18089", "LANDING_API_BASE_URL");
-export const marketingBaseUrl = exactHTTPOrigin(process.env.MARKETING_BASE_URL || process.env.NEXT_PUBLIC_MARKETING_BASE_URL || "https://manle.knasoftware.com", "MARKETING_BASE_URL");
+export const marketingBaseUrl = exactHTTPOrigin(process.env.MARKETING_BASE_URL || process.env.NEXT_PUBLIC_MARKETING_BASE_URL || "https://ai.knasoftware.com", "MARKETING_BASE_URL");
 export const salonPublicBaseUrl = exactHTTPOrigin(process.env.SALON_PUBLIC_BASE_URL || process.env.NEXT_PUBLIC_LANDING_BASE_URL || "https://salon.knasoftware.com", "SALON_PUBLIC_BASE_URL");
 
 export function configuredHost(origin: string) { return new URL(origin).hostname.toLowerCase(); }

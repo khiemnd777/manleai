@@ -11,7 +11,7 @@ Appointments for `external_provider`, monitor phone receptionist readiness,
 and understand failures quickly.
 
 The `landing/` app contains two host-separated public surfaces. The marketing
-site at `manle.knasoftware.com` uses the approved brand-led landing-page visual
+site at `ai.knasoftware.com` uses the approved brand-led landing-page visual
 language, bilingual content, a versioned pricing catalog, and a demo/Tenant
 setup request form. It has no checkout and must not imply that submitting the
 form creates a Tenant, account, subscription, invoice, provider connection, or
@@ -19,6 +19,11 @@ confirmed appointment. The customer-facing salon catalog at
 `salon.knasoftware.com/s/[slug]` stays call-to-request only, with no confirmed
 web booking claims, staff contact details, POS IDs, sync errors, owner
 identifiers, or provider tokens.
+
+The authenticated Platform and Tenant workspaces share
+`platform.knasoftware.com`. Principal scope and salon context select the
+workspace after login; the hostname must not be used as an authorization
+shortcut. Public salon routes remain canonical only on the salon host.
 
 Marketing registration is a two-step modal: salon/contact identity first,
 operational context and explicit versioned contact consent second. Required

@@ -359,7 +359,7 @@ RPO/RTO evidence.
 ## Marketing Registration And Tenant Provisioning
 
 - [x] Host bilingual marketing and pricing routes on
-  `manle.knasoftware.com`, while retaining canonical public salon pages only at
+  `ai.knasoftware.com`, while retaining canonical public salon pages only at
   `salon.knasoftware.com/s/[slug]`.
 - [x] Keep one versioned pricing catalog (`2026-07-30`) with Starter $200,
   Growth $450, and Custom starting at $900; do not add checkout or Stripe.
@@ -379,8 +379,10 @@ RPO/RTO evidence.
   funnel evidence.
 - [ ] Obtain legal approval for the exact EN/VI contact-consent copy and the
   180-day terminal retention period before production intake is enabled.
-- [ ] Create DNS for `manle.knasoftware.com`, verify edge TLS/CORS/CSP and host
-  routing, then run the documented production smoke/rollback checklist.
+- [ ] Verify edge TLS/CORS/CSP and host routing for `ai.knasoftware.com` and
+  `platform.knasoftware.com`, then run the documented production
+  smoke/rollback checklist. Retain the bounded marketing-host API compatibility
+  route until persisted provider callbacks are reviewed tenant by tenant.
 - [ ] When `manle.ai` is purchased, execute the documented reviewed domain
   migration; do not treat future hostnames as active beforehand.
 
