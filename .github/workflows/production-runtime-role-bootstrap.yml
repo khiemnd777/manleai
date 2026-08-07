@@ -1,0 +1,264 @@
+name: Production database runtime role bootstrap
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type BOOTSTRAP_PRODUCTION_RUNTIME_ROLE exactly
+        required: true
+        type: string
+      approval_reference:
+        description: Non-sensitive approved change reference
+        required: true
+        type: string
+
+concurrency:
+  group: manleai-production-runtime-role-bootstrap
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  BOOTSTRAP_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  bootstrap-runtime-role:
+    name: Reconcile restricted production runtime role
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate approval, secrets, and database contract
+        env:
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          PROJECT_ENV_B64: ${{ secrets.PROJECT_ENV_B64 }}
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ "$CONFIRMATION" != "BOOTSTRAP_PRODUCTION_RUNTIME_ROLE" ]; then
+            echo "::error::The production runtime-role confirmation does not match."
+            exit 1
+          fi
+          if [[ ! "$APPROVAL_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,159}$ ]]; then
+            echo "::error::The approval reference has an unsafe shape."
+            exit 1
+          fi
+          for key in PROJECT_ENV_B64 REMOTE_USER SERVER_IP SSH_PRIVATE_KEY; do
+            if [ -z "${!key:-}" ]; then
+              echo "::error::Missing GitHub secret: ${key}"
+              exit 1
+            fi
+          done
+
+          project_env="$RUNNER_TEMP/manleai-runtime-bootstrap.env"
+          printf '%s' "$PROJECT_ENV_B64" | base64 -d > "$project_env"
+          chmod 600 "$project_env"
+          bash deploy/validate-production-domain-contract.sh "$project_env"
+
+          set -a
+          . "$project_env"
+          set +a
+          for key in \
+            COMPOSE_PROJECT_NAME POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB \
+            DATABASE_RUNTIME_ROLE DATABASE_RUNTIME_PASSWORD DATABASE_URL \
+            MIGRATION_DATABASE_URL DATABASE_RLS_ENFORCED RATE_LIMIT_ENABLED \
+            RATE_LIMIT_CLIENT_IP_HEADER AUTO_MIGRATE; do
+            if [ -z "${!key:-}" ]; then
+              echo "::error::The production project env is missing ${key}."
+              exit 1
+            fi
+          done
+
+          for value in \
+            "$POSTGRES_PASSWORD" "$DATABASE_RUNTIME_PASSWORD" "$DATABASE_URL" \
+            "$MIGRATION_DATABASE_URL" "${JWT_SECRET:-}" \
+            "${TOKEN_ENCRYPTION_KEY_BASE64:-}"; do
+            if [ -n "$value" ]; then
+              echo "::add-mask::$value"
+            fi
+          done
+
+          if [ "$COMPOSE_PROJECT_NAME" != "manleai" ]; then
+            echo "::error::The production Compose project must be exactly manleai."
+            exit 1
+          fi
+          if [[ ! "$POSTGRES_USER" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]] || \
+             [[ ! "$POSTGRES_DB" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]] || \
+             [[ ! "$DATABASE_RUNTIME_ROLE" =~ ^[a-z_][a-z0-9_]{0,62}$ ]]; then
+            echo "::error::The production database identifiers are invalid."
+            exit 1
+          fi
+          if [ "$POSTGRES_USER" = "$DATABASE_RUNTIME_ROLE" ]; then
+            echo "::error::The migration owner and runtime role must differ."
+            exit 1
+          fi
+          if [[ ! "$POSTGRES_PASSWORD" =~ ^[A-Za-z0-9._~-]{24,128}$ ]] || \
+             [[ ! "$DATABASE_RUNTIME_PASSWORD" =~ ^[A-Za-z0-9._~-]{24,128}$ ]] || \
+             [ "$POSTGRES_PASSWORD" = "$DATABASE_RUNTIME_PASSWORD" ]; then
+            echo "::error::The production database passwords must be separate bounded URL-safe values."
+            exit 1
+          fi
+
+          expected_runtime_url="postgres://${DATABASE_RUNTIME_ROLE}:${DATABASE_RUNTIME_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+          expected_migration_url="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+          if [ "$DATABASE_URL" != "$expected_runtime_url" ]; then
+            echo "::error::DATABASE_URL must use the exact non-owner runtime identity."
+            exit 1
+          fi
+          if [ "$MIGRATION_DATABASE_URL" != "$expected_migration_url" ]; then
+            echo "::error::MIGRATION_DATABASE_URL must use the exact migration owner identity."
+            exit 1
+          fi
+          if [ "$DATABASE_RLS_ENFORCED" != "true" ] || \
+             [ "$RATE_LIMIT_ENABLED" != "true" ] || \
+             [ "$RATE_LIMIT_CLIENT_IP_HEADER" != "X-ManleAI-Client-IP" ] || \
+             [ "$AUTO_MIGRATE" != "true" ]; then
+            echo "::error::The production RLS, rate-limit, or migration safety contract is not enabled."
+            exit 1
+          fi
+
+      - name: Configure deployment SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+
+      - name: Upload private bootstrap inputs
+        env:
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+        run: |
+          set -euo pipefail
+          project_env="$RUNNER_TEMP/manleai-runtime-bootstrap.env"
+          remote_env="/tmp/manleai-runtime-bootstrap-$BOOTSTRAP_ID.env"
+          remote_script="/tmp/manleai-runtime-role-$BOOTSTRAP_ID.sh"
+          scp \
+            -i "$HOME/.ssh/id_ed25519" \
+            -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=15 \
+            "$project_env" \
+            "$REMOTE_USER@$SERVER_IP:$remote_env"
+          scp \
+            -i "$HOME/.ssh/id_ed25519" \
+            -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=15 \
+            deploy/postgres-init-runtime-role.sh \
+            "$REMOTE_USER@$SERVER_IP:$remote_script"
+
+      - name: Reconcile and verify the production runtime role
+        env:
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+        run: |
+          set -euo pipefail
+          ssh \
+            -i "$HOME/.ssh/id_ed25519" \
+            -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=15 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=5 \
+            "$REMOTE_USER@$SERVER_IP" \
+            "BOOTSTRAP_ID='$BOOTSTRAP_ID' APPROVAL_REFERENCE='$APPROVAL_REFERENCE' APPROVER='${{ github.actor }}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          umask 077
+
+          remote_env="/tmp/manleai-runtime-bootstrap-$BOOTSTRAP_ID.env"
+          remote_script="/tmp/manleai-runtime-role-$BOOTSTRAP_ID.sh"
+          cleanup() {
+            rm -f "$remote_env" "$remote_script"
+          }
+          trap cleanup EXIT
+
+          [[ -f "$remote_env" && ! -L "$remote_env" ]] || { echo "The private bootstrap env is missing." >&2; exit 1; }
+          [[ -f "$remote_script" && ! -L "$remote_script" ]] || { echo "The runtime-role script is missing." >&2; exit 1; }
+          chmod 600 "$remote_env" "$remote_script"
+          command -v docker >/dev/null 2>&1
+          docker info >/dev/null
+
+          set -a
+          . "$remote_env"
+          set +a
+          : "${POSTGRES_USER:?POSTGRES_USER is required}"
+          : "${POSTGRES_DB:?POSTGRES_DB is required}"
+          : "${DATABASE_RUNTIME_ROLE:?DATABASE_RUNTIME_ROLE is required}"
+          : "${DATABASE_RUNTIME_PASSWORD:?DATABASE_RUNTIME_PASSWORD is required}"
+          [[ "${COMPOSE_PROJECT_NAME:-}" = "manleai" ]] || { echo "Unexpected Compose project." >&2; exit 1; }
+
+          postgres_containers=()
+          while IFS= read -r container_id; do
+            [ -n "$container_id" ] && postgres_containers+=("$container_id")
+          done < <(docker ps \
+            --filter 'label=com.docker.compose.project=manleai' \
+            --filter 'label=com.docker.compose.service=postgres' \
+            --format '{{.ID}}')
+          if [ "${#postgres_containers[@]}" -ne 1 ]; then
+            echo "Expected exactly one running ManleAI PostgreSQL container." >&2
+            exit 1
+          fi
+          postgres_container="${postgres_containers[0]}"
+          postgres_health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$postgres_container")"
+          if [ "$postgres_health" != "healthy" ]; then
+            echo "The production PostgreSQL container is not healthy." >&2
+            exit 1
+          fi
+
+          docker exec -i \
+            -e POSTGRES_USER \
+            -e POSTGRES_DB \
+            -e DATABASE_RUNTIME_ROLE \
+            -e DATABASE_RUNTIME_PASSWORD \
+            "$postgres_container" \
+            sh -s < "$remote_script"
+
+          export PGPASSWORD="$DATABASE_RUNTIME_PASSWORD"
+          runtime_identity="$(docker exec -i \
+            -e PGPASSWORD \
+            -e DATABASE_RUNTIME_ROLE \
+            -e POSTGRES_DB \
+            "$postgres_container" \
+            sh -c 'exec psql -X -h "$HOSTNAME" -U "$DATABASE_RUNTIME_ROLE" -d "$POSTGRES_DB" -At -c "SELECT current_user"')"
+          unset PGPASSWORD DATABASE_RUNTIME_PASSWORD
+          if [ "$runtime_identity" != "$DATABASE_RUNTIME_ROLE" ]; then
+            echo "The runtime-role password login verification failed." >&2
+            exit 1
+          fi
+
+          printf 'runtime_role_bootstrap=ready\n'
+          printf 'approval_reference=%s\n' "$APPROVAL_REFERENCE"
+          printf 'approved_by=%s\n' "$APPROVER"
+          printf 'postgres_health=%s\n' "$postgres_health"
+          REMOTE
+
+      - name: Remove remote bootstrap inputs
+        if: ${{ always() }}
+        env:
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+        run: |
+          set +e
+          if [ -s "$HOME/.ssh/id_ed25519" ] && [ -n "${REMOTE_USER:-}" ] && [ -n "${SERVER_IP:-}" ]; then
+            ssh \
+              -i "$HOME/.ssh/id_ed25519" \
+              -o StrictHostKeyChecking=accept-new \
+              -o ConnectTimeout=15 \
+              "$REMOTE_USER@$SERVER_IP" \
+              "rm -f '/tmp/manleai-runtime-bootstrap-$BOOTSTRAP_ID.env' '/tmp/manleai-runtime-role-$BOOTSTRAP_ID.sh'"
+          fi
+
+      - name: Remove deployment SSH key and local bootstrap env
+        if: ${{ always() }}
+        run: |
+          rm -f "$HOME/.ssh/id_ed25519"
+          rm -f "$RUNNER_TEMP/manleai-runtime-bootstrap.env"

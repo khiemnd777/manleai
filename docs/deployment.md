@@ -295,8 +295,23 @@ role and never grant it `SUPERUSER` or `BYPASSRLS`.
 
 On a new PostgreSQL volume, `deploy/postgres-init-runtime-role.sh` creates the
 runtime login with `NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS`.
-For an existing volume, create or rotate that role once through an approved DBA
-change before deploying this release. The exact statement is equivalent to:
+The script is idempotent: it reconciles the login password and restrictive role
+attributes, then fails closed if the role has any role membership or owns a
+relation. It never grants application privileges; the candidate API does that
+through the migration-owner connection after migrations succeed.
+
+For an existing volume, run the protected manual
+`.github/workflows/production-runtime-role-bootstrap.yml` workflow once through
+an approved DBA change before deploying the first runtime-role release. The
+workflow requires the exact `BOOTSTRAP_PRODUCTION_RUNTIME_ROLE` confirmation,
+a bounded non-sensitive approval reference, the protected `production`
+environment, and the normal production SSH and `PROJECT_ENV_B64` secrets. It
+validates the owner/runtime URL split, uploads private mode-`600` temporary
+inputs, reconciles only the configured role inside the one healthy existing
+ManleAI PostgreSQL container, verifies the restricted attributes and password
+login, then removes the temporary files. It does not restart the stack, migrate
+schema, grant table privileges, or alter application rows. The exact role state
+is equivalent to:
 
 ```sql
 CREATE ROLE manleai_runtime LOGIN PASSWORD '<separate-secret>'
@@ -310,6 +325,20 @@ already-existing runtime role, then closes that connection. API requests and
 the worker use only the runtime connection. The worker does not receive
 `MIGRATION_DATABASE_URL`; production startup fails if the connected role name,
 ownership, `SUPERUSER`, `BYPASSRLS`, or RLS policy checks are unsafe.
+
+Run the existing-volume bootstrap from an authenticated GitHub CLI only after
+the protected environment and the upgraded secret are ready:
+
+```bash
+gh workflow run production-runtime-role-bootstrap.yml \
+  --ref main \
+  -f confirmation=BOOTSTRAP_PRODUCTION_RUNTIME_ROLE \
+  -f approval_reference='<approved-change-reference>'
+```
+
+Wait for that exact workflow run to complete successfully before creating the
+first release tag. A failed restrictive-role or password-login check blocks the
+release; do not weaken the role or bypass the check.
 
 ### V78-V80 system-tenant context rollout
 
