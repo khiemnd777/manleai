@@ -541,6 +541,40 @@ must have two distinct login emails/identities.
 `--reason` is an opaque operator change reference, not a note. It must match
 `[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}` and must not contain customer data.
 
+### Emergency demo identity preparation
+
+Use `.github/workflows/production-demo-identity-bootstrap.yml` only for the
+approved live demo state in which production has exactly one active Tenant
+identity, at least one salon owned by that identity, no Platform identity, no
+active Platform Admin, and no legacy `super_admin`. The protected workflow:
+
+1. requires the exact currently running release tag and fixed aggregate
+   account preflight;
+2. changes only the active Tenant owner's login email through
+   `platform-access rename-tenant-email`, preserving the same immutable user ID,
+   `salons.owner_user_id`, tenant memberships, salon data, and password while
+   revoking that user's refresh tokens;
+3. reuses the newly freed email only for a separate `principal_scope=platform`
+   identity created through the normal first-Admin bootstrap; and
+4. requires exactly two active identities afterward: one Tenant and one
+   Platform identity with one active Platform Admin assignment.
+
+The workflow builds the operator binary from the reviewed commit, mounts it
+into a one-off API-image container, uses the migration-owner database
+connection, and does not replace, reset, seed, or copy tenant data. Both
+mutations use fixed replay-safe action keys and immutable access action/event
+evidence. An exact rerun accepts either the approved initial counts or the exact
+completed counts and then replays both actions; any other aggregate state fails
+closed. Email, name, and password inputs are masked, staged in private temporary
+files, and deleted from the runner and VPS in `always()` cleanup steps.
+
+Create the generated initial Admin password as the protected production
+environment secret `PLATFORM_ADMIN_BOOTSTRAP_PASSWORD`, dispatch the workflow,
+verify its bounded aggregate postflight, and delete that temporary GitHub
+secret after success. The password must be delivered to the approved operator
+out of band. The existing Tenant password is unchanged. This is a bounded
+operator workflow, not an HTTP endpoint and not a general Tenant email editor.
+
 ## Opt-In Sample Test Data
 
 V73 adds only the `live|sample_test` classification contract to `users` and

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -23,16 +24,27 @@ func main() {
 }
 
 func run(ctx context.Context, args []string) error {
-	if len(args) == 0 || args[0] != "bootstrap-admin" {
-		return errors.New("usage: platform-access bootstrap-admin --email <platform-email> --full-name <name> --password-file <0600-file> --action-key <stable-key> --reason <change-reference>")
+	if len(args) == 0 {
+		return errors.New("usage: platform-access <bootstrap-admin|rename-tenant-email> [options]")
 	}
+	switch args[0] {
+	case "bootstrap-admin":
+		return runBootstrapAdmin(ctx, args[1:])
+	case "rename-tenant-email":
+		return runRenameTenantEmail(ctx, args[1:])
+	default:
+		return errors.New("usage: platform-access <bootstrap-admin|rename-tenant-email> [options]")
+	}
+}
+
+func runBootstrapAdmin(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("bootstrap-admin", flag.ContinueOnError)
 	email := flags.String("email", "", "email for the dedicated Platform identity")
 	fullName := flags.String("full-name", "", "full name for the dedicated Platform identity")
 	passwordFile := flags.String("password-file", "", "path to a regular 0600 file containing the initial password")
 	actionKey := flags.String("action-key", "", "stable retry-safe action key")
 	reason := flags.String("reason", "", "bounded operator change reference")
-	if err := flags.Parse(args[1:]); err != nil {
+	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if strings.TrimSpace(*email) == "" || strings.TrimSpace(*fullName) == "" || strings.TrimSpace(*passwordFile) == "" || strings.TrimSpace(*actionKey) == "" || strings.TrimSpace(*reason) == "" {
@@ -47,18 +59,12 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("hash Platform administrator password: %w", err)
 	}
 
-	cfg := config.Load()
-	databaseURL := cfg.MigrationDatabaseURL
-	if databaseURL == "" {
-		databaseURL = cfg.DatabaseURL
-	}
-	db, err := database.Open(ctx, databaseURL)
+	db, repository, err := openAccessRepository(ctx)
 	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+		return err
 	}
 	defer db.Close()
 
-	repository := access.NewRepository(db)
 	result, err := repository.BootstrapPlatformAdmin(ctx, access.BootstrapPlatformAdminRequest{
 		Email: *email, FullName: *fullName, PasswordHash: string(passwordHash), ActionKey: *actionKey, Reason: *reason,
 	})
@@ -69,6 +75,53 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("encode result: %w", err)
 	}
 	return nil
+}
+
+func runRenameTenantEmail(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("rename-tenant-email", flag.ContinueOnError)
+	currentEmail := flags.String("current-email", "", "current email for the active Tenant owner identity")
+	newEmail := flags.String("new-email", "", "replacement email for the same Tenant owner identity")
+	actionKey := flags.String("action-key", "", "stable retry-safe action key")
+	reason := flags.String("reason", "", "bounded operator change reference")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*currentEmail) == "" || strings.TrimSpace(*newEmail) == "" || strings.TrimSpace(*actionKey) == "" || strings.TrimSpace(*reason) == "" {
+		return errors.New("current-email, new-email, action-key, and reason are required")
+	}
+
+	db, repository, err := openAccessRepository(ctx)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	result, err := repository.RenameTenantEmail(ctx, access.RenameTenantEmailRequest{
+		CurrentEmail: *currentEmail,
+		NewEmail:     *newEmail,
+		ActionKey:    *actionKey,
+		Reason:       *reason,
+	})
+	if err != nil {
+		return fmt.Errorf("rename Tenant email: %w", err)
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
+		return fmt.Errorf("encode result: %w", err)
+	}
+	return nil
+}
+
+func openAccessRepository(ctx context.Context) (*sql.DB, *access.Repository, error) {
+	cfg := config.Load()
+	databaseURL := cfg.MigrationDatabaseURL
+	if databaseURL == "" {
+		databaseURL = cfg.DatabaseURL
+	}
+	db, err := database.Open(ctx, databaseURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open database: %w", err)
+	}
+	return db, access.NewRepository(db), nil
 }
 
 func readPrivatePasswordFile(filePath string) (string, error) {

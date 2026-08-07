@@ -403,6 +403,134 @@ func TestConcurrentPlatformAdminDemotionsPreserveOneActiveAdmin(t *testing.T) {
 	}
 }
 
+func TestAccessRepositoryRenameTenantEmailPreservesIdentityAndReplays(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := database.Migrate(ctx, db); err != nil {
+		t.Fatalf("migrate test database: %v", err)
+	}
+
+	suffix := uuid.NewString()
+	currentEmail := "rename-owner-" + suffix + "@example.test"
+	newEmail := "renamed-owner-" + suffix + "@example.test"
+	ownerID := insertAccessTestUser(t, db, currentEmail, PrincipalScopeTenant)
+	salonID := insertAccessTestSalon(t, db, ownerID, "Rename tenant "+suffix)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO refresh_tokens(user_id,token_hash,expires_at)
+		VALUES($1,$2,now()+interval '1 hour')
+	`, ownerID, "rename-token-"+suffix); err != nil {
+		t.Fatalf("seed refresh token: %v", err)
+	}
+
+	repository := NewRepository(db)
+	request := RenameTenantEmailRequest{
+		CurrentEmail: currentEmail,
+		NewEmail:     newEmail,
+		ActionKey:    "rename-tenant-email-" + suffix,
+		Reason:       "DEMO-IDENTITY-" + suffix,
+	}
+	result, err := repository.RenameTenantEmail(ctx, request)
+	if err != nil {
+		t.Fatalf("rename Tenant email: %v", err)
+	}
+	if result.UserID != ownerID || result.PrincipalScope != PrincipalScopeTenant || result.Status != "active" || result.OwnedSalonCount != 1 || result.RevokedRefreshTokens != 1 || result.Replayed {
+		t.Fatalf("rename result=%#v", result)
+	}
+
+	var persistedUserID string
+	if err := db.QueryRowContext(ctx, `SELECT id::text FROM users WHERE lower(email)=lower($1)`, newEmail).Scan(&persistedUserID); err != nil {
+		t.Fatalf("load renamed Tenant identity: %v", err)
+	}
+	if persistedUserID != ownerID {
+		t.Fatalf("renamed user id=%s, want %s", persistedUserID, ownerID)
+	}
+	var persistedOwnerID string
+	if err := db.QueryRowContext(ctx, `SELECT owner_user_id::text FROM salons WHERE id=$1`, salonID).Scan(&persistedOwnerID); err != nil {
+		t.Fatalf("load preserved salon owner: %v", err)
+	}
+	if persistedOwnerID != ownerID {
+		t.Fatalf("salon owner id=%s, want %s", persistedOwnerID, ownerID)
+	}
+	var oldEmailCount int
+	var refreshTokenCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM users WHERE lower(email)=lower($1)`, currentEmail).Scan(&oldEmailCount); err != nil {
+		t.Fatalf("count old email: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM refresh_tokens WHERE user_id=$1`, ownerID).Scan(&refreshTokenCount); err != nil {
+		t.Fatalf("count revoked refresh tokens: %v", err)
+	}
+	if oldEmailCount != 0 || refreshTokenCount != 0 {
+		t.Fatalf("old email count=%d refresh token count=%d, want 0/0", oldEmailCount, refreshTokenCount)
+	}
+
+	replay, err := repository.RenameTenantEmail(ctx, request)
+	if err != nil {
+		t.Fatalf("replay Tenant email rename: %v", err)
+	}
+	if !replay.Replayed || replay.UserID != ownerID || replay.OwnedSalonCount != 1 {
+		t.Fatalf("rename replay=%#v", replay)
+	}
+}
+
+func TestAccessRepositoryRenameTenantEmailRejectsWrongRealmAndOccupiedTarget(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := database.Migrate(ctx, db); err != nil {
+		t.Fatalf("migrate test database: %v", err)
+	}
+
+	suffix := uuid.NewString()
+	platformEmail := "rename-platform-" + suffix + "@example.test"
+	occupiedEmail := "rename-occupied-" + suffix + "@example.test"
+	tenantEmail := "rename-tenant-" + suffix + "@example.test"
+	insertAccessTestUser(t, db, platformEmail, PrincipalScopePlatform)
+	insertAccessTestUser(t, db, occupiedEmail, PrincipalScopeTenant)
+	tenantID := insertAccessTestUser(t, db, tenantEmail, PrincipalScopeTenant)
+	insertAccessTestSalon(t, db, tenantID, "Occupied rename tenant "+suffix)
+
+	repository := NewRepository(db)
+	if _, err := repository.RenameTenantEmail(ctx, RenameTenantEmailRequest{
+		CurrentEmail: platformEmail,
+		NewEmail:     "wrong-realm-" + suffix + "@example.test",
+		ActionKey:    "rename-platform-rejected-" + suffix,
+		Reason:       "DEMO-IDENTITY-" + suffix,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Platform identity rename error=%v, want not found", err)
+	}
+	if _, err := repository.RenameTenantEmail(ctx, RenameTenantEmailRequest{
+		CurrentEmail: tenantEmail,
+		NewEmail:     occupiedEmail,
+		ActionKey:    "rename-occupied-rejected-" + suffix,
+		Reason:       "DEMO-IDENTITY-" + suffix,
+	}); !errors.Is(err, ErrIdentityConflict) {
+		t.Fatalf("occupied target rename error=%v, want identity conflict", err)
+	}
+
+	var persistedEmail string
+	if err := db.QueryRowContext(ctx, `SELECT email FROM users WHERE id=$1`, tenantID).Scan(&persistedEmail); err != nil {
+		t.Fatalf("load unchanged Tenant email: %v", err)
+	}
+	if persistedEmail != tenantEmail {
+		t.Fatalf("Tenant email=%q, want unchanged %q", persistedEmail, tenantEmail)
+	}
+}
+
 func insertAccessTestUser(t *testing.T, db *sql.DB, email string, scope PrincipalScope) string {
 	t.Helper()
 	var id string

@@ -1,0 +1,212 @@
+name: Production demo identity bootstrap
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type APPLY_PRODUCTION_DEMO_IDENTITIES exactly
+        required: true
+        type: string
+      approval_reference:
+        description: Non-sensitive approved change reference
+        required: true
+        type: string
+      expected_release_tag:
+        description: Exact release tag currently running in production
+        required: true
+        type: string
+      tenant_current_email:
+        description: Exact current Tenant login email
+        required: true
+        type: string
+      tenant_new_email:
+        description: Exact replacement Tenant login email
+        required: true
+        type: string
+      platform_admin_email:
+        description: Exact new Platform Administrator email
+        required: true
+        type: string
+      platform_admin_name:
+        description: Display name for the new Platform Administrator
+        required: true
+        type: string
+
+concurrency:
+  group: manleai-production-demo-identity-bootstrap
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  BOOTSTRAP_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+  TENANT_RENAME_ACTION_KEY: production-demo-tenant-email-2026-08-07
+  PLATFORM_ADMIN_ACTION_KEY: production-demo-platform-admin-2026-08-07
+
+jobs:
+  bootstrap-demo-identities:
+    name: Rename Tenant login and bootstrap Platform Admin
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Validate approval and protected inputs
+        env:
+          ADMIN_EMAIL: ${{ inputs.platform_admin_email }}
+          ADMIN_NAME: ${{ inputs.platform_admin_name }}
+          ADMIN_PASSWORD: ${{ secrets.PLATFORM_ADMIN_BOOTSTRAP_PASSWORD }}
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          EXPECTED_RELEASE_TAG: ${{ inputs.expected_release_tag }}
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          TENANT_CURRENT_EMAIL: ${{ inputs.tenant_current_email }}
+          TENANT_NEW_EMAIL: ${{ inputs.tenant_new_email }}
+        run: |
+          set -euo pipefail
+
+          for value in "$ADMIN_EMAIL" "$ADMIN_NAME" "$ADMIN_PASSWORD" "$TENANT_CURRENT_EMAIL" "$TENANT_NEW_EMAIL"; do
+            echo "::add-mask::$value"
+          done
+          if [ "$CONFIRMATION" != "APPLY_PRODUCTION_DEMO_IDENTITIES" ]; then
+            echo "::error::The production demo identity confirmation does not match."
+            exit 1
+          fi
+          if [[ ! "$APPROVAL_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$ ]] || \
+             [[ ! "$EXPECTED_RELEASE_TAG" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]]; then
+            echo "::error::The production demo identity approval metadata is invalid."
+            exit 1
+          fi
+          for email in "$ADMIN_EMAIL" "$TENANT_CURRENT_EMAIL" "$TENANT_NEW_EMAIL"; do
+            if [[ ! "$email" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || [ "${#email}" -gt 320 ]; then
+              echo "::error::A production demo identity email is invalid."
+              exit 1
+            fi
+          done
+          if [ "$TENANT_CURRENT_EMAIL" != "$ADMIN_EMAIL" ] || [ "$TENANT_CURRENT_EMAIL" = "$TENANT_NEW_EMAIL" ]; then
+            echo "::error::The approved flow must free the current Tenant email for the new Platform Administrator."
+            exit 1
+          fi
+          if [ -z "$ADMIN_NAME" ] || [ "${#ADMIN_NAME}" -gt 160 ] || [[ "$ADMIN_NAME" == *$'\n'* ]] || \
+             [ "${#ADMIN_PASSWORD}" -lt 12 ] || [[ "$ADMIN_PASSWORD" == *$'\n'* ]]; then
+            echo "::error::The Platform Administrator name or password is invalid."
+            exit 1
+          fi
+          for key in REMOTE_USER SERVER_IP SSH_PRIVATE_KEY; do
+            if [ -z "${!key:-}" ]; then
+              echo "::error::Missing GitHub production secret: ${key}"
+              exit 1
+            fi
+          done
+
+          bash -n deploy/production-demo-identity-bootstrap.sh
+          bash -n deploy/production-account-audit.sh
+
+      - name: Test and build production identity operator
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          go test ./cmd/platform-access ./modules/access
+          CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/platform-access" ./cmd/platform-access
+          chmod 700 "$RUNNER_TEMP/platform-access"
+
+      - name: Prepare private bootstrap inputs
+        env:
+          ADMIN_EMAIL: ${{ inputs.platform_admin_email }}
+          ADMIN_NAME: ${{ inputs.platform_admin_name }}
+          ADMIN_PASSWORD: ${{ secrets.PLATFORM_ADMIN_BOOTSTRAP_PASSWORD }}
+          TENANT_CURRENT_EMAIL: ${{ inputs.tenant_current_email }}
+          TENANT_NEW_EMAIL: ${{ inputs.tenant_new_email }}
+        run: |
+          set -euo pipefail
+          private_dir="$RUNNER_TEMP/production-demo-identity"
+          install -d -m 700 "$private_dir"
+          printf '%s' "$TENANT_CURRENT_EMAIL" > "$private_dir/tenant-current-email"
+          printf '%s' "$TENANT_NEW_EMAIL" > "$private_dir/tenant-new-email"
+          printf '%s' "$ADMIN_EMAIL" > "$private_dir/platform-admin-email"
+          printf '%s' "$ADMIN_NAME" > "$private_dir/platform-admin-name"
+          printf '%s' "$ADMIN_PASSWORD" > "$private_dir/platform-admin-password"
+          chmod 600 "$private_dir"/*
+
+      - name: Configure deployment SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+
+      - name: Upload private identity bootstrap bundle
+        env:
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+        run: |
+          set -euo pipefail
+          remote_dir="/tmp/manleai-production-demo-identity-$BOOTSTRAP_ID"
+          ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
+            "$REMOTE_USER@$SERVER_IP" "install -d -m 700 '$remote_dir'"
+          scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
+            "$RUNNER_TEMP/platform-access" \
+            deploy/production-demo-identity-bootstrap.sh \
+            deploy/production-account-audit.sh \
+            "$RUNNER_TEMP/production-demo-identity/tenant-current-email" \
+            "$RUNNER_TEMP/production-demo-identity/tenant-new-email" \
+            "$RUNNER_TEMP/production-demo-identity/platform-admin-email" \
+            "$RUNNER_TEMP/production-demo-identity/platform-admin-name" \
+            "$RUNNER_TEMP/production-demo-identity/platform-admin-password" \
+            "$REMOTE_USER@$SERVER_IP:$remote_dir/"
+
+      - name: Apply and verify production demo identities
+        env:
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+          EXPECTED_RELEASE_TAG: ${{ inputs.expected_release_tag }}
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+        run: |
+          set -euo pipefail
+          remote_dir="/tmp/manleai-production-demo-identity-$BOOTSTRAP_ID"
+          ssh \
+            -i "$HOME/.ssh/id_ed25519" \
+            -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=15 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=5 \
+            "$REMOTE_USER@$SERVER_IP" \
+            "BOOTSTRAP_ID='$BOOTSTRAP_ID' EXPECTED_RELEASE_TAG='$EXPECTED_RELEASE_TAG' APPROVAL_REFERENCE='$APPROVAL_REFERENCE' TENANT_RENAME_ACTION_KEY='$TENANT_RENAME_ACTION_KEY' PLATFORM_ADMIN_ACTION_KEY='$PLATFORM_ADMIN_ACTION_KEY' bash '$remote_dir/production-demo-identity-bootstrap.sh'"
+
+      - name: Remove remote identity bootstrap bundle
+        if: ${{ always() }}
+        env:
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+        run: |
+          set +e
+          remote_dir="/tmp/manleai-production-demo-identity-$BOOTSTRAP_ID"
+          if [ -s "$HOME/.ssh/id_ed25519" ] && [ -n "${REMOTE_USER:-}" ] && [ -n "${SERVER_IP:-}" ]; then
+            ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
+              "$REMOTE_USER@$SERVER_IP" \
+              "rm -f '$remote_dir/platform-access' '$remote_dir/production-demo-identity-bootstrap.sh' '$remote_dir/production-account-audit.sh' '$remote_dir/tenant-current-email' '$remote_dir/tenant-new-email' '$remote_dir/platform-admin-email' '$remote_dir/platform-admin-name' '$remote_dir/platform-admin-password' '$remote_dir/tenant-rename-result.json' '$remote_dir/platform-admin-result.json'; rmdir '$remote_dir' 2>/dev/null || true"
+          fi
+
+      - name: Remove local private inputs and SSH key
+        if: ${{ always() }}
+        run: |
+          rm -f "$HOME/.ssh/id_ed25519" "$RUNNER_TEMP/platform-access"
+          rm -f "$RUNNER_TEMP/production-demo-identity/tenant-current-email" \
+            "$RUNNER_TEMP/production-demo-identity/tenant-new-email" \
+            "$RUNNER_TEMP/production-demo-identity/platform-admin-email" \
+            "$RUNNER_TEMP/production-demo-identity/platform-admin-name" \
+            "$RUNNER_TEMP/production-demo-identity/platform-admin-password"
+          rmdir "$RUNNER_TEMP/production-demo-identity" 2>/dev/null || true
