@@ -23,6 +23,8 @@ func TestV88SquareStrictTenantBindingSafety(t *testing.T) {
 		"pos_connections_tenant_identity_normalized_check",
 		"pos_adapter",
 		"active_provider",
+		"(NEW.id, 'service', 'collection', 1)",
+		"(NEW.id, 'staff', 'collection', 1)",
 		"btrim(salon.active_pos_provider) AS provider",
 	} {
 		if !strings.Contains(source, token) {

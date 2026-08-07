@@ -85,7 +85,8 @@ build_clone_database_name() {
   local suite="$2"
   local index="$3"
   local process_id="$4"
-  local clone_database="${base_database:0:18}_release_gate_rg_${suite}_${index}_${process_id}"
+  local clone_database="manleai_load_release_gate_rg_${suite}_${index}_${process_id}"
+  [[ "$base_database" == *release_gate* ]] || fail "base database lost the release_gate marker"
   [[ "$clone_database" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]] || fail "generated test database name is unsafe"
   [[ "$clone_database" == *release_gate* ]] || fail "generated test database lost the release_gate marker"
   printf '%s\n' "$clone_database"
@@ -286,6 +287,7 @@ run_self_test() {
   validate_deployment_workflow_contract
   clone_database="$(build_clone_database_name "manleai_phase10_release_gate_database_with_a_long_name" "integration" "19" "12345")"
   [[ "$clone_database" == *release_gate* ]] || fail "clone database self-test lost the release_gate marker"
+  [[ "$clone_database" == manleai_load_* ]] || fail "clone database self-test lost the scheduling-load isolation prefix"
   if (
     unset PGHOST PGPORT PGUSER PGDATABASE
     require_database_identity >/dev/null 2>&1

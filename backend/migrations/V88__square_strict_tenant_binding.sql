@@ -98,6 +98,8 @@ AS $$
 BEGIN
     INSERT INTO business_resource_versions (salon_id, resource_type, resource_id, version)
     VALUES
+        (NEW.id, 'service', 'collection', 1),
+        (NEW.id, 'staff', 'collection', 1),
         (NEW.id, 'service_aliases', 'collection', 1),
         (NEW.id, 'consultation_profiles', 'collection', 1),
         (NEW.id, 'knowledge_base', 'collection', 1),

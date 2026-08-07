@@ -194,10 +194,11 @@ triage keyword table.
   uses nonce-authorized style rules rather than inline attributes. The shared
   `deploy/run-ts-evidence-tests.mjs` compiler/Node runner owns execution. The
   gate also requires fresh migrate-twice PostgreSQL integration coverage from
-  V46 through latest, per-package database clones that prevent fixture
-  contamination, a live Redis 7 atomic-limiter test, and an explicit tenant/
-  security package contract covering customer notification, Square webhook
-  operations, and scheduling-PII retention before image build or deploy.
+  V46 through latest, per-package database clones whose names retain both the
+  `manleai_load_` isolation prefix and `release_gate` marker while preventing
+  fixture contamination, a live Redis 7 atomic-limiter test, and an explicit
+  tenant/security package contract covering customer notification, Square
+  webhook operations, and scheduling-PII retention before image build or deploy.
   See `docs/operations/release-gate.md`; a passing gate is code-ready evidence
   and not live-provider, backup/restore, alerting, or on-call proof.
 - Manual non-production restore drill workflow:

@@ -580,6 +580,9 @@ func (r *Repository) UpsertConnection(ctx context.Context, connection Connection
 	connection.Provider = strings.TrimSpace(connection.Provider)
 	connection.MerchantID = strings.TrimSpace(connection.MerchantID)
 	connection.LocationID = strings.TrimSpace(connection.LocationID)
+	if connection.Scopes == nil {
+		connection.Scopes = []string{}
+	}
 	if connection.SalonID == "" || connection.Provider == "" || connection.MerchantID == "" {
 		return nil, ErrValidation
 	}

@@ -70,6 +70,9 @@ The fresh database contract:
    migration-contract or integration package, then executes packages serially
    with bounded Go test timeouts. This prevents test fixtures from contaminating
    the template or any later package as well as preventing competing mutation.
+   Every clone name retains both the `manleai_load_` isolated-load prefix and
+   the `release_gate` marker required by the scheduling-load and release-gate
+   identity guards.
 
 Release-gate database mode exports
 `OWNER_FIRST_RELEASE_GATE_DATABASE_REQUIRED=1` and the isolated load database
