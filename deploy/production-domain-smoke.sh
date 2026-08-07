@@ -107,7 +107,7 @@ probe_domains() {
   curl -sS --connect-timeout 8 --max-time 20 -D "$headers_file" -o /dev/null "https://${marketing_domain}/login" || return 1
   status="$(last_http_status "$headers_file")"
   location="$(last_header_value location "$headers_file")"
-  [ "$status" = "308" ] || return 1
+  [ "$status" = "301" ] || return 1
   [ "$location" = "https://${admin_domain}/login" ] || return 1
 
   current_probe="marketing API compatibility"

@@ -93,7 +93,7 @@ change only the ManleAI route and manifest; existing project route files remain
 owned by their registered projects. After `upsert`,
 `deploy/production-domain-smoke.sh` retries the exact public host contract:
 HTTPS/API health, nonce CSP on every web surface, the marketing-to-Platform
-admin redirect, the bounded marketing-host API compatibility proxy, and the
+permanent `301` admin redirect, the bounded marketing-host API compatibility proxy, and the
 marketing-origin CORS response. The salon host root preserves its existing
 catalog-only behavior and may return a CSP-protected `200` or `404`; canonical
 salon pages remain under `/s/[slug]`. Each retry reports the exact failed probe.

@@ -58,7 +58,7 @@ curl() {
       printf 'HTTP/2 200\r\ncontent-security-policy: nonce-test\r\n\r\n' > "$headers_file"
       ;;
     "GET https://ai.example.test/login")
-      printf 'HTTP/2 308\r\nlocation: https://platform.example.test/login\r\n\r\n' > "$headers_file"
+      printf 'HTTP/2 301\r\nlocation: https://platform.example.test/login\r\n\r\n' > "$headers_file"
       ;;
     "GET https://ai.example.test/api/public/salons/domain-smoke-nonexistent")
       printf 'HTTP/2 404\r\ncontent-type: application/json; charset=utf-8\r\n\r\n' > "$headers_file"
