@@ -351,6 +351,40 @@ Wait for that exact workflow run to complete successfully before creating the
 first release tag. A failed restrictive-role or password-login check blocks the
 release; do not weaken the role or bypass the check.
 
+### Read-only production account audit
+
+Use `.github/workflows/production-account-audit.yml` when an approved operator
+needs aggregate evidence about production accounts and administrative access.
+The protected manual workflow requires the exact
+`AUDIT_PRODUCTION_ACCOUNTS` confirmation, a bounded non-sensitive approval
+reference, and the normal production SSH secrets. It uploads
+`deploy/production-account-audit.sh` temporarily, targets exactly one healthy
+ManleAI PostgreSQL container, and runs its fixed query with PostgreSQL
+`default_transaction_read_only=on` plus bounded statement and lock timeouts.
+
+The workflow reports only total/status/principal-scope counts, the number of
+active `platform_admin` accounts under the current Platform assignment model,
+and aggregate legacy `super_admin` counts. It never outputs user IDs, email
+addresses, names, phone numbers, password material, or deployment secrets. It
+does not create or modify accounts, roles, assignments, schema, containers,
+services, releases, or domain routing.
+
+Run it from an authenticated GitHub CLI after the protected environment is
+ready:
+
+```bash
+gh workflow run production-account-audit.yml \
+  --ref main \
+  -f confirmation=AUDIT_PRODUCTION_ACCOUNTS \
+  -f approval_reference='<approved-audit-reference>'
+```
+
+Inspect the log for the fixed `key=count` output. An active Platform Admin is
+an active `principal_scope=platform` account with an active
+`platform_role_assignments` row whose role is `platform_admin`. A legacy
+`super_admin` row is reported separately and is not evidence of current
+Platform authorization.
+
 ### V78-V80 system-tenant context rollout
 
 `V78__system_tenant_context_expand.sql` is intentionally the expand release of

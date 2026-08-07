@@ -210,6 +210,15 @@ triage keyword table.
   role password and restrictive attributes, rejects memberships or relation
   ownership, verifies password login, removes private temporary inputs, and
   performs no migration, application-row write, or service restart.
+- Read-only production account/admin audit:
+  `.github/workflows/production-account-audit.yml` invokes
+  `deploy/production-account-audit.sh` only through the protected `production`
+  environment. It requires an exact manual confirmation and bounded approval
+  reference, targets exactly one healthy ManleAI PostgreSQL container, forces
+  the database session read-only with bounded timeouts, and emits only fixed
+  aggregate account/status/principal-scope/current-Platform-Admin/legacy-admin
+  counts without application-row writes, PII, secrets, schema changes, service
+  restarts, release tags, or domain changes.
 - Runtime stack: `docker-compose.prod.yml`; API owns startup migrations and the
   worker starts only after API health with `AUTO_MIGRATE=false`.
 - Local orchestration: root `make restart` delegates to
@@ -1710,6 +1719,7 @@ boundary.
 | loading, empty, error, disabled, gated UI, copy, responsive | `salon-dashboard-ui`, `DESIGN.md` | page component and API helper |
 | Owner-first release gate, release contract, migrate twice, fresh PostgreSQL CI, V46 through latest, tenant security contract, Redis security test, browser session test, CSP test, secret redaction, public PII absence, notification masking, customer notification, Square webhook operations, scheduling PII retention, callback signature, high-risk race suite, manifest test ownership, TypeScript authority evidence, test:evidence, run-ts-evidence-tests, code-ready not operational-ready | `deploy/owner-first-release-gate.sh`, `deploy/owner-first-release-gate.manifest`, `deploy/run-ts-evidence-tests.mjs`, `.github/workflows/ci-cd.yml`, all three web package scripts | `docs/operations/release-gate.md`, `docs/deployment.md`, `docs/production-readiness-checklist.md`, manifest-owned backend integration/security packages, live Redis 7 CI service, frontend/POS browser-session and CSP evidence, landing CSP evidence, POS scheduler-style evidence, and all three web typecheck/build jobs |
 | CI/CD deploy, release tag, VPS deploy, GHCR image publish/sequential pull, SSH key, image extraction, healthcheck, release-scoped candidate env, atomic env promotion, previous env/Compose rollback, public domain smoke, production domain contract, platform.knasoftware.com, ai.knasoftware.com, migration checksum preflight, exit 42, pre-live reset, data profile guard, temporary sample credentials, systemd Caddy, project-edgectl, worker image | `.github/workflows/ci-cd.yml`, `deploy/production-domain-smoke.sh`, `deploy/validate-production-domain-contract.sh`, `deploy/postgres-migration-preflight.sh`, `deploy/postgres-sample-target-preflight.sh`, `deploy/postgres-data-profile-guard.sh` | `docs/deployment.md`, `docs/operations/migration-rollback.md`, `docker-compose.prod.yml`, `deploy/project.env.example`, deploy templates, GitHub Actions deploy log |
+| production account audit, account count, active account, disabled account, invited account, tenant principal count, platform principal count, active Platform Admin, legacy super_admin, read-only production SQL, no PII | `.github/workflows/production-account-audit.yml`, `deploy/production-account-audit.sh` | protected `production` environment, `users`, `platform_role_assignments`, `user_roles`, `roles`, `docs/deployment.md`, GitHub Actions audit log |
 
 ## Map Maintenance Checklist
 
