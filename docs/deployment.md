@@ -97,6 +97,12 @@ admin redirect, the bounded marketing-host API compatibility proxy, and the
 marketing-origin CORS response. The active release and environment are not
 promoted until that smoke passes.
 
+The manually dispatched `.github/workflows/production-edge-audit.yml` is the
+read-only diagnostic path for a failed edge cutover. It reports bounded Caddy
+service state, registered project ownership, recent TLS/certificate journal
+lines, and current public TLS handshakes. It does not validate, upsert, or
+remove an edge route and does not read deployment environment files.
+
 ## GitHub Actions
 
 The workflow in `.github/workflows/ci-cd.yml` runs only when a release tag

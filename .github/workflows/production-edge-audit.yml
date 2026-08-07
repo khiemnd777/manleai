@@ -1,0 +1,125 @@
+name: Production edge and TLS audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type AUDIT_PRODUCTION_EDGE exactly
+        required: true
+        type: string
+      approval_reference:
+        description: Non-sensitive approved audit reference
+        required: true
+        type: string
+
+concurrency:
+  group: manleai-production-edge-audit
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  audit-production-edge:
+    name: Read production edge and TLS diagnostics
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
+      - name: Validate approval and connection secrets
+        env:
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ "$CONFIRMATION" != "AUDIT_PRODUCTION_EDGE" ]; then
+            echo "::error::The production edge-audit confirmation does not match."
+            exit 1
+          fi
+          if [[ ! "$APPROVAL_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,159}$ ]]; then
+            echo "::error::The approval reference has an unsafe shape."
+            exit 1
+          fi
+          for key in REMOTE_USER SERVER_IP SSH_PRIVATE_KEY; do
+            if [ -z "${!key:-}" ]; then
+              echo "::error::Missing GitHub secret: ${key}"
+              exit 1
+            fi
+          done
+
+      - name: Configure deployment SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+
+      - name: Audit production edge and TLS
+        env:
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+        run: |
+          set -euo pipefail
+          ssh \
+            -i "$HOME/.ssh/id_ed25519" \
+            -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=15 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=5 \
+            "$REMOTE_USER@$SERVER_IP" \
+            bash -s <<'REMOTE'
+          set -uo pipefail
+
+          echo "== Caddy service state =="
+          systemctl show caddy \
+            --property=ActiveState \
+            --property=SubState \
+            --property=ExecMainStatus \
+            --no-pager || true
+
+          echo "== Registered project edge ownership =="
+          sudo -n project-edgectl list || true
+
+          echo "== Recent Caddy service status =="
+          systemctl status caddy --no-pager --lines=200 || true
+
+          echo "== Recent Caddy TLS and certificate journal =="
+          journalctl \
+            --unit caddy \
+            --since "-6 hours" \
+            --no-pager \
+            --lines=500 2>&1 \
+            | grep -Eai 'platform\.knasoftware\.com|tls|acme|certificate|challenge|issuer|error' \
+            | tail -n 300 || true
+
+          echo "== Current public TLS handshakes =="
+          for domain in \
+            ai.knasoftware.com \
+            platform.knasoftware.com \
+            salon.knasoftware.com \
+            pos.knasoftware.com; do
+            printf '%s: ' "$domain"
+            curl \
+              --silent \
+              --show-error \
+              --output /dev/null \
+              --connect-timeout 8 \
+              --max-time 15 \
+              --write-out 'http=%{http_code} tls_verify=%{ssl_verify_result}\n' \
+              "https://$domain/" || true
+          done
+          REMOTE
+
+          printf 'approval_reference=%s\n' "$APPROVAL_REFERENCE"
+          printf 'approved_by=%s\n' "${{ github.actor }}"
+
+      - name: Remove deployment SSH key
+        if: ${{ always() }}
+        run: rm -f "$HOME/.ssh/id_ed25519"

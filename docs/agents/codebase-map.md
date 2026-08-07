@@ -170,6 +170,8 @@ triage keyword table.
 ## Production Runtime And Release
 
 - Release workflow: `.github/workflows/ci-cd.yml`.
+- Read-only production edge/TLS diagnosis:
+  `.github/workflows/production-edge-audit.yml`.
 - Release env/edge cutover contract: the workflow stages candidate
   `project.env` inside the release directory, retains the exact previous env
   and Compose file for image rollback, renders the previous project edge route
