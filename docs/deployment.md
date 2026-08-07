@@ -58,7 +58,12 @@ sudo -n project-edgectl upsert manleai <route-file> <manifest-file>
 
 `upsert` runs only after the ManleAI API loopback healthcheck succeeds. It can
 change only the ManleAI route and manifest; existing project route files remain
-owned by their registered projects.
+owned by their registered projects. After `upsert`,
+`deploy/production-domain-smoke.sh --legacy` retries the current public host
+contract: HTTPS/API health plus nonce CSP on the current admin, salon, and POS
+surfaces. The script's separate four-host mode is reserved for the later
+reviewed Platform/marketing domain cutover. The active release and environment
+are not promoted until the selected smoke contract passes.
 
 ## GitHub Actions
 
@@ -83,7 +88,8 @@ jobs to pass and remain tag-only.
 
 The workflow then builds and publishes the five application images to GitHub
 Container Registry (GHCR) with that immutable release tag. The VPS receives
-the Compose/Caddy deployment bundle, `project.env`, image tag metadata, and—
+the Compose/Caddy deployment bundle, a release-scoped candidate `project.env`,
+image tag metadata, and—
 only for the protected `sample_test` profile—a temporary mode-`600` sample
 credential file. It logs into GHCR with the job's ephemeral `GITHUB_TOKEN`,
 pulls the tagged images, logs out, and starts the stack without compiling
@@ -102,11 +108,16 @@ keepalives during long-running work. Before replacing containers, the release
 requires an exact tag-specific declaration that the previous image is
 compatible with the candidate forward schema, takes and validates a private
 pre-deploy PostgreSQL backup, and tags the currently running application images
-locally. If the API healthcheck or edge-gateway validation/reload fails, it may
-restore those images only under that compatibility declaration and keeps the
+locally. The candidate environment remains inside its release directory; the
+previous release directory retains the exact active env and Compose file used
+for rollback. If API health, data-profile, edge validation/reload, or public
+domain smoke fails, the workflow restores the previous project edge route and
+those previous images with the previous env/Compose boundary, while keeping the
 previous `/opt/manleai/current` release active. Image rollback does not restore
-the database; PostgreSQL remains at its forward schema. Only after both checks
-succeed does the workflow move `/opt/manleai/current` to the new release:
+the database; PostgreSQL remains at its forward schema. Only after edge upsert
+and public smoke succeed does the workflow promote the active `project.env`
+and `/opt/manleai/current` release with compensating rollback if either
+promotion step fails:
 
 ```bash
 docker login ghcr.io

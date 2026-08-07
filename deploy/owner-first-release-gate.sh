@@ -230,6 +230,46 @@ run_security_contract() {
   run_go_packages_isolated security "${SECURITY_CONTRACT_PACKAGES[@]}"
 }
 
+workflow_marker_line() {
+  local workflow_file="$1"
+  local marker="$2"
+  awk -v marker="$marker" 'index($0, marker) { print NR; exit }' "$workflow_file"
+}
+
+validate_deployment_workflow_contract() {
+  local workflow_file="$repo_root/.github/workflows/ci-cd.yml"
+  local marker line_number upsert_line smoke_line env_promotion_line current_promotion_line
+  [ -f "$workflow_file" ] || fail "CI/CD workflow is missing"
+  [ -f "$script_dir/production-domain-smoke.sh" ] || fail "production domain smoke script is missing"
+
+  if grep -Fq 'mv "$DEPLOY_PATH/project.env.tmp" "$DEPLOY_PATH/project.env"' "$workflow_file"; then
+    fail "CI/CD workflow promotes project.env before candidate verification"
+  fi
+
+  for marker in \
+    'mv "$PROJECT_ENV_FILE" "$candidate_env"' \
+    '--env-file "$candidate_env"' \
+    '--env-file "$previous_env"' \
+    '-f "$previous_compose"' \
+    'restore_previous_edge' \
+    'bash "$release_dir/deploy/production-domain-smoke.sh"' \
+    'mv -Tf "$promoted_env" "$active_env"' \
+    'mv -Tf "$promoted_current" "$DEPLOY_PATH/current"'; do
+    grep -Fq -- "$marker" "$workflow_file" || fail "CI/CD workflow is missing deployment contract marker: $marker"
+  done
+
+  upsert_line="$(workflow_marker_line "$workflow_file" 'if ! sudo -n project-edgectl upsert manleai "$tmp_caddy" "$tmp_manifest"')"
+  smoke_line="$(workflow_marker_line "$workflow_file" 'if ! bash "$release_dir/deploy/production-domain-smoke.sh"')"
+  env_promotion_line="$(workflow_marker_line "$workflow_file" 'mv -Tf "$promoted_env" "$active_env"')"
+  current_promotion_line="$(workflow_marker_line "$workflow_file" 'mv -Tf "$promoted_current" "$DEPLOY_PATH/current"')"
+  for line_number in "$upsert_line" "$smoke_line" "$env_promotion_line" "$current_promotion_line"; do
+    [[ "$line_number" =~ ^[0-9]+$ ]] || fail "CI/CD workflow deployment contract ordering could not be resolved"
+  done
+  [ "$upsert_line" -lt "$smoke_line" ] || fail "public smoke must run after edge upsert"
+  [ "$smoke_line" -lt "$env_promotion_line" ] || fail "active project.env must be promoted after public smoke"
+  [ "$env_promotion_line" -lt "$current_promotion_line" ] || fail "current release promotion must follow project.env promotion"
+}
+
 run_self_test() {
   local clone_database
   validate_manifest_paths
@@ -238,7 +278,9 @@ run_self_test() {
   bash -n "$script_dir/postgres-migration-preflight.sh"
   bash -n "$script_dir/postgres-sample-target-preflight.sh"
   bash -n "$script_dir/postgres-data-profile-guard.sh"
+  bash -n "$script_dir/production-domain-smoke.sh"
   bash -n "$manifest"
+  validate_deployment_workflow_contract
   clone_database="$(build_clone_database_name "manleai_phase10_release_gate_database_with_a_long_name" "integration" "19" "12345")"
   [[ "$clone_database" == *release_gate* ]] || fail "clone database self-test lost the release_gate marker"
   if (
