@@ -94,8 +94,10 @@ owned by their registered projects. After `upsert`,
 `deploy/production-domain-smoke.sh` retries the exact public host contract:
 HTTPS/API health, nonce CSP on every web surface, the marketing-to-Platform
 admin redirect, the bounded marketing-host API compatibility proxy, and the
-marketing-origin CORS response. The active release and environment are not
-promoted until that smoke passes.
+marketing-origin CORS response. The salon host root preserves its existing
+catalog-only behavior and may return a CSP-protected `200` or `404`; canonical
+salon pages remain under `/s/[slug]`. Each retry reports the exact failed probe.
+The active release and environment are not promoted until that smoke passes.
 
 The manually dispatched `.github/workflows/production-edge-audit.yml` is the
 read-only diagnostic path for a failed edge cutover. It reports bounded Caddy

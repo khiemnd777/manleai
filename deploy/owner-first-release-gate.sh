@@ -245,6 +245,7 @@ validate_deployment_workflow_contract() {
   local marker line_number upsert_line smoke_line env_promotion_line current_promotion_line
   [ -f "$workflow_file" ] || fail "CI/CD workflow is missing"
   [ -f "$script_dir/production-domain-smoke.sh" ] || fail "production domain smoke script is missing"
+  [ -f "$script_dir/production-domain-smoke-test.sh" ] || fail "production domain smoke regression test is missing"
 
   if grep -Fq 'mv "$DEPLOY_PATH/project.env.tmp" "$DEPLOY_PATH/project.env"' "$workflow_file"; then
     fail "CI/CD workflow promotes project.env before candidate verification"
@@ -283,6 +284,8 @@ run_self_test() {
   bash -n "$script_dir/postgres-sample-target-preflight.sh"
   bash -n "$script_dir/postgres-data-profile-guard.sh"
   bash -n "$script_dir/production-domain-smoke.sh"
+  bash -n "$script_dir/production-domain-smoke-test.sh"
+  bash "$script_dir/production-domain-smoke-test.sh"
   bash -n "$manifest"
   validate_deployment_workflow_contract
   clone_database="$(build_clone_database_name "manleai_phase10_release_gate_database_with_a_long_name" "integration" "19" "12345")"

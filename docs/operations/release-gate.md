@@ -21,7 +21,8 @@ silently remove an entire contract area. Missing declared packages, test files,
 web applications, package manifests, or lockfiles fail the gate.
 The self-test also parses the local restart, migration checksum preflight,
 pre-live sample-target preflight, and post-migration data-profile guard scripts;
-checks the public domain smoke script; and rejects a CI/CD workflow that eagerly
+syntax-checks and executes the isolated public-domain smoke regression test;
+and rejects a CI/CD workflow that eagerly
 promotes candidate `project.env`, loses the previous env/Compose rollback
 boundary, or promotes env/current before edge upsert and public smoke. Missing,
 reordered, or syntactically invalid deployment guards fail before tests or

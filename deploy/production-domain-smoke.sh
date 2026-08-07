@@ -24,6 +24,7 @@ else
 fi
 attempt_limit="${PRODUCTION_DOMAIN_SMOKE_ATTEMPTS:-30}"
 retry_seconds="${PRODUCTION_DOMAIN_SMOKE_RETRY_SECONDS:-2}"
+current_probe="not started"
 
 if ! [[ "$attempt_limit" =~ ^[1-9][0-9]*$ ]] || [ "$attempt_limit" -gt 60 ]; then
   echo "Production domain smoke attempts must be an integer from 1 through 60." >&2
@@ -49,12 +50,13 @@ cleanup() {
 trap cleanup EXIT
 
 last_http_status() {
-  awk '/^HTTP\// { status=$2 } END { print status }' "$1"
+  awk '/^HTTP\// { status=$2 } END { gsub("\r", "", status); print status }' "$1"
 }
 
 last_header_value() {
   local header_name="$1"
-  awk -v target="${header_name,,}" '
+  awk -v target="$header_name" '
+    BEGIN { target=tolower(target) }
     index($0, ":") {
       name=substr($0, 1, index($0, ":") - 1)
       gsub("\r", "", name)
@@ -71,22 +73,22 @@ last_header_value() {
 probe_domains() {
   local status location content_type
 
+  current_probe="platform API health"
   curl -fsS --connect-timeout 8 --max-time 20 -o /dev/null "https://${admin_domain}/healthz" || return 1
 
+  current_probe="platform login CSP"
   : > "$headers_file"
   curl -fsS --connect-timeout 8 --max-time 20 -D "$headers_file" -o /dev/null "https://${admin_domain}/login" || return 1
   grep -Eiq '^content-security-policy:' "$headers_file" || return 1
 
+  current_probe="salon landing root"
   : > "$headers_file"
   curl -sS --connect-timeout 8 --max-time 20 -D "$headers_file" -o /dev/null "https://${salon_domain}/" || return 1
   status="$(last_http_status "$headers_file")"
-  if [ "$smoke_mode" = "domain_cutover" ]; then
-    [ "$status" = "200" ] || return 1
-  else
-    [ "$status" = "200" ] || [ "$status" = "404" ] || return 1
-  fi
+  [ "$status" = "200" ] || [ "$status" = "404" ] || return 1
   grep -Eiq '^content-security-policy:' "$headers_file" || return 1
 
+  current_probe="POS root CSP"
   : > "$headers_file"
   curl -fsSL --connect-timeout 8 --max-time 20 --max-redirs 5 -D "$headers_file" -o /dev/null "https://${pos_domain}/" || return 1
   grep -Eiq '^content-security-policy:' "$headers_file" || return 1
@@ -95,10 +97,12 @@ probe_domains() {
     return 0
   fi
 
+  current_probe="marketing root CSP"
   : > "$headers_file"
   curl -fsS --connect-timeout 8 --max-time 20 -D "$headers_file" -o /dev/null "https://${marketing_domain}/" || return 1
   grep -Eiq '^content-security-policy:' "$headers_file" || return 1
 
+  current_probe="marketing admin redirect"
   : > "$headers_file"
   curl -sS --connect-timeout 8 --max-time 20 -D "$headers_file" -o /dev/null "https://${marketing_domain}/login" || return 1
   status="$(last_http_status "$headers_file")"
@@ -106,6 +110,7 @@ probe_domains() {
   [ "$status" = "308" ] || return 1
   [ "$location" = "https://${admin_domain}/login" ] || return 1
 
+  current_probe="marketing API compatibility"
   : > "$headers_file"
   curl -sS --connect-timeout 8 --max-time 20 -D "$headers_file" -o /dev/null "https://${marketing_domain}/api/public/salons/domain-smoke-nonexistent" || return 1
   status="$(last_http_status "$headers_file")"
@@ -113,6 +118,7 @@ probe_domains() {
   [ "$status" = "404" ] || return 1
   [[ "$content_type" == application/json* ]] || return 1
 
+  current_probe="marketing-origin CORS"
   : > "$cors_headers_file"
   curl -fsS --connect-timeout 8 --max-time 20 \
     -X OPTIONS \
@@ -131,6 +137,7 @@ for ((attempt = 1; attempt <= attempt_limit; attempt++)); do
     echo "Production domain smoke passed for the ${smoke_mode} host contract."
     exit 0
   fi
+  echo "Production domain smoke attempt ${attempt}/${attempt_limit} failed at ${current_probe}." >&2
   if [ "$attempt" -lt "$attempt_limit" ]; then
     sleep "$retry_seconds"
   fi
