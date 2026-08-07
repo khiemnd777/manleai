@@ -356,6 +356,8 @@ jobs:
           set -euo pipefail
           env_file="$RUNNER_TEMP/project.env"
           images_file="$RUNNER_TEMP/manleai-images.env"
+          project_env_remote="/tmp/manleai-project-$RELEASE_ID.env"
+          images_env_remote="/tmp/manleai-images-$RELEASE_ID.env"
           ghcr_token_file="$RUNNER_TEMP/manleai-ghcr-token"
           ghcr_token_remote="/tmp/manleai-ghcr-token-$RELEASE_ID"
           sample_env_file="$RUNNER_TEMP/manleai-sample-data.env"
@@ -363,7 +365,7 @@ jobs:
           remote_credentials_uploaded=false
           cleanup_remote_credentials() {
             if [ "$remote_credentials_uploaded" = true ]; then
-              ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 "$REMOTE_USER@$SERVER_IP" "rm -f '$ghcr_token_remote' '$sample_env_remote'" || true
+              ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 "$REMOTE_USER@$SERVER_IP" "rm -f '$project_env_remote' '$images_env_remote' '$ghcr_token_remote' '$sample_env_remote'" || true
             fi
           }
           trap 'rm -f "$env_file" "$images_file" "$ghcr_token_file" "$sample_env_file"' EXIT
@@ -383,24 +385,20 @@ jobs:
           fi
 
           scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$RELEASE_ARCHIVE" "$REMOTE_USER@$SERVER_IP:/tmp/$RELEASE_NAME"
-          scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$env_file" "$REMOTE_USER@$SERVER_IP:/tmp/manleai-project.env"
-          scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$images_file" "$REMOTE_USER@$SERVER_IP:/tmp/manleai-images.env"
-          scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$ghcr_token_file" "$REMOTE_USER@$SERVER_IP:$ghcr_token_remote"
           remote_credentials_uploaded=true
+          scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$env_file" "$REMOTE_USER@$SERVER_IP:$project_env_remote"
+          scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$images_file" "$REMOTE_USER@$SERVER_IP:$images_env_remote"
+          scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$ghcr_token_file" "$REMOTE_USER@$SERVER_IP:$ghcr_token_remote"
           if [ "$DEPLOY_DATA_PROFILE" = "sample_test" ]; then
             scp -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$sample_env_file" "$REMOTE_USER@$SERVER_IP:$sample_env_remote"
           fi
 
-          ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' DEPLOY_DATA_PROFILE='$DEPLOY_DATA_PROFILE' GHCR_TOKEN_FILE='$ghcr_token_remote' SAMPLE_DATA_ENV_FILE='$sample_env_remote' bash -s" <<'REMOTE'
+          ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_DATA_PROFILE='$DEPLOY_DATA_PROFILE' PROJECT_ENV_FILE='$project_env_remote' IMAGES_ENV_FILE='$images_env_remote' GHCR_TOKEN_FILE='$ghcr_token_remote' SAMPLE_DATA_ENV_FILE='$sample_env_remote' bash -s" <<'REMOTE'
           set -euo pipefail
-          mkdir -p "$DEPLOY_PATH"
-          mv /tmp/manleai-project.env "$DEPLOY_PATH/project.env.tmp"
-          chmod 600 "$DEPLOY_PATH/project.env.tmp"
-          mv "$DEPLOY_PATH/project.env.tmp" "$DEPLOY_PATH/project.env"
-          mv /tmp/manleai-images.env "$DEPLOY_PATH/images.env.tmp"
-          chmod 600 "$DEPLOY_PATH/images.env.tmp"
+          test -s "$PROJECT_ENV_FILE"
+          test -s "$IMAGES_ENV_FILE"
           test -s "$GHCR_TOKEN_FILE"
-          chmod 600 "$GHCR_TOKEN_FILE"
+          chmod 600 "$PROJECT_ENV_FILE" "$IMAGES_ENV_FILE" "$GHCR_TOKEN_FILE"
           if [ "$DEPLOY_DATA_PROFILE" = "sample_test" ]; then
             test -s "$SAMPLE_DATA_ENV_FILE"
             chmod 600 "$SAMPLE_DATA_ENV_FILE"
@@ -425,6 +423,8 @@ jobs:
           SAMPLE_TEST_RESET_RELEASE_TAG: ${{ vars.SAMPLE_TEST_RESET_RELEASE_TAG }}
         run: |
           set -euo pipefail
+          project_env_remote="/tmp/manleai-project-$RELEASE_ID.env"
+          images_env_remote="/tmp/manleai-images-$RELEASE_ID.env"
           ghcr_token_remote="/tmp/manleai-ghcr-token-$RELEASE_ID"
           sample_env_remote="/tmp/manleai-sample-data-$RELEASE_ID.env"
 
@@ -438,9 +438,13 @@ jobs:
               -o ConnectTimeout=15 \
               -o ServerAliveInterval=30 \
               -o ServerAliveCountMax=2 \
-              "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' RELEASE_ID='$RELEASE_ID' GHCR_TOKEN_FILE='$ghcr_token_remote' SAMPLE_DATA_ENV_FILE='$sample_env_remote' bash -s" <<'REMOTE'
+              "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' RELEASE_ID='$RELEASE_ID' PROJECT_ENV_FILE='$project_env_remote' IMAGES_ENV_FILE='$images_env_remote' GHCR_TOKEN_FILE='$ghcr_token_remote' SAMPLE_DATA_ENV_FILE='$sample_env_remote' bash -s" <<'REMOTE'
             set +e
             release_dir="$DEPLOY_PATH/releases/$RELEASE_ID"
+            diagnostic_env="$release_dir/project.env"
+            if [ ! -f "$diagnostic_env" ]; then
+              diagnostic_env="$DEPLOY_PATH/project.env"
+            fi
 
             echo "== Memory =="
             free -h || true
@@ -449,34 +453,64 @@ jobs:
             echo "== Docker disk usage =="
             docker system df || true
 
-            if [ -f "$release_dir/docker-compose.prod.yml" ]; then
+            if [ -f "$release_dir/docker-compose.prod.yml" ] && [ -f "$diagnostic_env" ]; then
               cd "$release_dir"
               echo "== Compose status =="
-              docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai ps || true
+              docker compose --env-file "$diagnostic_env" -f docker-compose.prod.yml -p manleai ps || true
               echo "== Application logs =="
-              docker compose --env-file "$DEPLOY_PATH/project.env" -f docker-compose.prod.yml -p manleai logs --tail=120 api worker frontend landing pos-calendar || true
+              docker compose --env-file "$diagnostic_env" -f docker-compose.prod.yml -p manleai logs --tail=120 api worker frontend landing pos-calendar || true
             fi
-            rm -f "$GHCR_TOKEN_FILE" "$SAMPLE_DATA_ENV_FILE" || true
+            rm -f "$PROJECT_ENV_FILE" "$IMAGES_ENV_FILE" "$GHCR_TOKEN_FILE" "$SAMPLE_DATA_ENV_FILE" || true
           REMOTE
             echo "::endgroup::"
             exit "$status"
           }
 
           trap collect_deploy_diagnostics ERR
-          ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' DEPLOY_DATA_PROFILE='$DEPLOY_DATA_PROFILE' RELEASE_ID='$RELEASE_ID' RELEASE_NAME='$RELEASE_NAME' RELEASE_TAG='$IMAGE_TAG' GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN_FILE='$ghcr_token_remote' SAMPLE_DATA_ENV_FILE='$sample_env_remote' SAMPLE_TEST_RESET_RELEASE_TAG='$SAMPLE_TEST_RESET_RELEASE_TAG' MIGRATION_COMPATIBILITY_APPROVER='$MIGRATION_COMPATIBILITY_APPROVER' MIGRATION_COMPATIBILITY_RELEASE_TAG='$MIGRATION_COMPATIBILITY_RELEASE_TAG' POSTGRES_BACKUP_STORAGE_APPROVAL='$POSTGRES_BACKUP_STORAGE_APPROVAL' PREVIOUS_IMAGE_DB_COMPATIBLE='$PREVIOUS_IMAGE_DB_COMPATIBLE' bash -c 'set -euo pipefail; umask 077; buffered_script=\$(mktemp); cleanup() { rm -f \"\$buffered_script\"; }; trap cleanup EXIT; cat > \"\$buffered_script\"; bash \"\$buffered_script\"'" <<'REMOTE'
+          ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' DEPLOY_DATA_PROFILE='$DEPLOY_DATA_PROFILE' RELEASE_ID='$RELEASE_ID' RELEASE_NAME='$RELEASE_NAME' RELEASE_TAG='$IMAGE_TAG' GHCR_USERNAME='$GHCR_USERNAME' PROJECT_ENV_FILE='$project_env_remote' IMAGES_ENV_FILE='$images_env_remote' GHCR_TOKEN_FILE='$ghcr_token_remote' SAMPLE_DATA_ENV_FILE='$sample_env_remote' SAMPLE_TEST_RESET_RELEASE_TAG='$SAMPLE_TEST_RESET_RELEASE_TAG' MIGRATION_COMPATIBILITY_APPROVER='$MIGRATION_COMPATIBILITY_APPROVER' MIGRATION_COMPATIBILITY_RELEASE_TAG='$MIGRATION_COMPATIBILITY_RELEASE_TAG' POSTGRES_BACKUP_STORAGE_APPROVAL='$POSTGRES_BACKUP_STORAGE_APPROVAL' PREVIOUS_IMAGE_DB_COMPATIBLE='$PREVIOUS_IMAGE_DB_COMPATIBLE' bash -c 'set -euo pipefail; umask 077; buffered_script=\$(mktemp); cleanup() { rm -f \"\$buffered_script\"; }; trap cleanup EXIT; cat > \"\$buffered_script\"; bash \"\$buffered_script\"'" <<'REMOTE'
           set -euo pipefail
 
           release_dir="$DEPLOY_PATH/releases/$RELEASE_ID"
           archive="/tmp/$RELEASE_NAME"
+          active_env="$DEPLOY_PATH/project.env"
+          candidate_env="$release_dir/project.env"
+          candidate_images="$release_dir/images.env"
+          previous_release_dir=""
+          previous_env=""
+          previous_compose=""
           tmp_caddy=""
           tmp_manifest=""
+          previous_caddy=""
+          previous_manifest=""
+          promoted_env="$DEPLOY_PATH/project.env.next-$RELEASE_ID"
+          promoted_current="$DEPLOY_PATH/current.next-$RELEASE_ID"
           cleanup_release_credentials() {
             docker logout ghcr.io >/dev/null 2>&1 || true
-            rm -f "$GHCR_TOKEN_FILE" "$SAMPLE_DATA_ENV_FILE" "$tmp_caddy" "$tmp_manifest"
+            rm -f "$PROJECT_ENV_FILE" "$IMAGES_ENV_FILE" "$GHCR_TOKEN_FILE" "$SAMPLE_DATA_ENV_FILE" \
+              "$tmp_caddy" "$tmp_manifest" "$previous_caddy" "$previous_manifest" \
+              "$promoted_env" "$promoted_current"
           }
           trap cleanup_release_credentials EXIT
           mkdir -p "$release_dir"
           tar -xzf "$archive" -C "$release_dir"
+          if [ ! -s "$PROJECT_ENV_FILE" ] || [ ! -s "$IMAGES_ENV_FILE" ]; then
+            echo "::error::Release environment or image metadata is missing."
+            exit 1
+          fi
+          mv "$PROJECT_ENV_FILE" "$candidate_env"
+          mv "$IMAGES_ENV_FILE" "$candidate_images"
+          chmod 600 "$candidate_env" "$candidate_images"
+
+          if [ -e "$DEPLOY_PATH/current" ]; then
+            previous_release_dir="$(readlink -f "$DEPLOY_PATH/current")"
+            if [ ! -d "$previous_release_dir" ] || [ ! -f "$previous_release_dir/docker-compose.prod.yml" ] || [ ! -f "$active_env" ]; then
+              echo "::error::The active release does not have an exact env and Compose rollback boundary."
+              exit 1
+            fi
+            previous_env="$previous_release_dir/project.env"
+            previous_compose="$previous_release_dir/docker-compose.prod.yml"
+            install -m 600 "$active_env" "$previous_env"
+          fi
           if [ "$MIGRATION_COMPATIBILITY_RELEASE_TAG" != "$RELEASE_TAG" ]; then
             echo "::error::The database compatibility declaration does not match this release."
             exit 1
@@ -502,12 +536,6 @@ jobs:
               exit 1
               ;;
           esac
-          if [ ! -f "$DEPLOY_PATH/images.env.tmp" ]; then
-            echo "::error::Release image metadata is missing."
-            exit 1
-          fi
-          mv "$DEPLOY_PATH/images.env.tmp" "$release_dir/images.env"
-          chmod 600 "$release_dir/images.env"
           if [ ! -s "$GHCR_TOKEN_FILE" ]; then
             echo "::error::GHCR token file is missing."
             exit 1
@@ -515,8 +543,8 @@ jobs:
 
           compose() {
             docker compose \
-              --env-file "$DEPLOY_PATH/project.env" \
-              --env-file "$release_dir/images.env" \
+              --env-file "$candidate_env" \
+              --env-file "$candidate_images" \
               -f "$release_dir/docker-compose.prod.yml" \
               -p manleai "$@"
           }
@@ -533,7 +561,7 @@ jobs:
           chmod 600 "$compatibility_record"
 
           set -a
-          . "$DEPLOY_PATH/project.env"
+          . "$candidate_env"
           set +a
           : "${POSTGRES_DB:?POSTGRES_DB is required for the pre-deploy backup}"
           : "${POSTGRES_USER:?POSTGRES_USER is required for the pre-deploy backup}"
@@ -554,7 +582,7 @@ jobs:
           if [ -n "$postgres_container_running" ]; then
             set +e
             migration_preflight_output="$(bash "$release_dir/deploy/postgres-migration-preflight.sh" \
-              --env-file "$DEPLOY_PATH/project.env" \
+              --env-file "$candidate_env" \
               --compose-file "$release_dir/docker-compose.prod.yml" \
               --project manleai \
               --migrations-dir "$release_dir/backend/migrations" 2>&1)"
@@ -579,7 +607,7 @@ jobs:
             if [ "$DEPLOY_DATA_PROFILE" = "sample_test" ]; then
               set +e
               sample_target_output="$(bash "$release_dir/deploy/postgres-sample-target-preflight.sh" \
-                --env-file "$DEPLOY_PATH/project.env" \
+                --env-file "$candidate_env" \
                 --compose-file "$release_dir/docker-compose.prod.yml" \
                 --project manleai 2>&1)"
               sample_target_status=$?
@@ -601,7 +629,7 @@ jobs:
           backup_record="$release_dir/predeploy-backup.record"
           if [ -n "$postgres_container_running" ]; then
             backup_result="$(bash "$release_dir/deploy/postgres-backup.sh" \
-              --env-file "$DEPLOY_PATH/project.env" \
+              --env-file "$candidate_env" \
               --compose-file "$release_dir/docker-compose.prod.yml" \
               --project manleai \
               --source-db "$POSTGRES_DB" \
@@ -624,13 +652,17 @@ jobs:
               echo "::error::Refusing image rollback because previous-image database compatibility was not declared."
               return
             fi
+            if [ -z "$previous_env" ] || [ -z "$previous_compose" ] || [ ! -f "$previous_env" ] || [ ! -f "$previous_compose" ]; then
+              echo "::error::The exact previous env and Compose files are unavailable for image rollback."
+              return 1
+            fi
             echo "Restoring the previous application images against the forward-compatible database schema."
             echo "This image rollback does not restore or delete any database."
             docker compose \
-              --env-file "$DEPLOY_PATH/project.env" \
+              --env-file "$previous_env" \
               --env-file "$rollback_images" \
-              -f "$release_dir/docker-compose.prod.yml" \
-              -p manleai up -d --no-build --remove-orphans || true
+              -f "$previous_compose" \
+              -p manleai up -d --no-build --remove-orphans
           }
 
           capture_rollback_images() {
@@ -654,7 +686,7 @@ jobs:
 
           pull_release_images() {
             set -a
-            . "$release_dir/images.env"
+            . "$candidate_images"
             set +a
             for service in api worker frontend landing pos-calendar; do
               image="$IMAGE_REPOSITORY/manleai-$service:$IMAGE_TAG"
@@ -693,7 +725,7 @@ jobs:
           compose ps
 
           set -a
-          . "$DEPLOY_PATH/project.env"
+          . "$candidate_env"
           set +a
 
           ADMIN_DOMAIN="${ADMIN_DOMAIN:-platform.knasoftware.com}"
@@ -748,7 +780,7 @@ jobs:
 
           if ! bash "$release_dir/deploy/postgres-data-profile-guard.sh" \
               --profile "$DEPLOY_DATA_PROFILE" \
-              --env-file "$DEPLOY_PATH/project.env" \
+              --env-file "$candidate_env" \
               --compose-file "$release_dir/docker-compose.prod.yml" \
               --project manleai; then
             echo "::error::The deployed database does not satisfy the selected data profile."
@@ -756,29 +788,76 @@ jobs:
             exit 1
           fi
 
+          render_edge_bundle() {
+            local env_file="$1"
+            local template_dir="$2"
+            local caddy_output="$3"
+            local manifest_output="$4"
+            (
+              set -a
+              . "$env_file"
+              set +a
+              ADMIN_DOMAIN="${ADMIN_DOMAIN:-platform.knasoftware.com}"
+              MARKETING_DOMAIN="${MARKETING_DOMAIN:-ai.knasoftware.com}"
+              LANDING_DOMAIN="${LANDING_DOMAIN:-salon.knasoftware.com}"
+              POS_DOMAIN="${POS_DOMAIN:-pos.knasoftware.com}"
+              API_PORT="${API_PORT:-18089}"
+              FRONTEND_PORT="${FRONTEND_PORT:-13088}"
+              LANDING_PORT="${LANDING_PORT:-13090}"
+              POS_CALENDAR_PORT="${POS_CALENDAR_PORT:-13091}"
+              sed \
+                -e "s#{{ADMIN_DOMAIN}}#${ADMIN_DOMAIN}#g" \
+                -e "s#{{MARKETING_DOMAIN}}#${MARKETING_DOMAIN}#g" \
+                -e "s#{{LANDING_DOMAIN}}#${LANDING_DOMAIN}#g" \
+                -e "s#{{POS_DOMAIN}}#${POS_DOMAIN}#g" \
+                -e "s#{{API_PORT}}#${API_PORT}#g" \
+                -e "s#{{FRONTEND_PORT}}#${FRONTEND_PORT}#g" \
+                -e "s#{{LANDING_PORT}}#${LANDING_PORT}#g" \
+                -e "s#{{POS_CALENDAR_PORT}}#${POS_CALENDAR_PORT}#g" \
+                "$template_dir/manleai.caddy.template" > "$caddy_output"
+              sed \
+                -e "s#{{ADMIN_DOMAIN}}#${ADMIN_DOMAIN}#g" \
+                -e "s#{{MARKETING_DOMAIN}}#${MARKETING_DOMAIN}#g" \
+                -e "s#{{LANDING_DOMAIN}}#${LANDING_DOMAIN}#g" \
+                -e "s#{{POS_DOMAIN}}#${POS_DOMAIN}#g" \
+                -e "s#{{API_PORT}}#${API_PORT}#g" \
+                -e "s#{{FRONTEND_PORT}}#${FRONTEND_PORT}#g" \
+                -e "s#{{LANDING_PORT}}#${LANDING_PORT}#g" \
+                -e "s#{{POS_CALENDAR_PORT}}#${POS_CALENDAR_PORT}#g" \
+                "$template_dir/manleai.edge-manifest.template" > "$manifest_output"
+            )
+          }
+
+          restore_previous_edge() {
+            if [ -z "$previous_caddy" ] || [ -z "$previous_manifest" ]; then
+              echo "::error::The exact previous edge route is unavailable for rollback."
+              return 1
+            fi
+            sudo -n project-edgectl upsert manleai "$previous_caddy" "$previous_manifest"
+          }
+
+          rollback_after_edge_cutover() {
+            local edge_status=0
+            local image_status=0
+            restore_previous_edge || edge_status=$?
+            rollback_release || image_status=$?
+            [ "$edge_status" -eq 0 ] && [ "$image_status" -eq 0 ]
+          }
+
           tmp_caddy="$(mktemp)"
           tmp_manifest="$(mktemp)"
-          sed \
-            -e "s#{{ADMIN_DOMAIN}}#${ADMIN_DOMAIN}#g" \
-            -e "s#{{MARKETING_DOMAIN}}#${MARKETING_DOMAIN}#g" \
-            -e "s#{{LANDING_DOMAIN}}#${LANDING_DOMAIN}#g" \
-            -e "s#{{POS_DOMAIN}}#${POS_DOMAIN}#g" \
-            -e "s#{{API_PORT}}#${API_PORT}#g" \
-            -e "s#{{FRONTEND_PORT}}#${FRONTEND_PORT}#g" \
-            -e "s#{{LANDING_PORT}}#${LANDING_PORT}#g" \
-            -e "s#{{POS_CALENDAR_PORT}}#${POS_CALENDAR_PORT}#g" \
-            "$release_dir/deploy/manleai.caddy.template" > "$tmp_caddy"
+          render_edge_bundle "$candidate_env" "$release_dir/deploy" "$tmp_caddy" "$tmp_manifest"
 
-          sed \
-            -e "s#{{ADMIN_DOMAIN}}#${ADMIN_DOMAIN}#g" \
-            -e "s#{{MARKETING_DOMAIN}}#${MARKETING_DOMAIN}#g" \
-            -e "s#{{LANDING_DOMAIN}}#${LANDING_DOMAIN}#g" \
-            -e "s#{{POS_DOMAIN}}#${POS_DOMAIN}#g" \
-            -e "s#{{API_PORT}}#${API_PORT}#g" \
-            -e "s#{{FRONTEND_PORT}}#${FRONTEND_PORT}#g" \
-            -e "s#{{LANDING_PORT}}#${LANDING_PORT}#g" \
-            -e "s#{{POS_CALENDAR_PORT}}#${POS_CALENDAR_PORT}#g" \
-            "$release_dir/deploy/manleai.edge-manifest.template" > "$tmp_manifest"
+          if [ -n "$previous_release_dir" ]; then
+            if [ ! -f "$previous_release_dir/deploy/manleai.caddy.template" ] || [ ! -f "$previous_release_dir/deploy/manleai.edge-manifest.template" ]; then
+              echo "::error::The previous release does not contain edge templates for rollback."
+              rollback_release
+              exit 1
+            fi
+            previous_caddy="$(mktemp)"
+            previous_manifest="$(mktemp)"
+            render_edge_bundle "$previous_env" "$previous_release_dir/deploy" "$previous_caddy" "$previous_manifest"
+          fi
 
           if ! sudo -n project-edgectl validate manleai "$tmp_caddy" "$tmp_manifest"; then
             echo "::error::Rendered ManleAI route failed project-edge validation."
@@ -787,11 +866,34 @@ jobs:
           fi
 
           if ! sudo -n project-edgectl upsert manleai "$tmp_caddy" "$tmp_manifest"; then
+            restore_previous_edge || true
             rollback_release
             echo "::error::Project-edge upsert failed; restored the prior ManleAI route and application images."
             exit 1
           fi
-          ln -sfn "$release_dir" "$DEPLOY_PATH/current"
+
+          if ! bash "$release_dir/deploy/production-domain-smoke.sh" \
+              "$ADMIN_DOMAIN" "$MARKETING_DOMAIN" "$LANDING_DOMAIN" "$POS_DOMAIN"; then
+            echo "::error::Public domain smoke failed after edge cutover."
+            rollback_after_edge_cutover || true
+            exit 1
+          fi
+
+          if ! install -m 600 "$candidate_env" "$promoted_env" || ! mv -Tf "$promoted_env" "$active_env"; then
+            echo "::error::Candidate project.env could not be promoted after public smoke."
+            rollback_after_edge_cutover || true
+            exit 1
+          fi
+
+          rm -f "$promoted_current"
+          if ! ln -s "$release_dir" "$promoted_current" || ! mv -Tf "$promoted_current" "$DEPLOY_PATH/current"; then
+            echo "::error::Candidate release could not be promoted after public smoke."
+            if [ -n "$previous_env" ]; then
+              install -m 600 "$previous_env" "$active_env" || true
+            fi
+            rollback_after_edge_cutover || true
+            exit 1
+          fi
           rm -f "$archive"
           REMOTE
           trap - ERR

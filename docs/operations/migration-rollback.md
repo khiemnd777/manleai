@@ -118,15 +118,21 @@ container is not considered empty and fails closed.
 
 - Pull the immutable tagged images.
 - Capture the currently running image IDs.
-- Start the candidate stack; the API owns migrations and the worker waits for
-  API health with `AUTO_MIGRATE=false`.
+- Stage the candidate `project.env` inside the candidate release directory;
+  preserve the active env and previous release Compose file as one rollback
+  boundary instead of overwriting global runtime configuration before checks.
+- Start the candidate stack with the candidate env; the API owns migrations and
+  the worker waits for API health with `AUTO_MIGRATE=false`.
 - Under the protected `sample_test` profile only, an incompatible ledger or
   non-sample target may be replaced after backup when
   `SAMPLE_TEST_RESET_RELEASE_TAG` exactly matches the candidate tag. The reset
   removes only the Compose-owned PostgreSQL volume and writes a release record.
   The `live` profile always fails before deletion.
-- Require API health and edge-route validation before moving the `current`
-  release symlink.
+- Require API health, data-profile validation, edge-route upsert, and bounded
+  public HTTPS/domain/CSP/CORS smoke before promoting the active env or moving
+  the `current` release symlink. A post-upsert smoke failure restores the exact
+  previous project edge route and previous images with the previous env and
+  Compose file.
 - Preserve the backup, checksum, compatibility declaration, prior image tags,
   and bounded logs for the change record.
 
