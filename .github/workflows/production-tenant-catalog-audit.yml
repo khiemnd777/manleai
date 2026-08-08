@@ -1,0 +1,147 @@
+name: Production tenant catalog audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type AUDIT_PRODUCTION_TENANT_CATALOG exactly
+        required: true
+        type: string
+      approval_reference:
+        description: Non-sensitive approved audit reference
+        required: true
+        type: string
+      tenant_id:
+        description: Exact production tenant UUID to audit
+        required: true
+        type: string
+
+concurrency:
+  group: manleai-production-tenant-catalog-audit
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  AUDIT_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  audit-production-tenant-catalog:
+    name: Read aggregate production tenant catalog state
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate approval, tenant, and connection secrets
+        env:
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          TARGET_SALON_ID: ${{ inputs.tenant_id }}
+        run: |
+          set -euo pipefail
+
+          if [ "$CONFIRMATION" != "AUDIT_PRODUCTION_TENANT_CATALOG" ]; then
+            echo "::error::The production tenant-catalog confirmation does not match."
+            exit 1
+          fi
+          if [[ ! "$APPROVAL_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,159}$ ]]; then
+            echo "::error::The approval reference has an unsafe shape."
+            exit 1
+          fi
+          if [[ ! "$TARGET_SALON_ID" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
+            echo "::error::The tenant ID must be an exact UUID."
+            exit 1
+          fi
+          for key in REMOTE_USER SERVER_IP SSH_PRIVATE_KEY; do
+            if [ -z "${!key:-}" ]; then
+              echo "::error::Missing GitHub secret: ${key}"
+              exit 1
+            fi
+          done
+
+          bash -n deploy/production-tenant-catalog-audit.sh
+
+      - name: Configure deployment SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+
+      - name: Upload read-only audit script
+        env:
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+        run: |
+          set -euo pipefail
+          scp \
+            -i "$HOME/.ssh/id_ed25519" \
+            -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=15 \
+            deploy/production-tenant-catalog-audit.sh \
+            "$REMOTE_USER@$SERVER_IP:/tmp/manleai-production-tenant-catalog-audit-$AUDIT_ID.sh"
+
+      - name: Audit production tenant catalog and Services authorization
+        env:
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          TARGET_SALON_ID: ${{ inputs.tenant_id }}
+        run: |
+          set -euo pipefail
+          ssh \
+            -i "$HOME/.ssh/id_ed25519" \
+            -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=15 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=5 \
+            "$REMOTE_USER@$SERVER_IP" \
+            "AUDIT_ID='$AUDIT_ID' TARGET_SALON_ID='$TARGET_SALON_ID' bash -s" <<'REMOTE'
+          set -euo pipefail
+          umask 077
+
+          remote_script="/tmp/manleai-production-tenant-catalog-audit-$AUDIT_ID.sh"
+          cleanup() {
+            rm -f "$remote_script"
+          }
+          trap cleanup EXIT
+
+          [[ -f "$remote_script" && ! -L "$remote_script" ]] || {
+            echo "The production tenant catalog audit script is missing." >&2
+            exit 1
+          }
+          chmod 600 "$remote_script"
+          bash "$remote_script" /opt/manleai/project.env "$TARGET_SALON_ID"
+          REMOTE
+
+          printf 'approval_reference=%s\n' "$APPROVAL_REFERENCE"
+          printf 'approved_by=%s\n' "${{ github.actor }}"
+
+      - name: Remove remote audit script
+        if: ${{ always() }}
+        env:
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+        run: |
+          set +e
+          if [ -s "$HOME/.ssh/id_ed25519" ] && [ -n "${REMOTE_USER:-}" ] && [ -n "${SERVER_IP:-}" ]; then
+            ssh \
+              -i "$HOME/.ssh/id_ed25519" \
+              -o StrictHostKeyChecking=accept-new \
+              -o ConnectTimeout=15 \
+              "$REMOTE_USER@$SERVER_IP" \
+              "rm -f '/tmp/manleai-production-tenant-catalog-audit-$AUDIT_ID.sh'"
+          fi
+
+      - name: Remove deployment SSH key
+        if: ${{ always() }}
+        run: rm -f "$HOME/.ssh/id_ed25519"

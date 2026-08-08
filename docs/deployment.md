@@ -393,6 +393,52 @@ an active `principal_scope=platform` account with an active
 `super_admin` row is reported separately and is not evidence of current
 Platform authorization.
 
+### Read-only production tenant catalog audit
+
+Use `.github/workflows/production-tenant-catalog-audit.yml` when an approved
+operator needs direct aggregate database evidence for one exact production
+tenant's canonical catalog and Platform Services authorization. The protected
+manual workflow requires the exact `AUDIT_PRODUCTION_TENANT_CATALOG`
+confirmation, a bounded non-sensitive approval reference, one UUID tenant ID,
+and the normal production SSH secrets. It uploads
+`deploy/production-tenant-catalog-audit.sh` temporarily, targets exactly one
+healthy ManleAI PostgreSQL container, and runs its fixed query with PostgreSQL
+`default_transaction_read_only=on` plus bounded statement and lock timeouts.
+
+The workflow reports whether the salon exists, its data classification,
+selected `active_pos_provider` adapter token, scheduling authority, aggregate
+service/category/alias counts, the number of services matching the selected
+provider, and aggregate `platform_admin` results for
+`app_platform_admin_capability`, `app_active_support_authorization`, and
+`app_actor_feature_access`. The selected provider token is not evidence that a
+salon-scoped integration configuration is enabled or live-verified; Platform
+Technical and the persisted integration-config/runtime status remain the
+source of truth for that claim.
+
+The audit never outputs service names or descriptions, user IDs, email
+addresses, names, phone numbers, password material, provider secrets, or
+deployment secrets. It does not create or modify tenants, catalog rows,
+authorization rows, schema, containers, services, releases, or domain routing.
+
+Run it from an authenticated GitHub CLI after the protected environment is
+ready:
+
+```bash
+gh workflow run production-tenant-catalog-audit.yml \
+  --ref main \
+  -f confirmation=AUDIT_PRODUCTION_TENANT_CATALOG \
+  -f approval_reference='<approved-audit-reference>' \
+  -f tenant_id='<production-tenant-uuid>'
+```
+
+Inspect the log for the fixed `key=value` output. A nonzero
+`services_total` with a zero `services_matching_active_provider` proves a
+catalog/provider-selection mismatch, not an empty canonical catalog. A
+Platform Admin count that passes `app_platform_admin_capability` and
+`app_actor_feature_access` but not `app_active_support_authorization` is the
+expected V76 distinction between direct Admin authority and temporary
+Platform Ops support authorization.
+
 ### V78-V80 system-tenant context rollout
 
 `V78__system_tenant_context_expand.sql` is intentionally the expand release of
