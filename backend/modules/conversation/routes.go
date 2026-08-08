@@ -54,11 +54,11 @@ func RegisterPlatformV2Routes(api fiber.Router, handler *PlatformHandler, jwtSec
 	group.Post("/calls", simulate, handler.StartV2)
 	group.Get("/calls/party-requests", read, handler.normalizedDelegate.ListPartyBookingRequests)
 	group.Patch("/calls/party-requests/:request_id/status", manage, handler.normalizedDelegate.UpdatePartyBookingRequestStatus)
-	group.Get("/calls/:session_id", read, handler.normalizedDelegate.Get)
-	group.Get("/calls/:session_id/realtime-events", read, handler.normalizedDelegate.RealtimeEvents)
-	group.Post("/calls/:session_id/archive", manage, handler.normalizedDelegate.Archive)
-	group.Post("/calls/:session_id/redact", redact, handler.normalizedDelegate.Redact)
-	group.Post("/calls/:session_id/messages", simulate, handler.MessageV2)
+	group.Get("/calls/:session_id<guid>", read, handler.normalizedDelegate.Get)
+	group.Get("/calls/:session_id<guid>/realtime-events", read, handler.normalizedDelegate.RealtimeEvents)
+	group.Post("/calls/:session_id<guid>/archive", manage, handler.normalizedDelegate.Archive)
+	group.Post("/calls/:session_id<guid>/redact", redact, handler.normalizedDelegate.Redact)
+	group.Post("/calls/:session_id<guid>/messages", simulate, handler.MessageV2)
 }
 
 func (h *PlatformHandler) guard(capability access.Capability, piiScope access.PIIScope) fiber.Handler {

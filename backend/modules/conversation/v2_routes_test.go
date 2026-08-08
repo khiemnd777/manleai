@@ -28,10 +28,15 @@ func TestPlatformV2RoutesUseCallsResource(t *testing.T) {
 	app := fiber.New()
 	RegisterPlatformV2Routes(app.Group("/api"), NewPlatformHandler(&Service{}, nil), "test-secret")
 	want := map[string]bool{
-		http.MethodGet + " /api/v2/platform/tenants/:tenant_id/calls":                false,
-		http.MethodPost + " /api/v2/platform/tenants/:tenant_id/calls":               false,
-		http.MethodGet + " /api/v2/platform/tenants/:tenant_id/calls/:session_id":    false,
-		http.MethodGet + " /api/v2/platform/tenants/:tenant_id/calls/party-requests": false,
+		http.MethodGet + " /api/v2/platform/tenants/:tenant_id/calls":                                     false,
+		http.MethodPost + " /api/v2/platform/tenants/:tenant_id/calls":                                    false,
+		http.MethodGet + " /api/v2/platform/tenants/:tenant_id/calls/party-requests":                      false,
+		http.MethodPatch + " /api/v2/platform/tenants/:tenant_id/calls/party-requests/:request_id/status": false,
+		http.MethodGet + " /api/v2/platform/tenants/:tenant_id/calls/:session_id<guid>":                   false,
+		http.MethodGet + " /api/v2/platform/tenants/:tenant_id/calls/:session_id<guid>/realtime-events":   false,
+		http.MethodPost + " /api/v2/platform/tenants/:tenant_id/calls/:session_id<guid>/archive":          false,
+		http.MethodPost + " /api/v2/platform/tenants/:tenant_id/calls/:session_id<guid>/redact":           false,
+		http.MethodPost + " /api/v2/platform/tenants/:tenant_id/calls/:session_id<guid>/messages":         false,
 	}
 	for _, route := range app.GetRoutes() {
 		key := route.Method + " " + route.Path
@@ -47,7 +52,9 @@ func TestPlatformV2RoutesUseCallsResource(t *testing.T) {
 }
 
 func TestPlatformV2CallDetailReturnsNormalizedSession(t *testing.T) {
+	const sessionID = "11111111-1111-4111-8111-111111111111"
 	store := newFakeConversationStore()
+	store.session.ID = sessionID
 	store.session.StateRevision = 7
 	store.session.Transcript = []TranscriptMessage{{ID: "message-1", Body: "Hello"}}
 	store.session.DetailWarnings = []ConversationDetailWarning{{
@@ -56,9 +63,9 @@ func TestPlatformV2CallDetailReturnsNormalizedSession(t *testing.T) {
 		Message: "Unsupported legacy transcript metadata was omitted from this projection.",
 	}}
 	app := fiber.New()
-	app.Get("/api/v2/platform/tenants/:tenant_id/calls/:session_id", NewNormalizedHandler(NewService(store, nil)).Get)
+	app.Get("/api/v2/platform/tenants/:tenant_id/calls/:session_id<guid>", NewNormalizedHandler(NewService(store, nil)).Get)
 
-	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v2/platform/tenants/salon-1/calls/session-1", nil))
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v2/platform/tenants/salon-1/calls/"+sessionID, nil))
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
@@ -76,12 +83,13 @@ func TestPlatformV2CallDetailReturnsNormalizedSession(t *testing.T) {
 }
 
 func TestPlatformV2CallDetailReturnsSafeStageError(t *testing.T) {
+	const sessionID = "22222222-2222-4222-8222-222222222222"
 	store := newFakeConversationStore()
 	store.getSessionErr = newConversationDetailReadError(conversationDetailStageTranscript, errors.New("private database detail"))
 	app := fiber.New()
-	app.Get("/api/v2/platform/tenants/:tenant_id/calls/:session_id", NewNormalizedHandler(NewService(store, nil)).Get)
+	app.Get("/api/v2/platform/tenants/:tenant_id/calls/:session_id<guid>", NewNormalizedHandler(NewService(store, nil)).Get)
 
-	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v2/platform/tenants/salon-1/calls/session-1", nil))
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v2/platform/tenants/salon-1/calls/"+sessionID, nil))
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}

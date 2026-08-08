@@ -211,7 +211,10 @@ Calls detail is independently retriable from the list/readiness aggregate.
 `GET /api/v2/platform/tenants/:tenant_id/calls/:session_id` returns optional
 safe `detail_warnings` when incompatible legacy optional JSON is omitted and
 uses section-specific sanitized error codes for actual transcript, handoff,
-party-request, or scheduling-evidence read failures.
+party-request, or scheduling-evidence read failures. Dynamic call-session
+routes accept GUID session identifiers only. The composed production router
+therefore preserves `/calls/readiness` as the static Voice-owned readiness
+resource even though Conversation routes are registered first.
 
 `backend/modules/pos` is the sole v2 owner of the rich `/services` and
 `/service-categories` workflow because it owns provider field authority,

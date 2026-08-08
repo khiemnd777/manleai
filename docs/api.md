@@ -1285,7 +1285,11 @@ permit any service/category/profile mutation.
 
 The normalized detail route
 `GET /api/v2/platform/tenants/:tenant_id/calls/:session_id` returns the session
-under `data`, including optional `detail_warnings`. Valid legacy JSON values
+under `data`, including optional `detail_warnings`. `session_id` is constrained
+to a GUID at the router boundary, so static Calls resources such as
+`GET /api/v2/platform/tenants/:tenant_id/calls/readiness` cannot be interpreted
+as conversation-session identifiers even when conversation routes are
+registered before voice routes. Valid legacy JSON values
 whose top-level shape no longer matches optional transcript metadata or party
 guest details are omitted from that projection and reported through a safe
 warning; persisted source data is not rewritten. A real child-read failure is
