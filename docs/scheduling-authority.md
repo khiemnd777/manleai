@@ -647,7 +647,13 @@ The implemented Phase 5 domain workflow is salon-scoped and explicit:
   pending-approval target-authority evidence.
 - Platform Scheduling owns the operator selection workflow through
   `frontend/features/platform/platform-scheduling-authority-control.tsx` and
-  `frontend/lib/api/scheduling-authority-switches.ts`. The legacy Tenant
+  `frontend/lib/api/scheduling-authority-switches.ts`. The same card loads the
+  independent persisted `booking_mode` through
+  `backend/modules/scheduling_behavior` and
+  `frontend/lib/api/scheduling-behavior.ts`, presents the backend-owned
+  effective behavior, and saves booking mode through its own versioned,
+  idempotent, audited command. Authority and booking-mode mutations share the
+  scheduling fence but never change each other. The legacy Tenant
   preview/commit component remains compatibility code. Integrations remains
   provider setup and never changes authority implicitly.
 
@@ -911,7 +917,10 @@ as a current “confirmed”, “has been booked”, or “has been rescheduled�
 Duplicate conversation-event replay still returns its original persisted AI
 message unchanged. Cancel replay remains terminal and current-safe.
 Platform Scheduling provides authority selection, automatic readiness,
-blockers, one explicit change action, and latest-run evidence. Internal
+blockers, one explicit authority-change action, independent AI booking-mode
+selection, the persisted effective behavior, and latest-run evidence. A
+readiness preview is labelled as a readiness check; only a committed run is
+labelled as the last authority change. Internal
 preview/commit details remain immutable backend evidence rather than two
 operator-facing buttons.
 

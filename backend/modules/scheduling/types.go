@@ -39,9 +39,62 @@ const (
 	BookingModeDisabled         BookingMode = "disabled"
 )
 
+type ConversationSchedulingBehavior string
+
+const (
+	ConversationSchedulingBehaviorOwnerReview              ConversationSchedulingBehavior = "owner_review"
+	ConversationSchedulingBehaviorAutomaticInternalCommit  ConversationSchedulingBehavior = "automatic_internal_commit"
+	ConversationSchedulingBehaviorAutomaticExternalBooking ConversationSchedulingBehavior = "automatic_external_booking"
+	ConversationSchedulingBehaviorDisabled                 ConversationSchedulingBehavior = "disabled"
+)
+
 type ConversationPolicyFence struct {
 	BookingMode         BookingMode
 	SchedulingAuthority string
+}
+
+// AllowedConversationBookingModes and ConversationBehavior keep the
+// authority × booking-mode matrix in the scheduling domain. Management APIs
+// and the conversation runtime must not maintain separate compatibility rules.
+func AllowedConversationBookingModes(authority string) ([]BookingMode, error) {
+	if !isKnownSchedulingAuthority(authority) {
+		return nil, &AuthorityNotReadyError{Authority: authority}
+	}
+	modes := []BookingMode{BookingModePendingApproval}
+	if authority != booking.SchedulingAuthorityOwnerManual {
+		modes = append(modes, BookingModeConfirmedBooking)
+	}
+	return append(modes, BookingModeDisabled), nil
+}
+
+func ConversationBehavior(policy ConversationPolicyFence) (ConversationSchedulingBehavior, error) {
+	allowed, err := AllowedConversationBookingModes(policy.SchedulingAuthority)
+	if err != nil {
+		return "", err
+	}
+	valid := false
+	for _, mode := range allowed {
+		if mode == policy.BookingMode {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return "", &AuthorityNotReadyError{Authority: policy.SchedulingAuthority}
+	}
+	switch policy.BookingMode {
+	case BookingModeDisabled:
+		return ConversationSchedulingBehaviorDisabled, nil
+	case BookingModePendingApproval:
+		return ConversationSchedulingBehaviorOwnerReview, nil
+	case BookingModeConfirmedBooking:
+		if policy.SchedulingAuthority == booking.SchedulingAuthorityManleAICalendar {
+			return ConversationSchedulingBehaviorAutomaticInternalCommit, nil
+		}
+		return ConversationSchedulingBehaviorAutomaticExternalBooking, nil
+	default:
+		return "", &AuthorityNotReadyError{Authority: policy.SchedulingAuthority}
+	}
 }
 
 // PersistedOperationOrigin distinguishes a confirming booking attempt from a

@@ -9,6 +9,16 @@ export type User = {
 
 export type SchedulingAuthority = "owner_manual" | "manleai_calendar" | "external_provider";
 export type BookingMode = "confirmed_booking" | "pending_approval" | "disabled";
+export type EffectiveSchedulingBehavior = "owner_review" | "automatic_internal_commit" | "automatic_external_booking" | "disabled";
+
+export type SchedulingBehavior = {
+  scheduling_authority: SchedulingAuthority;
+  authority_version: number;
+  booking_mode: BookingMode;
+  policy_version: number;
+  allowed_booking_modes: BookingMode[];
+  effective_behavior: EffectiveSchedulingBehavior;
+};
 
 export type Salon = {
   id: string;

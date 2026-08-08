@@ -1370,9 +1370,14 @@ Canonical workflow resources include:
 - Integrations: `/integrations`, `/integrations/:provider`, Square connection,
   sync, activation and safety verification, Twilio voice-routing verification,
   and OpenAI runtime verification
-- Scheduling: `POST /scheduling/authority/readiness`,
-  `PUT /scheduling/authority`, authority history, and
-  `/scheduling/internal-calendar/*`
+- Scheduling: `GET /scheduling/behavior`,
+  `PUT /scheduling/booking-mode`,
+  `POST /scheduling/authority/readiness`, `PUT /scheduling/authority`,
+  authority history, and `/scheduling/internal-calendar/*`. The behavior read
+  returns the persisted authority/version, booking mode/policy version,
+  backend-owned allowed modes, and effective behavior. Booking-mode mutation
+  requires `action_key` plus `expected_version`, uses `technical.write`, and
+  never changes scheduling authority.
 - Operations: `/operations/overview`, `/operations/runtime-limits`,
   `/operations/provider-events/square`, and `/operations/owner-notifications`
 - governance/history: `/access`, `/audit-events`, and

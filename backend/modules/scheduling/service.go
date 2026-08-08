@@ -375,20 +375,8 @@ func (s *Service) hydratePersistedRequestTarget(ctx context.Context, salonID str
 }
 
 func validateConversationPolicy(policy ConversationPolicyFence) error {
-	if !isKnownSchedulingAuthority(policy.SchedulingAuthority) {
-		return &AuthorityNotReadyError{Authority: policy.SchedulingAuthority}
-	}
-	switch policy.BookingMode {
-	case BookingModePendingApproval, BookingModeDisabled:
-		return nil
-	case BookingModeConfirmedBooking:
-		if policy.SchedulingAuthority == booking.SchedulingAuthorityOwnerManual {
-			return &AuthorityNotReadyError{Authority: policy.SchedulingAuthority}
-		}
-		return nil
-	default:
-		return &AuthorityNotReadyError{Authority: policy.SchedulingAuthority}
-	}
+	_, err := ConversationBehavior(policy)
+	return err
 }
 
 func (s *Service) CurrentSchedulingAuthority(ctx context.Context, salonID string, ownerUserID string) (string, error) {

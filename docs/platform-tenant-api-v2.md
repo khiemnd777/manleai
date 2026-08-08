@@ -83,7 +83,9 @@ mounted beneath either root.
 /integrations/:provider/verifications
 
 /scheduling
+/scheduling/behavior
 /scheduling/authority
+/scheduling/booking-mode
 /scheduling/internal-calendar
 /scheduling/resources
 /scheduling/exceptions
@@ -163,6 +165,35 @@ live-execution, idempotency, and atomicity checks remain mandatory business
 safety rules. Platform Ops needs `technical.write`. Existing operations retain
 their originating scheduling authority.
 
+## Scheduling behavior resource
+
+Platform Scheduling reads the persisted authority and AI conversation policy
+through:
+
+```text
+GET /api/v2/platform/tenants/:tenant_id/scheduling/behavior
+```
+
+The projection returns `scheduling_authority`, `authority_version`,
+`booking_mode`, the `ai_receptionist/policy` version,
+`allowed_booking_modes`, and one stable `effective_behavior` token. The
+backend scheduling domain owns the authority × booking-mode matrix; frontends
+render the returned decision and do not recreate compatibility rules.
+
+Booking mode changes use the separate command:
+
+```text
+PUT /api/v2/platform/tenants/:tenant_id/scheduling/booking-mode
+```
+
+The command requires `booking_mode`, `expected_version`, and `action_key`.
+It locks the shared scheduling mutation fence, validates the current authority
+inside the transaction, advances the existing `ai_receptionist/policy`
+resource version, and records the actual Platform actor in immutable technical
+action/event evidence. It never changes scheduling authority. Authority
+switches never change booking mode. `owner_manual + confirmed_booking` remains
+invalid.
+
 ## AI receptionist runtime
 
 `salons.ai_enabled` remains salon-wide runtime intent. Its management contract
@@ -203,7 +234,7 @@ The active Platform tenant frontend uses v2 for the tenant directory/context,
 Business profile/hours/public page, Staff, Customers, rich POS-backed Services
 and service categories, Calls and call catalog projections, Training,
 authority-neutral AI Runtime, provider configuration/connection/verification,
-Scheduling authority/internal calendar, Operations health/runtime limits/
+Scheduling behavior/authority/internal calendar, Operations health/runtime limits/
 provider events/owner notifications, Access, audit events, and configuration
 transfers.
 

@@ -71,6 +71,7 @@ modules/pos          provider-neutral POS contracts and persistence
 modules/pos_square   Square adapter and Square integration routes
 modules/public_catalog public-safe salon catalog read API
 modules/scheduling   owner-scoped authority resolution and authority-neutral scheduling dispatch
+modules/scheduling_behavior Platform scheduling behavior read model plus versioned/idempotent booking-mode management
 modules/scheduling_external_provider external-provider executor delegating to the existing booking service
 modules/scheduling_owner_manual request-only executor and pending owner-review aggregate
 modules/scheduling_manleai_calendar owner-scoped configuration/readiness plus Phase 4B aggregate create and Phase 4C lifecycle executor
@@ -1099,6 +1100,15 @@ evidence and never invokes an internal commit or provider create. `disabled`
 stops new conversation scheduling before missing-field collection or tool
 dispatch. Exact persisted operation replay remains origin-bound inside the
 scheduling boundary and therefore precedes current-policy gating.
+
+The normalized Platform Scheduling control plane reads both persisted values
+through `backend/modules/scheduling_behavior`. That module does not execute
+scheduling work and does not replace the authority-switch owner. Its booking-
+mode command uses the shared scheduling advisory fence, the existing
+`ai_receptionist/policy` technical version, stable action-key replay, immutable
+actual-actor audit, and the scheduling domain's single authority × mode
+matrix. Authority switching and booking-mode mutation remain separate commands
+and never silently modify one another.
 
 The current external-provider runtime checks provider-neutral availability,
 offers slots, and only calls booking creation after required fields are present

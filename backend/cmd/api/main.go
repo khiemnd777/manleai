@@ -37,6 +37,7 @@ import (
 	"github.com/manleai/ai-receptionist/modules/salon"
 	"github.com/manleai/ai-receptionist/modules/scheduling"
 	authorityswitch "github.com/manleai/ai-receptionist/modules/scheduling_authority_switch"
+	schedulingbehavior "github.com/manleai/ai-receptionist/modules/scheduling_behavior"
 	"github.com/manleai/ai-receptionist/modules/scheduling_external_provider"
 	manleaicalendar "github.com/manleai/ai-receptionist/modules/scheduling_manleai_calendar"
 	"github.com/manleai/ai-receptionist/modules/scheduling_owner_manual"
@@ -250,6 +251,8 @@ func main() {
 	authoritySwitchPlatformHandler := authorityswitch.NewPlatformHandler(authoritySwitchService, accessService)
 	authorityswitch.RegisterPlatformRoutes(api, authoritySwitchPlatformHandler, cfg.JWTSecret)
 	authorityswitch.RegisterPlatformV2Routes(api, authoritySwitchPlatformHandler, cfg.JWTSecret)
+	schedulingBehaviorService := schedulingbehavior.NewService(schedulingbehavior.NewRepository(db))
+	schedulingbehavior.RegisterPlatformRoutes(api, schedulingbehavior.NewPlatformHandler(schedulingBehaviorService, accessService), cfg.JWTSecret)
 
 	logg.Info("api listening", "port", cfg.ServerPort, "env", cfg.AppEnv)
 	if err := app.Listen(":" + cfg.ServerPort); err != nil {

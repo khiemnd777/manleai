@@ -173,6 +173,14 @@ those controls exist.
 Connecting, syncing, or testing Square must never look like an implicit
 authority switch.
 
+Platform Scheduling presents authority and AI booking mode in one Scheduling
+behavior card because operators need the effective combination to understand
+new-work outcomes. They remain independent persisted controls with separate
+explicit save actions. The card loads both values, shows backend-returned
+allowed booking modes and effective behavior, states that pending approval
+does not reserve a time, and states that authority changes do not change
+booking mode. A readiness preview is never labelled as a completed change.
+
 - `owner_manual`: focus on pending request review and notification state. Do
   not show provider setup as a booking prerequisite or promise automatic
   availability.
@@ -738,8 +746,9 @@ Use this checklist before finishing UI work:
 - API data, DTOs, and frontend types agree.
 - No fake confirmation path exists: pending owner review, failed internal
   commits, and incomplete/failed provider writes remain unconfirmed.
-- AI Settings presents `booking_mode` as caller-facing scheduling behavior,
-  separate from the selected scheduling authority. Pending approval copy says
+- Platform Scheduling presents `booking_mode` as caller-facing scheduling
+  behavior beside, but separate from, the selected scheduling authority.
+  Pending approval copy says
   that the selected time is not reserved; disabled copy says availability and
   request actions do not run; owner-manual automatic confirmation is disabled.
 - Owner review rows and details show the request's target scheduling authority
