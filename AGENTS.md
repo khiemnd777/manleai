@@ -328,6 +328,57 @@ the same approved documentation scope.
 - Prefer official vendor docs for external-service behavior. Include links when internet sources are used, and avoid half-sourced instructions such as "go to X -> Y" without origin or evidence.
 - If the evidence is insufficient, say exactly what is missing and what needs to be inspected next instead of filling the gap with a confident-sounding answer.
 
+## Mandatory Page/API Surface Audit
+
+- This audit is mandatory whenever a user reports that a page, tab, dashboard,
+  workflow surface, or page-level action is unavailable, partially loaded,
+  inconsistent, or returning an API error. A screenshot or appshot proves the
+  visible symptom only; it is never sufficient evidence of the failing API,
+  owning module, or root cause.
+- Before naming a root cause, proposing a fix, or editing files, inspect the
+  owning frontend page/component and produce an **API Surface Inventory** for
+  the whole affected surface. Include every request made during initial load,
+  dependent effects, selection/detail loading, pagination/filtering, retries,
+  and user actions, including fallback requests and route-mapping helpers.
+- For every inventoried request, record the actor workflow, frontend caller,
+  HTTP method, fully resolved route shape, backend route owner, authorization
+  and PII gate, handler/service/repository or provider path, source of truth,
+  and the UI impact when that request fails. Do not stop after finding the first
+  plausible endpoint or the endpoint whose name resembles the visible error.
+- Trace the routes in the same composition and registration order used by the
+  production entrypoint. Explicitly check static-versus-dynamic precedence,
+  unconstrained path parameters, overlapping module registrations, normalized
+  route aliases, rewrites/proxies, and frontend resource-path mappers. Isolated
+  handler or module-route tests are not proof that the composed production
+  router dispatches the request correctly.
+- Inspect aggregate loaders such as `Promise.all`, chained effects, shared
+  error state, and fallback/retry logic. Document the failure fan-out: which
+  single request can collapse the whole surface, which sections remain usable,
+  and whether a partial-data state still permits mutations.
+- Use the exact failed request when it is available: method, URL, status,
+  response code/message, timestamp, and request ID. If it is not available,
+  reproduce or instrument the surface until the failed request is identified.
+  If that cannot be done, state that the diagnosis is incomplete and do not
+  present an inferred boundary as confirmed.
+- Review the request and response contracts consumed by the entire surface,
+  including DTOs, mappers, error namespaces, pagination metadata, optional
+  projections, and empty/partial/error states. Check whether one proposed fix
+  changes behavior for another API consumer or enables a mutation with stale,
+  incomplete, or failed prerequisite data.
+- Regression coverage for a page-level API defect must include the composed
+  route stack and the frontend failure boundary, not only an isolated function
+  or source-text assertion. Route-collision tests must register modules in the
+  production order and exercise both the static path and a valid dynamic path.
+- Do not claim a page defect is fixed after local tests or CI alone. Verify the
+  exact formerly failing endpoint against the deployed version and reload the
+  complete page workflow. If production verification is unavailable, report
+  the deployment as unverified rather than fixed.
+- The final diagnosis or implementation plan must summarize the API Surface
+  Inventory, identify the confirmed failing boundary, list adjacent consumers
+  reviewed for regression, and name any API that could not be exercised. This
+  requirement applies even when the user initially provides only one image or
+  one error message.
+
 ## Product Proposal Quality Gate
 
 - Before proposing any product, UI, workflow, or architecture change, complete the proposal gate mentally and expose the relevant parts in the answer when the decision is non-trivial.

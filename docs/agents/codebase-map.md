@@ -114,6 +114,14 @@ and triage keywords in this file.
    If a profile, catalog, provider, schema, or typed state owner exists, route
    behavior through it and reject duplicated phrase matching, field-specific
    prompt tables, fixed menus, and fixed question order.
+9. For any page-, tab-, dashboard-, or surface-level defect, follow the root
+   `AGENTS.md` **Mandatory Page/API Surface Audit** before naming a root cause or
+   proposing a fix. Inventory every initial, dependent, detail, pagination,
+   retry, fallback, and mutation request; resolve frontend route mappers; trace
+   the composed backend registration order; map aggregate failure fan-out; and
+   verify the exact failed endpoint plus the complete deployed page workflow.
+   A screenshot or isolated module test is symptom evidence, not proof of the
+   failing API boundary.
 
 ## Function And Helper Lookup Contract
 
