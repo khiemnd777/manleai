@@ -13,15 +13,22 @@ import {
   isManleAICalendarVersionConflict,
   newManleAICalendarActionKey,
   salonLocalDateTimeToISO,
-  updateManleAICalendarStaffProfile
+  updateManleAICalendarStaffProfile,
+  type InternalCalendarSurface
 } from "@/lib/api/internal-calendar";
 import type {
   ManleAICalendarAggregate,
   ManleAICalendarMutationResponse,
   ManleAICalendarStaffProfile,
   ManleAICalendarWeeklyPeriodInput,
-  POSStaffMember
 } from "@/types/api";
+
+type StaffCalendarMember = {
+  id?: string;
+  name: string;
+  active: boolean;
+  archived_at?: string | null;
+};
 
 type PeriodDraft = {
   key: string;
@@ -39,10 +46,13 @@ type TimeOffForm = {
 type StaffCalendarProfileProps = {
   salonID: string;
   timezone: string;
-  member: POSStaffMember | null;
+  member: StaffCalendarMember | null;
   calendar: ManleAICalendarAggregate | null;
   loading: boolean;
   error?: string;
+  surface?: InternalCalendarSurface;
+  manageServiceEligibility?: boolean;
+  canonicalEligibleServiceIDs?: string[];
   onReload: () => Promise<void>;
   onCalendarChange: (calendar: ManleAICalendarAggregate) => void;
 };
@@ -56,6 +66,9 @@ export function StaffCalendarProfile({
   calendar,
   loading,
   error: loadError = "",
+  surface = "tenant",
+  manageServiceEligibility = true,
+  canonicalEligibleServiceIDs,
   onReload,
   onCalendarChange
 }: StaffCalendarProfileProps) {
@@ -204,13 +217,16 @@ export function StaffCalendarProfile({
       setError("Every weekly schedule period needs a valid start and end time, with end after start.");
       return;
     }
+    const persistedEligibleServiceIDs = manageServiceEligibility
+      ? eligibleServiceIDs
+      : canonicalEligibleServiceIDs ?? profile?.eligible_services.map((service) => service.id) ?? [];
     await runMutation(scope, scope, scope === "schedule" ? "Weekly schedule saved." : "Service eligibility saved.", (key, expectedVersion) =>
       updateManleAICalendarStaffProfile(salonID, staffID, {
         action_key: key,
         expected_config_version: expectedVersion,
         weekly_periods: weeklyPeriods,
-        eligible_service_ids: eligibleServiceIDs
-      })
+        eligible_service_ids: persistedEligibleServiceIDs
+      }, surface)
     );
   }
 
@@ -244,7 +260,7 @@ export function StaffCalendarProfile({
         ends_at: endsAt,
         capacity_override: null,
         reason: timeOffForm.reason.trim() || undefined
-      })
+      }, surface)
     );
   }
 
@@ -253,7 +269,7 @@ export function StaffCalendarProfile({
       cancelManleAICalendarException(salonID, exceptionID, {
         action_key: key,
         expected_config_version: expectedVersion
-      })
+      }, surface)
     );
   }
 
@@ -263,7 +279,7 @@ export function StaffCalendarProfile({
         <div>
           <div className="text-sm font-semibold text-ink">ManleAI controls · internal calendar profile</div>
           <CardDescription>
-            Weekly schedule, service eligibility, and time off are owned by this staff record and stay editable independently of provider-managed contact fields.
+            Weekly schedule and time off are owned by this staff record and stay editable independently of provider-managed contact fields.
           </CardDescription>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -274,7 +290,7 @@ export function StaffCalendarProfile({
 
       {!calendar.config ? (
         <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-900">
-          Save the salon's ManleAI Calendar policy in Settings before configuring staff schedules.
+          Save the salon&apos;s ManleAI Calendar policy before configuring staff schedules.
         </div>
       ) : null}
       {member.archived_at || !member.active ? (
@@ -331,7 +347,7 @@ export function StaffCalendarProfile({
         </div>
       </section>
 
-      <section className="mt-5 rounded-md border border-line bg-white p-4">
+      {manageServiceEligibility ? <section className="mt-5 rounded-md border border-line bg-white p-4">
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
           <div>
             <div className="text-sm font-semibold text-ink">Services this staff member can perform</div>
@@ -364,7 +380,11 @@ export function StaffCalendarProfile({
             {filteredServices.length === 0 ? <div className="mt-3 text-sm text-muted">No services match this search.</div> : null}
           </>
         )}
-      </section>
+      </section> : (
+        <section className="mt-5 rounded-md border border-blue-200 bg-blue-50 p-4 text-sm leading-6 text-blue-900">
+          Service assignments use the canonical Eligible services control above. Saving a weekly schedule preserves those persisted assignments and does not create a second eligibility source.
+        </section>
+      )}
 
       <section className="mt-5 rounded-md border border-line bg-white p-4">
         <div className="flex items-start gap-3">

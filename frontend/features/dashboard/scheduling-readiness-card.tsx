@@ -5,6 +5,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  actionableCalendarBlockers,
+  calendarBlockerPresentation,
+  calendarSetupLinks,
+  type CalendarSetupSurface
+} from "@/lib/scheduling/calendar-setup";
 import type { ManleAICalendarAggregate, SchedulingAuthority } from "@/types/api";
 
 type SchedulingReadinessCardProps = {
@@ -13,6 +19,8 @@ type SchedulingReadinessCardProps = {
   error?: string;
   onRetry?: () => void;
   showSetupLinks?: boolean;
+  setupSurface?: CalendarSetupSurface;
+  salonID?: string;
 };
 
 export function SchedulingReadinessCard({
@@ -20,7 +28,9 @@ export function SchedulingReadinessCard({
   loading = false,
   error = "",
   onRetry,
-  showSetupLinks = true
+  showSetupLinks = true,
+  setupSurface = "tenant",
+  salonID = ""
 }: SchedulingReadinessCardProps) {
   if (loading) {
     return (
@@ -59,7 +69,8 @@ export function SchedulingReadinessCard({
   }
 
   const readiness = calendar.readiness;
-  const blockers = readiness.blockers;
+  const blockers = actionableCalendarBlockers(readiness.blockers);
+  const setupLinks = calendarSetupLinks(setupSurface, salonID);
   const capabilities = readiness.capabilities;
   const partialExecution = Boolean(capabilities && Object.values(capabilities).some(Boolean));
   const selectedInternal = calendar.scheduling_authority === "manleai_calendar";
@@ -136,10 +147,10 @@ export function SchedulingReadinessCard({
           <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             <CapabilityValue label="Staff-only availability" enabled={capabilities?.staff_only_availability === true} />
             <CapabilityValue label="Staff-only create" enabled={capabilities?.staff_only_create === true} />
-            <CapabilityValue label="Party create" enabled={capabilities?.party_create === true} phase="Phase 4B" />
-            <CapabilityValue label="Pooled capacity" enabled={capabilities?.pooled_capacity === true} phase="Phase 4B" />
-            <CapabilityValue label="Reschedule" enabled={capabilities?.reschedule === true} phase="Phase 4C" />
-            <CapabilityValue label="Cancel" enabled={capabilities?.cancel === true} phase="Phase 4C" />
+            <CapabilityValue label="Party create" enabled={capabilities?.party_create === true} />
+            <CapabilityValue label="Pooled capacity" enabled={capabilities?.pooled_capacity === true} />
+            <CapabilityValue label="Reschedule" enabled={capabilities?.reschedule === true} />
+            <CapabilityValue label="Cancel" enabled={capabilities?.cancel === true} />
           </div>
         </div>
       ) : null}
@@ -153,21 +164,19 @@ export function SchedulingReadinessCard({
         <div className="mt-4 rounded-md border border-line bg-white p-4">
           <div className="text-sm font-semibold text-ink">Backend readiness blockers</div>
           <div className="mt-3 space-y-2">
-            {blockers.map((blocker, index) => (
-              <div key={`${blocker.code}-${blocker.entity_id ?? blocker.scope}-${index}`} className="text-sm leading-6 text-muted">
-                <span className="font-medium text-ink">{blocker.message}</span>
-                <span className="ml-2 text-xs">{blocker.dimension} · {blocker.scope}</span>
-              </div>
-            ))}
+            {blockers.map((blocker, index) => {
+              const item = calendarBlockerPresentation(blocker, calendar, setupSurface, salonID);
+              return <div key={`${blocker.code}-${blocker.entity_id ?? blocker.scope}-${index}`} className="flex flex-col justify-between gap-2 rounded-md border border-line p-3 sm:flex-row sm:items-center"><div className="text-sm leading-6 text-muted"><span className="font-medium text-ink">{item.label}: </span>{item.message}<span className="ml-2 text-xs">{blocker.dimension} · {blocker.scope}</span></div><Link href={item.href} className="flex-none text-sm font-semibold text-brand hover:underline">{item.action}</Link></div>;
+            })}
           </div>
         </div>
       ) : null}
 
       {selectedInternal && showSetupLinks ? (
         <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-          <SetupLink href="/dashboard/settings" label="Calendar settings" />
-          <SetupLink href="/dashboard/staff" label="Staff schedules" />
-          <SetupLink href="/dashboard/services" label="Service policies" />
+          <SetupLink href={setupLinks.calendar} label="Calendar settings" />
+          <SetupLink href={setupLinks.staff} label="Staff schedules" />
+          <SetupLink href={setupLinks.services} label="Service policies" />
         </div>
       ) : null}
     </Card>
@@ -183,12 +192,12 @@ function ReadinessValue({ label, value }: { label: string; value: string }) {
   );
 }
 
-function CapabilityValue({ label, enabled, phase }: { label: string; enabled: boolean; phase?: string }) {
+function CapabilityValue({ label, enabled }: { label: string; enabled: boolean }) {
   return (
     <div className="flex items-center justify-between gap-3 rounded-md border border-line bg-slate-50 p-3">
       <div>
         <div className="text-sm font-medium text-ink">{label}</div>
-        {!enabled && phase ? <div className="mt-1 text-xs text-muted">Gated for {phase}</div> : null}
+        {!enabled ? <div className="mt-1 text-xs text-muted">Needs compatible configuration</div> : null}
       </div>
       <Badge value={enabled ? "ready" : "blocked"} />
     </div>

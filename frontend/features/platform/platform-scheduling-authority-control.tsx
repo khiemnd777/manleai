@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, RefreshCcw } from "lucide-react";
+import Link from "next/link";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,7 +16,8 @@ import {
   preparePlatformSchedulingAuthorityChange
 } from "@/lib/api/scheduling-authority-switches";
 import type { ChangeSchedulingAuthorityInput } from "@/lib/api/scheduling-authority-switches";
-import type { SchedulingAuthority, SchedulingAuthoritySwitchRun } from "@/types/api";
+import { actionableCalendarBlockers, calendarBlockerPresentation } from "@/lib/scheduling/calendar-setup";
+import type { ManleAICalendarAggregate, SchedulingAuthority, SchedulingAuthoritySwitchRun } from "@/types/api";
 
 const authorityOptions: Array<{ value: SchedulingAuthority; label: string; description: string }> = [
   { value: "owner_manual", label: "Owner confirmation", description: "Capture pending requests for the salon to handle. No appointment is confirmed automatically." },
@@ -34,11 +36,13 @@ export function PlatformSchedulingAuthorityControl({
   salonID,
   currentAuthority,
   currentVersion,
+  calendar,
   onReload
 }: {
   salonID: string;
   currentAuthority: SchedulingAuthority;
   currentVersion: number;
+  calendar: ManleAICalendarAggregate;
   onReload: () => Promise<void>;
 }) {
   const [selected, setSelected] = useState<SchedulingAuthority>(currentAuthority);
@@ -161,6 +165,7 @@ export function PlatformSchedulingAuthorityControl({
   if (loading) return <Card><Skeleton className="h-6 w-56" /><Skeleton className="mt-4 h-24" /><Skeleton className="mt-4 h-10 w-36" /></Card>;
 
   const ready = readiness?.status === "preview_ready" && readiness.readiness_snapshot.ready && readiness.blockers.length === 0;
+  const visibleBlockers = actionableCalendarBlockers(readiness?.blockers ?? []);
   return (
     <Card>
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
@@ -177,7 +182,7 @@ export function PlatformSchedulingAuthorityControl({
         })}
       </div>
       {busy === "readiness" ? <div className="mt-4 rounded-md border border-line p-4 text-sm text-muted">Checking readiness…</div> : null}
-      {readiness ? <div className={`mt-4 rounded-md border p-4 ${ready ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}><div className="flex items-start gap-3">{ready ? <CheckCircle2 className="mt-0.5 h-5 w-5 text-emerald-700" /> : <AlertTriangle className="mt-0.5 h-5 w-5 text-amber-700" />}<div><div className="text-sm font-semibold text-ink">{ready ? `Ready to switch to ${authorityLabel(selected)}` : `${authorityLabel(selected)} needs setup`}</div><p className="mt-1 text-sm text-muted">{ready ? "The backend will recheck this evidence before changing new-work authority." : "Resolve the items below, then select this authority again."}</p></div></div>{readiness.blockers.length > 0 ? <ul className="mt-3 space-y-1 text-sm text-amber-900">{readiness.blockers.map((blocker) => <li key={`${blocker.code}-${blocker.scope ?? ""}-${blocker.entity_id ?? ""}`}>• {blocker.message}</li>)}</ul> : null}</div> : null}
+      {readiness ? <div className={`mt-4 rounded-md border p-4 ${ready ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}><div className="flex items-start gap-3">{ready ? <CheckCircle2 className="mt-0.5 h-5 w-5 text-emerald-700" /> : <AlertTriangle className="mt-0.5 h-5 w-5 text-amber-700" />}<div><div className="text-sm font-semibold text-ink">{ready ? `Ready to switch to ${authorityLabel(selected)}` : `${authorityLabel(selected)} needs setup`}</div><p className="mt-1 text-sm text-muted">{ready ? "The backend will recheck this evidence before changing new-work authority." : "Resolve the items below, then select this authority again."}</p></div></div>{visibleBlockers.length > 0 ? <div className="mt-3 space-y-2">{visibleBlockers.map((blocker, index) => { const item = calendarBlockerPresentation(blocker, calendar, "platform", salonID); return <div key={`${blocker.code}-${blocker.scope ?? ""}-${blocker.entity_id ?? ""}-${index}`} className="flex flex-col justify-between gap-2 rounded-md border border-amber-200 bg-white p-3 sm:flex-row sm:items-center"><div><div className="text-sm font-semibold text-ink">{item.label}</div><div className="mt-1 text-xs leading-5 text-amber-900">{item.message}</div></div><Link href={item.href} className="flex-none text-sm font-semibold text-brand hover:underline">{item.action}</Link></div>; })}</div> : null}</div> : null}
       <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs leading-5 text-muted">{latest ? `Last change: ${authorityLabel(latest.source_scheduling_authority)} → ${authorityLabel(latest.target_scheduling_authority)} · ${formatDate(latest.updated_at)}` : "No previous authority change."}</p><div className="flex flex-col gap-2 sm:flex-row"><Button type="button" variant="secondary" onClick={() => void reload()} disabled={busy !== ""} className="w-full sm:w-auto"><RefreshCcw className="h-4 w-4" />{busy === "reload" ? "Reloading…" : "Reload"}</Button><Button type="button" onClick={() => void changeAuthority()} disabled={busy !== "" || !ready} className="w-full sm:w-auto">{busy === "change" ? "Changing…" : `Switch to ${authorityLabel(selected)}`}</Button></div></div>
     </Card>
   );

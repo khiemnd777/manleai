@@ -52,6 +52,7 @@ export function PlatformSchedulingSettings({ tenantID }: { tenantID: string }) {
         salonID={tenantID}
         currentAuthority={calendar.scheduling_authority}
         currentVersion={calendar.authority_version}
+        calendar={calendar}
         onReload={load}
       />
       <Card>

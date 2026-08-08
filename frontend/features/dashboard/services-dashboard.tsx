@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { useSearchParams } from "next/navigation";
 import { AlertTriangle, Archive, Check, Pencil, Plus, RefreshCcw, RotateCcw, Settings2, Tags, XCircle } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -131,6 +132,9 @@ const consultationOptionGroups = {
 type ServicesSurface = "tenant" | "platform";
 
 export function ServicesDashboard({ surface = "tenant", salonID: fixedSalonID = "" }: { surface?: ServicesSurface; salonID?: string } = {}) {
+  const searchParams = useSearchParams();
+  const requestedEditID = searchParams.get("edit") ?? "";
+  const openedDeepLink = useRef("");
   const [salon, setSalon] = useState<Salon | null>(null);
   const [externalReadiness, setExternalReadiness] = useState<ExternalSchedulingReadiness | null>(null);
   const [externalReadinessError, setExternalReadinessError] = useState("");
@@ -213,6 +217,14 @@ export function ServicesDashboard({ surface = "tenant", salonID: fixedSalonID = 
   useEffect(() => {
     void load();
   }, [fixedSalonID, surface]);
+
+  useEffect(() => {
+    if (loading || !requestedEditID || openedDeepLink.current === requestedEditID) return;
+    const requested = services.find((service) => service.id === requestedEditID);
+    if (!requested) return;
+    openedDeepLink.current = requestedEditID;
+    openEditForm(requested);
+  }, [loading, requestedEditID, services]);
 
   async function reloadCalendar() {
     if (!salon?.id) return;
@@ -617,7 +629,7 @@ export function ServicesDashboard({ surface = "tenant", salonID: fixedSalonID = 
       {success ? <Alert type="success" title="Services updated" message={success} /> : null}
       {externalReadinessError ? <Alert title="External scheduling readiness unavailable" message={`${externalReadinessError} Internal services and calendar setup remain available.`} /> : null}
 
-      <SchedulingReadinessCard calendar={calendar} loading={calendarLoading} error={calendarError} onRetry={() => void reloadCalendar()} />
+      <SchedulingReadinessCard calendar={calendar} loading={calendarLoading} error={calendarError} onRetry={() => void reloadCalendar()} setupSurface={surface} salonID={salon.id} />
       {calendar?.scheduling_authority === "external_provider" ? (
         <>
           <ServicesGate readiness={externalReadiness} />

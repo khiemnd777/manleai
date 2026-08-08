@@ -70,20 +70,23 @@ type InternalCalendarSetupProps = {
   salonID: string;
   timezone: string;
   surface?: InternalCalendarSurface;
+  initialCalendar?: ManleAICalendarAggregate;
+  onCalendarChange?: (calendar: ManleAICalendarAggregate) => void;
 };
 
 const dayLabels = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
-export function InternalCalendarSetup({ salonID, timezone, surface = "tenant" }: InternalCalendarSetupProps) {
+export function InternalCalendarSetup({ salonID, timezone, surface = "tenant", initialCalendar, onCalendarChange }: InternalCalendarSetupProps) {
   const actionKeysRef = useRef(new Map<string, string>());
-  const [calendar, setCalendar] = useState<ManleAICalendarAggregate | null>(null);
-  const [loading, setLoading] = useState(true);
+  const skipInitialLoad = useRef(Boolean(initialCalendar));
+  const [calendar, setCalendar] = useState<ManleAICalendarAggregate | null>(initialCalendar ?? null);
+  const [loading, setLoading] = useState(!initialCalendar);
   const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-  const [configForm, setConfigForm] = useState<ConfigForm>(emptyConfigForm());
-  const [hours, setHours] = useState<HourDraft[]>([]);
+  const [configForm, setConfigForm] = useState<ConfigForm>(() => initialCalendar ? configToForm(initialCalendar) : emptyConfigForm());
+  const [hours, setHours] = useState<HourDraft[]>(() => initialCalendar ? hoursToDrafts(initialCalendar) : []);
   const [resourceForm, setResourceForm] = useState<ResourceForm>(emptyResourceForm());
   const [exceptionForm, setExceptionForm] = useState<ExceptionForm>(emptyExceptionForm());
 
@@ -93,7 +96,8 @@ export function InternalCalendarSetup({ salonID, timezone, surface = "tenant" }:
     setHours(hoursToDrafts(next));
     setResourceForm(emptyResourceForm());
     setExceptionForm(emptyExceptionForm());
-  }, []);
+    onCalendarChange?.(next);
+  }, [onCalendarChange]);
 
   const load = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
     if (!silent) setLoading(true);
@@ -109,6 +113,10 @@ export function InternalCalendarSetup({ salonID, timezone, surface = "tenant" }:
   }, [applyCalendar, salonID, surface]);
 
   useEffect(() => {
+    if (skipInitialLoad.current) {
+      skipInitialLoad.current = false;
+      return;
+    }
     void load();
   }, [load]);
 
@@ -360,12 +368,12 @@ export function InternalCalendarSetup({ salonID, timezone, surface = "tenant" }:
 
   return (
     <div className="space-y-6">
-      <SchedulingReadinessCard calendar={calendar} showSetupLinks={false} />
+      <SchedulingReadinessCard calendar={calendar} showSetupLinks={false} setupSurface={surface} salonID={salonID} />
 
       {error ? <Alert title="Calendar setup not updated" message={error} /> : null}
       {success ? <Alert type="success" title="Calendar setup updated" message={success} /> : null}
 
-      <Card>
+      <Card id="calendar-policy" className="scroll-mt-24">
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
           <div>
             <CardTitle>ManleAI Calendar policy</CardTitle>
@@ -451,7 +459,7 @@ export function InternalCalendarSetup({ salonID, timezone, surface = "tenant" }:
         </div>
       </Card>
 
-      <Card>
+      <Card id="calendar-hours" className="scroll-mt-24">
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
           <div>
             <CardTitle>Local salon hours</CardTitle>
@@ -502,15 +510,15 @@ export function InternalCalendarSetup({ salonID, timezone, surface = "tenant" }:
         </div>
       </Card>
 
-      <Card>
+      <Card id="calendar-resources" className="scroll-mt-24">
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
           <div>
             <CardTitle>Shared resource pools</CardTitle>
             <CardDescription>
-              Optional shared capacity such as pedicure chairs. Pooled execution remains blocked until the internal capacity engine ships.
+              Optional shared capacity such as pedicure chairs. Staff-only services do not need resource pools.
             </CardDescription>
           </div>
-          <Badge value={calendar.readiness.capabilities?.pooled_capacity === true ? "ready" : "blocked"} />
+          <Badge value={activeResources.length === 0 ? "optional" : calendar.readiness.capabilities?.pooled_capacity === true ? "ready" : "needs setup"} />
         </div>
         <div className="mt-5 grid gap-4 md:grid-cols-[1fr_12rem_auto] md:items-end">
           <TextField label="Resource name" value={resourceForm.name} maxLength={constraints.resource_name_max_characters} disabled={Boolean(busy)} onChange={(value) => updateResourceForm({ ...resourceForm, name: value })} />
@@ -630,7 +638,7 @@ export function InternalCalendarSetup({ salonID, timezone, surface = "tenant" }:
         )}
       </Card>
 
-      <Card className="border-blue-200 bg-blue-50 shadow-none">
+      <Card id="calendar-activation" className="scroll-mt-24 border-blue-200 bg-blue-50 shadow-none">
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
           <div>
             <CardTitle>Activation audit</CardTitle>

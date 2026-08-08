@@ -1,4 +1,4 @@
-import { apiRequest, RequestError } from "@/lib/api/client";
+import { apiRequest, RequestError } from "./client";
 import type {
   ManleAICalendarAggregateResponse,
   ManleAICalendarConfigInput,
@@ -12,13 +12,13 @@ import type {
   ManleAICalendarServicePolicyResponse,
   ManleAICalendarStaffProfileInput,
   ManleAICalendarStaffProfileResponse
-} from "@/types/api";
+} from "../../types/api";
 
 const versionConflictCode = "MANLEAI_CALENDAR_CONFIG_VERSION_CONFLICT";
 export type InternalCalendarSurface = "tenant" | "platform";
 
 export function getManleAICalendar(salonID: string, surface: InternalCalendarSurface = "tenant") {
-  return calendarRequest<ManleAICalendarAggregateResponse>(calendarPath(salonID, surface), surface);
+  return calendarRequest<ManleAICalendarAggregateResponse>(internalCalendarPath(salonID, surface), surface);
 }
 
 export function updateManleAICalendarConfig(salonID: string, input: ManleAICalendarConfigInput, surface: InternalCalendarSurface = "tenant") {
@@ -30,7 +30,7 @@ export function replaceManleAICalendarHours(salonID: string, input: ManleAICalen
 }
 
 export function getManleAICalendarStaffProfile(salonID: string, staffID: string, surface: InternalCalendarSurface = "tenant") {
-  return calendarRequest<ManleAICalendarStaffProfileResponse>(`${calendarPath(salonID, surface)}/staff/${encodeURIComponent(staffID)}`, surface);
+  return calendarRequest<ManleAICalendarStaffProfileResponse>(`${internalCalendarPath(salonID, surface)}/staff/${encodeURIComponent(staffID)}`, surface);
 }
 
 export function updateManleAICalendarStaffProfile(
@@ -43,7 +43,7 @@ export function updateManleAICalendarStaffProfile(
 }
 
 export function getManleAICalendarServicePolicy(salonID: string, serviceID: string, surface: InternalCalendarSurface = "tenant") {
-  return calendarRequest<ManleAICalendarServicePolicyResponse>(`${calendarPath(salonID, surface)}/services/${encodeURIComponent(serviceID)}`, surface);
+  return calendarRequest<ManleAICalendarServicePolicyResponse>(`${internalCalendarPath(salonID, surface)}/services/${encodeURIComponent(serviceID)}`, surface);
 }
 
 export function updateManleAICalendarServicePolicy(
@@ -56,7 +56,7 @@ export function updateManleAICalendarServicePolicy(
 }
 
 export function listManleAICalendarResources(salonID: string, surface: InternalCalendarSurface = "tenant") {
-  return calendarRequest<ManleAICalendarResourceListResponse>(`${calendarPath(salonID, surface)}/resources`, surface);
+  return calendarRequest<ManleAICalendarResourceListResponse>(`${internalCalendarPath(salonID, surface)}/resources`, surface);
 }
 
 export function createManleAICalendarResource(salonID: string, input: ManleAICalendarResourceInput, surface: InternalCalendarSurface = "tenant") {
@@ -143,7 +143,7 @@ export function salonLocalDateTimeToISO(value: string, timezone: string) {
   return new Date([...matches][0]).toISOString();
 }
 
-function calendarPath(salonID: string, surface: InternalCalendarSurface) {
+export function internalCalendarPath(salonID: string, surface: InternalCalendarSurface) {
   return surface === "platform"
     ? `/api/v2/platform/tenants/${encodeURIComponent(salonID)}/scheduling/internal-calendar`
     : `/api/salons/${encodeURIComponent(salonID)}/manleai-calendar`;
@@ -156,11 +156,15 @@ function mutate(
   input: object,
   surface: InternalCalendarSurface
 ) {
-  const normalizedSuffix = surface === "platform" && suffix === "/config" ? "/policy" : surface === "platform" && suffix === "/activate" ? "/activation" : suffix;
-  return calendarRequest<ManleAICalendarMutationResponse>(`${calendarPath(salonID, surface)}${normalizedSuffix}`, surface, {
+  return calendarRequest<ManleAICalendarMutationResponse>(internalCalendarMutationPath(salonID, suffix, surface), surface, {
     method,
     body: JSON.stringify(input)
   });
+}
+
+export function internalCalendarMutationPath(salonID: string, suffix: string, surface: InternalCalendarSurface) {
+  const normalizedSuffix = surface === "platform" && suffix === "/config" ? "/policy" : surface === "platform" && suffix === "/activate" ? "/activation" : suffix;
+  return `${internalCalendarPath(salonID, surface)}${normalizedSuffix}`;
 }
 
 async function calendarRequest<T>(path: string, surface: InternalCalendarSurface, init: RequestInit = {}) {
