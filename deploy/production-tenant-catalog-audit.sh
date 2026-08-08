@@ -172,7 +172,7 @@ CROSS JOIN catalog_counts AS catalog
 CROSS JOIN category_counts AS categories
 CROSS JOIN service_alias_counts AS service_aliases
 CROSS JOIN category_alias_counts AS category_aliases
-CROSS JOIN authorization_counts AS authorization
+CROSS JOIN authorization_counts AS auth_counts
 CROSS JOIN LATERAL (
   VALUES
     (1, 'audit_scope=production_tenant_catalog'),
@@ -192,10 +192,10 @@ CROSS JOIN LATERAL (
     (15, 'service_aliases_active=' || service_aliases.service_aliases_active),
     (16, 'service_category_aliases_total=' || category_aliases.service_category_aliases_total),
     (17, 'service_category_aliases_active=' || category_aliases.service_category_aliases_active),
-    (18, 'active_platform_admin_accounts=' || authorization.active_platform_admin_accounts),
-    (19, 'platform_admin_services_read_capable_accounts=' || authorization.platform_admin_services_read_capable_accounts),
-    (20, 'support_services_read_authorized_admin_accounts=' || authorization.support_services_read_authorized_admin_accounts),
-    (21, 'actor_feature_services_read_authorized_admin_accounts=' || authorization.actor_feature_services_read_authorized_admin_accounts)
+    (18, 'active_platform_admin_accounts=' || auth_counts.active_platform_admin_accounts),
+    (19, 'platform_admin_services_read_capable_accounts=' || auth_counts.platform_admin_services_read_capable_accounts),
+    (20, 'support_services_read_authorized_admin_accounts=' || auth_counts.support_services_read_authorized_admin_accounts),
+    (21, 'actor_feature_services_read_authorized_admin_accounts=' || auth_counts.actor_feature_services_read_authorized_admin_accounts)
 ) AS output(ordinal, line)
 ORDER BY output.ordinal;
 
