@@ -330,6 +330,17 @@ locators and V79 worker discovery/claim functions may operate unbound under
 repository work. V80 is code-ready evidence only until the V79-aware image and
 all provider/worker paths have been observed in the target environment.
 
+The application query layer preserves the same split. Live provider/worker
+conversation, salon-settings, scheduling-origin, booking, `owner_manual`,
+`manleai_calendar`, and external-provider scheduling-evidence repository
+predicates admit `app_rls_system_salon_allowed(salon_id)` independently of any
+Tenant Owner membership or feature grant. Interactive actor requests continue
+through membership and `app_actor_feature_access` checks. This does not turn a
+provider/worker into an actor or widen management APIs: an unbound, malformed,
+or cross-tenant system context still fails closed, while an exact tenant-bound
+system context can continue the live call and its scheduling writes if the
+Owner identity is revoked.
+
 ## Scheduling Authority Contract
 
 `docs/scheduling-authority.md` is the normative boundary for availability,

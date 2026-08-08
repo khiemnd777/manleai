@@ -154,7 +154,8 @@ func (r *Repository) hydrateOwnerRequestEvidence(
 		 AND request.id = cs.scheduling_request_id
 		WHERE cs.salon_id = $1
 		  AND (
-		      public.app_actor_feature_access($2::uuid, salon.id, 'calls.read', 'calls')
+		      public.app_rls_system_salon_allowed(salon.id)
+		      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.read', 'calls')
 		      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls')
 		  )
 		  AND cs.id = ANY($3::uuid[])
@@ -325,7 +326,8 @@ func (r *Repository) hydrateInternalResultEvidence(
 		 AND appointment.id = cs.appointment_id
 		WHERE cs.salon_id = $1
 		  AND (
-		      public.app_actor_feature_access($2::uuid, salon.id, 'calls.read', 'calls')
+		      public.app_rls_system_salon_allowed(salon.id)
+		      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.read', 'calls')
 		      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls')
 		  )
 		  AND cs.id = ANY($3::uuid[])
@@ -752,7 +754,8 @@ func externalEvidenceQuery(split bool) string {
 		` + join + `
 		WHERE cs.salon_id = $1
 		  AND (
-		      public.app_actor_feature_access($2::uuid, salon.id, 'calls.read', 'calls')
+		      public.app_rls_system_salon_allowed(salon.id)
+		      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.read', 'calls')
 		      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls')
 		  )
 		  AND attempt.scheduling_authority = 'external_provider'

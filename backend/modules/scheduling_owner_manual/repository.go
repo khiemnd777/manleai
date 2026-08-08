@@ -42,7 +42,8 @@ func (r *Repository) SchedulingTargetReadinessFacts(ctx context.Context, salonID
 		JOIN salon_settings settings ON settings.salon_id = salon.id
 		WHERE salon.id::text = $1
 		  AND (
-		      public.has_active_tenant_membership(salon.id, $2::uuid)
+		      public.app_rls_system_salon_allowed(salon.id)
+		      OR public.has_active_tenant_membership(salon.id, $2::uuid)
 		      OR
 		      public.app_actor_feature_access($2::uuid, salon.id, 'calls.read', 'calls')
 		      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls')
@@ -71,7 +72,8 @@ func (r *Repository) CreateOrReplay(ctx context.Context, salonID string, ownerUs
 		FROM scheduling_requests request
 		JOIN salons salon ON salon.id = request.salon_id
 		WHERE request.salon_id::text = $1
-		  AND (public.has_active_tenant_membership(salon.id, $2::uuid)
+		  AND (public.app_rls_system_salon_allowed(salon.id)
+		       OR public.has_active_tenant_membership(salon.id, $2::uuid)
 		       OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls'))
 		  AND request.scheduling_authority = $3
 		  AND request.operation_key = $4
@@ -95,7 +97,7 @@ func (r *Repository) CreateOrReplay(ctx context.Context, salonID string, ownerUs
 	}
 	var currentAuthority string
 	var bookingMode string
-	if err := tx.QueryRowContext(ctx, `SELECT settings.scheduling_authority, settings.booking_mode FROM salon_settings settings JOIN salons salon ON salon.id=settings.salon_id WHERE settings.salon_id::text=$1 AND (public.has_active_tenant_membership(salon.id, $2::uuid) OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls')) FOR SHARE OF settings, salon`, salonID, ownerUserID).Scan(&currentAuthority, &bookingMode); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT settings.scheduling_authority, settings.booking_mode FROM salon_settings settings JOIN salons salon ON salon.id=settings.salon_id WHERE settings.salon_id::text=$1 AND (public.app_rls_system_salon_allowed(salon.id) OR public.has_active_tenant_membership(salon.id, $2::uuid) OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls')) FOR SHARE OF settings, salon`, salonID, ownerUserID).Scan(&currentAuthority, &bookingMode); errors.Is(err, sql.ErrNoRows) {
 		return nil, false, pos.ErrNotFound
 	} else if err != nil {
 		return nil, false, err
@@ -125,7 +127,8 @@ func (r *Repository) CreateOrReplay(ctx context.Context, salonID string, ownerUs
 		SELECT timezone
 		FROM salons salon
 		WHERE salon.id::text = $1
-		  AND (public.has_active_tenant_membership(salon.id, $2::uuid)
+		  AND (public.app_rls_system_salon_allowed(salon.id)
+		       OR public.has_active_tenant_membership(salon.id, $2::uuid)
 		       OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls'))
 		FOR SHARE
 	`, salonID, ownerUserID).Scan(&salonTimezone); errors.Is(err, sql.ErrNoRows) {
@@ -514,7 +517,8 @@ func getRequest(ctx context.Context, queryer requestQuerier, salonID string, own
 	request, err := scanRequest(queryer.QueryRowContext(ctx, requestSelect+`
 		WHERE request.id::text = $1
 		  AND request.salon_id::text = $2
-		  AND (public.has_active_tenant_membership(salon.id, $3::uuid)
+		  AND (public.app_rls_system_salon_allowed(salon.id)
+		       OR public.has_active_tenant_membership(salon.id, $3::uuid)
 		       OR public.app_actor_feature_access($3::uuid, salon.id, 'calls.simulate', 'calls'))
 	`, requestID, salonID, ownerUserID))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -537,7 +541,8 @@ func lockRequestTx(ctx context.Context, tx *sql.Tx, salonID string, ownerUserID 
 	request, err := scanRequest(tx.QueryRowContext(ctx, requestSelect+`
 		WHERE request.id::text = $1
 		  AND request.salon_id::text = $2
-		  AND (public.has_active_tenant_membership(salon.id, $3::uuid)
+		  AND (public.app_rls_system_salon_allowed(salon.id)
+		       OR public.has_active_tenant_membership(salon.id, $3::uuid)
 		       OR public.app_actor_feature_access($3::uuid, salon.id, 'calls.simulate', 'calls'))
 		FOR UPDATE OF request
 	`, requestID, salonID, ownerUserID))

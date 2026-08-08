@@ -33,7 +33,8 @@ func (r *Repository) ResolveAvailabilityQuoteSchedulingAuthority(ctx context.Con
 		FROM availability_quotes quote
 		JOIN salons salon ON salon.id = quote.salon_id
 		WHERE quote.salon_id = $1
-		  AND (public.has_active_tenant_membership(salon.id, $2::uuid)
+		  AND (public.app_rls_system_salon_allowed(salon.id)
+		       OR public.has_active_tenant_membership(salon.id, $2::uuid)
 		       OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls'))
 		  AND quote.id::text = $3
 	`, salonID, ownerUserID, strings.TrimSpace(quoteID)).Scan(&authority)
@@ -61,7 +62,8 @@ func (r *Repository) FindOperationSchedulingOrigin(ctx context.Context, salonID 
 			FROM booking_attempts attempt
 			JOIN salons salon ON salon.id = attempt.salon_id
 			WHERE attempt.salon_id = $1
-			  AND (public.has_active_tenant_membership(salon.id, $2::uuid)
+			  AND (public.app_rls_system_salon_allowed(salon.id)
+			       OR public.has_active_tenant_membership(salon.id, $2::uuid)
 			       OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls'))
 			  AND attempt.operation_key = $3
 			UNION ALL
@@ -69,7 +71,8 @@ func (r *Repository) FindOperationSchedulingOrigin(ctx context.Context, salonID 
 			FROM scheduling_requests request
 			JOIN salons salon ON salon.id = request.salon_id
 			WHERE request.salon_id = $1
-			  AND (public.has_active_tenant_membership(salon.id, $2::uuid)
+			  AND (public.app_rls_system_salon_allowed(salon.id)
+			       OR public.has_active_tenant_membership(salon.id, $2::uuid)
 			       OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls'))
 			  AND request.operation_key = $3
 	`, salonID, ownerUserID, operationKey)
@@ -115,7 +118,8 @@ func (r *Repository) ResolveAttemptSchedulingAuthority(ctx context.Context, salo
 		FROM booking_attempts attempt
 		JOIN salons salon ON salon.id = attempt.salon_id
 		WHERE attempt.salon_id = $1
-		  AND (public.has_active_tenant_membership(salon.id, $2::uuid)
+		  AND (public.app_rls_system_salon_allowed(salon.id)
+		       OR public.has_active_tenant_membership(salon.id, $2::uuid)
 		       OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls'))
 		  AND attempt.id::text = $3
 	`, salonID, ownerUserID, strings.TrimSpace(attemptID)).Scan(&authority)
@@ -135,7 +139,8 @@ func (r *Repository) ResolveAvailabilityRetrySchedulingAuthority(ctx context.Con
 		FROM booking_attempts attempt
 		JOIN salons salon ON salon.id = attempt.salon_id
 		WHERE attempt.salon_id = $1
-		  AND (public.has_active_tenant_membership(salon.id, $2::uuid)
+		  AND (public.app_rls_system_salon_allowed(salon.id)
+		       OR public.has_active_tenant_membership(salon.id, $2::uuid)
 		       OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls'))
 		  AND attempt.id::text = $3
 		  AND attempt.scheduling_authority = 'external_provider'
@@ -157,7 +162,8 @@ func (r *Repository) ResolveAppointmentSchedulingAuthority(ctx context.Context, 
 		FROM appointments appointment
 		JOIN salons salon ON salon.id = appointment.salon_id
 		WHERE appointment.salon_id = $1
-		  AND (public.has_active_tenant_membership(salon.id, $2::uuid)
+		  AND (public.app_rls_system_salon_allowed(salon.id)
+		       OR public.has_active_tenant_membership(salon.id, $2::uuid)
 		       OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls'))
 		  AND appointment.id::text = $3
 	`, salonID, ownerUserID, strings.TrimSpace(appointmentID)).Scan(&authority)

@@ -58,7 +58,8 @@ func (r *Repository) EnsureSalonOwner(ctx context.Context, salonID string, owner
 			SELECT 1 FROM salons salon
 			WHERE salon.id = $1
 			  AND (
-			      public.has_active_tenant_membership(salon.id, $2::uuid)
+			      public.app_rls_system_salon_allowed(salon.id)
+			      OR public.has_active_tenant_membership(salon.id, $2::uuid)
 			      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls')
 			  )
 		)
@@ -79,7 +80,8 @@ func (r *Repository) GetActiveProvider(ctx context.Context, salonID string, owne
 		FROM salons salon
 		WHERE salon.id = $1
 		  AND (
-		      public.has_active_tenant_membership(salon.id, $2::uuid)
+		      public.app_rls_system_salon_allowed(salon.id)
+		      OR public.has_active_tenant_membership(salon.id, $2::uuid)
 		      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls')
 		  )
 	`, salonID, ownerUserID).Scan(&provider)
@@ -113,7 +115,8 @@ func (r *Repository) GetActiveProviderFence(ctx context.Context, salonID string,
 		 AND connection.provider = BTRIM(salon.active_pos_provider)
 		WHERE salon.id = $1
 		  AND (
-		      public.has_active_tenant_membership(salon.id, $2::uuid)
+		      public.app_rls_system_salon_allowed(salon.id)
+		      OR public.has_active_tenant_membership(salon.id, $2::uuid)
 		      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls')
 		  )
 	`, salonID, ownerUserID).Scan(
@@ -2152,7 +2155,8 @@ func (r *Repository) GetBookingOperation(ctx context.Context, salonID string, ow
 		      FROM salons salon
 		      WHERE salon.id = ba.salon_id
 			        AND (
-			            public.has_active_tenant_membership(salon.id, $3::uuid)
+			            public.app_rls_system_salon_allowed(salon.id)
+			            OR public.has_active_tenant_membership(salon.id, $3::uuid)
 			            OR public.app_actor_feature_access($3::uuid, salon.id, 'calls.simulate', 'calls')
 			        )
 		  )
@@ -2183,7 +2187,8 @@ func (r *Repository) GetSafeRetryAvailabilityOrigin(ctx context.Context, salonID
 		      SELECT 1 FROM salons salon
 			      WHERE salon.id = ba.salon_id
 			        AND (
-			            public.has_active_tenant_membership(salon.id, $3::uuid)
+			            public.app_rls_system_salon_allowed(salon.id)
+			            OR public.has_active_tenant_membership(salon.id, $3::uuid)
 			            OR public.app_actor_feature_access($3::uuid, salon.id, 'calls.simulate', 'calls')
 			        )
 		  )
@@ -3320,7 +3325,8 @@ func (r *Repository) GetAppointmentForOwner(ctx context.Context, salonID string,
 		JOIN salons salon
 		  ON salon.id = appointment.salon_id
 			 AND (
-			     public.has_active_tenant_membership(salon.id, $3::uuid)
+			     public.app_rls_system_salon_allowed(salon.id)
+			     OR public.has_active_tenant_membership(salon.id, $3::uuid)
 			     OR public.app_actor_feature_access($3::uuid, salon.id, 'calls.simulate', 'calls')
 			 )
 		WHERE appointment.id = $1
@@ -3392,7 +3398,8 @@ func (r *Repository) getExternalAppointmentForOwner(ctx context.Context, salonID
 		WHERE a.id = $1
 		  AND a.salon_id = $2
 		  AND (
-		      public.has_active_tenant_membership(salon.id, $3::uuid)
+		      public.app_rls_system_salon_allowed(salon.id)
+		      OR public.has_active_tenant_membership(salon.id, $3::uuid)
 		      OR public.app_actor_feature_access($3::uuid, salon.id, 'calls.simulate', 'calls')
 		  )
 		  AND salon.active_pos_provider = a.pos_provider
@@ -3467,7 +3474,8 @@ func (r *Repository) getInternalAppointmentForOwner(ctx context.Context, salonID
 		JOIN salons salon
 		  ON salon.id = appointment.salon_id
 			 AND (
-			     public.has_active_tenant_membership(salon.id, $3::uuid)
+			     public.app_rls_system_salon_allowed(salon.id)
+			     OR public.has_active_tenant_membership(salon.id, $3::uuid)
 			     OR public.app_actor_feature_access($3::uuid, salon.id, 'calls.simulate', 'calls')
 			 )
 		WHERE appointment.id = $1
@@ -3530,7 +3538,8 @@ func (r *Repository) ListRescheduleCandidates(ctx context.Context, salonID strin
 		    JOIN salons salon
 		      ON salon.id = appointment.salon_id
 			     AND (
-			         public.has_active_tenant_membership(salon.id, $2::uuid)
+			         public.app_rls_system_salon_allowed(salon.id)
+			         OR public.has_active_tenant_membership(salon.id, $2::uuid)
 			         OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls')
 			     )
 		    WHERE appointment.salon_id = $1
@@ -3554,7 +3563,8 @@ func (r *Repository) ListRescheduleCandidates(ctx context.Context, salonID strin
 		    JOIN salons salon
 		      ON salon.id = appointment.salon_id
 			     AND (
-			         public.has_active_tenant_membership(salon.id, $2::uuid)
+			         public.app_rls_system_salon_allowed(salon.id)
+			         OR public.has_active_tenant_membership(salon.id, $2::uuid)
 			         OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls')
 			     )
 		    JOIN booking_attempts origin

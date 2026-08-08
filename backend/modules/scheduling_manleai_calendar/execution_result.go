@@ -87,7 +87,8 @@ func loadAuthoritativeInternalResultTx(
 		  ON appointment.salon_id = event.salon_id
 		 AND appointment.id = event.appointment_id
 		WHERE attempt.salon_id = $1
-		  AND (public.has_active_tenant_membership(salon.id, $2::uuid)
+		  AND (public.app_rls_system_salon_allowed(salon.id)
+		       OR public.has_active_tenant_membership(salon.id, $2::uuid)
 		       OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls'))
 		  AND appointment.id::text = $3
 		  AND attempt.id::text = $4

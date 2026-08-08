@@ -41,7 +41,8 @@ func lockLifecycleTarget(ctx context.Context, tx *sql.Tx, salonID string, ownerU
 		FROM appointments appointment
 		JOIN salons salon ON salon.id = appointment.salon_id
 		WHERE appointment.salon_id = $1
-		  AND (public.has_active_tenant_membership(salon.id, $2::uuid)
+		  AND (public.app_rls_system_salon_allowed(salon.id)
+		       OR public.has_active_tenant_membership(salon.id, $2::uuid)
 		       OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls'))
 		  AND appointment.id::text = $3
 		  AND appointment.scheduling_authority = 'manleai_calendar'
@@ -662,7 +663,8 @@ func replayLifecycleTx(ctx context.Context, tx *sql.Tx, salonID string, ownerUse
 		JOIN manleai_calendar_execution_events event
 		  ON event.salon_id = attempt.salon_id AND event.booking_attempt_id = attempt.id
 		WHERE attempt.salon_id = $1
-		  AND (public.has_active_tenant_membership(salon.id, $2::uuid)
+		  AND (public.app_rls_system_salon_allowed(salon.id)
+		       OR public.has_active_tenant_membership(salon.id, $2::uuid)
 		       OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.simulate', 'calls'))
 		  AND attempt.operation_key = $3
 		FOR UPDATE OF attempt

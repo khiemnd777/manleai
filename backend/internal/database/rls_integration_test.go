@@ -2,7 +2,9 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -12,6 +14,13 @@ import (
 
 	"github.com/lib/pq"
 	"github.com/manleai/ai-receptionist/internal/databasecontext"
+	bookingmodule "github.com/manleai/ai-receptionist/modules/booking"
+	conversationmodule "github.com/manleai/ai-receptionist/modules/conversation"
+	"github.com/manleai/ai-receptionist/modules/pos"
+	"github.com/manleai/ai-receptionist/modules/salon"
+	"github.com/manleai/ai-receptionist/modules/scheduling"
+	calendar "github.com/manleai/ai-receptionist/modules/scheduling_manleai_calendar"
+	"github.com/manleai/ai-receptionist/modules/scheduling_owner_manual"
 )
 
 func TestV80RuntimeRoleEnforcesActorPublicAndSystemTenantBoundaries(t *testing.T) {
@@ -59,6 +68,9 @@ func TestV80RuntimeRoleEnforcesActorPublicAndSystemTenantBoundaries(t *testing.T
 
 	var ownerA, ownerB, platformAdmin, salonA, salonB string
 	fixturePrefix := "rls-" + suffix
+	phoneBase := time.Now().UnixNano() % 10000000
+	phoneA := fmt.Sprintf("+1555%07d", phoneBase)
+	phoneB := fmt.Sprintf("+1555%07d", (phoneBase+1)%10000000)
 	if err := adminDB.QueryRowContext(context.Background(), `
 		INSERT INTO users (email,password_hash,full_name)
 		VALUES ($1,'test-hash','RLS Owner A') RETURNING id::text
@@ -85,14 +97,14 @@ func TestV80RuntimeRoleEnforcesActorPublicAndSystemTenantBoundaries(t *testing.T
 	}
 	if err := adminDB.QueryRowContext(context.Background(), `
 		INSERT INTO salons (name,phone,owner_user_id,public_slug,public_catalog_enabled)
-		VALUES ('RLS Salon A','555-6801',$1,'rls-a-' || $2,true) RETURNING id::text
-	`, ownerA, suffix).Scan(&salonA); err != nil {
+		VALUES ('RLS Salon A',$3,$1,'rls-a-' || $2,true) RETURNING id::text
+	`, ownerA, suffix, phoneA).Scan(&salonA); err != nil {
 		t.Fatalf("insert salon A: %v", err)
 	}
 	if err := adminDB.QueryRowContext(context.Background(), `
 		INSERT INTO salons (name,phone,owner_user_id,public_slug,public_catalog_enabled)
-		VALUES ('RLS Salon B','555-6802',$1,'rls-b-' || $2,false) RETURNING id::text
-	`, ownerB, suffix).Scan(&salonB); err != nil {
+		VALUES ('RLS Salon B',$3,$1,'rls-b-' || $2,false) RETURNING id::text
+	`, ownerB, suffix, phoneB).Scan(&salonB); err != nil {
 		t.Fatalf("insert salon B: %v", err)
 	}
 	if _, err := adminDB.ExecContext(context.Background(), `
@@ -102,8 +114,33 @@ func TestV80RuntimeRoleEnforcesActorPublicAndSystemTenantBoundaries(t *testing.T
 		t.Fatalf("insert salon settings fixtures: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = adminDB.ExecContext(context.Background(), `DELETE FROM salons WHERE id IN ($1,$2)`, salonA, salonB)
-		_, _ = adminDB.ExecContext(context.Background(), `DELETE FROM users WHERE id IN ($1,$2,$3)`, ownerA, ownerB, platformAdmin)
+		cleanupTx, err := adminDB.BeginTx(context.Background(), &sql.TxOptions{})
+		if err != nil {
+			return
+		}
+		defer cleanupTx.Rollback()
+		if _, err := cleanupTx.ExecContext(context.Background(), `SET LOCAL session_replication_role='replica'`); err != nil {
+			return
+		}
+		for _, statement := range []string{
+			`DELETE FROM openai_runtime_verification_events WHERE salon_id IN ($1,$2)`,
+			`DELETE FROM openai_runtime_verification_capabilities WHERE salon_id IN ($1,$2)`,
+			`DELETE FROM openai_runtime_verification_runs WHERE salon_id IN ($1,$2)`,
+		} {
+			if _, err := cleanupTx.ExecContext(context.Background(), statement, salonA, salonB); err != nil {
+				return
+			}
+		}
+		if _, err := cleanupTx.ExecContext(context.Background(), `SET LOCAL session_replication_role='origin'`); err != nil {
+			return
+		}
+		if _, err := cleanupTx.ExecContext(context.Background(), `DELETE FROM salons WHERE id IN ($1,$2)`, salonA, salonB); err != nil {
+			return
+		}
+		if _, err := cleanupTx.ExecContext(context.Background(), `DELETE FROM users WHERE id IN ($1,$2,$3)`, ownerA, ownerB, platformAdmin); err != nil {
+			return
+		}
+		_ = cleanupTx.Commit()
 	})
 	if _, err := adminDB.ExecContext(context.Background(), `
 		INSERT INTO services (salon_id,pos_provider,pos_service_id,name,duration_minutes,active,ai_bookable)
@@ -151,8 +188,8 @@ func TestV80RuntimeRoleEnforcesActorPublicAndSystemTenantBoundaries(t *testing.T
 			INSERT INTO salon_integration_configs (
 				salon_id,provider,enabled,settings,credential_fingerprint_hmac,credential_revision,destination_profile
 			) VALUES
-				($1,'openai',true,'{}'::jsonb,repeat('a',64),1,'openai_public'),
-				($2,'openai',true,'{}'::jsonb,repeat('b',64),1,'openai_public')
+				($1,'openai',true,'{}'::jsonb,md5($3) || md5($3),1,'openai_public'),
+				($2,'openai',true,'{}'::jsonb,md5($4) || md5($4),1,'openai_public')
 			RETURNING id,salon_id
 		)
 		INSERT INTO openai_runtime_verification_runs (
@@ -162,7 +199,7 @@ func TestV80RuntimeRoleEnforcesActorPublicAndSystemTenantBoundaries(t *testing.T
 		SELECT config.salon_id,config.id,salon.owner_user_id,'rls-openai-' || config.salon_id::text,
 		       repeat('c',64),1,1,'openai-public-v1','openai-voice-v1'
 		FROM configs config JOIN salons salon ON salon.id=config.salon_id
-	`, salonA, salonB); err != nil {
+	`, salonA, salonB, fixturePrefix+"-openai-a", fixturePrefix+"-openai-b"); err != nil {
 		t.Fatalf("insert OpenAI verification fixtures: %v", err)
 	}
 	if _, err := adminDB.ExecContext(context.Background(), `
@@ -273,32 +310,37 @@ func TestV80RuntimeRoleEnforcesActorPublicAndSystemTenantBoundaries(t *testing.T
 	assertVerificationRunUpdates(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeProvider, salonA), salonA, 0)
 	assertVerificationRunUpdates(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeWorker, salonA), salonA, 1)
 	assertVerificationRunUpdates(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeWorker, salonA), salonB, 0)
-	claimOpenAIVerifications := func(ctx context.Context) int {
+	claimOpenAIVerifications := func(ctx context.Context) map[string]int {
 		t.Helper()
 		rows, err := runtimeDB.QueryContext(ctx, `
-			SELECT run_id FROM public.app_worker_claim_openai_runtime_verifications(10,300000)
+			SELECT run_id, salon_id::text FROM public.app_worker_claim_openai_runtime_verifications(10,300000)
 		`)
 		if err != nil {
 			t.Fatalf("claim OpenAI verification runs: %v", err)
 		}
 		defer rows.Close()
-		count := 0
+		claimedBySalon := map[string]int{}
 		for rows.Next() {
-			count++
+			var runID string
+			var claimedSalonID string
+			if err := rows.Scan(&runID, &claimedSalonID); err != nil {
+				t.Fatalf("scan OpenAI verification claim: %v", err)
+			}
+			claimedBySalon[claimedSalonID]++
 		}
 		if err := rows.Err(); err != nil {
 			t.Fatalf("iterate OpenAI verification claims: %v", err)
 		}
-		return count
+		return claimedBySalon
 	}
-	if got := claimOpenAIVerifications(context.Background()); got != 0 {
-		t.Fatalf("unscoped OpenAI verification claims=%d, want 0", got)
+	if got := claimOpenAIVerifications(context.Background()); len(got) != 0 {
+		t.Fatalf("unscoped OpenAI verification claims=%v, want none", got)
 	}
-	if got := claimOpenAIVerifications(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeWorker, salonA)); got != 0 {
-		t.Fatalf("tenant-bound discovery OpenAI verification claims=%d, want 0", got)
+	if got := claimOpenAIVerifications(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeWorker, salonA)); len(got) != 0 {
+		t.Fatalf("tenant-bound discovery OpenAI verification claims=%v, want none", got)
 	}
-	if got := claimOpenAIVerifications(databasecontext.WithScope(context.Background(), databasecontext.ScopeWorker)); got != 2 {
-		t.Fatalf("unbound worker OpenAI verification claims=%d, want 2", got)
+	if got := claimOpenAIVerifications(databasecontext.WithScope(context.Background(), databasecontext.ScopeWorker)); got[salonA] != 1 || got[salonB] != 1 {
+		t.Fatalf("unbound worker OpenAI verification claims=%v, want one fixture claim per salon", got)
 	}
 
 	assertServiceUpdates := func(ctx context.Context, targetSalonID string, want int64) {
@@ -325,7 +367,7 @@ func TestV80RuntimeRoleEnforcesActorPublicAndSystemTenantBoundaries(t *testing.T
 	if err := runtimeDB.QueryRowContext(
 		databasecontext.WithScope(context.Background(), databasecontext.ScopeProvider),
 		`SELECT public.app_provider_voice_phone_salon($1)::text`,
-		"555-6801",
+		phoneA,
 	).Scan(&locatedSalonID); err != nil {
 		t.Fatalf("locate provider voice salon: %v", err)
 	}
@@ -415,6 +457,159 @@ func TestV80RuntimeRoleEnforcesActorPublicAndSystemTenantBoundaries(t *testing.T
 	assertCount(platformContext, "call_sessions", 1)
 	assertCount(platformContext, "appointments", 1)
 	assertCount(platformContext, "owner_notifications", 1)
+
+	// A provider-bound live call is a system runtime operation, not an
+	// interactive action performed by the salon Owner. Revoking the Owner
+	// must still fail interactive actor access closed without interrupting the
+	// exact-salon provider runtime.
+	if _, err := adminDB.ExecContext(context.Background(), `
+		UPDATE salon_memberships
+		SET status='revoked', version=version+1, updated_at=now()
+		WHERE salon_id=$1 AND user_id=$2
+	`, salonA, ownerA); err != nil {
+		t.Fatalf("revoke owner membership for provider runtime regression: %v", err)
+	}
+
+	ownerContext := databasecontext.WithActor(context.Background(), ownerA)
+	providerContext := databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeProvider, salonA)
+	unboundProviderContext := databasecontext.WithScope(context.Background(), databasecontext.ScopeProvider)
+	crossTenantProviderContext := databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeProvider, salonB)
+
+	conversationRepo := conversationmodule.NewRepository(runtimeDB)
+	if _, err := conversationRepo.GetRuntimeConfig(ownerContext, salonA, ownerA); !errors.Is(err, conversationmodule.ErrNotFound) {
+		t.Fatalf("revoked owner runtime config error=%v, want conversation not found", err)
+	}
+	if _, err := conversationRepo.GetRuntimeConfig(unboundProviderContext, salonA, ownerA); !errors.Is(err, conversationmodule.ErrNotFound) {
+		t.Fatalf("unbound provider runtime config error=%v, want conversation not found", err)
+	}
+	if _, err := conversationRepo.GetRuntimeConfig(crossTenantProviderContext, salonA, ownerA); !errors.Is(err, conversationmodule.ErrNotFound) {
+		t.Fatalf("cross-tenant provider runtime config error=%v, want conversation not found", err)
+	}
+	if _, err := conversationRepo.GetRuntimeConfig(providerContext, salonA, ownerA); err != nil {
+		t.Fatalf("exact-salon provider runtime config: %v", err)
+	}
+
+	phoneSession, err := conversationRepo.CreateSession(providerContext, conversationmodule.NewSessionRecord{
+		SalonID:        salonA,
+		OwnerUserID:    ownerA,
+		Channel:        conversationmodule.ChannelPhone,
+		Provider:       "twilio",
+		ProviderCallID: "CA" + suffix,
+		InboundPhone:   "+13125556810",
+		OutboundPhone:  "+13125556811",
+		InitialReply:   "How can I help today?",
+	})
+	if err != nil {
+		t.Fatalf("create exact-salon provider phone session: %v", err)
+	}
+	phoneSession, err = conversationRepo.SaveTurn(providerContext, conversationmodule.TurnRecord{
+		SalonID:               salonA,
+		OwnerUserID:           ownerA,
+		Session:               *phoneSession,
+		ExpectedStateRevision: phoneSession.StateRevision,
+		CustomerMessage:       "I need help choosing a service.",
+		AIMessage:             "I can help with that.",
+		EventKey:              "provider-runtime-turn-" + suffix,
+		Update: conversationmodule.SessionUpdate{
+			Status:      conversationmodule.StatusActive,
+			Intent:      conversationmodule.IntentUnknown,
+			Outcome:     conversationmodule.OutcomeCollecting,
+			DialogState: phoneSession.DialogState,
+		},
+	})
+	if err != nil {
+		t.Fatalf("save exact-salon provider phone turn: %v", err)
+	}
+	if phoneSession.StateRevision != 1 {
+		t.Fatalf("provider phone state revision=%d, want 1", phoneSession.StateRevision)
+	}
+
+	salonRepo := salon.NewRepository(runtimeDB)
+	if _, err := salonRepo.GetSettings(ownerContext, salonA, ownerA); !errors.Is(err, salon.ErrNotFound) {
+		t.Fatalf("revoked owner settings error=%v, want salon not found", err)
+	}
+	if _, err := salonRepo.GetSettings(providerContext, salonA, ownerA); err != nil {
+		t.Fatalf("exact-salon provider settings: %v", err)
+	}
+
+	schedulingRepo := scheduling.NewRepository(runtimeDB)
+	if _, err := schedulingRepo.ResolveSchedulingAuthority(ownerContext, salonA, ownerA); !errors.Is(err, pos.ErrNotFound) {
+		t.Fatalf("revoked owner scheduling authority error=%v, want POS not found", err)
+	}
+	if authority, err := schedulingRepo.ResolveSchedulingAuthority(providerContext, salonA, ownerA); err != nil {
+		t.Fatalf("exact-salon provider scheduling authority: %v", err)
+	} else if authority != bookingmodule.SchedulingAuthorityOwnerManual {
+		t.Fatalf("provider scheduling authority=%q, want owner_manual", authority)
+	}
+
+	calendarRepo := calendar.NewRepository(runtimeDB)
+	if _, err := calendarRepo.GetAggregate(ownerContext, salonA, ownerA); !errors.Is(err, calendar.ErrNotFound) {
+		t.Fatalf("revoked owner internal-calendar aggregate error=%v, want calendar not found", err)
+	}
+	if aggregate, err := calendarRepo.GetAggregate(providerContext, salonA, ownerA); err != nil {
+		t.Fatalf("exact-salon provider internal-calendar aggregate: %v", err)
+	} else if aggregate.SchedulingAuthority != bookingmodule.SchedulingAuthorityOwnerManual {
+		t.Fatalf("provider internal-calendar authority=%q, want owner_manual", aggregate.SchedulingAuthority)
+	}
+
+	bookingRepo := bookingmodule.NewRepository(runtimeDB)
+	if err := bookingRepo.EnsureSalonOwner(ownerContext, salonA, ownerA); !errors.Is(err, pos.ErrNotFound) {
+		t.Fatalf("revoked owner booking access error=%v, want POS not found", err)
+	}
+	if err := bookingRepo.EnsureSalonOwner(providerContext, salonA, ownerA); err != nil {
+		t.Fatalf("exact-salon provider booking access: %v", err)
+	}
+
+	ownerManualRepo := scheduling_owner_manual.NewRepository(runtimeDB)
+	if _, _, err := ownerManualRepo.SchedulingTargetReadinessFacts(ownerContext, salonA, ownerA); !errors.Is(err, pos.ErrNotFound) {
+		t.Fatalf("revoked owner manual readiness error=%v, want POS not found", err)
+	}
+	if _, serviceCount, err := ownerManualRepo.SchedulingTargetReadinessFacts(providerContext, salonA, ownerA); err != nil {
+		t.Fatalf("exact-salon provider owner-manual readiness: %v", err)
+	} else if serviceCount != 1 {
+		t.Fatalf("provider owner-manual eligible services=%d, want 1", serviceCount)
+	}
+
+	var serviceID string
+	if err := adminDB.QueryRowContext(context.Background(), `
+		SELECT id::text FROM services WHERE salon_id=$1 AND name='Tenant A Service'
+	`, salonA).Scan(&serviceID); err != nil {
+		t.Fatalf("load provider runtime service fixture: %v", err)
+	}
+	voiceRequest := scheduling.ActionRequest{
+		OperationType:      scheduling.OperationKindBook,
+		OperationKey:       "provider-runtime-owner-manual-" + suffix,
+		Source:             bookingmodule.SourceAIVoiceCall,
+		CallSessionID:      phoneSession.ID,
+		CustomerName:       "Provider Runtime Caller",
+		CustomerPhone:      "+13125556812",
+		RequestedStartTime: time.Now().UTC().Add(48 * time.Hour),
+		RequestedTimezone:  "America/Chicago",
+		PartySize:          1,
+		Segments: []scheduling.ActionSegment{{
+			ServiceID:          serviceID,
+			StaffSelectionMode: bookingmodule.StaffSelectionAnyone,
+			GuestReference:     "guest-1",
+			Quantity:           1,
+		}},
+	}
+	if _, _, err := ownerManualRepo.CreateOrReplay(ownerContext, salonA, ownerA, voiceRequest, strings.Repeat("e", 64)); !errors.Is(err, pos.ErrNotFound) {
+		t.Fatalf("revoked owner scheduling write error=%v, want POS not found", err)
+	}
+	createdRequest, replayed, err := ownerManualRepo.CreateOrReplay(providerContext, salonA, ownerA, voiceRequest, strings.Repeat("e", 64))
+	if err != nil {
+		t.Fatalf("create exact-salon provider owner-manual request: %v", err)
+	}
+	if replayed || createdRequest.Status != scheduling.SchedulingRequestStatusPending {
+		t.Fatalf("provider owner-manual create replayed=%t status=%q, want new pending request", replayed, createdRequest.Status)
+	}
+	replayedRequest, replayed, err := ownerManualRepo.CreateOrReplay(providerContext, salonA, ownerA, voiceRequest, strings.Repeat("e", 64))
+	if err != nil {
+		t.Fatalf("replay exact-salon provider owner-manual request: %v", err)
+	}
+	if !replayed || replayedRequest.ID != createdRequest.ID {
+		t.Fatalf("provider owner-manual replay=%t id=%q, want exact request %q", replayed, replayedRequest.ID, createdRequest.ID)
+	}
 }
 
 func runtimeRoleURL(adminURL, role, password string) (string, error) {

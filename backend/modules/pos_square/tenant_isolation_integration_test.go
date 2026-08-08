@@ -29,6 +29,58 @@ import (
 	"github.com/manleai/ai-receptionist/modules/pos"
 )
 
+func TestSquareSchedulingEvidenceUsesExactSystemSalonWithoutOwnerMembership(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		if os.Getenv("OWNER_FIRST_RELEASE_GATE_DATABASE_REQUIRED") == "1" {
+			t.Fatal("TEST_DATABASE_URL is required in release-gate mode")
+		}
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := database.Open(context.Background(), databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")
+	ownerA, salonA := insertStrictSquareTenant(t, context.Background(), db, "System evidence tenant A", "+13125551141", suffix+"a")
+	ownerB, salonB := insertStrictSquareTenant(t, context.Background(), db, "System evidence tenant B", "+13125551142", suffix+"b")
+	defer cleanupStrictSquareTenants(t, db, []string{salonA, salonB}, []string{ownerA, ownerB})
+	if _, err := db.ExecContext(context.Background(), `
+		UPDATE salon_memberships
+		SET status='revoked', version=version+1, updated_at=now()
+		WHERE salon_id=$1 AND user_id=$2
+	`, salonA, ownerA); err != nil {
+		t.Fatalf("revoke owner membership: %v", err)
+	}
+
+	loadEvidence := func(ctx context.Context) (squareSchedulingTargetEvidence, error) {
+		t.Helper()
+		tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+		if err != nil {
+			return squareSchedulingTargetEvidence{}, err
+		}
+		defer tx.Rollback()
+		return loadSquareSchedulingTargetEvidenceTx(ctx, tx, salonA, ownerA)
+	}
+
+	if _, err := loadEvidence(databasecontext.WithActor(context.Background(), ownerA)); !errors.Is(err, pos.ErrNotFound) {
+		t.Fatalf("revoked owner scheduling evidence error=%v, want POS not found", err)
+	}
+	if _, err := loadEvidence(databasecontext.WithScope(context.Background(), databasecontext.ScopeProvider)); !errors.Is(err, pos.ErrNotFound) {
+		t.Fatalf("unbound provider scheduling evidence error=%v, want POS not found", err)
+	}
+	if _, err := loadEvidence(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeProvider, salonB)); !errors.Is(err, pos.ErrNotFound) {
+		t.Fatalf("cross-tenant provider scheduling evidence error=%v, want POS not found", err)
+	}
+	if evidence, err := loadEvidence(databasecontext.WithSystemSalon(context.Background(), databasecontext.ScopeProvider, salonA)); err != nil {
+		t.Fatalf("exact-salon provider scheduling evidence: %v", err)
+	} else if evidence.AuthorityVersion != 1 {
+		t.Fatalf("provider scheduling evidence authority version=%d, want 1", evidence.AuthorityVersion)
+	}
+}
+
 func TestSquareTwoTenantEndToEndIsolation(t *testing.T) {
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {

@@ -138,7 +138,10 @@ func (r *Repository) GetRuntimeConfig(ctx context.Context, salonID string, owner
 		FROM salons s
 		LEFT JOIN salon_settings ss ON ss.salon_id = s.id
 		WHERE s.id = $1
-		  AND public.app_actor_feature_access($2::uuid, s.id, 'calls.simulate', 'calls')
+		  AND (
+		      public.app_rls_system_salon_allowed(s.id)
+		      OR public.app_actor_feature_access($2::uuid, s.id, 'calls.simulate', 'calls')
+		  )
 	`, salonID, ownerUserID).Scan(
 		&cfg.SalonName,
 		&cfg.Timezone,
@@ -423,7 +426,8 @@ func (r *Repository) GetSessionForOwner(ctx context.Context, salonID string, own
 		WHERE cs.id = $1
 		  AND cs.salon_id = $2
 		  AND (
-		      public.app_actor_feature_access($3::uuid, salon.id, 'calls.read', 'calls')
+		      public.app_rls_system_salon_allowed(salon.id)
+		      OR public.app_actor_feature_access($3::uuid, salon.id, 'calls.read', 'calls')
 		      OR public.app_actor_feature_access($3::uuid, salon.id, 'calls.simulate', 'calls')
 		  )
 	`, sessionID, salonID, ownerUserID)
@@ -448,7 +452,8 @@ func (r *Repository) GetSessionByTurnEventKey(ctx context.Context, salonID strin
 		WHERE cs.id = $1
 		  AND cs.salon_id = $2
 		  AND (
-		      public.app_actor_feature_access($3::uuid, salon.id, 'calls.read', 'calls')
+		      public.app_rls_system_salon_allowed(salon.id)
+		      OR public.app_actor_feature_access($3::uuid, salon.id, 'calls.read', 'calls')
 		      OR public.app_actor_feature_access($3::uuid, salon.id, 'calls.simulate', 'calls')
 		  )
 		  AND EXISTS (
@@ -1395,7 +1400,10 @@ func (r *Repository) SaveTurn(ctx context.Context, record TurnRecord) (session *
 		JOIN salons s ON s.id = cs.salon_id
 		WHERE cs.id = $1
 		  AND cs.salon_id = $2
-			  AND public.app_actor_feature_access($3::uuid, s.id, 'calls.simulate', 'calls')
+		  AND (
+		      public.app_rls_system_salon_allowed(s.id)
+		      OR public.app_actor_feature_access($3::uuid, s.id, 'calls.simulate', 'calls')
+		  )
 		  AND cs.lifecycle_status <> $4
 		FOR UPDATE
 		`, record.Session.ID, record.SalonID, record.OwnerUserID, LifecycleRedacted).Scan(&lockedStateRevision); err != nil {
