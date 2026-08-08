@@ -12,6 +12,7 @@ BACKEND_RACE_PACKAGES=(
   ./internal/ratelimit
   ./internal/schedulingload
   ./modules/access
+  ./modules/ai_runtime_control
   ./modules/auth
   ./modules/booking
   ./modules/business
@@ -73,6 +74,7 @@ SECURITY_CONTRACT_PACKAGES=(
   ./internal/middleware
   ./internal/ratelimit
   ./modules/access
+  ./modules/ai_runtime_control
   ./modules/auth
   ./modules/business
   ./modules/booking
@@ -100,6 +102,7 @@ SECURITY_CONTRACT_PACKAGES=(
 )
 
 SECURITY_CONTRACT_TEST_FILES=(
+  backend/migrations/v89_safety_test.go
   backend/migrations/v86_safety_test.go
   backend/migrations/v87_safety_test.go
   backend/migrations/v88_safety_test.go
@@ -131,12 +134,14 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/internal/middleware/rate_limit_test.go
   backend/internal/ratelimit/redis_store_integration_test.go
   frontend/lib/api/business.test.ts
+  frontend/lib/api/ai-runtime-routes.test.ts
+  frontend/lib/api/platform-tenant-routes.test.ts
   frontend/lib/api/platform-configuration-transfer.test.ts
   frontend/lib/api/access.test.ts
   frontend/lib/api/session.test.ts
   frontend/lib/api/browser-session.test.ts
   frontend/lib/security/content-security-policy.test.ts
-  frontend/features/platform/technical-integration-settings-contract.test.ts
+  frontend/features/platform/platform-integration-settings-contract.test.ts
   landing/lib/security/content-security-policy.test.ts
   pos-calendar/lib/api/browser-session.test.ts
   pos-calendar/lib/security/content-security-policy.test.ts
@@ -144,6 +149,8 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/access/repository_integration_test.go
   backend/modules/access/routes_test.go
   backend/modules/access/service_test.go
+  backend/modules/ai_runtime_control/routes_test.go
+  backend/modules/ai_runtime_control/service_test.go
   backend/modules/auth/handler_test.go
   backend/modules/auth/repository_integration_test.go
   backend/modules/auth/service_test.go
@@ -159,6 +166,7 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/config_transfer/repository_test.go
   backend/modules/config_transfer/platform_service_test.go
   backend/modules/conversation/manleai_calendar_party_scheduling_test.go
+  backend/modules/conversation/v2_routes_test.go
   backend/modules/conversation/answer_context_performance_test.go
   backend/modules/conversation/answer_context_performance_integration_test.go
   backend/modules/conversation/platform_support_routes_test.go
@@ -206,12 +214,14 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/scheduling/handler_test.go
   backend/modules/scheduling/service_test.go
   backend/modules/scheduling_manleai_calendar/execution_repository_integration_test.go
+  backend/modules/scheduling_manleai_calendar/platform_v2_routes_test.go
   backend/modules/scheduling_manleai_calendar/executor_test.go
   backend/modules/scheduling_owner_manual/repository_integration_test.go
   backend/modules/scheduling_retention/processor_test.go
   backend/modules/scheduling_retention/repository_contract_test.go
   backend/modules/scheduling_retention/repository_integration_test.go
   backend/modules/training/handler_test.go
+  backend/modules/training/v2_routes_test.go
   backend/modules/training/platform_support_routes_test.go
   backend/modules/training/service_test.go
   backend/modules/tenant_runtime/repository_integration_test.go

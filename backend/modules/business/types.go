@@ -58,6 +58,22 @@ type SalonProfile struct {
 	UpdatedAt            time.Time `json:"updated_at"`
 }
 
+type PlatformTenantContextPermissions struct {
+	CanRead        bool     `json:"can_read"`
+	AllowedActions []string `json:"allowed_actions"`
+	PIIScopes      []string `json:"pii_scopes"`
+}
+
+type PlatformTenantContextMeta struct {
+	ResourceVersion int64                            `json:"resource_version"`
+	Permissions     PlatformTenantContextPermissions `json:"permissions"`
+}
+
+type PlatformTenantContextResponse struct {
+	Data SalonProfile              `json:"data"`
+	Meta PlatformTenantContextMeta `json:"meta"`
+}
+
 type SalonProfileMutationRequest struct {
 	MutationControl
 	Name              string `json:"name"`

@@ -37,6 +37,11 @@ func (h *Handler) Latest(c *fiber.Ctx) error {
 	return respondSwitch(c, result, err)
 }
 
+func (h *Handler) LatestV2(c *fiber.Ctx) error {
+	result, err := h.service.Latest(c.UserContext(), switchSalonID(c), middleware.UserID(c))
+	return respondChangeV2(c, result, err)
+}
+
 func (h *Handler) Get(c *fiber.Ctx) error {
 	result, err := h.service.Get(c.UserContext(), switchSalonID(c), middleware.UserID(c), c.Params("run_id"))
 	return respondSwitch(c, result, err)
@@ -49,6 +54,42 @@ func (h *Handler) Commit(c *fiber.Ctx) error {
 	}
 	result, err := h.service.Commit(c.UserContext(), switchSalonID(c), middleware.UserID(c), c.Params("run_id"), req)
 	return respondSwitch(c, result, err)
+}
+
+func (h *Handler) Change(c *fiber.Ctx) error {
+	var req ChangeRequest
+	if err := c.BodyParser(&req); err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "SCHEDULING_AUTHORITY_SWITCH_VALIDATION_ERROR", "Scheduling authority change input is invalid.")
+	}
+	result, err := h.service.Change(c.UserContext(), switchSalonID(c), middleware.UserID(c), req)
+	return respondChangeV2(c, result, err)
+}
+
+func (h *Handler) PrepareChange(c *fiber.Ctx) error {
+	var req ChangeRequest
+	if err := c.BodyParser(&req); err != nil {
+		return respond.Error(c, fiber.StatusBadRequest, "SCHEDULING_AUTHORITY_SWITCH_VALIDATION_ERROR", "Scheduling authority readiness input is invalid.")
+	}
+	result, err := h.service.PrepareChange(c.UserContext(), switchSalonID(c), middleware.UserID(c), req)
+	return respondChangeV2(c, result, err)
+}
+
+func respondChangeV2(c *fiber.Ctx, result *PreviewResponse, err error) error {
+	if err != nil {
+		return respondSwitch(c, nil, err)
+	}
+	actions := make([]string, 0, 1)
+	if result.SwitchRun.Status == StatusPreviewBlocked {
+		actions = append(actions, "retry_after_resolving_blockers")
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{
+		"data": result.SwitchRun,
+		"meta": fiber.Map{
+			"replayed":         result.Replayed,
+			"resource_version": result.SwitchRun.ExpectedSourceAuthorityVersion,
+			"permissions":      fiber.Map{"can_read": true, "allowed_actions": actions},
+		},
+	})
 }
 
 func respondSwitch(c *fiber.Ctx, body *PreviewResponse, err error) error {

@@ -82,7 +82,7 @@ async function sendRequest(path: string, init: RequestInit, accessToken = getAcc
     headers.delete("Authorization");
   }
   const activeTenantSalonID = storedActiveTenantSalonID();
-  if (activeTenantSalonID && !path.startsWith("/api/platform/")) {
+  if (activeTenantSalonID && !isPlatformPath(path)) {
     headers.set("X-Tenant-Salon-ID", activeTenantSalonID);
   }
 
@@ -92,6 +92,10 @@ async function sendRequest(path: string, init: RequestInit, accessToken = getAcc
     credentials: "include",
     cache: "no-store"
   });
+}
+
+function isPlatformPath(path: string) {
+  return path.startsWith("/api/platform/") || path.startsWith("/api/v2/platform/");
 }
 
 async function requestWithRefresh(path: string, init: RequestInit) {

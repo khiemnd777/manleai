@@ -275,6 +275,51 @@ func TestCommitRejectsChangedExternalAdapterTransactionalProof(t *testing.T) {
 	}
 }
 
+func TestChangeAuthorityCreatesAndCommitsOneReplaySafeCommand(t *testing.T) {
+	store := &fakeStore{
+		current:          authorityState{Authority: TargetExternalProvider, Version: 7},
+		eligibleServices: 2,
+	}
+	service := NewService(store, nil, nil, true)
+	request := ChangeRequest{
+		TargetSchedulingAuthority: TargetOwnerManual,
+		ExpectedAuthorityVersion:  7,
+		ActionKey:                 "change-authority-7",
+	}
+
+	response, err := service.Change(context.Background(), "salon-1", "platform-admin-1", request)
+	if err != nil {
+		t.Fatalf("change authority: %v", err)
+	}
+	if response == nil || response.SwitchRun == nil || response.SwitchRun.Status != "committed" {
+		t.Fatalf("change response=%#v", response)
+	}
+	if store.createCalls != 1 || store.commitCalls != 1 {
+		t.Fatalf("change calls preview=%d commit=%d, want one each", store.createCalls, store.commitCalls)
+	}
+	if response.SwitchRun.ActorUserID != "platform-admin-1" {
+		t.Fatalf("actual actor=%q", response.SwitchRun.ActorUserID)
+	}
+}
+
+func TestChangeAuthorityReturnsBlockedReadinessWithoutCommit(t *testing.T) {
+	store := &fakeStore{current: authorityState{Authority: TargetExternalProvider, Version: 7}}
+	response, err := NewService(store, nil, nil, false).Change(context.Background(), "salon-1", "platform-admin-1", ChangeRequest{
+		TargetSchedulingAuthority: TargetOwnerManual,
+		ExpectedAuthorityVersion:  7,
+		ActionKey:                 "blocked-authority-change",
+	})
+	if err != nil {
+		t.Fatalf("blocked change: %v", err)
+	}
+	if response == nil || response.SwitchRun == nil || response.SwitchRun.Status != StatusPreviewBlocked {
+		t.Fatalf("blocked response=%#v", response)
+	}
+	if store.commitCalls != 0 {
+		t.Fatalf("blocked change committed %d times", store.commitCalls)
+	}
+}
+
 type fakeStore struct {
 	existing          *SwitchRun
 	current           authorityState
@@ -319,6 +364,7 @@ func (f *fakeStore) CreateOrReplayPreview(_ context.Context, input persistPrevie
 		OperationKey:                   input.OperationKey, ActorUserID: input.OwnerUserID, ReadinessSnapshot: input.ReadinessSnapshot, Blockers: input.Blockers,
 		Status: input.Status, PreviewedAt: now, CreatedAt: now, UpdatedAt: now, payloadFingerprint: input.PayloadFingerprint,
 	}
+	f.existing = run
 	return run, false, nil
 }
 

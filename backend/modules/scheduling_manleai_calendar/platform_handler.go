@@ -14,12 +14,13 @@ type platformAuthorizer interface {
 }
 
 type PlatformHandler struct {
-	delegate *Handler
-	access   platformAuthorizer
+	delegate           *Handler
+	normalizedDelegate *Handler
+	access             platformAuthorizer
 }
 
 func NewPlatformHandler(service *Service, authorizer platformAuthorizer) *PlatformHandler {
-	return &PlatformHandler{delegate: NewHandler(service), access: authorizer}
+	return &PlatformHandler{delegate: NewHandler(service), normalizedDelegate: NewNormalizedHandler(service), access: authorizer}
 }
 
 func (h *PlatformHandler) guard(capability access.Capability, next fiber.Handler) fiber.Handler {

@@ -65,11 +65,11 @@ export type PlatformTransferResponse = {
 };
 
 export function platformTransferBase(tenantID: string) {
-  return `/api/platform/tenants/${encodeURIComponent(tenantID)}/configuration-transfer`;
+  return `/api/v2/platform/tenants/${encodeURIComponent(tenantID)}/configuration-transfers`;
 }
 
 export function previewPlatformTransfer(tenantID: string, request: PlatformTransferRequest) {
-  return apiRequest<PlatformTransferResponse>(`${platformTransferBase(tenantID)}/preview`, {
+  return platformTransferRequest<PlatformTransferResponse>(`${platformTransferBase(tenantID)}/previews`, {
     method: "POST",
     body: JSON.stringify(request)
   });
@@ -81,21 +81,21 @@ export function applyPlatformTransfer(
   previewID: string,
   actionKey: string
 ) {
-  return apiRequest<PlatformTransferResponse>(`${platformTransferBase(tenantID)}/apply`, {
+  return platformTransferRequest<PlatformTransferResponse>(`${platformTransferBase(tenantID)}/applications`, {
     method: "POST",
     body: JSON.stringify({ ...request, preview_id: previewID, action_key: actionKey })
   });
 }
 
 export function listPlatformTransferRuns(tenantID: string, limit = 25) {
-  return apiRequest<{ runs: PlatformTransferResponse[] }>(
+  return platformTransferRequest<{ runs: PlatformTransferResponse[] }>(
     `${platformTransferBase(tenantID)}/runs?limit=${limit}`
   );
 }
 
 export async function exportPlatformConfiguration(tenantID: string, sections: string[], salonName: string) {
   const path = `${platformTransferBase(tenantID)}/export?sections=${encodeURIComponent(sections.join(","))}`;
-  const bundle = await apiRequest<ConfigurationBundle>(path);
+  const bundle = await platformTransferRequest<ConfigurationBundle>(path);
   const filename = `${slugify(bundle.salon_profile?.name || salonName || "salon") || "salon"}-platform-configuration-${datePart(bundle.exported_at)}.json`;
   const blob = new Blob([JSON.stringify(bundle)], { type: "application/json" });
   const url = window.URL.createObjectURL(blob);
@@ -106,6 +106,10 @@ export async function exportPlatformConfiguration(tenantID: string, sections: st
   link.click();
   link.remove();
   window.URL.revokeObjectURL(url);
+}
+
+async function platformTransferRequest<T>(path: string, init: RequestInit = {}) {
+  return (await apiRequest<{ data: T }>(path, init)).data;
 }
 
 export async function readPlatformConfiguration(file: File): Promise<PlatformConfigurationFile> {

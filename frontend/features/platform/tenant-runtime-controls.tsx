@@ -50,7 +50,7 @@ export function TenantRuntimeControls({ tenantID }: { tenantID: string }) {
     setLoading(true);
     setError("");
     try {
-      const result = await apiRequest<RuntimeProfile>(`/api/platform/tenants/${tenantID}/operations/runtime?window_minutes=60`);
+      const result = (await apiRequest<{data:RuntimeProfile}>(`/api/v2/platform/tenants/${encodeURIComponent(tenantID)}/operations/runtime-limits?window_minutes=60`)).data;
       setProfile(result);
       setForm(formFromLimits(result.limits));
       setBlocked(false);
@@ -73,10 +73,10 @@ export function TenantRuntimeControls({ tenantID }: { tenantID: string }) {
     const stableActionKey = actionKey || newActionKey();
     setActionKey(stableActionKey);
     try {
-      const limits = await apiRequest<RuntimeLimits>(`/api/platform/tenants/${tenantID}/operations/runtime/limits`, {
+      const limits = (await apiRequest<{data:RuntimeLimits}>(`/api/v2/platform/tenants/${encodeURIComponent(tenantID)}/operations/runtime-limits`, {
         method: "PUT",
         body: JSON.stringify({ ...form, action_key: stableActionKey, expected_version: profile.limits.version })
-      });
+      })).data;
       setProfile((current) => current ? { ...current, limits } : current);
       setForm(formFromLimits(limits));
       setActionKey("");

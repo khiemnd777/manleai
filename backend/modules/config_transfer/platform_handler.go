@@ -18,8 +18,9 @@ type platformTransferAuthorizer interface {
 }
 
 type PlatformHandler struct {
-	service *PlatformService
-	access  platformTransferAuthorizer
+	service    *PlatformService
+	access     platformTransferAuthorizer
+	normalized bool
 }
 
 func NewPlatformHandler(service *PlatformService, authorizer platformTransferAuthorizer) *PlatformHandler {
@@ -209,6 +210,9 @@ func (h *PlatformHandler) respond(c *fiber.Ctx, value any, err error) error {
 	case err != nil:
 		return respond.Error(c, fiber.StatusInternalServerError, "CONFIGURATION_TRANSFER_FAILED", "Could not complete Platform configuration transfer.")
 	default:
+		if h.normalized {
+			return respond.JSON(c, fiber.StatusOK, fiber.Map{"data": value, "meta": fiber.Map{"replayed": false, "resource_version": 0, "permissions": fiber.Map{"can_read": true, "allowed_actions": []string{}}}})
+		}
 		return respond.JSON(c, fiber.StatusOK, value)
 	}
 }

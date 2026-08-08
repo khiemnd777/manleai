@@ -158,7 +158,7 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
   }
 
   async function fetchSessionPage(salonID: string, filter: LifecycleFilter, limit: number, offset: number) {
-    return apiRequest<SessionsResponse>(sessionListPath(salonID, filter, limit, offset));
+    return callsApiRequest<SessionsResponse>(sessionListPath(salonID, filter, limit, offset));
   }
 
   async function fetchSessionPageWithFallback(salonID: string, filter: LifecycleFilter, limit: number, offset: number) {
@@ -180,7 +180,7 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
   }
 
   async function fetchPartyRequests(salonID: string, status: PartyStatusFilter, limit: number, offset: number) {
-    return apiRequest<PartyRequestsResponse>(partyRequestsPath(salonID, status, limit, offset));
+    return callsApiRequest<PartyRequestsResponse>(partyRequestsPath(salonID, status, limit, offset));
   }
 
   async function fetchPartyRequestsWithFallback(salonID: string, status: PartyStatusFilter, limit: number, offset: number) {
@@ -251,12 +251,12 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
       }
 
       const [voiceResponse, sessionsResponse, readinessResponse, partyResponse, serviceResponse, staffResponse] = await Promise.all([
-        apiRequest<VoiceStatus>(callsResourcePath(surface, activeSalon.id, "/voice/status")),
+        callsApiRequest<VoiceStatus>(callsResourcePath(surface, activeSalon.id, "/voice/status")),
         fetchSessionPageWithFallback(activeSalon.id, filter, limit, offset),
         fetchSessionPage(activeSalon.id, "active", readinessMetricLimit, 0),
         fetchPartyRequestsWithFallback(activeSalon.id, partyStatusFilter, partyLimit, partyOffset),
-        apiRequest<ServicesResponse>(callsResourcePath(surface, activeSalon.id, "/services")),
-        apiRequest<StaffResponse>(callsResourcePath(surface, activeSalon.id, "/staff"))
+        callsApiRequest<ServicesResponse>(callsResourcePath(surface, activeSalon.id, "/services")),
+        callsApiRequest<StaffResponse>(callsResourcePath(surface, activeSalon.id, "/staff"))
       ]);
       setVoiceStatus(voiceResponse);
       applySessionPage(sessionsResponse, limit, offset);
@@ -270,7 +270,7 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
       const nextSummary =
         sessionsResponse.sessions.find((item) => item.id === currentID) ?? sessionsResponse.sessions[0] ?? null;
       if (nextSummary) {
-        const detail = await apiRequest<ConversationSession>(
+        const detail = await callsApiRequest<ConversationSession>(
           callsResourcePath(surface, activeSalon.id, `/conversation-sessions/${nextSummary.id}`)
         );
         setSelectedSession(detail);
@@ -322,7 +322,7 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
       let offset = 0;
       let hasMore = true;
       while (hasMore) {
-        const response = await apiRequest<RealtimeEventsResponse>(
+        const response = await callsApiRequest<RealtimeEventsResponse>(
           `${callsResourcePath(surface, salonID, `/conversation-sessions/${sessionID}/realtime-events`)}?limit=${realtimeEventPageSize}&offset=${offset}`
         );
         if (requestID !== realtimeEventsRequestID.current) return;
@@ -376,7 +376,7 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
     setSuccess("");
     setSending(true);
     try {
-      const session = await apiRequest<ConversationSession>(callsResourcePath(surface, salon.id, "/conversation-sessions"), {
+      const session = await callsApiRequest<ConversationSession>(callsResourcePath(surface, salon.id, "/conversation-sessions"), {
         method: "POST",
         body: JSON.stringify({ channel: "simulator" })
       });
@@ -406,12 +406,12 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
     try {
       let session = selectedSession;
       if (!session || session.status !== "active" || session.channel !== "simulator") {
-        session = await apiRequest<ConversationSession>(callsResourcePath(surface, salon.id, "/conversation-sessions"), {
+        session = await callsApiRequest<ConversationSession>(callsResourcePath(surface, salon.id, "/conversation-sessions"), {
           method: "POST",
           body: JSON.stringify({ channel: "simulator" })
         });
       }
-      const updated = await apiRequest<ConversationSession>(
+      const updated = await callsApiRequest<ConversationSession>(
         callsResourcePath(surface, salon.id, `/conversation-sessions/${session.id}/messages`),
         {
           method: "POST",
@@ -434,7 +434,7 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
     setActionError("");
     setSuccess("");
     try {
-      const detail = await apiRequest<ConversationSession>(
+      const detail = await callsApiRequest<ConversationSession>(
         callsResourcePath(surface, salon.id, `/conversation-sessions/${sessionID}`)
       );
       setSelectedSession(detail);
@@ -458,7 +458,7 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
     setSuccess("");
     setSessionActionID(`${item.id}:archive`);
     try {
-      const updated = await apiRequest<ConversationSession>(
+      const updated = await callsApiRequest<ConversationSession>(
         callsResourcePath(surface, salon.id, `/conversation-sessions/${item.id}/archive`),
         { method: "POST" }
       );
@@ -481,7 +481,7 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
     setSuccess("");
     setSessionActionID(`${item.id}:redact`);
     try {
-      const updated = await apiRequest<ConversationSession>(
+      const updated = await callsApiRequest<ConversationSession>(
         callsResourcePath(surface, salon.id, `/conversation-sessions/${item.id}/redact`),
         { method: "POST" }
       );
@@ -504,7 +504,7 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
     setSuccess("");
     setPartyActionID(`${item.id}:${status}`);
     try {
-      const response = await apiRequest<PartyRequestResponse>(
+      const response = await callsApiRequest<PartyRequestResponse>(
         callsResourcePath(surface, salon.id, `/party-booking-requests/${item.id}/status`),
         {
           method: "PATCH",
@@ -533,7 +533,7 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
     setSuccess("");
     setSavingCorrection(true);
     try {
-      await apiRequest<OwnerCorrection>(callsResourcePath(surface, salon.id, "/owner-corrections"), {
+      await callsApiRequest<OwnerCorrection>(callsResourcePath(surface, salon.id, "/owner-corrections"), {
         method: "POST",
         body: JSON.stringify({
           call_session_id: correctionTarget.sessionID,
@@ -1125,9 +1125,31 @@ async function loadPlatformCallsSalon(salonID: string): Promise<Salon | null> {
 function callsResourcePath(surface: CallsSurface, salonID: string, resource: string) {
   const encodedSalonID = encodeURIComponent(salonID);
   if (surface === "tenant") return `/api/salons/${encodedSalonID}${resource}`;
-  const callsScopedResource = resource === "/services" || resource === "/staff" || resource === "/owner-corrections";
-  const prefix = `/api/platform/tenants/${encodedSalonID}${callsScopedResource ? "/calls" : ""}`;
-  return `${prefix}${resource}`;
+  if (resource.startsWith("/conversation-sessions")) {
+    return `/api/v2/platform/tenants/${encodedSalonID}${resource.replace("/conversation-sessions", "/calls")}`;
+  }
+  if (resource.startsWith("/party-booking-requests")) {
+    return `/api/v2/platform/tenants/${encodedSalonID}${resource.replace("/party-booking-requests", "/calls/party-requests")}`;
+  }
+  if (resource === "/voice/status") return `/api/v2/platform/tenants/${encodedSalonID}/calls/readiness`;
+  if (resource === "/services" || resource === "/staff") return `/api/v2/platform/tenants/${encodedSalonID}/calls/catalog${resource}`;
+  if (resource === "/owner-corrections") return `/api/v2/platform/tenants/${encodedSalonID}/calls/corrections`;
+  return `/api/v2/platform/tenants/${encodedSalonID}/calls${resource}`;
+}
+
+async function callsApiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  if (!path.startsWith("/api/v2/platform/")) return apiRequest<T>(path, init);
+  const response = await apiRequest<{ data: unknown; meta: { page?: { limit: number; offset: number; has_more: boolean } } }>(path, init);
+  const method = init.method ?? "GET";
+  const pathname = path.split("?", 1)[0];
+  const page = response.meta.page;
+  if (method === "GET" && /\/calls$/.test(pathname)) return { sessions: response.data, ...page } as T;
+  if (method === "GET" && /\/calls\/party-requests$/.test(pathname)) return { party_booking_requests: response.data, ...page } as T;
+  if (method === "GET" && /\/realtime-events$/.test(pathname)) return { events: response.data, ...page } as T;
+  if (method === "GET" && /\/calls\/catalog\/services$/.test(pathname)) return { services: response.data } as T;
+  if (method === "GET" && /\/calls\/catalog\/staff$/.test(pathname)) return { staff: response.data } as T;
+  if (method === "PATCH" && /\/party-requests\/[^/]+\/status$/.test(pathname)) return { party_booking_request: response.data } as T;
+  return response.data as T;
 }
 
 function ReadinessPanel({ voiceStatus, surface }: { voiceStatus: VoiceStatus | null; surface: CallsSurface }) {
@@ -1149,13 +1171,13 @@ function ReadinessPanel({ voiceStatus, surface }: { voiceStatus: VoiceStatus | n
             </CardDescription>
             <ReadinessBlockers blockers={voiceStatus?.phone_answering?.blockers} />
             <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
-              <Info label="Provider" value={surface === "platform" ? "Managed in Technical settings" : voiceStatus?.provider || "twilio"} />
+              <Info label="Provider" value={surface === "platform" ? "Managed in Integrations" : voiceStatus?.provider || "twilio"} />
               <Info label="Signature" value={<Badge value={voiceStatus?.signature_verification ? "active" : "disabled"} />} />
               <Info label="Input mode" value={<Badge value={voiceStatus?.input_mode || "gather"} />} />
               <Info label="Salon phone" value={voiceStatus?.salon_phone || "Not configured"} />
-              <Info label="Inbound webhook" value={<span className="break-all font-mono text-xs">{surface === "platform" ? "Managed in Technical settings" : voiceStatus?.inbound_webhook_url || "Not configured"}</span>} />
-              <Info label="Recording webhook" value={<span className="break-all font-mono text-xs">{surface === "platform" ? "Managed in Technical settings" : voiceStatus?.recording_webhook_url || "Not configured"}</span>} />
-              <Info label="Realtime stream" value={<span className="break-all font-mono text-xs">{surface === "platform" ? "Managed in Technical settings" : voiceStatus?.stream_webhook_url || "Not configured"}</span>} />
+              <Info label="Inbound webhook" value={<span className="break-all font-mono text-xs">{surface === "platform" ? "Managed in Integrations" : voiceStatus?.inbound_webhook_url || "Not configured"}</span>} />
+              <Info label="Recording webhook" value={<span className="break-all font-mono text-xs">{surface === "platform" ? "Managed in Integrations" : voiceStatus?.recording_webhook_url || "Not configured"}</span>} />
+              <Info label="Realtime stream" value={<span className="break-all font-mono text-xs">{surface === "platform" ? "Managed in Integrations" : voiceStatus?.stream_webhook_url || "Not configured"}</span>} />
             </dl>
             <div className="mt-4 border-t border-line/80 pt-4">
               <div className="flex flex-wrap items-center justify-between gap-2">

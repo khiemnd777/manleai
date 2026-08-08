@@ -108,6 +108,48 @@ func (s *ServiceLayer) SalonProfile(ctx context.Context, actor middleware.ActorC
 	return s.repo.GetSalonProfile(ctx, strings.TrimSpace(salonID))
 }
 
+func (s *ServiceLayer) PlatformTenantContext(ctx context.Context, actor middleware.ActorContext, salonID string) (*PlatformTenantContextResponse, error) {
+	salonID = strings.TrimSpace(salonID)
+	if salonID == "" || actor.PrincipalScope != middleware.PrincipalScopePlatform {
+		return nil, ErrForbidden
+	}
+	if err := s.authorize(ctx, actor, access.AccessCheck{Surface: access.SurfacePlatform, Capability: access.CapabilityPlatformTenantsRead}); err != nil {
+		return nil, err
+	}
+	profile, err := s.repo.GetSalonProfile(ctx, salonID)
+	if err != nil {
+		return nil, err
+	}
+	checks := []access.AccessCheck{
+		{Surface: access.SurfacePlatform, SalonID: salonID, Capability: access.CapabilityBusinessRead},
+		{Surface: access.SurfacePlatform, SalonID: salonID, Capability: access.CapabilityServicesRead},
+		{Surface: access.SurfacePlatform, SalonID: salonID, Capability: access.CapabilityTrainingRead},
+		{Surface: access.SurfacePlatform, SalonID: salonID, Capability: access.CapabilityCallsRead, PIIScope: access.PIIScopeCalls},
+		{Surface: access.SurfacePlatform, SalonID: salonID, Capability: access.CapabilityTechnicalRead},
+		{Surface: access.SurfacePlatform, SalonID: salonID, Capability: access.CapabilityOperationsRead},
+		{Surface: access.SurfacePlatform, SalonID: salonID, Capability: access.CapabilityAuditRead},
+		{Surface: access.SurfacePlatform, SalonID: salonID, Capability: access.CapabilityPlatformAccess},
+	}
+	permissions := PlatformTenantContextPermissions{CanRead: true, AllowedActions: make([]string, 0, len(checks)), PIIScopes: make([]string, 0, 1)}
+	for _, check := range checks {
+		err := s.access.Authorize(ctx, actor, check)
+		if err == nil {
+			permissions.AllowedActions = append(permissions.AllowedActions, string(check.Capability))
+			if check.PIIScope != "" {
+				permissions.PIIScopes = append(permissions.PIIScopes, string(check.PIIScope))
+			}
+			continue
+		}
+		if !errors.Is(err, access.ErrForbidden) {
+			return nil, err
+		}
+	}
+	return &PlatformTenantContextResponse{
+		Data: *profile,
+		Meta: PlatformTenantContextMeta{ResourceVersion: profile.Version, Permissions: permissions},
+	}, nil
+}
+
 func (s *ServiceLayer) UpdateSalonProfile(ctx context.Context, actor middleware.ActorContext, surface access.Surface, salonID string, req SalonProfileMutationRequest) (*MutationResponse[SalonProfile], error) {
 	salonID = strings.TrimSpace(salonID)
 	req = normalizeSalonProfile(req)

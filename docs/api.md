@@ -1,5 +1,11 @@
 # API
 
+The additive normalized Platform tenant contract is defined in
+`docs/platform-tenant-api-v2.md`. Legacy routes documented below remain active
+compatibility adapters until their registered consumers have moved and the v2
+removal gates pass. v2 does not introduce dual writes; both surfaces delegate
+to the same domain services and repositories.
+
 Base URL: `http://localhost:18089`
 
 All endpoints except login, bootstrap owner setup, refresh, logout, health,
@@ -1330,12 +1336,42 @@ write only `source=local_override`. Business-relevant mutations share the
 scheduling advisory fence, and public page publishing reuses the canonical
 selected-authority readiness policy.
 
-## SaaS Platform Technical And Operations APIs
+## SaaS Platform Tenant v2 APIs
 
-Technical configuration is Platform-only. Platform Admin has the capability;
+The active Platform tenant-detail frontend uses the normalized root
+`/api/v2/platform/tenants/:tenant_id`. Platform Admin has direct capability
+authority and acts as the actual actor; no Tenant approval is required.
 Platform Ops needs an active exact-salon assignment with the matching
-`technical.read` or `technical.write` delegation. Tenant memberships do not
-satisfy these routes, and the tenant ID comes only from the fixed route.
+delegation, current temporary authorization where declared, and the exact PII
+grant for sensitive projections. Tenant memberships do not satisfy Platform
+routes, and the tenant ID comes only from the fixed route.
+
+Canonical workflow resources include:
+
+- collection/context: `GET /api/v2/platform/tenants` and `GET /context`
+- Business: `/business/profile`, `/business/hours`, `/business/public-page`,
+  `/staff`, `/customers`, `/services`, and `/service-categories`
+- AI Receptionist: `/calls/*`, `/knowledge`, `/corrections`, `/evaluations`,
+  and `GET|PUT /ai-receptionist/runtime`
+- Integrations: `/integrations`, `/integrations/:provider`, Square connection,
+  sync, activation and safety verification, Twilio voice-routing verification,
+  and OpenAI runtime verification
+- Scheduling: `POST /scheduling/authority/readiness`,
+  `PUT /scheduling/authority`, authority history, and
+  `/scheduling/internal-calendar/*`
+- Operations: `/operations/overview`, `/operations/runtime-limits`,
+  `/operations/provider-events/square`, and `/operations/owner-notifications`
+- governance/history: `/access`, `/audit-events`, and
+  `/configuration-transfers/*`
+
+Successful v2 responses use `{ "data": ..., "meta": ... }`. The exact route
+and response rules are normative in `docs/platform-tenant-api-v2.md`.
+
+### Legacy Platform compatibility routes
+
+The routes below remain mounted for compatibility only. The active Platform
+tenant-detail frontend does not call them. They delegate to the same domain
+services and persistence owners as v2 and must not introduce dual writes.
 
 - `GET|PUT /api/platform/tenants/:tenant_id/technical/integration-configs[/square|/twilio|/openai]`
 - `GET /api/platform/tenants/:tenant_id/technical/square/status`
@@ -1345,11 +1381,13 @@ satisfy these routes, and the tenant ID comes only from the fixed route.
 - `POST /api/platform/tenants/:tenant_id/technical/square/sync`
 - `POST /api/platform/tenants/:tenant_id/technical/square/scheduling-capability/re-evaluate`
 - `POST /api/platform/tenants/:tenant_id/technical/square/active-provider/activate`
-- `POST /api/platform/tenants/:tenant_id/technical/square/ai-booking/enable`
-- `POST /api/platform/tenants/:tenant_id/technical/square/ai-booking/disable`
+- `POST /api/platform/tenants/:tenant_id/technical/square/ai-booking/enable|disable`
 - `/api/platform/tenants/:tenant_id/technical/manleai-calendar/*`
 - `/api/platform/tenants/:tenant_id/technical/scheduling-authority-switches/*`
 
+The compatibility Square AI routes delegate to the same persisted runtime
+state, but canonical management is authority-neutral under
+`/api/v2/platform/tenants/:tenant_id/ai-receptionist/runtime`.
 AI runtime enable/disable requires `action_key` and
 `expected_version`. Exact replay returns the same versioned state; changed-key
 reuse and stale versions fail without changing runtime state. The persisted

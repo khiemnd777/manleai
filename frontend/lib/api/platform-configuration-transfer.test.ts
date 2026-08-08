@@ -18,7 +18,7 @@ function configuration(schemaVersion: string, includedSections?: string[]): Conf
 test("Platform Transfer uses one encoded destination tenant path", () => {
   assert.equal(
     platformTransferBase("salon/a"),
-    "/api/platform/tenants/salon%2Fa/configuration-transfer"
+    "/api/v2/platform/tenants/salon%2Fa/configuration-transfers"
   );
 });
 

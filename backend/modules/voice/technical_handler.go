@@ -15,8 +15,9 @@ type technicalAuthorizer interface {
 }
 
 type TechnicalHandler struct {
-	service *Service
-	access  technicalAuthorizer
+	service    *Service
+	access     technicalAuthorizer
+	normalized bool
 }
 
 func NewTechnicalHandler(service *Service, authorizer technicalAuthorizer) *TechnicalHandler {
@@ -35,6 +36,15 @@ func (h *TechnicalHandler) TwilioVoiceRoutingStatus(c *fiber.Ctx) error {
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "TWILIO_VOICE_ROUTING_STATUS_FAILED", "Could not load Voice routing status.")
+	}
+	if h.normalized {
+		return respond.JSON(c, fiber.StatusOK, fiber.Map{
+			"data": status,
+			"meta": fiber.Map{
+				"replayed": false, "resource_version": 0,
+				"permissions": fiber.Map{"can_read": true, "allowed_actions": []string{}},
+			},
+		})
 	}
 	return respond.JSON(c, fiber.StatusOK, status)
 }

@@ -162,7 +162,7 @@ test("Square keeps visible settings while leaving write-only secrets blank", () 
 test("Platform configuration path encodes one exact tenant identifier", () => {
   assert.equal(
     platformIntegrationConfigBasePath("salon/a"),
-    "/api/platform/tenants/salon%2Fa/technical/integration-configs"
+    "/api/v2/platform/tenants/salon%2Fa/integrations"
   );
 });
 

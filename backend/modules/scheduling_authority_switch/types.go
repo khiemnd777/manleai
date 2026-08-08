@@ -30,6 +30,15 @@ type CommitRequest struct {
 	ActionKey string `json:"action_key"`
 }
 
+// ChangeRequest is the normalized operator command. Preview/run persistence is
+// retained behind this contract for readiness evidence, replay, and audit.
+type ChangeRequest struct {
+	TargetSchedulingAuthority string `json:"target_scheduling_authority"`
+	ExpectedAuthorityVersion  int64  `json:"expected_authority_version"`
+	ActionKey                 string `json:"action_key"`
+	RollbackOfSwitchRunID     string `json:"rollback_of_switch_run_id,omitempty"`
+}
+
 type ReadinessCheck = scheduling.TargetReadinessCheck
 type ReadinessBlocker = scheduling.TargetReadinessBlocker
 type ReadinessSnapshot = scheduling.TargetReadiness

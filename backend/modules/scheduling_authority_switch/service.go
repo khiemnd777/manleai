@@ -56,6 +56,64 @@ func NewService(store Store, calendar targetReadiness, external targetReadiness,
 	return &Service{store: store, calendar: calendar, external: external, ownerManualRegistered: ownerManualRegistered}
 }
 
+// PrepareChange evaluates and persists the immutable readiness evidence used
+// by the normalized command without changing scheduling authority.
+func (s *Service) PrepareChange(ctx context.Context, salonID string, actorUserID string, req ChangeRequest) (*PreviewResponse, error) {
+	salonID = strings.TrimSpace(salonID)
+	actorUserID = strings.TrimSpace(actorUserID)
+	req.TargetSchedulingAuthority = strings.TrimSpace(req.TargetSchedulingAuthority)
+	req.ActionKey = strings.TrimSpace(req.ActionKey)
+	req.RollbackOfSwitchRunID = strings.TrimSpace(req.RollbackOfSwitchRunID)
+	if salonID == "" || actorUserID == "" || !validAuthority(req.TargetSchedulingAuthority) || req.ExpectedAuthorityVersion <= 0 || req.ActionKey == "" || len(req.ActionKey) > maxOperationKeyBytes {
+		return nil, ErrValidation
+	}
+	operationKey := changeOperationKey(req.ActionKey)
+	if existing, err := s.store.FindByOperationKey(ctx, salonID, actorUserID, operationKey); err == nil {
+		if existing.TargetSchedulingAuthority != req.TargetSchedulingAuthority ||
+			existing.ExpectedSourceAuthorityVersion != req.ExpectedAuthorityVersion ||
+			existing.RollbackOfSwitchRunID != req.RollbackOfSwitchRunID {
+			return nil, ErrOperationConflict
+		}
+		return &PreviewResponse{SwitchRun: existing, Replayed: true}, nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+
+	current, err := s.store.CurrentAuthority(ctx, salonID, actorUserID)
+	if err != nil {
+		return nil, err
+	}
+	if current.Version != req.ExpectedAuthorityVersion || current.Authority == req.TargetSchedulingAuthority {
+		return nil, ErrVersionConflict
+	}
+	return s.Preview(ctx, salonID, actorUserID, PreviewRequest{
+		OperationKey:                   operationKey,
+		SourceSchedulingAuthority:      current.Authority,
+		TargetSchedulingAuthority:      req.TargetSchedulingAuthority,
+		ExpectedSourceAuthorityVersion: req.ExpectedAuthorityVersion,
+		RollbackOfSwitchRunID:          req.RollbackOfSwitchRunID,
+	})
+
+}
+
+// Change presents authority switching as one operator command while preserving
+// the immutable preview and commit protocol internally.
+func (s *Service) Change(ctx context.Context, salonID string, actorUserID string, req ChangeRequest) (*PreviewResponse, error) {
+	preview, err := s.PrepareChange(ctx, salonID, actorUserID, req)
+	if err != nil {
+		return nil, err
+	}
+	if preview.SwitchRun.Status == StatusPreviewBlocked || preview.SwitchRun.Status == "committed" {
+		return preview, nil
+	}
+	return s.Commit(ctx, strings.TrimSpace(salonID), strings.TrimSpace(actorUserID), preview.SwitchRun.ID, CommitRequest{ActionKey: strings.TrimSpace(req.ActionKey)})
+}
+
+func changeOperationKey(actionKey string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(actionKey)))
+	return "v2-authority-change:" + hex.EncodeToString(digest[:])
+}
+
 func (s *Service) Preview(ctx context.Context, salonID string, ownerUserID string, req PreviewRequest) (*PreviewResponse, error) {
 	req = normalizePreviewRequest(req)
 	if !validPreviewRequest(salonID, ownerUserID, req) {

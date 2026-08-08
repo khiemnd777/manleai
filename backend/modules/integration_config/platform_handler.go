@@ -15,8 +15,9 @@ type platformAuthorizer interface {
 }
 
 type PlatformHandler struct {
-	service *Service
-	access  platformAuthorizer
+	service    *Service
+	access     platformAuthorizer
+	normalized bool
 }
 
 func NewPlatformHandler(service *Service, authorizer platformAuthorizer) *PlatformHandler {
@@ -101,5 +102,31 @@ func (h *PlatformHandler) respond(c *fiber.Ctx, value any, err error, code strin
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, code, "Could not complete integration configuration.")
 	}
+	if h.normalized {
+		version, replayed := integrationResultMeta(value)
+		return respond.JSON(c, fiber.StatusOK, fiber.Map{"data": value, "meta": fiber.Map{"replayed": replayed, "resource_version": version, "permissions": fiber.Map{"can_read": true, "allowed_actions": []string{}}}})
+	}
 	return respond.JSON(c, fiber.StatusOK, value)
+}
+
+func integrationResultMeta(value any) (int64, bool) {
+	switch item := value.(type) {
+	case *IntegrationConfigsResponse:
+		version := item.Square.Version
+		if item.Twilio.Version > version {
+			version = item.Twilio.Version
+		}
+		if item.OpenAI.Version > version {
+			version = item.OpenAI.Version
+		}
+		return version, false
+	case *SquareSettingsResponse:
+		return item.Version, item.Replayed
+	case *TwilioSettingsResponse:
+		return item.Version, item.Replayed
+	case *OpenAISettingsResponse:
+		return item.Version, item.Replayed
+	default:
+		return 0, false
+	}
 }

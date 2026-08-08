@@ -138,7 +138,7 @@ func TestHandlerMapsStableCalendarErrors(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.wantCode, func(t *testing.T) {
 			app := fiber.New()
-			app.Get("/", func(c *fiber.Ctx) error { return respondCalendar(c, fiber.StatusOK, nil, test.err) })
+			app.Get("/", func(c *fiber.Ctx) error { return respondCalendar(c, fiber.StatusOK, nil, test.err, false) })
 			response := executeCalendarRequest(t, app, http.MethodGet, "/", nil)
 			defer response.Body.Close()
 			if response.StatusCode != test.wantStatus {

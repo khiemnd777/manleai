@@ -2,6 +2,7 @@ package business
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -12,8 +13,9 @@ import (
 )
 
 type Handler struct {
-	service *ServiceLayer
-	surface access.Surface
+	service    *ServiceLayer
+	surface    access.Surface
+	normalized bool
 }
 
 func NewHandler(service *ServiceLayer, surface access.Surface) *Handler {
@@ -41,14 +43,22 @@ func (h *Handler) ListSalons(c *fiber.Ctx) error {
 			}
 		}
 	}
-	return respond.JSON(c, fiber.StatusOK, result)
+	return h.read(c, result)
 }
 func (h *Handler) SalonProfile(c *fiber.Ctx) error {
 	result, err := h.service.SalonProfile(c.UserContext(), middleware.Actor(c), h.surface, h.salonID(c))
 	if err != nil {
 		return h.handleError(c, err)
 	}
-	return respond.JSON(c, fiber.StatusOK, result)
+	return h.read(c, result)
+}
+
+func (h *Handler) PlatformTenantContext(c *fiber.Ctx) error {
+	result, err := h.service.PlatformTenantContext(c.UserContext(), middleware.Actor(c), h.salonID(c))
+	if err != nil {
+		return h.handleError(c, err)
+	}
+	return h.read(c, result)
 }
 func (h *Handler) UpdateSalonProfile(c *fiber.Ctx) error {
 	var req SalonProfileMutationRequest
@@ -63,7 +73,7 @@ func (h *Handler) Services(c *fiber.Ctx) error {
 	if err != nil {
 		return h.handleError(c, err)
 	}
-	return respond.JSON(c, fiber.StatusOK, result)
+	return h.read(c, result)
 }
 func (h *Handler) CreateService(c *fiber.Ctx) error {
 	var req ServiceMutationRequest
@@ -94,7 +104,7 @@ func (h *Handler) ServiceCategories(c *fiber.Ctx) error {
 	if err != nil {
 		return h.handleError(c, err)
 	}
-	return respond.JSON(c, fiber.StatusOK, result)
+	return h.read(c, result)
 }
 func (h *Handler) CreateServiceCategory(c *fiber.Ctx) error {
 	var req ServiceCategoryMutationRequest
@@ -125,7 +135,7 @@ func (h *Handler) Staff(c *fiber.Ctx) error {
 	if err != nil {
 		return h.handleError(c, err)
 	}
-	return respond.JSON(c, fiber.StatusOK, result)
+	return h.read(c, result)
 }
 func (h *Handler) CreateStaff(c *fiber.Ctx) error {
 	var req StaffMutationRequest
@@ -165,7 +175,7 @@ func (h *Handler) BusinessHours(c *fiber.Ctx) error {
 	if err != nil {
 		return h.handleError(c, err)
 	}
-	return respond.JSON(c, fiber.StatusOK, result)
+	return h.read(c, result)
 }
 func (h *Handler) ReplaceBusinessHours(c *fiber.Ctx) error {
 	var req BusinessHoursMutationRequest
@@ -180,7 +190,7 @@ func (h *Handler) PublicCatalogSettings(c *fiber.Ctx) error {
 	if err != nil {
 		return h.handleError(c, err)
 	}
-	return respond.JSON(c, fiber.StatusOK, result)
+	return h.read(c, result)
 }
 func (h *Handler) UpdatePublicCatalogSettings(c *fiber.Ctx) error {
 	var req PublicCatalogMutationRequest
@@ -203,7 +213,7 @@ func (h *Handler) Customers(c *fiber.Ctx) error {
 	if err != nil {
 		return h.handleError(c, err)
 	}
-	return respond.JSON(c, fiber.StatusOK, result)
+	return h.read(c, result)
 }
 func (h *Handler) CreateCustomer(c *fiber.Ctx) error {
 	var req CustomerMutationRequest
@@ -252,7 +262,122 @@ func (h *Handler) mutation(c *fiber.Ctx, result any, err error, status int) erro
 		replayed = value.Replayed
 	}
 	c.Set("X-Idempotent-Replay", strconv.FormatBool(replayed))
+	if h.normalized {
+		data, version := normalizedMutationData(result)
+		return respond.JSON(c, status, fiber.Map{"data": data, "meta": h.normalizedMeta(c, version, replayed, nil)})
+	}
 	return respond.JSON(c, status, result)
+}
+
+func (h *Handler) read(c *fiber.Ctx, result any) error {
+	if !h.normalized {
+		return respond.JSON(c, fiber.StatusOK, result)
+	}
+	data := result
+	version := int64(0)
+	var page fiber.Map
+	switch value := result.(type) {
+	case *SalonProfile:
+		version = value.Version
+	case *ServicesResponse:
+		data = value.Services
+		version = maxServiceVersion(value.Services)
+	case *ServiceCategoriesResponse:
+		data = value.Categories
+		version = maxCategoryVersion(value.Categories)
+	case *StaffResponse:
+		data = value.Staff
+		version = maxStaffVersion(value.Staff)
+	case *BusinessHours:
+		version = value.Version
+	case *PublicCatalogSettings:
+		version = value.Version
+	case *CustomersResponse:
+		data = value.Customers
+		version = maxCustomerVersion(value.Customers)
+		limit, _ := strconv.Atoi(defaultQuery(c.Query("limit"), "50"))
+		offset, _ := strconv.Atoi(defaultQuery(c.Query("offset"), "0"))
+		page = fiber.Map{"limit": limit, "offset": offset, "has_more": len(value.Customers) == limit}
+	}
+	return respond.JSON(c, fiber.StatusOK, fiber.Map{"data": data, "meta": h.normalizedMeta(c, version, false, page)})
+}
+
+func (h *Handler) normalizedMeta(c *fiber.Ctx, version int64, replayed bool, page fiber.Map) fiber.Map {
+	requestID := ""
+	if value := c.Locals("requestid"); value != nil {
+		requestID = fmt.Sprint(value)
+	}
+	meta := fiber.Map{
+		"request_id":       requestID,
+		"replayed":         replayed,
+		"resource_version": version,
+		"permissions":      fiber.Map{"can_read": true, "allowed_actions": []string{}},
+	}
+	if page != nil {
+		meta["page"] = page
+	}
+	return meta
+}
+
+func normalizedMutationData(result any) (any, int64) {
+	switch value := result.(type) {
+	case *MutationResponse[SalonProfile]:
+		return value.Data, value.Data.Version
+	case *MutationResponse[Service]:
+		return value.Data, value.Data.Version
+	case *MutationResponse[ServiceCategory]:
+		return value.Data, value.Data.Version
+	case *MutationResponse[StaffMember]:
+		return value.Data, value.Data.Version
+	case *MutationResponse[BusinessHours]:
+		return value.Data, value.Data.Version
+	case *MutationResponse[PublicCatalogSettings]:
+		return value.Data, value.Data.Version
+	case *MutationResponse[Customer]:
+		return value.Data, value.Data.Version
+	default:
+		return result, 0
+	}
+}
+
+func maxServiceVersion(items []Service) int64 {
+	var version int64
+	for _, item := range items {
+		if item.Version > version {
+			version = item.Version
+		}
+	}
+	return version
+}
+func maxCategoryVersion(items []ServiceCategory) int64 {
+	var version int64
+	for _, item := range items {
+		if item.Version > version {
+			version = item.Version
+		}
+	}
+	return version
+}
+func maxStaffVersion(items []StaffMember) int64 {
+	var version int64
+	for _, item := range items {
+		if item.Version > version {
+			version = item.Version
+		}
+		if item.EligibilityVersion > version {
+			version = item.EligibilityVersion
+		}
+	}
+	return version
+}
+func maxCustomerVersion(items []Customer) int64 {
+	var version int64
+	for _, item := range items {
+		if item.Version > version {
+			version = item.Version
+		}
+	}
+	return version
 }
 
 func (h *Handler) handleError(c *fiber.Ctx, err error) error {

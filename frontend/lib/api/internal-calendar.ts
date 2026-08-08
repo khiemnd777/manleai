@@ -18,7 +18,7 @@ const versionConflictCode = "MANLEAI_CALENDAR_CONFIG_VERSION_CONFLICT";
 export type InternalCalendarSurface = "tenant" | "platform";
 
 export function getManleAICalendar(salonID: string, surface: InternalCalendarSurface = "tenant") {
-  return apiRequest<ManleAICalendarAggregateResponse>(calendarPath(salonID, surface));
+  return calendarRequest<ManleAICalendarAggregateResponse>(calendarPath(salonID, surface), surface);
 }
 
 export function updateManleAICalendarConfig(salonID: string, input: ManleAICalendarConfigInput, surface: InternalCalendarSurface = "tenant") {
@@ -30,9 +30,7 @@ export function replaceManleAICalendarHours(salonID: string, input: ManleAICalen
 }
 
 export function getManleAICalendarStaffProfile(salonID: string, staffID: string, surface: InternalCalendarSurface = "tenant") {
-  return apiRequest<ManleAICalendarStaffProfileResponse>(
-    `${calendarPath(salonID, surface)}/staff/${encodeURIComponent(staffID)}`
-  );
+  return calendarRequest<ManleAICalendarStaffProfileResponse>(`${calendarPath(salonID, surface)}/staff/${encodeURIComponent(staffID)}`, surface);
 }
 
 export function updateManleAICalendarStaffProfile(
@@ -45,9 +43,7 @@ export function updateManleAICalendarStaffProfile(
 }
 
 export function getManleAICalendarServicePolicy(salonID: string, serviceID: string, surface: InternalCalendarSurface = "tenant") {
-  return apiRequest<ManleAICalendarServicePolicyResponse>(
-    `${calendarPath(salonID, surface)}/services/${encodeURIComponent(serviceID)}`
-  );
+  return calendarRequest<ManleAICalendarServicePolicyResponse>(`${calendarPath(salonID, surface)}/services/${encodeURIComponent(serviceID)}`, surface);
 }
 
 export function updateManleAICalendarServicePolicy(
@@ -60,7 +56,7 @@ export function updateManleAICalendarServicePolicy(
 }
 
 export function listManleAICalendarResources(salonID: string, surface: InternalCalendarSurface = "tenant") {
-  return apiRequest<ManleAICalendarResourceListResponse>(`${calendarPath(salonID, surface)}/resources`);
+  return calendarRequest<ManleAICalendarResourceListResponse>(`${calendarPath(salonID, surface)}/resources`, surface);
 }
 
 export function createManleAICalendarResource(salonID: string, input: ManleAICalendarResourceInput, surface: InternalCalendarSurface = "tenant") {
@@ -149,7 +145,7 @@ export function salonLocalDateTimeToISO(value: string, timezone: string) {
 
 function calendarPath(salonID: string, surface: InternalCalendarSurface) {
   return surface === "platform"
-    ? `/api/platform/tenants/${encodeURIComponent(salonID)}/technical/manleai-calendar`
+    ? `/api/v2/platform/tenants/${encodeURIComponent(salonID)}/scheduling/internal-calendar`
     : `/api/salons/${encodeURIComponent(salonID)}/manleai-calendar`;
 }
 
@@ -160,10 +156,16 @@ function mutate(
   input: object,
   surface: InternalCalendarSurface
 ) {
-  return apiRequest<ManleAICalendarMutationResponse>(`${calendarPath(salonID, surface)}${suffix}`, {
+  const normalizedSuffix = surface === "platform" && suffix === "/config" ? "/policy" : surface === "platform" && suffix === "/activate" ? "/activation" : suffix;
+  return calendarRequest<ManleAICalendarMutationResponse>(`${calendarPath(salonID, surface)}${normalizedSuffix}`, surface, {
     method,
     body: JSON.stringify(input)
   });
+}
+
+async function calendarRequest<T>(path: string, surface: InternalCalendarSurface, init: RequestInit = {}) {
+  if (surface === "tenant") return apiRequest<T>(path, init);
+  return (await apiRequest<{ data: T }>(path, init)).data;
 }
 
 function zonedParts(value: number, timezone: string) {

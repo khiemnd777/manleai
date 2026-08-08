@@ -25,6 +25,7 @@ func (failingVoiceSupportAudit) RecordPlatformSupportAction(context.Context, mid
 func TestVoiceOperationalRoutesRequireAuthentication(t *testing.T) {
 	app := fiber.New()
 	RegisterRoutes(app.Group("/api"), NewHandler(&Service{}), "test-secret")
+	RegisterPlatformRoutes(app.Group("/api"), NewPlatformHandler(&Service{}, nil), "test-secret")
 	for _, test := range []struct {
 		method string
 		path   string
@@ -32,6 +33,7 @@ func TestVoiceOperationalRoutesRequireAuthentication(t *testing.T) {
 		{method: http.MethodGet, path: "/api/salons/salon-1/voice/status"},
 		{method: http.MethodPost, path: "/api/salons/salon-1/voice/semantic-check"},
 		{method: http.MethodPost, path: "/api/salons/salon-1/voice/semantic-evaluate"},
+		{method: http.MethodGet, path: "/api/v2/platform/tenants/salon-1/calls/readiness"},
 	} {
 		response, err := app.Test(httptest.NewRequest(test.method, test.path, nil))
 		if err != nil {

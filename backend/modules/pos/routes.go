@@ -63,6 +63,23 @@ func RegisterPlatformRoutes(api fiber.Router, handler *Handler, authorizer platf
 	group.Post("/service-categories/:category_id/restore", write, handler.RestoreServiceCategory)
 	group.Post("/service-categories/:category_id/aliases", write, handler.UpsertServiceCategoryAlias)
 	group.Post("/service-category-aliases/:alias_id/archive", write, handler.ArchiveServiceCategoryAlias)
+	normalized := &Handler{service: handler.service, normalized: true}
+	v2 := api.Group("/v2/platform/tenants/:id", middleware.RequireAuth(jwtSecret))
+	v2.Get("/services", read, normalized.Services)
+	v2.Post("/services", write, normalized.CreateService)
+	v2.Put("/services/:service_id", write, normalized.UpdateService)
+	v2.Patch("/services/:service_id/owner-controls", write, normalized.UpdateServiceOwnerControls)
+	v2.Post("/services/:service_id/archive", write, normalized.ArchiveService)
+	v2.Patch("/services/:service_id/ai-bookable", write, normalized.UpdateServiceAIBookable)
+	v2.Patch("/services/:service_id/category", write, normalized.AssignServiceCategory)
+	v2.Get("/service-categories", read, normalized.ServiceCategories)
+	v2.Post("/service-categories/suggestions/refresh", write, normalized.RefreshServiceCategorySuggestions)
+	v2.Post("/service-categories", write, normalized.CreateServiceCategory)
+	v2.Put("/service-categories/:category_id", write, normalized.UpdateServiceCategory)
+	v2.Post("/service-categories/:category_id/archive", write, normalized.ArchiveServiceCategory)
+	v2.Post("/service-categories/:category_id/restore", write, normalized.RestoreServiceCategory)
+	v2.Post("/service-categories/:category_id/aliases", write, normalized.UpsertServiceCategoryAlias)
+	v2.Post("/service-category-aliases/:alias_id/archive", write, normalized.ArchiveServiceCategoryAlias)
 }
 
 func RegisterPlatformCallsCatalogRoutes(api fiber.Router, handler *Handler, authorizer platformAuthorizer, jwtSecret string) {
@@ -70,6 +87,10 @@ func RegisterPlatformCallsCatalogRoutes(api fiber.Router, handler *Handler, auth
 	read := requirePlatformCalls(authorizer, access.CapabilityCallsRead)
 	group.Get("/services", read, handler.Services)
 	group.Get("/staff", read, handler.Staff)
+	normalized := &Handler{service: handler.service, normalized: true}
+	v2 := api.Group("/v2/platform/tenants/:id/calls/catalog", middleware.RequireAuth(jwtSecret))
+	v2.Get("/services", read, normalized.Services)
+	v2.Get("/staff", read, normalized.Staff)
 }
 
 func requirePlatformServices(authorizer platformAuthorizer, capability access.Capability) fiber.Handler {

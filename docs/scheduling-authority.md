@@ -605,8 +605,10 @@ authority evidence.
 
 ## Authority Switching
 
-An authority switch is an explicit owner action with reviewable readiness and
-dry-run evidence. A connection, sync, import, provider webhook, or configuration
+An authority switch is an explicit authorized-actor action with reviewable
+readiness and dry-run evidence. Platform Admin acts directly and does not need
+Tenant approval; Platform Ops requires exact delegated authority. A connection,
+sync, import, provider webhook, or configuration
 transfer must not switch authority implicitly.
 
 Switching must:
@@ -628,7 +630,7 @@ Configuration transfer does not move live scheduling authority, appointments,
 provider connections, or provider state unless a later versioned transfer
 contract explicitly adds that operational workflow.
 
-The implemented Phase 5 workflow is owner-scoped and explicit:
+The implemented Phase 5 domain workflow is salon-scoped and explicit:
 
 - V52 owns immutable switch runs/events and an optional exact inverse
   `rollback_of_switch_run_id`; a reverse switch is a new reviewed operation,
@@ -643,14 +645,24 @@ The implemented Phase 5 workflow is owner-scoped and explicit:
   V53 preserves exact external quote authority provenance across switches;
   V54 owns owner-first onboarding compatibility, and V55 owns optional
   pending-approval target-authority evidence.
-- Settings owns the selection/review workflow through
-  `frontend/features/dashboard/scheduling-authority-switch.tsx` and
-  `frontend/lib/api/scheduling-authority-switches.ts`. Integrations remains the
-  provider setup surface and never changes authority implicitly.
+- Platform Scheduling owns the operator selection workflow through
+  `frontend/features/platform/platform-scheduling-authority-control.tsx` and
+  `frontend/lib/api/scheduling-authority-switches.ts`. The legacy Tenant
+  preview/commit component remains compatibility code. Integrations remains
+  provider setup and never changes authority implicitly.
+
+The normalized Platform v2 workflow presents this as one operator-owned
+authority change. Target selection loads readiness automatically and one
+visible change action performs the version-fenced commit. Preview/run/event
+records remain internal immutable audit and replay evidence. Platform Admin
+does not require Tenant approval; Platform Ops still requires
+`technical.write`. Readiness, live-execution, authority-version, idempotency,
+atomicity, and originating-authority rules remain unchanged.
 
 A blocked/stale preview, authority-version drift, changed readiness evidence,
-or live external execution prevents commit. The owner must resolve the blocker
-and create a fresh preview; the implementation does not bypass those
+or live external execution prevents commit. The authorized operator must
+resolve the blocker and retry the one-step command; the implementation creates
+fresh internal evidence and does not bypass those
 operational gates.
 
 ## API And Persistence Contract
@@ -829,6 +841,10 @@ The authenticated authority-switch routes are
 `GET /api/salons/:id/scheduling-authority-switches/latest`,
 `GET /api/salons/:id/scheduling-authority-switches/:run_id`, and
 `POST /api/salons/:id/scheduling-authority-switches/:run_id/commit`.
+The canonical Platform command is
+`PUT /api/v2/platform/tenants/:tenant_id/scheduling/authority`, with
+`POST .../authority/readiness` for read-only readiness and
+`GET .../authority/history/latest` for the latest immutable run projection.
 
 The neutral availability/action routes carry aggregate internal quote, durable
 root/child confirmation, and Phase 4C lifecycle execution evidence; no separate
@@ -894,8 +910,10 @@ at that time and that current status may differ. It must not restate the replay
 as a current “confirmed”, “has been booked”, or “has been rescheduled” claim.
 Duplicate conversation-event replay still returns its original persisted AI
 message unchanged. Cancel replay remains terminal and current-safe.
-Settings provides authority selection, read-only readiness preview, blocker
-review, explicit commit, latest-run evidence, and fresh inverse-switch review.
+Platform Scheduling provides authority selection, automatic readiness,
+blockers, one explicit change action, and latest-run evidence. Internal
+preview/commit details remain immutable backend evidence rather than two
+operator-facing buttons.
 
 ## Security, Privacy, And Tenancy
 

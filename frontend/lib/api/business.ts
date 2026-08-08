@@ -131,10 +131,11 @@ export type BusinessCustomer = {
 };
 
 export type BusinessMutationResponse<T> = { data: T; replayed: boolean };
+type NormalizedBusinessResponse<T> = { data: T; meta: { replayed: boolean; resource_version: number } };
 export type MutationControl = { action_key: string; expected_version: number };
 
 export function businessDirectoryPath(kind: BusinessSurface["kind"]) {
-  return kind === "platform" ? "/api/platform/tenants/" : "/api/salons/";
+  return kind === "platform" ? "/api/v2/platform/tenants" : "/api/salons/";
 }
 
 export function isSampleData(value: { data_classification: DataClassification }) {
@@ -143,16 +144,29 @@ export function isSampleData(value: { data_classification: DataClassification })
 
 export function businessBasePath(surface: BusinessSurface) {
   return surface.kind === "platform"
-    ? `/api/platform/tenants/${surface.salonID}/business`
+    ? `/api/v2/platform/tenants/${encodeURIComponent(surface.salonID)}`
     : `/api/salons/${surface.salonID}/business`;
 }
 
-export function listBusinessSalons(kind: BusinessSurface["kind"]) {
-  return apiRequest<{ salons: BusinessSalonSummary[] }>(businessDirectoryPath(kind));
+export async function listBusinessSalons(kind: BusinessSurface["kind"]) {
+  if (kind === "tenant") return apiRequest<{ salons: BusinessSalonSummary[] }>(businessDirectoryPath(kind));
+  const response = await apiRequest<NormalizedBusinessResponse<{ salons: BusinessSalonSummary[] }>>(businessDirectoryPath(kind));
+  return response.data;
 }
 
-export function businessGet<T>(surface: BusinessSurface, resource: string) {
-  return apiRequest<T>(`${businessBasePath(surface)}/${resource}`);
+export function platformBusinessResourcePath(salonID: string, resource: string) {
+  return `/api/v2/platform/tenants/${encodeURIComponent(salonID)}/${normalizedPlatformResource(resource)}`;
+}
+
+export async function businessGet<T>(surface: BusinessSurface, resource: string) {
+  if (surface.kind === "tenant") return apiRequest<T>(`${businessBasePath(surface)}/${resource}`);
+  const response = await apiRequest<NormalizedBusinessResponse<unknown>>(platformBusinessResourcePath(surface.salonID, resource));
+  const resourceName = resource.split("?", 1)[0];
+  if (resourceName === "services") return { services: response.data } as T;
+  if (resourceName === "service-categories") return { categories: response.data } as T;
+  if (resourceName === "staff") return { staff: response.data } as T;
+  if (resourceName === "customers") return { customers: response.data } as T;
+  return response.data as T;
 }
 
 export async function businessMutation<T>(
@@ -161,6 +175,16 @@ export async function businessMutation<T>(
   method: "POST" | "PATCH" | "PUT",
   body: Record<string, unknown>
 ) {
+  if (surface.kind === "platform") {
+    const { data, response } = await apiRequestWithResponse<NormalizedBusinessResponse<T>>(
+      platformBusinessResourcePath(surface.salonID, resource),
+      { method, body: JSON.stringify(body) }
+    );
+    return {
+      data: data.data,
+      replayed: data.meta.replayed || response.headers.get("X-Idempotent-Replay") === "true"
+    };
+  }
   const { data, response } = await apiRequestWithResponse<BusinessMutationResponse<T>>(
     `${businessBasePath(surface)}/${resource}`,
     { method, body: JSON.stringify(body) }
@@ -169,6 +193,18 @@ export async function businessMutation<T>(
     ...data,
     replayed: data.replayed || response.headers.get("X-Idempotent-Replay") === "true"
   };
+}
+
+function normalizedPlatformResource(resource: string) {
+  const queryIndex = resource.indexOf("?");
+  const path = queryIndex >= 0 ? resource.slice(0, queryIndex) : resource;
+  const query = queryIndex >= 0 ? resource.slice(queryIndex) : "";
+  let normalized = path;
+  if (path === "profile") normalized = "business/profile";
+  else if (path === "business-hours") normalized = "business/hours";
+  else if (path === "public-catalog") normalized = "business/public-page";
+  else if (/^staff\/[^/]+\/services$/.test(path)) normalized = path.replace(/\/services$/, "/service-eligibility");
+  return normalized + query;
 }
 
 export function newBusinessActionKey(prefix: string) {

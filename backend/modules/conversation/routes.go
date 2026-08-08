@@ -44,14 +44,32 @@ func RegisterPlatformRoutes(api fiber.Router, handler *PlatformHandler, jwtSecre
 	group.Patch("/party-booking-requests/:request_id/status", manage, handler.delegate.UpdatePartyBookingRequestStatus)
 }
 
+func RegisterPlatformV2Routes(api fiber.Router, handler *PlatformHandler, jwtSecret string) {
+	group := api.Group("/v2/platform/tenants/:tenant_id", middleware.RequireAuth(jwtSecret))
+	read := handler.guard(access.CapabilityCallsRead, access.PIIScopeCalls)
+	manage := handler.guard(access.CapabilityCallsManage, access.PIIScopeCalls)
+	simulate := handler.guard(access.CapabilityCallsSimulate, access.PIIScopeCalls)
+	redact := handler.guard(access.CapabilityCallsRedact, access.PIIScopeCalls)
+	group.Get("/calls", read, handler.normalizedDelegate.List)
+	group.Post("/calls", simulate, handler.StartV2)
+	group.Get("/calls/party-requests", read, handler.normalizedDelegate.ListPartyBookingRequests)
+	group.Patch("/calls/party-requests/:request_id/status", manage, handler.normalizedDelegate.UpdatePartyBookingRequestStatus)
+	group.Get("/calls/:session_id", read, handler.normalizedDelegate.Get)
+	group.Get("/calls/:session_id/realtime-events", read, handler.normalizedDelegate.RealtimeEvents)
+	group.Post("/calls/:session_id/archive", manage, handler.normalizedDelegate.Archive)
+	group.Post("/calls/:session_id/redact", redact, handler.normalizedDelegate.Redact)
+	group.Post("/calls/:session_id/messages", simulate, handler.MessageV2)
+}
+
 func (h *PlatformHandler) guard(capability access.Capability, piiScope access.PIIScope) fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		salonID := conversationSalonID(c)
 		if h == nil || h.access == nil || h.access.Authorize(c.UserContext(), middleware.Actor(c), access.AccessCheck{
-			Surface: access.SurfacePlatform, SalonID: c.Params("id"), Capability: capability, PIIScope: piiScope,
+			Surface: access.SurfacePlatform, SalonID: salonID, Capability: capability, PIIScope: piiScope,
 		}) != nil {
 			return respond.Error(c, fiber.StatusForbidden, "CALLS_ACCESS_FORBIDDEN", "This Platform account is not authorized for this salon Calls action.")
 		}
-		if h.access.RecordPlatformSupportAction(c.UserContext(), middleware.Actor(c), c.Params("id"), capability, piiScope, c.Method(), c.Path()) != nil {
+		if h.access.RecordPlatformSupportAction(c.UserContext(), middleware.Actor(c), salonID, capability, piiScope, c.Method(), c.Path()) != nil {
 			return respond.Error(c, fiber.StatusInternalServerError, "SUPPORT_AUDIT_FAILED", "Could not record this authorized support action.")
 		}
 		return c.Next()

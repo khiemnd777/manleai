@@ -54,9 +54,32 @@ func RegisterPlatformRoutes(api fiber.Router, handler *Handler, authorizer platf
 	group.Post("/training/evaluate", read, handler.Evaluate)
 }
 
+func RegisterPlatformV2Routes(api fiber.Router, handler *Handler, authorizer platformAuthorizer, jwtSecret string) {
+	group := api.Group("/v2/platform/tenants/:tenant_id", middleware.RequireAuth(jwtSecret))
+	read := requirePlatformCapability(authorizer, access.CapabilityTrainingRead)
+	write := requirePlatformCapability(authorizer, access.CapabilityTrainingWrite)
+	correctionRead := requirePlatformCapabilityWithPII(authorizer, access.CapabilityTrainingRead, access.PIIScopeCalls)
+	correctionWrite := requirePlatformCapabilityWithPII(authorizer, access.CapabilityTrainingWrite, access.PIIScopeCalls)
+	group.Get("/knowledge", read, handler.ListKnowledge)
+	group.Post("/knowledge", write, handler.CreateKnowledge)
+	group.Put("/knowledge/:item_id", write, handler.UpdateKnowledge)
+	group.Delete("/knowledge/:item_id", write, handler.DeleteKnowledge)
+	group.Get("/corrections", correctionRead, handler.ListCorrections)
+	group.Post("/corrections", correctionWrite, handler.CreateCorrection)
+	group.Post("/corrections/:correction_id/apply", correctionWrite, handler.ApplyCorrection)
+	group.Post("/corrections/:correction_id/apply-service-alias", correctionWrite, handler.ApplyServiceAliasCorrection)
+	group.Post("/corrections/:correction_id/dismiss", correctionWrite, handler.DismissCorrection)
+	group.Post("/evaluations", read, handler.Evaluate)
+	group.Get("/service-aliases", requirePlatformCapability(authorizer, access.CapabilityServicesRead), handler.ListServiceAliases)
+	group.Post("/service-aliases", requirePlatformCapability(authorizer, access.CapabilityServicesWrite), handler.UpsertServiceAlias)
+}
+
 func RegisterPlatformCallsCorrectionRoute(api fiber.Router, handler *Handler, authorizer platformAuthorizer, jwtSecret string) {
 	group := api.Group("/platform/tenants/:id/calls", middleware.RequireAuth(jwtSecret))
 	group.Post("/owner-corrections", requirePlatformCapabilityWithPII(authorizer, access.CapabilityCallsManage, access.PIIScopeCalls), handler.CreateCorrection)
+	normalized := &Handler{service: handler.service, limiter: handler.limiter, normalized: true}
+	v2 := api.Group("/v2/platform/tenants/:tenant_id/calls", middleware.RequireAuth(jwtSecret))
+	v2.Post("/corrections", requirePlatformCapabilityWithPII(authorizer, access.CapabilityCallsManage, access.PIIScopeCalls), normalized.CreateCorrection)
 }
 
 func requirePlatformCapability(authorizer platformAuthorizer, capability access.Capability) fiber.Handler {
@@ -65,12 +88,13 @@ func requirePlatformCapability(authorizer platformAuthorizer, capability access.
 
 func requirePlatformCapabilityWithPII(authorizer platformAuthorizer, capability access.Capability, piiScope access.PIIScope) fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		salonID := trainingSalonID(c)
 		if authorizer == nil || authorizer.Authorize(c.UserContext(), middleware.Actor(c), access.AccessCheck{
-			Surface: access.SurfacePlatform, SalonID: c.Params("id"), Capability: capability, PIIScope: piiScope,
+			Surface: access.SurfacePlatform, SalonID: salonID, Capability: capability, PIIScope: piiScope,
 		}) != nil {
 			return respond.Error(c, fiber.StatusForbidden, "SALON_FEATURE_ACCESS_FORBIDDEN", "This Platform account is not authorized for this salon feature.")
 		}
-		if authorizer.RecordPlatformSupportAction(c.UserContext(), middleware.Actor(c), c.Params("id"), capability, piiScope, c.Method(), c.Path()) != nil {
+		if authorizer.RecordPlatformSupportAction(c.UserContext(), middleware.Actor(c), salonID, capability, piiScope, c.Method(), c.Path()) != nil {
 			return respond.Error(c, fiber.StatusInternalServerError, "SUPPORT_AUDIT_FAILED", "Could not record this authorized support action.")
 		}
 		return c.Next()

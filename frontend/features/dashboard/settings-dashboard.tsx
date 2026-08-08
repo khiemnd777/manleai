@@ -473,7 +473,7 @@ function ReadinessGate({
   const readyForExternalNewWork = Boolean(readiness?.ready_for_external_new_work);
   const readyDescription = readyForExternalNewWork
     ? "External scheduling is ready for new work. The receptionist still confirms only after the selected provider returns the required durable booking evidence."
-    : "External scheduling is not ready for new work. Provider setup and diagnostics remain in Platform Technical settings.";
+    : "External scheduling is not ready for new work. Provider setup and diagnostics remain in Platform Integrations.";
 
   return (
     <Card className={readyForExternalNewWork ? "border-emerald-200 bg-emerald-50 shadow-none" : "border-amber-200 bg-amber-50 shadow-none"}>
@@ -867,7 +867,7 @@ function BusinessHoursCard({
             Synced from Square Appointments. Availability checks reject requested times outside these periods.
           </CardDescription>
           <div className="mt-2 text-xs leading-5 text-muted">
-            Provider sync is managed in Platform Technical settings. Last sync: {lastSyncedAt ? formatDateTime(lastSyncedAt) : "not synced"}.
+            Provider sync is managed in Platform Integrations. Last sync: {lastSyncedAt ? formatDateTime(lastSyncedAt) : "not synced"}.
           </div>
         </div>
         <Badge value={hasSyncedSquarePeriods ? "ready" : "blocked"} className="self-start" />
@@ -875,7 +875,7 @@ function BusinessHoursCard({
 
       {!hasSyncedSquarePeriods ? (
         <div className="mt-5 rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-          No Square business hour periods are synced yet. Ask an authorized Platform administrator to review the provider setup and sync in Technical settings.
+          No Square business hour periods are synced yet. Ask an authorized Platform administrator to review the provider setup and sync in Integrations.
         </div>
       ) : null}
 

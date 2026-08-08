@@ -182,12 +182,12 @@ export function ServicesDashboard({ surface = "tenant", salonID: fixedSalonID = 
       }
       setCalendarLoading(true);
       const [readinessResult, serviceResponse, categoryResponse, aliasResponse, calendarResult] = await Promise.all([
-        apiRequest<ExternalSchedulingReadiness>(externalSchedulingReadinessPath(surface, activeSalon.id))
+        servicesApiRequest<ExternalSchedulingReadiness>(externalSchedulingReadinessPath(surface, activeSalon.id), surface)
           .then((value) => ({ value, error: "" }))
           .catch((readinessError: unknown) => ({ value: null, error: errorMessage(readinessError, "Could not load external scheduling readiness.") })),
-        apiRequest<ServicesResponse>(serviceResourcePath(surface, activeSalon.id, "/services")),
-        apiRequest<ServiceCategoriesResponse>(serviceResourcePath(surface, activeSalon.id, "/service-categories")),
-        apiRequest<ServiceAliasesResponse>(serviceResourcePath(surface, activeSalon.id, "/service-aliases")),
+        servicesApiRequest<ServicesResponse>(serviceResourcePath(surface, activeSalon.id, "/services"), surface),
+        servicesApiRequest<ServiceCategoriesResponse>(serviceResourcePath(surface, activeSalon.id, "/service-categories"), surface),
+        servicesApiRequest<ServiceAliasesResponse>(serviceResourcePath(surface, activeSalon.id, "/service-aliases"), surface),
         getManleAICalendar(activeSalon.id, surface)
           .then((response) => ({ value: response.manleai_calendar, error: "" }))
           .catch((calendarFailure: unknown) => ({ value: null, error: errorMessage(calendarFailure, "Could not load internal calendar readiness.") }))
@@ -282,16 +282,17 @@ export function ServicesDashboard({ surface = "tenant", salonID: fixedSalonID = 
     try {
       const ownerControlsOnly = Boolean(editingService && !operationalFieldsEditable(editingService.field_authority));
       const response = editingService?.id
-        ? await apiRequest<ServiceResponse>(
+        ? await servicesApiRequest<ServiceResponse>(
             ownerControlsOnly
               ? serviceResourcePath(surface, salon.id, `/services/${editingService.id}/owner-controls`)
               : serviceResourcePath(surface, salon.id, `/services/${editingService.id}`),
+            surface,
             {
               method: ownerControlsOnly ? "PATCH" : "PUT",
               body: JSON.stringify(ownerControlsOnly ? serviceOwnerControlsPayload(form) : servicePayload(form))
             }
           )
-        : await apiRequest<ServiceResponse>(serviceResourcePath(surface, salon.id, "/services"), {
+        : await servicesApiRequest<ServiceResponse>(serviceResourcePath(surface, salon.id, "/services"), surface, {
             method: "POST",
             body: JSON.stringify(servicePayload(form))
           });
@@ -321,11 +322,11 @@ export function ServicesDashboard({ surface = "tenant", salonID: fixedSalonID = 
     try {
       const body = JSON.stringify(categoryPayload(categoryForm));
       const response = editingCategory
-        ? await apiRequest<ServiceCategoryResponse>(serviceResourcePath(surface, salon.id, `/service-categories/${editingCategory.id}`), {
+        ? await servicesApiRequest<ServiceCategoryResponse>(serviceResourcePath(surface, salon.id, `/service-categories/${editingCategory.id}`), surface, {
             method: "PUT",
             body
           })
-        : await apiRequest<ServiceCategoryResponse>(serviceResourcePath(surface, salon.id, "/service-categories"), {
+        : await servicesApiRequest<ServiceCategoryResponse>(serviceResourcePath(surface, salon.id, "/service-categories"), surface, {
             method: "POST",
             body
           });
@@ -348,7 +349,7 @@ export function ServicesDashboard({ surface = "tenant", salonID: fixedSalonID = 
     setError("");
     setSuccess("");
     try {
-      const response = await apiRequest<ServiceCategoryResponse>(serviceResourcePath(surface, salon.id, `/service-categories/${category.id}/archive`), {
+      const response = await servicesApiRequest<ServiceCategoryResponse>(serviceResourcePath(surface, salon.id, `/service-categories/${category.id}/archive`), surface, {
         method: "POST"
       });
       setCategories((current) => upsertCategory(current, response.service_category));
@@ -367,7 +368,7 @@ export function ServicesDashboard({ surface = "tenant", salonID: fixedSalonID = 
     setError("");
     setSuccess("");
     try {
-      const response = await apiRequest<ServiceCategoryResponse>(serviceResourcePath(surface, salon.id, `/service-categories/${category.id}/restore`), {
+      const response = await servicesApiRequest<ServiceCategoryResponse>(serviceResourcePath(surface, salon.id, `/service-categories/${category.id}/restore`), surface, {
         method: "POST"
       });
       setCategories((current) => upsertCategory(current, response.service_category));
@@ -386,7 +387,7 @@ export function ServicesDashboard({ surface = "tenant", salonID: fixedSalonID = 
     setError("");
     setSuccess("");
     try {
-      await apiRequest<ServiceCategoryAliasResponse>(serviceResourcePath(surface, salon.id, `/service-categories/${category.id}/aliases`), {
+      await servicesApiRequest<ServiceCategoryAliasResponse>(serviceResourcePath(surface, salon.id, `/service-categories/${category.id}/aliases`), surface, {
         method: "POST",
         body: JSON.stringify({ alias: aliasDraft, confidence: 1 })
       });
@@ -407,7 +408,7 @@ export function ServicesDashboard({ surface = "tenant", salonID: fixedSalonID = 
     setError("");
     setSuccess("");
     try {
-      await apiRequest<ServiceCategoryAliasResponse>(serviceResourcePath(surface, salon.id, `/service-category-aliases/${alias.id}/archive`), {
+      await servicesApiRequest<ServiceCategoryAliasResponse>(serviceResourcePath(surface, salon.id, `/service-category-aliases/${alias.id}/archive`), surface, {
         method: "POST"
       });
       setSuccess("Category alias archived.");
@@ -425,7 +426,7 @@ export function ServicesDashboard({ surface = "tenant", salonID: fixedSalonID = 
     setError("");
     setSuccess("");
     try {
-      await apiRequest<ServiceAlias>(serviceResourcePath(surface, salon.id, "/service-aliases"), {
+      await servicesApiRequest<ServiceAlias>(serviceResourcePath(surface, salon.id, "/service-aliases"), surface, {
         method: "POST",
         body: JSON.stringify({
           service_id: service.id,
@@ -449,7 +450,7 @@ export function ServicesDashboard({ surface = "tenant", salonID: fixedSalonID = 
     setError("");
     setSuccess("");
     try {
-      await apiRequest<ServiceAlias>(serviceResourcePath(surface, salon.id, "/service-aliases"), {
+      await servicesApiRequest<ServiceAlias>(serviceResourcePath(surface, salon.id, "/service-aliases"), surface, {
         method: "POST",
         body: JSON.stringify({
           service_id: alias.service_id,
@@ -474,7 +475,7 @@ export function ServicesDashboard({ surface = "tenant", salonID: fixedSalonID = 
     setError("");
     setSuccess("");
     try {
-      const response = await apiRequest<RefreshCategoriesResponse>(serviceResourcePath(surface, salon.id, "/service-categories/suggestions/refresh"), {
+      const response = await servicesApiRequest<RefreshCategoriesResponse>(serviceResourcePath(surface, salon.id, "/service-categories/suggestions/refresh"), surface, {
         method: "POST"
       });
       setSuccess(refreshSummary(response.refresh));
@@ -492,7 +493,7 @@ export function ServicesDashboard({ surface = "tenant", salonID: fixedSalonID = 
     setError("");
     setSuccess("");
     try {
-      const response = await apiRequest<ServiceResponse>(serviceResourcePath(surface, salon.id, `/services/${service.id}/category`), {
+      const response = await servicesApiRequest<ServiceResponse>(serviceResourcePath(surface, salon.id, `/services/${service.id}/category`), surface, {
         method: "PATCH",
         body: JSON.stringify({ service_category_id: categoryID })
       });
@@ -517,7 +518,7 @@ export function ServicesDashboard({ surface = "tenant", salonID: fixedSalonID = 
     setError("");
     setSuccess("");
     try {
-      const response = await apiRequest<ServiceResponse>(serviceResourcePath(surface, salon.id, `/services/${service.id}/archive`), {
+      const response = await servicesApiRequest<ServiceResponse>(serviceResourcePath(surface, salon.id, `/services/${service.id}/archive`), surface, {
         method: "POST"
       });
       setServices((current) => upsertService(current, response.service));
@@ -540,7 +541,7 @@ export function ServicesDashboard({ surface = "tenant", salonID: fixedSalonID = 
     setError("");
     setSuccess("");
     try {
-      const response = await apiRequest<ServiceResponse>(serviceResourcePath(surface, salon.id, `/services/${service.id}/ai-bookable`), {
+      const response = await servicesApiRequest<ServiceResponse>(serviceResourcePath(surface, salon.id, `/services/${service.id}/ai-bookable`), surface, {
         method: "PATCH",
         body: JSON.stringify({ ai_bookable: nextValue })
       });
@@ -750,7 +751,7 @@ function ServicesGate({ readiness }: { readiness: ExternalSchedulingReadiness | 
         <div>
           <CardTitle>External scheduling is not ready</CardTitle>
           <CardDescription className="text-amber-900">
-            Local services can be managed now. Booking stays gated until provider setup and the business catalog are ready. Provider setup remains in Platform Technical settings.
+            Local services can be managed now. Booking stays gated until provider setup and the business catalog are ready. Provider setup remains in Platform Integrations.
           </CardDescription>
         </div>
       </div>
@@ -2419,15 +2420,32 @@ async function loadPlatformSalon(salonID: string): Promise<Salon | null> {
 
 function serviceResourcePath(surface: ServicesSurface, salonID: string, resource: string) {
   const prefix = surface === "platform"
-    ? `/api/platform/tenants/${encodeURIComponent(salonID)}`
+    ? `/api/v2/platform/tenants/${encodeURIComponent(salonID)}`
     : `/api/salons/${encodeURIComponent(salonID)}`;
   return `${prefix}${resource}`;
 }
 
 function externalSchedulingReadinessPath(surface: ServicesSurface, salonID: string) {
   return surface === "platform"
-    ? `/api/platform/tenants/${encodeURIComponent(salonID)}/services/external-scheduling-readiness`
+    ? `/api/v2/platform/tenants/${encodeURIComponent(salonID)}/services/external-scheduling-readiness`
     : `/api/salons/${encodeURIComponent(salonID)}/business/external-scheduling-readiness`;
+}
+
+async function servicesApiRequest<T>(path: string, surface: ServicesSurface, init: RequestInit = {}): Promise<T> {
+  if (surface === "tenant" || !path.startsWith("/api/v2/platform/")) return apiRequest<T>(path, init);
+  const response = await apiRequest<{ data: unknown }>(path, init);
+  const pathname = path.split("?", 1)[0];
+  const method = init.method ?? "GET";
+  if (method === "GET" && /\/services$/.test(pathname)) return { services: response.data } as T;
+  if (method === "GET" && /\/service-categories$/.test(pathname)) return { service_categories: response.data } as T;
+  if (method === "GET" && /\/service-aliases$/.test(pathname)) return { service_aliases: response.data } as T;
+  if (/\/service-category-aliases\/[^/]+\/archive$/.test(pathname) || /\/service-categories\/[^/]+\/aliases$/.test(pathname)) {
+    return { service_category_alias: response.data } as T;
+  }
+  if (/\/service-categories\/suggestions\/refresh$/.test(pathname)) return { refresh: response.data } as T;
+  if (/\/service-categories(?:\/|$)/.test(pathname)) return { service_category: response.data } as T;
+  if (/\/services(?:\/|$)/.test(pathname)) return { service: response.data } as T;
+  return response.data as T;
 }
 
 function formatPrice(value?: number) {

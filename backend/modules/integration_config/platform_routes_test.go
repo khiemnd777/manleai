@@ -16,6 +16,10 @@ func TestPlatformIntegrationConfigRoutesRequireAuthentication(t *testing.T) {
 		{http.MethodPut, "/api/platform/tenants/salon-1/technical/integration-configs/square"},
 		{http.MethodPut, "/api/platform/tenants/salon-1/technical/integration-configs/twilio"},
 		{http.MethodPut, "/api/platform/tenants/salon-1/technical/integration-configs/openai"},
+		{http.MethodGet, "/api/v2/platform/tenants/salon-1/integrations"},
+		{http.MethodPut, "/api/v2/platform/tenants/salon-1/integrations/square"},
+		{http.MethodPut, "/api/v2/platform/tenants/salon-1/integrations/twilio"},
+		{http.MethodPut, "/api/v2/platform/tenants/salon-1/integrations/openai"},
 	} {
 		response, err := app.Test(httptest.NewRequest(test.method, test.path, nil))
 		if err != nil {

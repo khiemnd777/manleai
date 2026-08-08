@@ -42,6 +42,27 @@ func TestRegisterRoutesUsesProtectedPhaseFivePreviewPaths(t *testing.T) {
 	}
 }
 
+func TestRegisterPlatformV2RoutesExposesOneAuthorityCommand(t *testing.T) {
+	app := fiber.New()
+	RegisterPlatformV2Routes(app.Group("/api"), NewPlatformHandler(NewService(&fakeStore{}, nil, nil, true), nil), "test-secret")
+	want := map[string]bool{
+		http.MethodPost + " /api/v2/platform/tenants/:tenant_id/scheduling/authority/readiness":     false,
+		http.MethodPut + " /api/v2/platform/tenants/:tenant_id/scheduling/authority":                false,
+		http.MethodGet + " /api/v2/platform/tenants/:tenant_id/scheduling/authority/history/latest": false,
+	}
+	for _, route := range app.GetRoutes() {
+		key := route.Method + " " + route.Path
+		if _, ok := want[key]; ok {
+			want[key] = true
+		}
+	}
+	for route, found := range want {
+		if !found {
+			t.Fatalf("route %s was not registered", route)
+		}
+	}
+}
+
 func TestHandlerPreviewReturnsSanitizedRunAndStableErrorCodes(t *testing.T) {
 	tests := []struct {
 		name       string

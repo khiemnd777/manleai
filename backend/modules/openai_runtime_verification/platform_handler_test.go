@@ -56,3 +56,17 @@ func TestPlatformHandlerAuthorizesExactTenantBeforeVerificationService(t *testin
 		t.Fatalf("read authorization=%#v", authorizer.checks[1])
 	}
 }
+
+func TestPlatformVerificationV2RoutesRequireAuthentication(t *testing.T) {
+	app := fiber.New()
+	RegisterPlatformRoutes(app.Group("/api"), NewPlatformHandler(&Service{}, nil), "test-secret")
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		response, err := app.Test(httptest.NewRequest(method, "/api/v2/platform/tenants/salon-a/integrations/openai/verifications", nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s status=%d, want 401", method, response.StatusCode)
+		}
+	}
+}

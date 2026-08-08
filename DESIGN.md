@@ -75,21 +75,19 @@ never be used to convert or infer that realm.
   salon-delegable capabilities, display names, and dependencies from the
   backend capability catalog. The frontend must not maintain a parallel list or
   infer read/write dependencies.
-- **Owner-authorized support** is a second, separate control for Services, AI
-  Training, and Calls. Platform Admin requests an exact Platform identity,
-  capability set, opaque support reference, and expiry; the salon Owner reviews,
-  approves/rejects, and may revoke it from the existing Settings workflow. Base
-  Platform role/assignment access remains required. The UI must never imply that
-  Platform Admin bypasses Owner approval. Calls approval includes its linked
-  Calls PII scope and limits the whole request to 24 hours; non-PII support is
-  limited to 30 days.
+- **Platform operator authorization** is managed by Platform Admin. Platform
+  Admin has direct exact role-capability authority and never needs Tenant Owner
+  approval. Platform Ops requires the exact active salon assignment, delegated
+  capability, current Admin-granted temporary authorization, and any declared
+  PII scope. Non-PII authorization is limited to 30 days and PII authorization
+  is limited to 24 hours.
 - **Temporary sensitive data access** explains that PII means customer, call,
   appointment, or notification records. A Platform role or salon capability
   alone does not reveal PII. The control requires an exact scope, opaque
   approved change reference, and duration of at most 24 hours; it shows expiry,
   revocation, and audit behavior before the administrator acts.
-- The general temporary-sensitive-data control does not grant Calls. Calls PII
-  is created only by Owner approval of the linked support request.
+- A general feature authorization does not imply PII access. Calls PII requires
+  an exact Admin-granted Calls scope linked to the Platform Ops authorization.
 - Platform role and salon Access navigation is visible only to current Platform
   Administrators. Direct routes remain backend-authorized and fail closed.
 - Existing access rows use the API's nested user summary and never display a raw
@@ -112,7 +110,7 @@ Current Platform roles
   Account · role · status · version                  [Revoke]
 
 Nail salon detail
-Business | Services | AI Training | Calls | Technical settings | Transfer | Operations | Access | Audit
+Overview | Business | AI Receptionist | Platform Controls | History
 
 Access                                              [Refresh]
 Salon team
@@ -124,10 +122,10 @@ Platform support access
   [Active Platform Ops]
   [Backend capability checkboxes and dependencies]  [Assign access]
 
-Request Owner authorization
-  [Platform account] [Services / AI Training / Calls capabilities]
-  [Support reference] [Expiry] [Calls PII when required] [Request approval]
-  Pending Owner review · exact capabilities · expiry    [Cancel request]
+Platform operator authorization
+  [Platform Ops account] [Services / AI Training / Calls capabilities]
+  [Support reference] [Expiry] [Calls PII when required] [Grant access]
+  Active authorization · exact capabilities · expiry       [Revoke]
 
 Temporary sensitive data access
   [Platform account] [Data scope] [Change reference] [1–24 hours]
@@ -150,8 +148,10 @@ Transfer                                            [Export selected JSON]
   Destination authority/version · source adapter · destination adapter
   Section · create · update · unchanged · skipped · conflicts
   Warnings / conflicts                              [Apply reviewed transfer]
-Recent transfer runs                               [Refresh]
 ```
+
+Transfer-run evidence is a separate History > Configuration transfers screen;
+it is not mixed into the copy/apply workflow.
 
 Transfer is Platform-only. The destination is implied by the current tenant
 detail route and is never reselected inside the form. Preview visibly writes
@@ -218,7 +218,7 @@ The Tenant Calls view may show Owner-operational readiness fields already
 available to that workflow. The Owner-authorized Platform Calls view reuses the
 same component but receives a business-safe projection: provider URLs, model,
 voice, credentials, and diagnostics are represented only as managed in
-Technical settings.
+Platform Integrations and Scheduling.
 
 ## ManleAI Calendar Configuration
 
@@ -474,7 +474,7 @@ consent, and callback configuration remain in Integrations.
   errors retain refresh/retry; success refreshes metrics/detail without
   implying the related scheduling request was resolved.
 
-The Twilio card in Platform tenant **Technical settings** owns owner-SMS setup: explicit
+The Twilio card in Platform tenant **Integrations** owns owner-SMS setup: explicit
 enablement, E.164 owner destination, fresh consent attestation, write-only
 Account SID/Auth Token, write-only Messaging Service SID or sender, callback
 paths, and read-only computed HTTPS callback URLs. Changing the destination
@@ -636,7 +636,7 @@ services, categories, and their aliases.
 
 Tenant/Platform differences belong in explicit surface-aware data adapters,
 safe DTO projections, and capability-gated actions inside those components.
-Provider configuration remains under Platform Technical. A separate component
+Provider configuration remains under Platform Integrations. A separate component
 is justified only when the actor workflow or operational parent is genuinely
 different, and that decision must be documented before implementation.
 

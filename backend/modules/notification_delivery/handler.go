@@ -16,7 +16,10 @@ type handlerService interface {
 	Requeue(context.Context, string, string, string, RequeueRequest) (*DetailResponse, bool, error)
 }
 
-type Handler struct{ service handlerService }
+type Handler struct {
+	service    handlerService
+	normalized bool
+}
 
 func NewHandler(service handlerService) *Handler { return &Handler{service: service} }
 
@@ -37,12 +40,12 @@ func (h *Handler) List(c *fiber.Ctx) error {
 		return invalid(c)
 	}
 	res, serviceErr := h.service.List(c.UserContext(), deliverySalonID(c), middleware.UserID(c), c.Query("status"), limit, offset)
-	return respondResult(c, res, serviceErr)
+	return h.respondResult(c, res, false, serviceErr)
 }
 
 func (h *Handler) Get(c *fiber.Ctx) error {
 	res, err := h.service.Get(c.UserContext(), deliverySalonID(c), middleware.UserID(c), c.Params("notification_id"))
-	return respondResult(c, res, err)
+	return h.respondResult(c, res, false, err)
 }
 
 func (h *Handler) Requeue(c *fiber.Ctx) error {
@@ -52,15 +55,24 @@ func (h *Handler) Requeue(c *fiber.Ctx) error {
 	}
 	res, replayed, err := h.service.Requeue(c.UserContext(), deliverySalonID(c), middleware.UserID(c), c.Params("notification_id"), req)
 	if err != nil {
-		return respondResult(c, nil, err)
+		return h.respondResult(c, nil, false, err)
 	}
 	c.Set("X-Idempotent-Replay", strconv.FormatBool(replayed))
-	return respond.JSON(c, fiber.StatusOK, res)
+	return h.respondResult(c, res, replayed, nil)
 }
 
-func respondResult(c *fiber.Ctx, body any, err error) error {
+func (h *Handler) respondResult(c *fiber.Ctx, body any, replayed bool, err error) error {
 	switch {
 	case err == nil:
+		if h.normalized {
+			return respond.JSON(c, fiber.StatusOK, fiber.Map{
+				"data": body,
+				"meta": fiber.Map{
+					"replayed": replayed, "resource_version": 0,
+					"permissions": fiber.Map{"can_read": true, "allowed_actions": []string{}},
+				},
+			})
+		}
 		return respond.JSON(c, fiber.StatusOK, body)
 	case errors.Is(err, ErrValidation):
 		return invalid(c)

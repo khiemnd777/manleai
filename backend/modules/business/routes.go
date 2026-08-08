@@ -24,6 +24,30 @@ func RegisterPlatformRoutes(api fiber.Router, handler *Handler, authorizer platf
 	group := api.Group("/platform/tenants", middleware.RequireAuth(jwtSecret))
 	group.Get("/", handler.ListSalons)
 	registerBusinessRoutes(group, "/:tenant_id/business", handler, authorizer)
+	api.Get("/v2/platform/tenants/:tenant_id/context", middleware.RequireAuth(jwtSecret), handler.PlatformTenantContext)
+	api.Get("/v2/platform/tenants", middleware.RequireAuth(jwtSecret), (&Handler{service: handler.service, surface: handler.surface, normalized: true}).ListSalons)
+	registerNormalizedPlatformBusinessRoutes(api, handler, authorizer, jwtSecret)
+}
+
+func registerNormalizedPlatformBusinessRoutes(api fiber.Router, handler *Handler, authorizer platformSupportAuthorizer, jwtSecret string) {
+	normalized := &Handler{service: handler.service, surface: handler.surface, normalized: true}
+	group := api.Group("/v2/platform/tenants/:tenant_id", middleware.RequireAuth(jwtSecret))
+	group.Get("/business/profile", normalized.SalonProfile)
+	group.Patch("/business/profile", normalized.UpdateSalonProfile)
+	group.Get("/business/hours", normalized.BusinessHours)
+	group.Put("/business/hours", normalized.ReplaceBusinessHours)
+	group.Get("/business/public-page", normalized.PublicCatalogSettings)
+	group.Patch("/business/public-page", normalized.UpdatePublicCatalogSettings)
+
+	group.Get("/staff", normalized.Staff)
+	group.Post("/staff", normalized.CreateStaff)
+	group.Patch("/staff/:staff_id", normalized.UpdateStaff)
+	group.Post("/staff/:staff_id/archive", normalized.ArchiveStaff)
+	group.Put("/staff/:staff_id/service-eligibility", normalized.ReplaceStaffServiceEligibility)
+	group.Get("/customers", normalized.Customers)
+	group.Post("/customers", normalized.CreateCustomer)
+	group.Patch("/customers/:customer_id", normalized.UpdateCustomer)
+	group.Post("/customers/:customer_id/archive", normalized.ArchiveCustomer)
 }
 
 func registerBusinessRoutes(group fiber.Router, prefix string, handler *Handler, platformAuthorizer platformSupportAuthorizer) {

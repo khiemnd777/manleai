@@ -44,7 +44,7 @@ import type {
 
 type ProviderAction = { signature: string; key: string };
 
-export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string }) {
+export function PlatformIntegrationSettings({ tenantID }: { tenantID: string }) {
   const [configs, setConfigs] = useState<IntegrationConfigs | null>(null);
   const [voiceRoutingStatus, setVoiceRoutingStatus] = useState<TwilioVoiceRoutingStatus | null>(null);
   const [voiceRoutingStatusError, setVoiceRoutingStatusError] = useState("");
@@ -63,7 +63,8 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
   const actionKeys = useRef<Partial<Record<IntegrationConfigProvider, ProviderAction>>>({});
   const openAIVerificationAction = useRef<ProviderAction | null>(null);
   const base = platformIntegrationConfigBasePath(tenantID);
-  const openAIVerificationPath = `/api/platform/tenants/${encodeURIComponent(tenantID)}/technical/openai/runtime-verification`;
+  const integrationBase = `/api/v2/platform/tenants/${encodeURIComponent(tenantID)}/integrations`;
+  const openAIVerificationPath = `${integrationBase}/openai/verifications`;
 
   const load = useCallback(async () => {
     const requestID = ++loadRequestRef.current;
@@ -73,8 +74,8 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
     setVoiceRoutingStatusError("");
     setOpenAIVerificationError("");
     try {
-      const routingStatusPromise = apiRequest<TwilioVoiceRoutingStatus>(
-          `/api/platform/tenants/${encodeURIComponent(tenantID)}/technical/voice-routing-status`
+      const routingStatusPromise = normalizedIntegrationRequest<TwilioVoiceRoutingStatus>(
+          `${integrationBase}/twilio/verifications/voice-routing`
         ).then(
           (status) => ({ status, error: "" }),
           (failure) => ({
@@ -82,13 +83,13 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
             error: errorMessage(failure, "Live Twilio routing evidence is temporarily unavailable.")
           })
         );
-      const verificationPromise = apiRequest<OpenAIRuntimeVerificationResponse>(openAIVerificationPath).then(
+      const verificationPromise = normalizedIntegrationRequest<OpenAIRuntimeVerificationResponse>(openAIVerificationPath).then(
         (response) => ({ verification: response.verification, error: "" }),
         (failure) => failure instanceof RequestError && failure.status === 404
           ? { verification: null, error: "" }
           : { verification: null, error: errorMessage(failure, "OpenAI verification evidence is temporarily unavailable.") }
       );
-      const value = await apiRequest<IntegrationConfigs>(base);
+      const value = await integrationConfigRequest<IntegrationConfigs>(base);
       const routingResult = await routingStatusPromise;
       const verificationResult = await verificationPromise;
       if (requestID !== loadRequestRef.current) return;
@@ -104,11 +105,11 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
     } catch (failure) {
       if (requestID !== loadRequestRef.current) return;
       if (failure instanceof RequestError && failure.status === 403) setBlocked(true);
-      else setError(errorMessage(failure, "Could not load technical integration settings."));
+      else setError(errorMessage(failure, "Could not load integration settings."));
     } finally {
       if (requestID === loadRequestRef.current) setLoading(false);
     }
-  }, [base, openAIVerificationPath, tenantID]);
+  }, [base, integrationBase, openAIVerificationPath]);
 
   useEffect(() => {
     setActiveTab("square");
@@ -145,7 +146,7 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
     setError("");
     setSuccess("");
     try {
-      const value = await apiRequest<T>(`${base}/${provider}`, {
+      const value = await integrationConfigRequest<T>(`${base}/${provider}`, {
         method: "PUT",
         body: JSON.stringify({
           ...payload,
@@ -177,8 +178,8 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
     setConfigs((current) => (current ? { ...current, twilio: updated } : current));
     setTwilioForm(twilioConfigToForm(updated));
     try {
-      const routingStatus = await apiRequest<TwilioVoiceRoutingStatus>(
-        `/api/platform/tenants/${encodeURIComponent(tenantID)}/technical/voice-routing-status`
+      const routingStatus = await normalizedIntegrationRequest<TwilioVoiceRoutingStatus>(
+        `${integrationBase}/twilio/verifications/voice-routing`
       );
       setVoiceRoutingStatus(routingStatus);
       setVoiceRoutingStatusError("");
@@ -211,7 +212,7 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
     setError("");
     setSuccess("");
     try {
-      const response = await apiRequest<OpenAIRuntimeVerificationResponse>(openAIVerificationPath, {
+      const response = await normalizedIntegrationRequest<OpenAIRuntimeVerificationResponse>(openAIVerificationPath, {
         method: "POST",
         body: JSON.stringify({ action_key: action.key, expected_config_version: configVersion })
       });
@@ -237,8 +238,8 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
   if (blocked) {
     return (
       <Alert
-        title="Technical access denied"
-        message="This Platform account needs technical.read for this exact salon. Tenant membership and Business access do not grant provider configuration access."
+        title="Integration access denied"
+        message="This Platform account is not authorized to view provider configuration for this salon."
       />
     );
   }
@@ -247,7 +248,7 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
     <div className="space-y-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h2 className="text-lg font-bold text-ink">Technical integration settings</h2>
+          <h2 className="text-lg font-bold text-ink">Integrations</h2>
           <p className="mt-1 text-sm text-muted">
             Square, Twilio, and OpenAI configuration is salon-scoped and managed only from Platform UI.
           </p>
@@ -257,7 +258,7 @@ export function TechnicalIntegrationSettings({ tenantID }: { tenantID: string })
         </Button>
       </div>
 
-      {error ? <Alert title="Technical settings need attention" message={error} /> : null}
+      {error ? <Alert title="Integration settings need attention" message={error} /> : null}
       {success ? <Alert type="success" title="Saved" message={success} /> : null}
       {openAIVerificationError ? <Alert title="OpenAI verification evidence unavailable" message={openAIVerificationError} /> : null}
 
@@ -308,14 +309,13 @@ type SquareStatus = {
 };
 
 function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
-  const base = `/api/platform/tenants/${encodeURIComponent(tenantID)}/technical/square`;
+  const base = `/api/v2/platform/tenants/${encodeURIComponent(tenantID)}/integrations/square`;
   const [status, setStatus] = useState<SquareStatus | null>(null);
   const [locations, setLocations] = useState<POSLocation[]>([]);
   const [locationID, setLocationID] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const requestRef = useRef(0);
-  const aiAction = useRef<{ enabled: boolean; key: string } | null>(null);
   const capabilityAction = useRef<{ signature: string; key: string } | null>(null);
   const activationAction = useRef<{ signature: string; key: string } | null>(null);
 
@@ -323,11 +323,11 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
     const requestID = ++requestRef.current;
     setError("");
     try {
-      const value = await apiRequest<SquareStatus>(`${base}/status`);
+      const value = await normalizedIntegrationRequest<SquareStatus>(`${base}/connection`);
       if (requestID !== requestRef.current) return;
       setStatus(value);
       if (value.connection?.id) {
-        const locationResponse = await apiRequest<{ locations: POSLocation[] }>(`${base}/locations`);
+        const locationResponse = await normalizedIntegrationRequest<{ locations: POSLocation[] }>(`${base}/connection/locations`);
         if (requestID !== requestRef.current) return;
         setLocations(locationResponse.locations);
         setLocationID(value.connection.location_id || locationResponse.locations[0]?.id || "");
@@ -347,7 +347,6 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
     setLocations([]);
     setLocationID("");
     setError("");
-    aiAction.current = null;
     capabilityAction.current = null;
     activationAction.current = null;
     void load();
@@ -360,7 +359,7 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
     setBusy("connect");
     setError("");
     try {
-      const result = await apiRequest<{ url: string }>(`${base}/connect-url`);
+      const result = await normalizedIntegrationRequest<{ url: string }>(`${base}/connection/connect-url`);
       window.location.assign(result.url);
     } catch (failure) {
       setError(errorMessage(failure, "Could not start Square OAuth."));
@@ -372,8 +371,8 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
     setBusy("location");
     setError("");
     try {
-      await apiRequest(`${base}/select-location`, {
-        method: "POST",
+      await normalizedIntegrationRequest(`${base}/connection/location`, {
+        method: "PUT",
         body: JSON.stringify({ location_id: locationID })
       });
       await load();
@@ -388,39 +387,10 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
     setBusy("sync");
     setError("");
     try {
-      await apiRequest(`${base}/sync`, { method: "POST" });
+      await normalizedIntegrationRequest(`${base}/sync-runs`, { method: "POST" });
       await load();
     } catch (failure) {
       setError(errorMessage(failure, "Could not sync Square catalog."));
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function setAIEnabled(enabled: boolean) {
-    if (!status) return;
-    let action = aiAction.current;
-    if (!action || action.enabled !== enabled) {
-      action = {
-        enabled,
-        key: newBusinessActionKey(enabled ? "enable-ai-runtime" : "disable-ai-runtime")
-      };
-      aiAction.current = action;
-    }
-    setBusy("ai-runtime");
-    setError("");
-    try {
-      await apiRequest(`${base}/ai-booking/${enabled ? "enable" : "disable"}`, {
-        method: "POST",
-        body: JSON.stringify({
-          action_key: action.key,
-          expected_version: status.readiness.ai_runtime_version
-        })
-      });
-      aiAction.current = null;
-      await load();
-    } catch (failure) {
-      setError(errorMessage(failure, "Could not update the salon AI runtime."));
     } finally {
       setBusy("");
     }
@@ -440,7 +410,7 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
     setBusy("capability");
     setError("");
     try {
-      await apiRequest(`${base}/scheduling-capability/re-evaluate`, {
+      await normalizedIntegrationRequest(`${base}/verifications/scheduling-safety`, {
         method: "POST",
         body: JSON.stringify(squareSchedulingCapabilityReevaluationPayload(
           action.key,
@@ -469,7 +439,7 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
     setBusy("activate-provider");
     setError("");
     try {
-      await apiRequest(`${base}/active-provider/activate`, {
+      await normalizedIntegrationRequest(`${base}/activation`, {
         method: "POST",
         body: JSON.stringify(squareInitialProviderActivationPayload(
           action.key,
@@ -488,12 +458,10 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
   }
 
   const connected = Boolean(status?.connection?.id) && status?.connection?.status !== "not_connected";
-  const aiEnabled = Boolean(status?.readiness?.ai_enabled);
-
   if (!status && !error) {
     return (
       <Card>
-        <CardTitle>Square connection &amp; AI runtime</CardTitle>
+        <CardTitle>Square Appointments connection</CardTitle>
         <CardDescription>Loading tenant-bound Square connection and active-provider evidence.</CardDescription>
         <div className="mt-5 grid gap-4 sm:grid-cols-4">
           {Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-14" />)}
@@ -506,17 +474,15 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
     <Card>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <CardTitle>Square connection &amp; AI runtime</CardTitle>
+          <CardTitle>Square Appointments connection</CardTitle>
           <CardDescription>
-            OAuth, location, sync, readiness, and the salon-wide AI runtime switch are operated by Platform staff.
-            Connecting does not switch scheduling authority or enable AI implicitly.
+            Manage OAuth, location, catalog sync, and Square scheduling-safety evidence. Connecting does not switch scheduling authority or start AI Receptionist.
           </CardDescription>
         </div>
         <div className="flex gap-2">
           <Badge value={connected ? status?.connection?.status || "connected" : "not_connected"} />
           <Badge value={status?.initial_activation?.active_provider.provider ? "provider_selected" : "provider_unselected"} />
           <Badge value={status?.readiness?.automatic_single_create ? "buyer_write_safe" : "request_only"} />
-          <Badge value={aiEnabled ? "ai_enabled" : "ai_disabled"} />
         </div>
       </div>
       {error ? (
@@ -534,7 +500,7 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
           label="Latest sync"
           value={status?.connection?.last_sync_at ? new Date(status.connection.last_sync_at).toLocaleString() : "Never"}
         />
-        <Metric label="AI runtime version" value={`v${status?.readiness?.ai_runtime_version ?? 0}`} />
+        <Metric label="Catalog items" value={`${(status?.readiness?.service_count ?? 0) + (status?.readiness?.staff_count ?? 0)}`} />
       </div>
       {status && !status.initial_activation.active_provider.provider ? (
         <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4">
@@ -618,14 +584,6 @@ function SquareConnectionPanel({ tenantID }: { tenantID: string }) {
         ) : null}
         <Button
           type="button"
-          variant={aiEnabled ? "danger" : "secondary"}
-          disabled={Boolean(busy) || !status}
-          onClick={() => void setAIEnabled(!aiEnabled)}
-        >
-          {busy === "ai-runtime" ? "Saving…" : aiEnabled ? "Disable AI runtime" : "Enable AI runtime"}
-        </Button>
-        <Button
-          type="button"
           variant="secondary"
           disabled={Boolean(busy) || !connected || (status?.readiness?.connection_capability_version ?? 0) <= 0 || (status?.readiness?.integration_config_version ?? 0) <= 0}
           onClick={() => void reevaluateSchedulingCapability()}
@@ -655,4 +613,14 @@ function providerLabel(provider: IntegrationConfigProvider) {
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error && error.message ? error.message : fallback;
+}
+
+async function integrationConfigRequest<T>(path: string, init: RequestInit = {}) {
+  const response = await apiRequest<{ data: T }>(path, init);
+  return response.data;
+}
+
+async function normalizedIntegrationRequest<T>(path: string, init: RequestInit = {}) {
+  const response = await apiRequest<{ data: T }>(path, init);
+  return response.data;
 }

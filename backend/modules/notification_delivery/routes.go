@@ -18,4 +18,12 @@ func RegisterPlatformRoutes(api fiber.Router, handler *PlatformHandler, jwtSecre
 	group.Get("/", handler.guard(access.CapabilityOperationsRead, handler.delegate.List))
 	group.Get("/:notification_id", handler.guard(access.CapabilityOperationsRead, handler.delegate.Get))
 	group.Post("/:notification_id/requeue", handler.guard(access.CapabilityOperationsWrite, handler.delegate.Requeue))
+	normalized := &PlatformHandler{
+		delegate: &Handler{service: handler.delegate.service, normalized: true},
+		access:   handler.access,
+	}
+	v2 := api.Group("/v2/platform/tenants/:tenant_id/operations/owner-notifications", middleware.RequireAuth(jwtSecret))
+	v2.Get("", normalized.guard(access.CapabilityOperationsRead, normalized.delegate.List))
+	v2.Get("/:notification_id", normalized.guard(access.CapabilityOperationsRead, normalized.delegate.Get))
+	v2.Post("/:notification_id/requeue", normalized.guard(access.CapabilityOperationsWrite, normalized.delegate.Requeue))
 }

@@ -26,6 +26,28 @@ func TestPlatformStaffProjectionOmitsContactPII(t *testing.T) {
 	}
 }
 
+func TestPlatformTenantContextReturnsOnlyBackendAuthorizedNavigation(t *testing.T) {
+	store := &fakeBusinessStore{profile: &SalonProfile{ID: "salon-1", Name: "Lotus", City: "Chicago", State: "IL", Timezone: "America/Chicago"}}
+	authorizer := &fakeBusinessAuthorizer{authorize: func(check access.AccessCheck) error {
+		if check.Capability == access.CapabilityBusinessRead || check.Capability == access.CapabilityTechnicalRead || check.Capability == access.CapabilityPlatformTenantsRead {
+			return nil
+		}
+		return access.ErrForbidden
+	}}
+	result, err := NewService(store, authorizer).PlatformTenantContext(context.Background(), middleware.ActorContext{
+		UserID: "platform-ops", PrincipalScope: middleware.PrincipalScopePlatform,
+	}, "salon-1")
+	if err != nil {
+		t.Fatalf("context: %v", err)
+	}
+	if result.Data.Name != "Lotus" {
+		t.Fatalf("profile=%#v", result.Data)
+	}
+	if len(result.Meta.Permissions.AllowedActions) != 2 || result.Meta.Permissions.AllowedActions[0] != "business.read" || result.Meta.Permissions.AllowedActions[1] != "technical.read" {
+		t.Fatalf("allowed actions=%#v", result.Meta.Permissions.AllowedActions)
+	}
+}
+
 func TestPlatformCustomerReadRequiresExactPIIGrant(t *testing.T) {
 	authorizer := &fakeBusinessAuthorizer{authorize: func(check access.AccessCheck) error {
 		if check.PIIScope == access.PIIScopeCustomers {
@@ -110,11 +132,19 @@ func (f *fakeBusinessAuthorizer) Authorize(_ context.Context, _ middleware.Actor
 
 type fakeBusinessStore struct {
 	Store
+	profile           *SalonProfile
 	staff             []StaffMember
 	service           *Service
 	lastCommand       MutationCommand
 	listServicesCalls int
 	mutateStaffCalls  int
+}
+
+func (f *fakeBusinessStore) GetSalonProfile(context.Context, string) (*SalonProfile, error) {
+	if f.profile == nil {
+		return &SalonProfile{}, nil
+	}
+	return f.profile, nil
 }
 
 func (f *fakeBusinessStore) ListPlatformSalons(context.Context, string) ([]SalonSummary, error) {

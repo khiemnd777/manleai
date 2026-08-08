@@ -3,6 +3,7 @@ package notificationdelivery
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -68,5 +69,23 @@ func TestDeliveryRoutesRequireAuthenticationAndReturnPIISafeShape(t *testing.T) 
 	}
 	if !strings.Contains(visible, "••••0123") || service.ownerUserID != "owner-1" {
 		t.Fatalf("safe response=%s owner=%q", visible, service.ownerUserID)
+	}
+}
+
+func TestPlatformOwnerNotificationV2RoutesRequireAuthentication(t *testing.T) {
+	app := fiber.New()
+	RegisterPlatformRoutes(app.Group("/api"), NewPlatformHandler(&fakeHandlerService{}, nil), "test-secret")
+	for _, test := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v2/platform/tenants/salon-1/operations/owner-notifications"},
+		{http.MethodGet, "/api/v2/platform/tenants/salon-1/operations/owner-notifications/notification-1"},
+		{http.MethodPost, "/api/v2/platform/tenants/salon-1/operations/owner-notifications/notification-1/requeue"},
+	} {
+		response, err := app.Test(httptest.NewRequest(test.method, test.path, nil))
+		if err != nil {
+			t.Fatalf("%s %s: %v", test.method, test.path, err)
+		}
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s %s status=%d, want 401", test.method, test.path, response.StatusCode)
+		}
 	}
 }

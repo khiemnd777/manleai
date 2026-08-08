@@ -18,7 +18,7 @@ export type SquareWebhookOperationsResponse = SquareWebhookEventsResponse & {
   webhook_configured?: boolean;
 };
 
-export function listSquareWebhookEvents(
+export async function listSquareWebhookEvents(
   salonID: string,
   status: SquareWebhookListStatus,
   limit = 25,
@@ -27,15 +27,11 @@ export function listSquareWebhookEvents(
 ) {
   const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
   if (status) query.set("status", status);
-  return apiRequest<SquareWebhookOperationsResponse>(
-    `${squareWebhookBase(salonID, surface)}?${query.toString()}`
-  );
+  return squareWebhookRequest<SquareWebhookOperationsResponse>(`${squareWebhookBase(salonID, surface)}?${query.toString()}`, surface);
 }
 
-export function getSquareWebhookEvent(salonID: string, webhookEventID: string, surface: "tenant" | "platform" = "tenant") {
-  return apiRequest<SquareWebhookEventDetailResponse>(
-    `${squareWebhookBase(salonID, surface)}/${encodeURIComponent(webhookEventID)}`
-  );
+export async function getSquareWebhookEvent(salonID: string, webhookEventID: string, surface: "tenant" | "platform" = "tenant") {
+  return squareWebhookRequest<SquareWebhookEventDetailResponse>(`${squareWebhookBase(salonID, surface)}/${encodeURIComponent(webhookEventID)}`, surface);
 }
 
 export async function requeueSquareWebhookEvent(
@@ -48,16 +44,26 @@ export async function requeueSquareWebhookEvent(
     `${squareWebhookBase(salonID, surface)}/${encodeURIComponent(webhookEventID)}/requeue`,
     { method: "POST", body: JSON.stringify({ action_key: actionKey }) }
   );
+
+  const payload = surface === "platform"
+    ? (result.data as unknown as { data: SquareWebhookEventDetailResponse }).data
+    : result.data;
   return {
-    event: result.data.event,
+    event: payload.event,
     replayed: result.response.headers.get("X-Idempotent-Replay") === "true"
   };
 }
 
 function squareWebhookBase(salonID: string, surface: "tenant" | "platform") {
   return surface === "platform"
-    ? `/api/platform/tenants/${encodeURIComponent(salonID)}/operations/square-webhooks`
+    ? `/api/v2/platform/tenants/${encodeURIComponent(salonID)}/operations/provider-events/square`
     : `/api/salons/${encodeURIComponent(salonID)}/square-webhook-events`;
+}
+
+async function squareWebhookRequest<T>(path: string, surface: "tenant" | "platform") {
+  if (surface === "tenant") return apiRequest<T>(path);
+  const response = await apiRequest<{ data: T }>(path);
+  return response.data;
 }
 
 export function newSquareWebhookActionKey() {

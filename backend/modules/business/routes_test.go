@@ -47,6 +47,23 @@ func TestTenantAndPlatformBusinessRoutesAreFixedAndSymmetric(t *testing.T) {
 			}
 		}
 	}
+	if !routes["GET /api/v2/platform/tenants/:tenant_id/context"] {
+		t.Error("missing normalized Platform tenant context route")
+	}
+	if !routes["GET /api/v2/platform/tenants"] {
+		t.Error("missing normalized Platform tenant directory route")
+	}
+	for _, route := range []string{
+		"GET /api/v2/platform/tenants/:tenant_id/business/profile",
+		"GET /api/v2/platform/tenants/:tenant_id/business/hours",
+		"GET /api/v2/platform/tenants/:tenant_id/business/public-page",
+		"GET /api/v2/platform/tenants/:tenant_id/staff",
+		"GET /api/v2/platform/tenants/:tenant_id/customers",
+	} {
+		if !routes[route] {
+			t.Errorf("missing normalized route %s", route)
+		}
+	}
 }
 
 func TestPlatformBusinessServicesGuardFailsClosedWhenSupportAuditFails(t *testing.T) {

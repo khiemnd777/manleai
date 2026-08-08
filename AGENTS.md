@@ -23,7 +23,8 @@ supports structured multi-guest, multi-service staff-only and
 pooled create plus whole-root internal reschedule/cancel. Phase 2 also
 implements `owner_manual` as a request-only, pending-owner-review executor with
 no appointment or provider side effect. V52-V55 and the Platform tenant
-Technical UI implement explicit reviewed authority preview/commit, immutable audit history, and
+Scheduling UI implement one operator-facing authority change backed by internal reviewed
+preview/commit evidence, immutable audit history, and
 an explicit inverse-run reference; integrations never switch authority
 implicitly.
 
@@ -40,6 +41,9 @@ treat them as binding:
   switching: `docs/scheduling-authority.md`
 - POS booking, Square, and confirmation safety: `docs/pos-adapter-layer.md`, `docs/square-integration.md`
 - API surface and authenticated status/debug endpoints: `docs/api.md`
+- Normalized Platform tenant v2 API, response/readiness vocabulary, security
+  planes, information architecture, and compatibility removal gates:
+  `docs/platform-tenant-api-v2.md`
 - Production, deployment, provider runtime config, and dashboard-managed provider settings: `docs/deployment.md`
 - Production readiness scope: `docs/production-readiness-checklist.md`
 - Conversation AnswerContext query-count, multi-replica freshness,
@@ -74,9 +78,9 @@ the same approved documentation scope.
 
 - Active Square, Twilio, and OpenAI configuration is salon-scoped operational
   data stored in `salon_integration_configs` and managed through
-  `/platform/tenants/:tenant_id/technical`.
+  `/platform/tenants/:tenant_id/integrations`.
 - For active-runtime claims or diagnosis, inspect the Platform-backed API
-  state (`GET /api/platform/tenants/:tenant_id/technical/integration-configs`), the relevant readiness or
+  state (`GET /api/v2/platform/tenants/:tenant_id/integrations`), the relevant readiness or
   debug endpoint such as `GET /api/salons/:id/voice/status`, persisted provider
   state, and the runtime resolver code as applicable.
 - Never inspect, quote, or infer active provider configuration from `.env`,
@@ -154,8 +158,8 @@ the same approved documentation scope.
   structured multi-guest, multi-service internal create, and Phase 4C whole-
   root internal reschedule/cancel workflows. Masked notification recovery is a
   Platform Operations workflow. Explicit authority selection, preview, review,
-  commit, conflict/recovery, inverse-run context, and internal technical
-  configuration live in the Platform tenant Technical tab.
+  commit, conflict/recovery, inverse-run context, and internal calendar
+  configuration live in the Platform tenant Scheduling section.
 - `manleai_calendar` has a registered executor for verified aggregate
   availability and atomic create across structured guests, ordered service
   units, concrete staff assignments, and pooled resource allocations. Phase 4C
@@ -193,7 +197,7 @@ the same approved documentation scope.
 - Staff-to-service eligibility is a canonical tenant-fenced relationship that
   can be managed from the Staff parent before a service-policy row exists; do
   not introduce setup-order dependency between Staff-first and Service-first UI.
-- ManleAI Calendar technical UI lives in the Platform tenant Technical tab:
+- ManleAI Calendar configuration UI lives in the Platform tenant Scheduling section:
   salon-wide policy, local hours, staff weekly schedules, service execution
   policies, shared resources, exceptions, activation, and authority switching.
   Tenant and Platform Business surfaces still share canonical service, staff,

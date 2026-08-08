@@ -9,11 +9,31 @@ import (
 )
 
 type Handler struct {
-	service *ServiceLayer
+	service    *ServiceLayer
+	normalized bool
 }
 
 func NewHandler(service *ServiceLayer) *Handler {
 	return &Handler{service: service}
+}
+
+func (h *Handler) success(c *fiber.Ctx, status int, value any) error {
+	if !h.normalized {
+		return respond.JSON(c, status, value)
+	}
+	data := value
+	if object, ok := value.(fiber.Map); ok && len(object) == 1 {
+		for _, item := range object {
+			data = item
+		}
+	}
+	return respond.JSON(c, status, fiber.Map{
+		"data": data,
+		"meta": fiber.Map{
+			"replayed": false, "resource_version": 0,
+			"permissions": fiber.Map{"can_read": true, "allowed_actions": []string{}},
+		},
+	})
 }
 
 func activeProviderNotConfiguredError(c *fiber.Ctx, err error) (bool, error) {
@@ -34,7 +54,7 @@ func (h *Handler) Services(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICES_FAILED", "Could not load services.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"services": items})
+	return h.success(c, fiber.StatusOK, fiber.Map{"services": items})
 }
 
 func (h *Handler) ServiceCategories(c *fiber.Ctx) error {
@@ -45,7 +65,7 @@ func (h *Handler) ServiceCategories(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORIES_FAILED", "Could not load service categories.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service_categories": items})
+	return h.success(c, fiber.StatusOK, fiber.Map{"service_categories": items})
 }
 
 func (h *Handler) CreateServiceCategory(c *fiber.Ctx) error {
@@ -63,7 +83,7 @@ func (h *Handler) CreateServiceCategory(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORY_CREATE_FAILED", "Could not create service category.")
 	}
-	return respond.JSON(c, fiber.StatusCreated, fiber.Map{"service_category": item})
+	return h.success(c, fiber.StatusCreated, fiber.Map{"service_category": item})
 }
 
 func (h *Handler) UpdateServiceCategory(c *fiber.Ctx) error {
@@ -81,7 +101,7 @@ func (h *Handler) UpdateServiceCategory(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORY_UPDATE_FAILED", "Could not update service category.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service_category": item})
+	return h.success(c, fiber.StatusOK, fiber.Map{"service_category": item})
 }
 
 func (h *Handler) ArchiveServiceCategory(c *fiber.Ctx) error {
@@ -95,7 +115,7 @@ func (h *Handler) ArchiveServiceCategory(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORY_ARCHIVE_FAILED", "Could not archive service category.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service_category": item})
+	return h.success(c, fiber.StatusOK, fiber.Map{"service_category": item})
 }
 
 func (h *Handler) RestoreServiceCategory(c *fiber.Ctx) error {
@@ -109,7 +129,7 @@ func (h *Handler) RestoreServiceCategory(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORY_RESTORE_FAILED", "Could not restore service category.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service_category": item})
+	return h.success(c, fiber.StatusOK, fiber.Map{"service_category": item})
 }
 
 func (h *Handler) UpsertServiceCategoryAlias(c *fiber.Ctx) error {
@@ -127,7 +147,7 @@ func (h *Handler) UpsertServiceCategoryAlias(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORY_ALIAS_SAVE_FAILED", "Could not save service category alias.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service_category_alias": item})
+	return h.success(c, fiber.StatusOK, fiber.Map{"service_category_alias": item})
 }
 
 func (h *Handler) ArchiveServiceCategoryAlias(c *fiber.Ctx) error {
@@ -141,7 +161,7 @@ func (h *Handler) ArchiveServiceCategoryAlias(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORY_ALIAS_ARCHIVE_FAILED", "Could not archive service category alias.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service_category_alias": item})
+	return h.success(c, fiber.StatusOK, fiber.Map{"service_category_alias": item})
 }
 
 func (h *Handler) AssignServiceCategory(c *fiber.Ctx) error {
@@ -159,7 +179,7 @@ func (h *Handler) AssignServiceCategory(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORY_ASSIGN_FAILED", "Could not assign service category.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service": item})
+	return h.success(c, fiber.StatusOK, fiber.Map{"service": item})
 }
 
 func (h *Handler) RefreshServiceCategorySuggestions(c *fiber.Ctx) error {
@@ -170,7 +190,7 @@ func (h *Handler) RefreshServiceCategorySuggestions(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CATEGORY_SUGGESTION_REFRESH_FAILED", "Could not refresh service category suggestions.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"refresh": result})
+	return h.success(c, fiber.StatusOK, fiber.Map{"refresh": result})
 }
 
 func (h *Handler) CreateService(c *fiber.Ctx) error {
@@ -191,7 +211,7 @@ func (h *Handler) CreateService(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_CREATE_FAILED", "Could not create service.")
 	}
-	return respond.JSON(c, fiber.StatusCreated, fiber.Map{"service": item})
+	return h.success(c, fiber.StatusCreated, fiber.Map{"service": item})
 }
 
 func (h *Handler) UpdateService(c *fiber.Ctx) error {
@@ -212,7 +232,7 @@ func (h *Handler) UpdateService(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_UPDATE_FAILED", "Could not update service.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service": item})
+	return h.success(c, fiber.StatusOK, fiber.Map{"service": item})
 }
 
 func (h *Handler) UpdateServiceOwnerControls(c *fiber.Ctx) error {
@@ -230,7 +250,7 @@ func (h *Handler) UpdateServiceOwnerControls(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_OWNER_CONTROLS_UPDATE_FAILED", "Could not update ManleAI service controls.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service": item})
+	return h.success(c, fiber.StatusOK, fiber.Map{"service": item})
 }
 
 func (h *Handler) ArchiveService(c *fiber.Ctx) error {
@@ -244,7 +264,7 @@ func (h *Handler) ArchiveService(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_ARCHIVE_FAILED", "Could not archive service.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service": item})
+	return h.success(c, fiber.StatusOK, fiber.Map{"service": item})
 }
 
 func (h *Handler) UpdateServiceAIBookable(c *fiber.Ctx) error {
@@ -262,7 +282,7 @@ func (h *Handler) UpdateServiceAIBookable(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SERVICE_UPDATE_FAILED", "Could not update service.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"service": item})
+	return h.success(c, fiber.StatusOK, fiber.Map{"service": item})
 }
 
 func (h *Handler) Staff(c *fiber.Ctx) error {
@@ -276,7 +296,7 @@ func (h *Handler) Staff(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "STAFF_FAILED", "Could not load staff.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"staff": items})
+	return h.success(c, fiber.StatusOK, fiber.Map{"staff": items})
 }
 
 func (h *Handler) ProviderSwitchReadiness(c *fiber.Ctx) error {
@@ -290,7 +310,7 @@ func (h *Handler) ProviderSwitchReadiness(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "PROVIDER_SWITCH_READINESS_FAILED", "Could not load provider switch readiness.")
 	}
-	return respond.JSON(c, fiber.StatusOK, readiness)
+	return h.success(c, fiber.StatusOK, readiness)
 }
 
 func (h *Handler) CreateProviderSwitchRun(c *fiber.Ctx) error {
@@ -311,7 +331,7 @@ func (h *Handler) CreateProviderSwitchRun(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "PROVIDER_SWITCH_RUN_CREATE_FAILED", "Could not create provider switch run.")
 	}
-	return respond.JSON(c, fiber.StatusCreated, fiber.Map{"run": run})
+	return h.success(c, fiber.StatusCreated, fiber.Map{"run": run})
 }
 
 func (h *Handler) LatestProviderSwitchRun(c *fiber.Ctx) error {
@@ -322,7 +342,7 @@ func (h *Handler) LatestProviderSwitchRun(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "PROVIDER_SWITCH_RUN_FAILED", "Could not load provider switch run.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"run": run})
+	return h.success(c, fiber.StatusOK, fiber.Map{"run": run})
 }
 
 func (h *Handler) GetProviderSwitchRun(c *fiber.Ctx) error {
@@ -336,7 +356,7 @@ func (h *Handler) GetProviderSwitchRun(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "PROVIDER_SWITCH_RUN_FAILED", "Could not load provider switch run.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"run": run})
+	return h.success(c, fiber.StatusOK, fiber.Map{"run": run})
 }
 
 func (h *Handler) ProviderSwitchDryRunReadiness(c *fiber.Ctx) error {
@@ -350,7 +370,7 @@ func (h *Handler) ProviderSwitchDryRunReadiness(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "PROVIDER_SWITCH_DRY_RUN_READINESS_FAILED", "Could not load provider switch dry-run readiness.")
 	}
-	return respond.JSON(c, fiber.StatusOK, readiness)
+	return h.success(c, fiber.StatusOK, readiness)
 }
 
 func (h *Handler) UpdateProviderSwitchMatch(c *fiber.Ctx) error {
@@ -368,7 +388,7 @@ func (h *Handler) UpdateProviderSwitchMatch(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "PROVIDER_SWITCH_MATCH_UPDATE_FAILED", "Could not update provider switch match.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"run": run})
+	return h.success(c, fiber.StatusOK, fiber.Map{"run": run})
 }
 
 func (h *Handler) CreateStaff(c *fiber.Ctx) error {
@@ -389,7 +409,7 @@ func (h *Handler) CreateStaff(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "STAFF_CREATE_FAILED", "Could not create staff member.")
 	}
-	return respond.JSON(c, fiber.StatusCreated, fiber.Map{"staff_member": item})
+	return h.success(c, fiber.StatusCreated, fiber.Map{"staff_member": item})
 }
 
 func (h *Handler) UpdateStaff(c *fiber.Ctx) error {
@@ -410,7 +430,7 @@ func (h *Handler) UpdateStaff(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "STAFF_UPDATE_FAILED", "Could not update staff member.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"staff_member": item})
+	return h.success(c, fiber.StatusOK, fiber.Map{"staff_member": item})
 }
 
 func (h *Handler) ArchiveStaff(c *fiber.Ctx) error {
@@ -424,7 +444,7 @@ func (h *Handler) ArchiveStaff(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "STAFF_ARCHIVE_FAILED", "Could not archive staff member.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"staff_member": item})
+	return h.success(c, fiber.StatusOK, fiber.Map{"staff_member": item})
 }
 
 func (h *Handler) UpdateStaffAIBookable(c *fiber.Ctx) error {
@@ -442,7 +462,7 @@ func (h *Handler) UpdateStaffAIBookable(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "STAFF_UPDATE_FAILED", "Could not update staff member.")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"staff_member": item})
+	return h.success(c, fiber.StatusOK, fiber.Map{"staff_member": item})
 }
 
 type updateAIBookableRequest struct {

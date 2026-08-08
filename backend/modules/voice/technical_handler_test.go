@@ -3,6 +3,7 @@ package voice
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -38,5 +39,17 @@ func TestTechnicalVoiceRoutingStatusRequiresExactTechnicalRead(t *testing.T) {
 	}
 	if authorizer.check.Surface != access.SurfacePlatform || authorizer.check.SalonID != "salon_1" || authorizer.check.Capability != access.CapabilityTechnicalRead {
 		t.Fatalf("authorization check=%#v", authorizer.check)
+	}
+}
+
+func TestTechnicalVoiceRoutingV2RouteRequiresAuthentication(t *testing.T) {
+	app := fiber.New()
+	RegisterTechnicalRoutes(app.Group("/api"), NewTechnicalHandler(&Service{}, nil), "test-secret")
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v2/platform/tenants/salon_1/integrations/twilio/verifications/voice-routing", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status=%d, want 401", response.StatusCode)
 	}
 }

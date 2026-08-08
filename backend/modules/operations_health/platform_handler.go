@@ -15,8 +15,9 @@ type platformAuthorizer interface {
 }
 
 type PlatformHandler struct {
-	service *Service
-	access  platformAuthorizer
+	service    *Service
+	access     platformAuthorizer
+	normalized bool
 }
 
 func NewPlatformHandler(service *Service, authorizer platformAuthorizer) *PlatformHandler {
@@ -43,6 +44,9 @@ func (h *PlatformHandler) Get(c *fiber.Ctx) error {
 	status, err := h.service.GetForPlatform(c.UserContext(), c.Params("tenant_id"))
 	switch {
 	case err == nil:
+		if h.normalized {
+			return respond.JSON(c, fiber.StatusOK, fiber.Map{"data": status, "meta": fiber.Map{"replayed": false, "resource_version": 0, "permissions": fiber.Map{"can_read": true, "allowed_actions": []string{}}}})
+		}
 		return respond.JSON(c, fiber.StatusOK, status)
 	case errors.Is(err, ErrValidation):
 		return respond.Error(c, fiber.StatusBadRequest, "OPERATIONS_STATUS_INVALID", "Operations status request is invalid.")

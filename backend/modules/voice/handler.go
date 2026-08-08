@@ -24,8 +24,9 @@ type platformAuthorizer interface {
 }
 
 type PlatformHandler struct {
-	service *Service
-	access  platformAuthorizer
+	service    *Service
+	access     platformAuthorizer
+	normalized bool
 }
 
 func NewPlatformHandler(service *Service, authorizer platformAuthorizer) *PlatformHandler {
@@ -33,15 +34,19 @@ func NewPlatformHandler(service *Service, authorizer platformAuthorizer) *Platfo
 }
 
 func (h *PlatformHandler) Status(c *fiber.Ctx) error {
+	salonID := c.Params("id")
+	if salonID == "" {
+		salonID = c.Params("tenant_id")
+	}
 	if h == nil || h.access == nil || h.access.Authorize(c.UserContext(), middleware.Actor(c), access.AccessCheck{
-		Surface: access.SurfacePlatform, SalonID: c.Params("id"), Capability: access.CapabilityCallsRead, PIIScope: access.PIIScopeCalls,
+		Surface: access.SurfacePlatform, SalonID: salonID, Capability: access.CapabilityCallsRead, PIIScope: access.PIIScopeCalls,
 	}) != nil {
 		return respond.Error(c, fiber.StatusForbidden, "CALLS_ACCESS_FORBIDDEN", "This Platform account is not authorized for the salon Calls view.")
 	}
-	if h.access.RecordPlatformSupportAction(c.UserContext(), middleware.Actor(c), c.Params("id"), access.CapabilityCallsRead, access.PIIScopeCalls, c.Method(), c.Path()) != nil {
+	if h.access.RecordPlatformSupportAction(c.UserContext(), middleware.Actor(c), salonID, access.CapabilityCallsRead, access.PIIScopeCalls, c.Method(), c.Path()) != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "SUPPORT_AUDIT_FAILED", "Could not record this authorized support action.")
 	}
-	status, err := h.service.StatusForPlatform(c.UserContext(), c.Params("id"), middleware.UserID(c))
+	status, err := h.service.StatusForPlatform(c.UserContext(), salonID, middleware.UserID(c))
 	if errors.Is(err, ErrValidation) {
 		return respond.Error(c, fiber.StatusBadRequest, "VOICE_STATUS_INVALID", "Voice status request is invalid.")
 	}
@@ -50,6 +55,15 @@ func (h *PlatformHandler) Status(c *fiber.Ctx) error {
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "VOICE_STATUS_FAILED", "Could not load voice status.")
+	}
+	if h.normalized {
+		return respond.JSON(c, fiber.StatusOK, fiber.Map{
+			"data": status,
+			"meta": fiber.Map{
+				"replayed": false, "resource_version": 0,
+				"permissions": fiber.Map{"can_read": true, "allowed_actions": []string{}},
+			},
+		})
 	}
 	return respond.JSON(c, fiber.StatusOK, status)
 }

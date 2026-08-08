@@ -18,6 +18,7 @@ import (
 	"github.com/manleai/ai-receptionist/internal/ratelimit"
 	"github.com/manleai/ai-receptionist/internal/respond"
 	"github.com/manleai/ai-receptionist/modules/access"
+	airuntimecontrol "github.com/manleai/ai-receptionist/modules/ai_runtime_control"
 	"github.com/manleai/ai-receptionist/modules/auth"
 	"github.com/manleai/ai-receptionist/modules/booking"
 	"github.com/manleai/ai-receptionist/modules/business"
@@ -157,6 +158,8 @@ func main() {
 	operationshealth.RegisterPlatformRoutes(api, operationshealth.NewPlatformHandler(operationsHealthService, accessService), cfg.JWTSecret)
 
 	posRepo := pos.NewRepository(db)
+	aiRuntimeControlService := airuntimecontrol.NewService(posRepo)
+	airuntimecontrol.RegisterPlatformRoutes(api, airuntimecontrol.NewPlatformHandler(aiRuntimeControlService, accessService), cfg.JWTSecret)
 
 	squareAdapter, err := pos_square.NewSquareAdapter(integrationConfigService, posRepo, cipher)
 	if err != nil {
@@ -191,11 +194,13 @@ func main() {
 	conversationService.SetCustomerSMSConsentTool(customerNotificationService)
 	conversation.RegisterRoutes(api, conversation.NewHandler(conversationService), cfg.JWTSecret)
 	conversation.RegisterPlatformRoutes(api, conversation.NewPlatformHandler(conversationService, accessService), cfg.JWTSecret)
+	conversation.RegisterPlatformV2Routes(api, conversation.NewPlatformHandler(conversationService, accessService), cfg.JWTSecret)
 
 	trainingRepo := training.NewRepository(db)
 	trainingService := training.NewService(trainingRepo, schedulingService)
 	training.RegisterRoutes(api, training.NewHandler(trainingService).SetTenantRuntimeLimiter(tenantRuntimeService), cfg.JWTSecret)
 	training.RegisterPlatformRoutes(api, training.NewHandler(trainingService), accessService, cfg.JWTSecret)
+	training.RegisterPlatformV2Routes(api, training.NewNormalizedHandler(trainingService), accessService, cfg.JWTSecret)
 	training.RegisterPlatformServiceAliasRoutes(api, training.NewHandler(trainingService), accessService, cfg.JWTSecret)
 	training.RegisterPlatformCallsCorrectionRoute(api, training.NewHandler(trainingService), accessService, cfg.JWTSecret)
 	configurationTransferRepo := configtransfer.NewRepository(db)
@@ -242,7 +247,9 @@ func main() {
 	pos_square.RegisterPlatformRoutes(api, pos_square.NewPlatformHandler(squareService, accessService, tenantRuntimeService), cfg.JWTSecret)
 	authoritySwitchRepo := authorityswitch.NewRepository(db)
 	authoritySwitchService := authorityswitch.NewService(authoritySwitchRepo, manleaiCalendarService, squareService, ownerManualSchedulingExecutor != nil)
-	authorityswitch.RegisterPlatformRoutes(api, authorityswitch.NewPlatformHandler(authoritySwitchService, accessService), cfg.JWTSecret)
+	authoritySwitchPlatformHandler := authorityswitch.NewPlatformHandler(authoritySwitchService, accessService)
+	authorityswitch.RegisterPlatformRoutes(api, authoritySwitchPlatformHandler, cfg.JWTSecret)
+	authorityswitch.RegisterPlatformV2Routes(api, authoritySwitchPlatformHandler, cfg.JWTSecret)
 
 	logg.Info("api listening", "port", cfg.ServerPort, "env", cfg.AppEnv)
 	if err := app.Listen(":" + cfg.ServerPort); err != nil {

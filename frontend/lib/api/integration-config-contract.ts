@@ -215,7 +215,7 @@ export function openAIConfigPayload(form: OpenAIConfigForm): Record<string, unkn
 }
 
 export function platformIntegrationConfigBasePath(tenantID: string) {
-  return `/api/platform/tenants/${encodeURIComponent(tenantID)}/technical/integration-configs`;
+  return `/api/v2/platform/tenants/${encodeURIComponent(tenantID)}/integrations`;
 }
 
 export function squareSchedulingCapabilityReevaluationPayload(

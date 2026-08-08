@@ -1,18 +1,17 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, Download, FileJson, RefreshCcw, Search, ShieldCheck, Upload } from "lucide-react";
+import { ArrowRight, Download, FileJson, Search, ShieldCheck, Upload } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
-import { ImportIssueList, ImportSummaryTable, listOrNone, sectionLabel } from "@/features/configuration-transfer/import-preview";
+import { ImportIssueList, ImportSummaryTable, listOrNone } from "@/features/configuration-transfer/import-preview";
 import { listBusinessSalons, type BusinessSalonSummary } from "@/lib/api/business";
 import { RequestError } from "@/lib/api/client";
 import {
   applyPlatformTransfer,
   exportPlatformConfiguration,
-  listPlatformTransferRuns,
   newPlatformTransferActionKey,
   previewPlatformTransfer,
   readPlatformConfiguration,
@@ -48,8 +47,6 @@ export function PlatformConfigurationTransfer({ tenantID }: { tenantID: string }
   const [legacyV7Adapted, setLegacyV7Adapted] = useState(false);
   const [sections, setSections] = useState<string[]>(safeSections);
   const [preview, setPreview] = useState<PlatformTransferResponse | null>(null);
-  const [runs, setRuns] = useState<PlatformTransferResponse[]>([]);
-  const [runsBlocked, setRunsBlocked] = useState(false);
   const [actionKey, setActionKey] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
@@ -74,20 +71,8 @@ export function PlatformConfigurationTransfer({ tenantID }: { tenantID: string }
     setLoading(true);
     setError("");
     try {
-      const [directory, runResult] = await Promise.allSettled([
-        listBusinessSalons("platform"),
-        listPlatformTransferRuns(tenantID)
-      ]);
-      if (directory.status === "fulfilled") setSalons(directory.value.salons);
-      else throw directory.reason;
-      if (runResult.status === "fulfilled") {
-        setRuns(runResult.value.runs);
-        setRunsBlocked(false);
-      } else if (runResult.reason instanceof RequestError && runResult.reason.status === 403) {
-        setRunsBlocked(true);
-      } else {
-        setError(errorMessage(runResult.reason, "Could not load recent transfer runs."));
-      }
+      const directory = await listBusinessSalons("platform");
+      setSalons(directory.salons);
     } catch (failure) {
       setError(errorMessage(failure, "Could not load Platform Transfer."));
     } finally { setLoading(false); }
@@ -160,13 +145,6 @@ export function PlatformConfigurationTransfer({ tenantID }: { tenantID: string }
       const result = await applyPlatformTransfer(tenantID, request, preview.run_id, actionKey);
       setPreview(result);
       setSuccess(result.replayed ? "The previously applied result was returned safely." : "Configuration transfer applied atomically. Scheduling authority, provider connection state, and secrets were preserved.");
-      try {
-        const recent = await listPlatformTransferRuns(tenantID);
-        setRuns(recent.runs);
-        setRunsBlocked(false);
-      } catch (historyFailure) {
-        if (historyFailure instanceof RequestError && historyFailure.status === 403) setRunsBlocked(true);
-      }
     } catch (failure) {
       setError(errorMessage(failure, "Could not apply this transfer."));
       if (failure instanceof RequestError && failure.code === "CONFIGURATION_TRANSFER_STALE") {
@@ -220,11 +198,6 @@ export function PlatformConfigurationTransfer({ tenantID }: { tenantID: string }
       <Card>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div><CardTitle>3. Preview and apply</CardTitle><CardDescription>Preview writes no salon configuration; it records safe review evidence. Apply succeeds only against the exact source fingerprint, destination versions, and scheduling-authority version reviewed here.</CardDescription></div><Button type="button" disabled={!canPreview} onClick={() => void runPreview()}><ShieldCheck className="h-4 w-4" />{busy === "preview" ? "Previewing…" : "Preview changes"}</Button></div>
         {!preview ? <div className="mt-5 rounded-md border border-dashed border-line p-6 text-sm text-muted">Choose a source and at least one section, then preview. No destination configuration is changed during preview.</div> : <div className="mt-5 space-y-4"><div className="flex flex-col gap-3 rounded-md border border-line bg-slate-50 p-4 sm:flex-row sm:items-start sm:justify-between"><div><div className="text-sm font-semibold text-ink">Destination authority remains {authorityLabel(preview.target_scheduling_authority)}</div><div className="mt-1 text-xs leading-5 text-muted">Authority version {preview.target_scheduling_authority_version} · source adapter {preview.source_active_pos_provider || "not reported"} · destination adapter {preview.target_active_pos_provider || "not configured"}</div></div><Badge value={preview.can_apply ? preview.status : "conflict"} /></div><ImportSummaryTable summary={preview.summary} /><ImportIssueList title="Conflicts" issues={preview.conflicts} tone="danger" /><ImportIssueList title="Warnings" issues={preview.warnings} tone="warning" /><details className="rounded-md border border-line p-3 text-xs leading-5 text-muted"><summary className="cursor-pointer font-semibold text-ink">Excluded data ({preview.excluded_data.length})</summary><div className="mt-2 break-words">{preview.excluded_data.join(", ")}</div></details><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div className="text-xs leading-5 text-muted">Schema {preview.schema_version}. Re-enter secrets for: {listOrNone(preview.requires_secret_reentry)}.</div><Button type="button" disabled={Boolean(busy) || !preview.can_apply || preview.status === "applied"} onClick={() => void apply()}><ArrowRight className="h-4 w-4" />{busy === "apply" ? "Applying atomically…" : preview.status === "applied" ? "Applied" : "Apply reviewed transfer"}</Button></div></div>}
-      </Card>
-
-      <Card>
-        <div className="flex items-start justify-between gap-3"><div><CardTitle>Recent transfer runs</CardTitle><CardDescription>Safe run metadata only. Full configuration payloads and secret values are not stored.</CardDescription></div><Button type="button" variant="secondary" onClick={() => void load()} disabled={Boolean(busy)}><RefreshCcw className="h-4 w-4" />Refresh</Button></div>
-        {runsBlocked ? <div className="mt-4"><Alert type="warning" title="Run history requires audit access" message="This Platform account can operate authorized sections, but audit.read is required to list recent transfer runs." /></div> : runs.length ? <div className="mt-4 space-y-3">{runs.map((run) => <div key={run.run_id} className="rounded-md border border-line p-4"><div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between"><div><div className="text-sm font-semibold text-ink">{run.source_type === "tenant" ? "Tenant-to-tenant" : "JSON upload"}</div><div className="mt-1 text-xs text-muted">{new Date(run.created_at).toLocaleString()} · {run.included_sections.map(sectionLabel).join(", ")}</div></div><Badge value={run.status} /></div></div>)}</div> : <div className="mt-4 rounded-md border border-dashed border-line p-5 text-sm text-muted">No transfer run has been recorded for this salon.</div>}
       </Card>
     </div>
   );

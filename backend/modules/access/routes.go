@@ -33,4 +33,16 @@ func RegisterRoutes(api fiber.Router, handler *Handler, jwtSecret string) {
 	group.Get("/audit", handler.ListAuditEvents)
 	api.Get("/platform/tenants/:id/support-access/effective", middleware.RequireAuth(jwtSecret), handler.GetEffectiveSupportAccess)
 
+	v2 := api.Group("/v2/platform/tenants/:tenant_id/access", middleware.RequireAuth(jwtSecret))
+	v2.Get("", handler.PlatformTenantAccess)
+	v2.Get("/effective", handler.GetEffectiveSupportAccessV2)
+	v2.Put("/team/:user_id", handler.MutateMembershipV2)
+	v2.Put("/operators/:user_id", handler.MutateSalonAssignmentV2)
+	v2.Post("/operators/pii-grants", handler.GrantPIIAccessV2)
+	v2.Post("/operators/pii-grants/:grant_id/revoke", handler.RevokePIIAccessV2)
+	v2.Post("/operators/temporary-authorizations", handler.CreateSupportAccessRequestV2)
+	v2.Post("/operators/temporary-authorizations/:request_id/cancel", handler.CancelSupportAccessRequestV2)
+	v2.Post("/operators/temporary-authorizations/:request_id/revoke", handler.RevokeSupportAccessRequestV2)
+	api.Get("/v2/platform/tenants/:tenant_id/audit-events", middleware.RequireAuth(jwtSecret), handler.ListAuditEventsV2)
+
 }

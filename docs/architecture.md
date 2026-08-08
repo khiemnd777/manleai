@@ -99,7 +99,7 @@ components/layout    independent Tenant and Platform shells plus route-surface g
 features/auth        login flow
 features/configuration-transfer shared transfer preview presentation helpers
 features/business    shared Tenant/Platform Business editors and Tenant appointments/calls consoles
-features/platform    tenant directory/detail, global Platform roles, tenant Access, Technical, Transfer, Operations, Audit, and runtime-limit controls
+features/platform    tenant directory/detail, five-group workflow shell, global Platform roles, tenant Access, Integrations, Scheduling, AI Runtime, Transfer, Operations, Audit, and runtime-limit controls
 features/public      slug-scoped public salon landing projection
 features/onboarding salon profile creation
 lib/api              typed API client
@@ -244,9 +244,10 @@ consultation writes reuse the POS validation/persistence owner.
 
 Phases 4-10 complete the split. V77 adds the reviewed Transfer workflow.
 `/dashboard/*` is the Tenant Business surface;
-`/platform/*` is the Platform Admin/Ops surface with tenant detail tabs for
-Business, Services, AI Training, Calls, Technical, Transfer, Operations,
-Access, and Audit. Services, Calls, Settings, and AI Training use the original rich
+`/platform/*` is the Platform Admin/Ops surface. The normalized tenant workspace
+groups the same domain workflows under Overview, Business, AI Receptionist,
+Platform Controls, and History; legacy direct tab routes remain compatibility
+adapters during the v2 cutover. Services, Calls, Settings, and AI Training use the original rich
 dashboard components through explicit Tenant/Platform data adapters; the
 Owner-first cutover does not replace those workflows with reduced dashboards.
 Platform Business therefore does not render its former reduced Services
@@ -274,6 +275,13 @@ technical configuration, AI runtime enablement, and tenant runtime limits are
 Platform-only. Tenant users manage only their salon's Business objects. The
 same Business service lets an authorized Platform operator manage those
 objects on the tenant's behalf while recording the actual Platform actor.
+
+`docs/platform-tenant-api-v2.md` owns the normalized resource taxonomy,
+response/readiness vocabulary, actor-versus-system security planes, information
+architecture, and compatibility removal gate. `technical` remains a legacy
+route grouping, not a v2 domain resource. Provider setup moves to Integrations,
+scheduling controls move to Scheduling, and salon-wide AI enablement moves to
+AI Receptionist Runtime without changing their persisted domain owners.
 
 V67 rejects authenticated tenant runtime access without an active exact-salon
 membership. V68 installs tenant-row RLS; the API and worker use a non-owner,
@@ -1129,7 +1137,7 @@ tenant binding; an already-bound call path performs direct exact-tenant lookup
 and cannot rediscover or rebind another tenant. `salons.phone` is not part of this path. The active-number partial
 unique index prevents two enabled tenant routes from owning one inbound number.
 Route verification persists only an HMAC routing fingerprint and bounded route
-metadata, allowing Platform Technical to distinguish saved configuration from
+metadata, allowing Platform Integrations to distinguish saved configuration from
 a live webhook matching the current config without storing tokens, signatures,
 or provider bodies. Shared Voice routes remain expand-release rollback code;
 they must be removed in a later contract release after per-tenant live evidence,

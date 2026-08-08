@@ -20,4 +20,10 @@ func RegisterPlatformRoutes(api fiber.Router, handler *PlatformHandler, jwtSecre
 	group.Put(prefix+"/square", handler.UpdateSquare)
 	group.Put(prefix+"/twilio", handler.UpdateTwilio)
 	group.Put(prefix+"/openai", handler.UpdateOpenAI)
+	normalized := &PlatformHandler{service: handler.service, access: handler.access, normalized: true}
+	v2 := api.Group("/v2/platform/tenants/:tenant_id/integrations", middleware.RequireAuth(jwtSecret))
+	v2.Get("", normalized.GetAll)
+	v2.Put("/square", normalized.UpdateSquare)
+	v2.Put("/twilio", normalized.UpdateTwilio)
+	v2.Put("/openai", normalized.UpdateOpenAI)
 }

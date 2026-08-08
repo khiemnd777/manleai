@@ -38,10 +38,14 @@ func TestPlatformTransferRoutesAreFixedAndRequireAuthentication(t *testing.T) {
 	app := fiber.New()
 	RegisterPlatformRoutes(app.Group("/api"), NewPlatformHandler(nil, nil), "test-secret")
 	want := map[string]bool{
-		"GET /api/platform/tenants/:tenant_id/configuration-transfer/export":   true,
-		"POST /api/platform/tenants/:tenant_id/configuration-transfer/preview": true,
-		"POST /api/platform/tenants/:tenant_id/configuration-transfer/apply":   true,
-		"GET /api/platform/tenants/:tenant_id/configuration-transfer/runs":     true,
+		"GET /api/platform/tenants/:tenant_id/configuration-transfer/export":            true,
+		"POST /api/platform/tenants/:tenant_id/configuration-transfer/preview":          true,
+		"POST /api/platform/tenants/:tenant_id/configuration-transfer/apply":            true,
+		"GET /api/platform/tenants/:tenant_id/configuration-transfer/runs":              true,
+		"GET /api/v2/platform/tenants/:tenant_id/configuration-transfers/export":        true,
+		"POST /api/v2/platform/tenants/:tenant_id/configuration-transfers/previews":     true,
+		"POST /api/v2/platform/tenants/:tenant_id/configuration-transfers/applications": true,
+		"GET /api/v2/platform/tenants/:tenant_id/configuration-transfers/runs":          true,
 	}
 	for _, route := range app.GetRoutes() {
 		delete(want, route.Method+" "+route.Path)

@@ -34,6 +34,17 @@ func TestPlatformSquareRoutesRequireAuthentication(t *testing.T) {
 		{http.MethodPost, "/api/platform/tenants/salon-1/technical/square/active-provider/activate"},
 		{http.MethodPost, "/api/platform/tenants/salon-1/technical/square/ai-booking/enable"},
 		{http.MethodPost, "/api/platform/tenants/salon-1/technical/square/ai-booking/disable"},
+		{http.MethodGet, "/api/v2/platform/tenants/salon-1/integrations/square/connection"},
+		{http.MethodGet, "/api/v2/platform/tenants/salon-1/integrations/square/connection/connect-url"},
+		{http.MethodGet, "/api/v2/platform/tenants/salon-1/integrations/square/connection/locations"},
+		{http.MethodPut, "/api/v2/platform/tenants/salon-1/integrations/square/connection/location"},
+		{http.MethodPost, "/api/v2/platform/tenants/salon-1/integrations/square/sync-runs"},
+		{http.MethodPost, "/api/v2/platform/tenants/salon-1/integrations/square/verifications/scheduling-safety"},
+		{http.MethodPost, "/api/v2/platform/tenants/salon-1/integrations/square/activation"},
+		{http.MethodGet, "/api/v2/platform/tenants/salon-1/services/external-scheduling-readiness"},
+		{http.MethodGet, "/api/v2/platform/tenants/salon-1/operations/provider-events/square"},
+		{http.MethodGet, "/api/v2/platform/tenants/salon-1/operations/provider-events/square/event-1"},
+		{http.MethodPost, "/api/v2/platform/tenants/salon-1/operations/provider-events/square/event-1/requeue"},
 	} {
 		response, err := app.Test(httptest.NewRequest(test.method, test.path, nil))
 		if err != nil {

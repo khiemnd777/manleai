@@ -22,6 +22,8 @@ func TestPlatformAccessRoutesRequireAuthentication(t *testing.T) {
 		"/api/platform/access/salons/salon-1/pii-grants",
 		"/api/platform/access/audit",
 		"/api/platform/tenants/salon-1/support-access/effective",
+		"/api/v2/platform/tenants/salon-1/access",
+		"/api/v2/platform/tenants/salon-1/access/effective",
 	} {
 		response, err := app.Test(httptest.NewRequest("GET", path, nil))
 		if err != nil {

@@ -72,3 +72,25 @@ func TestPlatformCallsCatalogGuardRequiresAndAuditsCallsPII(t *testing.T) {
 		t.Fatalf("authorize/audit PII scopes = %q/%q, want calls/calls", authorizer.check.PIIScope, authorizer.auditScope)
 	}
 }
+
+func TestNormalizedPlatformServicesRoutesRequireAuthentication(t *testing.T) {
+	app := fiber.New()
+	RegisterPlatformRoutes(app.Group("/api"), NewHandler(&ServiceLayer{}), nil, "test-secret")
+	RegisterPlatformCallsCatalogRoutes(app.Group("/api"), NewHandler(&ServiceLayer{}), nil, "test-secret")
+	for _, test := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v2/platform/tenants/salon-1/services"},
+		{http.MethodPost, "/api/v2/platform/tenants/salon-1/services"},
+		{http.MethodGet, "/api/v2/platform/tenants/salon-1/service-categories"},
+		{http.MethodPost, "/api/v2/platform/tenants/salon-1/service-categories/suggestions/refresh"},
+		{http.MethodGet, "/api/v2/platform/tenants/salon-1/calls/catalog/services"},
+		{http.MethodGet, "/api/v2/platform/tenants/salon-1/calls/catalog/staff"},
+	} {
+		response, err := app.Test(httptest.NewRequest(test.method, test.path, nil))
+		if err != nil {
+			t.Fatalf("%s %s: %v", test.method, test.path, err)
+		}
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s %s status=%d, want 401", test.method, test.path, response.StatusCode)
+		}
+	}
+}

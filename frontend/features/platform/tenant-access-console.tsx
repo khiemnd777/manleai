@@ -11,12 +11,7 @@ import {
   cancelSupportAccessRequest,
   createSupportAccessRequest,
   grantPII,
-  listAccessCapabilities,
-  listMemberships,
-  listPIIGrants,
-  listPlatformRoles,
-  listSalonAssignments,
-  listSupportAccessRequests,
+  getTenantAccessWorkspace,
   mutateMembership,
   mutateSalonAssignment,
   revokePII,
@@ -33,6 +28,7 @@ import { BusinessMutationKeyManager } from "@/lib/api/business";
 import { RequestError } from "@/lib/api/client";
 
 type PIIScope = PIIGrant["scope"];
+type AccessSection = "team" | "support" | "temporary" | "sensitive";
 
 const piiScopes: Array<{ value: PIIScope; label: string }> = [
   { value: "customers", label: "Customer records" },
@@ -41,6 +37,7 @@ const piiScopes: Array<{ value: PIIScope; label: string }> = [
 ];
 
 export function TenantAccessConsole({ tenantID }: { tenantID: string }) {
+	const [section, setSection] = useState<AccessSection>("team");
   const [memberships, setMemberships] = useState<TenantMembership[]>([]);
   const [roles, setRoles] = useState<PlatformRoleAssignment[]>([]);
   const [assignments, setAssignments] = useState<SalonAssignment[]>([]);
@@ -73,20 +70,13 @@ export function TenantAccessConsole({ tenantID }: { tenantID: string }) {
     setError("");
     setSuccess("");
     try {
-      const [membershipResult, roleResult, assignmentResult, grantResult, capabilityResult, supportResult] = await Promise.all([
-        listMemberships(tenantID),
-        listPlatformRoles(),
-        listSalonAssignments(tenantID),
-        listPIIGrants(tenantID),
-        listAccessCapabilities(),
-        listSupportAccessRequests(tenantID)
-      ]);
-      setMemberships(membershipResult.memberships);
-      setRoles(roleResult.assignments);
-      setAssignments(assignmentResult.assignments);
-      setGrants(grantResult.grants);
-      setCapabilities(capabilityResult.capabilities);
-      setSupportRequests(supportResult.requests);
+      const workspace = await getTenantAccessWorkspace(tenantID);
+      setMemberships(workspace.memberships);
+      setRoles(workspace.platform_roles);
+      setAssignments(workspace.operator_assignments);
+      setGrants(workspace.pii_grants);
+      setCapabilities(workspace.capabilities);
+      setSupportRequests(workspace.temporary_authorizations);
     } catch (failure) {
       if (failure instanceof RequestError && failure.status === 403) setAdminBlocked(true);
       else setError(errorMessage(failure, "Could not load salon access."));
@@ -311,7 +301,18 @@ export function TenantAccessConsole({ tenantID }: { tenantID: string }) {
       {error ? <Alert title="Access action needs attention" message={error} /> : null}
       {success ? <Alert type="success" title="Saved" message={success} /> : null}
 
-      <Card>
+      <nav className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4" aria-label="Access workflows">
+        {([
+          ["team", "Salon team"],
+          ["support", "Platform support"],
+          ["temporary", "Temporary Ops"],
+          ["sensitive", "Sensitive data"]
+        ] as Array<[AccessSection, string]>).map(([key, label]) => (
+          <button key={key} type="button" onClick={() => setSection(key)} className={`rounded-lg border p-3 text-left text-sm font-semibold shadow-soft ${section === key ? "border-teal-300 bg-teal-50 text-brand" : "border-line bg-white text-slate-700 hover:border-teal-200"}`}>{label}</button>
+        ))}
+      </nav>
+
+      {section === "temporary" ? <Card>
         <div className="flex items-start gap-3">
           <ShieldAlert className="mt-0.5 h-5 w-5 flex-none text-brand" />
           <div><CardTitle>Temporary Ops authorization</CardTitle><CardDescription>Platform Admin can grant an assigned Ops account time-bounded Services, AI Training, or Calls access. Platform Admin access itself is direct and never depends on this grant.</CardDescription></div>
@@ -323,9 +324,9 @@ export function TenantAccessConsole({ tenantID }: { tenantID: string }) {
           <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_180px_auto] md:items-end"><label className="block space-y-2"><span className="block text-sm font-semibold text-ink">Change reference</span><input className="field" value={requestReference} onChange={(event) => { setRequestReference(event.target.value); mutationKey.current.clear(); }} placeholder="SUPPORT-2048" maxLength={128} /></label><label className="block space-y-2"><span className="block text-sm font-semibold text-ink">Duration (hours)</span><input className="field" type="number" min="1" max={requestCallsPII ? 24 : 720} value={requestHours} onChange={(event) => { setRequestHours(event.target.value); mutationKey.current.clear(); }} /></label><Button type="button" disabled={!requestUserID || !requestReference || requestCapabilities.length === 0 || busy === "support-request"} onClick={() => void sendSupportRequest()}>Grant temporarily</Button></div>
         </div>
         <AccessRows empty="No temporary Ops authorizations for this salon." items={supportRequests.map((item) => ({id:item.id,user:item.user,badges:[item.effective_status,...item.pii_scopes.map((scope)=>`${scope} PII`)],detail:<>{item.capabilities.map((name)=>capabilityLabel(name,capabilities)).join(", ")} · expires {new Date(item.approved_expires_at || item.requested_expires_at).toLocaleString()} · {item.reason}</>,action:item.status === "pending_owner_review" ? <Button type="button" variant="secondary" disabled={busy === `support-${item.id}`} onClick={() => void cancelSupportRequest(item)}>Cancel legacy request</Button> : item.status === "approved" ? <Button type="button" variant="secondary" disabled={busy === `support-${item.id}`} onClick={() => void revokeSupportRequest(item)}>Revoke</Button> : undefined}))} />
-      </Card>
+      </Card> : null}
 
-      <Card>
+      {section === "team" ? <Card>
         <div className="flex items-start gap-3">
           <Users className="mt-0.5 h-5 w-5 flex-none text-brand" />
           <div><CardTitle>Salon team</CardTitle><CardDescription>Add or remove Tenant Business Managers. Platform Admin can also suspend or reactivate the Owner’s Tenant workspace access without changing the salon ownership record.</CardDescription></div>
@@ -354,9 +355,9 @@ export function TenantAccessConsole({ tenantID }: { tenantID: string }) {
             action: <Button type="button" variant="secondary" disabled={busy === `membership-${item.user_id}`} onClick={() => void toggleMembership(item)}>{item.status === "active" ? "Revoke" : "Reactivate"}</Button>
           }))}
         />
-      </Card>
+      </Card> : null}
 
-      <Card>
+      {section === "support" ? <Card>
         <div className="flex items-start gap-3">
           <UserCog className="mt-0.5 h-5 w-5 flex-none text-brand" />
           <div><CardTitle>Platform support access</CardTitle><CardDescription>Choose exactly what an active Platform Ops account can do for this salon. This does not grant access to sensitive customer data.</CardDescription></div>
@@ -398,9 +399,9 @@ export function TenantAccessConsole({ tenantID }: { tenantID: string }) {
             action: <Button type="button" variant="secondary" disabled={busy === `assignment-${item.user_id}`} onClick={() => void toggleAssignment(item)}>{item.status === "active" ? "Revoke" : "Reactivate"}</Button>
           }))}
         />
-      </Card>
+      </Card> : null}
 
-      <Card>
+      {section === "sensitive" ? <Card>
         <div className="flex items-start gap-3">
           <Clock3 className="mt-0.5 h-5 w-5 flex-none text-amber-700" />
           <div>
@@ -430,7 +431,7 @@ export function TenantAccessConsole({ tenantID }: { tenantID: string }) {
             };
           })}
         />
-      </Card>
+      </Card> : null}
     </div>
   );
 }

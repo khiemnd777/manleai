@@ -15,8 +15,9 @@ type platformAuthorizer interface {
 }
 
 type PlatformHandler struct {
-	service *Service
-	access  platformAuthorizer
+	service    *Service
+	access     platformAuthorizer
+	normalized bool
 }
 
 func NewPlatformHandler(service *Service, authorizer platformAuthorizer) *PlatformHandler {
@@ -70,6 +71,19 @@ func (h *PlatformHandler) respond(c *fiber.Ctx, status *RunStatus, replayed bool
 	}
 	if err != nil {
 		return respond.Error(c, fiber.StatusInternalServerError, "OPENAI_VERIFICATION_FAILED", "OpenAI verification could not be completed.")
+	}
+	if h.normalized {
+		version := int64(0)
+		if status != nil {
+			version = status.ConfigVersion
+		}
+		return respond.JSON(c, fiber.StatusOK, fiber.Map{
+			"data": fiber.Map{"verification": status, "replayed": replayed},
+			"meta": fiber.Map{
+				"replayed": replayed, "resource_version": version,
+				"permissions": fiber.Map{"can_read": true, "allowed_actions": []string{"verify"}},
+			},
+		})
 	}
 	return respond.JSON(c, fiber.StatusOK, fiber.Map{"verification": status, "replayed": replayed})
 }

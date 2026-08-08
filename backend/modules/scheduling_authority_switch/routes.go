@@ -21,3 +21,10 @@ func RegisterPlatformRoutes(api fiber.Router, handler *PlatformHandler, jwtSecre
 	group.Get("/:run_id", handler.guard(access.CapabilityTechnicalRead, handler.delegate.Get))
 	group.Post("/:run_id/commit", handler.guard(access.CapabilityTechnicalWrite, handler.delegate.Commit))
 }
+
+func RegisterPlatformV2Routes(api fiber.Router, handler *PlatformHandler, jwtSecret string) {
+	group := api.Group("/v2/platform/tenants/:tenant_id/scheduling", middleware.RequireAuth(jwtSecret))
+	group.Post("/authority/readiness", handler.guard(access.CapabilityTechnicalWrite, handler.delegate.PrepareChange))
+	group.Put("/authority", handler.guard(access.CapabilityTechnicalWrite, handler.delegate.Change))
+	group.Get("/authority/history/latest", handler.guard(access.CapabilityTechnicalRead, handler.delegate.LatestV2))
+}

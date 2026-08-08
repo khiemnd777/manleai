@@ -23,6 +23,7 @@ type PlatformHandler struct {
 	service        *Service
 	access         platformAuthorizer
 	runtimeLimiter platformRuntimeLimiter
+	normalized     bool
 }
 
 type platformRuntimeLimiter interface {
@@ -81,7 +82,17 @@ func (h *PlatformHandler) BusinessReadiness(c *fiber.Ctx) error {
 	if err != nil {
 		return respond.Error(c, fiber.StatusServiceUnavailable, "SCHEDULING_READINESS_UNAVAILABLE", "Scheduling readiness is temporarily unavailable.")
 	}
-	return respond.JSON(c, fiber.StatusOK, businessReadinessResponse(readiness))
+	value := businessReadinessResponse(readiness)
+	if h.normalized {
+		return respond.JSON(c, fiber.StatusOK, fiber.Map{
+			"data": value,
+			"meta": fiber.Map{
+				"replayed": false, "resource_version": 0,
+				"permissions": fiber.Map{"can_read": true, "allowed_actions": []string{}},
+			},
+		})
+	}
+	return respond.JSON(c, fiber.StatusOK, value)
 }
 
 func (h *PlatformHandler) Locations(c *fiber.Ctx) error {
@@ -92,7 +103,7 @@ func (h *PlatformHandler) Locations(c *fiber.Ctx) error {
 	if err != nil {
 		return h.respond(c, nil, err, "SQUARE_LOCATIONS_FAILED")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"locations": result})
+	return h.respond(c, fiber.Map{"locations": result}, nil, "SQUARE_LOCATIONS_FAILED")
 }
 
 type platformSelectLocationRequest struct {
@@ -130,7 +141,7 @@ func (h *PlatformHandler) Sync(c *fiber.Ctx) error {
 	if err != nil {
 		return h.respond(c, nil, err, "SQUARE_SYNC_FAILED")
 	}
-	return respond.JSON(c, fiber.StatusOK, fiber.Map{"ok": true, "summary": result})
+	return h.respond(c, fiber.Map{"ok": true, "summary": result}, nil, "SQUARE_SYNC_FAILED")
 }
 
 func (h *PlatformHandler) ReevaluateSchedulingCapability(c *fiber.Ctx) error {
@@ -274,6 +285,15 @@ func (h *PlatformHandler) webhookRespond(c *fiber.Ctx, value any, replayed bool,
 		return respond.Error(c, fiber.StatusInternalServerError, "SQUARE_WEBHOOK_OPERATIONS_FAILED", "Could not process Square webhook operations.")
 	default:
 		c.Set("X-Idempotent-Replay", strconv.FormatBool(replayed))
+		if h.normalized {
+			return respond.JSON(c, fiber.StatusOK, fiber.Map{
+				"data": value,
+				"meta": fiber.Map{
+					"replayed": replayed, "resource_version": 0,
+					"permissions": fiber.Map{"can_read": true, "allowed_actions": []string{}},
+				},
+			})
+		}
 		return respond.JSON(c, fiber.StatusOK, value)
 	}
 }
@@ -311,6 +331,36 @@ func (h *PlatformHandler) respond(c *fiber.Ctx, value any, err error, code strin
 	case err != nil:
 		return respond.Error(c, fiber.StatusBadGateway, code, "Square technical operation could not be completed.")
 	default:
+		if h.normalized {
+			replayed := c.GetRespHeader("X-Idempotent-Replay") == "true"
+			return respond.JSON(c, fiber.StatusOK, fiber.Map{
+				"data": value,
+				"meta": fiber.Map{
+					"replayed":         replayed,
+					"resource_version": squarePlatformResourceVersion(value),
+					"permissions": fiber.Map{
+						"can_read":        true,
+						"allowed_actions": []string{},
+					},
+				},
+			})
+		}
 		return respond.JSON(c, fiber.StatusOK, value)
+	}
+}
+
+func squarePlatformResourceVersion(value any) int64 {
+	switch item := value.(type) {
+	case *StatusResponse:
+		if item.Readiness != nil {
+			return item.Readiness.ConnectionCapabilityVersion
+		}
+		return item.InitialActivation.ActiveProvider.Version
+	case pos.SchedulingCapabilityEvaluation:
+		return item.ConnectionCapabilityVersion
+	case pos.ActiveProviderState:
+		return item.Version
+	default:
+		return 0
 	}
 }

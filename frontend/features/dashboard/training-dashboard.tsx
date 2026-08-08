@@ -117,7 +117,7 @@ export function TrainingDashboard({ surface = "tenant", salonID: fixedSalonID = 
         return;
       }
       const [knowledgeResponse] = await Promise.all([
-        apiRequest<KnowledgeResponse>(trainingResourcePath(surface, activeSalon.id, "/knowledge-items")),
+        trainingApiRequest<KnowledgeResponse>(trainingResourcePath(surface, activeSalon.id, "/knowledge-items")),
         loadCorrections(activeSalon.id),
         loadServiceCatalog(activeSalon.id)
       ]);
@@ -187,19 +187,19 @@ export function TrainingDashboard({ surface = "tenant", salonID: fixedSalonID = 
         status: form.status
       };
       if (form.correctionId) {
-        await apiRequest<KnowledgeItem>(trainingResourcePath(surface, salon.id, `/owner-corrections/${form.correctionId}/apply`), {
+        await trainingApiRequest<KnowledgeItem>(trainingResourcePath(surface, salon.id, `/owner-corrections/${form.correctionId}/apply`), {
           method: "POST",
           body: JSON.stringify(payload)
         });
         setSuccess("Correction applied to active knowledge.");
       } else if (form.id) {
-        await apiRequest<KnowledgeItem>(trainingResourcePath(surface, salon.id, `/knowledge-items/${form.id}`), {
+        await trainingApiRequest<KnowledgeItem>(trainingResourcePath(surface, salon.id, `/knowledge-items/${form.id}`), {
           method: "PUT",
           body: JSON.stringify(payload)
         });
         setSuccess("Knowledge item updated.");
       } else {
-        await apiRequest<KnowledgeItem>(trainingResourcePath(surface, salon.id, "/knowledge-items"), {
+        await trainingApiRequest<KnowledgeItem>(trainingResourcePath(surface, salon.id, "/knowledge-items"), {
           method: "POST",
           body: JSON.stringify(payload)
         });
@@ -222,7 +222,7 @@ export function TrainingDashboard({ surface = "tenant", salonID: fixedSalonID = 
     setActionError("");
     setSuccess("");
     try {
-      await apiRequest<void>(trainingResourcePath(surface, salon.id, `/knowledge-items/${item.id}`), { method: "DELETE" });
+      await trainingApiRequest<void>(trainingResourcePath(surface, salon.id, `/knowledge-items/${item.id}`), { method: "DELETE" });
       if (form.id === item.id) setForm(emptyForm);
       setSuccess("Knowledge item deleted.");
       await reloadTraining(salon.id);
@@ -240,7 +240,7 @@ export function TrainingDashboard({ surface = "tenant", salonID: fixedSalonID = 
     setActionError("");
     setSuccess("");
     try {
-      await apiRequest<OwnerCorrection>(trainingResourcePath(surface, salon.id, "/owner-corrections"), {
+      await trainingApiRequest<OwnerCorrection>(trainingResourcePath(surface, salon.id, "/owner-corrections"), {
         method: "POST",
         body: JSON.stringify({ correction: correctionText })
       });
@@ -261,7 +261,7 @@ export function TrainingDashboard({ surface = "tenant", salonID: fixedSalonID = 
     setActionError("");
     setSuccess("");
     try {
-      const result = await apiRequest<EvaluationResult>(trainingResourcePath(surface, salon.id, "/training/evaluate"), {
+      const result = await trainingApiRequest<EvaluationResult>(trainingResourcePath(surface, salon.id, "/training/evaluate"), {
         method: "POST",
         body: JSON.stringify({ message: evaluationMessage })
       });
@@ -295,7 +295,7 @@ export function TrainingDashboard({ surface = "tenant", salonID: fixedSalonID = 
     setActionError("");
     setSuccess("");
     try {
-      const alias = await apiRequest<ServiceAlias>(
+      const alias = await trainingApiRequest<ServiceAlias>(
         trainingResourcePath(surface, salon.id, `/owner-corrections/${form.correctionId}/apply-service-alias`),
         {
           method: "POST",
@@ -326,7 +326,7 @@ export function TrainingDashboard({ surface = "tenant", salonID: fixedSalonID = 
     setActionError("");
     setSuccess("");
     try {
-      await apiRequest<OwnerCorrection>(trainingResourcePath(surface, salon.id, `/owner-corrections/${correction.id}/dismiss`), {
+      await trainingApiRequest<OwnerCorrection>(trainingResourcePath(surface, salon.id, `/owner-corrections/${correction.id}/dismiss`), {
         method: "POST"
       });
       setSuccess("Correction dismissed.");
@@ -343,7 +343,7 @@ export function TrainingDashboard({ surface = "tenant", salonID: fixedSalonID = 
 
   async function reloadTraining(salonID: string) {
     const [knowledgeResponse] = await Promise.all([
-      apiRequest<KnowledgeResponse>(trainingResourcePath(surface, salonID, "/knowledge-items")),
+      trainingApiRequest<KnowledgeResponse>(trainingResourcePath(surface, salonID, "/knowledge-items")),
       loadCorrections(salonID)
     ]);
     setKnowledge(knowledgeResponse.knowledge_items);
@@ -352,7 +352,7 @@ export function TrainingDashboard({ surface = "tenant", salonID: fixedSalonID = 
   async function loadCorrections(salonID: string) {
     setCorrectionAccessError("");
     try {
-      const response = await apiRequest<CorrectionsResponse>(trainingResourcePath(surface, salonID, "/owner-corrections"));
+      const response = await trainingApiRequest<CorrectionsResponse>(trainingResourcePath(surface, salonID, "/owner-corrections"));
       setCorrections(response.owner_corrections);
     } catch (err) {
       setCorrections([]);
@@ -364,7 +364,7 @@ export function TrainingDashboard({ surface = "tenant", salonID: fixedSalonID = 
     setServiceCatalogLoading(true);
     setServiceCatalogError("");
     try {
-      const response = await apiRequest<ServicesResponse>(trainingResourcePath(surface, salonID, "/services"));
+      const response = await trainingApiRequest<ServicesResponse>(trainingResourcePath(surface, salonID, "/services"));
       setServices(response.services);
     } catch (err) {
       setServices([]);
@@ -939,10 +939,24 @@ async function loadPlatformTrainingSalon(salonID: string): Promise<Salon | null>
 }
 
 function trainingResourcePath(surface: TrainingSurface, salonID: string, resource: string) {
-  const prefix = surface === "platform"
-    ? `/api/platform/tenants/${encodeURIComponent(salonID)}`
-    : `/api/salons/${encodeURIComponent(salonID)}`;
-  return `${prefix}${resource}`;
+  const encoded = encodeURIComponent(salonID);
+  if (surface === "tenant") return `/api/salons/${encoded}${resource}`;
+  if (resource.startsWith("/knowledge-items")) return `/api/v2/platform/tenants/${encoded}${resource.replace("/knowledge-items", "/knowledge")}`;
+  if (resource.startsWith("/owner-corrections")) return `/api/v2/platform/tenants/${encoded}${resource.replace("/owner-corrections", "/corrections")}`;
+  if (resource === "/training/evaluate") return `/api/v2/platform/tenants/${encoded}/evaluations`;
+  if (resource === "/services") return `/api/v2/platform/tenants/${encoded}/services`;
+  return `/api/v2/platform/tenants/${encoded}${resource}`;
+}
+
+async function trainingApiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  if (!path.startsWith("/api/v2/platform/")) return apiRequest<T>(path, init);
+  if (init.method === "DELETE") return apiRequest<T>(path, init);
+  const response = await apiRequest<{ data: unknown }>(path, init);
+  const method = init.method ?? "GET";
+  if (method === "GET" && /\/knowledge$/.test(path)) return { knowledge_items: response.data } as T;
+  if (method === "GET" && /\/corrections$/.test(path)) return { owner_corrections: response.data } as T;
+  if (method === "GET" && /\/services$/.test(path)) return { services: response.data } as T;
+  return response.data as T;
 }
 
 function formatDate(value: string) {
