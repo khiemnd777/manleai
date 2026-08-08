@@ -117,10 +117,9 @@ func (r *Repository) EnsureSalonOwner(ctx context.Context, salonID string, owner
 			SELECT 1 FROM salons salon
 			WHERE salon.id = $1
 			  AND (
-			      public.has_active_tenant_membership(salon.id, $2::uuid)
-			      OR public.app_active_support_authorization($2::uuid, salon.id, 'services.read')
-			      OR public.app_active_support_authorization($2::uuid, salon.id, 'training.read')
-			      OR public.app_active_support_authorization($2::uuid, salon.id, 'calls.read')
+			      public.app_actor_feature_access($2::uuid, salon.id, 'services.read')
+			      OR public.app_actor_feature_access($2::uuid, salon.id, 'training.read')
+			      OR public.app_actor_feature_access($2::uuid, salon.id, 'calls.read')
 			  )
 		)
 	`, salonID, ownerUserID).Scan(&exists)
@@ -3271,10 +3270,7 @@ func lockAIBookableMutationFenceTx(ctx context.Context, tx *sql.Tx, salonID stri
 		SELECT COALESCE(BTRIM(active_pos_provider), '')
 		FROM salons
 		WHERE id = $1
-		  AND (
-		      public.has_active_tenant_membership(id, $2::uuid)
-		      OR public.app_active_support_authorization($2::uuid, id, 'services.write')
-		  )
+		  AND public.app_actor_feature_access($2::uuid, id, 'services.write')
 		FOR UPDATE
 	`, salonID, ownerUserID).Scan(&fence.ActiveProvider); errors.Is(err, sql.ErrNoRows) {
 		return fence, ErrNotFound

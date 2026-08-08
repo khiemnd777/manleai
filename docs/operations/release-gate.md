@@ -134,13 +134,16 @@ coverage includes:
 - immutable V74 Tenant/Platform principal scope, fail-closed mixed-identity
   migration, realm-specific account directories, and database-enforced
   assignment targets;
-- V75 Owner-authorized Platform Services/AI Training/Calls access with no Admin
-  bypass: current base role/assignment capability plus exact active Owner
-  authorization, request-linked Calls PII, bounded expiry/revocation, per-action
-  actual-actor audit, feature RLS, and select-only call-linked scheduling
-  evidence without general Appointments access; compatibility Platform Business
-  Services routes cannot bypass that gate, and support never substitutes the
-  salon Owner identity;
+- V75/V76 Platform Services/AI Training/Calls access through the canonical
+  actor-feature decision: exact role capability and active membership for
+  Tenant actors, direct exact role capability for Platform Admin, and exact
+  salon assignment plus current Admin-granted authorization for Platform Ops;
+  Calls PII remains request-linked and bounded for Ops, with expiry/revocation,
+  per-action actual-actor audit, feature RLS, and select-only call-linked
+  scheduling evidence without general Appointments access; POS/Training domain
+  repositories cannot call the lower-level Ops-only support helpers directly,
+  compatibility Platform Business Services routes cannot bypass the gate, and
+  Platform work never substitutes the salon Owner identity;
 - authority-aware Training evaluation with tenant-first and unknown-authority
   fail-closed behavior;
 - integration token and secret whole-response redaction plus stable POS/Square

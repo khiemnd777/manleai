@@ -196,25 +196,29 @@ tenant, Platform role, or access surface. Routes own the surface:
 
 - Tenant surface requires an active membership for the exact salon and
   currently exposes only the stable Business capabilities.
-- Platform Admin has global non-PII platform, Business, Technical, Operations,
-  and Audit capabilities.
+- Platform Admin has direct global access when its active role owns the exact
+  route capability, including the Platform PII scopes declared by that route;
+  it does not need a salon assignment or temporary support grant.
 - Platform Ops requires an active Platform role, an active assignment for the
-  exact salon, and a database-owned delegated capability on that assignment.
-- Platform access to customer, call, appointment, or notification PII requires
-  a separate non-revoked grant for the exact user, salon, and PII scope whose
-  expiry is no more than 24 hours. Platform Admin is not exempt.
+  exact salon, a database-owned delegated capability on that assignment, and
+  a current Admin-granted temporary authorization for Services, AI Training,
+  and Calls.
+- Platform Ops access to customer, call, appointment, or notification PII also
+  requires a separate non-revoked grant for the exact user, salon, and PII
+  scope whose expiry is no more than 24 hours.
 
-V75 adds Owner-authorized Platform support for Services, AI Training, and
-Calls. It is a second gate, never a replacement for Platform RBAC: Platform
-Admin must retain the exact role permission and Platform Ops must retain the
-exact active salon assignment permission. The salon Owner approves one exact
-Platform identity, capability set, and expiry; non-PII access lasts at most 30
-days, while any Calls capability requires a request-linked Calls PII child and
-limits the full authorization to 24 hours. Reject, cancel, revoke, expiry,
-account/role change, or Ops assignment/capability change fails access closed.
-There is no Platform Admin bypass. Every allowed support route records the
-actual Platform actor, salon, capability, PII scope, method, and route in the
-immutable access event ledger before domain work.
+V75 introduced temporary Platform support authorization for Services, AI
+Training, and Calls. V76 then made Platform Admin the control-plane authority:
+Admin uses direct exact role-capability access, while Platform Ops must retain
+the exact active salon assignment capability plus one current Admin-granted
+authorization. Non-PII Ops access lasts at most 30 days; Calls PII is separately
+granted and bounded to 24 hours. Reject, cancel, revoke, expiry, account/role
+change, or Ops assignment/capability change fails Ops access closed. Domain
+repositories and RLS use `app_actor_feature_access` as the canonical Tenant,
+Admin, and Ops decision; the lower-level support helpers are Ops-only sub-rules.
+Every allowed Platform route records the actual actor, salon, capability, PII
+scope, method, and route in the immutable access event ledger before domain
+work.
 
 Access mutations use a stable action key, canonical request fingerprint,
 optimistic expected version, exact stored replay response, and immutable event.
@@ -249,8 +253,8 @@ Platform Business therefore does not render its former reduced Services
 editor: the full shared Services tab is the sole Platform management surface
 for services, categories, category aliases, and service aliases. Legacy
 Platform Business service/category API paths remain compatibility routes but
-also require exact V75 Owner-authorized Services access and successful support
-action audit.
+also require the exact canonical actor/capability decision and successful
+Platform action audit.
 The Transfer tab is the only mounted configuration-transfer surface after the
 SaaS cutover. Its target is implied by the tenant detail route. Platform Admin
 has direct capability evaluation; Platform Ops must hold every selected source
@@ -262,7 +266,7 @@ The retained Tenant/onboarding v8 handlers are compatibility code and are not
 registered by `cmd/api`.
 Global Platform role
 governance stays at `/platform/access`; salon membership, exact-salon Platform
-Ops capabilities, Owner-support requests, and temporary non-Calls PII grants are managed at
+Ops capabilities, Admin-granted temporary Ops authorization, and temporary PII grants are managed at
 `/platform/tenants/:tenant_id/access` without a redundant salon selector.
 Provider configuration, Square
 connection/sync/test controls, scheduling-authority changes, ManleAI Calendar
@@ -276,11 +280,13 @@ membership. V68 installs tenant-row RLS; the API and worker use a non-owner,
 non-`BYPASSRLS` runtime role and the API alone receives the separate migration
 credential. V71 removes all public direct base-table visibility and exposes a
 safe authority-aware JSON projection. V72 maps PII-bearing operational tables
-to `customers`, `calls`, `appointments`, or `notifications`, so Platform Admin
-and Ops need an active exact-scope grant even when querying through PostgreSQL.
+to `customers`, `calls`, `appointments`, or `notifications`. V76 gives Platform
+Admin direct exact role-capability access to those scopes; Platform Ops still
+needs the exact active PII grant when querying through PostgreSQL.
 V69 adds database-owned per-tenant quotas, usage buckets, and fair worker claim
-limits. V75 replaces direct feature-row access with exact
-base-capability-plus-Owner-authorization RLS for Services/Training/Calls. Calls
+limits. V75 introduced feature-row authorization RLS for
+Services/Training/Calls; V76 supersedes its Owner-approval model with the
+canonical Tenant/Admin/Ops actor decision described above. Calls
 may read only scheduling rows durably linked to the authorized call session;
 this is select-only evidence projection, not general Appointments access or
 scheduling authority. Its service/category/consultation reads are limited to
